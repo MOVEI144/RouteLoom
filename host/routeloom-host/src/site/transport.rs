@@ -1,7 +1,9 @@
 //! Where join messages come from and go to (docs/design/sdk-v1/02 §7,
 //! 07 §4). The Site Authority never touches USB: a gateway adapter turns
 //! HostOps 0x60 JoinRelayUp into [`RelayUp`], and the authority's
-//! [`Outbound`] items into 0x61 JoinRelayDown / 0x62 JoinRelayAbort.
+//! [`Outbound`] items into 0x61 JoinRelayDown / 0x62 JoinRelayAbort
+//! (`routeloom-protocol::join_relay`, the byte-level codec shared with the
+//! device's `UsbBridge::attach_join_relay`).
 //!
 //! Expected shapes (02 §7.1/§7.2 as resolved in §7.4 and hardened by #116;
 //! byte layouts are owned by the USB codec, not by this module):
@@ -10,6 +12,8 @@
 //! 0x60 JoinRelayUp   (G→H): gateway u64 | from_proxy u64 | hops u8 | RelayHeader(dir=1) | body
 //! 0x61 JoinRelayDown (H→G): to_proxy u64 | RelayHeader(dir=2, status) | body
 //! 0x62 JoinRelayAbort (both): proxy u64 | relay_id u32 | gateway_epoch u32 | proxy_epoch u32 | reason u8
+//! 0x63 JoinRelayResult (G→H): result u16 | proxy u64 | relay_id u32 |
+//!                             gateway_epoch u32 | proxy_epoch u32
 //! RelayHeader (32 B): ver=2 | dir | relay_id u32 | proxy u64 | joiner MAC 6B |
 //!                     step u8 | status u8 | joiner_rssi_dbm i8 | phase u8 |
 //!                     gateway_epoch u32 | proxy_epoch u32
@@ -21,10 +25,10 @@
 //! proxy frees its slot); aborting is a 0x62 JoinRelayAbort. A gateway
 //! joining over its own USB link uses `proxy = gateway`, `hops = 0` (07 §4).
 //!
-//! The binding to real USB frames is [`UsbJoinRelay`] — deliberately thin
-//! and not wired into the daemon's USB lanes yet. The integrator maps the
-//! codec's decoded 0x60 body onto `RelayUp` and encodes each `Outbound` as
-//! 0x61/0x62.
+//! The binding to real USB frames is [`super::usb::UsbSiteAdapter`]:
+//! `deliver` admits one encoded frame into its bounded down queue (8
+//! items, one item ≤ 1005 B, TTL 20 s) and reports admission back, so a
+//! full link ends the authority attempt instead of dropping it silently.
 
 use std::sync::{Arc, Mutex};
 
@@ -46,7 +50,10 @@ pub const PHASE_RESUME: u8 = 5;
 /// `step` of an EDHOC error message on the relay.
 pub const STEP_EDHOC_ERROR: u8 = 5;
 
-/// JoinRelayAbort reasons (provisional — the P3-2 codec owns the values).
+/// Why the authority ended a relay without an answer. Provisional and
+/// host-local: these values are NEVER cast to USB bytes — the USB
+/// adapter maps each variant explicitly onto a 0x62 reason; see
+/// `super::usb` for the table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum AbortReason {
@@ -64,7 +71,9 @@ pub enum AbortReason {
 
 /// Identifies one relayed exchange: both service epochs, the proxy's
 /// relay slot within its epoch, and the MAC it observed (02 §7.1, #116).
-/// Unauthenticated routing data, never evidence.
+/// Unauthenticated routing data, never evidence. The USB adapter binds
+/// `gateway` to the authenticated session's gateway identity — a RelayKey
+/// never carries a gateway the session did not prove.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct RelayKey {
     pub gateway: u64,
@@ -75,7 +84,8 @@ pub struct RelayKey {
     pub joiner_mac: [u8; 6],
 }
 
-/// One message up from a joiner (decoded 0x60).
+/// One message up from a joiner (decoded 0x60, phase 4 only — the USB
+/// adapter refuses phase 5 as P3-5-unsupported before it reaches here).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelayUp {
     pub key: RelayKey,
@@ -89,7 +99,7 @@ pub struct RelayUp {
     pub body: Vec<u8>,
 }
 
-/// One message down to a joiner (encode as 0x61).
+/// One message down to a joiner (encode as 0x61 with a message body).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelayDown {
     pub key: RelayKey,
@@ -110,15 +120,41 @@ pub enum Outbound {
     },
 }
 
+impl Outbound {
+    pub fn key(&self) -> RelayKey {
+        match self {
+            Self::Down(down) => down.key,
+            Self::Abort { key, .. } => *key,
+        }
+    }
+}
+
+/// Why `deliver` refused an outbound message. Every variant ends the
+/// authority attempt as failed (`SiteService::with` → `fail_attempt`):
+/// the answer cannot reach the device, so the exchange is over.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeliverReject {
+    /// The bounded down queue (8 items) is full.
+    QueueFull,
+    /// The encoded frame exceeds the 1005 B item bound.
+    TooLarge,
+    /// The USB session the adapter was bound to is gone.
+    Closed,
+}
+
 /// Delivers the authority's outbound messages. Implementations must not
 /// block (the authority calls them with its lock released, but a slow
-/// transport would still stall the join driver).
+/// transport would still stall the join driver) and must not call back
+/// into the authority: `SiteService::with` maps a rejection onto
+/// `fail_attempt` itself, after the delivery loop, so no callback can
+/// run while a transport mutex is held and no delivery recurses.
 pub trait JoinTransport: Send + Sync {
-    fn deliver(&self, outbound: Outbound);
+    fn deliver(&self, outbound: Outbound) -> Result<(), DeliverReject>;
 }
 
 /// In-process transport for tests and simulations: collects everything
-/// the authority sends.
+/// the authority sends. Unbounded by design — it always admits, so tests
+/// never trip the production queue bounds by accident.
 #[derive(Default)]
 pub struct InProcessTransport {
     sent: Mutex<Vec<Outbound>>,
@@ -136,59 +172,71 @@ impl InProcessTransport {
 }
 
 impl JoinTransport for InProcessTransport {
-    fn deliver(&self, outbound: Outbound) {
+    fn deliver(&self, outbound: Outbound) -> Result<(), DeliverReject> {
         self.sent.lock().expect("transport poisoned").push(outbound);
-    }
-}
-
-/// USB binding placeholder: forwards to a frame sink the integrator
-/// supplies (the daemon's single-writer outbound queue), one callback per
-/// `Outbound`. Until the P3-2 codec lands the daemon constructs the
-/// authority with no USB transport and joins arrive only in-process.
-pub struct UsbJoinRelay<F: Fn(Outbound) + Send + Sync> {
-    sink: F,
-}
-
-impl<F: Fn(Outbound) + Send + Sync> UsbJoinRelay<F> {
-    pub fn new(sink: F) -> Self {
-        Self { sink }
-    }
-}
-
-impl<F: Fn(Outbound) + Send + Sync> JoinTransport for UsbJoinRelay<F> {
-    fn deliver(&self, outbound: Outbound) {
-        (self.sink)(outbound);
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::usb::UsbSiteAdapter;
     use super::*;
 
-    #[test]
-    fn the_usb_binding_forwards_every_outbound() {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let sink = Arc::clone(&seen);
-        let relay = UsbJoinRelay::new(move |o| sink.lock().unwrap().push(o));
-        let key = RelayKey {
+    fn key() -> RelayKey {
+        RelayKey {
             gateway: 1,
             proxy: 2,
             gateway_epoch: 7,
             proxy_epoch: 3,
             relay_id: 3,
-            joiner_mac: [4; 6],
-        };
-        relay.deliver(Outbound::Abort {
-            key,
-            reason: AbortReason::Busy,
-        });
-        relay.deliver(Outbound::Down(RelayDown {
+            joiner_mac: [2, 0, 0, 0, 0, 3],
+        }
+    }
+
+    fn down(key: RelayKey) -> Outbound {
+        Outbound::Down(RelayDown {
             key,
             phase: PHASE_EDHOC,
             step: 2,
             status: DownStatus::Continue,
             body: vec![0x40],
-        }));
-        assert_eq!(seen.lock().unwrap().len(), 2);
+        })
+    }
+
+    #[test]
+    fn the_in_process_transport_always_admits() {
+        let transport = InProcessTransport::new();
+        for _ in 0..32 {
+            assert_eq!(transport.deliver(down(key())), Ok(()));
+        }
+        assert_eq!(transport.take().len(), 32);
+        assert!(transport.take().is_empty());
+    }
+
+    #[test]
+    fn outbound_knows_its_relay() {
+        let key = key();
+        assert_eq!(down(key).key(), key);
+        assert_eq!(
+            Outbound::Abort {
+                key,
+                reason: AbortReason::Busy,
+            }
+            .key(),
+            key
+        );
+    }
+
+    #[test]
+    fn the_usb_adapter_serves_the_transport_contract() {
+        // The production transport behind the trait object: one small
+        // down admits, and the failure mode is a typed rejection, not a
+        // silent drop. Bounds and mapping tables are covered in usb.rs.
+        let adapter = UsbSiteAdapter::new(1, 7);
+        let transport: &dyn JoinTransport = adapter.as_ref();
+        assert_eq!(transport.deliver(down(key())), Ok(()));
+        adapter.close();
+        assert_eq!(transport.deliver(down(key())), Err(DeliverReject::Closed));
     }
 }

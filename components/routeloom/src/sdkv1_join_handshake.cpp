@@ -153,9 +153,17 @@ Status JoinHandshake::Credentials::peer(const edhoc::Role, const ByteView kid,
     if (!verified) return Status::error(StatusCode::AuthenticationFailed, "site cert chain");
     // The authenticated issuer must be the Site CA the candidate observation
     // named — a certificate of another org does not satisfy this attempt.
+    // A direct transport (P4 §8.2) observes nothing to narrow by: any
+    // active Site CA anchor the authority chains to may satisfy the
+    // attempt, and the strict-assignment flag at decide() still pins
+    // re-joins. The chain verification above is unchanged either way.
     const IdentityAnchor* anchor =
         identity_active_anchor(*o.identity_, claims.issuer, AnchorKind::SiteCa);
-    if (anchor == nullptr || join_org_hint(anchor->pubkey) != o.config_.org_hint) {
+    if (anchor == nullptr) {
+      return Status::error(StatusCode::AuthenticationFailed, "site ca unknown");
+    }
+    if (!o.config_.direct_transport &&
+        join_org_hint(anchor->pubkey) != o.config_.org_hint) {
       return Status::error(StatusCode::AuthenticationFailed, "site ca hint");
     }
     out.credential = o.site_cert_.view();
@@ -249,8 +257,15 @@ Status JoinHandshake::config_validate(const JoinHandshakeConfig& config,
       // as the private scalar.
       return Status::error(StatusCode::Unsupported, "rli1 key handle");
   }
-  if (config.org_hint == 0 || config.site_hint == 0 || config.network_low32 == 0) {
+  if (!config.direct_transport &&
+      (config.org_hint == 0 || config.site_hint == 0 || config.network_low32 == 0)) {
     return Status::error(StatusCode::InvalidArgument, "join hints");
+  }
+  if (config.direct_transport &&
+      (config.org_hint != 0 || config.site_hint != 0 || config.network_low32 != 0)) {
+    // A direct transport observes nothing: nonzero hints would be a lie
+    // the m2 binding could not check.
+    return Status::error(StatusCode::InvalidArgument, "join direct hints");
   }
   if (config.requested_role == 0 || (config.requested_role & ~kMemberRoleMask) != 0 ||
       !role_executable(config.requested_role, config.capability)) {
@@ -343,8 +358,11 @@ Status JoinHandshake::process_m2(const ByteView message) noexcept {
   }
   // Authenticated now: the offer must agree with the certified site AND
   // with the observed candidate hints (a hint collision is not identity).
-  if (join_site_hint(offer_.site_id) != config_.site_hint ||
-      offer_.network_low32 != config_.network_low32) {
+  // A direct transport (P4 §8.2) attaches to exactly one site, so there is
+  // no observed set to collide with — but the SiteCert binding below still
+  // proves the site.
+  if (!config_.direct_transport && (join_site_hint(offer_.site_id) != config_.site_hint ||
+                                    offer_.network_low32 != config_.network_low32)) {
     ++stats_.m2_failures;
     outcome_ = JoinAttemptOutcome::AuthenticationFailed;
     return Status::error(StatusCode::AuthenticationFailed, "join candidate binding");

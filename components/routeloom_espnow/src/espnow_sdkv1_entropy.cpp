@@ -55,4 +55,41 @@ Status EspMaintenanceEntropy::fill(const MutableByteView out) noexcept {
   return Status::success();
 }
 
+Status EspOwnerEntropy::begin() noexcept {
+  if (state_ != State::Uninitialized) {
+    return Status::error(StatusCode::InvalidState, "owner entropy already started");
+  }
+  // Runs after WiFi init: the RF noise source feeds esp_fill_random, so
+  // PSA draws directly with no extra source to enable.
+  if (psa_crypto_init() != PSA_SUCCESS) {
+    state_ = State::Failed;
+    return Status::error(StatusCode::InvalidState, "owner PSA init failed");
+  }
+  std::uint8_t probe[32]{};
+  const psa_status_t probe_status = psa_generate_random(probe, sizeof(probe));
+  secure_clear(probe, sizeof(probe));
+  if (probe_status != PSA_SUCCESS) {
+    state_ = State::Failed;
+    return Status::error(StatusCode::InvalidState, "owner entropy probe failed");
+  }
+  state_ = State::Ready;
+  return Status::success();
+}
+
+Status EspOwnerEntropy::fill(const MutableByteView out) noexcept {
+  if (out.data == nullptr && out.size != 0) {
+    return Status::error(StatusCode::InvalidArgument, "owner entropy target");
+  }
+  if (state_ != State::Ready) {
+    return Status::error(StatusCode::InvalidState, "owner entropy not ready");
+  }
+  if (out.size == 0) return Status::success();
+  if (psa_generate_random(out.data, out.size) != PSA_SUCCESS) {
+    secure_clear(out.data, out.size);
+    state_ = State::Failed;
+    return Status::error(StatusCode::InvalidState, "owner entropy draw failed");
+  }
+  return Status::success();
+}
+
 }  // namespace routeloom::espnow

@@ -1,40 +1,44 @@
 #pragma once
 
-// SDK v1 device wiring (docs/design/sdk-v1/05 §5, 07 §6, 08 P7): the four
-// `rlsec` stores (rlident/rlsite/rlrevo/rlres) as one firmware-owned object
-// plus the factory maintenance console runner over USB Serial/JTAG. The
-// store discipline and the console protocol live in the portable core
-// (sdkv1_store.hpp, sdkv1_maintenance.hpp) and are host-tested; this file
-// only binds them to NVS, the USB driver and FreeRTOS.
+// SDK v1 device wiring (docs/design/sdk-v1/05 §5, 07 §6, 08 P7): the six
+// `rlsec` stores (rlident/rlsite/rlrevo/rlres plus rlrev/rlres2 for the P4
+// member handshake) as one firmware-owned object plus the factory
+// maintenance console runner over USB Serial/JTAG. The store discipline
+// and the console protocol live in the portable core (sdkv1_store.hpp,
+// sdkv1_maintenance.hpp) and are host-tested; this file only binds them
+// to NVS, the USB driver and FreeRTOS.
 
 #include <cstddef>
 
 #include "routeloom/nvs_sdkv1_store.hpp"
 #include "routeloom/sdkv1_blob_storage.hpp"
+#include "routeloom/sdkv1_membership.hpp"
 #include "routeloom/sdkv1_store.hpp"
 #include "routeloom/status.hpp"
 
 namespace routeloom::espnow {
 
-// The four SDK v1 stores over `rlsec`, owned statically by the firmware
+// The six SDK v1 stores over `rlsec`, owned statically by the firmware
 // (about 5 KiB of .bss for the slot scratch buffers and adopted records —
 // see ram-budget.md; nothing is allocated per call). Not thread-safe; the
 // owner serializes use.
 class Sdkv1Stores {
  public:
   // `resume_slots` is kResumeNodeSlots (16) on a node, kResumeGatewaySlots
-  // (160) on a gateway (05 §3.2/§5.1).
+  // (160) on a gateway (05 §3.2/§5.1). It sizes both the RLP1 and the RLP2
+  // slot ranges; the P4 purpose quotas (12+4 / 32+128) partition the RLP2
+  // range.
   explicit Sdkv1Stores(std::size_t resume_slots) noexcept;
   ~Sdkv1Stores() = default;
 
   Sdkv1Stores(const Sdkv1Stores&) = delete;
   Sdkv1Stores& operator=(const Sdkv1Stores&) = delete;
 
-  // Open the four namespaces on `partition` (kSecurityNvsPartition, already
+  // Open the six namespaces on `partition` (kSecurityNvsPartition, already
   // mounted). Half-open namespaces are closed again on failure.
   Status open(const char* partition) noexcept;
-  // Initialize all three record stores (the resume cache is stateless and
-  // scans on demand). Every store is attempted; the first error is
+  // Initialize all four record stores (the resume caches are stateless and
+  // scan on demand). Every store is attempted; the first error is
   // returned while the others still land in their observed state.
   Status initialize() noexcept;
   // One boot-diagnostic line per store (counts and impairment only — no
@@ -45,6 +49,8 @@ class Sdkv1Stores {
   sdkv1::SiteStore& site() noexcept { return site_; }
   sdkv1::RevocationStore& revocation() noexcept { return revocation_; }
   sdkv1::ResumeCache& resume() noexcept { return resume_; }
+  sdkv1::LocalRevocationStore& local_revocation() noexcept { return local_revocation_; }
+  sdkv1::ResumeSlotStorage2& resume2() noexcept { return resume2_storage_; }
 
  private:
   std::size_t resume_slots_;
@@ -52,14 +58,19 @@ class Sdkv1Stores {
   NvsBlobNamespace site_ns_{};
   NvsBlobNamespace revo_ns_{};
   NvsBlobNamespace resume_ns_{};
+  NvsBlobNamespace local_revocation_ns_{};
+  NvsBlobNamespace resume2_ns_{};
   sdkv1::BlobRecordSlotStorage ident_storage_;
   sdkv1::BlobRecordSlotStorage site_storage_;
   sdkv1::BlobRecordSlotStorage revo_storage_;
   sdkv1::BlobResumeSlotStorage resume_storage_;
+  sdkv1::BlobRecordSlotStorage local_revocation_storage_;
+  sdkv1::BlobResumeSlotStorage2 resume2_storage_;
   sdkv1::IdentityStore identity_;
   sdkv1::SiteStore site_;
   sdkv1::RevocationStore revocation_;
   sdkv1::ResumeCache resume_;
+  sdkv1::LocalRevocationStore local_revocation_;
 };
 
 // Factory maintenance console (07 §6 steps 1-5): installs the USB

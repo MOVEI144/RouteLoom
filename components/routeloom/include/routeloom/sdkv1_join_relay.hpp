@@ -85,12 +85,24 @@ class JoinCookieSealer {
 // RAM-only state drawn from boot entropy; a reboot invalidates old cookies.
 class HmacJoinCookie final : public JoinCookieSealer {
  public:
-  explicit HmacJoinCookie(const std::array<std::uint8_t, 32>& key) noexcept : key_(key) {}
+  // Unkeyed: seal() refuses until install_key() arms the sealer. The
+  // firmware owner needs this split — the coordinator (which holds the
+  // sealer) is constructed before radio-up entropy exists, and the
+  // cookie key must be drawn only after the radio entropy source is
+  // ready (G-SEC P4 §8.4), never from weak pre-RF randomness.
+  HmacJoinCookie() noexcept = default;
+  explicit HmacJoinCookie(const std::array<std::uint8_t, 32>& key) noexcept
+      : key_(key), keyed_(true) {}
   ~HmacJoinCookie() override;
+  // One-time arming; refuses a second key (no silent rekey under a live
+  // coordinator) and refuses to arm from an all-zero key.
+  Status install_key(const std::array<std::uint8_t, 32>& key) noexcept;
+  bool keyed() const noexcept { return keyed_; }
   Status seal(const JoinCookieMaterial& material, JoinCookieBytes& out) noexcept override;
 
  private:
   std::array<std::uint8_t, 32> key_{};
+  bool keyed_{false};
 };
 
 inline constexpr char kJoinCookieDomain[] = "RouteLoom/zt-cookie/v1";
@@ -246,6 +258,14 @@ struct JoinProxyConfig {
   // Zero (or any other invalid config) makes every mutator fail with
   // InvalidArgument; the engine never sends before it learns its epoch.
   std::uint32_t proxy_epoch{0};
+  // The Owner's single-device deployment (G-SEC P4 §8.2): gateway == node
+  // addresses the co-located JoinRelayGateway through a direction-demuxed
+  // loopback (never the radio). The proxy still only consumes downs and
+  // the gateway only ups; each engine's admission drops the other's
+  // direction, so no frame ping-pongs. Default false keeps the
+  // standalone guard (a proxy forwarding to itself over the mesh is a
+  // misconfiguration).
+  bool colocated_gateway{false};
   std::uint32_t cookie_bucket_ms{2000};
   std::uint32_t offer_slots{32};       // random OFFER slot (02-discovery §5)
   std::uint32_t offer_slot_ms{10};
@@ -296,7 +316,10 @@ class JoinProxy {
 
   Status on_rld1_rx(const MacAddress& source, const MacAddress& destination,
                     std::int8_t rssi_dbm, ByteView frame, MonotonicMs now_ms) noexcept;
-  // `from` is the verified mesh origin of a routed relay frame.
+  // `from` is the routed frame's origin claim as received over a
+  // link-authenticated previous hop — hop authentication, NOT origin
+  // authentication. Only the terminal EDHOC/resume verification proves the
+  // origin (P4 §7.4); a relaying member can forge it.
   Status on_relay_rx(NodeId from, FrameType type, ByteView payload,
                      MonotonicMs now_ms) noexcept;
   Status poll(MonotonicMs now_ms) noexcept;
@@ -507,7 +530,9 @@ class JoinRelayGateway {
   Status set_host_sink(JoinRelayHostSink* sink) noexcept;
   Status set_membership(MembershipState state) noexcept;
 
-  // Wire RX: `from` is the verified mesh origin, `hops` its distance.
+  // Wire RX: `from` is the origin claim of a link-authenticated routed
+  // frame (see JoinProxy::on_relay_rx — not a proven origin), `hops` its
+  // distance.
   Status on_relay_rx(NodeId from, std::uint8_t hops, FrameType type, ByteView payload,
                      MonotonicMs now_ms) noexcept;
   // USB 0x61: deliver a down relay object to `to_proxy`. Ok = accepted for

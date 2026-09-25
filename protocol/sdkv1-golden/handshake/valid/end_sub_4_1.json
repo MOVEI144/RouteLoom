@@ -1,0 +1,10 @@
+{
+  "codec": "end_sub",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "lane": "end",
+  "name": "end_sub_4_1",
+  "phase": 4,
+  "step": 1,
+  "sub": 193
+}

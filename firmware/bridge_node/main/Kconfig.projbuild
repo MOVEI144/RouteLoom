@@ -23,14 +23,17 @@ config ROUTELOOM_TX_POWER_QDBM
 config ROUTELOOM_PEER_NODE_ID
     hex "Static peer Node ID; 0 disables peer registration"
     default 0x0
+    depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
 
 config ROUTELOOM_PEER_MAC
     string "Static peer station MAC (aa:bb:cc:dd:ee:ff)"
     default "00:00:00:00:00:00"
+    depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
 
 config ROUTELOOM_ROUTE_GATEWAY_SCOPED
     bool "Gateway-scoped routing profile (100-node sites)"
     default n
+    depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
     help
         Switches the node from the flat routing profile to the
         gateway-scoped profile (docs/design/sdk-v1/routing-scale.md,
@@ -74,6 +77,7 @@ config ROUTELOOM_ROUTE_LIFETIME_MS
 config ROUTELOOM_DISCOVERY
     bool "Enable autonomous neighbor discovery (RLD1 bootstrap lane)"
     default n
+    depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
     help
         EXPERIMENTAL: enables the RLD1 bootstrap lane, the portable
         NeighborDiscovery engine and dev-PSK possession authentication.
@@ -134,6 +138,7 @@ config ROUTELOOM_DISCOVERY_SCOPE_GENERATION
 config ROUTELOOM_DEVELOPMENT_KEY_HEX
     string "DEVELOPMENT ONLY 32-byte network master key in hex"
     default "524f5554454c4f4f4d2d444556454c4f504d454e542d4b45592d4f4e4c592121"
+    depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
     help
         Shared development key. Never use this default in a deployment. This provider does not
         replace the planned device-identity/EDHOC security profile.
@@ -142,6 +147,7 @@ config ROUTELOOM_MIGRATION
     int "Channel migration mode (0=Disabled, 1=Observe, 2=Manual)"
     range 0 2
     default 0
+    depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
     help
         EXPERIMENTAL: wires the migration participant + control-object
         transport onto the authenticated Wire lane. Observe runs the
@@ -229,6 +235,7 @@ config ROUTELOOM_CAPABILITY
 config ROUTELOOM_TRUST_STORE
     bool "Boot-validate the NVS trust/credential stores (rltrust/rlcred)"
     default n
+    depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
     help
         EXPERIMENTAL (sdk-completion/04-provisioning-lifecycle.md):
         opens the "rltrust" and "rlcred" NVS regions, validates the

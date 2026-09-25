@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "routeloom/bootstrap_transport.hpp"
 #include "routeloom/discovery.hpp"
 #include "routeloom/sdkv1_join_relay.hpp"
 #include "routeloom/sdkv1_join_transport.hpp"
@@ -158,6 +159,19 @@ void codecs(const ByteView input) {
     if (join_reply_decode(carrier, input, reply).ok()) {
       if (!join_reply_encode(carrier, reply, sink, written).ok()) std::abort();
       require_same(ByteView{out.data(), written}, input);
+    }
+  }
+  // P4 §7.3: the routed end-session object shares the chunk carriers but
+  // never an assembly — the lane bit in the sub byte selects it.
+  EndObject end{};
+  if (end_object_decode(input, end).ok()) {
+    if (!inside(end.message, input)) std::abort();
+    if (!end_object_encode(end, sink, written).ok()) std::abort();
+    require_same(ByteView{out.data(), written}, input);
+    EndObject single{};
+    (void)end_single_frame_decode(FrameType::BootstrapAuth, input, single);
+    if (end_single_frame_decode(FrameType::MembershipResult, input, single).ok()) {
+      std::abort();  // type 4 never carries an end object
     }
   }
   RelayObject relay{};

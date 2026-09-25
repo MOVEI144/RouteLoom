@@ -4,6 +4,7 @@
 use std::fmt;
 
 pub mod authority;
+pub mod bootstrap;
 pub mod dev_session;
 pub mod group_ops;
 pub mod host_ops;

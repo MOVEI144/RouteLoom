@@ -185,6 +185,16 @@ class SessionBank {
   // Establishment demand for the Owner: idempotent per (scope, peer).
   bool take_demand(SessionDemand& out) noexcept;
   bool demand_pending(SecurityScope scope, NodeId peer) const noexcept;
+  // Re-records a demand the Owner popped but could not act on yet (the
+  // demand driver's push-back when its link staging is full). Same
+  // idempotent path tx_epoch uses; a full table keeps refusing until the
+  // application retries. Refuses on an unconfigured bank like tx_epoch.
+  void note_demand(SecurityScope scope, NodeId peer) noexcept {
+    if (reentered() || !configured_) return;
+    if (scope != SecurityScope::Link && scope != SecurityScope::EndToEnd) return;
+    if (peer == kInvalidNodeId || peer == kBroadcastNodeId) return;
+    record_demand(scope, peer);
+  }
 
   // A nonzero RX id unique across live/overlap contexts (the handshake
   // engine additionally keeps its in-flight ids out); 8 draws max.
@@ -208,6 +218,12 @@ class SessionBank {
   // Inspection for the Owner/tests (side-effect-free, guard-transparent).
   std::size_t live_count(SecurityScope scope) const noexcept;
   bool has_usable(SecurityScope scope, NodeId peer) const noexcept;
+  // Verified peer summary for the Owner's AuthenticatedPeerView: true
+  // with the installed generation/role when a usable entry for (scope,
+  // peer) stands. Only engine installs set nonzero claims, so a hit
+  // proves a completed authentication behind this bank.
+  bool peer_summary(SecurityScope scope, NodeId peer, std::uint32_t& generation,
+                    std::uint32_t& role) const noexcept;
   std::size_t demand_count() const noexcept;
 
  private:

@@ -143,6 +143,9 @@ jobs:
         #                      #41 gateway-scoped routing profile, 5 s tick /
         #                      90 s lease defaults; the bridge lists itself,
         #                      the reference node names gateway 0x1).
+        #   owner_member     — CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y
+        #                      (G-SEC P4 §8.4): the shared EspNowSecurityOwner
+        #                      boot path with the dev-PSK lane compiled out.
         # The base matrix keeps every feature OFF (defaults), so both
         # branches compile. Compile-time coverage only — never a hardware
         # or qualification claim.
@@ -191,6 +194,40 @@ jobs:
             profile: normal
             autonomy: off
             features: route_scoped
+          # Owner-profile cells (G-SEC P4 §8.4): the reference node and
+          # the bridge boot the shared EspNowSecurityOwner with the
+          # legacy dev-PSK lane compiled out. Compile-time coverage
+          # only — membership itself is host-tested.
+          - app: reference_node
+            target: esp32c3
+            profile: normal
+            autonomy: off
+            features: owner_member
+          - app: bridge_node
+            target: esp32c3
+            profile: normal
+            autonomy: off
+            features: owner_member
+          - app: reference_node
+            target: esp32s3
+            profile: normal
+            autonomy: off
+            features: owner_member
+          - app: bridge_node
+            target: esp32s3
+            profile: normal
+            autonomy: off
+            features: owner_member
+          - app: reference_node
+            target: esp32c5
+            profile: normal
+            autonomy: off
+            features: owner_member
+          - app: bridge_node
+            target: esp32c5
+            profile: normal
+            autonomy: off
+            features: owner_member
           # Paired bench cells: two ESP32-C3 boards flashed as a real
           # 2-node mesh (static neighbor + RLD1 discovery lane running
           # alongside). autonomy=discover enables CONFIG_ROUTELOOM_DISCOVERY
@@ -264,6 +301,11 @@ jobs:
             # tick and lease come from the Kconfig defaults.
             printf 'CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y\n' >> sdkconfig
           fi
+          if [ '${{ matrix.features }}' = owner_member ]; then
+            # Security-owner profile (G-SEC P4 §8.4): the legacy-only
+            # options vanish by `depends on`, so nothing else is set.
+            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y\n' >> sdkconfig
+          fi
           idf.py build
           if [ '${{ matrix.profile }}' = deep_sleep ]; then
             # Prove the kconfig symbol survived re-resolution and the
@@ -313,6 +355,16 @@ jobs:
               grep -q '^CONFIG_ROUTELOOM_ROUTE_LIFETIME_MS=90000$' sdkconfig
               ;;
             *) ! grep -q '^CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y' sdkconfig ;;
+          esac
+          case '${{ matrix.features }}' in
+            owner_member)
+              # Prove the owner profile survived re-resolution and the
+              # legacy-only options really vanished with it.
+              grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y' sdkconfig
+              ! grep -q '^CONFIG_ROUTELOOM_DISCOVERY=y' sdkconfig
+              ! grep -q '^CONFIG_ROUTELOOM_DEEP_SLEEP=y' sdkconfig
+              ;;
+            *) ! grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y' sdkconfig ;;
           esac
           case '${{ matrix.features }}' in
             paired_bridge)

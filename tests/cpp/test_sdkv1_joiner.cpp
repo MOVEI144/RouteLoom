@@ -12,9 +12,11 @@
 // matrix (power cuts at every flash boundary), re-entrancy, the #109
 // retransmit path, quiescence, bounds and the resource gates.
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -2426,6 +2428,250 @@ void test_joiner_size_budget() {
   current.clear();
 }
 
+// --- P4 §8.2: direct transport (a gateway joining over its own USB) -----
+// The device Joiner talks (phase, step, message) to a scripted SimAuthority
+// through a JoinDirectPort; no radio, no scan, no candidate table. Downs
+// queue in the port and feed back after poll returns (send_direct runs
+// inside poll, so feeding back inline would be re-entry).
+
+class DirectPort final : public JoinDirectPort {
+ public:
+  DirectPort(SimAuthority& authority, std::uint64_t& now) : authority_(authority), now_(now) {}
+  Status send_direct(JoinAuthPhase phase, std::uint8_t step, ByteView message) noexcept override {
+    ups.push_back(Up{phase, step, Bytes(message.data, message.data + message.size)});
+    const AuthorityDown down = authority_.on_up(step, message, now_);
+    if (down.has) downs.push_back(down);
+    return Status::success();
+  }
+  struct Up {
+    JoinAuthPhase phase;
+    std::uint8_t step;
+    Bytes body;
+  };
+  std::vector<Up> ups;
+  std::vector<AuthorityDown> downs;
+
+ private:
+  SimAuthority& authority_;
+  std::uint64_t& now_;
+};
+
+class DirectRig {
+ public:
+  DirectRig(const AuthorityPolicy& policy = AuthorityPolicy{})
+      : device_(device_config(), device_identity(), 0xD1EC7, faults_),
+        authority_(make_authority()) {
+    authority_.policy = policy;
+    authority_.set_sak_signer(&sak());
+  }
+
+  DeviceEnds& device() { return device_; }
+  SimAuthority& authority() { return authority_; }
+  DirectPort& port() { return port_; }
+  RadioFaults& faults() { return faults_; }
+  std::uint64_t now() const { return now_; }
+
+  // One pump round: poll, then feed the queued downs. Returns false when
+  // a terminal action is pending (left for the test) or a call failed.
+  bool round() {
+    DeviceEnds& dev = device_;
+    dev.now_ms = now_;
+    dev.identity_storage.now_ms = now_;
+    dev.site_storage.now_ms = now_;
+    if (!dev.joiner.poll(now_).ok()) return false;
+    for (const AuthorityDown& down : port_.downs) {
+      const Status fed = dev.joiner.on_direct_message(
+          JoinAuthPhase::EdhocMessage, down.step, view(down.body), now_);
+      if (!fed.ok()) return false;
+    }
+    port_.downs.clear();
+    JoinAction action{};
+    if (dev.joiner.take_action(action).ok()) {
+      pending_ = action;
+      has_pending_ = true;
+      return false;
+    }
+    now_ += 5;
+    return true;
+  }
+
+  bool pump_until(const std::function<bool()>& done, std::uint64_t timeout_ms) {
+    const std::uint64_t end = now_ + timeout_ms;
+    while (now_ <= end) {
+      if (!round()) return done();
+      if (done()) return true;
+    }
+    return done();
+  }
+
+  bool has_pending() const { return has_pending_; }
+  const JoinAction& pending() const { return pending_; }
+
+ private:
+  SimAuthority make_authority() {
+    CertClaims claims{};
+    claims.type = CertType::Site;
+    claims.issuer = kSiteCaId;
+    claims.subject = kSiteA;
+    claims.pubkey = sak().pub;
+    claims.network_low32 = static_cast<std::uint32_t>(kNetworkA);
+    claims.site_epoch = static_cast<std::uint32_t>(kNetworkA >> 32U);
+    claims.usage = 1;
+    claims.serial = 1;
+    site_cert_ = issue(claims, site_ca());
+    if (!cert_subject_kid(claims, sak_kid_).ok()) std::abort();
+    return SimAuthority(site_cert_, sak_kid_, sak().priv, device_ca().pub, kSiteA, kNetworkA,
+                        site_package(), 0xA07);
+  }
+
+  static ByteView view(const Bytes& bytes) {
+    return ByteView{bytes.data(), bytes.size()};
+  }
+
+  RadioFaults faults_{};
+  DeviceEnds device_;
+  ByteBuffer<kRlcw1CertMax> site_cert_{};
+  Digest256 sak_kid_{};
+  SimAuthority authority_;
+  std::uint64_t now_{0};
+  DirectPort port_{authority_, now_};
+  JoinAction pending_{};
+  bool has_pending_{false};
+};
+
+struct CountingPolicy final : public JoinCommitPolicy {
+  bool check(const SiteRecord& prepared, MonotonicMs now) noexcept override {
+    (void)prepared;
+    (void)now;
+    ++checks;
+    return allow;
+  }
+  bool allow{true};
+  std::uint32_t checks{0};
+};
+
+void test_direct_allow_commits() {
+  current = "direct allow";
+  DirectRig rig;
+  DeviceEnds& dev = rig.device();
+  CountingPolicy policy;
+  dev.joiner.set_commit_policy(&policy);
+  CHECK(dev.joiner.start_direct(boot_input(), rig.port(), 0).ok());
+  CHECK(rig.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::Ready; }, 30000));
+  CHECK(rig.has_pending());
+  CHECK(rig.pending().kind == JoinActionKind::MemberReady);
+  CHECK(rig.pending().joined_now);
+  CHECK(rig.pending().commit_seq == dev.site_store.commit_seq());
+  // Exactly one EDHOC exchange over the direct port, no radio touched.
+  CHECK(rig.port().ups.size() == 2);
+  CHECK(rig.port().ups[0].step == 1 && rig.port().ups[1].step == 3);
+  CHECK(rig.port().ups[0].phase == JoinAuthPhase::EdhocMessage);
+  CHECK(dev.air.empty());
+  CHECK(dev.channel == 0);
+  for (const JoinEvent& event : dev.observer.events) {
+    CHECK(event.kind != JoinEventKind::StoreFailure);
+  }
+  // The gate was consulted exactly once, then the RLS1 landed durably.
+  CHECK(policy.checks == 1);
+  CHECK(dev.site_store.has_site());
+  const SiteRecord& site = dev.site_store.site();
+  CHECK(site.site_id == kSiteA && site.network == kNetworkA);
+  CHECK(site.role == static_cast<std::uint8_t>(kMemberRoleEndpoint));
+  CHECK(site.gk_epoch_current == 203);
+  CHECK(dev.joiner.snapshot().state == JoinState::Ready);
+  current.clear();
+}
+
+void test_direct_deny_parks_stopped() {
+  current = "direct deny";
+  AuthorityPolicy policy;
+  policy.verdict = JoinVerdict::DenyNotHere;
+  DirectRig rig(policy);
+  DeviceEnds& dev = rig.device();
+  CHECK(dev.joiner.start_direct(boot_input(), rig.port(), 0).ok());
+  CHECK(rig.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::Stopped; }, 30000));
+  // No table to select from: terminal, never Select/Backoff.
+  CHECK(dev.joiner.snapshot().state == JoinState::Stopped);
+  CHECK(dev.joiner.snapshot().counters.denies == 1);
+  CHECK(!dev.site_store.has_site());
+  CHECK(dev.air.empty());
+  // The Owner restarts for the next attempt; the exchange runs again.
+  const std::uint32_t attempts = dev.joiner.snapshot().counters.attempts;
+  CHECK(dev.joiner.start_direct(boot_input(), rig.port(), rig.now()).ok());
+  CHECK(rig.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::Stopped; }, 30000));
+  CHECK(dev.joiner.snapshot().counters.attempts == attempts + 1);
+  current.clear();
+}
+
+void test_direct_edges() {
+  current = "direct edges";
+  DirectRig rig;
+  DeviceEnds& dev = rig.device();
+  JoinBootInput boot = boot_input();
+  // Unprepared boot and an unusable role refuse; garbage scan channels do
+  // not matter (no radio is touched).
+  JoinBootInput unprepared{};
+  CHECK(!dev.joiner.start_direct(unprepared, rig.port(), 0).ok());
+  JoinerConfig bad = device_config();
+  bad.requested_role = 0;
+  DeviceEnds bad_dev(bad, device_identity(), 0xD1EC7, rig.faults());
+  CHECK(!bad_dev.joiner.start_direct(boot, rig.port(), 0).ok());
+  JoinerConfig noscan = device_config();
+  noscan.scan_channel_count = 0;
+  DeviceEnds noscan_dev(noscan, device_identity(), 0xD1EC7, rig.faults());
+  CHECK(noscan_dev.joiner.start_direct(boot, rig.port(), 0).ok());
+  CHECK(dev.joiner.start_direct(boot, rig.port(), 0).ok());
+  CHECK(!dev.joiner.start_direct(boot, rig.port(), 0).ok());  // already running
+  CHECK(!dev.joiner.start(boot, 0).ok());
+  // Radio RX during a direct run is an Owner bug: refused, nothing moves.
+  CHECK(dev.joiner.on_rld1_rx(JoinRxMeta{}, ByteView{}, 0).code == StatusCode::InvalidState);
+  CHECK(rig.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::WaitM2; }, 30000));
+  // An unexpected step drops counted; the staged m2 still processes.
+  const std::array<std::uint8_t, 4> junk{1, 2, 3, 4};
+  CHECK(dev.joiner
+            .on_direct_message(JoinAuthPhase::EdhocMessage, 4,
+                               ByteView{junk.data(), junk.size()}, rig.now())
+            .ok());
+  CHECK(dev.joiner.snapshot().counters.rx_dropped == 1);
+  // A full mailbox answers Busy without overwriting: the pump already
+  // staged m4, so the wedge is refused and the staged m4 still commits.
+  CHECK(rig.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::WaitM4; }, 30000));
+  const AuthorityDown wedge{true, 5, true, Bytes{0xEE}};
+  CHECK(dev.joiner
+            .on_direct_message(JoinAuthPhase::EdhocMessage, wedge.step,
+                               ByteView{wedge.body.data(), wedge.body.size()}, rig.now())
+            .code == StatusCode::Busy);
+  CHECK(rig.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::Ready; }, 30000));
+  CHECK(rig.has_pending() && rig.pending().kind == JoinActionKind::MemberReady);
+  current.clear();
+}
+
+void test_commit_policy_deny_no_write() {
+  current = "commit policy deny";
+  DirectRig rig;
+  DeviceEnds& dev = rig.device();
+  CountingPolicy policy;
+  policy.allow = false;
+  dev.joiner.set_commit_policy(&policy);
+  CHECK(dev.joiner.start_direct(boot_input(), rig.port(), 0).ok());
+  CHECK(rig.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::Stopped; }, 30000));
+  // The verified Allow was vetoed: avoided without writing anything.
+  CHECK(policy.checks == 1);
+  CHECK(dev.joiner.snapshot().counters.denies == 1);
+  CHECK(!dev.site_store.has_site());
+  for (const auto& op : dev.site_storage.log_) {
+    CHECK(op.op != 'w');
+  }
+  current.clear();
+}
+
 }  // namespace
 
 int main() {
@@ -2486,6 +2732,10 @@ int main() {
   test_v1_j05_proxy_changeover();
   test_refresh_proxy_is_attempted_proxy();
   test_joiner_size_budget();
+  test_direct_allow_commits();
+  test_direct_deny_parks_stopped();
+  test_direct_edges();
+  test_commit_policy_deny_no_write();
   if (failures == 0) {
     std::printf("joiner tests passed\n");
   } else {

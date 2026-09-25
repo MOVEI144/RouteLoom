@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <new>
 
 #include "esp_event.h"
 #include "esp_log.h"
@@ -334,10 +335,11 @@ Status EspNowRuntime::initialize() noexcept {
     return Status::error(StatusCode::AlreadyExists,
                          "runtime initialized");
   }
-  if (!security_.ready()) {
-    return Status::error(StatusCode::InvalidState,
-                         "security provider not ready");
-  }
+  // Radio-only init (G-SEC P4 §8.1): provider readiness gates the node
+  // start (MeshNode::start refuses an unready provider), not the radio —
+  // a member-mode device brings the radio up for its zero-touch join
+  // while the session provider is still unconfigured, and the node
+  // starts only after the adopted member config lands.
   event_queue_ = xQueueCreate(kEventQueueCapacity, sizeof(Event));
   if (event_queue_ == nullptr) {
     return Status::error(StatusCode::NoCapacity,
@@ -502,6 +504,25 @@ Status EspNowRuntime::register_neighbor(
   portENTER_CRITICAL(&callback_lock_);
   record->release_pending = false;
   portEXIT_CRITICAL(&callback_lock_);
+  return Status::success();
+}
+
+Status EspNowRuntime::attach_bootstrap_sink(BootstrapRld1Sink& sink) noexcept {
+  if (bootstrap_sink_ != nullptr) {
+    return Status::error(StatusCode::AlreadyExists,
+                         "bootstrap sink already attached");
+  }
+  bootstrap_sink_ = &sink;
+  return Status::success();
+}
+
+Status EspNowRuntime::adopt_member_node(const routeloom::NodeConfig& adopted) noexcept {
+  if (node_.started() || started_) {
+    return Status::error(StatusCode::InvalidState,
+                         "member config arrived after node start");
+  }
+  node_.~MeshNode();
+  new (&node_) MeshNode(adopted, *this, security_, observer_);
   return Status::success();
 }
 
@@ -921,15 +942,31 @@ void EspNowRuntime::poll_once() noexcept {
       (void)recover();
     }
   }
-  if (discovery_ != nullptr && bootstrap_queue_ != nullptr) {
+  if (bootstrap_queue_ != nullptr &&
+      (discovery_ != nullptr || bootstrap_sink_ != nullptr)) {
     BootstrapEvent rx{};
     while (xQueueReceive(bootstrap_queue_, &rx, 0) == pdTRUE) {
-      discovery_->on_rld1_rx(
-          DiscoveryRxMetadata{rx.source, rx.destination},
-          ByteView{rx.data.data(), rx.length}, rx.received_ms);
+      if (bootstrap_sink_ != nullptr) {
+        // The security owner demuxes: ZT to its Joiner, member link
+        // frames to its engine, member Discovers back into discovery.
+        sdkv1::JoinRxMeta meta{};
+        meta.source = rx.source;
+        meta.destination = rx.destination;
+        meta.channel = rx.channel;
+        meta.rssi = rx.rssi_dbm;
+        bootstrap_sink_->on_bootstrap_rld1(meta, rx.radio_generation,
+                                           ByteView{rx.data.data(), rx.length},
+                                           rx.received_ms);
+      } else {
+        discovery_->on_rld1_rx(
+            DiscoveryRxMetadata{rx.source, rx.destination},
+            ByteView{rx.data.data(), rx.length}, rx.received_ms);
+      }
     }
-    discovery_->poll(now);
-    reconcile_autonomy(now);
+    if (discovery_ != nullptr) {
+      discovery_->poll(now);
+      reconcile_autonomy(now);
+    }
   }
   // Serialized channel operations advance here: drain fence -> verified
   // apply -> bounded visit dwell -> verified return home (04 §3/§8).
@@ -1429,9 +1466,9 @@ Status EspNowRuntime::ensure_transient_peer(const MacAddress& mac) noexcept {
 
 Status EspNowRuntime::send_rld1(const routeloom::MacAddress& dest,
                                 const ByteView encoded) noexcept {
-  if (discovery_ == nullptr) {
+  if (discovery_ == nullptr && bootstrap_sink_ == nullptr) {
     return Status::error(StatusCode::InvalidState,
-                         "autonomy engine not attached");
+                         "no bootstrap owner attached");
   }
   if (channel_runner_.busy()) {
     // A serialized channel operation owns the radio (04 §3/§8): RLD1
@@ -2236,11 +2273,16 @@ void EspNowRuntime::enqueue_rx(
     event.received_ms = now_ms();
     event.length = static_cast<std::uint16_t>(length);
     event.rssi_dbm = info->rx_ctrl != nullptr ? info->rx_ctrl->rssi : 0;
+    event.channel =
+        info->rx_ctrl != nullptr ? static_cast<std::uint8_t>(info->rx_ctrl->channel) : 0;
+    portENTER_CRITICAL(&callback_lock_);
+    event.radio_generation = channel_runner_.radio_generation().value;
+    portEXIT_CRITICAL(&callback_lock_);
     std::memcpy(event.data.data(), data, event.length);
-    // The event is fully local: nothing here needs callback_lock_, so the
-    // queue send runs outside it (same shape as the wire lane below and
-    // enqueue_tx) — holding the WiFi-task critical section across queue
-    // internals stretches it over every RLD1 frame.
+    // Only the generation read above needs callback_lock_; the queue send
+    // runs outside it (same shape as the wire lane below and enqueue_tx)
+    // — holding the WiFi-task critical section across queue internals
+    // stretches it over every RLD1 frame.
     if (xQueueSend(bootstrap_queue_, &event, 0) != pdTRUE) {
       portENTER_CRITICAL(&callback_lock_);
       ++bootstrap_rx_dropped_;

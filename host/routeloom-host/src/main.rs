@@ -752,6 +752,12 @@ struct State {
     /// SDK v1 Site Authority (--site-authority DIR): EDHOC Responder, member
     /// ledger and the KGuard decision surface. None when not configured.
     site: Option<Arc<site::SiteService>>,
+    /// Verified join-relay (HostOps 0x60-0x63) bodies waiting for the site
+    /// lane — separate from `dispatch_inbox` so relay traffic never
+    /// competes with the send lane's replies. Posted only for
+    /// session-verified bodies; the lane additionally gates on the
+    /// gateway's CAP_JOIN_RELAY_V2 bit before touching the authority.
+    site_inbox: site::usb::SiteInbox,
 }
 
 fn now_ms() -> u64 {
@@ -1194,6 +1200,15 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                     state,
                     ms,
                     "\"kind\":\"rx_drop\",\"reason\":\"node_inbox_full\"".to_string(),
+                );
+            }
+        }
+        FrameKind::HostOps if site::owns(body) => {
+            if !state.site_inbox.post(frame.request, body.to_vec()) {
+                push_event(
+                    state,
+                    ms,
+                    "\"kind\":\"rx_drop\",\"reason\":\"site_inbox_full\"".to_string(),
                 );
             }
         }
@@ -2536,7 +2551,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let authority = site::config::open_dir(dir, now_ms())
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
             eprintln!(
-                "site authority: site {:016x} network {:016x} (EXPERIMENTAL; the USB join relay is not wired yet — joins reach it only in-process)",
+                "site authority: site {:016x} network {:016x} (EXPERIMENTAL; USB join relay 0x60-0x63 serves capable sessions)",
                 authority.site_id(),
                 authority.network()
             );
@@ -2625,19 +2640,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let node_outbound = outbound_tx.clone();
         thread::spawn(move || nodes::node_status_loop(node_state, node_outbound));
     }
-    // Site Authority timers (message_3 / KGuard decision deadlines); its
-    // events go to the same ring as every other lane's.
-    if let Some(site) = state.site.clone() {
+    // Site Authority lane (USB join relay 0x60-0x63 + authority timers):
+    // pumps the site inbox through the USB adapter and drains its down
+    // queue onto the same writer queue. Idle without a capable session;
+    // its events go to the same ring as every other lane's.
+    if state.site.is_some() {
         let site_state = Arc::clone(&state);
-        thread::spawn(move || loop {
-            thread::sleep(Duration::from_millis(100));
-            for (ms, fields) in site.tick(site::group_keys::HostTime {
-                mono_ms: mono_ms(),
-                unix_ms: now_ms(),
-            }) {
-                push_event(&site_state, ms, fields);
-            }
-        });
+        let site_outbound = outbound_tx.clone();
+        thread::spawn(move || site::usb::site_loop(site_state, site_outbound));
     }
     // group_delivery_v1 lane: writes 0x50/0x52 for group.send records and
     // settles them from the 0x51 answers. Idle while nothing is queued or

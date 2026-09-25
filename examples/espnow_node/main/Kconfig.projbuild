@@ -23,14 +23,17 @@ config ROUTELOOM_TX_POWER_QDBM
 config ROUTELOOM_PEER_NODE_ID
     hex "Static peer Node ID; 0 disables peer registration"
     default 0x0
+    depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
 
 config ROUTELOOM_PEER_MAC
     string "Static peer station MAC (aa:bb:cc:dd:ee:ff)"
     default "00:00:00:00:00:00"
+    depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
 
 config ROUTELOOM_ROUTE_GATEWAY_SCOPED
     bool "Gateway-scoped routing profile (100-node sites)"
     default n
+    depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
     help
         Switches the node from the flat routing profile to the
         gateway-scoped profile (docs/design/sdk-v1/routing-scale.md,
@@ -81,6 +84,7 @@ config ROUTELOOM_ROUTE_LIFETIME_MS
 config ROUTELOOM_DEVELOPMENT_KEY_HEX
     string "DEVELOPMENT ONLY 32-byte network master key in hex"
     default "524f5554454c4f4f4d2d444556454c4f504d454e542d4b45592d4f4e4c592121"
+    depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
     help
         Shared development key. Never use this default in a deployment. This provider does not
         replace the planned device-identity/EDHOC security profile.

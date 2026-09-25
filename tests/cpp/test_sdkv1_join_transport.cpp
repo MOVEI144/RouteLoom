@@ -580,6 +580,35 @@ JoinChunk make_chunk(const Bytes& object, const std::size_t index, const std::ui
   return chunk;
 }
 
+void unit_cookie_keying() {
+  current = "unit_cookie_keying";
+  // G-SEC P4 §8.4: the owner constructs the sealer before radio-up
+  // entropy exists and arms it at boot. An unkeyed sealer refuses (never
+  // a weak zero-key cookie); arming is one-time and rejects zero keys.
+  HmacJoinCookie sealer;
+  JoinCookieMaterial material{};
+  material.proxy = 0x11;
+  material.network_low32 = 0x524c0001;
+  JoinCookieBytes cookie{};
+  CHECK(!sealer.keyed());
+  CHECK(sealer.seal(material, cookie).code == StatusCode::InvalidState);
+  std::array<std::uint8_t, 32> zero{};
+  CHECK(sealer.install_key(zero).code == StatusCode::InvalidArgument);
+  CHECK(!sealer.keyed());
+  std::array<std::uint8_t, 32> key{};
+  for (std::size_t i = 0; i < key.size(); ++i) key[i] = static_cast<std::uint8_t>(i + 1);
+  CHECK(sealer.install_key(key).ok());
+  CHECK(sealer.keyed());
+  CHECK(sealer.seal(material, cookie).ok());
+  CHECK(sealer.install_key(key).code == StatusCode::InvalidState);
+  // The explicit ctor stays keyed (existing proxy/gateway callers).
+  HmacJoinCookie keyed(key);
+  JoinCookieBytes again{};
+  CHECK(keyed.keyed());
+  CHECK(keyed.seal(material, again).ok());
+  CHECK(cookie == again);
+}
+
 void unit_slot() {
   current = "unit_slot";
   Bytes object(300);
@@ -636,20 +665,20 @@ void unit_slot() {
     // Sender side: pending chunks follow the receiver's contiguous prefix.
     CHECK(slot.chunk_total() == 5);
     CHECK(slot.pending_mask() == 0x1F);
-    JoinReply progress{JoinAuthPhase::EdhocMessage, 3, 9, 236, JoinReplyStatus::Progress, 7, 3};
+    JoinReply progress{JoinAuthPhase::EdhocMessage, 3, 9, 236, JoinReplyStatus::Progress, ObjectLane::JoinRelay, 7, 3};
     CHECK(slot.on_reply(progress, 7) == JoinObjectSlot::ReplyOutcome::Progress);
     CHECK(slot.pending_mask() == 0x1C);
-    JoinReply other{JoinAuthPhase::EdhocMessage, 3, 8, 500, JoinReplyStatus::Complete, 7, 3};
+    JoinReply other{JoinAuthPhase::EdhocMessage, 3, 8, 500, JoinReplyStatus::Complete, ObjectLane::JoinRelay, 7, 3};
     CHECK(slot.on_reply(other, 7) == JoinObjectSlot::ReplyOutcome::Ignored);
-    JoinReply stale{JoinAuthPhase::EdhocMessage, 3, 9, 500, JoinReplyStatus::Complete, 6, 3};
+    JoinReply stale{JoinAuthPhase::EdhocMessage, 3, 9, 500, JoinReplyStatus::Complete, ObjectLane::JoinRelay, 6, 3};
     CHECK(slot.on_reply(stale, 7) == JoinObjectSlot::ReplyOutcome::Ignored);
-    JoinReply aborted{JoinAuthPhase::EdhocMessage, 3, 9, 0, JoinReplyStatus::Aborted, 7, 3};
+    JoinReply aborted{JoinAuthPhase::EdhocMessage, 3, 9, 0, JoinReplyStatus::Aborted, ObjectLane::JoinRelay, 7, 3};
     CHECK(slot.on_reply(aborted, 8) == JoinObjectSlot::ReplyOutcome::Restart);
     CHECK(slot.pending_mask() == 0x1F);
-    JoinReply short_complete{JoinAuthPhase::EdhocMessage, 3, 9, 499, JoinReplyStatus::Complete, 7,
-                             3};
+    JoinReply short_complete{JoinAuthPhase::EdhocMessage, 3, 9, 499, JoinReplyStatus::Complete,
+                             ObjectLane::JoinRelay, 7, 3};
     CHECK(slot.on_reply(short_complete, 9) == JoinObjectSlot::ReplyOutcome::Ignored);
-    JoinReply done{JoinAuthPhase::EdhocMessage, 3, 9, 500, JoinReplyStatus::Complete, 7, 3};
+    JoinReply done{JoinAuthPhase::EdhocMessage, 3, 9, 500, JoinReplyStatus::Complete, ObjectLane::JoinRelay, 7, 3};
     CHECK(slot.on_reply(done, 9) == JoinObjectSlot::ReplyOutcome::Done);
     CHECK(slot.mode() == JoinObjectSlot::Mode::Idle);
   }
@@ -927,6 +956,32 @@ void run() {
   for (const auto& path : invalid_files) run_invalid(path);
   for (const auto& path : v2_invalid_files) run_invalid(path);
   for (const auto& path : history_files) run_v1_history(path);
+  {
+    current = "local_join_token";
+    const RelayToken token = local_join_token(1234, 77);
+    CHECK(token.gateway_epoch == 1234);
+    CHECK(token.proxy_epoch == 1234);
+    CHECK(token.relay_id == 77);
+    CHECK(local_join_token_matches(token, 1234, 77));
+    CHECK(!local_join_token_matches(RelayToken{1235, 1234, 77}, 1234, 77));
+    CHECK(!local_join_token_matches(RelayToken{1234, 1235, 77}, 1234, 77));
+    CHECK(!local_join_token_matches(RelayToken{1234, 1234, 78}, 1234, 77));
+    CHECK(!local_join_token_matches(token, 0, 77));
+    RelayObject object{};
+    object.header.dir = RelayDirection::Up;
+    object.header.relay_id = token.relay_id;
+    object.header.proxy = 1;
+    object.header.joiner_mac = MacAddress{{2, 0, 0, 0, 0, 1}};
+    object.header.gateway_epoch = token.gateway_epoch;
+    object.header.proxy_epoch = token.proxy_epoch;
+    const std::uint8_t body = 0xA5;
+    object.message = ByteView{&body, 1};
+    std::array<std::uint8_t, kRelayObjectMax> encoded{};
+    std::size_t written = 0;
+    CHECK(relay_object_encode(object, MutableByteView{encoded.data(), encoded.size()},
+                              written).ok());
+  }
+  unit_cookie_keying();
   unit_slot();
   unit_admission();
   unit_budgets();

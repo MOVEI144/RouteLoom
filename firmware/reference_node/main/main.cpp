@@ -8,6 +8,7 @@
 
 #include "esp_attr.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -46,7 +47,13 @@
 #include "routeloom/fail_policy.hpp"
 #include "routeloom/nvs_counter_store.hpp"
 #include "routeloom/power.hpp"
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+#include "routeloom/espnow_sdkv1_entropy.hpp"
+#include "routeloom/espnow_security_owner.hpp"
+#include "routeloom/owner_pump.hpp"
+#else
 #include "routeloom/psk_security.hpp"
+#endif
 #include "routeloom/secure_clear.hpp"
 
 namespace {
@@ -60,7 +67,12 @@ using routeloom::NodeId;
 using routeloom::NodeObserver;
 using routeloom::Status;
 using routeloom::StatusCode;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+using routeloom::espnow::EspNowSecurityOwner;
+using routeloom::espnow::EspOwnerEntropy;
+#else
 using routeloom::espnow::DevelopmentPskSecurityProvider;
+#endif
 using routeloom::espnow::EspNowPowerPort;
 using routeloom::espnow::EspNowRuntime;
 using routeloom::espnow::EspNowRuntimeConfig;
@@ -94,7 +106,7 @@ class LogObserver final : public NodeObserver {
   }
 };
 
-int hex_value(const char value) noexcept {
+[[maybe_unused]] int hex_value(const char value) noexcept {
   if (value >= '0' && value <= '9') return value - '0';
   const char lower =
       static_cast<char>(std::tolower(static_cast<unsigned char>(value)));
@@ -103,8 +115,8 @@ int hex_value(const char value) noexcept {
 }
 
 template <std::size_t Size>
-bool parse_hex(const char* text,
-               std::array<std::uint8_t, Size>& output) noexcept {
+[[maybe_unused]] bool parse_hex(const char* text,
+                                std::array<std::uint8_t, Size>& output) noexcept {
   if (text == nullptr || std::strlen(text) != Size * 2U) return false;
   for (std::size_t i = 0; i < Size; ++i) {
     const int high = hex_value(text[i * 2]);
@@ -115,7 +127,7 @@ bool parse_hex(const char* text,
   return true;
 }
 
-bool parse_mac(const char* text, MacAddress& mac) noexcept {
+[[maybe_unused]] bool parse_mac(const char* text, MacAddress& mac) noexcept {
   if (text == nullptr) return false;
   unsigned values[6]{};
   if (std::sscanf(text, "%2x:%2x:%2x:%2x:%2x:%2x", &values[0],
@@ -624,8 +636,10 @@ extern "C" void app_main(void) {
       routeloom::sdkv1::kResumeNodeSlots);
   status = sdkv1_stores.open(routeloom::espnow::kSecurityNvsPartition);
   if (!status) {
-#if CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
-    fail(status.detail);  // a factory console without NVS provisions nothing
+#if CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE || !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    // A factory console without NVS provisions nothing, and the security
+    // owner cannot join without stores — continuing would run a dead node.
+    fail(status.detail);
 #else
     ESP_LOGE(kTag, "sdkv1 stores open failed: %s", status.detail);
 #endif
@@ -653,6 +667,7 @@ extern "C" void app_main(void) {
              "is orphaned (pre-rlsec layout); an explicit NVS erase reclaims "
              "it");
   }
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   std::uint32_t peer_capacity = 0;
   status = routeloom::espnow::nvs_partition_peer_capacity(
       routeloom::espnow::kSecurityNvsPartition,
@@ -683,6 +698,28 @@ extern "C" void app_main(void) {
   if (!status) fail(status.detail);
   routeloom::espnow::log_peer_state(kTag, security,
                                     routeloom::espnow::kSecurityNvsPartition);
+  routeloom::SecurityProvider& session_security = security;
+#else
+  // Owner profile (G-SEC P4 §8.4): the shared security owner runs over
+  // the sdkv1 stores above; the dev-PSK path is compiled out. The owner
+  // boots after radio-up (entropy + attach + boot below); the node start
+  // stays deferred to ApplyMemberConfig.
+  static EspOwnerEntropy entropy;
+  static EspNowSecurityOwner owner;
+  EspNowSecurityOwner::Config owner_config{};
+  owner_config.local_node = CONFIG_ROUTELOOM_NODE_ID;
+  // Pre-radio station MAC from eFuse: no custom MAC is ever set, so this
+  // is the address the runtime will read back after Wi-Fi init.
+  if (esp_read_mac(owner_config.local_mac.data(), ESP_MAC_WIFI_STA) != ESP_OK) {
+    fail("station MAC unreadable");
+  }
+  owner_config.joiner.node = owner_config.local_node;
+  owner_config.joiner.mac = owner_config.local_mac;
+  owner_config.log_tag = kTag;
+  status = owner.begin(sdkv1_stores, entropy, owner_config);
+  if (!status) fail(status.detail);
+  routeloom::SecurityProvider& session_security = owner.session_provider();
+#endif
 
 #if CONFIG_ROUTELOOM_MIGRATION
   // Channel migration (issue #5): durable plan/commit/active state plus the
@@ -829,6 +866,9 @@ extern "C" void app_main(void) {
 #endif
   config.node.node = CONFIG_ROUTELOOM_NODE_ID;
   config.node.message_session = message_session;
+  // Explicit durable boot token (G-SEC P4 §9.1): identical to the compat
+  // init for the legacy provider, explicit-nonzero for session providers.
+  config.node.boot_session = message_session;
   // Telemetry observations carry the same persisted per-boot incarnation as
   // the config journal (cross-cutting §4.2) — never the zero "unset".
   config.node.boot_incarnation = message_session;
@@ -941,12 +981,28 @@ extern "C" void app_main(void) {
     routeloom::secure_clear(config_key_material);
   }
 #endif
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   routeloom::secure_clear(key);
+#endif
 
-  static EspNowRuntime runtime(config, security, observer);
+  static EspNowRuntime runtime(config, session_security, observer);
   status = runtime.initialize();
   if (!status) fail(status.detail);
 
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  // Owner profile: boot after radio-up — entropy.begin() draws post-RF
+  // randomness, then boot() arms the cookie sealer from it. The node
+  // start stays deferred to ApplyMemberConfig.
+  status = entropy.begin();
+  if (!status) fail(status.detail);
+  status = owner.attach_runtime(runtime);
+  if (!status) fail(status.detail);
+  status = owner.boot(message_session, /*rlboot_prepared=*/true,
+                      /*usb_direct=*/false, monotonic_now_ms());
+  if (!status) fail(status.detail);
+#endif
+
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   if (CONFIG_ROUTELOOM_PEER_NODE_ID != 0) {
     MacAddress mac{};
     if (!parse_mac(CONFIG_ROUTELOOM_PEER_MAC, mac)) {
@@ -956,6 +1012,7 @@ extern "C" void app_main(void) {
         runtime.register_neighbor(CONFIG_ROUTELOOM_PEER_NODE_ID, mac, 1);
     if (!status) fail(status.detail);
   }
+#endif
 
 #if CONFIG_ROUTELOOM_DISCOVERY
   // Autonomous discovery (issue #3): the RLD1 bootstrap lane plus the
@@ -1221,7 +1278,19 @@ extern "C" void app_main(void) {
   runtime.node().set_telemetry_remote(true);
 #endif
 
-#if CONFIG_ROUTELOOM_DEEP_SLEEP
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  // Owner profile: the runtime task is not started (the node starts on
+  // ApplyMemberConfig), so app_main owns the event drain and the owner
+  // poll single-threaded.
+  ESP_LOGI(kTag, "security owner started; node start deferred to membership");
+  // Boot complete — the pump loop below is the node's main loop.
+  routeloom::fail_streak_runtime_started(s_fail);
+  for (;;) {
+    runtime.poll_once();
+    owner.poll(monotonic_now_ms());
+    runtime.wait_for_event(routeloom::kOwnerPollPeriodMs);
+  }
+#elif CONFIG_ROUTELOOM_DEEP_SLEEP
   // Wired: PowerCoordinator driven single-threaded (no runtime task), two-
   // slot NVS sleep image, RTC-marker + wake-cause classification, timer wake
   // via esp_deep_sleep_start. Not wired (host/port only): trusted RTC
@@ -1298,6 +1367,7 @@ extern "C" void app_main(void) {
   // Boot complete — the runtime task is the node's main loop.
   routeloom::fail_streak_runtime_started(s_fail);
 #endif
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   // The development PSK profile is pinned to SecurityProfile::Development;
   // this firmware can never report itself as production-secure.
   if (security.security_profile() != routeloom::SecurityProfile::Production) {
@@ -1306,4 +1376,5 @@ extern "C" void app_main(void) {
         "EXPERIMENTAL CORE_FIXED_250 started; development PSK is not a "
         "production identity profile");
   }
+#endif
 }

@@ -4,8 +4,9 @@ Byte-exact vectors for the member EDHOC wire of G-SEC P4: the link
 carrier digest and link/end bindings (§5.2/§5.3), the session EAD values
 SessionIntent (−65542), SessionState (−65543), ContextConfirm (−65544)
 (§5.3), the 15-element Exporter application contexts with the
-capability/contexts digests (§5.4), and the RFC 9528 EDHOC_Exporter KDF
-from a known PRK_exporter.
+capability/contexts digests (§5.4), the RFC 9528 EDHOC_Exporter KDF
+from a known PRK_exporter, and the routed end-object envelope with its
+lane-separated chunk sub namespace (§7.3).
 
 | side | code | what it does with the vectors |
 |---|---|---|

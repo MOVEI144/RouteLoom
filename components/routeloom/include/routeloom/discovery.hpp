@@ -29,6 +29,7 @@
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/endpoint_wire.hpp"
 #include "routeloom/fixed_containers.hpp"
+#include "routeloom/key_schedule.hpp"
 #include "routeloom/peer_directory.hpp"
 #include "routeloom/security.hpp"
 #include "routeloom/status.hpp"
@@ -523,8 +524,36 @@ class NeighborDiscovery {
   // the engine-minted proof. The elevation tail (MAC conflict, membership
   // re-check, regular slot, binding generation, Bound→Probe) is shared with
   // the dev exchange path — there is exactly one promotion implementation.
+  //
+  // Frozen carriers for the engine come from take_member_start(): with the
+  // member-handshake mode armed, an accepted OFFER (initiator) or a sent
+  // OFFER (responder) parks its frozen DISCOVER/OFFER material instead of
+  // running the dev PROVE/CONFIRM exchange, and the Owner takes each start
+  // once. Untaken starts expire on the usual stage/candidate deadlines.
   static constexpr std::uint32_t kMemberHandshakeNone = 0;
   static constexpr std::size_t kMemberHandshakePendings = 4;
+  // One parked member-handshake start: the frozen exchange the engine
+  // binds (P4 §5.2). The carrier's network/node_i/node_r stay zero here —
+  // discovery only knows the low32 filter — and the Owner stamps the
+  // adopted full64/self/peer before the engine sees it.
+  struct MemberStartRequest {
+    bool initiator{false};  // our DISCOVER won (vs their DISCOVER)
+    NodeId peer{kInvalidNodeId};  // claimed NodeId (unverified until the engine)
+    MacAddress peer_mac{};
+    keys::LinkCarrier carrier{};
+    MonotonicMs expires_at_ms{0};  // frozen material valid until
+  };
+  // Arms/clears the member-handshake mode. While armed, accept_offer parks
+  // instead of proving, sent OFFERs park responder starts, and inbound
+  // PROVE (a dev-profile peer) is refused. Only the Owner calls this, and
+  // only while no exchange is in flight.
+  void set_member_handshake_mode(bool armed) noexcept { member_handshake_mode_ = armed; }
+  bool member_handshake_mode() const noexcept { return member_handshake_mode_; }
+  // Takes the next parked start (oldest responder start first, else the
+  // initiator start). NotFound when none is parked. Taking consumes the
+  // discovery leg: the Outbound slot frees for the next begin_discovery
+  // and the candidate unparks (its expiry still sweeps it).
+  Status take_member_start(MemberStartRequest& out, MonotonicMs now_ms) noexcept;
   // Reserve a member-handshake start for (peer, peer_mac): fails
   // BindingConflict when the pair contradicts a known record and
   // PeerCapacity when no neighbor slot could take the elevation. The
@@ -570,6 +599,9 @@ class NeighborDiscovery {
     MonotonicMs offer_due_ms{0};
     bool offer_pending{false};
     bool transient_held{false};
+    // Member-handshake mode: our OFFER went out and the frozen exchange is
+    // parked for take_member_start (cleared on take; expiry still sweeps).
+    bool member_start_parked{false};
     // Pins the accepted DISCOVER's scope context (class/generation + frame
     // digest, legacy = scoped:false) so the OFFER tag and the final
     // transcript binding reproduce the exact exchange (02 §2.4/§5.2).
@@ -821,6 +853,10 @@ class NeighborDiscovery {
   std::size_t discover_cursor_{0};
 
   Outbound outbound_{};
+  // Member-handshake mode (P4 §7.2): park frozen starts for the Owner's
+  // engine instead of running the dev PROVE/CONFIRM exchange. Armed only
+  // with no exchange in flight.
+  bool member_handshake_mode_{false};
   std::uint32_t next_candidate_id_{1};
   // Minted binding ids never wrap to 0: UINT32_MAX is the last mintable id
   // and 0 afterwards means exhausted (P4 §7.2) — a live id is never reused.

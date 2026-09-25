@@ -52,7 +52,18 @@ bool offset_of(const JoinObjectSlot& slot, const ByteView view, std::size_t& off
 
 HmacJoinCookie::~HmacJoinCookie() { secure_clear(key_); }
 
+Status HmacJoinCookie::install_key(const std::array<std::uint8_t, 32>& key) noexcept {
+  if (keyed_) return Status::error(StatusCode::InvalidState, "cookie sealer already keyed");
+  bool nonzero = false;
+  for (const std::uint8_t byte : key) nonzero = nonzero || (byte != 0);
+  if (!nonzero) return Status::error(StatusCode::InvalidArgument, "cookie key is zero");
+  key_ = key;
+  keyed_ = true;
+  return Status::success();
+}
+
 Status HmacJoinCookie::seal(const JoinCookieMaterial& material, JoinCookieBytes& out) noexcept {
+  if (!keyed_) return Status::error(StatusCode::InvalidState, "cookie sealer unkeyed");
   std::array<std::uint8_t, sizeof(kJoinCookieDomain) + 6 + 16 + 8 + 4 + 8> input{};
   std::size_t pos = 0;
   std::memcpy(input.data(), kJoinCookieDomain, sizeof(kJoinCookieDomain));
@@ -434,8 +445,9 @@ JoinProxy::JoinProxy(const JoinProxyConfig& config, ZtRld1Port& rld1, ZtRelayPor
       cookie_(cookie),
       entropy_(entropy),
       config_valid_(id_valid(config.node) && id_valid(config.gateway) &&
-                    config.node != config.gateway && config.network_low32 != 0 &&
-                    config.proxy_epoch != 0 && config.cookie_bucket_ms != 0 &&
+                    (config.node != config.gateway || config.colocated_gateway) &&
+                    config.network_low32 != 0 && config.proxy_epoch != 0 &&
+                    config.cookie_bucket_ms != 0 &&
                     config.offer_slots != 0 && config.offer_slot_ms != 0 &&
                     config.m1_interval_ms != 0 && config.relay_timeout_ms != 0 &&
                     config.device_silence_ms != 0 && config.assembly_timeout_ms != 0 &&
@@ -1046,7 +1058,10 @@ void JoinProxy::on_relay_rx_impl(const NodeId from, const FrameType type, const 
     }
     case FrameType::BootstrapChunk: {
       JoinChunk chunk{};
-      if (!join_chunk_decode(JoinCarrier::WireRelay, payload, chunk) || !chunk_ours(chunk) ||
+      // Lane guard (P4 §7.3): end-session chunks never enter the
+      // join-relay assembly, even on a colliding (id, phase, step).
+      if (!join_chunk_decode(JoinCarrier::WireRelay, payload, chunk) ||
+          chunk.lane != ObjectLane::JoinRelay || !chunk_ours(chunk) ||
           join_step_flow(chunk.phase, chunk.step) == JoinFlow::Up ||
           chunk.total > kRelayObjectMax) {
         ++stats_.frames_rejected;
@@ -1108,8 +1123,11 @@ void JoinProxy::on_relay_rx_impl(const NodeId from, const FrameType type, const 
     }
     case FrameType::BootstrapReply: {
       JoinReply reply{};
+      // Lane guard (P4 §7.3): an end-lane reply never advances a
+      // join-relay send.
       if (!join_reply_decode(JoinCarrier::WireRelay, payload, reply) || !relay_.active ||
-          reply.id != relay_.relay_id || reply.gateway_epoch != relay_.gateway_epoch ||
+          reply.lane != ObjectLane::JoinRelay || reply.id != relay_.relay_id ||
+          reply.gateway_epoch != relay_.gateway_epoch ||
           reply.proxy_epoch != config_.proxy_epoch || !relay_.slot_up) {
         ++stats_.frames_rejected;
         return;
@@ -1836,7 +1854,10 @@ void JoinRelayGateway::on_relay_rx_impl(const NodeId from, const std::uint8_t ho
     }
     case FrameType::BootstrapChunk: {
       JoinChunk chunk{};
+      // Lane guard (P4 §7.3): end-session chunks never enter the
+      // join-relay assembly, even on a colliding (id, phase, step).
       if (!join_chunk_decode(JoinCarrier::WireRelay, payload, chunk) ||
+          chunk.lane != ObjectLane::JoinRelay ||
           join_step_flow(chunk.phase, chunk.step) == JoinFlow::Down) {
         ++stats_.frames_rejected;
         return;
@@ -1846,7 +1867,10 @@ void JoinRelayGateway::on_relay_rx_impl(const NodeId from, const std::uint8_t ho
     }
     case FrameType::BootstrapReply: {
       JoinReply reply{};
-      if (!join_reply_decode(JoinCarrier::WireRelay, payload, reply)) {
+      // Lane guard (P4 §7.3): an end-lane reply never touches the
+      // join-relay gateway slots.
+      if (!join_reply_decode(JoinCarrier::WireRelay, payload, reply) ||
+          reply.lane != ObjectLane::JoinRelay) {
         ++stats_.frames_rejected;
         return;
       }

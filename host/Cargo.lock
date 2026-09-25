@@ -545,6 +545,7 @@ dependencies = [
  "aes-gcm",
  "hkdf",
  "hmac",
+ "routeloom-protocol",
  "sha2",
  "zeroize",
 ]

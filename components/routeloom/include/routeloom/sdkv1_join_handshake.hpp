@@ -59,6 +59,11 @@ struct JoinHandshakeConfig {
   NodeId node{kInvalidNodeId};      // must equal identity.node_id
   // The selected candidate's observed hints, bound to the authenticated
   // SiteCert in m2 (hint collision does not pass as authentication).
+  // A direct transport (USB LocalJoin, P4 §8.2) observes no radio and
+  // selects the site by attachment instead: it sets direct_transport and
+  // leaves the hints zero, and m2 skips the observed-hint binding while
+  // the authenticated SiteCert binding stays.
+  bool direct_transport{false};
   std::uint32_t org_hint{0};        // join_org_hint of the Site CA being tried
   std::uint32_t site_hint{0};       // join_site_hint of the expected site
   std::uint32_t network_low32{0};   // observed network hint

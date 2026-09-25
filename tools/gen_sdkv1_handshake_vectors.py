@@ -326,6 +326,82 @@ def main() -> None:
          dict(network=network, node_i=node_i, node_r=node_r, exchange_id=exchange_id ^ 1,
               binding_hex=end_flip.hex(), differs_from="end_binding_basic"))
 
+    # --- end object envelope (§7.3, PR3) ---
+    def end_object_encode(phase: int, step: int, exchange: int, profile: int,
+                          message: bytes) -> bytes:
+        assert phase in (4, 5) and 1 <= step <= (4 if phase == 4 else 3)
+        assert exchange != 0 and profile in (1, 2) and 1 <= len(message) <= 960
+        head = struct.pack(">BBBBIBBH", 1, phase, step, 0, exchange, 2, profile,
+                           len(message))
+        assert len(head) == 12
+        return head + message
+
+    msg_basic = bytes(range(0x20, 0x40))
+    end_basic = end_object_encode(4, 1, exchange_id, 1, msg_basic)
+    good("end_object_basic", "end_object",
+         dict(phase=4, step=1, exchange_id=exchange_id, purpose=2, profile=1,
+              message_hex=msg_basic.hex(), object_hex=end_basic.hex()),
+         object=end_basic)
+    end_dev = end_object_encode(4, 3, 0x01020304, 2, b"\xAA")
+    good("end_object_profile_dev", "end_object",
+         dict(phase=4, step=3, exchange_id=0x01020304, purpose=2, profile=2,
+              message_hex="aa", object_hex=end_dev.hex()),
+         object=end_dev)
+    end_resume = end_object_encode(5, 3, 0xDEADBEEF, 1, bytes([0x55]) * 128)
+    good("end_object_resume", "end_object",
+         dict(phase=5, step=3, exchange_id=0xDEADBEEF, purpose=2, profile=1,
+              message_hex=("55" * 128), object_hex=end_resume.hex()),
+         object=end_resume)
+    msg_max = bytes((i * 7 + 3) & 0xFF for i in range(960))
+    end_max = end_object_encode(4, 4, 0xFFFFFFFF, 1, msg_max)
+    good("end_object_max", "end_object",
+         dict(phase=4, step=4, exchange_id=0xFFFFFFFF, purpose=2, profile=1,
+              message_hex=msg_max.hex(), object_hex=end_max.hex()),
+         object=end_max)
+    end_flip = end_object_encode(4, 1, exchange_id, 1, bytes([0x21]) + msg_basic[1:])
+    assert end_flip != end_basic
+    good("end_object_flip_message", "end_object",
+         dict(phase=4, step=1, exchange_id=exchange_id, purpose=2, profile=1,
+              message_hex=end_flip[12:].hex(), object_hex=end_flip.hex(),
+              differs_from="end_object_basic"),
+         object=end_flip)
+    bad("end_object_bad_version", "end_object", b"\x02" + end_basic[1:],
+        "ver must be 1")
+    bad("end_object_bad_flags", "end_object", end_basic[:3] + b"\x01" + end_basic[4:],
+        "flags must be 0")
+    bad("end_object_bad_phase", "end_object", end_basic[:1] + b"\x06" + end_basic[2:],
+        "phase is 4 EDHOC or 5 RLRES1")
+    bad("end_object_bad_step", "end_object", end_basic[:2] + b"\x05" + end_basic[3:],
+        "member EDHOC has no step 5")
+    bad("end_object_zero_step", "end_object", end_basic[:2] + b"\x00" + end_basic[3:],
+        "step is 1..4/1..3")
+    bad("end_object_zero_exchange", "end_object", end_basic[:4] + b"\x00\x00\x00\x00" +
+        end_basic[8:], "exchange_id is nonzero")
+    bad("end_object_bad_purpose", "end_object", end_basic[:8] + b"\x01" + end_basic[9:],
+        "purpose is pinned to 2 end")
+    bad("end_object_bad_profile", "end_object", end_basic[:9] + b"\x03" + end_basic[10:],
+        "profile is 1 member or 2 dev")
+    bad("end_object_length_short", "end_object",
+        end_basic[:10] + struct.pack(">H", len(msg_basic) - 1) + msg_basic,
+        "message_len must match the body")
+    bad("end_object_length_long", "end_object",
+        end_basic[:10] + struct.pack(">H", len(msg_basic) + 1) + msg_basic,
+        "message_len must match the body")
+    bad("end_object_zero_length", "end_object", end_basic[:10] + b"\x00\x00" + msg_basic,
+        "message is 1..960 bytes")
+    bad("end_object_truncated", "end_object", end_basic[:-1], "body must be complete")
+    bad("end_object_head_only", "end_object", end_basic[:12], "body must be complete")
+
+    # --- end chunk sub namespace (§7.3, PR3): 0x80|(phase<<4)|step ---
+    for phase, steps in ((4, (1, 2, 3, 4)), (5, (1, 2, 3))):
+        for step in steps:
+            sub = 0x80 | (phase << 4) | step
+            good(f"end_sub_{phase}_{step}", "end_sub",
+                 dict(phase=phase, step=step, lane="end", sub=sub))
+    bad("end_sub_edhoc_step5", "end_sub", bytes([0xC5]), "member EDHOC has no step 5")
+    bad("end_sub_resume_step4", "end_sub", bytes([0xD4]), "RLRES1 has no step 4")
+    bad("end_sub_phase6", "end_sub", bytes([0xE1]), "phase is 4 or 5")
+
     # --- session EAD (§5.3) ---
     boot_i, boot_r = 7, 9
     intent = intent_encode(1, 1, cap_i, boot_i, binding)
@@ -477,8 +553,9 @@ Byte-exact vectors for the member EDHOC wire of G-SEC P4: the link
 carrier digest and link/end bindings (§5.2/§5.3), the session EAD values
 SessionIntent (−65542), SessionState (−65543), ContextConfirm (−65544)
 (§5.3), the 15-element Exporter application contexts with the
-capability/contexts digests (§5.4), and the RFC 9528 EDHOC_Exporter KDF
-from a known PRK_exporter.
+capability/contexts digests (§5.4), the RFC 9528 EDHOC_Exporter KDF
+from a known PRK_exporter, and the routed end-object envelope with its
+lane-separated chunk sub namespace (§7.3).
 
 | side | code | what it does with the vectors |
 |---|---|---|

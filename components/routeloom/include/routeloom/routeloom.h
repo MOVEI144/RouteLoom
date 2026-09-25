@@ -13,8 +13,11 @@ extern "C" {
 #define RL_MAX_APPLICATION_PAYLOAD 128u
 #define RL_MAX_ESPNOW_BODY 250u
 #define RL_AEAD_TAG_SIZE 16u
-/* Gateway-scoped routing profile: gateways per site (kMaxRouteGateways). */
-#define RL_MAX_ROUTE_GATEWAYS 2u
+/* Gateway-scoped routing profile: gateways per site (kMaxRouteGateways).
+   Four since the P4 member-membership work, matching the RLS1 gateway list;
+   callers built against the previous header (RL_NODE_CONFIG_SIZE_GATEWAY2)
+   explicitly keep the two-gateway limit — see below. */
+#define RL_MAX_ROUTE_GATEWAYS 4u
 
 typedef uint64_t rl_node_id_t;
 typedef uint64_t rl_network_id_t;
@@ -143,18 +146,21 @@ typedef struct rl_node_config {
   uint8_t control_budget_gate_enabled;
   uint8_t reserved[3];
   /* ---- Tail extension (still RL_ABI_VERSION 2): read only when struct_size
-     >= sizeof(rl_node_config_t). A caller built against the previous header
-     passes struct_size == RL_NODE_CONFIG_SIZE_BASE and keeps the flat
-     routing profile; any other size below the full struct is rejected.
-     rl_node_config_init() fills the full struct.
+     covers it. A caller built against the pre-routing header passes
+     struct_size == RL_NODE_CONFIG_SIZE_BASE and keeps the flat routing
+     profile; a caller built against the two-gateway header passes
+     RL_NODE_CONFIG_SIZE_GATEWAY2 and is limited to two gateways (a larger
+     count is rejected, never silently truncated). Any other size below
+     the full struct is rejected. rl_node_config_init() fills the full struct.
 
      Gateway-scoped routing profile (docs/design/sdk-v1/routing-scale.md).
-     route_gateway_count == 0 (the default) keeps the flat profile. 1..2
+     route_gateway_count == 0 (the default) keeps the flat profile. 1..4
      selects the scoped profile with route_gateways[0..count-1] (in
      preference order; a gateway lists itself; every node of a site carries
      the same set). rl_init rejects with RL_STATUS_INVALID_ARGUMENT a count
-     above RL_MAX_ROUTE_GATEWAYS and a zero or duplicate id inside the count;
-     entries at or beyond the count are ignored. rl_start rejects with
+     above the struct_size-covered capacity and a zero or duplicate id
+     inside the count; entries at or beyond the count are ignored.
+     rl_start rejects with
      RL_STATUS_INVALID_ARGUMENT a scoped config whose lease is below
      (2 * route_refresh_ticks + 2) * route_advertisement_period_ms
      (ROUTE_LIFETIME_BELOW_REFRESH_BOUND) — the product values are 5000 ms /
@@ -170,6 +176,9 @@ typedef struct rl_node_config {
 /* struct_size of rl_node_config_t before the tail extension (the layout
    through reserved[3]); still accepted by rl_init. */
 #define RL_NODE_CONFIG_SIZE_BASE 64u
+/* struct_size of the two-gateway header (base + count/ticks/reserved_ext +
+   two gateway ids); still accepted by rl_init with the two-gateway limit. */
+#define RL_NODE_CONFIG_SIZE_GATEWAY2 88u
 
 typedef struct rl_send_options {
   uint32_t struct_size;

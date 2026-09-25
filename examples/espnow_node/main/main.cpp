@@ -8,6 +8,8 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_mac.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
@@ -15,7 +17,14 @@
 #include "sdkconfig.h"
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/nvs_counter_store.hpp"
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+#include "routeloom/espnow_sdkv1.hpp"
+#include "routeloom/espnow_sdkv1_entropy.hpp"
+#include "routeloom/espnow_security_owner.hpp"
+#include "routeloom/owner_pump.hpp"
+#else
 #include "routeloom/psk_security.hpp"
+#endif
 
 namespace {
 constexpr char kTag[] = "RouteLoomNode";
@@ -28,7 +37,13 @@ using routeloom::NodeId;
 using routeloom::NodeObserver;
 using routeloom::Status;
 using routeloom::StatusCode;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+using routeloom::espnow::EspNowSecurityOwner;
+using routeloom::espnow::EspOwnerEntropy;
+using routeloom::espnow::Sdkv1Stores;
+#else
 using routeloom::espnow::DevelopmentPskSecurityProvider;
+#endif
 using routeloom::espnow::EspNowRuntime;
 using routeloom::espnow::EspNowRuntimeConfig;
 using routeloom::espnow::MacAddress;
@@ -60,7 +75,7 @@ class LogObserver final : public NodeObserver {
   }
 };
 
-int hex_value(const char value) noexcept {
+[[maybe_unused]] int hex_value(const char value) noexcept {
   if (value >= '0' && value <= '9') return value - '0';
   const char lower =
       static_cast<char>(std::tolower(static_cast<unsigned char>(value)));
@@ -69,8 +84,8 @@ int hex_value(const char value) noexcept {
 }
 
 template <std::size_t Size>
-bool parse_hex(const char* text,
-               std::array<std::uint8_t, Size>& output) noexcept {
+[[maybe_unused]] bool parse_hex(const char* text,
+                                std::array<std::uint8_t, Size>& output) noexcept {
   if (text == nullptr || std::strlen(text) != Size * 2U) return false;
   for (std::size_t i = 0; i < Size; ++i) {
     const int high = hex_value(text[i * 2]);
@@ -81,7 +96,7 @@ bool parse_hex(const char* text,
   return true;
 }
 
-bool parse_mac(const char* text, MacAddress& mac) noexcept {
+[[maybe_unused]] bool parse_mac(const char* text, MacAddress& mac) noexcept {
   if (text == nullptr) return false;
   unsigned values[6]{};
   if (std::sscanf(text, "%2x:%2x:%2x:%2x:%2x:%2x", &values[0],
@@ -130,6 +145,12 @@ Status next_boot_session(std::uint32_t& session) noexcept {
   for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+routeloom::MonotonicMs monotonic_now_ms() noexcept {
+  return static_cast<routeloom::MonotonicMs>(esp_timer_get_time() / 1000);
+}
+#endif
+
 }  // namespace
 
 extern "C" void app_main(void) {
@@ -175,6 +196,7 @@ extern "C" void app_main(void) {
              "is orphaned (pre-rlsec layout); an explicit NVS erase reclaims "
              "it");
   }
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   std::uint32_t peer_capacity = 0;
   status = routeloom::espnow::nvs_partition_peer_capacity(
       routeloom::espnow::kSecurityNvsPartition,
@@ -205,12 +227,45 @@ extern "C" void app_main(void) {
   if (!status) fail(status.detail);
   routeloom::espnow::log_peer_state(kTag, security,
                                     routeloom::espnow::kSecurityNvsPartition);
+  routeloom::SecurityProvider& session_security = security;
+#else
+  // Owner profile (G-SEC P4 §8.4): the SDK v1 stores feed the shared
+  // security owner; the dev-PSK path above is compiled out. An unopenable
+  // store fails boot — without stores the coordinator could never join,
+  // so continuing would run a dead node.
+  static Sdkv1Stores sdkv1_stores(routeloom::sdkv1::kResumeNodeSlots);
+  status = sdkv1_stores.open(routeloom::espnow::kSecurityNvsPartition);
+  if (!status) fail(status.detail);
+  status = sdkv1_stores.initialize();
+  if (!status) {
+    ESP_LOGE(kTag, "sdkv1 stores init: %s", status.detail);
+  }
+  sdkv1_stores.log_state(kTag);
+  static EspOwnerEntropy entropy;
+  static EspNowSecurityOwner owner;
+  EspNowSecurityOwner::Config owner_config{};
+  owner_config.local_node = CONFIG_ROUTELOOM_NODE_ID;
+  // Pre-radio station MAC from eFuse: no custom MAC is ever set, so this
+  // is the address the runtime will read back after Wi-Fi init.
+  if (esp_read_mac(owner_config.local_mac.data(), ESP_MAC_WIFI_STA) != ESP_OK) {
+    fail("station MAC unreadable");
+  }
+  owner_config.joiner.node = owner_config.local_node;
+  owner_config.joiner.mac = owner_config.local_mac;
+  owner_config.log_tag = kTag;
+  status = owner.begin(sdkv1_stores, entropy, owner_config);
+  if (!status) fail(status.detail);
+  routeloom::SecurityProvider& session_security = owner.session_provider();
+#endif
 
   static LogObserver observer;
   EspNowRuntimeConfig config{};
   config.node.network = CONFIG_ROUTELOOM_NETWORK_ID;
   config.node.node = CONFIG_ROUTELOOM_NODE_ID;
   config.node.message_session = message_session;
+  // Explicit durable boot token (G-SEC P4 §9.1): identical to the compat
+  // init for the legacy provider, explicit-nonzero for session providers.
+  config.node.boot_session = message_session;
   // Telemetry observations carry the same persisted per-boot incarnation —
   // never the zero "unset".
   config.node.boot_incarnation = message_session;
@@ -255,12 +310,15 @@ extern "C" void app_main(void) {
 #endif
   config.channel = CONFIG_ROUTELOOM_CHANNEL;
   config.max_tx_power_qdbm = CONFIG_ROUTELOOM_TX_POWER_QDBM;
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   std::fill(key.begin(), key.end(), 0);
+#endif
 
-  static EspNowRuntime runtime(config, security, observer);
+  static EspNowRuntime runtime(config, session_security, observer);
   status = runtime.initialize();
   if (!status) fail(status.detail);
 
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   if (CONFIG_ROUTELOOM_PEER_NODE_ID != 0) {
     MacAddress mac{};
     if (!parse_mac(CONFIG_ROUTELOOM_PEER_MAC, mac)) {
@@ -282,4 +340,23 @@ extern "C" void app_main(void) {
         "EXPERIMENTAL CORE_FIXED_250 started; development PSK is not a "
         "production identity profile");
   }
+#else
+  // Owner profile: entropy draws only exist post-radio-up, so the owner
+  // boots here — boot() arms its cookie sealer from ready entropy and
+  // the node start stays deferred to ApplyMemberConfig. The
+  // single-threaded pump owns the event drain and the owner poll.
+  status = entropy.begin();
+  if (!status) fail(status.detail);
+  status = owner.attach_runtime(runtime);
+  if (!status) fail(status.detail);
+  status = owner.boot(message_session, /*rlboot_prepared=*/true,
+                      /*usb_direct=*/false, monotonic_now_ms());
+  if (!status) fail(status.detail);
+  ESP_LOGI(kTag, "security owner started; node start deferred to membership");
+  for (;;) {
+    runtime.poll_once();
+    owner.poll(monotonic_now_ms());
+    runtime.wait_for_event(routeloom::kOwnerPollPeriodMs);
+  }
+#endif
 }

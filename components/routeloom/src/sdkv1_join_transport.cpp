@@ -79,14 +79,28 @@ std::size_t chunk_len(const JoinCarrier carrier, const std::size_t total,
 
 // Shared chunk checks for encode and decode.
 Status chunk_check(const JoinCarrier carrier, const JoinChunk& chunk) noexcept {
-  if (chunk.phase == JoinAuthPhase::RelayStatus || !join_step_valid(chunk.phase, chunk.step)) {
+  // The end lane (P4 §7.3) never rides RLD1 and member EDHOC has no
+  // step-5 error object; join rules are unchanged.
+  if (chunk.lane == ObjectLane::EndSession) {
+    if (carrier == JoinCarrier::Rld1) return malformed("end chunk carrier");
+    const bool ok = (chunk.phase == JoinAuthPhase::EdhocMessage && chunk.step >= 1 &&
+                     chunk.step <= 4) ||
+                    (chunk.phase == JoinAuthPhase::Resume && chunk.step >= 1 && chunk.step <= 3);
+    if (!ok) return malformed("end chunk sub");
+  } else if (chunk.phase == JoinAuthPhase::RelayStatus ||
+             !join_step_valid(chunk.phase, chunk.step)) {
     return malformed("join chunk sub");
   }
   if (chunk.id == 0) return malformed("join chunk id");
-  // The epochs name the Wire exchange; RLD1 has no epochs (#116).
+  // The epochs name the Wire exchange; RLD1 has no epochs (#116). The
+  // end lane keeps them reserved zero (its key is the end exchange).
   if (carrier == JoinCarrier::Rld1) {
     if (chunk.gateway_epoch != 0 || chunk.proxy_epoch != 0) {
       return malformed("join chunk epoch");
+    }
+  } else if (chunk.lane == ObjectLane::EndSession) {
+    if (chunk.gateway_epoch != 0 || chunk.proxy_epoch != 0) {
+      return malformed("end chunk epoch");
     }
   } else if (chunk.gateway_epoch == 0 || chunk.proxy_epoch == 0) {
     return malformed("join chunk epoch");
@@ -107,8 +121,19 @@ Status chunk_check(const JoinCarrier carrier, const JoinChunk& chunk) noexcept {
 
 // Shared reply checks for encode and decode.
 Status reply_check(const JoinCarrier carrier, const JoinReply& reply) noexcept {
-  if (reply.phase == JoinAuthPhase::RelayStatus || !join_step_valid(reply.phase, reply.step) ||
-      reply.id == 0 || reply.received > kJoinObjectMax ||
+  // The end lane (P4 §7.3) never rides RLD1 and member EDHOC has no
+  // step-5 error object; join rules are unchanged.
+  if (reply.lane == ObjectLane::EndSession) {
+    if (carrier == JoinCarrier::Rld1) return malformed("end reply carrier");
+    const bool ok = (reply.phase == JoinAuthPhase::EdhocMessage && reply.step >= 1 &&
+                     reply.step <= 4) ||
+                    (reply.phase == JoinAuthPhase::Resume && reply.step >= 1 && reply.step <= 3);
+    if (!ok) return malformed("end reply sub");
+  } else if (reply.phase == JoinAuthPhase::RelayStatus ||
+             !join_step_valid(reply.phase, reply.step)) {
+    return malformed("join reply fields");
+  }
+  if (reply.id == 0 || reply.received > kJoinObjectMax ||
       static_cast<std::uint8_t>(reply.status) > static_cast<std::uint8_t>(JoinReplyStatus::Aborted) ||
       (reply.status == JoinReplyStatus::Aborted && reply.received != 0) ||
       (reply.status == JoinReplyStatus::Complete && reply.received == 0)) {
@@ -117,6 +142,12 @@ Status reply_check(const JoinCarrier carrier, const JoinReply& reply) noexcept {
   if (carrier == JoinCarrier::Rld1) {
     if (reply.gateway_epoch != 0 || reply.proxy_epoch != 0) {
       return malformed("join reply epoch");
+    }
+  } else if (reply.lane == ObjectLane::EndSession) {
+    // Reserved-zero epochs: the end exchange binds by (lane, origin,
+    // destination, exchange_id), not service epochs.
+    if (reply.gateway_epoch != 0 || reply.proxy_epoch != 0) {
+      return malformed("end reply epoch");
     }
   } else if (reply.gateway_epoch == 0 || reply.proxy_epoch == 0) {
     return malformed("join reply epoch");
@@ -456,6 +487,26 @@ bool join_sub_decode(const std::uint8_t sub, JoinAuthPhase& phase, std::uint8_t&
   return true;
 }
 
+bool object_sub_decode(const std::uint8_t sub, ObjectLane& lane, JoinAuthPhase& phase,
+                       std::uint8_t& step) noexcept {
+  // The lane bit alone selects the namespace; each half keeps its own step
+  // rules so a join chunk and an end chunk never decode into one another.
+  if ((sub & kEndSubLaneBit) != 0) {
+    lane = ObjectLane::EndSession;
+    const std::uint8_t high = static_cast<std::uint8_t>((sub & ~kEndSubLaneBit) >> 4U);
+    const std::uint8_t low = static_cast<std::uint8_t>(sub & 0x0FU);
+    const bool ok =
+        (high == static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage) && low >= 1 && low <= 4) ||
+        (high == static_cast<std::uint8_t>(JoinAuthPhase::Resume) && low >= 1 && low <= 3);
+    if (!ok) return false;
+    phase = static_cast<JoinAuthPhase>(high);
+    step = low;
+    return true;
+  }
+  lane = ObjectLane::JoinRelay;
+  return join_sub_decode(sub, phase, step);
+}
+
 std::uint32_t join_rld1_object_id(const JoinNonce& nonce) noexcept {
   return get_u32(nonce.data());
 }
@@ -472,7 +523,7 @@ Status join_chunk_encode(const JoinCarrier carrier, const JoinChunk& chunk,
   }
   std::uint8_t* p = out.data;
   p[0] = join_chunk_version(carrier);
-  p[1] = join_sub(chunk.phase, chunk.step);
+  p[1] = object_sub(chunk.lane, chunk.phase, chunk.step);
   put_u32(p + 2, chunk.id);
   put_u16(p + 6, chunk.offset);
   put_u16(p + 8, chunk.total);
@@ -494,7 +545,7 @@ Status join_chunk_decode(const JoinCarrier carrier, const ByteView encoded,
     return malformed("join chunk head");
   }
   JoinChunk chunk{};
-  if (!join_sub_decode(encoded.data[1], chunk.phase, chunk.step)) {
+  if (!object_sub_decode(encoded.data[1], chunk.lane, chunk.phase, chunk.step)) {
     return malformed("join chunk sub");
   }
   chunk.id = get_u32(encoded.data + 2);
@@ -522,7 +573,7 @@ Status join_reply_encode(const JoinCarrier carrier, const JoinReply& reply,
   }
   std::uint8_t* p = out.data;
   p[0] = join_chunk_version(carrier);
-  p[1] = join_sub(reply.phase, reply.step);
+  p[1] = object_sub(reply.lane, reply.phase, reply.step);
   put_u32(p + 2, reply.id);
   put_u16(p + 6, reply.received);
   p[8] = static_cast<std::uint8_t>(reply.status);
@@ -543,7 +594,7 @@ Status join_reply_decode(const JoinCarrier carrier, const ByteView encoded,
     return malformed("join reply head");
   }
   JoinReply reply{};
-  if (!join_sub_decode(encoded.data[1], reply.phase, reply.step)) {
+  if (!object_sub_decode(encoded.data[1], reply.lane, reply.phase, reply.step)) {
     return malformed("join reply sub");
   }
   reply.id = get_u32(encoded.data + 2);
@@ -571,6 +622,7 @@ void JoinObjectSlot::reset() noexcept {
   data_.fill(0);
   mode_ = Mode::Idle;
   ++generation_;
+  lane_ = ObjectLane::JoinRelay;
   step_ = 0;
   id_ = 0;
   gateway_epoch_ = 0;
@@ -629,10 +681,11 @@ JoinObjectSlot::Accepted JoinObjectSlot::accept(const JoinCarrier carrier, const
   result.reply.phase = chunk.phase;
   result.reply.step = chunk.step;
   result.reply.id = chunk.id;
+  result.reply.lane = chunk.lane;
   result.reply.gateway_epoch = chunk.gateway_epoch;
   result.reply.proxy_epoch = chunk.proxy_epoch;
   if (!chunk_check(carrier, chunk)) return result;  // Rejected
-  const std::uint8_t sub = join_sub(chunk.phase, chunk.step);
+  const std::uint8_t sub = object_sub(chunk.lane, chunk.phase, chunk.step);
   // A late duplicate of the object completed last (its Complete reply was
   // lost): answer Complete again, whatever the slot holds now. The full
   // token must match: a chunk from another epoch is never this object.
@@ -651,13 +704,14 @@ JoinObjectSlot::Accepted JoinObjectSlot::accept(const JoinCarrier carrier, const
     return result;
   }
   const bool same_key = mode_ == Mode::Assembling && carrier == carrier_ &&
-                        sub == join_sub(phase_, step_) && chunk.id == id_ &&
+                        sub == object_sub(lane_, phase_, step_) && chunk.id == id_ &&
                         chunk.gateway_epoch == gateway_epoch_ && chunk.proxy_epoch == proxy_epoch_;
   if (mode_ == Mode::Idle) {
     data_.fill(0);
     mode_ = Mode::Assembling;
     ++generation_;
     carrier_ = carrier;
+    lane_ = chunk.lane;
     phase_ = chunk.phase;
     step_ = chunk.step;
     id_ = chunk.id;
@@ -731,36 +785,50 @@ void JoinObjectSlot::release_assembled_if(const std::uint32_t expected) noexcept
 Status JoinObjectSlot::load(const JoinCarrier carrier, const JoinAuthPhase phase,
                             const std::uint8_t step, const std::uint32_t id,
                             const std::uint32_t gateway_epoch, const std::uint32_t proxy_epoch,
-                            const ByteView object, const MonotonicMs now_ms) noexcept {
+                            const ByteView object, const MonotonicMs now_ms,
+                            const ObjectLane lane) noexcept {
   if (object.data == nullptr || object.size > kJoinObjectMax) {
     return invalid("join slot object");
   }
   if (object.data != data_.data()) {
     // Validate before touching the buffer so a refused load keeps the slot.
     if (object.size <= join_single_frame_max(carrier) || phase == JoinAuthPhase::RelayStatus ||
-        !join_step_valid(phase, step) || id == 0) {
+        !join_step_valid(phase, step) || id == 0 ||
+        (lane == ObjectLane::EndSession &&
+         (carrier == JoinCarrier::Rld1 || (phase == JoinAuthPhase::EdhocMessage && step > 4)))) {
       return invalid("join slot load");
     }
     if (carrier == JoinCarrier::Rld1) {
+      if (gateway_epoch != 0 || proxy_epoch != 0) return invalid("join slot epoch");
+    } else if (lane == ObjectLane::EndSession) {
+      // Reserved-zero epochs (P4 §7.3): the end exchange key carries no
+      // service epochs.
       if (gateway_epoch != 0 || proxy_epoch != 0) return invalid("join slot epoch");
     } else if (gateway_epoch == 0 || proxy_epoch == 0) {
       return invalid("join slot epoch");
     }
     std::memmove(data_.data(), object.data, object.size);
   }
-  return load_in_place(carrier, phase, step, id, gateway_epoch, proxy_epoch, object.size, now_ms);
+  return load_in_place(carrier, phase, step, id, gateway_epoch, proxy_epoch, object.size, now_ms,
+                         lane);
 }
 
 Status JoinObjectSlot::load_in_place(const JoinCarrier carrier, const JoinAuthPhase phase,
                                      const std::uint8_t step, const std::uint32_t id,
                                      const std::uint32_t gateway_epoch,
                                      const std::uint32_t proxy_epoch, const std::size_t size,
-                                     const MonotonicMs now_ms) noexcept {
+                                     const MonotonicMs now_ms, const ObjectLane lane) noexcept {
   if (size <= join_single_frame_max(carrier) || size > kJoinObjectMax ||
-      phase == JoinAuthPhase::RelayStatus || !join_step_valid(phase, step) || id == 0) {
+      phase == JoinAuthPhase::RelayStatus || !join_step_valid(phase, step) || id == 0 ||
+      (lane == ObjectLane::EndSession &&
+       (carrier == JoinCarrier::Rld1 || (phase == JoinAuthPhase::EdhocMessage && step > 4)))) {
     return invalid("join slot load");
   }
   if (carrier == JoinCarrier::Rld1) {
+    if (gateway_epoch != 0 || proxy_epoch != 0) return invalid("join slot epoch");
+  } else if (lane == ObjectLane::EndSession) {
+    // Reserved-zero epochs (P4 §7.3): the end exchange key carries no
+    // service epochs.
     if (gateway_epoch != 0 || proxy_epoch != 0) return invalid("join slot epoch");
   } else if (gateway_epoch == 0 || proxy_epoch == 0) {
     return invalid("join slot epoch");
@@ -769,6 +837,7 @@ Status JoinObjectSlot::load_in_place(const JoinCarrier carrier, const JoinAuthPh
   mode_ = Mode::Sending;
   ++generation_;
   carrier_ = carrier;
+  lane_ = lane;
   phase_ = phase;
   step_ = step;
   id_ = id;
@@ -789,6 +858,7 @@ std::size_t JoinObjectSlot::chunk_total() const noexcept {
 Status JoinObjectSlot::chunk_at(const std::size_t index, JoinChunk& out) const noexcept {
   if (mode_ != Mode::Sending || index >= chunk_total()) return invalid("join slot chunk");
   const std::size_t offset = index * join_chunk_data_max(carrier_);
+  out.lane = lane_;
   out.phase = phase_;
   out.step = step_;
   out.id = id_;
@@ -808,8 +878,8 @@ std::uint16_t JoinObjectSlot::pending_mask() const noexcept {
 JoinObjectSlot::ReplyOutcome JoinObjectSlot::on_reply(const JoinReply& reply,
                                                       const MonotonicMs now_ms) noexcept {
   (void)now_ms;
-  if (mode_ != Mode::Sending || reply.phase != phase_ || reply.step != step_ ||
-      reply.id != id_ || reply.gateway_epoch != gateway_epoch_ ||
+  if (mode_ != Mode::Sending || reply.lane != lane_ || reply.phase != phase_ ||
+      reply.step != step_ || reply.id != id_ || reply.gateway_epoch != gateway_epoch_ ||
       reply.proxy_epoch != proxy_epoch_) {
     return ReplyOutcome::Ignored;
   }
@@ -1114,6 +1184,8 @@ bool zt_rld1_frame(const autonomy::Rld1Envelope& env) noexcept {
              env.body[1] <= static_cast<std::uint8_t>(JoinAuthPhase::RelayStatus);
     case FrameType::BootstrapChunk:
     case FrameType::BootstrapReply:
+      // join_sub_decode (not the lane-aware form): the 0x80 end-session
+      // sub never classifies as an RLD1 frame (P4 §7.3).
       return env.body_size >= 2 && env.body[0] == kJoinChunkVersion &&
              join_sub_decode(env.body[1], phase, step);
     default:

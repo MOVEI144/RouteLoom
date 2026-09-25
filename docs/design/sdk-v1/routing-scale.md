@@ -29,7 +29,7 @@ air timeは`congestion.hpp`と同じ推定モデルで数える：`frame_us = (e
 
 ## 3. 採用設計：gateway-scoped profile
 
-`NodeConfig::route_gateways`（最大2、`kMaxRouteGateways`）に1つ以上のgatewayを設定すると有効になる。site内の全nodeが同じ一覧を持ち、gateway自身も自分を載せる。未設定ならflat profileのまま（既存の挙動・試験は不変）。
+`NodeConfig::route_gateways`（最大4、`kMaxRouteGateways`。G-SEC P4でRLS1の一覧に合わせて2→4へ拡張）に1つ以上のgatewayを設定すると有効になる。site内の全nodeが同じ一覧を持ち、gateway自身も自分を載せる。未設定ならflat profileのまま（既存の挙動・試験は不変）。
 
 各nodeにとって**親**＝gatewayへのcommitted next hop、**子**＝自分を親としている隣接。gateway木はBabelの経路選択そのもので、別のparent選択規則は持たない。
 
@@ -104,8 +104,8 @@ flat profileの規則は`lifetime > (ceil(D/6) + 1) × period`（`flat_lifetime_
 
 | 入口 | gateway | tick／lease | 検査 |
 |---|---|---|---|
-| C++ `NodeConfig` | `route_gateways`（最大2、`kInvalidNodeId`は空き枠。1つでも設定でscoped） | `route_advertisement_period_ms`／`route_lifetime_ms`、`route_refresh_ticks`（既定6） | `start()`の`validate_config()`がlease規則違反を`InvalidArgument`（`ROUTE_LIFETIME_BELOW_REFRESH_BOUND`）で拒否 |
-| C API `rl_node_config_t` | `route_gateway_count`（0＝flat、既定）＋`route_gateways[RL_MAX_ROUTE_GATEWAYS]`（優先順） | 既存の`route_advertisement_period_ms`／`route_lifetime_ms`、`route_refresh_ticks`（0＝SDK既定6） | `rl_init`が個数超過・count内の0・重複を`RL_STATUS_INVALID_ARGUMENT`で拒否（count以降の要素は無視）。lease規則違反とbroadcast IDは`rl_start`が`RL_STATUS_INVALID_ARGUMENT`で拒否 |
+| C++ `NodeConfig` | `route_gateways`（最大4、`kInvalidNodeId`は空き枠。1つでも設定でscoped） | `route_advertisement_period_ms`／`route_lifetime_ms`、`route_refresh_ticks`（既定6） | `start()`の`validate_config()`がlease規則違反を`InvalidArgument`（`ROUTE_LIFETIME_BELOW_REFRESH_BOUND`）で拒否 |
+| C API `rl_node_config_t` | `route_gateway_count`（0＝flat、既定）＋`route_gateways[RL_MAX_ROUTE_GATEWAYS]`（優先順） | 既存の`route_advertisement_period_ms`／`route_lifetime_ms`、`route_refresh_ticks`（0＝SDK既定6） | `rl_init`が個数超過・count内の0・重複を`RL_STATUS_INVALID_ARGUMENT`で拒否（count以降の要素は無視）。旧2-gateway header（`RL_NODE_CONFIG_SIZE_GATEWAY2`）の呼出しは上限2のまま受付け、count 3以上は切捨てず拒否。lease規則違反とbroadcast IDは`rl_start`が`RL_STATUS_INVALID_ARGUMENT`で拒否 |
 | firmware Kconfig（reference_node／bridge_node／examples/espnow_node） | `ROUTELOOM_ROUTE_GATEWAY_SCOPED`（既定n）、`ROUTELOOM_ROUTE_GATEWAY_1`（既定0x1）、`ROUTELOOM_ROUTE_GATEWAY_2`（0＝なし）。bridge_nodeはgatewayなので自分の`ROUTELOOM_NODE_ID`を先頭に載せ、`_2`だけを持つ | `ROUTELOOM_ROUTE_PERIOD_MS`（既定5000）／`ROUTELOOM_ROUTE_LIFETIME_MS`（既定90000）。scoped時だけ現れ、flat buildはSDK既定（5s／15s）に触れない | gateway 0・重複・lease規則違反を`static_assert`でbuild失敗にする（起動時拒否より前に止める） |
 
 `rl_node_config_init()`はflat既定（5s／15s、gatewayなし）のままなので、C callerがscopedにするときは5s／90sを明示する（15sのままでは`rl_start`が拒否する）。実効gateway一覧は`rl_route_gateways()`で読める（0件＝flat）。
@@ -168,7 +168,7 @@ Wire v2 header（88B）は不変。ROUTE_UPDATEのpayload形式も不変。予�
 - **親の沈黙故障**：親の電源断はDATA失敗（即時）かlease（90秒）でしか分からない。上り送信があればDATA失敗→pull→数秒で修復するが、送信の無いboardへの下りは最長1 lease届かない。flat profileより遅い。
 - **起動時の嵐**：全台同時起動でpullが約1,900 frameになる。起動jitterや、隣接の広告を一定時間待ってからpullする等の緩和が必要（未実装）。
 - **gatewayの深さとboard間**：木を経由するので、別の枝の深いboard同士は10hopを超えて届かない。
-- **複数gateway**：2つまで設定できるが、上りは各親へ同じ部分木を送る単純な方式で、試験は1 gatewayが中心。
+- **複数gateway**：C++／新C API／RLS1は4つまで設定できる（旧C APIとfirmwareのlegacy Kconfigは2つまで）。上りは各親へ同じ部分木を送る単純な方式で、試験は1 gatewayが中心。
 - **hostへの報告なし**：C API（§5.1）とfirmware Kconfigからは設定できるが、USB HostOps（HelloAck・node_status_v1）はrouting profileとgateway一覧を運ばない。golden固定のUSB wire形式への追加が要るので別作業とする。firmwareのgateway一覧はbuild時固定で、remote config（RCC1）からは変えられない。
 - **実RF未検証**：air timeは推定モデル、simは衝突・損失を模擬しない。§14の実測・capacity manifestはG-ROUTEに残る。
 

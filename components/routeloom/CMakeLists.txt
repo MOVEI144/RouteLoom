@@ -1,6 +1,7 @@
 set(ROUTELOOM_CORE_SOURCES
   src/authority.cpp
   src/autonomy_wire.cpp
+  src/bootstrap_transport.cpp
   src/byte_io.cpp
   src/channel_plan.cpp
   src/config.cpp
@@ -45,6 +46,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/sdkv1_pop.cpp
   src/sdkv1_records.cpp
   src/sdkv1_handshake.cpp
+  src/sdkv1_security_coordinator.cpp
   src/sdkv1_session_wire.cpp
   src/sdkv1_grant_renew.cpp
   src/sdkv1_revocation.cpp
