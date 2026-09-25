@@ -231,11 +231,13 @@ IdempotencyResult IdempotencyTable::submit(
       slot = i;
       break;
     }
-    // Only retention-expired records are evictable: evicting a live record
-    // would silently re-execute a resubmitted key. Reject instead — the
+    // Evictable: retention-expired, or settled and past the replay hold.
+    // A record whose delivery is still in flight is never evicted — the
     // caller reports IDEMPOTENCY_FULL and the host backs off.
-    if (now_ms - records_[i].last_use_ms >= kRetentionMs &&
-        records_[i].last_use_ms < oldest_use) {
+    const MonotonicMs age = now_ms - records_[i].last_use_ms;
+    const bool evictable = age >= kRetentionMs ||
+                           (records_[i].settled && age >= kSettledHoldMs);
+    if (evictable && records_[i].last_use_ms < oldest_use) {
       oldest_use = records_[i].last_use_ms;
       slot = i;
     }
@@ -255,6 +257,18 @@ IdempotencyResult IdempotencyTable::submit(
   entry.last_use_ms = now_ms;
   record = &entry;
   return IdempotencyResult::Accepted;
+}
+
+void IdempotencyTable::settle(const std::uint32_t message_session,
+                              const std::uint64_t message_sequence) noexcept {
+  for (std::size_t i = 0; i < kCapacity; ++i) {
+    if (!used_[i] || !records_[i].accepted) continue;
+    if (records_[i].message_session == message_session &&
+        records_[i].message_sequence == message_sequence) {
+      records_[i].settled = true;
+      return;
+    }
+  }
 }
 
 std::size_t IdempotencyTable::size() const noexcept {

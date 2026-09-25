@@ -138,9 +138,12 @@ struct IdempotencyRecord {
   std::uint16_t error_code{0};
   std::uint32_t message_session{0};
   std::uint64_t message_sequence{0};
-  // Last identity touch; drives retention expiry (never evicted earlier —
-  // evicting a live record would silently re-execute a resubmitted key).
+  // Last identity touch; drives retention expiry and the settled hold.
   MonotonicMs last_use_ms{0};
+  // The stored result is final and already reported to the host: admission
+  // refused, or the mesh delivery reached a terminal state. Settled records
+  // are the only unexpired ones a full table may evict.
+  bool settled{false};
 };
 
 enum class IdempotencyResult : std::uint8_t { Accepted, Existing, Conflict, NoCapacity };
@@ -148,14 +151,22 @@ enum class IdempotencyResult : std::uint8_t { Accepted, Existing, Conflict, NoCa
 class IdempotencyTable {
  public:
   static constexpr std::size_t kCapacity = 16;
-  // Mirrors the host retention contract (docs/spec/host.md §operation
-  // identity): results are replayable for 24h. Records are NEVER evicted
-  // before expiry — a full table of unexpired records rejects with
-  // NoCapacity (IDEMPOTENCY_FULL), which is the specified backpressure
-  // signal. Expired records are evictable; a resubmitted expired key is
-  // treated as a fresh operation (per-principal acceptance epochs and
-  // IDEMPOTENCY_WINDOW_EXPIRED remain host-side future work).
+  // Mirrors the host retention contract (docs/spec/host.md §8): results
+  // are replayable for 24h, and a full table evicts settled (terminal)
+  // records oldest-first — the host does the same at its 256-record cap
+  // and tombstones evicted keys. A record whose delivery is still in
+  // flight is never evicted: a full table of such records rejects with
+  // NoCapacity (IDEMPOTENCY_FULL), the specified backpressure signal.
+  // Without settled eviction, sixteen deliveries that failed during an
+  // outage wedged the gateway for 24h (issue #167). Expired records are
+  // evictable; a resubmitted evicted key is treated as a fresh operation
+  // (per-principal acceptance epochs and IDEMPOTENCY_WINDOW_EXPIRED
+  // remain host-side future work).
   static constexpr MonotonicMs kRetentionMs = 24ULL * 3600ULL * 1000ULL;
+  // A settled record stays replayable this long after its last use before
+  // a full table may evict it: a host retry of a just-finished request
+  // still replays instead of re-executing.
+  static constexpr MonotonicMs kSettledHoldMs = 5000;
 
   // Finds or creates the record for this identity. On Existing/Conflict,
   // `record` points at the stored entry. On Accepted the caller must fill the
@@ -166,6 +177,9 @@ class IdempotencyTable {
                            IdempotencyRecord*& record) noexcept;
 
   std::size_t size() const noexcept;
+  // Marks the accepted record carrying this mesh message id as settled
+  // (its delivery reached a terminal state). Unknown ids are ignored.
+  void settle(std::uint32_t message_session, std::uint64_t message_sequence) noexcept;
 
  private:
   std::array<IdempotencyRecord, kCapacity> records_{};

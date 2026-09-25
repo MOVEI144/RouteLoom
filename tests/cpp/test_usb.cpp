@@ -527,6 +527,67 @@ void test_idempotency() {
   CHECK(full.submit(ByteView{principal.data(), principal.size()}, 7, 16, 1,
                     payload_hash(ByteView{tag1.data(), tag1.size()}), t1,
                     record) == IdempotencyResult::Accepted);
+
+  // Settled eviction (issue #167): a full table of unexpired records whose
+  // deliveries reached a terminal state evicts the oldest settled record
+  // once its replay hold passed; in-flight records are never evicted.
+  IdempotencyTable settled;
+  const MonotonicMs s0 = 9000;
+  std::array<IdempotencyRecord*, IdempotencyTable::kCapacity> rows{};
+  for (std::uint64_t key = 0; key < IdempotencyTable::kCapacity; ++key) {
+    const std::array<std::uint8_t, 1> tag{{static_cast<std::uint8_t>(key)}};
+    CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16,
+                         key, payload_hash(ByteView{tag.data(), tag.size()}),
+                         s0 + static_cast<MonotonicMs>(key), rows[key]) ==
+          IdempotencyResult::Accepted);
+    rows[key]->accepted = true;
+    rows[key]->message_session = 77;
+    rows[key]->message_sequence = 100 + key;
+  }
+  const std::array<std::uint8_t, 1> tag_new{{99}};
+  // Nothing settled: full.
+  CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 99,
+                       payload_hash(ByteView{tag_new.data(), tag_new.size()}),
+                       s0 + IdempotencyTable::kSettledHoldMs + 100,
+                       record) == IdempotencyResult::NoCapacity);
+  // Two deliveries end (keys 3 and 1); an unknown id settles nothing.
+  settled.settle(77, 103);
+  settled.settle(77, 101);
+  settled.settle(78, 101);
+  settled.settle(77, 999);
+  CHECK(rows[3]->settled && rows[1]->settled && !rows[0]->settled);
+  // Inside the replay hold the settled records still refuse eviction.
+  CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 99,
+                       payload_hash(ByteView{tag_new.data(), tag_new.size()}),
+                       s0 + 1 + IdempotencyTable::kSettledHoldMs - 1,
+                       record) == IdempotencyResult::NoCapacity);
+  // Past the hold the OLDEST settled record (key 1) goes first, then key 3;
+  // the fourteen unsettled records stay and the table refuses again.
+  CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 99,
+                       payload_hash(ByteView{tag_new.data(), tag_new.size()}),
+                       s0 + 3 + IdempotencyTable::kSettledHoldMs,
+                       record) == IdempotencyResult::Accepted);
+  CHECK(record == rows[1] && !record->settled && record->key == 99);
+  const std::array<std::uint8_t, 1> tag_1{{1}};
+  CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 1,
+                       payload_hash(ByteView{tag_1.data(), tag_1.size()}),
+                       s0 + 3 + IdempotencyTable::kSettledHoldMs,
+                       record) == IdempotencyResult::Accepted);
+  CHECK(record == rows[3]);
+  const std::array<std::uint8_t, 1> tag_98{{98}};
+  CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 98,
+                       payload_hash(ByteView{tag_98.data(), tag_98.size()}),
+                       s0 + 3 + IdempotencyTable::kSettledHoldMs,
+                       record) == IdempotencyResult::NoCapacity);
+  // A refused admission is settled by the bridge as well; the table treats
+  // the flag uniformly (the record is evictable after the hold).
+  rows[5]->accepted = false;
+  rows[5]->settled = true;
+  CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 98,
+                       payload_hash(ByteView{tag_98.data(), tag_98.size()}),
+                       s0 + 5 + IdempotencyTable::kSettledHoldMs,
+                       record) == IdempotencyResult::Accepted);
+  CHECK(record == rows[5]);
 }
 
 // -------------------------------------------------------- loopback bridge
