@@ -556,6 +556,10 @@ void test_member_ready_fetches_package_epoch_past_old_rrs() {
   CHECK(node.snap().applied_rs_epoch == 15);
   // The intermediate set does not complete the package's fetch obligation.
   CHECK(node.snap().rs_epoch_to_fetch == 16);
+  // A same-site member re-adoption carries no fresh package hint, but it
+  // must retain the still-unmet target from this join.
+  CHECK_OK(node.dispatch(LifecycleInput::MemberReady(node.site.commit_seq(), 0), 300));
+  CHECK(node.snap().rs_epoch_to_fetch == 16);
   CHECK_OK(node.dispatch(LifecycleInput::Poll(), 60100));
   CHECK(node.snap().authority_gets_sent >= 2);
   CHECK_OK(node.dispatch(LifecycleInput::Authority(authority, kAuthorityTypeRevocation,

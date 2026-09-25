@@ -42,6 +42,9 @@ struct SecurityCoordinatorTestAccess {
                       MonotonicMs now) noexcept {
     return coordinator.adopt_member(ready, now);
   }
+  static void invalidate_joiner_channels(SecurityCoordinator& coordinator) noexcept {
+    coordinator.deps_.joiner_config.scan_channel_count = 0;
+  }
 };
 }  // namespace routeloom::sdkv1
 
@@ -1830,6 +1833,60 @@ void test_refresh_stale_gk() {
   CHECK(coordinator.snapshot().refresh_strikes == 0);
 }
 
+void test_workspace_arm_survives_member_adoption_and_refresh() {
+  current = "workspace_arm_survives_member_adoption_and_refresh";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  CHECK(poll_drain(coordinator, now));
+  for (int i = 0; i < 3; ++i) {
+    bump_unknown_generations(*f.deps().discovery, 2);
+    CHECK(poll_drain(coordinator, now));
+  }
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  CHECK(coordinator.step(poll_at(++now)).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+}
+
+void test_failed_refresh_re_adopts_configured_member() {
+  current = "failed_refresh_re_adopts_configured_member";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  FakeAuthorityPort port;
+  CHECK(coordinator.attach_authority_port(port));
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  CHECK(poll_drain(coordinator, now));
+  SecurityCoordinatorTestAccess::invalidate_joiner_channels(coordinator);
+  for (int i = 0; i < 2; ++i) {
+    bump_unknown_generations(*f.deps().discovery, 2);
+    CHECK(poll_drain(coordinator, now));
+  }
+  bump_unknown_generations(*f.deps().discovery, 2);
+  CHECK(coordinator.step(poll_at(now += 5000)).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+  CHECK(!coordinator.snapshot().authority_started);
+  CoordinatorAction action{};
+  CHECK(coordinator.take_action(action).ok());
+  CHECK(action.kind == CoordinatorActionKind::ApplyMemberConfig);
+  CHECK(action.member.node == kNode);
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  CHECK(coordinator.step(poll_at(++now)).ok());
+  CHECK(coordinator.snapshot().engine_quiescent);
+  CHECK(coordinator.snapshot().resume_link_slots == kResume2NodeLinkQuota);
+}
+
 void test_link_failure_refresh_waits_for_poll_boundary() {
   current = "link_failure_refresh_waits_for_poll_boundary";
   Fixture f{};
@@ -2175,6 +2232,8 @@ int main() {
   test_group_provider_routing();
   test_coordinator_group_cached_revocation();
   test_refresh_stale_gk();
+  test_workspace_arm_survives_member_adoption_and_refresh();
+  test_failed_refresh_re_adopts_configured_member();
   test_link_failure_refresh_waits_for_poll_boundary();
   test_commit_veto();
   test_store_credential_verifier();

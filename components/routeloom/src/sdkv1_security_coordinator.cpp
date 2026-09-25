@@ -54,6 +54,7 @@ SecurityCoordinator::SecurityCoordinator(const Deps& deps) noexcept
   // (the channel view works from construction).
   // Boot builds the Joiner, the adoption swaps it for the member engine;
   // the adoption also starts the GK state and wants the authority channel.
+  secure_clear(&ws_, sizeof(ws_));
   create_small();
   authority_env_.bind(deps_.entropy);
   if (deps_.sleep_image != nullptr) {
@@ -469,8 +470,8 @@ bool SecurityCoordinator::member_work_pending() const noexcept {
     if (!entry.used) continue;
     // A completed member leg (installed_link cleared its start) only
     // routes late duplicates — the engine already dropped the exchange,
-    // so it never blocks sleep. Joiner/proxy legs always count as work.
-    if (entry.owner == DemuxOwner::Member && !entry.has_start) continue;
+    // so it never blocks sleep.
+    if (!entry.has_start) continue;
     return true;
   }
   return false;
@@ -484,8 +485,7 @@ bool SecurityCoordinator::quiescent_locked() const noexcept {
   if (sleeping_) return true;
   if (mode_ == CoordinatorMode::ZeroTouch) return joiner().quiescent();
   if (has_member_engine()) {
-    // Completed member legs only route late duplicates (never sleep
-    // work); Joiner/proxy legs always count — see member_work_pending.
+    // Completed member legs only route late duplicates and do not block sleep.
     if (member_work_pending()) return false;
     if (mode_ != CoordinatorMode::Member) return true;
     // A pending GK promote (a durable flash write) holds sleep off; the
@@ -611,14 +611,14 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
     // so it must not block the re-handshake (sleep wake, rekey).
     bool leg_live = false;
     for (const auto& slot : member().demux) {
-      if (slot.used && slot.owner == DemuxOwner::Member && slot.has_start &&
+      if (slot.used && slot.has_start &&
           slot.mac == start.peer_mac) {
         leg_live = true;
         break;
       }
     }
     if (leg_live) continue;
-    DemuxEntry* entry = claim_demux(start.peer_mac, 0, DemuxOwner::Member, now);
+    DemuxEntry* entry = claim_demux(start.peer_mac, 0, now);
     if (entry == nullptr) break;
     entry->peer = start.peer;
     entry->has_start = true;
@@ -673,7 +673,9 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
     member().proxy.poll(now);
     if (member().gateway_active) member().gateway.poll(now);
     watch_linkless(now);   // stale-GK evidence accrues toward a refresh
-    drive_authority(now);  // GK tick/promote, channel tick, deferred start
+    if (mode_ == CoordinatorMode::Member && !member_apply_pending_) {
+      drive_authority(now);  // GK tick/promote, channel tick, deferred start
+    }
   }
   if (removal_holdoff_armed_ && now >= removal_holdoff_at_) {
     removal_holdoff_armed_ = false;
@@ -704,8 +706,7 @@ SecurityCoordinator::DemuxEntry* SecurityCoordinator::find_demux(
 }
 
 SecurityCoordinator::DemuxEntry* SecurityCoordinator::claim_demux(
-    const MacAddress& mac, const std::uint32_t object_id, const DemuxOwner owner,
-    const MonotonicMs now) noexcept {
+    const MacAddress& mac, const std::uint32_t object_id, const MonotonicMs now) noexcept {
   assert(has_member_engine());
   DemuxEntry* free = nullptr;
   for (auto& entry : member().demux) {
@@ -714,9 +715,7 @@ SecurityCoordinator::DemuxEntry* SecurityCoordinator::claim_demux(
       continue;
     }
     if (entry.mac == mac && entry.object_id == object_id) {
-      // Same exchange, same owner: refresh. Same exchange, another
-      // owner: the cooperation is ambiguous — drop (no steal).
-      if (entry.owner != owner) return nullptr;
+      // The member exchange already owns this key.
       entry.expires_at = now + kDemuxHoldMs;
       return &entry;
     }
@@ -726,7 +725,6 @@ SecurityCoordinator::DemuxEntry* SecurityCoordinator::claim_demux(
   free->mac = mac;
   free->peer = kInvalidNodeId;
   free->object_id = object_id;
-  free->owner = owner;
   free->expires_at = now + kDemuxHoldMs;
   free->has_start = false;
   free->initiator = false;
@@ -823,72 +821,33 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
   }
   DemuxEntry* hit = find_demux(event.rld1_meta.source, object_id);
   if (hit != nullptr) {
-    if (hit->owner == DemuxOwner::Joiner) {
-      if (mode_ != CoordinatorMode::ZeroTouch) {
-        sat_inc(counters_.demux_drops);
-        return Status::success();
-      }
-      return joiner().on_rld1_rx(event.rld1_meta, event.rld1_frame, event.now);
-    }
-    if (hit->owner == DemuxOwner::Proxy) {
-      if (mode_ != CoordinatorMode::Member) {
-        sat_inc(counters_.demux_drops);
-        return Status::success();
-      }
-      const std::int16_t rssi = event.rld1_meta.rssi;
-      const std::int8_t rssi8 =
-          rssi < -128 ? -128 : (rssi > 127 ? 127 : static_cast<std::int8_t>(rssi));
-      member().proxy.on_rld1_rx(event.rld1_meta.source, event.rld1_meta.destination, rssi8,
-                        event.rld1_frame, event.now);
-      return Status::success();
-    }
     return demux_member_frame(env, hit, event.now);
   }
-  // New exchange. An engine-mode Auth single frame with a parked
-  // responder start (same peer MAC) binds to it; anything else follows
-  // the mode default: ZT Joiner while unprovisioned, proxy admission
-  // while member, drop while dev (no join service there).
-  if (has_member_engine()) {
-    for (auto& entry : member().demux) {
-      if (entry.used && entry.owner == DemuxOwner::Member && entry.has_start &&
-          !entry.initiator && entry.mac == event.rld1_meta.source) {
-        // The initiator's txn now keys the leg, and every answer echoes
-        // the same nonce back.
-        entry.object_id = object_id;
-        entry.txn = env.transaction_nonce;
-        return demux_member_frame(env, &entry, event.now);
-      }
+  // A parked responder start binds to the initiator's first object id.
+  for (auto& entry : member().demux) {
+    if (entry.used && entry.has_start &&
+        !entry.initiator && entry.mac == event.rld1_meta.source) {
+      entry.object_id = object_id;
+      entry.txn = env.transaction_nonce;
+      return demux_member_frame(env, &entry, event.now);
     }
-    if (mode_ != CoordinatorMode::Member) {
-      sat_inc(counters_.demux_drops);
-      return Status::success();
-    }
-    // The proxy owns one bounded exchange and verifies the OFFER cookie
-    // before admitting it. Unknown pre-cookie frames must not occupy the
-    // member demux table, or a small flood could block real handshakes.
-    if (env.kind == FrameType::BootstrapReply &&
-        member().proxy.state() != JoinProxy::State::Relaying) {
-      sat_inc(counters_.demux_drops);
-      return Status::success();
-    }
-    const std::int16_t rssi = event.rld1_meta.rssi;
-    const std::int8_t rssi8 =
-        rssi < -128 ? -128 : (rssi > 127 ? 127 : static_cast<std::int8_t>(rssi));
-    member().proxy.on_rld1_rx(event.rld1_meta.source, event.rld1_meta.destination, rssi8,
-                      event.rld1_frame, event.now);
-    return Status::success();
   }
-  if (env.kind == FrameType::BootstrapReply) {
+  if (mode_ != CoordinatorMode::Member) {
     sat_inc(counters_.demux_drops);
     return Status::success();
   }
-  DemuxEntry* joiner_entry =
-      claim_demux(event.rld1_meta.source, object_id, DemuxOwner::Joiner, event.now);
-  if (joiner_entry == nullptr) {
+  // The proxy verifies the OFFER cookie before admitting an exchange.
+  if (env.kind == FrameType::BootstrapReply &&
+      member().proxy.state() != JoinProxy::State::Relaying) {
     sat_inc(counters_.demux_drops);
     return Status::success();
   }
-  return joiner().on_rld1_rx(event.rld1_meta, event.rld1_frame, event.now);
+  const std::int16_t rssi = event.rld1_meta.rssi;
+  const std::int8_t rssi8 =
+      rssi < -128 ? -128 : (rssi > 127 ? 127 : static_cast<std::int8_t>(rssi));
+  member().proxy.on_rld1_rx(event.rld1_meta.source, event.rld1_meta.destination, rssi8,
+                            event.rld1_frame, event.now);
+  return Status::success();
 }
 
 void SecurityCoordinator::ensure_responder_token(DemuxEntry& entry,
@@ -1050,7 +1009,7 @@ void SecurityCoordinator::drain_demands(const MonotonicMs now) noexcept {
     // the frozen carrier only discovery can supply.
     DemuxEntry* leg = nullptr;
     for (auto& entry : member().demux) {
-      if (entry.used && entry.owner == DemuxOwner::Member && entry.has_start &&
+      if (entry.used && entry.has_start &&
           entry.peer == demand.peer && entry.initiator) {
         leg = &entry;
         break;
@@ -1106,7 +1065,7 @@ void SecurityCoordinator::drain_engine_results(const MonotonicMs now) noexcept {
     } else if (result.event == HandshakeEvent::Failed && result.scope == SecurityScope::Link) {
       // Tear down the leg: the next discovery round or demand re-drives.
       for (auto& entry : member().demux) {
-        if (entry.used && entry.owner == DemuxOwner::Member && entry.peer == result.peer) {
+        if (entry.used && entry.peer == result.peer) {
           if (entry.discovery_token != NeighborDiscovery::kMemberHandshakeNone &&
               deps_.discovery != nullptr) {
             deps_.discovery->cancel_member_handshake(entry.discovery_token);
@@ -1145,7 +1104,7 @@ Status SecurityCoordinator::emit_link_send(const HandshakeResult& result,
   // to an id it no longer routes.
   DemuxEntry* leg = nullptr;
   for (auto& entry : member().demux) {
-    if (entry.used && entry.owner == DemuxOwner::Member && entry.has_start &&
+    if (entry.used && entry.has_start &&
         entry.peer == result.peer) {
       leg = &entry;
       break;
@@ -1267,7 +1226,7 @@ Status SecurityCoordinator::installed_link(const HandshakeResult& result,
                                            const MonotonicMs now) noexcept {
   (void)now;
   for (auto& entry : member().demux) {
-    if (entry.used && entry.owner == DemuxOwner::Member && entry.peer == result.peer) {
+    if (entry.used && entry.peer == result.peer) {
       if (entry.discovery_token != NeighborDiscovery::kMemberHandshakeNone &&
           deps_.discovery != nullptr) {
         deps_.discovery->complete_handshake(entry.discovery_token, result.proof, last_now_);
@@ -2318,24 +2277,21 @@ void SecurityCoordinator::start_refresh(const MonotonicMs now) noexcept {
   suspend_authority();
   authority_wanted_ = true;
   destroy_workspace();
+  mode_ = CoordinatorMode::ZeroTouch;
   create_joiner();
   const JoinBootInput boot{boot_witness_, true, JoinBootMode::VerifyExistingMembership};
   const Status started =
       usb_direct_ ? joiner().start_direct(boot, *this, now) : joiner().start(boot, now);
   if (!started) {
-    // No refresh leg possible: stay a member (the engine is already
-    // gone, but the stores, bank and GK state are intact and the next
-    // strikes re-arm from zero).
-    destroy_workspace();
-    create_member();
-    mode_ = CoordinatorMode::Member;
+    // Re-adopt the retained site through the same configured member path.
+    refresh_active_ = false;
     refresh_strikes_ = 0;
     refresh_cooldown_until_ = now > kJoinNoDeadline - kRefreshCooldownMs
                                   ? kJoinNoDeadline
                                   : now + kRefreshCooldownMs;
+    (void)adopt_boot_rls1(now);
     return;
   }
-  mode_ = CoordinatorMode::ZeroTouch;
   refresh_active_ = true;
   refresh_start_ = now;
   refresh_strikes_ = 0;
@@ -2440,8 +2396,8 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
   adopted_ = cfg;
   member_valid_ = true;
   destroy_workspace();
-  create_member();
   mode_ = CoordinatorMode::Member;
+  create_member();
   GatewaySessionBank::LocalView local{};
   local.self = cfg.node;
   local.network = cfg.network;
@@ -2591,10 +2547,10 @@ Status SecurityCoordinator::install_dev_config(const CoordinatorDevConfig& confi
   adopted_ = cfg;
   member_valid_ = true;
   destroy_workspace();
+  mode_ = CoordinatorMode::Dev;
   create_member();
   destroy_small();
   create_dev();
-  mode_ = CoordinatorMode::Dev;
   sat_inc(counters_.boots);
   GatewaySessionBank::LocalView local{};
   local.self = cfg.node;
@@ -2670,6 +2626,7 @@ void SecurityCoordinator::drain_joiner(const MonotonicMs now) noexcept {
     JoinAction action{};
     if (!joiner().take_action(action).ok()) break;
     on_joiner_action(action, now);
+    if (mode_ != CoordinatorMode::ZeroTouch) break;
   }
 }
 
