@@ -43,7 +43,7 @@ pub const DISTRIBUTION_OUTBOX_MAX: usize = 4;
 pub const DISTRIBUTION_DISPATCH_GAP_MS: u64 = 100;
 /// Backoff schedule (seconds): targets advance through 5/10/20/40/60 s
 /// and keep retrying at the capped 60 s level;
-/// transport refusals back the whole outbox off to the same cap.
+/// transport refusals back off each queued mail to the same cap.
 pub const DISTRIBUTION_BACKOFF_S: [u64; 5] = [5, 10, 20, 40, 60];
 /// Adds one, refusing to wrap: the generation/rs_epoch/gk_epoch counters
 /// stop at u32::MAX with an explicit error instead of aliasing an older
@@ -343,7 +343,7 @@ impl OperationDistribution {
 /// What one queued mail carries. The outbox is shared (04 §9.1: at
 /// most 4 live mails across RRS1, notices and grants); notices queue
 /// ahead of grants, grants ahead of RRS1 fan-out.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum OutboundKind {
     Rrs,
     Notice,
@@ -355,7 +355,6 @@ pub enum OutboundKind {
 pub struct OutboundRrs {
     pub op: u64,
     pub node: u64,
-    pub due_ms: u64,
     pub what: OutboundKind,
 }
 
@@ -694,6 +693,8 @@ impl SiteAuthority {
         if self.rrs_transport.is_none() {
             return;
         }
+        self.rrs_refusals
+            .retain(|(op, _, _), _| self.operations.contains_key(op));
         // Queue due targets, newest operation first.
         let mut ops: Vec<u64> = self.operations.keys().copied().collect();
         ops.sort_by_key(|id| std::cmp::Reverse(*id));
@@ -736,6 +737,13 @@ impl SiteAuthority {
                 {
                     continue;
                 }
+                if self
+                    .rrs_refusals
+                    .get(&(id, target.node, OutboundKind::Rrs))
+                    .is_some_and(|(due, _)| *due > now_ms)
+                {
+                    continue;
+                }
                 // Coalesce: a target that already proved a newer set for
                 // the same network owes this older operation nothing.
                 if self.target_proved_newer(target.node, dist.rs_epoch, dist.network) {
@@ -747,22 +755,21 @@ impl SiteAuthority {
                 self.rrs_outbox.push_back(OutboundRrs {
                     op: id,
                     node,
-                    due_ms: now_ms,
                     what: OutboundKind::Rrs,
                 });
             }
         }
-        // Dispatch the outbox head at the paced rate.
+        // Inspect each mail at most once per tick. Refused mail leaves
+        // the bounded outbox until its own retry deadline.
         let mut sent: Vec<(u64, u64, OutboundKind)> = Vec::new();
-        let mut refused: u32 = 0;
-        while now_ms >= self.rrs_next_dispatch_ms {
+        let candidates = self.rrs_outbox.len();
+        for _ in 0..candidates {
+            if now_ms < self.rrs_next_dispatch_ms {
+                break;
+            }
             let Some(head) = self.rrs_outbox.pop_front() else {
                 break;
             };
-            if head.due_ms > now_ms {
-                self.rrs_outbox.push_front(head);
-                break;
-            }
             let bytes = match head.what {
                 OutboundKind::Rrs => {
                     if !self.target_still_due(head.op, head.node, now_ms) {
@@ -785,6 +792,7 @@ impl SiteAuthority {
                 }
             };
             let Some((bytes, network)) = bytes else {
+                self.rrs_refusals.remove(&(head.op, head.node, head.what));
                 continue; // stale entry (phase moved, op evicted): drop, no airtime
             };
             let presealed_notice = head.what == OutboundKind::Notice
@@ -807,33 +815,20 @@ impl SiteAuthority {
                 None => false,
             };
             if !delivered {
-                // A refusal parks only this head at the back with its own
-                // backoff (5..60 s capped); the pass moves on so one
-                // channel-less member cannot head-of-line block the
-                // members behind it. The whole-outbox backoff below still
-                // applies when nothing in this pass went out at all.
-                let level =
-                    (self.rrs_transport_backoff as usize).min(DISTRIBUTION_BACKOFF_S.len() - 1);
+                // Keep retry metadata outside the four-slot outbox so
+                // offline targets cannot occupy every mail slot.
+                let key = (head.op, head.node, head.what);
+                let refusals = self.rrs_refusals.get(&key).map_or(0, |(_, count)| *count);
+                let level = (refusals as usize).min(DISTRIBUTION_BACKOFF_S.len() - 1);
                 let wait = DISTRIBUTION_BACKOFF_S[level].saturating_mul(1000);
                 let due = now_ms.saturating_add(wait);
-                self.rrs_outbox.push_back(OutboundRrs {
-                    due_ms: due,
-                    ..head
-                });
-                refused = refused.saturating_add(1);
+                self.rrs_refusals
+                    .insert(key, (due, refusals.saturating_add(1)));
                 continue;
             }
-            self.rrs_transport_backoff = 0;
+            self.rrs_refusals.remove(&(head.op, head.node, head.what));
             self.rrs_next_dispatch_ms = now_ms.saturating_add(DISTRIBUTION_DISPATCH_GAP_MS);
             sent.push((head.op, head.node, head.what));
-        }
-        if sent.is_empty() && refused > 0 {
-            // Nothing went out: the transport itself is down, so back
-            // the whole outbox off exactly like a lone refusal used to.
-            let level = (self.rrs_transport_backoff as usize).min(DISTRIBUTION_BACKOFF_S.len() - 1);
-            let wait = DISTRIBUTION_BACKOFF_S[level].saturating_mul(1000);
-            self.rrs_next_dispatch_ms = now_ms.saturating_add(wait);
-            self.rrs_transport_backoff = self.rrs_transport_backoff.saturating_add(1);
         }
         let mut touched: Vec<u64> = sent.iter().map(|(op, _, _)| *op).collect();
         touched.sort_unstable();
@@ -895,6 +890,13 @@ impl SiteAuthority {
             {
                 continue;
             }
+            if self
+                .rrs_refusals
+                .get(&(id, due, OutboundKind::Notice))
+                .is_some_and(|(retry_at, _)| *retry_at > time.unix_ms)
+            {
+                continue;
+            }
             // No live or retained binding (and the row being removed,
             // none can form): mark `unreachable` instead of retrying
             // past the best-effort window. Fakes always seal, so
@@ -914,7 +916,6 @@ impl SiteAuthority {
             self.rrs_outbox.push_back(OutboundRrs {
                 op: id,
                 node: due,
-                due_ms: time.unix_ms,
                 what: OutboundKind::Notice,
             });
         }
@@ -1419,8 +1420,8 @@ mod tests {
         assert!(distribution_view(None).contains("\"state\":\"unknown\""));
     }
 
-    /// A refused head parks at the back with its own backoff while the
-    /// pass moves on: one channel-less member cannot head-of-line block
+    /// A refused head gets its own backoff outside the outbox, so one
+    /// channel-less member cannot head-of-line block
     /// the members behind it (live E2E cutover with an offline gateway).
     #[test]
     fn refusal_parks_one_head_without_stalling_the_outbox() {
@@ -1453,6 +1454,7 @@ mod tests {
         const T0: u64 = 1_790_000_000_000;
         const REFUSED: u64 = 0x00A1_0000_0000_0001;
         const ONLINE: u64 = 0x00A1_0000_0000_0002;
+        const LATE: u64 = 0x00A1_0000_0000_0003;
         let mut auth = super::super::testkit::authority(
             Box::<super::super::store::MemoryStore>::default(),
             T0,
@@ -1505,14 +1507,138 @@ mod tests {
         assert_eq!(dist.targets[1].state, TargetState::Unknown);
         assert_eq!(dist.targets[1].attempts, 1);
 
-        // Before the parked head's backoff the pass is quiet without
-        // tripping the transport-wide gate.
+        // A new due target behind the parked head can dispatch before
+        // that head's retry deadline.
+        auth.operations
+            .get_mut(&7)
+            .unwrap()
+            .distribution
+            .as_mut()
+            .unwrap()
+            .targets
+            .push(target(LATE));
         auth.tick_distribution(T0 + DISTRIBUTION_DISPATCH_GAP_MS);
-        assert_eq!(sent.lock().unwrap().len(), 1);
+        assert_eq!(*sent.lock().unwrap(), vec![ONLINE, LATE]);
 
         // Past the backoff the refused head retries (and refuses
         // again) while the online member sends again.
         auth.tick_distribution(T0 + 6_000);
-        assert_eq!(*sent.lock().unwrap(), vec![ONLINE, ONLINE]);
+        assert_eq!(*sent.lock().unwrap(), vec![ONLINE, LATE, ONLINE]);
+    }
+
+    #[test]
+    fn refused_heads_free_the_bounded_outbox_for_an_online_target() {
+        use std::sync::{Arc, Mutex};
+        struct RefuseOffline(Arc<Mutex<Vec<u64>>>);
+        impl RevocationTransport for RefuseOffline {
+            fn send_rrs(&mut self, node: u64, _object: &[u8]) -> bool {
+                self.0.lock().unwrap().push(node);
+                node == ONLINE
+            }
+        }
+        const T0: u64 = 1_790_000_000_000;
+        const NODE: u64 = 0x00A1_0000_0000_0001;
+        const ONLINE: u64 = 0x00A1_0000_0000_0002;
+        let mut auth = super::super::testkit::authority(
+            Box::<super::super::store::MemoryStore>::default(),
+            T0,
+        );
+        auth.operations.insert(
+            7,
+            super::super::records::Operation {
+                id: 7,
+                kind: "revoke".to_string(),
+                node: 0x00A1_0000_0000_0009,
+                generation: 1,
+                member_cert_serial: 0,
+                rs_epoch: 2,
+                gk_from: 0,
+                gk_to: 0,
+                created_ms: T0,
+                gk_cause: String::new(),
+                gk_end: String::new(),
+                distribution: Some(OperationDistribution {
+                    state: DistState::Distributing,
+                    rs_epoch: 2,
+                    network: super::super::testkit::network(),
+                    object_sha256: [0xBB; 32],
+                    targets: vec![DistributionTarget {
+                        node: NODE,
+                        kid: [0xAA; 32],
+                        generation: 1,
+                        network: super::super::testkit::network(),
+                        state: TargetState::Pending,
+                        attempts: 0,
+                        next_retry_ms: 0,
+                        ack_rs_epoch: None,
+                    }],
+                    overflow: 0,
+                }),
+                cutover: None,
+                notice: None,
+            },
+        );
+        auth.rrs_latest_object = vec![9u8; 32];
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        auth.set_rrs_transport(Some(Box::new(RefuseOffline(attempts.clone()))));
+
+        auth.tick_distribution(T0);
+        assert_eq!(*attempts.lock().unwrap(), vec![NODE]);
+        let targets = &mut auth
+            .operations
+            .get_mut(&7)
+            .unwrap()
+            .distribution
+            .as_mut()
+            .unwrap()
+            .targets;
+        for node in [NODE + 2, NODE + 3, NODE + 4, ONLINE] {
+            targets.push(DistributionTarget {
+                node,
+                kid: [0xAA; 32],
+                generation: 1,
+                network: super::super::testkit::network(),
+                state: TargetState::Pending,
+                attempts: 0,
+                next_retry_ms: 0,
+                ack_rs_epoch: None,
+            });
+        }
+        auth.tick_distribution(T0 + DISTRIBUTION_DISPATCH_GAP_MS);
+        assert!(
+            attempts.lock().unwrap().contains(&ONLINE),
+            "the fifth member was served"
+        );
+        auth.tick_distribution(T0 + 5_000);
+        assert!(
+            attempts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|&&n| n == NODE)
+                .count()
+                >= 2
+        );
+        auth.tick_distribution(T0 + 10_000);
+        assert_eq!(
+            attempts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|&&n| n == NODE)
+                .count(),
+            2,
+            "an unrelated successful send does not reset this head's backoff"
+        );
+        auth.tick_distribution(T0 + 15_000);
+        assert_eq!(
+            attempts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|&&n| n == NODE)
+                .count(),
+            3
+        );
     }
 }

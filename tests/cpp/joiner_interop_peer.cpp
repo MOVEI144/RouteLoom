@@ -65,7 +65,8 @@
 // gk_current u32 | gk_next u32 | lifecycle_phase u8 |
 // lifecycle_action u8 | applied_rs u32 | applied_gk u32 |
 // holdoff_remaining_ms u64 | authority_ready u8 | adopted_network u64 |
-// own_generation u32 | lifecycle_booted u8 | reserved[2].
+// own_generation u32 | lifecycle_booted u8 | runtime_enforce_count u8 |
+// runtime_flags u8 (removed=1, trust_erased=2, retired=4, installed=8).
 //
 // Setup arrives on argv (all integers accept 0x hex; blobs are hex):
 //
@@ -890,8 +891,11 @@ class OwnerLeg {
     put_u64(payload, life.adopted_network);
     put_u32(payload, life.own_generation);
     payload.push_back(lifecycle_booted_ ? 1 : 0);
-    payload.push_back(0);
-    payload.push_back(0);
+    payload.push_back(static_cast<std::uint8_t>(lruntime_.enforced > 255 ? 255 : lruntime_.enforced));
+    payload.push_back(static_cast<std::uint8_t>((lruntime_.runtime_erased ? 1 : 0) |
+                                                (lruntime_.trust_erased ? 2 : 0) |
+                                                (lruntime_.network_retired ? 4 : 0) |
+                                                (lruntime_.trust_installed ? 8 : 0)));
     if (!write_frame(payload)) fatal("G write failed");
   }
 

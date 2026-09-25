@@ -1,7 +1,7 @@
 # Live Owner E2E harness (P5 §10.4, P6 §11.4)
 
-The real C++ member stack — Joiner, AuthorityClient, GroupKeyState and
-MembershipLifecycle on fake radio/flash — against the real Rust Site
+The portable C++ Joiner, AuthorityClient, GroupKeyState and
+MembershipLifecycle on fake radio/flash run against the real Rust Site
 Authority (SQLite ledger, API1 socket, KGuard) over a pipe. The pipe
 carries join relay objects plus whole authority carriers; the USB
 HostOps 0x64/0x65 fragment layer (`UsbAuthorityAdapter`) runs for real
@@ -60,6 +60,11 @@ virtual clock past the 60 s cleanup window.
   authority channel; the SelfRevoked test injects the genuine
   authority-minted RRS1 bytes as a gossip object (`J` tag) and the
   lifecycle verifies them for real.
+- `OwnerLeg` is the test wiring for the portable security components,
+  not the firmware `EspNowSecurityOwner` or `MeshNode`. Its runtime port
+  records RRS enforcement, trust erasure and cutover callbacks; it does
+  not run P4 session or route retirement. The E2E asserts that the
+  lifecycle reaches those callbacks and that its durable state changes.
 - The cutover test fakes only the offline gateway's Prepared receipt
   (digested over the authority's own staged grant bytes); the pipe
   device prepares, commits and adopts over its real channel.

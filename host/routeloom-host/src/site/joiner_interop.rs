@@ -1,5 +1,5 @@
-//! Live E2E (design P3-4 §10.2, P5 §10.4, P6 §11.4): the real C++
-//! member stack (`tests/cpp/joiner_interop_peer.cpp`, real Joiner +
+//! Live E2E (design P3-4 §10.2, P5 §10.4, P6 §11.4): the portable C++
+//! member components (`tests/cpp/joiner_interop_peer.cpp`, real Joiner +
 //! AuthorityClient + GroupKeyState + MembershipLifecycle on fake
 //! radio/flash, real Proxy + Gateway per site) against two real Rust
 //! Site Authorities (`SiteService` on SQLite, API1 socket, KGuardMock).
@@ -13,8 +13,8 @@
 //! MemberCert/SitePackage/DAMS come from the production Rust code. The
 //! authority carriers cross the pipe behind the real USB HostOps
 //! fragment layer (`UsbAuthorityAdapter` 0x64/0x65 on this side).
-//! MeshNode routing, gossip peers and real radio are out of scope: RRS1
-//! arrives over the authority channel only (see
+//! The firmware Owner, MeshNode routing, gossip peers and real radio are
+//! out of scope: RRS1 normally arrives over the authority channel (see
 //! `docs/design/sdk-v1/live-e2e-harness.md`).
 //!
 //! The peer path comes from `ROUTELOOM_OWNER_PEER` (fallback
@@ -225,6 +225,8 @@ struct OwnerSnap {
     adopted_network: u64,
     own_generation: u32,
     lifecycle_booted: bool,
+    enforced_count: u8,
+    runtime_flags: u8,
 }
 
 struct Tick {
@@ -502,6 +504,10 @@ impl Peer {
                     tick.owner.adopted_network = get_u64(&payload, &mut pos);
                     tick.owner.own_generation = get_u32(&payload, &mut pos);
                     tick.owner.lifecycle_booted = payload[pos] != 0;
+                    pos += 1;
+                    tick.owner.enforced_count = payload[pos];
+                    pos += 1;
+                    tick.owner.runtime_flags = payload[pos];
                 }
                 b'D' => done = true,
                 b'E' => panic!("peer fatal: {}", String::from_utf8_lossy(&payload[1..])),
@@ -1614,6 +1620,10 @@ const PHASE_PREPARED: u8 = 10;
 const ACTION_RECOVERY_REQUIRED: u8 = 4;
 const ACTION_RESTART_UNASSIGNED: u8 = 2;
 const ACTION_ADOPT_NETWORK: u8 = 3;
+const RUNTIME_REMOVED: u8 = 1;
+const TRUST_ERASED: u8 = 2;
+const NETWORK_RETIRED: u8 = 4;
+const TRUST_INSTALLED: u8 = 8;
 
 /// Joins the pipe device on site A and attaches the authority lane.
 /// Returns the MemberReady tick.
@@ -2034,7 +2044,7 @@ fn live_owner_rrs_delivery_and_apply() {
     let mut world = World::start("owner-rrs", 0x0E05);
     join_and_attach(&mut world);
     let active = world.sites[0].service.with(|a| a.gks.active_epoch()).0;
-    wait_owner_ready(&mut world, active);
+    let before = wait_owner_ready(&mut world, active).owner.enforced_count;
     let floor = world.sites[0].service.authority_epochs().1;
 
     // B joins but stays offline (no channel): the RRS1 must still reach
@@ -2061,6 +2071,10 @@ fn live_owner_rrs_delivery_and_apply() {
         t.owner.applied_rs == floor + 1 && t.owner.lifecycle_phase == PHASE_ACTIVE
     });
     assert!(tick.owner.join_confirmed, "channel survived the RRS");
+    assert!(
+        tick.owner.enforced_count > before,
+        "RRS reached the runtime enforcement port"
+    );
     // The revoke also rotated the GK; the online member converges there too.
     let tick = world.pump_until(8000, |t| {
         t.owner.gk_current == active + 1 && t.owner.lifecycle_phase == PHASE_ACTIVE
@@ -2106,6 +2120,11 @@ fn live_owner_removal_notice_erase_holdoff() {
     assert!(tick.owner.join_confirmed, "notice arrived over the channel");
     let tick = world.pump_until(8000, |t| t.owner.lifecycle_phase == PHASE_HOLDOFF);
     assert_eq!(tick.snap.store_site, 0, "site trust erased");
+    assert_eq!(
+        tick.owner.runtime_flags & (RUNTIME_REMOVED | TRUST_ERASED),
+        RUNTIME_REMOVED | TRUST_ERASED,
+        "runtime and site trust were erased before holdoff"
+    );
     assert!(
         tick.owner.holdoff_remaining_ms > 0,
         "holdoff runs after erasure"
@@ -2349,6 +2368,11 @@ fn live_owner_cutover_prepare_commit() {
     assert_eq!(
         tick.owner.lifecycle_action, ACTION_ADOPT_NETWORK,
         "the adoption order fired"
+    );
+    assert_eq!(
+        tick.owner.runtime_flags & (NETWORK_RETIRED | TRUST_INSTALLED),
+        NETWORK_RETIRED | TRUST_INSTALLED,
+        "cutover retired the old runtime and installed new trust"
     );
     assert_eq!(tick.member.site_cert, next_cert, "new-epoch SiteCert");
     let row = world.member_row(0).expect("member row on the new epoch");
