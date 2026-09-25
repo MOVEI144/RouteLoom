@@ -56,13 +56,16 @@ constexpr char kTag[] = "RouteLoomBr";
 
 // Long-lived CPU-only state can reside in LP SRAM on the C5; radio and USB
 // driver buffers stay in their normal HP memory. The smaller gateway config
-// state also fits the C3 RTC bank.
+// state also fits the C3 RTC bank. Both DRAM-tight security modes (member
+// and dev-RAM) place it there; the dev-RAM default build is as tight as the
+// member one.
 #if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC && CONFIG_IDF_TARGET_ESP32C5
 #define ROUTELOOM_MEMBER_C5_LP RTC_DATA_ATTR
 #else
 #define ROUTELOOM_MEMBER_C5_LP
 #endif
-#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC && \
+#if (CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC || \
+     CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM) && \
     (CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C5)
 #define ROUTELOOM_MEMBER_SMALL_LP RTC_DATA_ATTR
 #else

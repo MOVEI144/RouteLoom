@@ -387,7 +387,7 @@ class SecurityCoordinator final : public BootstrapSink,
   // discovery's MembershipHooks port (the firmware initializes the
   // discovery's controller with these at StartMemberDiscovery).
   MembershipHooks& membership_hooks() noexcept {
-    return mode_ == CoordinatorMode::Dev ? static_cast<MembershipHooks&>(dev_hooks_)
+    return mode_ == CoordinatorMode::Dev ? static_cast<MembershipHooks&>(dev().hooks)
                                          : static_cast<MembershipHooks&>(hooks_);
   }
   // The member OFFER cookie box, live in Member and Dev mode (null
@@ -419,7 +419,11 @@ class SecurityCoordinator final : public BootstrapSink,
     return Status::success();
   }
   // Secret-free channel view for firmware diagnostics (safe in callbacks).
-  AuthoritySnapshot authority_snapshot() const noexcept { return authority_.snapshot(); }
+  AuthoritySnapshot authority_snapshot() const noexcept {
+    // No channel exists in Dev (see snapshot): report the unstarted view.
+    if (mode_ == CoordinatorMode::Dev) return AuthoritySnapshot{};
+    return small().authority.snapshot();
+  }
   // Adopted GK epochs for the 0x66 QueryLocal answer (0/0 pre-adoption;
   // false until the member config lands).
   bool group_epochs(std::uint32_t& current, std::uint32_t& next) const noexcept {
@@ -729,6 +733,56 @@ class SecurityCoordinator final : public BootstrapSink,
     MemberEngine member;
   };
 
+  // The member small side: the held sleep restore image (P4 §9.3 —
+  // the consumed image waits here while the parent re-binds post-wake;
+  // terminal once done/failed) plus the authority channel client (G-SEC
+  // P5 — Member-only: the dev route has no channel to drive). Live in
+  // every mode except Dev. The destructor wipes the held image (key
+  // material); the channel tears itself down.
+  struct MemberSmallSide {
+    RtcSessionImage held{};
+    AuthorityClient authority;
+    MemberSmallSide(const routeloom::AeadGcm& aead, AuthorityPort& port,
+                    AuthorityObserver& observer, rlres1::Environment& rlres1_env,
+                    GroupKeyState* group) noexcept;
+    ~MemberSmallSide() noexcept;
+    MemberSmallSide(const MemberSmallSide&) = delete;
+    MemberSmallSide& operator=(const MemberSmallSide&) = delete;
+  };
+
+  // The dev side (P4 §10.1, Dev mode only): the boot-scoped group sender,
+  // the group provider over it (placement-built at adoption), the
+  // Required dev scope view and the dev hooks. The destructor tears the
+  // provider down and wipes the sender/scope/hooks.
+  struct DevSide {
+    DevGroupSender sender{};
+    alignas(DevGroupProvider) std::array<std::uint8_t, sizeof(DevGroupProvider)> group_box{};
+    bool group_live{false};
+    DevScopeProvider scope{};
+    DevMembershipHooks hooks;
+    DevSide(const RevocationStore& revocations, const LocalRevocationStore& local_revocation,
+            const AuthenticatedPeerView* peers) noexcept;
+    ~DevSide() noexcept;
+    DevSide(const DevSide&) = delete;
+    DevSide& operator=(const DevSide&) = delete;
+    DevGroupProvider& group() noexcept;
+  };
+
+  // Tagged by mode_: dev iff Dev, small everywhere else. Dev adoption
+  // destroys the small side before constructing the dev side; stop and
+  // abandon rebuild the small side when leaving Dev. The two sides never
+  // share a boot phase, so they never share RAM: the dev side rides
+  // inside the slack of the member-only channel state — bridge DRAM has
+  // no room for both (RAM floor matrix).
+  union ModeSides {
+    ModeSides() noexcept {}
+    ~ModeSides() noexcept {}
+    MemberSmallSide small;
+    DevSide dev;
+  };
+  static_assert(sizeof(DevSide) <= sizeof(MemberSmallSide),
+                "dev side must fit the member small side");
+
   // --- mode workspace (exactly one live; see above) ---
   void destroy_workspace() noexcept;
   void create_joiner() noexcept;
@@ -737,6 +791,15 @@ class SecurityCoordinator final : public BootstrapSink,
   const Joiner& joiner() const noexcept { return ws_.joiner; }
   MemberEngine& member() noexcept { return ws_.member; }
   const MemberEngine& member() const noexcept { return ws_.member; }
+  // --- mode sides (exactly one live; see above) ---
+  void destroy_small() noexcept;
+  void create_small() noexcept;
+  void create_dev() noexcept;
+  void destroy_dev() noexcept;
+  MemberSmallSide& small() noexcept { return sides_.small; }
+  const MemberSmallSide& small() const noexcept { return sides_.small; }
+  DevSide& dev() noexcept { return sides_.dev; }
+  const DevSide& dev() const noexcept { return sides_.dev; }
 
   Deps deps_{};
   CoordinatorMode mode_{CoordinatorMode::Fresh};
@@ -753,15 +816,12 @@ class SecurityCoordinator final : public BootstrapSink,
   RamSessionProvider<32, 128> pairwise_provider_;
   GroupKeyState group_keys_;
   GroupSecurityProvider group_provider_;
-  // Dev route (P4 §10.1, Dev mode only): the boot-scoped group sender,
-  // the group provider over it (PSK copied in, placement-built at
-  // adoption), the Required dev scope view and the dev hooks. Unused in
-  // Member mode; wiped on stop.
-  DevGroupSender dev_sender_;
-  alignas(DevGroupProvider) std::array<std::uint8_t, sizeof(DevGroupProvider)> dev_group_box_{};
-  bool dev_group_live_{false};
-  DevScopeProvider dev_scope_;
-  DevMembershipHooks dev_hooks_;
+  // Mode sides (exactly one live; tagged by mode_): the member small
+  // side everywhere except Dev, the dev route (P4 §10.1 — group sender
+  // and provider, Required dev scope view, dev hooks) in Dev. The
+  // constructor builds the small side; dev adoption swaps it for the dev
+  // side and stop/abandon swap back when leaving Dev.
+  ModeSides sides_;
   // Stable session view: pairwise to the bank, group to the GK provider
   // (Member) or the dev group provider (Dev, once bound above).
   SessionProviderMux provider_mux_;
@@ -772,7 +832,6 @@ class SecurityCoordinator final : public BootstrapSink,
   GkMemberScopeProvider member_scope_;
   AuthorityPortProxy authority_port_;
   AuthorityEnv authority_env_;
-  AuthorityClient authority_;
   Workspace ws_{};
 
   std::array<StagedFrame, kStagedFrames> staged_{};
@@ -802,11 +861,18 @@ class SecurityCoordinator final : public BootstrapSink,
   bool removal_holdoff_armed_{false};
   MonotonicMs removal_holdoff_at_{0};
   CoordinatorCounters counters_{};
-  // Sleep restore one-shot state (P4 §9.3): the consumed image waits in
-  // RAM while the parent re-binds post-wake. Terminal once done/failed.
-  // restore_elapsed_ms_ is the bound already deducted from the held
-  // image; retries with a larger bound deduct the delta.
-  RtcSessionImage held_restore_{};
+  // Sleep restore one-shot state (P4 §9.3): the consumed image waits
+  // in the small side while the parent re-binds post-wake. Terminal once
+  // done/failed. restore_elapsed_ms_ is the bound already deducted from
+  // the held image; retries with a larger bound deduct the delta.
+  //
+  // Dev boot consumption memory (P4 §10.1): the last dev boot this boot
+  // configured a group sender for (0 = none yet). The dev side is rebuilt
+  // per adoption, so the sender's own boot guard cannot see a previous
+  // adoption's boot — install refuses a consumed boot before configuring
+  // (the same key never restarts its counter space). Survives stop: the
+  // boot does not change across one.
+  std::uint32_t dev_boot_seen_{0};
   bool restore_holding_{false};
   bool restore_done_{false};
   bool restore_failed_{false};

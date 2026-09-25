@@ -113,13 +113,16 @@ class RtcWriteAheadProvider final : public SecurityProvider {
 
   // Arms the guard over a consumed image: commits the image to the port
   // (write + readback) and starts write-ahead for its contexts. The port
-  // must outlive the armed period. Refuses InvalidState when already
-  // armed, InvalidArgument when the image is not restorable-shaped
-  // (leaving the port untouched). Never consults the bank: bank/image
-  // lockstep is verified on every issue instead.
-  Status arm(RtcSessionPort& port, const RtcSessionImage& image) noexcept;
-  // Disarms every slot, wipes the held image, and best-effort
-  // invalidates the port (a dead image must not linger in RTC).
+  // and the image must outlive the armed period: the guard borrows the
+  // image (no second retained copy — bridge DRAM has no room for one)
+  // and advances it in place on every guarded issue. Refuses InvalidState
+  // when already armed, InvalidArgument when the image is not
+  // restorable-shaped (leaving the port untouched and borrowing nothing).
+  // Never consults the bank: bank/image lockstep is verified on every
+  // issue instead. The caller must not touch the image while armed.
+  Status arm(RtcSessionPort& port, RtcSessionImage& image) noexcept;
+  // Disarms every slot, wipes the borrowed image, and best-effort
+  // invalidates the port (a dead image must not linger in RTC or RAM).
   void disarm() noexcept;
   bool armed() const noexcept;
 
@@ -148,7 +151,10 @@ class RtcWriteAheadProvider final : public SecurityProvider {
   SecurityProvider& inner_;
   SessionInstaller& installer_;
   RtcSessionPort* port_{nullptr};
-  RtcSessionImage image_{};
+  // Borrowed armed image (see arm): non-null exactly while armed. Points
+  // at caller-stable storage — the coordinator's held restore image — and
+  // is wiped through on disarm/destruction.
+  RtcSessionImage* image_{nullptr};
   bool slot_armed_[kRtcSessionMaxContexts]{false, false};
 };
 

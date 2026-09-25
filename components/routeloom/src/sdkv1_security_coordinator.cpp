@@ -45,29 +45,75 @@ SecurityCoordinator::SecurityCoordinator(const Deps& deps) noexcept
       pairwise_provider_(bank_),
       group_keys_(*deps_.site),
       group_provider_(group_keys_, pairwise_provider_, deps_.crypto_aead, deps_.local_node),
-      dev_hooks_(*deps.revocations, *deps.local_revocation, this),
       provider_mux_(pairwise_provider_, group_provider_),
       sleep_guard_(provider_mux_, pairwise_provider_),
-      member_scope_(group_keys_, kMemberScopeRef),
-      authority_(deps_.crypto_aead, authority_port_, *this, authority_env_, &group_keys_) {
-  // Fresh: no workspace side constructed. Boot builds the Joiner, the
-  // adoption swaps it for the member engine; the adoption also starts
-  // the GK state and wants the authority channel.
+      member_scope_(group_keys_, kMemberScopeRef) {
+  // Fresh: no workspace side constructed, but the member small side is
+  // (the restore hold and the channel view work from construction).
+  // Boot builds the Joiner, the adoption swaps it for the member engine;
+  // the adoption also starts the GK state and wants the authority channel.
+  create_small();
   authority_env_.bind(deps_.entropy);
 }
 
 SecurityCoordinator::~SecurityCoordinator() noexcept {
-  if (dev_group_live_) {
-    dev_group().DevGroupProvider::~DevGroupProvider();
-    dev_group_live_ = false;
+  if (mode_ == CoordinatorMode::Dev) {
+    destroy_dev();
+  } else {
+    destroy_small();
   }
-  secure_clear(&held_restore_, sizeof(held_restore_));
   destroy_workspace();
 }
 
-DevGroupProvider& SecurityCoordinator::dev_group() noexcept {
-  return *reinterpret_cast<DevGroupProvider*>(dev_group_box_.data());
+SecurityCoordinator::MemberSmallSide::MemberSmallSide(
+    const routeloom::AeadGcm& aead, AuthorityPort& port, AuthorityObserver& observer,
+    rlres1::Environment& rlres1_env, GroupKeyState* group) noexcept
+    : authority(aead, port, observer, rlres1_env, group) {}
+
+SecurityCoordinator::MemberSmallSide::~MemberSmallSide() noexcept {
+  secure_clear(&held, sizeof(held));
 }
+
+SecurityCoordinator::DevSide::DevSide(const RevocationStore& revocations,
+                                       const LocalRevocationStore& local_revocation,
+                                       const AuthenticatedPeerView* peers) noexcept
+    : hooks(revocations, local_revocation, peers) {}
+
+SecurityCoordinator::DevSide::~DevSide() noexcept {
+  if (group_live) {
+    group().DevGroupProvider::~DevGroupProvider();
+    group_live = false;
+  }
+  sender.clear();
+  scope.wipe();
+  hooks.wipe();
+}
+
+DevGroupProvider& SecurityCoordinator::DevSide::group() noexcept {
+  return *reinterpret_cast<DevGroupProvider*>(group_box.data());
+}
+
+void SecurityCoordinator::destroy_small() noexcept {
+  sides_.small.~MemberSmallSide();
+  secure_clear(&sides_, sizeof(sides_));
+}
+
+void SecurityCoordinator::create_small() noexcept {
+  new (&sides_.small) MemberSmallSide(deps_.crypto_aead, authority_port_, *this, authority_env_,
+                                      &group_keys_);
+}
+
+void SecurityCoordinator::create_dev() noexcept {
+  new (&sides_.dev)
+      DevSide(*deps_.revocations, *deps_.local_revocation, this);
+}
+
+void SecurityCoordinator::destroy_dev() noexcept {
+  sides_.dev.~DevSide();
+  secure_clear(&sides_, sizeof(sides_));
+}
+
+DevGroupProvider& SecurityCoordinator::dev_group() noexcept { return dev().group(); }
 
 bool SecurityCoordinator::SessionProviderMux::ready() const noexcept {
   return pairwise_.ready() && group().ready();
@@ -314,10 +360,18 @@ CoordinatorSnapshot SecurityCoordinator::snapshot() const noexcept {
   out.link_sessions = static_cast<std::uint32_t>(bank_.live_count(SecurityScope::Link));
   out.end_sessions = static_cast<std::uint32_t>(bank_.live_count(SecurityScope::EndToEnd));
   out.demands = bank_.demand_count();
-  const AuthoritySnapshot auth = authority_.snapshot();
-  out.authority_started = auth.started;
-  out.authority_ready = auth.state == AuthoritySnapshot::State::Ready;
-  out.authority_busy = auth.busy;
+  // The dev route has no authority channel (the small side is dead in
+  // Dev): report the same unstarted view a fresh channel snapshots.
+  if (mode_ == CoordinatorMode::Dev) {
+    out.authority_started = false;
+    out.authority_ready = false;
+    out.authority_busy = false;
+  } else {
+    const AuthoritySnapshot auth = small().authority.snapshot();
+    out.authority_started = auth.started;
+    out.authority_ready = auth.state == AuthoritySnapshot::State::Ready;
+    out.authority_busy = auth.busy;
+  }
   out.join_confirmed = join_confirmed_;
   out.refresh_strikes = refresh_strikes_;
   return out;
@@ -339,7 +393,7 @@ Status SecurityCoordinator::member_discovery_config(DiscoveryConfig& out) noexce
     // scope filters DISCOVER/OFFER to the same PSK before that.
     out.capability_bits = kRld1CapDevRamSessionV1;
     out.scope_mode = ScopeMode::Required;
-    out.scope_provider = &dev_scope_;
+    out.scope_provider = &dev().scope;
     out.scope = kDevScopeRef;
   } else {
     out.capability_bits = kRld1CapMemberEdhocV1 | kRld1CapMemberResumeV1;
@@ -374,13 +428,13 @@ MonotonicMs SecurityCoordinator::next_deadline(const MonotonicMs now) const noex
     if (mode_ == CoordinatorMode::Member) {
       // A pending GK promote and the authority channel join the schedule.
       if (group_keys_.promotion_pending()) return now;
-      if (authority_wanted_ && !authority_.snapshot().started) {
+      if (authority_wanted_ && !small().authority.snapshot().started) {
         const MonotonicMs retry = last_authority_start_ > kJoinNoDeadline - 1000
                                       ? kJoinNoDeadline
                                       : last_authority_start_ + 1000;
         sooner(retry);
       } else {
-        sooner(authority_.next_deadline());
+        sooner(small().authority.next_deadline());
       }
     }
   }
@@ -527,9 +581,9 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
     // engine path below, whose fresh session then stands while restore
     // reports occupied (cold resume).
     if (start.initiator && restore_holding_ &&
-        start.peer == held_restore_.contexts[0].entry.peer &&
-        start.peer_mac == held_restore_.parent_mac &&
-        !revoked(start.peer, held_restore_.contexts[0].entry.peer_generation) &&
+        start.peer == small().held.contexts[0].entry.peer &&
+        start.peer_mac == small().held.parent_mac &&
+        !revoked(start.peer, small().held.contexts[0].entry.peer_generation) &&
         deps_.discovery->confirm_sleep_parent(start, now).ok()) {
       continue;
     }
@@ -1773,11 +1827,17 @@ Status SecurityCoordinator::save_sleep_image(RtcSessionPort& port, const NodeId 
   // the saved entries — their counters must never TX without write-ahead.
   if (sleep_guard_.armed()) {
     sleep_guard_.disarm();
-    const Status rearmed = sleep_guard_.arm(port, image);
+    // The guard borrows its image from caller-stable storage: re-home
+    // the fresh image in the held slot (the disarm above wiped the armed
+    // image it replaces) before re-arming over it.
+    small().held = image;
+    const Status rearmed = sleep_guard_.arm(port, small().held);
     if (!rearmed) {
       for (std::size_t i = 0; i < image.count; ++i) {
         (void)bank_.retire(image.contexts[i].scope, image.contexts[i].entry.peer);
       }
+      // The refused image is not armed: leave no key material behind.
+      secure_clear(&small().held, sizeof(small().held));
     }
     secure_clear(&image, sizeof(image));
     return rearmed;
@@ -1787,7 +1847,7 @@ Status SecurityCoordinator::save_sleep_image(RtcSessionPort& port, const NodeId 
 }
 
 Status SecurityCoordinator::fail_restore(const Status& status) noexcept {
-  secure_clear(&held_restore_, sizeof(held_restore_));
+  secure_clear(&small().held, sizeof(small().held));
   restore_holding_ = false;
   restore_failed_ = true;
   restore_error_ = status;
@@ -1828,7 +1888,7 @@ Status SecurityCoordinator::restore_sleep_image(RtcSessionPort& port, const std:
     // Without a durable membership (dev adoption) the check stays zeroed:
     // zeros can never match a member image's nonzero generation/commit,
     // so dev always resumes cold through RLRES1 instead.
-    const Status consumed = consume_rtc_session(port, wake, held_restore_);
+    const Status consumed = consume_rtc_session(port, wake, small().held);
     if (!consumed) return fail_restore(consumed);
     restore_holding_ = true;
     restore_elapsed_ms_ = trusted_elapsed_ms;
@@ -1839,8 +1899,8 @@ Status SecurityCoordinator::restore_sleep_image(RtcSessionPort& port, const std:
   // context fails the restore instead of installing an over-credited one.
   if (trusted_elapsed_ms > restore_elapsed_ms_) {
     const std::uint32_t delta = trusted_elapsed_ms - restore_elapsed_ms_;
-    for (std::size_t i = 0; i < held_restore_.count; ++i) {
-      SessionBankEntry& entry = held_restore_.contexts[i].entry;
+    for (std::size_t i = 0; i < small().held.count; ++i) {
+      SessionBankEntry& entry = small().held.contexts[i].entry;
       if (delta >= entry.remaining_ms) {
         return fail_restore(
             Status::error(StatusCode::IntegrityError, "sleep restore elapsed"));
@@ -1851,7 +1911,7 @@ Status SecurityCoordinator::restore_sleep_image(RtcSessionPort& port, const std:
   }
   // The parent must have re-bound post-wake with the same radio MAC the
   // image names: a context without its radio peer is never sendable.
-  const NodeId parent = held_restore_.contexts[0].entry.peer;
+  const NodeId parent = small().held.contexts[0].entry.peer;
   NeighborDiscovery* const discovery = deps_.discovery;
   MacAddress observed{};
   BindingId live{kInvalidBindingId};
@@ -1859,7 +1919,7 @@ Status SecurityCoordinator::restore_sleep_image(RtcSessionPort& port, const std:
       !discovery->mac_of(parent, observed)) {
     return Status::error(StatusCode::Busy, "sleep restore parent unbound");
   }
-  if (!rtc_parent_warm_ok(held_restore_, observed, true)) {
+  if (!rtc_parent_warm_ok(small().held, observed, true)) {
     return fail_restore(
         Status::error(StatusCode::AuthorizationFailed, "sleep restore parent changed"));
   }
@@ -1871,32 +1931,33 @@ Status SecurityCoordinator::restore_sleep_image(RtcSessionPort& port, const std:
     return fail_restore(
         Status::error(StatusCode::AuthorizationFailed, "sleep restore membership lost"));
   }
-  for (std::size_t i = 0; i < held_restore_.count; ++i) {
-    const SessionBankEntry& entry = held_restore_.contexts[i].entry;
+  for (std::size_t i = 0; i < small().held.count; ++i) {
+    const SessionBankEntry& entry = small().held.contexts[i].entry;
     if (revoked(entry.peer, entry.peer_generation)) {
       return fail_restore(
           Status::error(StatusCode::AuthorizationFailed, "sleep restore peer revoked"));
     }
   }
   const Status link =
-      bank_.restore_entry(SecurityScope::Link, parent, held_restore_.contexts[0].entry);
+      bank_.restore_entry(SecurityScope::Link, parent, small().held.contexts[0].entry);
   if (!link) return fail_restore(link);  // occupied: a newer context stands; resume instead
-  if (held_restore_.count == 2) {
+  if (small().held.count == 2) {
     // Best-effort: the end leg resumes through demand when the slot is
     // taken or stale — the warm link is unaffected.
-    (void)bank_.restore_entry(SecurityScope::EndToEnd, held_restore_.contexts[1].entry.peer,
-                              held_restore_.contexts[1].entry);
+    (void)bank_.restore_entry(SecurityScope::EndToEnd, small().held.contexts[1].entry.peer,
+                              small().held.contexts[1].entry);
   }
   // Re-base the image to this boot before the guard commits it: the wake
   // chain proves "no boot skipped" (source + 1 == next), and the armed
   // port image is this boot's commit — a power cut without a second save
   // then consumes it on the next wake instead of failing the chain.
-  held_restore_.source_boot = boot_witness_;
-  const Status armed = sleep_guard_.arm(port, held_restore_);
-  const std::uint8_t restored_count = held_restore_.count;
+  small().held.source_boot = boot_witness_;
+  const Status armed = sleep_guard_.arm(port, small().held);
+  const std::uint8_t restored_count = small().held.count;
   const NodeId end_peer =
-      restored_count == 2 ? held_restore_.contexts[1].entry.peer : kInvalidNodeId;
-  secure_clear(&held_restore_, sizeof(held_restore_));
+      restored_count == 2 ? small().held.contexts[1].entry.peer : kInvalidNodeId;
+  // The armed image stays: the guard borrows this slot from here on and
+  // wipes it on disarm. The hold itself is over either way.
   restore_holding_ = false;
   if (!armed) {
     // Installed but unwritable: undo the install — restored counters
@@ -1928,6 +1989,9 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now) noexcept {
     (void)group_keys_.advance(stop, now);
   }
   destroy_workspace();  // wipes the live side (joiner or member)
+  // Leaving Dev rebuilds the small side (stop_traffic above destroyed
+  // the dev side); everywhere else it never left.
+  if (mode_ == CoordinatorMode::Dev) create_small();
   for (auto& slot : staged_) slot = StagedFrame{};
   action_ = CoordinatorAction{};
   action_pending_ = false;
@@ -1948,7 +2012,7 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now) noexcept {
   removal_holdoff_armed_ = false;
   // Restore is per-boot: a stopped coordinator forgets the held image
   // and any terminal verdict with it.
-  secure_clear(&held_restore_, sizeof(held_restore_));
+  secure_clear(&small().held, sizeof(small().held));
   restore_holding_ = false;
   restore_done_ = false;
   restore_failed_ = false;
@@ -1971,28 +2035,28 @@ constexpr MonotonicMs kAuthorityStartRetryMs = 1000;
 
 Status SecurityCoordinator::on_authority_rx(const CoordinatorEvent& event) noexcept {
   if (mode_ != CoordinatorMode::Member || sleeping_) return Status::success();
-  if (!authority_.snapshot().started) return Status::success();  // stale carrier
+  if (!small().authority.snapshot().started) return Status::success();  // stale carrier
   AuthorityInput in{};
   in.kind = AuthorityInputKind::RxCarrier;
   in.rx.kind = event.auth_kind;
   in.rx.bytes = event.auth_bytes;
   in.rx.writable = event.auth_writable;
-  return authority_.advance(in, event.now);
+  return small().authority.advance(in, event.now);
 }
 
 Status SecurityCoordinator::on_authority_tx(const CoordinatorEvent& event) noexcept {
   if (mode_ != CoordinatorMode::Member || sleeping_) return Status::success();
-  if (!authority_.snapshot().started) return Status::success();
+  if (!small().authority.snapshot().started) return Status::success();
   AuthorityInput in{};
   in.kind = AuthorityInputKind::TxResult;
   in.tx.token = event.auth_token;
   in.tx.delivered = event.auth_delivered;
-  return authority_.advance(in, event.now);
+  return small().authority.advance(in, event.now);
 }
 
 Status SecurityCoordinator::on_request_pull(const CoordinatorEvent& event) noexcept {
   if (mode_ != CoordinatorMode::Member || sleeping_) return Status::success();
-  if (!authority_.snapshot().started) {
+  if (!small().authority.snapshot().started) {
     // Not started yet: the adoption pull covers the first sync; a later
     // want restarts the channel and pulls then.
     authority_wanted_ = true;
@@ -2004,7 +2068,7 @@ Status SecurityCoordinator::on_request_pull(const CoordinatorEvent& event) noexc
   AuthorityInput in{};
   in.kind = AuthorityInputKind::RequestPull;
   in.pull.reason = static_cast<PullReason>(event.pull_reason);
-  return authority_.advance(in, event.now);
+  return small().authority.advance(in, event.now);
 }
 
 Status SecurityCoordinator::on_usb_session_up(const MonotonicMs now) noexcept {
@@ -2059,10 +2123,12 @@ bool SecurityCoordinator::build_authority_start(AuthorityStart& out) const noexc
 }
 
 void SecurityCoordinator::suspend_authority() noexcept {
-  if (!authority_.snapshot().started) return;
+  // No channel exists in Dev (see snapshot): suspending is a no-op there.
+  if (mode_ == CoordinatorMode::Dev) return;
+  if (!small().authority.snapshot().started) return;
   AuthorityInput in{};
   in.kind = AuthorityInputKind::Suspend;
-  (void)authority_.advance(in, last_now_);
+  (void)small().authority.advance(in, last_now_);
 }
 
 void SecurityCoordinator::drive_authority(const MonotonicMs now) noexcept {
@@ -2075,8 +2141,8 @@ void SecurityCoordinator::drive_authority(const MonotonicMs now) noexcept {
   (void)group_keys_.advance(tick, now);
   AuthorityInput poll{};
   poll.kind = AuthorityInputKind::Tick;
-  (void)authority_.advance(poll, now);
-  if (authority_wanted_ && !authority_.snapshot().started &&
+  (void)small().authority.advance(poll, now);
+  if (authority_wanted_ && !small().authority.snapshot().started &&
       now - last_authority_start_ >= kAuthorityStartRetryMs) {
     last_authority_start_ = now;
     AuthorityStart start{};
@@ -2084,13 +2150,13 @@ void SecurityCoordinator::drive_authority(const MonotonicMs now) noexcept {
     AuthorityInput begin{};
     begin.kind = AuthorityInputKind::Start;
     begin.start = start;
-    if (!authority_.advance(begin, now)) return;
+    if (!small().authority.advance(begin, now)) return;
     // The first sync rides the new channel immediately (one Pull; the
     // client's own bucket paces any more).
     AuthorityInput pull{};
     pull.kind = AuthorityInputKind::RequestPull;
     pull.pull.reason = PullReason::BootReconnectSync;
-    (void)authority_.advance(pull, now);
+    (void)small().authority.advance(pull, now);
   }
 }
 
@@ -2408,11 +2474,13 @@ void SecurityCoordinator::emit_member_action() noexcept {
 
 void SecurityCoordinator::abandon_dev_adoption(JoinRecoveryReason reason) noexcept {
   // The member side exists (create_member ran); stop_traffic scrubs the
-  // bank and every partially adopted dev view, then the workspace dies
-  // and the coordinator parks in Recovery like a failed member adoption.
+  // bank and destroys the partially adopted dev side, then the workspace
+  // dies and the coordinator parks in Recovery like a failed member
+  // adoption — with the small side rebuilt, as every non-Dev mode has it.
   stop_traffic();
   destroy_workspace();
   mode_ = CoordinatorMode::Recovery;
+  create_small();
   CoordinatorAction action{};
   action.kind = CoordinatorActionKind::ReportRecovery;
   action.recovery = reason;
@@ -2431,7 +2499,7 @@ Status SecurityCoordinator::install_dev_config(const CoordinatorDevConfig& confi
     if (byte != 0) psk_zero = false;
   }
   if (psk_zero) return Status::error(StatusCode::InvalidArgument, "dev psk");
-  if (dev_group_live_) {
+  if (mode_ == CoordinatorMode::Dev) {
     return Status::error(StatusCode::InvalidState, "dev already adopted");
   }
   CoordinatorMemberConfig cfg{};
@@ -2449,6 +2517,8 @@ Status SecurityCoordinator::install_dev_config(const CoordinatorDevConfig& confi
   member_valid_ = true;
   destroy_workspace();
   create_member();
+  destroy_small();
+  create_dev();
   mode_ = CoordinatorMode::Dev;
   sat_inc(counters_.boots);
   GatewaySessionBank::LocalView local{};
@@ -2481,21 +2551,29 @@ Status SecurityCoordinator::install_dev_config(const CoordinatorDevConfig& confi
   }
   // The group side binds only after the pairwise side stands: a failed
   // adopt leaves no half-adopted provider behind (stop_traffic in the
-  // abandon path scrubs whatever bound so far).
-  if (!dev_sender_.configure(config.psk, config.network, config.node, config.boot).ok()) {
+  // abandon path scrubs whatever bound so far). A boot this boot already
+  // consumed refuses first: the dev side is rebuilt per adoption, so the
+  // fresh sender cannot see the previous boot — without this a re-adopted
+  // boot would restart its counter space under the same key.
+  if (config.boot == dev_boot_seen_) {
     abandon_dev_adoption(JoinRecoveryReason::StorageFailure);
     return Status::success();
   }
-  new (dev_group_box_.data())
-      DevGroupProvider(dev_sender_, config.psk, config.network, deps_.bank_aead, config.node);
-  dev_group_live_ = true;
+  if (!dev().sender.configure(config.psk, config.network, config.node, config.boot).ok()) {
+    abandon_dev_adoption(JoinRecoveryReason::StorageFailure);
+    return Status::success();
+  }
+  dev_boot_seen_ = config.boot;
+  new (dev().group_box.data())
+      DevGroupProvider(dev().sender, config.psk, config.network, deps_.bank_aead, config.node);
+  dev().group_live = true;
   provider_mux_.set_dev_group(&dev_group());
   provider_mux_.set_dev(true);
-  if (!dev_scope_.adopt(config.psk, config.network).ok()) {
+  if (!dev().scope.adopt(config.psk, config.network).ok()) {
     abandon_dev_adoption(JoinRecoveryReason::StorageFailure);
     return Status::success();
   }
-  if (!dev_hooks_.adopt(config.network, config.node, config.role).ok()) {
+  if (!dev().hooks.adopt(config.network, config.node, config.role).ok()) {
     abandon_dev_adoption(JoinRecoveryReason::MembershipInvalid);
     return Status::success();
   }
@@ -2624,23 +2702,20 @@ void SecurityCoordinator::stop_traffic() noexcept {
   // Member workspace is live; the caller destroys (wipes) it after. The
   // bank and the GK scope live outside the union, so they are scrubbed
   // here: bank clear does not depend on new entropy, and proxy/gateway leave
-  // Member (aborting relays, freeing slots) before the wipe. The dev
-  // group/scope/hooks live outside the union too and are scrubbed here
-  // the same way (the dev-armed engine, with its PSK policy, dies with
-  // the workspace below).
+  // Member (aborting relays, freeing slots) before the wipe. In Dev the
+  // dev side dies here instead of the small side (the dev-armed engine,
+  // with its PSK policy, dies with the workspace below); the mux drops
+  // its dev group pointer before the storage goes.
   (void)member().engine.cancel_all();
   bank_.clear();
   sleep_guard_.disarm();
   provider_mux_.set_dev(false);
   provider_mux_.set_dev_group(nullptr);
-  if (dev_group_live_) {
-    dev_group().DevGroupProvider::~DevGroupProvider();
-    dev_group_live_ = false;
+  if (mode_ == CoordinatorMode::Dev) {
+    destroy_dev();
+  } else {
+    secure_clear(&small().held, sizeof(small().held));
   }
-  dev_sender_.clear();
-  dev_scope_.wipe();
-  dev_hooks_.wipe();
-  secure_clear(&held_restore_, sizeof(held_restore_));
   restore_holding_ = false;
   restore_done_ = false;
   restore_failed_ = false;

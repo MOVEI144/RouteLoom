@@ -1407,6 +1407,30 @@ void test_dev_stop_readopt() {
   CHECK(next.session_provider().ready());
 }
 
+void test_dev_stop_member_adopt() {
+  current = "dev_stop_member_adopt";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.adopt_dev(dev_config(), kT0).ok());
+  // Dev has no authority channel: the snapshot reports the unstarted view.
+  CHECK(!coordinator.snapshot().authority_started);
+  CHECK(!coordinator.snapshot().authority_ready);
+  CHECK(!coordinator.snapshot().authority_busy);
+  CHECK(!coordinator.authority_snapshot().started);
+  CoordinatorEvent stop{};
+  stop.kind = CoordinatorEventKind::Stop;
+  stop.now = kT0 + 100;
+  CHECK(coordinator.step(stop).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Fresh);
+  // The dev side is gone: a member adoption runs on the small side again.
+  CHECK(coordinator.step(boot_event(kT0 + 200, kBoot)).ok());
+  MonotonicMs now = kT0 + 200;
+  CHECK(poll_until_member(coordinator, now));
+}
+
 void test_dev_revocation_blocks_membership() {
   current = "dev_revocation_blocks_membership";
   Fixture f{};
@@ -1458,6 +1482,7 @@ int main() {
   test_dev_scope_agrees_across_nodes();
   test_dev_mux_routing();
   test_dev_stop_readopt();
+  test_dev_stop_member_adopt();
   test_dev_revocation_blocks_membership();
   if (failures != 0) {
     std::fprintf(stderr, "FAILURES: %d\n", failures);

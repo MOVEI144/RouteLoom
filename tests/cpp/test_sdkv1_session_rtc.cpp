@@ -11,6 +11,11 @@
 using namespace routeloom;
 using namespace routeloom::sdkv1;
 
+// The write-ahead guard borrows its retained image from caller-stable
+// storage: a second by-value copy would not fit bridge DRAM next to the
+// coordinator's held restore image.
+static_assert(sizeof(RtcWriteAheadProvider) <= 48, "guard must borrow the image");
+
 namespace {
 // Keyed test cipher (NOT an AEAD): XOR stream plus a tag over key, nonce,
 // AAD and body. Cross-key confusion fails the tag; the bank suite proves the
@@ -437,6 +442,10 @@ int main() {
   CHECK(bank_d.configure(local, aead, {RtcRandom::fill, &random_d}, 4000).ok());
   CHECK(bank_d.restore_entry(SecurityScope::Link, 11, woken.contexts[0].entry).ok());
   RamSessionProvider<32, 8> inner(bank_d);
+  // The guard borrows this image: it must outlive the guard.
+  RtcSessionImage guard_image = sleep;
+  guard_image.count = 1;
+  guard_image.contexts[0].entry.tx_next = 2;
   RtcWriteAheadProvider guard(inner, inner);
   CHECK(!guard.armed());
   CHECK(guard.ready());
@@ -456,9 +465,6 @@ int main() {
   // Arm over the live entry: the port commits the image first, then bank
   // and RTC advance in lockstep (bank tx_next is 2 after the issue above).
   RtcMemory guard_rtc;
-  RtcSessionImage guard_image = sleep;
-  guard_image.count = 1;
-  guard_image.contexts[0].entry.tx_next = 2;
   CHECK(guard.arm(guard_rtc, guard_image).ok());
   CHECK(guard.armed());
   CHECK(guard.arm(guard_rtc, guard_image).code == StatusCode::InvalidState);
@@ -488,6 +494,7 @@ int main() {
   CHECK(guard.next_counter(tx, fresh).ok());
   CHECK(fresh == 0);
   CHECK(!guard.armed());
+  CHECK(guard_image.count == 0);  // disarm wiped the borrowed image, not a copy
   CHECK(!decode_rtc_session(ByteView{guard_rtc.bytes.data(), guard_rtc.bytes.size()}, sleep_wake,
                             result).ok());
   // An invalid image never arms and leaves the port untouched.
@@ -513,5 +520,6 @@ int main() {
   CHECK(!failing.next_counter(tx, refused).ok());
   CHECK(failing.tx_epoch(SecurityScope::Link, 11, guard_epoch).code == StatusCode::AuthRequired);
   CHECK(!failing.next_counter(tx, refused).ok());  // still refused: no RAM fallback
+  CHECK(woken.count == 0);  // the failed update disarmed and wiped the borrowed image
   return failures ? 1 : 0;
 }

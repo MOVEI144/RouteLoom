@@ -205,14 +205,18 @@ RtcWriteAheadProvider::RtcWriteAheadProvider(SecurityProvider& inner,
     : inner_(inner), installer_(installer) {}
 
 RtcWriteAheadProvider::~RtcWriteAheadProvider() noexcept {
-  // RAM image only: the port may already be gone (it must merely outlive
-  // the armed period, and disarm() is the call that retires it).
+  // Borrowed image only: the port and the image may already be gone (both
+  // must merely outlive the armed period, and disarm() is the call that
+  // retires them).
   for (bool& armed : slot_armed_) armed = false;
-  secure_clear(&image_, sizeof(image_));
+  if (image_ != nullptr) {
+    secure_clear(image_, sizeof(*image_));
+    image_ = nullptr;
+  }
   port_ = nullptr;
 }
 
-Status RtcWriteAheadProvider::arm(RtcSessionPort& port, const RtcSessionImage& image) noexcept {
+Status RtcWriteAheadProvider::arm(RtcSessionPort& port, RtcSessionImage& image) noexcept {
   if (armed()) return Status::error(StatusCode::InvalidState, "write-ahead already armed");
   std::array<std::uint8_t, kRtcSessionRecordSize> encoded{};
   const Status shaped =
@@ -235,15 +239,18 @@ Status RtcWriteAheadProvider::arm(RtcSessionPort& port, const RtcSessionImage& i
     (void)port.invalidate();
     return Status::error(StatusCode::StorageFailure, "write-ahead commit unverified");
   }
-  image_ = image;
+  image_ = &image;
   port_ = &port;
-  for (std::size_t i = 0; i < image_.count; ++i) slot_armed_[i] = true;
+  for (std::size_t i = 0; i < image.count; ++i) slot_armed_[i] = true;
   return Status::success();
 }
 
 void RtcWriteAheadProvider::disarm() noexcept {
   for (bool& armed : slot_armed_) armed = false;
-  secure_clear(&image_, sizeof(image_));
+  if (image_ != nullptr) {
+    secure_clear(image_, sizeof(*image_));
+    image_ = nullptr;
+  }
   if (port_ != nullptr) {
     (void)port_->invalidate();
     port_ = nullptr;
@@ -291,10 +298,10 @@ bool RtcWriteAheadProvider::accepts_group_epoch(const std::uint32_t g) const noe
 Status RtcWriteAheadProvider::next_counter(const SecurityContext& context,
                                            std::uint64_t& counter) noexcept {
   std::size_t slot = kRtcSessionMaxContexts;
-  if (armed()) {
-    for (std::size_t i = 0; i < image_.count; ++i) {
-      if (slot_armed_[i] && image_.contexts[i].scope == context.scope &&
-          image_.contexts[i].entry.peer == context.receiver) {
+  if (armed() && image_ != nullptr) {
+    for (std::size_t i = 0; i < image_->count; ++i) {
+      if (slot_armed_[i] && image_->contexts[i].scope == context.scope &&
+          image_->contexts[i].entry.peer == context.receiver) {
         slot = i;
         break;
       }
@@ -306,7 +313,7 @@ Status RtcWriteAheadProvider::next_counter(const SecurityContext& context,
   // bank issues its own counters from here on.
   std::uint32_t live_cid = 0;
   const Status epoch_status = inner_.tx_epoch(context.scope, context.receiver, live_cid);
-  if (!epoch_status || live_cid != image_.contexts[slot].entry.tx_cid) {
+  if (!epoch_status || live_cid != image_->contexts[slot].entry.tx_cid) {
     disarm_slot(slot);
     return inner_.next_counter(context, counter);
   }
@@ -317,7 +324,7 @@ Status RtcWriteAheadProvider::next_counter(const SecurityContext& context,
   const Status bank_status = inner_.next_counter(context, bank_counter);
   if (!bank_status) return bank_status;
   std::uint64_t retained_counter = 0;
-  const Status retained_status = advance_rtc_tx(*port_, image_, slot, retained_counter);
+  const Status retained_status = advance_rtc_tx(*port_, *image_, slot, retained_counter);
   if (!retained_status || retained_counter != bank_counter) {
     // Durability lost (or diverged): retire the entry and refuse. The
     // counter never reached radio, so the demand-driven re-handshake
