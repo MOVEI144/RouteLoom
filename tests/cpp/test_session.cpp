@@ -785,9 +785,97 @@ void test_refusal_with_usable_context_is_a_failure() {
   CHECK(pair.sec_a.counters_drawn.empty());
 }
 
+// Broadcast route advertisements must use GroupLink, never a pairwise
+// session or the unicast receive path (P5 §8). This fake checks the wire
+// boundary only; it does not grant routing/capability authority.
+class BroadcastWireSecurity final : public SecurityProvider {
+ public:
+  bool ready() const noexcept override { return true; }
+  Status tx_group_link_epochs(std::uint32_t& boot, std::uint32_t& g) noexcept override {
+    boot = 70;
+    g = 8;
+    return Status::success();
+  }
+  Status next_counter(const SecurityContext& c, std::uint64_t& counter) noexcept override {
+    if (c.scope != SecurityScope::GroupLink || c.receiver != kBroadcastNodeId ||
+        c.epoch != 70 || c.group_epoch != 8) return Status::error(StatusCode::InvalidState, "wrong scope");
+    ++draws;
+    return inner.next_counter(c, counter);
+  }
+  Status seal(const SecurityContext& c, std::uint64_t counter, ByteView aad, ByteView plain,
+              MutableByteView cipher, std::array<std::uint8_t, kAeadTagSize>& tag) noexcept override {
+    if (c.scope != SecurityScope::GroupLink || c.group_epoch != 8) {
+      return Status::error(StatusCode::InvalidState, "wrong seal scope");
+    }
+    return inner.seal(c, counter, aad, plain, cipher, tag);
+  }
+  Status open(const SecurityContext& c, std::uint64_t counter, ByteView aad, ByteView cipher,
+              const std::array<std::uint8_t, kAeadTagSize>& tag, MutableByteView plain) noexcept override {
+    if (c.scope != SecurityScope::GroupLink || c.group_epoch != 8) {
+      return Status::error(StatusCode::InvalidState, "wrong open scope");
+    }
+    return inner.open(c, counter, aad, cipher, tag, plain);
+  }
+  TestSecurity inner{};
+  int draws{0};
+};
+
+void test_broadcast_route_wire_gate() {
+  BroadcastWireSecurity security;
+  wire::PlainFrame frame{};
+  frame.header.network = kNet;
+  frame.header.type = FrameType::RouteUpdate;
+  frame.header.origin = 10;
+  frame.header.previous_hop = 10;
+  frame.header.next_hop = kBroadcastNodeId;
+  frame.header.destination = kBroadcastNodeId;
+  frame.header.hop_remaining = 1;
+  frame.header.delivery = DeliveryClass::BestEffort;
+  frame.header.original_lifetime_ms = 1000;
+  frame.header.remaining_deadline_ms = 1000;
+  frame.header.message = {1, 1};
+  frame.payload_size = 4;
+  frame.payload[0] = 1;
+  frame.payload[2] = 1;
+  wire::EncodedFrame encoded{};
+  // Malformed broadcast shapes must fail before any GroupLink counter is drawn.
+  auto malformed = frame;
+  malformed.header.type = FrameType::Data;
+  CHECK(!wire::encode_new(malformed, security, encoded).ok());
+  malformed = frame;
+  malformed.header.previous_hop = 11;
+  CHECK(!wire::encode_new(malformed, security, encoded).ok());
+  malformed = frame;
+  malformed.header.flags = wire::kFlagEndProtected;
+  CHECK(!wire::encode_new(malformed, security, encoded).ok());
+  malformed = frame;
+  malformed.header.hop_remaining = 2;
+  CHECK(!wire::encode_new(malformed, security, encoded).ok());
+  malformed = frame;
+  malformed.header.delivery = DeliveryClass::Reliable;
+  CHECK(!wire::encode_new(malformed, security, encoded).ok());
+  CHECK(security.draws == 0);
+  TestSecurity legacy;
+  CHECK(wire::encode_new(frame, legacy, encoded).code == StatusCode::Unsupported);
+  CHECK(encoded.size == 0);
+  CHECK_OK(wire::encode_new(frame, security, encoded));
+  CHECK(security.draws == 1);
+  wire::LinkOpenedFrame opened{};
+  CHECK(!wire::open_link(encoded.view(), 20, security, opened).ok());
+  CHECK_OK(wire::open_link(encoded.view(), 20, security, opened, true));
+  CHECK(opened.header.link_epoch == 70 && opened.header.end_epoch == 8);
+  CHECK(opened.protected_payload_size == frame.payload_size);
+  CHECK(std::memcmp(opened.protected_payload.data(), frame.payload.data(), frame.payload_size) == 0);
+  // A unicast receiver cannot accept a different type with the broadcast hop.
+  auto tampered = encoded;
+  tampered.bytes[4] = static_cast<std::uint8_t>(FrameType::Data);
+  CHECK(!wire::open_link(tampered.view(), 20, security, opened, true).ok());
+}
+
 }  // namespace
 
 int main() {
+  test_broadcast_route_wire_gate();
   test_default_provider_reports_configured_values();
   test_default_hooks_keep_node_bytes_identical();
   test_v1_k10_golden_vectors_unchanged();

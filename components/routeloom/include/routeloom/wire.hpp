@@ -122,8 +122,10 @@ Status stamp_end_epoch(Header& header, SecurityProvider& security) noexcept;
 Status encode_new(const PlainFrame& frame,
                   SecurityProvider& security,
                   EncodedFrame& output) noexcept;
-// open_link authenticates ONLY the immediate previous-hop peer under the
-// SecurityScope::Link context. Success here does NOT verify the claimed
+// open_link authenticates a unicast immediate peer under Link. The explicit
+// broadcast-route path uses GroupLink instead: it does not prove sender
+// identity and must never enter the ordinary pairwise receive/telemetry path.
+// Success here does NOT verify the claimed
 // origin, the origin-to-destination binding or the payload end-to-end: a
 // relay must never treat a link-opened frame as origin-verified. End-to-end
 // origin verification exists only through open_end success at the bound
@@ -131,7 +133,8 @@ Status encode_new(const PlainFrame& frame,
 Status open_link(ByteView encoded,
                  NodeId local_node,
                  SecurityProvider& security,
-                 LinkOpenedFrame& output) noexcept;
+                 LinkOpenedFrame& output,
+                 bool allow_broadcast_route = false) noexcept;
 // open_end verifies the end-immutable header fields and payload under the
 // SecurityScope::EndToEnd context bound to (origin, destination). It must be
 // called only by the bound destination — it returns AuthorizationFailed for
