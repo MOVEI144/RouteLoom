@@ -283,4 +283,21 @@ Status LegacyStateConsole::process_line(const ByteView line, const bool stopped,
   return Status::success();
 }
 
+Status strip_legacy_state_prefix(const ByteView line, ByteView& rest) noexcept {
+  rest = ByteView{};
+  static constexpr char kPrefix[] = "security legacy-state";
+  constexpr std::size_t kPrefixLen = sizeof(kPrefix) - 1;
+  if (line.data == nullptr || line.size < kPrefixLen ||
+      std::memcmp(line.data, kPrefix, kPrefixLen) != 0) {
+    return Status::error(StatusCode::NotFound, "not a legacy-state line");
+  }
+  if (line.size == kPrefixLen) return Status::success();  // bare prefix, empty rest
+  if (line.data[kPrefixLen] != ' ') {
+    return Status::error(StatusCode::NotFound, "not a legacy-state line");
+  }
+  rest.data = line.data + kPrefixLen + 1;
+  rest.size = line.size - kPrefixLen - 1;
+  return Status::success();
+}
+
 }  // namespace routeloom::sdkv1

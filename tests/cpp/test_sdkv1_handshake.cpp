@@ -322,7 +322,8 @@ struct FrozenLink {
   std::array<std::uint8_t, 16> cookie{};
 };
 
-FrozenLink freeze_link(Side& initiator, Side& responder, const MonotonicMs now,
+template <typename Initiator, typename Responder>
+FrozenLink freeze_link(Initiator& initiator, Responder& responder, const MonotonicMs now,
                        const std::uint32_t caps_i, const std::uint32_t caps_r) {
   FrozenLink frozen{};
   frozen.carrier.network = kNet;
@@ -354,25 +355,31 @@ struct PumpResult {
 };
 
 // Delivers one Send result into the peer with owner-observed framing.
-Status deliver_to(Side& to, const Side& from, const HandshakeResult& send,
+template <typename To, typename From>
+Status deliver_to(To& to, const From& from, const HandshakeResult& send,
                   const FrozenLink& frozen, const MonotonicMs now) {
   HandshakeRx rx{};
   rx.scope = send.scope;
   rx.phase = send.phase;
   rx.step = send.step;
   rx.claimed_peer = from.self;
-  rx.src_mac = from.mac_self;  // observed sender/receiver, always
-  rx.dst_mac = to.mac_self;
-  rx.carrier = frozen.carrier;
-  std::array<std::uint8_t, 16> cookie = frozen.cookie;
-  if (send.cookie_attach) rx.cookie = ByteView{cookie.data(), cookie.size()};
+  std::array<std::uint8_t, 16> cookie = frozen.cookie;  // borrowed by rx below
+  if (send.scope == SecurityScope::EndToEnd) {
+    rx.exchange_id = send.exchange_id;  // routed envelope id, nonzero
+  } else {
+    rx.src_mac = from.mac_self;  // observed sender/receiver, always
+    rx.dst_mac = to.mac_self;
+    rx.carrier = frozen.carrier;
+    if (send.cookie_attach) rx.cookie = ByteView{cookie.data(), cookie.size()};
+  }
   return to.engine.on_message(rx, ByteView{send.message.data(), send.message_size}, now);
 }
 
 // Runs the exchange to completion: every Send is delivered immediately,
 // time advances 50 ms per hop (well inside the cookie bucket and the
 // retransmit/timer horizons, so no timer fires mid-exchange).
-PumpResult pump(Side& a, Side& b, const FrozenLink& frozen,
+template <typename A, typename B>
+PumpResult pump(A& a, B& b, const FrozenLink& frozen,
                   const MonotonicMs start = kT0) {
   PumpResult result{};
   MonotonicMs now = start;
@@ -428,7 +435,8 @@ PumpResult pump(Side& a, Side& b, const FrozenLink& frozen,
   return result;
 }
 
-bool roundtrip_ok(Side& from, Side& to, const HandshakeResult& est_from,
+template <typename From, typename To>
+bool roundtrip_ok(From& from, To& to, const HandshakeResult& est_from,
                   const HandshakeResult& est_to) {
   if (est_from.tx_context_id == 0 || est_from.tx_context_id != est_to.rx_context_id) return false;
   SecurityContext seal_ctx{};
@@ -489,7 +497,114 @@ struct Pair {
   }
 };
 
-Status request_link(Side& initiator, Side& responder, const FrozenLink& frozen,
+// --- Dev-resume sides (P4 §10.1, PR6 wiring) -----------------------------------
+// Same engine/bank/cookie shape as Side, but armed with a DevResumePolicy
+// instead of member credentials: the membership view answers no local
+// evidence (local() must never even be called) and revocation only, the
+// credential verifier is null (dev never runs EDHOC), and the bank sits
+// at the fixed dev GK epoch 1.
+struct DevMembership final : public HandshakeMembershipView {
+  bool local(HandshakeLocal& out) const noexcept override {
+    ++local_calls;
+    (void)out;
+    return false;
+  }
+  bool revoked(const NodeId peer, const std::uint32_t generation) const noexcept override {
+    (void)generation;  // dev generations are always 0; the local gate decides
+    return revoked_peers.count(peer) != 0;
+  }
+  mutable std::size_t local_calls{0};
+  std::set<NodeId> revoked_peers;
+};
+
+struct NullVerifier final : public SessionCredentialVerifier {
+  bool local_credential(LocalCredential& out) noexcept override {
+    (void)out;
+    return false;
+  }
+  bool verify_peer(const ByteView cert, const NodeId expected_node,
+                   PeerCertClaims& out) noexcept override {
+    (void)cert;
+    (void)expected_node;
+    (void)out;
+    return false;
+  }
+};
+
+struct DevSide {
+  DevSide(const NodeId self, const NodeId peer, const MacAddress& mac_self,
+          const MacAddress& mac_peer, const keys::Secret& psk, const std::uint64_t rng_seed)
+      : self(self),
+        peer(peer),
+        mac_self(mac_self),
+        mac_peer(mac_peer),
+        storage(16),
+        cache(storage, kResume2NodeLinkQuota, kResume2NodeEndQuota),
+        sink(bank),
+        engine(cache, sink, cookie, membership, verifier, &XorShift::fill, &rng) {
+    rng.state = rng_seed;
+    policy.psk = psk;
+    policy.network = kNet;
+    policy.self = self;
+    policy.role = kMemberRoleEndpoint;
+    policy.boot = 11;
+  }
+
+  bool start() {
+    AeadGcm port{&TestAead::seal, &TestAead::open, nullptr};
+    TestBank::LocalView view{};
+    view.self = self;
+    view.network = kNet;
+    view.gk_epoch = 1;  // dev fixed epoch (P4 §10.1)
+    TestBank::RandomSource random{&XorShift::fill, &rng};
+    if (!bank.configure(view, port, random, kT0).ok()) return false;
+    if (!cookie.configure(&XorShift::fill, &rng).ok()) return false;
+    return engine.configure_dev(policy, kT0).ok();
+  }
+
+  NodeId self{kInvalidNodeId};
+  NodeId peer{kInvalidNodeId};
+  MacAddress mac_self{};
+  MacAddress mac_peer{};
+  XorShift rng;
+  FaultyResumeStorage2 storage;
+  ResumeCache2 cache;
+  TestBank bank;
+  TestSink sink;
+  MemberCookie cookie;
+  DevMembership membership;
+  NullVerifier verifier;
+  HandshakeEngine engine;
+  DevResumePolicy policy{};
+};
+
+keys::Secret dev_psk(const std::uint8_t fill) {
+  keys::Secret psk{};
+  psk.fill(fill);
+  return psk;
+}
+
+struct DevPair {
+  std::unique_ptr<DevSide> a;
+  std::unique_ptr<DevSide> b;
+  static DevPair make(const keys::Secret& psk_a, const keys::Secret& psk_b) {
+    DevPair pair;
+    pair.a.reset(new DevSide(kNodeA, kNodeB, mac_of(0x0A), mac_of(0x0B), psk_a, 0xD1));
+    pair.b.reset(new DevSide(kNodeB, kNodeA, mac_of(0x0B), mac_of(0x0A), psk_b, 0xD2));
+    CHECK(pair.a->start());
+    CHECK(pair.b->start());
+    return pair;
+  }
+  static DevPair make() {
+    const keys::Secret psk = dev_psk(0xA5);
+    return make(psk, psk);
+  }
+};
+
+constexpr std::uint32_t kCapsDev = kRld1CapDevRamSessionV1;
+
+template <typename Initiator, typename Responder>
+Status request_link(Initiator& initiator, Responder& responder, const FrozenLink& frozen,
                     const MonotonicMs now,
                     const HandshakeReason reason = HandshakeReason::Initial,
                     const std::uint32_t elevation_token = 0) {
@@ -1308,6 +1423,240 @@ void test_bank_sink_forwarding() {
 
 }  // namespace
 
+void test_dev_link_resume() {
+  // Two dev engines complete a PSK-rooted RLRES1 with no member evidence,
+  // no EDHOC flight and no resume-store traffic, and the installed keys
+  // agree in both directions.
+  DevPair pair = DevPair::make();
+  const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsDev, kCapsDev);
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+  const PumpResult result = pump(*pair.a, *pair.b, frozen);
+  CHECK(result.established_a && result.established_b);
+  CHECK(result.failed_a == StatusCode::Ok && result.failed_b == StatusCode::Ok);
+  CHECK(result.est_a.tx_context_id == result.est_b.rx_context_id);
+  CHECK(result.est_a.rx_context_id == result.est_b.tx_context_id);
+  CHECK(result.est_a.has_proof && result.est_b.has_proof);
+  CHECK(pair.a->sink.installs == 1 && pair.b->sink.installs == 1);
+  CHECK(roundtrip_ok(*pair.a, *pair.b, result.est_a, result.est_b));
+  CHECK(roundtrip_ok(*pair.b, *pair.a, result.est_b, result.est_a));
+  CHECK(pair.a->storage.write_calls == 0 && pair.b->storage.write_calls == 0);
+  CHECK(pair.a->storage.read_calls == 0 && pair.b->storage.read_calls == 0);
+  CHECK(pair.a->membership.local_calls == 0 && pair.b->membership.local_calls == 0);
+  // Dev summary shape (P4 §10.1): cert 0, generation 0, created_gk 1.
+  SessionBankEntry entry{};
+  CHECK_OK(pair.a->bank.export_entry(SecurityScope::Link, kNodeB, entry));
+  CHECK(entry.peer_generation == 0 && entry.created_gk == 1);
+  CHECK((entry.flags & TestBank::kFlagDevResume) != 0);
+  const std::array<std::uint8_t, 8> zero_cert{};
+  CHECK(entry.peer_cert_id == zero_cert);
+  // The resume wire sizes are unchanged (R1 60 / R2 52 / R3 16).
+  CHECK(result.r1_size == rlres1::kR1BaseSize);
+  CHECK(result.r2_size == rlres1::kR2Size);
+  CHECK(result.r3_size == rlres1::kR3Size);
+  CHECK(result.m1_size == 0);  // no EDHOC flight on either side
+}
+
+void test_dev_churn_200_no_nvs() {
+  // V1-N01 host shape: one initiator runs full exchanges against 200
+  // distinct dev peers with zero resume-store reads or writes (#37 — no
+  // c/f/r growth). Each peer answers from its own engine: the pair RMS
+  // binds both node ids, so one responder cannot stand in for another.
+  const keys::Secret psk = dev_psk(0xA5);
+  DevSide initiator(kNodeA, kNodeB, mac_of(0x0A), mac_of(0x0B), psk, 0xD1);
+  CHECK(initiator.start());
+  std::size_t ok = 0;
+  MonotonicMs now = kT0;
+  for (std::uint32_t i = 0; i < 200; ++i) {
+    const NodeId peer = 0x00A1000000010000ULL + i;
+    DevSide responder(peer, kNodeA, mac_of(0x0B), mac_of(0x0A), psk, 0xE0 + i);
+    CHECK(responder.start());
+    // A fresh cookie per round: the seal only covers a ~4 s bucket.
+    const FrozenLink frozen = freeze_link(initiator, responder, now, kCapsDev, kCapsDev);
+    HandshakeRequest req{};
+    req.scope = SecurityScope::Link;
+    req.peer = peer;
+    req.reason = HandshakeReason::Initial;
+    req.mac_i = initiator.mac_self;
+    req.mac_r = initiator.mac_peer;
+    req.carrier = frozen.carrier;
+    CHECK_OK(initiator.engine.request(req, now));
+    const PumpResult round = pump(initiator, responder, frozen, now);
+    if (round.established_a && round.established_b) ++ok;
+    CHECK_OK(initiator.bank.retire_all(peer));
+    CHECK_OK(responder.bank.retire_all(kNodeA));
+    CHECK(responder.storage.write_calls == 0 && responder.storage.read_calls == 0);
+    // Past the 8 s exchange deadline: the initiator's post-Established
+    // R3Confirm resend duty ends through the natural poll lifecycle.
+    now += 9000;
+    CHECK_OK(initiator.engine.poll(now));
+  }
+  CHECK(ok == 200);
+  CHECK(initiator.sink.installs == 200);
+  CHECK(initiator.storage.write_calls == 0 && initiator.storage.read_calls == 0);
+  CHECK(initiator.membership.local_calls == 0);
+  CHECK(initiator.engine.quiescent());
+}
+
+void test_dev_end_resume() {
+  // Same policy over the routed end scope: no carrier/MAC/cookie, the
+  // exchange id rides the envelope, keys agree end to end.
+  DevPair pair = DevPair::make();
+  const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsDev, kCapsDev);
+  HandshakeRequest req{};
+  req.scope = SecurityScope::EndToEnd;
+  req.peer = kNodeB;
+  req.reason = HandshakeReason::Initial;
+  CHECK_OK(pair.a->engine.request(req, kT0));
+  const PumpResult result = pump(*pair.a, *pair.b, frozen);
+  CHECK(result.established_a && result.established_b);
+  CHECK(!result.est_a.has_proof && !result.est_b.has_proof);  // end: no discovery proof
+  SecurityContext seal_ctx{};
+  seal_ctx.scope = SecurityScope::EndToEnd;
+  seal_ctx.network = kNet;
+  seal_ctx.sender = kNodeA;
+  seal_ctx.receiver = kNodeB;
+  seal_ctx.epoch = result.est_a.tx_context_id;
+  std::uint64_t counter = 0;
+  CHECK_OK(pair.a->bank.next_counter(seal_ctx, counter));
+  const std::uint8_t plain[] = {9, 8, 7};
+  std::array<std::uint8_t, 3> cipher{};
+  std::array<std::uint8_t, kAeadTagSize> tag{};
+  CHECK_OK(pair.a->bank.seal(seal_ctx, counter, ByteView{}, ByteView{plain, 3},
+                             MutableByteView{cipher.data(), cipher.size()}, tag));
+  SecurityContext open_ctx = seal_ctx;
+  open_ctx.epoch = result.est_b.rx_context_id;
+  std::array<std::uint8_t, 3> opened{};
+  CHECK_OK(pair.b->bank.open(open_ctx, counter, ByteView{},
+                             ByteView{cipher.data(), cipher.size()}, tag,
+                             MutableByteView{opened.data(), opened.size()}));
+  CHECK(opened[0] == 9 && opened[2] == 7);
+  CHECK(pair.a->storage.write_calls == 0 && pair.b->storage.write_calls == 0);
+}
+
+void test_dev_psk_mismatch_refuses() {
+  // Different PSKs derive different RMS: the responder answers at most an
+  // unauthenticated hint and the initiator fails WITHOUT an EDHOC
+  // fallback (dev has no credentials to fall back to).
+  DevPair pair = DevPair::make(dev_psk(0xA5), dev_psk(0x5A));
+  const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsDev, kCapsDev);
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+  const PumpResult result = pump(*pair.a, *pair.b, frozen);
+  CHECK(!result.established_a && !result.established_b);
+  CHECK(result.failed_a == StatusCode::AuthenticationFailed);
+  CHECK(pair.a->sink.installs == 0 && pair.b->sink.installs == 0);
+  CHECK(pair.a->storage.write_calls == 0 && pair.b->storage.write_calls == 0);
+  CHECK(result.m1_size == 0);  // the Failed came from RLRES1, not EDHOC
+}
+
+void test_dev_unknown_claimant_dropped() {
+  // Dev lookup derives the RMS from (PSK, network, self, claimed peer):
+  // an R1 without a claimed peer never resolves, never installs.
+  DevPair pair = DevPair::make();
+  const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsDev, kCapsDev);
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+  HandshakeResult send{};
+  CHECK_OK(pair.a->engine.take_result(send));
+  CHECK(send.event == HandshakeEvent::Send && send.phase == 5 && send.step == 1);
+  CHECK_OK(pair.a->engine.accept_send(send.token, send.phase, send.step));
+  HandshakeRx rx{};
+  rx.scope = SecurityScope::Link;
+  rx.phase = 5;
+  rx.step = 1;
+  rx.claimed_peer = kInvalidNodeId;
+  rx.src_mac = pair.a->mac_self;
+  rx.dst_mac = pair.b->mac_self;
+  rx.carrier = frozen.carrier;
+  std::array<std::uint8_t, 16> cookie = frozen.cookie;
+  rx.cookie = ByteView{cookie.data(), cookie.size()};
+  CHECK_OK(pair.b->engine.on_message(
+      rx, ByteView{send.message.data(), send.message_size}, kT0 + 50));
+  HandshakeResult answer{};
+  if (pair.b->engine.take_result(answer).ok()) {
+    CHECK(answer.event == HandshakeEvent::Send);  // at most a hint
+  }
+  CHECK(pair.b->sink.installs == 0);
+  CHECK(pair.b->storage.write_calls == 0 && pair.b->storage.read_calls == 0);
+}
+
+void test_dev_caps_refused() {
+  // Dev link legs need the DevRam bit on BOTH sides and no member bits:
+  // any member/dev mix at selection time is Unsupported, never a quiet
+  // downgrade to the old protocol.
+  DevPair pair = DevPair::make();
+  FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsDev, kCapsDev);
+  frozen.carrier.capability_r = kCapsFull;
+  CHECK(request_link(*pair.a, *pair.b, frozen, kT0).code == StatusCode::Unsupported);
+  frozen.carrier.capability_i = kCapsFull;
+  frozen.carrier.capability_r = kCapsDev;
+  CHECK(request_link(*pair.a, *pair.b, frozen, kT0).code == StatusCode::Unsupported);
+  frozen.carrier.capability_i = kCapsDev | kCapsFull;
+  frozen.carrier.capability_r = kCapsDev;
+  CHECK(request_link(*pair.a, *pair.b, frozen, kT0).code == StatusCode::Unsupported);
+  // And a member engine refuses a dev-only peer the same way.
+  Pair members = Pair::make();
+  const FrozenLink dev_frozen =
+      freeze_link(*members.a, *members.b, kT0, kCapsDev, kCapsDev);
+  CHECK(request_link(*members.a, *members.b, dev_frozen, kT0).code ==
+        StatusCode::Unsupported);
+}
+
+void test_member_dev_mutual_refusal() {
+  // V1-K10 host shape: a member initiator and a dev responder (and back)
+  // never establish — neither side installs, and neither side answers in
+  // the other's protocol.
+  Pair members = Pair::make();
+  DevPair devs = DevPair::make();
+  // Member EDHOC m1 into a dev responder: the cookie (a DoS gate, not an
+  // auth proof) verifies, then the m1 dies silently — no m2, no install.
+  const FrozenLink m_frozen = freeze_link(*members.a, *devs.b, kT0, kCapsFull, kCapsFull);
+  CHECK_OK(request_link(*members.a, *devs.b, m_frozen, kT0));
+  const PumpResult m_result = pump(*members.a, *devs.b, m_frozen);
+  CHECK(!m_result.established_a && !m_result.established_b);
+  CHECK(m_result.m1_size != 0);  // the member really attempted EDHOC
+  CHECK(m_result.m2_size == 0 && m_result.r2_size == 0);
+  CHECK(members.a->sink.installs == 0 && devs.b->sink.installs == 0);
+  // Dev R1 into a member responder: at most an unauthenticated hint, and
+  // the dev initiator fails instead of falling back to EDHOC.
+  const FrozenLink d_frozen = freeze_link(*devs.a, *members.b, kT0, kCapsDev, kCapsDev);
+  CHECK_OK(request_link(*devs.a, *members.b, d_frozen, kT0));
+  const PumpResult d_result = pump(*devs.a, *members.b, d_frozen);
+  CHECK(!d_result.established_a && !d_result.established_b);
+  CHECK(d_result.failed_a == StatusCode::AuthenticationFailed);
+  CHECK(d_result.m1_size == 0 && d_result.r3_size == 0);
+  CHECK(devs.a->sink.installs == 0 && members.b->sink.installs == 0);
+  CHECK(members.b->engine.quiescent());  // the hint left no responder state
+  CHECK(devs.a->storage.write_calls == 0 && members.b->storage.write_calls == 0);
+}
+
+void test_dev_revoked_peer_refuses() {
+  // The local revocation gate runs before the install even with the right
+  // PSK: a revoked initiator gets at most a hint, never a session.
+  DevPair pair = DevPair::make();
+  pair.b->membership.revoked_peers.insert(kNodeA);
+  const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsDev, kCapsDev);
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+  const PumpResult result = pump(*pair.a, *pair.b, frozen);
+  CHECK(!result.established_a && !result.established_b);
+  CHECK(result.failed_a == StatusCode::AuthenticationFailed);
+  CHECK(pair.a->sink.installs == 0 && pair.b->sink.installs == 0);
+  CHECK(pair.a->storage.write_calls == 0 && pair.b->storage.write_calls == 0);
+}
+
+void test_dev_configure_busy_while_in_flight() {
+  // Re-arming the policy mid-exchange is refused; once the exchange is
+  // done and drained it is accepted again.
+  DevPair pair = DevPair::make();
+  const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsDev, kCapsDev);
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+  CHECK(pair.a->engine.configure_dev(pair.a->policy, kT0 + 50).code == StatusCode::Busy);
+  const PumpResult result = pump(*pair.a, *pair.b, frozen);
+  CHECK(result.established_a && result.established_b);
+  // Past the 8 s exchange deadline: the post-Established R3Confirm duty
+  // ends, the engine drains quiescent, and re-arming is accepted again.
+  CHECK_OK(pair.a->engine.poll(kT0 + 9000));
+  CHECK_OK(pair.a->engine.configure_dev(pair.a->policy, kT0 + 9000));
+}
+
 int main() {
   test_link_edhoc_full();
   test_responder_waits_for_m4_admission();
@@ -1332,6 +1681,15 @@ int main() {
   test_elevation();
   test_elevation_negatives();
   test_bank_sink_forwarding();
+  test_dev_link_resume();
+  test_dev_churn_200_no_nvs();
+  test_dev_end_resume();
+  test_dev_psk_mismatch_refuses();
+  test_dev_unknown_claimant_dropped();
+  test_dev_caps_refused();
+  test_member_dev_mutual_refusal();
+  test_dev_revoked_peer_refuses();
+  test_dev_configure_busy_while_in_flight();
   if (failures == 0) {
     std::printf("sdkv1 handshake: all scenarios pass\n");
     return 0;

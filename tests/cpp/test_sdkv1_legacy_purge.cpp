@@ -152,5 +152,20 @@ int main() {
   CHECK(legacy_verb.process_line(line(kPurge), true, response, sizeof(response), size).ok());
   CHECK(std::strcmp(response, "ERR refused") == 0);  // legacy build keeps its keys
   CHECK(!legacy_port.marker && legacy_port.erased == 0);
+
+  // The firmware runner routes `security legacy-state <verb>` lines here;
+  // anything else stays with the factory console (NotFound, no match).
+  ByteView rest{};
+  CHECK(strip_legacy_state_prefix(line("security legacy-state status"), rest).ok());
+  CHECK(rest.size == 6 && std::memcmp(rest.data, "status", 6) == 0);
+  CHECK(strip_legacy_state_prefix(line("security legacy-state"), rest).ok());
+  CHECK(rest.size == 0);  // bare prefix feeds an empty line (invalid_argument)
+  CHECK(strip_legacy_state_prefix(line("security legacy-stateX"), rest).code ==
+        StatusCode::NotFound);
+  CHECK(strip_legacy_state_prefix(line("security legacy-stat"), rest).code ==
+        StatusCode::NotFound);
+  CHECK(strip_legacy_state_prefix(line("security"), rest).code == StatusCode::NotFound);
+  CHECK(strip_legacy_state_prefix(line("status"), rest).code == StatusCode::NotFound);
+  CHECK(strip_legacy_state_prefix(line(""), rest).code == StatusCode::NotFound);
   return 0;
 }

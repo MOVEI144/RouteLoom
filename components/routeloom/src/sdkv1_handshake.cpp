@@ -4,6 +4,7 @@
 
 #include "routeloom/discovery_scope.hpp"  // sha256, hmac_sha256
 #include "routeloom/rlcw1.hpp"  // cert_decode, cert_subject_kid (kid rule)
+#include "routeloom/sdkv1_dev_session.hpp"  // dev_find_slot (dev-resume lookup)
 #include "routeloom/sdkv1_ead.hpp"  // join_credential_check (cert + kid match)
 #include "routeloom/sdkv1_join_transport.hpp"  // join_step_valid (shared object codec)
 #include "routeloom/secure_clear.hpp"
@@ -61,6 +62,38 @@ bool caps_edhoc_pair(const std::uint32_t ours, const std::uint32_t theirs) noexc
 bool caps_resume_pair(const std::uint32_t ours, const std::uint32_t theirs) noexcept {
   return caps_production(ours, theirs) && ((ours & kRld1CapMemberResumeV1) != 0) &&
          ((theirs & kRld1CapMemberResumeV1) != 0);
+}
+
+// Dev selection (P4 §10.1): the DevRam bit on both sides and no member
+// bits anywhere — any member/dev mix is Unsupported, never a downgrade.
+bool caps_dev_pair(const std::uint32_t ours, const std::uint32_t theirs) noexcept {
+  return ((ours & kRld1CapDevRamSessionV1) != 0) &&
+         ((theirs & kRld1CapDevRamSessionV1) != 0) &&
+         (((ours | theirs) & (kRld1CapMemberEdhocV1 | kRld1CapMemberResumeV1)) == 0);
+}
+
+// Binds a dev-resume record to its derivation: the commit re-derives the
+// RMS from the armed policy and recomputes this, so a mid-flight policy
+// change refuses instead of installing under mixed evidence. Symmetric
+// in the two nodes (the pair RMS is), so both sides agree on it.
+void dev_slot_identity(const NodeId a, const NodeId b, const keys::Purpose purpose,
+                       const NetworkId network, const keys::Secret& rms,
+                       ScopeDigest& out) noexcept {
+  static constexpr char kLabel[] = "RouteLoom/v1/dev-resume-binding";
+  constexpr std::size_t kLabelLen = sizeof(kLabel);  // with the NUL separator
+  constexpr std::size_t kLen = kLabelLen + 1 + 8 + 8 + 8 + 32;
+  const NodeId lo = a < b ? a : b;
+  const NodeId hi = a < b ? b : a;
+  std::array<std::uint8_t, kLen> input{};
+  std::size_t at = 0;
+  for (std::size_t i = 0; i < kLabelLen; ++i) input[at++] = static_cast<std::uint8_t>(kLabel[i]);
+  input[at++] = static_cast<std::uint8_t>(purpose);
+  for (int i = 7; i >= 0; --i) input[at++] = static_cast<std::uint8_t>(network >> (8 * i));
+  for (int i = 7; i >= 0; --i) input[at++] = static_cast<std::uint8_t>(lo >> (8 * i));
+  for (int i = 7; i >= 0; --i) input[at++] = static_cast<std::uint8_t>(hi >> (8 * i));
+  for (const auto byte : rms) input[at++] = byte;
+  sha256(ByteView{input.data(), input.size()}, out);
+  secure_clear(input);
 }
 
 bool carrier_equal(const keys::LinkCarrier& a, const keys::LinkCarrier& b) noexcept {
@@ -194,6 +227,8 @@ HandshakeEngine::HandshakeEngine(ResumeCache2& cache, HandshakeSessionSink& sink
       random_ctx_(random_ctx),
       credentials_(*this) {}
 
+HandshakeEngine::~HandshakeEngine() noexcept { secure_clear(dev_policy_.psk); }
+
 Status HandshakeEngine::configure(const MonotonicMs now) noexcept {
   if (entered_) return Status::error(StatusCode::Busy, "handshake re-entered");
   const EnterGuard guard(entered_);
@@ -201,6 +236,12 @@ Status HandshakeEngine::configure(const MonotonicMs now) noexcept {
   if (!cookie_.configured()) {
     return Status::error(StatusCode::InvalidState, "handshake cookie not configured");
   }
+  // Member configure always means member mode: a previously armed dev
+  // policy is wiped, never left half-live under member evidence.
+  secure_clear(dev_policy_.psk);
+  dev_policy_ = DevResumePolicy{};
+  dev_armed_ = false;
+  dev_r1_peer_ = kInvalidNodeId;
   cancel_all_internal();
   rlres1_configured_ = false;
   staged_ = StagedEstablished{};
@@ -214,7 +255,52 @@ Status HandshakeEngine::configure(const MonotonicMs now) noexcept {
   return Status::success();
 }
 
+Status HandshakeEngine::configure_dev(const DevResumePolicy& policy,
+                                      const MonotonicMs now) noexcept {
+  if (entered_) return Status::error(StatusCode::Busy, "handshake re-entered");
+  const EnterGuard guard(entered_);
+  if (random_ == nullptr) return Status::error(StatusCode::InvalidArgument, "handshake random");
+  if (!cookie_.configured()) {
+    return Status::error(StatusCode::InvalidState, "handshake cookie not configured");
+  }
+  // A zero low32 has no wire identity (the radio carries low32 only); the
+  // role repeats the member-role bits so the install stays in range.
+  if (!id_usable(policy.self) || policy.network == 0 ||
+      (policy.network & 0xFFFFFFFFULL) == 0 || policy.role == 0 ||
+      (policy.role & ~kMemberRoleMask) != 0) {
+    return Status::error(StatusCode::InvalidArgument, "handshake dev policy");
+  }
+  bool psk_zero = true;
+  for (const auto byte : policy.psk) psk_zero = psk_zero && (byte == 0);
+  if (psk_zero) return Status::error(StatusCode::InvalidArgument, "handshake dev psk");
+  // The policy only (re-)arms on a fully drained engine: a mid-flight
+  // PSK swap would install under mixed evidence.
+  if (has_pending_ || staged_.pending || edhoc_flight_.active ||
+      lookup_.kind != ResumeLookupWork::Kind::None) {
+    return Status::error(StatusCode::Busy, "handshake result pending");
+  }
+  for (const auto& record : records_) {
+    if (record.used) return Status::error(StatusCode::Busy, "handshake in flight");
+  }
+  secure_clear(dev_policy_.psk);
+  dev_policy_ = policy;
+  dev_armed_ = true;
+  dev_r1_peer_ = kInvalidNodeId;
+  cancel_all_internal();
+  rlres1_configured_ = false;
+  staged_ = StagedEstablished{};
+  has_pending_ = false;
+  pending_ = HandshakeResult{};
+  last_tick_ = now;
+  ecc_primed_ = false;
+  const Status local = refresh_dev_local();
+  if (!local) return local;
+  configured_ = true;
+  return Status::success();
+}
+
 Status HandshakeEngine::refresh_local() noexcept {
+  if (dev_armed_) return refresh_dev_local();
   HandshakeLocal fresh{};
   if (!membership_.local(fresh)) {
     cancel_all_internal();
@@ -281,6 +367,60 @@ Status HandshakeEngine::refresh_local() noexcept {
   }
   return changed ? Status::error(StatusCode::Conflict, "handshake local evidence changed")
                  : Status::success();
+}
+
+Status HandshakeEngine::refresh_dev_local() noexcept {
+  // Fixed by the armed policy: no site, no RRS1, gk pinned at 1. The
+  // membership view is not consulted — local() returning false (or
+  // counting calls) must never disturb a dev exchange.
+  HandshakeLocal fresh{};
+  fresh.self = dev_policy_.self;
+  fresh.network = dev_policy_.network;
+  fresh.site_id = 0;
+  fresh.site_epoch = static_cast<std::uint32_t>(dev_policy_.network >> 32);
+  fresh.rs_epoch = 0;
+  fresh.gk_epoch = 1;
+  fresh.generation = 0;
+  fresh.role = dev_policy_.role;
+  fresh.caps = kRld1CapDevRamSessionV1;
+  fresh.boot = dev_policy_.boot;
+  if (local_set_ &&
+      (fresh.network != local_.network || fresh.self != local_.self ||
+       fresh.role != local_.role || fresh.boot != local_.boot)) {
+    // Unreachable: the policy only changes on a quiescent engine, which
+    // re-runs the full configure path. Fail closed if it ever happens.
+    cancel_all_internal();
+    rlres1_configured_ = false;
+    return Status::error(StatusCode::Conflict, "handshake dev policy changed");
+  }
+  local_ = fresh;
+  local_set_ = true;
+  if (!rlres1_configured_) {
+    cancel_all_internal();
+    rlres1::Local view{};
+    view.self = local_.self;
+    view.network = local_.network;
+    view.site_id = 0;
+    view.epochs.site_epoch = local_.site_epoch;
+    view.epochs.rs_epoch = 0;
+    view.epochs.gk_epoch = 1;
+    rlres1::Limits limits{};
+    limits.base_timeout_ms = 2000;  // 3 x 500 ms R1 retransmits fit inside
+    const Status configured = rlres1_.configure(view, limits);
+    if (!configured) return configured;
+    rlres1_configured_ = true;
+  } else {
+    rlres1::Epochs epochs{};
+    epochs.site_epoch = local_.site_epoch;
+    epochs.rs_epoch = 0;
+    epochs.gk_epoch = 1;
+    const Status updated = rlres1_.update_epochs(epochs);
+    if (!updated) {
+      cancel_all_internal();
+      return updated;
+    }
+  }
+  return Status::success();
 }
 
 bool HandshakeEngine::quiescent() const noexcept {
@@ -518,6 +658,23 @@ bool HandshakeEngine::random(const MutableByteView out) noexcept {
 bool HandshakeEngine::find_slot(const rlres1::Purpose purpose, const rlres1::ResumeId& rid,
                                 rlres1::Slot& out) noexcept {
   out = rlres1::Slot{};
+  if (dev_armed_) {
+    // RAM-only lookup (P4 §10.1): derive the pair RMS from the PSK and
+    // the R1's claimed peer (stashed by complete_resume_r1 around the
+    // synchronous on_r1 call) and check the rid. No claimant, no peer
+    // enumeration, no store — and no match without the PSK.
+    if (dev_r1_peer_ == kInvalidNodeId) return false;
+    const Status found = dev_find_slot(dev_policy_.psk, dev_policy_.network, purpose,
+                                       dev_policy_.self, dev_r1_peer_, rid, out);
+    if (!found) return false;
+    ResumeBinding binding{};
+    binding.slot_index = kDevResumeSlot;
+    dev_slot_identity(dev_policy_.self, dev_r1_peer_, purpose, dev_policy_.network,
+                      out.secret, binding.identity);
+    binding.valid = true;
+    resume_lookup_ = binding;
+    return true;
+  }
   ResumeContext context{};
   context.network = local_.network;
   context.gk_epoch = local_.gk_epoch;
@@ -587,6 +744,14 @@ bool HandshakeEngine::allocate_context_id(const rlres1::Purpose purpose, const N
 
 bool HandshakeEngine::reserve_resume_use(const rlres1::Purpose purpose,
                                          const rlres1::ResumeId& rid) noexcept {
+  // Dev policy: no durable 64-use budget (there is no RLP to count on).
+  // Freshness comes from the per-attempt nonces the rlres1 engine itself
+  // enforces; rotation is the bank's 24 h / 2^32 rule.
+  if (dev_armed_) {
+    (void)purpose;
+    (void)rid;
+    return true;
+  }
   ResumeContext context{};
   context.network = local_.network;
   context.gk_epoch = local_.gk_epoch;
@@ -700,6 +865,7 @@ void HandshakeEngine::cancel_all_internal() noexcept {
   rlres1_.clear_all();
   resume_lookup_ = ResumeBinding{};
   lookup_ = ResumeLookupWork{};
+  dev_r1_peer_ = kInvalidNodeId;
   pending_ = HandshakeResult{};
   has_pending_ = false;
   staged_ = StagedEstablished{};
@@ -844,6 +1010,11 @@ Status HandshakeEngine::request(const HandshakeRequest& req, const MonotonicMs n
       req.reason != HandshakeReason::ResumeRetry) {
     return Status::error(StatusCode::InvalidArgument, "handshake reason");
   }
+  // ResumeRetry means "resume died, run the full EDHOC" — dev has no
+  // EDHOC to retry to, so the reason itself is unservable.
+  if (dev_armed_ && req.reason == HandshakeReason::ResumeRetry) {
+    return Status::error(StatusCode::Unsupported, "handshake dev no edhoc retry");
+  }
   for (const auto& candidate : records_) {
     if (candidate.used && candidate.scope == req.scope && candidate.peer == req.peer) {
       return Status::error(StatusCode::Busy, "handshake already in flight");
@@ -872,14 +1043,20 @@ Status HandshakeEngine::request(const HandshakeRequest& req, const MonotonicMs n
     }
     // Selection on the frozen hints (P4 §5.1): the EDHOC floor must be
     // mutual or the link is Unsupported; resume-first additionally
-    // needs the resume bit on both sides.
-    if (!caps_edhoc_pair(req.carrier.capability_i, req.carrier.capability_r)) {
+    // needs the resume bit on both sides. Dev selects on the DevRam bit
+    // pair instead (P4 §10.1) — member/dev mixes never start.
+    if (dev_armed_) {
+      if (!caps_dev_pair(req.carrier.capability_i, req.carrier.capability_r)) {
+        return Status::error(StatusCode::Unsupported, "handshake peer dev unsupported");
+      }
+    } else if (!caps_edhoc_pair(req.carrier.capability_i, req.carrier.capability_r)) {
       return Status::error(StatusCode::Unsupported, "handshake peer edhoc unsupported");
     }
     seed.mac_i = req.mac_i;
     seed.mac_r = req.mac_r;
     seed.carrier = req.carrier;
-    resume_offered = caps_resume_pair(req.carrier.capability_i, req.carrier.capability_r);
+    resume_offered = dev_armed_ ||
+                     caps_resume_pair(req.carrier.capability_i, req.carrier.capability_r);
   } else {
     const Status drawn = draw_exchange_id(seed.exchange_id);
     if (!drawn) return drawn;
@@ -889,6 +1066,33 @@ Status HandshakeEngine::request(const HandshakeRequest& req, const MonotonicMs n
   // look up and reserve BEFORE the record commits, so a refused request
   // leaves no trace.
   if (req.reason != HandshakeReason::ResumeRetry && resume_offered) {
+    if (dev_armed_) {
+      // O(1) derivation, no stepped cache scan at any quota: the RMS is
+      // computed, never looked up, and nothing durable is spent. Busy
+      // only on transient capacity; anything the rlres1 engine refuses
+      // (revocation included) fails the request synchronously — there
+      // is no EDHOC queue to park it on.
+      if (rlres1_.initiator_in_flight() >= 4) {
+        return Status::error(StatusCode::Busy, "handshake resume full");
+      }
+      keys::Secret rms{};
+      const Status derived =
+          keys::dev_pair_rms(dev_policy_.psk, dev_policy_.network, dev_policy_.self,
+                             req.peer, to_keys_purpose(req.scope), rms);
+      if (!derived) {
+        secure_clear(rms);
+        return derived;
+      }
+      CarrierRecord* record = alloc_record();
+      if (record == nullptr) {
+        secure_clear(rms);
+        return Status::error(StatusCode::Busy, "handshake table full");
+      }
+      *record = seed;
+      const Status started = begin_dev_resume(*record, rms, now);
+      secure_clear(rms);
+      return started;
+    }
     if (cache_.link_quota() > ResumeCache2::kLookupStepSlots ||
         cache_.end_quota() > ResumeCache2::kLookupStepSlots) {
       CarrierRecord* record = alloc_record();
@@ -919,6 +1123,11 @@ Status HandshakeEngine::request(const HandshakeRequest& req, const MonotonicMs n
         return begin_resume(*record, slot, index, now);
       }
     }
+  }
+  if (dev_armed_) {
+    // Unreachable: the dev branch above always starts or refuses. Held
+    // as a fail-closed backstop so no future edit queues EDHOC in dev.
+    return Status::error(StatusCode::InternalError, "handshake dev edhoc unreachable");
   }
   CarrierRecord* record = alloc_record();
   if (record == nullptr) return Status::error(StatusCode::Busy, "handshake table full");
@@ -994,7 +1203,68 @@ Status HandshakeEngine::begin_resume(CarrierRecord& record, const ResumeSlot2& s
   return sent;
 }
 
+Status HandshakeEngine::begin_dev_resume(CarrierRecord& record, const keys::Secret& rms,
+                                         const MonotonicMs now) noexcept {
+  ScopeDigest identity{};
+  dev_slot_identity(dev_policy_.self, record.peer, to_keys_purpose(record.scope),
+                    dev_policy_.network, rms, identity);
+  record.resume.slot_index = kDevResumeSlot;
+  record.resume.identity = identity;
+  record.resume.valid = true;
+  rlres1::BeginRequest begin{};
+  begin.slot.purpose = to_keys_purpose(record.scope);
+  begin.slot.peer = record.peer;
+  begin.slot.network = dev_policy_.network;
+  begin.slot.created_gk_epoch = 1;
+  begin.slot.peer_generation = 0;
+  begin.slot.secret = rms;
+  if (record.scope == SecurityScope::Link) {
+    begin.carrier.kind = rlres1::Carrier::Kind::Link;
+    begin.carrier.mac_i = record.mac_i;
+    begin.carrier.mac_r = record.mac_r;
+    keys::link_carrier_digest(record.carrier, begin.carrier.carrier_digest);
+  } else {
+    begin.carrier.kind = rlres1::Carrier::Kind::Routed;
+    begin.carrier.hops = 0;
+  }
+  rlres1::Output out{};
+  rlres1_.begin(begin, now, *this, out);
+  secure_clear(begin.slot.secret);
+  if (out.action != rlres1::Action::Send) {
+    // Same refusal shape as begin_resume, minus the EDHOC fallback: a
+    // revoked peer or an aged view fails the request, never escalates.
+    const StatusCode failure = out.reject == rlres1::Reject::TableFull ||
+                                       out.reject == rlres1::Reject::EntropyUnavailable
+                                   ? StatusCode::Busy
+                                   : StatusCode::AuthenticationFailed;
+    drop_record(record);
+    secure_clear(out.message);
+    return Status::error(failure, "handshake dev resume begin refused");
+  }
+  if (out.message_size > record.last_tx.size()) {
+    drop_record(record);
+    secure_clear(out.message);
+    return Status::error(StatusCode::InternalError, "handshake r1 oversized");
+  }
+  std::memcpy(record.last_tx.data(), out.message.data(), out.message_size);
+  record.last_tx_size = out.message_size;
+  record.last_phase = 5;
+  record.last_step = 1;
+  record.state = RecordState::ResumeWaitR2;
+  record.retransmit_at = now + kResumeRetransmitMs;
+  record.retransmits = 0;
+  const Status sent = emit_send(record, 5, 1, ByteView{out.message.data(), out.message_size},
+                                record.scope == SecurityScope::Link);
+  secure_clear(out.message);
+  return sent;
+}
+
 Status HandshakeEngine::begin_edhoc(CarrierRecord& record, const MonotonicMs now) noexcept {
+  if (dev_armed_) {
+    // Unreachable: dev never queues EDHOC (request() refuses, on_message
+    // drops phase 4). Fail closed — dev owns no credentials to run with.
+    return emit_failed(record, StatusCode::AuthenticationFailed);
+  }
   if (edhoc_flight_.active) {
     record.state = RecordState::EdhocQueued;
     record.retransmit_at = now;
@@ -1158,6 +1428,9 @@ Status HandshakeEngine::on_message(const HandshakeRx& rx, const ByteView message
   const bool edhoc = rx.phase == 4;
   const bool resume = rx.phase == 5;
   if (!edhoc && !resume) return Status::success();
+  // Dev runs RLRES1 only: EDHOC bytes die before any record match, park
+  // or allocation — a member m1 into a dev engine answers nothing.
+  if (edhoc && dev_armed_) return Status::success();
   const JoinAuthPhase phase =
       edhoc ? JoinAuthPhase::EdhocMessage : JoinAuthPhase::Resume;
   if (!join_step_valid(phase, rx.step)) return Status::success();
@@ -1615,8 +1888,9 @@ Status HandshakeEngine::on_resume_message(CarrierRecord* record, const Handshake
       carrier.kind = rlres1::Carrier::Kind::Routed;
       carrier.hops = 0;
     }
-    if (cache_.link_quota() > ResumeCache2::kLookupStepSlots ||
-        cache_.end_quota() > ResumeCache2::kLookupStepSlots) {
+    // Dev derives the RMS in O(1): no stepped cache scan at any quota.
+    if (!dev_armed_ && (cache_.link_quota() > ResumeCache2::kLookupStepSlots ||
+                        cache_.end_quota() > ResumeCache2::kLookupStepSlots)) {
       rlres1::R1 decoded{};
       if (lookup_.kind != ResumeLookupWork::Kind::None ||
           rlres1::decode_r1(message, decoded) != rlres1::DecodeError::None ||
@@ -1683,6 +1957,11 @@ Status HandshakeEngine::on_resume_message(CarrierRecord* record, const Handshake
       // A hint (or a late R2): the RMS did not resume — run the full
       // EDHOC on the same record. The RLP slot stays valid (06 §4.3).
       rlres1_.abort(rlres1::Role::Initiator, record->peer, to_keys_purpose(record->scope));
+      if (dev_armed_) {
+        // No EDHOC to run: a wrong-PSK peer or a revoked generation
+        // ends here, with nothing installed and no escalation.
+        return emit_failed(*record, StatusCode::AuthenticationFailed);
+      }
       record->state = RecordState::EdhocQueued;
       record->retransmit_at = now;
       if (!edhoc_flight_.active && ecc_budget_ok(now)) return begin_edhoc(*record, now);
@@ -1736,7 +2015,11 @@ Status HandshakeEngine::complete_resume_r1(CarrierRecord& fresh, const ByteView 
                                            const MonotonicMs now) noexcept {
   rlres1::Output out{};
   resume_lookup_ = ResumeBinding{};
+  // Stash the claimant for find_slot's PSK derivation: valid during this
+  // synchronous on_r1 call only (an unknown claimant resolves nothing).
+  dev_r1_peer_ = dev_armed_ ? claimed_peer : kInvalidNodeId;
   rlres1_.on_r1(message, carrier, claimed_peer, now, *this, out);
+  dev_r1_peer_ = kInvalidNodeId;
   if (out.action == rlres1::Action::Send && out.message_size == rlres1::kR2Size) {
     if (!resume_lookup_.valid || out.message_size > fresh.last_tx.size() ||
         message.size != rlres1::kR1BaseSize) {
@@ -2214,6 +2497,9 @@ Status HandshakeEngine::resume_commit(CarrierRecord& record,
   pending_commit_tx_ = 0;
   pending_commit_rx_ = 0;
   pending_commit_proof_ = AuthenticatedPeerProof{};
+  if (record.resume.valid && record.resume.slot_index == kDevResumeSlot) {
+    return dev_resume_commit(record, established);
+  }
   ResumeSlot2 slot{};
   bool intact = false;
   if (!record.resume.valid ||
@@ -2254,6 +2540,67 @@ Status HandshakeEngine::resume_commit(CarrierRecord& record,
   InstallAttestation att{};
   att.peer_role = slot.peer_role;
   att.created_gk_epoch = slot.created_gk_epoch;
+  const Status installed = sink_.install_verified(keys, att);
+  if (!installed) return installed;
+  AuthenticatedPeerProof proof{};
+  const Status minted = mint_proof(record, proof);
+  if (!minted) return minted;
+  pending_commit_tx_ = keys.tx_context_id;
+  pending_commit_rx_ = keys.rx_context_id;
+  pending_commit_proof_ = proof;
+  return Status::success();
+}
+
+Status HandshakeEngine::dev_resume_commit(CarrierRecord& record,
+                                          const rlres1::Established& established) noexcept {
+  if (!record.resume.valid || record.resume.slot_index != kDevResumeSlot ||
+      established.peer != record.peer) {
+    return Status::error(StatusCode::AuthenticationFailed, "session dev binding");
+  }
+  // Re-derive under the CURRENT policy: the exchange ran under the policy
+  // that armed it, and only an unchanged policy reproduces the RMS.
+  keys::Secret rms{};
+  const Status derived =
+      keys::dev_pair_rms(dev_policy_.psk, dev_policy_.network, dev_policy_.self,
+                         record.peer, to_keys_purpose(record.scope), rms);
+  if (!derived) {
+    secure_clear(rms);
+    return derived;
+  }
+  ScopeDigest identity{};
+  dev_slot_identity(dev_policy_.self, record.peer, to_keys_purpose(record.scope),
+                    dev_policy_.network, rms, identity);
+  secure_clear(rms);
+  if (identity != record.resume.identity) {
+    return Status::error(StatusCode::AuthenticationFailed, "session dev policy moved");
+  }
+  const Status local = refresh_dev_local();
+  if (!local) return local;
+  // The CURRENT revocation view decides — a peer revoked after the first
+  // message still never installs. Generation 0 on both sides: dev has no
+  // assignment generations, so the local gate owns the decision alone.
+  if (membership_.revoked(record.peer, 0)) {
+    return Status::error(StatusCode::AuthenticationFailed, "session peer revoked");
+  }
+  if (membership_.revoked(local_.self, 0)) {
+    return Status::error(StatusCode::AuthenticationFailed, "session self revoked");
+  }
+  ContextKeys keys{};
+  keys.scope = record.scope;
+  keys.network = local_.network;
+  keys.peer = established.peer;
+  keys.tx_context_id = established.tx_context_id;
+  keys.rx_context_id = established.rx_context_id;
+  keys.tx_key = established.tx.key;
+  keys.rx_key = established.rx.key;
+  keys.tx_iv = established.tx.iv;
+  keys.rx_iv = established.rx.iv;
+  keys.peer_cert_id = {};  // fixed dev summary (P4 §10.1): no cert ...
+  keys.peer_generation = 0;  // ... generation 0, created_gk 1 below
+  InstallAttestation att{};
+  att.peer_role = dev_policy_.role;
+  att.created_gk_epoch = 1;
+  att.dev_resume = true;
   const Status installed = sink_.install_verified(keys, att);
   if (!installed) return installed;
   AuthenticatedPeerProof proof{};

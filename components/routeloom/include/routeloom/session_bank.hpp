@@ -50,6 +50,10 @@ using SessionRandomFn = bool (*)(void* ctx, std::uint8_t* out, std::size_t size)
 struct InstallAttestation {
   std::uint32_t peer_role{0};
   std::uint32_t created_gk_epoch{0};
+  // True when the keys were agreed under the dev-PSK resume policy (P4
+  // §10.1) rather than member credentials. The bank stamps kFlagDevResume
+  // from this — nothing else sets the provenance bit.
+  bool dev_resume{false};
 };
 
 struct SessionDemand {
@@ -116,7 +120,7 @@ class SessionBank {
   // generation 0, created_gk 1). A flagged context works like any live
   // one, but restore_entry refuses it — dev sessions re-run RLRES1 after
   // every boot instead of RTC-restoring — and the RTC codec never carries
-  // flags.
+  // flags. Stamped from InstallAttestation::dev_resume only.
   static constexpr std::uint32_t kFlagDevResume = 0x08;
 
   // The frozen TX use-budget rule (P4 §4.2), as a pure function so the

@@ -208,6 +208,20 @@ struct HandshakeRequest {
   keys::LinkCarrier carrier{};
 };
 
+// Dev-resume policy (P4 §10.1): the shared development PSK roots
+// per-pair RLRES1 secrets (dev_pair_rms) with no resume store, no EDHOC
+// and no identity claim — a match proves "same PSK" only. `role` is the
+// local config allow-role (nonzero member-role bits), `boot` the durable
+// boot token. Epochs are fixed (site_epoch from the network high32,
+// rs 0, gk 1); revocation still gates through the membership view.
+struct DevResumePolicy {
+  keys::Secret psk{};
+  NetworkId network{0};
+  NodeId self{kInvalidNodeId};
+  std::uint32_t role{0};
+  std::uint32_t boot{0};
+};
+
 struct HandshakeRx {
   SecurityScope scope{SecurityScope::Link};
   std::uint8_t phase{0};  // 4 EDHOC, 5 RLRES1 (join-transport object codec)
@@ -267,11 +281,21 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   HandshakeEngine(ResumeCache2& cache, HandshakeSessionSink& sink, MemberCookie& cookie,
                   HandshakeMembershipView& membership, SessionCredentialVerifier& verifier,
                   RandomFn random, void* random_ctx) noexcept;
+  // Wipes the armed dev PSK (exchange secrets die with their records and
+  // flights; the policy is configuration and outlives them otherwise).
+  ~HandshakeEngine() noexcept;
 
   HandshakeEngine(const HandshakeEngine&) = delete;
   HandshakeEngine& operator=(const HandshakeEngine&) = delete;
 
   Status configure(MonotonicMs now) noexcept;
+  // Arms the dev-resume policy instead of member credentials: RLRES1 with
+  // PSK-derived pair secrets, no resume store, no EDHOC fallback (a dead
+  // RMS fails the exchange, never escalates). Refuses Busy while any
+  // record, lookup, flight or undrained result exists; the policy only
+  // changes (or arms) on a quiescent engine. The membership view stays
+  // attached for revocation; its local() is never consulted in dev mode.
+  Status configure_dev(const DevResumePolicy& policy, MonotonicMs now) noexcept;
 
   // Start a resume-first exchange toward `req.peer` (single flight per
   // scope/peer; a second request is Busy until cancel/timeout).
@@ -445,6 +469,11 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   };
 
   Status refresh_local() noexcept;
+  // Dev-mode local evidence (fixed by the armed policy, never the member
+  // view): self/network/role from the policy, epochs pinned (site from
+  // the network high32, rs 0, gk 1). Idempotent — the policy cannot move
+  // under a live exchange, so the view never "changes".
+  Status refresh_dev_local() noexcept;
   // Drops every record and session without emitting (re-entry safe: used
   // under the entry guard only).
   void cancel_all_internal() noexcept;
@@ -459,6 +488,12 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   void stage_established(const StagedEstablished& established) noexcept;
   Status begin_resume(CarrierRecord& record, const ResumeSlot2& slot, std::size_t slot_index,
                       MonotonicMs now) noexcept;
+  // Dev-mode initiator start: same R1 shape, but the RMS comes from the
+  // armed policy (dev_pair_rms) instead of a cache slot, and a refused
+  // start fails the record — dev never queues EDHOC. Marks the binding
+  // with kDevResumeSlot so the commit re-derives instead of re-reading.
+  Status begin_dev_resume(CarrierRecord& record, const keys::Secret& rms,
+                          MonotonicMs now) noexcept;
   Status begin_edhoc(CarrierRecord& record, MonotonicMs now) noexcept;
   // Responder m1 intake (fresh or parked): starts the flight and
   // answers m2, or parks the bytes in the shared stash when the flight
@@ -487,6 +522,14 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
                                     MonotonicMs now) noexcept;
   Status edhoc_commit(CarrierRecord& record) noexcept;
   Status resume_commit(CarrierRecord& record, const rlres1::Established& established) noexcept;
+  // Dev-mode commit for a kDevResumeSlot binding: re-derives the pair RMS
+  // from the armed policy and the record peer, re-checks the binding,
+  // installs with the fixed dev summary (cert 0, generation 0,
+  // created_gk 1, dev_resume provenance). The policy cannot move under a
+  // live exchange, so a re-derived RMS that differs is a refusal, and
+  // revocation (peer and self, generation 0) still gates the install.
+  Status dev_resume_commit(CarrierRecord& record,
+                           const rlres1::Established& established) noexcept;
   // Authenticated peer-state checks (purpose echo, node, site, epochs,
   // caps agreement, initiator boot/caps echo). `peer_is_initiator`
   // selects the staged State (I or R). Records the peer GK epoch.
@@ -544,9 +587,20 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   rlres1::Engine rlres1_;
   bool rlres1_configured_{false};
 
+  // Sentinel binding index for dev-resume records: the RMS is re-derived
+  // from the armed policy at commit instead of re-read from a cache slot.
+  // No cache holds this many slots, so a member binding never aliases it.
+  static constexpr std::size_t kDevResumeSlot = static_cast<std::size_t>(-1);
+
   std::array<CarrierRecord, kCarrierRecords> records_{};
   ResumeBinding resume_lookup_{};
   ResumeLookupWork lookup_{};
+  // Dev-resume arming (configure_dev): the policy, and the claimed peer
+  // stashed around exactly one synchronous rlres1 on_r1 call so find_slot
+  // can derive the pair RMS. The stash is only valid during that call.
+  DevResumePolicy dev_policy_{};
+  bool dev_armed_{false};
+  NodeId dev_r1_peer_{kInvalidNodeId};
   EdhocFlight edhoc_flight_{};
   std::array<std::uint8_t, 4> edhoc_cid_bytes_{};
   // Single-owner big-message buffer (m2/m4 responder-duplicate, m3

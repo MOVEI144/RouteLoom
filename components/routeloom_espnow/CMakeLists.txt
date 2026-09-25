@@ -11,6 +11,7 @@ idf_component_register(
     src/nvs_counter_store.cpp
     src/nvs_cred_store.cpp
     src/nvs_ledger_store.cpp
+    src/nvs_legacy_purge.cpp
     src/nvs_replay_store.cpp
     src/nvs_sdkv1_store.cpp
     src/nvs_security_floor.cpp

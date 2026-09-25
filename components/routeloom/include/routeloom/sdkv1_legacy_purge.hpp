@@ -39,6 +39,12 @@ bool is_legacy_peer_key(const LegacyKey& key) noexcept;
 // A failure returns without claiming completion; retries are idempotent.
 Status purge_legacy_state(LegacyPurgePort& port, bool stopped, bool ram_only_build,
                           LegacyPurgeResult& result) noexcept;
+// Splits a physical-console line: `security legacy-state <rest>` yields the
+// verb line for LegacyStateConsole::process_line (a bare prefix yields an
+// empty rest, which the console refuses as invalid_argument). Anything
+// else is NotFound and stays with the factory console. `rest` borrows
+// `line` and is cleared on refusal.
+Status strip_legacy_state_prefix(ByteView line, ByteView& rest) noexcept;
 
 // Physical-maintenance console for the purge (P4 §10.2): the portable logic
 // behind the firmware's `security legacy-state` verb. The firmware runner

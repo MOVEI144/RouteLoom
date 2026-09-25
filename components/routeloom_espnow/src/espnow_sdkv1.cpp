@@ -7,8 +7,14 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "routeloom/discovery_scope.hpp"  // sha256 (member SAK-kid stand-in)
 #include "routeloom/espnow_sdkv1_entropy.hpp"
+#include "routeloom/nvs_legacy_purge.hpp"
+#include "routeloom/sdkv1_dev_session.hpp"
+#include "routeloom/sdkv1_legacy_purge.hpp"
 #include "routeloom/sdkv1_maintenance.hpp"
+#include "routeloom/secure_clear.hpp"
+#include "sdkconfig.h"
 
 namespace routeloom::espnow {
 namespace {
@@ -18,6 +24,73 @@ constexpr char kTag[] = "RouteLoomSdkv1";
 // driver calls; 8 KiB leaves headroom without touching the main task.
 constexpr std::uint32_t kConsoleTaskStack = 8192;
 
+int hex_value(const char value) noexcept {
+  if (value >= '0' && value <= '9') return value - '0';
+  if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+  if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+  return -1;
+}
+
+// Resolves the maintenance-domain fingerprint the `security legacy-state`
+// verb compares against (P4 §10.2): an adopted site yields the member
+// print (site/network/self plus the site-cert digest as the SAK-kid
+// stand-in — the SiteStore carries no separate SAK kid field), otherwise
+// the Kconfig dev PSK yields the dev print. Neither (an unadopted
+// RAM-only device, or an unparseable key) means unknown: the runner then
+// serves the read-only `status` only and refuses every purge line.
+bool resolve_legacy_domain(Sdkv1Stores& stores,
+                           sdkv1::MaintenanceFingerprint& out) noexcept {
+  out = sdkv1::MaintenanceFingerprint{};
+  if (stores.site().has_site() && stores.identity().has_identity()) {
+    const sdkv1::SiteRecord& site = stores.site().site();
+    const sdkv1::IdentityRecord& identity = stores.identity().identity();
+    const ByteView cert = site.site_cert.view();
+    if (cert.size == 0) return false;
+    ScopeDigest kid{};
+    sha256(cert, kid);
+    std::array<std::uint8_t, 32> sak_kid{};
+    std::memcpy(sak_kid.data(), kid.data(), sak_kid.size());
+    secure_clear(kid);
+    const Status ok = sdkv1::member_maintenance_fingerprint(
+        1, site.network, identity.node_id, site.site_id, sak_kid, out);
+    secure_clear(sak_kid);
+    return ok.ok();
+  }
+// The dev PSK Kconfig exists in legacy-fixture builds only; anywhere
+// else there is no dev domain to resolve (unadopted RAM-only devices
+// stay unknown until the DevRam runtime carries its own PSK config).
+#ifdef CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX
+  const char* hex = CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX;
+  keys::Secret psk{};
+  if (hex == nullptr || std::strlen(hex) != psk.size() * 2) return false;
+  for (std::size_t i = 0; i < psk.size(); ++i) {
+    const int high = hex_value(hex[i * 2]);
+    const int low = hex_value(hex[i * 2 + 1]);
+    if (high < 0 || low < 0) {
+      secure_clear(psk);
+      return false;
+    }
+    psk[i] = static_cast<std::uint8_t>((high << 4) | low);
+  }
+  const Status ok = sdkv1::dev_maintenance_fingerprint(
+      psk, 2, static_cast<NetworkId>(CONFIG_ROUTELOOM_NETWORK_ID),
+      static_cast<NodeId>(CONFIG_ROUTELOOM_NODE_ID), out);
+  secure_clear(psk);
+  return ok.ok();
+#else
+  return false;
+#endif
+}
+
+// Exact `status` match for the unknown-domain fallback (see above): kept
+// next to the router so a future console verb cannot silently slip past
+// the purge gate — any new mutating verb must extend this predicate.
+bool is_legacy_status_only(const ByteView rest) noexcept {
+  static constexpr char kStatus[] = "status";
+  return rest.size == sizeof(kStatus) - 1 &&
+         std::memcmp(rest.data, kStatus, rest.size) == 0;
+}
+
 void console_task(void* arg) {
   Sdkv1Stores* stores = static_cast<Sdkv1Stores*>(arg);
   EspMaintenanceEntropy entropy;
@@ -26,6 +99,23 @@ void console_task(void* arg) {
     ESP_LOGE(kTag, "maintenance entropy unavailable: %s", entropy_status.detail);
   }
   sdkv1::MaintenanceConsole console(stores->identity(), entropy);
+  // The `security legacy-state` verb rides the same exclusive physical
+  // console (P4 §10.2): the maintenance boot never starts radio, USB
+  // lanes or the Node, so `stopped` below is structural, not polled.
+  NvsLegacyPurgePort purge_port;
+  sdkv1::MaintenanceFingerprint legacy_domain{};
+  const bool legacy_domain_known = resolve_legacy_domain(*stores, legacy_domain);
+  if (!legacy_domain_known) {
+    ESP_LOGW(kTag, "legacy-state domain unknown: status only, purge refused");
+  }
+  sdkv1::LegacyStateConsole legacy(
+      purge_port, legacy_domain,
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+      false
+#else
+      true
+#endif
+  );
   static char line[sdkv1::kMaintenanceLineMax + 2];
   static char response[sdkv1::kMaintenanceResponseMax];
   static const char kBanner[] = "routeloom-maintenance v1 ready\n";
@@ -46,14 +136,45 @@ void console_task(void* arg) {
     }
     if (length > 0 && line[length - 1] == '\r') --length;
     std::size_t response_size = 0;
+    const ByteView raw_line{reinterpret_cast<const std::uint8_t*>(line), length};
+    ByteView legacy_rest{};
     if (overflow) {
       const char refused[] = "ERR invalid_argument";
       std::memcpy(response, refused, sizeof(refused));
       response_size = sizeof(refused) - 1;
+    } else if (sdkv1::strip_legacy_state_prefix(raw_line, legacy_rest).ok()) {
+      // console_locked refuses every verb on this console (same rule and
+      // tokens as the factory side): the identity store is re-read per
+      // line, so a seal committed earlier in this session takes effect
+      // immediately, and an unreadable store fails closed.
+      const Status identity_status = stores->identity().initialize();
+      if (!identity_status.ok() || stores->identity().quarantined() ||
+          stores->identity().uncertain()) {
+        const char refused[] = "ERR store_unavailable";
+        std::memcpy(response, refused, sizeof(refused));
+        response_size = sizeof(refused) - 1;
+      } else if (stores->identity().has_identity() &&
+                 (stores->identity().identity().flags &
+                  sdkv1::kIdentityFlagConsoleLocked) != 0) {
+        const char refused[] = "ERR locked";
+        std::memcpy(response, refused, sizeof(refused));
+        response_size = sizeof(refused) - 1;
+      } else if (!legacy_domain_known && !is_legacy_status_only(legacy_rest)) {
+        const char refused[] = "ERR domain";
+        std::memcpy(response, refused, sizeof(refused));
+        response_size = sizeof(refused) - 1;
+      } else {
+        const Status status = legacy.process_line(legacy_rest, /*stopped=*/true,
+                                                   response, sizeof(response),
+                                                   response_size);
+        if (!status) {
+          ESP_LOGE(kTag, "legacy console fault: %s", status.detail);
+          continue;  // caller-side bug only; the line is dropped, console stays
+        }
+      }
     } else {
-      const Status status = console.process_line(
-          ByteView{reinterpret_cast<const std::uint8_t*>(line), length}, response,
-          sizeof(response), response_size);
+      const Status status =
+          console.process_line(raw_line, response, sizeof(response), response_size);
       if (!status) {
         ESP_LOGE(kTag, "console fault: %s", status.detail);
         continue;  // caller-side bug only; the line is dropped, console stays

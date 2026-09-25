@@ -84,7 +84,9 @@ class Sdkv1Stores {
 // Call pre-RF from a CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE build only. Log
 // text shares the USB with the protocol on builds whose console is USB;
 // the factory tool syncs on the `OK`/`ERR` response prefix and ignores
-// anything else.
+// anything else. Lines starting with `security legacy-state` are routed
+// to the legacy peer-record purge verb (P4 §10.2) instead of the factory
+// provisioning console; everything else keeps the factory grammar.
 Status run_maintenance_console(Sdkv1Stores& stores) noexcept;
 
 }  // namespace routeloom::espnow

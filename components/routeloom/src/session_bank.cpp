@@ -443,6 +443,7 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::install_verified(
   fresh.peer_generation = keys.peer_generation;
   fresh.peer_role = att.peer_role;
   fresh.created_gk = att.created_gk_epoch;
+  fresh.flags = att.dev_resume ? kFlagDevResume : 0;
   fresh.remaining_ms = kContextLifetimeMs;
   fresh.install_serial = ++install_serial_;
   if (existing != nullptr) {
