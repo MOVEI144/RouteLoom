@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "routeloom/autonomy_wire.hpp"
@@ -37,6 +38,8 @@ std::string current;
 using namespace routeloom;
 using namespace routeloom::sdkv1;
 using namespace sdkv1_test;
+
+static_assert(std::is_nothrow_destructible_v<SecurityCoordinator>);
 
 constexpr MacAddress kMac{{0x02, 0, 0, 0, 0x12, 0x34}};
 constexpr MacAddress kPeerMac{{0x02, 0, 0, 0, 0x0A, 0x01}};

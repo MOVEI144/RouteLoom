@@ -247,7 +247,7 @@ class SecurityCoordinator final : public BootstrapSink,
   explicit SecurityCoordinator(const Deps& deps) noexcept;
   SecurityCoordinator(const SecurityCoordinator&) = delete;
   SecurityCoordinator& operator=(const SecurityCoordinator&) = delete;
-  ~SecurityCoordinator() override;
+  ~SecurityCoordinator() noexcept override;
 
   // The single entry. Boot/Poll/Stop/PrepareSleep/Wake drive the mode
   // workspace; Rld1Rx demuxes to Joiner/proxy/member engine; USB downs
