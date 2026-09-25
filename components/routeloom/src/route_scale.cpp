@@ -60,6 +60,95 @@ bool reserved_node(const NodeId node) noexcept {
 
 }  // namespace
 
+// Broadcast records are validated as a whole before the caller can install
+// any route. A GK tag alone does not establish a pairwise sender identity.
+namespace {
+bool valid_broadcast_records(const BroadcastRouteRecord* records, const std::size_t count,
+                             const NodeId sender) noexcept {
+  if (records == nullptr || count == 0 || count > kBroadcastRouteMaxRecords ||
+      reserved_node(sender) || records[0].route.destination != sender ||
+      records[0].route.metric != 0 || records[0].via != kInvalidNodeId) return false;
+  for (std::size_t i = 0; i < count; ++i) {
+    const auto& record = records[i];
+    const auto& route = record.route;
+    if (reserved_node(route.destination) || route.generation == 0 ||
+        (i != 0 && (route.metric == 0 ||
+                     (route.metric == kInfiniteRouteMetric
+                          ? record.via != kInvalidNodeId
+                          : reserved_node(record.via) || record.via == sender ||
+                                record.via == route.destination)))) return false;
+    for (std::size_t j = 0; j < i; ++j) {
+      if (records[j].route.destination == route.destination) return false;
+    }
+  }
+  return true;
+}
+}  // namespace
+
+Status encode_broadcast_route_update(const BroadcastRouteRecord* records,
+                                     const std::size_t count, const NodeId sender,
+                                     const MutableByteView out, std::size_t& written) noexcept {
+  written = 0;
+  if (!valid_broadcast_records(records, count, sender)) {
+    return Status::error(StatusCode::InvalidArgument, "broadcast route records");
+  }
+  ByteWriter writer(out);
+  auto status = writer.write_u8(1);
+  if (status) status = writer.write_u8(0);
+  if (status) status = writer.write_u8(static_cast<std::uint8_t>(count));
+  if (status) status = writer.write_u8(0);
+  for (std::size_t i = 0; status && i < count; ++i) {
+    const auto& record = records[i];
+    status = writer.write_u64(record.route.destination);
+    if (status) status = writer.write_u32(record.route.generation);
+    if (status) status = writer.write_u16(record.route.sequence);
+    if (status) status = writer.write_u16(record.route.metric);
+    if (status) status = writer.write_u64(record.via);
+  }
+  if (status) written = writer.size();
+  return status;
+}
+
+Status decode_broadcast_route_update(
+    const ByteView input, const NodeId sender,
+    std::array<BroadcastRouteRecord, kBroadcastRouteMaxRecords>& records,
+    std::size_t& count) noexcept {
+  count = 0;
+  if (input.data == nullptr || input.size < 28 || input.data[0] != 1 ||
+      input.data[1] != 0 || input.data[3] != 0 || input.data[2] == 0 ||
+      input.data[2] > kBroadcastRouteMaxRecords ||
+      input.size != 4U + 24U * input.data[2]) {
+    return Status::error(StatusCode::ProtocolError, "broadcast route length/head");
+  }
+  std::array<BroadcastRouteRecord, kBroadcastRouteMaxRecords> decoded{};
+  ByteReader reader(input);
+  std::uint8_t head = 0;
+  for (int i = 0; i < 4; ++i) {
+    auto status = reader.read_u8(head);
+    if (!status) return status;
+  }
+  for (std::size_t i = 0; i < input.data[2]; ++i) {
+    auto& record = decoded[i];
+    auto status = reader.read_u64(record.route.destination);
+    if (status) status = reader.read_u32(record.route.generation);
+    if (status) status = reader.read_u16(record.route.sequence);
+    if (status) status = reader.read_u16(record.route.metric);
+    if (status) status = reader.read_u64(record.via);
+    if (!status) return status;
+  }
+  if (!valid_broadcast_records(decoded.data(), input.data[2], sender)) {
+    return Status::error(StatusCode::ProtocolError, "broadcast route records");
+  }
+  records = decoded;
+  count = input.data[2];
+  return Status::success();
+}
+
+RouteMetric project_broadcast_route_metric(const BroadcastRouteRecord& record,
+                                           const NodeId receiver) noexcept {
+  return record.via == receiver ? kInfiniteRouteMetric : record.route.metric;
+}
+
 // --- ROUTE_REQUEST payload codec ------------------------------------------------
 
 Status encode_route_request(const RouteRequestPayload& payload, const MutableByteView out,

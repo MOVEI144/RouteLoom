@@ -164,6 +164,14 @@
     "max_records": 7,
     "first_record": "sender self record, metric 0"
   },
+  "broadcast_route_update_payload": {
+    "status": "codec only; not enabled on mesh or radio",
+    "layout": "version u8=1, flags u8=0, count u8=1..5, reserved u8=0, count x (destination u64, generation u32, sequence u16, metric u16, via u64), all big-endian",
+    "max_records": 5,
+    "first_record": "sender self record, metric 0, via 0",
+    "poison_projection": "receiver equal to via sees infinity; all other receivers see metric",
+    "authentication": "group tag does not prove pairwise sender binding"
+  },
   "route_request_payload": {
     "frame_protection": "link-only, one hop, hop_remaining 1",
     "fields": [

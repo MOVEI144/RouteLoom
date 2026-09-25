@@ -225,6 +225,48 @@ void test_route_request_codec() {
   CHECK_OK(decode_route_request(ByteView{reply.data(), reply.size()}, out));
 }
 
+// Broadcast route payload: parent poisons only its own gateway record while
+// a different neighbor still sees a finite metric. Malformed input must not
+// publish any records, including a valid prefix.
+void test_broadcast_route_payload() {
+  std::array<BroadcastRouteRecord, kBroadcastRouteMaxRecords> records{};
+  records[0] = {{10, 7, 3, 0}, 0};
+  records[1] = {{1, 8, 4, 5}, 20};
+  std::array<std::uint8_t, kMaxApplicationPayload> bytes{};
+  std::size_t written = 0;
+  CHECK_OK(encode_broadcast_route_update(records.data(), 2, 10,
+                                         MutableByteView{bytes.data(), bytes.size()}, written));
+  CHECK(written == 52);
+  CHECK(bytes[0] == 1 && bytes[1] == 0 && bytes[2] == 2 && bytes[3] == 0);
+  const std::array<std::uint8_t, 24> second{{0, 0, 0, 0, 0, 0, 0, 1,
+                                              0, 0, 0, 8, 0, 4, 0, 5,
+                                              0, 0, 0, 0, 0, 0, 0, 20}};
+  CHECK(std::memcmp(bytes.data() + 28, second.data(), second.size()) == 0);
+  std::array<BroadcastRouteRecord, kBroadcastRouteMaxRecords> decoded{};
+  std::size_t count = 0;
+  CHECK_OK(decode_broadcast_route_update(ByteView{bytes.data(), written}, 10, decoded, count));
+  CHECK(count == 2 && decoded[1].via == 20);
+  CHECK(project_broadcast_route_metric(decoded[1], 20) == kInfiniteRouteMetric);
+  CHECK(project_broadcast_route_metric(decoded[1], 30) == 5);
+  auto bad = bytes;
+  bad[2] = 1;  // no trailing records allowed
+  CHECK(!decode_broadcast_route_update(ByteView{bad.data(), written}, 10, decoded, count).ok());
+  CHECK(count == 0);
+  bad = bytes;
+  std::memset(bad.data() + 44, 0, 8);
+  bad[51] = 10;  // a nonself route cannot point back to its sender
+  CHECK(!decode_broadcast_route_update(ByteView{bad.data(), written}, 10, decoded, count).ok());
+  CHECK(count == 0);
+  bad = bytes;
+  // Duplicate destination in the second record.
+  std::memcpy(bad.data() + 28, bad.data() + 4, 8);
+  CHECK(!decode_broadcast_route_update(ByteView{bad.data(), written}, 10, decoded, count).ok());
+  CHECK(count == 0);
+  CHECK(!decode_broadcast_route_update(ByteView{bytes.data(), written - 1}, 10,
+                                       decoded, count).ok());
+  CHECK(count == 0);
+}
+
 // ----------------------------------------------------------------------------
 // Unit: lease rules and config enforcement
 // ----------------------------------------------------------------------------
@@ -877,6 +919,7 @@ int main(int argc, char** argv) {
   const std::string mode = argc > 1 ? argv[1] : "";
   if (mode.empty() || mode == "unit") {
     test_route_request_codec();
+    test_broadcast_route_payload();
     test_lease_rules();
     test_scoped_config_enforced();
     test_tombstone_outlives_lease();
