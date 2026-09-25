@@ -14,10 +14,10 @@ namespace routeloom::sdkv1 {
 
 constexpr std::uint32_t kLifecycleMagic = 0x524C5831U;
 constexpr std::uint32_t kLifecycleSeal = 0x4C583101U;
-constexpr std::size_t kLifecycleSlotBytes = 2048;
 // Switching carries new RLS1, signed new RRS1 and CutoverCommit in one
 // durable intent; the maximum sealed record is 1609 B.
 constexpr std::size_t kLifecyclePayloadMax = 1521;
+constexpr std::size_t kLifecycleSlotBytes = 88 + kLifecyclePayloadMax;
 
 enum class LifecycleMode : std::uint8_t {
   Idle = 0, Removing = 1, Holdoff = 2, UnassignedReady = 3,

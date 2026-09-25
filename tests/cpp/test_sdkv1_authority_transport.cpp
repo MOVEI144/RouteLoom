@@ -711,6 +711,34 @@ void test_gateway_self_down() {
         std::memcmp(local.downs[0].bytes.data(), envelope.data(), envelope.size()) == 0);
   CHECK(port.sends == 0);  // nothing looped onto the mesh
   CHECK(gateway.quiescent());
+
+  // The Owner has one verified-message staging slot. Two completed local
+  // downs remain ordered across polls so neither authenticated body is lost.
+  const auto first = pattern(1500, 0x51);
+  const auto second = pattern(1500, 0x81);
+  const auto stage = [&](const std::vector<std::uint8_t>& body,
+                         const std::uint32_t transfer) {
+    fragment.kind = AuthorityCarrierKind::Envelope;
+    fragment.total = 1500;
+    fragment.transfer_id = transfer;
+    fragment.offset = 0;
+    fragment.data = ByteView{body.data(), 960};
+    CHECK(gateway.authority_down(kGateway, fragment, complete, 2000));
+    CHECK(!complete);
+    fragment.offset = 960;
+    fragment.data = ByteView{body.data() + 960, 540};
+    CHECK(gateway.authority_down(kGateway, fragment, complete, 2000));
+    CHECK(complete);
+  };
+  stage(first, 0x5E20);
+  stage(second, 0x5E21);
+  gateway.poll(2000);
+  CHECK(local.downs.size() == 2);
+  if (local.downs.size() >= 2) CHECK(local.downs[1].bytes == first);
+  gateway.poll(2001);
+  CHECK(local.downs.size() == 3);
+  if (local.downs.size() >= 3) CHECK(local.downs[2].bytes == second);
+  CHECK(gateway.quiescent());
 }
 
 void test_gateway_slot_exhaustion() {

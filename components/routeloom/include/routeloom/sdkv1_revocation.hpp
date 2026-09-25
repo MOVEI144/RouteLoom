@@ -593,7 +593,7 @@ struct LifecycleSnapshot {
 class MembershipLifecycle final {
  public:
   MembershipLifecycle(const LifecycleConfig& config, IdentityStore& identity, SiteStore& site,
-                      RevocationStore& revocations, ResumeCache& resume, LifecyclePorts& ports,
+                      RevocationStore& revocations, ResumeCache& resume, LifecyclePorts ports,
                       const Es256Verifier& verifier = default_es256_verifier(),
                       LifecycleStore* journal = nullptr) noexcept;
 
@@ -746,7 +746,7 @@ class MembershipLifecycle final {
   RevocationStore& revocations_;
   ResumeCache& resume_;
   LifecycleStore* journal_{nullptr};
-  LifecyclePorts& ports_;
+  LifecyclePorts ports_;
   const Es256Verifier& verifier_;
   RrsExchange exchange_;
 

@@ -474,7 +474,7 @@ struct CallGuard {
 
 MembershipLifecycle::MembershipLifecycle(
     const LifecycleConfig& config, IdentityStore& identity, SiteStore& site,
-    RevocationStore& revocations, ResumeCache& resume, LifecyclePorts& ports,
+    RevocationStore& revocations, ResumeCache& resume, LifecyclePorts ports,
     const Es256Verifier& verifier, LifecycleStore* journal) noexcept
     : config_(config),
       identity_(identity),
@@ -484,7 +484,7 @@ MembershipLifecycle::MembershipLifecycle(
       journal_(journal),
       ports_(ports),
       verifier_(verifier),
-      exchange_(ports.peer, ports.object_sink) {
+      exchange_(ports_.peer, ports_.object_sink) {
   refresh_snapshot();
 }
 

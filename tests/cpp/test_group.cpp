@@ -1902,6 +1902,191 @@ void test_promote_hold_first_frame() {
   CHECK(obs.group_messages.size() == 1);
 }
 
+void test_revoked_group_sender_with_old_key() {
+  sdkv1_test::FaultyRecordStorage site_storage(sdkv1::kSiteSlotBytes);
+  sdkv1::SiteStore site_store(site_storage);
+  CHECK_OK(site_store.initialize());
+  const sdkv1::SiteRecord site = sdkv1_test::site_record(3, 5);
+  CHECK_OK(site_store.commit(site));
+  sdkv1::GroupKeyState keys(site_store);
+  sdkv1::GroupKeyState::Input start{};
+  start.op = sdkv1::GroupKeyState::Op::Start;
+  start.boot = site.boot_witness;
+  start.generation = site.assignment_generation;
+  CHECK_OK(keys.advance(start, 1000));
+
+  sdkv1_test::FaultyRecordStorage rrs_storage(sdkv1::kRevocationSlotBytes);
+  sdkv1::RevocationStore revocations(rrs_storage);
+  CHECK_OK(revocations.initialize());
+  routeloom_test::TestSecurity pairwise;
+  const AeadGcm* aead = builtin_aead_gcm();
+  CHECK(aead != nullptr);
+  if (aead == nullptr) return;
+  const NodeId sender = site.gateways[0];
+  sdkv1::GroupSecurityProvider transmitter(keys, pairwise, *aead, sender);
+  sdkv1::GroupSecurityProvider receiver(keys, pairwise, *aead, 2, &revocations);
+  SecurityContext end{SecurityScope::Group, static_cast<std::uint32_t>(site.network),
+                      sender, kBroadcastNodeId, site.gk_epoch_current, 0,
+                      site.boot_witness, group_address(kGroupAll)};
+  const std::uint8_t payload[] = {'o', 'l', 'd'};
+  const std::uint8_t aad[] = {0x42};
+  std::array<std::uint8_t, sizeof(payload)> ciphertext{}, opened{};
+  std::array<std::uint8_t, kAeadTagSize> tag{};
+  std::uint64_t counter = 0;
+  CHECK_OK(transmitter.next_counter(end, counter));
+  CHECK_OK(transmitter.seal(end, counter, ByteView{aad, sizeof(aad)},
+                            ByteView{payload, sizeof(payload)},
+                            MutableByteView{ciphertext.data(), ciphertext.size()}, tag));
+  CHECK_OK(receiver.open(end, counter, ByteView{aad, sizeof(aad)},
+                         ByteView{ciphertext.data(), ciphertext.size()}, tag,
+                         MutableByteView{opened.data(), opened.size()}));
+  CHECK(std::memcmp(opened.data(), payload, sizeof(payload)) == 0);
+
+  // The applied RRS1 names the sender while the old GK remains decryptable.
+  sdkv1::RevocationSet set = sdkv1_test::revocation_set(15, 1, sdkv1_test::kSiteEpoch);
+  set.entries[0].node_id = sender;
+  set.entries[0].min_generation = site.assignment_generation;
+  const auto object = sdkv1_test::revocation_object(set);
+  CHECK_OK(revocations.accept(object.view(), sdkv1_test::sak().pub,
+                              site.site_id, site.network));
+  CHECK(keys.accepts(site.gk_epoch_current));
+  CHECK_OK(transmitter.next_counter(end, counter));
+  CHECK_OK(transmitter.seal(end, counter, ByteView{aad, sizeof(aad)},
+                            ByteView{payload, sizeof(payload)},
+                            MutableByteView{ciphertext.data(), ciphertext.size()}, tag));
+  opened.fill(0xA5);
+  CHECK(receiver.open(end, counter, ByteView{aad, sizeof(aad)},
+                      ByteView{ciphertext.data(), ciphertext.size()}, tag,
+                      MutableByteView{opened.data(), opened.size()}).code ==
+        StatusCode::AuthorizationFailed);
+  CHECK((opened == std::array<std::uint8_t, sizeof(payload)>{}));
+
+  // GroupLink has no assignment generation on the wire. Its authenticated
+  // previous hop is barred by the same applied identity set.
+  SecurityContext link{SecurityScope::GroupLink, end.network, sender,
+                       kBroadcastNodeId, site.boot_witness,
+                       site.gk_epoch_current, 0, 0};
+  CHECK_OK(transmitter.next_counter(link, counter));
+  CHECK_OK(transmitter.seal(link, counter, ByteView{aad, sizeof(aad)},
+                            ByteView{payload, sizeof(payload)},
+                            MutableByteView{ciphertext.data(), ciphertext.size()}, tag));
+  opened.fill(0xA5);
+  CHECK(receiver.open(link, counter, ByteView{aad, sizeof(aad)},
+                      ByteView{ciphertext.data(), ciphertext.size()}, tag,
+                      MutableByteView{opened.data(), opened.size()}).code ==
+        StatusCode::AuthorizationFailed);
+  CHECK((opened == std::array<std::uint8_t, sizeof(payload)>{}));
+
+  // A live relay with the old GK can authenticate the GroupLink wrapper
+  // around a revoked gateway's GroupEnd frame. The mesh gate must inspect
+  // the distinct origin after link authentication, before forwarding or
+  // application delivery.
+  const NodeId relay = sender + 7;
+  sdkv1::GroupSecurityProvider relay_provider(keys, pairwise, *aead, relay);
+  wire::PlainFrame plain = group_plain_header(
+      sender, MessageId{site.boot_witness, kGroupSequenceFlag | 1});
+  plain.header.network = static_cast<std::uint32_t>(site.network);
+  plain.header.end_epoch = site.gk_epoch_current;
+  GroupDataHeader head{};
+  head.priority = Priority::Normal;
+  CHECK_OK(encode_group_data(head, ByteView{payload, sizeof(payload)},
+                             MutableByteView{plain.payload.data(), plain.payload.size()},
+                             plain.payload_size));
+  wire::LinkOpenedFrame sealed{};
+  CHECK_OK(wire::seal_group(plain, sender, transmitter, sealed));
+  sealed.header.next_hop = relay;
+  wire::EncodedFrame frame{};
+  CHECK_OK(wire::forward(sealed, relay, 2, 1, sealed.header.remaining_deadline_ms,
+                         relay_provider, frame));
+
+  sdkv1::GroupKeyState clean_keys(site_store);
+  CHECK_OK(clean_keys.advance(start, 1000));
+  sdkv1::GroupSecurityProvider clean_provider(clean_keys, pairwise, *aead, 2);
+  NodeConfig config{};
+  config.network = sdkv1_test::kNetworkLow;
+  config.node = 2;
+  config.route_gateways = {sender, kInvalidNodeId};
+  config.route_advertisement_period_ms = kFastPeriodMs;
+  config.route_lifetime_ms = kFastLifetimeMs;
+  config.route_refresh_ticks = kScopedDefaultRefreshTicks;
+  config.message_session = 102;
+  config.boot_incarnation = 0xB002;
+  config.route_generation = 1;
+  config.link_epoch = 1;
+  config.end_epoch = 1;
+  routeloom_test::SimNetwork clean_net;
+  routeloom_test::SimRadio clean_radio(clean_net, 2);
+  routeloom_test::CapturingObserver clean_obs;
+  MeshNode clean_node(config, clean_radio, clean_provider, clean_obs);
+  routeloom_test::SimReplyPort clean_reply(clean_radio, 2, 1);
+  clean_reply.set_rx_context(relay, 1);
+  clean_node.set_reply_peer_port(&clean_reply);
+  CHECK_OK(clean_node.start(2000));
+  CHECK_OK(clean_node.on_radio_receive(
+      relay, frame.view(), routeloom_test::sim_rx_metadata(&clean_reply, relay), 2000));
+  CHECK(clean_obs.group_messages.size() == 1);
+
+  routeloom_test::SimNetwork revoked_net;
+  routeloom_test::SimRadio revoked_radio(revoked_net, 2);
+  routeloom_test::CapturingObserver revoked_obs;
+  MeshNode revoked_node(config, revoked_radio, receiver, revoked_obs);
+  routeloom_test::SimReplyPort revoked_reply(revoked_radio, 2, 1);
+  revoked_reply.set_rx_context(relay, 1);
+  revoked_node.set_reply_peer_port(&revoked_reply);
+  CHECK_OK(revoked_node.start(2000));
+  CHECK_OK(revoked_node.on_radio_receive(
+      relay, frame.view(), routeloom_test::sim_rx_metadata(&revoked_reply, relay), 2000));
+  CHECK(revoked_obs.group_messages.empty());
+  CHECK(revoked_obs.has_diag("GROUP_SENDER_REVOKED"));
+
+  // A relay can be revoked after an ordered frame is authenticated and
+  // held for a missing sequence. Its held application callback must stop.
+  sdkv1_test::FaultyRecordStorage pending_storage(sdkv1::kRevocationSlotBytes);
+  sdkv1::RevocationStore pending_revocations(pending_storage);
+  CHECK_OK(pending_revocations.initialize());
+  sdkv1::GroupSecurityProvider pending_provider(keys, pairwise, *aead, 2,
+                                                 &pending_revocations);
+  routeloom_test::SimNetwork pending_net;
+  routeloom_test::SimRadio pending_radio(pending_net, 2);
+  routeloom_test::CapturingObserver pending_obs;
+  MeshNode pending_node(config, pending_radio, pending_provider, pending_obs);
+  routeloom_test::SimReplyPort pending_reply(pending_radio, 2, 1);
+  pending_reply.set_rx_context(relay, 1);
+  pending_node.set_reply_peer_port(&pending_reply);
+  CHECK_OK(pending_node.start(2000));
+  const auto ordered_frame = [&](std::uint32_t sequence, wire::EncodedFrame& out) {
+    wire::PlainFrame message = group_plain_header(
+        sender, MessageId{site.boot_witness, kGroupSequenceFlag | sequence});
+    message.header.network = static_cast<std::uint32_t>(site.network);
+    message.header.end_epoch = site.gk_epoch_current;
+    GroupDataHeader ordered{};
+    ordered.ordered = true;
+    CHECK_OK(encode_group_data(ordered, ByteView{payload, sizeof(payload)},
+                               MutableByteView{message.payload.data(), message.payload.size()},
+                               message.payload_size));
+    wire::LinkOpenedFrame wrapped{};
+    CHECK_OK(wire::seal_group(message, sender, transmitter, wrapped));
+    wrapped.header.next_hop = relay;
+    CHECK_OK(wire::forward(wrapped, relay, 2, 1,
+                           wrapped.header.remaining_deadline_ms, relay_provider, out));
+  };
+  wire::EncodedFrame first{}, third{};
+  ordered_frame(1, first);
+  ordered_frame(3, third);
+  const auto pending_meta = routeloom_test::sim_rx_metadata(&pending_reply, relay);
+  CHECK_OK(pending_node.on_radio_receive(relay, first.view(), pending_meta, 2000));
+  CHECK_OK(pending_node.on_radio_receive(relay, third.view(), pending_meta, 2001));
+  CHECK(pending_obs.group_messages.size() == 1);
+  CHECK(pending_node.group_holds_in_use() == 1);
+  set.entries[0].node_id = relay;
+  const auto relay_revocation = sdkv1_test::revocation_object(set);
+  CHECK_OK(pending_revocations.accept(relay_revocation.view(), sdkv1_test::sak().pub,
+                                       site.site_id, site.network));
+  CHECK_OK(pending_node.poll(3000));
+  CHECK(pending_node.group_holds_in_use() == 0);
+  CHECK(pending_obs.group_messages.size() == 1);
+}
+
 int main(int argc, char** argv) {
   const std::string mode = argc > 1 ? argv[1] : "";
   if (mode.empty() || mode == "unit") {
@@ -1927,6 +2112,7 @@ int main(int argc, char** argv) {
     test_bad_payload_session_jump_is_ignored();
     test_unicast_ordering();
     test_promote_hold_first_frame();
+    test_revoked_group_sender_with_old_key();
   }
   if (mode.empty() || mode == "scale") {
     test_hundred_node_alarm();

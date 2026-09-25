@@ -7543,8 +7543,13 @@ void MeshNode::revoke_routes(const NodeId peer, const MonotonicMs now_ms) noexce
   // awaiting work involving the revoked identity before another dispatch
   // can select it under a repaired route or an overlapping session.
   const auto involves_peer = [&](const TxJob& job) noexcept {
+    if (job.owner == JobOwner::Group) {
+      const GroupTree* tree = group_trees_.find(
+          [&](const GroupTree& value) { return value.key == job.ack.key; });
+      if (tree != nullptr && tree->parent == peer) return true;
+    }
     return job.peer == peer || job.plain.header.origin == peer ||
-           job.plain.header.destination == peer;
+           job.plain.header.destination == peer || job.ack.key.origin == peer;
   };
   TxJob dropped{};
   while (scheduler_.drop_one_if(involves_peer, dropped)) {
@@ -7556,6 +7561,16 @@ void MeshNode::revoke_routes(const NodeId peer, const MonotonicMs now_ms) noexce
     awaiting_hop_.release(awaiting);
     fail_job(job, "REVOKED_PEER", now_ms, true);
   }
+  if (group_promote_hold_.used &&
+      (group_promote_hold_.peer == peer || group_promote_hold_.frame.header.origin == peer)) {
+    group_promote_hold_ = GroupPromoteHold{};
+  }
+  while (GroupHold* hold = group_holds_.find([&](const GroupHold& value) {
+           return value.info.key.origin == peer || value.previous_hop == peer;
+         })) group_holds_.release(hold);
+  while (GroupTree* tree = group_trees_.find([&](const GroupTree& value) {
+           return value.key.origin == peer || value.parent == peer;
+         })) group_trees_.release(tree);
 }
 
 void MeshNode::refresh_neighbor_load(const MonotonicMs now_ms) noexcept {

@@ -72,7 +72,8 @@ using Bytes = std::vector<std::uint8_t>;
 
 constexpr std::size_t kRpcMax = 1100;
 constexpr std::size_t kFlashSlots = 4;  // identity 0/1, site 0/1
-constexpr std::size_t kFlashBytes = kFlashSlots * kIdentitySlotBytes;
+constexpr std::size_t kFlashSlotBytes = 1024;  // pipe fixture layout
+constexpr std::size_t kFlashBytes = kFlashSlots * kFlashSlotBytes;
 constexpr std::uint64_t kBootWitness = 0x0A11CE;
 constexpr std::uint64_t kTickStepMs = 5;
 
@@ -457,10 +458,10 @@ class PeerWorld {
       std::memcpy(dev.identity_storage.inner_.slot(0).data(), setup.flash.data(),
                   kIdentitySlotBytes);
       std::memcpy(dev.identity_storage.inner_.slot(1).data(),
-                  setup.flash.data() + kIdentitySlotBytes, kIdentitySlotBytes);
-      std::memcpy(dev.site_storage.inner_.slot(0).data(), setup.flash.data() + 2 * kSiteSlotBytes,
+                  setup.flash.data() + kFlashSlotBytes, kIdentitySlotBytes);
+      std::memcpy(dev.site_storage.inner_.slot(0).data(), setup.flash.data() + 2 * kFlashSlotBytes,
                   kSiteSlotBytes);
-      std::memcpy(dev.site_storage.inner_.slot(1).data(), setup.flash.data() + 3 * kSiteSlotBytes,
+      std::memcpy(dev.site_storage.inner_.slot(1).data(), setup.flash.data() + 3 * kFlashSlotBytes,
                   kSiteSlotBytes);
     }
     for (const auto& site : setup.sites) add_site(site);
@@ -580,6 +581,7 @@ class PeerWorld {
       payload.push_back(i < 2 ? 0 : 1);
       payload.push_back(static_cast<std::uint8_t>(i % 2));
       payload.insert(payload.end(), slots[i]->begin(), slots[i]->end());
+      payload.resize(3 + kFlashSlotBytes, 0xFF);
       if (!write_frame(payload)) fatal("P exceeds the RPC bound");
     }
   }

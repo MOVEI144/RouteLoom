@@ -342,7 +342,8 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   LifecycleObjectSink lifecycle_sink_{*this};
   LifecycleObserver lifecycle_observer_{*this};
   alignas(sdkv1::MembershipLifecycle)
-      std::array<std::uint8_t, sizeof(sdkv1::MembershipLifecycle)> lifecycle_box_{};
+      static std::array<std::uint8_t, sizeof(sdkv1::MembershipLifecycle)> lifecycle_box_;
+  static bool lifecycle_box_in_use_;
   bool lifecycle_live_{false};
   bool lifecycle_booted_{false};
   bool removal_pending_{false};  // coordinator boot deferred: erasure runs first
@@ -370,7 +371,8 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   struct AuthorityRxStage {
     bool used{false};
     std::uint8_t type{0};
-    std::array<std::uint8_t, sdkv1::kAuthorityBodyHeadSize + sdkv1::rrs_const::kInputBodyMax> body{};
+    // Type 7's GrantCommit is the largest P6 authority down body.
+    std::array<std::uint8_t, sdkv1::kAuthorityBodyHeadSize + sdkv1::kGrantCommitMax> body{};
     std::size_t size{0};
   };
   struct AuthorityTxStage {
@@ -379,8 +381,10 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
     std::array<std::uint8_t, sdkv1::kGrantReceiptSize> body{};
     std::size_t size{0};
   };
-  // AuthorityGateway can complete both of its down slots in one poll.
-  std::array<AuthorityRxStage, 2> authority_rx_staged_{};
+  // Both transports deliver at most one local down per poll. The verified
+  // body stays here until the lifecycle's next poll, outside the channel
+  // callback.
+  std::array<AuthorityRxStage, 1> authority_rx_staged_{};
   std::array<AuthorityTxStage, 4> authority_tx_staged_{};
   // Authority transport (built at boot, once the runtime — and on
   // gateways the bridge — is attached): the mesh port over the node, one

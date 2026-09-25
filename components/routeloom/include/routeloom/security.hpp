@@ -101,6 +101,9 @@ class SecurityProvider {
     return Status::error(StatusCode::Unsupported, "group link unavailable");
   }
   virtual bool accepts_group_epoch(std::uint32_t /*g*/) const noexcept { return true; }
+  // Group frames have no assignment generation. A production provider
+  // checks the applied site revocation set by sender identity for every GK.
+  virtual bool revoked_group_sender(NodeId /*sender*/) const noexcept { return false; }
   // True while a next-GK frame authenticated but its durable promote is
   // still outstanding: the node holds (not drops) the triggering frame
   // and retries it after the promote. Providers without GK state never

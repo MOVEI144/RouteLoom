@@ -298,6 +298,8 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   static constexpr std::uint8_t kControlBurst = 4;
   static constexpr MonotonicMs kControlRefillMs = 100;  // 10 frames/s
   static constexpr std::size_t kControlMaxDecoded = 256;
+  static constexpr std::size_t kControlMaxInner =
+      kControlMaxDecoded - kHeaderSize - kCrcSize - kProtectedBodyOverhead;
   static constexpr std::uint64_t kRxGrantFrames = 8;
   static constexpr std::uint64_t kRxGrantBytes = 16384;
   static constexpr MonotonicMs kHandshakeTimeoutMs = 5000;
@@ -308,16 +310,22 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   static constexpr std::uint8_t kCreditQueryMax = 3;
   static constexpr std::size_t kMaxReasonLen = 64;
 
-  struct TxItem {
+  struct TxItemMeta {
     std::uint64_t request{0};
     // 0 = never expires; diagnostic replies carry the query's deadline so
     // credit starvation cannot retain and later deliver stale evidence.
     MonotonicMs expires_ms{0};
-    std::array<std::uint8_t, kMaxTxInner> body{};
     std::size_t body_size{0};
     std::uint16_t flags{0};
     FrameKind kind{FrameKind::KeepAlive};
   };
+
+  template <std::size_t BodyCapacity>
+  struct TxItem : TxItemMeta {
+    std::array<std::uint8_t, BodyCapacity> body{};
+  };
+  static_assert(sizeof(TxItem<kControlMaxInner>) <= 256,
+                "CONTROL reservation stores at most one 256-byte frame");
 
   struct RequestMap {
     MessageId id{};
@@ -601,19 +609,18 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // use only — no caller may hold a view into these across a bridge call.
   static constexpr std::size_t kMaxTxBody = kMaxTxInner + kProtectedBodyOverhead;
   static constexpr std::size_t kTxScratchBytes = kHeaderSize + kMaxTxBody + kCrcSize;
-  FixedQueue<TxItem, kControlQueueCapacity> control_q_{};
-  FixedQueue<TxItem, kDataQueueCapacity> data_q_{};
+  FixedQueue<TxItem<kControlMaxInner>, kControlQueueCapacity> control_q_{};
+  FixedQueue<TxItem<kMaxTxInner>, kDataQueueCapacity> data_q_{};
   // The device never emits a body above kMaxTxBody, so the in-progress wire
   // frame needs the COBS bound of kTxScratchBytes, not of a 4 KB frame.
   std::array<std::uint8_t, encoded_frame_bound(kTxScratchBytes)> tx_wire_{};
-  // tx_body_ is live only inside pump_tx (seal -> encode_frame). Between
+  // tx_body_ is live only inside pump_tx (seal -> in-place frame encode). Between
   // pumps it doubles as the transient staging of two RX-side encoders that
   // finish before returning (ram-budget.md): the DataToMesh canonical hash
   // input (kind || inner) and the node-status page reply — each is copied
   // into a TxItem or hashed before any pump can run.
-  std::array<std::uint8_t, kMaxTxBody> tx_body_{};
-  static_assert(kMaxTxBody >= kMaxTxInner + 1, "canonical DataToMesh staging");
-  std::array<std::uint8_t, kTxScratchBytes> encode_scratch_{};
+  std::array<std::uint8_t, kTxScratchBytes> tx_body_{};
+  static_assert(kTxScratchBytes >= kMaxTxInner + 1, "canonical DataToMesh staging");
   std::size_t tx_wire_size_{0};
   std::size_t tx_wire_sent_{0};
   bool tx_wire_active_{false};
@@ -651,7 +658,7 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   MonotonicMs node_monitor_ms_{0};
   std::array<NodeStatus, kNodeStatusPageMax> node_page_{};
   // The encoded page reply is staged in tx_body_ (see above).
-  static_assert(kMaxTxBody >= kGatewayInnerHeadSize + kNodeStatusPageMaxPayload,
+  static_assert(kTxScratchBytes >= kGatewayInnerHeadSize + kNodeStatusPageMaxPayload,
                 "node-status page staging");
   // The largest 0x25 trust-manifest request (2048 B object) fits one
   // decoded USB frame body; the largest config reply (92 B challenge
@@ -679,14 +686,14 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // P4 security owner (exclusive with join_relay_ above): owns the 0x61
   // /0x62 dispatch and the session-death hook when attached.
   SecurityOwnerUsbSink* join_owner_{nullptr};
-  static_assert(kMaxTxBody >= kGatewayInnerHeadSize + kJoinRelayUpMaxPayload,
+  static_assert(kTxScratchBytes >= kGatewayInnerHeadSize + kJoinRelayUpMaxPayload,
                 "join relay up staging");
   static_assert(kGatewayInnerHeadSize + kJoinRelayUpMaxPayload <= kMaxTxInner,
                 "a 0x60 body fits one TxItem");
   // authority_channel_v1: the attached sink (nullptr -> 0x65/0x66 answer
   // Unsupported). 0x64 bodies are staged in tx_body_ like 0x60.
   AuthorityUsbSink* authority_sink_{nullptr};
-  static_assert(kMaxTxBody >= kGatewayInnerHeadSize + kAuthorityFragmentMax,
+  static_assert(kTxScratchBytes >= kGatewayInnerHeadSize + kAuthorityFragmentMax,
                 "authority up staging");
   static_assert(kGatewayInnerHeadSize + kAuthorityFragmentMax <= kMaxTxInner,
                 "a 0x64 body fits one TxItem");

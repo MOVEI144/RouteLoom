@@ -7,11 +7,15 @@
 
 namespace routeloom::sdkv1 {
 
+class RevocationStore;
+
 class GroupSecurityProvider final : public SecurityProvider {
  public:
   GroupSecurityProvider(GroupKeyState& keys, SecurityProvider& pairwise,
-                        const routeloom::AeadGcm& aead, NodeId self) noexcept
-      : keys_(keys), pairwise_(pairwise), aead_(aead), self_(self) {}
+                        const routeloom::AeadGcm& aead, NodeId self,
+                        const RevocationStore* revocations = nullptr) noexcept
+      : keys_(keys), pairwise_(pairwise), aead_(aead), self_(self),
+        revocations_(revocations) {}
   GroupSecurityProvider(const GroupSecurityProvider&) = delete;
   GroupSecurityProvider& operator=(const GroupSecurityProvider&) = delete;
   ~GroupSecurityProvider();
@@ -23,6 +27,7 @@ class GroupSecurityProvider final : public SecurityProvider {
   bool accepts_group_epoch(std::uint32_t epoch) const noexcept override {
     return keys_.accepts(epoch);
   }
+  bool revoked_group_sender(NodeId sender) const noexcept override;
   bool group_promotion_pending() const noexcept override {
     return keys_.promotion_pending();
   }
@@ -51,6 +56,7 @@ class GroupSecurityProvider final : public SecurityProvider {
   SecurityProvider& pairwise_;
   const routeloom::AeadGcm& aead_;
   NodeId self_;
+  const RevocationStore* revocations_;
   std::array<std::uint8_t, kMaxEspNowBody> staging_{};
   bool in_call_{false};
 };

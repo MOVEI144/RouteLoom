@@ -733,6 +733,12 @@ void MeshNode::handle_group_data(const wire::LinkOpenedFrame& frame, const NodeI
     observer_.on_diagnostic("GROUP_KEY_RETIRED", peer, &header.message);
     return;
   }
+  if (security_.revoked_group_sender(header.origin) ||
+      security_.revoked_group_sender(header.previous_hop)) {
+    saturating_inc(group_stats_.rejected);
+    observer_.on_diagnostic("GROUP_SENDER_REVOKED", peer, &header.message);
+    return;
+  }
   const MessageKey key{header.origin, header.message};
   const std::uint8_t round = static_cast<std::uint8_t>(header.delivery_round & kGroupRoundMask);
   const bool refresh = (header.delivery_round & kGroupRoundRefresh) != 0;
@@ -857,7 +863,7 @@ void MeshNode::handle_group_data(const wire::LinkOpenedFrame& frame, const NodeI
     info.group_seq = seq;
     info.priority = head.priority;
     info.ordered = head.ordered;
-    group_accept(*stream, info, app, member, remaining, now_ms, header.end_epoch);
+    group_accept(*stream, info, app, member, remaining, now_ms, header.end_epoch, peer);
   }
 
   GroupTree* tree = allocate_group_tree(now_ms);
@@ -965,6 +971,12 @@ void MeshNode::handle_group_report(const wire::PlainFrame& frame, const NodeId p
 
 bool MeshNode::group_origin_job_stale(const TxJob& job) const noexcept {
   if (job.owner != JobOwner::Group) return false;
+  if (security_.revoked_group_sender(job.ack.key.origin) ||
+      security_.revoked_group_sender(job.peer)) return true;
+  const GroupTree* tree = group_trees_.find(
+      [&](const GroupTree& value) { return value.key == job.ack.key; });
+  if (tree == nullptr && job.ack.key.origin != config_.node) return true;
+  if (tree != nullptr && security_.revoked_group_sender(tree->parent)) return true;
   if (job.ack.accepted_type == FrameType::GroupData &&
       job.form == JobForm::Forwarded &&
       !security_.accepts_group_epoch(job.forwarded.header.end_epoch)) return true;
@@ -1003,6 +1015,7 @@ void MeshNode::group_job_done(const TxJob& job, const bool success,
 // --- Ordering and application hand-off (group-delivery.md §6) -----------------------
 
 void MeshNode::group_deliver_app(const GroupMessageInfo& info, const ByteView app) noexcept {
+  if (security_.revoked_group_sender(info.key.origin)) return;
   saturating_inc(group_stats_.delivered);
   if (info.late) saturating_inc(group_stats_.late);
   observer_.on_group_message(info, app);
@@ -1012,7 +1025,8 @@ void MeshNode::group_accept(GroupStream& stream, const GroupMessageInfo& info,
                             const ByteView app, const bool member,
                             const std::uint32_t remaining_ms,
                             const MonotonicMs now_ms,
-                            const std::uint32_t gk_epoch) noexcept {
+                            const std::uint32_t gk_epoch,
+                            const NodeId previous_hop) noexcept {
   const std::uint32_t seq = info.group_seq;
   if (stream.next_seq == 0) stream.next_seq = seq;  // first message of this session
   // Keep the cursor inside the duplicate window: anything older than the
@@ -1086,6 +1100,7 @@ void MeshNode::group_accept(GroupStream& stream, const GroupMessageInfo& info,
   }
   saturating_inc(group_stats_.held);
   hold->info = info;
+  hold->previous_hop = previous_hop;
   hold->gk_epoch = gk_epoch;
   hold->release_at_ms = now_ms + std::min(remaining_ms, kGroupOrderMaxHoldMs);
   hold->size = static_cast<std::uint8_t>(std::min(app.size, hold->payload.size()));
@@ -1101,7 +1116,8 @@ void MeshNode::group_drain(GroupStream& stream) noexcept {
     });
     if (hold != nullptr) {
       const GroupMessageInfo info = hold->info;
-      const bool live = security_.accepts_group_epoch(hold->gk_epoch);
+      const bool live = security_.accepts_group_epoch(hold->gk_epoch) &&
+                        !security_.revoked_group_sender(hold->previous_hop);
       std::array<std::uint8_t, kGroupPayloadMax> payload{};
       const std::uint8_t size = hold->size;
       std::memcpy(payload.data(), hold->payload.data(), size);
@@ -1128,7 +1144,8 @@ void MeshNode::group_skip_to(GroupStream& stream, const std::uint32_t target) no
       group_stats_.gaps_skipped += lowest->info.group_seq - stream.next_seq;
     }
     const GroupMessageInfo info = lowest->info;
-    const bool live = security_.accepts_group_epoch(lowest->gk_epoch);
+    const bool live = security_.accepts_group_epoch(lowest->gk_epoch) &&
+                      !security_.revoked_group_sender(lowest->previous_hop);
     std::array<std::uint8_t, kGroupPayloadMax> payload{};
     const std::uint8_t size = lowest->size;
     std::memcpy(payload.data(), lowest->payload.data(), size);
@@ -1192,6 +1209,7 @@ SleepHoldRelease MeshNode::release_one_group_hold_for_sleep() noexcept {
   }
   GroupMessageInfo info = target->info;
   const std::uint32_t gk_epoch = target->gk_epoch;
+  const NodeId previous_hop = target->previous_hop;
   // A hold the cursor already passed (defensive — the release always takes
   // the lowest held seq) reads as late, exactly like group_accept.
   if (stream->next_seq != 0 && seq < stream->next_seq) info.late = true;
@@ -1204,7 +1222,8 @@ SleepHoldRelease MeshNode::release_one_group_hold_for_sleep() noexcept {
   }
   // Exactly one hand-off: the trailing group_drain() that group_skip_to runs
   // is deliberately NOT run, so this call releases exactly one message.
-  if (security_.accepts_group_epoch(gk_epoch))
+  if (security_.accepts_group_epoch(gk_epoch) &&
+      !security_.revoked_group_sender(previous_hop))
     group_deliver_app(info, ByteView{payload.data(), size});
   return SleepHoldRelease::Released;
 }
@@ -1229,6 +1248,14 @@ bool MeshNode::group_radio_pending() const noexcept {
 // --- poll() driver ------------------------------------------------------------------
 
 void MeshNode::process_group(const MonotonicMs now_ms) noexcept {
+  while (GroupHold* hold = group_holds_.find([&](const GroupHold& value) {
+           return security_.revoked_group_sender(value.info.key.origin) ||
+                  security_.revoked_group_sender(value.previous_hop);
+         })) group_holds_.release(hold);
+  while (GroupTree* tree = group_trees_.find([&](const GroupTree& value) {
+           return security_.revoked_group_sender(value.key.origin) ||
+                  security_.revoked_group_sender(value.parent);
+         })) group_trees_.release(tree);
   // A frame held for a GK promote retries once the promote settles
   // (landed or failed); a promote that never settles expires the hold.
   if (group_promote_hold_.used && !security_.group_promotion_pending()) {

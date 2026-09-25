@@ -1,5 +1,6 @@
 #include "routeloom/espnow_security_owner.hpp"
 
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -7,6 +8,18 @@
 #include "routeloom/secure_clear.hpp"
 
 namespace routeloom::espnow {
+
+// The P6 lifecycle is CPU-only state. Member builds with RTC capacity keep
+// it outside the main radio/USB SRAM bank.
+#if CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32S3 || \
+    (CONFIG_IDF_TARGET_ESP32C5 && defined(ROUTELOOM_REFERENCE_IMAGE))
+RTC_DATA_ATTR
+#endif
+alignas(sdkv1::MembershipLifecycle)
+std::array<std::uint8_t, sizeof(sdkv1::MembershipLifecycle)>
+    EspNowSecurityOwner::lifecycle_box_{};
+bool EspNowSecurityOwner::lifecycle_box_in_use_{false};
+
 namespace {
 
 constexpr std::uint32_t kTuneDeadlineMs = 3000;
@@ -34,7 +47,9 @@ EspNowSecurityOwner::~EspNowSecurityOwner() noexcept {
   }
   if (lifecycle_live_) {
     lifecycle().~MembershipLifecycle();
+    secure_clear(lifecycle_box_);
     lifecycle_live_ = false;
+    lifecycle_box_in_use_ = false;
   }
   if (coordinator_live_) {
     coordinator().~SecurityCoordinator();
@@ -332,6 +347,8 @@ ConfigEndpointSink* EspNowSecurityOwner::authority_mesh_sink() noexcept {
 Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
                                   const Config& config) noexcept {
   if (begun_) return Status::error(StatusCode::AlreadyExists, "owner already begun");
+  if (lifecycle_box_in_use_)
+    return Status::error(StatusCode::Busy, "lifecycle owner already active");
   if (config.local_node == kInvalidNodeId || config.local_node == kBroadcastNodeId ||
       config.local_mac == routeloom::MacAddress{}) {
     return Status::error(StatusCode::InvalidArgument, "owner identity");
@@ -384,6 +401,7 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
                                  stores_->revocation(), stores_->resume(), lifecycle_ports,
                                  sdkv1::default_es256_verifier(), &stores_->lifecycle());
   lifecycle_live_ = true;
+  lifecycle_box_in_use_ = true;
   begun_ = true;
   observer_store_ = EspNowDiscoveryObserver(config_.log_tag, runtime_);
   ESP_LOGI(config_.log_tag, "security owner ready (node 0x%llx)",
@@ -830,7 +848,7 @@ void EspNowSecurityOwner::drive_authority(const MonotonicMs now_ms) noexcept {
   } else {
     endpoint()->poll(now_ms);
     sdkv1::AuthorityRxCarrier rx{};
-    while (endpoint()->take_rx(rx)) {
+    if (endpoint()->take_rx(rx)) {
       sdkv1::CoordinatorEvent in{};
       in.kind = sdkv1::CoordinatorEventKind::AuthorityRx;
       in.now = now_ms;

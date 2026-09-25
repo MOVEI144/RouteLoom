@@ -44,7 +44,8 @@ SecurityCoordinator::SecurityCoordinator(const Deps& deps) noexcept
       bank_sink_(bank_),
       pairwise_provider_(bank_),
       group_keys_(*deps_.site),
-      group_provider_(group_keys_, pairwise_provider_, deps_.crypto_aead, deps_.local_node),
+      group_provider_(group_keys_, pairwise_provider_, deps_.crypto_aead, deps_.local_node,
+                      deps_.revocations),
       member_scope_(group_keys_, kMemberScopeRef),
       authority_(deps_.crypto_aead, authority_port_, *this, authority_env_, &group_keys_) {
   // Fresh: no workspace side constructed. Boot builds the Joiner, the

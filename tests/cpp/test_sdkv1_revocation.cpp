@@ -298,6 +298,23 @@ struct NodeFixture {
   LifecycleSnapshot snap() { return lifecycle.snapshot(); }
 };
 
+[[gnu::noinline]] void rebuild_with_short_lived_ports(NodeFixture& fixture) {
+  LifecyclePorts ports{fixture.authority, fixture.peer, fixture.runtime,
+                       fixture.entropy, fixture.sink, &fixture.observer};
+  fixture.lifecycle.~MembershipLifecycle();
+  new (&fixture.lifecycle)
+      MembershipLifecycle(fixture.config, fixture.identity, fixture.site,
+                          fixture.revocations, fixture.resume, ports,
+                          default_es256_verifier(), &fixture.journal);
+}
+
+void test_lifecycle_port_bundle_lifetime() {
+  NodeFixture fixture;
+  rebuild_with_short_lived_ports(fixture);
+  CHECK(fixture.provision(3, 15));
+  CHECK(fixture.snap().phase == LifecyclePhase::Active);
+}
+
 // --- Wire codecs -------------------------------------------------------------------------
 
 void test_rrs_wire_codecs() {
@@ -2686,6 +2703,7 @@ void test_reassigned_member_can_be_removed_again() {
 }  // namespace
 
 int main() {
+  test_lifecycle_port_bundle_lifetime();
   test_removal_preserves_stored_floor();
   test_removal_resumes_with_corrupt_cleared_site_sibling();
   test_removal_blocks_when_both_site_slots_are_corrupt();
