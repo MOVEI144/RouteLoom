@@ -4,6 +4,7 @@
 // save the retained RTC image across a simulated deep sleep, and warm
 // restore with TX write-ahead. Unsafe immediate restores stay refused.
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -30,6 +31,11 @@ using namespace routeloom;
 using namespace routeloom::sdkv1;
 using namespace sdkv1_test;
 using namespace owner_sim;
+
+// The always-on gateway must not reserve a full RTC restore image in its
+// coordinator; sleep-capable firmware supplies that storage explicitly.
+static_assert(sizeof(SecurityCoordinator) <= 64400,
+              "coordinator must not embed the RTC restore image");
 
 constexpr NodeId kSimNodeA = kNode;  // 0x00A1000000001234
 constexpr NodeId kSimNodeB = 0x00A1000000005678ULL;
@@ -417,6 +423,21 @@ void test_member_sleep_save_shapes() {
   // without touching the port; a save overwrites; an aborted save leaves
   // the live bank running on RAM counters after wake.
   current = "member_sleep_save_shapes";
+  // An always-on owner has no restore slot and refuses sleep operations
+  // without touching the RTC port.
+  SimNode always_on(kSimNodeA, kSimMacA, 0xA1E,
+                    kResume2NodeLinkQuota + kResume2NodeEndQuota, false);
+  std::array<std::uint8_t, kRtcSessionRecordSize> unavailable_backing{};
+  BufferRtcSessionPort unavailable_port(
+      MutableByteView{unavailable_backing.data(), unavailable_backing.size()});
+  CHECK(always_on.coordinator()
+            .save_sleep_image(unavailable_port, kSimNodeB, kSimMacB, 7, kSimT0)
+            .code == StatusCode::Unsupported);
+  CHECK(always_on.coordinator()
+            .restore_sleep_image(unavailable_port, kSimBoot + 1, 5000, true, true)
+            .code == StatusCode::Unsupported);
+  CHECK(std::all_of(unavailable_backing.begin(), unavailable_backing.end(),
+                    [](std::uint8_t byte) { return byte == 0; }));
   // Lone node (no peer): adopted and quiescent, but no link to retain.
   SimNode lone(kSimNodeA, kSimMacA, 0xA1E, kResume2NodeLinkQuota + kResume2NodeEndQuota);
   MonotonicMs now = kSimT0;

@@ -234,6 +234,11 @@ constexpr std::uint32_t kSleepMarkerValue = 0x524c5057;  // "RLPW"
 // no validity claim rides on the backing itself.
 RTC_DATA_ATTR std::array<std::uint8_t, routeloom::sdkv1::kRtcSessionRecordSize>
     s_rtc_session{};
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+// The consumed image waits here until the parent binds; the always-on
+// security Owner does not reserve this space in gateway HP SRAM.
+RTC_DATA_ATTR routeloom::sdkv1::RtcSessionImage s_rtc_hold{};
+#endif
 #endif
 
 class LogPowerEvents final : public routeloom::PowerEvents {
@@ -745,7 +750,11 @@ extern "C" void app_main(void) {
   owner_config.joiner.node = owner_config.local_node;
   owner_config.joiner.mac = owner_config.local_mac;
   owner_config.log_tag = kTag;
+#if CONFIG_ROUTELOOM_DEEP_SLEEP && CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+  status = owner.begin(sdkv1_stores, entropy, owner_config, &s_rtc_hold);
+#else
   status = owner.begin(sdkv1_stores, entropy, owner_config);
+#endif
   if (!status) fail(status.detail);
   routeloom::SecurityProvider& session_security = owner.session_provider();
 #endif
@@ -1401,14 +1410,14 @@ extern "C" void app_main(void) {
     // the live parent binding, then configure the timer wake and enter
     // deep sleep through the shared power port (radio stop + pre-sleep
     // hook). Busy re-pumps against the drain deadline; a save refusal
-    // without an image sleeps cold with the marker clear. Mesh, group,
-    // relay and USB drains ride a future PowerCoordinator leg for the
-    // Owner profile — this tail only parks the security workspace.
+    // without an image sleeps cold with the marker clear. The Owner
+    // admits sleep only after node deliveries, group holds and radio
+    // work have drained as well as its security workspace. At the drain
+    // deadline, pending application results are settled before teardown.
     if (esp_timer_get_time() >= owner_prepare_at_us) {
       if (!owner_sleep_parked) {
-        if (!owner.prepare_sleep(monotonic_now_ms())) {
-          if (esp_timer_get_time() >= owner_stop_at_us) fail("owner sleep drain deadline");
-        } else {
+        if (owner.prepare_sleep(monotonic_now_ms(),
+                                esp_timer_get_time() >= owner_stop_at_us)) {
           owner_sleep_parked = true;
         }
       }
@@ -1418,7 +1427,10 @@ extern "C" void app_main(void) {
         routeloom::BindingId parent_binding{routeloom::kInvalidBindingId};
         routeloom::Status saved =
             routeloom::Status::error(routeloom::StatusCode::NotFound, "no parent link");
-        if (owner.coordinator().first_live_peer(routeloom::SecurityScope::Link, parent) &&
+        if (runtime.node().sleep_work_pending()) {
+          saved = routeloom::Status::error(routeloom::StatusCode::Busy,
+                                          "node has sleep work");
+        } else if (owner.coordinator().first_live_peer(routeloom::SecurityScope::Link, parent) &&
             owner.discovery() != nullptr &&
             owner.discovery()->binding_of(parent, parent_binding) &&
             owner.discovery()->mac_of(parent, parent_mac)) {
@@ -1430,7 +1442,6 @@ extern "C" void app_main(void) {
           // New work landed after the park: unpark and keep pumping.
           owner_sleep_parked = false;
           (void)owner.wake(monotonic_now_ms());
-          if (esp_timer_get_time() >= owner_stop_at_us) fail("owner sleep drain deadline");
         } else {
           if (saved) {
             s_sleep_marker = kSleepMarkerValue;

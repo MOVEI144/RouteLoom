@@ -26,7 +26,7 @@
 // TuneChannel action), the MeshNode and NeighborDiscovery (adopted via
 // member actions, polled by the firmware), the USB transport (frames via
 // the USB port/events), and any flash layout (stores stay injected).
-// Sleep images are PR5: PrepareSleep only reports drain readiness.
+// Sleep images are caller-backed: PrepareSleep parks after work drains.
 //
 // No heap, no exceptions; every entry is noexcept.
 
@@ -297,6 +297,9 @@ class SecurityCoordinator final : public BootstrapSink,
     RevocationStore* revocations{nullptr};
     LocalRevocationStore* local_revocation{nullptr};
     ResumeSlotStorage2* resume_storage{nullptr};
+    // Sleep-capable firmware supplies a stable image outside the Owner's
+    // always-on RAM. Null disables warm session save/restore.
+    RtcSessionImage* sleep_image{nullptr};
     // (No TrustStore: anchors are established before the coordinator
     // boots and consulted through the adopted stores, never directly.)
     // Member discovery, attached late: null at Boot (adoption precedes
@@ -796,19 +799,15 @@ class SecurityCoordinator final : public BootstrapSink,
     MemberEngine member;
   };
 
-  // The member small side: the held sleep restore image (P4 §9.3 —
-  // the consumed image waits here while the parent re-binds post-wake;
-  // terminal once done/failed) plus the authority channel client (G-SEC
-  // P5 — Member-only: the dev route has no channel to drive). Live in
-  // every mode except Dev. The destructor wipes the held image (key
-  // material); the channel tears itself down.
+  // The member small side holds the authority channel client (G-SEC P5).
+  // The sleep image is supplied separately by sleep-capable firmware, so
+  // an always-on gateway does not reserve that memory. Live except in Dev.
   struct MemberSmallSide {
-    RtcSessionImage held{};
     AuthorityClient authority;
     MemberSmallSide(const routeloom::AeadGcm& aead, AuthorityPort& port,
                     AuthorityObserver& observer, rlres1::Environment& rlres1_env,
                     GroupKeyState* group) noexcept;
-    ~MemberSmallSide() noexcept;
+    ~MemberSmallSide() noexcept = default;
     MemberSmallSide(const MemberSmallSide&) = delete;
     MemberSmallSide& operator=(const MemberSmallSide&) = delete;
   };
@@ -926,15 +925,15 @@ class SecurityCoordinator final : public BootstrapSink,
   std::uint64_t removal_watermark_site_id_{0};
   std::uint32_t removal_watermark_generation_{0};
   CoordinatorCounters counters_{};
-  // Sleep restore one-shot state (P4 §9.3): the consumed image waits
-  // in the small side while the parent re-binds post-wake. Terminal once
-  // done/failed. restore_elapsed_ms_ is the bound already deducted from
-  // the held image; retries with a larger bound deduct the delta.
+  // Sleep restore one-shot state (P4 §9.3): the consumed image waits in
+  // caller-supplied storage while the parent re-binds post-wake. Terminal
+  // once done/failed. restore_elapsed_ms_ is the bound already deducted
+  // from the held image; retries with a larger bound deduct the delta.
   //
-  // Dev boot consumption memory (P4 §10.1): the last dev boot this boot
-  // configured a group sender for (0 = none yet). The dev side is rebuilt
+  // Dev boot consumption memory (P4 §10.1): the highest dev boot this
+  // coordinator configured a group sender for (0 = none yet). The dev side is rebuilt
   // per adoption, so the sender's own boot guard cannot see a previous
-  // adoption's boot — install refuses a consumed boot before configuring
+  // adoption's boot — install refuses any non-advancing boot before configuring
   // (the same key never restarts its counter space). Survives stop: the
   // boot does not change across one.
   std::uint32_t dev_boot_seen_{0};

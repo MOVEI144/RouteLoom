@@ -251,7 +251,7 @@ class SimCookieAuth final : public NeighborAuthenticator {
 class SimNode {
  public:
   SimNode(const NodeId node, const MacAddress& mac, const std::uint64_t entropy_seed,
-          const std::size_t resume_slots)
+          const std::size_t resume_slots, const bool sleep_storage = true)
       : node_(node),
         mac_(mac),
         resume_storage_(resume_slots),
@@ -266,6 +266,7 @@ class SimNode {
     deps_.revocations = &revocations_;
     deps_.local_revocation = &local_revocation_;
     deps_.resume_storage = &resume_storage_;
+    deps_.sleep_image = sleep_storage ? &sleep_image_ : nullptr;
     deps_.discovery = nullptr;  // attaches at StartMemberDiscovery, like firmware
     deps_.entropy = &entropy_;
     deps_.rld1 = &rld1_;
@@ -474,6 +475,7 @@ class SimNode {
   SimUsbPort usb_{};
   StoreCredentialVerifier verifier_;
   SimSealer sealer_;
+  RtcSessionImage sleep_image_{};
   SecurityCoordinator::Deps deps_{};
   alignas(SecurityCoordinator) std::array<std::uint8_t, sizeof(SecurityCoordinator)>
       coordinator_box_{};

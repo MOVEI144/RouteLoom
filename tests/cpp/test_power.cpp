@@ -606,6 +606,23 @@ void test_policy_fail() {
   CHECK(w.storage.write_calls == 1);
 }
 
+void test_owner_sleep_waits_for_unfinished_delivery() {
+  MemoryPowerStorage storage;
+  PowerWorld w(storage);
+  CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, 0));
+  CHECK(!w.node.sleep_work_pending());
+  const MessageId id = queue_pending(w, 99, false);
+  CHECK(w.node.quiesced());  // no radio work, but the delivery is still live
+  CHECK(w.node.sleep_work_pending());
+  CHECK(w.node.settle_failed_sleep_work().code == StatusCode::Busy);
+  CHECK(w.node.set_draining(true).ok());
+  CHECK_OK(w.node.settle_failed_sleep_work());
+  CHECK(w.node.delivery(id).state == DeliveryState::Failed);
+  CHECK(std::strcmp(w.node.delivery(id).reason, "SLEEP_DRAIN") == 0);
+  CHECK(!w.node.sleep_work_pending());
+}
+
 void test_policy_save_durable() {
   MemoryPowerStorage storage;
   PowerWorld w(storage);
@@ -1793,6 +1810,7 @@ void test_group_sleep_policy_fail() {
                                ElapsedInterval{0, 0, false}, w.now));
   GroupSendOptions options{};
   const MessageId id = w.send_all(w.a, options);
+  CHECK(w.a.sleep_work_pending());
   SleepRequest request{};
   request.pending_policy = SleepWorkPolicy::Fail;
   CHECK_OK(coordinator.sleep_prepare(request, w.now));
@@ -1801,10 +1819,27 @@ void test_group_sleep_policy_fail() {
                      "DRAIN_DEADLINE"));
   const auto result = w.a.group_delivery(id);
   CHECK(result.state == DeliveryState::Failed);
+  CHECK(!w.a.sleep_work_pending());
   CHECK(std::strcmp(result.reason, "SLEEP_DRAIN") == 0);
   const auto last = last_group_result(w.observer_a);
   CHECK(last.id == id && last.state == DeliveryState::Failed &&
         std::strcmp(last.reason, "SLEEP_DRAIN") == 0);
+}
+
+void test_owner_sleep_deadline_settles_group_origin() {
+  GroupPowerWorld w;
+  w.converge();
+  drop_all_reports();
+  w.net.drop_frame = group_loss_hook;
+  GroupSendOptions options{};
+  const MessageId id = w.send_all(w.a, options);
+  CHECK(w.a.sleep_work_pending());
+  CHECK_OK(w.a.set_draining(true));
+  CHECK_OK(w.a.settle_failed_sleep_work());
+  const auto result = w.a.group_delivery(id);
+  CHECK(result.state == DeliveryState::Failed);
+  CHECK(std::strcmp(result.reason, "SLEEP_DRAIN") == 0);
+  CHECK(!w.a.sleep_work_pending());
 }
 
 void test_group_sleep_policy_save() {
@@ -5361,6 +5396,7 @@ int main() {
   test_stale_ticket_rejected_outstanding_stays_valid();
   test_send_rejected_while_draining();
   test_policy_fail();
+  test_owner_sleep_waits_for_unfinished_delivery();
   test_policy_save_durable();
   test_policy_defer();
   test_persist_full_fails_explicitly();
@@ -5390,6 +5426,7 @@ int main() {
   test_short_sleep_resend_dedups_once();
   test_group_drain_completes_round();
   test_group_sleep_policy_fail();
+  test_owner_sleep_deadline_settles_group_origin();
   test_group_sleep_policy_save();
   test_group_sleep_policy_defer();
   test_group_ordered_hold_released_for_sleep();

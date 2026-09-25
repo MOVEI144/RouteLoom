@@ -1057,6 +1057,25 @@ class MeshNode {
     return !physical_.active && scheduler_.empty() && awaiting_hop_.size() == 0 &&
            !group_radio_pending();
   }
+  // Warm session sleep cannot drop unfinished application results or
+  // ordered group holds. This is stricter than radio quiescence: a
+  // delivery waiting for a route can have no frame in flight.
+  bool sleep_work_pending() const noexcept {
+    if (!quiesced() || component_jobs_outstanding_ != 0 ||
+        group_holds_.size() != 0 || group_promote_hold_.used) return true;
+    bool pending = false;
+    deliveries_.for_each([&](const Delivery& delivery) {
+      pending = pending || !sleep_terminal(delivery.state);
+    });
+    group_origins_.for_each([&](const GroupOrigin& origin) {
+      pending = pending || !sleep_terminal(origin.state);
+    });
+    return pending;
+  }
+  // At a sleep drain deadline, report failure for every unfinished
+  // application result and release ordered group holds before the radio
+  // queues are discarded. The caller has already closed new admission.
+  Status settle_failed_sleep_work() noexcept;
 
   // --- Congestion control (03-congestion.md §4, §5) ----------------------------
   // Live scheduler/BUSY counters for tests, diagnostics and the P3 observer.

@@ -352,7 +352,8 @@ ConfigEndpointSink* EspNowSecurityOwner::authority_mesh_sink() noexcept {
 }
 
 Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
-                                  const Config& config) noexcept {
+                                  const Config& config,
+                                  sdkv1::RtcSessionImage* sleep_image) noexcept {
   if (begun_) return Status::error(StatusCode::AlreadyExists, "owner already begun");
   if (lifecycle_box_in_use_)
     return Status::error(StatusCode::Busy, "lifecycle owner already active");
@@ -376,6 +377,7 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
   deps.revocations = &stores_->revocation();
   deps.local_revocation = &stores_->local_revocation();
   deps.resume_storage = &stores_->resume2();
+  deps.sleep_image = sleep_image;
   deps.entropy = entropy_;
   deps.rld1 = this;
   deps.mesh = this;
@@ -937,24 +939,65 @@ void EspNowSecurityOwner::drive_authority(const MonotonicMs now_ms) noexcept {
   }
 }
 
-Status EspNowSecurityOwner::prepare_sleep(const MonotonicMs now_ms) noexcept {
-  if (!booted_) return Status::error(StatusCode::InvalidState, "owner not booted");
+Status EspNowSecurityOwner::prepare_sleep(const MonotonicMs now_ms,
+                                         const bool drain_deadline) noexcept {
+  if (!booted_ || runtime_ == nullptr) {
+    return Status::error(StatusCode::InvalidState, "owner not booted");
+  }
+  MeshNode& node = runtime_->node();
+  if (node.in_external_callback() || (!drain_deadline && node.sleep_work_pending())) {
+    return Status::error(StatusCode::Busy, "node has sleep work");
+  }
   // Drain first: a pending action (tune/member/discovery) is owed work,
   // not sleep permission. The coordinator re-checks the slot anyway.
   poll_tune(now_ms);
   drain_actions(now_ms);
+  if (!drain_deadline && node.sleep_work_pending()) {
+    return Status::error(StatusCode::Busy, "node has sleep work");
+  }
+  const Status drained = node.set_draining(true);
+  if (!drained) return drained;
   sdkv1::CoordinatorEvent event{};
   event.kind = sdkv1::CoordinatorEventKind::PrepareSleep;
   event.now = now_ms;
-  return coordinator().step(event);
+  const Status parked = coordinator().step(event);
+  if (!parked) {
+    (void)node.set_draining(false);
+    return parked;
+  }
+  if (drain_deadline) {
+    // The Owner path has no delivery image; report Fail dispositions
+    // before tearing down radio work at the deadline.
+    const Status settled = node.settle_failed_sleep_work();
+    if (!settled) {
+      (void)wake(now_ms);
+      return settled;
+    }
+  } else {
+    const Status quiet = node.quiesce_for_sleep();
+    if (!quiet) {
+      (void)wake(now_ms);
+      return quiet;
+    }
+  }
+  if (node.sleep_work_pending()) {
+    (void)wake(now_ms);
+    return Status::error(StatusCode::Busy, "node has sleep work");
+  }
+  return Status::success();
 }
 
 Status EspNowSecurityOwner::wake(const MonotonicMs now_ms) noexcept {
   if (!booted_) return Status::error(StatusCode::InvalidState, "owner not booted");
+  if (runtime_ != nullptr && runtime_->node().in_external_callback()) {
+    return Status::error(StatusCode::Busy, "owner wake in callback");
+  }
   sdkv1::CoordinatorEvent event{};
   event.kind = sdkv1::CoordinatorEventKind::Wake;
   event.now = now_ms;
-  return coordinator().step(event);
+  const Status awakened = coordinator().step(event);
+  if (awakened && runtime_ != nullptr) (void)runtime_->node().set_draining(false);
+  return awakened;
 }
 
 void EspNowSecurityOwner::on_bootstrap_rld1(const sdkv1::JoinRxMeta& meta,

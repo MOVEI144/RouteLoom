@@ -1556,6 +1556,27 @@ void test_dev_stop_readopt() {
   CHECK(next.session_provider().ready());
 }
 
+void test_dev_boot_cannot_regress_after_stop() {
+  current = "dev_boot_cannot_regress_after_stop";
+  Fixture f{};
+  CHECK(f.init_stores());
+  SecurityCoordinator coordinator(f.deps());
+  CoordinatorDevConfig config = dev_config();
+  CHECK(coordinator.adopt_dev(config, kT0).ok());
+  CoordinatorEvent stop{};
+  stop.kind = CoordinatorEventKind::Stop;
+  stop.now = kT0 + 100;
+  CHECK(coordinator.step(stop).ok());
+  config.boot += 1;
+  CHECK(coordinator.adopt_dev(config, kT0 + 200).ok());
+  stop.now = kT0 + 300;
+  CHECK(coordinator.step(stop).ok());
+  config.boot -= 1;
+  CHECK(coordinator.adopt_dev(config, kT0 + 400).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Recovery);
+  CHECK(!coordinator.session_provider().ready());
+}
+
 void test_dev_stop_member_adopt() {
   current = "dev_stop_member_adopt";
   Fixture f{};
@@ -1666,6 +1687,7 @@ int main() {
   test_dev_scope_agrees_across_nodes();
   test_dev_mux_routing();
   test_dev_stop_readopt();
+  test_dev_boot_cannot_regress_after_stop();
   test_dev_stop_member_adopt();
   test_dev_channel_failure_rebuilds_small_side();
   test_dev_revocation_blocks_membership();
