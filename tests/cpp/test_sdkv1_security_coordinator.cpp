@@ -868,6 +868,31 @@ void test_sleep_wake_stop() {
   CHECK(coordinator.local(local));
 }
 
+void test_lifecycle_stop_defers_durable_resume_clear() {
+  current = "lifecycle_stop_defers_durable_resume_clear";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  f.resume_storage.slot(0)[0] = 0x42;  // torn slot awaits the journaled sweep
+  CoordinatorEvent stop{};
+  stop.kind = CoordinatorEventKind::StopForLifecycle;
+  stop.now = now;
+  CHECK(coordinator.step(stop).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Fresh);
+  CHECK(!coordinator.session_provider().ready());
+  CHECK(f.resume_storage.slot(0)[0] == 0x42);
+  ResumeCache2 cache(f.resume_storage, kResume2NodeLinkQuota, kResume2NodeEndQuota);
+  std::size_t cursor = 0;
+  bool done = false;
+  CHECK(cache.clear_step(cursor, done).ok());
+  CHECK(cursor == 1 && f.resume_storage.slot(0)[0] != 0x42);
+}
+
 void test_commit_veto() {
   current = "commit_veto";
   Fixture f{};
@@ -1346,6 +1371,7 @@ int main() {
   test_relay_loopback_and_mesh_send();
   test_late_discovery_attach();
   test_sleep_wake_stop();
+  test_lifecycle_stop_defers_durable_resume_clear();
   test_authority_channel_lifecycle();
   test_group_provider_routing();
   test_refresh_stale_gk();

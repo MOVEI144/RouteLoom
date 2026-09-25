@@ -457,6 +457,11 @@ class ResumeCache2 {
   Status touch(std::size_t index, std::uint32_t boot, bool gk_epoch_changed) noexcept;
   Status invalidate_peer(NodeId peer) noexcept;
   Status clear_all() noexcept;
+  // One durable slot per Poll; an error leaves the cursor on the slot
+  // whose erasure has not been proven.
+  Status sweep_revoked(const ResumeContext& context, std::size_t& cursor,
+                       bool& done) noexcept;
+  Status clear_step(std::size_t& cursor, bool& done) noexcept;
 
  private:
   struct BudgetEntry {

@@ -106,6 +106,7 @@ enum class CoordinatorEventKind : std::uint8_t {
   PrepareSleep,    // Busy while work is outstanding, else parks sleeping
   Wake,            // resume polling after sleep
   Stop,            // full stop back to Fresh (wipes the mode workspace)
+  StopForLifecycle, // journaled removal/switch: Owner sweeps durable RLP2 one slot per Poll
 };
 
 struct CoordinatorEvent {
@@ -248,6 +249,13 @@ struct CoordinatorCounters {
 };
 
 // The Owner. See the header comment for the ownership map.
+class AuthorityVerifiedSink {
+ public:
+  virtual ~AuthorityVerifiedSink() = default;
+  // Called inside the channel's receive guard; copy only and dispatch later.
+  virtual void on_verified_authority(std::uint8_t type, ByteView plaintext) noexcept = 0;
+};
+
 class SecurityCoordinator final : public BootstrapSink,
                                    public JoinDirectPort,
                                    public JoinCommitPolicy,
@@ -283,6 +291,7 @@ class SecurityCoordinator final : public BootstrapSink,
     // (a different port than the bank's split-tag AeadGcm above).
     routeloom::AeadGcm crypto_aead{};
     JoinCookieSealer* proxy_sealer{nullptr};
+    AuthorityVerifiedSink* authority_sink{nullptr};
     MacAddress local_mac{};
     NodeId local_node{kInvalidNodeId};
     JoinerConfig joiner_config{};
@@ -400,6 +409,7 @@ class SecurityCoordinator final : public BootstrapSink,
   }
   // Secret-free channel view for firmware diagnostics (safe in callbacks).
   AuthoritySnapshot authority_snapshot() const noexcept { return authority_.snapshot(); }
+  Status send_authority_typed(std::uint8_t type, ByteView body, MonotonicMs now) noexcept;
   // Adopted GK epochs for the 0x66 QueryLocal answer (0/0 pre-adoption;
   // false until the member config lands).
   bool group_epochs(std::uint32_t& current, std::uint32_t& next) const noexcept {
@@ -432,6 +442,8 @@ class SecurityCoordinator final : public BootstrapSink,
   bool revoked(NodeId peer, std::uint32_t generation) const noexcept override;
   bool authenticated(NodeId peer, NetworkId network, std::uint32_t& generation,
                      std::uint32_t& role) const noexcept override;
+  bool authenticated_link(NodeId peer, NetworkId network, std::uint32_t& generation,
+                          std::uint32_t& role) const noexcept;
   bool boot_witness_ok(std::uint32_t witness) const noexcept override;
   // AuthorityObserver (channel context): counts verified events. Never
   // drives the channel (no advance from the callback).
@@ -540,7 +552,7 @@ class SecurityCoordinator final : public BootstrapSink,
   Status on_channel_ready(const CoordinatorEvent& event) noexcept;
   Status on_prepare_sleep(MonotonicMs now) noexcept;
   Status on_wake(MonotonicMs now) noexcept;
-  Status on_stop(MonotonicMs now) noexcept;
+  Status on_stop(MonotonicMs now, bool defer_resume_clear = false) noexcept;
   // --- authority channel legs ---
   Status on_authority_rx(const CoordinatorEvent& event) noexcept;
   Status on_authority_tx(const CoordinatorEvent& event) noexcept;
@@ -588,7 +600,7 @@ class SecurityCoordinator final : public BootstrapSink,
   // --- removal ---
   Status land_removal(const RemovalNotice& notice, ByteView removal_object,
                       MonotonicMs now) noexcept;
-  void stop_traffic() noexcept;
+  void stop_traffic(bool clear_resume = true) noexcept;
   // The real quiescence check, for PrepareSleep (which runs inside step()
   // with the re-entry guard set, where the public query answers false).
   bool quiescent_locked() const noexcept;

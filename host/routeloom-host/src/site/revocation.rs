@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use routeloom_json::Json;
 use routeloom_provision::sdkv1::revocation::RevocationEntry;
 
-use super::authority_channel::{AuthorityOutbound, ChannelMember};
+use super::authority_channel::{AuthorityOutbound, ChannelEvent, ChannelMember};
 use super::p6_channel::P6Receipt;
 use super::records::{h16, parse_h16, parse_hex};
 use super::store::{Batch, DocKind};
@@ -87,6 +87,16 @@ pub trait RevocationTransport {
     fn send_notice(&mut self, _node: u64, _network: u64, _notice: &[u8]) -> bool {
         false
     }
+    /// Captures one exact type-6 ciphertext before a revoke commit.
+    /// A production channel never sends it from this call.
+    fn preseal_notice(&mut self, _node: u64, _network: u64, _notice: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+    /// Sends the durable, already-sealed ciphertext after commit, including
+    /// after a host restart that lost the RAM authority channel.
+    fn send_presealed_notice(&mut self, _node: u64, _sealed: &[u8]) -> bool {
+        false
+    }
     /// Sends a type-7 GrantRenew plaintext over `network`'s authority
     /// context. Default refuses until wired.
     fn send_grant(&mut self, _node: u64, _network: u64, _plaintext: &[u8]) -> bool {
@@ -108,12 +118,19 @@ pub trait RevocationTransport {
     fn p6_ready(&self) -> bool {
         false
     }
+    /// The USB/mesh egress is currently bound. A detached production
+    /// port retains mail without counting a send attempt.
+    fn set_delivery_attached(&mut self, _attached: bool) {}
     /// Feeds one inbound carrier into the port (reassembled USB 0x64 /
     /// mesh envelope, R1 or R3). Default ignores: fakes deliver
     /// reports by calling the handlers directly.
     fn push_carrier(&mut self, _device: u64, _kind: CarrierKind, _bytes: &[u8], _now_ms: u64) {}
     /// Takes the verified P6 reports queued since the last call.
     fn poll_p6_receipts(&mut self) -> Vec<P6Receipt> {
+        Vec::new()
+    }
+    /// Other events from the shared P5/P6 channel table.
+    fn poll_channel_events(&mut self) -> Vec<ChannelEvent> {
         Vec::new()
     }
     /// Takes every queued outbound carrier for the USB/mesh mapping.
@@ -349,6 +366,9 @@ pub struct OutboundRrs {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NoticeState {
     pub object: Vec<u8>,
+    /// Exact encrypted type-6 carrier captured before the revoke commit.
+    /// Replays use these bytes; a restart does not reseal with a new key.
+    pub sealed: Option<Vec<u8>>,
     /// The AAD network the notice was issued for.
     pub network: u64,
     pub delivery: NoticeDelivery,
@@ -391,9 +411,14 @@ impl NoticeDelivery {
 
 impl NoticeState {
     pub fn doc(&self) -> String {
+        let sealed = self.sealed.as_ref().map_or_else(
+            || "null".to_string(),
+            |bytes| format!("\"{}\"", hex_lower(bytes)),
+        );
         format!(
-            "{{\"object\":\"{}\",\"network\":\"{}\",\"delivery\":\"{}\",\"intent_confirmed\":{},\"attempts\":{}}}",
+            "{{\"object\":\"{}\",\"sealed\":{},\"network\":\"{}\",\"delivery\":\"{}\",\"intent_confirmed\":{},\"attempts\":{}}}",
             hex_lower(&self.object),
+            sealed,
             h16(self.network),
             self.delivery.name(),
             self.intent_confirmed,
@@ -412,8 +437,25 @@ impl NoticeState {
         if object.is_empty() {
             return None;
         }
+        let sealed = match json.get("sealed") {
+            None | Some(Json::Null) => None,
+            Some(Json::String(hex))
+                if !hex.is_empty()
+                    && hex.len() <= 4096
+                    && hex.len() % 2 == 0
+                    && hex.bytes().all(|b| b.is_ascii_hexdigit()) =>
+            {
+                Some(
+                    (0..hex.len() / 2)
+                        .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok())
+                        .collect::<Option<Vec<_>>>()?,
+                )
+            }
+            _ => return None,
+        };
         Some(Self {
             object,
+            sealed,
             network: parse_h16(json.get("network")?.as_str()?)?,
             delivery: NoticeDelivery::parse(json.get("delivery")?.as_str()?)?,
             intent_confirmed: json.get("intent_confirmed")?.as_bool()?,
@@ -744,9 +786,18 @@ impl SiteAuthority {
             let Some((bytes, network)) = bytes else {
                 continue; // stale entry (phase moved, op evicted): drop, no airtime
             };
+            let presealed_notice = head.what == OutboundKind::Notice
+                && self
+                    .operations
+                    .get(&head.op)
+                    .and_then(|op| op.notice.as_ref())
+                    .is_some_and(|notice| notice.sealed.is_some());
             let delivered = match self.rrs_transport.as_mut() {
                 Some(transport) => match head.what {
                     OutboundKind::Rrs => transport.send_rrs(head.node, &bytes),
+                    OutboundKind::Notice if presealed_notice => {
+                        transport.send_presealed_notice(head.node, &bytes)
+                    }
                     OutboundKind::Notice => transport.send_notice(head.node, network, &bytes),
                     OutboundKind::Prepare | OutboundKind::Commit => {
                         transport.send_grant(head.node, network, &bytes)
@@ -813,7 +864,7 @@ impl SiteAuthority {
             let due = match self.operations.get(&id) {
                 Some(op) => match op.notice.as_ref() {
                     Some(notice)
-                        if notice.network == self.id.network
+                        if (notice.network == self.id.network || notice.sealed.is_some())
                             && matches!(
                                 notice.delivery,
                                 NoticeDelivery::Pending | NoticeDelivery::Sent
@@ -837,9 +888,14 @@ impl SiteAuthority {
             // none can form): mark `unreachable` instead of retrying
             // past the best-effort window. Fakes always seal, so
             // their queueing is unchanged.
-            let sealable = self.rrs_transport.as_ref().is_some_and(|transport| {
-                transport.notice_sealable(due, self.id.network, time.mono_ms)
-            });
+            let sealable = self
+                .operations
+                .get(&id)
+                .and_then(|op| op.notice.as_ref())
+                .is_some_and(|notice| notice.sealed.is_some())
+                || self.rrs_transport.as_ref().is_some_and(|transport| {
+                    transport.notice_sealable(due, self.id.network, time.mono_ms)
+                });
             if !sealable {
                 self.note_notice_unreachable(id, time.unix_ms);
                 continue;
@@ -883,7 +939,7 @@ impl SiteAuthority {
     fn notice_bytes(&self, op: u64) -> Option<(Vec<u8>, u64)> {
         let operation = self.operations.get(&op)?;
         let notice = operation.notice.as_ref()?;
-        if notice.network != self.id.network
+        if (notice.network != self.id.network && notice.sealed.is_none())
             || !matches!(
                 notice.delivery,
                 NoticeDelivery::Pending | NoticeDelivery::Sent
@@ -892,7 +948,13 @@ impl SiteAuthority {
         {
             return None;
         }
-        Some((notice.object.clone(), notice.network))
+        Some((
+            notice
+                .sealed
+                .clone()
+                .unwrap_or_else(|| notice.object.clone()),
+            notice.network,
+        ))
     }
 
     /// Records a notice send: the first one moves Pending to Sent with

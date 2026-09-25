@@ -11,6 +11,7 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "routeloom/wire.hpp"
+#include "routeloom/sdkv1_revocation.hpp"
 
 namespace routeloom::espnow {
 namespace {
@@ -1689,6 +1690,66 @@ Status EspNowRuntime::migration_send(const NodeId peer, const FrameType type,
     default:
       return Status::error(StatusCode::InvalidArgument,
                            "type not allowed on the migration lane");
+  }
+  return send_bound_link(peer, type, payload);
+}
+
+Status EspNowRuntime::p6_send(const NodeId peer, const FrameType type,
+                              const ByteView payload) noexcept {
+  if (payload.data == nullptr || payload.size == 0) {
+    return Status::error(StatusCode::InvalidArgument, "empty p6 payload");
+  }
+  switch (type) {
+    case FrameType::Control: {
+      sdkv1::StateEpochs epochs{};
+      sdkv1::RrsRequest request{};
+      if (!sdkv1::state_epochs_decode(payload, epochs) &&
+          !sdkv1::rrs_request_decode(payload, request)) {
+        return Status::error(StatusCode::InvalidArgument, "invalid p6 control");
+      }
+      break;
+    }
+    case FrameType::ControlObject: {
+      autonomy::ControlObjectPayload manifest{};
+      if (!autonomy::control_object_decode(payload, manifest) ||
+          manifest.kind != autonomy::ControlObjectKind::RevocationSet) {
+        return Status::error(StatusCode::InvalidArgument, "invalid p6 manifest");
+      }
+      break;
+    }
+    case FrameType::ObjectChunk: {
+      autonomy::ObjectChunkPayload chunk{};
+      if (!autonomy::object_chunk_decode(payload, chunk)) {
+        return Status::error(StatusCode::InvalidArgument, "invalid p6 chunk");
+      }
+      break;
+    }
+    case FrameType::ObjectAck: {
+      autonomy::ObjectAckPayload ack{};
+      if (!autonomy::object_ack_decode(payload, ack)) {
+        return Status::error(StatusCode::InvalidArgument, "invalid p6 ack");
+      }
+      break;
+    }
+    default:
+      return Status::error(StatusCode::InvalidArgument, "type not allowed on p6 lane");
+  }
+  return send_bound_link(peer, type, payload);
+}
+
+Status EspNowRuntime::p6_link_binding(const NodeId peer,
+                                     std::uint32_t& binding) noexcept {
+  binding = 0;
+  const Status status = security_.current_rx_epoch(SecurityScope::Link, peer, binding);
+  if (!status) return status;
+  if (binding == 0) return Status::error(StatusCode::InvalidState, "p6 link context absent");
+  return Status::success();
+}
+
+Status EspNowRuntime::send_bound_link(const NodeId peer, const FrameType type,
+                                      const ByteView payload) noexcept {
+  if (channel_runner_.busy() && !channel_runner_.visiting()) {
+    return Status::error(StatusCode::WouldBlock, "RADIO_OP_IN_PROGRESS");
   }
   Peer* record = find_peer(peer);
   if (record == nullptr) {

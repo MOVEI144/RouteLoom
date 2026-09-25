@@ -54,6 +54,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
                                    public sdkv1::CoordinatorMeshPort,
                                    public sdkv1::CoordinatorUsbPort,
                                    public NeighborAuthenticator,
+                                   public sdkv1::AuthorityVerifiedSink,
                                    public RrsGossipSink,
                                    public RrsChunkSink {
  public:
@@ -184,6 +185,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // frames of the lifecycle's live transfer; the rest stay migration's.
   bool claim_rrs_chunk(NodeId peer, FrameType carrier, ByteView body,
                        MonotonicMs now_ms) noexcept override;
+  void on_verified_authority(std::uint8_t type, ByteView plaintext) noexcept override;
 
  private:
   // One outstanding radio tune: a TuneChannel action (coord_token != 0)
@@ -197,9 +199,8 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   };
 
   // --- P6 lifecycle ports (G-SEC P6 PR D) --------------------------------------
-  // Thin adapters: the authority/peer sends refuse until the P5 channel
-  // and the link-TX lane land (the lifecycle then stays silent but still
-  // applies); the runtime/object/observer sides are fully wired.
+  // Adapters stage callback-produced sends; the Owner drains them after the
+  // lifecycle returns, so neither component re-enters the other.
   class LifecycleAuthorityPort final : public sdkv1::LifecycleAuthorityPort {
    public:
     explicit LifecycleAuthorityPort(EspNowSecurityOwner& owner) noexcept : owner_(owner) {}
@@ -281,6 +282,9 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // before the coordinator's next Poll.
   void poll_lifecycle(MonotonicMs now_ms) noexcept;
   void feed_lifecycle_inputs(MonotonicMs now_ms) noexcept;
+  void sync_lifecycle_peers(MonotonicMs now_ms) noexcept;
+  void drain_authority_tx(MonotonicMs now_ms) noexcept;
+  void drain_peer_tx() noexcept;
   void drain_lifecycle_actions(MonotonicMs now_ms) noexcept;
   void on_lifecycle_recovery(const sdkv1::LifecycleAction& action, MonotonicMs now_ms) noexcept;
   void complete_lifecycle_recovery(bool reprovisioned, MonotonicMs now_ms) noexcept;
@@ -326,8 +330,11 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
     bool used{false};
     NodeId peer{kInvalidNodeId};
     FrameType carrier{FrameType::Data};
-    std::array<std::uint8_t, 160> body{};
+    std::array<std::uint8_t, kMaxApplicationPayload> body{};
     std::size_t body_size{0};
+    std::uint32_t generation{0};
+    std::uint32_t role{0};
+    std::uint32_t binding{0};
   };
   LifecycleAuthorityPort lifecycle_authority_{*this};
   LifecyclePeerPort lifecycle_peer_{*this};
@@ -340,12 +347,41 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   bool lifecycle_booted_{false};
   bool removal_pending_{false};  // coordinator boot deferred: erasure runs first
   std::array<GossipStage, 4> gossip_staged_{};
+  std::array<NodeId, EspNowRuntime::kPeerCapacity> lifecycle_peers_{};
+  struct PeerTxStage {
+    bool used{false};
+    NodeId peer{kInvalidNodeId};
+    FrameType carrier{FrameType::Data};
+    std::array<std::uint8_t, kMaxApplicationPayload> body{};
+    std::size_t size{0};
+    std::uint32_t binding{0};
+  };
+  std::array<PeerTxStage, 4> peer_tx_staged_{};
   bool completed_object_valid_{false};  // latest-wins completed RRS1
   NodeId completed_object_peer_{kInvalidNodeId};
   std::array<std::uint8_t, sdkv1::kRevocationObjectMax> completed_object_{};
   std::size_t completed_object_size_{0};
   std::uint64_t lifecycle_recovery_token_{0};  // outstanding recovery action, if any
   std::uint32_t gossip_dropped_{0};
+  NetworkId p4_sweep_network_{0};
+  std::uint32_t p4_sweep_rs_epoch_{0};
+  std::size_t p4_sweep_cursor_{0};
+  std::size_t p4_clear_cursor_{0};
+  struct AuthorityRxStage {
+    bool used{false};
+    std::uint8_t type{0};
+    std::array<std::uint8_t, sdkv1::kAuthorityBodyHeadSize + sdkv1::rrs_const::kInputBodyMax> body{};
+    std::size_t size{0};
+  };
+  struct AuthorityTxStage {
+    bool used{false};
+    std::uint8_t type{0};
+    std::array<std::uint8_t, sdkv1::kGrantReceiptSize> body{};
+    std::size_t size{0};
+  };
+  // AuthorityGateway can complete both of its down slots in one poll.
+  std::array<AuthorityRxStage, 2> authority_rx_staged_{};
+  std::array<AuthorityTxStage, 4> authority_tx_staged_{};
   // Authority transport (built at boot, once the runtime — and on
   // gateways the bridge — is attached): the mesh port over the node, one
   // of the endpoint (devices) / relay + mesh sink + direct port

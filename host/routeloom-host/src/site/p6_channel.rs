@@ -118,7 +118,7 @@ struct Retained {
 /// Single-threaded logic under the embedder's mutex; every method is a
 /// quick table operation, never a nested authority call.
 pub struct P6ChannelHub {
-    channels: AuthorityChannels,
+    channels: Arc<Mutex<AuthorityChannels>>,
     live: BTreeMap<u64, ChannelMember>,
     retained: BTreeMap<u64, Retained>,
     pending_carriers: Vec<AuthorityOutbound>,
@@ -133,14 +133,23 @@ pub struct P6ChannelHub {
 
 impl P6ChannelHub {
     pub fn new(network: u64, site_id: u64, site_epoch: u32, rs_epoch: u32, gk_epoch: u32) -> Self {
+        let channels = Arc::new(Mutex::new(AuthorityChannels::new(ChannelConfig {
+            network,
+            site_id,
+            site_epoch,
+            rs_epoch,
+            gk_epoch,
+        })));
+        Self::with_channels(channels, network, site_id)
+    }
+
+    pub fn with_channels(
+        channels: Arc<Mutex<AuthorityChannels>>,
+        network: u64,
+        site_id: u64,
+    ) -> Self {
         Self {
-            channels: AuthorityChannels::new(ChannelConfig {
-                network,
-                site_id,
-                site_epoch,
-                rs_epoch,
-                gk_epoch,
-            }),
+            channels,
             live: BTreeMap::new(),
             retained: BTreeMap::new(),
             pending_carriers: Vec::new(),
@@ -156,7 +165,24 @@ impl P6ChannelHub {
 
     /// The network the live table currently serves.
     pub fn network(&self) -> u64 {
-        self.channels.network()
+        self.channels
+            .lock()
+            .expect("authority channel poisoned")
+            .network()
+    }
+
+    fn drain_channel_events(&mut self) {
+        let events = {
+            let mut channels = self.channels.lock().expect("authority channel poisoned");
+            let mut events = Vec::new();
+            while let Some(event) = channels.poll_event() {
+                events.push(event);
+            }
+            events
+        };
+        for event in events {
+            self.sort_event(event);
+        }
     }
 
     fn grace_active(&self, mono_ms: u64) -> bool {
@@ -196,7 +222,11 @@ impl P6ChannelHub {
         }
         self.last_mono_ms = mono_ms;
         self.current_network = current_network;
-        self.channels.tick(mono_ms);
+        self.channels
+            .lock()
+            .expect("authority channel poisoned")
+            .tick(mono_ms);
+        self.drain_channel_events();
         let fresh: BTreeMap<u64, ChannelMember> = live
             .iter()
             .map(|(node, member)| (*node, member.clone()))
@@ -213,8 +243,22 @@ impl P6ChannelHub {
             self.retain(node, member, mono_ms.saturating_add(P6_BINDING_GRACE_MS));
         }
         self.live = fresh;
+        let expired: Vec<u64> = self
+            .retained
+            .iter()
+            .filter(|(_, entry)| mono_ms >= entry.until_mono_ms)
+            .map(|(node, _)| *node)
+            .collect();
         self.retained
             .retain(|_, entry| mono_ms < entry.until_mono_ms);
+        for node in expired {
+            if !self.live.contains_key(&node) {
+                self.channels
+                    .lock()
+                    .expect("authority channel poisoned")
+                    .retire_device(node);
+            }
+        }
         if self.grace_until_mono_ms != 0 {
             if !self.grace_active(mono_ms) {
                 self.grace_until_mono_ms = 0;
@@ -222,13 +266,16 @@ impl P6ChannelHub {
             }
             // Inside the grace the old table is frozen: no flip, no
             // epoch updates — it serves the retired network only.
-        } else if self.channels.network() != current_network {
+        } else if self.network() != current_network {
             // No grace announced (e.g. the port attached after the
             // commit): adopt the current network at once, keeping
             // only retention that is still inside its own window.
             self.flip(current_network, rs_epoch, gk_epoch);
         } else {
-            self.channels.set_epochs(rs_epoch, gk_epoch);
+            self.channels
+                .lock()
+                .expect("authority channel poisoned")
+                .set_epochs(rs_epoch, gk_epoch);
         }
     }
 
@@ -258,7 +305,7 @@ impl P6ChannelHub {
     /// `old_network` for [`P6_BINDING_GRACE_MS`], then flips. Calls
     /// for any other network are ignored (a stale or replayed note).
     pub fn note_cutover(&mut self, old_network: u64, mono_ms: u64) {
-        if old_network == 0 || old_network != self.channels.network() {
+        if old_network == 0 || old_network != self.network() {
             return;
         }
         let grace: Vec<(u64, ChannelMember)> = self
@@ -279,22 +326,36 @@ impl P6ChannelHub {
     /// handshakes and idle channels of the retired table drop: their
     /// devices re-handshake (or recover over ZT) on the new network.
     fn flip(&mut self, network: u64, rs_epoch: u32, gk_epoch: u32) {
-        self.pending_carriers.extend(self.channels.take_outbound());
-        while let Some(event) = self.channels.poll_event() {
-            self.sort_event(event);
-        }
-        self.channels = AuthorityChannels::new(ChannelConfig {
-            network,
-            site_id: self.site_id,
-            site_epoch: (network >> 32) as u32,
-            rs_epoch,
-            gk_epoch,
-        });
+        self.pending_carriers.extend(
+            self.channels
+                .lock()
+                .expect("authority channel poisoned")
+                .take_outbound(),
+        );
+        self.drain_channel_events();
+        *self.channels.lock().expect("authority channel poisoned") =
+            AuthorityChannels::new(ChannelConfig {
+                network,
+                site_id: self.site_id,
+                site_epoch: (network >> 32) as u32,
+                rs_epoch,
+                gk_epoch,
+            });
     }
 
     /// Feeds one inbound carrier (USB 0x64 / mesh, reassembled by the
     /// P5 PR4 mapping) into the table.
     pub fn push_carrier(&mut self, device: u64, kind: CarrierKind, bytes: &[u8], mono_ms: u64) {
+        // A removed member may finish the notice exchange on its existing
+        // context, but cannot create a new one during the retention window.
+        if (kind == CarrierKind::R3 && !self.live.contains_key(&device))
+            || (kind == CarrierKind::R1
+                && self.retained.contains_key(&device)
+                && !self.live.contains_key(&device))
+        {
+            return;
+        }
+        self.last_mono_ms = mono_ms;
         let directory = HubDirectory {
             live: &self.live,
             retained: &self.retained,
@@ -303,15 +364,44 @@ impl P6ChannelHub {
         };
         let mut rng = |buf: &mut [u8]| fill_random(buf).is_ok();
         self.channels
+            .lock()
+            .expect("authority channel poisoned")
             .on_carrier(&directory, device, kind, bytes, mono_ms, &mut rng);
-        while let Some(event) = self.channels.poll_event() {
-            self.sort_event(event);
-        }
+        self.drain_channel_events();
     }
 
     /// Sorts one channel event: type-5/7 P6 reports become receipts,
     /// everything else waits for the P5 GK pump.
     fn sort_event(&mut self, event: ChannelEvent) {
+        let device = match &event {
+            ChannelEvent::ChannelReady { device }
+            | ChannelEvent::ChannelLost { device, .. }
+            | ChannelEvent::JoinConfirm { device, .. }
+            | ChannelEvent::Pull { device, .. }
+            | ChannelEvent::UpdateAck { device, .. }
+            | ChannelEvent::ActivateAck { device, .. }
+            | ChannelEvent::Passthrough { device, .. } => *device,
+        };
+        if !self.live.contains_key(&device) {
+            if let ChannelEvent::Passthrough {
+                env_type: 5, body, ..
+            } = &event
+            {
+                if body.len() >= BODY_HEAD
+                    && matches!(
+                        decode_type5(&body[BODY_HEAD..]),
+                        Some(P6Type5::NoticeAccepted { .. })
+                    )
+                {
+                    // The common receipt parser below still checks the
+                    // retained binding and authenticated generation.
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
         let (device, env_type, body) = match &event {
             ChannelEvent::Passthrough {
                 device,
@@ -331,7 +421,10 @@ impl P6ChannelHub {
             }
             let head = BodyHead::decode(&body[..BODY_HEAD], body[1]).ok()?;
             let binding = self.lookup(device, self.last_mono_ms)?;
-            if binding.network != self.channels.network() {
+            if binding.network != self.network()
+                || head.op != 2
+                || head.generation != binding.generation
+            {
                 return None;
             }
             Some(P6Receipt {
@@ -375,7 +468,12 @@ impl P6ChannelHub {
     /// the P5 PR4 USB/mesh mapping.
     pub fn take_carriers(&mut self) -> Vec<AuthorityOutbound> {
         let mut out = std::mem::take(&mut self.pending_carriers);
-        out.extend(self.channels.take_outbound());
+        out.extend(
+            self.channels
+                .lock()
+                .expect("authority channel poisoned")
+                .take_outbound(),
+        );
         out
     }
 
@@ -410,7 +508,7 @@ impl P6ChannelHub {
         // network COMMIT seals; everything else waits out the grace,
         // honestly unknown, instead of sealing under the wrong
         // context.
-        if network != self.channels.network() {
+        if network != self.network() {
             return false;
         }
         let grace_commit =
@@ -447,6 +545,8 @@ impl P6ChannelHub {
             now: mono_ms,
         };
         self.channels
+            .lock()
+            .expect("authority channel poisoned")
             .send_typed(
                 &directory,
                 device,
@@ -465,7 +565,8 @@ impl P6ChannelHub {
     /// seal (04 §7.1: no existing context) and stalling the shared
     /// outbox behind it.
     pub fn notice_sealable(&self, node: u64, network: u64, mono_ms: u64) -> bool {
-        if network != self.channels.network() || !self.channels.has_channel(node) {
+        let channels = self.channels.lock().expect("authority channel poisoned");
+        if network != channels.network() || !channels.has_channel(node) {
             return false;
         }
         self.lookup(node, mono_ms)
@@ -482,6 +583,49 @@ impl P6ChannelHub {
         self.send_on(node, 6, network, notice, false, mono_ms)
     }
 
+    /// Captures a notice while the member row and its channel are still
+    /// current. The ciphertext is returned to the revoke transaction and
+    /// cannot enter the transport outbox until that transaction commits.
+    pub fn preseal_notice(
+        &mut self,
+        node: u64,
+        network: u64,
+        notice: &[u8],
+        mono_ms: u64,
+    ) -> Option<Vec<u8>> {
+        if network != self.current_network || network != self.network() {
+            return None;
+        }
+        let binding = self.live.get(&node)?.clone();
+        if !binding.member || binding.network != network {
+            return None;
+        }
+        let directory = HubDirectory {
+            live: &self.live,
+            retained: &self.retained,
+            grace_until_mono_ms: self.grace_until_mono_ms,
+            now: mono_ms,
+        };
+        self.channels
+            .lock()
+            .expect("authority channel poisoned")
+            .seal_typed_detached(&directory, node, 6, binding.generation, notice, mono_ms)
+            .ok()
+            .map(|outbound| outbound.bytes)
+    }
+
+    pub fn send_presealed_notice(&mut self, node: u64, sealed: &[u8]) -> bool {
+        if sealed.is_empty() || sealed.len() > 2048 || self.pending_carriers.len() >= 64 {
+            return false;
+        }
+        self.pending_carriers.push(AuthorityOutbound {
+            device: node,
+            kind: CarrierKind::Envelope,
+            bytes: sealed.to_vec(),
+        });
+        true
+    }
+
     /// Seals a GrantRenew plaintext (PREPARE pre-commit, COMMIT on the
     /// old network during the grace).
     pub fn send_grant(&mut self, node: u64, network: u64, plaintext: &[u8], mono_ms: u64) -> bool {
@@ -493,7 +637,7 @@ impl P6ChannelHub {
 impl std::fmt::Debug for P6ChannelHub {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("P6ChannelHub")
-            .field("network", &format_args!("{:016x}", self.channels.network()))
+            .field("network", &format_args!("{:016x}", self.network()))
             .field("live", &self.live.len())
             .field("retained", &self.retained.len())
             .field("grace", &self.grace_until_mono_ms)
@@ -549,6 +693,7 @@ impl AuthorityDirectory for HubDirectory<'_> {
 /// and none calls back into the authority.
 pub struct P6ChannelTransport {
     hub: Arc<Mutex<P6ChannelHub>>,
+    delivery_attached: bool,
     /// Last monotonic tick seen (send gating); refreshed by
     /// `refresh_p6_bindings` every authority tick.
     mono_ms: u64,
@@ -560,6 +705,7 @@ impl P6ChannelTransport {
     pub fn share(hub: &Arc<Mutex<P6ChannelHub>>) -> Self {
         Self {
             hub: Arc::clone(hub),
+            delivery_attached: true,
             mono_ms: 0,
         }
     }
@@ -571,14 +717,35 @@ impl P6ChannelTransport {
 
 impl RevocationTransport for P6ChannelTransport {
     fn send_rrs(&mut self, node: u64, object: &[u8]) -> bool {
+        if !self.delivery_attached {
+            return false;
+        }
         self.lock().send_rrs(node, object, self.mono_ms)
     }
 
     fn send_notice(&mut self, node: u64, network: u64, notice: &[u8]) -> bool {
+        if !self.delivery_attached {
+            return false;
+        }
         self.lock().send_notice(node, network, notice, self.mono_ms)
     }
 
+    fn preseal_notice(&mut self, node: u64, network: u64, notice: &[u8]) -> Option<Vec<u8>> {
+        self.lock()
+            .preseal_notice(node, network, notice, self.mono_ms)
+    }
+
+    fn send_presealed_notice(&mut self, node: u64, sealed: &[u8]) -> bool {
+        if !self.delivery_attached {
+            return false;
+        }
+        self.lock().send_presealed_notice(node, sealed)
+    }
+
     fn send_grant(&mut self, node: u64, network: u64, plaintext: &[u8]) -> bool {
+        if !self.delivery_attached {
+            return false;
+        }
         self.lock()
             .send_grant(node, network, plaintext, self.mono_ms)
     }
@@ -595,12 +762,20 @@ impl RevocationTransport for P6ChannelTransport {
         true
     }
 
+    fn set_delivery_attached(&mut self, attached: bool) {
+        self.delivery_attached = attached;
+    }
+
     fn push_carrier(&mut self, device: u64, kind: CarrierKind, bytes: &[u8], now_ms: u64) {
         self.lock().push_carrier(device, kind, bytes, now_ms);
     }
 
     fn poll_p6_receipts(&mut self) -> Vec<P6Receipt> {
         self.lock().poll_receipts()
+    }
+
+    fn poll_channel_events(&mut self) -> Vec<ChannelEvent> {
+        self.lock().poll_other()
     }
 
     fn take_p6_carriers(&mut self) -> Vec<AuthorityOutbound> {

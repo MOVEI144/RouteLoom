@@ -855,7 +855,7 @@ impl AuthorityChannels {
                 // head must still be well-formed; the tail stays opaque.
                 let head_ok = plaintext.len() >= BODY_HEAD
                     && BodyHead::decode(&plaintext[..BODY_HEAD], plaintext[1])
-                        .is_ok_and(|head| head.generation == generation);
+                        .is_ok_and(|head| head.op == 2 && head.generation == generation);
                 if head_ok {
                     self.push_event(ChannelEvent::Passthrough {
                         device,
@@ -877,6 +877,21 @@ impl AuthorityChannels {
         plaintext: &[u8],
         now_ms: u64,
     ) -> Result<(), ChannelSendError> {
+        let outbound =
+            self.seal_for_inner(directory, device, env_type, plaintext, now_ms, false)?;
+        self.push_outbound(outbound);
+        Ok(())
+    }
+
+    fn seal_for_inner(
+        &mut self,
+        directory: &dyn AuthorityDirectory,
+        device: u64,
+        env_type: u8,
+        plaintext: &[u8],
+        now_ms: u64,
+        detached: bool,
+    ) -> Result<AuthorityOutbound, ChannelSendError> {
         // Pre-send re-check: never seal under a stale DAMS.
         let stale = !self
             .channels
@@ -891,7 +906,7 @@ impl AuthorityChannels {
             });
             return Err(ChannelSendError::StaleMember);
         }
-        if self.outbound.len() >= MAX_OUTBOUND {
+        if !detached && self.outbound.len() >= MAX_OUTBOUND {
             self.stats.send_errors += 1;
             return Err(ChannelSendError::OutboundFull);
         }
@@ -949,12 +964,11 @@ impl AuthorityChannels {
         channel.request_id += 1;
         channel.last_activity_ms = now_ms;
         self.stats.sends += 1;
-        self.push_outbound(AuthorityOutbound {
+        Ok(AuthorityOutbound {
             device,
             kind: CarrierKind::Envelope,
             bytes: envelope,
-        });
-        Ok(())
+        })
     }
 
     fn alloc_request_id(&mut self, device: u64) -> Result<u64, ChannelSendError> {
@@ -1090,6 +1104,38 @@ impl AuthorityChannels {
         let sent = self.seal_for(directory, device, env_type, &plaintext, now_ms);
         plaintext.zeroize();
         sent
+    }
+
+    /// Seals a typed envelope while retaining its exact ciphertext for a
+    /// transaction that must commit before the carrier may leave.
+    pub fn seal_typed_detached(
+        &mut self,
+        directory: &dyn AuthorityDirectory,
+        device: u64,
+        env_type: u8,
+        generation: u32,
+        tail: &[u8],
+        now_ms: u64,
+    ) -> Result<AuthorityOutbound, ChannelSendError> {
+        if !matches!(env_type, 5..=7)
+            || tail.len() > AUTHORITY_ENVELOPE_MAX - AUTHORITY_ENVELOPE_MIN - BODY_HEAD
+        {
+            return Err(ChannelSendError::InvalidParams);
+        }
+        let request_id = self.alloc_request_id(device)?;
+        let head = BodyHead {
+            op: 1,
+            generation,
+            request_id,
+        }
+        .encode(1)
+        .map_err(|_| ChannelSendError::InvalidParams)?;
+        let mut plaintext = Vec::with_capacity(BODY_HEAD + tail.len());
+        plaintext.extend_from_slice(&head);
+        plaintext.extend_from_slice(tail);
+        let sealed = self.seal_for_inner(directory, device, env_type, &plaintext, now_ms, true);
+        plaintext.zeroize();
+        sealed
     }
 
     /// The network this table currently serves (the P6 port flips the
@@ -1770,11 +1816,11 @@ mod tests {
         let mut device = handshake(&mut channels, &directory);
         // A type-6 body with a well-formed head passes through verbatim.
         let mut body = BodyHead {
-            op: 1,
+            op: 2,
             generation: 9,
             request_id: 0x55,
         }
-        .encode(1)
+        .encode(2)
         .expect("head")
         .to_vec();
         body.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
@@ -1801,6 +1847,19 @@ mod tests {
         }
         // A bad head under a valid tag does not.
         body[0] = 2;
+        channels.on_carrier(
+            &directory,
+            DEVICE,
+            CarrierKind::Envelope,
+            &device.seal(6, &body),
+            1000,
+            &mut rng(&mut state),
+        );
+        assert!(channels.poll_event().is_none());
+        // A device cannot impersonate the authority's down direction,
+        // even when it owns the AEAD send key for its own direction.
+        body[0] = 1;
+        body[1] = 1;
         channels.on_carrier(
             &directory,
             DEVICE,
@@ -1910,6 +1969,23 @@ mod tests {
     }
 
     #[test]
+    fn detached_notice_seals_even_when_normal_outbox_is_full() {
+        let directory = FakeDirectory::with(DEVICE, dams());
+        let mut channels = AuthorityChannels::new(config());
+        let mut device = handshake(&mut channels, &directory);
+        for _ in 0..MAX_OUTBOUND {
+            channels
+                .send_typed(&directory, DEVICE, 5, 9, &[1], 1001)
+                .unwrap();
+        }
+        let notice = channels
+            .seal_typed_detached(&directory, DEVICE, 6, 9, &[2], 1001)
+            .unwrap();
+        assert_eq!(channels.take_outbound().len(), MAX_OUTBOUND);
+        assert_eq!(device.open(&notice.bytes).0, 6);
+    }
+
+    #[test]
     fn retire_device_discards_queued_carriers() {
         let directory = FakeDirectory::with(DEVICE, dams());
         let mut channels = AuthorityChannels::new(config());
@@ -1941,11 +2017,11 @@ mod tests {
         let mut state = 0x52;
         for request_id in 1..=MAX_EVENTS as u64 {
             let body = BodyHead {
-                op: 1,
+                op: 2,
                 generation: 9,
                 request_id,
             }
-            .encode(1)
+            .encode(2)
             .expect("head");
             channels.on_carrier(
                 &directory,
@@ -1957,11 +2033,11 @@ mod tests {
             );
         }
         let last = BodyHead {
-            op: 1,
+            op: 2,
             generation: 9,
             request_id: MAX_EVENTS as u64 + 1,
         }
-        .encode(1)
+        .encode(2)
         .expect("head");
         let retry = device.seal(6, &last);
         channels.on_carrier(
@@ -1977,7 +2053,7 @@ mod tests {
                 panic!("lost event {request_id}");
             };
             assert_eq!(
-                BodyHead::decode(&body, 1).expect("head").request_id,
+                BodyHead::decode(&body, 2).expect("head").request_id,
                 request_id
             );
         }

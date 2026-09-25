@@ -184,6 +184,9 @@ Status SecurityCoordinator::step(const CoordinatorEvent& event) noexcept {
     case CoordinatorEventKind::Stop:
       status = on_stop(event.now);
       break;
+    case CoordinatorEventKind::StopForLifecycle:
+      status = on_stop(event.now, true);
+      break;
   }
   in_port_ = false;
   return status;
@@ -1349,6 +1352,16 @@ bool SecurityCoordinator::authenticated(const NodeId peer, const NetworkId netwo
   return bank_.peer_summary(SecurityScope::EndToEnd, peer, generation, role);
 }
 
+bool SecurityCoordinator::authenticated_link(const NodeId peer, const NetworkId network,
+                                             std::uint32_t& generation,
+                                             std::uint32_t& role) const noexcept {
+  generation = 0;
+  role = 0;
+  return mode_ == CoordinatorMode::Member && member_valid_ &&
+         network == adopted_.network &&
+         bank_.peer_summary(SecurityScope::Link, peer, generation, role);
+}
+
 bool SecurityCoordinator::boot_witness_ok(const std::uint32_t witness) const noexcept {
   // A stored membership newer than the rlboot counter is implausible; a
   // zero witness never authenticates.
@@ -1475,7 +1488,8 @@ Status SecurityCoordinator::on_wake(const MonotonicMs now) noexcept {
   return Status::success();
 }
 
-Status SecurityCoordinator::on_stop(const MonotonicMs now) noexcept {
+Status SecurityCoordinator::on_stop(const MonotonicMs now,
+                                     const bool defer_resume_clear) noexcept {
   (void)now;
   if (mode_ == CoordinatorMode::Member) {
     // stop_traffic reads the state; unattached (pre-Start) relays stop
@@ -1483,7 +1497,7 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now) noexcept {
     if (deps_.discovery != nullptr) {
       deps_.discovery->membership() = MembershipController{};
     }
-    stop_traffic();
+    stop_traffic(!defer_resume_clear);
   }
   suspend_authority();
   {
@@ -1517,6 +1531,25 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now) noexcept {
 }
 
 // --- Authority channel (G-SEC P5) ----------------------------------------------------------------
+
+Status SecurityCoordinator::send_authority_typed(const std::uint8_t type,
+                                                 const ByteView body,
+                                                 const MonotonicMs now) noexcept {
+  if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
+  if (mode_ != CoordinatorMode::Member || !member_valid_ || sleeping_) {
+    return Status::error(StatusCode::InvalidState, "authority outside active member");
+  }
+  if (now < last_now_) return Status::error(StatusCode::TimeUncertain, "coordinator clock regressed");
+  in_port_ = true;
+  AuthorityInput input{};
+  input.kind = AuthorityInputKind::SendTyped;
+  input.typed.type = type;
+  input.typed.body = body;
+  const Status status = authority_.advance(input, now);
+  if (status) last_now_ = now;
+  in_port_ = false;
+  return status;
+}
 
 namespace {
 
@@ -1672,10 +1705,11 @@ void SecurityCoordinator::on_event(const AuthorityEvent& event) noexcept {
       sat_inc(counters_.authority_activates);
       break;
     case AuthorityEvent::Kind::Passthrough:
-      // Verified type 5..8 plaintext with no P6 sink connected: counted
-      // and dropped. The client sends no ACK for these, so nothing here
-      // can fake success.
       sat_inc(counters_.authority_passthrough);
+      if (deps_.authority_sink != nullptr && event.envelope_type >= 5 &&
+          event.envelope_type <= 7) {
+        deps_.authority_sink->on_verified_authority(event.envelope_type, event.passthrough);
+      }
       break;
   }
 }
@@ -2081,14 +2115,14 @@ Status SecurityCoordinator::land_removal(const RemovalNotice& notice,
   return committed;
 }
 
-void SecurityCoordinator::stop_traffic() noexcept {
+void SecurityCoordinator::stop_traffic(const bool clear_resume) noexcept {
   // Member workspace is live; the caller destroys (wipes) it after. The
   // bank and the GK scope live outside the union, so they are scrubbed
   // here: bank clear does not depend on new entropy, and proxy/gateway leave
   // Member (aborting relays, freeing slots) before the wipe.
   (void)member().engine.cancel_all();
   bank_.clear();
-  (void)member().resume_cache.clear_all();
+  if (clear_resume) (void)member().resume_cache.clear_all();
   (void)member().member_cookie.configure(&entropy_fill, deps_.entropy);  // rotate; old cookies die
   // Verified removal ends the channel (its DAMS copy wipes with it) and
   // parks the GK state: no group TX/RX, no scope tags from here on.

@@ -1662,6 +1662,38 @@ void test_resume2_incremental_lookup() {
   CHECK(cursor.ambiguous && !cursor.match.valid);
 }
 
+void test_resume2_incremental_revocation_and_clear() {
+  FaultyResumeStorage2 storage(6);
+  ResumeCache2 cache(storage, 3, 3);
+  CHECK_OK(cache.put(resume2_slot(100), context()));
+  CHECK_OK(cache.put(resume2_slot(101), context()));
+  RevocationSet rrs = revocation_set(1, 0);
+  rrs.entries[0] = RevocationEntry{100, 2, RevocationReason::Lost};
+  rrs.count = 1;
+  std::size_t cursor = 0;
+  bool done = false;
+  storage.cut_call = storage.write_calls;
+  CHECK(cache.sweep_revoked(context(203, &rrs), cursor, done).code ==
+        StatusCode::StorageFailure);
+  CHECK(cursor == 0 && !done);
+  storage.disarm();
+  while (!done) {
+    const std::size_t before = storage.read_calls;
+    CHECK_OK(cache.sweep_revoked(context(203, &rrs), cursor, done));
+    CHECK(storage.read_calls - before <= 2);
+  }
+  ResumeSlot2 slot{};
+  bool intact = false;
+  CHECK_OK(cache.read_at(0, slot, intact));
+  CHECK(intact && !slot.valid);
+  CHECK_OK(cache.find_by_peer(ResumePurpose::Link, 101, context(), slot, cursor));
+  cursor = 0;
+  done = false;
+  while (!done) CHECK_OK(cache.clear_step(cursor, done));
+  CHECK(cache.find_by_peer(ResumePurpose::Link, 101, context(), slot, cursor).code ==
+        StatusCode::NotFound);
+}
+
 void test_resume2_uses() {
   // The 64-use ceiling holds across reboots; one RMS generation costs at
   // most 8 durable reservation writes (P4 §6.2, V1-F05). Each boot drops
@@ -1993,6 +2025,7 @@ int main() {
   test_resume2_cache_rules();
   test_resume2_find_by_id();
   test_resume2_incremental_lookup();
+  test_resume2_incremental_revocation_and_clear();
   test_resume2_uses();
   test_resume2_power_cuts();
   test_local_revocation_basic();

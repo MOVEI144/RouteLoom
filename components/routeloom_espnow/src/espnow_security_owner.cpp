@@ -55,27 +55,52 @@ sdkv1::MembershipLifecycle& EspNowSecurityOwner::lifecycle() noexcept {
 
 Status EspNowSecurityOwner::LifecycleAuthorityPort::authority_send(
     const std::uint8_t authority_type, const ByteView body) noexcept {
-  (void)authority_type;
-  (void)body;
-  // The device authority channel (P5 PR4: USB/mesh mapping + the
-  // AuthorityClient typed send) is not wired yet: Applied/Get/
-  // NoticeAccepted/PREPARED/APPLIED stay unsent and the Host side
-  // honestly reports them unknown until their bearer lands. WouldBlock
-  // (not Unsupported): the bearer is coming, the data stays valid.
-  return Status::error(StatusCode::WouldBlock, "p5 authority channel not wired");
+  EspNowSecurityOwner& owner = owner_;
+  if (authority_type < 5 || authority_type > 7 || body.data == nullptr ||
+      body.size == 0 || body.size > owner.authority_tx_staged_[0].body.size()) {
+    return Status::error(StatusCode::InvalidArgument, "p6 authority body");
+  }
+  if (!owner.coordinator_live_ ||
+      owner.coordinator().authority_snapshot().state != sdkv1::AuthoritySnapshot::State::Ready) {
+    return Status::error(StatusCode::WouldBlock, "p6 authority not ready");
+  }
+  for (AuthorityTxStage& slot : owner.authority_tx_staged_) {
+    if (slot.used) continue;
+    std::memcpy(slot.body.data(), body.data, body.size);
+    slot.type = authority_type;
+    slot.size = body.size;
+    slot.used = true;
+    return Status::success();
+  }
+  return Status::error(StatusCode::WouldBlock, "p6 authority queue full");
 }
 
 Status EspNowSecurityOwner::LifecyclePeerPort::peer_send(const NodeId peer, const FrameType carrier,
                                                          const ByteView body) noexcept {
-  (void)peer;
-  (void)carrier;
-  (void)body;
-  // No 1-hop link-TX lane exists yet (migration_send is allowlisted to
-  // the migration carriers and needs an attached migration engine):
-  // StateEpochs/RrsRequest/manifests/chunks/ACKs stay unsent and the
-  // lifecycle runs silent (features 0), still applying whatever RRS1
-  // arrives. A dedicated link-TX API is the follow-up, not a reuse.
-  return Status::error(StatusCode::WouldBlock, "p6 gossip TX not wired");
+  EspNowSecurityOwner& owner = owner_;
+  if (owner.runtime_ == nullptr || !owner.coordinator_live_ || body.data == nullptr ||
+      body.size == 0 || body.size > owner.peer_tx_staged_[0].body.size()) {
+    return Status::error(StatusCode::InvalidArgument, "p6 peer send");
+  }
+  std::uint32_t generation = 0, role = 0;
+  if (!owner.coordinator().authenticated_link(peer, owner.adopted_network_, generation, role)) {
+    return Status::error(StatusCode::AuthorizationFailed, "p6 peer unauthenticated");
+  }
+  std::uint32_t binding = 0;
+  if (!owner.runtime_->p6_link_binding(peer, binding)) {
+    return Status::error(StatusCode::AuthorizationFailed, "p6 peer binding absent");
+  }
+  for (PeerTxStage& slot : owner.peer_tx_staged_) {
+    if (slot.used) continue;
+    std::memcpy(slot.body.data(), body.data, body.size);
+    slot.peer = peer;
+    slot.carrier = carrier;
+    slot.size = body.size;
+    slot.binding = binding;
+    slot.used = true;
+    return Status::success();
+  }
+  return Status::error(StatusCode::WouldBlock, "p6 peer queue full");
 }
 
 Status EspNowSecurityOwner::LifecycleRuntimePort::enforce_revocation(
@@ -85,12 +110,9 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::enforce_revocation(
   if (owner.stores_ == nullptr || !owner.coordinator_live_) {
     return Status::error(StatusCode::InvalidState, "enforce before wiring");
   }
-  // Sessions + Discovery bindings retire through the coordinator seam
-  // (which re-checks the set against the adopted store first); routes
-  // withdraw per entry through the node. TX-queue/group/RTC scrubbing
-  // has no Owner-reachable API yet (residual below): retired sessions
-  // make queued frames to revoked peers fail closed, and the revoked
-  // routes never select again.
+  // The P4 bank, pending handshakes and Discovery bindings retire before
+  // any durable resume sweep. The route withdrawal also closes queued
+  // sends to revoked peers.
   const Status sessions = owner.coordinator().revoke_member_sessions(set, site_epoch, now_ms);
   if (!sessions) return sessions;
   if (owner.runtime_ != nullptr) {
@@ -98,21 +120,72 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::enforce_revocation(
       owner.runtime_->node().revoke_routes(set.entries[i].node_id, now_ms);
     }
   }
-  return Status::success();
+  if (owner.p4_sweep_network_ != set.network || owner.p4_sweep_rs_epoch_ != set.rs_epoch) {
+    owner.p4_sweep_network_ = set.network;
+    owner.p4_sweep_rs_epoch_ = set.rs_epoch;
+    owner.p4_sweep_cursor_ = 0;
+  }
+  sdkv1::ResumeSlotStorage2& storage = owner.stores_->resume2();
+  const bool gateway = storage.slot_count() ==
+      sdkv1::kResume2GatewayLinkQuota + sdkv1::kResume2GatewayEndQuota;
+  sdkv1::ResumeCache2 cache(storage,
+                            gateway ? sdkv1::kResume2GatewayLinkQuota
+                                    : sdkv1::kResume2NodeLinkQuota,
+                            gateway ? sdkv1::kResume2GatewayEndQuota
+                                    : sdkv1::kResume2NodeEndQuota);
+  sdkv1::ResumeContext context{};
+  context.network = set.network;
+  context.revocations = &set;
+  bool done = false;
+  const Status swept = cache.sweep_revoked(context, owner.p4_sweep_cursor_, done);
+  if (!swept) return swept;
+  return done ? Status::success() : Status::error(StatusCode::WouldBlock, "p4 resume sweep");
 }
 
 Status EspNowSecurityOwner::LifecycleRuntimePort::remove_member_runtime() noexcept {
   EspNowSecurityOwner& owner = owner_;
-  // Re-asserts the stopped state (the coordinator's land_removal runs
-  // first on the Joiner path and already halted traffic): relay off,
-  // discovery membership revoked. Idempotent by construction.
+  // The journal already holds the signed removal intent. Stop every
+  // member key scope before erasing storage; a reboot replays this step
+  // before the coordinator can adopt a member again.
   if (owner.runtime_ != nullptr) {
+    const PauseReason prior = owner.runtime_->node().pause_reason();
+    if (prior != PauseReason::None && prior != PauseReason::Cutover) {
+      (void)owner.runtime_->node().clear_pause(prior);
+    }
+    (void)owner.runtime_->node().set_pause(PauseReason::Cutover, pause::kAll);
     (void)owner.runtime_->node().set_relay_enabled(false);
   }
   if (owner.discovery_live_) {
     owner.discovery()->membership().revoke();
   }
-  return Status::success();
+  if (owner.coordinator_live_ && !owner.removal_pending_) {
+    sdkv1::CoordinatorEvent stop{};
+    stop.kind = sdkv1::CoordinatorEventKind::StopForLifecycle;
+    stop.now = owner.runtime_ != nullptr ? owner.runtime_->now_ms() : 0;
+    const Status halted = owner.coordinator().step(stop);
+    if (!halted) return halted;
+  }
+  owner.removal_pending_ = true;
+  for (PeerTxStage& slot : owner.peer_tx_staged_) {
+    secure_clear(slot.body);
+    slot = PeerTxStage{};
+  }
+  for (AuthorityTxStage& slot : owner.authority_tx_staged_) {
+    secure_clear(slot.body);
+    slot = AuthorityTxStage{};
+  }
+  sdkv1::ResumeSlotStorage2& storage = owner.stores_->resume2();
+  const bool gateway = storage.slot_count() ==
+      sdkv1::kResume2GatewayLinkQuota + sdkv1::kResume2GatewayEndQuota;
+  sdkv1::ResumeCache2 cache(storage,
+                            gateway ? sdkv1::kResume2GatewayLinkQuota
+                                    : sdkv1::kResume2NodeLinkQuota,
+                            gateway ? sdkv1::kResume2GatewayEndQuota
+                                    : sdkv1::kResume2NodeEndQuota);
+  bool done = false;
+  const Status cleared = cache.clear_step(owner.p4_clear_cursor_, done);
+  if (!cleared) return cleared;
+  return done ? Status::success() : Status::error(StatusCode::WouldBlock, "p4 resume clear");
 }
 
 Status EspNowSecurityOwner::LifecycleRuntimePort::erase_site_trust() noexcept {
@@ -287,13 +360,14 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
   deps.bank_aead = psa_session_aead_gcm();
   deps.crypto_aead = *psa_aead_gcm();
   deps.proxy_sealer = &sealer();
+  deps.authority_sink = this;
   deps.local_mac = config_.local_mac;
   deps.local_node = config_.local_node;
   deps.joiner_config = config_.joiner;
   new (coordinator_box_.data()) sdkv1::SecurityCoordinator(deps);
   coordinator_live_ = true;
-  // The P6 membership lifecycle beside the coordinator: same stores, the
-  // RLX1 journal, silent gossip (no link-TX lane yet). Self is the RLI1
+  // The P6 membership lifecycle beside the coordinator: same stores and
+  // RLX1 journal. Self is the RLI1
   // node id when provisioned, else the Kconfig identity (which becomes
   // the RLI1 id at provisioning — a mismatch blocks, never corrupts).
   sdkv1::LifecycleConfig lifecycle_config{};
@@ -302,7 +376,7 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
                               : config_.local_node;
   lifecycle_config.profile = config_.gateway ? sdkv1::LifecycleProfile::Gateway
                                                        : sdkv1::LifecycleProfile::Node;
-  lifecycle_config.enabled_features = 0;
+  lifecycle_config.enabled_features = kCapRrsGossipV1;
   sdkv1::LifecyclePorts lifecycle_ports{lifecycle_authority_, lifecycle_peer_, lifecycle_runtime_,
                                         *entropy_, lifecycle_sink_, &lifecycle_observer_};
   new (lifecycle_box_.data())
@@ -451,10 +525,18 @@ void EspNowSecurityOwner::on_rrs_frame(const NodeId peer, const FrameType type,
   if (type != FrameType::Control && type != FrameType::ControlObject) return;
   for (GossipStage& slot : gossip_staged_) {
     if (slot.used) continue;
+    std::uint32_t generation = 0, role = 0;
+    if (!coordinator_live_ || !coordinator().authenticated_link(peer, adopted_network_, generation, role))
+      return;
+    std::uint32_t binding = 0;
+    if (runtime_ == nullptr || !runtime_->p6_link_binding(peer, binding)) return;
     std::memcpy(slot.body.data(), body.data, body.size);
     slot.body_size = body.size;
     slot.peer = peer;
     slot.carrier = type;
+    slot.generation = generation;
+    slot.role = role;
+    slot.binding = binding;
     slot.used = true;
     return;
   }
@@ -468,16 +550,21 @@ bool EspNowSecurityOwner::claim_rrs_chunk(const NodeId peer, const FrameType car
       body.size > gossip_staged_[0].body.size()) {
     return false;
   }
-  // The P4 binding adapter is not wired yet, so every gossip stamp carries
-  // binding 0 (manifests and chunks consistently): the transfer registry
-  // still keys (peer, hash) correctly.
-  if (!lifecycle().owns_rrs_chunk(peer, 0, carrier, body)) return false;
+  std::uint32_t binding = 0;
+  if (runtime_ == nullptr || !runtime_->p6_link_binding(peer, binding) ||
+      !lifecycle().owns_rrs_chunk(peer, binding, carrier, body)) return false;
   for (GossipStage& slot : gossip_staged_) {
     if (slot.used) continue;
+    std::uint32_t generation = 0, role = 0;
+    if (!coordinator_live_ || !coordinator().authenticated_link(peer, adopted_network_, generation, role))
+      return true;
     std::memcpy(slot.body.data(), body.data, body.size);
     slot.body_size = body.size;
     slot.peer = peer;
     slot.carrier = carrier;
+    slot.generation = generation;
+    slot.role = role;
+    slot.binding = binding;
     slot.used = true;
     return true;
   }
@@ -487,30 +574,155 @@ bool EspNowSecurityOwner::claim_rrs_chunk(const NodeId peer, const FrameType car
 
 void EspNowSecurityOwner::poll_lifecycle(const MonotonicMs now_ms) noexcept {
   if (!lifecycle_live_ || !lifecycle_booted_) return;
+  sync_lifecycle_peers(now_ms);
   feed_lifecycle_inputs(now_ms);
+  drain_authority_tx(now_ms);
   (void)lifecycle().dispatch(sdkv1::LifecycleInput::Poll(), now_ms);
+  drain_authority_tx(now_ms);
+  drain_peer_tx();
   drain_lifecycle_actions(now_ms);
+}
+
+void EspNowSecurityOwner::sync_lifecycle_peers(const MonotonicMs now_ms) noexcept {
+  if (runtime_ == nullptr || !coordinator_live_ || adopted_network_ == 0) return;
+  std::array<NodeId, EspNowRuntime::kPeerCapacity> current{};
+  std::size_t count = 0;
+  runtime_->for_each_peer([&](const NodeId peer, const MacAddress&,
+                              const RouteMetric, const bool) noexcept {
+    if (peer == self_node() || count >= current.size()) return;
+    std::uint32_t generation = 0, role = 0;
+    if (!coordinator().authenticated_link(peer, adopted_network_, generation, role) ||
+        role == 0 || role > 0xFF) return;
+    std::uint32_t binding = 0;
+    if (!runtime_->p6_link_binding(peer, binding)) return;
+    sdkv1::PeerCredentialStamp stamp{};
+    stamp.peer = peer;
+    stamp.network = adopted_network_;
+    stamp.assignment_generation = generation;
+    stamp.role = static_cast<std::uint8_t>(role);
+    stamp.binding_incarnation = binding;
+    (void)lifecycle().dispatch(sdkv1::LifecycleInput::PeerBound(stamp), now_ms);
+    current[count++] = peer;
+  });
+  for (const NodeId prior : lifecycle_peers_) {
+    if (prior == kInvalidNodeId) continue;
+    bool still_bound = false;
+    for (std::size_t i = 0; i < count; ++i) {
+      if (current[i] == prior) { still_bound = true; break; }
+    }
+    if (!still_bound) {
+      (void)lifecycle().dispatch(sdkv1::LifecycleInput::PeerGone(prior), now_ms);
+    }
+  }
+  lifecycle_peers_ = current;
+}
+
+void EspNowSecurityOwner::on_verified_authority(const std::uint8_t type,
+                                                const ByteView plaintext) noexcept {
+  if (type < 5 || type > 7 || plaintext.data == nullptr ||
+      plaintext.size <= sdkv1::kAuthorityBodyHeadSize ||
+      plaintext.size > authority_rx_staged_[0].body.size()) return;
+  for (AuthorityRxStage& slot : authority_rx_staged_) {
+    if (slot.used) continue;
+    std::memcpy(slot.body.data(), plaintext.data, plaintext.size);
+    slot.type = type;
+    slot.size = plaintext.size;
+    slot.used = true;
+    return;
+  }
+}
+
+void EspNowSecurityOwner::drain_authority_tx(const MonotonicMs now_ms) noexcept {
+  for (AuthorityTxStage& slot : authority_tx_staged_) {
+    if (!slot.used) continue;
+    const Status sent = coordinator().send_authority_typed(
+        slot.type, ByteView{slot.body.data(), slot.size}, now_ms);
+    if (!sent) {
+      if (sent.code != StatusCode::Busy) {
+        secure_clear(slot.body);
+        slot = AuthorityTxStage{};
+      }
+      break;
+    }
+    secure_clear(slot.body);
+    slot = AuthorityTxStage{};
+  }
+}
+
+void EspNowSecurityOwner::drain_peer_tx() noexcept {
+  if (runtime_ == nullptr) return;
+  for (PeerTxStage& slot : peer_tx_staged_) {
+    if (!slot.used) continue;
+    std::uint32_t generation = 0, role = 0;
+    if (!coordinator().authenticated_link(slot.peer, adopted_network_, generation, role)) {
+      secure_clear(slot.body);
+      slot = PeerTxStage{};
+      continue;
+    }
+    std::uint32_t binding = 0;
+    if (!runtime_->p6_link_binding(slot.peer, binding) || binding != slot.binding) {
+      secure_clear(slot.body);
+      slot = PeerTxStage{};
+      continue;
+    }
+    const Status sent = runtime_->p6_send(slot.peer, slot.carrier,
+                                          ByteView{slot.body.data(), slot.size});
+    if (!sent && (sent.code == StatusCode::WouldBlock || sent.code == StatusCode::Busy)) break;
+    secure_clear(slot.body);
+    slot = PeerTxStage{};
+  }
 }
 
 void EspNowSecurityOwner::feed_lifecycle_inputs(const MonotonicMs now_ms) noexcept {
   // Gossip feeds only while adopted: the stamp needs the adopted network
   // and role, and the lifecycle ignores peer control while unadopted.
   if (adopted_network_ != 0 && adopted_role_ != 0) {
+    for (AuthorityRxStage& slot : authority_rx_staged_) {
+      if (!slot.used) continue;
+      sdkv1::AuthorityBodyHead head{};
+      const bool valid = sdkv1::authority_head_decode(
+          ByteView{slot.body.data(), sdkv1::kAuthorityBodyHeadSize}, head).ok();
+      if (valid && stores_ != nullptr && stores_->site().has_site() &&
+          head.op == 1 && head.generation == stores_->site().site().assignment_generation &&
+          stores_->site().site().network == adopted_network_) {
+        sdkv1::PeerCredentialStamp stamp{};
+        stamp.network = adopted_network_;
+        stamp.peer = stores_->site().site().gateway_count != 0
+                         ? stores_->site().site().gateways[0] : kInvalidNodeId;
+        stamp.assignment_generation = head.generation;
+        (void)lifecycle().dispatch(
+            sdkv1::LifecycleInput::Authority(
+                stamp, slot.type,
+                ByteView{slot.body.data() + sdkv1::kAuthorityBodyHeadSize,
+                         slot.size - sdkv1::kAuthorityBodyHeadSize}),
+            now_ms);
+      }
+      secure_clear(slot.body);
+      slot = AuthorityRxStage{};
+    }
     for (GossipStage& slot : gossip_staged_) {
       if (!slot.used) continue;
       slot.used = false;
       sdkv1::PeerCredentialStamp stamp{};
       stamp.peer = slot.peer;
       stamp.network = adopted_network_;
-      stamp.role = adopted_role_;
-      // No P4 adapter yet: the generation/fingerprint/binding the sink
-      // cannot verify stay zero (documented seam). The lifecycle
-      // validates-but-never-consumes them on the gossip path — only
-      // SAK-signed objects move state.
-      (void)lifecycle().dispatch(
-          sdkv1::LifecycleInput::PeerControl(
-              stamp, slot.carrier, ByteView{slot.body.data(), slot.body_size}),
-          now_ms);
+      std::uint32_t generation = 0, role = 0;
+      if (coordinator().authenticated_link(slot.peer, adopted_network_, generation, role) &&
+          generation == slot.generation && role == slot.role) {
+        std::uint32_t binding = 0;
+        if (!runtime_->p6_link_binding(slot.peer, binding) || binding != slot.binding) {
+          secure_clear(slot.body);
+          continue;
+        }
+        stamp.role = role;
+        stamp.assignment_generation = generation;
+        stamp.binding_incarnation = binding;
+        (void)lifecycle().dispatch(
+            sdkv1::LifecycleInput::PeerControl(
+                stamp, slot.carrier, ByteView{slot.body.data(), slot.body_size}),
+            now_ms);
+      }
+      secure_clear(slot.body);
     }
     if (completed_object_valid_) {
       completed_object_valid_ = false;
@@ -521,6 +733,10 @@ void EspNowSecurityOwner::feed_lifecycle_inputs(const MonotonicMs now_ms) noexce
           now_ms);
     }
   } else {
+    for (AuthorityRxStage& slot : authority_rx_staged_) {
+      secure_clear(slot.body);
+      slot = AuthorityRxStage{};
+    }
     for (GossipStage& slot : gossip_staged_) slot.used = false;
     completed_object_valid_ = false;
   }
@@ -1093,6 +1309,7 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
     (void)lifecycle().dispatch(
         sdkv1::LifecycleInput::MemberReady(stores_->site().commit_seq(), 0), now_ms);
     complete_lifecycle_recovery(true, now_ms);
+  }
   // Adoption binds the authority transport's self id (self-downs deliver
   // locally and self-addressed mesh sends refuse from here on).
   if (authority_live_) {

@@ -130,7 +130,14 @@ void test_revoke_routes() {
   w.run(4000);
   CHECK(w.at(1)->routes().best(4).next_hop == 2);
   CHECK(w.at(1)->routes().best(2).valid);
+  const std::array<std::uint8_t, 1> pending_payload{{0xA5}};
+  SendOptions pending_options{};
+  pending_options.lifetime_ms = 30000;
+  MessageId pending{};
+  CHECK_OK(w.at(1)->send(2, ByteView{pending_payload.data(), pending_payload.size()},
+                         pending_options, w.now, pending));
   w.at(1)->revoke_routes(2, w.now);
+  CHECK(w.at(1)->delivery(pending).state == DeliveryState::Failed);
   CHECK(!w.at(1)->routes().best(2).valid);
   // The revoked arm stays dead across advertisement waves (its updates
   // are ignored while the record is inactive); the destination repairs

@@ -536,6 +536,9 @@ Status AuthorityClient::advance(const AuthorityInput& in, const MonotonicMs now)
     case AuthorityInputKind::Suspend:
       status = on_suspend();
       break;
+    case AuthorityInputKind::SendTyped:
+      status = on_typed(in.typed, now);
+      break;
     default:
       status = Status::error(StatusCode::InvalidArgument, "AUTHORITY_INPUT_UNKNOWN");
       break;
@@ -999,6 +1002,36 @@ Status AuthorityClient::do_seal(const keys::AuthorityEnvelopeType type, const By
   return Status::success();
 }
 
+Status AuthorityClient::on_typed(const AuthorityTypedRequest& typed,
+                                 const MonotonicMs now) noexcept {
+  if (typed.type < 5 || typed.type > 7 || typed.body.data == nullptr ||
+      typed.body.size == 0 || typed.body.size > 1024) {
+    return Status::error(StatusCode::InvalidArgument, "AUTHORITY_TYPED_BODY");
+  }
+  if (state_ != AuthoritySnapshot::State::Ready || !site_bound()) {
+    return Status::error(StatusCode::InvalidState, "AUTHORITY_NOT_BOUND");
+  }
+  if (tx_size_ != 0) return Status::error(StatusCode::Busy, "AUTHORITY_TX_BUSY");
+  if (next_request_id_ == UINT64_MAX) {
+    return Status::error(StatusCode::CounterExhausted, "AUTHORITY_REQUEST_EXHAUSTED");
+  }
+  std::array<std::uint8_t, kAuthorityBodyHeadSize + 1024> plaintext{};
+  AuthorityBodyHead head{};
+  head.op = 2;
+  head.generation = local_.generation;
+  head.request_id = next_request_id_;
+  std::size_t written = 0;
+  const Status encoded = authority_head_encode(
+      head, MutableByteView{plaintext.data(), plaintext.size()}, written);
+  if (!encoded) return encoded;
+  std::memcpy(plaintext.data() + written, typed.body.data, typed.body.size);
+  const Status sent = do_seal(static_cast<keys::AuthorityEnvelopeType>(typed.type),
+                              ByteView{plaintext.data(), written + typed.body.size}, now);
+  secure_clear(plaintext);
+  if (sent) ++next_request_id_;
+  return sent;
+}
+
 bool AuthorityClient::site_bound() const noexcept {
   if (group_ == nullptr) return true;  // PR1 fake-carrier mode
   // A failed GK twin write blocks group traffic, but the already established
@@ -1313,7 +1346,8 @@ void AuthorityClient::on_envelope_ready(const AuthorityRxCarrier& rx,
       // borrows `body` during the call, so notify first and wipe after.
       AuthorityBodyHead head{};
       if (plain_size < kAuthorityBodyHeadSize ||
-          !authority_head_decode(ByteView{workspace, kAuthorityBodyHeadSize}, head)) {
+          !authority_head_decode(ByteView{workspace, kAuthorityBodyHeadSize}, head) ||
+          head.op != 1 || head.generation != local_.generation) {
         fail();
         return;
       }

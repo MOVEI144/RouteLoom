@@ -522,6 +522,12 @@ Status MembershipLifecycle::dispatch(const LifecycleInput& input, const Monotoni
     case LifecycleInputTag::VerifiedPeerControl:
       status = on_peer_control(input.payload.peer_control, now_ms);
       break;
+    case LifecycleInputTag::AuthenticatedPeerBound:
+      status = on_peer_bound(input.payload.bound_peer, now_ms);
+      break;
+    case LifecycleInputTag::AuthenticatedPeerGone:
+      status = on_peer_gone(input.payload.gone_peer);
+      break;
     case LifecycleInputTag::CompletedRrsObject:
       status = on_completed(input.payload.completed, now_ms);
       break;
@@ -1023,7 +1029,14 @@ Status MembershipLifecycle::apply_enforce(const MonotonicMs now_ms) noexcept {
   // Poll with the barrier closed.
   const Status enforced =
       ports_.runtime.enforce_revocation(revocations_.set(), site_epoch(), now_ms);
-  if (!enforced) return Status::success();
+  if (!enforced) {
+    if (enforced.code == StatusCode::WouldBlock) {
+      sweep_attempts_ = 0;
+    } else if (++sweep_attempts_ >= rrs_const::kSweepAttemptsMax) {
+      enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+    }
+    return Status::success();
+  }
   apply_step_ = ApplyStep::Sweep;
   sweep_cursor_ = 0;
   sweep_attempts_ = 0;
@@ -1431,6 +1444,7 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
                                                          : LifecyclePhase::Holdoff;
         removal_step_ = RemovalStep::Runtime;
         removal_cursor_ = 0;
+        removal_attempts_ = 0;
         holdoff_start_ = now_ms;  // lost monotonic continuity: start 600 s again
         if (phase_ == LifecyclePhase::Holdoff) {
           const SiteStoreHealth health = site_.health();
@@ -1615,6 +1629,41 @@ Status MembershipLifecycle::on_authority(const LifecycleAuthorityMessage& messag
     return Status::success();  // closed phases take no authority objects
   }
   return begin_apply(message.body, CandidateSource::Authority, message.authority.peer, now_ms);
+}
+
+Status MembershipLifecycle::on_peer_bound(const PeerCredentialStamp& stamp,
+                                          const MonotonicMs now_ms) noexcept {
+  if (!gossip_tx_enabled() || !permits(stamp, TrafficUse::RecoveryControl)) {
+    return Status::success();
+  }
+  for (Neighbor& neighbor : neighbors_) {
+    if (!neighbor.used || neighbor.node != stamp.peer) continue;
+    if (neighbor.binding != stamp.binding_incarnation) {
+      neighbor.binding = stamp.binding_incarnation;
+      neighbor.advertised_rs = 0;
+      neighbor.advertised_gk = 0;
+      neighbor.notify_due = now_ms;
+    }
+    return Status::success();
+  }
+  for (Neighbor& neighbor : neighbors_) {
+    if (neighbor.used) continue;
+    neighbor = Neighbor{};
+    neighbor.used = true;
+    neighbor.node = stamp.peer;
+    neighbor.binding = stamp.binding_incarnation;
+    neighbor.notify_due = now_ms;
+    return Status::success();
+  }
+  saturate_inc(counters_.gossip_dropped);
+  return Status::error(StatusCode::NoCapacity, "p6 neighbor table full");
+}
+
+Status MembershipLifecycle::on_peer_gone(const NodeId peer) noexcept {
+  for (Neighbor& neighbor : neighbors_) {
+    if (neighbor.used && neighbor.node == peer) neighbor = Neighbor{};
+  }
+  return Status::success();
 }
 
 Status MembershipLifecycle::on_peer_control(const LifecyclePeerControl& control,
@@ -1860,6 +1909,7 @@ Status MembershipLifecycle::on_removal(ByteView object, MonotonicMs now_ms) noex
   exchange_.abort();
   action_pending_ = false;
   removal_cursor_ = 0;
+  removal_attempts_ = 0;
   removal_step_ = RemovalStep::Runtime;
   return Status::success();
 }
@@ -1922,10 +1972,17 @@ Status MembershipLifecycle::removal_poll(MonotonicMs now_ms) noexcept {
   // An error during a store commit can mean the write actually landed.
   // Re-read from a new instance on boot instead of continuing from a stale
   // in-memory slot ordinal. The Removing intent keeps the gate closed.
-  if (!result && (removal_step_ == RemovalStep::Site ||
-                  removal_step_ == RemovalStep::Revocation ||
-                  removal_step_ == RemovalStep::Finish)) {
-    enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+  if (!result) {
+    if (result.code == StatusCode::WouldBlock) {
+      removal_attempts_ = 0;
+    } else if (removal_step_ == RemovalStep::Runtime || removal_step_ == RemovalStep::Resume) {
+      if (++removal_attempts_ >= rrs_const::kSweepAttemptsMax)
+        enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+    } else {
+      enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+    }
+  } else {
+    removal_attempts_ = 0;
   }
   return Status::success();
 }
@@ -2229,7 +2286,10 @@ Status MembershipLifecycle::switch_poll(MonotonicMs now_ms) noexcept {
   }
   Status st{};
   switch (switch_step_) {
-    case 0: st = ports_.runtime.retire_network(); break;
+    case 0:
+      st = ports_.runtime.retire_network();
+      if (st.code == StatusCode::WouldBlock) return Status::success();
+      break;
     case 1: {
       bool done = false;
       st = resume_.clear_step(switch_cursor_, done);

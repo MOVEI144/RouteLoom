@@ -462,7 +462,7 @@ fn service_with_port() -> (SiteService, Arc<InProcessTransport>, Arc<RecordSink>
     )));
     service.with(|a| a.set_rrs_transport(Some(Box::new(P6ChannelTransport::share(&hub)))));
     let sink = RecordSink::new();
-    service.set_authority_sink(sink.clone());
+    service.set_authority_transport(Some(sink.clone()));
     (service, transport, sink)
 }
 

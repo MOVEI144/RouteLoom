@@ -272,6 +272,8 @@ enum class LifecycleInputTag : std::uint8_t {
   ActionComplete = 8,
   Stop = 9,
   RemovalRequired = 10,
+  AuthenticatedPeerBound = 11,
+  AuthenticatedPeerGone = 12,
 };
 
 struct LifecycleBootEvidence {
@@ -331,6 +333,8 @@ union LifecyclePayload {
   LifecycleJoinRecovery recovery;
   LifecycleActionComplete action_complete;
   ByteView removal_required;
+  PeerCredentialStamp bound_peer;
+  NodeId gone_peer;
 };
 
 struct LifecycleInput {
@@ -372,6 +376,18 @@ struct LifecycleInput {
     in.payload.peer_control.peer = peer;
     in.payload.peer_control.carrier = carrier;
     in.payload.peer_control.body = body;
+    return in;
+  }
+  static LifecycleInput PeerBound(const PeerCredentialStamp& peer) noexcept {
+    LifecycleInput in{};
+    in.tag = LifecycleInputTag::AuthenticatedPeerBound;
+    in.payload.bound_peer = peer;
+    return in;
+  }
+  static LifecycleInput PeerGone(NodeId peer) noexcept {
+    LifecycleInput in{};
+    in.tag = LifecycleInputTag::AuthenticatedPeerGone;
+    in.payload.gone_peer = peer;
     return in;
   }
   static LifecycleInput Completed(NodeId peer, ByteView object) noexcept {
@@ -640,6 +656,8 @@ class MembershipLifecycle final {
   Status on_member_ready(const LifecycleMemberReady& ready, MonotonicMs now_ms) noexcept;
   Status on_authority(const LifecycleAuthorityMessage& message, MonotonicMs now_ms) noexcept;
   Status on_peer_control(const LifecyclePeerControl& control, MonotonicMs now_ms) noexcept;
+  Status on_peer_bound(const PeerCredentialStamp& peer, MonotonicMs now_ms) noexcept;
+  Status on_peer_gone(NodeId peer) noexcept;
   Status on_completed(const LifecycleCompletedObject& completed, MonotonicMs now_ms) noexcept;
   Status on_link_failure(const LifecycleLinkFailure& failure, MonotonicMs now_ms) noexcept;
   Status on_recovery(const LifecycleJoinRecovery& recovery, MonotonicMs now_ms) noexcept;
@@ -743,6 +761,7 @@ class MembershipLifecycle final {
   bool self_revoked_{false};
   RemovalStep removal_step_{RemovalStep::Runtime};
   std::size_t removal_cursor_{0};
+  std::uint8_t removal_attempts_{0};
   MonotonicMs holdoff_start_{0};
   std::size_t switch_cursor_{0};
   std::uint8_t switch_step_{0};

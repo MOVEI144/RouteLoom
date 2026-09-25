@@ -100,7 +100,7 @@ use group_keys::{
     ValidatedKeys, GK_OUTBOX_CAP, GK_ROTATION_PERIOD_MS, MEMBER_CAP, META_ACTIVATED_MS,
     META_HIGH_WATER, META_LAST_ROTATION,
 };
-use p6_channel::{decode_type5, P6Receipt, P6Type5};
+use p6_channel::{decode_type5, P6ChannelHub, P6ChannelTransport, P6Receipt, P6Type5};
 use records::{
     h16, op_token, request_token, role_name, DeviceFacts, Discovered, JoinRequestRec, Operation,
     StoredDecision, Verdict, Via, ROLE_ENDPOINT, ROLE_GATEWAY, ROLE_RELAY,
@@ -669,7 +669,8 @@ pub struct SiteAuthority {
     /// authority, fenced on the live rows at every dispatch). Handshakes
     /// land here from the USB lane; sealed carriers leave through
     /// `authority_transport`, drained by `SiteService::with`.
-    channels: AuthorityChannels,
+    channels: Arc<Mutex<AuthorityChannels>>,
+    last_channel_mono_ms: u64,
     /// The USB fragment sink for sealed carriers. `None` until the lane
     /// binds a capable session: outbound carriers drop, and the status
     /// block reports `attached: false` instead of implying delivery.
@@ -1168,13 +1169,14 @@ impl SiteAuthority {
             gks,
             gk_outbox: Vec::new(),
             gk_transport: None,
-            channels: AuthorityChannels::new(ChannelConfig {
+            channels: Arc::new(Mutex::new(AuthorityChannels::new(ChannelConfig {
                 network: channel_network,
                 site_id: channel_site_id,
                 site_epoch: channel_site_epoch,
                 rs_epoch,
                 gk_epoch: channel_gk_epoch,
-            }),
+            }))),
+            last_channel_mono_ms: 0,
             authority_transport: None,
             channel_hints: Vec::new(),
             pull_buckets: HashMap::new(),
@@ -2120,6 +2122,7 @@ impl SiteAuthority {
     /// sinks. Outbound carriers leave via `SiteService::with`, which
     /// drains them with the lock released like the join outbox.
     pub(super) fn tick_p6_channel(&mut self, time: HostTime) {
+        self.last_channel_mono_ms = time.mono_ms;
         let live: Vec<(u64, ChannelMember)> = self
             .devices
             .values()
@@ -2162,13 +2165,6 @@ impl SiteAuthority {
             transport.push_carrier(device, kind, bytes, time.mono_ms);
         }
         self.drain_p6_receipts(time);
-    }
-
-    /// Takes every queued outbound P6 carrier for the USB/mesh mapping.
-    pub(super) fn take_p6_carriers(&mut self) -> Vec<AuthorityOutbound> {
-        self.rrs_transport
-            .as_mut()
-            .map_or_else(Vec::new, |transport| transport.take_p6_carriers())
     }
 
     /// `capabilities.get` distribution state: `rrs_ready` once the
@@ -3002,10 +2998,22 @@ impl SiteAuthority {
                 format!("RemovalNotice issue failed: {e}"),
             )
         })?;
+        let production_p6 = self
+            .rrs_transport
+            .as_ref()
+            .is_some_and(|port| port.p6_ready());
+        let sealed_notice = if row.dams == [0; 32] {
+            None
+        } else {
+            self.rrs_transport
+                .as_mut()
+                .and_then(|port| port.preseal_notice(row.node, self.id.network, &removal_notice))
+        };
         let notice = revocation::NoticeState {
             object: removal_notice,
+            sealed: sealed_notice.clone(),
             network: self.id.network,
-            delivery: if row.dams == [0; 32] {
+            delivery: if row.dams == [0; 32] || (production_p6 && sealed_notice.is_none()) {
                 revocation::NoticeDelivery::Unreachable
             } else {
                 revocation::NoticeDelivery::Pending
@@ -3123,10 +3131,22 @@ impl SiteAuthority {
         self.devices.insert(removed.node, removed);
         // The row is dead: retire the channel and its ready hint now
         // rather than at the next dispatch, and echo the new epochs.
-        self.channels.retire_device(row.node);
+        if !self
+            .rrs_transport
+            .as_ref()
+            .is_some_and(|port| port.p6_ready())
+        {
+            self.channels
+                .lock()
+                .expect("authority channel poisoned")
+                .retire_device(row.node);
+        }
         self.channel_hints.push((row.node, None));
         self.pull_buckets.remove(&row.node);
-        self.channels.set_epochs(rs_epoch, self.gks.active_epoch());
+        self.channels
+            .lock()
+            .expect("authority channel poisoned")
+            .set_epochs(rs_epoch, self.gks.active_epoch());
         for rop in retired {
             self.operations.insert(rop.id, rop);
         }
@@ -3611,6 +3631,8 @@ impl SiteAuthority {
         }
         self.gks.publish_activation(time.unix_ms, time.mono_ms);
         self.channels
+            .lock()
+            .expect("authority channel poisoned")
             .set_epochs(self.rs_epoch, self.gks.active_epoch());
         let (_, _, _, unknown) = self.gks.counts();
         self.event(
@@ -4324,17 +4346,38 @@ impl SiteAuthority {
         time: HostTime,
         rng: &mut dyn FnMut(&mut [u8]) -> bool,
     ) {
+        self.last_channel_mono_ms = time.mono_ms;
+        if self
+            .rrs_transport
+            .as_ref()
+            .is_some_and(|port| port.p6_ready())
+        {
+            self.tick_p6_channel(time);
+            if let Some(port) = self.rrs_transport.as_mut() {
+                port.push_carrier(device, kind, bytes, time.mono_ms);
+            }
+            self.drain_p6_receipts(time);
+            let pending = self
+                .rrs_transport
+                .as_mut()
+                .map_or_else(Vec::new, |port| port.poll_channel_events());
+            for event in pending {
+                self.map_channel_event(event, time);
+            }
+            return;
+        }
         let directory = AuthorityDir {
             devices: &self.devices,
             network: self.id.network,
         };
-        self.channels
-            .on_carrier(&directory, device, kind, bytes, time.unix_ms, rng);
+        let mut channels = self.channels.lock().expect("authority channel poisoned");
+        channels.on_carrier(&directory, device, kind, bytes, time.mono_ms, rng);
         // Drain first: mapping borrows the rows and the store.
         let mut pending = Vec::new();
-        while let Some(event) = self.channels.poll_event() {
+        while let Some(event) = channels.poll_event() {
             pending.push(event);
         }
+        drop(channels);
         for event in pending {
             self.map_channel_event(event, time);
         }
@@ -4344,11 +4387,27 @@ impl SiteAuthority {
     /// retire) and maps whatever they emit — an idle-retired channel
     /// clears its `channel_ready` hint here, not at the next dispatch.
     fn tick_channels(&mut self, time: HostTime) {
-        self.channels.tick(time.unix_ms);
+        if self
+            .rrs_transport
+            .as_ref()
+            .is_some_and(|port| port.p6_ready())
+        {
+            let pending = self
+                .rrs_transport
+                .as_mut()
+                .map_or_else(Vec::new, |port| port.poll_channel_events());
+            for event in pending {
+                self.map_channel_event(event, time);
+            }
+            return;
+        }
+        let mut channels = self.channels.lock().expect("authority channel poisoned");
+        channels.tick(time.mono_ms);
         let mut pending = Vec::new();
-        while let Some(event) = self.channels.poll_event() {
+        while let Some(event) = channels.poll_event() {
             pending.push(event);
         }
+        drop(channels);
         for event in pending {
             self.map_channel_event(event, time);
         }
@@ -4484,12 +4543,12 @@ impl SiteAuthority {
                             devices: &self.devices,
                             network: self.id.network,
                         };
-                        if let Err(error) = self.channels.answer_join_confirm(
-                            &directory,
-                            device,
-                            params,
-                            time.unix_ms,
-                        ) {
+                        let answer = self
+                            .channels
+                            .lock()
+                            .expect("authority channel poisoned")
+                            .answer_join_confirm(&directory, device, params, time.mono_ms);
+                        if let Err(error) = answer {
                             self.event(
                                 time.unix_ms,
                                 format!(
@@ -4639,7 +4698,6 @@ impl SiteAuthority {
         &mut self,
         command: GroupKeyCommand,
         expected_dams: Option<&[u8; 32]>,
-        now_ms: u64,
     ) -> Result<(), ChannelSendError> {
         let node = command.node();
         let Some(row) = self.devices.get(&node).cloned() else {
@@ -4649,8 +4707,9 @@ impl SiteAuthority {
             devices: &self.devices,
             network: self.id.network,
         };
+        let mut channels = self.channels.lock().expect("authority channel poisoned");
         match command {
-            GroupKeyCommand::Wake { node } => self.channels.queue_wake(
+            GroupKeyCommand::Wake { node } => channels.queue_wake(
                 &directory,
                 node,
                 self.id.site_claims.site_epoch,
@@ -4664,10 +4723,10 @@ impl SiteAuthority {
                 overlap_s,
             } => {
                 if !row.member || expected_dams != Some(row.dams).as_ref() {
-                    self.channels.retire_device(node);
+                    channels.retire_device(node);
                     return Err(ChannelSendError::StaleMember);
                 }
-                self.channels.send_update(
+                channels.send_update(
                     &directory,
                     node,
                     UpdateParams {
@@ -4677,7 +4736,7 @@ impl SiteAuthority {
                         overlap_s,
                         gk: key.bytes(),
                     },
-                    now_ms,
+                    self.last_channel_mono_ms,
                 )
             }
             GroupKeyCommand::Activate {
@@ -4688,10 +4747,10 @@ impl SiteAuthority {
                 overlap_s,
             } => {
                 if !row.member || expected_dams != Some(row.dams).as_ref() {
-                    self.channels.retire_device(node);
+                    channels.retire_device(node);
                     return Err(ChannelSendError::StaleMember);
                 }
-                self.channels.send_activate(
+                channels.send_activate(
                     &directory,
                     node,
                     ActivateParams {
@@ -4701,7 +4760,7 @@ impl SiteAuthority {
                         cause: rotation_cause(cause),
                         overlap_s,
                     },
-                    now_ms,
+                    self.last_channel_mono_ms,
                 )
             }
         }
@@ -4711,13 +4770,37 @@ impl SiteAuthority {
     /// this on every capable bind (and clears it on unbind by passing
     /// `None`), so `attached` in the status block tracks the live link.
     pub fn set_authority_transport(&mut self, transport: Option<Arc<dyn AuthorityTransport>>) {
+        if transport.is_some() && self.rrs_transport.is_none() {
+            let hub = Arc::new(Mutex::new(P6ChannelHub::with_channels(
+                Arc::clone(&self.channels),
+                self.id.network,
+                self.id.site_id,
+            )));
+            self.rrs_transport = Some(Box::new(P6ChannelTransport::share(&hub)));
+        }
+        if let Some(port) = self.rrs_transport.as_mut() {
+            port.set_delivery_attached(transport.is_some());
+        }
         self.authority_transport = transport;
     }
 
     /// Sealed carriers queued since the last drain, for `SiteService::with`
     /// to hand to the transport with the lock released.
     fn take_authority_outbound(&mut self) -> Vec<AuthorityOutbound> {
-        self.channels.take_outbound()
+        if self
+            .rrs_transport
+            .as_ref()
+            .is_some_and(|port| port.p6_ready())
+        {
+            return self
+                .rrs_transport
+                .as_mut()
+                .map_or_else(Vec::new, |port| port.take_p6_carriers());
+        }
+        self.channels
+            .lock()
+            .expect("authority channel poisoned")
+            .take_outbound()
     }
 
     /// Channel up/down hints queued since the last drain.
@@ -4769,7 +4852,12 @@ impl SiteAuthority {
         // The lane binds/unbinds the fragment sink on every session
         // boundary, so `attached` tracks the live link — never implied.
         let authority_attached = self.authority_transport.is_some();
-        let authority_channels = self.channels.stats().channels;
+        let authority_channels = self
+            .channels
+            .lock()
+            .expect("authority channel poisoned")
+            .stats()
+            .channels;
         format!(
             "{{\"site_id\":\"{}\",\"network\":\"{}\",\"network_low32\":\"{:08x}\",\"site_epoch\":{},\"site_cert_serial\":{},\"sak_fingerprint\":\"{}\",\"device_ca_id\":\"{}\",\"rs_epoch\":{},\"gk_epoch\":{},\"gk_staged\":{staged},\"gk\":{{\"phase\":\"{phase}\",\"cause\":{cause},\"targets\":{targets},\"staged_ack\":{staged_ack},\"active_ack\":{active_ack},\"unknown\":{unknown}}},\"authority\":{{\"attached\":{authority_attached},\"channels\":{authority_channels}}},\"member_cap\":{MEMBER_CAP},\"members\":{members},\"members_unconfirmed\":{unconfirmed},\"removed\":{removed},\"discovered\":{},\"join_requests\":{},\"live_exchanges\":{},\"channel\":{},\"channel_epoch\":{},\"gateways\":[{gateways}],\"membership_revision\":{},\"ledger_seq\":{},\"storage_durable\":{},\"policy\":{},\"counters\":{},\"clock\":\"host_unix_ms\",\"now_ms\":{}}}",
             h16(self.id.site_id),
@@ -5200,7 +5288,7 @@ impl GroupKeyTransport for ChannelGroupKeyTransport {
         // service or a seal failure is honest non-delivery — the
         // rotation timers keep the target due and retry.
         if let Some(service) = self.service.upgrade() {
-            let _ = service.seal_group_key(command, expected_dams, crate::now_ms());
+            let _ = service.seal_group_key(command, expected_dams);
         }
     }
 
@@ -5227,7 +5315,6 @@ pub struct SiteService {
     gk_handoff: Mutex<()>,
     authority: Mutex<SiteAuthority>,
     transport: Mutex<Option<Arc<dyn JoinTransport>>>,
-    authority_sink: Mutex<Option<Arc<dyn AuthorityTransport>>>,
 }
 
 pub type Events = Vec<(u64, String)>;
@@ -5238,19 +5325,11 @@ impl SiteService {
             gk_handoff: Mutex::new(()),
             authority: Mutex::new(authority),
             transport: Mutex::new(None),
-            authority_sink: Mutex::new(None),
         }
     }
 
     pub fn set_transport(&self, transport: Arc<dyn JoinTransport>) {
         *self.transport.lock().expect("transport poisoned") = Some(transport);
-    }
-
-    /// Installs the P6/GK carrier mapping (P5 PR4: USB 0x65 / mesh).
-    /// Until one is set, sealed carriers drop after queueing — sends
-    /// already reported only `unknown`, never success.
-    pub fn set_authority_sink(&self, sink: Arc<dyn AuthorityTransport>) {
-        *self.authority_sink.lock().expect("authority sink poisoned") = Some(sink);
     }
 
     /// Runs `f` on the authority; delivers what it queued. A delivery
@@ -5264,7 +5343,7 @@ impl SiteService {
         // commit while an earlier command to that member is still in send.
         // The authority lock remains released during transport calls.
         let handoff = self.gk_handoff.lock().expect("gk handoff poisoned");
-        let (result, outbound, gk_outbound, gk_transport, p6_carriers, mut events) = {
+        let (result, outbound, gk_outbound, gk_transport, mut events) = {
             let mut authority = self.authority.lock().expect("site authority poisoned");
             let result = f(&mut authority);
             (
@@ -5272,7 +5351,6 @@ impl SiteService {
                 authority.take_outbound(),
                 std::mem::take(&mut authority.gk_outbox),
                 authority.gk_transport.clone(),
-                authority.take_p6_carriers(),
                 authority.take_events(),
             )
         };
@@ -5288,29 +5366,17 @@ impl SiteService {
                 );
             }
         }
-        // P6 carriers (R2 / sealed type-5/6/7 envelopes) leave the same
-        // way, through the P5 PR4 USB/mesh mapping once one is set.
-        if !p6_carriers.is_empty() {
-            let sink = self
-                .authority_sink
-                .lock()
-                .expect("authority sink poisoned")
-                .clone();
-            if let Some(sink) = sink {
-                for carrier in p6_carriers {
-                    sink.deliver(carrier);
-                }
-            }
-        }
         // Sealed carriers (from `f` and from the GK seals above) and the
         // ready-cache hints, taken under one re-lock.
         let (authority_outbound, authority_transport, hints) = {
             let mut authority = self.authority.lock().expect("site authority poisoned");
-            (
-                authority.take_authority_outbound(),
-                authority.authority_transport.clone(),
-                authority.take_channel_hints(),
-            )
+            let transport = authority.authority_transport.clone();
+            let carriers = if transport.is_some() {
+                authority.take_authority_outbound()
+            } else {
+                Vec::new()
+            };
+            (carriers, transport, authority.take_channel_hints())
         };
         if let Some(transport) = &gk_transport {
             for (node, dams) in hints {
@@ -5380,12 +5446,11 @@ impl SiteService {
         &self,
         command: GroupKeyCommand,
         expected_dams: Option<&[u8; 32]>,
-        now_ms: u64,
     ) -> Result<(), ChannelSendError> {
         self.authority
             .lock()
             .expect("site authority poisoned")
-            .seal_group_key_command(command, expected_dams, now_ms)
+            .seal_group_key_command(command, expected_dams)
     }
 
     /// Routes a P6 carrier through the P6 delivery port.

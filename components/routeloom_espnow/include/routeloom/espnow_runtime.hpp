@@ -235,6 +235,10 @@ class EspNowRuntime final : public RadioPort,
   // traffic is the visit's whole purpose.
   Status migration_send(NodeId peer, FrameType type,
                         ByteView payload) noexcept override;
+  // P6's exact one-hop gossip carriers use the same authenticated link
+  // frame path, independently of whether migration is attached.
+  Status p6_send(NodeId peer, FrameType type, ByteView payload) noexcept;
+  Status p6_link_binding(NodeId peer, std::uint32_t& binding) noexcept;
   std::size_t migration_peers(NodeId* out,
                               std::size_t capacity) const noexcept override;
 
@@ -422,6 +426,7 @@ class EspNowRuntime final : public RadioPort,
   void reconcile_autonomy(MonotonicMs now) noexcept;
   void poll_bootstrap(MonotonicMs now) noexcept;
   Status send_raw(const MacAddress& mac, ByteView frame) noexcept;
+  Status send_bound_link(NodeId peer, FrameType type, ByteView payload) noexcept;
   Status apply_lr250(const MacAddress& mac) noexcept;
   Status rebuild_driver() noexcept;
 

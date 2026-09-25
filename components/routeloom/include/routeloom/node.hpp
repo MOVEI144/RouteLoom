@@ -1940,7 +1940,8 @@ class MeshNode {
                        const MessageId* message) noexcept;
   void dispatch_next(MonotonicMs now_ms) noexcept;
   void complete_job(TxJob& job, bool hop_accepted, MonotonicMs now_ms) noexcept;
-  void fail_job(TxJob& job, const char* reason, MonotonicMs now_ms) noexcept;
+  void fail_job(TxJob& job, const char* reason, MonotonicMs now_ms,
+                bool terminal = false) noexcept;
   void retry_or_fail(TxJob& job, const char* reason, MonotonicMs now_ms) noexcept;
   // Re-admit a BUSY-deferred job after its clamped retry_after wait, bounded
   // by busy_readmissions_max and the combined physical-attempt budget (03 §5).
