@@ -2628,9 +2628,16 @@ fn gk_pull_matrix_on_stable() {
             .as_u64(),
         Some(2)
     );
-    // Malformed and stranger pulls fence out.
+    // Keyless (current 0): the maximally-behind case is served the
+    // active key (§6.3), never stranded to the next rotation. Only a
+    // bad reason still fails the shape — and strangers fence out.
     assert_eq!(
         pull(&service, a.node, 0, 0, 2, T0 + 9_000),
+        PullOutcome::Answered
+    );
+    assert_eq!(updates_of(&gk.take()), vec![(a.node, 2)]);
+    assert_eq!(
+        pull(&service, a.node, 0, 0, 0, T0 + 9_000),
         PullOutcome::Rejected {
             reason: "pull_shape"
         }
@@ -2647,6 +2654,108 @@ fn gk_pull_matrix_on_stable() {
             reason: "pull_fence"
         }
     );
+}
+
+/// G-SEC P5 PR4 (§4): repeats inside the 60 s bucket fold into one
+/// pending answer — served once at reopen with the latest epochs,
+/// never dropped, never doubled.
+#[test]
+fn gk_pull_repeats_coalesce_into_one_pending_answer() {
+    use super::authority_channel::{ChannelEvent, PullFields, PullReason};
+
+    let (service, transport, gk) = gk_service();
+    let a = join_member(&service, &transport, 0x00A1_0000_0000_AE01, 0xAE, T0);
+
+    fn wire_pull(
+        service: &SiteService,
+        node: u64,
+        request_id: u64,
+        current: u32,
+        next: u32,
+        now: u64,
+    ) -> Vec<(u64, String)> {
+        let (_, generation, _) = channel_id(service, node);
+        service
+            .with(|auth| {
+                auth.map_channel_event(
+                    ChannelEvent::Pull {
+                        device: node,
+                        pull: PullFields {
+                            generation,
+                            request_id,
+                            current,
+                            next,
+                            reason: PullReason::UnknownNewerEpoch,
+                        },
+                    },
+                    HostTime::sync(now),
+                )
+            })
+            .1
+    }
+
+    // First pull: answered at once.
+    let events = wire_pull(&service, a.node, 1, 1, 0, T0);
+    assert!(
+        events
+            .iter()
+            .any(|(_, f)| f.contains("\"kind\":\"authority.pull\"")
+                && f.contains("\"request_id\":1")
+                && f.contains("\"outcome\":\"answered\"")),
+        "first pull answered: {events:?}"
+    );
+    assert_eq!(updates_of(&gk.take()), vec![(a.node, 1)]);
+
+    // Two repeats inside the bucket: throttled, nothing queued.
+    let events = wire_pull(&service, a.node, 2, 1, 0, T0 + 10_000);
+    assert!(
+        events
+            .iter()
+            .any(|(_, f)| f.contains("authority.pull_throttled")),
+        "repeat throttled: {events:?}"
+    );
+    let events = wire_pull(&service, a.node, 3, 1, 1, T0 + 20_000);
+    assert!(
+        events
+            .iter()
+            .any(|(_, f)| f.contains("authority.pull_throttled")),
+        "second repeat throttled: {events:?}"
+    );
+    assert!(gk.take().is_empty());
+
+    // Still inside the window: the tick serves nothing.
+    let events = service.tick(HostTime::sync(T0 + 30_000));
+    assert!(
+        !events
+            .iter()
+            .any(|(_, f)| f.contains("\"kind\":\"authority.pull\"")),
+        "nothing served early: {events:?}"
+    );
+    assert!(gk.take().is_empty());
+
+    // Past the window: exactly one answer, with the latest epochs.
+    let events = service.tick(HostTime::sync(T0 + 61_000));
+    assert!(
+        events
+            .iter()
+            .any(|(_, f)| f.contains("\"kind\":\"authority.pull\"")
+                && f.contains("\"request_id\":3")
+                && f.contains("\"current\":1")
+                && f.contains("\"next\":1")
+                && f.contains("\"outcome\":\"answered\"")),
+        "pending served with latest epochs: {events:?}"
+    );
+    assert_eq!(updates_of(&gk.take()), vec![(a.node, 1)]);
+
+    // The bit cleared: no second serve.
+    let events = service.tick(HostTime::sync(T0 + 62_000));
+    assert!(
+        !events
+            .iter()
+            .any(|(_, f)| f.contains("\"kind\":\"authority.pull\"")),
+        "no double serve: {events:?}"
+    );
+    assert!(gk.take().is_empty());
 }
 
 /// G-SEC P5 PR3 (§3.2/§6.2): channel-less targets get rate-limited Wake

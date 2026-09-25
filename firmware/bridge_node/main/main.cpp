@@ -19,6 +19,8 @@
 #include "esp_wifi.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "routeloom/nvs_boot_session.hpp"
+#include "routeloom/nvs_legacy_purge.hpp"
 #include "sdkconfig.h"
 #if CONFIG_ROUTELOOM_DISCOVERY
 #include "routeloom/espnow_autonomy.hpp"
@@ -50,6 +52,21 @@
 
 namespace {
 constexpr char kTag[] = "RouteLoomBr";
+
+// Long-lived CPU-only state can reside in LP SRAM on the C5; radio and USB
+// driver buffers stay in their normal HP memory. The smaller gateway config
+// state also fits the C3 RTC bank.
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC && CONFIG_IDF_TARGET_ESP32C5
+#define ROUTELOOM_MEMBER_C5_LP RTC_DATA_ATTR
+#else
+#define ROUTELOOM_MEMBER_C5_LP
+#endif
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC && \
+    (CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C5)
+#define ROUTELOOM_MEMBER_SMALL_LP RTC_DATA_ATTR
+#else
+#define ROUTELOOM_MEMBER_SMALL_LP
+#endif
 
 using routeloom::ByteView;
 using routeloom::NodeId;
@@ -124,35 +141,6 @@ template <std::size_t Size>
   return true;
 }
 
-Status next_boot_session(std::uint32_t& session) noexcept {
-  nvs_handle_t handle = 0;
-  esp_err_t error = nvs_open("rlboot", NVS_READWRITE, &handle);
-  if (error != ESP_OK) {
-    return Status::error(StatusCode::StorageFailure,
-                         "boot nvs_open failed");
-  }
-  std::uint32_t stored = 0;
-  error = nvs_get_u32(handle, "session", &stored);
-  if (error != ESP_OK && error != ESP_ERR_NVS_NOT_FOUND) {
-    nvs_close(handle);
-    return Status::error(StatusCode::StorageFailure,
-                         "boot session read failed");
-  }
-  session = stored + 1U;
-  if (session == 0) {
-    nvs_close(handle);
-    return Status::error(StatusCode::CounterExhausted,
-                         "boot session exhausted");
-  }
-  error = nvs_set_u32(handle, "session", session);
-  if (error == ESP_OK) error = nvs_commit(handle);
-  nvs_close(handle);
-  return error == ESP_OK
-             ? Status::success()
-             : Status::error(StatusCode::StorageFailure,
-                             "boot session commit failed");
-}
-
 // .rtc_noinit is the only RAM the boot path never re-initializes, so it is
 // what actually survives esp_restart and the deep-sleep wake used below
 // (.rtc.data is re-copied from the image on every non-deep-sleep reset).
@@ -219,7 +207,7 @@ extern "C" void app_main(void) {
   // block this write. Every boot — even one that fails below — consumes a
   // session, which keeps TX epochs strictly fresh.
   std::uint32_t message_session = 0;
-  auto status = next_boot_session(message_session);
+  auto status = routeloom::next_boot_session(message_session);
   if (!status) fail(status.detail);
 
   const esp_err_t sec_nvs_error =
@@ -239,7 +227,7 @@ extern "C" void app_main(void) {
   // resume slots. Impairment is never node-fatal and never triggers an
   // erase: a quarantined/uncertain store is reported and its consumers
   // fail closed while the node keeps routing.
-  static routeloom::espnow::Sdkv1Stores sdkv1_stores(
+  static ROUTELOOM_MEMBER_C5_LP routeloom::espnow::Sdkv1Stores sdkv1_stores(
       routeloom::sdkv1::kResumeGatewaySlots);
   status = sdkv1_stores.open(routeloom::espnow::kSecurityNvsPartition);
   if (!status) {
@@ -256,6 +244,17 @@ extern "C" void app_main(void) {
       ESP_LOGE(kTag, "sdkv1 stores init: %s", sdkv1_status.detail);
     }
     sdkv1_stores.log_state(kTag);
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+    // Member boot binds the already advanced token to the adopted RLS1.
+    status = routeloom::reconcile_boot_session(sdkv1_stores.site(), message_session);
+    if (!status) fail(status.detail);
+#endif
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM && !CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
+    status = routeloom::reserve_dev_group_boot_session(message_session, message_session);
+    if (!status) fail(status.detail);
+#endif
+#endif
   }
 #if CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
   // Factory maintenance console (sdk-v1/07 §6): runs pre-RF and owns the
@@ -275,6 +274,8 @@ extern "C" void app_main(void) {
              "it");
   }
 #if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  status = routeloom::espnow::refuse_legacy_boot_after_migration();
+  if (!status) fail(status.detail);
   std::uint32_t peer_capacity = 0;
   status = routeloom::espnow::nvs_partition_peer_capacity(
       routeloom::espnow::kSecurityNvsPartition,
@@ -323,7 +324,7 @@ extern "C" void app_main(void) {
   owner_config.joiner.node = owner_config.local_node;
   owner_config.joiner.mac = owner_config.local_mac;
   owner_config.log_tag = kTag;
-  owner_config.lifecycle_gateway = true;  // USB-attached: the P6 gateway profile
+  owner_config.gateway = true;  // USB-attached: relay + direct local channel
   status = owner.begin(sdkv1_stores, entropy, owner_config);
   if (!status) fail(status.detail);
   routeloom::SecurityProvider& session_security = owner.session_provider();
@@ -615,6 +616,9 @@ extern "C" void app_main(void) {
   status = owner.boot(message_session, /*rlboot_prepared=*/true,
                       /*usb_direct=*/true, monotonic_now_ms());
   if (!status) fail(status.detail);
+  // Authority lane (G-SEC P5): the relay demux serves terminal 22/49/50/51
+  // for USB-bound devices plus the gateway's own channel.
+  runtime.node().set_config_sink(owner.authority_mesh_sink());
 #endif
   bridge.set_mesh(&runtime.node());
   // Device nonce seeds the session transcript; sampling esp_random only
@@ -630,7 +634,7 @@ extern "C" void app_main(void) {
   // bit gates both — a build that does not advertise it never answers a
   // Query and never accepts a registration. The node's own poll drives the
   // sink through the service-sink interface (attach() installs it).
-  static routeloom::GatewayDelivery gateway(runtime.node());
+  static ROUTELOOM_MEMBER_C5_LP routeloom::GatewayDelivery gateway(runtime.node());
   if ((bridge_config.capability & routeloom::usb::kCapGatewayEndpointV1) !=
       0) {
     status = bridge.attach_gateway(gateway);
@@ -645,7 +649,7 @@ extern "C" void app_main(void) {
   // CAP_CONFIG_ENDPOINT_V1 bit gates admission; without it the ops answer
   // Unsupported. The node poll drives the component's bounded retries.
   static routeloom::MeshConfigPort config_port(runtime.node());
-  static routeloom::ConfigGateway config_gateway(config_port, bridge);
+  static ROUTELOOM_MEMBER_SMALL_LP routeloom::ConfigGateway config_gateway(config_port, bridge);
   if ((bridge_config.capability & routeloom::usb::kCapConfigEndpointV1) != 0) {
     status = bridge.attach_config(config_gateway);
     if (!status) fail(status.detail);

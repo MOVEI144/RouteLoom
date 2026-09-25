@@ -900,7 +900,34 @@ void test_control_object_kind_revocation_set() {
   raw[2] = 5;
   CHECK_OK(autonomy::control_object_decode(ByteView{raw, sizeof(raw)}, manifest));
   CHECK(manifest.kind == autonomy::ControlObjectKind::TrustManifest);
-  raw[2] = 7;
+  raw[2] = 8;
+  CHECK(!autonomy::control_object_decode(ByteView{raw, sizeof(raw)}, manifest));
+}
+
+// P5 PR4: kind 7 (AuthorityEnvelope) carries authority-channel envelopes
+// larger than 120 B over the 49/50/51 object transfer. Kinds 5 and 6 stay
+// TrustManifest and RevocationSet; 8+ stays refused.
+void test_control_object_kind_authority_envelope() {
+  // Raw manifest bytes with kind byte 7 — no reliance on the new enum.
+  std::uint8_t raw[autonomy::kControlObjectPayloadSize] = {1, 1, 7, 0, 0x08, 0x00};
+  for (std::size_t i = 6; i < sizeof(raw); ++i) raw[i] = static_cast<std::uint8_t>(i);
+  autonomy::ControlObjectPayload manifest{};
+  CHECK_OK(autonomy::control_object_decode(ByteView{raw, sizeof(raw)}, manifest));
+  CHECK(static_cast<std::uint8_t>(manifest.kind) == 7);
+  CHECK(manifest.total_len == 0x0800);
+
+  autonomy::EncodedPayload enc{};
+  autonomy::ControlObjectPayload back{};
+  back.kind = static_cast<autonomy::ControlObjectKind>(7);
+  back.total_len = 2048;
+  for (std::size_t i = 0; i < back.object_hash.size(); ++i)
+    back.object_hash[i] = static_cast<std::uint8_t>(0xC0 + i);
+  CHECK_OK(autonomy::control_object_encode(back, enc));
+  autonomy::ControlObjectPayload decoded{};
+  CHECK_OK(autonomy::control_object_decode(enc.view(), decoded));
+  CHECK(static_cast<std::uint8_t>(decoded.kind) == 7);
+  CHECK(decoded.total_len == 2048);
+  raw[2] = 8;
   CHECK(!autonomy::control_object_decode(ByteView{raw, sizeof(raw)}, manifest));
 }
 
@@ -916,6 +943,7 @@ int main() {
   test_autonomy_golden();
   test_fake_radio();
   test_control_object_kind_revocation_set();
+  test_control_object_kind_authority_envelope();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d autonomy checks failed\n", failures);

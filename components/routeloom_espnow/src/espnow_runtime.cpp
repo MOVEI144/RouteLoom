@@ -721,10 +721,21 @@ void EspNowRuntime::stop() noexcept {
 }
 
 void EspNowRuntime::poll_once() noexcept {
-  if (!started_ || event_queue_ == nullptr) {
+  if (event_queue_ == nullptr) {
     return;
   }
   const MonotonicMs now = now_ms();
+  if (!started_) {
+    // Join RLD1 and channel operations run before the member Node starts.
+    // No ordinary Wire frame may enter an unstarted Node; discard that
+    // bounded queue while the bootstrap owner receives its own lane.
+    Event discarded{};
+    for (std::size_t i = 0; i < kEventQueueCapacity &&
+                            xQueueReceive(event_queue_, &discarded, 0) == pdTRUE; ++i) {}
+    poll_bootstrap(now);
+    channel_runner_.poll(now);
+    return;
+  }
   // Stack headroom of the CALLING task: poll_once is driven by the runtime
   // task (start_task) or by the app_main pump loops (bridge_node,
   // reference_node deep-sleep), so this one site covers whichever stack the
@@ -942,10 +953,22 @@ void EspNowRuntime::poll_once() noexcept {
       (void)recover();
     }
   }
+  poll_bootstrap(now);
+  // Serialized channel operations advance here: drain fence -> verified
+  // apply -> bounded visit dwell -> verified return home (04 §3/§8).
+  channel_runner_.poll(now);
+  if (migration_ != nullptr) {
+    migration_->poll(now);
+  }
+  node_.poll(now);
+}
+
+void EspNowRuntime::poll_bootstrap(const MonotonicMs now) noexcept {
   if (bootstrap_queue_ != nullptr &&
       (discovery_ != nullptr || bootstrap_sink_ != nullptr)) {
     BootstrapEvent rx{};
-    while (xQueueReceive(bootstrap_queue_, &rx, 0) == pdTRUE) {
+    for (std::size_t i = 0; i < kBootstrapQueueCapacity &&
+                            xQueueReceive(bootstrap_queue_, &rx, 0) == pdTRUE; ++i) {
       if (bootstrap_sink_ != nullptr) {
         // The security owner demuxes: ZT to its Joiner, member link
         // frames to its engine, member Discovers back into discovery.
@@ -963,18 +986,11 @@ void EspNowRuntime::poll_once() noexcept {
             ByteView{rx.data.data(), rx.length}, rx.received_ms);
       }
     }
-    if (discovery_ != nullptr) {
+    if (discovery_ != nullptr && started_) {
       discovery_->poll(now);
       reconcile_autonomy(now);
     }
   }
-  // Serialized channel operations advance here: drain fence -> verified
-  // apply -> bounded visit dwell -> verified return home (04 §3/§8).
-  channel_runner_.poll(now);
-  if (migration_ != nullptr) {
-    migration_->poll(now);
-  }
-  node_.poll(now);
 }
 
 void EspNowRuntime::wait_for_event(const MonotonicMs timeout_ms) noexcept {

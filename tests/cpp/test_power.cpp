@@ -71,6 +71,9 @@ int failures = 0;
   } while (false)
 
 using namespace routeloom;
+static_assert(trusted_deep_sleep_reset(true, true));
+static_assert(!trusted_deep_sleep_reset(false, true));
+static_assert(!trusted_deep_sleep_reset(true, false));
 using routeloom_test::CapturingObserver;
 using routeloom_test::SimNetwork;
 using routeloom_test::SimRadio;
@@ -5295,6 +5298,35 @@ static_assert(noexcept(std::declval<PowerCoordinator&>().ticket_valid(
                   SleepTicket{})),
               "ticket_valid is noexcept");
 
+void test_trusted_sleep_elapsed() {
+  // A timer wake and marker identify the intended sleep, but neither
+  // bounds oscillator drift or post-wake boot time.
+  CHECK(!classify_sleep_elapsed(true, true, true, 30000, 0).known);
+  // An independently established upper bound permits deadline deduction.
+  const ElapsedInterval trusted =
+      classify_sleep_elapsed(true, true, true, 30000, 33000);
+  CHECK(trusted.known);
+  CHECK(trusted.lower_ms == 0);
+  CHECK(trusted.upper_ms == 33000);
+  // Any missing evidence parks TIME_UNCERTAIN instead of guessing.
+  CHECK(!classify_sleep_elapsed(false, true, true, 30000, 33000).known);
+  CHECK(!classify_sleep_elapsed(true, false, true, 30000, 33000).known);
+  CHECK(!classify_sleep_elapsed(true, true, false, 30000, 33000).known);
+  CHECK(!classify_sleep_elapsed(true, true, true, 0, 33000).known);
+  const ElapsedInterval saturated = classify_sleep_elapsed(
+      true, true, true, std::numeric_limits<std::uint32_t>::max(),
+      std::numeric_limits<std::uint64_t>::max());
+  CHECK(saturated.known);
+  CHECK(saturated.upper_ms == std::numeric_limits<std::uint64_t>::max());
+  // End to end: the trusted interval feeds begin() and resends a durable
+  // pending whose lifetime covers it (else TIME_UNCERTAIN parks it).
+  std::uint32_t remaining = 0;
+  CHECK(resume_remaining_lifetime(DeadlinePolicy::WallElapsedValidity, 60000,
+                                  trusted, remaining)
+            .ok());
+  CHECK(remaining == 60000 - static_cast<std::uint32_t>(trusted.upper_ms));
+}
+
 }  // namespace
 
 int main() {
@@ -5384,6 +5416,7 @@ int main() {
   test_enter_copies_aliased_ticket();
   test_abort_never_erases_committed_snapshot();
   test_sleep_path_uses_no_heap();
+  test_trusted_sleep_elapsed();
   if (failures == 0) {
     std::printf("power tests passed\n");
     return 0;

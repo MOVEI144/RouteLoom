@@ -34,6 +34,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/route_scale.cpp
   src/routing.cpp
   src/sdkv1_authority.cpp
+  src/sdkv1_authority_transport.cpp
   src/sdkv1_blob_storage.cpp
   src/sdkv1_ead.cpp
   src/sdkv1_join_candidates.cpp
@@ -46,6 +47,10 @@ set(ROUTELOOM_CORE_SOURCES
   src/sdkv1_pop.cpp
   src/sdkv1_records.cpp
   src/sdkv1_handshake.cpp
+  src/sdkv1_boot_session.cpp
+  src/sdkv1_dev_session.cpp
+  src/sdkv1_legacy_purge.cpp
+  src/sdkv1_session_rtc.cpp
   src/sdkv1_security_coordinator.cpp
   src/sdkv1_session_wire.cpp
   src/sdkv1_grant_renew.cpp

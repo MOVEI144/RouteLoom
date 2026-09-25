@@ -9,17 +9,25 @@
 namespace routeloom::espnow {
 namespace {
 
-// The member discovery scope handle: the coordinator's GK provider serves
-// exactly one (member) scope and ignores the value — discovery only needs
-// it non-invalid (Required refuses kInvalidScopeRef at start).
-constexpr ScopeRef kMemberScopeRef{1};
-
 constexpr std::uint32_t kTuneDeadlineMs = 3000;
 constexpr int kApplyCutoverRetries = 3;
+// A GROUP_KEY_RETIRED diagnostic turns into at most one pull per window;
+// the channel's own bucket (1/min) paces the wire below this.
+constexpr MonotonicMs kRetiredPullWindowMs = 10000;
 
 }  // namespace
 
 EspNowSecurityOwner::~EspNowSecurityOwner() noexcept {
+  if (authority_live_) {
+    if (config_.gateway) {
+      mesh_sink()->~AuthorityMeshSink();
+      gateway()->~AuthorityGateway();
+    } else {
+      endpoint()->~AuthorityEndpoint();
+    }
+    mesh_port()->~MeshConfigPort();
+    authority_live_ = false;
+  }
   if (discovery_live_) {
     discovery()->~NeighborDiscovery();
     discovery_live_ = false;
@@ -214,6 +222,40 @@ NeighborDiscovery* EspNowSecurityOwner::discovery() noexcept {
   return reinterpret_cast<NeighborDiscovery*>(discovery_box_.data());
 }
 
+MeshConfigPort* EspNowSecurityOwner::mesh_port() noexcept {
+  if (!authority_live_) return nullptr;
+  return reinterpret_cast<MeshConfigPort*>(mesh_port_box_.data());
+}
+
+sdkv1::AuthorityEndpoint* EspNowSecurityOwner::endpoint() noexcept {
+  if (!authority_live_ || config_.gateway) return nullptr;
+  return reinterpret_cast<sdkv1::AuthorityEndpoint*>(transport_box_.endpoint.data());
+}
+
+sdkv1::AuthorityGateway* EspNowSecurityOwner::gateway() noexcept {
+  if (!authority_live_ || !config_.gateway) return nullptr;
+  return reinterpret_cast<sdkv1::AuthorityGateway*>(transport_box_.gateway.data());
+}
+
+sdkv1::AuthorityMeshSink* EspNowSecurityOwner::mesh_sink() noexcept {
+  if (!authority_live_ || !config_.gateway) return nullptr;
+  return reinterpret_cast<sdkv1::AuthorityMeshSink*>(mesh_sink_box_.data());
+}
+
+NodeId EspNowSecurityOwner::self_node() const noexcept {
+  return adopted_node_ != kInvalidNodeId ? adopted_node_ : config_.local_node;
+}
+
+sdkv1::AuthorityMeshDemux* EspNowSecurityOwner::authority_demux() noexcept {
+  if (!authority_live_) return nullptr;
+  return config_.gateway ? static_cast<sdkv1::AuthorityMeshDemux*>(gateway())
+                         : static_cast<sdkv1::AuthorityMeshDemux*>(endpoint());
+}
+
+ConfigEndpointSink* EspNowSecurityOwner::authority_mesh_sink() noexcept {
+  return mesh_sink();
+}
+
 Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
                                   const Config& config) noexcept {
   if (begun_) return Status::error(StatusCode::AlreadyExists, "owner already begun");
@@ -243,6 +285,7 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
   deps.usb = this;
   deps.verifier = &verifier();
   deps.bank_aead = psa_session_aead_gcm();
+  deps.crypto_aead = *psa_aead_gcm();
   deps.proxy_sealer = &sealer();
   deps.local_mac = config_.local_mac;
   deps.local_node = config_.local_node;
@@ -257,7 +300,7 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
   lifecycle_config.self = stores_->identity().has_identity()
                               ? stores_->identity().identity().node_id
                               : config_.local_node;
-  lifecycle_config.profile = config_.lifecycle_gateway ? sdkv1::LifecycleProfile::Gateway
+  lifecycle_config.profile = config_.gateway ? sdkv1::LifecycleProfile::Gateway
                                                        : sdkv1::LifecycleProfile::Node;
   lifecycle_config.enabled_features = 0;
   sdkv1::LifecyclePorts lifecycle_ports{lifecycle_authority_, lifecycle_peer_, lifecycle_runtime_,
@@ -345,6 +388,30 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
     ESP_LOGW(config_.log_tag, "boot: journal holds removal intent — erasure runs first");
     return Status::success();
   }
+  // The authority transport needs the runtime (mesh port over the node)
+  // and, on gateways, the bridge (USB lane + local direct port): both
+  // attach before boot. Port attach precedes the Boot step so the first
+  // adoption can start its channel immediately.
+  if (config_.gateway && bridge_ == nullptr) {
+    return Status::error(StatusCode::InvalidState, "gateway without usb bridge");
+  }
+  new (mesh_port_box_.data()) MeshConfigPort(runtime_->node());
+  authority_live_ = true;  // the accessors below (and the dtor) go live here
+  if (config_.gateway) {
+    new (transport_box_.gateway.data())
+        sdkv1::AuthorityGateway(*mesh_port(), *this, *this, config_.local_node);
+    new (mesh_sink_box_.data()) sdkv1::AuthorityMeshSink(*gateway());
+    direct_port_.bind(this);
+    Status authority_status = coordinator().attach_authority_port(direct_port_);
+    if (!authority_status) return authority_status;
+    authority_status = bridge_->attach_authority(*this);
+    if (!authority_status) return authority_status;
+  } else {
+    new (transport_box_.endpoint.data())
+        sdkv1::AuthorityEndpoint(*mesh_port(), config_.local_node);
+    const Status authority_status = coordinator().attach_authority_port(*endpoint());
+    if (!authority_status) return authority_status;
+  }
   sdkv1::CoordinatorEvent event{};
   event.kind = sdkv1::CoordinatorEventKind::Boot;
   event.now = now_ms;
@@ -367,6 +434,7 @@ void EspNowSecurityOwner::poll(const MonotonicMs now_ms) noexcept {
   event.kind = sdkv1::CoordinatorEventKind::Poll;
   event.now = now_ms;
   (void)coordinator().step(event);
+  drive_authority(now_ms);
   poll_tune(now_ms);
   drain_actions(now_ms);
 }
@@ -527,6 +595,90 @@ void EspNowSecurityOwner::complete_lifecycle_recovery(const bool reprovisioned,
   }  // unreachable: esp_restart never returns
 }
 
+void EspNowSecurityOwner::drive_authority(const MonotonicMs now_ms) noexcept {
+  if (!authority_live_) return;
+  if (config_.gateway) {
+    gateway()->poll(now_ms);  // local downs deliver via on_local_down
+    // The direct port stages exactly one completion per accepted send
+    // (the port contract); it cannot feed the coordinator from inside
+    // try_send, so the completion waits here for the next poll.
+    if (usb_tx_pending_) {
+      usb_tx_pending_ = false;
+      sdkv1::CoordinatorEvent out{};
+      out.kind = sdkv1::CoordinatorEventKind::AuthorityTx;
+      out.now = now_ms;
+      out.auth_token = usb_tx_.token;
+      out.auth_delivered = usb_tx_.delivered;
+      (void)coordinator().step(out);
+    }
+  } else {
+    endpoint()->poll(now_ms);
+    sdkv1::AuthorityRxCarrier rx{};
+    while (endpoint()->take_rx(rx)) {
+      sdkv1::CoordinatorEvent in{};
+      in.kind = sdkv1::CoordinatorEventKind::AuthorityRx;
+      in.now = now_ms;
+      in.auth_kind = rx.kind;
+      in.auth_bytes = rx.bytes;
+      in.auth_writable = rx.writable;
+      (void)coordinator().step(in);
+    }
+    sdkv1::AuthorityTxResult done{};
+    while (endpoint()->take_tx_result(done)) {
+      sdkv1::CoordinatorEvent out{};
+      out.kind = sdkv1::CoordinatorEventKind::AuthorityTx;
+      out.now = now_ms;
+      out.auth_token = done.token;
+      out.auth_delivered = done.delivered;
+      (void)coordinator().step(out);
+    }
+  }
+  // USB session edges drive the USB-bound channel: down arrives through
+  // the bridge sinks; up is an edge the bridge never announces, so the
+  // poll watches for it.
+  if (bridge_ != nullptr) {
+    const bool active = bridge_->state() == usb::SessionState::Active;
+    if (active && !usb_session_active_) {
+      sdkv1::CoordinatorEvent up{};
+      up.kind = sdkv1::CoordinatorEventKind::UsbSessionUp;
+      up.now = now_ms;
+      (void)coordinator().step(up);
+    }
+    usb_session_active_ = active;
+  }
+  // A retired GK observed on the air pulls the current one (throttled;
+  // the backstop for a missed rotation Wake).
+  if (group_key_retired_ && now_ms - last_pull_ms_ >= kRetiredPullWindowMs) {
+    group_key_retired_ = false;
+    last_pull_ms_ = now_ms;
+    sdkv1::CoordinatorEvent pull{};
+    pull.kind = sdkv1::CoordinatorEventKind::RequestPull;
+    pull.now = now_ms;
+    pull.pull_reason = 1;  // UnknownNewerEpoch
+    (void)coordinator().step(pull);
+  }
+}
+
+Status EspNowSecurityOwner::prepare_sleep(const MonotonicMs now_ms) noexcept {
+  if (!booted_) return Status::error(StatusCode::InvalidState, "owner not booted");
+  // Drain first: a pending action (tune/member/discovery) is owed work,
+  // not sleep permission. The coordinator re-checks the slot anyway.
+  poll_tune(now_ms);
+  drain_actions(now_ms);
+  sdkv1::CoordinatorEvent event{};
+  event.kind = sdkv1::CoordinatorEventKind::PrepareSleep;
+  event.now = now_ms;
+  return coordinator().step(event);
+}
+
+Status EspNowSecurityOwner::wake(const MonotonicMs now_ms) noexcept {
+  if (!booted_) return Status::error(StatusCode::InvalidState, "owner not booted");
+  sdkv1::CoordinatorEvent event{};
+  event.kind = sdkv1::CoordinatorEventKind::Wake;
+  event.now = now_ms;
+  return coordinator().step(event);
+}
+
 void EspNowSecurityOwner::on_bootstrap_rld1(const sdkv1::JoinRxMeta& meta,
                                             const std::uint32_t radio_generation,
                                             const ByteView frame,
@@ -616,6 +768,125 @@ void EspNowSecurityOwner::join_session_down(const MonotonicMs now_ms) noexcept {
   event.kind = sdkv1::CoordinatorEventKind::UsbSessionDown;
   event.now = now_ms;
   (void)coordinator().step(event);
+}
+
+Status EspNowSecurityOwner::authority_down(const NodeId device,
+                                           const usb::AuthorityFragment& fragment,
+                                           bool& complete,
+                                           const MonotonicMs now_ms) noexcept {
+  complete = false;
+  if (!booted_ || !authority_live_ || !config_.gateway) {
+    return Status::error(StatusCode::InvalidState, "authority lane not live");
+  }
+  // Self-addressed downs reassemble in the relay slots like any device;
+  // the pump delivers them to the local channel instead of the mesh.
+  (void)device;
+  return gateway()->authority_down(fragment.device, fragment, complete, now_ms);
+}
+
+Status EspNowSecurityOwner::site_state_set(const usb::SiteStateSet& set,
+                                           usb::SiteStateReport& report,
+                                           const MonotonicMs now_ms) noexcept {
+  if (!booted_ || !authority_live_ || !config_.gateway) {
+    return Status::error(StatusCode::InvalidState, "authority lane not live");
+  }
+  std::uint32_t current = 0;
+  std::uint32_t next = 0;
+  const bool valid = coordinator().group_epochs(current, next);
+  report.local_state_valid = valid;
+  report.local_current = current;
+  report.local_next = next;
+  if (set.action == usb::SiteStateAction::WakeLocal) {
+    // The host asks the gateway to (re)open its own channel: the local
+    // equivalent of a Wake carrier (content-free, 8 bytes). The client
+    // coalesces rapid wakes itself.
+    static const std::uint8_t kWake[8] = {0};
+    sdkv1::CoordinatorEvent wake{};
+    wake.kind = sdkv1::CoordinatorEventKind::AuthorityRx;
+    wake.now = now_ms;
+    wake.auth_kind = sdkv1::AuthorityCarrierKind::Wake;
+    wake.auth_bytes = ByteView{kWake, sizeof(kWake)};
+    (void)coordinator().step(wake);
+  } else if (valid && set.gk_epoch_hint != 0 && set.gk_epoch_hint != current &&
+             set.gk_epoch_hint != next) {
+    // The host's GK view matches neither of ours: ask for the current
+    // one (the channel bucket paces the wire).
+    sdkv1::CoordinatorEvent pull{};
+    pull.kind = sdkv1::CoordinatorEventKind::RequestPull;
+    pull.now = now_ms;
+    pull.pull_reason = 1;  // UnknownNewerEpoch
+    (void)coordinator().step(pull);
+  }
+  // Site/rs hints are the host's view of durable floors the device never
+  // re-reads mid-boot; the GK hint above is the only acting one.
+  return Status::success();
+}
+
+void EspNowSecurityOwner::authority_session_down(const MonotonicMs now_ms) noexcept {
+  usb_tx_pending_ = false;
+  if (authority_live_ && config_.gateway) gateway()->drop_all();
+  if (!booted_) return;
+  sdkv1::CoordinatorEvent event{};
+  event.kind = sdkv1::CoordinatorEventKind::UsbSessionDown;
+  event.now = now_ms;
+  (void)coordinator().step(event);
+}
+
+bool EspNowSecurityOwner::send_up(const usb::AuthorityFragment& fragment) noexcept {
+  if (bridge_ == nullptr) return false;
+  return bridge_->send_authority_up(fragment).ok();
+}
+
+void EspNowSecurityOwner::on_local_down(const sdkv1::AuthorityCarrierKind kind,
+                                        const MutableByteView bytes) noexcept {
+  if (!booted_) return;  // poll context; bytes borrow the relay slot
+  sdkv1::CoordinatorEvent in{};
+  in.kind = sdkv1::CoordinatorEventKind::AuthorityRx;
+  in.now = runtime_ != nullptr ? runtime_->now_ms() : 0;
+  in.auth_kind = kind;
+  in.auth_bytes = ByteView{bytes.data, bytes.size};
+  in.auth_writable = bytes;
+  (void)coordinator().step(in);
+}
+
+bool EspNowSecurityOwner::DirectUsbAuthorityPort::try_send(
+    const NodeId gateway, const sdkv1::AuthorityCarrierKind kind, const ByteView carrier,
+    std::uint64_t& token) noexcept {
+  token = 0;
+  if (owner_ == nullptr || owner_->bridge_ == nullptr) return false;
+  if (owner_->bridge_->state() != usb::SessionState::Active) return false;
+  if (owner_->usb_tx_pending_) return false;  // one completion at a time
+  if (!sdkv1::authority_carrier_kind_valid(static_cast<std::uint8_t>(kind)) ||
+      !sdkv1::authority_carrier_length_valid(kind, carrier.size) ||
+      (carrier.size != 0 && carrier.data == nullptr)) {
+    return false;
+  }
+  if (++owner_->usb_transfer_ == 0) owner_->usb_transfer_ = 1;
+  // One carrier is at most 3 fragments (960 B data each). A refusal past
+  // the first leaves a host-side partial the host's reassembly window
+  // expires; the channel's Tick retries the whole carrier under a fresh
+  // token, so the partial never merges with the retry.
+  constexpr std::size_t kFragData = 960;
+  std::size_t offset = 0;
+  while (offset < carrier.size) {
+    const std::size_t length =
+        carrier.size - offset > kFragData ? kFragData : carrier.size - offset;
+    usb::AuthorityFragment fragment{};
+    fragment.device = owner_->self_node();
+    fragment.transfer_id = owner_->usb_transfer_;
+    fragment.kind = kind;
+    fragment.hops = 0;  // direct: never touched the mesh
+    fragment.total = static_cast<std::uint16_t>(carrier.size);
+    fragment.offset = static_cast<std::uint16_t>(offset);
+    fragment.data = ByteView{carrier.data + offset, length};
+    (void)gateway;  // the USB leg needs no route address
+    if (!owner_->bridge_->send_authority_up(fragment)) return false;
+    offset += length;
+  }
+  token = owner_->usb_transfer_;
+  owner_->usb_tx_ = sdkv1::AuthorityTxResult{token, true};
+  owner_->usb_tx_pending_ = true;
+  return true;
 }
 
 Status EspNowSecurityOwner::send_rld1(const routeloom::MacAddress& destination,
@@ -822,6 +1093,14 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
     (void)lifecycle().dispatch(
         sdkv1::LifecycleInput::MemberReady(stores_->site().commit_seq(), 0), now_ms);
     complete_lifecycle_recovery(true, now_ms);
+  // Adoption binds the authority transport's self id (self-downs deliver
+  // locally and self-addressed mesh sends refuse from here on).
+  if (authority_live_) {
+    if (config_.gateway) {
+      gateway()->set_self(member.node);
+    } else {
+      endpoint()->set_self(member.node);
+    }
   }
   NodeConfig node = runtime_->node().config();
   node.network = member.network;
@@ -835,9 +1114,14 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   for (std::size_t i = 0; i < member.route_gateway_count && i < node.route_gateways.size(); ++i) {
     node.route_gateways[i] = member.route_gateways[i];
   }
+  const std::uint8_t operating = stores_->site().has_site()
+                                     ? stores_->site().site().channel
+                                     : runtime_->committed_channel();
   Status status = runtime_->adopt_member_node(node);
   if (!status && status.code != StatusCode::InvalidState) {
     ESP_LOGE(config_.log_tag, "member node adopt failed: %s", status.detail);
+    report_tune(Tune{0, kInvalidOperationToken, operating, true},
+                StatusCode::RadioFailure, runtime_->now_ms());
     return;
   }
   // The gossip sink rides the member node: a fresh adopt placement-news
@@ -852,15 +1136,7 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   // The radio may still sit on the join channel: move it to the adopted
   // operating channel before the node starts (no member traffic flows
   // during the move). Already there → start immediately.
-  const std::uint8_t operating = stores_->site().has_site()
-                                     ? stores_->site().site().channel
-                                     : runtime_->committed_channel();
   if (operating == runtime_->committed_channel()) {
-    status = runtime_->start();
-    if (!status) {
-      ESP_LOGE(config_.log_tag, "member node start failed: %s", status.detail);
-      return;
-    }
     report_tune(Tune{0, kInvalidOperationToken, operating, true}, StatusCode::Ok,
                 runtime_->now_ms());
     return;
@@ -870,6 +1146,8 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   status = request_cutover(operating, 0, runtime_->now_ms());
   if (!status) {
     ESP_LOGE(config_.log_tag, "member channel move failed: %s", status.detail);
+    report_tune(Tune{0, kInvalidOperationToken, operating, true},
+                StatusCode::RadioFailure, runtime_->now_ms());
   }
 }
 
@@ -880,50 +1158,57 @@ void EspNowSecurityOwner::on_start_discovery(const MonotonicMs now_ms) noexcept 
     return;
   }
   DiscoveryConfig config{};
-  config.node = adopted_node_;
-  config.network = adopted_network_;
-  config.scope_mode = ScopeMode::Required;
-  config.scope_provider = &coordinator().gk_scope();
-  config.scope = kMemberScopeRef;
-  config.cookie_bucket_ms = static_cast<std::uint32_t>(sdkv1::MemberCookie::kBucketMs);
+  const Status prepared = coordinator().member_discovery_config(config);
+  if (!prepared) {
+    ESP_LOGE(config_.log_tag, "member discovery config failed: %s", prepared.detail);
+    return;
+  }
   auto* engine = new (discovery_box_.data()) NeighborDiscovery(config, *runtime_, *this,
                                                          coordinator().membership_hooks(),
                                                          *entropy_, observer_store_);
   discovery_live_ = true;
-  Status status = engine->membership().initialize(coordinator().membership_hooks(),
-                                                  adopted_network_);
+  Status status = engine->start(now_ms);
   if (!status) {
-    ESP_LOGE(config_.log_tag, "member controller init failed: %s", status.detail);
-    engine->~NeighborDiscovery();
-    discovery_live_ = false;
+    ESP_LOGE(config_.log_tag, "member discovery start failed: %s", status.detail);
+    abort_discovery_start(now_ms, false);
     return;
   }
   status = coordinator().attach_discovery(*engine);
   if (!status) {
     ESP_LOGE(config_.log_tag, "discovery attach failed: %s", status.detail);
-    engine->~NeighborDiscovery();
-    discovery_live_ = false;
+    abort_discovery_start(now_ms, false);
     return;
   }
   status = runtime_->attach_autonomy(*engine);
   if (!status) {
     ESP_LOGE(config_.log_tag, "autonomy attach failed: %s", status.detail);
-    engine->~NeighborDiscovery();
-    discovery_live_ = false;
+    abort_discovery_start(now_ms, true);
     return;
   }
   engine->set_member_handshake_mode(true);
-  status = engine->start(now_ms);
-  if (!status) {
-    ESP_LOGE(config_.log_tag, "member discovery start failed: %s", status.detail);
-    return;
-  }
   status = engine->begin_discovery(now_ms);
   if (!status) {
-    ESP_LOGW(config_.log_tag, "member begin_discovery failed: %s (rx-driven only)",
-             status.detail);
+    ESP_LOGE(config_.log_tag, "member begin_discovery failed: %s", status.detail);
+    abort_discovery_start(now_ms, true);
+    return;
   }
   ESP_LOGI(config_.log_tag, "member discovery started");
+}
+
+void EspNowSecurityOwner::abort_discovery_start(const MonotonicMs now_ms,
+                                                const bool attached) noexcept {
+  // Attached ports may retain the discovery pointer. Keep the object alive
+  // until runtime teardown, while revoking all session keys and radio work.
+  if (!attached && discovery_live_) {
+    discovery()->~NeighborDiscovery();
+    discovery_live_ = false;
+    secure_clear(discovery_box_);
+  }
+  sdkv1::CoordinatorEvent stop{};
+  stop.kind = sdkv1::CoordinatorEventKind::Stop;
+  stop.now = now_ms;
+  (void)coordinator().step(stop);
+  runtime_->stop();
 }
 
 void EspNowSecurityOwner::poll_tune(const MonotonicMs now_ms) noexcept {
@@ -959,11 +1244,15 @@ void EspNowSecurityOwner::poll_tune(const MonotonicMs now_ms) noexcept {
 
 void EspNowSecurityOwner::report_tune(const Tune& tune, const StatusCode result_code,
                                       const MonotonicMs now_ms) noexcept {
+  StatusCode reported = result_code;
   if (tune.coord_token == 0) {
     // The ApplyMemberConfig channel move: start the node, then report
     // the firmware's apply-time ChannelReady. On a failed move with
     // retries left, re-request instead of reporting.
-    if (result_code != StatusCode::Ok && apply_retries_ > 0 && apply_channel_ != 0) {
+    if (reported == StatusCode::Ok && runtime_->committed_channel() != tune.channel) {
+      reported = StatusCode::RadioFailure;
+    }
+    if (reported != StatusCode::Ok && apply_retries_ > 0 && apply_channel_ != 0) {
       --apply_retries_;
       const Status retry = request_cutover(apply_channel_, 0, now_ms);
       if (retry) return;
@@ -971,9 +1260,12 @@ void EspNowSecurityOwner::report_tune(const Tune& tune, const StatusCode result_
     }
     apply_retries_ = 0;
     apply_channel_ = 0;
-    const Status started = runtime_->start();
-    if (!started) {
-      ESP_LOGE(config_.log_tag, "member node start failed: %s", started.detail);
+    if (reported == StatusCode::Ok) {
+      const Status started = runtime_->start();
+      if (!started) {
+        ESP_LOGE(config_.log_tag, "member node start failed: %s", started.detail);
+        reported = started.code;
+      }
     }
   }
   // Report reality, not the request: the coordinator gates RLD1 on the
@@ -983,7 +1275,7 @@ void EspNowSecurityOwner::report_tune(const Tune& tune, const StatusCode result_
   ready.kind = sdkv1::CoordinatorEventKind::ChannelReady;
   ready.now = now_ms;
   ready.channel_token = tune.coord_token;
-  ready.channel_result = result_code;
+  ready.channel_result = reported;
   ready.channel = runtime_->committed_channel();
   ready.channel_generation = runtime_->radio_generation().value;
   (void)coordinator().step(ready);

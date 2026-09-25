@@ -84,7 +84,7 @@ config ROUTELOOM_ROUTE_LIFETIME_MS
 config ROUTELOOM_DEVELOPMENT_KEY_HEX
     string "DEVELOPMENT ONLY 32-byte network master key in hex"
     default "524f5554454c4f4f4d2d444556454c4f504d454e542d4b45592d4f4e4c592121"
-    depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE || ROUTELOOM_SECURITY_MODE_DEV_RAM
     help
         Shared development key. Never use this default in a deployment. This provider does not
         replace the planned device-identity/EDHOC security profile.

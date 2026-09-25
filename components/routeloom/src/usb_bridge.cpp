@@ -134,6 +134,27 @@ Status UsbBridge::attach_security_owner(SecurityOwnerUsbSink& owner) noexcept {
   return Status::success();
 }
 
+Status UsbBridge::attach_authority(AuthorityUsbSink& sink) noexcept {
+  authority_sink_ = &sink;
+  config_.capability |= kCapAuthorityChannelV1;
+  return Status::success();
+}
+
+Status UsbBridge::send_authority_up(const AuthorityFragment& fragment) noexcept {
+  if (state_ != SessionState::Active ||
+      (config_.capability & kCapAuthorityChannelV1) == 0) {
+    return Status::error(StatusCode::InvalidState, "no host session for authority up");
+  }
+  std::size_t written = 0;
+  const Status status = encode_authority_up(
+      fragment, MutableByteView{tx_body_.data(), tx_body_.size()}, written);
+  if (!status) return status;
+  if (!enqueue(FrameKind::HostOps, 0, 0, ByteView{tx_body_.data(), written}, now_ms_)) {
+    return Status::error(StatusCode::NoCapacity, "authority up queue full");
+  }
+  return Status::success();
+}
+
 Status UsbBridge::relay_up(const NodeId proxy, const std::uint8_t hops,
                            const ByteView object) noexcept {
   if (state_ != SessionState::Active || (config_.capability & kCapJoinRelayV2) == 0) {
@@ -725,6 +746,17 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
       // 0x60/0x63 are device→host only.
       send_error(UsbErrorCode::ProtocolError, request, "JOIN_RELAY_DIRECTION", now_ms);
       break;
+    case HostOpsSub::AuthorityDown:
+      handle_authority_down(request, inner, now_ms);
+      break;
+    case HostOpsSub::SiteStateSet:
+      handle_site_state_set(request, inner, now_ms);
+      break;
+    case HostOpsSub::AuthorityUp:
+    case HostOpsSub::SiteStateReport:
+      // 0x64/0x67 are device→host only.
+      send_error(UsbErrorCode::ProtocolError, request, "AUTHORITY_DIRECTION", now_ms);
+      break;
     default:
       send_error(UsbErrorCode::Unsupported, request, "SUBCOMMAND_UNKNOWN", now_ms);
       break;
@@ -1109,6 +1141,30 @@ ConfigOpsResult join_relay_result_for(const Status& status) noexcept {
   }
 }
 
+// Status of an AuthorityUsbSink call -> the 0x67 result. Ok only ever
+// means "queued toward the mesh" (fragment) or "the object fully queued"
+// (object, upgraded by the sink's `complete` flag) — never channel,
+// crypto or key-apply evidence.
+SiteStateResult site_state_result_for(const Status& status) noexcept {
+  switch (status.code) {
+    case StatusCode::Ok:
+      return SiteStateResult::FragmentQueued;
+    case StatusCode::NoCapacity:
+    case StatusCode::Busy:
+    case StatusCode::WouldBlock:
+      return SiteStateResult::Busy;
+    case StatusCode::NoRoute:
+    case StatusCode::NotFound:
+      return SiteStateResult::Unreachable;
+    case StatusCode::Conflict:
+      return SiteStateResult::Conflict;
+    case StatusCode::Expired:
+      return SiteStateResult::Timeout;
+    default:
+      return SiteStateResult::Unsupported;
+  }
+}
+
 }  // namespace
 
 void UsbBridge::send_join_relay_result(const std::uint64_t request, const ConfigOpsResult result,
@@ -1189,6 +1245,68 @@ void UsbBridge::handle_join_relay_abort(const std::uint64_t request, const ByteV
           ? join_relay_->host_abort(abort.proxy, token, now_ms)
           : Status::error(StatusCode::InvalidArgument, "host abort reason");
   send_join_relay_result(request, join_relay_result_for(status), abort.proxy, token, now_ms);
+}
+
+void UsbBridge::send_site_state_report(const std::uint64_t request,
+                                       const SiteStateReport& report,
+                                       const MonotonicMs now_ms) noexcept {
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kSiteStateReportPayload> body{};
+  std::size_t written = 0;
+  if (!encode_site_state_report(report, MutableByteView{body.data(), body.size()},
+                                written)) {
+    send_error(UsbErrorCode::ProtocolError, request, "AUTHORITY_REPORT", now_ms);
+    return;
+  }
+  (void)enqueue(FrameKind::HostOps, 0, request, ByteView{body.data(), written}, now_ms);
+}
+
+void UsbBridge::handle_authority_down(const std::uint64_t request, const ByteView inner,
+                                      const MonotonicMs now_ms) noexcept {
+  AuthorityFragment fragment{};
+  if (!decode_authority_down(inner, fragment).ok()) {
+    send_error(UsbErrorCode::ProtocolError, request, "AUTHORITY_MALFORMED", now_ms);
+    return;
+  }
+  SiteStateReport report{};
+  report.result = SiteStateResult::Unsupported;
+  report.device = fragment.device;
+  report.transfer_id = fragment.transfer_id;
+  const std::uint32_t extent =
+      static_cast<std::uint32_t>(fragment.offset) + fragment.data.size;
+  report.received_len =
+      static_cast<std::uint16_t>(extent > fragment.total ? fragment.total : extent);
+  if ((config_.capability & kCapAuthorityChannelV1) == 0 || authority_sink_ == nullptr) {
+    send_site_state_report(request, report, now_ms);
+    return;
+  }
+  bool complete = false;
+  const Status status =
+      authority_sink_->authority_down(fragment.device, fragment, complete, now_ms);
+  report.result = site_state_result_for(status);
+  if (status && complete) report.result = SiteStateResult::ObjectQueued;
+  send_site_state_report(request, report, now_ms);
+}
+
+void UsbBridge::handle_site_state_set(const std::uint64_t request, const ByteView inner,
+                                      const MonotonicMs now_ms) noexcept {
+  SiteStateSet set{};
+  if (!decode_site_state_set(inner, set).ok()) {
+    send_error(UsbErrorCode::ProtocolError, request, "AUTHORITY_MALFORMED", now_ms);
+    return;
+  }
+  SiteStateReport report{};
+  report.result = SiteStateResult::Unsupported;
+  report.device = config_.node;  // 0x66 names no device: it is always local
+  if ((config_.capability & kCapAuthorityChannelV1) == 0 || authority_sink_ == nullptr) {
+    send_site_state_report(request, report, now_ms);
+    return;
+  }
+  const Status status = authority_sink_->site_state_set(set, report, now_ms);
+  report.device = config_.node;
+  report.transfer_id = 0;
+  report.received_len = 0;
+  report.result = site_state_result_for(status);
+  send_site_state_report(request, report, now_ms);
 }
 
 void UsbBridge::handle_group_send(const std::uint64_t request, const ByteView inner,
@@ -2219,6 +2337,11 @@ void UsbBridge::reset_session_state() noexcept {
   // by the next session.
   if (had_session && join_owner_ != nullptr) {
     join_owner_->join_session_down(now_ms_);
+  }
+  // Same for the authority lane: fragment/transfer state dies with the
+  // session; the endpoints resync over a fresh channel.
+  if (had_session && authority_sink_ != nullptr) {
+    authority_sink_->authority_session_down(now_ms_);
   }
 }
 

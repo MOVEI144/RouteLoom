@@ -124,6 +124,56 @@ Status group_dsk_key(const ScopeDigest& prk, const std::uint32_t gk_epoch, Secre
   return expand_secret(ByteView{prk.data(), prk.size()}, info, out);
 }
 
+// --- DevRam (P4 §10.1) ------------------------------------------------------
+
+Status dev_pair_rms(const Secret& psk, const NetworkId network, const NodeId a,
+                    const NodeId b, const Purpose purpose, Secret& out) noexcept {
+  secure_clear(out);
+  if (network == 0 || a == kInvalidNodeId || b == kInvalidNodeId ||
+      a == kBroadcastNodeId || b == kBroadcastNodeId || a == b ||
+      (purpose != Purpose::Link && purpose != Purpose::End)) {
+    return Status::error(StatusCode::InvalidArgument, "invalid dev pair");
+  }
+  Info salt(kLabelDevRam);
+  salt.u64(network);
+  ScopeDigest prk{};
+  hkdf_sha256_extract(salt.view(), ByteView{psk.data(), psk.size()}, prk);
+  Info info(kLabelDevRms);
+  info.u8(static_cast<std::uint8_t>(purpose));
+  info.u64(a < b ? a : b);
+  info.u64(a < b ? b : a);
+  const Status status = expand_secret(ByteView{prk.data(), prk.size()}, info, out);
+  secure_clear(prk);
+  return status;
+}
+
+Status dev_group_key(const Secret& psk, const NetworkId network, const NodeId origin,
+                     const std::uint32_t boot, TrafficKey& out) noexcept {
+  clear(out);
+  if (network == 0 || origin == kInvalidNodeId || origin == kBroadcastNodeId || boot == 0) {
+    return Status::error(StatusCode::InvalidArgument, "invalid dev group epoch");
+  }
+  Info salt(kLabelDevRam);
+  salt.u64(network);
+  ScopeDigest prk{};
+  hkdf_sha256_extract(salt.view(), ByteView{psk.data(), psk.size()}, prk);
+  Info key_info(kLabelDevGroupKey);
+  key_info.u64(origin);
+  key_info.u32(boot);
+  Status status = hkdf_sha256_expand(ByteView{prk.data(), prk.size()}, key_info.view(),
+                                     MutableByteView{out.key.data(), out.key.size()});
+  if (status) {
+    Info iv_info(kLabelDevGroupIv);
+    iv_info.u64(origin);
+    iv_info.u32(boot);
+    status = hkdf_sha256_expand(ByteView{prk.data(), prk.size()}, iv_info.view(),
+                                MutableByteView{out.iv.data(), out.iv.size()});
+  }
+  if (!status) clear(out);
+  secure_clear(prk);
+  return status;
+}
+
 // --- RLRES1 ----------------------------------------------------------------
 
 void resume_id(const Secret& rms, const Purpose purpose, ResumeId& out) noexcept {

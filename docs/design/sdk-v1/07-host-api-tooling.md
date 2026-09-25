@@ -206,6 +206,8 @@ USB frame上限4096Bに対し最大の本文はRRS1付きで約700B。gateway自
 
 **Resolved in implementation（P3-2）**：上の表のbit 6と0x40〜0x42はnode_status_v1が、0x50〜0x52とbit 7はgroup_delivery_v1が既に使っているため、参加中継は**capability bit 8（`kCapJoinRelayV1`）とHostOps 0x60 JOIN_RELAY_UP／0x61 JOIN_RELAY_DOWN／0x62 JOIN_RELAY_ABORT／0x63 JOIN_RELAY_RESULT**（0x61/0x62への応答）として実装した（形式は[02 §7.4](02-zero-touch-join.md)、共通vector `protocol/usb-golden/join-relay`、Rust `routeloom-protocol::join_relay`）。表の0x43〜0x46（P5）は同じsite-authority族の0x64 AUTHORITY_UP／0x65 AUTHORITY_DOWN／0x66 SITE_STATE_SET／0x67 SITE_STATE_REPORTとして実装した（G-SEC P5 PR1：capability bit 9 `kCapAuthorityChannelV1`、**未広告**。形式はP5設計書 §3.3、共通vector `protocol/sdkv1-golden/authority/`、C++ `sdkv1_authority.hpp`＋`usb_host_ops.hpp`、Rust `routeloom-keysched::authority`＋`routeloom-protocol::{authority,host_ops}`）。bitは中継だけを表し、P5の機能は別bitで広告する。gateway自身の参加（`hops=0`）は未実装。
 
+**P5 PR4 統合時の衝突**：join-relay-v2 が bit 9 を使用するため、P5 authority (0x64〜0x67) の能力bitは **10** に変更した。旧bit 9でauthorityを広告するとjoin-relay-v2しか持たないgatewayを誤認する。authority搬送の実接続が完了するまでbit 10も広告しない。
+
 **Resolved in implementation（P3-2 #116）**：参加中継をv2化した（形式は[02 §7.5](02-zero-touch-join.md#75-wire-relay-v2p3-2-116)）。族は0x60〜0x63のままinner schemaを**2**に上げ、**capability bit 9（`kCapJoinRelayV2`）**で広告する。0x62／0x63は完全なRelayToken（両epoch付き）を運び、Okの0x63は完全な非0 tokenを必ず持つ。共通vectorは`protocol/usb-golden/join-relay-v2/`（codec＋20 step session、[README](../../../protocol/usb-golden/join-relay-v2/README.md)）で、C++ bridgeの再生とRustの復号がbyte一致する。hostの`RelayKey`は両epochを追加し、`RelayUp／Down`はphaseを明示する（P3-3のSiteServiceはphase 4だけ受理）。v1（bit 8・schema 1）へのfallbackは無い。
 
 ## 5. KGuardとの典型的な流れ

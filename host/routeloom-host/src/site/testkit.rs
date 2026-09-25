@@ -13,6 +13,13 @@ use routeloom_join::{
     JoinResult, LastMembership, RemovalNotice, SiteOffer, DAMS_SIZE, EXPORTER_LABEL_DAMS,
     JOIN_EAD_CREDENTIAL_LABEL, JOIN_PROFILE_MEMBERSHIP_RECOVERY, JOIN_PROFILE_RLJOIN1,
 };
+use routeloom_keysched::authority::{mac_equal, open_envelope, seal_envelope, ReplayWindow};
+use routeloom_keysched::rlres1::{Epochs, R1, R2};
+use routeloom_keysched::{
+    resume_auth_key, resume_binding_routed, resume_confirm_key, resume_id, resume_mac, resume_prk,
+    resume_traffic_key, sha256, Direction, Purpose, ResumeKeyContext, TrafficKey, LABEL_RESUME_R1,
+    LABEL_RESUME_R2, LABEL_RESUME_R3,
+};
 use routeloom_provision::credential::credential_kid;
 use routeloom_provision::sdkv1::cert::{cert_issue, cert_verify, CertClaims, CertType};
 use routeloom_provision::signer::{test_keypair, FileRootSigner, RootSigner};
@@ -445,5 +452,144 @@ impl GroupKeyTransport for FakeGroupKeyTransport {
 
     fn send(&self, command: GroupKeyCommand, _: Option<&[u8; 32]>) {
         self.sent.lock().expect("gk fake poisoned").push(command);
+    }
+}
+
+/// The network identity a [`FakeDevice`] handshakes against: the
+/// authority's network/site plus the epochs the device reports (R1)
+/// and expects echoed (R2 MAC).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AuthorityNet {
+    pub network: u64,
+    pub site: u64,
+    pub epochs_i: Epochs,
+    pub epochs_r: Epochs,
+}
+
+/// Minimal fake device: drives RLRES1 as initiator with the keysched
+/// codecs and seals/opens envelopes with real AES-GCM.
+pub(crate) struct FakeDevice {
+    device: u64,
+    dams: [u8; 32],
+    k_auth: [u8; 32],
+    binding: [u8; 32],
+    nonce_i: [u8; 16],
+    cid_i: u32,
+    r1_bytes: Vec<u8>,
+    net: AuthorityNet,
+    rx_key: TrafficKey,
+    tx_key: TrafficKey,
+    rx_ctx: u32,
+    tx_ctx: u32,
+    tx_counter: u64,
+    request_id: u64,
+    rx_window: ReplayWindow,
+}
+
+impl FakeDevice {
+    pub(crate) fn begin(
+        device: u64,
+        dams: [u8; 32],
+        cid_i: u32,
+        nonce_i: [u8; 16],
+        net: AuthorityNet,
+    ) -> (Vec<u8>, Self) {
+        let k_auth = resume_auth_key(&dams, Purpose::Authority, net.network, device, net.site);
+        let binding = resume_binding_routed(Purpose::Authority, device, net.site);
+        let mut r1 = R1 {
+            purpose: Purpose::Authority,
+            rid: resume_id(&dams, Purpose::Authority),
+            nonce_i,
+            cid_i,
+            epochs: net.epochs_i,
+            ticket: Vec::new(),
+            mac: [0; 16],
+        };
+        r1.mac = resume_mac(&k_auth, LABEL_RESUME_R1, &[&binding, &r1.body()]);
+        let r1_bytes = r1.encode();
+        (
+            r1_bytes.clone(),
+            Self {
+                device,
+                dams,
+                k_auth,
+                binding,
+                nonce_i,
+                cid_i,
+                r1_bytes,
+                net,
+                rx_key: TrafficKey {
+                    key: [0; 16],
+                    iv: [0; 12],
+                },
+                tx_key: TrafficKey {
+                    key: [0; 16],
+                    iv: [0; 12],
+                },
+                rx_ctx: 0,
+                tx_ctx: 0,
+                tx_counter: 0,
+                request_id: 1,
+                rx_window: ReplayWindow::new(),
+            },
+        )
+    }
+
+    pub(crate) fn on_r2(&mut self, r2_bytes: &[u8]) -> Vec<u8> {
+        let R2::Ok {
+            nonce_r,
+            cid_r,
+            epochs: _,
+            mac,
+        } = R2::decode(r2_bytes).expect("R2 ok")
+        else {
+            panic!("expected R2 ok");
+        };
+        let body = R2::ok_body(&nonce_r, cid_r, &self.net.epochs_r);
+        // Rebuild the exact R2 bytes the host sealed the MAC over.
+        let mut full = body.clone();
+        full.extend_from_slice(&mac);
+        let expect = resume_mac(
+            &self.k_auth,
+            LABEL_RESUME_R2,
+            &[&self.binding, &self.r1_bytes, &body],
+        );
+        assert!(mac_equal(&expect, &mac));
+        let context = ResumeKeyContext {
+            purpose: Purpose::Authority,
+            network: self.net.network,
+            node_i: self.device,
+            node_r: self.net.site,
+            cid_i: self.cid_i,
+            cid_r,
+        };
+        let th = sha256(&[&self.r1_bytes, &full]);
+        let prk = resume_prk(&self.nonce_i, &nonce_r, &self.dams);
+        let k_conf = resume_confirm_key(&prk, &th);
+        self.tx_key = resume_traffic_key(&prk, &context, Direction::InitiatorToResponder, &th);
+        self.rx_key = resume_traffic_key(&prk, &context, Direction::ResponderToInitiator, &th);
+        self.rx_ctx = self.cid_i;
+        self.tx_ctx = cid_r;
+        resume_mac(&k_conf, LABEL_RESUME_R3, &[&th]).to_vec()
+    }
+
+    pub(crate) fn seal(&mut self, env_type: u8, plaintext: &[u8]) -> Vec<u8> {
+        let envelope = seal_envelope(
+            &self.tx_key,
+            env_type,
+            self.tx_ctx,
+            self.tx_counter,
+            plaintext,
+        )
+        .expect("seal");
+        self.tx_counter += 1;
+        self.request_id += 1;
+        envelope
+    }
+
+    pub(crate) fn open(&mut self, envelope: &[u8]) -> (u8, Vec<u8>) {
+        let (header, plaintext) = open_envelope(&self.rx_key, envelope, self.rx_ctx).expect("open");
+        assert!(self.rx_window.accept(header.counter));
+        (header.env_type, plaintext)
     }
 }

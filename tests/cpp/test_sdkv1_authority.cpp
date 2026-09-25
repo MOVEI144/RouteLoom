@@ -27,6 +27,9 @@
 #include "routeloom/key_schedule.hpp"
 #include "routeloom/rlres1.hpp"
 #include "routeloom/sdkv1_authority.hpp"
+
+static_assert(sizeof(routeloom::sdkv1::AuthorityClient) <= 4840,
+              "authority client shares its send and receive workspace");
 #include "routeloom/sdkv1_group_keys.hpp"
 #include "test_sdkv1.hpp"
 
@@ -1454,6 +1457,28 @@ void test_staged_confirm_and_one_pending_ack() {
                         ByteView{port.sent[0].bytes.data(), port.sent[0].bytes.size()}, 1000);
   CHECK(fake.ready);
   port.sent.clear();
+
+  Bytes large_plain(keys::kAuthorityEnvelopeMax - keys::kAuthorityEnvelopeMin, 0xA5);
+  sdkv1::AuthorityBodyHead large_head{};
+  large_head.op = 1;
+  large_head.generation = kGeneration;
+  large_head.request_id = 0x55;
+  std::size_t large_head_size = 0;
+  CHECK(sdkv1::authority_head_encode(
+      large_head, MutableByteView{large_plain.data(), large_plain.size()}, large_head_size));
+  auto large = fake.seal_bytes(keys::AuthorityEnvelopeType::RemovalNotice,
+                               ByteView{large_plain.data(), large_plain.size()});
+  CHECK(large.bytes.size() == keys::kAuthorityEnvelopeMax);
+  rx.rx.kind = sdkv1::AuthorityCarrierKind::Envelope;
+  rx.rx.bytes = ByteView{large.bytes.data(), large.bytes.size()};
+  rx.rx.writable = MutableByteView{large.bytes.data(), large.bytes.size()};
+  CHECK(client.advance(rx, 1001));
+  CHECK(!observer.seen.empty() &&
+        observer.seen.back().kind == sdkv1::AuthorityEvent::Kind::Passthrough);
+  CHECK(port.sent.empty());  // stalled JoinConfirm remains byte-for-byte intact
+  CHECK(std::all_of(large.bytes.begin(), large.bytes.end(),
+                    [](std::uint8_t byte) { return byte == 0; }));
+  rx.rx.writable = {};
 
   auto make_update = [&](std::uint32_t g) {
     sdkv1::GroupKeyUpdate update{};

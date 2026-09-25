@@ -6,8 +6,10 @@
 // The Coordinator owns the mode workspace — the P3-4 Joiner while
 // unprovisioned (radio or USB-direct), the member HandshakeEngine with
 // its session bank while adopted — plus the RLD1 demux owner table, the
-// join proxy and relay gateway, the APPLIED boot lease's rlboot witness
-// and the local-removal evidence. It implements the sink/port interfaces
+// join proxy and relay gateway, the APPLIED boot lease's rlboot witness,
+// the local-removal evidence, the single GroupKeyState with its group
+// provider and member scope view, and the authority channel client.
+// It implements the sink/port interfaces
 // of everything it owns (BootstrapSink, JoinDirectPort, JoinCommitPolicy,
 // JoinRelayHostSink, the engine's membership/peer/boot views) so the
 // wiring has no free functions and no second owner.
@@ -35,6 +37,10 @@
 #include "routeloom/discovery.hpp"
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/sdkv1_ead.hpp"
+#include "routeloom/rlres1.hpp"
+#include "routeloom/sdkv1_authority.hpp"
+#include "routeloom/sdkv1_group_keys.hpp"
+#include "routeloom/sdkv1_group_security.hpp"
 #include "routeloom/sdkv1_handshake.hpp"
 #include "routeloom/sdkv1_join_relay.hpp"
 #include "routeloom/sdkv1_join_transport.hpp"
@@ -92,6 +98,10 @@ enum class CoordinatorEventKind : std::uint8_t {
   UsbRelayDown,    // H→G 0x61 for a mesh proxy
   UsbRelayAbort,   // H→G 0x62 (only HostAborted is a defined H→G reason)
   UsbSessionDown,  // USB disconnect: USB-bound state drops, never reused
+  UsbSessionUp,    // USB session (re)established: restart USB-bound channels
+  AuthorityRx,     // one authority carrier from the mesh/USB transport
+  AuthorityTx,     // one authority send completion from the transport
+  RequestPull,     // ask the authority for the current GK (unknown epoch)
   ChannelReady,    // radio tune completion (answers a TuneChannel action)
   PrepareSleep,    // Busy while work is outstanding, else parks sleeping
   Wake,            // resume polling after sleep
@@ -129,6 +139,16 @@ struct CoordinatorEvent {
   std::uint8_t channel{0};
   JoinPhy channel_phy{JoinPhy::Lr250};
   std::uint32_t channel_generation{0};
+  // AuthorityRx: one carrier (bytes valid during the call only; the
+  // transport's take_rx view is fed synchronously, never staged).
+  AuthorityCarrierKind auth_kind{AuthorityCarrierKind::Envelope};
+  ByteView auth_bytes{};
+  MutableByteView auth_writable{};
+  // AuthorityTx: the transport's completion for an earlier try_send.
+  std::uint64_t auth_token{0};
+  bool auth_delivered{false};
+  // RequestPull: 1 UnknownNewerEpoch, 2 BootReconnectSync, 3 LostAckRepair.
+  std::uint8_t pull_reason{0};
 };
 
 // --- Actions (single slot, take_action) ------------------------------------------------------
@@ -199,6 +219,15 @@ struct CoordinatorSnapshot {
   std::uint32_t demands{0};
   std::uint16_t resume_link_slots{0};
   std::uint16_t resume_end_slots{0};
+  // Authority channel (G-SEC P5): live once the member config lands and
+  // the transport port attaches. join_confirmed latches on the verified
+  // JoinConfirm ACK; authority_busy gates sleep while work is in flight.
+  bool authority_started{false};
+  bool authority_ready{false};
+  bool authority_busy{false};
+  bool join_confirmed{false};
+  // Consecutive member-link failures behind the stale-GK refresh (P5 §7.4).
+  std::uint8_t refresh_strikes{0};
 };
 
 struct CoordinatorCounters {
@@ -209,6 +238,13 @@ struct CoordinatorCounters {
   std::uint32_t staged_drops{0};
   std::uint32_t usb_drops{0};
   std::uint32_t sleep_parks{0};
+  std::uint32_t authority_ready{0};
+  std::uint32_t authority_lost{0};
+  std::uint32_t authority_confirmed{0};
+  std::uint32_t authority_updates{0};
+  std::uint32_t authority_activates{0};
+  std::uint32_t authority_passthrough{0};  // verified type 5..8, P6 unconnected
+  std::uint32_t refreshes{0};
 };
 
 // The Owner. See the header comment for the ownership map.
@@ -219,7 +255,8 @@ class SecurityCoordinator final : public BootstrapSink,
                                    public ZtRelayPort,
                                    public HandshakeMembershipView,
                                    public AuthenticatedPeerView,
-                                   public BootWitnessView {
+                                   public BootWitnessView,
+                                   public AuthorityObserver {
  public:
   // The stores, discovery, entropy and ports stay firmware-owned and must
   // outlive the Coordinator. `local_mac`/`local_node` identify this device
@@ -242,6 +279,9 @@ class SecurityCoordinator final : public BootstrapSink,
     CoordinatorUsbPort* usb{nullptr};
     SessionCredentialVerifier* verifier{nullptr};
     AeadGcm bank_aead{};
+    // Combined-tag GCM for the group provider and the authority channel
+    // (a different port than the bank's split-tag AeadGcm above).
+    routeloom::AeadGcm crypto_aead{};
     JoinCookieSealer* proxy_sealer{nullptr};
     MacAddress local_mac{};
     NodeId local_node{kInvalidNodeId};
@@ -266,14 +306,20 @@ class SecurityCoordinator final : public BootstrapSink,
   bool quiescent() const noexcept;
 
   // The GK-backed discovery scope provider, handed to the firmware's
-  // DiscoveryConfig at construction. Empty (Inactive) until a member
-  // config is adopted; the StartMemberDiscovery action only says when.
-  DiscoveryScopeProvider& gk_scope() noexcept { return gk_scope_; }
+  // DiscoveryConfig at construction (with the kMemberScopeRef handle).
+  // Refuses until a member config is adopted; the StartMemberDiscovery
+  // action only says when. Reads the single GroupKeyState — no second
+  // GK copy, no dev-PSK fallback.
+  DiscoveryScopeProvider& gk_scope() noexcept { return member_scope_; }
+  // Full radio discovery identity for the adopted member. The capability
+  // word and observed local MAC must match the handshake carrier exactly.
+  Status member_discovery_config(DiscoveryConfig& out) noexcept;
   // The session provider view over the member bank, handed to the
   // firmware's MeshNode at construction. Unconfigured (not ready) until
   // a member config is adopted; the node must not start on it before
-  // ApplyMemberConfig.
-  SecurityProvider& session_provider() noexcept { return session_provider_; }
+  // ApplyMemberConfig. Pairwise scopes delegate to the member bank;
+  // group scopes seal/open under the adopted GK.
+  SecurityProvider& session_provider() noexcept { return group_provider_; }
   // The membership hooks over the adopted stores, for the member
   // discovery's MembershipHooks port (the firmware initializes the
   // discovery's controller with these at StartMemberDiscovery).
@@ -341,6 +387,29 @@ class SecurityCoordinator final : public BootstrapSink,
   // limited reauth path) — never under-retires.
   Status revoke_member_sessions(const RevocationSet& set, std::uint32_t site_epoch,
                                 MonotonicMs now) noexcept;
+  // Attaches the authority transport port (once): the mesh endpoint on a
+  // device, the direct USB port on a gateway. Until attached the channel
+  // stages its carriers and retries on Tick; detaching is not supported
+  // (Stop wipes the channel instead). The port must outlive the Owner.
+  Status attach_authority_port(AuthorityPort& port) noexcept {
+    if (authority_port_.live() != nullptr) {
+      return Status::error(StatusCode::AlreadyExists, "authority port already attached");
+    }
+    authority_port_.attach(port);
+    return Status::success();
+  }
+  // Secret-free channel view for firmware diagnostics (safe in callbacks).
+  AuthoritySnapshot authority_snapshot() const noexcept { return authority_.snapshot(); }
+  // Adopted GK epochs for the 0x66 QueryLocal answer (0/0 pre-adoption;
+  // false until the member config lands).
+  bool group_epochs(std::uint32_t& current, std::uint32_t& next) const noexcept {
+    current = group_keys_.current();
+    next = 0;
+    if (deps_.site != nullptr && deps_.site->has_site()) {
+      next = deps_.site->site().gk_epoch_next;
+    }
+    return group_keys_.ready();
+  }
 
   // BootstrapSink (Node RX context): stages the frame, never sends.
   Status on_frame(const BootstrapMeta& meta, FrameType type, ByteView payload,
@@ -364,8 +433,12 @@ class SecurityCoordinator final : public BootstrapSink,
   bool authenticated(NodeId peer, NetworkId network, std::uint32_t& generation,
                      std::uint32_t& role) const noexcept override;
   bool boot_witness_ok(std::uint32_t witness) const noexcept override;
+  // AuthorityObserver (channel context): counts verified events. Never
+  // drives the channel (no advance from the callback).
+  void on_event(const AuthorityEvent& event) noexcept override;
 
  private:
+  friend struct SecurityCoordinatorTestAccess;
   static constexpr std::size_t kDemuxEntries = 8;
   static constexpr std::size_t kStagedFrames = 4;
   static constexpr std::uint32_t kDemuxHoldMs = 30000;
@@ -399,28 +472,64 @@ class SecurityCoordinator final : public BootstrapSink,
     MonotonicMs now{0};
   };
 
-  // GK-backed scope provider for member discovery (Required). The key is
-  // adopted with the member config and wiped on removal/stop; until then
-  // every call refuses and discovery must not start. No previous-generation
-  // overlap: a GK epoch change re-adopts (P4 keeps one live generation).
-  class GkScopeProvider final : public DiscoveryScopeProvider {
+  // rlres1::Environment for the authority initiator: entropy and
+  // receive context ids. The slot directory is unused (the client only
+  // initiates, never answers R1). A nested class (not another base)
+  // because the environment's non-const revoked() would collide with
+  // the membership view's const one.
+  class AuthorityEnv final : public rlres1::Environment {
    public:
-    void adopt(const std::uint8_t gk[32], std::uint32_t generation) noexcept;
-    void wipe() noexcept;
-    bool active() const noexcept { return active_; }
-    SecurityProfile security_profile() const noexcept override {
-      return SecurityProfile::Production;
+    void bind(EntropySource* entropy) noexcept { entropy_ = entropy; }
+    bool random(MutableByteView out) noexcept override {
+      return entropy_ != nullptr && entropy_->fill(out).ok();
     }
-    bool current_generation(ScopeRef scope, std::uint32_t& out) noexcept override;
-    bool accepted_generation(ScopeRef scope, std::uint32_t generation,
-                             MonotonicMs now_ms) noexcept override;
-    Status scope_tag(ScopeRef scope, std::uint32_t generation, ByteView input,
-                     ScopeTag& out) noexcept override;
+    bool find_slot(rlres1::Purpose purpose, const rlres1::ResumeId& rid,
+                   rlres1::Slot& out) noexcept override {
+      (void)purpose;
+      (void)rid;
+      (void)out;
+      return false;
+    }
+    bool revoked(NodeId peer, std::uint32_t generation) noexcept override {
+      (void)peer;
+      (void)generation;
+      return false;  // initiator-only: never consulted
+    }
+    bool allocate_context_id(rlres1::Purpose purpose, NodeId peer,
+                             std::uint32_t& cid) noexcept override {
+      (void)purpose;
+      (void)peer;
+      if (++next_cid_ == 0) next_cid_ = 1;
+      cid = next_cid_;
+      return true;
+    }
+    bool reserve_resume_use(rlres1::Purpose purpose,
+                            const rlres1::ResumeId& rid) noexcept override {
+      (void)purpose;
+      (void)rid;
+      return false;
+    }
 
    private:
-    std::array<std::uint8_t, 32> gk_{};
-    std::uint32_t generation_{0};
-    bool active_{false};
+    EntropySource* entropy_{nullptr};
+    std::uint32_t next_cid_{0};
+  };
+
+  // Late-bound authority port: the firmware attaches the mesh endpoint
+  // or the direct USB port after construction. try_send refuses (false,
+  // nothing spent) until attached, so the channel stages and retries.
+  class AuthorityPortProxy final : public AuthorityPort {
+   public:
+    void attach(AuthorityPort& port) noexcept { live_ = &port; }
+    AuthorityPort* live() const noexcept { return live_; }
+    bool try_send(NodeId gateway, AuthorityCarrierKind kind, ByteView carrier,
+                  std::uint64_t& token) noexcept override {
+      if (live_ == nullptr) return false;
+      return live_->try_send(gateway, kind, carrier, token);
+    }
+
+   private:
+    AuthorityPort* live_{nullptr};
   };
 
   // --- step() legs ---
@@ -432,6 +541,20 @@ class SecurityCoordinator final : public BootstrapSink,
   Status on_prepare_sleep(MonotonicMs now) noexcept;
   Status on_wake(MonotonicMs now) noexcept;
   Status on_stop(MonotonicMs now) noexcept;
+  // --- authority channel legs ---
+  Status on_authority_rx(const CoordinatorEvent& event) noexcept;
+  Status on_authority_tx(const CoordinatorEvent& event) noexcept;
+  Status on_request_pull(const CoordinatorEvent& event) noexcept;
+  Status on_usb_session_up(MonotonicMs now) noexcept;
+  void drive_authority(MonotonicMs now) noexcept;
+  bool build_authority_start(AuthorityStart& out) const noexcept;
+  void suspend_authority() noexcept;
+  // --- stale-GK refresh (P5 §7.4) ---
+  void note_link_established() noexcept;
+  void note_link_failed() noexcept;
+  void watch_linkless(MonotonicMs now) noexcept;
+  void start_refresh(MonotonicMs now) noexcept;
+  void maybe_abandon_refresh(MonotonicMs now) noexcept;
   // --- MemberReady adoption ---
   Status adopt_member(const JoinAction& ready, MonotonicMs now) noexcept;
   Status adopt_boot_rls1(MonotonicMs now) noexcept;  // same tail, stored site
@@ -527,16 +650,33 @@ class SecurityCoordinator final : public BootstrapSink,
   SdkMembershipHooks hooks_;
   NullJoinObserver joiner_observer_{};
   // The bank stays outside the union: the firmware binds the session
-  // provider over it at construction, before any workspace exists.
+  // provider over it at construction, before any workspace exists. The
+  // GK state, the group/pairwise provider, the member scope view and the
+  // authority channel stay outside the union too: a stale-GK refresh
+  // destroys the member engine around them without resetting group
+  // counters, replay windows or the adopted scope.
   GatewaySessionBank bank_;
   BankSessionSink<32, 128> bank_sink_;
-  RamSessionProvider<32, 128> session_provider_;
-  GkScopeProvider gk_scope_;
+  RamSessionProvider<32, 128> pairwise_provider_;
+  GroupKeyState group_keys_;
+  GroupSecurityProvider group_provider_;
+  GkMemberScopeProvider member_scope_;
+  AuthorityPortProxy authority_port_;
+  AuthorityEnv authority_env_;
+  AuthorityClient authority_;
   Workspace ws_{};
 
   std::array<StagedFrame, kStagedFrames> staged_{};
   CoordinatorAction action_{};
   bool action_pending_{false};
+  bool authority_wanted_{false};  // adopted: the channel (re)starts on poll
+  bool join_confirmed_{false};    // latched on the verified JoinConfirm ACK
+  std::uint8_t refresh_strikes_{0};
+  std::uint32_t last_unknown_generation_{0};  // discovery scope_stats sample
+  bool refresh_active_{false};
+  MonotonicMs refresh_start_{0};
+  MonotonicMs refresh_cooldown_until_{0};
+  MonotonicMs last_authority_start_{0};
   CoordinatorMemberConfig adopted_{};
   bool member_valid_{false};
   std::uint32_t tune_token_{0};
@@ -548,6 +688,7 @@ class SecurityCoordinator final : public BootstrapSink,
   bool in_port_{false};
   bool usb_direct_{false};
   bool discovery_started_{false};
+  bool member_apply_pending_{false};
   MonotonicMs last_now_{0};
   bool removal_holdoff_armed_{false};
   MonotonicMs removal_holdoff_at_{0};

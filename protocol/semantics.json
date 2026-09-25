@@ -265,15 +265,18 @@
       "usb": {"capability_bit": 9, "inner_schema": 2}
     }
   },
+  "control_object_kinds": {"CHANNEL_PLAN": 1, "RECOVERY_SNAPSHOT": 2, "CONFIG_PERMIT": 3, "CONFIG_RECOVERY": 4, "TRUST_MANIFEST": 5, "REVOCATION_SET": 6, "AUTHORITY_ENVELOPE": 7},
   "authority_channel": {
-    "status": "EXPERIMENTAL codecs + endpoint/responder state machines (sdk-v1 G-SEC P5 PR1); not wired into firmware or the daemon",
+    "status": "EXPERIMENTAL codecs + endpoint/responder state machines (sdk-v1 G-SEC P5 PR1-PR3) wired to the mesh/USB/firmware/daemon (P5 PR4); P6 delivery sink unconnected",
     "envelope": {"version": 1, "types": {"JOIN_CONFIRM": 1, "GROUP_KEY_UPDATE": 2, "GROUP_KEY_ACTIVATE": 3, "GROUP_KEY_PULL": 4}, "header_bytes": 12, "min_bytes": 28, "max_bytes": 2048, "aead": "AES-GCM-128", "gk_id_label": "RouteLoom/v1/gk-id"},
     "carrier_kinds": {"R1": 1, "R2": 2, "R3": 3, "ENVELOPE": 4, "WAKE": 5},
+    "mesh": {"control_subtype": 9, "carrier_head_bytes": 8, "carrier_body_max": 120, "object_kind": 7, "object_max_bytes": 2048, "gateway_slots": 2, "note": "design numbers 5/5 were taken (trust-status-query/TrustManifest); the wire takes the next free subtype 9 and kind 7"},
     "fragment": {"header_bytes": 20, "data_max": 960, "grid": 960, "hops_max": 16},
     "usb": {
-      "capability_bit": 9,
-      "advertised": false,
-      "subcommands": {"AUTHORITY_UP": 100, "AUTHORITY_DOWN": 101, "SITE_STATE_SET": 102, "SITE_STATE_REPORT": 103}
+      "capability_bit": 10,
+      "advertised": true,
+      "subcommands": {"AUTHORITY_UP": 100, "AUTHORITY_DOWN": 101, "SITE_STATE_SET": 102, "SITE_STATE_REPORT": 103},
+      "note": "bit 9 was already join-relay-v2; the lane takes the next free bit 10 and advertises it once the gateway attaches the sink"
     }
   },
   "max_espnow_body_bytes": 250,

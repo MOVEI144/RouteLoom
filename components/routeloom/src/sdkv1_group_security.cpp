@@ -103,12 +103,13 @@ GroupReplaySender* GroupSecurityProvider::free_sender(const SecurityScope scope)
 }
 
 bool GroupSecurityProvider::replay_ok(const GroupReplaySender& s, const std::uint32_t epoch,
-                                       const std::uint32_t boot,
-                                       const std::uint64_t counter) noexcept {
+                                      const std::uint32_t boot,
+                                      const std::uint64_t counter) noexcept {
   if (boot < s.boot) return false;
   if (boot > s.boot) return true;
-  for (const auto& bank : s.banks) {
-    if (bank.epoch != epoch) continue;
+  for (std::size_t i = 0; i < keys_.replay_epochs_.size(); ++i) {
+    if (keys_.replay_epochs_[i] != epoch) continue;
+    const auto& bank = s.banks[i];
     if (counter > bank.max) return true;
     const std::uint64_t distance = bank.max - counter;
     return distance < 64 && (bank.bitmap & (std::uint64_t{1} << distance)) == 0;
@@ -125,15 +126,20 @@ void GroupSecurityProvider::replay_commit(GroupReplaySender& s, const NodeId pee
     s.boot = boot;
   }
   s.sender = peer;
-  GroupReplayBank* bank = nullptr;
-  for (auto& b : s.banks) if (b.epoch == epoch) bank = &b;
-  if (bank == nullptr) {
-    // Never let a delayed retired epoch evict the current bank. Both live
-    // epochs fit; a retired bank is the only replacement candidate.
-    bank = !keys_.accepts(s.banks[0].epoch) ? &s.banks[0] : &s.banks[1];
-    *bank = {};
-    bank->epoch = epoch;
+  std::size_t index = 0;
+  if (keys_.replay_epochs_[0] == epoch) {
+    index = 0;
+  } else if (keys_.replay_epochs_[1] == epoch) {
+    index = 1;
+  } else {
+    // Only an authenticated frame may relabel a bank. Clear every sender's
+    // retired bank together; a delayed old epoch cannot evict a live one.
+    index = !keys_.accepts(keys_.replay_epochs_[0]) ? 0 : 1;
+    for (auto& entry : keys_.link_rx_) entry.banks[index] = {};
+    for (auto& entry : keys_.end_rx_) entry.banks[index] = {};
+    keys_.replay_epochs_[index] = epoch;
   }
+  GroupReplayBank* bank = &s.banks[index];
   if (counter > bank->max) {
     const std::uint64_t delta = counter - bank->max;
     bank->bitmap = (delta >= 64 ? 0 : bank->bitmap << delta) | 1;

@@ -15,6 +15,8 @@
 #include "esp_wifi.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "routeloom/nvs_boot_session.hpp"
+#include "routeloom/nvs_legacy_purge.hpp"
 #include "sdkconfig.h"
 #if CONFIG_ROUTELOOM_DISCOVERY || CONFIG_ROUTELOOM_CONFIG
 #include "routeloom/espnow_autonomy.hpp"
@@ -58,6 +60,14 @@
 
 namespace {
 constexpr char kTag[] = "RouteLoomRef";
+
+// NVS codec state uses CPU-only reads and writes, so the C5 member image
+// keeps it in LP SRAM while HP SRAM remains available to radio traffic.
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC && CONFIG_IDF_TARGET_ESP32C5
+#define ROUTELOOM_MEMBER_C5_LP RTC_DATA_ATTR
+#else
+#define ROUTELOOM_MEMBER_C5_LP
+#endif
 
 using routeloom::ByteView;
 using routeloom::DeliveryResult;
@@ -103,7 +113,21 @@ class LogObserver final : public NodeObserver {
     ESP_LOGW(kTag, "diagnostic reason=%s peer=%llu message=%s", reason,
              static_cast<unsigned long long>(peer),
              message == nullptr ? "none" : "present");
+    // Unknown-epoch group traffic is the backstop pull trigger for a
+    // missed rotation Wake (records only; the owner polls the flag).
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    if (owner_ != nullptr && reason != nullptr &&
+        std::strcmp(reason, "GROUP_KEY_RETIRED") == 0) {
+      owner_->note_group_key_retired();
+    }
+#endif
   }
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  void bind_owner(EspNowSecurityOwner* owner) noexcept { owner_ = owner; }
+
+ private:
+  EspNowSecurityOwner* owner_{nullptr};
+#endif
 };
 
 [[maybe_unused]] int hex_value(const char value) noexcept {
@@ -140,35 +164,6 @@ template <std::size_t Size>
     mac.bytes[i] = static_cast<std::uint8_t>(values[i]);
   }
   return true;
-}
-
-Status next_boot_session(std::uint32_t& session) noexcept {
-  nvs_handle_t handle = 0;
-  esp_err_t error = nvs_open("rlboot", NVS_READWRITE, &handle);
-  if (error != ESP_OK) {
-    return Status::error(StatusCode::StorageFailure,
-                         "boot nvs_open failed");
-  }
-  std::uint32_t stored = 0;
-  error = nvs_get_u32(handle, "session", &stored);
-  if (error != ESP_OK && error != ESP_ERR_NVS_NOT_FOUND) {
-    nvs_close(handle);
-    return Status::error(StatusCode::StorageFailure,
-                         "boot session read failed");
-  }
-  session = stored + 1U;
-  if (session == 0) {
-    nvs_close(handle);
-    return Status::error(StatusCode::CounterExhausted,
-                         "boot session exhausted");
-  }
-  error = nvs_set_u32(handle, "session", session);
-  if (error == ESP_OK) error = nvs_commit(handle);
-  nvs_close(handle);
-  return error == ESP_OK
-             ? Status::success()
-             : Status::error(StatusCode::StorageFailure,
-                             "boot session commit failed");
 }
 
 // .rtc_noinit is the only RAM the boot path never re-initializes, so it is
@@ -223,8 +218,11 @@ RTC_NOINIT_ATTR routeloom::FailStreak s_fail;
 
 // RTC slow-memory marker: written right before esp_deep_sleep_start and
 // cleared on boot. Lost on a full power cut — exactly the cases that must
-// not be classified as a sleep resume.
+// not be classified as a sleep resume. The programmed timer duration rides
+// alongside so the wake can prove a trusted slept-time lower bound (P4
+// §9.3); it is one-shot — a reset without a new sleep must not reuse it.
 RTC_DATA_ATTR std::uint32_t s_sleep_marker = 0;
+RTC_DATA_ATTR std::uint32_t s_sleep_programmed_ms = 0;
 constexpr std::uint32_t kSleepMarkerValue = 0x524c5057;  // "RLPW"
 
 class LogPowerEvents final : public routeloom::PowerEvents {
@@ -261,18 +259,11 @@ class FailStreakClearOnSleep final : public routeloom::espnow::PreSleepHook {
   }
 };
 
-routeloom::ResetCause classify_boot() noexcept {
-  // esp_sleep_get_wakeup_causes() returns a *bitmap* of esp_sleep_source_t
-  // values — on a non-sleep reset it reports BIT(ESP_SLEEP_WAKEUP_UNDEFINED),
-  // which is nonzero. Mask the UNDEFINED bit before treating the bitmap as
-  // evidence of a real sleep wakeup so brownout/watchdog resets are not
-  // misclassified as deep-sleep resumes.
-  const std::uint32_t wakeup =
-      esp_sleep_get_wakeup_causes() & ~(1U << ESP_SLEEP_WAKEUP_UNDEFINED);
+routeloom::ResetCause classify_boot(bool& marked) noexcept {
   const esp_reset_reason_t reason = esp_reset_reason();
-  const bool marked = s_sleep_marker == kSleepMarkerValue;
+  marked = s_sleep_marker == kSleepMarkerValue;
   s_sleep_marker = 0;
-  if (marked && (reason == ESP_RST_DEEPSLEEP || wakeup != 0U)) {
+  if (routeloom::trusted_deep_sleep_reset(reason == ESP_RST_DEEPSLEEP, marked)) {
     return routeloom::ResetCause::DeepSleepWake;
   }
   if (reason == ESP_RST_POWERON || reason == ESP_RST_BROWNOUT ||
@@ -280,6 +271,20 @@ routeloom::ResetCause classify_boot() noexcept {
     return routeloom::ResetCause::ColdBoot;
   }
   return routeloom::ResetCause::OtherReset;
+}
+
+// A marked timer wake proves the wake source, not an elapsed-time upper
+// bound: RTC slow-clock drift and time spent rebooting are not bounded by
+// the programmed duration. Park durable pendings TIME_UNCERTAIN until an
+// independently bounded elapsed interval is available.
+routeloom::ElapsedInterval classify_wake_elapsed(const routeloom::ResetCause cause,
+                                                 const bool marked) noexcept {
+  const std::uint32_t programmed = s_sleep_programmed_ms;
+  s_sleep_programmed_ms = 0;
+  return routeloom::classify_sleep_elapsed(
+      cause == routeloom::ResetCause::DeepSleepWake,
+      esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER, marked,
+      programmed, /*trusted_upper_ms=*/0);
 }
 
 #endif  // CONFIG_ROUTELOOM_DEEP_SLEEP
@@ -611,7 +616,7 @@ extern "C" void app_main(void) {
   // block this write. Every boot — even one that fails below — consumes a
   // session, which keeps TX epochs strictly fresh.
   std::uint32_t message_session = 0;
-  auto status = next_boot_session(message_session);
+  auto status = routeloom::next_boot_session(message_session);
   if (!status) fail(status.detail);
 
   const esp_err_t sec_nvs_error =
@@ -632,7 +637,7 @@ extern "C" void app_main(void) {
   // is reported and its consumers fail closed (the maintenance console
   // refuses, the join FSM of P3-4 will treat it as unprovisioned), while
   // the node keeps routing.
-  static routeloom::espnow::Sdkv1Stores sdkv1_stores(
+  static ROUTELOOM_MEMBER_C5_LP routeloom::espnow::Sdkv1Stores sdkv1_stores(
       routeloom::sdkv1::kResumeNodeSlots);
   status = sdkv1_stores.open(routeloom::espnow::kSecurityNvsPartition);
   if (!status) {
@@ -649,6 +654,17 @@ extern "C" void app_main(void) {
       ESP_LOGE(kTag, "sdkv1 stores init: %s", sdkv1_status.detail);
     }
     sdkv1_stores.log_state(kTag);
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+    // Member boot binds the already advanced token to the adopted RLS1.
+    status = routeloom::reconcile_boot_session(sdkv1_stores.site(), message_session);
+    if (!status) fail(status.detail);
+#endif
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM && !CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
+    status = routeloom::reserve_dev_group_boot_session(message_session, message_session);
+    if (!status) fail(status.detail);
+#endif
+#endif
   }
 #if CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
   // Factory maintenance console (sdk-v1/07 §6): runs pre-RF and owns the
@@ -668,6 +684,8 @@ extern "C" void app_main(void) {
              "it");
   }
 #if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  status = routeloom::espnow::refuse_legacy_boot_after_migration();
+  if (!status) fail(status.detail);
   std::uint32_t peer_capacity = 0;
   status = routeloom::espnow::nvs_partition_peer_capacity(
       routeloom::espnow::kSecurityNvsPartition,
@@ -856,6 +874,9 @@ extern "C" void app_main(void) {
 #endif
 
   static LogObserver observer;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  observer.bind_owner(&owner);
+#endif
   EspNowRuntimeConfig config{};
 #if CONFIG_ROUTELOOM_TRUST_STORE
   // The committed trust image owns the deployment's network identity;
@@ -1245,6 +1266,11 @@ extern "C" void app_main(void) {
   config_target.attach_trust_store(trust_store, config_floor);
 #endif
   runtime.node().set_config_sink(&config_target);
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  // Authority lane (G-SEC P5): subtype-9 carriers and kind-7 objects route
+  // to the Owner's mesh endpoint before the config path sees them.
+  config_target.attach_authority(owner.authority_demux());
+#endif
   // The committed config image drives the live relay gate from now on
   // (field 3 relay_allowed); attach after the sink so the gate reflects the
   // durable snapshot, not just the compile-time default.
@@ -1293,11 +1319,12 @@ extern "C" void app_main(void) {
 #elif CONFIG_ROUTELOOM_DEEP_SLEEP
   // Wired: PowerCoordinator driven single-threaded (no runtime task), two-
   // slot NVS sleep image, RTC-marker + wake-cause classification, timer wake
-  // via esp_deep_sleep_start. Not wired (host/port only): trusted RTC
-  // elapsed interval (pendings park TIME_UNCERTAIN), GPIO wake mask, and
-  // bounded rediscovery — EspNowPowerPort::start_discovery reports
-  // Unsupported, so an unconfirmed resume ends RESUME_UNCONFIRMED/
-  // DISCOVERY_REQUIRED instead of fabricating rediscovery.
+  // via esp_deep_sleep_start. The timer cause is recorded, but no trusted
+  // upper bound on elapsed time exists yet, so pendings park TIME_UNCERTAIN.
+  // Not wired (host/port only): GPIO wake mask and bounded
+  // rediscovery — EspNowPowerPort::start_discovery reports Unsupported, so
+  // an unconfirmed resume ends RESUME_UNCONFIRMED/DISCOVERY_REQUIRED
+  // instead of fabricating rediscovery.
   // Sleep images are system state and stay in the default partition
   // (sdk-v1/05 §5.1); only per-peer security state lives in rlsec.
   static NvsCounterStore sleep_store;
@@ -1312,10 +1339,12 @@ extern "C" void app_main(void) {
   static routeloom::PowerCoordinator coordinator(
       power_config, runtime.node(), power_port, sleep_storage, power_events);
 
-  // Cold boot vs deep-sleep resume are distinct coordinator inputs. Elapsed
-  // time across sleep is reported unknown until a trusted RTC interval is
-  // wired, so durable pendings park as TIME_UNCERTAIN instead of resending.
-  status = coordinator.begin(classify_boot(), routeloom::ElapsedInterval{0, 0, false},
+  // Cold boot vs deep-sleep resume are distinct coordinator inputs. The
+  // The timer cause alone cannot bound elapsed time, so durable pendings
+  // park TIME_UNCERTAIN until an independent elapsed-time source exists.
+  bool boot_marked = false;
+  const routeloom::ResetCause boot_cause = classify_boot(boot_marked);
+  status = coordinator.begin(boot_cause, classify_wake_elapsed(boot_cause, boot_marked),
                              monotonic_now_ms());
   if (!status) fail(status.detail);
   runtime.mark_started();
@@ -1348,12 +1377,14 @@ extern "C" void app_main(void) {
     }
     if (coordinator.state() == routeloom::PowerState::ReadyToSleep) {
       s_sleep_marker = kSleepMarkerValue;
+      s_sleep_programmed_ms = CONFIG_ROUTELOOM_SLEEP_DURATION_MS;
       status =
           coordinator.sleep_enter(coordinator.ticket(), monotonic_now_ms());
       // The marker claims "sleep in progress" only while sleep_enter runs:
       // a return — failure or an unexpected non-sleep success — must not
       // leave it armed for the reset path to misread as a sleep cycle.
       s_sleep_marker = 0;
+      s_sleep_programmed_ms = 0;
       if (!status) fail(status.detail);
     }
     runtime.wait_for_event(routeloom::kOwnerPollPeriodMs);

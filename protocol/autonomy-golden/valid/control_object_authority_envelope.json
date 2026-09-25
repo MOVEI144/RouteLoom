@@ -1,0 +1,11 @@
+{
+  "codec": "control_object",
+  "encoded_hex": "010107000800000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "expect": "ok",
+  "format": "routeloom-autonomy-v1-golden",
+  "kind": 7,
+  "name": "control_object_authority_envelope",
+  "object_hash_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "subtype": 1,
+  "total_len": 2048
+}
