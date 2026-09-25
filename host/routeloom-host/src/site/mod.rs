@@ -453,7 +453,7 @@ impl SiteError {
 fn store_failure(detail: &store::StoreError) -> SiteError {
     SiteError::new(
         "STORE_FAILURE",
-        format!("the site store did not commit; nothing was changed ({detail})"),
+        format!("the site store operation failed ({detail})"),
     )
     .retry()
 }
@@ -1514,9 +1514,8 @@ impl SiteAuthority {
     fn decide_for(&mut self, mut txn: Txn, device: Verified, now_ms: u64) {
         let node = device.facts.node;
         let existing = self.devices.get(&node).cloned();
-        // An old key's recovery query after a reassignment (04 §5.4):
-        // the live row conflicts, but the revoke ledger may still owe
-        // this binding its Removed notice over the old network.
+        // A revoked key can still query when a different key holds the
+        // live row. The ledger may owe its Removed notice over the old network.
         let old_kid_removed = match &existing {
             Some(row) if row.member && row.kid != device.facts.kid => self.revoked_binding(
                 device.facts.node,
@@ -2557,9 +2556,8 @@ impl SiteAuthority {
 
         match request.verdict {
             Verdict::Allow { role } => {
-                // The flag stored with the request is stale information:
-                // the conflict is judged on the membership as it is now,
-                // inside this commit. A removed row does not conflict.
+                // The request's conflict flag may be stale. Check the
+                // current membership before issuing a new assignment.
                 if self
                     .devices
                     .get(&open.facts.node)
@@ -2572,15 +2570,13 @@ impl SiteAuthority {
                 }
                 // Group frames carry a NodeId, not an assignment generation.
                 // Once revoked, that ID cannot safely identify a new group sender.
-                let revoked_before = self
-                    .store
-                    .ledger_for(open.facts.node)
-                    .map_err(|error| {
-                        self.store_error(now_ms, &error);
-                        store_failure(&error)
-                    })?
-                    .iter()
-                    .any(|row| row.kind == "revoke");
+                let revoked_before =
+                    self.store
+                        .has_revocation(open.facts.node)
+                        .map_err(|error| {
+                            self.store_error(now_ms, &error);
+                            store_failure(&error)
+                        })?;
                 if revoked_before {
                     return Err(SiteError::new(
                         "CONFLICT",

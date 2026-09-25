@@ -2,6 +2,7 @@
 //! and 07 §8 named per test). Devices are simulated with the Rust EDHOC
 //! Initiator and routeloom-join's device-side checks (testkit).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -30,6 +31,32 @@ fn service_with(store: Box<dyn SiteStore>) -> (SiteService, Arc<InProcessTranspo
 
 fn service() -> (SiteService, Arc<InProcessTransport>) {
     service_with(Box::<MemoryStore>::default())
+}
+
+struct PresenceOnlyStore {
+    inner: MemoryStore,
+    fail_lookup: Arc<AtomicBool>,
+}
+
+impl SiteStore for PresenceOnlyStore {
+    fn load(&mut self) -> Result<Snapshot, StoreError> {
+        self.inner.load()
+    }
+    fn commit(&mut self, batch: &Batch) -> Result<(), StoreError> {
+        self.inner.commit(batch)
+    }
+    fn durable(&self) -> bool {
+        false
+    }
+    fn ledger_for(&mut self, _: u64) -> Result<Vec<LedgerRow>, StoreError> {
+        Err(StoreError("full ledger lookup unavailable".into()))
+    }
+    fn has_revocation(&mut self, node: u64) -> Result<bool, StoreError> {
+        if self.fail_lookup.load(Ordering::Relaxed) {
+            return Err(StoreError("revocation lookup failed".into()));
+        }
+        self.inner.has_revocation(node)
+    }
 }
 
 fn decide(
@@ -749,11 +776,61 @@ fn restart_after_commit_reissues_the_same_member_cert() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// V1-H04 / V1-R01 (host part) / V1-R05 / V1-R07: revoke with the wrong
-/// generation is CONFLICT; revoke commits RRS1 (SAK-signed, verifiable);
-/// the removed device gets Removed + a RemovalNotice it verifies, erases
-/// its site state, then shows up as previously_removed and can be
-/// re-assigned at generation 2.
+/// An allow needs only revocation presence; a failed lookup must never
+/// issue an assignment.
+#[test]
+fn allow_uses_revocation_presence_and_fails_closed_on_lookup_error() {
+    let fail_lookup = Arc::new(AtomicBool::new(false));
+    let (service, transport) = service_with(Box::new(PresenceOnlyStore {
+        inner: MemoryStore::default(),
+        fail_lookup: fail_lookup.clone(),
+    }));
+    let node = 0x00A1_0000_0000_5009;
+    join_member(&service, &transport, node, 0x79, T0);
+    revoke(&service, node, 1, "revoke", T0 + 10_000).unwrap();
+
+    let mut replacement = SimDevice::new(node, 0x7a);
+    let (_, outcome, events) = replacement.start(&service, &transport, T0 + 20_000);
+    assert!(matches!(outcome, Outcome::Waiting));
+    let id = request_id(&events).unwrap();
+    fail_lookup.store(true, Ordering::Relaxed);
+    assert_eq!(
+        decide(
+            &service,
+            id,
+            node,
+            Verdict::Allow {
+                role: ROLE_ENDPOINT
+            },
+            "retry",
+            T0 + 20_010
+        )
+        .unwrap_err()
+        .code,
+        "STORE_FAILURE"
+    );
+    fail_lookup.store(false, Ordering::Relaxed);
+    assert_eq!(
+        decide(
+            &service,
+            id,
+            node,
+            Verdict::Allow {
+                role: ROLE_ENDPOINT
+            },
+            "retry",
+            T0 + 20_020
+        )
+        .unwrap_err()
+        .code,
+        "CONFLICT"
+    );
+    assert!(!service.with(|a| a.devices[&node].member).0);
+}
+
+/// V1-H04 / V1-R01 (host part) / V1-R05 / V1-R07: revoke commits a
+/// verifiable RRS1; the removed device erases its site state, and only
+/// a newly provisioned NodeId can join after removal.
 #[test]
 fn removal_end_to_end() {
     let (service, transport) = service();
@@ -840,7 +917,7 @@ fn removal_end_to_end() {
         "{outcome:?}"
     );
     assert!(device.site.is_none());
-    // Unassigned again: KGuard sees previously_removed and may re-assign.
+    // KGuard sees the removed identity, but its NodeId cannot be re-allowed.
     let (_, outcome, events) = device.start(&service, &transport, T0 + 660_000);
     assert!(matches!(outcome, Outcome::Waiting));
     let request = events
@@ -868,8 +945,8 @@ fn removal_end_to_end() {
 
     // The office reprovisions RLI1/DevCert with a fresh NodeId; only that
     // identity can join while the old RRS1 entry remains in force.
-    let mut replacement = SimDevice::new(device.node + 1, 0x79);
-    let (mut new_exchange, _, new_events) = replacement.start(&service, &transport, T0 + 660_020);
+    let mut replacement = SimDevice::new(device.node + 1, 0x78);
+    let (mut new_exchange, _, new_events) = replacement.start(&service, &transport, T0 + 663_000);
     decide(
         &service,
         request_id(&new_events).unwrap(),
@@ -878,7 +955,7 @@ fn removal_end_to_end() {
             role: ROLE_ENDPOINT,
         },
         "fresh",
-        T0 + 660_030,
+        T0 + 663_010,
     )
     .unwrap();
     assert!(matches!(

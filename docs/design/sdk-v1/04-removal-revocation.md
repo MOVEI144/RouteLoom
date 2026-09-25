@@ -96,7 +96,7 @@ linkが連続3回`REVOKED` hintまたは失敗で終わり、使える近隣が�
 2. MembershipStateは`Revoked`を経て、RLS1が無い状態＝`Unprovisioned`として起動し直す。
 3. 10分のholdoffの後、ZeroTouch参加を再開する。KGuardには`previously_removed=true`の発見済み機器として見えるが、旧NodeIdの再allowはHostが拒否する。再参加には事務所で新NodeIdのRLI1／DevCertを発行する。
 
-「削除後は物理的なリセットまで沈黙すべき」とする運用もあり得る。自動で未割当に戻るか、沈黙するかは製品判断（[08](08-implementation-plan.md) §6 Q9）。既定案は「未割当に戻る」（要求R1のゼロタッチ再利用と整合）。
+「削除後は物理的なリセットまで沈黙すべき」とする運用もあり得る。自動で未割当に戻るか、沈黙するかは製品判断（[08](08-implementation-plan.md) §6 Q9）。既定案は「未割当に戻る」だが、旧NodeIdの発見・参加要求は再allowできない。再利用には新NodeIdのRLI1／DevCertを事務所で再発行する。
 
 ## 7. site_epoch cutover（RRS1満杯・大規模な入替え）
 
@@ -111,7 +111,7 @@ Host実装（P6-2 PR D、`host/routeloom-host/src/site/cutover.rs`）：`members
 
 ## 8. 予約：SAK交換（後続設計）
 
-SAK侵害または計画交換では、Site CA（オフライン）が署名する`SiteAuthorityChange{site_id, new SiteCert, min_site_epoch}`を機器が検証し、RLS1のSiteCertを差し替える。形式と配布は後続設計で、v1ではSAK侵害時の回復は「現場全機器の削除→再参加」（物理作業不要、ゼロタッチで戻る）とする。
+SAK侵害または計画交換では、Site CA（オフライン）が署名する`SiteAuthorityChange{site_id, new SiteCert, min_site_epoch}`を機器が検証し、RLS1のSiteCertを差し替える。形式と配布は後続設計。v1で現場全機器を削除して回復する場合、失効したNodeIdは再allowできず、各機器に新NodeIdのRLI1／DevCertを再発行する必要がある。
 
 ## 9. 時刻と保証の範囲
 
@@ -145,4 +145,4 @@ SAK侵害または計画交換では、Site CA（オフライン）が署名す�
 | V1-R09 | 分断群：再結合までは通信継続（保証外の記録）、再結合後に拒否 | P6-1 PR Aでpartition/merge sim試験（`test_sdkv1_revocation.cpp`）。HILはP8へ引継ぎ |
 | V1-R10 | RRS1・RemovalNoticeのC++/Rust共通vector、fuzz | RRS部分はPR Aで実施。PR BでRLX1 recordとLastMembership/profile/capabilityのvalid/invalid共通vectorを追加し、C++/Rust両harnessとCI再生成検査を実施。Renewと実結線E2Eは後続PR |
 
-P6 の本番プロフィールは未有効。Host の通知 outbox・旧 kid 履歴照会・cutover driver・競合処理・自動再発行は PR D で接続した（上記 V1-R07／V1-R08）。残るは Owner／ESP の消去・lifecycle 実接続と E2E である。portable Joiner は起動時に渡された RLX1 の削除世代 watermark 以下の同一site Allowを拒否する。Owner が検証済み watermark を渡し、再割当後の journal を整合させる結線も PR D に属する（未接続）。portable の `NoticeAccepted` は intent 保存後の best effort 引渡しであり、Host の受領永続化を表さない。Host は受領した `NoticeAccepted` を revoke operation の `notice.intent_confirmed` として永続化する（消去の証拠ではない）。
+P6 の本番プロフィールは未有効。Host の通知 outbox・旧 kid 履歴照会・cutover driver・競合処理・有効な既存memberの自動再発行は PR D で接続した（上記 V1-R07／V1-R08）。残るは Owner／ESP の消去・lifecycle 実接続と E2E である。portable Joiner は起動時に渡された RLX1 の削除世代 watermark 以下の同一site Allowを拒否する。Owner が検証済み watermark を渡して journal を整合させる結線も PR D に属する（未接続）。portable の `NoticeAccepted` は intent 保存後の best effort 引渡しであり、Host の受領永続化を表さない。Host は受領した `NoticeAccepted` を revoke operation の `notice.intent_confirmed` として永続化する（消去の証拠ではない）。
