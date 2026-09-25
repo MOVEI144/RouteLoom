@@ -171,9 +171,11 @@ jobs:
             features: config_target_on
           # maintenance_on compiles the factory maintenance-console branch
           # (CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y, sdk-v1/07 §6 P7):
-          # pre-RF console instead of the mesh. Compile-time coverage
-          # only — the console's behavior is host-tested, and enabling it
-          # in a field build is never correct.
+          # pre-RF console instead of the mesh. The reference cell rides
+          # the DevRam default, the bridge cell pins LegacyFixture, so
+          # both console pairings compile. Compile-time coverage only —
+          # the console's behavior is host-tested, and enabling it in a
+          # field build is never correct.
           - app: reference_node
             target: esp32c3
             profile: normal
@@ -228,6 +230,14 @@ jobs:
             profile: normal
             autonomy: off
             features: owner_member
+          # Owner + deep-sleep cell: the reference member sleep tail
+          # (save/restore around the power coordinator) compiles under
+          # the member profile. Compile-time coverage only.
+          - app: reference_node
+            target: esp32c3
+            profile: deep_sleep
+            autonomy: off
+            features: owner_member
           # Paired bench cells: two ESP32-C3 boards flashed as a real
           # 2-node mesh (static neighbor + RLD1 discovery lane running
           # alongside). autonomy=discover enables CONFIG_ROUTELOOM_DISCOVERY
@@ -261,15 +271,23 @@ jobs:
           idf.py set-target '${{ matrix.target }}'
           if [ '${{ matrix.profile }}' = deep_sleep ]; then
             printf 'CONFIG_ROUTELOOM_DEEP_SLEEP=y\n' >> sdkconfig
+            if [ '${{ matrix.features }}' != owner_member ]; then
+              # The legacy power-coordinator sleep path (G-SEC P4: explicit
+              # LegacyFixture — DevRam is the default).
+              printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
+            fi
           fi
           if [ '${{ matrix.autonomy }}' = observe ]; then
+            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
             printf 'CONFIG_ROUTELOOM_DISCOVERY=y\nCONFIG_ROUTELOOM_MIGRATION=1\n' >> sdkconfig
           fi
           if [ '${{ matrix.autonomy }}' = discover ]; then
+            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
             printf 'CONFIG_ROUTELOOM_DISCOVERY=y\n' >> sdkconfig
           fi
           if [ '${{ matrix.features }}' = paired_bridge ]; then
             # Bench pair node 1: USB gateway/bridge talking to node 2.
+            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
             printf 'CONFIG_ROUTELOOM_CAPABILITY=0x1f\n' >> sdkconfig
             printf 'CONFIG_ROUTELOOM_NODE_ID=0x1\n' >> sdkconfig
             printf 'CONFIG_ROUTELOOM_PEER_NODE_ID=0x2\n' >> sdkconfig
@@ -277,6 +295,7 @@ jobs:
           fi
           if [ '${{ matrix.features }}' = paired_target ]; then
             # Bench pair node 2: reference node carrying the RCC1 journal.
+            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
             printf 'CONFIG_ROUTELOOM_CONFIG=y\n' >> sdkconfig
             printf 'CONFIG_ROUTELOOM_NODE_ID=0x2\n' >> sdkconfig
             printf 'CONFIG_ROUTELOOM_PEER_NODE_ID=0x1\n' >> sdkconfig
@@ -285,20 +304,28 @@ jobs:
           if [ '${{ matrix.features }}' = endpoints_on ]; then
             # bridge_node opt-in: capability bits 3 (gateway_endpoint_v1)
             # and 4 (config_endpoint_v1) attach + advertise both endpoints.
+            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
             printf 'CONFIG_ROUTELOOM_CAPABILITY=0x1f\n' >> sdkconfig
           fi
           if [ '${{ matrix.features }}' = config_target_on ]; then
             # reference_node opt-in: the RCC1 permit journal endpoint.
+            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
             printf 'CONFIG_ROUTELOOM_CONFIG=y\n' >> sdkconfig
           fi
           if [ '${{ matrix.features }}' = maintenance_on ]; then
             # reference_node opt-in: the factory maintenance console
-            # branch instead of the mesh (sdk-v1/07 §6 P7).
+            # branch instead of the mesh (sdk-v1/07 §6 P7). The bridge
+            # cell pins LegacyFixture (legacy-console pairing); the
+            # reference cell rides the DevRam default.
             printf 'CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y\n' >> sdkconfig
+            if [ '${{ matrix.app }}' = bridge_node ]; then
+              printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
+            fi
           fi
           if [ '${{ matrix.features }}' = route_scoped ]; then
             # Gateway-scoped routing profile (issue #41); the gateway id,
             # tick and lease come from the Kconfig defaults.
+            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
             printf 'CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y\n' >> sdkconfig
           fi
           if [ '${{ matrix.features }}' = owner_member ]; then
@@ -359,13 +386,44 @@ jobs:
           case '${{ matrix.features }}' in
             owner_member)
               # Prove the owner profile survived re-resolution and the
-              # legacy-only options really vanished with it.
+              # legacy-only options really vanished with it. The
+              # deep_sleep profile cell pairs DEEP_SLEEP with the member
+              # sleep tail instead of the legacy power path.
               grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y' sdkconfig
               ! grep -q '^CONFIG_ROUTELOOM_DISCOVERY=y' sdkconfig
-              ! grep -q '^CONFIG_ROUTELOOM_DEEP_SLEEP=y' sdkconfig
+              if [ '${{ matrix.profile }}' = deep_sleep ]; then
+                grep -q '^CONFIG_ROUTELOOM_DEEP_SLEEP=y' sdkconfig
+              else
+                ! grep -q '^CONFIG_ROUTELOOM_DEEP_SLEEP=y' sdkconfig
+              fi
               ;;
             *) ! grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y' sdkconfig ;;
           esac
+          # Security default (G-SEC P4): DevRam unless the cell pins
+          # LegacyFixture for its legacy-only options.
+          legacy_expected=n
+          if [ '${{ matrix.profile }}' = deep_sleep ] &&
+             [ '${{ matrix.features }}' != owner_member ]; then
+            legacy_expected=y
+          fi
+          if [ '${{ matrix.autonomy }}' != off ]; then
+            legacy_expected=y
+          fi
+          case '${{ matrix.features }}' in
+            endpoints_on|config_target_on|route_scoped|paired_bridge|paired_target)
+              legacy_expected=y
+              ;;
+            maintenance_on)
+              if [ '${{ matrix.app }}' = bridge_node ]; then
+                legacy_expected=y
+              fi
+              ;;
+          esac
+          if [ "$legacy_expected" = y ]; then
+            grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y' sdkconfig
+          elif [ '${{ matrix.features }}' != owner_member ]; then
+            grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y' sdkconfig
+          fi
           case '${{ matrix.features }}' in
             paired_bridge)
               grep -q '^CONFIG_ROUTELOOM_NODE_ID=0x1' sdkconfig

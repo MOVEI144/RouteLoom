@@ -27,15 +27,17 @@ menu "RouteLoom"
 
     choice ROUTELOOM_SECURITY_MODE
         prompt "Security owner profile"
-        default ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+        default ROUTELOOM_SECURITY_MODE_DEV_RAM
         help
             Exclusive session-security profile (G-SEC P4 §8.4). The
             reference, bridge and example entries share one
             EspNowSecurityOwner; the legacy dev-PSK path is compiled out
             of the non-legacy profiles (no fallback branches) and the
-            legacy-only options below depend on LegacyFixture. MemberEdhoc
-            is the production candidate; the development default moves to
-            DevRam in the final P4 PR.
+            legacy-only options below depend on LegacyFixture. DevRam is
+            the development default (RAM-only provider, no NVS
+            counter/replay writes); LegacyFixture stays for the
+            host-compat suites only — select it explicitly per build.
+            MemberEdhoc is the production candidate.
 
         config ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
             bool "legacy-fixture (dev-PSK, host-compat tests only)"
