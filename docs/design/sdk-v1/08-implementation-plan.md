@@ -16,62 +16,73 @@
 | P1-4 | 導出labelとinfo形式の凍結（group、RLRES1、AuthorityEnvelope）、C++/Rust vector（**このbranchで実装済み**：[key_schedule.hpp](../../../components/routeloom/include/routeloom/key_schedule.hpp)、`host/routeloom-keysched`、独立Python生成器`tools/gen_sdkv1_derivation_vectors.py`→`protocol/sdkv1-golden/derivations/`、[03 §2.2](03-key-hierarchy.md)） | P1-1 | V1-K01, V1-F03 |
 | P1-5 | RLRES1の状態機械（portable）と攻撃試験（**このbranchで実装済み**：[rlres1.hpp](../../../components/routeloom/include/routeloom/rlres1.hpp)の単独`rlres1::Engine`、攻撃試験とfuzz、[06 §2.2.1](06-fast-rejoin.md)） | P1-4 | V1-F02 |
 | **P2 — EDHOC** | | | |
-| P2-1 | libedhoc（05で固定したSHA、MIT）をvendor、bounded memory backend、micro-ecc／PSAのcrypto callback、RFC 9529 vectorをhostで実行、NOTICE更新（**このbranchで実装済み**：libedhoc `c8857b62…`＋zcbor 0.8.1＋host用TF-PSA-Crypto AES/CCMをupstreamのままvendor（[VENDORED.json](../../../components/routeloom/third_party/VENDORED.json)）、[edhoc.hpp](../../../components/routeloom/include/routeloom/edhoc.hpp)のsuite 2 backend（固定arena・固定key store、micro-ecc＋`kdf.hpp`、AES-CCMはhost builtin／ESP-IDFはPSA hook）、[RFC 9529 §3／§4](../../../protocol/edhoc-rfc9529/README.md)とmethod 0＋RLCW1 MemberCertの往復をhost試験。firmwareからは未呼出。kcwt値渡しはlibedhoc未対応） | なし | RFC 9529 |
-| P2-2 | C3/S3でEDHOCの署名・検証・ECDH時間、stack、heapを実測（以後のtimeout・並列度の根拠） | P2-1 | V1-J15, V1-F06（一部） |
+| P2-1 | libedhoc（05で固定したSHA、MIT）をvendor、bounded memory backend、micro-ecc／PSAのcrypto callback、RFC 9529 vectorをhostで実行、NOTICE更新（**このbranchで実装済み**：libedhoc `c8857b62…`＋zcbor 0.8.1＋host用TF-PSA-Crypto AES/CCMをvendor（zcborのみ長さ0のprotected headerでnullをmemmoveしない1行修正。差分とblob idはVENDORED.jsonで固定）（[VENDORED.json](../../../components/routeloom/third_party/VENDORED.json)）、[edhoc.hpp](../../../components/routeloom/include/routeloom/edhoc.hpp)のsuite 2 backend（固定arena・固定key store、micro-ecc＋`kdf.hpp`、AES-CCMはhost builtin／ESP-IDFはPSA hook）、[RFC 9529 §3／§4](../../../protocol/edhoc-rfc9529/README.md)とmethod 0＋RLCW1 MemberCertの往復をhost試験。P4第2段でfirmware OwnerのMember EDHOC／参加経路へ配線済み（実機未試験）。kcwt値渡しはlibedhoc未対応） | なし | RFC 9529 |
+| P2-2 | C3/S3/C5でEDHOCの署名・検証・ECDH時間、stack、heapを実測（未実施、#99。以後のtimeout・並列度の根拠） | P2-1 | V1-J15, V1-F06（一部） |
 | P2-3 | join用EAD（JoinIntent/SiteOffer/JoinRequest/JoinResult/SitePackage）codecとRust mirror（**このbranchで実装済み**：[sdkv1_ead.hpp](../../../components/routeloom/include/routeloom/sdkv1_ead.hpp)、Rust `host/routeloom-join`、04 §6.1のRemovalNoticeも含む。独立Python生成器`tools/gen_sdkv1_ead_vectors.py`の[共通vector](../../../protocol/sdkv1-golden/ead/README.md)、fuzz。EAD labelと未定点は[02 §6.3](02-zero-touch-join.md)、AssignmentTicketの形式は未定で、A2の機器はfail closed） | P1-2 | V1-J12, V1-J14 |
 | **P3 — 搬送とSite Authority** | | | |
-| P3-1 | RLD1 body v3（ZeroTouch DISCOVER/OFFER）、BootstrapAuth phase 4〜6、1024B組立object、admission・`semantics.json`更新、fuzz（**このbranchで実装済み**：[sdkv1_join_transport.hpp](../../../components/routeloom/include/routeloom/sdkv1_join_transport.hpp)のcodec・有界object slot・admissionと機器端`ZtJoinerLink`、独立Python生成器`tools/gen_sdkv1_join_transport_vectors.py`の[共通vector](../../../protocol/sdkv1-golden/join-transport/README.md)、`fuzz_sdkv1_join`。証明書はkid参照＋Credential EAD（label 65541）、`edhoc::Session`のEAD hookでm1〜m4の実長を確認。firmware・MeshNode未配線。決めた細部は[02 §3・§5.4・§6](02-zero-touch-join.md)） | P2-3 | V1-J10, V1-J11 |
-| P3-2 | proxy中継（Wire 3/4/5/6のrelay object）、USB HostOps 0x40〜0x42、capability bit（**このbranchで実装済み**：`JoinProxy`・`JoinRelayGateway`（[sdkv1_join_relay.hpp](../../../components/routeloom/include/routeloom/sdkv1_join_relay.hpp)）、`UsbBridge::attach_join_relay`、Rust `routeloom-protocol::join_relay`、共通vector `protocol/usb-golden/join-relay`。USBは衝突回避で**0x60〜0x63・capability bit 8**（0x40〜0x42／bit 6はnode_status_v1、[02 §7.4](02-zero-touch-join.md)）。relay portのMeshNode接続とgateway自身の参加は未実装） | P3-1 | V1-J02, V1-H08 |
-| P3-3 | `routeloom-host`のSite Authority service（store、EDHOC responder、台帳）、API1 `join.*`/`devices.discovered.*`/`members.*`/`site.status`、KGuard mock client（**このbranchで実装済み**：`--site-authority DIR`、pure RustのEDHOC responder `host/routeloom-edhoc`（RFC 9529 §3を両roleでbyte一致、libedhocとのmethod 0 join transcriptを両方向でbyte一致、[protocol/edhoc-interop](../../../protocol/edhoc-interop/README.md)）、SQLite台帳（hash chain、MemberCert・DAMS・RRS1・GK・発見済み・参加要求）、判定engine、API1と`membership.revoke`、`routeloom-client::site`の`SiteAdmin`と`KGuardMock`。P3-3時点で未接続だったUSB 0x60〜0x63・authority channel・GK配布・RRS1配布は後続P3-4／P5／P6で結線済み。証明書値渡しのEAD label 65541（P3-1で凍結）とDAMSのExporter context（P3-4で凍結）。機器側EDHOC arenaは2048Bに引き上げ済み（[07 §2.4](07-host-api-tooling.md)）） | P2-1, P3-2 | V1-J03, V1-J09, V1-H01〜H07 |
-| P3-4 | 機器のportable `Joiner` FSM、RLS1の耐久commit／Reconcile、重複現場の候補表を実装済み。二現場C++ simulator 53件とRust実Site Authorityへのlive E2E 4件でhost検証済み。MeshNode／firmware／USB daemon配線とHILはP4-2／P8-1へ残す。P3-5（RLRES1 ticket再試行）は無効、A2はfail closed（[02 §10.4](02-zero-touch-join.md)） | P3-1, P1-3 | V1-J01, V1-J04〜J07, V1-J13 |
+| P3-1 | RLD1 body v3（ZeroTouch DISCOVER/OFFER）、BootstrapAuth phase 4〜6、1024B組立object、admission・`semantics.json`更新、fuzz（[sdkv1_join_transport.hpp](../../../components/routeloom/include/routeloom/sdkv1_join_transport.hpp)と[共通vector](../../../protocol/sdkv1-golden/join-transport/README.md)をportable実装・host試験済み。kid参照＋Credential EAD label 65541を使用）。当時残ったfirmware／MeshNodeへの配線はP4第2段（PR #141）で完了。実機未試験 | P2-3 | V1-J10, V1-J11 |
+| P3-2 | `JoinProxy`／`JoinRelayGateway`とUSB join relayをportable実装・host試験済み（[sdkv1_join_relay.hpp](../../../components/routeloom/include/routeloom/sdkv1_join_relay.hpp)、USBは衝突を避け**0x60〜0x63・capability bit 8**、[02 §7.4](02-zero-touch-join.md)）。#113のcallback再入拒否、#116のrelay v2／RelayBook（追い出し・proxy再起動後の重複排除）も回帰試験済み。MeshNode／gateway参加／Host配線はP4第2段で完了。実機未試験 | P3-1 | V1-J02, V1-H08 |
+| P3-3 | `routeloom-host`のSite Authority service（store、EDHOC responder、台帳）、API1 `join.*`/`devices.discovered.*`/`members.*`/`site.status`、KGuard mock client（**このbranchで実装済み**：`--site-authority DIR`、pure RustのEDHOC responder `host/routeloom-edhoc`（RFC 9529 §3を両roleでbyte一致、libedhocとのmethod 0 join transcriptを両方向でbyte一致、[protocol/edhoc-interop](../../../protocol/edhoc-interop/README.md)）、SQLite台帳（hash chain、MemberCert・DAMS・RRS1・GK・発見済み・参加要求）、判定engine、API1と`membership.revoke`、`routeloom-client::site`の`SiteAdmin`と`KGuardMock`。P3-3時点で未接続だったUSB 0x60〜0x63・authority channel・GK配布・RRS1配布は後続P4／P5／P6で結線済み。証明書値渡しのEAD label 65541（P3-1で凍結）とDAMSのExporter context（P3-4で凍結）。機器側EDHOC arenaは2048Bに引き上げ済み（[07 §2.4](07-host-api-tooling.md)）） | P2-1, P3-2 | V1-J03, V1-J09, V1-H01〜H07 |
+| P3-4 | 機器のportable `Joiner` FSM、RLS1耐久commit／Reconcile、重複現場の候補表をPR #123／#124で実装。二現場C++ simulator 53件とRust実Site Authorityへのlive E2E 4件でhost検証済み。MeshNode／firmware／USB daemon配線はP4第2段で完了。HILはP8-1へ残る。P3-5（ticket再試行）は任意・未採用、A2はfail closed（[02 §10.4](02-zero-touch-join.md)） | P3-1, P1-3 | V1-J01, V1-J04〜J07, V1-J13 |
 | P3-5 | pending ticketによる安価な再試行（任意） | P1-5, P3-3 | V1-J03 |
 | **P4 — セッションengine** | | | |
 | P4-1 | SecurityProviderのAPI追加（`tx_epoch`/`context_state`、`SessionInstaller`、scope 2/3）とNode配線。開発Providerは設定値を返し挙動不変（**このbranchで実装済み**：host試験、scope番号は`Group`＝2を維持し`GroupLink`＝3、C ABIのsession callbackは延期、[03 §8.1〜8.2](03-key-hierarchy.md)） | なし | 既存全試験、V1-K10 |
-| P4-2 | `HandshakeEngine`、本番link EDHOC＋RLRES1（RLD1）、RLS1/RRS1で裏付けた`MembershipHooks`、本番buildだけ`UnavailableAuthenticator`を置換（要件：#60-2 — `MembershipHooks`はlocal失効をauthority ledgerへ耐電断永続化すること。controllerの`Revoked`はRAMのみで、再起動時`initialize`は`local_member`からfail-openに再評価する。#60-4 — replay/counter slot導出に秘密saltを含めること。公開のkeyless foldのままでは共有PSKを持つ内部者がNodeIdを選んで決定的に衝突を製造できる） | P2-1, P1-5, P4-1 | V1-K02〜K04, V1-F01, V1-F04 |
-| P4-3 | E2E EDHOC/RLRES1（routed bootstrap）、gatewayの対称鍵枠、APPLIED leaseをboot sessionへ | P4-2 | V1-F05, V1-F07 |
-| P4-4 | 開発ProviderをRAM context engineへ移行（RLRES1のRMS＝開発PSK）、旧`c*`/`f*`/`r*`を消す保守verb | P4-2 | V1-N01, V1-K10（更新） |
+| P4-2 | PR #133でRAM session Provider、耐電断membership／RLP2、Member EDHOC／RLRES1の`HandshakeEngine`をportable実装。PR #141でrouted bootstrap、`SecurityCoordinator`、参加FSM handoff、USB gateway join、firmware `EspNowSecurityOwner`／MeshNodeへ結線し、#132のRLP2分割探索とm4受理後installも修正。#60-2の失効永続化・#60-4の秘密saltによるslot導出を含めhost試験・ESP-IDF build済み。実機・HIL未試験 | P2-1, P1-5, P4-1 | V1-K02〜K04, V1-F01, V1-F04 |
+| P4-3 | PR #141でrouted E2E EDHOC／RLRES1とgateway対称鍵枠を接続。PR #144／#149でboot witness、Owner sleep保存・復元（親binding、全work drain、RTC counter先行更新、信頼できる経過時間上限）を接続・host試験済み。F07のRTCドリフト／起動遅延の実測・上限確定は[#148](https://github.com/MOVEI144/RouteLoom/issues/148)、P8 HILは[#99](https://github.com/MOVEI144/RouteLoom/issues/99) | P4-2 | V1-F05, V1-F07 |
+| P4-4 | PR #144／#149でDevRam pairwise RAM context engine、加入なしadoption、group boot、旧`c*`/`f*`/`r*`の限定purgeと独立耐久markerを配線・電断試験済み。**公開既定はDevRam**、LegacyFixtureは明示選択のみ。旧版機でrlsecが満杯かつSDK namespace未作成時の読み取り専用復旧は[#152](https://github.com/MOVEI144/RouteLoom/issues/152)に残る | P4-2 | V1-N01, V1-K10（更新） |
 | **P5 — group鍵** | | | |
-| P5-1 | authority channel（AuthorityEnvelope・USB 0x64〜0x67・共通vectorはPR1で実装済み。Host／Ownerの実搬送はPR4で結線済み）、GK保存・配布・更新・pull、GroupLink/GroupEnd、Member scope鍵をGKから導出 | P3-3, P4-3 | V1-K05〜K07, V1-K09, V1-K11 |
-| P5-2 | broadcast経路広告（opt-in capability）。group delivery設計と同時にレビュー | P5-1 | V1-K08 |
+| P5-1 | PR #126（AuthorityEnvelope・USB 0x64〜0x67・共通vector）、#137（機器GK耐久FSM・GroupLink／GroupEnd・Member scope）、#131（Site AuthorityのGK台帳・更新・atomic revoke）、#143（mesh／USB／Host／Owner実搬送）を結線済み。PR #151で実C++ portable security部品⇄Rust Site Authorityのjoin→GK配布／更新／pull／失効除外をlive E2E試験済み。[harnessの境界](live-e2e-harness.md)は単一機器・模擬radio／flash。実firmware複数機器は[#150](https://github.com/MOVEI144/RouteLoom/issues/150) | P3-3, P4-3 | V1-K05〜K07, V1-K09, V1-K11 |
+| P5-2 | PR #145でbit7 nonce-bound grant付きGroupLink broadcast経路広告をmesh／ESP-NOWに選択式で配線。既定OFF、grant不足などはunicast fallback。100台host simulationでloop／false route 0。全mesh probeの推定管理airtime約2.0M µs/sは出荷包絡を超えるためOwnerのsparse probe・RF検証後に有効化 | P5-1 | V1-K08 |
 | **P6 — 削除** | | | |
-| P6-1 | RRS1の発行・gossip・執行、RemovalNotice、`membership.revoke`と段階表示（PR DでHost／Owner・P4 session／resume／経路・JoinerのSelfRevoked経路を結線、host試験済み。実機・HILは未実施） | P5-1 | V1-R01〜R07, V1-R09, V1-R10 |
-| P6-2 | site_epoch cutoverとGrantRenew（PR DでHost driver・Owner RLX1 journal／AdoptNetwork・再起動回復・pipe E2Eをhost試験済み。実機・HILは未実施） | P6-1 | V1-R08 |
+| P6-1 | PR #129（RRS1発行・gossip・peer執行）、#136（RemovalNotice・RLX1消去・600秒holdoff）、#147（Host配布、OwnerのP4 session／resume／経路失効、group送信元拒否、SelfRevoked→ZT）を結線済み。PR #151のlive E2Eで配送・執行・RemovalNotice・電断再起動を確認。NodeId再割当時のgroup送信者世代は[#146](https://github.com/MOVEI144/RouteLoom/issues/146)、複数機器gossipの実Owner結合は[#150](https://github.com/MOVEI144/RouteLoom/issues/150)、HILは[#99](https://github.com/MOVEI144/RouteLoom/issues/99) | P5-1 | V1-R01〜R07, V1-R09, V1-R10 |
+| P6-2 | PR #140で署名付きGrantRenew／PREPARE／COMMITとRLX1電断安全cutover、PR #147でHost driver・Owner AdoptNetwork／再起動回復を接続。PR #151のpipe E2EでPREPARE／COMMIT・旧revision再発行・電断を確認。実firmware複数機器とHILは#150／#99 | P6-1 | V1-R08 |
 | **P7 — 事務所tooling** | | | |
-| P7-1 | routeloom-provision：`DeviceCaSigner`、devcert、identity、`rlsec` NVS image。firmwareの保守verb（機器内鍵生成＋所持証明）（**このbranchで実装済み**：`sdkv1::{devca,pop,office,rlsec}`と`routeloomctl provision-devca-keygen／pop-challenge／devcert／identity`、所持証明の検証、`nvs_partition_gen`用CSV。`rlsec`のNVS adapter（`sdkv1_blob_storage`＋ESP-IDF `nvs_sdkv1_store`）は4 storeともfirmwareに配線済み（[07 §6.2](07-host-api-tooling.md)）。firmwareの保守verb（USB consoleの`keygen`／`identity`、portable engine＋PoPのC++ codec・共通vector）はP7の残りで実装、[07 §6.1〜6.2](07-host-api-tooling.md)） | P1-2, P1-3 | V1-H09 |
+| P7-1 | `routeloom-provision`の`DeviceCaSigner`、DevCert／RLI1、PoP、`rlsec` NVS image・CSV、`routeloomctl provision-devca-keygen／pop-challenge／devcert／identity`、4 storeのfirmware NVS adapterを実装済み。PR #125で機器内鍵生成＋PoPのUSB保守console `keygen`／`identity`も配線・host試験／firmware build済み（[07 §6.1〜6.2](07-host-api-tooling.md)）。実機entropy・console・鍵注入未試験。旧版機の満杯rlsec復旧は#152 | P1-2, P1-3 | V1-H09 |
 | P7-2 | `site-cert`コマンド、在庫出力（**このbranchで実装済み**：`sdkv1::siteca`と`routeloomctl provision-siteca-keygen／site-cert`、正式な在庫出力`inventory.json`。[07 §6.2](07-host-api-tooling.md)） | P7-1 | V1-H09 |
 | **P8 — 認定** | | | |
-| P8-1 | HIL：2現場（2 host）の重複配置、6台以上の一斉復電、削除のgossip、電源断行列 | 全部 | V1-J05, V1-F06, V1-N08, V1-R09 |
-| P8-2 | RouteLoom独自部分（RLRES1、EADの束縛、group鍵の使い方、RRS1、context id対応）の独立レビュー | P1〜P6 | — |
+| P8-1 | **未実施**（#99）：HILで2現場（2 host）の重複配置、6台以上の一斉復電、削除gossip、電源断行列を検証。F07のRTC実測は#148 | 全部 | V1-J05, V1-F06, V1-N08, V1-R09 |
+| P8-2 | **未実施**（#100）：RouteLoom独自部分（RLRES1、EADの束縛、group鍵の使い方、RRS1、context id対応）の独立レビュー | P1〜P6 | — |
 
-P0は他と独立して先に出せる。P0-1／P0-2とP1-1〜P1-5、P2-1、P2-3、P3-1、P3-2（firmware・MeshNode配線を除く）、P3-3（USB結線を除く）、P4-1、P7-1、P7-2はこのbranchに含まれる。
+P0-1／P0-2、P1-1〜P1-5、P2-1、P2-3、P3-1〜P3-4、P4-1〜P4-4、P5-1／P5-2、P6-1／P6-2、P7-1／P7-2は上記の**ソフトウェア・host試験／firmware build範囲**でこのbranchに含まれる。P2-2とP8-1／P8-2は未完了。P3-5は任意で未採用。個別の後続課題は[#146](https://github.com/MOVEI144/RouteLoom/issues/146)／[#148](https://github.com/MOVEI144/RouteLoom/issues/148)／[#150](https://github.com/MOVEI144/RouteLoom/issues/150)／[#152](https://github.com/MOVEI144/RouteLoom/issues/152)。
+
+関連する基盤補修もmerge済み：#51（RCR2／RLF1のconfig復旧とRTM1 root更新）、#110（group sleep drain）、#113／#116（relay再入・重複排除）、#117（ExpectedReply peer leaseをOwnerへ配線）、#34（連続boot失敗時のtimed deep sleep）、#55／#47（USB credit、探索／migration窓、受入遅延目標）、#60（単調時刻とTX完了でのOwner起床）。いずれもhost回帰試験／対象buildの証拠であり、実NVS電断、TX間隔・RAM／stack、RFの実測とは区別する。
 
 ## 2. 試験計画
 
-| 層 | 対象 | 方法 |
+| 層 | このbranchでの証拠 | 残る範囲 |
 |---|---|---|
-| portable C++（ctest） | codec、二重slot store、FSM（参加・proxy・RLRES1・GK・RRS1）、Provider API | 既存の`tests/cpp`形式。電源断・storage失敗注入は`test_fault_injection`の規律 |
-| Rust（cargo test） | routeloom-provision、routeloom-host（Site Authority、API1、store） | 既存crateのtest。daemonはKGuard mockで端から端まで |
-| 共通golden | 証明書、RLI1/RLS1/RRS1/RLP1、EAD、RLD1 v3、relay object、RLRES1のtranscriptと鍵、group導出、AuthorityEnvelope、USB 0x40〜0x46（実装は0x60〜、02 §7.4） | `protocol/sdkv1-golden/`。独立したPython生成器（既存`tools/gen_*_vectors.py`と同じ流儀）。ECDSA署名はRFC 6979の決定的署名か、検証のみのvector |
-| EDHOC | ライブラリ | RFC 9529の公開vector（試験専用鍵、本番鍵と分離） |
-| fuzz | RLD1 v3本文、BootstrapAuth phase 4〜6、relay object、RRS1、EAD、RLP1 | `tests/fuzz`へ追加 |
-| simulation | 2現場重複、proxy flood、削除gossip、一斉復電、sleep端末 | SimNetwork |
-| HIL | EDHOC時間、参加時間、一斉復電、NVS実測、2現場 | [HIL harness](../../hil.md)。結果は証拠として保存し、未測定を実測と書かない |
+| portable C++（CTest） | P3-4 Joiner／relay、P4 session・boot／RTC／DevRam、P5 authority／GK／broadcast、P6 RRS1／gossip／RLX1／cutover、P7保守consoleをhost試験。電源断、再入、失効後の拒否、境界値の回帰を含む。GCC／ClangとsanitizerをCIで実行 | 実firmware Owner／MeshNodeを複数機器で結ぶ試験は#150 |
+| Rust（cargo test） | Site Authority台帳、API1、GK更新／失効／cutover、USB adapterを試験。PR #151のlive pipe E2Eは実C++ portable security部品とRust Site Authorityを接続し、旧Joiner試験と合わせ15件をCIで実行（[境界](live-e2e-harness.md)） | 1台構成で模擬radio／flash。実firmware Owner・複数機器・P4 session／route執行は#150 |
+| 共通golden | 証明書・記録・EAD・DAMS、RLD1 v3／relay v2、RLRES1／P4 session、GK／AuthorityEnvelope／RRS1／cutover、USB join relay 0x60〜0x63・authority 0x64〜0x67をC++／Rustで共有し、独立Python生成器の再生成差分をCIで確認 | 実機上のUSB・RFでの相互運用ではない |
+| EDHOC／fuzz | libedhoc suite 2のRFC 9529公開trace、Rust responderとのbyte一致、参加EADと不正入力、join／RRS1等のfuzz corpusをhost検査 | P2-2のC3/S3/C5時間・stack・heap実測は#99 |
+| simulation／build | 二現場Joiner、100台RRS1 gossip／broadcast route、Owner sleep／DevRam・cutoverのhost模擬。ESP-IDF C3/S3/C5のOwner／保守構成はPR #149時点で15/15 build・静的RAM gate通過 | 実機RAM・電波・一斉復電の測定ではない |
+| HIL／RF | 未実施 | #99のP2-2／P8-1、#148のF07 RTCドリフト・起動遅延、RF・実NVS電断を[HIL harness](../../hil.md)で記録する |
 
 ## 3. 受入ID一覧
 
-参加 V1-J01〜J15（[02](02-zero-touch-join.md) §14）、鍵 V1-K01〜K12（[03](03-key-hierarchy.md) §10）、削除 V1-R01〜R10（[04](04-removal-revocation.md) §11）、NVS V1-N01〜N08（[05](05-nvs-state-37.md) §8）、高速再参加 V1-F01〜F08（[06](06-fast-rejoin.md) §9）、Host V1-H01〜H09（[07](07-host-api-tooling.md) §8）。V1-K12（HKDF）、V1-K10（P4-1、Wire v2 golden vectorをProvider epoch経路で再現）、P1-2のV1-J14（証明書部分）・P1-3のV1-J08（store部分）・V1-N02（slot部分）・V1-R10（RRS1部分）・V1-H09（codec golden、P7-1の発行・PoP部分、P7の保守verb・site-cert・在庫出力）、P1-4のV1-K01（HKDF／RLRES1部分、Exporter部分はP2）・V1-F03、P1-5のV1-F02（engine単体）、P2-1のRFC 9529 vector（§3のmethod 3／suite 2 traceと§4の不正message。method 0は同suiteのRLCW1往復で確認）、P2-3のV1-J12（MemberCert・SitePackageの各field不一致を「検証不成立」とする§10.2検査のhost試験と共通vector。保存・回避の動作はP3-4）・V1-J14（EAD部分：各EAD項目長とm1が1 frameに収まること・m4の予算を静的検査）、P3-1のV1-J14（EDHOC encoder込みの実長：kid＋Credential EADでm1〜m4＝55／362／341／353B）・V1-J10（hint・backoffで状態不変、host sim）・V1-J11（proxy側：relay 1件・m1 2秒1件・cookie前にmemoryを使わない。memberのDATA維持はMeshNode配線後）、P3-2のV1-J02（中継の往復とproxy slot解放、Wire routingはport模擬）・V1-H08（USB 0x60〜0x63のC++/Rust共通vectorとcapability無しのUnsupported）、P3-3のV1-J03・V1-J09（Site Authority側：未割当→pending→割当→次の試行でAllow、KGuard無応答→pending→後の決定が次の試行で反映。機器はRust Initiatorと`routeloom-join`の機器側検査で模擬し、実機の参加FSM配線（P4-2）は未実装）・V1-H01〜H04／H06／H07（host試験、H01のconfirmは受け口まで）・V1-H05（`committed`段階まで。配布はP5/P6）と、P0のV1-N04／V1-N05（host試験）・V1-N07（CIの予算model）がこのbranchで実行済み。V1-N03はhost modelのみ（HIL未実施）。P3-4のV1-J01・J04〜J07・J13、J12の保存0／回避、J08のFSM電断行列、J03/J09のFSM側再試行は二現場C++ simulatorで実行し、J01/J04/J05の正常・拒否・pending経路と電断再起動はRust実Site Authority相手のlive E2E 4件でも実行。J05のHIL部分とfirmware／USB接続は未実施。その他はplanned_not_run。
+参加 V1-J01〜J15（[02](02-zero-touch-join.md) §14）、鍵 V1-K01〜K12（[03](03-key-hierarchy.md) §10）、削除 V1-R01〜R10（[04](04-removal-revocation.md) §11）、NVS V1-N01〜N08（[05](05-nvs-state-37.md) §8）、高速再参加 V1-F01〜F08（[06](06-fast-rejoin.md) §9）、Host V1-H01〜H09（[07](07-host-api-tooling.md) §8）。同じIDでもportable／host部分と実機・HIL部分は別の証拠として扱う。
+
+| 範囲 | 実行済みの部分 | 未完了・範囲外 |
+|---|---|---|
+| P0〜P3 | K12、J08／J12／J14のcodec・store・検査部分、N02／N04／N05／N07、F02／F03の単体部分、RFC 9529、J01〜J07／J09〜J11／J13、H01〜H08のportable・Rust Site Authority・二現場simulator／pipe部分。P3-4のRust実Site Authority⇄C++ Joiner live E2E 4件 | J05／J15、N03／N08などの実機／HIL部分。P3-5 ticketは任意・未採用、A2はfail closed |
+| P4（#133／#141／#144／#149） | K02〜K04・K10、F01／F04／F05、N01のsession／boot／DevRam／purgeをhost試験。F07のOwner sleep復元はhost simulationで実行 | F07のRTC実測と上限確定は#148。P2-2／P8-1の実機確認は#99。旧版機の満杯rlsec復旧は#152 |
+| P5（#126／#137／#131／#143／#145／#151） | K05〜K09／K11のGK導出・保存／配布／更新・broadcast opt-inをportable／Rust試験。実C++ security部品⇄Rust Site Authorityのlive E2EでJoinConfirm、Update／Activate、pull、削除後の配布拒否を確認 | broadcastは既定OFF。Ownerのsparse probe、実firmware複数機器（#150）、RF／HILは未実施 |
+| P6（#129／#136／#140／#147／#151） | R01〜R08／R10のRRS1・RemovalNotice・消去／holdoff・GrantRenew／cutoverをportable／Rust試験。100台gossipはsimulation、R07／R08とSelfRevokedはpipe E2Eで確認 | R09の実機gossip／電断HILは#99／#150。NodeId再割当後のGroupLink／GroupEnd送信者識別は#146 |
+| P7（#125） | H09のPoP、機器内鍵生成・保守console、SiteCert・inventory、4 store NVS adapterをhost試験／firmware build | 実機entropy／console／鍵注入・custodyは未確認。旧版機の復旧は#152 |
+
+これらの部分試験をV1-J・K・R・N・F・H全IDの完了として数えない。実firmware結合、実機測定、独立レビューの受入記録をP8で揃える。
 
 ## 4. 本番を名乗る条件
 
-`security_profile() == Production`を返してよいのは、次をすべて満たすbuildだけ。
+`security_profile() == Production`を返してよいのは、次を**すべて**満たすbuildだけ。P3-4〜P7のソフトウェア結線やhost E2Eの完了は、この判定を変更しない。
 
 1. P2-1のEDHOCがRFC 9529 vectorを通り（このbranchでhost試験：suite 2の§3と§4。§2はsuite 0でbackendの対象外）、P1-4のRouteLoom vectorがC++/Rustで一致。
-2. V1-J・K・R・N・F・Hのhost試験がすべて通過。
-3. P2-2とP8-1のHIL実測が記録され、timeout・並列度がその実測に基づく。
-4. P8-2の独立レビューで未解決の重大指摘が無い。
-5. 配備tier（T1/T2）と鍵保管（[04 provisioning §4.10](../sdk-completion/04-provisioning-lifecycle.md)）が決定済み。
+2. V1-J・K・R・N・F・Hのhost試験がすべて通過し、[#146](https://github.com/MOVEI144/RouteLoom/issues/146)の送信者世代と[#150](https://github.com/MOVEI144/RouteLoom/issues/150)の実Owner結合など未閉鎖の受入境界を解決している。§3の部分試験だけでは未達。
+3. P2-2とP8-1のHIL実測（[#99](https://github.com/MOVEI144/RouteLoom/issues/99)）が記録され、timeout・並列度、F07のsleep経過時間上限（[#148](https://github.com/MOVEI144/RouteLoom/issues/148)）がその実測に基づく。
+4. P8-2の独立レビュー（[#100](https://github.com/MOVEI144/RouteLoom/issues/100)）で未解決の重大指摘が無い。
+5. 配備tier（T1/T2）、Device CA／Site CAの鍵保管・custody、製造／注入／移管手順（[04 provisioning §4.10](../sdk-completion/04-provisioning-lifecycle.md)）が決定・検証済み。
 
-それまで、実装済みの部分もEXPERIMENTALとして扱い、KGuardの本番配備に使わない。
+**現状は未達**。HIL（条件3）、独立レビュー（条件4）、鍵custody／tier（条件5）が未了であり、host受入も§3の部分証拠に留まる。`EspNowSecurityOwner::security_profile()`は`Development`を返し、Nodeは`SECURITY_PROFILE_EXPERIMENTAL`を出す。DevRamが公開既定、LegacyFixtureは明示選択のみ。Member EDHOC構成を含め`Production`と表示せず、KGuardの本番配備に使わない。
 
 ## 5. 既存文書との整合（実装時に同時改訂するもの）
 
