@@ -1,0 +1,10 @@
+2e17a82b1b3d62c0d63d2a940e35310d0f99983f44a2e91f48368edae07f15e9  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-member-r4/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+1f2415b09fad4f709656624f0d5e7f9926ce931e2e0e0f7e3f9ba2591373ecef  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-member-r4/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+2e17a82b1b3d62c0d63d2a940e35310d0f99983f44a2e91f48368edae07f15e9  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-member-r4/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+1f2415b09fad4f709656624f0d5e7f9926ce931e2e0e0f7e3f9ba2591373ecef  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-member-r4/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+1bab178438ac3fbd723190c4cb3b8c9728890232cfe5acd0d9e7c96201fe8979  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-member-r4/build/bootloader/bootloader.bin
+3a6f9db26ffe09cd179ef8d1b84d07c375165c39fb5c77e438bd69811c95eb0d  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-member-r4/build/flasher_args.json
+e61421139c6406f44aa78de50a0c30a7a99d778fcdb619eb2035fb57878dc0f7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-member-r4/build/partition_table/partition-table.bin
+9396a02b9d03ae1420c8cf10a04c06357d894fbfe3477ecb3feef6c3d78a07dd  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-member-r4/build/ram-report.json
+a2dc3e52dce734952a3b262f37c9ddb58a74350f7f5d4f123711ba1b5ba0bcf0  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-member-r4/build/routeloom_bridge_node.bin
+a08bb9cae9c82ff218ce3b2d8e9cc1f2d3c664e092a8d8172ea0056077ed3f17  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-member-r4/build/size.json

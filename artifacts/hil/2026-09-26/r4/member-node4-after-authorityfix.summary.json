@@ -1,0 +1,12 @@
+{
+  "count": 3,
+  "accepted": 3,
+  "delivered": 3,
+  "success_rate": 1.0,
+  "rtt_ms_min": 53.19,
+  "rtt_ms_median": 103.99,
+  "rtt_ms_p95": 104.83,
+  "rtt_ms_p99": 104.9,
+  "rtt_ms_max": 104.92,
+  "evidence": "artifacts/hil/2026-09-26/r4/member-node4-after-authorityfix.jsonl"
+}

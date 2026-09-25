@@ -1,0 +1,9 @@
+[2026-09-25T21:05:06.985+00:00] !! connected /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00
+[2026-09-25T21:05:14.196+00:00] I (361) esp_image: segment 3: paddr=0016e144 vaddr=40806e84 sizeI (60490) RouteLoom: stack hwm main 10984 B
+[2026-09-25T21:05:47.850+00:00] I (94309) RouteLoomRef: discovery event=STALE peer=1
+[2026-09-25T21:05:47.850+00:00] W (94309) RouteLoomRef: diagnostic reason=STALE peer=1 message=none
+[2026-09-25T21:05:49.853+00:00] I (96310) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-25T21:05:49.853+00:00] W (96311) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-25T21:05:50.454+00:00] I (96914) RouteLoomRef: discovery event=BOUND peer=5
+[2026-09-25T21:05:50.454+00:00] W (96914) RouteLoomRef: diagnostic reason=BOUND peer=5 message=none
+[2026-09-25T21:05:52.092+00:00] !! capture finished

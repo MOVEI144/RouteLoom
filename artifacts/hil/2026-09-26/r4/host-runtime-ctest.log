@@ -1,0 +1,8 @@
+Internal ctest changing into directory: /tmp/routeloom-hil-r4-hostbuild
+Test project /tmp/routeloom-hil-r4-hostbuild
+    Start 37: routeloom_espnow_runtime_tests
+1/1 Test #37: routeloom_espnow_runtime_tests ...   Passed    0.00 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   0.00 sec

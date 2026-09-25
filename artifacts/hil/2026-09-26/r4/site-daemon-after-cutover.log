@@ -1,0 +1,6 @@
+api acl loaded: revision 1
+operation store: sqlite at /tmp/routeloom-hil-r4-site/op-store (lineage 02614eca8c868b5aae60b407b2cc7dad)
+warning: development key custody — a plaintext P-256 root key file guarded only by POSIX 0600 permissions is NOT production custody; production root keys live on an offline machine/HSM behind the RootSigner seam (04-provisioning-lifecycle.md SS4.4, SS4.10)
+site authority: site 5173000000000042 network 00000002524c0001 (EXPERIMENTAL; USB join relay 0x60-0x63 serves capable sessions)
+config authority: none — config.propose refused; challenge/status queries still run (pass --config-authority)
+RouteLoom host listening on /tmp/routeloom-hil-r4-site.sock

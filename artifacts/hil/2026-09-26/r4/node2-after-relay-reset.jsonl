@@ -1,0 +1,1 @@
+{"index":0,"accepted":true,"request":12,"response":{"accepted":true,"request":12},"delivery":{"request":12,"destination":2,"state":"expired","reason":"DEADLINE_EXPIRED","msg_session":188,"msg_seq":27,"updated_ms":1790370575523},"latency_ms":5020.07}
