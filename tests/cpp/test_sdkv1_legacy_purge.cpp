@@ -105,5 +105,52 @@ int main() {
   }
   CHECK(total == 200 && result.remaining == 0);
   for (bool live : churn.live) CHECK(!live);
+
+  // The physical-maintenance console: status counts survivors, purge needs
+  // the full domain fingerprint plus a stopped radio. Every refusal leaves
+  // the store untouched — no marker, no erase.
+  auto line = [](const char* text) {
+    return ByteView{reinterpret_cast<const std::uint8_t*>(text), std::strlen(text)};
+  };
+  const std::array<std::uint8_t, 16> domain{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                                            0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+  constexpr char kPurge[] = "purge --domain 000102030405060708090a0b0c0d0e0f --confirm";
+  MemoryPort verb_port;
+  LegacyStateConsole verb(verb_port, domain, true);
+  char response[LegacyStateConsole::kResponseMax];
+  std::size_t size = 0;
+  CHECK(verb.process_line(line("status"), true, response, sizeof(response), size).ok());
+  CHECK(std::strcmp(response, "OK legacy=5 marker=0") == 0);
+  CHECK(verb.process_line(line("purge --domain 000102030405060708090a0b0c0d0e0e --confirm"),
+                          true, response, sizeof(response), size).ok());
+  CHECK(std::strcmp(response, "ERR domain") == 0);  // one nibble off
+  CHECK(!verb_port.marker && verb_port.erased == 0);
+  CHECK(verb.process_line(line("purge --confirm"), true, response, sizeof(response), size).ok());
+  CHECK(std::strcmp(response, "ERR invalid_argument") == 0);
+  CHECK(verb.process_line(line("purge"), true, response, sizeof(response), size).ok());
+  CHECK(std::strcmp(response, "ERR invalid_argument") == 0);
+  CHECK(verb.process_line(line(""), true, response, sizeof(response), size).ok());
+  CHECK(std::strcmp(response, "ERR invalid_argument") == 0);
+  CHECK(verb.process_line(line("status now"), true, response, sizeof(response), size).ok());
+  CHECK(std::strcmp(response, "ERR invalid_argument") == 0);
+  CHECK(!verb_port.marker && verb_port.erased == 0);
+  CHECK(verb.process_line(line(kPurge), false, response, sizeof(response), size).ok());
+  CHECK(std::strcmp(response, "ERR busy") == 0);  // live radio refuses first
+  CHECK(!verb_port.marker && verb_port.erased == 0);
+  CHECK(verb.process_line(line(kPurge), true, response, sizeof(response), size).ok());
+  CHECK(std::strcmp(response, "OK erased=5 remaining=0") == 0);
+  CHECK(verb_port.marker && verb_port.erased == 5);
+  CHECK(verb.process_line(line(kPurge), true, response, sizeof(response), size).ok());
+  CHECK(std::strcmp(response, "OK erased=0 remaining=0") == 0);  // idempotent
+  CHECK(verb.process_line(line("status"), true, response, sizeof(response), size).ok());
+  CHECK(std::strcmp(response, "OK legacy=0 marker=1") == 0);
+  char small[8];
+  CHECK(verb.process_line(line("status"), true, small, sizeof(small), size).code ==
+        StatusCode::InvalidArgument);
+  MemoryPort legacy_port;
+  LegacyStateConsole legacy_verb(legacy_port, domain, false);
+  CHECK(legacy_verb.process_line(line(kPurge), true, response, sizeof(response), size).ok());
+  CHECK(std::strcmp(response, "ERR refused") == 0);  // legacy build keeps its keys
+  CHECK(!legacy_port.marker && legacy_port.erased == 0);
   return 0;
 }

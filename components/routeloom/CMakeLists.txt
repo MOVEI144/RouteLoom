@@ -47,6 +47,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/sdkv1_records.cpp
   src/sdkv1_handshake.cpp
   src/sdkv1_boot_session.cpp
+  src/sdkv1_dev_session.cpp
   src/sdkv1_legacy_purge.cpp
   src/sdkv1_session_rtc.cpp
   src/sdkv1_security_coordinator.cpp
