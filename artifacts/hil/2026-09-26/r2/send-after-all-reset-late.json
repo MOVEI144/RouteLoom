@@ -1,0 +1,15 @@
+{
+  "sent_unix": 1790365548.96769,
+  "response": "{\"accepted\":true,\"request\":6}",
+  "stderr": "",
+  "delivery": {
+    "request": 6,
+    "destination": 2,
+    "state": "expired",
+    "reason": "DEADLINE_EXPIRED",
+    "msg_session": 163,
+    "msg_seq": 6,
+    "updated_ms": 1790365553973
+  },
+  "latency_ms": 5056.62
+}

@@ -31,6 +31,24 @@ class PreflightTest(unittest.TestCase):
                         with self.assertRaises(flash.FlashError):
                             flash.preflight_board(board, "/dev/fake", "esptool", out)
 
+    def test_c6_requires_full_eui64_match(self):
+        board = rig.Board(name="ref-c", app="reference_node", chip="esp32c6",
+                          mac="10:bd:a3:ff:fe:b1:47:54")
+        with tempfile.TemporaryDirectory() as out:
+            for mac, passes in ((board.mac, True),
+                                ("10:bd:a3:ff:fe:b1:48:a8", False),
+                                ("10:bd:a3:b1:47:54", False)):
+                result = subprocess.CompletedProcess(
+                    args=[], returncode=0,
+                    stdout=f"Chip type:          ESP32-C6FH4 (rev)\nMAC:                {mac}\n",
+                    stderr="")
+                with patch.object(flash.subprocess, "run", return_value=result):
+                    if passes:
+                        self.assertEqual(flash.preflight_board(board, "/dev/fake", "esptool", out)["mac"], mac)
+                    else:
+                        with self.assertRaises(flash.FlashError):
+                            flash.preflight_board(board, "/dev/fake", "esptool", out)
+
 
 if __name__ == "__main__":
     unittest.main()

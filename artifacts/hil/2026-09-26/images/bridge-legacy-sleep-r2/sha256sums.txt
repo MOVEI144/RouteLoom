@@ -1,0 +1,10 @@
+c040a9719d4e95cd84bf6b85d56b98307b08ffc51051b892bc13b37661bc778a  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-legacy-sleep-r2/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+711cd9ea0ba4bf3f7ea0ab516535b3a5d1641abf52729d5d036ec67ccf40ede7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-legacy-sleep-r2/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+c040a9719d4e95cd84bf6b85d56b98307b08ffc51051b892bc13b37661bc778a  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-legacy-sleep-r2/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+711cd9ea0ba4bf3f7ea0ab516535b3a5d1641abf52729d5d036ec67ccf40ede7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-legacy-sleep-r2/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+8611bb9aa6d5015a4c302c38469df00538daeafe1c33d60ea5839863afbc7adb  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-legacy-sleep-r2/build/bootloader/bootloader.bin
+b2420dca7ccf9d4f697badc38714d9cb7bbfdb1b202116c94a584ae4dcd200df  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-legacy-sleep-r2/build/flasher_args.json
+e61421139c6406f44aa78de50a0c30a7a99d778fcdb619eb2035fb57878dc0f7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-legacy-sleep-r2/build/partition_table/partition-table.bin
+32b379f1886d3e3e94847b54854e9cb8e4a5f19739ed197a8ec69a6acd2b2927  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-legacy-sleep-r2/build/ram-report.json
+d6d4294d7adabc71f16b40f3f235edb77435289725fe47db599673dc709b4854  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-legacy-sleep-r2/build/routeloom_bridge_node.bin
+6b2c8f3c5e61dff78b15d62dd589a24ae9b12758f9d6b19ff19a6956c0f49e1b  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-legacy-sleep-r2/build/size.json

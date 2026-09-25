@@ -6,7 +6,8 @@
 #
 # Each bench maps a role name to:
 #   app        firmware app under firmware/<app> (build dir = firmware/<app>/build)
-#   chip       esp32c3 | esp32s3 | esp32c5 (`flash.py` preflight checks C3/C5)
+#   chip       esp32c3 | esp32s3 | esp32c5 | esp32c6
+#              C6 is an experimental HIL target, outside the SDK v1 support list.
 #   mac        expected base MAC; required for this bench's flash preflight
 #   role       bridge | reference (free-form, drives scenario requirements)
 #   node_id    mesh node id as built (ROUTELOOM_NODE_ID) — used in `send` steps
@@ -33,10 +34,63 @@
 # socket (routeloomctl) only.
 
 rigs:
+  bench-2026-09-26-mixed5:
+    description: "experimental five-node bench: three C3s and two unsupported C6s"
+    host:
+      daemon_bin: host/target/debug/routeloom-host
+      ctl_bin: host/target/debug/routeloomctl
+      socket: /tmp/routeloom-hil-2026-09-26-mixed5.sock
+      poll_interval_s: 0.5
+      command_timeout_s: 10
+    boards:
+      bridge:
+        app: bridge_node
+        chip: esp32c3
+        mac: "94:a9:90:6a:ee:c4"
+        role: bridge
+        node_id: 0x1
+        console: none
+        port_globs:
+          - "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00"
+        reset: esptool
+      ref-a:
+        app: reference_node
+        chip: esp32c3
+        mac: "94:a9:90:7a:b5:60"
+        role: reference
+        node_id: 0x2
+        port_globs:
+          - "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00"
+        reset: esptool
+      ref-b:
+        app: reference_node
+        chip: esp32c3
+        mac: "94:a9:90:7a:26:ac"
+        role: reference
+        node_id: 0x3
+        port_globs:
+          - "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00"
+        reset: esptool
+      ref-c:
+        app: reference_node
+        chip: esp32c6
+        mac: "10:bd:a3:ff:fe:b1:47:54"
+        role: reference
+        node_id: 0x4
+        port_globs:
+          - "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00"
+        reset: esptool
+      ref-d:
+        app: reference_node
+        chip: esp32c6
+        mac: "10:bd:a3:ff:fe:b1:48:a8"
+        role: reference
+        node_id: 0x5
+        port_globs:
+          - "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00"
+        reset: esptool
   bench-2026-09-26:
-    # Five USB devices were present: three C3s and two C6s. The C6s are
-    # deliberately excluded: this run authorizes writes only to C3/C5.
-    # No C5 was detected, so the requested five-node bench is unavailable.
+    # Prior C3-only rig retained for reproducibility of the first run.
     description: "2026-09-26: three eligible C3 boards; two C6s excluded"
     host:
       daemon_bin: host/target/debug/routeloom-host

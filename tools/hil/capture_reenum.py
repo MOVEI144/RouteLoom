@@ -23,7 +23,13 @@ def main() -> int:
     p.add_argument("--reset-on-connect", action="store_true",
                    help="pulse RTS with DTR low after opening the known board")
     args = p.parse_args()
-    if args.mac.upper() not in args.port or "*" in args.port:
+    mac_parts = args.mac.upper().split(":")
+    # ESP32-C6 chip-id reports EUI-64, while its USB by-id name contains
+    # the EUI-48 base MAC (the middle FF:FE bytes are omitted).
+    port_mac = ":".join(mac_parts[:3] + mac_parts[5:]) if (
+        len(mac_parts) == 8 and mac_parts[3:5] == ["FF", "FE"]
+    ) else args.mac.upper()
+    if port_mac not in args.port or "*" in args.port:
         p.error("port must be one exact by-id path containing the expected MAC")
     deadline = time.monotonic() + args.seconds
     path = pathlib.Path(args.out)

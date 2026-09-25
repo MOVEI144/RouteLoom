@@ -1,0 +1,10 @@
+c040a9719d4e95cd84bf6b85d56b98307b08ffc51051b892bc13b37661bc778a  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-r2-lowmem/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+711cd9ea0ba4bf3f7ea0ab516535b3a5d1641abf52729d5d036ec67ccf40ede7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-r2-lowmem/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+c040a9719d4e95cd84bf6b85d56b98307b08ffc51051b892bc13b37661bc778a  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-r2-lowmem/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+711cd9ea0ba4bf3f7ea0ab516535b3a5d1641abf52729d5d036ec67ccf40ede7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-r2-lowmem/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+c53ea559ecfbaecc9f1962f7b94a64c26e7e3771c9a1ca3ae580a78eaef8fb77  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-r2-lowmem/build/bootloader/bootloader.bin
+b2420dca7ccf9d4f697badc38714d9cb7bbfdb1b202116c94a584ae4dcd200df  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-r2-lowmem/build/flasher_args.json
+e61421139c6406f44aa78de50a0c30a7a99d778fcdb619eb2035fb57878dc0f7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-r2-lowmem/build/partition_table/partition-table.bin
+73a618d533b928dca510000701cf782998a7af94ba595250d733546dab83dfc3  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-r2-lowmem/build/ram-report.json
+914ff0c129e16db050639ce9485d5a4ba8041790d135a36aed16a7f66a120a70  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-r2-lowmem/build/routeloom_bridge_node.bin
+bae7f0c6380ac1bafebd9470df0db10b5bc97ba5bcd6315f163e142e6c7a96a2  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-r2-lowmem/build/size.json

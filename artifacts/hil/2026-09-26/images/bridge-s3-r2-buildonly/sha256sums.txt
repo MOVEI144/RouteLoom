@@ -1,0 +1,10 @@
+2e17a82b1b3d62c0d63d2a940e35310d0f99983f44a2e91f48368edae07f15e9  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-r2-buildonly/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+1f2415b09fad4f709656624f0d5e7f9926ce931e2e0e0f7e3f9ba2591373ecef  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-r2-buildonly/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+2e17a82b1b3d62c0d63d2a940e35310d0f99983f44a2e91f48368edae07f15e9  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-r2-buildonly/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+1f2415b09fad4f709656624f0d5e7f9926ce931e2e0e0f7e3f9ba2591373ecef  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-r2-buildonly/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+44f5fea0622fab16c8b0b4a01a5a03dc43546946b51a84d390abc9efc3881f78  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-r2-buildonly/build/bootloader/bootloader.bin
+3a6f9db26ffe09cd179ef8d1b84d07c375165c39fb5c77e438bd69811c95eb0d  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-r2-buildonly/build/flasher_args.json
+e61421139c6406f44aa78de50a0c30a7a99d778fcdb619eb2035fb57878dc0f7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-r2-buildonly/build/partition_table/partition-table.bin
+eb31789af968276ef4e179a003fe1a14a7a28eb4c337613d0fb6cb30f4ebd52d  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-r2-buildonly/build/ram-report.json
+103a45d1a69337d3ffe1aef954b61341482c87097f30bc9d8d1c6944d1a24c53  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-r2-buildonly/build/routeloom_bridge_node.bin
+f5b24b221470b90de5cc753ef60bae94a19baf4e1033fe7d8d6bbc6b35319ace  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-s3-r2-buildonly/build/size.json

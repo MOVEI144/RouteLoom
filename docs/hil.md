@@ -4,10 +4,12 @@
 flashing, serial capture, scenario runs, and run reports. Everything is
 stdlib-only Python — no third-party dependencies.
 
-**Status honesty:** the first partial hardware run is recorded in
-[2026-09-26-bench-5node.md](hil/2026-09-26-bench-5node.md). Its five USB
-devices were three C3s and two C6s, so the requested C3/C5 five-node run
-remains unfinished. Harness self-tests alone are not hardware validation.
+**Hardware status:** the [2026-09-26 bench report](hil/2026-09-26-bench-5node.md)
+records the first hardware run and its continuation. The bench contained
+three C3s and two C6s; C6 is an experimental HIL target outside the SDK v1
+support list. One C3 stopped enumerating, so the continuation exercised four
+boards (two C3s, two C6s). A five-node run and C5 hardware comparison remain
+unfinished. Harness self-tests alone are not hardware validation.
 
 ## Concepts
 

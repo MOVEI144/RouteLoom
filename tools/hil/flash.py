@@ -68,8 +68,9 @@ def preflight_board(board: "rig_mod.Board", port: str, esptool: str,
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(f"$ {' '.join(cmd)}\n{output}")
     import re
-    chip = re.search(r"Chip type:\s*ESP32-(C3|C5)\b", output, re.I)
-    mac = re.search(r"^MAC:\s*([0-9a-f:]{17})\s*$", output, re.I | re.M)
+    chip = re.search(r"Chip type:\s*ESP32-(C3|C5|C6)(?!\d)", output, re.I)
+    # C6 reports an EUI-64 in the MAC field; C3/C5 report EUI-48.
+    mac = re.search(r"^MAC:\s*([0-9a-f]{2}(?::[0-9a-f]{2}){5,7})\s*$", output, re.I | re.M)
     detected_chip = "esp32" + chip.group(1).lower() if chip else None
     detected_mac = mac.group(1).lower() if mac else None
     if result.returncode != 0 or detected_chip != board.chip or (

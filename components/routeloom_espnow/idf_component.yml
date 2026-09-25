@@ -20,13 +20,13 @@ tags:
   - espnow
   - routeloom
   - wifi-lr
-# Only these targets are compiled in CI (espressif/idf:v6.0.3). Other
-# ESP-NOW-capable chips may work but are unvalidated — see
-# docs/implementation/component-distribution.md.
+# C3/S3/C5 are SDK v1 targets compiled in CI. C6 is admitted solely for
+# experimental HIL builds; it remains outside the supported SDK target set.
 targets:
   - esp32c3
   - esp32s3
   - esp32c5
+  - esp32c6
 dependencies:
   idf: ">=6.0"
   # Resolved locally when this repository's components/ directory is on the

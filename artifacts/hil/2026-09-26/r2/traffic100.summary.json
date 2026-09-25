@@ -1,0 +1,18 @@
+{
+  "planned": 100,
+  "host_accepted": 21,
+  "device_delivered": 11,
+  "device_failed_idempotency_full": 10,
+  "stopped_reason": "device idempotency table reached fixed 16-entry / 24-hour limit",
+  "states": {
+    "(2, 'delivered', 'END_RECEIVED')": 4,
+    "(5, 'delivered', 'END_RECEIVED')": 4,
+    "(4, 'delivered', 'END_RECEIVED')": 3,
+    "(4, 'failed', 'IDEMPOTENCY_FULL')": 4,
+    "(2, 'failed', 'IDEMPOTENCY_FULL')": 3,
+    "(5, 'failed', 'IDEMPOTENCY_FULL')": 3
+  },
+  "delivered_latency_ms_median": 104.03,
+  "delivered_latency_ms_max": 257.87,
+  "evidence": "artifacts/hil/2026-09-26/r2/traffic100.jsonl"
+}

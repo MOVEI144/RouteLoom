@@ -1,0 +1,1 @@
+{"index":0,"destination":2,"request":1,"admitted_at_unix":1790366207.7225406,"admission_attempts":1,"delivery":{"request":1,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":166,"msg_seq":1,"updated_ms":1790366207785},"latency_ms":102.95}

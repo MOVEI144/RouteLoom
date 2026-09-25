@@ -1,0 +1,39 @@
+{
+  "cell": "hil",
+  "target": "esp32c3",
+  "app": "reference_node",
+  "memory": [
+    {
+      "name": "DRAM",
+      "total": 321296,
+      "used": 218730,
+      "free": 102566,
+      "parts": {
+        ".bss": 132120,
+        ".text": 73126,
+        ".data": 13484
+      }
+    },
+    {
+      "name": "RTC SLOW",
+      "total": 8192,
+      "used": 104,
+      "free": 8088,
+      "parts": {
+        ".force_slow": 36,
+        ".text": 28,
+        ".rtc_reserved": 24,
+        ".rtc_noinit": 8,
+        ".data": 8
+      }
+    }
+  ],
+  "guard": {
+    "memory_type": "DRAM",
+    "static_bss": 132120,
+    "static_data": 13484,
+    "free": 102566,
+    "min_free": 8192,
+    "passed": true
+  }
+}

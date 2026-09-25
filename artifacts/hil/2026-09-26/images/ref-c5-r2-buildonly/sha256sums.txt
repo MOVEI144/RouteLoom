@@ -1,0 +1,10 @@
+f83109ffd3c20462ad5905001983e384fed902fc75878e67ef4d4696fbc21824  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-r2-buildonly/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+7256ae90f7ae6b17bbc3fe844f46cc7832af24ee7b093042182466aa6aab844f  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-r2-buildonly/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+f83109ffd3c20462ad5905001983e384fed902fc75878e67ef4d4696fbc21824  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-r2-buildonly/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+7256ae90f7ae6b17bbc3fe844f46cc7832af24ee7b093042182466aa6aab844f  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-r2-buildonly/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+cb67132e7a4a82264431e425ddc669490c279980988e7b085188bba0643b2b0e  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-r2-buildonly/build/bootloader/bootloader.bin
+b04cbe107c9ab592842780179b2213538b7d477025d5969d1181868f98cae811  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-r2-buildonly/build/flasher_args.json
+068ab45eb37a4be22b3aea004e4e970cfbbf9a25bc0824c1572be5bf68a37fef  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-r2-buildonly/build/partition_table/partition-table.bin
+60cc1edaa90ac3277437a2b133906e0acb1ffd9e289409cc84c17e0aa8fc8d93  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-r2-buildonly/build/ram-report.json
+961c65cc00f44dec32c3f864eed6624deb2b3a0c1e1027d6b74b8d3f5c30f947  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-r2-buildonly/build/routeloom_reference_node.bin
+9586aee35c668b5ea3cfc1e0f8f2d61c0183c2a121d55fc1b6a6416642406254  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-r2-buildonly/build/size.json

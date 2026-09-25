@@ -1,0 +1,16 @@
+{
+  "principals": {
+    "1000": {
+      "networks": {
+        "*": [
+          "READ_PAYLOAD",
+          "SEND",
+          "READ_OPERATION",
+          "MEMBERSHIP_READ",
+          "MEMBERSHIP_DECIDE",
+          "MEMBERSHIP_ADMIN"
+        ]
+      }
+    }
+  }
+}

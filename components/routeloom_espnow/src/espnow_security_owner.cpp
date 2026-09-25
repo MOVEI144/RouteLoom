@@ -1559,6 +1559,10 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
                 StatusCode::RadioFailure, runtime_->now_ms());
     return;
   }
+  // MeshNode gates bootstrap transit on the adopted Relay/Gateway role.
+  // Enabling relay alone leaves its local role at zero and rejects routed
+  // session handshakes with BOOTSTRAP_TRANSIT_ROLE.
+  runtime_->node().set_local_role(member.role);
   // The gossip sink rides the member node: a fresh adopt placement-news
   // the node (install), a recovery re-adopt refuses the rebuild (the
   // running node already matches — re-assert and return). Idempotent

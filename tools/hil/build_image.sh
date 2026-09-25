@@ -9,7 +9,7 @@ fi
 app=$1 target=$2 label=$3
 shift 3
 case "$app/$target" in
-  reference_node/esp32c3|reference_node/esp32c5|bridge_node/esp32c3|bridge_node/esp32c5) ;;
+  reference_node/esp32c3|reference_node/esp32s3|reference_node/esp32c5|reference_node/esp32c6|bridge_node/esp32c3|bridge_node/esp32s3|bridge_node/esp32c5|bridge_node/esp32c6) ;;
   *) echo "unsupported app/target: $app/$target" >&2; exit 2 ;;
 esac
 [[ $label =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "invalid label" >&2; exit 2; }

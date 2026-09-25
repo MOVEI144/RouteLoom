@@ -1,0 +1,5 @@
+api acl loaded: revision 1
+operation store: memory (RAM_ONLY only; pass --op-store for durability)
+warning: memory operation store — a daemon restart requires a gateway reboot for dispatch (the device rejects the new lane with LaneMismatch); pass --op-store for a durable lane
+config authority: none — config.propose refused; challenge/status queries still run (pass --config-authority)
+RouteLoom host listening on /tmp/routeloom-hil-2026-09-26-mixed5.sock

@@ -1,0 +1,47 @@
+[
+  {
+    "node": 2,
+    "sent_unix": 1790365653.3943589,
+    "response": "{\"accepted\":true,\"request\":4}",
+    "delivery": {
+      "request": 4,
+      "destination": 2,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 164,
+      "msg_seq": 33,
+      "updated_ms": 1790365658405
+    },
+    "latency_ms": 5018.13
+  },
+  {
+    "node": 5,
+    "sent_unix": 1790365658.413528,
+    "response": "{\"accepted\":true,\"request\":5}",
+    "delivery": {
+      "request": 5,
+      "destination": 5,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 164,
+      "msg_seq": 44,
+      "updated_ms": 1790365663420
+    },
+    "latency_ms": 5016.25
+  },
+  {
+    "node": 4,
+    "sent_unix": 1790365663.431043,
+    "response": "{\"accepted\":true,\"request\":6}",
+    "delivery": {
+      "request": 6,
+      "destination": 4,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 164,
+      "msg_seq": 57,
+      "updated_ms": 1790365663487
+    },
+    "latency_ms": 104.69
+  }
+]

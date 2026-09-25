@@ -1,0 +1,1 @@
+{"index":0,"destination":2,"request":2,"admitted_at_unix":1790366232.024417,"admission_attempts":1,"delivery":{"request":2,"destination":2,"state":"failed","reason":"HOP_ACCEPT_TIMEOUT","msg_session":166,"msg_seq":2,"updated_ms":1790366232598},"latency_ms":621.27}

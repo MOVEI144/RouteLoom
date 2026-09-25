@@ -1,0 +1,10 @@
+6d6708b5f128c5f70a454e90d374c7c73590c0f3087e9a4d484cbd2938bbffe8  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c-c6-devram/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+203d70dff11edd632ae107d1b67541ac9969bf79461c064e456bce0f6d7a32aa  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c-c6-devram/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+6d6708b5f128c5f70a454e90d374c7c73590c0f3087e9a4d484cbd2938bbffe8  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c-c6-devram/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+203d70dff11edd632ae107d1b67541ac9969bf79461c064e456bce0f6d7a32aa  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c-c6-devram/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+7e2f5ce6ed8c89e20c4f32a14c6d2662e99978814f786ee5185f2d8964dac53f  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c-c6-devram/build/bootloader/bootloader.bin
+36c02bf6f718c6b86359df643fa0c419afa5bee71b2c09bbcfa8f0c495e60a67  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c-c6-devram/build/flasher_args.json
+068ab45eb37a4be22b3aea004e4e970cfbbf9a25bc0824c1572be5bf68a37fef  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c-c6-devram/build/partition_table/partition-table.bin
+37bc6e3066424e932ac368274874af57086005985568f4e7e0f5d32a0e3c1887  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c-c6-devram/build/ram-report.json
+788d8ec3f4b5c6a38cd1c3c42d97fa8702f95a809a55db86e6f5e43a1d19a571  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c-c6-devram/build/routeloom_reference_node.bin
+05efc14445ac69ec7cb54970f2e900918f7d7ee05c696400838232f47fcd9930  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c-c6-devram/build/size.json
