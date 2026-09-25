@@ -18,7 +18,8 @@
 //  5. Arena / KeyStore unit behaviour, and the sizes and stack high-water
 //     this backend needs (printed; see docs/design/sdk-v1/ram-budget.md).
 //
-// Vectors: protocol/edhoc-rfc9529/chapter3.txt (tools/extract_rfc9529_vectors.py).
+// Vectors: protocol/edhoc-rfc9529/chapter3.txt (tools/extract_rfc9529_vectors.py)
+// and trailing-invalid.txt (the same messages with surplus bytes).
 //
 // Known upstream report under UBSan (recoverable, the test still passes):
 // libedhoc's message_3/message_4 Enc_structure encodes the empty
@@ -106,19 +107,21 @@ bool same(const Bytes& expected, const std::uint8_t* data, const std::size_t siz
 
 std::map<std::string, Bytes> load_vectors() {
   std::map<std::string, Bytes> out;
-  std::ifstream file(std::string(ROUTELOOM_EDHOC_RFC9529_DIR) + "/chapter3.txt");
-  std::string line;
-  while (std::getline(file, line)) {
-    if (line.empty() || line[0] == '#') continue;
-    const std::size_t eq = line.find(" = ");
-    if (eq == std::string::npos) continue;
-    const std::string name = line.substr(0, eq);
-    const std::string value = line.substr(eq + 3);
-    Bytes bytes;
-    for (std::size_t i = 0; i + 1 < value.size(); i += 2) {
-      bytes.push_back(static_cast<std::uint8_t>(std::stoul(value.substr(i, 2), nullptr, 16)));
+  for (const char* filename : {"chapter3.txt", "trailing-invalid.txt"}) {
+    std::ifstream file(std::string(ROUTELOOM_EDHOC_RFC9529_DIR) + "/" + filename);
+    std::string line;
+    while (std::getline(file, line)) {
+      if (line.empty() || line[0] == '#') continue;
+      const std::size_t eq = line.find(" = ");
+      if (eq == std::string::npos) continue;
+      const std::string name = line.substr(0, eq);
+      const std::string value = line.substr(eq + 3);
+      Bytes bytes;
+      for (std::size_t i = 0; i + 1 < value.size(); i += 2) {
+        bytes.push_back(static_cast<std::uint8_t>(std::stoul(value.substr(i, 2), nullptr, 16)));
+      }
+      out[name] = bytes;
     }
-    out[name] = bytes;
   }
   return out;
 }
@@ -354,6 +357,35 @@ void test_rfc9529_trace() {
   note(initiator);
   CHECK(responder.process_message_1(view(V("message_1"))).ok());
   note(responder);
+
+  // EDHOC messages are exact CBOR sequences: neither an extra break nor
+  // another CBOR item belongs to the authenticated exchange.
+  for (const auto& names : std::array<std::array<const char*, 3>, 2>{{
+           {"message_2_trailing_break", "message_3_trailing_break", "message_4_trailing_break"},
+           {"message_2_trailing_item", "message_3_trailing_item", "message_4_trailing_item"}}}) {
+    ScriptedRng bad_init_rng;
+    bad_init_rng.outputs.push_back(V("X"));
+    ScriptedRng bad_resp_rng;
+    bad_resp_rng.outputs.push_back(V("Y"));
+    edhoc::Session bad_init, bad_resp;
+    CHECK(bad_init.begin(rfc_config(edhoc::Role::Initiator, creds, bad_init_rng)).ok());
+    CHECK(bad_resp.begin(rfc_config(edhoc::Role::Responder, creds, bad_resp_rng)).ok());
+    CHECK(bad_resp.process_message_1(view(V("message_1"))).ok());
+    CHECK(!bad_init.process_message_2(view(V(names[0]))).ok());
+
+    edhoc::Session m3_resp;
+    CHECK(m3_resp.begin(rfc_config(edhoc::Role::Responder, creds, bad_resp_rng)).ok());
+    CHECK(m3_resp.process_message_1(view(V("message_1"))).ok());
+    CHECK(m3_resp.compose_message_2(MutableByteView{buffer.data(), buffer.size()}, length).ok());
+    CHECK(!m3_resp.process_message_3(view(V(names[1]))).ok());
+
+    edhoc::Session m4_init;
+    CHECK(m4_init.begin(rfc_config(edhoc::Role::Initiator, creds, bad_init_rng)).ok());
+    CHECK(m4_init.compose_message_1(MutableByteView{buffer.data(), buffer.size()}, length).ok());
+    CHECK(m4_init.process_message_2(view(V("message_2"))).ok());
+    CHECK(m4_init.compose_message_3(MutableByteView{buffer.data(), buffer.size()}, length).ok());
+    CHECK(!m4_init.process_message_4(view(V(names[2]))).ok());
+  }
 
   // §3.4 message_2
   CHECK(responder.compose_message_2(MutableByteView{buffer.data(), buffer.size()}, length).ok());

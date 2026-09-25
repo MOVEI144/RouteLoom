@@ -300,6 +300,14 @@ pub trait SiteStore: Send {
             .filter(|row| row.node == node)
             .collect())
     }
+    /// Existence check for the v1 NodeId reuse rule. Stores may answer it
+    /// without materializing the node's full, unbounded ledger history.
+    fn has_revocation(&mut self, node: u64) -> Result<bool, StoreError> {
+        Ok(self
+            .ledger_for(node)?
+            .iter()
+            .any(|row| row.kind == "revoke"))
+    }
 }
 
 /// RAM store for tests; `fail_next` injects a commit failure (the
@@ -783,6 +791,15 @@ impl SiteStore for SqliteSiteStore {
             });
         }
         Ok(out)
+    }
+
+    fn has_revocation(&mut self, node: u64) -> Result<bool, StoreError> {
+        let found: i64 = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ledger WHERE node = ?1 AND kind = 'revoke')",
+            params![i(node)],
+            |row| row.get(0),
+        )?;
+        Ok(found != 0)
     }
 
     fn commit(&mut self, batch: &Batch) -> Result<(), StoreError> {

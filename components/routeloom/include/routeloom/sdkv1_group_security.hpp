@@ -28,6 +28,8 @@ class GroupSecurityProvider final : public SecurityProvider {
     return keys_.accepts(epoch);
   }
   bool revoked_group_sender(NodeId sender) const noexcept override;
+  // Saturating diagnostic for TX attempts under a locally revoked NodeId.
+  std::uint32_t revoked_tx_attempts() const noexcept { return revoked_tx_attempts_; }
   bool group_promotion_pending() const noexcept override {
     return keys_.promotion_pending();
   }
@@ -59,6 +61,7 @@ class GroupSecurityProvider final : public SecurityProvider {
   const RevocationStore* revocations_;
   std::array<std::uint8_t, kMaxEspNowBody> staging_{};
   bool in_call_{false};
+  std::uint32_t revoked_tx_attempts_{0};
 };
 
 }  // namespace routeloom::sdkv1

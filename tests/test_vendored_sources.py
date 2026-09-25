@@ -1,4 +1,4 @@
-"""Vendored EDHOC sources match pinned blobs, with one checked zcbor patch.
+"""Vendored EDHOC sources match pinned blobs, with checked local patches.
 
 components/routeloom/third_party/VENDORED.json records, for libedhoc, zcbor
 and the TF-PSA-Crypto AES/CCM/GCM subset, the upstream URL, commit, SPDX license
@@ -83,6 +83,20 @@ class VendoredSources(unittest.TestCase):
         restored = source.replace(fixed, upstream, 1)
         self.assertEqual(blob_id_bytes(restored),
                          zcbor["local_patches"]["src/zcbor_encode.c"]["upstream_blob"])
+
+    def test_libedhoc_decode_patches_are_only_exact_length_checks(self):
+        lib = LOCK["components"][0]
+        self.assertEqual(len(lib["local_patches"]), 3)
+        for number in (2, 3, 4):
+            relative = f"library/core/classic/edhoc_classic_message_{number}.c"
+            with self.subTest(file=relative):
+                source = (THIRD_PARTY / lib["directory"] / relative).read_bytes()
+                fixed = (f"if (ZCBOR_SUCCESS != ret || len != msg_{number}_len) {{\n"
+                         "\t\t/* A message is exactly one CBOR item, without trailing data. */").encode()
+                upstream = b"if (ZCBOR_SUCCESS != ret) {"
+                self.assertEqual(source.count(fixed), 1)
+                self.assertEqual(blob_id_bytes(source.replace(fixed, upstream, 1)),
+                                 lib["local_patches"][relative]["upstream_blob"])
 
     def test_notice_credits_every_component(self):
         notice = (ROOT / "NOTICE").read_text(encoding="utf-8")

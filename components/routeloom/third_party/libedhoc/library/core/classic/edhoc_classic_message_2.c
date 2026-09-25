@@ -138,7 +138,8 @@ STATIC int parse_g_y_ciphertext_2(struct edhoc_context *ctx,
 	const int ret = cbor_decode_message_2_G_Y_CIPHERTEXT_2(msg_2, msg_2_len,
 							       &output, &len);
 
-	if (ZCBOR_SUCCESS != ret) {
+	if (ZCBOR_SUCCESS != ret || len != msg_2_len) {
+		/* A message is exactly one CBOR item, without trailing data. */
 		return EDHOC_ERROR_CBOR_FAILURE;
 	}
 

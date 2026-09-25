@@ -172,6 +172,10 @@ Status GroupSecurityProvider::next_counter(const SecurityContext& c,
     return Status::error(StatusCode::Busy, "group provider re-entry");
   in_call_ = true;
   keys_.provider_in_call_ = true;
+  // Count the mistaken re-allocation before material refuses the counter;
+  // callers may inspect this even when no group frame reaches the radio.
+  if (c.sender == self_ && revoked_group_sender(self_) && revoked_tx_attempts_ != UINT32_MAX)
+    ++revoked_tx_attempts_;
   keys::TrafficKey material_key{};
   Status status = material(c, material_key, true);
   keys::clear(material_key);

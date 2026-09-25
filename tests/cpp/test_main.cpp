@@ -124,6 +124,8 @@ void test_single_authority() {
 
 struct CApiState {
   std::uint64_t counter{0};
+  rl_security_context_t last_group{};
+  bool saw_group{false};
 };
 
 // Minimal ExpectedReply Owner for the C ABI tests (issue #117): a stable
@@ -234,8 +236,14 @@ rl_status_code_t capi_radio_send_try_detach(void* user, rl_node_id_t, uint64_t,
 }
 rl_status_code_t capi_radio_recover(void*) { return RL_STATUS_OK; }
 bool capi_security_ready(void*) { return true; }
-rl_status_code_t capi_next_counter(void* user, const rl_security_context_t*, uint64_t* counter) {
-  *counter = static_cast<CApiState*>(user)->counter++;
+rl_status_code_t capi_next_counter(void* user, const rl_security_context_t* context,
+                                   uint64_t* counter) {
+  auto& state = *static_cast<CApiState*>(user);
+  if (context->scope == RL_SECURITY_GROUP) {
+    state.last_group = *context;
+    state.saw_group = true;
+  }
+  *counter = state.counter++;
   return RL_STATUS_OK;
 }
 rl_status_code_t capi_seal(void*, const rl_security_context_t*, uint64_t,
@@ -396,6 +404,12 @@ void test_c_api_group() {
     rl_group_result_t result{};
     CHECK(rl_get_group_result(node.context, id, &result) == RL_STATUS_OK);
     CHECK(result.group == RL_GROUP_ALL && result.id.sequence == id.sequence);
+    CHECK(rl_send_group(node.context, 3, payload, sizeof(payload), &options, 1, &id) ==
+          RL_STATUS_OK);
+    CHECK(node.state.saw_group);
+    CHECK(node.state.last_group.scope == RL_SECURITY_GROUP &&
+          node.state.last_group.sender == 7 &&
+          node.state.last_group.receiver == (RL_GROUP_ADDRESS_BASE | RL_GROUP_ALL));
     // No neighbors: nothing to reach — an honest terminal verdict.
     rl_poll(node.context, 2);
     CHECK(rl_get_group_result(node.context, id, &result) == RL_STATUS_OK);
