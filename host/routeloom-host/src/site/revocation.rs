@@ -754,6 +754,7 @@ impl SiteAuthority {
         }
         // Dispatch the outbox head at the paced rate.
         let mut sent: Vec<(u64, u64, OutboundKind)> = Vec::new();
+        let mut refused: u32 = 0;
         while now_ms >= self.rrs_next_dispatch_ms {
             let Some(head) = self.rrs_outbox.pop_front() else {
                 break;
@@ -806,23 +807,33 @@ impl SiteAuthority {
                 None => false,
             };
             if !delivered {
-                // Transport refusal backs the whole outbox off (5..60 s
-                // capped); the target keeps its attempt and retries.
+                // A refusal parks only this head at the back with its own
+                // backoff (5..60 s capped); the pass moves on so one
+                // channel-less member cannot head-of-line block the
+                // members behind it. The whole-outbox backoff below still
+                // applies when nothing in this pass went out at all.
                 let level =
                     (self.rrs_transport_backoff as usize).min(DISTRIBUTION_BACKOFF_S.len() - 1);
                 let wait = DISTRIBUTION_BACKOFF_S[level].saturating_mul(1000);
-                self.rrs_next_dispatch_ms = now_ms.saturating_add(wait);
-                self.rrs_transport_backoff = self.rrs_transport_backoff.saturating_add(1);
-                let due = self.rrs_next_dispatch_ms;
-                self.rrs_outbox.push_front(OutboundRrs {
+                let due = now_ms.saturating_add(wait);
+                self.rrs_outbox.push_back(OutboundRrs {
                     due_ms: due,
                     ..head
                 });
-                break;
+                refused = refused.saturating_add(1);
+                continue;
             }
             self.rrs_transport_backoff = 0;
             self.rrs_next_dispatch_ms = now_ms.saturating_add(DISTRIBUTION_DISPATCH_GAP_MS);
             sent.push((head.op, head.node, head.what));
+        }
+        if sent.is_empty() && refused > 0 {
+            // Nothing went out: the transport itself is down, so back
+            // the whole outbox off exactly like a lone refusal used to.
+            let level = (self.rrs_transport_backoff as usize).min(DISTRIBUTION_BACKOFF_S.len() - 1);
+            let wait = DISTRIBUTION_BACKOFF_S[level].saturating_mul(1000);
+            self.rrs_next_dispatch_ms = now_ms.saturating_add(wait);
+            self.rrs_transport_backoff = self.rrs_transport_backoff.saturating_add(1);
         }
         let mut touched: Vec<u64> = sent.iter().map(|(op, _, _)| *op).collect();
         touched.sort_unstable();
@@ -1406,5 +1417,102 @@ mod tests {
         assert_eq!(dist.counts(), (1, 0, 3, 4));
         assert!(distribution_view(Some(&dist)).contains("\"state\":\"distributing\""));
         assert!(distribution_view(None).contains("\"state\":\"unknown\""));
+    }
+
+    /// A refused head parks at the back with its own backoff while the
+    /// pass moves on: one channel-less member cannot head-of-line block
+    /// the members behind it (live E2E cutover with an offline gateway).
+    #[test]
+    fn refusal_parks_one_head_without_stalling_the_outbox() {
+        use std::sync::{Arc, Mutex};
+        struct RefuseOne {
+            refused: u64,
+            sent: Arc<Mutex<Vec<u64>>>,
+        }
+        impl RevocationTransport for RefuseOne {
+            fn send_rrs(&mut self, node: u64, _object: &[u8]) -> bool {
+                if node == self.refused {
+                    return false;
+                }
+                self.sent.lock().unwrap().push(node);
+                true
+            }
+        }
+        fn target(node: u64) -> DistributionTarget {
+            DistributionTarget {
+                node,
+                kid: [0xAA; 32],
+                generation: 1,
+                network: super::super::testkit::network(),
+                state: TargetState::Pending,
+                attempts: 0,
+                next_retry_ms: 0,
+                ack_rs_epoch: None,
+            }
+        }
+        const T0: u64 = 1_790_000_000_000;
+        const REFUSED: u64 = 0x00A1_0000_0000_0001;
+        const ONLINE: u64 = 0x00A1_0000_0000_0002;
+        let mut auth = super::super::testkit::authority(
+            Box::<super::super::store::MemoryStore>::default(),
+            T0,
+        );
+        auth.operations.insert(
+            7,
+            super::super::records::Operation {
+                id: 7,
+                kind: "revoke".to_string(),
+                node: 0x00A1_0000_0000_0009,
+                generation: 1,
+                member_cert_serial: 0,
+                rs_epoch: 2,
+                gk_from: 0,
+                gk_to: 0,
+                created_ms: T0,
+                gk_cause: String::new(),
+                gk_end: String::new(),
+                distribution: Some(OperationDistribution {
+                    state: DistState::Distributing,
+                    rs_epoch: 2,
+                    network: super::super::testkit::network(),
+                    object_sha256: [0xBB; 32],
+                    targets: vec![target(REFUSED), target(ONLINE)],
+                    overflow: 0,
+                }),
+                cutover: None,
+                notice: None,
+            },
+        );
+        auth.rrs_latest_object = vec![9u8; 32];
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        auth.set_rrs_transport(Some(Box::new(RefuseOne {
+            refused: REFUSED,
+            sent: sent.clone(),
+        })));
+
+        // The refused head parks; the online member behind it is served
+        // in the same pass.
+        auth.tick_distribution(T0);
+        assert_eq!(*sent.lock().unwrap(), vec![ONLINE]);
+        let dist = auth
+            .operations
+            .get(&7)
+            .unwrap()
+            .distribution
+            .clone()
+            .unwrap();
+        assert_eq!(dist.targets[0].state, TargetState::Pending);
+        assert_eq!(dist.targets[1].state, TargetState::Unknown);
+        assert_eq!(dist.targets[1].attempts, 1);
+
+        // Before the parked head's backoff the pass is quiet without
+        // tripping the transport-wide gate.
+        auth.tick_distribution(T0 + DISTRIBUTION_DISPATCH_GAP_MS);
+        assert_eq!(sent.lock().unwrap().len(), 1);
+
+        // Past the backoff the refused head retries (and refuses
+        // again) while the online member sends again.
+        auth.tick_distribution(T0 + 6_000);
+        assert_eq!(*sent.lock().unwrap(), vec![ONLINE, ONLINE]);
     }
 }
