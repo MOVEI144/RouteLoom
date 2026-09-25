@@ -10,7 +10,7 @@ namespace routeloom::sdkv1 {
 class GroupSecurityProvider final : public SecurityProvider {
  public:
   GroupSecurityProvider(GroupKeyState& keys, SecurityProvider& pairwise,
-                        const AeadGcm& aead, NodeId self) noexcept
+                        const routeloom::AeadGcm& aead, NodeId self) noexcept
       : keys_(keys), pairwise_(pairwise), aead_(aead), self_(self) {}
   GroupSecurityProvider(const GroupSecurityProvider&) = delete;
   GroupSecurityProvider& operator=(const GroupSecurityProvider&) = delete;
@@ -23,6 +23,12 @@ class GroupSecurityProvider final : public SecurityProvider {
   bool accepts_group_epoch(std::uint32_t epoch) const noexcept override {
     return keys_.accepts(epoch);
   }
+  bool group_promotion_pending() const noexcept override {
+    return keys_.promotion_pending();
+  }
+  // Adoption binds the member NodeId the provider transmits as; the Owner
+  // calls it once per adoption (construction carries the pre-adoption id).
+  void set_self(NodeId self) noexcept { self_ = self; }
   Status next_counter(const SecurityContext& context, std::uint64_t& counter) noexcept override;
   Status seal(const SecurityContext& context, std::uint64_t counter, ByteView aad,
               ByteView plaintext, MutableByteView ciphertext,
@@ -36,14 +42,14 @@ class GroupSecurityProvider final : public SecurityProvider {
   bool allowed_sender(const SecurityContext& context) const noexcept;
   GroupReplaySender* sender(const SecurityContext& context) noexcept;
   GroupReplaySender* free_sender(SecurityScope scope) noexcept;
-  static bool replay_ok(const GroupReplaySender& sender, std::uint32_t epoch,
-                        std::uint32_t boot, std::uint64_t counter) noexcept;
+  bool replay_ok(const GroupReplaySender& sender, std::uint32_t epoch,
+                 std::uint32_t boot, std::uint64_t counter) noexcept;
   void replay_commit(GroupReplaySender& sender, NodeId peer, std::uint32_t epoch,
                             std::uint32_t boot, std::uint64_t counter) noexcept;
 
   GroupKeyState& keys_;
   SecurityProvider& pairwise_;
-  const AeadGcm& aead_;
+  const routeloom::AeadGcm& aead_;
   NodeId self_;
   std::array<std::uint8_t, kMaxEspNowBody> staging_{};
   bool in_call_{false};

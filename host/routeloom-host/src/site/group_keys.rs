@@ -320,15 +320,23 @@ impl std::fmt::Debug for GroupKeyCommand {
 /// it must be a fast non-blocking read — implementations must never call
 /// back into the authority while holding their channel table. `send` runs
 /// with the authority lock released, but within the service's serialized
-/// handoff. It must enqueue promptly without calling back into SiteService;
-/// key commands must match `expected_dams` to the channel's bound DAMS
-/// while selecting that channel. Wake has no channel and passes `None`.
-/// A queued command is never reach evidence.
+/// handoff. It must enqueue promptly; the channel-backed transport funnels
+/// the command back through `SiteService::seal_group_key` (which locks the
+/// authority but never touches a transport, so the callback cannot
+/// recurse). Key commands must match `expected_dams` to the channel's
+/// bound DAMS while selecting that channel. Wake has no channel and
+/// passes `None`. A queued command is never reach evidence.
 pub trait GroupKeyTransport: Send + Sync {
     /// True when the established channel to `node` has this incarnation.
     fn channel_ready(&self, node: u64, expected_dams: &[u8; 32]) -> bool;
     /// Best-effort send, checking the incarnation again at dispatch.
     fn send(&self, command: GroupKeyCommand, expected_dams: Option<&[u8; 32]>);
+    /// Channel up (`Some` DAMS) / down (`None`) hint, delivered by the
+    /// service with every lock released. The default ignores it; the
+    /// channel-backed transport refreshes the `channel_ready` cache the
+    /// tick reads under the authority lock (a callback there would
+    /// deadlock). Hints are advisory only — `send` re-fences.
+    fn note_channel(&self, _node: u64, _dams: Option<[u8; 32]>) {}
 }
 
 /// A type 2/3 op-2 ACK as the channel layer hands it to the authority: the

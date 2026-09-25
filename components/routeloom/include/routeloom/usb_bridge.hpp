@@ -192,6 +192,37 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   };
   Status attach_security_owner(SecurityOwnerUsbSink& owner) noexcept;
 
+  // Authority-lane binding (authority_channel_v1, G-SEC P5): serves
+  // HostOps 0x65 AUTHORITY_DOWN / 0x66 SITE_STATE_SET through the
+  // gateway's sink (answered by 0x67) while a session is ACTIVE, and
+  // emits reassembled mesh carriers as 0x64 through send_authority_up.
+  // Advertises kCapAuthorityChannelV1 in HelloAck. A dying session
+  // notifies the sink so USB-bound fragment state drops with it; epoch
+  // or key application is never resumed from a slot.
+  class AuthorityUsbSink {
+   public:
+    virtual ~AuthorityUsbSink() = default;
+    // One decoded H→G down fragment (borrows the 0x65 inner bytes,
+    // valid during the call). `complete` reports whether this fragment
+    // finished the object (result 1 vs 0 in the 0x67). Returns queue
+    // admission for the 0x67.
+    virtual Status authority_down(NodeId device, const AuthorityFragment& fragment,
+                                  bool& complete, MonotonicMs now_ms) noexcept = 0;
+    // One H→G site-state set: fills the local half of the 0x67 report
+    // (epochs, validity flag; the bridge stamps device/transfer/result).
+    // The returned Status maps to the 0x67 result (Ok reads FragmentQueued).
+    virtual Status site_state_set(const SiteStateSet& set, SiteStateReport& report,
+                                  MonotonicMs now_ms) noexcept = 0;
+    // An established session died: USB-bound fragment/transfer state
+    // drops, never reused by the next session.
+    virtual void authority_session_down(MonotonicMs now_ms) noexcept = 0;
+  };
+  Status attach_authority(AuthorityUsbSink& sink) noexcept;
+  // One 0x64 carrier fragment toward the host (request id 0), for the
+  // gateway's mesh→USB egress. Only while ACTIVE; NoCapacity when the
+  // TX queue is full (the gateway keeps the bytes for the next poll).
+  Status send_authority_up(const AuthorityFragment& fragment) noexcept;
+
   // Serial RX entry point: feed raw bytes read from the wire.
   void on_bytes(ByteView input, MonotonicMs now_ms) noexcept;
   // Periodic work: partial-frame timeout, handshake timeout, TX pump,
@@ -394,6 +425,14 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
                               MonotonicMs now_ms) noexcept;
   void handle_join_relay_abort(std::uint64_t request, ByteView inner,
                                MonotonicMs now_ms) noexcept;
+  // Authority lane (0x65/0x66): decode, gate on kCapAuthorityChannelV1 +
+  // an attached sink, hand to AuthorityUsbSink and answer one 0x67.
+  void handle_authority_down(std::uint64_t request, ByteView inner,
+                             MonotonicMs now_ms) noexcept;
+  void handle_site_state_set(std::uint64_t request, ByteView inner,
+                             MonotonicMs now_ms) noexcept;
+  void send_site_state_report(std::uint64_t request, const SiteStateReport& report,
+                              MonotonicMs now_ms) noexcept;
   void send_join_relay_result(std::uint64_t request, ConfigOpsResult result, NodeId proxy,
                               sdkv1::RelayToken token, MonotonicMs now_ms) noexcept;
   // poll(): diff the mesh against the armed baseline at most every
@@ -644,6 +683,13 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
                 "join relay up staging");
   static_assert(kGatewayInnerHeadSize + kJoinRelayUpMaxPayload <= kMaxTxInner,
                 "a 0x60 body fits one TxItem");
+  // authority_channel_v1: the attached sink (nullptr -> 0x65/0x66 answer
+  // Unsupported). 0x64 bodies are staged in tx_body_ like 0x60.
+  AuthorityUsbSink* authority_sink_{nullptr};
+  static_assert(kMaxTxBody >= kGatewayInnerHeadSize + kAuthorityFragmentMax,
+                "authority up staging");
+  static_assert(kGatewayInnerHeadSize + kAuthorityFragmentMax <= kMaxTxInner,
+                "a 0x64 body fits one TxItem");
   BridgeStats stats_{};
 };
 

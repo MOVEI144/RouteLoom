@@ -99,6 +99,11 @@ def emit(folder, name, record):
 
 
 def main():
+    kinds = json.loads((ROOT / "protocol" / "semantics.json").read_text(
+        encoding="utf-8"))["control_object_kinds"]
+    assert len(kinds) == len(set(kinds.values())), "duplicate control object kind"
+    assert kinds["TRUST_MANIFEST"] == 5 and kinds["AUTHORITY_ENVELOPE"] == 7
+    unknown_kind = max(kinds.values()) + 1
     # Only the generated folders are wiped: top-level files such as
     # README.md are checked-in documentation, not generator output.
     for sub in ("valid", "invalid"):
@@ -150,6 +155,9 @@ def main():
         ("control_object_trust_manifest", "control_object", dict(
             subtype=1, kind=5, total_len=1750, object_hash_hex=obj_hash.hex()),
          control_object(1, 5, 0, 1750, obj_hash)),
+        ("control_object_authority_envelope", "control_object", dict(
+            subtype=1, kind=7, total_len=2048, object_hash_hex=obj_hash.hex()),
+         control_object(1, 7, 0, 2048, obj_hash)),
         ("object_chunk_first", "object_chunk", dict(
             subtype=1, object_hash_hex=obj_hash.hex(), offset=0,
             data_hex=bytes(range(32)).hex()),
@@ -273,8 +281,8 @@ def main():
         control_object(1, 1, 0, 3000, obj_hash),
         "total_len exceeds the 2048-byte object limit")
     bad("control_object_unknown_kind", "control_object",
-        control_object(1, 7, 0, 512, obj_hash),
-        "object kind 7 is unassigned")
+        control_object(1, unknown_kind, 0, 512, obj_hash),
+        f"object kind {unknown_kind} is unassigned (7 is AuthorityEnvelope)")
 
     print(f"wrote {len(list((OUT / 'valid').glob('*.json')))} valid and "
           f"{len(list((OUT / 'invalid').glob('*.json')))} invalid vectors to {OUT}")

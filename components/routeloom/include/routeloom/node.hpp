@@ -112,6 +112,9 @@ constexpr std::size_t kGroupStreamCapacity = kMaxRouteGateways;  // sources = ga
 constexpr std::uint32_t kGroupLevelWaitMs = 150;
 constexpr std::uint8_t kGroupMaxRounds = 12;         // round 0 + up to 11 repairs (lifetime-bound)
 constexpr std::uint32_t kGroupRepairGapMs = 200;     // pause between rounds at the source
+// A next-GK frame held for its durable promote expires after this when
+// the promote never settles (blocked store): the repair round recovers.
+constexpr MonotonicMs kGroupPromoteHoldMs = 5000;
 // An ordered message waiting for a gap is released (the gap skipped) after
 // min(its own remaining lifetime, this) — head-of-line blocking never
 // outlives the message lifetime (group-delivery.md §6).
@@ -186,6 +189,8 @@ struct GroupStats {
   std::uint64_t rejected{0};          // invalid/unsupported group frames
   std::uint64_t open_failures{0};
   std::uint64_t state_refusals{0};    // no tree slot: subtree reported missing
+  std::uint64_t promote_holds{0};     // next-GK frames held for the durable promote
+  std::uint64_t promote_drops{0};     // held frames dropped (slot busy/expired)
 };
 
 // Read-only views of the receive-side group state (tests/diagnostics):
@@ -1916,7 +1921,7 @@ class MeshNode {
   // internal paths never call the guarded entries.
   Status send_service_impl(NodeId destination, ByteView payload,
                            std::uint32_t lifetime_ms, Priority priority,
-                         MonotonicMs now_ms, MessageId& id) noexcept;
+                           MonotonicMs now_ms, MessageId& id) noexcept;
 
   Status encode_job(TxJob& job, MonotonicMs now_ms) noexcept;
   // True when an AuthRequired encode refusal is a missing/pending session
@@ -2366,6 +2371,18 @@ class MeshNode {
     std::uint8_t size{0};
     std::array<std::uint8_t, kGroupPayloadMax> payload{};
   };
+  // One sealed GROUP_DATA frame held while its next-GK durable promote is
+  // outstanding (G-SEC P5): the frame that triggers an implicit activation
+  // authenticates but cannot open until the promote lands, so the node
+  // retries it from process_group instead of dropping it onto the repair
+  // round. A second trigger while one is held drops (bounded, counted);
+  // stream seen-bits still suppress the repair duplicate.
+  struct GroupPromoteHold {
+    bool used{false};
+    wire::LinkOpenedFrame frame{};
+    NodeId peer{kInvalidNodeId};
+    MonotonicMs held_at_ms{0};
+  };
 
   void handle_group_data(const wire::LinkOpenedFrame& frame, NodeId peer,
                          MonotonicMs now_ms) noexcept;
@@ -2619,6 +2636,7 @@ class MeshNode {
   FixedPool<GroupOrigin, kGroupOriginCapacity> group_origins_{};
   FixedPool<GroupStream, kGroupStreamCapacity> group_streams_{};
   FixedPool<GroupHold, kGroupHoldCapacity> group_holds_{};
+  GroupPromoteHold group_promote_hold_{};
   std::uint32_t next_group_seq_{1};
   std::int64_t group_budget_tokens_us_{kGroupBudgetCapacityUs};
   MonotonicMs group_budget_last_ms_{0};

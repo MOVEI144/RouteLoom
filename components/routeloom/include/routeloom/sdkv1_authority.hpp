@@ -177,11 +177,11 @@ void authority_gk_id(NetworkId network, std::uint32_t epoch, const keys::Secret&
 // maps an AEAD failure to AuthenticationFailed without touching `plaintext`
 // beyond zeroing it. Neither tracks replay: the caller commits the window
 // only after a successful open.
-Status authority_seal(const AeadGcm& aead, const keys::TrafficKey& tx,
+Status authority_seal(const routeloom::AeadGcm& aead, const keys::TrafficKey& tx,
                       keys::AuthorityEnvelopeType type, std::uint32_t ctx_id,
                       std::uint64_t counter, ByteView plaintext, MutableByteView out,
                       std::size_t& written) noexcept;
-Status authority_open(const AeadGcm& aead, const keys::TrafficKey& rx, ByteView envelope,
+Status authority_open(const routeloom::AeadGcm& aead, const keys::TrafficKey& rx, ByteView envelope,
                       std::uint32_t want_ctx, MutableByteView plaintext, std::size_t& written,
                       keys::AuthorityEnvelopeHeader& header) noexcept;
 
@@ -265,6 +265,9 @@ struct AuthorityStart {
 struct AuthorityRxCarrier {
   AuthorityCarrierKind kind{AuthorityCarrierKind::Envelope};
   ByteView bytes{};  // valid during the advance() call only
+  // When this spans the transport's writable assembly, the client may
+  // authenticate and erase it in place while its TX workspace is occupied.
+  MutableByteView writable{};
 };
 
 struct AuthorityTxResult {
@@ -315,6 +318,10 @@ struct AuthoritySnapshot {
   std::uint32_t backoff_s{0};  // current backoff step (0 = not backing off)
   bool pull_pending{false};
   bool join_confirmed{false};
+  // True while channel work is in flight (staged TX, pending ACK,
+  // handshake or backoff). Diagnostics only: the channel naps across
+  // sleep and resumes on Wake, so busyness never gates sleep.
+  bool busy{false};
 };
 
 class AuthorityClient final {
@@ -322,7 +329,7 @@ class AuthorityClient final {
   // All references are caller-owned and must outlive the client. `rlres1_env`
   // supplies entropy and receive context ids (its slot directory is unused:
   // the client only initiates).
-  AuthorityClient(const AeadGcm& aead, AuthorityPort& port, AuthorityObserver& observer,
+  AuthorityClient(const routeloom::AeadGcm& aead, AuthorityPort& port, AuthorityObserver& observer,
                   rlres1::Environment& rlres1_env, GroupKeyState* group = nullptr) noexcept;
 
   AuthorityClient(const AuthorityClient&) = delete;
@@ -364,10 +371,10 @@ class AuthorityClient final {
                  MonotonicMs now) noexcept;
   Status send_join_confirm(MonotonicMs now) noexcept;
   Status send_pull(PullReason reason, MonotonicMs now) noexcept;
-  void on_envelope_ready(ByteView bytes, MonotonicMs now) noexcept;
+  void on_envelope_ready(const AuthorityRxCarrier& rx, MonotonicMs now) noexcept;
   void wipe() noexcept;
 
-  const AeadGcm& aead_;
+  const routeloom::AeadGcm& aead_;
   AuthorityPort& port_;
   AuthorityObserver& observer_;
   rlres1::Environment& env_;
@@ -385,14 +392,16 @@ class AuthorityClient final {
   AuthorityReplayWindow rx_window_{};
   std::uint64_t tx_counter_{0};
   std::uint64_t next_request_id_{1};
-  // Single staged carrier: the TX buffer (2048 B). The port copies it
-  // synchronously; while the port is full the bytes wait here for Tick.
+  // One 2048 B workspace holds a staged TX until the port copies it, or
+  // one authenticated RX while no TX is staged. A port-stalled TX keeps
+  // its bytes and the peer retries the refused envelope.
   std::array<std::uint8_t, keys::kAuthorityEnvelopeMax> tx_buffer_{};
+  // The fixed P5 control replies can arrive while a prior send is stalled.
+  // A full-size envelope uses the common workspace once that send leaves.
+  std::array<std::uint8_t, keys::kAuthorityEnvelopeHeaderSize +
+                               kGroupKeyUpdateSize + kAeadTagSize> rx_control_{};
   std::size_t tx_size_{0};
   TxKind tx_kind_{TxKind::None};
-  // RX buffer (2048 B), doubling as the plaintext workspace; wiped once the
-  // envelope is consumed or rejected.
-  std::array<std::uint8_t, keys::kAuthorityEnvelopeMax> rx_buffer_{};
   std::uint64_t tx_token_{0};  // last accepted send, for TxResult matching
   bool tx_token_live_{false};
   MonotonicMs backoff_until_{0};

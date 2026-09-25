@@ -207,6 +207,12 @@ enum class ControlObjectKind : std::uint8_t {
   // bytes verbatim; the manifest hash proves reassembly identity only, the
   // SAK signature inside the object is the authority.
   RevocationSet = 6,
+  // P5 authority channel (03-key-hierarchy.md §5.3): envelopes larger than
+  // 120 B ride the same 49/50/51 transfer verbatim (28..2048 B, the
+  // manifest hash proves reassembly identity only). The design's number 5
+  // was already TrustManifest when the P5 transport landed, so authority
+  // takes the next free kind; 8+ stays refused.
+  AuthorityEnvelope = 7,
 };
 using ObjectHash = std::array<std::uint8_t, 32>;
 // Manifest layout (38B): version u8 | subtype u8 | kind u8 | flags u8 (=0) |

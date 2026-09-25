@@ -272,7 +272,8 @@ class SimNode {
     deps_.mesh = &mesh_;
     deps_.usb = &usb_;
     deps_.verifier = &verifier_;
-    deps_.bank_aead = AeadGcm{&SimAead::seal, &SimAead::open, nullptr};
+    deps_.bank_aead = sdkv1::AeadGcm{&SimAead::seal, &SimAead::open, nullptr};
+    deps_.crypto_aead = *routeloom::builtin_aead_gcm();
     deps_.proxy_sealer = &sealer_;
     deps_.local_mac = mac_;
     deps_.local_node = node_;

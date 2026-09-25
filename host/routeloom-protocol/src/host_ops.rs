@@ -1277,7 +1277,9 @@ pub fn decode_config_reply(inner: &[u8], sub: u8) -> Result<ConfigReply, HostOps
 // kind pins are USB wire facts re-declared here (they match
 // routeloom-keysched's RLRES1 sizes and the 28..=2048 envelope span, which
 // this crate must not depend on).
-pub const CAP_AUTHORITY_CHANNEL_V1: u32 = 1 << 9;
+// Join-relay-v2 owns bit 9; an authority-only lane needs its own transcript bit.
+pub const CAP_AUTHORITY_CHANNEL_V1: u32 = 1 << 10;
+const _: () = assert!(CAP_AUTHORITY_CHANNEL_V1 & crate::join_relay::CAP_JOIN_RELAY_V2 == 0);
 pub const SUB_AUTHORITY_UP: u8 = 0x64;
 pub const SUB_AUTHORITY_DOWN: u8 = 0x65;
 pub const SUB_SITE_STATE_SET: u8 = 0x66;

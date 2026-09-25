@@ -12,6 +12,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "routeloom/aead_gcm.hpp"
 #include "routeloom/autonomy_wire.hpp"
 #include "routeloom/discovery.hpp"
 #include "routeloom/sdkv1_ead.hpp"
@@ -21,6 +22,14 @@
 #include "routeloom/usb_host_ops.hpp"
 
 #include "test_sdkv1.hpp"
+
+namespace routeloom::sdkv1 {
+struct SecurityCoordinatorTestAccess {
+  static void link_failed(SecurityCoordinator& coordinator) noexcept {
+    coordinator.note_link_failed();
+  }
+};
+}  // namespace routeloom::sdkv1
 
 namespace {
 
@@ -256,6 +265,7 @@ struct Fixture {
     d.usb = &usb;
     d.verifier = &verifier;
     d.bank_aead = sdkv1::AeadGcm{&fake_seal, &fake_open, nullptr};
+    d.crypto_aead = *routeloom::builtin_aead_gcm();
     d.proxy_sealer = &sealer;
     d.local_mac = kMac;
     d.local_node = kNode;
@@ -300,6 +310,18 @@ bool poll_until_member(SecurityCoordinator& coordinator, MonotonicMs& now, const
     if (coordinator.snapshot().mode == CoordinatorMode::Member) return true;
   }
   return false;
+}
+
+bool complete_member_apply(SecurityCoordinator& coordinator, MonotonicMs now,
+                           std::uint8_t channel) {
+  CoordinatorEvent applied{};
+  applied.kind = CoordinatorEventKind::ChannelReady;
+  applied.now = now;
+  applied.channel_token = 0;
+  applied.channel_result = StatusCode::Ok;
+  applied.channel = channel;
+  applied.channel_generation = 7;
+  return coordinator.step(applied).ok();
 }
 
 SiteRecord gateway_site() {
@@ -382,18 +404,19 @@ void test_boot_silent_adoption() {
         advertised.scope != kInvalidScopeRef);
 
   // The GK scope went live with the adopted generation; anything else
-  // refuses without leaking.
+  // refuses without leaking. The member scope handle binds the provider.
   std::uint32_t generation = 0;
-  CHECK(coordinator.gk_scope().current_generation(ScopeRef{}, generation));
+  CHECK(coordinator.gk_scope().current_generation(kMemberScopeRef, generation));
   CHECK(generation == 203);
+  CHECK(!coordinator.gk_scope().current_generation(ScopeRef{}, generation));
   ScopeTag tag{};
   const std::uint8_t input[3] = {1, 2, 3};
   CHECK(coordinator.gk_scope()
-            .scope_tag(ScopeRef{}, 203, ByteView{input, sizeof(input)}, tag)
+            .scope_tag(kMemberScopeRef, 203, ByteView{input, sizeof(input)}, tag)
             .ok());
   ScopeTag refused{};
   CHECK(!coordinator.gk_scope()
-             .scope_tag(ScopeRef{}, 204, ByteView{input, sizeof(input)}, refused)
+             .scope_tag(kMemberScopeRef, 204, ByteView{input, sizeof(input)}, refused)
              .ok());
   for (const auto byte : refused) CHECK(byte == 0);
 
@@ -532,14 +555,12 @@ void test_invalid_proxy_auth_does_not_hold_demux() {
   CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
   MonotonicMs now = kT0;
   CHECK(poll_until_member(coordinator, now));
-  CoordinatorEvent applied{};
-  applied.kind = CoordinatorEventKind::ChannelReady;
-  applied.now = now;
-  applied.channel_token = 0;
-  applied.channel_result = StatusCode::Ok;
-  applied.channel = f.site.site().channel;
-  applied.channel_generation = 7;
-  CHECK(coordinator.step(applied).ok());
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  now += 100;
+  CHECK(coordinator.step(poll_at(now)).ok());
+  CoordinatorAction ready_action{};
+  while (coordinator.take_action(ready_action).ok()) {
+  }
   CHECK(coordinator.quiescent());
 
   for (std::uint8_t i = 1; i <= 8; ++i) {
@@ -838,7 +859,7 @@ void test_sleep_wake_stop() {
   HandshakeLocal local{};
   CHECK(!coordinator.local(local));
   std::uint32_t generation = 0;
-  CHECK(!coordinator.gk_scope().current_generation(ScopeRef{}, generation));
+  CHECK(!coordinator.gk_scope().current_generation(kMemberScopeRef, generation));
 
   // And a second boot adopts again (the bank re-configure path).
   now += 100;
@@ -961,6 +982,233 @@ void test_channel_ready_flow() {
 
 }  // namespace
 
+// --- P5 PR4: authority channel + stale-GK refresh --------------------------------
+
+class FakeAuthorityPort final : public AuthorityPort {
+ public:
+  struct Sent {
+    NodeId gateway{kInvalidNodeId};
+    AuthorityCarrierKind kind{AuthorityCarrierKind::Envelope};
+    std::vector<std::uint8_t> bytes;
+    std::uint64_t token{0};
+  };
+  bool try_send(NodeId gateway, AuthorityCarrierKind kind, ByteView carrier,
+                std::uint64_t& token) noexcept override {
+    if (refuse) return false;
+    token = ++next_token;
+    Sent sent;
+    sent.gateway = gateway;
+    sent.kind = kind;
+    sent.bytes.assign(carrier.data, carrier.data + carrier.size);
+    sent.token = token;
+    sends.push_back(sent);
+    return true;
+  }
+  bool refuse{false};
+  std::uint64_t next_token{0};
+  std::vector<Sent> sends;
+};
+
+CoordinatorEvent authority_rx_event(AuthorityCarrierKind kind, ByteView bytes,
+                                   MonotonicMs now) {
+  CoordinatorEvent event{};
+  event.kind = CoordinatorEventKind::AuthorityRx;
+  event.now = now;
+  event.auth_kind = kind;
+  event.auth_bytes = bytes;
+  return event;
+}
+
+bool poll_drain(SecurityCoordinator& coordinator, MonotonicMs& now, int rounds = 1) {
+  for (int i = 0; i < rounds; ++i) {
+    now += 100;
+    if (!coordinator.step(poll_at(now)).ok()) return false;
+    CoordinatorAction action{};
+    while (coordinator.take_action(action).ok()) {
+    }
+  }
+  return true;
+}
+
+void test_authority_channel_lifecycle() {
+  current = "authority_channel_lifecycle";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  FakeAuthorityPort port;
+  CHECK(coordinator.attach_authority_port(port));
+  CHECK(!coordinator.attach_authority_port(port));  // once only
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  // Taking ApplyMemberConfig does not prove the radio reached the member
+  // channel. The authority channel starts after the apply completion.
+  CHECK(poll_drain(coordinator, now));
+  CHECK(port.sends.empty());
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  CHECK(poll_drain(coordinator, now));
+  CHECK(!port.sends.empty());
+  if (!port.sends.empty()) {
+    CHECK(port.sends[0].kind == AuthorityCarrierKind::R1);
+    CHECK(port.sends[0].bytes.size() == 60);
+    CHECK(port.sends[0].gateway == 0x00A1000000000001ULL);
+  }
+  CoordinatorSnapshot snap = coordinator.snapshot();
+  CHECK(snap.authority_started);
+  CHECK(!snap.authority_ready);
+  CHECK(snap.authority_busy);  // Connecting
+  CHECK(!snap.join_confirmed);
+  // A stray carrier while Connecting is rejected, never applied.
+  const std::uint8_t garbage[40] = {0};
+  CHECK(coordinator
+            .step(authority_rx_event(AuthorityCarrierKind::Envelope,
+                                     ByteView{garbage, sizeof(garbage)}, now))
+            .ok());
+  CHECK(coordinator.authority_snapshot().rx_rejected == 1);
+  // A pull request pends on the connecting channel; a bad reason refuses.
+  CoordinatorEvent pull{};
+  pull.kind = CoordinatorEventKind::RequestPull;
+  pull.now = now;
+  pull.pull_reason = 0;
+  CHECK(!coordinator.step(pull).ok());
+  pull.pull_reason = 1;
+  CHECK(coordinator.step(pull).ok());
+  // USB session death suspends the channel; session up restarts it.
+  CoordinatorEvent down{};
+  down.kind = CoordinatorEventKind::UsbSessionDown;
+  down.now = now;
+  CHECK(coordinator.step(down).ok());
+  CHECK(!coordinator.snapshot().authority_started);
+  CoordinatorEvent up{};
+  up.kind = CoordinatorEventKind::UsbSessionUp;
+  now += 5000;
+  up.now = now;
+  CHECK(coordinator.step(up).ok());
+  CHECK(coordinator.snapshot().authority_started);
+  CHECK(port.sends.size() >= 2);  // a fresh R1 went out
+  // Carriers outside Member mode drop silently (stale transport views).
+  CoordinatorEvent stop{};
+  stop.kind = CoordinatorEventKind::Stop;
+  stop.now = now;
+  CHECK(coordinator.step(stop).ok());
+  CHECK(coordinator
+            .step(authority_rx_event(AuthorityCarrierKind::Wake,
+                                     ByteView{garbage, 8}, now))
+            .ok());
+  CHECK(!coordinator.snapshot().authority_started);
+}
+
+void test_group_provider_routing() {
+  current = "group_provider_routing";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  // Pre-adoption the provider is pairwise-only: group TX refuses.
+  std::uint32_t epoch = 0;
+  CHECK(coordinator.session_provider()
+            .tx_epoch(SecurityScope::Group, kBroadcastNodeId, epoch)
+            .code == StatusCode::AuthRequired);
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  // Adopted: the group epoch is the durable current, link epochs snapshot
+  // boot+generation atomically, staged-and-unknown refuses.
+  CHECK(coordinator.session_provider()
+            .tx_epoch(SecurityScope::Group, kBroadcastNodeId, epoch)
+            .ok());
+  CHECK(epoch == 203);
+  std::uint32_t boot = 0;
+  std::uint32_t g = 0;
+  CHECK(coordinator.session_provider().tx_group_link_epochs(boot, g).ok());
+  CHECK(boot == kBoot);
+  CHECK(g == 203);
+  CHECK(coordinator.session_provider().accepts_group_epoch(203));
+  CHECK(!coordinator.session_provider().accepts_group_epoch(999));
+  CHECK(!coordinator.session_provider().group_promotion_pending());
+  // Pairwise still delegates to the member bank.
+  CHECK(coordinator.session_provider().tx_epoch(SecurityScope::Link, kNode + 1, epoch).code ==
+        StatusCode::AuthRequired);
+}
+
+void bump_unknown_generations(NeighborDiscovery& discovery, std::uint32_t fresh) {
+  // White-box stand-in for discovery observing unknown-generation
+  // DISCOVERs (the counting itself is covered by the discovery suite);
+  // the Owner logic under test turns fresh observations into strikes.
+  const_cast<ScopeStats&>(discovery.scope_stats()).unknown_generation += fresh;
+}
+
+void test_refresh_stale_gk() {
+  current = "refresh_stale_gk";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  FakeAuthorityPort port;
+  CHECK(coordinator.attach_authority_port(port));
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  CHECK(poll_drain(coordinator, now, 5));  // StartMemberDiscovery emitted
+  CHECK(coordinator.snapshot().link_sessions == 0);
+  // Linklessness alone never refreshes: quiet neighbors are not evidence.
+  CHECK(poll_drain(coordinator, now, 20));
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+  CHECK(coordinator.snapshot().refresh_strikes == 0);
+  // Three discovery rounds with fresh unknown generations while linkless
+  // tear the member engine down into a same-site refresh.
+  for (int i = 0; i < 3; ++i) {
+    bump_unknown_generations(*f.deps().discovery, 2);
+    CHECK(poll_drain(coordinator, now));
+  }
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  CHECK(coordinator.counters().refreshes == 1);
+  CHECK(f.site.has_site());  // RLS1 retained, never erased first
+  CHECK(!coordinator.snapshot().authority_started);  // channel suspended
+  // No re-verification possible (no peers here): after 5 minutes the
+  // refresh abandons back to the retained membership.
+  CHECK(poll_drain(coordinator, now, 3001));
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+  CHECK(coordinator.counters().refreshes == 1);
+  // Cooling down: fresh unknowns inside 10 minutes do not re-trigger.
+  for (int i = 0; i < 3; ++i) {
+    bump_unknown_generations(*f.deps().discovery, 2);
+    CHECK(poll_drain(coordinator, now));
+  }
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+  CHECK(coordinator.counters().refreshes == 1);
+  CHECK(coordinator.snapshot().refresh_strikes == 0);
+}
+
+void test_link_failure_refresh_waits_for_poll_boundary() {
+  current = "link_failure_refresh_waits_for_poll_boundary";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  CHECK(poll_drain(coordinator, now));  // discovery has started
+  for (int i = 0; i < 3; ++i) {
+    SecurityCoordinatorTestAccess::link_failed(coordinator);
+  }
+  // Engine results are drained in a loop. The member workspace must
+  // remain alive until that loop and the member poll have finished.
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+  CHECK(coordinator.snapshot().refresh_strikes == 3);
+  CHECK(poll_drain(coordinator, now));
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  CHECK(coordinator.counters().refreshes == 1);
+}
+
 int main() {
   test_boot_silent_adoption();
   test_member_apply_failure_is_closed();
@@ -974,6 +1222,10 @@ int main() {
   test_relay_loopback_and_mesh_send();
   test_late_discovery_attach();
   test_sleep_wake_stop();
+  test_authority_channel_lifecycle();
+  test_group_provider_routing();
+  test_refresh_stale_gk();
+  test_link_failure_refresh_waits_for_poll_boundary();
   test_commit_veto();
   test_store_credential_verifier();
   test_channel_ready_flow();

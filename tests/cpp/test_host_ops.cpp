@@ -3774,6 +3774,9 @@ std::uint64_t authority_u64(const AuthorityFields& f, const char* key) {
 }
 
 void test_authority_usb_codecs() {
+  // Both lanes are negotiated independently; a join-only gateway must not
+  // claim that it can forward authority envelopes.
+  CHECK((kCapAuthorityChannelV1 & kCapJoinRelayV2) == 0);
 #ifndef ROUTELOOM_SDKV1_GOLDEN_DIR
   CHECK(false);  // the authority cases need the golden directory
   return;
@@ -3993,6 +3996,246 @@ void test_authority_usb_codecs() {
   }
 }
 
+// P5 PR4: the 0x64-0x67 authority lane through a live bridge session —
+// dispatch, 0x67 receipts, 0x64 ups, capability gating and reconnect.
+class FakeAuthoritySink final : public UsbBridge::AuthorityUsbSink {
+ public:
+  Status authority_down(NodeId device, const AuthorityFragment& fragment,
+                        bool& complete, MonotonicMs) noexcept override {
+    ++downs;
+    last_device = device;
+    last_transfer = fragment.transfer_id;
+    if (fail_next) {
+      fail_next = false;
+      return Status::error(StatusCode::Busy, "test backpressure");
+    }
+    complete = fragment_complete(fragment);
+    return Status::success();
+  }
+  Status site_state_set(const SiteStateSet& set, SiteStateReport& report,
+                        MonotonicMs) noexcept override {
+    ++sets;
+    last_action = set.action;
+    report.local_state_valid = true;
+    report.local_current = 7;
+    report.local_next = 8;
+    return Status::success();
+  }
+  void authority_session_down(MonotonicMs) noexcept override { ++session_downs; }
+
+  // Two-fragment completion model: the second fragment of a transfer
+  // finishes it, a single-fragment total too.
+  bool fragment_complete(const AuthorityFragment& fragment) {
+    if (fragment.offset + fragment.data.size >= fragment.total) return true;
+    if (fragment.transfer_id == open_transfer) return true;
+    open_transfer = fragment.transfer_id;
+    return false;
+  }
+
+  int downs{0};
+  int sets{0};
+  int session_downs{0};
+  bool fail_next{false};
+  NodeId last_device{kInvalidNodeId};
+  std::uint32_t last_transfer{0};
+  std::uint32_t open_transfer{0};
+  SiteStateAction last_action{SiteStateAction::WakeLocal};
+};
+
+std::vector<std::uint8_t> authority_down_bytes(NodeId device, std::uint32_t transfer,
+                                               sdkv1::AuthorityCarrierKind kind,
+                                               std::uint16_t total, std::uint16_t offset,
+                                               ByteView data) {
+  AuthorityFragment fragment{};
+  fragment.device = device;
+  fragment.transfer_id = transfer;
+  fragment.kind = kind;
+  fragment.hops = 0;
+  fragment.total = total;
+  fragment.offset = offset;
+  fragment.data = data;
+  std::array<std::uint8_t, 1024> out{};
+  std::size_t written = 0;
+  if (!encode_authority_down(fragment, MutableByteView{out.data(), out.size()},
+                             written)) {
+    return {};
+  }
+  return std::vector<std::uint8_t>(out.begin(), out.begin() + written);
+}
+
+void test_bridge_authority_dispatch() {
+  World world;
+  FakeAuthoritySink sink;
+  CHECK(world.bridge.attach_authority(sink));
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0x1111, 10) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+
+  // A single-fragment R2 down completes the object: 0x67 ObjectQueued.
+  std::array<std::uint8_t, 52> r2{};
+  for (std::size_t i = 0; i < r2.size(); ++i) r2[i] = static_cast<std::uint8_t>(i);
+  const auto r2_down = authority_down_bytes(0x101, 0xA11CE,
+                                                  sdkv1::AuthorityCarrierKind::R2, 52, 0,
+                                                  ByteView{r2.data(), r2.size()});
+  const auto answer =
+      transact(world, host, now, 20, ByteView{r2_down.data(), r2_down.size()},
+               got_error, error_code);
+  CHECK(!got_error);
+  SiteStateReport report{};
+  CHECK(decode_site_state_report(ByteView{answer.data(), answer.size()}, report));
+  CHECK(report.result == SiteStateResult::ObjectQueued);
+  CHECK(report.device == 0x101);
+  CHECK(report.transfer_id == 0xA11CEu);
+  CHECK(report.received_len == 52);
+  CHECK(sink.downs == 1);
+  CHECK(sink.last_device == 0x101);
+
+  // A two-fragment envelope: FragmentQueued then ObjectQueued.
+  std::array<std::uint8_t, 1500> envelope{};
+  for (std::size_t i = 0; i < envelope.size(); ++i)
+    envelope[i] = static_cast<std::uint8_t>(0x80 + i);
+  const auto first = authority_down_bytes(0x101, 0xBEEF,
+                                          sdkv1::AuthorityCarrierKind::Envelope, 1500,
+                                          0, ByteView{envelope.data(), 960});
+  const auto frag_answer =
+      transact(world, host, now, 21, ByteView{first.data(), first.size()}, got_error,
+               error_code);
+  CHECK(!got_error);
+  CHECK(decode_site_state_report(ByteView{frag_answer.data(), frag_answer.size()},
+                                 report));
+  CHECK(report.result == SiteStateResult::FragmentQueued);
+  CHECK(report.received_len == 960);
+  const auto second = authority_down_bytes(0x101, 0xBEEF,
+                                           sdkv1::AuthorityCarrierKind::Envelope, 1500,
+                                           960, ByteView{envelope.data() + 960, 540});
+  const auto obj_answer =
+      transact(world, host, now, 22, ByteView{second.data(), second.size()}, got_error,
+               error_code);
+  CHECK(!got_error);
+  CHECK(decode_site_state_report(ByteView{obj_answer.data(), obj_answer.size()},
+                                 report));
+  CHECK(report.result == SiteStateResult::ObjectQueued);
+
+  // Sink backpressure surfaces as Busy, never a false queued receipt.
+  sink.fail_next = true;
+  const auto busy_answer = transact(
+      world, host, now, 23, ByteView{first.data(), first.size()}, got_error, error_code);
+  CHECK(!got_error);
+  CHECK(decode_site_state_report(ByteView{busy_answer.data(), busy_answer.size()},
+                                 report));
+  CHECK(report.result == SiteStateResult::Busy);
+
+  // 0x66 QueryLocal reports the sink's local epochs under the request id.
+  SiteStateSet set{};
+  set.action = SiteStateAction::QueryLocal;
+  set.site_epoch = 9;
+  std::array<std::uint8_t, 64> set_bytes{};
+  std::size_t set_written = 0;
+  CHECK(encode_site_state_set(set, MutableByteView{set_bytes.data(), set_bytes.size()},
+                              set_written));
+  const auto set_answer =
+      transact(world, host, now, 24, ByteView{set_bytes.data(), set_written}, got_error,
+               error_code);
+  CHECK(!got_error);
+  CHECK(decode_site_state_report(ByteView{set_answer.data(), set_answer.size()},
+                                 report));
+  CHECK(report.result == SiteStateResult::FragmentQueued);
+  CHECK(report.device == 1);  // the gateway node itself
+  CHECK(report.local_state_valid);
+  CHECK(report.local_current == 7);
+  CHECK(report.local_next == 8);
+  CHECK(sink.sets == 1);
+
+  // A malformed 0x65 and a host-issued 0x64 are protocol errors.
+  const std::array<std::uint8_t, 4> malformed{{1, 0x65, 0, 1}};
+  (void)transact(world, host, now, 25, ByteView{malformed.data(), malformed.size()},
+                 got_error, error_code);
+  CHECK(got_error);
+  AuthorityFragment up{};
+  up.device = 0x101;
+  up.transfer_id = 3;
+  up.kind = sdkv1::AuthorityCarrierKind::R1;
+  up.hops = 1;
+  up.total = 60;
+  up.offset = 0;
+  std::array<std::uint8_t, 60> r1{};
+  up.data = ByteView{r1.data(), r1.size()};
+  std::array<std::uint8_t, 1024> up_bytes{};
+  std::size_t up_written = 0;
+  CHECK(encode_authority_up(up, MutableByteView{up_bytes.data(), up_bytes.size()},
+                            up_written));
+  (void)transact(world, host, now, 26, ByteView{up_bytes.data(), up_written}, got_error,
+                 error_code);
+  CHECK(got_error);
+
+  // The 0x64 up path: staged while ACTIVE, opened by the host driver.
+  CHECK(world.bridge.send_authority_up(up));
+  world.drain(now);
+  now += 200;
+  bool saw_up = false;
+  for (const auto& record : world.device_sink.frames) {
+    std::uint64_t counter = 0;
+    ByteView opened{};
+    if (!open_body(host.proof.key, kDirDeviceToHost, record.frame, counter, opened)) {
+      continue;
+    }
+    if (record.frame.kind != FrameKind::HostOps || opened.size < 2 ||
+        opened.data[1] != 0x64) {
+      continue;
+    }
+    AuthorityFragment opened_up{};
+    CHECK(decode_authority_up(opened, opened_up));
+    CHECK(opened_up.device == 0x101);
+    CHECK(opened_up.transfer_id == 3);
+    saw_up = true;
+  }
+  world.device_sink.frames.clear();
+  CHECK(saw_up);
+
+  // Session death notifies the sink; the next session serves again.
+  world.bridge.notify_disconnect(now);
+  world.drain(now);
+  CHECK(sink.session_downs == 1);
+  HostDriver host2;
+  now += 500;
+  CHECK(host_handshake(world, host2, now, 0x2222, 100) != 0);
+  const auto re_down = authority_down_bytes(0x101, 0xE1E10,
+                                            sdkv1::AuthorityCarrierKind::Envelope, 1500,
+                                            0, ByteView{envelope.data(), 960});
+  const auto re_answer = transact(world, host2, now, 110,
+                                  ByteView{re_down.data(), re_down.size()}, got_error,
+                                  error_code);
+  CHECK(!got_error);
+  CHECK(decode_site_state_report(ByteView{re_answer.data(), re_answer.size()},
+                                 report));
+  CHECK(report.result == SiteStateResult::FragmentQueued);
+  CHECK(sink.session_downs == 1);
+}
+
+void test_bridge_authority_unsupported() {
+  // Without attach_authority the lane answers Unsupported, never served.
+  World world;
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0x1111, 10) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  std::array<std::uint8_t, 16> r3{};
+  const auto bytes = authority_down_bytes(0x101, 0x1234,
+                                          sdkv1::AuthorityCarrierKind::R3, 16, 0,
+                                          ByteView{r3.data(), r3.size()});
+  const auto answer =
+      transact(world, host, now, 20, ByteView{bytes.data(), bytes.size()}, got_error,
+               error_code);
+  CHECK(!got_error);
+  SiteStateReport report{};
+  CHECK(decode_site_state_report(ByteView{answer.data(), answer.size()}, report));
+  CHECK(report.result == SiteStateResult::Unsupported);
+  CHECK(report.device == 0x101);
+}
+
 int main() {
   test_boot_lease();
   test_submit_codec();
@@ -4039,6 +4282,8 @@ int main() {
   test_host_ops_sub_registry();
   test_bridge_config_trust_dispatch();
   test_authority_usb_codecs();
+  test_bridge_authority_dispatch();
+  test_bridge_authority_unsupported();
   if (failures != 0) {
     std::fprintf(stderr, "%d host-ops checks failed\n", failures);
     return 1;
