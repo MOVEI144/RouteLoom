@@ -601,6 +601,22 @@ void suite_lifetime(const AeadGcm& port) {
 }
 
 template <typename Bank>
+void suite_stop_wipes_without_entropy(const AeadGcm& port) {
+  Fixture<Bank> fix;
+  CHECK_OK(fix.configure(port));
+  install_link(fix.bank, kPeer, 0x1111, 0x2222, 0x10);
+  CHECK(fix.bank.has_usable(SecurityScope::Link, kPeer));
+  fix.random.exhausted = true;
+  fix.bank.clear();
+  CHECK(!fix.bank.configured());
+  CHECK(fix.bank.live_count(SecurityScope::Link) == 0);
+  CHECK(!fix.bank.has_usable(SecurityScope::Link, kPeer));
+  fix.random.exhausted = false;
+  CHECK_OK(fix.configure(port, kSelf, 5000));
+  CHECK(fix.bank.live_count(SecurityScope::Link) == 0);
+}
+
+template <typename Bank>
 void suite_k04_reboot_forgets(const AeadGcm& port) {
   // V1-K04: a reboot loses keys AND windows together. Old frames never
   // re-verify — not even when the new context accidentally reuses an id.
@@ -874,6 +890,7 @@ void run_suite(const AeadGcm& port, bool& fail_next) {
   suite_install_retire<Bank>(port);
   suite_overlap<Bank>(port);
   suite_lifetime<Bank>(port);
+  suite_stop_wipes_without_entropy<Bank>(port);
   suite_k04_reboot_forgets<Bank>(port);
   suite_isolation<Bank>(port);
 }

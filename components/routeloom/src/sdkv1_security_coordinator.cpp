@@ -202,6 +202,24 @@ CoordinatorSnapshot SecurityCoordinator::snapshot() const noexcept {
   return out;
 }
 
+Status SecurityCoordinator::member_discovery_config(DiscoveryConfig& out) noexcept {
+  out = DiscoveryConfig{};
+  if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
+  if (mode_ != CoordinatorMode::Member || !member_valid_) {
+    return Status::error(StatusCode::InvalidState, "member discovery unavailable");
+  }
+  out.node = adopted_.node;
+  out.mac = deps_.local_mac;
+  out.network = adopted_.network;
+  out.network_hint = static_cast<std::uint32_t>(adopted_.network);
+  out.capability_bits = kRld1CapMemberEdhocV1 | kRld1CapMemberResumeV1;
+  out.scope_mode = ScopeMode::Required;
+  out.scope_provider = &gk_scope_;
+  out.scope = ScopeRef{1};
+  out.cookie_bucket_ms = static_cast<std::uint32_t>(MemberCookie::kBucketMs);
+  return Status::success();
+}
+
 MonotonicMs SecurityCoordinator::next_deadline(const MonotonicMs now) const noexcept {
   if (sleeping_ || mode_ == CoordinatorMode::Fresh) return kJoinNoDeadline;
   MonotonicMs deadline = kJoinNoDeadline;
@@ -237,6 +255,7 @@ bool SecurityCoordinator::quiescent() const noexcept {
 }
 
 bool SecurityCoordinator::quiescent_locked() const noexcept {
+  if (tune_outstanding_ != 0 || member_apply_pending_) return false;
   for (const auto& staged : staged_) {
     if (staged.used) return false;
   }
@@ -303,10 +322,9 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
     return Status::success();
   }
   if (mode_ != CoordinatorMode::Member) return Status::success();
-  // The GK scope is adopted with the member config; StartMemberDiscovery
-  // follows ApplyMemberConfig through the single action slot (the
-  // !action_pending_ guard keeps the order: the firmware takes the config
-  // first, then starts discovery with the Required GK scope).
+  if (member_apply_pending_) return Status::success();
+  // Start discovery only after the firmware has reported a successful
+  // member radio/node apply and the single action slot is free.
   if (!discovery_started_ && !action_pending_) {
     CoordinatorAction start{};
     start.kind = CoordinatorActionKind::StartMemberDiscovery;
@@ -457,6 +475,10 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
     return Status::success();  // Fresh/Removed/Recovery: no RLD1 owner lives
   }
   if (sleeping_) return Status::success();
+  if (mode_ == CoordinatorMode::Member && member_apply_pending_) {
+    sat_inc(counters_.demux_drops);
+    return Status::success();
+  }
   if (event.radio_generation != radio_generation_) {
     sat_inc(counters_.demux_drops);
     return Status::success();
@@ -1361,10 +1383,21 @@ Status SecurityCoordinator::on_channel_ready(const CoordinatorEvent& event) noex
                               : Status::error(event.channel_result, "tune failed");
     return joiner().on_channel_ready(event.channel_token, result, event.now);
   }
-  // No tune outstanding: in member mode this is the firmware's apply-time
-  // report (it owns the radio and retuned while applying the member
-  // config); anywhere else it is stale.
-  if (mode_ != CoordinatorMode::Member) return Status::success();
+  // The first member report proves the node and radio reached the adopted
+  // operating channel. Discovery cannot start on the join channel.
+  if (mode_ != CoordinatorMode::Member || !member_apply_pending_ ||
+      event.channel_token != 0) return Status::success();
+  member_apply_pending_ = false;
+  if (event.channel_result != StatusCode::Ok || event.channel != channel_) {
+    stop_traffic();
+    destroy_workspace();
+    mode_ = CoordinatorMode::Recovery;
+    CoordinatorAction recovery{};
+    recovery.kind = CoordinatorActionKind::ReportRecovery;
+    recovery.recovery = JoinRecoveryReason::RadioFailure;
+    emit_action(recovery);
+    return Status::success();
+  }
   channel_ = event.channel;
   radio_generation_ = event.channel_generation;
   return Status::success();
@@ -1409,6 +1442,7 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now) noexcept {
   sleeping_ = false;
   usb_direct_ = false;
   discovery_started_ = false;
+  member_apply_pending_ = false;
   hooks_.set_holdoff_elapsed(false);
   removal_holdoff_armed_ = false;
   mode_ = CoordinatorMode::Fresh;
@@ -1558,6 +1592,7 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
   }
   channel_ = site.channel;  // the operating channel gates RLD1 RX
   discovery_started_ = false;
+  member_apply_pending_ = true;
   sat_inc(counters_.member_adoptions);
   emit_member_action();
   return Status::success();
@@ -1680,18 +1715,10 @@ Status SecurityCoordinator::land_removal(const RemovalNotice& notice, const Mono
 void SecurityCoordinator::stop_traffic() noexcept {
   // Member workspace is live; the caller destroys (wipes) it after. The
   // bank and the GK scope live outside the union, so they are scrubbed
-  // here: the bank re-bind wipes every key, and the proxy/gateway leave
+  // here: bank clear does not depend on new entropy, and proxy/gateway leave
   // Member (aborting relays, freeing slots) before the wipe.
   (void)member().engine.cancel_all();
-  if (bank_.configured() && member_valid_) {
-    GatewaySessionBank::LocalView local{};
-    local.self = adopted_.node;
-    local.network = adopted_.network;
-    if (deps_.site->has_site()) {
-      local.gk_epoch = deps_.site->site().gk_epoch_current;
-    }
-    (void)bank_.reset_membership(local, last_now_);
-  }
+  bank_.clear();
   (void)member().resume_cache.clear_all();
   (void)member().member_cookie.configure(&entropy_fill, deps_.entropy);  // rotate; old cookies die
   gk_scope_.wipe();

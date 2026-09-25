@@ -11,6 +11,7 @@
 #include <cstring>
 
 #include "routeloom/espnow_runtime.hpp"
+#include "routeloom/autonomy_wire.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/types.hpp"
 #include "routeloom/wire.hpp"
@@ -184,6 +185,54 @@ void test_boot_installs_lease_port() {
   EspNowRuntime runtime(make_config(), security, observer);
   CHECK(runtime.initialize().ok());
   CHECK(runtime.start().ok());
+  runtime.stop();
+}
+
+class CapturingBootstrap final : public routeloom::espnow::BootstrapRld1Sink {
+ public:
+  void on_bootstrap_rld1(const routeloom::sdkv1::JoinRxMeta&,
+                         std::uint32_t, ByteView, routeloom::MonotonicMs) noexcept override {
+    ++received;
+  }
+  unsigned received{0};
+};
+
+void test_prestart_owner_pump() {
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize().ok());
+  CapturingBootstrap bootstrap;
+  CHECK(runtime.attach_bootstrap_sink(bootstrap).ok());
+  std::array<std::uint8_t, routeloom::autonomy::kRld1HeaderSize> rld1{};
+  rld1[0] = 'R'; rld1[1] = 'L'; rld1[2] = 'D'; rld1[3] = '1';
+  rld1[4] = routeloom::autonomy::kRld1Version;
+  rld1[5] = static_cast<std::uint8_t>(routeloom::FrameType::Discover);
+  rld1[6] = 0;
+  rld1[7] = static_cast<std::uint8_t>(rld1.size());
+  rld1[8] = 0;
+  rld1[9] = static_cast<std::uint8_t>(rld1.size());
+  CHECK(idf_stub::inject_rx(peer_mac().bytes.data(), rld1.data(), rld1.size()));
+  runtime.poll_once();
+  CHECK(bootstrap.received == 1);
+
+  routeloom::RadioOperation move{};
+  move.kind = routeloom::RadioOperationKind::ChannelCutover;
+  move.deadline_ms = 3000;
+  move.constraints.channel = 7;
+  move.constraints.outage_permitted = true;
+  const routeloom::OperationToken token = runtime.request_radio_operation(move);
+  CHECK(token != routeloom::kInvalidOperationToken);
+  routeloom::OperationResult result{};
+  for (int i = 0; i < 10; ++i) {
+    runtime.poll_once();
+    CHECK(runtime.radio_operation_result(token, result));
+    if (result.outcome != routeloom::OperationOutcome::Pending) break;
+    idf_stub::advance_ms(1);
+  }
+  CHECK(result.outcome == routeloom::OperationOutcome::Applied);
+  CHECK(runtime.committed_channel() == 7);
   runtime.stop();
 }
 
@@ -551,6 +600,7 @@ void test_retired_binding_cannot_be_resurrected_by_registration() {
 
 int main() {
   test_boot_installs_lease_port();
+  test_prestart_owner_pump();
   test_security_callback_cannot_reenter_owner_lease();
   test_reliable_to_static_peer_uses_binding();
   test_old_rx_epoch_cannot_acquire_current_binding();

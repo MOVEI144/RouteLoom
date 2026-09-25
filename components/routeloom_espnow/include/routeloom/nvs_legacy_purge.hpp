@@ -21,6 +21,10 @@ namespace routeloom::espnow {
 // marker — the port reports it instead of guessing.
 inline constexpr std::uint32_t kLegacyMigrationMagic = 0x52414D31;
 
+// A migrated device must never restart the persistent legacy provider in
+// this firmware image. Called before any legacy counter/replay store opens.
+Status refuse_legacy_boot_after_migration() noexcept;
+
 class NvsLegacyPurgePort final : public sdkv1::LegacyPurgePort {
  public:
   NvsLegacyPurgePort() noexcept = default;

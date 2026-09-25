@@ -1600,6 +1600,144 @@ void test_dev_caps_refused() {
         StatusCode::Unsupported);
 }
 
+void test_dev_responder_caps_refused() {
+  // A direct R1 may arrive without a local request(). Construct an R1
+  // under the malformed carrier itself so its MAC remains valid: a
+  // binding mismatch alone must not mask a missing responder caps gate.
+  struct R1Env final : rlres1::Environment {
+    std::uint8_t nonce{1};
+    bool random(MutableByteView out) noexcept override {
+      for (std::size_t i = 0; i < out.size; ++i) out.data[i] = nonce++;
+      return true;
+    }
+    bool find_slot(keys::Purpose, const keys::ResumeId&, rlres1::Slot&) noexcept override {
+      return false;
+    }
+    bool revoked(NodeId, std::uint32_t) noexcept override { return false; }
+    bool allocate_context_id(keys::Purpose, NodeId, std::uint32_t& id) noexcept override {
+      id = 0xCAFE;
+      return true;
+    }
+    bool reserve_resume_use(keys::Purpose, const keys::ResumeId&) noexcept override {
+      return true;
+    }
+  };
+  constexpr std::array<std::uint32_t, 3> bad_caps{
+      kCapsFull, kCapsDev | kCapsFull, 0};
+  for (const auto caps : bad_caps) {
+    DevPair pair = DevPair::make();
+    const FrozenLink bad = freeze_link(*pair.a, *pair.b, kT0, caps, kCapsDev);
+    R1Env env;
+    rlres1::Engine raw;
+    rlres1::Local local{};
+    local.self = kNodeA;
+    local.network = kNet;
+    local.epochs.site_epoch = static_cast<std::uint32_t>(kNet >> 32);
+    local.epochs.gk_epoch = 1;
+    CHECK_OK(raw.configure(local, rlres1::Limits{}));
+    rlres1::BeginRequest begin{};
+    begin.slot.purpose = keys::Purpose::Link;
+    begin.slot.peer = kNodeB;
+    begin.slot.network = kNet;
+    begin.slot.created_gk_epoch = 1;
+    CHECK_OK(keys::dev_pair_rms(pair.a->policy.psk, kNet, kNodeA, kNodeB,
+                                keys::Purpose::Link, begin.slot.secret));
+    begin.carrier.kind = rlres1::Carrier::Kind::Link;
+    begin.carrier.mac_i = pair.a->mac_self;
+    begin.carrier.mac_r = pair.b->mac_self;
+    keys::link_carrier_digest(bad.carrier, begin.carrier.carrier_digest);
+    rlres1::Output r1{};
+    raw.begin(begin, kT0, env, r1);
+    CHECK(r1.action == rlres1::Action::Send);
+    HandshakeRx rx{};
+    rx.scope = SecurityScope::Link;
+    rx.phase = 5;
+    rx.step = 1;
+    rx.claimed_peer = kNodeA;
+    rx.src_mac = pair.a->mac_self;
+    rx.dst_mac = pair.b->mac_self;
+    rx.carrier = bad.carrier;
+    rx.cookie = ByteView{bad.cookie.data(), bad.cookie.size()};
+    CHECK_OK(pair.b->engine.on_message(
+        rx, ByteView{r1.message.data(), r1.message_size}, kT0 + 50));
+    HandshakeResult answer{};
+    CHECK(pair.b->engine.take_result(answer).code == StatusCode::NotFound);
+    CHECK(pair.b->engine.quiescent());
+    CHECK(pair.b->sink.installs == 0);
+  }
+}
+
+void test_member_responder_caps_refused() {
+  // The direct R1 path must check the member hint pair even when its MAC
+  // verifies under an existing RLP slot.
+  struct R1Env final : rlres1::Environment {
+    std::uint8_t nonce{1};
+    bool random(MutableByteView out) noexcept override {
+      for (std::size_t i = 0; i < out.size; ++i) out.data[i] = nonce++;
+      return true;
+    }
+    bool find_slot(keys::Purpose, const keys::ResumeId&, rlres1::Slot&) noexcept override {
+      return false;
+    }
+    bool revoked(NodeId, std::uint32_t) noexcept override { return false; }
+    bool allocate_context_id(keys::Purpose, NodeId, std::uint32_t& id) noexcept override {
+      id = 0xCAFE;
+      return true;
+    }
+    bool reserve_resume_use(keys::Purpose, const keys::ResumeId&) noexcept override {
+      return true;
+    }
+  };
+  Pair pair = Pair::make();
+  const FrozenLink good = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
+  CHECK_OK(request_link(*pair.a, *pair.b, good, kT0));
+  const PumpResult seeded = pump(*pair.a, *pair.b, good);
+  CHECK(seeded.established_a && seeded.established_b);
+  const bool quiescent_before = pair.b->engine.quiescent();
+  ResumeSlot2 slot{};
+  CHECK(slot_for(*pair.a, kNodeB, slot));
+  const FrozenLink bad = freeze_link(*pair.a, *pair.b, kT0 + 500,
+                                     kCapsFull | kCapsDev, kCapsFull);
+  R1Env env;
+  rlres1::Engine raw;
+  rlres1::Local local{};
+  local.self = kNodeA;
+  local.network = kNet;
+  local.site_id = sdkv1_test::kSiteId;
+  local.epochs.site_epoch = kSiteEpoch;
+  local.epochs.rs_epoch = kRs;
+  local.epochs.gk_epoch = kGk;
+  CHECK_OK(raw.configure(local, rlres1::Limits{}));
+  rlres1::BeginRequest begin{};
+  begin.slot.purpose = keys::Purpose::Link;
+  begin.slot.peer = kNodeB;
+  begin.slot.network = kNet;
+  begin.slot.created_gk_epoch = slot.created_gk_epoch;
+  begin.slot.peer_generation = slot.peer_generation;
+  begin.slot.secret = slot.rms;
+  begin.carrier.kind = rlres1::Carrier::Kind::Link;
+  begin.carrier.mac_i = pair.a->mac_self;
+  begin.carrier.mac_r = pair.b->mac_self;
+  keys::link_carrier_digest(bad.carrier, begin.carrier.carrier_digest);
+  rlres1::Output r1{};
+  raw.begin(begin, kT0 + 500, env, r1);
+  CHECK(r1.action == rlres1::Action::Send);
+  HandshakeRx rx{};
+  rx.scope = SecurityScope::Link;
+  rx.phase = 5;
+  rx.step = 1;
+  rx.claimed_peer = kNodeA;
+  rx.src_mac = pair.a->mac_self;
+  rx.dst_mac = pair.b->mac_self;
+  rx.carrier = bad.carrier;
+  rx.cookie = ByteView{bad.cookie.data(), bad.cookie.size()};
+  CHECK_OK(pair.b->engine.on_message(
+      rx, ByteView{r1.message.data(), r1.message_size}, kT0 + 550));
+  HandshakeResult answer{};
+  CHECK(pair.b->engine.take_result(answer).code == StatusCode::NotFound);
+  CHECK(pair.b->engine.quiescent() == quiescent_before);
+}
+
 void test_member_dev_mutual_refusal() {
   // V1-K10 host shape: a member initiator and a dev responder (and back)
   // never establish — neither side installs, and neither side answers in
@@ -1621,7 +1759,12 @@ void test_member_dev_mutual_refusal() {
   CHECK_OK(request_link(*devs.a, *members.b, d_frozen, kT0));
   const PumpResult d_result = pump(*devs.a, *members.b, d_frozen);
   CHECK(!d_result.established_a && !d_result.established_b);
-  CHECK(d_result.failed_a == StatusCode::AuthenticationFailed);
+  CHECK(d_result.failed_a == StatusCode::Ok);
+  CHECK_OK(devs.a->engine.poll(kT0 + 9000));
+  HandshakeResult dev_timeout{};
+  CHECK_OK(devs.a->engine.take_result(dev_timeout));
+  CHECK(dev_timeout.event == HandshakeEvent::Failed &&
+        dev_timeout.failure == StatusCode::AuthenticationFailed);
   CHECK(d_result.m1_size == 0 && d_result.r3_size == 0);
   CHECK(devs.a->sink.installs == 0 && members.b->sink.installs == 0);
   CHECK(members.b->engine.quiescent());  // the hint left no responder state
@@ -1687,6 +1830,8 @@ int main() {
   test_dev_psk_mismatch_refuses();
   test_dev_unknown_claimant_dropped();
   test_dev_caps_refused();
+  test_dev_responder_caps_refused();
+  test_member_responder_caps_refused();
   test_member_dev_mutual_refusal();
   test_dev_revoked_peer_refuses();
   test_dev_configure_busy_while_in_flight();

@@ -1,5 +1,6 @@
 #include "routeloom/sdkv1_session_rtc.hpp"
 
+#include <atomic>
 #include <cstring>
 
 #include "routeloom/crc32.hpp"
@@ -46,6 +47,8 @@ struct Cursor {
 bool valid(const RtcSessionImage& image) noexcept {
   if (image.source_boot == 0 || image.network == 0 || image.local_generation == 0 ||
       image.site_commit == 0 || image.gk_epoch == 0 || image.parent_binding == 0 ||
+      image.parent_mac == MacAddress{} ||
+      image.parent_mac == MacAddress{0xff, 0xff, 0xff, 0xff, 0xff, 0xff} ||
       image.count == 0 || image.count > 2) return false;
   for (std::size_t i = 0; i < image.count; ++i) {
     const auto& c = image.contexts[i];
@@ -110,6 +113,7 @@ Status encode_rtc_session(const RtcSessionImage& image, MutableByteView out) noe
 
 Status decode_rtc_session(ByteView bytes, const RtcWakeCheck& wake,
                           RtcSessionImage& out) noexcept {
+  secure_clear(&out, sizeof(out));
   if (bytes.data == nullptr || bytes.size != kRtcSessionRecordSize || !wake.deep_sleep ||
       !wake.sleep_marker || wake.trusted_elapsed_ms == 0) return invalid();
   Scratch scratch;
@@ -156,12 +160,19 @@ Status decode_rtc_session(ByteView bytes, const RtcWakeCheck& wake,
 
 Status consume_rtc_session(RtcSessionPort& port, const RtcWakeCheck& wake,
                            RtcSessionImage& out) noexcept {
+  secure_clear(&out, sizeof(out));
   Scratch scratch;
   Status status = port.read(MutableByteView{scratch.raw.data(), scratch.raw.size()});
-  if (!status) return status;
+  if (!status) {
+    const Status cleared = port.invalidate();
+    return cleared ? status : cleared;
+  }
   status = decode_rtc_session(ByteView{scratch.raw.data(), scratch.raw.size()}, wake,
                               scratch.image);
-  if (!status) return status;
+  if (!status) {
+    const Status cleared = port.invalidate();
+    return cleared ? status : cleared;
+  }
   status = port.invalidate();
   if (!status) return status;
   status = port.read(MutableByteView{scratch.raw.data(), scratch.raw.size()});
@@ -241,6 +252,7 @@ Status BufferRtcSessionPort::invalidate() noexcept {
     return Status::error(StatusCode::InvalidArgument, "RTC buffer size");
   }
   secure_clear(backing_.data, backing_.size);
+  std::atomic_thread_fence(std::memory_order_seq_cst);
   return Status::success();
 }
 
@@ -249,9 +261,18 @@ Status BufferRtcSessionPort::write(const ByteView image) noexcept {
       image.data == nullptr || image.size != kRtcSessionRecordSize) {
     return Status::error(StatusCode::InvalidArgument, "RTC buffer size");
   }
-  if (image.data != backing_.data) {
-    std::memcpy(backing_.data, image.data, kRtcSessionRecordSize);
+  if (image.data == backing_.data) {
+    return Status::error(StatusCode::InvalidArgument, "RTC image aliases backing");
   }
+  // The commit word at bytes 8..11 is the last write. An interrupted
+  // update leaves an uncommitted record, never a partly advanced key/window.
+  secure_clear(backing_.data, backing_.size);
+  std::memcpy(backing_.data, image.data, 8);
+  std::memcpy(backing_.data + 12, image.data + 12, kRtcSessionRecordSize - 12);
+  std::atomic_thread_fence(std::memory_order_seq_cst);
+  auto* commit = static_cast<volatile std::uint8_t*>(backing_.data + 8);
+  for (std::size_t i = 0; i < 4; ++i) commit[i] = image.data[8 + i];
+  std::atomic_thread_fence(std::memory_order_seq_cst);
   return Status::success();
 }
 

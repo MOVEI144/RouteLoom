@@ -7,7 +7,6 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "routeloom/discovery_scope.hpp"  // sha256 (member SAK-kid stand-in)
 #include "routeloom/espnow_sdkv1_entropy.hpp"
 #include "routeloom/nvs_legacy_purge.hpp"
 #include "routeloom/sdkv1_dev_session.hpp"
@@ -31,34 +30,26 @@ int hex_value(const char value) noexcept {
   return -1;
 }
 
-// Resolves the maintenance-domain fingerprint the `security legacy-state`
-// verb compares against (P4 §10.2): an adopted site yields the member
-// print (site/network/self plus the site-cert digest as the SAK-kid
-// stand-in — the SiteStore carries no separate SAK kid field), otherwise
-// the Kconfig dev PSK yields the dev print. Neither (an unadopted
-// RAM-only device, or an unparseable key) means unknown: the runner then
-// serves the read-only `status` only and refuses every purge line.
+// Resolve the maintenance domain for the running profile. A stale site
+// record in a DevRam image cannot change the fingerprint away from the
+// configured PSK domain; an unadopted Member image has no purge domain.
 bool resolve_legacy_domain(Sdkv1Stores& stores,
                            sdkv1::MaintenanceFingerprint& out) noexcept {
   out = sdkv1::MaintenanceFingerprint{};
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
   if (stores.site().has_site() && stores.identity().has_identity()) {
     const sdkv1::SiteRecord& site = stores.site().site();
     const sdkv1::IdentityRecord& identity = stores.identity().identity();
+    if (!sdkv1::site_matches_identity(site, identity)) return false;
     const ByteView cert = site.site_cert.view();
     if (cert.size == 0) return false;
-    ScopeDigest kid{};
-    sha256(cert, kid);
-    std::array<std::uint8_t, 32> sak_kid{};
-    std::memcpy(sak_kid.data(), kid.data(), sak_kid.size());
-    secure_clear(kid);
-    const Status ok = sdkv1::member_maintenance_fingerprint(
-        1, site.network, identity.node_id, site.site_id, sak_kid, out);
-    secure_clear(sak_kid);
+    const Status ok = sdkv1::member_maintenance_fingerprint_for_site_cert(
+        1, site.network, identity.node_id, site.site_id, cert, out);
     return ok.ok();
   }
-// The dev PSK Kconfig exists in legacy-fixture builds only; anywhere
-// else there is no dev domain to resolve (unadopted RAM-only devices
-// stay unknown until the DevRam runtime carries its own PSK config).
+  return false;
+#else
+  (void)stores;
 #ifdef CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX
   const char* hex = CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX;
   keys::Secret psk{};
@@ -79,6 +70,7 @@ bool resolve_legacy_domain(Sdkv1Stores& stores,
   return ok.ok();
 #else
   return false;
+#endif
 #endif
 }
 
@@ -103,19 +95,6 @@ void console_task(void* arg) {
   // console (P4 §10.2): the maintenance boot never starts radio, USB
   // lanes or the Node, so `stopped` below is structural, not polled.
   NvsLegacyPurgePort purge_port;
-  sdkv1::MaintenanceFingerprint legacy_domain{};
-  const bool legacy_domain_known = resolve_legacy_domain(*stores, legacy_domain);
-  if (!legacy_domain_known) {
-    ESP_LOGW(kTag, "legacy-state domain unknown: status only, purge refused");
-  }
-  sdkv1::LegacyStateConsole legacy(
-      purge_port, legacy_domain,
-#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
-      false
-#else
-      true
-#endif
-  );
   static char line[sdkv1::kMaintenanceLineMax + 2];
   static char response[sdkv1::kMaintenanceResponseMax];
   static const char kBanner[] = "routeloom-maintenance v1 ready\n";
@@ -159,17 +138,29 @@ void console_task(void* arg) {
         const char refused[] = "ERR locked";
         std::memcpy(response, refused, sizeof(refused));
         response_size = sizeof(refused) - 1;
-      } else if (!legacy_domain_known && !is_legacy_status_only(legacy_rest)) {
-        const char refused[] = "ERR domain";
-        std::memcpy(response, refused, sizeof(refused));
-        response_size = sizeof(refused) - 1;
       } else {
-        const Status status = legacy.process_line(legacy_rest, /*stopped=*/true,
-                                                   response, sizeof(response),
-                                                   response_size);
-        if (!status) {
-          ESP_LOGE(kTag, "legacy console fault: %s", status.detail);
-          continue;  // caller-side bug only; the line is dropped, console stays
+        sdkv1::MaintenanceFingerprint legacy_domain{};
+        const bool known = resolve_legacy_domain(*stores, legacy_domain);
+        if (!known && !is_legacy_status_only(legacy_rest)) {
+          const char refused[] = "ERR domain";
+          std::memcpy(response, refused, sizeof(refused));
+          response_size = sizeof(refused) - 1;
+        } else {
+          sdkv1::LegacyStateConsole legacy(
+              purge_port, legacy_domain,
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+              false
+#else
+              true
+#endif
+          );
+          const Status status = legacy.process_line(legacy_rest, /*stopped=*/true,
+                                                     response, sizeof(response),
+                                                     response_size);
+          if (!status) {
+            ESP_LOGE(kTag, "legacy console fault: %s", status.detail);
+            continue;
+          }
         }
       }
     } else {

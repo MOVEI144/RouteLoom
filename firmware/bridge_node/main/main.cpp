@@ -20,6 +20,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "routeloom/nvs_boot_session.hpp"
+#include "routeloom/nvs_legacy_purge.hpp"
 #include "sdkconfig.h"
 #if CONFIG_ROUTELOOM_DISCOVERY
 #include "routeloom/espnow_autonomy.hpp"
@@ -229,10 +230,15 @@ extern "C" void app_main(void) {
     }
     sdkv1_stores.log_state(kTag);
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
-    // Repair the already advanced system token against the adopted RLS1
-    // before any provider, group sender or radio session can use it.
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+    // Member boot binds the already advanced token to the adopted RLS1.
     status = routeloom::reconcile_boot_session(sdkv1_stores.site(), message_session);
     if (!status) fail(status.detail);
+#endif
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM && !CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
+    status = routeloom::reserve_dev_group_boot_session(message_session, message_session);
+    if (!status) fail(status.detail);
+#endif
 #endif
   }
 #if CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
@@ -253,6 +259,8 @@ extern "C" void app_main(void) {
              "it");
   }
 #if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  status = routeloom::espnow::refuse_legacy_boot_after_migration();
+  if (!status) fail(status.detail);
   std::uint32_t peer_capacity = 0;
   status = routeloom::espnow::nvs_partition_peer_capacity(
       routeloom::espnow::kSecurityNvsPartition,

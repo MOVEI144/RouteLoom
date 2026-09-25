@@ -103,6 +103,11 @@ int main() {
   CHECK(store.advance(false, 0, token).code == StatusCode::StorageFailure && token == before);
   port.lost_write = false;
   CHECK(store.advance(false, 0, token).ok() && token == 2);
+  port.stored = 0;
+  port.found = true;
+  const int zero_writes = port.writes;
+  CHECK(store.advance(false, 0, token).code == StatusCode::RecoveryRequired &&
+        token == 2 && port.writes == zero_writes);
   CHECK(port.writes >= 6);
 
   // A committed system candidate behind boot_hi must skip the last group

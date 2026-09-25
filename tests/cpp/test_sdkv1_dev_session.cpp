@@ -14,6 +14,7 @@
 #include "routeloom/key_schedule.hpp"
 #include "routeloom/rlres1.hpp"
 #include "routeloom/sdkv1_dev_session.hpp"
+#include "test_sdkv1.hpp"
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #x); return 1; } } while (false)
 
@@ -112,6 +113,11 @@ int main() {
   CHECK(group.next_counter(counter).ok() && counter == 0);  // new boot, new key
   CHECK(group.material(material).ok());
   CHECK(material.key != expect.key);
+  group.clear();
+  CHECK(!group.configured());
+  CHECK(group.configure(psk, kNet, kSelf, 18).code == StatusCode::Conflict);
+  CHECK(group.configure(psk, kNet, kSelf, 19).ok());
+  CHECK(group.next_counter(counter).ok() && counter == 0);
   CHECK(DevGroupSender::counter_admissible(DevGroupSender::kMaxUseCounter - 1));
   CHECK(!DevGroupSender::counter_admissible(DevGroupSender::kMaxUseCounter));
   CHECK(!DevGroupSender::counter_admissible(DevGroupSender::kMaxUseCounter + 1));
@@ -137,6 +143,29 @@ int main() {
   CHECK(member_maintenance_fingerprint(1, kNet, kSelf, 0x0102030405060708ULL, sak, moved).ok() &&
         moved != member);
   sak[0] ^= 1;
+  const auto site_cert = sdkv1_test::issue(sdkv1_test::sitecert_claims(),
+                                            sdkv1_test::site_ca());
+  CertClaims site_claims{};
+  CHECK(cert_decode(site_cert.view(), site_claims).ok());
+  Digest256 actual_sak_kid{};
+  CHECK(cert_subject_kid(site_claims, actual_sak_kid).ok());
+  MaintenanceFingerprint expected_site{};
+  CHECK(member_maintenance_fingerprint(1, sdkv1_test::kNetwork, sdkv1_test::kNode,
+                                       sdkv1_test::kSiteId, actual_sak_kid, expected_site).ok());
+  MaintenanceFingerprint from_cert{};
+  CHECK(member_maintenance_fingerprint_for_site_cert(
+            1, sdkv1_test::kNetwork, sdkv1_test::kNode, sdkv1_test::kSiteId,
+            site_cert.view(), from_cert).ok());
+  CHECK(from_cert == expected_site);
+  ScopeDigest cert_hash{};
+  sha256(site_cert.view(), cert_hash);
+  MaintenanceFingerprint wrong_site{};
+  CHECK(member_maintenance_fingerprint(1, sdkv1_test::kNetwork, sdkv1_test::kNode,
+                                       sdkv1_test::kSiteId, cert_hash, wrong_site).ok());
+  CHECK(from_cert != wrong_site);
+  CHECK(member_maintenance_fingerprint_for_site_cert(
+            1, sdkv1_test::kNetwork, sdkv1_test::kNode, sdkv1_test::kSiteId + 1,
+            site_cert.view(), from_cert).code == StatusCode::InvalidArgument);
   CHECK(dev_maintenance_fingerprint(psk, 2, 0, kSelf, moved).code == StatusCode::InvalidArgument);
   CHECK(member_maintenance_fingerprint(1, 0, kSelf, 0x0102030405060708ULL, sak, moved).code ==
         StatusCode::InvalidArgument);

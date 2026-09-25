@@ -59,6 +59,7 @@ class DevGroupSender {
   keys::TrafficKey key_{};
   std::uint64_t tx_next_{0};
   std::uint32_t boot_{0};
+  std::uint32_t last_boot_{0};
   bool configured_{false};
 };
 
@@ -76,6 +77,11 @@ Status member_maintenance_fingerprint(std::uint8_t profile, NetworkId network, N
                                       std::uint64_t site_id,
                                       const std::array<std::uint8_t, 32>& sak_kid,
                                       MaintenanceFingerprint& out) noexcept;
+// The SAK kid is the SiteCert subject public-key kid, not a hash of the
+// certificate envelope. The caller has already validated the adopted site.
+Status member_maintenance_fingerprint_for_site_cert(
+    std::uint8_t profile, NetworkId network, NodeId self, std::uint64_t site_id,
+    ByteView site_cert, MaintenanceFingerprint& out) noexcept;
 // Lowercase 32 hex chars plus NUL into `text[33]`.
 Status format_fingerprint_hex(const MaintenanceFingerprint& print, char text[33]) noexcept;
 // Exactly 32 hex chars (case-insensitive); anything else refuses with `out`

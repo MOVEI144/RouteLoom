@@ -57,8 +57,8 @@ class RtcSessionPort {
   virtual Status write(ByteView image) noexcept = 0;
 };
 
-// Buffer-backed port: firmware binds the backing to RTC slow memory (see
-// espnow_session_rtc.hpp), host tests to a plain array. Reads and writes
+// Buffer-backed port: firmware can bind RTC slow memory, host tests a plain
+// array. Reads and writes
 // are exact-size only — a short buffer is a caller bug and leaves the
 // backing untouched. invalidate() wipes the whole backing (marker and any
 // retained keys): stale key material must not linger in RTC after the

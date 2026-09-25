@@ -400,6 +400,7 @@ class EspNowRuntime final : public RadioPort,
                              bool transfer = false) noexcept;
   void release_autonomy_peer(Peer& peer, MonotonicMs now) noexcept;
   void reconcile_autonomy(MonotonicMs now) noexcept;
+  void poll_bootstrap(MonotonicMs now) noexcept;
   Status send_raw(const MacAddress& mac, ByteView frame) noexcept;
   Status apply_lr250(const MacAddress& mac) noexcept;
   Status rebuild_driver() noexcept;

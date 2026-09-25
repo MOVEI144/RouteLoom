@@ -162,6 +162,9 @@ class SessionBank {
   Status configure(const LocalView& local, const AeadGcm& aead, const RandomSource& random,
                    MonotonicMs now) noexcept;
   bool configured() const noexcept { return configured_; }
+  // Stops all sessions and erases keys without needing entropy or storage.
+  // The caller serializes this with all bank entries and callbacks.
+  void clear() noexcept;
 
   // The Owner calls this before every operation batch: subtracts elapsed
   // time from all lifetimes (saturating; entries at 0 are wiped), drops

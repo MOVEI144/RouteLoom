@@ -71,6 +71,9 @@ int failures = 0;
   } while (false)
 
 using namespace routeloom;
+static_assert(trusted_deep_sleep_reset(true, true));
+static_assert(!trusted_deep_sleep_reset(false, true));
+static_assert(!trusted_deep_sleep_reset(true, false));
 using routeloom_test::CapturingObserver;
 using routeloom_test::SimNetwork;
 using routeloom_test::SimRadio;
@@ -5296,25 +5299,25 @@ static_assert(noexcept(std::declval<PowerCoordinator&>().ticket_valid(
               "ticket_valid is noexcept");
 
 void test_trusted_sleep_elapsed() {
-  // P4 wiring: a timer wake after a marked sleep proves the programmed
-  // duration as a LOWER bound; the upper bound adds the wake-to-classify
-  // boot margin (consumers deduct the upper — the safe direction).
+  // A timer wake and marker identify the intended sleep, but neither
+  // bounds oscillator drift or post-wake boot time.
+  CHECK(!classify_sleep_elapsed(true, true, true, 30000, 0).known);
+  // An independently established upper bound permits deadline deduction.
   const ElapsedInterval trusted =
-      classify_sleep_elapsed(true, true, true, 30000);
+      classify_sleep_elapsed(true, true, true, 30000, 33000);
   CHECK(trusted.known);
-  CHECK(trusted.lower_ms == 30000);
-  CHECK(trusted.upper_ms == 30000 + kSleepWakeBootMarginMs);
+  CHECK(trusted.lower_ms == 0);
+  CHECK(trusted.upper_ms == 33000);
   // Any missing evidence parks TIME_UNCERTAIN instead of guessing.
-  CHECK(!classify_sleep_elapsed(false, true, true, 30000).known);  // cold boot
-  CHECK(!classify_sleep_elapsed(true, false, true, 30000).known);  // GPIO wake
-  CHECK(!classify_sleep_elapsed(true, true, false, 30000).known);  // no marker
-  CHECK(!classify_sleep_elapsed(true, true, true, 0).known);       // no program
-  // The u64 margin addition cannot wrap a u32 program past the lower bound.
+  CHECK(!classify_sleep_elapsed(false, true, true, 30000, 33000).known);
+  CHECK(!classify_sleep_elapsed(true, false, true, 30000, 33000).known);
+  CHECK(!classify_sleep_elapsed(true, true, false, 30000, 33000).known);
+  CHECK(!classify_sleep_elapsed(true, true, true, 0, 33000).known);
   const ElapsedInterval saturated = classify_sleep_elapsed(
-      true, true, true, std::numeric_limits<std::uint32_t>::max());
+      true, true, true, std::numeric_limits<std::uint32_t>::max(),
+      std::numeric_limits<std::uint64_t>::max());
   CHECK(saturated.known);
-  CHECK(saturated.lower_ms == std::numeric_limits<std::uint32_t>::max());
-  CHECK(saturated.upper_ms >= saturated.lower_ms);
+  CHECK(saturated.upper_ms == std::numeric_limits<std::uint64_t>::max());
   // End to end: the trusted interval feeds begin() and resends a durable
   // pending whose lifetime covers it (else TIME_UNCERTAIN parks it).
   std::uint32_t remaining = 0;

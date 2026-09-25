@@ -154,6 +154,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   void on_tune_channel(const sdkv1::CoordinatorTune& tune, MonotonicMs now_ms) noexcept;
   void on_member_config(const sdkv1::CoordinatorMemberConfig& member, MonotonicMs now_ms) noexcept;
   void on_start_discovery(MonotonicMs now_ms) noexcept;
+  void abort_discovery_start(MonotonicMs now_ms, bool attached) noexcept;
   void poll_tune(MonotonicMs now_ms) noexcept;
   void report_tune(const Tune& tune, StatusCode result, MonotonicMs now_ms) noexcept;
   Status request_cutover(std::uint8_t channel, std::uint32_t coord_token,

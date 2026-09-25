@@ -163,6 +163,11 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::reset_membership(const LocalVie
 }
 
 template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
+void SessionBank<kLinkCapacity, kEndCapacity>::clear() noexcept {
+  wipe_all();
+}
+
+template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
 bool SessionBank<kLinkCapacity, kEndCapacity>::map_network(
     const NetworkId context_network) const noexcept {
   if (context_network == local_.network) return true;

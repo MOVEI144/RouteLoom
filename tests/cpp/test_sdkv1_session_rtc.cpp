@@ -137,6 +137,10 @@ int main() {
   }
   std::array<std::uint8_t, kRtcSessionRecordSize> raw{};
   CHECK(encode_rtc_session(saved, MutableByteView{raw.data(), raw.size()}).ok());
+  RtcSessionImage no_parent = saved;
+  no_parent.parent_mac = {};
+  CHECK(!encode_rtc_session(no_parent, MutableByteView{raw.data(), raw.size()}).ok());
+  CHECK(encode_rtc_session(saved, MutableByteView{raw.data(), raw.size()}).ok());
   RtcSessionImage result{};
   RtcWakeCheck wake{};
   wake.deep_sleep = true;
@@ -156,7 +160,9 @@ int main() {
   for (std::size_t i = 0; i < raw.size(); ++i) {
     raw[i] ^= 1;
     CHECK(!decode_rtc_session(ByteView{raw.data(), raw.size()}, wake, result).ok());
+    CHECK(result.count == 0 && result.contexts[0].entry.tx_key[0] == 0);
     raw[i] ^= 1;
+    CHECK(decode_rtc_session(ByteView{raw.data(), raw.size()}, wake, result).ok());
   }
   wake.deep_sleep = false;
   CHECK(!decode_rtc_session(ByteView{raw.data(), raw.size()}, wake, result).ok());
@@ -189,6 +195,15 @@ int main() {
   CHECK(consume_rtc_session(rtc, wake, restored).ok());
   CHECK(restored.count == 2 && restored.contexts[0].entry.tx_next == 20);
   CHECK(!consume_rtc_session(rtc, wake, result).ok());
+
+  // A rejected wake image must not leave old key bytes in retained RAM.
+  std::array<std::uint8_t, kRtcSessionRecordSize> retained = raw;
+  retained[80] ^= 1;  // key/body corruption with a committed marker
+  BufferRtcSessionPort retained_port(MutableByteView{retained.data(), retained.size()});
+  CHECK(!consume_rtc_session(retained_port, wake, result).ok());
+  CHECK(std::all_of(retained.begin(), retained.end(), [](std::uint8_t byte) {
+    return byte == 0;
+  }));
 
   // F07 write-ahead: no radio TX with an old retained counter. An
   // interrupted write leaves the marker invalid and forces a new handshake.
@@ -367,6 +382,9 @@ int main() {
   std::array<std::uint8_t, kRtcSessionRecordSize> backing{};
   BufferRtcSessionPort backing_port{MutableByteView{backing.data(), backing.size()}};
   CHECK(backing_port.write(ByteView{raw.data(), raw.size()}).ok());
+  CHECK(backing == raw);
+  CHECK(backing_port.write(ByteView{backing.data(), backing.size()}).code ==
+        StatusCode::InvalidArgument);
   CHECK(backing == raw);
   std::array<std::uint8_t, kRtcSessionRecordSize> seen{};
   CHECK(backing_port.read(MutableByteView{seen.data(), seen.size()}).ok());

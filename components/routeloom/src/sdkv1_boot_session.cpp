@@ -10,6 +10,9 @@ Status BootSessionStore::advance(const bool has_site, const std::uint32_t witnes
   bool found = false;
   const Status read = port_.read(stored, found);
   if (!read) return read;
+  if (found && stored == 0) {
+    return Status::error(StatusCode::RecoveryRequired, "invalid boot session");
+  }
   if (has_site && witness == 0) {
     return Status::error(StatusCode::RecoveryRequired, "missing site boot witness");
   }

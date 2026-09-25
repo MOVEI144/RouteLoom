@@ -1428,9 +1428,19 @@ Status HandshakeEngine::on_message(const HandshakeRx& rx, const ByteView message
   const bool edhoc = rx.phase == 4;
   const bool resume = rx.phase == 5;
   if (!edhoc && !resume) return Status::success();
-  // Dev runs RLRES1 only: EDHOC bytes die before any record match, park
-  // or allocation — a member m1 into a dev engine answers nothing.
+  // Link initiation must select the local profile before allocating a
+  // responder record. The authenticated transcript still binds the carrier.
   if (edhoc && dev_armed_) return Status::success();
+  if (rx.scope == SecurityScope::Link && rx.step == 1 &&
+      (rx.carrier.network != local_.network || rx.carrier.node_r != local_.self ||
+       (rx.claimed_peer != kInvalidNodeId && rx.carrier.node_i != rx.claimed_peer) ||
+       (dev_armed_ ? !caps_dev_pair(rx.carrier.capability_i, rx.carrier.capability_r)
+                   : (edhoc ? !caps_edhoc_pair(rx.carrier.capability_i,
+                                                rx.carrier.capability_r)
+                            : !caps_resume_pair(rx.carrier.capability_i,
+                                                rx.carrier.capability_r))))) {
+    return Status::success();
+  }
   const JoinAuthPhase phase =
       edhoc ? JoinAuthPhase::EdhocMessage : JoinAuthPhase::Resume;
   if (!join_step_valid(phase, rx.step)) return Status::success();

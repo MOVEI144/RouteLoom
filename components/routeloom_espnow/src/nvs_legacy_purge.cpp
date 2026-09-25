@@ -25,7 +25,7 @@ Status take_across(std::size_t skip, const char*& name_space, char key[16],
   for (const char* space : kSpaces) {
     nvs_iterator_t iterator = nullptr;
     esp_err_t error = nvs_entry_find(kPartition, space, NVS_TYPE_ANY, &iterator);
-    if (error == ESP_ERR_NVS_NOT_FOUND || error == ESP_ERR_INVALID_ARG) continue;
+    if (error == ESP_ERR_NVS_NOT_FOUND) continue;
     if (error != ESP_OK) {
       nvs_release_iterator(iterator);
       return Status::error(StatusCode::StorageFailure, "legacy find failed");
@@ -59,6 +59,15 @@ Status take_across(std::size_t skip, const char*& name_space, char key[16],
 
 }  // namespace
 
+Status refuse_legacy_boot_after_migration() noexcept {
+  NvsLegacyPurgePort port;
+  bool migrated = false;
+  const Status status = port.migration(migrated);
+  if (!status) return status;
+  return migrated ? Status::error(StatusCode::RecoveryRequired, "legacy profile migrated")
+                  : Status::success();
+}
+
 Status NvsLegacyPurgePort::migration(bool& present) noexcept {
   present = false;
   nvs_handle_t handle = 0;
@@ -75,11 +84,17 @@ Status NvsLegacyPurgePort::migration(bool& present) noexcept {
   if (result != ESP_OK) {
     return Status::error(StatusCode::StorageFailure, "legacy migration read");
   }
-  present = value == kLegacyMigrationMagic;
+  if (value != kLegacyMigrationMagic) {
+    return Status::error(StatusCode::StorageFailure, "legacy migration schema");
+  }
+  present = true;
   return Status::success();
 }
 
 Status NvsLegacyPurgePort::commit_migration() noexcept {
+  bool present = false;
+  const Status checked = migration(present);
+  if (!checked || present) return checked;
   nvs_handle_t handle = 0;
   esp_err_t result = nvs_open_from_partition(kPartition, kDevSpace, NVS_READWRITE, &handle);
   if (result != ESP_OK) {
@@ -123,8 +138,8 @@ Status NvsLegacyPurgePort::erase(const sdkv1::LegacyKey& key) noexcept {
   }
   char space[16]{};
   char name[16]{};
-  std::memcpy(space, key.name_space, sizeof(space) - 1);
-  std::memcpy(name, key.key, sizeof(name) - 1);
+  std::memcpy(space, key.name_space, std::strlen(key.name_space) + 1);
+  std::memcpy(name, key.key, std::strlen(key.key) + 1);
   nvs_handle_t handle = 0;
   esp_err_t result =
       nvs_open_from_partition(kPartition, space, NVS_READWRITE, &handle);

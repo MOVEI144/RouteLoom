@@ -1,6 +1,7 @@
 #include "routeloom/sdkv1_dev_session.hpp"
 
 #include "routeloom/discovery_scope.hpp"  // sha256, hmac_sha256
+#include "routeloom/rlcw1.hpp"
 #include "routeloom/secure_clear.hpp"
 
 namespace routeloom::sdkv1 {
@@ -72,7 +73,7 @@ Status DevGroupSender::configure(const keys::Secret& psk, const NetworkId networ
   if (network == 0 || !id_valid(origin) || boot == 0) {
     return Status::error(StatusCode::InvalidArgument, "dev group epoch invalid");
   }
-  if (configured_ && boot <= boot_) {
+  if (last_boot_ != 0 && boot <= last_boot_) {
     // Same key, same counter space: restarting at 0 would reuse nonces.
     return Status::error(StatusCode::Conflict, "dev group boot not advanced");
   }
@@ -84,6 +85,7 @@ Status DevGroupSender::configure(const keys::Secret& psk, const NetworkId networ
   keys::clear(next);
   tx_next_ = 0;
   boot_ = boot;
+  last_boot_ = boot;
   configured_ = true;
   return Status::success();
 }
@@ -152,6 +154,31 @@ Status member_maintenance_fingerprint(const std::uint8_t profile, const NetworkI
   for (std::size_t i = 0; i < out.size(); ++i) out[i] = digest[i];
   secure_clear(digest);
   return Status::success();
+}
+
+Status member_maintenance_fingerprint_for_site_cert(
+    const std::uint8_t profile, const NetworkId network, const NodeId self,
+    const std::uint64_t site_id, const ByteView site_cert,
+    MaintenanceFingerprint& out) noexcept {
+  out = MaintenanceFingerprint{};
+  CertClaims claims{};
+  const Status decoded = cert_decode(site_cert, claims);
+  if (!decoded) return decoded;
+  if (claims.type != CertType::Site || claims.subject != site_id ||
+      claims.network_low32 != static_cast<std::uint32_t>(network) ||
+      claims.site_epoch != static_cast<std::uint32_t>(network >> 32)) {
+    return Status::error(StatusCode::InvalidArgument, "maintenance site cert mismatch");
+  }
+  Digest256 sak_kid{};
+  const Status kid = cert_subject_kid(claims, sak_kid);
+  if (!kid) {
+    secure_clear(sak_kid);
+    return kid;
+  }
+  const Status result = member_maintenance_fingerprint(profile, network, self, site_id,
+                                                       sak_kid, out);
+  secure_clear(sak_kid);
+  return result;
 }
 
 Status format_fingerprint_hex(const MaintenanceFingerprint& print, char text[33]) noexcept {

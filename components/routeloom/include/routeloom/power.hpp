@@ -36,6 +36,13 @@ enum class ResetCause : std::uint8_t {
   OtherReset = 2,    // watchdog/panic/etc: RAM lost, NVS intact
 };
 
+// A retained marker is intent, not reset evidence. A watchdog or software
+// reset between arming and sleep entry must never consume retained keys.
+constexpr bool trusted_deep_sleep_reset(const bool reset_reason_deep_sleep,
+                                        const bool marker_ok) noexcept {
+  return reset_reason_deep_sleep && marker_ok;
+}
+
 enum class ResumeOutcome : std::uint8_t {
   None = 0,
   ColdStart,          // no peers to resume with; normal bootstrap path
@@ -181,20 +188,14 @@ struct SleepRequest {
 const char* power_state_name(PowerState state) noexcept;
 const char* resume_outcome_name(ResumeOutcome outcome) noexcept;
 
-// Wake-to-classify boot margin (P4 §9.3): the ROM bootloader plus IDF app
-// init before firmware reads the wake cause runs no RF and no app work,
-// so 2 s bounds it generously. The trusted-elapsed upper bound adds this
-// margin; over-deduction only shortens lifetimes (the safe direction).
-constexpr std::uint64_t kSleepWakeBootMarginMs = 2000;
-
-// Trusted sleep-elapsed classifier (P4 §9.3, F07/F08): a timer wake after
-// a marked deep sleep proves the programmed duration as a LOWER bound on
-// the slept time (the timer fires at the program point, boot adds more).
-// Anything else — cold boot, GPIO wake, missing marker, no program — is
-// unknown, so consumers park TIME_UNCERTAIN instead of guessing.
+// A timer wake identifies the intended sleep but its programmed duration
+// alone does not bound RTC clock drift or the time spent rebooting. Only an
+// independent upper bound on elapsed wall time permits deadline deduction.
+// Zero means no such evidence and parks durable work TIME_UNCERTAIN.
 ElapsedInterval classify_sleep_elapsed(bool deep_sleep_wake, bool timer_wake,
                                        bool marker_ok,
-                                       std::uint32_t programmed_ms) noexcept;
+                                       std::uint32_t programmed_ms,
+                                       std::uint64_t trusted_upper_ms) noexcept;
 
 // Phase-1 plan for one carry slot: what the settlement must do with it.
 enum class CarryPlanKind : std::uint8_t {

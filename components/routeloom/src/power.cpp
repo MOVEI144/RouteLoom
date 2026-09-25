@@ -182,12 +182,13 @@ const char* resume_outcome_name(const ResumeOutcome outcome) noexcept {
 
 ElapsedInterval classify_sleep_elapsed(const bool deep_sleep_wake, const bool timer_wake,
                                        const bool marker_ok,
-                                       const std::uint32_t programmed_ms) noexcept {
+                                       const std::uint32_t programmed_ms,
+                                       const std::uint64_t trusted_upper_ms) noexcept {
   ElapsedInterval out{};
-  if (!deep_sleep_wake || !timer_wake || !marker_ok || programmed_ms == 0) return out;
-  out.lower_ms = programmed_ms;
-  // u64 arithmetic: a u32 program plus the margin cannot wrap below lower.
-  out.upper_ms = static_cast<std::uint64_t>(programmed_ms) + kSleepWakeBootMarginMs;
+  if (!deep_sleep_wake || !timer_wake || !marker_ok || programmed_ms == 0 ||
+      trusted_upper_ms == 0) return out;
+  out.lower_ms = 0;
+  out.upper_ms = trusted_upper_ms;
   out.known = true;
   return out;
 }

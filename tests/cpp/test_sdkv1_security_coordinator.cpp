@@ -50,7 +50,9 @@ constexpr MonotonicMs kT0 = 100000;
 
 class FakeEntropy final : public EntropySource {
  public:
+  bool fail{false};
   Status fill(const MutableByteView out) noexcept override {
+    if (fail) return Status::error(StatusCode::InvalidState, "entropy unavailable");
     if (out.data == nullptr) return Status::error(StatusCode::InvalidArgument, "null");
     for (std::size_t i = 0; i < out.size; ++i) {
       state_ = state_ * 6364136223846793005ULL + 1442695040888963407ULL;
@@ -319,11 +321,13 @@ void test_boot_silent_adoption() {
   CHECK(f.site.commit(site_record()).ok());
   SecurityCoordinator coordinator(f.deps());
   CHECK(!coordinator.session_provider().ready());
+  DiscoveryConfig advertised{};
+  CHECK(coordinator.member_discovery_config(advertised).code == StatusCode::InvalidState);
   CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
   CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
 
-  // The healthy boot check adopts silently: ApplyMemberConfig first, then
-  // StartMemberDiscovery once the firmware took the config.
+  // Discovery waits for the radio and node to finish applying the member
+  // channel; merely taking ApplyMemberConfig is not sufficient.
   MonotonicMs now = kT0;
   bool saw_config = false;
   bool saw_discovery = false;
@@ -345,6 +349,17 @@ void test_boot_silent_adoption() {
         CHECK(action.member.route_gateway_count == 2);
         CHECK(action.member.route_gateways[0] == 0x00A1000000000001ULL);
         CHECK(action.member.route_gateways[1] == 0x00A1000000000002ULL);
+        CHECK(coordinator.step(poll_at(now + 1)).ok());
+        CoordinatorAction premature{};
+        CHECK(coordinator.take_action(premature).code == StatusCode::NotFound);
+        CoordinatorEvent applied{};
+        applied.kind = CoordinatorEventKind::ChannelReady;
+        applied.now = now + 2;
+        applied.channel_token = 0;
+        applied.channel_result = StatusCode::Ok;
+        applied.channel = f.site.site().channel;
+        applied.channel_generation = 7;
+        CHECK(coordinator.step(applied).ok());
       } else if (action.kind == CoordinatorActionKind::StartMemberDiscovery) {
         CHECK(saw_config);  // order: config first, discovery second
         saw_discovery = true;
@@ -356,6 +371,15 @@ void test_boot_silent_adoption() {
   CHECK(saw_config);
   CHECK(saw_discovery);
   CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+  CHECK(coordinator.member_discovery_config(advertised).ok());
+  CHECK(advertised.node == kNode && advertised.mac == kMac &&
+        advertised.network == kNetwork &&
+        advertised.network_hint == static_cast<std::uint32_t>(kNetwork));
+  CHECK(advertised.capability_bits ==
+        (kRld1CapMemberEdhocV1 | kRld1CapMemberResumeV1));
+  CHECK(advertised.scope_mode == ScopeMode::Required &&
+        advertised.scope_provider == &coordinator.gk_scope() &&
+        advertised.scope != kInvalidScopeRef);
 
   // The GK scope went live with the adopted generation; anything else
   // refuses without leaking.
@@ -398,6 +422,42 @@ void test_boot_silent_adoption() {
   CHECK(coordinator.session_provider().tx_epoch(SecurityScope::Link, kNode + 1, epoch).code ==
         StatusCode::AuthRequired);
   CHECK(coordinator.snapshot().demands == 1);
+}
+
+void test_member_apply_failure_is_closed() {
+  current = "member_apply_failure_is_closed";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  bool applied = false;
+  MonotonicMs now = kT0;
+  for (int i = 0; i < 50 && !applied; ++i) {
+    now += 100;
+    CHECK(coordinator.step(poll_at(now)).ok());
+    CoordinatorAction action{};
+    while (coordinator.take_action(action).ok()) {
+      if (action.kind == CoordinatorActionKind::ApplyMemberConfig) applied = true;
+    }
+  }
+  CHECK(applied);
+  CoordinatorEvent failed{};
+  failed.kind = CoordinatorEventKind::ChannelReady;
+  failed.now = now + 1;
+  failed.channel_token = 0;
+  failed.channel_result = StatusCode::RadioFailure;
+  failed.channel = 1;
+  CHECK(coordinator.step(failed).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Recovery);
+  CHECK(coordinator.snapshot().link_sessions == 0);
+  CoordinatorAction report{};
+  CHECK(coordinator.take_action(report).ok());
+  CHECK(report.kind == CoordinatorActionKind::ReportRecovery);
+  CHECK(report.recovery == JoinRecoveryReason::RadioFailure);
+  CHECK(coordinator.step(poll_at(now + 2)).ok());
+  CHECK(coordinator.take_action(report).code == StatusCode::NotFound);
 }
 
 void test_rld1_demux_gates() {
@@ -472,6 +532,14 @@ void test_invalid_proxy_auth_does_not_hold_demux() {
   CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
   MonotonicMs now = kT0;
   CHECK(poll_until_member(coordinator, now));
+  CoordinatorEvent applied{};
+  applied.kind = CoordinatorEventKind::ChannelReady;
+  applied.now = now;
+  applied.channel_token = 0;
+  applied.channel_result = StatusCode::Ok;
+  applied.channel = f.site.site().channel;
+  applied.channel_generation = 7;
+  CHECK(coordinator.step(applied).ok());
   CHECK(coordinator.quiescent());
 
   for (std::uint8_t i = 1; i <= 8; ++i) {
@@ -543,6 +611,15 @@ void test_staged_bootstrap_rx() {
   CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
   MonotonicMs now = kT0;
   CHECK(poll_until_member(coordinator, now));
+
+  CoordinatorEvent applied{};
+  applied.kind = CoordinatorEventKind::ChannelReady;
+  applied.now = now;
+  applied.channel_token = 0;
+  applied.channel_result = StatusCode::Ok;
+  applied.channel = f.site.site().channel;
+  applied.channel_generation = 7;
+  CHECK(coordinator.step(applied).ok());
 
   // The Node RX context only stages: nothing is sent from the callback.
   BootstrapMeta meta{};
@@ -701,13 +778,24 @@ void test_sleep_wake_stop() {
   MonotonicMs now = kT0;
   CHECK(poll_until_member(coordinator, now));
 
+  CoordinatorEvent sleep{};
+  sleep.kind = CoordinatorEventKind::PrepareSleep;
+  sleep.now = now;
+  CHECK(coordinator.step(sleep).code == StatusCode::Busy);
+  CoordinatorEvent applied{};
+  applied.kind = CoordinatorEventKind::ChannelReady;
+  applied.now = now;
+  applied.channel_token = 0;
+  applied.channel_result = StatusCode::Ok;
+  applied.channel = f.site.site().channel;
+  applied.channel_generation = 7;
+  CHECK(coordinator.step(applied).ok());
+
   // Quiescent parks; a staged frame vetoes with Busy.
   BootstrapMeta meta{};
   meta.origin = kNode + 1;
   const std::uint8_t body[1] = {0x01};
   CHECK(coordinator.on_frame(meta, FrameType::BootstrapAuth, ByteView{body, 1}, now).ok());
-  CoordinatorEvent sleep{};
-  sleep.kind = CoordinatorEventKind::PrepareSleep;
   sleep.now = now;
   CHECK(coordinator.step(sleep).code == StatusCode::Busy);
   CHECK(!coordinator.snapshot().sleeping);
@@ -740,7 +828,11 @@ void test_sleep_wake_stop() {
   CoordinatorEvent stop{};
   stop.kind = CoordinatorEventKind::Stop;
   stop.now = now;
+  CHECK(coordinator.session_provider().ready());
+  f.entropy.fail = true;
   CHECK(coordinator.step(stop).ok());
+  CHECK(!coordinator.session_provider().ready());
+  f.entropy.fail = false;
   CHECK(coordinator.snapshot().mode == CoordinatorMode::Fresh);
   CHECK(coordinator.quiescent());
   HandshakeLocal local{};
@@ -871,6 +963,7 @@ void test_channel_ready_flow() {
 
 int main() {
   test_boot_silent_adoption();
+  test_member_apply_failure_is_closed();
   test_rld1_demux_gates();
   test_invalid_proxy_auth_does_not_hold_demux();
   test_clock_regression_refused();
