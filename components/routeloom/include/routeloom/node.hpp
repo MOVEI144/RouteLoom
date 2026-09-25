@@ -933,6 +933,12 @@ class MeshNode {
   std::size_t txn_in_flight() const noexcept;
 
   const RouteTable& routes() const noexcept { return routes_; }
+  // P6 enforcement (G-SEC P6 PR D): deactivates the neighbor record
+  // (plain route updates from it are then ignored, not re-learned),
+  // drops every candidate learned via `peer`, and withdraws the route
+  // to `peer` itself, expediting the retraction wave like a neighbor
+  // loss. The record heals through the normal handshake path only.
+  void revoke_routes(NodeId peer, MonotonicMs now_ms) noexcept;
 
   // --- Node status snapshot (node_status.hpp, node_status.cpp) --------------
   // Read-only, allocation-free view assembled from the neighbor, route and
@@ -1822,6 +1828,9 @@ class MeshNode {
   Status validate_config() const noexcept;
   Neighbor* find_neighbor(NodeId node) noexcept;
   const Neighbor* find_neighbor(NodeId node) const noexcept;
+  // Shared drop path (guard held by the caller): deactivates the record,
+  // invalidates via-peer candidates, and expedites the retraction wave.
+  void drop_neighbor_locked(Neighbor& record, NodeId neighbor, MonotonicMs now_ms) noexcept;
   // Identity reset (sdk-completion/03 §3.7): clears the measurement mirror
   // and returns link_cost to nominal — evidence gathered under a previous
   // peer incarnation/binding must not move the current identity's metric.

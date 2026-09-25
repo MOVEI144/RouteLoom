@@ -117,6 +117,29 @@ void test_line_delivery(int hops) {
   check_no_forward_loops(w.net.sights);
 }
 
+void test_revoke_routes() {
+  // P6 enforcement: revoking a peer drops every candidate via it and
+  // the route to the peer itself; surviving destinations repair onto
+  // other next hops, and the hold-down keeps the revoked arm from
+  // being re-selected when it re-advertises.
+  SimWorld w;
+  for (NodeId id = 1; id <= 4; ++id) w.add(id);
+  w.start_all();
+  w.link(1, 2, 1, 1); w.link(2, 4, 1, 1);
+  w.link(1, 3, 2, 2); w.link(3, 4, 2, 2);
+  w.run(4000);
+  CHECK(w.at(1)->routes().best(4).next_hop == 2);
+  CHECK(w.at(1)->routes().best(2).valid);
+  w.at(1)->revoke_routes(2, w.now);
+  CHECK(!w.at(1)->routes().best(2).valid);
+  // The revoked arm stays dead across advertisement waves (its updates
+  // are ignored while the record is inactive); the destination repairs
+  // onto the surviving arm and delivery follows.
+  w.run(15000);
+  CHECK(w.at(1)->routes().best(4).next_hop == 3);
+  send_and_expect(w, 1, 4, 10000, "revoke-routes");
+}
+
 void test_diamond() {
   SimWorld w;
   for (NodeId id = 1; id <= 4; ++id) w.add(id);
@@ -660,6 +683,7 @@ int main() {
   test_line_delivery(3);
   test_line_delivery(5);
   test_line_delivery(10);
+  test_revoke_routes();
   test_diamond();
   test_ring();
   test_relay_removal();

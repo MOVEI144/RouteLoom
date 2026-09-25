@@ -878,6 +878,52 @@ void test_rrs_exchange_timeouts_and_demux() {
         StatusCode::InvalidArgument);
 }
 
+void test_owns_rrs_chunk_demux() {
+  // The Owner's chunk/ack demux: the lifecycle claims exactly the frames
+  // of its live gossip transfer, so those route to VerifiedPeerControl
+  // while everything else stays on the migration lane.
+  NodeFixture node{};
+  CHECK(node.provision(3, 16));
+  node.pump(0);
+  CHECK(node.snap().phase == LifecyclePhase::Active);
+  FakePeerPort tx_port;
+  FakeObjectSink tx_sink;
+  RrsExchange tx(tx_port, tx_sink);
+  const auto object = revocation_object(revocation_set(16));
+  CHECK_OK(tx.publish(kNode, 7, object.view(), 0));
+  tx.poll(0);
+  CHECK(!tx_port.sent.empty());
+  CHECK(tx_port.sent[0].carrier == FrameType::ControlObject);
+  // Before the manifest, no chunk is ours — not even a well-formed one.
+  for (const auto& sent : tx_port.sent) {
+    if (sent.carrier != FrameType::ObjectChunk) continue;
+    CHECK(!node.lifecycle.owns_rrs_chunk(
+        kNodeB, 7, sent.carrier, ByteView{sent.body.data(), sent.body.size()}));
+  }
+  CHECK_OK(node.dispatch(
+      LifecycleInput::PeerControl(
+          stamp_for(kNodeB, 3), FrameType::ControlObject,
+          ByteView{tx_port.sent[0].body.data(), tx_port.sent[0].body.size()}),
+      0));
+  // The transfer's chunks and ACKs are claimed; anything else is not.
+  bool saw_chunk = false;
+  for (const auto& sent : tx_port.sent) {
+    if (sent.carrier != FrameType::ObjectChunk) continue;
+    saw_chunk = true;
+    const ByteView body{sent.body.data(), sent.body.size()};
+    CHECK(node.lifecycle.owns_rrs_chunk(kNodeB, 7, sent.carrier, body));
+    CHECK(!node.lifecycle.owns_rrs_chunk(kNodeC, 7, sent.carrier, body));
+    CHECK(!node.lifecycle.owns_rrs_chunk(kNodeB, 9, sent.carrier, body));
+    CHECK(!node.lifecycle.owns_rrs_chunk(kNodeB, 7, FrameType::Control, body));
+  }
+  CHECK(saw_chunk);
+  const std::array<std::uint8_t, 3> garbage{{1, 2, 3}};
+  CHECK(!node.lifecycle.owns_rrs_chunk(kNodeB, 7, FrameType::ObjectChunk,
+                                       ByteView{garbage.data(), garbage.size()}));
+  CHECK(!node.lifecycle.owns_rrs_chunk(kInvalidNodeId, 7, FrameType::ObjectChunk,
+                                       ByteView{garbage.data(), garbage.size()}));
+}
+
 // --- Re-entry ----------------------------------------------------------------------------------
 
 bool same_snapshot(const LifecycleSnapshot& a, const LifecycleSnapshot& b) {
@@ -2616,6 +2662,7 @@ int main() {
   test_link_failure_and_recovery();
   test_rrs_exchange_roundtrip();
   test_rrs_exchange_timeouts_and_demux();
+  test_owns_rrs_chunk_demux();
   test_reentry_is_busy_and_changelss();
   test_gossip_line_propagates();
   test_gossip_line_100_nodes_converges();

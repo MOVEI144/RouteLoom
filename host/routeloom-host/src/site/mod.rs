@@ -51,6 +51,7 @@ pub mod authority_channel;
 pub mod config;
 pub mod cutover;
 pub mod group_keys;
+pub mod p6_channel;
 pub mod records;
 pub mod revocation;
 pub mod store;
@@ -85,6 +86,7 @@ use routeloom_provision::sha256::sha256;
 use routeloom_provision::signer::{fill_random, RootSigner};
 
 use crate::receive_log::hex_lower;
+use authority_channel::{AuthorityOutbound, AuthorityTransport, ChannelMember};
 use group_keys::{
     decode_last_rotation, encode_last_rotation, fresh_group_key, gk_id, validate_group_keys,
     AckOutcome, ConfirmOutcome, GkSecret, GkSend, GroupKeyAck, GroupKeyCommand, GroupKeyPull,
@@ -93,10 +95,12 @@ use group_keys::{
     ValidatedKeys, GK_OUTBOX_CAP, GK_ROTATION_PERIOD_MS, MEMBER_CAP, META_ACTIVATED_MS,
     META_HIGH_WATER, META_LAST_ROTATION,
 };
+use p6_channel::{decode_type5, P6Receipt, P6Type5};
 use records::{
     h16, op_token, request_token, role_name, DeviceFacts, Discovered, JoinRequestRec, Operation,
     StoredDecision, Verdict, Via, ROLE_ENDPOINT, ROLE_GATEWAY, ROLE_RELAY,
 };
+use routeloom_protocol::authority::CarrierKind;
 use store::{Batch, DeviceRow, DocKind, GroupKeyRow, LedgerRow, RotationWrite, SiteStore};
 use transport::{
     AbortReason, DownStatus, JoinTransport, Outbound, RelayDown, RelayKey, RelayUp, PHASE_EDHOC,
@@ -1984,9 +1988,146 @@ impl SiteAuthority {
     /// lifecycle on both axes (§6.2). Notices and cutover grants queue
     /// before RRS1 fan-out; the one paced dispatch serves them all.
     pub fn tick(&mut self, time: HostTime) {
+        self.tick_p6_channel(time);
         self.tick_cutover(time);
         self.tick_joins(time.unix_ms);
         self.tick_gk(time);
+    }
+
+    /// The P6 channel half of the tick (P6 PR D): refreshes the
+    /// port's member bindings first — every seal below fences on them —
+    /// then routes verified device reports to the revocation/cutover
+    /// sinks. Outbound carriers leave via `SiteService::with`, which
+    /// drains them with the lock released like the join outbox.
+    pub(super) fn tick_p6_channel(&mut self, time: HostTime) {
+        let live: Vec<(u64, ChannelMember)> = self
+            .devices
+            .values()
+            .filter(|row| row.member)
+            .map(|row| {
+                (
+                    row.node,
+                    ChannelMember {
+                        member: true,
+                        kid: row.kid,
+                        generation: row.generation,
+                        dams: row.dams,
+                        network: self.id.network,
+                    },
+                )
+            })
+            .collect();
+        if let Some(transport) = self.rrs_transport.as_mut() {
+            transport.refresh_p6_bindings(
+                &live,
+                self.id.network,
+                self.rs_epoch,
+                self.gks.active_epoch(),
+                time.mono_ms,
+            );
+        }
+        self.drain_p6_receipts(time);
+    }
+
+    /// Feeds one inbound P6 carrier into the port (called by the USB
+    /// 0x64 / mesh mapping with the lock held, like `handle_up`).
+    pub fn push_p6_carrier(
+        &mut self,
+        device: u64,
+        kind: CarrierKind,
+        bytes: &[u8],
+        time: HostTime,
+    ) {
+        if let Some(transport) = self.rrs_transport.as_mut() {
+            transport.push_carrier(device, kind, bytes, time.mono_ms);
+        }
+        self.drain_p6_receipts(time);
+    }
+
+    /// Takes every queued outbound P6 carrier for the USB/mesh mapping.
+    pub(super) fn take_p6_carriers(&mut self) -> Vec<AuthorityOutbound> {
+        self.rrs_transport
+            .as_mut()
+            .map_or_else(Vec::new, |transport| transport.take_p6_carriers())
+    }
+
+    /// `capabilities.get` distribution state: `rrs_ready` once the
+    /// production channel port is attached, else `rrs_no_transport`.
+    pub fn p6_distribution_status(&self) -> &'static str {
+        if self.rrs_transport.as_ref().is_some_and(|t| t.p6_ready()) {
+            "rrs_ready"
+        } else {
+            "rrs_no_transport"
+        }
+    }
+
+    /// Routes the port's verified reports: type 5 Applied/Get/
+    /// NoticeAccepted to the revocation sink, type 7 PREPARED/APPLIED
+    /// to the cutover sink. A Get is answered best-effort on the spot
+    /// (spam-gapped, outside the paced outbox — the device
+    /// cooldowns itself at 60 s); anything malformed drops silently.
+    pub(super) fn drain_p6_receipts(&mut self, time: HostTime) {
+        let receipts = match self.rrs_transport.as_mut() {
+            Some(transport) => transport.poll_p6_receipts(),
+            None => return,
+        };
+        for receipt in receipts {
+            match receipt.env_type {
+                5 => self.apply_type5_receipt(receipt, time),
+                7 => {
+                    self.handle_grant_receipt(
+                        receipt.device,
+                        receipt.generation,
+                        receipt.network,
+                        &receipt.body,
+                        time.unix_ms,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn apply_type5_receipt(&mut self, receipt: P6Receipt, time: HostTime) {
+        match decode_type5(&receipt.body) {
+            Some(P6Type5::Applied { rs_epoch, sha }) => {
+                self.handle_rrs_applied(
+                    receipt.device,
+                    receipt.generation,
+                    receipt.network,
+                    rs_epoch,
+                    &sha,
+                    time.unix_ms,
+                );
+            }
+            Some(P6Type5::NoticeAccepted { rs_epoch, sha }) => {
+                self.handle_notice_accepted(
+                    receipt.device,
+                    receipt.generation,
+                    receipt.network,
+                    rs_epoch,
+                    &sha,
+                    time.unix_ms,
+                );
+            }
+            Some(P6Type5::Get { wanted_rs_epoch }) => {
+                let answer = match self.handle_rrs_get(wanted_rs_epoch, time.unix_ms) {
+                    Ok(answer) => answer,
+                    Err(_) => return,
+                };
+                let gap_ok = self
+                    .rrs_transport
+                    .as_mut()
+                    .is_some_and(|t| t.note_p6_get_answer(receipt.device, time.mono_ms));
+                if !gap_ok {
+                    return;
+                }
+                if let Some(transport) = self.rrs_transport.as_mut() {
+                    let _ = transport.send_rrs(receipt.device, &answer);
+                }
+            }
+            None => {}
+        }
     }
 
     /// Time-driven work: message_3 and decision deadlines.
@@ -4478,6 +4619,7 @@ pub struct SiteService {
     gk_handoff: Mutex<()>,
     authority: Mutex<SiteAuthority>,
     transport: Mutex<Option<Arc<dyn JoinTransport>>>,
+    authority_sink: Mutex<Option<Arc<dyn AuthorityTransport>>>,
 }
 
 pub type Events = Vec<(u64, String)>;
@@ -4488,11 +4630,19 @@ impl SiteService {
             gk_handoff: Mutex::new(()),
             authority: Mutex::new(authority),
             transport: Mutex::new(None),
+            authority_sink: Mutex::new(None),
         }
     }
 
     pub fn set_transport(&self, transport: Arc<dyn JoinTransport>) {
         *self.transport.lock().expect("transport poisoned") = Some(transport);
+    }
+
+    /// Installs the P6/GK carrier mapping (P5 PR4: USB 0x65 / mesh).
+    /// Until one is set, sealed carriers drop after queueing — sends
+    /// already reported only `unknown`, never success.
+    pub fn set_authority_sink(&self, sink: Arc<dyn AuthorityTransport>) {
+        *self.authority_sink.lock().expect("authority sink poisoned") = Some(sink);
     }
 
     /// Runs `f` on the authority; delivers what it queued. A delivery
@@ -4506,7 +4656,7 @@ impl SiteService {
         // commit while an earlier command to that member is still in send.
         // The authority lock remains released during transport calls.
         let handoff = self.gk_handoff.lock().expect("gk handoff poisoned");
-        let (result, outbound, gk_outbound, gk_transport, mut events) = {
+        let (result, outbound, gk_outbound, gk_transport, p6_carriers, mut events) = {
             let mut authority = self.authority.lock().expect("site authority poisoned");
             let result = f(&mut authority);
             (
@@ -4514,6 +4664,7 @@ impl SiteService {
                 authority.take_outbound(),
                 std::mem::take(&mut authority.gk_outbox),
                 authority.gk_transport.clone(),
+                authority.take_p6_carriers(),
                 authority.take_events(),
             )
         };
@@ -4525,6 +4676,20 @@ impl SiteService {
                     queued.command,
                     queued.expected_dams.as_ref().map(GkSecret::bytes),
                 );
+            }
+        }
+        // P6 carriers (R2 / sealed type-5/6/7 envelopes) leave the same
+        // way, through the P5 PR4 USB/mesh mapping once one is set.
+        if !p6_carriers.is_empty() {
+            let sink = self
+                .authority_sink
+                .lock()
+                .expect("authority sink poisoned")
+                .clone();
+            if let Some(sink) = sink {
+                for carrier in p6_carriers {
+                    sink.deliver(carrier);
+                }
             }
         }
         drop(handoff);
@@ -4558,6 +4723,19 @@ impl SiteService {
         self.with(|a| a.handle_up(up, now_ms)).1
     }
 
+    /// One inbound authority carrier (reassembled USB 0x64 / mesh,
+    /// addressed by the gateway-confirmed device id).
+    pub fn handle_carrier(
+        &self,
+        device: u64,
+        kind: CarrierKind,
+        bytes: &[u8],
+        time: HostTime,
+    ) -> Events {
+        self.with(|a| a.push_p6_carrier(device, kind, bytes, time))
+            .1
+    }
+
     pub fn tick(&self, time: HostTime) -> Events {
         self.with(|a| a.tick(time)).1
     }
@@ -4576,6 +4754,8 @@ mod cutover_tests;
 mod e2e;
 #[cfg(test)]
 mod joiner_interop;
+#[cfg(test)]
+mod p6_channel_tests;
 #[cfg(test)]
 pub(crate) mod testkit;
 #[cfg(test)]

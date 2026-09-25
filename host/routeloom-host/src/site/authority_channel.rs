@@ -26,8 +26,9 @@ use routeloom_keysched::authority::{
 use routeloom_keysched::rlres1::{decode_r3, Epochs, R1, R2};
 use routeloom_keysched::{
     resume_auth_key, resume_binding_routed, resume_confirm_key, resume_id, resume_mac, resume_prk,
-    resume_traffic_key, sha256, Direction, Purpose, ResumeKeyContext, TrafficKey, LABEL_RESUME_R1,
-    LABEL_RESUME_R2, LABEL_RESUME_R3,
+    resume_traffic_key, sha256, Direction, Purpose, ResumeKeyContext, TrafficKey,
+    AUTHORITY_ENVELOPE_MAX, AUTHORITY_ENVELOPE_MIN, LABEL_RESUME_R1, LABEL_RESUME_R2,
+    LABEL_RESUME_R3,
 };
 use routeloom_protocol::authority::CarrierKind;
 use zeroize::{Zeroize, Zeroizing};
@@ -81,7 +82,7 @@ pub struct AuthorityOutbound {
 /// Outbound sink. The channel calls it with the lock released (mirroring
 /// the JoinTransport discipline), so implementations must be re-entrant
 /// safe; `deliver` itself never calls back into the channel.
-pub trait AuthorityTransport {
+pub trait AuthorityTransport: Send + Sync {
     fn deliver(&self, outbound: AuthorityOutbound);
 }
 
@@ -1044,6 +1045,61 @@ impl AuthorityChannels {
             .map_err(|_| ChannelSendError::InvalidParams)?;
         self.seal_for(directory, device, 1, &plaintext, now_ms)
     }
+
+    /// Seals a P6 typed payload for `device` (G-SEC P6 PR D: RRS1 /
+    /// RemovalNotice / GrantRenew): the 16-byte generation head the
+    /// channel fences on, then the opaque P6 body the revocation /
+    /// cutover sink owns. Only types 5..=7 ride here; anything else is
+    /// a caller bug, refused before any channel state moves.
+    pub fn send_typed(
+        &mut self,
+        directory: &dyn AuthorityDirectory,
+        device: u64,
+        env_type: u8,
+        generation: u32,
+        tail: &[u8],
+        now_ms: u64,
+    ) -> Result<(), ChannelSendError> {
+        if !matches!(env_type, 5..=7) {
+            return Err(ChannelSendError::InvalidParams);
+        }
+        if tail.len() > AUTHORITY_ENVELOPE_MAX - AUTHORITY_ENVELOPE_MIN - BODY_HEAD {
+            return Err(ChannelSendError::InvalidParams);
+        }
+        let request_id = self.alloc_request_id(device)?;
+        let head = BodyHead {
+            op: 1,
+            generation,
+            request_id,
+        }
+        .encode(1)
+        .map_err(|_| ChannelSendError::InvalidParams)?;
+        let mut plaintext = Vec::with_capacity(BODY_HEAD + tail.len());
+        plaintext.extend_from_slice(&head);
+        plaintext.extend_from_slice(tail);
+        let sent = self.seal_for(directory, device, env_type, &plaintext, now_ms);
+        plaintext.zeroize();
+        sent
+    }
+
+    /// The network this table currently serves (the P6 port flips the
+    /// whole table — never this field — on a cutover).
+    pub fn network(&self) -> u64 {
+        self.config.network
+    }
+
+    /// Refreshes the advertised RRS/GK epochs (R2 `epochs_r`); the
+    /// network and site identity only move via a table flip.
+    pub fn set_epochs(&mut self, rs_epoch: u32, gk_epoch: u32) {
+        self.config.rs_epoch = rs_epoch;
+        self.config.gk_epoch = gk_epoch;
+    }
+
+    /// True when `device` holds an established channel (advisory: the
+    /// send-time re-check still fences the seal).
+    pub fn has_channel(&self, device: u64) -> bool {
+        self.channels.contains_key(&device)
+    }
 }
 
 #[cfg(test)]
@@ -1890,6 +1946,44 @@ mod tests {
             Err(ChannelSendError::StaleMember)
         );
         assert!(channels.take_outbound().is_empty());
+    }
+
+    #[test]
+    fn typed_send_fences_type_generation_and_size() {
+        let directory = FakeDirectory::with(DEVICE, dams());
+        let mut channels = AuthorityChannels::new(config());
+        let mut device = handshake(&mut channels, &directory);
+        // Only P6 types ride; anything else refuses before sealing.
+        for env_type in [0, 1, 2, 3, 4, 8, 9, 255] {
+            assert_eq!(
+                channels.send_typed(&directory, DEVICE, env_type, 9, &[1, 2], 1001),
+                Err(ChannelSendError::InvalidParams),
+                "env_type {env_type}"
+            );
+        }
+        // A generation that is not the bound one refuses as well.
+        assert_eq!(
+            channels.send_typed(&directory, DEVICE, 5, 8, &[1, 2], 1001),
+            Err(ChannelSendError::InvalidParams)
+        );
+        // Oversize tails refuse instead of truncating.
+        let big = vec![0xAA; 4096];
+        assert_eq!(
+            channels.send_typed(&directory, DEVICE, 5, 9, &big, 1001),
+            Err(ChannelSendError::InvalidParams)
+        );
+        assert!(channels.take_outbound().is_empty());
+        // The happy path: head-wrapped, device-openable, tail intact.
+        channels
+            .send_typed(&directory, DEVICE, 6, 9, &[0xC0, 0x01], 1001)
+            .expect("typed send");
+        let out = channels.take_outbound();
+        assert_eq!(out.len(), 1);
+        let (env_type, plaintext) = device.open(&out[0].bytes);
+        assert_eq!(env_type, 6);
+        let head = BodyHead::decode(&plaintext[..BODY_HEAD], plaintext[1]).expect("head");
+        assert_eq!((head.op, head.generation), (1, 9));
+        assert_eq!(&plaintext[BODY_HEAD..], &[0xC0, 0x01]);
     }
 
     #[test]

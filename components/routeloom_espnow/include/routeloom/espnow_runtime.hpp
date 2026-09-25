@@ -40,6 +40,19 @@ struct MacAddress {
   }
 };
 
+// P6 chunk/ack claim hook (G-SEC P6 PR D): the Owner implements this over
+// the lifecycle's live-transfer registry. Called synchronously from the
+// RX lane for ObjectChunk/ObjectAck only; true claims the frame (the
+// Owner stages a copy and feeds it to the lifecycle from its poll —
+// never dispatches here), false leaves it for the migration engine.
+// Must not block, allocate, or touch stores.
+class RrsChunkSink {
+ public:
+  virtual ~RrsChunkSink() = default;
+  virtual bool claim_rrs_chunk(NodeId peer, FrameType carrier, ByteView body,
+                               MonotonicMs now_ms) noexcept = 0;
+};
+
 struct EspNowRuntimeConfig {
   NodeConfig node{};
   std::uint8_t channel{1};
@@ -191,6 +204,13 @@ class EspNowRuntime final : public RadioPort,
   void on_autonomy_frame(NodeId peer, FrameType type, ByteView payload,
                          MonotonicMs now_ms,
                          MonotonicMs captured_ms = 0) noexcept override;
+  // P6 chunk/ack demux (G-SEC P6 PR D): the Owner installs a claim hook
+  // so kind-6 object chunks/ACKs of a live RRS1 transfer route to the
+  // lifecycle instead of the migration engine (manifests already route
+  // to the gossip sink at the node layer; carriers are shared, so the
+  // hook decides by (peer, binding, hash)). Nullptr disables (PR A
+  // state: everything flows to migration, as before).
+  void set_rrs_chunk_sink(RrsChunkSink* sink) noexcept { rrs_chunk_sink_ = sink; }
   // Verify oracle (04 §10): forwards authenticated traffic to the migration
   // sink — but ONLY while no radio operation owns the channel. Frames
   // observed during a survey/helper visit or mid-cutover drain are
@@ -609,6 +629,7 @@ class EspNowRuntime final : public RadioPort,
   OwnerReplyPort reply_port_;
   ChannelOperationRunner channel_runner_;
   MigrationFrameSink* migration_{nullptr};
+  RrsChunkSink* rrs_chunk_sink_{nullptr};
   routeloom::MacAddress self_mac_{};
   std::uint64_t autonomy_sequence_{0};
   // Source MAC of the RX event currently being drained in poll_once — used

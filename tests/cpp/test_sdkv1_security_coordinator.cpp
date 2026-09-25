@@ -867,6 +867,130 @@ void test_channel_ready_flow() {
   CHECK(coordinator.snapshot().joiner != JoinState::WaitChannel);
 }
 
+void test_recovery_join_reproves_retained_membership() {
+  current = "recovery_join_reproves_retained_membership";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  const std::uint32_t adopted_seq = f.site.commit_seq();
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+
+  // The P6 drain starts the recovery join (SelfRevoked → ZT check): the
+  // member engine stops but the stores stay for re-proof.
+  now += 100;
+  CHECK(coordinator.start_recovery_join(now).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  CHECK(f.site.has_site());
+  CHECK(f.site.commit_seq() == adopted_seq);
+  // Traffic halted: the GK scope is scrubbed (the bank stays configured
+  // for the retained membership, with every session wiped).
+  ScopeRef scope{1};
+  std::uint32_t scope_generation = 0;
+  CHECK(!coordinator.gk_scope().current_generation(scope, scope_generation));
+
+  // A verify boot never adopts silently: it tunes to query the
+  // authority instead of emitting MemberReady off the retained RLS1.
+  bool saw_tune = false;
+  bool saw_config = false;
+  for (int i = 0; i < 30 && !saw_tune; ++i) {
+    now += 100;
+    CHECK(coordinator.step(poll_at(now)).ok());
+    CoordinatorAction action{};
+    while (coordinator.take_action(action).ok()) {
+      if (action.kind == CoordinatorActionKind::TuneChannel) saw_tune = true;
+      if (action.kind == CoordinatorActionKind::ApplyMemberConfig) saw_config = true;
+    }
+  }
+  CHECK(saw_tune);
+  CHECK(!saw_config);
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+
+  // Outside Member mode the hook refuses; a regressed clock refuses.
+  CHECK(!coordinator.start_recovery_join(now).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+}
+
+void test_recovery_join_refuses_outside_member() {
+  current = "recovery_join_refuses_outside_member";
+  Fixture f{};
+  CHECK(f.init_stores());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(!coordinator.start_recovery_join(kT0).ok());  // Fresh: nothing retained
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  CHECK(!coordinator.start_recovery_join(kT0).ok());  // ZeroTouch: joiner owns it
+}
+
+void test_removal_watermark_does_not_break_adoption() {
+  current = "removal_watermark_does_not_break_adoption";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  // A stale watermark for an older generation of another site rides the
+  // boot into the Joiner; the healthy retained membership still adopts.
+  // (The blocking itself — older generation of the same site — is
+  // covered by the Joiner suite; here only the plumbing is under test.)
+  coordinator.set_removal_watermark(kSiteId + 1, 7);
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+}
+
+void test_wipe_site_trust() {
+  current = "wipe_site_trust";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  ScopeRef scope{1};
+  std::uint32_t generation = 0;
+  CHECK(coordinator.gk_scope().current_generation(scope, generation));
+  CHECK(coordinator.wipe_site_trust().ok());
+  CHECK(!coordinator.gk_scope().current_generation(scope, generation));
+  CHECK(f.discovery.membership().state() == MembershipState::Revoked);
+  // Idempotent: re-asserting after traffic stopped still succeeds.
+  CHECK(coordinator.wipe_site_trust().ok());
+}
+
+void test_revoke_member_sessions() {
+  current = "revoke_member_sessions";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  // Nothing adopted yet: a foreign set refuses instead of retiring.
+  RevocationSet foreign = revocation_set(3);
+  foreign.network = kNetwork + 1;
+  now += 100;
+  CHECK(!coordinator.revoke_member_sessions(foreign, 3, now).ok());
+  // The adopted set enforces cleanly.
+  RevocationSet set = revocation_set(3);
+  auto object = revocation_object(set);
+  CHECK(f.revocations.accept(object.view(), sak().pub, kSiteId, kNetwork).ok());
+  CHECK(coordinator.revoke_member_sessions(set, 3, now).ok());
+  // Outside Member mode there is nothing live to retire.
+  CoordinatorEvent stop{};
+  stop.kind = CoordinatorEventKind::Stop;
+  stop.now = now;
+  CHECK(coordinator.step(stop).ok());
+  CHECK(coordinator.revoke_member_sessions(set, 3, now).ok());
+}
+
 }  // namespace
 
 int main() {
@@ -884,6 +1008,11 @@ int main() {
   test_commit_veto();
   test_store_credential_verifier();
   test_channel_ready_flow();
+  test_recovery_join_reproves_retained_membership();
+  test_recovery_join_refuses_outside_member();
+  test_removal_watermark_does_not_break_adoption();
+  test_wipe_site_trust();
+  test_revoke_member_sessions();
   if (failures != 0) {
     std::fprintf(stderr, "FAILURES: %d\n", failures);
     return 1;

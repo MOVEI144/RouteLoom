@@ -230,7 +230,7 @@ impl Drop for Peer {
 }
 
 impl Peer {
-    fn spawn(t0: u64, seed: u64, flash: Option<&std::path::Path>) -> Self {
+    fn spawn(t0: u64, seed: u64, flash: Option<&std::path::Path>, verify: bool) -> Self {
         let path = std::env::var_os("ROUTELOOM_JOINER_PEER")
             .map(std::path::PathBuf::from)
             .or_else(|| {
@@ -294,6 +294,9 @@ impl Peer {
             .stderr(Stdio::inherit());
         if let Some(file) = flash {
             command.arg("--flash").arg(file);
+        }
+        if verify {
+            command.arg("--verify");
         }
         let mut child = command.spawn().expect("spawn joiner interop peer");
         let stdin = child.stdin.take().expect("peer stdin");
@@ -601,7 +604,7 @@ impl World {
     fn start(tag: &str, seed: u64) -> Self {
         let now = now_ms();
         Self {
-            peer: Peer::spawn(now, seed, None),
+            peer: Peer::spawn(now, seed, None, false),
             sites: [InteropSite::site_a(tag, now), InteropSite::site_b(tag, now)],
             now,
             decisions: Vec::new(),
@@ -611,9 +614,12 @@ impl World {
         }
     }
 
-    fn swap_peer(&mut self, t0: u64, seed: u64, flash: &std::path::Path) {
+    fn swap_peer(&mut self, t0: u64, seed: u64, flash: &std::path::Path, verify: bool) {
         self.now = t0;
-        self.peer = Peer::spawn(t0, seed, Some(flash));
+        self.peer = Peer::spawn(t0, seed, Some(flash), verify);
+        // A reboot starts a new boot: the m4s after it answer a
+        // re-proof, never the pre-cycle KGuard decision.
+        self.decisions.clear();
     }
 
     fn route_up(&mut self, up: &PeerUp) {
@@ -679,7 +685,10 @@ impl World {
                                 (row, durable)
                             })
                             .0;
-                        if allowed_here {
+                        // A reissue-allow m4 carries no KGuard decision at
+                        // all (04 §8.5), so a live member row takes the
+                        // strict path too.
+                        if allowed_here || row.as_ref().is_some_and(|r| r.member) {
                             let row = row.expect("allow committed before its m4");
                             assert!(row.member, "allow row is a member");
                             assert_ne!(row.dams, [0; 32], "DAMS stored with the delivery");
@@ -689,9 +698,11 @@ impl World {
                             let durable = durable.expect("allow persisted before its m4");
                             assert_eq!(durable.delivered_ms, Some(delivered));
                             assert_eq!(durable.dams, row.dams);
-                            // The API socket stamps decisions with wall time;
-                            // the peer tick runs on this fixture's virtual time.
-                            let forwarded_at = now_ms();
+                            // delivered_ms is stamped on the caller's axis:
+                            // wall on the API socket path, virtual on the
+                            // direct reissue path. Both axes are monotone,
+                            // so the commit precedes the send on either.
+                            let forwarded_at = now_ms().max(self.now);
                             assert!(
                                 delivered <= forwarded_at,
                                 "durable approval precedes the m4 send"
@@ -795,6 +806,7 @@ impl World {
 // C++ `JoinActionKind` (sdkv1_joiner.hpp): None 0, ChangeChannel 1,
 // MemberReady 2, RemovalRequired 3, RecoveryRequired 4.
 const MEMBER_READY: u8 = 2;
+const REMOVAL_REQUIRED: u8 = 3;
 
 fn check_terminal(snap: &Snap, kind: u8) {
     // C++ `JoinState::Stopped = 0`: a terminal action never sits on Stopped.
@@ -973,7 +985,7 @@ fn power_cut_after_commit_boots_as_member() {
     let flash_path = dir.join("flash.bin");
     std::fs::write(&flash_path, &before).unwrap();
 
-    world.swap_peer(world.now + 1000, 0xC08, &flash_path);
+    world.swap_peer(world.now + 1000, 0xC08, &flash_path, false);
     let ups_at_boot = world.ups_seen;
     let tick = world.pump_until(2000, |t| t.snap.action_pending);
     check_member_boot(&tick.snap);
@@ -983,5 +995,253 @@ fn power_cut_after_commit_boots_as_member() {
     assert_eq!(tick.member.dams_digest, dams_before, "DAMS intact");
     assert_eq!(tick.snap.store_site, testkit::SITE);
     assert_eq!(tick.snap.store_gen, 1);
+    let _ = std::fs::remove_file(&flash_path);
+}
+
+/// V1-R07 over the pipe: the member is revoked while offline, then
+/// power-cycles and re-proves its retained RLS1. The real C++ Joiner in
+/// VerifyExistingMembership mode ZTs with LastMembership, the real Rust
+/// authority answers Removed with a fresh SAK-signed notice in the m4,
+/// and the Joiner lands RemovalRequired without touching flash.
+#[test]
+fn cpp_joiner_removed_rediscovers_over_the_pipe() {
+    use routeloom_client::site::RemovalReason;
+
+    let mut world = World::start("removed", 0xBE07);
+    world.sites[0]
+        .kguard
+        .assign(DEVICE_NODE, Assignment::Here(Role::Endpoint));
+    let tick = world.pump_until(6000, |t| t.snap.action_pending);
+    check_terminal(&tick.snap, MEMBER_READY);
+    let before = world.peer.dump_flash();
+    let dir = world.sites[0].dir.clone();
+    let flash_path = dir.join("flash.bin");
+    std::fs::write(&flash_path, &before).unwrap();
+
+    // Revoked while offline: the direct notice has no bearer here (no
+    // port attached), so the ZT re-proof must carry the removal.
+    world.sites[0]
+        .link
+        .revoke(DEVICE_NODE, 1, RemovalReason::Removed, "r07-rm")
+        .unwrap();
+    assert!(
+        world.member_row(0).as_ref().is_some_and(|row| !row.member),
+        "revoke commits the removal"
+    );
+
+    // Power cycle into the verify boot: ZT re-proof, not silent adoption.
+    let ups_at_boot = world.ups_seen;
+    world.swap_peer(world.now + 1000, 0xBE08, &flash_path, true);
+    let tick = world.pump_until(12000, |t| t.snap.action_pending);
+    assert!(world.ups_seen > ups_at_boot, "the verify boot ZTs");
+    assert_ne!(tick.snap.state, 0, "the FSM left Stopped");
+    assert_eq!(
+        tick.snap.pending_action, REMOVAL_REQUIRED,
+        "the verified notice lands RemovalRequired"
+    );
+    assert_eq!(tick.snap.terminal_kind, REMOVAL_REQUIRED);
+    assert_ne!(tick.snap.terminal_at, 0, "terminal action stamped");
+    // Nothing committed: the retained RLS1 is evidence, not membership.
+    assert_eq!(tick.snap.store_site, testkit::SITE);
+    assert_eq!(tick.snap.store_gen, 1);
+    assert_eq!(tick.snap.site_writes, 0, "Removed writes nothing");
+    assert_ne!(tick.snap.last_read_at, 0, "the RLS1 was read back");
+    let _ = std::fs::remove_file(&flash_path);
+}
+
+/// V1-R08 straggler over the pipe: the member hears no PREPARE/COMMIT
+/// (offline at cutover), then re-proves over ZT and takes the
+/// authenticated reissue on the new epoch — real C++ Joiner, real Rust
+/// authority, no KGuard round-trip.
+#[test]
+fn cpp_joiner_cutover_reissue_over_the_pipe() {
+    use super::cutover::CUTOVER_PREPARE_WINDOW_MS;
+    use super::group_keys::HostTime;
+    use super::revocation::RevocationTransport;
+    use super::testkit::{Outcome, SimDevice};
+    use routeloom_join::renew::{Head, Phase, Receipt};
+
+    type GrantMail = (u64, u64, Vec<u8>);
+    struct Channel {
+        outbox: Arc<Mutex<Vec<GrantMail>>>,
+    }
+    impl RevocationTransport for Channel {
+        fn send_rrs(&mut self, _node: u64, _object: &[u8]) -> bool {
+            true
+        }
+        fn send_notice(&mut self, _node: u64, _network: u64, _notice: &[u8]) -> bool {
+            true
+        }
+        fn send_grant(&mut self, node: u64, network: u64, plaintext: &[u8]) -> bool {
+            self.outbox
+                .lock()
+                .unwrap()
+                .push((node, network, plaintext.to_vec()));
+            true
+        }
+        fn carries_notice(&self) -> bool {
+            true
+        }
+        fn carries_grant(&self) -> bool {
+            true
+        }
+    }
+
+    let mut world = World::start("reissue", 0xBE08);
+    world.sites[0]
+        .kguard
+        .assign(DEVICE_NODE, Assignment::Here(Role::Endpoint));
+    world.sites[0]
+        .kguard
+        .assign(testkit::GATEWAY, Assignment::Here(Role::Gateway));
+    // The gateway joins on the Rust side first (the pipe is still idle,
+    // so its m4 cannot stray into the peer).
+    let mut gateway = SimDevice::new(testkit::GATEWAY, 0x60);
+    gateway.capability |= routeloom_join::JOIN_CAPABILITY_GATEWAY;
+    let (mut exchange, outcome, _) = gateway.start(
+        &world.sites[0].service,
+        &world.sites[0].transport,
+        world.now,
+    );
+    assert!(matches!(outcome, Outcome::Waiting), "{outcome:?}");
+    let done = world.sites[0]
+        .kguard
+        .serve_once(&world.sites[0].link)
+        .unwrap();
+    assert_eq!(done.len(), 1);
+    let outcome = gateway.finish(&mut exchange, &world.sites[0].transport);
+    assert!(
+        matches!(
+            outcome,
+            Outcome::Result(routeloom_join::JoinResult::Allow { .. })
+        ),
+        "{outcome:?}"
+    );
+    // The pipe device joins; the gateway idles as a member.
+    let tick = world.pump_until(6000, |t| t.snap.action_pending);
+    check_terminal(&tick.snap, MEMBER_READY);
+    let before = world.peer.dump_flash();
+    let dir = world.sites[0].dir.clone();
+    let flash_path = dir.join("flash.bin");
+    std::fs::write(&flash_path, &before).unwrap();
+
+    // Cutover with a captured grant lane; only the gateway ACKs, the
+    // pipe device hears nothing and becomes the straggler.
+    let grants: Arc<Mutex<Vec<GrantMail>>> = Arc::new(Mutex::new(Vec::new()));
+    world.sites[0].service.with(|a| {
+        a.set_rrs_transport(Some(Box::new(Channel {
+            outbox: grants.clone(),
+        })))
+    });
+    let site_ca = FileRootSigner::from_secret(testkit::SITE_CA, &test_keypair(0x61).0).unwrap();
+    let next_cert = cert_issue(
+        &CertClaims {
+            cert_type: CertType::Site,
+            issuer: testkit::SITE_CA,
+            subject: testkit::SITE,
+            pubkey: test_keypair(0x62).1,
+            network_low32: testkit::NETWORK_LOW,
+            site_epoch: testkit::SITE_EPOCH + 1,
+            usage: 1,
+            serial: 8,
+            ..CertClaims::default()
+        },
+        &site_ca,
+    )
+    .unwrap();
+    let outcome = world.sites[0]
+        .link
+        .cutover(
+            testkit::SITE_EPOCH,
+            &crate::receive_log::hex_lower(&next_cert),
+            "r08-cut-1",
+        )
+        .unwrap();
+    assert_eq!(outcome.state, "preparing");
+    let t0 = world.now;
+    world.sites[0]
+        .service
+        .with(|a| a.tick(HostTime::sync(t0 + 1000)));
+    world.sites[0]
+        .service
+        .with(|a| a.tick(HostTime::sync(t0 + 1100)));
+    assert_eq!(grants.lock().unwrap().len(), 2);
+    let op = super::records::parse_op_token(&outcome.operation_id).unwrap();
+    let (gk_epoch, old_network, new_network) = world.sites[0]
+        .service
+        .with(|a| {
+            let state = a
+                .operations
+                .get(&op)
+                .unwrap()
+                .cutover
+                .as_ref()
+                .unwrap()
+                .clone();
+            (state.next_gk_epoch, state.old_network, state.new_network)
+        })
+        .0;
+    for (node, _, bytes) in grants.lock().unwrap().clone() {
+        if node == DEVICE_NODE {
+            continue;
+        }
+        let receipt = Receipt {
+            head: Head {
+                phase: Phase::Prepared,
+                cutover_id: op,
+                revision: 1,
+                old_network,
+            },
+            new_network,
+            gk_epoch,
+            rs_epoch: 0,
+            digest: sha256(&bytes),
+            status: 0,
+        }
+        .encode()
+        .unwrap()
+        .to_vec();
+        let (moved, _) = world.sites[0]
+            .service
+            .with(|a| a.handle_grant_receipt(node, 1, old_network, &receipt, t0 + 2000));
+        assert!(moved);
+    }
+    let lapse = t0 + 1000 + CUTOVER_PREPARE_WINDOW_MS;
+    world.sites[0]
+        .service
+        .with(|a| a.tick(HostTime::sync(lapse)));
+    let progress = world.sites[0]
+        .link
+        .cutover_operation(&outcome.operation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(progress.phase, "committed");
+
+    // The straggler re-proves on its old RLS1: an authenticated reissue
+    // on the new epoch, with no join.request for KGuard.
+    let ups_at_boot = world.ups_seen;
+    world.swap_peer(lapse + 1000, 0xBE09, &flash_path, true);
+    let decisions_before = world.decisions.len();
+    let tick = world.pump_until(12000, |t| t.snap.action_pending);
+    assert!(world.ups_seen > ups_at_boot, "the verify boot ZTs");
+    check_terminal(&tick.snap, MEMBER_READY);
+    assert_eq!(
+        world.decisions.len(),
+        decisions_before,
+        "no KGuard round-trip"
+    );
+    let row = world.member_row(0).expect("member row on the new epoch");
+    assert!(row.member);
+    assert_eq!(row.generation, 1);
+    assert_eq!(
+        world.sites[0].service.with(|a| a.network()).0,
+        new_network,
+        "authority sits on the new epoch"
+    );
+    assert_eq!(tick.member.site_cert, next_cert, "new-epoch SiteCert");
+    assert_eq!(
+        tick.member.member_cert, row.member_cert,
+        "reissued MemberCert"
+    );
     let _ = std::fs::remove_file(&flash_path);
 }

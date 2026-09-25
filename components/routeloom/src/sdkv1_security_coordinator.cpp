@@ -276,7 +276,11 @@ Status SecurityCoordinator::on_boot(const CoordinatorEvent& event) noexcept {
   // of record (healthy adoption without radio, recovery_only re-issue,
   // RecoveryRequired when the stores cannot proceed). The firmware picks
   // the transport by attachment: USB (direct) or radio scan.
-  const JoinBootInput boot{event.boot_witness, true};
+  JoinBootInput boot{};
+  boot.boot_witness = event.boot_witness;
+  boot.prepared = true;
+  boot.removal_watermark_site_id = removal_watermark_site_id_;
+  boot.removal_watermark_generation = removal_watermark_generation_;
   mode_ = CoordinatorMode::ZeroTouch;  // tags the workspace for destroy below
   create_joiner();
   const Status started = event.usb_direct ? joiner().start_direct(boot, *this, event.now)
@@ -1601,7 +1605,9 @@ void SecurityCoordinator::on_joiner_action(const JoinAction& action, const Monot
       (void)adopt_member(action, now);
       return;
     case JoinActionKind::RemovalRequired:
-      (void)land_removal(action.removal, now);
+      (void)land_removal(action.removal,
+                         ByteView{action.removal_object.data(), action.removal_object.size()},
+                         now);
       return;
     case JoinActionKind::RecoveryRequired: {
       destroy_workspace();
@@ -1624,7 +1630,9 @@ void SecurityCoordinator::emit_action(const CoordinatorAction& action) noexcept 
 
 // --- Removal -------------------------------------------------------------------------------------
 
-Status SecurityCoordinator::land_removal(const RemovalNotice& notice, const MonotonicMs now) noexcept {
+Status SecurityCoordinator::land_removal(const RemovalNotice& notice,
+                                        const ByteView removal_object,
+                                        const MonotonicMs now) noexcept {
   if (mode_ != CoordinatorMode::ZeroTouch && mode_ != CoordinatorMode::Member) {
     return Status::error(StatusCode::InvalidState, "removal without workspace");
   }
@@ -1673,6 +1681,9 @@ Status SecurityCoordinator::land_removal(const RemovalNotice& notice, const Mono
   report.removal.site_id = site.site_id;
   report.removal.generation = notice.generation;
   report.removal.notice = notice;
+  if (removal_object.data != nullptr && removal_object.size == report.removal.object.size()) {
+    std::memcpy(report.removal.object.data(), removal_object.data, removal_object.size);
+  }
   emit_action(report);
   return committed;
 }
@@ -1702,6 +1713,82 @@ void SecurityCoordinator::stop_traffic() noexcept {
   member().gateway.set_membership(state);
   member().gateway_active = false;
   member_valid_ = false;
+}
+
+// --- P6 lifecycle connection points --------------------------------------------------------
+
+Status SecurityCoordinator::start_recovery_join(const MonotonicMs now) noexcept {
+  if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
+  if (mode_ != CoordinatorMode::Member || !member_valid_) {
+    return Status::error(StatusCode::InvalidState, "recovery join outside member");
+  }
+  if (now < last_now_) return Status::error(StatusCode::TimeUncertain, "coordinator clock regressed");
+  if (!deps_.site->has_site() || !deps_.identity->has_identity()) {
+    return Status::error(StatusCode::InvalidState, "recovery join without membership");
+  }
+  in_port_ = true;
+  last_now_ = now;
+  // Traffic halts and member secrets scrub, but the stores stay: the
+  // Joiner re-proves the retained membership (or lands its removal).
+  // Staged member frames die with the engine — they must never feed a
+  // post-recovery workspace.
+  stop_traffic();
+  destroy_workspace();
+  for (auto& slot : staged_) slot = StagedFrame{};
+  mode_ = CoordinatorMode::ZeroTouch;  // tags the workspace for destroy below
+  create_joiner();
+  JoinBootInput boot{};
+  boot.boot_witness = boot_witness_;
+  boot.prepared = true;
+  boot.mode = JoinBootMode::VerifyExistingMembership;
+  boot.removal_watermark_site_id = removal_watermark_site_id_;
+  boot.removal_watermark_generation = removal_watermark_generation_;
+  const Status started =
+      usb_direct_ ? joiner().start_direct(boot, *this, now) : joiner().start(boot, now);
+  if (!started) {
+    destroy_workspace();
+    mode_ = CoordinatorMode::Recovery;
+    CoordinatorAction action{};
+    action.kind = CoordinatorActionKind::ReportRecovery;
+    action.recovery = JoinRecoveryReason::MembershipInvalid;
+    emit_action(action);
+  }
+  in_port_ = false;
+  return Status::success();
+}
+
+Status SecurityCoordinator::wipe_site_trust() noexcept {
+  if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
+  gk_scope_.wipe();
+  if (deps_.discovery != nullptr) deps_.discovery->membership().revoke();
+  if (gk_scope_.active()) return Status::error(StatusCode::InternalError, "gk scope survived wipe");
+  return Status::success();
+}
+
+Status SecurityCoordinator::revoke_member_sessions(const RevocationSet& set,
+                                                   const std::uint32_t site_epoch,
+                                                   const MonotonicMs now) noexcept {
+  (void)site_epoch;
+  (void)now;
+  if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
+  if (mode_ != CoordinatorMode::Member) return Status::success();
+  // The set must be the adopted one: the lifecycle commits before
+  // enforcing, so anything else is a wiring bug — refuse instead of
+  // retiring sessions for a set the store never adopted.
+  if (!member_valid_ || !deps_.revocations->has_set() ||
+      deps_.revocations->set().site_id != set.site_id ||
+      deps_.revocations->set().network != set.network ||
+      deps_.revocations->rs_epoch() != set.rs_epoch) {
+    return Status::error(StatusCode::InvalidArgument, "revoke set mismatch");
+  }
+  (void)member().engine.cancel_all();
+  for (std::size_t i = 0; i < set.count; ++i) {
+    const NodeId peer = set.entries[i].node_id;
+    if (peer == kInvalidNodeId || peer == kBroadcastNodeId) continue;
+    (void)bank_.retire_all(peer);
+    if (deps_.discovery != nullptr) (void)deps_.discovery->revoke_peer(peer);
+  }
+  return Status::success();
 }
 
 // --- GK-backed discovery scope -----------------------------------------------------------------

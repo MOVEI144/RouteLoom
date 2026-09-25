@@ -596,6 +596,13 @@ class MembershipLifecycle final {
   bool quiescent() const noexcept;
   // Next gossip/exchange work, or UINT64_MAX when nothing is scheduled.
   MonotonicMs next_deadline() const noexcept;
+  // Owner chunk/ack demux (G-SEC P6 PR D): true when the gossip exchange
+  // owns a transfer for (peer, binding, the hash carried in `body`), so
+  // the frame routes to the lifecycle instead of the migration engine.
+  // Pure (never mutates, callable from a sink): malformed bodies and
+  // non-chunk carriers answer false.
+  bool owns_rrs_chunk(NodeId peer, std::uint32_t binding, FrameType carrier,
+                      ByteView body) const noexcept;
 
  private:
   enum class ApplyStep : std::uint8_t { Verify, Store, Enforce, Sweep, Floor, Done };

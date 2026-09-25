@@ -862,7 +862,7 @@ impl SiteAuthority {
         // outbox (dispatch, pacing and backoff all compare unix); only
         // the 600 s window and the 60 s grace run on the monotonic
         // axis below.
-        self.queue_notices(time.unix_ms);
+        self.queue_notices(time);
         if !self.cutover_resume_pending.is_empty() {
             let pending = std::mem::take(&mut self.cutover_resume_pending);
             self.restart_cutover_window(&pending, time.mono_ms);
@@ -1411,6 +1411,12 @@ impl SiteAuthority {
         self.operations.insert(id, updated);
         for operation in retired_notices {
             self.operations.insert(operation.id, operation);
+        }
+        // The port keeps serving the old network for the COMMIT grace
+        // (RAM-only, like `cutover_grace_until_mono` above); fakes and
+        // the transport-less state ignore the note.
+        if let Some(transport) = self.rrs_transport.as_mut() {
+            transport.note_p6_cutover(state.old_network, time.mono_ms);
         }
         self.prune_rrs_history();
         let (prepared, applied, unknown, _) = self

@@ -612,6 +612,22 @@ MonotonicMs MembershipLifecycle::next_deadline() const noexcept {
   return next;
 }
 
+bool MembershipLifecycle::owns_rrs_chunk(const NodeId peer, const std::uint32_t binding,
+                                         const FrameType carrier, const ByteView body) const noexcept {
+  if (peer == kInvalidNodeId || peer == kBroadcastNodeId) return false;
+  if (carrier == FrameType::ObjectChunk) {
+    autonomy::ObjectChunkPayload chunk{};
+    if (!autonomy::object_chunk_decode(body, chunk)) return false;
+    return exchange_.owns_transfer(peer, binding, chunk.object_hash);
+  }
+  if (carrier == FrameType::ObjectAck) {
+    autonomy::ObjectAckPayload ack{};
+    if (!autonomy::object_ack_decode(body, ack)) return false;
+    return exchange_.owns_transfer(peer, binding, ack.object_hash);
+  }
+  return false;
+}
+
 bool MembershipLifecycle::need_rrs() const noexcept {
   if (!adopted_.site_ok) return false;
   if (phase_ != LifecyclePhase::BootGate && phase_ != LifecyclePhase::Active &&

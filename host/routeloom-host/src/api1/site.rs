@@ -650,8 +650,12 @@ pub(super) fn capability_json<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Str
         Some(service) => (true, service.with(|a| a.storage_durable()).0),
         None => (false, false),
     };
+    let distribution = match ctx.site {
+        Some(service) => service.with(|a| a.p6_distribution_status()).0,
+        None => "rrs_no_transport",
+    };
     let join_relay = join_relay_status(ctx);
     format!(
-        "{{\"configured\":{configured},\"edhoc\":\"rfc9528-method0-suite2\",\"verdicts\":[\"allow\",\"pending\",\"deny\"],\"permissions\":[\"MEMBERSHIP_READ\",\"MEMBERSHIP_DECIDE\",\"MEMBERSHIP_ADMIN\"],\"page_max\":{SITE_PAGE_MAX},\"events\":[{kinds}],\"join_relay\":\"{join_relay}\",\"distribution\":\"rrs_no_transport\",\"storage_durable\":{durable}}}"
+        "{{\"configured\":{configured},\"edhoc\":\"rfc9528-method0-suite2\",\"verdicts\":[\"allow\",\"pending\",\"deny\"],\"permissions\":[\"MEMBERSHIP_READ\",\"MEMBERSHIP_DECIDE\",\"MEMBERSHIP_ADMIN\"],\"page_max\":{SITE_PAGE_MAX},\"events\":[{kinds}],\"join_relay\":\"{join_relay}\",\"distribution\":\"{distribution}\",\"storage_durable\":{durable}}}"
     )
 }

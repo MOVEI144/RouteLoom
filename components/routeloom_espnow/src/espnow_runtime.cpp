@@ -1598,6 +1598,14 @@ void EspNowRuntime::on_autonomy_frame(const NodeId peer, const FrameType type,
     case FrameType::ControlObject:
     case FrameType::ObjectChunk:
     case FrameType::ObjectAck:
+      // P6 kind-6 chunks/ACKs of a live RRS1 transfer route to the Owner's
+      // lifecycle; anything unclaimed (including all migration kinds)
+      // flows on as before.
+      if ((type == FrameType::ObjectChunk || type == FrameType::ObjectAck) &&
+          rrs_chunk_sink_ != nullptr &&
+          rrs_chunk_sink_->claim_rrs_chunk(peer, type, payload, now_ms)) {
+        return;
+      }
       if (migration_ != nullptr) {
         migration_->on_migration_frame(peer, type, payload, now_ms,
                                        captured_ms);

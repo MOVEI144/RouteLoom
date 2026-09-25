@@ -7,9 +7,10 @@
 //! each target proves it applied the set — or stays honestly `unknown`.
 //! Nothing is ever counted as a success without an Applied ACK.
 //!
-//! The transport is a port ([`RevocationTransport`]): production holds
-//! none until the P5 authority channel lands (`capabilities.get` reports
-//! `rrs_no_transport`), while tests inject an in-process fake. The
+//! The transport is a port ([`RevocationTransport`]): production
+//! attaches the channel port ([`super::p6_channel::P6ChannelTransport`],
+//! `capabilities.get` then reports `rrs_ready`), no port means
+//! `rrs_no_transport`, and tests inject in-process fakes. The
 //! scheduler, backoff, coalescing and persistence below are transport
 //! agnostic and fully exercised that way.
 //!
@@ -24,10 +25,13 @@ use std::collections::BTreeMap;
 use routeloom_json::Json;
 use routeloom_provision::sdkv1::revocation::RevocationEntry;
 
+use super::authority_channel::{AuthorityOutbound, ChannelMember};
+use super::p6_channel::P6Receipt;
 use super::records::{h16, parse_h16, parse_hex};
 use super::store::{Batch, DocKind};
 use super::{SiteAuthority, SiteError};
 use crate::receive_log::hex_lower;
+use routeloom_protocol::authority::CarrierKind;
 
 /// Targets snapshotted per operation (the P6 profile: ~100 deployed
 /// boards plus headroom, gateway included). Members beyond the cap are
@@ -97,6 +101,49 @@ pub trait RevocationTransport {
     /// True when `send_grant` can deliver (same head-of-line rule).
     fn carries_grant(&self) -> bool {
         false
+    }
+    /// True for the production channel port (P6 PR D). Fakes stay
+    /// false so `capabilities.get` keeps reporting `rrs_no_transport`
+    /// until a real port is attached.
+    fn p6_ready(&self) -> bool {
+        false
+    }
+    /// Feeds one inbound carrier into the port (reassembled USB 0x64 /
+    /// mesh envelope, R1 or R3). Default ignores: fakes deliver
+    /// reports by calling the handlers directly.
+    fn push_carrier(&mut self, _device: u64, _kind: CarrierKind, _bytes: &[u8], _now_ms: u64) {}
+    /// Takes the verified P6 reports queued since the last call.
+    fn poll_p6_receipts(&mut self) -> Vec<P6Receipt> {
+        Vec::new()
+    }
+    /// Takes every queued outbound carrier for the USB/mesh mapping.
+    fn take_p6_carriers(&mut self) -> Vec<AuthorityOutbound> {
+        Vec::new()
+    }
+    /// Syncs the live member bindings (called every authority tick).
+    /// `mono_ms` drives retention expiry and the cutover grace.
+    fn refresh_p6_bindings(
+        &mut self,
+        _live: &[(u64, ChannelMember)],
+        _current_network: u64,
+        _rs_epoch: u32,
+        _gk_epoch: u32,
+        _mono_ms: u64,
+    ) {
+    }
+    /// Notes a cutover commit so the port can serve the old network's
+    /// COMMIT grace before flipping to the new network.
+    fn note_p6_cutover(&mut self, _old_network: u64, _mono_ms: u64) {}
+    /// Notes a Get answer for the per-device spam gap. False drops
+    /// the answer (answered too recently).
+    fn note_p6_get_answer(&mut self, _device: u64, _mono_ms: u64) -> bool {
+        true
+    }
+    /// True when a notice to `node` on `network` could still seal.
+    /// When false the distributor marks the notice `unreachable`
+    /// instead of retrying forever.
+    fn notice_sealable(&self, _node: u64, _network: u64, _mono_ms: u64) -> bool {
+        true
     }
 }
 
@@ -474,9 +521,9 @@ pub(super) fn decode_rrs_history(
 }
 
 impl SiteAuthority {
-    /// Installs the RRS1 transport (the P5 authority channel; tests
-    /// inject a fake). `None` is the production PR-A state: nothing is
-    /// sent and every target honestly stays `unknown`.
+    /// Installs the RRS1 transport (production: the P6 channel
+    /// port's share of its hub; tests inject a fake). `None` means
+    /// nothing is sent and every target honestly stays `unknown`.
     pub fn set_rrs_transport(&mut self, transport: Option<Box<dyn RevocationTransport + Send>>) {
         self.rrs_transport = transport;
     }
@@ -749,7 +796,7 @@ impl SiteAuthority {
     /// (04 §7.1: the notice goes first). Best-effort: at most
     /// [`NOTICE_SEND_MAX`] transport sends, then the target is on its
     /// own until its ZT recovery.
-    pub(super) fn queue_notices(&mut self, now_ms: u64) {
+    pub(super) fn queue_notices(&mut self, time: super::group_keys::HostTime) {
         if self
             .rrs_transport
             .as_ref()
@@ -786,12 +833,48 @@ impl SiteAuthority {
             {
                 continue;
             }
+            // No live or retained binding (and the row being removed,
+            // none can form): mark `unreachable` instead of retrying
+            // past the best-effort window. Fakes always seal, so
+            // their queueing is unchanged.
+            let sealable = self.rrs_transport.as_ref().is_some_and(|transport| {
+                transport.notice_sealable(due, self.id.network, time.mono_ms)
+            });
+            if !sealable {
+                self.note_notice_unreachable(id, time.unix_ms);
+                continue;
+            }
             self.rrs_outbox.push_back(OutboundRrs {
                 op: id,
                 node: due,
-                due_ms: now_ms,
+                due_ms: time.unix_ms,
                 what: OutboundKind::Notice,
             });
+        }
+    }
+
+    /// Marks a notice `unreachable`: no authority context exists for
+    /// the removed binding, so the direct send cannot proceed (the
+    /// RRS1 fan-out still carries the revocation). Silent, like the
+    /// revoke-time and cutover-commit markings.
+    fn note_notice_unreachable(&mut self, op: u64, now_ms: u64) {
+        let changed = match self.operations.get_mut(&op) {
+            Some(operation) => match operation.notice.as_mut() {
+                Some(notice)
+                    if matches!(
+                        notice.delivery,
+                        NoticeDelivery::Pending | NoticeDelivery::Sent
+                    ) =>
+                {
+                    notice.delivery = NoticeDelivery::Unreachable;
+                    true
+                }
+                _ => false,
+            },
+            None => false,
+        };
+        if changed {
+            self.persist_operation(op, now_ms);
         }
     }
 

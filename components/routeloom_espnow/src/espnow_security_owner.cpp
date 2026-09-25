@@ -1,6 +1,9 @@
 #include "routeloom/espnow_security_owner.hpp"
 
 #include "esp_log.h"
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "routeloom/secure_clear.hpp"
 
 namespace routeloom::espnow {
@@ -21,6 +24,10 @@ EspNowSecurityOwner::~EspNowSecurityOwner() noexcept {
     discovery()->~NeighborDiscovery();
     discovery_live_ = false;
   }
+  if (lifecycle_live_) {
+    lifecycle().~MembershipLifecycle();
+    lifecycle_live_ = false;
+  }
   if (coordinator_live_) {
     coordinator().~SecurityCoordinator();
     coordinator_live_ = false;
@@ -29,6 +36,160 @@ EspNowSecurityOwner::~EspNowSecurityOwner() noexcept {
     verifier().~StoreCredentialVerifier();
     sealer().~HmacJoinCookie();
     begun_ = false;
+  }
+}
+
+sdkv1::MembershipLifecycle& EspNowSecurityOwner::lifecycle() noexcept {
+  return *reinterpret_cast<sdkv1::MembershipLifecycle*>(lifecycle_box_.data());
+}
+
+// --- P6 lifecycle ports -----------------------------------------------------
+
+Status EspNowSecurityOwner::LifecycleAuthorityPort::authority_send(
+    const std::uint8_t authority_type, const ByteView body) noexcept {
+  (void)authority_type;
+  (void)body;
+  // The device authority channel (P5 PR4: USB/mesh mapping + the
+  // AuthorityClient typed send) is not wired yet: Applied/Get/
+  // NoticeAccepted/PREPARED/APPLIED stay unsent and the Host side
+  // honestly reports them unknown until their bearer lands. WouldBlock
+  // (not Unsupported): the bearer is coming, the data stays valid.
+  return Status::error(StatusCode::WouldBlock, "p5 authority channel not wired");
+}
+
+Status EspNowSecurityOwner::LifecyclePeerPort::peer_send(const NodeId peer, const FrameType carrier,
+                                                         const ByteView body) noexcept {
+  (void)peer;
+  (void)carrier;
+  (void)body;
+  // No 1-hop link-TX lane exists yet (migration_send is allowlisted to
+  // the migration carriers and needs an attached migration engine):
+  // StateEpochs/RrsRequest/manifests/chunks/ACKs stay unsent and the
+  // lifecycle runs silent (features 0), still applying whatever RRS1
+  // arrives. A dedicated link-TX API is the follow-up, not a reuse.
+  return Status::error(StatusCode::WouldBlock, "p6 gossip TX not wired");
+}
+
+Status EspNowSecurityOwner::LifecycleRuntimePort::enforce_revocation(
+    const sdkv1::RevocationSet& set, const std::uint32_t site_epoch,
+    const MonotonicMs now_ms) noexcept {
+  EspNowSecurityOwner& owner = owner_;
+  if (owner.stores_ == nullptr || !owner.coordinator_live_) {
+    return Status::error(StatusCode::InvalidState, "enforce before wiring");
+  }
+  // Sessions + Discovery bindings retire through the coordinator seam
+  // (which re-checks the set against the adopted store first); routes
+  // withdraw per entry through the node. TX-queue/group/RTC scrubbing
+  // has no Owner-reachable API yet (residual below): retired sessions
+  // make queued frames to revoked peers fail closed, and the revoked
+  // routes never select again.
+  const Status sessions = owner.coordinator().revoke_member_sessions(set, site_epoch, now_ms);
+  if (!sessions) return sessions;
+  if (owner.runtime_ != nullptr) {
+    for (std::size_t i = 0; i < set.count; ++i) {
+      owner.runtime_->node().revoke_routes(set.entries[i].node_id, now_ms);
+    }
+  }
+  return Status::success();
+}
+
+Status EspNowSecurityOwner::LifecycleRuntimePort::remove_member_runtime() noexcept {
+  EspNowSecurityOwner& owner = owner_;
+  // Re-asserts the stopped state (the coordinator's land_removal runs
+  // first on the Joiner path and already halted traffic): relay off,
+  // discovery membership revoked. Idempotent by construction.
+  if (owner.runtime_ != nullptr) {
+    (void)owner.runtime_->node().set_relay_enabled(false);
+  }
+  if (owner.discovery_live_) {
+    owner.discovery()->membership().revoke();
+  }
+  return Status::success();
+}
+
+Status EspNowSecurityOwner::LifecycleRuntimePort::erase_site_trust() noexcept {
+  EspNowSecurityOwner& owner = owner_;
+  if (!owner.coordinator_live_) {
+    return Status::error(StatusCode::InvalidState, "trust erasure before wiring");
+  }
+  // The site trust on this path is the RLS1 SiteCert verified against
+  // the RLI1 anchors (no separate derived blobs exist in production):
+  // RLS1 itself is erased by the lifecycle's Site step next, RLI1 stays
+  // (device-level per 04 §6.4), and this step wipes the RAM view (GK
+  // scope + discovery membership) and verifies it is gone.
+  return owner.coordinator().wipe_site_trust();
+}
+
+Status EspNowSecurityOwner::LifecycleRuntimePort::retire_network() noexcept {
+  // Cutover retirement: member traffic halts like a removal, but the
+  // stores (old + staged site) stay for the switch to commit.
+  return remove_member_runtime();
+}
+
+Status EspNowSecurityOwner::LifecycleRuntimePort::install_site_trust(
+    const sdkv1::SiteRecord& next) noexcept {
+  (void)next;
+  EspNowSecurityOwner& owner = owner_;
+  if (owner.stores_ == nullptr) {
+    return Status::error(StatusCode::InvalidState, "trust install before wiring");
+  }
+  // The new site trust IS the staged RLS1 the lifecycle commits itself;
+  // the RAM view (GK scope, discovery) adopts it at the post-reboot
+  // re-adoption, not here. This step verifies the staged record the
+  // lifecycle handed over matches the committed store.
+  if (!owner.stores_->site().has_site()) {
+    return Status::error(StatusCode::InvalidState, "no staged site to install");
+  }
+  return Status::success();
+}
+
+void EspNowSecurityOwner::LifecycleObjectSink::on_rrs_object(
+    const NodeId peer, const ByteView object, const MonotonicMs now_ms) noexcept {
+  (void)now_ms;
+  EspNowSecurityOwner& owner = owner_;
+  // Latest-wins staging for the poll feed: gossip duplicates, so keeping
+  // the newest completion is always at least as good. Never dispatches
+  // here (the lifecycle holds its guard).
+  if (object.data == nullptr || object.size == 0 ||
+      object.size > owner.completed_object_.size()) {
+    return;
+  }
+  std::memcpy(owner.completed_object_.data(), object.data, object.size);
+  owner.completed_object_size_ = object.size;
+  owner.completed_object_peer_ = peer;
+  owner.completed_object_valid_ = true;
+}
+
+void EspNowSecurityOwner::LifecycleObserver::on_lifecycle_event(
+    const sdkv1::LifecycleEvent& event, const MonotonicMs now_ms) noexcept {
+  (void)now_ms;
+  EspNowSecurityOwner& owner = owner_;
+  const char* tag = owner.config_.log_tag;
+  switch (event.kind) {
+    case sdkv1::LifecycleEventKind::RrsApplied:
+      ESP_LOGI(tag, "p6: RRS1 applied rs_epoch=%lu", static_cast<unsigned long>(event.epoch));
+      break;
+    case sdkv1::LifecycleEventKind::RrsRejected:
+      ESP_LOGW(tag, "p6: RRS1 rejected rs_epoch=%lu detail=%lu",
+               static_cast<unsigned long>(event.epoch), static_cast<unsigned long>(event.detail));
+      break;
+    case sdkv1::LifecycleEventKind::SelfRevoked:
+      ESP_LOGW(tag, "p6: self rejected by RRS1 rs_epoch=%lu — recovery join next",
+               static_cast<unsigned long>(event.epoch));
+      break;
+    case sdkv1::LifecycleEventKind::RecoveryStarted:
+      ESP_LOGI(tag, "p6: recovery started reason=%lu", static_cast<unsigned long>(event.detail));
+      break;
+    case sdkv1::LifecycleEventKind::RecoveryFinished:
+      ESP_LOGI(tag, "p6: recovery finished rs_epoch=%lu", static_cast<unsigned long>(event.epoch));
+      break;
+    case sdkv1::LifecycleEventKind::GossipStalled:
+      ESP_LOGW(tag, "p6: gossip stalled peer=%llu rs_epoch=%lu",
+               static_cast<unsigned long long>(event.peer), static_cast<unsigned long>(event.epoch));
+      break;
+    case sdkv1::LifecycleEventKind::StorageBlocked:
+      ESP_LOGE(tag, "p6: STORAGE BLOCKED reason=%lu", static_cast<unsigned long>(event.detail));
+      break;
   }
 }
 
@@ -88,6 +249,24 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
   deps.joiner_config = config_.joiner;
   new (coordinator_box_.data()) sdkv1::SecurityCoordinator(deps);
   coordinator_live_ = true;
+  // The P6 membership lifecycle beside the coordinator: same stores, the
+  // RLX1 journal, silent gossip (no link-TX lane yet). Self is the RLI1
+  // node id when provisioned, else the Kconfig identity (which becomes
+  // the RLI1 id at provisioning — a mismatch blocks, never corrupts).
+  sdkv1::LifecycleConfig lifecycle_config{};
+  lifecycle_config.self = stores_->identity().has_identity()
+                              ? stores_->identity().identity().node_id
+                              : config_.local_node;
+  lifecycle_config.profile = config_.lifecycle_gateway ? sdkv1::LifecycleProfile::Gateway
+                                                       : sdkv1::LifecycleProfile::Node;
+  lifecycle_config.enabled_features = 0;
+  sdkv1::LifecyclePorts lifecycle_ports{lifecycle_authority_, lifecycle_peer_, lifecycle_runtime_,
+                                        *entropy_, lifecycle_sink_, &lifecycle_observer_};
+  new (lifecycle_box_.data())
+      sdkv1::MembershipLifecycle(lifecycle_config, stores_->identity(), stores_->site(),
+                                 stores_->revocation(), stores_->resume(), lifecycle_ports,
+                                 sdkv1::default_es256_verifier(), &stores_->lifecycle());
+  lifecycle_live_ = true;
   begun_ = true;
   observer_store_ = EspNowDiscoveryObserver(config_.log_tag, runtime_);
   ESP_LOGI(config_.log_tag, "security owner ready (node 0x%llx)",
@@ -103,6 +282,7 @@ Status EspNowSecurityOwner::attach_runtime(EspNowRuntime& runtime) noexcept {
   const Status status = runtime.attach_bootstrap_sink(*this);
   if (!status) return status;
   runtime_ = &runtime;
+  runtime.set_rrs_chunk_sink(this);
   observer_store_ = EspNowDiscoveryObserver(config_.log_tag, runtime_);
   return Status::success();
 }
@@ -139,6 +319,32 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
   key_status = sealer().install_key(cookie_key);
   secure_clear(cookie_key.data(), cookie_key.size());
   if (!key_status) return key_status;
+  // The lifecycle boots first (journal before member): a leftover
+  // Removing/Holdoff intent from before the reboot runs to completion
+  // before the coordinator may adopt anything.
+  const Status lifecycle_boot =
+      lifecycle().dispatch(sdkv1::LifecycleInput::Boot(rlboot_prepared), now_ms);
+  if (!lifecycle_boot) return lifecycle_boot;
+  lifecycle_booted_ = true;
+  const sdkv1::LifecycleSnapshot boot_snap = lifecycle().snapshot();
+  // The RLX1 UnassignedReady watermark hands to the Joiner: a
+  // post-removal Allow for an older generation of the same site refuses
+  // (04 §6.4). Anything else clears the watermark.
+  const sdkv1::LifecycleStore& journal = stores_->lifecycle();
+  if (journal.has_record() &&
+      journal.record().mode == sdkv1::LifecycleMode::UnassignedReady) {
+    coordinator().set_removal_watermark(journal.record().site_id, journal.record().generation);
+  } else {
+    coordinator().set_removal_watermark(0, 0);
+  }
+  if (boot_snap.phase == sdkv1::LifecyclePhase::Removing ||
+      boot_snap.phase == sdkv1::LifecyclePhase::Holdoff) {
+    removal_pending_ = true;
+    boot_witness_ = rlboot_witness;
+    booted_ = true;
+    ESP_LOGW(config_.log_tag, "boot: journal holds removal intent — erasure runs first");
+    return Status::success();
+  }
   sdkv1::CoordinatorEvent event{};
   event.kind = sdkv1::CoordinatorEventKind::Boot;
   event.now = now_ms;
@@ -155,12 +361,170 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
 
 void EspNowSecurityOwner::poll(const MonotonicMs now_ms) noexcept {
   if (!booted_) return;
+  poll_lifecycle(now_ms);
+  if (removal_pending_) return;  // erasure owns the device until the reboot
   sdkv1::CoordinatorEvent event{};
   event.kind = sdkv1::CoordinatorEventKind::Poll;
   event.now = now_ms;
   (void)coordinator().step(event);
   poll_tune(now_ms);
   drain_actions(now_ms);
+}
+
+// --- P6 lifecycle pump --------------------------------------------------------
+
+void EspNowSecurityOwner::on_rrs_frame(const NodeId peer, const FrameType type,
+                                       const ByteView body, const MonotonicMs now_ms) noexcept {
+  (void)now_ms;
+  if (!lifecycle_live_ || body.data == nullptr || body.size == 0 ||
+      body.size > gossip_staged_[0].body.size()) {
+    return;
+  }
+  if (type != FrameType::Control && type != FrameType::ControlObject) return;
+  for (GossipStage& slot : gossip_staged_) {
+    if (slot.used) continue;
+    std::memcpy(slot.body.data(), body.data, body.size);
+    slot.body_size = body.size;
+    slot.peer = peer;
+    slot.carrier = type;
+    slot.used = true;
+    return;
+  }
+  ++gossip_dropped_;
+}
+
+bool EspNowSecurityOwner::claim_rrs_chunk(const NodeId peer, const FrameType carrier,
+                                          const ByteView body, const MonotonicMs now_ms) noexcept {
+  (void)now_ms;
+  if (!lifecycle_live_ || body.data == nullptr || body.size == 0 ||
+      body.size > gossip_staged_[0].body.size()) {
+    return false;
+  }
+  // The P4 binding adapter is not wired yet, so every gossip stamp carries
+  // binding 0 (manifests and chunks consistently): the transfer registry
+  // still keys (peer, hash) correctly.
+  if (!lifecycle().owns_rrs_chunk(peer, 0, carrier, body)) return false;
+  for (GossipStage& slot : gossip_staged_) {
+    if (slot.used) continue;
+    std::memcpy(slot.body.data(), body.data, body.size);
+    slot.body_size = body.size;
+    slot.peer = peer;
+    slot.carrier = carrier;
+    slot.used = true;
+    return true;
+  }
+  ++gossip_dropped_;
+  return true;  // claimed but unstaged: a retry, never migration's
+}
+
+void EspNowSecurityOwner::poll_lifecycle(const MonotonicMs now_ms) noexcept {
+  if (!lifecycle_live_ || !lifecycle_booted_) return;
+  feed_lifecycle_inputs(now_ms);
+  (void)lifecycle().dispatch(sdkv1::LifecycleInput::Poll(), now_ms);
+  drain_lifecycle_actions(now_ms);
+}
+
+void EspNowSecurityOwner::feed_lifecycle_inputs(const MonotonicMs now_ms) noexcept {
+  // Gossip feeds only while adopted: the stamp needs the adopted network
+  // and role, and the lifecycle ignores peer control while unadopted.
+  if (adopted_network_ != 0 && adopted_role_ != 0) {
+    for (GossipStage& slot : gossip_staged_) {
+      if (!slot.used) continue;
+      slot.used = false;
+      sdkv1::PeerCredentialStamp stamp{};
+      stamp.peer = slot.peer;
+      stamp.network = adopted_network_;
+      stamp.role = adopted_role_;
+      // No P4 adapter yet: the generation/fingerprint/binding the sink
+      // cannot verify stay zero (documented seam). The lifecycle
+      // validates-but-never-consumes them on the gossip path — only
+      // SAK-signed objects move state.
+      (void)lifecycle().dispatch(
+          sdkv1::LifecycleInput::PeerControl(
+              stamp, slot.carrier, ByteView{slot.body.data(), slot.body_size}),
+          now_ms);
+    }
+    if (completed_object_valid_) {
+      completed_object_valid_ = false;
+      (void)lifecycle().dispatch(
+          sdkv1::LifecycleInput::Completed(
+              completed_object_peer_,
+              ByteView{completed_object_.data(), completed_object_size_}),
+          now_ms);
+    }
+  } else {
+    for (GossipStage& slot : gossip_staged_) slot.used = false;
+    completed_object_valid_ = false;
+  }
+}
+
+void EspNowSecurityOwner::drain_lifecycle_actions(const MonotonicMs now_ms) noexcept {
+  for (int i = 0; i < 4; ++i) {
+    sdkv1::LifecycleAction action{};
+    if (!lifecycle().take_action(action)) break;
+    switch (action.tag) {
+      case sdkv1::LifecycleActionTag::RecoveryRequired:
+      case sdkv1::LifecycleActionTag::StartRecoveryJoin:
+        on_lifecycle_recovery(action, now_ms);
+        break;
+      case sdkv1::LifecycleActionTag::RestartUnassigned:
+        ESP_LOGW(config_.log_tag, "p6: removal holdoff done — rebooting unassigned");
+        reboot_for_lifecycle("p6 restart-unassigned");
+        break;
+      case sdkv1::LifecycleActionTag::AdoptNetwork:
+        if (stores_ == nullptr ||
+            stores_->site().commit_seq() != action.expected_site_commit_seq) {
+          // The stores moved under the decision: the action stays pending
+          // and retries next poll instead of adopting a stale switch.
+          ESP_LOGW(config_.log_tag, "p6: adopt raced a store commit — retaking");
+          break;
+        }
+        ESP_LOGW(config_.log_tag, "p6: adopting network 0x%llx — rebooting",
+                 static_cast<unsigned long long>(action.network));
+        reboot_for_lifecycle("p6 adopt-network");
+        break;
+      case sdkv1::LifecycleActionTag::None:
+        break;
+    }
+  }
+}
+
+void EspNowSecurityOwner::on_lifecycle_recovery(const sdkv1::LifecycleAction& action,
+                                                const MonotonicMs now_ms) noexcept {
+  // A self-rejecting RRS1 (or a link-failure verdict, issue #139)
+  // re-proves the retained membership over a zero-touch join instead of
+  // dropping it.
+  if (lifecycle_recovery_token_ != 0) return;  // one recovery at a time
+  if (stores_ == nullptr || stores_->site().commit_seq() != action.expected_site_commit_seq) {
+    return;  // stale decision: the action stays pending for a retake
+  }
+  const Status started = coordinator().start_recovery_join(now_ms);
+  if (!started) {
+    // Not in Member mode (a recovery is already running, or removal
+    // landed first): leave the action pending — completion arrives with
+    // the Joiner's verdict, or not at all when removal wins.
+    return;
+  }
+  lifecycle_recovery_token_ = action.token;
+  ESP_LOGW(config_.log_tag, "p6: recovery join started reason=%u",
+           static_cast<unsigned>(action.reason));
+}
+
+void EspNowSecurityOwner::complete_lifecycle_recovery(const bool reprovisioned,
+                                                      const MonotonicMs now_ms) noexcept {
+  if (lifecycle_recovery_token_ == 0 || !lifecycle_live_) return;
+  const std::uint64_t token = lifecycle_recovery_token_;
+  lifecycle_recovery_token_ = 0;
+  (void)lifecycle().dispatch(sdkv1::LifecycleInput::ActionDone(token, Status::success()), now_ms);
+  (void)lifecycle().dispatch(sdkv1::LifecycleInput::Recovery(reprovisioned), now_ms);
+}
+
+[[noreturn]] void EspNowSecurityOwner::reboot_for_lifecycle(const char* reason) noexcept {
+  ESP_LOGE(config_.log_tag, "p6: %s (clean reboot, not a fault)", reason);
+  vTaskDelay(pdMS_TO_TICKS(100));  // let the line reach the UART
+  esp_restart();
+  for (;;) {
+  }  // unreachable: esp_restart never returns
 }
 
 void EspNowSecurityOwner::on_bootstrap_rld1(const sdkv1::JoinRxMeta& meta,
@@ -401,10 +765,24 @@ void EspNowSecurityOwner::drain_actions(const MonotonicMs now_ms) noexcept {
                  static_cast<unsigned long long>(action.removal.site_id),
                  static_cast<unsigned long>(action.removal.generation));
         runtime_->node().set_relay_enabled(false);
+        // The verified notice also drives the journaled erasure: the
+        // lifecycle re-verifies the COSE itself and runs Removing (full
+        // cleanup) → Holdoff → UnassignedReady → reboot. A recovery join
+        // that lands here found the removal instead of reprovisioning.
+        if (lifecycle_live_ && lifecycle_booted_) {
+          (void)lifecycle().dispatch(
+              sdkv1::LifecycleInput::RemovalRequired(ByteView{action.removal.object.data(),
+                                                              action.removal.object.size()}),
+              now_ms);
+          complete_lifecycle_recovery(false, now_ms);
+        }
         break;
       case sdkv1::CoordinatorActionKind::ReportRecovery:
         ESP_LOGE(config_.log_tag, "membership recovery required (reason %u): see maintenance",
                  static_cast<unsigned>(action.recovery));
+        // A recovery join that lands here did not reprovision: the
+        // lifecycle decides the next step (retry or maintenance).
+        if (lifecycle_live_ && lifecycle_booted_) complete_lifecycle_recovery(false, now_ms);
         break;
       case sdkv1::CoordinatorActionKind::None:
         break;
@@ -433,9 +811,18 @@ void EspNowSecurityOwner::on_tune_channel(const sdkv1::CoordinatorTune& tune,
 
 void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig& member,
                                            const MonotonicMs now_ms) noexcept {
-  (void)now_ms;
   adopted_node_ = member.node;
   adopted_network_ = member.network;
+  adopted_role_ = member.role;
+  // The adoption re-proves the stores for the lifecycle (first adopt and
+  // every recovery re-adopt): the RLS1 commit_seq the coordinator saw,
+  // with no package fetch target yet (a P4 adapter handoff to come —
+  // acquisition meanwhile runs off the stored set plus gossip).
+  if (lifecycle_live_ && lifecycle_booted_ && stores_ != nullptr) {
+    (void)lifecycle().dispatch(
+        sdkv1::LifecycleInput::MemberReady(stores_->site().commit_seq(), 0), now_ms);
+    complete_lifecycle_recovery(true, now_ms);
+  }
   NodeConfig node = runtime_->node().config();
   node.network = member.network;
   node.node = member.node;
@@ -449,10 +836,16 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
     node.route_gateways[i] = member.route_gateways[i];
   }
   Status status = runtime_->adopt_member_node(node);
-  if (!status) {
+  if (!status && status.code != StatusCode::InvalidState) {
     ESP_LOGE(config_.log_tag, "member node adopt failed: %s", status.detail);
     return;
   }
+  // The gossip sink rides the member node: a fresh adopt placement-news
+  // the node (install), a recovery re-adopt refuses the rebuild (the
+  // running node already matches — re-assert and return). Idempotent
+  // either way; without it P6 frames honestly reject.
+  (void)runtime_->node().set_rrs_sink(this);
+  if (!status) return;
   runtime_->node().set_bootstrap_sink(&coordinator());
   // Relay duties are role-gated (unknown role 0 never transits).
   runtime_->node().set_relay_enabled(member.role != 0);

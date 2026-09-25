@@ -691,17 +691,22 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
   return Status::success();
 }
 
-Status MeshNode::remove_neighbor(const NodeId neighbor, const MonotonicMs now_ms) noexcept {
-  if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
-  auto* record = find_neighbor(neighbor);
-  if (record == nullptr) return Status::error(StatusCode::NotFound, "neighbor not found");
-  record->active = false;
+void MeshNode::drop_neighbor_locked(Neighbor& record, const NodeId neighbor,
+                                   const MonotonicMs now_ms) noexcept {
+  record.active = false;
   routes_.invalidate_next_hop(neighbor, now_ms);
   routes_.clear_next_hop_busy(neighbor);  // drop stale busy state too
   ++self_route_sequence_;
   ++config_revision_;
   trigger_route_advertisement(now_ms);
+}
+
+Status MeshNode::remove_neighbor(const NodeId neighbor, const MonotonicMs now_ms) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+  NodeGuard guard(in_call_);
+  auto* record = find_neighbor(neighbor);
+  if (record == nullptr) return Status::error(StatusCode::NotFound, "neighbor not found");
+  drop_neighbor_locked(*record, neighbor, now_ms);
   return Status::success();
 }
 
@@ -7513,6 +7518,25 @@ Status MeshNode::set_relay_enabled(const bool enabled) noexcept {
     trigger_route_advertisement(last_clock_ms_);
   }
   return Status::success();
+}
+
+void MeshNode::revoke_routes(const NodeId peer, const MonotonicMs now_ms) noexcept {
+  if (in_call_) return;  // enforcement is retried on the next RRS apply
+  NodeGuard guard(in_call_);
+  if (peer == kInvalidNodeId || peer == kBroadcastNodeId) return;
+  // Route updates are plain frames gated only on the neighbor record, so
+  // scrubbing the table is not enough: the neighbor itself goes inactive
+  // (its re-advertisements are then ignored, not re-learned). It heals
+  // through the normal handshake path — which the RRS gate refuses until
+  // the peer re-authenticates under a newer generation.
+  if (auto* record = find_neighbor(peer); record != nullptr) {
+    drop_neighbor_locked(*record, peer, now_ms);
+  } else {
+    routes_.invalidate_next_hop(peer, now_ms, true);
+  }
+  const RouteSelection selected = routes_.best(peer);
+  if (selected.valid) (void)routes_.withdraw(peer, selected.next_hop, now_ms);
+  routes_.evaluate(now_ms);
 }
 
 void MeshNode::refresh_neighbor_load(const MonotonicMs now_ms) noexcept {

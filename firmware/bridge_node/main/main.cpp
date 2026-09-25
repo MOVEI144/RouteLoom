@@ -323,6 +323,7 @@ extern "C" void app_main(void) {
   owner_config.joiner.node = owner_config.local_node;
   owner_config.joiner.mac = owner_config.local_mac;
   owner_config.log_tag = kTag;
+  owner_config.lifecycle_gateway = true;  // USB-attached: the P6 gateway profile
   status = owner.begin(sdkv1_stores, entropy, owner_config);
   if (!status) fail(status.detail);
   routeloom::SecurityProvider& session_security = owner.session_provider();
