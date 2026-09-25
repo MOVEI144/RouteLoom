@@ -15,6 +15,10 @@
 #include "routeloom/aead_gcm.hpp"
 #include "routeloom/autonomy_wire.hpp"
 #include "routeloom/discovery.hpp"
+#include "routeloom/group.hpp"
+#include "routeloom/node.hpp"
+#include "routeloom/sdkv1_group_security.hpp"
+#include "routeloom/wire.hpp"
 #include "routeloom/sdkv1_ead.hpp"
 #include "routeloom/sdkv1_security_coordinator.hpp"
 #include "routeloom/sdkv1_store.hpp"
@@ -22,6 +26,8 @@
 #include "routeloom/usb_host_ops.hpp"
 
 #include "test_sdkv1.hpp"
+#include "test_security.hpp"
+#include "test_sim.hpp"
 
 namespace routeloom::sdkv1 {
 struct SecurityCoordinatorTestAccess {
@@ -1278,9 +1284,161 @@ void test_group_provider_routing() {
   CHECK(coordinator.session_provider().accepts_group_epoch(203));
   CHECK(!coordinator.session_provider().accepts_group_epoch(999));
   CHECK(!coordinator.session_provider().group_promotion_pending());
+  const NodeId removed = site_record().gateways[0];
+  RevocationSet revoked = revocation_set(15, 1, kSiteEpoch);
+  revoked.entries[0].node_id = removed;
+  revoked.entries[0].min_generation = 4;
+  const auto object = revocation_object(revoked);
+  CHECK(f.revocations.accept(object.view(), sak().pub, kSiteId, kNetwork).ok());
+  // Both wrapper layers must preserve the applied group gate even when an
+  // already-opened frame takes a duplicate, repair or held-delivery path.
+  CHECK(coordinator.session_provider().revoked_group_sender(removed));
+  CHECK(!coordinator.session_provider().revoked_group_sender(removed + 1));
   // Pairwise still delegates to the member bank.
   CHECK(coordinator.session_provider().tx_epoch(SecurityScope::Link, kNode + 1, epoch).code ==
         StatusCode::AuthRequired);
+}
+
+// The simulated RF hop uses a test pairwise link; group cryptography and
+// revocation still pass through the actual Owner's session provider.
+class GroupMeshSession final : public SecurityProvider {
+ public:
+  GroupMeshSession(SecurityProvider& group, SecurityProvider& link) noexcept
+      : group_(group), link_(link) {}
+  bool ready() const noexcept override { return group_.ready(); }
+  Status tx_epoch(SecurityScope scope, NodeId peer, std::uint32_t& epoch) noexcept override {
+    return provider(scope).tx_epoch(scope, peer, epoch);
+  }
+  bool accepts_group_epoch(std::uint32_t epoch) const noexcept override {
+    return group_.accepts_group_epoch(epoch);
+  }
+  bool revoked_group_sender(NodeId sender) const noexcept override {
+    return group_.revoked_group_sender(sender);
+  }
+  bool group_promotion_pending() const noexcept override {
+    return group_.group_promotion_pending();
+  }
+  Status next_counter(const SecurityContext& c, std::uint64_t& counter) noexcept override {
+    return provider(c.scope).next_counter(c, counter);
+  }
+  Status seal(const SecurityContext& c, std::uint64_t counter, ByteView aad, ByteView plain,
+              MutableByteView encrypted, std::array<std::uint8_t, kAeadTagSize>& tag) noexcept override {
+    return provider(c.scope).seal(c, counter, aad, plain, encrypted, tag);
+  }
+  Status open(const SecurityContext& c, std::uint64_t counter, ByteView aad, ByteView encrypted,
+              const std::array<std::uint8_t, kAeadTagSize>& tag,
+              MutableByteView plain) noexcept override {
+    return provider(c.scope).open(c, counter, aad, encrypted, tag, plain);
+  }
+ private:
+  SecurityProvider& provider(SecurityScope scope) const noexcept {
+    return scope == SecurityScope::Link ? link_ : group_;
+  }
+  SecurityProvider& group_;
+  SecurityProvider& link_;
+};
+
+void test_coordinator_group_cached_revocation() {
+  current = "coordinator_group_cached_revocation";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  const SiteRecord site = site_record();
+  CHECK(f.site.commit(site).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+
+  // Sender and relay have the old GK; only the receiving Owner has the
+  // newly applied RRS1. Rewrap the same end bytes with fresh link counters.
+  GroupKeyState sender_keys(f.site);
+  GroupKeyState::Input start{};
+  start.op = GroupKeyState::Op::Start;
+  start.boot = kBoot;
+  start.generation = site.assignment_generation;
+  CHECK(sender_keys.advance(start, now).ok());
+  const routeloom::AeadGcm* aead = builtin_aead_gcm();
+  CHECK(aead != nullptr);
+  if (!aead) return;
+  const NodeId origin = site.gateways[0];
+  const NodeId relay = origin + 7;
+  routeloom_test::TestSecurity pairwise;
+  GroupMeshSession receiver(coordinator.session_provider(), pairwise);
+  GroupSecurityProvider origin_provider(sender_keys, pairwise, *aead, origin);
+  NodeConfig config{};
+  config.network = static_cast<std::uint32_t>(site.network);
+  config.node = kNode;
+  config.route_gateways = {origin, kInvalidNodeId};
+  config.route_advertisement_period_ms = 500;
+  config.route_lifetime_ms = 9000;
+  config.message_session = 102;
+  config.boot_incarnation = 0xB002;
+  config.route_generation = 1;
+  config.link_epoch = 1;
+  config.end_epoch = 1;
+  routeloom_test::SimNetwork net;
+  routeloom_test::SimRadio radio(net, kNode);
+  routeloom_test::CapturingObserver observer;
+  MeshNode node(config, radio, receiver, observer);
+  routeloom_test::SimReplyPort reply(radio, kNode, 1);
+  reply.set_rx_context(relay, 1);
+  node.set_reply_peer_port(&reply);
+  CHECK(node.start(now).ok());
+  const auto meta = routeloom_test::sim_rx_metadata(&reply, relay);
+  const std::uint8_t payload[] = {'r'};
+  const auto make_frame = [&](std::uint32_t sequence, bool ordered, std::uint8_t round,
+                              wire::EncodedFrame& out) {
+    wire::PlainFrame plain{};
+    plain.header.type = FrameType::GroupData;
+    plain.header.flags = wire::kFlagEndProtected;
+    plain.header.delivery = DeliveryClass::Reliable;
+    plain.header.hop_remaining = 8;
+    plain.header.network = config.network;
+    plain.header.origin = origin;
+    plain.header.destination = group_address(kGroupAll);
+    plain.header.previous_hop = origin;
+    plain.header.next_hop = origin;
+    plain.header.message = {kBoot, kGroupSequenceFlag | sequence};
+    plain.header.remaining_deadline_ms = 5000;
+    plain.header.original_lifetime_ms = 5000;
+    plain.header.link_epoch = kBoot;
+    plain.header.end_epoch = site.gk_epoch_current;
+    GroupDataHeader head{};
+    head.ordered = ordered;
+    CHECK(encode_group_data(head, ByteView{payload, sizeof(payload)},
+                            MutableByteView{plain.payload.data(), plain.payload.size()},
+                            plain.payload_size).ok());
+    wire::LinkOpenedFrame sealed{};
+    CHECK(wire::seal_group(plain, origin, origin_provider, sealed).ok());
+    sealed.header.next_hop = relay;
+    CHECK(wire::forward(sealed, relay, kNode, round, 5000, pairwise, out).ok());
+  };
+  wire::EncodedFrame first{}, held{}, duplicate{}, repair{};
+  make_frame(1, true, 0, first);
+  make_frame(3, true, 0, held);
+  CHECK(node.on_radio_receive(relay, first.view(), meta, now).ok());
+  CHECK(node.on_radio_receive(relay, held.view(), meta, now + 1).ok());
+  CHECK(observer.group_messages.size() == 1);
+  CHECK(node.group_holds_in_use() == 1);
+
+  RevocationSet revoked = revocation_set(15, 1, kSiteEpoch);
+  revoked.entries[0].node_id = origin;
+  revoked.entries[0].min_generation = site.assignment_generation + 1;
+  const auto object = revocation_object(revoked);
+  CHECK(f.revocations.accept(object.view(), sak().pub, site.site_id, site.network).ok());
+  node.revoke_routes(origin, now + 2);
+  CHECK(node.poll(now + 2).ok());
+  CHECK(node.group_holds_in_use() == 0);
+  const auto before = node.group_stats();
+  make_frame(1, true, 0, duplicate);
+  make_frame(1, true, 1, repair);
+  CHECK(node.on_radio_receive(relay, duplicate.view(), meta, now + 3).ok());
+  CHECK(node.on_radio_receive(relay, repair.view(), meta, now + 4).ok());
+  CHECK(observer.group_messages.size() == 1);
+  CHECK(node.group_stats().reports_sent == before.reports_sent);
+  CHECK(node.group_stats().rejected >= before.rejected + 2);
+  CHECK(observer.has_diag("GROUP_SENDER_REVOKED"));
 }
 
 void bump_unknown_generations(NeighborDiscovery& discovery, std::uint32_t fresh) {
@@ -1673,6 +1831,7 @@ int main() {
   test_lifecycle_stop_defers_durable_resume_clear();
   test_authority_channel_lifecycle();
   test_group_provider_routing();
+  test_coordinator_group_cached_revocation();
   test_refresh_stale_gk();
   test_link_failure_refresh_waits_for_poll_boundary();
   test_commit_veto();

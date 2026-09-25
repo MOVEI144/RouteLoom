@@ -8,6 +8,11 @@ They are **upstream IETF vectors**, not RouteLoom goldens: nothing here is
 generated from RouteLoom code, and the keys are public test keys that must
 never appear in a deployment.
 
+[trailing-invalid.txt](trailing-invalid.txt) is a RouteLoom rejection set:
+each entry is the corresponding §3 message_2, message_3 or message_4 with
+one surplus `ff` or `00` byte. C++ and Rust consume the same bytes, and
+`tests/test_edhoc_vectors.py` checks the derivation from `chapter3.txt`.
+
 `tools/extract_rfc9529_vectors.py` copies them verbatim from the RFC text
 (it checks the text's SHA-256 first, and keeps each value's section and
 label as a comment); it needs the RFC downloaded and is not part of the

@@ -295,6 +295,10 @@ bool RtcWriteAheadProvider::accepts_group_epoch(const std::uint32_t g) const noe
   return inner_.accepts_group_epoch(g);
 }
 
+bool RtcWriteAheadProvider::revoked_group_sender(const NodeId sender) const noexcept {
+  return inner_.revoked_group_sender(sender);
+}
+
 Status RtcWriteAheadProvider::next_counter(const SecurityContext& context,
                                            std::uint64_t& counter) noexcept {
   std::size_t slot = kRtcSessionMaxContexts;

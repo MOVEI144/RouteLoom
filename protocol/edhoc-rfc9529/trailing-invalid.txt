@@ -1,0 +1,7 @@
+# RFC 9529 chapter 3 messages with one surplus byte; both EDHOC stacks must reject.
+message_2_trailing_break = 582b419701d7f00a26c2dc587a36dd752549f33763c893422c8ea0f955a13a4ff5d59862a1eef9e0e7e1886fcdff
+message_2_trailing_item = 582b419701d7f00a26c2dc587a36dd752549f33763c893422c8ea0f955a13a4ff5d59862a1eef9e0e7e1886fcd00
+message_3_trailing_break = 52e562097bc417dd5919485ac7891ffd90a9fcff
+message_3_trailing_item = 52e562097bc417dd5919485ac7891ffd90a9fc00
+message_4_trailing_break = 4828c966b7ca304f83ff
+message_4_trailing_item = 4828c966b7ca304f8300

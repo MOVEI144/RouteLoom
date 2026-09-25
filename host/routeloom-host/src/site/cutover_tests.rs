@@ -1221,8 +1221,7 @@ fn missed_cutover_reissues_without_kguard() {
     );
 }
 
-/// V1-R07: a node reassigned to a new key still answers its old key's
-/// recovery query with a Removed notice over the old network.
+/// A rejected replacement cannot suppress the old key's recovery notice.
 #[test]
 fn old_kid_recovery_gets_removed() {
     let (service, transport) = service();
@@ -1241,16 +1240,24 @@ fn old_kid_recovery_gets_removed() {
         )
     });
     answer.unwrap();
-    // Reassign the same node id to a new key.
-    let mut new = SimDevice::new(0x00A1_0000_0000_7001, 0x72);
-    join_member(
-        &service,
-        &transport,
-        &mut new,
-        ROLE_ENDPOINT,
-        "m2",
-        T0 + 2_000,
-    );
+    // A different key cannot reclaim a revoked group sender ID.
+    let mut new = SimDevice::new(old.node, 0x72);
+    let (_, _, events) = new.start(&service, &transport, T0 + 2_000);
+    let (answer, _) = service.with(|a| {
+        a.decide(
+            KGUARD,
+            super::DecideRequest {
+                join_request_id: request_id(&events).unwrap(),
+                device: new.node,
+                verdict: Verdict::Allow {
+                    role: ROLE_ENDPOINT,
+                },
+                key: "m2".into(),
+            },
+            T0 + 2_010,
+        )
+    });
+    assert_eq!(answer.unwrap_err().code, "CONFLICT");
     // The old key comes back holding generation 1.
     old.recovery_existing = true;
     let (outcome, _) = old.attempt(&service, &transport, T0 + 3_000);
