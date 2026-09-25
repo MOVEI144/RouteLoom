@@ -368,6 +368,9 @@ class SecurityCoordinator final : public BootstrapSink,
   // bank; group scopes seal/open under the adopted GK (dev: under the
   // boot-scoped dev group key).
   SecurityProvider& session_provider() noexcept { return sleep_guard_; }
+  std::uint32_t revoked_group_tx_attempts() const noexcept {
+    return group_provider_.revoked_tx_attempts();
+  }
   // Sleep save (P4 §9.3, V1-F07), Member mode after PrepareSleep parked
   // the coordinator: exports the (Link, parent) session plus the first
   // live EndToEnd session (when one stands) into `port` with the adopted

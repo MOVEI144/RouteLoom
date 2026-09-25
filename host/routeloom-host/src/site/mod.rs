@@ -1566,9 +1566,8 @@ impl SiteAuthority {
                 }
                 previously_removed = true;
             }
-            // A removed row is history, not a conflict (07 §7): the
-            // replacement key asks KGuard like any other device, marked
-            // by the node's removal.
+            // A removed row is not a live-key conflict. KGuard may see
+            // the request, but allow still checks the revocation history.
             Some(row) if !row.member => previously_removed = true,
             Some(_) if old_kid_removed.is_some() => {
                 let removed = old_kid_removed.expect("old key hit");
@@ -2568,7 +2567,24 @@ impl SiteAuthority {
                 {
                     return Err(SiteError::new(
                         "CONFLICT",
-                        "another key holds this device id here; revoke that membership first (07 §7)",
+                        "another key holds this NodeId; use a new NodeId (revocation does not permit reuse)",
+                    ));
+                }
+                // Group frames carry a NodeId, not an assignment generation.
+                // Once revoked, that ID cannot safely identify a new group sender.
+                let revoked_before = self
+                    .store
+                    .ledger_for(open.facts.node)
+                    .map_err(|error| {
+                        self.store_error(now_ms, &error);
+                        store_failure(&error)
+                    })?
+                    .iter()
+                    .any(|row| row.kind == "revoke");
+                if revoked_before {
+                    return Err(SiteError::new(
+                        "CONFLICT",
+                        "NodeId was revoked; reprovision with a new NodeId before joining this site",
                     ));
                 }
                 let capability_ok = match role {

@@ -14,6 +14,8 @@
 
 「旧割当（世代）の機器の通信を拒否」は、`MemberCert.assignment_generation < min_generation`、または`MemberCert.site_epoch < site_epoch_floor`のMemberCertを、link/E2E確立時と、RRS1を受理した時点の生存contextの両方で拒否することで実現する。
 
+**v1のNodeId規則**：GroupLink／GroupEndには割当世代がないため、一度この現場で失効したNodeIdは同じ現場で再発行しない（cutoverでRRS1のentryが消えても履歴台帳を確認する）。機器のNodeIdは事務所のRLI1／DevCertに固定され、Hostは参加時に別の値を割り当てられない。再参加させるには事務所で新NodeIdの機器IDを再発行し、KGuardが新IDをallowする。旧IDでのallowは理由付きCONFLICTとする。誤ったHostが旧IDで新世代を発行しても、RRS1を適用済みの機器はそのIDのgroup frameを拒否する。割当世代とGK epochの結合はv1.1（#146）。
+
 ## 2. RRS1 — 失効集合
 
 Site AuthorityのSAKが署名するCOSE_Sign1（ES256）。external AAD＝`"RouteLoom/revocation-set/v1" 0x00 || network u64`（機器自身のRLS1から与え、転送経路の申告を使わない）。payloadは固定長BE：
@@ -92,7 +94,7 @@ linkが連続3回`REVOKED` hintまたは失敗で終わり、使える近隣が�
 
 1. RLS1、現場のRLT1、RRS1、再開cache、GK、DAMSを消去（seal付きの空記録へ、または二重slotのtombstone）。RLI1は残す。
 2. MembershipStateは`Revoked`を経て、RLS1が無い状態＝`Unprovisioned`として起動し直す。
-3. 10分のholdoffの後、ZeroTouch参加を再開する。KGuardには`previously_removed=true`の発見済み機器として見え、再割当しない限りpending/denyになる。
+3. 10分のholdoffの後、ZeroTouch参加を再開する。KGuardには`previously_removed=true`の発見済み機器として見えるが、旧NodeIdの再allowはHostが拒否する。再参加には事務所で新NodeIdのRLI1／DevCertを発行する。
 
 「削除後は物理的なリセットまで沈黙すべき」とする運用もあり得る。自動で未割当に戻るか、沈黙するかは製品判断（[08](08-implementation-plan.md) §6 Q9）。既定案は「未割当に戻る」（要求R1のゼロタッチ再利用と整合）。
 
@@ -135,10 +137,10 @@ SAK侵害または計画交換では、Site CA（オフライン）が署名す�
 | V1-R01 | revoke：台帳commit後にだけRRS1発行、API段階の順序 | P6-1 PR Aでhost試験（`site::tests::revocation_*`、`operations_get_round_trips_*`）。P4/P5実配線は未接続のためfake port |
 | V1-R02 | 近隣がRRS1受理→即context破棄・再開slot消去・経路撤回 | P6-1 PR Aで機器sim試験（`test_sdkv1_revocation.cpp`）。実P4 adapterは未接続のためfake port |
 | V1-R03 | gossip：authorityから遠いmemberへhop数に比例して伝播 | P6-1 PR Aで3-node line・100-node line・partition/merge sim試験（同上）。損失・重複・reorder・silent peer・32枠圧力の系統的fault注入は残課題 |
-| V1-R04 | 旧世代MemberCertでのlink/E2E確立拒否、再割当（世代+1）後は受理 | P6-1 PR Aでfloor/last-good・限定再認証の単体試験（同上＋`test_discovery.cpp`）。実EDHOC E2EはP4接続後 |
+| V1-R04 | 旧世代MemberCertでのlink/E2E確立拒否。v1では失効NodeIdの再割当は行わない | P6-1 PR Aでfloor/last-good・限定再認証の単体試験（同上＋`test_discovery.cpp`）。実EDHOC E2EはP4接続後 |
 | V1-R05 | 削除者はRemovalNoticeを検証して現場状態を消去、RLI1は保持 | PR B portable fake-port試験：RLX1 intent→逐次消去→holdoff→未割当action、RLI1不変、journalのbyte境界電断。実P4/P5/ESP trust adapterと統合電断試験は未接続 |
 | V1-R06 | 偽`REVOKED` hint・未署名通知・他現場SAK署名では何も消さない | PR B portableでは改竄署名の非消去のみ確認。hint/異現場の結線試験は未実施 |
-| V1-R07 | 紛失機器の復帰：ゼロタッチ経路でRemoved判定→消去→発見済み表示 | PR B の portable Joiner は健康なRLS1を保持して問い合わせ、実署名NoticeをOwnerへ渡すsim試験あり。Hostは旧networkのEADを同一kidの削除済みrowに加え、再割当後の旧kidはrevoke台帳（node索引）で照合する。revokeは署名済みNoticeを同transactionでcommitし、tickがcommit後に配送・NoticeAcceptedで`intent_confirmed`を立てる（`erase_confirmed`はprotocolに存在せず常にnull）。Owner引渡し・pipe E2Eは未接続 |
+| V1-R07 | 紛失機器の復帰：ゼロタッチ経路でRemoved判定→消去→発見済み表示 | PR B の portable Joiner は健康なRLS1を保持して問い合わせ、実署名NoticeをOwnerへ渡すsim試験あり。Hostは旧networkのEADを同一kidの削除済みrowに加え、旧kidの照会はrevoke台帳（node索引）で照合する。revokeは署名済みNoticeを同transactionでcommitし、tickがcommit後に配送・NoticeAcceptedで`intent_confirmed`を立てる（`erase_confirmed`はprotocolに存在せず常にnull）。Owner引渡し・pipe E2Eは未接続 |
 | V1-R08 | RRS1満杯→cutover：GrantRenew取り逃しmemberの自動再参加（KGuardの人手確認なし） | P6-2 PR DでHost driverを実装しhost試験（`site::cutover_tests::*`：commit前送信0・600秒とgateway gate・準備中revokeの競合・再起動・RRS満杯回復・通知outbox、API socket経由の`site::e2e::cutover_flows_*`、取り逃しmemberのKGuard不要な再発行）。機器・Owner・firmware実結線とC++ Joiner pipe E2Eは残課題 |
 | V1-R09 | 分断群：再結合までは通信継続（保証外の記録）、再結合後に拒否 | P6-1 PR Aでpartition/merge sim試験（`test_sdkv1_revocation.cpp`）。HILはP8へ引継ぎ |
 | V1-R10 | RRS1・RemovalNoticeのC++/Rust共通vector、fuzz | RRS部分はPR Aで実施。PR BでRLX1 recordとLastMembership/profile/capabilityのvalid/invalid共通vectorを追加し、C++/Rust両harnessとCI再生成検査を実施。Renewと実結線E2Eは後続PR |
