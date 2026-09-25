@@ -6,11 +6,6 @@
 namespace routeloom::espnow {
 namespace {
 
-// The member discovery scope handle: the coordinator's GK provider serves
-// exactly one (member) scope and ignores the value — discovery only needs
-// it non-invalid (Required refuses kInvalidScopeRef at start).
-constexpr ScopeRef kMemberScopeRef{1};
-
 constexpr std::uint32_t kTuneDeadlineMs = 3000;
 constexpr int kApplyCutoverRetries = 3;
 
@@ -161,6 +156,26 @@ void EspNowSecurityOwner::poll(const MonotonicMs now_ms) noexcept {
   (void)coordinator().step(event);
   poll_tune(now_ms);
   drain_actions(now_ms);
+}
+
+Status EspNowSecurityOwner::prepare_sleep(const MonotonicMs now_ms) noexcept {
+  if (!booted_) return Status::error(StatusCode::InvalidState, "owner not booted");
+  // Drain first: a pending action (tune/member/discovery) is owed work,
+  // not sleep permission. The coordinator re-checks the slot anyway.
+  poll_tune(now_ms);
+  drain_actions(now_ms);
+  sdkv1::CoordinatorEvent event{};
+  event.kind = sdkv1::CoordinatorEventKind::PrepareSleep;
+  event.now = now_ms;
+  return coordinator().step(event);
+}
+
+Status EspNowSecurityOwner::wake(const MonotonicMs now_ms) noexcept {
+  if (!booted_) return Status::error(StatusCode::InvalidState, "owner not booted");
+  sdkv1::CoordinatorEvent event{};
+  event.kind = sdkv1::CoordinatorEventKind::Wake;
+  event.now = now_ms;
+  return coordinator().step(event);
 }
 
 void EspNowSecurityOwner::on_bootstrap_rld1(const sdkv1::JoinRxMeta& meta,
@@ -448,9 +463,14 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   for (std::size_t i = 0; i < member.route_gateway_count && i < node.route_gateways.size(); ++i) {
     node.route_gateways[i] = member.route_gateways[i];
   }
+  const std::uint8_t operating = stores_->site().has_site()
+                                     ? stores_->site().site().channel
+                                     : runtime_->committed_channel();
   Status status = runtime_->adopt_member_node(node);
   if (!status) {
     ESP_LOGE(config_.log_tag, "member node adopt failed: %s", status.detail);
+    report_tune(Tune{0, kInvalidOperationToken, operating, true},
+                StatusCode::RadioFailure, runtime_->now_ms());
     return;
   }
   runtime_->node().set_bootstrap_sink(&coordinator());
@@ -459,15 +479,7 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   // The radio may still sit on the join channel: move it to the adopted
   // operating channel before the node starts (no member traffic flows
   // during the move). Already there → start immediately.
-  const std::uint8_t operating = stores_->site().has_site()
-                                     ? stores_->site().site().channel
-                                     : runtime_->committed_channel();
   if (operating == runtime_->committed_channel()) {
-    status = runtime_->start();
-    if (!status) {
-      ESP_LOGE(config_.log_tag, "member node start failed: %s", status.detail);
-      return;
-    }
     report_tune(Tune{0, kInvalidOperationToken, operating, true}, StatusCode::Ok,
                 runtime_->now_ms());
     return;
@@ -477,6 +489,8 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   status = request_cutover(operating, 0, runtime_->now_ms());
   if (!status) {
     ESP_LOGE(config_.log_tag, "member channel move failed: %s", status.detail);
+    report_tune(Tune{0, kInvalidOperationToken, operating, true},
+                StatusCode::RadioFailure, runtime_->now_ms());
   }
 }
 
@@ -487,50 +501,57 @@ void EspNowSecurityOwner::on_start_discovery(const MonotonicMs now_ms) noexcept 
     return;
   }
   DiscoveryConfig config{};
-  config.node = adopted_node_;
-  config.network = adopted_network_;
-  config.scope_mode = ScopeMode::Required;
-  config.scope_provider = &coordinator().gk_scope();
-  config.scope = kMemberScopeRef;
-  config.cookie_bucket_ms = static_cast<std::uint32_t>(sdkv1::MemberCookie::kBucketMs);
+  const Status prepared = coordinator().member_discovery_config(config);
+  if (!prepared) {
+    ESP_LOGE(config_.log_tag, "member discovery config failed: %s", prepared.detail);
+    return;
+  }
   auto* engine = new (discovery_box_.data()) NeighborDiscovery(config, *runtime_, *this,
                                                          coordinator().membership_hooks(),
                                                          *entropy_, observer_store_);
   discovery_live_ = true;
-  Status status = engine->membership().initialize(coordinator().membership_hooks(),
-                                                  adopted_network_);
+  Status status = engine->start(now_ms);
   if (!status) {
-    ESP_LOGE(config_.log_tag, "member controller init failed: %s", status.detail);
-    engine->~NeighborDiscovery();
-    discovery_live_ = false;
+    ESP_LOGE(config_.log_tag, "member discovery start failed: %s", status.detail);
+    abort_discovery_start(now_ms, false);
     return;
   }
   status = coordinator().attach_discovery(*engine);
   if (!status) {
     ESP_LOGE(config_.log_tag, "discovery attach failed: %s", status.detail);
-    engine->~NeighborDiscovery();
-    discovery_live_ = false;
+    abort_discovery_start(now_ms, false);
     return;
   }
   status = runtime_->attach_autonomy(*engine);
   if (!status) {
     ESP_LOGE(config_.log_tag, "autonomy attach failed: %s", status.detail);
-    engine->~NeighborDiscovery();
-    discovery_live_ = false;
+    abort_discovery_start(now_ms, true);
     return;
   }
   engine->set_member_handshake_mode(true);
-  status = engine->start(now_ms);
-  if (!status) {
-    ESP_LOGE(config_.log_tag, "member discovery start failed: %s", status.detail);
-    return;
-  }
   status = engine->begin_discovery(now_ms);
   if (!status) {
-    ESP_LOGW(config_.log_tag, "member begin_discovery failed: %s (rx-driven only)",
-             status.detail);
+    ESP_LOGE(config_.log_tag, "member begin_discovery failed: %s", status.detail);
+    abort_discovery_start(now_ms, true);
+    return;
   }
   ESP_LOGI(config_.log_tag, "member discovery started");
+}
+
+void EspNowSecurityOwner::abort_discovery_start(const MonotonicMs now_ms,
+                                                const bool attached) noexcept {
+  // Attached ports may retain the discovery pointer. Keep the object alive
+  // until runtime teardown, while revoking all session keys and radio work.
+  if (!attached && discovery_live_) {
+    discovery()->~NeighborDiscovery();
+    discovery_live_ = false;
+    secure_clear(discovery_box_);
+  }
+  sdkv1::CoordinatorEvent stop{};
+  stop.kind = sdkv1::CoordinatorEventKind::Stop;
+  stop.now = now_ms;
+  (void)coordinator().step(stop);
+  runtime_->stop();
 }
 
 void EspNowSecurityOwner::poll_tune(const MonotonicMs now_ms) noexcept {
@@ -566,11 +587,15 @@ void EspNowSecurityOwner::poll_tune(const MonotonicMs now_ms) noexcept {
 
 void EspNowSecurityOwner::report_tune(const Tune& tune, const StatusCode result_code,
                                       const MonotonicMs now_ms) noexcept {
+  StatusCode reported = result_code;
   if (tune.coord_token == 0) {
     // The ApplyMemberConfig channel move: start the node, then report
     // the firmware's apply-time ChannelReady. On a failed move with
     // retries left, re-request instead of reporting.
-    if (result_code != StatusCode::Ok && apply_retries_ > 0 && apply_channel_ != 0) {
+    if (reported == StatusCode::Ok && runtime_->committed_channel() != tune.channel) {
+      reported = StatusCode::RadioFailure;
+    }
+    if (reported != StatusCode::Ok && apply_retries_ > 0 && apply_channel_ != 0) {
       --apply_retries_;
       const Status retry = request_cutover(apply_channel_, 0, now_ms);
       if (retry) return;
@@ -578,9 +603,12 @@ void EspNowSecurityOwner::report_tune(const Tune& tune, const StatusCode result_
     }
     apply_retries_ = 0;
     apply_channel_ = 0;
-    const Status started = runtime_->start();
-    if (!started) {
-      ESP_LOGE(config_.log_tag, "member node start failed: %s", started.detail);
+    if (reported == StatusCode::Ok) {
+      const Status started = runtime_->start();
+      if (!started) {
+        ESP_LOGE(config_.log_tag, "member node start failed: %s", started.detail);
+        reported = started.code;
+      }
     }
   }
   // Report reality, not the request: the coordinator gates RLD1 on the
@@ -590,7 +618,7 @@ void EspNowSecurityOwner::report_tune(const Tune& tune, const StatusCode result_
   ready.kind = sdkv1::CoordinatorEventKind::ChannelReady;
   ready.now = now_ms;
   ready.channel_token = tune.coord_token;
-  ready.channel_result = result_code;
+  ready.channel_result = reported;
   ready.channel = runtime_->committed_channel();
   ready.channel_generation = runtime_->radio_generation().value;
   (void)coordinator().step(ready);

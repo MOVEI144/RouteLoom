@@ -50,6 +50,10 @@ using SessionRandomFn = bool (*)(void* ctx, std::uint8_t* out, std::size_t size)
 struct InstallAttestation {
   std::uint32_t peer_role{0};
   std::uint32_t created_gk_epoch{0};
+  // True when the keys were agreed under the dev-PSK resume policy (P4
+  // §10.1) rather than member credentials. The bank stamps kFlagDevResume
+  // from this — nothing else sets the provenance bit.
+  bool dev_resume{false};
 };
 
 struct SessionDemand {
@@ -112,6 +116,12 @@ class SessionBank {
   static constexpr std::uint32_t kOverlapLifetimeMs = 60U * 1000U;
   static constexpr std::size_t kStagingBytes = kMaxEspNowBody;  // 250
   static constexpr std::size_t kCidRetries = 8;
+  // Provenance of a dev-PSK resume install (P4 §10.1: cert_id 0,
+  // generation 0, created_gk 1). A flagged context works like any live
+  // one, but restore_entry refuses it — dev sessions re-run RLRES1 after
+  // every boot instead of RTC-restoring — and the RTC codec never carries
+  // flags. Stamped from InstallAttestation::dev_resume only.
+  static constexpr std::uint32_t kFlagDevResume = 0x08;
 
   // The frozen TX use-budget rule (P4 §4.2), as a pure function so the
   // 2^32 boundary is testable without issuing four billion counters:
@@ -152,6 +162,9 @@ class SessionBank {
   Status configure(const LocalView& local, const AeadGcm& aead, const RandomSource& random,
                    MonotonicMs now) noexcept;
   bool configured() const noexcept { return configured_; }
+  // Stops all sessions and erases keys without needing entropy or storage.
+  // The caller serializes this with all bank entries and callbacks.
+  void clear() noexcept;
 
   // The Owner calls this before every operation batch: subtracts elapsed
   // time from all lifetimes (saturating; entries at 0 are wiped), drops
@@ -175,6 +188,19 @@ class SessionBank {
   // SessionInstaller path: installs with role 0 (unknown). Relay duties
   // stay refused until a handshake attests the real role.
   Status install(const ContextKeys& keys) noexcept;
+  // Sleep save/restore (P4 §9.3, V1-F07): export_entry copies the live
+  // current context for (scope, peer) into `out` (NotFound when none
+  // stands); restore_entry installs one consumed RTC image entry with its
+  // key, TX counter, RX window and lifetime preserved as one unit — the
+  // only path that revives counters instead of zeroing them. The caller
+  // must have matched the image network/membership to this bank and
+  // checked the radio parent separately (rtc_parent_binding_ok). A fresh
+  // install serial is assigned: the image serial orders nothing post-wake.
+  // An occupied (scope, peer) slot refuses Conflict: live keys are never
+  // overwritten with older counters.
+  Status export_entry(SecurityScope scope, NodeId peer, SessionBankEntry& out) const noexcept;
+  Status restore_entry(SecurityScope scope, NodeId peer,
+                       const SessionBankEntry& entry) noexcept;
   Status retire(SecurityScope scope, NodeId peer) noexcept;
   Status retire_all(NodeId peer) noexcept;
   // Drops the oldest idle (no live seal reservation), unpinned end context

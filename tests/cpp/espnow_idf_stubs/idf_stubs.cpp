@@ -21,6 +21,7 @@
 namespace {
 
 std::int64_t g_now_us = 0;
+std::uint8_t g_channel = 6;
 unsigned g_send_count = 0;
 unsigned g_del_peer_count = 0;
 bool g_fail_del_peer = false;
@@ -44,6 +45,7 @@ namespace idf_stub {
 
 void reset() noexcept {
   g_now_us = 0;
+  g_channel = 6;
   g_send_count = 0;
   g_del_peer_count = 0;
   g_fail_del_peer = false;
@@ -278,14 +280,14 @@ esp_err_t esp_wifi_stop(void) { return ESP_OK; }
 
 esp_err_t esp_wifi_set_channel(const uint8_t primary,
                                const wifi_second_chan_t second) {
-  (void)primary;
   (void)second;
+  g_channel = primary;
   return ESP_OK;
 }
 
 esp_err_t esp_wifi_get_channel(uint8_t* primary,
                                wifi_second_chan_t* second) {
-  if (primary != nullptr) *primary = 6;
+  if (primary != nullptr) *primary = g_channel;
   if (second != nullptr) *second = WIFI_SECOND_CHAN_NONE;
   return ESP_OK;
 }

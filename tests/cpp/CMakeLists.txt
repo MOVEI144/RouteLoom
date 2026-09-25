@@ -454,6 +454,43 @@ set_tests_properties(routeloom_sdkv1_joiner_tests PROPERTIES
 # The single device security Owner (G-SEC P4 §8, PR4): boot/store
 # classification, the RLD1 demux gates, staged bootstrap RX, the USB
 # gateway queue-admission verdicts, sleep/wake/stop, the RLV1 veto.
+add_executable(routeloom_sdkv1_dev_keys_tests test_sdkv1_dev_keys.cpp)
+target_link_libraries(routeloom_sdkv1_dev_keys_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_sdkv1_dev_keys_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_dev_keys_tests COMMAND routeloom_sdkv1_dev_keys_tests)
+
+add_executable(routeloom_sdkv1_legacy_purge_tests test_sdkv1_legacy_purge.cpp)
+target_link_libraries(routeloom_sdkv1_legacy_purge_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_sdkv1_legacy_purge_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_legacy_purge_tests COMMAND routeloom_sdkv1_legacy_purge_tests)
+
+add_executable(routeloom_nvs_legacy_purge_tests
+    test_nvs_legacy_purge.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_legacy_purge.cpp)
+target_link_libraries(routeloom_nvs_legacy_purge_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_nvs_legacy_purge_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/esp_idf_stub)
+target_compile_options(routeloom_nvs_legacy_purge_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_nvs_legacy_purge_tests COMMAND routeloom_nvs_legacy_purge_tests)
+
+add_executable(routeloom_sdkv1_dev_session_tests test_sdkv1_dev_session.cpp)
+target_link_libraries(routeloom_sdkv1_dev_session_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_sdkv1_dev_session_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_sdkv1_dev_session_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_dev_session_tests COMMAND routeloom_sdkv1_dev_session_tests)
+
+add_executable(routeloom_sdkv1_session_rtc_tests test_sdkv1_session_rtc.cpp)
+target_link_libraries(routeloom_sdkv1_session_rtc_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_sdkv1_session_rtc_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_session_rtc_tests COMMAND routeloom_sdkv1_session_rtc_tests)
+
+add_executable(routeloom_sdkv1_boot_session_tests test_sdkv1_boot_session.cpp)
+target_link_libraries(routeloom_sdkv1_boot_session_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_sdkv1_boot_session_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_boot_session_tests COMMAND routeloom_sdkv1_boot_session_tests)
+
 add_executable(routeloom_sdkv1_coordinator_tests test_sdkv1_security_coordinator.cpp)
 target_link_libraries(routeloom_sdkv1_coordinator_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_sdkv1_coordinator_tests PRIVATE

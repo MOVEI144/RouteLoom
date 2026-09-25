@@ -67,7 +67,7 @@ RLP1 slot（84B）:
 
 | 証人 | 守るもの | 失われた時 |
 |---|---|---|
-| `rlboot`（u32、既存） | group送信者鍵（`tx_boot`）、route generation | RLS1内の`boot_witness`（参加時とGK activationごとに記録）より小さい、または欠落でRLS1が存在→破損とみなし、group TXを閉じ、耐久boot証跡と未使用新GKによる保守復旧を要求する（`+2^20`だけでは長期停止中の起動上限を証明できない） |
+| `rlboot`（u32、既存） | group送信者鍵（`tx_boot`）、route generation | system NVSを先に+1し、RLS1の`boot_witness`採用後に候補がwitness以下なら`witness + 2^20`へ修復・読戻ししてから公開する。overflow、読出し不明、site不確定は使用停止。過去最大bootの完全な耐rollback証明ではなく、長期停止中の物理flash rollbackは対象外 |
 | 開発profileの`cmax`（§4.2） | 掃除したTX counterのepoch上限 | 起動時に`session ≤ cmax`なら開始しない（fail closed） |
 
 `rlboot`は既定`nvs`に残し、ピアごとの状態とは別partitionにする（§5）。これで「ピア状態が満杯→boot session書込み失敗→起動不能」の連鎖を断つ。
