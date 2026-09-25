@@ -394,8 +394,8 @@ void test_boot_adoption() {
   CHECK(bare.revocations.initialize());
   CHECK_OK(bare.dispatch(LifecycleInput::Boot(true), 0));
   CHECK(bare.snap().phase == LifecyclePhase::BootGate);
-  // Recovery-control-only establishment is allowed for the boot fetch
-  // (traffic itself stays closed in the hooks until the set lands).
+  // Recovery-control-only establishment is allowed for the boot fetch.
+  // The hooks can admit a fresh zero-floor member before its first RRS1.
   CHECK(bare.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
   CHECK_OK(bare.dispatch(LifecycleInput::Poll(), 0));
   CHECK(bare.authority.sent.size() == 1);
@@ -490,6 +490,20 @@ void test_boot_self_revoked_and_blocked() {
   CHECK(wrong_geo.snap().phase == LifecyclePhase::StorageBlocked);
 }
 
+void test_boot_rejects_resume_storage_quota_mismatch() {
+  for (const std::size_t slots : {std::size_t{15}, std::size_t{17}}) {
+    NodeFixture node;
+    FaultyResumeStorage2 storage(slots);
+    ResumeCache2 resume(storage, kResume2NodeLinkQuota, kResume2NodeEndQuota);
+    node.lifecycle.~MembershipLifecycle();
+    new (&node.lifecycle) MembershipLifecycle(node.config, node.identity, node.site,
+                                               node.revocations, resume, node.ports,
+                                               default_es256_verifier(), &node.journal);
+    CHECK(node.provision(3, 14));
+    CHECK(node.snap().phase == LifecyclePhase::StorageBlocked);
+  }
+}
+
 void test_boot_revalidates_stored_rrs() {
   NodeFixture node;
   CHECK_OK(node.identity.initialize());
@@ -516,8 +530,8 @@ void test_boot_revalidates_stored_rrs() {
   CHECK_OK(old_network.revocations.accept(old_object.view(), sak().pub, kSiteId, previous));
   CHECK_OK(old_network.dispatch(LifecycleInput::Boot(true), 0));
   CHECK(old_network.snap().phase == LifecyclePhase::BootGate);
-  // No adopted set for this network yet, so the boot fetch is open
-  // (like the bare case above); traffic stays hooks-gated.
+  // No adopted set for this network yet, so the boot fetch is open;
+  // the nonzero floor closes data admission in the hooks.
   CHECK(old_network.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
   CHECK_OK(old_network.dispatch(LifecycleInput::Poll(), 0));
   CHECK(!old_network.authority.sent.empty());
@@ -529,7 +543,8 @@ void test_member_ready_closes_on_floor_advance() {
   CHECK_OK(node.site.raise_rs_floor(15));
   CHECK_OK(node.dispatch(LifecycleInput::MemberReady(node.site.commit_seq(), 15), 100));
   CHECK(node.snap().phase == LifecyclePhase::BootGate);
-  // BootGate opens only the recovery fetch; traffic stays hooks-gated.
+  // The advanced floor closes data admission in the hooks while the
+  // recovery fetch remains available.
   CHECK(node.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
 }
 
@@ -549,7 +564,8 @@ void test_apply_does_not_ack_below_a_newer_floor() {
   CHECK_OK(node.dispatch(LifecycleInput::Poll(), 100));
   CHECK(node.snap().phase == LifecyclePhase::BootGate);
   CHECK(node.authority.sent.empty());
-  // BootGate opens only the recovery fetch; traffic stays hooks-gated.
+  // The advanced floor closes data admission in the hooks while the
+  // recovery fetch remains available.
   CHECK(node.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
 }
 
@@ -604,8 +620,8 @@ void test_apply_order_and_sweep() {
   CHECK_OK(node.dispatch(
       LifecycleInput::Authority(authority, kAuthorityTypeRevocation, object.view()), 1000));
   CHECK(node.snap().phase == LifecyclePhase::ApplyingRrs);
-  // The barrier shuts traffic (hooks) while recovery control stays
-  // open for the RRS1 exchange itself.
+  // Before commit, the adopted set still controls traffic. Recovery
+  // control stays open for the RRS1 exchange itself.
   CHECK(node.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
   // Step through: Verify, Store, Enforce, 16 sweep polls, Floor, Done.
   CHECK_OK(node.dispatch(LifecycleInput::Poll(), 1000));  // Verify
@@ -812,7 +828,7 @@ void test_link_failure_and_recovery() {
   CHECK_OK(node.dispatch(LifecycleInput::ActionDone(token, Status::success()), 300));
   CHECK(!node.snap().action_pending);
   CHECK(node.lifecycle.take_action(again).code == StatusCode::NotFound);
-  // Closed for normal traffic (hooks); recovery control stays available.
+  // Recovery control stays available during the lifecycle recovery phase.
   CHECK(node.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
   // The recovery join re-provisions the stores: back to Active.
   CHECK_OK(node.dispatch(LifecycleInput::Recovery(true), 400));
@@ -2780,6 +2796,7 @@ int main() {
   test_boot_adoption();
   test_enforcement_storage_failure_stays_closed();
   test_boot_self_revoked_and_blocked();
+  test_boot_rejects_resume_storage_quota_mismatch();
   test_boot_revalidates_stored_rrs();
   test_member_ready_closes_on_floor_advance();
   test_apply_does_not_ack_below_a_newer_floor();

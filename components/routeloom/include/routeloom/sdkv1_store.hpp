@@ -350,6 +350,7 @@ class ResumeCache2 {
 
   std::size_t link_quota() const noexcept { return link_quota_; }
   std::size_t end_quota() const noexcept { return end_quota_; }
+  std::size_t slot_count() const noexcept { return storage_.slot_count(); }
 
   // Validity: valid state, network == context network, created_gk_epoch <=
   // gk_epoch < created_gk_epoch + 2 (u64 arithmetic: a wrapped or regressed

@@ -8,7 +8,7 @@
 //    empty = corrupt, oversize or short read = corrupt, backend errors =
 //    StorageFailure;
 //  - key/namespace mapping (rlident i0/i1, rlsite s0/s1, rlrevo r0/r1,
-//    rlres s00..s15 / s000..s159) and blobs of exactly used_len bytes;
+//    rlres2 s00..s15 / s000..s159) and blobs of exactly used_len bytes;
 //  - IdentityStore / SiteStore / RevocationStore / ResumeCache2 end to end,
 //    including a manufactured (office-written) twin pair and a power cut at
 //    every write of commit/clear with the value either landed or not.

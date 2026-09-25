@@ -38,6 +38,36 @@ ACCEPTANCE_NO_HOST_TEST = {
     "V1-F04": "relay-stop route-switch handshake count (needs routing+session integration)",
 }
 
+ACCEPTANCE_ID_RE = re.compile(r"\bV1-[A-Z]\d+\b")
+# The six design acceptance tables currently define 62 stable IDs. Keep
+# their roster independent of the table scan so deleting a table row
+# cannot silently shrink the set being checked.
+ACCEPTANCE_SERIES_END = {"J": 15, "K": 12, "R": 10, "N": 8, "F": 8, "H": 9}
+EXPECTED_ACCEPTANCE_IDS = {
+    f"V1-{series}{number:02d}"
+    for series, end in ACCEPTANCE_SERIES_END.items()
+    for number in range(1, end + 1)
+}
+
+
+def acceptance_test_sources(root: Path):
+    """Only executable test sources can establish an acceptance trace."""
+    for path in (root / "tests").rglob("test_*"):
+        if path.is_file() and path.suffix in {".cpp", ".py"}:
+            # Checker mutation tests mention IDs as decoys; they are not
+            # evidence for the protocol acceptance cases themselves.
+            if path.suffix == ".py" and "from check_review_contracts import" in path.read_text(
+                encoding="utf-8"
+            ):
+                continue
+            yield path
+    for path in (root / "host").rglob("*.rs"):
+        if "target" in path.parts:
+            continue
+        source = path.read_text(encoding="utf-8")
+        if re.search(r"#\[(?:tokio::)?test\]", source):
+            yield path
+
 # Frozen Wire v1 frame type IDs (CORE_FIXED_250 profile). Mirrors
 # FrameType in components/routeloom/include/routeloom/types.hpp.
 EXPECTED_FRAME_IDS = {
@@ -940,20 +970,16 @@ def validate(root: Path) -> dict:
             "docs/design/sdk-v1/07-host-api-tooling.md",
         ):
             design_ids.update(
-                re.findall(r"V1-[A-Z]\d+", (root / doc).read_text(encoding="utf-8"))
+                ACCEPTANCE_ID_RE.findall((root / doc).read_text(encoding="utf-8"))
             )
+        test("acceptance_design_ids", design_ids == EXPECTED_ACCEPTANCE_IDS,
+             f"missing={sorted(EXPECTED_ACCEPTANCE_IDS - design_ids)} "
+             f"unexpected={sorted(design_ids - EXPECTED_ACCEPTANCE_IDS)}")
         evidence: dict[str, list[str]] = {i: [] for i in design_ids}
-        for base in ("tests", "host"):
-            for path in sorted((root / base).rglob("*")):
-                if not path.is_file() or "target" in path.parts:
-                    continue
-                try:
-                    text = path.read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError):
-                    continue
-                for i in design_ids:
-                    if i in text:
-                        evidence[i].append(str(path.relative_to(root)))
+        for path in acceptance_test_sources(root):
+            source_ids = set(ACCEPTANCE_ID_RE.findall(path.read_text(encoding="utf-8")))
+            for i in source_ids & design_ids:
+                evidence[i].append(str(path.relative_to(root)))
         for i in sorted(design_ids):
             if evidence[i]:
                 test(f"acceptance_trace:{i}", True, ",".join(evidence[i][:4]))

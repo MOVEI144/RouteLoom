@@ -703,7 +703,8 @@ LifecycleBlockReason MembershipLifecycle::adopt_stores() noexcept {
   const std::size_t want_end = config_.profile == LifecycleProfile::Gateway
                                    ? kResume2GatewayEndQuota
                                    : kResume2NodeEndQuota;
-  if (resume_.link_quota() != want_link || resume_.end_quota() != want_end)
+  if (resume_.link_quota() != want_link || resume_.end_quota() != want_end ||
+      resume_.slot_count() != want_link + want_end)
     return LifecycleBlockReason::ResumeGeometry;
   if (!site_.has_site() || site_.quarantined() || site_.uncertain()) {
     return LifecycleBlockReason::Site;
