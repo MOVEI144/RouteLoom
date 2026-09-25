@@ -1,26 +1,33 @@
-//! Live E2E (design P3-4 §10.2): the real C++ Joiner FSM
-//! (`tests/cpp/joiner_interop_peer.cpp`, real Joiner + Link + stores on
-//! fake radio/flash, real Proxy + Gateway per site) against two real Rust
+//! Live E2E (design P3-4 §10.2, P5 §10.4, P6 §11.4): the real C++
+//! member stack (`tests/cpp/joiner_interop_peer.cpp`, real Joiner +
+//! AuthorityClient + GroupKeyState + MembershipLifecycle on fake
+//! radio/flash, real Proxy + Gateway per site) against two real Rust
 //! Site Authorities (`SiteService` on SQLite, API1 socket, KGuardMock).
 //!
 //! This is the process-interop complement of `site::e2e`, which drives the
 //! same authority with a Rust `SimDevice`: here the EDHOC Initiator, the
-//! scan/candidate FSM, the RLS1 commit + readback and the MemberReady
-//! action are all the portable C++ implementation, while decisions,
-//! the durable ledger and the MemberCert/SitePackage/DAMS come from the
-//! production Rust code. USB daemon wiring, MeshNode and real radio are
-//! out of scope, exactly like the C++ two-site simulator.
+//! scan/candidate FSM, the RLS1 commit + readback, the MemberReady
+//! action, the RLRES1 handshake, the GK stage/activate FSM and the
+//! RRS1/notice/cutover lifecycle are all the portable C++
+//! implementation, while decisions, the durable ledger and the
+//! MemberCert/SitePackage/DAMS come from the production Rust code. The
+//! authority carriers cross the pipe behind the real USB HostOps
+//! fragment layer (`UsbAuthorityAdapter` 0x64/0x65 on this side).
+//! MeshNode routing, gossip peers and real radio are out of scope: RRS1
+//! arrives over the authority channel only (see
+//! `docs/design/sdk-v1/live-e2e-harness.md`).
 //!
-//! The peer path comes from `ROUTELOOM_JOINER_PEER` or the CMake build
-//! next to this workspace. A missing executable is a hard failure, never
-//! a skip (§10.2 item 6).
+//! The peer path comes from `ROUTELOOM_OWNER_PEER` (fallback
+//! `ROUTELOOM_JOINER_PEER`) or the CMake build next to this workspace. A
+//! missing executable is a hard failure, never a skip (§10.2 item 6).
 //!
 //! Time: the test owns one virtual clock (`t0` = real `now_ms` at start,
 //! so API1's real-time stamps stay near the authority's virtual stamps).
 //! Every step sends `TICK(now)` to the peer, routes the relay ups through
-//! `handle_up`, runs `tick` on both authorities, forwards the downs and
-//! serves KGuard over the sockets — all within the same virtual
-//! millisecond, so no decision timeout can fire spuriously.
+//! `handle_up`, pumps the authority carriers through the USB adapter,
+//! runs `tick` on both authorities, forwards the downs and serves KGuard
+//! over the sockets — all within the same virtual millisecond, so no
+//! decision timeout can fire spuriously.
 //!
 //! The test adapter rule (§10.2 item 4): only `phase == EdhocMessage (4)`
 //! crosses the pipe. Anything else — and any object the shared
@@ -28,6 +35,11 @@
 //! mapped by meaning, never cast: the host `AbortReason` and the relay
 //! `RelayStatusCode` disagree numerically (host `Timeout = 3` is relay
 //! `Busy = 3`, which would lie).
+//!
+//! Authority carriers (`O` ups, `C` downs, kinds 1..5) cross as whole
+//! carriers; this side fragments them through the production USB codec,
+//! so the 0x64/0x65 framing, session checks and reassembly limits are
+//! the exercised code, not a test double.
 
 use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
@@ -39,6 +51,11 @@ use std::thread;
 
 use routeloom_client::api1::RouteLoomTransport;
 use routeloom_client::site::{Assignment, Decision, KGuardMock, Role, SiteAdmin};
+use routeloom_protocol::authority::CarrierKind;
+use routeloom_protocol::host_ops::{
+    decode_authority_down, encode_authority_up, AuthorityFragment, AUTHORITY_FRAGMENT_DATA_MAX,
+    SUB_AUTHORITY_DOWN,
+};
 use routeloom_protocol::join_relay::{
     RelayBody, RelayDirection, RelayHeader, RelayObject, RelayState, PHASE_EDHOC, RELAY_OBJECT_MAX,
 };
@@ -46,10 +63,12 @@ use routeloom_provision::sdkv1::cert::{cert_issue, CertClaims, CertType};
 use routeloom_provision::sha256::sha256;
 use routeloom_provision::signer::{test_keypair, FileRootSigner, RootSigner};
 
+use super::group_keys::HostTime;
 use super::store::SqliteSiteStore;
 use super::testkit;
 use super::transport::{DownStatus, InProcessTransport, Outbound, RelayKey, RelayUp};
-use super::{SiteAuthority, SiteService, SiteSetup};
+use super::usb::{authority_sub, UsbAuthorityAdapter};
+use super::{ChannelGroupKeyTransport, SiteAuthority, SiteService, SiteSetup};
 use crate::acl::Acl;
 use crate::{now_ms, serve_client, DeviceSession, State};
 
@@ -144,13 +163,18 @@ fn device_keys() -> DeviceKeys {
 
 // --- Peer process --------------------------------------------------------------
 
-const RPC_MAX: usize = 1100;
+const RPC_MAX: usize = 4096;
 
 struct PeerUp {
     site: u8,
     proxy: u64,
     hops: u8,
     object: Vec<u8>,
+}
+
+struct AuthorityUp {
+    kind: u8,
+    bytes: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -185,11 +209,31 @@ struct Member {
     dams_digest: [u8; 32],
 }
 
+/// `G` observation: the owner-leg snapshot (45 B incl. tag).
+#[derive(Clone, Debug, Default)]
+struct OwnerSnap {
+    auth_state: u8,
+    join_confirmed: bool,
+    gk_current: u32,
+    gk_next: u32,
+    lifecycle_phase: u8,
+    lifecycle_action: u8,
+    applied_rs: u32,
+    applied_gk: u32,
+    holdoff_remaining_ms: u64,
+    authority_ready: bool,
+    adopted_network: u64,
+    own_generation: u32,
+    lifecycle_booted: bool,
+}
+
 struct Tick {
     ups: Vec<PeerUp>,
     aborts: Vec<PeerAbort>,
+    authority_ups: Vec<AuthorityUp>,
     snap: Snap,
     member: Member,
+    owner: OwnerSnap,
 }
 
 fn get_u16(payload: &[u8], pos: &mut usize) -> u16 {
@@ -230,8 +274,15 @@ impl Drop for Peer {
 }
 
 impl Peer {
-    fn spawn(t0: u64, seed: u64, flash: Option<&std::path::Path>, verify: bool) -> Self {
-        let path = std::env::var_os("ROUTELOOM_JOINER_PEER")
+    fn spawn(
+        t0: u64,
+        seed: u64,
+        flash: Option<&std::path::Path>,
+        flash_ext: Option<&std::path::Path>,
+        verify: bool,
+    ) -> Self {
+        let path = std::env::var_os("ROUTELOOM_OWNER_PEER")
+            .or_else(|| std::env::var_os("ROUTELOOM_JOINER_PEER"))
             .map(std::path::PathBuf::from)
             .or_else(|| {
                 let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -244,7 +295,7 @@ impl Peer {
                     candidate.is_file().then_some(candidate)
                 })
             })
-            .expect("build routeloom_joiner_interop_peer or set ROUTELOOM_JOINER_PEER");
+            .expect("build routeloom_joiner_interop_peer or set ROUTELOOM_OWNER_PEER");
         let keys = device_keys();
         let site_ca_pub = test_keypair(0x61).1;
         let mut command = Command::new(&path);
@@ -295,6 +346,9 @@ impl Peer {
         if let Some(file) = flash {
             command.arg("--flash").arg(file);
         }
+        if let Some(file) = flash_ext {
+            command.arg("--flash-ext").arg(file);
+        }
         if verify {
             command.arg("--verify");
         }
@@ -333,6 +387,8 @@ impl Peer {
         let mut tick = Tick {
             ups: Vec::new(),
             aborts: Vec::new(),
+            authority_ups: Vec::new(),
+            owner: OwnerSnap::default(),
             snap: Snap {
                 state: 0,
                 action_pending: false,
@@ -417,6 +473,36 @@ impl Peer {
                         .dams_digest
                         .copy_from_slice(&payload[pos..pos + 32]);
                 }
+                b'O' => {
+                    assert!(payload.len() >= 3, "O carries kind + bytes");
+                    assert!((1..=5).contains(&payload[1]), "authority kind 1..5");
+                    tick.authority_ups.push(AuthorityUp {
+                        kind: payload[1],
+                        bytes: payload[2..].to_vec(),
+                    });
+                }
+                b'G' => {
+                    assert_eq!(payload.len(), 45, "G shape");
+                    let mut pos = 1;
+                    tick.owner.auth_state = payload[pos];
+                    pos += 1;
+                    tick.owner.join_confirmed = payload[pos] != 0;
+                    pos += 1;
+                    tick.owner.gk_current = get_u32(&payload, &mut pos);
+                    tick.owner.gk_next = get_u32(&payload, &mut pos);
+                    tick.owner.lifecycle_phase = payload[pos];
+                    pos += 1;
+                    tick.owner.lifecycle_action = payload[pos];
+                    pos += 1;
+                    tick.owner.applied_rs = get_u32(&payload, &mut pos);
+                    tick.owner.applied_gk = get_u32(&payload, &mut pos);
+                    tick.owner.holdoff_remaining_ms = get_u64(&payload, &mut pos);
+                    tick.owner.authority_ready = payload[pos] != 0;
+                    pos += 1;
+                    tick.owner.adopted_network = get_u64(&payload, &mut pos);
+                    tick.owner.own_generation = get_u32(&payload, &mut pos);
+                    tick.owner.lifecycle_booted = payload[pos] != 0;
+                }
                 b'D' => done = true,
                 b'E' => panic!("peer fatal: {}", String::from_utf8_lossy(&payload[1..])),
                 tag => panic!("unknown peer tag {tag}"),
@@ -442,6 +528,34 @@ impl Peer {
         self.send(&command);
     }
 
+    fn send_authority_down(&mut self, kind: u8, bytes: &[u8]) {
+        assert!((1..=5).contains(&kind), "authority kind 1..5");
+        assert!(!bytes.is_empty() && bytes.len() <= 2048, "carrier bound");
+        let mut command = vec![b'C', kind];
+        command.extend_from_slice(bytes);
+        self.send(&command);
+    }
+
+    fn request_pull(&mut self, reason: u8) {
+        assert!((1..=3).contains(&reason), "pull reason 1..3");
+        self.send(&[b'V', reason]);
+    }
+
+    /// Powers site proxies off/on between rounds: (site, proxy, muted).
+    fn send_mute(&mut self, mutes: &[(u8, u8, bool)]) {
+        for (site, proxy, muted) in mutes {
+            self.send(&[b'F', *site, *proxy, u8::from(*muted)]);
+        }
+    }
+
+    /// Injects a gossip-completed RRS1 object (see the `J` tag).
+    fn inject_gossip(&mut self, object: &[u8]) {
+        assert!(!object.is_empty() && object.len() <= 640, "RRS1 bound");
+        let mut command = vec![b'J'];
+        command.extend_from_slice(object);
+        self.send(&command);
+    }
+
     /// The 4 KB flash image (identity slots, then site slots) for the
     /// power-cut handover: only these bytes cross into the respawn.
     fn dump_flash(&mut self) -> Vec<u8> {
@@ -451,6 +565,24 @@ impl Peer {
             let payload = self.recv();
             assert_eq!(payload[0], b'P', "flash slot reply");
             assert_eq!(payload.len(), 3 + 1024, "slot image");
+            image.extend_from_slice(&payload[3..]);
+        }
+        image
+    }
+
+    /// The extended image (RRS slots, then journal slots) for the P6
+    /// power-cut handover: 2x640 + 2x1609 bytes.
+    fn dump_extended(&mut self) -> Vec<u8> {
+        self.send(b"X");
+        let mut image = Vec::with_capacity(4498);
+        for i in 0..4 {
+            let payload = self.recv();
+            assert_eq!(payload[0], b'X', "extended slot reply");
+            let expect_store = if i < 2 { 2 } else { 3 };
+            let expect_len = if i < 2 { 640 } else { 1609 };
+            assert_eq!(payload[1], expect_store, "extended store id");
+            assert_eq!(payload[2], (i % 2) as u8, "extended slot id");
+            assert_eq!(payload.len(), 3 + expect_len, "extended slot image");
             image.extend_from_slice(&payload[3..]);
         }
         image
@@ -598,25 +730,56 @@ struct World {
     allow_forwards: Vec<(u8, u64, u64)>,
     aborts_seen: Vec<PeerAbort>,
     ups_seen: u64,
+    /// USB authority adapters per site (None until `attach_authority`).
+    usb: [Option<Arc<UsbAuthorityAdapter>>; 2],
+    transfer: u32,
+    rng_state: u64,
+    /// Partition switch: false withholds `C` downs (device goes stale).
+    authority_downs_on: bool,
+    authority_ups_seen: u64,
+    authority_downs_sent: u64,
+    authority_fragments: u64,
+    /// Reassembled downs withheld from the pipe (other devices, or the
+    /// pipe device while partitioned): (device, kind, bytes).
+    mailbox: Vec<(u64, u8, Vec<u8>)>,
 }
 
 impl World {
     fn start(tag: &str, seed: u64) -> Self {
         let now = now_ms();
         Self {
-            peer: Peer::spawn(now, seed, None, false),
+            peer: Peer::spawn(now, seed, None, None, false),
             sites: [InteropSite::site_a(tag, now), InteropSite::site_b(tag, now)],
             now,
             decisions: Vec::new(),
             allow_forwards: Vec::new(),
             aborts_seen: Vec::new(),
             ups_seen: 0,
+            usb: [None, None],
+            transfer: 0,
+            rng_state: 0x1234_5678_9ABC_DEF0,
+            authority_downs_on: true,
+            authority_ups_seen: 0,
+            authority_downs_sent: 0,
+            authority_fragments: 0,
+            mailbox: Vec::new(),
         }
     }
 
     fn swap_peer(&mut self, t0: u64, seed: u64, flash: &std::path::Path, verify: bool) {
+        self.swap_peer_ext(t0, seed, flash, None, verify);
+    }
+
+    fn swap_peer_ext(
+        &mut self,
+        t0: u64,
+        seed: u64,
+        flash: &std::path::Path,
+        flash_ext: Option<&std::path::Path>,
+        verify: bool,
+    ) {
         self.now = t0;
-        self.peer = Peer::spawn(t0, seed, Some(flash), verify);
+        self.peer = Peer::spawn(t0, seed, Some(flash), flash_ext, verify);
         // A reboot starts a new boot: the m4s after it answer a
         // re-proof, never the pre-cycle KGuard decision.
         self.decisions.clear();
@@ -739,6 +902,177 @@ impl World {
         }
     }
 
+    /// Attaches the production authority lane (USB adapter + GK
+    /// transport, which also arms the P6 channel port) to one site.
+    fn attach_authority(&mut self, site_idx: usize) {
+        assert!(site_idx < 2, "known site");
+        assert!(self.usb[site_idx].is_none(), "attached once");
+        let gateway = self.sites[site_idx].gateway;
+        let usb = UsbAuthorityAdapter::new(gateway, 7 + site_idx as u64);
+        self.sites[site_idx]
+            .service
+            .set_group_key_transport(ChannelGroupKeyTransport::new(&self.sites[site_idx].service));
+        self.sites[site_idx]
+            .service
+            .set_authority_transport(Some(usb.clone()));
+        self.usb[site_idx] = Some(usb);
+    }
+
+    /// Which site the pipe device belongs to (its member row decides).
+    fn owner_site(&self) -> usize {
+        for index in 0..2 {
+            if self.member_row(index).is_some() {
+                return index;
+            }
+        }
+        0
+    }
+
+    /// Routes one `O` up: fragments it like a gateway (real 0x64 codec),
+    /// feeds the USB adapter, and pumps completed assemblies into the
+    /// authority. Deterministic RNG: the handshake draws from `rng_state`.
+    fn route_authority_up(&mut self, up: &AuthorityUp) {
+        let kind = CarrierKind::try_from_byte(up.kind).expect("authority kind 1..5");
+        assert!((1..=2048).contains(&up.bytes.len()), "carrier bound");
+        self.authority_ups_seen += 1;
+        let site_idx = self.owner_site();
+        self.pump_up_fragments(site_idx, DEVICE_NODE, kind, &up.bytes);
+    }
+
+    /// The same gateway-fragment pump for a Rust `FakeDevice` (the
+    /// second member in exclusion tests): identical USB framing.
+    fn fake_send_up(&mut self, site_idx: usize, device: u64, kind: CarrierKind, bytes: &[u8]) {
+        assert!((1..=2048).contains(&bytes.len()), "carrier bound");
+        self.pump_up_fragments(site_idx, device, kind, bytes);
+    }
+
+    fn pump_up_fragments(&mut self, site_idx: usize, device: u64, kind: CarrierKind, bytes: &[u8]) {
+        let usb = self.usb[site_idx]
+            .as_ref()
+            .expect("attach_authority before the owner leg runs")
+            .clone();
+        let total = bytes.len();
+        self.transfer = self.transfer.wrapping_add(1);
+        if self.transfer == 0 {
+            self.transfer = 1;
+        }
+        let transfer = self.transfer;
+        let mut offset = 0;
+        while offset < total {
+            let end = (offset + AUTHORITY_FRAGMENT_DATA_MAX).min(total);
+            let body = encode_authority_up(&AuthorityFragment {
+                device,
+                transfer_id: transfer,
+                kind,
+                hops: 1,
+                total: total as u16,
+                offset: offset as u16,
+                data: bytes[offset..end].to_vec(),
+            })
+            .expect("up fragment encodes");
+            self.authority_fragments += 1;
+            for completed in usb.handle_up(&body, self.now).expect("up assembles") {
+                assert_eq!(completed.device, device, "fragment device agrees");
+                let mut state = self.rng_state;
+                let mut rng = |out: &mut [u8]| {
+                    for b in out.iter_mut() {
+                        state = state
+                            .wrapping_mul(6364136223846793005)
+                            .wrapping_add(1442695040888963407);
+                        *b = (state >> 33) as u8;
+                    }
+                    true
+                };
+                self.sites[site_idx].service.handle_authority_up(
+                    completed.device,
+                    completed.kind,
+                    &completed.bytes,
+                    HostTime::sync(self.now),
+                    &mut rng,
+                );
+                self.rng_state = state;
+            }
+            offset = end;
+        }
+    }
+
+    /// Drains the USB down queues, reassembles the 0x65 fragments like a
+    /// gateway, and forwards the pipe device's carriers as `C` downs.
+    /// Anything not forwarded — another device's carriers, or the pipe
+    /// device's while the partition switch is off — lands in `mailbox`
+    /// for the test to inspect, selectively forward, or drop.
+    fn drain_authority_downs(&mut self, site_idx: usize) {
+        let usb = match self.usb[site_idx].as_ref() {
+            Some(usb) => usb.clone(),
+            None => return,
+        };
+        let mut partial: std::collections::HashMap<(u64, u32), (CarrierKind, Vec<u8>, usize)> =
+            std::collections::HashMap::new();
+        let mut whole = Vec::new();
+        // The adapter stamps admissions with the wall clock while this
+        // harness runs virtual time ahead of it; draining on the wall
+        // clock keeps the 20 s TTL honest (production runs the two
+        // together, so this skew exists only in the test).
+        for down in usb.take_ready(now_ms()) {
+            if authority_sub(&down.bytes) != Some(SUB_AUTHORITY_DOWN) {
+                continue;
+            }
+            self.authority_fragments += 1;
+            let fragment = decode_authority_down(&down.bytes).expect("down fragment decodes");
+            let entry = partial
+                .entry((fragment.device, fragment.transfer_id))
+                .or_insert_with(|| (fragment.kind, vec![0; fragment.total as usize], 0));
+            assert_eq!(entry.0, fragment.kind, "fragment kind stable");
+            let start = fragment.offset as usize;
+            entry.1[start..start + fragment.data.len()].copy_from_slice(&fragment.data);
+            entry.2 += fragment.data.len();
+            if entry.2 == fragment.total as usize {
+                let ((device, _), (kind, bytes, _)) = partial
+                    .remove_entry(&(fragment.device, fragment.transfer_id))
+                    .expect("assembly present");
+                whole.push((device, kind as u8, bytes));
+            }
+        }
+        for (device, kind, bytes) in whole {
+            if device == DEVICE_NODE && self.authority_downs_on {
+                self.peer.send_authority_down(kind, &bytes);
+                self.authority_downs_sent += 1;
+            } else {
+                self.mailbox.push((device, kind, bytes));
+            }
+        }
+    }
+
+    /// Takes the mailboxed carriers for one device (see above).
+    fn take_mail(&mut self, device: u64) -> Vec<(u8, Vec<u8>)> {
+        let mut kept = Vec::new();
+        let mut out = Vec::new();
+        for (node, kind, bytes) in self.mailbox.drain(..) {
+            if node == device {
+                out.push((kind, bytes));
+            } else {
+                kept.push((node, kind, bytes));
+            }
+        }
+        self.mailbox = kept;
+        out
+    }
+
+    /// Forwards mailboxed pipe-device carriers selectively (the
+    /// SelfRevoked test withholds the notice while delivering the RRS).
+    fn forward_mail(&mut self, mut select: impl FnMut(u8, &[u8]) -> bool) {
+        let mut kept = Vec::new();
+        for (node, kind, bytes) in self.mailbox.drain(..) {
+            if node == DEVICE_NODE && select(kind, &bytes) {
+                self.peer.send_authority_down(kind, &bytes);
+                self.authority_downs_sent += 1;
+            } else {
+                kept.push((node, kind, bytes));
+            }
+        }
+        self.mailbox = kept;
+    }
+
     /// One virtual step: peer pump, up routing, authority ticks, KGuard.
     fn step(&mut self, dt_ms: u64) -> Tick {
         self.now += dt_ms;
@@ -747,11 +1081,22 @@ impl World {
         for up in &tick.ups {
             self.route_up(up);
         }
+        let authority_live = self.usb.iter().any(|slot| slot.is_some());
+        if authority_live {
+            for up in &tick.authority_ups {
+                self.route_authority_up(up);
+            }
+        }
         for index in 0..2 {
             self.sites[index]
                 .service
                 .tick(super::group_keys::HostTime::sync(self.now));
             self.drain(index);
+        }
+        if authority_live {
+            for index in 0..2 {
+                self.drain_authority_downs(index);
+            }
         }
         self.serve_kguard();
         for abort in &tick.aborts {
@@ -1244,4 +1589,833 @@ fn cpp_joiner_cutover_reissue_over_the_pipe() {
         "reissued MemberCert"
     );
     let _ = std::fs::remove_file(&flash_path);
+}
+
+// --- Live owner E2E (P5 §10.4, P6 §11.4) ----------------------------------------
+// The tests below run the real C++ owner leg (AuthorityClient +
+// GroupKeyState + MembershipLifecycle) against the real Rust authority
+// over the USB-framed pipe. Seeds are fixed, every pump is budgeted,
+// and the virtual clock never touches the wall clock except for `t0`.
+
+/// C++ `AuthoritySnapshot::State` (sdkv1_authority.hpp).
+const AUTH_READY: u8 = 2;
+
+/// C++ `LifecyclePhase` (sdkv1_revocation.hpp).
+const PHASE_ACTIVE: u8 = 1;
+const PHASE_SELF_REVOKED: u8 = 3;
+const PHASE_REMOVING: u8 = 7;
+const PHASE_HOLDOFF: u8 = 8;
+const PHASE_UNASSIGNED_READY: u8 = 9;
+const PHASE_PREPARED: u8 = 10;
+
+/// C++ `LifecycleActionTag` (sdkv1_revocation.hpp). Self-revocation
+/// raises `RecoveryRequired` (4); `StartRecoveryJoin` (1) is the tag
+/// the firmware Owner acts on, never emitted by the lifecycle itself.
+const ACTION_RECOVERY_REQUIRED: u8 = 4;
+const ACTION_RESTART_UNASSIGNED: u8 = 2;
+const ACTION_ADOPT_NETWORK: u8 = 3;
+
+/// Joins the pipe device on site A and attaches the authority lane.
+/// Returns the MemberReady tick.
+fn join_and_attach(world: &mut World) -> Tick {
+    world.sites[0]
+        .kguard
+        .assign(DEVICE_NODE, Assignment::Here(Role::Endpoint));
+    world.attach_authority(0);
+    let tick = world.pump_until(6000, |t| t.snap.action_pending);
+    check_terminal(&tick.snap, MEMBER_READY);
+    world.check_member_material(0, &tick.member);
+    tick
+}
+
+/// P5 live: join → RLRES1 → JoinConfirm → first-contact GK, with the
+/// real C++ channel against the real Rust authority over USB framing.
+#[test]
+fn live_owner_confirm_and_first_contact_key() {
+    let mut world = World::start("owner-confirm", 0x0E01);
+    let tick = join_and_attach(&mut world);
+    assert_eq!(tick.snap.store_site, testkit::SITE);
+
+    let active = world.sites[0].service.with(|a| a.gks.active_epoch()).0;
+    let tick = world.pump_until(8000, |t| {
+        t.owner.join_confirmed
+            && t.owner.gk_current == active
+            && t.owner.authority_ready
+            && t.owner.lifecycle_phase == PHASE_ACTIVE
+    });
+    assert_eq!(tick.owner.auth_state, AUTH_READY);
+    assert!(tick.owner.lifecycle_booted, "lifecycle adopted the site");
+    let row = world.member_row(0).expect("member row");
+    assert!(row.confirmed, "Rust recorded the JoinConfirm");
+    assert!(
+        world.authority_fragments > 0,
+        "USB 0x64/0x65 framing crossed the pipe"
+    );
+    assert!(
+        world.authority_ups_seen > 0 && world.authority_downs_sent > 0,
+        "carriers flowed both ways"
+    );
+    let channels = world.sites[0]
+        .service
+        .with(|a| a.channels.lock().unwrap().stats().channels)
+        .0;
+    assert_eq!(channels, 1, "one live channel");
+}
+
+/// Pumps until the pipe device confirms and converges on `active`.
+fn wait_owner_ready(world: &mut World, active: u32) -> Tick {
+    world.pump_until(8000, |t| {
+        t.owner.join_confirmed
+            && t.owner.gk_current == active
+            && t.owner.authority_ready
+            && t.owner.lifecycle_phase == PHASE_ACTIVE
+    })
+}
+
+/// P5 live: a manual rotation stages and activates a fresh GK on the
+/// real C++ GK FSM (durable stage ACK → Activate → active ACK).
+#[test]
+fn live_owner_rotation_update_activate() {
+    let mut world = World::start("owner-rotate", 0x0E02);
+    join_and_attach(&mut world);
+    let active = world.sites[0].service.with(|a| a.gks.active_epoch()).0;
+    wait_owner_ready(&mut world, active);
+
+    let outcome = world.sites[0]
+        .link
+        .rotate_group_key(active, "owner-rot-1")
+        .unwrap();
+    assert_eq!(outcome.from_epoch, active);
+    let next = outcome.to_epoch;
+    assert_eq!(next, active + 1);
+
+    let tick = world.pump_until(8000, |t| {
+        t.owner.gk_current == next && t.owner.lifecycle_phase == PHASE_ACTIVE
+    });
+    assert!(tick.owner.join_confirmed);
+    let status = world.sites[0].link.group_key_status().unwrap();
+    assert_eq!(status.active, next, "rotation converged on {next}");
+    assert_eq!(status.staged, None);
+    assert_eq!(status.unknown, 0, "the member applied with evidence");
+    let last = status.last_rotation.expect("converged rotation recorded");
+    assert_eq!((last.from_epoch, last.to_epoch), (active, next));
+}
+
+/// Rotates when the lane is free, pumping through the 60 s
+/// post-activation cleanup window (retryable BUSY) on a budget.
+fn rotate_when_ready(world: &mut World, expected: u32, key: &str) -> u32 {
+    let mut last_err = String::new();
+    for _ in 0..8000 {
+        match world.sites[0].link.rotate_group_key(expected, key) {
+            Ok(outcome) => {
+                assert_eq!(outcome.from_epoch, expected);
+                return outcome.to_epoch;
+            }
+            Err(e) => {
+                last_err = format!("{e:?}");
+                world.step(25);
+            }
+        }
+    }
+    let status = world.sites[0].link.group_key_status().unwrap();
+    panic!("rotation stayed BUSY past its budget: {last_err} status={status:?}");
+}
+
+/// Direct rotation on the virtual clock: the API1 path stamps the
+/// wall clock, which cannot cross a 60 s virtual cleanup window, so
+/// back-to-back rotations in one test drive `rotate` with the test's
+/// own `HostTime`. Returns the staged `to` epoch.
+fn rotate_direct_when_ready(world: &mut World, expected: u32, key: &str) -> u32 {
+    for _ in 0..8000 {
+        let now = world.now;
+        let attempt = world.sites[0]
+            .service
+            .with(|a| {
+                a.rotate(
+                    501,
+                    super::RotateRequest {
+                        expected_active_epoch: expected,
+                        key: key.into(),
+                    },
+                    HostTime::sync(now),
+                )
+            })
+            .0;
+        match attempt {
+            Ok(result) => {
+                let tag = "\"to\":";
+                let start = result.find(tag).expect("to epoch") + tag.len();
+                let digits = result[start..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>();
+                let to: u32 = digits.parse().expect("to epoch number");
+                assert_eq!(to, expected + 1);
+                return to;
+            }
+            Err(_) => {
+                world.step(25);
+            }
+        }
+    }
+    panic!("direct rotation stayed BUSY past its budget");
+}
+
+/// P5 live: the device goes stale across two rotations behind a
+/// partition, then a single pull recovers it straight to the newest
+/// active GK (no history replay).
+#[test]
+fn live_owner_pull_recovers_stale_key() {
+    let mut world = World::start("owner-pull", 0x0E03);
+    join_and_attach(&mut world);
+    let active = world.sites[0].service.with(|a| a.gks.active_epoch()).0;
+    wait_owner_ready(&mut world, active);
+
+    // Partition: the host rotates twice (each past its 60 s staging
+    // deadline) while the device hears nothing.
+    world.authority_downs_on = false;
+    for (i, from) in [active, active + 1].into_iter().enumerate() {
+        // First via the API socket (production path), then direct on
+        // the virtual clock (the API stamps the wall clock, which
+        // cannot cross the virtual cleanup window).
+        let to = if i == 0 {
+            rotate_when_ready(&mut world, from, "owner-stale-0")
+        } else {
+            rotate_direct_when_ready(&mut world, from, "owner-stale-1")
+        };
+        assert_eq!(to, from + 1);
+        for _ in 0..4000 {
+            let now_active = world.sites[0].service.with(|a| a.gks.active_epoch()).0;
+            if now_active == from + 1 {
+                break;
+            }
+            world.step(25);
+        }
+        assert_eq!(
+            world.sites[0].service.with(|a| a.gks.active_epoch()).0,
+            from + 1,
+            "rotation {i} activated past its deadline"
+        );
+    }
+    let latest = active + 2;
+    assert_eq!(
+        world.sites[0].service.with(|a| a.gks.active_epoch()).0,
+        latest
+    );
+    // The device is still on the old key; its channel never noticed.
+    world.pump_until(200, |t| t.owner.gk_current == active);
+    world.mailbox.clear();
+
+    // Heal and pull: one Update → Activate jumps straight to latest.
+    world.authority_downs_on = true;
+    world.peer.request_pull(3);
+    let tick = world.pump_until(8000, |t| {
+        t.owner.gk_current == latest && t.owner.lifecycle_phase == PHASE_ACTIVE
+    });
+    assert!(tick.owner.authority_ready);
+    let status = world.sites[0].link.group_key_status().unwrap();
+    assert_eq!(status.active, latest);
+    assert_eq!(status.unknown, 0, "the stale member caught up");
+}
+
+const NODE_B: u64 = 0x00A1_0000_0000_0201;
+
+/// Joins a Rust-side second member on site 0. Returns its DAMS.
+fn join_sim_member(world: &mut World, node: u64, seed: u8) -> [u8; 32] {
+    use super::testkit::{Outcome, SimDevice};
+    world.sites[0]
+        .kguard
+        .assign(node, Assignment::Here(Role::Endpoint));
+    let mut sim = SimDevice::new(node, seed);
+    let (mut exchange, outcome, _) = sim.start(
+        &world.sites[0].service,
+        &world.sites[0].transport,
+        world.now,
+    );
+    assert!(matches!(outcome, Outcome::Waiting), "{outcome:?}");
+    // Serve only this member's request (the pipe device is already a
+    // member by the time these tests run, so no other request exists).
+    let done = world.sites[0]
+        .kguard
+        .serve_once(&world.sites[0].link)
+        .unwrap();
+    assert_eq!(done.len(), 1);
+    let outcome = sim.finish(&mut exchange, &world.sites[0].transport);
+    assert!(
+        matches!(
+            outcome,
+            Outcome::Result(routeloom_join::JoinResult::Allow { .. })
+        ),
+        "{outcome:?}"
+    );
+    let mut dams = [0u8; 32];
+    world.sites[0].service.with(|a| {
+        dams = a.devices.get(&node).expect("sim member row").dams;
+    });
+    dams
+}
+
+/// The authority net view for a site-0 member at the current epochs.
+fn fake_net(world: &mut World) -> super::testkit::AuthorityNet {
+    use routeloom_keysched::rlres1::Epochs;
+    let network = world.sites[0].service.with(|a| a.network()).0;
+    let (_, rs_epoch, gk_epoch) = world.sites[0].service.authority_epochs();
+    super::testkit::AuthorityNet {
+        network,
+        site: testkit::SITE,
+        epochs_i: Epochs {
+            site_epoch: (network >> 32) as u32,
+            rs_epoch,
+            gk_epoch,
+        },
+        epochs_r: Epochs {
+            site_epoch: (network >> 32) as u32,
+            rs_epoch,
+            gk_epoch,
+        },
+    }
+}
+
+/// Runs a `FakeDevice` handshake + JoinConfirm for `node` through the
+/// site-0 USB adapter. Returns the open device.
+fn fake_confirm(
+    world: &mut World,
+    node: u64,
+    dams: [u8; 32],
+    nonce: [u8; 16],
+) -> super::testkit::FakeDevice {
+    use routeloom_keysched::authority::{BodyHead, JoinConfirmUp};
+    let net = fake_net(world);
+    let (r1, mut peer) = super::testkit::FakeDevice::begin(node, dams, 0xBEEF, nonce, net);
+    world.fake_send_up(0, node, CarrierKind::R1, &r1);
+    let mut r3 = Vec::new();
+    for _ in 0..200 {
+        world.step(25);
+        for (kind, bytes) in world.take_mail(node) {
+            assert_eq!(kind, CarrierKind::R2 as u8);
+            r3 = peer.on_r2(&bytes);
+        }
+        if !r3.is_empty() {
+            break;
+        }
+    }
+    assert!(!r3.is_empty(), "R2 answers the fake R1");
+    world.fake_send_up(0, node, CarrierKind::R3, &r3);
+    for _ in 0..10 {
+        world.step(25);
+    }
+    let (row, active_epoch) = world.sites[0]
+        .service
+        .with(|a| {
+            (
+                a.devices.get(&node).expect("sim member row").clone(),
+                a.gks.active_epoch(),
+            )
+        })
+        .0;
+    let body = JoinConfirmUp {
+        head: BodyHead {
+            op: 1,
+            generation: row.generation,
+            request_id: 1,
+        },
+        cert_hash: sha256(&row.member_cert),
+        boot: 0xF00DBEEF,
+        current: active_epoch,
+        next: 0,
+    }
+    .encode();
+    world.fake_send_up(
+        0,
+        node,
+        CarrierKind::Envelope,
+        &peer.seal(1, &body.unwrap()),
+    );
+    for _ in 0..200 {
+        world.step(25);
+        let mail = world.take_mail(node);
+        if !mail.is_empty() {
+            for (kind, bytes) in &mail {
+                assert_eq!(*kind, CarrierKind::Envelope as u8);
+                let _ = peer.open(bytes);
+            }
+            break;
+        }
+    }
+    peer
+}
+
+/// P5 live: a removed member with a live channel receives its notice
+/// but never the fresh GK, while the remaining member converges.
+#[test]
+fn live_owner_rotation_excludes_removed() {
+    use routeloom_client::site::RemovalReason;
+    let mut world = World::start("owner-excl", 0x0E04);
+    join_and_attach(&mut world);
+    let active = world.sites[0].service.with(|a| a.gks.active_epoch()).0;
+    wait_owner_ready(&mut world, active);
+
+    // B joins on the Rust side and confirms over its own channel.
+    let dams_b = join_sim_member(&mut world, NODE_B, 0xB1);
+    let mut peer_b = fake_confirm(&mut world, NODE_B, dams_b, [0xB1; 16]);
+    let row_b = world.sites[0]
+        .service
+        .with(|a| a.devices.get(&NODE_B).expect("B row").clone())
+        .0;
+    assert!(row_b.confirmed, "B confirmed over its channel");
+    // B applies the current key first (it confirmed at `active`, so it
+    // already holds it); drain any leftover mail.
+    for _ in 0..50 {
+        world.step(25);
+    }
+    for (_, bytes) in world.take_mail(NODE_B) {
+        let _ = peer_b.open(&bytes);
+    }
+
+    // Revoke B: the rotation to a fresh GK must exclude it.
+    let outcome = world.sites[0]
+        .link
+        .revoke(
+            NODE_B,
+            row_b.generation,
+            RemovalReason::Removed,
+            "owner-excl-1",
+        )
+        .unwrap();
+    assert_eq!(outcome.state, "committed");
+    let next = active + 1;
+    let tick = world.pump_until(8000, |t| {
+        t.owner.gk_current == next && t.owner.lifecycle_phase == PHASE_ACTIVE
+    });
+    assert!(tick.owner.join_confirmed);
+
+    // B's channel carried its notice (type 6) but no Update/Activate
+    // for the fresh epoch: opening everything distinct it received
+    // must never yield envelope type 3 or 4. Transport retries reuse
+    // the same sealed bytes, so dedupe before opening (the replay
+    // window would reject the verbatim second copy, as designed).
+    let mut saw_notice = false;
+    for _ in 0..200 {
+        world.step(25);
+    }
+    let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    for (kind, bytes) in world.take_mail(NODE_B) {
+        assert_eq!(kind, CarrierKind::Envelope as u8);
+        if !seen.insert(bytes.clone()) {
+            continue;
+        }
+        let (env_type, _) = peer_b.open(&bytes);
+        assert!(
+            env_type != 3 && env_type != 4,
+            "removed B must not receive GK commands, got type {env_type}"
+        );
+        saw_notice |= env_type == 6;
+    }
+    assert!(saw_notice, "B received its removal notice");
+    let status = world.sites[0].link.group_key_status().unwrap();
+    assert_eq!(status.active, next);
+    let progress = world.sites[0]
+        .link
+        .operation(&outcome.operation_id)
+        .unwrap()
+        .expect("operation tracked");
+    assert_eq!(
+        progress.distribution.applied, 1,
+        "only the remaining member applied: {progress:?}"
+    );
+}
+
+/// P6 live: revoking an offline member fans the RRS1 out over the
+/// authority channel; the real C++ lifecycle applies it, enforces it,
+/// and reports Applied, converging the operation for the online member.
+#[test]
+fn live_owner_rrs_delivery_and_apply() {
+    use routeloom_client::site::RemovalReason;
+    let mut world = World::start("owner-rrs", 0x0E05);
+    join_and_attach(&mut world);
+    let active = world.sites[0].service.with(|a| a.gks.active_epoch()).0;
+    wait_owner_ready(&mut world, active);
+    let floor = world.sites[0].service.authority_epochs().1;
+
+    // B joins but stays offline (no channel): the RRS1 must still reach
+    // the pipe device over its own channel.
+    let _ = join_sim_member(&mut world, NODE_B, 0xB2);
+    let row_b = world.sites[0]
+        .service
+        .with(|a| a.devices.get(&NODE_B).expect("B row").clone())
+        .0;
+    let outcome = world.sites[0]
+        .link
+        .revoke(
+            NODE_B,
+            row_b.generation,
+            RemovalReason::Removed,
+            "owner-rrs-1",
+        )
+        .unwrap();
+    assert_eq!(outcome.state, "committed");
+    assert_eq!(outcome.rs_epoch, floor + 1);
+
+    // The C++ lifecycle applies the new set and returns to Active.
+    let tick = world.pump_until(8000, |t| {
+        t.owner.applied_rs == floor + 1 && t.owner.lifecycle_phase == PHASE_ACTIVE
+    });
+    assert!(tick.owner.join_confirmed, "channel survived the RRS");
+    // The revoke also rotated the GK; the online member converges there too.
+    let tick = world.pump_until(8000, |t| {
+        t.owner.gk_current == active + 1 && t.owner.lifecycle_phase == PHASE_ACTIVE
+    });
+    assert_eq!(tick.owner.applied_gk, active + 1);
+    let progress = world.sites[0]
+        .link
+        .operation(&outcome.operation_id)
+        .unwrap()
+        .expect("operation tracked");
+    assert_eq!(
+        progress.distribution.applied, 1,
+        "the online member applied: {progress:?}"
+    );
+}
+
+/// P6 live: revoking the online pipe device delivers its RemovalNotice
+/// over the channel; the real C++ lifecycle erases the site, runs the
+/// 600 s holdoff, and reports for restart — across a power cut that
+/// carries the RRS/journal image through files.
+#[test]
+fn live_owner_removal_notice_erase_holdoff() {
+    use routeloom_client::site::RemovalReason;
+    let mut world = World::start("owner-remove", 0x0E06);
+    join_and_attach(&mut world);
+    let active = world.sites[0].service.with(|a| a.gks.active_epoch()).0;
+    wait_owner_ready(&mut world, active);
+    let row = world.member_row(0).expect("member row");
+
+    let outcome = world.sites[0]
+        .link
+        .revoke(
+            DEVICE_NODE,
+            row.generation,
+            RemovalReason::Removed,
+            "owner-remove-1",
+        )
+        .unwrap();
+    assert_eq!(outcome.state, "committed");
+
+    // Notice → Removing: the site trust is erased.
+    let tick = world.pump_until(8000, |t| t.owner.lifecycle_phase == PHASE_REMOVING);
+    assert!(tick.owner.join_confirmed, "notice arrived over the channel");
+    let tick = world.pump_until(8000, |t| t.owner.lifecycle_phase == PHASE_HOLDOFF);
+    assert_eq!(tick.snap.store_site, 0, "site trust erased");
+    assert!(
+        tick.owner.holdoff_remaining_ms > 0,
+        "holdoff runs after erasure"
+    );
+
+    // Power cut mid-holdoff: only the flash files cross into the respawn.
+    // The radio stays muted afterwards so the fresh Joiner cannot commit
+    // a new site while the lifecycle replays the removal (production
+    // gates discovery the same way through the holdoff).
+    let dir = world.sites[0].dir.clone();
+    let flash_path = dir.join("owner-remove-flash.bin");
+    let ext_path = dir.join("owner-remove-flash-ext.bin");
+    std::fs::write(&flash_path, world.peer.dump_flash()).unwrap();
+    std::fs::write(&ext_path, world.peer.dump_extended()).unwrap();
+    world.swap_peer_ext(
+        world.now + 1000,
+        0xE06E06,
+        &flash_path,
+        Some(&ext_path),
+        false,
+    );
+    world.peer.send_mute(&[(0, 0, true), (1, 0, true)]);
+    let tick = world.pump_until(8000, |t| {
+        t.owner.lifecycle_phase == PHASE_HOLDOFF && t.owner.lifecycle_booted
+    });
+    assert_eq!(tick.snap.store_site, 0, "still erased after the cut");
+    assert!(
+        tick.owner.holdoff_remaining_ms > 500_000,
+        "holdoff re-entered from the journal, remaining={}",
+        tick.owner.holdoff_remaining_ms
+    );
+
+    // Past the holdoff the device reports for restart; the channel is
+    // gone with the site (no member row to handshake against).
+    let mut tick = tick;
+    for _ in 0..700 {
+        if tick.owner.lifecycle_phase == PHASE_UNASSIGNED_READY {
+            break;
+        }
+        tick = world.step(1000);
+    }
+    assert_eq!(tick.owner.lifecycle_phase, PHASE_UNASSIGNED_READY);
+    assert_eq!(
+        tick.owner.lifecycle_action, ACTION_RESTART_UNASSIGNED,
+        "the owner order after the holdoff"
+    );
+    let _ = std::fs::remove_file(&flash_path);
+    let _ = std::fs::remove_file(&ext_path);
+}
+
+/// P6 live (#139): an RRS1 naming the device, heard over gossip
+/// ahead of its notice, drives the real C++ lifecycle into SelfRevoked
+/// with a recovery order instead of silently stalling or mis-applying.
+/// The RRS1 bytes are the genuine authority artifact; only the mesh hop
+/// is injected (the harness has no gossip peers).
+#[test]
+fn live_owner_self_revoked_recovers() {
+    use routeloom_client::site::RemovalReason;
+    let mut world = World::start("owner-selfrev", 0x0E07);
+    join_and_attach(&mut world);
+    let active = world.sites[0].service.with(|a| a.gks.active_epoch()).0;
+    wait_owner_ready(&mut world, active);
+    let row = world.member_row(0).expect("member row");
+
+    // Revoke behind the partition so the notice cannot land first, then
+    // hand the device its own RRS1 as a gossip object.
+    world.authority_downs_on = false;
+    let outcome = world.sites[0]
+        .link
+        .revoke(
+            DEVICE_NODE,
+            row.generation,
+            RemovalReason::Removed,
+            "owner-selfrev-1",
+        )
+        .unwrap();
+    assert_eq!(outcome.state, "committed");
+    for _ in 0..50 {
+        world.step(25);
+    }
+    let rrs_object = world.sites[0]
+        .service
+        .with(|a| a.rrs_latest_object.clone())
+        .0;
+    assert!(!rrs_object.is_empty(), "the revoke minted an RRS1");
+    world.peer.inject_gossip(&rrs_object);
+    let tick = world.pump_until(8000, |t| {
+        t.owner.lifecycle_phase == PHASE_SELF_REVOKED
+            && t.owner.lifecycle_action == ACTION_RECOVERY_REQUIRED
+    });
+    assert_eq!(tick.owner.applied_rs, outcome.rs_epoch);
+
+    // The notice lands next: SelfRevoked yields to Removing, and the
+    // site is erased exactly like the direct-notice leg. Retried copies
+    // share the sealed bytes; the channel replay window drops them.
+    world.forward_mail(|_, _| true);
+    world.authority_downs_on = true;
+    let tick = world.pump_until(8000, |t| {
+        t.owner.lifecycle_phase == PHASE_REMOVING || t.owner.lifecycle_phase == PHASE_HOLDOFF
+    });
+    assert!(
+        tick.owner.lifecycle_phase == PHASE_REMOVING || tick.owner.lifecycle_phase == PHASE_HOLDOFF,
+        "removal proceeds after the notice"
+    );
+}
+
+/// P6 live: a cutover stages the next epoch over the channel; the real
+/// C++ lifecycle prepares, commits past the window, adopts the new
+/// network with its GK, and re-opens the channel there — all online.
+#[test]
+fn live_owner_cutover_prepare_commit() {
+    use super::cutover::CUTOVER_PREPARE_WINDOW_MS;
+    let mut world = World::start("owner-cut", 0x0E08);
+    join_and_attach(&mut world);
+    let active = world.sites[0].service.with(|a| a.gks.active_epoch()).0;
+    wait_owner_ready(&mut world, active);
+
+    let site_ca = FileRootSigner::from_secret(testkit::SITE_CA, &test_keypair(0x61).0).unwrap();
+    let next_cert = cert_issue(
+        &CertClaims {
+            cert_type: CertType::Site,
+            issuer: testkit::SITE_CA,
+            subject: testkit::SITE,
+            pubkey: test_keypair(0x62).1,
+            network_low32: testkit::NETWORK_LOW,
+            site_epoch: testkit::SITE_EPOCH + 1,
+            usage: 1,
+            serial: 8,
+            ..CertClaims::default()
+        },
+        &site_ca,
+    )
+    .unwrap();
+    // The gateway joins on the Rust side first (cutover commits
+    // gateway-first and snapshots its targets at commit; only the
+    // gateway's Prepared receipt is faked — the pipe device prepares
+    // over its real channel).
+    {
+        use super::testkit::{Outcome, SimDevice};
+        world.sites[0]
+            .kguard
+            .assign(testkit::GATEWAY, Assignment::Here(Role::Gateway));
+        let mut gateway = SimDevice::new(testkit::GATEWAY, 0x60);
+        gateway.capability |= routeloom_join::JOIN_CAPABILITY_GATEWAY;
+        let (mut exchange, outcome, _) = gateway.start(
+            &world.sites[0].service,
+            &world.sites[0].transport,
+            world.now,
+        );
+        assert!(matches!(outcome, Outcome::Waiting));
+        let done = world.sites[0]
+            .kguard
+            .serve_once(&world.sites[0].link)
+            .unwrap();
+        assert_eq!(done.len(), 1);
+        let outcome = gateway.finish(&mut exchange, &world.sites[0].transport);
+        assert!(matches!(
+            outcome,
+            Outcome::Result(routeloom_join::JoinResult::Allow { .. })
+        ));
+    }
+
+    let outcome = world.sites[0]
+        .link
+        .cutover(
+            testkit::SITE_EPOCH,
+            &crate::receive_log::hex_lower(&next_cert),
+            "owner-cut-1",
+        )
+        .unwrap();
+    assert_eq!(outcome.state, "preparing");
+
+    // PREPARE lands over the channel; the device stages the epoch.
+    let tick = world.pump_until(8000, |t| t.owner.lifecycle_phase == PHASE_PREPARED);
+    assert!(tick.owner.join_confirmed);
+    let op = super::records::parse_op_token(&outcome.operation_id).unwrap();
+    let (next_gk, new_network, old_network) = world.sites[0]
+        .service
+        .with(|a| {
+            let state = a
+                .operations
+                .get(&op)
+                .unwrap()
+                .cutover
+                .as_ref()
+                .unwrap()
+                .clone();
+            (state.next_gk_epoch, state.new_network, state.old_network)
+        })
+        .0;
+    // The offline gateway's Prepared receipt: its grant never leaves
+    // the distributor (no channel), so the test digests the exact
+    // bytes the authority would have sent, like the R08 capture.
+    {
+        use routeloom_join::renew::{Head, Phase, Receipt};
+        let grant = world.sites[0]
+            .service
+            .with(|a| {
+                a.grant_bytes(
+                    op,
+                    testkit::GATEWAY,
+                    super::revocation::OutboundKind::Prepare,
+                )
+            })
+            .0
+            .expect("gateway grant staged");
+        let receipt = Receipt {
+            head: Head {
+                phase: Phase::Prepared,
+                cutover_id: op,
+                revision: 1,
+                old_network,
+            },
+            new_network,
+            gk_epoch: next_gk,
+            rs_epoch: 0,
+            digest: sha256(&grant),
+            status: 0,
+        }
+        .encode()
+        .unwrap()
+        .to_vec();
+        let now = world.now;
+        let (moved, _) = world.sites[0]
+            .service
+            .with(|a| a.handle_grant_receipt(testkit::GATEWAY, 1, old_network, &receipt, now));
+        assert!(moved, "gateway marked prepared");
+    }
+
+    // Past the window the commit lands; the device adopts the new
+    // network, its GK, and re-opens the channel there.
+    for _ in 0..(CUTOVER_PREPARE_WINDOW_MS / 1000 + 10) {
+        world.step(1000);
+    }
+    let tick = world.pump_until(8000, |t| {
+        t.owner.lifecycle_phase == PHASE_ACTIVE
+            && t.owner.adopted_network == new_network
+            && t.owner.gk_current == next_gk
+            && t.owner.authority_ready
+    });
+    assert_eq!(
+        tick.owner.lifecycle_action, ACTION_ADOPT_NETWORK,
+        "the adoption order fired"
+    );
+    assert_eq!(tick.member.site_cert, next_cert, "new-epoch SiteCert");
+    let row = world.member_row(0).expect("member row on the new epoch");
+    assert!(row.member);
+    assert_eq!(row.member_cert, tick.member.member_cert);
+    assert_eq!(
+        world.sites[0].service.with(|a| a.network()).0,
+        new_network,
+        "authority sits on the new epoch"
+    );
+    // Past the commit grace the offline gateway parks in recovery
+    // while the online member stands applied.
+    for _ in 0..(super::cutover::CUTOVER_GRACE_MS / 1000 + 5) {
+        world.step(1000);
+    }
+    let progress = world.sites[0]
+        .link
+        .cutover_operation(&outcome.operation_id)
+        .unwrap()
+        .expect("cutover tracked");
+    assert_eq!(progress.phase, "recovery_pending");
+    assert_eq!(
+        progress.applied, 1,
+        "the online member applied: {progress:?}"
+    );
+    assert!(progress.recovery_pending, "gateway straggler parked");
+}
+
+/// P5 live: a power cut after GK convergence carries the identity/site
+/// image through a file; the respawned peer boots as a member, keeps
+/// its GK, and re-opens the channel without rejoining.
+#[test]
+fn live_owner_power_cut_keeps_group_keys() {
+    let mut world = World::start("owner-pcut", 0x0E09);
+    join_and_attach(&mut world);
+    let active = world.sites[0].service.with(|a| a.gks.active_epoch()).0;
+    wait_owner_ready(&mut world, active);
+
+    // Rotate once so the asserted key came over the channel, not the package.
+    let outcome = world.sites[0]
+        .link
+        .rotate_group_key(active, "owner-pcut-1")
+        .unwrap();
+    wait_owner_ready(&mut world, outcome.to_epoch);
+
+    let dir = world.sites[0].dir.clone();
+    let flash_path = dir.join("owner-pcut-flash.bin");
+    let ext_path = dir.join("owner-pcut-flash-ext.bin");
+    std::fs::write(&flash_path, world.peer.dump_flash()).unwrap();
+    std::fs::write(&ext_path, world.peer.dump_extended()).unwrap();
+    let ups_before = world.ups_seen;
+    world.swap_peer_ext(
+        world.now + 1000,
+        0xE09E09,
+        &flash_path,
+        Some(&ext_path),
+        false,
+    );
+
+    // Member boot: no join traffic, same GK, channel re-opens.
+    let tick = world.pump_until(8000, |t| {
+        t.owner.join_confirmed && t.owner.gk_current == outcome.to_epoch
+    });
+    assert_eq!(world.ups_seen, ups_before, "no rejoin after the cut");
+    assert_eq!(tick.snap.store_site, testkit::SITE);
+    assert_eq!(tick.owner.lifecycle_phase, PHASE_ACTIVE);
+    assert!(tick.owner.authority_ready, "channel re-opened");
+    let _ = std::fs::remove_file(&flash_path);
+    let _ = std::fs::remove_file(&ext_path);
 }

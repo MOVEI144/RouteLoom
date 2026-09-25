@@ -1,11 +1,22 @@
-// Live E2E peer (design P3-4 §10.2): the C++ end of the Rust Site
-// Authority interop. A real Joiner + ZtJoinerLink + Identity/Site stores
-// runs on a fake channel-switching radio and fake slot flash; each site
-// runs a real JoinProxy + JoinRelayGateway whose host sink is the pipe to
-// the Rust driver (host/routeloom-host/src/site/joiner_interop.rs) —
-// there is deliberately no scripted authority on this side.
+// Live E2E peer (design P3-4 §10.2, P5 §10.4, P6 §11.4): the C++ end of
+// the Rust Site Authority interop. A real Joiner + ZtJoinerLink +
+// Identity/Site stores runs on a fake channel-switching radio and fake
+// slot flash; each site runs a real JoinProxy + JoinRelayGateway whose
+// host sink is the pipe to the Rust driver
+// (host/routeloom-host/src/site/joiner_interop.rs) — there is
+// deliberately no scripted authority on this side.
 //
-// Framing: u16le length (1..1100) + payload over stdin/stdout; stderr is
+// Once the Joiner commits a SiteRecord, the same process also runs the
+// real member security leg over the pipe: AuthorityClient +
+// GroupKeyState over the committed SiteStore, and MembershipLifecycle
+// over Revocation/Lifecycle/Resume stores, with the verified type 5..7
+// plaintext crossing between them exactly like the firmware Owner
+// (EspNowSecurityOwner): the full envelope body is stripped of its 16 B
+// P5 head before the lifecycle sees it, and lifecycle reports leave via
+// SendTyped. Gossip has no peer in this single-device harness, so RRS1
+// arrives over the authority channel only.
+//
+// Framing: u16le length (1..4096) + payload over stdin/stdout; stderr is
 // diagnostics only and never carries key material. First payload byte is
 // the tag. Rust -> C++:
 //
@@ -15,7 +26,17 @@
 //   B <site u8><proxy u64le><relay_id u32le><gateway_epoch u32le>
 //     <proxy_epoch u32le> host abort (queued likewise)
 //   F <site u8><proxy u8><muted u8>   power a proxy off/on
+//   C <kind u8><carrier bytes>       authority down (queued likewise;
+//                                    kind 1..5, envelope <= 2048 B)
+//   V <reason u8>                    request a GK pull (reason 1..3)
+//   J <RRS1 object bytes>            inject a gossip-completed RRS1 object
+//                                    (single-device harness: no mesh peer
+//                                    exists, so the bytes cross the pipe and
+//                                    the lifecycle verifies them for real)
 //   P                              dump the flash image (4 slot replies)
+//   X                              dump the extended image: RRS slots 0/1
+//                                  (store 2, 640 B) then journal 0/1
+//                                  (store 3, 1609 B)
 //   Q                              quit (exit 0)
 //
 // C++ -> Rust, emitted after each T in this order:
@@ -23,9 +44,12 @@
 //   U <site u8><proxy u64le><hops u8><relay object>   one relayed up
 //   A <site u8><proxy u64le><relay_id u32le><gateway_epoch u32le>
 //     <proxy_epoch u32le><reason u8> gateway/proxy abort
+//   O <kind u8><carrier bytes>       one authority up (R1/R3/envelope)
 //   S <46 B snapshot>               state/action/store/counter observation
 //   M <site cert><member cert><dams sha256>  member material (digests, no keys)
+//   G <45 B owner snapshot>         authority/GK/lifecycle observation
 //   P <store u8><slot u8><1024 B>    flash slot image (power-cut handover)
+//   X <store u8><slot u8><bytes>     extended slot image (RRS/journal)
 //   D                              end of the TICK response
 //   E <text>                        fatal error; the peer exits nonzero after it
 //
@@ -37,6 +61,12 @@
 // M payload: sitecert_len u16le | sitecert | membercert_len u16le |
 // membercert | sha256(dams) 32 B (zeros when no member row).
 //
+// G frame (45 B incl. tag, all le): auth_state u8 | join_confirmed u8 |
+// gk_current u32 | gk_next u32 | lifecycle_phase u8 |
+// lifecycle_action u8 | applied_rs u32 | applied_gk u32 |
+// holdoff_remaining_ms u64 | authority_ready u8 | adopted_network u64 |
+// own_generation u32 | lifecycle_booted u8 | reserved[2].
+//
 // Setup arrives on argv (all integers accept 0x hex; blobs are hex):
 //
 //   --node <u64> --mac <12hex> --dev-priv <64hex> --dev-pub <128hex>
@@ -44,6 +74,7 @@
 //   --fw <u32> --cap <u32> --role <u8> --t0 <ms> --seed <u64>
 //   --site <id,network,gateway,proxymac,proxynode,channel,rssi,hops>
 //   --flash <file>   (optional 4096 B preload: identity slots, site slots)
+//   --flash-ext <file> (optional 4498 B preload: RRS slots, journal slots)
 //   --verify         boot the Joiner in VerifyExistingMembership mode (a
 //                    retained RLS1 re-proves over ZT instead of adopting
 //                    silently — the removal-recovery / cutover-reissue leg)
@@ -60,8 +91,13 @@
 #include <utility>
 #include <vector>
 
+#include "routeloom/aead_gcm.hpp"
 #include "routeloom/device_credential.hpp"
 #include "routeloom/discovery_scope.hpp"
+#include "routeloom/sdkv1_authority.hpp"
+#include "routeloom/sdkv1_group_keys.hpp"
+#include "routeloom/sdkv1_lifecycle_store.hpp"
+#include "routeloom/sdkv1_revocation.hpp"
 
 #include "join_sim_network.hpp"
 
@@ -70,12 +106,19 @@ namespace {
 using namespace join_sim;
 using Bytes = std::vector<std::uint8_t>;
 
-constexpr std::size_t kRpcMax = 1100;
+constexpr std::size_t kRpcMax = 4096;  // P5 §10.4: envelopes ride the same pipe
 constexpr std::size_t kFlashSlots = 4;  // identity 0/1, site 0/1
 constexpr std::size_t kFlashSlotBytes = 1024;  // pipe fixture layout
 constexpr std::size_t kFlashBytes = kFlashSlots * kFlashSlotBytes;
 constexpr std::uint64_t kBootWitness = 0x0A11CE;
 constexpr std::uint64_t kTickStepMs = 5;
+constexpr std::size_t kAuthorityUpsMax = 8;  // bounded pipe queue per tick
+constexpr std::size_t kAuthorityQueueMax = 8;
+constexpr std::size_t kPassthroughMax = 4;
+constexpr std::size_t kRrsSlotBytes = 640;
+constexpr std::size_t kJournalSlotBytes = 88 + 1521;
+constexpr std::size_t kFlashExtBytes = 2 * kRrsSlotBytes + 2 * kJournalSlotBytes;
+constexpr NodeId kGossipPeer = 0x00A1000000000301ULL;  // fixed fake mesh peer
 
 bool from_hex(const std::string& text, Bytes& out) {
   out.clear();
@@ -270,6 +313,224 @@ class PeerSite {
   SimEntropy proxy_entropy_;
 };
 
+// --- Member security leg -----------------------------------------------------------
+// Real AuthorityClient + GroupKeyState + MembershipLifecycle over the pipe.
+// Queues are bounded; nothing sends from inside a callback — the pump
+// drains staged work between rounds, mirroring the firmware Owner.
+
+struct AuthorityCarrier {
+  std::uint8_t kind{0};  // 1..5, AuthorityCarrierKind
+  Bytes bytes;
+};
+
+struct PassthroughItem {
+  std::uint8_t type{0};  // 5..7
+  Bytes body;            // full verified body (head + tail)
+};
+
+class PipeAuthorityPort final : public routeloom::sdkv1::AuthorityPort {
+ public:
+  bool try_send(NodeId gateway, routeloom::sdkv1::AuthorityCarrierKind kind, ByteView carrier,
+                std::uint64_t& token) noexcept override {
+    (void)gateway;
+    if (carrier.data == nullptr || carrier.size == 0 ||
+        carrier.size > routeloom::keys::kAuthorityEnvelopeMax || ups.size() >= kAuthorityUpsMax) {
+      return false;
+    }
+    AuthorityCarrier up{};
+    up.kind = static_cast<std::uint8_t>(kind);
+    up.bytes.assign(carrier.data, carrier.data + carrier.size);
+    ups.push_back(std::move(up));
+    token = ++next_token_;
+    return true;
+  }
+  std::deque<AuthorityCarrier> ups;
+
+ private:
+  std::uint64_t next_token_{0};
+};
+
+class PipeAuthorityObserver final : public routeloom::sdkv1::AuthorityObserver {
+ public:
+  void on_event(const routeloom::sdkv1::AuthorityEvent& event) noexcept override {
+    switch (event.kind) {
+      case routeloom::sdkv1::AuthorityEvent::Kind::ChannelReady:
+        ++ready;
+        break;
+      case routeloom::sdkv1::AuthorityEvent::Kind::ChannelLost:
+        ++lost;
+        break;
+      case routeloom::sdkv1::AuthorityEvent::Kind::JoinConfirmAck:
+        ++confirmed;
+        break;
+      case routeloom::sdkv1::AuthorityEvent::Kind::UpdateReceived:
+        ++updates;
+        break;
+      case routeloom::sdkv1::AuthorityEvent::Kind::ActivateReceived:
+        ++activates;
+        break;
+      case routeloom::sdkv1::AuthorityEvent::Kind::Passthrough:
+        ++passthroughs;
+        if (event.envelope_type >= 5 && event.envelope_type <= 7 &&
+            event.passthrough.data != nullptr && event.passthrough.size != 0 &&
+            event.passthrough.size <= routeloom::keys::kAuthorityEnvelopeMax &&
+            staged.size() < kPassthroughMax) {
+          PassthroughItem item{};
+          item.type = event.envelope_type;
+          item.body.assign(event.passthrough.data,
+                           event.passthrough.data + event.passthrough.size);
+          staged.push_back(std::move(item));
+        }
+        break;
+    }
+  }
+  std::uint64_t ready{0};
+  std::uint64_t lost{0};
+  std::uint64_t confirmed{0};
+  std::uint64_t updates{0};
+  std::uint64_t activates{0};
+  std::uint64_t passthroughs{0};
+  std::deque<PassthroughItem> staged;
+};
+
+class PeerRlres1Env final : public routeloom::rlres1::Environment {
+ public:
+  void bind(EntropySource* entropy) noexcept { entropy_ = entropy; }
+  bool random(MutableByteView out) noexcept override {
+    return entropy_ != nullptr && entropy_->fill(out).ok();
+  }
+  bool find_slot(routeloom::rlres1::Purpose purpose, const routeloom::rlres1::ResumeId& rid,
+                 routeloom::rlres1::Slot& out) noexcept override {
+    (void)purpose;
+    (void)rid;
+    (void)out;
+    return false;  // initiator-only: never answers R1
+  }
+  bool revoked(NodeId peer, std::uint32_t generation) noexcept override {
+    (void)peer;
+    (void)generation;
+    return false;
+  }
+  bool allocate_context_id(routeloom::rlres1::Purpose purpose, NodeId peer,
+                           std::uint32_t& cid) noexcept override {
+    (void)purpose;
+    (void)peer;
+    if (++next_cid_ == 0) next_cid_ = 1;
+    cid = next_cid_;
+    return true;
+  }
+  bool reserve_resume_use(routeloom::rlres1::Purpose purpose,
+                          const routeloom::rlres1::ResumeId& rid) noexcept override {
+    (void)purpose;
+    (void)rid;
+    return false;
+  }
+
+ private:
+  EntropySource* entropy_{nullptr};
+  std::uint32_t next_cid_{0};
+};
+
+// Lifecycle ports. The authority port stages SendTyped work for the pump
+// (never drives the channel from the callback); the peer port records
+// gossip attempts (no peer exists in this harness); the runtime port
+// records enforcement so the G snapshot can observe it.
+struct LifecycleTyped {
+  std::uint8_t type{0};
+  Bytes body;
+};
+
+class PeerLifecycleAuthorityPort final : public routeloom::sdkv1::LifecycleAuthorityPort {
+ public:
+  Status authority_send(const std::uint8_t type, const ByteView body) noexcept override {
+    if (body.data == nullptr || body.size == 0 || body.size > 1024 ||
+        queued.size() >= kAuthorityQueueMax) {
+      return Status::error(StatusCode::WouldBlock, "lifecycle authority busy");
+    }
+    LifecycleTyped item{};
+    item.type = type;
+    item.body.assign(body.data, body.data + body.size);
+    queued.push_back(std::move(item));
+    ++staged;
+    return Status::success();
+  }
+  std::deque<LifecycleTyped> queued;
+  std::uint64_t staged{0};
+};
+
+class PeerLifecyclePeerPort final : public routeloom::sdkv1::LifecyclePeerPort {
+ public:
+  Status peer_send(const NodeId peer, const FrameType carrier,
+                   const ByteView body) noexcept override {
+    (void)carrier;
+    if (body.data == nullptr) return Status::error(StatusCode::InvalidArgument, "peer body");
+    ++attempts;
+    last_peer = peer;
+    return Status::success();  // single-device harness: no gossip peer
+  }
+  std::uint64_t attempts{0};
+  NodeId last_peer{kInvalidNodeId};
+};
+
+class PeerLifecycleRuntimePort final : public routeloom::sdkv1::LifecycleRuntimePort {
+ public:
+  Status retire_network() noexcept override {
+    network_retired = true;
+    return Status::success();
+  }
+  Status install_site_trust(const SiteRecord& next) noexcept override {
+    (void)next;
+    trust_installed = true;
+    return Status::success();
+  }
+  Status remove_member_runtime() noexcept override {
+    runtime_erased = true;
+    return Status::success();
+  }
+  Status erase_site_trust() noexcept override {
+    trust_erased = true;
+    return Status::success();
+  }
+  Status enforce_revocation(const RevocationSet& set, const std::uint32_t site_epoch,
+                            const MonotonicMs now) noexcept override {
+    (void)now;
+    ++enforced;
+    last_rs = set.rs_epoch;
+    last_site_epoch = site_epoch;
+    return Status::success();
+  }
+  std::uint64_t enforced{0};
+  std::uint32_t last_rs{0};
+  std::uint32_t last_site_epoch{0};
+  bool network_retired{false};
+  bool trust_installed{false};
+  bool runtime_erased{false};
+  bool trust_erased{false};
+};
+
+class PeerRrsObjectSink final : public routeloom::sdkv1::RrsObjectSink {
+ public:
+  void on_rrs_object(const NodeId peer, const ByteView object,
+                     const MonotonicMs now_ms) noexcept override {
+    (void)now_ms;
+    (void)peer;
+    (void)object;
+    ++completed;
+  }
+  std::uint64_t completed{0};
+};
+
+class PeerLifecycleObserver final : public routeloom::sdkv1::LifecycleObserver {
+ public:
+  void on_lifecycle_event(const routeloom::sdkv1::LifecycleEvent& event,
+                          const MonotonicMs now_ms) noexcept override {
+    (void)event;
+    (void)now_ms;
+    ++events;
+  }
+  std::uint64_t events{0};
+};
+
 // --- Setup -----------------------------------------------------------------------
 
 struct PeerSetup {
@@ -278,7 +539,8 @@ struct PeerSetup {
   std::uint64_t t0{0};
   std::uint64_t seed{0x5EED1234ULL};
   std::vector<SimSiteParams> sites;
-  Bytes flash;  // empty, or exactly kFlashBytes
+  Bytes flash;      // empty, or exactly kFlashBytes
+  Bytes flash_ext;  // empty, or exactly kFlashExtBytes
   bool verify{false};
 };
 
@@ -337,7 +599,7 @@ void usage() {
                "--dev-pub <128hex> --dev-cert <hex> --site-ca-id <u64> --site-ca-pub <128hex> "
                "--fw <u32> --cap <u32> --role <u8> --t0 <ms> --seed <u64> "
                "--site <id,network,gateway,proxymac,proxynode,channel,rssi,hops>... "
-               "[--flash <file>] [--verify]\n");
+               "[--flash <file>] [--flash-ext <file>] [--verify]\n");
 }
 
 // The site CA keypair outlives the setup (SimSiteParams only borrows it).
@@ -349,6 +611,7 @@ bool parse_setup(int argc, char** argv, PeerSetup& setup) {
   bool have_node = false, have_mac = false, have_priv = false, have_pub = false,
        have_cert = false, have_ca_id = false, have_ca_pub = false, have_t0 = false;
   std::string flash_path;
+  std::string flash_ext_path;
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i], value;
     if (arg == "--node" && take_arg(argc, argv, i, value)) {
@@ -382,6 +645,8 @@ bool parse_setup(int argc, char** argv, PeerSetup& setup) {
       setup.sites.push_back(params);
     } else if (arg == "--flash" && take_arg(argc, argv, i, value)) {
       flash_path = value;
+    } else if (arg == "--flash-ext" && take_arg(argc, argv, i, value)) {
+      flash_ext_path = value;
     } else if (arg == "--verify") {
       setup.verify = true;
     } else {
@@ -427,8 +692,433 @@ bool parse_setup(int argc, char** argv, PeerSetup& setup) {
     std::fclose(file);
     if (!ok) return false;
   }
+  if (!flash_ext_path.empty()) {
+    std::FILE* file = std::fopen(flash_ext_path.c_str(), "rb");
+    if (file == nullptr) return false;
+    setup.flash_ext.resize(kFlashExtBytes);
+    const bool ok =
+        std::fread(setup.flash_ext.data(), 1, kFlashExtBytes, file) == kFlashExtBytes;
+    std::fclose(file);
+    if (!ok) return false;
+  }
   return true;
 }
+
+// --- The owner leg -----------------------------------------------------------------
+// Starts once the Joiner commits a SiteRecord and then runs every round:
+// the GroupKeyState tick, the AuthorityClient tick, the lifecycle poll,
+// and the staged handoffs between them (observer passthroughs into the
+// lifecycle with the 16 B P5 head stripped, lifecycle reports out via
+// SendTyped) plus the lifecycle action drain. A changed SiteRecord
+// (cutover adoption) restarts the channel and the group binding; a
+// cleared one (removal) suspends them while the lifecycle runs the
+// erasure and the holdoff. Recovery/rejoin legs are driven by the Rust
+// side respawning this peer (power-cut handover), never by restarting
+// the Joiner in place.
+
+class OwnerLeg {
+ public:
+  OwnerLeg(DeviceEnds& device, NodeId self, NodeId gateway_fallback, std::uint64_t seed)
+      : device_(device),
+        self_(self),
+        gateway_fallback_(gateway_fallback),
+        auth_entropy_(seed ^ 0xA07E1E9ULL),
+        group_(device.site_store),
+        client_(aead_or_die(), port_, observer_, env_, &group_),
+        rrs_storage_(routeloom::sdkv1::kRevocationSlotBytes),
+        journal_storage_(routeloom::sdkv1::kLifecycleSlotBytes),
+        resume_storage_(16),
+        revocations_(rrs_storage_),
+        resume_(resume_storage_),
+        journal_(journal_storage_),
+        ports_{lauth_, lpeer_, lruntime_, auth_entropy_, lobject_, &lobs_},
+        config_(make_config(self)),
+        lifecycle_(config_, device.identity_store, device.site_store, revocations_, resume_,
+                   ports_, default_es256_verifier(), &journal_) {
+    env_.bind(&auth_entropy_);
+  }
+
+  void queue_down(std::uint8_t kind, Bytes bytes) {
+    if (kind < 1 || kind > 5 || bytes.empty() ||
+        bytes.size() > routeloom::keys::kAuthorityEnvelopeMax ||
+        downs_.size() >= kAuthorityQueueMax) {
+      fatal("bad authority down");
+    }
+    AuthorityCarrier down{};
+    down.kind = kind;
+    down.bytes = std::move(bytes);
+    downs_.push_back(std::move(down));
+  }
+
+  void request_pull(std::uint8_t reason) {
+    if (reason < 1 || reason > 3) fatal("bad pull reason");
+    pulls_.push_back(reason);
+  }
+
+  void inject_gossip(Bytes object) {
+    if (object.empty() || object.size() > 640 || gossip_.size() >= 4) {
+      fatal("bad gossip object");
+    }
+    gossip_.push_back(std::move(object));
+  }
+
+  void preload_extended(const Bytes& image) {
+    if (image.size() != kFlashExtBytes) fatal("bad extended flash image");
+    if (rrs_storage_.slot(0).size() != kRrsSlotBytes ||
+        journal_storage_.slot(0).size() != kJournalSlotBytes) {
+      fatal("extended slot size mismatch");
+    }
+    std::memcpy(rrs_storage_.slot(0).data(), image.data(), kRrsSlotBytes);
+    std::memcpy(rrs_storage_.slot(1).data(), image.data() + kRrsSlotBytes, kRrsSlotBytes);
+    std::memcpy(journal_storage_.slot(0).data(), image.data() + 2 * kRrsSlotBytes,
+                kJournalSlotBytes);
+    std::memcpy(journal_storage_.slot(1).data(), image.data() + 2 * kRrsSlotBytes + kJournalSlotBytes,
+                kJournalSlotBytes);
+  }
+
+  void emit_extended() {
+    const std::uint8_t stores[4] = {2, 2, 3, 3};
+    for (int i = 0; i < 4; ++i) {
+      const std::vector<std::uint8_t>& slot =
+          (i < 2) ? rrs_storage_.slot(static_cast<std::uint8_t>(i))
+                  : journal_storage_.slot(static_cast<std::uint8_t>(i - 2));
+      Bytes payload;
+      payload.push_back('X');
+      payload.push_back(stores[i]);
+      payload.push_back(static_cast<std::uint8_t>(i % 2));
+      payload.insert(payload.end(), slot.begin(), slot.end());
+      if (!write_frame(payload)) fatal("X exceeds the RPC bound");
+    }
+  }
+
+  void round(std::uint64_t now) {
+    // The lifecycle runs with or without a site once booted: removal,
+    // the holdoff and recovery all happen on a cleared store. But the
+    // boot itself needs a site or a journal record — booting pointlessly
+    // on empty stores parks the lifecycle in StorageBlocked, and only
+    // the channel and the group binding need the committed SiteRecord.
+    if (!lifecycle_ready_) {
+      if (!revocations_.initialize()) fatal("lifecycle RRS store init failed");
+      if (!journal_.initialize()) fatal("lifecycle journal init failed");
+      const bool has_site = device_.site_store.has_site();
+      if (has_site || journal_.has_record()) {
+        if (!lifecycle_.dispatch(routeloom::sdkv1::LifecycleInput::Boot(true), now))
+          fatal("lifecycle boot failed");
+        lifecycle_ready_ = true;
+        lifecycle_booted_ = true;
+      }
+    }
+    maybe_start(now);
+    if (started_) track_site(now);
+    // Queued host carriers first: the client is idle here, never inside
+    // a port callback, so RxCarrier cannot report Busy.
+    while (!downs_.empty()) {
+      const AuthorityCarrier down = downs_.front();
+      downs_.pop_front();
+      if (!channel_live_) continue;  // suspended across removal; drop
+      routeloom::sdkv1::AuthorityInput in{};
+      in.kind = routeloom::sdkv1::AuthorityInputKind::RxCarrier;
+      in.rx.kind = static_cast<routeloom::sdkv1::AuthorityCarrierKind>(down.kind);
+      in.rx.bytes = ByteView{down.bytes.data(), down.bytes.size()};
+      const Status status = client_.advance(in, now);
+      if (!status.ok()) fatal("authority RxCarrier failed");
+    }
+    if (channel_live_) {
+      while (!pulls_.empty()) {
+        const std::uint8_t reason = pulls_.front();
+        routeloom::sdkv1::AuthorityInput pull{};
+        pull.kind = routeloom::sdkv1::AuthorityInputKind::RequestPull;
+        pull.pull.reason = static_cast<routeloom::sdkv1::PullReason>(reason);
+        const Status status = client_.advance(pull, now);
+        if (status.code == StatusCode::Busy) break;  // retry next round
+        if (!status.ok()) fatal("authority pull failed");
+        pulls_.pop_front();
+      }
+      routeloom::sdkv1::GroupKeyState::Input tick{};
+      tick.op = routeloom::sdkv1::GroupKeyState::Op::Tick;
+      (void)group_.advance(tick, now);
+      routeloom::sdkv1::AuthorityInput poll{};
+      poll.kind = routeloom::sdkv1::AuthorityInputKind::Tick;
+      const Status status = client_.advance(poll, now);
+      if (!status.ok()) fatal("authority Tick failed");
+    }
+    (void)lifecycle_.dispatch(routeloom::sdkv1::LifecycleInput::Poll(), now);
+    // Injected gossip objects dispatch as completed reassemblies from a
+    // fixed mesh peer; the lifecycle verifies them like any gossip.
+    while (!gossip_.empty() && lifecycle_ready_) {
+      const Bytes object = gossip_.front();
+      gossip_.pop_front();
+      (void)lifecycle_.dispatch(
+          routeloom::sdkv1::LifecycleInput::Completed(
+              kGossipPeer, ByteView{object.data(), object.size()}),
+          now);
+    }
+    drain_passthroughs(now);
+    drain_lifecycle_reports(now);
+    drain_actions(now);
+  }
+
+  void emit_ups() {
+    while (!port_.ups.empty()) {
+      const AuthorityCarrier up = port_.ups.front();
+      port_.ups.pop_front();
+      Bytes payload;
+      payload.push_back('O');
+      payload.push_back(up.kind);
+      payload.insert(payload.end(), up.bytes.begin(), up.bytes.end());
+      if (!write_frame(payload)) fatal("O exceeds the RPC bound");
+    }
+  }
+
+  void emit_snapshot() {
+    const routeloom::sdkv1::AuthoritySnapshot auth = client_.snapshot();
+    const routeloom::sdkv1::LifecycleSnapshot life = lifecycle_.snapshot();
+    Bytes payload;
+    payload.push_back('G');
+    payload.push_back(static_cast<std::uint8_t>(auth.state));
+    payload.push_back(auth.join_confirmed ? 1 : 0);
+    put_u32(payload, group_.current());
+    std::uint32_t next = 0;
+    if (device_.site_store.has_site()) next = device_.site_store.site().gk_epoch_next;
+    put_u32(payload, next);
+    payload.push_back(static_cast<std::uint8_t>(life.phase));
+    payload.push_back(last_action_);
+    put_u32(payload, life.applied_rs_epoch);
+    put_u32(payload, life.applied_gk_epoch);
+    put_u64(payload, life.holdoff_remaining_ms);
+    payload.push_back(auth.state == routeloom::sdkv1::AuthoritySnapshot::State::Ready ? 1 : 0);
+    put_u64(payload, life.adopted_network);
+    put_u32(payload, life.own_generation);
+    payload.push_back(lifecycle_booted_ ? 1 : 0);
+    payload.push_back(0);
+    payload.push_back(0);
+    if (!write_frame(payload)) fatal("G write failed");
+  }
+
+  bool channel_ready() const {
+    return channel_live_ &&
+           client_.snapshot().state == routeloom::sdkv1::AuthoritySnapshot::State::Ready;
+  }
+
+ private:
+  static const routeloom::AeadGcm& aead_or_die() {
+    const routeloom::AeadGcm* aead = routeloom::builtin_aead_gcm();
+    if (aead == nullptr) fatal("no host AEAD backend");
+    return *aead;
+  }
+
+  static routeloom::sdkv1::LifecycleConfig make_config(NodeId self) {
+    routeloom::sdkv1::LifecycleConfig config{};
+    config.self = self;
+    config.profile = routeloom::sdkv1::LifecycleProfile::Node;
+    config.enabled_features = 0;  // authority-only harness: gossip stays silent
+    return config;
+  }
+
+  void maybe_start(std::uint64_t now) {
+    const bool has_site =
+        device_.site_store.has_site() && device_.site_store.site().state == SiteState::Member;
+    if (!has_site) {
+      had_site_ = false;
+      return;
+    }
+    const SiteRecord& site = device_.site_store.site();
+    bool dams_zero = true;
+    for (const auto b : site.dams) dams_zero = dams_zero && (b == 0);
+    if (dams_zero) return;
+    // A fresh site under a running lifecycle (first join, or a rejoin
+    // after the removal holdoff) adopts it; a cutover adoption keeps
+    // the lifecycle's own switch instead.
+    if (!had_site_) {
+      if (!lifecycle_.dispatch(routeloom::sdkv1::LifecycleInput::MemberReady(
+              device_.site_store.commit_seq(), site.rs_epoch_floor),
+                                   now))
+        fatal("lifecycle member-ready failed");
+      had_site_ = true;
+    }
+    if (started_) return;
+    routeloom::sdkv1::GroupKeyState::Input begin{};
+    begin.op = routeloom::sdkv1::GroupKeyState::Op::Start;
+    begin.boot = static_cast<std::uint32_t>(kBootWitness);
+    if (!group_.advance(begin, now)) fatal("group start failed");
+    routeloom::sdkv1::AuthorityStart start{};
+    if (!build_start(site, start)) fatal("authority start build failed");
+    routeloom::sdkv1::AuthorityInput input{};
+    input.kind = routeloom::sdkv1::AuthorityInputKind::Start;
+    input.start = start;
+    if (!client_.advance(input, now)) fatal("authority start failed");
+    bound_ = site;
+    bound_valid_ = true;
+    started_ = true;
+    channel_live_ = true;
+  }
+
+  // Cutover adoption changes the SiteRecord under us; removal clears it.
+  // The lifecycle drives both — here only the channel and the group
+  // binding follow, exactly once per change.
+  void track_site(std::uint64_t now) {
+    if (!device_.site_store.has_site()) {
+      if (channel_live_) {
+        routeloom::sdkv1::AuthorityInput suspend{};
+        suspend.kind = routeloom::sdkv1::AuthorityInputKind::Suspend;
+        (void)client_.advance(suspend, now);
+        routeloom::sdkv1::GroupKeyState::Input stop{};
+        stop.op = routeloom::sdkv1::GroupKeyState::Op::Stop;
+        (void)group_.advance(stop, now);
+        channel_live_ = false;
+      }
+      return;
+    }
+    const SiteRecord& site = device_.site_store.site();
+    if (!bound_valid_ || site_changed(site)) {
+      routeloom::sdkv1::GroupKeyState::Input stop{};
+      stop.op = routeloom::sdkv1::GroupKeyState::Op::Stop;
+      (void)group_.advance(stop, now);
+      routeloom::sdkv1::GroupKeyState::Input begin{};
+      begin.op = routeloom::sdkv1::GroupKeyState::Op::Start;
+      begin.boot = static_cast<std::uint32_t>(kBootWitness);
+      if (!group_.advance(begin, now)) fatal("group restart failed");
+      routeloom::sdkv1::AuthorityInput suspend{};
+      suspend.kind = routeloom::sdkv1::AuthorityInputKind::Suspend;
+      (void)client_.advance(suspend, now);
+      routeloom::sdkv1::AuthorityStart start{};
+      if (!build_start(site, start)) fatal("authority restart build failed");
+      routeloom::sdkv1::AuthorityInput input{};
+      input.kind = routeloom::sdkv1::AuthorityInputKind::Start;
+      input.start = start;
+      if (!client_.advance(input, now)) fatal("authority restart failed");
+      bound_ = site;
+      bound_valid_ = true;
+      channel_live_ = true;
+    }
+  }
+
+  bool site_changed(const SiteRecord& site) const {
+    if (site.site_id != bound_.site_id || site.network != bound_.network ||
+        site.assignment_generation != bound_.assignment_generation || site.role != bound_.role) {
+      return true;
+    }
+    return site.dams != bound_.dams;
+  }
+
+  bool build_start(const SiteRecord& site, routeloom::sdkv1::AuthorityStart& out) const {
+    out.network = site.network;
+    out.self = self_;
+    out.site_id = site.site_id;
+    out.gateway = site.gateway_count != 0 ? site.gateways[0] : gateway_fallback_;
+    out.dams = site.dams;
+    out.generation = site.assignment_generation;
+    out.epochs.site_epoch = static_cast<std::uint32_t>(site.network >> 32U);
+    out.epochs.rs_epoch = site.rs_epoch_floor;
+    out.epochs.gk_epoch = site.gk_epoch_current;
+    ScopeDigest digest{};
+    sha256(ByteView{site.member_cert.bytes.data(), site.member_cert.size}, digest);
+    std::memcpy(out.member_cert_hash.data(), digest.data(), digest.size());
+    out.boot = static_cast<std::uint32_t>(kBootWitness);
+    out.gk_current = site.gk_epoch_current;
+    out.gk_next = site.gk_epoch_next;
+    return true;
+  }
+
+  void drain_passthroughs(std::uint64_t now) {
+    if (!device_.site_store.has_site()) {
+      observer_.staged.clear();
+      return;
+    }
+    const SiteRecord& site = device_.site_store.site();
+    while (!observer_.staged.empty()) {
+      const PassthroughItem item = observer_.staged.front();
+      observer_.staged.pop_front();
+      if (item.body.size() <= routeloom::sdkv1::kAuthorityBodyHeadSize) continue;
+      routeloom::sdkv1::AuthorityBodyHead head{};
+      if (!routeloom::sdkv1::authority_head_decode(
+              ByteView{item.body.data(), routeloom::sdkv1::kAuthorityBodyHeadSize}, head))
+        continue;
+      if (head.op != 1 || head.generation != site.assignment_generation ||
+          site.network == 0) {
+        continue;  // the client already fenced this; never feed the lifecycle
+      }
+      routeloom::sdkv1::PeerCredentialStamp stamp{};
+      stamp.network = site.network;
+      stamp.peer = site.gateway_count != 0 ? site.gateways[0] : gateway_fallback_;
+      stamp.assignment_generation = head.generation;
+      stamp.role = site.role;
+      (void)lifecycle_.dispatch(
+          routeloom::sdkv1::LifecycleInput::Authority(
+              stamp, item.type,
+              ByteView{item.body.data() + routeloom::sdkv1::kAuthorityBodyHeadSize,
+                       item.body.size() - routeloom::sdkv1::kAuthorityBodyHeadSize}),
+          now);
+    }
+  }
+
+  void drain_lifecycle_reports(std::uint64_t now) {
+    while (!lauth_.queued.empty()) {
+      if (!channel_live_) return;  // keep queued across the suspension
+      const LifecycleTyped item = lauth_.queued.front();
+      routeloom::sdkv1::AuthorityInput in{};
+      in.kind = routeloom::sdkv1::AuthorityInputKind::SendTyped;
+      in.typed.type = item.type;
+      in.typed.body = ByteView{item.body.data(), item.body.size()};
+      const Status status = client_.advance(in, now);
+      if (status.code == StatusCode::Busy || status.code == StatusCode::InvalidState) {
+        return;  // TX staged or handshaking: retry next round
+      }
+      if (!status.ok()) fatal("authority SendTyped failed");
+      lauth_.queued.pop_front();
+    }
+  }
+
+  void drain_actions(std::uint64_t now) {
+    for (;;) {
+      routeloom::sdkv1::LifecycleAction action{};
+      const Status taken = lifecycle_.take_action(action);
+      if (taken.code == StatusCode::NotFound) return;
+      if (!taken.ok()) fatal("lifecycle take_action failed");
+      last_action_ = static_cast<std::uint8_t>(action.tag);
+      // The harness owns no radio/discovery to reinit: completing with
+      // success records the order. Process-spawning legs (recovery and
+      // rejoin) are driven by the Rust side respawning this peer.
+      (void)lifecycle_.dispatch(
+          routeloom::sdkv1::LifecycleInput::ActionDone(action.token, Status::success()), now);
+    }
+  }
+
+  DeviceEnds& device_;
+  NodeId self_{kInvalidNodeId};
+  NodeId gateway_fallback_{kInvalidNodeId};
+  SimEntropy auth_entropy_;
+  PeerRlres1Env env_;
+  PipeAuthorityPort port_;
+  PipeAuthorityObserver observer_;
+  routeloom::sdkv1::GroupKeyState group_;
+  routeloom::sdkv1::AuthorityClient client_;
+  sdkv1_test::FaultyRecordStorage rrs_storage_;
+  sdkv1_test::FaultyRecordStorage journal_storage_;
+  sdkv1_test::FaultyResumeStorage resume_storage_;
+  RevocationStore revocations_;
+  ResumeCache resume_;
+  routeloom::sdkv1::LifecycleStore journal_;
+  PeerLifecycleAuthorityPort lauth_;
+  PeerLifecyclePeerPort lpeer_;
+  PeerLifecycleRuntimePort lruntime_;
+  PeerRrsObjectSink lobject_;
+  PeerLifecycleObserver lobs_;
+  routeloom::sdkv1::LifecyclePorts ports_;
+  routeloom::sdkv1::LifecycleConfig config_;
+  routeloom::sdkv1::MembershipLifecycle lifecycle_;
+  std::deque<AuthorityCarrier> downs_;
+  std::deque<std::uint8_t> pulls_;
+  std::deque<Bytes> gossip_;
+  SiteRecord bound_{};
+  bool bound_valid_{false};
+  bool started_{false};
+  bool channel_live_{false};
+  bool lifecycle_ready_{false};
+  bool lifecycle_booted_{false};
+  bool had_site_{false};
+  std::uint8_t last_action_{0};
+};
 
 // --- The pump --------------------------------------------------------------------
 // Mirrors JoinSimNetwork::round, but gateway ups drain to the pipe and host
@@ -471,6 +1161,8 @@ class PeerWorld {
     if (setup.verify) boot.mode = JoinBootMode::VerifyExistingMembership;
     const Status started = device_->joiner.start(boot, now_);
     if (!started.ok()) fatal("joiner start failed");
+    owner_.reset(new OwnerLeg(*device_, setup.config.node, setup.sites[0].gateway, setup.seed));
+    if (!setup.flash_ext.empty()) owner_->preload_extended(setup.flash_ext);
   }
 
   void add_site(const SimSiteParams& params) {
@@ -487,6 +1179,12 @@ class PeerWorld {
   void queue_abort(std::uint8_t site, NodeId proxy, RelayToken token) {
     aborts_.push_back(QueuedAbort{site, proxy, token});
   }
+  void queue_authority_down(std::uint8_t kind, Bytes carrier) {
+    owner_->queue_down(kind, std::move(carrier));
+  }
+  void request_pull(std::uint8_t reason) { owner_->request_pull(reason); }
+  void inject_gossip(Bytes object) { owner_->inject_gossip(std::move(object)); }
+  void emit_extended() { owner_->emit_extended(); }
   void set_proxy_muted(std::uint8_t site, std::uint8_t proxy, bool muted) {
     if (site < sites_.size()) sites_[site]->set_proxy_muted(proxy, muted);
   }
@@ -532,7 +1230,10 @@ class PeerWorld {
         if (!write_frame(payload)) fatal("A write failed");
       }
     }
+    owner_->emit_ups();
   }
+
+  void emit_owner() { owner_->emit_snapshot(); }
 
   void emit_snapshot() {
     DeviceEnds& dev = *device_;
@@ -621,6 +1322,7 @@ class PeerWorld {
     for (auto& site : sites_) site->poll(now_);
     if (!dev.joiner.poll(now_).ok()) fatal("device poll failed");
     consume_actions();
+    owner_->round(now_);
   }
 
   void deliver_radio() {
@@ -691,6 +1393,7 @@ class PeerWorld {
   }
 
   std::unique_ptr<DeviceEnds> device_;
+  std::unique_ptr<OwnerLeg> owner_;
   std::uint64_t seed_;
   std::uint64_t now_;
   RadioFaults faults_;
@@ -734,8 +1437,18 @@ int run(int argc, char** argv) {
         world.emit_ups_and_aborts();
         world.emit_snapshot();
         world.emit_member();
+        world.emit_owner();
         if (!write_frame(Bytes{'D'})) fatal("D write failed");
         (void)std::fflush(stdout);
+      } else if (tag == 'C') {
+        if (frame.size() < 3) fatal("bad C");
+        world.queue_authority_down(frame[1], Bytes(frame.begin() + 2, frame.end()));
+      } else if (tag == 'V') {
+        if (frame.size() != 2) fatal("bad V");
+        world.request_pull(frame[1]);
+      } else if (tag == 'J') {
+        if (frame.size() < 2) fatal("bad J");
+        world.inject_gossip(Bytes(frame.begin() + 1, frame.end()));
       } else if (tag == 'W') {
         if (frame.size() < 11) fatal("bad W");
         std::size_t pos = 1;
@@ -757,6 +1470,9 @@ int run(int argc, char** argv) {
         world.set_proxy_muted(frame[1], frame[2], frame[3] != 0);
       } else if (tag == 'P') {
         world.emit_flash();
+        (void)std::fflush(stdout);
+      } else if (tag == 'X') {
+        world.emit_extended();
         (void)std::fflush(stdout);
       } else if (tag == 'Q') {
         return 0;
