@@ -494,7 +494,7 @@ Status SiteStore::encode(const SiteRecord& record, std::size_t& used_len) noexce
   return Status::success();
 }
 
-Status SiteStore::commit(const SiteRecord& record) noexcept {
+Status SiteStore::check_member(const SiteRecord& record) const noexcept {
   if (!pair_.initialized()) {
     return Status::error(StatusCode::InvalidState, "site store not initialized");
   }
@@ -536,13 +536,34 @@ Status SiteStore::commit(const SiteRecord& record) noexcept {
       return Status::error(StatusCode::Conflict, "site record regressed");
     }
   }
+  return Status::success();
+}
+
+Status SiteStore::commit(const SiteRecord& record) noexcept {
+  Status status = check_member(record);
+  if (!status) return status;
   std::size_t used_len = 0;
-  Status status = encode(record, used_len);
+  status = encode(record, used_len);
   if (status) status = pair_.commit_prepared(used_len);
   wipe_scratch();
+  if (status) site_ = record;
+  return status;
+}
+
+Status SiteStore::consolidate(const SiteRecord& record) noexcept {
+  // Never use recover() on a healthy store: the signed switching intent
+  // authorizes the network change, not regression of generation or floors.
+  Status status = check_member(record);
   if (!status) return status;
-  site_ = record;
-  return Status::success();
+  if (pair_.quarantined() || pair_.uncertain()) {
+    return Status::error(StatusCode::RecoveryRequired, "site store impaired");
+  }
+  std::size_t used_len = 0;
+  status = encode(record, used_len);
+  if (status) status = pair_.commit_twin_prepared(used_len);
+  wipe_scratch();
+  if (status) site_ = record;
+  return status;
 }
 
 Status SiteStore::stage_group_key(const std::uint32_t epoch,

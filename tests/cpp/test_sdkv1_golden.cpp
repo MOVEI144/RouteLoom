@@ -21,8 +21,10 @@
 #include <vector>
 
 #include "routeloom/rlcw1.hpp"
+#include "routeloom/discovery_scope.hpp"
 #include "routeloom/sdkv1_pop.hpp"
 #include "routeloom/sdkv1_records.hpp"
+#include "routeloom/sdkv1_grant_renew.hpp"
 #include "routeloom/sdkv1_lifecycle_store.hpp"
 
 extern "C" {
@@ -333,10 +335,13 @@ void valid_rlx1_record(const Fields& f) {
   expected.self = num(f, "self_node");
   expected.site_id = num(f, "site_id");
   expected.old_network = num(f, "old_network");
+  expected.new_network = has(f, "new_network") ? num(f, "new_network") : 0;
   expected.generation = static_cast<std::uint32_t>(num(f, "generation"));
   expected.rs_floor = static_cast<std::uint32_t>(num(f, "rs_floor"));
   expected.gk_floor = static_cast<std::uint32_t>(num(f, "gk_floor"));
   expected.boot_witness = static_cast<std::uint32_t>(num(f, "boot_witness"));
+  expected.cutover_id = has(f, "cutover_id") ? num(f, "cutover_id") : 0;
+  expected.revision = has(f, "revision") ? static_cast<std::uint32_t>(num(f, "revision")) : 0;
   const auto payload = hex(f, "payload_hex");
   CHECK(payload.size() <= expected.payload.bytes.size());
   if (payload.size() > expected.payload.bytes.size()) return;
@@ -344,8 +349,10 @@ void valid_rlx1_record(const Fields& f) {
   expected.payload.size = payload.size();
   CHECK(decoded.mode == expected.mode && decoded.self == expected.self &&
         decoded.site_id == expected.site_id && decoded.old_network == expected.old_network &&
+        decoded.new_network == expected.new_network &&
         decoded.generation == expected.generation && decoded.rs_floor == expected.rs_floor &&
         decoded.gk_floor == expected.gk_floor && decoded.boot_witness == expected.boot_witness &&
+        decoded.cutover_id == expected.cutover_id && decoded.revision == expected.revision &&
         decoded.payload.size == expected.payload.size &&
         std::memcmp(decoded.payload.bytes.data(), expected.payload.bytes.data(),
                     expected.payload.size) == 0);
@@ -362,6 +369,71 @@ void valid_rlx1_record(const Fields& f) {
                                 expected.site_id, expected.old_network, expected.self,
                                 expected.generation, claim, verified).ok());
     CHECK(verified);
+  }
+}
+
+void valid_cutover(const Fields& f) {
+  const auto prepare_bytes = hex(f, "prepare_hex");
+  GrantPrepare prepare{};
+  CHECK(grant_prepare_decode(view(prepare_bytes), prepare).ok());
+  CHECK(prepare.head.old_network == num(f, "old_network"));
+  CHECK(prepare.head.cutover_id == num(f, "cutover_id"));
+  CHECK(prepare.head.revision == num(f, "revision"));
+  CHECK(prepare.new_network == num(f, "new_network"));
+  CHECK(equals(prepare.site_cert, hex(f, "sitecert_hex")));
+  CHECK(equals(prepare.member_cert, hex(f, "membercert_hex")));
+  CHECK(prepare.dams == hex_array<32>(f, "dams_hex"));
+  ByteBuffer<kSitePackageSize> package{};
+  CHECK(site_package_encode(prepare.package, package).ok());
+  CHECK(equals(package, hex(f, "site_package_hex")));
+
+  const auto commit_bytes = hex(f, "commit_hex");
+  GrantCommit commit{};
+  CHECK(grant_commit_decode(view(commit_bytes), commit).ok());
+  CHECK(equals(commit.proof, hex(f, "commit_proof_hex")));
+  CHECK(equals(commit.revocations, hex(f, "rrs_hex")));
+  CutoverCommit proof{};
+  bool verified = false;
+  CHECK(cutover_commit_verify(commit.proof.view(), hex_array<64>(f, "signer_pubkey_hex"),
+                              num(f, "old_network"), proof, verified).ok());
+  CHECK(verified);
+  CHECK(proof.site_id == num(f, "site_id") && proof.new_network == num(f, "new_network"));
+  CHECK(proof.cutover_id == num(f, "cutover_id") && proof.revision == num(f, "revision"));
+  CHECK(proof.gk_epoch == num(f, "gk_epoch") && proof.rs_epoch == num(f, "rs_epoch"));
+  CHECK(proof.rrs_sha256 == hex_array<32>(f, "rrs_sha256_hex"));
+  Digest256 actual_rrs_hash{};
+  sha256(commit.revocations.view(), actual_rrs_hash);
+  CHECK(proof.rrs_sha256 == actual_rrs_hash);
+  Digest256 actual_proof_hash{};
+  sha256(commit.proof.view(), actual_proof_hash);
+  CHECK(actual_proof_hash == hex_array<32>(f, "commit_digest_hex"));
+  std::array<std::uint8_t, kCutoverAadSize> aad{};
+  CHECK(cutover_commit_aad(proof.old_network, aad).ok());
+  const auto aad_bytes = hex(f, "commit_aad_hex");
+  CHECK(aad_bytes.size() == aad.size());
+  if (aad_bytes.size() == aad.size())
+    CHECK(std::equal(aad.begin(), aad.end(), aad_bytes.begin()));
+  RevocationSet rrs{};
+  verified = false;
+  CHECK(revocation_object_verify(commit.revocations.view(),
+                                 hex_array<64>(f, "signer_pubkey_hex"), proof.site_id,
+                                 proof.new_network, rrs, verified).ok());
+  CHECK(verified && rrs.rs_epoch == proof.rs_epoch);
+  for (const char* key : {"prepared_hex", "applied_hex"}) {
+    const auto receipt_bytes = hex(f, key);
+    GrantReceipt receipt{};
+    CHECK(grant_receipt_decode(view(receipt_bytes), receipt).ok());
+    std::array<std::uint8_t, kGrantReceiptSize> encoded{};
+    CHECK(grant_receipt_encode(receipt, encoded).ok());
+    CHECK(receipt_bytes.size() == encoded.size());
+    if (receipt_bytes.size() == encoded.size())
+      CHECK(std::equal(encoded.begin(), encoded.end(), receipt_bytes.begin()));
+    CHECK(receipt.head.old_network == proof.old_network);
+    CHECK(receipt.new_network == proof.new_network);
+    CHECK(receipt.head.cutover_id == proof.cutover_id);
+    CHECK(receipt.head.revision == proof.revision);
+    CHECK(receipt.digest == hex_array<32>(f, key[0] == 'a' ? "commit_digest_hex" :
+                                                        "prepare_digest_hex"));
   }
 }
 
@@ -592,6 +664,8 @@ void run() {
     } else if (codec == "rlx1_record") {
       saw_rlx1 = true;
       valid_rlx1_record(f);
+    } else if (codec == "cutover") {
+      valid_cutover(f);
     } else if (codec == "rlp1") {
       valid_rlp1(f);
     } else if (codec == "rlp2") {

@@ -529,6 +529,11 @@ add_test(NAME routeloom_sdkv1_membership_tests COMMAND routeloom_sdkv1_membershi
 # P6 revocation lifecycle, PR A (docs/design/sdk-v1/04 §2-§5, plan P6-1):
 # RRS1 acceptance/enforcement/gossip and the traffic gate through fake
 # ports (production P4/P5 adapters land later; see sdkv1_revocation.hpp).
+add_executable(routeloom_sdkv1_grant_renew_tests test_sdkv1_grant_renew.cpp)
+target_link_libraries(routeloom_sdkv1_grant_renew_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_sdkv1_grant_renew_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_grant_renew_tests COMMAND routeloom_sdkv1_grant_renew_tests)
+
 add_executable(routeloom_sdkv1_revocation_tests test_sdkv1_revocation.cpp)
 target_link_libraries(routeloom_sdkv1_revocation_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_sdkv1_revocation_tests PRIVATE

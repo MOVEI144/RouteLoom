@@ -311,6 +311,7 @@ fn check_rrs1_record(name: &str, doc: &Json) {
 
 fn check_rlx1_record(name: &str, doc: &Json) {
     let mode = match num(doc, "mode") {
+        0 => LifecycleMode::Idle,
         1 => LifecycleMode::Removing,
         2 => LifecycleMode::Holdoff,
         3 => LifecycleMode::UnassignedReady,
@@ -321,13 +322,17 @@ fn check_rlx1_record(name: &str, doc: &Json) {
         self_node: num(doc, "self_node"),
         site_id: num(doc, "site_id"),
         old_network: num(doc, "old_network"),
-        new_network: 0,
+        new_network: doc
+            .get("new_network")
+            .map_or(0, |_| num(doc, "new_network")),
         generation: num(doc, "generation") as u32,
         rs_floor: num(doc, "rs_floor") as u32,
         gk_floor: num(doc, "gk_floor") as u32,
         boot_witness: num(doc, "boot_witness") as u32,
-        cutover_id: 0,
-        revision: 0,
+        cutover_id: doc.get("cutover_id").map_or(0, |_| num(doc, "cutover_id")),
+        revision: doc
+            .get("revision")
+            .map_or(0, |_| num(doc, "revision") as u32),
         payload: hex(doc, "payload_hex"),
     };
     let record = hex(doc, "record_hex");
@@ -357,6 +362,36 @@ fn check_rlx1_record(name: &str, doc: &Json) {
             &arr::<64>(doc, "signer_pubkey_hex")
         ));
     }
+}
+
+fn check_cutover(name: &str, doc: &Json) {
+    let payload = hex(doc, "commit_payload_hex");
+    let aad = hex(doc, "commit_aad_hex");
+    let signature = arr::<64>(doc, "commit_signature_hex");
+    let proof = hex(doc, "commit_proof_hex");
+    assert_eq!(
+        cose_es256_sig_structure(&payload, &aad),
+        hex(doc, "commit_sig_structure_hex"),
+        "{name}"
+    );
+    assert_eq!(cose_es256_assemble(&payload, &signature), proof, "{name}");
+    let parsed = cose_es256_parse(&proof, 80, 80, 155).unwrap();
+    assert_eq!(parsed.payload, payload, "{name}");
+    assert!(cose_es256_verify(
+        parsed.payload,
+        &aad,
+        &parsed.signature,
+        &arr::<64>(doc, "signer_pubkey_hex")
+    ));
+    let secret = arr::<32>(doc, "signer_secret_hex");
+    let signer = FileRootSigner::from_secret(num(doc, "site_id"), &secret).unwrap();
+    assert_eq!(
+        signer
+            .sign(&cose_es256_sig_structure(&payload, &aad))
+            .unwrap(),
+        signature,
+        "{name}: re-sign"
+    );
 }
 
 fn check_rlp1(name: &str, doc: &Json) {
@@ -530,6 +565,7 @@ fn sdkv1_valid_vectors_match_byte_for_byte() {
                 saw_rlx1 = true;
                 check_rlx1_record(name, doc);
             }
+            "cutover" => check_cutover(name, doc),
             "rlp1" => check_rlp1(name, doc),
             "rlp2" => check_rlp2(name, doc),
             "rlv1" => check_rlv1(name, doc),

@@ -1,0 +1,8 @@
+{
+  "codec": "rlx1_record",
+  "encoded_hex": "524c583100010058000000014c583101000000070300000000a10000000012345173000000000042000000030a1b2c3d0000000000000000000000030000000e000000cb0000020000000000000000130000000261d08878",
+  "expect": "error",
+  "format": "routeloom-sdkv1-golden-v1",
+  "name": "rlx1_ready_with_cutover_id",
+  "note": "non-cutover modes cannot retain a cutover ID"
+}
