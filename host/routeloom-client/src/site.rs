@@ -270,6 +270,41 @@ pub struct OperationProgress {
     pub distribution: DistributionProgress,
 }
 
+/// The answer to `membership.cutover` (P6-2): the staged epoch exists
+/// and PREPAREs are flowing (or honestly parked); the switch itself is
+/// reported separately.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CutoverOutcome {
+    pub operation_id: String,
+    /// `preparing` — the next epoch staged; distribution to the mesh is
+    /// reported separately (`operations.get`, `cutover.progress`).
+    pub state: String,
+    pub new_site_epoch: u32,
+    pub revision: u32,
+    pub targets: u32,
+}
+
+/// GrantRenew progress of a cutover operation (P6-2): `preparing` (the
+/// 600 s window runs), `waiting_gateway` (the window lapsed without a
+/// current-revision gateway PREPARED — the old network is kept),
+/// `committed` (the epoch switched; COMMITs flow inside the grace),
+/// `converged` (every tracked target applied), or `recovery_pending`
+/// (stragglers recover through the authenticated reissue, never a
+/// rollback). Nothing counts as prepared/applied without evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CutoverProgress {
+    pub operation_id: String,
+    pub phase: String,
+    pub new_site_epoch: u32,
+    pub revision: u32,
+    pub prepared: u64,
+    pub applied: u64,
+    pub unknown: u64,
+    pub total: u64,
+    pub waiting_gateway: bool,
+    pub recovery_pending: bool,
+}
+
 /// One Site Authority event (the raw JSON is kept for fields this type
 /// does not model).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -321,6 +356,24 @@ pub trait SiteAdmin: Send + Sync {
     /// Reads back a revoke operation with its RRS1 distribution progress
     /// (`operations.get`). `None` when the id is unknown.
     fn operation(&self, operation_id: &str) -> Result<Option<OperationProgress>, TransportError>;
+    /// Starts a site_epoch cutover (ADMIN). `expected_site_epoch` guards
+    /// against acting on a stale screen (`CONFLICT` when it moved on);
+    /// `next_site_cert_hex` must verify under the configured Site CA and
+    /// step the epoch by exactly one. While a cutover prepares the call
+    /// is `CONFLICT`.
+    fn cutover(
+        &self,
+        expected_site_epoch: u32,
+        next_site_cert_hex: &str,
+        idempotency_key: &str,
+    ) -> Result<CutoverOutcome, TransportError>;
+    /// Reads back a cutover operation with its grant progress
+    /// (`operations.get`). `None` when the id is unknown or not a
+    /// cutover.
+    fn cutover_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<CutoverProgress>, TransportError>;
 
     fn site_events(&self) -> Result<SiteEventStream, TransportError>;
 }

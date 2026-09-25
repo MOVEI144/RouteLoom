@@ -67,12 +67,26 @@ int follow_chain(const SimWorld& w, NodeId from, const NodeId destination,
     if (!visited.insert(from).second) return -1;
     const auto selection = w.at(from)->routes().best(destination);
     if (!selection.valid) return 0;
+    if (!w.net.connected(from, selection.next_hop)) return 0;
     from = selection.next_hop;
     ++count;
     if (w.nodes.count(from) == 0) return 0;
   }
   if (hops != nullptr) *hops = count;
   return 1;
+}
+
+void test_follow_chain_requires_live_edges() {
+  SimWorld w;
+  scoped_profile(w, 1, 500, 9000);
+  w.add(1);
+  w.add(2);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.run(1000);
+  CHECK(follow_chain(w, 2, 1) == 1);
+  w.net.disconnect(1, 2);
+  CHECK(follow_chain(w, 2, 1) == 0);
 }
 
 // Failure aid: prints the next-hop chain from `from` toward `destination`.
@@ -225,6 +239,48 @@ void test_route_request_codec() {
   CHECK_OK(decode_route_request(ByteView{reply.data(), reply.size()}, out));
 }
 
+// Broadcast route payload: parent poisons only its own gateway record while
+// a different neighbor still sees a finite metric. Malformed input must not
+// publish any records, including a valid prefix.
+void test_broadcast_route_payload() {
+  std::array<BroadcastRouteRecord, kBroadcastRouteMaxRecords> records{};
+  records[0] = {{10, 7, 3, 0}, 0};
+  records[1] = {{1, 8, 4, 5}, 20};
+  std::array<std::uint8_t, kMaxApplicationPayload> bytes{};
+  std::size_t written = 0;
+  CHECK_OK(encode_broadcast_route_update(records.data(), 2, 10,
+                                         MutableByteView{bytes.data(), bytes.size()}, written));
+  CHECK(written == 52);
+  CHECK(bytes[0] == 1 && bytes[1] == 0 && bytes[2] == 2 && bytes[3] == 0);
+  const std::array<std::uint8_t, 24> second{{0, 0, 0, 0, 0, 0, 0, 1,
+                                              0, 0, 0, 8, 0, 4, 0, 5,
+                                              0, 0, 0, 0, 0, 0, 0, 20}};
+  CHECK(std::memcmp(bytes.data() + 28, second.data(), second.size()) == 0);
+  std::array<BroadcastRouteRecord, kBroadcastRouteMaxRecords> decoded{};
+  std::size_t count = 0;
+  CHECK_OK(decode_broadcast_route_update(ByteView{bytes.data(), written}, 10, decoded, count));
+  CHECK(count == 2 && decoded[1].via == 20);
+  CHECK(project_broadcast_route_metric(decoded[1], 20) == kInfiniteRouteMetric);
+  CHECK(project_broadcast_route_metric(decoded[1], 30) == 5);
+  auto bad = bytes;
+  bad[2] = 1;  // no trailing records allowed
+  CHECK(!decode_broadcast_route_update(ByteView{bad.data(), written}, 10, decoded, count).ok());
+  CHECK(count == 0);
+  bad = bytes;
+  std::memset(bad.data() + 44, 0, 8);
+  bad[51] = 10;  // a nonself route cannot point back to its sender
+  CHECK(!decode_broadcast_route_update(ByteView{bad.data(), written}, 10, decoded, count).ok());
+  CHECK(count == 0);
+  bad = bytes;
+  // Duplicate destination in the second record.
+  std::memcpy(bad.data() + 28, bad.data() + 4, 8);
+  CHECK(!decode_broadcast_route_update(ByteView{bad.data(), written}, 10, decoded, count).ok());
+  CHECK(count == 0);
+  CHECK(!decode_broadcast_route_update(ByteView{bytes.data(), written - 1}, 10,
+                                       decoded, count).ok());
+  CHECK(count == 0);
+}
+
 // ----------------------------------------------------------------------------
 // Unit: lease rules and config enforcement
 // ----------------------------------------------------------------------------
@@ -277,6 +333,39 @@ void test_scoped_config_enforced() {
     };
     w.add(1);
     CHECK(!w.at(1)->start(0).ok());
+  }
+  {
+    // P5-2: a flat all-destinations dump must not silently accept opt-in.
+    SimWorld w;
+    w.configure = [](NodeConfig& config) { config.route_broadcast = true; };
+    w.add(1);
+    const auto status = w.at(1)->start(0);
+    CHECK(status.code == StatusCode::Unsupported);
+    CHECK(std::string(status.detail) == "BROADCAST_REQUIRES_SCOPED_ROUTES");
+  }
+  {
+    // P5-2: scoped opt-in starts — batched GroupLink advertisements to live
+    // grant holders, unicast everywhere else. The default stays off.
+    SimWorld w;
+    scoped_profile(w, 1, 5000, kScopedProductLifetimeMs);
+    const auto configure = w.configure;
+    w.configure = [configure](NodeConfig& config) {
+      configure(config);
+      config.route_broadcast = true;
+    };
+    w.add(1);
+    CHECK_OK(w.at(1)->start(0));
+    CHECK(w.at(1)->gateway_scoped());
+    SimWorld plain;
+    scoped_profile(plain, 1, 5000, kScopedProductLifetimeMs);
+    plain.add(1);
+    CHECK_OK(plain.at(1)->start(0));
+    std::array<std::uint8_t, kCapabilitiesNonceSize> nonce{};
+    nonce.fill(0x11);
+    CHECK((w.at(1)->build_capabilities_reply(nonce).features &
+           kCapRouteBroadcastV1) != 0);
+    CHECK((plain.at(1)->build_capabilities_reply(nonce).features &
+           kCapRouteBroadcastV1) == 0);
   }
   {
     SimWorld w;  // flat profile keeps its (non-fatal) diagnostic
@@ -611,6 +700,7 @@ RouteScaleStats sum_stats(const SimWorld& w) {
     sum.other_frames += s.other_frames;
     sum.pull_answers += s.pull_answers;
     sum.pulls_sent += s.pulls_sent;
+    sum.broadcast_frames += s.broadcast_frames;
   }
   return sum;
 }
@@ -871,12 +961,848 @@ void test_hundred_node_site() {
   }
 }
 
+// ----------------------------------------------------------------------------
+// P5-2 broadcast: grant lifecycle, batched TX, dedicated RX (V1-K08)
+// ----------------------------------------------------------------------------
+
+void broadcast_profile(SimWorld& w, const NodeId gateway) {
+  scoped_profile(w, gateway, kFastPeriodMs, kFastLifetimeMs);
+  const auto configure = w.configure;
+  w.configure = [configure](NodeConfig& config) {
+    configure(config);
+    config.route_broadcast = true;
+  };
+}
+
+// Owner-stand-in probing: every node in `probers` queries every neighbor.
+// One deterministic nonzero nonce per (querier, peer); renewal/outstanding
+// refusals are normal pacing, never failures.
+//
+// Two pacings shape the round. First, the node's per-origin queue (12)
+// holds queries, replies and route jobs together: bursting all 8 queries
+// at once leaves no room for the replies. Second, the sim dispatches one
+// in-flight frame per poll, so an undrained round trickles over hundreds
+// of ms — and any nonzero exchange latency collides with the 5 s renewal
+// bound (the next round is then refused and its grants lapse). Batches of
+// two with a full same-instant drain between them respect both, the way a
+// real Owner paces its probes and real firmware completes a round in ms.
+void probe_broadcast_grants(SimWorld& w, const std::set<NodeId>& probers,
+                            std::uint64_t& lcg) {
+  std::map<NodeId, std::vector<NodeId>> neighbors;
+  std::size_t most = 0;
+  for (const NodeId node : probers) {
+    if (w.nodes.count(node) == 0) continue;
+    for (const auto& [peer, ptr] : w.nodes) {
+      if (peer != node && w.net.connected(node, peer)) {
+        neighbors[node].push_back(peer);
+      }
+    }
+    most = std::max(most, neighbors[node].size());
+  }
+  constexpr std::size_t kProbeBatch = 2;
+  for (std::size_t base = 0; base < most; base += kProbeBatch) {
+    for (const auto& [node, peers] : neighbors) {
+      for (std::size_t k = 0; k < kProbeBatch && base + k < peers.size();
+           ++k) {
+        std::array<std::uint8_t, kCapabilitiesNonceSize> nonce{};
+        for (auto& byte : nonce) {
+          lcg = lcg * 6364136223846793005ULL + 1442695040888963407ULL;
+          byte = static_cast<std::uint8_t>(lcg >> 33);
+        }
+        nonce[0] |= 0x01;  // the codec refuses an all-zero nonce
+        (void)w.at(node)->send_capabilities_query(peers[base + k], nonce,
+                                                  w.now);
+      }
+    }
+    // ~2 frames per node per pass (poll dispatch + post-drain dispatch);
+    // 8 passes drain a batch several times over, all at one `now`.
+    for (int pass = 0; pass < 8; ++pass) {
+      for (const auto& [node, ptr] : w.nodes) ptr->poll(w.now);
+      w.net.flush(w.now);
+    }
+  }
+}
+
+bool saw_broadcast_update(const SimWorld& w, const NodeId from) {
+  for (const auto& sight : w.net.sights) {
+    if (sight.type == FrameType::RouteUpdate && sight.from == from &&
+        sight.to == kBroadcastNodeId) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Seals an authentic broadcast RouteUpdate from `from` under its test GK.
+bool seal_broadcast_frame(routeloom_test::TestSecurity& security,
+                          const NetworkId network, const NodeId from,
+                          const BroadcastRouteRecord* records,
+                          const std::size_t count,
+                          wire::EncodedFrame& encoded) {
+  wire::PlainFrame frame{};
+  frame.header.network = network;
+  frame.header.type = FrameType::RouteUpdate;
+  frame.header.origin = from;
+  frame.header.previous_hop = from;
+  frame.header.next_hop = kBroadcastNodeId;
+  frame.header.destination = kBroadcastNodeId;
+  frame.header.hop_remaining = 1;
+  frame.header.delivery = DeliveryClass::BestEffort;
+  frame.header.message = MessageId{100 + static_cast<std::uint32_t>(from), 1};
+  frame.header.original_lifetime_ms = 1000;
+  frame.header.remaining_deadline_ms = 1000;
+  frame.header.link_epoch = 1;
+  frame.header.end_epoch = 1;
+  std::size_t written = 0;
+  if (!encode_broadcast_route_update(
+          records, count, from,
+          MutableByteView{frame.payload.data(), frame.payload.size()},
+          written)) {
+    return false;
+  }
+  frame.payload_size = written;
+  return wire::encode_new(frame, security, encoded).ok();
+}
+
+void test_broadcast_grant_lifecycle() {
+  SimWorld w;
+  broadcast_profile(w, 1);
+  w.add(1);
+  w.add(2);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  CHECK(!w.at(1)->peer_broadcast_eligible(2, w.now));  // no grant yet
+  std::uint64_t lcg = 0xBCA57;
+  probe_broadcast_grants(w, {1, 2}, lcg);
+  w.run(100);
+  CHECK(w.at(1)->peer_broadcast_eligible(2, w.now));
+  CHECK(w.at(2)->peer_broadcast_eligible(1, w.now));
+  CHECK_OK(w.at(1)->note_peer_stale(2));
+  CHECK(!w.at(1)->peer_broadcast_eligible(2, w.now));
+  // A legacy peer answers without the bit: probed, but never eligible.
+  const auto configure = w.configure;
+  w.configure = [configure](NodeConfig& config) {
+    configure(config);
+    config.route_broadcast = false;
+  };
+  w.add(3);
+  CHECK_OK(w.at(3)->start(w.now));
+  w.link(1, 3, 1, 1);
+  probe_broadcast_grants(w, {1}, lcg);
+  w.run(100);
+  CHECK(!w.at(1)->peer_broadcast_eligible(3, w.now));
+  // A configured busy grant is exactly the busy permission, never broadcast.
+  CHECK_OK(w.at(1)->set_peer_busy_capable(2, true));
+  CHECK(w.at(1)->peer_busy_capable(2, w.now));
+  CHECK(!w.at(1)->peer_broadcast_eligible(2, w.now));
+  // Expiry returns every peer to unicast.
+  w.run(6000);
+  CHECK(!w.at(1)->peer_broadcast_eligible(2, w.now));
+  CHECK(!w.at(2)->peer_broadcast_eligible(1, w.now));
+  // A fresh probe re-arms; remove + re-add revokes immediately.
+  probe_broadcast_grants(w, {1, 2}, lcg);
+  w.run(100);
+  CHECK(w.at(1)->peer_broadcast_eligible(2, w.now));
+  w.unlink(1, 2);
+  w.link(1, 2, 1, 1);
+  CHECK(!w.at(1)->peer_broadcast_eligible(2, w.now));
+  CHECK(!w.at(2)->peer_broadcast_eligible(1, w.now));
+}
+
+void test_broadcast_batches_downward_refresh() {
+  // G(1) - A(5) - P(2) - C(3), C(4): P reaches the gateway via A, so its two
+  // children share one broadcast refresh while live grants hold; G's single
+  // child keeps unicast.
+  SimWorld w;
+  broadcast_profile(w, 1);
+  for (NodeId id = 1; id <= 6; ++id) w.add(id);
+  w.start_all();
+  w.link(1, 5, 1, 1);
+  w.link(5, 2, 1, 1);
+  w.link(2, 3, 1, 1);
+  w.link(2, 4, 1, 1);
+  w.link(2, 6, 1, 1);  // spare leaf, removed later to force a trigger
+  std::uint64_t lcg = 0xB0A7;
+  const std::set<NodeId> probers{1, 2, 3, 4, 5, 6};
+  probe_broadcast_grants(w, probers, lcg);
+  w.run(3000);
+  for (const NodeId board : {2, 3, 4, 5, 6}) {
+    CHECK(follow_chain(w, board, 1) == 1);
+    CHECK(follow_chain(w, 1, board) == 1);
+  }
+  CHECK(w.at(2)->scoped_child(3));
+  CHECK(w.at(2)->scoped_child(4));
+  // Removing the spare leaf triggers P's downward batch to both children.
+  w.at(2)->remove_neighbor(6, w.now);
+  w.at(6)->remove_neighbor(2, w.now);
+  w.net.disconnect(2, 6);
+  w.run(2000);
+  CHECK(w.at(2)->route_scale_stats().broadcast_frames > 0);
+  CHECK(saw_broadcast_update(w, 2));
+  CHECK(w.at(1)->route_scale_stats().broadcast_frames == 0);  // one child: unicast
+  CHECK(follow_chain(w, 3, 1) == 1);
+  CHECK(follow_chain(w, 4, 1) == 1);
+  // Expired grants fall back to unicast: no new broadcast, still converged.
+  w.run(6000);
+  CHECK(!w.at(2)->peer_broadcast_eligible(3, w.now));
+  CHECK(!w.at(2)->peer_broadcast_eligible(4, w.now));
+  const std::uint64_t broadcast_before =
+      w.at(2)->route_scale_stats().broadcast_frames;
+  const std::uint64_t downward_before =
+      w.at(2)->route_scale_stats().downward_frames;
+  w.unlink(2, 4);
+  w.link(2, 4, 1, 1);
+  w.run(3000);
+  CHECK(w.at(2)->route_scale_stats().broadcast_frames == broadcast_before);
+  CHECK(w.at(2)->route_scale_stats().downward_frames > downward_before);
+  CHECK(follow_chain(w, 3, 1) == 1);
+  CHECK(follow_chain(w, 4, 1) == 1);
+}
+
+void test_broadcast_grant_covers_queue_lifetime() {
+  SimWorld w;
+  broadcast_profile(w, 1);
+  for (NodeId id : {1, 2, 3, 4, 5, 6}) w.add(id);
+  w.start_all();
+  w.link(1, 5, 1, 1);
+  w.link(5, 2, 1, 1);
+  w.link(2, 3, 1, 1);
+  w.link(2, 4, 1, 1);
+  w.link(2, 6, 1, 1);
+  std::uint64_t lcg = 0xB0A7;
+  probe_broadcast_grants(w, {1, 2, 3, 4, 5, 6}, lcg);
+  w.run(3000);
+  CHECK(w.at(2)->scoped_child(3) && w.at(2)->scoped_child(4));
+  // The grants remain live now, but expire before a queued update's one
+  // second send deadline. The triggered update must cover both children by
+  // pairwise unicast instead of relying on those expiring grants.
+  w.now = 4300;
+  CHECK(w.at(2)->peer_broadcast_eligible(3, w.now));
+  CHECK(w.at(2)->peer_broadcast_eligible(4, w.now));
+  const auto broadcasts = w.at(2)->route_scale_stats().broadcast_frames;
+  const auto unicasts = w.at(2)->route_scale_stats().downward_frames;
+  w.unlink(2, 6);
+  w.run(200);
+  CHECK(w.at(2)->route_scale_stats().broadcast_frames == broadcasts);
+  CHECK(w.at(2)->route_scale_stats().downward_frames >= unicasts + 2);
+}
+
+void test_broadcast_direct_gateway_falls_back() {
+  // G(1) - P(2) - C(3), C(4): P's gateway route is direct, so no broadcast
+  // can carry it (no third-node via) — the batch stays unicast and the
+  // tree still converges.
+  SimWorld w;
+  broadcast_profile(w, 1);
+  for (NodeId id = 1; id <= 4; ++id) w.add(id);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.link(2, 3, 1, 1);
+  w.link(2, 4, 1, 1);
+  std::uint64_t lcg = 0xD1EC7;
+  probe_broadcast_grants(w, {1, 2, 3, 4}, lcg);
+  w.run(3000);
+  CHECK(w.at(2)->peer_broadcast_eligible(3, w.now));
+  CHECK(w.at(2)->peer_broadcast_eligible(4, w.now));
+  CHECK(w.at(2)->route_scale_stats().broadcast_frames == 0);
+  CHECK(w.at(2)->route_scale_stats().downward_frames > 0);
+  CHECK(!saw_broadcast_update(w, 2));
+  for (const NodeId board : {2, 3, 4}) {
+    CHECK(follow_chain(w, board, 1) == 1);
+    CHECK(follow_chain(w, 1, board) == 1);
+  }
+}
+
+std::size_t count_diag(const routeloom_test::CapturingObserver* obs, const char* reason) {
+  std::size_t count = 0;
+  for (const auto& d : obs->diagnostics) {
+    if (d == reason) ++count;
+  }
+  return count;
+}
+
+void test_broadcast_rx_gates() {
+  // S(4) advertises the gateway G(1) at metric 5 via P(2). P (the via) must
+  // see infinity and take S as a child; X(3) must learn G via S.
+  SimWorld w;
+  broadcast_profile(w, 1);
+  w.add(1);
+  w.add(2);
+  w.add(3);
+  w.add(4);
+  w.add(5);  // unknown sender: never linked
+  w.start_all();
+  w.link(2, 4, 1, 1);
+  w.link(3, 4, 1, 1);
+  auto seal_from = [&](const NodeId from, const RouteMetric metric,
+                       wire::EncodedFrame& encoded) {
+    BroadcastRouteRecord records[2]{};
+    records[0].route = RouteAdvertisement{from, 1, 7, 0};
+    records[0].via = kInvalidNodeId;
+    records[1].route = RouteAdvertisement{1, 1, 3, metric};
+    records[1].via = 2;
+    return seal_broadcast_frame(*w.security[from], w.network_id, from, records, 2,
+                               encoded);
+  };
+  auto rx_meta = [&](const NodeId node, const NodeId peer) {
+    return routeloom_test::sim_rx_metadata(w.reply_ports[node].get(), peer);
+  };
+  wire::EncodedFrame foreign{};
+  BroadcastRouteRecord foreign_records[2]{};
+  foreign_records[0] = {{4, 1, 7, 0}, kInvalidNodeId};
+  foreign_records[1] = {{1, 1, 3, 1}, 2};
+  CHECK(seal_broadcast_frame(*w.security[4], w.network_id + 1, 4,
+                             foreign_records, 2, foreign));
+  CHECK_OK(w.at(3)->on_radio_receive(4, foreign.view(), rx_meta(3, 4), w.now));
+  CHECK(!w.at(3)->routes().best(1).valid);
+  wire::EncodedFrame bindingless{};
+  CHECK(seal_from(4, 1, bindingless));
+  RadioRxMetadata old_meta{};
+  CHECK_OK(w.at(3)->on_radio_receive(4, bindingless.view(), old_meta, w.now));
+  CHECK(!w.at(3)->routes().best(1).valid);
+  auto replaced_binding = rx_meta(3, 4);
+  ++replaced_binding.binding_generation.value;
+  CHECK_OK(w.at(3)->on_radio_receive(4, bindingless.view(), replaced_binding, w.now));
+  CHECK(!w.at(3)->routes().best(1).valid);
+  w.security[3]->set_accept_group_epoch(false);
+  wire::EncodedFrame zero_time_hint{};
+  CHECK(seal_from(4, 1, zero_time_hint));
+  CHECK_OK(w.at(3)->on_radio_receive(4, zero_time_hint.view(), rx_meta(3, 4), w.now));
+  CHECK_OK(w.at(3)->on_radio_receive(4, zero_time_hint.view(), rx_meta(3, 4), w.now));
+  CHECK(count_diag(w.obs(3), "BROADCAST_UNKNOWN_GK") == 1);
+  w.security[3]->set_accept_group_epoch(true);
+  wire::EncodedFrame p_frame{};
+  CHECK(seal_from(4, 5, p_frame));
+  const std::uint32_t rx_before = w.at(2)->rx_generation();
+  const std::uint32_t work_before = w.at(2)->work_generation();
+  const auto* telemetry_before = w.at(2)->telemetry_peer(4);
+  const std::uint32_t rssi_before = telemetry_before ? telemetry_before->rssi_samples : 0;
+  CHECK_OK(w.at(2)->on_radio_receive(
+      4, p_frame.view(), rx_meta(2, 4), w.now));
+  CHECK(w.at(2)->rx_generation() == rx_before);  // no resume confirmation
+  CHECK(w.at(2)->work_generation() == work_before + 1);  // sleep tickets die
+  const auto* telemetry_after = w.at(2)->telemetry_peer(4);
+  CHECK((telemetry_after ? telemetry_after->rssi_samples : 0) == rssi_before);
+  CHECK(!w.at(2)->peer_broadcast_eligible(4, w.now));  // no grant fabricated
+  CHECK(w.at(2)->scoped_child(4));  // poisoned gateway record = child
+  CHECK(!w.at(2)->routes().best(1).valid);  // via self projects infinity
+  CHECK(w.at(2)->routes().best(4).valid);  // the self record still lands
+  wire::EncodedFrame x_frame{};
+  CHECK(seal_from(4, 5, x_frame));
+  CHECK_OK(
+      w.at(3)->on_radio_receive(4, x_frame.view(), rx_meta(3, 4), w.now));
+  const auto via_s = w.at(3)->routes().best(1);
+  CHECK(via_s.valid && via_s.next_hop == 4 && via_s.metric == 6);
+  // Unknown sender: connected radio, no neighbor — rejected, route untouched.
+  w.net.connect(3, 5);
+  wire::EncodedFrame unknown{};
+  CHECK(seal_from(5, 5, unknown));
+  CHECK_OK(
+      w.at(3)->on_radio_receive(5, unknown.view(), rx_meta(3, 5), w.now));
+  CHECK(!w.at(3)->routes().best(5).valid);
+  CHECK(w.obs(3)->has_diag("BROADCAST_ROUTE_SENDER_REJECTED"));
+  // Attributed transmitter differs from the claimed origin: rejected.
+  wire::EncodedFrame misattributed{};
+  CHECK(seal_from(4, 5, misattributed));
+  CHECK_OK(w.at(3)->on_radio_receive(
+      2, misattributed.view(), rx_meta(3, 2), w.now));
+  CHECK(w.at(3)->routes().best(1).metric == 6);  // unchanged
+  // Stale binding evidence: rejected before the group open.
+  wire::EncodedFrame stale{};
+  CHECK(seal_from(4, 5, stale));
+  auto stale_meta = rx_meta(3, 4);
+  stale_meta.identity_current = false;
+  CHECK_OK(w.at(3)->on_radio_receive(4, stale.view(), stale_meta, w.now));
+  CHECK(w.at(3)->routes().best(1).metric == 6);  // unchanged
+  // Legacy receiver: the ordinary path refuses the broadcast shape.
+  const auto configure = w.configure;
+  w.configure = [configure](NodeConfig& config) {
+    configure(config);
+    config.route_broadcast = false;
+  };
+  w.add(6);
+  CHECK_OK(w.at(6)->start(w.now));
+  w.link(4, 6, 1, 1);
+  wire::EncodedFrame legacy{};
+  CHECK(seal_from(4, 5, legacy));
+  CHECK_OK(
+      w.at(6)->on_radio_receive(4, legacy.view(), rx_meta(6, 4), w.now));
+  CHECK(w.at(6)->routes().best(4).generation == 0);  // self record not applied
+  CHECK(!w.at(6)->routes().best(1).valid);
+  // Unknown GK: a rate-limited hint, never a route. The hint at time zero
+  // suppresses repeats until its one-minute deadline.
+  w.now = 1000;
+  w.security[3]->set_accept_group_epoch(false);
+  wire::EncodedFrame unknown_gk{};
+  CHECK(seal_from(4, 2, unknown_gk));  // better metric — must not apply
+  CHECK_OK(
+      w.at(3)->on_radio_receive(4, unknown_gk.view(), rx_meta(3, 4), w.now));
+  CHECK(w.at(3)->routes().best(1).metric == 6);  // unchanged
+  CHECK(count_diag(w.obs(3), "BROADCAST_UNKNOWN_GK") == 1);
+  wire::EncodedFrame unknown_gk2{};
+  CHECK(seal_from(4, 2, unknown_gk2));
+  CHECK_OK(
+      w.at(3)->on_radio_receive(4, unknown_gk2.view(), rx_meta(3, 4), w.now));
+  CHECK(count_diag(w.obs(3), "BROADCAST_UNKNOWN_GK") == 1);  // coalesced
+  w.now += 61000;
+  wire::EncodedFrame unknown_gk3{};
+  CHECK(seal_from(4, 2, unknown_gk3));
+  CHECK_OK(
+      w.at(3)->on_radio_receive(4, unknown_gk3.view(), rx_meta(3, 4), w.now));
+  CHECK(count_diag(w.obs(3), "BROADCAST_UNKNOWN_GK") == 2);
+  // Bad tag: refused, and the failure pollutes no replay window.
+  w.security[3]->set_accept_group_epoch(true);
+  const std::uint64_t replays_before = w.security.at(3)->group_replays();
+  wire::EncodedFrame tampered{};
+  CHECK(seal_from(4, 2, tampered));
+  tampered.bytes[tampered.size - 1] ^= 0xFF;
+  CHECK_OK(
+      w.at(3)->on_radio_receive(4, tampered.view(), rx_meta(3, 4), w.now));
+  CHECK(w.at(3)->routes().best(1).metric == 6);  // unchanged
+  CHECK(w.security.at(3)->group_replays() == replays_before);
+  // Exact replay of accepted bytes: refused, applied exactly once.
+  wire::EncodedFrame replay{};
+  CHECK(seal_from(4, 2, replay));
+  CHECK_OK(
+      w.at(3)->on_radio_receive(4, replay.view(), rx_meta(3, 4), w.now));
+  CHECK(w.at(3)->routes().best(1).metric == 3);  // 2 + link cost 1
+  CHECK_OK(
+      w.at(3)->on_radio_receive(4, replay.view(), rx_meta(3, 4), w.now));
+  CHECK(w.at(3)->routes().best(1).metric == 3);  // unchanged
+  CHECK(w.security.at(3)->group_replays() == replays_before + 1);
+}
+
+// A pairwise Link the provider reports unusable vetoes broadcast RX even
+// with the sender admitted and the group tag valid.
+class BroadcastLinkGateSecurity final : public SecurityProvider {
+ public:
+  explicit BroadcastLinkGateSecurity(routeloom_test::TestSecurity& inner) : inner_(inner) {}
+  bool ready() const noexcept override { return true; }
+  ContextState context_state(const SecurityScope scope,
+                             const NodeId peer) const noexcept override {
+    if (scope == SecurityScope::Link && peer == gated_peer_ && !link_up_) {
+      return ContextState::None;
+    }
+    return inner_.context_state(scope, peer);
+  }
+  Status tx_group_link_epochs(std::uint32_t& boot, std::uint32_t& g) noexcept override {
+    return inner_.tx_group_link_epochs(boot, g);
+  }
+  bool accepts_group_epoch(const std::uint32_t g) const noexcept override {
+    return inner_.accepts_group_epoch(g);
+  }
+  Status next_counter(const SecurityContext& context,
+                      std::uint64_t& counter) noexcept override {
+    return inner_.next_counter(context, counter);
+  }
+  Status seal(const SecurityContext& context, const std::uint64_t counter,
+              const ByteView aad, const ByteView plaintext,
+              const MutableByteView ciphertext,
+              std::array<std::uint8_t, kAeadTagSize>& tag) noexcept override {
+    return inner_.seal(context, counter, aad, plaintext, ciphertext, tag);
+  }
+  Status open(const SecurityContext& context, const std::uint64_t counter,
+              const ByteView aad, const ByteView ciphertext,
+              const std::array<std::uint8_t, kAeadTagSize>& tag,
+              const MutableByteView plaintext) noexcept override {
+    return inner_.open(context, counter, aad, ciphertext, tag, plaintext);
+  }
+  void set_link_up(const bool up) noexcept { link_up_ = up; }
+
+ private:
+  routeloom_test::TestSecurity& inner_;
+  NodeId gated_peer_{4};
+  bool link_up_{false};
+};
+
+void test_broadcast_rx_requires_pairwise_link() {
+  SimWorld w;
+  broadcast_profile(w, 1);
+  // Receiver 2 runs behind the gating provider; locals outlive the node.
+  routeloom_test::TestSecurity inner;
+  BroadcastLinkGateSecurity gated(inner);
+  routeloom_test::CapturingObserver observer;
+  routeloom_test::SimRadio radio(w.net, 2);
+  NodeConfig config{};
+  config.network = w.network_id;
+  config.node = 2;
+  config.message_session = 102;
+  config.boot_incarnation = 0xB002;
+  config.route_generation = 1;
+  config.link_epoch = 1;
+  config.end_epoch = 1;
+  config.route_gateways = {1, kInvalidNodeId};
+  config.route_advertisement_period_ms = kFastPeriodMs;
+  config.route_lifetime_ms = kFastLifetimeMs;
+  config.route_broadcast = true;
+  routeloom_test::TestSecurity sender_security;
+  routeloom_test::SimReplyPort reply_port(radio, 2, 1);
+  MeshNode node(config, radio, gated, observer);
+  node.set_reply_peer_port(&reply_port);
+  CHECK_OK(node.start(0));
+  CHECK_OK(node.add_neighbor(4, 1, 0));
+  BroadcastRouteRecord records[1]{};
+  records[0].route = RouteAdvertisement{4, 1, 7, 0};
+  records[0].via = kInvalidNodeId;
+  wire::EncodedFrame blocked{};
+  CHECK(seal_broadcast_frame(sender_security, w.network_id, 4, records, 1, blocked));
+  RadioRxMetadataV2 meta = routeloom_test::sim_rx_metadata(&reply_port, 4);
+  CHECK_OK(node.on_radio_receive(4, blocked.view(), meta, 0));
+  CHECK(!node.routes().best(4).valid || node.routes().best(4).generation == 0);
+  CHECK(count_diag(&observer, "BROADCAST_ROUTE_SENDER_REJECTED") == 1);
+  gated.set_link_up(true);
+  wire::EncodedFrame admitted{};
+  CHECK(seal_broadcast_frame(sender_security, w.network_id, 4, records, 1, admitted));
+  CHECK_OK(node.on_radio_receive(4, admitted.view(), meta, 0));
+  CHECK(node.routes().best(4).valid);
+  CHECK(node.routes().best(4).generation == 1);
+  CHECK(count_diag(&observer, "BROADCAST_ROUTE_SENDER_REJECTED") == 1);
+}
+
+void test_broadcast_restart_keeps_link_measurement() {
+  SimWorld w;
+  broadcast_profile(w, 1);
+  w.add(1);
+  w.add(4);
+  w.start_all();
+  w.link(1, 4, 1, 1);
+  w.run(200);
+  const std::uint8_t payload[] = {7};
+  SendOptions options{};
+  options.delivery = DeliveryClass::BestEffort;
+  for (int i = 0; i < 8; ++i) {
+    MessageId id{};
+    CHECK_OK(w.at(1)->send(4, ByteView{payload, sizeof payload}, options, w.now, id));
+  }
+  w.now += 300;
+  for (int i = 0; i < 12; ++i) w.run(0);
+  const RouteMetric measured = w.at(1)->peer_link_cost(4);
+  CHECK(measured > 1);
+  BroadcastRouteRecord self[1]{};
+  self[0] = {{4, 2, 8, 0}, kInvalidNodeId};
+  wire::EncodedFrame update{};
+  CHECK(seal_broadcast_frame(*w.security[4], w.network_id, 4, self, 1, update));
+  CHECK_OK(w.at(1)->on_radio_receive(
+      4, update.view(), routeloom_test::sim_rx_metadata(w.reply_ports[1].get(), 4), w.now));
+  CHECK(w.at(1)->peer_link_cost(4) == measured);
+}
+
+// Probes every 5 s (a grant never outlives its renewal) while running.
+void run_with_probes(SimWorld& w, const std::set<NodeId>& probers,
+                     std::uint64_t& lcg, MonotonicMs duration_ms,
+                     MonotonicMs next_probe_ms) {
+  const MonotonicMs end = w.now + duration_ms;
+  while (w.now < end) {
+    if (w.now >= next_probe_ms) {
+      probe_broadcast_grants(w, probers, lcg);
+      next_probe_ms += 5000;
+    }
+    w.run(0, 5);
+  }
+}
+
+void test_broadcast_topologies() {
+  std::uint64_t lcg = 0x70;
+  // Self/parent/child: 1(G) - 2 - 3 with 2's uplink through 1 and 3 behind 2.
+  {
+    SimWorld w;
+    broadcast_profile(w, 1);
+    for (NodeId id = 1; id <= 3; ++id) w.add(id);
+    w.start_all();
+    w.link(1, 2, 1, 1);
+    w.link(2, 3, 1, 1);
+    const std::set<NodeId> probers{1, 2, 3};
+    probe_broadcast_grants(w, probers, lcg);
+    run_with_probes(w, probers, lcg, 4000, 5000);
+    CHECK(follow_chain(w, 3, 1) == 1);
+    CHECK(follow_chain(w, 1, 3) == 1);
+    CHECK(w.at(1)->scoped_child(2));
+    CHECK(w.at(2)->scoped_child(3));
+    CHECK(!w.at(2)->scoped_child(1));
+    // One child per node: nothing to batch, everything unicast.
+    CHECK(sum_stats(w).broadcast_frames == 0);
+  }
+  // Diamond: two disjoint paths stay loop-free with broadcast on.
+  {
+    SimWorld w;
+    broadcast_profile(w, 1);
+    for (NodeId id = 1; id <= 4; ++id) w.add(id);
+    w.start_all();
+    w.link(1, 2, 1, 1);
+    w.link(1, 3, 1, 1);
+    w.link(2, 4, 1, 1);
+    w.link(3, 4, 1, 1);
+    const std::set<NodeId> probers{1, 2, 3, 4};
+    probe_broadcast_grants(w, probers, lcg);
+    run_with_probes(w, probers, lcg, 4000, 5000);
+    for (const NodeId board : {2, 3, 4}) {
+      CHECK(follow_chain(w, board, 1) == 1);
+      CHECK(follow_chain(w, 1, board) == 1);
+    }
+    MessageId up{};
+    MessageId down{};
+    CHECK(send_data(w, 4, 1, up));
+    CHECK(send_data(w, 1, 4, down));
+    run_with_probes(w, probers, lcg, 2000, 10000);
+    CHECK(w.at(4)->delivery(up).state == DeliveryState::Delivered);
+    CHECK(w.at(1)->delivery(down).state == DeliveryState::Delivered);
+    CHECK(data_sights_loop_free(w.net.sights));
+  }
+  // Ten hops: a line of ten converges end to end.
+  {
+    SimWorld w;
+    broadcast_profile(w, 1);
+    for (NodeId id = 1; id <= 10; ++id) w.add(id);
+    w.start_all();
+    for (NodeId id = 1; id <= 9; ++id) w.link(id, id + 1, 1, 1);
+    std::set<NodeId> probers;
+    for (NodeId id = 1; id <= 10; ++id) probers.insert(id);
+    probe_broadcast_grants(w, probers, lcg);
+    run_with_probes(w, probers, lcg, 8000, 5000);
+    std::size_t hops = 0;
+    CHECK(follow_chain(w, 10, 1, &hops) == 1);
+    CHECK(hops == 9);
+    CHECK(follow_chain(w, 1, 10) == 1);
+    for (NodeId id = 2; id <= 10; ++id) {
+      CHECK(follow_chain(w, id, 1) == 1);
+      CHECK(follow_chain(w, 1, id) == 1);
+    }
+  }
+  // Partition: the far half loses the gateway, then rejoins.
+  {
+    SimWorld w;
+    broadcast_profile(w, 1);
+    for (NodeId id = 1; id <= 4; ++id) w.add(id);
+    w.start_all();
+    w.link(1, 2, 1, 1);
+    w.link(2, 3, 1, 1);
+    w.link(3, 4, 1, 1);
+    const std::set<NodeId> probers{1, 2, 3, 4};
+    probe_broadcast_grants(w, probers, lcg);
+    run_with_probes(w, probers, lcg, 4000, 5000);
+    CHECK(follow_chain(w, 4, 1) == 1);
+    w.unlink(2, 3);
+    run_with_probes(w, probers, lcg, 10000, 10000);
+    CHECK(!w.at(3)->routes().best(1).valid);
+    CHECK(!w.at(4)->routes().best(1).valid);
+    // Rejoin: the re-adds revoked the 2-3 grants, so let the renewal bound
+    // pass, re-probe, and converge again with broadcast back on.
+    w.link(2, 3, 1, 1);
+    w.run(1000);
+    probe_broadcast_grants(w, probers, lcg);
+    w.run(4000);  // inside the fresh grant window (strict expiry bound)
+    CHECK(w.at(2)->peer_broadcast_eligible(3, w.now));
+    CHECK(follow_chain(w, 4, 1) == 1);
+    CHECK(follow_chain(w, 1, 4) == 1);
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Scale: 100 nodes x legacy/mixed/opt-in with the same seed
+// ----------------------------------------------------------------------------
+
+struct BcastModeResult {
+  const char* name{""};
+  MonotonicMs converged_at{0};
+  std::size_t upward_lapses{0};
+  std::size_t downward_lapses{0};
+  std::size_t chain_failures{0};
+  std::size_t loops{0};
+  std::size_t false_routes{0};
+  std::uint64_t route_frames{0};
+  std::uint64_t route_bytes{0};
+  std::uint64_t diag_frames{0};
+  std::uint64_t diag_bytes{0};
+  std::uint64_t broadcast_frames{0};
+  std::uint64_t downward_frames{0};
+  double window_s{0};
+};
+
+// mode 0 = legacy (all unicast), 1 = mixed (the x < 5 half opts in, the
+// gateway side), 2 = all opt-in. Same topology, timers and probe seed;
+// only the opt-in set differs. The mixed boundary is contiguous (a rollout
+// pocket), not checkerboard: batching needs two opting-in children.
+BcastModeResult run_bcast_mode(const int mode) {
+  constexpr int kSide = 10;
+  constexpr std::uint32_t kPeriodMs = kScopedProductPeriodMs;
+  constexpr std::uint32_t kLifetimeMs = kScopedProductLifetimeMs;
+  constexpr MonotonicMs kStepMs = 50;
+  auto id = [](int x, int y) { return static_cast<NodeId>(1 + x * kSide + y); };
+  const NodeId gateway = id(0, 4);
+
+  SimWorld w;
+  w.net.record_sights = false;
+  scoped_profile(w, gateway, kPeriodMs, kLifetimeMs);
+  const auto configure = w.configure;
+  w.configure = [configure, mode](NodeConfig& config) {
+    configure(config);
+    const int x = static_cast<int>((config.node - 1) / kSide);
+    if (mode == 2 || (mode == 1 && x < kSide / 2)) {
+      config.route_broadcast = true;
+    }
+  };
+  for (int x = 0; x < kSide; ++x) {
+    for (int y = 0; y < kSide; ++y) w.add(id(x, y));
+  }
+  w.start_all();
+  for (int x = 0; x < kSide; ++x) {
+    for (int y = 0; y < kSide; ++y) {
+      for (const auto& [dx, dy] : {std::pair{1, 0}, std::pair{0, 1}, std::pair{1, 1},
+                                   std::pair{1, -1}}) {
+        const int nx = x + dx;
+        const int ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= kSide || ny >= kSide) continue;
+        w.link(id(x, y), id(nx, ny), 1, 1);
+      }
+    }
+  }
+  std::set<NodeId> probers;
+  if (mode != 0) {
+    for (const auto& [node, ptr] : w.nodes) {
+      const int x = static_cast<int>((node - 1) / kSide);
+      if (mode == 2 || x < kSide / 2) probers.insert(node);
+    }
+  }
+  std::uint64_t lcg = 0xBCA57;  // same probe seed every mode
+  BcastModeResult result{};
+  result.name = mode == 0 ? "legacy" : mode == 1 ? "mixed" : "opt-in";
+
+  std::vector<NodeId> boards;
+  for (const auto& [node, ptr] : w.nodes) {
+    if (node != gateway) boards.push_back(node);
+  }
+  auto converged = [&]() {
+    for (const NodeId board : boards) {
+      if (follow_chain(w, board, gateway) != 1) return false;
+      if (follow_chain(w, gateway, board) != 1) return false;
+    }
+    return true;
+  };
+  // Probes ride 2.5 s off the 5 s tick grid so every grant covers its tick.
+  MonotonicMs next_probe_ms = 2500;
+  auto step = [&]() {
+    if (!probers.empty() && w.now >= next_probe_ms) {
+      probe_broadcast_grants(w, probers, lcg);
+      next_probe_ms += 5000;
+    }
+    w.run(0, kStepMs);
+  };
+  std::size_t tick = 0;
+  while (w.now <= 120000) {
+    step();
+    if (++tick % 20 == 0 && converged()) {
+      result.converged_at = w.now;
+      break;
+    }
+  }
+
+  const auto tally_before = w.net.route_control_tx;
+  const auto diag_before = w.net.tx_by_type;
+  const RouteScaleStats stats_before = sum_stats(w);
+  const MonotonicMs window_start = w.now;
+  constexpr MonotonicMs kWindowMs = 60000;
+  const MonotonicMs window_end = window_start + kWindowMs;
+  tick = 0;
+  while (w.now < window_end) {
+    step();
+    for (const NodeId board : boards) {
+      if (!w.at(board)->routes().best(gateway).valid) ++result.upward_lapses;
+      if (!w.at(gateway)->routes().best(board).valid) ++result.downward_lapses;
+    }
+    if (++tick % 20 == 0) {
+      for (const NodeId board : boards) {
+        const int up = follow_chain(w, board, gateway);
+        const int dn = follow_chain(w, gateway, board);
+        if (up < 0 || dn < 0) ++result.loops;
+        if (up != 1 || dn != 1) ++result.chain_failures;
+      }
+      for (const auto& [node, ptr] : w.nodes) {
+        const NodeId source = node;
+        ptr->routes().for_each_selected([&](const RouteSelection& selection) {
+          if (selection.valid && selection.destination != source &&
+              follow_chain(w, source, selection.destination) != 1) {
+            ++result.false_routes;
+          }
+        });
+      }
+    }
+  }
+  result.window_s = static_cast<double>(w.now - window_start) / 1000.0;
+  for (const auto& [node, ptr] : w.nodes) {
+    (void)ptr;
+    routeloom_test::SimNetwork::TxTally delta = w.net.route_control_tx[node];
+    const auto it = tally_before.find(node);
+    if (it != tally_before.end()) {
+      delta.frames -= it->second.frames;
+      delta.bytes -= it->second.bytes;
+    }
+    result.route_frames += delta.frames;
+    result.route_bytes += delta.bytes;
+  }
+  {
+    routeloom_test::SimNetwork::TxTally delta =
+        w.net.tx_by_type[FrameType::Diagnostic];
+    const auto it = diag_before.find(FrameType::Diagnostic);
+    if (it != diag_before.end()) {
+      delta.frames -= it->second.frames;
+      delta.bytes -= it->second.bytes;
+    }
+    result.diag_frames = delta.frames;
+    result.diag_bytes = delta.bytes;
+  }
+  const RouteScaleStats stats_after = sum_stats(w);
+  result.broadcast_frames =
+      stats_after.broadcast_frames - stats_before.broadcast_frames;
+  result.downward_frames =
+      stats_after.downward_frames - stats_before.downward_frames;
+  return result;
+}
+
+void test_broadcast_hundred_node_modes() {
+  const BcastModeResult legacy = run_bcast_mode(0);
+  const BcastModeResult mixed = run_bcast_mode(1);
+  const BcastModeResult optin = run_bcast_mode(2);
+  for (const auto* r : {&legacy, &mixed, &optin}) {
+    CHECK(r->converged_at != 0);
+    CHECK(r->upward_lapses == 0);
+    CHECK(r->downward_lapses == 0);
+    CHECK(r->chain_failures == 0);
+    CHECK(r->loops == 0);
+    CHECK(r->false_routes == 0);
+  }
+  CHECK(legacy.broadcast_frames == 0);
+  CHECK(mixed.broadcast_frames > 0);
+  CHECK(optin.broadcast_frames > 0);
+  // Batching replaces downward unicasts one-for-many: fewer route frames.
+  CHECK(optin.route_frames < legacy.route_frames);
+  for (const auto* r : {&legacy, &mixed, &optin}) {
+    const routeloom_test::SimNetwork::TxTally route{r->route_frames,
+                                                   r->route_bytes};
+    const routeloom_test::SimNetwork::TxTally diag{r->diag_frames,
+                                                  r->diag_bytes};
+    const double route_us = static_cast<double>(airtime_us(route)) / r->window_s;
+    const double diag_us = static_cast<double>(airtime_us(diag)) / r->window_s;
+    std::fprintf(stderr,
+                 "  bcast-100: %-7s converged=%6llu ms lapses=%zu/%zu chain=%zu loops=%zu false=%zu "
+                 "route=%llu frames (%7.0f us/s) cap=%llu frames (%7.0f us/s) "
+                 "total=%7.0f us/s down_uni=%llu bcast=%llu\n",
+                 r->name, static_cast<unsigned long long>(r->converged_at),
+                 r->upward_lapses, r->downward_lapses, r->chain_failures,
+                 r->loops, r->false_routes, static_cast<unsigned long long>(r->route_frames),
+                 route_us, static_cast<unsigned long long>(r->diag_frames),
+                 diag_us, route_us + diag_us,
+                 static_cast<unsigned long long>(r->downward_frames),
+                 static_cast<unsigned long long>(r->broadcast_frames));
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   const std::string mode = argc > 1 ? argv[1] : "";
   if (mode.empty() || mode == "unit") {
     test_route_request_codec();
+    test_follow_chain_requires_live_edges();
+    test_broadcast_route_payload();
     test_lease_rules();
     test_scoped_config_enforced();
     test_tombstone_outlives_lease();
@@ -887,9 +1813,18 @@ int main(int argc, char** argv) {
     test_on_demand_discovery();
     test_flat_node_ignores_route_request();
     test_scoped_loop_freedom_under_churn();
+    test_broadcast_grant_lifecycle();
+    test_broadcast_batches_downward_refresh();
+    test_broadcast_grant_covers_queue_lifetime();
+    test_broadcast_direct_gateway_falls_back();
+    test_broadcast_rx_gates();
+    test_broadcast_rx_requires_pairwise_link();
+    test_broadcast_restart_keeps_link_measurement();
+    test_broadcast_topologies();
   }
   if (mode.empty() || mode == "scale") {
     test_hundred_node_site();
+    test_broadcast_hundred_node_modes();
   }
   if (failures != 0) {
     std::fprintf(stderr, "%d routing-scale checks failed\n", failures);

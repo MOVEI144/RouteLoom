@@ -783,6 +783,37 @@ void test_group_gcm_replay() {
   in.key.fill(0xA5);
   in.overlap_s = 10;
   CHECK_OK(keys.advance(in, 101));
+  SecurityContext staged_link{SecurityScope::GroupLink,
+                              static_cast<std::uint32_t>(site.network), 0x100,
+                              kBroadcastNodeId, site.boot_witness + 1,
+                              site.gk_epoch_current + 1, 0, 0};
+  ScopeDigest staged_prk{};
+  keys::TrafficKey staged_traffic{};
+  keys::AeadNonce staged_nonce{};
+  keys::group_prk(site.network, store.site().gk_next, staged_prk);
+  CHECK_OK(keys::group_bcast_key(staged_prk, staged_link.group_epoch,
+                                 staged_link.sender, staged_link.epoch,
+                                 staged_traffic));
+  CHECK_OK(keys::aead_nonce(staged_traffic.iv, 7, staged_nonce));
+  const std::uint8_t staged_aad[] = {42};
+  const std::uint8_t staged_plain[] = {1, 2, 3};
+  std::array<std::uint8_t, 3 + kAeadTagSize> staged_sealed{};
+  std::array<std::uint8_t, kAeadTagSize> staged_tag{};
+  std::array<std::uint8_t, 3> staged_opened{};
+  CHECK(aead->seal(aead->ctx, staged_traffic.key.data(), staged_nonce.data(),
+                   ByteView{staged_aad, 1}, ByteView{staged_plain, 3},
+                   staged_sealed.data()));
+  std::memcpy(staged_tag.data(), staged_sealed.data() + 3, staged_tag.size());
+  const auto staged_writes = storage.write_calls;
+  CHECK(receiver.open(staged_link, 7, ByteView{staged_aad, 1},
+                      ByteView{staged_sealed.data(), 3}, staged_tag,
+                      MutableByteView{staged_opened.data(), staged_opened.size()}).code ==
+        StatusCode::Busy);
+  CHECK((staged_opened == std::array<std::uint8_t, 3>{}));
+  CHECK(storage.write_calls == staged_writes && keys.promotion_pending());
+  keys::clear(staged_traffic);
+  secure_clear(staged_prk);
+  secure_clear(staged_nonce);
   // An insider can send under a staged GK. A verified tag schedules the
   // promotion, but cannot reach application plaintext before twin commit.
   NoPairwise no_session;
@@ -1662,6 +1693,38 @@ void test_resume2_incremental_lookup() {
   CHECK(cursor.ambiguous && !cursor.match.valid);
 }
 
+void test_resume2_incremental_revocation_and_clear() {
+  FaultyResumeStorage2 storage(6);
+  ResumeCache2 cache(storage, 3, 3);
+  CHECK_OK(cache.put(resume2_slot(100), context()));
+  CHECK_OK(cache.put(resume2_slot(101), context()));
+  RevocationSet rrs = revocation_set(1, 0);
+  rrs.entries[0] = RevocationEntry{100, 2, RevocationReason::Lost};
+  rrs.count = 1;
+  std::size_t cursor = 0;
+  bool done = false;
+  storage.cut_call = storage.write_calls;
+  CHECK(cache.sweep_revoked(context(203, &rrs), cursor, done).code ==
+        StatusCode::StorageFailure);
+  CHECK(cursor == 0 && !done);
+  storage.disarm();
+  while (!done) {
+    const std::size_t before = storage.read_calls;
+    CHECK_OK(cache.sweep_revoked(context(203, &rrs), cursor, done));
+    CHECK(storage.read_calls - before <= 2);
+  }
+  ResumeSlot2 slot{};
+  bool intact = false;
+  CHECK_OK(cache.read_at(0, slot, intact));
+  CHECK(intact && !slot.valid);
+  CHECK_OK(cache.find_by_peer(ResumePurpose::Link, 101, context(), slot, cursor));
+  cursor = 0;
+  done = false;
+  while (!done) CHECK_OK(cache.clear_step(cursor, done));
+  CHECK(cache.find_by_peer(ResumePurpose::Link, 101, context(), slot, cursor).code ==
+        StatusCode::NotFound);
+}
+
 void test_resume2_uses() {
   // The 64-use ceiling holds across reboots; one RMS generation costs at
   // most 8 durable reservation writes (P4 §6.2, V1-F05). Each boot drops
@@ -1896,8 +1959,8 @@ void test_ram_footprint() {
               sizeof(LocalRevocationStore));
   CHECK(sizeof(ResumeCache) <= 128);
   CHECK(sizeof(ResumeCache2) <= 512);
-  CHECK(sizeof(IdentityStore) <= 2 * kIdentitySlotBytes);
-  CHECK(sizeof(SiteStore) <= 2 * kSiteSlotBytes);
+  CHECK(sizeof(IdentityStore) <= 1408);
+  CHECK(sizeof(SiteStore) <= 1536);
   CHECK(sizeof(RevocationStore) <= 2 * kRevocationSlotBytes);
   // The 108 B record is dwarfed by the shared pair machinery; the bound is
   // the record plus one slot buffer plus that fixed overhead.
@@ -1993,6 +2056,7 @@ int main() {
   test_resume2_cache_rules();
   test_resume2_find_by_id();
   test_resume2_incremental_lookup();
+  test_resume2_incremental_revocation_and_clear();
   test_resume2_uses();
   test_resume2_power_cuts();
   test_local_revocation_basic();

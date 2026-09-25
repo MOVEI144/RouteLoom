@@ -92,6 +92,14 @@ Status encode_frame(FrameKind kind, std::uint16_t flags, std::uint64_t session,
                     MutableByteView scratch, MutableByteView out,
                     std::size_t& written) noexcept;
 
+// `buffer` initially holds the body at offset zero. It has room for the
+// header and CRC, and is consumed in place before COBS writes to `out`.
+// Useful for a static TX pump that does not retain the body after encoding.
+Status encode_frame_inplace(FrameKind kind, std::uint16_t flags, std::uint64_t session,
+                            std::uint64_t request, MutableByteView buffer,
+                            std::size_t body_size, MutableByteView out,
+                            std::size_t& written) noexcept;
+
 // Validates and splits one decoded (post-COBS) buffer. `out.body` aliases
 // `decoded`. Checks magic, version, kind, exact body_len and CRC.
 Status decode_frame(ByteView decoded, UsbFrame& out) noexcept;

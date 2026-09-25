@@ -279,6 +279,11 @@ struct AuthorityPullRequest {
   PullReason reason{PullReason::BootReconnectSync};
 };
 
+struct AuthorityTypedRequest {
+  std::uint8_t type{0};
+  ByteView body{};  // type 5/6/7 tail, copied before advance returns
+};
+
 enum class AuthorityInputKind : std::uint8_t {
   Start = 0,
   RxCarrier,
@@ -286,6 +291,7 @@ enum class AuthorityInputKind : std::uint8_t {
   Tick,
   RequestPull,
   Suspend,
+  SendTyped,
 };
 
 struct AuthorityInput {
@@ -294,6 +300,7 @@ struct AuthorityInput {
   AuthorityRxCarrier rx{};
   AuthorityTxResult tx{};
   AuthorityPullRequest pull{};
+  AuthorityTypedRequest typed{};
 };
 
 // Secret-free view of the channel. Safe to log and to read from callbacks.
@@ -354,6 +361,7 @@ class AuthorityClient final {
   Status on_tx_result(const AuthorityTxResult& tx) noexcept;
   Status on_tick(MonotonicMs now) noexcept;
   Status on_pull(const AuthorityPullRequest& pull, MonotonicMs now) noexcept;
+  Status on_typed(const AuthorityTypedRequest& typed, MonotonicMs now) noexcept;
   Status on_suspend() noexcept;
 
   Status begin_handshake(MonotonicMs now) noexcept;

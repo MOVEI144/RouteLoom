@@ -38,6 +38,7 @@
 #include "routeloom/bootstrap_transport.hpp"
 #include "routeloom/discovery.hpp"
 #include "routeloom/discovery_scope.hpp"
+#include "routeloom/sdkv1_ead.hpp"
 #include "routeloom/rlres1.hpp"
 #include "routeloom/sdkv1_authority.hpp"
 #include "routeloom/sdkv1_dev_session.hpp"
@@ -109,6 +110,7 @@ enum class CoordinatorEventKind : std::uint8_t {
   PrepareSleep,    // Busy while work is outstanding, else parks sleeping
   Wake,            // resume polling after sleep
   Stop,            // full stop back to Fresh (wipes the mode workspace)
+  StopForLifecycle, // journaled removal/switch: Owner sweeps durable RLP2 one slot per Poll
 };
 
 struct CoordinatorEvent {
@@ -189,6 +191,9 @@ struct CoordinatorRemoval {
   std::uint64_t site_id{0};
   std::uint32_t generation{0};
   RemovalNotice notice{};
+  // The verified 103 B notice object the Joiner acted on, for the P6
+  // lifecycle's journaled erasure (it re-verifies the COSE itself).
+  std::array<std::uint8_t, kRemovalNoticeObjectSize> object{};
 };
 
 struct CoordinatorAction {
@@ -266,6 +271,13 @@ struct CoordinatorCounters {
 };
 
 // The Owner. See the header comment for the ownership map.
+class AuthorityVerifiedSink {
+ public:
+  virtual ~AuthorityVerifiedSink() = default;
+  // Called inside the channel's receive guard; copy only and dispatch later.
+  virtual void on_verified_authority(std::uint8_t type, ByteView plaintext) noexcept = 0;
+};
+
 class SecurityCoordinator final : public BootstrapSink,
                                    public JoinDirectPort,
                                    public JoinCommitPolicy,
@@ -301,6 +313,7 @@ class SecurityCoordinator final : public BootstrapSink,
     // (a different port than the bank's split-tag AeadGcm above).
     routeloom::AeadGcm crypto_aead{};
     JoinCookieSealer* proxy_sealer{nullptr};
+    AuthorityVerifiedSink* authority_sink{nullptr};
     MacAddress local_mac{};
     NodeId local_node{kInvalidNodeId};
     JoinerConfig joiner_config{};
@@ -407,6 +420,52 @@ class SecurityCoordinator final : public BootstrapSink,
     deps_.discovery = &discovery;
     return Status::success();
   }
+  // Detaches the member discovery (P6 cutover re-adoption): the
+  // firmware destroys the old-network engine and attaches a fresh one.
+  // Refuses unless `discovery` is the attached instance.
+  Status detach_discovery(NeighborDiscovery& discovery) noexcept {
+    if (deps_.discovery != &discovery) {
+      return Status::error(StatusCode::InvalidArgument, "foreign discovery detach");
+    }
+    deps_.discovery = nullptr;
+    return Status::success();
+  }
+
+  // --- P6 lifecycle connection points (G-SEC P6 PR D) ---------------------------
+  // Driven by the firmware Owner's MembershipLifecycle drain. Each is a
+  // small, explicit hook — never a callback into the lifecycle — and
+  // refuses Busy while a port callback runs inside.
+  //
+  // Starts a recovery join over the retained stores (SelfRevoked /
+  // link-failure recovery, #139): the member engine stops (traffic
+  // halted, bank/scope/cookies scrubbed) and the Joiner re-proves the
+  // membership in VerifyExistingMembership mode. Member mode only; the
+  // stores are untouched, so completion re-adopts (MemberReady),
+  // lands the removal (RemovalRequired) or reports recovery. The mesh
+  // node and discovery stay up: recovery never changes the network.
+  Status start_recovery_join(MonotonicMs now) noexcept;
+  // Names the last removed (site, generation) from the RLX1 journal's
+  // UnassignedReady watermark; both zero clears. Consumed at every
+  // Joiner start so a post-removal Allow for an older generation of
+  // the same site refuses. Harmless for recovery joins: the retained
+  // generation always exceeds any removed one.
+  void set_removal_watermark(std::uint64_t site_id, std::uint32_t generation) noexcept {
+    removal_watermark_site_id_ = site_id;
+    removal_watermark_generation_ = generation;
+  }
+  // Wipes the member site trust held outside the stores (GK scope,
+  // discovery membership) and verifies it is gone. Idempotent: safe to
+  // re-assert after traffic already stopped.
+  Status wipe_site_trust() noexcept;
+  // Enforces an adopted RRS1 over the live member state: cancels
+  // in-flight handshakes, retires every bank session of a rejected
+  // peer, revokes the Discovery binding. RLP1 is swept by the
+  // lifecycle itself; RLP2 lookups already fence on the adopted set.
+  // No-op outside Member mode. Over-retires peers that re-authed
+  // under a newer generation since (they re-handshake through the
+  // limited reauth path) — never under-retires.
+  Status revoke_member_sessions(const RevocationSet& set, std::uint32_t site_epoch,
+                                MonotonicMs now) noexcept;
   // Attaches the authority transport port (once): the mesh endpoint on a
   // device, the direct USB port on a gateway. Until attached the channel
   // stages its carriers and retries on Tick; detaching is not supported
@@ -424,6 +483,7 @@ class SecurityCoordinator final : public BootstrapSink,
     if (mode_ == CoordinatorMode::Dev) return AuthoritySnapshot{};
     return small().authority.snapshot();
   }
+  Status send_authority_typed(std::uint8_t type, ByteView body, MonotonicMs now) noexcept;
   // Adopted GK epochs for the 0x66 QueryLocal answer (0/0 pre-adoption;
   // false until the member config lands).
   bool group_epochs(std::uint32_t& current, std::uint32_t& next) const noexcept {
@@ -456,6 +516,8 @@ class SecurityCoordinator final : public BootstrapSink,
   bool revoked(NodeId peer, std::uint32_t generation) const noexcept override;
   bool authenticated(NodeId peer, NetworkId network, std::uint32_t& generation,
                      std::uint32_t& role) const noexcept override;
+  bool authenticated_link(NodeId peer, NetworkId network, std::uint32_t& generation,
+                          std::uint32_t& role) const noexcept;
   bool boot_witness_ok(std::uint32_t witness) const noexcept override;
   // AuthorityObserver (channel context): counts verified events. Never
   // drives the channel (no advance from the callback).
@@ -613,7 +675,7 @@ class SecurityCoordinator final : public BootstrapSink,
   Status on_channel_ready(const CoordinatorEvent& event) noexcept;
   Status on_prepare_sleep(MonotonicMs now) noexcept;
   Status on_wake(MonotonicMs now) noexcept;
-  Status on_stop(MonotonicMs now) noexcept;
+  Status on_stop(MonotonicMs now, bool defer_resume_clear = false) noexcept;
   // --- authority channel legs ---
   Status on_authority_rx(const CoordinatorEvent& event) noexcept;
   Status on_authority_tx(const CoordinatorEvent& event) noexcept;
@@ -675,8 +737,9 @@ class SecurityCoordinator final : public BootstrapSink,
   void on_joiner_action(const JoinAction& action, MonotonicMs now) noexcept;
   void emit_action(const CoordinatorAction& action) noexcept;
   // --- removal ---
-  Status land_removal(const RemovalNotice& notice, MonotonicMs now) noexcept;
-  void stop_traffic() noexcept;
+  Status land_removal(const RemovalNotice& notice, ByteView removal_object,
+                      MonotonicMs now) noexcept;
+  void stop_traffic(bool clear_resume = true) noexcept;
   // The real quiescence check, for PrepareSleep (which runs inside step()
   // with the re-entry guard set, where the public query answers false).
   bool quiescent_locked() const noexcept;
@@ -860,6 +923,8 @@ class SecurityCoordinator final : public BootstrapSink,
   MonotonicMs last_now_{0};
   bool removal_holdoff_armed_{false};
   MonotonicMs removal_holdoff_at_{0};
+  std::uint64_t removal_watermark_site_id_{0};
+  std::uint32_t removal_watermark_generation_{0};
   CoordinatorCounters counters_{};
   // Sleep restore one-shot state (P4 §9.3): the consumed image waits
   // in the small side while the parent re-binds post-wake. Terminal once

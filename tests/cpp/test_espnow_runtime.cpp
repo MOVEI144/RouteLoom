@@ -175,6 +175,26 @@ void test_security_callback_cannot_reenter_owner_lease() {
   runtime.stop();
 }
 
+void test_p6_binding_tracks_current_receive_context() {
+  idf_stub::reset();
+  ReenteringSecurity security;
+  CapturingObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize().ok());
+  CHECK(runtime.start().ok());
+  CHECK(runtime.register_neighbor(kPeer, peer_mac(), 1).ok());
+  std::uint32_t binding = 0;
+  CHECK(runtime.p6_link_binding(kPeer, binding).ok());
+  CHECK(binding == 1);
+  security.rx_context = 2;
+  CHECK(runtime.p6_link_binding(kPeer, binding).ok());
+  CHECK(binding == 2);
+  security.rx_context = 0;
+  CHECK(runtime.p6_link_binding(kPeer, binding).code == routeloom::StatusCode::InvalidState);
+  CHECK(binding == 0);
+  runtime.stop();
+}
+
 // The runtime installs its lease port before node start: without it the
 // node refuses to start ("reply peer port not attached") and no firmware
 // admission can run at all.
@@ -479,6 +499,32 @@ void test_driver_release_waits_for_use_and_callback() {
   runtime.stop();
 }
 
+// A broadcast uses the Owner's reserved physical slot and the permanent
+// driver peer, not a transient NodeId->MAC mapping or raw-send lane.
+void test_route_broadcast_uses_reserved_radio_slot() {
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize().ok());
+  CHECK(runtime.start().ok());
+  const std::uint8_t frame = 0x42;
+  CHECK(runtime.send(routeloom::kBroadcastNodeId, 1, ByteView{&frame, 1}).ok());
+  CHECK(idf_stub::send_count() == 1);
+  CHECK(idf_stub::last_send_to(routeloom::discovery_const::kBroadcastMac.data()));
+  CHECK(runtime.send(routeloom::kBroadcastNodeId, 2, ByteView{&frame, 1}).code ==
+        routeloom::StatusCode::WouldBlock);
+  const auto airtime_before = runtime.node().congestion_stats().service_us_misc;
+  idf_stub::advance_ms(2);
+  CHECK(idf_stub::complete_send(true));
+  runtime.poll_once();
+  CHECK(runtime.node().congestion_stats().service_us_misc >= airtime_before + 2000);
+  CHECK(runtime.node().telemetry_peer(routeloom::kBroadcastNodeId) == nullptr);
+  CHECK(runtime.send(routeloom::kBroadcastNodeId, 2, ByteView{&frame, 1}).ok());
+  CHECK(idf_stub::complete_send(false));
+  runtime.stop();
+}
+
 void test_driver_delete_failure_keeps_slot_occupied() {
   idf_stub::reset();
   TestSecurity security;
@@ -656,12 +702,14 @@ int main() {
   test_boot_installs_lease_port();
   test_prestart_owner_pump();
   test_security_callback_cannot_reenter_owner_lease();
+  test_p6_binding_tracks_current_receive_context();
   test_reliable_to_static_peer_uses_binding();
   test_old_rx_epoch_cannot_acquire_current_binding();
   test_distinct_session_tx_and_rx_contexts();
   test_stop_drains_node_reply_uses();
   test_stale_binding_keeps_reserved_reply_sendable();
   test_driver_release_waits_for_use_and_callback();
+  test_route_broadcast_uses_reserved_radio_slot();
   test_driver_delete_failure_keeps_slot_occupied();
   test_failed_static_registration_does_not_claim_a_slot();
   test_route_capacity_registration_rolls_back_driver_peer();

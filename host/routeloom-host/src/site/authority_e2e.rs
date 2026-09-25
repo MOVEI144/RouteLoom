@@ -21,9 +21,9 @@ use routeloom_protocol::host_ops::{
 use routeloom_provision::sdkv1::revocation::RevocationReason;
 use routeloom_provision::sha256::sha256;
 
-use super::group_keys::HostTime;
+use super::group_keys::{GkSecret, GroupKeyCommand, HostTime, RotationCause};
 use super::records::{Verdict, ROLE_ENDPOINT};
-use super::store::MemoryStore;
+use super::store::{MemoryStore, SiteStore, SqliteSiteStore};
 use super::testkit::{self, AuthorityNet, FakeDevice, Outcome, SimDevice};
 use super::transport::InProcessTransport;
 use super::usb::{authority_sub, UsbAuthorityAdapter};
@@ -44,15 +44,17 @@ struct Rig {
     rng_state: u64,
     transfer: u32,
     now: u64,
+    mono_offset: u64,
     request_id: u64,
 }
 
 impl Rig {
     fn new() -> Self {
-        let service = Arc::new(SiteService::new(testkit::authority(
-            Box::<MemoryStore>::default(),
-            T0,
-        )));
+        Self::with_store(Box::<MemoryStore>::default())
+    }
+
+    fn with_store(store: Box<dyn SiteStore>) -> Self {
+        let service = Arc::new(SiteService::new(testkit::authority(store, T0)));
         let relay = InProcessTransport::new();
         service.set_transport(relay.clone());
         service.set_group_key_transport(ChannelGroupKeyTransport::new(&service));
@@ -65,6 +67,7 @@ impl Rig {
             rng_state: 0x1234_5678_9ABC_DEF0,
             transfer: 0,
             now: T0,
+            mono_offset: 0,
             request_id: 0,
         }
     }
@@ -158,7 +161,10 @@ impl Rig {
                     up.device,
                     up.kind,
                     &up.bytes,
-                    HostTime::sync(self.now),
+                    HostTime {
+                        unix_ms: self.now,
+                        mono_ms: self.now - self.mono_offset,
+                    },
                     &mut rng,
                 ));
                 self.rng_state = state;
@@ -214,12 +220,344 @@ impl Rig {
 
     fn tick(&mut self) -> Events {
         self.now += 1_000;
-        self.service.tick(HostTime::sync(self.now))
+        self.service.tick(HostTime {
+            unix_ms: self.now,
+            mono_ms: self.now - self.mono_offset,
+        })
     }
 }
 
 fn has_kind(events: &Events, kind: &str) -> bool {
     events.iter().any(|(_, fields)| fields.contains(kind))
+}
+
+#[test]
+fn live_channel_idle_uses_monotonic_time_after_group_key_send() {
+    let mut rig = Rig::new();
+    let _ = rig.join(NODE_A, 0xA1, T0);
+    rig.mono_offset = T0 - 1_000;
+    let row = rig.service.with(|a| a.devices[&NODE_A].clone()).0;
+    let (r1, mut peer) = FakeDevice::begin(NODE_A, row.dams, 0xA001, [0x11; 16], rig.net());
+    rig.handshake(NODE_A, &mut peer, r1);
+    let next = rig.service.with(|a| a.gks.active_epoch() + 1).0;
+    rig.service
+        .seal_group_key(
+            GroupKeyCommand::Update {
+                node: NODE_A,
+                epoch: next,
+                key: GkSecret::new([0xA5; 32]),
+                cause: RotationCause::Manual,
+                overlap_s: RotationCause::Manual.overlap_s(),
+            },
+            Some(&row.dams),
+        )
+        .unwrap();
+    let _ = rig.service.with(|_| ());
+    let idle = 1_000 + super::authority_channel::IDLE_RETIRE_MS + 1;
+    let events = rig.service.tick(HostTime {
+        unix_ms: T0 + idle,
+        mono_ms: idle,
+    });
+    assert!(has_kind(&events, "authority.channel_lost"), "{events:?}");
+}
+
+#[test]
+fn live_revoke_persists_presealed_notice_before_delivery() {
+    let mut rig = Rig::new();
+    let _ = rig.join(NODE_A, 0xA1, T0);
+    let row = rig.service.with(|a| a.devices[&NODE_A].clone()).0;
+    let (r1, mut peer) = FakeDevice::begin(NODE_A, row.dams, 0xA001, [0x11; 16], rig.net());
+    rig.handshake(NODE_A, &mut peer, r1);
+    let request = RevokeRequest {
+        device: NODE_A,
+        expected_generation: row.generation,
+        reason: RevocationReason::Removed,
+        key: "presealed-notice".into(),
+    };
+    rig.service
+        .with(|a| a.revoke(KGUARD, request, HostTime::sync(T0)))
+        .0
+        .unwrap();
+    let (notice_doc, sealed) = rig
+        .service
+        .with(|a| {
+            a.operations
+                .values()
+                .find(|op| op.kind == "revoke" && op.node == NODE_A)
+                .and_then(|op| op.notice.as_ref())
+                .map(|notice| (notice.doc(), notice.sealed.clone()))
+                .unwrap()
+        })
+        .0;
+    assert!(notice_doc.contains("\"sealed\":\""), "{notice_doc}");
+    let sealed = sealed.unwrap();
+    let parsed =
+        super::revocation::NoticeState::from_doc(&routeloom_json::parse(&notice_doc).unwrap())
+            .unwrap();
+    assert_eq!(parsed.sealed, Some(sealed.clone()));
+    let mut delivered = false;
+    for _ in 0..5 {
+        rig.tick();
+        delivered |= rig.recv_downs().iter().any(|(node, kind, bytes)| {
+            *node == NODE_A && *kind == CarrierKind::Envelope && *bytes == sealed
+        });
+    }
+    assert!(delivered, "the committed ciphertext must be the one sent");
+}
+
+#[test]
+fn detached_usb_keeps_presealed_notice_for_reconnect() {
+    let mut rig = Rig::new();
+    let _ = rig.join(NODE_A, 0xA1, T0);
+    let row = rig.service.with(|a| a.devices[&NODE_A].clone()).0;
+    let (r1, mut peer) = FakeDevice::begin(NODE_A, row.dams, 0xA001, [0x11; 16], rig.net());
+    rig.handshake(NODE_A, &mut peer, r1);
+    rig.service.set_authority_transport(None);
+    rig.service
+        .with(|a| {
+            a.revoke(
+                KGUARD,
+                RevokeRequest {
+                    device: NODE_A,
+                    expected_generation: row.generation,
+                    reason: RevocationReason::Removed,
+                    key: "reconnect-notice".into(),
+                },
+                HostTime::sync(T0),
+            )
+        })
+        .0
+        .unwrap();
+    for _ in 0..5 {
+        rig.tick();
+    }
+    let attempts = rig
+        .service
+        .with(|a| {
+            a.operations
+                .values()
+                .find(|op| op.kind == "revoke" && op.node == NODE_A)
+                .unwrap()
+                .notice
+                .as_ref()
+                .unwrap()
+                .attempts
+        })
+        .0;
+    assert_eq!(attempts, 0, "a detached USB lane cannot deliver");
+    let sealed = rig
+        .service
+        .with(|a| {
+            a.operations
+                .values()
+                .find(|op| op.kind == "revoke" && op.node == NODE_A)
+                .unwrap()
+                .notice
+                .as_ref()
+                .unwrap()
+                .sealed
+                .clone()
+                .unwrap()
+        })
+        .0;
+    rig.service.set_authority_transport(Some(rig.usb.clone()));
+    let mut saw_notice = false;
+    for _ in 0..30 {
+        rig.tick();
+        for (_, kind, bytes) in rig.recv_downs() {
+            if kind == CarrierKind::Envelope && bytes == sealed {
+                saw_notice = true;
+            }
+        }
+    }
+    assert!(saw_notice);
+}
+
+#[test]
+fn host_restart_replays_exact_committed_notice_without_channel() {
+    let path = std::env::temp_dir().join(format!(
+        "routeloom-p6-presealed-{}-{}.db",
+        std::process::id(),
+        T0
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut rig = Rig::with_store(Box::new(SqliteSiteStore::open(&path).unwrap()));
+    let _ = rig.join(NODE_A, 0xA1, T0);
+    let row = rig.service.with(|a| a.devices[&NODE_A].clone()).0;
+    let (r1, mut peer) = FakeDevice::begin(NODE_A, row.dams, 0xA001, [0x11; 16], rig.net());
+    rig.handshake(NODE_A, &mut peer, r1);
+    rig.service
+        .with(|a| {
+            a.revoke(
+                KGUARD,
+                RevokeRequest {
+                    device: NODE_A,
+                    expected_generation: row.generation,
+                    reason: RevocationReason::Removed,
+                    key: "restart-notice".into(),
+                },
+                HostTime::sync(T0),
+            )
+        })
+        .0
+        .unwrap();
+    let sealed = rig
+        .service
+        .with(|a| {
+            a.operations
+                .values()
+                .find(|op| op.kind == "revoke" && op.node == NODE_A)
+                .unwrap()
+                .notice
+                .as_ref()
+                .unwrap()
+                .sealed
+                .clone()
+                .unwrap()
+        })
+        .0;
+    drop(rig);
+    let mut restarted = Rig::with_store(Box::new(SqliteSiteStore::open(&path).unwrap()));
+    restarted.tick();
+    assert!(restarted
+        .recv_downs()
+        .iter()
+        .any(|(node, kind, bytes)| *node == NODE_A
+            && *kind == CarrierKind::Envelope
+            && *bytes == sealed));
+    drop(restarted);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn live_p6_uses_the_existing_usb_authority_channel() {
+    let mut rig = Rig::new();
+    let _a = rig.join(NODE_A, 0xA1, T0);
+    let _b = rig.join(NODE_B, 0xB2, T0 + 100);
+    assert_eq!(
+        rig.service.with(|a| a.p6_distribution_status()).0,
+        "rrs_ready"
+    );
+
+    let a = rig.service.with(|s| s.devices[&NODE_A].clone()).0;
+    let b = rig.service.with(|s| s.devices[&NODE_B].clone()).0;
+    let (r1_a, mut peer_a) = FakeDevice::begin(NODE_A, a.dams, 0xA001, [0x11; 16], rig.net());
+    rig.handshake(NODE_A, &mut peer_a, r1_a);
+    let (r1_b, mut peer_b) = FakeDevice::begin(NODE_B, b.dams, 0xA002, [0x22; 16], rig.net());
+    rig.handshake(NODE_B, &mut peer_b, r1_b);
+    assert_eq!(
+        rig.service
+            .with(|s| s.channels.lock().unwrap().stats().channels)
+            .0,
+        2
+    );
+
+    let result = rig.service.with(|authority| {
+        authority.revoke(
+            501,
+            RevokeRequest {
+                device: NODE_B,
+                expected_generation: b.generation,
+                reason: RevocationReason::Removed,
+                key: "live-p6-revoke".into(),
+            },
+            HostTime::sync(rig.now + 100),
+        )
+    });
+    result.0.unwrap();
+    let mut kinds = Vec::new();
+    let sealed_notice = rig
+        .service
+        .with(|s| {
+            s.operations
+                .values()
+                .find(|op| op.kind == "revoke" && op.node == NODE_B)
+                .unwrap()
+                .notice
+                .as_ref()
+                .unwrap()
+                .sealed
+                .clone()
+                .unwrap()
+        })
+        .0;
+    let mut opened_notice = false;
+    for _ in 0..5 {
+        rig.tick();
+        for (node, kind, bytes) in rig.recv_downs() {
+            assert_eq!(kind, CarrierKind::Envelope);
+            if node == NODE_A {
+                kinds.push((node, peer_a.open(&bytes).0));
+            } else {
+                assert_eq!(bytes, sealed_notice);
+                if !opened_notice {
+                    kinds.push((node, peer_b.open(&bytes).0));
+                    opened_notice = true;
+                }
+            }
+        }
+    }
+    assert!(kinds.contains(&(NODE_A, 5)));
+    assert!(kinds.contains(&(NODE_B, 6)));
+
+    let (rs_epoch, rrs_hash, notice_hash) = rig
+        .service
+        .with(|s| {
+            let op = s
+                .operations
+                .values()
+                .find(|op| op.kind == "revoke" && op.node == NODE_B)
+                .unwrap();
+            (
+                s.rs_epoch,
+                sha256(&s.rrs_latest_object),
+                sha256(&op.notice.as_ref().unwrap().object),
+            )
+        })
+        .0;
+    let mut applied = BodyHead {
+        op: 2,
+        generation: a.generation,
+        request_id: 11,
+    }
+    .encode(2)
+    .unwrap()
+    .to_vec();
+    applied.extend_from_slice(&[1, 1, 0, 0]);
+    applied.extend_from_slice(&rs_epoch.to_be_bytes());
+    applied.extend_from_slice(&rrs_hash);
+    rig.send_up(NODE_A, CarrierKind::Envelope, &peer_a.seal(5, &applied));
+
+    let mut accepted = BodyHead {
+        op: 2,
+        generation: b.generation,
+        request_id: 12,
+    }
+    .encode(2)
+    .unwrap()
+    .to_vec();
+    accepted.extend_from_slice(&[1, 3, 0, 0]);
+    accepted.extend_from_slice(&rs_epoch.to_be_bytes());
+    accepted.extend_from_slice(&notice_hash);
+    rig.send_up(NODE_B, CarrierKind::Envelope, &peer_b.seal(5, &accepted));
+    let (applied, accepted) = rig
+        .service
+        .with(|s| {
+            let op = s
+                .operations
+                .values()
+                .find(|op| op.kind == "revoke" && op.node == NODE_B)
+                .unwrap();
+            (
+                op.distribution.as_ref().unwrap().targets.iter().any(|t| {
+                    t.node == NODE_A && t.state == super::revocation::TargetState::Applied
+                }),
+                op.notice.as_ref().unwrap().intent_confirmed,
+            )
+        })
+        .0;
+    assert!(applied);
+    assert!(accepted);
 }
 
 /// Full confirm loop: handshake, JoinConfirm, the sealed answer, the
@@ -408,7 +746,7 @@ fn live_rotation_excludes_removed_member() {
     assert!(rig.recv_downs().is_empty());
     let _ = (a, b);
 
-    // Removal retires B's channel at once and starts a fresh rotation.
+    // Removal closes B's normal member lane and starts a fresh rotation.
     rig.service
         .with(|a| {
             a.revoke(
@@ -433,17 +771,40 @@ fn live_rotation_excludes_removed_member() {
         .with(|a| a.status_json(HostTime::sync(rig.now)))
         .0;
     assert!(
-        status.contains("\"channels\":1"),
-        "B's channel retired: {status}"
+        status.contains("\"channels\":2"),
+        "B's notice-only context retained: {status}"
     );
+    let sealed_notice = rig
+        .service
+        .with(|a| {
+            a.operations
+                .values()
+                .find(|op| op.kind == "revoke" && op.node == NODE_B)
+                .unwrap()
+                .notice
+                .as_ref()
+                .unwrap()
+                .sealed
+                .clone()
+                .unwrap()
+        })
+        .0;
 
     // Drive the rotation: A answers every sealed command with durable
-    // evidence until the rotation converges. Every carrier on the wire
-    // must address A — B gets nothing, not even a Wake.
+    // evidence until the rotation converges. B can receive only the
+    // exact presealed notice, never a GK command or Wake.
     let mut staged_key: Option<[u8; 32]> = None;
     for _ in 0..20 {
         rig.tick();
         for (node, kind, bytes) in rig.recv_downs() {
+            if node == NODE_B {
+                assert_eq!(kind, CarrierKind::Envelope);
+                assert_eq!(
+                    bytes, sealed_notice,
+                    "removed member receives only its notice"
+                );
+                continue;
+            }
             assert_eq!(node, NODE_A, "excluded member received a carrier");
             assert_eq!(kind, CarrierKind::Envelope);
             let (env_type, plaintext) = peer_a.open(&bytes);
@@ -490,6 +851,9 @@ fn live_rotation_excludes_removed_member() {
                     .encode()
                     .unwrap();
                     rig.send_up(NODE_A, CarrierKind::Envelope, &peer_a.seal(3, &ack));
+                }
+                5 => {
+                    assert!(plaintext.len() > routeloom_keysched::authority::BODY_HEAD);
                 }
                 other => panic!("unexpected envelope type {other}"),
             }
@@ -717,7 +1081,7 @@ fn live_passthrough_diagnoses_without_answer() {
 
     // A hand-framed head (the head codec only speaks ops 1/2): the
     // sink checks the generation, the tail stays opaque to P5.
-    let mut body = vec![1, 1, 0, 0];
+    let mut body = vec![1, 2, 0, 0];
     body.extend_from_slice(&row.generation.to_be_bytes());
     body.extend_from_slice(&3_u64.to_be_bytes());
     body.extend_from_slice(&[0x5A; 12]);

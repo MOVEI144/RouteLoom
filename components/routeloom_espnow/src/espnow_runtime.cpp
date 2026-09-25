@@ -11,6 +11,7 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "routeloom/wire.hpp"
+#include "routeloom/sdkv1_revocation.hpp"
 
 namespace routeloom::espnow {
 namespace {
@@ -313,12 +314,10 @@ Status EspNowRuntime::initialize_espnow() noexcept {
       }
     }
   }
-  if (discovery_ != nullptr) {
-    const Status status = register_broadcast_peer();
-    if (!status) {
-      return status;
-    }
-  }
+  // Route advertisements also use this permanent peer when discovery is
+  // absent. Register it once with the same radio-owner rate setup.
+  const Status broadcast_status = register_broadcast_peer();
+  if (!broadcast_status) return broadcast_status;
   for (auto& slot : transient_peers_) {
     if (slot.used) {
       const Status status = add_driver_peer(slot.mac);
@@ -1375,7 +1374,12 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
   MacAddress peer_mac{};
   bool driver_registered = false;
   portENTER_CRITICAL(&callback_lock_);
-  if (const Peer* record = find_peer(peer)) {
+  if (peer == kBroadcastNodeId) {
+    // Route broadcasts use the permanent ESP-NOW peer, but still reserve the
+    // same physical TX slot and callback fence as ordinary node traffic.
+    peer_mac.bytes = discovery_const::kBroadcastMac;
+    driver_registered = broadcast_peer_;
+  } else if (const Peer* record = find_peer(peer)) {
     peer_mac = record->mac;
     driver_registered = record->driver_registered;
   }
@@ -1466,7 +1470,9 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
                                   pending_channel_epoch_,
                                   pending_length_class_, peer};
   portEXIT_CRITICAL(&callback_lock_);
-  node_.note_tx_submit_identity(token, submit_key);
+  // Broadcast completion only confirms driver submission, not reception by
+  // any particular neighbor. Never seed per-peer telemetry with this key.
+  if (peer != kBroadcastNodeId) node_.note_tx_submit_identity(token, submit_key);
   const esp_err_t error =
       esp_now_send(peer_mac.bytes.data(), frame.data, frame.size);
   if (error != ESP_OK) {
@@ -1639,6 +1645,14 @@ void EspNowRuntime::on_autonomy_frame(const NodeId peer, const FrameType type,
     case FrameType::ControlObject:
     case FrameType::ObjectChunk:
     case FrameType::ObjectAck:
+      // P6 kind-6 chunks/ACKs of a live RRS1 transfer route to the Owner's
+      // lifecycle; anything unclaimed (including all migration kinds)
+      // flows on as before.
+      if ((type == FrameType::ObjectChunk || type == FrameType::ObjectAck) &&
+          rrs_chunk_sink_ != nullptr &&
+          rrs_chunk_sink_->claim_rrs_chunk(peer, type, payload, now_ms)) {
+        return;
+      }
       if (migration_ != nullptr) {
         migration_->on_migration_frame(peer, type, payload, now_ms,
                                        captured_ms);
@@ -1706,6 +1720,66 @@ Status EspNowRuntime::migration_send(const NodeId peer, const FrameType type,
     default:
       return Status::error(StatusCode::InvalidArgument,
                            "type not allowed on the migration lane");
+  }
+  return send_bound_link(peer, type, payload);
+}
+
+Status EspNowRuntime::p6_send(const NodeId peer, const FrameType type,
+                              const ByteView payload) noexcept {
+  if (payload.data == nullptr || payload.size == 0) {
+    return Status::error(StatusCode::InvalidArgument, "empty p6 payload");
+  }
+  switch (type) {
+    case FrameType::Control: {
+      sdkv1::StateEpochs epochs{};
+      sdkv1::RrsRequest request{};
+      if (!sdkv1::state_epochs_decode(payload, epochs) &&
+          !sdkv1::rrs_request_decode(payload, request)) {
+        return Status::error(StatusCode::InvalidArgument, "invalid p6 control");
+      }
+      break;
+    }
+    case FrameType::ControlObject: {
+      autonomy::ControlObjectPayload manifest{};
+      if (!autonomy::control_object_decode(payload, manifest) ||
+          manifest.kind != autonomy::ControlObjectKind::RevocationSet) {
+        return Status::error(StatusCode::InvalidArgument, "invalid p6 manifest");
+      }
+      break;
+    }
+    case FrameType::ObjectChunk: {
+      autonomy::ObjectChunkPayload chunk{};
+      if (!autonomy::object_chunk_decode(payload, chunk)) {
+        return Status::error(StatusCode::InvalidArgument, "invalid p6 chunk");
+      }
+      break;
+    }
+    case FrameType::ObjectAck: {
+      autonomy::ObjectAckPayload ack{};
+      if (!autonomy::object_ack_decode(payload, ack)) {
+        return Status::error(StatusCode::InvalidArgument, "invalid p6 ack");
+      }
+      break;
+    }
+    default:
+      return Status::error(StatusCode::InvalidArgument, "type not allowed on p6 lane");
+  }
+  return send_bound_link(peer, type, payload);
+}
+
+Status EspNowRuntime::p6_link_binding(const NodeId peer,
+                                     std::uint32_t& binding) noexcept {
+  binding = 0;
+  const Status status = security_.current_rx_epoch(SecurityScope::Link, peer, binding);
+  if (!status) return status;
+  if (binding == 0) return Status::error(StatusCode::InvalidState, "p6 link context absent");
+  return Status::success();
+}
+
+Status EspNowRuntime::send_bound_link(const NodeId peer, const FrameType type,
+                                      const ByteView payload) noexcept {
+  if (channel_runner_.busy() && !channel_runner_.visiting()) {
+    return Status::error(StatusCode::WouldBlock, "RADIO_OP_IN_PROGRESS");
   }
   Peer* record = find_peer(peer);
   if (record == nullptr) {

@@ -7,9 +7,10 @@
 //! each target proves it applied the set — or stays honestly `unknown`.
 //! Nothing is ever counted as a success without an Applied ACK.
 //!
-//! The transport is a port ([`RevocationTransport`]): production holds
-//! none until the P5 authority channel lands (`capabilities.get` reports
-//! `rrs_no_transport`), while tests inject an in-process fake. The
+//! The transport is a port ([`RevocationTransport`]): production
+//! attaches the channel port ([`super::p6_channel::P6ChannelTransport`],
+//! `capabilities.get` then reports `rrs_ready`), no port means
+//! `rrs_no_transport`, and tests inject in-process fakes. The
 //! scheduler, backoff, coalescing and persistence below are transport
 //! agnostic and fully exercised that way.
 //!
@@ -24,10 +25,13 @@ use std::collections::BTreeMap;
 use routeloom_json::Json;
 use routeloom_provision::sdkv1::revocation::RevocationEntry;
 
+use super::authority_channel::{AuthorityOutbound, ChannelEvent, ChannelMember};
+use super::p6_channel::P6Receipt;
 use super::records::{h16, parse_h16, parse_hex};
 use super::store::{Batch, DocKind};
 use super::{SiteAuthority, SiteError};
 use crate::receive_log::hex_lower;
+use routeloom_protocol::authority::CarrierKind;
 
 /// Targets snapshotted per operation (the P6 profile: ~100 deployed
 /// boards plus headroom, gateway included). Members beyond the cap are
@@ -48,7 +52,7 @@ pub fn checked_next(value: u32, what: &str) -> Result<u32, SiteError> {
     value.checked_add(1).ok_or_else(|| {
         SiteError::new(
             "COUNTER_EXHAUSTED",
-            format!("{what} counter exhausted; a site_epoch cutover must reset it"),
+            format!("{what} counter exhausted; safe maintenance is required"),
         )
     })
 }
@@ -67,11 +71,97 @@ pub fn rrs_covers(older: &[RevocationEntry], newer: &[RevocationEntry]) -> bool 
     })
 }
 
-/// The P5 authority channel's RRS1 send half (PR A: port only). Returns
+/// The P5 authority channel's send half (PR A: port only). Returns
 /// false when the object was not sent (backpressure / no route); the
 /// distributor retries with backoff and never treats a refusal as an ACK.
+///
+/// The port carries plaintext authority payloads — the RRS1 object
+/// (type 5), the RemovalNotice (type 6), the GrantRenew PREPARE/COMMIT
+/// (type 7) — and the future P5 channel seals them into the addressed
+/// network's context at send time. The `network` on `send_notice` and
+/// `send_grant` selects the required context; an old-network notice must
+/// never be sealed under a new-network context.
 pub trait RevocationTransport {
     fn send_rrs(&mut self, node: u64, object: &[u8]) -> bool;
+    /// Sends a type-6 RemovalNotice. Default refuses until wired.
+    fn send_notice(&mut self, _node: u64, _network: u64, _notice: &[u8]) -> bool {
+        false
+    }
+    /// Captures one exact type-6 ciphertext before a revoke commit.
+    /// A production channel never sends it from this call.
+    fn preseal_notice(&mut self, _node: u64, _network: u64, _notice: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+    /// Sends the durable, already-sealed ciphertext after commit, including
+    /// after a host restart that lost the RAM authority channel.
+    fn send_presealed_notice(&mut self, _node: u64, _sealed: &[u8]) -> bool {
+        false
+    }
+    /// Sends a type-7 GrantRenew plaintext over `network`'s authority
+    /// context. Default refuses until wired.
+    fn send_grant(&mut self, _node: u64, _network: u64, _plaintext: &[u8]) -> bool {
+        false
+    }
+    /// True when `send_notice` can deliver. The distributor only queues
+    /// supported kinds, so an RRS-only port never wedges behind
+    /// notices it cannot carry (the outbox dispatches head-first).
+    fn carries_notice(&self) -> bool {
+        false
+    }
+    /// True when `send_grant` can deliver (same head-of-line rule).
+    fn carries_grant(&self) -> bool {
+        false
+    }
+    /// True for the production channel port (P6 PR D). Fakes stay
+    /// false so `capabilities.get` keeps reporting `rrs_no_transport`
+    /// until a real port is attached.
+    fn p6_ready(&self) -> bool {
+        false
+    }
+    /// The USB/mesh egress is currently bound. A detached production
+    /// port retains mail without counting a send attempt.
+    fn set_delivery_attached(&mut self, _attached: bool) {}
+    /// Feeds one inbound carrier into the port (reassembled USB 0x64 /
+    /// mesh envelope, R1 or R3). Default ignores: fakes deliver
+    /// reports by calling the handlers directly.
+    fn push_carrier(&mut self, _device: u64, _kind: CarrierKind, _bytes: &[u8], _now_ms: u64) {}
+    /// Takes the verified P6 reports queued since the last call.
+    fn poll_p6_receipts(&mut self) -> Vec<P6Receipt> {
+        Vec::new()
+    }
+    /// Other events from the shared P5/P6 channel table.
+    fn poll_channel_events(&mut self) -> Vec<ChannelEvent> {
+        Vec::new()
+    }
+    /// Takes every queued outbound carrier for the USB/mesh mapping.
+    fn take_p6_carriers(&mut self) -> Vec<AuthorityOutbound> {
+        Vec::new()
+    }
+    /// Syncs the live member bindings (called every authority tick).
+    /// `mono_ms` drives retention expiry and the cutover grace.
+    fn refresh_p6_bindings(
+        &mut self,
+        _live: &[(u64, ChannelMember)],
+        _current_network: u64,
+        _rs_epoch: u32,
+        _gk_epoch: u32,
+        _mono_ms: u64,
+    ) {
+    }
+    /// Notes a cutover commit so the port can serve the old network's
+    /// COMMIT grace before flipping to the new network.
+    fn note_p6_cutover(&mut self, _old_network: u64, _mono_ms: u64) {}
+    /// Notes a Get answer for the per-device spam gap. False drops
+    /// the answer (answered too recently).
+    fn note_p6_get_answer(&mut self, _device: u64, _mono_ms: u64) -> bool {
+        true
+    }
+    /// True when a notice to `node` on `network` could still seal.
+    /// When false the distributor marks the notice `unreachable`
+    /// instead of retrying forever.
+    fn notice_sealable(&self, _node: u64, _network: u64, _mono_ms: u64) -> bool {
+        true
+    }
 }
 
 /// Per-target delivery state. `Pending` never left the Host; `Unknown`
@@ -250,11 +340,139 @@ impl OperationDistribution {
     }
 }
 
+/// What one queued mail carries. The outbox is shared (04 §9.1: at
+/// most 4 live mails across RRS1, notices and grants); notices queue
+/// ahead of grants, grants ahead of RRS1 fan-out.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutboundKind {
+    Rrs,
+    Notice,
+    Prepare,
+    Commit,
+}
+
 /// One queued object send (RAM-only; rebuilt from the snapshot).
 pub struct OutboundRrs {
     pub op: u64,
     pub node: u64,
     pub due_ms: u64,
+    pub what: OutboundKind,
+}
+
+/// RemovalNotice delivery (04 §7.1, `revoke` only). The signed 103 B
+/// object commits with the revoke; the tick sends it after commit —
+/// never before — and the type-5 sub-3 accept receipt confirms the
+/// durable intent (not the erase: no remote erase proof exists).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NoticeState {
+    pub object: Vec<u8>,
+    /// Exact encrypted type-6 carrier captured before the revoke commit.
+    /// Replays use these bytes; a restart does not reseal with a new key.
+    pub sealed: Option<Vec<u8>>,
+    /// The AAD network the notice was issued for.
+    pub network: u64,
+    pub delivery: NoticeDelivery,
+    pub intent_confirmed: bool,
+    /// Best-effort resends stop after this many transport sends.
+    pub attempts: u32,
+}
+
+/// `pending` (committed, never sent), `sent` (the transport took it at
+/// least once), or `unreachable` (no authority context existed at
+/// removal — a DAMS was never delivered — so nothing can seal it).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NoticeDelivery {
+    Pending,
+    Sent,
+    Unreachable,
+}
+
+/// Best-effort notice resends (04 §7.1).
+pub const NOTICE_SEND_MAX: u32 = 3;
+
+impl NoticeDelivery {
+    fn name(self) -> &'static str {
+        match self {
+            NoticeDelivery::Pending => "pending",
+            NoticeDelivery::Sent => "sent",
+            NoticeDelivery::Unreachable => "unreachable",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "pending" => Some(NoticeDelivery::Pending),
+            "sent" => Some(NoticeDelivery::Sent),
+            "unreachable" => Some(NoticeDelivery::Unreachable),
+            _ => None,
+        }
+    }
+}
+
+impl NoticeState {
+    pub fn doc(&self) -> String {
+        let sealed = self.sealed.as_ref().map_or_else(
+            || "null".to_string(),
+            |bytes| format!("\"{}\"", hex_lower(bytes)),
+        );
+        format!(
+            "{{\"object\":\"{}\",\"sealed\":{},\"network\":\"{}\",\"delivery\":\"{}\",\"intent_confirmed\":{},\"attempts\":{}}}",
+            hex_lower(&self.object),
+            sealed,
+            h16(self.network),
+            self.delivery.name(),
+            self.intent_confirmed,
+            self.attempts,
+        )
+    }
+
+    pub fn from_doc(json: &Json) -> Option<Self> {
+        let hex = json.get("object")?.as_str()?;
+        if hex.len() > 4096 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let object = (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok())
+            .collect::<Option<Vec<_>>>()?;
+        if object.is_empty() {
+            return None;
+        }
+        let sealed = match json.get("sealed") {
+            None | Some(Json::Null) => None,
+            Some(Json::String(hex))
+                if !hex.is_empty()
+                    && hex.len() <= 4096
+                    && hex.len() % 2 == 0
+                    && hex.bytes().all(|b| b.is_ascii_hexdigit()) =>
+            {
+                Some(
+                    (0..hex.len() / 2)
+                        .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok())
+                        .collect::<Option<Vec<_>>>()?,
+                )
+            }
+            _ => return None,
+        };
+        Some(Self {
+            object,
+            sealed,
+            network: parse_h16(json.get("network")?.as_str()?)?,
+            delivery: NoticeDelivery::parse(json.get("delivery")?.as_str()?)?,
+            intent_confirmed: json.get("intent_confirmed")?.as_bool()?,
+            attempts: u32::try_from(json.get("attempts")?.as_u64()?).ok()?,
+        })
+    }
+
+    /// The `operations.get` fragment (07 §2.2). `erase_confirmed` is
+    /// always null: the protocol has no remote erase proof, and a link
+    /// ACK must never read as one.
+    pub fn view(&self) -> String {
+        format!(
+            "{{\"delivery\":\"{}\",\"intent_confirmed\":{},\"erase_confirmed\":null}}",
+            self.delivery.name(),
+            self.intent_confirmed,
+        )
+    }
 }
 
 /// (entries by epoch, digests by epoch, latest object bytes).
@@ -265,11 +483,17 @@ pub(super) type RrsHistory = (
 );
 
 /// Decodes the durable RRS1 history for ACK validation and coalescing.
+/// `boundaries` carries the committed cutovers as
+/// `(commit_rs_epoch, new_network)`: rs/site epochs continue across the
+/// switch (04 §8.1), so each stored set verifies under its own segment's
+/// network, and coverage restarts at every boundary (only a verified
+/// cutover may compress entries).
 pub(super) fn decode_rrs_history(
     snapshot: &super::store::Snapshot,
     sak_pubkey: &[u8; 64],
     site_id: u64,
     network: u64,
+    boundaries: &[(u32, u64)],
 ) -> Result<RrsHistory, String> {
     let mut history = BTreeMap::new();
     let mut digests = BTreeMap::new();
@@ -277,9 +501,32 @@ pub(super) fn decode_rrs_history(
     let mut previous: Option<(u32, u32, Vec<RevocationEntry>)> = None;
     let mut ordered: Vec<_> = snapshot.rrs.iter().collect();
     ordered.sort_by_key(|(epoch, _)| *epoch);
+    // The configured SiteCert may still name the pre-cutover epoch, or
+    // may have been replaced after a cutover. The first signed RRS1 is
+    // the durable source for the initial network of this history.
+    let initial_network = match ordered.first() {
+        Some((_, object)) => {
+            routeloom_provision::sdkv1::revocation::revocation_object_decode(object)
+                .map_err(|e| format!("stored RRS1 corrupt: {e}"))?
+                .network
+        }
+        None => network,
+    };
+    if (initial_network & 0xffff_ffff) != (network & 0xffff_ffff)
+        || boundaries.last().map_or(initial_network, |(_, net)| *net) != network
+    {
+        return Err("stored RRS1 history network disagrees with active site".into());
+    }
     for (epoch, object) in ordered {
+        let expected = boundaries
+            .iter()
+            .filter(|(at, _)| *at <= *epoch)
+            .map(|(_, network)| *network)
+            .last()
+            .unwrap_or(initial_network);
+        let boundary = boundaries.iter().any(|(at, _)| at == epoch);
         let (set, verified) = routeloom_provision::sdkv1::revocation::revocation_object_verify(
-            object, sak_pubkey, site_id, network,
+            object, sak_pubkey, site_id, expected,
         )
         .map_err(|e| format!("stored RRS1 corrupt: {e}"))?;
         if !verified || set.rs_epoch != *epoch {
@@ -288,10 +535,16 @@ pub(super) fn decode_rrs_history(
             ));
         }
         if let Some((prior_epoch, prior_floor, prior_entries)) = &previous {
-            if epoch <= prior_epoch
-                || set.site_epoch_floor < *prior_floor
-                || !rrs_covers(prior_entries, &set.entries)
-            {
+            if epoch <= prior_epoch || (!boundary && set.site_epoch_floor < *prior_floor) {
+                return Err(format!("stored RRS1 history regresses at epoch {epoch}"));
+            }
+            if boundary {
+                if set.site_epoch_floor != (expected >> 32) as u32 {
+                    return Err(format!(
+                        "stored RRS1 at cutover epoch {epoch} misses the new floor"
+                    ));
+                }
+            } else if !rrs_covers(prior_entries, &set.entries) {
                 return Err(format!("stored RRS1 history regresses at epoch {epoch}"));
             }
         }
@@ -300,13 +553,19 @@ pub(super) fn decode_rrs_history(
         previous = Some((*epoch, set.site_epoch_floor, set.entries));
         latest = object.clone();
     }
+    if boundaries
+        .iter()
+        .any(|(epoch, _)| !history.contains_key(epoch))
+    {
+        return Err("stored RRS1 history misses a cutover boundary".into());
+    }
     Ok((history, digests, latest))
 }
 
 impl SiteAuthority {
-    /// Installs the RRS1 transport (the P5 authority channel; tests
-    /// inject a fake). `None` is the production PR-A state: nothing is
-    /// sent and every target honestly stays `unknown`.
+    /// Installs the RRS1 transport (production: the P6 channel
+    /// port's share of its hub; tests inject a fake). `None` means
+    /// nothing is sent and every target honestly stays `unknown`.
     pub fn set_rrs_transport(&mut self, transport: Option<Box<dyn RevocationTransport + Send>>) {
         self.rrs_transport = transport;
     }
@@ -405,7 +664,7 @@ impl SiteAuthority {
     /// Writes one operation doc back after distribution progress. This is
     /// a pure update: unlike `operation_doc` (commit path) it never moves
     /// the op allocator and never evicts siblings.
-    fn persist_operation(&mut self, op: u64, now_ms: u64) {
+    pub(super) fn persist_operation(&mut self, op: u64, now_ms: u64) {
         let Some(operation) = self.operations.get(&op).cloned() else {
             return;
         };
@@ -426,6 +685,8 @@ impl SiteAuthority {
     /// targets into the shared outbox and dispatches at most 10 objects
     /// per second, newest operation first (an ACK for a newer set
     /// coalesces onto older operations, so older sends give way).
+    /// Notices and grants queue ahead (see `tick_cutover`); the paced
+    /// dispatch below serves every kind from the one outbox.
     pub(super) fn tick_distribution(&mut self, now_ms: u64) {
         // Convergence is transport-agnostic (an empty snapshot converges
         // with no transport at all); only queueing and dispatch need one.
@@ -451,6 +712,12 @@ impl SiteAuthority {
             if dist.state == DistState::Converged {
                 continue;
             }
+            // A retired network's sets want no airtime: their targets
+            // either moved (and prove on the new network) or stay
+            // honestly unknown.
+            if dist.network != self.id.network {
+                continue;
+            }
             let mut queue = Vec::new();
             for target in &dist.targets {
                 if self.rrs_outbox.len() + queue.len() >= DISTRIBUTION_OUTBOX_MAX {
@@ -465,7 +732,7 @@ impl SiteAuthority {
                 if self
                     .rrs_outbox
                     .iter()
-                    .any(|o| o.op == id && o.node == target.node)
+                    .any(|o| o.op == id && o.node == target.node && o.what == OutboundKind::Rrs)
                 {
                     continue;
                 }
@@ -481,11 +748,12 @@ impl SiteAuthority {
                     op: id,
                     node,
                     due_ms: now_ms,
+                    what: OutboundKind::Rrs,
                 });
             }
         }
         // Dispatch the outbox head at the paced rate.
-        let mut sent: Vec<(u64, u64)> = Vec::new();
+        let mut sent: Vec<(u64, u64, OutboundKind)> = Vec::new();
         while now_ms >= self.rrs_next_dispatch_ms {
             let Some(head) = self.rrs_outbox.pop_front() else {
                 break;
@@ -494,12 +762,47 @@ impl SiteAuthority {
                 self.rrs_outbox.push_front(head);
                 break;
             }
-            if !self.target_still_due(head.op, head.node, now_ms) {
-                continue; // converged/retired/applied meanwhile: drop, no airtime
-            }
-            let object = self.rrs_latest_object.clone();
+            let bytes = match head.what {
+                OutboundKind::Rrs => {
+                    if !self.target_still_due(head.op, head.node, now_ms) {
+                        continue; // converged/retired/applied meanwhile: drop, no airtime
+                    }
+                    Some((self.rrs_latest_object.clone(), self.id.network))
+                }
+                OutboundKind::Notice => self.notice_bytes(head.op),
+                OutboundKind::Prepare | OutboundKind::Commit => {
+                    if !self.grant_still_due(head.op, head.node, head.what, now_ms) {
+                        continue;
+                    }
+                    let network = self
+                        .operations
+                        .get(&head.op)
+                        .and_then(|op| op.cutover.as_ref())
+                        .map(|state| state.old_network);
+                    self.grant_bytes(head.op, head.node, head.what)
+                        .and_then(|bytes| network.map(|network| (bytes, network)))
+                }
+            };
+            let Some((bytes, network)) = bytes else {
+                continue; // stale entry (phase moved, op evicted): drop, no airtime
+            };
+            let presealed_notice = head.what == OutboundKind::Notice
+                && self
+                    .operations
+                    .get(&head.op)
+                    .and_then(|op| op.notice.as_ref())
+                    .is_some_and(|notice| notice.sealed.is_some());
             let delivered = match self.rrs_transport.as_mut() {
-                Some(transport) => transport.send_rrs(head.node, &object),
+                Some(transport) => match head.what {
+                    OutboundKind::Rrs => transport.send_rrs(head.node, &bytes),
+                    OutboundKind::Notice if presealed_notice => {
+                        transport.send_presealed_notice(head.node, &bytes)
+                    }
+                    OutboundKind::Notice => transport.send_notice(head.node, network, &bytes),
+                    OutboundKind::Prepare | OutboundKind::Commit => {
+                        transport.send_grant(head.node, network, &bytes)
+                    }
+                },
                 None => false,
             };
             if !delivered {
@@ -519,19 +822,241 @@ impl SiteAuthority {
             }
             self.rrs_transport_backoff = 0;
             self.rrs_next_dispatch_ms = now_ms.saturating_add(DISTRIBUTION_DISPATCH_GAP_MS);
-            sent.push((head.op, head.node));
+            sent.push((head.op, head.node, head.what));
         }
-        let mut touched: Vec<u64> = sent.iter().map(|(op, _)| *op).collect();
+        let mut touched: Vec<u64> = sent.iter().map(|(op, _, _)| *op).collect();
         touched.sort_unstable();
         touched.dedup();
-        for (op, node) in sent {
-            self.note_sent(op, node, now_ms);
+        for (op, node, what) in sent {
+            match what {
+                OutboundKind::Rrs => self.note_sent(op, node, now_ms),
+                OutboundKind::Notice => self.note_notice_sent(op, now_ms),
+                OutboundKind::Prepare | OutboundKind::Commit => {
+                    self.note_grant_sent(op, node, now_ms)
+                }
+            }
         }
         for id in touched {
             self.persist_operation(id, now_ms);
         }
         // Converge what the sends (and coalescing) completed.
         self.converge_distributions(now_ms);
+    }
+
+    /// Queues pending RemovalNotices ahead of grants and RRS1 fan-out
+    /// (04 §7.1: the notice goes first). Best-effort: at most
+    /// [`NOTICE_SEND_MAX`] transport sends, then the target is on its
+    /// own until its ZT recovery.
+    pub(super) fn queue_notices(&mut self, time: super::group_keys::HostTime) {
+        if self
+            .rrs_transport
+            .as_ref()
+            .map_or(true, |transport| !transport.carries_notice())
+        {
+            return;
+        }
+        let mut ops: Vec<u64> = self.operations.keys().copied().collect();
+        ops.sort_by_key(|id| std::cmp::Reverse(*id));
+        for id in ops {
+            if self.rrs_outbox.len() >= DISTRIBUTION_OUTBOX_MAX {
+                break;
+            }
+            let due = match self.operations.get(&id) {
+                Some(op) => match op.notice.as_ref() {
+                    Some(notice)
+                        if (notice.network == self.id.network || notice.sealed.is_some())
+                            && matches!(
+                                notice.delivery,
+                                NoticeDelivery::Pending | NoticeDelivery::Sent
+                            )
+                            && notice.attempts < NOTICE_SEND_MAX =>
+                    {
+                        op.node
+                    }
+                    _ => continue,
+                },
+                None => continue,
+            };
+            if self
+                .rrs_outbox
+                .iter()
+                .any(|o| o.op == id && o.what == OutboundKind::Notice)
+            {
+                continue;
+            }
+            // No live or retained binding (and the row being removed,
+            // none can form): mark `unreachable` instead of retrying
+            // past the best-effort window. Fakes always seal, so
+            // their queueing is unchanged.
+            let sealable = self
+                .operations
+                .get(&id)
+                .and_then(|op| op.notice.as_ref())
+                .is_some_and(|notice| notice.sealed.is_some())
+                || self.rrs_transport.as_ref().is_some_and(|transport| {
+                    transport.notice_sealable(due, self.id.network, time.mono_ms)
+                });
+            if !sealable {
+                self.note_notice_unreachable(id, time.unix_ms);
+                continue;
+            }
+            self.rrs_outbox.push_back(OutboundRrs {
+                op: id,
+                node: due,
+                due_ms: time.unix_ms,
+                what: OutboundKind::Notice,
+            });
+        }
+    }
+
+    /// Marks a notice `unreachable`: no authority context exists for
+    /// the removed binding, so the direct send cannot proceed (the
+    /// RRS1 fan-out still carries the revocation). Silent, like the
+    /// revoke-time and cutover-commit markings.
+    fn note_notice_unreachable(&mut self, op: u64, now_ms: u64) {
+        let changed = match self.operations.get_mut(&op) {
+            Some(operation) => match operation.notice.as_mut() {
+                Some(notice)
+                    if matches!(
+                        notice.delivery,
+                        NoticeDelivery::Pending | NoticeDelivery::Sent
+                    ) =>
+                {
+                    notice.delivery = NoticeDelivery::Unreachable;
+                    true
+                }
+                _ => false,
+            },
+            None => false,
+        };
+        if changed {
+            self.persist_operation(op, now_ms);
+        }
+    }
+
+    /// Resolves one queued notice to `(bytes, network)`. A notice whose
+    /// op retired it meanwhile resolves to nothing and drops.
+    fn notice_bytes(&self, op: u64) -> Option<(Vec<u8>, u64)> {
+        let operation = self.operations.get(&op)?;
+        let notice = operation.notice.as_ref()?;
+        if (notice.network != self.id.network && notice.sealed.is_none())
+            || !matches!(
+                notice.delivery,
+                NoticeDelivery::Pending | NoticeDelivery::Sent
+            )
+            || notice.attempts >= NOTICE_SEND_MAX
+        {
+            return None;
+        }
+        Some((
+            notice
+                .sealed
+                .clone()
+                .unwrap_or_else(|| notice.object.clone()),
+            notice.network,
+        ))
+    }
+
+    /// Records a notice send: the first one moves Pending to Sent with
+    /// its `member.removal_notified` event; resends just count.
+    fn note_notice_sent(&mut self, op: u64, now_ms: u64) {
+        let (node, generation) = match self.operations.get(&op) {
+            Some(operation) => (operation.node, operation.generation),
+            None => return,
+        };
+        let first = match self.operations.get_mut(&op) {
+            Some(operation) => match operation.notice.as_mut() {
+                Some(notice) => {
+                    notice.attempts = notice.attempts.saturating_add(1);
+                    if notice.delivery == NoticeDelivery::Pending {
+                        notice.delivery = NoticeDelivery::Sent;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => return,
+            },
+            None => return,
+        };
+        if first {
+            self.event(
+                now_ms,
+                format!(
+                    "\"kind\":\"member.removal_notified\",\"device_id\":\"{}\",\"generation\":{generation},\"route\":\"authority_direct\",\"intent_confirmed\":false",
+                    h16(node)
+                ),
+            );
+        }
+    }
+
+    /// Records a NoticeAccepted receipt (type 5 sub 3, called by the P5
+    /// authority channel with the context-bound node/generation/
+    /// network): the removed binding's notice hash must match exactly,
+    /// and the cited set cannot be from our future. This confirms the
+    /// durable intent — never the erase. Returns true when a notice
+    /// moved to confirmed.
+    pub fn handle_notice_accepted(
+        &mut self,
+        node: u64,
+        generation: u32,
+        network: u64,
+        rs_epoch: u32,
+        notice_sha256: &[u8; 32],
+        now_ms: u64,
+    ) -> bool {
+        // The device proves a set we issued: a newer citation than our
+        // latest is a forgery (older is fine — the accept may predate
+        // later revokes or the cutover).
+        if rs_epoch > self.rs_epoch {
+            return false;
+        }
+        let ids: Vec<u64> = self.operations.keys().copied().collect();
+        for id in ids {
+            let matched = self.operations.get(&id).is_some_and(|op| {
+                op.kind == "revoke" && op.node == node && op.generation == generation
+            }) && self
+                .operations
+                .get(&id)
+                .and_then(|op| op.notice.as_ref())
+                .is_some_and(|notice| {
+                    notice.network == network
+                        && !notice.intent_confirmed
+                        && super::sha256(&notice.object) == *notice_sha256
+                });
+            if !matched {
+                continue;
+            }
+            let mut updated = match self.operations.get(&id).cloned() {
+                Some(op) => op,
+                None => continue,
+            };
+            if let Some(notice) = updated.notice.as_mut() {
+                notice.intent_confirmed = true;
+            }
+            let batch = Batch {
+                docs: vec![(DocKind::Operation, h16(updated.id), Some(updated.doc()))],
+                ..Batch::default()
+            };
+            match self.store.commit(&batch) {
+                Ok(()) => {
+                    self.operations.insert(id, updated);
+                    self.event(
+                        now_ms,
+                        format!(
+                            "\"kind\":\"member.removal_notified\",\"device_id\":\"{}\",\"generation\":{generation},\"route\":\"authority_direct\",\"intent_confirmed\":true",
+                            h16(node)
+                        ),
+                    );
+                    return true;
+                }
+                Err(error) => {
+                    self.store_error(now_ms, &error);
+                    return false;
+                }
+            }
+        }
+        false
     }
 
     fn converge_distributions(&mut self, now_ms: u64) {

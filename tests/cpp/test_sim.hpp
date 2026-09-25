@@ -401,6 +401,52 @@ inline std::size_t SimNetwork::flush(routeloom::MonotonicMs now) {
             tally.bytes += pending.frame.size();
           }
         }
+        if (pending.to == routeloom::kBroadcastNodeId) {
+          // RF broadcast (P5-2): one tally above, one sight, one driver
+          // completion — a broadcast has no MAC ACK, so even a hook-dropped
+          // copy still completes Success while its receiver stays silent —
+          // and one delivery per connected listener, each with that
+          // listener's own RX evidence. The loss hooks see a per-receiver
+          // view (to = the listener), exactly like a unicast to it.
+          FrameSight sight{};
+          if (record_sights &&
+              sight_frame(routeloom::ByteView{pending.frame.data(), pending.frame.size()}, sight)) {
+            sights.push_back(sight);
+          }
+          {
+            routeloom::RadioTxObservation obs{};
+            obs.peer = pending.to;
+            obs.submitted_us = static_cast<std::uint64_t>(now) * 1000u;
+            obs.completed_us = obs.submitted_us + pending.service_us;
+            obs.outcome = routeloom::RadioTxOutcome::Success;
+            obs.provenance = routeloom::ObservationProvenance::LocalDriver;
+            obs.token = pending.token;
+            (void)nodes.at(pending.from)->note_radio_tx(obs, now);
+          }
+          (void)nodes.at(pending.from)
+              ->on_radio_tx_result(pending.token, true, now);
+          woken.insert(pending.from);
+          for (const auto& [id, node] : nodes) {
+            if (id == pending.from || !connected(pending.from, id)) continue;
+            Pending view = pending;
+            view.to = id;
+            if (drop_frame != nullptr && drop_frame(view)) {
+              ++dropped;
+              continue;
+            }
+            if (silent_drop != nullptr && silent_drop(view)) {
+              ++dropped;
+              continue;
+            }
+            const routeloom::RadioRxMetadataV2 meta =
+                sim_rx_metadata(reply_port(id), pending.from);
+            (void)node->on_radio_receive(
+                pending.from,
+                routeloom::ByteView{pending.frame.data(), pending.frame.size()},
+                meta, now);
+          }
+          continue;
+        }
         const bool dropped_by_hook = drop_frame != nullptr && drop_frame(pending);
         const bool success = !dropped_by_hook && connected(pending.from, pending.to) &&
                              nodes.count(pending.to) != 0;

@@ -44,7 +44,8 @@ SecurityCoordinator::SecurityCoordinator(const Deps& deps) noexcept
       bank_sink_(bank_),
       pairwise_provider_(bank_),
       group_keys_(*deps_.site),
-      group_provider_(group_keys_, pairwise_provider_, deps_.crypto_aead, deps_.local_node),
+      group_provider_(group_keys_, pairwise_provider_, deps_.crypto_aead, deps_.local_node,
+                      deps_.revocations),
       provider_mux_(pairwise_provider_, group_provider_),
       sleep_guard_(provider_mux_, pairwise_provider_),
       member_scope_(group_keys_, kMemberScopeRef) {
@@ -312,6 +313,9 @@ Status SecurityCoordinator::step(const CoordinatorEvent& event) noexcept {
     case CoordinatorEventKind::Stop:
       status = on_stop(event.now);
       break;
+    case CoordinatorEventKind::StopForLifecycle:
+      status = on_stop(event.now, true);
+      break;
   }
   in_port_ = false;
   return status;
@@ -511,7 +515,11 @@ Status SecurityCoordinator::on_boot(const CoordinatorEvent& event) noexcept {
   // of record (healthy adoption without radio, recovery_only re-issue,
   // RecoveryRequired when the stores cannot proceed). The firmware picks
   // the transport by attachment: USB (direct) or radio scan.
-  const JoinBootInput boot{event.boot_witness, true};
+  JoinBootInput boot{};
+  boot.boot_witness = event.boot_witness;
+  boot.prepared = true;
+  boot.removal_watermark_site_id = removal_watermark_site_id_;
+  boot.removal_watermark_generation = removal_watermark_generation_;
   mode_ = CoordinatorMode::ZeroTouch;  // tags the workspace for destroy below
   create_joiner();
   const Status started = event.usb_direct ? joiner().start_direct(boot, *this, event.now)
@@ -1608,6 +1616,16 @@ bool SecurityCoordinator::authenticated(const NodeId peer, const NetworkId netwo
   return bank_.peer_summary(SecurityScope::EndToEnd, peer, generation, role);
 }
 
+bool SecurityCoordinator::authenticated_link(const NodeId peer, const NetworkId network,
+                                             std::uint32_t& generation,
+                                             std::uint32_t& role) const noexcept {
+  generation = 0;
+  role = 0;
+  return mode_ == CoordinatorMode::Member && member_valid_ &&
+         network == adopted_.network &&
+         bank_.peer_summary(SecurityScope::Link, peer, generation, role);
+}
+
 bool SecurityCoordinator::boot_witness_ok(const std::uint32_t witness) const noexcept {
   // A stored membership newer than the rlboot counter is implausible; a
   // zero witness never authenticates.
@@ -1707,6 +1725,9 @@ Status SecurityCoordinator::on_channel_ready(const CoordinatorEvent& event) noex
   if (event.channel_result != StatusCode::Ok || event.channel != channel_) {
     stop_traffic();
     destroy_workspace();
+    // Leaving Dev rebuilds the small side (stop_traffic above destroyed
+    // the dev side); everywhere else it never left.
+    if (mode_ == CoordinatorMode::Dev) create_small();
     mode_ = CoordinatorMode::Recovery;
     CoordinatorAction recovery{};
     recovery.kind = CoordinatorActionKind::ReportRecovery;
@@ -1970,7 +1991,8 @@ Status SecurityCoordinator::restore_sleep_image(RtcSessionPort& port, const std:
   return Status::success();
 }
 
-Status SecurityCoordinator::on_stop(const MonotonicMs now) noexcept {
+Status SecurityCoordinator::on_stop(const MonotonicMs now,
+                                     const bool defer_resume_clear) noexcept {
   (void)now;
   if (has_member_engine()) {
     // stop_traffic reads the state; unattached (pre-Start) relays stop
@@ -1978,7 +2000,7 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now) noexcept {
     if (deps_.discovery != nullptr) {
       deps_.discovery->membership() = MembershipController{};
     }
-    stop_traffic();
+    stop_traffic(!defer_resume_clear);
   }
   suspend_authority();
   {
@@ -2023,6 +2045,25 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now) noexcept {
 }
 
 // --- Authority channel (G-SEC P5) ----------------------------------------------------------------
+
+Status SecurityCoordinator::send_authority_typed(const std::uint8_t type,
+                                                 const ByteView body,
+                                                 const MonotonicMs now) noexcept {
+  if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
+  if (mode_ != CoordinatorMode::Member || !member_valid_ || sleeping_) {
+    return Status::error(StatusCode::InvalidState, "authority outside active member");
+  }
+  if (now < last_now_) return Status::error(StatusCode::TimeUncertain, "coordinator clock regressed");
+  in_port_ = true;
+  AuthorityInput input{};
+  input.kind = AuthorityInputKind::SendTyped;
+  input.typed.type = type;
+  input.typed.body = body;
+  const Status status = small().authority.advance(input, now);
+  if (status) last_now_ = now;
+  in_port_ = false;
+  return status;
+}
 
 namespace {
 
@@ -2180,10 +2221,11 @@ void SecurityCoordinator::on_event(const AuthorityEvent& event) noexcept {
       sat_inc(counters_.authority_activates);
       break;
     case AuthorityEvent::Kind::Passthrough:
-      // Verified type 5..8 plaintext with no P6 sink connected: counted
-      // and dropped. The client sends no ACK for these, so nothing here
-      // can fake success.
       sat_inc(counters_.authority_passthrough);
+      if (deps_.authority_sink != nullptr && event.envelope_type >= 5 &&
+          event.envelope_type <= 7) {
+        deps_.authority_sink->on_verified_authority(event.envelope_type, event.passthrough);
+      }
       break;
   }
 }
@@ -2621,7 +2663,9 @@ void SecurityCoordinator::on_joiner_action(const JoinAction& action, const Monot
       return;
     case JoinActionKind::RemovalRequired:
       refresh_active_ = false;
-      (void)land_removal(action.removal, now);
+      (void)land_removal(action.removal,
+                         ByteView{action.removal_object.data(), action.removal_object.size()},
+                         now);
       return;
     case JoinActionKind::RecoveryRequired: {
       refresh_active_ = false;
@@ -2645,7 +2689,9 @@ void SecurityCoordinator::emit_action(const CoordinatorAction& action) noexcept 
 
 // --- Removal -------------------------------------------------------------------------------------
 
-Status SecurityCoordinator::land_removal(const RemovalNotice& notice, const MonotonicMs now) noexcept {
+Status SecurityCoordinator::land_removal(const RemovalNotice& notice,
+                                        const ByteView removal_object,
+                                        const MonotonicMs now) noexcept {
   if (mode_ != CoordinatorMode::ZeroTouch && mode_ != CoordinatorMode::Member) {
     return Status::error(StatusCode::InvalidState, "removal without workspace");
   }
@@ -2694,11 +2740,14 @@ Status SecurityCoordinator::land_removal(const RemovalNotice& notice, const Mono
   report.removal.site_id = site.site_id;
   report.removal.generation = notice.generation;
   report.removal.notice = notice;
+  if (removal_object.data != nullptr && removal_object.size == report.removal.object.size()) {
+    std::memcpy(report.removal.object.data(), removal_object.data, removal_object.size);
+  }
   emit_action(report);
   return committed;
 }
 
-void SecurityCoordinator::stop_traffic() noexcept {
+void SecurityCoordinator::stop_traffic(const bool clear_resume) noexcept {
   // Member workspace is live; the caller destroys (wipes) it after. The
   // bank and the GK scope live outside the union, so they are scrubbed
   // here: bank clear does not depend on new entropy, and proxy/gateway leave
@@ -2720,7 +2769,7 @@ void SecurityCoordinator::stop_traffic() noexcept {
   restore_done_ = false;
   restore_failed_ = false;
   restore_error_ = Status::success();
-  (void)member().resume_cache.clear_all();
+  if (clear_resume) (void)member().resume_cache.clear_all();
   (void)member().member_cookie.configure(&entropy_fill, deps_.entropy);  // rotate; old cookies die
   // Verified removal ends the channel (its DAMS copy wipes with it) and
   // parks the GK state: no group TX/RX, no scope tags from here on.
@@ -2739,6 +2788,84 @@ void SecurityCoordinator::stop_traffic() noexcept {
   member().gateway.set_membership(state);
   member().gateway_active = false;
   member_valid_ = false;
+}
+
+// --- P6 lifecycle connection points --------------------------------------------------------
+
+Status SecurityCoordinator::start_recovery_join(const MonotonicMs now) noexcept {
+  if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
+  if (mode_ != CoordinatorMode::Member || !member_valid_) {
+    return Status::error(StatusCode::InvalidState, "recovery join outside member");
+  }
+  if (now < last_now_) return Status::error(StatusCode::TimeUncertain, "coordinator clock regressed");
+  if (!deps_.site->has_site() || !deps_.identity->has_identity()) {
+    return Status::error(StatusCode::InvalidState, "recovery join without membership");
+  }
+  in_port_ = true;
+  last_now_ = now;
+  // Traffic halts and member secrets scrub, but the stores stay: the
+  // Joiner re-proves the retained membership (or lands its removal).
+  // Staged member frames die with the engine — they must never feed a
+  // post-recovery workspace.
+  stop_traffic();
+  destroy_workspace();
+  for (auto& slot : staged_) slot = StagedFrame{};
+  mode_ = CoordinatorMode::ZeroTouch;  // tags the workspace for destroy below
+  create_joiner();
+  JoinBootInput boot{};
+  boot.boot_witness = boot_witness_;
+  boot.prepared = true;
+  boot.mode = JoinBootMode::VerifyExistingMembership;
+  boot.removal_watermark_site_id = removal_watermark_site_id_;
+  boot.removal_watermark_generation = removal_watermark_generation_;
+  const Status started =
+      usb_direct_ ? joiner().start_direct(boot, *this, now) : joiner().start(boot, now);
+  if (!started) {
+    destroy_workspace();
+    mode_ = CoordinatorMode::Recovery;
+    CoordinatorAction action{};
+    action.kind = CoordinatorActionKind::ReportRecovery;
+    action.recovery = JoinRecoveryReason::MembershipInvalid;
+    emit_action(action);
+  }
+  in_port_ = false;
+  return Status::success();
+}
+
+Status SecurityCoordinator::wipe_site_trust() noexcept {
+  if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
+  GroupKeyState::Input stop{};
+  stop.op = GroupKeyState::Op::Stop;
+  (void)group_keys_.advance(stop, last_now_);
+  if (deps_.discovery != nullptr) deps_.discovery->membership().revoke();
+  if (group_keys_.ready()) return Status::error(StatusCode::InternalError, "gk survived wipe");
+  return Status::success();
+}
+
+Status SecurityCoordinator::revoke_member_sessions(const RevocationSet& set,
+                                                   const std::uint32_t site_epoch,
+                                                   const MonotonicMs now) noexcept {
+  (void)site_epoch;
+  (void)now;
+  if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
+  if (mode_ != CoordinatorMode::Member) return Status::success();
+  // The set must be the adopted one: the lifecycle commits before
+  // enforcing, so anything else is a wiring bug — refuse instead of
+  // retiring sessions for a set the store never adopted.
+  if (!member_valid_ || !deps_.revocations->has_set() ||
+      deps_.revocations->set().site_id != set.site_id ||
+      deps_.revocations->set().network != set.network ||
+      deps_.revocations->rs_epoch() != set.rs_epoch) {
+    return Status::error(StatusCode::InvalidArgument, "revoke set mismatch");
+  }
+  (void)member().engine.cancel_all();
+  for (std::size_t i = 0; i < set.count; ++i) {
+    const NodeId peer = set.entries[i].node_id;
+    if (peer == kInvalidNodeId || peer == kBroadcastNodeId) continue;
+    (void)bank_.retire_all(peer);
+    if (deps_.discovery != nullptr) (void)deps_.discovery->revoke_peer(peer);
+  }
+  return Status::success();
 }
 
 }  // namespace routeloom::sdkv1

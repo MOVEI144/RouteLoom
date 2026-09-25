@@ -1020,6 +1020,35 @@ impl GroupRotation {
         }
     }
 
+    /// Publishes cutover staging (04 §8): the next GK stages with no
+    /// P5 rotation and no targets — it only ever travels inside
+    /// PREPAREs. A live rotation is dropped (its operation closes as
+    /// superseded by the caller).
+    pub fn publish_cutover_staging(&mut self, epoch: u32, key: GkSecret, created_ms: u64) {
+        self.staged = Some((epoch, key));
+        self.staged_created_ms = created_ms;
+        self.high_water = self.high_water.max(epoch);
+        self.rotation = None;
+        self.targets.clear();
+    }
+
+    /// Publishes the cutover commit's activation: the staged next GK
+    /// becomes active with no rotation row (COMMIT distribution, not P5
+    /// Updates, carries it). The old key is already deleted from the
+    /// store; the cleanup window starts.
+    pub fn publish_cutover_activation(&mut self, activated_ms: u64, mono_ms: u64) {
+        if self.rotation.is_some() {
+            return;
+        }
+        if let Some((epoch, key)) = self.staged.take() {
+            self.active_epoch = epoch;
+            self.active_key = key;
+        }
+        self.staged_created_ms = 0;
+        self.activated_ms = activated_ms;
+        self.cleanup_until_mono = mono_ms.saturating_add(GK_CLEANUP_MS);
+    }
+
     /// Publishes the Activating commit: staged becomes active, the old key
     /// is already deleted from the store, the cleanup window starts.
     pub fn publish_activation(&mut self, activated_ms: u64, mono_ms: u64) {

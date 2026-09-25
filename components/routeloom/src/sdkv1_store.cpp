@@ -1387,6 +1387,58 @@ Status ResumeCache2::clear_all() noexcept {
   return Status::success();
 }
 
+Status ResumeCache2::sweep_revoked(const ResumeContext& context, std::size_t& cursor,
+                                  bool& done) noexcept {
+  done = false;
+  const std::size_t count = storage_.slot_count();
+  if (count != link_quota_ + end_quota_) {
+    return Status::error(StatusCode::InvalidState, "resume2 quota mismatch");
+  }
+  if (cursor >= count) {
+    done = true;
+    return Status::success();
+  }
+  ResumeSlot2 slot{};
+  bool intact = true;
+  Status status = read_slot(cursor, slot, intact);
+  if (!status) return status;
+  if (!intact ||
+      (slot.valid && slot.network == context.network && context.revocations != nullptr &&
+       revocation_rejects(*context.revocations, slot.peer, slot.peer_generation,
+                          static_cast<std::uint32_t>(slot.network >> 32U)))) {
+    status = write_slot(cursor, ResumeSlot2{});
+    if (!status) return status;
+    drop_budget(cursor);
+  }
+  ++cursor;
+  done = cursor >= count;
+  return Status::success();
+}
+
+Status ResumeCache2::clear_step(std::size_t& cursor, bool& done) noexcept {
+  done = false;
+  const std::size_t count = storage_.slot_count();
+  if (count != link_quota_ + end_quota_) {
+    return Status::error(StatusCode::InvalidState, "resume2 quota mismatch");
+  }
+  if (cursor >= count) {
+    done = true;
+    return Status::success();
+  }
+  ResumeSlot2 slot{};
+  bool intact = true;
+  Status status = read_slot(cursor, slot, intact);
+  if (!status) return status;
+  if (slot.valid || !intact) {
+    status = write_slot(cursor, ResumeSlot2{});
+    if (!status) return status;
+  }
+  drop_budget(cursor);
+  ++cursor;
+  done = cursor >= count;
+  return Status::success();
+}
+
 Status ResumeCache::sweep_revoked(const ResumeContext& context, std::size_t& cursor,
                                  bool& done) noexcept {
   done = false;

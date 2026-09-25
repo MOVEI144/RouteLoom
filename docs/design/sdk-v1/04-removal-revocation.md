@@ -105,6 +105,8 @@ linkが連続3回`REVOKED` hintまたは失敗で終わり、使える近隣が�
 
 費用：全memberの再handshake（RLRES1ではなくEDHOC。RMSがnetworkに束縛されるため）。30件以上の削除を貯めたとき程度の頻度を想定する。
 
+Host実装（P6-2 PR D、`host/routeloom-host/src/site/cutover.rs`）：`membership.cutover`（ADMIN）はepoch段差・Site CA配下の次SiteCert・snapshot・全allocatorを検証してから次epoch全体（次SiteCert・同世代の次MemberCert・fresh次DAMS・共有P5 allocatorの次GK）を1 transactionでstageし、tickがPREPAREを配る。stageから600秒後に最新改訂のgateway PREPAREDが1台以上あれば次RRS1＋CutoverCommitの署名とactive切替を1 transactionでcommitし、COMMITを60秒の旧network猶予内で配る（猶予はRAMのみ。再起動で終了し、取り逃しはZT再発行へ）。準備中のrevokeは現networkへ先にcommitしてから改訂上げ・次GK再stage・全PREPARED無効・600秒再開・発行済みbindingの次RRS1持越しを同一transactionで行い、準備中のallowはsnapshotへ同世代の次資格で参加する（満杯は切捨てず拒否）。再起動はwindowを数え直し、epoch・serial・GKを消費しない。配布transportはfake portのまま（`RevocationTransport`に`carries_notice`／`carries_grant`の宣言を追加。未対応の種別はqueueせず、RRS-only portを詰まらせない）。機器・Owner・firmware側の実結線（P4/P5 adapter、gateway-local、ESP NVS RLX1）は残課題。
+
 ## 8. 予約：SAK交換（後続設計）
 
 SAK侵害または計画交換では、Site CA（オフライン）が署名する`SiteAuthorityChange{site_id, new SiteCert, min_site_epoch}`を機器が検証し、RLS1のSiteCertを差し替える。形式と配布は後続設計で、v1ではSAK侵害時の回復は「現場全機器の削除→再参加」（物理作業不要、ゼロタッチで戻る）とする。
@@ -136,9 +138,9 @@ SAK侵害または計画交換では、Site CA（オフライン）が署名す�
 | V1-R04 | 旧世代MemberCertでのlink/E2E確立拒否、再割当（世代+1）後は受理 | P6-1 PR Aでfloor/last-good・限定再認証の単体試験（同上＋`test_discovery.cpp`）。実EDHOC E2EはP4接続後 |
 | V1-R05 | 削除者はRemovalNoticeを検証して現場状態を消去、RLI1は保持 | PR B portable fake-port試験：RLX1 intent→逐次消去→holdoff→未割当action、RLI1不変、journalのbyte境界電断。実P4/P5/ESP trust adapterと統合電断試験は未接続 |
 | V1-R06 | 偽`REVOKED` hint・未署名通知・他現場SAK署名では何も消さない | PR B portableでは改竄署名の非消去のみ確認。hint/異現場の結線試験は未実施 |
-| V1-R07 | 紛失機器の復帰：ゼロタッチ経路でRemoved判定→消去→発見済み表示 | PR B の portable Joiner は健康なRLS1を保持して問い合わせ、実署名NoticeをOwnerへ渡すsim試験あり。Hostは旧networkのEADを同一kidの削除済みrowに照合する。Owner引渡し・旧kid履歴・Host通知配送・pipe E2Eは未接続 |
-| V1-R08 | RRS1満杯→cutover：GrantRenew取り逃しmemberの自動再参加（KGuardの人手確認なし） | planned_not_run（P6-2） |
+| V1-R07 | 紛失機器の復帰：ゼロタッチ経路でRemoved判定→消去→発見済み表示 | PR B の portable Joiner は健康なRLS1を保持して問い合わせ、実署名NoticeをOwnerへ渡すsim試験あり。Hostは旧networkのEADを同一kidの削除済みrowに加え、再割当後の旧kidはrevoke台帳（node索引）で照合する。revokeは署名済みNoticeを同transactionでcommitし、tickがcommit後に配送・NoticeAcceptedで`intent_confirmed`を立てる（`erase_confirmed`はprotocolに存在せず常にnull）。Owner引渡し・pipe E2Eは未接続 |
+| V1-R08 | RRS1満杯→cutover：GrantRenew取り逃しmemberの自動再参加（KGuardの人手確認なし） | P6-2 PR DでHost driverを実装しhost試験（`site::cutover_tests::*`：commit前送信0・600秒とgateway gate・準備中revokeの競合・再起動・RRS満杯回復・通知outbox、API socket経由の`site::e2e::cutover_flows_*`、取り逃しmemberのKGuard不要な再発行）。機器・Owner・firmware実結線とC++ Joiner pipe E2Eは残課題 |
 | V1-R09 | 分断群：再結合までは通信継続（保証外の記録）、再結合後に拒否 | P6-1 PR Aでpartition/merge sim試験（`test_sdkv1_revocation.cpp`）。HILはP8へ引継ぎ |
 | V1-R10 | RRS1・RemovalNoticeのC++/Rust共通vector、fuzz | RRS部分はPR Aで実施。PR BでRLX1 recordとLastMembership/profile/capabilityのvalid/invalid共通vectorを追加し、C++/Rust両harnessとCI再生成検査を実施。Renewと実結線E2Eは後続PR |
 
-P6 の本番プロフィールは未有効。Host の通知 outbox、旧 kid 履歴照会、Owner／ESP の消去実接続と E2E は PR D で接続する。portable Joiner は起動時に渡された RLX1 の削除世代 watermark 以下の同一site Allowを拒否する。Owner が検証済み watermark を渡し、再割当後の journal を整合させる結線も PR D に属する。portable の `NoticeAccepted` は intent 保存後の best effort 引渡しであり、Host の受領永続化を表さない。
+P6 の本番プロフィールは未有効。Host の通知 outbox・旧 kid 履歴照会・cutover driver・競合処理・自動再発行は PR D で接続した（上記 V1-R07／V1-R08）。残るは Owner／ESP の消去・lifecycle 実接続と E2E である。portable Joiner は起動時に渡された RLX1 の削除世代 watermark 以下の同一site Allowを拒否する。Owner が検証済み watermark を渡し、再割当後の journal を整合させる結線も PR D に属する（未接続）。portable の `NoticeAccepted` は intent 保存後の best effort 引渡しであり、Host の受領永続化を表さない。Host は受領した `NoticeAccepted` を revoke operation の `notice.intent_confirmed` として永続化する（消去の証拠ではない）。

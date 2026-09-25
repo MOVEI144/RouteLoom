@@ -53,7 +53,6 @@ constexpr std::size_t kRecordSeqOffset = 16;
 // len-4 u32 crc32
 constexpr std::uint32_t kIdentityMagic = 0x524C4931U;  // "RLI1"
 constexpr std::uint32_t kIdentitySealCommitted = 0x1DE71771U;
-constexpr std::size_t kIdentitySlotBytes = 1024;
 constexpr std::size_t kIdentityAnchorMax = 3;
 constexpr std::size_t kIdentityAnchorEntrySize = 80;
 constexpr std::size_t kIdentityFixedSize = 160;
@@ -61,6 +60,7 @@ constexpr std::size_t kIdentityRecordMin = kIdentityFixedSize + kIdentityAnchorE
 constexpr std::size_t kIdentityRecordMax =
     kIdentityFixedSize + kIdentityAnchorMax * kIdentityAnchorEntrySize + 4 + kRlcw1CertMax + 4;
 static_assert(kIdentityRecordMax == 664, "02 §2: RLI1 max 664 B");
+constexpr std::size_t kIdentitySlotBytes = kIdentityRecordMax;
 
 constexpr std::uint8_t kIdentityFlagConsoleLocked = 0x01;
 constexpr std::uint8_t kIdentityFlagStrictAssignment = 0x02;  // A2 mode
@@ -131,12 +131,12 @@ Status identity_verify_site_cert(const IdentityRecord& record, ByteView site_cer
 // no certificates (200 B) — the "sealed empty record" of 04 §6.4.
 constexpr std::uint32_t kSiteMagic = 0x524C5331U;  // "RLS1"
 constexpr std::uint32_t kSiteSealCommitted = 0x5173AB1EU;
-constexpr std::size_t kSiteSlotBytes = 1024;
 constexpr std::size_t kSiteFixedSize = 196;
 constexpr std::size_t kSiteGatewayMax = 4;
 constexpr std::size_t kSiteRecordMin = kSiteFixedSize + 4;
 constexpr std::size_t kSiteRecordMax = kSiteFixedSize + 2 * kRlcw1CertMax + 4;
 static_assert(kSiteRecordMax == 712, "RLS1 max = 02 §10.3 708 B + commit_seq");
+constexpr std::size_t kSiteSlotBytes = kSiteRecordMax;
 
 enum class SiteState : std::uint8_t { Cleared = 0, Member = 1 };
 

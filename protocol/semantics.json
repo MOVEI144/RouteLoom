@@ -164,6 +164,21 @@
     "max_records": 7,
     "first_record": "sender self record, metric 0"
   },
+  "diagnostic_route_broadcast_capability": {
+    "feature_bit": 7,
+    "membership_lifecycle_bit": 6,
+    "rrs_gossip_bit": 5,
+    "status": "scoped opt-in wired; legacy peers never set bit 7 so no grant discriminator is needed"
+  },
+  "broadcast_route_update_payload": {
+    "status": "scoped opt-in wired: batched GroupLink TX, dedicated RX dispatch, unicast fallback",
+    "wire_header": "RouteUpdate, next_hop=destination=broadcast, origin=previous_hop=non-broadcast, hop_remaining=1, BestEffort, round=0, end_protected=false, end_counter=0, link_epoch=sender boot, end_epoch=GK; explicit broadcast open only",
+    "layout": "version u8=1, flags u8=0, count u8=1..5, reserved u8=0, count x (destination u64, generation u32, sequence u16, metric u16, via u64), all big-endian",
+    "max_records": 5,
+    "first_record": "sender self record, metric 0, via 0",
+    "poison_projection": "receiver equal to via sees infinity; all other receivers see metric",
+    "authentication": "group tag does not prove pairwise sender binding"
+  },
   "route_request_payload": {
     "frame_protection": "link-only, one hop, hop_remaining 1",
     "fields": [

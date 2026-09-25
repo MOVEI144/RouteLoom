@@ -4,6 +4,7 @@
 
 #include "routeloom/group.hpp"
 #include "routeloom/secure_clear.hpp"
+#include "routeloom/sdkv1_store.hpp"
 
 namespace routeloom::sdkv1 {
 namespace {
@@ -20,6 +21,18 @@ std::uint32_t sender_boot(const SecurityContext& c) noexcept {
 
 GroupSecurityProvider::~GroupSecurityProvider() {
   secure_clear(staging_);
+}
+
+bool GroupSecurityProvider::revoked_group_sender(const NodeId sender) const noexcept {
+  if (revocations_ == nullptr || !revocations_->has_set() ||
+      !keys_.store_.has_site()) return false;
+  const RevocationSet& set = revocations_->set();
+  const SiteRecord& site = keys_.store_.site();
+  if (set.site_id != site.site_id || set.network != site.network) return false;
+  for (std::size_t i = 0; i < set.count; ++i) {
+    if (set.entries[i].node_id == sender) return true;
+  }
+  return false;
 }
 
 Status GroupSecurityProvider::tx_epoch(const SecurityScope scope, const NodeId peer,
@@ -71,6 +84,9 @@ Status GroupSecurityProvider::material(const SecurityContext& c, keys::TrafficKe
   }
   if (c.scope == SecurityScope::GroupLink && (c.sender_boot || c.group_id)) {
     return Status::error(StatusCode::AuthorizationFailed, "group link binding");
+  }
+  if (transmit && revoked_group_sender(c.sender)) {
+    return Status::error(StatusCode::AuthorizationFailed, "group sender revoked");
   }
   ScopeDigest prk{};
   Status status = keys_.derive(gk_epoch(c), prk);
@@ -249,9 +265,11 @@ Status GroupSecurityProvider::open(const SecurityContext& c, const std::uint64_t
       status = Status::error(StatusCode::AuthorizationFailed, "group tag invalid");
     }
   }
-  const bool next_end = status && c.scope == SecurityScope::Group &&
-                        gk_epoch(c) == keys_.store_.site().gk_epoch_next;
-  if (status && !next_end) {
+  if (status && revoked_group_sender(c.sender)) {
+    status = Status::error(StatusCode::AuthorizationFailed, "group sender revoked");
+  }
+  const bool next_group = status && gk_epoch(c) == keys_.store_.site().gk_epoch_next;
+  if (status && !next_group) {
     std::memcpy(plaintext.data, staging_.data(), ciphertext.size);
     replay_commit(*entry, c.sender, gk_epoch(c), sender_boot(c), counter);
   } else if (plaintext.data != nullptr) {
@@ -264,7 +282,7 @@ Status GroupSecurityProvider::open(const SecurityContext& c, const std::uint64_t
   in_call_ = false;
   // Do not deliver, replay-commit or forward a next-GK frame before the
   // Owner's next Tick durably promotes. The sender's repair can resend it.
-  if (next_end) {
+  if (next_group) {
     GroupKeyState::Input event{};
     event.op = GroupKeyState::Op::AuthenticatedNext;
     event.epoch = gk_epoch(c);

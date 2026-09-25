@@ -1427,8 +1427,9 @@ struct ReentrantPort final : public ZtRld1Port {
 };
 
 struct ReentrantStorage final : public RecordSlotStorage {
+  explicit ReentrantStorage(std::size_t slot_bytes) : inner_(slot_bytes) {}
   Joiner* joiner{nullptr};
-  FaultyRecordStorage inner_{1024};
+  FaultyRecordStorage inner_;
   int busy{0};
   Status read(const std::uint8_t slot, const MutableByteView target) noexcept override {
     if (joiner != nullptr && joiner->poll(1).code == StatusCode::Busy) ++busy;
@@ -1444,8 +1445,8 @@ void test_reentry_refused() {
   current = "reentry";
   // A Joiner whose every dependency re-enters it; with no sites around,
   // the FSM walks BootCheck -> scan -> Backoff and rescans.
-  ReentrantStorage id_storage;
-  ReentrantStorage site_storage;
+  ReentrantStorage id_storage{kIdentitySlotBytes};
+  ReentrantStorage site_storage{kSiteSlotBytes};
   IdentityStore identity(id_storage);
   SiteStore site(site_storage);
   CHECK(identity.initialize().ok());

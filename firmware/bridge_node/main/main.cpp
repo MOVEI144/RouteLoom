@@ -56,8 +56,8 @@ constexpr char kTag[] = "RouteLoomBr";
 
 // Long-lived CPU-only state can reside in LP SRAM on the C5; radio and USB
 // driver buffers stay in their normal HP memory. The smaller gateway config
-// state also fits the C3 RTC bank. Both DRAM-tight security modes (member
-// and dev-RAM) place it there; the dev-RAM default build is as tight as the
+// state fits the C3 RTC bank. Both DRAM-tight security modes (member and
+// dev-RAM) place it there; the dev-RAM default build is as tight as the
 // member one.
 #if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC && CONFIG_IDF_TARGET_ESP32C5
 #define ROUTELOOM_MEMBER_C5_LP RTC_DATA_ATTR
@@ -66,7 +66,7 @@ constexpr char kTag[] = "RouteLoomBr";
 #endif
 #if (CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC || \
      CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM) && \
-    (CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C5)
+    CONFIG_IDF_TARGET_ESP32C3
 #define ROUTELOOM_MEMBER_SMALL_LP RTC_DATA_ATTR
 #else
 #define ROUTELOOM_MEMBER_SMALL_LP
@@ -543,6 +543,11 @@ extern "C" void app_main(void) {
       static_cast<std::uint32_t>(CONFIG_ROUTELOOM_ROUTE_PERIOD_MS);
   config.node.route_lifetime_ms =
       static_cast<std::uint32_t>(CONFIG_ROUTELOOM_ROUTE_LIFETIME_MS);
+#if CONFIG_ROUTELOOM_ROUTE_BROADCAST
+  // P5-2 broadcast opt-in (routing-scale.md section 8): default off.
+  config.node.route_broadcast = true;
+  ESP_LOGI(kTag, "routing profile: route broadcast opt-in enabled");
+#endif
   ESP_LOGI(kTag,
            "routing profile: gateway-scoped gateways=0x%" PRIx64 ",0x%" PRIx64
            " tick=%" PRIu32 "ms lease=%" PRIu32 "ms",

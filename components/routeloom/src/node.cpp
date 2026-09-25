@@ -534,6 +534,12 @@ Status MeshNode::validate_config() const noexcept {
       return Status::error(StatusCode::InvalidArgument, "invalid route gateway");
     }
   }
+  if (config_.route_broadcast && !gateway_scoped()) {
+    return Status::error(StatusCode::Unsupported, "BROADCAST_REQUIRES_SCOPED_ROUTES");
+  }
+  // Scoped opt-in is wired: batched GroupLink advertisements to live
+  // grant holders, unicast everywhere else (routing-scale.md §8). Flat
+  // full-table broadcast stays unsupported — see above.
   if (gateway_scoped() &&
       !scoped_lifetime_sufficient(config_.route_advertisement_period_ms,
                                   config_.route_lifetime_ms,
@@ -656,6 +662,7 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
   record->tx_window = kPeerWindowInitial;
   record->window_accepts = 0;
   record->busy_capable = false;
+  record->cap_features = 0;
   record->cap_valid_until_ms = 0;
   record->cap_node_boot = 0;
   record->last_cap_exchange_ms = 0;
@@ -691,17 +698,22 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
   return Status::success();
 }
 
-Status MeshNode::remove_neighbor(const NodeId neighbor, const MonotonicMs now_ms) noexcept {
-  if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
-  auto* record = find_neighbor(neighbor);
-  if (record == nullptr) return Status::error(StatusCode::NotFound, "neighbor not found");
-  record->active = false;
+void MeshNode::drop_neighbor_locked(Neighbor& record, const NodeId neighbor,
+                                   const MonotonicMs now_ms) noexcept {
+  record.active = false;
   routes_.invalidate_next_hop(neighbor, now_ms);
   routes_.clear_next_hop_busy(neighbor);  // drop stale busy state too
   ++self_route_sequence_;
   ++config_revision_;
   trigger_route_advertisement(now_ms);
+}
+
+Status MeshNode::remove_neighbor(const NodeId neighbor, const MonotonicMs now_ms) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+  NodeGuard guard(in_call_);
+  auto* record = find_neighbor(neighbor);
+  if (record == nullptr) return Status::error(StatusCode::NotFound, "neighbor not found");
+  drop_neighbor_locked(*record, neighbor, now_ms);
   return Status::success();
 }
 
@@ -2014,7 +2026,13 @@ bool MeshNode::defer_for_session(TxJob& job) noexcept {
   // the next hop first, then the end layer a fresh frame would seal (a
   // forwarded frame's end layer is already sealed by its origin).
   NodeId subject = job.peer;
-  ContextState state = security_.context_state(SecurityScope::Link, job.peer);
+  // A broadcast job seals under GroupLink, not the pairwise Link: ask about
+  // the context the encode actually refused on, or a missing GK would fail
+  // the job instead of holding it for the key.
+  const SecurityScope link_scope = job.peer == kBroadcastNodeId
+                                       ? SecurityScope::GroupLink
+                                       : SecurityScope::Link;
+  ContextState state = security_.context_state(link_scope, job.peer);
   if (context_usable(state) && job.form == JobForm::Plain &&
       (job.plain.header.flags & wire::kFlagEndProtected) != 0) {
     const SecurityContext end = wire::end_context(job.plain.header);
@@ -2330,6 +2348,12 @@ Status MeshNode::on_radio_tx_result(const std::uint64_t token, const bool succes
       bucket != nullptr && bucket->pending_completions != 0) {
     --bucket->pending_completions;
   }
+  // A broadcast has no per-neighbor MAC ACK. Resolve the one-shot driver
+  // attempt without fabricating reachability, RF loss or HopAccept evidence.
+  if (job.peer == kBroadcastNodeId) {
+    complete_job(job, false, now_ms);
+    return Status::success();
+  }
   auto* neighbor = find_neighbor(job.peer);
   if (!success) {
     if (neighbor != nullptr && neighbor->consecutive_failures < UINT8_MAX) {
@@ -2463,7 +2487,7 @@ void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
 }
 
 void MeshNode::fail_job(TxJob& job, const char* reason,
-                        const MonotonicMs now_ms) noexcept {
+                        const MonotonicMs now_ms, const bool terminal) noexcept {
   // Terminate the transaction work item first: the failure report below
   // reserves a fresh short transaction, which must see the freed capacity.
   finish_txn_work(job.txn);
@@ -2524,7 +2548,8 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
       delivery->app_phase != 0) {
     return;
   }
-  if ((delivery->options.delivery == DeliveryClass::Reliable ||
+  if (!terminal &&
+      (delivery->options.delivery == DeliveryClass::Reliable ||
        delivery->options.delivery == DeliveryClass::Applied) &&
       now_ms < delivery->expires_at_ms &&
       static_cast<std::uint8_t>(delivery->round + 1U) < config_.max_end_to_end_rounds) {
@@ -2533,7 +2558,8 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
     set_delivery_state(*delivery, DeliveryState::WaitingForRoute, reason);
     return;
   }
-  if (delivery->options.delivery == DeliveryClass::Applied) {
+  if (delivery->options.delivery == DeliveryClass::Applied &&
+      (!terminal || job.physical_attempts != 0)) {
     // Rounds exhausted on a transmitted request — the destination may have
     // executed it; Indeterminate is the honest verdict (01 §1.9).
     set_delivery_state(*delivery, DeliveryState::Indeterminate, "APP_RESULT_TIMEOUT");
@@ -4163,8 +4189,10 @@ void MeshNode::handle_busy(const wire::LinkOpenedFrame& frame, const NodeId peer
     // A well-formed authenticated BUSY proves the peer implements the
     // payload — mark it capable for our emit path. The grant is bounded:
     // direct proof refreshes the same validity window a capabilities
-    // exchange would install.
+    // exchange would install. It proves exactly the busy payload, so it
+    // installs exactly that permission — never a broadcast grant.
     neighbor->busy_capable = true;
+    neighbor->cap_features = kCapBusyV1;
     neighbor->cap_valid_until_ms = now_ms + kCapabilitiesValidityMs;
     // The feedback sequence orders load feedback per peer: a stale or
     // replayed BUSY must never re-arm a deferral (03 §5). RFC 1982 serial
@@ -5094,7 +5122,7 @@ void MeshNode::process_applied(const MonotonicMs now_ms) noexcept {
 
 void MeshNode::handle_route_update(const wire::PlainFrame& frame, const NodeId peer,
                                    const MonotonicMs now_ms) noexcept {
-  auto* neighbor = find_neighbor(peer);
+  const auto* neighbor = find_neighbor(peer);
   if (neighbor == nullptr || !neighbor->active) return;
   ByteReader reader(ByteView{frame.payload.data(), frame.payload_size});
   std::uint8_t count = 0;
@@ -5112,6 +5140,15 @@ void MeshNode::handle_route_update(const wire::PlainFrame& frame, const NodeId p
       return;
     }
   }
+  apply_route_records(records.data(), count, peer, now_ms, true);
+}
+
+void MeshNode::apply_route_records(const RouteAdvertisement* records,
+                                   const std::size_t count, const NodeId peer,
+                                   const MonotonicMs now_ms,
+                                   const bool pairwise_authenticated) noexcept {
+  auto* neighbor = find_neighbor(peer);
+  if (neighbor == nullptr || !neighbor->active || records == nullptr) return;
 
   // Relay restart: the peer's self record (destination == peer) carries a
   // higher origin generation than we last saw. The restarted relay lost its
@@ -5119,7 +5156,7 @@ void MeshNode::handle_route_update(const wire::PlainFrame& frame, const NodeId p
   // stale. Drop via-peer candidates without hold-down — post-restart
   // advertisements are legitimate fresh state.
   bool restarted = false;
-  for (std::uint8_t i = 0; i < count; ++i) {
+  for (std::size_t i = 0; i < count; ++i) {
     if (records[i].destination == peer && records[i].generation > neighbor->generation) {
       restarted = neighbor->generation != 0;
       neighbor->generation = records[i].generation;
@@ -5127,18 +5164,18 @@ void MeshNode::handle_route_update(const wire::PlainFrame& frame, const NodeId p
   }
   if (restarted) {
     routes_.invalidate_next_hop(peer, now_ms, false);
-    // §3.7 identity reset: measurement gathered against the previous
-    // incarnation is unattributable to this one.
-    reset_neighbor_measurement(*neighbor);
+    // Only pairwise authentication can retire per-peer measurement. A
+    // GroupLink frame may update route generation but proves no peer boot.
+    if (pairwise_authenticated) reset_neighbor_measurement(*neighbor);
     trigger_route_advertisement(now_ms);
     observer_.on_diagnostic("PEER_RESTARTED_ROUTES_FLUSHED", peer, nullptr);
   }
   // Scoped profile: tree-role inference (poisoned gateway record = the peer
   // routes to that gateway through us). Scheduling state only — route state
   // below still moves exclusively through consider().
-  note_scoped_update(*neighbor, records.data(), count, now_ms);
+  note_scoped_update(*neighbor, records, count, now_ms);
 
-  for (std::uint8_t i = 0; i < count; ++i) {
+  for (std::size_t i = 0; i < count; ++i) {
     const auto& advertisement = records[i];
     if (advertisement.destination == config_.node) continue;
     // Advertisements are considered against the CURRENT effective link
@@ -5292,6 +5329,17 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
   // Any received frame — even one that fails decode — is radio activity and
   // must invalidate outstanding sleep tickets.
   ++work_generation_;
+  if (config_.route_broadcast) {
+    // Opt-in RX: a strict broadcast-route shape bypasses the pairwise
+    // receive path for the dedicated GroupLink dispatch — which never feeds
+    // telemetry, resume confirmation or link activity. Anything else falls
+    // through to the ordinary path below, unchanged.
+    wire::Header peek{};
+    if (wire::peek_header(encoded, peek) && peek.next_hop == kBroadcastNodeId) {
+      handle_broadcast_route(peer, encoded, metadata, now_ms);
+      return;
+    }
+  }
   wire::LinkOpenedFrame frame{};
   auto status = wire::open_link(encoded, config_.node, security_, frame);
   if (!status) {
@@ -6316,6 +6364,9 @@ Status MeshNode::note_radio_tx(const RadioTxObservation& observation,
         break;
     }
   }
+  // RF broadcast consumes management airtime but has no neighbor MAC ACK.
+  // Keep the ledger debit above and omit every per-peer completion sample.
+  if (observation.peer == kBroadcastNodeId) return Status::success();
   auto* bucket = observation_bucket(
       ObservationKey{observation.binding_generation,
                      ObservationDirection::Egress, observation.radio_generation,
@@ -6724,6 +6775,9 @@ CapabilitiesReply MeshNode::build_capabilities_reply(
   // forward_v1 additionally requires the live relay gate (04 §capabilities).
   if (transit_permitted()) reply.features |= kCapForwardV1;
   if (telemetry_remote_) reply.features |= kCapRemoteTelemetryV1;
+  // The broadcast bit names a wired receiver: scoped opt-in only, so a
+  // legacy or flat peer never grants it (routing-scale.md §8).
+  if (config_.route_broadcast) reply.features |= kCapRouteBroadcastV1;
   // Only the configured+ready verifier's bit — never every compiled profile.
   if (config_sink_ != nullptr) {
     ExternalCallbackScope scope(in_external_callback_);
@@ -7018,6 +7072,10 @@ void MeshNode::handle_diagnostic_link(const NodeId peer,
       neighbor->cap_node_boot = reply.node_boot;
       neighbor->cap_valid_until_ms = grant_ms != 0 ? now_ms + grant_ms : 0;
       neighbor->last_cap_exchange_ms = now_ms;
+      // The whole granted bitmask is retained per recipient under the same
+      // validity window — a grant without the broadcast bit authorizes no
+      // broadcast, and valid_for_ms==0 clears every permission at once.
+      neighbor->cap_features = grant_ms != 0 ? reply.features : 0;
       neighbor->busy_capable =
           grant_ms != 0 && (reply.features & kCapBusyV1) != 0;
     }
@@ -7448,6 +7506,9 @@ Status MeshNode::note_peer_stale(const NodeId peer) noexcept {
   telemetry_peers_.mark_stale(peer);
   if (Neighbor* neighbor = find_neighbor(peer)) {
     reset_neighbor_measurement(*neighbor);
+    neighbor->cap_features = 0;
+    neighbor->busy_capable = false;
+    neighbor->cap_valid_until_ms = 0;
   }
   return Status::success();
 }
@@ -7513,6 +7574,57 @@ Status MeshNode::set_relay_enabled(const bool enabled) noexcept {
     trigger_route_advertisement(last_clock_ms_);
   }
   return Status::success();
+}
+
+void MeshNode::revoke_routes(const NodeId peer, const MonotonicMs now_ms) noexcept {
+  if (in_call_) return;  // enforcement is retried on the next RRS apply
+  NodeGuard guard(in_call_);
+  if (peer == kInvalidNodeId || peer == kBroadcastNodeId) return;
+  // Route updates are plain frames gated only on the neighbor record, so
+  // scrubbing the table is not enough: the neighbor itself goes inactive
+  // (its re-advertisements are then ignored, not re-learned). It heals
+  // through the normal handshake path — which the RRS gate refuses until
+  // the peer re-authenticates under a newer generation.
+  if (auto* record = find_neighbor(peer); record != nullptr) {
+    drop_neighbor_locked(*record, peer, now_ms);
+  } else {
+    routes_.invalidate_next_hop(peer, now_ms, true);
+  }
+  const RouteSelection selected = routes_.best(peer);
+  if (selected.valid) (void)routes_.withdraw(peer, selected.next_hop, now_ms);
+  routes_.evaluate(now_ms);
+  // A route withdrawal alone leaves admitted work alive. Drop queued and
+  // awaiting work involving the revoked identity before another dispatch
+  // can select it under a repaired route or an overlapping session.
+  const auto involves_peer = [&](const TxJob& job) noexcept {
+    if (job.owner == JobOwner::Group) {
+      const GroupTree* tree = group_trees_.find(
+          [&](const GroupTree& value) { return value.key == job.ack.key; });
+      if (tree != nullptr && tree->parent == peer) return true;
+    }
+    return job.peer == peer || job.plain.header.origin == peer ||
+           job.plain.header.destination == peer || job.ack.key.origin == peer;
+  };
+  TxJob dropped{};
+  while (scheduler_.drop_one_if(involves_peer, dropped)) {
+    fail_job(dropped, "REVOKED_PEER", now_ms, true);
+  }
+  while (auto* awaiting = awaiting_hop_.find(
+             [&](const AwaitingHop& value) { return involves_peer(value.job); })) {
+    TxJob job = awaiting->job;
+    awaiting_hop_.release(awaiting);
+    fail_job(job, "REVOKED_PEER", now_ms, true);
+  }
+  if (group_promote_hold_.used &&
+      (group_promote_hold_.peer == peer || group_promote_hold_.frame.header.origin == peer)) {
+    group_promote_hold_ = GroupPromoteHold{};
+  }
+  while (GroupHold* hold = group_holds_.find([&](const GroupHold& value) {
+           return value.info.key.origin == peer || value.previous_hop == peer;
+         })) group_holds_.release(hold);
+  while (GroupTree* tree = group_trees_.find([&](const GroupTree& value) {
+           return value.key.origin == peer || value.parent == peer;
+         })) group_trees_.release(tree);
 }
 
 void MeshNode::refresh_neighbor_load(const MonotonicMs now_ms) noexcept {
@@ -7653,7 +7765,9 @@ Status MeshNode::set_peer_busy_capable(const NodeId peer, const bool capable) no
   if (auto* neighbor = find_neighbor(peer)) {
     neighbor->busy_capable = capable;
     // A host/configured grant carries the same bounded validity as an
-    // exchange-derived one — it is refreshed, never permanent.
+    // exchange-derived one — it is refreshed, never permanent — and it
+    // names exactly the busy permission, like a BUSY proof.
+    neighbor->cap_features = capable ? static_cast<std::uint32_t>(kCapBusyV1) : 0u;
     neighbor->cap_valid_until_ms =
         capable ? last_clock_ms_ + kCapabilitiesValidityMs : 0;
   }
@@ -7665,6 +7779,18 @@ bool MeshNode::peer_busy_capable(const NodeId peer,
   const auto* neighbor = find_neighbor(peer);
   return neighbor != nullptr && neighbor->busy_capable &&
          neighbor->cap_valid_until_ms > now_ms;
+}
+
+bool MeshNode::peer_broadcast_eligible(const NodeId peer,
+                                       const MonotonicMs now_ms) const noexcept {
+  const auto* neighbor = find_neighbor(peer);
+  // Same liveness rule as the busy gate (an unexpired nonce-bound grant),
+  // plus the broadcast bit and a usable pairwise Link context — the grant
+  // alone never authorizes a broadcast to a peer we cannot reach pairwise.
+  return neighbor != nullptr && neighbor->active &&
+         (neighbor->cap_features & kCapRouteBroadcastV1) != 0 &&
+         neighbor->cap_valid_until_ms > now_ms &&
+         context_usable(security_.context_state(SecurityScope::Link, peer));
 }
 
 }  // namespace routeloom

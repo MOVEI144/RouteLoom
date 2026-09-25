@@ -67,6 +67,11 @@ struct NodeConfig {
   // many advertisement periods. validate_config() enforces
   // route_lifetime_ms >= (2 * ticks + kScopedLeaseMarginTicks) * period.
   std::uint8_t route_refresh_ticks{kScopedDefaultRefreshTicks};
+  // P5-2 opt-in (routing-scale.md §8): scoped self+gateway refreshes to
+  // live grant holders share one GroupLink broadcast; every other target
+  // keeps unicast. Flat full-table broadcast is unsupported (start refuses
+  // it); firmware leaves this default-off behind Kconfig.
+  bool route_broadcast{false};
   // §14 management airtime budget gate (03-congestion.md §8, radio.md
   // §9/§14): the pinned spec-envelope refill is an UNCALIBRATED
   // capability, not a measured allocation — it must not gate route
@@ -676,6 +681,7 @@ struct RouteScaleStats {
   std::uint64_t discovery_replies_forwarded{0};
   std::uint64_t discoveries_resolved{0};  // discovery state closed by a live route
   std::uint64_t route_requests_dropped{0};  // invalid, duplicate, rate-limited or no path
+  std::uint64_t broadcast_frames{0};  // batched GroupLink self+gateway advertisements sent
 };
 
 // Provider-owned sessions (sdk-v1/03 §8–§9, plan P4-1). All zero with a
@@ -938,6 +944,12 @@ class MeshNode {
   std::size_t txn_in_flight() const noexcept;
 
   const RouteTable& routes() const noexcept { return routes_; }
+  // P6 enforcement (G-SEC P6 PR D): deactivates the neighbor record
+  // (plain route updates from it are then ignored, not re-learned),
+  // drops every candidate learned via `peer`, and withdraws the route
+  // to `peer` itself, expediting the retraction wave like a neighbor
+  // loss. The record heals through the normal handshake path only.
+  void revoke_routes(NodeId peer, MonotonicMs now_ms) noexcept;
 
   // --- Node status snapshot (node_status.hpp, node_status.cpp) --------------
   // Read-only, allocation-free view assembled from the neighbor, route and
@@ -1065,6 +1077,11 @@ class MeshNode {
   // Whether a live (unexpired) capability grant marks this peer as
   // Busy(20)-capable right now — read-only mirror of the gate at 03 §5.
   bool peer_busy_capable(NodeId peer, MonotonicMs now_ms) const noexcept;
+  // Whether `peer` is eligible for a batched GroupLink route advertisement
+  // right now (routing-scale.md §8): an active neighbor whose live
+  // nonce-bound grant carries kCapRouteBroadcastV1 under a usable pairwise
+  // Link context. Read-only mirror of the scheduler's batching gate.
+  bool peer_broadcast_eligible(NodeId peer, MonotonicMs now_ms) const noexcept;
   // Effective link cost currently fed to routing for `peer` (nominal base
   // adjusted by the measured exchange ratio and our egress queue penalty,
   // 03 §6). kInfiniteRouteMetric when the peer is unknown.
@@ -1282,7 +1299,8 @@ class MeshNode {
 
   // Members are grouped 8-byte first, then 4/2/1-byte (ram-budget.md): the
   // fields of one mechanism are split across the groups, so each keeps its
-  // comment where it is declared. 160 B instead of 192 B (LP64 and RISC-V/Xtensa).
+  // comment where it is declared. 168 B (164 + 4 tail padding) instead of
+  // 192 B (LP64 and RISC-V/Xtensa).
   struct Neighbor {
     // --- 8-byte members ---
     NodeId node{kInvalidNodeId};
@@ -1317,6 +1335,11 @@ class MeshNode {
     MonotonicMs last_pull_answer_ms{0};
     NodeId pull_target{kInvalidNodeId};
     // --- 4-byte members ---
+    // Granted feature bits from the peer's latest nonce-bound
+    // CapabilitiesReply (telemetry.hpp CapabilityFeature), live only while
+    // cap_valid_until_ms is future. Cleared with the rest of the grant on
+    // re-add; expiry is lazy like busy_capable.
+    std::uint32_t cap_features{0};
     RouteGeneration generation{0};  // last origin generation the peer self-advertised
     // Highest feedback sequence accepted from this peer; stale/replayed
     // BUSY payloads are detected against it (FeedbackSequence ordering tag).
@@ -1827,6 +1850,9 @@ class MeshNode {
   Status validate_config() const noexcept;
   Neighbor* find_neighbor(NodeId node) noexcept;
   const Neighbor* find_neighbor(NodeId node) const noexcept;
+  // Shared drop path (guard held by the caller): deactivates the record,
+  // invalidates via-peer candidates, and expedites the retraction wave.
+  void drop_neighbor_locked(Neighbor& record, NodeId neighbor, MonotonicMs now_ms) noexcept;
   // Identity reset (sdk-completion/03 §3.7): clears the measurement mirror
   // and returns link_cost to nominal — evidence gathered under a previous
   // peer incarnation/binding must not move the current identity's metric.
@@ -1931,7 +1957,8 @@ class MeshNode {
                        const MessageId* message) noexcept;
   void dispatch_next(MonotonicMs now_ms) noexcept;
   void complete_job(TxJob& job, bool hop_accepted, MonotonicMs now_ms) noexcept;
-  void fail_job(TxJob& job, const char* reason, MonotonicMs now_ms) noexcept;
+  void fail_job(TxJob& job, const char* reason, MonotonicMs now_ms,
+                bool terminal = false) noexcept;
   void retry_or_fail(TxJob& job, const char* reason, MonotonicMs now_ms) noexcept;
   // Re-admit a BUSY-deferred job after its clamped retry_after wait, bounded
   // by busy_readmissions_max and the combined physical-attempt budget (03 §5).
@@ -2200,6 +2227,13 @@ class MeshNode {
                                          std::uint32_t hop_timeout_ms) noexcept;
   void handle_route_update(const wire::PlainFrame& frame, NodeId peer,
                            MonotonicMs now_ms) noexcept;
+  // Applies validated route records from `peer` (unicast ROUTE_UPDATE or a
+  // projected GroupLink broadcast): peer-restart reset, tree-role inference
+  // and one consider() per record. Only a pairwise-authenticated restart may
+  // reset link measurement; group frames never change capability or resume state.
+  void apply_route_records(const RouteAdvertisement* records, std::size_t count,
+                           NodeId peer, MonotonicMs now_ms,
+                           bool pairwise_authenticated) noexcept;
   void handle_seqno_request(const wire::PlainFrame& frame, NodeId peer,
                             MonotonicMs now_ms) noexcept;
 
@@ -2263,6 +2297,29 @@ class MeshNode {
                                std::size_t count, MonotonicMs now_ms) noexcept;
   Status queue_scoped_update(NodeId neighbor, NodeId extra,
                              MonotonicMs now_ms) noexcept;
+  // P5-2 broadcast (routing-scale.md §8): one GroupLink self+gateway frame
+  // for `count` downward targets when at least two are eligible and the
+  // GroupLink snapshot, build and queue all succeed; unicast covers every
+  // other target and every fallback. Counts downward_frames per unicast and
+  // broadcast_frames per broadcast. Returns false when the scheduler filled
+  // mid-batch (the caller stops its pass, as before).
+  bool emit_downward_batch(const NodeId* targets, std::size_t count,
+                           MonotonicMs now_ms) noexcept;
+  // True while the provider can stamp a GroupLink frame right now (a
+  // side-effect-free epoch snapshot: no counter is drawn by asking).
+  bool broadcast_tx_ready() noexcept;
+  // Builds the shared self+gateway records with committed-next-hop via.
+  // False when no broadcast can carry them (a gateway on a direct link has
+  // no third-node via) — the caller falls back to unicast.
+  bool build_broadcast_records(BroadcastRouteRecord* records,
+                               std::size_t& count) noexcept;
+  Status queue_broadcast_route_update(MonotonicMs now_ms) noexcept;
+  // Dedicated GroupLink route dispatch: sender-gated, route-only. Never
+  // touches capability grants, telemetry summaries, resume confirmation or
+  // link activity — a group tag proves no pairwise identity.
+  void handle_broadcast_route(NodeId peer, ByteView encoded,
+                              const RadioRxMetadataV2* metadata,
+                              MonotonicMs now_ms) noexcept;
   std::size_t emit_upward(UpwardCycle& cycle, std::size_t max_frames,
                           MonotonicMs now_ms) noexcept;
   void emit_upward_dirty(NodeId parent, MonotonicMs now_ms) noexcept;
@@ -2366,6 +2423,7 @@ class MeshNode {
   };
   struct GroupHold {
     GroupMessageInfo info{};
+    NodeId previous_hop{kInvalidNodeId};
     std::uint32_t gk_epoch{0};
     MonotonicMs release_at_ms{0};
     std::uint8_t size{0};
@@ -2430,7 +2488,7 @@ class MeshNode {
   // Ordering + application hand-off (group-delivery.md §6).
   void group_accept(GroupStream& stream, const GroupMessageInfo& info, ByteView app,
                     bool member, std::uint32_t remaining_ms, MonotonicMs now_ms,
-                    std::uint32_t gk_epoch) noexcept;
+                    std::uint32_t gk_epoch, NodeId previous_hop) noexcept;
   void group_drain(GroupStream& stream) noexcept;
   void group_skip_to(GroupStream& stream, std::uint32_t target) noexcept;
   void group_deliver_app(const GroupMessageInfo& info, ByteView app) noexcept;
@@ -2628,6 +2686,9 @@ class MeshNode {
   std::uint32_t next_route_request_id_{1};
   MonotonicMs route_request_window_ms_{0};
   std::uint32_t route_request_window_count_{0};
+  // Earliest next unknown-GK hint from a broadcast (at most one per minute;
+  // the pull itself is the Owner's job).
+  MonotonicMs next_broadcast_gk_hint_ms_{0};
   RouteScaleStats route_scale_stats_{};
   // Group delivery state (bounded; group-delivery.md §9).
   std::array<GroupId, kGroupMembershipMax> group_membership_{};

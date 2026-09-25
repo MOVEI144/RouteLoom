@@ -26,6 +26,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <new>
 #include <type_traits>
 
@@ -38,6 +39,7 @@
 #include "routeloom/psa_session_aead.hpp"
 #include "routeloom/sdkv1_authority_transport.hpp"
 #include "routeloom/sdkv1_join_relay.hpp"
+#include "routeloom/sdkv1_revocation.hpp"
 #include "routeloom/sdkv1_security_coordinator.hpp"
 #include "routeloom/usb_bridge.hpp"
 
@@ -51,7 +53,10 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
                                    public sdkv1::ZtRld1Port,
                                    public sdkv1::CoordinatorMeshPort,
                                    public sdkv1::CoordinatorUsbPort,
-                                   public NeighborAuthenticator {
+                                   public NeighborAuthenticator,
+                                   public sdkv1::AuthorityVerifiedSink,
+                                   public RrsGossipSink,
+                                   public RrsChunkSink {
  public:
   struct Config {
     NodeId local_node{kInvalidNodeId};  // Kconfig identity until adoption
@@ -81,6 +86,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // here on.
   SecurityProvider& session_provider() noexcept;
   sdkv1::SecurityCoordinator& coordinator() noexcept;
+  sdkv1::MembershipLifecycle& lifecycle() noexcept;
   // Late bindings (each once, before boot): the radio (RLD1 TX, channel
   // operations, member node adoption) and the USB bridge (LocalJoin +
   // relay ups/downs). A radio-only node skips the bridge: relay ups
@@ -191,6 +197,16 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
                 const AuthTag& tag) noexcept override;
   Status issue_proof(const AuthTranscript& transcript, NodeId peer, const AuthTag& tag,
                      AuthenticatedPeerProof& out) noexcept override;
+  // RrsGossipSink: one link-authenticated P6 body (StateEpochs/RrsRequest
+  // Control or a kind-6 manifest). Stages a copy for the poll feed —
+  // never dispatches here (the node holds its guard).
+  void on_rrs_frame(NodeId peer, FrameType type, ByteView body,
+                    MonotonicMs now_ms) noexcept override;
+  // RrsChunkSink: one ObjectChunk/ObjectAck. Claims (stages) exactly the
+  // frames of the lifecycle's live transfer; the rest stay migration's.
+  bool claim_rrs_chunk(NodeId peer, FrameType carrier, ByteView body,
+                       MonotonicMs now_ms) noexcept override;
+  void on_verified_authority(std::uint8_t type, ByteView plaintext) noexcept override;
 
  private:
   // One outstanding radio tune: a TuneChannel action (coord_token != 0)
@@ -201,6 +217,56 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
     OperationToken op{kInvalidOperationToken};
     std::uint8_t channel{0};
     bool active{false};
+  };
+
+  // --- P6 lifecycle ports (G-SEC P6 PR D) --------------------------------------
+  // Adapters stage callback-produced sends; the Owner drains them after the
+  // lifecycle returns, so neither component re-enters the other.
+  class LifecycleAuthorityPort final : public sdkv1::LifecycleAuthorityPort {
+   public:
+    explicit LifecycleAuthorityPort(EspNowSecurityOwner& owner) noexcept : owner_(owner) {}
+    Status authority_send(std::uint8_t authority_type, ByteView body) noexcept override;
+
+   private:
+    EspNowSecurityOwner& owner_;
+  };
+  class LifecyclePeerPort final : public sdkv1::LifecyclePeerPort {
+   public:
+    explicit LifecyclePeerPort(EspNowSecurityOwner& owner) noexcept : owner_(owner) {}
+    Status peer_send(NodeId peer, FrameType carrier, ByteView body) noexcept override;
+
+   private:
+    EspNowSecurityOwner& owner_;
+  };
+  class LifecycleRuntimePort final : public sdkv1::LifecycleRuntimePort {
+   public:
+    explicit LifecycleRuntimePort(EspNowSecurityOwner& owner) noexcept : owner_(owner) {}
+    Status enforce_revocation(const sdkv1::RevocationSet& set, std::uint32_t site_epoch,
+                              MonotonicMs now_ms) noexcept override;
+    Status remove_member_runtime() noexcept override;
+    Status erase_site_trust() noexcept override;
+    Status retire_network() noexcept override;
+    Status install_site_trust(const sdkv1::SiteRecord& next) noexcept override;
+
+   private:
+    EspNowSecurityOwner& owner_;
+  };
+  class LifecycleObjectSink final : public sdkv1::RrsObjectSink {
+   public:
+    explicit LifecycleObjectSink(EspNowSecurityOwner& owner) noexcept : owner_(owner) {}
+    void on_rrs_object(NodeId peer, ByteView object, MonotonicMs now_ms) noexcept override;
+
+   private:
+    EspNowSecurityOwner& owner_;
+  };
+  class LifecycleObserver final : public sdkv1::LifecycleObserver {
+   public:
+    explicit LifecycleObserver(EspNowSecurityOwner& owner) noexcept : owner_(owner) {}
+    void on_lifecycle_event(const sdkv1::LifecycleEvent& event,
+                            MonotonicMs now_ms) noexcept override;
+
+   private:
+    EspNowSecurityOwner& owner_;
   };
 
   sdkv1::HmacJoinCookie& sealer() noexcept;
@@ -232,6 +298,23 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   void report_tune(const Tune& tune, StatusCode result, MonotonicMs now_ms) noexcept;
   Status request_cutover(std::uint8_t channel, std::uint32_t coord_token,
                          MonotonicMs now_ms) noexcept;
+  // P6 pump: staged gossip/chunks in, lifecycle Poll, one action drain
+  // round. Runs before the coordinator step so a recovery join starts
+  // before the coordinator's next Poll.
+  void poll_lifecycle(MonotonicMs now_ms) noexcept;
+  void feed_lifecycle_inputs(MonotonicMs now_ms) noexcept;
+  void sync_lifecycle_peers(MonotonicMs now_ms) noexcept;
+  void drain_authority_tx(MonotonicMs now_ms) noexcept;
+  void drain_peer_tx() noexcept;
+  void drain_lifecycle_actions(MonotonicMs now_ms) noexcept;
+  void on_lifecycle_recovery(const sdkv1::LifecycleAction& action, MonotonicMs now_ms) noexcept;
+  void complete_lifecycle_recovery(bool reprovisioned, MonotonicMs now_ms) noexcept;
+  // AdoptNetwork/RestartUnassigned reboot: the mesh node and discovery
+  // cannot re-adopt live (adopt_member_node/attach_autonomy refuse past
+  // start), so the durable post-condition (new stores + Idle journal /
+  // erased stores + UnassignedReady watermark) is picked up by a clean
+  // boot. Never returns.
+  [[noreturn]] void reboot_for_lifecycle(const char* reason) noexcept;
 
   Config config_{};
   Sdkv1Stores* stores_{nullptr};
@@ -245,6 +328,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   Tune tune_{};
   NodeId adopted_node_{kInvalidNodeId};  // from ApplyMemberConfig (self match)
   NetworkId adopted_network_{0};
+  std::uint8_t adopted_role_{0};
   int apply_retries_{0};      // ApplyMemberConfig channel-move retries left
   std::uint8_t apply_channel_{0};  // target operating channel (0 = none)
   alignas(sdkv1::HmacJoinCookie) std::array<std::uint8_t, sizeof(sdkv1::HmacJoinCookie)>
@@ -257,6 +341,72 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   alignas(NeighborDiscovery) std::array<std::uint8_t, sizeof(NeighborDiscovery)> discovery_box_{};
   bool discovery_live_{false};
   EspNowDiscoveryObserver observer_store_{nullptr, nullptr};
+  // --- P6 lifecycle (G-SEC P6 PR D) --------------------------------------------
+  // One staged gossip/chunk frame from the RX sinks (link Control bodies
+  // and kind-6 manifests/chunks/ACKs are all <= kMaxApplicationPayload
+  // 128 B; oversize frames drop at stage time). Four slots: gossip
+  // duplicates, so oldest-wins drop under flood only delays — never
+  // corrupts — acquisition.
+  struct GossipStage {
+    bool used{false};
+    NodeId peer{kInvalidNodeId};
+    FrameType carrier{FrameType::Data};
+    std::array<std::uint8_t, kMaxApplicationPayload> body{};
+    std::size_t body_size{0};
+    std::uint32_t generation{0};
+    std::uint32_t role{0};
+    std::uint32_t binding{0};
+  };
+  LifecycleAuthorityPort lifecycle_authority_{*this};
+  LifecyclePeerPort lifecycle_peer_{*this};
+  LifecycleRuntimePort lifecycle_runtime_{*this};
+  LifecycleObjectSink lifecycle_sink_{*this};
+  LifecycleObserver lifecycle_observer_{*this};
+  alignas(sdkv1::MembershipLifecycle)
+      static std::array<std::uint8_t, sizeof(sdkv1::MembershipLifecycle)> lifecycle_box_;
+  static bool lifecycle_box_in_use_;
+  bool lifecycle_live_{false};
+  bool lifecycle_booted_{false};
+  bool removal_pending_{false};  // coordinator boot deferred: erasure runs first
+  std::array<GossipStage, 4> gossip_staged_{};
+  std::array<NodeId, EspNowRuntime::kPeerCapacity> lifecycle_peers_{};
+  struct PeerTxStage {
+    bool used{false};
+    NodeId peer{kInvalidNodeId};
+    FrameType carrier{FrameType::Data};
+    std::array<std::uint8_t, kMaxApplicationPayload> body{};
+    std::size_t size{0};
+    std::uint32_t binding{0};
+  };
+  std::array<PeerTxStage, 4> peer_tx_staged_{};
+  bool completed_object_valid_{false};  // latest-wins completed RRS1
+  NodeId completed_object_peer_{kInvalidNodeId};
+  std::array<std::uint8_t, sdkv1::kRevocationObjectMax> completed_object_{};
+  std::size_t completed_object_size_{0};
+  std::uint64_t lifecycle_recovery_token_{0};  // outstanding recovery action, if any
+  std::uint32_t gossip_dropped_{0};
+  NetworkId p4_sweep_network_{0};
+  std::uint32_t p4_sweep_rs_epoch_{0};
+  std::size_t p4_sweep_cursor_{0};
+  std::size_t p4_clear_cursor_{0};
+  struct AuthorityRxStage {
+    bool used{false};
+    std::uint8_t type{0};
+    // Type 7's GrantCommit is the largest P6 authority down body.
+    std::array<std::uint8_t, sdkv1::kAuthorityBodyHeadSize + sdkv1::kGrantCommitMax> body{};
+    std::size_t size{0};
+  };
+  struct AuthorityTxStage {
+    bool used{false};
+    std::uint8_t type{0};
+    std::array<std::uint8_t, sdkv1::kGrantReceiptSize> body{};
+    std::size_t size{0};
+  };
+  // Both transports deliver at most one local down per poll. The verified
+  // body stays here until the lifecycle's next poll, outside the channel
+  // callback.
+  std::array<AuthorityRxStage, 1> authority_rx_staged_{};
+  std::array<AuthorityTxStage, 4> authority_tx_staged_{};
   // Authority transport (built at boot, once the runtime — and on
   // gateways the bridge — is attached): the mesh port over the node, one
   // of the endpoint (devices) / relay + mesh sink + direct port

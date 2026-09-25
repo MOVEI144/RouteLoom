@@ -6,9 +6,10 @@ use routeloom_json::Json;
 
 use super::{parse_hex_u64, protocol, Notifications, RouteLoomTransport};
 use crate::site::{
-    Decision, DecisionOutcome, DiscoveredDevice, DistributionProgress, GroupKeyStatus, JoinRequest,
-    LastRotation, Member, OperationProgress, RemovalReason, RevokeOutcome, RotateOutcome,
-    SiteAdmin, SiteEvent, SiteEventStream, SiteStatus, Via, SITE_EVENT_KINDS,
+    CutoverOutcome, CutoverProgress, Decision, DecisionOutcome, DiscoveredDevice,
+    DistributionProgress, GroupKeyStatus, JoinRequest, LastRotation, Member, OperationProgress,
+    RemovalReason, RevokeOutcome, RotateOutcome, SiteAdmin, SiteEvent, SiteEventStream, SiteStatus,
+    Via, SITE_EVENT_KINDS,
 };
 use crate::{NodeId, TransportError};
 
@@ -215,6 +216,36 @@ pub fn operation_from_json(json: &Json) -> Option<OperationProgress> {
             unknown: opt_u64(dist, "unknown").unwrap_or(0),
             total: opt_u64(dist, "total").unwrap_or(0),
         },
+    })
+}
+
+/// Parses a cutover `operations.get` body. `None` when the body is not
+/// a cutover (a revoke parses through [`operation_from_json`]).
+pub fn cutover_operation_from_json(json: &Json) -> Option<CutoverProgress> {
+    if json.get("kind").and_then(Json::as_str) != Some("cutover") {
+        return None;
+    }
+    Some(CutoverProgress {
+        operation_id: string_of(json, "operation_id")?,
+        phase: string_of(json, "phase")?,
+        new_site_epoch: u32_of(json, "new_site_epoch")?,
+        revision: u32_of(json, "revision")?,
+        prepared: opt_u64(json, "prepared").unwrap_or(0),
+        applied: opt_u64(json, "applied").unwrap_or(0),
+        unknown: opt_u64(json, "unknown").unwrap_or(0),
+        total: opt_u64(json, "total").unwrap_or(0),
+        waiting_gateway: json.get("waiting_gateway").and_then(Json::as_bool)?,
+        recovery_pending: json.get("recovery_pending").and_then(Json::as_bool)?,
+    })
+}
+
+fn cutover_outcome_from_json(json: &Json) -> Option<CutoverOutcome> {
+    Some(CutoverOutcome {
+        operation_id: string_of(json, "operation_id")?,
+        state: string_of(json, "state")?,
+        new_site_epoch: u32_of(json, "new_site_epoch")?,
+        revision: u32_of(json, "revision")?,
+        targets: u32_of(json, "targets")?,
     })
 }
 
@@ -426,6 +457,47 @@ impl SiteAdmin for RouteLoomTransport {
         operation_from_json(&result)
             .map(Some)
             .ok_or_else(|| protocol("unparsable revoke operation"))
+    }
+
+    fn cutover(
+        &self,
+        expected_site_epoch: u32,
+        next_site_cert_hex: &str,
+        idempotency_key: &str,
+    ) -> Result<CutoverOutcome, TransportError> {
+        let result = self.call(
+            "membership.cutover",
+            &format!(
+                "{{\"expected_site_epoch\":{expected_site_epoch},\"next_site_cert\":\"{next_site_cert_hex}\",\"idempotency_key\":\"{}\"}}",
+                routeloom_json::escape_string(idempotency_key)
+            ),
+        )?;
+        cutover_outcome_from_json(&result).ok_or_else(|| protocol("unparsable membership.cutover"))
+    }
+
+    fn cutover_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<CutoverProgress>, TransportError> {
+        let result = match self.call(
+            "operations.get",
+            &format!(
+                "{{\"operation_id\":\"{}\"}}",
+                routeloom_json::escape_string(operation_id)
+            ),
+        ) {
+            Ok(result) => result,
+            Err(TransportError::Rejected { code, .. }) if code == "NOT_FOUND" => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        if result.get("kind").and_then(Json::as_str) != Some("cutover") {
+            return Ok(None);
+        }
+        cutover_operation_from_json(&result)
+            .map(Some)
+            .ok_or_else(|| protocol("unparsable cutover operation"))
     }
 
     fn site_events(&self) -> Result<SiteEventStream, TransportError> {

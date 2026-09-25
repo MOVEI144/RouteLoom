@@ -1382,12 +1382,67 @@ void test_rx_attacks() {
     CHECK(event.type == 6);
     CHECK(event.passthrough.size() == pt.size() &&
           std::memcmp(event.passthrough.data(), pt.data(), pt.size()) == 0);
+    sdkv1::AuthorityBodyHead stale_head = head;
+    stale_head.generation = kGeneration + 1;
+    CHECK(sdkv1::authority_head_encode(stale_head,
+                                       MutableByteView{pt.data(), pt.size()}, head_size));
+    feed(fake.seal_bytes(keys::AuthorityEnvelopeType::RemovalNotice,
+                         ByteView{pt.data(), pt.size()}).bytes);
+    CHECK(observer.seen.size() == before + 1);
+    stale_head = head;
+    stale_head.op = 2;
+    CHECK(sdkv1::authority_head_encode(stale_head,
+                                       MutableByteView{pt.data(), pt.size()}, head_size));
+    feed(fake.seal_bytes(keys::AuthorityEnvelopeType::RemovalNotice,
+                         ByteView{pt.data(), pt.size()}).bytes);
+    CHECK(observer.seen.size() == before + 1);
     pt[0] = 2;  // bad body version under a valid tag
     feed(fake.seal_bytes(keys::AuthorityEnvelopeType::RemovalNotice,
                          ByteView{pt.data(), pt.size()})
              .bytes);
     CHECK(observer.seen.size() == before + 1);
   }
+}
+
+void test_typed_p6_send() {
+  const routeloom::AeadGcm* aead = routeloom::builtin_aead_gcm();
+  CHECK(aead != nullptr);
+  if (aead == nullptr) return;
+  FakePort port;
+  FakeObserver observer;
+  FakeEnv env;
+  sdkv1::AuthorityClient client(*aead, port, observer, env);
+  FakeAuthority fake(secret(0xD0));
+  sdkv1::AuthorityInput start{};
+  start.kind = sdkv1::AuthorityInputKind::Start;
+  start.start = make_start();
+  CHECK(client.advance(start, 1000));
+  CHECK(pump(client, port, fake, 1000));
+  const std::array<std::uint8_t, 8> report{1, 2, 0, 0, 0, 0, 0, 1};
+  sdkv1::AuthorityInput typed{};
+  typed.kind = sdkv1::AuthorityInputKind::SendTyped;
+  typed.typed.type = 5;
+  typed.typed.body = ByteView{report.data(), report.size()};
+  CHECK(client.advance(typed, 1001));
+  CHECK(port.sent.size() == 1);
+  if (port.sent.size() == 1) {
+    std::array<std::uint8_t, keys::kAuthorityEnvelopeMax> plain{};
+    std::size_t size = 0;
+    keys::AuthorityEnvelopeHeader envelope{};
+    CHECK(sdkv1::authority_open(*aead, fake.rx,
+          ByteView{port.sent[0].bytes.data(), port.sent[0].bytes.size()}, fake.rx_ctx,
+          MutableByteView{plain.data(), plain.size()}, size, envelope));
+    CHECK(envelope.type == keys::AuthorityEnvelopeType::RevocationNotify);
+    CHECK(size == sdkv1::kAuthorityBodyHeadSize + report.size());
+    sdkv1::AuthorityBodyHead head{};
+    CHECK(sdkv1::authority_head_decode(
+        ByteView{plain.data(), sdkv1::kAuthorityBodyHeadSize}, head));
+    CHECK(head.op == 2 && head.generation == kGeneration && head.request_id != 0);
+    CHECK(std::memcmp(plain.data() + sdkv1::kAuthorityBodyHeadSize,
+                      report.data(), report.size()) == 0);
+  }
+  typed.typed.type = 4;
+  CHECK(!client.advance(typed, 1002));
 }
 
 void test_port_full_and_tx_result() {
@@ -1873,6 +1928,7 @@ int main() {
   test_reentry();
   test_timeouts_and_backoff();
   test_rx_attacks();
+  test_typed_p6_send();
   test_port_full_and_tx_result();
   test_staged_confirm_and_one_pending_ack();
   test_pull_bucket_at_zero();
