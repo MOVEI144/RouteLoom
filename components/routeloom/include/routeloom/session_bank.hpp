@@ -278,6 +278,19 @@ class SessionBank {
   static constexpr std::uint32_t kFlagSealReserved = 0x01;
   static constexpr std::uint32_t kFlagRekeyPending = 0x02;
   static constexpr std::uint32_t kFlagPinned = 0x04;
+  // Memoized hash_start() results: every seal/open/next_counter lookup
+  // hashes (scope, peer) with HMAC-SHA256, so the last few results are
+  // kept and a hit skips the HMAC. Pure hints — any content is
+  // correct (a miss recomputes) — but they must clear whenever the
+  // hash inputs change (wipe_all covers configure, reset_membership
+  // and clear, the only salt/locality writers).
+  static constexpr std::size_t kHashStartHints = 2;
+  struct HashStartHint {
+    SecurityScope scope{SecurityScope::Link};
+    NodeId peer{kInvalidNodeId};
+    std::size_t start{0};
+    bool valid{false};
+  };
 
   bool reentered() const noexcept { return in_port_; }
   // P4 §8.1: the wire carries low32 only, so the provider entry maps a
@@ -299,6 +312,8 @@ class SessionBank {
   RandomSource random_{};
   std::array<std::uint8_t, 32> slot_salt_{};
   bool slot_salt_ready_{false};
+  mutable std::array<HashStartHint, kHashStartHints> hash_hints_{};
+  mutable std::size_t hash_hint_next_{0};
   bool configured_{false};
   MonotonicMs last_tick_{0};
   std::uint32_t install_serial_{0};

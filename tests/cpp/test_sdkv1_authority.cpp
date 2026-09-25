@@ -28,8 +28,9 @@
 #include "routeloom/rlres1.hpp"
 #include "routeloom/sdkv1_authority.hpp"
 
-static_assert(sizeof(routeloom::sdkv1::AuthorityClient) <= 4840,
-              "authority client shares its send and receive workspace");
+static_assert(sizeof(routeloom::sdkv1::AuthorityClient) <= 4848,
+              "authority client shares its send and receive workspace "
+              "(+40: the commit_seq-keyed MemberCert hash cache)");
 #include "routeloom/sdkv1_group_keys.hpp"
 #include "test_sdkv1.hpp"
 
@@ -949,6 +950,49 @@ void test_bound_channel_fences_changed_site() {
       CHECK(port.sent.empty());
     }
   }
+}
+
+void test_site_binding_cache_tracks_commits() {
+  // The bind-time MemberCert hash is cached across polls/RXs and keyed
+  // by the site commit_seq: a commit that preserves the binding (new
+  // sequence, same material) recomputes to the same hash and stays
+  // bound, while a binding change still fences.
+  const auto* aead = routeloom::builtin_aead_gcm();
+  CHECK(aead != nullptr);
+  if (aead == nullptr) return;
+  sdkv1_test::FaultyRecordStorage storage(sdkv1::kSiteSlotBytes);
+  sdkv1::SiteStore store(storage);
+  CHECK(store.initialize());
+  const auto site = sdkv1_test::site_record(3, 10);
+  CHECK(store.commit(site));
+  sdkv1::GroupKeyState group(store);
+  sdkv1::GroupKeyState::Input begin{};
+  begin.op = sdkv1::GroupKeyState::Op::Start;
+  begin.boot = site.boot_witness;
+  CHECK(group.advance(begin, 1000));
+  const auto start = bound_start(site);
+  FakePort port;
+  FakeObserver observer;
+  FakeEnv env;
+  sdkv1::AuthorityClient client(*aead, port, observer, env, &group);
+  FakeAuthority fake(site.dams, start);
+  sdkv1::AuthorityInput input{};
+  input.kind = sdkv1::AuthorityInputKind::Start;
+  input.start = start;
+  CHECK(client.advance(input, 1000));
+  CHECK(pump(client, port, fake, 1000));
+  // Identical recommit: the sequence advances, the binding does not.
+  const std::uint32_t seq_before = store.commit_seq();
+  CHECK(store.commit(store.site()));
+  CHECK(store.commit_seq() != seq_before);
+  input = {};
+  input.kind = sdkv1::AuthorityInputKind::RequestPull;
+  CHECK(client.advance(input, 1001));
+  // A binding change still fences on the very next check.
+  sdkv1::SiteRecord newer = store.site();
+  ++newer.boot_witness;
+  CHECK(store.commit(newer));
+  CHECK(client.advance(input, 1002).code == routeloom::StatusCode::Conflict);
 }
 
 void test_round_trip() {
@@ -1925,6 +1969,7 @@ int main() {
   test_round_trip();
   test_durable_group_ack_round_trip();
   test_bound_channel_fences_changed_site();
+  test_site_binding_cache_tracks_commits();
   test_reentry();
   test_timeouts_and_backoff();
   test_rx_attacks();

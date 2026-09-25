@@ -386,10 +386,6 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   std::size_t completed_object_size_{0};
   std::uint64_t lifecycle_recovery_token_{0};  // outstanding recovery action, if any
   std::uint32_t gossip_dropped_{0};
-  NetworkId p4_sweep_network_{0};
-  std::uint32_t p4_sweep_rs_epoch_{0};
-  std::size_t p4_sweep_cursor_{0};
-  std::size_t p4_clear_cursor_{0};
   struct AuthorityRxStage {
     bool used{false};
     std::uint8_t type{0};

@@ -12,8 +12,10 @@
 //   rlident  i0 / i1        RLI1 twin pair        (blob ≤ 664 B, slot 1024 B)
 //   rlsite   s0 / s1        RLS1 A/B pair         (blob ≤ 712 B, slot 1024 B)
 //   rlrevo   r0 / r1        RRS1 storage record   (blob ≤ 640 B, slot 640 B)
-//   rlres    s00…s15        RLP1 slots, node      (blob = 84 B)
-//            s000…s159      RLP1 slots, gateway   (3 digits once count > 100)
+//   rlres2   s00…s15        RLP2 slots, node      (blob = 96 B)
+//            s000…s159      RLP2 slots, gateway   (3 digits once count > 100)
+// (The pre-P4 `rlres` RLP1 namespace is never opened anymore; stale
+// blobs from older images are purged once at open.)
 //
 // Read-back contract (identical to NvsTrustStore / NvsCredStore):
 //   - a MISSING key reads as a uniformly erased (0xFF) slot image — the
@@ -28,12 +30,13 @@
 //     of the slot view reads 0xFF, matching what the store wrote;
 //   - backend errors surface as StorageFailure; nothing here erases, resets
 //     or reformats (recovery is the stores' explicit recover()).
-// RLP1 slots have no seal: any size other than 84 B reads as the non-erased
-// pattern, which fails the CRC and is treated as an empty slot (the only
-// consequence of a torn resume slot is one full EDHOC, 05 §3.2).
+// Resume slots have no seal: any size other than the slot size reads as
+// the non-erased pattern, which fails the CRC and is treated as an empty
+// slot (the only consequence of a torn resume slot is one full EDHOC,
+// 05 §3.2).
 //
-// Heap-free, no statics; one BlobRecordSlotStorage/BlobResumeSlotStorage
-// is two pointers and a size, so wiring the four stores costs no RAM beyond
+// Heap-free, no statics; one BlobRecordSlotStorage/BlobResumeSlotStorage2
+// is two pointers and a size, so wiring the stores costs no RAM beyond
 // the stores' own scratch buffers.
 
 #include <cstddef>
@@ -51,6 +54,8 @@ namespace routeloom::sdkv1 {
 inline constexpr char kIdentityNamespace[] = "rlident";
 inline constexpr char kSiteNamespace[] = "rlsite";
 inline constexpr char kRevocationNamespace[] = "rlrevo";
+// Legacy RLP1 namespace: opened only to purge stale pre-P4 blobs, never
+// for live slots (all resume state lives in kResume2Namespace).
 inline constexpr char kResumeNamespace[] = "rlres";
 inline constexpr char kLocalRevocationNamespace[] = "rlrev";
 inline constexpr char kResume2Namespace[] = "rlres2";
@@ -124,12 +129,15 @@ class BlobRecordSlotStorage final : public RecordSlotStorage {
   std::size_t slot_bytes_;
 };
 
-// ResumeSlotStorage (ResumeCache) over "s%02u" (count ≤ 100) or "s%03u"
-// keys. A slot count of 0 or above kResumeSlotsMax makes every call fail
-// with InvalidArgument (slot_count() then reports 0).
-class BlobResumeSlotStorage final : public ResumeSlotStorage {
+// ResumeSlotStorage2 (ResumeCache2, RLP2) over "s%02u" (count ≤ 100)
+// or "s%03u" keys of the resume namespace (kResume2Namespace). Slots
+// are exactly kResume2SlotBytes (96 B); any other stored length reads
+// as the corrupt pattern (an empty slot — one full EDHOC). A slot
+// count of 0 or above kResumeSlotsMax makes every call fail with
+// InvalidArgument (slot_count() then reports 0).
+class BlobResumeSlotStorage2 final : public ResumeSlotStorage2 {
  public:
-  BlobResumeSlotStorage(BlobNamespace& blobs, std::size_t slot_count) noexcept
+  BlobResumeSlotStorage2(BlobNamespace& blobs, std::size_t slot_count) noexcept
       : blobs_(blobs),
         slot_count_(slot_count > 0 && slot_count <= kResumeSlotsMax ? slot_count : 0) {}
 
@@ -140,26 +148,6 @@ class BlobResumeSlotStorage final : public ResumeSlotStorage {
   // Key of slot `index` for a cache of `slot_count` slots.
   static Status slot_key(std::size_t index, std::size_t slot_count,
                          char (&key)[kResumeKeyBytes]) noexcept;
-
- private:
-  BlobNamespace& blobs_;
-  std::size_t slot_count_;
-};
-
-// ResumeSlotStorage2 (ResumeCache2, RLP2) over "s%02u"/"s%03u" keys of a
-// dedicated namespace (kResume2Namespace): the same key scheme as RLP1,
-// separated by the namespace so the two layouts never alias. Slots are
-// exactly kResume2SlotBytes (96 B); any other stored length reads as the
-// corrupt pattern (an empty slot — one full EDHOC).
-class BlobResumeSlotStorage2 final : public ResumeSlotStorage2 {
- public:
-  BlobResumeSlotStorage2(BlobNamespace& blobs, std::size_t slot_count) noexcept
-      : blobs_(blobs),
-        slot_count_(slot_count > 0 && slot_count <= kResumeSlotsMax ? slot_count : 0) {}
-
-  std::size_t slot_count() const noexcept override { return slot_count_; }
-  Status read(std::size_t index, MutableByteView target) noexcept override;
-  Status write(std::size_t index, ByteView data) noexcept override;
 
  private:
   BlobNamespace& blobs_;

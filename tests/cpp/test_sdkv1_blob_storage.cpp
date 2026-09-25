@@ -8,8 +8,8 @@
 //    empty = corrupt, oversize or short read = corrupt, backend errors =
 //    StorageFailure;
 //  - key/namespace mapping (rlident i0/i1, rlsite s0/s1, rlrevo r0/r1,
-//    rlres s00..s15 / s000..s159) and blobs of exactly used_len bytes;
-//  - IdentityStore / SiteStore / RevocationStore / ResumeCache end to end,
+//    rlres2 s00..s15 / s000..s159) and blobs of exactly used_len bytes;
+//  - IdentityStore / SiteStore / RevocationStore / ResumeCache2 end to end,
 //    including a manufactured (office-written) twin pair and a power cut at
 //    every write of commit/clear with the value either landed or not.
 
@@ -196,35 +196,35 @@ void test_record_storage_mapping() {
 
 void test_resume_keys() {
   char key[kResumeKeyBytes]{};
-  CHECK_OK(BlobResumeSlotStorage::slot_key(0, kResumeNodeSlots, key));
+  CHECK_OK(BlobResumeSlotStorage2::slot_key(0, kResumeNodeSlots, key));
   CHECK(std::string(key) == "s00");
-  CHECK_OK(BlobResumeSlotStorage::slot_key(15, kResumeNodeSlots, key));
+  CHECK_OK(BlobResumeSlotStorage2::slot_key(15, kResumeNodeSlots, key));
   CHECK(std::string(key) == "s15");
-  CHECK_OK(BlobResumeSlotStorage::slot_key(99, 100, key));
+  CHECK_OK(BlobResumeSlotStorage2::slot_key(99, 100, key));
   CHECK(std::string(key) == "s99");
-  CHECK_OK(BlobResumeSlotStorage::slot_key(0, kResumeGatewaySlots, key));
+  CHECK_OK(BlobResumeSlotStorage2::slot_key(0, kResumeGatewaySlots, key));
   CHECK(std::string(key) == "s000");
-  CHECK_OK(BlobResumeSlotStorage::slot_key(159, kResumeGatewaySlots, key));
+  CHECK_OK(BlobResumeSlotStorage2::slot_key(159, kResumeGatewaySlots, key));
   CHECK(std::string(key) == "s159");
-  CHECK_OK(BlobResumeSlotStorage::slot_key(998, kResumeSlotsMax, key));
+  CHECK_OK(BlobResumeSlotStorage2::slot_key(998, kResumeSlotsMax, key));
   CHECK(std::string(key) == "s998");
-  CHECK(BlobResumeSlotStorage::slot_key(16, kResumeNodeSlots, key).code ==
+  CHECK(BlobResumeSlotStorage2::slot_key(16, kResumeNodeSlots, key).code ==
         StatusCode::InvalidArgument);
-  CHECK(BlobResumeSlotStorage::slot_key(0, 0, key).code == StatusCode::InvalidArgument);
-  CHECK(BlobResumeSlotStorage::slot_key(0, kResumeSlotsMax + 1, key).code ==
+  CHECK(BlobResumeSlotStorage2::slot_key(0, 0, key).code == StatusCode::InvalidArgument);
+  CHECK(BlobResumeSlotStorage2::slot_key(0, kResumeSlotsMax + 1, key).code ==
         StatusCode::InvalidArgument);
   // Every gateway key is distinct and fits NVS's 15-character limit.
   std::map<std::string, int> seen;
   for (std::size_t i = 0; i < kResumeGatewaySlots; ++i) {
-    CHECK_OK(BlobResumeSlotStorage::slot_key(i, kResumeGatewaySlots, key));
+    CHECK_OK(BlobResumeSlotStorage2::slot_key(i, kResumeGatewaySlots, key));
     CHECK(std::string(key).size() == 4);
     ++seen[key];
   }
   CHECK(seen.size() == kResumeGatewaySlots);
   FakeNvs nvs;
-  BlobResumeSlotStorage invalid(nvs, 0);
+  BlobResumeSlotStorage2 invalid(nvs, 0);
   CHECK(invalid.slot_count() == 0);
-  BlobResumeSlotStorage too_many(nvs, kResumeSlotsMax + 1);
+  BlobResumeSlotStorage2 too_many(nvs, kResumeSlotsMax + 1);
   CHECK(too_many.slot_count() == 0);
 }
 
@@ -394,62 +394,82 @@ void test_site_and_revocation_over_nvs() {
 
 void test_resume_cache_over_nvs() {
   FakeNvs nvs;
-  BlobResumeSlotStorage storage(nvs, kResumeNodeSlots);
+  BlobResumeSlotStorage2 storage(nvs, kResumeNodeSlots);
   CHECK(storage.slot_count() == kResumeNodeSlots);
-  ResumeCache cache(storage);
+  ResumeCache2 cache(storage, kResume2NodeLinkQuota, kResume2NodeEndQuota);
   const ResumeContext context{kNetwork, 203, nullptr};
-  ResumeSlot out{};
+  ResumeSlot2 out{};
   std::size_t index = 0;
   // Nothing written: every key missing = every slot empty.
-  CHECK(cache.find(ResumePurpose::Link, 100, context, out, index).code == StatusCode::NotFound);
+  CHECK(cache.find_by_peer(ResumePurpose::Link, 100, context, out, index).code ==
+        StatusCode::NotFound);
   CHECK(nvs.blobs.empty());
-  CHECK_OK(cache.put(resume_slot(100), context));
-  CHECK_OK(cache.put(resume_slot(101), context));
-  CHECK(nvs.blobs.size() == 2 && nvs.blobs["s00"].size() == kResumeSlotBytes &&
+  CHECK_OK(cache.put(resume2_slot(100), context));
+  CHECK_OK(cache.put(resume2_slot(101), context));
+  CHECK(nvs.blobs.size() == 2 && nvs.blobs["s00"].size() == kResume2SlotBytes &&
         nvs.blobs.count("s01") == 1);
-  CHECK_OK(cache.find(ResumePurpose::Link, 101, context, out, index));
-  CHECK(index == 1 && out.rms == resume_slot(101).rms);
+  CHECK_OK(cache.find_by_peer(ResumePurpose::Link, 101, context, out, index));
+  CHECK(index == 1 && out.rms == resume2_slot(101).rms);
   // A wrong-size or present-but-erased blob is an unusable slot (full
   // EDHOC), and is the first reused.
-  nvs.blobs["s00"].resize(kResumeSlotBytes - 1);
-  CHECK(cache.find(ResumePurpose::Link, 100, context, out, index).code == StatusCode::NotFound);
-  nvs.blobs["s00"].assign(kResumeSlotBytes, 0xFF);
-  CHECK(cache.find(ResumePurpose::Link, 100, context, out, index).code == StatusCode::NotFound);
-  CHECK_OK(cache.put(resume_slot(102), context));
-  CHECK_OK(cache.find(ResumePurpose::Link, 102, context, out, index));
+  nvs.blobs["s00"].resize(kResume2SlotBytes - 1);
+  CHECK(cache.find_by_peer(ResumePurpose::Link, 100, context, out, index).code ==
+        StatusCode::NotFound);
+  nvs.blobs["s00"].assign(kResume2SlotBytes, 0xFF);
+  CHECK(cache.find_by_peer(ResumePurpose::Link, 100, context, out, index).code ==
+        StatusCode::NotFound);
+  CHECK_OK(cache.put(resume2_slot(102), context));
+  CHECK_OK(cache.find_by_peer(ResumePurpose::Link, 102, context, out, index));
   CHECK(index == 0);
-  // Invalidation scrubs the RMS from the stored blob.
-  CHECK_OK(cache.invalidate_peer(101));
-  ResumeSlot scrubbed{};
-  CHECK_OK(resume_slot_decode(ByteView{nvs.blobs["s01"].data(), nvs.blobs["s01"].size()},
-                              scrubbed));
+  // The revocation sweep scrubs the RMS from the stored blob (peer 102
+  // is not revoked and survives the same two sweep steps).
+  RevocationSet rrs{};
+  rrs.entries[0] = RevocationEntry{101, 2, RevocationReason::Removed};
+  rrs.count = 1;
+  const ResumeContext guarded{kNetwork, 203, &rrs};
+  std::size_t cursor = 0;
+  bool done = true;
+  CHECK_OK(cache.sweep_revoked(guarded, cursor, done));
+  CHECK(!done);
+  CHECK_OK(cache.sweep_revoked(guarded, cursor, done));
+  ResumeSlot2 scrubbed{};
+  CHECK_OK(resume2_slot_decode(ByteView{nvs.blobs["s01"].data(), nvs.blobs["s01"].size()},
+                               scrubbed));
   CHECK(!scrubbed.valid);
-  CHECK(all_equal(std::vector<std::uint8_t>(nvs.blobs["s01"].begin() + 48,
-                                            nvs.blobs["s01"].begin() + 80),
+  CHECK(all_equal(std::vector<std::uint8_t>(nvs.blobs["s01"].begin() + 60,
+                                            nvs.blobs["s01"].begin() + 92),
                   0x00));
-  // Gateway sizing: 160 fixed keys, same RAM.
+  CHECK_OK(cache.find_by_peer(ResumePurpose::Link, 102, context, out, index));
+  // Gateway sizing: 160 fixed keys (32 link + 128 end), same RAM.
   FakeNvs gateway_nvs;
-  BlobResumeSlotStorage gateway(gateway_nvs, kResumeGatewaySlots);
-  ResumeCache gateway_cache(gateway);
-  for (NodeId peer = 200; peer < 200 + kResumeGatewaySlots + 5; ++peer) {
-    CHECK_OK(gateway_cache.put(resume_slot(peer, 0, static_cast<std::uint32_t>(peer)), context));
+  BlobResumeSlotStorage2 gateway(gateway_nvs, kResumeGatewaySlots);
+  ResumeCache2 gateway_cache(gateway, kResume2GatewayLinkQuota, kResume2GatewayEndQuota);
+  for (NodeId peer = 200; peer < 200 + kResume2GatewayLinkQuota; ++peer) {
+    CHECK_OK(gateway_cache.put(
+        resume2_slot(peer, 0, static_cast<std::uint32_t>(peer), 203, ResumePurpose::Link),
+        context));
+  }
+  for (NodeId peer = 300; peer < 300 + kResume2GatewayEndQuota; ++peer) {
+    CHECK_OK(gateway_cache.put(
+        resume2_slot(peer, 0, static_cast<std::uint32_t>(peer), 203, ResumePurpose::End),
+        context));
   }
   CHECK(gateway_nvs.blobs.size() == kResumeGatewaySlots);
   CHECK(gateway_nvs.blobs.count("s000") == 1 && gateway_nvs.blobs.count("s159") == 1);
   // Backend faults propagate.
   nvs.read_error = true;
-  CHECK(cache.find(ResumePurpose::Link, 102, context, out, index).code ==
+  CHECK(cache.find_by_peer(ResumePurpose::Link, 102, context, out, index).code ==
         StatusCode::StorageFailure);
   nvs.disarm();
 }
 
 void test_ram_footprint() {
-  // The storage ports are two pointers and a size; wiring all four stores
+  // The storage ports are two pointers and a size; wiring the stores
   // adds nothing beyond the stores' own scratch buffers (C3 floor).
-  std::printf("sizeof BlobRecordSlotStorage=%zu BlobResumeSlotStorage=%zu\n",
-              sizeof(BlobRecordSlotStorage), sizeof(BlobResumeSlotStorage));
+  std::printf("sizeof BlobRecordSlotStorage=%zu BlobResumeSlotStorage2=%zu\n",
+              sizeof(BlobRecordSlotStorage), sizeof(BlobResumeSlotStorage2));
   CHECK(sizeof(BlobRecordSlotStorage) <= 6 * sizeof(void*));
-  CHECK(sizeof(BlobResumeSlotStorage) <= 4 * sizeof(void*));
+  CHECK(sizeof(BlobResumeSlotStorage2) <= 4 * sizeof(void*));
 }
 
 }  // namespace

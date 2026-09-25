@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs_flash.h"
 #include "routeloom/espnow_sdkv1_entropy.hpp"
 #include "routeloom/nvs_legacy_purge.hpp"
 #include "routeloom/sdkv1_dev_session.hpp"
@@ -81,6 +82,49 @@ bool is_legacy_status_only(const ByteView rest) noexcept {
   static constexpr char kStatus[] = "status";
   return rest.size == sizeof(kStatus) - 1 &&
          std::memcmp(rest.data, kStatus, rest.size) == 0;
+}
+
+// Pre-P4 images kept RLP1 resume slots in the `rlres` namespace; no live
+// code uses it anymore. Probe read-only so a fresh device never creates
+// that namespace. Erase before opening the live stores to reclaim space
+// needed for their namespaces. Failure is logged; stale blobs cannot
+// be used as RLP2 slots.
+void purge_legacy_rlres(const char* partition) noexcept {
+  nvs_handle_t handle = 0;
+  const esp_err_t opened =
+      nvs_open_from_partition(partition, sdkv1::kResumeNamespace, NVS_READONLY, &handle);
+  if (opened == ESP_ERR_NVS_NOT_FOUND) return;  // nothing ever written
+  if (opened != ESP_OK) {
+    ESP_LOGW(kTag, "rlres purge: open failed (%s)", esp_err_to_name(opened));
+    return;
+  }
+  std::size_t used = 0;
+  const esp_err_t counted = nvs_get_used_entry_count(handle, &used);
+  if (counted != ESP_OK) {
+    ESP_LOGW(kTag, "rlres purge: count failed (%s)", esp_err_to_name(counted));
+    nvs_close(handle);
+    return;
+  }
+  if (used == 0) {
+    nvs_close(handle);
+    return;
+  }
+  nvs_close(handle);
+  handle = 0;
+  const esp_err_t writable =
+      nvs_open_from_partition(partition, sdkv1::kResumeNamespace, NVS_READWRITE, &handle);
+  if (writable != ESP_OK) {
+    ESP_LOGW(kTag, "rlres purge: writable open failed (%s)", esp_err_to_name(writable));
+    return;
+  }
+  esp_err_t erased = nvs_erase_all(handle);
+  if (erased == ESP_OK) erased = nvs_commit(handle);
+  if (erased != ESP_OK) {
+    ESP_LOGW(kTag, "rlres purge: erase failed (%s)", esp_err_to_name(erased));
+  } else {
+    ESP_LOGI(kTag, "rlres purge: erased %u stale RLP1 entries", static_cast<unsigned>(used));
+  }
+  nvs_close(handle);
 }
 
 void console_task(void* arg) {
@@ -186,7 +230,6 @@ Sdkv1Stores::Sdkv1Stores(const std::size_t resume_slots) noexcept
                     sdkv1::kSiteSlotBytes),
       revo_storage_(revo_ns_, sdkv1::kRevocationKey0, sdkv1::kRevocationKey1,
                     sdkv1::kRevocationSlotBytes),
-      resume_storage_(resume_ns_, resume_slots),
       local_revocation_storage_(local_revocation_ns_, sdkv1::kLocalRevocationKey0,
                                 sdkv1::kLocalRevocationKey1, sdkv1::kLocalRevocationSlotBytes),
       resume2_storage_(resume2_ns_, resume_slots),
@@ -195,15 +238,23 @@ Sdkv1Stores::Sdkv1Stores(const std::size_t resume_slots) noexcept
       identity_(ident_storage_),
       site_(site_storage_),
       revocation_(revo_storage_),
-      resume_(resume_storage_),
+      resume_cache_(resume2_storage_,
+                    resume_slots ==
+                            sdkv1::kResume2GatewayLinkQuota + sdkv1::kResume2GatewayEndQuota
+                        ? sdkv1::kResume2GatewayLinkQuota
+                        : sdkv1::kResume2NodeLinkQuota,
+                    resume_slots ==
+                            sdkv1::kResume2GatewayLinkQuota + sdkv1::kResume2GatewayEndQuota
+                        ? sdkv1::kResume2GatewayEndQuota
+                        : sdkv1::kResume2NodeEndQuota),
       local_revocation_(local_revocation_storage_),
       lifecycle_(lifecycle_storage_) {}
 
 Status Sdkv1Stores::open(const char* partition) noexcept {
+  purge_legacy_rlres(partition);
   Status status = ident_ns_.open(partition, sdkv1::kIdentityNamespace);
   if (status) status = site_ns_.open(partition, sdkv1::kSiteNamespace);
   if (status) status = revo_ns_.open(partition, sdkv1::kRevocationNamespace);
-  if (status) status = resume_ns_.open(partition, sdkv1::kResumeNamespace);
   if (status) status = local_revocation_ns_.open(partition, sdkv1::kLocalRevocationNamespace);
   if (status) status = resume2_ns_.open(partition, sdkv1::kResume2Namespace);
   if (status) status = lifecycle_ns_.open(partition, sdkv1::kLifecycleNamespace);
@@ -211,7 +262,6 @@ Status Sdkv1Stores::open(const char* partition) noexcept {
     ident_ns_.close();
     site_ns_.close();
     revo_ns_.close();
-    resume_ns_.close();
     local_revocation_ns_.close();
     resume2_ns_.close();
     lifecycle_ns_.close();

@@ -78,6 +78,7 @@ void run_case(const Case& c) {
 }
 
 void test_rfc5869_vectors() {
+  // V1-K12: RFC 5869 Appendix A.1/A.2/A.3 (PRK and OKM).
   // RFC 5869 Appendix A.1 — basic.
   run_case(Case{"A.1", std::vector<std::uint8_t>(22, 0x0b), range(0x00, 0x0c),
                 range(0xf0, 0xf9), 42,

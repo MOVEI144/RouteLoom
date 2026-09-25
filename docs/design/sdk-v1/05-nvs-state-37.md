@@ -35,6 +35,8 @@ entry数はNVS v2のblob（index 1＋data header 1＋32B単位のdata）で概�
 
 ### 3.2 再開cache（固定slot、LRU）
 
+現行の再開cacheはRLP2（96B slot、`rlres2`、purpose quota 12+4 node／32+128 gateway、64-use ceiling）で、lifecycleのsweep対象もRLP2のみ。以下に記すRLP1（84B）はpre-P4のfrozen形式（codecとgoldenがpinするのみで、cache・sweep・NVS配線は撤去済み）。既存機の`rlres`は、live storeのnamespaceを開く前に読み取り専用で存在を調べ、旧blobがあれば消去する。消去に失敗した場合は警告し、旧blobをRLP2として使わない。§5.1は消去成功後の定常予算であり、失敗時には旧entryが残る。
+
 永続するピアごとの状態は再開主秘密RMSだけ。**slot数を固定し、NVSキー名も固定**（`s00`〜`s15`、gatewayは`s000`〜`s159`）にして、キーの数が増えない構造にする。
 
 ```text
@@ -48,7 +50,7 @@ RLP1 slot（84B）:
 80 u32 crc32
 ```
 
-空slot（`state=0`）は`purpose`以降の全fieldが0（RMSを消去済み）。未書込み・CRC不一致のslotも空として扱う。sealは持たない（1 slotの書込みが途中で切れてもCRCで空になり、帰結はfull EDHOCだけ）。P1-3の`ResumeCache`はslot内容をRAMに持たず毎回storageを走査する（slot数によらずRAM 96B、C3 gatewayでも同じ）。
+空slot（`state=0`）は`purpose`以降の全fieldが0（RMSを消去済み）。未書込み・CRC不一致のslotも空として扱う。sealは持たない（1 slotの書込みが途中で切れてもCRCで空になり、帰結はfull EDHOCだけ）。旧P1-3の`ResumeCache`はslot内容をRAMに持たず毎回storageを走査していた。現行のRLP2も固定長bufferで走査し、slot数に応じてRAMを増やさない。
 
 | 規則 | 内容 |
 |---|---|
@@ -100,7 +102,7 @@ D2-bで1ピアあたり約6 entry（両scopeの`c*`）が回収され、約14 en
 | `rltrust` | RLT1 2 slot（≤1684B） | 110 | 110 | `rlsec` |
 | `rlrevo` | RRS1 2 slot（≤640B） | 44 | 44 | `rlsec` |
 | `rlmaint` | RLX1 2 slot（≤2048B、PR Bの削除journal） | 最大132＋namespace | 同左 | `rlsec` |
-| `rlres` | 再開cache（84B＝5 entry/slot） | 16 slot＝80 | 160 slot＝800 | `rlsec` |
+| `rlres2` | 再開cache RLP2（96B＝5 entry/slot） | 16 slot＝80 | 160 slot＝800 | `rlsec` |
 | 証人 | `cmax`等 | 2 | 2 | `rlsec` |
 | **本番小計（rlsec）** | | **約464** | **約1184** | |
 | 開発legacy（D2-c上限） | `c*`/`f*`/`r*` | 64ピア×14〜20＝最大1280 | 128ピア×20＝最大2560 | `rlsec` |
@@ -157,7 +159,7 @@ rlsec,    data, nvs,     0x190000, 0x10000
 
 | ID | 内容 |
 |---|---|
-| V1-N01 | 本番profileで200ピアと順に通信しても`rlcounter`/`rlreplay`のキーが0件、`rlres`は固定件数 |
+| V1-N01 | 本番profileで200ピアと順に通信しても`rlcounter`/`rlreplay`のキーが0件、`rlres2`は固定件数 |
 | V1-N02 | 再開slot追い出し後の再接触はfull EDHOCになり、捕獲した旧frame・旧R1は拒否 |
 | V1-N03 | `rlsec`を満杯にしても起動し、`rlboot`が進む（開発・本番） |
 | V1-N04 | D2-b：過去epochの`c*`掃除後、`cmax`以下のboot sessionでは開始しない |
@@ -193,7 +195,7 @@ rlsec,    data, nvs,     0x190000, 0x10000
 
 - RX側の上限は機器の生涯で累計した(scope, 送信元)に効く。上限到達後の新しい送信元は、全台での開発network id／PSK切替と`rlreplay`/`rlcounter`の明示消去（D2-e）まで通信できない。根本解決はD1（P4-4、開発ProviderのRAM context engine化）。
 - TX側の上限は1起動内の(scope, 宛先)数に効く（起動ごとに掃除される）。
-- `rlident`/`rlsite`/`rltrust`/`rlrevo`/`rlres`（§5.1）はP1-3／P7-1で`rlsec`へ置く（`rlident`/`rlsite`/`rlrevo`/`rlres`のNVS adapterと事務所の`rlident` imageはP7-1で実装、firmwareでの生成・配線は未実施、[07 §6.1](07-host-api-tooling.md)）。P0では既存の`rltrust`/`rlcred`を既定`nvs`に残した（`rlsec`の保守imageと書込み手順がまだ無いため）。`rlsec`のNVS暗号化（T2）も未適用。
+- P0時点では`rlident`/`rlsite`/`rltrust`/`rlrevo`/`rlres`を後続段階で`rlsec`へ置く計画だった。現行の再開namespaceは`rlres2`で、旧`rlres`は§3.2の消去対象である。P0では既存の`rltrust`/`rlcred`を既定`nvs`に残した。`rlsec`のNVS暗号化（T2）は未適用。
 - 数値はNVS形式からの計算で、実機の`nvs_get_stats()`との照合（V1-N08）は未実施。
 
 ### 9.4 移行

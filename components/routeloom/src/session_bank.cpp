@@ -189,6 +189,9 @@ bool SessionBank<kLinkCapacity, kEndCapacity>::entry_usable(
 template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
 std::size_t SessionBank<kLinkCapacity, kEndCapacity>::hash_start(
     const SecurityScope scope, const NodeId peer) const noexcept {
+  for (const HashStartHint& hint : hash_hints_) {
+    if (hint.valid && hint.scope == scope && hint.peer == peer) return hint.start;
+  }
   std::array<std::uint8_t, 64> input{};
   std::size_t at = 0;
   const auto put = [&](const void* data, const std::size_t size) {
@@ -207,12 +210,20 @@ std::size_t SessionBank<kLinkCapacity, kEndCapacity>::hash_start(
   ScopeDigest digest{};
   hmac_sha256(ByteView{slot_salt_.data(), slot_salt_.size()}, ByteView{input.data(), at}, digest);
   secure_clear(input);
-  const std::uint32_t start = (static_cast<std::uint32_t>(digest[0]) << 24U) |
-                              (static_cast<std::uint32_t>(digest[1]) << 16U) |
-                              (static_cast<std::uint32_t>(digest[2]) << 8U) |
-                              static_cast<std::uint32_t>(digest[3]);
+  const std::uint32_t raw = (static_cast<std::uint32_t>(digest[0]) << 24U) |
+                             (static_cast<std::uint32_t>(digest[1]) << 16U) |
+                             (static_cast<std::uint32_t>(digest[2]) << 8U) |
+                             static_cast<std::uint32_t>(digest[3]);
   const std::size_t capacity = scope == SecurityScope::Link ? kLinkCapacity : kEndCapacity;
-  return capacity == 0 ? 0 : static_cast<std::size_t>(start % capacity);
+  const std::size_t start = capacity == 0 ? 0 : static_cast<std::size_t>(raw % capacity);
+  HashStartHint filled{};
+  filled.scope = scope;
+  filled.peer = peer;
+  filled.start = start;
+  filled.valid = true;
+  hash_hints_[hash_hint_next_] = filled;
+  hash_hint_next_ = (hash_hint_next_ + 1) % kHashStartHints;
+  return start;
 }
 
 template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
@@ -297,6 +308,8 @@ void SessionBank<kLinkCapacity, kEndCapacity>::wipe_all() noexcept {
   configured_ = false;
   install_serial_ = 0;
   lru_clock_ = 0;
+  for (auto& hint : hash_hints_) hint = HashStartHint{};
+  hash_hint_next_ = 0;
 }
 
 template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
