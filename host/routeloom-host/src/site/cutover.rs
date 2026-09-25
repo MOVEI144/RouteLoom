@@ -1043,6 +1043,13 @@ impl SiteAuthority {
             {
                 continue;
             }
+            if self
+                .rrs_refusals
+                .get(&(id, target.node, kind))
+                .is_some_and(|(due, _)| *due > now_ms)
+            {
+                continue;
+            }
             // The snapshot never drifts under the event loop
             // (revoke/allow fold their changes into their own
             // transactions); a drifted binding fails closed: no send.
@@ -1055,7 +1062,6 @@ impl SiteAuthority {
             self.rrs_outbox.push_back(OutboundRrs {
                 op: id,
                 node: target.node,
-                due_ms: now_ms,
                 what: kind,
             });
         }
@@ -1848,6 +1854,11 @@ impl SiteAuthority {
                 .as_ref()
                 .map(|state| (updated.id, state.revision));
             self.operations.insert(updated.id, updated);
+        }
+        if let Some((id, _)) = restaged {
+            self.rrs_refusals.retain(|(op, _, kind), _| {
+                *op != id || !matches!(kind, OutboundKind::Prepare | OutboundKind::Commit)
+            });
         }
         if let Some(prior) = effect.superseded_owner {
             self.operations.insert(prior.id, prior);

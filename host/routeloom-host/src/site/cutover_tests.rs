@@ -977,6 +977,14 @@ fn revoke_during_prepare_restages_and_carries() {
     let (moved, _) = service
         .with(|a| a.handle_grant_receipt(keeper.node, 1, testkit::network(), &bytes, T0 + 11_000));
     assert!(moved);
+    // A transport refusal from revision 1 must not delay the freshly
+    // restaged PREPARE for this same member and operation.
+    service.with(|a| {
+        a.rrs_refusals.insert(
+            (op, keeper.node, super::revocation::OutboundKind::Prepare),
+            (T0 + 72_000, 4),
+        );
+    });
     // Revoke the leaver mid-prepare.
     let (answer, _) = service.with(|a| {
         a.revoke(
