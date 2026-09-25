@@ -1,6 +1,6 @@
 {
   "format": "routeloom-vendored-sources-v1",
-  "note": "files maps vendored paths to checked-in git blob ids. All are byte-identical to the pinned upstream commits except the one documented zcbor null/zero-length memmove patch; tests/test_vendored_sources.py checks its exact upstream transformation. RouteLoom glue lives in src/edhoc/.",
+  "note": "files maps vendored paths to checked-in git blob ids. All are byte-identical to the pinned upstream commits except the documented zcbor guard and libedhoc exact-length decode patches; tests/test_vendored_sources.py checks their exact upstream transformations. RouteLoom glue lives in src/edhoc/.",
   "components": [
     {
       "name": "libedhoc",
@@ -11,6 +11,11 @@
       "license": "MIT",
       "license_file": "LICENSE",
       "subset": "LICENSE, include/, library/core/, library/internal/, backends/{cbor,memory,log}/ (CMakeLists.txt, library/cipher_suites/, tests/, zephyr/, cmake/, externals/ not vendored)",
+      "local_patches": {
+        "library/core/classic/edhoc_classic_message_2.c": {"upstream_blob": "736ac4a8de5cdbf5f7d9051c9f907b68f7b9450e", "reason": "Reject trailing bytes after CBOR message_2."},
+        "library/core/classic/edhoc_classic_message_3.c": {"upstream_blob": "61e0cde862c9f128929bd434a378c17974b5fd10", "reason": "Reject trailing bytes after CBOR message_3."},
+        "library/core/classic/edhoc_classic_message_4.c": {"upstream_blob": "6deb56270d67d602e13e0919e3933fa1621e8099", "reason": "Reject trailing bytes after CBOR message_4."}
+      },
       "files": {
         "LICENSE": "59515297e49509b6db26c8ee6cfb629fcd9b8998",
         "backends/cbor/include/backend_cbor_bstr_type_decode.h": "e57ca86f35298b200c340b0eeb3dc25fe0dec938",
@@ -102,9 +107,9 @@
         "include/edhoc/types.h": "4aaa8badcf9320c8d54e3682f307f287c72742e7",
         "include/edhoc/values.h": "e595008c7f8935e47e5551116eea5ea1af491f93",
         "library/core/classic/edhoc_classic_message_1.c": "f4644d0e66074b3244601fb46e475c4c3fd82bac",
-        "library/core/classic/edhoc_classic_message_2.c": "736ac4a8de5cdbf5f7d9051c9f907b68f7b9450e",
-        "library/core/classic/edhoc_classic_message_3.c": "61e0cde862c9f128929bd434a378c17974b5fd10",
-        "library/core/classic/edhoc_classic_message_4.c": "6deb56270d67d602e13e0919e3933fa1621e8099",
+        "library/core/classic/edhoc_classic_message_2.c": "b1ba89076d1ebf13a06e45b9a05ed84f38900230",
+        "library/core/classic/edhoc_classic_message_3.c": "f84231d09e579e0502a5420ff55af72103c19209",
+        "library/core/classic/edhoc_classic_message_4.c": "48ac46cc381eff88149e5673709f4d5d1731817f",
         "library/core/edhoc.c": "2e00184437d93f58b8d84ff3acc1f40b661699b0",
         "library/core/edhoc_cbor_internal.c": "938b87a38595e2ef25f13ab903c0933f323261e2",
         "library/core/edhoc_cipher_internal.c": "378ca33bff37ca731a561049dc5a23791b03e662",

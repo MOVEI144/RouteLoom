@@ -355,6 +355,39 @@ void test_rfc9529_trace() {
   CHECK(responder.process_message_1(view(V("message_1"))).ok());
   note(responder);
 
+  // EDHOC messages are exact CBOR sequences: neither an extra break nor
+  // another CBOR item belongs to the authenticated exchange.
+  for (const std::uint8_t suffix : {std::uint8_t{0xff}, std::uint8_t{0x00}}) {
+    ScriptedRng bad_init_rng;
+    bad_init_rng.outputs.push_back(V("X"));
+    ScriptedRng bad_resp_rng;
+    bad_resp_rng.outputs.push_back(V("Y"));
+    edhoc::Session bad_init, bad_resp;
+    CHECK(bad_init.begin(rfc_config(edhoc::Role::Initiator, creds, bad_init_rng)).ok());
+    CHECK(bad_resp.begin(rfc_config(edhoc::Role::Responder, creds, bad_resp_rng)).ok());
+    CHECK(bad_resp.process_message_1(view(V("message_1"))).ok());
+    auto bad = V("message_2");
+    bad.push_back(suffix);
+    CHECK(!bad_init.process_message_2(view(bad)).ok());
+
+    edhoc::Session m3_resp;
+    CHECK(m3_resp.begin(rfc_config(edhoc::Role::Responder, creds, bad_resp_rng)).ok());
+    CHECK(m3_resp.process_message_1(view(V("message_1"))).ok());
+    CHECK(m3_resp.compose_message_2(MutableByteView{buffer.data(), buffer.size()}, length).ok());
+    bad = V("message_3");
+    bad.push_back(suffix);
+    CHECK(!m3_resp.process_message_3(view(bad)).ok());
+
+    edhoc::Session m4_init;
+    CHECK(m4_init.begin(rfc_config(edhoc::Role::Initiator, creds, bad_init_rng)).ok());
+    CHECK(m4_init.compose_message_1(MutableByteView{buffer.data(), buffer.size()}, length).ok());
+    CHECK(m4_init.process_message_2(view(V("message_2"))).ok());
+    CHECK(m4_init.compose_message_3(MutableByteView{buffer.data(), buffer.size()}, length).ok());
+    bad = V("message_4");
+    bad.push_back(suffix);
+    CHECK(!m4_init.process_message_4(view(bad)).ok());
+  }
+
   // §3.4 message_2
   CHECK(responder.compose_message_2(MutableByteView{buffer.data(), buffer.size()}, length).ok());
   CHECK(same(V("message_2"), buffer.data(), length, "message_2"));

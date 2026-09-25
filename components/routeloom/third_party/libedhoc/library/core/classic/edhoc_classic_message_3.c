@@ -122,7 +122,8 @@ STATIC int parse_ciphertext_3(const uint8_t *msg_3, size_t msg_3_len,
 	const int ret = cbor_decode_message_3_CIPHERTEXT_3(msg_3, msg_3_len,
 							   &output, &len);
 
-	if (ZCBOR_SUCCESS != ret) {
+	if (ZCBOR_SUCCESS != ret || len != msg_3_len) {
+		/* A message is exactly one CBOR item, without trailing data. */
 		return EDHOC_ERROR_CBOR_FAILURE;
 	}
 

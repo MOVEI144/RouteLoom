@@ -1278,6 +1278,16 @@ void test_group_provider_routing() {
   CHECK(coordinator.session_provider().accepts_group_epoch(203));
   CHECK(!coordinator.session_provider().accepts_group_epoch(999));
   CHECK(!coordinator.session_provider().group_promotion_pending());
+  const NodeId removed = site_record().gateways[0];
+  RevocationSet revoked = revocation_set(15, 1, kSiteEpoch);
+  revoked.entries[0].node_id = removed;
+  revoked.entries[0].min_generation = 4;
+  const auto object = revocation_object(revoked);
+  CHECK(f.revocations.accept(object.view(), sak().pub, kSiteId, kNetwork).ok());
+  // Both wrapper layers must preserve the applied group gate even when an
+  // already-opened frame takes a duplicate, repair or held-delivery path.
+  CHECK(coordinator.session_provider().revoked_group_sender(removed));
+  CHECK(!coordinator.session_provider().revoked_group_sender(removed + 1));
   // Pairwise still delegates to the member bank.
   CHECK(coordinator.session_provider().tx_epoch(SecurityScope::Link, kNode + 1, epoch).code ==
         StatusCode::AuthRequired);
