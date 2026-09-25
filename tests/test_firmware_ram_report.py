@@ -177,6 +177,28 @@ class Guard(unittest.TestCase):
 
 
 class Documentation(unittest.TestCase):
+    def test_owner_matrix_covers_targets(self):
+        workflow = (ROOT / ".github/workflows/sdk.yml").read_text(encoding="utf-8")
+        cells = set(re.findall(
+            r"(?m)^          - app: (reference_node|bridge_node)\n"
+            r"            target: (esp32c3|esp32s3|esp32c5)\n"
+            r"            profile: normal\n"
+            r"            autonomy: off\n"
+            r"            features: owner_member$", workflow))
+        self.assertEqual(cells, {
+            (app, target)
+            for app in ("reference_node", "bridge_node")
+            for target in ("esp32c3", "esp32s3", "esp32c5")
+        })
+
+    def test_owner_main_task_stack_budget(self):
+        for app in ("bridge_node", "reference_node"):
+            defaults = (ROOT / "firmware" / app / "sdkconfig.defaults").read_text(
+                encoding="utf-8")
+            matches = re.findall(r"^CONFIG_ESP_MAIN_TASK_STACK_SIZE=(\d+)$", defaults, re.M)
+            self.assertEqual(len(matches), 1, app)
+            self.assertGreaterEqual(int(matches[0]), 16 * 1024, app)
+
     def test_floor_table_matches_tool(self):
         text = DOC.read_text(encoding="utf-8")
         rows = re.findall(r"^\| `(esp32\w+)` \| `([\w*]+)` \| ([\d,]+) \|", text, re.M)

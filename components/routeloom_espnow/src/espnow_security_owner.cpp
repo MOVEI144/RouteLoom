@@ -169,6 +169,9 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
   if (runtime_ == nullptr) {
     return Status::error(StatusCode::InvalidState, "runtime not attached");
   }
+  if (!rlboot_prepared || rlboot_witness == 0) {
+    return Status::error(StatusCode::InvalidArgument, "boot witness unavailable");
+  }
   // Arm the ZT OFFER cookie sealer from post-radio-up entropy (boot runs
   // after entropy.begin() in main): boot-RAM-only, so a reboot
   // invalidates every outstanding cookie. Unbegun entropy fails the boot
@@ -211,6 +214,7 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
   event.usb_direct = usb_direct;
   const Status status = coordinator().step(event);
   if (!status) return status;
+  boot_witness_ = rlboot_witness;
   booted_ = true;
   ESP_LOGI(config_.log_tag, "booted (%s)", usb_direct ? "usb-direct" : "radio");
   return Status::success();
@@ -315,7 +319,8 @@ Status EspNowSecurityOwner::join_down(const NodeId to_proxy, const sdkv1::RelayO
     // our radio MAC. Anything else is refused, never forwarded.
     const sdkv1::RelayHeader& header = object.header;
     if (header.dir != sdkv1::RelayDirection::Down || header.proxy != self ||
-        header.relay_id == 0 || header.relay_id != local_join_relay_id_ ||
+        !sdkv1::local_join_token_matches(sdkv1::relay_token_of(header),
+                                         boot_witness_, local_join_relay_id_) ||
         header.joiner_mac != config_.local_mac) {
       return Status::error(StatusCode::InvalidArgument, "local join mismatch");
     }
@@ -350,7 +355,8 @@ Status EspNowSecurityOwner::join_abort(const NodeId proxy, const sdkv1::RelayTok
   if (!booted_) return Status::error(StatusCode::InvalidState, "owner not booted");
   const NodeId self =
       adopted_node_ != kInvalidNodeId ? adopted_node_ : config_.local_node;
-  if (proxy == self && token.relay_id != 0 && token.relay_id == local_join_relay_id_) {
+  if (proxy == self &&
+      sdkv1::local_join_token_matches(token, boot_witness_, local_join_relay_id_)) {
     // The host is aborting our own LocalJoin attempt.
     local_join_relay_id_ = 0;
     sdkv1::CoordinatorEvent abort{};
@@ -537,6 +543,10 @@ Status EspNowSecurityOwner::send_local_join_up(const sdkv1::JoinAuthPhase phase,
   up.header.phase = phase;
   up.header.step = step;
   up.header.state = sdkv1::RelayState::Continue;
+  const sdkv1::RelayToken token =
+      sdkv1::local_join_token(boot_witness_, local_join_relay_id_);
+  up.header.gateway_epoch = token.gateway_epoch;
+  up.header.proxy_epoch = token.proxy_epoch;
   up.message = message;
   std::array<std::uint8_t, sdkv1::kRelayObjectMax> encoded{};
   std::size_t written = 0;

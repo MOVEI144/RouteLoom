@@ -141,7 +141,7 @@
     },
     "gateway_scoped": {
       "status": "portable-core-host-tested-not-rf-qualified",
-      "max_gateways": 2,
+      "max_gateways": 4,
       "period_ms": 5000,
       "refresh_ticks": 6,
       "lease_margin_ticks": 2,

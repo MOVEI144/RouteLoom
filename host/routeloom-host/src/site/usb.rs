@@ -93,6 +93,8 @@ pub const DOWN_TTL_MS: u64 = 20_000;
 const REQUEST_MAP_CAP: usize = 32;
 /// Verified 0x60-0x63 bodies waiting for the lane.
 const INBOX_CAP: usize = 64;
+const RELAY_SLOTS_CAP: usize = 64;
+const RELAY_SLOT_TTL_MS: u64 = 30_000;
 const TICK_MS: u64 = 100;
 /// Request ids for this lane live in their own high range ("ST") so they
 /// can never alias a DataToMesh, dispatcher, node-status or group id.
@@ -176,6 +178,8 @@ pub struct AdapterStats {
     pub unexpected_gateway: u64,
     pub stray_aborts: u64,
     pub stray_results: u64,
+    pub relay_full: u64,
+    pub binding_conflicts: u64,
 }
 
 /// One queued down-link frame, ready for the writer queue.
@@ -198,6 +202,7 @@ pub struct ReadyDown {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RelaySlot {
     key: RelayKey,
+    expires_ms: u64,
 }
 
 fn slot_of(key: RelayKey) -> (u64, RelayToken) {
@@ -309,6 +314,18 @@ impl UsbSiteAdapter {
             joiner_mac: header.joiner_mac,
         };
         let slot = slot_of(key);
+        let expired: Vec<_> = guard
+            .relays
+            .iter()
+            .filter_map(|(slot, relay)| (relay.expires_ms <= now_ms).then_some(*slot))
+            .collect();
+        for expired_slot in expired {
+            guard.relays.remove(&expired_slot);
+            drop_queued(&mut guard.queue, expired_slot);
+            guard
+                .requests
+                .retain(|(_, key, _)| slot_of(*key) != expired_slot);
+        }
         if header.state == RelayState::Abort {
             // The proxy ended the relay with an abort object rather than
             // 0x62: drop anything queued for it; the lane fails the
@@ -330,7 +347,28 @@ impl UsbSiteAdapter {
             guard.stats.malformed += 1;
             return Err(UpError::Malformed);
         };
-        guard.relays.insert(slot, RelaySlot { key });
+        if let Some(existing) = guard.relays.get_mut(&slot) {
+            if existing.key != key {
+                guard.stats.binding_conflicts += 1;
+                return Err(UpError::BindingConflict);
+            }
+            existing.expires_ms = now_ms.saturating_add(RELAY_SLOT_TTL_MS);
+        } else {
+            if guard.relays.len() >= RELAY_SLOTS_CAP {
+                guard.stats.relay_full += 1;
+                if let Ok(bytes) = abort62_bytes(key, RelayAbortReason::HostAborted) {
+                    let _ = admit_bytes_locked(&mut guard, bytes, key, true, now_ms);
+                }
+                return Ok(UpOutcome::CapacityRefused);
+            }
+            guard.relays.insert(
+                slot,
+                RelaySlot {
+                    key,
+                    expires_ms: now_ms.saturating_add(RELAY_SLOT_TTL_MS),
+                },
+            );
+        }
         Ok(UpOutcome::Relay(RelayUp {
             key,
             hops: up.hops,
@@ -578,12 +616,15 @@ pub enum UpOutcome {
     /// A phase-5 up, refused with an H→G 0x62 (queued if it fits —
     /// nothing further either way, no authority state exists for it).
     Phase5Refused,
+    /// The bounded relay directory is full; a host abort was queued if possible.
+    CapacityRefused,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UpError {
     Malformed,
     UnexpectedGateway,
+    BindingConflict,
     Closed,
 }
 
@@ -1250,7 +1291,7 @@ pub fn site_once(
                     Ok(UpOutcome::ProxyAbort { key }) => {
                         service.with(|a| a.fail_attempt(key));
                     }
-                    Ok(UpOutcome::Phase5Refused) | Err(_) => {}
+                    Ok(UpOutcome::Phase5Refused | UpOutcome::CapacityRefused) | Err(_) => {}
                 },
                 Some(SUB_JOIN_RELAY_ABORT) => {
                     if let Ok(AbortOutcome::RelayOver { key, .. }) = adapter.handle_abort(&body) {
@@ -1454,6 +1495,62 @@ mod tests {
             object: up_object(phase, step, RelayState::Continue, body),
         })
         .unwrap()
+    }
+
+    fn up_inner_named(relay_id: u32, mac: [u8; 6]) -> Vec<u8> {
+        let mut object =
+            RelayObject::decode(&up_object(4, 1, RelayState::Continue, vec![1])).unwrap();
+        object.header.relay_id = relay_id;
+        object.header.joiner_mac = mac;
+        encode_join_relay_up(&JoinRelayUp {
+            gateway: GATEWAY,
+            from_proxy: PROXY,
+            hops: 3,
+            object: object.encode().unwrap(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn relay_directory_is_bounded_and_binding_is_stable() {
+        let adapter = UsbSiteAdapter::new(GATEWAY, SESSION);
+        for relay_id in 1..=RELAY_SLOTS_CAP as u32 {
+            let up = up_inner_named(relay_id, MAC);
+            assert!(matches!(
+                adapter.handle_up(&up, 1000),
+                Ok(UpOutcome::Relay(_))
+            ));
+        }
+        assert_eq!(adapter.lock().relays.len(), RELAY_SLOTS_CAP);
+        assert_eq!(
+            adapter.handle_up(&up_inner_named(65, MAC), 1001),
+            Ok(UpOutcome::CapacityRefused)
+        );
+        assert_eq!(adapter.lock().relays.len(), RELAY_SLOTS_CAP);
+        assert_eq!(adapter.stats().relay_full, 1);
+        let changed_mac = [2, 0, 0, 0, 0x12, 0x35];
+        assert_eq!(
+            adapter.handle_up(&up_inner_named(1, changed_mac), 1002),
+            Err(UpError::BindingConflict)
+        );
+        let first = (
+            PROXY,
+            RelayToken {
+                gateway_epoch: GW_EPOCH,
+                proxy_epoch: PX_EPOCH,
+                relay_id: 1,
+            },
+        );
+        assert_eq!(
+            adapter.lock().relays.get(&first).unwrap().key.joiner_mac,
+            MAC
+        );
+        assert_eq!(adapter.stats().binding_conflicts, 1);
+        assert!(matches!(
+            adapter.handle_up(&up_inner_named(65, MAC), 1000 + RELAY_SLOT_TTL_MS + 1),
+            Ok(UpOutcome::Relay(_))
+        ));
+        assert_eq!(adapter.lock().relays.len(), 1);
     }
 
     fn abort_object_up() -> Vec<u8> {

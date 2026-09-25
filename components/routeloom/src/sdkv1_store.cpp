@@ -1124,6 +1124,93 @@ Status ResumeCache2::find_by_id(const ResumePurpose purpose,
   return Status::success();
 }
 
+Status ResumeCache2::find_by_peer_step(const ResumePurpose purpose, const NodeId peer,
+                                       const ResumeContext& context, LookupCursor& cursor,
+                                       bool& done) noexcept {
+  done = false;
+  if (storage_.slot_count() != link_quota_ + end_quota_) {
+    return Status::error(StatusCode::InvalidState, "resume2 quota mismatch");
+  }
+  const std::size_t begin = purpose == ResumePurpose::Link ? 0 : link_quota_;
+  const std::size_t end = purpose == ResumePurpose::Link ? link_quota_ : link_quota_ + end_quota_;
+  if (!cursor.initialized) {
+    cursor = LookupCursor{};
+    cursor.next = begin;
+    cursor.initialized = true;
+  }
+  if (cursor.next < begin || cursor.next > end) {
+    return Status::error(StatusCode::InvalidArgument, "resume2 lookup cursor");
+  }
+  std::size_t reads = 0;
+  while (cursor.next < end && reads < kLookupStepSlots) {
+    ResumeSlot2 slot{};
+    bool intact = true;
+    const Status status = read_slot(cursor.next, slot, intact);
+    if (!status) return status;
+    ++reads;
+    if (slot.valid && slot.purpose == purpose && slot.peer == peer && usable(slot, context)) {
+      cursor.match = slot;
+      cursor.index = cursor.next;
+      cursor.found = true;
+      cursor.next = end;
+      break;
+    }
+    ++cursor.next;
+  }
+  done = cursor.next == end;
+  return Status::success();
+}
+
+Status ResumeCache2::find_by_id_step(const ResumePurpose purpose,
+                                     const std::array<std::uint8_t, 8>& rid,
+                                     const NodeId claimed_peer, const ResumeContext& context,
+                                     LookupCursor& cursor, bool& done) noexcept {
+  done = false;
+  if (storage_.slot_count() != link_quota_ + end_quota_) {
+    return Status::error(StatusCode::InvalidState, "resume2 quota mismatch");
+  }
+  const keys::Purpose key_purpose =
+      purpose == ResumePurpose::Link ? keys::Purpose::Link : keys::Purpose::End;
+  const std::size_t begin = purpose == ResumePurpose::Link ? 0 : link_quota_;
+  const std::size_t end = purpose == ResumePurpose::Link ? link_quota_ : link_quota_ + end_quota_;
+  if (!cursor.initialized) {
+    cursor = LookupCursor{};
+    cursor.next = begin;
+    cursor.initialized = true;
+  }
+  if (cursor.next < begin || cursor.next > end) {
+    return Status::error(StatusCode::InvalidArgument, "resume2 lookup cursor");
+  }
+  std::size_t reads = 0;
+  while (cursor.next < end && reads < kLookupStepSlots) {
+    ResumeSlot2 slot{};
+    bool intact = true;
+    const Status status = read_slot(cursor.next, slot, intact);
+    if (!status) return status;
+    ++reads;
+    if (slot.valid && slot.purpose == purpose && usable(slot, context) &&
+        (claimed_peer == kInvalidNodeId || slot.peer == claimed_peer)) {
+      keys::ResumeId slot_rid{};
+      keys::resume_id(slot.rms, key_purpose, slot_rid);
+      if (slot_rid == rid) {
+        if (cursor.found) {
+          secure_clear(cursor.match.rms);
+          cursor.match = ResumeSlot2{};
+          cursor.ambiguous = true;
+          cursor.next = end;
+          break;
+        }
+        cursor.match = slot;
+        cursor.index = cursor.next;
+        cursor.found = true;
+      }
+    }
+    ++cursor.next;
+  }
+  done = cursor.next == end;
+  return Status::success();
+}
+
 Status ResumeCache2::read_at(const std::size_t index, ResumeSlot2& out, bool& intact) noexcept {
   if (index >= storage_.slot_count()) {
     return Status::error(StatusCode::InvalidArgument, "resume2 slot index");

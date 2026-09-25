@@ -168,7 +168,7 @@ Wire v2 header（88B）は不変。ROUTE_UPDATEのpayload形式も不変。予�
 - **親の沈黙故障**：親の電源断はDATA失敗（即時）かlease（90秒）でしか分からない。上り送信があればDATA失敗→pull→数秒で修復するが、送信の無いboardへの下りは最長1 lease届かない。flat profileより遅い。
 - **起動時の嵐**：全台同時起動でpullが約1,900 frameになる。起動jitterや、隣接の広告を一定時間待ってからpullする等の緩和が必要（未実装）。
 - **gatewayの深さとboard間**：木を経由するので、別の枝の深いboard同士は10hopを超えて届かない。
-- **複数gateway**：2つまで設定できるが、上りは各親へ同じ部分木を送る単純な方式で、試験は1 gatewayが中心。
+- **複数gateway**：C++／新C API／RLS1は4つまで設定できる（旧C APIとfirmwareのlegacy Kconfigは2つまで）。上りは各親へ同じ部分木を送る単純な方式で、試験は1 gatewayが中心。
 - **hostへの報告なし**：C API（§5.1）とfirmware Kconfigからは設定できるが、USB HostOps（HelloAck・node_status_v1）はrouting profileとgateway一覧を運ばない。golden固定のUSB wire形式への追加が要るので別作業とする。firmwareのgateway一覧はbuild時固定で、remote config（RCC1）からは変えられない。
 - **実RF未検証**：air timeは推定モデル、simは衝突・損失を模擬しない。§14の実測・capacity manifestはG-ROUTEに残る。
 

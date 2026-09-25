@@ -1623,6 +1623,45 @@ void test_resume2_find_by_id() {
         StatusCode::NotFound);
 }
 
+void test_resume2_incremental_lookup() {
+  FaultyResumeStorage2 storage(160);
+  ResumeCache2 cache(storage, 32, 128);
+  ResumeSlot2 slot = resume2_slot(200, 0, 7, 203, ResumePurpose::End);
+  std::array<std::uint8_t, kResume2SlotBytes> encoded{};
+  CHECK_OK(resume2_slot_encode(slot, encoded));
+  storage.slot(159) = encoded;
+  ResumeCache2::LookupCursor cursor{};
+  bool done = false;
+  for (int step = 0; step < 8; ++step) {
+    const std::size_t before = storage.read_calls;
+    CHECK_OK(cache.find_by_peer_step(ResumePurpose::End, 200, context(), cursor, done));
+    CHECK(storage.read_calls - before <= ResumeCache2::kLookupStepSlots);
+    if (step < 7) CHECK(!done);
+  }
+  CHECK(done && cursor.found && cursor.index == 159);
+  CHECK(cursor.match.rms == slot.rms);
+  routeloom::keys::ResumeId rid{};
+  routeloom::keys::resume_id(slot.rms, routeloom::keys::Purpose::End, rid);
+  cursor = ResumeCache2::LookupCursor{};
+  done = false;
+  for (int step = 0; step < 8; ++step) {
+    const std::size_t before = storage.read_calls;
+    CHECK_OK(cache.find_by_id_step(ResumePurpose::End, rid, kInvalidNodeId,
+                                    context(), cursor, done));
+    CHECK(storage.read_calls - before <= ResumeCache2::kLookupStepSlots);
+    if (step < 7) CHECK(!done);
+  }
+  CHECK(done && cursor.found && !cursor.ambiguous && cursor.index == 159);
+  storage.slot(158) = encoded;
+  cursor = ResumeCache2::LookupCursor{};
+  done = false;
+  while (!done) {
+    CHECK_OK(cache.find_by_id_step(ResumePurpose::End, rid, kInvalidNodeId,
+                                    context(), cursor, done));
+  }
+  CHECK(cursor.ambiguous && !cursor.match.valid);
+}
+
 void test_resume2_uses() {
   // The 64-use ceiling holds across reboots; one RMS generation costs at
   // most 8 durable reservation writes (P4 §6.2, V1-F05). Each boot drops
@@ -1953,6 +1992,7 @@ int main() {
   test_resume_power_cuts();
   test_resume2_cache_rules();
   test_resume2_find_by_id();
+  test_resume2_incremental_lookup();
   test_resume2_uses();
   test_resume2_power_cuts();
   test_local_revocation_basic();

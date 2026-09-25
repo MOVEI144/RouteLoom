@@ -27,7 +27,6 @@ namespace sdkv1 {
 class BootstrapSink;
 struct BootstrapMeta;
 }  // namespace sdkv1
-
 // Physical submission tokens never repeat within one node lifetime. Zero is
 // the exhausted sentinel after the last nonzero token is issued.
 constexpr bool mint_physical_token(std::uint64_t& next,

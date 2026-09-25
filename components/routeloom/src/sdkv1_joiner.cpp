@@ -60,6 +60,15 @@ bool role_valid(const JoinerConfig& config) noexcept {
   return (need & ~config.capability) == 0;
 }
 
+bool boot_valid(const JoinBootInput& boot) noexcept {
+  return boot.prepared &&
+      (boot.mode == JoinBootMode::Normal ||
+       boot.mode == JoinBootMode::VerifyExistingMembership) &&
+      ((boot.removal_watermark_site_id == 0) ==
+       (boot.removal_watermark_generation == 0)) &&
+      boot.removal_watermark_site_id != std::numeric_limits<std::uint64_t>::max();
+}
+
 }  // namespace
 
 // --- Lifetime -------------------------------------------------------------------------------
@@ -353,16 +362,7 @@ Status Joiner::start(const JoinBootInput& boot, const MonotonicMs now) noexcept 
   if (state_ != JoinState::Stopped) {
     return Status::error(StatusCode::InvalidState, "joiner already started");
   }
-  if (!boot.prepared) return Status::error(StatusCode::InvalidArgument, "joiner boot unprepared");
-  if (boot.mode != JoinBootMode::Normal &&
-      boot.mode != JoinBootMode::VerifyExistingMembership) {
-    return Status::error(StatusCode::InvalidArgument, "joiner boot mode");
-  }
-  if ((boot.removal_watermark_site_id == 0) !=
-          (boot.removal_watermark_generation == 0) ||
-      boot.removal_watermark_site_id == std::numeric_limits<std::uint64_t>::max()) {
-    return Status::error(StatusCode::InvalidArgument, "joiner removal watermark");
-  }
+  if (!boot_valid(boot)) return Status::error(StatusCode::InvalidArgument, "joiner boot");
   if (!channels_valid(config_) || !role_valid(config_)) {
     return Status::error(StatusCode::InvalidArgument, "joiner config");
   }
@@ -381,16 +381,7 @@ Status Joiner::start_direct(const JoinBootInput& boot, JoinDirectPort& port,
   if (state_ != JoinState::Stopped) {
     return Status::error(StatusCode::InvalidState, "joiner already started");
   }
-  if (!boot.prepared) return Status::error(StatusCode::InvalidArgument, "joiner boot unprepared");
-  if (boot.mode != JoinBootMode::Normal &&
-      boot.mode != JoinBootMode::VerifyExistingMembership) {
-    return Status::error(StatusCode::InvalidArgument, "joiner boot mode");
-  }
-  if ((boot.removal_watermark_site_id == 0) !=
-          (boot.removal_watermark_generation == 0) ||
-      boot.removal_watermark_site_id == std::numeric_limits<std::uint64_t>::max()) {
-    return Status::error(StatusCode::InvalidArgument, "joiner removal watermark");
-  }
+  if (!boot_valid(boot)) return Status::error(StatusCode::InvalidArgument, "joiner boot");
   // No radio is touched, so the scan channels are not consulted — but the
   // requested role still gates what may be committed.
   if (!role_valid(config_)) {

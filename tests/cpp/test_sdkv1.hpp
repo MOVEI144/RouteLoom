@@ -102,6 +102,7 @@ class FaultyResumeStorage2 final : public ResumeSlotStorage2 {
   }
   std::size_t slot_count() const noexcept override { return slots_.size(); }
   Status read(const std::size_t index, const MutableByteView target) noexcept override {
+    ++read_calls;
     if (index >= slots_.size() || target.size != kResume2SlotBytes) {
       return Status::error(StatusCode::InvalidArgument, "bad resume2 read");
     }
@@ -130,6 +131,7 @@ class FaultyResumeStorage2 final : public ResumeSlotStorage2 {
   }
 
   std::size_t write_calls{0};
+  std::size_t read_calls{0};
   std::size_t cut_call{std::numeric_limits<std::size_t>::max()};
   std::size_t cut_bytes{0};
   bool read_error{false};

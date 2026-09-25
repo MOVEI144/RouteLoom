@@ -230,6 +230,7 @@ struct HandshakeRx {
 struct HandshakeResult {
   HandshakeEvent event{HandshakeEvent::Failed};
   std::uint32_t token{0};  // exchange serial (correlates Send/Established)
+  std::uint32_t exchange_id{0};  // routed end envelope binding; zero for link
   SecurityScope scope{SecurityScope::Link};
   NodeId peer{kInvalidNodeId};
   HandshakeRole role{HandshakeRole::Initiator};
@@ -282,6 +283,10 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   Status poll(MonotonicMs now) noexcept;
   // Pops the pending result (NotFound when empty).
   Status take_result(HandshakeResult& out) noexcept;
+  // A successful transport admission of responder m4 permits the final
+  // session install. A refused send leaves the flight pending for retry.
+  Status accept_send(std::uint32_t token, std::uint8_t phase,
+                     std::uint8_t step) noexcept;
   Status cancel(NodeId peer, HandshakeCancelReason reason) noexcept;
   Status cancel_all() noexcept;
   // Side-effect-free and readable any time (false while a call is inside).
@@ -318,12 +323,15 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
     Free = 0,
     ResumeWaitR2,   // initiator: R1 sent
     ResumeWaitR3,   // responder: R2 sent
+    ResumeLookupPeer,  // gateway: find the initiator's cached peer
+    ResumeLookupR1,    // gateway: find the responder's R1 id
     ResumeR3Confirm,  // initiator: installed, R3 re-sent until quiet
     EdhocQueued,    // initiator: waiting for the single EDHOC flight / ECC
     EdhocM1Parked,  // responder: m1 stashed, waiting for flight / ECC
     EdhocWaitM2,    // initiator: m1 sent
     EdhocWaitM3,    // responder: m2 sent
     EdhocWaitM4,    // initiator: m3 sent
+    EdhocM4Pending,  // responder: m4 composed, awaiting transport admission
     EdhocM4Sent,    // responder: m4 sent, installed
   };
 
@@ -331,6 +339,18 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
     bool valid{false};
     std::size_t slot_index{0};
     ScopeDigest identity{};
+  };
+
+  struct ResumeLookupWork {
+    enum class Kind : std::uint8_t { None, Peer, R1 };
+    Kind kind{Kind::None};
+    std::uint32_t token{0};
+    bool ready{false};
+    ResumeCache2::LookupCursor cursor{};
+    rlres1::ResumeId rid{};
+    rlres1::Carrier carrier{};
+    NodeId claimed_peer{kInvalidNodeId};
+    std::array<std::uint8_t, rlres1::kR1BaseSize> r1{};
   };
 
   struct CarrierRecord {
@@ -455,6 +475,10 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
                           MonotonicMs now) noexcept;
   Status on_resume_message(CarrierRecord* record, const HandshakeRx& rx, ByteView message,
                            MonotonicMs now) noexcept;
+  Status complete_resume_r1(CarrierRecord& record, ByteView message,
+                            const rlres1::Carrier& carrier, NodeId claimed_peer,
+                            MonotonicMs now) noexcept;
+  Status poll_resume_lookup(MonotonicMs now) noexcept;
   Status responder_cookie_ok(const HandshakeRx& rx) noexcept;
   Status build_binding(SecurityScope scope, const keys::LinkCarrier& carrier, const MacAddress& mac_i,
                        const MacAddress& mac_r, NodeId node_i, NodeId node_r,
@@ -522,6 +546,7 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
 
   std::array<CarrierRecord, kCarrierRecords> records_{};
   ResumeBinding resume_lookup_{};
+  ResumeLookupWork lookup_{};
   EdhocFlight edhoc_flight_{};
   std::array<std::uint8_t, 4> edhoc_cid_bytes_{};
   // Single-owner big-message buffer (m2/m4 responder-duplicate, m3

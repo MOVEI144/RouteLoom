@@ -212,6 +212,8 @@ struct CoordinatorSnapshot {
   std::uint32_t link_sessions{0};
   std::uint32_t end_sessions{0};
   std::uint32_t demands{0};
+  std::uint16_t resume_link_slots{0};
+  std::uint16_t resume_end_slots{0};
   // Authority channel (G-SEC P5): live once the member config lands and
   // the transport port attaches. join_confirmed latches on the verified
   // JoinConfirm ACK; authority_busy gates sleep while work is in flight.
@@ -284,7 +286,7 @@ class SecurityCoordinator final : public BootstrapSink,
   explicit SecurityCoordinator(const Deps& deps) noexcept;
   SecurityCoordinator(const SecurityCoordinator&) = delete;
   SecurityCoordinator& operator=(const SecurityCoordinator&) = delete;
-  ~SecurityCoordinator() override;
+  ~SecurityCoordinator() noexcept override;
 
   // The single entry. Boot/Poll/Stop/PrepareSleep/Wake drive the mode
   // workspace; Rld1Rx demuxes to Joiner/proxy/member engine; USB downs

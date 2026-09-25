@@ -956,6 +956,31 @@ void run() {
   for (const auto& path : invalid_files) run_invalid(path);
   for (const auto& path : v2_invalid_files) run_invalid(path);
   for (const auto& path : history_files) run_v1_history(path);
+  {
+    current = "local_join_token";
+    const RelayToken token = local_join_token(1234, 77);
+    CHECK(token.gateway_epoch == 1234);
+    CHECK(token.proxy_epoch == 1234);
+    CHECK(token.relay_id == 77);
+    CHECK(local_join_token_matches(token, 1234, 77));
+    CHECK(!local_join_token_matches(RelayToken{1235, 1234, 77}, 1234, 77));
+    CHECK(!local_join_token_matches(RelayToken{1234, 1235, 77}, 1234, 77));
+    CHECK(!local_join_token_matches(RelayToken{1234, 1234, 78}, 1234, 77));
+    CHECK(!local_join_token_matches(token, 0, 77));
+    RelayObject object{};
+    object.header.dir = RelayDirection::Up;
+    object.header.relay_id = token.relay_id;
+    object.header.proxy = 1;
+    object.header.joiner_mac = MacAddress{{2, 0, 0, 0, 0, 1}};
+    object.header.gateway_epoch = token.gateway_epoch;
+    object.header.proxy_epoch = token.proxy_epoch;
+    const std::uint8_t body = 0xA5;
+    object.message = ByteView{&body, 1};
+    std::array<std::uint8_t, kRelayObjectMax> encoded{};
+    std::size_t written = 0;
+    CHECK(relay_object_encode(object, MutableByteView{encoded.data(), encoded.size()},
+                              written).ok());
+  }
   unit_cookie_keying();
   unit_slot();
   unit_admission();

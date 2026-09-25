@@ -1759,6 +1759,8 @@ Status MeshNode::send_typed(const FrameType type, const NodeId destination,
 Status MeshNode::send_bootstrap(const NodeId destination, const FrameType type,
                                 const ByteView payload, const std::uint32_t lifetime_ms,
                                 const MonotonicMs now_ms, MessageId& id) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+  NodeGuard guard(in_call_);
   last_clock_ms_ = now_ms;
   if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
   ++work_generation_;
@@ -3929,13 +3931,21 @@ void MeshNode::handle_bootstrap(const wire::LinkOpenedFrame& frame, const NodeId
       replay_retained_failure(*duplicate, type, rx, now_ms);
       return;
     }
-    AdmissionReservation reply{};
-    if (rx.valid && reserve_rx_reply(rx, true, 1, now_ms, reply) &&
-        queue_hop_accept(frame.header, reply.txn, now_ms)) {
-      reply.committed = true;
-    } else {
-      reply.rollback();
+    if (!rx.valid) {
+      refuse_without_binding(peer, frame.header, "REACK_NO_BINDING", now_ms);
+      return;
     }
+    AdmissionReservation reply{};
+    if (!reserve_rx_reply(rx, /*needs_control_slot=*/true, 1, now_ms,
+                          reply) ||
+        !queue_hop_accept(frame.header, reply.txn, now_ms)) {
+      reply.rollback();
+      emit_busy_or_drop(peer, frame.header,
+                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
+                        rx, now_ms);
+      return;
+    }
+    reply.committed = true;
     return;
   }
 
@@ -3944,19 +3954,37 @@ void MeshNode::handle_bootstrap(const wire::LinkOpenedFrame& frame, const NodeId
       observer_.on_diagnostic("BOOTSTRAP_PAYLOAD_REJECTED", peer, &frame.header.message);
       return;
     }
-    MonotonicMs deadline = 0;
-    if (!rx.valid || scheduler_.free_slots() < 1 ||
-        !scheduler_.control_slot_available() || !txn_slot_available() ||
-        !txn_deadline_for(frame.header.remaining_deadline_ms, now_ms, deadline)) {
+    if (!rx.valid) {
+      refuse_without_binding(peer, frame.header, "ADMISSION_NO_BINDING", now_ms);
+      return;
+    }
+    MonotonicMs txn_deadline = 0;
+    if (scheduler_.free_slots() < 1 || !scheduler_.control_slot_available() ||
+        !txn_slot_available() ||
+        !txn_deadline_for(frame.header.remaining_deadline_ms, now_ms,
+                          txn_deadline)) {
+      emit_busy_or_drop(peer, frame.header,
+                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
+                        rx, now_ms);
       observer_.on_diagnostic("BOOTSTRAP_NO_ACK_SLOT", peer, &frame.header.message);
       return;
     }
     AdmissionReservation res{};
     res.node = this;
+    ReplyLeaseToken use{kInvalidReplyLeaseToken};
     if (reply_peer_port_ == nullptr ||
-        !reply_peer_port_->acquire(rx.binding, deadline, now_ms, res.use) ||
-        !begin_txn(res.use, deadline, res.txn)) {
+        !reply_peer_port_->acquire(rx.binding, txn_deadline, now_ms, use)) {
+      emit_busy_or_drop(peer, frame.header,
+                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
+                        rx, now_ms);
+      return;
+    }
+    res.use = use;
+    if (!begin_txn(use, txn_deadline, res.txn)) {
       res.rollback();
+      emit_busy_or_drop(peer, frame.header,
+                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
+                        rx, now_ms);
       return;
     }
     auto* entry = allocate_dedup(key, type, frame.header.delivery_round,
@@ -3965,14 +3993,16 @@ void MeshNode::handle_bootstrap(const wire::LinkOpenedFrame& frame, const NodeId
     if (entry == nullptr) {
       res.rollback();
       emit_busy_or_drop(peer, frame.header,
-                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), rx, now_ms);
+                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
+                        rx, now_ms);
       return;
     }
     res.dedup = entry;
     if (!queue_hop_accept(frame.header, res.txn, now_ms)) {
       res.rollback();
       emit_busy_or_drop(peer, frame.header,
-                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), rx, now_ms);
+                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
+                        rx, now_ms);
       return;
     }
     res.committed = true;
@@ -4016,11 +4046,18 @@ void MeshNode::handle_bootstrap(const wire::LinkOpenedFrame& frame, const NodeId
   // enforced once, at forward emission (wire::forward refuses hops <= 1
   // for every lane) — an inbound hops==0 transit frame is unemittable by
   // any honest encoder, so a second check would be unreachable.
-  if (frame.header.remaining_deadline_ms <= rx_age_ms_) {
+  MonotonicMs txn_deadline = 0;
+  if (!txn_deadline_for(frame.header.remaining_deadline_ms, now_ms,
+                        txn_deadline)) {
     ++transit_refused_;
     emit_transit_refusal(frame, TransitFailureReason::Deadline, rx, now_ms);
     observer_.on_diagnostic("BOOTSTRAP_TRANSIT_DEADLINE_SPENT", peer,
                             &frame.header.message);
+    return;
+  }
+  if (!rx.valid) {
+    ++transit_refused_;
+    refuse_without_binding(peer, frame.header, "TRANSIT_NO_BINDING", now_ms);
     return;
   }
   const auto route = routes_.best(frame.header.destination);
@@ -4031,21 +4068,31 @@ void MeshNode::handle_bootstrap(const wire::LinkOpenedFrame& frame, const NodeId
   }
   const AdmitVerdict admit =
       scheduler_.check(config_.node, /*scope=*/peer, frame.header.origin, 2);
-  if (admit != AdmitVerdict::Admitted) {
+  if (admit != AdmitVerdict::Admitted ||
+      !scheduler_.control_slot_available() || !txn_slot_available()) {
+    saturating_inc(scheduler_.stats_.admissions_rejected);
     emit_busy_or_drop(peer, frame.header, busy_reason_for(admit), rx, now_ms);
     observer_.on_diagnostic("BOOTSTRAP_TRANSIT_DENIED", peer, &frame.header.message);
     return;
   }
-  MonotonicMs deadline = 0;
-  if (!rx.valid || !txn_deadline_for(frame.header.remaining_deadline_ms, now_ms, deadline) ||
-      scheduler_.free_slots() < 2 || !scheduler_.control_slot_available() ||
-      !txn_slot_available()) return;
   AdmissionReservation res{};
   res.node = this;
+  ReplyLeaseToken use{kInvalidReplyLeaseToken};
   if (reply_peer_port_ == nullptr ||
-      !reply_peer_port_->acquire(rx.binding, deadline, now_ms, res.use) ||
-      !begin_txn(res.use, deadline, res.txn)) {
+      !reply_peer_port_->acquire(rx.binding, txn_deadline, now_ms, use)) {
+    saturating_inc(scheduler_.stats_.admissions_rejected);
+    emit_busy_or_drop(peer, frame.header,
+                      static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
+                      rx, now_ms);
+    return;
+  }
+  res.use = use;
+  if (!begin_txn(use, txn_deadline, res.txn)) {
+    saturating_inc(scheduler_.stats_.admissions_rejected);
     res.rollback();
+    emit_busy_or_drop(peer, frame.header,
+                      static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
+                      rx, now_ms);
     return;
   }
   auto* entry = allocate_dedup(key, type, frame.header.delivery_round,
@@ -4054,14 +4101,16 @@ void MeshNode::handle_bootstrap(const wire::LinkOpenedFrame& frame, const NodeId
   if (entry == nullptr) {
     res.rollback();
     emit_busy_or_drop(peer, frame.header,
-                      static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), rx, now_ms);
+                      static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
+                      rx, now_ms);
     return;
   }
   res.dedup = entry;
   if (!queue_forward(frame, route.next_hop, res.txn, now_ms)) {
     res.rollback();
     emit_busy_or_drop(peer, frame.header,
-                      static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), rx, now_ms);
+                      static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
+                      rx, now_ms);
     observer_.on_diagnostic("BOOTSTRAP_TRANSIT_RESERVATION_FAILED", peer,
                             &frame.header.message);
     return;
