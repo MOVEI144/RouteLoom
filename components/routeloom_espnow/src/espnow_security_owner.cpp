@@ -1436,9 +1436,7 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   for (std::size_t i = 0; i < member.route_gateway_count && i < node.route_gateways.size(); ++i) {
     node.route_gateways[i] = member.route_gateways[i];
   }
-  const std::uint8_t operating = stores_->site().has_site()
-                                     ? stores_->site().site().channel
-                                     : runtime_->committed_channel();
+  const std::uint8_t operating = member.channel;
   Status status = runtime_->adopt_member_node(node);
   if (!status && status.code != StatusCode::InvalidState) {
     ESP_LOGE(config_.log_tag, "member node adopt failed: %s", status.detail);

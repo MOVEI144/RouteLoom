@@ -1280,7 +1280,7 @@ Status SecurityCoordinator::emit_end_send(const HandshakeResult& result,
   object.phase = static_cast<JoinAuthPhase>(result.phase);
   object.step = result.step;
   object.exchange_id = exchange;
-  object.profile = kEndProfileMember;
+  object.profile = mode_ == CoordinatorMode::Dev ? kEndProfileDev : kEndProfileMember;
   object.message = ByteView{result.message.data(), result.message_size};
   std::array<std::uint8_t, kEndObjectMax> encoded{};
   std::size_t encoded_size = 0;
@@ -1463,6 +1463,11 @@ void SecurityCoordinator::handle_end_single(const BootstrapMeta& meta, ByteView 
                                             const MonotonicMs now) noexcept {
   EndObject object{};
   if (!end_single_frame_decode(FrameType::BootstrapAuth, payload, object).ok()) {
+    sat_inc(counters_.demux_drops);
+    return;
+  }
+  if (object.profile !=
+      (mode_ == CoordinatorMode::Dev ? kEndProfileDev : kEndProfileMember)) {
     sat_inc(counters_.demux_drops);
     return;
   }
@@ -2390,6 +2395,7 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
   CoordinatorMemberConfig cfg{};
   cfg.network = site.network;
   cfg.node = identity.node_id;
+  cfg.channel = site.channel;
   // The message session names this boot on the mesh: entropy-drawn when
   // the RNG answers, else the rlboot witness (durable, nonzero, distinct
   // per boot). The node refuses 0 either way.
@@ -2559,6 +2565,7 @@ Status SecurityCoordinator::install_dev_config(const CoordinatorDevConfig& confi
   CoordinatorMemberConfig cfg{};
   cfg.network = config.network;
   cfg.node = config.node;
+  cfg.channel = config.channel;
   // Both sessions are the reserved durable boot: it rises every boot, so
   // a reboot never reuses a group key epoch (P4 §10.1).
   cfg.message_session = config.boot;

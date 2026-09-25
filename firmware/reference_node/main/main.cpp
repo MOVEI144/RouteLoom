@@ -63,12 +63,14 @@
 namespace {
 constexpr char kTag[] = "RouteLoomRef";
 
-// NVS codec state uses CPU-only reads and writes, so the C5 member image
-// keeps it in LP SRAM while HP SRAM remains available to radio traffic.
-#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC && CONFIG_IDF_TARGET_ESP32C5
-#define ROUTELOOM_MEMBER_C5_LP RTC_DATA_ATTR
+// NVS codec state uses CPU-only reads and writes, so C5 Owner profiles
+// keep it in LP SRAM while HP SRAM remains available to radio traffic.
+#if (CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC || \
+     CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM) && \
+    CONFIG_IDF_TARGET_ESP32C5
+#define ROUTELOOM_OWNER_C5_LP RTC_DATA_ATTR
 #else
-#define ROUTELOOM_MEMBER_C5_LP
+#define ROUTELOOM_OWNER_C5_LP
 #endif
 
 using routeloom::ByteView;
@@ -227,18 +229,16 @@ RTC_DATA_ATTR std::uint32_t s_sleep_marker = 0;
 RTC_DATA_ATTR std::uint32_t s_sleep_programmed_ms = 0;
 constexpr std::uint32_t kSleepMarkerValue = 0x524c5057;  // "RLPW"
 
-#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+#if CONFIG_ROUTELOOM_DEEP_SLEEP && CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
 // Owner sleep tail (P4 §9.3, V1-F07): the retained session image in RTC
 // slow memory, the only RAM surviving deep sleep. Zero after any
 // non-sleep reset (re-copied from the image) — decode refuses those, so
 // no validity claim rides on the backing itself.
 RTC_DATA_ATTR std::array<std::uint8_t, routeloom::sdkv1::kRtcSessionRecordSize>
     s_rtc_session{};
-#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
 // The consumed image waits here until the parent binds; the always-on
 // security Owner does not reserve this space in gateway HP SRAM.
 RTC_DATA_ATTR routeloom::sdkv1::RtcSessionImage s_rtc_hold{};
-#endif
 #endif
 
 class LogPowerEvents final : public routeloom::PowerEvents {
@@ -653,7 +653,7 @@ extern "C" void app_main(void) {
   // is reported and its consumers fail closed (the maintenance console
   // refuses, the join FSM of P3-4 will treat it as unprovisioned), while
   // the node keeps routing.
-  static ROUTELOOM_MEMBER_C5_LP routeloom::espnow::Sdkv1Stores sdkv1_stores(
+  static ROUTELOOM_OWNER_C5_LP routeloom::espnow::Sdkv1Stores sdkv1_stores(
       routeloom::sdkv1::kResumeNodeSlots);
   status = sdkv1_stores.open(routeloom::espnow::kSecurityNvsPartition);
   if (!status) {

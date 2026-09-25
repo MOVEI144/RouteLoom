@@ -145,10 +145,16 @@ class SimMeshPort final : public CoordinatorMeshPort {
     (void)now_ms;
     out.push_back({destination, type,
                    std::vector<std::uint8_t>(payload.data, payload.data + payload.size)});
+    if (type == FrameType::BootstrapAuth && payload.size >= kEndObjectHeaderSize &&
+        (payload.data[1] == static_cast<std::uint8_t>(JoinAuthPhase::Resume) ||
+         payload.data[1] == static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage))) {
+      end_profiles.push_back(payload.data[9]);
+    }
     id = MessageId{1, static_cast<std::uint32_t>(out.size())};
     return Status::success();
   }
   std::vector<MeshFrame> out{};
+  std::vector<std::uint8_t> end_profiles{};
 };
 
 class SimUsbPort final : public CoordinatorUsbPort {
@@ -364,7 +370,7 @@ class SimNode {
           // operating channel (token 0, like the owner apply leg).
           adopted_ = action.member;
           adopted_valid_ = true;
-          operating_channel_ = site_.has_site() ? site_.site().channel : kSimChannel;
+          operating_channel_ = action.member.channel;
           {
             CoordinatorEvent ready{};
             ready.kind = CoordinatorEventKind::ChannelReady;

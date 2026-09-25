@@ -177,6 +177,7 @@ struct CoordinatorTune {
 struct CoordinatorMemberConfig {
   NetworkId network{0};  // full64 (low32 filters the radio)
   NodeId node{kInvalidNodeId};
+  std::uint8_t channel{0};  // adopted operating channel, independent of stale stores
   std::uint32_t message_session{0};
   std::uint32_t boot_session{0};  // rlboot witness, nonzero
   std::uint32_t link_epoch{1};

@@ -278,9 +278,54 @@ void test_dev_end_scope() {
   }
   CHECK(established);
   CHECK(pair.a.coordinator().snapshot().end_sessions == 1);
+  CHECK(!pair.a.mesh_.end_profiles.empty());
+  CHECK(!pair.b.mesh_.end_profiles.empty());
+  for (const std::uint8_t profile : pair.a.mesh_.end_profiles) {
+    CHECK(profile == kEndProfileDev);
+  }
+  for (const std::uint8_t profile : pair.b.mesh_.end_profiles) {
+    CHECK(profile == kEndProfileDev);
+  }
   std::uint32_t generation = 0, role = 0;
   CHECK(pair.a.coordinator().authenticated(kDevNodeB, kNetwork, generation, role));
   CHECK(generation == 0 && role != 0);
+
+  // A valid end envelope from the other security profile is refused at
+  // the lane gate before its untrusted message reaches the engine.
+  const std::uint8_t message[] = {0x01};
+  EndObject wrong{};
+  wrong.phase = JoinAuthPhase::Resume;
+  wrong.step = 1;
+  wrong.exchange_id = 0x12345678;
+  wrong.profile = kEndProfileMember;
+  wrong.message = ByteView{message, sizeof(message)};
+  std::array<std::uint8_t, kEndObjectMax> encoded{};
+  std::size_t written = 0;
+  CHECK(end_object_encode(wrong, MutableByteView{encoded.data(), encoded.size()}, written).ok());
+  BootstrapMeta meta{};
+  meta.origin = kDevNodeB;
+  meta.destination = kDevNodeA;
+  const std::uint32_t before = pair.a.coordinator().counters().demux_drops;
+  CHECK(pair.a.coordinator().on_frame(meta, FrameType::BootstrapAuth,
+                                      ByteView{encoded.data(), written}, now).ok());
+  CoordinatorEvent poll{};
+  poll.kind = CoordinatorEventKind::Poll;
+  poll.now = now + 1;
+  CHECK(pair.a.coordinator().step(poll).ok());
+  CHECK(pair.a.coordinator().counters().demux_drops == before + 1);
+}
+
+void test_dev_ignores_stale_member_channel() {
+  current = "dev_ignores_stale_member_channel";
+  SimNode node{kDevNodeA, kDevMacA, 0xD1A, kResume2NodeLinkQuota + kResume2NodeEndQuota};
+  CHECK(node.init_stores());
+  SiteRecord old = site_record();
+  old.channel = kSimChannel + 1;
+  CHECK(node.site().commit(old).ok());
+  CHECK(node.boot_dev(kDevT0, dev_test_psk(), kNetwork, kDevBoot));
+  node.drain_actions(kDevT0);
+  CHECK(node.operating_channel() == kSimChannel);
+  CHECK(node.coordinator().snapshot().mode == CoordinatorMode::Dev);
 }
 
 }  // namespace
@@ -291,6 +336,7 @@ int main() {
   test_dev_no_store_writes();
   test_dev_wrong_psk_no_session();
   test_dev_end_scope();
+  test_dev_ignores_stale_member_channel();
   if (failures != 0) {
     std::fprintf(stderr, "FAILURES: %d\n", failures);
     return 1;
