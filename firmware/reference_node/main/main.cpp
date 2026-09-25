@@ -195,8 +195,11 @@ RTC_NOINIT_ATTR routeloom::FailStreak s_fail;
 
 // RTC slow-memory marker: written right before esp_deep_sleep_start and
 // cleared on boot. Lost on a full power cut — exactly the cases that must
-// not be classified as a sleep resume.
+// not be classified as a sleep resume. The programmed timer duration rides
+// alongside so the wake can prove a trusted slept-time lower bound (P4
+// §9.3); it is one-shot — a reset without a new sleep must not reuse it.
 RTC_DATA_ATTR std::uint32_t s_sleep_marker = 0;
+RTC_DATA_ATTR std::uint32_t s_sleep_programmed_ms = 0;
 constexpr std::uint32_t kSleepMarkerValue = 0x524c5057;  // "RLPW"
 
 class LogPowerEvents final : public routeloom::PowerEvents {
@@ -233,7 +236,7 @@ class FailStreakClearOnSleep final : public routeloom::espnow::PreSleepHook {
   }
 };
 
-routeloom::ResetCause classify_boot() noexcept {
+routeloom::ResetCause classify_boot(bool& marked) noexcept {
   // esp_sleep_get_wakeup_causes() returns a *bitmap* of esp_sleep_source_t
   // values — on a non-sleep reset it reports BIT(ESP_SLEEP_WAKEUP_UNDEFINED),
   // which is nonzero. Mask the UNDEFINED bit before treating the bitmap as
@@ -242,7 +245,7 @@ routeloom::ResetCause classify_boot() noexcept {
   const std::uint32_t wakeup =
       esp_sleep_get_wakeup_causes() & ~(1U << ESP_SLEEP_WAKEUP_UNDEFINED);
   const esp_reset_reason_t reason = esp_reset_reason();
-  const bool marked = s_sleep_marker == kSleepMarkerValue;
+  marked = s_sleep_marker == kSleepMarkerValue;
   s_sleep_marker = 0;
   if (marked && (reason == ESP_RST_DEEPSLEEP || wakeup != 0U)) {
     return routeloom::ResetCause::DeepSleepWake;
@@ -252,6 +255,20 @@ routeloom::ResetCause classify_boot() noexcept {
     return routeloom::ResetCause::ColdBoot;
   }
   return routeloom::ResetCause::OtherReset;
+}
+
+// Trusted slept-time lower bound (P4 §9.3): only a marked deep-sleep wake
+// via the timer proves the programmed duration; anything else is unknown
+// and the coordinator parks durable pendings TIME_UNCERTAIN. One-shot:
+// the program is consumed here so a later reset cannot replay it.
+routeloom::ElapsedInterval classify_wake_elapsed(const routeloom::ResetCause cause,
+                                                 const bool marked) noexcept {
+  const std::uint32_t programmed = s_sleep_programmed_ms;
+  s_sleep_programmed_ms = 0;
+  return routeloom::classify_sleep_elapsed(
+      cause == routeloom::ResetCause::DeepSleepWake,
+      esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER, marked,
+      programmed);
 }
 
 #endif  // CONFIG_ROUTELOOM_DEEP_SLEEP
@@ -1271,11 +1288,12 @@ extern "C" void app_main(void) {
 #elif CONFIG_ROUTELOOM_DEEP_SLEEP
   // Wired: PowerCoordinator driven single-threaded (no runtime task), two-
   // slot NVS sleep image, RTC-marker + wake-cause classification, timer wake
-  // via esp_deep_sleep_start. Not wired (host/port only): trusted RTC
-  // elapsed interval (pendings park TIME_UNCERTAIN), GPIO wake mask, and
-  // bounded rediscovery — EspNowPowerPort::start_discovery reports
-  // Unsupported, so an unconfirmed resume ends RESUME_UNCONFIRMED/
-  // DISCOVERY_REQUIRED instead of fabricating rediscovery.
+  // via esp_deep_sleep_start, and the trusted slept-time interval (a marked
+  // timer wake proves the programmed duration; anything else still parks
+  // TIME_UNCERTAIN). Not wired (host/port only): GPIO wake mask and bounded
+  // rediscovery — EspNowPowerPort::start_discovery reports Unsupported, so
+  // an unconfirmed resume ends RESUME_UNCONFIRMED/DISCOVERY_REQUIRED
+  // instead of fabricating rediscovery.
   // Sleep images are system state and stay in the default partition
   // (sdk-v1/05 §5.1); only per-peer security state lives in rlsec.
   static NvsCounterStore sleep_store;
@@ -1290,10 +1308,13 @@ extern "C" void app_main(void) {
   static routeloom::PowerCoordinator coordinator(
       power_config, runtime.node(), power_port, sleep_storage, power_events);
 
-  // Cold boot vs deep-sleep resume are distinct coordinator inputs. Elapsed
-  // time across sleep is reported unknown until a trusted RTC interval is
-  // wired, so durable pendings park as TIME_UNCERTAIN instead of resending.
-  status = coordinator.begin(classify_boot(), routeloom::ElapsedInterval{0, 0, false},
+  // Cold boot vs deep-sleep resume are distinct coordinator inputs. The
+  // slept-time interval is trusted only on a marked timer wake (P4 §9.3);
+  // anything else parks durable pendings as TIME_UNCERTAIN instead of
+  // resending on a fabricated zero.
+  bool boot_marked = false;
+  const routeloom::ResetCause boot_cause = classify_boot(boot_marked);
+  status = coordinator.begin(boot_cause, classify_wake_elapsed(boot_cause, boot_marked),
                              monotonic_now_ms());
   if (!status) fail(status.detail);
   runtime.mark_started();
@@ -1326,12 +1347,14 @@ extern "C" void app_main(void) {
     }
     if (coordinator.state() == routeloom::PowerState::ReadyToSleep) {
       s_sleep_marker = kSleepMarkerValue;
+      s_sleep_programmed_ms = CONFIG_ROUTELOOM_SLEEP_DURATION_MS;
       status =
           coordinator.sleep_enter(coordinator.ticket(), monotonic_now_ms());
       // The marker claims "sleep in progress" only while sleep_enter runs:
       // a return — failure or an unexpected non-sleep success — must not
       // leave it armed for the reset path to misread as a sleep cycle.
       s_sleep_marker = 0;
+      s_sleep_programmed_ms = 0;
       if (!status) fail(status.detail);
     }
     runtime.wait_for_event(routeloom::kOwnerPollPeriodMs);

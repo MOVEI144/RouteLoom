@@ -112,6 +112,12 @@ class SessionBank {
   static constexpr std::uint32_t kOverlapLifetimeMs = 60U * 1000U;
   static constexpr std::size_t kStagingBytes = kMaxEspNowBody;  // 250
   static constexpr std::size_t kCidRetries = 8;
+  // Provenance of a dev-PSK resume install (P4 §10.1: cert_id 0,
+  // generation 0, created_gk 1). A flagged context works like any live
+  // one, but restore_entry refuses it — dev sessions re-run RLRES1 after
+  // every boot instead of RTC-restoring — and the RTC codec never carries
+  // flags.
+  static constexpr std::uint32_t kFlagDevResume = 0x08;
 
   // The frozen TX use-budget rule (P4 §4.2), as a pure function so the
   // 2^32 boundary is testable without issuing four billion counters:

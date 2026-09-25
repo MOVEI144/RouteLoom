@@ -360,5 +360,44 @@ int main() {
   CHECK(cold.export_entry(SecurityScope::Link, 11, missing).code == StatusCode::InvalidState);
   CHECK(cold.restore_entry(SecurityScope::Link, 11, woken.contexts[0].entry).code ==
         StatusCode::InvalidState);
+
+  // P4 wiring: the buffer-backed port is what firmware binds to RTC slow
+  // memory. Exact-size reads/writes only; invalidate clears the committed
+  // marker AND any retained key material (no stale keys linger in RTC).
+  std::array<std::uint8_t, kRtcSessionRecordSize> backing{};
+  BufferRtcSessionPort backing_port{MutableByteView{backing.data(), backing.size()}};
+  CHECK(backing_port.write(ByteView{raw.data(), raw.size()}).ok());
+  CHECK(backing == raw);
+  std::array<std::uint8_t, kRtcSessionRecordSize> seen{};
+  CHECK(backing_port.read(MutableByteView{seen.data(), seen.size()}).ok());
+  CHECK(seen == raw);
+  std::array<std::uint8_t, kRtcSessionRecordSize - 1> short_buf{};
+  CHECK(!backing_port.read(MutableByteView{short_buf.data(), short_buf.size()}).ok());
+  CHECK(!backing_port
+             .write(ByteView{short_buf.data(), short_buf.size()})
+             .ok());
+  CHECK(backing == raw);  // refused sizes leave the backing untouched
+  RtcSessionImage via_port{};
+  CHECK(consume_rtc_session(backing_port, wake, via_port).ok());
+  CHECK(via_port.count == 2 && via_port.contexts[0].entry.tx_next == 20);
+  CHECK(!consume_rtc_session(backing_port, wake, result).ok());  // one-shot
+  bool all_zero = true;
+  for (const auto byte : backing) all_zero = all_zero && (byte == 0);
+  CHECK(all_zero);  // invalidate wiped the retained keys, not just the marker
+  RtcSessionImage live = saved;  // tx_next already 21 from the cycle above
+  CHECK(encode_rtc_session(live, MutableByteView{raw.data(), raw.size()}).ok());
+  CHECK(backing_port.write(ByteView{raw.data(), raw.size()}).ok());
+  CHECK(advance_rtc_tx(backing_port, live, 0, issued).ok());
+  CHECK(issued == 21 && live.contexts[0].entry.tx_next == 22);
+  CHECK(backing_port.read(MutableByteView{seen.data(), seen.size()}).ok());
+  CHECK(decode_rtc_session(ByteView{seen.data(), seen.size()}, wake, result).ok());
+  CHECK(result.contexts[0].entry.tx_next == 22);
+
+  // P4 wiring: dev-resume contexts never RTC-restore (fresh RLRES1 after
+  // every boot instead); the provenance flag fails the shape gate.
+  bad = woken.contexts[0].entry;
+  bad.flags = NodeSessionBank::kFlagDevResume;
+  CHECK(bank_c.restore_entry(SecurityScope::Link, 11, bad).code ==
+        StatusCode::InvalidArgument);
   return failures ? 1 : 0;
 }

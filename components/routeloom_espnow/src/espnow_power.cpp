@@ -3,6 +3,11 @@
 #include <algorithm>
 #include <cstring>
 
+// The RTC session-image backing (P4 §9.3): the owner sleep cycle binds its
+// slow-memory instance through here once it exists; the include keeps the
+// contract compiling under IDF until then.
+#include "routeloom/espnow_session_rtc.hpp"
+
 #include "esp_err.h"
 #include "esp_now.h"
 #include "esp_sleep.h"

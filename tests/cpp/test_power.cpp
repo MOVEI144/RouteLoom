@@ -5295,6 +5295,35 @@ static_assert(noexcept(std::declval<PowerCoordinator&>().ticket_valid(
                   SleepTicket{})),
               "ticket_valid is noexcept");
 
+void test_trusted_sleep_elapsed() {
+  // P4 wiring: a timer wake after a marked sleep proves the programmed
+  // duration as a LOWER bound; the upper bound adds the wake-to-classify
+  // boot margin (consumers deduct the upper — the safe direction).
+  const ElapsedInterval trusted =
+      classify_sleep_elapsed(true, true, true, 30000);
+  CHECK(trusted.known);
+  CHECK(trusted.lower_ms == 30000);
+  CHECK(trusted.upper_ms == 30000 + kSleepWakeBootMarginMs);
+  // Any missing evidence parks TIME_UNCERTAIN instead of guessing.
+  CHECK(!classify_sleep_elapsed(false, true, true, 30000).known);  // cold boot
+  CHECK(!classify_sleep_elapsed(true, false, true, 30000).known);  // GPIO wake
+  CHECK(!classify_sleep_elapsed(true, true, false, 30000).known);  // no marker
+  CHECK(!classify_sleep_elapsed(true, true, true, 0).known);       // no program
+  // The u64 margin addition cannot wrap a u32 program past the lower bound.
+  const ElapsedInterval saturated = classify_sleep_elapsed(
+      true, true, true, std::numeric_limits<std::uint32_t>::max());
+  CHECK(saturated.known);
+  CHECK(saturated.lower_ms == std::numeric_limits<std::uint32_t>::max());
+  CHECK(saturated.upper_ms >= saturated.lower_ms);
+  // End to end: the trusted interval feeds begin() and resends a durable
+  // pending whose lifetime covers it (else TIME_UNCERTAIN parks it).
+  std::uint32_t remaining = 0;
+  CHECK(resume_remaining_lifetime(DeadlinePolicy::WallElapsedValidity, 60000,
+                                  trusted, remaining)
+            .ok());
+  CHECK(remaining == 60000 - static_cast<std::uint32_t>(trusted.upper_ms));
+}
+
 }  // namespace
 
 int main() {
@@ -5384,6 +5413,7 @@ int main() {
   test_enter_copies_aliased_ticket();
   test_abort_never_erases_committed_snapshot();
   test_sleep_path_uses_no_heap();
+  test_trusted_sleep_elapsed();
   if (failures == 0) {
     std::printf("power tests passed\n");
     return 0;

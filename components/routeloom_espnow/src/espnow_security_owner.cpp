@@ -163,6 +163,26 @@ void EspNowSecurityOwner::poll(const MonotonicMs now_ms) noexcept {
   drain_actions(now_ms);
 }
 
+Status EspNowSecurityOwner::prepare_sleep(const MonotonicMs now_ms) noexcept {
+  if (!booted_) return Status::error(StatusCode::InvalidState, "owner not booted");
+  // Drain first: a pending action (tune/member/discovery) is owed work,
+  // not sleep permission. The coordinator re-checks the slot anyway.
+  poll_tune(now_ms);
+  drain_actions(now_ms);
+  sdkv1::CoordinatorEvent event{};
+  event.kind = sdkv1::CoordinatorEventKind::PrepareSleep;
+  event.now = now_ms;
+  return coordinator().step(event);
+}
+
+Status EspNowSecurityOwner::wake(const MonotonicMs now_ms) noexcept {
+  if (!booted_) return Status::error(StatusCode::InvalidState, "owner not booted");
+  sdkv1::CoordinatorEvent event{};
+  event.kind = sdkv1::CoordinatorEventKind::Wake;
+  event.now = now_ms;
+  return coordinator().step(event);
+}
+
 void EspNowSecurityOwner::on_bootstrap_rld1(const sdkv1::JoinRxMeta& meta,
                                             const std::uint32_t radio_generation,
                                             const ByteView frame,

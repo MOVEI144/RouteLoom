@@ -181,6 +181,21 @@ struct SleepRequest {
 const char* power_state_name(PowerState state) noexcept;
 const char* resume_outcome_name(ResumeOutcome outcome) noexcept;
 
+// Wake-to-classify boot margin (P4 §9.3): the ROM bootloader plus IDF app
+// init before firmware reads the wake cause runs no RF and no app work,
+// so 2 s bounds it generously. The trusted-elapsed upper bound adds this
+// margin; over-deduction only shortens lifetimes (the safe direction).
+constexpr std::uint64_t kSleepWakeBootMarginMs = 2000;
+
+// Trusted sleep-elapsed classifier (P4 §9.3, F07/F08): a timer wake after
+// a marked deep sleep proves the programmed duration as a LOWER bound on
+// the slept time (the timer fires at the program point, boot adds more).
+// Anything else — cold boot, GPIO wake, missing marker, no program — is
+// unknown, so consumers park TIME_UNCERTAIN instead of guessing.
+ElapsedInterval classify_sleep_elapsed(bool deep_sleep_wake, bool timer_wake,
+                                       bool marker_ok,
+                                       std::uint32_t programmed_ms) noexcept;
+
 // Phase-1 plan for one carry slot: what the settlement must do with it.
 enum class CarryPlanKind : std::uint8_t {
   Unused = 0,  // carry slot free

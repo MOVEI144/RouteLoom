@@ -57,6 +57,23 @@ class RtcSessionPort {
   virtual Status write(ByteView image) noexcept = 0;
 };
 
+// Buffer-backed port: firmware binds the backing to RTC slow memory (see
+// espnow_session_rtc.hpp), host tests to a plain array. Reads and writes
+// are exact-size only — a short buffer is a caller bug and leaves the
+// backing untouched. invalidate() wipes the whole backing (marker and any
+// retained keys): stale key material must not linger in RTC after the
+// image is consumed or superseded.
+class BufferRtcSessionPort final : public RtcSessionPort {
+ public:
+  explicit BufferRtcSessionPort(MutableByteView backing) noexcept : backing_(backing) {}
+  Status read(MutableByteView out) noexcept override;
+  Status invalidate() noexcept override;
+  Status write(ByteView image) noexcept override;
+
+ private:
+  MutableByteView backing_{};
+};
+
 Status encode_rtc_session(const RtcSessionImage& image, MutableByteView out) noexcept;
 // On failure does not expose a partially decoded image or any key bytes.
 Status decode_rtc_session(ByteView bytes, const RtcWakeCheck& wake,

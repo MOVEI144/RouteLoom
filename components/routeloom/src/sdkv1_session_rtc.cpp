@@ -227,4 +227,32 @@ Status advance_rtc_tx(RtcSessionPort& port, RtcSessionImage& current,
   return Status::success();
 }
 
+Status BufferRtcSessionPort::read(const MutableByteView out) noexcept {
+  if (backing_.data == nullptr || backing_.size != kRtcSessionRecordSize ||
+      out.data == nullptr || out.size != kRtcSessionRecordSize) {
+    return Status::error(StatusCode::InvalidArgument, "RTC buffer size");
+  }
+  std::memcpy(out.data, backing_.data, kRtcSessionRecordSize);
+  return Status::success();
+}
+
+Status BufferRtcSessionPort::invalidate() noexcept {
+  if (backing_.data == nullptr || backing_.size != kRtcSessionRecordSize) {
+    return Status::error(StatusCode::InvalidArgument, "RTC buffer size");
+  }
+  secure_clear(backing_.data, backing_.size);
+  return Status::success();
+}
+
+Status BufferRtcSessionPort::write(const ByteView image) noexcept {
+  if (backing_.data == nullptr || backing_.size != kRtcSessionRecordSize ||
+      image.data == nullptr || image.size != kRtcSessionRecordSize) {
+    return Status::error(StatusCode::InvalidArgument, "RTC buffer size");
+  }
+  if (image.data != backing_.data) {
+    std::memcpy(backing_.data, image.data, kRtcSessionRecordSize);
+  }
+  return Status::success();
+}
+
 }  // namespace routeloom::sdkv1
