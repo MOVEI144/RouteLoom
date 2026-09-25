@@ -60,7 +60,7 @@ bool caps_edhoc_pair(const std::uint32_t ours, const std::uint32_t theirs) noexc
 
 // Resume additionally needs the resume bit on both sides.
 bool caps_resume_pair(const std::uint32_t ours, const std::uint32_t theirs) noexcept {
-  return caps_production(ours, theirs) && ((ours & kRld1CapMemberResumeV1) != 0) &&
+  return caps_edhoc_pair(ours, theirs) && ((ours & kRld1CapMemberResumeV1) != 0) &&
          ((theirs & kRld1CapMemberResumeV1) != 0);
 }
 

@@ -1696,46 +1696,50 @@ void test_member_responder_caps_refused() {
   const bool quiescent_before = pair.b->engine.quiescent();
   ResumeSlot2 slot{};
   CHECK(slot_for(*pair.a, kNodeB, slot));
-  const FrozenLink bad = freeze_link(*pair.a, *pair.b, kT0 + 500,
-                                     kCapsFull | kCapsDev, kCapsFull);
-  R1Env env;
-  rlres1::Engine raw;
-  rlres1::Local local{};
-  local.self = kNodeA;
-  local.network = kNet;
-  local.site_id = sdkv1_test::kSiteId;
-  local.epochs.site_epoch = kSiteEpoch;
-  local.epochs.rs_epoch = kRs;
-  local.epochs.gk_epoch = kGk;
-  CHECK_OK(raw.configure(local, rlres1::Limits{}));
-  rlres1::BeginRequest begin{};
-  begin.slot.purpose = keys::Purpose::Link;
-  begin.slot.peer = kNodeB;
-  begin.slot.network = kNet;
-  begin.slot.created_gk_epoch = slot.created_gk_epoch;
-  begin.slot.peer_generation = slot.peer_generation;
-  begin.slot.secret = slot.rms;
-  begin.carrier.kind = rlres1::Carrier::Kind::Link;
-  begin.carrier.mac_i = pair.a->mac_self;
-  begin.carrier.mac_r = pair.b->mac_self;
-  keys::link_carrier_digest(bad.carrier, begin.carrier.carrier_digest);
-  rlres1::Output r1{};
-  raw.begin(begin, kT0 + 500, env, r1);
-  CHECK(r1.action == rlres1::Action::Send);
-  HandshakeRx rx{};
-  rx.scope = SecurityScope::Link;
-  rx.phase = 5;
-  rx.step = 1;
-  rx.claimed_peer = kNodeA;
-  rx.src_mac = pair.a->mac_self;
-  rx.dst_mac = pair.b->mac_self;
-  rx.carrier = bad.carrier;
-  rx.cookie = ByteView{bad.cookie.data(), bad.cookie.size()};
-  CHECK_OK(pair.b->engine.on_message(
-      rx, ByteView{r1.message.data(), r1.message_size}, kT0 + 550));
-  HandshakeResult answer{};
-  CHECK(pair.b->engine.take_result(answer).code == StatusCode::NotFound);
-  CHECK(pair.b->engine.quiescent() == quiescent_before);
+  const auto attempt = [&](std::uint32_t caps_i, std::uint32_t caps_r,
+                           std::uint64_t offset) {
+    const FrozenLink bad = freeze_link(*pair.a, *pair.b, kT0 + offset, caps_i, caps_r);
+    R1Env env;
+    rlres1::Engine raw;
+    rlres1::Local local{};
+    local.self = kNodeA;
+    local.network = kNet;
+    local.site_id = sdkv1_test::kSiteId;
+    local.epochs.site_epoch = kSiteEpoch;
+    local.epochs.rs_epoch = kRs;
+    local.epochs.gk_epoch = kGk;
+    CHECK_OK(raw.configure(local, rlres1::Limits{}));
+    rlres1::BeginRequest begin{};
+    begin.slot.purpose = keys::Purpose::Link;
+    begin.slot.peer = kNodeB;
+    begin.slot.network = kNet;
+    begin.slot.created_gk_epoch = slot.created_gk_epoch;
+    begin.slot.peer_generation = slot.peer_generation;
+    begin.slot.secret = slot.rms;
+    begin.carrier.kind = rlres1::Carrier::Kind::Link;
+    begin.carrier.mac_i = pair.a->mac_self;
+    begin.carrier.mac_r = pair.b->mac_self;
+    keys::link_carrier_digest(bad.carrier, begin.carrier.carrier_digest);
+    rlres1::Output r1{};
+    raw.begin(begin, kT0 + offset, env, r1);
+    CHECK(r1.action == rlres1::Action::Send);
+    HandshakeRx rx{};
+    rx.scope = SecurityScope::Link;
+    rx.phase = 5;
+    rx.step = 1;
+    rx.claimed_peer = kNodeA;
+    rx.src_mac = pair.a->mac_self;
+    rx.dst_mac = pair.b->mac_self;
+    rx.carrier = bad.carrier;
+    rx.cookie = ByteView{bad.cookie.data(), bad.cookie.size()};
+    CHECK_OK(pair.b->engine.on_message(
+        rx, ByteView{r1.message.data(), r1.message_size}, kT0 + offset + 50));
+    HandshakeResult answer{};
+    CHECK(pair.b->engine.take_result(answer).code == StatusCode::NotFound);
+    CHECK(pair.b->engine.quiescent() == quiescent_before);
+  };
+  attempt(kCapsFull | kCapsDev, kCapsFull, 500);
+  attempt(kRld1CapMemberResumeV1, kRld1CapMemberResumeV1, 1000);
 }
 
 void test_member_dev_mutual_refusal() {
