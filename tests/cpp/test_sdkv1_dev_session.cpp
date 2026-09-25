@@ -394,5 +394,47 @@ int main() {
     wire::PlainFrame opened2{};
     CHECK(wire::open_group(sealed, b, opened2).code == StatusCode::ReplayRejected);
   }
+
+  // --- Dev discovery scope: Required, fixed generation 1, PSK-derived ----
+  {
+    DevScopeProvider scope;
+    CHECK(!scope.active());
+    std::uint32_t generation = 0;
+    CHECK(!scope.current_generation(kDevScopeRef, generation));
+    CHECK(!scope.accepted_generation(kDevScopeRef, 1, 1000));
+    ScopeTag tag{};
+    const std::array<std::uint8_t, 8> input{{9, 8, 7}};
+    CHECK(scope.scope_tag(kDevScopeRef, 1, ByteView{input.data(), input.size()}, tag).code ==
+          StatusCode::AuthRequired);
+    CHECK(scope.adopt(psk, 0).code == StatusCode::InvalidArgument);
+    CHECK(!scope.active());
+    CHECK(scope.adopt(psk, kNet).ok());
+    CHECK(scope.active());
+    CHECK(scope.current_generation(kDevScopeRef, generation) && generation == 1);
+    CHECK(!scope.current_generation(kMemberScopeRef, generation));
+    CHECK(scope.accepted_generation(kDevScopeRef, 1, 1000));
+    CHECK(!scope.accepted_generation(kDevScopeRef, 2, 1000));
+    CHECK(!scope.accepted_generation(kMemberScopeRef, 1, 1000));
+    CHECK(scope.scope_tag(kDevScopeRef, 1, ByteView{input.data(), input.size()}, tag).ok());
+    CHECK(scope_tag_verify(scope, kDevScopeRef, 1, ByteView{input.data(), input.size()}, tag));
+    ScopeTag tampered = tag;
+    tampered[0] ^= 1;
+    CHECK(!scope_tag_verify(scope, kDevScopeRef, 1, ByteView{input.data(), input.size()},
+                            tampered));
+    // Another PSK never verifies; another network adopts another key.
+    keys::Secret other = psk;
+    other[0] ^= 1;
+    DevScopeProvider foreign;
+    CHECK(foreign.adopt(other, kNet).ok());
+    CHECK(!scope_tag_verify(foreign, kDevScopeRef, 1, ByteView{input.data(), input.size()}, tag));
+    DevScopeProvider moved;
+    CHECK(moved.adopt(psk, kNet + 1).ok());
+    ScopeTag moved_tag{};
+    CHECK(moved.scope_tag(kDevScopeRef, 1, ByteView{input.data(), input.size()}, moved_tag).ok());
+    CHECK(moved_tag != tag);
+    scope.wipe();
+    CHECK(!scope.active());
+    CHECK(!scope.accepted_generation(kDevScopeRef, 1, 1000));
+  }
   return 0;
 }

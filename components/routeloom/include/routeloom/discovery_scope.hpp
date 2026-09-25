@@ -60,6 +60,11 @@ constexpr ScopeRef kInvalidScopeRef{0};
 // configured with it. Distinct from any legacy/dev scope handle the
 // firmware configures for other providers.
 constexpr ScopeRef kMemberScopeRef{1};
+// The dev-discovery scope handle (G-SEC P4 §10.1): the Owner's PSK-backed
+// dev scope provider serves this handle, and the dev discovery is
+// configured with it (Required, fixed generation 1). A local handle only —
+// never compared against a member handle, never on the wire.
+constexpr ScopeRef kDevScopeRef{2};
 
 // §2.2 mode registry. Off/OpenLegacy are explicit non-scoped configurations;
 // nothing may silently move a Required deployment into them on key loss.

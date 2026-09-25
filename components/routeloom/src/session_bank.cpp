@@ -995,7 +995,13 @@ bool SessionBank<kLinkCapacity, kEndCapacity>::peer_summary(const SecurityScope 
   if (!configured_) return false;
   const SessionBankEntry* entry = find_current(scope, peer);
   if (entry == nullptr || !entry_usable(*entry)) return false;
-  if (entry->peer_generation == 0 || entry->peer_role == 0) return false;
+  if (entry->peer_generation == 0 || entry->peer_role == 0) {
+    // Dev-resume slots prove "same PSK this boot" with generation 0 by
+    // design (P4 §10.1): report them, and let each consumer's hooks
+    // decide — the member hooks still require a member generation, the
+    // dev hooks require generation 0.
+    if ((entry->flags & kFlagDevResume) == 0 || entry->peer_role == 0) return false;
+  }
   generation = entry->peer_generation;
   role = entry->peer_role;
   return true;

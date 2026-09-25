@@ -131,6 +131,9 @@ class RtcWriteAheadProvider final : public SecurityProvider {
                           std::uint32_t& epoch) const noexcept override;
   Status tx_group_link_epochs(std::uint32_t& boot, std::uint32_t& g) noexcept override;
   bool accepts_group_epoch(std::uint32_t g) const noexcept override;
+  bool group_promotion_pending() const noexcept override {
+    return inner_.group_promotion_pending();
+  }
   Status next_counter(const SecurityContext& context, std::uint64_t& counter) noexcept override;
   Status seal(const SecurityContext& context, std::uint64_t counter, ByteView aad,
               ByteView plaintext, MutableByteView ciphertext,

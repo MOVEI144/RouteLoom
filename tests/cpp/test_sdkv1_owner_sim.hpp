@@ -426,6 +426,27 @@ class SimNode {
     return coordinator_->session_provider().tx_epoch(SecurityScope::Link, peer, epoch).ok();
   }
 
+  // Owner-mirrored dev adoption (dev profile): static PSK config through
+  // the coordinator, then the same action drain as the member route.
+  bool boot_dev(const MonotonicMs now, const keys::Secret& psk, const NetworkId network,
+                const std::uint32_t boot) {
+    CoordinatorDevConfig dev{};
+    dev.psk = psk;
+    dev.network = network;
+    dev.node = node_;
+    dev.boot = boot;
+    dev.role = kMemberRoleEndpoint | kMemberRoleRelay;
+    dev.channel = kSimChannel;
+    if (!coordinator_->adopt_dev(dev, now).ok()) return false;
+    operating_channel_ = kSimChannel;
+    return true;
+  }
+
+  // Durable-store traffic counters: the dev route must never write the
+  // resume slots (no c/f/r growth, V1-N01).
+  std::size_t resume_writes() const noexcept { return resume_storage_.write_calls; }
+  std::size_t resume_reads() const noexcept { return resume_storage_.read_calls; }
+
   const CoordinatorMemberConfig& adopted() const noexcept { return adopted_; }
   bool adopted_valid() const noexcept { return adopted_valid_; }
   std::uint8_t operating_channel() const noexcept { return operating_channel_; }

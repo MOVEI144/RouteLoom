@@ -5,10 +5,12 @@
 //
 // The Coordinator owns the mode workspace — the P3-4 Joiner while
 // unprovisioned (radio or USB-direct), the member HandshakeEngine with
-// its session bank while adopted — plus the RLD1 demux owner table, the
-// join proxy and relay gateway, the APPLIED boot lease's rlboot witness,
-// the local-removal evidence, the single GroupKeyState with its group
-// provider and member scope view, and the authority channel client.
+// its session bank while adopted, the same engine dev-armed (P4 §10.1)
+// under a static dev adoption — plus the RLD1 demux owner table, the
+// join proxy and relay gateway (member only), the APPLIED boot lease's
+// rlboot witness, the local-removal evidence, the single GroupKeyState
+// with its group provider and member scope view, the dev group/scope
+// views, and the authority channel client (member only).
 // It implements the sink/port interfaces
 // of everything it owns (BootstrapSink, JoinDirectPort, JoinCommitPolicy,
 // JoinRelayHostSink, the engine's membership/peer/boot views) so the
@@ -38,6 +40,7 @@
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/rlres1.hpp"
 #include "routeloom/sdkv1_authority.hpp"
+#include "routeloom/sdkv1_dev_session.hpp"
 #include "routeloom/sdkv1_group_keys.hpp"
 #include "routeloom/sdkv1_group_security.hpp"
 #include "routeloom/sdkv1_handshake.hpp"
@@ -200,8 +203,25 @@ enum class CoordinatorMode : std::uint8_t {
   Fresh,      // constructed / stopped: no workspace running
   ZeroTouch,  // Joiner running (radio scan or USB direct)
   Member,     // adopted: engine + bank + proxy (+ gateway on role) live
+  Dev,        // static dev adoption: dev-armed engine + bank live, no
+              // Joiner/proxy/gateway/authority (P4 §10.1)
   Removed,    // verified removal landed: traffic stopped, evidence durable
   Recovery,   // stores need recovery before any mode can run
+};
+
+// Static dev adoption (P4 §10.1): the shared development PSK, network,
+// node, durable boot token, local allow-role and operating channel. The
+// boot must already be reserved (boot_hi) and the radio already on the
+// channel — the dev route has no cutover. The PSK is copied into the
+// engine policy and the group provider at adoption; the caller wipes its
+// own copy (it cannot be wiped through this struct afterwards).
+struct CoordinatorDevConfig {
+  keys::Secret psk{};
+  NetworkId network{0};
+  NodeId node{kInvalidNodeId};
+  std::uint32_t boot{0};  // reserved durable boot (message/boot session)
+  std::uint32_t role{0};  // local allow-role (nonzero member-role bits)
+  std::uint8_t channel{0};
 };
 
 struct CoordinatorSnapshot {
@@ -230,6 +250,7 @@ struct CoordinatorSnapshot {
 struct CoordinatorCounters {
   std::uint32_t boots{0};
   std::uint32_t member_adoptions{0};
+  std::uint32_t dev_adoptions{0};
   std::uint32_t removals{0};
   std::uint32_t demux_drops{0};
   std::uint32_t staged_drops{0};
@@ -295,6 +316,13 @@ class SecurityCoordinator final : public BootstrapSink,
   // feed the direct join or the relay gateway; ChannelReady completes a
   // TuneChannel action. Refuses Busy while a port callback runs inside.
   Status step(const CoordinatorEvent& event) noexcept;
+  // Static dev adoption (P4 §10.1) INSTEAD of Boot: arms the engine with
+  // the dev-resume policy, configures the bank at the fixed dev epoch,
+  // adopts the dev group sender/provider, scope and hooks, and emits
+  // ApplyMemberConfig for the direct node adopt (no join, no RLS1). From
+  // Fresh only; dev or member/boot, never both. Refuses Busy while a
+  // port callback runs inside. Like Boot, advances the clock to `now`.
+  Status adopt_dev(const CoordinatorDevConfig& config, MonotonicMs now) noexcept;
   Status take_action(CoordinatorAction& out) noexcept;
   CoordinatorSnapshot snapshot() const noexcept;
   const CoordinatorCounters& counters() const noexcept { return counters_; }
@@ -308,17 +336,20 @@ class SecurityCoordinator final : public BootstrapSink,
   // action only says when. Reads the single GroupKeyState — no second
   // GK copy, no dev-PSK fallback.
   DiscoveryScopeProvider& gk_scope() noexcept { return member_scope_; }
-  // Full radio discovery identity for the adopted member. The capability
-  // word and observed local MAC must match the handshake carrier exactly.
+  // Full radio discovery identity for the adopted member (or the dev
+  // adoption: then the DevRam capability bit with the Required dev
+  // scope). The capability word and observed local MAC must match the
+  // handshake carrier exactly.
   Status member_discovery_config(DiscoveryConfig& out) noexcept;
   // The session provider view over the member bank, handed to the
   // firmware's MeshNode at construction. Unconfigured (not ready) until
-  // a member config is adopted; the node must not start on it before
-  // ApplyMemberConfig. The view is the sleep write-ahead guard over the
-  // group/pairwise provider: unarmed it purely delegates, so every
-  // existing caller behaves exactly as before until a sleep image
-  // restores into the bank. Pairwise scopes delegate to the member
-  // bank; group scopes seal/open under the adopted GK.
+  // a member config (or a dev adoption) lands; the node must not start
+  // on it before ApplyMemberConfig. The view is the sleep write-ahead
+  // guard over the group/pairwise mux: unarmed it purely delegates, so
+  // every existing caller behaves exactly as before until a sleep image
+  // restores into the bank. Pairwise scopes delegate to the adopted
+  // bank; group scopes seal/open under the adopted GK (dev: under the
+  // boot-scoped dev group key).
   SecurityProvider& session_provider() noexcept { return sleep_guard_; }
   // Sleep save (P4 §9.3, V1-F07), Member mode after PrepareSleep parked
   // the coordinator: exports the (Link, parent) session plus the first
@@ -351,16 +382,20 @@ class SecurityCoordinator final : public BootstrapSink,
   // when none stands): the save side resolves the retained link through
   // this. Side-effect-free observation, like snapshot().
   bool first_live_peer(SecurityScope scope, NodeId& peer) const noexcept;
-  // The membership hooks over the adopted stores, for the member
+  // The membership hooks over the adopted stores (dev: over the static
+  // dev config plus the shared revocation gates), for the adopted
   // discovery's MembershipHooks port (the firmware initializes the
   // discovery's controller with these at StartMemberDiscovery).
-  MembershipHooks& membership_hooks() noexcept { return hooks_; }
-  // The member OFFER cookie box, live in Member mode only (null
-  // otherwise): the member discovery authenticator seals OFFER cookies
+  MembershipHooks& membership_hooks() noexcept {
+    return mode_ == CoordinatorMode::Dev ? static_cast<MembershipHooks&>(dev_hooks_)
+                                         : static_cast<MembershipHooks&>(hooks_);
+  }
+  // The member OFFER cookie box, live in Member and Dev mode (null
+  // otherwise): the adopted discovery authenticator seals OFFER cookies
   // through it. Never stored beyond the call — the workspace may be
   // replaced by removal or stop.
   const MemberCookie* member_cookie() const noexcept {
-    return mode_ == CoordinatorMode::Member ? &member().member_cookie : nullptr;
+    return has_member_engine() ? &member().member_cookie : nullptr;
   }
   // Attaches the member discovery (once): the firmware constructs it
   // with the adopted network + Required GK scope at StartMemberDiscovery
@@ -517,6 +552,55 @@ class SecurityCoordinator final : public BootstrapSink,
     AuthorityPort* live_{nullptr};
   };
 
+  // Stable session view over the two adopted profiles (P4 §10.1):
+  // pairwise scopes always delegate to the member bank, group scopes to
+  // the GK-backed provider in Member mode and to the boot-scoped dev
+  // group provider once a dev adoption binds it. The firmware holds this
+  // (through the sleep guard) from construction; the Owner flips the
+  // group side exactly once per adoption and back on stop.
+  class SessionProviderMux final : public SecurityProvider {
+   public:
+    SessionProviderMux(SecurityProvider& pairwise, SecurityProvider& member_group) noexcept
+        : pairwise_(pairwise), member_group_(member_group) {}
+    SessionProviderMux(const SessionProviderMux&) = delete;
+    SessionProviderMux& operator=(const SessionProviderMux&) = delete;
+    void set_dev_group(SecurityProvider* dev_group) noexcept { dev_group_ = dev_group; }
+    void set_dev(bool dev) noexcept { dev_ = dev && dev_group_ != nullptr; }
+    bool dev() const noexcept { return dev_; }
+
+    bool ready() const noexcept override;
+    SecurityProfile security_profile() const noexcept override;
+    Status tx_epoch(SecurityScope scope, NodeId peer, std::uint32_t& epoch) noexcept override;
+    Status current_rx_epoch(SecurityScope scope, NodeId peer,
+                            std::uint32_t& epoch) const noexcept override;
+    ContextState context_state(SecurityScope scope, NodeId peer) const noexcept override;
+    Status tx_group_link_epochs(std::uint32_t& boot, std::uint32_t& g) noexcept override;
+    bool accepts_group_epoch(std::uint32_t g) const noexcept override;
+    bool group_promotion_pending() const noexcept override;
+    Status next_counter(const SecurityContext& context, std::uint64_t& counter) noexcept override;
+    Status seal(const SecurityContext& context, std::uint64_t counter, ByteView aad,
+                ByteView plaintext, MutableByteView ciphertext,
+                std::array<std::uint8_t, kAeadTagSize>& tag) noexcept override;
+    Status open(const SecurityContext& context, std::uint64_t counter, ByteView aad,
+                ByteView ciphertext, const std::array<std::uint8_t, kAeadTagSize>& tag,
+                MutableByteView plaintext) noexcept override;
+
+   private:
+    static bool is_group(SecurityScope scope) noexcept {
+      return scope == SecurityScope::Group || scope == SecurityScope::GroupLink;
+    }
+    SecurityProvider& group() noexcept {
+      return dev_ && dev_group_ != nullptr ? *dev_group_ : member_group_;
+    }
+    const SecurityProvider& group() const noexcept {
+      return dev_ && dev_group_ != nullptr ? *dev_group_ : member_group_;
+    }
+    SecurityProvider& pairwise_;
+    SecurityProvider& member_group_;
+    SecurityProvider* dev_group_{nullptr};
+    bool dev_{false};
+  };
+
   // --- step() legs ---
   Status on_boot(const CoordinatorEvent& event) noexcept;
   Status on_poll(MonotonicMs now) noexcept;
@@ -545,7 +629,18 @@ class SecurityCoordinator final : public BootstrapSink,
   Status adopt_boot_rls1(MonotonicMs now) noexcept;  // same tail, stored site
   Status install_member_config(const SiteRecord& site, const IdentityRecord& identity,
                                std::uint32_t boot_session, MonotonicMs now) noexcept;
+  // --- static dev adoption (P4 §10.1) ---
+  Status install_dev_config(const CoordinatorDevConfig& config, MonotonicMs now) noexcept;
+  // Scrubs the half-built dev adoption into Recovery (ReportRecovery).
+  void abandon_dev_adoption(JoinRecoveryReason reason) noexcept;
+  DevGroupProvider& dev_group() noexcept;
   void emit_member_action() noexcept;
+  // The workspace holds the member engine side (Member or Dev): the
+  // engine, bank, cookie, demands and demux legs all run there; only the
+  // join proxy/gateway, authority channel and GK refresh are Member-only.
+  bool has_member_engine() const noexcept {
+    return mode_ == CoordinatorMode::Member || mode_ == CoordinatorMode::Dev;
+  }
   // --- RLD1 demux ---
   DemuxEntry* find_demux(const MacAddress& mac, std::uint32_t object_id) noexcept;
   DemuxEntry* claim_demux(const MacAddress& mac, std::uint32_t object_id, DemuxOwner owner,
@@ -624,9 +719,9 @@ class SecurityCoordinator final : public BootstrapSink,
                  const JoinRelayGatewayConfig& gateway_config) noexcept;
   };
 
-  // Tagged by mode_: joiner iff ZeroTouch, member iff Member, neither
-  // anywhere else. Transitions destroy one side (wiping it) before
-  // constructing the other; the destructor destroys the live side.
+  // Tagged by mode_: joiner iff ZeroTouch, member iff Member or Dev,
+  // neither anywhere else. Transitions destroy one side (wiping it)
+  // before constructing the other; the destructor destroys the live side.
   union Workspace {
     Workspace() noexcept {}
     ~Workspace() noexcept {}
@@ -649,19 +744,30 @@ class SecurityCoordinator final : public BootstrapSink,
   NullJoinObserver joiner_observer_{};
   // The bank stays outside the union: the firmware binds the session
   // provider over it at construction, before any workspace exists. The
-  // GK state, the group/pairwise provider, the member scope view and the
-  // authority channel stay outside the union too: a stale-GK refresh
-  // destroys the member engine around them without resetting group
-  // counters, replay windows or the adopted scope.
+  // GK state, the group/pairwise mux, the scope views and the authority
+  // channel stay outside the union too: a stale-GK refresh destroys the
+  // member engine around them without resetting group counters, replay
+  // windows or the adopted scope.
   GatewaySessionBank bank_;
   BankSessionSink<32, 128> bank_sink_;
   RamSessionProvider<32, 128> pairwise_provider_;
   GroupKeyState group_keys_;
   GroupSecurityProvider group_provider_;
-  // Retained TX write-ahead over the group provider (unarmed: pure
-  // delegate; the bank installer underneath retires diverged slots).
-  // Armed only by restore_sleep_image; disarmed by stop, removal, and
-  // wake.
+  // Dev route (P4 §10.1, Dev mode only): the boot-scoped group sender,
+  // the group provider over it (PSK copied in, placement-built at
+  // adoption), the Required dev scope view and the dev hooks. Unused in
+  // Member mode; wiped on stop.
+  DevGroupSender dev_sender_;
+  alignas(DevGroupProvider) std::array<std::uint8_t, sizeof(DevGroupProvider)> dev_group_box_{};
+  bool dev_group_live_{false};
+  DevScopeProvider dev_scope_;
+  DevMembershipHooks dev_hooks_;
+  // Stable session view: pairwise to the bank, group to the GK provider
+  // (Member) or the dev group provider (Dev, once bound above).
+  SessionProviderMux provider_mux_;
+  // Retained TX write-ahead over the mux (unarmed: pure delegate; the
+  // bank installer underneath retires diverged slots). Armed only by
+  // restore_sleep_image (Member); disarmed by stop, removal, and wake.
   RtcWriteAheadProvider sleep_guard_;
   GkMemberScopeProvider member_scope_;
   AuthorityPortProxy authority_port_;

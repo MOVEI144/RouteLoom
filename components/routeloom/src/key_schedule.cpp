@@ -174,6 +174,22 @@ Status dev_group_key(const Secret& psk, const NetworkId network, const NodeId or
   return status;
 }
 
+Status dev_scope_key(const Secret& psk, const NetworkId network, Secret& out) noexcept {
+  secure_clear(out);
+  if (network == 0) {
+    return Status::error(StatusCode::InvalidArgument, "invalid dev scope network");
+  }
+  Info salt(kLabelDevRam);
+  salt.u64(network);
+  ScopeDigest prk{};
+  hkdf_sha256_extract(salt.view(), ByteView{psk.data(), psk.size()}, prk);
+  Info info(kLabelDevScope);
+  const Status status = expand_secret(ByteView{prk.data(), prk.size()}, info, out);
+  if (!status) secure_clear(out);
+  secure_clear(prk);
+  return status;
+}
+
 // --- RLRES1 ----------------------------------------------------------------
 
 void resume_id(const Secret& rms, const Purpose purpose, ResumeId& out) noexcept {

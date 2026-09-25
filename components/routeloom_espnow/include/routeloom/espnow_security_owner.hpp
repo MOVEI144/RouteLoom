@@ -37,7 +37,6 @@
 #include "routeloom/psa_aead_gcm.hpp"
 #include "routeloom/psa_session_aead.hpp"
 #include "routeloom/sdkv1_authority_transport.hpp"
-#include "routeloom/sdkv1_dev_session.hpp"
 #include "routeloom/sdkv1_join_relay.hpp"
 #include "routeloom/sdkv1_security_coordinator.hpp"
 #include "routeloom/usb_bridge.hpp"
@@ -76,9 +75,10 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // (begin runs pre-radio). The stores, entropy and config outlive the
   // owner.
   Status begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy, const Config& config) noexcept;
-  // The session provider view for the runtime constructor: the bank
-  // view until the member config lands (the node must not start
-  // before), the dev group provider once adopt_dev runs.
+  // The session provider view for the runtime constructor: unready
+  // until the member config (or a dev adoption) lands — the node must
+  // not start before. The coordinator mux serves both profiles from
+  // here on.
   SecurityProvider& session_provider() noexcept;
   sdkv1::SecurityCoordinator& coordinator() noexcept;
   // Late bindings (each once, before boot): the radio (RLD1 TX, channel
@@ -97,21 +97,22 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // Dev static config (P4 §10.1): adoption without joining. The durable
   // boot must already be reserved (reserve_dev_group_boot_session) and
   // the radio already on `channel` — the dev route has no cutover.
-  struct DevGroupConfig {
+  struct DevConfig {
     keys::Secret psk{};
     NetworkId network{0};
     NodeId node{kInvalidNodeId};
     std::uint8_t channel{0};
     std::uint32_t boot{0};  // reserved durable boot (message/boot session)
-    std::uint32_t role{0};  // nonzero relays (member-role bits, local config)
+    std::uint32_t role{0};  // local allow-role (nonzero member-role bits)
   };
-  // Adopts the dev config INSTEAD of boot(): configures the boot-scoped
-  // group sender/provider, adopts the runtime node directly and starts
-  // it. The coordinator stays Fresh (no Joiner, no engine, no
-  // discovery): session_provider() serves the dev group provider from
-  // here on. Dev or member, never both.
-  Status adopt_dev(const DevGroupConfig& config, MonotonicMs now_ms) noexcept;
-  bool dev_adopted() const noexcept { return dev_live_; }
+  // Adopts the dev config INSTEAD of boot(): the coordinator arms the
+  // dev-resume engine, adopts the dev group/scope/hooks, and emits
+  // ApplyMemberConfig for the direct node adopt (same action drain as
+  // the member route: node adopt, then StartMemberDiscovery). The node
+  // start stays deferred to the apply, like member. Dev or member/boot,
+  // never both.
+  Status adopt_dev(const DevConfig& config, MonotonicMs now_ms) noexcept;
+  bool dev_adopted() const noexcept;
   // One pump turn after runtime.poll_once: coordinator Poll, ready radio
   // completions, and the action drain (tune/member/discovery/report).
   void poll(MonotonicMs now_ms) noexcept;
@@ -256,14 +257,6 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   alignas(NeighborDiscovery) std::array<std::uint8_t, sizeof(NeighborDiscovery)> discovery_box_{};
   bool discovery_live_{false};
   EspNowDiscoveryObserver observer_store_{nullptr, nullptr};
-  // Dev group route (adopt_dev): sender configured at adopt, provider
-  // constructed over it (PSK copied in). Unused in member mode.
-  sdkv1::DevGroupSender dev_sender_{};
-  sdkv1::AeadGcm dev_aead_{};
-  alignas(sdkv1::DevGroupProvider)
-      std::array<std::uint8_t, sizeof(sdkv1::DevGroupProvider)> dev_box_{};
-  bool dev_live_{false};
-  sdkv1::DevGroupProvider& dev_provider() noexcept;
   // Authority transport (built at boot, once the runtime — and on
   // gateways the bridge — is attached): the mesh port over the node, one
   // of the endpoint (devices) / relay + mesh sink + direct port

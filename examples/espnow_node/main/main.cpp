@@ -361,13 +361,14 @@ extern "C" void app_main(void) {
   if (!status) fail(status.detail);
 #if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
   // Dev route (P4 §10.1): adoption without joining — the reserved dev
-  // boot plus the static PSK/network/node/channel adopt the node
-  // directly; group send/receive serves from here on.
+  // boot plus the static PSK/network/node/channel arm the dev-resume
+  // engine through the coordinator; pairwise sessions and group
+  // send/receive serve from here on.
   routeloom::keys::Secret dev_psk{};
   if (!parse_hex(CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX, dev_psk)) {
     fail("invalid development key");
   }
-  EspNowSecurityOwner::DevGroupConfig dev_config{};
+  EspNowSecurityOwner::DevConfig dev_config{};
   dev_config.psk = dev_psk;
   routeloom::secure_clear(dev_psk);
   dev_config.network = static_cast<routeloom::NetworkId>(CONFIG_ROUTELOOM_NETWORK_ID);

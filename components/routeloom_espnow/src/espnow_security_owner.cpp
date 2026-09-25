@@ -15,10 +15,6 @@ constexpr MonotonicMs kRetiredPullWindowMs = 10000;
 }  // namespace
 
 EspNowSecurityOwner::~EspNowSecurityOwner() noexcept {
-  if (dev_live_) {
-    dev_provider().sdkv1::DevGroupProvider::~DevGroupProvider();
-    dev_live_ = false;
-  }
   if (authority_live_) {
     if (config_.gateway) {
       mesh_sink()->~AuthorityMeshSink();
@@ -57,12 +53,14 @@ sdkv1::SecurityCoordinator& EspNowSecurityOwner::coordinator() noexcept {
 }
 
 SecurityProvider& EspNowSecurityOwner::session_provider() noexcept {
-  if (dev_live_) return dev_provider();
   return coordinator().session_provider();
 }
 
-sdkv1::DevGroupProvider& EspNowSecurityOwner::dev_provider() noexcept {
-  return *reinterpret_cast<sdkv1::DevGroupProvider*>(dev_box_.data());
+bool EspNowSecurityOwner::dev_adopted() const noexcept {
+  if (!coordinator_live_) return false;
+  const auto& coordinator =
+      *reinterpret_cast<const sdkv1::SecurityCoordinator*>(coordinator_box_.data());
+  return coordinator.snapshot().mode == sdkv1::CoordinatorMode::Dev;
 }
 
 NeighborDiscovery* EspNowSecurityOwner::discovery() noexcept {
@@ -229,61 +227,37 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
   return Status::success();
 }
 
-Status EspNowSecurityOwner::adopt_dev(const DevGroupConfig& config,
+Status EspNowSecurityOwner::adopt_dev(const DevConfig& config,
                                         const MonotonicMs now_ms) noexcept {
-  (void)now_ms;
   if (!begun_) return Status::error(StatusCode::InvalidState, "owner not begun");
   if (runtime_ == nullptr) {
     return Status::error(StatusCode::InvalidState, "runtime not attached");
   }
-  if (booted_ || dev_live_) {
+  if (booted_) {
     return Status::error(StatusCode::InvalidState, "owner already running");
   }
-  if (config.network == 0 || config.node == kInvalidNodeId ||
-      config.node == kBroadcastNodeId || config.node == 0 || config.boot == 0 ||
-      config.channel == 0) {
-    return Status::error(StatusCode::InvalidArgument, "dev config");
-  }
-  bool psk_zero = true;
-  for (const std::uint8_t byte : config.psk) {
-    if (byte != 0) psk_zero = false;
-  }
-  if (psk_zero) return Status::error(StatusCode::InvalidArgument, "dev psk");
   // The dev route has no cutover: the static channel must already match
-  // the radio (firmware boots the runtime on it).
-  if (runtime_->committed_channel() != config.channel) {
+  // the radio (firmware boots the runtime on it). The coordinator
+  // re-validates the rest (network/node/boot/role/PSK shapes).
+  if (config.channel == 0 || runtime_->committed_channel() != config.channel) {
     return Status::error(StatusCode::InvalidArgument, "dev channel");
   }
-  const Status sender_status =
-      dev_sender_.configure(config.psk, config.network, config.node, config.boot);
-  if (!sender_status) return sender_status;
-  dev_aead_ = psa_session_aead_gcm();
-  new (dev_box_.data()) sdkv1::DevGroupProvider(dev_sender_, config.psk, config.network,
-                                                dev_aead_, config.node);
-  dev_live_ = true;
-  NodeConfig node = runtime_->node().config();
-  node.network = config.network;
-  node.node = config.node;
-  node.message_session = config.boot;
-  node.boot_session = config.boot;
-  node.link_epoch = 1;
-  node.end_epoch = 1;
-  node.boot_incarnation = 0;  // unknown on the dev route (telemetry only)
-  node.route_generation = config.boot;  // reserved boots rise every boot
-  for (NodeId& gateway : node.route_gateways) gateway = kInvalidNodeId;
-  const Status adopted = runtime_->adopt_member_node(node);
-  if (!adopted) {
-    dev_provider().sdkv1::DevGroupProvider::~DevGroupProvider();
-    dev_live_ = false;
-    dev_sender_.clear();
-    return adopted;
+  sdkv1::CoordinatorDevConfig adopted{};
+  adopted.psk = config.psk;
+  adopted.network = config.network;
+  adopted.node = config.node;
+  adopted.boot = config.boot;
+  adopted.role = config.role;
+  adopted.channel = config.channel;
+  const Status status = coordinator().adopt_dev(adopted, now_ms);
+  secure_clear(adopted.psk);
+  if (!status) return status;
+  // A parked Recovery (ReportRecovery pending) is a failed adopt, not a
+  // running dev node: fail loudly like a refused boot.
+  if (coordinator().snapshot().mode == sdkv1::CoordinatorMode::Recovery) {
+    return Status::error(StatusCode::RecoveryRequired, "dev adopt failed");
   }
-  runtime_->node().set_relay_enabled(config.role != 0);
-  const Status started = runtime_->start();
-  if (!started) {
-    ESP_LOGE(config_.log_tag, "dev node start failed: %s", started.detail);
-    return started;
-  }
+  booted_ = true;  // the pump now drives the dev-armed coordinator
   ESP_LOGI(config_.log_tag, "dev adopted (node 0x%llx, boot %lu)",
            static_cast<unsigned long long>(config.node),
            static_cast<unsigned long>(config.boot));
@@ -831,7 +805,9 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
 
 void EspNowSecurityOwner::on_start_discovery(const MonotonicMs now_ms) noexcept {
   if (discovery_live_) return;
-  if (!stores_->site().has_site()) {
+  // The dev route adopts static config, never an RLS1: the discovery
+  // config gate below (engine mode + valid adoption) is the check there.
+  if (!dev_adopted() && !stores_->site().has_site()) {
     ESP_LOGE(config_.log_tag, "member discovery without adopted site");
     return;
   }

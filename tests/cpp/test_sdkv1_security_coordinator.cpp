@@ -1209,6 +1209,231 @@ void test_link_failure_refresh_waits_for_poll_boundary() {
   CHECK(coordinator.counters().refreshes == 1);
 }
 
+CoordinatorDevConfig dev_config() {
+  CoordinatorDevConfig config{};
+  config.psk.fill(0xA5);
+  config.network = kNetwork;
+  config.node = kNode;
+  config.boot = 77;
+  config.role = static_cast<std::uint32_t>(kMemberRoleEndpoint | kMemberRoleRelay);
+  config.channel = 6;
+  return config;
+}
+
+void test_dev_adopt_validation() {
+  current = "dev_adopt_validation";
+  // Every invalid shape refuses and leaves the coordinator Fresh.
+  const auto expect_invalid = [](CoordinatorDevConfig config) {
+    Fixture f{};
+    CHECK(f.init_stores());
+    SecurityCoordinator coordinator(f.deps());
+    CHECK(coordinator.adopt_dev(config, kT0).code == StatusCode::InvalidArgument);
+    CHECK(coordinator.snapshot().mode == CoordinatorMode::Fresh);
+    CoordinatorAction action{};
+    CHECK(coordinator.take_action(action).code == StatusCode::NotFound);
+  };
+  CoordinatorDevConfig bad = dev_config();
+  bad.network = 0;
+  expect_invalid(bad);
+  bad = dev_config();
+  bad.node = kInvalidNodeId;
+  expect_invalid(bad);
+  bad = dev_config();
+  bad.node = kBroadcastNodeId;
+  expect_invalid(bad);
+  bad = dev_config();
+  bad.node = 0;
+  expect_invalid(bad);
+  bad = dev_config();
+  bad.boot = 0;
+  expect_invalid(bad);
+  bad = dev_config();
+  bad.channel = 0;
+  expect_invalid(bad);
+  bad = dev_config();
+  bad.role = 0;
+  expect_invalid(bad);
+  bad = dev_config();
+  bad.psk.fill(0);
+  expect_invalid(bad);
+
+  // Success: Dev mode, direct adopt action with the dev content, and the
+  // dev discovery identity (bit26 + Required dev scope).
+  Fixture f{};
+  CHECK(f.init_stores());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.adopt_dev(dev_config(), kT0).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Dev);
+  CHECK(coordinator.counters().dev_adoptions == 1);
+  CoordinatorAction action{};
+  CHECK(coordinator.take_action(action).ok());
+  CHECK(action.kind == CoordinatorActionKind::ApplyMemberConfig);
+  CHECK(action.member.network == kNetwork && action.member.node == kNode);
+  CHECK(action.member.message_session == 77 && action.member.boot_session == 77);
+  CHECK(action.member.link_epoch == 1 && action.member.end_epoch == 1);
+  CHECK(action.member.role == (kMemberRoleEndpoint | kMemberRoleRelay));
+  for (const NodeId gateway : action.member.route_gateways) CHECK(gateway == kInvalidNodeId);
+  DiscoveryConfig discovery{};
+  CHECK(coordinator.member_discovery_config(discovery).ok());
+  CHECK(discovery.capability_bits == kRld1CapDevRamSessionV1);
+  CHECK(discovery.scope_mode == ScopeMode::Required);
+  CHECK(discovery.scope == kDevScopeRef);
+  CHECK(discovery.scope_provider != nullptr);
+  CHECK(coordinator.member_cookie() != nullptr);
+  MembershipState state = MembershipState::Unprovisioned;
+  CHECK(coordinator.membership_hooks().local_state(kNetwork, state).ok());
+  CHECK(state == MembershipState::Member);
+  CHECK(coordinator.membership_hooks().local_member(kNetwork));
+  CHECK(!coordinator.membership_hooks().approve_join(kNode + 1, kNetwork));
+  // Adopt twice, or boot after adopt, refuses: dev or member, never both.
+  CHECK(coordinator.adopt_dev(dev_config(), kT0 + 1).code == StatusCode::InvalidState);
+  CHECK(coordinator.step(boot_event(kT0 + 1, kBoot)).code == StatusCode::InvalidState);
+
+  // Boot first, then adopt, refuses the same way.
+  Fixture g{};
+  CHECK(g.init_stores());
+  SecurityCoordinator booted(g.deps());
+  CHECK(booted.step(boot_event(kT0, kBoot)).ok());
+  CHECK(booted.adopt_dev(dev_config(), kT0 + 1).code == StatusCode::InvalidState);
+}
+
+void test_dev_scope_agrees_across_nodes() {
+  current = "dev_scope_agrees_across_nodes";
+  // Two adoptions over the same PSK/network tag identically (the OFFER
+  // check both sides run); a different PSK never verifies.
+  Fixture f{};
+  Fixture g{};
+  Fixture h{};
+  CHECK(f.init_stores() && g.init_stores() && h.init_stores());
+  SecurityCoordinator a(f.deps());
+  SecurityCoordinator b(g.deps());
+  SecurityCoordinator c(h.deps());
+  CHECK(a.adopt_dev(dev_config(), kT0).ok());
+  CHECK(b.adopt_dev(dev_config(), kT0).ok());
+  CoordinatorDevConfig other = dev_config();
+  other.psk.fill(0x5A);
+  CHECK(c.adopt_dev(other, kT0).ok());
+  DiscoveryConfig da{};
+  DiscoveryConfig db{};
+  DiscoveryConfig dc{};
+  CHECK(a.member_discovery_config(da).ok());
+  CHECK(b.member_discovery_config(db).ok());
+  CHECK(c.member_discovery_config(dc).ok());
+  const std::array<std::uint8_t, 24> input{{1, 2, 3}};
+  ScopeTag tag{};
+  CHECK(da.scope_provider->scope_tag(da.scope, 1, ByteView{input.data(), input.size()}, tag)
+            .ok());
+  CHECK(scope_tag_verify(*db.scope_provider, db.scope, 1, ByteView{input.data(), input.size()},
+                         tag));
+  CHECK(!scope_tag_verify(*dc.scope_provider, dc.scope, 1,
+                          ByteView{input.data(), input.size()}, tag));
+  CHECK(!scope_tag_verify(*db.scope_provider, kMemberScopeRef, 1,
+                          ByteView{input.data(), input.size()}, tag));
+}
+
+void test_dev_mux_routing() {
+  current = "dev_mux_routing";
+  Fixture f{};
+  CHECK(f.init_stores());
+  SecurityCoordinator coordinator(f.deps());
+  // Pre-adoption the group side is the unready GK provider: group TX
+  // refuses exactly like the member route.
+  std::uint32_t epoch = 0;
+  CHECK(coordinator.session_provider()
+            .tx_epoch(SecurityScope::Group, kBroadcastNodeId, epoch)
+            .code == StatusCode::AuthRequired);
+  CHECK(coordinator.adopt_dev(dev_config(), kT0).ok());
+  // Adopted (no apply needed for the provider itself): group TX carries
+  // the fixed dev epoch, accepts exactly it, and GroupLink refuses.
+  CHECK(coordinator.session_provider().ready());
+  CHECK(coordinator.session_provider()
+            .tx_epoch(SecurityScope::Group, kBroadcastNodeId, epoch)
+            .ok());
+  CHECK(epoch == kDevGroupEpoch);
+  CHECK(coordinator.session_provider().accepts_group_epoch(kDevGroupEpoch));
+  CHECK(!coordinator.session_provider().accepts_group_epoch(kDevGroupEpoch + 1));
+  std::uint32_t boot = 0;
+  std::uint32_t g = 0;
+  CHECK(coordinator.session_provider().tx_group_link_epochs(boot, g).code ==
+        StatusCode::Unsupported);
+  CHECK(!coordinator.session_provider().group_promotion_pending());
+  CHECK(coordinator.session_provider().security_profile() == SecurityProfile::Development);
+  // Pairwise still delegates to the adopted bank: unknown peers refuse,
+  // and the bank reports them as link demands.
+  CHECK(coordinator.session_provider().tx_epoch(SecurityScope::Link, kNode + 1, epoch).code ==
+        StatusCode::AuthRequired);
+  CHECK(coordinator.session_provider().context_state(SecurityScope::Link, kNode + 1) ==
+        ContextState::Establishing);
+  CHECK(coordinator.session_provider().context_state(SecurityScope::Link, kNode + 2) ==
+        ContextState::None);
+}
+
+void test_dev_stop_readopt() {
+  current = "dev_stop_readopt";
+  Fixture f{};
+  CHECK(f.init_stores());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.adopt_dev(dev_config(), kT0).ok());
+  CHECK(coordinator.member_cookie() != nullptr);
+  CoordinatorEvent stop{};
+  stop.kind = CoordinatorEventKind::Stop;
+  stop.now = kT0 + 100;
+  CHECK(coordinator.step(stop).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Fresh);
+  CHECK(!coordinator.session_provider().ready());
+  CHECK(coordinator.member_cookie() == nullptr);
+  MembershipState state = MembershipState::Member;
+  CHECK(coordinator.membership_hooks().local_state(kNetwork, state).ok());
+  CHECK(state == MembershipState::Unprovisioned);
+  std::uint32_t epoch = 0;
+  CHECK(coordinator.session_provider()
+            .tx_epoch(SecurityScope::Group, kBroadcastNodeId, epoch)
+            .code == StatusCode::AuthRequired);
+  // Same-boot rebuild refuses (the consumed boot token never reseeds a
+  // group sender): the adopt parks in Recovery with ReportRecovery.
+  CHECK(coordinator.adopt_dev(dev_config(), kT0 + 200).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Recovery);
+  CoordinatorAction action{};
+  CHECK(coordinator.take_action(action).ok());
+  CHECK(action.kind == CoordinatorActionKind::ReportRecovery);
+  // A fresh coordinator adopts the next boot cleanly.
+  Fixture g{};
+  CHECK(g.init_stores());
+  SecurityCoordinator next(g.deps());
+  CoordinatorDevConfig config = dev_config();
+  config.boot = 78;
+  CHECK(next.adopt_dev(config, kT0 + 300).ok());
+  CHECK(next.snapshot().mode == CoordinatorMode::Dev);
+  CHECK(next.session_provider().ready());
+}
+
+void test_dev_revocation_blocks_membership() {
+  current = "dev_revocation_blocks_membership";
+  Fixture f{};
+  CHECK(f.init_stores());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.adopt_dev(dev_config(), kT0).ok());
+  // A standing removal record refuses dev membership — Blocked or
+  // Cleaned, with no holdoff expiry on the dev route.
+  LocalRevocationRecord blocked{};
+  blocked.state = LocalRevocationState::Blocked;
+  blocked.cause = LocalRevocationCause::Notice;
+  blocked.local_node = kNode;
+  blocked.site_id = kSiteId;
+  blocked.network = kNetwork;
+  blocked.removed_generation = 3;
+  blocked.evidence_digest.fill(0xE1);
+  CHECK(f.local_revocation.commit_blocked(blocked).ok());
+  CHECK(!coordinator.membership_hooks().local_member(kNetwork));
+  MembershipState state = MembershipState::Member;
+  CHECK(coordinator.membership_hooks().local_state(kNetwork, state).ok());
+  CHECK(state == MembershipState::Revoked);
+  CHECK(f.local_revocation.commit_cleaned().ok());
+  CHECK(!coordinator.membership_hooks().local_member(kNetwork));
+  CHECK(coordinator.membership_hooks().local_state(kNetwork, state).ok());
+  CHECK(state == MembershipState::Revoked);
+}
+
 int main() {
   test_boot_silent_adoption();
   test_member_apply_failure_is_closed();
@@ -1229,6 +1454,11 @@ int main() {
   test_commit_veto();
   test_store_credential_verifier();
   test_channel_ready_flow();
+  test_dev_adopt_validation();
+  test_dev_scope_agrees_across_nodes();
+  test_dev_mux_routing();
+  test_dev_stop_readopt();
+  test_dev_revocation_blocks_membership();
   if (failures != 0) {
     std::fprintf(stderr, "FAILURES: %d\n", failures);
     return 1;

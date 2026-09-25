@@ -71,6 +71,54 @@ Status dev_find_slot(const keys::Secret& psk, const NetworkId network,
   return Status::success();
 }
 
+Status DevScopeProvider::adopt(const keys::Secret& psk, const NetworkId network) noexcept {
+  keys::Secret next{};
+  const Status derived = keys::dev_scope_key(psk, network, next);
+  if (!derived) return derived;
+  wipe();
+  key_ = next;
+  secure_clear(next);
+  network_ = network;
+  active_ = true;
+  return Status::success();
+}
+
+void DevScopeProvider::wipe() noexcept {
+  secure_clear(key_);
+  network_ = 0;
+  active_ = false;
+}
+
+bool DevScopeProvider::current_generation(const ScopeRef scope, std::uint32_t& out) noexcept {
+  if (in_call_) return false;
+  if (scope != kDevScopeRef || !active_) return false;
+  out = kDevScopeGeneration;
+  return true;
+}
+
+bool DevScopeProvider::accepted_generation(const ScopeRef scope, const std::uint32_t generation,
+                                           const MonotonicMs now_ms) noexcept {
+  (void)now_ms;
+  if (in_call_) return false;
+  return scope == kDevScopeRef && active_ && generation == kDevScopeGeneration;
+}
+
+Status DevScopeProvider::scope_tag(const ScopeRef scope, const std::uint32_t generation,
+                                   const ByteView input, ScopeTag& out) noexcept {
+  out.fill(0);
+  if (in_call_) return Status::error(StatusCode::Busy, "dev scope re-entered");
+  if (scope != kDevScopeRef || !active_ || generation != kDevScopeGeneration) {
+    return Status::error(StatusCode::AuthRequired, "dev scope unavailable");
+  }
+  in_call_ = true;
+  ScopeDigest digest{};
+  hmac_sha256(ByteView{key_.data(), key_.size()}, input, digest);
+  for (std::size_t i = 0; i < out.size(); ++i) out[i] = digest[i];
+  secure_clear(digest);
+  in_call_ = false;
+  return Status::success();
+}
+
 Status DevGroupSender::configure(const keys::Secret& psk, const NetworkId network,
                                  const NodeId origin, const std::uint32_t boot) noexcept {
   if (network == 0 || !id_valid(origin) || boot == 0) {

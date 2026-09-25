@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "routeloom/discovery_scope.hpp"
 #include "routeloom/group_replay.hpp"
 #include "routeloom/key_schedule.hpp"
 #include "routeloom/rlres1.hpp"
@@ -71,6 +72,42 @@ class DevGroupSender {
 // Fixed dev group wire epoch (P4 §10.1): dev senders version by boot (the
 // key epoch), so the epoch field is always this.
 constexpr std::uint32_t kDevGroupEpoch = 1;
+// Fixed dev discovery generation (P4 §10.1): the dev scope key is
+// boot-independent (pairwise sessions do not version by boot), so the
+// discovery scope has exactly one generation, never rotated.
+constexpr std::uint32_t kDevScopeGeneration = 1;
+
+// Dev discovery scope provider (P4 §10.1): serves kDevScopeRef for the
+// dev discovery (Required) from the PSK-derived scope key
+// (keys::dev_scope_key). Tags only filter DISCOVER/OFFER to "same PSK on
+// this network" — they prove no identity and gate no traffic. The PSK is
+// derived, never stored; the key wipes on wipe()/destruction. No heap,
+// no exceptions.
+class DevScopeProvider final : public DiscoveryScopeProvider {
+ public:
+  DevScopeProvider() noexcept = default;
+  DevScopeProvider(const DevScopeProvider&) = delete;
+  DevScopeProvider& operator=(const DevScopeProvider&) = delete;
+  ~DevScopeProvider() noexcept { wipe(); }
+
+  // Derives and holds the scope key. Refuses network 0; a second adopt
+  // re-derives (same inputs) or replaces (the Owner adopts once per boot).
+  Status adopt(const keys::Secret& psk, NetworkId network) noexcept;
+  void wipe() noexcept;
+  bool active() const noexcept { return active_; }
+
+  bool current_generation(ScopeRef scope, std::uint32_t& out) noexcept override;
+  bool accepted_generation(ScopeRef scope, std::uint32_t generation,
+                           MonotonicMs now_ms) noexcept override;
+  Status scope_tag(ScopeRef scope, std::uint32_t generation, ByteView input,
+                   ScopeTag& out) noexcept override;
+
+ private:
+  keys::Secret key_{};
+  NetworkId network_{0};
+  bool active_{false};
+  bool in_call_{false};
+};
 
 // Dev group provider (P4 §10.1, V1-N01/V1-K10): SecurityProvider over
 // boot-scoped dev group keys. TX draws DevGroupSender counters (RAM,

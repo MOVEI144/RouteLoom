@@ -53,6 +53,7 @@ inline constexpr char kLabelDevRam[] = "RouteLoom/v1/dev-ram";
 inline constexpr char kLabelDevRms[] = "RouteLoom/v1/dev-rms";
 inline constexpr char kLabelDevGroupKey[] = "RouteLoom/v1/dev-group-key";
 inline constexpr char kLabelDevGroupIv[] = "RouteLoom/v1/dev-group-iv";
+inline constexpr char kLabelDevScope[] = "RouteLoom/v1/dev-scope";
 
 // EDHOC Exporter labels (private use, 03 §2.1). Consumed by P2; listed here so
 // the whole RouteLoom label space is frozen in one place.
@@ -126,6 +127,12 @@ Status dev_pair_rms(const Secret& psk, NetworkId network, NodeId a, NodeId b,
                     Purpose purpose, Secret& out) noexcept;
 Status dev_group_key(const Secret& psk, NetworkId network, NodeId origin,
                      std::uint32_t boot, TrafficKey& out) noexcept;
+// Dev discovery scope key (§10.1): K_scope = Expand(dev_prk,
+// "RouteLoom/v1/dev-scope" 0x00, 32) under the same dev_prk extraction as
+// the pair RMS. Boot-independent (pairwise sessions do not version by
+// boot) and fixed at discovery generation 1; a match proves "same PSK on
+// this network" for DISCOVER/OFFER filtering only, never identity.
+Status dev_scope_key(const Secret& psk, NetworkId network, Secret& out) noexcept;
 
 // --- RLRES1 (06 §2.1) -----------------------------------------------------------
 // rid = first8(HMAC(RMS, "RouteLoom/v1/rid" 0x00 || purpose u8))

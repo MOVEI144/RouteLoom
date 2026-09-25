@@ -45,7 +45,9 @@ SecurityCoordinator::SecurityCoordinator(const Deps& deps) noexcept
       pairwise_provider_(bank_),
       group_keys_(*deps_.site),
       group_provider_(group_keys_, pairwise_provider_, deps_.crypto_aead, deps_.local_node),
-      sleep_guard_(group_provider_, pairwise_provider_),
+      dev_hooks_(*deps.revocations, *deps.local_revocation, this),
+      provider_mux_(pairwise_provider_, group_provider_),
+      sleep_guard_(provider_mux_, pairwise_provider_),
       member_scope_(group_keys_, kMemberScopeRef),
       authority_(deps_.crypto_aead, authority_port_, *this, authority_env_, &group_keys_) {
   // Fresh: no workspace side constructed. Boot builds the Joiner, the
@@ -55,8 +57,83 @@ SecurityCoordinator::SecurityCoordinator(const Deps& deps) noexcept
 }
 
 SecurityCoordinator::~SecurityCoordinator() noexcept {
+  if (dev_group_live_) {
+    dev_group().DevGroupProvider::~DevGroupProvider();
+    dev_group_live_ = false;
+  }
   secure_clear(&held_restore_, sizeof(held_restore_));
   destroy_workspace();
+}
+
+DevGroupProvider& SecurityCoordinator::dev_group() noexcept {
+  return *reinterpret_cast<DevGroupProvider*>(dev_group_box_.data());
+}
+
+bool SecurityCoordinator::SessionProviderMux::ready() const noexcept {
+  return pairwise_.ready() && group().ready();
+}
+
+SecurityProfile SecurityCoordinator::SessionProviderMux::security_profile() const noexcept {
+  return group().security_profile();
+}
+
+Status SecurityCoordinator::SessionProviderMux::tx_epoch(const SecurityScope scope, const NodeId peer,
+                                                         std::uint32_t& epoch) noexcept {
+  return is_group(scope) ? group().tx_epoch(scope, peer, epoch)
+                         : pairwise_.tx_epoch(scope, peer, epoch);
+}
+
+Status SecurityCoordinator::SessionProviderMux::current_rx_epoch(const SecurityScope scope,
+                                                                 const NodeId peer,
+                                                                 std::uint32_t& epoch) const
+    noexcept {
+  return is_group(scope) ? group().current_rx_epoch(scope, peer, epoch)
+                         : pairwise_.current_rx_epoch(scope, peer, epoch);
+}
+
+ContextState SecurityCoordinator::SessionProviderMux::context_state(const SecurityScope scope,
+                                                                    const NodeId peer) const
+    noexcept {
+  return is_group(scope) ? group().context_state(scope, peer)
+                         : pairwise_.context_state(scope, peer);
+}
+
+Status SecurityCoordinator::SessionProviderMux::tx_group_link_epochs(std::uint32_t& boot,
+                                                                     std::uint32_t& g) noexcept {
+  return group().tx_group_link_epochs(boot, g);
+}
+
+bool SecurityCoordinator::SessionProviderMux::accepts_group_epoch(const std::uint32_t g) const
+    noexcept {
+  return group().accepts_group_epoch(g);
+}
+
+bool SecurityCoordinator::SessionProviderMux::group_promotion_pending() const noexcept {
+  return group().group_promotion_pending();
+}
+
+Status SecurityCoordinator::SessionProviderMux::next_counter(const SecurityContext& context,
+                                                             std::uint64_t& counter) noexcept {
+  return is_group(context.scope) ? group().next_counter(context, counter)
+                                 : pairwise_.next_counter(context, counter);
+}
+
+Status SecurityCoordinator::SessionProviderMux::seal(
+    const SecurityContext& context, const std::uint64_t counter, const ByteView aad,
+    const ByteView plaintext, const MutableByteView ciphertext,
+    std::array<std::uint8_t, kAeadTagSize>& tag) noexcept {
+  return is_group(context.scope)
+             ? group().seal(context, counter, aad, plaintext, ciphertext, tag)
+             : pairwise_.seal(context, counter, aad, plaintext, ciphertext, tag);
+}
+
+Status SecurityCoordinator::SessionProviderMux::open(
+    const SecurityContext& context, const std::uint64_t counter, const ByteView aad,
+    const ByteView ciphertext, const std::array<std::uint8_t, kAeadTagSize>& tag,
+    const MutableByteView plaintext) noexcept {
+  return is_group(context.scope)
+             ? group().open(context, counter, aad, ciphertext, tag, plaintext)
+             : pairwise_.open(context, counter, aad, ciphertext, tag, plaintext);
 }
 
 SecurityCoordinator::MemberEngine::MemberEngine(
@@ -77,10 +154,11 @@ SecurityCoordinator::MemberEngine::MemberEngine(
 void SecurityCoordinator::destroy_workspace() noexcept {
   if (mode_ == CoordinatorMode::ZeroTouch) {
     ws_.joiner.~Joiner();
-  } else if (mode_ == CoordinatorMode::Member) {
+  } else if (has_member_engine()) {
     // The engine's cross-references (cookie, cache, sink) die with the
     // workspace; outside references (bank, stores, ports) stay valid.
-    // The wipe below also clears demux cookies and slot bytes.
+    // The wipe below also clears demux cookies and slot bytes (and the
+    // dev PSK dies with the dev-armed engine here).
     ws_.member.~MemberEngine();
   } else {
     return;
@@ -193,6 +271,20 @@ Status SecurityCoordinator::step(const CoordinatorEvent& event) noexcept {
   return status;
 }
 
+Status SecurityCoordinator::adopt_dev(const CoordinatorDevConfig& config,
+                                     const MonotonicMs now) noexcept {
+  if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
+  if (mode_ != CoordinatorMode::Fresh) {
+    return Status::error(StatusCode::InvalidState, "coordinator already running");
+  }
+  if (!deps_ready(deps_)) return Status::error(StatusCode::InvalidState, "coordinator deps");
+  last_now_ = now;
+  in_port_ = true;
+  const Status status = install_dev_config(config, now);
+  in_port_ = false;
+  return status;
+}
+
 Status SecurityCoordinator::take_action(CoordinatorAction& out) noexcept {
   if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
   if (!action_pending_) return Status::error(StatusCode::NotFound, "no coordinator action");
@@ -214,7 +306,7 @@ CoordinatorSnapshot SecurityCoordinator::snapshot() const noexcept {
   if (mode_ == CoordinatorMode::ZeroTouch) {
     out.joiner = joiner().snapshot().state;
   }
-  if (mode_ == CoordinatorMode::Member) {
+  if (has_member_engine()) {
     out.engine_quiescent = member().engine.quiescent();
     out.resume_link_slots = static_cast<std::uint16_t>(member().resume_cache.link_quota());
     out.resume_end_slots = static_cast<std::uint16_t>(member().resume_cache.end_quota());
@@ -234,17 +326,27 @@ CoordinatorSnapshot SecurityCoordinator::snapshot() const noexcept {
 Status SecurityCoordinator::member_discovery_config(DiscoveryConfig& out) noexcept {
   out = DiscoveryConfig{};
   if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
-  if (mode_ != CoordinatorMode::Member || !member_valid_) {
+  if (!has_member_engine() || !member_valid_) {
     return Status::error(StatusCode::InvalidState, "member discovery unavailable");
   }
   out.node = adopted_.node;
   out.mac = deps_.local_mac;
   out.network = adopted_.network;
   out.network_hint = static_cast<std::uint32_t>(adopted_.network);
-  out.capability_bits = kRld1CapMemberEdhocV1 | kRld1CapMemberResumeV1;
-  out.scope_mode = ScopeMode::Required;
-  out.scope_provider = &member_scope_;
-  out.scope = kMemberScopeRef;
+  if (mode_ == CoordinatorMode::Dev) {
+    // Dev-only bit, no member bits: the engine refuses any member/dev
+    // mix as Unsupported (never a downgrade), and the Required dev
+    // scope filters DISCOVER/OFFER to the same PSK before that.
+    out.capability_bits = kRld1CapDevRamSessionV1;
+    out.scope_mode = ScopeMode::Required;
+    out.scope_provider = &dev_scope_;
+    out.scope = kDevScopeRef;
+  } else {
+    out.capability_bits = kRld1CapMemberEdhocV1 | kRld1CapMemberResumeV1;
+    out.scope_mode = ScopeMode::Required;
+    out.scope_provider = &member_scope_;
+    out.scope = kMemberScopeRef;
+  }
   out.cookie_bucket_ms = static_cast<std::uint32_t>(MemberCookie::kBucketMs);
   return Status::success();
 }
@@ -262,22 +364,24 @@ MonotonicMs SecurityCoordinator::next_deadline(const MonotonicMs now) const noex
     if (staged.used) return now;
   }
   if (mode_ == CoordinatorMode::ZeroTouch) sooner(joiner().next_deadline());
-  if (mode_ == CoordinatorMode::Member) {
+  if (has_member_engine()) {
     // The engine and the bank publish no deadline: while either has work
     // the firmware must keep polling, else the demux expiries rule.
     if (!member().engine.quiescent() || bank_.demand_count() != 0) return now;
     for (const auto& entry : member().demux) {
       if (entry.used) sooner(entry.expires_at);
     }
-    // A pending GK promote and the authority channel join the schedule.
-    if (group_keys_.promotion_pending()) return now;
-    if (authority_wanted_ && !authority_.snapshot().started) {
-      const MonotonicMs retry = last_authority_start_ > kJoinNoDeadline - 1000
-                                    ? kJoinNoDeadline
-                                    : last_authority_start_ + 1000;
-      sooner(retry);
-    } else {
-      sooner(authority_.next_deadline());
+    if (mode_ == CoordinatorMode::Member) {
+      // A pending GK promote and the authority channel join the schedule.
+      if (group_keys_.promotion_pending()) return now;
+      if (authority_wanted_ && !authority_.snapshot().started) {
+        const MonotonicMs retry = last_authority_start_ > kJoinNoDeadline - 1000
+                                      ? kJoinNoDeadline
+                                      : last_authority_start_ + 1000;
+        sooner(retry);
+      } else {
+        sooner(authority_.next_deadline());
+      }
     }
   }
   if (removal_holdoff_armed_) sooner(removal_holdoff_at_);
@@ -313,10 +417,11 @@ bool SecurityCoordinator::quiescent_locked() const noexcept {
   }
   if (sleeping_) return true;
   if (mode_ == CoordinatorMode::ZeroTouch) return joiner().quiescent();
-  if (mode_ == CoordinatorMode::Member) {
+  if (has_member_engine()) {
     // Completed member legs only route late duplicates (never sleep
     // work); Joiner/proxy legs always count — see member_work_pending.
     if (member_work_pending()) return false;
+    if (mode_ != CoordinatorMode::Member) return true;
     // A pending GK promote (a durable flash write) holds sleep off; the
     // authority channel naps with the device instead — staged bytes, a
     // handshake or backoff resume on Wake, and deep sleep closes the
@@ -379,7 +484,7 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
     maybe_abandon_refresh(now);
     return Status::success();
   }
-  if (mode_ != CoordinatorMode::Member) return Status::success();
+  if (!has_member_engine()) return Status::success();
   if (member_apply_pending_) return Status::success();
   // Start discovery only after the firmware has reported a successful
   // member radio/node apply and the single action slot is free.
@@ -411,14 +516,6 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
     NeighborDiscovery::MemberStartRequest start{};
     if (!deps_.discovery->take_member_start(start, now).ok()) break;
     if (start.peer == kInvalidNodeId || start.peer == adopted_.node) continue;
-    // Sleep re-confirmation (P4 §9.3, V1-F07): while a restore image is
-    // held for this initiator peer at the retained radio MAC, the
-    // accepted OFFER re-confirms the parent WITHOUT the engine —
-    // restore installs the retained (peer-authenticated) session, and a
-    // fresh handshake would install over the bank slot restore needs. No
-    // demux leg is held: nothing routes for a confirmed parent. Any
-    // refusal falls through to the normal engine path below, whose fresh
-    // session then stands while restore reports occupied (cold resume).
     // Sleep re-confirmation (P4 §9.3, V1-F07): while a restore image is
     // held for this initiator peer at the retained radio MAC, the
     // accepted OFFER re-confirms the parent WITHOUT the engine —
@@ -500,10 +597,14 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
   drain_demands(now);
   drain_engine_results(now);
   drive_engine(now);
-  member().proxy.poll(now);
-  if (member().gateway_active) member().gateway.poll(now);
-  watch_linkless(now);   // stale-GK evidence accrues toward a refresh
-  drive_authority(now);  // GK tick/promote, channel tick, deferred start
+  if (mode_ == CoordinatorMode::Member) {
+    // Join service, stale-GK watch and authority channel are Member-only:
+    // the dev route has no proxy, no GK and no channel to drive.
+    member().proxy.poll(now);
+    if (member().gateway_active) member().gateway.poll(now);
+    watch_linkless(now);   // stale-GK evidence accrues toward a refresh
+    drive_authority(now);  // GK tick/promote, channel tick, deferred start
+  }
   if (removal_holdoff_armed_ && now >= removal_holdoff_at_) {
     removal_holdoff_armed_ = false;
     hooks_.set_holdoff_elapsed(true);
@@ -563,11 +664,11 @@ SecurityCoordinator::DemuxEntry* SecurityCoordinator::claim_demux(
 }
 
 Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
-  if (mode_ != CoordinatorMode::ZeroTouch && mode_ != CoordinatorMode::Member) {
+  if (mode_ != CoordinatorMode::ZeroTouch && !has_member_engine()) {
     return Status::success();  // Fresh/Removed/Recovery: no RLD1 owner lives
   }
   if (sleeping_) return Status::success();
-  if (mode_ == CoordinatorMode::Member && member_apply_pending_) {
+  if (has_member_engine() && member_apply_pending_) {
     sat_inc(counters_.demux_drops);
     return Status::success();
   }
@@ -604,7 +705,7 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
       }
       return joiner().on_rld1_rx(event.rld1_meta, event.rld1_frame, event.now);
     }
-    if (mode_ != CoordinatorMode::Member) {
+    if (!has_member_engine()) {
       sat_inc(counters_.demux_drops);
       return Status::success();
     }
@@ -665,11 +766,11 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
     }
     return demux_member_frame(env, hit, event.now);
   }
-  // New exchange. A member-mode Auth single frame with a parked
+  // New exchange. An engine-mode Auth single frame with a parked
   // responder start (same peer MAC) binds to it; anything else follows
   // the mode default: ZT Joiner while unprovisioned, proxy admission
-  // while member.
-  if (mode_ == CoordinatorMode::Member) {
+  // while member, drop while dev (no join service there).
+  if (has_member_engine()) {
     for (auto& entry : member().demux) {
       if (entry.used && entry.owner == DemuxOwner::Member && entry.has_start &&
           !entry.initiator && entry.mac == event.rld1_meta.source) {
@@ -679,6 +780,10 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
         entry.txn = env.transaction_nonce;
         return demux_member_frame(env, &entry, event.now);
       }
+    }
+    if (mode_ != CoordinatorMode::Member) {
+      sat_inc(counters_.demux_drops);
+      return Status::success();
     }
     // The proxy owns one bounded exchange and verifies the OFFER cookie
     // before admitting it. Unknown pre-cookie frames must not occupy the
@@ -726,7 +831,7 @@ void SecurityCoordinator::ensure_responder_token(DemuxEntry& entry,
 
 Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env,
                                                DemuxEntry* entry, const MonotonicMs now) noexcept {
-  if (entry == nullptr || !entry->used || mode_ != CoordinatorMode::Member) {
+  if (entry == nullptr || !entry->used || !has_member_engine()) {
     sat_inc(counters_.demux_drops);
     return Status::success();
   }
@@ -919,7 +1024,7 @@ void SecurityCoordinator::drain_engine_results(const MonotonicMs now) noexcept {
     } else if (result.event == HandshakeEvent::Established && result.has_proof &&
                result.scope == SecurityScope::Link) {
       (void)installed_link(result, now);
-      note_link_established();
+      if (mode_ == CoordinatorMode::Member) note_link_established();
     } else if (result.event == HandshakeEvent::Failed && result.scope == SecurityScope::Link) {
       // Tear down the leg: the next discovery round or demand re-drives.
       for (auto& entry : member().demux) {
@@ -931,7 +1036,8 @@ void SecurityCoordinator::drain_engine_results(const MonotonicMs now) noexcept {
           entry = DemuxEntry{};
         }
       }
-      note_link_failed();
+      // Stale-GK strikes are Member-only: dev has no GK to refresh.
+      if (mode_ == CoordinatorMode::Member) note_link_failed();
     }
   }
 }
@@ -1195,10 +1301,13 @@ void SecurityCoordinator::drain_staged(const MonotonicMs now) noexcept {
 
 void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
                                                  const MonotonicMs now) noexcept {
-  if (mode_ != CoordinatorMode::Member) {
+  if (!has_member_engine()) {
     sat_inc(counters_.staged_drops);
     return;
   }
+  // Join-relay lanes are Member-only: a dev node runs no proxy/gateway,
+  // so anything but the end-session lane drops here.
+  const bool member_mode = mode_ == CoordinatorMode::Member;
   const ByteView payload{frame.payload.data(), frame.payload_size};
   switch (frame.type) {
     case FrameType::BootstrapAuth: {
@@ -1211,6 +1320,10 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
       if (payload.data[1] == static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage) ||
           payload.data[1] == static_cast<std::uint8_t>(JoinAuthPhase::Resume)) {
         handle_end_single(frame.meta, payload, now);
+        return;
+      }
+      if (!member_mode) {
+        sat_inc(counters_.staged_drops);
         return;
       }
       member().proxy.on_relay_rx(frame.meta.origin, frame.type, payload, now);
@@ -1226,6 +1339,10 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
     case FrameType::MembershipResult:
       // Join-relay Final/Abort only: proxy first (its admission drops
       // foreign frames before any assembly), then the gateway.
+      if (!member_mode) {
+        sat_inc(counters_.staged_drops);
+        return;
+      }
       member().proxy.on_relay_rx(frame.meta.origin, frame.type, payload, now);
       if (member().gateway_active) {
         const std::uint8_t hops =
@@ -1256,6 +1373,10 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
             sat_inc(counters_.demux_drops);
           }
         }
+        return;
+      }
+      if (!member_mode) {
+        sat_inc(counters_.staged_drops);
         return;
       }
       member().proxy.on_relay_rx(frame.meta.origin, frame.type, payload, now);
@@ -1409,7 +1530,10 @@ bool SecurityCoordinator::local(HandshakeLocal& out) const noexcept {
 }
 
 bool SecurityCoordinator::revoked(const NodeId peer, const std::uint32_t generation) const noexcept {
-  if (mode_ != CoordinatorMode::Member || !member_valid_) return false;
+  // The shared Owner gate (P4 §10.1): the dev-armed engine consults this
+  // at R1/R3 time with generation 0, exactly like the member engine. The
+  // RLV1 record itself is enforced by the hooks + mode, not here.
+  if (!has_member_engine() || !member_valid_) return false;
   if (!deps_.revocations->has_set()) return false;  // no set: nothing revoked
   const std::uint32_t site_epoch = static_cast<std::uint32_t>(adopted_.network >> 32);
   return deps_.revocations->rejects(peer, generation, site_epoch);
@@ -1423,7 +1547,8 @@ bool SecurityCoordinator::authenticated(const NodeId peer, const NetworkId netwo
   // Only a live bank entry counts: the bank is RAM-only (empty before the
   // first install, wiped on site change), so a hit proves a completed
   // authentication of this boot. Caches, the shared GK and RLP names fail.
-  if (mode_ != CoordinatorMode::Member || !member_valid_) return false;
+  // In Dev mode the hit proves "same PSK" (generation 0, policy role).
+  if (!has_member_engine() || !member_valid_) return false;
   if (network != adopted_.network) return false;
   if (bank_.peer_summary(SecurityScope::Link, peer, generation, role)) return true;
   return bank_.peer_summary(SecurityScope::EndToEnd, peer, generation, role);
@@ -1518,9 +1643,12 @@ Status SecurityCoordinator::on_channel_ready(const CoordinatorEvent& event) noex
     return joiner().on_channel_ready(event.channel_token, result, event.now);
   }
   // The first member report proves the node and radio reached the adopted
-  // operating channel. Discovery cannot start on the join channel.
-  if (mode_ != CoordinatorMode::Member || !member_apply_pending_ ||
-      event.channel_token != 0) return Status::success();
+  // operating channel. Discovery cannot start on the join channel. The
+  // dev route reports the same token-0 apply completion (already on its
+  // static channel, so the move is a no-op there).
+  if (!has_member_engine() || !member_apply_pending_ || event.channel_token != 0) {
+    return Status::success();
+  }
   member_apply_pending_ = false;
   if (event.channel_result != StatusCode::Ok || event.channel != channel_) {
     stop_traffic();
@@ -1783,7 +1911,7 @@ Status SecurityCoordinator::restore_sleep_image(RtcSessionPort& port, const std:
 
 Status SecurityCoordinator::on_stop(const MonotonicMs now) noexcept {
   (void)now;
-  if (mode_ == CoordinatorMode::Member) {
+  if (has_member_engine()) {
     // stop_traffic reads the state; unattached (pre-Start) relays stop
     // as revoked.
     if (deps_.discovery != nullptr) {
@@ -2278,6 +2406,110 @@ void SecurityCoordinator::emit_member_action() noexcept {
   emit_action(action);
 }
 
+void SecurityCoordinator::abandon_dev_adoption(JoinRecoveryReason reason) noexcept {
+  // The member side exists (create_member ran); stop_traffic scrubs the
+  // bank and every partially adopted dev view, then the workspace dies
+  // and the coordinator parks in Recovery like a failed member adoption.
+  stop_traffic();
+  destroy_workspace();
+  mode_ = CoordinatorMode::Recovery;
+  CoordinatorAction action{};
+  action.kind = CoordinatorActionKind::ReportRecovery;
+  action.recovery = reason;
+  emit_action(action);
+}
+
+Status SecurityCoordinator::install_dev_config(const CoordinatorDevConfig& config,
+                                               const MonotonicMs now) noexcept {
+  if (config.network == 0 || config.node == kInvalidNodeId ||
+      config.node == kBroadcastNodeId || config.node == 0 || config.boot == 0 ||
+      config.channel == 0 || config.role == 0) {
+    return Status::error(StatusCode::InvalidArgument, "dev config");
+  }
+  bool psk_zero = true;
+  for (const std::uint8_t byte : config.psk) {
+    if (byte != 0) psk_zero = false;
+  }
+  if (psk_zero) return Status::error(StatusCode::InvalidArgument, "dev psk");
+  if (dev_group_live_) {
+    return Status::error(StatusCode::InvalidState, "dev already adopted");
+  }
+  CoordinatorMemberConfig cfg{};
+  cfg.network = config.network;
+  cfg.node = config.node;
+  // Both sessions are the reserved durable boot: it rises every boot, so
+  // a reboot never reuses a group key epoch (P4 §10.1).
+  cfg.message_session = config.boot;
+  cfg.boot_session = config.boot;
+  cfg.link_epoch = 1;
+  cfg.end_epoch = 1;
+  cfg.boot_incarnation = 0;  // unknown on the dev route (telemetry only)
+  cfg.role = config.role;
+  adopted_ = cfg;
+  member_valid_ = true;
+  destroy_workspace();
+  create_member();
+  mode_ = CoordinatorMode::Dev;
+  sat_inc(counters_.boots);
+  GatewaySessionBank::LocalView local{};
+  local.self = cfg.node;
+  local.network = cfg.network;
+  local.gk_epoch = 1;  // fixed dev epoch (P4 §10.1): the engine attests
+                       // created_gk 1 and the bank enforces created+2
+  GatewaySessionBank::RandomSource random{};
+  random.fn = &entropy_fill;
+  random.ctx = deps_.entropy;
+  const Status banked = bank_.configured() ? bank_.reset_membership(local, now)
+                                           : bank_.configure(local, deps_.bank_aead, random, now);
+  if (!banked.ok()) {
+    abandon_dev_adoption(JoinRecoveryReason::StorageFailure);
+    return Status::success();
+  }
+  if (!member().member_cookie.configure(&entropy_fill, deps_.entropy).ok()) {
+    abandon_dev_adoption(JoinRecoveryReason::StorageFailure);
+    return Status::success();
+  }
+  DevResumePolicy policy{};
+  policy.psk = config.psk;
+  policy.network = config.network;
+  policy.self = config.node;
+  policy.role = config.role;
+  policy.boot = config.boot;
+  if (!member().engine.configure_dev(policy, now).ok()) {
+    abandon_dev_adoption(JoinRecoveryReason::MembershipInvalid);
+    return Status::success();
+  }
+  // The group side binds only after the pairwise side stands: a failed
+  // adopt leaves no half-adopted provider behind (stop_traffic in the
+  // abandon path scrubs whatever bound so far).
+  if (!dev_sender_.configure(config.psk, config.network, config.node, config.boot).ok()) {
+    abandon_dev_adoption(JoinRecoveryReason::StorageFailure);
+    return Status::success();
+  }
+  new (dev_group_box_.data())
+      DevGroupProvider(dev_sender_, config.psk, config.network, deps_.bank_aead, config.node);
+  dev_group_live_ = true;
+  provider_mux_.set_dev_group(&dev_group());
+  provider_mux_.set_dev(true);
+  if (!dev_scope_.adopt(config.psk, config.network).ok()) {
+    abandon_dev_adoption(JoinRecoveryReason::StorageFailure);
+    return Status::success();
+  }
+  if (!dev_hooks_.adopt(config.network, config.node, config.role).ok()) {
+    abandon_dev_adoption(JoinRecoveryReason::MembershipInvalid);
+    return Status::success();
+  }
+  // No proxy/gateway/authority in dev: the workspace side stays
+  // Unprovisioned and the poll never drives it. Relay duties are
+  // role-gated by the firmware from the adopted config, like member.
+  channel_ = config.channel;  // the operating channel gates RLD1 RX
+  discovery_started_ = false;
+  member_apply_pending_ = true;
+  sat_inc(counters_.dev_adoptions);
+  emit_member_action();
+  return Status::success();
+}
+
 // --- Joiner legs -------------------------------------------------------------------------------
 
 void SecurityCoordinator::drain_joiner(const MonotonicMs now) noexcept {
@@ -2392,10 +2624,22 @@ void SecurityCoordinator::stop_traffic() noexcept {
   // Member workspace is live; the caller destroys (wipes) it after. The
   // bank and the GK scope live outside the union, so they are scrubbed
   // here: bank clear does not depend on new entropy, and proxy/gateway leave
-  // Member (aborting relays, freeing slots) before the wipe.
+  // Member (aborting relays, freeing slots) before the wipe. The dev
+  // group/scope/hooks live outside the union too and are scrubbed here
+  // the same way (the dev-armed engine, with its PSK policy, dies with
+  // the workspace below).
   (void)member().engine.cancel_all();
   bank_.clear();
   sleep_guard_.disarm();
+  provider_mux_.set_dev(false);
+  provider_mux_.set_dev_group(nullptr);
+  if (dev_group_live_) {
+    dev_group().DevGroupProvider::~DevGroupProvider();
+    dev_group_live_ = false;
+  }
+  dev_sender_.clear();
+  dev_scope_.wipe();
+  dev_hooks_.wipe();
   secure_clear(&held_restore_, sizeof(held_restore_));
   restore_holding_ = false;
   restore_done_ = false;

@@ -133,4 +133,48 @@ class SdkMembershipHooks final : public MembershipHooks {
   bool holdoff_elapsed_{false};
 };
 
+// --- DevMembershipHooks ------------------------------------------------------------
+// MembershipHooks for the dev-RAM route (P4 §10.1): the adopted static
+// config (network/node/role) plus the same Owner revocation gates as the
+// member hooks (RLV1 record, adopted RRS1 set, this-boot bank summary).
+// There is no RLI1/RLS1, no floor and no join: approve_join always refuses,
+// and any standing RLV1 record — Blocked or Cleaned — refuses without a
+// holdoff expiry (a dev device holds no signed Allow, so only a physical
+// maintenance re-deploy with a domain change clears it, P4 §3.3). A peer
+// known here proved "same PSK" this boot — never an identity.
+class DevMembershipHooks final : public MembershipHooks {
+ public:
+  DevMembershipHooks(const RevocationStore& revocations,
+                     const LocalRevocationStore& local_revocation,
+                     const AuthenticatedPeerView* peers) noexcept;
+
+  // Adopts the static dev config (called once per adoption; the Owner
+  // wipes on stop/removal). A zero network, invalid node or zero role
+  // leaves the previous state untouched and refuses.
+  Status adopt(NetworkId network, NodeId node, std::uint32_t role) noexcept;
+  void wipe() noexcept;
+  bool adopted() const noexcept { return adopted_; }
+
+  bool local_member(NetworkId network) const noexcept override;
+  bool known_member(NodeId peer, NetworkId network) const noexcept override;
+  bool approve_join(NodeId node, NetworkId network) noexcept override;
+  Status local_state(NetworkId network, MembershipState& out) const noexcept override;
+
+ private:
+  // The revocation gates are readable (initialized, neither quarantined
+  // nor uncertain). Anything else fails closed as Revoked.
+  bool gates_healthy() const noexcept;
+  // Determined rejection: the adopted RRS1 names this node at dev
+  // generation 0 (vacuous without a set — dev adopts none).
+  bool self_rejected() const noexcept;
+
+  const RevocationStore& revocations_;
+  const LocalRevocationStore& local_revocation_;
+  const AuthenticatedPeerView* peers_;
+  NetworkId network_{0};
+  NodeId node_{kInvalidNodeId};
+  std::uint32_t role_{0};
+  bool adopted_{false};
+};
+
 }  // namespace routeloom::sdkv1

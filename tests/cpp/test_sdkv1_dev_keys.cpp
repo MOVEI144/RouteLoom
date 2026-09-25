@@ -44,5 +44,20 @@ int main() {
   CHECK(routeloom::keys::dev_group_key(psk, network, a, 0, group).code ==
         routeloom::StatusCode::InvalidArgument);
   CHECK(group.key == (std::array<std::uint8_t, 16>{}));
+  routeloom::keys::Secret scope{};
+  CHECK(routeloom::keys::dev_scope_key(psk, network, scope).ok());
+  CHECK(scope == (routeloom::keys::Secret{0x06,0x32,0x10,0x9d,0x18,0x61,0x42,0x21,
+      0x4b,0x8c,0x17,0x0f,0x4c,0x0f,0xcd,0x32,0x06,0xaa,0x50,0xd7,0xdd,0xc4,
+      0xe3,0x2e,0xe0,0x65,0x87,0xda,0x54,0x03,0x9d,0x18}));
+  auto same_scope = scope;
+  CHECK(routeloom::keys::dev_scope_key(psk, network + 1, same_scope).ok());
+  CHECK(same_scope != scope);
+  routeloom::keys::Secret other_psk = psk;
+  other_psk[0] ^= 1;
+  CHECK(routeloom::keys::dev_scope_key(other_psk, network, same_scope).ok());
+  CHECK(same_scope != scope);
+  CHECK(routeloom::keys::dev_scope_key(psk, 0, same_scope).code ==
+        routeloom::StatusCode::InvalidArgument);
+  CHECK(same_scope == routeloom::keys::Secret{});
   return 0;
 }

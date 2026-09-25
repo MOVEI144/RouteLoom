@@ -258,7 +258,10 @@ class SessionBank {
   // Verified peer summary for the Owner's AuthenticatedPeerView: true
   // with the installed generation/role when a usable entry for (scope,
   // peer) stands. Only engine installs set nonzero claims, so a hit
-  // proves a completed authentication behind this bank.
+  // proves a completed authentication behind this bank. Dev-resume
+  // slots report too (generation 0, nonzero policy role): a hit on one
+  // proves "same PSK this boot", and the hooks tell the provenances
+  // apart (member hooks require a member generation).
   bool peer_summary(SecurityScope scope, NodeId peer, std::uint32_t& generation,
                     std::uint32_t& role) const noexcept;
   std::size_t demand_count() const noexcept;
