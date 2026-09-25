@@ -1314,6 +1314,16 @@ void test_gossip_rates_and_refresh() {
       1000));
   CHECK_OK(quiet.dispatch(LifecycleInput::Poll(), 1000));
   CHECK(quiet.peer.sent.empty());
+  // A bit-7 route grant is not permission to send RRS gossip: only the
+  // bit-5 gossip grant opens the gossip lane.
+  NodeFixture route_only(kNodeC, kCapRouteBroadcastV1);
+  CHECK(route_only.provision(3, 16));
+  CHECK_OK(route_only.dispatch(
+      LifecycleInput::PeerControl(stamp_for(kNode, 3), FrameType::Control,
+                                 ByteView{newer.data(), newer.size()}),
+      1000));
+  CHECK_OK(route_only.dispatch(LifecycleInput::Poll(), 1000));
+  CHECK(route_only.peer.sent.empty());
 }
 
 void test_gossip_line_100_nodes_converges() {

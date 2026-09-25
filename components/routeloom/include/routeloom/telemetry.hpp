@@ -325,12 +325,16 @@ enum CapabilityFeature : std::uint32_t {
   kCapRemoteTelemetryV1 = 1u << 3,
   kCapBusyV1 = 1u << 4,
   // P6 (04-removal-revocation.md §4): RRS1 gossip + the membership
-  // lifecycle gate. Bits 7+ stay undefined and refused.
+  // lifecycle gate.
   kCapRrsGossipV1 = 1u << 5,
   kCapMembershipLifecycleV1 = 1u << 6,
+  // P5-2 route broadcast (routing-scale.md §8): the receiver accepts
+  // GroupLink route advertisements. Bit 7 was never assigned, so legacy
+  // peers grant nothing here and no discriminator is needed.
+  kCapRouteBroadcastV1 = 1u << 7,
 };
-// Capability bits the codec accepts (bits 0..6).
-constexpr std::uint32_t kCapabilityFeatureMask = 0x7Fu;
+// Capability bits the codec accepts (bits 0..7).
+constexpr std::uint32_t kCapabilityFeatureMask = 0xFFu;
 enum PermitProfileBit : std::uint32_t {
   kPermitProfileDevHmac = 1u << 0,
   kPermitProfileCoseEsp256 = 1u << 1,

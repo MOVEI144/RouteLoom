@@ -175,6 +175,10 @@ Status make_end_aad(const Header& header,
 }  // namespace
 
 SecurityContext link_context(const Header& header) noexcept {
+  if (header.type == FrameType::RouteUpdate && header.next_hop == kBroadcastNodeId) {
+    return SecurityContext{SecurityScope::GroupLink, header.network, header.previous_hop,
+                           kBroadcastNodeId, header.link_epoch, header.end_epoch};
+  }
   return SecurityContext{SecurityScope::Link, header.network, header.previous_hop,
                          header.next_hop, header.link_epoch};
 }
@@ -199,6 +203,11 @@ SecurityContext end_context(const Header& header) noexcept {
 }
 
 Status stamp_link_epoch(Header& header, SecurityProvider& security) noexcept {
+  if (header.next_hop == kBroadcastNodeId) {
+    // Boot and GK must come from the same snapshot; separate queries can
+    // mix key generations across a rotation.
+    return security.tx_group_link_epochs(header.link_epoch, header.end_epoch);
+  }
   return security.tx_epoch(SecurityScope::Link, header.next_hop, header.link_epoch);
 }
 
@@ -249,6 +258,16 @@ Status validate_header(const Header& header) noexcept {
       header.previous_hop == kInvalidNodeId || header.next_hop == kInvalidNodeId) {
     return Status::error(StatusCode::InvalidArgument, "wire identity field is invalid");
   }
+  if (header.next_hop == kBroadcastNodeId ||
+      (header.type == FrameType::RouteUpdate && header.destination == kBroadcastNodeId)) {
+    if (header.type != FrameType::RouteUpdate || header.next_hop != kBroadcastNodeId ||
+        header.destination != kBroadcastNodeId || header.origin != header.previous_hop ||
+        header.origin == kBroadcastNodeId || header.hop_remaining != 1 ||
+        header.delivery != DeliveryClass::BestEffort || header.delivery_round != 0 ||
+        header.flags != 0 || header.end_counter != 0) {
+      return Status::error(StatusCode::ProtocolError, "invalid broadcast route header");
+    }
+  }
   if (header.payload_length > kMaxApplicationPayload) {
     return Status::error(StatusCode::InvalidArgument, "payload exceeds v1 limit");
   }
@@ -266,6 +285,10 @@ Status validate_header(const Header& header) noexcept {
     return Status::error(StatusCode::InvalidArgument, "invalid lifetime");
   }
   return Status::success();
+}
+
+Status peek_header(const ByteView encoded, Header& header) noexcept {
+  return read_header(encoded, header);
 }
 
 Status encode_new(const PlainFrame& input,
@@ -289,6 +312,10 @@ Status encode_new(const PlainFrame& input,
   // (AuthRequired: no session yet) consumes nothing.
   status = stamp_link_epoch(header, security);
   if (!status) return status;
+  if (header.next_hop == kBroadcastNodeId &&
+      (header.link_epoch == 0 || header.end_epoch == 0)) {
+    return Status::error(StatusCode::AuthRequired, "GroupLink epochs unavailable");
+  }
   if ((header.flags & kFlagEndProtected) != 0) {
     status = stamp_end_epoch(header, security);
     if (!status) return status;
@@ -325,12 +352,19 @@ Status encode_new(const PlainFrame& input,
 Status open_link(const ByteView encoded,
                  const NodeId local_node,
                  SecurityProvider& security,
-                 LinkOpenedFrame& output) noexcept {
+                 LinkOpenedFrame& output,
+                 const bool allow_broadcast_route) noexcept {
   Header header{};
   auto status = read_header(encoded, header);
   if (!status) return status;
-  if (header.next_hop != local_node) {
+  if (header.next_hop != local_node &&
+      !(allow_broadcast_route && header.type == FrameType::RouteUpdate &&
+        header.next_hop == kBroadcastNodeId && local_node != kBroadcastNodeId)) {
     return Status::error(StatusCode::AuthorizationFailed, "frame is not addressed to this hop");
+  }
+  if (header.next_hop == kBroadcastNodeId &&
+      (header.link_epoch == 0 || header.end_epoch == 0)) {
+    return Status::error(StatusCode::ProtocolError, "invalid GroupLink epochs");
   }
   const std::size_t expected_plain = static_cast<std::size_t>(header.payload_length) +
       (((header.flags & kFlagEndProtected) != 0) ? kAeadTagSize : 0U);

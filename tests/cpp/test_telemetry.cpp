@@ -973,29 +973,31 @@ void test_capabilities_exchange() {
   CHECK(!a->peer_busy_capable(2, world.now));
 }
 
-// P6 PR-A (04 §4): feature bits 5 (RrsGossipV1) and 6
-// (MembershipLifecycleV1) round-trip; bit 7+ stays refused. Raw bits — no
-// reliance on the new constants.
+// Capability bits have distinct meanings: a route grant must never become
+// RRS gossip permission. Exercise raw wire bits as well as the named API.
 void test_capabilities_p6_feature_bits() {
+  CHECK(kCapRrsGossipV1 == (1u << 5));
+  CHECK(kCapMembershipLifecycleV1 == (1u << 6));
+  CHECK(kCapRouteBroadcastV1 == (1u << 7));
   CapabilitiesReply reply{};
   reply.echo_nonce.fill(0x3C);
   reply.node_boot = 0xB007;
-  reply.features = (1u << 5) | (1u << 6);
+  reply.features = (1u << 5) | (1u << 6) | (1u << 7);
   reply.valid_for_ms = kCapabilitiesValidityMs;
   std::array<std::uint8_t, kCapabilitiesReplyBodySize> raw{};
   CHECK_OK(capabilities_reply_encode(
       reply, MutableByteView{raw.data(), raw.size()}));
   CapabilitiesReply back{};
   CHECK_OK(capabilities_reply_decode(ByteView{raw.data(), raw.size()}, back));
-  CHECK(back.features == ((1u << 5) | (1u << 6)));
-  // Bit 7 (and anything above) is still undefined and refused.
-  reply.features |= (1u << 7);
+  CHECK(back.features == reply.features);
+  // Bits above the defined mask must not mint any permission.
+  reply.features |= (1u << 8);
   CHECK(!capabilities_reply_encode(
       reply, MutableByteView{raw.data(), raw.size()}));
-  reply.features = (1u << 5) | (1u << 6);
+  reply.features = (1u << 5) | (1u << 6) | (1u << 7);
   CHECK_OK(capabilities_reply_encode(
       reply, MutableByteView{raw.data(), raw.size()}));
-  raw[28] |= 0x80;  // features field, top bit
+  raw[28] |= 0x01;  // bit 8 in big-endian features field
   CHECK(!capabilities_reply_decode(ByteView{raw.data(), raw.size()}, back));
 }
 

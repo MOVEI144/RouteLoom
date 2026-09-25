@@ -314,12 +314,10 @@ Status EspNowRuntime::initialize_espnow() noexcept {
       }
     }
   }
-  if (discovery_ != nullptr) {
-    const Status status = register_broadcast_peer();
-    if (!status) {
-      return status;
-    }
-  }
+  // Route advertisements also use this permanent peer when discovery is
+  // absent. Register it once with the same radio-owner rate setup.
+  const Status broadcast_status = register_broadcast_peer();
+  if (!broadcast_status) return broadcast_status;
   for (auto& slot : transient_peers_) {
     if (slot.used) {
       const Status status = add_driver_peer(slot.mac);
@@ -1351,7 +1349,12 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
   MacAddress peer_mac{};
   bool driver_registered = false;
   portENTER_CRITICAL(&callback_lock_);
-  if (const Peer* record = find_peer(peer)) {
+  if (peer == kBroadcastNodeId) {
+    // Route broadcasts use the permanent ESP-NOW peer, but still reserve the
+    // same physical TX slot and callback fence as ordinary node traffic.
+    peer_mac.bytes = discovery_const::kBroadcastMac;
+    driver_registered = broadcast_peer_;
+  } else if (const Peer* record = find_peer(peer)) {
     peer_mac = record->mac;
     driver_registered = record->driver_registered;
   }
@@ -1442,7 +1445,9 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
                                   pending_channel_epoch_,
                                   pending_length_class_, peer};
   portEXIT_CRITICAL(&callback_lock_);
-  node_.note_tx_submit_identity(token, submit_key);
+  // Broadcast completion only confirms driver submission, not reception by
+  // any particular neighbor. Never seed per-peer telemetry with this key.
+  if (peer != kBroadcastNodeId) node_.note_tx_submit_identity(token, submit_key);
   const esp_err_t error =
       esp_now_send(peer_mac.bytes.data(), frame.data, frame.size);
   if (error != ESP_OK) {

@@ -45,6 +45,8 @@ use std::fmt;
 
 pub mod admission;
 pub mod autonomy;
+pub mod broadcast_route;
+pub mod diagnostic_capability;
 pub mod endpoint;
 pub mod group;
 pub mod revocation;

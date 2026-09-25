@@ -30,6 +30,7 @@
 #include "routeloom/group_replay.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/routing.hpp"
+#include "routeloom/secure_clear.hpp"
 #include "routeloom/sdkv1_group_keys.hpp"
 
 static_assert(sizeof(routeloom::sdkv1::GroupReplaySender) <= 48,
@@ -2085,6 +2086,39 @@ void test_revoked_group_sender_with_old_key() {
   CHECK_OK(pending_node.poll(3000));
   CHECK(pending_node.group_holds_in_use() == 0);
   CHECK(pending_obs.group_messages.size() == 1);
+
+  // A revoked sender cannot force promotion with an authenticated frame
+  // under the staged GK, including the GroupLink wrapper.
+  sdkv1::GroupKeyState::Input stage{};
+  stage.op = sdkv1::GroupKeyState::Op::Stage;
+  stage.generation = site.assignment_generation;
+  stage.epoch = site.gk_epoch_current + 1;
+  stage.key.fill(0xA5);
+  stage.overlap_s = 10;
+  CHECK_OK(keys.advance(stage, 3001));
+  link.group_epoch = stage.epoch;
+  ScopeDigest next_prk{};
+  keys::TrafficKey next_key{};
+  keys::AeadNonce next_nonce{};
+  keys::group_prk(site.network, site_store.site().gk_next, next_prk);
+  CHECK_OK(keys::group_bcast_key(next_prk, link.group_epoch, link.sender,
+                                 link.epoch, next_key));
+  CHECK_OK(keys::aead_nonce(next_key.iv, 7, next_nonce));
+  std::array<std::uint8_t, sizeof(payload) + kAeadTagSize> staged_cipher{};
+  CHECK(aead->seal(aead->ctx, next_key.key.data(), next_nonce.data(),
+                   ByteView{aad, sizeof(aad)}, ByteView{payload, sizeof(payload)},
+                   staged_cipher.data()));
+  std::memcpy(tag.data(), staged_cipher.data() + sizeof(payload), tag.size());
+  opened.fill(0xA5);
+  CHECK(receiver.open(link, 7, ByteView{aad, sizeof(aad)},
+                      ByteView{staged_cipher.data(), sizeof(payload)}, tag,
+                      MutableByteView{opened.data(), opened.size()}).code ==
+        StatusCode::AuthorizationFailed);
+  CHECK((opened == std::array<std::uint8_t, sizeof(payload)>{}));
+  CHECK(!keys.promotion_pending());
+  keys::clear(next_key);
+  secure_clear(next_prk);
+  secure_clear(next_nonce);
 }
 
 int main(int argc, char** argv) {

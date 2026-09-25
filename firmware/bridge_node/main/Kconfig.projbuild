@@ -74,6 +74,18 @@ config ROUTELOOM_ROUTE_LIFETIME_MS
         (the node would otherwise refuse to start with
         ROUTE_LIFETIME_BELOW_REFRESH_BOUND). Product value: 90000 ms.
 
+config ROUTELOOM_ROUTE_BROADCAST
+    bool "Broadcast self+gateway route advertisements (GroupLink, opt-in)"
+    default n
+    depends on ROUTELOOM_ROUTE_GATEWAY_SCOPED
+    help
+        P5-2: downward refreshes to two or more grant-holding neighbors
+        share one GroupLink route advertisement instead of one unicast
+        each (docs/design/sdk-v1/routing-scale.md section 8). Every other
+        target keeps unicast, so a mixed site keeps working. Enable on
+        the whole site at once. Default off; capability probing stays
+        with the Owner.
+
 config ROUTELOOM_DISCOVERY
     bool "Enable autonomous neighbor discovery (RLD1 bootstrap lane)"
     default n

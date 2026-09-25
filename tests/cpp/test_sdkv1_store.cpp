@@ -783,6 +783,37 @@ void test_group_gcm_replay() {
   in.key.fill(0xA5);
   in.overlap_s = 10;
   CHECK_OK(keys.advance(in, 101));
+  SecurityContext staged_link{SecurityScope::GroupLink,
+                              static_cast<std::uint32_t>(site.network), 0x100,
+                              kBroadcastNodeId, site.boot_witness + 1,
+                              site.gk_epoch_current + 1, 0, 0};
+  ScopeDigest staged_prk{};
+  keys::TrafficKey staged_traffic{};
+  keys::AeadNonce staged_nonce{};
+  keys::group_prk(site.network, store.site().gk_next, staged_prk);
+  CHECK_OK(keys::group_bcast_key(staged_prk, staged_link.group_epoch,
+                                 staged_link.sender, staged_link.epoch,
+                                 staged_traffic));
+  CHECK_OK(keys::aead_nonce(staged_traffic.iv, 7, staged_nonce));
+  const std::uint8_t staged_aad[] = {42};
+  const std::uint8_t staged_plain[] = {1, 2, 3};
+  std::array<std::uint8_t, 3 + kAeadTagSize> staged_sealed{};
+  std::array<std::uint8_t, kAeadTagSize> staged_tag{};
+  std::array<std::uint8_t, 3> staged_opened{};
+  CHECK(aead->seal(aead->ctx, staged_traffic.key.data(), staged_nonce.data(),
+                   ByteView{staged_aad, 1}, ByteView{staged_plain, 3},
+                   staged_sealed.data()));
+  std::memcpy(staged_tag.data(), staged_sealed.data() + 3, staged_tag.size());
+  const auto staged_writes = storage.write_calls;
+  CHECK(receiver.open(staged_link, 7, ByteView{staged_aad, 1},
+                      ByteView{staged_sealed.data(), 3}, staged_tag,
+                      MutableByteView{staged_opened.data(), staged_opened.size()}).code ==
+        StatusCode::Busy);
+  CHECK((staged_opened == std::array<std::uint8_t, 3>{}));
+  CHECK(storage.write_calls == staged_writes && keys.promotion_pending());
+  keys::clear(staged_traffic);
+  secure_clear(staged_prk);
+  secure_clear(staged_nonce);
   // An insider can send under a staged GK. A verified tag schedules the
   // promotion, but cannot reach application plaintext before twin commit.
   NoPairwise no_session;

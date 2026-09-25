@@ -113,6 +113,22 @@ struct RouteAdvertisement {
   RouteMetric metric{kInfiniteRouteMetric};
 };
 
+// Only the scoped self + gateway advertisement uses this format. via lets
+// each receiver apply poison reverse without poisoning other listeners.
+constexpr std::size_t kBroadcastRouteMaxRecords = 5;
+struct BroadcastRouteRecord {
+  RouteAdvertisement route{};
+  NodeId via{kInvalidNodeId};
+};
+Status encode_broadcast_route_update(const BroadcastRouteRecord* records, std::size_t count,
+                                     NodeId sender, MutableByteView out,
+                                     std::size_t& written) noexcept;
+Status decode_broadcast_route_update(ByteView input, NodeId sender,
+                                     std::array<BroadcastRouteRecord, kBroadcastRouteMaxRecords>& records,
+                                     std::size_t& count) noexcept;
+RouteMetric project_broadcast_route_metric(const BroadcastRouteRecord& record,
+                                           NodeId receiver) noexcept;
+
 // Route records are laid out largest-alignment first (no interior padding):
 // the table holds kMaxRouteEntries x kRouteCandidatesPerDestination of these
 // in static RAM (docs/design/sdk-v1/ram-budget.md).

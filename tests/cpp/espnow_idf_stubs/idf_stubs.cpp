@@ -63,6 +63,9 @@ void advance_ms(const std::uint32_t ms) noexcept {
 
 std::int64_t now_us() noexcept { return g_now_us; }
 unsigned send_count() noexcept { return g_send_count; }
+bool last_send_to(const std::uint8_t mac[6]) noexcept {
+  return mac != nullptr && std::memcmp(mac, g_last_dest, sizeof(g_last_dest)) == 0;
+}
 unsigned del_peer_count() noexcept { return g_del_peer_count; }
 void fail_del_peer(const bool fail) noexcept { g_fail_del_peer = fail; }
 void fail_add_peer(const bool fail) noexcept { g_fail_add_peer = fail; }
