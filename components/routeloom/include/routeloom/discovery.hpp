@@ -483,6 +483,10 @@ class NeighborDiscovery {
   bool data_permitted(const MacAddress& mac) const noexcept;
   bool data_permitted(NodeId peer) const noexcept;
   bool binding_of(NodeId peer, BindingId& out) const noexcept;
+  // Verified radio MAC of a live-bound peer — the parent identity the
+  // sleep image gates warm restore on (P4 §9.3). Same resolvability bar
+  // as binding_of; false when no live binding exists.
+  bool mac_of(NodeId peer, MacAddress& out) const noexcept;
   // Binding generation under which the peer's verified record stands — the
   // epoch that keys telemetry attribution (02-telemetry §2.4). Same
   // resolvability bar as binding_of; false when no live binding exists.
@@ -566,6 +570,19 @@ class NeighborDiscovery {
   // is refused and the reservation is dropped.
   Status complete_handshake(std::uint32_t token, const AuthenticatedPeerProof& proof,
                             MonotonicMs now_ms) noexcept;
+  // Sleep-parent re-confirmation (P4 §9.3, V1-F07): elevate the taken
+  // initiator start WITHOUT running the engine. The start is a live
+  // take_member_start product — its OFFER was scope-verified and echoed
+  // our fresh DISCOVER — so it re-confirms a live radio peer; peer
+  // authentication rides the retained session the Owner restores (whose
+  // capability floor was verified when that session was established),
+  // and the Owner pre-vets revocation before calling. Same
+  // conflict/capacity/local-membership bar as the engine tail (which
+  // runs here, shared): anything else is refused and the Owner falls
+  // back to a fresh handshake. Only the Owner calls this, only for its
+  // held restore parent, only in member-handshake mode.
+  Status confirm_sleep_parent(const MemberStartRequest& start,
+                              MonotonicMs now_ms) noexcept;
   // Drop the reservation (engine failure/abort path). Unknown tokens are
   // ignored — completion and cancellation never race into an error.
   void cancel_member_handshake(std::uint32_t token) noexcept;
@@ -779,6 +796,12 @@ class NeighborDiscovery {
   // dev exchange path and complete_handshake converge here.
   void elevate_proven_peer(const MacAddress& peer_mac, NodeId peer_node,
                            MonotonicMs now_ms) noexcept;
+  // The tail below the peer-evidence check, for callers that vetted the
+  // peer by other means (confirm_sleep_parent: retained session plus the
+  // Owner's revocation pre-check). `peer_member` must be true only with
+  // such evidence in hand.
+  void elevate_confirmed_peer(const MacAddress& peer_mac, NodeId peer_node,
+                              bool peer_member, MonotonicMs now_ms) noexcept;
   void sweep_member_pendings(MonotonicMs now_ms) noexcept;
   void release_candidate(Candidate& candidate) noexcept;
   void cancel_competing(const MacAddress& mac, NodeId node) noexcept;

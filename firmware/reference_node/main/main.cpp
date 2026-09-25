@@ -46,6 +46,8 @@
 #include "routeloom/espnow_power.hpp"
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/espnow_sdkv1.hpp"
+#include "routeloom/rlcw1.hpp"
+#include "routeloom/sdkv1_session_rtc.hpp"
 #include "routeloom/fail_policy.hpp"
 #include "routeloom/nvs_counter_store.hpp"
 #include "routeloom/power.hpp"
@@ -202,6 +204,15 @@ RTC_NOINIT_ATTR routeloom::FailStreak s_fail;
 RTC_DATA_ATTR std::uint32_t s_sleep_marker = 0;
 RTC_DATA_ATTR std::uint32_t s_sleep_programmed_ms = 0;
 constexpr std::uint32_t kSleepMarkerValue = 0x524c5057;  // "RLPW"
+
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+// Owner sleep tail (P4 §9.3, V1-F07): the retained session image in RTC
+// slow memory, the only RAM surviving deep sleep. Zero after any
+// non-sleep reset (re-copied from the image) — decode refuses those, so
+// no validity claim rides on the backing itself.
+RTC_DATA_ATTR std::array<std::uint8_t, routeloom::sdkv1::kRtcSessionRecordSize>
+    s_rtc_session{};
+#endif
 
 class LogPowerEvents final : public routeloom::PowerEvents {
  public:
@@ -988,14 +999,35 @@ extern "C" void app_main(void) {
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   // Owner profile: boot after radio-up — entropy.begin() draws post-RF
   // randomness, then boot() arms the cookie sealer from it. The node
-  // start stays deferred to ApplyMemberConfig.
+  // start stays deferred to ApplyMemberConfig (member) or adopt_dev
+  // (dev, below).
   status = entropy.begin();
   if (!status) fail(status.detail);
   status = owner.attach_runtime(runtime);
   if (!status) fail(status.detail);
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
+  // Dev route (P4 §10.1): adoption without joining. The reserved dev
+  // boot (message_session) plus the static PSK/network/node/channel
+  // adopt the node directly; group send/receive serves from here on.
+  routeloom::keys::Secret dev_psk{};
+  if (!parse_hex(CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX, dev_psk)) {
+    fail("invalid development key");
+  }
+  EspNowSecurityOwner::DevGroupConfig dev_config{};
+  dev_config.psk = dev_psk;
+  routeloom::secure_clear(dev_psk);
+  dev_config.network = static_cast<routeloom::NetworkId>(CONFIG_ROUTELOOM_NETWORK_ID);
+  dev_config.node = CONFIG_ROUTELOOM_NODE_ID;
+  dev_config.channel = static_cast<std::uint8_t>(CONFIG_ROUTELOOM_CHANNEL);
+  dev_config.boot = message_session;
+  dev_config.role = routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay;
+  status = owner.adopt_dev(dev_config, monotonic_now_ms());
+  if (!status) fail(status.detail);
+#else
   status = owner.boot(message_session, /*rlboot_prepared=*/true,
                       /*usb_direct=*/false, monotonic_now_ms());
   if (!status) fail(status.detail);
+#endif
 #endif
 
 #if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
@@ -1279,11 +1311,109 @@ extern "C" void app_main(void) {
   // ApplyMemberConfig), so app_main owns the event drain and the owner
   // poll single-threaded.
   ESP_LOGI(kTag, "security owner started; node start deferred to membership");
+#if CONFIG_ROUTELOOM_DEEP_SLEEP
+  // Owner sleep tail (P4 §9.3, V1-F07): one-shot wake evidence for the
+  // restore below. The marker/programmed reads clear the RTC cells, so
+  // a reset without a new sleep never reuses them.
+  bool owner_boot_marked = false;
+  const routeloom::ResetCause owner_boot_cause = classify_boot(owner_boot_marked);
+  const std::uint32_t owner_programmed_ms = s_sleep_programmed_ms;
+  s_sleep_programmed_ms = 0;
+  const bool owner_deep_wake = owner_boot_cause == routeloom::ResetCause::DeepSleepWake;
+  const bool owner_timer_wake = esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER;
+  routeloom::sdkv1::BufferRtcSessionPort owner_rtc_port(
+      routeloom::MutableByteView{s_rtc_session.data(), s_rtc_session.size()});
+  static routeloom::espnow::EspNowPowerPort owner_power_port(runtime);
+  static FailStreakClearOnSleep owner_streak_clear;
+  owner_power_port.set_pre_sleep_hook(&owner_streak_clear);
+  bool owner_restore_settled = false;
+  bool owner_sleep_parked = false;
+  const std::int64_t owner_prepare_at_us =
+      esp_timer_get_time() +
+      static_cast<std::int64_t>(CONFIG_ROUTELOOM_SLEEP_AFTER_MS) * 1000LL;
+  const std::int64_t owner_stop_at_us = owner_prepare_at_us + 30000000LL;
+#endif
   // Boot complete — the pump loop below is the node's main loop.
   routeloom::fail_streak_runtime_started(s_fail);
   for (;;) {
     runtime.poll_once();
     owner.poll(monotonic_now_ms());
+#if CONFIG_ROUTELOOM_DEEP_SLEEP
+    // Warm restore: retried while the parent re-binds (Busy) with a
+    // freshly bounded elapsed upper bound each round; terminal (warm or
+    // refused) settles once and a refusal resumes cold.
+    if (!owner_restore_settled) {
+      const routeloom::MonotonicMs awake_ms = monotonic_now_ms();
+      const std::uint32_t awake32 =
+          awake_ms > 0xFFFFFFFFULL ? 0xFFFFFFFFU : static_cast<std::uint32_t>(awake_ms);
+      const std::uint32_t elapsed = routeloom::bound_sleep_elapsed_upper_ms(
+          owner_deep_wake, owner_timer_wake, owner_boot_marked, owner_programmed_ms,
+          awake32);
+      const routeloom::Status restored = owner.coordinator().restore_sleep_image(
+          owner_rtc_port, message_session, elapsed, owner_deep_wake, owner_boot_marked);
+      if (restored.code != routeloom::StatusCode::Busy) {
+        owner_restore_settled = true;
+        if (restored) {
+          ESP_LOGI(kTag, "sleep restore: warm (elapsed bound %lu ms)",
+                   static_cast<unsigned long>(elapsed));
+        } else {
+          ESP_LOGW(kTag, "sleep restore refused (%s): cold resume", restored.detail);
+        }
+      }
+    }
+    // Sleep entry: park the security leg, save the retained image over
+    // the live parent binding, then configure the timer wake and enter
+    // deep sleep through the shared power port (radio stop + pre-sleep
+    // hook). Busy re-pumps against the drain deadline; a save refusal
+    // without an image sleeps cold with the marker clear. Mesh, group,
+    // relay and USB drains ride a future PowerCoordinator leg for the
+    // Owner profile — this tail only parks the security workspace.
+    if (esp_timer_get_time() >= owner_prepare_at_us) {
+      if (!owner_sleep_parked) {
+        if (!owner.prepare_sleep(monotonic_now_ms())) {
+          if (esp_timer_get_time() >= owner_stop_at_us) fail("owner sleep drain deadline");
+        } else {
+          owner_sleep_parked = true;
+        }
+      }
+      if (owner_sleep_parked) {
+        routeloom::NodeId parent = routeloom::kInvalidNodeId;
+        routeloom::MacAddress parent_mac{};
+        routeloom::BindingId parent_binding{routeloom::kInvalidBindingId};
+        routeloom::Status saved =
+            routeloom::Status::error(routeloom::StatusCode::NotFound, "no parent link");
+        if (owner.coordinator().first_live_peer(routeloom::SecurityScope::Link, parent) &&
+            owner.discovery() != nullptr &&
+            owner.discovery()->binding_of(parent, parent_binding) &&
+            owner.discovery()->mac_of(parent, parent_mac)) {
+          saved = owner.coordinator().save_sleep_image(
+              owner_rtc_port, parent, parent_mac, parent_binding.value,
+              monotonic_now_ms());
+        }
+        if (saved.code == routeloom::StatusCode::Busy) {
+          // New work landed after the park: unpark and keep pumping.
+          owner_sleep_parked = false;
+          (void)owner.wake(monotonic_now_ms());
+          if (esp_timer_get_time() >= owner_stop_at_us) fail("owner sleep drain deadline");
+        } else {
+          if (saved) {
+            s_sleep_marker = kSleepMarkerValue;
+            s_sleep_programmed_ms = CONFIG_ROUTELOOM_SLEEP_DURATION_MS;
+          }
+          routeloom::WakePlan plan{};
+          plan.wake_after_ms = CONFIG_ROUTELOOM_SLEEP_DURATION_MS;
+          if (!owner_power_port.configure_wake(plan)) fail("owner sleep wakeup refused");
+          (void)owner_power_port.enter_sleep();
+          // enter_sleep does not return on silicon; a return means no
+          // sleep happened — never leave the marker armed for the reset
+          // path to misread as a sleep cycle.
+          s_sleep_marker = 0;
+          s_sleep_programmed_ms = 0;
+          fail("owner sleep entry returned");
+        }
+      }
+    }
+#endif
     runtime.wait_for_event(routeloom::kOwnerPollPeriodMs);
   }
 #elif CONFIG_ROUTELOOM_DEEP_SLEEP

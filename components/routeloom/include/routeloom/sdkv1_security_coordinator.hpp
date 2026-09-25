@@ -40,6 +40,7 @@
 #include "routeloom/sdkv1_joiner.hpp"
 #include "routeloom/sdkv1_membership.hpp"
 #include "routeloom/sdkv1_records.hpp"
+#include "routeloom/sdkv1_session_rtc.hpp"
 #include "routeloom/sdkv1_store.hpp"
 #include "routeloom/security.hpp"
 #include "routeloom/session_bank.hpp"
@@ -271,8 +272,41 @@ class SecurityCoordinator final : public BootstrapSink,
   // The session provider view over the member bank, handed to the
   // firmware's MeshNode at construction. Unconfigured (not ready) until
   // a member config is adopted; the node must not start on it before
-  // ApplyMemberConfig.
-  SecurityProvider& session_provider() noexcept { return session_provider_; }
+  // ApplyMemberConfig. The view is the sleep write-ahead guard over the
+  // bank: unarmed it purely delegates, so every existing caller behaves
+  // exactly as before until a sleep image restores into the bank.
+  SecurityProvider& session_provider() noexcept { return sleep_guard_; }
+  // Sleep save (P4 §9.3, V1-F07), Member mode after PrepareSleep parked
+  // the coordinator: exports the (Link, parent) session plus the first
+  // live EndToEnd session (when one stands) into `port` with the adopted
+  // membership and the parent radio identity. Requires the park — call
+  // after prepare_sleep, before sleep_enter — and re-verifies quiescence
+  // (Busy: new work arrived, abort the attempt and retry later). Any
+  // other refusal means cold sleep: proceed without warm restore. A
+  // refusal leaves the port untouched; a stale image always fails the
+  // wake boot check, so it can never warm-restore by accident.
+  Status save_sleep_image(RtcSessionPort& port, NodeId parent, const MacAddress& parent_mac,
+                          std::uint32_t parent_binding, MonotonicMs now) noexcept;
+  // Sleep restore (P4 §9.3, V1-F07): consumes the retained image one-shot
+  // once adopted, holds it while the parent re-binds post-wake, then
+  // installs it and arms TX write-ahead. `next_boot` is this boot's
+  // retained boot witness, `trusted_elapsed_ms` the upper bound proved
+  // by post-wake evidence (0 = unknown, refused), `deep_sleep` /
+  // `sleep_marker` the reset-cause + marker evidence. Busy (not adopted
+  // yet, parked, or parent not bound yet) is retryable and touches
+  // nothing durable; retries may raise trusted_elapsed_ms as the awake
+  // time grows (positive deltas deduct from the held image, so the
+  // install never over-credits the rebind gap). Any other refusal is
+  // terminal for this boot and the device resumes through RLRES1
+  // instead. Idempotent once restored. Clock-free: every time input
+  // arrives pre-proved as the elapsed bound.
+  Status restore_sleep_image(RtcSessionPort& port, std::uint32_t next_boot,
+                             std::uint32_t trusted_elapsed_ms, bool deep_sleep,
+                             bool sleep_marker) noexcept;
+  // First usable session peer for `scope` in bank table order (false
+  // when none stands): the save side resolves the retained link through
+  // this. Side-effect-free observation, like snapshot().
+  bool first_live_peer(SecurityScope scope, NodeId& peer) const noexcept;
   // The membership hooks over the adopted stores, for the member
   // discovery's MembershipHooks port (the firmware initializes the
   // discovery's controller with these at StartMemberDiscovery).
@@ -398,6 +432,11 @@ class SecurityCoordinator final : public BootstrapSink,
   void sweep_demux(MonotonicMs now) noexcept;
   Status demux_member_frame(const autonomy::Rld1Envelope& env, DemuxEntry* entry,
                             MonotonicMs now) noexcept;
+  // Reserves the discovery elevation token for a parked responder leg on
+  // first inbound handshake traffic (the initiator side reserves at leg
+  // claim instead). Best-effort: a refused reservation leaves the token
+  // None and the session installs without discovery elevation.
+  void ensure_responder_token(DemuxEntry& entry, MonotonicMs now) noexcept;
   // --- engine legs ---
   Status drive_engine(MonotonicMs now) noexcept;
   Status emit_send(const HandshakeResult& result, MonotonicMs now) noexcept;
@@ -421,6 +460,15 @@ class SecurityCoordinator final : public BootstrapSink,
   // The real quiescence check, for PrepareSleep (which runs inside step()
   // with the re-entry guard set, where the public query answers false).
   bool quiescent_locked() const noexcept;
+  // Member handshake/session work regardless of the park: live engine
+  // legs, bank establishment demands, or live demux legs (completed
+  // member legs only route late duplicates and never count). Shared by
+  // quiescent_locked and the save-time re-check (which may not use the
+  // parked short-circuit).
+  bool member_work_pending() const noexcept;
+  // Abandons the held restore image (wiped) and latches the terminal
+  // failure for this boot.
+  Status fail_restore(const Status& status) noexcept;
 
   // Everything the member handshake owns that no outside reference
   // touches: the engine with its cookie and resume cache, the demand
@@ -483,6 +531,10 @@ class SecurityCoordinator final : public BootstrapSink,
   GatewaySessionBank bank_;
   BankSessionSink<32, 128> bank_sink_;
   RamSessionProvider<32, 128> session_provider_;
+  // Retained TX write-ahead over the bank provider (unarmed: pure
+  // delegate). Armed only by restore_sleep_image; disarmed by stop,
+  // removal, and wake.
+  RtcWriteAheadProvider sleep_guard_;
   GkScopeProvider gk_scope_;
   Workspace ws_{};
 
@@ -505,6 +557,16 @@ class SecurityCoordinator final : public BootstrapSink,
   bool removal_holdoff_armed_{false};
   MonotonicMs removal_holdoff_at_{0};
   CoordinatorCounters counters_{};
+  // Sleep restore one-shot state (P4 §9.3): the consumed image waits in
+  // RAM while the parent re-binds post-wake. Terminal once done/failed.
+  // restore_elapsed_ms_ is the bound already deducted from the held
+  // image; retries with a larger bound deduct the delta.
+  RtcSessionImage held_restore_{};
+  bool restore_holding_{false};
+  bool restore_done_{false};
+  bool restore_failed_{false};
+  std::uint32_t restore_elapsed_ms_{0};
+  Status restore_error_{StatusCode::Ok, "ok"};
 };
 
 }  // namespace routeloom::sdkv1

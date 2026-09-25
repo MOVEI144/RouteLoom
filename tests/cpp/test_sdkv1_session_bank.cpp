@@ -784,6 +784,59 @@ void suite_provider_wiring() {
   CHECK_OK(provider.retire_all(kPeer));
 }
 
+void suite_sleep_export() {
+  // Sleep save inspection (P4 §9.3): the owner finds a live peer per
+  // scope and exports a restorable copy — dev resumes never export.
+  Fixture<NodeSessionBank> fix;
+  NodeId found = kInvalidNodeId;
+  CHECK(!fix.bank.first_live_peer(SecurityScope::Link, found));
+  SessionBankEntry exported{};
+  CHECK(fix.bank.export_sleep_entry(SecurityScope::Link, kPeer, exported).code ==
+        StatusCode::InvalidState);
+  CHECK_OK(fix.configure(fix.test_port()));
+  CHECK(!fix.bank.first_live_peer(SecurityScope::Link, found));
+  CHECK(fix.bank.export_sleep_entry(SecurityScope::Link, kPeer, exported).code ==
+        StatusCode::NotFound);
+  install_link(fix.bank, kPeer, 0x1111, 0x2222, 0x10);
+  CHECK(fix.bank.first_live_peer(SecurityScope::Link, found));
+  CHECK(found == kPeer);
+  CHECK(!fix.bank.first_live_peer(SecurityScope::EndToEnd, found));
+  CHECK_OK(fix.bank.export_sleep_entry(SecurityScope::Link, kPeer, exported));
+  CHECK(exported.peer == kPeer && exported.tx_cid == 0x1111 && exported.rx_cid == 0x2222);
+  CHECK(exported.flags == 0);
+  // Pin/rekey housekeeping does not survive sleep: the copy clears it
+  // (the live entry keeps it).
+  CHECK_OK(fix.bank.set_pinned(SecurityScope::Link, kPeer, true));
+  CHECK_OK(fix.bank.export_sleep_entry(SecurityScope::Link, kPeer, exported));
+  CHECK(exported.flags == 0);
+  SessionBankEntry live{};
+  CHECK_OK(fix.bank.export_entry(SecurityScope::Link, kPeer, live));
+  CHECK(live.flags != 0);
+  // A dev-resume install never exports: dev sessions re-run RLRES1 after
+  // every boot instead of RTC-restoring.
+  constexpr NodeId kDevPeer = 0x00A1000000000999ULL;
+  ContextKeys dev_keys{};
+  dev_keys.scope = SecurityScope::Link;
+  dev_keys.network = kNet;
+  dev_keys.peer = kDevPeer;
+  dev_keys.tx_context_id = 0x3333;
+  dev_keys.rx_context_id = 0x4444;
+  dev_keys.tx_key.fill(0xE0);
+  dev_keys.rx_key.fill(0xE1);
+  dev_keys.tx_iv.fill(0xE2);
+  dev_keys.rx_iv.fill(0xE3);
+  InstallAttestation dev_att{};
+  dev_att.peer_role = 0b011;
+  dev_att.created_gk_epoch = kGk;
+  dev_att.dev_resume = true;
+  CHECK_OK(fix.bank.install_verified(dev_keys, dev_att));
+  CHECK(fix.bank.export_sleep_entry(SecurityScope::Link, kDevPeer, exported).code ==
+        StatusCode::InvalidArgument);
+  // ... but the plain member export beside it is unaffected.
+  CHECK_OK(fix.bank.export_sleep_entry(SecurityScope::Link, kPeer, exported));
+  CHECK(exported.peer == kPeer);
+}
+
 void suite_gateway_capacity(const AeadGcm& port) {
   Fixture<GatewaySessionBank> fix;
   CHECK_OK(fix.configure(port));
@@ -929,6 +982,7 @@ int main() {
 #endif
   suite_reentry();
   suite_provider_wiring();
+  suite_sleep_export();
   if (failures != 0) {
     std::fprintf(stderr, "%d session bank check(s) failed\n", failures);
     return 1;

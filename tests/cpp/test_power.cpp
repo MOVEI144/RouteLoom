@@ -717,6 +717,26 @@ std::size_t accepted_count(const CapturingObserver& observer) {
   return count;
 }
 
+void test_sleep_elapsed_upper_bound() {
+  using routeloom::bound_sleep_elapsed_upper_ms;
+  using routeloom::kSleepElapsedBootMarginMs;
+  // Untrusted shapes stay 0: cold/other reset, non-timer wake, missing
+  // marker, or a zero programmed duration never bounds anything.
+  CHECK(bound_sleep_elapsed_upper_ms(false, true, true, 60000, 100) == 0);
+  CHECK(bound_sleep_elapsed_upper_ms(true, false, true, 60000, 100) == 0);
+  CHECK(bound_sleep_elapsed_upper_ms(true, true, false, 60000, 100) == 0);
+  CHECK(bound_sleep_elapsed_upper_ms(true, true, true, 0, 100) == 0);
+  // A marked timer wake: twice programmed (drift) + boot margin + awake.
+  CHECK(bound_sleep_elapsed_upper_ms(true, true, true, 60000, 100) ==
+        120000 + kSleepElapsedBootMarginMs + 100);
+  CHECK(bound_sleep_elapsed_upper_ms(true, true, true, 60000, 0) ==
+        120000 + kSleepElapsedBootMarginMs);
+  // Saturates instead of wrapping: a huge programmed duration still
+  // yields a (uselessly large, cold-resuming) bound, never a small one.
+  CHECK(bound_sleep_elapsed_upper_ms(true, true, true, 0xFFFFFFFFU, 0xFFFFFFFFU) ==
+        0xFFFFFFFFU);
+}
+
 void test_resume_time_uncertain_no_resend() {
   MemoryPowerStorage storage;
   PowerWorld w(storage);
@@ -5346,6 +5366,7 @@ int main() {
   test_persist_full_fails_explicitly();
   test_drain_deadline_forces_settle();
   test_sleep_abort();
+  test_sleep_elapsed_upper_bound();
   test_resume_time_uncertain_no_resend();
   test_resume_known_elapsed_resends();
   test_resume_expired_no_resend();

@@ -193,6 +193,17 @@ ElapsedInterval classify_sleep_elapsed(const bool deep_sleep_wake, const bool ti
   return out;
 }
 
+std::uint32_t bound_sleep_elapsed_upper_ms(const bool deep_sleep_wake, const bool timer_wake,
+                                           const bool marker_ok,
+                                           const std::uint32_t programmed_ms,
+                                           const std::uint32_t awake_ms) noexcept {
+  if (!deep_sleep_wake || !timer_wake || !marker_ok || programmed_ms == 0) return 0;
+  const std::uint64_t upper = static_cast<std::uint64_t>(programmed_ms) * 2 +
+                              kSleepElapsedBootMarginMs + awake_ms;
+  if (upper > 0xFFFFFFFFULL) return 0xFFFFFFFFU;
+  return static_cast<std::uint32_t>(upper);
+}
+
 PowerCoordinator::PowerCoordinator(const PowerConfig& config, MeshNode& node,
                                    PowerPort& port, PowerStorage& storage,
                                    PowerEvents& events) noexcept

@@ -12,8 +12,11 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "routeloom/group_replay.hpp"
 #include "routeloom/key_schedule.hpp"
 #include "routeloom/rlres1.hpp"
+#include "routeloom/security.hpp"
+#include "routeloom/session_bank.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 
@@ -49,6 +52,8 @@ class DevGroupSender {
                    std::uint32_t boot) noexcept;
   bool configured() const noexcept { return configured_; }
   std::uint32_t boot() const noexcept { return boot_; }
+  // Next counter the sender would issue (for the provider's issued-check).
+  std::uint64_t tx_next() const noexcept { return tx_next_; }
   // Issues the next TX counter, stopping at kMaxUseCounter (CounterExhausted).
   Status next_counter(std::uint64_t& counter) noexcept;
   // Copies the current sender key (InvalidState before configure).
@@ -61,6 +66,58 @@ class DevGroupSender {
   std::uint32_t boot_{0};
   std::uint32_t last_boot_{0};
   bool configured_{false};
+};
+
+// Fixed dev group wire epoch (P4 §10.1): dev senders version by boot (the
+// key epoch), so the epoch field is always this.
+constexpr std::uint32_t kDevGroupEpoch = 1;
+
+// Dev group provider (P4 §10.1, V1-N01/V1-K10): SecurityProvider over
+// boot-scoped dev group keys. TX draws DevGroupSender counters (RAM,
+// stops at 2^32); RX derives per-sender keys and enforces replay per
+// (sender, boot) in RAM — no NVS counter/replay state anywhere, the #37
+// root fix for the dev profile. Group scope only: pairwise scopes refuse
+// (pairwise dev sessions need the coordinator route), as does GroupLink.
+// A matching frame only proves "someone with the PSK" — never a device
+// identity. No heap, no exceptions.
+class DevGroupProvider final : public SecurityProvider {
+ public:
+  // The PSK is COPIED (wiped in the destructor); the sender and AEAD are
+  // borrowed and must outlive the provider.
+  DevGroupProvider(DevGroupSender& sender, const keys::Secret& psk, NetworkId network,
+                   const AeadGcm& aead, NodeId self) noexcept;
+  DevGroupProvider(const DevGroupProvider&) = delete;
+  DevGroupProvider& operator=(const DevGroupProvider&) = delete;
+  ~DevGroupProvider() noexcept override;
+
+  bool ready() const noexcept override { return sender_.configured(); }
+  Status tx_epoch(SecurityScope scope, NodeId peer, std::uint32_t& epoch) noexcept override;
+  ContextState context_state(SecurityScope scope, NodeId peer) const noexcept override;
+  bool accepts_group_epoch(std::uint32_t g) const noexcept override {
+    return g == kDevGroupEpoch;
+  }
+  Status next_counter(const SecurityContext& c, std::uint64_t& counter) noexcept override;
+  Status seal(const SecurityContext& c, std::uint64_t counter, ByteView aad,
+              ByteView plaintext, MutableByteView ciphertext,
+              std::array<std::uint8_t, kAeadTagSize>& tag) noexcept override;
+  Status open(const SecurityContext& c, std::uint64_t counter, ByteView aad,
+              ByteView ciphertext, const std::array<std::uint8_t, kAeadTagSize>& tag,
+              MutableByteView plaintext) noexcept override;
+
+ private:
+  Status material(const SecurityContext& c, keys::TrafficKey& out, bool transmit) noexcept;
+
+  DevGroupSender& sender_;
+  keys::Secret psk_{};
+  NetworkId network_{0};
+  const AeadGcm& aead_;
+  NodeId self_{kInvalidNodeId};
+  GroupReplayTable replay_{};
+  std::array<std::uint8_t, kMaxEspNowBody> staging_{};
+  std::uint64_t sealed_{0};
+  bool has_sealed_{false};
+  std::uint32_t sealed_boot_{0};
+  bool in_call_{false};
 };
 
 // --- Maintenance-domain fingerprints (P4 §10.2) ------------------------------

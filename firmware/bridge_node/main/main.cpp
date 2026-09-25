@@ -39,6 +39,7 @@
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/espnow_sdkv1.hpp"
 #include "routeloom/fail_policy.hpp"
+#include "routeloom/rlcw1.hpp"
 #include "routeloom/nvs_counter_store.hpp"
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
 #include "routeloom/espnow_sdkv1_entropy.hpp"
@@ -597,9 +598,29 @@ extern "C" void app_main(void) {
   if (!status) fail(status.detail);
   status = owner.attach_usb(bridge);
   if (!status) fail(status.detail);
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
+  // Dev route (P4 §10.1): adoption without joining — the reserved dev
+  // boot plus the static PSK/network/node/channel adopt the node
+  // directly; group send/receive serves from here on.
+  routeloom::keys::Secret dev_psk{};
+  if (!parse_hex(CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX, dev_psk)) {
+    fail("invalid development key");
+  }
+  EspNowSecurityOwner::DevGroupConfig dev_config{};
+  dev_config.psk = dev_psk;
+  routeloom::secure_clear(dev_psk);
+  dev_config.network = static_cast<routeloom::NetworkId>(CONFIG_ROUTELOOM_NETWORK_ID);
+  dev_config.node = CONFIG_ROUTELOOM_NODE_ID;
+  dev_config.channel = static_cast<std::uint8_t>(CONFIG_ROUTELOOM_CHANNEL);
+  dev_config.boot = message_session;
+  dev_config.role = routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay;
+  status = owner.adopt_dev(dev_config, monotonic_now_ms());
+  if (!status) fail(status.detail);
+#else
   status = owner.boot(message_session, /*rlboot_prepared=*/true,
                       /*usb_direct=*/true, monotonic_now_ms());
   if (!status) fail(status.detail);
+#endif
 #endif
   bridge.set_mesh(&runtime.node());
   // Device nonce seeds the session transcript; sampling esp_random only
