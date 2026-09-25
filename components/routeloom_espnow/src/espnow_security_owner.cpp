@@ -127,7 +127,8 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::enforce_revocation(
   }
   // The P4 bank, pending handshakes and Discovery bindings retire before
   // any durable resume sweep. The route withdrawal also closes queued
-  // sends to revoked peers.
+  // sends to revoked peers. The RLP2 resume sweep itself belongs to the
+  // lifecycle's Sweep step (the single sweep path) and runs next.
   const Status sessions = owner.coordinator().revoke_member_sessions(set, site_epoch, now_ms);
   if (!sessions) return sessions;
   if (owner.runtime_ != nullptr) {
@@ -135,26 +136,7 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::enforce_revocation(
       owner.runtime_->node().revoke_routes(set.entries[i].node_id, now_ms);
     }
   }
-  if (owner.p4_sweep_network_ != set.network || owner.p4_sweep_rs_epoch_ != set.rs_epoch) {
-    owner.p4_sweep_network_ = set.network;
-    owner.p4_sweep_rs_epoch_ = set.rs_epoch;
-    owner.p4_sweep_cursor_ = 0;
-  }
-  sdkv1::ResumeSlotStorage2& storage = owner.stores_->resume2();
-  const bool gateway = storage.slot_count() ==
-      sdkv1::kResume2GatewayLinkQuota + sdkv1::kResume2GatewayEndQuota;
-  sdkv1::ResumeCache2 cache(storage,
-                            gateway ? sdkv1::kResume2GatewayLinkQuota
-                                    : sdkv1::kResume2NodeLinkQuota,
-                            gateway ? sdkv1::kResume2GatewayEndQuota
-                                    : sdkv1::kResume2NodeEndQuota);
-  sdkv1::ResumeContext context{};
-  context.network = set.network;
-  context.revocations = &set;
-  bool done = false;
-  const Status swept = cache.sweep_revoked(context, owner.p4_sweep_cursor_, done);
-  if (!swept) return swept;
-  return done ? Status::success() : Status::error(StatusCode::WouldBlock, "p4 resume sweep");
+  return Status::success();
 }
 
 Status EspNowSecurityOwner::LifecycleRuntimePort::remove_member_runtime() noexcept {
@@ -189,18 +171,9 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::remove_member_runtime() noexce
     secure_clear(slot.body);
     slot = AuthorityTxStage{};
   }
-  sdkv1::ResumeSlotStorage2& storage = owner.stores_->resume2();
-  const bool gateway = storage.slot_count() ==
-      sdkv1::kResume2GatewayLinkQuota + sdkv1::kResume2GatewayEndQuota;
-  sdkv1::ResumeCache2 cache(storage,
-                            gateway ? sdkv1::kResume2GatewayLinkQuota
-                                    : sdkv1::kResume2NodeLinkQuota,
-                            gateway ? sdkv1::kResume2GatewayEndQuota
-                                    : sdkv1::kResume2NodeEndQuota);
-  bool done = false;
-  const Status cleared = cache.clear_step(owner.p4_clear_cursor_, done);
-  if (!cleared) return cleared;
-  return done ? Status::success() : Status::error(StatusCode::WouldBlock, "p4 resume clear");
+  // The RLP2 resume clear belongs to the lifecycle's Resume step (the
+  // single sweep path) and runs next.
+  return Status::success();
 }
 
 Status EspNowSecurityOwner::LifecycleRuntimePort::erase_site_trust() noexcept {
@@ -407,7 +380,7 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
                                         *entropy_, lifecycle_sink_, &lifecycle_observer_};
   new (lifecycle_box_.data())
       sdkv1::MembershipLifecycle(lifecycle_config, stores_->identity(), stores_->site(),
-                                 stores_->revocation(), stores_->resume(), lifecycle_ports,
+                                 stores_->revocation(), stores_->resume_cache(), lifecycle_ports,
                                  sdkv1::default_es256_verifier(), &stores_->lifecycle());
   lifecycle_live_ = true;
   lifecycle_box_in_use_ = true;

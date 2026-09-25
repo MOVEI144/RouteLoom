@@ -375,6 +375,11 @@ class AuthorityClient final {
   UpdateResult apply_activate(const GroupKeyActivate& msg, MonotonicMs now) noexcept;
   StoredState stored_state(std::uint32_t g) const noexcept;
   bool site_bound() const noexcept;
+  // SHA-256 of the adopted RLS1 MemberCert, computed once per site
+  // commit: site_bound() runs on every poll/RX, and the cert only
+  // changes under a store commit (which always advances commit_seq,
+  // so a changed cert always misses). Requires group_ set.
+  void cached_site_cert_hash(ScopeDigest& out) const noexcept;
   Status do_seal(keys::AuthorityEnvelopeType type, ByteView plaintext,
                  MonotonicMs now) noexcept;
   Status send_join_confirm(MonotonicMs now) noexcept;
@@ -435,6 +440,11 @@ class AuthorityClient final {
   std::uint64_t tx_failed_{0};
   std::uint64_t rx_accepted_{0};
   std::uint64_t rx_rejected_{0};
+  // Bind-time MemberCert hash cache for site_bound() (see above).
+  // Keyed by the site commit_seq; cleared on wipe().
+  mutable ScopeDigest bound_cert_hash_{};
+  mutable std::uint32_t bound_cert_seq_{0};
+  mutable bool bound_cert_valid_{false};
 };
 
 }  // namespace routeloom::sdkv1

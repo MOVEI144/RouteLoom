@@ -114,6 +114,7 @@ class FaultyResumeStorage2 final : public ResumeSlotStorage2 {
     if (index >= slots_.size() || data.size != kResume2SlotBytes) {
       return Status::error(StatusCode::InvalidArgument, "bad resume2 write");
     }
+    if (fail_writes) return Status::error(StatusCode::StorageFailure, "injected write failure");
     const std::size_t call = write_calls++;
     if (call == cut_call) {
       std::memcpy(slots_[index].data(), data.data, cut_bytes);
@@ -135,47 +136,10 @@ class FaultyResumeStorage2 final : public ResumeSlotStorage2 {
   std::size_t cut_call{std::numeric_limits<std::size_t>::max()};
   std::size_t cut_bytes{0};
   bool read_error{false};
-
- private:
-  std::vector<std::array<std::uint8_t, kResume2SlotBytes>> slots_{};
-};
-
-class FaultyResumeStorage final : public ResumeSlotStorage {
- public:
-  explicit FaultyResumeStorage(const std::size_t count) : slots_(count) {
-    for (auto& slot : slots_) slot.fill(0xFF);
-  }
-  std::size_t slot_count() const noexcept override { return slots_.size(); }
-  Status read(const std::size_t index, const MutableByteView target) noexcept override {
-    if (index >= slots_.size() || target.size != kResumeSlotBytes) {
-      return Status::error(StatusCode::InvalidArgument, "bad resume read");
-    }
-    std::memcpy(target.data, slots_[index].data(), kResumeSlotBytes);
-    return Status::success();
-  }
-  Status write(const std::size_t index, const ByteView data) noexcept override {
-    if (index >= slots_.size() || data.size != kResumeSlotBytes) {
-      return Status::error(StatusCode::InvalidArgument, "bad resume write");
-    }
-    if (fail_writes) return Status::error(StatusCode::StorageFailure, "injected write failure");
-    const std::size_t call = write_calls++;
-    if (call == cut_call) {
-      std::memcpy(slots_[index].data(), data.data, cut_bytes);
-      return Status::error(StatusCode::StorageFailure, "power cut mid write");
-    }
-    std::memcpy(slots_[index].data(), data.data, kResumeSlotBytes);
-    return Status::success();
-  }
-  std::array<std::uint8_t, kResumeSlotBytes>& slot(const std::size_t index) {
-    return slots_[index];
-  }
-  std::size_t write_calls{0};
-  std::size_t cut_call{std::numeric_limits<std::size_t>::max()};
-  std::size_t cut_bytes{0};
   bool fail_writes{false};
 
  private:
-  std::vector<std::array<std::uint8_t, kResumeSlotBytes>> slots_;
+  std::vector<std::array<std::uint8_t, kResume2SlotBytes>> slots_{};
 };
 
 // --- Keys / ids ----------------------------------------------------------------------
@@ -365,6 +329,28 @@ inline ResumeSlot resume_slot(const NodeId peer, const std::uint8_t flags = 0,
   slot.network = kNetwork;
   slot.peer_cert_id = {1, 2, 3, 4, 5, 6, 7, 8};
   slot.peer_generation = 1;
+  slot.created_gk_epoch = gk_epoch;
+  slot.last_used_boot = last_used_boot;
+  for (std::size_t i = 0; i < slot.rms.size(); ++i) {
+    slot.rms[i] = static_cast<std::uint8_t>(peer + i + 1);
+  }
+  return slot;
+}
+
+inline ResumeSlot2 resume2_slot(const NodeId peer, const std::uint8_t flags = 0,
+                                const std::uint32_t last_used_boot = 0,
+                                const std::uint32_t gk_epoch = 203,
+                                const ResumePurpose purpose = ResumePurpose::Link) {
+  ResumeSlot2 slot{};
+  slot.valid = true;
+  slot.purpose = purpose;
+  slot.flags = flags;
+  slot.peer = peer;
+  slot.network = kNetwork;
+  slot.peer_cert_id = {1, 2, 3, 4, 5, 6, 7, 8};
+  slot.local_cert_id = {9, 9, 9, 9, 9, 9, 9, 9};
+  slot.peer_generation = 1;
+  slot.peer_role = 0b011;
   slot.created_gk_epoch = gk_epoch;
   slot.last_used_boot = last_used_boot;
   for (std::size_t i = 0; i < slot.rms.size(); ++i) {

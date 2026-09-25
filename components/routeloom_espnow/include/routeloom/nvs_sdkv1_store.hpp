@@ -25,9 +25,9 @@ namespace routeloom::espnow {
 //   store.initialize();                    // task stack (static or owner)
 //
 // and likewise kSiteNamespace + ::site, kRevocationNamespace +
-// ::revocation, kResumeNamespace + BlobResumeSlotStorage(ns,
-// sdkv1::kResumeNodeSlots or kResumeGatewaySlots). Opening a namespace
-// READWRITE creates it on first write only; nothing here erases a key.
+// ::revocation, kResume2Namespace + BlobResumeSlotStorage2(ns,
+// sdkv1::kResumeNodeSlots or kResumeGatewaySlots). Opening a missing
+// namespace READWRITE creates it immediately; nothing here erases a key.
 class NvsBlobNamespace final : public sdkv1::BlobNamespace {
  public:
   // Committed-write accounting for the flash-wear budget (05 §6).

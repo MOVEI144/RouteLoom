@@ -34,7 +34,9 @@ using namespace owner_sim;
 
 // The always-on gateway must not reserve a full RTC restore image in its
 // coordinator; sleep-capable firmware supplies that storage explicitly.
-static_assert(sizeof(SecurityCoordinator) <= 64400,
+// (+112: the session-bank lookup-start hints and the commit_seq-keyed
+// MemberCert hash cache; slack unchanged.)
+static_assert(sizeof(SecurityCoordinator) <= 64512,
               "coordinator must not embed the RTC restore image");
 
 constexpr NodeId kSimNodeA = kNode;  // 0x00A1000000001234

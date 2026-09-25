@@ -615,7 +615,7 @@ Status AuthorityClient::on_start(const AuthorityStart& start, const MonotonicMs 
     if (!group_->ready()) return Status::error(StatusCode::RecoveryRequired, "AUTHORITY_GROUP_BLOCKED");
     const SiteRecord& site = group_->store_.site();
     ScopeDigest cert_hash{};
-    sha256(ByteView{site.member_cert.bytes.data(), site.member_cert.size}, cert_hash);
+    cached_site_cert_hash(cert_hash);
     bool gateway_bound = false;
     for (std::uint8_t i = 0; i < site.gateway_count; ++i) {
       gateway_bound = gateway_bound || site.gateways[i] == start.gateway;
@@ -1032,6 +1032,17 @@ Status AuthorityClient::on_typed(const AuthorityTypedRequest& typed,
   return sent;
 }
 
+void AuthorityClient::cached_site_cert_hash(ScopeDigest& out) const noexcept {
+  const std::uint32_t seq = group_->store_.commit_seq();
+  if (!bound_cert_valid_ || seq != bound_cert_seq_) {
+    const SiteRecord& site = group_->store_.site();
+    sha256(ByteView{site.member_cert.bytes.data(), site.member_cert.size}, bound_cert_hash_);
+    bound_cert_seq_ = seq;
+    bound_cert_valid_ = true;
+  }
+  out = bound_cert_hash_;
+}
+
 bool AuthorityClient::site_bound() const noexcept {
   if (group_ == nullptr) return true;  // PR1 fake-carrier mode
   // A failed GK twin write blocks group traffic, but the already established
@@ -1039,7 +1050,7 @@ bool AuthorityClient::site_bound() const noexcept {
   if (!group_->store_.has_site() || group_->store_.quarantined()) return false;
   const SiteRecord& site = group_->store_.site();
   ScopeDigest cert_hash{};
-  sha256(ByteView{site.member_cert.bytes.data(), site.member_cert.size}, cert_hash);
+  cached_site_cert_hash(cert_hash);
   bool gateway_bound = false;
   for (std::uint8_t i = 0; i < site.gateway_count; ++i) {
     gateway_bound = gateway_bound || site.gateways[i] == local_.gateway;
@@ -1394,6 +1405,9 @@ void AuthorityClient::wipe() noexcept {
   last_activity_ = 0;
   last_wake_ms_ = 0;
   wake_seen_ = false;
+  secure_clear(bound_cert_hash_);
+  bound_cert_seq_ = 0;
+  bound_cert_valid_ = false;
   ready_since_ = 0;
   join_confirmed_ = false;
   join_confirm_sent_ = false;

@@ -730,7 +730,8 @@ class OwnerLeg {
         journal_storage_(routeloom::sdkv1::kLifecycleSlotBytes),
         resume_storage_(16),
         revocations_(rrs_storage_),
-        resume_(resume_storage_),
+        resume_(resume_storage_, routeloom::sdkv1::kResume2NodeLinkQuota,
+                routeloom::sdkv1::kResume2NodeEndQuota),
         journal_(journal_storage_),
         ports_{lauth_, lpeer_, lruntime_, auth_entropy_, lobject_, &lobs_},
         config_(make_config(self)),
@@ -1099,9 +1100,9 @@ class OwnerLeg {
   routeloom::sdkv1::AuthorityClient client_;
   sdkv1_test::FaultyRecordStorage rrs_storage_;
   sdkv1_test::FaultyRecordStorage journal_storage_;
-  sdkv1_test::FaultyResumeStorage resume_storage_;
+  sdkv1_test::FaultyResumeStorage2 resume_storage_;
   RevocationStore revocations_;
-  ResumeCache resume_;
+  ResumeCache2 resume_;
   routeloom::sdkv1::LifecycleStore journal_;
   PeerLifecycleAuthorityPort lauth_;
   PeerLifecyclePeerPort lpeer_;

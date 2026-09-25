@@ -5,7 +5,7 @@
 //  - the RRS1 -> enforcement -> RLS1-floor apply order across Polls, with
 //    the resume sweep killing only revoked-generation slots;
 //  - duplicate/equivocation/stale handling; self-revocation + recovery;
-//  - link-failure recovery, permits() matrix, re-entry Busy;
+//  - link-failure recovery, the recovery-control gate, re-entry Busy;
 //  - the 1+1 kind-6 exchange (timeouts, retries, re-ACK, demux);
 //  - gossip over a 3-node line, a 100-node line, and a partition/merge sim;
 //  - storage faults mid-apply; RAM budget gates.
@@ -230,13 +230,13 @@ struct NodeFixture {
   FaultyRecordStorage identity_storage{kIdentitySlotBytes};
   FaultyRecordStorage site_storage{kSiteSlotBytes};
   FaultyRecordStorage rrs_storage{kRevocationSlotBytes};
-  FaultyResumeStorage resume_storage{16};
+  FaultyResumeStorage2 resume_storage{16};
   FaultyRecordStorage journal_storage{kLifecycleSlotBytes};
   LifecycleStore journal{journal_storage};
   IdentityStore identity{identity_storage};
   SiteStore site{site_storage};
   RevocationStore revocations{rrs_storage};
-  ResumeCache resume{resume_storage};
+  ResumeCache2 resume{resume_storage, kResume2NodeLinkQuota, kResume2NodeEndQuota};
   FakeAuthorityPort authority{};
   FakePeerPort peer{};
   FakeRuntimePort runtime{};
@@ -379,10 +379,11 @@ void test_boot_adoption() {
   CHECK(node.runtime.calls[0].rrs_epoch_at_call == 16);
   CHECK(node.runtime.calls[0].rls_floor_at_call == 14);  // enforce ran pre-floor
   CHECK(node.snap().policy_revision >= 1);  // boot adoption bumps once
-  // Normal credential admitted, revoked one refused.
-  CHECK(node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
-  CHECK(!node.lifecycle.permits(stamp_for(0x00A1000000000100ULL, 1), TrafficUse::Data));
-  CHECK(node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::RecoveryControl));
+  // Recovery control: the normal credential is admitted, the revoked
+  // one refused. (Data-plane traffic is gated by SdkMembershipHooks,
+  // never here — the lifecycle answers only this question.)
+  CHECK(node.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
+  CHECK(!node.lifecycle.permits_recovery_control(stamp_for(0x00A1000000000100ULL, 1)));
 
   // No RRS1 at all: BootGate stays closed and asks the authority.
   NodeFixture bare;
@@ -393,9 +394,9 @@ void test_boot_adoption() {
   CHECK(bare.revocations.initialize());
   CHECK_OK(bare.dispatch(LifecycleInput::Boot(true), 0));
   CHECK(bare.snap().phase == LifecyclePhase::BootGate);
-  CHECK(!bare.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
   // Recovery-control-only establishment is allowed for the boot fetch.
-  CHECK(bare.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::RecoveryControl));
+  // The hooks can admit a fresh zero-floor member before its first RRS1.
+  CHECK(bare.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
   CHECK_OK(bare.dispatch(LifecycleInput::Poll(), 0));
   CHECK(bare.authority.sent.size() == 1);
   CHECK(bare.authority.sent[0].type == kAuthorityTypeRevocation);
@@ -448,12 +449,9 @@ void test_boot_self_revoked_and_blocked() {
   CHECK(action.tag == LifecycleActionTag::RecoveryRequired);
   CHECK(action.token != 0 && action.reason == LifecycleActionReason::SelfRevocation);
   CHECK(action.site_id == kSiteId && action.network == kNetwork);
-  // Every use is closed, including recovery control (zero-touch only).
-  for (const auto use : {TrafficUse::Data, TrafficUse::LinkHandshake, TrafficUse::Resume,
-                         TrafficUse::EndHandshake, TrafficUse::RouteOrigin,
-                         TrafficUse::RecoveryControl}) {
-    CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), use));
-  }
+  // Recovery control is closed too (zero-touch only); traffic uses
+  // are gated by the hooks, which see the same self-revoked stores.
+  CHECK(!node.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
   // A re-issue (generation 4) re-opens through MemberReady.
   SiteRecord reissued = site_for(kNode, 4, 16);
   CHECK_OK(node.site.commit(reissued));
@@ -492,6 +490,20 @@ void test_boot_self_revoked_and_blocked() {
   CHECK(wrong_geo.snap().phase == LifecyclePhase::StorageBlocked);
 }
 
+void test_boot_rejects_resume_storage_quota_mismatch() {
+  for (const std::size_t slots : {std::size_t{15}, std::size_t{17}}) {
+    NodeFixture node;
+    FaultyResumeStorage2 storage(slots);
+    ResumeCache2 resume(storage, kResume2NodeLinkQuota, kResume2NodeEndQuota);
+    node.lifecycle.~MembershipLifecycle();
+    new (&node.lifecycle) MembershipLifecycle(node.config, node.identity, node.site,
+                                               node.revocations, resume, node.ports,
+                                               default_es256_verifier(), &node.journal);
+    CHECK(node.provision(3, 14));
+    CHECK(node.snap().phase == LifecyclePhase::StorageBlocked);
+  }
+}
+
 void test_boot_revalidates_stored_rrs() {
   NodeFixture node;
   CHECK_OK(node.identity.initialize());
@@ -505,7 +517,7 @@ void test_boot_revalidates_stored_rrs() {
   CHECK_OK(node.revocations.accept(foreign.view(), other_key().pub, kSiteId, kNetwork));
   CHECK_OK(node.dispatch(LifecycleInput::Boot(true), 0));
   CHECK(node.snap().phase == LifecyclePhase::StorageBlocked);
-  CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
+  CHECK(!node.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
 
   NodeFixture old_network;
   CHECK_OK(old_network.identity.initialize());
@@ -518,7 +530,9 @@ void test_boot_revalidates_stored_rrs() {
   CHECK_OK(old_network.revocations.accept(old_object.view(), sak().pub, kSiteId, previous));
   CHECK_OK(old_network.dispatch(LifecycleInput::Boot(true), 0));
   CHECK(old_network.snap().phase == LifecyclePhase::BootGate);
-  CHECK(!old_network.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
+  // No adopted set for this network yet, so the boot fetch is open;
+  // the nonzero floor closes data admission in the hooks.
+  CHECK(old_network.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
   CHECK_OK(old_network.dispatch(LifecycleInput::Poll(), 0));
   CHECK(!old_network.authority.sent.empty());
 }
@@ -529,7 +543,9 @@ void test_member_ready_closes_on_floor_advance() {
   CHECK_OK(node.site.raise_rs_floor(15));
   CHECK_OK(node.dispatch(LifecycleInput::MemberReady(node.site.commit_seq(), 15), 100));
   CHECK(node.snap().phase == LifecyclePhase::BootGate);
-  CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
+  // The advanced floor closes data admission in the hooks while the
+  // recovery fetch remains available.
+  CHECK(node.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
 }
 
 void test_member_ready_fetches_package_epoch_past_old_rrs() {
@@ -585,14 +601,15 @@ void test_apply_does_not_ack_below_a_newer_floor() {
   CHECK_OK(node.dispatch(LifecycleInput::Poll(), 100));
   CHECK(node.snap().phase == LifecyclePhase::BootGate);
   CHECK(node.authority.sent.empty());
-  CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
+  // The advanced floor closes data admission in the hooks while the
+  // recovery fetch remains available.
+  CHECK(node.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
 }
 
 void test_recovery_control_rejects_revoked_credentials() {
   NodeFixture node;
   CHECK(node.provision(3, 14));
-  CHECK(!node.lifecycle.permits(stamp_for(0x00A1000000000100ULL, 1),
-                                TrafficUse::RecoveryControl));
+  CHECK(!node.lifecycle.permits_recovery_control(stamp_for(0x00A1000000000100ULL, 1)));
   RevocationSet next = revocation_set(15);
   next.entries[2] = RevocationEntry{kNode, 4, RevocationReason::Removed};
   next.count = 3;
@@ -604,7 +621,7 @@ void test_recovery_control_rejects_revoked_credentials() {
   CHECK_OK(node.dispatch(LifecycleInput::Poll(), 100));  // verify
   CHECK_OK(node.dispatch(LifecycleInput::Poll(), 100));  // durable set
   CHECK(node.snap().phase == LifecyclePhase::ApplyingRrs);
-  CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::RecoveryControl));
+  CHECK(!node.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
 }
 
 // --- RRS application order -----------------------------------------------------------------
@@ -615,11 +632,11 @@ void test_apply_order_and_sweep() {
   CHECK(node.snap().phase == LifecyclePhase::Active);
   // Resume cache: an old-generation slot (revoked by the next set), a
   // new-generation slot (live) and a GK-expired but unrevoked slot.
-  ResumeSlot old = resume_slot(kPeer, 0, 10);
+  ResumeSlot2 old = resume2_slot(kPeer, 0, 10);
   old.peer_generation = 1;
-  ResumeSlot fresh = resume_slot(0x00A1000000000888ULL, 0, 11);
+  ResumeSlot2 fresh = resume2_slot(0x00A1000000000888ULL, 0, 11);
   fresh.peer_generation = 5;
-  ResumeSlot expired = resume_slot(0x00A1000000000999ULL, 0, 12);
+  ResumeSlot2 expired = resume2_slot(0x00A1000000000999ULL, 0, 12);
   expired.peer_generation = 5;
   expired.created_gk_epoch = 100;  // 100 + 2 <= 203: unusable, not revoked
   ResumeContext context{kNetwork, 203, nullptr};
@@ -640,9 +657,9 @@ void test_apply_order_and_sweep() {
   CHECK_OK(node.dispatch(
       LifecycleInput::Authority(authority, kAuthorityTypeRevocation, object.view()), 1000));
   CHECK(node.snap().phase == LifecyclePhase::ApplyingRrs);
-  // Traffic closes while the barrier is shut.
-  CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
-  CHECK(node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::RecoveryControl));
+  // Before commit, the adopted set still controls traffic. Recovery
+  // control stays open for the RRS1 exchange itself.
+  CHECK(node.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
   // Step through: Verify, Store, Enforce, 16 sweep polls, Floor, Done.
   CHECK_OK(node.dispatch(LifecycleInput::Poll(), 1000));  // Verify
   CHECK(node.rrs_storage.write_calls == rrs_writes);      // verify writes nothing
@@ -665,29 +682,69 @@ void test_apply_order_and_sweep() {
   CHECK_OK(node.dispatch(LifecycleInput::Poll(), 1000));  // Done
   CHECK(node.snap().phase == LifecyclePhase::Active);
   CHECK(node.snap().applied_rs_epoch == 15);
-  CHECK(node.lifecycle.permits(stamp_for(0x00A1000000000888ULL, 5), TrafficUse::Data));
-  CHECK(!node.lifecycle.permits(stamp_for(kPeer, 1), TrafficUse::Data));
+  CHECK(node.lifecycle.permits_recovery_control(stamp_for(0x00A1000000000888ULL, 5)));
+  CHECK(!node.lifecycle.permits_recovery_control(stamp_for(kPeer, 1)));
   // Sweep precision: only the revoked-generation slot died.
-  ResumeSlot out{};
+  ResumeSlot2 out{};
   std::size_t index = 0;
   ResumeContext guarded{kNetwork, 203, &node.revocations.set()};
-  CHECK(node.resume.find(ResumePurpose::Link, kPeer, guarded, out, index).code ==
+  CHECK(node.resume.find_by_peer(ResumePurpose::Link, kPeer, guarded, out, index).code ==
         StatusCode::NotFound);
-  CHECK_OK(node.resume.find(ResumePurpose::Link, 0x00A1000000000888ULL, guarded, out, index));
+  CHECK_OK(node.resume.find_by_peer(ResumePurpose::Link, 0x00A1000000000888ULL, guarded, out,
+                                    index));
   CHECK(out.peer_generation == 5);
   // The GK-expired slot is untouched by the sweep (still on disk, unusable
   // by age rather than by revocation).
-  FaultyResumeStorage& raw = node.resume_storage;
+  FaultyResumeStorage2& raw = node.resume_storage;
   bool expired_present = false;
   for (std::size_t i = 0; i < raw.slot_count(); ++i) {
     bool erased = true;
     for (const auto byte : raw.slot(i)) erased = erased && (byte == 0xFF);
     if (erased) continue;  // the cache reads erased slots as empty, not via decode
-    ResumeSlot slot{};
-    CHECK_OK(resume_slot_decode(ByteView{raw.slot(i).data(), kResumeSlotBytes}, slot));
+    ResumeSlot2 slot{};
+    CHECK_OK(resume2_slot_decode(ByteView{raw.slot(i).data(), kResume2SlotBytes}, slot));
     if (slot.valid && slot.peer == 0x00A1000000000999ULL) expired_present = true;
   }
   CHECK(expired_present);
+}
+
+void test_apply_sweeps_rlp2_revoked_slots() {
+  // The engine's RLP2 resume cache is the lifecycle's sweep target: an
+  // old-generation RLP2 slot is physically erased when the revoking
+  // set applies, while a live slot survives.
+  NodeFixture node;
+  CHECK(node.provision(3, 14));
+  ResumeSlot2 old = resume2_slot(kPeer, 0, 10);
+  old.peer_generation = 1;
+  ResumeSlot2 live = resume2_slot(0x00A1000000000888ULL, 0, 11);
+  live.peer_generation = 5;
+  ResumeContext context{kNetwork, 203, nullptr};
+  CHECK_OK(node.resume.put(old, context));
+  CHECK_OK(node.resume.put(live, context));
+  RevocationSet next = revocation_set(15, 0, 2);
+  next.entries[0] = RevocationEntry{0x00A1000000000100ULL, 2, RevocationReason::Removed};
+  next.entries[1] = RevocationEntry{0x00A1000000000107ULL, 3, RevocationReason::Removed};
+  next.entries[2] = RevocationEntry{kPeer, 2, RevocationReason::Removed};
+  next.count = 3;
+  const auto object = revocation_object(next);
+  PeerCredentialStamp authority{};
+  authority.network = kNetwork;
+  CHECK_OK(node.dispatch(
+      LifecycleInput::Authority(authority, kAuthorityTypeRevocation, object.view()), 1000));
+  node.pump(1000);
+  CHECK(node.snap().phase == LifecyclePhase::Active);
+  CHECK(node.snap().applied_rs_epoch == 15);
+  bool old_present = false, live_present = false;
+  for (std::size_t i = 0; i < node.resume_storage.slot_count(); ++i) {
+    ResumeSlot2 slot{};
+    bool intact = false;
+    CHECK_OK(node.resume.read_at(i, slot, intact));
+    if (!slot.valid) continue;
+    if (slot.peer == kPeer) old_present = true;
+    if (slot.peer == 0x00A1000000000888ULL) live_present = true;
+  }
+  CHECK(!old_present);
+  CHECK(live_present);
 }
 
 void test_duplicate_equivocation_stale() {
@@ -725,8 +782,13 @@ void test_duplicate_equivocation_stale() {
   CHECK(node.snap().phase == LifecyclePhase::Active);
   CHECK(node.snap().equivocated);
   CHECK(node.snap().equivocations == 1);
-  CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
-  CHECK(node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::RecoveryControl));
+  // Equivocation raises re-fetch but gates nothing: recovery control
+  // still admits the healthy credential (design 04 states no traffic
+  // rule for equivocation, so the adopted set keeps enforcing), and
+  // the next Active poll asks the authority to break the tie.
+  CHECK(node.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
+  CHECK_OK(node.dispatch(LifecycleInput::Poll(), 20));
+  CHECK(node.snap().authority_gets_sent >= 1);
   CHECK(node.rrs_storage.write_calls == rrs_writes);  // the gossip copy never lands
   // Older epoch: stale, ignored.
   const auto older = revocation_object(revocation_set(13));
@@ -765,7 +827,7 @@ void test_enforcement_storage_failure_stays_closed() {
   node.runtime.enforce_storage_failure = true;
   for (int i = 0; i < 3; ++i) CHECK_OK(node.dispatch(LifecycleInput::Poll(), 102 + i));
   CHECK(node.snap().phase == LifecyclePhase::StorageBlocked);
-  CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
+  CHECK(!node.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
   CHECK(node.site.site().rs_epoch_floor == 14);
 }
 
@@ -803,9 +865,8 @@ void test_link_failure_and_recovery() {
   CHECK_OK(node.dispatch(LifecycleInput::ActionDone(token, Status::success()), 300));
   CHECK(!node.snap().action_pending);
   CHECK(node.lifecycle.take_action(again).code == StatusCode::NotFound);
-  // Closed for normal traffic; recovery control stays available.
-  CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
-  CHECK(node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::RecoveryControl));
+  // Recovery control stays available during the lifecycle recovery phase.
+  CHECK(node.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
   // The recovery join re-provisions the stores: back to Active.
   CHECK_OK(node.dispatch(LifecycleInput::Recovery(true), 400));
   CHECK(node.snap().phase == LifecyclePhase::Active);
@@ -1084,11 +1145,11 @@ void test_reentry_is_busy_and_changelss() {
   FaultyRecordStorage identity_storage(kIdentitySlotBytes);
   FaultyRecordStorage site_storage(kSiteSlotBytes);
   FaultyRecordStorage rrs_storage(kRevocationSlotBytes);
-  FaultyResumeStorage resume_storage(16);
+  FaultyResumeStorage2 resume_storage(16);
   IdentityStore identity(identity_storage);
   SiteStore site(site_storage);
   RevocationStore revocations(rrs_storage);
-  ResumeCache resume(resume_storage);
+  ResumeCache2 resume(resume_storage, kResume2NodeLinkQuota, kResume2NodeEndQuota);
   ReentrantAuthorityPort authority{};
   ReentrantPeerPort peer{};
   ReentrantRuntimePort runtime{};
@@ -1440,7 +1501,7 @@ void test_partition_continues_and_merge_converges() {
   CHECK(c.snap().phase == LifecyclePhase::Active);
   CHECK(c.snap().applied_rs_epoch == 14);
   CHECK(c.snap().fetches_started == 0);
-  CHECK(c.lifecycle.permits(stamp_for(kPeer, 1), TrafficUse::Data));  // stale view
+  CHECK(c.lifecycle.permits_recovery_control(stamp_for(kPeer, 1)));  // stale view
   // Merge: C pulls 15 from B and the stale credential closes.
   sim.link_up(kNodeB, kNodeC);
   steps = 0;
@@ -1449,7 +1510,7 @@ void test_partition_continues_and_merge_converges() {
     ++steps;
   }
   CHECK(c.snap().applied_rs_epoch == 15);
-  CHECK(!c.lifecycle.permits(stamp_for(kPeer, 1), TrafficUse::Data));
+  CHECK(!c.lifecycle.permits_recovery_control(stamp_for(kPeer, 1)));
 }
 
 // --- Storage faults --------------------------------------------------------------------------------
@@ -1467,7 +1528,7 @@ void test_apply_storage_faults() {
       LifecycleInput::Authority(authority, kAuthorityTypeRevocation, object.view()), 0));
   node.pump(0);
   CHECK(node.snap().phase == LifecyclePhase::StorageBlocked);
-  CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
+  CHECK(!node.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
   node.rrs_storage.disarm();
   CHECK_OK(node.dispatch(LifecycleInput::Boot(true), 100));
   node.pump(100);
@@ -1483,7 +1544,7 @@ void test_apply_storage_faults() {
   // re-runs the enforcement and completes the apply.
   NodeFixture sweep(kNodeB);
   CHECK(sweep.provision(3, 14));
-  ResumeSlot old = resume_slot(kPeer, 0, 10);
+  ResumeSlot2 old = resume2_slot(kPeer, 0, 10);
   old.peer_generation = 1;
   ResumeContext context{kNetwork, 203, nullptr};
   CHECK_OK(sweep.resume.put(old, context));
@@ -1548,7 +1609,7 @@ void test_uncertain_commit_rejects_different_same_epoch_object() {
   CHECK(node.snap().phase == LifecyclePhase::StorageBlocked);
   CHECK(node.authority.sent.empty());
   CHECK(node.runtime.calls.size() == enforcements_before);
-  CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
+  CHECK(!node.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
   CHECK(node.revocations.has_set());
   CHECK(node.revocations.rs_epoch() == 15);
   ByteBuffer<kRevocationObjectMax> landed{};
@@ -1560,15 +1621,15 @@ void test_uncertain_commit_rejects_different_same_epoch_object() {
 // --- Sweep/clear cursor units ------------------------------------------------------------------------
 
 void test_sweep_cursor_units() {
-  FaultyResumeStorage storage(4);
-  ResumeCache cache(storage);
+  FaultyResumeStorage2 storage(8);
+  ResumeCache2 cache(storage, 4, 4);
   RevocationSet rrs = revocation_set(15, 0, 2);
   rrs.entries[0] = RevocationEntry{kPeer, 2, RevocationReason::Removed};
   rrs.count = 1;
   ResumeContext plain{kNetwork, 203, nullptr};
-  ResumeSlot revoked = resume_slot(kPeer, 0, 10);
+  ResumeSlot2 revoked = resume2_slot(kPeer, 0, 10);
   revoked.peer_generation = 1;
-  ResumeSlot live = resume_slot(kNodeB, 0, 11);
+  ResumeSlot2 live = resume2_slot(kNodeB, 0, 11);
   live.peer_generation = 5;
   CHECK_OK(cache.put(revoked, plain));
   CHECK_OK(cache.put(live, plain));
@@ -1577,15 +1638,16 @@ void test_sweep_cursor_units() {
   bool done = true;
   int polls = 0;
   done = false;
-  while (!done && polls < 8) {
+  while (!done && polls < 12) {
     CHECK_OK(cache.sweep_revoked(guarded, cursor, done));
     ++polls;
   }
-  CHECK(done && polls == 4);  // one slot per call, no restart-from-head
-  ResumeSlot out{};
+  CHECK(done && polls == 8);  // one slot per call, no restart-from-head
+  ResumeSlot2 out{};
   std::size_t index = 0;
-  CHECK(cache.find(ResumePurpose::Link, kPeer, guarded, out, index).code == StatusCode::NotFound);
-  CHECK_OK(cache.find(ResumePurpose::Link, kNodeB, guarded, out, index));
+  CHECK(cache.find_by_peer(ResumePurpose::Link, kPeer, guarded, out, index).code ==
+        StatusCode::NotFound);
+  CHECK_OK(cache.find_by_peer(ResumePurpose::Link, kNodeB, guarded, out, index));
   // Past-the-end cursor is immediately done.
   cursor = 99;
   CHECK_OK(cache.sweep_revoked(guarded, cursor, done));
@@ -1594,25 +1656,26 @@ void test_sweep_cursor_units() {
   cursor = 0;
   done = false;
   polls = 0;
-  while (!done && polls < 8) {
+  while (!done && polls < 12) {
     CHECK_OK(cache.clear_step(cursor, done));
     ++polls;
   }
-  CHECK(done && polls == 4);
-  CHECK(cache.find(ResumePurpose::Link, kNodeB, guarded, out, index).code == StatusCode::NotFound);
+  CHECK(done && polls == 8);
+  CHECK(cache.find_by_peer(ResumePurpose::Link, kNodeB, guarded, out, index).code ==
+        StatusCode::NotFound);
 }
 
 void test_sweep_scrubs_torn_slot() {
-  FaultyResumeStorage storage(4);
-  ResumeCache cache(storage);
+  FaultyResumeStorage2 storage(8);
+  ResumeCache2 cache(storage, 4, 4);
   ResumeContext context{kNetwork, 203, nullptr};
-  ResumeSlot old = resume_slot(kPeer, 0, 10);
+  ResumeSlot2 old = resume2_slot(kPeer, 0, 10);
   old.peer_generation = 1;
   CHECK_OK(cache.put(old, context));
-  ResumeSlot found{};
+  ResumeSlot2 found{};
   std::size_t index = 0;
-  CHECK_OK(cache.find(ResumePurpose::Link, kPeer, context, found, index));
-  storage.slot(index)[kResumeSlotBytes - 1] ^= 0x01;
+  CHECK_OK(cache.find_by_peer(ResumePurpose::Link, kPeer, context, found, index));
+  storage.slot(index)[kResume2SlotBytes - 1] ^= 0x01;
   const std::size_t writes = storage.write_calls;
   RevocationSet set = revocation_set(15, 0, 2);
   set.entries[0] = RevocationEntry{kPeer, 2, RevocationReason::Removed};
@@ -1631,7 +1694,8 @@ void test_ram_budget() {
   std::printf("sizeof MembershipLifecycle=%zu RrsExchange=%zu RevocationSet=%zu\n",
               sizeof(MembershipLifecycle), sizeof(RrsExchange), sizeof(RevocationSet));
   CHECK(sizeof(MembershipLifecycle) <= 8192);
-  CHECK(sizeof(MembershipLifecycle) + sizeof(RevocationStore) + sizeof(ResumeCache) <= 10240);
+  CHECK(sizeof(MembershipLifecycle) + sizeof(RevocationStore) + sizeof(ResumeCache2) <=
+        10240);
   CHECK(sizeof(RrsExchange) <= 2 * kRevocationObjectMax + 512);
 }
 
@@ -2158,6 +2222,8 @@ void test_removal_ack_queues_after_intent_without_delaying_erasure() {
 }
 
 void test_removal_notice_intent() {
+  // V1-R06 (tampered-signature + wrong-network halves; hint wiring is
+  // still open per 04 §11). V1-R05 is the valid-notice half below.
   NodeFixture f{};
   CHECK(f.provision(2, 14));
   ByteBuffer<kRemovalNoticePayloadSize> payload{};
@@ -2581,11 +2647,11 @@ void test_signed_prepare_stages_without_switching() {
   CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 250));
   CHECK(f.journal_storage.slot(0) != retired_slot);
   CHECK(f.snap().phase == LifecyclePhase::Switching);
-  CHECK(!f.lifecycle.permits(stamp_for(kPeer, 2), TrafficUse::Data));
+  CHECK(!f.lifecycle.permits_recovery_control(stamp_for(kPeer, 2)));
   LifecycleAction action{};
   CHECK_OK(f.lifecycle.take_action(action));
   CHECK(action.tag == LifecycleActionTag::AdoptNetwork);
-  CHECK(!f.lifecycle.permits(stamp_for(kPeer, 2), TrafficUse::Data));
+  CHECK(!f.lifecycle.permits_recovery_control(stamp_for(kPeer, 2)));
   CHECK_OK(f.dispatch(LifecycleInput::ActionDone(action.token, Status::success()), 251));
   CHECK(f.snap().phase == LifecyclePhase::Active);
   // Fresh network authority binding receives APPLIED after the Owner adopts it.
@@ -2767,12 +2833,14 @@ int main() {
   test_boot_adoption();
   test_enforcement_storage_failure_stays_closed();
   test_boot_self_revoked_and_blocked();
+  test_boot_rejects_resume_storage_quota_mismatch();
   test_boot_revalidates_stored_rrs();
   test_member_ready_closes_on_floor_advance();
   test_member_ready_fetches_package_epoch_past_old_rrs();
   test_apply_does_not_ack_below_a_newer_floor();
   test_recovery_control_rejects_revoked_credentials();
   test_apply_order_and_sweep();
+  test_apply_sweeps_rlp2_revoked_slots();
   test_duplicate_equivocation_stale();
   test_link_failure_and_recovery();
   test_rrs_exchange_roundtrip();

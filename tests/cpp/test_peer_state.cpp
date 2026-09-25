@@ -429,6 +429,7 @@ void test_sweep_in_batches_and_witness_monotonic() {
 }
 
 void test_witness_refuses_old_epochs() {
+  // V1-N04: swept epochs never issue again (cmax commits before erasure).
   NvsModel nvs(10000);
   ModelCounterInventory inventory(nvs);
   CHECK_OK(inventory.commit(0x20, counter_record(5, 256)));
@@ -722,6 +723,7 @@ void test_churn_200_peers_fixed_capacity() {
 // (key, counter) repeat: the witness refuses the stale sessions, and records
 // newer than the regressed session wedge only their own slots.
 void test_boot_session_regression_never_reuses() {
+  // V1-N04: a boot session at or below cmax fails closed before any use.
   NvsModel rlsec(10000);
   BootPartition boot(4);
   ModelCounterInventory inventory(rlsec);

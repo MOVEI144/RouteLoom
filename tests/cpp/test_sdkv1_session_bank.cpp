@@ -917,6 +917,78 @@ void suite_nist_gcm() {
 #endif
 
 template <typename Bank>
+void suite_hash_hints_transparent(const AeadGcm& port) {
+  // The memoized lookup starts are walk-order hints only: three live
+  // keys churn through the two hint slots (hits, misses, evictions)
+  // while every counter, seal, open and query answers exactly as an
+  // unhinted scan. Reconfigure and clear invalidate the hints.
+  constexpr NodeId kPeerB = kPeer + 1;
+  Fixture<Bank> fix;
+  CHECK_OK(fix.configure(port));
+  install_link(fix.bank, kPeer, 0x1111, 0x2222, 0x10);
+  install_link(fix.bank, kPeerB, 0x3333, 0x4444, 0x20);
+  ContextKeys end_keys{};
+  end_keys.scope = SecurityScope::EndToEnd;
+  end_keys.network = kNet;
+  end_keys.peer = kPeer;
+  end_keys.tx_context_id = 0x5555;
+  end_keys.rx_context_id = 0x6666;
+  for (std::size_t i = 0; i < end_keys.tx_key.size(); ++i) {
+    end_keys.tx_key[i] = static_cast<std::uint8_t>(0x30 + i);
+    end_keys.rx_key[i] = static_cast<std::uint8_t>(0x70 + i);
+  }
+  for (std::size_t i = 0; i < end_keys.tx_iv.size(); ++i) {
+    end_keys.tx_iv[i] = static_cast<std::uint8_t>(0xB0 + i);
+    end_keys.rx_iv[i] = static_cast<std::uint8_t>(0xF0 + i);
+  }
+  end_keys.peer_generation = 3;
+  InstallAttestation end_att{};
+  end_att.peer_role = 0b011;
+  end_att.created_gk_epoch = kGk;
+  CHECK_OK(fix.bank.install_verified(end_keys, end_att));
+  const std::uint8_t aad[] = {0xAA};
+  const std::uint8_t plain[] = {9, 8, 7};
+  std::array<std::uint8_t, 3> cipher{};
+  std::array<std::uint8_t, kAeadTagSize> tag{};
+  std::uint64_t link_a = 0, link_b = 0, end_a = 0;
+  const auto tx_one = [&](const SecurityScope scope, const NodeId peer,
+                          const std::uint32_t cid, std::uint64_t& expect) {
+    std::uint64_t counter = 0;
+    CHECK_OK(fix.bank.next_counter(seal_context(scope, peer, cid), counter));
+    CHECK(counter == expect);
+    CHECK_OK(fix.bank.seal(seal_context(scope, peer, cid), counter, ByteView{aad, sizeof(aad)},
+                           ByteView{plain, sizeof(plain)},
+                           MutableByteView{cipher.data(), cipher.size()}, tag));
+    ++expect;
+  };
+  for (int round = 0; round < 6; ++round) {
+    tx_one(SecurityScope::Link, kPeer, 0x1111, link_a);
+    tx_one(SecurityScope::Link, kPeerB, 0x3333, link_b);
+    tx_one(SecurityScope::EndToEnd, kPeer, 0x5555, end_a);
+    // Misses between the hits: unknown peers refuse without spending.
+    std::uint64_t counter = 0;
+    CHECK(fix.bank.next_counter(seal_context(SecurityScope::Link, kPeerB + 1, 0x7777), counter)
+              .code == StatusCode::AuthRequired);
+    std::uint32_t generation = 0, role = 0;
+    CHECK(fix.bank.peer_summary(SecurityScope::EndToEnd, kPeer, generation, role));
+    CHECK(generation == 3 && role == 0b011);
+  }
+  CHECK(link_a == 6 && link_b == 6 && end_a == 6);
+  // A reconfigure draws a new salt: the old hints (and contexts) are gone.
+  CHECK_OK(fix.configure(port, kSelf, 2000));
+  CHECK(!fix.bank.has_usable(SecurityScope::Link, kPeer));
+  std::uint64_t counter = 0;
+  CHECK(fix.bank.next_counter(seal_context(SecurityScope::Link, kPeer, 0x1111), counter).code ==
+        StatusCode::AuthRequired);
+  install_link(fix.bank, kPeer, 0x1111, 0x2222, 0x10);
+  std::uint64_t fresh = 99;
+  CHECK_OK(fix.bank.next_counter(seal_context(SecurityScope::Link, kPeer, 0x1111), fresh));
+  CHECK(fresh == 0);
+  fix.bank.clear();
+  CHECK(!fix.bank.has_usable(SecurityScope::Link, kPeer));
+}
+
+template <typename Bank>
 void suite_peer_summary(const AeadGcm& port) {
   // The Owner's AuthenticatedPeerView feed: an engine install reports its
   // verified generation/role, anything else (unknown peer, role-0 public
@@ -937,6 +1009,7 @@ void suite_peer_summary(const AeadGcm& port) {
 template <typename Bank>
 void run_suite(const AeadGcm& port, bool& fail_next) {
   suite_roundtrip<Bank>(port);
+  suite_hash_hints_transparent<Bank>(port);
   suite_peer_summary<Bank>(port);
   suite_unknown_and_demand<Bank>(port);
   suite_reservation<Bank>(port, fail_next);

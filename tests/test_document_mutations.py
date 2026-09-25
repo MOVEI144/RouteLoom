@@ -30,6 +30,43 @@ class MutationTests(unittest.TestCase):
     def rejected(self): self.assertTrue(validate(self.root)['failed'])
     def docs_rejected(self): self.assertTrue(docs_run(self.root)['failed'])
     def test_valid_source_passes(self): self.assertEqual(validate(self.root)['failed'],[])
+    def test_acceptance_tag_moved_to_non_test_source_fails(self):
+        test = self.root/'tests/cpp/test_kdf.cpp'
+        source = test.read_text()
+        self.assertIn('V1-K12', source)
+        test.write_text(source.replace('V1-K12', 'K12', 1))
+        cmake = self.root/'tests/cpp/CMakeLists.txt'
+        cmake.write_text(cmake.read_text() + '\n# V1-K12\n')
+        failed = {item['name'] for item in validate(self.root)['failed']}
+        self.assertIn('acceptance_trace:V1-K12', failed)
+    def test_acceptance_tag_requires_exact_id(self):
+        test = self.root/'tests/cpp/test_kdf.cpp'
+        source = test.read_text()
+        self.assertIn('V1-K12', source)
+        test.write_text(source.replace('V1-K12', 'V1-K120', 1))
+        failed = {item['name'] for item in validate(self.root)['failed']}
+        self.assertIn('acceptance_trace:V1-K12', failed)
+    def test_acceptance_new_id_requires_test(self):
+        design = self.root/'docs/design/sdk-v1/03-key-hierarchy.md'
+        design.write_text(design.read_text() + '\n| V1-K123 | new acceptance case |\n')
+        failed = {item['name'] for item in validate(self.root)['failed']}
+        self.assertIn('acceptance_trace:V1-K123', failed)
+    def test_acceptance_design_id_cannot_disappear(self):
+        design = self.root/'docs/design/sdk-v1/03-key-hierarchy.md'
+        source = design.read_text()
+        self.assertIn('V1-K12', source)
+        design.write_text(source.replace('V1-K12', 'K12'))
+        failed = {item['name'] for item in validate(self.root)['failed']}
+        self.assertIn('acceptance_design_ids', failed)
+    def test_legacy_rlres_purge_probes_before_creating_or_opening_stores(self):
+        source = (self.root/'components/routeloom_espnow/src/espnow_sdkv1.cpp').read_text()
+        purge = source.split('void purge_legacy_rlres(', 1)[1].split('void console_task(', 1)[0]
+        first_open = purge.split('nvs_open_from_partition(', 1)[1].split(');', 1)[0]
+        self.assertIn('NVS_READONLY', first_open)
+        self.assertLess(purge.index('nvs_get_used_entry_count('), purge.index('NVS_READWRITE'))
+        open_body = source.split('Status Sdkv1Stores::open(', 1)[1].split('Status Sdkv1Stores::initialize(', 1)[0]
+        self.assertLess(open_body.index('purge_legacy_rlres(partition)'),
+                        open_body.index('ident_ns_.open('))
     def test_original_review_latency_mutation(self):
         p=self.root/'docs/spec/acceptance.md'; s=p.read_text(); self.assertIn('P95 35ms以内',s); p.write_text(s.replace('P95 35ms以内','P95 2ms以内',1)); self.rejected()
     def test_latency_target_below_airtime_floor_mutation(self):

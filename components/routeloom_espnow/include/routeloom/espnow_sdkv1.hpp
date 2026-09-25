@@ -1,9 +1,9 @@
 #pragma once
 
-// SDK v1 device wiring (docs/design/sdk-v1/05 §5, 07 §6, 08 P7): the seven
-// `rlsec` stores (rlident/rlsite/rlrevo/rlres plus rlrev/rlres2 for the P4
-// member handshake, plus rlmaint for the P6 removal/cutover journal) as
-// one firmware-owned object plus the factory maintenance console runner
+// SDK v1 device wiring (docs/design/sdk-v1/05 §5, 07 §6, 08 P7): the
+// `rlsec` stores (rlident/rlsite/rlrevo, rlrev/rlres2 for the P4 member
+// handshake, rlmaint for the P6 removal/cutover journal) as one
+// firmware-owned object plus the factory maintenance console runner
 // over USB Serial/JTAG. The store discipline and the console protocol
 // live in the portable core (sdkv1_store.hpp, sdkv1_maintenance.hpp) and
 // are host-tested; this file only binds them to NVS, the USB driver and
@@ -26,9 +26,8 @@ namespace routeloom::espnow {
 class Sdkv1Stores {
  public:
   // `resume_slots` is kResumeNodeSlots (16) on a node, kResumeGatewaySlots
-  // (160) on a gateway (05 §3.2/§5.1). It sizes both the RLP1 and the RLP2
-  // slot ranges; the P4 purpose quotas (12+4 / 32+128) partition the RLP2
-  // range.
+  // (160) on a gateway (05 §3.2/§5.1). It sizes the RLP2 slot range; the
+  // P4 purpose quotas (12+4 / 32+128) partition it.
   explicit Sdkv1Stores(std::size_t resume_slots) noexcept;
   ~Sdkv1Stores() = default;
 
@@ -36,7 +35,9 @@ class Sdkv1Stores {
   Sdkv1Stores& operator=(const Sdkv1Stores&) = delete;
 
   // Open the six namespaces on `partition` (kSecurityNvsPartition, already
-  // mounted). Half-open namespaces are closed again on failure.
+  // mounted) and purge the legacy pre-P4 `rlres` RLP1 blobs, if any.
+  // Half-open namespaces are closed again on failure; a purge failure
+  // is logged and never fails the open (stale blobs only waste NVS).
   Status open(const char* partition) noexcept;
   // Initialize all four record stores (the resume caches are stateless and
   // scan on demand). Every store is attempted; the first error is
@@ -49,7 +50,9 @@ class Sdkv1Stores {
   sdkv1::IdentityStore& identity() noexcept { return identity_; }
   sdkv1::SiteStore& site() noexcept { return site_; }
   sdkv1::RevocationStore& revocation() noexcept { return revocation_; }
-  sdkv1::ResumeCache& resume() noexcept { return resume_; }
+  // The engine's RLP2 resume cache: the lifecycle's sweep target (the
+  // single resume system on this device).
+  sdkv1::ResumeCache2& resume_cache() noexcept { return resume_cache_; }
   sdkv1::LocalRevocationStore& local_revocation() noexcept { return local_revocation_; }
   sdkv1::ResumeSlotStorage2& resume2() noexcept { return resume2_storage_; }
   sdkv1::LifecycleStore& lifecycle() noexcept { return lifecycle_; }
@@ -59,21 +62,19 @@ class Sdkv1Stores {
   NvsBlobNamespace ident_ns_{};
   NvsBlobNamespace site_ns_{};
   NvsBlobNamespace revo_ns_{};
-  NvsBlobNamespace resume_ns_{};
   NvsBlobNamespace local_revocation_ns_{};
   NvsBlobNamespace resume2_ns_{};
   NvsBlobNamespace lifecycle_ns_{};
   sdkv1::BlobRecordSlotStorage ident_storage_;
   sdkv1::BlobRecordSlotStorage site_storage_;
   sdkv1::BlobRecordSlotStorage revo_storage_;
-  sdkv1::BlobResumeSlotStorage resume_storage_;
   sdkv1::BlobRecordSlotStorage local_revocation_storage_;
   sdkv1::BlobResumeSlotStorage2 resume2_storage_;
   sdkv1::BlobRecordSlotStorage lifecycle_storage_;
   sdkv1::IdentityStore identity_;
   sdkv1::SiteStore site_;
   sdkv1::RevocationStore revocation_;
-  sdkv1::ResumeCache resume_;
+  sdkv1::ResumeCache2 resume_cache_;
   sdkv1::LocalRevocationStore local_revocation_;
   sdkv1::LifecycleStore lifecycle_;
 };
