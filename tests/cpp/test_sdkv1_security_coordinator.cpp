@@ -28,6 +28,9 @@ struct SecurityCoordinatorTestAccess {
   static void link_failed(SecurityCoordinator& coordinator) noexcept {
     coordinator.note_link_failed();
   }
+  static JoinSnapshot join_snapshot(const SecurityCoordinator& coordinator) noexcept {
+    return coordinator.joiner().snapshot();
+  }
   static Status adopt(SecurityCoordinator& coordinator, const JoinAction& ready,
                       MonotonicMs now) noexcept {
     return coordinator.adopt_member(ready, now);
@@ -667,6 +670,123 @@ void test_zt_unicast_does_not_claim_member_demux() {
   rx.rld1_frame = encoded.view();
   CHECK(coordinator.step(rx).ok());
   CHECK(coordinator.counters().demux_drops == drops);
+}
+
+void test_zt_wait_m2_status_after_demux_exhaustion() {
+  current = "zt_wait_m2_status_after_demux_exhaustion";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  std::size_t sent = 0;
+  std::array<std::uint8_t, 16> m1_nonce{};
+  bool saw_m1 = false;
+  // Drive a real scan and OFFER through the coordinator until the Joiner
+  // sends m1. Every scan channel is acknowledged as a separate radio action.
+  for (int i = 0; i < 300 && !saw_m1; ++i) {
+    now += 100;
+    CHECK(coordinator.step(poll_at(now)).ok());
+    CoordinatorAction action{};
+    while (coordinator.take_action(action).ok()) {
+      if (action.kind != CoordinatorActionKind::TuneChannel) continue;
+      CoordinatorEvent ready{};
+      ready.kind = CoordinatorEventKind::ChannelReady;
+      ready.now = now;
+      ready.channel_token = action.tune.token;
+      ready.channel = action.tune.channel;
+      ready.channel_result = StatusCode::Ok;
+      CHECK(coordinator.step(ready).ok());
+    }
+    while (sent < f.rld1.sends.size()) {
+      autonomy::Rld1Envelope env{};
+      CHECK(autonomy::rld1_decode(ByteView{f.rld1.sends[sent].bytes.data(),
+                                           f.rld1.sends[sent].bytes.size()}, env).ok());
+      ++sent;
+      if (env.kind == FrameType::BootstrapAuth) {
+        m1_nonce = env.transaction_nonce;
+        saw_m1 = true;
+      }
+      if (env.kind != FrameType::Discover) continue;
+      ZtOfferBody offer{};
+      offer.flags = kZtOfferAuthorityReachable;
+      offer.org_hint = join_org_hint(site_ca().pub);
+      offer.site_hint = join_site_hint(site_record().site_id);
+      offer.authority_hops = 1;
+      autonomy::Rld1Encoded frame{};
+      CHECK(zt_offer_frame_encode(kNode + 1, static_cast<std::uint32_t>(kNetwork),
+                                  env.transaction_nonce, offer, frame).ok());
+      CoordinatorEvent rx{};
+      rx.kind = CoordinatorEventKind::Rld1Rx;
+      rx.now = now;
+      rx.rld1_meta.source = kPeerMac;
+      rx.rld1_meta.destination = kMac;
+      rx.rld1_meta.channel = SecurityCoordinatorTestAccess::join_snapshot(coordinator).channel;
+      rx.rld1_frame = frame.view();
+      CHECK(coordinator.step(rx).ok());
+    }
+  }
+  CHECK(saw_m1);
+  CHECK(SecurityCoordinatorTestAccess::join_snapshot(coordinator).state == JoinState::WaitM2);
+  const auto drops = coordinator.counters().demux_drops;
+  // Nine unrelated object IDs must not occupy a member demux arm in ZT.
+  for (std::uint8_t i = 1; i <= 9; ++i) {
+    autonomy::Rld1Envelope noise{};
+    noise.kind = FrameType::BootstrapAuth;
+    noise.transaction_nonce[0] = i;
+    noise.body[0] = 1;
+    noise.body[1] = static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage);
+    noise.body_size = 2;
+    autonomy::Rld1Encoded frame{};
+    CHECK(autonomy::rld1_encode(noise, frame).ok());
+    CoordinatorEvent rx{};
+    rx.kind = CoordinatorEventKind::Rld1Rx;
+    rx.now = ++now;
+    rx.rld1_meta.source = kPeerMac;
+    rx.rld1_meta.destination = kMac;
+    rx.rld1_meta.channel = SecurityCoordinatorTestAccess::join_snapshot(coordinator).channel;
+    rx.rld1_frame = frame.view();
+    CHECK(coordinator.step(rx).ok());
+  }
+  JoinAuthObject hint{};
+  hint.phase = JoinAuthPhase::RelayStatus;
+  hint.step = 1;
+  hint.relay_status = RelayStatusCode::Busy;
+  hint.retry_after_ms = 1000;
+  JoinObjectBytes body{};
+  std::size_t size = 0;
+  CHECK(join_object_encode(hint, MutableByteView{body.bytes.data(), body.bytes.size()}, size));
+  autonomy::Rld1Envelope status{};
+  status.kind = FrameType::BootstrapAuth;
+  status.transaction_nonce = m1_nonce;
+  status.claimed_node = kNode + 1;
+  status.network_hint = static_cast<std::uint32_t>(kNetwork);
+  std::memcpy(status.body.data(), body.bytes.data(), size);
+  status.body_size = size;
+  autonomy::Rld1Encoded frame{};
+  CHECK(autonomy::rld1_encode(status, frame).ok());
+  CoordinatorEvent rx{};
+  rx.kind = CoordinatorEventKind::Rld1Rx;
+  rx.now = ++now;
+  rx.rld1_meta.source = kPeerMac;
+  rx.rld1_meta.destination = kMac;
+  rx.rld1_meta.channel = SecurityCoordinatorTestAccess::join_snapshot(coordinator).channel;
+  rx.rld1_frame = frame.view();
+  CHECK(coordinator.step(rx).ok());
+  CHECK(coordinator.counters().demux_drops == drops);
+  CHECK(SecurityCoordinatorTestAccess::join_snapshot(coordinator).state == JoinState::WaitM2);
+  // The pre-m2 hint is not a verdict: after the unanswered m1 times out,
+  // its retry_after suppresses only this proxy for the next selection.
+  for (int i = 0; i < 150; ++i) {
+    now += 100;
+    CHECK(coordinator.step(poll_at(now)).ok());
+    if (SecurityCoordinatorTestAccess::join_snapshot(coordinator).counters.transient_failures)
+      break;
+  }
+  const JoinSnapshot joined = SecurityCoordinatorTestAccess::join_snapshot(coordinator);
+  CHECK(joined.counters.transient_failures == 1);
+  CHECK(joined.candidates.proxy_suppressions == 1);
 }
 
 void test_clock_regression_refused() {
@@ -1746,6 +1866,7 @@ int main() {
   test_invalid_proxy_auth_does_not_hold_demux();
   test_join_rs_target_reaches_member_config();
   test_zt_unicast_does_not_claim_member_demux();
+  test_zt_wait_m2_status_after_demux_exhaustion();
   test_clock_regression_refused();
   test_gateway_resume_quotas();
   test_staged_bootstrap_rx();
