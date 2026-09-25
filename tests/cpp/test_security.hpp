@@ -84,6 +84,10 @@ class TestSecurity final : public routeloom::SecurityProvider {
                          const routeloom::ByteView ciphertext,
                          const std::array<std::uint8_t, routeloom::kAeadTagSize>& tag,
                          const routeloom::MutableByteView plaintext) noexcept override {
+    if (context.scope == routeloom::SecurityScope::GroupLink && !accept_group_epoch_) {
+      return routeloom::Status::error(routeloom::StatusCode::AuthRequired,
+                                      "test group epoch unavailable");
+    }
     if (plaintext.size < ciphertext.size) {
       return routeloom::Status::error(routeloom::StatusCode::NoCapacity, "test plaintext");
     }

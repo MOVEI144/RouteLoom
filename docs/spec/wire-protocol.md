@@ -73,7 +73,7 @@ headerは88Bのまま、payload上限128Bも変えない。counterを48bitに狭
 
 ### broadcast ROUTE_UPDATE（P5-2、scoped opt-inで配線済み）
 
-専用payload（version 1、24B/record、最大5件）は[routing-scale](../design/sdk-v1/routing-scale.md)を参照。Wireは`next_hop=destination=broadcast`のときRouteUpdateだけを認め、`origin=previous_hop`（通常node ID）、hop=1、BestEffort、round=0、end保護なし、end counter=0を強制する。送信時はGroupLink ProviderからbootとGK epochを同時に取得し（無ければUnsupported）、`link_epoch=boot`、`end_epoch=GK`でGroupLink封止する。受信のbroadcast openは専用dispatchだけが明示指定し、送信者gate（opt-in・観測MAC・active隣接・Link usable・現在binding）を先に通してからopenする。通常のMeshNode受信経路は既定で拒否する。GroupLink tagはpeer本人性の証明ではなく、route適用だけを行いcapability・telemetry・resume確認には使わない。送信先適格性は別途pairwiseのnonce-bound capability grant（bit7）で判定する。
+専用payload（version 1、24B/record、最大5件）は[routing-scale](../design/sdk-v1/routing-scale.md)を参照。Wireは`next_hop=destination=broadcast`のときRouteUpdateだけを認め、`origin=previous_hop`（通常node ID）、hop=1、BestEffort、round=0、end保護なし、end counter=0を強制する。送信時はGroupLink ProviderからbootとGK epochを同時に取得し（無ければUnsupported）、`link_epoch=boot`、`end_epoch=GK`でGroupLink封止する。受信のbroadcast openは専用dispatchだけが明示指定し、送信者gate（opt-in・観測MAC・active隣接・Link usable・V2 metadataとOwner snapshotの現在binding）を先に通す。未知GKの未認証headerは分1回までのpull hintに留め、既知GKだけGroupLinkでopenする。通常のMeshNode受信経路は既定で拒否する。GroupLink tagはpeer本人性の証明ではなく、route適用だけを行いcapability・telemetry・resume確認には使わない。送信先適格性は別途pairwiseのnonce-bound capability grant（bit7）で判定する。
 
 ### ROUTE_REQUEST payload（type 35、gateway-scoped routing）
 

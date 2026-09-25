@@ -494,7 +494,12 @@ void test_route_broadcast_uses_reserved_radio_slot() {
   CHECK(idf_stub::last_send_to(routeloom::discovery_const::kBroadcastMac.data()));
   CHECK(runtime.send(routeloom::kBroadcastNodeId, 2, ByteView{&frame, 1}).code ==
         routeloom::StatusCode::WouldBlock);
+  const auto airtime_before = runtime.node().congestion_stats().service_us_misc;
+  idf_stub::advance_ms(2);
   CHECK(idf_stub::complete_send(true));
+  runtime.poll_once();
+  CHECK(runtime.node().congestion_stats().service_us_misc >= airtime_before + 2000);
+  CHECK(runtime.node().telemetry_peer(routeloom::kBroadcastNodeId) == nullptr);
   CHECK(runtime.send(routeloom::kBroadcastNodeId, 2, ByteView{&frame, 1}).ok());
   CHECK(idf_stub::complete_send(false));
   runtime.stop();

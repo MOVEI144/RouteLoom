@@ -14,6 +14,7 @@
 // tolerates — loop-freedom does not depend on the schedule (§8).
 
 #include <algorithm>
+#include <limits>
 
 #include "routeloom/byte_io.hpp"
 #include "routeloom/node.hpp"
@@ -529,7 +530,12 @@ bool MeshNode::emit_downward_batch(const NodeId* targets, const std::size_t coun
   std::size_t other_count = 0;
   // Both call sites pass at most kNeighborCapacity targets.
   for (std::size_t i = 0; i < count; ++i) {
-    if (config_.route_broadcast && peer_broadcast_eligible(targets[i], now_ms)) {
+    const auto* neighbor = find_neighbor(targets[i]);
+    // The queued frame may wait for its whole one-second lifetime. Require
+    // the recipient's grant to cover that interval, then use unicast when
+    // it is close to expiring.
+    if (config_.route_broadcast && peer_broadcast_eligible(targets[i], now_ms) &&
+        neighbor->cap_valid_until_ms - now_ms > kScopedUpdateLifetimeMs) {
       eligible[eligible_count++] = targets[i];
     } else {
       others[other_count++] = targets[i];
@@ -1167,9 +1173,31 @@ void MeshNode::handle_broadcast_route(const NodeId peer, const ByteView encoded,
   // open on senders the pairwise layer does not vouch for.
   const auto* neighbor = find_neighbor(claimed.origin);
   if (claimed.origin != peer || neighbor == nullptr || !neighbor->active ||
+      claimed.network != config_.network ||
       !context_usable(security_.context_state(SecurityScope::Link, claimed.origin)) ||
-      (metadata != nullptr && !metadata->identity_current)) {
+      metadata == nullptr || !metadata->identity_current ||
+      metadata->binding == kInvalidBindingId ||
+      metadata->binding_generation == BindingGeneration{0}) {
     observer_.on_diagnostic("BROADCAST_ROUTE_SENDER_REJECTED", peer, nullptr);
+    return;
+  }
+  ReplyBinding binding{};
+  if (reply_peer_port_ == nullptr ||
+      !reply_peer_port_->snapshot_binding(peer, binding) ||
+      binding.id != metadata->binding ||
+      binding.generation != metadata->binding_generation) {
+    observer_.on_diagnostic("BROADCAST_ROUTE_SENDER_REJECTED", peer, nullptr);
+    return;
+  }
+  // An unknown epoch cannot be decrypted by the GroupLink Provider. Its
+  // unauthenticated header can only request a bounded Owner repair hint.
+  if (!security_.accepts_group_epoch(claimed.end_epoch)) {
+    if (now_ms < next_broadcast_gk_hint_ms_) return;
+    next_broadcast_gk_hint_ms_ =
+        now_ms > std::numeric_limits<MonotonicMs>::max() - kBroadcastGkHintGapMs
+            ? std::numeric_limits<MonotonicMs>::max()
+            : now_ms + kBroadcastGkHintGapMs;
+    observer_.on_diagnostic("BROADCAST_UNKNOWN_GK", peer, &claimed.message);
     return;
   }
   wire::LinkOpenedFrame frame{};
@@ -1178,17 +1206,6 @@ void MeshNode::handle_broadcast_route(const NodeId peer, const ByteView encoded,
   if (!opened) {
     note_rx_refusal(opened, peer, nullptr);
     ++telemetry_event_drops_;
-    return;
-  }
-  // An unknown GK generation is a hint, not evidence: the Owner pulls the
-  // key, at most once a minute however often the hint repeats.
-  if (!security_.accepts_group_epoch(frame.header.end_epoch)) {
-    if (last_broadcast_gk_hint_ms_ != 0 &&
-        now_ms - last_broadcast_gk_hint_ms_ < kBroadcastGkHintGapMs) {
-      return;
-    }
-    last_broadcast_gk_hint_ms_ = now_ms;
-    observer_.on_diagnostic("BROADCAST_UNKNOWN_GK", peer, &frame.header.message);
     return;
   }
   // The frame is link-only (no end tag): the whole payload authenticates
@@ -1210,7 +1227,7 @@ void MeshNode::handle_broadcast_route(const NodeId peer, const ByteView encoded,
     projected[i] = records[i].route;
     projected[i].metric = project_broadcast_route_metric(records[i], config_.node);
   }
-  apply_route_records(projected.data(), count, frame.header.origin, now_ms);
+  apply_route_records(projected.data(), count, frame.header.origin, now_ms, false);
 }
 
 }  // namespace routeloom

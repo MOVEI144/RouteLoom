@@ -2219,10 +2219,11 @@ class MeshNode {
                            MonotonicMs now_ms) noexcept;
   // Applies validated route records from `peer` (unicast ROUTE_UPDATE or a
   // projected GroupLink broadcast): peer-restart reset, tree-role inference
-  // and one consider() per record. The ONLY route-table entry for route
-  // advertisements — capability, telemetry and resume state never move here.
+  // and one consider() per record. Only a pairwise-authenticated restart may
+  // reset link measurement; group frames never change capability or resume state.
   void apply_route_records(const RouteAdvertisement* records, std::size_t count,
-                           NodeId peer, MonotonicMs now_ms) noexcept;
+                           NodeId peer, MonotonicMs now_ms,
+                           bool pairwise_authenticated) noexcept;
   void handle_seqno_request(const wire::PlainFrame& frame, NodeId peer,
                             MonotonicMs now_ms) noexcept;
 
@@ -2674,9 +2675,9 @@ class MeshNode {
   std::uint32_t next_route_request_id_{1};
   MonotonicMs route_request_window_ms_{0};
   std::uint32_t route_request_window_count_{0};
-  // Last unknown-GK hint surfaced from a broadcast (rate-limited: at most
-  // one pull trigger per minute — the pull itself is the Owner's job).
-  MonotonicMs last_broadcast_gk_hint_ms_{0};
+  // Earliest next unknown-GK hint from a broadcast (at most one per minute;
+  // the pull itself is the Owner's job).
+  MonotonicMs next_broadcast_gk_hint_ms_{0};
   RouteScaleStats route_scale_stats_{};
   // Group delivery state (bounded; group-delivery.md §9).
   std::array<GroupId, kGroupMembershipMax> group_membership_{};

@@ -768,7 +768,7 @@ void EspNowRuntime::poll_once() noexcept {
                                      : RadioTxOutcome::Failure;
       staged.provenance = ObservationProvenance::LocalDriver;
       staged.token = event.token;
-      if (event.peer != kBroadcastNodeId) node_.note_radio_tx(staged, now);
+      node_.note_radio_tx(staged, now);
       node_.on_radio_tx_result(event.token, event.success, now);
     }
   }
@@ -796,7 +796,7 @@ void EspNowRuntime::poll_once() noexcept {
                                           : RadioTxOutcome::Failure);
     staged.provenance = ObservationProvenance::LocalDriver;
     staged.token = event.token;
-    if (event.peer != kBroadcastNodeId) node_.note_radio_tx(staged, now);
+    node_.note_radio_tx(staged, now);
     if (event.tx_lane == TxLane::Reserved) {
       node_.on_radio_tx_result(event.token, event.success, now);
     }
@@ -820,7 +820,7 @@ void EspNowRuntime::poll_once() noexcept {
                                          : RadioTxOutcome::Failure);
       obs.provenance = ObservationProvenance::LocalDriver;
       obs.token = event.token;
-      if (event.peer != kBroadcastNodeId) node_.note_radio_tx(obs, now);
+      node_.note_radio_tx(obs, now);
       if (event.tx_lane == TxLane::Reserved) {
         node_.on_radio_tx_result(event.token, event.success, now);
       }

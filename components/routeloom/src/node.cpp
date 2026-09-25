@@ -5133,12 +5133,13 @@ void MeshNode::handle_route_update(const wire::PlainFrame& frame, const NodeId p
       return;
     }
   }
-  apply_route_records(records.data(), count, peer, now_ms);
+  apply_route_records(records.data(), count, peer, now_ms, true);
 }
 
 void MeshNode::apply_route_records(const RouteAdvertisement* records,
                                    const std::size_t count, const NodeId peer,
-                                   const MonotonicMs now_ms) noexcept {
+                                   const MonotonicMs now_ms,
+                                   const bool pairwise_authenticated) noexcept {
   auto* neighbor = find_neighbor(peer);
   if (neighbor == nullptr || !neighbor->active || records == nullptr) return;
 
@@ -5156,9 +5157,9 @@ void MeshNode::apply_route_records(const RouteAdvertisement* records,
   }
   if (restarted) {
     routes_.invalidate_next_hop(peer, now_ms, false);
-    // §3.7 identity reset: measurement gathered against the previous
-    // incarnation is unattributable to this one.
-    reset_neighbor_measurement(*neighbor);
+    // Only pairwise authentication can retire per-peer measurement. A
+    // GroupLink frame may update route generation but proves no peer boot.
+    if (pairwise_authenticated) reset_neighbor_measurement(*neighbor);
     trigger_route_advertisement(now_ms);
     observer_.on_diagnostic("PEER_RESTARTED_ROUTES_FLUSHED", peer, nullptr);
   }
@@ -6356,6 +6357,9 @@ Status MeshNode::note_radio_tx(const RadioTxObservation& observation,
         break;
     }
   }
+  // RF broadcast consumes management airtime but has no neighbor MAC ACK.
+  // Keep the ledger debit above and omit every per-peer completion sample.
+  if (observation.peer == kBroadcastNodeId) return Status::success();
   auto* bucket = observation_bucket(
       ObservationKey{observation.binding_generation,
                      ObservationDirection::Egress, observation.radio_generation,
@@ -7495,6 +7499,9 @@ Status MeshNode::note_peer_stale(const NodeId peer) noexcept {
   telemetry_peers_.mark_stale(peer);
   if (Neighbor* neighbor = find_neighbor(peer)) {
     reset_neighbor_measurement(*neighbor);
+    neighbor->cap_features = 0;
+    neighbor->busy_capable = false;
+    neighbor->cap_valid_until_ms = 0;
   }
   return Status::success();
 }

@@ -249,9 +249,8 @@ Status GroupSecurityProvider::open(const SecurityContext& c, const std::uint64_t
       status = Status::error(StatusCode::AuthorizationFailed, "group tag invalid");
     }
   }
-  const bool next_end = status && c.scope == SecurityScope::Group &&
-                        gk_epoch(c) == keys_.store_.site().gk_epoch_next;
-  if (status && !next_end) {
+  const bool next_group = status && gk_epoch(c) == keys_.store_.site().gk_epoch_next;
+  if (status && !next_group) {
     std::memcpy(plaintext.data, staging_.data(), ciphertext.size);
     replay_commit(*entry, c.sender, gk_epoch(c), sender_boot(c), counter);
   } else if (plaintext.data != nullptr) {
@@ -264,7 +263,7 @@ Status GroupSecurityProvider::open(const SecurityContext& c, const std::uint64_t
   in_call_ = false;
   // Do not deliver, replay-commit or forward a next-GK frame before the
   // Owner's next Tick durably promotes. The sender's repair can resend it.
-  if (next_end) {
+  if (next_group) {
     GroupKeyState::Input event{};
     event.op = GroupKeyState::Op::AuthenticatedNext;
     event.epoch = gk_epoch(c);
