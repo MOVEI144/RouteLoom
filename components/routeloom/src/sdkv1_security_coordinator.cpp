@@ -1496,6 +1496,7 @@ Status SecurityCoordinator::on_authority_rx(const CoordinatorEvent& event) noexc
   in.kind = AuthorityInputKind::RxCarrier;
   in.rx.kind = event.auth_kind;
   in.rx.bytes = event.auth_bytes;
+  in.rx.writable = event.auth_writable;
   return authority_.advance(in, event.now);
 }
 

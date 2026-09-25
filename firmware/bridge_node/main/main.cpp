@@ -51,6 +51,21 @@
 namespace {
 constexpr char kTag[] = "RouteLoomBr";
 
+// Long-lived CPU-only state can reside in LP SRAM on the C5; radio and USB
+// driver buffers stay in their normal HP memory. The smaller gateway config
+// state also fits the C3 RTC bank.
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC && CONFIG_IDF_TARGET_ESP32C5
+#define ROUTELOOM_MEMBER_C5_LP RTC_DATA_ATTR
+#else
+#define ROUTELOOM_MEMBER_C5_LP
+#endif
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC && \
+    (CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C5)
+#define ROUTELOOM_MEMBER_SMALL_LP RTC_DATA_ATTR
+#else
+#define ROUTELOOM_MEMBER_SMALL_LP
+#endif
+
 using routeloom::ByteView;
 using routeloom::NodeId;
 using routeloom::Status;
@@ -239,7 +254,7 @@ extern "C" void app_main(void) {
   // resume slots. Impairment is never node-fatal and never triggers an
   // erase: a quarantined/uncertain store is reported and its consumers
   // fail closed while the node keeps routing.
-  static routeloom::espnow::Sdkv1Stores sdkv1_stores(
+  static ROUTELOOM_MEMBER_C5_LP routeloom::espnow::Sdkv1Stores sdkv1_stores(
       routeloom::sdkv1::kResumeGatewaySlots);
   status = sdkv1_stores.open(routeloom::espnow::kSecurityNvsPartition);
   if (!status) {
@@ -633,7 +648,7 @@ extern "C" void app_main(void) {
   // bit gates both — a build that does not advertise it never answers a
   // Query and never accepts a registration. The node's own poll drives the
   // sink through the service-sink interface (attach() installs it).
-  static routeloom::GatewayDelivery gateway(runtime.node());
+  static ROUTELOOM_MEMBER_C5_LP routeloom::GatewayDelivery gateway(runtime.node());
   if ((bridge_config.capability & routeloom::usb::kCapGatewayEndpointV1) !=
       0) {
     status = bridge.attach_gateway(gateway);
@@ -648,7 +663,7 @@ extern "C" void app_main(void) {
   // CAP_CONFIG_ENDPOINT_V1 bit gates admission; without it the ops answer
   // Unsupported. The node poll drives the component's bounded retries.
   static routeloom::MeshConfigPort config_port(runtime.node());
-  static routeloom::ConfigGateway config_gateway(config_port, bridge);
+  static ROUTELOOM_MEMBER_SMALL_LP routeloom::ConfigGateway config_gateway(config_port, bridge);
   if ((bridge_config.capability & routeloom::usb::kCapConfigEndpointV1) != 0) {
     status = bridge.attach_config(config_gateway);
     if (!status) fail(status.detail);

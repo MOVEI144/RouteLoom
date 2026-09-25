@@ -256,6 +256,7 @@ void EspNowSecurityOwner::drive_authority(const MonotonicMs now_ms) noexcept {
       in.now = now_ms;
       in.auth_kind = rx.kind;
       in.auth_bytes = rx.bytes;
+      in.auth_writable = rx.writable;
       (void)coordinator().step(in);
     }
     sdkv1::AuthorityTxResult done{};
@@ -453,13 +454,14 @@ bool EspNowSecurityOwner::send_up(const usb::AuthorityFragment& fragment) noexce
 }
 
 void EspNowSecurityOwner::on_local_down(const sdkv1::AuthorityCarrierKind kind,
-                                        const ByteView bytes) noexcept {
+                                        const MutableByteView bytes) noexcept {
   if (!booted_) return;  // poll context; bytes borrow the relay slot
   sdkv1::CoordinatorEvent in{};
   in.kind = sdkv1::CoordinatorEventKind::AuthorityRx;
   in.now = runtime_ != nullptr ? runtime_->now_ms() : 0;
   in.auth_kind = kind;
-  in.auth_bytes = bytes;
+  in.auth_bytes = ByteView{bytes.data, bytes.size};
+  in.auth_writable = bytes;
   (void)coordinator().step(in);
 }
 

@@ -185,7 +185,9 @@ class AuthorityEndpoint final : public AuthorityMeshDemux, public AuthorityPort 
     std::uint16_t received{0};
     MonotonicMs started_ms{0};
     std::array<std::uint8_t, kAuthorityObjectMax> buffer{};
-    std::array<std::uint8_t, kAuthorityObjectMax / 8> bitmap{};
+    // Mesh chunks are fixed 90-byte cells (at most 23), so one bit per
+    // received cell also detects exact retries without a per-byte map.
+    std::uint32_t received_chunks{0};
   };
   struct TxTransfer {
     bool active{false};
@@ -241,7 +243,7 @@ class AuthorityHostSink {
 class AuthorityLocalSink {
  public:
   virtual ~AuthorityLocalSink() = default;
-  virtual void on_local_down(AuthorityCarrierKind kind, ByteView bytes) noexcept = 0;
+  virtual void on_local_down(AuthorityCarrierKind kind, MutableByteView bytes) noexcept = 0;
 };
 
 // --- Gateway relay --------------------------------------------------------------
@@ -321,7 +323,8 @@ class AuthorityGateway final : public AuthorityMeshDemux {
     MonotonicMs last_send_ms{0};
     bool mesh_manifest_sent{false};  // Down objects only
     std::array<std::uint8_t, kAuthorityObjectMax> buffer{};
-    std::array<std::uint8_t, kAuthorityObjectMax / 8> bitmap{};
+    // Up uses 90-byte mesh cells, down uses 960-byte USB cells.
+    std::uint32_t received_chunks{0};
   };
 
   Slot* find_slot(NodeId device, Direction direction, std::uint32_t transfer_id,

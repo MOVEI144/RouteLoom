@@ -132,7 +132,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // AuthorityHostSink: one 0x64 toward the host (gateway mesh egress).
   bool send_up(const usb::AuthorityFragment& fragment) noexcept override;
   // AuthorityLocalSink: a reassembled self-addressed down (poll context).
-  void on_local_down(sdkv1::AuthorityCarrierKind kind, ByteView bytes) noexcept override;
+  void on_local_down(sdkv1::AuthorityCarrierKind kind, MutableByteView bytes) noexcept override;
   // sdkv1::ZtRld1Port / CoordinatorMeshPort: radio sends (refuse before
   // the runtime attaches).
   Status send_rld1(const routeloom::MacAddress& destination, ByteView frame) noexcept override;

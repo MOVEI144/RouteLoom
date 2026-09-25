@@ -142,6 +142,7 @@ struct CoordinatorEvent {
   // transport's take_rx view is fed synchronously, never staged).
   AuthorityCarrierKind auth_kind{AuthorityCarrierKind::Envelope};
   ByteView auth_bytes{};
+  MutableByteView auth_writable{};
   // AuthorityTx: the transport's completion for an earlier try_send.
   std::uint64_t auth_token{0};
   bool auth_delivered{false};

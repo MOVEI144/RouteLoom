@@ -12,6 +12,9 @@ namespace {
 
 constexpr std::size_t kChunkDataMax = kMaxApplicationPayload - 38;  // 90
 constexpr std::size_t kUsbFragmentDataMax = 960;
+static_assert((kAuthorityObjectMax + kChunkDataMax - 1) / kChunkDataMax <= 32);
+static_assert((kAuthorityObjectMax + kUsbFragmentDataMax - 1) /
+                  kUsbFragmentDataMax <= 32);
 
 void sat_inc(std::uint32_t& counter) noexcept {
   if (counter < 0xFFFFFFFFu) ++counter;
@@ -120,7 +123,7 @@ void AuthorityEndpoint::drop_rx() noexcept {
   rx_.active = false;
   secure_clear(carrier_buf_.data(), carrier_buf_.size());
   secure_clear(rx_.buffer.data(), rx_.buffer.size());
-  for (auto& byte : rx_.bitmap) byte = 0;
+  rx_.received_chunks = 0;
 }
 
 void AuthorityEndpoint::drop_tx() noexcept {
@@ -235,7 +238,7 @@ void AuthorityEndpoint::on_manifest(
   rx_.total_len = manifest.total_len;
   rx_.received = 0;
   rx_.started_ms = now_ms;
-  for (auto& byte : rx_.bitmap) byte = 0;
+  rx_.received_chunks = 0;
   send_ack(origin, manifest.object_hash, 0, autonomy::ObjectAckStatus::Incomplete, now_ms);
 }
 
@@ -265,23 +268,21 @@ void AuthorityEndpoint::on_chunk(const NodeId origin,
     sat_inc(counters_.rx_denied);
     return;
   }
-  for (std::uint16_t i = 0; i < chunk.data_size; ++i) {
-    const std::uint16_t at = static_cast<std::uint16_t>(chunk.offset + i);
-    const std::uint8_t mask = static_cast<std::uint8_t>(1U << (at & 7U));
-    if ((rx_.bitmap[at >> 3U] & mask) != 0) {
-      if (rx_.buffer[at] != chunk.data[i]) {
-        const std::uint16_t progress = rx_.received;
-        const autonomy::ObjectHash hash = rx_.hash;
-        drop_rx();
-        send_ack(origin, hash, progress, autonomy::ObjectAckStatus::Failed, now_ms);
-        sat_inc(counters_.rx_denied);
-        return;
-      }
-      continue;
+  const std::uint32_t bit = std::uint32_t{1} << (chunk.offset / kChunkDataMax);
+  if ((rx_.received_chunks & bit) != 0) {
+    if (std::memcmp(rx_.buffer.data() + chunk.offset, chunk.data.data(),
+                    chunk.data_size) != 0) {
+      const std::uint16_t progress = rx_.received;
+      const autonomy::ObjectHash hash = rx_.hash;
+      drop_rx();
+      send_ack(origin, hash, progress, autonomy::ObjectAckStatus::Failed, now_ms);
+      sat_inc(counters_.rx_denied);
+      return;
     }
-    rx_.bitmap[at >> 3U] = static_cast<std::uint8_t>(rx_.bitmap[at >> 3U] | mask);
-    rx_.buffer[at] = chunk.data[i];
-    ++rx_.received;
+  } else {
+    std::memcpy(rx_.buffer.data() + chunk.offset, chunk.data.data(), chunk.data_size);
+    rx_.received_chunks |= bit;
+    rx_.received = static_cast<std::uint16_t>(rx_.received + chunk.data_size);
   }
   if (rx_.received >= rx_.total_len) {
     Digest256 digest{};
@@ -339,6 +340,7 @@ bool AuthorityEndpoint::take_rx(AuthorityRxCarrier& out) noexcept {
   if (carrier_ready_) {
     out.kind = carrier_kind_;
     out.bytes = ByteView{carrier_buf_.data(), carrier_size_};
+    out.writable = MutableByteView{carrier_buf_.data(), carrier_size_};
     carrier_ready_ = false;
     return true;
   }
@@ -346,6 +348,7 @@ bool AuthorityEndpoint::take_rx(AuthorityRxCarrier& out) noexcept {
     // Kind-7 objects are envelope bytes verbatim (never handshake wire).
     out.kind = AuthorityCarrierKind::Envelope;
     out.bytes = ByteView{rx_.buffer.data(), rx_.total_len};
+    out.writable = MutableByteView{rx_.buffer.data(), rx_.total_len};
     object_ready_ = false;
     return true;
   }
@@ -656,22 +659,20 @@ void AuthorityGateway::on_chunk(const NodeId origin,
     sat_inc(counters_.denied);
     return;
   }
-  for (std::uint16_t i = 0; i < chunk.data_size; ++i) {
-    const std::uint16_t at = static_cast<std::uint16_t>(chunk.offset + i);
-    const std::uint8_t mask = static_cast<std::uint8_t>(1U << (at & 7U));
-    if ((slot->bitmap[at >> 3U] & mask) != 0) {
-      if (slot->buffer[at] != chunk.data[i]) {
-        send_ack(origin, chunk.object_hash, slot->received,
-                 autonomy::ObjectAckStatus::Failed, now_ms);
-        drop_slot(*slot);
-        sat_inc(counters_.denied);
-        return;
-      }
-      continue;
+  const std::uint32_t bit = std::uint32_t{1} << (chunk.offset / kChunkDataMax);
+  if ((slot->received_chunks & bit) != 0) {
+    if (std::memcmp(slot->buffer.data() + chunk.offset, chunk.data.data(),
+                    chunk.data_size) != 0) {
+      send_ack(origin, chunk.object_hash, slot->received,
+               autonomy::ObjectAckStatus::Failed, now_ms);
+      drop_slot(*slot);
+      sat_inc(counters_.denied);
+      return;
     }
-    slot->bitmap[at >> 3U] = static_cast<std::uint8_t>(slot->bitmap[at >> 3U] | mask);
-    slot->buffer[at] = chunk.data[i];
-    ++slot->received;
+  } else {
+    std::memcpy(slot->buffer.data() + chunk.offset, chunk.data.data(), chunk.data_size);
+    slot->received_chunks |= bit;
+    slot->received = static_cast<std::uint16_t>(slot->received + chunk.data_size);
   }
   if (slot->received >= slot->total_len) {
     Digest256 digest{};
@@ -729,9 +730,17 @@ Status AuthorityGateway::authority_down(const NodeId device,
                                         const MonotonicMs now_ms) noexcept {
   complete = false;
   if (in_call_) return Status::error(StatusCode::Busy, "authority gateway re-entry");
-  if (device == kInvalidNodeId || fragment.device != device ||
-      fragment.transfer_id == 0 || fragment.data.size > kUsbFragmentDataMax ||
-      (fragment.data.size != 0 && fragment.data.data == nullptr)) {
+  if (device == kInvalidNodeId || device == kBroadcastNodeId ||
+      fragment.device != device ||
+      fragment.transfer_id == 0 || fragment.hops != 0 ||
+      !authority_carrier_length_valid(fragment.kind, fragment.total) ||
+      fragment.offset % usb::kAuthorityFragmentDataMax != 0 ||
+      fragment.offset >= fragment.total || fragment.data.data == nullptr ||
+      fragment.data.size == 0 ||
+      fragment.data.size > usb::kAuthorityFragmentDataMax ||
+      static_cast<std::uint32_t>(fragment.offset) + fragment.data.size > fragment.total ||
+      (static_cast<std::uint32_t>(fragment.offset) + fragment.data.size < fragment.total &&
+       fragment.data.size != usb::kAuthorityFragmentDataMax)) {
     return Status::error(StatusCode::InvalidArgument, "authority down binding");
   }
   Slot* slot = find_slot(device, Direction::Down, fragment.transfer_id, fragment.kind);
@@ -740,14 +749,6 @@ Status AuthorityGateway::authority_down(const NodeId device,
     if (slot == nullptr) {
       sat_inc(counters_.denied);
       return Status::error(StatusCode::Busy, "authority gateway full");
-    }
-    if (fragment.total < keys::kAuthorityEnvelopeMin &&
-        fragment.kind == AuthorityCarrierKind::Envelope) {
-      return Status::error(StatusCode::InvalidArgument, "authority down length");
-    }
-    if (!authority_carrier_length_valid(fragment.kind, fragment.total) &&
-        fragment.kind != AuthorityCarrierKind::Envelope) {
-      return Status::error(StatusCode::InvalidArgument, "authority down length");
     }
     slot->active = true;
     slot->direction = Direction::Down;
@@ -764,19 +765,19 @@ Status AuthorityGateway::authority_down(const NodeId device,
     drop_slot(*slot);
     return Status::error(StatusCode::InvalidArgument, "authority down overrun");
   }
-  for (std::size_t i = 0; i < fragment.data.size; ++i) {
-    const std::uint16_t at = static_cast<std::uint16_t>(fragment.offset + i);
-    const std::uint8_t mask = static_cast<std::uint8_t>(1U << (at & 7U));
-    if ((slot->bitmap[at >> 3U] & mask) != 0) {
-      if (slot->buffer[at] != fragment.data.data[i]) {
-        drop_slot(*slot);
-        return Status::error(StatusCode::Conflict, "authority down rewritten");
-      }
-      continue;
+  const std::uint32_t bit = std::uint32_t{1} <<
+                            (fragment.offset / usb::kAuthorityFragmentDataMax);
+  if ((slot->received_chunks & bit) != 0) {
+    if (std::memcmp(slot->buffer.data() + fragment.offset, fragment.data.data,
+                    fragment.data.size) != 0) {
+      drop_slot(*slot);
+      return Status::error(StatusCode::Conflict, "authority down rewritten");
     }
-    slot->bitmap[at >> 3U] = static_cast<std::uint8_t>(slot->bitmap[at >> 3U] | mask);
-    slot->buffer[at] = fragment.data.data[i];
-    ++slot->received;
+  } else {
+    std::memcpy(slot->buffer.data() + fragment.offset, fragment.data.data,
+                fragment.data.size);
+    slot->received_chunks |= bit;
+    slot->received = static_cast<std::uint16_t>(slot->received + fragment.data.size);
   }
   if (slot->received < slot->total_len) return Status::success();
   // Reassembled: envelopes larger than a carrier frame hash for the
@@ -803,7 +804,7 @@ bool AuthorityGateway::pump_down_mesh(Slot& slot, const MonotonicMs now_ms) noex
     // Our own channel bypasses the mesh: deliver the reassembled object
     // to the local client instead of looping it onto the radio.
     in_call_ = true;
-    local_.on_local_down(slot.kind, ByteView{slot.buffer.data(), slot.total_len});
+    local_.on_local_down(slot.kind, MutableByteView{slot.buffer.data(), slot.total_len});
     in_call_ = false;
     drop_slot(slot);
     return true;

@@ -31,6 +31,9 @@
 #include "routeloom/node.hpp"
 #include "routeloom/routing.hpp"
 #include "routeloom/sdkv1_group_keys.hpp"
+
+static_assert(sizeof(routeloom::sdkv1::GroupReplaySender) <= 48,
+              "replay epochs are shared across all group senders");
 #include "routeloom/sdkv1_group_security.hpp"
 #include "routeloom/sdkv1_records.hpp"
 #include "routeloom/sdkv1_store.hpp"

@@ -42,8 +42,8 @@ class GroupSecurityProvider final : public SecurityProvider {
   bool allowed_sender(const SecurityContext& context) const noexcept;
   GroupReplaySender* sender(const SecurityContext& context) noexcept;
   GroupReplaySender* free_sender(SecurityScope scope) noexcept;
-  static bool replay_ok(const GroupReplaySender& sender, std::uint32_t epoch,
-                        std::uint32_t boot, std::uint64_t counter) noexcept;
+  bool replay_ok(const GroupReplaySender& sender, std::uint32_t epoch,
+                 std::uint32_t boot, std::uint64_t counter) noexcept;
   void replay_commit(GroupReplaySender& sender, NodeId peer, std::uint32_t epoch,
                             std::uint32_t boot, std::uint64_t counter) noexcept;
 

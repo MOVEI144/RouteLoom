@@ -14,6 +14,11 @@
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/sdkv1_authority.hpp"
 #include "routeloom/sdkv1_authority_transport.hpp"
+
+static_assert(sizeof(routeloom::sdkv1::AuthorityEndpoint) <= 4512,
+              "authority endpoint keeps only chunk receipt bits");
+static_assert(sizeof(routeloom::sdkv1::AuthorityGateway) <= 4384,
+              "authority relay keeps only chunk receipt bits");
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 #include "routeloom/usb_host_ops.hpp"
@@ -122,7 +127,7 @@ class RecordingLocalSink final : public AuthorityLocalSink {
     AuthorityCarrierKind kind{AuthorityCarrierKind::Envelope};
     std::vector<std::uint8_t> bytes;
   };
-  void on_local_down(AuthorityCarrierKind kind, ByteView bytes) noexcept override {
+  void on_local_down(AuthorityCarrierKind kind, MutableByteView bytes) noexcept override {
     Down down;
     down.kind = kind;
     down.bytes.assign(bytes.data, bytes.data + bytes.size);
@@ -419,11 +424,14 @@ void test_endpoint_rx_rules() {
   manifest.total_len = 100;
   endpoint.on_manifest(kGateway, manifest, 3000);
   chunk.offset = 0;
-  chunk.data_size = 50;
+  chunk.data_size = 90;
   endpoint.on_chunk(kGateway, chunk, 3000);
   chunk.data[0] ^= 0xFF;
   endpoint.on_chunk(kGateway, chunk, 3000);
   CHECK(!endpoint.take_rx(rx));
+  CHECK(autonomy::object_ack_decode(
+      ByteView{port.queue.back().payload.data(), port.queue.back().payload.size()}, ack));
+  CHECK(ack.status == autonomy::ObjectAckStatus::Failed);
   // Claim routing: subtype 9 and kind 7 only, live hashes only.
   CHECK(endpoint.claim_control(kAuthorityControlSubtype));
   CHECK(!endpoint.claim_control(5));
@@ -656,9 +664,9 @@ void test_gateway_down_path() {
   CHECK(retry.offset == 0);
   // Rewriting the token's bytes mid-transfer is a Conflict, not a merge.
   fragment.transfer_id = 0xCAFE;
-  fragment.total = 100;
+  fragment.total = 1500;
   fragment.offset = 0;
-  const auto first = pattern(60, 0x01);
+  const auto first = pattern(960, 0x01);
   fragment.data = ByteView{first.data(), first.size()};
   CHECK(gateway.authority_down(kDevice, fragment, complete, 3000));
   CHECK(!complete);
@@ -741,6 +749,35 @@ void test_gateway_slot_exhaustion() {
   // USB session death drops everything, honestly idle afterwards.
   CHECK(!gateway.quiescent());
   gateway.drop_all();
+  CHECK(gateway.quiescent());
+}
+
+void test_gateway_direct_down_rejects_noncanonical_fragments() {
+  RecordingPort port;
+  RecordingHostSink host;
+  RecordingLocalSink local;
+  AuthorityGateway gateway(port, host, local, kGateway);
+  const auto bytes = pattern(960);
+  usb::AuthorityFragment fragment{};
+  fragment.device = kDevice;
+  fragment.transfer_id = 7;
+  fragment.kind = AuthorityCarrierKind::Envelope;
+  fragment.total = 2049;
+  fragment.data = ByteView{bytes.data(), bytes.size()};
+  bool complete = false;
+  CHECK(!gateway.authority_down(kDevice, fragment, complete, 1000));
+  CHECK(gateway.quiescent());
+  fragment.total = 1500;
+  fragment.data = ByteView{bytes.data(), 959};
+  CHECK(!gateway.authority_down(kDevice, fragment, complete, 1000));
+  CHECK(gateway.quiescent());
+  fragment.data = ByteView{bytes.data(), bytes.size()};
+  fragment.offset = 1;
+  CHECK(!gateway.authority_down(kDevice, fragment, complete, 1000));
+  CHECK(gateway.quiescent());
+  fragment.offset = 0;
+  fragment.device = kBroadcastNodeId;
+  CHECK(!gateway.authority_down(kBroadcastNodeId, fragment, complete, 1000));
   CHECK(gateway.quiescent());
 }
 
@@ -844,6 +881,7 @@ int main() {
   test_gateway_down_path();
   test_gateway_self_down();
   test_gateway_slot_exhaustion();
+  test_gateway_direct_down_rejects_noncanonical_fragments();
   test_config_target_authority_hook();
   if (failures != 0) {
     std::fprintf(stderr, "%d authority-transport checks failed\n", failures);

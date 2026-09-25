@@ -724,7 +724,7 @@ Status AuthorityClient::on_rx(const AuthorityRxCarrier& rx, const MonotonicMs no
     ++rx_rejected_;  // stray handshake bytes and Wakes change nothing
     return Status::success();
   }
-  on_envelope_ready(rx.bytes, now);
+  on_envelope_ready(rx, now);
   return Status::success();
 }
 
@@ -906,9 +906,9 @@ void AuthorityClient::wipe_channel_keys() noexcept {
   tx_counter_ = 0;
   next_request_id_ = 1;
   secure_clear(tx_buffer_);
+  secure_clear(rx_control_);
   tx_size_ = 0;
   tx_kind_ = TxKind::None;
-  secure_clear(rx_buffer_);
   tx_token_live_ = false;
   ack_pending_ = false;
   secure_clear(ack_gk_id_);
@@ -1170,46 +1170,56 @@ Status AuthorityClient::send_pull(const PullReason reason, const MonotonicMs now
   return Status::success();
 }
 
-void AuthorityClient::on_envelope_ready(const ByteView bytes, const MonotonicMs now) noexcept {
-  if (bytes.data == nullptr || bytes.size > rx_buffer_.size()) {
+void AuthorityClient::on_envelope_ready(const AuthorityRxCarrier& rx,
+                                         const MonotonicMs now) noexcept {
+  const ByteView bytes = rx.bytes;
+  const bool direct = tx_size_ != 0 && bytes.size > rx_control_.size() &&
+                      rx.writable.data == bytes.data && rx.writable.size >= bytes.size;
+  std::uint8_t* const workspace = tx_size_ == 0 ? tx_buffer_.data()
+                                  : direct ? rx.writable.data : rx_control_.data();
+  const std::size_t capacity = tx_size_ == 0 ? tx_buffer_.size()
+                               : direct ? rx.writable.size : rx_control_.size();
+  if (bytes.data == nullptr || bytes.size > keys::kAuthorityEnvelopeMax ||
+      bytes.size > capacity) {
     ++rx_rejected_;
     return;
   }
-  std::memcpy(rx_buffer_.data(), bytes.data, bytes.size);
-  const ByteView envelope{rx_buffer_.data(), bytes.size};
+  if (!direct) std::memmove(workspace, bytes.data, bytes.size);
+  const std::size_t wipe_size = direct ? bytes.size : capacity;
+  const ByteView envelope{workspace, bytes.size};
   keys::AuthorityEnvelopeHeader header{};
   std::size_t plain_size = 0;
   // In place: plaintext lands at the buffer front while its ciphertext sits
   // 12 bytes ahead, so reads always run ahead of writes (see the AeadGcm
   // contract). No second 2 KiB buffer, no big stack array.
   const Status opened = authority_open(aead_, rx_key_, envelope, rx_ctx_,
-                                       MutableByteView{rx_buffer_.data(), rx_buffer_.size()},
+                                       MutableByteView{workspace, capacity},
                                        plain_size, header);
   if (!opened) {
-    secure_clear(rx_buffer_);
+    secure_clear(workspace, wipe_size);
     ++rx_rejected_;
     return;
   }
   if (ack_pending_ && (header.type == keys::AuthorityEnvelopeType::GroupKeyUpdate ||
                        header.type == keys::AuthorityEnvelopeType::GroupKeyActivate)) {
-    secure_clear(rx_buffer_);
+    secure_clear(workspace, wipe_size);
     ++rx_rejected_;
     return;
   }
   // The AEAD tag verified: commit the replay window before any meaning check.
   if (!rx_window_.accept(header.counter)) {
-    secure_clear(rx_buffer_);
+    secure_clear(workspace, wipe_size);
     ++rx_rejected_;
     return;
   }
   last_activity_ = now;
-  const ByteView body{rx_buffer_.data(), plain_size};
+  const ByteView body{workspace, plain_size};
   const auto fail = [&](void) {
-    secure_clear(rx_buffer_);
+    secure_clear(workspace, wipe_size);
     ++rx_rejected_;
   };
   const auto done = [&](void) {
-    secure_clear(rx_buffer_);
+    secure_clear(workspace, wipe_size);
     ++rx_accepted_;
   };
   switch (header.type) {
@@ -1303,7 +1313,7 @@ void AuthorityClient::on_envelope_ready(const ByteView bytes, const MonotonicMs 
       // borrows `body` during the call, so notify first and wipe after.
       AuthorityBodyHead head{};
       if (plain_size < kAuthorityBodyHeadSize ||
-          !authority_head_decode(ByteView{rx_buffer_.data(), kAuthorityBodyHeadSize}, head)) {
+          !authority_head_decode(ByteView{workspace, kAuthorityBodyHeadSize}, head)) {
         fail();
         return;
       }
@@ -1314,7 +1324,7 @@ void AuthorityClient::on_envelope_ready(const ByteView bytes, const MonotonicMs 
       event.passthrough = body;
       ++rx_accepted_;
       observer_.on_event(event);
-      secure_clear(rx_buffer_);
+      secure_clear(workspace, wipe_size);
       return;
     }
   }
@@ -1333,9 +1343,9 @@ void AuthorityClient::wipe() noexcept {
   tx_counter_ = 0;
   next_request_id_ = 1;
   secure_clear(tx_buffer_);
+  secure_clear(rx_control_);
   tx_size_ = 0;
   tx_kind_ = TxKind::None;
-  secure_clear(rx_buffer_);
   tx_token_ = 0;
   tx_token_live_ = false;
   backoff_until_ = 0;
