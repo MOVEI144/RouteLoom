@@ -72,6 +72,11 @@ class DevelopmentPskSecurityProvider final : public SecurityProvider {
                     NvsCounterStore& counter_store,
                     const PeerStateConfig& config) noexcept;
   void close() noexcept;
+  // On a planned deep sleep, shrink each persisted RX reservation to the
+  // last accepted counter. A cold restart must retain the higher ceiling,
+  // but keeping it on an orderly sleep rejects the peer's next frames.
+  // Call only after the radio/node have quiesced; failure must abort sleep.
+  Status prepare_sleep() noexcept;
 
   bool ready() const noexcept override { return ready_; }
   SecurityProfile security_profile() const noexcept override {

@@ -1527,6 +1527,13 @@ extern "C" void app_main(void) {
       prepared = true;
     }
     if (coordinator.state() == routeloom::PowerState::ReadyToSleep) {
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+      // The radio is quiesced. Tighten the RX replay ceilings before the
+      // planned power loss, or the next live peer counters fall inside the
+      // crash reservation and are rejected after wake.
+      status = security.prepare_sleep();
+      if (!status) fail(status.detail);
+#endif
       s_sleep_marker = kSleepMarkerValue;
       s_sleep_programmed_ms = CONFIG_ROUTELOOM_SLEEP_DURATION_MS;
       status =
