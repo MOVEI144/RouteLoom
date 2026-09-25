@@ -11,6 +11,7 @@ inline constexpr esp_err_t ESP_OK = 0;
 inline constexpr esp_err_t ESP_ERR_NVS_NOT_FOUND = 1;
 inline constexpr esp_err_t ESP_ERR_INVALID_ARG = 2;
 inline constexpr esp_err_t ESP_ERR_NVS_TYPE_MISMATCH = 3;
+inline constexpr esp_err_t ESP_ERR_NVS_NOT_ENOUGH_SPACE = 4;
 inline constexpr int NVS_READONLY = 0;
 inline constexpr int NVS_READWRITE = 1;
 inline constexpr int NVS_TYPE_ANY = 0;
@@ -20,6 +21,7 @@ struct nvs_entry_info_t {
   char key[16]{};
 };
 
+esp_err_t nvs_open(const char*, int, nvs_handle_t*);
 esp_err_t nvs_open_from_partition(const char*, const char*, int, nvs_handle_t*);
 esp_err_t nvs_get_u32(nvs_handle_t, const char*, std::uint32_t*);
 esp_err_t nvs_set_u32(nvs_handle_t, const char*, std::uint32_t);

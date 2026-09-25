@@ -71,7 +71,11 @@ Status refuse_legacy_boot_after_migration() noexcept {
 Status NvsLegacyPurgePort::migration(bool& present) noexcept {
   present = false;
   nvs_handle_t handle = 0;
-  const esp_err_t opened = nvs_open_from_partition(kPartition, kDevSpace, NVS_READONLY, &handle);
+  // The marker lives in the default NVS partition (like the rlboot
+  // witness), NOT in rlsec: a full security partition must never block
+  // the migration record itself (#37 — even erases need a free slot, so
+  // a marker inside rlsec could deadlock the purge it gates).
+  const esp_err_t opened = nvs_open(kDevSpace, NVS_READONLY, &handle);
   if (opened == ESP_ERR_NVS_NOT_FOUND) return Status::success();
   if (opened != ESP_OK) {
     return Status::error(StatusCode::StorageFailure, "legacy migration open");
@@ -96,7 +100,7 @@ Status NvsLegacyPurgePort::commit_migration() noexcept {
   const Status checked = migration(present);
   if (!checked || present) return checked;
   nvs_handle_t handle = 0;
-  esp_err_t result = nvs_open_from_partition(kPartition, kDevSpace, NVS_READWRITE, &handle);
+  esp_err_t result = nvs_open(kDevSpace, NVS_READWRITE, &handle);
   if (result != ESP_OK) {
     return Status::error(StatusCode::StorageFailure, "legacy migration open");
   }

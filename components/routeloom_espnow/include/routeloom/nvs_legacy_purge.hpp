@@ -3,9 +3,13 @@
 // NVS-backed LegacyPurgePort for the physical `security legacy-state`
 // console verb (G-SEC P4 §10.2): enumerates the exact legacy peer-record
 // shapes (`rlcounter:c%08x`, `rlreplay:f/r%08x`) in the rlsec partition
-// and commits the `rldev/migration` RAM-only marker. Erase never touches
-// anything outside those two namespaces and shapes — cmax, witnesses,
-// boot_hi, RLI1/RLS1/RLT1/RRS1/RLV1/RLP and config records all survive.
+// and commits the `rldev/migration` RAM-only marker. The marker lives in
+// the DEFAULT NVS partition (like the rlboot witness), independent of
+// rlsec: a full security partition must never block the migration record
+// itself (#37 — even erases need a free slot, so a marker inside rlsec
+// could deadlock the purge it gates). Erase never touches anything
+// outside those two namespaces and shapes — cmax, witnesses, boot_hi,
+// RLI1/RLS1/RLT1/RRS1/RLV1/RLP and config records all survive.
 // Single-threaded on the maintenance console task (radio never runs in
 // that boot, so `stopped` is structural). No heap, no exceptions.
 
