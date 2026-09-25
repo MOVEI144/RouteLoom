@@ -613,6 +613,98 @@ fn live_pull_answers_and_throttles() {
     assert_eq!(rig.recv_downs().len(), 1);
 }
 
+/// A keyless member's wire pull (current == 0) is the
+/// maximally-behind case (§6.3), not a malformed one: it is answered
+/// with the active key, and the staged/active ACK catch-up converges
+/// it — the same loop as the confirm sync, over real fragments.
+#[test]
+fn live_keyless_pull_recovers_member() {
+    let mut rig = Rig::new();
+    let device = rig.join(NODE_A, 0xA1, T0);
+    let row = rig.service.with(|a| a.devices[&NODE_A].clone()).0;
+    let _ = device;
+    let (r1, mut peer) = FakeDevice::begin(NODE_A, row.dams, 0xA001, [0x11; 16], rig.net());
+    rig.handshake(NODE_A, &mut peer, r1);
+
+    // Confirm keyless and drain the first-contact sync; the member
+    // then loses its keys (storage failure) and pulls from zero.
+    let request_id = rig.next_request_id();
+    let confirm = JoinConfirmUp {
+        head: BodyHead {
+            op: 1,
+            generation: row.generation,
+            request_id,
+        },
+        cert_hash: sha256(&row.member_cert),
+        boot: 7,
+        current: 0,
+        next: 0,
+    }
+    .encode()
+    .unwrap();
+    rig.send_up(NODE_A, CarrierKind::Envelope, &peer.seal(1, &confirm));
+    for (_, _, bytes) in rig.recv_downs() {
+        peer.open(&bytes);
+    }
+
+    let active = rig.service.with(|a| a.gks.active_epoch()).0;
+    let pull = GroupKeyPull {
+        head: BodyHead {
+            op: 1,
+            generation: row.generation,
+            request_id: 11,
+        },
+        current: 0,
+        next: 0,
+        reason: PullReason::LostAckRepair,
+    }
+    .encode()
+    .unwrap();
+    let events = rig.send_up(NODE_A, CarrierKind::Envelope, &peer.seal(4, &pull));
+    assert!(
+        events
+            .iter()
+            .any(|(_, f)| f.contains("\"kind\":\"authority.pull\"")
+                && f.contains("\"request_id\":11")
+                && f.contains("\"outcome\":\"answered\"")),
+        "keyless pull answered: {events:?}"
+    );
+    let downs = rig.recv_downs();
+    assert_eq!(downs.len(), 1);
+    let (env_type, plaintext) = peer.open(&downs[0].2);
+    assert_eq!(env_type, 2);
+    let update = GroupKeyUpdate::decode(&plaintext).unwrap();
+    assert_eq!(update.g, active);
+
+    // Staged ACK earns the Activate; active ACK converges.
+    for (stored, expect_type) in [(StoredState::Staged, 3), (StoredState::Active, 0)] {
+        let ack_id = rig.next_request_id();
+        let ack = GroupKeyAck {
+            head: BodyHead {
+                op: 2,
+                generation: row.generation,
+                request_id: ack_id,
+            },
+            g: active,
+            gk_id: gk_id(testkit::network(), active, &update.gk),
+            result: UpdateResult::Durable,
+            stored_state: stored,
+        }
+        .encode()
+        .unwrap();
+        rig.send_up(NODE_A, CarrierKind::Envelope, &peer.seal(2, &ack));
+        let downs = rig.recv_downs();
+        if expect_type == 0 {
+            assert!(downs.is_empty(), "converged: wire silent");
+        } else {
+            assert_eq!(downs.len(), 1);
+            let (env_type, plaintext) = peer.open(&downs[0].2);
+            assert_eq!(env_type, expect_type);
+            assert_eq!(GroupKeyActivate::decode(&plaintext).unwrap().g, active);
+        }
+    }
+}
+
 /// Types 5..8 carry no P5 handler: verified plaintext is diagnosed, and
 /// no processed ACK is faked back.
 #[test]

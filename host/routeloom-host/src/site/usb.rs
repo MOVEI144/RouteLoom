@@ -753,7 +753,8 @@ const AUTHORITY_WINDOW_MS: u64 = 10_000;
 /// (session id). Implements [`AuthorityTransport`] (fragmentation into
 /// the bounded 0x65 down queue) and reassembles the 0x64 inbox; 0x67
 /// receipts only release request tracking, and 0x66 carries the
-/// session-(re)bind QueryLocal. Like the relay adapter, `close` drops
+/// session-(re)bind QueryLocal plus WakeLocal for the gateway's own
+/// channel-less Wake. Like the relay adapter, `close` drops
 /// everything and later calls fail — a closed adapter never feeds a
 /// new session.
 pub struct UsbAuthorityAdapter {
@@ -939,20 +940,30 @@ impl UsbAuthorityAdapter {
     }
 
     /// Queues one H→G 0x66 (the lane sends QueryLocal on every capable
-    /// bind so a reconnected gateway resyncs its local epochs).
+    /// bind so a reconnected gateway resyncs its local epochs; a Wake
+    /// for the gateway itself leaves as WakeLocal from `deliver`).
     pub fn send_state_set(&self, set: &SiteStateSet, now_ms: u64) -> Result<(), DeliverReject> {
         let mut guard = self.lock();
-        if guard.closed {
-            guard.stats.rejected_closed += 1;
+        self.send_state_set_locked(&mut guard, set, now_ms)
+    }
+
+    fn send_state_set_locked(
+        &self,
+        inner: &mut AuthorityInner,
+        set: &SiteStateSet,
+        now_ms: u64,
+    ) -> Result<(), DeliverReject> {
+        if inner.closed {
+            inner.stats.rejected_closed += 1;
             return Err(DeliverReject::Closed);
         }
-        if guard.queue.len() >= DOWN_QUEUE_CAP {
-            guard.stats.rejected_full += 1;
+        if inner.queue.len() >= DOWN_QUEUE_CAP {
+            inner.stats.rejected_full += 1;
             return Err(DeliverReject::QueueFull);
         }
-        guard.stats.state_sets += 1;
-        guard.stats.admitted += 1;
-        guard.queue.push_back(AuthorityDown {
+        inner.stats.state_sets += 1;
+        inner.stats.admitted += 1;
+        inner.queue.push_back(AuthorityDown {
             bytes: encode_site_state_set(set),
             device: self.gateway,
             transfer_id: 0,
@@ -985,11 +996,19 @@ impl UsbAuthorityAdapter {
     /// nonzero token per carrier). Fire-and-forget: a full queue or a
     /// closed session drops and counts — the channel layer already
     /// counted the send, and the rotation timers keep every target due
-    /// and retry, so a drop is delay, never loss.
+    /// and retry, so a drop is delay, never loss. The one exception is
+    /// a Wake for the bound gateway itself, which leaves as 0x66
+    /// WakeLocal instead of a relay-slot round trip (P5 §6.2).
     fn deliver_locked(&self, inner: &mut AuthorityInner, outbound: AuthorityOutbound, now_ms: u64) {
         if inner.closed {
             inner.stats.rejected_closed += 1;
             return;
+        }
+        if outbound.device == self.gateway && outbound.kind == CarrierKind::Wake {
+            if let Some(set) = wake_local_set(&outbound.bytes) {
+                let _ = self.send_state_set_locked(inner, &set, now_ms);
+                return;
+            }
         }
         if outbound.bytes.len() > AUTHORITY_FRAGMENT_TOTAL_MAX || outbound.bytes.is_empty() {
             inner.stats.encode_refused += 1;
@@ -1088,6 +1107,23 @@ impl UsbAuthorityAdapter {
             guard.stats.requests_evicted += 1;
         }
     }
+}
+
+/// Splits an 8 B Wake body (site_epoch, gk_epoch) into its 0x66
+/// WakeLocal equivalent. Anything else is not a Wake-shaped body:
+/// the carrier path (with its kind/total check) decides its fate,
+/// never a guessed 0x66. The RS hint is unknown on this path — the
+/// gateway acts on the GK hint only, like any QueryLocal mismatch.
+fn wake_local_set(body: &[u8]) -> Option<SiteStateSet> {
+    if body.len() != 8 {
+        return None;
+    }
+    Some(SiteStateSet {
+        action: SiteStateAction::WakeLocal,
+        site_epoch: u32::from_be_bytes(body[0..4].try_into().ok()?),
+        rs_epoch_hint: 0,
+        gk_epoch_hint: u32::from_be_bytes(body[4..8].try_into().ok()?),
+    })
 }
 
 impl AuthorityTransport for UsbAuthorityAdapter {
@@ -2295,6 +2331,53 @@ mod tests {
         assert_eq!(set.rs_epoch_hint, 5);
         assert_eq!(set.gk_epoch_hint, 9);
         assert_eq!(adapter.stats().state_sets, 1);
+    }
+
+    #[test]
+    fn gateway_self_wake_leaves_as_wake_local() {
+        // P5 §6.2: a Wake for the bound gateway itself is its local
+        // equivalent — 0x66 WakeLocal — not a relay-slot round trip.
+        let adapter = UsbAuthorityAdapter::new(GATEWAY, SESSION);
+        let mut body = Vec::new();
+        body.extend_from_slice(&3_u32.to_be_bytes());
+        body.extend_from_slice(&9_u32.to_be_bytes());
+        adapter.deliver(AuthorityOutbound {
+            device: GATEWAY,
+            kind: CarrierKind::Wake,
+            bytes: body,
+        });
+        let ready = adapter.take_ready(crate::now_ms());
+        assert_eq!(ready.len(), 1);
+        assert_eq!(authority_sub(&ready[0].bytes), Some(SUB_SITE_STATE_SET));
+        let set = routeloom_protocol::host_ops::decode_site_state_set(&ready[0].bytes).unwrap();
+        assert_eq!(set.action, SiteStateAction::WakeLocal);
+        assert_eq!(set.site_epoch, 3);
+        assert_eq!(set.gk_epoch_hint, 9);
+        // A foreign Wake keeps the 0x65 carrier path.
+        adapter.deliver(AuthorityOutbound {
+            device: DEVICE,
+            kind: CarrierKind::Wake,
+            bytes: vec![0; 8],
+        });
+        let ready = adapter.take_ready(crate::now_ms());
+        assert_eq!(ready.len(), 1);
+        assert_eq!(authority_sub(&ready[0].bytes), Some(SUB_AUTHORITY_DOWN));
+    }
+
+    #[test]
+    fn misshapen_gateway_wake_queues_no_state_set() {
+        // Not an 8 B Wake body: never a malformed 0x66 — the carrier
+        // path refuses it at encode, exactly like a foreign Wake of
+        // the same shape.
+        let adapter = UsbAuthorityAdapter::new(GATEWAY, SESSION);
+        adapter.deliver(AuthorityOutbound {
+            device: GATEWAY,
+            kind: CarrierKind::Wake,
+            bytes: vec![0; 12],
+        });
+        assert!(adapter.take_ready(crate::now_ms()).is_empty());
+        assert_eq!(adapter.stats().encode_refused, 1);
+        assert_eq!(adapter.stats().state_sets, 0);
     }
 
     #[test]

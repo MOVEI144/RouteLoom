@@ -132,6 +132,27 @@ pub const OPERATIONS_CAP: usize = 1024;
 /// Wire pulls answered per device (P5 §4), on the monotonic clock.
 const PULL_BUCKET_MS: u64 = 60_000;
 
+/// A wire pull that arrived inside its device's 60 s bucket and folded
+/// into the one pending answer (§4: repeated Wake/unknown-epoch pulls
+/// merge into a pending bit; the latest repeat wins). Identity
+/// (kid/DAMS) is never cached here — the serve re-reads the live row
+/// and re-fences, so a removal in between still wins.
+struct PendingPull {
+    current: u32,
+    next: u32,
+    reason: u8,
+    generation: u32,
+    request_id: u64,
+}
+
+/// The per-device 60 s pull bucket (§4): the last answer plus the
+/// coalesced repeat, if any.
+#[derive(Default)]
+struct PullBucket {
+    last_ms: u64,
+    pending: Option<PendingPull>,
+}
+
 /// Channel enums cross into the GK state only through these explicit
 /// tables (no wildcard, no bare `as` cast): a new variant breaks the
 /// build until the mapping names it.
@@ -640,10 +661,10 @@ pub struct SiteAuthority {
     /// (the tick reads the cache under the lock, where a callback
     /// would deadlock). Bounded: one entry per mapped channel event.
     channel_hints: Vec<(u64, Option<[u8; 32]>)>,
-    /// Last answered wire pull per device (mono ms), for the 60 s
-    /// bucket. RAM-only: a restart re-opens every bucket, which only
-    /// costs one early answer per device. Bounded by the member count.
-    pull_last_ms: HashMap<u64, u64>,
+    /// One pull bucket per device (§4). RAM-only: a restart re-opens
+    /// every bucket, which only costs one early answer per device.
+    /// Bounded by the member count; revoke drops the row.
+    pull_buckets: HashMap<u64, PullBucket>,
     next_serial: u32,
     revision: u32,
     ledger_seq: u64,
@@ -1057,7 +1078,7 @@ impl SiteAuthority {
             }),
             authority_transport: None,
             channel_hints: Vec::new(),
-            pull_last_ms: HashMap::new(),
+            pull_buckets: HashMap::new(),
             next_serial: meta_u32(&snapshot, "next_serial")?.unwrap_or(1),
             revision,
             ledger_seq,
@@ -2520,7 +2541,7 @@ impl SiteAuthority {
         // rather than at the next dispatch, and echo the new epochs.
         self.channels.retire_device(row.node);
         self.channel_hints.push((row.node, None));
-        self.pull_last_ms.remove(&row.node);
+        self.pull_buckets.remove(&row.node);
         self.channels.set_epochs(rs_epoch, self.gks.active_epoch());
         self.publish_staging_plan(plan, op.clone(), evicted);
         for rop in retired {
@@ -2806,6 +2827,9 @@ impl SiteAuthority {
     /// then the 24 h periodic start. Every commit below publishes to RAM
     /// only on success and queues nothing on failure.
     fn tick_gk(&mut self, time: HostTime) {
+        // Coalesced pulls first: the serve re-arms rotation targets
+        // before the round below spends its tokens.
+        self.serve_pending_pulls(time);
         // A restored activating/catching-up rotation takes a fresh cleanup
         // window (never a restored deadline); restored staging activates
         // below as expired.
@@ -3539,7 +3563,10 @@ impl SiteAuthority {
     /// after the active ACK); between active and staged it stages directly;
     /// past the issued high-water mark the ledger contradicts the device
     /// and the pull is refused with a diagnostic. A pull never moves the
-    /// global phase on its own claim.
+    /// global phase on its own claim. A keyless pull (`current == 0`)
+    /// is the maximally-behind case, not a malformed one: the fence
+    /// above already proved a live row, so it is served the active key
+    /// like any behind member instead of waiting for the next rotation.
     pub fn on_group_key_pull(&mut self, pull: GroupKeyPull, time: HostTime) -> PullOutcome {
         if !self.channel_member(pull.node, &pull.kid, pull.generation, &pull.dams) {
             self.bump_gk_rejected("pull_fence");
@@ -3547,7 +3574,7 @@ impl SiteAuthority {
                 reason: "pull_fence",
             };
         }
-        if pull.current == 0 || pull.reason == 0 || pull.reason > 3 {
+        if pull.reason == 0 || pull.reason > 3 {
             self.bump_gk_rejected("pull_shape");
             return PullOutcome::Rejected {
                 reason: "pull_shape",
@@ -3724,6 +3751,70 @@ impl SiteAuthority {
         }
     }
 
+    /// Answers coalesced pulls whose 60 s bucket re-opened (§4): the
+    /// latest throttled pull per device is served once, as if it had
+    /// just arrived. The serve consumes the next window, so a burst of
+    /// repeats costs one answer per window — never one per pull, and
+    /// never a drop the device must re-time itself. Identity comes
+    /// from the live row, re-fenced like any wire pull.
+    fn serve_pending_pulls(&mut self, time: HostTime) {
+        let due: Vec<u64> = self
+            .pull_buckets
+            .iter()
+            .filter(|(_, bucket)| {
+                bucket.pending.is_some()
+                    && time.mono_ms.saturating_sub(bucket.last_ms) >= PULL_BUCKET_MS
+            })
+            .map(|(device, _)| *device)
+            .collect();
+        for device in due {
+            let Some(bucket) = self.pull_buckets.get_mut(&device) else {
+                continue;
+            };
+            let Some(coalesced) = bucket.pending.take() else {
+                continue;
+            };
+            bucket.last_ms = time.mono_ms;
+            self.answer_pull(device, coalesced, true, time);
+        }
+    }
+
+    /// Answers one pull — wire or coalesced (`coalesced` tells the
+    /// diagnostic apart) — against the live row, re-fenced like any
+    /// wire pull.
+    fn answer_pull(&mut self, device: u64, pull: PendingPull, coalesced: bool, time: HostTime) {
+        let Some(row) = self.devices.get(&device).cloned() else {
+            self.bump_gk_rejected("pull_race");
+            return;
+        };
+        let outcome = self.on_group_key_pull(
+            GroupKeyPull {
+                node: device,
+                kid: row.kid,
+                generation: pull.generation,
+                dams: row.dams,
+                current: pull.current,
+                next: pull.next,
+                reason: pull.reason,
+            },
+            time,
+        );
+        let (outcome, detail) = match outcome {
+            PullOutcome::Answered => ("answered", ""),
+            PullOutcome::Rejected { reason } => ("rejected", reason),
+        };
+        self.event(
+            time.unix_ms,
+            format!(
+                "\"kind\":\"authority.pull\",\"device_id\":\"{}\",\"request_id\":{},\"current\":{},\"next\":{},\"outcome\":\"{outcome}\",\"detail\":\"{detail}\",\"coalesced\":{coalesced}",
+                h16(device),
+                pull.request_id,
+                pull.current,
+                pull.next
+            ),
+        );
+    }
+
     /// Maps one verified channel event into member/GK state. Every arm is
     /// fenced on the live row again: a removal committed between the
     /// dispatch and this mapping still wins.
@@ -3820,57 +3911,43 @@ impl SiteAuthority {
             ChannelEvent::Pull { device, pull } => {
                 // One pull per device per 60 s (P5 §4), on the monotonic
                 // clock: hopping reason/epochs cannot bypass the bucket.
-                // The bucket lives at the wire entry — not inside
-                // `on_group_key_pull` — so the confirm-accompanying sync
-                // below stays the one blessed immediate answer.
-                let throttled = self
-                    .pull_last_ms
-                    .get(&device)
-                    .is_some_and(|last| time.mono_ms.saturating_sub(*last) < PULL_BUCKET_MS);
+                // A throttled pull is not dropped — it folds into the
+                // device's pending bit (latest wins), answered once the
+                // bucket re-opens. The bucket lives at the wire entry —
+                // not inside `on_group_key_pull` — so the
+                // confirm-accompanying sync stays the one blessed
+                // immediate answer.
+                let pending = PendingPull {
+                    current: pull.current,
+                    next: pull.next,
+                    reason: pull_reason_u8(pull.reason),
+                    generation: pull.generation,
+                    request_id: pull.request_id,
+                };
+                let throttled = self.pull_buckets.get(&device).is_some_and(|bucket| {
+                    time.mono_ms.saturating_sub(bucket.last_ms) < PULL_BUCKET_MS
+                });
                 if throttled {
+                    let request_id = pending.request_id;
+                    self.pull_buckets.entry(device).or_default().pending = Some(pending);
                     self.event(
                         time.unix_ms,
                         format!(
                             "\"kind\":\"authority.pull_throttled\",\"device_id\":\"{}\",\"request_id\":{}",
                             h16(device),
-                            pull.request_id
+                            request_id
                         ),
                     );
                     return;
                 }
-                self.pull_last_ms.insert(device, time.mono_ms);
-                let Some(row) = self.devices.get(&device).cloned() else {
-                    self.bump_gk_rejected("pull_race");
-                    return;
-                };
-                let outcome = self.on_group_key_pull(
-                    GroupKeyPull {
-                        node: device,
-                        kid: row.kid,
-                        generation: pull.generation,
-                        dams: row.dams,
-                        current: pull.current,
-                        next: pull.next,
-                        reason: pull_reason_u8(pull.reason),
-                    },
-                    time,
-                );
-                // Bucketed, so one event per pull cannot flush the ring;
-                // the request id proves the typed sink carried the head.
-                let (outcome, detail) = match outcome {
-                    PullOutcome::Answered => ("answered", ""),
-                    PullOutcome::Rejected { reason } => ("rejected", reason),
-                };
-                self.event(
-                    time.unix_ms,
-                    format!(
-                        "\"kind\":\"authority.pull\",\"device_id\":\"{}\",\"request_id\":{},\"current\":{},\"next\":{},\"outcome\":\"{outcome}\",\"detail\":\"{detail}\"",
-                        h16(device),
-                        pull.request_id,
-                        pull.current,
-                        pull.next
-                    ),
-                );
+                let bucket = self.pull_buckets.entry(device).or_default();
+                bucket.last_ms = time.mono_ms;
+                // A fresh wire answer supersedes any coalesced repeat:
+                // its epochs are newer by construction. Bucketed, so one
+                // event per pull cannot flush the ring; the request id
+                // proves the typed sink carried the head.
+                bucket.pending = None;
+                self.answer_pull(device, pending, false, time);
             }
             ChannelEvent::UpdateAck { device, ack } | ChannelEvent::ActivateAck { device, ack } => {
                 let Some(row) = self.devices.get(&device).cloned() else {
