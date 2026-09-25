@@ -146,6 +146,38 @@ fn check_group(f: &Fields) {
     assert_ne!(cat(&bcast), cat(&gend));
 }
 
+fn check_dev(f: &Fields) {
+    let prk = dev_prk(int(f, "network"), &arr(f, "psk_hex"));
+    assert_eq!(prk.to_vec(), hex(f, "prk_hex"));
+    let (a, b) = (int(f, "node_a"), int(f, "node_b"));
+    assert_eq!(
+        dev_pair_rms_info(Purpose::Link, a, b),
+        hex(f, "rms_link_info_hex")
+    );
+    assert_eq!(
+        dev_pair_rms_info(Purpose::End, a, b),
+        hex(f, "rms_end_info_hex")
+    );
+    let link = dev_pair_rms(&prk, Purpose::Link, a, b);
+    let end = dev_pair_rms(&prk, Purpose::End, a, b);
+    assert_eq!(link.to_vec(), hex(f, "rms_link_hex"));
+    assert_eq!(end.to_vec(), hex(f, "rms_end_hex"));
+    // Swapped ends agree (ordered pair); purposes never collide.
+    assert_eq!(link, dev_pair_rms(&prk, Purpose::Link, b, a));
+    assert_ne!(link, end);
+    let (origin, boot) = (int(f, "origin"), int32(f, "boot"));
+    assert_eq!(
+        dev_group_key_info(origin, boot),
+        hex(f, "group_key_info_hex")
+    );
+    assert_eq!(dev_group_iv_info(origin, boot), hex(f, "group_iv_info_hex"));
+    let group = dev_group_key(&prk, origin, boot);
+    assert_eq!(group.key.to_vec(), hex(f, "group_key_hex"));
+    assert_eq!(group.iv.to_vec(), hex(f, "group_iv_hex"));
+    assert_eq!(dev_scope_info(), hex(f, "scope_info_hex"));
+    assert_eq!(dev_scope_key(&prk).to_vec(), hex(f, "scope_hex"));
+}
+
 fn check_rlres1(f: &Fields) {
     let purpose = Purpose::from_u8(u8::try_from(int(f, "purpose")).expect("u8")).expect("purpose");
     let (network, node_i, node_r) = (int(f, "network"), int(f, "node_i"), int(f, "node_r"));
@@ -274,6 +306,7 @@ fn valid_vectors_match_byte_for_byte() {
                 check_rlres1(&f);
                 rlres1_count += 1;
             }
+            "dev" => check_dev(&f),
             other => panic!("unknown codec {other} in {}", path.display()),
         }
     }
@@ -303,6 +336,11 @@ fn invalid_vectors_are_refused_with_the_same_reason() {
 fn frozen_labels() {
     assert_eq!(LABEL_RESUME_KEY, "RouteLoom/v1/resume-key");
     assert_eq!(LABEL_GROUP_SALT, "RouteLoom/v1/group");
+    assert_eq!(LABEL_DEV_RAM, "RouteLoom/v1/dev-ram");
+    assert_eq!(LABEL_DEV_RMS, "RouteLoom/v1/dev-rms");
+    assert_eq!(LABEL_DEV_GROUP_KEY, "RouteLoom/v1/dev-group-key");
+    assert_eq!(LABEL_DEV_GROUP_IV, "RouteLoom/v1/dev-group-iv");
+    assert_eq!(LABEL_DEV_SCOPE, "RouteLoom/v1/dev-scope");
     assert_eq!(
         info(LABEL_RESUME_R3, &[&[1, 2]]),
         b"RouteLoom/v1/R3\x00\x01\x02".to_vec()

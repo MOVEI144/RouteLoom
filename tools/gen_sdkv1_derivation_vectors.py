@@ -2,10 +2,11 @@
 """Regenerate protocol/sdkv1-golden/derivations/ (SDK v1 plan P1-4/P1-5).
 
 Independent reference for the FROZEN RouteLoom key-derivation labels and
-info encodings of docs/design/sdk-v1/03-key-hierarchy.md §2.2/§5.3/§6.1 and
-the RLRES1 resume transcript of 06-fast-rejoin.md §2.1. Written from the
-design text with the Python standard library only (hmac/hashlib/struct) —
-it shares no code with the C++ (components/routeloom/src/key_schedule.cpp,
+info encodings of docs/design/sdk-v1/03-key-hierarchy.md §2.2/§5.3/§6.1,
+the RLRES1 resume transcript of 06-fast-rejoin.md §2.1, and the dev-RAM
+PSK derivations of the P4 design (§10.1). Written from the design text
+with the Python standard library only (hmac/hashlib/struct) — it shares
+no code with the C++ (components/routeloom/src/key_schedule.cpp,
 resume.cpp) or Rust (host/routeloom-keysched) implementations, which must
 both reproduce every byte below.
 
@@ -46,6 +47,11 @@ L_R2 = b"RouteLoom/v1/R2"
 L_R3 = b"RouteLoom/v1/R3"
 L_CONF = b"RouteLoom/v1/resume-confirm"
 L_KEY = b"RouteLoom/v1/resume-key"
+L_DEV_RAM = b"RouteLoom/v1/dev-ram"
+L_DEV_RMS = b"RouteLoom/v1/dev-rms"
+L_DEV_GROUP_KEY = b"RouteLoom/v1/dev-group-key"
+L_DEV_GROUP_IV = b"RouteLoom/v1/dev-group-iv"
+L_DEV_SCOPE = b"RouteLoom/v1/dev-scope"
 
 PURPOSE_LINK, PURPOSE_END, PURPOSE_AUTHORITY, PURPOSE_PENDING = 1, 2, 4, 5
 DIR_I_TO_R, DIR_R_TO_I = 1, 2
@@ -219,6 +225,39 @@ def emit(sub: str, name: str, record: dict) -> None:
                     encoding="utf-8")
 
 
+# --- dev-RAM key (P4 §10.1) -------------------------------------------------------
+# Same HKDF-SHA-256 shape as the group key, rooted at the shared 32-byte
+# development PSK: dev_prk binds the full network id, the pair RMS binds
+# the purpose byte plus the ordered node pair, the group key/iv bind the
+# origin plus the durable boot, and the discovery scope binds nothing
+# further (one fixed generation, boot-independent).
+
+def dev_vector(psk, network, a, b, origin, boot):
+    lo, hi = (a, b) if a < b else (b, a)
+    salt = info(L_DEV_RAM, u64(network))
+    prk = hkdf_extract(salt, psk)
+    rms_link_info = info(L_DEV_RMS, u8(PURPOSE_LINK), u64(lo), u64(hi))
+    rms_end_info = info(L_DEV_RMS, u8(PURPOSE_END), u64(lo), u64(hi))
+    key_info = info(L_DEV_GROUP_KEY, u64(origin), u32(boot))
+    iv_info = info(L_DEV_GROUP_IV, u64(origin), u32(boot))
+    scope_info = info(L_DEV_SCOPE)
+    return {
+        "psk_hex": psk.hex(), "network": network, "node_a": a, "node_b": b,
+        "origin": origin, "boot": boot,
+        "salt_hex": salt.hex(), "prk_hex": prk.hex(),
+        "rms_link_info_hex": rms_link_info.hex(),
+        "rms_link_hex": hkdf_expand(prk, rms_link_info, 32).hex(),
+        "rms_end_info_hex": rms_end_info.hex(),
+        "rms_end_hex": hkdf_expand(prk, rms_end_info, 32).hex(),
+        "group_key_info_hex": key_info.hex(),
+        "group_key_hex": hkdf_expand(prk, key_info, 16).hex(),
+        "group_iv_info_hex": iv_info.hex(),
+        "group_iv_hex": hkdf_expand(prk, iv_info, 12).hex(),
+        "scope_info_hex": scope_info.hex(),
+        "scope_hex": hkdf_expand(prk, scope_info, 32).hex(),
+    }
+
+
 def main() -> None:
     # Only the generated folders are wiped; README.md is checked in.
     for sub in ("valid", "invalid"):
@@ -245,6 +284,16 @@ def main() -> None:
          group_vector(0xFFFF_FFFF_FFFF_FFFE, pattern(0xA5, 32), 0xFFFF_FFFF,
                       0xFFFF_FFFF_FFFF_FFFE, 0xFFFF_FFFF, 0x4700_0000_0000_00FF,
                       0x0000_0000_0000_0FFF, 0xFFFF_FFFF))
+
+    # Dev-RAM derivations (P4 §10.1, V1-K10): pair RMS per purpose, the
+    # boot-scoped group key/iv, and the discovery scope key.
+    good("dev_basic", "dev",
+         dev_vector(pattern(0x2A, 32), network, 0x0000_0000_0000_0101,
+                    0x0000_0000_0000_0102, 0x0000_0000_0000_0101, 7))
+    good("dev_max_fields", "dev",
+         dev_vector(pattern(0x5A, 32), 0xFFFF_FFFF_FFFF_FFFE,
+                    0xFFFF_FFFF_FFFF_FFFD, 0xFFFF_FFFF_FFFF_FFFE,
+                    0xFFFF_FFFF_FFFF_FFFD, 0xFFFF_FFFF))
 
     # AEAD nonce formation (03 §3).
     iv = pattern(0x3C, 12)

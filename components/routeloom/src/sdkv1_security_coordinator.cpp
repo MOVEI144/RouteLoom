@@ -46,15 +46,144 @@ SecurityCoordinator::SecurityCoordinator(const Deps& deps) noexcept
       group_keys_(*deps_.site),
       group_provider_(group_keys_, pairwise_provider_, deps_.crypto_aead, deps_.local_node,
                       deps_.revocations),
-      member_scope_(group_keys_, kMemberScopeRef),
-      authority_(deps_.crypto_aead, authority_port_, *this, authority_env_, &group_keys_) {
-  // Fresh: no workspace side constructed. Boot builds the Joiner, the
-  // adoption swaps it for the member engine; the adoption also starts
-  // the GK state and wants the authority channel.
+      provider_mux_(pairwise_provider_, group_provider_),
+      sleep_guard_(provider_mux_, pairwise_provider_),
+      member_scope_(group_keys_, kMemberScopeRef) {
+  // Fresh: no workspace side constructed, but the member small side is
+  // (the channel view works from construction).
+  // Boot builds the Joiner, the adoption swaps it for the member engine;
+  // the adoption also starts the GK state and wants the authority channel.
+  create_small();
   authority_env_.bind(deps_.entropy);
+  if (deps_.sleep_image != nullptr) {
+    secure_clear(deps_.sleep_image, sizeof(*deps_.sleep_image));
+  }
 }
 
-SecurityCoordinator::~SecurityCoordinator() noexcept { destroy_workspace(); }
+SecurityCoordinator::~SecurityCoordinator() noexcept {
+  if (mode_ == CoordinatorMode::Dev) {
+    destroy_dev();
+  } else {
+    destroy_small();
+  }
+  destroy_workspace();
+  if (deps_.sleep_image != nullptr) {
+    secure_clear(deps_.sleep_image, sizeof(*deps_.sleep_image));
+  }
+}
+
+SecurityCoordinator::MemberSmallSide::MemberSmallSide(
+    const routeloom::AeadGcm& aead, AuthorityPort& port, AuthorityObserver& observer,
+    rlres1::Environment& rlres1_env, GroupKeyState* group) noexcept
+    : authority(aead, port, observer, rlres1_env, group) {}
+
+SecurityCoordinator::DevSide::DevSide(const RevocationStore& revocations,
+                                       const LocalRevocationStore& local_revocation,
+                                       const AuthenticatedPeerView* peers) noexcept
+    : hooks(revocations, local_revocation, peers) {}
+
+SecurityCoordinator::DevSide::~DevSide() noexcept {
+  if (group_live) {
+    group().DevGroupProvider::~DevGroupProvider();
+    group_live = false;
+  }
+  sender.clear();
+  scope.wipe();
+  hooks.wipe();
+}
+
+DevGroupProvider& SecurityCoordinator::DevSide::group() noexcept {
+  return *reinterpret_cast<DevGroupProvider*>(group_box.data());
+}
+
+void SecurityCoordinator::destroy_small() noexcept {
+  sides_.small.~MemberSmallSide();
+  secure_clear(&sides_, sizeof(sides_));
+}
+
+void SecurityCoordinator::create_small() noexcept {
+  new (&sides_.small) MemberSmallSide(deps_.crypto_aead, authority_port_, *this, authority_env_,
+                                      &group_keys_);
+}
+
+void SecurityCoordinator::create_dev() noexcept {
+  new (&sides_.dev)
+      DevSide(*deps_.revocations, *deps_.local_revocation, this);
+}
+
+void SecurityCoordinator::destroy_dev() noexcept {
+  sides_.dev.~DevSide();
+  secure_clear(&sides_, sizeof(sides_));
+}
+
+DevGroupProvider& SecurityCoordinator::dev_group() noexcept { return dev().group(); }
+
+bool SecurityCoordinator::SessionProviderMux::ready() const noexcept {
+  return pairwise_.ready() && group().ready();
+}
+
+SecurityProfile SecurityCoordinator::SessionProviderMux::security_profile() const noexcept {
+  return group().security_profile();
+}
+
+Status SecurityCoordinator::SessionProviderMux::tx_epoch(const SecurityScope scope, const NodeId peer,
+                                                         std::uint32_t& epoch) noexcept {
+  return is_group(scope) ? group().tx_epoch(scope, peer, epoch)
+                         : pairwise_.tx_epoch(scope, peer, epoch);
+}
+
+Status SecurityCoordinator::SessionProviderMux::current_rx_epoch(const SecurityScope scope,
+                                                                 const NodeId peer,
+                                                                 std::uint32_t& epoch) const
+    noexcept {
+  return is_group(scope) ? group().current_rx_epoch(scope, peer, epoch)
+                         : pairwise_.current_rx_epoch(scope, peer, epoch);
+}
+
+ContextState SecurityCoordinator::SessionProviderMux::context_state(const SecurityScope scope,
+                                                                    const NodeId peer) const
+    noexcept {
+  return is_group(scope) ? group().context_state(scope, peer)
+                         : pairwise_.context_state(scope, peer);
+}
+
+Status SecurityCoordinator::SessionProviderMux::tx_group_link_epochs(std::uint32_t& boot,
+                                                                     std::uint32_t& g) noexcept {
+  return group().tx_group_link_epochs(boot, g);
+}
+
+bool SecurityCoordinator::SessionProviderMux::accepts_group_epoch(const std::uint32_t g) const
+    noexcept {
+  return group().accepts_group_epoch(g);
+}
+
+bool SecurityCoordinator::SessionProviderMux::group_promotion_pending() const noexcept {
+  return group().group_promotion_pending();
+}
+
+Status SecurityCoordinator::SessionProviderMux::next_counter(const SecurityContext& context,
+                                                             std::uint64_t& counter) noexcept {
+  return is_group(context.scope) ? group().next_counter(context, counter)
+                                 : pairwise_.next_counter(context, counter);
+}
+
+Status SecurityCoordinator::SessionProviderMux::seal(
+    const SecurityContext& context, const std::uint64_t counter, const ByteView aad,
+    const ByteView plaintext, const MutableByteView ciphertext,
+    std::array<std::uint8_t, kAeadTagSize>& tag) noexcept {
+  return is_group(context.scope)
+             ? group().seal(context, counter, aad, plaintext, ciphertext, tag)
+             : pairwise_.seal(context, counter, aad, plaintext, ciphertext, tag);
+}
+
+Status SecurityCoordinator::SessionProviderMux::open(
+    const SecurityContext& context, const std::uint64_t counter, const ByteView aad,
+    const ByteView ciphertext, const std::array<std::uint8_t, kAeadTagSize>& tag,
+    const MutableByteView plaintext) noexcept {
+  return is_group(context.scope)
+             ? group().open(context, counter, aad, ciphertext, tag, plaintext)
+             : pairwise_.open(context, counter, aad, ciphertext, tag, plaintext);
+}
 
 SecurityCoordinator::MemberEngine::MemberEngine(
     ResumeSlotStorage2& resume, GatewaySessionBank& bank, BankSessionSink<32, 128>& sink,
@@ -74,10 +203,11 @@ SecurityCoordinator::MemberEngine::MemberEngine(
 void SecurityCoordinator::destroy_workspace() noexcept {
   if (mode_ == CoordinatorMode::ZeroTouch) {
     ws_.joiner.~Joiner();
-  } else if (mode_ == CoordinatorMode::Member) {
+  } else if (has_member_engine()) {
     // The engine's cross-references (cookie, cache, sink) die with the
     // workspace; outside references (bank, stores, ports) stay valid.
-    // The wipe below also clears demux cookies and slot bytes.
+    // The wipe below also clears demux cookies and slot bytes (and the
+    // dev PSK dies with the dev-armed engine here).
     ws_.member.~MemberEngine();
   } else {
     return;
@@ -193,6 +323,20 @@ Status SecurityCoordinator::step(const CoordinatorEvent& event) noexcept {
   return status;
 }
 
+Status SecurityCoordinator::adopt_dev(const CoordinatorDevConfig& config,
+                                     const MonotonicMs now) noexcept {
+  if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
+  if (mode_ != CoordinatorMode::Fresh) {
+    return Status::error(StatusCode::InvalidState, "coordinator already running");
+  }
+  if (!deps_ready(deps_)) return Status::error(StatusCode::InvalidState, "coordinator deps");
+  last_now_ = now;
+  in_port_ = true;
+  const Status status = install_dev_config(config, now);
+  in_port_ = false;
+  return status;
+}
+
 Status SecurityCoordinator::take_action(CoordinatorAction& out) noexcept {
   if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
   if (!action_pending_) return Status::error(StatusCode::NotFound, "no coordinator action");
@@ -214,7 +358,7 @@ CoordinatorSnapshot SecurityCoordinator::snapshot() const noexcept {
   if (mode_ == CoordinatorMode::ZeroTouch) {
     out.joiner = joiner().snapshot().state;
   }
-  if (mode_ == CoordinatorMode::Member) {
+  if (has_member_engine()) {
     out.engine_quiescent = member().engine.quiescent();
     out.resume_link_slots = static_cast<std::uint16_t>(member().resume_cache.link_quota());
     out.resume_end_slots = static_cast<std::uint16_t>(member().resume_cache.end_quota());
@@ -222,10 +366,18 @@ CoordinatorSnapshot SecurityCoordinator::snapshot() const noexcept {
   out.link_sessions = static_cast<std::uint32_t>(bank_.live_count(SecurityScope::Link));
   out.end_sessions = static_cast<std::uint32_t>(bank_.live_count(SecurityScope::EndToEnd));
   out.demands = bank_.demand_count();
-  const AuthoritySnapshot auth = authority_.snapshot();
-  out.authority_started = auth.started;
-  out.authority_ready = auth.state == AuthoritySnapshot::State::Ready;
-  out.authority_busy = auth.busy;
+  // The dev route has no authority channel (the small side is dead in
+  // Dev): report the same unstarted view a fresh channel snapshots.
+  if (mode_ == CoordinatorMode::Dev) {
+    out.authority_started = false;
+    out.authority_ready = false;
+    out.authority_busy = false;
+  } else {
+    const AuthoritySnapshot auth = small().authority.snapshot();
+    out.authority_started = auth.started;
+    out.authority_ready = auth.state == AuthoritySnapshot::State::Ready;
+    out.authority_busy = auth.busy;
+  }
   out.join_confirmed = join_confirmed_;
   out.refresh_strikes = refresh_strikes_;
   return out;
@@ -234,17 +386,27 @@ CoordinatorSnapshot SecurityCoordinator::snapshot() const noexcept {
 Status SecurityCoordinator::member_discovery_config(DiscoveryConfig& out) noexcept {
   out = DiscoveryConfig{};
   if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
-  if (mode_ != CoordinatorMode::Member || !member_valid_) {
+  if (!has_member_engine() || !member_valid_) {
     return Status::error(StatusCode::InvalidState, "member discovery unavailable");
   }
   out.node = adopted_.node;
   out.mac = deps_.local_mac;
   out.network = adopted_.network;
   out.network_hint = static_cast<std::uint32_t>(adopted_.network);
-  out.capability_bits = kRld1CapMemberEdhocV1 | kRld1CapMemberResumeV1;
-  out.scope_mode = ScopeMode::Required;
-  out.scope_provider = &member_scope_;
-  out.scope = kMemberScopeRef;
+  if (mode_ == CoordinatorMode::Dev) {
+    // Dev-only bit, no member bits: the engine refuses any member/dev
+    // mix as Unsupported (never a downgrade), and the Required dev
+    // scope filters DISCOVER/OFFER to the same PSK before that.
+    out.capability_bits = kRld1CapDevRamSessionV1;
+    out.scope_mode = ScopeMode::Required;
+    out.scope_provider = &dev().scope;
+    out.scope = kDevScopeRef;
+  } else {
+    out.capability_bits = kRld1CapMemberEdhocV1 | kRld1CapMemberResumeV1;
+    out.scope_mode = ScopeMode::Required;
+    out.scope_provider = &member_scope_;
+    out.scope = kMemberScopeRef;
+  }
   out.cookie_bucket_ms = static_cast<std::uint32_t>(MemberCookie::kBucketMs);
   return Status::success();
 }
@@ -262,22 +424,24 @@ MonotonicMs SecurityCoordinator::next_deadline(const MonotonicMs now) const noex
     if (staged.used) return now;
   }
   if (mode_ == CoordinatorMode::ZeroTouch) sooner(joiner().next_deadline());
-  if (mode_ == CoordinatorMode::Member) {
+  if (has_member_engine()) {
     // The engine and the bank publish no deadline: while either has work
     // the firmware must keep polling, else the demux expiries rule.
     if (!member().engine.quiescent() || bank_.demand_count() != 0) return now;
     for (const auto& entry : member().demux) {
       if (entry.used) sooner(entry.expires_at);
     }
-    // A pending GK promote and the authority channel join the schedule.
-    if (group_keys_.promotion_pending()) return now;
-    if (authority_wanted_ && !authority_.snapshot().started) {
-      const MonotonicMs retry = last_authority_start_ > kJoinNoDeadline - 1000
-                                    ? kJoinNoDeadline
-                                    : last_authority_start_ + 1000;
-      sooner(retry);
-    } else {
-      sooner(authority_.next_deadline());
+    if (mode_ == CoordinatorMode::Member) {
+      // A pending GK promote and the authority channel join the schedule.
+      if (group_keys_.promotion_pending()) return now;
+      if (authority_wanted_ && !small().authority.snapshot().started) {
+        const MonotonicMs retry = last_authority_start_ > kJoinNoDeadline - 1000
+                                      ? kJoinNoDeadline
+                                      : last_authority_start_ + 1000;
+        sooner(retry);
+      } else {
+        sooner(small().authority.next_deadline());
+      }
     }
   }
   if (removal_holdoff_armed_) sooner(removal_holdoff_at_);
@@ -293,6 +457,19 @@ bool SecurityCoordinator::quiescent() const noexcept {
   return quiescent_locked();
 }
 
+bool SecurityCoordinator::member_work_pending() const noexcept {
+  if (!member().engine.quiescent() || bank_.demand_count() != 0) return true;
+  for (const auto& entry : member().demux) {
+    if (!entry.used) continue;
+    // A completed member leg (installed_link cleared its start) only
+    // routes late duplicates — the engine already dropped the exchange,
+    // so it never blocks sleep. Joiner/proxy legs always count as work.
+    if (entry.owner == DemuxOwner::Member && !entry.has_start) continue;
+    return true;
+  }
+  return false;
+}
+
 bool SecurityCoordinator::quiescent_locked() const noexcept {
   if (tune_outstanding_ != 0 || member_apply_pending_) return false;
   for (const auto& staged : staged_) {
@@ -300,11 +477,11 @@ bool SecurityCoordinator::quiescent_locked() const noexcept {
   }
   if (sleeping_) return true;
   if (mode_ == CoordinatorMode::ZeroTouch) return joiner().quiescent();
-  if (mode_ == CoordinatorMode::Member) {
-    if (!member().engine.quiescent() || bank_.demand_count() != 0) return false;
-    for (const auto& entry : member().demux) {
-      if (entry.used) return false;
-    }
+  if (has_member_engine()) {
+    // Completed member legs only route late duplicates (never sleep
+    // work); Joiner/proxy legs always count — see member_work_pending.
+    if (member_work_pending()) return false;
+    if (mode_ != CoordinatorMode::Member) return true;
     // A pending GK promote (a durable flash write) holds sleep off; the
     // authority channel naps with the device instead — staged bytes, a
     // handshake or backoff resume on Wake, and deep sleep closes the
@@ -371,7 +548,7 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
     maybe_abandon_refresh(now);
     return Status::success();
   }
-  if (mode_ != CoordinatorMode::Member) return Status::success();
+  if (!has_member_engine()) return Status::success();
   if (member_apply_pending_) return Status::success();
   // Start discovery only after the firmware has reported a successful
   // member radio/node apply and the single action slot is free.
@@ -403,12 +580,33 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
     NeighborDiscovery::MemberStartRequest start{};
     if (!deps_.discovery->take_member_start(start, now).ok()) break;
     if (start.peer == kInvalidNodeId || start.peer == adopted_.node) continue;
+    // Sleep re-confirmation (P4 §9.3, V1-F07): while a restore image is
+    // held for this initiator peer at the retained radio MAC, the
+    // accepted OFFER re-confirms the parent WITHOUT the engine —
+    // restore installs the retained (peer-authenticated) session, and a
+    // fresh handshake would install over the bank slot restore needs. No
+    // demux leg is held: nothing routes for a confirmed parent. The
+    // parent generation is revocation-vetted first (a revoked parent
+    // must not even bind); any refusal falls through to the normal
+    // engine path below, whose fresh session then stands while restore
+    // reports occupied (cold resume).
+    if (start.initiator && restore_holding_ && deps_.sleep_image != nullptr &&
+        start.peer == deps_.sleep_image->contexts[0].entry.peer &&
+        start.peer_mac == deps_.sleep_image->parent_mac &&
+        !revoked(start.peer, deps_.sleep_image->contexts[0].entry.peer_generation) &&
+        deps_.discovery->confirm_sleep_parent(start, now).ok()) {
+      continue;
+    }
     // One member leg per peer MAC: the engine refuses per-peer duplicates
     // anyway, and a second leg would alias the demux key. A simultaneous
-    // open resolves to the first leg; mutual auth still succeeds.
+    // open resolves to the first leg; mutual auth still succeeds. A
+    // completed leg (installed_link cleared its start) only routes late
+    // duplicates of the old exchange — a new exchange never matches it,
+    // so it must not block the re-handshake (sleep wake, rekey).
     bool leg_live = false;
     for (const auto& slot : member().demux) {
-      if (slot.used && slot.owner == DemuxOwner::Member && slot.mac == start.peer_mac) {
+      if (slot.used && slot.owner == DemuxOwner::Member && slot.has_start &&
+          slot.mac == start.peer_mac) {
         leg_live = true;
         break;
       }
@@ -447,6 +645,9 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
       req.scope = SecurityScope::Link;
       req.peer = start.peer;
       req.reason = HandshakeReason::Initial;
+      // The minted proof names this reservation: without it discovery
+      // cannot match the completion and the link never binds.
+      req.elevation_token = token;
       req.mac_i = deps_.local_mac;
       req.mac_r = start.peer_mac;
       req.carrier = entry->carrier;
@@ -460,10 +661,14 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
   drain_demands(now);
   drain_engine_results(now);
   drive_engine(now);
-  member().proxy.poll(now);
-  if (member().gateway_active) member().gateway.poll(now);
-  watch_linkless(now);   // stale-GK evidence accrues toward a refresh
-  drive_authority(now);  // GK tick/promote, channel tick, deferred start
+  if (mode_ == CoordinatorMode::Member) {
+    // Join service, stale-GK watch and authority channel are Member-only:
+    // the dev route has no proxy, no GK and no channel to drive.
+    member().proxy.poll(now);
+    if (member().gateway_active) member().gateway.poll(now);
+    watch_linkless(now);   // stale-GK evidence accrues toward a refresh
+    drive_authority(now);  // GK tick/promote, channel tick, deferred start
+  }
   if (removal_holdoff_armed_ && now >= removal_holdoff_at_) {
     removal_holdoff_armed_ = false;
     hooks_.set_holdoff_elapsed(true);
@@ -523,11 +728,11 @@ SecurityCoordinator::DemuxEntry* SecurityCoordinator::claim_demux(
 }
 
 Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
-  if (mode_ != CoordinatorMode::ZeroTouch && mode_ != CoordinatorMode::Member) {
+  if (mode_ != CoordinatorMode::ZeroTouch && !has_member_engine()) {
     return Status::success();  // Fresh/Removed/Recovery: no RLD1 owner lives
   }
   if (sleeping_) return Status::success();
-  if (mode_ == CoordinatorMode::Member && member_apply_pending_) {
+  if (has_member_engine() && member_apply_pending_) {
     sat_inc(counters_.demux_drops);
     return Status::success();
   }
@@ -564,7 +769,7 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
       }
       return joiner().on_rld1_rx(event.rld1_meta, event.rld1_frame, event.now);
     }
-    if (mode_ != CoordinatorMode::Member) {
+    if (!has_member_engine()) {
       sat_inc(counters_.demux_drops);
       return Status::success();
     }
@@ -625,11 +830,11 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
     }
     return demux_member_frame(env, hit, event.now);
   }
-  // New exchange. A member-mode Auth single frame with a parked
+  // New exchange. An engine-mode Auth single frame with a parked
   // responder start (same peer MAC) binds to it; anything else follows
   // the mode default: ZT Joiner while unprovisioned, proxy admission
-  // while member.
-  if (mode_ == CoordinatorMode::Member) {
+  // while member, drop while dev (no join service there).
+  if (has_member_engine()) {
     for (auto& entry : member().demux) {
       if (entry.used && entry.owner == DemuxOwner::Member && entry.has_start &&
           !entry.initiator && entry.mac == event.rld1_meta.source) {
@@ -639,6 +844,10 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
         entry.txn = env.transaction_nonce;
         return demux_member_frame(env, &entry, event.now);
       }
+    }
+    if (mode_ != CoordinatorMode::Member) {
+      sat_inc(counters_.demux_drops);
+      return Status::success();
     }
     // The proxy owns one bounded exchange and verifies the OFFER cookie
     // before admitting it. Unknown pre-cookie frames must not occupy the
@@ -668,9 +877,25 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
   return joiner().on_rld1_rx(event.rld1_meta, event.rld1_frame, event.now);
 }
 
+void SecurityCoordinator::ensure_responder_token(DemuxEntry& entry,
+                                                   const MonotonicMs now) noexcept {
+  if (!entry.has_start || entry.initiator ||
+      entry.discovery_token != NeighborDiscovery::kMemberHandshakeNone ||
+      deps_.discovery == nullptr) {
+    return;
+  }
+  std::uint32_t token = NeighborDiscovery::kMemberHandshakeNone;
+  ScopeDigest carrier_digest{};
+  keys::link_carrier_digest(entry.carrier, carrier_digest);
+  if (deps_.discovery->begin_member_handshake(entry.peer, entry.mac, carrier_digest, now, token)
+          .ok()) {
+    entry.discovery_token = token;
+  }
+}
+
 Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env,
                                                DemuxEntry* entry, const MonotonicMs now) noexcept {
-  if (entry == nullptr || !entry->used || mode_ != CoordinatorMode::Member) {
+  if (entry == nullptr || !entry->used || !has_member_engine()) {
     sat_inc(counters_.demux_drops);
     return Status::success();
   }
@@ -742,11 +967,13 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
       sat_inc(counters_.demux_drops);
       return Status::success();
     }
+    ensure_responder_token(*entry, now);
     HandshakeRx rx{};
     rx.scope = SecurityScope::Link;
     rx.phase = static_cast<std::uint8_t>(object.phase);
     rx.step = object.step;
     rx.claimed_peer = entry->peer;
+    rx.elevation_token = entry->discovery_token;
     rx.src_mac = entry->mac;
     rx.dst_mac = deps_.local_mac;
     rx.carrier = entry->carrier;
@@ -777,11 +1004,13 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
     sat_inc(counters_.demux_drops);
     return Status::success();
   }
+  ensure_responder_token(*entry, now);
   HandshakeRx rx{};
   rx.scope = SecurityScope::Link;
   rx.phase = static_cast<std::uint8_t>(object.phase);
   rx.step = object.step;
   rx.claimed_peer = entry->peer;
+  rx.elevation_token = entry->discovery_token;
   rx.src_mac = entry->mac;
   rx.dst_mac = deps_.local_mac;
   rx.carrier = entry->carrier;
@@ -789,6 +1018,11 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
     rx.cookie = ByteView{object.cookie.data(), object.cookie.size()};
   }
   (void)member().engine.on_message(rx, object.message, now);
+  // The assembly is consumed: free the slot for the next exchange's
+  // chunks (a second chunked handshake in this boot would otherwise
+  // find it Busy). Late duplicates still answer Complete from the
+  // retained token.
+  member().link_rx.release_assembled();
   return Status::success();
 }
 
@@ -818,6 +1052,10 @@ void SecurityCoordinator::drain_demands(const MonotonicMs now) noexcept {
     req.scope = SecurityScope::Link;
     req.peer = demand.peer;
     req.reason = HandshakeReason::Initial;
+    // Pairs the minted proof with discovery's reservation (None when the
+    // leg was never reserved: the session still installs, elevation is
+    // skipped for it).
+    req.elevation_token = leg->discovery_token;
     req.mac_i = deps_.local_mac;
     req.mac_r = leg->mac;
     req.carrier = leg->carrier;
@@ -850,7 +1088,7 @@ void SecurityCoordinator::drain_engine_results(const MonotonicMs now) noexcept {
     } else if (result.event == HandshakeEvent::Established && result.has_proof &&
                result.scope == SecurityScope::Link) {
       (void)installed_link(result, now);
-      note_link_established();
+      if (mode_ == CoordinatorMode::Member) note_link_established();
     } else if (result.event == HandshakeEvent::Failed && result.scope == SecurityScope::Link) {
       // Tear down the leg: the next discovery round or demand re-drives.
       for (auto& entry : member().demux) {
@@ -862,7 +1100,8 @@ void SecurityCoordinator::drain_engine_results(const MonotonicMs now) noexcept {
           entry = DemuxEntry{};
         }
       }
-      note_link_failed();
+      // Stale-GK strikes are Member-only: dev has no GK to refresh.
+      if (mode_ == CoordinatorMode::Member) note_link_failed();
     }
   }
 }
@@ -886,10 +1125,14 @@ Status SecurityCoordinator::emit_send(const HandshakeResult& result,
 Status SecurityCoordinator::emit_link_send(const HandshakeResult& result,
                                            const MonotonicMs now) noexcept {
   // The leg holds the peer MAC, the frozen carrier (cookie source) and
-  // the transaction id (drawn on our first send, echoed after).
+  // the transaction id (drawn on our first send, echoed after). Only a
+  // live (start-carrying) leg answers: a completed leg for the same peer
+  // names the old exchange, and sending on it would key the peer's demux
+  // to an id it no longer routes.
   DemuxEntry* leg = nullptr;
   for (auto& entry : member().demux) {
-    if (entry.used && entry.owner == DemuxOwner::Member && entry.peer == result.peer) {
+    if (entry.used && entry.owner == DemuxOwner::Member && entry.has_start &&
+        entry.peer == result.peer) {
       leg = &entry;
       break;
     }
@@ -1037,7 +1280,7 @@ Status SecurityCoordinator::emit_end_send(const HandshakeResult& result,
   object.phase = static_cast<JoinAuthPhase>(result.phase);
   object.step = result.step;
   object.exchange_id = exchange;
-  object.profile = kEndProfileMember;
+  object.profile = mode_ == CoordinatorMode::Dev ? kEndProfileDev : kEndProfileMember;
   object.message = ByteView{result.message.data(), result.message_size};
   std::array<std::uint8_t, kEndObjectMax> encoded{};
   std::size_t encoded_size = 0;
@@ -1122,10 +1365,13 @@ void SecurityCoordinator::drain_staged(const MonotonicMs now) noexcept {
 
 void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
                                                  const MonotonicMs now) noexcept {
-  if (mode_ != CoordinatorMode::Member) {
+  if (!has_member_engine()) {
     sat_inc(counters_.staged_drops);
     return;
   }
+  // Join-relay lanes are Member-only: a dev node runs no proxy/gateway,
+  // so anything but the end-session lane drops here.
+  const bool member_mode = mode_ == CoordinatorMode::Member;
   const ByteView payload{frame.payload.data(), frame.payload_size};
   switch (frame.type) {
     case FrameType::BootstrapAuth: {
@@ -1138,6 +1384,10 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
       if (payload.data[1] == static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage) ||
           payload.data[1] == static_cast<std::uint8_t>(JoinAuthPhase::Resume)) {
         handle_end_single(frame.meta, payload, now);
+        return;
+      }
+      if (!member_mode) {
+        sat_inc(counters_.staged_drops);
         return;
       }
       member().proxy.on_relay_rx(frame.meta.origin, frame.type, payload, now);
@@ -1153,6 +1403,10 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
     case FrameType::MembershipResult:
       // Join-relay Final/Abort only: proxy first (its admission drops
       // foreign frames before any assembly), then the gateway.
+      if (!member_mode) {
+        sat_inc(counters_.staged_drops);
+        return;
+      }
       member().proxy.on_relay_rx(frame.meta.origin, frame.type, payload, now);
       if (member().gateway_active) {
         const std::uint8_t hops =
@@ -1185,6 +1439,10 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
         }
         return;
       }
+      if (!member_mode) {
+        sat_inc(counters_.staged_drops);
+        return;
+      }
       member().proxy.on_relay_rx(frame.meta.origin, frame.type, payload, now);
       if (member().gateway_active) {
         const std::uint8_t hops =
@@ -1205,6 +1463,11 @@ void SecurityCoordinator::handle_end_single(const BootstrapMeta& meta, ByteView 
                                             const MonotonicMs now) noexcept {
   EndObject object{};
   if (!end_single_frame_decode(FrameType::BootstrapAuth, payload, object).ok()) {
+    sat_inc(counters_.demux_drops);
+    return;
+  }
+  if (object.profile !=
+      (mode_ == CoordinatorMode::Dev ? kEndProfileDev : kEndProfileMember)) {
     sat_inc(counters_.demux_drops);
     return;
   }
@@ -1253,6 +1516,9 @@ void SecurityCoordinator::handle_end_chunk(const BootstrapMeta& meta, ByteView p
     return;
   }
   handle_end_single(meta, member().end_rx.assembled(), now);
+  // Consumed: free the slot for the next end exchange (same Busy wedge
+  // as the link slot above).
+  member().end_rx.release_assembled();
 }
 
 // --- Sink/port interfaces (owned contexts, never re-entered) -------------------------------
@@ -1333,7 +1599,10 @@ bool SecurityCoordinator::local(HandshakeLocal& out) const noexcept {
 }
 
 bool SecurityCoordinator::revoked(const NodeId peer, const std::uint32_t generation) const noexcept {
-  if (mode_ != CoordinatorMode::Member || !member_valid_) return false;
+  // The shared Owner gate (P4 §10.1): the dev-armed engine consults this
+  // at R1/R3 time with generation 0, exactly like the member engine. The
+  // RLV1 record itself is enforced by the hooks + mode, not here.
+  if (!has_member_engine() || !member_valid_) return false;
   if (!deps_.revocations->has_set()) return false;  // no set: nothing revoked
   const std::uint32_t site_epoch = static_cast<std::uint32_t>(adopted_.network >> 32);
   return deps_.revocations->rejects(peer, generation, site_epoch);
@@ -1347,7 +1616,8 @@ bool SecurityCoordinator::authenticated(const NodeId peer, const NetworkId netwo
   // Only a live bank entry counts: the bank is RAM-only (empty before the
   // first install, wiped on site change), so a hit proves a completed
   // authentication of this boot. Caches, the shared GK and RLP names fail.
-  if (mode_ != CoordinatorMode::Member || !member_valid_) return false;
+  // In Dev mode the hit proves "same PSK" (generation 0, policy role).
+  if (!has_member_engine() || !member_valid_) return false;
   if (network != adopted_.network) return false;
   if (bank_.peer_summary(SecurityScope::Link, peer, generation, role)) return true;
   return bank_.peer_summary(SecurityScope::EndToEnd, peer, generation, role);
@@ -1452,13 +1722,19 @@ Status SecurityCoordinator::on_channel_ready(const CoordinatorEvent& event) noex
     return joiner().on_channel_ready(event.channel_token, result, event.now);
   }
   // The first member report proves the node and radio reached the adopted
-  // operating channel. Discovery cannot start on the join channel.
-  if (mode_ != CoordinatorMode::Member || !member_apply_pending_ ||
-      event.channel_token != 0) return Status::success();
+  // operating channel. Discovery cannot start on the join channel. The
+  // dev route reports the same token-0 apply completion (already on its
+  // static channel, so the move is a no-op there).
+  if (!has_member_engine() || !member_apply_pending_ || event.channel_token != 0) {
+    return Status::success();
+  }
   member_apply_pending_ = false;
   if (event.channel_result != StatusCode::Ok || event.channel != channel_) {
     stop_traffic();
     destroy_workspace();
+    // Leaving Dev rebuilds the small side (stop_traffic above destroyed
+    // the dev side); everywhere else it never left.
+    if (mode_ == CoordinatorMode::Dev) create_small();
     mode_ = CoordinatorMode::Recovery;
     CoordinatorAction recovery{};
     recovery.kind = CoordinatorActionKind::ReportRecovery;
@@ -1474,7 +1750,7 @@ Status SecurityCoordinator::on_channel_ready(const CoordinatorEvent& event) noex
 Status SecurityCoordinator::on_prepare_sleep(const MonotonicMs now) noexcept {
   (void)now;
   // Busy while the firmware still owes a take_action or the workspace has
-  // work; else park. Sleep images are PR5 — Poll simply naps.
+  // work; else park until the caller saves or aborts the image.
   if (action_pending_ || !quiescent_locked()) {
     return Status::error(StatusCode::Busy, "coordinator has work");
   }
@@ -1486,13 +1762,254 @@ Status SecurityCoordinator::on_prepare_sleep(const MonotonicMs now) noexcept {
 Status SecurityCoordinator::on_wake(const MonotonicMs now) noexcept {
   (void)now;
   sleeping_ = false;
+  // The retained image (if any was saved) is stale from here on: the
+  // firmware invalidates the port on the abort path, and a retained-wake
+  // continuation runs on live bank counters — never on write-ahead.
+  sleep_guard_.disarm();
+  return Status::success();
+}
+
+bool SecurityCoordinator::first_live_peer(const SecurityScope scope, NodeId& peer) const noexcept {
+  return bank_.first_live_peer(scope, peer);
+}
+
+Status SecurityCoordinator::save_sleep_image(RtcSessionPort& port, const NodeId parent,
+                                             const MacAddress& parent_mac,
+                                             const std::uint32_t parent_binding,
+                                             const MonotonicMs now) noexcept {
+  if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entered");
+  if (deps_.sleep_image == nullptr) {
+    return Status::error(StatusCode::Unsupported, "sleep image storage unavailable");
+  }
+  if (mode_ != CoordinatorMode::Member || !member_valid_) {
+    return Status::error(StatusCode::InvalidState, "sleep save without adoption");
+  }
+  if (!sleeping_) {
+    return Status::error(StatusCode::InvalidState, "sleep save without park");
+  }
+  if (now < last_now_) {
+    return Status::error(StatusCode::TimeUncertain, "coordinator clock regressed");
+  }
+  // The park is stale the moment new work lands: an untaken action, an
+  // outstanding tune, a staged end frame, a fresh bank demand, or a live
+  // handshake leg aborts the attempt — the firmware wakes and retries.
+  if (action_pending_ || tune_outstanding_ != 0 || member_apply_pending_ ||
+      member_work_pending()) {
+    return Status::error(StatusCode::Busy, "coordinator has work");
+  }
+  for (const auto& staged : staged_) {
+    if (staged.used) return Status::error(StatusCode::Busy, "coordinator has work");
+  }
+  if (parent == kInvalidNodeId || parent == kBroadcastNodeId || parent_binding == 0 ||
+      parent_mac == MacAddress{} || parent_mac == discovery_const::kBroadcastMac) {
+    return Status::error(StatusCode::InvalidArgument, "sleep save parent shape");
+  }
+  if (!deps_.site->has_site() || !deps_.identity->has_identity()) {
+    return Status::error(StatusCode::InvalidState, "sleep save without membership");
+  }
+  const Status ticked = bank_.tick(now);
+  if (!ticked) return ticked;
+  last_now_ = now;
+  RtcSessionImage image{};
+  image.source_boot = boot_witness_;
+  const SiteRecord& site = deps_.site->site();
+  image.network = site.network;
+  image.local_generation = site.assignment_generation;
+  image.site_commit = deps_.site->commit_seq();
+  image.gk_epoch = site.gk_epoch_current;
+  image.rs_floor = site.rs_epoch_floor;
+  const IdentityRecord& identity = deps_.identity->identity();
+  for (std::size_t i = 0; i < image.kid_digest.size(); ++i) {
+    image.kid_digest[i] = identity.kid[i];
+  }
+  image.parent_mac = parent_mac;
+  image.parent_binding = parent_binding;
+  const Status link =
+      bank_.export_sleep_entry(SecurityScope::Link, parent, image.contexts[0].entry);
+  if (!link) {
+    secure_clear(&image, sizeof(image));
+    return link;
+  }
+  image.contexts[0].scope = SecurityScope::Link;
+  image.count = 1;
+  NodeId end_peer = kInvalidNodeId;
+  if (bank_.first_live_peer(SecurityScope::EndToEnd, end_peer) &&
+      bank_.export_sleep_entry(SecurityScope::EndToEnd, end_peer, image.contexts[1].entry).ok()) {
+    image.contexts[1].scope = SecurityScope::EndToEnd;
+    image.count = 2;
+  }
+  std::array<std::uint8_t, kRtcSessionRecordSize> encoded{};
+  const Status shaped =
+      encode_rtc_session(image, MutableByteView{encoded.data(), encoded.size()});
+  if (!shaped) {
+    secure_clear(&image, sizeof(image));
+    secure_clear(encoded);
+    return shaped;
+  }
+  const Status written = port.write(ByteView{encoded.data(), encoded.size()});
+  secure_clear(encoded);
+  if (!written) {
+    secure_clear(&image, sizeof(image));
+    return written;
+  }
+  // A save supersedes the restore the guard still tracks (sleep, wake,
+  // sleep in one boot): re-arm over the fresh image so the next issue
+  // compares against what the port now holds. A re-arm failure retires
+  // the saved entries — their counters must never TX without write-ahead.
+  if (sleep_guard_.armed()) {
+    sleep_guard_.disarm();
+    // The guard borrows its image from caller-stable storage: re-home
+    // the fresh image in the held slot (the disarm above wiped the armed
+    // image it replaces) before re-arming over it.
+    *deps_.sleep_image = image;
+    const Status rearmed = sleep_guard_.arm(port, *deps_.sleep_image);
+    if (!rearmed) {
+      for (std::size_t i = 0; i < image.count; ++i) {
+        (void)bank_.retire(image.contexts[i].scope, image.contexts[i].entry.peer);
+      }
+      // The refused image is not armed: leave no key material behind.
+      secure_clear(deps_.sleep_image, sizeof(*deps_.sleep_image));
+    }
+    secure_clear(&image, sizeof(image));
+    return rearmed;
+  }
+  secure_clear(&image, sizeof(image));
+  return Status::success();
+}
+
+Status SecurityCoordinator::fail_restore(const Status& status) noexcept {
+  if (deps_.sleep_image != nullptr) {
+    secure_clear(deps_.sleep_image, sizeof(*deps_.sleep_image));
+  }
+  restore_holding_ = false;
+  restore_failed_ = true;
+  restore_error_ = status;
+  return status;
+}
+
+Status SecurityCoordinator::restore_sleep_image(RtcSessionPort& port, const std::uint32_t next_boot,
+                                                const std::uint32_t trusted_elapsed_ms,
+                                                const bool deep_sleep,
+                                                const bool sleep_marker) noexcept {
+  if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entered");
+  if (restore_done_) return Status::success();
+  if (restore_failed_) return restore_error_;
+  if (deps_.sleep_image == nullptr) {
+    return Status::error(StatusCode::Unsupported, "sleep image storage unavailable");
+  }
+  if (mode_ != CoordinatorMode::Member || !member_valid_ || sleeping_) {
+    return Status::error(StatusCode::Busy, "sleep restore not ready");
+  }
+  if (next_boot != boot_witness_) {
+    return fail_restore(Status::error(StatusCode::InvalidArgument, "sleep restore boot mismatch"));
+  }
+  if (!restore_holding_) {
+    RtcWakeCheck wake{};
+    wake.deep_sleep = deep_sleep;
+    wake.sleep_marker = sleep_marker;
+    wake.trusted_elapsed_ms = trusted_elapsed_ms;
+    wake.next_boot = next_boot;
+    wake.network = adopted_.network;
+    if (deps_.site->has_site() && deps_.identity->has_identity()) {
+      const SiteRecord& site = deps_.site->site();
+      wake.local_generation = site.assignment_generation;
+      wake.site_commit = deps_.site->commit_seq();
+      wake.gk_epoch = site.gk_epoch_current;
+      wake.rs_floor = site.rs_epoch_floor;
+      const IdentityRecord& identity = deps_.identity->identity();
+      for (std::size_t i = 0; i < wake.kid_digest.size(); ++i) {
+        wake.kid_digest[i] = identity.kid[i];
+      }
+    }
+    // Without a durable membership (dev adoption) the check stays zeroed:
+    // zeros can never match a member image's nonzero generation/commit,
+    // so dev always resumes cold through RLRES1 instead.
+    const Status consumed = consume_rtc_session(port, wake, *deps_.sleep_image);
+    if (!consumed) return fail_restore(consumed);
+    restore_holding_ = true;
+    restore_elapsed_ms_ = trusted_elapsed_ms;
+  }
+  // The wake evidence is per-boot, but the elapsed bound grows while the
+  // parent re-binds: re-apply positive deltas so the installed image is
+  // always deducted to the latest bound. A delta that outlives any held
+  // context fails the restore instead of installing an over-credited one.
+  if (trusted_elapsed_ms > restore_elapsed_ms_) {
+    const std::uint32_t delta = trusted_elapsed_ms - restore_elapsed_ms_;
+    for (std::size_t i = 0; i < deps_.sleep_image->count; ++i) {
+      SessionBankEntry& entry = deps_.sleep_image->contexts[i].entry;
+      if (delta >= entry.remaining_ms) {
+        return fail_restore(
+            Status::error(StatusCode::IntegrityError, "sleep restore elapsed"));
+      }
+      entry.remaining_ms -= delta;
+    }
+    restore_elapsed_ms_ = trusted_elapsed_ms;
+  }
+  // The parent must have re-bound post-wake with the same radio MAC the
+  // image names: a context without its radio peer is never sendable.
+  const NodeId parent = deps_.sleep_image->contexts[0].entry.peer;
+  NeighborDiscovery* const discovery = deps_.discovery;
+  MacAddress observed{};
+  BindingId live{kInvalidBindingId};
+  if (discovery == nullptr || !discovery->binding_of(parent, live) ||
+      !discovery->mac_of(parent, observed)) {
+    return Status::error(StatusCode::Busy, "sleep restore parent unbound");
+  }
+  if (!rtc_parent_warm_ok(*deps_.sleep_image, observed, true)) {
+    return fail_restore(
+        Status::error(StatusCode::AuthorizationFailed, "sleep restore parent changed"));
+  }
+  // The adoption must still hold locally (RLV1, floors, store health)
+  // and neither restored peer may have been revoked since.
+  MembershipState local_state = MembershipState::Unprovisioned;
+  const Status local_status = hooks_.local_state(adopted_.network, local_state);
+  if (!local_status || local_state != MembershipState::Member) {
+    return fail_restore(
+        Status::error(StatusCode::AuthorizationFailed, "sleep restore membership lost"));
+  }
+  for (std::size_t i = 0; i < deps_.sleep_image->count; ++i) {
+    const SessionBankEntry& entry = deps_.sleep_image->contexts[i].entry;
+    if (revoked(entry.peer, entry.peer_generation)) {
+      return fail_restore(
+          Status::error(StatusCode::AuthorizationFailed, "sleep restore peer revoked"));
+    }
+  }
+  const Status link =
+      bank_.restore_entry(SecurityScope::Link, parent, deps_.sleep_image->contexts[0].entry);
+  if (!link) return fail_restore(link);  // occupied: a newer context stands; resume instead
+  if (deps_.sleep_image->count == 2) {
+    // Best-effort: the end leg resumes through demand when the slot is
+    // taken or stale — the warm link is unaffected.
+    (void)bank_.restore_entry(SecurityScope::EndToEnd, deps_.sleep_image->contexts[1].entry.peer,
+                              deps_.sleep_image->contexts[1].entry);
+  }
+  // Re-base the image to this boot before the guard commits it: the wake
+  // chain proves "no boot skipped" (source + 1 == next), and the armed
+  // port image is this boot's commit — a power cut without a second save
+  // then consumes it on the next wake instead of failing the chain.
+  deps_.sleep_image->source_boot = boot_witness_;
+  const Status armed = sleep_guard_.arm(port, *deps_.sleep_image);
+  const std::uint8_t restored_count = deps_.sleep_image->count;
+  const NodeId end_peer =
+      restored_count == 2 ? deps_.sleep_image->contexts[1].entry.peer : kInvalidNodeId;
+  // The armed image stays: the guard borrows this slot from here on and
+  // wipes it on disarm. The hold itself is over either way.
+  restore_holding_ = false;
+  if (!armed) {
+    // Installed but unwritable: undo the install — restored counters
+    // must never TX without write-ahead — and resume instead.
+    (void)bank_.retire(SecurityScope::Link, parent);
+    if (restored_count == 2) (void)bank_.retire(SecurityScope::EndToEnd, end_peer);
+    return fail_restore(armed);
+  }
+  restore_done_ = true;
   return Status::success();
 }
 
 Status SecurityCoordinator::on_stop(const MonotonicMs now,
                                      const bool defer_resume_clear) noexcept {
   (void)now;
-  if (mode_ == CoordinatorMode::Member) {
+  if (has_member_engine()) {
     // stop_traffic reads the state; unattached (pre-Start) relays stop
     // as revoked.
     if (deps_.discovery != nullptr) {
@@ -1509,6 +2026,9 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now,
     (void)group_keys_.advance(stop, now);
   }
   destroy_workspace();  // wipes the live side (joiner or member)
+  // Leaving Dev rebuilds the small side (stop_traffic above destroyed
+  // the dev side); everywhere else it never left.
+  if (mode_ == CoordinatorMode::Dev) create_small();
   for (auto& slot : staged_) slot = StagedFrame{};
   action_ = CoordinatorAction{};
   action_pending_ = false;
@@ -1527,6 +2047,16 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now,
   member_apply_pending_ = false;
   hooks_.set_holdoff_elapsed(false);
   removal_holdoff_armed_ = false;
+  // Restore is per-boot: a stopped coordinator forgets the held image
+  // and any terminal verdict with it.
+  if (deps_.sleep_image != nullptr) {
+    secure_clear(deps_.sleep_image, sizeof(*deps_.sleep_image));
+  }
+  restore_holding_ = false;
+  restore_done_ = false;
+  restore_failed_ = false;
+  restore_elapsed_ms_ = 0;
+  restore_error_ = Status{StatusCode::Ok, "ok"};
   mode_ = CoordinatorMode::Fresh;
   return Status::success();
 }
@@ -1546,7 +2076,7 @@ Status SecurityCoordinator::send_authority_typed(const std::uint8_t type,
   input.kind = AuthorityInputKind::SendTyped;
   input.typed.type = type;
   input.typed.body = body;
-  const Status status = authority_.advance(input, now);
+  const Status status = small().authority.advance(input, now);
   if (status) last_now_ = now;
   in_port_ = false;
   return status;
@@ -1563,28 +2093,28 @@ constexpr MonotonicMs kAuthorityStartRetryMs = 1000;
 
 Status SecurityCoordinator::on_authority_rx(const CoordinatorEvent& event) noexcept {
   if (mode_ != CoordinatorMode::Member || sleeping_) return Status::success();
-  if (!authority_.snapshot().started) return Status::success();  // stale carrier
+  if (!small().authority.snapshot().started) return Status::success();  // stale carrier
   AuthorityInput in{};
   in.kind = AuthorityInputKind::RxCarrier;
   in.rx.kind = event.auth_kind;
   in.rx.bytes = event.auth_bytes;
   in.rx.writable = event.auth_writable;
-  return authority_.advance(in, event.now);
+  return small().authority.advance(in, event.now);
 }
 
 Status SecurityCoordinator::on_authority_tx(const CoordinatorEvent& event) noexcept {
   if (mode_ != CoordinatorMode::Member || sleeping_) return Status::success();
-  if (!authority_.snapshot().started) return Status::success();
+  if (!small().authority.snapshot().started) return Status::success();
   AuthorityInput in{};
   in.kind = AuthorityInputKind::TxResult;
   in.tx.token = event.auth_token;
   in.tx.delivered = event.auth_delivered;
-  return authority_.advance(in, event.now);
+  return small().authority.advance(in, event.now);
 }
 
 Status SecurityCoordinator::on_request_pull(const CoordinatorEvent& event) noexcept {
   if (mode_ != CoordinatorMode::Member || sleeping_) return Status::success();
-  if (!authority_.snapshot().started) {
+  if (!small().authority.snapshot().started) {
     // Not started yet: the adoption pull covers the first sync; a later
     // want restarts the channel and pulls then.
     authority_wanted_ = true;
@@ -1596,7 +2126,7 @@ Status SecurityCoordinator::on_request_pull(const CoordinatorEvent& event) noexc
   AuthorityInput in{};
   in.kind = AuthorityInputKind::RequestPull;
   in.pull.reason = static_cast<PullReason>(event.pull_reason);
-  return authority_.advance(in, event.now);
+  return small().authority.advance(in, event.now);
 }
 
 Status SecurityCoordinator::on_usb_session_up(const MonotonicMs now) noexcept {
@@ -1651,10 +2181,12 @@ bool SecurityCoordinator::build_authority_start(AuthorityStart& out) const noexc
 }
 
 void SecurityCoordinator::suspend_authority() noexcept {
-  if (!authority_.snapshot().started) return;
+  // No channel exists in Dev (see snapshot): suspending is a no-op there.
+  if (mode_ == CoordinatorMode::Dev) return;
+  if (!small().authority.snapshot().started) return;
   AuthorityInput in{};
   in.kind = AuthorityInputKind::Suspend;
-  (void)authority_.advance(in, last_now_);
+  (void)small().authority.advance(in, last_now_);
 }
 
 void SecurityCoordinator::drive_authority(const MonotonicMs now) noexcept {
@@ -1667,8 +2199,8 @@ void SecurityCoordinator::drive_authority(const MonotonicMs now) noexcept {
   (void)group_keys_.advance(tick, now);
   AuthorityInput poll{};
   poll.kind = AuthorityInputKind::Tick;
-  (void)authority_.advance(poll, now);
-  if (authority_wanted_ && !authority_.snapshot().started &&
+  (void)small().authority.advance(poll, now);
+  if (authority_wanted_ && !small().authority.snapshot().started &&
       now - last_authority_start_ >= kAuthorityStartRetryMs) {
     last_authority_start_ = now;
     AuthorityStart start{};
@@ -1676,13 +2208,13 @@ void SecurityCoordinator::drive_authority(const MonotonicMs now) noexcept {
     AuthorityInput begin{};
     begin.kind = AuthorityInputKind::Start;
     begin.start = start;
-    if (!authority_.advance(begin, now)) return;
+    if (!small().authority.advance(begin, now)) return;
     // The first sync rides the new channel immediately (one Pull; the
     // client's own bucket paces any more).
     AuthorityInput pull{};
     pull.kind = AuthorityInputKind::RequestPull;
     pull.pull.reason = PullReason::BootReconnectSync;
-    (void)authority_.advance(pull, now);
+    (void)small().authority.advance(pull, now);
   }
 }
 
@@ -1863,6 +2395,7 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
   CoordinatorMemberConfig cfg{};
   cfg.network = site.network;
   cfg.node = identity.node_id;
+  cfg.channel = site.channel;
   // The message session names this boot on the mesh: entropy-drawn when
   // the RNG answers, else the rlboot witness (durable, nonzero, distinct
   // per boot). The node refuses 0 either way.
@@ -1999,6 +2532,122 @@ void SecurityCoordinator::emit_member_action() noexcept {
   emit_action(action);
 }
 
+void SecurityCoordinator::abandon_dev_adoption(JoinRecoveryReason reason) noexcept {
+  // The member side exists (create_member ran); stop_traffic scrubs the
+  // bank and destroys the partially adopted dev side, then the workspace
+  // dies and the coordinator parks in Recovery like a failed member
+  // adoption — with the small side rebuilt, as every non-Dev mode has it.
+  stop_traffic();
+  destroy_workspace();
+  mode_ = CoordinatorMode::Recovery;
+  create_small();
+  CoordinatorAction action{};
+  action.kind = CoordinatorActionKind::ReportRecovery;
+  action.recovery = reason;
+  emit_action(action);
+}
+
+Status SecurityCoordinator::install_dev_config(const CoordinatorDevConfig& config,
+                                               const MonotonicMs now) noexcept {
+  if (config.network == 0 || config.node == kInvalidNodeId ||
+      config.node == kBroadcastNodeId || config.node == 0 || config.boot == 0 ||
+      config.channel == 0 || config.role == 0) {
+    return Status::error(StatusCode::InvalidArgument, "dev config");
+  }
+  bool psk_zero = true;
+  for (const std::uint8_t byte : config.psk) {
+    if (byte != 0) psk_zero = false;
+  }
+  if (psk_zero) return Status::error(StatusCode::InvalidArgument, "dev psk");
+  if (mode_ == CoordinatorMode::Dev) {
+    return Status::error(StatusCode::InvalidState, "dev already adopted");
+  }
+  CoordinatorMemberConfig cfg{};
+  cfg.network = config.network;
+  cfg.node = config.node;
+  cfg.channel = config.channel;
+  // Both sessions are the reserved durable boot: it rises every boot, so
+  // a reboot never reuses a group key epoch (P4 §10.1).
+  cfg.message_session = config.boot;
+  cfg.boot_session = config.boot;
+  cfg.link_epoch = 1;
+  cfg.end_epoch = 1;
+  cfg.boot_incarnation = 0;  // unknown on the dev route (telemetry only)
+  cfg.role = config.role;
+  adopted_ = cfg;
+  member_valid_ = true;
+  destroy_workspace();
+  create_member();
+  destroy_small();
+  create_dev();
+  mode_ = CoordinatorMode::Dev;
+  sat_inc(counters_.boots);
+  GatewaySessionBank::LocalView local{};
+  local.self = cfg.node;
+  local.network = cfg.network;
+  local.gk_epoch = 1;  // fixed dev epoch (P4 §10.1): the engine attests
+                       // created_gk 1 and the bank enforces created+2
+  GatewaySessionBank::RandomSource random{};
+  random.fn = &entropy_fill;
+  random.ctx = deps_.entropy;
+  const Status banked = bank_.configured() ? bank_.reset_membership(local, now)
+                                           : bank_.configure(local, deps_.bank_aead, random, now);
+  if (!banked.ok()) {
+    abandon_dev_adoption(JoinRecoveryReason::StorageFailure);
+    return Status::success();
+  }
+  if (!member().member_cookie.configure(&entropy_fill, deps_.entropy).ok()) {
+    abandon_dev_adoption(JoinRecoveryReason::StorageFailure);
+    return Status::success();
+  }
+  DevResumePolicy policy{};
+  policy.psk = config.psk;
+  policy.network = config.network;
+  policy.self = config.node;
+  policy.role = config.role;
+  policy.boot = config.boot;
+  if (!member().engine.configure_dev(policy, now).ok()) {
+    abandon_dev_adoption(JoinRecoveryReason::MembershipInvalid);
+    return Status::success();
+  }
+  // The group side binds only after the pairwise side stands: a failed
+  // adopt leaves no half-adopted provider behind (stop_traffic in the
+  // abandon path scrubs whatever bound so far). A boot at or below the
+  // consumed high-water refuses: the rebuilt sender cannot remember an
+  // earlier adoption's counter space on its own.
+  if (config.boot <= dev_boot_seen_) {
+    abandon_dev_adoption(JoinRecoveryReason::StorageFailure);
+    return Status::success();
+  }
+  if (!dev().sender.configure(config.psk, config.network, config.node, config.boot).ok()) {
+    abandon_dev_adoption(JoinRecoveryReason::StorageFailure);
+    return Status::success();
+  }
+  dev_boot_seen_ = config.boot;
+  new (dev().group_box.data())
+      DevGroupProvider(dev().sender, config.psk, config.network, deps_.bank_aead, config.node);
+  dev().group_live = true;
+  provider_mux_.set_dev_group(&dev_group());
+  provider_mux_.set_dev(true);
+  if (!dev().scope.adopt(config.psk, config.network).ok()) {
+    abandon_dev_adoption(JoinRecoveryReason::StorageFailure);
+    return Status::success();
+  }
+  if (!dev().hooks.adopt(config.network, config.node, config.role).ok()) {
+    abandon_dev_adoption(JoinRecoveryReason::MembershipInvalid);
+    return Status::success();
+  }
+  // No proxy/gateway/authority in dev: the workspace side stays
+  // Unprovisioned and the poll never drives it. Relay duties are
+  // role-gated by the firmware from the adopted config, like member.
+  channel_ = config.channel;  // the operating channel gates RLD1 RX
+  discovery_started_ = false;
+  member_apply_pending_ = true;
+  sat_inc(counters_.dev_adoptions);
+  emit_member_action();
+  return Status::success();
+}
+
 // --- Joiner legs -------------------------------------------------------------------------------
 
 void SecurityCoordinator::drain_joiner(const MonotonicMs now) noexcept {
@@ -2120,9 +2769,26 @@ void SecurityCoordinator::stop_traffic(const bool clear_resume) noexcept {
   // Member workspace is live; the caller destroys (wipes) it after. The
   // bank and the GK scope live outside the union, so they are scrubbed
   // here: bank clear does not depend on new entropy, and proxy/gateway leave
-  // Member (aborting relays, freeing slots) before the wipe.
+  // Member (aborting relays, freeing slots) before the wipe. In Dev the
+  // dev side dies here instead of the small side (the dev-armed engine,
+  // with its PSK policy, dies with the workspace below); the mux drops
+  // its dev group pointer before the storage goes.
   (void)member().engine.cancel_all();
   bank_.clear();
+  sleep_guard_.disarm();
+  provider_mux_.set_dev(false);
+  provider_mux_.set_dev_group(nullptr);
+  if (mode_ == CoordinatorMode::Dev) {
+    destroy_dev();
+  } else {
+    if (deps_.sleep_image != nullptr) {
+      secure_clear(deps_.sleep_image, sizeof(*deps_.sleep_image));
+    }
+  }
+  restore_holding_ = false;
+  restore_done_ = false;
+  restore_failed_ = false;
+  restore_error_ = Status::success();
   if (clear_resume) (void)member().resume_cache.clear_all();
   (void)member().member_cookie.configure(&entropy_fill, deps_.entropy);  // rotate; old cookies die
   // Verified removal ends the channel (its DAMS copy wipes with it) and

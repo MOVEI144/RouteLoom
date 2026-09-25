@@ -1,6 +1,9 @@
 #include "routeloom/sdkv1_dev_session.hpp"
 
+#include <cstring>
+
 #include "routeloom/discovery_scope.hpp"  // sha256, hmac_sha256
+#include "routeloom/group.hpp"  // is_group_address
 #include "routeloom/rlcw1.hpp"
 #include "routeloom/secure_clear.hpp"
 
@@ -68,6 +71,54 @@ Status dev_find_slot(const keys::Secret& psk, const NetworkId network,
   return Status::success();
 }
 
+Status DevScopeProvider::adopt(const keys::Secret& psk, const NetworkId network) noexcept {
+  keys::Secret next{};
+  const Status derived = keys::dev_scope_key(psk, network, next);
+  if (!derived) return derived;
+  wipe();
+  key_ = next;
+  secure_clear(next);
+  network_ = network;
+  active_ = true;
+  return Status::success();
+}
+
+void DevScopeProvider::wipe() noexcept {
+  secure_clear(key_);
+  network_ = 0;
+  active_ = false;
+}
+
+bool DevScopeProvider::current_generation(const ScopeRef scope, std::uint32_t& out) noexcept {
+  if (in_call_) return false;
+  if (scope != kDevScopeRef || !active_) return false;
+  out = kDevScopeGeneration;
+  return true;
+}
+
+bool DevScopeProvider::accepted_generation(const ScopeRef scope, const std::uint32_t generation,
+                                           const MonotonicMs now_ms) noexcept {
+  (void)now_ms;
+  if (in_call_) return false;
+  return scope == kDevScopeRef && active_ && generation == kDevScopeGeneration;
+}
+
+Status DevScopeProvider::scope_tag(const ScopeRef scope, const std::uint32_t generation,
+                                   const ByteView input, ScopeTag& out) noexcept {
+  out.fill(0);
+  if (in_call_) return Status::error(StatusCode::Busy, "dev scope re-entered");
+  if (scope != kDevScopeRef || !active_ || generation != kDevScopeGeneration) {
+    return Status::error(StatusCode::AuthRequired, "dev scope unavailable");
+  }
+  in_call_ = true;
+  ScopeDigest digest{};
+  hmac_sha256(ByteView{key_.data(), key_.size()}, input, digest);
+  for (std::size_t i = 0; i < out.size(); ++i) out[i] = digest[i];
+  secure_clear(digest);
+  in_call_ = false;
+  return Status::success();
+}
+
 Status DevGroupSender::configure(const keys::Secret& psk, const NetworkId network,
                                  const NodeId origin, const std::uint32_t boot) noexcept {
   if (network == 0 || !id_valid(origin) || boot == 0) {
@@ -112,6 +163,174 @@ void DevGroupSender::clear() noexcept {
   tx_next_ = 0;
   boot_ = 0;
   configured_ = false;
+}
+
+DevGroupProvider::DevGroupProvider(DevGroupSender& sender, const keys::Secret& psk,
+                                   const NetworkId network, const AeadGcm& aead,
+                                   const NodeId self) noexcept
+    : sender_(sender), psk_(psk), network_(network), aead_(aead), self_(self) {}
+
+DevGroupProvider::~DevGroupProvider() noexcept {
+  secure_clear(psk_);
+  secure_clear(staging_);
+}
+
+Status DevGroupProvider::tx_epoch(const SecurityScope scope, const NodeId peer,
+                                  std::uint32_t& epoch) noexcept {
+  epoch = 0;
+  if (scope != SecurityScope::Group || peer != kBroadcastNodeId) {
+    return Status::error(StatusCode::Unsupported, "dev group TX epoch");
+  }
+  if (!sender_.configured()) {
+    return Status::error(StatusCode::AuthRequired, "dev group TX unavailable");
+  }
+  epoch = kDevGroupEpoch;
+  return Status::success();
+}
+
+ContextState DevGroupProvider::context_state(const SecurityScope scope,
+                                             const NodeId peer) const noexcept {
+  if (scope != SecurityScope::Group || peer != kBroadcastNodeId) return ContextState::None;
+  return sender_.configured() ? ContextState::Ready : ContextState::None;
+}
+
+Status DevGroupProvider::material(const SecurityContext& c, keys::TrafficKey& out,
+                                  const bool transmit) noexcept {
+  keys::clear(out);
+  if (c.scope != SecurityScope::Group) {
+    return Status::error(StatusCode::Unsupported, "dev group scope");
+  }
+  if (network_ == 0 || c.network == 0 || c.network != network_ || !id_valid(c.sender) ||
+      c.receiver != kBroadcastNodeId || c.sender_boot == 0 || c.epoch != kDevGroupEpoch ||
+      c.group_epoch != 0 || !is_group_address(c.group_id)) {
+    return Status::error(StatusCode::InvalidArgument, "dev group binding");
+  }
+  if (transmit) {
+    if (!sender_.configured()) {
+      return Status::error(StatusCode::AuthorizationFailed, "dev group TX unavailable");
+    }
+    if (c.sender != self_ || c.sender_boot != sender_.boot()) {
+      return Status::error(StatusCode::AuthorizationFailed, "dev group origin");
+    }
+  }
+  return keys::dev_group_key(psk_, network_, c.sender, c.sender_boot, out);
+}
+
+Status DevGroupProvider::next_counter(const SecurityContext& c,
+                                      std::uint64_t& counter) noexcept {
+  counter = 0;
+  if (in_call_) return Status::error(StatusCode::Busy, "dev group reentry");
+  in_call_ = true;
+  keys::TrafficKey unused{};
+  const Status bound = material(c, unused, true);
+  keys::clear(unused);
+  if (!bound) {
+    in_call_ = false;
+    return bound;
+  }
+  const Status drawn = sender_.next_counter(counter);
+  in_call_ = false;
+  return drawn;
+}
+
+Status DevGroupProvider::seal(const SecurityContext& c, const std::uint64_t counter,
+                              const ByteView aad, const ByteView plaintext,
+                              const MutableByteView ciphertext,
+                              std::array<std::uint8_t, kAeadTagSize>& tag) noexcept {
+  if (c.scope != SecurityScope::Group) {
+    return Status::error(StatusCode::Unsupported, "dev group scope");
+  }
+  // A reconfigured sender is a new key epoch with a fresh counter space:
+  // the sealed high-water belongs to the old boot and resets with it.
+  if (sender_.boot() != sealed_boot_) {
+    sealed_ = 0;
+    has_sealed_ = false;
+    sealed_boot_ = sender_.boot();
+  }
+  if (in_call_) return Status::error(StatusCode::Busy, "dev group reentry");
+  if (counter >= sender_.tx_next() || (has_sealed_ && counter <= sealed_) ||
+      counter > kMaxCryptoCounter || ciphertext.size != plaintext.size ||
+      plaintext.size > staging_.size() - kAeadTagSize || !aead_.seal ||
+      (aad.size != 0 && aad.data == nullptr) ||
+      (plaintext.size != 0 && (plaintext.data == nullptr || ciphertext.data == nullptr))) {
+    return Status::error(StatusCode::InvalidArgument, "dev group seal bounds");
+  }
+  in_call_ = true;
+  // A failed seal also burns the counter: no second plaintext can use the
+  // same key/nonce even if the backend wrote partial ciphertext.
+  sealed_ = counter;
+  has_sealed_ = true;
+  keys::TrafficKey key{};
+  keys::AeadNonce nonce{};
+  Status status = material(c, key, true);
+  if (status) status = keys::aead_nonce(key.iv, counter, nonce);
+  if (status && !aead_.seal(aead_.ctx, key.key.data(), nonce.data(), aad, plaintext,
+                            staging_.data(), staging_.data() + plaintext.size)) {
+    status = Status::error(StatusCode::IntegrityError, "dev group seal failed");
+  }
+  if (status) {
+    std::memcpy(ciphertext.data, staging_.data(), plaintext.size);
+    std::memcpy(tag.data(), staging_.data() + plaintext.size, tag.size());
+  }
+  secure_clear(staging_);
+  keys::clear(key);
+  secure_clear(nonce);
+  in_call_ = false;
+  return status;
+}
+
+Status DevGroupProvider::open(const SecurityContext& c, const std::uint64_t counter,
+                              const ByteView aad, const ByteView ciphertext,
+                              const std::array<std::uint8_t, kAeadTagSize>& tag,
+                              const MutableByteView plaintext) noexcept {
+  if (c.scope != SecurityScope::Group) {
+    return Status::error(StatusCode::Unsupported, "dev group scope");
+  }
+  if (in_call_) return Status::error(StatusCode::Busy, "dev group reentry");
+  if (counter > kMaxCryptoCounter || plaintext.size != ciphertext.size ||
+      ciphertext.size > staging_.size() - kAeadTagSize || !aead_.open ||
+      (aad.size != 0 && aad.data == nullptr) ||
+      (ciphertext.size != 0 && (ciphertext.data == nullptr || plaintext.data == nullptr))) {
+    if (plaintext.data != nullptr && plaintext.size <= staging_.size())
+      secure_clear(plaintext.data, plaintext.size);
+    return Status::error(StatusCode::ProtocolError, "dev group open bounds");
+  }
+  in_call_ = true;
+  keys::TrafficKey key{};
+  keys::AeadNonce nonce{};
+  Status status = material(c, key, false);
+  if (status) status = keys::aead_nonce(key.iv, counter, nonce);
+  if (status) {
+    if (!aead_.open(aead_.ctx, key.key.data(), nonce.data(), aad, ciphertext, tag.data(),
+                    staging_.data())) {
+      status = Status::error(StatusCode::AuthorizationFailed, "dev group tag invalid");
+    }
+  }
+  if (status) {
+    // Replay per (sender, boot): the sender's key generation is its boot,
+    // so the window versions on sender_boot (the wire epoch is fixed).
+    // Checked after the tag — a replay costs one AEAD open and is still
+    // rejected. Outsiders replaying captured frames only burn CPU.
+    const SecurityContext replay_context{SecurityScope::Group,
+                                         c.network,
+                                         c.sender,
+                                         c.receiver,
+                                         c.sender_boot,
+                                         0,
+                                         c.sender_boot,
+                                         c.group_id};
+    status = replay_.accept(replay_context, counter);
+  }
+  if (status) {
+    std::memcpy(plaintext.data, staging_.data(), ciphertext.size);
+  } else if (plaintext.data != nullptr) {
+    secure_clear(plaintext.data, plaintext.size);
+  }
+  secure_clear(staging_);
+  keys::clear(key);
+  secure_clear(nonce);
+  in_call_ = false;
+  return status;
 }
 
 Status dev_maintenance_fingerprint(const keys::Secret& psk, const std::uint8_t profile,

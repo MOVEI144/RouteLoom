@@ -306,7 +306,7 @@ config ROUTELOOM_MIGRATION_SWITCH_BOUND_MS
 config ROUTELOOM_DEEP_SLEEP
     bool "Drive a deep-sleep prepare/enter cycle through the power coordinator"
     default n
-    depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE || ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
     help
         Experimental reference path. When enabled, app_main pumps the runtime
         and PowerCoordinator single-threaded, prepares sleep after

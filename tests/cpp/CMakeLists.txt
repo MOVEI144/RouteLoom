@@ -505,6 +505,20 @@ target_include_directories(routeloom_sdkv1_coordinator_tests PRIVATE
 target_compile_options(routeloom_sdkv1_coordinator_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_coordinator_tests COMMAND routeloom_sdkv1_coordinator_tests)
 
+add_executable(routeloom_sdkv1_owner_sleep_tests test_sdkv1_owner_sleep.cpp)
+target_link_libraries(routeloom_sdkv1_owner_sleep_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_sdkv1_owner_sleep_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_sdkv1_owner_sleep_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_owner_sleep_tests COMMAND routeloom_sdkv1_owner_sleep_tests)
+
+add_executable(routeloom_sdkv1_dev_route_tests test_sdkv1_dev_route.cpp)
+target_link_libraries(routeloom_sdkv1_dev_route_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_sdkv1_dev_route_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_sdkv1_dev_route_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_dev_route_tests COMMAND routeloom_sdkv1_dev_route_tests)
+
 # Live E2E peer (design P3-4 §10.2): driven by the Rust Site Authority
 # test (host/routeloom-host/src/site/joiner_interop.rs), never by ctest.
 add_executable(routeloom_joiner_interop_peer joiner_interop_peer.cpp)

@@ -194,6 +194,166 @@ bool rtc_parent_binding_ok(const RtcSessionImage& image, const MacAddress& obser
   return image.parent_mac == observed_parent;
 }
 
+bool rtc_parent_warm_ok(const RtcSessionImage& image, const MacAddress& observed_parent,
+                        const bool parent_bound) noexcept {
+  if (image.count == 0 || image.count > kRtcSessionMaxContexts || !parent_bound) return false;
+  return image.parent_mac == observed_parent;
+}
+
+RtcWriteAheadProvider::RtcWriteAheadProvider(SecurityProvider& inner,
+                                             SessionInstaller& installer) noexcept
+    : inner_(inner), installer_(installer) {}
+
+RtcWriteAheadProvider::~RtcWriteAheadProvider() noexcept {
+  // Borrowed image only: the port and the image may already be gone (both
+  // must merely outlive the armed period, and disarm() is the call that
+  // retires them).
+  for (bool& armed : slot_armed_) armed = false;
+  if (image_ != nullptr) {
+    secure_clear(image_, sizeof(*image_));
+    image_ = nullptr;
+  }
+  port_ = nullptr;
+}
+
+Status RtcWriteAheadProvider::arm(RtcSessionPort& port, RtcSessionImage& image) noexcept {
+  if (armed()) return Status::error(StatusCode::InvalidState, "write-ahead already armed");
+  std::array<std::uint8_t, kRtcSessionRecordSize> encoded{};
+  const Status shaped =
+      encode_rtc_session(image, MutableByteView{encoded.data(), encoded.size()});
+  if (!shaped) {
+    secure_clear(encoded);
+    return Status::error(StatusCode::InvalidArgument, "write-ahead image shape");
+  }
+  const Status written = port.write(ByteView{encoded.data(), encoded.size()});
+  if (!written) {
+    secure_clear(encoded);
+    return written;
+  }
+  std::array<std::uint8_t, kRtcSessionRecordSize> back{};
+  const Status seen = port.read(MutableByteView{back.data(), back.size()});
+  const bool match = seen.ok() && back == encoded;
+  secure_clear(encoded);
+  secure_clear(back);
+  if (!match) {
+    (void)port.invalidate();
+    return Status::error(StatusCode::StorageFailure, "write-ahead commit unverified");
+  }
+  image_ = &image;
+  port_ = &port;
+  for (std::size_t i = 0; i < image.count; ++i) slot_armed_[i] = true;
+  return Status::success();
+}
+
+void RtcWriteAheadProvider::disarm() noexcept {
+  for (bool& armed : slot_armed_) armed = false;
+  if (image_ != nullptr) {
+    secure_clear(image_, sizeof(*image_));
+    image_ = nullptr;
+  }
+  if (port_ != nullptr) {
+    (void)port_->invalidate();
+    port_ = nullptr;
+  }
+}
+
+bool RtcWriteAheadProvider::armed() const noexcept {
+  return slot_armed_[0] || slot_armed_[1];
+}
+
+void RtcWriteAheadProvider::disarm_slot(const std::size_t index) noexcept {
+  if (index < kRtcSessionMaxContexts) slot_armed_[index] = false;
+  if (!armed()) disarm();
+}
+
+SecurityProfile RtcWriteAheadProvider::security_profile() const noexcept {
+  return inner_.security_profile();
+}
+
+bool RtcWriteAheadProvider::ready() const noexcept { return inner_.ready(); }
+
+ContextState RtcWriteAheadProvider::context_state(const SecurityScope scope,
+                                                  const NodeId peer) const noexcept {
+  return inner_.context_state(scope, peer);
+}
+
+Status RtcWriteAheadProvider::tx_epoch(const SecurityScope scope, const NodeId peer,
+                                       std::uint32_t& epoch) noexcept {
+  return inner_.tx_epoch(scope, peer, epoch);
+}
+
+Status RtcWriteAheadProvider::current_rx_epoch(const SecurityScope scope, const NodeId peer,
+                                               std::uint32_t& epoch) const noexcept {
+  return inner_.current_rx_epoch(scope, peer, epoch);
+}
+
+Status RtcWriteAheadProvider::tx_group_link_epochs(std::uint32_t& boot, std::uint32_t& g) noexcept {
+  return inner_.tx_group_link_epochs(boot, g);
+}
+
+bool RtcWriteAheadProvider::accepts_group_epoch(const std::uint32_t g) const noexcept {
+  return inner_.accepts_group_epoch(g);
+}
+
+Status RtcWriteAheadProvider::next_counter(const SecurityContext& context,
+                                           std::uint64_t& counter) noexcept {
+  std::size_t slot = kRtcSessionMaxContexts;
+  if (armed() && image_ != nullptr) {
+    for (std::size_t i = 0; i < image_->count; ++i) {
+      if (slot_armed_[i] && image_->contexts[i].scope == context.scope &&
+          image_->contexts[i].entry.peer == context.receiver) {
+        slot = i;
+        break;
+      }
+    }
+  }
+  if (slot == kRtcSessionMaxContexts) return inner_.next_counter(context, counter);
+  // The live context must still be the restored one: a reinstall (fresh
+  // handshake under a new tx id) ends write-ahead for the slot and the
+  // bank issues its own counters from here on.
+  std::uint32_t live_cid = 0;
+  const Status epoch_status = inner_.tx_epoch(context.scope, context.receiver, live_cid);
+  if (!epoch_status || live_cid != image_->contexts[slot].entry.tx_cid) {
+    disarm_slot(slot);
+    return inner_.next_counter(context, counter);
+  }
+  // Lockstep: the bank counter first, then the retained counter, and the
+  // two must agree. The RTC write completes before the counter returns,
+  // so radio only ever sees counters the retained image already leads.
+  std::uint64_t bank_counter = 0;
+  const Status bank_status = inner_.next_counter(context, bank_counter);
+  if (!bank_status) return bank_status;
+  std::uint64_t retained_counter = 0;
+  const Status retained_status = advance_rtc_tx(*port_, *image_, slot, retained_counter);
+  if (!retained_status || retained_counter != bank_counter) {
+    // Durability lost (or diverged): retire the entry and refuse. The
+    // counter never reached radio, so the demand-driven re-handshake
+    // starts clean — no RAM fallback may issue past this point.
+    (void)installer_.retire(context.scope, context.receiver);
+    disarm_slot(slot);
+    if (retained_status) {
+      return Status::error(StatusCode::InternalError, "write-ahead diverged");
+    }
+    return retained_status;
+  }
+  counter = retained_counter;
+  return Status::success();
+}
+
+Status RtcWriteAheadProvider::seal(const SecurityContext& context, const std::uint64_t counter,
+                                   const ByteView aad, const ByteView plaintext,
+                                   const MutableByteView ciphertext,
+                                   std::array<std::uint8_t, kAeadTagSize>& tag) noexcept {
+  return inner_.seal(context, counter, aad, plaintext, ciphertext, tag);
+}
+
+Status RtcWriteAheadProvider::open(const SecurityContext& context, const std::uint64_t counter,
+                                   const ByteView aad, const ByteView ciphertext,
+                                   const std::array<std::uint8_t, kAeadTagSize>& tag,
+                                   const MutableByteView plaintext) noexcept {
+  return inner_.open(context, counter, aad, ciphertext, tag, plaintext);
+}
+
 Status advance_rtc_tx(RtcSessionPort& port, RtcSessionImage& current,
                       const std::size_t context_index, std::uint64_t& counter) noexcept {
   if (!valid(current) || context_index >= current.count ||

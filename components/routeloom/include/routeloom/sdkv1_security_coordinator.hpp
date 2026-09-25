@@ -5,10 +5,12 @@
 //
 // The Coordinator owns the mode workspace — the P3-4 Joiner while
 // unprovisioned (radio or USB-direct), the member HandshakeEngine with
-// its session bank while adopted — plus the RLD1 demux owner table, the
-// join proxy and relay gateway, the APPLIED boot lease's rlboot witness,
-// the local-removal evidence, the single GroupKeyState with its group
-// provider and member scope view, and the authority channel client.
+// its session bank while adopted, the same engine dev-armed (P4 §10.1)
+// under a static dev adoption — plus the RLD1 demux owner table, the
+// join proxy and relay gateway (member only), the APPLIED boot lease's
+// rlboot witness, the local-removal evidence, the single GroupKeyState
+// with its group provider and member scope view, the dev group/scope
+// views, and the authority channel client (member only).
 // It implements the sink/port interfaces
 // of everything it owns (BootstrapSink, JoinDirectPort, JoinCommitPolicy,
 // JoinRelayHostSink, the engine's membership/peer/boot views) so the
@@ -24,7 +26,7 @@
 // TuneChannel action), the MeshNode and NeighborDiscovery (adopted via
 // member actions, polled by the firmware), the USB transport (frames via
 // the USB port/events), and any flash layout (stores stay injected).
-// Sleep images are PR5: PrepareSleep only reports drain readiness.
+// Sleep images are caller-backed: PrepareSleep parks after work drains.
 //
 // No heap, no exceptions; every entry is noexcept.
 
@@ -39,6 +41,7 @@
 #include "routeloom/sdkv1_ead.hpp"
 #include "routeloom/rlres1.hpp"
 #include "routeloom/sdkv1_authority.hpp"
+#include "routeloom/sdkv1_dev_session.hpp"
 #include "routeloom/sdkv1_group_keys.hpp"
 #include "routeloom/sdkv1_group_security.hpp"
 #include "routeloom/sdkv1_handshake.hpp"
@@ -47,6 +50,7 @@
 #include "routeloom/sdkv1_joiner.hpp"
 #include "routeloom/sdkv1_membership.hpp"
 #include "routeloom/sdkv1_records.hpp"
+#include "routeloom/sdkv1_session_rtc.hpp"
 #include "routeloom/sdkv1_store.hpp"
 #include "routeloom/security.hpp"
 #include "routeloom/session_bank.hpp"
@@ -173,6 +177,7 @@ struct CoordinatorTune {
 struct CoordinatorMemberConfig {
   NetworkId network{0};  // full64 (low32 filters the radio)
   NodeId node{kInvalidNodeId};
+  std::uint8_t channel{0};  // adopted operating channel, independent of stale stores
   std::uint32_t message_session{0};
   std::uint32_t boot_session{0};  // rlboot witness, nonzero
   std::uint32_t link_epoch{1};
@@ -204,8 +209,25 @@ enum class CoordinatorMode : std::uint8_t {
   Fresh,      // constructed / stopped: no workspace running
   ZeroTouch,  // Joiner running (radio scan or USB direct)
   Member,     // adopted: engine + bank + proxy (+ gateway on role) live
+  Dev,        // static dev adoption: dev-armed engine + bank live, no
+              // Joiner/proxy/gateway/authority (P4 §10.1)
   Removed,    // verified removal landed: traffic stopped, evidence durable
   Recovery,   // stores need recovery before any mode can run
+};
+
+// Static dev adoption (P4 §10.1): the shared development PSK, network,
+// node, durable boot token, local allow-role and operating channel. The
+// boot must already be reserved (boot_hi) and the radio already on the
+// channel — the dev route has no cutover. The PSK is copied into the
+// engine policy and the group provider at adoption; the caller wipes its
+// own copy (it cannot be wiped through this struct afterwards).
+struct CoordinatorDevConfig {
+  keys::Secret psk{};
+  NetworkId network{0};
+  NodeId node{kInvalidNodeId};
+  std::uint32_t boot{0};  // reserved durable boot (message/boot session)
+  std::uint32_t role{0};  // local allow-role (nonzero member-role bits)
+  std::uint8_t channel{0};
 };
 
 struct CoordinatorSnapshot {
@@ -234,6 +256,7 @@ struct CoordinatorSnapshot {
 struct CoordinatorCounters {
   std::uint32_t boots{0};
   std::uint32_t member_adoptions{0};
+  std::uint32_t dev_adoptions{0};
   std::uint32_t removals{0};
   std::uint32_t demux_drops{0};
   std::uint32_t staged_drops{0};
@@ -275,6 +298,9 @@ class SecurityCoordinator final : public BootstrapSink,
     RevocationStore* revocations{nullptr};
     LocalRevocationStore* local_revocation{nullptr};
     ResumeSlotStorage2* resume_storage{nullptr};
+    // Sleep-capable firmware supplies a stable image outside the Owner's
+    // always-on RAM. Null disables warm session save/restore.
+    RtcSessionImage* sleep_image{nullptr};
     // (No TrustStore: anchors are established before the coordinator
     // boots and consulted through the adopted stores, never directly.)
     // Member discovery, attached late: null at Boot (adoption precedes
@@ -307,6 +333,13 @@ class SecurityCoordinator final : public BootstrapSink,
   // feed the direct join or the relay gateway; ChannelReady completes a
   // TuneChannel action. Refuses Busy while a port callback runs inside.
   Status step(const CoordinatorEvent& event) noexcept;
+  // Static dev adoption (P4 §10.1) INSTEAD of Boot: arms the engine with
+  // the dev-resume policy, configures the bank at the fixed dev epoch,
+  // adopts the dev group sender/provider, scope and hooks, and emits
+  // ApplyMemberConfig for the direct node adopt (no join, no RLS1). From
+  // Fresh only; dev or member/boot, never both. Refuses Busy while a
+  // port callback runs inside. Like Boot, advances the clock to `now`.
+  Status adopt_dev(const CoordinatorDevConfig& config, MonotonicMs now) noexcept;
   Status take_action(CoordinatorAction& out) noexcept;
   CoordinatorSnapshot snapshot() const noexcept;
   const CoordinatorCounters& counters() const noexcept { return counters_; }
@@ -320,25 +353,66 @@ class SecurityCoordinator final : public BootstrapSink,
   // action only says when. Reads the single GroupKeyState — no second
   // GK copy, no dev-PSK fallback.
   DiscoveryScopeProvider& gk_scope() noexcept { return member_scope_; }
-  // Full radio discovery identity for the adopted member. The capability
-  // word and observed local MAC must match the handshake carrier exactly.
+  // Full radio discovery identity for the adopted member (or the dev
+  // adoption: then the DevRam capability bit with the Required dev
+  // scope). The capability word and observed local MAC must match the
+  // handshake carrier exactly.
   Status member_discovery_config(DiscoveryConfig& out) noexcept;
   // The session provider view over the member bank, handed to the
   // firmware's MeshNode at construction. Unconfigured (not ready) until
-  // a member config is adopted; the node must not start on it before
-  // ApplyMemberConfig. Pairwise scopes delegate to the member bank;
-  // group scopes seal/open under the adopted GK.
-  SecurityProvider& session_provider() noexcept { return group_provider_; }
-  // The membership hooks over the adopted stores, for the member
+  // a member config (or a dev adoption) lands; the node must not start
+  // on it before ApplyMemberConfig. The view is the sleep write-ahead
+  // guard over the group/pairwise mux: unarmed it purely delegates, so
+  // every existing caller behaves exactly as before until a sleep image
+  // restores into the bank. Pairwise scopes delegate to the adopted
+  // bank; group scopes seal/open under the adopted GK (dev: under the
+  // boot-scoped dev group key).
+  SecurityProvider& session_provider() noexcept { return sleep_guard_; }
+  // Sleep save (P4 §9.3, V1-F07), Member mode after PrepareSleep parked
+  // the coordinator: exports the (Link, parent) session plus the first
+  // live EndToEnd session (when one stands) into `port` with the adopted
+  // membership and the parent radio identity. Requires the park — call
+  // after prepare_sleep, before sleep_enter — and re-verifies quiescence
+  // (Busy: new work arrived, abort the attempt and retry later). Any
+  // other refusal means cold sleep: proceed without warm restore. A
+  // refusal leaves the port untouched; a stale image always fails the
+  // wake boot check, so it can never warm-restore by accident.
+  Status save_sleep_image(RtcSessionPort& port, NodeId parent, const MacAddress& parent_mac,
+                          std::uint32_t parent_binding, MonotonicMs now) noexcept;
+  // Sleep restore (P4 §9.3, V1-F07): consumes the retained image one-shot
+  // once adopted, holds it while the parent re-binds post-wake, then
+  // installs it and arms TX write-ahead. `next_boot` is this boot's
+  // retained boot witness, `trusted_elapsed_ms` the upper bound proved
+  // by post-wake evidence (0 = unknown, refused), `deep_sleep` /
+  // `sleep_marker` the reset-cause + marker evidence. Busy (not adopted
+  // yet, parked, or parent not bound yet) is retryable and touches
+  // nothing durable; retries may raise trusted_elapsed_ms as the awake
+  // time grows (positive deltas deduct from the held image, so the
+  // install never over-credits the rebind gap). Any other refusal is
+  // terminal for this boot and the device resumes through RLRES1
+  // instead. Idempotent once restored. Clock-free: every time input
+  // arrives pre-proved as the elapsed bound.
+  Status restore_sleep_image(RtcSessionPort& port, std::uint32_t next_boot,
+                             std::uint32_t trusted_elapsed_ms, bool deep_sleep,
+                             bool sleep_marker) noexcept;
+  // First usable session peer for `scope` in bank table order (false
+  // when none stands): the save side resolves the retained link through
+  // this. Side-effect-free observation, like snapshot().
+  bool first_live_peer(SecurityScope scope, NodeId& peer) const noexcept;
+  // The membership hooks over the adopted stores (dev: over the static
+  // dev config plus the shared revocation gates), for the adopted
   // discovery's MembershipHooks port (the firmware initializes the
   // discovery's controller with these at StartMemberDiscovery).
-  MembershipHooks& membership_hooks() noexcept { return hooks_; }
-  // The member OFFER cookie box, live in Member mode only (null
-  // otherwise): the member discovery authenticator seals OFFER cookies
+  MembershipHooks& membership_hooks() noexcept {
+    return mode_ == CoordinatorMode::Dev ? static_cast<MembershipHooks&>(dev().hooks)
+                                         : static_cast<MembershipHooks&>(hooks_);
+  }
+  // The member OFFER cookie box, live in Member and Dev mode (null
+  // otherwise): the adopted discovery authenticator seals OFFER cookies
   // through it. Never stored beyond the call — the workspace may be
   // replaced by removal or stop.
   const MemberCookie* member_cookie() const noexcept {
-    return mode_ == CoordinatorMode::Member ? &member().member_cookie : nullptr;
+    return has_member_engine() ? &member().member_cookie : nullptr;
   }
   // Attaches the member discovery (once): the firmware constructs it
   // with the adopted network + Required GK scope at StartMemberDiscovery
@@ -408,7 +482,11 @@ class SecurityCoordinator final : public BootstrapSink,
     return Status::success();
   }
   // Secret-free channel view for firmware diagnostics (safe in callbacks).
-  AuthoritySnapshot authority_snapshot() const noexcept { return authority_.snapshot(); }
+  AuthoritySnapshot authority_snapshot() const noexcept {
+    // No channel exists in Dev (see snapshot): report the unstarted view.
+    if (mode_ == CoordinatorMode::Dev) return AuthoritySnapshot{};
+    return small().authority.snapshot();
+  }
   Status send_authority_typed(std::uint8_t type, ByteView body, MonotonicMs now) noexcept;
   // Adopted GK epochs for the 0x66 QueryLocal answer (0/0 pre-adoption;
   // false until the member config lands).
@@ -544,6 +622,55 @@ class SecurityCoordinator final : public BootstrapSink,
     AuthorityPort* live_{nullptr};
   };
 
+  // Stable session view over the two adopted profiles (P4 §10.1):
+  // pairwise scopes always delegate to the member bank, group scopes to
+  // the GK-backed provider in Member mode and to the boot-scoped dev
+  // group provider once a dev adoption binds it. The firmware holds this
+  // (through the sleep guard) from construction; the Owner flips the
+  // group side exactly once per adoption and back on stop.
+  class SessionProviderMux final : public SecurityProvider {
+   public:
+    SessionProviderMux(SecurityProvider& pairwise, SecurityProvider& member_group) noexcept
+        : pairwise_(pairwise), member_group_(member_group) {}
+    SessionProviderMux(const SessionProviderMux&) = delete;
+    SessionProviderMux& operator=(const SessionProviderMux&) = delete;
+    void set_dev_group(SecurityProvider* dev_group) noexcept { dev_group_ = dev_group; }
+    void set_dev(bool dev) noexcept { dev_ = dev && dev_group_ != nullptr; }
+    bool dev() const noexcept { return dev_; }
+
+    bool ready() const noexcept override;
+    SecurityProfile security_profile() const noexcept override;
+    Status tx_epoch(SecurityScope scope, NodeId peer, std::uint32_t& epoch) noexcept override;
+    Status current_rx_epoch(SecurityScope scope, NodeId peer,
+                            std::uint32_t& epoch) const noexcept override;
+    ContextState context_state(SecurityScope scope, NodeId peer) const noexcept override;
+    Status tx_group_link_epochs(std::uint32_t& boot, std::uint32_t& g) noexcept override;
+    bool accepts_group_epoch(std::uint32_t g) const noexcept override;
+    bool group_promotion_pending() const noexcept override;
+    Status next_counter(const SecurityContext& context, std::uint64_t& counter) noexcept override;
+    Status seal(const SecurityContext& context, std::uint64_t counter, ByteView aad,
+                ByteView plaintext, MutableByteView ciphertext,
+                std::array<std::uint8_t, kAeadTagSize>& tag) noexcept override;
+    Status open(const SecurityContext& context, std::uint64_t counter, ByteView aad,
+                ByteView ciphertext, const std::array<std::uint8_t, kAeadTagSize>& tag,
+                MutableByteView plaintext) noexcept override;
+
+   private:
+    static bool is_group(SecurityScope scope) noexcept {
+      return scope == SecurityScope::Group || scope == SecurityScope::GroupLink;
+    }
+    SecurityProvider& group() noexcept {
+      return dev_ && dev_group_ != nullptr ? *dev_group_ : member_group_;
+    }
+    const SecurityProvider& group() const noexcept {
+      return dev_ && dev_group_ != nullptr ? *dev_group_ : member_group_;
+    }
+    SecurityProvider& pairwise_;
+    SecurityProvider& member_group_;
+    SecurityProvider* dev_group_{nullptr};
+    bool dev_{false};
+  };
+
   // --- step() legs ---
   Status on_boot(const CoordinatorEvent& event) noexcept;
   Status on_poll(MonotonicMs now) noexcept;
@@ -572,7 +699,18 @@ class SecurityCoordinator final : public BootstrapSink,
   Status adopt_boot_rls1(MonotonicMs now) noexcept;  // same tail, stored site
   Status install_member_config(const SiteRecord& site, const IdentityRecord& identity,
                                std::uint32_t boot_session, MonotonicMs now) noexcept;
+  // --- static dev adoption (P4 §10.1) ---
+  Status install_dev_config(const CoordinatorDevConfig& config, MonotonicMs now) noexcept;
+  // Scrubs the half-built dev adoption into Recovery (ReportRecovery).
+  void abandon_dev_adoption(JoinRecoveryReason reason) noexcept;
+  DevGroupProvider& dev_group() noexcept;
   void emit_member_action() noexcept;
+  // The workspace holds the member engine side (Member or Dev): the
+  // engine, bank, cookie, demands and demux legs all run there; only the
+  // join proxy/gateway, authority channel and GK refresh are Member-only.
+  bool has_member_engine() const noexcept {
+    return mode_ == CoordinatorMode::Member || mode_ == CoordinatorMode::Dev;
+  }
   // --- RLD1 demux ---
   DemuxEntry* find_demux(const MacAddress& mac, std::uint32_t object_id) noexcept;
   DemuxEntry* claim_demux(const MacAddress& mac, std::uint32_t object_id, DemuxOwner owner,
@@ -580,6 +718,11 @@ class SecurityCoordinator final : public BootstrapSink,
   void sweep_demux(MonotonicMs now) noexcept;
   Status demux_member_frame(const autonomy::Rld1Envelope& env, DemuxEntry* entry,
                             MonotonicMs now) noexcept;
+  // Reserves the discovery elevation token for a parked responder leg on
+  // first inbound handshake traffic (the initiator side reserves at leg
+  // claim instead). Best-effort: a refused reservation leaves the token
+  // None and the session installs without discovery elevation.
+  void ensure_responder_token(DemuxEntry& entry, MonotonicMs now) noexcept;
   // --- engine legs ---
   Status drive_engine(MonotonicMs now) noexcept;
   Status emit_send(const HandshakeResult& result, MonotonicMs now) noexcept;
@@ -604,6 +747,15 @@ class SecurityCoordinator final : public BootstrapSink,
   // The real quiescence check, for PrepareSleep (which runs inside step()
   // with the re-entry guard set, where the public query answers false).
   bool quiescent_locked() const noexcept;
+  // Member handshake/session work regardless of the park: live engine
+  // legs, bank establishment demands, or live demux legs (completed
+  // member legs only route late duplicates and never count). Shared by
+  // quiescent_locked and the save-time re-check (which may not use the
+  // parked short-circuit).
+  bool member_work_pending() const noexcept;
+  // Abandons the held restore image (wiped) and latches the terminal
+  // failure for this boot.
+  Status fail_restore(const Status& status) noexcept;
 
   // Everything the member handshake owns that no outside reference
   // touches: the engine with its cookie and resume cache, the demand
@@ -638,15 +790,61 @@ class SecurityCoordinator final : public BootstrapSink,
                  const JoinRelayGatewayConfig& gateway_config) noexcept;
   };
 
-  // Tagged by mode_: joiner iff ZeroTouch, member iff Member, neither
-  // anywhere else. Transitions destroy one side (wiping it) before
-  // constructing the other; the destructor destroys the live side.
+  // Tagged by mode_: joiner iff ZeroTouch, member iff Member or Dev,
+  // neither anywhere else. Transitions destroy one side (wiping it)
+  // before constructing the other; the destructor destroys the live side.
   union Workspace {
     Workspace() noexcept {}
     ~Workspace() noexcept {}
     Joiner joiner;
     MemberEngine member;
   };
+
+  // The member small side holds the authority channel client (G-SEC P5).
+  // The sleep image is supplied separately by sleep-capable firmware, so
+  // an always-on gateway does not reserve that memory. Live except in Dev.
+  struct MemberSmallSide {
+    AuthorityClient authority;
+    MemberSmallSide(const routeloom::AeadGcm& aead, AuthorityPort& port,
+                    AuthorityObserver& observer, rlres1::Environment& rlres1_env,
+                    GroupKeyState* group) noexcept;
+    ~MemberSmallSide() noexcept = default;
+    MemberSmallSide(const MemberSmallSide&) = delete;
+    MemberSmallSide& operator=(const MemberSmallSide&) = delete;
+  };
+
+  // The dev side (P4 §10.1, Dev mode only): the boot-scoped group sender,
+  // the group provider over it (placement-built at adoption), the
+  // Required dev scope view and the dev hooks. The destructor tears the
+  // provider down and wipes the sender/scope/hooks.
+  struct DevSide {
+    DevGroupSender sender{};
+    alignas(DevGroupProvider) std::array<std::uint8_t, sizeof(DevGroupProvider)> group_box{};
+    bool group_live{false};
+    DevScopeProvider scope{};
+    DevMembershipHooks hooks;
+    DevSide(const RevocationStore& revocations, const LocalRevocationStore& local_revocation,
+            const AuthenticatedPeerView* peers) noexcept;
+    ~DevSide() noexcept;
+    DevSide(const DevSide&) = delete;
+    DevSide& operator=(const DevSide&) = delete;
+    DevGroupProvider& group() noexcept;
+  };
+
+  // Tagged by mode_: dev iff Dev, small everywhere else. Dev adoption
+  // destroys the small side before constructing the dev side; stop and
+  // abandon rebuild the small side when leaving Dev. The two sides never
+  // share a boot phase, so they never share RAM: the dev side rides
+  // inside the slack of the member-only channel state — bridge DRAM has
+  // no room for both (RAM floor matrix).
+  union ModeSides {
+    ModeSides() noexcept {}
+    ~ModeSides() noexcept {}
+    MemberSmallSide small;
+    DevSide dev;
+  };
+  static_assert(sizeof(DevSide) <= sizeof(MemberSmallSide),
+                "dev side must fit the member small side");
 
   // --- mode workspace (exactly one live; see above) ---
   void destroy_workspace() noexcept;
@@ -656,6 +854,15 @@ class SecurityCoordinator final : public BootstrapSink,
   const Joiner& joiner() const noexcept { return ws_.joiner; }
   MemberEngine& member() noexcept { return ws_.member; }
   const MemberEngine& member() const noexcept { return ws_.member; }
+  // --- mode sides (exactly one live; see above) ---
+  void destroy_small() noexcept;
+  void create_small() noexcept;
+  void create_dev() noexcept;
+  void destroy_dev() noexcept;
+  MemberSmallSide& small() noexcept { return sides_.small; }
+  const MemberSmallSide& small() const noexcept { return sides_.small; }
+  DevSide& dev() noexcept { return sides_.dev; }
+  const DevSide& dev() const noexcept { return sides_.dev; }
 
   Deps deps_{};
   CoordinatorMode mode_{CoordinatorMode::Fresh};
@@ -663,19 +870,31 @@ class SecurityCoordinator final : public BootstrapSink,
   NullJoinObserver joiner_observer_{};
   // The bank stays outside the union: the firmware binds the session
   // provider over it at construction, before any workspace exists. The
-  // GK state, the group/pairwise provider, the member scope view and the
-  // authority channel stay outside the union too: a stale-GK refresh
-  // destroys the member engine around them without resetting group
-  // counters, replay windows or the adopted scope.
+  // GK state, the group/pairwise mux, the scope views and the authority
+  // channel stay outside the union too: a stale-GK refresh destroys the
+  // member engine around them without resetting group counters, replay
+  // windows or the adopted scope.
   GatewaySessionBank bank_;
   BankSessionSink<32, 128> bank_sink_;
   RamSessionProvider<32, 128> pairwise_provider_;
   GroupKeyState group_keys_;
   GroupSecurityProvider group_provider_;
+  // Mode sides (exactly one live; tagged by mode_): the member small
+  // side everywhere except Dev, the dev route (P4 §10.1 — group sender
+  // and provider, Required dev scope view, dev hooks) in Dev. The
+  // constructor builds the small side; dev adoption swaps it for the dev
+  // side and stop/abandon swap back when leaving Dev.
+  ModeSides sides_;
+  // Stable session view: pairwise to the bank, group to the GK provider
+  // (Member) or the dev group provider (Dev, once bound above).
+  SessionProviderMux provider_mux_;
+  // Retained TX write-ahead over the mux (unarmed: pure delegate; the
+  // bank installer underneath retires diverged slots). Armed only by
+  // restore_sleep_image (Member); disarmed by stop, removal, and wake.
+  RtcWriteAheadProvider sleep_guard_;
   GkMemberScopeProvider member_scope_;
   AuthorityPortProxy authority_port_;
   AuthorityEnv authority_env_;
-  AuthorityClient authority_;
   Workspace ws_{};
 
   std::array<StagedFrame, kStagedFrames> staged_{};
@@ -707,6 +926,23 @@ class SecurityCoordinator final : public BootstrapSink,
   std::uint64_t removal_watermark_site_id_{0};
   std::uint32_t removal_watermark_generation_{0};
   CoordinatorCounters counters_{};
+  // Sleep restore one-shot state (P4 §9.3): the consumed image waits in
+  // caller-supplied storage while the parent re-binds post-wake. Terminal
+  // once done/failed. restore_elapsed_ms_ is the bound already deducted
+  // from the held image; retries with a larger bound deduct the delta.
+  //
+  // Dev boot consumption memory (P4 §10.1): the highest dev boot this
+  // coordinator configured a group sender for (0 = none yet). The dev side is rebuilt
+  // per adoption, so the sender's own boot guard cannot see a previous
+  // adoption's boot — install refuses any non-advancing boot before configuring
+  // (the same key never restarts its counter space). Survives stop: the
+  // boot does not change across one.
+  std::uint32_t dev_boot_seen_{0};
+  bool restore_holding_{false};
+  bool restore_done_{false};
+  bool restore_failed_{false};
+  std::uint32_t restore_elapsed_ms_{0};
+  Status restore_error_{StatusCode::Ok, "ok"};
 };
 
 }  // namespace routeloom::sdkv1

@@ -504,6 +504,43 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::export_entry(
   out = *entry;
   return Status::success();
 }
+template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
+bool SessionBank<kLinkCapacity, kEndCapacity>::first_live_peer(
+    const SecurityScope scope, NodeId& peer) const noexcept {
+  peer = kInvalidNodeId;
+  if (scope == SecurityScope::Link) {
+    for (std::size_t i = 0; i < kLinkCapacity; ++i) {
+      if (link_used_[i] && entry_usable(link_[i])) {
+        peer = link_[i].peer;
+        return true;
+      }
+    }
+  } else if (scope == SecurityScope::EndToEnd) {
+    for (std::size_t i = 0; i < kEndCapacity; ++i) {
+      if (end_used_[i] && entry_usable(end_[i])) {
+        peer = end_[i].peer;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
+Status SessionBank<kLinkCapacity, kEndCapacity>::export_sleep_entry(
+    const SecurityScope scope, const NodeId peer, SessionBankEntry& out) const noexcept {
+  const Status status = export_entry(scope, peer, out);
+  if (!status) return status;
+  if ((out.flags & kFlagDevResume) != 0) {
+    out = SessionBankEntry{};
+    return Status::error(StatusCode::InvalidArgument, "session dev never sleeps");
+  }
+  out.flags &= ~(kFlagPinned | kFlagRekeyPending);
+  if (out.flags != 0) {
+    out = SessionBankEntry{};
+    return Status::error(StatusCode::InvalidArgument, "session save flags live");
+  }
+  return Status::success();
+}
 
 template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
 Status SessionBank<kLinkCapacity, kEndCapacity>::restore_entry(
@@ -958,7 +995,13 @@ bool SessionBank<kLinkCapacity, kEndCapacity>::peer_summary(const SecurityScope 
   if (!configured_) return false;
   const SessionBankEntry* entry = find_current(scope, peer);
   if (entry == nullptr || !entry_usable(*entry)) return false;
-  if (entry->peer_generation == 0 || entry->peer_role == 0) return false;
+  if (entry->peer_generation == 0 || entry->peer_role == 0) {
+    // Dev-resume slots prove "same PSK this boot" with generation 0 by
+    // design (P4 §10.1): report them, and let each consumer's hooks
+    // decide — the member hooks still require a member generation, the
+    // dev hooks require generation 0.
+    if ((entry->flags & kFlagDevResume) == 0 || entry->peer_role == 0) return false;
+  }
   generation = entry->peer_generation;
   role = entry->peer_role;
   return true;

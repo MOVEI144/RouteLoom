@@ -642,6 +642,60 @@ void test_retired_binding_cannot_be_resurrected_by_registration() {
   runtime.stop();
 }
 
+void test_adopt_member_node_keeps_node_startable() {
+  // Owner adoption (member now, dev next) reconstructs the node: the
+  // #117 reply-lease port must be re-attached and adopted gateways must
+  // run sufficient route timers, or node start refuses and the adopted
+  // node never runs.
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  EspNowRuntimeConfig config = make_config();
+  EspNowRuntime runtime(config, security, observer);
+  CHECK(runtime.initialize().ok());
+  routeloom::NodeConfig adopted = config.node;
+  adopted.node = 0x00A1000000001234ULL;
+  adopted.network = 0x0A1B2C3DUL;
+  adopted.message_session = 4242;
+  adopted.boot_session = 4242;
+  adopted.route_generation = 4242;
+  adopted.route_gateways[0] = 0x00A1000000000001ULL;
+  adopted.route_gateways[1] = 0x00A1000000000002ULL;
+  CHECK(runtime.adopt_member_node(adopted).ok());
+  // Adopted gateways run the product scoped timers (routing-scale.md §5):
+  // the constructed flat defaults cannot satisfy the lease rule.
+  CHECK(runtime.node().config().route_advertisement_period_ms ==
+        routeloom::kScopedProductPeriodMs);
+  CHECK(runtime.node().config().route_lifetime_ms ==
+        routeloom::kScopedProductLifetimeMs);
+  CHECK(runtime.start().ok());
+  runtime.stop();
+}
+
+void test_adopt_member_node_keeps_sufficient_timers() {
+  // Sufficient configured timers survive adoption untouched: only an
+  // insufficient pair is raised to the product scoped values.
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  EspNowRuntimeConfig config = make_config();
+  config.node.route_advertisement_period_ms = 5000;
+  config.node.route_lifetime_ms = 90000;
+  EspNowRuntime runtime(config, security, observer);
+  CHECK(runtime.initialize().ok());
+  routeloom::NodeConfig adopted = config.node;
+  adopted.node = 0x00A1000000001234ULL;
+  adopted.network = 0x0A1B2C3DUL;
+  adopted.message_session = 4242;
+  adopted.boot_session = 4242;
+  adopted.route_generation = 4242;
+  CHECK(runtime.adopt_member_node(adopted).ok());
+  CHECK(runtime.node().config().route_advertisement_period_ms == 5000);
+  CHECK(runtime.node().config().route_lifetime_ms == 90000);
+  CHECK(runtime.start().ok());
+  runtime.stop();
+}
+
 }  // namespace
 
 int main() {
@@ -661,6 +715,8 @@ int main() {
   test_route_capacity_registration_rolls_back_driver_peer();
   test_failed_registration_delete_retries_before_slot_reuse();
   test_retired_binding_cannot_be_resurrected_by_registration();
+  test_adopt_member_node_keeps_node_startable();
+  test_adopt_member_node_keeps_sufficient_timers();
   if (failures != 0) {
     std::fprintf(stderr, "test_espnow_runtime: %d failure(s)\n", failures);
     return 1;

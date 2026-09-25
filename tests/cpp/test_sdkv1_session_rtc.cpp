@@ -11,6 +11,11 @@
 using namespace routeloom;
 using namespace routeloom::sdkv1;
 
+// The write-ahead guard borrows its retained image from caller-stable
+// storage: a second by-value copy would not fit bridge DRAM next to the
+// coordinator's held restore image.
+static_assert(sizeof(RtcWriteAheadProvider) <= 48, "guard must borrow the image");
+
 namespace {
 // Keyed test cipher (NOT an AEAD): XOR stream plus a tag over key, nonce,
 // AAD and body. Cross-key confusion fails the tag; the bank suite proves the
@@ -417,5 +422,104 @@ int main() {
   bad.flags = NodeSessionBank::kFlagDevResume;
   CHECK(bank_c.restore_entry(SecurityScope::Link, 11, bad).code ==
         StatusCode::InvalidArgument);
+
+  // Deep-sleep warm gate (P4 §9.3): the restored parent MAC must equal
+  // the re-observed radio peer and a live post-wake binding must exist
+  // for the parent. Binding ids are re-minted every boot, so id equality
+  // is NOT part of this gate — rtc_parent_binding_ok above stays the
+  // RAM-continuity check for retained wakes.
+  CHECK(rtc_parent_warm_ok(woken, sleep.parent_mac, true));
+  CHECK(!rtc_parent_warm_ok(woken, MacAddress{0x02, 0, 0, 0, 0, 0x0C}, true));
+  CHECK(!rtc_parent_warm_ok(woken, sleep.parent_mac, false));
+  RtcSessionImage empty_image{};
+  CHECK(!rtc_parent_warm_ok(empty_image, sleep.parent_mac, true));
+
+  // Write-ahead guard: restored contexts issue TX counters from the RTC
+  // image first, so a power cut between radio TX and the next save can
+  // never rewind to an issued counter. Unarmed it purely delegates.
+  NodeSessionBank bank_d;
+  RtcRandom random_d;
+  CHECK(bank_d.configure(local, aead, {RtcRandom::fill, &random_d}, 4000).ok());
+  CHECK(bank_d.restore_entry(SecurityScope::Link, 11, woken.contexts[0].entry).ok());
+  RamSessionProvider<32, 8> inner(bank_d);
+  // The guard borrows this image: it must outlive the guard.
+  RtcSessionImage guard_image = sleep;
+  guard_image.count = 1;
+  guard_image.contexts[0].entry.tx_next = 2;
+  RtcWriteAheadProvider guard(inner, inner);
+  CHECK(!guard.armed());
+  CHECK(guard.ready());
+  CHECK(guard.security_profile() == SecurityProfile::Development);
+  CHECK(guard.context_state(SecurityScope::Link, 11) == ContextState::Ready);
+  std::uint32_t guard_epoch = 0;
+  CHECK(guard.tx_epoch(SecurityScope::Link, 11, guard_epoch).ok());
+  CHECK(guard_epoch == 17);
+  std::uint64_t unarmed_first = 0;
+  CHECK(guard.next_counter(tx, unarmed_first).ok());
+  CHECK(unarmed_first == 1);
+  std::array<std::uint8_t, 4> guard_cipher{};
+  std::array<std::uint8_t, kAeadTagSize> guard_tag{};
+  CHECK(guard.seal(tx, unarmed_first, ByteView{aad, sizeof(aad)},
+                  ByteView{plain, sizeof(plain)},
+                  MutableByteView{guard_cipher.data(), guard_cipher.size()}, guard_tag).ok());
+  // Arm over the live entry: the port commits the image first, then bank
+  // and RTC advance in lockstep (bank tx_next is 2 after the issue above).
+  RtcMemory guard_rtc;
+  CHECK(guard.arm(guard_rtc, guard_image).ok());
+  CHECK(guard.armed());
+  CHECK(guard.arm(guard_rtc, guard_image).code == StatusCode::InvalidState);
+  std::uint64_t issued_two = 0, issued_three = 0;
+  CHECK(guard.next_counter(tx, issued_two).ok());
+  CHECK(guard.next_counter(tx, issued_three).ok());
+  CHECK(issued_two == 2 && issued_three == 3);
+  CHECK(decode_rtc_session(ByteView{guard_rtc.bytes.data(), guard_rtc.bytes.size()}, sleep_wake,
+                           result).ok());
+  CHECK(result.contexts[0].entry.tx_next == 4);  // retained >= issued + 1, always
+  SessionBankEntry lockstep{};
+  CHECK(bank_d.export_entry(SecurityScope::Link, 11, lockstep).ok());
+  CHECK(lockstep.tx_next == 4);  // the bank advanced with the image
+  // A reinstalled context stops the write-ahead: the live tx id no
+  // longer matches the armed one, so the guard disarms and delegates
+  // fresh bank counters — and the dead image is wiped from the port.
+  ContextKeys rekeys = keys;
+  rekeys.tx_context_id = 0x5555;
+  rekeys.rx_context_id = 0x6666;
+  rekeys.tx_key.fill(0xC0);  // a real re-handshake mints fresh keys, not just ids
+  rekeys.rx_key.fill(0xC1);
+  rekeys.tx_iv.fill(0xC2);
+  rekeys.rx_iv.fill(0xC3);
+  CHECK(bank_d.install_verified(rekeys, att).ok());
+  tx.epoch = 0x5555;  // the wire layer re-stamps after tx_epoch, as always
+  std::uint64_t fresh = 0;
+  CHECK(guard.next_counter(tx, fresh).ok());
+  CHECK(fresh == 0);
+  CHECK(!guard.armed());
+  CHECK(guard_image.count == 0);  // disarm wiped the borrowed image, not a copy
+  CHECK(!decode_rtc_session(ByteView{guard_rtc.bytes.data(), guard_rtc.bytes.size()}, sleep_wake,
+                            result).ok());
+  // An invalid image never arms and leaves the port untouched.
+  RtcMemory untouched_rtc;
+  CHECK(guard.arm(untouched_rtc, empty_image).code == StatusCode::InvalidArgument);
+  CHECK(!guard.armed());
+  bool untouched_zero = true;
+  for (const auto byte : untouched_rtc.bytes) untouched_zero = untouched_zero && (byte == 0);
+  CHECK(untouched_zero);
+  // A failed RTC update retires the bank entry and refuses: no counter
+  // may fall back to RAM-only issue after durability is lost.
+  NodeSessionBank bank_f;
+  RtcRandom random_f;
+  CHECK(bank_f.configure(local, aead, {RtcRandom::fill, &random_f}, 5000).ok());
+  CHECK(bank_f.restore_entry(SecurityScope::Link, 11, woken.contexts[0].entry).ok());
+  RamSessionProvider<32, 8> inner_f(bank_f);
+  RtcWriteAheadProvider failing(inner_f, inner_f);
+  RtcMemory failing_rtc;
+  CHECK(failing.arm(failing_rtc, woken).ok());
+  tx.epoch = 17;  // re-stamp for this bank's live tx id
+  failing_rtc.fail_write = true;
+  std::uint64_t refused = 0;
+  CHECK(!failing.next_counter(tx, refused).ok());
+  CHECK(failing.tx_epoch(SecurityScope::Link, 11, guard_epoch).code == StatusCode::AuthRequired);
+  CHECK(!failing.next_counter(tx, refused).ok());  // still refused: no RAM fallback
+  CHECK(woken.count == 0);  // the failed update disarmed and wiped the borrowed image
   return failures ? 1 : 0;
 }

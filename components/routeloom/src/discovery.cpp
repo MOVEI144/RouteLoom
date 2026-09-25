@@ -1417,7 +1417,13 @@ void NeighborDiscovery::elevate_proven_peer(const MacAddress& peer_mac,
   membership_.complete_authentication(hooks_, config_.node, config_.network);
   const bool peer_member =
       hooks_.known_member(peer_node, config_.network);
+  elevate_confirmed_peer(peer_mac, peer_node, peer_member, now_ms);
+}
 
+void NeighborDiscovery::elevate_confirmed_peer(const MacAddress& peer_mac,
+                                              const NodeId peer_node,
+                                              const bool peer_member,
+                                              const MonotonicMs now_ms) noexcept {
   // MAC change / device swap (02 §8): never overwrite a live binding for the
   // same NodeId with a new address. A still-alive old binding means the two
   // radios cannot be distinguished -> CONFLICT quarantine.
@@ -2555,6 +2561,92 @@ bool NeighborDiscovery::binding_of(const NodeId peer, BindingId& out) const noex
   }
   out = neighbor->binding;
   return true;
+}
+
+bool NeighborDiscovery::mac_of(const NodeId peer, MacAddress& out) const noexcept {
+  const Neighbor* neighbor = find_neighbor(peer);
+  if (neighbor == nullptr || neighbor->binding == kInvalidBindingId ||
+      !resolvable_phase(neighbor->phase)) {
+    return false;
+  }
+  out = neighbor->mac;
+  return true;
+}
+
+Status NeighborDiscovery::confirm_sleep_parent(const MemberStartRequest& start,
+                                              const MonotonicMs now_ms) noexcept {
+  if (!member_handshake_mode_) {
+    return Status::error(StatusCode::InvalidState, "member mode off");
+  }
+  if (!start.initiator) {
+    return Status::error(StatusCode::InvalidArgument, "sleep confirm needs OFFER");
+  }
+  const NodeId peer = start.peer;
+  const MacAddress peer_mac = start.peer_mac;
+  if (peer == kInvalidNodeId || peer == kBroadcastNodeId || peer == 0) {
+    return Status::error(StatusCode::InvalidArgument, "member peer id");
+  }
+  bool mac_zero = true;
+  for (const auto byte : peer_mac) {
+    if (byte != 0) mac_zero = false;
+  }
+  if (mac_zero) return Status::error(StatusCode::InvalidArgument, "member peer mac");
+  if (now_ms >= start.expires_at_ms) {
+    return Status::error(StatusCode::Expired, "sleep confirm start stale");
+  }
+  // Same reservation-time bar as begin_member_handshake: a start that
+  // contradicts a known record, or one the table could not take, is
+  // refused BEFORE the shared tail runs — the tail's conflict
+  // quarantine must not poison the Owner's engine fallback.
+  if (const Neighbor* by_node = find_neighbor(peer); by_node != nullptr) {
+    if (!mac_equal(by_node->mac, peer_mac) && by_node->phase != NeighborPhase::Revoked &&
+        by_node->phase != NeighborPhase::Conflict && now_ms < by_node->lease_expires_at_ms) {
+      return Status::error(StatusCode::BindingConflict, "member mac changed");
+    }
+  }
+  if (const Neighbor* by_mac = find_neighbor(peer_mac); by_mac != nullptr) {
+    if (by_mac->node != peer && by_mac->phase != NeighborPhase::Revoked &&
+        by_mac->phase != NeighborPhase::Conflict) {
+      return Status::error(StatusCode::BindingConflict, "member mac taken");
+    }
+  }
+  std::size_t pendings = 0;
+  for (const auto& pending : member_pendings_) {
+    if (pending.used) ++pendings;
+  }
+  const Neighbor* same = find_neighbor(peer_mac);
+  const bool reauth = same != nullptr && same->node == peer &&
+                      same->phase != NeighborPhase::Conflict &&
+                      same->phase != NeighborPhase::Revoked;
+  if (!reauth) {
+    std::size_t reclaimable = 0;
+    neighbors_.for_each([&](const Neighbor& neighbor) {
+      if (!neighbor.pinned &&
+          (neighbor.phase == NeighborPhase::Stale ||
+           neighbor.phase == NeighborPhase::Conflict ||
+           neighbor.phase == NeighborPhase::Revoked)) {
+        ++reclaimable;
+      }
+    });
+    const std::size_t free =
+        discovery_const::kNeighborCapacity - neighbors_.size() + reclaimable;
+    if (free <= pendings) {
+      return Status::error(StatusCode::PeerCapacity, "member table full");
+    }
+  }
+  // No known_member gate: the peer authenticated last boot, not this
+  // one — that is what the retained session proves. Revocation was
+  // pre-checked by the Owner (and is re-checked at restore); local
+  // membership still has to complete or the tail holds ApprovalPending
+  // and the post-check below refuses.
+  membership_.complete_authentication(hooks_, config_.node, config_.network);
+  elevate_confirmed_peer(peer_mac, peer, true, now_ms);
+  const Neighbor* bound = find_neighbor(peer);
+  if (bound == nullptr || bound->binding == kInvalidBindingId ||
+      !mac_equal(bound->mac, peer_mac) || !resolvable_phase(bound->phase)) {
+    return Status::error(StatusCode::InvalidState, "sleep confirm unbound");
+  }
+  return Status::success();
 }
 
 bool NeighborDiscovery::binding_generation_of(

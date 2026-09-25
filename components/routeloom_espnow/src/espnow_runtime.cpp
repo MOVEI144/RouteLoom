@@ -520,8 +520,33 @@ Status EspNowRuntime::adopt_member_node(const routeloom::NodeConfig& adopted) no
     return Status::error(StatusCode::InvalidState,
                          "member config arrived after node start");
   }
+  routeloom::NodeConfig applied = adopted;
+  // Adopted gateways need the gateway-scoped lease (routing-scale.md §5):
+  // membership carries no route timers, so an insufficient constructed
+  // pair is raised to the product scoped values — otherwise node start
+  // refuses with ROUTE_LIFETIME_BELOW_REFRESH_BOUND. A sufficient
+  // configured pair is kept untouched.
+  bool scoped = false;
+  for (const routeloom::NodeId gateway : applied.route_gateways) {
+    if (gateway != routeloom::kInvalidNodeId) {
+      scoped = true;
+      break;
+    }
+  }
+  if (scoped && !routeloom::scoped_lifetime_sufficient(
+                     applied.route_advertisement_period_ms,
+                     applied.route_lifetime_ms,
+                     applied.route_refresh_ticks)) {
+    applied.route_advertisement_period_ms = routeloom::kScopedProductPeriodMs;
+    applied.route_lifetime_ms = routeloom::kScopedProductLifetimeMs;
+  }
   node_.~MeshNode();
-  new (&node_) MeshNode(adopted, *this, security_, observer_);
+  new (&node_) MeshNode(applied, *this, security_, observer_);
+  // The reconstruction above drops every attached sink: the #117
+  // reply-lease port is runtime-owned, so it is re-attached here — node
+  // start refuses without it. Owner/observer sinks re-attach through
+  // their own apply legs after this returns.
+  (void)node_.set_reply_peer_port(&reply_port_);
   return Status::success();
 }
 

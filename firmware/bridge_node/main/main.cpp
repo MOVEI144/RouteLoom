@@ -39,6 +39,7 @@
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/espnow_sdkv1.hpp"
 #include "routeloom/fail_policy.hpp"
+#include "routeloom/rlcw1.hpp"
 #include "routeloom/nvs_counter_store.hpp"
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
 #include "routeloom/espnow_sdkv1_entropy.hpp"
@@ -53,15 +54,21 @@
 namespace {
 constexpr char kTag[] = "RouteLoomBr";
 
-// Long-lived CPU-only state can reside in LP SRAM on the C5; radio and USB
-// driver buffers stay in their normal HP memory. The smaller gateway config
-// state fits the C3 RTC bank.
-#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC && CONFIG_IDF_TARGET_ESP32C5
-#define ROUTELOOM_MEMBER_C5_LP RTC_DATA_ATTR
+// Long-lived CPU-only state can reside in LP SRAM on the C5 Owner profiles;
+// radio and USB driver buffers stay in their normal HP memory. The gateway config
+// state fits the C3 RTC bank. Both DRAM-tight security modes (member and
+// dev-RAM) place it there; the dev-RAM default build is as tight as the
+// member one.
+#if (CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC || \
+     CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM) && \
+    CONFIG_IDF_TARGET_ESP32C5
+#define ROUTELOOM_OWNER_C5_LP RTC_DATA_ATTR
 #else
-#define ROUTELOOM_MEMBER_C5_LP
+#define ROUTELOOM_OWNER_C5_LP
 #endif
-#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC && CONFIG_IDF_TARGET_ESP32C3
+#if (CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC || \
+     CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM) && \
+    CONFIG_IDF_TARGET_ESP32C3
 #define ROUTELOOM_MEMBER_SMALL_LP RTC_DATA_ATTR
 #else
 #define ROUTELOOM_MEMBER_SMALL_LP
@@ -226,7 +233,7 @@ extern "C" void app_main(void) {
   // resume slots. Impairment is never node-fatal and never triggers an
   // erase: a quarantined/uncertain store is reported and its consumers
   // fail closed while the node keeps routing.
-  static ROUTELOOM_MEMBER_C5_LP routeloom::espnow::Sdkv1Stores sdkv1_stores(
+  static ROUTELOOM_OWNER_C5_LP routeloom::espnow::Sdkv1Stores sdkv1_stores(
       routeloom::sdkv1::kResumeGatewaySlots);
   status = sdkv1_stores.open(routeloom::espnow::kSecurityNvsPartition);
   if (!status) {
@@ -476,7 +483,7 @@ extern "C" void app_main(void) {
   }
 
   static UsbSerialStream stream;
-  static routeloom::usb::UsbBridge::Config bridge_config;
+  routeloom::usb::UsbBridge::Config bridge_config;
   const char* secret = CONFIG_ROUTELOOM_USB_DEV_SECRET;
   bridge_config.secret =
       ByteView{reinterpret_cast<const std::uint8_t*>(secret),
@@ -617,12 +624,33 @@ extern "C" void app_main(void) {
   if (!status) fail(status.detail);
   status = owner.attach_usb(bridge);
   if (!status) fail(status.detail);
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
+  // Dev route (P4 §10.1): adoption without joining — the reserved dev
+  // boot plus the static PSK/network/node/channel arm the dev-resume
+  // engine through the coordinator; pairwise sessions and group
+  // send/receive serve from here on.
+  routeloom::keys::Secret dev_psk{};
+  if (!parse_hex(CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX, dev_psk)) {
+    fail("invalid development key");
+  }
+  EspNowSecurityOwner::DevConfig dev_config{};
+  dev_config.psk = dev_psk;
+  routeloom::secure_clear(dev_psk);
+  dev_config.network = static_cast<routeloom::NetworkId>(CONFIG_ROUTELOOM_NETWORK_ID);
+  dev_config.node = CONFIG_ROUTELOOM_NODE_ID;
+  dev_config.channel = static_cast<std::uint8_t>(CONFIG_ROUTELOOM_CHANNEL);
+  dev_config.boot = message_session;
+  dev_config.role = routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay;
+  status = owner.adopt_dev(dev_config, monotonic_now_ms());
+  if (!status) fail(status.detail);
+#else
   status = owner.boot(message_session, /*rlboot_prepared=*/true,
                       /*usb_direct=*/true, monotonic_now_ms());
   if (!status) fail(status.detail);
   // Authority lane (G-SEC P5): the relay demux serves terminal 22/49/50/51
   // for USB-bound devices plus the gateway's own channel.
   runtime.node().set_config_sink(owner.authority_mesh_sink());
+#endif
 #endif
   bridge.set_mesh(&runtime.node());
   // Device nonce seeds the session transcript; sampling esp_random only
@@ -638,12 +666,13 @@ extern "C" void app_main(void) {
   // bit gates both — a build that does not advertise it never answers a
   // Query and never accepts a registration. The node's own poll drives the
   // sink through the service-sink interface (attach() installs it).
-  static ROUTELOOM_MEMBER_C5_LP routeloom::GatewayDelivery gateway(runtime.node());
-  if ((bridge_config.capability & routeloom::usb::kCapGatewayEndpointV1) !=
-      0) {
-    status = bridge.attach_gateway(gateway);
-    if (!status) fail(status.detail);
-  }
+  // The Kconfig bitmap is fixed per image; disabled endpoints reserve no
+  // long-lived gateway RAM.
+#if CONFIG_ROUTELOOM_CAPABILITY & 0x8
+  static ROUTELOOM_OWNER_C5_LP routeloom::GatewayDelivery gateway(runtime.node());
+  status = bridge.attach_gateway(gateway);
+  if (!status) fail(status.detail);
+#endif
 
   // Config endpoint (scope-gateway-config P5): the bridge issues Config
   // challenge/status queries and kind-3 permit transfers toward a target on
@@ -652,12 +681,12 @@ extern "C" void app_main(void) {
   // host under the 0x21/0x22/0x23 subcommand it was requested with. The
   // CAP_CONFIG_ENDPOINT_V1 bit gates admission; without it the ops answer
   // Unsupported. The node poll drives the component's bounded retries.
+#if CONFIG_ROUTELOOM_CAPABILITY & 0x10
   static routeloom::MeshConfigPort config_port(runtime.node());
   static ROUTELOOM_MEMBER_SMALL_LP routeloom::ConfigGateway config_gateway(config_port, bridge);
-  if ((bridge_config.capability & routeloom::usb::kCapConfigEndpointV1) != 0) {
-    status = bridge.attach_config(config_gateway);
-    if (!status) fail(status.detail);
-  }
+  status = bridge.attach_config(config_gateway);
+  if (!status) fail(status.detail);
+#endif
 
   // M1 diagnostics (m1-completion D1d): the bridge answers HostOps 0x30
   // diagnostic requests — local capabilities inline, remote telemetry via

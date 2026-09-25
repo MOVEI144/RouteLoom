@@ -79,9 +79,12 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // initialized) with an unkeyed cookie sealer; `entropy` may be unbegun
   // (begin runs pre-radio). The stores, entropy and config outlive the
   // owner.
-  Status begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy, const Config& config) noexcept;
-  // The session provider view for the runtime constructor (unconfigured
-  // until the member config lands — the node must not start before).
+  Status begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy, const Config& config,
+               sdkv1::RtcSessionImage* sleep_image = nullptr) noexcept;
+  // The session provider view for the runtime constructor: unready
+  // until the member config (or a dev adoption) lands — the node must
+  // not start before. The coordinator mux serves both profiles from
+  // here on.
   SecurityProvider& session_provider() noexcept;
   sdkv1::SecurityCoordinator& coordinator() noexcept;
   sdkv1::MembershipLifecycle& lifecycle() noexcept;
@@ -98,18 +101,37 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // unready entropy refuses the boot.
   Status boot(std::uint32_t rlboot_witness, bool rlboot_prepared, bool usb_direct,
               MonotonicMs now_ms) noexcept;
+  // Dev static config (P4 §10.1): adoption without joining. The durable
+  // boot must already be reserved (reserve_dev_group_boot_session) and
+  // the radio already on `channel` — the dev route has no cutover.
+  struct DevConfig {
+    keys::Secret psk{};
+    NetworkId network{0};
+    NodeId node{kInvalidNodeId};
+    std::uint8_t channel{0};
+    std::uint32_t boot{0};  // reserved durable boot (message/boot session)
+    std::uint32_t role{0};  // local allow-role (nonzero member-role bits)
+  };
+  // Adopts the dev config INSTEAD of boot(): the coordinator arms the
+  // dev-resume engine, adopts the dev group/scope/hooks, and emits
+  // ApplyMemberConfig for the direct node adopt (same action drain as
+  // the member route: node adopt, then StartMemberDiscovery). The node
+  // start stays deferred to the apply, like member. Dev or member/boot,
+  // never both.
+  Status adopt_dev(const DevConfig& config, MonotonicMs now_ms) noexcept;
+  bool dev_adopted() const noexcept;
   // One pump turn after runtime.poll_once: coordinator Poll, ready radio
   // completions, and the action drain (tune/member/discovery/report).
   void poll(MonotonicMs now_ms) noexcept;
-  // Sleep drain (P4 §9.3): parks the coordinator when — and only when —
-  // the firmware owes no take_action and the workspace is quiescent
-  // (no staged RX, no in-flight exchange, no demand, no live demux).
-  // Busy otherwise: the caller keeps pumping and retries; it must not
-  // enter sleep on a refusal. Node/group/relay/USB drains stay with
-  // their owners (PowerCoordinator, #110) — this is the security leg.
-  Status prepare_sleep(MonotonicMs now_ms) noexcept;
-  // Resumes polling after sleep (the RTC consume/restore lands here once
-  // the owner sleep cycle exists; today it only clears the park).
+  // Sleep drain (P4 §9.3): waits for the node's accepted delivery,
+  // group and radio work, then closes new node admission and parks the
+  // coordinator once its security workspace is quiescent. At the drain
+  // deadline, pending results fail explicitly and radio jobs are torn
+  // down, matching the PowerCoordinator's Fail policy. Busy means the
+  // caller keeps pumping and retries; a refusal never permits sleep.
+  Status prepare_sleep(MonotonicMs now_ms, bool drain_deadline = false) noexcept;
+  // Aborts an in-process sleep attempt, reopening node admission and
+  // clearing the coordinator park and any stale write-ahead guard.
   Status wake(MonotonicMs now_ms) noexcept;
   // The member discovery (null until StartMemberDiscovery constructs it).
   NeighborDiscovery* discovery() noexcept;

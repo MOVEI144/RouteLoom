@@ -201,6 +201,17 @@ class SessionBank {
   Status export_entry(SecurityScope scope, NodeId peer, SessionBankEntry& out) const noexcept;
   Status restore_entry(SecurityScope scope, NodeId peer,
                        const SessionBankEntry& entry) noexcept;
+  // Sleep save inspection (P4 §9.3, V1-F07): first_live_peer reports the
+  // first usable current entry's peer for `scope` in table order (false
+  // when none stands); export_sleep_entry copies the live (scope, peer)
+  // entry into a restorable image entry. Pin/rekey housekeeping is
+  // cleared on the copy only — it never survives sleep. A dev-resume
+  // install, an in-flight seal reservation, or any unknown flag refuses
+  // InvalidArgument with `out` cleared: dev sessions re-run RLRES1 after
+  // every boot instead of RTC-restoring.
+  bool first_live_peer(SecurityScope scope, NodeId& peer) const noexcept;
+  Status export_sleep_entry(SecurityScope scope, NodeId peer,
+                            SessionBankEntry& out) const noexcept;
   Status retire(SecurityScope scope, NodeId peer) noexcept;
   Status retire_all(NodeId peer) noexcept;
   // Drops the oldest idle (no live seal reservation), unpinned end context
@@ -247,7 +258,10 @@ class SessionBank {
   // Verified peer summary for the Owner's AuthenticatedPeerView: true
   // with the installed generation/role when a usable entry for (scope,
   // peer) stands. Only engine installs set nonzero claims, so a hit
-  // proves a completed authentication behind this bank.
+  // proves a completed authentication behind this bank. Dev-resume
+  // slots report too (generation 0, nonzero policy role): a hit on one
+  // proves "same PSK this boot", and the hooks tell the provenances
+  // apart (member hooks require a member generation).
   bool peer_summary(SecurityScope scope, NodeId peer, std::uint32_t& generation,
                     std::uint32_t& role) const noexcept;
   std::size_t demand_count() const noexcept;

@@ -24,6 +24,8 @@
 #include "routeloom/espnow_sdkv1_entropy.hpp"
 #include "routeloom/espnow_security_owner.hpp"
 #include "routeloom/owner_pump.hpp"
+#include "routeloom/rlcw1.hpp"
+#include "routeloom/secure_clear.hpp"
 #else
 #include "routeloom/psk_security.hpp"
 #endif
@@ -357,9 +359,30 @@ extern "C" void app_main(void) {
   if (!status) fail(status.detail);
   status = owner.attach_runtime(runtime);
   if (!status) fail(status.detail);
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
+  // Dev route (P4 §10.1): adoption without joining — the reserved dev
+  // boot plus the static PSK/network/node/channel arm the dev-resume
+  // engine through the coordinator; pairwise sessions and group
+  // send/receive serve from here on.
+  routeloom::keys::Secret dev_psk{};
+  if (!parse_hex(CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX, dev_psk)) {
+    fail("invalid development key");
+  }
+  EspNowSecurityOwner::DevConfig dev_config{};
+  dev_config.psk = dev_psk;
+  routeloom::secure_clear(dev_psk);
+  dev_config.network = static_cast<routeloom::NetworkId>(CONFIG_ROUTELOOM_NETWORK_ID);
+  dev_config.node = CONFIG_ROUTELOOM_NODE_ID;
+  dev_config.channel = static_cast<std::uint8_t>(CONFIG_ROUTELOOM_CHANNEL);
+  dev_config.boot = message_session;
+  dev_config.role = routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay;
+  status = owner.adopt_dev(dev_config, monotonic_now_ms());
+  if (!status) fail(status.detail);
+#else
   status = owner.boot(message_session, /*rlboot_prepared=*/true,
                       /*usb_direct=*/false, monotonic_now_ms());
   if (!status) fail(status.detail);
+#endif
   ESP_LOGI(kTag, "security owner started; node start deferred to membership");
   for (;;) {
     runtime.poll_once();

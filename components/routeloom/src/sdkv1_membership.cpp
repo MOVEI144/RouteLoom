@@ -273,4 +273,109 @@ Status SdkMembershipHooks::local_state(const NetworkId network,
   return Status::success();
 }
 
+// --- DevMembershipHooks ------------------------------------------------------------
+
+DevMembershipHooks::DevMembershipHooks(const RevocationStore& revocations,
+                                       const LocalRevocationStore& local_revocation,
+                                       const AuthenticatedPeerView* peers) noexcept
+    : revocations_(revocations), local_revocation_(local_revocation), peers_(peers) {}
+
+Status DevMembershipHooks::adopt(const NetworkId network, const NodeId node,
+                                 const std::uint32_t role) noexcept {
+  if (network == 0 || node == kInvalidNodeId || node == kBroadcastNodeId || role == 0) {
+    return Status::error(StatusCode::InvalidArgument, "dev membership invalid");
+  }
+  network_ = network;
+  node_ = node;
+  role_ = role;
+  adopted_ = true;
+  return Status::success();
+}
+
+void DevMembershipHooks::wipe() noexcept {
+  network_ = 0;
+  node_ = kInvalidNodeId;
+  role_ = 0;
+  adopted_ = false;
+}
+
+bool DevMembershipHooks::gates_healthy() const noexcept {
+  if (!revocations_.initialized() || !local_revocation_.initialized()) return false;
+  if (revocations_.quarantined() || revocations_.uncertain()) return false;
+  if (local_revocation_.quarantined() || local_revocation_.uncertain()) return false;
+  return true;
+}
+
+bool DevMembershipHooks::self_rejected() const noexcept {
+  if (!revocations_.has_set()) return false;
+  const RevocationSet& set = revocations_.set();
+  if (set.network != network_) return false;
+  return revocation_rejects(set, node_, 0, static_cast<std::uint32_t>(network_ >> 32U));
+}
+
+bool DevMembershipHooks::local_member(const NetworkId network) const noexcept {
+  if (!adopted_ || network != network_) return false;
+  if (!gates_healthy()) return false;
+  // Any standing removal evidence refuses: a dev device holds no signed
+  // Allow, so only a physical maintenance re-deploy clears it (P4 §3.3).
+  // There is deliberately no holdoff expiry here.
+  if (local_revocation_.has_record()) return false;
+  if (self_rejected()) return false;
+  return true;
+}
+
+bool DevMembershipHooks::known_member(const NodeId peer, const NetworkId network) const noexcept {
+  if (peers_ == nullptr || !local_member(network)) return false;
+  std::uint32_t generation = 0, role = 0;
+  if (!peers_->authenticated(peer, network, generation, role)) return false;
+  // This boot's "same PSK" proof, re-checked against the latest
+  // revocation view: dev sessions carry generation 0 and the locally
+  // configured role (never a member generation), anything else is not a
+  // dev authentication.
+  if (generation != 0 || role == 0) return false;
+  if (revocations_.has_set() &&
+      revocation_rejects(revocations_.set(), peer, generation,
+                         static_cast<std::uint32_t>(network >> 32U))) {
+    return false;
+  }
+  return true;
+}
+
+bool DevMembershipHooks::approve_join(const NodeId node, const NetworkId network) noexcept {
+  (void)node;
+  (void)network;
+  // The dev route never joins: adoption is static config, and a radio
+  // peer's approval is never reused here.
+  return false;
+}
+
+Status DevMembershipHooks::local_state(const NetworkId network,
+                                       MembershipState& out) const noexcept {
+  // The durable refusal wins over every other signal, like the member
+  // hooks — except the holdoff never clears a dev refusal (see above).
+  if (!local_revocation_.initialized() || local_revocation_.quarantined() ||
+      local_revocation_.uncertain()) {
+    out = MembershipState::Revoked;
+    return Status::error(StatusCode::StorageFailure, "rlv1 gate unprovable");
+  }
+  if (local_revocation_.has_record()) {
+    out = MembershipState::Revoked;
+    return Status::success();
+  }
+  if (!revocations_.initialized() || revocations_.quarantined() || revocations_.uncertain()) {
+    out = MembershipState::Revoked;
+    return Status::error(StatusCode::StorageFailure, "dev revocation store unprovable");
+  }
+  if (adopted_ && network == network_ && self_rejected()) {
+    out = MembershipState::Revoked;
+    return Status::success();
+  }
+  if (local_member(network)) {
+    out = MembershipState::Member;
+    return Status::success();
+  }
+  out = MembershipState::Unprovisioned;
+  return Status::success();
+}
+
 }  // namespace routeloom::sdkv1

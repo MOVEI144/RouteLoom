@@ -197,6 +197,20 @@ ElapsedInterval classify_sleep_elapsed(bool deep_sleep_wake, bool timer_wake,
                                        std::uint32_t programmed_ms,
                                        std::uint64_t trusted_upper_ms) noexcept;
 
+// Boot time the sleep bound absorbs (ROM to app_main is far below a
+// second; the margin is generous because the direction is safe).
+constexpr std::uint32_t kSleepElapsedBootMarginMs = 10000;
+// Trusted save-to-restore upper bound (P4 §9.3, V1-F07): from a marked
+// timer wake, the true sleep is below twice the programmed duration
+// (any uncalibrated-RC drift is far below 100%) plus the boot margin,
+// plus the measured awake time — saturated to 32 bits. 0 (untrusted)
+// unless deep+timer+marked all hold and the programmed duration is
+// nonzero. Safe direction only: overestimation cold-resumes (the
+// session lifetime check fails), never unsafe-warms.
+std::uint32_t bound_sleep_elapsed_upper_ms(bool deep_sleep_wake, bool timer_wake,
+                                           bool marker_ok, std::uint32_t programmed_ms,
+                                           std::uint32_t awake_ms) noexcept;
+
 // Phase-1 plan for one carry slot: what the settlement must do with it.
 enum class CarryPlanKind : std::uint8_t {
   Unused = 0,  // carry slot free

@@ -70,6 +70,102 @@ struct ChurnPort final : LegacyPurgePort {
 };
 }  // namespace
 
+struct CutBacking {
+  static constexpr std::size_t kLegacy = 40;
+  static constexpr std::size_t kOther = 5;
+  std::array<std::array<char, 10>, kLegacy> legacy{};
+  std::array<bool, kLegacy> legacy_live{};
+  std::array<std::array<char, 10>, kOther> other{};
+  std::array<bool, kOther> other_live{};
+  bool marker{false};          // committed (durable)
+  bool pending_marker{false};  // staged set, uncommitted (lost on cut)
+  CutBacking() {
+    for (unsigned i = 0; i < kLegacy; ++i) {
+      std::snprintf(legacy[i].data(), legacy[i].size(), "f%08x", i);
+      legacy_live[i] = true;
+    }
+    for (unsigned i = 0; i < kOther; ++i) {
+      std::snprintf(other[i].data(), other[i].size(), "x%08x", i);
+      other_live[i] = true;
+    }
+  }
+  std::size_t live_legacy() const {
+    std::size_t count = 0;
+    for (bool live : legacy_live) count += live ? 1 : 0;
+    return count;
+  }
+};
+
+// Power-cut injector over a shared durable backing: every mutating NVS
+// op (marker set, marker commit, each erase) is one charged op, and the
+// cut fires before op `cut_after` (reads never cut — a torn read changes
+// no durability). A fresh port over the same backing is the reboot.
+struct CutPort final : LegacyPurgePort {
+  CutBacking* backing;
+  std::size_t cut_after;
+  std::size_t ops{0};
+  bool cut{false};
+  CutPort(CutBacking* backing_in, std::size_t cut_after_in) noexcept
+      : backing(backing_in), cut_after(cut_after_in) {}
+  bool charge() noexcept {
+    if (cut) return false;
+    if (ops == cut_after) {
+      cut = true;
+      backing->pending_marker = false;  // the staged set never committed
+      return false;
+    }
+    ++ops;
+    return true;
+  }
+  Status migration(bool& present) noexcept override {
+    present = backing->marker;
+    return Status::success();
+  }
+  Status commit_migration() noexcept override {
+    if (backing->marker) return Status::success();
+    if (!charge()) return Status::error(StatusCode::StorageFailure, "power cut");
+    backing->pending_marker = true;  // the set stages...
+    if (!charge()) return Status::error(StatusCode::StorageFailure, "power cut");
+    backing->marker = true;  // ...the commit persists it
+    backing->pending_marker = false;
+    return Status::success();
+  }
+  Status next(std::size_t& cursor, LegacyKey& key, bool& found) noexcept override {
+    // Fixed-index cursor (erased entries skip, never shift): legacy keys
+    // first, then the untouched non-legacy shapes.
+    while (cursor < CutBacking::kLegacy && !backing->legacy_live[cursor]) ++cursor;
+    if (cursor < CutBacking::kLegacy) {
+      key = {"rlreplay", backing->legacy[cursor].data()};
+      found = true;
+      ++cursor;
+      return Status::success();
+    }
+    std::size_t other = cursor - CutBacking::kLegacy;
+    while (other < CutBacking::kOther && !backing->other_live[other]) {
+      ++other;
+      ++cursor;
+    }
+    if (other >= CutBacking::kOther) {
+      found = false;
+      return Status::success();
+    }
+    key = {"rlcounter", backing->other[other].data()};
+    found = true;
+    ++cursor;
+    return Status::success();
+  }
+  Status erase(const LegacyKey& key) noexcept override {
+    if (!charge()) return Status::error(StatusCode::StorageFailure, "power cut");
+    for (std::size_t i = 0; i < CutBacking::kLegacy; ++i) {
+      if (backing->legacy_live[i] && std::strcmp(backing->legacy[i].data(), key.key) == 0) {
+        backing->legacy_live[i] = false;
+        return Status::success();
+      }
+    }
+    return Status::error(StatusCode::NotFound, "gone");
+  }
+};
+
 int main() {
   MemoryPort port;
   LegacyPurgeResult result{};
@@ -167,5 +263,47 @@ int main() {
   CHECK(strip_legacy_state_prefix(line("security"), rest).code == StatusCode::NotFound);
   CHECK(strip_legacy_state_prefix(line("status"), rest).code == StatusCode::NotFound);
   CHECK(strip_legacy_state_prefix(line(""), rest).code == StatusCode::NotFound);
+
+  // Power-cut matrix (#37): the cut fires before every mutating op of a
+  // 40-key purge (marker set, marker commit, each erase), then a fresh
+  // port over the same backing ("reboot") reruns to completion. Every
+  // row must converge: all legacy keys gone, the marker committed, the
+  // non-legacy shapes untouched, and no pass ever reporting completion
+  // while survivors remain.
+  constexpr std::size_t kCutOps = 2 + CutBacking::kLegacy;
+  for (std::size_t cut = 0; cut <= kCutOps; ++cut) {
+    CutBacking backing;
+    // The cut port runs pass after pass (16 erases each) until the cut
+    // fires; the last row never cuts (a clean run inside the matrix).
+    CutPort first(&backing, cut);
+    LegacyPurgeResult cut_result{};
+    bool fired = false;
+    for (unsigned pass = 0; pass < 10; ++pass) {
+      if (!purge_legacy_state(first, true, true, cut_result).ok()) {
+        fired = true;
+        break;
+      }
+      if (cut_result.remaining == 0) break;
+    }
+    CHECK(fired == (cut < kCutOps));
+    CHECK(!backing.pending_marker);  // a staged set never looks committed
+    LegacyPurgeResult rerun{};
+    bool complete = false;
+    for (unsigned pass = 0; pass < 10 && !complete; ++pass) {
+      CutPort reboot(&backing, kCutOps + 1);  // no further cuts
+      CHECK(purge_legacy_state(reboot, true, true, rerun).ok());
+      CHECK(rerun.remaining == backing.live_legacy());
+      complete = rerun.remaining == 0;
+    }
+    CHECK(complete);
+    CHECK(backing.marker);
+    CHECK(backing.live_legacy() == 0);
+    for (bool live : backing.other_live) CHECK(live);
+    // Past completion the purge is a stable no-op (marker readback only).
+    CutPort settled(&backing, kCutOps + 1);
+    LegacyPurgeResult noop{};
+    CHECK(purge_legacy_state(settled, true, true, noop).ok());
+    CHECK(noop.erased == 0 && noop.remaining == 0);
+  }
   return 0;
 }

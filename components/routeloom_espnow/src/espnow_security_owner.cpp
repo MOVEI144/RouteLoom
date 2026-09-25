@@ -305,6 +305,13 @@ SecurityProvider& EspNowSecurityOwner::session_provider() noexcept {
   return coordinator().session_provider();
 }
 
+bool EspNowSecurityOwner::dev_adopted() const noexcept {
+  if (!coordinator_live_) return false;
+  const auto& coordinator =
+      *reinterpret_cast<const sdkv1::SecurityCoordinator*>(coordinator_box_.data());
+  return coordinator.snapshot().mode == sdkv1::CoordinatorMode::Dev;
+}
+
 NeighborDiscovery* EspNowSecurityOwner::discovery() noexcept {
   if (!discovery_live_) return nullptr;
   return reinterpret_cast<NeighborDiscovery*>(discovery_box_.data());
@@ -345,7 +352,8 @@ ConfigEndpointSink* EspNowSecurityOwner::authority_mesh_sink() noexcept {
 }
 
 Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
-                                  const Config& config) noexcept {
+                                  const Config& config,
+                                  sdkv1::RtcSessionImage* sleep_image) noexcept {
   if (begun_) return Status::error(StatusCode::AlreadyExists, "owner already begun");
   if (lifecycle_box_in_use_)
     return Status::error(StatusCode::Busy, "lifecycle owner already active");
@@ -369,6 +377,7 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
   deps.revocations = &stores_->revocation();
   deps.local_revocation = &stores_->local_revocation();
   deps.resume_storage = &stores_->resume2();
+  deps.sleep_image = sleep_image;
   deps.entropy = entropy_;
   deps.rld1 = this;
   deps.mesh = this;
@@ -515,6 +524,43 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
   boot_witness_ = rlboot_witness;
   booted_ = true;
   ESP_LOGI(config_.log_tag, "booted (%s)", usb_direct ? "usb-direct" : "radio");
+  return Status::success();
+}
+
+Status EspNowSecurityOwner::adopt_dev(const DevConfig& config,
+                                        const MonotonicMs now_ms) noexcept {
+  if (!begun_) return Status::error(StatusCode::InvalidState, "owner not begun");
+  if (runtime_ == nullptr) {
+    return Status::error(StatusCode::InvalidState, "runtime not attached");
+  }
+  if (booted_) {
+    return Status::error(StatusCode::InvalidState, "owner already running");
+  }
+  // The dev route has no cutover: the static channel must already match
+  // the radio (firmware boots the runtime on it). The coordinator
+  // re-validates the rest (network/node/boot/role/PSK shapes).
+  if (config.channel == 0 || runtime_->committed_channel() != config.channel) {
+    return Status::error(StatusCode::InvalidArgument, "dev channel");
+  }
+  sdkv1::CoordinatorDevConfig adopted{};
+  adopted.psk = config.psk;
+  adopted.network = config.network;
+  adopted.node = config.node;
+  adopted.boot = config.boot;
+  adopted.role = config.role;
+  adopted.channel = config.channel;
+  const Status status = coordinator().adopt_dev(adopted, now_ms);
+  secure_clear(adopted.psk);
+  if (!status) return status;
+  // A parked Recovery (ReportRecovery pending) is a failed adopt, not a
+  // running dev node: fail loudly like a refused boot.
+  if (coordinator().snapshot().mode == sdkv1::CoordinatorMode::Recovery) {
+    return Status::error(StatusCode::RecoveryRequired, "dev adopt failed");
+  }
+  booted_ = true;  // the pump now drives the dev-armed coordinator
+  ESP_LOGI(config_.log_tag, "dev adopted (node 0x%llx, boot %lu)",
+           static_cast<unsigned long long>(config.node),
+           static_cast<unsigned long>(config.boot));
   return Status::success();
 }
 
@@ -893,24 +939,65 @@ void EspNowSecurityOwner::drive_authority(const MonotonicMs now_ms) noexcept {
   }
 }
 
-Status EspNowSecurityOwner::prepare_sleep(const MonotonicMs now_ms) noexcept {
-  if (!booted_) return Status::error(StatusCode::InvalidState, "owner not booted");
+Status EspNowSecurityOwner::prepare_sleep(const MonotonicMs now_ms,
+                                         const bool drain_deadline) noexcept {
+  if (!booted_ || runtime_ == nullptr) {
+    return Status::error(StatusCode::InvalidState, "owner not booted");
+  }
+  MeshNode& node = runtime_->node();
+  if (node.in_external_callback() || (!drain_deadline && node.sleep_work_pending())) {
+    return Status::error(StatusCode::Busy, "node has sleep work");
+  }
   // Drain first: a pending action (tune/member/discovery) is owed work,
   // not sleep permission. The coordinator re-checks the slot anyway.
   poll_tune(now_ms);
   drain_actions(now_ms);
+  if (!drain_deadline && node.sleep_work_pending()) {
+    return Status::error(StatusCode::Busy, "node has sleep work");
+  }
+  const Status drained = node.set_draining(true);
+  if (!drained) return drained;
   sdkv1::CoordinatorEvent event{};
   event.kind = sdkv1::CoordinatorEventKind::PrepareSleep;
   event.now = now_ms;
-  return coordinator().step(event);
+  const Status parked = coordinator().step(event);
+  if (!parked) {
+    (void)node.set_draining(false);
+    return parked;
+  }
+  if (drain_deadline) {
+    // The Owner path has no delivery image; report Fail dispositions
+    // before tearing down radio work at the deadline.
+    const Status settled = node.settle_failed_sleep_work();
+    if (!settled) {
+      (void)wake(now_ms);
+      return settled;
+    }
+  } else {
+    const Status quiet = node.quiesce_for_sleep();
+    if (!quiet) {
+      (void)wake(now_ms);
+      return quiet;
+    }
+  }
+  if (node.sleep_work_pending()) {
+    (void)wake(now_ms);
+    return Status::error(StatusCode::Busy, "node has sleep work");
+  }
+  return Status::success();
 }
 
 Status EspNowSecurityOwner::wake(const MonotonicMs now_ms) noexcept {
   if (!booted_) return Status::error(StatusCode::InvalidState, "owner not booted");
+  if (runtime_ != nullptr && runtime_->node().in_external_callback()) {
+    return Status::error(StatusCode::Busy, "owner wake in callback");
+  }
   sdkv1::CoordinatorEvent event{};
   event.kind = sdkv1::CoordinatorEventKind::Wake;
   event.now = now_ms;
-  return coordinator().step(event);
+  const Status awakened = coordinator().step(event);
+  if (awakened && runtime_ != nullptr) (void)runtime_->node().set_draining(false);
+  return awakened;
 }
 
 void EspNowSecurityOwner::on_bootstrap_rld1(const sdkv1::JoinRxMeta& meta,
@@ -1349,9 +1436,7 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   for (std::size_t i = 0; i < member.route_gateway_count && i < node.route_gateways.size(); ++i) {
     node.route_gateways[i] = member.route_gateways[i];
   }
-  const std::uint8_t operating = stores_->site().has_site()
-                                     ? stores_->site().site().channel
-                                     : runtime_->committed_channel();
+  const std::uint8_t operating = member.channel;
   Status status = runtime_->adopt_member_node(node);
   if (!status && status.code != StatusCode::InvalidState) {
     ESP_LOGE(config_.log_tag, "member node adopt failed: %s", status.detail);
@@ -1388,7 +1473,9 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
 
 void EspNowSecurityOwner::on_start_discovery(const MonotonicMs now_ms) noexcept {
   if (discovery_live_) return;
-  if (!stores_->site().has_site()) {
+  // The dev route adopts static config, never an RLS1: the discovery
+  // config gate below (engine mode + valid adoption) is the check there.
+  if (!dev_adopted() && !stores_->site().has_site()) {
     ESP_LOGE(config_.log_tag, "member discovery without adopted site");
     return;
   }

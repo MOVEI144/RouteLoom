@@ -7563,6 +7563,28 @@ Status MeshNode::set_draining(const bool draining) noexcept {
   return Status::success();
 }
 
+Status MeshNode::settle_failed_sleep_work() noexcept {
+  if (in_call_ || in_external_callback_ || !sleep_draining_) {
+    return Status::error(StatusCode::Busy, "sleep settlement unavailable");
+  }
+  while (settle_one_sleep_delivery(
+      SleepWorkPolicy::Fail, [](const MessageId&) noexcept { return false; })) {}
+  while (settle_one_sleep_group_origin(SleepWorkPolicy::Fail)) {}
+  while (true) {
+    const SleepHoldRelease released = release_one_group_hold_for_sleep();
+    if (released == SleepHoldRelease::NonePending) break;
+    if (released == SleepHoldRelease::StreamInvariant) {
+      return Status::error(StatusCode::InvalidState, "group hold stream missing");
+    }
+  }
+  const Status quiet = quiesce_for_sleep();
+  if (!quiet) return quiet;
+  if (sleep_work_pending()) {
+    return Status::error(StatusCode::Busy, "node has sleep work");
+  }
+  return Status::success();
+}
+
 Status MeshNode::set_relay_enabled(const bool enabled) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
   NodeGuard guard(in_call_);
