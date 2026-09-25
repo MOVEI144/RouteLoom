@@ -132,7 +132,7 @@ Heartbeatは許された範囲で位相を分散する。既定jitterは周期±
 
 ## 10. Peerとメモリ
 
-Peer20枠をbroadcast1＋通常16＋transient3に割り、通常pinは最大12。進行中TX、重要経路、受領待ちPeerは追い出さない。Peer登録・再作成後はLRを再適用する。Peer不足でDATA broadcastへ逃げない。
+Peer20枠をbroadcast1＋通常16＋transient3に割り、通常pinは最大12。ESP-NOW Ownerは経路広告用broadcastも予約済み物理TX slot・callback fenceで送るが、driver完了を近隣別到達・RSSI・MAC成功率の証拠にしない（経路広告schedulerは未配線、opt-in既定OFF）。進行中TX、重要経路、受領待ちPeerは追い出さない。Peer登録・再作成後はLRを再適用する。Peer不足でDATA broadcastへ逃げない。
 
 論理台帳128、近隣32、RX64、TX64（制御予約8）、logical in-flight8は大容量設計の上限例。実装基準は[資源profile](resource-profiles.md)のleaf／relay／gateway別の値を使う。driver Peerとsecurity session数と台帳数は別。未登録Peerからのdriver非暗号frameもSDKで認証してから必要な返信枠を確保する。認証前にPeer登録だけで信用しない。
 

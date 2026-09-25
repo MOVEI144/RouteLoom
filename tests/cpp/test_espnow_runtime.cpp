@@ -479,6 +479,27 @@ void test_driver_release_waits_for_use_and_callback() {
   runtime.stop();
 }
 
+// A broadcast uses the Owner's reserved physical slot and the permanent
+// driver peer, not a transient NodeId->MAC mapping or raw-send lane.
+void test_route_broadcast_uses_reserved_radio_slot() {
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize().ok());
+  CHECK(runtime.start().ok());
+  const std::uint8_t frame = 0x42;
+  CHECK(runtime.send(routeloom::kBroadcastNodeId, 1, ByteView{&frame, 1}).ok());
+  CHECK(idf_stub::send_count() == 1);
+  CHECK(idf_stub::last_send_to(routeloom::discovery_const::kBroadcastMac.data()));
+  CHECK(runtime.send(routeloom::kBroadcastNodeId, 2, ByteView{&frame, 1}).code ==
+        routeloom::StatusCode::WouldBlock);
+  CHECK(idf_stub::complete_send(true));
+  CHECK(runtime.send(routeloom::kBroadcastNodeId, 2, ByteView{&frame, 1}).ok());
+  CHECK(idf_stub::complete_send(false));
+  runtime.stop();
+}
+
 void test_driver_delete_failure_keeps_slot_occupied() {
   idf_stub::reset();
   TestSecurity security;
@@ -608,6 +629,7 @@ int main() {
   test_stop_drains_node_reply_uses();
   test_stale_binding_keeps_reserved_reply_sendable();
   test_driver_release_waits_for_use_and_callback();
+  test_route_broadcast_uses_reserved_radio_slot();
   test_driver_delete_failure_keeps_slot_occupied();
   test_failed_static_registration_does_not_claim_a_slot();
   test_route_capacity_registration_rolls_back_driver_peer();

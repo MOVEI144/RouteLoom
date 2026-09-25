@@ -2338,6 +2338,12 @@ Status MeshNode::on_radio_tx_result(const std::uint64_t token, const bool succes
       bucket != nullptr && bucket->pending_completions != 0) {
     --bucket->pending_completions;
   }
+  // A broadcast has no per-neighbor MAC ACK. Resolve the one-shot driver
+  // attempt without fabricating reachability, RF loss or HopAccept evidence.
+  if (job.peer == kBroadcastNodeId) {
+    complete_job(job, false, now_ms);
+    return Status::success();
+  }
   auto* neighbor = find_neighbor(job.peer);
   if (!success) {
     if (neighbor != nullptr && neighbor->consecutive_failures < UINT8_MAX) {

@@ -14,6 +14,7 @@ void advance_ms(std::uint32_t ms) noexcept;
 std::int64_t now_us() noexcept;
 // esp_now_send / esp_now_del_peer call counts since reset.
 unsigned send_count() noexcept;
+bool last_send_to(const std::uint8_t mac[6]) noexcept;
 unsigned del_peer_count() noexcept;
 void fail_del_peer(bool fail) noexcept;
 void fail_add_peer(bool fail) noexcept;
