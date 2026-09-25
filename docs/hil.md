@@ -45,6 +45,13 @@ python3 tools/hil/flash.py --rig tools/hil/rigs.yaml --bench bench-a \
 # reference node's USB-Serial-JTAG console)
 python3 tools/hil/capture.py --port /dev/cu.usbmodemXXXX --out run.log
 
+# Reset a reference board N times and send M messages after each release:
+# per-message outcome, reset-to-first-delivery time, IDEMPOTENCY_FULL count
+# and the reference console captured on the same port (issue #167 evidence)
+python3 tools/hil/reset_cycles.py --rig tools/hil/rigs.yaml --bench bench-a \
+    --board ref-a --ctl host/target/debug/routeloomctl --socket /tmp/rl.sock \
+    --destination 2 --cycles 10 --sends 10 --out artifacts/hil/reset-run
+
 # Run scenarios (all, or --scenario name repeatedly); --list shows names
 python3 tools/hil/scenarios.py --rig tools/hil/rigs.yaml --bench bench-a \
     --out artifacts/hil/run-1

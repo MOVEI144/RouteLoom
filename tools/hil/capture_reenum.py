@@ -9,6 +9,12 @@ import time
 
 import serial
 
+try:
+    from . import flash, rig
+except ImportError:
+    import flash  # type: ignore
+    import rig  # type: ignore
+
 
 def stamp() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds")
@@ -22,7 +28,22 @@ def main() -> int:
     p.add_argument("--seconds", type=float, required=True)
     p.add_argument("--reset-on-connect", action="store_true",
                    help="pulse RTS with DTR low after opening the known board")
+    p.add_argument("--reset-after-s", type=float,
+                   help="pulse RTS once during capture, after this many seconds")
+    p.add_argument("--rig", default="tools/hil/rigs.yaml")
+    p.add_argument("--bench")
+    p.add_argument("--board")
     args = p.parse_args()
+    if args.reset_after_s is not None:
+        if args.reset_after_s < 0 or args.reset_after_s >= args.seconds:
+            p.error("reset-after-s must be within the capture period")
+        if not args.bench or not args.board:
+            p.error("a timed reset requires --bench and --board for chip-id preflight")
+        board = rig.load_rigs(args.rig)[args.bench].boards[args.board]
+        if board.mac.lower() != args.mac.lower() or args.port not in board.port_globs:
+            p.error("timed-reset port/MAC is not pinned to the named rig board")
+        flash.preflight_board(board, args.port, flash.DEFAULT_ESPTOOL,
+                              str(pathlib.Path(args.out).parent))
     mac_parts = args.mac.upper().split(":")
     # ESP32-C6 chip-id reports EUI-64, while its USB by-id name contains
     # the EUI-48 base MAC (the middle FF:FE bytes are omitted).
@@ -31,7 +52,9 @@ def main() -> int:
     ) else args.mac.upper()
     if port_mac not in args.port or "*" in args.port:
         p.error("port must be one exact by-id path containing the expected MAC")
-    deadline = time.monotonic() + args.seconds
+    started = time.monotonic()
+    deadline = started + args.seconds
+    reset_done = False
     path = pathlib.Path(args.out)
     path.parent.mkdir(parents=True, exist_ok=True)
     stream = None
@@ -60,6 +83,18 @@ def main() -> int:
                     time.sleep(0.2)
                     continue
             try:
+                if (args.reset_after_s is not None and not reset_done and
+                        time.monotonic() >= started + args.reset_after_s):
+                    stream.dtr = False
+                    stream.rts = True
+                    log.write(f"[{stamp()}] !! reset assert (RTS, DTR low)\n")
+                    log.flush()
+                    time.sleep(0.12)
+                    stream.rts = False
+                    stream.dtr = True
+                    log.write(f"[{stamp()}] !! reset released\n")
+                    log.flush()
+                    reset_done = True
                 data = stream.read(4096)
             except (OSError, serial.SerialException) as exc:
                 log.write(f"[{stamp()}] !! disconnected: {exc}\n")
