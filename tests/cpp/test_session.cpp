@@ -326,7 +326,7 @@ bool received(const CapturingObserver& observer, const char* text) {
 // --- (a) defaults -------------------------------------------------------------
 
 void test_default_provider_reports_configured_values() {
-  TestSecurity security;  // does not override the new hooks
+  TestSecurity security;  // overrides only the GroupLink test hooks
   for (const SecurityScope scope : {SecurityScope::Link, SecurityScope::EndToEnd,
                                     SecurityScope::Group, SecurityScope::GroupLink}) {
     std::uint32_t epoch = 0x01020304;
@@ -785,6 +785,25 @@ void test_refusal_with_usable_context_is_a_failure() {
   CHECK(pair.sec_a.counters_drawn.empty());
 }
 
+// A provider without GroupLink support: tx_group_link_epochs keeps the base
+// Unsupported default, so broadcast TX fails before any counter is drawn.
+class LegacyWireSecurity final : public SecurityProvider {
+ public:
+  bool ready() const noexcept override { return true; }
+  Status next_counter(const SecurityContext& c, std::uint64_t& counter) noexcept override {
+    return inner.next_counter(c, counter);
+  }
+  Status seal(const SecurityContext& c, std::uint64_t counter, ByteView aad, ByteView plain,
+              MutableByteView cipher, std::array<std::uint8_t, kAeadTagSize>& tag) noexcept override {
+    return inner.seal(c, counter, aad, plain, cipher, tag);
+  }
+  Status open(const SecurityContext& c, std::uint64_t counter, ByteView aad, ByteView cipher,
+              const std::array<std::uint8_t, kAeadTagSize>& tag, MutableByteView plain) noexcept override {
+    return inner.open(c, counter, aad, cipher, tag, plain);
+  }
+  TestSecurity inner{};
+};
+
 // Broadcast route advertisements must use GroupLink, never a pairwise
 // session or the unicast receive path (P5 §8). This fake checks the wire
 // boundary only; it does not grant routing/capability authority.
@@ -855,7 +874,7 @@ void test_broadcast_route_wire_gate() {
   malformed.header.delivery = DeliveryClass::Reliable;
   CHECK(!wire::encode_new(malformed, security, encoded).ok());
   CHECK(security.draws == 0);
-  TestSecurity legacy;
+  LegacyWireSecurity legacy;
   CHECK(wire::encode_new(frame, legacy, encoded).code == StatusCode::Unsupported);
   CHECK(encoded.size == 0);
   CHECK_OK(wire::encode_new(frame, security, encoded));

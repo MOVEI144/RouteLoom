@@ -28,6 +28,30 @@ class TestSecurity final : public routeloom::SecurityProvider {
  public:
   bool ready() const noexcept override { return true; }
 
+  // P5-2 broadcast stand-in for the GK/boot snapshot: nonzero by default,
+  // AuthRequired when either is cleared (unknown GK on the TX side).
+  routeloom::Status tx_group_link_epochs(std::uint32_t& boot,
+                                         std::uint32_t& g) noexcept override {
+    if (group_link_boot_ == 0 || group_link_g_ == 0) {
+      return routeloom::Status::error(routeloom::StatusCode::AuthRequired,
+                                      "test GroupLink epochs unavailable");
+    }
+    boot = group_link_boot_;
+    g = group_link_g_;
+    return routeloom::Status::success();
+  }
+  // Unknown-GK stand-in on the RX side: flip off to refuse every group
+  // epoch (the tag still opens — the cipher has no keys — but the node
+  // must drop the frame before any route use).
+  bool accepts_group_epoch(std::uint32_t /*g*/) const noexcept override {
+    return accept_group_epoch_;
+  }
+  void set_group_link_epochs(std::uint32_t boot, std::uint32_t g) noexcept {
+    group_link_boot_ = boot;
+    group_link_g_ = g;
+  }
+  void set_accept_group_epoch(bool accept) noexcept { accept_group_epoch_ = accept; }
+
   routeloom::Status next_counter(const routeloom::SecurityContext& context,
                                  std::uint64_t& counter) noexcept override {
     auto key = std::make_tuple(static_cast<int>(context.scope), context.network,
@@ -71,10 +95,12 @@ class TestSecurity final : public routeloom::SecurityProvider {
       return routeloom::Status::error(routeloom::StatusCode::AuthenticationFailed,
                                     "test tag mismatch");
     }
-    if (context.scope == routeloom::SecurityScope::Group) {
-      // Group scope replay (group-delivery.md §7): per (sender, group,
-      // epoch) a counter opens once — the node must dedup a group message
-      // on its header BEFORE opening it, so a second open is a defect.
+    if (context.scope == routeloom::SecurityScope::Group ||
+        context.scope == routeloom::SecurityScope::GroupLink) {
+      // Group/GroupLink scope replay (group-delivery.md §7): per (sender,
+      // domain, epoch) a counter opens once — the node must dedup a group
+      // message on its header BEFORE opening it, so a second open of the
+      // same bytes is a defect.
       const auto replay_key = std::make_tuple(context.network, context.sender,
                                               context.receiver, context.epoch, counter);
       if (!group_accepted_.insert(replay_key).second) {
@@ -100,6 +126,9 @@ class TestSecurity final : public routeloom::SecurityProvider {
                       std::uint32_t, std::uint64_t>>
       group_accepted_{};
   std::uint64_t group_replays_{0};
+  std::uint32_t group_link_boot_{1};
+  std::uint32_t group_link_g_{1};
+  bool accept_group_epoch_{true};
   using Key = std::tuple<int, routeloom::NetworkId, routeloom::NodeId, routeloom::NodeId,
                          std::uint16_t>;
   std::map<Key, std::uint64_t> counters_{};

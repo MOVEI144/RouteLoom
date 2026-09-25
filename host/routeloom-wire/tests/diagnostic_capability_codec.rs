@@ -1,6 +1,6 @@
 use routeloom_wire::diagnostic_capability::{
     decode_query, decode_reply, encode_query, encode_reply, CapabilitiesReply,
-    CAP_ROUTE_BROADCAST_V1, CAP_RRS_GOSSIP_V1,
+    CAP_MEMBERSHIP_LIFECYCLE_V1, CAP_ROUTE_BROADCAST_V1, CAP_RRS_GOSSIP_V1,
 };
 
 #[test]
@@ -19,14 +19,15 @@ fn nonce_bound_query_reply_and_distinct_route_permission() {
     let encoded = encode_reply(reply).unwrap();
     assert_eq!(encoded.len(), 40);
     assert_eq!(decode_reply(&encoded).unwrap(), reply);
-    // An old bit-5-only grant cannot identify a new broadcast sender: the
-    // wire format has no discriminator for legacy RRS grants.
+    // A legacy bit-5-only grant is RRS gossip permission, never route
+    // broadcast: bit 7 was never assigned before P5-2, so no discriminator
+    // is needed to tell the two apart.
     let mut legacy = encoded;
-    legacy[28..32].copy_from_slice(&CAP_ROUTE_BROADCAST_V1.to_be_bytes());
-    assert_eq!(
-        decode_reply(&legacy).unwrap().features,
-        CAP_ROUTE_BROADCAST_V1
-    );
+    legacy[28..32].copy_from_slice(&CAP_RRS_GOSSIP_V1.to_be_bytes());
+    let legacy_features = decode_reply(&legacy).unwrap().features;
+    assert_eq!(legacy_features, CAP_RRS_GOSSIP_V1);
+    assert_eq!(legacy_features & CAP_ROUTE_BROADCAST_V1, 0);
+    assert_eq!(legacy_features & CAP_MEMBERSHIP_LIFECYCLE_V1, 0);
 }
 
 #[test]

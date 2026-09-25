@@ -1208,8 +1208,8 @@ void test_gossip_rates_and_refresh() {
       1000));
   CHECK_OK(quiet.dispatch(LifecycleInput::Poll(), 1000));
   CHECK(quiet.peer.sent.empty());
-  // A bit-5 route grant is not permission to send RRS gossip. Older P6
-  // builds used this bit, so never alias it to the new gossip capability.
+  // A bit-7 route grant is not permission to send RRS gossip: only the
+  // bit-5 gossip grant opens the gossip lane.
   NodeFixture route_only(kNodeC, kCapRouteBroadcastV1);
   CHECK(route_only.provision(3, 16));
   CHECK_OK(route_only.dispatch(

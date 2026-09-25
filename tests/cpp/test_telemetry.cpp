@@ -976,9 +976,9 @@ void test_capabilities_exchange() {
 // Capability bits have distinct meanings: a route grant must never become
 // RRS gossip permission. Exercise raw wire bits as well as the named API.
 void test_capabilities_p6_feature_bits() {
-  CHECK(kCapRouteBroadcastV1 == (1u << 5));
+  CHECK(kCapRrsGossipV1 == (1u << 5));
   CHECK(kCapMembershipLifecycleV1 == (1u << 6));
-  CHECK(kCapRrsGossipV1 == (1u << 7));
+  CHECK(kCapRouteBroadcastV1 == (1u << 7));
   CapabilitiesReply reply{};
   reply.echo_nonce.fill(0x3C);
   reply.node_boot = 0xB007;
