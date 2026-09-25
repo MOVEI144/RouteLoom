@@ -164,6 +164,12 @@
     "max_records": 7,
     "first_record": "sender self record, metric 0"
   },
+  "diagnostic_route_broadcast_capability": {
+    "feature_bit": 5,
+    "membership_lifecycle_bit": 6,
+    "rrs_gossip_bit": 7,
+    "status": "broadcast opt-in refused until legacy P6 bit-5 RRS grants can be distinguished; old bit-5 grants never authorize RRS on the new codec"
+  },
   "broadcast_route_update_payload": {
     "status": "codec and wire GroupLink header gate only; mesh and radio dispatch disabled",
     "wire_header": "RouteUpdate, next_hop=destination=broadcast, origin=previous_hop=non-broadcast, hop_remaining=1, BestEffort, round=0, end_protected=false, end_counter=0, link_epoch=sender boot, end_epoch=GK; explicit broadcast open only",
