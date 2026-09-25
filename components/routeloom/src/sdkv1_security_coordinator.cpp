@@ -1,5 +1,6 @@
 #include "routeloom/sdkv1_security_coordinator.hpp"
 
+#include <cassert>
 #include <cstring>
 #include <new>
 
@@ -677,6 +678,7 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
 }
 
 void SecurityCoordinator::sweep_demux(const MonotonicMs now) noexcept {
+  assert(has_member_engine());
   for (auto& entry : member().demux) {
     if (!entry.used || now < entry.expires_at) continue;
     if (entry.discovery_token != NeighborDiscovery::kMemberHandshakeNone &&
@@ -689,6 +691,7 @@ void SecurityCoordinator::sweep_demux(const MonotonicMs now) noexcept {
 
 SecurityCoordinator::DemuxEntry* SecurityCoordinator::find_demux(
     const MacAddress& mac, const std::uint32_t object_id) noexcept {
+  assert(has_member_engine());
   for (auto& entry : member().demux) {
     if (entry.used && entry.mac == mac && entry.object_id == object_id) return &entry;
   }
@@ -698,6 +701,7 @@ SecurityCoordinator::DemuxEntry* SecurityCoordinator::find_demux(
 SecurityCoordinator::DemuxEntry* SecurityCoordinator::claim_demux(
     const MacAddress& mac, const std::uint32_t object_id, const DemuxOwner owner,
     const MonotonicMs now) noexcept {
+  assert(has_member_engine());
   DemuxEntry* free = nullptr;
   for (auto& entry : member().demux) {
     if (!entry.used) {
@@ -789,6 +793,11 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
   if (!to_us) {  // Auth/Chunks/Replies are unicast-only on RLD1
     sat_inc(counters_.demux_drops);
     return Status::success();
+  }
+  // Joiner validates its own exchange, including pre-m2 RelayStatus; no
+  // member demux exists while its workspace union arm is active.
+  if (!has_member_engine()) {
+    return joiner().on_rld1_rx(event.rld1_meta, event.rld1_frame, event.now);
   }
   // Auth/Chunk/Reply: exact (MAC, object id) owner match, else the
   // new-exchange admission below. The object id is the transaction's
@@ -2353,14 +2362,12 @@ Status SecurityCoordinator::adopt_member(const JoinAction& ready, const Monotoni
   if (mode_ != CoordinatorMode::ZeroTouch) {
     return Status::error(StatusCode::InvalidState, "member ready outside zt");
   }
-  // joined_now vs silent adoption share the tail: the stores are
-  // re-resolved either way. rs_epoch_to_fetch (the fresh-join RS package
-  // target) has no PR4 consumer — the RS fetch rides maintenance (PR5).
-  (void)ready;
-  return adopt_boot_rls1(now);
+  // Preserve the verified package's RS target through member config adoption.
+  return adopt_boot_rls1(now, ready.rs_epoch_to_fetch);
 }
 
-Status SecurityCoordinator::adopt_boot_rls1(const MonotonicMs now) noexcept {
+Status SecurityCoordinator::adopt_boot_rls1(const MonotonicMs now,
+                                            const std::uint32_t rs_epoch_to_fetch) noexcept {
   const auto to_recovery = [&](const JoinRecoveryReason reason) {
     destroy_workspace();  // Recovery holds no workspace side
     mode_ = CoordinatorMode::Recovery;
@@ -2384,16 +2391,18 @@ Status SecurityCoordinator::adopt_boot_rls1(const MonotonicMs now) noexcept {
     to_recovery(JoinRecoveryReason::MembershipInvalid);
     return Status::success();
   }
-  return install_member_config(site, identity, site.boot_witness, now);
+  return install_member_config(site, identity, site.boot_witness, now, rs_epoch_to_fetch);
 }
 
 Status SecurityCoordinator::install_member_config(const SiteRecord& site,
                                                   const IdentityRecord& identity,
                                                   const std::uint32_t boot_session,
-                                                  const MonotonicMs now) noexcept {
+                                                  const MonotonicMs now,
+                                                  const std::uint32_t rs_epoch_to_fetch) noexcept {
   if (boot_session == 0) return Status::error(StatusCode::InvalidArgument, "zero boot session");
   CoordinatorMemberConfig cfg{};
   cfg.network = site.network;
+  cfg.rs_epoch_to_fetch = rs_epoch_to_fetch;
   cfg.node = identity.node_id;
   cfg.channel = site.channel;
   // The message session names this boot on the mesh: entropy-drawn when

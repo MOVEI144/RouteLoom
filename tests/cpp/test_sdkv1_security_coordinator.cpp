@@ -28,6 +28,10 @@ struct SecurityCoordinatorTestAccess {
   static void link_failed(SecurityCoordinator& coordinator) noexcept {
     coordinator.note_link_failed();
   }
+  static Status adopt(SecurityCoordinator& coordinator, const JoinAction& ready,
+                      MonotonicMs now) noexcept {
+    return coordinator.adopt_member(ready, now);
+  }
 };
 }  // namespace routeloom::sdkv1
 
@@ -585,6 +589,84 @@ void test_invalid_proxy_auth_does_not_hold_demux() {
     CHECK(coordinator.step(rx).ok());
   }
   CHECK(coordinator.quiescent());
+}
+
+void test_join_rs_target_reaches_member_config() {
+  current = "join_rs_target_reaches_member_config";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  CHECK(f.site.commit(site_record()).ok());
+  JoinAction ready{};
+  ready.kind = JoinActionKind::MemberReady;
+  ready.rs_epoch_to_fetch = 345;
+  CHECK(SecurityCoordinatorTestAccess::adopt(coordinator, ready, kT0 + 1).ok());
+  CoordinatorAction action{};
+  CHECK(coordinator.take_action(action).ok());
+  CHECK(action.kind == CoordinatorActionKind::ApplyMemberConfig);
+  CHECK(action.member.rs_epoch_to_fetch == 345);
+}
+
+void test_zt_unicast_does_not_claim_member_demux() {
+  current = "zt_unicast_does_not_claim_member_demux";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  const auto send = [&](const FrameType kind, const std::uint8_t nonce) {
+    autonomy::Rld1Envelope env{};
+    env.kind = kind;
+    env.transaction_nonce[0] = nonce;
+    env.body[0] = 1;
+    env.body[1] = static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage);
+    env.body_size = kind == FrameType::BootstrapReply ? 6 : 2;
+    autonomy::Rld1Encoded encoded{};
+    CHECK(autonomy::rld1_encode(env, encoded).ok());
+    CoordinatorEvent rx{};
+    rx.kind = CoordinatorEventKind::Rld1Rx;
+    rx.now = kT0 + nonce;
+    rx.rld1_meta.source = kPeerMac;
+    rx.rld1_meta.destination = kMac;
+    rx.rld1_meta.channel = 6;
+    rx.rld1_frame = encoded.view();
+    CHECK(coordinator.step(rx).ok());
+  };
+  const auto drops = coordinator.counters().demux_drops;
+  // Rejected auth frames must not occupy the inactive member union arm.
+  for (std::uint8_t n = 1; n <= 10; ++n) send(FrameType::BootstrapAuth, n);
+  // Early relay status uses the Auth lane, while progress replies use
+  // Reply; neither may claim an inactive member workspace.
+  send(FrameType::BootstrapReply, 11);
+  JoinAuthObject hint{};
+  hint.phase = JoinAuthPhase::RelayStatus;
+  hint.step = 1;
+  hint.relay_status = RelayStatusCode::Busy;
+  hint.retry_after_ms = 1000;
+  JoinObjectBytes hint_bytes{};
+  std::size_t hint_size = 0;
+  CHECK(join_object_encode(hint,
+        MutableByteView{hint_bytes.bytes.data(), hint_bytes.bytes.size()}, hint_size));
+  autonomy::Rld1Envelope status{};
+  status.kind = FrameType::BootstrapAuth;
+  status.transaction_nonce[0] = 12;
+  std::memcpy(status.body.data(), hint_bytes.bytes.data(), hint_size);
+  status.body_size = hint_size;
+  autonomy::Rld1Encoded encoded{};
+  CHECK(autonomy::rld1_encode(status, encoded).ok());
+  CoordinatorEvent rx{};
+  rx.kind = CoordinatorEventKind::Rld1Rx;
+  rx.now = kT0 + 12;
+  rx.rld1_meta.source = kPeerMac;
+  rx.rld1_meta.destination = kMac;
+  rx.rld1_meta.channel = 6;
+  rx.rld1_frame = encoded.view();
+  CHECK(coordinator.step(rx).ok());
+  CHECK(coordinator.counters().demux_drops == drops);
 }
 
 void test_clock_regression_refused() {
@@ -1662,6 +1744,8 @@ int main() {
   test_member_apply_failure_is_closed();
   test_rld1_demux_gates();
   test_invalid_proxy_auth_does_not_hold_demux();
+  test_join_rs_target_reaches_member_config();
+  test_zt_unicast_does_not_claim_member_demux();
   test_clock_regression_refused();
   test_gateway_resume_quotas();
   test_staged_bootstrap_rx();

@@ -1534,6 +1534,9 @@ bool HandshakeEngine::step1_may_proceed(const SecurityScope scope, const NodeId 
   if (peer == kInvalidNodeId) return true;  // unknown: duplicates die by hash/nonce
   for (auto& candidate : records_) {
     if (!candidate.used || candidate.scope != scope || candidate.peer != peer) continue;
+    // Routed step-1 has no cookie: its claimed origin cannot evict an
+    // authenticated flight before EDHOC or the resume MAC verifies it.
+    if (scope == SecurityScope::EndToEnd) return false;
     if (candidate.state == RecordState::EdhocM4Pending ||
         candidate.state == RecordState::EdhocM4Sent ||
         candidate.state == RecordState::ResumeR3Confirm) {
@@ -1716,6 +1719,8 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
            record->state == RecordState::EdhocM4Sent) ? 4 : 2;
       return emit_send(*record, 4, step, ByteView{big_tx_.data(), big_tx_size_}, false);
     }
+    // Link admission precedes any destructive simultaneous-open decision.
+    if (!responder_cookie_ok(rx) || next_token_ == 0xFFFFFFFFU) return Status::success();
     if (!step1_may_proceed(rx.scope, rx.claimed_peer)) return Status::success();
     CarrierRecord* fresh = nullptr;
     const Status allocated = verify_cookie_and_allocate(rx, message, fresh, now);
@@ -1884,7 +1889,18 @@ Status HandshakeEngine::on_resume_message(CarrierRecord* record, const Handshake
       return emit_send(*record, 5, 2,
                        ByteView{record->last_tx.data(), record->last_tx_size}, false);
     }
-    if (!step1_may_proceed(rx.scope, rx.claimed_peer)) return Status::success();
+    if (!responder_cookie_ok(rx) || next_token_ == 0xFFFFFFFFU) return Status::success();
+    if (rx.scope == SecurityScope::EndToEnd) {
+      for (auto& candidate : records_) {
+        if (!candidate.used || candidate.scope != rx.scope ||
+            candidate.peer != rx.claimed_peer) continue;
+        if (candidate.state != RecordState::EdhocM4Sent &&
+            candidate.state != RecordState::ResumeR3Confirm) return Status::success();
+        // Keep quiet resend until complete_resume_r1 authenticates the R1.
+      }
+    } else if (!step1_may_proceed(rx.scope, rx.claimed_peer)) {
+      return Status::success();
+    }
     CarrierRecord* fresh = nullptr;
     const Status allocated = verify_cookie_and_allocate(rx, message, fresh, now);
     if (!allocated) return Status::success();  // cookie/table: drop
@@ -2045,6 +2061,18 @@ Status HandshakeEngine::complete_resume_r1(CarrierRecord& fresh, const ByteView 
     std::memcpy(fresh.r1_nonce.data(), message.data + 12, fresh.r1_nonce.size());
     fresh.r1_nonce_set = true;
     fresh.state = RecordState::ResumeWaitR3;
+    // R2 exists only after the R1 MAC and admission gate succeed.
+    // A routed claimant cannot end the old quiet resend any earlier.
+    if (fresh.scope == SecurityScope::EndToEnd) {
+      for (auto& candidate : records_) {
+        if (&candidate != &fresh && candidate.used && candidate.scope == fresh.scope &&
+            candidate.peer == fresh.peer &&
+            (candidate.state == RecordState::EdhocM4Sent ||
+             candidate.state == RecordState::ResumeR3Confirm)) {
+          drop_record(candidate);
+        }
+      }
+    }
     if (out.superseded_initiator) {
       // Simultaneous open resolved against us-as-initiator: our own
       // attempt yielded; its record dies silently (the responder path

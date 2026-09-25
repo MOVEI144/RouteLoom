@@ -823,6 +823,9 @@ void test_routed_end_exchange() {
   request.scope = SecurityScope::EndToEnd;
   request.peer = kNodeB;
   request.reason = HandshakeReason::Initial;
+  HandshakeRx saved_m3{};
+  std::array<std::uint8_t, HandshakeEngine::kMaxMessageBytes> saved_m3_bytes{};
+  std::size_t saved_m3_size = 0;
   const auto exchange = [&](const MonotonicMs start, const std::uint8_t expected_phase) {
     CHECK_OK(pair.a->engine.request(request, start));
     bool established_a = false, established_b = false;
@@ -854,6 +857,11 @@ void test_routed_end_exchange() {
           rx.claimed_peer = from->self;
           rx.exchange_id = out.exchange_id;
           CHECK(rx.exchange_id != 0);
+          if (start == kT0 && out.phase == 4 && out.step == 3) {
+            saved_m3 = rx;
+            saved_m3_size = out.message_size;
+            std::memcpy(saved_m3_bytes.data(), out.message.data(), saved_m3_size);
+          }
           now += 50;
           CHECK_OK(to->engine.on_message(rx, ByteView{out.message.data(), out.message_size}, now));
         }
@@ -863,6 +871,21 @@ void test_routed_end_exchange() {
     CHECK(established_a && established_b);
   };
   exchange(kT0, 4);
+  CHECK(saved_m3_size != 0);
+  HandshakeRx forged{};
+  forged.scope = SecurityScope::EndToEnd;
+  forged.phase = 5;
+  forged.step = 1;
+  forged.claimed_peer = kNodeA;
+  forged.exchange_id = saved_m3.exchange_id + 1;
+  std::array<std::uint8_t, 60> bogus_r1{};
+  CHECK_OK(pair.b->engine.on_message(forged, ByteView{bogus_r1.data(), bogus_r1.size()},
+                                     kT0 + 400));
+  CHECK_OK(pair.b->engine.on_message(saved_m3,
+             ByteView{saved_m3_bytes.data(), saved_m3_size}, kT0 + 410));
+  HandshakeResult resent_m4{};
+  CHECK_OK(pair.b->engine.take_result(resent_m4));
+  CHECK(resent_m4.event == HandshakeEvent::Send && resent_m4.step == 4);
   CHECK(pair.a->bank.live_count(SecurityScope::EndToEnd) == 1);
   CHECK(pair.b->bank.live_count(SecurityScope::EndToEnd) == 1);
   CHECK_OK(pair.a->bank.retire(SecurityScope::EndToEnd, kNodeB));
@@ -1157,6 +1180,35 @@ void test_simultaneous_open() {
   CHECK(pair.a->sink.installs == 1 && pair.b->sink.installs == 1);
   CHECK(roundtrip_ok(*pair.a, *pair.b, result.est_a, result.est_b));
   CHECK(roundtrip_ok(*pair.b, *pair.a, result.est_b, result.est_a));
+}
+
+void test_forged_step1_cannot_yield_initiator() {
+  Pair pair = Pair::make();
+  const FrozenLink ab = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
+  const FrozenLink ba = freeze_link(*pair.b, *pair.a, kT0, kCapsFull, kCapsFull);
+  CHECK_OK(request_link(*pair.a, *pair.b, ab, kT0));
+  CHECK_OK(request_link(*pair.b, *pair.a, ba, kT0));
+  HandshakeResult own{}, incoming{};
+  CHECK_OK(pair.a->engine.take_result(own));
+  CHECK_OK(pair.b->engine.take_result(incoming));
+  HandshakeRx forged{};
+  forged.scope = SecurityScope::Link;
+  forged.phase = incoming.phase;
+  forged.step = incoming.step;
+  forged.claimed_peer = kNodeB;
+  forged.src_mac = pair.b->mac_self;
+  forged.dst_mac = pair.a->mac_self;
+  forged.carrier = ba.carrier;
+  auto bad_cookie = ba.cookie;
+  bad_cookie[0] ^= 1;
+  forged.cookie = ByteView{bad_cookie.data(), bad_cookie.size()};
+  CHECK_OK(pair.a->engine.on_message(forged,
+             ByteView{incoming.message.data(), incoming.message_size}, kT0 + 100));
+  // The still-live initiator must retransmit its original m1.
+  CHECK_OK(pair.a->engine.poll(kT0 + 1200));
+  HandshakeResult retry{};
+  CHECK_OK(pair.a->engine.take_result(retry));
+  CHECK(retry.event == HandshakeEvent::Send && retry.token == own.token && retry.step == 1);
 }
 
 void test_min_gk_birthday() {
@@ -1822,6 +1874,7 @@ int main() {
   test_reentry_busy();
   test_cancel_and_timeout();
   test_simultaneous_open();
+  test_forged_step1_cannot_yield_initiator();
   test_min_gk_birthday();
   test_revoke_before_commit();
   test_unknown_claimant_cannot_complete();
