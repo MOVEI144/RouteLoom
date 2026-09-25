@@ -21,6 +21,7 @@
 #include "routeloom/trust_store.hpp"
 #include "routeloom/usb_host_ops.hpp"
 
+#include "join_sim_network.hpp"
 #include "test_sdkv1.hpp"
 
 namespace routeloom::sdkv1 {
@@ -787,6 +788,141 @@ void test_zt_wait_m2_status_after_demux_exhaustion() {
   const JoinSnapshot joined = SecurityCoordinatorTestAccess::join_snapshot(coordinator);
   CHECK(joined.counters.transient_failures == 1);
   CHECK(joined.candidates.proxy_suppressions == 1);
+}
+
+// A valid m2 must still reach the Joiner after more than eight distinct
+// rejected exchanges; the inactive MemberEngine must not own ZT demux state.
+void test_zt_m2_after_nine_exchanges() {
+  current = "zt_m2_after_nine_exchanges";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  std::size_t sent = 0;
+  JoinNonce nonce{};
+  JoinAuthObject m1{};
+  std::array<std::uint8_t, kJoinMessageMax> m1_bytes{};
+  std::size_t m1_size = 0;
+  bool saw_m1 = false;
+  for (int i = 0; i < 300 && !saw_m1; ++i) {
+    now += 100;
+    CHECK(coordinator.step(poll_at(now)).ok());
+    CoordinatorAction action{};
+    while (coordinator.take_action(action).ok()) {
+      if (action.kind != CoordinatorActionKind::TuneChannel) continue;
+      CoordinatorEvent ready{};
+      ready.kind = CoordinatorEventKind::ChannelReady;
+      ready.now = now;
+      ready.channel_token = action.tune.token;
+      ready.channel = action.tune.channel;
+      ready.channel_result = StatusCode::Ok;
+      CHECK(coordinator.step(ready).ok());
+    }
+    while (sent < f.rld1.sends.size()) {
+      autonomy::Rld1Envelope env{};
+      const auto& bytes = f.rld1.sends[sent++].bytes;
+      CHECK(autonomy::rld1_decode(ByteView{bytes.data(), bytes.size()}, env).ok());
+      if (env.kind == FrameType::BootstrapAuth) {
+        nonce = env.transaction_nonce;
+        CHECK(join_object_decode(ByteView{env.body.data(), env.body_size}, m1).ok());
+        m1_size = m1.message.size;
+        std::memcpy(m1_bytes.data(), m1.message.data, m1_size);
+        saw_m1 = true;
+      }
+      if (env.kind != FrameType::Discover) continue;
+      ZtOfferBody offer{};
+      offer.flags = kZtOfferAuthorityReachable;
+      offer.org_hint = join_org_hint(site_ca().pub);
+      offer.site_hint = join_site_hint(site_record().site_id);
+      offer.authority_hops = 1;
+      autonomy::Rld1Encoded frame{};
+      CHECK(zt_offer_frame_encode(kNode + 1, static_cast<std::uint32_t>(kNetwork),
+                                  env.transaction_nonce, offer, frame).ok());
+      CoordinatorEvent rx{};
+      rx.kind = CoordinatorEventKind::Rld1Rx;
+      rx.now = now;
+      rx.rld1_meta.source = kPeerMac;
+      rx.rld1_meta.destination = kMac;
+      rx.rld1_meta.channel = SecurityCoordinatorTestAccess::join_snapshot(coordinator).channel;
+      rx.rld1_frame = frame.view();
+      CHECK(coordinator.step(rx).ok());
+    }
+  }
+  CHECK(saw_m1);
+  if (!saw_m1) return;
+  CHECK(m1.step == 1);
+  CHECK(SecurityCoordinatorTestAccess::join_snapshot(coordinator).state == JoinState::WaitM2);
+
+  CertClaims claims{};
+  claims.type = CertType::Site;
+  claims.issuer = kSiteCaId;
+  claims.subject = site_record().site_id;
+  claims.pubkey = sak().pub;
+  claims.network_low32 = static_cast<std::uint32_t>(kNetwork);
+  claims.site_epoch = static_cast<std::uint32_t>(kNetwork >> 32U);
+  claims.usage = 1;
+  const auto cert = issue(claims, site_ca());
+  Digest256 kid{};
+  CHECK(cert_subject_kid(claims, kid));
+  join_sim::SimAuthority authority(cert, kid, sak().priv, device_ca().pub,
+                                   claims.subject, kNetwork, SitePackage{}, 0x1234);
+  const auto down = authority.on_up(1, ByteView{m1_bytes.data(), m1_size}, now);
+  CHECK(down.has && down.step == 2);
+  if (!down.has) return;
+
+  const auto drops = coordinator.counters().demux_drops;
+  const auto deliver = [&](const FrameType kind, const JoinNonce& id, const ByteView body) {
+    autonomy::Rld1Envelope env{};
+    env.kind = kind;
+    env.network_hint = static_cast<std::uint32_t>(kNetwork);
+    env.claimed_node = kNode + 1;
+    env.transaction_nonce = id;
+    env.body_size = body.size;
+    std::memcpy(env.body.data(), body.data, body.size);
+    autonomy::Rld1Encoded frame{};
+    CHECK(autonomy::rld1_encode(env, frame).ok());
+    CoordinatorEvent rx{};
+    rx.kind = CoordinatorEventKind::Rld1Rx;
+    rx.now = ++now;
+    rx.rld1_meta.source = kPeerMac;
+    rx.rld1_meta.destination = kMac;
+    rx.rld1_meta.channel = SecurityCoordinatorTestAccess::join_snapshot(coordinator).channel;
+    rx.rld1_frame = frame.view();
+    CHECK(coordinator.step(rx).ok());
+  };
+  for (std::uint8_t i = 1; i <= 9; ++i) {
+    JoinNonce other{};
+    other[0] = i;
+    const std::uint8_t bad[2] = {1, static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage)};
+    deliver(FrameType::BootstrapAuth, other, ByteView{bad, sizeof(bad)});
+  }
+  JoinAuthObject m2{};
+  m2.phase = JoinAuthPhase::EdhocMessage;
+  m2.step = 2;
+  m2.message = ByteView{down.body.data(), down.body.size()};
+  JoinObjectBytes encoded{};
+  std::size_t size = 0;
+  CHECK(join_object_encode(m2, MutableByteView{encoded.bytes.data(), encoded.bytes.size()},
+                           size).ok());
+  JoinObjectSlot slot{};
+  CHECK(slot.load(JoinCarrier::Rld1, JoinAuthPhase::EdhocMessage, 2,
+                  join_rld1_object_id(nonce), 0, 0,
+                  ByteView{encoded.bytes.data(), size}, now).ok());
+  for (std::size_t i = 0; i < slot.chunk_total(); ++i) {
+    JoinChunk chunk{};
+    CHECK(slot.chunk_at(i, chunk).ok());
+    std::array<std::uint8_t, autonomy::kRld1MaxBody> body{};
+    std::size_t body_size = 0;
+    CHECK(join_chunk_encode(JoinCarrier::Rld1, chunk,
+                            MutableByteView{body.data(), body.size()}, body_size).ok());
+    deliver(FrameType::BootstrapChunk, nonce, ByteView{body.data(), body_size});
+  }
+  CHECK(coordinator.counters().demux_drops == drops);
+  CHECK(coordinator.step(poll_at(++now)).ok());
+  CHECK(SecurityCoordinatorTestAccess::join_snapshot(coordinator).counters.m2_ok == 1);
+  CHECK(SecurityCoordinatorTestAccess::join_snapshot(coordinator).state != JoinState::WaitM2);
 }
 
 void test_clock_regression_refused() {
@@ -1867,6 +2003,7 @@ int main() {
   test_join_rs_target_reaches_member_config();
   test_zt_unicast_does_not_claim_member_demux();
   test_zt_wait_m2_status_after_demux_exhaustion();
+  test_zt_m2_after_nine_exchanges();
   test_clock_regression_refused();
   test_gateway_resume_quotas();
   test_staged_bootstrap_rx();
