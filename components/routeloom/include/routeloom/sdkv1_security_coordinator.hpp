@@ -370,6 +370,9 @@ class SecurityCoordinator final : public BootstrapSink,
   // bank; group scopes seal/open under the adopted GK (dev: under the
   // boot-scoped dev group key).
   SecurityProvider& session_provider() noexcept { return sleep_guard_; }
+  std::uint32_t revoked_group_tx_attempts() const noexcept {
+    return group_provider_.revoked_tx_attempts();
+  }
   // Sleep save (P4 §9.3, V1-F07), Member mode after PrepareSleep parked
   // the coordinator: exports the (Link, parent) session plus the first
   // live EndToEnd session (when one stands) into `port` with the adopted
@@ -648,6 +651,7 @@ class SecurityCoordinator final : public BootstrapSink,
     ContextState context_state(SecurityScope scope, NodeId peer) const noexcept override;
     Status tx_group_link_epochs(std::uint32_t& boot, std::uint32_t& g) noexcept override;
     bool accepts_group_epoch(std::uint32_t g) const noexcept override;
+    bool revoked_group_sender(NodeId sender) const noexcept override;
     bool group_promotion_pending() const noexcept override;
     Status next_counter(const SecurityContext& context, std::uint64_t& counter) noexcept override;
     Status seal(const SecurityContext& context, std::uint64_t counter, ByteView aad,

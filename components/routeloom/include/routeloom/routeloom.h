@@ -99,10 +99,14 @@ typedef enum rl_priority {
 
 /* A security vtable must refuse (RL_STATUS_UNSUPPORTED) a scope it does not
    implement. RL_SECURITY_GROUP (group delivery, docs/design/sdk-v1/
-   group-delivery.md §7): sender = the group message's origin, receiver =
-   the group address (RL_GROUP_ADDRESS_BASE | group id); every group key
-   holder may open it; keys MUST be per (sender, group, epoch) — the nonce
-   carries no sender, so a key shared by several senders would reuse nonces. */
+   group-delivery.md §7): sender = the group message's origin. The wire
+   destination is RL_GROUP_ADDRESS_BASE | group id and is authenticated by
+   the end AAD. The vtable receiver is always
+   RL_GROUP_ADDRESS_BASE | RL_GROUP_ALL (the site broadcast key domain),
+   including non-ALL groups. This legacy C context
+   does not expose group id; a provider needing per-group keys must use the
+   C++ SecurityProvider interface instead. Keys MUST be per (sender, epoch):
+   the nonce carries no sender, so sharing a key would reuse nonces. */
 typedef enum rl_security_scope {
   RL_SECURITY_LINK = 0,
   RL_SECURITY_END_TO_END = 1,

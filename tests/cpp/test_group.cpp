@@ -1962,11 +1962,18 @@ void test_revoked_group_sender_with_old_key() {
         StatusCode::AuthorizationFailed);
   CHECK((opened == std::array<std::uint8_t, sizeof(payload)>{}));
 
+  // A faulty re-allow of the same NodeId must be visible at group TX,
+  // not mistaken for an ordinary counter or transport failure.
+  sdkv1::GroupSecurityProvider reassigned(keys, pairwise, *aead, sender, &revocations);
+  CHECK(reassigned.next_counter(end, counter).code == StatusCode::AuthorizationFailed);
+  CHECK(reassigned.revoked_tx_attempts() == 1);
   // GroupLink has no assignment generation on the wire. Its authenticated
   // previous hop is barred by the same applied identity set.
   SecurityContext link{SecurityScope::GroupLink, end.network, sender,
                        kBroadcastNodeId, site.boot_witness,
                        site.gk_epoch_current, 0, 0};
+  CHECK(reassigned.next_counter(link, counter).code == StatusCode::AuthorizationFailed);
+  CHECK(reassigned.revoked_tx_attempts() == 2);
   CHECK_OK(transmitter.next_counter(link, counter));
   CHECK_OK(transmitter.seal(link, counter, ByteView{aad, sizeof(aad)},
                             ByteView{payload, sizeof(payload)},
@@ -1977,6 +1984,31 @@ void test_revoked_group_sender_with_old_key() {
                       MutableByteView{opened.data(), opened.size()}).code ==
         StatusCode::AuthorizationFailed);
   CHECK((opened == std::array<std::uint8_t, sizeof(payload)>{}));
+
+  // The freshly provisioned NodeId can use the same current GK; the old
+  // sender remains rejected above even after another sender succeeds.
+  const NodeId fresh_id = site.gateways[1];
+  sdkv1::GroupSecurityProvider fresh(keys, pairwise, *aead, fresh_id);
+  SecurityContext fresh_link = link;
+  fresh_link.sender = fresh_id;
+  CHECK_OK(fresh.next_counter(fresh_link, counter));
+  CHECK_OK(fresh.seal(fresh_link, counter, ByteView{aad, sizeof(aad)},
+                      ByteView{payload, sizeof(payload)},
+                      MutableByteView{ciphertext.data(), ciphertext.size()}, tag));
+  CHECK_OK(receiver.open(fresh_link, counter, ByteView{aad, sizeof(aad)},
+                         ByteView{ciphertext.data(), ciphertext.size()}, tag,
+                         MutableByteView{opened.data(), opened.size()}));
+  CHECK(std::memcmp(opened.data(), payload, sizeof(payload)) == 0);
+  SecurityContext fresh_end = end;
+  fresh_end.sender = fresh_id;
+  CHECK_OK(fresh.next_counter(fresh_end, counter));
+  CHECK_OK(fresh.seal(fresh_end, counter, ByteView{aad, sizeof(aad)},
+                      ByteView{payload, sizeof(payload)},
+                      MutableByteView{ciphertext.data(), ciphertext.size()}, tag));
+  CHECK_OK(receiver.open(fresh_end, counter, ByteView{aad, sizeof(aad)},
+                         ByteView{ciphertext.data(), ciphertext.size()}, tag,
+                         MutableByteView{opened.data(), opened.size()}));
+  CHECK(std::memcmp(opened.data(), payload, sizeof(payload)) == 0);
 
   // A live relay with the old GK can authenticate the GroupLink wrapper
   // around a revoked gateway's GroupEnd frame. The mesh gate must inspect
