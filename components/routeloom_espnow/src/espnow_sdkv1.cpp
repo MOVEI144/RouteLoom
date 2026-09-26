@@ -5,12 +5,16 @@
 
 #include "driver/usb_serial_jtag.h"
 #include "esp_app_desc.h"
+#include "esp_attr.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "routeloom/espnow_board_config.hpp"
 #include "routeloom/espnow_sdkv1_entropy.hpp"
 #include "routeloom/nvs_legacy_purge.hpp"
+#include "routeloom/sdkv1_board_setup.hpp"
 #include "routeloom/sdkv1_dev_session.hpp"
 #include "routeloom/sdkv1_legacy_purge.hpp"
 #include "routeloom/sdkv1_maintenance.hpp"
@@ -25,6 +29,18 @@ constexpr char kTag[] = "RouteLoomSdkv1";
 // driver calls; 8 KiB leaves headroom without touching the main task.
 constexpr std::uint32_t kConsoleTaskStack = 8192;
 
+// This translation unit links into field images too, so a plain static
+// would spend DRAM-tight .bss on a console-only store; the guarded C3
+// profiles park it in the RTC bank instead (same convention as
+// EspNowSecurityOwner::lifecycle_box_).
+#if (CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC || \
+     CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM) && \
+    CONFIG_IDF_TARGET_ESP32C3
+#define ROUTELOOM_SETUP_STORE_LP RTC_DATA_ATTR
+#else
+#define ROUTELOOM_SETUP_STORE_LP
+#endif
+
 int hex_value(const char value) noexcept {
   if (value >= '0' && value <= '9') return value - '0';
   if (value >= 'a' && value <= 'f') return value - 'a' + 10;
@@ -35,10 +51,14 @@ int hex_value(const char value) noexcept {
 // Resolve the maintenance domain for the running profile. A stale site
 // record in a DevRam image cannot change the fingerprint away from the
 // configured PSK domain; an unadopted Member image has no purge domain.
-bool resolve_legacy_domain(Sdkv1Stores& stores,
+// DevRam on the generic image: the PSK and the domain's node/network come
+// from the committed rlkeys/rlcfg pair, not Kconfig — an unprovisioned
+// board simply has no purge domain.
+bool resolve_legacy_domain(Sdkv1Stores& stores, BoardStores& board,
                            sdkv1::MaintenanceFingerprint& out) noexcept {
   out = sdkv1::MaintenanceFingerprint{};
 #if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+  (void)board;
   if (stores.site().has_site() && stores.identity().has_identity()) {
     const sdkv1::SiteRecord& site = stores.site().site();
     const sdkv1::IdentityRecord& identity = stores.identity().identity();
@@ -50,8 +70,23 @@ bool resolve_legacy_domain(Sdkv1Stores& stores,
     return ok.ok();
   }
   return false;
+#elif CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
+  (void)stores;
+  const Status config_status = board.config().initialize();
+  const Status secrets_status = board.secrets().initialize();
+  if (!config_status.ok() || !secrets_status.ok() ||
+      !board.config().has_config() || !board.secrets().has_secrets() ||
+      !board.secrets().secrets().has_psk) {
+    return false;
+  }
+  const Status ok = sdkv1::dev_maintenance_fingerprint(
+      board.secrets().secrets().psk, 2,
+      static_cast<NetworkId>(board.config().config().network),
+      board.config().config().node, out);
+  return ok.ok();
 #else
   (void)stores;
+  (void)board;
 #ifdef CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX
   const char* hex = CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX;
   keys::Secret psk{};
@@ -74,6 +109,18 @@ bool resolve_legacy_domain(Sdkv1Stores& stores,
   return false;
 #endif
 #endif
+}
+
+// Lines the board-setup console owns (design-devflow §4.1): `benchcfg` /
+// `benchsecret` — exact verb token, followed by a space or end-of-line.
+bool board_setup_line(const ByteView line) noexcept {
+  const auto match = [&](const char* name) {
+    const std::size_t length = std::strlen(name);
+    return line.size >= length &&
+           std::memcmp(line.data, name, length) == 0 &&
+           (line.size == length || line.data[length] == ' ');
+  };
+  return match("benchcfg") || match("benchsecret");
 }
 
 // Exact `status` match for the unknown-domain fallback (see above): kept
@@ -142,6 +189,42 @@ void console_task(void* arg) {
   wipe.resume = &stores->resume_cache();
   wipe.lifecycle = &stores->lifecycle();
   sdkv1::MaintenanceConsole console(stores->identity(), entropy, wipe);
+  // Board provisioning stores (rlcfg/rlkeys): the console is the only
+  // writable path — the field image never commits them (design §4.1).
+  // Open failures leave the stores impaired; the bench* verbs then fail
+  // closed while the identity console keeps working.
+  static ROUTELOOM_SETUP_STORE_LP BoardStores board_stores;
+  const Status board_open = board_stores.open(/*writable=*/true);
+  if (!board_open) {
+    ESP_LOGE(kTag, "board stores open failed: %s", board_open.detail);
+  }
+  // The setup image's own field profile (§4.2): a Member/DevRam console
+  // build only commits documents that this very chip/role/security/MAC
+  // could boot. Legacy-fixture consoles stay unbound (nullptr) — they
+  // provision boards for any later field image.
+  routeloom::BoardBootIdentity setup_identity{};
+  routeloom::BoardBootIdentity* expected = nullptr;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  setup_identity.chip = board_chip();
+#ifdef ROUTELOOM_REFERENCE_IMAGE
+  setup_identity.role = routeloom::BoardRole::Reference;
+#else
+  setup_identity.role = routeloom::BoardRole::Bridge;
+#endif
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
+  setup_identity.security = routeloom::BoardSecurity::DevRam;
+#else
+  setup_identity.security = routeloom::BoardSecurity::Member;
+#endif
+  if (esp_read_mac(setup_identity.sta_mac.data(), ESP_MAC_WIFI_STA) != ESP_OK) {
+    ESP_LOGE(kTag, "setup identity: station MAC unreadable");
+  } else {
+    expected = &setup_identity;
+  }
+#endif
+  sdkv1::BoardSetupConsole board_console(board_stores.config(),
+                                         board_stores.secrets(),
+                                         stores->identity(), expected);
   // The status receipt identifies the running image: the office verifies
   // the maintenance build before the field switch (07 §6, V1-H10).
   if (const esp_app_desc_t* app = esp_app_get_description()) {
@@ -197,7 +280,7 @@ void console_task(void* arg) {
         response_size = sizeof(refused) - 1;
       } else {
         sdkv1::MaintenanceFingerprint legacy_domain{};
-        const bool known = resolve_legacy_domain(*stores, legacy_domain);
+        const bool known = resolve_legacy_domain(*stores, board_stores, legacy_domain);
         if (!known && !is_legacy_status_only(legacy_rest)) {
           const char refused[] = "ERR domain";
           std::memcpy(response, refused, sizeof(refused));
@@ -219,6 +302,13 @@ void console_task(void* arg) {
             continue;
           }
         }
+      }
+    } else if (board_setup_line(raw_line)) {
+      const Status status = board_console.process_line(
+          raw_line, response, sizeof(response), response_size);
+      if (!status) {
+        ESP_LOGE(kTag, "board console fault: %s", status.detail);
+        continue;
       }
     } else {
       const Status status =
