@@ -2477,16 +2477,18 @@ void UsbBridge::note_submit_refused(const std::uint64_t dispatch_seq,
   on_diagnostic(text, destination, nullptr);
 }
 
-void UsbBridge::on_diagnostic(const char* reason, const NodeId peer,
-                              const MessageId* message) noexcept {
+bool UsbBridge::emit_diagnostic(const char* reason, const NodeId peer,
+                                   const MessageId* message,
+                                   const MonotonicMs now_ms) noexcept {
   // inner: peer(8) || flags(1) || [msg_session(4) || msg_seq(8)] ||
-  //        reason_len(1) || reason
-  std::array<std::uint8_t, 8 + 1 + 12 + 1 + kMaxReasonLen> inner{};
+  //        reason_len(1) || reason || boot(8) || seq(4) || dropped_total(8)
+  std::array<std::uint8_t, 8 + 1 + 12 + 1 + kMaxReasonLen + kDiagAccountingTailSize>
+      inner{};
   write_u64(inner.data(), peer);
   std::size_t size = 9;
-  inner[8] = 0;
+  inner[8] = kDiagFlagHasAccounting;
   if (message != nullptr) {
-    inner[8] = kDiagFlagHasMessage;
+    inner[8] |= kDiagFlagHasMessage;
     write_u32(inner.data() + 9, message->session);
     write_u64(inner.data() + 13, message->sequence);
     size = 21;
@@ -2495,8 +2497,32 @@ void UsbBridge::on_diagnostic(const char* reason, const NodeId peer,
   if (reason_len > kMaxReasonLen) reason_len = kMaxReasonLen;
   inner[size] = static_cast<std::uint8_t>(reason_len);
   if (reason_len > 0) std::memcpy(inner.data() + size + 1, reason, reason_len);
-  enqueue(FrameKind::Diagnostic, 0, 0,
-          ByteView{inner.data(), size + 1 + reason_len}, now_ms_);
+  size += 1 + reason_len;
+  write_u64(inner.data() + size, config_.boot_id);
+  write_u32(inner.data() + size + 8, diag_seq_);
+  write_u64(inner.data() + size + 12, stats_.diagnostics_dropped);
+  ++diag_seq_;
+  return enqueue(FrameKind::Diagnostic, 0, 0,
+                 ByteView{inner.data(), size + kDiagAccountingTailSize},
+                 now_ms);
+}
+
+void UsbBridge::on_diagnostic(const char* reason, const NodeId peer,
+                              const MessageId* message) noexcept {
+  // A drop the queue could not take earlier goes out ahead of this
+  // diagnostic as an explicit marker — recovery is announced, and the
+  // marker's own seq keeps the host's gap math exact.
+  if (diag_loss_pending_) {
+    if (emit_diagnostic("DIAG_LOSS", config_.node, nullptr, now_ms_)) {
+      diag_loss_pending_ = false;
+    } else {
+      ++stats_.diagnostics_dropped;
+    }
+  }
+  if (!emit_diagnostic(reason, peer, message, now_ms_)) {
+    ++stats_.diagnostics_dropped;
+    diag_loss_pending_ = true;
+  }
 }
 
 // --- Gateway host lane (scope-gateway-config/05-wire-api.md §5.6, P3) ------

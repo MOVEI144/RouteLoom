@@ -75,6 +75,7 @@ pub const EVENT_KINDS: &[&str] = &[
     "decode_error",
     "delivery_event",
     "diagnostic",
+    "diagnostic_loss",
     "dispatch",
     "error",
     "frame",
@@ -1201,6 +1202,13 @@ mod tests {
             .subscribe(1, Some(501), msg_sub(1), 0, 1, 0, 1_000)
             .unwrap();
         assert_ne!(token(foreign), tok);
+    }
+
+    #[test]
+    fn diagnostic_loss_is_a_subscribable_event_kind() {
+        // The host-side gap signal must survive a kinds filter so
+        // journals can select it alongside the diagnostics themselves.
+        assert!(EVENT_KINDS.contains(&"diagnostic_loss"));
     }
 
     #[test]

@@ -96,6 +96,10 @@ fn session_stalled(now: u64, last_rx: u64) -> bool {
 /// handshake and opens inbound bodies before parsing the inner layouts used
 /// by the device bridge (components/routeloom/src/usb_bridge.cpp).
 const DIAG_FLAG_HAS_MESSAGE: u8 = 0x01;
+/// Set on every Diagnostic from a loss-accounting bridge: boot(8) ||
+/// seq(4) || dropped_total(8), big-endian, appended after the reason.
+const DIAG_FLAG_HAS_ACCOUNTING: u8 = 0x02;
+const DIAG_ACCOUNTING_TAIL: usize = 20;
 const CREDIT_GRANT: u8 = 0;
 const CREDIT_QUERY: u8 = 1;
 const CREDIT_CLOSE: u8 = 2;
@@ -582,6 +586,17 @@ struct AutonomyState {
     migration_events: u64,
 }
 
+/// Baseline for device-diagnostic loss detection: the last accounted
+/// (boot, seq, dropped_total) triple the read loop ingested. `boot` is
+/// None until the first accounted frame — legacy frames (no trailer)
+/// never touch the baseline.
+#[derive(Default)]
+struct DiagLossBaseline {
+    boot: Option<u64>,
+    seq: u32,
+    dropped: u64,
+}
+
 /// Discovery-engine reason strings (components/routeloom/src/discovery.cpp).
 /// Everything else autonomy-related is a migration-lane event.
 const DISCOVERY_REASONS: &[&str] = &[
@@ -600,6 +615,62 @@ const DISCOVERY_REASONS: &[&str] = &[
 
 /// Classify a device diagnostic reason into the autonomy view. Reasons are
 /// bounded engine strings — classified, never parsed for data.
+/// Compares one accounted diagnostic against the baseline and pushes a
+/// `diagnostic_loss` event when device-side drops left a seq gap, when a
+/// fresh boot's counter already moved (pre-history loss, range unknown),
+/// or — defensively — when the counter jumped without a gap. Duplicates,
+/// out-of-order arrivals, and legacy frames never move the baseline.
+fn check_diag_loss(state: &State, ms: u64, boot: u64, seq: u32, dropped: u64) {
+    let mut base = state.diag_loss.lock().expect("diag loss poisoned");
+    // (lost_from, lost_to, lost) — the range stays None when only the
+    // counter proves the loss.
+    let mut loss: Option<(Option<u32>, Option<u32>, u64)> = None;
+    let mut advance = true;
+    match base.boot {
+        Some(known) if known == boot => {
+            let ahead = seq.wrapping_sub(base.seq);
+            if ahead == 1 {
+                if dropped > base.dropped {
+                    loss = Some((None, None, dropped - base.dropped));
+                }
+            } else if ahead != 0 && ahead <= u32::MAX / 2 {
+                // USB never reorders: every seq between the baseline and
+                // this arrival was dropped on the device. Wrapping math
+                // keeps the u32 rollover exact.
+                loss = Some((
+                    Some(base.seq.wrapping_add(1)),
+                    Some(seq.wrapping_sub(1)),
+                    u64::from(ahead - 1),
+                ));
+            } else {
+                advance = false;
+            }
+        }
+        _ => {
+            if dropped > 0 {
+                loss = Some((None, None, dropped));
+            }
+        }
+    }
+    if advance {
+        base.boot = Some(boot);
+        base.seq = seq;
+        base.dropped = dropped;
+    }
+    drop(base);
+    if let Some((from, to, lost)) = loss {
+        push_event(
+            state,
+            ms,
+            format!(
+                "\"kind\":\"diagnostic_loss\",\"boot\":{boot},\"lost_from\":{},\"lost_to\":{},\"lost\":{lost},\"dropped_total\":{dropped}",
+                json_opt_u64(from.map(u64::from)),
+                json_opt_u64(to.map(u64::from)),
+            ),
+        );
+    }
+}
+
 fn note_autonomy(state: &State, ms: u64, reason: &str) {
     let migration = reason.starts_with("PHASE_")
         || reason.starts_with("ASSESS_")
@@ -685,6 +756,7 @@ struct State {
     /// process-local and never on the wire.
     next_conn: AtomicU64,
     autonomy: Mutex<AutonomyState>,
+    diag_loss: Mutex<DiagLossBaseline>,
     /// Bounded receive log for the API1 `messages.read` surface (Issue #7):
     /// retains actual DataFromMesh payloads as HOST_RAM_RETAINED evidence.
     /// Separate from `events` — the diagnostic ring never carried bodies.
@@ -1122,6 +1194,21 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                     (None, None, 9)
                 };
                 let reason = reason_at(body, reason_offset);
+                // Loss-accounting trailer after the reason (absent on
+                // legacy builds — unknown stays null, never synthesized).
+                let reason_len = body.get(reason_offset).copied().unwrap_or(0) as usize;
+                let tail = reason_offset + 1 + reason_len;
+                let (diag_boot, diag_seq, diag_dropped) = if flags & DIAG_FLAG_HAS_ACCOUNTING != 0
+                    && body.len() >= tail + DIAG_ACCOUNTING_TAIL
+                {
+                    (
+                        u64_at(body, tail),
+                        u32_at(body, tail + 8),
+                        u64_at(body, tail + 12),
+                    )
+                } else {
+                    (None, None, None)
+                };
                 if let Some(peer) = peer {
                     touch_node(state, peer, "peer", ms);
                 }
@@ -1132,13 +1219,22 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                     state,
                     ms,
                     format!(
-                        "\"kind\":\"diagnostic\",\"peer\":{},\"reason\":{},\"msg_session\":{},\"msg_seq\":{}",
+                        "\"kind\":\"diagnostic\",\"peer\":{},\"reason\":{},\"msg_session\":{},\"msg_seq\":{},\"diag_boot\":{},\"diag_seq\":{},\"diag_dropped\":{}",
                         json_opt_u64(peer),
                         json_opt_str(reason.as_deref()),
                         msg_session.map_or_else(|| "null".to_string(), |v| v.to_string()),
                         json_opt_u64(msg_seq),
+                        json_opt_u64(diag_boot),
+                        json_opt_u64(diag_seq.map(u64::from)),
+                        json_opt_u64(diag_dropped),
                     ),
                 );
+                // Gap check after the arrival itself: the ring reads
+                // "frame N arrived, and it revealed seqs X..Y missing".
+                if let (Some(boot), Some(seq), Some(dropped)) = (diag_boot, diag_seq, diag_dropped)
+                {
+                    check_diag_loss(state, ms, boot, seq, dropped);
+                }
             } else {
                 push_event(
                     state,
@@ -3424,6 +3520,90 @@ mod tests {
         assert!(json.contains("\"peer\":55"));
         assert!(json.contains("\"reason\":\"RETRY!\""));
         assert!(json.contains("\"msg_seq\":300"));
+    }
+
+    /// Diagnostic body with the loss-accounting trailer: peer(8) ||
+    /// flags(1) || reason_len(1) || reason || boot(8) || seq(4) ||
+    /// dropped_total(8).
+    fn diag_body(peer: u64, reason: &str, boot: u64, seq: u32, dropped: u64) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&peer.to_be_bytes());
+        body.push(DIAG_FLAG_HAS_ACCOUNTING);
+        body.push(reason.len() as u8);
+        body.extend_from_slice(reason.as_bytes());
+        body.extend_from_slice(&boot.to_be_bytes());
+        body.extend_from_slice(&seq.to_be_bytes());
+        body.extend_from_slice(&dropped.to_be_bytes());
+        body
+    }
+
+    fn record_diag(state: &State, body: &[u8], ms: u64) {
+        record_frame(
+            state,
+            &frame(FrameKind::Diagnostic, 0, 0, body.to_vec()),
+            body,
+            ms,
+        );
+    }
+
+    #[test]
+    fn diagnostic_seq_gap_raises_loss_event() {
+        let state = State::default();
+        record_diag(&state, &diag_body(2, "EVT0", 7, 0, 0), 100);
+        record_diag(&state, &diag_body(2, "EVT1", 7, 1, 0), 101);
+        // Seq 2 was dropped on the device; the marker + next diagnostic
+        // arrive with the gap visible.
+        record_diag(&state, &diag_body(1, "DIAG_LOSS", 7, 3, 1), 102);
+        let json = events_json(&state);
+        assert!(json.contains("\"kind\":\"diagnostic_loss\""), "{json}");
+        assert!(json.contains("\"boot\":7"), "{json}");
+        assert!(json.contains("\"lost_from\":2"), "{json}");
+        assert!(json.contains("\"lost_to\":2"), "{json}");
+        assert!(json.contains("\"lost\":1"), "{json}");
+        assert!(json.contains("\"dropped_total\":1"), "{json}");
+        // The arrivals themselves carry the accounting fields.
+        assert!(json.contains("\"diag_boot\":7"), "{json}");
+        assert!(json.contains("\"diag_seq\":3"), "{json}");
+        assert!(json.contains("\"diag_dropped\":1"), "{json}");
+    }
+
+    #[test]
+    fn diagnostic_boot_change_rebaselines() {
+        let state = State::default();
+        record_diag(&state, &diag_body(2, "EVT0", 7, 5, 0), 100);
+        // Same-device reboot: seq restarts, no loss claimed.
+        record_diag(&state, &diag_body(2, "EVT0", 8, 0, 0), 101);
+        let json = events_json(&state);
+        assert!(!json.contains("\"kind\":\"diagnostic_loss\""), "{json}");
+        // A fresh boot whose counter already moved lost pre-history
+        // diagnostics the host never saw — reported without a range.
+        record_diag(&state, &diag_body(2, "EVT4", 9, 4, 2), 102);
+        let json = events_json(&state);
+        assert!(json.contains("\"kind\":\"diagnostic_loss\""), "{json}");
+        assert!(json.contains("\"boot\":9"), "{json}");
+        assert!(json.contains("\"lost\":2"), "{json}");
+        assert!(json.contains("\"lost_from\":null"), "{json}");
+    }
+
+    #[test]
+    fn legacy_diagnostic_without_trailer_is_untracked() {
+        let state = State::default();
+        let mut body = Vec::new();
+        body.extend_from_slice(&55_u64.to_be_bytes());
+        body.push(0);
+        body.push(6);
+        body.extend_from_slice(b"RETRY!");
+        record_diag(&state, &body, 100);
+        let json = events_json(&state);
+        assert!(json.contains("\"reason\":\"RETRY!\""), "{json}");
+        assert!(json.contains("\"diag_boot\":null"), "{json}");
+        assert!(!json.contains("\"kind\":\"diagnostic_loss\""), "{json}");
+        // Untracked frames never disturb the baseline.
+        record_diag(&state, &diag_body(2, "EVT0", 7, 0, 0), 101);
+        record_diag(&state, &body, 102);
+        record_diag(&state, &diag_body(2, "EVT1", 7, 1, 0), 103);
+        let json = events_json(&state);
+        assert!(!json.contains("\"kind\":\"diagnostic_loss\""), "{json}");
     }
 
     #[test]

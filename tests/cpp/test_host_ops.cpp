@@ -1969,9 +1969,11 @@ void test_bridge_mesh_rejected() {
     if (record.frame.kind != FrameKind::Diagnostic) continue;
     CHECK(opened.size >= 10);
     CHECK(read_u64(opened.data) == 2);  // refused destination
-    CHECK(opened.data[8] == 0);         // no message key: nothing was sent
+    // No message key (nothing was sent); the accounting tail follows.
+    CHECK((opened.data[8] & kDiagFlagHasMessage) == 0);
+    CHECK((opened.data[8] & kDiagFlagHasAccounting) != 0);
     const std::size_t reason_len = opened.data[9];
-    CHECK(opened.size == 10 + reason_len);
+    CHECK(opened.size == 10 + reason_len + kDiagAccountingTailSize);
     const std::string reason(reinterpret_cast<const char*>(opened.data + 10),
                              reason_len);
     CHECK(reason.rfind("SUBMIT_REFUSED:9:", 0) == 0);
@@ -2039,8 +2041,9 @@ void test_bridge_submit_refused_without_mesh() {
     }
     if (record.frame.kind != FrameKind::Diagnostic) continue;
     CHECK(opened.size >= 10);
+    CHECK((opened.data[8] & kDiagFlagHasAccounting) != 0);
     const std::size_t reason_len = opened.data[9];
-    CHECK(opened.size == 10 + reason_len);
+    CHECK(opened.size == 10 + reason_len + kDiagAccountingTailSize);
     const std::string reason(reinterpret_cast<const char*>(opened.data + 10),
                              reason_len);
     CHECK(reason == "SUBMIT_REFUSED:1:MESH_UNAVAILABLE");

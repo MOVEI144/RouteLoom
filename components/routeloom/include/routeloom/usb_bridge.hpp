@@ -30,6 +30,11 @@ constexpr std::uint8_t kCreditQuery = 1;
 constexpr std::uint8_t kCreditClose = 2;
 
 constexpr std::uint8_t kDiagFlagHasMessage = 0x01;
+// Set on every Diagnostic: boot(8) || seq(4) || dropped_total(8) follows the
+// reason, so the PC can spot gaps. Appended, never inserted — old hosts
+// stop at the reason end and ignore the tail.
+constexpr std::uint8_t kDiagFlagHasAccounting = 0x02;
+constexpr std::size_t kDiagAccountingTailSize = 20;
 
 // Session state machine: DISCONNECTED → HELLO → AUTHENTICATING → ACTIVE →
 // DRAINING. Reconnect always builds a new session; partial frames, grants,
@@ -77,6 +82,11 @@ struct BridgeStats {
   std::uint64_t credit_denied{0};
   std::uint64_t control_denied{0};
   std::uint64_t dropped_frames{0};
+  // Local Diagnostic callbacks lost to a full TX queue (a subset of
+  // dropped_frames). Reported in every diagnostic tail and, after the
+  // queue drains, as an explicit DIAG_LOSS marker — the PC never has to
+  // guess whether its diagnostic view is complete.
+  std::uint64_t diagnostics_dropped{0};
   // Diagnostic replies dropped because the query's own lifetime expired
   // while the frame waited for USB credits (04 §USB: credit starvation
   // must not deliver a stale snapshot nor lose it silently).
@@ -502,6 +512,11 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // a `SUBMIT_REFUSED:<seq>:<detail>` diagnostic for the destination.
   void note_submit_refused(std::uint64_t dispatch_seq, NodeId destination,
                            const char* detail) noexcept;
+  // Stamps one Diagnostic (boot, per-emission seq, cumulative drop count)
+  // and queues it; false when the TX queue is full. The seq advances per
+  // attempt, so a drop leaves a gap the PC can see.
+  bool emit_diagnostic(const char* reason, NodeId peer, const MessageId* message,
+                       MonotonicMs now_ms) noexcept;
   void handle_credit(std::uint64_t request, ByteView inner,
                      MonotonicMs now_ms) noexcept;
   void issue_rx_grant(bool initial, MonotonicMs now_ms) noexcept;
@@ -707,6 +722,11 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   static_assert(kGatewayInnerHeadSize + kAuthorityFragmentMax <= kMaxTxInner,
                 "a 0x64 body fits one TxItem");
   BridgeStats stats_{};
+  // Diagnostic loss accounting: per-emission sequence plus a pending
+  // marker flag. The marker goes out ahead of the next diagnostic once
+  // the queue drains — it is sequenced like any emission, never silent.
+  std::uint32_t diag_seq_{0};
+  bool diag_loss_pending_{false};
 };
 
 }  // namespace routeloom::usb
