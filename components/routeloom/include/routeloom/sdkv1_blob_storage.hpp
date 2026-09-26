@@ -8,7 +8,10 @@
 // NVS. Keeping the slot/blob mapping here means the read-back contract is
 // exercised by host tests instead of only compiled for the device.
 //
-// BoardConfig uses partition `rlcfg`, namespace `board`, keys b0/b1.
+// BoardConfig uses partition `rlcfg`, namespace `board`, keys b0/b1;
+// BoardSecrets uses partition `rlkeys`, namespace `keys`, keys k0/k1
+// (design-devflow §4.1: config and secret material are separate durable
+// stores so app-only updates can never touch either).
 // NVS layout (partition `rlsec`, 05 §5.1):
 //   rlident  i0 / i1        RLI1 twin pair        (blob ≤ 664 B, slot 1024 B)
 //   rlsite   s0 / s1        RLS1 A/B pair         (blob ≤ 712 B, slot 1024 B)
@@ -58,6 +61,10 @@ inline constexpr char kBoardConfigPartition[] = "rlcfg";
 inline constexpr char kBoardConfigNamespace[] = "board";
 inline constexpr char kBoardConfigKey0[] = "b0";
 inline constexpr char kBoardConfigKey1[] = "b1";
+inline constexpr char kBoardSecretsPartition[] = "rlkeys";
+inline constexpr char kBoardSecretsNamespace[] = "keys";
+inline constexpr char kBoardSecretsKey0[] = "k0";
+inline constexpr char kBoardSecretsKey1[] = "k1";
 inline constexpr char kIdentityNamespace[] = "rlident";
 inline constexpr char kSiteNamespace[] = "rlsite";
 inline constexpr char kRevocationNamespace[] = "rlrevo";
@@ -131,6 +138,7 @@ class BlobRecordSlotStorage final : public RecordSlotStorage {
 
   // The fixed layouts above.
   static BlobRecordSlotStorage board_config(BlobNamespace& blobs) noexcept;
+  static BlobRecordSlotStorage board_secrets(BlobNamespace& blobs) noexcept;
   static BlobRecordSlotStorage identity(BlobNamespace& blobs) noexcept;
   static BlobRecordSlotStorage site(BlobNamespace& blobs) noexcept;
   static BlobRecordSlotStorage revocation(BlobNamespace& blobs) noexcept;

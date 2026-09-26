@@ -28,15 +28,10 @@ std::uint64_t get64(const std::uint8_t* p) noexcept {
 }
 
 Status validate(const BoardConfig& c) noexcept {
-  if (c.generation == 0 || reserved_node_id(c.node) || c.chip == 0 ||
-      (c.sta_mac[0] & 1U) != 0 ||
-      (c.sta_mac == std::array<std::uint8_t, 6>{}) ||
-      (c.role != BoardRole::Bridge && c.role != BoardRole::Reference) ||
-      (c.security != BoardSecurity::DevRam && c.security != BoardSecurity::Member) ||
-      c.network == 0 || c.channel < 1 || c.channel > 13) {
+  if (c.generation == 0) {
     return Status::error(StatusCode::InvalidArgument, "board configuration invalid");
   }
-  return Status::success();
+  return board_config_fields_valid(c);
 }
 
 Status structure(const ByteView bytes) noexcept {
@@ -51,7 +46,7 @@ Status structure(const ByteView bytes) noexcept {
 
 Status decode(const ByteView bytes, BoardConfig& out) noexcept {
   if (!structure(bytes) || get32(bytes.data + 8) != 1 || get32(bytes.data + 12) != kSeal ||
-      get32(bytes.data + 46) != crc32_iso_hdlc(ByteView{bytes.data, 46})) {
+      get32(bytes.data + 82) != crc32_iso_hdlc(ByteView{bytes.data, 82})) {
     return Status::error(StatusCode::IntegrityError, "board record seal");
   }
   BoardConfig config{};
@@ -63,6 +58,10 @@ Status decode(const ByteView bytes, BoardConfig& out) noexcept {
   config.security = static_cast<BoardSecurity>(bytes.data[40]);
   config.channel = bytes.data[41];
   config.network = get32(bytes.data + 42);
+  config.secrets_generation = get32(bytes.data + 46);
+  for (std::size_t i = 0; i < config.secrets_fingerprint.size(); ++i) {
+    config.secrets_fingerprint[i] = bytes.data[50 + i];
+  }
   const Status status = validate(config);
   if (status) out = config;
   return status;
@@ -76,6 +75,27 @@ const sdkv1::SealedRecordFormat kFormat{kMagic, kSeal, kBoardConfigSlotBytes,
                                         kBoardConfigRecordBytes, kBoardConfigRecordBytes,
                                         true, &structure, &semantic};
 }  // namespace
+
+Status board_config_fields_valid(const BoardConfig& c) noexcept {
+  if (reserved_node_id(c.node) || c.chip == 0 ||
+      (c.sta_mac[0] & 1U) != 0 ||
+      (c.sta_mac == std::array<std::uint8_t, 6>{}) ||
+      (c.role != BoardRole::Bridge && c.role != BoardRole::Reference) ||
+      (c.security != BoardSecurity::DevRam && c.security != BoardSecurity::Member) ||
+      c.network == 0 || c.channel < 1 || c.channel > 13) {
+    return Status::error(StatusCode::InvalidArgument, "board configuration invalid");
+  }
+  return Status::success();
+}
+
+bool board_config_equal(const BoardConfig& a, const BoardConfig& b) noexcept {
+  return a.generation == b.generation && a.node == b.node &&
+         a.sta_mac == b.sta_mac && a.chip == b.chip && a.role == b.role &&
+         a.security == b.security && a.network == b.network &&
+         a.channel == b.channel &&
+         a.secrets_generation == b.secrets_generation &&
+         a.secrets_fingerprint == b.secrets_fingerprint;
+}
 
 BoardConfigStore::BoardConfigStore(sdkv1::RecordSlotStorage& storage) noexcept
     : pair_(storage, kFormat, scratch_.writable(), &config_) {}
@@ -117,7 +137,11 @@ Status BoardConfigStore::commit(const BoardConfig& config) noexcept {
   p[40] = static_cast<std::uint8_t>(config.security);
   p[41] = config.channel;
   put32(p + 42, config.network);
-  put32(p + 46, 0);  // SealedSlotPair writes CRC after sequence and seal.
+  put32(p + 46, config.secrets_generation);
+  for (std::size_t i = 0; i < config.secrets_fingerprint.size(); ++i) {
+    p[50 + i] = config.secrets_fingerprint[i];
+  }
+  put32(p + 82, 0);  // SealedSlotPair writes CRC after sequence and seal.
   status = pair_.commit_prepared(kBoardConfigRecordBytes);
   if (status) config_ = config;
   else readback_ready_ = false;  // A failed acknowledgement may have committed the seal.
