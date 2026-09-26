@@ -293,7 +293,12 @@ fn policy_set<S: OperationStore>(
         patch.decision_mode = Some(match value.as_str() {
             Some("kguard") => DecisionMode::Kguard,
             Some("closed") => DecisionMode::Closed,
-            _ => return Err(invalid("decision_mode must be \"kguard\" or \"closed\"")),
+            Some("lab_inventory") => DecisionMode::LabInventory,
+            _ => {
+                return Err(invalid(
+                    "decision_mode must be \"kguard\", \"closed\" or \"lab_inventory\"",
+                ))
+            }
         });
     }
     if let Some(value) = params.get("decision_timeout_ms") {
@@ -312,7 +317,7 @@ fn policy_set<S: OperationStore>(
                 .ok_or_else(|| invalid("pending_retry_after_s must be 30..=3600"))?,
         );
     }
-    let (result, events) = service.with(|a| a.update_policy(&patch));
+    let (result, events) = service.with(|a| a.update_policy_at(&patch, ctx.now_mono));
     push_events(ctx, events);
     Ok(result?)
 }
