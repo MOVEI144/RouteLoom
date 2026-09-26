@@ -7,6 +7,21 @@ menu "RouteLoom"
             Bench-only diagnostic logs for reset recovery. Context IDs and
             handshake step numbers are logged, never keys or payloads.
 
+    config ROUTELOOM_HIL_HEAP_TELEMETRY
+        bool "HIL free heap and largest block once per minute"
+        default n
+        help
+            Bench-only heap samples beside the existing stack high-water log.
+            Logs free, largest and minimum free 8-bit heap in bytes so a
+            long hardware run can detect leaks and fragmentation.
+
+    config ROUTELOOM_HIL_EDHOC_TIMING
+        bool "HIL timings for EDHOC P-256 operations and full exchange"
+        default n
+        help
+            Logs operation durations and the full handshake duration on an
+            ESP bench. No key, transcript or payload bytes are logged.
+
     config ROUTELOOM_WIFI_NETIF_INIT
         bool "Start esp_netif (lwIP TCP/IP task) before the Wi-Fi driver"
         default n

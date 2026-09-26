@@ -835,6 +835,12 @@ void EspNowRuntime::poll_once() noexcept {
     stack_hwm_log_ms_ = now;
     ESP_LOGI(kTag, "stack hwm %s %lu B", pcTaskGetName(nullptr),
              static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr)));
+#if CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY
+    ESP_LOGI(kTag, "HIL HEAP free=%lu largest=%lu min=%lu B",
+             static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+             static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+             static_cast<unsigned long>(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)));
+#endif
   }
   Event event{};
   // The dedicated reserved-completion slot drains FIRST — it resolves the

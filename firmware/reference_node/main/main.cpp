@@ -1392,6 +1392,31 @@ extern "C" void app_main(void) {
   for (;;) {
     runtime.poll_once();
     owner.poll(monotonic_now_ms());
+#if CONFIG_ROUTELOOM_HIL_SEND_DESTINATION != 0
+    // Bench-only device-originated traffic. The reference's observer logs
+    // delivery, while the receiving node logs origin and sequence.
+    static routeloom::MonotonicMs hil_send_next_ms = monotonic_now_ms() + 10000;
+    static std::uint32_t hil_send_attempt = 0;
+    const routeloom::MonotonicMs hil_now_ms = monotonic_now_ms();
+    if (hil_send_attempt < CONFIG_ROUTELOOM_HIL_SEND_COUNT &&
+        hil_now_ms >= hil_send_next_ms) {
+      const std::array<std::uint8_t, 8> payload{
+          'R', 'L', 'H', 'I', 'L', 'D',
+          static_cast<std::uint8_t>(hil_send_attempt >> 8),
+          static_cast<std::uint8_t>(hil_send_attempt)};
+      routeloom::MessageId id{};
+      const auto sent = runtime.node().send(
+          CONFIG_ROUTELOOM_HIL_SEND_DESTINATION,
+          routeloom::ByteView{payload.data(), payload.size()},
+          routeloom::SendOptions{}, hil_now_ms, id);
+      ESP_LOGI(kTag, "HIL DEVICE SEND attempt=%lu dest=%llu admitted=%u detail=%s",
+               static_cast<unsigned long>(hil_send_attempt),
+               static_cast<unsigned long long>(CONFIG_ROUTELOOM_HIL_SEND_DESTINATION),
+               static_cast<unsigned>(static_cast<bool>(sent)), sent.detail);
+      ++hil_send_attempt;
+      hil_send_next_ms = hil_now_ms + 2000;
+    }
+#endif
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG && CONFIG_ROUTELOOM_CONFIG
     static routeloom::MonotonicMs last_config_trace = 0;
     const routeloom::MonotonicMs config_now = monotonic_now_ms();
