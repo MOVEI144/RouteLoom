@@ -1430,9 +1430,10 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
     }
 }
 
-/// Copy one verified mesh payload into the bounded receive log. Network and
-/// gateway attribution come from the authenticated session, never from the
-/// payload. Non-stored outcomes (conflict, caps, oversize) surface as bounded
+/// Copy a gateway-reported mesh payload from a verified USB session into the
+/// bounded receive log. Network and gateway attribution come from the
+/// authenticated session, never from the payload. Non-stored outcomes
+/// (conflict, caps, oversize) surface as bounded
 /// diagnostic events — the log is never silently rewritten.
 fn receive_ingest(
     state: &State,
@@ -3949,6 +3950,89 @@ mod tests {
             "API1 {\"v\":1,\"request_id\":\"rx2\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"earliest\"}}",
         );
         assert!(denied.contains("AuthorizationFailed"), "{denied}");
+    }
+
+    #[test]
+    fn ingest_assurance_does_not_follow_site_ledger() {
+        use crate::site::testkit::{self, Outcome, SimDevice};
+        use crate::site::{DecideRequest, SiteService};
+        let now = 1_790_000_000_000;
+        let store = Box::<crate::site::store::MemoryStore>::default();
+        let service = Arc::new(SiteService::new(testkit::authority(store, now)));
+        let transport = crate::site::transport::InProcessTransport::new();
+        service.set_transport(transport.clone());
+        // Enroll one member through the real join flow.
+        let node = 0x00A1_0000_0000_7001;
+        let mut device = SimDevice::new(node, 0x79);
+        let (_, outcome, events) = device.start(&service, &transport, now);
+        assert!(matches!(outcome, Outcome::Waiting));
+        let request = testkit::request_id(&events).expect("join request");
+        service
+            .with(|a| {
+                a.decide(
+                    501,
+                    DecideRequest {
+                        join_request_id: request,
+                        device: node,
+                        verdict: crate::site::records::Verdict::Allow {
+                            role: crate::site::records::ROLE_ENDPOINT,
+                        },
+                        key: "allow-7001".into(),
+                    },
+                    now + 10,
+                )
+            })
+            .0
+            .unwrap();
+        let network = u64::from(testkit::NETWORK_LOW);
+        let state = State {
+            site: Some(Arc::clone(&service)),
+            ..State::default()
+        };
+        {
+            let mut session = state.session.lock().expect("session");
+            session.network = Some(network);
+            session.node = Some(1);
+        }
+        // Enrollment records do not prove which security profile protected
+        // either received frame.
+        for (origin, seq) in [(node, 11u64), (0x99, 12)] {
+            receive_ingest(&state, Some(origin), Some(5), Some(seq), &[0xaa], now + 20);
+        }
+        let mut log = state.receive_log.lock().expect("receive log");
+        let crate::receive_log::ReadOutcome::Batch(batch) =
+            log.read(network, 0, 8, now + 20, false)
+        else {
+            panic!("ingested records must be readable");
+        };
+        assert_eq!(batch.records.len(), 2);
+        for record in &batch.records {
+            let json = api1::record_json(record, "cursor");
+            assert!(
+                json.contains("\"assurance\":{\"profile\":\"UNKNOWN\",\"origin\":\"unverified\"}"),
+                "{json}"
+            );
+        }
+        // Authority absence does not establish that the gateway uses DevRam.
+        let bare = State::default();
+        {
+            let mut session = bare.session.lock().expect("session");
+            session.network = Some(network);
+            session.node = Some(1);
+        }
+        receive_ingest(&bare, Some(node), Some(5), Some(13), &[0xbb], now + 20);
+        let mut log = bare.receive_log.lock().expect("receive log");
+        let crate::receive_log::ReadOutcome::Batch(batch) =
+            log.read(network, 0, 8, now + 20, false)
+        else {
+            panic!("bare record must be readable");
+        };
+        assert_eq!(batch.records.len(), 1);
+        let json = api1::record_json(&batch.records[0], "cursor");
+        assert!(
+            json.contains("\"assurance\":{\"profile\":\"UNKNOWN\",\"origin\":\"unverified\"}"),
+            "{json}"
+        );
     }
 
     #[test]
