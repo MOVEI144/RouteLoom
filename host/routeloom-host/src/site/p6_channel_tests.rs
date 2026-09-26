@@ -386,6 +386,29 @@ fn gateway_applied_during_cutover_grace_reaches_receipt_queue() {
 }
 
 #[test]
+fn regressed_clock_cannot_reopen_old_cutover_context() {
+    let (mut hub, member) = hub_with(test_dams(0xD0));
+    let mut device = handshake(&mut hub, &member, 1000);
+    let old = testkit::network();
+    let new = (u64::from(testkit::SITE_EPOCH + 1) << 32) | u64::from(testkit::NETWORK_LOW);
+    hub.note_cutover(old, 5000);
+    let mut staged = member.clone();
+    staged.network = new;
+    hub.refresh(&[(MEMBER_A, staged.clone())], new, 7, 13, 6000);
+    // A clock regression during COMMIT grace must not allow an old
+    // authenticated carrier to extend the window or produce a receipt.
+    let mut applied = device.head(member.generation).to_vec();
+    applied.extend_from_slice(&[1, 1, 0, 0, 0, 0, 0, 7]);
+    applied.extend_from_slice(&[0xA5; 32]);
+    let sealed = device.seal(5, &applied);
+    hub.push_carrier(MEMBER_A, CarrierKind::Envelope, &sealed, 5500);
+    assert!(hub.poll_receipts().is_empty());
+    assert!(!hub.send_grant(MEMBER_A, old, &[0xC0], 5500));
+    hub.refresh(&[(MEMBER_A, staged)], new, 7, 13, 5600);
+    assert_eq!(hub.network(), new);
+}
+
+#[test]
 fn new_handshake_waits_out_the_grace() {
     let (mut hub, member) = hub_with(test_dams(0xD0));
     let _device = handshake(&mut hub, &member, 1000);

@@ -109,7 +109,7 @@ linkが連続3回`REVOKED` hintまたは失敗で終わり、使える近隣が�
 
 Host実装（P6-2 PR D、`host/routeloom-host/src/site/cutover.rs`）：`membership.cutover`（ADMIN）はepoch段差・Site CA配下の次SiteCert・snapshot・全allocatorを検証してから次epoch全体（次SiteCert・同世代の次MemberCert・fresh次DAMS・共有P5 allocatorの次GK）を1 transactionでstageし、tickがPREPAREを配る。stageから600秒後に最新改訂のgateway PREPAREDが1台以上あれば次RRS1＋CutoverCommitの署名とactive切替を1 transactionでcommitし、COMMITを60秒の旧network猶予内で配る（猶予はRAMのみ。再起動で終了し、取り逃しはZT再発行へ）。準備中のrevokeは現networkへ先にcommitしてから改訂上げ・次GK再stage・全PREPARED無効・600秒再開・発行済みbindingの次RRS1持越しを同一transactionで行い、準備中のallowはsnapshotへ同世代の次資格で参加する（満杯は切捨てず拒否）。再起動はwindowを数え直し、epoch・serial・GKを消費しない。配布transportはfake portのまま（`RevocationTransport`に`carries_notice`／`carries_grant`の宣言を追加。未対応の種別はqueueせず、RRS-only portを詰まらせない）。機器・Owner・firmware側の実結線（P4/P5 adapter、gateway-local、ESP NVS RLX1）は残課題。
 
-COMMIT直後、次のauthority tickで新epochのlive表を再構築する前に届いた旧contextの認証済みAPPLIEDも、この猶予内に限り保持済みbindingで検証し、未到達はunknownのままにする。
+COMMIT直後、次のauthority tickで新epochのlive表を再構築する前に届いた旧contextの認証済みAPPLIEDも、この猶予内に限り保持済みbindingで検証し、未到達はunknownのままにする。carrier受信時に単調時計の後退を検出した場合は旧bindingの猶予を直ちに破棄し、そのcarrierを適用せず、次tickで新networkへ切り替える。
 
 ## 8. 予約：SAK交換（後続設計）
 

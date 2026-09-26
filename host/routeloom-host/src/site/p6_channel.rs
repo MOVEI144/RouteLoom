@@ -346,6 +346,14 @@ impl P6ChannelHub {
     /// Feeds one inbound carrier (USB 0x64 / mesh, reassembled by the
     /// P5 PR4 mapping) into the table.
     pub fn push_carrier(&mut self, device: u64, kind: CarrierKind, bytes: &[u8], mono_ms: u64) {
+        // A regressed clock ends all old-binding grace immediately. Do not
+        // process the carrier or lower the timestamp: the next refresh must
+        // flip to the committed network rather than reopen an old context.
+        if mono_ms < self.last_mono_ms {
+            self.grace_until_mono_ms = 0;
+            self.retained.clear();
+            return;
+        }
         // A removed member may finish the notice exchange on its existing
         // context, but cannot create a new one during the retention window.
         if (kind == CarrierKind::R3 && !self.live.contains_key(&device))
