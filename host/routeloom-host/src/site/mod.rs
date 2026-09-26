@@ -332,6 +332,16 @@ pub enum DecisionMode {
     Closed,
 }
 
+/// One `join.policy.set` patch (07 §2): only `Some` fields change, the
+/// rest stay at whatever the policy holds when the patch applies.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PolicyPatch {
+    pub zero_touch_open: Option<bool>,
+    pub decision_mode: Option<DecisionMode>,
+    pub decision_timeout_ms: Option<u16>,
+    pub pending_retry_after_s: Option<u32>,
+}
+
 /// `join.policy.*` (07 §2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct JoinPolicy {
@@ -484,6 +494,111 @@ struct Txn {
     recovery_profile: bool,
 }
 
+/// One ended relay attempt, kept for triage: abort and down-refusal
+/// reasons must survive the attempt they ended. `source` names who
+/// ended it (`gateway_abort`, `down_admission`, `proxy_abort`,
+/// `session_drop`, `timeout`); `reason` is that source's detail.
+/// `stage` is the join phase reached (`await_message_3` or `deciding`),
+/// with the device and join-request links when the attempt knew them.
+/// One record renders both the `join_relay_failed` event and the
+/// `recent_relay_failures` ring entry, so they can never disagree.
+#[derive(Clone, Debug)]
+pub struct RelayFailure {
+    ms: u64,
+    source: &'static str,
+    reason: String,
+    gateway: u64,
+    proxy: u64,
+    gateway_epoch: u32,
+    proxy_epoch: u32,
+    relay_id: u32,
+    joiner: [u8; 6],
+    stage: &'static str,
+    device: Option<u64>,
+    join_request: Option<u64>,
+}
+
+/// Recent relay failures kept for `site.status` (bounded: triage, not
+/// history — the event ring carries the live stream).
+const RECENT_RELAY_FAILURES_CAP: usize = 16;
+
+impl RelayFailure {
+    fn for_txn(ms: u64, source: &'static str, reason: String, txn: &Txn) -> Self {
+        let (stage, join_request) = match txn.state {
+            TxnState::AwaitMessage3 => ("await_message_3", None),
+            TxnState::Deciding(id) => ("deciding", Some(id)),
+        };
+        Self {
+            ms,
+            source,
+            reason,
+            gateway: txn.key.gateway,
+            proxy: txn.key.proxy,
+            gateway_epoch: txn.key.gateway_epoch,
+            proxy_epoch: txn.key.proxy_epoch,
+            relay_id: txn.key.relay_id,
+            joiner: txn.key.joiner_mac,
+            stage,
+            device: txn.device.as_ref().map(|d| d.facts.node),
+            join_request,
+        }
+    }
+
+    /// A failure for a relay with no live attempt (already timed out or
+    /// never admitted): only the key names anything.
+    fn for_unknown_key(source: &'static str, reason: String, key: RelayKey) -> Self {
+        Self {
+            ms: 0,
+            source,
+            reason,
+            gateway: key.gateway,
+            proxy: key.proxy,
+            gateway_epoch: key.gateway_epoch,
+            proxy_epoch: key.proxy_epoch,
+            relay_id: key.relay_id,
+            joiner: key.joiner_mac,
+            stage: "unknown",
+            device: None,
+            join_request: None,
+        }
+    }
+
+    fn common_fields(&self) -> String {
+        let device = self
+            .device
+            .map_or_else(|| "null".to_string(), |node| format!("\"{}\"", h16(node)));
+        let join_request = self.join_request.map_or_else(
+            || "null".to_string(),
+            |id| format!("\"{}\"", request_token(id)),
+        );
+        format!(
+            "\"source\":\"{}\",\"reason\":\"{}\",\"gateway\":\"{}\",\"proxy\":\"{}\",\"gateway_epoch\":{},\"proxy_epoch\":{},\"relay_id\":{},\"joiner\":\"{}\",\"stage\":\"{}\",\"device\":{device},\"join_request\":{join_request}",
+            self.source,
+            routeloom_json::escape_string(&self.reason),
+            h16(self.gateway),
+            h16(self.proxy),
+            self.gateway_epoch,
+            self.proxy_epoch,
+            self.relay_id,
+            hex_lower(&self.joiner),
+            self.stage,
+        )
+    }
+
+    /// Event body fields (the envelope stamps `ms`).
+    pub fn event_fields(&self) -> String {
+        format!("\"kind\":\"join_relay_failed\",{}", self.common_fields())
+    }
+
+    fn json(&self) -> String {
+        format!(
+            "{{\"ms\":{},\"kind\":\"join_relay_failed\",{}}}",
+            self.ms,
+            self.common_fields()
+        )
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Counters {
     pub message_1: u64,
@@ -505,6 +620,9 @@ pub struct Counters {
     pub store_failures: u64,
     /// Rejected GK ACKs/pulls by fence reason (stale epoch, DAMS, GK-id…).
     pub gk_rejected: BTreeMap<&'static str, u64>,
+    /// Downlink deliveries the transport refused, by `DeliverReject` name
+    /// (`queue_full`, `too_large`, `closed`).
+    pub downlink_rejected: BTreeMap<&'static str, u64>,
 }
 
 impl Counters {
@@ -521,8 +639,14 @@ impl Counters {
             .map(|(k, v)| format!("\"{k}\":{v}"))
             .collect::<Vec<_>>()
             .join(",");
+        let downlink_rejected = self
+            .downlink_rejected
+            .iter()
+            .map(|(k, v)| format!("\"{k}\":{v}"))
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
-            "{{\"message_1\":{},\"message_1_refused\":{},\"busy_aborts\":{},\"unknown_relay\":{},\"timeouts\":{},\"relay_failed\":{},\"rejected_unverified\":{{{rejected}}},\"allowed\":{},\"reissued\":{},\"pending\":{},\"denied\":{},\"removed_notices\":{},\"authority_busy\":{},\"store_failures\":{},\"gk_rejected\":{{{gk_rejected}}}}}",
+            "{{\"message_1\":{},\"message_1_refused\":{},\"busy_aborts\":{},\"unknown_relay\":{},\"timeouts\":{},\"relay_failed\":{},\"rejected_unverified\":{{{rejected}}},\"allowed\":{},\"reissued\":{},\"pending\":{},\"denied\":{},\"removed_notices\":{},\"authority_busy\":{},\"store_failures\":{},\"gk_rejected\":{{{gk_rejected}}},\"downlink_rejected\":{{{downlink_rejected}}}}}",
             self.message_1,
             self.message_1_refused,
             self.busy_aborts,
@@ -652,6 +776,8 @@ pub struct SiteAuthority {
     decisions: BTreeMap<(u32, String), StoredDecision>,
     operations: BTreeMap<u64, Operation>,
     txns: Vec<Txn>,
+    /// Ended relay attempts, newest last (triaged via `site.status`).
+    recent_relay_failures: VecDeque<RelayFailure>,
     joiner_last_m1: HashMap<[u8; 6], u64>,
     join_mono_ms: u64,
     rs_epoch: u32,
@@ -1164,6 +1290,7 @@ impl SiteAuthority {
             decisions,
             operations,
             txns: Vec::new(),
+            recent_relay_failures: VecDeque::new(),
             joiner_last_m1: HashMap::new(),
             join_mono_ms: 0,
             rs_epoch,
@@ -2267,6 +2394,12 @@ impl SiteAuthority {
             match txn.state {
                 TxnState::AwaitMessage3 => {
                     self.counters.timeouts += 1;
+                    self.push_recent_failure(RelayFailure::for_txn(
+                        now_ms,
+                        "timeout",
+                        "message_3 deadline".to_string(),
+                        &txn,
+                    ));
                     self.abort(txn.key, AbortReason::Timeout);
                 }
                 TxnState::Deciding(_) => {
@@ -2288,31 +2421,66 @@ impl SiteAuthority {
         self.tick_distribution(now_ms);
     }
 
-    /// Ends one relayed exchange as failed: its answer could not be
-    /// admitted to the downlink, the gateway reported the relay over, or
-    /// a queue result arrived non-Ok. Queues no further outbound — the
-    /// device retries with a fresh relay, and answering a dead relay
-    /// could loop (`SiteService::with` relies on this: no recursion).
-    /// Returns whether a live exchange was dropped.
-    pub fn fail_attempt(&mut self, key: RelayKey) -> bool {
-        if !self.txns.iter().any(|t| t.key == key) {
-            return false;
-        }
-        self.txns.retain(|t| t.key != key);
+    /// Ends one relayed exchange as failed, keeping the reason, the
+    /// join stage reached and the device/request links for triage. The
+    /// returned record renders the `join_relay_failed` event AND the
+    /// `recent_relay_failures` ring entry from one source. Queues no
+    /// further outbound — the device retries with a fresh relay, and
+    /// answering a dead relay could loop (`SiteService::with` relies on
+    /// this: no recursion). Returns `None` when no live exchange holds
+    /// `key` (already timed out or never admitted).
+    pub fn fail_relay(
+        &mut self,
+        key: RelayKey,
+        source: &'static str,
+        reason: String,
+        now_ms: u64,
+    ) -> Option<RelayFailure> {
+        let txn = self.pop_txn(key)?;
         self.counters.relay_failed += 1;
-        true
+        let failure = RelayFailure::for_txn(now_ms, source, reason, &txn);
+        self.push_recent_failure(failure.clone());
+        Some(failure)
+    }
+
+    fn pop_txn(&mut self, key: RelayKey) -> Option<Txn> {
+        let pos = self.txns.iter().position(|t| t.key == key)?;
+        Some(self.txns.remove(pos))
+    }
+
+    fn push_recent_failure(&mut self, failure: RelayFailure) {
+        if self.recent_relay_failures.len() >= RECENT_RELAY_FAILURES_CAP {
+            self.recent_relay_failures.pop_front();
+        }
+        self.recent_relay_failures.push_back(failure);
     }
 
     /// Drops every live exchange relayed through `gateway`: its USB
     /// session died, and the proxy slots died with it. The lane logs the
     /// session boundary; the count lets it say how many relays went with
-    /// it. Returns the number dropped.
-    pub fn drop_gateway_relays(&mut self, gateway: u64) -> usize {
-        let before = self.txns.len();
-        self.txns.retain(|t| t.key.gateway != gateway);
-        let dropped = before - self.txns.len();
-        self.counters.relay_failed += dropped as u64;
-        dropped
+    /// it, and each dropped attempt keeps its stage and links in the
+    /// recent-failures ring. Returns the number dropped.
+    pub fn drop_gateway_relays(&mut self, gateway: u64, now_ms: u64) -> usize {
+        let mut kept = Vec::with_capacity(self.txns.len());
+        let mut dropped = Vec::new();
+        for txn in std::mem::take(&mut self.txns) {
+            if txn.key.gateway == gateway {
+                dropped.push(txn);
+            } else {
+                kept.push(txn);
+            }
+        }
+        self.txns = kept;
+        for txn in &dropped {
+            self.push_recent_failure(RelayFailure::for_txn(
+                now_ms,
+                "session_drop",
+                "usb session reset".to_string(),
+                txn,
+            ));
+        }
+        self.counters.relay_failed += dropped.len() as u64;
+        dropped.len()
     }
 
     // --- KGuard decisions --------------------------------------------------------------------
@@ -4842,6 +5010,27 @@ impl SiteAuthority {
         Ok(policy.json())
     }
 
+    /// Applies a partial `join.policy.set` patch onto the CURRENT policy:
+    /// read, patch, validate and commit happen under the one authority
+    /// lock the caller holds, so two concurrent partial updates from two
+    /// connections cannot lose each other's fields.
+    pub fn update_policy(&mut self, patch: &PolicyPatch) -> Result<String, SiteError> {
+        let mut policy = self.policy;
+        if let Some(zero_touch_open) = patch.zero_touch_open {
+            policy.zero_touch_open = zero_touch_open;
+        }
+        if let Some(decision_mode) = patch.decision_mode {
+            policy.decision_mode = decision_mode;
+        }
+        if let Some(decision_timeout_ms) = patch.decision_timeout_ms {
+            policy.decision_timeout_ms = decision_timeout_ms;
+        }
+        if let Some(pending_retry_after_s) = patch.pending_retry_after_s {
+            policy.pending_retry_after_s = pending_retry_after_s;
+        }
+        self.set_policy(policy)
+    }
+
     // --- read side ------------------------------------------------------------------------------
 
     pub fn status_json(&self, time: HostTime) -> String {
@@ -4878,8 +5067,14 @@ impl SiteAuthority {
             .expect("authority channel poisoned")
             .stats()
             .channels;
+        let failures = self
+            .recent_relay_failures
+            .iter()
+            .map(RelayFailure::json)
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
-            "{{\"site_id\":\"{}\",\"network\":\"{}\",\"network_low32\":\"{:08x}\",\"site_epoch\":{},\"site_cert_serial\":{},\"sak_fingerprint\":\"{}\",\"device_ca_id\":\"{}\",\"rs_epoch\":{},\"gk_epoch\":{},\"gk_staged\":{staged},\"gk\":{{\"phase\":\"{phase}\",\"cause\":{cause},\"targets\":{targets},\"staged_ack\":{staged_ack},\"active_ack\":{active_ack},\"unknown\":{unknown}}},\"authority\":{{\"attached\":{authority_attached},\"channels\":{authority_channels}}},\"member_cap\":{MEMBER_CAP},\"members\":{members},\"members_unconfirmed\":{unconfirmed},\"removed\":{removed},\"discovered\":{},\"join_requests\":{},\"live_exchanges\":{},\"channel\":{},\"channel_epoch\":{},\"gateways\":[{gateways}],\"membership_revision\":{},\"ledger_seq\":{},\"storage_durable\":{},\"policy\":{},\"counters\":{},\"clock\":\"host_unix_ms\",\"now_ms\":{}}}",
+            "{{\"site_id\":\"{}\",\"network\":\"{}\",\"network_low32\":\"{:08x}\",\"site_epoch\":{},\"site_cert_serial\":{},\"sak_fingerprint\":\"{}\",\"device_ca_id\":\"{}\",\"rs_epoch\":{},\"gk_epoch\":{},\"gk_staged\":{staged},\"gk\":{{\"phase\":\"{phase}\",\"cause\":{cause},\"targets\":{targets},\"staged_ack\":{staged_ack},\"active_ack\":{active_ack},\"unknown\":{unknown}}},\"authority\":{{\"attached\":{authority_attached},\"channels\":{authority_channels}}},\"member_cap\":{MEMBER_CAP},\"members\":{members},\"members_unconfirmed\":{unconfirmed},\"removed\":{removed},\"discovered\":{},\"join_requests\":{},\"live_exchanges\":{},\"recent_relay_failures\":[{failures}],\"channel\":{},\"channel_epoch\":{},\"gateways\":[{gateways}],\"membership_revision\":{},\"ledger_seq\":{},\"storage_durable\":{},\"policy\":{},\"counters\":{},\"clock\":\"host_unix_ms\",\"now_ms\":{}}}",
             h16(self.id.site_id),
             h16(self.id.network),
             self.id.network & 0xFFFF_FFFF,
@@ -4949,6 +5144,15 @@ impl SiteAuthority {
             next.map_or_else(|| "null".to_string(), |n| format!("\"{}\"", h16(n))),
             self.discovered.len()
         )
+    }
+
+    /// Membership state for one node (`member`/`removed`), `None` when
+    /// the node is not in the ledger. Drives the legacy `NODES`
+    /// membership column so a lost route can never read as "left".
+    pub fn member_state(&self, node: u64) -> Option<&'static str> {
+        self.devices
+            .get(&node)
+            .map(|row| if row.member { "member" } else { "removed" })
     }
 
     fn member_json(row: &DeviceRow) -> String {
@@ -5357,7 +5561,7 @@ impl SiteService {
     /// gone) ends that relay's attempt as failed — re-locked after the
     /// delivery loop, so no transport mutex is ever held across an
     /// authority call and a rejection can never recurse into another
-    /// delivery (`fail_attempt` queues no outbound).
+    /// delivery (`fail_relay` queues no outbound).
     pub fn with<R>(&self, f: impl FnOnce(&mut SiteAuthority) -> R) -> (R, Events) {
         // Serialize the state change with the GK handoff: a removal cannot
         // commit while an earlier command to that member is still in send.
@@ -5411,26 +5615,41 @@ impl SiteService {
                 transport.deliver(carrier);
             }
         }
-        drop(handoff);
         if !outbound.is_empty() {
             let transport = self.transport.lock().expect("transport poisoned").clone();
             if let Some(transport) = transport {
                 let mut failed = Vec::new();
                 for message in outbound {
                     let key = message.key();
-                    if transport.deliver(message).is_err() {
-                        failed.push(key);
+                    if let Err(reject) = transport.deliver(message) {
+                        failed.push((key, reject.name()));
                     }
                 }
                 if !failed.is_empty() {
+                    let failed_at = crate::now_ms();
                     let mut authority = self.authority.lock().expect("site authority poisoned");
-                    for key in failed {
-                        authority.fail_attempt(key);
+                    for (key, reason) in failed {
+                        if let Some(failure) = authority.fail_relay(
+                            key,
+                            "downlink_rejected",
+                            reason.to_string(),
+                            failed_at,
+                        ) {
+                            events.push((failed_at, failure.event_fields()));
+                        }
+                        *authority
+                            .counters
+                            .downlink_rejected
+                            .entry(reason)
+                            .or_insert(0) += 1;
                     }
                     events.extend(authority.take_events());
                 }
             }
         }
+        // Delivery admission and its refusal share the authority update
+        // order, so another mutation cannot end the relay between them.
+        drop(handoff);
         (result, events)
     }
 

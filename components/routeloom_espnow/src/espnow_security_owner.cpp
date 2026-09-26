@@ -1,5 +1,7 @@
 #include "routeloom/espnow_security_owner.hpp"
 
+#include <cstdio>
+
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -232,8 +234,9 @@ void EspNowSecurityOwner::LifecycleObjectSink::on_rrs_object(
 
 void EspNowSecurityOwner::LifecycleObserver::on_lifecycle_event(
     const sdkv1::LifecycleEvent& event, const MonotonicMs now_ms) noexcept {
-  (void)now_ms;
   EspNowSecurityOwner& owner = owner_;
+  owner.lifecycle_journal_.on_lifecycle_event(event, now_ms);
+  owner.emit_lifecycle_diagnostic(event);
   const char* tag = owner.config_.log_tag;
   switch (event.kind) {
     case sdkv1::LifecycleEventKind::RrsApplied:
@@ -323,6 +326,70 @@ sdkv1::AuthorityMeshDemux* EspNowSecurityOwner::authority_demux() noexcept {
 
 ConfigEndpointSink* EspNowSecurityOwner::authority_mesh_sink() noexcept {
   return mesh_sink();
+}
+
+const sdkv1::LifecycleJournal& EspNowSecurityOwner::lifecycle_journal() const noexcept {
+  return lifecycle_journal_;
+}
+
+void EspNowSecurityOwner::emit_lifecycle_diagnostic(
+    const sdkv1::LifecycleEvent& event) noexcept {
+  if (bridge_ == nullptr) return;
+  // Stable vocabulary, numeric fields only — the PC greps these from its
+  // event ring. Self-scoped events carry kInvalidNodeId like the mesh's
+  // own self diagnostics; peer-scoped ones name the peer.
+  char text[64]{};
+  const char* format = nullptr;
+  switch (event.kind) {
+    case sdkv1::LifecycleEventKind::RrsApplied:
+      format = "RRS_APPLIED:epoch=%lu";
+      break;
+    case sdkv1::LifecycleEventKind::RrsRejected:
+      format = "RRS_REJECTED:epoch=%lu:detail=%lu";
+      break;
+    case sdkv1::LifecycleEventKind::SelfRevoked:
+      format = "SELF_REVOKED:epoch=%lu";
+      break;
+    case sdkv1::LifecycleEventKind::RecoveryStarted:
+      format = "RECOVERY_STARTED:reason=%lu";
+      break;
+    case sdkv1::LifecycleEventKind::RecoveryFinished:
+      format = "RECOVERY_FINISHED:epoch=%lu";
+      break;
+    case sdkv1::LifecycleEventKind::GossipStalled:
+      format = "GOSSIP_STALLED:epoch=%lu";
+      break;
+    case sdkv1::LifecycleEventKind::StorageBlocked:
+      format = "STORAGE_BLOCKED:reason=%lu";
+      break;
+  }
+  if (format == nullptr) return;
+  if (event.kind == sdkv1::LifecycleEventKind::RrsRejected) {
+    std::snprintf(text, sizeof(text), format,
+                  static_cast<unsigned long>(event.epoch),
+                  static_cast<unsigned long>(event.detail));
+  } else {
+    const std::uint32_t value =
+        (event.kind == sdkv1::LifecycleEventKind::RecoveryStarted ||
+         event.kind == sdkv1::LifecycleEventKind::StorageBlocked)
+            ? event.detail
+            : event.epoch;
+    std::snprintf(text, sizeof(text), format,
+                  static_cast<unsigned long>(value));
+  }
+  const bool peer_scoped =
+      event.kind == sdkv1::LifecycleEventKind::GossipStalled ||
+      event.kind == sdkv1::LifecycleEventKind::SelfRevoked;
+  bridge_->on_diagnostic(text, peer_scoped ? event.peer : kInvalidNodeId,
+                         nullptr);
+}
+
+void EspNowSecurityOwner::emit_recovery_diagnostic(const std::uint8_t reason) noexcept {
+  if (bridge_ == nullptr) return;
+  char text[64]{};
+  std::snprintf(text, sizeof(text), "RECOVERY_REQUIRED:reason=%u",
+                static_cast<unsigned>(reason));
+  bridge_->on_diagnostic(text, kInvalidNodeId, nullptr);
 }
 
 Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
@@ -1514,6 +1581,9 @@ void EspNowSecurityOwner::drain_actions(const MonotonicMs now_ms) noexcept {
       case sdkv1::CoordinatorActionKind::ReportRecovery:
         ESP_LOGE(config_.log_tag, "membership recovery required (reason %u): see maintenance",
                  static_cast<unsigned>(action.recovery));
+        lifecycle_journal_.note_recovery_reported(
+            static_cast<std::uint8_t>(action.recovery), now_ms);
+        emit_recovery_diagnostic(static_cast<std::uint8_t>(action.recovery));
         // A recovery join that lands here did not reprovision: the
         // lifecycle decides the next step (retry or maintenance).
         if (lifecycle_live_ && lifecycle_booted_) complete_lifecycle_recovery(false, now_ms);

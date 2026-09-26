@@ -42,6 +42,8 @@ USB request IDはsession内一意、Message IDは論理配送の寿命、host id
 
 COMMAND_ACCEPTEDは機器受付だけ。管理確定、PC永続保存、アプリ適用は別event。再接続で信用先が変わったら旧認可を引き継がない。
 
+開発profileのHostOps `SUBMIT` が `MeshRejected` を返す場合、固定長 `RECEIPT` の32B hash位置は `RLFR`（4B）＋理由長（1B）＋印字可能ASCII理由（最大27B）＋ゼロ埋めになる。旧機器のcanonical hash echoや形式不正は理由として扱わない。受理された送信の終端失敗では、`DeliveryEvent` の `reason` の後に24B `operation_id` を付ける。hostはそのidと `msg_session/msg_seq` をともに照合して当該操作に理由を保存する。末尾の無い旧eventは観測eventとして残すが、操作の理由には結び付けない。
+
 ## 6. 検査
 
 CRC既知vector、1byte分割、COBS境界、overlength、部分timeout、grant duplicate／stale／別session、2軸不足、partial write一度課金、zero-credit相互待ちを検査する。小モデルで累積creditが通ってもUSB暗号・実driver相互運用が認定されたことにはならない。

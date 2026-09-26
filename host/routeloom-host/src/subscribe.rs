@@ -66,6 +66,7 @@ const LINE_OVERHEAD: usize = 96;
 pub const EVENT_KINDS: &[&str] = &[
     "adapter",
     "auth_ok",
+    "boot",
     "credit",
     "credit_close",
     "credit_grant",
@@ -74,6 +75,7 @@ pub const EVENT_KINDS: &[&str] = &[
     "decode_error",
     "delivery_event",
     "diagnostic",
+    "diagnostic_loss",
     "dispatch",
     "error",
     "frame",
@@ -1169,6 +1171,13 @@ mod tests {
     }
 
     #[test]
+    fn boot_is_a_subscribable_event_kind() {
+        // The daemon's first ring entry (restart boundary + build/config
+        // identity) must survive a kinds filter so journals can select it.
+        assert!(EVENT_KINDS.contains(&"boot"));
+    }
+
+    #[test]
     fn token_roundtrip_and_rejects() {
         let hub = SubscriptionHub::with_boot(0x1234_5678_9abc_def0);
         let id = hub
@@ -1193,6 +1202,13 @@ mod tests {
             .subscribe(1, Some(501), msg_sub(1), 0, 1, 0, 1_000)
             .unwrap();
         assert_ne!(token(foreign), tok);
+    }
+
+    #[test]
+    fn diagnostic_loss_is_a_subscribable_event_kind() {
+        // The host-side gap signal must survive a kinds filter so
+        // journals can select it alongside the diagnostics themselves.
+        assert!(EVENT_KINDS.contains(&"diagnostic_loss"));
     }
 
     #[test]

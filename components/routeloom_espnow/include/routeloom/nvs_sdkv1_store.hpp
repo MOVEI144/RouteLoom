@@ -36,6 +36,19 @@ class NvsBlobNamespace final : public sdkv1::BlobNamespace {
     std::uint64_t bytes{0};
   };
 
+  // Most recent native NVS failure: `op` tags the call ("open",
+  // "blob_size", "blob_read", "blob_write", "commit") and `native` is the
+  // esp_err_t it returned. Sticky — successes and benign absence probes
+  // never clear it — so a later read still explains the earlier fault.
+  // `op == nullptr` (with ESP_OK) until the first failure.
+  struct NvsLastError {
+    const char* op{nullptr};
+    esp_err_t native{ESP_OK};
+    // SDK v1 uses `rlsec` and namespaces of at most seven characters.
+    char partition[8]{};
+    char name_space[8]{};
+  };
+
   NvsBlobNamespace() = default;
   ~NvsBlobNamespace() override;
 
@@ -43,7 +56,8 @@ class NvsBlobNamespace final : public sdkv1::BlobNamespace {
   NvsBlobNamespace& operator=(const NvsBlobNamespace&) = delete;
 
   // `partition` nullptr selects the default "nvs" partition (bench only;
-  // the SDK v1 records belong in kSecurityNvsPartition).
+  // the SDK v1 records belong in kSecurityNvsPartition). The labels are
+  // snapshotted on entry so even a failed open stays attributable.
   Status open(const char* partition, const char* name_space) noexcept;
   void close() noexcept;
   bool is_open() const noexcept { return open_; }
@@ -54,11 +68,24 @@ class NvsBlobNamespace final : public sdkv1::BlobNamespace {
   Status blob_write(const char* key, ByteView data) noexcept override;
 
   WriteStats write_stats() const noexcept { return stats_; }
+  NvsLastError last_error() const noexcept { return last_; }
+  // Snapshotted open() labels ("", "" until the first open call).
+  const char* partition() const noexcept { return partition_; }
+  const char* name_space() const noexcept { return space_; }
 
  private:
+  // Keeps the last native cause and emits the operation/location/code to
+  // the device log without retaining a formatted buffer in each namespace.
+  Status note_error(const char* op, esp_err_t error, const char* failed_detail,
+                    const char* nospace_detail) noexcept;
+
   nvs_handle_t handle_{0};
   bool open_{false};
   WriteStats stats_{};
+  NvsLastError last_{};
+  // NVS labels are at most 15 chars + NUL each.
+  char partition_[16]{};
+  char space_[16]{};
 };
 
 }  // namespace routeloom::espnow

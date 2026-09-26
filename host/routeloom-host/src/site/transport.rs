@@ -142,6 +142,17 @@ pub enum DeliverReject {
     Closed,
 }
 
+impl DeliverReject {
+    /// Counter name for `Counters.downlink_rejected`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::QueueFull => "queue_full",
+            Self::TooLarge => "too_large",
+            Self::Closed => "closed",
+        }
+    }
+}
+
 /// Delivers the authority's outbound messages. Implementations must not
 /// block (the authority calls them with its lock released, but a slow
 /// transport would still stall the join driver) and must not call back

@@ -238,8 +238,20 @@ void PowerCoordinator::notify_diagnostic(const char* reason) noexcept {
   events_.on_diagnostic(reason);
 }
 
-void PowerCoordinator::transition(const PowerState next,
-                                  const char* reason) noexcept {
+namespace {
+
+void CopyReason(char (&out)[48], const char* reason) noexcept {
+  std::size_t i = 0;
+  if (reason != nullptr) {
+    for (; reason[i] != '\0' && i < 47; ++i) out[i] = reason[i];
+  }
+  out[i] = '\0';
+}
+
+}  // namespace
+
+void PowerCoordinator::transition(const PowerState next, const char* reason,
+                                  const MonotonicMs now_ms) noexcept {
   if (state_ == next) return;
   const PowerState from = state_;
   // Post-state notification: the new state is fully in effect (mask and
@@ -247,6 +259,26 @@ void PowerCoordinator::transition(const PowerState next,
   // observes `to` from state(). Mutating calls from the callback are Busy —
   // nothing overwrites this assignment behind the notification.
   state_ = next;
+  if (from == PowerState::Running && now_ms >= awake_entered_ms_) {
+    stats_.awake_ms += now_ms - awake_entered_ms_;
+  }
+  if (next == PowerState::Running) awake_entered_ms_ = now_ms;
+  if (next == PowerState::Sleeping) ++stats_.sleeps;
+  // Resuming entries from a plain boot (BOOT/COLD_START path) are not
+  // wakes — only the WAKE-family reasons count, split by reset cause.
+  if (next == PowerState::Resuming && reason != nullptr &&
+      (std::strcmp(reason, "WAKE") == 0 ||
+       std::strcmp(reason, "WAKE_DEEP_SLEEP") == 0)) {
+    ++stats_.wakes;
+    if (cause_ == ResetCause::DeepSleepWake) ++stats_.deep_wakes;
+    stats_.last_wake_cause = cause_;
+    stats_.last_wake_ms = now_ms;
+  }
+  stats_.state = next;
+  stats_.last_from = from;
+  stats_.last_to = next;
+  CopyReason(stats_.last_reason, reason);
+  stats_.last_ms = now_ms;
   notify_transition(from, next, reason);
 }
 
@@ -278,7 +310,8 @@ Status PowerCoordinator::begin(const ResetCause cause,
   begun_ = true;
   cause_ = cause;
   transition(PowerState::Resuming,
-             cause == ResetCause::DeepSleepWake ? "WAKE_DEEP_SLEEP" : "BOOT");
+             cause == ResetCause::DeepSleepWake ? "WAKE_DEEP_SLEEP" : "BOOT",
+             now_ms);
   resume_flow(cause, elapsed, now_ms);
   return Status::success();
 }
@@ -302,7 +335,8 @@ Status PowerCoordinator::sleep_prepare(const SleepRequest& request,
   return Status::success();
 }
 
-Status PowerCoordinator::sleep_abort(const char* reason) noexcept {
+Status PowerCoordinator::sleep_abort(const char* reason,
+                                     const MonotonicMs now_ms) noexcept {
   if (in_callback()) {
     return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
   }
@@ -312,7 +346,7 @@ Status PowerCoordinator::sleep_abort(const char* reason) noexcept {
   if (reason == nullptr) reason = "SLEEP_ABORT_REQUEST";
   // Immediate: the reason is consumed synchronously by the notification
   // below, never retained, so no copy is needed.
-  abort_to_running(reason);
+  abort_to_running(reason, StatusCode::Ok, now_ms);
   return Status::success();
 }
 
@@ -365,7 +399,7 @@ Status PowerCoordinator::run_enter(const SleepTicket& ticket,
   // Execution-start gate: the ticket was valid at receipt; re-check before
   // touching anything.
   if (!validate_enter(ticket, false)) {
-    abort_to_running("SLEEP_TICKET_INVALID");
+    abort_to_running("SLEEP_TICKET_INVALID", StatusCode::Ok, now_ms);
     return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
   }
   // Time spent waiting in READY_TO_SLEEP is real elapsed lifetime: plan the
@@ -406,7 +440,7 @@ Status PowerCoordinator::run_enter(const SleepTicket& ticket,
         ticket_ = SleepTicket{};
         sleep_image_armed_ = false;
         disk_pending_possible_ = true;
-        abort_to_running("SLEEP_SEQUENCE_EXHAUSTED");
+        abort_to_running("SLEEP_SEQUENCE_EXHAUSTED", StatusCode::Ok, now_ms);
         return Status::error(StatusCode::CounterExhausted,
                              "SLEEP_SEQUENCE_EXHAUSTED");
       }
@@ -416,7 +450,7 @@ Status PowerCoordinator::run_enter(const SleepTicket& ticket,
         // notification: the refresh never landed, so nothing terminated.
         ticket_ = SleepTicket{};
         sleep_image_armed_ = false;
-        abort_to_running(commit.detail);
+        abort_to_running(commit.detail, commit.code, now_ms);
         return commit;
       }
     }
@@ -438,29 +472,29 @@ Status PowerCoordinator::run_enter(const SleepTicket& ticket,
     notify_pending_result(record, StatusCode::Expired);
   }
   if (!validate_enter(ticket, false)) {
-    abort_to_running("SLEEP_TICKET_INVALID");
+    abort_to_running("SLEEP_TICKET_INVALID", StatusCode::Ok, now_ms);
     return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
   }
   // Handoff begins. SLEEP_ENTER reports "platform handoff in progress", not
   // proof of physical sleep: a failed wake setup still aborts from here.
   entering_ = true;
-  transition(PowerState::Sleeping, "SLEEP_ENTER");
+  transition(PowerState::Sleeping, "SLEEP_ENTER", now_ms);
   if (!validate_enter(ticket, true)) {
     entering_ = false;
-    abort_to_running("SLEEP_TICKET_INVALID");
+    abort_to_running("SLEEP_TICKET_INVALID", StatusCode::Ok, now_ms);
     return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
   }
   auto status = port_.configure_wake(request_.wake);
   if (!status) {
     entering_ = false;
-    abort_to_running("SLEEP_ENTER_FAILED");
+    abort_to_running("SLEEP_ENTER_FAILED", status.code, now_ms);
     return status;
   }
   // Final gate and the single port call with no application callback
   // between them: nothing can invalidate the ticket in this gap.
   if (!validate_enter(ticket, true)) {
     entering_ = false;
-    abort_to_running("SLEEP_TICKET_INVALID");
+    abort_to_running("SLEEP_TICKET_INVALID", StatusCode::Ok, now_ms);
     return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
   }
   ticket_ = SleepTicket{};  // consume: at most one platform enter per ticket
@@ -468,7 +502,7 @@ Status PowerCoordinator::run_enter(const SleepTicket& ticket,
   status = port_.enter_sleep();
   entering_ = false;
   if (!status) {
-    abort_to_running("SLEEP_ENTER_FAILED");
+    abort_to_running("SLEEP_ENTER_FAILED", status.code, now_ms);
     return status;
   }
   return Status::success();
@@ -484,29 +518,29 @@ Status PowerCoordinator::wake(const ResetCause cause,
     return Status::error(StatusCode::InvalidState, "not sleeping");
   }
   cause_ = cause;
-  transition(PowerState::Resuming, "WAKE");
+  transition(PowerState::Resuming, "WAKE", now_ms);
   resume_flow(cause, elapsed, now_ms);
   return Status::success();
 }
 
-Status PowerCoordinator::notify_app_event() noexcept {
+Status PowerCoordinator::notify_app_event(const MonotonicMs now_ms) noexcept {
   if (in_callback()) {
     return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
   }
   ++app_events_;
   if (sleep_attempt_active()) {
-    abort_to_running("SLEEP_TICKET_INVALID");
+    abort_to_running("SLEEP_TICKET_INVALID", StatusCode::Ok, now_ms);
   }
   return Status::success();
 }
 
-Status PowerCoordinator::notify_radio_reset() noexcept {
+Status PowerCoordinator::notify_radio_reset(const MonotonicMs now_ms) noexcept {
   if (in_callback()) {
     return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
   }
   ++radio_generation_;
   if (sleep_attempt_active()) {
-    abort_to_running("SLEEP_TICKET_INVALID");
+    abort_to_running("SLEEP_TICKET_INVALID", StatusCode::Ok, now_ms);
   }
   return Status::success();
 }
@@ -530,7 +564,7 @@ void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
       // Radio is quiesced; a ticket invalidated by late activity aborts the
       // sleep attempt instead of entering on a stale snapshot.
       if (!ticket_valid(ticket_)) {
-        abort_to_running("SLEEP_TICKET_INVALID");
+        abort_to_running("SLEEP_TICKET_INVALID", StatusCode::Ok, now_ms);
       }
       break;
     case PowerState::Resuming:
@@ -539,7 +573,7 @@ void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
       // callback or an app send must not count as peers answering.
       if (node_.rx_generation() != confirm_baseline_) {
         outcome_ = ResumeOutcome::FastResume;
-        transition(PowerState::Running, "RESUME_CONFIRMED");
+        transition(PowerState::Running, "RESUME_CONFIRMED", now_ms);
       } else if (now_ms >= resume_deadline_ms_) {
         if (!discovery_started_) {
           discovery_started_ = true;
@@ -548,7 +582,7 @@ void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
                                       : discovery.detail);
         }
         outcome_ = ResumeOutcome::DiscoveryRequired;
-        transition(PowerState::Running, "RESUME_UNCONFIRMED");
+        transition(PowerState::Running, "RESUME_UNCONFIRMED", now_ms);
       }
       break;
     case PowerState::Persisting:
@@ -563,18 +597,18 @@ void PowerCoordinator::start_prepare(const SleepRequest& request,
   node_.set_draining(true);
   drain_deadline_ms_ = start_at + config_.drain_timeout_ms;
   sleep_image_armed_ = false;
-  transition(PowerState::Draining, "SLEEP_PREPARE");
+  transition(PowerState::Draining, "SLEEP_PREPARE", start_at);
 }
 
 void PowerCoordinator::settle_current_attempt(const MonotonicMs now_ms) noexcept {
   transition(PowerState::Persisting,
-             node_.quiesced() ? "DRAIN_SETTLED" : "DRAIN_DEADLINE");
+             node_.quiesced() ? "DRAIN_SETTLED" : "DRAIN_DEADLINE", now_ms);
   // Phase 1: plan and commit WITHOUT changing delivery state or notifying.
   // A failure here aborts with live work, carry set and holds untouched.
   plan_sleep_image(now_ms);
   const auto status = persist_image(now_ms);
   if (!status) {
-    abort_to_running(status.detail);
+    abort_to_running(status.detail, status.code, now_ms);
     return;
   }
   // Phase 2: the image is durable — only now settle. Every callback below
@@ -601,14 +635,14 @@ void PowerCoordinator::settle_current_attempt(const MonotonicMs now_ms) noexcept
     if (released == SleepHoldRelease::NonePending) break;
     if (released == SleepHoldRelease::StreamInvariant) {
       // Holds are kept; the attempt cannot honestly proceed to a ticket.
-      abort_to_running("GROUP_HOLD_STREAM_MISSING");
+      abort_to_running("GROUP_HOLD_STREAM_MISSING", StatusCode::Ok, now_ms);
       return;
     }
   }
   node_.quiesce_for_sleep();
   const auto radio = port_.quiesce_radio();
   if (!radio) {
-    abort_to_running(radio.detail);
+    abort_to_running(radio.detail, radio.code, now_ms);
     return;
   }
   radio_quiesced_ = true;
@@ -619,12 +653,12 @@ void PowerCoordinator::settle_current_attempt(const MonotonicMs now_ms) noexcept
   // work_generation bump is baked into the freshly issued ticket, and the
   // caller already saw the deterministic NODE_DRAINING error.
   if (!sleep_books_consistent()) {
-    abort_to_running("SLEEP_BOOKS_INCONSISTENT");
+    abort_to_running("SLEEP_BOOKS_INCONSISTENT", StatusCode::Ok, now_ms);
     return;
   }
   issue_ticket();
   sleep_image_armed_ = true;
-  transition(PowerState::ReadyToSleep, "SLEEP_READY");
+  transition(PowerState::ReadyToSleep, "SLEEP_READY", now_ms);
 }
 
 void PowerCoordinator::plan_sleep_image(const MonotonicMs now_ms) noexcept {
@@ -1018,7 +1052,7 @@ void PowerCoordinator::resume_flow(const ResetCause cause,
     outcome_ = usable ? ResumeOutcome::ColdStart
                       : (expected || found) ? ResumeOutcome::CacheLost
                                             : ResumeOutcome::ColdStart;
-    transition(PowerState::Running, "COLD_START");
+    transition(PowerState::Running, "COLD_START", now_ms);
     return;
   }
   confirm_baseline_ = node_.rx_generation();
@@ -1074,7 +1108,46 @@ void PowerCoordinator::restore_pending(const PowerImage& image,
   }
 }
 
-void PowerCoordinator::abort_to_running(const char* reason) noexcept {
+void PowerCoordinator::note_abort(const char* reason, const StatusCode code,
+                                     const MonotonicMs now_ms) noexcept {
+  ++stats_.aborts;
+  CopyReason(stats_.last_abort, reason);
+  stats_.last_abort_ms = now_ms;
+  if (reason != nullptr) {
+    if (std::strcmp(reason, "SLEEP_ABORT_REQUEST") == 0) {
+      ++stats_.aborts_abort_request;
+      return;
+    }
+    if (std::strcmp(reason, "SLEEP_TICKET_INVALID") == 0) {
+      ++stats_.aborts_ticket_invalid;
+      return;
+    }
+    if (std::strcmp(reason, "SLEEP_SEQUENCE_EXHAUSTED") == 0) {
+      ++stats_.aborts_sequence_exhausted;
+      return;
+    }
+    if (std::strcmp(reason, "SLEEP_ENTER_FAILED") == 0) {
+      ++stats_.aborts_enter_failed;
+      return;
+    }
+    if (std::strcmp(reason, "GROUP_HOLD_STREAM_MISSING") == 0) {
+      ++stats_.aborts_group_hold_missing;
+      return;
+    }
+    if (std::strcmp(reason, "SLEEP_BOOKS_INCONSISTENT") == 0) {
+      ++stats_.aborts_books_inconsistent;
+      return;
+    }
+  }
+  if (code == StatusCode::StorageFailure) {
+    ++stats_.aborts_storage;
+    return;
+  }
+  ++stats_.aborts_other;
+}
+
+void PowerCoordinator::abort_to_running(const char* reason, const StatusCode code,
+                                        const MonotonicMs now_ms) noexcept {
   // All teardown first, notifications last: a mutating call inside the
   // notifications below is Busy — it can never re-run this worker.
   ticket_ = SleepTicket{};
@@ -1088,6 +1161,16 @@ void PowerCoordinator::abort_to_running(const char* reason) noexcept {
   node_.set_draining(false);
   const PowerState from = state_;
   state_ = PowerState::Running;
+  awake_entered_ms_ = now_ms;
+  note_abort(reason, code, now_ms);
+  stats_.state = PowerState::Running;
+  stats_.last_from = from;
+  stats_.last_to = PowerState::Running;
+  // The retained last transition mirrors the observer-visible stream: the
+  // synthetic SLEEP_ABORTED edge, with the real reason kept in last_abort.
+  CopyReason(stats_.last_reason,
+             from != PowerState::Running ? "SLEEP_ABORTED" : reason);
+  stats_.last_ms = now_ms;
   notify_diagnostic(reason);
   // A failed radio restart is surfaced, never hidden: RUNNING means control
   // is back with the owner, not that the radio is healthy. The ticket stays
