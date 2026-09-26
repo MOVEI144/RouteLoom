@@ -175,6 +175,41 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(len(state.routes), 2)
         self.assertIsNone(route_hops(state, 's', '01', '03'))
 
+    def test_delayed_old_boot_removal_does_not_erase_new_incarnation(self):
+        clock = FakeClock()
+        base = {'source': 'daemon', 'source_epoch': 'session', 'scope': 's'}
+        events = [
+            {**base, 'source_seq': 1, 'kind': 'node', 'payload': {'node': '02', 'boot': 'old'}},
+            {**base, 'source_seq': 2, 'kind': 'node', 'payload': {'node': '02', 'boot': 'new'}},
+            {**base, 'source_seq': 3, 'kind': 'node',
+             'payload': {'node': '02', 'boot': 'old', 'removed': True}},
+            {**base, 'source_seq': 4, 'kind': 'route',
+             'payload': {'observer': '02', 'destination': '01', 'boot': 'old', 'valid': True}},
+            {**base, 'source_seq': 5, 'kind': 'route',
+             'payload': {'observer': '02', 'destination': '01', 'boot': 'new', 'valid': True}},
+            {**base, 'source_seq': 6, 'kind': 'route',
+             'payload': {'observer': '02', 'destination': '01', 'boot': 'old', 'removed': True}},
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'boot.rlcapture'
+            with Capture(path, 'boot') as cap:
+                for event in events:
+                    clock.advance(1)
+                    cap.add(event, clock)
+            state = replay(path)
+            self.assertEqual(state.nodes['s:02']['boot'], 'new')
+            self.assertEqual(state.routes['s:02:01']['boot'], 'new')
+            self.assertEqual(state, replay(path, until_seq=6))
+
+    def test_removal_from_one_source_keeps_other_source_observation(self):
+        state = State()
+        for source, boot in [('gateway', 'a'), ('reference-usb', 'a')]:
+            reduce(state, {'source': source, 'scope': 's', 'kind': 'node',
+                           'payload': {'node': '02', 'boot': boot}})
+        reduce(state, {'source': 'gateway', 'scope': 's', 'kind': 'node',
+                       'payload': {'node': '02', 'boot': 'a', 'removed': True}})
+        self.assertEqual(state.nodes['s:02']['_source'], 'reference-usb')
+
     def test_fake_api1_fragmented_and_reordered(self):
         server = FakeAPI1()
         self.assertEqual(server.feed(b'API1 {"v":1,"request_id":"a",')[0:1], [])

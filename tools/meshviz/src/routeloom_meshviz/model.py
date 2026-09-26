@@ -74,7 +74,10 @@ def reduce(state: State, event: dict) -> State:
         item = event['payload']
         key = _key(scope, kind + 's', item)
         if item.get('removed'):
-            table.pop(key, None)
+            old = table.get(key)
+            # A delayed removal from an earlier boot cannot retire a newer incarnation.
+            if old and old.get('_source') == source and item.get('boot') not in old.get('_old_boots', []):
+                table.pop(key, None)
         else:
             _update(table, key, item, source)
     elif kind == 'sample':
