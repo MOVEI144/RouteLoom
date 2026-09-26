@@ -28,6 +28,10 @@ class CaptureReader:
             raise ValueError('unsupported SQLite schema')
         # (seq, t_mono_ns, t_unix_ns); a one-hour capture is tens of thousands of rows.
         self.index = self.db.execute('SELECT seq,t_mono_ns,t_unix_ns FROM events ORDER BY seq').fetchall()
+        # Pre-index captures store metric_samples(seq, series, value_json);
+        # their sample timestamps live on the joined events row (same seq).
+        columns = {row[1] for row in self.db.execute('PRAGMA table_info(metric_samples)')}
+        self._samples_legacy = 't_unix_ns' not in columns
 
     def close(self):
         self.db.close()
@@ -62,12 +66,21 @@ class CaptureReader:
             applied.append(event)
         return applied
 
+    def sample_rows(self, until_seq):
+        """(seq, t_mono_ns, t_unix_ns, series, value_json) up to seq, either table layout."""
+        if self._samples_legacy:
+            return self.db.execute(
+                'SELECT m.seq,e.t_mono_ns,e.t_unix_ns,m.series,m.value_json '
+                'FROM metric_samples m JOIN events e ON e.seq=m.seq '
+                'WHERE m.seq<=? ORDER BY m.seq', (until_seq,))
+        return self.db.execute(
+            'SELECT seq,t_mono_ns,t_unix_ns,series,value_json FROM metric_samples '
+            'WHERE seq<=? ORDER BY seq', (until_seq,))
+
     def series(self, until_seq, names=None, points=SERIES_POINTS):
         """series → [(t_unix_ms, value)] up to seq; the newest `points` samples per series."""
         result = {}
-        for seq, t_unix_ns, series, value_json in self.db.execute(
-                'SELECT seq,t_unix_ns,series,value_json FROM metric_samples WHERE seq<=? ORDER BY seq',
-                (until_seq,)):
+        for seq, t_mono_ns, t_unix_ns, series, value_json in self.sample_rows(until_seq):
             if names is not None and series not in names:
                 continue
             value = json.loads(value_json)
@@ -152,9 +165,7 @@ def export_capture(path, out_dir, until_seq=None):
             {**item, 'scope': key.split(':')[0], 'source': item.get('_source')}
             for key, item in sorted(state.routes.items())))
         def samples():
-            for seq, t_mono, t_unix, series, value_json in reader.db.execute(
-                    'SELECT seq,t_mono_ns,t_unix_ns,series,value_json FROM metric_samples '
-                    'WHERE seq<=? ORDER BY seq', (limit,)):
+            for seq, t_mono, t_unix, series, value_json in reader.sample_rows(limit):
                 value = json.loads(value_json)
                 yield {'seq': seq, 't_mono_ns': t_mono, 't_utc': _iso(t_unix // 1_000_000),
                        'series': series, 'value': value.get('value'), 'unit': value.get('unit'),
