@@ -137,13 +137,15 @@ impl Drop for DeviceRow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LedgerRow {
     pub seq: u64,
-    /// "approve", "revoke", "reissue" or "cutover".
+    /// "approve", "revoke", "reissue", "cutover" or "archive".
     pub kind: String,
     pub node: u64,
     pub kid: [u8; 32],
     pub generation: u32,
-    /// SHA-256 of the MemberCert (approve/reissue), of the RRS1 object
-    /// (revoke) or of the CutoverCommit object (cutover).
+    /// SHA-256 of the MemberCert (approve/reissue/archive — the archived
+    /// row's last MemberCert, binding the entry to the credential being
+    /// forgotten), of the RRS1 object (revoke) or of the CutoverCommit
+    /// object (cutover).
     pub digest: [u8; 32],
     pub ms: u64,
     pub hash: [u8; 32],
@@ -191,6 +193,9 @@ pub enum RotationWrite {
 pub struct Batch {
     pub meta: Vec<(&'static str, Vec<u8>)>,
     pub devices: Vec<DeviceRow>,
+    /// Delete exactly these device rows (archive drops removed rows; the
+    /// ledger keeps every row, so the no-reissue history survives).
+    pub devices_delete: Vec<u64>,
     pub ledger: Vec<LedgerRow>,
     pub rrs: Vec<(u32, Vec<u8>)>,
     pub group_keys: Vec<GroupKeyRow>,
@@ -210,6 +215,7 @@ impl Batch {
     pub fn is_empty(&self) -> bool {
         self.meta.is_empty()
             && self.devices.is_empty()
+            && self.devices_delete.is_empty()
             && self.ledger.is_empty()
             && self.rrs.is_empty()
             && self.group_keys.is_empty()
@@ -242,6 +248,9 @@ impl Snapshot {
         for row in &batch.devices {
             self.devices.retain(|d| d.node != row.node);
             self.devices.push(row.clone());
+        }
+        for node in &batch.devices_delete {
+            self.devices.retain(|d| &d.node != node);
         }
         self.ledger.extend(batch.ledger.iter().cloned());
         for (epoch, object) in &batch.rrs {
@@ -925,6 +934,9 @@ impl SiteStore for SqliteSiteStore {
                 ],
             )?;
         }
+        for node in &batch.devices_delete {
+            tx.execute("DELETE FROM devices WHERE node = ?1", params![i(*node)])?;
+        }
         for l in &batch.ledger {
             tx.execute(
                 "INSERT INTO ledger (seq, kind, node, kid, generation, digest, ms, hash)
@@ -1079,6 +1091,7 @@ mod tests {
             let batch = Batch {
                 meta: vec![("rs_epoch", 5_u32.to_be_bytes().to_vec())],
                 devices: vec![device.clone()],
+                devices_delete: Vec::new(),
                 ledger: vec![LedgerRow {
                     seq: 1,
                     kind: "approve".into(),

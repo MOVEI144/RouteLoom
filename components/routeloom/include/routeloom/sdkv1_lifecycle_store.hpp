@@ -66,6 +66,9 @@ class LifecycleStore final {
   // A valid Removing/Holdoff survivor may repair a known corrupt sibling,
   // but only after the caller has reverified the signed payload and binding.
   Status resume_removal(const LifecycleRecord& verified) noexcept;
+  // Erase both slots back to factory-empty (deprovision): no journal, no
+  // impairment, the RAM record zeroed. Works from any state.
+  Status clear() noexcept;
   bool has_record() const noexcept { return pair_.has_active(); }
   bool quarantined() const noexcept { return pair_.quarantined(); }
   bool uncertain() const noexcept { return pair_.uncertain(); }

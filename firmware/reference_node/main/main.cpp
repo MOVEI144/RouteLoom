@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "esp_app_desc.h"
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -689,6 +690,11 @@ extern "C" void app_main(void) {
   status = routeloom::espnow::run_maintenance_console(sdkv1_stores);
   fail(status.detail);
 #endif
+  // 07 §6 shipping marker: this line only runs in the field build (the
+  // console path above never returns). The office matches fw= against the
+  // flashed image's project_description.json and the `sdkv1 identity`
+  // node= above against the inventory row.
+  ESP_LOGI(kTag, "routeloom field boot: fw=%s", esp_app_get_description()->version);
 
   if (routeloom::espnow::nvs_namespace_in_use(NVS_DEFAULT_PART_NAME,
                                               "rlcounter") ||

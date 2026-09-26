@@ -75,6 +75,13 @@ Status BlobRecordSlotStorage::write(const std::uint8_t slot, const ByteView data
   return blobs_.blob_write(keys_[slot], data);
 }
 
+Status BlobRecordSlotStorage::erase(const std::uint8_t slot) noexcept {
+  if (slot >= SealedSlotPair::kSlots) {
+    return Status::error(StatusCode::InvalidArgument, "record slot erase arguments");
+  }
+  return blobs_.blob_erase(keys_[slot]);
+}
+
 BlobRecordSlotStorage BlobRecordSlotStorage::identity(BlobNamespace& blobs) noexcept {
   return BlobRecordSlotStorage(blobs, kIdentityKey0, kIdentityKey1, kIdentitySlotBytes);
 }

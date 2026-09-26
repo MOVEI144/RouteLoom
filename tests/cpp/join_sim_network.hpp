@@ -102,6 +102,11 @@ class LoggingStorage final : public RecordSlotStorage {
     log_.push_back(StorageOp{'w', slot, data.size, now_ms, status.code});
     return status;
   }
+  Status erase(const std::uint8_t slot) noexcept override {
+    const Status status = inner_.erase(slot);
+    log_.push_back(StorageOp{'e', slot, 0, now_ms, status.code});
+    return status;
+  }
   std::size_t writes() const noexcept {
     std::size_t n = 0;
     for (const auto& op : log_)

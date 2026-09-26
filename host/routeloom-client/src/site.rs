@@ -28,13 +28,14 @@ use std::sync::Mutex;
 use crate::{NodeId, TransportError};
 
 /// Event kinds the Site Authority emits (07 §2.3 as implemented).
-pub const SITE_EVENT_KINDS: [&str; 12] = [
+pub const SITE_EVENT_KINDS: [&str; 13] = [
     "join.request",
     "join.decided",
     "device.discovered",
     "member.reissued",
     "member.confirmed",
     "member.revoked",
+    "member.archived",
     "member.removal_notified",
     "rrs.published",
     "gk.staged",

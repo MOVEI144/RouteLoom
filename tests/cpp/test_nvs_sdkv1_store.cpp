@@ -14,7 +14,7 @@ static_assert(sizeof(routeloom::espnow::NvsBlobNamespace) <= 128,
 namespace {
 // Scriptable NVS fake: fail_op selects the call that refuses, fail_code the
 // native error it returns. Everything else succeeds against one blob slot.
-enum class FailOp { kNone, kOpen, kSize, kRead, kWrite, kCommit };
+enum class FailOp { kNone, kOpen, kSize, kRead, kWrite, kErase, kCommit };
 FailOp fail_op = FailOp::kNone;
 esp_err_t fail_code = ESP_OK;
 std::string stored;
@@ -70,6 +70,13 @@ esp_err_t nvs_set_blob(nvs_handle_t, const char*, const void* data, std::size_t 
   if (ShouldFail(FailOp::kWrite, &code)) return code;
   stored.assign(static_cast<const char*>(data), length);
   stored_live = true;
+  return ESP_OK;
+}
+esp_err_t nvs_erase_key(nvs_handle_t, const char*) {
+  esp_err_t code = ESP_OK;
+  if (ShouldFail(FailOp::kErase, &code)) return code;
+  if (!stored_live) return ESP_ERR_NVS_NOT_FOUND;
+  stored_live = false;
   return ESP_OK;
 }
 esp_err_t nvs_commit(nvs_handle_t) {
@@ -177,6 +184,36 @@ int CheckRoundTrip() {
   CHECK(read_len == 5 && std::memcmp(out, "hello", 5) == 0);
   return 0;
 }
+
+int CheckEraseFailuresAndAbsence() {
+  Reset();
+  routeloom::espnow::NvsBlobNamespace store;
+  CHECK(OpenStore(store));
+  CHECK(store.blob_erase("k").ok());
+  CHECK(store.write_stats().commits == 0);
+  const routeloom::ByteView data{reinterpret_cast<const std::uint8_t*>("v"), 1};
+  CHECK(store.blob_write("k", data).ok());
+  fail_op = FailOp::kErase;
+  fail_code = ESP_ERR_NVS_NOT_ENOUGH_SPACE;
+  const auto erase = store.blob_erase("k");
+  CHECK(!erase.ok() && erase.code == routeloom::StatusCode::StorageFailure);
+  CHECK(std::strstr(erase.detail, "space") != nullptr);
+  CHECK(std::strcmp(store.last_error().op, "blob_erase") == 0);
+  CHECK(store.last_error().native == ESP_ERR_NVS_NOT_ENOUGH_SPACE);
+  CHECK(store.write_stats().commits == 1);
+  fail_op = FailOp::kCommit;
+  fail_code = ESP_ERR_INVALID_ARG;
+  const auto commit = store.blob_erase("k");
+  CHECK(!commit.ok() && commit.code == routeloom::StatusCode::StorageFailure);
+  CHECK(std::strcmp(store.last_error().op, "commit") == 0);
+  CHECK(store.last_error().native == ESP_ERR_INVALID_ARG);
+  CHECK(store.write_stats().commits == 1);
+  fail_op = FailOp::kNone;
+  CHECK(store.blob_write("k", data).ok());
+  CHECK(store.blob_erase("k").ok());
+  CHECK(store.write_stats().commits == 3);
+  return 0;
+}
 }  // namespace
 
 int CheckLastErrorSticky() {
@@ -235,6 +272,7 @@ int main() {
   if (CheckWriteGeneric() != 0) return 1;
   if (CheckCommitSpace() != 0) return 1;
   if (CheckRoundTrip() != 0) return 1;
+  if (CheckEraseFailuresAndAbsence() != 0) return 1;
   if (CheckLastErrorSticky() != 0) return 1;
   if (CheckOpenFailureAttributed() != 0) return 1;
   if (CheckLastErrorKeepsItsNamespace() != 0) return 1;

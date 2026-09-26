@@ -366,6 +366,16 @@ Status SealedSlotPair::commit_twin_prepared(const std::size_t used_len) noexcept
   return Status::success();
 }
 
+Status SealedSlotPair::erase_all() noexcept {
+  // Both slots are attempted even when the first fails, so one bad slot
+  // cannot pin the other slot's record in place.
+  Status first = storage_.erase(0);
+  const Status second = storage_.erase(1);
+  if (!first) return first;
+  if (!second) return second;
+  return initialize();
+}
+
 // --- IdentityStore ---------------------------------------------------------------
 
 IdentityStore::IdentityStore(RecordSlotStorage& storage) noexcept
@@ -412,6 +422,20 @@ Status IdentityStore::recover(const IdentityRecord& record) noexcept {
   if (status) status = pair_.commit_twin_prepared(used_len);
   if (!status) return status;
   identity_ = record;
+  return Status::success();
+}
+
+Status IdentityStore::clear() noexcept {
+  const Status status = pair_.erase_all();
+  secure_clear(scratch_.bytes.data(), scratch_.bytes.size());
+  scratch_.size = 0;
+  if (!status) {
+    // A failed erase leaves unknown slot state: re-observe rather than
+    // claim an empty store, so the next deprovision retries honestly.
+    (void)initialize();
+    return status;
+  }
+  identity_ = IdentityRecord{};
   return Status::success();
 }
 

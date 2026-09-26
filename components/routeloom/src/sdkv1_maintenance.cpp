@@ -2,6 +2,7 @@
 
 #include <cstring>
 
+#include "routeloom/discovery_scope.hpp"
 #include "routeloom/sdkv1_pop.hpp"
 #include "routeloom/secure_clear.hpp"
 
@@ -34,6 +35,15 @@ class Response {
     size_ += length;
     return true;
   }
+  bool put_bytes(const std::uint8_t* data, const std::size_t length) noexcept {
+    if (!ok_ || (length > 0 && data == nullptr) || length > capacity_ - size_) {
+      ok_ = false;
+      return false;
+    }
+    std::memcpy(buffer_ + size_, data, length);
+    size_ += length;
+    return true;
+  }
   bool put_hex(const std::uint8_t* data, const std::size_t size) noexcept {
     static constexpr char kDigits[] = "0123456789abcdef";
     if (!ok_ || data == nullptr || size > (capacity_ - size_) / 2) {
@@ -45,6 +55,29 @@ class Response {
       buffer_[size_++] = kDigits[data[i] & 0xF];
     }
     return true;
+  }
+  bool put_u64_hex(const std::uint64_t value) noexcept {
+    std::uint8_t raw[8]{};
+    for (int i = 7; i >= 0; --i) {
+      raw[i] = static_cast<std::uint8_t>(value >> (8 * (7 - i)));
+    }
+    return put_hex(raw, sizeof(raw));
+  }
+  bool put_uint(const std::uint32_t value) noexcept {
+    char text[11]{};
+    std::size_t length = 0;
+    std::uint32_t rest = value;
+    do {
+      text[length++] = static_cast<char>('0' + (rest % 10));
+      rest /= 10;
+    } while (rest != 0);
+    for (std::size_t i = 0; i < length / 2; ++i) {
+      const char swap = text[i];
+      text[i] = text[length - 1 - i];
+      text[length - 1 - i] = swap;
+    }
+    text[length] = '\0';
+    return put(text);
   }
   bool finish() noexcept {
     if (!ok_ || size_ >= capacity_) {
@@ -117,6 +150,20 @@ Line split_line(const ByteView line) noexcept {
 bool verb_is(const ByteView verb, const char* name) noexcept {
   const std::size_t length = std::strlen(name);
   return verb.size == length && std::memcmp(verb.data, name, length) == 0;
+}
+
+// A firmware version is a short printable token (no spaces: the receipt is
+// space-separated). Anything else — including unset — reports `unknown`
+// so the office rejects instead of mis-matching.
+bool firmware_version_valid(const ByteView version) noexcept {
+  if (version.data == nullptr || version.size == 0 ||
+      version.size > routeloom::sdkv1::kMaintenanceFwVersionMax) {
+    return false;
+  }
+  for (std::size_t i = 0; i < version.size; ++i) {
+    if (version.data[i] < 0x21 || version.data[i] > 0x7E) return false;
+  }
+  return true;
 }
 
 bool parse_node(const ByteView text, NodeId& node) noexcept {
@@ -362,9 +409,23 @@ MaintenanceConsole::MaintenanceConsole(IdentityStore& store,
                                        EntropySource& entropy) noexcept
     : store_(store), entropy_(entropy) {}
 
+MaintenanceConsole::MaintenanceConsole(IdentityStore& store, EntropySource& entropy,
+                                       const MaintenanceWipeStores& wipe) noexcept
+    : store_(store), entropy_(entropy), wipe_(wipe) {}
+
 MaintenanceConsole::~MaintenanceConsole() noexcept {
   secure_clear(pending_scalar_);
   pending_pubkey_ = P256PublicKey{};
+  burn_deprovision_challenge();
+}
+
+void MaintenanceConsole::burn_deprovision_challenge() noexcept {
+  deprovision_pending_ = false;
+  deprovision_bound_ = false;
+  deprovision_impaired_ = false;
+  deprovision_node_ = kInvalidNodeId;
+  secure_clear(deprovision_kid_);
+  secure_clear(deprovision_nonce_);
 }
 
 Status MaintenanceConsole::process_line(const ByteView line, char* response,
@@ -387,16 +448,27 @@ Status MaintenanceConsole::process_line(const ByteView line, char* response,
   };
   // Fresh store state on every line: impairment is observed, never cached.
   // (An uncertain/quarantined store reports an error *and* its flag; an
-  // unreadable one reports the fault with no flags — all three refuse.)
+  // unreadable one reports the fault with no flags.) State refusals still
+  // dominate input errors, except the verbs that must work through them:
+  // `status`/`lock` stay readable on a locked seal, and the deprovision
+  // pair runs on an impaired store too (that is often why it runs).
   const Status store_status = store_.initialize();
-  if (!store_status.ok() || store_.quarantined() || store_.uncertain()) {
+  const Line tokens = split_line(line);
+  const bool impaired =
+      !store_status.ok() || store_.quarantined() || store_.uncertain();
+  const bool locked = !impaired && store_.has_identity() &&
+                      (store_.identity().flags & kIdentityFlagConsoleLocked) != 0;
+  const bool deprovision_line =
+      tokens.valid && (verb_is(tokens.verb, "deprovision") ||
+                       verb_is(tokens.verb, "deprovision_confirm"));
+  if (impaired && !deprovision_line) {
     return fail("store_unavailable");
   }
-  if (store_.has_identity() &&
-      (store_.identity().flags & kIdentityFlagConsoleLocked) != 0) {
+  const bool receipt_line = tokens.valid && (verb_is(tokens.verb, "status") ||
+                                             verb_is(tokens.verb, "lock"));
+  if (locked && !receipt_line && !deprovision_line) {
     return fail("locked");
   }
-  const Line tokens = split_line(line);
   if (!tokens.valid) {
     return fail("invalid_argument");
   }
@@ -408,6 +480,78 @@ Status MaintenanceConsole::process_line(const ByteView line, char* response,
     out.put(store_.has_identity() ? "sealed" : "none");
     out.put(" pending=");
     out.put(has_pending_ ? "1" : "0");
+    out.put(" locked=");
+    out.put(locked ? "1" : "0");
+    if (store_.has_identity()) {
+      // The manufacturing receipt: non-secret identifiers only, so the
+      // office can match the device against its inventory row — after a
+      // lost response, after a lock, after a USB mixup.
+      const IdentityRecord& sealed = store_.identity();
+      CertClaims claims{};
+      if (!cert_decode(ByteView{sealed.devcert.bytes.data(), sealed.devcert.size},
+                       claims)
+               .ok() ||
+          claims.type != CertType::Device) {
+        return fail("store_unavailable");
+      }
+      out.put(" node=");
+      out.put_u64_hex(sealed.node_id);
+      out.put(" kid=");
+      out.put_hex(sealed.kid.data(), sealed.kid.size());
+      out.put(" serial=");
+      out.put_uint(claims.serial);
+      out.put(" devcert_sha256=");
+      ScopeDigest digest{};
+      sha256(ByteView{sealed.devcert.bytes.data(), sealed.devcert.size}, digest);
+      out.put_hex(digest.data(), digest.size());
+    }
+    out.put(" fw=");
+    if (firmware_version_valid(firmware_version_)) {
+      out.put_bytes(firmware_version_.data, firmware_version_.size);
+    } else {
+      out.put("unknown");
+    }
+    if (!out.finish()) {
+      return Status::error(StatusCode::InternalError, "console response");
+    }
+    response_size = out.size();
+    return Status::success();
+  }
+  if (verb_is(tokens.verb, "lock")) {
+    if (tokens.argc != 1) {
+      return fail("invalid_argument");
+    }
+    Digest256 kid{};
+    std::size_t kid_len = 0;
+    if (!hex_decode(tokens.args[0], kid.data(), kid.size(), kid_len) ||
+        kid_len != kid.size()) {
+      return fail("invalid_argument");
+    }
+    if (!store_.has_identity()) {
+      return fail("no_identity");
+    }
+    const IdentityRecord& sealed = store_.identity();
+    if (kid != sealed.kid) {
+      return fail("key_mismatch");
+    }
+    // Idempotent finalize bound to the matched target: re-locking the
+    // same seal replays the success instead of refusing.
+    if ((sealed.flags & kIdentityFlagConsoleLocked) == 0) {
+      IdentityRecord record = sealed;
+      record.flags |= kIdentityFlagConsoleLocked;
+      if (!store_.commit(record).ok()) {
+        return fail("lock_failed");
+      }
+      // Readback: re-read the store like a fresh boot and confirm the
+      // adopted record is the locked one before claiming success.
+      const Status reread = store_.initialize();
+      if (!reread.ok() || !store_.has_identity() ||
+          !identity_equal(store_.identity(), record)) {
+        return fail("lock_failed");
+      }
+    }
+    out.put("OK locked kid=");
+    out.put_hex(kid.data(), kid.size());
     if (!out.finish()) {
       return Status::error(StatusCode::InternalError, "console response");
     }
@@ -477,9 +621,6 @@ Status MaintenanceConsole::process_line(const ByteView line, char* response,
     if (tokens.argc != 1) {
       return fail("invalid_argument");
     }
-    if (store_.has_identity()) {
-      return fail("already_provisioned");
-    }
     std::uint8_t bundle_text[kMaintenanceBundleMax]{};
     std::size_t bundle_len = 0;
     if (!hex_decode(tokens.args[0], bundle_text, sizeof(bundle_text), bundle_len) ||
@@ -490,6 +631,33 @@ Status MaintenanceConsole::process_line(const ByteView line, char* response,
     BundleParser parser(ByteView{bundle_text, bundle_len});
     if (!parser.parse(bundle)) {
       return fail("invalid_argument");
+    }
+    if (store_.has_identity()) {
+      // A lost USB response re-asks with the identical bundle: replay the
+      // success without touching the seal (the pending key is gone after
+      // a reconnect, so the replay must not need it). Anything else for
+      // the same slot is a provisioning conflict.
+      const IdentityRecord& sealed = store_.identity();
+      IdentityRecord candidate{};
+      candidate.node_id = bundle.node;
+      candidate.key_location = sealed.key_location;
+      candidate.flags = bundle.flags;
+      candidate.kid = bundle.kid;
+      candidate.pubkey = bundle.pubkey;
+      candidate.key_material = sealed.key_material;
+      candidate.anchors = bundle.anchors;
+      candidate.anchor_count = bundle.anchor_count;
+      candidate.devcert = bundle.devcert;
+      if (!identity_equal(candidate, sealed)) {
+        return fail("already_provisioned");
+      }
+      out.put("OK sealed kid=");
+      out.put_hex(sealed.kid.data(), sealed.kid.size());
+      if (!out.finish()) {
+        return Status::error(StatusCode::InternalError, "console response");
+      }
+      response_size = out.size();
+      return Status::success();
     }
     if (!has_pending_) {
       return fail("no_pending_key");
@@ -534,6 +702,139 @@ Status MaintenanceConsole::process_line(const ByteView line, char* response,
     has_pending_ = false;
     out.put("OK sealed kid=");
     out.put_hex(bundle.kid.data(), bundle.kid.size());
+    if (!out.finish()) {
+      return Status::error(StatusCode::InternalError, "console response");
+    }
+    response_size = out.size();
+    return Status::success();
+  }
+  if (verb_is(tokens.verb, "deprovision")) {
+    if (tokens.argc != 0) {
+      return fail("invalid_argument");
+    }
+    if (!wipe_ready()) {
+      return fail("unsupported");
+    }
+    std::array<std::uint8_t, kDeprovisionNonceSize> nonce{};
+    if (!entropy_.fill(MutableByteView{nonce.data(), nonce.size()}).ok()) {
+      secure_clear(nonce);
+      return fail("entropy_not_ready");
+    }
+    deprovision_nonce_ = nonce;
+    secure_clear(nonce);
+    deprovision_pending_ = true;
+    deprovision_impaired_ = impaired;
+    deprovision_bound_ = !impaired && store_.has_identity();
+    if (deprovision_bound_) {
+      deprovision_node_ = store_.identity().node_id;
+      deprovision_kid_ = store_.identity().kid;
+    } else {
+      deprovision_node_ = kInvalidNodeId;
+      deprovision_kid_ = Digest256{};
+    }
+    out.put("OK deprovision node=");
+    if (deprovision_bound_) {
+      out.put_u64_hex(deprovision_node_);
+    } else {
+      out.put("none");
+    }
+    out.put(" kid=");
+    if (deprovision_bound_) {
+      out.put_hex(deprovision_kid_.data(), deprovision_kid_.size());
+    } else {
+      out.put("none");
+    }
+    out.put(" nonce=");
+    out.put_hex(deprovision_nonce_.data(), deprovision_nonce_.size());
+    if (!out.finish()) {
+      return Status::error(StatusCode::InternalError, "console response");
+    }
+    response_size = out.size();
+    return Status::success();
+  }
+  if (verb_is(tokens.verb, "deprovision_confirm")) {
+    if (tokens.argc != 2) {
+      return fail("invalid_argument");
+    }
+    if (!wipe_ready()) {
+      return fail("unsupported");
+    }
+    if (!deprovision_pending_) {
+      return fail("no_challenge");
+    }
+    std::array<std::uint8_t, kDeprovisionNonceSize> nonce{};
+    std::size_t nonce_len = 0;
+    if (!hex_decode(tokens.args[0], nonce.data(), nonce.size(), nonce_len) ||
+        nonce_len != nonce.size()) {
+      return fail("invalid_argument");
+    }
+    const bool want_none =
+        tokens.args[1].size == 4 && std::memcmp(tokens.args[1].data, "none", 4) == 0;
+    Digest256 kid{};
+    std::size_t kid_len = 0;
+    const bool kid_ok = hex_decode(tokens.args[1], kid.data(), kid.size(), kid_len) &&
+                        kid_len == kid.size();
+    if (!want_none && !kid_ok) {
+      return fail("invalid_argument");
+    }
+    // Single-use: a well-formed confirm burns the challenge whether it
+    // matches or not, so a stale line can never wipe a later state.
+    const bool nonce_ok = nonce == deprovision_nonce_;
+    const bool bound_ok =
+        deprovision_bound_ ? (kid_ok && kid == deprovision_kid_) : want_none;
+    // The challenge confirms the state that was shown to the operator.
+    // A new seal or a change in store health needs a fresh challenge.
+    const bool same_target = deprovision_impaired_ == impaired &&
+                             (deprovision_bound_
+                                  ? (!impaired && store_.has_identity() &&
+                                     store_.identity().node_id == deprovision_node_ &&
+                                     store_.identity().kid == deprovision_kid_)
+                                  : (impaired || !store_.has_identity()));
+    const NodeId wiped_node = deprovision_node_;
+    const bool had_identity = deprovision_bound_;
+    burn_deprovision_challenge();
+    secure_clear(nonce);
+    secure_clear(kid);
+    if (!nonce_ok) {
+      return fail("no_challenge");
+    }
+    if (!bound_ok || !same_target) {
+      return fail("key_mismatch");
+    }
+    // Attempt every non-identity store and report the first error. Keep
+    // the identity if any of those wipes fails, so a retry retains its
+    // target binding. Identity wipes last, after the other stores are
+    // clear. The rlboot witness is untouched (monotonic).
+    Status wiped = Status::success();
+    const auto scrub = [&](const Status& step) {
+      if (wiped.ok()) wiped = step;
+    };
+    scrub(wipe_.site->clear());
+    scrub(wipe_.revocation->clear());
+    scrub(wipe_.local_revocation->clear());
+    scrub(wipe_.resume->clear_all());
+    scrub(wipe_.lifecycle->clear());
+    if (wiped.ok()) scrub(store_.clear());
+    if (!wiped.ok()) {
+      return fail("wipe_failed");
+    }
+    // The old life's pending key must not survive its own wipe.
+    secure_clear(pending_scalar_);
+    pending_pubkey_ = P256PublicKey{};
+    pending_node_ = kInvalidNodeId;
+    has_pending_ = false;
+    // Readback: the identity store re-read like a fresh boot must show
+    // no identity before the wipe is claimed.
+    const Status reread = store_.initialize();
+    if (!reread.ok() || store_.has_identity()) {
+      return fail("wipe_failed");
+    }
+    out.put("OK deprovisioned node=");
+    if (had_identity) {
+      out.put_u64_hex(wiped_node);
+    } else {
+      out.put("none");
+    }
     if (!out.finish()) {
       return Status::error(StatusCode::InternalError, "console response");
     }

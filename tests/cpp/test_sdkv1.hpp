@@ -68,6 +68,15 @@ class FaultyRecordStorage final : public RecordSlotStorage {
     if (call == flip_call) slots_[slot][data.size / 2] ^= 0x01;  // silent corruption
     return Status::success();
   }
+  Status erase(const std::uint8_t slot) noexcept override {
+    if (slot >= 2) {
+      return Status::error(StatusCode::InvalidArgument, "bad erase");
+    }
+    if (fail_writes) return Status::error(StatusCode::StorageFailure, "injected erase failure");
+    ++erase_calls;
+    slots_[slot].assign(slot_bytes_, 0xFF);
+    return Status::success();
+  }
   std::vector<std::uint8_t>& slot(const std::uint8_t index) { return slots_[index]; }
   void disarm() {
     cut_call = drop_call = flip_call = substitute_call = std::numeric_limits<std::size_t>::max();
@@ -79,6 +88,7 @@ class FaultyRecordStorage final : public RecordSlotStorage {
 
   std::size_t write_calls{0};
   std::size_t read_calls{0};
+  std::size_t erase_calls{0};
   std::size_t fail_read_call{0};  // 1-based call, once
   std::size_t cut_call{std::numeric_limits<std::size_t>::max()};
   std::size_t cut_bytes{0};
