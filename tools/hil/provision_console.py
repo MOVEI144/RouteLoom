@@ -35,7 +35,7 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--port", required=True)
     p.add_argument("--mac", required=True)
-    p.add_argument("--chip", choices=("esp32c3", "esp32c5"), required=True)
+    p.add_argument("--chip", choices=("esp32c3", "esp32c5", "esp32c6"), required=True)
     p.add_argument("--esptool", default=str(pathlib.Path.home() / ".local/bin/esptool"))
     p.add_argument("--ctl", required=True)
     p.add_argument("--ca-key", required=True)

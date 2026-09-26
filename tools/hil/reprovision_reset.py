@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Back up and erase only the rlsec partition of a chip/MAC-verified board.
 
-Use when testing a fresh Site state on the same physical C3/C5 reference or
+Use when testing a fresh Site state on the same physical C3/C5/C6 reference or
 bridge. The backup contains private device identity material: keep it outside
 the repository in a mode-0700 directory.
 """
@@ -32,8 +32,8 @@ def main() -> int:
     p.add_argument("--esptool", default=flash.DEFAULT_ESPTOOL)
     args = p.parse_args()
     board = rig.load_rigs(args.rig)[args.bench].boards[args.board]
-    if board.chip not in ("esp32c3", "esp32c5") or not board.mac:
-        raise RuntimeError("rlsec erase requires a pinned C3/C5 MAC")
+    if board.chip not in ("esp32c3", "esp32c5", "esp32c6") or not board.mac:
+        raise RuntimeError("rlsec erase requires a pinned C3/C5/C6 MAC")
     if board.app not in RLSEC_SIZES:
         raise RuntimeError("no audited rlsec layout for this app")
     rlsec_size = RLSEC_SIZES[board.app]
