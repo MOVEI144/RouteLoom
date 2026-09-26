@@ -649,8 +649,13 @@ class DeviceTests(unittest.TestCase):
             expected = Identity('esp32c3', '1', self.a.base_mac, None,
                                 '164020', 4 * 1024 * 1024, False, False)
             api = API()
-            flash('COM1', FlashPlan(expected, 'esp32c3', (image,), True,
-                                   self.a.base_mac, True), api)
+            with patch('routeloom_meshviz.flash_worker.verify_bundle', return_value={
+                    'chip': 'esp32c3', 'chip_revision_range': [0, 255],
+                    'minimum_flash_bytes': 0x1b0000,
+                    'files': [{'offset': image.offset, 'path': 'app.bin',
+                               'size': image.size, 'sha256': image.sha256}]}):
+                flash('COM1', FlashPlan(expected, 'esp32c3', (image,), True,
+                                       self.a.base_mac, True, Path(td)), api)
             self.assertEqual(api.written, [(0x10000, b'image')])
             self.assertEqual(api.assert_images, api.written)
 
@@ -727,22 +732,29 @@ class DeviceTests(unittest.TestCase):
             image = Image(0x10000, p, 5, hashlib.sha256(b'image').hexdigest())
             expected = Identity('esp32c3', '1', self.a.base_mac, None,
                                 '164020', 4 * 1024 * 1024, False, False)
-            plan = FlashPlan(expected, 'esp32c3', (image,), True, self.a.base_mac, True)
+            plan = FlashPlan(expected, 'esp32c3', (image,), True, self.a.base_mac, True,
+                             Path(td))
+            verifier = patch('routeloom_meshviz.flash_worker.verify_bundle', return_value={
+                'chip': 'esp32c3', 'chip_revision_range': [0, 255],
+                'minimum_flash_bytes': 0x1b0000,
+                'files': [{'offset': image.offset, 'path': 'app.bin',
+                           'size': image.size, 'sha256': image.sha256}]})
+            verifier.start()
+            self.addCleanup(verifier.stop)
             api = API(False)
             flash('COM1', plan, api)
             self.assertEqual(api.writes, [api.rom, api.rom])
             self.assertTrue(api.rom.closed)
             api = API(False)
             with patch.dict(sys.modules, {'esptool': api}):
-                with self.assertRaises(ValueError):
-                    flash('COM1', plan)
-            self.assertEqual(api.writes, [])
+                flash('COM1', plan)
+            self.assertEqual(api.writes, [api.rom, api.rom])
             api = API(False)
             claimed_sta = Identity('esp32c3', '1', self.a.base_mac, self.a.base_mac,
                                    '164020', 4 * 1024 * 1024, False, False)
             with self.assertRaises(ValueError):
                 flash('COM1', FlashPlan(claimed_sta, 'esp32c3', (image,), True,
-                                       self.a.base_mac, True), api)
+                                       self.a.base_mac, True, Path(td)), api)
             self.assertEqual(api.writes, [])
             api = API(None)
             with self.assertRaises(ValueError):
