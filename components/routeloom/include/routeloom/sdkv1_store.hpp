@@ -39,12 +39,15 @@ namespace routeloom::sdkv1 {
 // Raw two-slot persistence. read() fills the whole slot view (a missing
 // blob reads uniformly erased); write() lands a record no larger than the
 // slot. Implementations must tolerate power loss at any byte boundary and
-// never erase or reformat on error.
+// never erase or reformat on error. erase() restores the factory-empty
+// slot (idempotent, durable on success): the explicit deprovision
+// primitive, never an implicit recovery.
 class RecordSlotStorage {
  public:
   virtual ~RecordSlotStorage() = default;
   virtual Status read(std::uint8_t slot, MutableByteView target) noexcept = 0;
   virtual Status write(std::uint8_t slot, ByteView data) noexcept = 0;
+  virtual Status erase(std::uint8_t slot) noexcept = 0;
 };
 
 struct SealedRecordFormat {
@@ -85,6 +88,10 @@ class SealedSlotPair {
   // impaired states — recover() and the removal tombstone are the explicit
   // ways out; clears quarantine/uncertain on success.
   Status commit_twin_prepared(std::size_t used_len) noexcept;
+  // Erase both slots back to factory-empty and re-observe (works from any
+  // state, including quarantine — it is the deprovision primitive, not a
+  // recovery). Both slots are attempted; the first error is reported.
+  Status erase_all() noexcept;
 
   bool initialized() const noexcept { return initialized_; }
   bool has_active() const noexcept { return has_active_; }
@@ -143,6 +150,9 @@ class IdentityStore {
   Status initialize() noexcept;
   Status commit(const IdentityRecord& record) noexcept;
   Status recover(const IdentityRecord& record) noexcept;
+  // Erase both slots back to factory-empty (deprovision): no identity,
+  // no impairment, the RAM record zeroed. Works from any state.
+  Status clear() noexcept;
 
   bool initialized() const noexcept { return pair_.initialized(); }
   bool has_identity() const noexcept { return pair_.has_active(); }

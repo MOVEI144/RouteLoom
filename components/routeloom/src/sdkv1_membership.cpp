@@ -1,6 +1,7 @@
 #include "routeloom/sdkv1_membership.hpp"
 
 #include "routeloom/device_credential.hpp"  // CredentialKeyLocation
+#include "routeloom/secure_clear.hpp"
 
 namespace routeloom::sdkv1 {
 namespace {
@@ -21,6 +22,20 @@ Status LocalRevocationStore::initialize() noexcept {
   const Status loaded = reload();
   if (!loaded) return loaded;
   return status;
+}
+
+Status LocalRevocationStore::clear() noexcept {
+  const Status status = pair_.erase_all();
+  secure_clear(scratch_.bytes.data(), scratch_.bytes.size());
+  scratch_.size = 0;
+  if (!status) {
+    // A failed erase leaves unknown slot state: re-observe rather than
+    // claim an empty store, so the next deprovision retries honestly.
+    (void)initialize();
+    return status;
+  }
+  record_ = LocalRevocationRecord{};
+  return Status::success();
 }
 
 Status LocalRevocationStore::refresh() noexcept {
