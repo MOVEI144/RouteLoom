@@ -127,8 +127,15 @@ class Result:
 def run_batch(items, worker, leases=None):
     """The worker owns probe, preflight and write in one ROM session."""
     leases = leases or PortLeases()
+    items = list(items)
+    identities = [plan.expected.base_mac.lower() for _, plan in items]
+    ports = [port for port, _ in items]
     results = []
     for port, plan in items:
+        if identities.count(plan.expected.base_mac.lower()) > 1 or ports.count(port) > 1:
+            # Duplicate assignments are ambiguous even if the first write succeeds.
+            results.append(Result(port, False, 'duplicate board identity or port'))
+            continue
         try:
             with leases.acquire(plan.expected.base_mac):
                 worker(port, plan)

@@ -33,41 +33,65 @@ class Capture:
         self.seq = 0
         self.state = State()
         self.last_checkpoint_ns = 0
+        self.failed = False
 
     def add(self, event: dict, clock):
-        self.seq += 1
-        if self.seq == 1:
-            self.last_checkpoint_ns = clock.mono_ns
-        self.db.execute('INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?)', (
-            self.seq, clock.mono_ns, clock.unix_ms * 1_000_000,
-            event['source'], event.get('source_epoch'), event.get('source_seq'),
-            event['kind'], event.get('scope'), json.dumps({'schema_version': 1, **event})))
-        if event['kind'] == 'sample':
-            self.db.execute('INSERT INTO metric_samples VALUES (?,?,?)',
-                            (self.seq, event['payload']['series'], json.dumps(event['payload'])))
-        reduce(self.state, event)
-        if self.seq % 5000 == 0 or clock.mono_ns - self.last_checkpoint_ns >= 30_000_000_000:
-            # Checkpoints share the event transaction, so a crash cannot expose a future state.
-            snapshot = asdict(self.state)
-            snapshot['retired_epochs'] = {k: sorted(v) for k, v in self.state.retired_epochs.items()}
-            self.db.execute('INSERT INTO checkpoints VALUES (?,?,?)',
-                            (self.seq, clock.mono_ns, json.dumps(snapshot)))
-            self.last_checkpoint_ns = clock.mono_ns
-        # Important operation boundaries can explicitly call flush().
-        if self.seq % 1000 == 0:
-            self.flush()
+        if self.failed:
+            raise RuntimeError('capture recording stopped after storage failure')
+        try:
+            self.seq += 1
+            if self.seq == 1:
+                self.last_checkpoint_ns = clock.mono_ns
+            self.db.execute('INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?)', (
+                self.seq, clock.mono_ns, clock.unix_ms * 1_000_000,
+                event['source'], event.get('source_epoch'), event.get('source_seq'),
+                event['kind'], event.get('scope'), json.dumps({'schema_version': 1, **event})))
+            if event['kind'] == 'sample':
+                self.db.execute('INSERT INTO metric_samples VALUES (?,?,?)',
+                                (self.seq, event['payload']['series'], json.dumps(event['payload'])))
+            reduce(self.state, event)
+            if self.seq % 5000 == 0 or clock.mono_ns - self.last_checkpoint_ns >= 30_000_000_000:
+                # Checkpoints share the event transaction, so a crash cannot expose a future state.
+                snapshot = asdict(self.state)
+                snapshot['retired_epochs'] = {k: sorted(v) for k, v in self.state.retired_epochs.items()}
+                self.db.execute('INSERT INTO checkpoints VALUES (?,?,?)',
+                                (self.seq, clock.mono_ns, json.dumps(snapshot)))
+                self.last_checkpoint_ns = clock.mono_ns
+            # Important operation boundaries can explicitly call flush().
+            if self.seq % 1000 == 0:
+                self.flush()
+        except (sqlite3.Error, OSError):
+            # Never accept more events or advertise a clean capture after a write failure.
+            self.failed = True
+            self.db.rollback()
+            raise
 
     def flush(self):
-        self.db.commit()
+        if self.failed:
+            raise RuntimeError('capture recording stopped after storage failure')
+        try:
+            self.db.commit()
+        except (sqlite3.Error, OSError):
+            self.failed = True
+            self.db.rollback()
+            raise
 
     def close(self):
-        self.flush()
-        self.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-        self.db.close()
-        self.manifest['closed'] = True
-        tmp = self.path / 'manifest.json.tmp'
-        tmp.write_text(json.dumps(self.manifest), encoding='utf-8')
-        os.replace(tmp, self.path / 'manifest.json')
+        if self.failed:
+            self.db.rollback()
+            self.db.close()
+            return
+        try:
+            self.flush()
+            self.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            self.db.close()
+            self.manifest['closed'] = True
+            tmp = self.path / 'manifest.json.tmp'
+            tmp.write_text(json.dumps(self.manifest), encoding='utf-8')
+            os.replace(tmp, self.path / 'manifest.json')
+        except (sqlite3.Error, OSError):
+            self.failed = True
+            raise
 
     def __enter__(self):
         return self

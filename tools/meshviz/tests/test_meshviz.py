@@ -78,6 +78,28 @@ class ModelTests(unittest.TestCase):
             self.assertIn('s:02', recovered.nodes)
             self.assertEqual(recovered.gaps[-1]['reason'], 'UncleanEnd')
 
+    def test_disk_failure_does_not_mark_capture_clean(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'test.rlcapture'
+            cap = Capture(path, 'id')
+            clock = FakeClock()
+            cap.add({'source': 'daemon', 'scope': 's', 'kind': 'node',
+                     'payload': {'node': '02'}}, clock)
+            cap.flush()
+            cap.db.execute("CREATE TRIGGER disk_failure BEFORE INSERT ON events "
+                           "BEGIN SELECT RAISE(FAIL, 'disk full'); END")
+            with self.assertRaises(sqlite3.DatabaseError):
+                cap.add({'source': 'daemon', 'scope': 's', 'kind': 'node',
+                         'payload': {'node': '03'}}, clock)
+            with self.assertRaises(RuntimeError):
+                cap.add({'source': 'daemon', 'scope': 's', 'kind': 'node',
+                         'payload': {'node': '04'}}, clock)
+            cap.close()
+            self.assertFalse(json.loads((path / 'manifest.json').read_text())['closed'])
+            state = replay(path)
+            self.assertEqual(set(state.nodes), {'s:02'})
+            self.assertEqual(state.gaps[-1]['reason'], 'UncleanEnd')
+
     def test_partial_snapshot_and_duplicate_source_sequence(self):
         state = State()
         base = {'scope': 's', 'source': 'daemon', 'source_epoch': 'a'}
@@ -155,7 +177,9 @@ class DeviceTests(unittest.TestCase):
                      FlashPlan(self.a, 'esp32s3', (image,), True, self.a.base_mac, True),
                      plan(self.a, expected_mac=self.a.base_mac),
                      plan(self.b, expected_mac=self.b.base_mac)]
-            results = run_batch(list(zip(['COM0', 'COM0a', 'COM1', 'COM2'], cases)), worker)
+            rejected = [run_batch([(port, candidate)], worker)[0]
+                        for port, candidate in zip(['COM0', 'COM0a'], cases[:2])]
+            results = rejected + run_batch(list(zip(['COM1', 'COM2'], cases[2:])), worker)
             self.assertEqual([r.ok for r in results], [False, False, True, False])
             self.assertEqual(calls, ['COM1', 'COM2'])
             for corrupt in [Image(-1, p, 5, image.sha256), Image(0x10000, p, 5, '0'*64),
@@ -171,6 +195,18 @@ class DeviceTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     plan(identity, expected_mac=identity.base_mac).verify('COM1', identity)
             self.assertEqual(calls, ['COM1', 'COM2'])
+
+    def test_batch_rejects_duplicate_identity_before_writing(self):
+        with tempfile.TemporaryDirectory() as td:
+            image_path = Path(td) / 'app.bin'
+            image_path.write_bytes(b'image')
+            image = Image(0x10000, image_path, 5, hashlib.sha256(b'image').hexdigest())
+            plan = FlashPlan(self.a, self.a.chip, (image,), True, self.a.base_mac, True)
+            calls = []
+            results = run_batch([('COM1', plan), ('COM2', plan)],
+                                lambda port, _: calls.append(port))
+            self.assertEqual([r.ok for r in results], [False, False])
+            self.assertEqual(calls, [])
 
     def test_rom_worker_rejects_before_write(self):
         class ROM:
@@ -247,6 +283,11 @@ class DeviceTests(unittest.TestCase):
             self.assertEqual(api.writes, [api.rom, api.rom])
             self.assertTrue(api.rom.closed)
             api = API(None)
+            with self.assertRaises(ValueError):
+                flash('COM1', plan, api)
+            self.assertEqual(api.writes, [])
+            api = API(False)
+            api.rom.get_security_info = lambda cache=False: {'parsed_flags': {}}
             with self.assertRaises(ValueError):
                 flash('COM1', plan, api)
             self.assertEqual(api.writes, [])
