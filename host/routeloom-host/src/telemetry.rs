@@ -114,6 +114,14 @@ impl TelemetryOps {
             .values()
             .any(|op| op.request == request && op.outcome.is_none())
     }
+
+    pub fn request_pending_in_session(&self, request: u64, session: u64) -> bool {
+        self.ops
+            .lock()
+            .expect("telemetry ops poisoned")
+            .values()
+            .any(|op| op.request == request && op.session == session && op.outcome.is_none())
+    }
     fn mint(&self) -> (u64, u64) {
         let mut next = self.next.lock().expect("telemetry ops poisoned");
         *next = next.wrapping_add(1);

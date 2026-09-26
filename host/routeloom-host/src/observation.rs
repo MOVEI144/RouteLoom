@@ -139,7 +139,7 @@ impl ObservationOps {
         &self,
         params: ObservationQueryParams,
         session: u64,
-        now_ms: u64,
+        now_mono_ms: u64,
     ) -> Result<u64, SubmitError> {
         let mut ops = self.ops.lock().expect("observation ops poisoned");
         if ops.len() >= MAX_IN_FLIGHT {
@@ -153,7 +153,7 @@ impl ObservationOps {
                 session,
                 request,
                 params,
-                submitted_ms: now_ms,
+                submitted_ms: now_mono_ms,
                 sent: false,
                 outcome: None,
                 settled_ms: None,
@@ -197,12 +197,15 @@ impl ObservationOps {
         session: u64,
         boot: u64,
         max_age_ms: u64,
-        now_ms: u64,
+        now_mono_ms: u64,
     ) -> Option<CachedBody> {
-        self.cache
-            .lock()
-            .expect("observation cache poisoned")
-            .get(section, session, boot, max_age_ms, now_ms)
+        self.cache.lock().expect("observation cache poisoned").get(
+            section,
+            session,
+            boot,
+            max_age_ms,
+            now_mono_ms,
+        )
     }
 
     /// Current dirty generation; a page stores only against the mark its
@@ -549,7 +552,7 @@ impl ObservationCache {
         session: u64,
         boot: u64,
         max_age_ms: u64,
-        now_ms: u64,
+        now_mono_ms: u64,
     ) -> Option<CachedBody> {
         if !self.pinned(session, boot) {
             return None;
@@ -572,7 +575,7 @@ impl ObservationCache {
         if max_age_ms == 0 {
             return None;
         }
-        if now_ms.saturating_sub(cached.received_ms) > max_age_ms {
+        if now_mono_ms.saturating_sub(cached.received_mono_ms) > max_age_ms {
             return None;
         }
         Some(cached.clone())
@@ -796,8 +799,12 @@ pub fn milestones_json(
     received_ms: u64,
 ) -> String {
     use routeloom_protocol::observation::{coord_mode_name, joiner_name, membership_name};
-    let at = |age_ms: u32| {
-        age_to_host_ms(received_ms, age_ms).map_or("null".to_string(), |ms| ms.to_string())
+    let at = |age_ms: u64| {
+        if age_ms == routeloom_protocol::observation::MILESTONE_AGE_UNKNOWN {
+            "null".to_string()
+        } else {
+            received_ms.saturating_sub(age_ms).to_string()
+        }
     };
     format!(
         "{{\"mode\":{{\"code\":{},\"name\":\"{}\"}},\"membership\":{{\"code\":{},\"name\":\"{}\"}},\"joiner\":{{\"code\":{},\"name\":\"{}\"}},\"adopted\":{},\"confirmed\":{},\"attempts\":{},\"adopted_node\":{},\"join_started_at_ms\":{},\"adopted_at_ms\":{},\"confirmed_at_ms\":{}}}",
@@ -906,6 +913,32 @@ pub fn neighbor_entry_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_snapshot_expires_on_monotonic_time_after_wall_rewind() {
+        let ops = ObservationOps::default();
+        assert!(ops.store(CacheStore {
+            section: routeloom_protocol::observation::SECTION_SYSTEM,
+            session: 7,
+            boot: 9,
+            body: vec![0; routeloom_protocol::observation::SYSTEM_BODY],
+            revision: 0,
+            received_ms: 1_700_000_000_000,
+            received_mono_ms: 100,
+            rtt_ms: 1,
+            armed: false,
+            dirty_mark: ops.dirty_mark(),
+        }));
+        assert!(ops
+            .cached(
+                routeloom_protocol::observation::SECTION_SYSTEM,
+                7,
+                9,
+                1_000,
+                10_000
+            )
+            .is_none());
+    }
 
     #[test]
     fn request_ranges_do_not_overlap() {
@@ -1046,9 +1079,9 @@ mod tests {
             membership: 5,
             joiner_state: 2,
             attempts: 1,
-            join_started_age_ms: AGE_UNKNOWN,
+            join_started_age_ms: routeloom_protocol::observation::MILESTONE_AGE_UNKNOWN,
             adopted_age_ms: 50,
-            confirmed_age_ms: AGE_UNKNOWN,
+            confirmed_age_ms: routeloom_protocol::observation::MILESTONE_AGE_UNKNOWN,
             adopted_node: 0x0A,
             ..ObservationMilestones::default()
         };
@@ -1060,6 +1093,21 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("\"adopted_at_ms\":9950"), "{rendered}");
+
+        let old = ObservationMilestones {
+            flags: routeloom_protocol::observation::MILESTONE_ADOPTED,
+            adopted_age_ms: 365 * 24 * 60 * 60 * 1000,
+            ..ObservationMilestones::default()
+        };
+        let received = 1_700_000_000_000;
+        let rendered = milestones_json(&old, received);
+        assert!(
+            rendered.contains(&format!(
+                "\"adopted_at_ms\":{}",
+                received - old.adopted_age_ms
+            )),
+            "{rendered}"
+        );
 
         let lost = RouteDetailEntry {
             destination: 7,

@@ -140,9 +140,8 @@ constexpr std::uint8_t kNeighborActive = 1u << 0;     // admitted direct neighbo
 constexpr std::uint8_t kNeighborRssiValid = 1u << 1;  // rssi_* carry a real measurement
 constexpr std::uint8_t kNeighborHeardValid = 1u << 2;  // heard_age_ms carries a real observation
 
-// Age sentinel: the milestone was not reached this boot (or was never
-// recorded). Ages saturate here rather than wrapping.
-constexpr std::uint32_t kMilestoneAgeUnknown = UINT32_MAX;
+// Age sentinel: the milestone was not reached this boot.
+constexpr std::uint64_t kMilestoneAgeUnknown = UINT64_MAX;
 // Heap sentinel: the platform port cannot read this figure.
 constexpr std::uint32_t kHeapBytesUnknown = UINT32_MAX;
 // Neighbor sentinel: no heard observation / no discovery lease on record.
@@ -197,9 +196,8 @@ struct ObservationTables {
   std::uint32_t dedup_evicted{0};
 };
 
-// Join-lifecycle record for this boot. Ages are durations against the fill
-// time (kMilestoneAgeUnknown when the stage was not reached, clamping one
-// below it past 49.7 days so a very old stamp never reads as unknown):
+// Join-lifecycle record for this boot. Ages are millisecond durations
+// against the fill time (kMilestoneAgeUnknown when a stage was not reached):
 // join_started is the first join-attempt start, adopted the member/dev
 // config adoption, confirmed the verified JoinConfirm ACK. attempts counts handshake
 // attempts this boot (latched at adoption — the Joiner is destroyed once
@@ -212,9 +210,9 @@ struct JoinMilestones {
   std::uint8_t joiner_state{kJoinerUnknown};
   std::uint8_t flags{0};
   std::uint32_t attempts{0};
-  std::uint32_t join_started_age_ms{kMilestoneAgeUnknown};
-  std::uint32_t adopted_age_ms{kMilestoneAgeUnknown};
-  std::uint32_t confirmed_age_ms{kMilestoneAgeUnknown};
+  std::uint64_t join_started_age_ms{kMilestoneAgeUnknown};
+  std::uint64_t adopted_age_ms{kMilestoneAgeUnknown};
+  std::uint64_t confirmed_age_ms{kMilestoneAgeUnknown};
   NodeId adopted_node{kInvalidNodeId};
 };
 

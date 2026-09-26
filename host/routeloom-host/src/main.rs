@@ -873,6 +873,32 @@ impl State {
     }
 }
 
+// The shared RF budget reserves a writer-queue slot before the serial
+// writer can seal it. A query that expired or lost its USB session while
+// waiting in that queue must never become a later radio transaction.
+fn queued_diagnostic_is_live(state: &State, request: u64) -> bool {
+    let telemetry = telemetry::owns_request(request);
+    let observation = remote_observation::owns_request(request);
+    if !telemetry && !observation {
+        return true;
+    }
+    let session = state.session.lock().expect("session poisoned");
+    let id = if session.authenticated {
+        session.id
+    } else {
+        None
+    };
+    let Some(id) = id else { return false };
+    drop(session);
+    if telemetry {
+        state.telemetry_ops.request_pending_in_session(request, id)
+    } else {
+        state
+            .remote_observation_ops
+            .request_pending_in_session(request, id)
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2093,6 +2119,9 @@ fn adapter_writer_loop(
             }
             Outbound::Seal(frame) => frame,
         };
+        if !queued_diagnostic_is_live(&state, frame.request) {
+            continue;
+        }
         // Seal the queued inner body under the session key. Sealing happens
         // here — on the ONLY thread that writes — so direction counters are
         // strictly sequential with wire order even when a send is rejected
@@ -2101,9 +2130,12 @@ fn adapter_writer_loop(
             let mut guard = session.lock().expect("device session poisoned");
             guard.protect(&mut frame)
         };
-        let sent = protected
-            .map_err(str::to_string)
-            .and_then(|()| transmit(&writer_slot, &state, &frame).map_err(|e| e.to_string()));
+        let sent = protected.map_err(str::to_string).and_then(|()| {
+            state
+                .radio_budget
+                .note_transmit_attempt(frame.request, mono_ms());
+            transmit(&writer_slot, &state, &frame).map_err(|e| e.to_string())
+        });
         match sent {
             Ok(_) => {
                 last_tx_ms = now_ms();
@@ -3152,6 +3184,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_remote_query_is_dropped_after_settlement_or_session_change() {
+        let state = State::default();
+        {
+            let mut session = state.session.lock().unwrap();
+            session.authenticated = true;
+            session.id = Some(7);
+        }
+        let params = remote_observation::RemoteObservationParams {
+            observer: 2,
+            section: routeloom_protocol::observation::SECTION_SYSTEM,
+            max_entries: 1,
+            exact: false,
+            after: 0,
+        };
+        let token = match state.remote_observation_ops.submit(params, 7, 100).unwrap() {
+            remote_observation::SubmitOutcome::Live { token, .. } => token,
+            _ => panic!("expected a fresh query"),
+        };
+        let request = state.remote_observation_ops.request_for(token).unwrap();
+        assert!(queued_diagnostic_is_live(&state, request));
+        assert!(state.remote_observation_ops.post_error(request, 7, 1));
+        assert!(!queued_diagnostic_is_live(&state, request));
+
+        let token = match state.remote_observation_ops.submit(params, 7, 200).unwrap() {
+            remote_observation::SubmitOutcome::Live { token, .. } => token,
+            _ => panic!("expected a fresh query"),
+        };
+        let request = state.remote_observation_ops.request_for(token).unwrap();
+        state.session.lock().unwrap().id = Some(8);
+        assert!(!queued_diagnostic_is_live(&state, request));
+    }
 
     fn frame(kind: FrameKind, flags: u16, request: u64, body: Vec<u8>) -> Frame {
         Frame {

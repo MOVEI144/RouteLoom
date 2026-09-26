@@ -2601,7 +2601,7 @@ fn observation_query_local<S: OperationStore>(
     if !crate::observation::is_paged_section(section) && max_age_ms > 0 {
         if let Some(cached) =
             ctx.observation_ops
-                .cached(section, link.session, link.boot, max_age_ms, ctx.now_ms)
+                .cached(section, link.session, link.boot, max_age_ms, ctx.now_mono)
         {
             return Ok(ObservationAnswer {
                 revision: cached.revision,
@@ -2663,6 +2663,14 @@ fn observation_query_local<S: OperationStore>(
             rtt_ms,
         } => {
             use routeloom_protocol::observation::{PAGE_ARMED, PAGE_MORE};
+            if header.boot_id != link.boot {
+                return Err(ApiError {
+                    code: "GATEWAY_UNAVAILABLE",
+                    message: "gateway boot changed during the observation query".to_string(),
+                    extra_fields: "\"reason\":\"boot_changed\"".to_string(),
+                    retryable: true,
+                });
+            }
             Ok(ObservationAnswer {
                 revision: header.revision,
                 boot: header.boot_id,
@@ -3366,7 +3374,21 @@ fn topology_get<S: OperationStore>(
         RemoteSection::Answer(answer) => answer,
         RemoteSection::Reject(reject) => return Ok(remote_reject_json(&scope, &reject)),
     };
-    if answer.more && (answer.count == 0 || answer.next_after <= after) {
+    let first = observation_first_page_id(section, &answer.body)?;
+    if exact {
+        if answer.more
+            || answer.count > 1
+            || (answer.count == 0 && answer.next_after != after)
+            || first.is_some_and(|id| id != after)
+        {
+            return Err(ApiError::simple(
+                "INDETERMINATE",
+                "the observation answer does not match the exact destination",
+            ));
+        }
+    } else if (answer.count == 0 && (answer.more || answer.next_after != after))
+        || first.is_some_and(|id| id <= after || answer.next_after <= after)
+    {
         return Err(observation_page_changed());
     }
     if cursor.is_some_and(|cursor| {
@@ -3421,6 +3443,41 @@ fn topology_get<S: OperationStore>(
         ),
         entries = entries.join(","),
     ))
+}
+
+fn observation_first_page_id(section: u8, body: &[u8]) -> Result<Option<u64>, ApiError> {
+    use routeloom_protocol::observation::{
+        decode_neighbor_detail_entry, decode_route_detail_entry, NEIGHBOR_ENTRY_SIZE,
+        ROUTE_ENTRY_SIZE, SECTION_ROUTES,
+    };
+    let entry_size = if section == SECTION_ROUTES {
+        ROUTE_ENTRY_SIZE
+    } else {
+        NEIGHBOR_ENTRY_SIZE
+    };
+    let malformed = || ApiError::simple("INDETERMINATE", "malformed observation page entry order");
+    let chunks = body.chunks_exact(entry_size);
+    if !chunks.remainder().is_empty() {
+        return Err(malformed());
+    }
+    let mut first = None;
+    let mut previous = None;
+    for chunk in chunks {
+        let id = if section == SECTION_ROUTES {
+            decode_route_detail_entry(chunk).map(|entry| entry.destination)
+        } else {
+            decode_neighbor_detail_entry(chunk).map(|entry| entry.peer)
+        }
+        .map_err(|_| malformed())?;
+        if previous.is_some_and(|previous| id <= previous) {
+            return Err(malformed());
+        }
+        if first.is_none() {
+            first = Some(id);
+        }
+        previous = Some(id);
+    }
+    Ok(first)
 }
 
 /// Decodes a routes page body into rendered entries; a body that does
@@ -9317,6 +9374,37 @@ mod tests {
     const REMOTE_SNAPSHOT_HEX: &str = "01080000010203040000000000000abc112233445566778805010100a5a5a5a500000000000003e800000000000000020000007800013880000100000607b900";
 
     #[test]
+    fn topology_get_remote_rejects_nonascending_neighbors() {
+        use routeloom_protocol::observation::*;
+        let (acl, log, store, limiter) = test_env();
+        let ops = leaked_remote_observation_ops();
+        let c = ApiContext {
+            session: observation_session(0xFFFF_FFFF),
+            remote_observation_ops: ops,
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
+        };
+        let mut snapshot = hex_bytes(REMOTE_SNAPSHOT_HEX);
+        snapshot[8..16].copy_from_slice(&5_u64.to_be_bytes());
+        snapshot[26] = 2;
+        snapshot.extend_from_slice(&encode_neighbor_detail_entry(&NeighborDetailEntry {
+            peer: 1,
+            ..NeighborDetailEntry::default()
+        }));
+        let line = observation_line(
+            "topology.get",
+            "{\"observer\":\"0000000000000005\",\"section\":\"neighbors\"}",
+        );
+        let response = drive_remote_observation_once(
+            ops,
+            &line,
+            &c,
+            remote_reply_inner(0, 5, &snapshot),
+            2_000,
+        );
+        assert_error_schema(&response, "INDETERMINATE");
+    }
+
+    #[test]
     fn topology_get_remote_neighbors_roundtrip() {
         let (acl, log, store, limiter) = test_env();
         let ops: &'static crate::remote_observation::RemoteObservationOps =
@@ -9689,6 +9777,125 @@ mod tests {
         );
         let response = handle(line.as_bytes(), &c);
         assert!(response.contains("\"code\":\"TIMEOUT\""), "{response}");
+    }
+
+    #[test]
+    fn topology_get_rejects_a_page_that_repeats_the_cursor() {
+        use routeloom_protocol::observation::*;
+        let (acl, log, store, limiter) = test_env();
+        let ops = leaked_observation_ops();
+        let c = ApiContext {
+            session: observation_session(0xFFFF_FFFF),
+            observation_ops: ops,
+            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+        };
+        let cursor = ObservationCursor {
+            after: 2,
+            revision: 7,
+            observer_boot: 0xB007,
+            gateway_boot: 0xB007,
+            session: 0x5e55,
+            observer: 0x0abc,
+            section: SECTION_ROUTES,
+        }
+        .encode();
+        let mut body = encode_route_detail_entry(&RouteDetailEntry {
+            destination: 2,
+            next_hop: 2,
+            valid: true,
+            ..RouteDetailEntry::default()
+        });
+        body.extend_from_slice(&encode_route_detail_entry(&RouteDetailEntry {
+            destination: 3,
+            next_hop: 2,
+            valid: true,
+            ..RouteDetailEntry::default()
+        }));
+        let page = encode_observation_page(
+            &ObservationPageHeader {
+                result: RESULT_OK,
+                section: SECTION_ROUTES,
+                flags: 0,
+                count: 2,
+                boot_id: 0xB007,
+                revision: 7,
+                next_after: 3,
+            },
+            &body,
+        )
+        .unwrap();
+        let line = observation_line(
+            "topology.get",
+            &format!("{{{OBSERVER},\"section\":\"routes\",\"cursor\":\"{cursor}\"}}"),
+        );
+        let response = drive_observation_once(ops, &line, &c, page, 1_000);
+        assert_error_schema(&response, "SNAPSHOT_CHANGED");
+    }
+
+    #[test]
+    fn topology_get_exact_rejects_another_destination() {
+        use routeloom_protocol::observation::*;
+        let (acl, log, store, limiter) = test_env();
+        let ops = leaked_observation_ops();
+        let c = ApiContext {
+            session: observation_session(0xFFFF_FFFF),
+            observation_ops: ops,
+            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+        };
+        let body = encode_route_detail_entry(&RouteDetailEntry {
+            destination: 2,
+            next_hop: 2,
+            valid: true,
+            ..RouteDetailEntry::default()
+        });
+        let page = encode_observation_page(
+            &ObservationPageHeader {
+                result: RESULT_OK,
+                section: SECTION_ROUTES,
+                flags: 0,
+                count: 1,
+                boot_id: 0xB007,
+                revision: 7,
+                next_after: 2,
+            },
+            &body,
+        )
+        .unwrap();
+        let line = observation_line(
+            "topology.get",
+            &format!("{{{OBSERVER},\"section\":\"routes\",\"destination\":\"0000000000000009\"}}"),
+        );
+        let response = drive_observation_once(ops, &line, &c, page, 1_000);
+        assert_error_schema(&response, "INDETERMINATE");
+    }
+
+    #[test]
+    fn health_get_rejects_a_different_gateway_boot() {
+        use routeloom_protocol::observation::*;
+        let (acl, log, store, limiter) = test_env();
+        let ops = leaked_observation_ops();
+        let c = ApiContext {
+            session: observation_session(0xFFFF_FFFF),
+            observation_ops: ops,
+            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+        };
+        let body = encode_observation_system(&ObservationSystem::default());
+        let page = encode_observation_page(
+            &ObservationPageHeader {
+                result: RESULT_OK,
+                section: SECTION_SYSTEM,
+                flags: 0,
+                count: 1,
+                boot_id: 0xB008,
+                revision: 0,
+                next_after: 0,
+            },
+            &body,
+        )
+        .unwrap();
+        let line = observation_line("health.get", &format!("{{{OBSERVER}}}"));
+        let response = drive_observation_once(ops, &line, &c, page, 1_000);
+        assert_error_schema(&response, "GATEWAY_UNAVAILABLE");
     }
 
     #[test]

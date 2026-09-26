@@ -68,8 +68,8 @@ std::uint32_t saturate_u32(const std::uint64_t value) noexcept {
   return value > kU32Max ? kU32Max : static_cast<std::uint32_t>(value);
 }
 
-// Like saturate_u32 but reserving the top value for the unknown sentinel
-// (milestone ages and neighbor ages/leases share the idiom).
+// Like saturate_u32 but reserving the top value for unknown neighbor ages
+// and leases.
 std::uint32_t saturate_age_u32(const std::uint64_t value) noexcept {
   if (value >= kNeighborAgeUnknown) return kNeighborAgeUnknown - 1;
   return static_cast<std::uint32_t>(value);

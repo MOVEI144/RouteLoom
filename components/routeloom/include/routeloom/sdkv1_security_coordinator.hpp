@@ -969,20 +969,17 @@ class SecurityCoordinator final : public BootstrapSink,
   // it mirrors — join_started_ with the current join leg, adopted_ with
   // member_valid_, confirmed_ with join_confirmed_. A stop clears all
   // three; a failed adoption clears adopted_/confirmed_ with member_valid_.
-  // Packed for the bridge DRAM floor without wrapping within a boot: the
-  // leg start keeps whole seconds since boot (136 years of range — the
-  // 49-day u32-ms wrap is gone; the served age is floored to the start's
-  // second and so never claims fresher than the truth), and confirmed is
-  // whole seconds past adopted in u32 (the old u16 saturated at 18 h).
-  // Attempts saturate at u16: one leg cannot handshake that often in a
-  // boot. Same 24 bytes as before: the bridge floor leaves no room to grow.
-  MonotonicMs milestone_adopted_ms_{0};
-  std::uint32_t milestone_join_started_s_{0};
+  // Three 48-bit boot-monotonic millisecond stamps cover more than a year
+  // without the 32-bit millisecond wrap or lost subsecond precision, while
+  // keeping the bridge's 24-byte state footprint. Flags indicate validity.
+  std::array<std::uint8_t, 6> milestone_join_started_ms_{};
+  std::array<std::uint8_t, 6> milestone_adopted_ms_{};
+  std::array<std::uint8_t, 6> milestone_confirmed_ms_{};
+  // Attempts saturate at u16: one leg cannot handshake that often in a boot.
   // Handshake attempts in the current leg: live from the Joiner while
   // ZeroTouch, latched here at adoption (the Joiner is destroyed once the
   // member side goes live).
   std::uint16_t milestone_attempts_{0};
-  std::uint32_t milestone_confirmed_gap_s_{0};
   std::uint8_t milestone_flags_{0};
   std::uint8_t milestone_joiner_latched_{kJoinerUnknown};
   static constexpr std::uint8_t kMilestoneStarted = 0x01;

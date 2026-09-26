@@ -1299,9 +1299,9 @@ Status decode_site_state_report(ByteView inner, SiteStateReport& out) noexcept;
 //   route_reachable:u16, route_total:u16, link:u16, link_cap:u16, end:u16,
 //   end_cap:u16, dedup_resident:u16, dedup_terminal:u16, dedup_cap:u16,
 //   tx_used:u8, tx_cap:u8, group_trees:u8, group_origins:u8,
-//   dedup_refused:u32, dedup_evicted:u32, reserved:u16), milestones 32B
+//   dedup_refused:u32, dedup_evicted:u32, reserved:u16), milestones 44B
 //   (mode:u8, membership:u8, joiner:u8, flags:u8, attempts:u32,
-//   started_age:u32, adopted_age:u32, confirmed_age:u32, adopted_node:u64,
+//   started_age:u64, adopted_age:u64, confirmed_age:u64, adopted_node:u64,
 //   reserved:u32), summary 24B (neighbor_digest:u32, route_digest:u32,
 //   neighbor_active:u16, neighbor_total:u16, route_reachable:u16,
 //   route_total:u16, milestone_gen:u32, reserved:u32).
@@ -1333,7 +1333,7 @@ constexpr std::size_t kObservationQueryPayload = 12;
 constexpr std::size_t kObservationPageFixed = 26;
 constexpr std::size_t kObservationSystemBody = 28;
 constexpr std::size_t kObservationTablesBody = 36;
-constexpr std::size_t kObservationMilestonesBody = 32;
+constexpr std::size_t kObservationMilestonesBody = 44;
 constexpr std::size_t kObservationSummaryBody = 24;
 constexpr std::size_t kObservationRouteEntrySize = 30;
 constexpr std::size_t kObservationNeighborEntrySize = 24;

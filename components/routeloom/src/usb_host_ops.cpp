@@ -2786,9 +2786,9 @@ Status encode_observation_milestones(const JoinMilestones& body,
   if (status) status = writer.write_u8(body.joiner_state);
   if (status) status = writer.write_u8(body.flags);
   if (status) status = writer.write_u32(body.attempts);
-  if (status) status = writer.write_u32(body.join_started_age_ms);
-  if (status) status = writer.write_u32(body.adopted_age_ms);
-  if (status) status = writer.write_u32(body.confirmed_age_ms);
+  if (status) status = writer.write_u64(body.join_started_age_ms);
+  if (status) status = writer.write_u64(body.adopted_age_ms);
+  if (status) status = writer.write_u64(body.confirmed_age_ms);
   if (status) status = writer.write_u64(body.adopted_node);
   if (status) status = writer.write_u32(0);
   return status;
@@ -2806,9 +2806,9 @@ Status decode_observation_milestones(const ByteView body, JoinMilestones& out) n
   if (status) status = reader.read_u8(out.joiner_state);
   if (status) status = reader.read_u8(out.flags);
   if (status) status = reader.read_u32(out.attempts);
-  if (status) status = reader.read_u32(out.join_started_age_ms);
-  if (status) status = reader.read_u32(out.adopted_age_ms);
-  if (status) status = reader.read_u32(out.confirmed_age_ms);
+  if (status) status = reader.read_u64(out.join_started_age_ms);
+  if (status) status = reader.read_u64(out.adopted_age_ms);
+  if (status) status = reader.read_u64(out.confirmed_age_ms);
   if (status) status = reader.read_u64(out.adopted_node);
   if (status) status = reader.read_u32(reserved);
   if (!status) return status;

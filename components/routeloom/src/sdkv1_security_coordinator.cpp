@@ -416,13 +416,24 @@ std::uint8_t map_joiner_state(const JoinState state) noexcept {
   }
 }
 
-std::uint32_t milestone_age(const MonotonicMs now, const MonotonicMs stamp) noexcept {
+constexpr MonotonicMs kMilestoneStampMax = (MonotonicMs{1} << 48) - 1;
+
+void store_milestone_ms(std::array<std::uint8_t, 6>& out, const MonotonicMs now) noexcept {
+  const MonotonicMs stamp = now > kMilestoneStampMax ? kMilestoneStampMax : now;
+  for (unsigned i = 0; i < out.size(); ++i) {
+    out[i] = static_cast<std::uint8_t>(stamp >> ((out.size() - 1 - i) * 8));
+  }
+}
+
+MonotonicMs load_milestone_ms(const std::array<std::uint8_t, 6>& in) noexcept {
+  MonotonicMs stamp = 0;
+  for (const std::uint8_t byte : in) stamp = (stamp << 8) | byte;
+  return stamp;
+}
+
+std::uint64_t milestone_age(const MonotonicMs now, const MonotonicMs stamp) noexcept {
   if (now < stamp) return 0;
-  const std::uint64_t age = static_cast<std::uint64_t>(now - stamp);
-  // Saturate one below the unknown sentinel: a >49.7-day age reads as
-  // "at least that old", never as "not reached" and never wrapped.
-  if (age >= kMilestoneAgeUnknown) return kMilestoneAgeUnknown - 1;
-  return static_cast<std::uint32_t>(age);
+  return now - stamp;
 }
 
 std::uint16_t saturate_attempts(const std::uint32_t attempts) noexcept {
@@ -432,17 +443,14 @@ std::uint16_t saturate_attempts(const std::uint32_t attempts) noexcept {
 }  // namespace
 
 void SecurityCoordinator::note_milestone_leg_started(const MonotonicMs now) noexcept {
-  // Whole seconds since boot, floored: the served age (now - start*1000)
-  // can only overstate, never understate, the true age.
-  milestone_join_started_s_ =
-      now / 1000 > UINT32_MAX ? UINT32_MAX : static_cast<std::uint32_t>(now / 1000);
+  store_milestone_ms(milestone_join_started_ms_, now);
   milestone_flags_ |= kMilestoneStarted;
   milestone_attempts_ = 0;
   milestone_flags_ = static_cast<std::uint8_t>(milestone_flags_ & ~kMilestoneLatched);
 }
 
 void SecurityCoordinator::note_milestone_adopted(const MonotonicMs now) noexcept {
-  milestone_adopted_ms_ = now;
+  store_milestone_ms(milestone_adopted_ms_, now);
   milestone_flags_ |= kMilestoneAdoptedBit;
   // The Joiner is destroyed with the adoption — latch its attempt count
   // and terminal state now; the getter serves the latch past this point.
@@ -456,7 +464,7 @@ void SecurityCoordinator::note_milestone_adopted(const MonotonicMs now) noexcept
 }
 
 void SecurityCoordinator::note_milestone_dev_adopted(const MonotonicMs now) noexcept {
-  milestone_adopted_ms_ = now;
+  store_milestone_ms(milestone_adopted_ms_, now);
   milestone_flags_ |= kMilestoneAdoptedBit;
   milestone_attempts_ = 0;
   milestone_joiner_latched_ = kJoinerStopped;
@@ -466,18 +474,11 @@ void SecurityCoordinator::note_milestone_dev_adopted(const MonotonicMs now) noex
 
 void SecurityCoordinator::note_milestone_confirmed() noexcept {
   // First JoinConfirm ACK per adoption wins; the observer callback runs
-  // inside the step whose now last_now_ holds. The gap is whole seconds
-  // past adopted (floored — the served age never claims fresher than the
-  // truth) in u32: 136 years, so no adoption-to-confirm delay saturates it.
+  // inside the step whose now last_now_ holds.
   const bool adopted = (milestone_flags_ & kMilestoneAdoptedBit) != 0;
   const bool confirmed = (milestone_flags_ & kMilestoneConfirmedBit) != 0;
   if (adopted && !confirmed) {
-    const std::uint64_t gap_ms = last_now_ >= milestone_adopted_ms_
-                                     ? static_cast<std::uint64_t>(last_now_ - milestone_adopted_ms_)
-                                     : 0;
-    const std::uint64_t gap_s = gap_ms / 1000;
-    milestone_confirmed_gap_s_ =
-        gap_s > UINT32_MAX ? UINT32_MAX : static_cast<std::uint32_t>(gap_s);
+    store_milestone_ms(milestone_confirmed_ms_, last_now_);
     milestone_flags_ |= kMilestoneConfirmedBit;
   }
 }
@@ -521,15 +522,11 @@ JoinMilestones SecurityCoordinator::milestones(const MonotonicMs now) const noex
   if (member_valid_) out.flags |= kMilestoneAdopted;
   if (join_confirmed_) out.flags |= kMilestoneConfirmed;
   if (started) {
-    out.join_started_age_ms = milestone_age(
-        now, static_cast<MonotonicMs>(milestone_join_started_s_) * 1000);
+    out.join_started_age_ms = milestone_age(now, load_milestone_ms(milestone_join_started_ms_));
   }
-  if (adopted) out.adopted_age_ms = milestone_age(now, milestone_adopted_ms_);
-  // The confirmed delta hangs off adopted; without it there is no instant.
+  if (adopted) out.adopted_age_ms = milestone_age(now, load_milestone_ms(milestone_adopted_ms_));
   if (confirmed && adopted) {
-    const MonotonicMs confirmed_ms =
-        milestone_adopted_ms_ + static_cast<MonotonicMs>(milestone_confirmed_gap_s_) * 1000;
-    out.confirmed_age_ms = milestone_age(now, confirmed_ms);
+    out.confirmed_age_ms = milestone_age(now, load_milestone_ms(milestone_confirmed_ms_));
   }
   out.adopted_node = member_valid_ ? adopted_.node : kInvalidNodeId;
   return out;

@@ -45,7 +45,8 @@ pub const QUERY_PAYLOAD: usize = 12;
 pub const PAGE_FIXED: usize = 26;
 pub const SYSTEM_BODY: usize = 28;
 pub const TABLES_BODY: usize = 36;
-pub const MILESTONES_BODY: usize = 32;
+pub const MILESTONES_BODY: usize = 44;
+pub const MILESTONE_AGE_UNKNOWN: u64 = u64::MAX;
 pub const SUMMARY_BODY: usize = 24;
 pub const ROUTE_ENTRY_SIZE: usize = 30;
 pub const NEIGHBOR_ENTRY_SIZE: usize = 24;
@@ -420,7 +421,7 @@ pub fn decode_observation_tables(body: &[u8]) -> Result<ObservationTables, HostO
     Ok(out)
 }
 
-/// Join-lifecycle record singleton (32-byte body).
+/// Join-lifecycle record singleton (44-byte body).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ObservationMilestones {
     pub mode: u8,
@@ -428,9 +429,9 @@ pub struct ObservationMilestones {
     pub joiner_state: u8,
     pub flags: u8,
     pub attempts: u32,
-    pub join_started_age_ms: u32,
-    pub adopted_age_ms: u32,
-    pub confirmed_age_ms: u32,
+    pub join_started_age_ms: u64,
+    pub adopted_age_ms: u64,
+    pub confirmed_age_ms: u64,
     pub adopted_node: u64,
 }
 
@@ -468,12 +469,12 @@ pub fn decode_observation_milestones(body: &[u8]) -> Result<ObservationMilestone
         joiner_state: body[2],
         flags: body[3],
         attempts: u32::from_be_bytes(be(body, 4)?),
-        join_started_age_ms: u32::from_be_bytes(be(body, 8)?),
-        adopted_age_ms: u32::from_be_bytes(be(body, 12)?),
-        confirmed_age_ms: u32::from_be_bytes(be(body, 16)?),
-        adopted_node: u64::from_be_bytes(be(body, 20)?),
+        join_started_age_ms: u64::from_be_bytes(be(body, 8)?),
+        adopted_age_ms: u64::from_be_bytes(be(body, 16)?),
+        confirmed_age_ms: u64::from_be_bytes(be(body, 24)?),
+        adopted_node: u64::from_be_bytes(be(body, 32)?),
     };
-    if u32::from_be_bytes(be(body, 28)?) != 0 {
+    if u32::from_be_bytes(be(body, 40)?) != 0 {
         return Err(HostOpsError::Invalid("observation milestones reserved"));
     }
     if out.flags & !(MILESTONE_ADOPTED | MILESTONE_CONFIRMED) != 0 {
@@ -1132,7 +1133,7 @@ mod tests {
             flags: MILESTONE_ADOPTED | MILESTONE_CONFIRMED,
             attempts: 2,
             join_started_age_ms: 100,
-            adopted_age_ms: 50,
+            adopted_age_ms: 365 * 24 * 60 * 60 * 1000,
             confirmed_age_ms: 10,
             adopted_node: 0x0A,
         };
@@ -1425,8 +1426,9 @@ mod tests {
 
         // 0x71 milestones page: member/ready, adopted+confirmed, gen 7.
         let page = hex_decode(
-            "0171003a000002000100000000b0071d000100000007000000000000000003050303\
-             0000000200000064000000320000000a000000000000000a00000000",
+            "01710046000002000100000000b0071d000100000007000000000000000003050303\
+             0000000200000000000000640000000000000032000000000000000a\
+             000000000000000a00000000",
         );
         let (header, body) = decode_observation_page(&page).unwrap();
         assert_eq!(header.section, SECTION_MILESTONES);

@@ -2507,9 +2507,7 @@ void test_milestones_join_leg_adopt_confirm() {
   CHECK(m.join_started_age_ms == now + 200 - kT0);
   CHECK(m.attempts == 0);
   CHECK(m.adopted_node == kNode);
-  // The verified JoinConfirm ACK stamps confirmed at the step's now, kept
-  // as whole seconds past adopted (1200ms floors to 1s: confirmed reads as
-  // the adopted instant + 1s, so the served age never claims fresher).
+  // The verified JoinConfirm ACK stamps the step's monotonic time.
   CHECK(coordinator.step(poll_at(now + 1300)).ok());
   AuthorityEvent ack{};
   ack.kind = AuthorityEvent::Kind::JoinConfirmAck;
@@ -2518,7 +2516,7 @@ void test_milestones_join_leg_adopt_confirm() {
   m = coordinator.milestones(now + 1500);
   CHECK((m.flags & kMilestoneConfirmed) != 0);
   CHECK(m.adopted_age_ms == 1400);
-  CHECK(m.confirmed_age_ms == 400);
+  CHECK(m.confirmed_age_ms == 200);
 }
 
 void test_milestones_leg_start_survives_u32_wrap() {
@@ -2527,9 +2525,8 @@ void test_milestones_leg_start_survives_u32_wrap() {
   CHECK(f.init_stores());
   CHECK(f.identity.commit(identity_record()).ok());
   SecurityCoordinator coordinator(f.deps());
-  // Boot a leg just below the 32-bit ms wrap; the stored whole-second
-  // start still reports the true age past it.
-  constexpr MonotonicMs kT1 = 4294967000;
+  // Boot a leg just below the 32-bit ms wrap, at a fractional second.
+  constexpr MonotonicMs kT1 = 4294967123;
   CHECK(coordinator.step(boot_event(kT1, kBoot)).ok());
   CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
   const JoinMilestones m = coordinator.milestones(kT1 + 500);
@@ -2560,20 +2557,19 @@ void test_milestones_silent_adopt_has_no_leg() {
   CHECK(m.adopted_node == kNode);
 }
 
-void test_milestones_join_started_survives_49_days() {
-  current = "milestones_join_started_survives_49_days";
+void test_milestones_join_started_survives_one_year() {
+  current = "milestones_join_started_survives_one_year";
   Fixture f{};
   CHECK(f.init_stores());
   CHECK(f.identity.commit(identity_record()).ok());
   SecurityCoordinator coordinator(f.deps());
   CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
   CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
-  // A leg that stays open past the 32-bit ms wrap (49.7 days) must
-  // neither wrap nor read as unknown: the served age clamps one below
-  // the unknown sentinel ("at least that old").
-  constexpr MonotonicMs kFiftyDays = MonotonicMs{50} * 24 * 3600 * 1000;
-  const JoinMilestones m = coordinator.milestones(kT0 + kFiftyDays);
-  CHECK(m.join_started_age_ms == kMilestoneAgeUnknown - 1);
+  // A leg that stays open for a year retains its actual age for host
+  // clock mapping across multiple 32-bit millisecond wraps.
+  constexpr MonotonicMs kOneYear = MonotonicMs{365} * 24 * 3600 * 1000;
+  const JoinMilestones m = coordinator.milestones(kT0 + kOneYear);
+  CHECK(m.join_started_age_ms == kOneYear);
   CHECK(m.adopted_age_ms == kMilestoneAgeUnknown);
 }
 
@@ -2655,7 +2651,7 @@ int main() {
   test_milestones_join_leg_adopt_confirm();
   test_milestones_leg_start_survives_u32_wrap();
   test_milestones_silent_adopt_has_no_leg();
-  test_milestones_join_started_survives_49_days();
+  test_milestones_join_started_survives_one_year();
   test_milestones_confirmed_gap_past_18h();
   if (failures != 0) {
     std::fprintf(stderr, "FAILURES: %d\n", failures);

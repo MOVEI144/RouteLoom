@@ -25,8 +25,8 @@ use routeloom_protocol::observation::{
 };
 use routeloom_protocol::telemetry::{
     decode_diagnostic_reject, decode_diagnostic_reply, encode_diagnostic_request_raw,
-    DiagnosticReject, DIAG_SUB_DIAGNOSTIC_REJECT, DIAG_SUB_REMOTE_OBSERVATION_SNAPSHOT,
-    REJECT_BODY_SIZE,
+    DiagnosticReject, RejectReason, DIAG_SUB_DIAGNOSTIC_REJECT,
+    DIAG_SUB_REMOTE_OBSERVATION_SNAPSHOT, REJECT_BODY_SIZE,
 };
 use routeloom_protocol::{Frame, FrameKind};
 use std::collections::HashMap;
@@ -52,9 +52,10 @@ pub const API_WAIT_MS: u64 = 6_000;
 /// after this long so abandoned queries cannot pin table slots.
 const SETTLE_GRACE_MS: u64 = API_WAIT_MS;
 const TICK_MS: u64 = 50;
-/// A mesh failure (reject or timeout) is served from the negative cache
-/// for this long instead of re-querying the radio.
+/// Transient mesh refusals are briefly cached; unsupported peers and
+/// timeouts need a longer probe interval to bound repeated RF work.
 const NEG_TTL_MS: u64 = 5_000;
+const UNSUPPORTED_NEG_TTL_MS: u64 = 60_000;
 /// Negative cache rows; the oldest-victim eviction keeps it bounded.
 const NEG_MAX: usize = 16;
 
@@ -171,6 +172,13 @@ impl RemoteObservationOps {
             .values()
             .any(|op| op.request == request && op.outcome.is_none())
     }
+    pub fn request_pending_in_session(&self, request: u64, session: u64) -> bool {
+        self.ops
+            .lock()
+            .expect("remote observation ops poisoned")
+            .values()
+            .any(|op| op.request == request && op.session == session && op.outcome.is_none())
+    }
     fn mint(&self) -> (u64, u64) {
         let mut next = self.next.lock().expect("remote observation ops poisoned");
         *next = next.wrapping_add(1);
@@ -201,6 +209,13 @@ impl RemoteObservationOps {
     fn neg_record(&self, key: NegKey, outcome: NegOutcome, now_ms: u64) {
         let mut neg = self.neg.lock().expect("remote observation ops poisoned");
         neg.retain(|_, entry| entry.until_ms > now_ms);
+        let ttl_ms = match &outcome {
+            NegOutcome::Timeout => UNSUPPORTED_NEG_TTL_MS,
+            NegOutcome::Reject(reject) if reject.reason == RejectReason::Unsupported => {
+                UNSUPPORTED_NEG_TTL_MS
+            }
+            NegOutcome::Reject(_) => NEG_TTL_MS,
+        };
         if neg.len() >= NEG_MAX && !neg.contains_key(&key) {
             // Bounded victim: drop an arbitrary row (all rows are fresh
             // here — a wrong victim only costs one re-query).
@@ -212,7 +227,7 @@ impl RemoteObservationOps {
             key,
             NegEntry {
                 outcome,
-                until_ms: now_ms.saturating_add(NEG_TTL_MS),
+                until_ms: now_ms.saturating_add(ttl_ms),
             },
         );
     }
@@ -711,6 +726,30 @@ mod tests {
         let mut body = hex(REJECT_HEX);
         body[12..20].copy_from_slice(&params().observer.to_be_bytes());
         body
+    }
+
+    #[test]
+    fn unsupported_observer_is_not_reprobed_within_a_minute() {
+        let ops = RemoteObservationOps::default();
+        let token = live_token(&ops);
+        let request = ops.request_for(token).unwrap();
+        let mut reject = matching_reject();
+        reject[8..10].copy_from_slice(&1u16.to_be_bytes());
+        assert!(ops.post_reply(
+            request,
+            0x5e55,
+            reply_inner(0, params().observer, &reject),
+            2_000,
+            2_000
+        ));
+        assert!(matches!(
+            ops.submit(params(), 0x5e55, 31_000),
+            Ok(SubmitOutcome::Cached(_))
+        ));
+        assert!(matches!(
+            ops.submit(params(), 0x5e55, 62_001),
+            Ok(SubmitOutcome::Live { fresh: true, .. })
+        ));
     }
 
     fn live_token(ops: &RemoteObservationOps) -> u64 {
