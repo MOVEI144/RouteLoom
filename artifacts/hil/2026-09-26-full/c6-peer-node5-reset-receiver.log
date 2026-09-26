@@ -1,0 +1,29 @@
+[2026-09-26T07:59:51.443Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-26T08:00:12.187Z] W (713868) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=4 message=present
+[2026-09-26T08:00:12.206Z] I (713887) RouteLoomRef: discovery event=REACHABLE peer=4
+[2026-09-26T08:00:12.207Z] W (713887) RouteLoomRef: diagnostic reason=REACHABLE peer=4 message=none
+[2026-09-26T08:00:14.212Z] W (715892) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=4 message=none
+[2026-09-26T08:00:18.796Z] I (720475) RouteLoom: stack hwm main 10588 B
+[2026-09-26T08:00:21.748Z] W (723428) RouteLoomRef: diagnostic reason=session unknown context peer=4 message=present
+[2026-09-26T08:00:21.815Z] I (723496) RouteLoomRef: message origin=4 session=39 sequence=1 bytes=8
+[2026-09-26T08:00:23.609Z] I (725290) RouteLoomRef: message origin=4 session=39 sequence=7 bytes=8
+[2026-09-26T08:00:25.609Z] I (727290) RouteLoomRef: message origin=4 session=39 sequence=8 bytes=8
+[2026-09-26T08:00:27.610Z] I (729291) RouteLoomRef: message origin=4 session=39 sequence=9 bytes=8
+[2026-09-26T08:00:29.610Z] I (731291) RouteLoomRef: message origin=4 session=39 sequence=10 bytes=8
+[2026-09-26T08:00:31.611Z] I (733292) RouteLoomRef: message origin=4 session=39 sequence=11 bytes=8
+[2026-09-26T08:00:33.610Z] I (735291) RouteLoomRef: message origin=4 session=39 sequence=12 bytes=8
+[2026-09-26T08:00:35.611Z] I (737292) RouteLoomRef: message origin=4 session=39 sequence=13 bytes=8
+[2026-09-26T08:00:37.619Z] I (739299) RouteLoomRef: message origin=4 session=39 sequence=14 bytes=8
+[2026-09-26T08:00:39.619Z] I (741300) RouteLoomRef: message origin=4 session=39 sequence=15 bytes=8
+[2026-09-26T08:00:41.619Z] I (743300) RouteLoomRef: message origin=4 session=39 sequence=16 bytes=8
+[2026-09-26T08:00:43.620Z] I (745301) RouteLoomRef: message origin=4 session=39 sequence=17 bytes=8
+[2026-09-26T08:00:45.621Z] I (747302) RouteLoomRef: message origin=4 session=39 sequence=18 bytes=8
+[2026-09-26T08:00:47.623Z] I (749303) RouteLoomRef: message origin=4 session=39 sequence=19 bytes=8
+[2026-09-26T08:00:49.624Z] I (751305) RouteLoomRef: message origin=4 session=39 sequence=20 bytes=8
+[2026-09-26T08:00:51.626Z] I (753306) RouteLoomRef: message origin=4 session=39 sequence=21 bytes=8
+[2026-09-26T08:00:53.632Z] I (755312) RouteLoomRef: message origin=4 session=39 sequence=22 bytes=8
+[2026-09-26T08:00:55.626Z] I (757307) RouteLoomRef: message origin=4 session=39 sequence=23 bytes=8
+[2026-09-26T08:00:57.625Z] I (759306) RouteLoomRef: message origin=4 session=39 sequence=24 bytes=8
+[2026-09-26T08:00:59.627Z] I (761308) RouteLoomRef: message origin=4 session=39 sequence=25 bytes=8
+[2026-09-26T08:01:18.795Z] I (780476) RouteLoom: stack hwm main 10588 B
+[2026-09-26T08:01:36.622Z] !! capture closed

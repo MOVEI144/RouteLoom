@@ -1,0 +1,10 @@
+c040a9719d4e95cd84bf6b85d56b98307b08ffc51051b892bc13b37661bc778a  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r2-member-sleep-node2/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+711cd9ea0ba4bf3f7ea0ab516535b3a5d1641abf52729d5d036ec67ccf40ede7  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r2-member-sleep-node2/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+c040a9719d4e95cd84bf6b85d56b98307b08ffc51051b892bc13b37661bc778a  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r2-member-sleep-node2/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+711cd9ea0ba4bf3f7ea0ab516535b3a5d1641abf52729d5d036ec67ccf40ede7  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r2-member-sleep-node2/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+1029c1edb61d53213d8f225175ff6967954c95f3e052d595407474f991dba33f  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r2-member-sleep-node2/build/bootloader/bootloader.bin
+e5b5d7f1f7589470e89ea12332069f4e65adbb817dd9d51cf1fea67049c12f2a  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r2-member-sleep-node2/build/flasher_args.json
+068ab45eb37a4be22b3aea004e4e970cfbbf9a25bc0824c1572be5bf68a37fef  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r2-member-sleep-node2/build/partition_table/partition-table.bin
+d3d7f8be4b0527a12b52ee7f2742900dd45b8fb1586ed502b45378886fe57e8b  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r2-member-sleep-node2/build/ram-report.json
+77723a0670ab055833c5580a7758bfd3f68deeb9a401bc66e33fc9efe65042ef  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r2-member-sleep-node2/build/routeloom_reference_node.bin
+eb4181311d25305419698a5ea962ebe56f5ba5f61f6f0c28e739ce6f30f867e7  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r2-member-sleep-node2/build/size.json

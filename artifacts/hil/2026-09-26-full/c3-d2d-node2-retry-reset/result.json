@@ -1,0 +1,23 @@
+{
+  "started": "2026-09-26T14:41:59.403931+00:00",
+  "hold_s": 0.5,
+  "boards": [
+    {
+      "name": "ref-a",
+      "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00",
+      "identity": {
+        "chip": "esp32c3",
+        "mac": "94:a9:90:7a:b5:60",
+        "log": "flash-ref-a-preflight.log"
+      },
+      "open_attempts": 1,
+      "asserted": "2026-09-26T14:41:59.404906+00:00",
+      "released": "2026-09-26T14:41:59.905152+00:00",
+      "after_state": "ONLINE",
+      "after_port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00"
+    }
+  ],
+  "assert_skew_ms": 0.0,
+  "release_skew_ms": 0.0,
+  "finished": "2026-09-26T14:42:01.906073+00:00"
+}

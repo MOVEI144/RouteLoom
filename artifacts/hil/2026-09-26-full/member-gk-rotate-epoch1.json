@@ -1,0 +1,8 @@
+{
+  "cause": "manual",
+  "from": 1,
+  "operation_id": "op-0000000000000006",
+  "state": "committed",
+  "targets": 5,
+  "to": 2
+}

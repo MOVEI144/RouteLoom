@@ -1,0 +1,144 @@
+[2026-09-26T15:36:11.257+00:00] !! connected 94:A9:90:7A:26:AC count=1
+[2026-09-26T15:36:12.460+00:00] I (19604) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=10:W (24970) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SATISFIED peer=4 message=present
+[2026-09-26T15:36:12.861+00:00] I (25354) RouteLoomRef: member state=4 links=3 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T15:36:12.861+00:00] I (25354) RouteLoomRef: member handshake starts=4 requests=1 rejected=0 send_fail=2 established=3 failed=0 last_error=6 active=0
+[2026-09-26T15:36:12.861+00:00] I (25355) RouteLoomRef: member end send_fail=9 established=1 failed=1 last_error=8
+[2026-09-26T15:36:12.861+00:00] I (25355) RouteLoomRef: authority state=2 tx_sent=6 tx_failed=0 rx_accepted=1 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T15:36:12.861+00:00] I (25355) RouteLoomRef: authority mesh tx_carrier=6 queued=6 shed=1675 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T15:36:12.861+00:00] I (25356) RouteLoomRef: authority jobs accepted=4 failed=2 last=SESSION_UNAVAILABLE
+[2026-09-26T15:36:12.861+00:00] I (25356) RouteLoomRef: member discovery rx=3 offer_tx=3 offer_rx=4 auth=3 kind_reject=0 capacity=0 send_fail=3
+[2026-09-26T15:36:12.861+00:00] I (25356) RouteLoomRef: member scope raw=7 accepted=4 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T15:36:17.873+00:00] I (30357) RouteLoomRef: member state=4 links=3 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T15:36:17.873+00:00] I (30357) RouteLoomRef: member handshake starts=4 requests=1 rejected=0 send_fail=2 established=3 failed=0 last_error=6 active=0
+[2026-09-26T15:36:17.873+00:00] I (30358) RouteLoomRef: member end send_fail=9 established=1 failed=1 last_error=8
+[2026-09-26T15:36:17.873+00:00] I (30358) RouteLoomRef: authority state=2 tx_sent=6 tx_failed=0 rx_accepted=1 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T15:36:17.873+00:00] I (30358) RouteLoomRef: authority mesh tx_carrier=6 queued=6 shed=1675 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T15:36:17.873+00:00] I (30359) RouteLoomRef: authority jobs accepted=4 failed=2 last=SESSION_UNAVAILABLE
+[2026-09-26T15:36:17.873+00:00] I (30359) RouteLoomRef: member discovery rx=3 offer_tx=3 offer_rx=4 auth=3 kind_reject=0 capacity=0 send_fail=3
+[2026-09-26T15:36:17.873+00:00] I (30359) RouteLoomRef: member scope raw=7 accepted=4 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T15:36:21.584+00:00] W (34079) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:21.584+00:00] W (34080) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:21.584+00:00] W (34080) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:21.584+00:00] W (34085) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:21.584+00:00] W (34102) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:21.684+00:00] W (34137) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:21.684+00:00] W (34156) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:21.684+00:00] W (34185) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:21.684+00:00] W (34207) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:22.085+00:00] W (34589) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:22.085+00:00] W (34604) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:22.185+00:00] W (34640) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:22.185+00:00] W (34657) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:22.185+00:00] W (34688) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:22.185+00:00] W (34709) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:22.487+00:00] W (34966) RouteLoomRef: diagnostic reason=session bank not configured peer=4 message=none
+[2026-09-26T15:36:22.587+00:00] W (35091) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:22.688+00:00] W (35119) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:22.688+00:00] W (35126) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:22.688+00:00] W (35141) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:22.688+00:00] W (35168) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:22.688+00:00] W (35187) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:22.788+00:00] W (35220) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:24.293+00:00] W (36734) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:24.494+00:00] W (36969) RouteLoomRef: diagnostic reason=session bank not configured peer=4 message=none
+[2026-09-26T15:36:24.694+00:00] W (37125) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:26.504+00:00] W (38971) RouteLoomRef: diagnostic reason=session bank not configured peer=4 message=none
+[2026-09-26T15:36:26.605+00:00] W (39129) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:28.309+00:00] W (40816) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:28.511+00:00] W (40972) RouteLoomRef: diagnostic reason=session bank not configured peer=4 message=none
+[2026-09-26T15:36:28.611+00:00] W (41132) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:30.315+00:00] W (42822) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:30.516+00:00] W (42975) RouteLoomRef: diagnostic reason=session bank not configured peer=4 message=none
+[2026-09-26T15:36:30.616+00:00] W (43133) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:31.618+00:00] W (44140) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:31.719+00:00] W (44227) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:31.919+00:00] W (44410) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:32.019+00:00] W (44501) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:32.320+00:00] W (44810) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:32.320+00:00] W (44824) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:32.420+00:00] W (44909) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:32.522+00:00] W (44978) RouteLoomRef: diagnostic reason=session bank not configured peer=4 message=none
+[2026-09-26T15:36:32.623+00:00] W (45137) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:32.723+00:00] W (45213) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:32.823+00:00] W (45300) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:33.626+00:00] W (46142) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:33.726+00:00] W (46233) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:33.926+00:00] W (46416) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:34.027+00:00] W (46515) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:34.327+00:00] W (46818) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:34.327+00:00] W (46825) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:34.428+00:00] W (46904) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:34.528+00:00] W (46980) RouteLoomRef: diagnostic reason=session bank not configured peer=4 message=none
+[2026-09-26T15:36:34.629+00:00] W (47139) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:34.729+00:00] W (47222) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:34.829+00:00] W (47313) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:35.640+00:00] W (48143) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:35.740+00:00] W (48237) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:35.941+00:00] W (48412) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:36.041+00:00] W (48494) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:36.341+00:00] W (48813) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:36.342+00:00] W (48828) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:36.442+00:00] W (48903) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:36.542+00:00] W (48982) RouteLoomRef: diagnostic reason=session bank not configured peer=4 message=none
+[2026-09-26T15:36:36.642+00:00] W (49141) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:36.743+00:00] W (49215) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:36.843+00:00] W (49309) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:38.348+00:00] W (50832) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:38.549+00:00] W (50984) RouteLoomRef: diagnostic reason=session bank not configured peer=4 message=none
+[2026-09-26T15:36:38.649+00:00] W (51144) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:40.353+00:00] W (52835) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:40.554+00:00] W (52987) RouteLoomRef: diagnostic reason=session bank not configured peer=4 message=none
+[2026-09-26T15:36:40.654+00:00] W (53146) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:42.359+00:00] W (54836) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:42.459+00:00] I (54943) RouteLoomRef: discovery event=STALE peer=4
+[2026-09-26T15:36:42.459+00:00] W (54943) RouteLoomRef: diagnostic reason=STALE peer=4 message=none
+[2026-09-26T15:36:42.559+00:00] W (54990) RouteLoomRef: diagnostic reason=session bank not configured peer=4 message=none
+[2026-09-26T15:36:42.659+00:00] I (55124) RouteLoomRef: discovery event=STALE peer=2
+[2026-09-26T15:36:42.659+00:00] W (55124) RouteLoomRef: diagnostic reason=STALE peer=2 message=none
+[2026-09-26T15:36:42.659+00:00] W (55147) RouteLoomRef: diagnostic reason=session bank not configured peer=2 message=none
+[2026-09-26T15:36:44.363+00:00] W (56841) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:44.864+00:00] I (57315) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:36:45.365+00:00] I (57861) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:36:46.067+00:00] I (58518) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:36:46.367+00:00] W (58842) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:47.470+00:00] I (59967) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:36:47.871+00:00] I (60346) RouteLoom: stack hwm main 10384 B
+[2026-09-26T15:36:47.871+00:00] I (60346) RouteLoom: HIL HEAP free=21564 largest=18432 min=20568 B
+[2026-09-26T15:36:47.871+00:00] I (60347) RouteLoom: HIL DISCOVERY candidates=0 neighbors=3 capacity=0 auth=3 stale=2 probes=6 send_failures=28199 kind_rejects=0
+[2026-09-26T15:36:47.871+00:00] I (60347) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=323 seq=10
+[2026-09-26T15:36:47.871+00:00] I (60348) RouteLoom: HIL ROUTE peer=2 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-26T15:36:48.272+00:00] I (60764) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:36:48.272+00:00] I (60795) RouteLoomRef: discovery event=STALE peer=1
+[2026-09-26T15:36:48.272+00:00] W (60795) RouteLoomRef: diagnostic reason=STALE peer=1 message=none
+[2026-09-26T15:36:48.372+00:00] W (60844) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T15:36:51.581+00:00] I (64013) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:36:52.583+00:00] I (65086) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:36:53.886+00:00] I (66345) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:36:55.490+00:00] I (67982) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:36:58.600+00:00] I (71091) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:36:59.502+00:00] I (71948) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:01.107+00:00] I (73567) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:02.109+00:00] I (74602) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:02.911+00:00] I (75431) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:04.414+00:00] I (76928) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:04.714+00:00] I (77149) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:07.323+00:00] I (79762) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:12.837+00:00] I (85271) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:13.940+00:00] I (86396) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:14.842+00:00] I (87325) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:15.142+00:00] I (87654) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:15.844+00:00] I (88321) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:16.545+00:00] I (89018) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:16.646+00:00] I (89099) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:17.046+00:00] I (89554) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:19.352+00:00] I (91857) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:19.752+00:00] I (92240) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:23.865+00:00] I (96301) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:26.070+00:00] I (98528) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:26.471+00:00] I (98935) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:27.674+00:00] I (100184) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:30.081+00:00] I (102519) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:32.587+00:00] I (105026) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:32.887+00:00] I (105391) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:34.591+00:00] I (107026) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:37:34.900+00:00] I (107375) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff

@@ -1,0 +1,138 @@
+[2026-09-26T08:38:47.091+00:00] !! connected /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00
+[2026-09-26T08:38:47.892+00:00] W (199209) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNW (229204) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:38:48.693+00:00] W (230030) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:38:48.693+00:00] W (230030) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:38:52.902+00:00] W (234201) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:38:53.502+00:00] W (234844) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:38:53.502+00:00] W (234844) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:38:57.908+00:00] W (239200) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:38:58.709+00:00] W (240011) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:38:58.709+00:00] W (240012) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:38:59.110+00:00] I (240407) RouteLoom: stack hwm main 11380 B
+[2026-09-26T08:38:59.110+00:00] I (240407) RouteLoom: HIL HEAP free=21988 largest=18432 min=21200 B
+[2026-09-26T08:38:59.911+00:00] W (241147) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:38:59.911+00:00] W (241147) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=4 message=none
+[2026-09-26T08:38:59.911+00:00] W (241153) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=5 seq=2 att=1 peer=4 message=none
+[2026-09-26T08:39:00.111+00:00] W (241486) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:39:00.311+00:00] W (241487) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=2 message=none
+[2026-09-26T08:39:00.912+00:00] W (242171) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:39:00.912+00:00] W (242172) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=4 message=none
+[2026-09-26T08:39:01.913+00:00] W (243151) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=5 seq=2 att=2 peer=2 message=none
+[2026-09-26T08:39:01.913+00:00] W (243207) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:39:01.913+00:00] W (243208) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=4 message=none
+[2026-09-26T08:39:02.915+00:00] W (244199) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:39:02.915+00:00] W (244200) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=4 message=none
+[2026-09-26T08:39:02.915+00:00] W (244247) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:39:02.915+00:00] W (244248) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=4 message=none
+[2026-09-26T08:39:02.915+00:00] W (244278) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:39:02.915+00:00] W (244278) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=2 message=none
+[2026-09-26T08:39:03.515+00:00] W (244876) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:39:03.515+00:00] W (244876) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=2 message=none
+[2026-09-26T08:39:05.919+00:00] W (247153) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=5 seq=2 att=3 peer=4 message=none
+[2026-09-26T08:39:07.921+00:00] W (249201) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:39:07.921+00:00] W (249202) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=4 message=none
+[2026-09-26T08:39:08.121+00:00] I (249378) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-26T08:39:08.121+00:00] W (249378) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-26T08:39:08.121+00:00] I (249400) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-26T08:39:08.121+00:00] W (249400) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-26T08:39:08.121+00:00] W (249464) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:39:08.121+00:00] W (249465) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=2 message=none
+[2026-09-26T08:39:08.322+00:00] W (249545) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:39:08.322+00:00] W (249546) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=4 message=none
+[2026-09-26T08:39:08.522+00:00] W (249853) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:39:08.522+00:00] W (249854) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=2 message=none
+[2026-09-26T08:39:09.724+00:00] W (251063) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:39:09.724+00:00] W (251064) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=2 message=none
+[2026-09-26T08:39:09.724+00:00] W (251072) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:39:09.724+00:00] W (251076) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=4 message=none
+[2026-09-26T08:39:11.927+00:00] W (253154) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=5 seq=2 att=4 peer=2 message=none
+[2026-09-26T08:39:12.928+00:00] W (254204) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:39:13.529+00:00] W (254855) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:39:13.529+00:00] W (254855) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=2 message=none
+[2026-09-26T08:39:17.936+00:00] W (259205) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:39:18.537+00:00] W (259857) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:39:22.944+00:00] W (264208) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:39:23.545+00:00] W (264860) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:39:27.950+00:00] W (269209) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:39:28.551+00:00] W (269866) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:39:32.957+00:00] W (274209) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:39:33.557+00:00] W (274868) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:39:37.963+00:00] W (279210) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:39:38.564+00:00] W (279867) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:39:42.972+00:00] W (284211) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:39:43.573+00:00] W (284867) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:39:47.980+00:00] W (289229) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:39:48.581+00:00] W (289868) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:39:52.987+00:00] W (294218) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:39:53.587+00:00] W (294869) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:39:57.994+00:00] W (299222) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:39:58.595+00:00] W (299871) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:39:59.195+00:00] I (300409) RouteLoom: stack hwm main 11380 B
+[2026-09-26T08:39:59.196+00:00] I (300409) RouteLoom: HIL HEAP free=21932 largest=18432 min=21136 B
+[2026-09-26T08:40:03.000+00:00] W (304225) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:03.000+00:00] W (304250) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-26T08:40:03.000+00:00] I (304307) RouteLoomRef: message origin=1 session=238 sequence=4 bytes=9
+[2026-09-26T08:40:03.000+00:00] W (304339) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:03.200+00:00] W (304410) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:03.602+00:00] W (304873) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:04.003+00:00] W (305329) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:05.004+00:00] W (306338) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:05.004+00:00] W (306347) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:05.405+00:00] W (306739) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=4 message=present
+[2026-09-26T08:40:06.207+00:00] W (307390) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:06.207+00:00] W (307400) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:07.008+00:00] W (308351) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:07.208+00:00] W (308411) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:08.009+00:00] W (309219) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:08.209+00:00] W (309426) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:08.209+00:00] W (309444) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:08.612+00:00] W (309890) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:13.018+00:00] W (314220) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:13.619+00:00] W (314893) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:18.024+00:00] W (319223) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:18.625+00:00] W (319894) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:23.037+00:00] W (324229) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:23.638+00:00] W (324897) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:28.044+00:00] W (329232) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:28.645+00:00] W (329898) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:33.051+00:00] W (334232) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:33.652+00:00] W (334900) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:37.857+00:00] W (339233) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:38.658+00:00] W (339901) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:42.864+00:00] W (344237) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:43.665+00:00] W (344905) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:47.870+00:00] W (349239) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:48.671+00:00] W (349907) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:49.272+00:00] W (350625) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:50.274+00:00] W (351620) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:50.474+00:00] W (351700) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:51.275+00:00] W (352638) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:51.475+00:00] W (352734) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:52.476+00:00] W (353659) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:52.476+00:00] W (353785) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:52.877+00:00] W (354241) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:53.478+00:00] W (354691) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:53.678+00:00] W (354909) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:57.884+00:00] W (359243) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:40:58.685+00:00] W (359909) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:40:59.085+00:00] I (360411) RouteLoom: stack hwm main 11380 B
+[2026-09-26T08:40:59.085+00:00] I (360411) RouteLoom: HIL HEAP free=21876 largest=18432 min=21096 B
+[2026-09-26T08:41:02.891+00:00] W (364245) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:41:03.692+00:00] W (364910) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:41:07.898+00:00] W (369245) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:41:08.699+00:00] W (369913) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:41:12.906+00:00] W (374253) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:41:13.706+00:00] W (374918) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:41:17.912+00:00] W (379248) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:41:18.713+00:00] W (379920) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:41:22.918+00:00] W (384249) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:41:23.719+00:00] W (384928) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:41:27.927+00:00] W (389257) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:41:28.728+00:00] W (389924) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:41:32.935+00:00] W (394252) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:41:33.736+00:00] W (394928) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:41:37.941+00:00] W (399250) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:41:38.742+00:00] W (399929) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:41:42.948+00:00] W (404252) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=4 message=none
+[2026-09-26T08:41:43.750+00:00] W (404929) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-26T08:41:47.190+00:00] !! capture finished

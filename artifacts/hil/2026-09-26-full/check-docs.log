@@ -1,0 +1,10 @@
+{
+  "scope": "documentation-and-parameters-only",
+  "markdown_files": 96,
+  "json_files": 6,
+  "checks": 1202,
+  "passed": 1202,
+  "failed": [],
+  "rf_tested": false,
+  "firmware_tested": false
+}

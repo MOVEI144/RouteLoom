@@ -1,0 +1,9 @@
+UTC 2026-09-26T06:39:49.762644+00:00
+Target: prior kernel log mapped Node3 MAC 94:a9:90:7a:26:ac to USB 1-4.2.2 (parent hub port 2); current port disable was 0.
+Action: sudo sh wrote 1, waited 2 s, wrote 0 to /sys/bus/usb/devices/1-4.2:1.0/1-4.2-port2/disable; exit 0.
+After /dev/serial/by-id:
+usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00
+usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00
+usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00
+usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00
+Node3 remains absent.

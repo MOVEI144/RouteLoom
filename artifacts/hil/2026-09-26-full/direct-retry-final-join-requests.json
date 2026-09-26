@@ -1,0 +1,40 @@
+{
+  "requests": [
+    {
+      "join_request_id": "jr-0000000000000001",
+      "device_id": "0000000000000001",
+      "kid": "06a77e4ae52c1c65a54906872340769fe9662acbc97123bb7af898dd3e4972d0",
+      "model": 17,
+      "hw_rev": 2,
+      "cert_serial": 11,
+      "fw_version": 0,
+      "capability": [
+        "sleepy",
+        "relay",
+        "gateway"
+      ],
+      "requested_role": "gateway",
+      "previously_removed": false,
+      "kid_conflict": false,
+      "via": {
+        "gateway": "0000000000000001",
+        "proxy": "0000000000000001",
+        "authority_hops": 0,
+        "joiner_rssi_dbm": 0
+      },
+      "attempt": 1,
+      "created_ms": 1790438580873,
+      "updated_ms": 1790438580873,
+      "deadline_ms": 1790438585873,
+      "remaining_ms": 0,
+      "state": "decided",
+      "decision": {
+        "verdict": "allow",
+        "role": "gateway",
+        "decided_ms": 1790438587965
+      }
+    }
+  ],
+  "max": 256,
+  "clock": "host_unix_ms"
+}

@@ -1,0 +1,16 @@
+[2026-09-26T05:01:43.209Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-26T05:02:41.015Z] I (120463) RouteLoom: stack hwm main 11096 B
+[2026-09-26T05:03:37.150Z] W (176599) RouteLoomRef: diagnostic reason=session unknown context peer=4 message=present
+[2026-09-26T05:03:37.217Z] I (176665) RouteLoomRef: message origin=1 session=221 sequence=7 bytes=9
+[2026-09-26T05:03:37.529Z] I (176978) RouteLoomRef: message origin=1 session=221 sequence=14 bytes=9
+[2026-09-26T05:03:37.897Z] I (177346) RouteLoomRef: message origin=1 session=221 sequence=20 bytes=9
+[2026-09-26T05:03:38.188Z] W (177636) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=4 message=none
+[2026-09-26T05:03:38.193Z] W (177638) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=2 seq=1 att=1 peer=4 message=none
+[2026-09-26T05:03:38.244Z] W (177693) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SATISFIED peer=4 message=present
+[2026-09-26T05:03:39.109Z] W (178557) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=4 message=none
+[2026-09-26T05:03:39.161Z] W (178609) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=4 message=none
+[2026-09-26T05:03:39.233Z] I (178682) RouteLoomRef: message origin=1 session=221 sequence=25 bytes=9
+[2026-09-26T05:03:39.509Z] I (178958) RouteLoomRef: message origin=1 session=221 sequence=29 bytes=9
+[2026-09-26T05:03:41.015Z] I (180464) RouteLoom: stack hwm main 11096 B
+[2026-09-26T05:04:41.015Z] I (240464) RouteLoom: stack hwm main 11096 B
+[2026-09-26T05:04:43.220Z] !! capture closed

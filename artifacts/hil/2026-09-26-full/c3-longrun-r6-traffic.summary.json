@@ -1,0 +1,24 @@
+{
+  "requested": 100,
+  "host_accepted": 100,
+  "delivered": 100,
+  "stopped_reason": null,
+  "success_rate": 1.0,
+  "rate_limit_retries": 0,
+  "pace_s": 37.0,
+  "elapsed_s": 3663.11,
+  "latency_ms_median": 104.18,
+  "latency_ms_p95": 155.55,
+  "latency_ms_max": 335.65,
+  "by_destination": {
+    "2": {
+      "accepted": 50,
+      "delivered": 50
+    },
+    "3": {
+      "accepted": 50,
+      "delivered": 50
+    }
+  },
+  "evidence": "artifacts/hil/2026-09-26-full/c3-longrun-r6-traffic.jsonl"
+}

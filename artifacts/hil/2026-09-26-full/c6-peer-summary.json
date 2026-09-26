@@ -1,0 +1,10 @@
+{
+  "attempted": 20,
+  "admitted": 20,
+  "end_received": 20,
+  "receiver_unique": 20,
+  "latency_ms_median": 46.0,
+  "latency_ms_min": 45,
+  "latency_ms_max": 252,
+  "latency_ms_p95": 74
+}

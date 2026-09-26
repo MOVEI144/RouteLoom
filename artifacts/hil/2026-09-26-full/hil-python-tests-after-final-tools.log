@@ -1,0 +1,25 @@
+test_flash_encryption_never_builds_flash_command (test_catch_wake.CatchWakeTest.test_flash_encryption_never_builds_flash_command) ... ok
+test_mismatched_mac_never_builds_flash_command (test_catch_wake.CatchWakeTest.test_mismatched_mac_never_builds_flash_command) ... ok
+test_secure_boot_never_builds_flash_command (test_catch_wake.CatchWakeTest.test_secure_boot_never_builds_flash_command) ... ok
+test_corrupt_crc_fails_closed (test_counter_snapshot.CounterSnapshotTest.test_corrupt_crc_fails_closed) ... ok
+test_valid_record_and_replay_blob_is_not_exported (test_counter_snapshot.CounterSnapshotTest.test_valid_record_and_replay_blob_is_not_exported) ... ok
+test_app_only_needs_no_fallback_boot_bins (test_flash_app_only.FlashAppOnlyTests.test_app_only_needs_no_fallback_boot_bins) ... ok
+test_fallback_app_only (test_flash_app_only.FlashAppOnlyTests.test_fallback_app_only) ... ok
+test_missing_app_offset_refuses_fallback (test_flash_app_only.FlashAppOnlyTests.test_missing_app_offset_refuses_fallback) ... ok
+test_boot_log_failures_flag_heap_floor_and_wifi_init (test_preflight.BootLogTest.test_boot_log_failures_flag_heap_floor_and_wifi_init) ... ok
+test_c6_requires_full_eui64_match (test_preflight.PreflightTest.test_c6_requires_full_eui64_match) ... ok
+test_only_expected_chip_and_mac_pass (test_preflight.PreflightTest.test_only_expected_chip_and_mac_pass) ... ok
+test_provision_console_uses_security_preflight_before_serial_write (test_preflight.PreflightTest.test_provision_console_uses_security_preflight_before_serial_write) ... ok
+test_security_enabled_refuses_before_write (test_preflight.PreflightTest.test_security_enabled_refuses_before_write) ... ok
+test_security_probe_rejects_swapped_board (test_preflight.PreflightTest.test_security_probe_rejects_swapped_board) ... ok
+test_unpinned_mac_refuses (test_preflight.PreflightTest.test_unpinned_mac_refuses) ... ok
+test_retries_transient_usb_open_on_same_pinned_port (test_reset_all.ResetAllTest.test_retries_transient_usb_open_on_same_pinned_port) ... ok
+test_idempotency_full_after_host_admission_is_counted (test_reset_cycles.ResetCycleAccountingTest.test_idempotency_full_after_host_admission_is_counted) ... ok
+test_connected_without_route (test_route_convergence.RouteConvergenceTest.test_connected_without_route) ... ok
+test_direct_route (test_route_convergence.RouteConvergenceTest.test_direct_route) ... ok
+test_learned_route_with_unknown_hops (test_route_convergence.RouteConvergenceTest.test_learned_route_with_unknown_hops) ... ok
+
+----------------------------------------------------------------------
+Ran 20 tests in 0.013s
+
+OK

@@ -1,0 +1,20 @@
+{
+  "requested": 5,
+  "host_accepted": 5,
+  "delivered": 5,
+  "stopped_reason": null,
+  "success_rate": 1.0,
+  "rate_limit_retries": 0,
+  "pace_s": 1.0,
+  "elapsed_s": 4.06,
+  "latency_ms_median": 58.03,
+  "latency_ms_p95": 100.43,
+  "latency_ms_max": 110.69,
+  "by_destination": {
+    "2": {
+      "accepted": 5,
+      "delivered": 5
+    }
+  },
+  "evidence": "artifacts/hil/2026-09-26-full/member-c3-node2-after-confirm-5.jsonl"
+}

@@ -1,0 +1,21 @@
+{
+  "member": {
+    "device_id": "0000000000000006",
+    "kid": "7ec8ee43ae47b1fbf44eb1ae8c37ccaef2fa7da02d727107ece8c6190b5f3ecb",
+    "state": "member",
+    "generation": 1,
+    "role": "relay",
+    "member_cert_serial": 6,
+    "confirm_state": "allowed_unconfirmed",
+    "delivered": true,
+    "model": 17,
+    "hw_rev": 2,
+    "cert_serial": 6,
+    "approved_ms": 1790437237354,
+    "delivered_ms": 1790437237354,
+    "confirmed_ms": null,
+    "last_seen_ms": 1790437237354,
+    "removed_ms": null,
+    "removal_reason": null
+  }
+}

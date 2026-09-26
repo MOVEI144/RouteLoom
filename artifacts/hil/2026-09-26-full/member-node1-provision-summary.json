@@ -1,0 +1,8 @@
+{
+  "preflight_chip": "esp32c3",
+  "preflight_mac": "94:a9:90:6a:ee:c4",
+  "node": "0000000000000001",
+  "seal": "OK sealed kid=04c64bcd457d1f5307e12aeb9a5d36922df6a435d355ff6366ceaf02ccc55781",
+  "readback": "OK identity=sealed pending=0",
+  "bundle_bytes": 943
+}

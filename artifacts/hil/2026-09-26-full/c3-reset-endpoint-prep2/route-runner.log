@@ -1,0 +1,1 @@
+{"expected": ["0000000000000002", "0000000000000003"], "authenticated_at_s": 0.0, "routes_at_s": {"0000000000000002": 0.0}, "all_routes_at_s": null, "elapsed_s": 30.309, "source": "artifacts/hil/2026-09-26-full/c3-reset-endpoint-prep2/routes.jsonl"}

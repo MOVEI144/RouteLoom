@@ -1,0 +1,12 @@
+[2026-09-26T08:56:15.507+00:00] !! connected /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00
+[2026-09-26T08:56:29.325+00:00] I (1238123) RouteLoomRef: discovery event=PEER_CAPACITY peer=4
+[2026-09-26T08:56:29.325+00:00] I (1290537) RouteLoomRef: discovery event=STALE peer=2
+[2026-09-26T08:56:29.325+00:00] W (1290537) RouteLoomRef: diagnostic reason=STALE peer=2 message=none
+[2026-09-26T08:56:45.751+00:00] I (1307052) RouteLoomRef: discovery event=PEER_CAPACITY peer=2
+[2026-09-26T08:56:45.751+00:00] W (1307052) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=2 message=none
+[2026-09-26T08:56:51.360+00:00] I (1312648) RouteLoomRef: discovery event=STALE peer=1
+[2026-09-26T08:56:51.360+00:00] W (1312648) RouteLoomRef: diagnostic reason=STALE peer=1 message=none
+[2026-09-26T08:56:59.171+00:00] I (1320428) RouteLoom: stack hwm main 11380 B
+[2026-09-26T08:56:59.171+00:00] I (1320428) RouteLoom: HIL HEAP free=22092 largest=18432 min=20464 B
+[2026-09-26T08:57:00.973+00:00] I (1322229) RouteLoomRef: discovery event=PEER_CAPACITY peer=2
+[2026-09-26T08:57:00.973+00:00] W (1322229) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=2 message=none

@@ -1,0 +1,4 @@
+api acl loaded: revision 1
+operation store: sqlite at /tmp/routeloom-hil-full-2026-09-26/direct-retry-site/op-store.db (lineage fd719f0b62033e37f8a0d5178ecba40f)
+warning: operation store created fresh (lineage fd719f0b62033e37f8a0d5178ecba40f) — if this replaces a lost or corrupt store, any gateway still bound to the old lineage rejects dispatch with LaneMismatch until it is rebooted
+Error: Custom { kind: InvalidInput, error: "/tmp/routeloom-hil-full-2026-09-26/direct-retry-site/sak.key: ProtocolError: key file format" }

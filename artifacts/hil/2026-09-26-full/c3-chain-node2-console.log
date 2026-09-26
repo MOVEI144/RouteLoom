@@ -1,0 +1,707 @@
+[2026-09-26T10:06:58.748Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-26T10:07:00.711Z] I (13198) RouteLoom: HIL LINK tx peer=1 type=32 cid=4132687039 sI (53206) RouteLoom: HIL LINK tx peer=1 type=32 cid=4132687039 seq=13
+[2026-09-26T10:07:00.758Z] I (53253) RouteLoom: HIL LINK rx peer=1 type=32 cid=2033024895 current=0 status=5 seq=864
+[2026-09-26T10:07:00.792Z] I (53288) RouteLoom: HIL LINK rx peer=1 type=40 cid=2033024895 current=0 status=5 seq=502
+[2026-09-26T10:07:05.712Z] I (58207) RouteLoom: HIL LINK tx peer=1 type=32 cid=4132687039 seq=14
+[2026-09-26T10:07:07.915Z] I (60410) RouteLoom: stack hwm main 11096 B
+[2026-09-26T10:07:07.915Z] I (60410) RouteLoom: HIL HEAP free=21756 largest=18432 min=21024 B
+[2026-09-26T10:07:07.921Z] I (60411) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0
+[2026-09-26T10:07:10.715Z] I (63209) RouteLoom: HIL LINK tx peer=1 type=32 cid=4132687039 seq=15
+[2026-09-26T10:07:11.156Z] I (63651) RouteLoom: HIL LINK tx peer=1 type=32 cid=4132687039 seq=16
+[2026-09-26T10:07:11.993Z] I (64488) RouteLoom: HIL LINK tx peer=1 type=32 cid=4132687039 seq=17
+[2026-09-26T10:07:13.159Z] I (65654) RouteLoom: HIL LINK tx peer=1 type=32 cid=4132687039 seq=18
+[2026-09-26T10:07:13.446Z] I (65941) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:07:13.466Z] I (65961) RouteLoom: HIL RLD1 rx claimed=3 phase=5 step=1
+[2026-09-26T10:07:13.474Z] I (65969) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=2
+[2026-09-26T10:07:13.494Z] I (65989) RouteLoom: HIL RLD1 rx claimed=3 phase=5 step=3
+[2026-09-26T10:07:13.496Z] HIL resume R3 installed peer=3 tx=2561326836 rx=3908730615
+[2026-09-26T10:07:13.498Z] I (65993) RouteLoomRef: discovery event=BOUND peer=3
+[2026-09-26T10:07:13.504Z] W (65993) RouteLoomRef: diagnostic reason=BOUND peer=3 message=none
+[2026-09-26T10:07:13.511Z] I (66002) RouteLoom: HIL LINK rx peer=3 type=40 cid=3908730615 current=0 status=5 seq=17
+[2026-09-26T10:07:14.081Z] I (66576) RouteLoom: HIL LINK tx peer=1 type=32 cid=4132687039 seq=19
+[2026-09-26T10:07:15.160Z] I (67655) RouteLoom: HIL LINK tx peer=1 type=32 cid=4132687039 seq=20
+[2026-09-26T10:07:15.717Z] I (68211) RouteLoom: HIL LINK tx peer=1 type=32 cid=4132687039 seq=21
+[2026-09-26T10:07:16.139Z] I (68634) RouteLoom: HIL LINK tx peer=1 type=32 cid=4132687039 seq=22
+[2026-09-26T10:07:17.164Z] I (69659) RouteLoom: HIL LINK tx peer=1 type=32 cid=4132687039 seq=23
+[2026-09-26T10:07:18.166Z] I (70661) RouteLoom: HIL LINK tx peer=1 type=32 cid=4132687039 seq=24
+[2026-09-26T10:07:19.191Z] I (71686) RouteLoom: HIL LINK tx peer=1 type=32 cid=4132687039 seq=25
+[2026-09-26T10:07:20.010Z] I (72501) RouteLoom: HIL RLD1 rx claimed=1 phase=5 step=1
+[2026-09-26T10:07:20.015Z] I (72509) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=2
+[2026-09-26T10:07:20.036Z] I (72529) RouteLoom: HIL RLD1 rx claimed=1 phase=5 step=3
+[2026-09-26T10:07:20.036Z] HIL resume R3 installed peer=1 tx=3468399451 rx=4182627966
+[2026-09-26T10:07:20.046Z] I (72539) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=2
+[2026-09-26T10:07:20.049Z] W (72541) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-26T10:07:20.064Z] I (72557) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=3
+[2026-09-26T10:07:20.066Z] I (72559) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-26T10:07:20.072Z] W (72560) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-26T10:07:20.077Z] I (72569) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=26
+[2026-09-26T10:07:20.224Z] I (72717) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=27
+[2026-09-26T10:07:20.528Z] I (73023) RouteLoom: HIL RLD1 rx claimed=1 phase=5 step=3
+[2026-09-26T10:07:20.528Z] HIL resume R3 no record peer=1
+[2026-09-26T10:07:21.030Z] I (73525) RouteLoom: HIL RLD1 rx claimed=1 phase=5 step=3
+[2026-09-26T10:07:21.529Z] I (74024) RouteLoom: HIL RLD1 rx claimed=1 phase=5 step=3
+[2026-09-26T10:07:21.529Z] HIL resume R3 no record peer=1
+[2026-09-26T10:07:22.045Z] I (74539) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=4
+[2026-09-26T10:07:22.068Z] I (74563) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=1
+[2026-09-26T10:07:22.073Z] W (74565) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-26T10:07:22.106Z] I (74600) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=2
+[2026-09-26T10:07:22.117Z] I (74611) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=28
+[2026-09-26T10:07:23.150Z] I (75645) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=3
+[2026-09-26T10:07:25.067Z] I (77561) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=29
+[2026-09-26T10:07:27.070Z] I (79564) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=4
+[2026-09-26T10:07:30.068Z] I (82562) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=30
+[2026-09-26T10:07:32.066Z] I (84560) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=5
+[2026-09-26T10:07:32.076Z] I (84570) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=5
+[2026-09-26T10:07:35.070Z] I (87564) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=31
+[2026-09-26T10:07:37.073Z] I (89567) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=6
+[2026-09-26T10:07:40.071Z] I (92565) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=32
+[2026-09-26T10:07:42.063Z] I (94557) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=6
+[2026-09-26T10:07:42.073Z] I (94567) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=7
+[2026-09-26T10:07:43.509Z] I (96004) RouteLoomRef: discovery event=STALE peer=3
+[2026-09-26T10:07:43.510Z] W (96004) RouteLoomRef: diagnostic reason=STALE peer=3 message=none
+[2026-09-26T10:07:43.529Z] I (96023) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:07:45.072Z] I (97566) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=33
+[2026-09-26T10:07:45.513Z] I (98005) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:07:45.513Z] W (98005) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:07:47.072Z] I (99567) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=8
+[2026-09-26T10:07:50.073Z] I (102567) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=34
+[2026-09-26T10:07:52.081Z] I (104575) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=9
+[2026-09-26T10:07:54.087Z] I (106581) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=8
+[2026-09-26T10:07:55.073Z] I (107567) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=35
+[2026-09-26T10:07:57.075Z] I (109570) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=10
+[2026-09-26T10:08:00.074Z] I (112568) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=36
+[2026-09-26T10:08:02.075Z] I (114570) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=11
+[2026-09-26T10:08:02.639Z] I (115134) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-26T10:08:02.642Z] W (115134) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-26T10:08:02.646Z] I (115136) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:08:02.653Z] W (115141) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:08:04.087Z] I (116581) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=9
+[2026-09-26T10:08:05.075Z] I (117569) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=37
+[2026-09-26T10:08:07.078Z] I (119572) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=12
+[2026-09-26T10:08:07.918Z] I (120412) RouteLoom: stack hwm main 11096 B
+[2026-09-26T10:08:07.918Z] I (120412) RouteLoom: HIL HEAP free=21756 largest=18432 min=20976 B
+[2026-09-26T10:08:07.924Z] I (120413) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=3 stale=1
+[2026-09-26T10:08:10.075Z] I (122569) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=38
+[2026-09-26T10:08:12.080Z] I (124574) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=13
+[2026-09-26T10:08:13.563Z] I (126057) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:08:13.564Z] I (126058) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:08:13.569Z] I (126061) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:08:13.575Z] W (126063) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:08:13.581Z] W (126070) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:08:13.587Z] I (126076) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:08:13.595Z] I (126083) RouteLoom: HIL LINK rx peer=3 type=40 cid=3908730615 current=0 status=5 seq=13717
+[2026-09-26T10:08:13.603Z] W (126091) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=3 message=present
+[2026-09-26T10:08:13.608Z] I (126098) RouteLoom: HIL RLD1 rx claimed=3 phase=5 step=2
+[2026-09-26T10:08:13.614Z] I (126107) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:08:13.619Z] I (126109) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=3
+[2026-09-26T10:08:13.625Z] W (126114) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:08:13.631Z] I (126120) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:08:13.640Z] I (126130) RouteLoom: HIL LINK rx peer=3 type=40 cid=2547708868 current=0 status=5 seq=13718
+[2026-09-26T10:08:13.647Z] W (126135) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=3 message=present
+[2026-09-26T10:08:13.655Z] I (126148) RouteLoom: HIL LINK rx peer=3 type=41 cid=2547708868 current=0 status=5 seq=13719
+[2026-09-26T10:08:13.660Z] I (126151) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-26T10:08:13.667Z] W (126155) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-26T10:08:13.673Z] I (126165) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=39
+[2026-09-26T10:08:13.716Z] I (126210) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=40
+[2026-09-26T10:08:13.742Z] I (126236) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=14
+[2026-09-26T10:08:14.109Z] I (126603) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=10
+[2026-09-26T10:08:15.634Z] I (128128) RouteLoom: HIL LINK rx peer=3 type=40 cid=2547708868 current=0 status=5 seq=13720
+[2026-09-26T10:08:17.081Z] I (129575) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=15
+[2026-09-26T10:08:17.635Z] I (130129) RouteLoom: HIL LINK rx peer=3 type=40 cid=2547708868 current=0 status=5 seq=13721
+[2026-09-26T10:08:18.659Z] I (131153) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=43
+[2026-09-26T10:08:19.637Z] I (132131) RouteLoom: HIL LINK rx peer=3 type=40 cid=2547708868 current=0 status=5 seq=13722
+[2026-09-26T10:08:21.648Z] I (134133) RouteLoom: HIL LINK rx peer=3 type=40 cid=2547708868 current=0 status=5 seq=13723
+[2026-09-26T10:08:22.083Z] I (134576) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=16
+[2026-09-26T10:08:23.642Z] I (136135) RouteLoom: HIL LINK rx peer=3 type=40 cid=2547708868 current=0 status=5 seq=13724
+[2026-09-26T10:08:23.660Z] I (136154) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=45
+[2026-09-26T10:08:24.109Z] I (136602) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=11
+[2026-09-26T10:08:25.643Z] I (138137) RouteLoom: HIL LINK rx peer=3 type=40 cid=2547708868 current=0 status=5 seq=13725
+[2026-09-26T10:08:27.084Z] I (139578) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=17
+[2026-09-26T10:08:27.646Z] I (140140) RouteLoom: HIL LINK rx peer=3 type=40 cid=2547708868 current=0 status=5 seq=13726
+[2026-09-26T10:08:28.658Z] I (141152) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=47
+[2026-09-26T10:08:28.671Z] I (141165) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=49
+[2026-09-26T10:08:28.686Z] I (141179) RouteLoom: HIL LINK rx peer=1 type=34 cid=4182627966 current=0 status=5 seq=18
+[2026-09-26T10:08:28.690Z] W (141181) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-26T10:08:28.738Z] I (141231) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=19
+[2026-09-26T10:08:29.648Z] I (142141) RouteLoom: HIL LINK rx peer=3 type=40 cid=2547708868 current=0 status=5 seq=13727
+[2026-09-26T10:08:30.676Z] I (143169) RouteLoom: HIL LINK rx peer=1 type=34 cid=4182627966 current=0 status=5 seq=20
+[2026-09-26T10:08:30.680Z] W (143171) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-26T10:08:31.651Z] I (144144) RouteLoom: HIL LINK rx peer=3 type=40 cid=2547708868 current=0 status=5 seq=13728
+[2026-09-26T10:08:32.085Z] I (144579) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=21
+[2026-09-26T10:08:33.653Z] I (146146) RouteLoom: HIL LINK rx peer=3 type=40 cid=2547708868 current=0 status=5 seq=13729
+[2026-09-26T10:08:33.665Z] I (146159) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=51
+[2026-09-26T10:08:34.130Z] I (146624) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=12
+[2026-09-26T10:08:34.677Z] I (147170) RouteLoom: HIL LINK rx peer=1 type=34 cid=4182627966 current=0 status=5 seq=22
+[2026-09-26T10:08:34.681Z] W (147172) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-26T10:08:35.653Z] I (148147) RouteLoom: HIL LINK rx peer=3 type=40 cid=2547708868 current=0 status=5 seq=13730
+[2026-09-26T10:08:37.086Z] I (149580) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=23
+[2026-09-26T10:08:37.655Z] I (150149) RouteLoom: HIL LINK rx peer=3 type=40 cid=2547708868 current=0 status=5 seq=13731
+[2026-09-26T10:08:38.667Z] I (151161) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=53
+[2026-09-26T10:08:39.657Z] I (152150) RouteLoom: HIL LINK rx peer=3 type=40 cid=2547708868 current=0 status=5 seq=13732
+[2026-09-26T10:08:41.659Z] I (154152) RouteLoom: HIL LINK rx peer=3 type=40 cid=2547708868 current=0 status=5 seq=13733
+[2026-09-26T10:08:42.087Z] I (154580) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=24
+[2026-09-26T10:08:43.660Z] I (156153) RouteLoom: HIL LINK rx peer=3 type=40 cid=2547708868 current=0 status=5 seq=13734
+[2026-09-26T10:08:43.669Z] I (156163) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=55
+[2026-09-26T10:08:44.130Z] I (156623) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=13
+[2026-09-26T10:08:47.089Z] I (159583) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=25
+[2026-09-26T10:08:48.673Z] I (161167) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=57
+[2026-09-26T10:08:52.095Z] I (164586) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=26
+[2026-09-26T10:08:53.679Z] I (166171) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=59
+[2026-09-26T10:08:54.152Z] I (166645) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=14
+[2026-09-26T10:08:57.092Z] I (169585) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=27
+[2026-09-26T10:08:58.678Z] I (171171) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=61
+[2026-09-26T10:09:02.094Z] I (174587) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=28
+[2026-09-26T10:09:03.680Z] I (176172) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=63
+[2026-09-26T10:09:04.151Z] I (176644) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=15
+[2026-09-26T10:09:07.094Z] I (179587) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=29
+[2026-09-26T10:09:07.923Z] I (180416) RouteLoom: stack hwm main 11096 B
+[2026-09-26T10:09:07.923Z] I (180416) RouteLoom: HIL HEAP free=21756 largest=18432 min=20968 B
+[2026-09-26T10:09:07.929Z] I (180417) RouteLoom: HIL DISCOVERY candidates=1 neighbors=2 capacity=0 auth=4 stale=1
+[2026-09-26T10:09:08.686Z] I (181179) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=65
+[2026-09-26T10:09:12.096Z] I (184589) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=30
+[2026-09-26T10:09:13.662Z] I (186156) RouteLoomRef: discovery event=STALE peer=3
+[2026-09-26T10:09:13.663Z] W (186156) RouteLoomRef: diagnostic reason=STALE peer=3 message=none
+[2026-09-26T10:09:13.668Z] I (186160) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:09:13.676Z] I (186170) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=67
+[2026-09-26T10:09:13.690Z] I (186183) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=68
+[2026-09-26T10:09:13.706Z] I (186199) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=31
+[2026-09-26T10:09:14.173Z] I (186666) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=16
+[2026-09-26T10:09:15.664Z] I (188157) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:09:15.664Z] W (188157) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:09:16.712Z] I (189205) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:09:16.713Z] I (189206) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:09:16.718Z] W (189209) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:09:16.724Z] I (189212) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:09:16.737Z] I (189230) RouteLoom: HIL RLD1 rx claimed=3 phase=5 step=2
+[2026-09-26T10:09:16.742Z] I (189235) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:09:16.743Z] I (189237) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=3
+[2026-09-26T10:09:16.749Z] W (189237) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:09:16.754Z] I (189242) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:09:16.771Z] I (189264) RouteLoom: HIL LINK rx peer=3 type=40 cid=2588779290 current=0 status=5 seq=13735
+[2026-09-26T10:09:17.097Z] I (189590) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=32
+[2026-09-26T10:09:18.689Z] I (191183) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=69
+[2026-09-26T10:09:18.766Z] I (191256) RouteLoom: HIL LINK rx peer=3 type=40 cid=2588779290 current=0 status=5 seq=13736
+[2026-09-26T10:09:20.765Z] I (193258) RouteLoom: HIL LINK rx peer=3 type=40 cid=2588779290 current=0 status=5 seq=13737
+[2026-09-26T10:09:22.099Z] I (194591) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=33
+[2026-09-26T10:09:22.766Z] I (195259) RouteLoom: HIL LINK rx peer=3 type=40 cid=2588779290 current=0 status=5 seq=13738
+[2026-09-26T10:09:23.691Z] I (196184) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=70
+[2026-09-26T10:09:24.173Z] I (196666) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=17
+[2026-09-26T10:09:24.769Z] I (197262) RouteLoom: HIL LINK rx peer=3 type=40 cid=2588779290 current=0 status=5 seq=13739
+[2026-09-26T10:09:26.770Z] I (199263) RouteLoom: HIL LINK rx peer=3 type=40 cid=2588779290 current=0 status=5 seq=13740
+[2026-09-26T10:09:27.098Z] I (199591) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=34
+[2026-09-26T10:09:28.691Z] I (201184) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=71
+[2026-09-26T10:09:28.774Z] I (201266) RouteLoom: HIL LINK rx peer=3 type=40 cid=2588779290 current=0 status=5 seq=13741
+[2026-09-26T10:09:30.774Z] I (203267) RouteLoom: HIL LINK rx peer=3 type=40 cid=2588779290 current=0 status=5 seq=13742
+[2026-09-26T10:09:32.102Z] I (204595) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=35
+[2026-09-26T10:09:32.777Z] I (205270) RouteLoom: HIL LINK rx peer=3 type=40 cid=2588779290 current=0 status=5 seq=13743
+[2026-09-26T10:09:33.691Z] I (206184) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=72
+[2026-09-26T10:09:34.196Z] I (206689) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=18
+[2026-09-26T10:09:34.778Z] I (207271) RouteLoom: HIL LINK rx peer=3 type=40 cid=2588779290 current=0 status=5 seq=13744
+[2026-09-26T10:09:36.782Z] I (209275) RouteLoom: HIL LINK rx peer=3 type=40 cid=2588779290 current=0 status=5 seq=13745
+[2026-09-26T10:09:37.098Z] I (209591) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=36
+[2026-09-26T10:09:38.691Z] I (211184) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=73
+[2026-09-26T10:09:38.782Z] I (211275) RouteLoom: HIL LINK rx peer=3 type=40 cid=2588779290 current=0 status=5 seq=13746
+[2026-09-26T10:09:40.786Z] I (213279) RouteLoom: HIL LINK rx peer=3 type=40 cid=2588779290 current=0 status=5 seq=13747
+[2026-09-26T10:09:42.102Z] I (214595) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=37
+[2026-09-26T10:09:42.786Z] I (215279) RouteLoom: HIL LINK rx peer=3 type=40 cid=2588779290 current=0 status=5 seq=13748
+[2026-09-26T10:09:43.691Z] I (216184) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=74
+[2026-09-26T10:09:44.195Z] I (216687) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=19
+[2026-09-26T10:09:44.791Z] I (217283) RouteLoom: HIL LINK rx peer=3 type=40 cid=2588779290 current=0 status=5 seq=13749
+[2026-09-26T10:09:46.790Z] I (219283) RouteLoom: HIL LINK rx peer=3 type=40 cid=2588779290 current=0 status=5 seq=13750
+[2026-09-26T10:09:47.103Z] I (219595) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=38
+[2026-09-26T10:09:48.691Z] I (221184) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=75
+[2026-09-26T10:09:52.103Z] I (224595) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=39
+[2026-09-26T10:09:53.691Z] I (226184) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=76
+[2026-09-26T10:09:54.219Z] I (226709) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=20
+[2026-09-26T10:09:57.104Z] I (229597) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=40
+[2026-09-26T10:09:58.695Z] I (231187) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=77
+[2026-09-26T10:10:02.105Z] I (234598) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=41
+[2026-09-26T10:10:03.696Z] I (236188) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=78
+[2026-09-26T10:10:04.215Z] I (236708) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=21
+[2026-09-26T10:10:07.107Z] I (239599) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=42
+[2026-09-26T10:10:07.926Z] I (240419) RouteLoom: stack hwm main 11096 B
+[2026-09-26T10:10:07.927Z] I (240419) RouteLoom: HIL HEAP free=21756 largest=18432 min=20968 B
+[2026-09-26T10:10:07.933Z] I (240420) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=5 stale=2
+[2026-09-26T10:10:08.696Z] I (241188) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=79
+[2026-09-26T10:10:12.111Z] I (244603) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=43
+[2026-09-26T10:10:13.700Z] I (246192) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=80
+[2026-09-26T10:10:14.237Z] I (246729) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=22
+[2026-09-26T10:10:16.794Z] I (249287) RouteLoomRef: discovery event=STALE peer=3
+[2026-09-26T10:10:16.794Z] W (249287) RouteLoomRef: diagnostic reason=STALE peer=3 message=none
+[2026-09-26T10:10:16.805Z] I (249292) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:16.808Z] W (249294) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:10:16.814Z] I (249299) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:16.824Z] I (249315) RouteLoom: HIL RLD1 rx claimed=3 phase=5 step=1
+[2026-09-26T10:10:17.109Z] I (249601) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=44
+[2026-09-26T10:10:17.318Z] I (249811) RouteLoom: HIL RLD1 rx claimed=3 phase=5 step=1
+[2026-09-26T10:10:17.326Z] I (249818) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:17.327Z] I (249820) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=2
+[2026-09-26T10:10:17.332Z] W (249823) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:10:17.338Z] I (249825) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:17.346Z] I (249839) RouteLoom: HIL RLD1 rx claimed=3 phase=5 step=3
+[2026-09-26T10:10:17.360Z] I (249852) RouteLoom: HIL LINK rx peer=3 type=40 cid=1198962430 current=0 status=5 seq=13751
+[2026-09-26T10:10:17.365Z] W (249853) RouteLoomRef: diagnostic reason=session unknown context peer=3 message=none
+[2026-09-26T10:10:17.829Z] I (250321) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:17.830Z] I (250322) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=2
+[2026-09-26T10:10:17.835Z] W (250325) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:10:17.841Z] I (250328) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:18.330Z] I (250822) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:18.331Z] I (250823) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=2
+[2026-09-26T10:10:18.336Z] W (250826) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:10:18.342Z] I (250829) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:18.697Z] I (251189) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=81
+[2026-09-26T10:10:18.795Z] I (251288) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:10:18.796Z] W (251288) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:10:22.112Z] I (254604) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=45
+[2026-09-26T10:10:23.699Z] I (256190) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=82
+[2026-09-26T10:10:24.242Z] I (256734) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=23
+[2026-09-26T10:10:24.260Z] I (256752) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=24
+[2026-09-26T10:10:27.112Z] I (259604) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=46
+[2026-09-26T10:10:28.698Z] I (261190) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=83
+[2026-09-26T10:10:32.113Z] I (264605) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=47
+[2026-09-26T10:10:33.701Z] I (266192) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=84
+[2026-09-26T10:10:34.259Z] I (266751) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=25
+[2026-09-26T10:10:37.116Z] I (269608) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=48
+[2026-09-26T10:10:38.702Z] I (271193) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=85
+[2026-09-26T10:10:42.117Z] I (274608) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=49
+[2026-09-26T10:10:43.703Z] I (276194) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=86
+[2026-09-26T10:10:44.280Z] I (276772) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=26
+[2026-09-26T10:10:47.119Z] I (279608) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=50
+[2026-09-26T10:10:47.356Z] I (279847) RouteLoom: HIL LINK rx peer=3 type=40 cid=1198962430 current=0 status=5 seq=20258
+[2026-09-26T10:10:47.360Z] W (279848) RouteLoomRef: diagnostic reason=session unknown context peer=3 message=none
+[2026-09-26T10:10:48.703Z] I (281194) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=87
+[2026-09-26T10:10:48.843Z] I (281335) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:10:48.844Z] W (281335) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:10:49.039Z] I (281531) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:49.041Z] I (281532) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:10:49.045Z] W (281535) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:10:49.051Z] I (281538) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:49.537Z] I (282029) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:49.538Z] I (282030) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:10:49.544Z] W (282033) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:10:49.549Z] I (282036) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:49.886Z] I (282378) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:49.887Z] W (282379) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:10:49.893Z] I (282380) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:50.038Z] I (282530) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:50.040Z] I (282531) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:10:50.045Z] W (282534) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:10:50.050Z] I (282537) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:50.539Z] I (283031) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:50.540Z] I (283032) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:10:50.545Z] W (283035) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:10:50.551Z] I (283038) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:52.121Z] I (284611) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=51
+[2026-09-26T10:10:52.259Z] I (284751) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:52.260Z] W (284752) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:10:52.266Z] I (284753) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:53.703Z] I (286194) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=88
+[2026-09-26T10:10:53.792Z] I (286284) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:10:53.793Z] W (286284) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:10:54.278Z] I (286770) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=27
+[2026-09-26T10:10:57.119Z] I (289610) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=52
+[2026-09-26T10:10:58.452Z] I (290944) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:58.453Z] W (290945) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:10:58.459Z] I (290946) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:10:58.705Z] I (291196) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=89
+[2026-09-26T10:11:02.120Z] I (294611) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=53
+[2026-09-26T10:11:03.688Z] I (296180) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:11:03.689Z] W (296180) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:11:03.707Z] I (296198) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=90
+[2026-09-26T10:11:04.004Z] I (296495) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:04.004Z] I (296496) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:11:04.010Z] W (296499) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:11:04.016Z] I (296502) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:04.299Z] I (296790) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=28
+[2026-09-26T10:11:04.500Z] I (296992) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:04.501Z] I (296993) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:11:04.507Z] W (296996) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:11:04.513Z] I (296999) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:05.001Z] I (297493) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:05.002Z] I (297494) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:11:05.008Z] W (297497) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:11:05.014Z] I (297500) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:05.502Z] I (297994) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:05.503Z] I (297995) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:11:05.509Z] W (297998) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:11:05.515Z] I (298001) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:07.121Z] I (299612) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=54
+[2026-09-26T10:11:07.927Z] I (300419) RouteLoom: stack hwm main 11076 B
+[2026-09-26T10:11:07.928Z] I (300419) RouteLoom: HIL HEAP free=21756 largest=18432 min=20968 B
+[2026-09-26T10:11:07.934Z] I (300420) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=5 stale=3
+[2026-09-26T10:11:08.708Z] I (301199) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=91
+[2026-09-26T10:11:09.933Z] I (302425) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:09.935Z] W (302426) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:11:09.940Z] I (302427) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:12.121Z] I (304612) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=55
+[2026-09-26T10:11:13.710Z] I (306201) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=92
+[2026-09-26T10:11:14.299Z] I (306790) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=29
+[2026-09-26T10:11:17.121Z] I (309612) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=56
+[2026-09-26T10:11:18.710Z] I (311201) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=93
+[2026-09-26T10:11:22.123Z] I (314614) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=57
+[2026-09-26T10:11:23.481Z] I (315973) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:11:23.482Z] W (315973) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:11:23.710Z] I (316201) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=94
+[2026-09-26T10:11:24.323Z] I (316814) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=30
+[2026-09-26T10:11:24.439Z] I (316930) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:24.440Z] I (316931) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:11:24.445Z] W (316934) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:11:24.451Z] I (316937) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:24.937Z] I (317428) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:24.938Z] I (317429) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:11:24.943Z] W (317432) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:11:24.949Z] I (317435) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:25.438Z] I (317929) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:25.439Z] I (317930) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:11:25.444Z] W (317933) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:11:25.450Z] I (317936) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:25.939Z] I (318430) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:25.940Z] I (318431) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:11:25.945Z] W (318434) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:11:25.951Z] I (318437) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:27.124Z] I (319615) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=58
+[2026-09-26T10:11:28.710Z] I (321201) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=95
+[2026-09-26T10:11:32.125Z] I (324616) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=59
+[2026-09-26T10:11:33.306Z] I (325798) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:33.308Z] W (325799) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:11:33.314Z] I (325800) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:11:33.712Z] I (326203) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=96
+[2026-09-26T10:11:34.319Z] I (326810) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=31
+[2026-09-26T10:11:37.126Z] I (329617) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=60
+[2026-09-26T10:11:38.712Z] I (331203) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=97
+[2026-09-26T10:11:42.127Z] I (334618) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=61
+[2026-09-26T10:11:43.713Z] I (336204) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=98
+[2026-09-26T10:11:44.340Z] I (336830) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=32
+[2026-09-26T10:11:47.127Z] I (339618) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=62
+[2026-09-26T10:11:48.714Z] I (341204) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=99
+[2026-09-26T10:11:52.130Z] I (344620) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=63
+[2026-09-26T10:11:53.716Z] I (346206) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=100
+[2026-09-26T10:11:54.338Z] I (346828) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=33
+[2026-09-26T10:11:57.133Z] I (349623) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=64
+[2026-09-26T10:11:58.716Z] I (351206) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=101
+[2026-09-26T10:12:02.132Z] I (354622) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=65
+[2026-09-26T10:12:03.067Z] I (355558) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:12:03.068Z] W (355558) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:12:03.716Z] I (356206) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=102
+[2026-09-26T10:12:04.039Z] I (356530) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:12:04.040Z] I (356531) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:12:04.045Z] W (356534) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:12:04.051Z] I (356537) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:12:04.065Z] I (356556) RouteLoom: HIL RLD1 rx claimed=3 phase=5 step=2
+[2026-09-26T10:12:04.358Z] I (356848) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=34
+[2026-09-26T10:12:04.537Z] I (357028) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:12:04.538Z] I (357029) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:12:04.544Z] W (357032) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:12:04.549Z] I (357035) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:12:04.566Z] I (357057) RouteLoom: HIL RLD1 rx claimed=3 phase=5 step=2
+[2026-09-26T10:12:04.571Z] I (357062) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:12:04.572Z] I (357063) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=3
+[2026-09-26T10:12:04.578Z] W (357064) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:12:04.584Z] I (357069) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:12:04.600Z] I (357091) RouteLoom: HIL LINK rx peer=3 type=40 cid=1559665269 current=0 status=5 seq=20259
+[2026-09-26T10:12:06.593Z] I (359084) RouteLoom: HIL LINK rx peer=3 type=40 cid=1559665269 current=0 status=5 seq=20260
+[2026-09-26T10:12:07.133Z] I (359624) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=66
+[2026-09-26T10:12:07.929Z] I (360420) RouteLoom: stack hwm main 11076 B
+[2026-09-26T10:12:07.929Z] I (360420) RouteLoom: HIL HEAP free=21756 largest=18432 min=20968 B
+[2026-09-26T10:12:07.936Z] I (360421) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=6 stale=3
+[2026-09-26T10:12:08.596Z] I (361087) RouteLoom: HIL LINK rx peer=3 type=40 cid=1559665269 current=0 status=5 seq=20261
+[2026-09-26T10:12:08.717Z] I (361208) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=103
+[2026-09-26T10:12:10.596Z] I (363087) RouteLoom: HIL LINK rx peer=3 type=40 cid=1559665269 current=0 status=5 seq=20262
+[2026-09-26T10:12:12.136Z] I (364623) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=67
+[2026-09-26T10:12:12.600Z] I (365090) RouteLoom: HIL LINK rx peer=3 type=40 cid=1559665269 current=0 status=5 seq=20263
+[2026-09-26T10:12:13.717Z] I (366208) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=104
+[2026-09-26T10:12:14.362Z] I (366853) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=35
+[2026-09-26T10:12:14.378Z] I (366868) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=36
+[2026-09-26T10:12:14.604Z] I (367094) RouteLoom: HIL LINK rx peer=3 type=40 cid=1559665269 current=0 status=5 seq=20264
+[2026-09-26T10:12:16.605Z] I (369095) RouteLoom: HIL LINK rx peer=3 type=40 cid=1559665269 current=0 status=5 seq=20265
+[2026-09-26T10:12:17.137Z] I (369627) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=68
+[2026-09-26T10:12:18.604Z] I (371095) RouteLoom: HIL LINK rx peer=3 type=40 cid=1559665269 current=0 status=5 seq=20266
+[2026-09-26T10:12:18.718Z] I (371208) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=105
+[2026-09-26T10:12:20.609Z] I (373099) RouteLoom: HIL LINK rx peer=3 type=40 cid=1559665269 current=0 status=5 seq=20267
+[2026-09-26T10:12:22.137Z] I (374627) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=69
+[2026-09-26T10:12:22.611Z] I (375098) RouteLoom: HIL LINK rx peer=3 type=40 cid=1559665269 current=0 status=5 seq=20268
+[2026-09-26T10:12:23.718Z] I (376208) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=106
+[2026-09-26T10:12:24.382Z] I (376873) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=37
+[2026-09-26T10:12:24.398Z] I (376888) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=38
+[2026-09-26T10:12:24.612Z] I (377102) RouteLoom: HIL LINK rx peer=3 type=40 cid=1559665269 current=0 status=5 seq=20269
+[2026-09-26T10:12:26.613Z] I (379103) RouteLoom: HIL LINK rx peer=3 type=40 cid=1559665269 current=0 status=5 seq=20270
+[2026-09-26T10:12:27.137Z] I (379627) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=70
+[2026-09-26T10:12:28.617Z] I (381107) RouteLoom: HIL LINK rx peer=3 type=40 cid=1559665269 current=0 status=5 seq=20271
+[2026-09-26T10:12:28.718Z] I (381208) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=107
+[2026-09-26T10:12:30.617Z] I (383107) RouteLoom: HIL LINK rx peer=3 type=40 cid=1559665269 current=0 status=5 seq=20272
+[2026-09-26T10:12:32.137Z] I (384627) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=71
+[2026-09-26T10:12:32.620Z] I (385110) RouteLoom: HIL LINK rx peer=3 type=40 cid=1559665269 current=0 status=5 seq=20273
+[2026-09-26T10:12:33.718Z] I (386208) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=108
+[2026-09-26T10:12:34.397Z] I (386887) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=39
+[2026-09-26T10:12:34.621Z] I (387111) RouteLoom: HIL LINK rx peer=3 type=40 cid=1559665269 current=0 status=5 seq=20274
+[2026-09-26T10:12:37.142Z] I (389632) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=72
+[2026-09-26T10:12:38.723Z] I (391213) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=109
+[2026-09-26T10:12:42.142Z] I (394632) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=73
+[2026-09-26T10:12:43.725Z] I (396215) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=110
+[2026-09-26T10:12:44.420Z] I (396910) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=40
+[2026-09-26T10:12:47.142Z] I (399632) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=74
+[2026-09-26T10:12:48.725Z] I (401215) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=111
+[2026-09-26T10:12:52.149Z] I (404636) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=75
+[2026-09-26T10:12:53.736Z] I (406216) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=112
+[2026-09-26T10:12:54.420Z] I (406910) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=41
+[2026-09-26T10:12:57.147Z] I (409637) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=76
+[2026-09-26T10:12:58.727Z] I (411217) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=113
+[2026-09-26T10:13:02.146Z] I (414636) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=77
+[2026-09-26T10:13:03.727Z] I (416217) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=114
+[2026-09-26T10:13:04.443Z] I (416933) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=42
+[2026-09-26T10:13:04.622Z] I (417112) RouteLoomRef: discovery event=STALE peer=3
+[2026-09-26T10:13:04.622Z] W (417112) RouteLoomRef: diagnostic reason=STALE peer=3 message=none
+[2026-09-26T10:13:04.628Z] I (417116) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:06.624Z] I (419114) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:13:06.625Z] W (419114) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:13:07.147Z] I (419636) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=78
+[2026-09-26T10:13:07.932Z] I (420422) RouteLoom: stack hwm main 11076 B
+[2026-09-26T10:13:07.932Z] I (420422) RouteLoom: HIL HEAP free=21756 largest=18432 min=20968 B
+[2026-09-26T10:13:07.939Z] I (420423) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=6 stale=4
+[2026-09-26T10:13:08.728Z] I (421217) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=115
+[2026-09-26T10:13:09.276Z] I (421766) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:09.278Z] I (421767) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:13:09.282Z] W (421770) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:13:09.288Z] I (421773) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:09.722Z] I (422212) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:13:09.723Z] W (422212) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:13:09.775Z] I (422265) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:09.776Z] I (422266) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:13:09.781Z] W (422269) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:13:09.787Z] I (422272) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:10.276Z] I (422766) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:10.277Z] I (422767) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:13:10.282Z] W (422770) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:13:10.288Z] I (422773) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:10.776Z] I (423266) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:10.777Z] I (423267) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:13:10.782Z] W (423270) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:13:10.788Z] I (423273) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:12.146Z] I (424635) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=79
+[2026-09-26T10:13:13.729Z] I (426218) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=116
+[2026-09-26T10:13:14.444Z] I (426933) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=43
+[2026-09-26T10:13:15.920Z] I (428410) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:13:15.922Z] W (428410) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:13:16.617Z] I (429107) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:16.618Z] I (429108) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:13:16.623Z] W (429111) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:13:16.629Z] I (429114) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:17.115Z] I (429605) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:17.116Z] I (429606) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:13:17.122Z] W (429609) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:13:17.127Z] I (429612) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:17.147Z] I (429636) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=80
+[2026-09-26T10:13:17.615Z] I (430105) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:17.616Z] I (430106) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:13:17.621Z] W (430109) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:13:17.628Z] I (430112) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:18.116Z] I (430606) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:18.117Z] I (430607) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:13:18.122Z] W (430610) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:13:18.129Z] I (430613) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:18.730Z] I (431219) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=117
+[2026-09-26T10:13:22.149Z] I (434637) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=81
+[2026-09-26T10:13:23.731Z] I (436220) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=118
+[2026-09-26T10:13:23.969Z] I (436459) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:23.971Z] W (436460) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:13:23.976Z] I (436461) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:24.465Z] I (436954) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=44
+[2026-09-26T10:13:24.820Z] I (437310) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:24.822Z] W (437311) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:13:24.827Z] I (437312) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:27.007Z] I (439497) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:27.009Z] W (439498) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:13:27.014Z] I (439499) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:27.151Z] I (439640) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=82
+[2026-09-26T10:13:28.314Z] I (440804) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:13:28.315Z] W (440804) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:13:28.733Z] I (441222) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=119
+[2026-09-26T10:13:30.268Z] I (442758) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:30.269Z] I (442759) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:13:30.275Z] W (442762) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:13:30.281Z] I (442765) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:30.766Z] I (443256) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:30.767Z] I (443257) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:13:30.773Z] W (443260) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:13:30.779Z] I (443263) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:31.268Z] I (443757) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:31.269Z] I (443758) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:13:31.274Z] W (443761) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:13:31.280Z] I (443764) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:31.768Z] I (444258) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:31.769Z] I (444259) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:13:31.775Z] W (444262) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:13:31.781Z] I (444265) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:32.151Z] I (444640) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=83
+[2026-09-26T10:13:33.734Z] I (446223) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=120
+[2026-09-26T10:13:34.464Z] I (446953) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=45
+[2026-09-26T10:13:35.490Z] I (447980) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:35.492Z] W (447981) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:13:35.497Z] I (447982) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:37.152Z] I (449641) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=84
+[2026-09-26T10:13:38.735Z] I (451224) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=121
+[2026-09-26T10:13:42.153Z] I (454642) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=85
+[2026-09-26T10:13:43.736Z] I (456225) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=122
+[2026-09-26T10:13:44.484Z] I (456973) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=46
+[2026-09-26T10:13:47.154Z] I (459643) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=86
+[2026-09-26T10:13:48.737Z] I (461226) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=123
+[2026-09-26T10:13:52.153Z] I (464642) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=87
+[2026-09-26T10:13:53.101Z] I (465590) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:13:53.102Z] W (465590) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:13:53.738Z] I (466227) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=124
+[2026-09-26T10:13:54.482Z] I (466971) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=47
+[2026-09-26T10:13:55.140Z] I (467628) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:55.140Z] W (467629) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:13:55.146Z] I (467630) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:13:57.153Z] I (469642) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=88
+[2026-09-26T10:13:58.740Z] I (471228) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=125
+[2026-09-26T10:14:02.009Z] I (474498) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:14:02.010Z] I (474499) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:14:02.015Z] W (474502) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:14:02.021Z] I (474505) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:14:02.032Z] I (474521) RouteLoom: HIL RLD1 rx claimed=3 phase=5 step=2
+[2026-09-26T10:14:02.037Z] I (474526) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:14:02.038Z] I (474527) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=3
+[2026-09-26T10:14:02.044Z] W (474528) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:14:02.050Z] I (474533) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:14:02.066Z] I (474555) RouteLoom: HIL LINK rx peer=3 type=40 cid=1503206556 current=0 status=5 seq=20275
+[2026-09-26T10:14:02.158Z] I (474644) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=89
+[2026-09-26T10:14:03.741Z] I (476230) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=126
+[2026-09-26T10:14:04.058Z] I (476547) RouteLoom: HIL LINK rx peer=3 type=40 cid=1503206556 current=0 status=5 seq=20276
+[2026-09-26T10:14:04.505Z] I (476993) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=48
+[2026-09-26T10:14:06.059Z] I (478548) RouteLoom: HIL LINK rx peer=3 type=40 cid=1503206556 current=0 status=5 seq=20277
+[2026-09-26T10:14:07.156Z] I (479645) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=90
+[2026-09-26T10:14:07.935Z] I (480424) RouteLoom: stack hwm main 11076 B
+[2026-09-26T10:14:07.935Z] I (480424) RouteLoom: HIL HEAP free=21756 largest=18432 min=20968 B
+[2026-09-26T10:14:07.941Z] I (480425) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=7 stale=4
+[2026-09-26T10:14:08.066Z] I (480555) RouteLoom: HIL LINK rx peer=3 type=40 cid=1503206556 current=0 status=5 seq=20278
+[2026-09-26T10:14:08.745Z] I (481232) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=127
+[2026-09-26T10:14:10.062Z] I (482551) RouteLoom: HIL LINK rx peer=3 type=40 cid=1503206556 current=0 status=5 seq=20279
+[2026-09-26T10:14:12.066Z] I (484555) RouteLoom: HIL LINK rx peer=3 type=40 cid=1503206556 current=0 status=5 seq=20280
+[2026-09-26T10:14:12.154Z] I (484643) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=91
+[2026-09-26T10:14:13.743Z] I (486232) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=128
+[2026-09-26T10:14:14.065Z] I (486554) RouteLoom: HIL LINK rx peer=3 type=40 cid=1503206556 current=0 status=5 seq=20281
+[2026-09-26T10:14:14.502Z] I (486991) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=49
+[2026-09-26T10:14:16.066Z] I (488555) RouteLoom: HIL LINK rx peer=3 type=40 cid=1503206556 current=0 status=5 seq=20282
+[2026-09-26T10:14:17.158Z] I (489647) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=92
+[2026-09-26T10:14:18.069Z] I (490558) RouteLoom: HIL LINK rx peer=3 type=40 cid=1503206556 current=0 status=5 seq=20283
+[2026-09-26T10:14:18.743Z] I (491232) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=129
+[2026-09-26T10:14:20.070Z] I (492559) RouteLoom: HIL LINK rx peer=3 type=40 cid=1503206556 current=0 status=5 seq=20284
+[2026-09-26T10:14:22.071Z] I (494560) RouteLoom: HIL LINK rx peer=3 type=40 cid=1503206556 current=0 status=5 seq=20285
+[2026-09-26T10:14:22.159Z] I (494648) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=93
+[2026-09-26T10:14:23.743Z] I (496232) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=130
+[2026-09-26T10:14:24.073Z] I (496562) RouteLoom: HIL LINK rx peer=3 type=40 cid=1503206556 current=0 status=5 seq=20286
+[2026-09-26T10:14:24.524Z] I (497013) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=50
+[2026-09-26T10:14:26.075Z] I (498564) RouteLoom: HIL LINK rx peer=3 type=40 cid=1503206556 current=0 status=5 seq=20287
+[2026-09-26T10:14:27.161Z] I (499649) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=94
+[2026-09-26T10:14:28.078Z] I (500567) RouteLoom: HIL LINK rx peer=3 type=40 cid=1503206556 current=0 status=5 seq=20288
+[2026-09-26T10:14:28.743Z] I (501232) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=131
+[2026-09-26T10:14:30.083Z] I (502571) RouteLoom: HIL LINK rx peer=3 type=40 cid=1503206556 current=0 status=5 seq=20289
+[2026-09-26T10:14:32.082Z] I (504571) RouteLoom: HIL LINK rx peer=3 type=40 cid=1503206556 current=0 status=5 seq=20290
+[2026-09-26T10:14:32.163Z] I (504651) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=95
+[2026-09-26T10:14:33.743Z] I (506232) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=132
+[2026-09-26T10:14:34.525Z] I (507014) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=51
+[2026-09-26T10:14:37.162Z] I (509650) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=96
+[2026-09-26T10:14:38.746Z] I (511234) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=133
+[2026-09-26T10:14:42.163Z] I (514651) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=97
+[2026-09-26T10:14:43.748Z] I (516236) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=134
+[2026-09-26T10:14:44.549Z] I (517037) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=52
+[2026-09-26T10:14:47.163Z] I (519651) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=98
+[2026-09-26T10:14:48.748Z] I (521236) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=135
+[2026-09-26T10:14:52.164Z] I (524652) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=99
+[2026-09-26T10:14:53.749Z] I (526237) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=136
+[2026-09-26T10:14:54.547Z] I (527035) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=53
+[2026-09-26T10:14:57.168Z] I (529656) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=100
+[2026-09-26T10:14:58.751Z] I (531239) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=137
+[2026-09-26T10:15:02.083Z] I (534572) RouteLoomRef: discovery event=STALE peer=3
+[2026-09-26T10:15:02.086Z] W (534572) RouteLoomRef: diagnostic reason=STALE peer=3 message=none
+[2026-09-26T10:15:02.089Z] I (534576) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:15:02.167Z] I (534655) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=101
+[2026-09-26T10:15:02.468Z] I (534957) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:15:02.470Z] W (534958) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:15:02.475Z] I (534959) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:15:02.490Z] I (534979) RouteLoom: HIL RLD1 rx claimed=3 phase=5 step=1
+[2026-09-26T10:15:02.498Z] I (534986) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:15:02.499Z] I (534987) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=2
+[2026-09-26T10:15:02.504Z] W (534990) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:15:02.510Z] I (534993) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:15:02.784Z] I (535272) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:15:02.785Z] W (535273) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:15:02.791Z] I (535274) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:15:02.989Z] I (535477) RouteLoom: HIL RLD1 rx claimed=3 phase=5 step=1
+[2026-09-26T10:15:03.000Z] I (535488) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:15:03.001Z] I (535489) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=2
+[2026-09-26T10:15:03.006Z] W (535492) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:15:03.012Z] I (535495) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:15:03.019Z] I (535508) RouteLoom: HIL RLD1 rx claimed=3 phase=5 step=3
+[2026-09-26T10:15:03.022Z] HIL resume R3 installed peer=3 tx=2748056975 rx=1511201836
+[2026-09-26T10:15:03.029Z] I (535513) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:15:03.037Z] I (535524) RouteLoom: HIL LINK rx peer=3 type=40 cid=1511201836 current=0 status=5 seq=20291
+[2026-09-26T10:15:03.044Z] W (535527) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=3 message=present
+[2026-09-26T10:15:03.749Z] I (536237) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=138
+[2026-09-26T10:15:04.567Z] I (537055) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=54
+[2026-09-26T10:15:07.166Z] I (539654) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=102
+[2026-09-26T10:15:07.937Z] I (540425) RouteLoom: stack hwm main 11076 B
+[2026-09-26T10:15:07.937Z] I (540425) RouteLoom: HIL HEAP free=21708 largest=18432 min=20968 B
+[2026-09-26T10:15:07.944Z] I (540426) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=8 stale=5
+[2026-09-26T10:15:08.750Z] I (541238) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=139
+[2026-09-26T10:15:12.168Z] I (544656) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=103
+[2026-09-26T10:15:13.751Z] I (546239) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=140
+[2026-09-26T10:15:14.565Z] I (547053) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=55
+[2026-09-26T10:15:17.167Z] I (549655) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=104
+[2026-09-26T10:15:18.754Z] I (551241) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=141
+[2026-09-26T10:15:22.168Z] I (554656) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=105
+[2026-09-26T10:15:23.756Z] I (556243) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=142
+[2026-09-26T10:15:24.584Z] I (557072) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=56
+[2026-09-26T10:15:27.169Z] I (559657) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=106
+[2026-09-26T10:15:28.756Z] I (561243) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=143
+[2026-09-26T10:15:32.171Z] I (564658) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=107
+[2026-09-26T10:15:33.025Z] I (565513) RouteLoomRef: discovery event=STALE peer=3
+[2026-09-26T10:15:33.025Z] W (565513) RouteLoomRef: diagnostic reason=STALE peer=3 message=none
+[2026-09-26T10:15:33.056Z] I (565544) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:15:33.757Z] I (566244) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=144
+[2026-09-26T10:15:34.583Z] I (567071) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=57
+[2026-09-26T10:15:35.028Z] I (567515) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:15:35.028Z] W (567515) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:15:37.171Z] I (569658) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=108
+[2026-09-26T10:15:38.757Z] I (571244) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=145
+[2026-09-26T10:15:42.173Z] I (574660) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=109
+[2026-09-26T10:15:43.757Z] I (576244) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=146
+[2026-09-26T10:15:44.604Z] I (577091) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=58
+[2026-09-26T10:15:47.172Z] I (579659) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=110
+[2026-09-26T10:15:48.758Z] I (581245) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=147
+[2026-09-26T10:15:51.095Z] I (583583) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:15:51.096Z] W (583583) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:15:52.171Z] I (584658) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=111
+[2026-09-26T10:15:53.758Z] I (586245) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=148
+[2026-09-26T10:15:54.604Z] I (587091) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=59
+[2026-09-26T10:15:57.172Z] I (589659) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=112
+[2026-09-26T10:15:58.758Z] I (591245) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=149
+[2026-09-26T10:16:02.173Z] I (594660) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=113
+[2026-09-26T10:16:03.083Z] I (595570) RouteLoom: HIL LINK rx peer=3 type=40 cid=1511201836 current=0 status=5 seq=33738
+[2026-09-26T10:16:03.087Z] W (595572) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=3 message=present
+[2026-09-26T10:16:03.760Z] I (596247) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=150
+[2026-09-26T10:16:03.985Z] I (596472) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:16:03.986Z] I (596473) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=1
+[2026-09-26T10:16:03.990Z] I (596476) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-26T10:16:03.997Z] W (596478) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-26T10:16:04.003Z] W (596485) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:16:04.010Z] I (596491) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:16:04.014Z] I (596501) RouteLoom: HIL RLD1 rx claimed=3 phase=5 step=2
+[2026-09-26T10:16:04.020Z] I (596507) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:16:04.025Z] I (596509) RouteLoom: HIL RLD1 tx claimed=2 phase=5 step=3
+[2026-09-26T10:16:04.031Z] W (596513) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T10:16:04.037Z] I (596519) RouteLoom: HIL LR250 peer=94:a9:90:7a:26:ac result=ESP_OK
+[2026-09-26T10:16:04.511Z] I (596999) RouteLoom: HIL RLD1 rx claimed=3 phase=5 step=2
+[2026-09-26T10:16:04.626Z] I (597113) RouteLoom: HIL LINK rx peer=1 type=41 cid=4182627966 current=0 status=5 seq=60
+[2026-09-26T10:16:05.012Z] I (597500) RouteLoom: HIL RLD1 rx claimed=3 phase=5 step=2
+[2026-09-26T10:16:07.174Z] I (599661) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=114
+[2026-09-26T10:16:07.938Z] I (600425) RouteLoom: stack hwm main 11076 B
+[2026-09-26T10:16:07.938Z] I (600425) RouteLoom: HIL HEAP free=21756 largest=18432 min=20968 B
+[2026-09-26T10:16:07.944Z] I (600426) RouteLoom: HIL DISCOVERY candidates=1 neighbors=2 capacity=0 auth=9 stale=6
+[2026-09-26T10:16:08.766Z] I (601253) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=151
+[2026-09-26T10:16:12.176Z] I (604663) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=115
+[2026-09-26T10:16:13.770Z] I (606257) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=152
+[2026-09-26T10:16:14.625Z] I (607112) RouteLoom: HIL LINK rx peer=1 type=40 cid=4182627966 current=0 status=5 seq=61
+[2026-09-26T10:16:17.175Z] I (609662) RouteLoom: HIL LINK rx peer=1 type=32 cid=4182627966 current=0 status=5 seq=116
+[2026-09-26T10:16:18.774Z] I (611261) RouteLoom: HIL LINK tx peer=1 type=32 cid=3468399451 seq=153

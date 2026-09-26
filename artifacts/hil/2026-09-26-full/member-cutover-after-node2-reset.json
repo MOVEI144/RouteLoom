@@ -1,0 +1,17 @@
+{
+  "operation_id": "op-0000000000000009",
+  "kind": "cutover",
+  "phase": "preparing",
+  "expected_site_epoch": 1,
+  "new_site_epoch": 2,
+  "revision": 1,
+  "prepared": 2,
+  "applied": 0,
+  "unknown": 3,
+  "total": 5,
+  "waiting_gateway": false,
+  "recovery_pending": false,
+  "deadline_remaining_ms": 233970,
+  "commit_rs_epoch": 0,
+  "created_ms": 1790437663822
+}

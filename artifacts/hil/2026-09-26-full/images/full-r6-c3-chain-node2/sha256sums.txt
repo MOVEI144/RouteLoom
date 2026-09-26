@@ -1,0 +1,10 @@
+c040a9719d4e95cd84bf6b85d56b98307b08ffc51051b892bc13b37661bc778a  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r6-c3-chain-node2/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+711cd9ea0ba4bf3f7ea0ab516535b3a5d1641abf52729d5d036ec67ccf40ede7  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r6-c3-chain-node2/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+c040a9719d4e95cd84bf6b85d56b98307b08ffc51051b892bc13b37661bc778a  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r6-c3-chain-node2/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+711cd9ea0ba4bf3f7ea0ab516535b3a5d1641abf52729d5d036ec67ccf40ede7  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r6-c3-chain-node2/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+37a70cb8a2d75af06291b76ed4e098f8dcfb564a1c123712cb224e6b1c7975a1  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r6-c3-chain-node2/build/bootloader/bootloader.bin
+e5b5d7f1f7589470e89ea12332069f4e65adbb817dd9d51cf1fea67049c12f2a  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r6-c3-chain-node2/build/flasher_args.json
+068ab45eb37a4be22b3aea004e4e970cfbbf9a25bc0824c1572be5bf68a37fef  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r6-c3-chain-node2/build/partition_table/partition-table.bin
+c54173efb5d0193118c9fac00011b46d5b06ce4be4c4554cff7622b23ea735bf  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r6-c3-chain-node2/build/ram-report.json
+94a5873a41c48c9479e374e51478f25159dc0574aa9b9daf32e9fe76fed3e305  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r6-c3-chain-node2/build/routeloom_reference_node.bin
+e6b1f0ebe4708c3890ecb8664ce1d5a4c38375afd570f9e1ab6ad3b16ac9b0ff  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r6-c3-chain-node2/build/size.json

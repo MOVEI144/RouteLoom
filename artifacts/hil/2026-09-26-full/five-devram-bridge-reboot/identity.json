@@ -1,0 +1,5 @@
+{
+  "chip": "esp32c3",
+  "mac": "94:a9:90:6a:ee:c4",
+  "log": "flash-bridge-preflight.log"
+}

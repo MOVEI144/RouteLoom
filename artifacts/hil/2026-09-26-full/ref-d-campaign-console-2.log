@@ -1,0 +1,49 @@
+[2026-09-26T07:29:24.579+00:00] !! connected /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00
+[2026-09-26T07:29:27.784+00:00] I (8867132) RouteLoomRef: message origin=1 session=226 sequence=I (8927132) RouteLoomRef: message origin=1 session=226 sequence=43 bytes=9
+[2026-09-26T07:29:41.206+00:00] I (8940544) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:29:57.828+00:00] I (8957130) RouteLoomRef: message origin=1 session=226 sequence=44 bytes=9
+[2026-09-26T07:30:27.667+00:00] I (8987137) RouteLoomRef: message origin=1 session=226 sequence=45 bytes=9
+[2026-09-26T07:30:41.097+00:00] I (9000544) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:30:57.721+00:00] I (9017137) RouteLoomRef: message origin=1 session=226 sequence=46 bytes=9
+[2026-09-26T07:31:27.762+00:00] I (9047133) RouteLoomRef: message origin=1 session=226 sequence=47 bytes=9
+[2026-09-26T07:31:41.181+00:00] I (9060545) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:31:57.806+00:00] I (9077136) RouteLoomRef: message origin=1 session=226 sequence=48 bytes=9
+[2026-09-26T07:32:27.848+00:00] I (9107129) RouteLoomRef: message origin=1 session=226 sequence=49 bytes=9
+[2026-09-26T07:32:41.072+00:00] I (9120546) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:32:57.694+00:00] I (9137131) RouteLoomRef: message origin=1 session=226 sequence=50 bytes=9
+[2026-09-26T07:33:27.739+00:00] I (9167131) RouteLoomRef: message origin=1 session=226 sequence=51 bytes=9
+[2026-09-26T07:33:41.157+00:00] I (9180547) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:33:57.779+00:00] I (9197129) RouteLoomRef: message origin=1 session=226 sequence=52 bytes=9
+[2026-09-26T07:34:27.827+00:00] I (9227131) RouteLoomRef: message origin=1 session=226 sequence=53 bytes=9
+[2026-09-26T07:34:41.244+00:00] I (9240548) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:34:57.666+00:00] I (9257133) RouteLoomRef: message origin=1 session=226 sequence=54 bytes=9
+[2026-09-26T07:35:27.709+00:00] I (9287132) RouteLoomRef: message origin=1 session=226 sequence=55 bytes=9
+[2026-09-26T07:35:41.127+00:00] I (9300548) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:35:57.752+00:00] I (9317132) RouteLoomRef: message origin=1 session=226 sequence=56 bytes=9
+[2026-09-26T07:36:27.795+00:00] I (9347133) RouteLoomRef: message origin=1 session=226 sequence=57 bytes=9
+[2026-09-26T07:36:41.212+00:00] I (9360548) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:36:57.835+00:00] I (9377131) RouteLoomRef: message origin=1 session=226 sequence=58 bytes=9
+[2026-09-26T07:37:27.676+00:00] I (9407135) RouteLoomRef: message origin=1 session=226 sequence=59 bytes=9
+[2026-09-26T07:37:41.094+00:00] I (9420548) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:37:57.716+00:00] I (9437131) RouteLoomRef: message origin=1 session=226 sequence=60 bytes=9
+[2026-09-26T07:38:27.756+00:00] I (9467131) RouteLoomRef: message origin=1 session=226 sequence=61 bytes=9
+[2026-09-26T07:38:41.177+00:00] I (9480548) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:38:57.802+00:00] I (9497134) RouteLoomRef: message origin=1 session=226 sequence=62 bytes=9
+[2026-09-26T07:39:27.890+00:00] I (9527205) RouteLoomRef: message origin=1 session=226 sequence=63 bytes=9
+[2026-09-26T07:39:41.116+00:00] I (9540548) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:39:57.771+00:00] I (9557133) RouteLoomRef: message origin=1 session=226 sequence=64 bytes=9
+[2026-09-26T07:40:06.983+00:00] I (9566400) RouteLoomRef: discovery event=STALE peer=4
+[2026-09-26T07:40:06.983+00:00] W (9566400) RouteLoomRef: diagnostic reason=STALE peer=4 message=none
+[2026-09-26T07:40:08.985+00:00] I (9568401) RouteLoomRef: discovery event=REDISCOVERY peer=4
+[2026-09-26T07:40:08.985+00:00] W (9568402) RouteLoomRef: diagnostic reason=REDISCOVERY peer=4 message=none
+[2026-09-26T07:40:09.786+00:00] W (9569079) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T07:40:09.786+00:00] W (9569110) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T07:40:09.786+00:00] I (9569164) RouteLoomRef: discovery event=PROBE_GEN_MISMATCH peer=4
+[2026-09-26T07:40:09.786+00:00] W (9569165) RouteLoomRef: diagnostic reason=PROBE_GEN_MISMATCH peer=4 message=none
+[2026-09-26T07:40:25.408+00:00] ESP-ROM:esp32c6-20220919
+[2026-09-26T07:40:25.408+00:00] Build:Sep 19 2022
+[2026-09-26T07:40:25.408+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x16 (DOWNLOAD(USB/UART0/SDIO_REI_FEO))
+[2026-09-26T07:40:25.408+00:00] Saved PC:0x40807866
+[2026-09-26T07:40:25.408+00:00] waiting for download
+[2026-09-26T07:40:28.512+00:00] !! disconnected: device reports readiness to read but returned no data (device disconnected or multiple access on port?)
+[2026-09-26T07:40:28.512+00:00] !! connected /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00

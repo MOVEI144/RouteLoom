@@ -1,0 +1,34 @@
+[
+  {
+    "destination": 2,
+    "identity": {
+      "chip": "esp32c3",
+      "mac": "94:a9:90:6a:ee:c4",
+      "log": "flash-bridge-preflight.log"
+    },
+    "started": "2026-09-26T07:49:15.732808+00:00",
+    "finished": "2026-09-26T08:32:02.477331+00:00",
+    "adapter_auth_s": 1.518,
+    "runner_exit": 0,
+    "summary": {
+      "requested": 100,
+      "host_accepted": 100,
+      "delivered": 100,
+      "stopped_reason": null,
+      "success_rate": 1.0,
+      "rate_limit_retries": 255,
+      "pace_s": 0,
+      "elapsed_s": 2550.17,
+      "latency_ms_median": 58.21,
+      "latency_ms_p95": 206.94,
+      "latency_ms_max": 221.07,
+      "by_destination": {
+        "2": {
+          "accepted": 100,
+          "delivered": 100
+        }
+      },
+      "evidence": "artifacts/hil/2026-09-26-full/c3-only-100-campaign/cycle-00-node2/traffic.jsonl"
+    }
+  }
+]

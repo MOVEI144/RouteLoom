@@ -1,0 +1,48 @@
+{
+  "app": "reference_node",
+  "app_only": true,
+  "board": "ref-b",
+  "boot_log": "flash-ref-b-boot.log",
+  "chip": "esp32c3",
+  "cmd": [
+    "/home/sahur/.local/bin/esptool",
+    "--chip",
+    "esp32c3",
+    "--port",
+    "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00",
+    "--baud",
+    "460800",
+    "--before",
+    "default-reset",
+    "--after",
+    "hard-reset",
+    "write-flash",
+    "--flash-mode",
+    "dio",
+    "--flash-size",
+    "2MB",
+    "--flash-freq",
+    "80m",
+    "0x10000",
+    "artifacts/hil/2026-09-26/images/full-r8-member-timing-node6/build/routeloom_reference_node.bin"
+  ],
+  "error": null,
+  "esptool_log": "flash-ref-b-esptool.log",
+  "exit_code": 0,
+  "fallback_offsets": false,
+  "files": {
+    "0x10000": {
+      "path": "artifacts/hil/2026-09-26/images/full-r8-member-timing-node6/build/routeloom_reference_node.bin",
+      "sha256": "12e9be9da2048409b26be78b7b469aa70d3f396c5b96787fd793d57dbe3f5825"
+    }
+  },
+  "finished_utc": "2026-09-26T15:45:44.908Z",
+  "ok": true,
+  "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00",
+  "preflight": {
+    "chip": "esp32c3",
+    "log": "flash-ref-b-preflight.log",
+    "mac": "94:a9:90:7a:26:ac"
+  },
+  "started_utc": "2026-09-26T15:45:09.479Z"
+}

@@ -1,0 +1,10 @@
+{
+  "snapshots": 77,
+  "node2_snapshots": 77,
+  "node2_connected": 77,
+  "node2_hops1": 77,
+  "rssi_samples": 77,
+  "rssi_min_dbm": -41,
+  "rssi_median_dbm": -36,
+  "rssi_max_dbm": -33
+}

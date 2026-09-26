@@ -1,0 +1,10 @@
+{
+  "board": "bridge",
+  "chip": "esp32c3",
+  "mac": "94:a9:90:6a:ee:c4",
+  "offset": "0x190000",
+  "size": "0x20000",
+  "backup_sha256": "a48092209572270749b87647f49c9f89e7a135f62663db7da356f9b51c34bdf4",
+  "backup_path": "/tmp/routeloom-hil-full-2026-09-26/rlsec-node1-postcutover-before-retry.bin",
+  "erased": true
+}

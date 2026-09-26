@@ -1,0 +1,20 @@
+{
+  "requested": 100,
+  "host_accepted": 100,
+  "delivered": 100,
+  "stopped_reason": null,
+  "success_rate": 1.0,
+  "rate_limit_retries": 259,
+  "pace_s": 0.0,
+  "elapsed_s": 2591.52,
+  "latency_ms_median": 113.5,
+  "latency_ms_p95": 194.06,
+  "latency_ms_max": 379.49,
+  "by_destination": {
+    "3": {
+      "accepted": 100,
+      "delivered": 100
+    }
+  },
+  "evidence": "artifacts/hil/2026-09-26-full/c3-chain/r4-node3-100.jsonl"
+}

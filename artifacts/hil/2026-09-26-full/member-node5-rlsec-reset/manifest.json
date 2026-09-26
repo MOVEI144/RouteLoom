@@ -1,0 +1,10 @@
+{
+  "board": "ref-d",
+  "chip": "esp32c6",
+  "mac": "10:bd:a3:ff:fe:b1:48:a8",
+  "offset": "0x190000",
+  "size": "0x10000",
+  "backup_sha256": "1dfcf2113d839ab1def94db5be4bd05cdd4085c857c877e934fc1329f6a08b59",
+  "backup_path": "/tmp/routeloom-hil-full-2026-09-26/rlsec-node5-before-member.bin",
+  "erased": true
+}

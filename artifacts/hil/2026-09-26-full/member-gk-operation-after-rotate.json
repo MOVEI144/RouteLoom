@@ -1,0 +1,15 @@
+{
+  "cause": "manual",
+  "created_ms": 1790436228772,
+  "from": 1,
+  "kind": "rotate",
+  "operation_id": "op-0000000000000006",
+  "state": "distributing",
+  "targets": {
+    "active_ack": 0,
+    "staged_ack": 0,
+    "total": 5,
+    "unknown": 5
+  },
+  "to": 2
+}

@@ -1,0 +1,45 @@
+[2026-09-26T15:07:40.218Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-26T15:07:49.301Z] I (97271) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=18 src=1I (167751) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=21 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:07:52.578Z] I (171028) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=21 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:07:57.739Z] I (176189) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=21 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:07:58.304Z] I (176754) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=21 src=10:bd:a3:b1:48:a8 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:08:06.767Z] I (185215) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=21 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:08:24.045Z] I (202494) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=21 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:08:36.866Z] I (215315) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=21 src=10:bd:a3:b1:48:a8 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:08:48.714Z] I (227162) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=21 src=10:bd:a3:b1:48:a8 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:08:59.136Z] I (237585) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=21 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:09:37.222Z] I (275670) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=21 src=10:bd:a3:b1:48:a8 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:09:39.790Z] I (278237) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=21 src=10:bd:a3:b1:48:a8 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:09:42.943Z] I (281392) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=21 src=10:bd:a3:b1:48:a8 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:09:49.088Z] I (287537) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=21 src=10:bd:a3:b1:48:a8 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:10:08.348Z] I (306796) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=21 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:10:10.334Z] I (308783) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T15:10:10.337Z] I (308785) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T15:10:10.340Z] I (308789) RouteLoomRef: RLD1 tx kind=1 ch=1 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:10:10.344Z] I (308792) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T15:10:10.660Z] I (309109) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T15:10:10.663Z] I (309111) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T15:10:10.666Z] I (309115) RouteLoomRef: RLD1 tx kind=1 ch=6 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:10:10.670Z] I (309118) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T15:10:10.987Z] I (309435) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T15:10:10.989Z] I (309437) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T15:10:10.993Z] I (309441) RouteLoomRef: RLD1 tx kind=1 ch=11 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:10:10.996Z] I (309444) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T15:10:11.312Z] I (309761) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-26T15:10:11.315Z] I (309763) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-26T15:10:36.913Z] I (335361) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=24 src=10:bd:a3:b1:48:a8 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:11:08.656Z] I (367104) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=24 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:11:13.252Z] I (371699) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=24 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:11:14.348Z] I (372796) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=24 src=10:bd:a3:b1:48:a8 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:11:18.195Z] I (376643) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=24 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:11:19.076Z] I (377524) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=24 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:11:22.703Z] I (381151) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=24 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:11:25.366Z] I (383814) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=24 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:11:30.024Z] I (388471) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=24 src=10:bd:a3:b1:48:a8 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:11:30.292Z] I (388740) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=24 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:11:35.792Z] I (394239) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=24 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:11:36.059Z] I (394506) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=24 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:11:47.790Z] I (406237) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=24 src=10:bd:a3:b1:48:a8 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:11:48.653Z] I (407100) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=24 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:11:57.512Z] I (415959) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=24 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:12:09.538Z] I (427984) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=24 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff

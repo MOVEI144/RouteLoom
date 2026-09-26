@@ -1,0 +1,10 @@
+6d6708b5f128c5f70a454e90d374c7c73590c0f3087e9a4d484cbd2938bbffe8  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-console-node4/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+203d70dff11edd632ae107d1b67541ac9969bf79461c064e456bce0f6d7a32aa  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-console-node4/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+6d6708b5f128c5f70a454e90d374c7c73590c0f3087e9a4d484cbd2938bbffe8  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-console-node4/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+203d70dff11edd632ae107d1b67541ac9969bf79461c064e456bce0f6d7a32aa  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-console-node4/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+d2f607c0318fe53441cd631fff428840040e896610c91cd5180ccea9459e3121  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-console-node4/build/bootloader/bootloader.bin
+36c02bf6f718c6b86359df643fa0c419afa5bee71b2c09bbcfa8f0c495e60a67  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-console-node4/build/flasher_args.json
+068ab45eb37a4be22b3aea004e4e970cfbbf9a25bc0824c1572be5bf68a37fef  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-console-node4/build/partition_table/partition-table.bin
+976197668f9189a781a4e75065aa4ac6b998e7a55f3a9bdf5534e5e8be1d9053  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-console-node4/build/ram-report.json
+54dab0bddebe76d8154a8e0aba86270019ccd81cfe53c858142d3f8cc2a88fff  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-console-node4/build/routeloom_reference_node.bin
+f2f90b877918e16d36382622ac5b68b41ba70d0e7511f33e9e87d4d7a91bd96c  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-console-node4/build/size.json

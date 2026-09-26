@@ -1,0 +1,10 @@
+6d6708b5f128c5f70a454e90d374c7c73590c0f3087e9a4d484cbd2938bbffe8  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-ref-c6-node5/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+203d70dff11edd632ae107d1b67541ac9969bf79461c064e456bce0f6d7a32aa  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-ref-c6-node5/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+6d6708b5f128c5f70a454e90d374c7c73590c0f3087e9a4d484cbd2938bbffe8  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-ref-c6-node5/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+203d70dff11edd632ae107d1b67541ac9969bf79461c064e456bce0f6d7a32aa  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-ref-c6-node5/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+14dbf232af7c6d6e3cf808aca9c784688f4ed9c9c7323958e014932d1122b039  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-ref-c6-node5/build/bootloader/bootloader.bin
+36c02bf6f718c6b86359df643fa0c419afa5bee71b2c09bbcfa8f0c495e60a67  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-ref-c6-node5/build/flasher_args.json
+068ab45eb37a4be22b3aea004e4e970cfbbf9a25bc0824c1572be5bf68a37fef  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-ref-c6-node5/build/partition_table/partition-table.bin
+7dbf548fec74b193bf78990da0bee1dee6b936d3d9b627812aea18dc835a9349  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-ref-c6-node5/build/ram-report.json
+72a8a4d8d296395fd38e3944a331ac02d9f09bf8f45d5f810f535dbd40607251  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-ref-c6-node5/build/routeloom_reference_node.bin
+54cc9c38da33b1f80dc52756faed3c0923a202a1554c183133737061e3f75d8c  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-ref-c6-node5/build/size.json

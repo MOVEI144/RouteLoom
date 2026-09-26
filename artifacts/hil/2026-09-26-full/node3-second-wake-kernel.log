@@ -1,0 +1,8 @@
+2026-09-26T16:37:30.725651+09:00 sahur-pc kernel: usb 1-4.2.3: new full-speed USB device number 72 using xhci_hcd
+2026-09-26T16:37:30.834679+09:00 sahur-pc kernel: usb 1-4.2.3: New USB device found, idVendor=303a, idProduct=1001, bcdDevice= 1.01
+2026-09-26T16:37:30.834981+09:00 sahur-pc kernel: usb 1-4.2.3: New USB device strings: Mfr=1, Product=2, SerialNumber=3
+2026-09-26T16:37:30.835098+09:00 sahur-pc kernel: usb 1-4.2.3: Product: USB JTAG/serial debug unit
+2026-09-26T16:37:30.835193+09:00 sahur-pc kernel: usb 1-4.2.3: Manufacturer: Espressif
+2026-09-26T16:37:30.835284+09:00 sahur-pc kernel: usb 1-4.2.3: SerialNumber: 94:A9:90:7A:26:AC
+2026-09-26T16:37:30.848664+09:00 sahur-pc kernel: cdc_acm 1-4.2.3:1.0: ttyACM4: USB ACM device
+2026-09-26T16:37:31.035131+09:00 sahur-pc kernel: usb 1-4.2.3: USB disconnect, device number 72

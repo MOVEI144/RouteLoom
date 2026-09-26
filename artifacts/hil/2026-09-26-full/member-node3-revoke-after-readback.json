@@ -1,0 +1,28 @@
+{
+  "operation_id": "op-0000000000000007",
+  "kind": "revoke",
+  "device_id": "0000000000000003",
+  "generation": 1,
+  "state": "committed",
+  "rs_epoch": 2,
+  "distribution": {
+    "state": "pending",
+    "applied": 0,
+    "retired": 0,
+    "unknown": 4,
+    "total": 4,
+    "reached": 0,
+    "members": 4
+  },
+  "gk_rotation": {
+    "from": 2,
+    "to": 3,
+    "state": "activated_with_unknown"
+  },
+  "notice": {
+    "delivery": "sent",
+    "intent_confirmed": false,
+    "erase_confirmed": null
+  },
+  "created_ms": 1790436980877
+}

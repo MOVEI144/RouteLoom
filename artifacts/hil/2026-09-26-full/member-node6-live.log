@@ -1,0 +1,58 @@
+[2026-09-26T15:41:04.076+00:00] !! connected 94:A9:90:7A:26:AC count=1
+[2026-09-26T15:41:13.504+00:00] I (42299) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T15:41:13.504+00:00] I (42303) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T15:41:13.805+00:00] I (42552) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T15:41:13.805+00:00] I (42556) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T15:41:14.005+00:00] I (42773) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=15 src=10:bd:a3:b1:47:54 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T15:41:14.005+00:00] I (42806) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T15:41:14.005+00:00] I (42810) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T15:41:14.306+00:00] I (43059) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-26T15:41:14.306+00:00] I (43063) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-26T15:41:31.560+00:00] I (60345) RouteLoom: stack hwm main 10384 B
+[2026-09-26T15:41:31.561+00:00] I (60345) RouteLoom: HIL HEAP free=22492 largest=20480 min=21896 B
+[2026-09-26T15:41:31.561+00:00] I (60346) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-26T15:41:31.561+00:00] I (60346) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-26T15:41:31.561+00:00] I (60346) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-26T15:41:31.561+00:00] I (60347) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-26T15:41:32.663+00:00] I (61436) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T15:41:32.663+00:00] I (61440) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T15:41:32.964+00:00] I (61689) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T15:41:32.964+00:00] I (61693) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T15:41:33.165+00:00] I (61943) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T15:41:33.165+00:00] I (61947) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T15:41:33.465+00:00] I (62197) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-26T15:41:33.466+00:00] I (62201) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-26T15:42:05.462+00:00] I (94207) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T15:42:05.462+00:00] I (94211) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T15:42:05.662+00:00] I (94461) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T15:42:05.662+00:00] I (94465) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T15:42:05.963+00:00] I (94714) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T15:42:05.963+00:00] I (94718) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T15:42:06.164+00:00] I (94968) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-26T15:42:06.164+00:00] I (94972) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-26T15:42:31.533+00:00] I (120345) RouteLoom: stack hwm main 10384 B
+[2026-09-26T15:42:31.533+00:00] I (120345) RouteLoom: HIL HEAP free=22492 largest=20480 min=21896 B
+[2026-09-26T15:42:31.533+00:00] I (120346) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-26T15:42:31.533+00:00] I (120346) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-26T15:42:31.533+00:00] I (120346) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-26T15:42:31.533+00:00] I (120347) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-26T15:43:15.245+00:00] I (163991) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T15:43:15.245+00:00] I (163995) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T15:43:15.446+00:00] I (164245) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T15:43:15.446+00:00] I (164249) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T15:43:15.747+00:00] I (164499) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T15:43:15.747+00:00] I (164503) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T15:43:15.947+00:00] I (164752) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-26T15:43:15.947+00:00] I (164756) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-26T15:43:31.589+00:00] I (180346) RouteLoom: stack hwm main 10384 B
+[2026-09-26T15:43:31.589+00:00] I (180346) RouteLoom: HIL HEAP free=22492 largest=20480 min=21896 B
+[2026-09-26T15:43:31.589+00:00] I (180347) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-26T15:43:31.589+00:00] I (180347) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-26T15:43:31.589+00:00] I (180347) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-26T15:43:31.589+00:00] I (180348) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-26T15:44:31.554+00:00] I (240348) RouteLoom: stack hwm main 10384 B
+[2026-09-26T15:44:31.554+00:00] I (240348) RouteLoom: HIL HEAP free=22492 largest=20480 min=21896 B
+[2026-09-26T15:44:31.554+00:00] I (240349) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-26T15:44:31.554+00:00] I (240349) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-26T15:44:31.554+00:00] I (240349) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-26T15:44:31.554+00:00] I (240350) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0

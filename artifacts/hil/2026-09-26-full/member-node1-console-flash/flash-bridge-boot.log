@@ -1,0 +1,28 @@
+[2026-09-26T15:01:59.278Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-26T15:01:59.283Z] I (168) boot: Loaded app from partition at offset 0x10000
+[2026-09-26T15:01:59.287Z] I (169) boot: Disabling RNG early entropy source...
+[2026-09-26T15:01:59.299Z] I (185) cpu_start: Unicore app
+[2026-09-26T15:01:59.307Z] I (193) cpu_start: GPIO 20 and 21 are used as console UART I/O pins
+[2026-09-26T15:01:59.307Z] I (194) cpu_start: Pro cpu start user code
+[2026-09-26T15:01:59.311Z] I (194) cpu_start: cpu freq: 160000000 Hz
+[2026-09-26T15:01:59.314Z] I (196) app_init: Application information:
+[2026-09-26T15:01:59.318Z] I (200) app_init: Project name:     routeloom_bridge_node
+[2026-09-26T15:01:59.322Z] I (205) app_init: App version:      1
+[2026-09-26T15:01:59.327Z] I (208) app_init: Compile time:     Sep 26 2026 05:39:13
+[2026-09-26T15:01:59.331Z] I (213) app_init: ELF file SHA256:  6196f9579...
+[2026-09-26T15:01:59.335Z] I (217) app_init: ESP-IDF:          v6.0.3
+[2026-09-26T15:01:59.340Z] I (221) efuse_init: Min chip rev:     v0.3
+[2026-09-26T15:01:59.343Z] I (225) efuse_init: Max chip rev:     v1.99 
+[2026-09-26T15:01:59.346Z] I (229) efuse_init: Chip rev:         v0.4
+[2026-09-26T15:01:59.353Z] I (233) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-26T15:01:59.358Z] I (239) heap_init: At 3FC94480 len 0002BB80 (174 KiB): RAM
+[2026-09-26T15:01:59.364Z] I (244) heap_init: At 3FCC0000 len 0001C710 (113 KiB): Retention RAM
+[2026-09-26T15:01:59.371Z] I (250) heap_init: At 3FCDC710 len 00002950 (10 KiB): Retention RAM
+[2026-09-26T15:01:59.375Z] I (256) heap_init: At 50000048 len 00001FA0 (7 KiB): RTCRAM
+[2026-09-26T15:01:59.379Z] I (262) spi_flash: detected chip: generic
+[2026-09-26T15:01:59.382Z] I (265) spi_flash: flash io: dio
+[2026-09-26T15:01:59.394Z] W (268) spi_flash: Detected size(4096k) larger than the size in the binary image header(2048k). Using the size in the binary image header.
+[2026-09-26T15:01:59.400Z] I (281) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-26T15:01:59.407Z] I (287) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-26T15:01:59.461Z] routeloom-maintenance v1 ready
+[2026-09-26T15:02:04.502Z] !! capture closed

@@ -1,0 +1,17 @@
+{
+  "sent": {
+    "exit": 0,
+    "stdout": "{\"accepted\":true,\"request\":30}",
+    "stderr": ""
+  },
+  "delivery": {
+    "request": 30,
+    "destination": 0,
+    "state": "expired",
+    "reason": "DEADLINE_EXPIRED",
+    "msg_session": 406764572,
+    "msg_seq": 212,
+    "updated_ms": 1790437155060
+  },
+  "polls": 49
+}

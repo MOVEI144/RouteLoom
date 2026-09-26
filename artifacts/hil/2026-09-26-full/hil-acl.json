@@ -1,0 +1,13 @@
+{
+  "principals": {
+    "1000": {
+      "networks": {
+        "*": [
+          "READ_PAYLOAD",
+          "SEND",
+          "READ_OPERATION"
+        ]
+      }
+    }
+  }
+}

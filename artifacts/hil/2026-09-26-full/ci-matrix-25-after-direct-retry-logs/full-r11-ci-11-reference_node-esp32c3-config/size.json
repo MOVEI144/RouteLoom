@@ -1,0 +1,74 @@
+{
+    "version": "1.2",
+    "total_size": 954954,
+    "layout": [
+        {
+            "name": "Flash Code",
+            "total": 0,
+            "used": 751830,
+            "free": 0,
+            "parts": {
+                ".text": {
+                    "size": 751830
+                }
+            }
+        },
+        {
+            "name": "DRAM",
+            "total": 321296,
+            "used": 261888,
+            "free": 59408,
+            "parts": {
+                ".bss": {
+                    "size": 174280
+                },
+                ".text": {
+                    "size": 73084
+                },
+                ".data": {
+                    "size": 14524
+                }
+            }
+        },
+        {
+            "name": "Flash Data",
+            "total": 0,
+            "used": 115708,
+            "free": 0,
+            "parts": {
+                ".rodata": {
+                    "size": 115180
+                },
+                ".init_array": {
+                    "size": 256
+                },
+                ".appdesc": {
+                    "size": 256
+                },
+                ".tdata": {
+                    "size": 16
+                }
+            }
+        },
+        {
+            "name": "RTC SLOW",
+            "total": 8192,
+            "used": 96,
+            "free": 8096,
+            "parts": {
+                ".force_slow": {
+                    "size": 36
+                },
+                ".text": {
+                    "size": 28
+                },
+                ".rtc_reserved": {
+                    "size": 24
+                },
+                ".rtc_noinit": {
+                    "size": 8
+                }
+            }
+        }
+    ]
+}

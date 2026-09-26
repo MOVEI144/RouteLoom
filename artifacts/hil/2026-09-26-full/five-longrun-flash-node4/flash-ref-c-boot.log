@@ -1,0 +1,10 @@
+[2026-09-26T08:55:32.554Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-26T08:55:32.678Z] I (338) esp_image: segment 3: paddr=00150fc4 vaddr=408027a4 size=17874h ( 96372) load
+[2026-09-26T08:55:32.699Z] I (359) esp_image: segment 4: paddr=00168840 vaddr=4081a020 size=03c14h ( 15380) load
+[2026-09-26T08:55:32.705Z] I (363) esp_image: segment 5: paddr=0016c45c vaddr=50000000 size=00060h (    96) load
+[2026-09-26T08:55:32.710Z] I (364) esp_image: segment 6: paddr=0016c4c4 vaddr=50000068 size=00024h (    36) load
+[2026-09-26T08:55:32.716Z] I (376) boot: Loaded app from partition at offset 0x10000
+[2026-09-26T08:55:32.720Z] I (377) boot: Disabling RNG early entropy source...
+[2026-09-26T08:55:32.732Z] I (393) cpu_start: Unicore app
+[2026-09-26T08:55:34.619Z] !! serial read error on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00: pyserial read failed: device reports readiness to read but returned no data (device disconnected or multiple access on port?)
+[2026-09-26T08:55:40.555Z] !! capture closed

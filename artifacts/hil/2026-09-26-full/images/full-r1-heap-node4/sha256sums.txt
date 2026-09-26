@@ -1,0 +1,10 @@
+6d6708b5f128c5f70a454e90d374c7c73590c0f3087e9a4d484cbd2938bbffe8  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-heap-node4/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+203d70dff11edd632ae107d1b67541ac9969bf79461c064e456bce0f6d7a32aa  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-heap-node4/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+6d6708b5f128c5f70a454e90d374c7c73590c0f3087e9a4d484cbd2938bbffe8  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-heap-node4/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+203d70dff11edd632ae107d1b67541ac9969bf79461c064e456bce0f6d7a32aa  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-heap-node4/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+a32b7e21aee567eaa5878f09d3bbaf35e9649db5c9f0de02abb9506f2d1bab5d  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-heap-node4/build/bootloader/bootloader.bin
+36c02bf6f718c6b86359df643fa0c419afa5bee71b2c09bbcfa8f0c495e60a67  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-heap-node4/build/flasher_args.json
+068ab45eb37a4be22b3aea004e4e970cfbbf9a25bc0824c1572be5bf68a37fef  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-heap-node4/build/partition_table/partition-table.bin
+7dbf548fec74b193bf78990da0bee1dee6b936d3d9b627812aea18dc835a9349  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-heap-node4/build/ram-report.json
+8b2ad8bd48a7e84bb75da4b26c711435cb00cff03688d6bb5a514389296a912b  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-heap-node4/build/routeloom_reference_node.bin
+e9d079ffac40f2bdd0af353d532eeb00f15092fb8c15d7019a31db6085ad2f2f  /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r1-heap-node4/build/size.json

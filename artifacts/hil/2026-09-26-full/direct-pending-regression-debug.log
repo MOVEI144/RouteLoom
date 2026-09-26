@@ -1,0 +1,4 @@
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_sdkv1_joiner.cpp:2785 [direct-pending-retries]: ready
+sizeof(Joiner)=10664 (budget 12288)
+direct retry debug: state=14 attempts=2 errors=0 ups=4 now=65035 pending=0
+joiner tests FAILED: 1
