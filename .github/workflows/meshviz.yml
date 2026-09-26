@@ -21,6 +21,28 @@ jobs:
         run: python3 -m pip install 'cryptography>=41,<47'
       - name: Qt-free model, capture and device tests
         run: PYTHONPATH=tools/meshviz/src:tools python3 -m unittest discover -s tools/meshviz/tests -v
+  meshviz-gui:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Install Qt runtime libraries
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+      - name: Install GUI dependencies
+        run: |
+          python3 -m pip install \
+            'cffi==2.1.1' 'pycparser==3.0' 'cryptography==46.0.7' \
+            'numpy==2.5.3' 'packaging==26.3' \
+            'PySide6==6.11.2' 'pyqtgraph==0.14.0'
+      - name: Qt offscreen smoke and model/view tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: PYTHONPATH=tools/meshviz/src:tools python3 -m unittest discover -s tools/meshviz/tests -v
   firmware-bundles:
     # The committed key is DEVELOPMENT ONLY; this job has no release credentials.
     if: github.event_name != 'pull_request'
