@@ -186,11 +186,15 @@ Status EspNowRuntime::initialize_wifi() noexcept {
     return Status::error(StatusCode::InvalidArgument,
                          "approved channel and tx power are required");
   }
-  esp_err_t error = esp_netif_init();
+  esp_err_t error = ESP_OK;
+#if CONFIG_ROUTELOOM_WIFI_NETIF_INIT
+  // ESP-NOW does not need lwIP; the TCP/IP task is opt-in (Kconfig).
+  error = esp_netif_init();
   if (error != ESP_OK && error != ESP_ERR_INVALID_STATE) {
     return esp_status(error, StatusCode::RadioFailure,
                       "esp_netif_init failed");
   }
+#endif
   error = esp_event_loop_create_default();
   if (error != ESP_OK && error != ESP_ERR_INVALID_STATE) {
     return esp_status(error, StatusCode::RadioFailure,
@@ -363,6 +367,20 @@ Status EspNowRuntime::initialize_espnow() noexcept {
            static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
            static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
            static_cast<unsigned long>(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)));
+#if CONFIG_ROUTELOOM_BOOT_HEAP_FLOOR_BYTES > 0
+  // On-device counterpart of the CI static-RAM guard (ram-budget.md): the
+  // radio started, but session crypto and USB work still need heap. Not
+  // fatal — the bench reads this line as a failed start.
+  const std::size_t ready_free = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  const std::size_t ready_largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (ready_free < CONFIG_ROUTELOOM_BOOT_HEAP_FLOOR_BYTES ||
+      ready_largest < CONFIG_ROUTELOOM_BOOT_HEAP_FLOOR_BYTES / 2) {
+    ESP_LOGE(kTag, "BOOT_HEAP_BELOW_FLOOR free=%lu largest=%lu floor=%u bytes",
+             static_cast<unsigned long>(ready_free),
+             static_cast<unsigned long>(ready_largest),
+             static_cast<unsigned>(CONFIG_ROUTELOOM_BOOT_HEAP_FLOOR_BYTES));
+  }
+#endif
   return Status::success();
 }
 

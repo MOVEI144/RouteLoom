@@ -31,18 +31,51 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# Boot-heap model (ram-budget.md §5.1; 2026-09-26 bench, ESP-IDF v6.0.3,
+# esp_netif/lwIP off, A-MPDU off). The free internal heap when
+# esp_wifi_init() runs is the static headroom plus a per-app `offset`
+# (what the main task stack, NVS, USB driver and owner had already taken —
+# measured, not derived); Wi-Fi, PHY calibration and ESP-NOW then consume
+# `radio_peak` bytes at their minimum, and the node must keep `reserve`
+# bytes for session crypto and USB work (the on-device counterpart is
+# CONFIG_ROUTELOOM_BOOT_HEAP_FLOOR_BYTES). The model is only as good as
+# its measurement: re-measure `offset`/`radio_peak` whenever the Wi-Fi,
+# lwIP, main-task-stack or console configuration of a cell changes.
+BOOT_HEAP_MODEL: Dict[tuple, Dict[str, int]] = {
+    # bridge_node esp32c3: static free 29,690 B -> Wi-Fi init heap 42,248 B;
+    # minimum free during radio start 14,796 B (offset 12,558; peak 27,452).
+    ("esp32c3", "bridge_node"): {"offset": 12558, "radio_peak": 27452, "reserve": 12288},
+    # reference_node esp32c3: static free 34,044 B -> Wi-Fi init heap 50,316 B;
+    # minimum free during radio start 22,888 B (offset 16,272; peak 27,428).
+    # Reserve 8 KiB: a normal device holds far fewer sessions than a gateway.
+    ("esp32c3", "reference_node"): {"offset": 16272, "radio_peak": 27428, "reserve": 8192},
+}
+
+
+def derived_static_floor(model: Dict[str, int]) -> int:
+    """The static headroom that keeps `reserve` bytes after radio start,
+    rounded up to 512 B."""
+    need = model["radio_peak"] + model["reserve"] - model["offset"]
+    return -(-need // 512) * 512
+
+
 # Minimum static-RAM headroom (bytes) per (target, app); "*" matches any app.
-# 8 KiB is one feature increment of static state (group delivery added about
-# 5 KB) plus margin: a change that would eat the last 8 KiB has to
-# come with its own reclaim or a reviewed table change, instead of the next
-# feature failing at link time.
+# esp32c3/bridge_node is derived from BOOT_HEAP_MODEL above (27,182 B ->
+# 27,648 B): the previous 24 KiB floor still admitted an image that booted
+# with 5,956 B of heap left, and the 8 KiB floor before it admitted one that
+# failed esp_wifi_init (issue #166). Other floors remain at their existing
+# 8 KiB until physical startup measurements exist for those targets — they
+# are link-time floors only and claim nothing about radio start.
 MIN_FREE_BYTES: Dict[tuple, int] = {
-    ("esp32c3", "bridge_node"): 8 * 1024,
-    ("esp32c3", "reference_node"): 8 * 1024,
+    ("esp32c3", "bridge_node"): derived_static_floor(BOOT_HEAP_MODEL[("esp32c3", "bridge_node")]),
+    ("esp32c3", "reference_node"):
+        derived_static_floor(BOOT_HEAP_MODEL[("esp32c3", "reference_node")]),
     ("esp32s3", "*"): 8 * 1024,
     ("esp32c5", "*"): 8 * 1024,
 }
 DEFAULT_MIN_FREE_BYTES = 8 * 1024
+assert MIN_FREE_BYTES[("esp32c3", "bridge_node")] == 27648
+assert MIN_FREE_BYTES[("esp32c3", "reference_node")] == 19456
 
 # Section names that mark the memory type holding static data (abbreviated
 # names as esp-idf-size prints them by default, and the full output-section
@@ -128,6 +161,15 @@ def threshold(target: str, app: str) -> int:
                               MIN_FREE_BYTES.get((target, "*"), DEFAULT_MIN_FREE_BYTES))
 
 
+def boot_heap_estimate(target: str, app: str, free: int) -> Optional[Dict[str, int]]:
+    """Modelled free heap after radio start for a measured cell, else None."""
+    model = BOOT_HEAP_MODEL.get((target, app))
+    if model is None:
+        return None
+    return {**model, "static_free": free,
+            "estimate": free + model["offset"] - model["radio_peak"]}
+
+
 def evaluate(report: Any, target: str, app: str, cell: str = "") -> Dict[str, Any]:
     types = memory_types(report)
     guarded = static_type(types)
@@ -146,6 +188,7 @@ def evaluate(report: Any, target: str, app: str, cell: str = "") -> Dict[str, An
             "min_free": floor,
             "passed": guarded["free"] >= floor,
         },
+        "boot_heap": boot_heap_estimate(target, app, guarded["free"]),
     }
 
 
@@ -169,8 +212,18 @@ def markdown(result: Dict[str, Any]) -> str:
         f"Guard ({guard['memory_type']}, .bss {guard['static_bss']} B, "
         f".data {guard['static_data']} B): free {guard['free']} B vs floor "
         f"{guard['min_free']} B — **{verdict}**",
-        "",
     ]
+    model = result.get("boot_heap")
+    if model is not None:
+        lines.append(
+            f"Boot heap model: {model['static_free']} + {model['offset']} (pre-Wi-Fi offset) "
+            f"− {model['radio_peak']} (Wi-Fi/PHY/ESP-NOW peak) = {model['estimate']} B "
+            f"after radio start; reserve {model['reserve']} B (the floor above is derived "
+            f"from this model)")
+    else:
+        lines.append("Boot heap model: no bench measurement for this cell "
+                     "(link-time floor only)")
+    lines.append("")
     return "\n".join(lines)
 
 
