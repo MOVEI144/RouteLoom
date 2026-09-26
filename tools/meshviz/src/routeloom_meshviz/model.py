@@ -38,11 +38,11 @@ def reduce(state: State, event: dict) -> State:
     epoch = event.get('source_epoch')
     seq = event.get('source_seq')
     previous = state.sources.get(source)
-    if epoch in state.retired_epochs.get(source, set()):
+    if epoch is not None and epoch in state.retired_epochs.get(source, set()):
         return state
     if previous and epoch == previous[0] and seq is not None and seq <= previous[1]:
         return state
-    if previous and epoch != previous[0]:
+    if previous and epoch is not None and epoch != previous[0]:
         state.retired_epochs.setdefault(source, set()).add(previous[0])
         # A new daemon session cannot keep the previous session's live claims.
         for table in (state.nodes, state.links, state.routes):

@@ -70,6 +70,7 @@ class ModelTests(unittest.TestCase):
             reduce(state, {'kind': 'route', 'scope': 's', 'source': 'daemon',
                            'payload': {'observer': observer, 'destination': '03',
                                        'next_hop': hop, 'boot': 'a', 'valid': True}})
+        self.assertEqual(len(state.routes), 2)
         self.assertIsNone(route_hops(state, 's', '01', '03'))
 
     def test_fake_api1_fragmented_and_reordered(self):
