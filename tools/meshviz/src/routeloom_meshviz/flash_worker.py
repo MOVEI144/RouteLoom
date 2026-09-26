@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from .device import FlashPlan, Identity, Image
+from .board_setup import bundle_image_node_id
 from .firmware_catalog import DEV_PUBLIC_KEY, verify_bundle
 
 
@@ -16,6 +17,9 @@ def flash(port: str, plan: FlashPlan, api=None):
     if plan.bundle is None:
         raise ValueError('trusted bundle signature verifier unavailable')
     manifest = verify_bundle(plan.bundle, PUBLIC_KEY)
+    if (plan.assigned_node_id is not None and
+            bundle_image_node_id(plan.bundle) != plan.assigned_node_id):
+        raise ValueError('assigned NodeId differs from signed image configuration')
     if manifest['chip'] == 'esp32c6':
         raise ValueError('C6 is experimental HIL only')
     if manifest['chip'] != plan.chip or tuple(
@@ -94,7 +98,8 @@ def main():
         images = tuple(Image(e['offset'], root / e['path'], e['size'], e['sha256'])
                        for e in manifest['files'])
         plan = FlashPlan(identity, manifest['chip'], images, True,
-                         request['expected_mac'], request['quiesced'], root)
+                         request['expected_mac'], request['quiesced'], root,
+                         request.get('assigned_node_id'))
         flash(request['port'], plan)
         print(json.dumps({'ok': True}))
         return 0

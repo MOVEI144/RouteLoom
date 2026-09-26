@@ -33,13 +33,20 @@ class LineDecoder:
             del self.buffer[:end + 1]
             if len(line) > RESPONSE_MAX_BYTES:
                 raise ValueError('API1 response too long')
-            reply = json.loads(line)
-            if not isinstance(reply, dict) or reply.get('v') != 1:
+            reply = json.loads(line, parse_constant=self._invalid_constant)
+            if (not isinstance(reply, dict) or type(reply.get('v')) is not int or
+                    reply['v'] != 1 or not isinstance(reply.get('request_id'), str) or
+                    type(reply.get('ok')) is not bool or
+                    not isinstance(reply.get('result' if reply['ok'] else 'error'), dict)):
                 raise ValueError('invalid API1 response')
             replies.append(reply)
         if len(self.buffer) > RESPONSE_MAX_BYTES:
             raise ValueError('API1 response too long')
         return replies
+
+    @staticmethod
+    def _invalid_constant(value):
+        raise ValueError(f'invalid JSON constant: {value}')
 
 
 class NodesNormalizer:
@@ -55,7 +62,7 @@ class NodesNormalizer:
         self.last_emit_ms = None
 
     def events(self, source_info: dict, nodes: list, now_unix_ms: int, *, force_ms=30_000):
-        session = source_info.get('session_id')
+        session = (source_info.get('gateway'), source_info.get('session_id'))
         if session != self.session:
             # A new gateway USB session (or its loss) retires the previous session's claims.
             self.session = session

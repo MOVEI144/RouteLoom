@@ -34,7 +34,11 @@ jobs:
       - name: Install Qt runtime libraries
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
       - name: Install GUI dependencies
-        run: python3 -m pip install 'cryptography>=41,<47' 'PySide6>=6.8,<7' 'pyqtgraph>=0.13,<1'
+        run: |
+          python3 -m pip install \
+            'cffi==2.1.1' 'pycparser==3.0' 'cryptography==46.0.7' \
+            'numpy==2.5.3' 'packaging==26.3' \
+            'PySide6==6.11.2' 'pyqtgraph==0.14.0'
       - name: Qt offscreen smoke and model/view tests
         env:
           QT_QPA_PLATFORM: offscreen

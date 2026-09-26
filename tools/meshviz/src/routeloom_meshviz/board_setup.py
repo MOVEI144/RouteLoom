@@ -31,7 +31,21 @@ def normalize_node_id(text):
     if not 1 <= len(text) <= 16 or any(char not in '0123456789abcdef' for char in text):
         return None
     value = int(text, 16)
-    return f'{value:016x}' if value else None
+    return f'{value:016x}' if 0 < value < 2**64 - 1 else None
+
+
+def bundle_image_node_id(bundle):
+    """Read the resolved NodeId from an already verified bundle's signed sdkconfig."""
+    config = (Path(bundle) / 'sdkconfig').read_text(encoding='utf-8')
+    values = [line.partition('=')[2].strip() for line in config.splitlines()
+              if line.startswith('CONFIG_ROUTELOOM_NODE_ID=')]
+    if len(values) != 1:
+        return None
+    try:
+        value = int(values[0], 0)
+    except ValueError:
+        return None
+    return normalize_node_id(f'{value:x}') if 0 < value < 2**64 - 1 else None
 
 
 def assignment_errors(rows):
@@ -65,7 +79,7 @@ def assignment_errors(rows):
 
 
 def preview(row: BoardRow, manifest: dict | None, bundle: Path | None, *, quiesced: bool,
-            assignment_problems=()):
+            assignment_problems=(), image_node_id=None):
     """(FlashPlan or None, reasons, notes). Any reason blocks writing this board."""
     reasons = list(assignment_problems)
     notes = []
@@ -78,6 +92,11 @@ def preview(row: BoardRow, manifest: dict | None, bundle: Path | None, *, quiesc
         reasons.append('役割が未割当て')
     if normalize_node_id(row.node_id) is None:
         reasons.append('NodeId が未割当て')
+    if manifest is not None:
+        if image_node_id is None:
+            reasons.append('署名付き bundle の Kconfig NodeId を確認できない')
+        elif normalize_node_id(row.node_id) != image_node_id:
+            reasons.append(f'割当て NodeId と image の Kconfig NodeId {image_node_id} が不一致')
     if not quiesced:
         reasons.append('この port を使う daemon／console の停止（quiesce）が未確認')
     if manifest is not None:
@@ -101,7 +120,7 @@ def preview(row: BoardRow, manifest: dict | None, bundle: Path | None, *, quiesc
             notes.append(f'  0x{entry["offset"]:06x} {entry["size"]:>8} B {entry["sha256"][:16]}… '
                          f'{entry["path"]}')
         # Generic runtime config (PR 03a) is not available: images keep Kconfig NodeIds.
-        notes.append('注意: 個体別設定（NodeId 書込み）は未対応。image は Kconfig 既定の NodeId を持つ')
+        notes.append('個体別設定は未対応。bundle の resolved Kconfig NodeId を照合する')
     if identity is not None:
         if identity.secure_boot is not False or identity.flash_encryption is not False:
             reasons.append('secure boot／flash 暗号化の状態が無効と確認できない')
@@ -112,5 +131,6 @@ def preview(row: BoardRow, manifest: dict | None, bundle: Path | None, *, quiesc
     images = tuple(Image(entry['offset'], Path(bundle) / entry['path'], entry['size'], entry['sha256'])
                    for entry in manifest['files'])
     # verified_signature reflects the GUI's verify_bundle; the worker re-verifies regardless.
-    plan = FlashPlan(identity, manifest['chip'], images, True, identity.base_mac, quiesced, Path(bundle))
+    plan = FlashPlan(identity, manifest['chip'], images, True, identity.base_mac, quiesced,
+                     Path(bundle), image_node_id)
     return plan, [], notes

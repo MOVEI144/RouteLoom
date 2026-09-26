@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QPushButton,
                                QSlider, QVBoxLayout, QWidget)
 
@@ -17,6 +17,20 @@ def utc(ms):
     return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] + 'Z'
 
 
+class ExportJob(QThread):
+    result = Signal(object, str)
+
+    def __init__(self, path, directory, until):
+        super().__init__()
+        self.path, self.directory, self.until = path, directory, until
+
+    def run(self):
+        try:
+            self.result.emit(export_capture(self.path, self.directory, until_seq=self.until), '')
+        except Exception as exc:
+            self.result.emit(None, str(exc))
+
+
 class PlaybackView(QWidget):
     start_recording = Signal(str)
     stop_recording = Signal()
@@ -26,6 +40,7 @@ class PlaybackView(QWidget):
     speed = Signal(float)
     playing = Signal(bool)
     step = Signal()
+    export_finished = Signal()
 
     def __init__(self):
         super().__init__()
@@ -84,6 +99,7 @@ class PlaybackView(QWidget):
         layout.addStretch()
         self.capture_path = None
         self.position = None
+        self.export_job = None
 
     def _choose_record(self):
         directory = QFileDialog.getExistingDirectory(self, '記録の保存先ディレクトリ')
@@ -102,16 +118,27 @@ class PlaybackView(QWidget):
             self.export(directory)
 
     def export(self, directory):
-        if self.capture_path is None:
+        if self.capture_path is None or self.export_job is not None:
             return None
         until = self.position['seq'] if self.position else None
-        try:
-            out = export_capture(self.capture_path, directory, until_seq=until)
-            self.export_status.setText(f'書き出し完了: {out}（seq ≤ {until}）')
-            return out
-        except (OSError, ValueError) as exc:
-            self.export_status.setText(f'書き出し失敗: {exc}')
-            return None
+        self.export_button.setEnabled(False)
+        self.export_status.setText('書き出し中…')
+        job = ExportJob(self.capture_path, directory, until)
+        self.export_job = job
+        job.result.connect(lambda out, error: self._on_export_result(out, error, until))
+        job.finished.connect(self._on_export_finished)
+        job.start()
+        return None
+
+    def _on_export_result(self, out, error, until):
+        self.export_status.setText(f'書き出し失敗: {error}' if error else
+                                   f'書き出し完了: {out}（seq ≤ {until}）')
+
+    def _on_export_finished(self):
+        self.export_button.setEnabled(self.position is not None)
+        self.export_job.deleteLater()
+        self.export_job = None
+        self.export_finished.emit()
 
     def _toggle_play(self, on):
         self.play_button.setText('❚❚ 一時停止' if on else '▶ 再生')

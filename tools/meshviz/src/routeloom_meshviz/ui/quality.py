@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt
 from .. import views
 from ..trial import summarize
 
-COLUMNS = [('label', 'node'), ('state', '参加状態'), ('rssi', 'RSSI→GW'), ('rssi_avg', 'RSSI 平均'),
+COLUMNS = [('label', 'node'), ('state', '接続状態'), ('rssi', 'RSSI→GW'), ('rssi_avg', 'RSSI 平均'),
            ('observed', '観測から'), ('freshness', '鮮度'), ('link_cost', 'link cost'),
            ('route_metric', 'route metric'), ('hops', 'hop'), ('success', 'SDK 配送成功率'),
            ('latency_p50', '完了遅延 p50'), ('heap', 'heap')]

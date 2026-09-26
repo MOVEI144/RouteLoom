@@ -41,10 +41,10 @@ def _is_hex(value, length):
 def validate(plan: TrialPlan) -> list[str]:
     """Reasons the plan cannot start; empty means admissible within the host budget."""
     errors = []
-    if not _is_hex(plan.network, 16):
-        errors.append('network は 16 桁の hex')
-    if not _is_hex(plan.destination, 16):
-        errors.append('宛先は 16 桁の hex NodeId')
+    if not _is_hex(plan.network, 16) or not 1 <= int(plan.network, 16) <= 0xffffffff:
+        errors.append('network は wire-v1 範囲 1..ffffffff の 16 桁 hex')
+    if not _is_hex(plan.destination, 16) or int(plan.destination, 16) in (0, 2**64 - 1):
+        errors.append('宛先は予約値以外の 16 桁 hex NodeId')
     if type(plan.count) is not int or not 1 <= plan.count <= MAX_COUNT:
         errors.append(f'回数は 1..{MAX_COUNT}')
     if type(plan.interval_ms) is not int or plan.interval_ms < 1000:
@@ -77,14 +77,22 @@ def nearest_rank(values, q):
     return ordered[max(1, math.ceil(q * len(ordered))) - 1]
 
 
+def _retry_after(error):
+    detail = error.get('detail')
+    value = detail.get('retry_after_ms') if isinstance(detail, dict) else None
+    return value if type(value) is int and value > 0 else SUSTAINED_INTERVAL_MS
+
+
 class TrialRunner:
     """Draft→Running→Draining→Completed/Aborted with one ledger entry per planned index."""
 
-    def __init__(self, plan: TrialPlan, now_ms: int, run_id: str | None = None):
+    def __init__(self, plan: TrialPlan, now_ms: int, run_id: str | None = None,
+                 *, reconcile: bool = False):
         errors = validate(plan)
         if errors:
             raise ValueError('; '.join(errors))
         self.plan = plan
+        self.reconcile = reconcile
         self.run_id = run_id or uuid.uuid4().hex
         self.state = 'Running'
         self.stop_reason = None
@@ -92,6 +100,7 @@ class TrialRunner:
         self.shift_ms = 0
         self.epoch = None
         self.epoch_pending = False
+        self.epoch_retry_at_ms = now_ms
         self.next_index = 0
         self.outstanding = {}
         self.tag_counter = 0
@@ -129,7 +138,7 @@ class TrialRunner:
         admission_busy = any(kind in ('epoch', 'submit') for kind, _, _ in self.outstanding.values())
         if self.state == 'Running' and not admission_busy:
             if self.epoch is None:
-                if not self.epoch_pending:
+                if not self.epoch_pending and now_ms >= self.epoch_retry_at_ms:
                     self.epoch_pending = True
                     tag = self._tag('epoch', None, now_ms)
                     requests.append((tag, 'operations.open_epoch', {'network': self.plan.network}))
@@ -151,15 +160,26 @@ class TrialRunner:
                                     'storage': 'RAM_ONLY'}}))
             if self.next_index >= self.plan.count and self.epoch is not None:
                 self.state = 'Draining'
-        polling = {index for kind, index, _ in self.outstanding.values() if kind == 'poll'}
+        polling = {index for kind, index, _ in self.outstanding.values()
+                   if kind in ('poll', 'lookup')}
         for message in self.messages:
-            if message['operation_id'] is None or message['terminal_ms'] is not None:
+            if message['submit_ms'] is None or message['terminal_ms'] is not None:
                 continue
             index = message['index']
             if now_ms - message['submit_ms'] > self.plan.ttl_ms + SETTLE_GRACE_MS:
                 # Not settled by the deadline: the result stays unknown, never failed.
                 message['result'] = 'unknown'
                 message['terminal_ms'] = now_ms
+                continue
+            if message['operation_id'] is None:
+                if (self.reconcile and message['admission'] in ('NO_REPLY', 'INVALID_REPLY') and
+                        index not in polling
+                        and now_ms - self.last_poll.get(index, -POLL_MS) >= POLL_MS):
+                    self.last_poll[index] = now_ms
+                    tag = self._tag('lookup', index, now_ms)
+                    requests.append((tag, 'operations.get_by_key', {
+                        'network': self.plan.network, 'admission_epoch': self.epoch,
+                        'key': message['key']}))
                 continue
             if index not in polling and now_ms - self.last_poll.get(index, -POLL_MS) >= POLL_MS:
                 self.last_poll[index] = now_ms
@@ -175,35 +195,47 @@ class TrialRunner:
             return
         kind, index, _ = entry
         ok = isinstance(reply, dict) and reply.get('ok') is True
+        result = reply.get('result') if ok else None
+        if ok and (not isinstance(result, dict) or kind == 'submit' and
+                   not isinstance(result.get('operation_id'), str)):
+            ok = False
         error = reply.get('error', {}) if isinstance(reply, dict) and not ok else {}
-        code = error.get('code') if reply is not None else 'NO_REPLY'
+        if not isinstance(error, dict):
+            error = {}
+        code = ('NO_REPLY' if reply is None else error.get('code') or 'INVALID_REPLY')
         if kind == 'epoch':
             self.epoch_pending = False
-            if ok:
-                self.epoch = reply['result']['admission_epoch']
+            if ok and _is_hex(result.get('admission_epoch'), 16):
+                self.epoch = result['admission_epoch']
                 self.t0 = now_ms
             elif code == 'RATE_LIMITED':
-                self.shift_ms += error.get('detail', {}).get('retry_after_ms', SUSTAINED_INTERVAL_MS)
+                self.epoch_retry_at_ms = now_ms + _retry_after(error)
             else:
                 self.abort(f'open_epoch: {code}')
         elif kind == 'submit':
             message = self.messages[index]
             if ok:
-                result = reply['result']
                 message.update(admission='ACCEPTED', admitted_ms=now_ms,
                                operation_id=result.get('operation_id'),
                                dispatch_state=result.get('dispatch_state'), result='admitted')
                 self._settle(message, now_ms)
             else:
-                # Admission refusals are not delivery failures; a lost reply is unknown
-                # (a later get_by_key could reconcile it), never resubmitted with a new key.
-                message.update(admission=code, result='unknown' if code == 'NO_REPLY' else 'refused',
-                               terminal_ms=now_ms)
+                # Admission refusals are not delivery failures. A lost reply stays unknown
+                # until key lookup resolves it; the same index is never resubmitted.
+                unknown = code in ('NO_REPLY', 'INVALID_REPLY')
+                message.update(admission=code, result='unknown' if unknown else 'refused',
+                               terminal_ms=None if unknown and self.reconcile else now_ms)
                 if code == 'RATE_LIMITED':
-                    self.shift_ms += error.get('detail', {}).get('retry_after_ms', SUSTAINED_INTERVAL_MS)
+                    self.shift_ms += _retry_after(error)
+        elif kind == 'lookup' and ok:
+            message = self.messages[index]
+            if isinstance(result.get('operation_id'), str):
+                message.update(admission='ACCEPTED', operation_id=result['operation_id'],
+                               dispatch_state=result.get('dispatch_state'), result='admitted')
+                self._settle(message, now_ms)
         elif kind == 'poll' and ok:
             message = self.messages[index]
-            message['dispatch_state'] = reply['result'].get('dispatch_state')
+            message['dispatch_state'] = result.get('dispatch_state')
             self._settle(message, now_ms)
         self._maybe_finish()
 
@@ -255,10 +287,11 @@ def summarize(messages, plan=None, state=None, stop_reason=None):
         outcomes[message['result']] = outcomes.get(message['result'], 0) + 1
     refused = {}
     for message in submitted:
-        if message['admission'] not in (None, 'ACCEPTED'):
+        if message['admission'] not in (None, 'ACCEPTED', 'NO_REPLY', 'INVALID_REPLY'):
             refused[message['admission']] = refused.get(message['admission'], 0) + 1
     latency = [m['terminal_ms'] - m['submit_ms'] for m in success]
-    admit_latency = [m['admitted_ms'] - m['submit_ms'] for m in admitted]
+    admit_latency = [m['admitted_ms'] - m['submit_ms'] for m in admitted
+                     if type(m['admitted_ms']) is int]
     unknown_admitted = len([m for m in admitted if m['result'] in ('unknown', 'admitted')])
     return {
         'plan': asdict(plan) if plan else None, 'state': state, 'stop_reason': stop_reason,

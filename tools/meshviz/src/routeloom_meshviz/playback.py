@@ -151,16 +151,16 @@ def export_capture(path, out_dir, until_seq=None):
                                         'valid', 'evidence', 'source'], (
             {**item, 'scope': key.split(':')[0], 'source': item.get('_source')}
             for key, item in sorted(state.routes.items())))
-        rows = []
-        for seq, t_mono, t_unix, series, value_json in reader.db.execute(
-                'SELECT seq,t_mono_ns,t_unix_ns,series,value_json FROM metric_samples '
-                'WHERE seq<=? ORDER BY seq', (limit,)):
-            value = json.loads(value_json)
-            rows.append({'seq': seq, 't_mono_ns': t_mono, 't_utc': _iso(t_unix // 1_000_000),
-                         'series': series, 'value': value.get('value'), 'unit': value.get('unit'),
-                         'observed_unix_ms': value.get('observed_unix_ms')})
+        def samples():
+            for seq, t_mono, t_unix, series, value_json in reader.db.execute(
+                    'SELECT seq,t_mono_ns,t_unix_ns,series,value_json FROM metric_samples '
+                    'WHERE seq<=? ORDER BY seq', (limit,)):
+                value = json.loads(value_json)
+                yield {'seq': seq, 't_mono_ns': t_mono, 't_utc': _iso(t_unix // 1_000_000),
+                       'series': series, 'value': value.get('value'), 'unit': value.get('unit'),
+                       'observed_unix_ms': value.get('observed_unix_ms')}
         _write_csv(out / 'samples.csv', ['seq', 't_mono_ns', 't_utc', 'series', 'value', 'unit',
-                                         'observed_unix_ms'], rows)
+                                         'observed_unix_ms'], samples())
         plans, messages = reader.trial_messages(until_seq)
         message_columns = ['run_id', 'index', 'destination', 'payload_len', 'key', 'operation_id',
                            'planned_ms', 'submit_ms', 'admitted_ms', 'terminal_ms', 'admission',

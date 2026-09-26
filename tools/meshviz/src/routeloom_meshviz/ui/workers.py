@@ -12,7 +12,7 @@ import time
 from PySide6.QtCore import QCoreApplication, QObject, QTimer, Signal, Slot
 from PySide6.QtNetwork import QLocalSocket
 
-from ..api1_adapter import LineDecoder, NodesNormalizer, encode_request
+from ..api1_adapter import RESPONSE_MAX_BYTES, LineDecoder, NodesNormalizer, encode_request
 from ..capture import Capture
 from ..model import State, reduce
 from ..playback import CaptureReader
@@ -65,6 +65,7 @@ class ApiClient(QObject):
         self.counter = 0
         self.pending = {}
         self.pages = None
+        self.page_source = None
         self.capabilities = None
         self.info = {'connected': False, 'error': None, 'source': None, 'last_poll_unix_ms': None,
                      'methods': {}}
@@ -72,6 +73,7 @@ class ApiClient(QObject):
     @Slot()
     def start(self):
         self.socket = QLocalSocket(self)
+        self.socket.setReadBufferSize(RESPONSE_MAX_BYTES + 1)
         self.socket.connected.connect(self._on_connected)
         self.socket.disconnected.connect(self._on_disconnected)
         self.socket.readyRead.connect(self._on_ready)
@@ -99,7 +101,8 @@ class ApiClient(QObject):
         self.connection += 1
         self.normalizer = NodesNormalizer(self.connection)
         self.pages = None
-        self._publish(connected=True, error=None)
+        self.page_source = None
+        self._publish(connected=True, error=None, methods={})
         self._send(('capabilities',), 'capabilities.get', {})
         self._poll()
         self.poll_timer.start(POLL_MS)
@@ -107,12 +110,12 @@ class ApiClient(QObject):
     def _on_disconnected(self):
         self.poll_timer.stop()
         self._fail_pending()
-        self._publish(connected=False)
+        self._publish(connected=False, methods={})
         if not self.reconnect_timer.isActive():
             self.reconnect_timer.start(RECONNECT_MS)
 
     def _on_error(self, error):
-        self._publish(connected=False, error=self.socket.errorString())
+        self._publish(connected=False, error=self.socket.errorString(), methods={})
         self._fail_pending()
         self.poll_timer.stop()
         if not self.reconnect_timer.isActive():
@@ -125,6 +128,7 @@ class ApiClient(QObject):
                 self.reply.emit(kind[1], None)
         self.pending.clear()
         self.pages = None
+        self.page_source = None
 
     def _send(self, kind, method, params):
         if self.socket is None or self.socket.state() != QLocalSocket.LocalSocketState.ConnectedState:
@@ -145,6 +149,7 @@ class ApiClient(QObject):
             if self.pages is not None:
                 return
             self.pages = []
+            self.page_source = None
         params = {'limit': 128}
         if after is not None:
             params['after'] = after
@@ -159,6 +164,7 @@ class ApiClient(QObject):
                     self.reply.emit(kind[1], None)
                 elif kind[0] == 'nodes':
                     self.pages = None
+                    self.page_source = None
                     self._publish(error='nodes.list timeout')
 
     def _on_ready(self):
@@ -186,17 +192,40 @@ class ApiClient(QObject):
             return
         if not response.get('ok'):
             self.pages = None
+            self.page_source = None
             self._publish(error=f'nodes.list: {response.get("error", {}).get("code")}')
             return
-        result = response['result']
-        self.pages.extend(result.get('nodes', []))
-        if result.get('next_after') and len(self.pages) < 1024:
-            self._poll(result['next_after'])
+        result = response.get('result')
+        source = result.get('source') if isinstance(result, dict) else None
+        nodes = result.get('nodes') if isinstance(result, dict) else None
+        after = result.get('next_after') if isinstance(result, dict) else None
+        if (not isinstance(source, dict) or not isinstance(nodes, list) or
+                any(not isinstance(node, dict) or not isinstance(node.get('node'), str)
+                    for node in nodes) or
+                after is not None and (not isinstance(after, str) or len(after) != 16 or
+                                       any(c not in '0123456789abcdefABCDEF' for c in after)) or
+                self.page_source is not None and source != self.page_source or
+                len(self.pages) + len(nodes) > 1024 or
+                after is not None and len(self.pages) + len(nodes) >= 1024):
+            self.pages = None
+            self.page_source = None
+            self._publish(error='nodes.list changed or invalid during paging')
+            return
+        if self.page_source is None:
+            self.page_source = source
+        self.pages.extend(nodes)
+        if after is not None:
+            self._poll(after)
             return
         nodes, self.pages = self.pages, None
+        self.page_source = None
         now = now_unix_ms()
-        self._publish(source=result.get('source'), last_poll_unix_ms=now, error=None)
-        events = self.normalizer.events(result.get('source') or {}, nodes, now)
+        try:
+            events = self.normalizer.events(source, nodes, now)
+        except (ValueError, KeyError, TypeError) as exc:
+            self._publish(error=f'nodes.list invalid: {exc}')
+            return
+        self._publish(source=source, last_poll_unix_ms=now, error=None)
         if events:
             self.events.emit(events)
 
@@ -469,18 +498,42 @@ class BoardWorker(QObject):
     progress = Signal(str, str, str)
     probed = Signal(str, object, str)
     finished = Signal(list)
+    scanned = Signal(object, str)
+    bundle_loaded = Signal(int, str, object, object, str)
+    stopped = Signal()
 
     def __init__(self, backend):
         super().__init__()
         self.backend = backend
         self.cancel = threading.Event()
 
+    @Slot()
+    def scan(self):
+        try:
+            self.scanned.emit(self.backend.list_ports(), '')
+        except Exception as exc:
+            self.scanned.emit([], str(exc))
+
+    @Slot(int, str)
+    def load_bundle(self, serial, path):
+        from ..board_setup import bundle_image_node_id
+        from ..firmware_catalog import DEV_PUBLIC_KEY, verify_bundle
+        try:
+            manifest = verify_bundle(path, DEV_PUBLIC_KEY)
+            self.bundle_loaded.emit(serial, path, manifest, bundle_image_node_id(path), '')
+        except Exception as exc:
+            self.bundle_loaded.emit(serial, path, None, None, str(exc))
+
     @Slot(list)
     def probe(self, ports):
         for port in ports:
+            if self.cancel.is_set():
+                break
             self.progress.emit(port, 'Inspecting', 'ROM probe 中（board は reset される）')
             try:
-                self.probed.emit(port, self.backend.probe(port), '')
+                with self.backend.leases.acquire(f'probe:{port}', port):
+                    identity = self.backend.probe(port)
+                self.probed.emit(port, identity, '')
             except Exception as exc:
                 self.probed.emit(port, None, str(exc))
         self.finished.emit([])
@@ -488,7 +541,6 @@ class BoardWorker(QObject):
     @Slot(list)
     def flash(self, items):
         from ..device import run_batch
-        self.cancel.clear()
 
         def worker(port, plan):
             # Stop is honored between boards; a board being written finishes safely.
@@ -499,6 +551,11 @@ class BoardWorker(QObject):
 
         results = run_batch(items, worker, self.backend.leases)
         self.finished.emit([(r.port, r.ok, r.error) for r in results])
+
+    @Slot()
+    def stop(self):
+        _release(self)
+        self.stopped.emit()
 
 
 def _worker_env():
@@ -538,7 +595,8 @@ class RealBoards:
     def flash(self, port, plan):
         from dataclasses import asdict
         self._run({'port': port, 'bundle': str(plan.bundle), 'expected': asdict(plan.expected),
-                   'expected_mac': plan.expected_mac, 'quiesced': plan.quiesced}, 180)
+                   'expected_mac': plan.expected_mac, 'quiesced': plan.quiesced,
+                   'assigned_node_id': plan.assigned_node_id}, 180)
         return True
 
 

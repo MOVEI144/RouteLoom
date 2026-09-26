@@ -29,7 +29,8 @@ class FakeMethodError(Exception):
 
 class DemoMesh:
     """Fan-out-3 tree whose relay 2 fails and whose last node leaves periodically."""
-    METHODS = ('operations.open_epoch', 'messages.submit', 'operations.get')
+    METHODS = ('operations.open_epoch', 'messages.submit', 'operations.get',
+               'operations.get_by_key')
     RATE_PER_MIN = 2
     BURST = 16
 
@@ -151,8 +152,16 @@ class DemoMesh:
                     raise FakeMethodError('NOT_FOUND')
                 return self._record(self.ops[params['operation_id']], mono)
             network = params.get('network')
-            if not _hex(network, 16):
+            if not _network(network):
                 raise FakeMethodError('INVALID_ARGUMENT')
+            if method == 'operations.get_by_key':
+                if (set(params) != {'network', 'admission_epoch', 'key'} or
+                        not _hex(params['admission_epoch'], 16) or not _hex(params['key'], 32)):
+                    raise FakeMethodError('INVALID_ARGUMENT')
+                op_id = self.keys.get((network, params['admission_epoch'], params['key']))
+                if op_id is None:
+                    raise FakeMethodError('NOT_FOUND')
+                return self._record(self.ops[op_id], mono)
             if method == 'operations.open_epoch':
                 if set(params) != {'network'}:
                     raise FakeMethodError('INVALID_ARGUMENT')
@@ -164,7 +173,9 @@ class DemoMesh:
             payload = params.get('payload_hex')
             if (not _hex(params.get('admission_epoch'), 16) or not _hex(params.get('key'), 32) or
                     not isinstance(destination, dict) or destination.get('kind') != 'node' or
-                    not _hex(destination.get('id'), 16) or not isinstance(payload, str) or
+                    not _hex(destination.get('id'), 16) or
+                    int(destination['id'], 16) in (0, 2**64 - 1) or
+                    not isinstance(payload, str) or
                     len(payload) % 2 or params.get('payload_len') != len(payload) // 2 or
                     params['payload_len'] > 128 or
                     options.get('delivery', 'RELIABLE') not in ('RELIABLE', 'BEST_EFFORT')):
@@ -213,6 +224,10 @@ class DemoMesh:
 def _hex(value, length):
     return (isinstance(value, str) and len(value) == length and
             all(char in '0123456789abcdefABCDEF' for char in value))
+
+
+def _network(value):
+    return _hex(value, 16) and 1 <= int(value, 16) <= 0xffffffff
 
 
 def write_demo_capture(path, *, count=8, duration_s=120, step_ms=2000, capture_id='demo'):

@@ -62,7 +62,7 @@ class TopologyView(QWidget):
         self.layers = {}
         toolbar = QHBoxLayout()
         for key, text in (('phys', '物理 link'), ('route', '宛先への経路'), ('tree', 'gateway tree'),
-                          ('state', '参加状態')):
+                          ('state', '接続状態')):
             box = QCheckBox(text)
             box.setChecked(True)
             box.toggled.connect(self._relayer)
@@ -75,7 +75,7 @@ class TopologyView(QWidget):
                         '点線=node→gateway の選択 route　●接続 ▲通信なし ×消滅 ?不明')
         legend.setWordWrap(True)
         self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(['node', '参加状態', 'hop'])
+        self.table.setHorizontalHeaderLabels(['node', '接続状態', 'hop'])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -248,7 +248,7 @@ class TopologyView(QWidget):
         now = self.snapshot.get('now_unix_ms')
         lines = [f'node {self.selected}',
                  f'役割: {views.fmt(node.get("role"))}',
-                 f'参加状態: {info.get("state", views.UNKNOWN)}（Site membership は未取得）',
+                 f'接続状態: {info.get("state", views.UNKNOWN)}（Site membership は未取得）',
                  f'hop: {views.fmt(info.get("hops"))}（多 hop は route chain が揃う時だけ）',
                  f'gateway 選択 next hop: {views.fmt(model.route_edges.get(self.selected))}'
                  + ('（経路なし）' if self.selected in model.no_route else ''),

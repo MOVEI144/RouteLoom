@@ -1,15 +1,17 @@
 """Qt offscreen smoke tests for the Mesh Lab screens; skipped when PySide6 is absent."""
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 try:
     from PySide6.QtWidgets import QApplication
-    import pyqtgraph  # noqa: F401
+    __import__('pyqtgraph')
 except ImportError:  # the headless CI job runs without Qt
     QApplication = None
 
@@ -54,7 +56,10 @@ class GuiSmokeTests(unittest.TestCase):
     def window(self, **kw):
         from routeloom_meshviz.ui.app import MainWindow
         window = MainWindow(**kw)
-        self.addCleanup(window.shutdown)
+        def cleanup():
+            window.shutdown()
+            self.assertTrue(spin(self.app, lambda: window.retirer is None and window.boards.stopped))
+        self.addCleanup(cleanup)
         window.show()
         return window
 
@@ -63,6 +68,7 @@ class GuiSmokeTests(unittest.TestCase):
         window.tabs.setCurrentWidget(window.topology)
         self.assertTrue(spin(self.app, lambda: len(window.topology.node_items) == 10))
         self.assertIn('LIVE', window.header.labels['mode'].text())
+        self.assertEqual(window.topology.table.horizontalHeaderItem(1).text(), '接続状態')
         self.assertIn('gateway 01', window.header.labels['gateway'].text())
         # Gateway view only: the gateway tree is reported as unavailable, not drawn empty.
         self.assertIn('未取得', window.topology.tree_status.text())
@@ -95,8 +101,156 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertTrue(spin(self.app, lambda: 'SDK 受領 2' in trials.summary.text()))
         self.assertFalse(trials.start_button.isEnabled())
         self.assertFalse(window.boards.flash_button.isEnabled())
-        out = window.playback.export(self.tmp())
-        self.assertTrue((out / 'trial_messages.csv').is_file())
+        out = Path(self.tmp())
+        window.playback.export(out)
+        self.assertTrue(spin(self.app, lambda: window.playback.export_job is None and
+                             (out / 'trial_messages.csv').is_file()))
+
+    def test_nodes_paging_discards_mixed_daemon_sessions(self):
+        from routeloom_meshviz.ui.workers import ApiClient
+        client = ApiClient('/unused')
+        client.normalizer = __import__('routeloom_meshviz.api1_adapter',
+                                       fromlist=['NodesNormalizer']).NodesNormalizer(1)
+        client.pages = []
+        client._poll = lambda after=None: None
+        emitted = []
+        client.events.connect(emitted.append)
+        first = {'state': 'live', 'gateway': f'{1:016x}', 'session_id': 1}
+        second = {**first, 'session_id': 2}
+        client._on_nodes({'ok': True, 'result': {'source': first, 'nodes': [
+            {'node': f'{2:016x}', 'connected': True}], 'next_after': f'{2:016x}'}})
+        client._on_nodes({'ok': True, 'result': {'source': second, 'nodes': [
+            {'node': f'{3:016x}', 'connected': True}], 'next_after': None}})
+        self.assertEqual(emitted, [])
+        self.assertIsNone(client.pages)
+
+    def test_disconnect_revokes_send_capabilities(self):
+        from PySide6.QtCore import QTimer
+        from routeloom_meshviz.ui.workers import ApiClient
+        client = ApiClient('/unused')
+        client.poll_timer = QTimer()
+        client.reconnect_timer = QTimer()
+        client.info['methods'] = {'messages.submit': True}
+        statuses = []
+        client.status.connect(statuses.append)
+        client._on_disconnected()
+        self.assertFalse(statuses[-1]['connected'])
+        self.assertEqual(statuses[-1]['methods'], {})
+        client.reconnect_timer.stop()
+
+    def test_export_keeps_event_loop_responsive(self):
+        from routeloom_meshviz.ui.playback import PlaybackView
+        view = PlaybackView()
+        self.addCleanup(view.deleteLater)
+        view.capture_path = '/capture'
+        view.position = {'seq': 1}
+
+        def slow_export(_path, out_dir, until_seq=None):
+            time.sleep(0.4)
+            return Path(out_dir)
+
+        with patch('routeloom_meshviz.ui.playback.export_capture', slow_export):
+            started = time.monotonic()
+            view.export('/export')
+            self.assertLess(time.monotonic() - started, 0.2)
+            self.assertTrue(spin(self.app, lambda: '書き出し完了' in view.export_status.text()))
+
+    def test_shutdown_does_not_wait_in_gui_for_rom_probe(self):
+        window = self.window(fake_nodes=3)
+        boards = window.boards
+        self.assertTrue(spin(self.app, lambda: len(boards.rows) == 3))
+        boards.select_ports(['fake://A'])
+        boards.quiesce.setChecked(True)
+        started_probe = threading.Event()
+        original = boards.backend.probe
+
+        def slow_probe(port):
+            started_probe.set()
+            time.sleep(0.4)
+            return original(port)
+
+        boards.backend.probe = slow_probe
+        boards._probe_selected()
+        self.assertTrue(spin(self.app, started_probe.is_set))
+        started = time.monotonic()
+        window.shutdown()
+        self.assertLess(time.monotonic() - started, 0.2)
+
+    def test_quiesce_confirmation_is_not_reused_for_another_port(self):
+        window = self.window(fake_nodes=3)
+        boards = window.boards
+        self.assertTrue(spin(self.app, lambda: len(boards.rows) == 3))
+        boards.select_ports(['fake://A'])
+        boards.quiesce.setChecked(True)
+        boards.select_ports(['fake://B'])
+        self.assertFalse(boards.quiesce.isChecked())
+        self.assertFalse(boards.probe_button.isEnabled())
+
+    def test_close_stops_probe_before_next_board(self):
+        window = self.window(fake_nodes=3)
+        boards = window.boards
+        self.assertTrue(spin(self.app, lambda: len(boards.rows) == 3))
+        boards.select_ports(['fake://A', 'fake://B', 'fake://C'])
+        boards.quiesce.setChecked(True)
+        calls = []
+        started_probe = threading.Event()
+        original = boards.backend.probe
+
+        def slow_probe(port):
+            calls.append(port)
+            started_probe.set()
+            time.sleep(0.15)
+            return original(port)
+
+        boards.backend.probe = slow_probe
+        boards._probe_selected()
+        self.assertTrue(spin(self.app, started_probe.is_set))
+        window.shutdown()
+        self.assertTrue(spin(self.app, lambda: boards.stopped))
+        self.assertEqual(calls, ['fake://A'])
+
+    def test_stale_bundle_result_cannot_enable_write(self):
+        window = self.window(fake_nodes=3)
+        boards = window.boards
+        boards.load_bundle('/same-path')
+        first = boards._bundle_serial
+        boards.load_bundle('/same-path')
+        boards._on_bundle_loaded(first, '/same-path', {'chip': 'esp32c3'}, f'{2:016x}', '')
+        self.assertIsNone(boards.manifest)
+
+    def test_source_switch_does_not_wait_in_gui_for_recorder_close(self):
+        window = self.window(fake_nodes=3)
+        path = Path(self.tmp()) / 'capture.rlcapture'
+        window.model_start_recording.emit(str(path))
+        self.assertTrue(spin(self.app, lambda: window.recording_status.get('active')))
+        original = window.model.capture.close
+
+        def slow_close():
+            time.sleep(0.4)
+            original()
+
+        window.model.capture.close = slow_close
+        started = time.monotonic()
+        window.use_replay(str(path))
+        self.assertLess(time.monotonic() - started, 0.2)
+
+    def test_live_observation_age_advances_without_new_events(self):
+        window = self.window(fake_nodes=2)
+        window._stop_sources()
+        self.assertTrue(spin(self.app, lambda: window.retirer is None))
+        state = State()
+        now = time.time_ns() // 1_000_000
+        reduce(state, {'kind': 'node', 'scope': 's', 'source': 'test',
+                       'payload': {'node': f'{1:016x}', 'connected': True,
+                                   'last_heard_ms': now - 1000}})
+        window._on_snapshot({'state': state, 'now_unix_ms': now, 'now_mono_ns': time.monotonic_ns(),
+                             'history': {}, 'trial_events': []})
+        window._render()
+        before = window.header.labels['age'].text()
+        self.assertIn('1.0 s', before)
+        time.sleep(1.1)
+        window._render()
+        self.assertNotEqual(window.header.labels['age'].text(), before)
 
     def tmp(self):
         directory = tempfile.TemporaryDirectory()
@@ -158,8 +312,10 @@ class GuiSmokeTests(unittest.TestCase):
         window = self.window(fake_nodes=3)
         boards = window.boards
         window.tabs.setCurrentWidget(boards)
+        self.assertTrue(spin(self.app, lambda: len(boards.rows) == 3))
         self.assertEqual([r.port for r in boards.rows], ['fake://A', 'fake://B', 'fake://C'])
         boards.select_ports(['fake://A', 'fake://B', 'fake://C'])
+        boards.quiesce.setChecked(True)
         boards._probe_selected()
         self.assertTrue(spin(self.app, lambda: all(r.identity for r in boards.rows) and not boards.busy))
         boards.set_assignment('fake://A', 'reference_node', '2')
@@ -169,11 +325,18 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertFalse(boards.flash_button.isEnabled())
         boards.set_assignment('fake://C', 'reference_node', '3')
         boards.load_bundle(self.bundle())
+        self.assertTrue(spin(self.app, lambda: '署名・hash 検証済み' in boards.bundle_label.text()))
         self.assertIn('署名・hash 検証済み', boards.bundle_label.text())
         boards.quiesce.setChecked(True)
         boards.select_ports(['fake://A'])
+        boards.quiesce.setChecked(True)
         self.assertIn('書込み可', boards.preview.toPlainText())
         self.assertTrue(boards.flash_button.isEnabled())
+        from dataclasses import replace
+        plan = boards.plans()[0][1]
+        with self.assertRaisesRegex(ValueError, 'NodeId'):
+            boards.backend.flash('fake://A', replace(plan, assigned_node_id=f'{3:016x}'))
+        self.assertNotIn('fake://A', boards.backend.written)
         boards._flash_selected()
         self.assertTrue(spin(self.app, lambda: not boards.busy))
         self.assertEqual(boards.rows[0].state, 'Written')
@@ -208,6 +371,8 @@ class GuiSmokeTests(unittest.TestCase):
         from test_bundle import BundleTests
         root = Path(self.tmp())
         app, build, key, _ = BundleTests.fixture(root)
+        with (app / 'sdkconfig').open('a', encoding='utf-8') as stream:
+            stream.write('CONFIG_ROUTELOOM_NODE_ID=0x2\n')
         bundle = root / 'bundle'
         catalog.package(app, build, bundle, key, 'esp32c3', 'reference_node', 'gui-1', 'a' * 40, 'b' * 64)
         return str(bundle)

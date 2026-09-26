@@ -41,11 +41,15 @@ class Api1AdapterTests(unittest.TestCase):
         self.assertTrue(line.startswith(b'API1 ') and line.endswith(b'\n'))
         decoder = LineDecoder()
         self.assertEqual(decoder.feed(b'{"v":1,"request_id":"a"'), [])
-        self.assertEqual(decoder.feed(b',"ok":true}\n')[0]['request_id'], 'a')
+        self.assertEqual(decoder.feed(b',"ok":true,"result":{}}\n')[0]['request_id'], 'a')
         with self.assertRaises(ValueError):
             decoder.feed(b'x' * 70000)
         with self.assertRaises(ValueError):
             encode_request('r', 'm', {'p': 'x' * 9000})
+        with self.assertRaises(ValueError):
+            LineDecoder().feed(b'{"v":1,"request_id":[],"ok":true,"result":{}}\n')
+        with self.assertRaises(ValueError):
+            LineDecoder().feed(b'{"v":1,"request_id":"r","ok":true,"result":{"x":NaN}}\n')
 
     def test_gateway_view_keeps_unknown_and_no_route_distinct(self):
         normalizer = NodesNormalizer(1)
@@ -92,6 +96,17 @@ class Api1AdapterTests(unittest.TestCase):
         for event in lost:
             reduce(state, event)
         self.assertEqual(state.nodes, {})
+
+    def test_gateway_change_retires_previous_claims_even_with_same_session_number(self):
+        normalizer = NodesNormalizer(1)
+        state = State()
+        for event in normalizer.events({'gateway': f'{1:016x}', 'session_id': 1},
+                                       gateway_view(), 2000):
+            reduce(state, event)
+        for event in normalizer.events({'gateway': f'{9:016x}', 'session_id': 1},
+                                       [node(9, role='gateway', hops=0)], 4000):
+            reduce(state, event)
+        self.assertEqual(set(state.nodes), {f'gw-{9:016x}:{9:016x}'})
 
 
 class DemoAndFakeServerTests(unittest.TestCase):
@@ -150,6 +165,10 @@ class TrialTests(unittest.TestCase):
         self.assertTrue(any('admission' in e for e in errors))
         self.assertEqual(validate(self.plan(count=20, interval_ms=30_000)), [])
         self.assertTrue(validate(self.plan(payload_len=129, destination='xyz')))
+        self.assertTrue(validate(self.plan(network='0000000100000000')))
+        self.assertTrue(validate(self.plan(network='0000000000000000')))
+        self.assertTrue(validate(self.plan(destination='ffffffffffffffff')))
+        self.assertTrue(validate(self.plan(destination='0000000000000000')))
 
     def test_runner_against_fake_server_and_unknowns(self):
         clock = FakeClock(0, 1_790_000_000_000)
@@ -176,9 +195,35 @@ class TrialTests(unittest.TestCase):
         # The lost admission reply stays unknown; it is not resubmitted with a new key.
         self.assertEqual(runner.messages[2]['result'], 'unknown')
         self.assertEqual(summary['unknown'], 1)
+        self.assertEqual(summary['refused'], {})
         self.assertEqual(summary['success_rate_min'], 1.0)
         planned = [m['planned_ms'] for m in runner.messages]
         self.assertEqual([b - a for a, b in zip(planned, planned[1:])], [1000, 1000, 1000])
+
+    def test_lost_submit_reply_uses_key_lookup_without_resending(self):
+        clock = FakeClock(0, 1_790_000_000_000)
+        mesh = DemoMesh(8, clock=lambda: (clock.mono_ns // 1_000_000, clock.unix_ms))
+        fake = FakeAPI1(mesh=mesh)
+        runner = TrialRunner(self.plan(count=1), 0, reconcile=True)
+        submits = 0
+        lookups = 0
+        for _ in range(180):
+            now = clock.mono_ns // 1_000_000
+            for tag, method, params in runner.due(now):
+                reply = json.loads(fake.feed(encode_request(tag, method, params))[0])
+                if method == 'messages.submit':
+                    submits += 1
+                    runner.on_reply(tag, None, now)
+                else:
+                    lookups += method == 'operations.get_by_key'
+                    runner.on_reply(tag, reply, now)
+            if runner.finished:
+                break
+            clock.advance(250)
+        self.assertEqual((submits, lookups), (1, 1))
+        self.assertEqual(runner.messages[0]['result'], 'END_SDK_RECEIVED')
+        self.assertIsNone(runner.messages[0]['admitted_ms'])
+        self.assertEqual(runner.summary()['success'], 1)
 
     def test_rate_limited_submit_is_refused_and_shifts_schedule(self):
         runner = TrialRunner(self.plan(count=2), 0)
@@ -192,6 +237,21 @@ class TrialTests(unittest.TestCase):
         self.assertEqual(runner.due(1000), [])
         self.assertEqual(runner.due(31_000)[0][1], 'messages.submit')
         self.assertEqual(summarize(runner.messages)['refused'], {'RATE_LIMITED': 1})
+
+    def test_rate_limited_epoch_waits_before_retrying(self):
+        runner = TrialRunner(self.plan(count=1), 0)
+        (tag, _, _), = runner.due(0)
+        runner.on_reply(tag, {'ok': False, 'error': {'code': 'RATE_LIMITED',
+                        'detail': {'retry_after_ms': 30_000}}}, 0)
+        self.assertEqual(runner.due(250), [])
+        self.assertEqual(runner.due(29_999), [])
+        self.assertEqual(runner.due(30_000)[0][1], 'operations.open_epoch')
+
+    def test_malformed_epoch_reply_does_not_crash_runner(self):
+        runner = TrialRunner(self.plan(count=1), 0)
+        (tag, _, _), = runner.due(0)
+        runner.on_reply(tag, {'ok': True, 'result': {}}, 0)
+        self.assertEqual(runner.state, 'Aborted')
 
     def test_abort_stops_new_sends(self):
         runner = TrialRunner(self.plan(count=5), 0)
@@ -245,6 +305,7 @@ class BoardSetupTests(unittest.TestCase):
         self.assertTrue(any('MAC' in e for e in errors['C']))
         self.assertEqual(normalize_node_id('0x0002'), f'{2:016x}')
         self.assertIsNone(normalize_node_id('0'))
+        self.assertIsNone(normalize_node_id('ffffffffffffffff'))
         self.assertIsNone(normalize_node_id('xyz'))
 
     def test_preview_lists_every_safety_reason_and_builds_plan_only_when_clear(self):
@@ -256,12 +317,20 @@ class BoardSetupTests(unittest.TestCase):
         for expected in ('chip 不一致', '役割', 'quiesce', '暗号化'):
             self.assertIn(expected, text)
         row = BoardRow('A', identity=self.identity(), role='reference_node', node_id='2')
-        plan, reasons, notes = preview(row, self.manifest(), Path('/b'), quiesced=True)
+        plan, reasons, notes = preview(row, self.manifest(), Path('/b'), quiesced=True,
+                                       image_node_id=f'{2:016x}')
         self.assertEqual(reasons, [])
         self.assertEqual(plan.expected_mac, row.identity.base_mac)
         self.assertTrue(any('個体別設定' in note for note in notes))
         plan, reasons, _ = preview(row, self.manifest(chip='esp32c6'), Path('/b'), quiesced=True)
         self.assertTrue(any('C6' in r for r in reasons))
+
+    def test_preview_rejects_node_id_not_embedded_in_signed_image(self):
+        row = BoardRow('A', identity=self.identity(), role='reference_node', node_id='2')
+        plan, reasons, _ = preview(row, self.manifest(), Path('/b'), quiesced=True,
+                                   image_node_id='0000000000000001')
+        self.assertIsNone(plan)
+        self.assertTrue(any('NodeId' in reason for reason in reasons))
 
 
 class ProbeTests(unittest.TestCase):

@@ -2,6 +2,7 @@
 from contextlib import ExitStack
 from pathlib import Path
 import tempfile
+import time
 
 from PySide6.QtCore import QMetaObject, QObject, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction
@@ -19,6 +20,24 @@ from .trials import TrialsView
 from .workers import ApiClient, FakeBoards, ModelWorker, RealBoards, ReplayWorker
 
 RENDER_MS = 50
+AGE_RENDER_NS = 1_000_000_000
+
+
+class SourceRetirer(QThread):
+    """Drain worker slots and close source resources without waiting in the GUI thread."""
+    def __init__(self, threads, stack, parent):
+        super().__init__(parent)
+        self.threads = threads
+        self.stack = stack
+
+    def run(self):
+        try:
+            for thread, worker in reversed(self.threads):
+                QMetaObject.invokeMethod(worker, 'stop', Qt.ConnectionType.BlockingQueuedConnection)
+                thread.quit()
+                thread.wait()
+        finally:
+            self.stack.close()
 
 
 class Header(QWidget):
@@ -59,10 +78,15 @@ class MainWindow(QMainWindow):
         self.exit_stack = ExitStack()
         self.threads = []
         self.connections = []
+        self.retirer = None
+        self.after_retire = None
+        self.shutdown_started = False
+        self.close_requested = False
         self.api = self.model = self.replay = None
         self.mode = 'LIVE'
         self.pending = None
         self.dirty = False
+        self.last_clock_render_ns = 0
         self.source_status = {}
         self.recording_status = {'active': False}
         self.header = Header()
@@ -95,6 +119,8 @@ class MainWindow(QMainWindow):
         self.playback.speed.connect(self.replay_speed.emit)
         self.playback.playing.connect(self.replay_playing.emit)
         self.playback.step.connect(self.replay_step.emit)
+        self.playback.export_finished.connect(self._maybe_close)
+        self.boards.shutdown_finished.connect(self._maybe_close)
         # Coalesced rendering: workers post snapshots, the GUI paints at most 20 times/s.
         self.render_timer = QTimer(self)
         self.render_timer.timeout.connect(self._render)
@@ -136,34 +162,60 @@ class MainWindow(QMainWindow):
         thread.start()
         return thread
 
-    def _stop_sources(self):
+    def _stop_sources(self, after=None):
         self.trials.shutdown()
-        for thread, worker in self.threads:
-            # stop() runs in the worker's thread: sockets/timers/SQLite stay single-threaded.
-            QMetaObject.invokeMethod(worker, 'stop', Qt.ConnectionType.BlockingQueuedConnection)
-            thread.quit()
-            thread.wait(5000)
-        self.threads.clear()
+        self.trials.set_capabilities('REPLAY', {})
+        self.boards.set_mode('REPLAY')
+        self.playback.set_mode('REPLAY')
+        self.after_retire = after
+        if self.retirer is not None:
+            return
         for connection in self.connections:
             QObject.disconnect(connection)
         self.connections.clear()
         self.api = self.model = self.replay = None
-        self.exit_stack.close()
-        self.exit_stack = ExitStack()
         self.pending = None
         self.recording_status = {'active': False}
+        self.source_status = {}
+        if not self.threads:
+            self.exit_stack.close()
+            self.exit_stack = ExitStack()
+            if after is not None:
+                after()
+            return
+        old_threads, self.threads = self.threads, []
+        old_stack, self.exit_stack = self.exit_stack, ExitStack()
+        self.retirer = SourceRetirer(old_threads, old_stack, self)
+        self.retirer.finished.connect(self._on_sources_retired)
+        self.retirer.start()
+
+    def _on_sources_retired(self):
+        for thread, worker in self.retirer.threads:
+            worker.deleteLater()
+            thread.deleteLater()
+        self.retirer.deleteLater()
+        self.retirer = None
+        after, self.after_retire = self.after_retire, None
+        if after is not None and not self.shutdown_started:
+            after()
+        self._maybe_close()
 
     def use_fake(self):
-        self._stop_sources()
+        if self.shutdown_started:
+            return
+        self._stop_sources(self._start_fake)
+
+    def _start_fake(self):
         directory = Path(self.exit_stack.enter_context(tempfile.TemporaryDirectory(prefix='meshviz-')))
         socket_path = directory / 'api1.sock'
         self.exit_stack.enter_context(serve_fake_api1(socket_path, mesh=DemoMesh(self.fake_nodes)))
         self._start_live(str(socket_path), 'fake API1（demo mesh）')
 
     def use_live(self, path):
-        self._stop_sources()
+        if self.shutdown_started:
+            return
         self.live_target = path
-        self._start_live(path, f'daemon {path}')
+        self._stop_sources(lambda: self._start_live(path, f'daemon {path}'))
 
     def _back_to_live(self):
         if self.live_target:
@@ -177,26 +229,31 @@ class MainWindow(QMainWindow):
         self.api = ApiClient(path)
         self.model = ModelWorker('LIVE')
         self.api.events.connect(self.model.ingest)
-        self.api.status.connect(self._on_source_status)
-        self.api.reply.connect(self.trials.on_reply)
+        self.connections.append(self.api.status.connect(self._on_source_status))
+        self.connections.append(self.api.reply.connect(self.trials.on_reply))
         self.connections.append(self.api_request.connect(self.api.request))
         self.connections.append(self.model_events.connect(self.model.ingest))
         self.connections.append(self.model_start_recording.connect(self.model.start_recording))
         self.connections.append(self.model_stop_recording.connect(self.model.stop_recording))
-        self.model.snapshot.connect(self._on_snapshot)
-        self.model.recording.connect(self._on_recording)
+        self.connections.append(self.model.snapshot.connect(self._on_snapshot))
+        self.connections.append(self.model.recording.connect(self._on_recording))
         self._thread(self.model)
         self._thread(self.api)
         self._apply_mode()
 
     def use_replay(self, path):
-        self._stop_sources()
+        if self.shutdown_started:
+            return
+        self._stop_sources(lambda: self._start_replay(path))
+
+    def _start_replay(self, path):
         self.mode = 'REPLAY'
         self.source_label = f'capture {path}'
         self.replay = ReplayWorker()
-        self.replay.snapshot.connect(self._on_snapshot)
-        self.replay.position.connect(self.playback.on_position)
-        self.replay.failed.connect(lambda error: self.header.set('gateway', f'capture を開けない: {error}'))
+        self.connections.append(self.replay.snapshot.connect(self._on_snapshot))
+        self.connections.append(self.replay.position.connect(self.playback.on_position))
+        self.connections.append(self.replay.failed.connect(
+            lambda error: self.header.set('gateway', f'capture を開けない: {error}')))
         self.connections.append(self.replay_open.connect(self.replay.open))
         self.connections.append(self.replay_seek.connect(self.replay.seek))
         self.connections.append(self.replay_speed.connect(self.replay.set_speed))
@@ -247,9 +304,15 @@ class MainWindow(QMainWindow):
 
     def _render(self, force=False):
         snapshot = self.pending
-        if snapshot is None or (not self.dirty and not force):
+        clock_ns = time.monotonic_ns()
+        refresh_age = self.mode == 'LIVE' and clock_ns - self.last_clock_render_ns >= AGE_RENDER_NS
+        if snapshot is None or (not self.dirty and not force and not refresh_age):
             return
+        self.last_clock_render_ns = clock_ns
         self.dirty = False
+        if self.mode == 'LIVE':
+            snapshot = {**snapshot, 'now_unix_ms': time.time_ns() // 1_000_000,
+                        'now_mono_ns': clock_ns}
         state = snapshot['state']
         scope = (views.scopes(state) or ['不明'])[0]
         self.header.set('site', f'scope {scope}（site/profile: 未取得）')
@@ -275,14 +338,27 @@ class MainWindow(QMainWindow):
             self.trials.show_recorded(snapshot.get('trial_events', []))
 
     def closeEvent(self, event):
+        self.close_requested = True
         self.shutdown()
+        if self.retirer is not None or not self.boards.stopped or self.playback.export_job is not None:
+            event.ignore()
+            return
+        self.close_requested = False
         super().closeEvent(event)
 
     def shutdown(self):
         """Stop new trials/sends, drain the recorder, release sources, then boards/leases."""
+        if self.shutdown_started:
+            return
+        self.shutdown_started = True
         self.render_timer.stop()
         self._stop_sources()
         self.boards.shutdown()
+
+    def _maybe_close(self):
+        if (self.close_requested and self.retirer is None and self.boards.stopped and
+                self.playback.export_job is None):
+            QTimer.singleShot(0, self.close)
 
 
 def main(argv=None):

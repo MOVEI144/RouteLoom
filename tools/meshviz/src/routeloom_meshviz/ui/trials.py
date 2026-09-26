@@ -87,6 +87,7 @@ class TrialsView(QWidget):
         self.recorded = {}
         self.mode = 'LIVE'
         self.supported = False
+        self.reconcile_supported = False
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
         self._refresh_estimate()
@@ -120,6 +121,7 @@ class TrialsView(QWidget):
         self.mode = mode
         needed = ('operations.open_epoch', 'messages.submit', 'operations.get')
         self.supported = mode == 'LIVE' and all(methods.get(m) for m in needed)
+        self.reconcile_supported = mode == 'LIVE' and bool(methods.get('operations.get_by_key'))
         if mode != 'LIVE':
             self.status.setText('REPLAY 中は送信できません（記録された試験結果を表示）')
         elif not self.supported:
@@ -143,7 +145,7 @@ class TrialsView(QWidget):
         if self.mode != 'LIVE' or not self.supported:
             return
         try:
-            self.runner = TrialRunner(self.plan(), _mono_ms())
+            self.runner = TrialRunner(self.plan(), _mono_ms(), reconcile=self.reconcile_supported)
         except ValueError as exc:
             self.status.setText(f'開始不可: {exc}')
             return

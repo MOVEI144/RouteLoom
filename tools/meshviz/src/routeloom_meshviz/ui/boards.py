@@ -5,7 +5,6 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QHBoxLayout, Q
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ..board_setup import ROLES, BoardRow, assignment_errors, preview
-from ..firmware_catalog import DEV_PUBLIC_KEY, verify_bundle
 from .workers import BoardWorker
 
 COLUMNS = ['port', 'USB', 'chip', 'MAC 末尾', 'flash', '役割', 'NodeId', '状態']
@@ -20,6 +19,10 @@ def _flash_text(identity):
 class BoardsView(QWidget):
     probe_requested = Signal(list)
     flash_requested = Signal(list)
+    scan_requested = Signal()
+    bundle_requested = Signal(int, str)
+    stop_requested = Signal()
+    shutdown_finished = Signal()
 
     def __init__(self, backend):
         super().__init__()
@@ -27,8 +30,12 @@ class BoardsView(QWidget):
         self.rows = []
         self.manifest = None
         self.bundle = None
+        self.image_node_id = None
+        self._bundle_serial = 0
         self.mode = 'LIVE'
         self.busy = False
+        self.stopped = False
+        self.stopping = False
         self.bundle_label = QLabel('bundle: 未選択')
         self.bundle_label.setWordWrap(True)
         choose = QPushButton('bundle を選択…')
@@ -54,7 +61,7 @@ class BoardsView(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.itemSelectionChanged.connect(self._refresh_preview)
+        self.table.itemSelectionChanged.connect(self._selection_changed)
         self.preview = QPlainTextEdit()
         self.preview.setReadOnly(True)
         self.log = QPlainTextEdit()
@@ -80,20 +87,34 @@ class BoardsView(QWidget):
         self.worker.moveToThread(self.thread)
         self.probe_requested.connect(self.worker.probe)
         self.flash_requested.connect(self.worker.flash)
+        self.scan_requested.connect(self.worker.scan)
+        self.bundle_requested.connect(self.worker.load_bundle)
         self.worker.progress.connect(self._on_progress)
         self.worker.probed.connect(self._on_probed)
         self.worker.finished.connect(self._on_finished)
+        self.worker.scanned.connect(self._on_scanned)
+        self.worker.bundle_loaded.connect(self._on_bundle_loaded)
+        self.stop_requested.connect(self.worker.stop)
+        self.worker.stopped.connect(self.thread.quit)
+        self.thread.finished.connect(self._on_shutdown_finished)
         self.thread.start()
         self.rescan()
 
     # --- inventory ----------------------------------------------------------
 
     def rescan(self):
-        try:
-            ports = self.backend.list_ports()
-        except Exception as exc:
-            self.log.appendPlainText(f'port 列挙に失敗: {exc}')
-            ports = []
+        if self.stopping:
+            return
+        self.quiesce.setChecked(False)
+        self.scan_requested.emit()
+
+    def _selection_changed(self):
+        self.quiesce.setChecked(False)
+        self._refresh_preview()
+
+    def _on_scanned(self, ports, error):
+        if error:
+            self.log.appendPlainText(f'port 列挙に失敗: {error}')
         known = {row.port: row for row in self.rows}
         rows = []
         for port in ports:
@@ -181,21 +202,34 @@ class BoardsView(QWidget):
             self.load_bundle(path)
 
     def load_bundle(self, path):
-        try:
-            # Signature/hash/layout verification against the packaged development key.
-            self.manifest = verify_bundle(path, DEV_PUBLIC_KEY)
+        if self.stopping:
+            return
+        self.manifest = self.bundle = self.image_node_id = None
+        self.bundle_label.setText(f'bundle 検証中: {path}')
+        self._refresh_preview()
+        self._bundle_serial += 1
+        self._bundle_pending = self._bundle_serial
+        self.bundle_requested.emit(self._bundle_serial, path)
+
+    def _on_bundle_loaded(self, serial, path, manifest, image_node_id, error):
+        if serial != self._bundle_pending:
+            return
+        if error:
+            self.manifest = self.bundle = self.image_node_id = None
+            self.bundle_label.setText(f'bundle 拒否: {error}')
+        else:
+            self.manifest = manifest
             self.bundle = path
-            self.bundle_label.setText(f'bundle: {path}\n  {self.manifest["chip"]} {self.manifest["role"]} '
-                                      f'{self.manifest["firmware_version"]} — 署名・hash 検証済み（開発鍵）')
-        except Exception as exc:
-            self.manifest = self.bundle = None
-            self.bundle_label.setText(f'bundle 拒否: {exc}')
+            self.image_node_id = image_node_id
+            self.bundle_label.setText(f'bundle: {path}\n  {manifest["chip"]} {manifest["role"]} '
+                                      f'{manifest["firmware_version"]} — 署名・hash 検証済み（開発鍵）'
+                                      f'／resolved Kconfig NodeId {image_node_id or "不明"}')
         self._refresh_preview()
 
     def plans(self):
         errors = assignment_errors(self.rows)
         return [(row, *preview(row, self.manifest, self.bundle, quiesced=self.quiesce.isChecked(),
-                               assignment_problems=errors[row.port]))
+                               assignment_problems=errors[row.port], image_node_id=self.image_node_id))
                 for row in self._selected()]
 
     def _refresh_preview(self):
@@ -211,27 +245,36 @@ class BoardsView(QWidget):
         writable = [p for p in plans if p[1] is not None]
         self.flash_button.setEnabled(self.mode == 'LIVE' and not self.busy and bool(plans) and
                                      len(writable) == len(plans))
-        self.probe_button.setEnabled(self.mode == 'LIVE' and not self.busy and bool(plans))
+        self.probe_button.setEnabled(self.mode == 'LIVE' and not self.busy and bool(plans) and
+                                     self.quiesce.isChecked())
 
     def set_mode(self, mode):
         """REPLAY never writes or probes boards."""
         self.mode = mode
+        if mode != 'LIVE':
+            self.quiesce.setChecked(False)
         self._refresh_preview()
 
     # --- actions ------------------------------------------------------------
 
     def _probe_selected(self):
+        if self.stopping:
+            return
         ports = [row.port for row in self._selected()]
-        if ports and self.mode == 'LIVE':
+        if ports and self.mode == 'LIVE' and self.quiesce.isChecked():
             self.busy = True
+            self.worker.cancel.clear()
             self._refresh_preview()
             self.probe_requested.emit(ports)
 
     def _flash_selected(self):
+        if self.stopping:
+            return
         plans = self.plans()
         if self.mode != 'LIVE' or not plans or any(plan is None for _, plan, _, _ in plans):
             return
         self.busy = True
+        self.worker.cancel.clear()
         self.cancel_button.setEnabled(True)
         for row, _, _, _ in plans:
             row.state, row.message = 'Preflight', '待機'
@@ -280,6 +323,13 @@ class BoardsView(QWidget):
         self._render()
 
     def shutdown(self):
+        if self.stopping:
+            return
+        self.stopping = True
+        self.set_mode('REPLAY')
         self.worker.cancel.set()
-        self.thread.quit()
-        self.thread.wait(200_000)
+        self.stop_requested.emit()
+
+    def _on_shutdown_finished(self):
+        self.stopped = True
+        self.shutdown_finished.emit()

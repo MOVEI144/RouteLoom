@@ -119,9 +119,12 @@ def serve_fake_api1(path, nodes=(), *, mesh=None):
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
             protocol = FakeAPI1(nodes, mesh=mesh)
-            while chunk := self.request.recv(4096):
-                for reply in protocol.feed(chunk):
-                    self.request.sendall(reply)
+            try:
+                while chunk := self.request.recv(4096):
+                    for reply in protocol.feed(chunk):
+                        self.request.sendall(reply)
+            except (ConnectionResetError, BrokenPipeError):
+                pass
 
     with socketserver.ThreadingUnixStreamServer(str(path), Handler) as server:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
