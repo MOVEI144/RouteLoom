@@ -3,4 +3,4 @@
 *.bin
 # This run keeps raw sdkconfig (with development credentials) locally and
 # commits redacted metadata under artifacts/hil/2026-09-26-full/images/.
-full-r1-*/
+full-r*/

@@ -16,6 +16,14 @@ def query(ctl: str, socket: str, method: str) -> dict:
     return json.loads(result.stdout)
 
 
+def has_route(row: dict) -> bool:
+    """Host nodes leaves hops null for a learned, non-neighbor route."""
+    return bool(row.get("connected") and
+                (row.get("hops") is not None or
+                 (row.get("next_hop") is not None and
+                  row.get("route_metric") is not None)))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ctl", required=True)
@@ -47,8 +55,7 @@ def main() -> int:
                 nodes_reply = query(args.ctl, args.socket, "nodes")
                 result = nodes_reply.get("result", {})
                 nodes = result.get("nodes", [])
-                reachable = {row.get("node") for row in nodes
-                             if row.get("connected") and row.get("hops") is not None}
+                reachable = {row.get("node") for row in nodes if has_route(row)}
                 for node in expected & reachable:
                     first_routes.setdefault(node, elapsed)
                 signature = (result.get("source", {}).get("state"),

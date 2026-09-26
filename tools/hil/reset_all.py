@@ -2,7 +2,8 @@
 """Pulse reset on several chip/MAC-pinned USB Serial/JTAG boards together.
 
 Stop the host daemon and other serial readers first. This records the reset
-skew and USB re-enumeration; traffic after reboot is measured separately.
+skew and post-reset port state; traffic and any USB re-enumeration are measured
+separately.
 """
 
 import argparse
@@ -19,6 +20,25 @@ import rig
 
 def stamp() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def open_stable_port(port: str, timeout_s: float = 10.0) -> tuple[serial.Serial, int]:
+    """Retry a pinned by-id tty while esptool's reset re-enumerates USB."""
+    deadline = time.monotonic() + timeout_s
+    attempts = 0
+    while True:
+        attempts += 1
+        device = serial.Serial(port=None, baudrate=115200, timeout=0.2)
+        device.dtr, device.rts = True, False
+        device.port = port
+        try:
+            device.open()
+            return device, attempts
+        except (OSError, serial.SerialException):
+            device.close()
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.2)
 
 
 def main() -> int:
@@ -49,13 +69,11 @@ def main() -> int:
               "assert_skew_ms": None, "release_skew_ms": None}
     try:
         for name, board, port, identity in selected:
-            device = serial.Serial(port=None, baudrate=115200, timeout=0.2)
-            device.dtr, device.rts = True, False
-            device.port = port
-            device.open()
+            device, attempts = open_stable_port(port)
             streams.append(device)
             record["boards"].append({"name": name, "port": port,
-                                     "identity": identity})
+                                     "identity": identity,
+                                     "open_attempts": attempts})
         asserted = []
         for device, row in zip(streams, record["boards"]):
             device.dtr = False
