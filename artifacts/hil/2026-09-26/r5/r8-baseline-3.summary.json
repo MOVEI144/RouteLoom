@@ -1,0 +1,27 @@
+{
+  "requested": 3,
+  "host_accepted": 3,
+  "delivered": 3,
+  "stopped_reason": null,
+  "success_rate": 1.0,
+  "rate_limit_retries": 0,
+  "elapsed_s": 0.67,
+  "latency_ms_median": 215.99,
+  "latency_ms_p95": 221.16,
+  "latency_ms_max": 221.73,
+  "by_destination": {
+    "2": {
+      "accepted": 1,
+      "delivered": 1
+    },
+    "4": {
+      "accepted": 1,
+      "delivered": 1
+    },
+    "5": {
+      "accepted": 1,
+      "delivered": 1
+    }
+  },
+  "evidence": "artifacts/hil/2026-09-26/r5/r8-baseline-3.jsonl"
+}

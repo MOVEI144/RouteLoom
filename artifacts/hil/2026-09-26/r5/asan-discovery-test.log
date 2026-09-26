@@ -1,0 +1,8 @@
+Internal ctest changing into directory: /tmp/routeloom-hil2-asan
+Test project /tmp/routeloom-hil2-asan
+    Start 14: routeloom_discovery_tests
+1/1 Test #14: routeloom_discovery_tests ........   Passed    0.12 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   0.12 sec

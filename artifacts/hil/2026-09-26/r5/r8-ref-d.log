@@ -1,0 +1,18 @@
+[2026-09-25T22:34:43.086+00:00] !! connected /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00
+[2026-09-25T22:34:55.510+00:00] I (360) esp_image: segment 3: paddr=0016e740 vaddr=40806d64 sizeW (34404) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-25T22:34:55.510+00:00] I (34461) RouteLoomRef: message origin=1 session=203 sequence=7 bytes=9
+[2026-09-25T22:35:07.928+00:00] I (46910) RouteLoomRef: discovery event=BOUND peer=2
+[2026-09-25T22:35:07.928+00:00] W (46910) RouteLoomRef: diagnostic reason=BOUND peer=2 message=none
+[2026-09-25T22:35:07.928+00:00] I (46938) RouteLoomRef: discovery event=REACHABLE peer=2
+[2026-09-25T22:35:07.928+00:00] W (46938) RouteLoomRef: diagnostic reason=REACHABLE peer=2 message=none
+[2026-09-25T22:35:19.143+00:00] W (58152) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=2 message=present
+[2026-09-25T22:35:19.143+00:00] I (58174) RouteLoomRef: discovery event=REACHABLE peer=2
+[2026-09-25T22:35:19.143+00:00] W (58175) RouteLoomRef: diagnostic reason=REACHABLE peer=2 message=none
+[2026-09-25T22:35:19.143+00:00] W (58219) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-25T22:35:19.343+00:00] W (58294) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-25T22:35:21.145+00:00] W (60174) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=2 message=none
+[2026-09-25T22:35:21.546+00:00] I (60487) RouteLoom: stack hwm main 10588 B
+[2026-09-25T22:35:27.754+00:00] I (66677) RouteLoomRef: message origin=1 session=203 sequence=21 bytes=9
+[2026-09-25T22:35:31.559+00:00] I (70501) RouteLoomRef: message origin=1 session=203 sequence=24 bytes=9
+[2026-09-25T22:35:35.365+00:00] I (74332) RouteLoomRef: message origin=1 session=203 sequence=27 bytes=9
+[2026-09-25T22:36:21.428+00:00] I (120488) RouteLoom: stack hwm main 10588 B

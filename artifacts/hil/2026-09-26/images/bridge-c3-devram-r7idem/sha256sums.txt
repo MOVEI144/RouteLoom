@@ -1,0 +1,10 @@
+c040a9719d4e95cd84bf6b85d56b98307b08ffc51051b892bc13b37661bc778a  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c3-devram-r7idem/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+711cd9ea0ba4bf3f7ea0ab516535b3a5d1641abf52729d5d036ec67ccf40ede7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c3-devram-r7idem/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+c040a9719d4e95cd84bf6b85d56b98307b08ffc51051b892bc13b37661bc778a  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c3-devram-r7idem/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+711cd9ea0ba4bf3f7ea0ab516535b3a5d1641abf52729d5d036ec67ccf40ede7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c3-devram-r7idem/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+2f4a4cb1dcad931db44a9d135df206fd6956a6de80253f773232b51c52a0f395  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c3-devram-r7idem/build/bootloader/bootloader.bin
+b2420dca7ccf9d4f697badc38714d9cb7bbfdb1b202116c94a584ae4dcd200df  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c3-devram-r7idem/build/flasher_args.json
+e61421139c6406f44aa78de50a0c30a7a99d778fcdb619eb2035fb57878dc0f7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c3-devram-r7idem/build/partition_table/partition-table.bin
+84cc5df7eb6c54dd6287f5f8b4c9e3a20c6fd8a7f20055b6a370da73de609939  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c3-devram-r7idem/build/ram-report.json
+a885c43b244943595fd705663fe15e9a22ad0c9b18f8859a7d30aaa1a5cbdb5d  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c3-devram-r7idem/build/routeloom_bridge_node.bin
+e9d5ca3f9fd55bacc00c3d8f56ed145db4cfde7f06276fa3f7bd8ed6957dd824  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c3-devram-r7idem/build/size.json

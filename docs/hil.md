@@ -10,8 +10,13 @@ three C3s and two C6s; C6 is an experimental HIL target outside the SDK v1
 support list. One C3 stopped enumerating, so the continuation exercised four
 boards (two C3s, two C6s). A five-node run and C5 hardware comparison remain
 unfinished. A C3 LegacyFixture deep-sleep replay fix passed a wake-and-deliver
-cycle in the R3 continuation; DevRam/MemberEdhoc sleep and reset recovery
-remain open. MemberEdhoc node-to-node delivery passed, while the node's
+cycle in the R3 continuation; DevRam/MemberEdhoc sleep remains open. The
+[2026-09-26 fix report](hil/2026-09-26-fix-166-167.md) closes two of the
+bench findings: the default C3 images now start with measured heap headroom
+(issue #166, floors derived from the measurements) and delivery to a
+reference node recovers after its reset (issue #167: ten resets × ten sends
+on the C3 pair, every cycle recovered, first delivery 3.0–4.6 s after
+release). MemberEdhoc node-to-node delivery passed, while the node's
 authority channel still failed to reach the Site Authority. Harness
 self-tests alone are not hardware validation.
 

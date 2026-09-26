@@ -1,0 +1,27 @@
+{
+  "boards": [
+    {
+      "name": "ref-c",
+      "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00",
+      "identity": {
+        "chip": "esp32c6",
+        "mac": "10:bd:a3:ff:fe:b1:47:54",
+        "log": "flash-ref-c-preflight.log"
+      }
+    },
+    {
+      "name": "ref-d",
+      "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00",
+      "identity": {
+        "chip": "esp32c6",
+        "mac": "10:bd:a3:ff:fe:b1:48:a8",
+        "log": "flash-ref-d-preflight.log"
+      }
+    }
+  ],
+  "hold_s": 80.0,
+  "assert_skew_ms": 0.109,
+  "release_skew_ms": 2.28,
+  "errors": [],
+  "finished_unix": 1790375911.3218138
+}

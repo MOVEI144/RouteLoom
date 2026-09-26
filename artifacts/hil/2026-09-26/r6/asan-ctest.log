@@ -1,0 +1,196 @@
+Test project /tmp/routeloom-hil2-asan
+      Start  1: routeloom_core_tests
+ 1/95 Test  #1: routeloom_core_tests ........................   Passed    1.52 sec
+      Start  2: routeloom_routing_tests
+ 2/95 Test  #2: routeloom_routing_tests .....................   Passed   13.66 sec
+      Start  3: routeloom_routing_scale_unit_tests
+ 3/95 Test  #3: routeloom_routing_scale_unit_tests ..........   Passed    6.81 sec
+      Start  4: routeloom_routing_scale_100_node_tests
+ 4/95 Test  #4: routeloom_routing_scale_100_node_tests ......   Passed   17.99 sec
+      Start  5: routeloom_ledger_tests
+ 5/95 Test  #5: routeloom_ledger_tests ......................   Passed    0.02 sec
+      Start  6: routeloom_golden_tests
+ 6/95 Test  #6: routeloom_golden_tests ......................   Passed    0.02 sec
+      Start  7: routeloom_host_ops_tests
+ 7/95 Test  #7: routeloom_host_ops_tests ....................   Passed    0.12 sec
+      Start  8: routeloom_usb_tests
+ 8/95 Test  #8: routeloom_usb_tests .........................   Passed    0.06 sec
+      Start  9: routeloom_power_tests
+ 9/95 Test  #9: routeloom_power_tests .......................   Passed    0.85 sec
+      Start 10: routeloom_hardening_tests
+10/95 Test #10: routeloom_hardening_tests ...................   Passed    0.14 sec
+      Start 11: routeloom_autonomy_tests
+11/95 Test #11: routeloom_autonomy_tests ....................   Passed    0.02 sec
+      Start 12: routeloom_endpoint_tests
+12/95 Test #12: routeloom_endpoint_tests ....................   Passed    0.02 sec
+      Start 13: routeloom_gateway_tests
+13/95 Test #13: routeloom_gateway_tests .....................   Passed    0.79 sec
+      Start 14: routeloom_discovery_tests
+14/95 Test #14: routeloom_discovery_tests ...................   Passed    0.11 sec
+      Start 15: routeloom_scope_tests
+15/95 Test #15: routeloom_scope_tests .......................   Passed    0.03 sec
+      Start 16: routeloom_telemetry_tests
+16/95 Test #16: routeloom_telemetry_tests ...................   Passed    0.09 sec
+      Start 17: routeloom_congestion_tests
+17/95 Test #17: routeloom_congestion_tests ..................   Passed    0.15 sec
+      Start 18: routeloom_load_routing_tests
+18/95 Test #18: routeloom_load_routing_tests ................   Passed    0.17 sec
+      Start 19: routeloom_channel_tests
+19/95 Test #19: routeloom_channel_tests .....................   Passed    0.03 sec
+      Start 20: routeloom_migration_tests
+20/95 Test #20: routeloom_migration_tests ...................   Passed    0.01 sec
+      Start 21: routeloom_migration_wire_tests
+21/95 Test #21: routeloom_migration_wire_tests ..............   Passed    0.01 sec
+      Start 22: routeloom_baseline_diff_tests
+22/95 Test #22: routeloom_baseline_diff_tests ...............   Passed    0.36 sec
+      Start 23: routeloom_config_tests
+23/95 Test #23: routeloom_config_tests ......................   Passed    0.13 sec
+      Start 24: routeloom_security_floor_tests
+24/95 Test #24: routeloom_security_floor_tests ..............   Passed    0.01 sec
+      Start 25: routeloom_cose_tests
+25/95 Test #25: routeloom_cose_tests ........................   Passed    0.04 sec
+      Start 26: routeloom_config_wire_tests
+26/95 Test #26: routeloom_config_wire_tests .................   Passed    0.04 sec
+      Start 27: routeloom_trust_store_tests
+27/95 Test #27: routeloom_trust_store_tests .................   Passed    0.04 sec
+      Start 28: routeloom_credential_tests
+28/95 Test #28: routeloom_credential_tests ..................   Passed    4.25 sec
+      Start 29: routeloom_trust_manifest_tests
+29/95 Test #29: routeloom_trust_manifest_tests ..............   Passed    0.15 sec
+      Start 30: routeloom_kdf_tests
+30/95 Test #30: routeloom_kdf_tests .........................   Passed    0.01 sec
+      Start 31: routeloom_key_schedule_tests
+31/95 Test #31: routeloom_key_schedule_tests ................   Passed    0.01 sec
+      Start 32: routeloom_sdkv1_authority_tests
+32/95 Test #32: routeloom_sdkv1_authority_tests .............   Passed    0.06 sec
+      Start 33: routeloom_sdkv1_authority_transport_tests
+33/95 Test #33: routeloom_sdkv1_authority_transport_tests ...   Passed    0.01 sec
+      Start 34: routeloom_rlres1_tests
+34/95 Test #34: routeloom_rlres1_tests ......................   Passed    0.06 sec
+      Start 35: routeloom_reply_lease_tests
+35/95 Test #35: routeloom_reply_lease_tests .................   Passed    0.01 sec
+      Start 36: routeloom_reply_admission_tests
+36/95 Test #36: routeloom_reply_admission_tests .............   Passed    0.14 sec
+      Start 37: routeloom_espnow_runtime_tests
+37/95 Test #37: routeloom_espnow_runtime_tests ..............   Passed    0.02 sec
+      Start 38: routeloom_c_header_test
+38/95 Test #38: routeloom_c_header_test .....................   Passed    0.01 sec
+      Start 39: routeloom_trust_view_tests
+39/95 Test #39: routeloom_trust_view_tests ..................   Passed    0.08 sec
+      Start 40: routeloom_property_tests
+40/95 Test #40: routeloom_property_tests ....................   Passed   14.61 sec
+      Start 41: routeloom_applied_tests
+41/95 Test #41: routeloom_applied_tests .....................   Passed    0.14 sec
+      Start 42: routeloom_fault_tests
+42/95 Test #42: routeloom_fault_tests .......................   Passed    0.27 sec
+      Start 43: routeloom_dedup_tests
+43/95 Test #43: routeloom_dedup_tests .......................   Passed    0.92 sec
+      Start 44: routeloom_node_status_tests
+44/95 Test #44: routeloom_node_status_tests .................   Passed    0.05 sec
+      Start 45: routeloom_peer_state_tests
+45/95 Test #45: routeloom_peer_state_tests ..................   Passed    1.22 sec
+      Start 46: routeloom_group_unit_tests
+46/95 Test #46: routeloom_group_unit_tests ..................   Passed    1.33 sec
+      Start 47: routeloom_group_100_node_tests
+47/95 Test #47: routeloom_group_100_node_tests ..............   Passed   79.64 sec
+      Start 48: routeloom_session_tests
+48/95 Test #48: routeloom_session_tests .....................   Passed    0.06 sec
+      Start 49: routeloom_sdkv1_golden_tests
+49/95 Test #49: routeloom_sdkv1_golden_tests ................   Passed    0.11 sec
+      Start 50: routeloom_sdkv1_ead_tests
+50/95 Test #50: routeloom_sdkv1_ead_tests ...................   Passed    0.08 sec
+      Start 51: routeloom_sdkv1_session_wire_tests
+51/95 Test #51: routeloom_sdkv1_session_wire_tests ..........   Passed    0.01 sec
+      Start 52: routeloom_sdkv1_handshake_tests
+52/95 Test #52: routeloom_sdkv1_handshake_tests .............   Passed    0.78 sec
+      Start 53: routeloom_sdkv1_bootstrap_tests
+53/95 Test #53: routeloom_sdkv1_bootstrap_tests .............   Passed    0.17 sec
+      Start 54: routeloom_sdkv1_join_transport_tests
+54/95 Test #54: routeloom_sdkv1_join_transport_tests ........   Passed    0.04 sec
+      Start 55: routeloom_sdkv1_join_relay_tests
+55/95 Test #55: routeloom_sdkv1_join_relay_tests ............   Passed    0.02 sec
+      Start 56: routeloom_sdkv1_join_handshake_tests
+56/95 Test #56: routeloom_sdkv1_join_handshake_tests ........   Passed    1.25 sec
+      Start 57: routeloom_sdkv1_join_candidates_tests
+57/95 Test #57: routeloom_sdkv1_join_candidates_tests .......   Passed    0.01 sec
+      Start 58: routeloom_sdkv1_joiner_tests
+58/95 Test #58: routeloom_sdkv1_joiner_tests ................   Passed    8.73 sec
+      Start 59: routeloom_sdkv1_dev_keys_tests
+59/95 Test #59: routeloom_sdkv1_dev_keys_tests ..............   Passed    0.01 sec
+      Start 60: routeloom_sdkv1_legacy_purge_tests
+60/95 Test #60: routeloom_sdkv1_legacy_purge_tests ..........   Passed    0.01 sec
+      Start 61: routeloom_nvs_legacy_purge_tests
+61/95 Test #61: routeloom_nvs_legacy_purge_tests ............   Passed    0.01 sec
+      Start 62: routeloom_sdkv1_dev_session_tests
+62/95 Test #62: routeloom_sdkv1_dev_session_tests ...........   Passed    0.03 sec
+      Start 63: routeloom_sdkv1_session_rtc_tests
+63/95 Test #63: routeloom_sdkv1_session_rtc_tests ...........   Passed    0.01 sec
+      Start 64: routeloom_sdkv1_boot_session_tests
+64/95 Test #64: routeloom_sdkv1_boot_session_tests ..........   Passed    0.01 sec
+      Start 65: routeloom_sdkv1_coordinator_tests
+65/95 Test #65: routeloom_sdkv1_coordinator_tests ...........   Passed    0.92 sec
+      Start 66: routeloom_sdkv1_owner_sleep_tests
+66/95 Test #66: routeloom_sdkv1_owner_sleep_tests ...........   Passed    1.89 sec
+      Start 67: routeloom_sdkv1_dev_route_tests
+67/95 Test #67: routeloom_sdkv1_dev_route_tests .............   Passed    0.04 sec
+      Start 68: routeloom_join_stack_gate
+68/95 Test #68: routeloom_join_stack_gate ...................   Passed    0.43 sec
+      Start 69: routeloom_sdkv1_records_tests
+69/95 Test #69: routeloom_sdkv1_records_tests ...............   Passed    0.12 sec
+      Start 70: routeloom_sdkv1_store_tests
+70/95 Test #70: routeloom_sdkv1_store_tests .................   Passed    6.72 sec
+      Start 71: routeloom_sdkv1_session_bank_tests
+71/95 Test #71: routeloom_sdkv1_session_bank_tests ..........   Passed    0.03 sec
+      Start 72: routeloom_sdkv1_membership_tests
+72/95 Test #72: routeloom_sdkv1_membership_tests ............   Passed    0.18 sec
+      Start 73: routeloom_sdkv1_grant_renew_tests
+73/95 Test #73: routeloom_sdkv1_grant_renew_tests ...........   Passed    0.01 sec
+      Start 74: routeloom_sdkv1_revocation_tests
+74/95 Test #74: routeloom_sdkv1_revocation_tests ............   Passed    5.99 sec
+      Start 75: routeloom_sdkv1_maintenance_tests
+75/95 Test #75: routeloom_sdkv1_maintenance_tests ...........   Passed    0.35 sec
+      Start 76: routeloom_espnow_sdkv1_entropy_tests
+76/95 Test #76: routeloom_espnow_sdkv1_entropy_tests ........   Passed    0.01 sec
+      Start 77: routeloom_sdkv1_blob_storage_tests
+77/95 Test #77: routeloom_sdkv1_blob_storage_tests ..........   Passed    0.30 sec
+      Start 78: routeloom_edhoc_tests
+78/95 Test #78: routeloom_edhoc_tests .......................   Passed    0.45 sec
+      Start 79: routeloom_edhoc_interop_replay
+79/95 Test #79: routeloom_edhoc_interop_replay ..............   Passed    0.03 sec
+      Start 80: routeloom_edhoc_interop_replay_join
+80/95 Test #80: routeloom_edhoc_interop_replay_join .........   Passed    0.03 sec
+      Start 81: routeloom_edhoc_interop_replay_member
+81/95 Test #81: routeloom_edhoc_interop_replay_member .......   Passed    0.03 sec
+      Start 82: fuzz_wire_frame_corpus
+82/95 Test #82: fuzz_wire_frame_corpus ......................   Passed    0.01 sec
+      Start 83: fuzz_usb_codec_corpus
+83/95 Test #83: fuzz_usb_codec_corpus .......................   Passed    0.01 sec
+      Start 84: fuzz_autonomy_corpus
+84/95 Test #84: fuzz_autonomy_corpus ........................   Passed    0.01 sec
+      Start 85: fuzz_endpoint_corpus
+85/95 Test #85: fuzz_endpoint_corpus ........................   Passed    0.01 sec
+      Start 86: fuzz_host_ops_corpus
+86/95 Test #86: fuzz_host_ops_corpus ........................   Passed    0.01 sec
+      Start 87: fuzz_migration_corpus
+87/95 Test #87: fuzz_migration_corpus .......................   Passed    0.01 sec
+      Start 88: fuzz_cose_corpus
+88/95 Test #88: fuzz_cose_corpus ............................   Passed    0.01 sec
+      Start 89: fuzz_rlres1_corpus
+89/95 Test #89: fuzz_rlres1_corpus ..........................   Passed    0.01 sec
+      Start 90: fuzz_sdkv1_corpus
+90/95 Test #90: fuzz_sdkv1_corpus ...........................   Passed    0.01 sec
+      Start 91: fuzz_sdkv1_ead_corpus
+91/95 Test #91: fuzz_sdkv1_ead_corpus .......................   Passed    0.02 sec
+      Start 92: fuzz_sdkv1_join_corpus
+92/95 Test #92: fuzz_sdkv1_join_corpus ......................   Passed    0.02 sec
+      Start 93: fuzz_rlres1_mutation
+93/95 Test #93: fuzz_rlres1_mutation ........................   Passed    0.75 sec
+      Start 94: fuzz_sdkv1_ead_mutation
+94/95 Test #94: fuzz_sdkv1_ead_mutation .....................   Passed    0.30 sec
+      Start 95: fuzz_sdkv1_join_mutation
+95/95 Test #95: fuzz_sdkv1_join_mutation ....................   Passed    0.11 sec
+
+100% tests passed, 0 tests failed out of 95
+
+Total Test time (real) = 176.36 sec
+ctest rc=0

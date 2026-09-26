@@ -1,0 +1,13 @@
+[2026-09-25T22:34:43.077+00:00] !! connected /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00
+[2026-09-25T22:34:54.500+00:00] I (60485) RouteLoom: stack hwm main 11096 B
+[2026-09-25T22:34:55.301+00:00] W (61274) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-25T22:34:55.301+00:00] I (61317) RouteLoomRef: message origin=1 session=203 sequence=4 bytes=9
+[2026-09-25T22:35:19.337+00:00] W (85337) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=1 message=none
+[2026-09-25T22:35:19.337+00:00] W (85339) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=2 seq=1 att=1 peer=1 message=none
+[2026-09-25T22:35:20.940+00:00] W (87069) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=1 message=none
+[2026-09-25T22:35:21.340+00:00] W (87337) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=2 seq=1 att=2 peer=1 message=none
+[2026-09-25T22:35:27.551+00:00] I (93703) RouteLoomRef: message origin=1 session=203 sequence=20 bytes=9
+[2026-09-25T22:35:31.556+00:00] I (97532) RouteLoomRef: message origin=1 session=203 sequence=23 bytes=9
+[2026-09-25T22:35:35.361+00:00] I (101355) RouteLoomRef: message origin=1 session=203 sequence=26 bytes=9
+[2026-09-25T22:35:54.387+00:00] I (120486) RouteLoom: stack hwm main 11096 B
+[2026-09-25T22:36:54.474+00:00] I (180487) RouteLoom: stack hwm main 11096 B

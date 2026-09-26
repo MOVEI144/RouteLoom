@@ -1,0 +1,6 @@
+built bridge_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c3-devram-r11final
+bridge rc=0
+built reference_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-c3-devram-r11final-trace-node2
+ref-a-trace rc=0
+built reference_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-c3-devram-r11final-node2
+ref-a-plain rc=0

@@ -1,0 +1,217 @@
+[ 21%] Built target routeloom_edhoc_third_party
+[ 45%] Built target routeloom_core
+[ 45%] Linking CXX executable routeloom_ledger_tests
+[ 46%] Linking CXX executable routeloom_routing_tests
+[ 46%] Linking CXX executable routeloom_routing_scale_tests
+[ 46%] Linking CXX executable routeloom_core_tests
+[ 46%] Built target routeloom_ledger_tests
+[ 46%] Linking CXX executable routeloom_golden_tests
+[ 46%] Built target routeloom_routing_tests
+[ 47%] Built target routeloom_routing_scale_tests
+[ 48%] Built target routeloom_golden_tests
+[ 49%] Building CXX object tests/cpp/CMakeFiles/routeloom_host_ops_tests.dir/test_host_ops.cpp.o
+[ 49%] Building CXX object tests/cpp/CMakeFiles/routeloom_usb_tests.dir/test_usb.cpp.o
+[ 49%] Built target routeloom_core_tests
+[ 49%] Linking CXX executable routeloom_power_tests
+[ 49%] Linking CXX executable routeloom_hardening_tests
+[ 50%] Built target routeloom_power_tests
+[ 50%] Linking CXX executable routeloom_autonomy_tests
+[ 50%] Built target routeloom_hardening_tests
+[ 50%] Linking CXX executable routeloom_endpoint_tests
+[ 50%] Built target routeloom_autonomy_tests
+[ 50%] Linking CXX executable routeloom_gateway_tests
+[ 51%] Built target routeloom_endpoint_tests
+[ 52%] Built target routeloom_discovery_tests
+[ 52%] Building CXX object tests/cpp/CMakeFiles/routeloom_scope_tests.dir/test_scope.cpp.o
+[ 52%] Built target routeloom_gateway_tests
+[ 52%] Linking CXX executable routeloom_telemetry_tests
+[ 53%] Built target routeloom_telemetry_tests
+[ 53%] Linking CXX executable routeloom_congestion_tests
+[ 54%] Built target routeloom_congestion_tests
+[ 54%] Linking CXX executable routeloom_load_routing_tests
+[ 55%] Built target routeloom_load_routing_tests
+[ 55%] Linking CXX executable routeloom_channel_tests
+[ 55%] Built target routeloom_channel_tests
+[ 56%] Linking CXX executable routeloom_migration_tests
+[ 56%] Built target routeloom_migration_tests
+[ 56%] Linking CXX executable routeloom_migration_wire_tests
+[ 56%] Built target routeloom_migration_wire_tests
+[ 56%] Linking CXX executable routeloom_baseline_diff_tests
+[ 57%] Built target routeloom_baseline_diff_tests
+[ 58%] Building CXX object tests/cpp/CMakeFiles/routeloom_config_tests.dir/test_config.cpp.o
+[ 58%] Linking CXX executable routeloom_scope_tests
+[ 58%] Built target routeloom_scope_tests
+[ 58%] Linking CXX executable routeloom_security_floor_tests
+[ 59%] Built target routeloom_security_floor_tests
+[ 60%] Building CXX object tests/cpp/CMakeFiles/routeloom_cose_tests.dir/test_config_cose.cpp.o
+[ 60%] Linking CXX executable routeloom_cose_tests
+[ 60%] Built target routeloom_cose_tests
+[ 60%] Building CXX object tests/cpp/CMakeFiles/routeloom_config_wire_tests.dir/test_config_wire.cpp.o
+[ 61%] Linking CXX executable routeloom_usb_tests
+[ 61%] Linking CXX executable routeloom_config_wire_tests
+[ 61%] Built target routeloom_usb_tests
+[ 61%] Building CXX object tests/cpp/CMakeFiles/routeloom_trust_store_tests.dir/test_trust_store.cpp.o
+[ 61%] Built target routeloom_config_wire_tests
+[ 61%] Building CXX object tests/cpp/CMakeFiles/routeloom_credential_tests.dir/test_device_credential.cpp.o
+[ 61%] Linking CXX executable routeloom_config_tests
+[ 61%] Linking CXX executable routeloom_host_ops_tests
+[ 61%] Built target routeloom_config_tests
+[ 61%] Building CXX object tests/cpp/CMakeFiles/routeloom_trust_manifest_tests.dir/test_trust_manifest.cpp.o
+[ 61%] Built target routeloom_host_ops_tests
+[ 61%] Linking CXX executable routeloom_kdf_tests
+[ 62%] Linking CXX executable routeloom_credential_tests
+[ 63%] Built target routeloom_kdf_tests
+[ 64%] Linking CXX executable routeloom_key_schedule_tests
+[ 64%] Linking CXX executable routeloom_trust_store_tests
+[ 64%] Built target routeloom_credential_tests
+[ 64%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_authority_tests.dir/test_sdkv1_authority.cpp.o
+[ 64%] Built target routeloom_key_schedule_tests
+[ 64%] Built target routeloom_trust_store_tests
+[ 64%] Linking CXX executable routeloom_rlres1_tests
+[ 64%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_authority_transport_tests.dir/test_sdkv1_authority_transport.cpp.o
+[ 64%] Built target routeloom_rlres1_tests
+[ 65%] Linking CXX executable routeloom_reply_lease_tests
+[ 65%] Built target routeloom_reply_lease_tests
+[ 65%] Linking CXX executable routeloom_reply_admission_tests
+[ 66%] Linking CXX executable routeloom_trust_manifest_tests
+[ 66%] Built target routeloom_trust_manifest_tests
+[ 66%] Built target routeloom_reply_admission_tests
+[ 67%] Linking CXX executable routeloom_c_header_test
+[ 67%] Building CXX object tests/cpp/CMakeFiles/routeloom_espnow_runtime_tests.dir/test_espnow_runtime.cpp.o
+[ 67%] Built target routeloom_c_header_test
+[ 68%] Building CXX object tests/cpp/CMakeFiles/routeloom_trust_view_tests.dir/test_trust_view.cpp.o
+[ 68%] Linking CXX executable routeloom_sdkv1_authority_transport_tests
+[ 68%] Linking CXX executable routeloom_trust_view_tests
+[ 68%] Built target routeloom_sdkv1_authority_transport_tests
+[ 68%] Built target routeloom_trust_view_tests
+[ 69%] Linking CXX executable routeloom_property_tests
+[ 69%] Linking CXX executable routeloom_applied_tests
+[ 69%] Built target routeloom_property_tests
+[ 70%] Built target routeloom_applied_tests
+[ 70%] Building CXX object tests/cpp/CMakeFiles/routeloom_espnow_runtime_tests.dir/__/__/components/routeloom_espnow/src/espnow_runtime.cpp.o
+[ 71%] Building CXX object tests/cpp/CMakeFiles/routeloom_fault_tests.dir/test_fault_injection.cpp.o
+[ 72%] Linking CXX executable routeloom_sdkv1_authority_tests
+[ 72%] Built target routeloom_sdkv1_authority_tests
+[ 72%] Linking CXX executable routeloom_dedup_tests
+[ 73%] Linking CXX executable routeloom_node_status_tests
+[ 73%] Built target routeloom_dedup_tests
+[ 73%] Linking CXX executable routeloom_peer_state_tests
+[ 73%] Built target routeloom_node_status_tests
+[ 73%] Building CXX object tests/cpp/CMakeFiles/routeloom_group_tests.dir/test_group.cpp.o
+[ 73%] Built target routeloom_peer_state_tests
+[ 73%] Linking CXX executable routeloom_session_tests
+[ 73%] Built target routeloom_session_tests
+[ 73%] Linking CXX executable routeloom_sdkv1_golden_tests
+[ 73%] Linking CXX executable routeloom_espnow_runtime_tests
+[ 74%] Built target routeloom_sdkv1_golden_tests
+[ 74%] Linking CXX executable routeloom_sdkv1_ead_tests
+[ 74%] Built target routeloom_sdkv1_ead_tests
+[ 74%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_session_wire_tests.dir/test_sdkv1_session_wire.cpp.o
+[ 75%] Built target routeloom_espnow_runtime_tests
+[ 76%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_handshake_tests.dir/test_sdkv1_handshake.cpp.o
+[ 77%] Linking CXX executable routeloom_sdkv1_session_wire_tests
+[ 77%] Built target routeloom_sdkv1_session_wire_tests
+[ 77%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_bootstrap_tests.dir/test_sdkv1_bootstrap.cpp.o
+[ 77%] Linking CXX executable routeloom_fault_tests
+[ 77%] Built target routeloom_fault_tests
+[ 78%] Linking CXX executable routeloom_sdkv1_join_transport_tests
+[ 78%] Linking CXX executable routeloom_sdkv1_handshake_tests
+[ 78%] Built target routeloom_sdkv1_join_transport_tests
+[ 79%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_join_relay_tests.dir/test_sdkv1_join_relay.cpp.o
+[ 79%] Built target routeloom_sdkv1_handshake_tests
+[ 79%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_join_handshake_tests.dir/test_sdkv1_join_handshake.cpp.o
+[ 79%] Linking CXX executable routeloom_sdkv1_join_handshake_tests
+[ 79%] Built target routeloom_sdkv1_join_handshake_tests
+[ 79%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_join_candidates_tests.dir/test_sdkv1_join_candidates.cpp.o
+[ 79%] Linking CXX executable routeloom_sdkv1_bootstrap_tests
+[ 80%] Linking CXX executable routeloom_group_tests
+[ 80%] Built target routeloom_sdkv1_bootstrap_tests
+[ 80%] Linking CXX executable routeloom_sdkv1_join_relay_tests
+[ 80%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_joiner_tests.dir/test_sdkv1_joiner.cpp.o
+[ 80%] Built target routeloom_sdkv1_join_relay_tests
+[ 80%] Built target routeloom_group_tests
+[ 80%] Linking CXX executable routeloom_sdkv1_dev_keys_tests
+[ 81%] Linking CXX executable routeloom_sdkv1_legacy_purge_tests
+[ 81%] Built target routeloom_sdkv1_legacy_purge_tests
+[ 81%] Built target routeloom_sdkv1_dev_keys_tests
+[ 82%] Linking CXX executable routeloom_nvs_legacy_purge_tests
+[ 82%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_dev_session_tests.dir/test_sdkv1_dev_session.cpp.o
+[ 82%] Built target routeloom_nvs_legacy_purge_tests
+[ 82%] Linking CXX executable routeloom_sdkv1_session_rtc_tests
+[ 83%] Built target routeloom_sdkv1_session_rtc_tests
+[ 84%] Linking CXX executable routeloom_sdkv1_boot_session_tests
+[ 84%] Built target routeloom_sdkv1_boot_session_tests
+[ 85%] Linking CXX executable routeloom_sdkv1_join_candidates_tests
+[ 86%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_coordinator_tests.dir/test_sdkv1_security_coordinator.cpp.o
+[ 86%] Built target routeloom_sdkv1_join_candidates_tests
+[ 86%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_owner_sleep_tests.dir/test_sdkv1_owner_sleep.cpp.o
+[ 87%] Linking CXX executable routeloom_sdkv1_dev_session_tests
+[ 87%] Built target routeloom_sdkv1_dev_session_tests
+[ 88%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_dev_route_tests.dir/test_sdkv1_dev_route.cpp.o
+[ 89%] Linking CXX executable routeloom_sdkv1_owner_sleep_tests
+[ 89%] Linking CXX executable routeloom_sdkv1_dev_route_tests
+[ 89%] Built target routeloom_sdkv1_owner_sleep_tests
+[ 89%] Building CXX object tests/cpp/CMakeFiles/routeloom_joiner_interop_peer.dir/joiner_interop_peer.cpp.o
+[ 89%] Built target routeloom_sdkv1_dev_route_tests
+[ 89%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_records_tests.dir/test_sdkv1_records.cpp.o
+[ 89%] Linking CXX executable routeloom_sdkv1_records_tests
+[ 89%] Built target routeloom_sdkv1_records_tests
+[ 89%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_store_tests.dir/test_sdkv1_store.cpp.o
+[ 89%] Linking CXX executable routeloom_sdkv1_store_tests
+[ 89%] Built target routeloom_sdkv1_store_tests
+[ 89%] Linking CXX executable routeloom_sdkv1_session_bank_tests
+[ 89%] Built target routeloom_sdkv1_session_bank_tests
+[ 90%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_membership_tests.dir/test_sdkv1_membership.cpp.o
+[ 90%] Linking CXX executable routeloom_sdkv1_membership_tests
+[ 90%] Linking CXX executable routeloom_sdkv1_coordinator_tests
+[ 90%] Built target routeloom_sdkv1_membership_tests
+[ 90%] Linking CXX executable routeloom_sdkv1_grant_renew_tests
+[ 90%] Built target routeloom_sdkv1_grant_renew_tests
+[ 90%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_revocation_tests.dir/test_sdkv1_revocation.cpp.o
+[ 90%] Built target routeloom_sdkv1_coordinator_tests
+[ 90%] Linking CXX executable routeloom_joiner_interop_peer
+[ 90%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_maintenance_tests.dir/test_sdkv1_maintenance.cpp.o
+[ 90%] Built target routeloom_joiner_interop_peer
+[ 91%] Building CXX object tests/cpp/CMakeFiles/routeloom_espnow_sdkv1_entropy_tests.dir/test_espnow_sdkv1_entropy.cpp.o
+[ 91%] Building CXX object tests/cpp/CMakeFiles/routeloom_espnow_sdkv1_entropy_tests.dir/__/__/components/routeloom_espnow/src/espnow_sdkv1_entropy.cpp.o
+[ 91%] Linking CXX executable routeloom_espnow_sdkv1_entropy_tests
+[ 91%] Built target routeloom_espnow_sdkv1_entropy_tests
+[ 92%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_blob_storage_tests.dir/test_sdkv1_blob_storage.cpp.o
+[ 92%] Linking CXX executable routeloom_sdkv1_maintenance_tests
+[ 92%] Built target routeloom_sdkv1_maintenance_tests
+[ 92%] Building CXX object tests/cpp/CMakeFiles/routeloom_edhoc_tests.dir/test_edhoc.cpp.o
+[ 92%] Linking CXX executable routeloom_sdkv1_blob_storage_tests
+[ 92%] Linking CXX executable routeloom_sdkv1_joiner_tests
+[ 92%] Built target routeloom_sdkv1_blob_storage_tests
+[ 93%] Linking CXX executable routeloom_edhoc_interop_peer
+[ 93%] Built target routeloom_edhoc_interop_peer
+[ 93%] Linking CXX executable fuzz_wire_frame
+[ 93%] Built target routeloom_sdkv1_joiner_tests
+[ 94%] Linking CXX executable fuzz_usb_codec
+[ 94%] Built target fuzz_wire_frame
+[ 94%] Linking CXX executable fuzz_autonomy
+[ 94%] Built target fuzz_usb_codec
+[ 94%] Building CXX object tests/fuzz/CMakeFiles/fuzz_endpoint.dir/fuzz_endpoint.cpp.o
+[ 94%] Built target fuzz_autonomy
+[ 94%] Linking CXX executable fuzz_host_ops
+[ 95%] Built target fuzz_host_ops
+[ 96%] Linking CXX executable fuzz_migration
+[ 96%] Built target fuzz_migration
+[ 96%] Building CXX object tests/fuzz/CMakeFiles/fuzz_cose.dir/fuzz_cose.cpp.o
+[ 96%] Linking CXX executable fuzz_endpoint
+[ 96%] Built target fuzz_endpoint
+[ 96%] Linking CXX executable routeloom_edhoc_tests
+[ 96%] Linking CXX executable fuzz_rlres1
+[ 96%] Built target fuzz_rlres1
+[ 97%] Linking CXX executable fuzz_sdkv1
+[ 98%] Linking CXX executable fuzz_cose
+[ 98%] Built target routeloom_edhoc_tests
+[ 98%] Linking CXX executable fuzz_sdkv1_ead
+[ 98%] Built target fuzz_sdkv1
+[ 98%] Built target fuzz_cose
+[ 99%] Building CXX object tests/fuzz/CMakeFiles/fuzz_sdkv1_join.dir/fuzz_sdkv1_join.cpp.o
+[ 99%] Built target fuzz_sdkv1_ead
+[ 99%] Linking CXX executable fuzz_sdkv1_join
+[ 99%] Built target fuzz_sdkv1_join
+[100%] Linking CXX executable routeloom_sdkv1_revocation_tests
+[100%] Built target routeloom_sdkv1_revocation_tests

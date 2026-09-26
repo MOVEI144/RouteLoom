@@ -1,0 +1,27 @@
+{
+  "boards": [
+    {
+      "name": "bridge",
+      "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+      "identity": {
+        "chip": "esp32c3",
+        "mac": "94:a9:90:6a:ee:c4",
+        "log": "flash-bridge-preflight.log"
+      }
+    },
+    {
+      "name": "ref-a",
+      "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00",
+      "identity": {
+        "chip": "esp32c3",
+        "mac": "94:a9:90:7a:b5:60",
+        "log": "flash-ref-a-preflight.log"
+      }
+    }
+  ],
+  "hold_s": 0.5,
+  "assert_skew_ms": 0.04,
+  "release_skew_ms": 1.475,
+  "errors": [],
+  "finished_unix": 1790376339.5960152
+}

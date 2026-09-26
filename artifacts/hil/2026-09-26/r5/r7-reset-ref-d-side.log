@@ -1,0 +1,36 @@
+[2026-09-25T22:19:09.021+00:00] !! connected /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00
+[2026-09-25T22:19:10.824+00:00] W (67084) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-25T22:19:12.626+00:00] I (68905) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-25T22:19:12.626+00:00] W (68905) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-25T22:19:12.626+00:00] I (68907) RouteLoomRef: discovery event=REDISCOVERY peer=4
+[2026-09-25T22:19:12.626+00:00] W (68912) RouteLoomRef: diagnostic reason=REDISCOVERY peer=4 message=none
+[2026-09-25T22:19:13.227+00:00] W (69422) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-25T22:19:13.227+00:00] W (69449) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-25T22:19:13.227+00:00] I (69472) RouteLoomRef: discovery event=PROBE_GEN_MISMATCH peer=4
+[2026-09-25T22:19:13.227+00:00] W (69472) RouteLoomRef: diagnostic reason=PROBE_GEN_MISMATCH peer=4 message=none
+[2026-09-25T22:19:15.029+00:00] I (71234) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-25T22:19:15.029+00:00] W (71234) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-25T22:19:16.633+00:00] W (72979) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-25T22:19:16.834+00:00] I (73060) RouteLoomRef: message origin=1 session=202 sequence=7 bytes=9
+[2026-09-25T22:19:19.637+00:00] I (75894) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-25T22:19:19.637+00:00] W (75895) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-25T22:19:24.043+00:00] W (80233) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-25T22:19:24.443+00:00] W (80729) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-25T22:19:25.044+00:00] W (81230) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-25T22:19:25.445+00:00] W (81731) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-25T22:19:50.881+00:00] W (107226) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=1 message=none
+[2026-09-25T22:19:50.881+00:00] W (107229) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=2 seq=1 att=1 peer=1 message=none
+[2026-09-25T22:19:52.884+00:00] W (109228) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=2 seq=1 att=2 peer=1 message=none
+[2026-09-25T22:19:59.294+00:00] I (115477) RouteLoomRef: message origin=1 session=202 sequence=21 bytes=9
+[2026-09-25T22:19:59.895+00:00] I (116200) RouteLoomRef: message origin=1 session=202 sequence=24 bytes=9
+[2026-09-25T22:20:00.696+00:00] I (116975) RouteLoomRef: message origin=1 session=202 sequence=27 bytes=9
+[2026-09-25T22:20:04.301+00:00] I (120489) RouteLoom: stack hwm main 10588 B
+[2026-09-25T22:20:13.312+00:00] I (129497) RouteLoomRef: discovery event=STALE peer=4
+[2026-09-25T22:20:13.312+00:00] W (129497) RouteLoomRef: diagnostic reason=STALE peer=4 message=none
+[2026-09-25T22:20:17.919+00:00] I (134229) RouteLoomRef: discovery event=PEER_CAPACITY peer=4
+[2026-09-25T22:20:17.919+00:00] W (134230) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=4 message=none
+[2026-09-25T22:21:04.189+00:00] I (180489) RouteLoom: stack hwm main 10588 B
+[2026-09-25T22:21:04.389+00:00] I (180599) RouteLoomRef: discovery event=PEER_CAPACITY peer=4
+[2026-09-25T22:21:04.389+00:00] W (180599) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=4 message=none
+[2026-09-25T22:22:04.272+00:00] I (240489) RouteLoom: stack hwm main 10588 B
+[2026-09-25T22:22:09.080+00:00] !! capture finished

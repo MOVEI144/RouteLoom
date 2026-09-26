@@ -1,0 +1,27 @@
+{
+  "requested": 9,
+  "host_accepted": 9,
+  "delivered": 6,
+  "stopped_reason": null,
+  "success_rate": 0.6666666666666666,
+  "rate_limit_retries": 0,
+  "elapsed_s": 11.48,
+  "latency_ms_median": 57.095,
+  "latency_ms_p95": 59.16,
+  "latency_ms_max": 59.41,
+  "by_destination": {
+    "2": {
+      "accepted": 3,
+      "delivered": 0
+    },
+    "4": {
+      "accepted": 3,
+      "delivered": 3
+    },
+    "5": {
+      "accepted": 3,
+      "delivered": 3
+    }
+  },
+  "evidence": "artifacts/hil/2026-09-26/r5/r8-after-ref-a-reset-9.jsonl"
+}

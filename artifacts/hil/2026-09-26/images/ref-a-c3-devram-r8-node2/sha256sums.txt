@@ -1,0 +1,10 @@
+c040a9719d4e95cd84bf6b85d56b98307b08ffc51051b892bc13b37661bc778a  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-c3-devram-r8-node2/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+711cd9ea0ba4bf3f7ea0ab516535b3a5d1641abf52729d5d036ec67ccf40ede7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-c3-devram-r8-node2/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+c040a9719d4e95cd84bf6b85d56b98307b08ffc51051b892bc13b37661bc778a  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-c3-devram-r8-node2/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+711cd9ea0ba4bf3f7ea0ab516535b3a5d1641abf52729d5d036ec67ccf40ede7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-c3-devram-r8-node2/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+505e9aba415227277d11f1e3be3d164c2f889995907d62845d6a9635a9740eff  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-c3-devram-r8-node2/build/bootloader/bootloader.bin
+e5b5d7f1f7589470e89ea12332069f4e65adbb817dd9d51cf1fea67049c12f2a  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-c3-devram-r8-node2/build/flasher_args.json
+068ab45eb37a4be22b3aea004e4e970cfbbf9a25bc0824c1572be5bf68a37fef  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-c3-devram-r8-node2/build/partition_table/partition-table.bin
+fe22397a22195bdc6f556c0cad4f43539580c9498787f059c896770bb6aa51de  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-c3-devram-r8-node2/build/ram-report.json
+a5474d02afd2064e799fe6b95db4b96e1f791b21dca02c1c3d43ff86033a73e9  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-c3-devram-r8-node2/build/routeloom_reference_node.bin
+e4b1028d5de990c8211965e06c16d65cc37675356696c3fb39fef46ba03377ec  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-c3-devram-r8-node2/build/size.json

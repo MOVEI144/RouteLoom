@@ -1,0 +1,27 @@
+[ 45%] Built target routeloom_edhoc_third_party
+[ 45%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/bootstrap_transport.cpp.o
+[ 45%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/config_cose.cpp.o
+[ 47%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/config_dev.cpp.o
+[ 47%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/config.cpp.o
+[ 47%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/discovery.cpp.o
+[ 47%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/config_wire.cpp.o
+[ 50%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/node.cpp.o
+[ 52%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/rlcw1.cpp.o
+[ 52%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_authority_transport.cpp.o
+[ 52%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_join_candidates.cpp.o
+[ 52%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_join_handshake.cpp.o
+[ 54%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_joiner.cpp.o
+[ 54%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_join_relay.cpp.o
+[ 56%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_membership.cpp.o
+[ 56%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_maintenance.cpp.o
+[ 58%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_handshake.cpp.o
+[ 58%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_security_coordinator.cpp.o
+[ 58%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_revocation.cpp.o
+[ 58%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/trust_manifest.cpp.o
+[ 60%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/trust_view.cpp.o
+[ 60%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/usb_bridge.cpp.o
+[ 60%] Linking CXX static library librouteloom_core.a
+[ 97%] Built target routeloom_core
+[100%] Building CXX object tests/cpp/CMakeFiles/routeloom_discovery_tests.dir/test_discovery.cpp.o
+[100%] Linking CXX executable routeloom_discovery_tests
+[100%] Built target routeloom_discovery_tests

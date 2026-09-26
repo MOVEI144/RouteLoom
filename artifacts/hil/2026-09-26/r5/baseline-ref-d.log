@@ -1,0 +1,9 @@
+[2026-09-25T21:57:56.827+00:00] !! connected /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00
+[2026-09-25T21:58:27.673+00:00] I (120) esp_image: segment 1: paddr=00039194 vaddr=40800000 sizeI (300487) RouteLoom: stack hwm main 10732 B
+[2026-09-25T21:59:27.774+00:00] I (360487) RouteLoom: stack hwm main 10732 B
+[2026-09-25T21:59:59.025+00:00] W (391799) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-25T22:00:16.053+00:00] I (408805) RouteLoomRef: discovery event=BOUND peer=2
+[2026-09-25T22:00:16.053+00:00] W (408805) RouteLoomRef: diagnostic reason=BOUND peer=2 message=none
+[2026-09-25T22:00:16.053+00:00] I (408835) RouteLoomRef: discovery event=REACHABLE peer=2
+[2026-09-25T22:00:16.053+00:00] W (408835) RouteLoomRef: diagnostic reason=REACHABLE peer=2 message=none
+[2026-09-25T22:00:26.873+00:00] !! capture finished

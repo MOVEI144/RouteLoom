@@ -1,0 +1,418 @@
+[  1%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/psk/edhoc_psk_message_2.c.o
+[  1%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/edhoc_error_internal.c.o
+[  1%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/psk/edhoc_psk_message_3.c.o
+[  1%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/classic/edhoc_classic_message_4.c.o
+[  2%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/classic/edhoc_classic_message_1.c.o
+[  2%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/edhoc.c.o
+[  3%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/classic/edhoc_classic_message_2.c.o
+[  3%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/classic/edhoc_classic_message_3.c.o
+[  3%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/edhoc_exporter_internal.c.o
+[  3%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/edhoc_cbor_internal.c.o
+[  4%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/edhoc_kdf_internal.c.o
+[  4%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/edhoc_transcript_hash_internal.c.o
+[  4%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/edhoc_ead_internal.c.o
+[  5%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/edhoc_key_slot_internal.c.o
+[  5%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/edhoc_mac_internal.c.o
+[  5%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/edhoc_cipher_internal.c.o
+[  6%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/edhoc_key_schedule_internal.c.o
+[  6%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/edhoc_plaintext_internal.c.o
+[  7%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/edhoc_credentials_internal.c.o
+[  7%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/edhoc_connection_id_internal.c.o
+[  7%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/library/core/edhoc_coap.c.o
+[  7%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_bstr_type_decode.c.o
+[  7%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_bstr_type_encode.c.o
+[  7%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_connection_identifier_encode.c.o
+[  8%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_connection_identifier_decode.c.o
+[  8%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_ead_decode.c.o
+[  9%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_ead_encode.c.o
+[  9%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_enc_structure_decode.c.o
+[  9%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_enc_structure_encode.c.o
+[ 10%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_id_cred_x_decode.c.o
+[ 10%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_id_cred_x_encode.c.o
+[ 10%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_info_decode.c.o
+[ 11%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_info_encode.c.o
+[ 11%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_int_type_decode.c.o
+[ 11%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_int_type_encode.c.o
+[ 11%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_message_1_decode.c.o
+[ 12%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_message_1_encode.c.o
+[ 12%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_message_2_decode.c.o
+[ 12%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_message_2_encode.c.o
+[ 13%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_message_3_decode.c.o
+[ 13%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_message_3_encode.c.o
+[ 13%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_message_4_decode.c.o
+[ 14%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_message_4_encode.c.o
+[ 14%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_plaintext_2_decode.c.o
+[ 14%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_message_error_encode.c.o
+[ 14%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_message_error_decode.c.o
+[ 15%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_plaintext_2_encode.c.o
+[ 15%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_plaintext_3_decode.c.o
+[ 15%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_plaintext_3_encode.c.o
+[ 16%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_plaintext_4_decode.c.o
+[ 16%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_plaintext_4_encode.c.o
+[ 16%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_plaintext_2a_decode.c.o
+[ 17%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_plaintext_2a_encode.c.o
+[ 17%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_plaintext_3a_encode.c.o
+[ 17%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_plaintext_3a_decode.c.o
+[ 18%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_plaintext_3b_decode.c.o
+[ 18%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_plaintext_3b_encode.c.o
+[ 18%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_sig_structure_decode.c.o
+[ 18%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/libedhoc/backends/cbor/src/backend_cbor_sig_structure_encode.c.o
+[ 19%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/zcbor/src/zcbor_common.c.o
+[ 19%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/zcbor/src/zcbor_decode.c.o
+[ 20%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/tf-psa-crypto/drivers/builtin/src/ccm.c.o
+[ 20%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/tf-psa-crypto/drivers/builtin/src/aes.c.o
+[ 20%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/zcbor/src/zcbor_encode.c.o
+[ 20%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/tf-psa-crypto/drivers/builtin/src/gcm.c.o
+[ 21%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/tf-psa-crypto/drivers/builtin/src/block_cipher.c.o
+[ 21%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/tf-psa-crypto/platform/platform_util.c.o
+[ 21%] Building C object components/routeloom/CMakeFiles/routeloom_edhoc_third_party.dir/third_party/tf-psa-crypto/utilities/constant_time.c.o
+[ 21%] Linking C static library librouteloom_edhoc_third_party.a
+[ 21%] Built target routeloom_edhoc_third_party
+[ 23%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/channel_plan.cpp.o
+[ 23%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/config.cpp.o
+[ 23%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/config_dev.cpp.o
+[ 23%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/config_cose.cpp.o
+[ 23%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/authority.cpp.o
+[ 24%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/autonomy_wire.cpp.o
+[ 24%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/bootstrap_transport.cpp.o
+[ 24%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/byte_io.cpp.o
+[ 24%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/config_wire.cpp.o
+[ 24%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/crc32.cpp.o
+[ 24%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/c_api.cpp.o
+[ 25%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/counter_store.cpp.o
+[ 25%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/device_credential.cpp.o
+[ 25%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/discovery.cpp.o
+[ 26%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/discovery_scope.cpp.o
+[ 26%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/endpoint_wire.cpp.o
+[ 26%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/gateway.cpp.o
+[ 26%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/group_replay.cpp.o
+[ 27%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/group.cpp.o
+[ 27%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/group_wire.cpp.o
+[ 27%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/kdf.cpp.o
+[ 28%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/key_schedule.cpp.o
+[ 28%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/migration.cpp.o
+[ 29%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/node.cpp.o
+[ 29%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/migration_wire.cpp.o
+[ 29%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/node_status.cpp.o
+[ 29%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/peer_state.cpp.o
+[ 30%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/power.cpp.o
+[ 30%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/replay.cpp.o
+[ 30%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/reply_peer_leases.cpp.o
+[ 31%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/rlcw1.cpp.o
+[ 31%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/rlres1.cpp.o
+[ 31%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/route_scale.cpp.o
+[ 31%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/routing.cpp.o
+[ 32%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_authority.cpp.o
+[ 32%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_authority_transport.cpp.o
+[ 32%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_blob_storage.cpp.o
+[ 33%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_ead.cpp.o
+[ 33%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_join_candidates.cpp.o
+[ 33%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_join_handshake.cpp.o
+[ 34%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_joiner.cpp.o
+[ 34%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_join_relay.cpp.o
+[ 34%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_join_transport.cpp.o
+[ 35%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_membership.cpp.o
+[ 35%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_maintenance.cpp.o
+[ 35%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_pop.cpp.o
+[ 35%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_records.cpp.o
+[ 36%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_handshake.cpp.o
+[ 36%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_boot_session.cpp.o
+[ 36%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_dev_session.cpp.o
+[ 37%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_legacy_purge.cpp.o
+[ 37%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_session_rtc.cpp.o
+[ 37%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_security_coordinator.cpp.o
+[ 38%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_session_wire.cpp.o
+[ 38%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_grant_renew.cpp.o
+[ 38%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_revocation.cpp.o
+[ 38%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_lifecycle_store.cpp.o
+[ 39%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_store.cpp.o
+[ 39%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/security_floor.cpp.o
+[ 39%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_group_keys.cpp.o
+[ 40%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_group_security.cpp.o
+[ 40%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/session_bank.cpp.o
+[ 40%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/status.cpp.o
+[ 41%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/telemetry.cpp.o
+[ 41%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/trust_manifest.cpp.o
+[ 41%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/trust_store.cpp.o
+[ 42%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/trust_view.cpp.o
+[ 42%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/usb_bridge.cpp.o
+[ 42%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/usb_codec.cpp.o
+[ 42%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/usb_host_ops.cpp.o
+[ 43%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/usb_session.cpp.o
+[ 43%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/wire.cpp.o
+[ 43%] Building C object components/routeloom/CMakeFiles/routeloom_core.dir/third_party/micro-ecc/uECC.c.o
+[ 44%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/edhoc/edhoc_session.cpp.o
+[ 44%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/edhoc/edhoc_aead_builtin.cpp.o
+[ 44%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/edhoc/aead_gcm_builtin.cpp.o
+[ 45%] Building C object components/routeloom/CMakeFiles/routeloom_core.dir/src/edhoc/edhoc_port.c.o
+[ 45%] Linking CXX static library librouteloom_core.a
+[ 45%] Built target routeloom_core
+[ 45%] Building CXX object tests/cpp/CMakeFiles/routeloom_routing_tests.dir/test_routing_sims.cpp.o
+[ 46%] Building CXX object tests/cpp/CMakeFiles/routeloom_golden_tests.dir/test_golden.cpp.o
+[ 47%] Building CXX object tests/cpp/CMakeFiles/routeloom_routing_scale_tests.dir/test_routing_scale.cpp.o
+[ 47%] Building CXX object tests/cpp/CMakeFiles/routeloom_core_tests.dir/test_main.cpp.o
+[ 47%] Building CXX object tests/cpp/CMakeFiles/routeloom_usb_tests.dir/test_usb.cpp.o
+[ 48%] Building CXX object tests/cpp/CMakeFiles/routeloom_host_ops_tests.dir/test_host_ops.cpp.o
+[ 48%] Building CXX object tests/cpp/CMakeFiles/routeloom_ledger_tests.dir/test_ledger.cpp.o
+[ 49%] Building CXX object tests/cpp/CMakeFiles/routeloom_power_tests.dir/test_power.cpp.o
+[ 49%] Linking CXX executable routeloom_ledger_tests
+[ 49%] Built target routeloom_ledger_tests
+[ 49%] Building CXX object tests/cpp/CMakeFiles/routeloom_hardening_tests.dir/test_hardening.cpp.o
+[ 49%] Linking CXX executable routeloom_golden_tests
+[ 49%] Built target routeloom_golden_tests
+[ 49%] Building CXX object tests/cpp/CMakeFiles/routeloom_autonomy_tests.dir/test_autonomy.cpp.o
+[ 49%] Linking CXX executable routeloom_core_tests
+[ 49%] Built target routeloom_core_tests
+[ 50%] Building CXX object tests/cpp/CMakeFiles/routeloom_endpoint_tests.dir/test_endpoint.cpp.o
+[ 51%] Linking CXX executable routeloom_routing_tests
+[ 51%] Built target routeloom_routing_tests
+[ 51%] Building CXX object tests/cpp/CMakeFiles/routeloom_gateway_tests.dir/test_gateway.cpp.o
+[ 51%] Linking CXX executable routeloom_autonomy_tests
+[ 51%] Linking CXX executable routeloom_endpoint_tests
+[ 51%] Built target routeloom_autonomy_tests
+[ 52%] Building CXX object tests/cpp/CMakeFiles/routeloom_discovery_tests.dir/test_discovery.cpp.o
+[ 52%] Built target routeloom_endpoint_tests
+[ 52%] Building CXX object tests/cpp/CMakeFiles/routeloom_scope_tests.dir/test_scope.cpp.o
+[ 52%] Linking CXX executable routeloom_routing_scale_tests
+[ 52%] Linking CXX executable routeloom_host_ops_tests
+[ 52%] Linking CXX executable routeloom_hardening_tests
+[ 52%] Built target routeloom_routing_scale_tests
+[ 53%] Building CXX object tests/cpp/CMakeFiles/routeloom_telemetry_tests.dir/test_telemetry.cpp.o
+[ 53%] Built target routeloom_hardening_tests
+[ 54%] Building CXX object tests/cpp/CMakeFiles/routeloom_congestion_tests.dir/test_congestion.cpp.o
+[ 54%] Built target routeloom_host_ops_tests
+[ 55%] Building CXX object tests/cpp/CMakeFiles/routeloom_load_routing_tests.dir/test_routing_load.cpp.o
+[ 56%] Linking CXX executable routeloom_usb_tests
+[ 56%] Linking CXX executable routeloom_power_tests
+[ 56%] Built target routeloom_usb_tests
+[ 56%] Building CXX object tests/cpp/CMakeFiles/routeloom_channel_tests.dir/test_channel.cpp.o
+[ 56%] Built target routeloom_power_tests
+[ 56%] Building CXX object tests/cpp/CMakeFiles/routeloom_migration_tests.dir/test_migration.cpp.o
+[ 56%] Linking CXX executable routeloom_discovery_tests
+[ 56%] Linking CXX executable routeloom_scope_tests
+[ 56%] Built target routeloom_scope_tests
+[ 56%] Built target routeloom_discovery_tests
+[ 56%] Building CXX object tests/cpp/CMakeFiles/routeloom_migration_wire_tests.dir/test_migration_wire.cpp.o
+[ 57%] Building CXX object tests/cpp/CMakeFiles/routeloom_baseline_diff_tests.dir/test_baseline_diff.cpp.o
+[ 58%] Linking CXX executable routeloom_migration_tests
+[ 58%] Built target routeloom_migration_tests
+[ 59%] Building CXX object tests/cpp/CMakeFiles/routeloom_config_tests.dir/test_config.cpp.o
+[ 59%] Linking CXX executable routeloom_gateway_tests
+[ 59%] Linking CXX executable routeloom_telemetry_tests
+[ 59%] Built target routeloom_gateway_tests
+[ 60%] Building CXX object tests/cpp/CMakeFiles/routeloom_security_floor_tests.dir/test_security_floor.cpp.o
+[ 60%] Linking CXX executable routeloom_load_routing_tests
+[ 60%] Built target routeloom_telemetry_tests
+[ 61%] Building CXX object tests/cpp/CMakeFiles/routeloom_cose_tests.dir/test_config_cose.cpp.o
+[ 61%] Linking CXX executable routeloom_congestion_tests
+[ 61%] Linking CXX executable routeloom_migration_wire_tests
+[ 61%] Linking CXX executable routeloom_security_floor_tests
+[ 61%] Built target routeloom_load_routing_tests
+[ 61%] Building CXX object tests/cpp/CMakeFiles/routeloom_config_wire_tests.dir/test_config_wire.cpp.o
+[ 61%] Built target routeloom_migration_wire_tests
+[ 61%] Building CXX object tests/cpp/CMakeFiles/routeloom_trust_store_tests.dir/test_trust_store.cpp.o
+[ 61%] Built target routeloom_congestion_tests
+[ 61%] Built target routeloom_security_floor_tests
+[ 61%] Building CXX object tests/cpp/CMakeFiles/routeloom_trust_manifest_tests.dir/test_trust_manifest.cpp.o
+[ 61%] Building CXX object tests/cpp/CMakeFiles/routeloom_credential_tests.dir/test_device_credential.cpp.o
+[ 61%] Linking CXX executable routeloom_cose_tests
+[ 61%] Built target routeloom_cose_tests
+[ 62%] Building CXX object tests/cpp/CMakeFiles/routeloom_kdf_tests.dir/test_kdf.cpp.o
+[ 63%] Linking CXX executable routeloom_credential_tests
+[ 63%] Linking CXX executable routeloom_trust_store_tests
+[ 63%] Built target routeloom_credential_tests
+[ 63%] Building CXX object tests/cpp/CMakeFiles/routeloom_key_schedule_tests.dir/test_key_schedule.cpp.o
+[ 63%] Built target routeloom_trust_store_tests
+[ 63%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_authority_tests.dir/test_sdkv1_authority.cpp.o
+[ 64%] Linking CXX executable routeloom_trust_manifest_tests
+[ 64%] Linking CXX executable routeloom_kdf_tests
+[ 64%] Built target routeloom_trust_manifest_tests
+[ 64%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_authority_transport_tests.dir/test_sdkv1_authority_transport.cpp.o
+[ 64%] Built target routeloom_kdf_tests
+[ 64%] Building CXX object tests/cpp/CMakeFiles/routeloom_rlres1_tests.dir/test_rlres1.cpp.o
+[ 64%] Linking CXX executable routeloom_channel_tests
+[ 64%] Built target routeloom_channel_tests
+[ 64%] Building CXX object tests/cpp/CMakeFiles/routeloom_reply_lease_tests.dir/test_reply_peer_leases.cpp.o
+[ 64%] Linking CXX executable routeloom_config_wire_tests
+[ 64%] Linking CXX executable routeloom_baseline_diff_tests
+[ 64%] Built target routeloom_config_wire_tests
+[ 64%] Building CXX object tests/cpp/CMakeFiles/routeloom_reply_admission_tests.dir/test_reply_admission.cpp.o
+[ 64%] Built target routeloom_baseline_diff_tests
+[ 64%] Building CXX object tests/cpp/CMakeFiles/routeloom_espnow_runtime_tests.dir/test_espnow_runtime.cpp.o
+[ 65%] Linking CXX executable routeloom_reply_lease_tests
+[ 65%] Linking CXX executable routeloom_sdkv1_authority_transport_tests
+[ 65%] Built target routeloom_reply_lease_tests
+[ 65%] Linking CXX executable routeloom_rlres1_tests
+[ 65%] Building C object tests/cpp/CMakeFiles/routeloom_c_header_test.dir/c_api_smoke.c.o
+[ 66%] Linking CXX executable routeloom_c_header_test
+[ 66%] Built target routeloom_sdkv1_authority_transport_tests
+[ 66%] Built target routeloom_rlres1_tests
+[ 67%] Building CXX object tests/cpp/CMakeFiles/routeloom_trust_view_tests.dir/test_trust_view.cpp.o
+[ 67%] Building CXX object tests/cpp/CMakeFiles/routeloom_property_tests.dir/test_properties.cpp.o
+[ 67%] Built target routeloom_c_header_test
+[ 68%] Building CXX object tests/cpp/CMakeFiles/routeloom_espnow_runtime_tests.dir/espnow_idf_stubs/idf_stubs.cpp.o
+[ 69%] Linking CXX executable routeloom_key_schedule_tests
+[ 69%] Building CXX object tests/cpp/CMakeFiles/routeloom_espnow_runtime_tests.dir/__/__/components/routeloom_espnow/src/espnow_runtime.cpp.o
+[ 69%] Built target routeloom_key_schedule_tests
+[ 70%] Building CXX object tests/cpp/CMakeFiles/routeloom_applied_tests.dir/test_applied.cpp.o
+[ 70%] Linking CXX executable routeloom_config_tests
+[ 70%] Built target routeloom_config_tests
+[ 71%] Building CXX object tests/cpp/CMakeFiles/routeloom_fault_tests.dir/test_fault_injection.cpp.o
+[ 71%] Linking CXX executable routeloom_trust_view_tests
+[ 71%] Built target routeloom_trust_view_tests
+[ 71%] Building CXX object tests/cpp/CMakeFiles/routeloom_dedup_tests.dir/test_dedup.cpp.o
+[ 72%] Linking CXX executable routeloom_sdkv1_authority_tests
+[ 72%] Built target routeloom_sdkv1_authority_tests
+[ 72%] Building CXX object tests/cpp/CMakeFiles/routeloom_node_status_tests.dir/test_node_status.cpp.o
+[ 72%] Building CXX object tests/cpp/CMakeFiles/routeloom_peer_state_tests.dir/test_peer_state.cpp.o
+[ 72%] Linking CXX executable routeloom_espnow_runtime_tests
+[ 72%] Built target routeloom_espnow_runtime_tests
+[ 72%] Building CXX object tests/cpp/CMakeFiles/routeloom_group_tests.dir/test_group.cpp.o
+[ 72%] Linking CXX executable routeloom_reply_admission_tests
+[ 72%] Linking CXX executable routeloom_peer_state_tests
+[ 72%] Built target routeloom_reply_admission_tests
+[ 72%] Building CXX object tests/cpp/CMakeFiles/routeloom_session_tests.dir/test_session.cpp.o
+[ 72%] Built target routeloom_peer_state_tests
+[ 73%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_golden_tests.dir/test_sdkv1_golden.cpp.o
+[ 73%] Linking CXX executable routeloom_applied_tests
+[ 73%] Built target routeloom_applied_tests
+[ 73%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_ead_tests.dir/test_sdkv1_ead.cpp.o
+[ 74%] Linking CXX executable routeloom_property_tests
+[ 74%] Built target routeloom_property_tests
+[ 74%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_session_wire_tests.dir/test_sdkv1_session_wire.cpp.o
+[ 74%] Linking CXX executable routeloom_sdkv1_golden_tests
+[ 74%] Built target routeloom_sdkv1_golden_tests
+[ 74%] Linking CXX executable routeloom_dedup_tests
+[ 75%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_handshake_tests.dir/test_sdkv1_handshake.cpp.o
+[ 75%] Built target routeloom_dedup_tests
+[ 75%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_bootstrap_tests.dir/test_sdkv1_bootstrap.cpp.o
+[ 75%] Linking CXX executable routeloom_fault_tests
+[ 76%] Linking CXX executable routeloom_node_status_tests
+[ 76%] Built target routeloom_fault_tests
+[ 76%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_join_transport_tests.dir/test_sdkv1_join_transport.cpp.o
+[ 76%] Built target routeloom_node_status_tests
+[ 76%] Linking CXX executable routeloom_sdkv1_ead_tests
+[ 77%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_join_relay_tests.dir/test_sdkv1_join_relay.cpp.o
+[ 77%] Built target routeloom_sdkv1_ead_tests
+[ 78%] Linking CXX executable routeloom_sdkv1_session_wire_tests
+[ 78%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_join_handshake_tests.dir/test_sdkv1_join_handshake.cpp.o
+[ 78%] Built target routeloom_sdkv1_session_wire_tests
+[ 78%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_join_candidates_tests.dir/test_sdkv1_join_candidates.cpp.o
+[ 79%] Linking CXX executable routeloom_sdkv1_join_candidates_tests
+[ 79%] Built target routeloom_sdkv1_join_candidates_tests
+[ 79%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_joiner_tests.dir/test_sdkv1_joiner.cpp.o
+[ 80%] Linking CXX executable routeloom_group_tests
+[ 81%] Linking CXX executable routeloom_sdkv1_join_transport_tests
+[ 81%] Built target routeloom_group_tests
+[ 81%] Linking CXX executable routeloom_sdkv1_join_handshake_tests
+[ 81%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_dev_keys_tests.dir/test_sdkv1_dev_keys.cpp.o
+[ 81%] Built target routeloom_sdkv1_join_transport_tests
+[ 81%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_legacy_purge_tests.dir/test_sdkv1_legacy_purge.cpp.o
+[ 81%] Built target routeloom_sdkv1_join_handshake_tests
+[ 81%] Linking CXX executable routeloom_sdkv1_handshake_tests
+[ 81%] Building CXX object tests/cpp/CMakeFiles/routeloom_nvs_legacy_purge_tests.dir/test_nvs_legacy_purge.cpp.o
+[ 81%] Linking CXX executable routeloom_sdkv1_dev_keys_tests
+[ 81%] Building CXX object tests/cpp/CMakeFiles/routeloom_nvs_legacy_purge_tests.dir/__/__/components/routeloom_espnow/src/nvs_legacy_purge.cpp.o
+[ 81%] Built target routeloom_sdkv1_dev_keys_tests
+[ 81%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_dev_session_tests.dir/test_sdkv1_dev_session.cpp.o
+[ 82%] Linking CXX executable routeloom_sdkv1_legacy_purge_tests
+[ 82%] Built target routeloom_sdkv1_handshake_tests
+[ 83%] Linking CXX executable routeloom_session_tests
+[ 83%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_session_rtc_tests.dir/test_sdkv1_session_rtc.cpp.o
+[ 84%] Linking CXX executable routeloom_nvs_legacy_purge_tests
+[ 84%] Built target routeloom_sdkv1_legacy_purge_tests
+[ 84%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_boot_session_tests.dir/test_sdkv1_boot_session.cpp.o
+[ 85%] Linking CXX executable routeloom_sdkv1_boot_session_tests
+[ 85%] Built target routeloom_nvs_legacy_purge_tests
+[ 86%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_coordinator_tests.dir/test_sdkv1_security_coordinator.cpp.o
+[ 86%] Built target routeloom_sdkv1_boot_session_tests
+[ 86%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_owner_sleep_tests.dir/test_sdkv1_owner_sleep.cpp.o
+[ 86%] Built target routeloom_session_tests
+[ 87%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_dev_route_tests.dir/test_sdkv1_dev_route.cpp.o
+[ 88%] Linking CXX executable routeloom_sdkv1_dev_session_tests
+[ 88%] Built target routeloom_sdkv1_dev_session_tests
+[ 88%] Building CXX object tests/cpp/CMakeFiles/routeloom_joiner_interop_peer.dir/joiner_interop_peer.cpp.o
+[ 88%] Linking CXX executable routeloom_sdkv1_session_rtc_tests
+[ 88%] Linking CXX executable routeloom_sdkv1_join_relay_tests
+[ 88%] Built target routeloom_sdkv1_session_rtc_tests
+[ 88%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_records_tests.dir/test_sdkv1_records.cpp.o
+[ 88%] Built target routeloom_sdkv1_join_relay_tests
+[ 88%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_store_tests.dir/test_sdkv1_store.cpp.o
+[ 88%] Linking CXX executable routeloom_sdkv1_bootstrap_tests
+[ 88%] Linking CXX executable routeloom_sdkv1_records_tests
+[ 88%] Built target routeloom_sdkv1_bootstrap_tests
+[ 88%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_session_bank_tests.dir/test_sdkv1_session_bank.cpp.o
+[ 88%] Built target routeloom_sdkv1_records_tests
+[ 89%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_membership_tests.dir/test_sdkv1_membership.cpp.o
+[ 89%] Linking CXX executable routeloom_sdkv1_dev_route_tests
+[ 90%] Linking CXX executable routeloom_sdkv1_owner_sleep_tests
+[ 90%] Linking CXX executable routeloom_sdkv1_session_bank_tests
+[ 90%] Built target routeloom_sdkv1_session_bank_tests
+[ 90%] Linking CXX executable routeloom_sdkv1_membership_tests
+[ 90%] Built target routeloom_sdkv1_dev_route_tests
+[ 90%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_grant_renew_tests.dir/test_sdkv1_grant_renew.cpp.o
+[ 90%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_revocation_tests.dir/test_sdkv1_revocation.cpp.o
+[ 90%] Built target routeloom_sdkv1_owner_sleep_tests
+[ 90%] Linking CXX executable routeloom_sdkv1_grant_renew_tests
+[ 90%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_maintenance_tests.dir/test_sdkv1_maintenance.cpp.o
+[ 90%] Built target routeloom_sdkv1_membership_tests
+[ 91%] Building CXX object tests/cpp/CMakeFiles/routeloom_espnow_sdkv1_entropy_tests.dir/test_espnow_sdkv1_entropy.cpp.o
+[ 91%] Built target routeloom_sdkv1_grant_renew_tests
+[ 92%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_blob_storage_tests.dir/test_sdkv1_blob_storage.cpp.o
+[ 92%] Building CXX object tests/cpp/CMakeFiles/routeloom_espnow_sdkv1_entropy_tests.dir/__/__/components/routeloom_espnow/src/espnow_sdkv1_entropy.cpp.o
+[ 92%] Linking CXX executable routeloom_espnow_sdkv1_entropy_tests
+[ 92%] Linking CXX executable routeloom_sdkv1_store_tests
+[ 92%] Built target routeloom_espnow_sdkv1_entropy_tests
+[ 92%] Building CXX object tests/cpp/CMakeFiles/routeloom_edhoc_tests.dir/test_edhoc.cpp.o
+[ 92%] Built target routeloom_sdkv1_store_tests
+[ 92%] Building CXX object tests/cpp/CMakeFiles/routeloom_edhoc_interop_peer.dir/edhoc_interop_peer.cpp.o
+[ 92%] Linking CXX executable routeloom_sdkv1_blob_storage_tests
+[ 92%] Linking CXX executable routeloom_sdkv1_maintenance_tests
+[ 92%] Built target routeloom_sdkv1_blob_storage_tests
+[ 92%] Building C object tests/cpp/CMakeFiles/routeloom_edhoc_tests.dir/edhoc_probe.c.o
+[ 92%] Building CXX object tests/fuzz/CMakeFiles/fuzz_wire_frame.dir/fuzz_wire_frame.cpp.o
+[ 92%] Built target routeloom_sdkv1_maintenance_tests
+[ 92%] Building CXX object tests/fuzz/CMakeFiles/fuzz_usb_codec.dir/fuzz_usb_codec.cpp.o
+[ 93%] Linking CXX executable routeloom_edhoc_interop_peer
+[ 93%] Built target routeloom_edhoc_interop_peer
+[ 93%] Building CXX object tests/fuzz/CMakeFiles/fuzz_autonomy.dir/fuzz_autonomy.cpp.o
+[ 93%] Linking CXX executable routeloom_edhoc_tests
+[ 93%] Linking CXX executable routeloom_joiner_interop_peer
+[ 93%] Built target routeloom_edhoc_tests
+[ 93%] Building CXX object tests/fuzz/CMakeFiles/fuzz_endpoint.dir/fuzz_endpoint.cpp.o
+[ 93%] Built target routeloom_joiner_interop_peer
+[ 94%] Building CXX object tests/fuzz/CMakeFiles/fuzz_host_ops.dir/fuzz_host_ops.cpp.o
+[ 95%] Linking CXX executable fuzz_usb_codec
+[ 95%] Built target fuzz_usb_codec
+[ 95%] Building CXX object tests/fuzz/CMakeFiles/fuzz_migration.dir/fuzz_migration.cpp.o
+[ 95%] Linking CXX executable fuzz_wire_frame
+[ 95%] Built target fuzz_wire_frame
+[ 95%] Building CXX object tests/fuzz/CMakeFiles/fuzz_cose.dir/fuzz_cose.cpp.o
+[ 95%] Linking CXX executable fuzz_autonomy
+[ 95%] Built target fuzz_autonomy
+[ 95%] Building CXX object tests/fuzz/CMakeFiles/fuzz_rlres1.dir/fuzz_rlres1.cpp.o
+[ 95%] Linking CXX executable fuzz_endpoint
+[ 95%] Built target fuzz_endpoint
+[ 95%] Building CXX object tests/fuzz/CMakeFiles/fuzz_sdkv1.dir/fuzz_sdkv1.cpp.o
+[ 95%] Linking CXX executable routeloom_sdkv1_coordinator_tests
+[ 96%] Linking CXX executable fuzz_migration
+[ 96%] Linking CXX executable fuzz_host_ops
+[ 96%] Built target fuzz_migration
+[ 96%] Building CXX object tests/fuzz/CMakeFiles/fuzz_sdkv1_ead.dir/fuzz_sdkv1_ead.cpp.o
+[ 96%] Built target fuzz_host_ops
+[ 97%] Building CXX object tests/fuzz/CMakeFiles/fuzz_sdkv1_join.dir/fuzz_sdkv1_join.cpp.o
+[ 98%] Linking CXX executable fuzz_cose
+[ 98%] Built target routeloom_sdkv1_coordinator_tests
+[ 98%] Built target fuzz_cose
+[ 98%] Linking CXX executable fuzz_rlres1
+[ 98%] Built target fuzz_rlres1
+[ 99%] Linking CXX executable fuzz_sdkv1
+[ 99%] Built target fuzz_sdkv1
+[ 99%] Linking CXX executable fuzz_sdkv1_ead
+[ 99%] Built target fuzz_sdkv1_ead
+[ 99%] Linking CXX executable routeloom_sdkv1_joiner_tests
+[ 99%] Linking CXX executable fuzz_sdkv1_join
+[ 99%] Built target routeloom_sdkv1_joiner_tests
+[ 99%] Built target fuzz_sdkv1_join
+[100%] Linking CXX executable routeloom_sdkv1_revocation_tests
+[100%] Built target routeloom_sdkv1_revocation_tests

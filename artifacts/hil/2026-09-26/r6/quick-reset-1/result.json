@@ -1,0 +1,1017 @@
+{
+  "board": "ref-a",
+  "identity": {
+    "chip": "esp32c3",
+    "mac": "94:a9:90:7a:b5:60",
+    "log": "flash-ref-a-preflight.log"
+  },
+  "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00",
+  "destination": 2,
+  "cycles": 1,
+  "sends": 5,
+  "hold_s": 0.5,
+  "send_gap_s": 1.0,
+  "started_unix": 1790378287.18716,
+  "baseline": [
+    {
+      "label": "B0",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 1
+      },
+      "admitted_unix": 1790378288.1898615,
+      "delivery": {
+        "request": 1,
+        "destination": 2,
+        "state": "delivered",
+        "reason": "END_RECEIVED",
+        "msg_session": 208,
+        "msg_seq": 1,
+        "updated_ms": 1790378291594
+      },
+      "latency_ms": 3409.29
+    },
+    {
+      "label": "B1",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 2
+      },
+      "admitted_unix": 1790378292.600621,
+      "delivery": {
+        "request": 2,
+        "destination": 2,
+        "state": "delivered",
+        "reason": "END_RECEIVED",
+        "msg_session": 208,
+        "msg_seq": 9,
+        "updated_ms": 1790378292650
+      },
+      "latency_ms": 52.26
+    }
+  ],
+  "cycle_results": [
+    {
+      "cycle": 0,
+      "released_unix": 1790378294.1542969,
+      "actual_hold_s": 0.501,
+      "sends": [
+        {
+          "label": "C0-0",
+          "admission_attempts": 1,
+          "response": {
+            "accepted": true,
+            "request": 3
+          },
+          "admitted_unix": 1790378294.1561005,
+          "delivery": {
+            "request": 3,
+            "destination": 2,
+            "state": "failed",
+            "reason": "HOP_ACCEPT_TIMEOUT",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "updated_ms": 1790378294690
+          },
+          "latency_ms": 569.5,
+          "offset_s": 0.571
+        },
+        {
+          "label": "C0-1",
+          "admission_attempts": 1,
+          "response": {
+            "accepted": true,
+            "request": 4
+          },
+          "admitted_unix": 1790378295.727984,
+          "delivery": {
+            "request": 4,
+            "destination": 2,
+            "state": "delivered",
+            "reason": "END_RECEIVED",
+            "msg_session": 208,
+            "msg_seq": 12,
+            "updated_ms": 1790378297356
+          },
+          "latency_ms": 1655.58,
+          "offset_s": 3.229
+        },
+        {
+          "label": "C0-2",
+          "admission_attempts": 1,
+          "response": {
+            "accepted": true,
+            "request": 5
+          },
+          "admitted_unix": 1790378298.385078,
+          "delivery": {
+            "request": 5,
+            "destination": 2,
+            "state": "delivered",
+            "reason": "END_RECEIVED",
+            "msg_session": 208,
+            "msg_seq": 15,
+            "updated_ms": 1790378298429
+          },
+          "latency_ms": 52.21,
+          "offset_s": 4.283
+        },
+        {
+          "label": "C0-3",
+          "admission_attempts": 1,
+          "response": {
+            "accepted": true,
+            "request": 6
+          },
+          "admitted_unix": 1790378299.4395866,
+          "delivery": {
+            "request": 6,
+            "destination": 2,
+            "state": "delivered",
+            "reason": "END_RECEIVED",
+            "msg_session": 208,
+            "msg_seq": 16,
+            "updated_ms": 1790378299492
+          },
+          "latency_ms": 105.16,
+          "offset_s": 5.39
+        },
+        {
+          "label": "C0-4",
+          "admission_attempts": 1,
+          "response": {
+            "accepted": true,
+            "request": 7
+          },
+          "admitted_unix": 1790378300.546678,
+          "delivery": {
+            "request": 7,
+            "destination": 2,
+            "state": "delivered",
+            "reason": "END_RECEIVED",
+            "msg_session": 208,
+            "msg_seq": 17,
+            "updated_ms": 1790378300599
+          },
+          "latency_ms": 104.63,
+          "offset_s": 6.497
+        }
+      ],
+      "recovery_s": 1.574,
+      "delivered": 4,
+      "idempotency_full": 0,
+      "events_tail": {
+        "events": [
+          {
+            "seq": 0,
+            "ms": 1790378282476,
+            "kind": "adapter",
+            "state": "connected"
+          },
+          {
+            "seq": 1,
+            "ms": 1790378282479,
+            "kind": "hello_ack",
+            "version": 1,
+            "node": 1,
+            "boot": 208,
+            "network": 1380712449,
+            "capability": 519
+          },
+          {
+            "seq": 2,
+            "ms": 1790378282482,
+            "kind": "auth_ok",
+            "session": 17968963328943807140
+          },
+          {
+            "seq": 3,
+            "ms": 1790378282482,
+            "kind": "credit_grant",
+            "grant_frames": 8,
+            "grant_bytes": 16384
+          },
+          {
+            "seq": 4,
+            "ms": 1790378282514,
+            "kind": "dispatch",
+            "detail": "lease up 00000000000000d00000000000000001"
+          },
+          {
+            "seq": 5,
+            "ms": 1790378282516,
+            "kind": "credit_grant",
+            "grant_frames": 9,
+            "grant_bytes": 16480
+          },
+          {
+            "seq": 6,
+            "ms": 1790378282517,
+            "kind": "host_ops_rx",
+            "request": 1,
+            "body_len": 27
+          },
+          {
+            "seq": 7,
+            "ms": 1790378282524,
+            "kind": "node_joined",
+            "node": "0000000000000001",
+            "gateway": "0000000000000001",
+            "reason": "gateway_attached",
+            "status": {
+              "node": "0000000000000001",
+              "role": "gateway",
+              "connected": true,
+              "listed": true,
+              "neighbor": false,
+              "direct": true,
+              "hops": 0,
+              "next_hop": null,
+              "route_metric": null,
+              "link_cost": null,
+              "rssi_dbm": null,
+              "rssi_avg_dbm": null,
+              "telemetry_stale": false,
+              "last_heard_ms": null,
+              "heard_age_ms": null,
+              "updated_ms": 1790378282524,
+              "changed_ms": 1790378282524
+            }
+          },
+          {
+            "seq": 8,
+            "ms": 1790378288191,
+            "kind": "credit_grant",
+            "grant_frames": 10,
+            "grant_bytes": 16552
+          },
+          {
+            "seq": 9,
+            "ms": 1790378288191,
+            "kind": "delivery_event",
+            "request": 1,
+            "state": "accepted",
+            "msg_session": 208,
+            "msg_seq": 1,
+            "reason": "TX_ACCEPTED"
+          },
+          {
+            "seq": 10,
+            "ms": 1790378288191,
+            "kind": "delivery_event",
+            "request": 1,
+            "state": "queued",
+            "msg_session": 208,
+            "msg_seq": 1,
+            "reason": "QUEUED"
+          },
+          {
+            "seq": 11,
+            "ms": 1790378288201,
+            "kind": "diagnostic",
+            "peer": 2,
+            "reason": "SESSION_PENDING",
+            "msg_session": 208,
+            "msg_seq": 1
+          },
+          {
+            "seq": 12,
+            "ms": 1790378289385,
+            "kind": "diagnostic",
+            "peer": 2,
+            "reason": "PROBE_GEN_MISMATCH",
+            "msg_session": null,
+            "msg_seq": null
+          },
+          {
+            "seq": 13,
+            "ms": 1790378289407,
+            "kind": "diagnostic",
+            "peer": 2,
+            "reason": "REACHABLE",
+            "msg_session": null,
+            "msg_seq": null
+          },
+          {
+            "seq": 14,
+            "ms": 1790378291415,
+            "kind": "diagnostic",
+            "peer": 2,
+            "reason": "PEER_RESTARTED_ROUTES_FLUSHED",
+            "msg_session": null,
+            "msg_seq": null
+          },
+          {
+            "seq": 15,
+            "ms": 1790378291505,
+            "kind": "delivery_event",
+            "request": 1,
+            "state": "waiting-for-mac",
+            "msg_session": 208,
+            "msg_seq": 1,
+            "reason": "TX_MAC_PENDING"
+          },
+          {
+            "seq": 16,
+            "ms": 1790378291516,
+            "kind": "delivery_event",
+            "request": 1,
+            "state": "waiting-for-hop-accept",
+            "msg_session": 208,
+            "msg_seq": 1,
+            "reason": "HOP_ACCEPT_PENDING"
+          },
+          {
+            "seq": 17,
+            "ms": 1790378291556,
+            "kind": "delivery_event",
+            "request": 1,
+            "state": "waiting-for-mac",
+            "msg_session": 208,
+            "msg_seq": 1,
+            "reason": "TX_MAC_PENDING"
+          },
+          {
+            "seq": 18,
+            "ms": 1790378291565,
+            "kind": "delivery_event",
+            "request": 1,
+            "state": "waiting-for-hop-accept",
+            "msg_session": 208,
+            "msg_seq": 1,
+            "reason": "HOP_ACCEPT_PENDING"
+          },
+          {
+            "seq": 19,
+            "ms": 1790378291578,
+            "kind": "delivery_event",
+            "request": 1,
+            "state": "waiting-for-end-receipt",
+            "msg_session": 208,
+            "msg_seq": 1,
+            "reason": "END_RECEIPT_PENDING"
+          },
+          {
+            "seq": 20,
+            "ms": 1790378291594,
+            "kind": "delivery_event",
+            "request": 1,
+            "state": "delivered",
+            "msg_session": 208,
+            "msg_seq": 1,
+            "reason": "END_RECEIVED"
+          },
+          {
+            "seq": 21,
+            "ms": 1790378292603,
+            "kind": "credit_grant",
+            "grant_frames": 11,
+            "grant_bytes": 16624
+          },
+          {
+            "seq": 22,
+            "ms": 1790378292603,
+            "kind": "delivery_event",
+            "request": 2,
+            "state": "accepted",
+            "msg_session": 208,
+            "msg_seq": 9,
+            "reason": "TX_ACCEPTED"
+          },
+          {
+            "seq": 23,
+            "ms": 1790378292603,
+            "kind": "delivery_event",
+            "request": 2,
+            "state": "queued",
+            "msg_session": 208,
+            "msg_seq": 9,
+            "reason": "QUEUED"
+          },
+          {
+            "seq": 24,
+            "ms": 1790378292610,
+            "kind": "delivery_event",
+            "request": 2,
+            "state": "waiting-for-mac",
+            "msg_session": 208,
+            "msg_seq": 9,
+            "reason": "TX_MAC_PENDING"
+          },
+          {
+            "seq": 25,
+            "ms": 1790378292624,
+            "kind": "credit_query"
+          },
+          {
+            "seq": 26,
+            "ms": 1790378292628,
+            "kind": "delivery_event",
+            "request": 2,
+            "state": "waiting-for-hop-accept",
+            "msg_session": 208,
+            "msg_seq": 9,
+            "reason": "HOP_ACCEPT_PENDING"
+          },
+          {
+            "seq": 27,
+            "ms": 1790378292635,
+            "kind": "delivery_event",
+            "request": 2,
+            "state": "waiting-for-end-receipt",
+            "msg_session": 208,
+            "msg_seq": 9,
+            "reason": "END_RECEIPT_PENDING"
+          },
+          {
+            "seq": 28,
+            "ms": 1790378292650,
+            "kind": "delivery_event",
+            "request": 2,
+            "state": "delivered",
+            "msg_session": 208,
+            "msg_seq": 9,
+            "reason": "END_RECEIVED"
+          },
+          {
+            "seq": 29,
+            "ms": 1790378294158,
+            "kind": "credit_grant",
+            "grant_frames": 12,
+            "grant_bytes": 16698
+          },
+          {
+            "seq": 30,
+            "ms": 1790378294158,
+            "kind": "delivery_event",
+            "request": 3,
+            "state": "accepted",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "reason": "TX_ACCEPTED"
+          },
+          {
+            "seq": 31,
+            "ms": 1790378294158,
+            "kind": "delivery_event",
+            "request": 3,
+            "state": "queued",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "reason": "QUEUED"
+          },
+          {
+            "seq": 32,
+            "ms": 1790378294165,
+            "kind": "delivery_event",
+            "request": 3,
+            "state": "waiting-for-mac",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "reason": "TX_MAC_PENDING"
+          },
+          {
+            "seq": 33,
+            "ms": 1790378294402,
+            "kind": "delivery_event",
+            "request": 3,
+            "state": "waiting-for-hop-accept",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "reason": "HOP_ACCEPT_PENDING"
+          },
+          {
+            "seq": 34,
+            "ms": 1790378294423,
+            "kind": "delivery_event",
+            "request": 3,
+            "state": "waiting-for-route",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "reason": "HOP_ACCEPT_TIMEOUT"
+          },
+          {
+            "seq": 35,
+            "ms": 1790378294477,
+            "kind": "delivery_event",
+            "request": 3,
+            "state": "queued",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "reason": "QUEUED"
+          },
+          {
+            "seq": 36,
+            "ms": 1790378294477,
+            "kind": "delivery_event",
+            "request": 3,
+            "state": "waiting-for-mac",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "reason": "TX_MAC_PENDING"
+          },
+          {
+            "seq": 37,
+            "ms": 1790378294486,
+            "kind": "delivery_event",
+            "request": 3,
+            "state": "waiting-for-hop-accept",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "reason": "HOP_ACCEPT_PENDING"
+          },
+          {
+            "seq": 38,
+            "ms": 1790378294522,
+            "kind": "delivery_event",
+            "request": 3,
+            "state": "waiting-for-mac",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "reason": "TX_MAC_PENDING"
+          },
+          {
+            "seq": 39,
+            "ms": 1790378294534,
+            "kind": "delivery_event",
+            "request": 3,
+            "state": "waiting-for-hop-accept",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "reason": "HOP_ACCEPT_PENDING"
+          },
+          {
+            "seq": 40,
+            "ms": 1790378294552,
+            "kind": "delivery_event",
+            "request": 3,
+            "state": "waiting-for-route",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "reason": "HOP_ACCEPT_TIMEOUT"
+          },
+          {
+            "seq": 41,
+            "ms": 1790378294606,
+            "kind": "delivery_event",
+            "request": 3,
+            "state": "queued",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "reason": "QUEUED"
+          },
+          {
+            "seq": 42,
+            "ms": 1790378294606,
+            "kind": "delivery_event",
+            "request": 3,
+            "state": "waiting-for-mac",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "reason": "TX_MAC_PENDING"
+          },
+          {
+            "seq": 43,
+            "ms": 1790378294618,
+            "kind": "credit_query"
+          },
+          {
+            "seq": 44,
+            "ms": 1790378294622,
+            "kind": "delivery_event",
+            "request": 3,
+            "state": "waiting-for-hop-accept",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "reason": "HOP_ACCEPT_PENDING"
+          },
+          {
+            "seq": 45,
+            "ms": 1790378294658,
+            "kind": "delivery_event",
+            "request": 3,
+            "state": "waiting-for-mac",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "reason": "TX_MAC_PENDING"
+          },
+          {
+            "seq": 46,
+            "ms": 1790378294669,
+            "kind": "delivery_event",
+            "request": 3,
+            "state": "waiting-for-hop-accept",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "reason": "HOP_ACCEPT_PENDING"
+          },
+          {
+            "seq": 47,
+            "ms": 1790378294690,
+            "kind": "delivery_event",
+            "request": 3,
+            "state": "failed",
+            "msg_session": 208,
+            "msg_seq": 11,
+            "reason": "HOP_ACCEPT_TIMEOUT"
+          },
+          {
+            "seq": 48,
+            "ms": 1790378295058,
+            "kind": "diagnostic",
+            "peer": 2,
+            "reason": "RX_CONTEXT_CHANGED",
+            "msg_session": 215,
+            "msg_seq": 1
+          },
+          {
+            "seq": 49,
+            "ms": 1790378295082,
+            "kind": "diagnostic",
+            "peer": 2,
+            "reason": "REACHABLE",
+            "msg_session": null,
+            "msg_seq": null
+          },
+          {
+            "seq": 50,
+            "ms": 1790378295729,
+            "kind": "credit_grant",
+            "grant_frames": 13,
+            "grant_bytes": 16772
+          },
+          {
+            "seq": 51,
+            "ms": 1790378295729,
+            "kind": "delivery_event",
+            "request": 4,
+            "state": "accepted",
+            "msg_session": 208,
+            "msg_seq": 12,
+            "reason": "TX_ACCEPTED"
+          },
+          {
+            "seq": 52,
+            "ms": 1790378295729,
+            "kind": "delivery_event",
+            "request": 4,
+            "state": "waiting-for-route",
+            "msg_session": 208,
+            "msg_seq": 12,
+            "reason": "NO_ROUTE"
+          },
+          {
+            "seq": 53,
+            "ms": 1790378297083,
+            "kind": "diagnostic",
+            "peer": 2,
+            "reason": "PEER_RESTARTED_ROUTES_FLUSHED",
+            "msg_session": null,
+            "msg_seq": null
+          },
+          {
+            "seq": 54,
+            "ms": 1790378297109,
+            "kind": "delivery_event",
+            "request": 4,
+            "state": "queued",
+            "msg_session": 208,
+            "msg_seq": 12,
+            "reason": "QUEUED"
+          },
+          {
+            "seq": 55,
+            "ms": 1790378297109,
+            "kind": "delivery_event",
+            "request": 4,
+            "state": "waiting-for-mac",
+            "msg_session": 208,
+            "msg_seq": 12,
+            "reason": "TX_MAC_PENDING"
+          },
+          {
+            "seq": 56,
+            "ms": 1790378297119,
+            "kind": "delivery_event",
+            "request": 4,
+            "state": "waiting-for-hop-accept",
+            "msg_session": 208,
+            "msg_seq": 12,
+            "reason": "HOP_ACCEPT_PENDING"
+          },
+          {
+            "seq": 57,
+            "ms": 1790378297204,
+            "kind": "delivery_event",
+            "request": 4,
+            "state": "waiting-for-mac",
+            "msg_session": 208,
+            "msg_seq": 12,
+            "reason": "TX_MAC_PENDING"
+          },
+          {
+            "seq": 58,
+            "ms": 1790378297220,
+            "kind": "delivery_event",
+            "request": 4,
+            "state": "waiting-for-hop-accept",
+            "msg_session": 208,
+            "msg_seq": 12,
+            "reason": "HOP_ACCEPT_PENDING"
+          },
+          {
+            "seq": 59,
+            "ms": 1790378297261,
+            "kind": "delivery_event",
+            "request": 4,
+            "state": "waiting-for-route",
+            "msg_session": 208,
+            "msg_seq": 12,
+            "reason": "HOP_ACCEPT_TIMEOUT"
+          },
+          {
+            "seq": 60,
+            "ms": 1790378297315,
+            "kind": "delivery_event",
+            "request": 4,
+            "state": "queued",
+            "msg_session": 208,
+            "msg_seq": 12,
+            "reason": "QUEUED"
+          },
+          {
+            "seq": 61,
+            "ms": 1790378297318,
+            "kind": "credit_query"
+          },
+          {
+            "seq": 62,
+            "ms": 1790378297321,
+            "kind": "delivery_event",
+            "request": 4,
+            "state": "waiting-for-mac",
+            "msg_session": 208,
+            "msg_seq": 12,
+            "reason": "TX_MAC_PENDING"
+          },
+          {
+            "seq": 63,
+            "ms": 1790378297325,
+            "kind": "delivery_event",
+            "request": 4,
+            "state": "waiting-for-hop-accept",
+            "msg_session": 208,
+            "msg_seq": 12,
+            "reason": "HOP_ACCEPT_PENDING"
+          },
+          {
+            "seq": 64,
+            "ms": 1790378297339,
+            "kind": "delivery_event",
+            "request": 4,
+            "state": "waiting-for-end-receipt",
+            "msg_session": 208,
+            "msg_seq": 12,
+            "reason": "END_RECEIPT_PENDING"
+          },
+          {
+            "seq": 65,
+            "ms": 1790378297356,
+            "kind": "delivery_event",
+            "request": 4,
+            "state": "delivered",
+            "msg_session": 208,
+            "msg_seq": 12,
+            "reason": "END_RECEIVED"
+          },
+          {
+            "seq": 66,
+            "ms": 1790378298387,
+            "kind": "credit_grant",
+            "grant_frames": 14,
+            "grant_bytes": 16846
+          },
+          {
+            "seq": 67,
+            "ms": 1790378298387,
+            "kind": "delivery_event",
+            "request": 5,
+            "state": "accepted",
+            "msg_session": 208,
+            "msg_seq": 15,
+            "reason": "TX_ACCEPTED"
+          },
+          {
+            "seq": 68,
+            "ms": 1790378298387,
+            "kind": "delivery_event",
+            "request": 5,
+            "state": "queued",
+            "msg_session": 208,
+            "msg_seq": 15,
+            "reason": "QUEUED"
+          },
+          {
+            "seq": 69,
+            "ms": 1790378298394,
+            "kind": "delivery_event",
+            "request": 5,
+            "state": "waiting-for-mac",
+            "msg_session": 208,
+            "msg_seq": 15,
+            "reason": "TX_MAC_PENDING"
+          },
+          {
+            "seq": 70,
+            "ms": 1790378298402,
+            "kind": "delivery_event",
+            "request": 5,
+            "state": "waiting-for-hop-accept",
+            "msg_session": 208,
+            "msg_seq": 15,
+            "reason": "HOP_ACCEPT_PENDING"
+          },
+          {
+            "seq": 71,
+            "ms": 1790378298416,
+            "kind": "delivery_event",
+            "request": 5,
+            "state": "waiting-for-end-receipt",
+            "msg_session": 208,
+            "msg_seq": 15,
+            "reason": "END_RECEIPT_PENDING"
+          },
+          {
+            "seq": 72,
+            "ms": 1790378298429,
+            "kind": "delivery_event",
+            "request": 5,
+            "state": "delivered",
+            "msg_session": 208,
+            "msg_seq": 15,
+            "reason": "END_RECEIVED"
+          },
+          {
+            "seq": 73,
+            "ms": 1790378299443,
+            "kind": "credit_grant",
+            "grant_frames": 15,
+            "grant_bytes": 16920
+          },
+          {
+            "seq": 74,
+            "ms": 1790378299443,
+            "kind": "delivery_event",
+            "request": 6,
+            "state": "accepted",
+            "msg_session": 208,
+            "msg_seq": 16,
+            "reason": "TX_ACCEPTED"
+          },
+          {
+            "seq": 75,
+            "ms": 1790378299444,
+            "kind": "delivery_event",
+            "request": 6,
+            "state": "queued",
+            "msg_session": 208,
+            "msg_seq": 16,
+            "reason": "QUEUED"
+          },
+          {
+            "seq": 76,
+            "ms": 1790378299453,
+            "kind": "delivery_event",
+            "request": 6,
+            "state": "waiting-for-mac",
+            "msg_session": 208,
+            "msg_seq": 16,
+            "reason": "TX_MAC_PENDING"
+          },
+          {
+            "seq": 77,
+            "ms": 1790378299461,
+            "kind": "delivery_event",
+            "request": 6,
+            "state": "waiting-for-hop-accept",
+            "msg_session": 208,
+            "msg_seq": 16,
+            "reason": "HOP_ACCEPT_PENDING"
+          },
+          {
+            "seq": 78,
+            "ms": 1790378299474,
+            "kind": "delivery_event",
+            "request": 6,
+            "state": "waiting-for-end-receipt",
+            "msg_session": 208,
+            "msg_seq": 16,
+            "reason": "END_RECEIPT_PENDING"
+          },
+          {
+            "seq": 79,
+            "ms": 1790378299492,
+            "kind": "delivery_event",
+            "request": 6,
+            "state": "delivered",
+            "msg_session": 208,
+            "msg_seq": 16,
+            "reason": "END_RECEIVED"
+          },
+          {
+            "seq": 80,
+            "ms": 1790378300551,
+            "kind": "credit_grant",
+            "grant_frames": 16,
+            "grant_bytes": 16994
+          },
+          {
+            "seq": 81,
+            "ms": 1790378300557,
+            "kind": "credit_query"
+          },
+          {
+            "seq": 82,
+            "ms": 1790378300561,
+            "kind": "delivery_event",
+            "request": 7,
+            "state": "accepted",
+            "msg_session": 208,
+            "msg_seq": 17,
+            "reason": "TX_ACCEPTED"
+          },
+          {
+            "seq": 83,
+            "ms": 1790378300561,
+            "kind": "delivery_event",
+            "request": 7,
+            "state": "queued",
+            "msg_session": 208,
+            "msg_seq": 17,
+            "reason": "QUEUED"
+          },
+          {
+            "seq": 84,
+            "ms": 1790378300561,
+            "kind": "delivery_event",
+            "request": 7,
+            "state": "waiting-for-mac",
+            "msg_session": 208,
+            "msg_seq": 17,
+            "reason": "TX_MAC_PENDING"
+          },
+          {
+            "seq": 85,
+            "ms": 1790378300566,
+            "kind": "delivery_event",
+            "request": 7,
+            "state": "waiting-for-hop-accept",
+            "msg_session": 208,
+            "msg_seq": 17,
+            "reason": "HOP_ACCEPT_PENDING"
+          },
+          {
+            "seq": 86,
+            "ms": 1790378300583,
+            "kind": "delivery_event",
+            "request": 7,
+            "state": "waiting-for-end-receipt",
+            "msg_session": 208,
+            "msg_seq": 17,
+            "reason": "END_RECEIPT_PENDING"
+          },
+          {
+            "seq": 87,
+            "ms": 1790378300599,
+            "kind": "delivery_event",
+            "request": 7,
+            "state": "delivered",
+            "msg_session": 208,
+            "msg_seq": 17,
+            "reason": "END_RECEIVED"
+          }
+        ],
+        "dropped": 0,
+        "next_seq": 88
+      }
+    }
+  ],
+  "finished_unix": 1790378303.7231562,
+  "summary": {
+    "baseline_delivered": 2,
+    "baseline_sends": 2,
+    "cycles": 1,
+    "sends_per_cycle": 5,
+    "delivered_total": 4,
+    "delivered_per_cycle": [
+      4
+    ],
+    "cycles_recovered": 1,
+    "recovery_s_min": 1.574,
+    "recovery_s_max": 1.574,
+    "recovery_s_median": 1.574,
+    "idempotency_full_total": 0
+  }
+}
