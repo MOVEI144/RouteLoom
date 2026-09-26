@@ -2,6 +2,10 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <map>
+#include <string>
+#include <vector>
+#include "routeloom/sdkv1_blob_storage.hpp"
 #include "routeloom/board_config.hpp"
 #include "routeloom/group.hpp"
 
@@ -55,6 +59,95 @@ BoardConfig board(const NodeId node, const std::uint8_t mac) {
   c.network = 42;
   c.channel = 6;
   return c;
+}
+
+// NVS commits a whole blob or nothing. The config namespace is independent
+// of rlsec, so an app-only update must not change either namespace.
+class ConfigNvs final : public sdkv1::BlobNamespace {
+ public:
+  Status blob_size(const char* key, std::size_t& size, bool& found) noexcept override {
+    const auto it = blobs.find(key);
+    found = it != blobs.end();
+    size = found ? it->second.size() : 0;
+    return Status::success();
+  }
+  Status blob_read(const char* key, MutableByteView target, std::size_t& size) noexcept override {
+    const auto it = blobs.find(key);
+    if (it == blobs.end() || target.size < it->second.size())
+      return Status::error(StatusCode::StorageFailure, "missing blob");
+    std::memcpy(target.data, it->second.data(), it->second.size());
+    size = it->second.size();
+    return Status::success();
+  }
+  Status blob_write(const char* key, ByteView data) noexcept override {
+    const auto call = writes++;
+    if (call == cut_at) {
+      if (!cut_lands) return Status::error(StatusCode::StorageFailure, "power cut");
+    }
+    blobs[key].assign(data.data, data.data + data.size);
+    if (call == cut_at) return Status::error(StatusCode::StorageFailure, "lost ack");
+    return Status::success();
+  }
+  Status blob_erase(const char* key) noexcept override {
+    blobs.erase(key);
+    return Status::success();
+  }
+  std::map<std::string, std::vector<std::uint8_t>> blobs;
+  std::size_t writes{0};
+  std::size_t cut_at{std::numeric_limits<std::size_t>::max()};
+  bool cut_lands{false};
+};
+
+void test_nvs_app_update_and_power_cut() {
+  for (std::uint8_t i = 0; i < 3; ++i) {
+    ConfigNvs nvs;
+    auto slot = sdkv1::BlobRecordSlotStorage::board_config(nvs);
+    BoardConfigStore setup(slot);
+    auto c = board(20 + i, 10 + i);
+    CHECK(setup.initialize().ok());
+    CHECK(setup.commit(c).ok());
+    CHECK(nvs.blobs.count("b0") == 1);
+    // Independent durable security state survives the app image replacement.
+    nvs.blobs["rlsec-boot-witness"] = {1, 2, 3};
+    auto newer = c;
+    newer.node += 10;
+    newer.generation++;
+    nvs.cut_at = nvs.writes;
+    CHECK(!setup.commit(newer).ok());
+    nvs.cut_at = std::numeric_limits<std::size_t>::max();
+    auto app_slot = sdkv1::BlobRecordSlotStorage::board_config(nvs);
+    BoardConfigStore updated(app_slot);
+    CHECK(updated.initialize().ok());
+    CHECK(updated.config().node == c.node);
+    CHECK(nvs.blobs["rlsec-boot-witness"] == std::vector<std::uint8_t>({1, 2, 3}));
+    CHECK(updated.authorize_rf({c.chip, c.sta_mac, c.role, c.security, c.node}).ok());
+  }
+  // A lost acknowledgement at each durable write boundary has an
+  // unambiguous readback: before the seal use the old record; after it,
+  // use the new one. Neither case overwrites the boot witness.
+  for (std::size_t phase = 0; phase < 2; ++phase) {
+    for (bool lands : {false, true}) {
+      ConfigNvs nvs;
+      auto slot = sdkv1::BlobRecordSlotStorage::board_config(nvs);
+      BoardConfigStore writer(slot);
+      CHECK(writer.initialize().ok());
+      auto c = board(30, 10);
+      CHECK(writer.commit(c).ok());
+      nvs.blobs["rlsec-boot-witness"] = {1, 2, 3};
+      auto newer = c;
+      newer.node = 31;
+      newer.generation = 2;
+      nvs.cut_at = nvs.writes + phase;
+      nvs.cut_lands = lands;
+      CHECK(!writer.commit(newer).ok());
+      nvs.cut_at = std::numeric_limits<std::size_t>::max();
+      auto app_slot = sdkv1::BlobRecordSlotStorage::board_config(nvs);
+      BoardConfigStore reboot(app_slot);
+      CHECK(reboot.initialize().ok());
+      CHECK(reboot.config().node == ((phase == 1 && lands) ? newer.node : c.node));
+      CHECK(nvs.blobs["rlsec-boot-witness"] == std::vector<std::uint8_t>({1, 2, 3}));
+    }
+  }
 }
 
 void test_three_boards_and_boot_gate() {
@@ -152,6 +245,7 @@ void test_interrupted_commit_preserves_old() {
 }
 }
 int main() {
+  test_nvs_app_update_and_power_cut();
   test_three_boards_and_boot_gate();
   test_rejected_records();
   test_interrupted_commit_preserves_old();

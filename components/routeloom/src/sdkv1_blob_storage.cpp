@@ -1,4 +1,5 @@
 #include "routeloom/sdkv1_blob_storage.hpp"
+#include "routeloom/board_config.hpp"
 
 #include <cstring>
 
@@ -80,6 +81,11 @@ Status BlobRecordSlotStorage::erase(const std::uint8_t slot) noexcept {
     return Status::error(StatusCode::InvalidArgument, "record slot erase arguments");
   }
   return blobs_.blob_erase(keys_[slot]);
+}
+
+BlobRecordSlotStorage BlobRecordSlotStorage::board_config(BlobNamespace& blobs) noexcept {
+  return BlobRecordSlotStorage(blobs, kBoardConfigKey0, kBoardConfigKey1,
+                               kBoardConfigSlotBytes);
 }
 
 BlobRecordSlotStorage BlobRecordSlotStorage::identity(BlobNamespace& blobs) noexcept {
