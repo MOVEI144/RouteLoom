@@ -119,6 +119,7 @@ class FlashPlan:
     expected_mac: str
     quiesced: bool = False
     bundle: Path | None = None
+    assigned_node_id: str | None = None
 
     def verified_images(self, port: str, measured: Identity) -> list[tuple[int, bytes]]:
         if (not port or not self.quiesced or not self.verified_signature or measured != self.expected or
