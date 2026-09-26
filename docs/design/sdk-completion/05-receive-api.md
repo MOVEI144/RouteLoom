@@ -35,17 +35,17 @@ This keeps the issue's §3 layering explicit: a payload that could not be honest
 The record shape in notifications is **byte-identical** to the `records[]` elements of `messages.read` (`api1.rs:479`), including the per-record `cursor` — the cursor is the resume position *after* that record, so a client can feed it back into `messages.read` or `messages.subscribe` verbatim:
 
 ```json
-{"v":1,"network":"0000000000000001","gateway":"0000000000000002","origin":"0000000000000003","message":{"session":"00000004","sequence":"0000000000000005"},"payload_hex":"00ff80","payload_len":3,"cursor":"AQAAAAAAAAAB…","endpoint_kind":"gateway_mirror","evidence":"HOST_RAM_RETAINED","assurance":{"profile":"EXPERIMENTAL_DEV_PSK","origin":"group-key-claim"}}
+{"v":1,"network":"0000000000000001","gateway":"0000000000000002","origin":"0000000000000003","message":{"session":"00000004","sequence":"0000000000000005"},"payload_hex":"00ff80","payload_len":3,"cursor":"AQAAAAAAAAAB…","endpoint_kind":"gateway_mirror","evidence":"HOST_RAM_RETAINED","assurance":{"profile":"UNKNOWN","origin":"unverified"}}
 ```
 
-Payload is lowercase hex, `payload_len` bytes, 0–128 B, never transcoded (non-UTF-8 and 0x00 pass through). `endpoint_kind`/`evidence`/`assurance` keep their existing honest values.
+Payload is lowercase hex, `payload_len` bytes, 0–128 B, never transcoded (non-UTF-8 and 0x00 pass through). The current USB receive body has no effective gateway security profile or per-frame origin verification result; `UNKNOWN` means the host lacks that evidence, regardless of Site Authority or ledger state.
 
 ### 5.2.2 Metadata record (`payloads:false` subscriptions)
 
 A metadata subscription requires only `READ_OPERATION` (payload rights stay `READ_PAYLOAD`). The record omits `payload_hex` and adds a digest — same rule as `operations.get`, which exposes `canonical_hash` but never the body (`api1.rs:1785`):
 
 ```json
-{"v":1,"network":"0000000000000001","gateway":"0000000000000002","origin":"0000000000000003","message":{"session":"00000004","sequence":"0000000000000005"},"payload_len":3,"payload_sha256":"<64 hex>","cursor":"AQAAAAAAAAAB…","endpoint_kind":"gateway_mirror","evidence":"HOST_RAM_RETAINED","assurance":{"profile":"EXPERIMENTAL_DEV_PSK","origin":"group-key-claim"}}
+{"v":1,"network":"0000000000000001","gateway":"0000000000000002","origin":"0000000000000003","message":{"session":"00000004","sequence":"0000000000000005"},"payload_len":3,"payload_sha256":"<64 hex>","cursor":"AQAAAAAAAAAB…","endpoint_kind":"gateway_mirror","evidence":"HOST_RAM_RETAINED","assurance":{"profile":"UNKNOWN","origin":"unverified"}}
 ```
 
 ### 5.2.3 Notification line envelope
