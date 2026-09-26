@@ -395,24 +395,22 @@ jobs:
               ;;
             *) ! grep -q '^CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y' sdkconfig ;;
           esac
-          case '${{ matrix.features }}' in
-            owner_member)
-              # Prove the owner profile survived re-resolution and the
-              # legacy-only options really vanished with it. The
-              # deep_sleep profile cell pairs DEEP_SLEEP with the member
-              # sleep tail instead of the legacy power path.
-              grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y' sdkconfig
-              ! grep -q '^CONFIG_ROUTELOOM_DISCOVERY=y' sdkconfig
-              if [ '${{ matrix.profile }}' = deep_sleep ]; then
-                grep -q '^CONFIG_ROUTELOOM_DEEP_SLEEP=y' sdkconfig
-              else
-                ! grep -q '^CONFIG_ROUTELOOM_DEEP_SLEEP=y' sdkconfig
-              fi
-              ;;
-            *) ! grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y' sdkconfig ;;
-          esac
-          # Security default (G-SEC P4): DevRam unless the cell pins
-          # LegacyFixture for its legacy-only options.
+          # bench_node defaults to MemberEdhoc in normal cells; its
+          # deep_sleep/off cells explicitly select LegacyFixture above.
+          member_expected=n
+          if [ '${{ matrix.features }}' = owner_member ] ||
+             { [ '${{ matrix.app }}' = bench_node ] &&
+               [ '${{ matrix.profile }}' = normal ] &&
+               [ '${{ matrix.features }}' = off ]; }; then
+            member_expected=y
+          fi
+          if [ "$member_expected" = y ]; then
+            grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y' sdkconfig
+          else
+            ! grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y' sdkconfig
+          fi
+          # Other normal/off cells default to DevRam; legacy-only cells
+          # explicitly select LegacyFixture above.
           legacy_expected=n
           if [ '${{ matrix.profile }}' = deep_sleep ] &&
              [ '${{ matrix.features }}' != owner_member ]; then
@@ -433,7 +431,7 @@ jobs:
           esac
           if [ "$legacy_expected" = y ]; then
             grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y' sdkconfig
-          elif [ '${{ matrix.features }}' != owner_member ]; then
+          elif [ "$member_expected" = n ]; then
             grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y' sdkconfig
           fi
           case '${{ matrix.features }}' in

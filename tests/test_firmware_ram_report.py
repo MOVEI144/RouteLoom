@@ -12,6 +12,7 @@ import copy
 import io
 import json
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -192,6 +193,35 @@ class Guard(unittest.TestCase):
 
 
 class Documentation(unittest.TestCase):
+    def test_ci_security_checks_match_firmware_profiles(self):
+        workflow = (ROOT / ".github/workflows/sdk.yml").read_text(encoding="utf-8")
+        checks = workflow.split("          idf.py build\n", 1)[1].split(
+            "          idf.py size >", 1)[0]
+        cases = (
+            ("bench_node", "normal", "off", "MEMBER_EDHOC", True),
+            ("bench_node", "deep_sleep", "off", "LEGACY_FIXTURE", True),
+            ("bench_node", "deep_sleep", "owner_member", "MEMBER_EDHOC", True),
+            ("reference_node", "normal", "off", "DEV_RAM", True),
+            ("bench_node", "normal", "off", "DEV_RAM", False),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            for app, profile, features, security, expected in cases:
+                with self.subTest(app=app, profile=profile, features=features,
+                                  security=security):
+                    config = f"CONFIG_ROUTELOOM_SECURITY_MODE_{security}=y\n"
+                    if profile == "deep_sleep":
+                        config += "CONFIG_ROUTELOOM_DEEP_SLEEP=y\n"
+                    (Path(tmp) / "sdkconfig").write_text(config, encoding="utf-8")
+                    script = checks
+                    for key, value in (("app", app), ("profile", profile),
+                                       ("autonomy", "off"), ("features", features)):
+                        script = script.replace("${{ matrix." + key + " }}", value)
+                    result = subprocess.run(["bash", "-euo", "pipefail", "-c", script],
+                                            cwd=tmp, capture_output=True, text=True,
+                                            check=False)
+                    self.assertEqual(result.returncode == 0, expected,
+                                     result.stderr)
+
     def test_owner_matrix_covers_targets(self):
         workflow = (ROOT / ".github/workflows/sdk.yml").read_text(encoding="utf-8")
         cells = set(re.findall(
