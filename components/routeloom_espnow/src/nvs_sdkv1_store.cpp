@@ -115,4 +115,23 @@ Status NvsBlobNamespace::blob_write(const char* key, const ByteView data) noexce
   return Status::success();
 }
 
+Status NvsBlobNamespace::blob_erase(const char* key) noexcept {
+  if (!open_ || key == nullptr) {
+    return Status::error(StatusCode::InvalidState, "NVS sdkv1 namespace not ready");
+  }
+  esp_err_t error = nvs_erase_key(handle_, key);
+  if (error == ESP_ERR_NVS_NOT_FOUND) return Status::success();
+  if (error != ESP_OK) {
+    return note_error("blob_erase", error, "nvs_erase_key failed",
+                      "nvs_erase_key failed (no space)");
+  }
+  error = nvs_commit(handle_);
+  if (error != ESP_OK) {
+    return note_error("commit", error, "nvs_commit failed",
+                      "nvs_commit failed (no space)");
+  }
+  ++stats_.commits;
+  return Status::success();
+}
+
 }  // namespace routeloom::espnow

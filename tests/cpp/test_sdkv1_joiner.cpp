@@ -1439,6 +1439,7 @@ struct ReentrantStorage final : public RecordSlotStorage {
     if (joiner != nullptr && joiner->poll(1).code == StatusCode::Busy) ++busy;
     return inner_.write(slot, data);
   }
+  Status erase(const std::uint8_t slot) noexcept override { return inner_.erase(slot); }
 };
 
 void test_reentry_refused() {
