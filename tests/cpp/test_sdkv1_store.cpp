@@ -893,9 +893,6 @@ void test_group_gcm_replay() {
   in.op = sdkv1::GroupKeyState::Op::Activate;
   in.boot = keys.boot();
   CHECK_OK(keys.advance(in, 201));
-  in = {};
-  in.op = sdkv1::GroupKeyState::Op::Tick;
-  CHECK_OK(keys.advance(in, 10202));
   link.sender = 0x1000;
   link.group_epoch = keys.current();
   keys::group_prk(site.network, store.site().gk_current, prk);
@@ -904,6 +901,13 @@ void test_group_gcm_replay() {
   CHECK(aead->seal(aead->ctx, traffic.key.data(), nonce.data(), ByteView{aad, 1},
                    ByteView{plain.data(), plain.size()}, sealed.data()));
   std::memcpy(tag.data(), sealed.data() + 3, tag.size());
+  // Old-GK frames remain valid during overlap; a new sender cannot displace
+  // their replay floors until the overlap ends.
+  CHECK(receiver.open(link, 0, ByteView{aad, 1}, ByteView{sealed.data(), 3}, tag,
+                      MutableByteView{opened.data(), opened.size()}).code == StatusCode::NoCapacity);
+  in = {};
+  in.op = sdkv1::GroupKeyState::Op::Tick;
+  CHECK_OK(keys.advance(in, 10202));
   CHECK_OK(receiver.open(link, 0, ByteView{aad, 1}, ByteView{sealed.data(), 3}, tag,
                          MutableByteView{opened.data(), opened.size()}));
   keys::clear(traffic);
