@@ -2228,7 +2228,7 @@ fn diagnostics_snapshot<S: OperationStore>(
                 max_age_ms,
             },
             session,
-            ctx.now_ms,
+            ctx.now_mono,
         )
         .map_err(|_| ApiError {
             code: "NO_CAPACITY",
@@ -4691,8 +4691,10 @@ mod tests {
                     true
                 })
                 .unwrap();
+            let mut operation_id = [8_u8; 24];
+            operation_id[16..].copy_from_slice(&seq.to_be_bytes());
             assert!(store
-                .attach_device_outcome(5, 900, "failed", Some("NO_ROUTE"))
+                .attach_device_outcome(&operation_id, 5, 900, "failed", Some("NO_ROUTE"))
                 .unwrap());
         }
         let after = handle(
@@ -4709,8 +4711,16 @@ mod tests {
         // Two different failure causes stay distinguishable on the API.
         {
             let mut store = store.lock().unwrap();
+            let mut operation_id = [8_u8; 24];
+            operation_id[16..].copy_from_slice(&1_u64.to_be_bytes());
             store
-                .attach_device_outcome(5, 900, "indeterminate", Some("END_RECEIPT_TIMEOUT"))
+                .attach_device_outcome(
+                    &operation_id,
+                    5,
+                    900,
+                    "indeterminate",
+                    Some("END_RECEIPT_TIMEOUT"),
+                )
                 .unwrap();
         }
         let later = handle(
@@ -7174,6 +7184,7 @@ mod tests {
                 let c = ApiContext {
                     session: group_session(0xFFFF_FFFF, 1),
                     telemetry_ops: ops,
+                    now_ms: u64::MAX - 100,
                     ..ctx(None, &acl, &log, &store, &limiter, 1_000)
                 };
                 handle(line.as_bytes(), &c)
@@ -7182,6 +7193,7 @@ mod tests {
                 let mut request = None;
                 for _ in 0..500 {
                     if let Some(token) = ops.tokens().first() {
+                        assert_eq!(ops.submitted_ms_for(*token), Some(1_000));
                         request = ops.request_for(*token);
                         break;
                     }
@@ -7192,8 +7204,13 @@ mod tests {
             let mut body = vec![0x01, 0x31, 0x00, 0x8c, 0x00, 0x00];
             body.extend_from_slice(&0x0abc_u64.to_be_bytes());
             body.extend_from_slice(&128_u16.to_be_bytes());
-            body.extend_from_slice(&hex_bytes("010400000000004d00000000000000c300000000deadbeef00000000000000050000000700000003000000010b00011300000000075bcd15000007d000000028c9b0ce00c40000000000000c00000064000000600000000300000001000000040000005f0000000200000001000004d20000162e000023340000000200000200"));
-            assert!(ops.post_reply(request, body));
+            let mut snapshot = hex_bytes("010400000000004d00000000000000c300000000deadbeef00000000000000050000000700000003000000010b00011300000000075bcd15000007d000000028c9b0ce00c40000000000000c00000064000000600000000300000001000000040000005f0000000200000001000004d20000162e000023340000000200000200");
+            snapshot[4..8].copy_from_slice(&(request as u32).to_be_bytes());
+            snapshot[8..16].copy_from_slice(&0x0abc_u64.to_be_bytes());
+            snapshot[45] = 0;
+            snapshot[46] = 255;
+            body.extend_from_slice(&snapshot);
+            assert!(ops.post_reply(request, 0x5e55, body));
             waiter.join().unwrap()
         });
         assert!(answer.contains("\"ok\":true"), "{answer}");

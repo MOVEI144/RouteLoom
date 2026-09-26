@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::{now_ms, Outbound, State};
+use crate::{mono_ms, Outbound, State};
 
 /// Request ids for this lane live in their own high range ("TL") so an
 /// Error frame echoing one can be routed back here and can never alias a
@@ -36,7 +36,7 @@ pub const QUERY_TIMEOUT_MS: u64 = 5_500;
 pub const API_WAIT_MS: u64 = 6_000;
 /// A resolved-but-untaken outcome (its waiter already left) is reaped
 /// after this long so abandoned queries cannot pin table slots.
-const SETTLE_GRACE_MS: u64 = 5_000;
+const SETTLE_GRACE_MS: u64 = API_WAIT_MS;
 const TICK_MS: u64 = 50;
 
 /// True for the HostOps bodies this lane owns (0x31 replies; 0x30 is
@@ -205,9 +205,21 @@ impl TelemetryOps {
             .map(|op| op.request)
     }
 
-    fn resolve(&self, request: u64, outcome: QueryOutcome, now_ms: u64) -> bool {
+    #[cfg(test)]
+    pub fn submitted_ms_for(&self, token: u64) -> Option<u64> {
+        self.ops
+            .lock()
+            .expect("telemetry ops poisoned")
+            .get(&token)
+            .map(|op| op.submitted_ms)
+    }
+
+    fn resolve(&self, request: u64, session: u64, outcome: QueryOutcome, now_ms: u64) -> bool {
         let mut ops = self.ops.lock().expect("telemetry ops poisoned");
-        let Some(op) = ops.values_mut().find(|op| op.request == request) else {
+        let Some(op) = ops
+            .values_mut()
+            .find(|op| op.request == request && op.session == session)
+        else {
             return false;
         };
         if op.outcome.is_none() {
@@ -223,22 +235,55 @@ impl TelemetryOps {
     /// parsing is cheap and keeps the lane state machine to one shape
     /// (pending vs resolved). Unknown requests are stale/foreign replies
     /// (a late answer past our timeout): ignored, never an event.
-    pub fn post_reply(&self, request: u64, body: Vec<u8>) -> bool {
-        let outcome = match decode_diagnostic_reply(&body) {
-            Ok(reply) if reply.result == ConfigOpsResult::Ok => decode_reply_body(&reply.body),
-            Ok(reply) => QueryOutcome::Device(reply.result),
-            Err(error) => QueryOutcome::DecodeError(error.to_string()),
+    pub fn post_reply(&self, request: u64, session: u64, body: Vec<u8>) -> bool {
+        let mut ops = self.ops.lock().expect("telemetry ops poisoned");
+        let Some(op) = ops
+            .values_mut()
+            .find(|op| op.request == request && op.session == session)
+        else {
+            return false;
         };
-        // now_ms() (wall) only orders the settle grace — expiry runs on
-        // the lane's clock, so a wall jump cannot strand a query.
-        self.resolve(request, outcome, now_ms())
+        if op.outcome.is_none() {
+            let outcome = match decode_diagnostic_reply(&body) {
+                Ok(reply) if reply.observer != op.params.observer => {
+                    QueryOutcome::DecodeError("reply observer does not match query".to_string())
+                }
+                Ok(reply) if reply.result == ConfigOpsResult::Ok => {
+                    match decode_reply_body(&reply.body) {
+                        QueryOutcome::Snapshot(snapshot)
+                            if snapshot.request_id != query_id_for(op.token)
+                                || snapshot.observer != op.params.observer
+                                || snapshot.peer != op.params.peer
+                                || snapshot.direction != op.params.direction
+                                || snapshot.length_class != op.params.length_class =>
+                        {
+                            QueryOutcome::DecodeError("snapshot does not match query".to_string())
+                        }
+                        QueryOutcome::Reject(reject)
+                            if reject.request_id != query_id_for(op.token)
+                                || reject.observer != op.params.observer =>
+                        {
+                            QueryOutcome::DecodeError("reject does not match query".to_string())
+                        }
+                        outcome => outcome,
+                    }
+                }
+                Ok(reply) => QueryOutcome::Device(reply.result),
+                Err(error) => QueryOutcome::DecodeError(error.to_string()),
+            };
+            op.outcome = Some(outcome);
+            op.settled_ms = Some(mono_ms());
+        }
+        drop(ops);
+        self.change.notify_all();
+        true
     }
 
     /// Posted by the USB read thread for an Error frame echoing our
     /// request id (a malformed 0x30 would land here — a daemon bug made
     /// visible, never a silent timeout).
-    pub fn post_error(&self, request: u64, code: u16) -> bool {
-        self.resolve(request, QueryOutcome::ErrorFrame(code), now_ms())
+    pub fn post_error(&self, request: u64, session: u64, code: u16) -> bool {
+        self.resolve(request, session, QueryOutcome::ErrorFrame(code), mono_ms())
     }
 }
 
@@ -367,7 +412,7 @@ fn query_id_for(token: u64) -> u32 {
 /// while no query is submitted.
 pub fn telemetry_loop(state: Arc<State>, outbound: mpsc::SyncSender<Outbound>) {
     loop {
-        telemetry_once(&state, &outbound, now_ms());
+        telemetry_once(&state, &outbound, mono_ms());
         let ops = state
             .telemetry_ops
             .ops
@@ -526,6 +571,23 @@ mod tests {
         }
     }
 
+    fn matching_snapshot(token: u64) -> Vec<u8> {
+        let mut body = hex(SNAPSHOT_HEX);
+        body[4..8].copy_from_slice(&query_id_for(token).to_be_bytes());
+        body[8..16].copy_from_slice(&params().observer.to_be_bytes());
+        body[24..32].copy_from_slice(&params().peer.to_be_bytes());
+        body[45] = params().direction;
+        body[46] = params().length_class;
+        body
+    }
+
+    fn matching_reject(token: u64) -> Vec<u8> {
+        let mut body = hex(REJECT_HEX);
+        body[4..8].copy_from_slice(&query_id_for(token).to_be_bytes());
+        body[12..20].copy_from_slice(&params().observer.to_be_bytes());
+        body
+    }
+
     fn live_state(session: u64) -> State {
         let state = State::default();
         let mut info = state.session.lock().expect("session poisoned");
@@ -556,11 +618,11 @@ mod tests {
         let token = ops.submit(params(), 0x5e55, 1_000).unwrap();
         let request = ops.request_for(token).unwrap();
         assert!(owns_request(request));
-        let body = reply_inner(0, 0x0abc, &hex(SNAPSHOT_HEX));
+        let body = reply_inner(0, 0x0abc, &matching_snapshot(token));
         assert!(owns(&body));
-        assert!(ops.post_reply(request, body));
+        assert!(ops.post_reply(request, 0x5e55, body));
         // A reply for an unknown request is a stale/foreign answer: ignored.
-        assert!(!ops.post_reply(request ^ 0xFFFF, vec![0x01, 0x31, 0, 0]));
+        assert!(!ops.post_reply(request ^ 0xFFFF, 0x5e55, vec![0x01, 0x31, 0, 0]));
         let outcome = ops.wait_for(token, Duration::from_millis(100)).unwrap();
         match outcome {
             QueryOutcome::Snapshot(snapshot) => {
@@ -574,18 +636,118 @@ mod tests {
     }
 
     #[test]
+    fn settled_reply_survives_the_api_wait_budget() {
+        let state = live_state(0x5e55);
+        let (tx, _rx) = mpsc::sync_channel(8);
+        let token = state
+            .telemetry_ops
+            .submit(params(), 0x5e55, mono_ms())
+            .unwrap();
+        let request = state.telemetry_ops.request_for(token).unwrap();
+        assert!(state.telemetry_ops.post_reply(
+            request,
+            0x5e55,
+            reply_inner(0, 0x0abc, &matching_snapshot(token))
+        ));
+        telemetry_once(&state, &tx, mono_ms() + API_WAIT_MS - 1);
+        assert!(matches!(
+            state
+                .telemetry_ops
+                .wait_for(token, Duration::from_millis(1)),
+            Some(QueryOutcome::Snapshot(_))
+        ));
+    }
+
+    #[test]
+    fn reply_from_a_new_usb_session_cannot_resolve_an_old_query() {
+        let state = live_state(0x5e55);
+        let token = state
+            .telemetry_ops
+            .submit(params(), 0x5e55, mono_ms())
+            .unwrap();
+        let request = state.telemetry_ops.request_for(token).unwrap();
+        state.session.lock().unwrap().id = Some(0x6000);
+        assert!(!state.telemetry_ops.post_reply(
+            request,
+            0x6000,
+            reply_inner(0, 0x0abc, &matching_snapshot(token)),
+        ));
+    }
+
+    #[test]
+    fn reply_must_match_the_requested_observer_peer_and_query() {
+        for field in [
+            "outer_observer",
+            "query_id",
+            "observer",
+            "peer",
+            "direction",
+            "class",
+        ] {
+            let ops = TelemetryOps::default();
+            let token = ops.submit(params(), 0x5e55, 1_000).unwrap();
+            let request = ops.request_for(token).unwrap();
+            let mut body = matching_snapshot(token);
+            let outer = if field == "outer_observer" {
+                0xc3
+            } else {
+                0x0abc
+            };
+            match field {
+                "query_id" => body[7] ^= 1,
+                "observer" => body[15] ^= 1,
+                "peer" => body[31] ^= 1,
+                "direction" => body[45] ^= 1,
+                "class" => body[46] = 2,
+                _ => {}
+            }
+            assert!(ops.post_reply(request, 0x5e55, reply_inner(0, outer, &body)));
+            assert!(
+                matches!(
+                    ops.wait_for(token, Duration::from_millis(100)),
+                    Some(QueryOutcome::DecodeError(_))
+                ),
+                "accepted wrong {field}"
+            );
+        }
+        for field in ["query_id", "observer"] {
+            let ops = TelemetryOps::default();
+            let token = ops.submit(params(), 0x5e55, 1_000).unwrap();
+            let request = ops.request_for(token).unwrap();
+            let mut body = matching_reject(token);
+            if field == "query_id" {
+                body[7] ^= 1;
+            } else {
+                body[19] ^= 1;
+            }
+            assert!(ops.post_reply(request, 0x5e55, reply_inner(0, 0x0abc, &body)));
+            assert!(
+                matches!(
+                    ops.wait_for(token, Duration::from_millis(100)),
+                    Some(QueryOutcome::DecodeError(_))
+                ),
+                "accepted wrong reject {field}"
+            );
+        }
+    }
+
+    #[test]
     fn reject_and_device_results_resolve_verbatim() {
         let ops = TelemetryOps::default();
         let token = ops.submit(params(), 0x5e55, 1_000).unwrap();
         let request = ops.request_for(token).unwrap();
-        assert!(ops.post_reply(request, reply_inner(0, 0x0abc, &hex(REJECT_HEX))));
+        assert!(ops.post_reply(
+            request,
+            0x5e55,
+            reply_inner(0, 0x0abc, &matching_reject(token))
+        ));
         match ops.wait_for(token, Duration::from_millis(100)).unwrap() {
             QueryOutcome::Reject(reject) => assert_eq!(reject.reason.name(), "NO_PEER"),
             other => panic!("expected reject, got {other:?}"),
         }
         let token = ops.submit(params(), 0x5e55, 1_000).unwrap();
         let request = ops.request_for(token).unwrap();
-        assert!(ops.post_reply(request, reply_inner(1, 0x0abc, &[])));
+        assert!(ops.post_reply(request, 0x5e55, reply_inner(1, 0x0abc, &[])));
         match ops.wait_for(token, Duration::from_millis(100)).unwrap() {
             QueryOutcome::Device(ConfigOpsResult::Busy) => {}
             other => panic!("expected device busy, got {other:?}"),
@@ -593,7 +755,7 @@ mod tests {
         // Garbage from the device is a decode error, never a snapshot.
         let token = ops.submit(params(), 0x5e55, 1_000).unwrap();
         let request = ops.request_for(token).unwrap();
-        assert!(ops.post_reply(request, reply_inner(0, 0x0abc, &[0x01, 0x04])));
+        assert!(ops.post_reply(request, 0x5e55, reply_inner(0, 0x0abc, &[0x01, 0x04])));
         match ops.wait_for(token, Duration::from_millis(100)).unwrap() {
             QueryOutcome::DecodeError(_) => {}
             other => panic!("expected decode error, got {other:?}"),
@@ -601,8 +763,8 @@ mod tests {
         // An Error frame echoing our request resolves as an error.
         let token = ops.submit(params(), 0x5e55, 1_000).unwrap();
         let request = ops.request_for(token).unwrap();
-        assert!(ops.post_error(request, 3));
-        assert!(!ops.post_error(request ^ 0xFFFF, 3));
+        assert!(ops.post_error(request, 0x5e55, 3));
+        assert!(!ops.post_error(request ^ 0xFFFF, 0x5e55, 3));
         match ops.wait_for(token, Duration::from_millis(100)).unwrap() {
             QueryOutcome::ErrorFrame(3) => {}
             other => panic!("expected error frame, got {other:?}"),

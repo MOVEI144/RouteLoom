@@ -1,9 +1,13 @@
 #include <cstdio>
 #include <cstring>
+#include <cstdarg>
 #include <string>
 
 #include "nvs.h"
 #include "routeloom/nvs_sdkv1_store.hpp"
+
+static_assert(sizeof(routeloom::espnow::NvsBlobNamespace) <= 128,
+              "six persistent namespaces must fit the esp32c3 RAM floor");
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #x); return 1; } } while (false)
 
@@ -15,6 +19,7 @@ FailOp fail_op = FailOp::kNone;
 esp_err_t fail_code = ESP_OK;
 std::string stored;
 bool stored_live = false;
+char last_log[128]{};
 
 bool ShouldFail(FailOp op, esp_err_t* code) {
   if (fail_op == op) {
@@ -24,6 +29,14 @@ bool ShouldFail(FailOp op, esp_err_t* code) {
   return false;
 }
 }  // namespace
+
+extern "C" void routeloom_test_log_error(const char* tag, const char* format, ...) {
+  (void)tag;
+  std::va_list args;
+  va_start(args, format);
+  std::vsnprintf(last_log, sizeof last_log, format, args);
+  va_end(args);
+}
 
 esp_err_t nvs_open(const char*, int, nvs_handle_t* handle) {
   *handle = 1;
@@ -72,6 +85,7 @@ void Reset() {
   fail_code = ESP_OK;
   stored.clear();
   stored_live = false;
+  last_log[0] = '\0';
 }
 
 // The store is neither copyable nor movable, so each check owns a local.
@@ -93,9 +107,16 @@ int CheckWriteSpace() {
   // Capacity refuses must read differently from generic failures so the
   // operator picks the right remedy (free space vs investigate).
   CHECK(std::strstr(status.detail, "space") != nullptr);
+  CHECK(std::strstr(last_log, "rlsec/rl") != nullptr);
+  CHECK(std::strstr(last_log, "blob_write") != nullptr);
+  char native[32]{};
+  std::snprintf(native, sizeof native, "native=0x%x", ESP_ERR_NVS_NOT_ENOUGH_SPACE);
+  CHECK(std::strstr(last_log, native) != nullptr);
   const auto last = store.last_error();
   CHECK(last.op != nullptr && std::strcmp(last.op, "blob_write") == 0);
   CHECK(last.native == ESP_ERR_NVS_NOT_ENOUGH_SPACE);
+  CHECK(std::strcmp(last.partition, "rlsec") == 0);
+  CHECK(std::strcmp(last.name_space, "rl") == 0);
   CHECK(std::strcmp(store.partition(), "rlsec") == 0);
   CHECK(std::strcmp(store.name_space(), "rl") == 0);
   return 0;
@@ -112,6 +133,9 @@ int CheckWriteGeneric() {
   const routeloom::Status status = store.blob_write("k", data);
   CHECK(!status.ok());
   CHECK(std::strstr(status.detail, "space") == nullptr);
+  char native[32]{};
+  std::snprintf(native, sizeof native, "native=0x%x", ESP_ERR_INVALID_ARG);
+  CHECK(std::strstr(last_log, native) != nullptr);
   const auto last = store.last_error();
   CHECK(last.op != nullptr && std::strcmp(last.op, "blob_write") == 0);
   CHECK(last.native == ESP_ERR_INVALID_ARG);
@@ -189,6 +213,23 @@ int CheckOpenFailureAttributed() {
   return 0;
 }
 
+int CheckLastErrorKeepsItsNamespace() {
+  Reset();
+  routeloom::espnow::NvsBlobNamespace store;
+  CHECK(OpenStore(store));
+  fail_op = FailOp::kWrite;
+  fail_code = ESP_ERR_INVALID_ARG;
+  const routeloom::ByteView data{reinterpret_cast<const std::uint8_t*>("v"), 1};
+  CHECK(!store.blob_write("k", data).ok());
+  fail_op = FailOp::kNone;
+  CHECK(store.open("other", "next").ok());
+  const auto last = store.last_error();
+  CHECK(std::strcmp(last.partition, "rlsec") == 0);
+  CHECK(std::strcmp(last.name_space, "rl") == 0);
+  CHECK(std::strcmp(store.partition(), "other") == 0);
+  return 0;
+}
+
 int main() {
   if (CheckWriteSpace() != 0) return 1;
   if (CheckWriteGeneric() != 0) return 1;
@@ -196,6 +237,7 @@ int main() {
   if (CheckRoundTrip() != 0) return 1;
   if (CheckLastErrorSticky() != 0) return 1;
   if (CheckOpenFailureAttributed() != 0) return 1;
+  if (CheckLastErrorKeepsItsNamespace() != 0) return 1;
   std::puts("PASS test_nvs_sdkv1_store");
   return 0;
 }

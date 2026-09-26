@@ -617,38 +617,43 @@ pub trait OperationStore {
             CancelOutcome::NotFound
         })
     }
-    /// Records a device-attested terminal detail on the operation holding
-    /// `msg_session`/`msg_seq` (reason-carrying DeliveryEvent, 01 §5: late
-    /// evidence appends to the same OperationId). True when an operation
-    /// matched. Message keys are unique per send, so at most one record
-    /// matches; concluded records keep their attachment, so they stay
-    /// findable. The default scans `dispatch_view` and rewrites through
-    /// `update_operation`, which every provider implements.
+    /// Records a device-attested terminal detail on the exact dispatch
+    /// operation named by the device's 24-byte operation id. The message
+    /// key is checked as well: mesh sessions can reuse (session, sequence)
+    /// after a restart, so key-only lookup could rewrite an older send.
+    /// Concluded records retain their attachment through device retirement.
     fn attach_device_outcome(
         &mut self,
+        operation_id: &[u8; 24],
         msg_session: u32,
         msg_seq: u64,
         state: &str,
         reason: Option<&str>,
     ) -> Result<bool, ()> {
-        for op in self.dispatch_view()? {
-            let keyed = op
-                .dispatch
-                .as_ref()
-                .is_some_and(|d| d.msg_session == Some(msg_session) && d.msg_seq == Some(msg_seq));
-            if !keyed {
-                continue;
-            }
-            return self.update_operation(op.seq, &mut |target| {
-                if let Some(dispatch) = target.dispatch.as_mut() {
-                    dispatch.attach_device_outcome(state, reason);
-                    true
-                } else {
-                    false
-                }
-            });
+        let seq = u64::from_be_bytes(operation_id[16..24].try_into().expect("fixed id"));
+        let Some(op) = self.get_by_seq(seq)? else {
+            return Ok(false);
+        };
+        let keyed = op.dispatch.as_ref().is_some_and(|d| {
+            d.dispatcher == operation_id[..16]
+                && d.msg_session == Some(msg_session)
+                && d.msg_seq == Some(msg_seq)
+        });
+        if !keyed {
+            return Ok(false);
         }
-        Ok(false)
+        self.update_operation(seq, &mut |target| {
+            if let Some(dispatch) = target.dispatch.as_mut().filter(|d| {
+                d.dispatcher == operation_id[..16]
+                    && d.msg_session == Some(msg_session)
+                    && d.msg_seq == Some(msg_seq)
+            }) {
+                dispatch.attach_device_outcome(state, reason);
+                true
+            } else {
+                false
+            }
+        })
     }
 }
 
@@ -1575,12 +1580,16 @@ mod tests {
                 true
             })
             .unwrap();
-        // The reason-carrying DeliveryEvent lands on the keyed operation;
-        // an unknown key matches nothing.
+        let mut operation_id = [8_u8; 24];
+        operation_id[16..].copy_from_slice(&seq.to_be_bytes());
+        // The reason-carrying DeliveryEvent lands on the named operation;
+        // an unknown message key matches nothing.
         assert!(store
-            .attach_device_outcome(5, 900, "failed", Some("NO_ROUTE"))
+            .attach_device_outcome(&operation_id, 5, 900, "failed", Some("NO_ROUTE"))
             .unwrap());
-        assert!(!store.attach_device_outcome(5, 901, "failed", None).unwrap());
+        assert!(!store
+            .attach_device_outcome(&operation_id, 5, 901, "failed", None)
+            .unwrap());
         let op = store.get_by_seq(seq).unwrap().unwrap();
         let dispatch = op.dispatch.as_ref().unwrap();
         assert_eq!(dispatch.device_state.as_deref(), Some("failed"));

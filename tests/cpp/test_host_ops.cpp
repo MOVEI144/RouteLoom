@@ -1944,8 +1944,8 @@ void test_bridge_mesh_rejected() {
 
   // The next send is refused by the mesh: honest MeshRejected, and no
   // half-created record — QUERY proves the position stayed empty.
-  // (Manual feed/drain: transact() clears the sink, which would discard
-  // the refusal diagnostic asserted below.)
+  // The fixed receipt carries the bounded reason in its slot-free hash
+  // position, bound to this SUBMIT request.
   const auto ninth = submit_bytes(9, ByteView{canonical.data(), canonical.size()});
   world.device_sink.frames.clear();
   world.feed(host.sealed(FrameKind::HostOps, 260,
@@ -1954,7 +1954,6 @@ void test_bridge_mesh_rejected() {
   world.drain(now);
   now += 200;
   std::vector<std::uint8_t> ninth_answer;
-  bool refused_diag = false;
   for (const auto& record : world.device_sink.frames) {
     std::uint64_t counter = 0;
     ByteView opened{};
@@ -1963,22 +1962,7 @@ void test_bridge_mesh_rejected() {
     if (record.frame.kind == FrameKind::HostOps && ninth_answer.empty()) {
       ninth_answer.assign(opened.data, opened.data + opened.size);
     }
-    // The pre-admission refusal also emits a diagnostic carrying the mesh
-    // detail: the receipt alone (MeshRejected) cannot tell a full delivery
-    // table from a paused node.
-    if (record.frame.kind != FrameKind::Diagnostic) continue;
-    CHECK(opened.size >= 10);
-    CHECK(read_u64(opened.data) == 2);  // refused destination
-    // No message key (nothing was sent); the accounting tail follows.
-    CHECK((opened.data[8] & kDiagFlagHasMessage) == 0);
-    CHECK((opened.data[8] & kDiagFlagHasAccounting) != 0);
-    const std::size_t reason_len = opened.data[9];
-    CHECK(opened.size == 10 + reason_len + kDiagAccountingTailSize);
-    const std::string reason(reinterpret_cast<const char*>(opened.data + 10),
-                             reason_len);
-    CHECK(reason.rfind("SUBMIT_REFUSED:9:", 0) == 0);
-    CHECK(reason.size() > std::strlen("SUBMIT_REFUSED:9:"));
-    refused_diag = true;
+    CHECK(record.frame.kind != FrameKind::Diagnostic);
   }
   world.device_sink.frames.clear();
   DispatchReceipt ninth_resp{};
@@ -1986,7 +1970,10 @@ void test_bridge_mesh_rejected() {
                        HostOpsSub::Submit, ninth_resp));
   CHECK(ninth_resp.result == HostOpsResult::MeshRejected);
   CHECK(!ninth_resp.msg_valid);
-  CHECK(refused_diag);
+  CHECK(std::memcmp(ninth_resp.hash.data(), "RLFR", 4) == 0);
+  const std::string reason(reinterpret_cast<const char*>(ninth_resp.hash.data() + 5),
+                           ninth_resp.hash[4]);
+  CHECK(reason == "delivery table full");
 
   const auto query = lane_bytes(HostOpsSub::QueryDispatch, 9);
   const auto query_answer =
@@ -2012,8 +1999,8 @@ void test_bridge_mesh_rejected() {
 }
 
 void test_bridge_submit_refused_without_mesh() {
-  // Defensive path: no mesh attached — MeshRejected plus the diagnostic
-  // naming the cause, never a silent refusal.
+  // Defensive path: no mesh attached — MeshRejected names the cause in
+  // the fixed receipt.
   World world;
   HostDriver host;
   MonotonicMs now = 1000;
@@ -2022,15 +2009,12 @@ void test_bridge_submit_refused_without_mesh() {
   world.device_sink.frames.clear();
   const auto canonical = build_canonical();
   const auto submit = submit_bytes(1, ByteView{canonical.data(), canonical.size()});
-  // Manual feed/drain: transact() clears the sink, which would discard
-  // the refusal diagnostic asserted below.
   world.feed(host.sealed(FrameKind::HostOps, 300,
                          ByteView{submit.data(), submit.size()}),
              now);
   world.drain(now);
   now += 200;
   std::vector<std::uint8_t> answer;
-  bool refused_diag = false;
   for (const auto& record : world.device_sink.frames) {
     std::uint64_t counter = 0;
     ByteView opened{};
@@ -2039,22 +2023,17 @@ void test_bridge_submit_refused_without_mesh() {
     if (record.frame.kind == FrameKind::HostOps && answer.empty()) {
       answer.assign(opened.data, opened.data + opened.size);
     }
-    if (record.frame.kind != FrameKind::Diagnostic) continue;
-    CHECK(opened.size >= 10);
-    CHECK((opened.data[8] & kDiagFlagHasAccounting) != 0);
-    const std::size_t reason_len = opened.data[9];
-    CHECK(opened.size == 10 + reason_len + kDiagAccountingTailSize);
-    const std::string reason(reinterpret_cast<const char*>(opened.data + 10),
-                             reason_len);
-    CHECK(reason == "SUBMIT_REFUSED:1:MESH_UNAVAILABLE");
-    refused_diag = true;
+    CHECK(record.frame.kind != FrameKind::Diagnostic);
   }
   world.device_sink.frames.clear();
   DispatchReceipt resp{};
   CHECK(decode_receipt(ByteView{answer.data(), answer.size()},
                        HostOpsSub::Submit, resp));
   CHECK(resp.result == HostOpsResult::MeshRejected);
-  CHECK(refused_diag);
+  CHECK(std::memcmp(resp.hash.data(), "RLFR", 4) == 0);
+  const std::string reason(reinterpret_cast<const char*>(resp.hash.data() + 5),
+                           resp.hash[4]);
+  CHECK(reason == "MESH_UNAVAILABLE");
   world.bridge.set_mesh(&world.n1);
 }
 
@@ -2072,6 +2051,8 @@ void test_bridge_window_failure_reason_reaches_host() {
   const auto canonical = build_canonical();
 
   const auto submit = submit_bytes(1, ByteView{canonical.data(), canonical.size()});
+  SubmitRequest submitted{};
+  CHECK(decode_submit(ByteView{submit.data(), submit.size()}, submitted));
   const auto answer =
       transact(world, host, now, 300, ByteView{submit.data(), submit.size()},
                got_error, error_code);
@@ -2097,9 +2078,11 @@ void test_bridge_window_failure_reason_reaches_host() {
     CHECK(read_u64(opened.data + 12) == receipt.msg_seq);
     CHECK(opened.data[20] == static_cast<std::uint8_t>(DeliveryState::Failed));
     const std::size_t reason_len = opened.data[21];
-    CHECK(opened.size == 22 + reason_len);
+    CHECK(opened.size == 22 + reason_len + kOperationIdSize);
     CHECK(std::string(reinterpret_cast<const char*>(opened.data + 22),
                       reason_len) == "HOP_TIMEOUT");
+    CHECK(std::memcmp(opened.data + 22 + reason_len,
+                      submitted.operation_id.data(), kOperationIdSize) == 0);
     reason_event = true;
   }
   CHECK(reason_event);

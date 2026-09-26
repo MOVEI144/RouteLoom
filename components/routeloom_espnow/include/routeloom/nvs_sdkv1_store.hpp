@@ -44,6 +44,9 @@ class NvsBlobNamespace final : public sdkv1::BlobNamespace {
   struct NvsLastError {
     const char* op{nullptr};
     esp_err_t native{ESP_OK};
+    // SDK v1 uses `rlsec` and namespaces of at most seven characters.
+    char partition[8]{};
+    char name_space[8]{};
   };
 
   NvsBlobNamespace() = default;
@@ -71,9 +74,8 @@ class NvsBlobNamespace final : public sdkv1::BlobNamespace {
   const char* name_space() const noexcept { return space_; }
 
  private:
-  // Records the failure for last_error() and maps it to StorageFailure,
-  // spelling capacity refuses apart from generic faults so the remedy
-  // (free space vs investigate) stays visible in the detail alone.
+  // Keeps the last native cause and emits the operation/location/code to
+  // the device log without retaining a formatted buffer in each namespace.
   Status note_error(const char* op, esp_err_t error, const char* failed_detail,
                     const char* nospace_detail) noexcept;
 

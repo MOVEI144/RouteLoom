@@ -506,12 +506,9 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // Frames one reason-carrying DeliveryEvent (shared by the legacy path
   // and by window-correlated terminal failures).
   void emit_delivery_event(std::uint64_t request,
-                           const DeliveryResult& result) noexcept;
-  // A SUBMIT the mesh refused before admission (MeshRejected receipt):
-  // the fixed receipt cannot carry the mesh detail, so it is emitted as
-  // a `SUBMIT_REFUSED:<seq>:<detail>` diagnostic for the destination.
-  void note_submit_refused(std::uint64_t dispatch_seq, NodeId destination,
-                           const char* detail) noexcept;
+                           const DeliveryResult& result,
+                           const std::array<std::uint8_t, kOperationIdSize>*
+                               operation_id = nullptr) noexcept;
   // Stamps one Diagnostic (boot, per-emission seq, cumulative drop count)
   // and queues it; false when the TX queue is full. The seq advances per
   // attempt, so a drop leaves a gap the PC can see.

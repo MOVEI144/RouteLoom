@@ -1,6 +1,5 @@
 #include "routeloom/usb_bridge.hpp"
 
-#include <cstdio>
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
@@ -42,6 +41,25 @@ void write_u32(std::uint8_t* p, std::uint32_t v) noexcept {
 void write_u16(std::uint8_t* p, std::uint16_t v) noexcept {
   p[0] = static_cast<std::uint8_t>(v >> 8U);
   p[1] = static_cast<std::uint8_t>(v & 0xFFU);
+}
+
+// A MeshRejected SUBMIT has no stored slot, so the receipt's 32-byte hash
+// position carries a bounded refusal detail instead. The fixed receipt
+// size and all other result layouts remain unchanged; older hosts ignore
+// this field on MeshRejected.
+void set_mesh_refusal(DispatchReceipt& receipt, const char* detail) noexcept {
+  receipt.hash.fill(0);
+  receipt.hash[0] = 'R';
+  receipt.hash[1] = 'L';
+  receipt.hash[2] = 'F';
+  receipt.hash[3] = 'R';
+  if (detail == nullptr) detail = "MESH_REJECTED";
+  std::size_t size = 0;
+  while (detail[size] != '\0' && size < receipt.hash.size() - 5) {
+    receipt.hash[5 + size] = static_cast<std::uint8_t>(detail[size]);
+    ++size;
+  }
+  receipt.hash[4] = static_cast<std::uint8_t>(size);
 }
 
 }  // namespace
@@ -1907,9 +1925,8 @@ void UsbBridge::handle_ops_submit(const std::uint64_t request,
 
   if (config_.mesh == nullptr) {
     receipt.result = HostOpsResult::MeshRejected;
+    set_mesh_refusal(receipt, "MESH_UNAVAILABLE");
     send_receipt(receipt, request, now_ms);
-    note_submit_refused(submit.dispatch_seq, fields.destination,
-                        "MESH_UNAVAILABLE");
     return;
   }
   SendOptions options{};
@@ -1934,12 +1951,10 @@ void UsbBridge::handle_ops_submit(const std::uint64_t request,
   ops_send_active_ = false;
   if (!status) {
     // Refused or full: no record is created, so a later retry is a clean
-    // Admit — never a Conflict against a half-created entry. The receipt
-    // cannot name the cause, so the mesh detail goes out as a diagnostic.
+    // Admit — never a Conflict against a half-created entry.
     receipt.result = HostOpsResult::MeshRejected;
+    set_mesh_refusal(receipt, status.detail);
     send_receipt(receipt, request, now_ms);
-    note_submit_refused(submit.dispatch_seq, fields.destination,
-                        status.detail);
     return;
   }
   if (!window_.record_sent(submit.dispatcher, submit.dispatch_seq,
@@ -2427,8 +2442,9 @@ void UsbBridge::on_delivery(const DeliveryResult& result) noexcept {
     // no receipt have been produced): suppress, as before.
     return;
   }
+  std::array<std::uint8_t, kOperationIdSize> operation_id{};
   if (window_.note_mesh_outcome(result.id.session, result.id.sequence,
-                                result.state)) {
+                                result.state, &operation_id)) {
     // Correlated — but a terminal failure without its reason would leave
     // the API1 send result unexplained (HOP_TIMEOUT and END_RECEIPT_TIMEOUT
     // share one window state). Emit the reason-carrying event for terminal
@@ -2439,7 +2455,7 @@ void UsbBridge::on_delivery(const DeliveryResult& result) noexcept {
         result.state == DeliveryState::Expired ||
         result.state == DeliveryState::Indeterminate ||
         result.state == DeliveryState::CancelledBeforeTx) {
-      emit_delivery_event(request_for(result.id), result);
+      emit_delivery_event(request_for(result.id), result, &operation_id);
     }
     return;
   }
@@ -2449,10 +2465,13 @@ void UsbBridge::on_delivery(const DeliveryResult& result) noexcept {
 }
 
 void UsbBridge::emit_delivery_event(const std::uint64_t request,
-                                    const DeliveryResult& result) noexcept {
+                                    const DeliveryResult& result,
+                                    const std::array<std::uint8_t, kOperationIdSize>*
+                                        operation_id) noexcept {
   // inner: request(8) || msg_session(4) || msg_seq(8) || state(1) ||
-  //        reason_len(1) || reason
-  std::array<std::uint8_t, 8 + 4 + 8 + 1 + 1 + kMaxReasonLen> inner{};
+  //        reason_len(1) || reason || [operation_id(24)]
+  std::array<std::uint8_t, 8 + 4 + 8 + 1 + 1 + kMaxReasonLen + kOperationIdSize>
+      inner{};
   write_u64(inner.data(), request);
   write_u32(inner.data() + 8, result.id.session);
   write_u64(inner.data() + 12, result.id.sequence);
@@ -2463,18 +2482,13 @@ void UsbBridge::emit_delivery_event(const std::uint64_t request,
   if (reason_len > 0) {
     std::memcpy(inner.data() + 22, result.reason, reason_len);
   }
+  const std::size_t tail = 22 + reason_len;
+  if (operation_id != nullptr) {
+    std::memcpy(inner.data() + tail, operation_id->data(), operation_id->size());
+  }
   enqueue(FrameKind::DeliveryEvent, 0, request,
-          ByteView{inner.data(), 22 + reason_len}, now_ms_);
-}
-
-void UsbBridge::note_submit_refused(const std::uint64_t dispatch_seq,
-                                    const NodeId destination,
-                                    const char* detail) noexcept {
-  char text[kMaxReasonLen + 1];
-  std::snprintf(text, sizeof text, "SUBMIT_REFUSED:%llu:%s",
-                static_cast<unsigned long long>(dispatch_seq),
-                detail != nullptr ? detail : "");
-  on_diagnostic(text, destination, nullptr);
+          ByteView{inner.data(), tail + (operation_id != nullptr ? kOperationIdSize : 0)},
+          now_ms_);
 }
 
 bool UsbBridge::emit_diagnostic(const char* reason, const NodeId peer,
@@ -2663,8 +2677,9 @@ void UsbBridge::handle_gateway_submit(const SubmitRequest& submit,
                                       DispatchReceipt& receipt,
                                       const std::uint64_t request,
                                       const MonotonicMs now_ms) noexcept {
-  const auto refuse = [&](const HostOpsResult result) {
+  const auto refuse = [&](const HostOpsResult result, const char* detail = nullptr) {
     receipt.result = result;
+    if (result == HostOpsResult::MeshRejected) set_mesh_refusal(receipt, detail);
     send_receipt(receipt, request, now_ms);
   };
   if ((config_.capability & kCapGatewayEndpointV1) == 0 || gateway_ == nullptr ||
@@ -2751,7 +2766,7 @@ void UsbBridge::handle_gateway_submit(const SubmitRequest& submit,
                       ByteView{prefix.data(), prefix.size()}, fields.payload,
                       submit.dispatch_seq, now_ms);
     if (!queued) {
-      refuse(HostOpsResult::MeshRejected);
+      refuse(HostOpsResult::MeshRejected, queued.detail);
       return;
     }
     if (!window_.record_sent(submit.dispatcher, submit.dispatch_seq,
@@ -2785,7 +2800,7 @@ void UsbBridge::handle_gateway_submit(const SubmitRequest& submit,
     }
   }
   if (send == nullptr) {
-    refuse(HostOpsResult::MeshRejected);
+    refuse(HostOpsResult::MeshRejected, "GATEWAY_SEND_FULL");
     return;
   }
   if (!window_.record_pending(submit.dispatcher, submit.dispatch_seq,

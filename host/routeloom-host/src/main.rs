@@ -1145,12 +1145,16 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                 let msg_seq = u64_at(body, 12);
                 let name = delivery_state_name(body[20]);
                 let reason = reason_at(body, 21);
+                let tail = 22 + usize::from(body[21]);
+                let operation_id: Option<&[u8; 24]> = body
+                    .get(tail..)
+                    .filter(|bytes| bytes.len() == 24)
+                    .and_then(|bytes| bytes.try_into().ok());
                 // Route by request: a legacy SEND tracks its request id
                 // in the deliveries table; a SUBMIT (host-ops) request id
                 // never appears there, so its event carries the device
-                // outcome for the operation holding this message key —
-                // attach it there instead of inventing a legacy
-                // delivery entry for it.
+                // outcome for the exact dispatch operation in the trailer.
+                // The message key alone can recur after a mesh restart.
                 let tracked = delivery_update_tracked(
                     state,
                     request,
@@ -1164,18 +1168,29 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                     ms,
                 );
                 if !tracked {
-                    if let (Some(session), Some(seq)) = (u32_at(body, 8), u64_at(body, 12)) {
+                    if let (Some(id), Some(session), Some(seq)) =
+                        (operation_id, u32_at(body, 8), u64_at(body, 12))
+                    {
                         if let Ok(mut store) = state.operation_store.lock() {
-                            let _ =
-                                store.attach_device_outcome(session, seq, name, reason.as_deref());
+                            let _ = store.attach_device_outcome(
+                                id,
+                                session,
+                                seq,
+                                name,
+                                reason.as_deref(),
+                            );
                         }
                     }
                 }
+                let dispatch_operation = operation_id.map_or_else(
+                    || "null".to_string(),
+                    |id| format!("\"{}\"", crate::receive_log::hex_lower(id)),
+                );
                 push_event(
                     state,
                     ms,
                     format!(
-                        "\"kind\":\"delivery_event\",\"request\":{request},\"state\":\"{name}\",\"msg_session\":{},\"msg_seq\":{},\"reason\":{}",
+                        "\"kind\":\"delivery_event\",\"request\":{request},\"state\":\"{name}\",\"msg_session\":{},\"msg_seq\":{},\"reason\":{},\"dispatch_operation\":{dispatch_operation}",
                         msg_session.map_or_else(|| "null".to_string(), |v| v.to_string()),
                         json_opt_u64(msg_seq),
                         json_opt_str(reason.as_deref()),
@@ -1262,7 +1277,9 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
             if let Some(request) = request.filter(|r| telemetry::owns_request(*r)) {
                 // A 0x30 the device refused at the frame level: the query
                 // resolves as an error, never a silent timeout.
-                state.telemetry_ops.post_error(request, code.unwrap_or(0));
+                state
+                    .telemetry_ops
+                    .post_error(request, frame.session, code.unwrap_or(0));
             }
             if let Some(request) = request {
                 // Error requests share the session request space (credit,
@@ -1372,7 +1389,9 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
         // refused post is a stale answer past our timeout — expected and
         // silent, never ring spam.
         FrameKind::HostOps if telemetry::owns(body) => {
-            state.telemetry_ops.post_reply(frame.request, body.to_vec());
+            state
+                .telemetry_ops
+                .post_reply(frame.request, frame.session, body.to_vec());
         }
         FrameKind::HostOps if site::owns(body) => {
             if !state.site_inbox.post(frame.request, body.to_vec()) {
@@ -3438,7 +3457,7 @@ mod tests {
         let state = State::default();
         // Admit an operation and bind its message key, as the dispatch
         // lane does when the SUBMIT receipt lands.
-        let seq = {
+        let (seq, seq2) = {
             let mut store = state.operation_store.lock().unwrap();
             store.open_epoch((501, 1), 0).unwrap();
             let json = "{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000001\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"00ff\",\"payload_len\":2,\"options\":{\"storage\":\"RAM_ONLY\"}}";
@@ -3462,7 +3481,34 @@ mod tests {
                     true
                 })
                 .unwrap();
-            seq
+            // A previously retained operation can carry the same message
+            // key after a mesh session restart. The event belongs to the
+            // second operation named by its dispatch identity.
+            let second_json = json.replace(
+                "00112233445566778899aabbccddeeff",
+                "00112233445566778899aabbccddeeee",
+            );
+            let mut second =
+                crate::canonical::parse_submit(&routeloom_json::parse(&second_json).unwrap(), None)
+                    .unwrap();
+            second.epoch = 1;
+            let seq2 = match store.submit(501, &second, 1001) {
+                SubmitOutcome::Accepted { seq } => seq,
+                _ => panic!("expected second accept"),
+            };
+            assert!(matches!(
+                store.prepare_dispatch(seq2, [7; 16], [8; 16]),
+                Ok(PrepareOutcome::Prepared(_))
+            ));
+            store
+                .update_operation(seq2, &mut |op| {
+                    let d = op.dispatch.as_mut().unwrap();
+                    d.msg_session = Some(5);
+                    d.msg_seq = Some(900);
+                    true
+                })
+                .unwrap();
+            (seq, seq2)
         };
         // A reason-carrying DeliveryEvent for the SUBMIT request id
         // (never tracked by the legacy SEND path).
@@ -3472,6 +3518,8 @@ mod tests {
         body.extend_from_slice(&900_u64.to_be_bytes());
         body.push(8); // failed
         body.extend_from_slice(b"\x08NO_ROUTE");
+        body.extend_from_slice(&[8; 16]);
+        body.extend_from_slice(&seq2.to_be_bytes());
         record_frame(
             &state,
             &frame(FrameKind::DeliveryEvent, 0, 4242, body.clone()),
@@ -3482,7 +3530,15 @@ mod tests {
         assert!(!deliveries_json(&state).contains("4242"));
         // ...the device outcome attaches to the keyed operation instead.
         let store = state.operation_store.lock().unwrap();
-        let dispatch = store.get_by_seq(seq).unwrap().unwrap().dispatch.unwrap();
+        assert!(store
+            .get_by_seq(seq)
+            .unwrap()
+            .unwrap()
+            .dispatch
+            .unwrap()
+            .device_reason
+            .is_none());
+        let dispatch = store.get_by_seq(seq2).unwrap().unwrap().dispatch.unwrap();
         assert_eq!(dispatch.device_state.as_deref(), Some("failed"));
         assert_eq!(dispatch.device_reason.as_deref(), Some("NO_ROUTE"));
         // And the event ring still carries the reason for triage.

@@ -34,8 +34,14 @@ pub const SITE_PAGE_MAX: usize = 128;
 /// Kinds the Site Authority appends to the event ring (also accepted by
 /// `messages.subscribe {stream:"events", filter:{kinds:[...]}}`).
 pub const SITE_EVENT_KINDS: &[&str] = &[
+    "authority.channel_lost",
+    "authority.channel_ready",
+    "authority.passthrough",
+    "authority.pull",
+    "authority.pull_throttled",
     "join.request",
     "join.decided",
+    "join_relay_failed",
     "device.discovered",
     "member.reissued",
     "member.confirmed",
@@ -667,4 +673,23 @@ pub(super) fn capability_json<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Str
     format!(
         "{{\"configured\":{configured},\"edhoc\":\"rfc9528-method0-suite2\",\"verdicts\":[\"allow\",\"pending\",\"deny\"],\"permissions\":[\"MEMBERSHIP_READ\",\"MEMBERSHIP_DECIDE\",\"MEMBERSHIP_ADMIN\"],\"page_max\":{SITE_PAGE_MAX},\"events\":[{kinds}],\"join_relay\":\"{join_relay}\",\"distribution\":\"{distribution}\",\"storage_durable\":{durable}}}"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SITE_EVENT_KINDS;
+
+    #[test]
+    fn join_relay_failures_can_be_filtered_and_advertised() {
+        for kind in [
+            "join_relay_failed",
+            "authority.channel_ready",
+            "authority.channel_lost",
+            "authority.pull",
+            "authority.pull_throttled",
+            "authority.passthrough",
+        ] {
+            assert!(SITE_EVENT_KINDS.contains(&kind), "missing {kind}");
+        }
+    }
 }

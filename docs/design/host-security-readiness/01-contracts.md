@@ -70,7 +70,7 @@ LOCAL_ACCEPTED、GATEWAY_ACCEPTED、END_SDK_RECEIVED、HOST_RAM_RETAINED、HOST_
 
 終端処理と観測は直交したフィールドにする：`dispatch_state`、`evidence`、`application_outcome`、`observation{deadline_elapsed,cancel_requested,time_uncertain}`。timeout後も同じOperationIdへ遅着証拠を追記できる。過去にtimeoutした記録自体を改ざんせず最新結論を照会する。
 
-機器が証言する終端の内訳は `device_outcome{state,reason}` に載せる（理由付き DeliveryEvent を message key で operation に紐付け、durable store にも保存）。`dispatch_state` の終端性（Failed／Indeterminate の保守的集約を含む）は変えず、原因だけを分離して診断可能にする。受理前拒否（MeshRejected）の機器側 detail は `SUBMIT_REFUSED:<seq>:<detail>` の diagnostic event で出す。
+機器が証言する終端の内訳は `device_outcome{state,reason}` に載せる。HostOps 由来の理由付き DeliveryEvent は末尾の24バイト operation id と MessageKey の両方を照合し、durable store にも保存する（MessageKey は再起動後に再利用され得る）。`dispatch_state` の終端性（Failed／Indeterminate の保守的集約を含む）は変えず、原因だけを分離する。受理前の MeshRejected は slot が無いため、固定長 RECEIPT の hash 位置を `"RLFR" | len:u8 | detail ASCII (最大27バイト) | zero padding` として使い、対応する operation に直近の拒否理由を保持する。旧機器の canonical hash echo は理由と解釈しない。
 
 ## 6. 共通上限と非対応
 

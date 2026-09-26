@@ -2070,8 +2070,10 @@ mod tests {
                     true
                 })
                 .unwrap();
+            let mut operation_id = [8_u8; 24];
+            operation_id[16..].copy_from_slice(&seq.to_be_bytes());
             assert!(store
-                .attach_device_outcome(5, 900, "failed", Some("NO_ROUTE"))
+                .attach_device_outcome(&operation_id, 5, 900, "failed", Some("NO_ROUTE"))
                 .unwrap());
         }
         let store = db.open();

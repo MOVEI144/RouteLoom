@@ -1,6 +1,7 @@
 #include "routeloom/nvs_sdkv1_store.hpp"
 
 #include "esp_err.h"
+#include "esp_log.h"
 
 namespace routeloom::espnow {
 namespace {
@@ -9,9 +10,10 @@ bool IsNoSpace(const esp_err_t error) noexcept {
   return error == ESP_ERR_NVS_NOT_ENOUGH_SPACE || error == ESP_ERR_NVS_NO_FREE_PAGES;
 }
 
-void CopyLabel(char* out, const char* src) noexcept {
+template <std::size_t N>
+void CopyLabel(char (&out)[N], const char* src) noexcept {
   std::size_t i = 0;
-  for (; src[i] != '\0' && i < 15; ++i) out[i] = src[i];
+  for (; src[i] != '\0' && i + 1 < N; ++i) out[i] = src[i];
   out[i] = '\0';
 }
 
@@ -24,6 +26,10 @@ Status NvsBlobNamespace::note_error(const char* op, const esp_err_t error,
                                     const char* nospace_detail) noexcept {
   last_.op = op;
   last_.native = error;
+  CopyLabel(last_.partition, partition_);
+  CopyLabel(last_.name_space, space_);
+  ESP_LOGE("RouteLoomNVS", "%s %s/%s native=0x%x", op, partition_, space_,
+           static_cast<unsigned int>(error));
   return Status::error(StatusCode::StorageFailure,
                        IsNoSpace(error) ? nospace_detail : failed_detail);
 }

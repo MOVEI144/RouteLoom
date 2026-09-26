@@ -621,8 +621,7 @@ pub struct Counters {
     /// Rejected GK ACKs/pulls by fence reason (stale epoch, DAMS, GK-id…).
     pub gk_rejected: BTreeMap<&'static str, u64>,
     /// Downlink deliveries the transport refused, by `DeliverReject` name
-    /// (`queue_full`, `too_large`, `closed`): the delivery loop has no
-    /// clock for the failures ring, so the reason survives here.
+    /// (`queue_full`, `too_large`, `closed`).
     pub downlink_rejected: BTreeMap<&'static str, u64>,
 }
 
@@ -2442,18 +2441,6 @@ impl SiteAuthority {
         let failure = RelayFailure::for_txn(now_ms, source, reason, &txn);
         self.push_recent_failure(failure.clone());
         Some(failure)
-    }
-
-    /// Clock-less subset of [`Self::fail_relay`] for the transport
-    /// delivery loop inside `SiteService::with` (no clock in scope):
-    /// pops and counts, records nothing — the typed reject reason lands
-    /// in `counters.downlink_rejected` at the call site instead.
-    pub fn fail_attempt(&mut self, key: RelayKey) -> bool {
-        if self.pop_txn(key).is_none() {
-            return false;
-        }
-        self.counters.relay_failed += 1;
-        true
     }
 
     fn pop_txn(&mut self, key: RelayKey) -> Option<Txn> {
@@ -5574,7 +5561,7 @@ impl SiteService {
     /// gone) ends that relay's attempt as failed — re-locked after the
     /// delivery loop, so no transport mutex is ever held across an
     /// authority call and a rejection can never recurse into another
-    /// delivery (`fail_attempt` queues no outbound).
+    /// delivery (`fail_relay` queues no outbound).
     pub fn with<R>(&self, f: impl FnOnce(&mut SiteAuthority) -> R) -> (R, Events) {
         // Serialize the state change with the GK handoff: a removal cannot
         // commit while an earlier command to that member is still in send.
@@ -5628,7 +5615,6 @@ impl SiteService {
                 transport.deliver(carrier);
             }
         }
-        drop(handoff);
         if !outbound.is_empty() {
             let transport = self.transport.lock().expect("transport poisoned").clone();
             if let Some(transport) = transport {
@@ -5640,9 +5626,17 @@ impl SiteService {
                     }
                 }
                 if !failed.is_empty() {
+                    let failed_at = crate::now_ms();
                     let mut authority = self.authority.lock().expect("site authority poisoned");
                     for (key, reason) in failed {
-                        authority.fail_attempt(key);
+                        if let Some(failure) = authority.fail_relay(
+                            key,
+                            "downlink_rejected",
+                            reason.to_string(),
+                            failed_at,
+                        ) {
+                            events.push((failed_at, failure.event_fields()));
+                        }
                         *authority
                             .counters
                             .downlink_rejected
@@ -5653,6 +5647,9 @@ impl SiteService {
                 }
             }
         }
+        // Delivery admission and its refusal share the authority update
+        // order, so another mutation cannot end the relay between them.
+        drop(handoff);
         (result, events)
     }
 
