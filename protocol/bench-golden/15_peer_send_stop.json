@@ -1,0 +1,11 @@
+{
+  "name": "peer_send_stop",
+  "opcode": 82,
+  "flags": 0,
+  "run_uuid_hex": "deadbeefcafe01020304050607080910",
+  "sequence": 2,
+  "body_hex": "000000b0071d0001",
+  "wire_hex": "524c423101520000deadbeefcafe01020304050607080910000000028bcbef71000000b0071d0001",
+  "expect": "ok",
+  "note": "stop the running generator; body is the boot incarnation"
+}

@@ -1,0 +1,11 @@
+{
+  "name": "peer_send_start",
+  "opcode": 80,
+  "flags": 0,
+  "run_uuid_hex": "deadbeefcafe01020304050607080910",
+  "sequence": 1,
+  "body_hex": "000000b0071d0001000000b0071d0002000000000000000b00000064004018deadbeef000000fa0000753001",
+  "wire_hex": "524c423101500000deadbeefcafe0102030405060708091000000001c31b67b7000000b0071d0001000000b0071d0002000000000000000b00000064004018deadbeef000000fa0000753001",
+  "expect": "ok",
+  "note": "control: node sends 64 packets of 24 B to node 0xB, seq from 100, 250 ms apart, 30 s TTL"
+}

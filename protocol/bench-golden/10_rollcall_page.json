@@ -1,0 +1,11 @@
+{
+  "name": "rollcall_page",
+  "opcode": 48,
+  "flags": 0,
+  "run_uuid_hex": "00112233445566778899aabbccddeeff",
+  "sequence": 11,
+  "body_hex": "00",
+  "wire_hex": "524c42310130000000112233445566778899aabbccddeeff0000000bd202ef8d00",
+  "expect": "ok",
+  "note": "rollcall asking for the identity STATUS page"
+}

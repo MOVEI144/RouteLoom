@@ -1,0 +1,11 @@
+{
+  "name": "count_status",
+  "opcode": 34,
+  "flags": 1,
+  "run_uuid_hex": "00112233445566778899aabbccddeeff",
+  "sequence": 9,
+  "body_hex": "010000000900000063000000020000000100000064000003840000000a000000000000abcd",
+  "wire_hex": "524c42310122000100112233445566778899aabbccddeeff00000009d584de48010000000900000063000000020000000100000064000003840000000a000000000000abcd",
+  "expect": "ok",
+  "note": "run state: 9 unique packets/99 bytes, 2 duplicates, 1 CRC invalid, window base 10"
+}

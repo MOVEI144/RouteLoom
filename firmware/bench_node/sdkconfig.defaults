@@ -1,0 +1,18 @@
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+CONFIG_COMPILER_CXX_RTTI=n
+CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_ESPNOW_MAX_ENCRYPT_NUM=0
+CONFIG_FREERTOS_HZ=1000
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+# Custom table: the single-app layout plus the "rlsec" NVS partition for
+# per-peer security state (issue #37). See partitions.csv.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+# The owner/crypto pump starts with the P4 §12.2 16 KiB stack budget.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+# The bench image is a normal site member (design-devflow.md §5.4): the
+# dev-PSK lane is compiled out and membership comes from the usual join.
+CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y

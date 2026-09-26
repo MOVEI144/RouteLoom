@@ -1,0 +1,11 @@
+{
+  "name": "rollcall",
+  "opcode": 48,
+  "flags": 0,
+  "run_uuid_hex": "00112233445566778899aabbccddeeff",
+  "sequence": 10,
+  "body_hex": "ff",
+  "wire_hex": "524c42310130000000112233445566778899aabbccddeeff0000000aff000000ff",
+  "expect": "ok",
+  "note": "group-carried point call; page 0xFF = no status request"
+}

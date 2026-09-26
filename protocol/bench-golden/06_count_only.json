@@ -1,0 +1,11 @@
+{
+  "name": "count_only",
+  "opcode": 32,
+  "flags": 0,
+  "run_uuid_hex": "00112233445566778899aabbccddeeff",
+  "sequence": 8,
+  "body_hex": "0000000000000000000102030405060708090a0b0c0d0e0f",
+  "wire_hex": "524c42310120000000112233445566778899aabbccddeeff0000000881b463fd0000000000000000000102030405060708090a0b0c0d0e0f",
+  "expect": "ok",
+  "note": "counted, never answered; body leads with the destination boot-incarnation bind (0 = unbound traffic)"
+}
