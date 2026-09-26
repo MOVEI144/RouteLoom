@@ -1,13 +1,27 @@
 """Isolated esptool 5.4.0 adapter. No arbitrary command or eFuse write API."""
 import json
 import sys
+from pathlib import Path
 
-from .device import FlashPlan, Identity
+from .device import FlashPlan, Identity, Image
+from .firmware_catalog import verify_bundle
+
+
+PUBLIC_KEY = Path(__file__).resolve().parents[2] / 'packaging' / 'dev-signing-public.pem'
 
 
 def flash(port: str, plan: FlashPlan, api=None):
-    if api is None:
+    # A caller's verified_signature flag is never cryptographic evidence.
+    if plan.bundle is None:
         raise ValueError('trusted bundle signature verifier unavailable')
+    manifest = verify_bundle(plan.bundle, PUBLIC_KEY)
+    if manifest['chip'] != plan.chip or tuple(
+            (e['offset'], Path(plan.bundle) / e['path'], e['size'], e['sha256'])
+            for e in manifest['files']) != tuple(
+            (i.offset, i.path, i.size, i.sha256) for i in plan.images):
+        raise ValueError('flash plan differs from signed bundle')
+    if api is None:
+        import esptool as api
     if api.__version__ != '5.4.0':
         raise ValueError('unreviewed esptool version')
     esp = api.detect_chip(port=port, connect_attempts=1)
@@ -38,9 +52,22 @@ def flash(port: str, plan: FlashPlan, api=None):
 
 
 def main():
-    # A client-provided plan cannot supply signature evidence.
-    print(json.dumps({'ok': False, 'error': 'no trusted bundle signature verifier configured'}))
-    return 1
+    try:
+        request = json.load(sys.stdin)
+        # The trust anchor is packaged with the worker, never supplied by JSON.
+        root = Path(request['bundle'])
+        manifest = verify_bundle(root, PUBLIC_KEY)
+        identity = Identity(**request['expected'])
+        images = tuple(Image(e['offset'], root / e['path'], e['size'], e['sha256'])
+                       for e in manifest['files'])
+        plan = FlashPlan(identity, manifest['chip'], images, True,
+                         request['expected_mac'], request['quiesced'], root)
+        flash(request['port'], plan)
+        print(json.dumps({'ok': True}))
+        return 0
+    except (ValueError, KeyError, TypeError, OSError, ImportError) as exc:
+        print(json.dumps({'ok': False, 'error': str(exc)}))
+        return 1
 
 
 if __name__ == '__main__':

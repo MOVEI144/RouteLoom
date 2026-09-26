@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "routeloom-meshviz"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["PySide6>=6.8,<7", "pyqtgraph>=0.13,<1", "pyserial>=3.5,<4", "esptool==5.4.0"]
+dependencies = ["PySide6>=6.8,<7", "pyqtgraph>=0.13,<1", "pyserial>=3.5,<4", "esptool==5.4.0", "cryptography>=41,<47"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

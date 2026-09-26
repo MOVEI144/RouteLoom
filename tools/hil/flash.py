@@ -220,9 +220,20 @@ def flash_board(
     image_dir: Optional[str] = None,
 ) -> dict:
     """Flash one board. Returns a manifest dict for the report."""
+    if image_dir and os.path.isfile(os.path.join(image_dir, 'manifest.json')):
+        # Bench and Mesh Lab share the same development trust anchor and layout.
+        from pathlib import Path
+        sys.path.insert(0, os.path.join(repo, 'tools', 'meshviz', 'src'))
+        from routeloom_meshviz.firmware_catalog import verify_bundle
+        public = Path(repo) / 'tools/meshviz/packaging/dev-signing-public.pem'
+        signed = verify_bundle(image_dir, public)
+        if signed['chip'] != board.chip or signed['role'] != board.app:
+            raise FlashError('signed bundle does not match board')
+        build_dir = image_dir
+    else:
+        build_dir = os.path.join(image_dir, 'build') if image_dir else board.build_dir(repo)
     os.makedirs(out_dir, exist_ok=True)
     preflight = preflight_board(board, port, esptool, out_dir)
-    build_dir = os.path.join(image_dir, "build") if image_dir else board.build_dir(repo)
     cmd, files, fallback = build_write_flash_cmd(
         build_dir, port, esptool, board.chip or None, board.flash_baud, app_only
     )
@@ -310,7 +321,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
     parser.add_argument("--out", default=os.path.join(
         rig_mod.REPO_ROOT, "artifacts", "hil", "flash"))
-    parser.add_argument("--image-dir", help="bench image directory containing build/flasher_args.json")
+    parser.add_argument("--image-dir", help="signed bundle or legacy bench build directory")
     parser.add_argument("--capture-boot", action="store_true",
                         help="capture USB boot text for a diagnostic image whose console is on USB")
     args = parser.parse_args(argv)
