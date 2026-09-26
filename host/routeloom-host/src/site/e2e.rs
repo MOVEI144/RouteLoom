@@ -641,9 +641,7 @@ fn cutover_flows_end_to_end_over_the_api_socket() {
     use routeloom_provision::sha256::sha256;
     use routeloom_provision::signer::{test_keypair, FileRootSigner};
 
-    use super::cutover::{
-        CUTOVER_GATEWAY_FLUSH_MS, CUTOVER_GRACE_MS, CUTOVER_PREPARE_WINDOW_MS,
-    };
+    use super::cutover::{CUTOVER_GATEWAY_FLUSH_MS, CUTOVER_GRACE_MS, CUTOVER_PREPARE_WINDOW_MS};
     use super::group_keys::HostTime;
     use super::revocation::RevocationTransport;
 
@@ -862,7 +860,9 @@ fn cutover_flows_end_to_end_over_the_api_socket() {
     // the site); the straggler's own retry may interleave.
     let flush_at = lapse + CUTOVER_GRACE_MS - CUTOVER_GATEWAY_FLUSH_MS + 100;
     daemon.service.with(|a| a.tick(HostTime::sync(flush_at)));
-    daemon.service.with(|a| a.tick(HostTime::sync(flush_at + 100)));
+    daemon
+        .service
+        .with(|a| a.tick(HostTime::sync(flush_at + 100)));
     let commits: Vec<_> = grants
         .lock()
         .unwrap()

@@ -566,7 +566,7 @@ target_include_directories(routeloom_owner_mesh_peer PRIVATE
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include)
 target_compile_options(routeloom_owner_mesh_peer PRIVATE
     -Wall -Wextra -Wpedantic -Werror -Wno-unused-variable -Wno-unused-parameter
-    -Wno-unused-function)
+    -Wno-unused-function -Wno-unused-private-field)
 
 # Live E2E peer (design P3-4 §10.2): driven by the Rust Site Authority
 # test (host/routeloom-host/src/site/joiner_interop.rs), never by ctest.
