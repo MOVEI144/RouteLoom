@@ -16,7 +16,7 @@ use routeloom_provision::signer::{test_keypair, FileRootSigner};
 use super::cutover::{CutoverRequest, CutoverState, CUTOVER_PREPARE_WINDOW_MS};
 use super::group_keys::HostTime;
 use super::records::{parse_op_token, Verdict, ROLE_ENDPOINT, ROLE_GATEWAY};
-use super::revocation::RevocationTransport;
+use super::revocation::{OutboundKind, RevocationTransport};
 use super::store::{MemoryStore, SiteStore};
 use super::testkit::{self, request_id, Outcome, SimDevice};
 use super::transport::InProcessTransport;
@@ -249,6 +249,22 @@ fn prepare_gateway(
             .0
     );
     (op, sends)
+}
+
+#[test]
+fn prepared_commit_waits_for_retry_window() {
+    let (service, transport) = service();
+    let (op, _) = prepare_gateway(&service, &transport, T0, "commit-backoff");
+    let at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
+    tick(&service, at);
+    // PREPARE's retry clock must not delay the first COMMIT, but a
+    // successful COMMIT send must suppress it until the ACK window ends.
+    service.with(|a| {
+        assert!(a.grant_still_due(op, testkit::GATEWAY, OutboundKind::Commit, at));
+        a.note_grant_sent(op, testkit::GATEWAY, at);
+        assert!(!a.grant_still_due(op, testkit::GATEWAY, OutboundKind::Commit, at + 100));
+        assert!(a.grant_still_due(op, testkit::GATEWAY, OutboundKind::Commit, at + 10_000));
+    });
 }
 
 #[test]

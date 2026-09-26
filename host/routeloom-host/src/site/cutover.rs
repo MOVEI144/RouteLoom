@@ -1033,7 +1033,9 @@ impl SiteAuthority {
                 }
                 _ => {}
             }
-            if target.state == GrantState::Unknown && target.next_retry_ms > now_ms {
+            if matches!(target.state, GrantState::Unknown | GrantState::Prepared)
+                && target.next_retry_ms > now_ms
+            {
                 continue;
             }
             if self
@@ -1118,7 +1120,7 @@ impl SiteAuthority {
                     {
                         false
                     }
-                    GrantState::Unknown if t.next_retry_ms > now_ms => false,
+                    GrantState::Unknown | GrantState::Prepared if t.next_retry_ms > now_ms => false,
                     _ => true,
                 }
             }),
@@ -1340,6 +1342,14 @@ impl SiteAuthority {
         let mut updated = op.clone();
         if let Some(next) = updated.cutover.as_mut() {
             next.phase = CutoverPhase::Committed;
+            // PREPARE backoff is not a COMMIT attempt: let the first
+            // post-commit send through immediately, then pace retries.
+            for target in &mut next.targets {
+                if target.state == GrantState::Prepared {
+                    target.attempts = 0;
+                    target.next_retry_ms = 0;
+                }
+            }
             next.commit_rs_epoch = commit_rs;
             next.commit_object = commit_object.clone();
             next.commit_rrs = rrs.clone();

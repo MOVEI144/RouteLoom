@@ -32,6 +32,9 @@
 
 namespace routeloom::sdkv1 {
 struct SecurityCoordinatorTestAccess {
+  static CoordinatorMemberConfig adopted(const SecurityCoordinator& coordinator) noexcept {
+    return coordinator.adopted_;
+  }
   static void link_failed(SecurityCoordinator& coordinator) noexcept {
     coordinator.note_link_failed();
   }
@@ -1955,6 +1958,7 @@ void test_failed_refresh_re_adopts_configured_member() {
   CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
   MonotonicMs now = kT0;
   CHECK(poll_until_member(coordinator, now));
+  const CoordinatorMemberConfig first = SecurityCoordinatorTestAccess::adopted(coordinator);
   CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
   CHECK(poll_drain(coordinator, now));
   SecurityCoordinatorTestAccess::invalidate_joiner_channels(coordinator);
@@ -1970,6 +1974,8 @@ void test_failed_refresh_re_adopts_configured_member() {
   CHECK(coordinator.take_action(action).ok());
   CHECK(action.kind == CoordinatorActionKind::ApplyMemberConfig);
   CHECK(action.member.node == kNode);
+  CHECK(action.member.message_session == first.message_session);
+  CHECK(action.member.boot_incarnation == first.boot_incarnation);
   CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
   CHECK(coordinator.step(poll_at(++now)).ok());
   CHECK(coordinator.snapshot().engine_quiescent);
