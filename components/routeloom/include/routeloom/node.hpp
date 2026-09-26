@@ -1829,6 +1829,9 @@ class MeshNode {
     // refuses with a BUSY. Without this reserve the refusal that most needs
     // backpressure finds no slot and degrades to a silent drop.
     static constexpr std::size_t kControlReserveSlots = 1;
+    // Two further pool slots remain available for route repair/refresh even
+    // when new DATA admissions saturate the scheduler.
+    static constexpr std::size_t kRouteReserveSlots = 2;
     static constexpr std::size_t kMaxJobsPerOrigin = 12;
     static constexpr std::size_t kMaxJobsPerScope = 12;
     // DRR: quantum per round per class = weight * 64 bytes of estimated

@@ -432,6 +432,28 @@ void test_failed_route_advertisement_rearmed() {
   CHECK(h.at(1)->routes().best(2).valid);
 }
 
+void test_route_maintenance_has_two_slots_under_data_load() {
+  Harness h;
+  MeshNode* a = h.add(1, 3, 2, 50, 60000);
+  (void)h.add(2);
+  (void)h.add(3);
+  h.link(1, 2);
+  h.link(1, 3);
+  // Keep the first radio TX outstanding while periodic advertisements fill
+  // the scheduler. A new transit admission must not take the repair slots.
+  for (h.now = 0; h.now < 2000 && a->congestion_stats().queued < 29;
+       h.now += 50) {
+    a->poll(h.now);
+  }
+  CHECK(a->congestion_stats().queued == 29);
+  inject(h, 1, 2, craft_transit(h.cipher, 2, 1, 999, 3, 1));
+  CHECK(a->transit_in_flight() == 0);
+  CHECK(a->congestion_stats().queued == 29);
+  a->poll(h.now + 50);
+  a->poll(h.now + 100);
+  CHECK(a->congestion_stats().queued == 31);
+}
+
 void test_physical_token_never_wraps() {
   std::uint64_t next = UINT64_MAX;
   std::uint64_t issued = 0;
@@ -1613,6 +1635,7 @@ int main() {
   test_control_lane();
   test_full_control_lane_never_commits_a_forward();
   test_failed_route_advertisement_rearmed();
+  test_route_maintenance_has_two_slots_under_data_load();
   test_physical_token_never_wraps();
   test_flow_caps();
   test_busy_emission();

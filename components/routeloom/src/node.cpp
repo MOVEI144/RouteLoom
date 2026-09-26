@@ -203,9 +203,9 @@ std::size_t MeshNode::TxScheduler::scope_count(const NodeId scope) const noexcep
 AdmitVerdict MeshNode::TxScheduler::check(const NodeId self, const NodeId scope,
                                           const NodeId origin,
                                           const std::size_t slots_needed) const noexcept {
-  // Non-control admission leaves kControlReserveSlots for the responses
-  // (BUSY / HOP_ACCEPT) a saturated node still owes its peers.
-  if (free_slots() < slots_needed + kControlReserveSlots) {
+  // New received work must leave room for its responses and two route
+  // maintenance jobs; otherwise a DATA flood can prevent route repair.
+  if (free_slots() < slots_needed + kControlReserveSlots + kRouteReserveSlots) {
     return AdmitVerdict::PoolFull;
   }
   if (origin_count(origin) >= kMaxJobsPerOrigin) return AdmitVerdict::OriginLimited;
@@ -245,6 +245,18 @@ Status MeshNode::TxScheduler::enqueue(TxJob&& job, const NodeId self,
   NodeId destination = kInvalidNodeId;
   flow_key(job, self, scope, origin, destination);
   const SchedClass cls = classify(job);
+  const FrameType type = job.form == JobForm::Forwarded
+                             ? job.forwarded.header.type : job.plain.header.type;
+  const bool route_maintenance = job.form == JobForm::Plain &&
+      (type == FrameType::RouteUpdate || type == FrameType::SeqnoRequest ||
+       type == FrameType::RouteRequest);
+  // Required work already accepted under check() keeps its slot; only new
+  // unreserved jobs may be refused to preserve route and ACK capacity.
+  if (job.txn == kInvalidTxnHandle &&
+      free_slots() <= kControlReserveSlots + (route_maintenance ? 0 : kRouteReserveSlots)) {
+    ++stats_.admissions_rejected;
+    return Status::error(StatusCode::WouldBlock, "TX_QUEUE_RESERVED");
+  }
   // >=80% watermark: new bulk admission is explicitly rejected/delayed —
   // already-accepted work is never evicted to make room (03 §4).
   if (cls == SchedClass::Bulk && bulk_suspended()) {
