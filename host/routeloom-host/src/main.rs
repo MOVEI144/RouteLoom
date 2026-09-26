@@ -2559,7 +2559,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 authority.site_id(),
                 authority.network()
             );
-            Some(Arc::new(site::SiteService::new(authority)))
+            Some(site::SiteService::new_live(authority))
         }
         None => None,
     };
