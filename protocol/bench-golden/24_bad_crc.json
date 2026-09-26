@@ -1,0 +1,6 @@
+{
+  "name": "bad_crc",
+  "expect": "crc_mismatch",
+  "wire_hex": "524c42310110000000112233445566778899aabbccddeeff0000000125d53dfd70696e58",
+  "note": "last body byte corrupted"
+}

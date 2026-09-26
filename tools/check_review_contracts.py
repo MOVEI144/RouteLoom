@@ -784,10 +784,18 @@ def validate(root: Path) -> dict:
                 for board in boards["boards"]
             ),
         )
-        for app in ("reference_node", "bridge_node"):
-            firmware = (
-                root / f"firmware/{app}/main/main.cpp"
-            ).read_text(encoding="utf-8")
+        # design-devflow.md §5.1: the node-style apps share one boot path in
+        # components/routeloom_node_boot — the ordering contract lives there
+        # for them; bridge_node keeps its own USB bridge main.
+        boot = (
+            root / "components/routeloom_node_boot/src/node_boot.cpp"
+        ).read_text(encoding="utf-8")
+        for app, firmware in (
+            ("bridge_node", (root / "firmware/bridge_node/main/main.cpp")
+             .read_text(encoding="utf-8")),
+            ("reference_node", boot),
+            ("bench_node", boot),
+        ):
             partition = firmware.index("nvs_flash_init_partition(")
             console = firmware.index("run_maintenance_console(sdkv1_stores)")
             peer_capacity = firmware.index("nvs_partition_peer_capacity(")
@@ -796,6 +804,15 @@ def validate(root: Path) -> dict:
                 f"{app}_maintenance_before_mesh_security",
                 partition < console < peer_capacity < security,
                 "factory console needs rlsec, not the development mesh security state",
+            )
+        for app in ("reference_node", "bench_node"):
+            firmware = (
+                root / f"firmware/{app}/main/main.cpp"
+            ).read_text(encoding="utf-8")
+            test(
+                f"{app}_runs_shared_boot",
+                "run_node(" in firmware and "NodeBootHooks" in firmware,
+                "node-style apps route through components/routeloom_node_boot",
             )
         workflow = (root / ".github/workflows/sdk.yml").read_text(encoding="utf-8")
         test(

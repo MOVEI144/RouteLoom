@@ -1,0 +1,6 @@
+{
+  "name": "bad_magic",
+  "expect": "bad_magic",
+  "wire_hex": "524c42300110000000112233445566778899aabbccddeeff0000000125d53dfd70696e67",
+  "note": "magic must be exactly 'RLB1'"
+}

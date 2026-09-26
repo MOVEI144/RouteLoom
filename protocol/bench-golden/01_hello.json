@@ -1,0 +1,11 @@
+{
+  "name": "hello",
+  "opcode": 1,
+  "flags": 0,
+  "run_uuid_hex": "00112233445566778899aabbccddeeff",
+  "sequence": 1,
+  "body_hex": "",
+  "wire_hex": "524c42310101000000112233445566778899aabbccddeeff0000000100000000",
+  "expect": "ok",
+  "note": "host opens a run; the reply is a CAPABILITIES"
+}

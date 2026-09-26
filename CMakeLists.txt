@@ -15,6 +15,7 @@ if(ROUTELOOM_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_subdirectory(components/routeloom)
+add_subdirectory(components/routeloom_bench)
 
 if(ROUTELOOM_BUILD_TESTS)
   enable_testing()

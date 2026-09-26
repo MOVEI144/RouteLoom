@@ -1,0 +1,11 @@
+{
+  "name": "capabilities",
+  "opcode": 2,
+  "flags": 1,
+  "run_uuid_hex": "00112233445566778899aabbccddeeff",
+  "sequence": 1,
+  "body_hex": "0101605f40020401000000b0071d0001c0ffee0100000000110102101120212230404150515260617071",
+  "wire_hex": "524c42310102000100112233445566778899aabbccddeeff0000000173db16cf0101605f40020401000000b0071d0001c0ffee0100000000110102101120212230404150515260617071",
+  "expect": "ok",
+  "note": "device answer: protocol bounds, queue depths, opcode list, boot incarnation, digests"
+}

@@ -84,8 +84,11 @@ python3 tools/firmware_ram_report.py build/size.json --target <target> --app <ap
 |---|---|---:|
 | `esp32c3` | `bridge_node` | 27,648 |
 | `esp32c3` | `reference_node` | 19,456 |
+| `esp32c3` | `bench_node` | 19,456 |
 | `esp32s3` | `*` | 8,192 |
 | `esp32c5` | `*` | 8,192 |
+
+`bench_node`の床はdesign-devflow.md §5.4の「reference以上の独立floor」に従いreferenceと同じ19,456 Bとする。bench imageは同じ`components/routeloom_node_boot`の起動経路を通り、アプリ増分は静的`.bss`のみなのでboot-heap modelのoffset/radio_peakはreferenceの実測を引き継ぐ（bench機での再計測はHILラウンドの課題）。
 
 **8 KiBの根拠**：静的状態の1機能分の増分（group配送はMeshNodeに約5 KBを足した）に余裕を加えた値である。最後の8 KiBを使う変更は、自分で同じだけ取り戻すか、この表を理由付きで変えるレビューを通す必要がある。linkが失敗して初めて気づく状態には戻さない。これは実行時のheap目標（resource-profilesの空きheap 32 KiB・最大block 16 KiB、HILで測る）とは別の、link前の床である。
 

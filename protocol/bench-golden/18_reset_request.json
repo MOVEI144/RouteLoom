@@ -1,0 +1,11 @@
+{
+  "name": "reset_request",
+  "opcode": 112,
+  "flags": 0,
+  "run_uuid_hex": "deadbeefcafe01020304050607080910",
+  "sequence": 5,
+  "body_hex": "000000b0071d00010000012c",
+  "wire_hex": "524c423101700000deadbeefcafe010203040506070809100000000529de86f7000000b0071d00010000012c",
+  "expect": "ok",
+  "note": "delayed one-shot reset bound to this boot incarnation"
+}

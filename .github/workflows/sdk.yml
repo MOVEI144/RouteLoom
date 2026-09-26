@@ -109,10 +109,11 @@ jobs:
           python3 tools/gen_sdkv1_handshake_vectors.py
           python3 tools/gen_sdkv1_join_relay_v2_vectors.py
           python3 tools/gen_sdkv1_revocation_vectors.py
-          git diff --exit-code -- protocol/golden protocol/usb-golden protocol/autonomy-golden protocol/provisioning-golden protocol/sdkv1-golden tests/fuzz/corpus/sdkv1_ead tests/fuzz/corpus/sdkv1_join
+          python3 tools/gen_bench_vectors.py
+          git diff --exit-code -- protocol/golden protocol/usb-golden protocol/autonomy-golden protocol/provisioning-golden protocol/sdkv1-golden protocol/bench-golden tests/fuzz/corpus/sdkv1_ead tests/fuzz/corpus/sdkv1_join
           # git diff ignores untracked files: a generator that starts
           # emitting an unreviewed vector must fail too.
-          test -z "$(git status --porcelain -- protocol/sdkv1-golden protocol/usb-golden tests/fuzz/corpus/sdkv1_ead tests/fuzz/corpus/sdkv1_join)"
+          test -z "$(git status --porcelain -- protocol/sdkv1-golden protocol/usb-golden protocol/bench-golden tests/fuzz/corpus/sdkv1_ead tests/fuzz/corpus/sdkv1_join)"
   firmware:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -126,7 +127,11 @@ jobs:
         profile: [normal, deep_sleep]
         # bridge_node exposes the portable UsbBridge on USB Serial/JTAG.
         # It has no deep-sleep variant, so that combination is excluded.
-        app: [reference_node, bridge_node]
+        # bench_node (design-devflow.md §5) defaults to the member profile
+        # in sdkconfig.defaults, so its base cells already build the main
+        # Member configuration; the deep_sleep cells pin LegacyFixture as
+        # for the other apps.
+        app: [reference_node, bridge_node, bench_node]
         # autonomy=observe compiles the EXPERIMENTAL autonomy lane:
         # RLD1 discovery + the migration participant in Observe mode
         # (CONFIG_ROUTELOOM_DISCOVERY=y, CONFIG_ROUTELOOM_MIGRATION=1).
@@ -234,6 +239,13 @@ jobs:
           # (save/restore around the power coordinator) compiles under
           # the member profile. Compile-time coverage only.
           - app: reference_node
+            target: esp32c3
+            profile: deep_sleep
+            autonomy: off
+            features: owner_member
+          # The bench app rides the same shared pump — compile the member
+          # sleep tail with the bench observer attached as well.
+          - app: bench_node
             target: esp32c3
             profile: deep_sleep
             autonomy: off

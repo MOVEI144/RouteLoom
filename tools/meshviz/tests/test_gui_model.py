@@ -165,6 +165,10 @@ class TrialTests(unittest.TestCase):
         self.assertTrue(any('admission' in e for e in errors))
         self.assertEqual(validate(self.plan(count=20, interval_ms=30_000)), [])
         self.assertTrue(validate(self.plan(payload_len=129, destination='xyz')))
+        # design-devflow.md §5.2: the host command bound is the 96 B HostOps
+        # lane, not the 128 B unicast ceiling.
+        self.assertEqual(validate(self.plan(payload_len=96)), [])
+        self.assertTrue(validate(self.plan(payload_len=97)))
         self.assertTrue(validate(self.plan(network='0000000100000000')))
         self.assertTrue(validate(self.plan(network='0000000000000000')))
         self.assertTrue(validate(self.plan(destination='ffffffffffffffff')))

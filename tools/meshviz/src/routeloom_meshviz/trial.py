@@ -14,6 +14,9 @@ ADMISSION_PER_MIN = 2
 ADMISSION_BURST = 16
 SUSTAINED_INTERVAL_MS = 60_000 // ADMISSION_PER_MIN
 MAX_COUNT = 64
+# design-devflow.md §5.2: host-issued commands must fit the 96 B HostOps
+# payload lane, not the 128 B bare-unicast bound the API accepts.
+MAX_PAYLOAD_LEN = 96
 POLL_MS = 2000
 REPLY_TIMEOUT_MS = 10_000
 SETTLE_GRACE_MS = 30_000
@@ -49,8 +52,8 @@ def validate(plan: TrialPlan) -> list[str]:
         errors.append(f'回数は 1..{MAX_COUNT}')
     if type(plan.interval_ms) is not int or plan.interval_ms < 1000:
         errors.append('間隔は 1 秒以上')
-    if type(plan.payload_len) is not int or not 0 <= plan.payload_len <= 128:
-        errors.append('payload 長は 0..128 B')
+    if type(plan.payload_len) is not int or not 0 <= plan.payload_len <= MAX_PAYLOAD_LEN:
+        errors.append(f'payload 長は 0..{MAX_PAYLOAD_LEN} B')
     if plan.delivery not in ('RELIABLE', 'BEST_EFFORT'):
         errors.append('delivery は RELIABLE か BEST_EFFORT')
     if type(plan.ttl_ms) is not int or not 1 <= plan.ttl_ms <= 30_000:

@@ -1,0 +1,11 @@
+{
+  "name": "echo_reply_duplicate",
+  "opcode": 17,
+  "flags": 3,
+  "run_uuid_hex": "00112233445566778899aabbccddeeff",
+  "sequence": 7,
+  "body_hex": "70696e67",
+  "wire_hex": "524c42310111000300112233445566778899aabbccddeeff0000000725d53dfd70696e67",
+  "expect": "ok",
+  "note": "re-answer to a request already seen inside the run window"
+}

@@ -1,0 +1,11 @@
+{
+  "name": "counter_reset",
+  "opcode": 96,
+  "flags": 0,
+  "run_uuid_hex": "deadbeefcafe01020304050607080910",
+  "sequence": 3,
+  "body_hex": "000000b0071d0001",
+  "wire_hex": "524c423101600000deadbeefcafe01020304050607080910000000038bcbef71000000b0071d0001",
+  "expect": "ok",
+  "note": "zero the app counters only \u2014 never SDK session/dedup state"
+}

@@ -1,0 +1,11 @@
+{
+  "name": "peer_send_status",
+  "opcode": 81,
+  "flags": 1,
+  "run_uuid_hex": "deadbeefcafe01020304050607080910",
+  "sequence": 1,
+  "body_hex": "0101004000030003000200000001000003e8000005dc",
+  "wire_hex": "524c423101510001deadbeefcafe01020304050607080910000000013431be690101004000030003000200000001000003e8000005dc",
+  "expect": "ok",
+  "note": "start acknowledgement: accepted counters are admission-time (final counters live on the generator STATUS page)"
+}

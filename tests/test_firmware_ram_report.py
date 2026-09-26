@@ -207,7 +207,7 @@ class Documentation(unittest.TestCase):
         })
 
     def test_owner_main_task_stack_budget(self):
-        for app in ("bridge_node", "reference_node"):
+        for app in ("bridge_node", "reference_node", "bench_node"):
             defaults = (ROOT / "firmware" / app / "sdkconfig.defaults").read_text(
                 encoding="utf-8")
             matches = re.findall(r"^CONFIG_ESP_MAIN_TASK_STACK_SIZE=(\d+)$", defaults, re.M)
