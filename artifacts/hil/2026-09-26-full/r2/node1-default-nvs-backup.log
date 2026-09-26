@@ -1,0 +1,25 @@
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00:
+Connecting...
+Detecting chip type... ESP32-C3
+Connected to ESP32-C3 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                94:a9:90:6a:ee:c4
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+Configuring flash size...
+Reading from 0x0000a000 ━━━━━                           16.7% 4.00kB/24.00kB [0s] 
+Reading from 0x0000b000 ━━━━━━━━━━                      33.3% 8.00kB/24.00kB [0s] 
+Reading from 0x0000c000 ━━━━━━━━━━━━━━━                 50.0% 12.00kB/24.00kB [0s] 
+Reading from 0x0000d000 ━━━━━━━━━━━━━━━━━━━━            66.7% 16.00kB/24.00kB [0s] 
+Reading from 0x0000e000 ━━━━━━━━━━━━━━━━━━━━━━━━━       83.3% 20.00kB/24.00kB [0s] 
+Reading from 0x0000f000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 24.00kB/24.00kB [0s] 
+Read 24576 bytes from 0x00009000 in 0.1 seconds (1970.8 kbit/s) to '/tmp/routeloom-hil-full-2026-09-26/gkfix-site/node1-postcutover-default-nvs.bin'.
+
+Hard resetting via RTS pin...

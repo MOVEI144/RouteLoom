@@ -1,0 +1,334 @@
+[2026-09-26T16:42:25.932Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-26T16:42:29.356Z] I (175424) RouteLoomRef: member state=4 links=1 ends=1 authorityI (335473) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:42:29.357Z] I (335474) RouteLoomRef: member handshake starts=2 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:42:29.357Z] I (335474) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:42:29.357Z] I (335474) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:42:29.358Z] I (335475) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:42:29.358Z] I (335475) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:42:29.358Z] I (335475) RouteLoomRef: member discovery rx=1 offer_tx=1 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:42:29.358Z] I (335475) RouteLoomRef: member scope raw=3 accepted=2 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:42:34.359Z] I (340475) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:42:34.359Z] I (340476) RouteLoomRef: member handshake starts=2 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:42:34.359Z] I (340476) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:42:34.359Z] I (340476) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:42:34.360Z] I (340477) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:42:34.360Z] I (340477) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:42:34.360Z] I (340477) RouteLoomRef: member discovery rx=1 offer_tx=1 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:42:34.363Z] I (340477) RouteLoomRef: member scope raw=3 accepted=2 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:42:39.361Z] I (345478) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:42:39.362Z] I (345479) RouteLoomRef: member handshake starts=2 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:42:39.363Z] I (345479) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:42:39.363Z] I (345479) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:42:39.363Z] I (345480) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:42:39.363Z] I (345480) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:42:39.363Z] I (345480) RouteLoomRef: member discovery rx=1 offer_tx=1 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:42:39.363Z] I (345480) RouteLoomRef: member scope raw=3 accepted=2 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:42:44.361Z] I (350478) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:42:44.362Z] I (350479) RouteLoomRef: member handshake starts=2 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:42:44.363Z] I (350479) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:42:44.363Z] I (350479) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:42:44.363Z] I (350480) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:42:44.363Z] I (350480) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:42:44.363Z] I (350480) RouteLoomRef: member discovery rx=1 offer_tx=1 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:42:44.363Z] I (350480) RouteLoomRef: member scope raw=3 accepted=2 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:42:45.312Z] I (351428) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:42:47.378Z] I (353495) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:42:49.362Z] I (355479) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:42:49.363Z] I (355480) RouteLoomRef: member handshake starts=4 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:42:49.363Z] I (355480) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:42:49.363Z] I (355480) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:42:49.363Z] I (355481) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:42:49.364Z] I (355481) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:42:49.365Z] I (355481) RouteLoomRef: member discovery rx=3 offer_tx=3 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:42:49.365Z] I (355482) RouteLoomRef: member scope raw=5 accepted=4 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:42:51.343Z] I (357460) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:42:54.241Z] I (360358) RouteLoom: stack hwm main 10384 B
+[2026-09-26T16:42:54.241Z] I (360358) RouteLoom: HIL HEAP free=21856 largest=19456 min=20944 B
+[2026-09-26T16:42:54.242Z] I (360359) RouteLoom: HIL DISCOVERY candidates=1 neighbors=1 capacity=0 auth=1 stale=0 probes=21 send_failures=1 kind_rejects=0
+[2026-09-26T16:42:54.242Z] I (360359) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=345 seq=4
+[2026-09-26T16:42:54.242Z] I (360359) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-26T16:42:54.365Z] I (360482) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:42:54.365Z] I (360483) RouteLoomRef: member handshake starts=5 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:42:54.366Z] I (360483) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:42:54.366Z] I (360483) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:42:54.366Z] I (360484) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:42:54.367Z] I (360484) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:42:54.367Z] I (360484) RouteLoomRef: member discovery rx=4 offer_tx=4 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:42:54.367Z] I (360484) RouteLoomRef: member scope raw=6 accepted=5 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:42:59.106Z] I (365223) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:42:59.366Z] I (365483) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:42:59.366Z] I (365484) RouteLoomRef: member handshake starts=6 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:42:59.369Z] I (365484) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:42:59.369Z] I (365484) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:42:59.369Z] I (365485) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:42:59.369Z] I (365485) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:42:59.369Z] I (365485) RouteLoomRef: member discovery rx=5 offer_tx=5 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:42:59.369Z] I (365486) RouteLoomRef: member scope raw=7 accepted=6 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:43:04.368Z] I (370485) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:43:04.368Z] I (370486) RouteLoomRef: member handshake starts=6 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:43:04.369Z] I (370486) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:43:04.369Z] I (370486) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:43:04.369Z] I (370487) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:43:04.370Z] I (370487) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:43:04.370Z] I (370487) RouteLoomRef: member discovery rx=5 offer_tx=5 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:43:04.370Z] I (370487) RouteLoomRef: member scope raw=7 accepted=6 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:43:09.371Z] I (375488) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:43:09.373Z] I (375489) RouteLoomRef: member handshake starts=6 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:43:09.373Z] I (375489) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:43:09.373Z] I (375489) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:43:09.373Z] I (375490) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:43:09.373Z] I (375490) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:43:09.373Z] I (375490) RouteLoomRef: member discovery rx=5 offer_tx=5 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:43:09.373Z] I (375490) RouteLoomRef: member scope raw=7 accepted=6 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:43:14.371Z] I (380488) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:43:14.371Z] I (380489) RouteLoomRef: member handshake starts=6 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:43:14.373Z] I (380489) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:43:14.373Z] I (380489) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:43:14.373Z] I (380490) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:43:14.373Z] I (380490) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:43:14.373Z] I (380490) RouteLoomRef: member discovery rx=5 offer_tx=5 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:43:14.373Z] I (380490) RouteLoomRef: member scope raw=7 accepted=6 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:43:14.481Z] I (380598) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:15.060Z] I (381177) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:16.045Z] I (382163) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:17.861Z] I (383978) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:19.373Z] I (385490) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:43:19.373Z] I (385491) RouteLoomRef: member handshake starts=10 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:43:19.373Z] I (385491) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:43:19.377Z] I (385491) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:43:19.377Z] I (385492) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:43:19.377Z] I (385492) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:43:19.377Z] I (385492) RouteLoomRef: member discovery rx=9 offer_tx=9 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:43:19.377Z] I (385492) RouteLoomRef: member scope raw=11 accepted=10 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:43:21.316Z] I (387434) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:24.373Z] I (390490) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:43:24.373Z] I (390491) RouteLoomRef: member handshake starts=11 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:43:24.373Z] I (390491) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:43:24.374Z] I (390491) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:43:24.374Z] I (390492) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:43:24.376Z] I (390492) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:43:24.376Z] I (390492) RouteLoomRef: member discovery rx=10 offer_tx=10 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:43:24.376Z] I (390493) RouteLoomRef: member scope raw=12 accepted=11 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:43:28.077Z] I (394192) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:29.126Z] I (395243) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:29.374Z] I (395491) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:43:29.375Z] I (395492) RouteLoomRef: member handshake starts=13 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:43:29.375Z] I (395492) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:43:29.375Z] I (395492) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:43:29.375Z] I (395493) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:43:29.375Z] I (395493) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:43:29.377Z] I (395493) RouteLoomRef: member discovery rx=12 offer_tx=12 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:43:29.377Z] I (395493) RouteLoomRef: member scope raw=14 accepted=13 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:43:29.966Z] I (396084) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:31.480Z] I (397598) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:34.355Z] I (400473) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:34.379Z] I (400494) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:43:34.379Z] I (400495) RouteLoomRef: member handshake starts=15 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:43:34.379Z] I (400495) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:43:34.379Z] I (400495) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:43:34.379Z] I (400496) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:43:34.379Z] I (400496) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:43:34.379Z] I (400496) RouteLoomRef: member discovery rx=15 offer_tx=14 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:43:34.379Z] I (400497) RouteLoomRef: member scope raw=17 accepted=16 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:43:39.379Z] I (405496) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:43:39.379Z] I (405497) RouteLoomRef: member handshake starts=16 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:43:39.380Z] I (405497) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:43:39.380Z] I (405497) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:43:39.380Z] I (405498) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:43:39.380Z] I (405498) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:43:39.381Z] I (405498) RouteLoomRef: member discovery rx=15 offer_tx=15 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:43:39.381Z] I (405499) RouteLoomRef: member scope raw=17 accepted=16 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:43:39.937Z] I (406053) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:42.243Z] I (408360) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:43.902Z] I (410019) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:44.380Z] I (410497) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:43:44.380Z] I (410498) RouteLoomRef: member handshake starts=19 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:43:44.380Z] I (410498) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:43:44.381Z] I (410498) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:43:44.381Z] I (410499) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:43:44.381Z] I (410499) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:43:44.382Z] I (410499) RouteLoomRef: member discovery rx=18 offer_tx=18 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:43:44.382Z] I (410500) RouteLoomRef: member scope raw=20 accepted=19 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:43:47.057Z] I (413175) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:49.382Z] I (415499) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:43:49.382Z] I (415500) RouteLoomRef: member handshake starts=20 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:43:49.382Z] I (415500) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:43:49.383Z] I (415500) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:43:49.383Z] I (415501) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:43:49.383Z] I (415501) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:43:49.384Z] I (415501) RouteLoomRef: member discovery rx=19 offer_tx=19 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:43:49.384Z] I (415501) RouteLoomRef: member scope raw=21 accepted=20 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:43:53.194Z] I (419312) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:54.240Z] I (420358) RouteLoom: stack hwm main 10384 B
+[2026-09-26T16:43:54.241Z] I (420358) RouteLoom: HIL HEAP free=21856 largest=19456 min=20944 B
+[2026-09-26T16:43:54.241Z] I (420359) RouteLoom: HIL DISCOVERY candidates=1 neighbors=1 capacity=0 auth=1 stale=0 probes=24 send_failures=1 kind_rejects=0
+[2026-09-26T16:43:54.241Z] I (420359) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=345 seq=4
+[2026-09-26T16:43:54.241Z] I (420359) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-26T16:43:54.385Z] I (420502) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:43:54.385Z] I (420503) RouteLoomRef: member handshake starts=21 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:43:54.385Z] I (420503) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:43:54.385Z] I (420503) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:43:54.386Z] I (420504) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:43:54.386Z] I (420504) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:43:54.386Z] I (420504) RouteLoomRef: member discovery rx=20 offer_tx=20 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:43:54.387Z] I (420504) RouteLoomRef: member scope raw=22 accepted=21 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:43:59.387Z] I (425505) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:43:59.388Z] I (425506) RouteLoomRef: member handshake starts=21 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:43:59.388Z] I (425506) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:43:59.388Z] I (425506) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:43:59.389Z] I (425507) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:43:59.389Z] I (425507) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:43:59.389Z] I (425507) RouteLoomRef: member discovery rx=20 offer_tx=20 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:43:59.390Z] I (425507) RouteLoomRef: member scope raw=22 accepted=21 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:44:04.389Z] I (430507) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:44:04.390Z] I (430508) RouteLoomRef: member handshake starts=21 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:44:04.390Z] I (430508) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:44:04.390Z] I (430508) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:44:04.391Z] I (430509) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:44:04.391Z] I (430509) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:44:04.391Z] I (430509) RouteLoomRef: member discovery rx=20 offer_tx=20 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:44:04.391Z] I (430509) RouteLoomRef: member scope raw=22 accepted=21 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:44:05.319Z] I (431437) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:44:09.054Z] I (435172) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:44:09.390Z] I (435508) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:44:09.392Z] I (435509) RouteLoomRef: member handshake starts=23 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:44:09.392Z] I (435509) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:44:09.392Z] I (435509) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:44:09.392Z] I (435510) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:44:09.392Z] I (435510) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:44:09.392Z] I (435510) RouteLoomRef: member discovery rx=22 offer_tx=22 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:44:09.393Z] I (435511) RouteLoomRef: member scope raw=24 accepted=23 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:44:10.930Z] I (437048) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:44:14.391Z] I (440509) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:44:14.392Z] I (440510) RouteLoomRef: member handshake starts=24 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:44:14.393Z] I (440510) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:44:14.393Z] I (440510) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:44:14.393Z] I (440511) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:44:14.393Z] I (440511) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:44:14.393Z] I (440511) RouteLoomRef: member discovery rx=23 offer_tx=23 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:44:14.395Z] I (440512) RouteLoomRef: member scope raw=25 accepted=24 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:44:14.525Z] I (440643) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:44:19.394Z] I (445511) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:44:19.394Z] I (445512) RouteLoomRef: member handshake starts=25 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:44:19.394Z] I (445512) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:44:19.394Z] I (445512) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:44:19.395Z] I (445513) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:44:19.395Z] I (445513) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:44:19.395Z] I (445513) RouteLoomRef: member discovery rx=24 offer_tx=24 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:44:19.395Z] I (445513) RouteLoomRef: member scope raw=26 accepted=25 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:44:21.542Z] I (447660) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:44:24.394Z] I (450512) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:44:24.395Z] I (450513) RouteLoomRef: member handshake starts=26 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:44:24.395Z] I (450513) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:44:24.395Z] I (450513) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:44:24.396Z] I (450514) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:44:24.396Z] I (450514) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:44:24.396Z] I (450514) RouteLoomRef: member discovery rx=25 offer_tx=25 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:44:24.397Z] I (450515) RouteLoomRef: member scope raw=27 accepted=26 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:44:29.397Z] I (455515) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:44:29.398Z] I (455516) RouteLoomRef: member handshake starts=26 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:44:29.398Z] I (455516) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:44:29.398Z] I (455516) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:44:29.399Z] I (455517) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:44:29.400Z] I (455517) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:44:29.400Z] I (455517) RouteLoomRef: member discovery rx=25 offer_tx=25 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:44:29.400Z] I (455518) RouteLoomRef: member scope raw=27 accepted=26 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:44:34.399Z] I (460517) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:44:34.400Z] I (460518) RouteLoomRef: member handshake starts=26 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:44:34.400Z] I (460518) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:44:34.400Z] I (460518) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:44:34.400Z] I (460519) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:44:34.401Z] I (460519) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:44:34.401Z] I (460519) RouteLoomRef: member discovery rx=25 offer_tx=25 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:44:34.401Z] I (460520) RouteLoomRef: member scope raw=27 accepted=26 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:44:35.421Z] I (461539) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:44:39.401Z] I (465519) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:44:39.401Z] I (465520) RouteLoomRef: member handshake starts=27 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:44:39.405Z] I (465520) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:44:39.405Z] I (465520) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:44:39.405Z] I (465521) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:44:39.405Z] I (465521) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:44:39.405Z] I (465521) RouteLoomRef: member discovery rx=26 offer_tx=26 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:44:39.405Z] I (465521) RouteLoomRef: member scope raw=28 accepted=27 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:44:44.404Z] I (470522) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:44:44.404Z] I (470523) RouteLoomRef: member handshake starts=27 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:44:44.408Z] I (470523) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:44:44.408Z] I (470523) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:44:44.408Z] I (470524) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:44:44.408Z] I (470524) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:44:44.408Z] I (470524) RouteLoomRef: member discovery rx=26 offer_tx=26 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:44:44.408Z] I (470525) RouteLoomRef: member scope raw=28 accepted=27 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:44:49.407Z] I (475525) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:44:49.410Z] I (475526) RouteLoomRef: member handshake starts=27 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:44:49.410Z] I (475526) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:44:49.410Z] I (475526) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:44:49.410Z] I (475527) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:44:49.410Z] I (475527) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:44:49.410Z] I (475527) RouteLoomRef: member discovery rx=26 offer_tx=26 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:44:49.410Z] I (475527) RouteLoomRef: member scope raw=28 accepted=27 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:44:54.243Z] I (480361) RouteLoom: stack hwm main 10384 B
+[2026-09-26T16:44:54.243Z] I (480361) RouteLoom: HIL HEAP free=21856 largest=19456 min=20944 B
+[2026-09-26T16:44:54.243Z] I (480362) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=27 send_failures=1 kind_rejects=0
+[2026-09-26T16:44:54.244Z] I (480362) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=345 seq=4
+[2026-09-26T16:44:54.244Z] I (480363) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-26T16:44:54.407Z] I (480525) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:44:54.407Z] I (480526) RouteLoomRef: member handshake starts=27 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:44:54.408Z] I (480526) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:44:54.408Z] I (480526) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:44:54.408Z] I (480527) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:44:54.409Z] I (480527) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:44:54.409Z] I (480527) RouteLoomRef: member discovery rx=26 offer_tx=26 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:44:54.410Z] I (480527) RouteLoomRef: member scope raw=28 accepted=27 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:44:59.410Z] I (485528) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:44:59.410Z] I (485529) RouteLoomRef: member handshake starts=27 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:44:59.411Z] I (485529) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:44:59.411Z] I (485529) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:44:59.411Z] I (485530) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:44:59.411Z] I (485530) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:44:59.412Z] I (485530) RouteLoomRef: member discovery rx=26 offer_tx=26 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:44:59.414Z] I (485530) RouteLoomRef: member scope raw=28 accepted=27 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:45:04.003Z] I (490121) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:45:04.411Z] I (490529) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:45:04.411Z] I (490530) RouteLoomRef: member handshake starts=28 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:45:04.412Z] I (490530) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:45:04.412Z] I (490530) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:45:04.412Z] I (490531) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:45:04.413Z] I (490531) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:45:04.413Z] I (490531) RouteLoomRef: member discovery rx=27 offer_tx=27 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:45:04.413Z] I (490531) RouteLoomRef: member scope raw=29 accepted=28 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:45:06.145Z] I (492263) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:45:09.413Z] I (495531) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:45:09.413Z] I (495532) RouteLoomRef: member handshake starts=29 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:45:09.414Z] I (495532) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:45:09.414Z] I (495532) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:45:09.414Z] I (495533) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:45:09.414Z] I (495533) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:45:09.415Z] I (495533) RouteLoomRef: member discovery rx=28 offer_tx=28 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:45:09.415Z] I (495534) RouteLoomRef: member scope raw=30 accepted=29 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:45:10.266Z] I (496384) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:45:14.415Z] I (500533) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:45:14.415Z] I (500534) RouteLoomRef: member handshake starts=30 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:45:14.416Z] I (500534) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:45:14.416Z] I (500534) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:45:14.416Z] I (500535) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:45:14.416Z] I (500535) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:45:14.417Z] I (500535) RouteLoomRef: member discovery rx=29 offer_tx=29 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:45:14.417Z] I (500536) RouteLoomRef: member scope raw=31 accepted=30 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:45:18.341Z] I (504459) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:45:19.417Z] I (505535) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:45:19.417Z] I (505536) RouteLoomRef: member handshake starts=31 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:45:19.418Z] I (505536) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:45:19.418Z] I (505536) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:45:19.418Z] I (505537) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:45:19.418Z] I (505537) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:45:19.419Z] I (505537) RouteLoomRef: member discovery rx=30 offer_tx=30 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:45:19.419Z] I (505538) RouteLoomRef: member scope raw=32 accepted=31 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:45:24.421Z] I (510538) RouteLoomRef: member state=4 links=1 ends=1 authority=1/1 confirm=1 demux_drop=0
+[2026-09-26T16:45:24.421Z] I (510539) RouteLoomRef: member handshake starts=31 requests=1 rejected=0 send_fail=0 established=1 failed=0 last_error=0 active=0
+[2026-09-26T16:45:24.421Z] I (510539) RouteLoomRef: member end send_fail=0 established=1 failed=0 last_error=0
+[2026-09-26T16:45:24.421Z] I (510539) RouteLoomRef: authority state=2 tx_sent=7 tx_failed=0 rx_accepted=3 rx_rejected=0 pull=0 busy=0 backoff_s=0
+[2026-09-26T16:45:24.421Z] I (510540) RouteLoomRef: authority mesh tx_carrier=7 queued=7 shed=873 rx_carrier=2 denied=0 timeout=0
+[2026-09-26T16:45:24.423Z] I (510540) RouteLoomRef: authority jobs accepted=13 failed=0 last=
+[2026-09-26T16:45:24.424Z] I (510540) RouteLoomRef: member discovery rx=30 offer_tx=30 offer_rx=2 auth=1 kind_reject=0 capacity=0 send_fail=1
+[2026-09-26T16:45:24.424Z] I (510541) RouteLoomRef: member scope raw=32 accepted=31 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-26T16:45:26.030Z] !! capture closed

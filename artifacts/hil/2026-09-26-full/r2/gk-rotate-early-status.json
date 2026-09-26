@@ -1,0 +1,1 @@
+{"v":1,"request_id":"hil-419888-1790440417379866437","ok":true,"result":{"active":1,"staged":2,"phase":"staging","cause":"manual","targets":3,"staged_ack":0,"active_ack":0,"unknown":3,"last_rotation":null,"next_due_ms":null,"clock":{"unix_ms":1790440417381,"mono_ms":96013}}}

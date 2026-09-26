@@ -1,0 +1,1 @@
+{"v":1,"request_id":"hil-419908-1790440417420869565","ok":true,"result":{"operation_id":"op-0000000000000004","kind":"rotate","from":1,"to":2,"cause":"manual","state":"distributing","created_ms":1790440400199,"targets":{"total":3,"staged_ack":0,"active_ack":0,"unknown":3}}}

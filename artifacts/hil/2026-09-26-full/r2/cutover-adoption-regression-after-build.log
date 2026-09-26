@@ -1,0 +1,8 @@
+[ 46%] Built target routeloom_edhoc_third_party
+[ 48%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/sdkv1_revocation.cpp.o
+[ 48%] Building CXX object components/routeloom/CMakeFiles/routeloom_core.dir/src/node.cpp.o
+[ 48%] Linking CXX static library librouteloom_core.a
+[ 97%] Built target routeloom_core
+[100%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_revocation_tests.dir/test_sdkv1_revocation.cpp.o
+[100%] Linking CXX executable routeloom_sdkv1_revocation_tests
+[100%] Built target routeloom_sdkv1_revocation_tests

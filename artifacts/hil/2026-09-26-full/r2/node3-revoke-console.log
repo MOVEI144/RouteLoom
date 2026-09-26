@@ -1,0 +1,58 @@
+[2026-09-26T16:42:25.925Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-26T16:42:26.832Z] I (170492) RouteLoomRef: member state=4 links=1 ends=1 authorityW (328795) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T16:42:28.833Z] W (330796) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T16:42:30.837Z] W (332799) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T16:42:32.841Z] W (334803) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T16:42:34.843Z] W (336806) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T16:42:36.847Z] W (338810) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T16:42:38.849Z] W (340811) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T16:42:40.853Z] W (342815) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T16:42:42.805Z] I (344768) RouteLoomRef: discovery event=STALE peer=1
+[2026-09-26T16:42:42.805Z] W (344768) RouteLoomRef: diagnostic reason=STALE peer=1 message=none
+[2026-09-26T16:42:42.854Z] W (344817) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T16:42:45.309Z] I (347272) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:42:47.374Z] I (349337) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:42:51.341Z] I (353304) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:42:58.402Z] I (360365) RouteLoom: stack hwm main 10280 B
+[2026-09-26T16:42:58.402Z] I (360365) RouteLoom: HIL HEAP free=21824 largest=19456 min=20984 B
+[2026-09-26T16:42:58.404Z] I (360366) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=1 probes=17 send_failures=9972 kind_rejects=0
+[2026-09-26T16:42:58.404Z] I (360366) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-26T16:42:58.404Z] I (360366) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-26T16:42:59.107Z] I (361070) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:14.478Z] I (376441) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:15.057Z] I (377020) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:16.046Z] I (378009) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:17.859Z] I (379822) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:21.317Z] I (383281) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:28.076Z] I (390036) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:29.124Z] I (391087) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:29.964Z] I (391926) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:31.482Z] I (393445) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:34.352Z] I (396316) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:39.940Z] I (401899) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:42.238Z] I (404202) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:43.899Z] I (405863) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:47.054Z] I (409018) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:53.193Z] I (415157) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:43:58.402Z] I (420366) RouteLoom: stack hwm main 10280 B
+[2026-09-26T16:43:58.402Z] I (420366) RouteLoom: HIL HEAP free=21824 largest=19456 min=20984 B
+[2026-09-26T16:43:58.403Z] I (420367) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=1 probes=17 send_failures=9972 kind_rejects=0
+[2026-09-26T16:43:58.403Z] I (420367) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-26T16:43:58.403Z] I (420368) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-26T16:44:05.315Z] I (427279) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:44:09.052Z] I (431016) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:44:10.931Z] I (432895) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:44:14.522Z] I (436486) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:44:21.539Z] I (443503) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:44:35.417Z] I (457382) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:44:58.402Z] I (480367) RouteLoom: stack hwm main 10280 B
+[2026-09-26T16:44:58.403Z] I (480367) RouteLoom: HIL HEAP free=21824 largest=19456 min=20984 B
+[2026-09-26T16:44:58.403Z] I (480368) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=1 probes=17 send_failures=9972 kind_rejects=0
+[2026-09-26T16:44:58.403Z] I (480368) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-26T16:44:58.404Z] I (480368) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-26T16:45:04.002Z] I (485967) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:45:06.143Z] I (488108) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:45:10.262Z] I (492227) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:45:12.854Z] W (494819) RouteLoomRef: diagnostic reason=session bank not configured peer=1 message=none
+[2026-09-26T16:45:18.337Z] I (500302) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T16:45:25.984Z] !! capture closed

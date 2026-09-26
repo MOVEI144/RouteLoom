@@ -1,0 +1,12 @@
+{
+  "count": 5,
+  "accepted": 5,
+  "delivered": 5,
+  "success_rate": 1.0,
+  "rtt_ms_min": 54.06,
+  "rtt_ms_median": 105.4,
+  "rtt_ms_p95": 105.75,
+  "rtt_ms_p99": 105.79,
+  "rtt_ms_max": 105.8,
+  "evidence": "artifacts/hil/2026-09-26-full/r2/newsite-node2-traffic-5.jsonl"
+}

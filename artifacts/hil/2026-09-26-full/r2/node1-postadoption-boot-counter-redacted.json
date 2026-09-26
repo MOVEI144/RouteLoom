@@ -1,0 +1,11 @@
+{
+  "chip": "esp32c3",
+  "mac": "94:a9:90:6a:ee:c4",
+  "before_rlboot_session": 533,
+  "after_rlboot_session": 817,
+  "delta": 284,
+  "nondecreasing": true,
+  "raw_size": 24576,
+  "raw_sha256": "458ce469faba4c310a4ae33574327b0ae1386a8014500d35bf6871d87fa2183c",
+  "raw_location": "private /tmp/routeloom-hil-full-2026-09-26/gkfix-site; not committed"
+}

@@ -1,0 +1,1 @@
+{"count":3,"accepted":3,"delivered":2,"success_rate":0.6666666666666666,"rtt_ms_min":115.87,"rtt_ms_median":116.025,"rtt_ms_p95":116.16,"rtt_ms_p99":116.18,"rtt_ms_max":116.18,"evidence":"artifacts/hil/2026-09-26-full/r2/newsite-node6-postgk-traffic-3.jsonl"}
