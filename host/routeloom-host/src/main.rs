@@ -2456,6 +2456,7 @@ struct DaemonArgs {
     config_profile: u8,
     config_authority_key: Option<PathBuf>,
     site_authority: Option<PathBuf>,
+    admission_profile: send_store::AdmissionProfile,
 }
 
 /// Parse a node/authority id argument as hexadecimal — the codebase's node
@@ -2497,6 +2498,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
     let mut config_profile = config::ISSUE_PROFILE_DEV;
     let mut config_authority_key = None;
     let mut site_authority = None;
+    let mut admission_profile = send_store::AdmissionProfile::Normal;
     let mut args = args;
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -2575,9 +2577,20 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
                     args.next().ok_or("--site-authority requires a directory")?,
                 ))
             }
+            // Admission budget profile (design-devflow D10): `normal` is
+            // the contract default (2 calls/min, burst 16). `bench-v1`
+            // raises host submission throughput for development sites —
+            // opt-in only, always reported by name via capacity.get.
+            "--admission-profile" => {
+                let text = args
+                    .next()
+                    .ok_or("--admission-profile requires normal|bench-v1")?;
+                admission_profile = send_store::AdmissionProfile::parse(&text)
+                    .ok_or_else(|| format!("--admission-profile: unknown profile \"{text}\""))?;
+            }
             "--help" | "-h" => {
                 println!(
-                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N] [--config-dev-key-hex HEX] [--config-profile dev|cose] [--config-authority-key PATH] [--site-authority DIR]"
+                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N] [--config-dev-key-hex HEX] [--config-profile dev|cose] [--config-authority-key PATH] [--site-authority DIR] [--admission-profile normal|bench-v1]"
                 );
                 process::exit(0);
             }
@@ -2613,6 +2626,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
         config_profile,
         config_authority_key,
         site_authority,
+        admission_profile,
     })
 }
 
@@ -2800,6 +2814,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_dev_key: args.config_dev_key,
         config_profile: args.config_profile,
         config_authority_key: args.config_authority_key.clone(),
+        rate_limiter: Mutex::new(send_store::AdmissionLimiter::with_profile(
+            args.admission_profile,
+            now_ms(),
+        )),
         ..State::default()
     });
     // The ring opens with the run's own restart boundary — before the
@@ -3266,6 +3284,7 @@ mod tests {
                 ttl_ms: 30_000,
                 storage: canonical::STORAGE_RAM,
                 hop_limit: canonical::HOP_DEFAULT,
+                queue_mode: canonical::QUEUE_FIFO,
                 gateway: None,
                 payload,
                 hash,

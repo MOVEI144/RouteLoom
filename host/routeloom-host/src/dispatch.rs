@@ -2770,6 +2770,7 @@ mod tests {
             ttl_ms: ttl,
             storage: canonical::STORAGE_RAM,
             hop_limit: canonical::HOP_DEFAULT,
+            queue_mode: canonical::QUEUE_FIFO,
             gateway: None,
             payload,
             hash: canonical::sha256(&canonical),

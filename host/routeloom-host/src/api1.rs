@@ -41,8 +41,8 @@ use crate::receive_log::{
     PAGE_LIMIT,
 };
 use crate::send_store::{
-    AdmissionLimiter, CancelOutcome, CapacityStatus, DispatchState, OpIdentity, OpenEpochError,
-    OperationStore, RateDeny, StoredOperation, SubmitOutcome,
+    self, AdmissionLimiter, CancelOutcome, CapacityStatus, DispatchState, OpIdentity,
+    OpenEpochError, OperationStore, RateDeny, StoredOperation, SubmitOutcome,
 };
 use crate::subscribe::{
     self, CapacityDeny, EvFilter, MsgFilter, SubKind, SubscriptionHub, HEARTBEAT_MS_DEFAULT,
@@ -324,6 +324,7 @@ pub fn handle_conn<S: OperationStore>(
     };
     let dispatch: Result<(String, Option<ConnEffect>), ApiError> = match method {
         "capabilities.get" => capabilities(&params, ctx).map(|r| (r, None)),
+        "capacity.get" => capacity_get(&params, ctx).map(|r| (r, None)),
         "messages.read" => messages_read(&params, ctx).map(|r| (r, None)),
         "messages.subscribe" => messages_subscribe(&params, ctx).map(|(r, e)| (r, Some(e))),
         "messages.unsubscribe" => messages_unsubscribe(&params, ctx).map(|r| (r, None)),
@@ -447,7 +448,7 @@ fn capabilities<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.retry\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true,\"lab.rollcall.start\":true,\"lab.rollcall.update\":true,\"lab.rollcall.stop\":true,\"lab.rollcall.status\":true,\"diagnostics.snapshot\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"site\":{site_caps},\"rollcall\":{{\"dispatch\":\"usb_group_delivery_v1\",\"min_interval_ms\":{rollcall_min},\"max_inflight\":1}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"capacity.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.retry\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true,\"lab.rollcall.start\":true,\"lab.rollcall.update\":true,\"lab.rollcall.stop\":true,\"lab.rollcall.status\":true,\"diagnostics.snapshot\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"queue_mode\":[\"FIFO\",\"LATEST_PER_DESTINATION\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"site\":{site_caps},\"rollcall\":{{\"dispatch\":\"usb_group_delivery_v1\",\"min_interval_ms\":{rollcall_min},\"max_inflight\":1}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -486,6 +487,70 @@ fn capabilities<S: OperationStore>(
             }),
         site_caps = site::capability_json(ctx),
         rollcall_min = crate::rollcall::MIN_INTERVAL_MS,
+    ))
+}
+
+/// `capacity.get` (design-devflow D10): the effective admission profile
+/// and every store/lane budget a long-plan validator needs — always the
+/// enforced values, never requested ones. `admission.client` carries the
+/// bench-v1 caller discipline (inflight cap and the initial-run window);
+/// null under the normal profile because the contract defines none.
+fn capacity_get<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    if !params.object_entries().is_empty() {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "capacity.get takes no params",
+        ));
+    }
+    let profile = ctx
+        .rate_limiter
+        .lock()
+        .expect("rate limiter poisoned")
+        .profile();
+    let store = ctx
+        .operation_store
+        .lock()
+        .expect("operation store poisoned");
+    let status = store.capacity_status(ctx.now_ms);
+    let client = match profile {
+        send_store::AdmissionProfile::Normal => "null".to_string(),
+        send_store::AdmissionProfile::BenchV1 => format!(
+            "{{\"inflight_max\":{},\"run_window_calls\":{},\"run_window_ms\":{}}}",
+            send_store::BENCH_INFLIGHT_MAX,
+            send_store::BENCH_RUN_WINDOW_CALLS,
+            send_store::BENCH_RUN_WINDOW_MS,
+        ),
+    };
+    let reclaimable = match status.reclaimable_at_ms {
+        Some(at) => at.to_string(),
+        None => "null".to_string(),
+    };
+    Ok(format!(
+        "{{\"admission\":{{\"profile\":\"{profile}\",\"calls_per_minute\":{rate},\"burst\":{burst},\"charges\":[\"messages.submit\",\"operations.open_epoch\"],\"client\":{client}}},\"store\":{{\"durable\":{durable},\"records_max\":{records},\"bytes_max\":{bytes},\"record_charge_bytes\":{charge},\"retention_ms\":{retention},\"unretired_epochs_max\":{epochs},\"active_max\":{active},\"active_per_principal_max\":{per_principal},\"free_slots\":{free_slots},\"free_bytes\":{free_bytes},\"reclaimable_at_ms\":{reclaimable}}},\"payload\":{{\"node_max_bytes\":{node_max},\"gateway_max_bytes\":{gw_max},\"group_max_bytes\":{group_max}}},\"group\":{{\"records_max\":{group_records},\"queue_max\":{group_queue},\"live_max\":{group_live},\"tombstones_max\":{group_tombstones},\"inbox_max\":{group_inbox}}},\"queue_mode\":{{\"LATEST_PER_DESTINATION\":{{\"requires\":{{\"delivery\":\"BEST_EFFORT\",\"storage\":\"RAM_ONLY\"}},\"supersede\":\"newest committed record retires still-queued older records to the same destination\"}}}}}}",
+        profile = profile.name(),
+        rate = profile.rate_per_minute(),
+        burst = profile.burst(),
+        durable = store.durable(),
+        records = send_store::RECORD_CAP,
+        bytes = send_store::STORE_BYTES_CAP,
+        charge = send_store::RECORD_RESERVATION_BYTES,
+        retention = send_store::RETENTION_MS,
+        epochs = send_store::MAX_UNRETIRED_EPOCHS,
+        active = send_store::ACTIVE_CAP,
+        per_principal = send_store::ACTIVE_PER_PRINCIPAL_CAP,
+        free_slots = status.free_slots,
+        free_bytes = status.free_bytes,
+        node_max = crate::receive_log::NORMAL_PAYLOAD_MAX,
+        gw_max = canonical::GATEWAY_PAYLOAD_MAX,
+        group_max = crate::group::PAYLOAD_MAX,
+        group_records = crate::group::RECORD_CAP,
+        group_queue = crate::group::QUEUE_CAP,
+        group_live = crate::group::LIVE_CAP,
+        group_tombstones = crate::group::TOMBSTONE_CAP,
+        group_inbox = crate::group::INBOX_CAP,
     ))
 }
 
@@ -1519,6 +1584,21 @@ fn messages_submit<S: OperationStore>(
     // wall-clock rewind can never stretch the dispatch deadline.
     match store.submit_at(uid, &req, ctx.now_ms, crate::mono_ms()) {
         SubmitOutcome::Accepted { seq } => {
+            // KG control discipline (D10): once the replacement is
+            // committed, retire still-queued older values to the same
+            // destination. The supersede runs after commit so a lost
+            // replacement can never take the previous value down with it.
+            if req.queue_mode == canonical::QUEUE_LATEST_PER_DESTINATION {
+                let superseded = store
+                    .supersede_latest_for_dest(uid, &req, seq, ctx.now_ms)
+                    .map_err(|()| store_fault())?;
+                return Ok(submit_result_supersede(
+                    &store.lineage(),
+                    seq,
+                    req.storage,
+                    &superseded,
+                ));
+            }
             Ok(submit_result(&store.lineage(), seq, req.storage))
         }
         // Replay answers the committed record through the operations.get
@@ -1602,6 +1682,28 @@ fn submit_result(lineage: &[u8; 16], seq: u64, storage: u8) -> String {
         "{{\"operation_id\":\"{}\",\"dispatch_state\":\"HOST_QUEUED\",\"evidence\":[\"{evidence}\"],\"message_key\":null}}",
         canonical::format_operation_id(lineage, seq)
     )
+}
+
+/// `submit_result` plus the control-profile supersede list: the seqs the
+/// newest value retired before dispatch, rendered as operation ids so a
+/// caller can audit which queued records this submit displaced.
+fn submit_result_supersede(
+    lineage: &[u8; 16],
+    seq: u64,
+    storage: u8,
+    superseded: &[u64],
+) -> String {
+    let base = submit_result(lineage, seq, storage);
+    let ids = superseded.iter().fold(String::new(), |mut out, s| {
+        if !out.is_empty() {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(&canonical::format_operation_id(lineage, *s));
+        out.push('"');
+        out
+    });
+    format!("{},\"superseded\":[{}]}}", &base[..base.len() - 1], ids)
 }
 
 /// The daemon's live schema-2 binding: the registration mirror pinned to
@@ -4055,8 +4157,15 @@ fn op_status(record: &StoredOperation, lineage: &[u8; 16], now_ms: u64) -> Strin
             record.dest,
         )
     });
+    // A superseded record carries the replacing seq as an operation id —
+    // provenance, so the cancel reads as the control profile's retire
+    // rather than an operator request.
+    let superseded_by = record
+        .superseded_by
+        .map(|seq| format!("\"{}\"", canonical::format_operation_id(lineage, seq)))
+        .unwrap_or_else(|| "null".to_string());
     format!(
-        "{{\"operation_id\":\"{}\",\"network\":\"{:016x}\",\"admission_epoch\":\"{:016x}\",\"key\":\"{}\",\"destination\":{destination_json},\"payload_len\":{},\"canonical_hash\":\"{}\",\"options\":{{\"delivery\":\"{}\",\"priority\":\"{}\",\"ttl_ms\":{},\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"storage\":\"{}\",\"hop_limit\":{},\"persist_across_sleep\":false}},\"dispatch_state\":\"{}\",\"evidence\":[{evidence_json}],\"message_key\":{message_key},\"device_outcome\":{device_outcome},\"application_outcome\":null,\"observation\":{{\"deadline_elapsed\":{elapsed},\"cancel_requested\":{cancel_requested},\"time_uncertain\":{time_uncertain}}}}}",
+        "{{\"operation_id\":\"{}\",\"network\":\"{:016x}\",\"admission_epoch\":\"{:016x}\",\"key\":\"{}\",\"destination\":{destination_json},\"payload_len\":{},\"canonical_hash\":\"{}\",\"options\":{{\"delivery\":\"{}\",\"priority\":\"{}\",\"ttl_ms\":{},\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"storage\":\"{}\",\"hop_limit\":{},\"persist_across_sleep\":false,\"queue_mode\":\"{}\"}},\"dispatch_state\":\"{}\",\"evidence\":[{evidence_json}],\"message_key\":{message_key},\"device_outcome\":{device_outcome},\"application_outcome\":null,\"observation\":{{\"deadline_elapsed\":{elapsed},\"cancel_requested\":{cancel_requested},\"superseded_by\":{superseded_by},\"time_uncertain\":{time_uncertain}}}}}",
         canonical::format_operation_id(lineage, record.seq),
         record.network,
         record.epoch,
@@ -4068,6 +4177,7 @@ fn op_status(record: &StoredOperation, lineage: &[u8; 16], now_ms: u64) -> Strin
         record.ttl_ms,
         canonical::storage_name(record.storage),
         record.hop_limit,
+        canonical::queue_mode_name(record.queue_mode),
         record.dispatch_state.name(),
     )
 }
@@ -8184,5 +8294,121 @@ mod tests {
         );
         let response = handle(group_line("lab.rollcall.start", "{}").as_bytes(), &c);
         assert_error_schema(&response, "UNSUPPORTED");
+    }
+
+    /// D10: `capacity.get` reports the enforced profile and budgets; the
+    /// bench profile's client discipline appears only under bench-v1.
+    #[test]
+    fn capacity_get_reports_profile_and_budgets() {
+        let (acl, log, store, limiter) = test_env();
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"c\",\"method\":\"capacity.get\",\"params\":{}}",
+            &c,
+        );
+        assert!(response.contains("\"ok\":true"), "{response}");
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let result = parsed.get("result").unwrap();
+        let admission = result.get("admission").unwrap();
+        assert_eq!(admission.get("profile").unwrap().as_str(), Some("normal"));
+        assert_eq!(admission.get("calls_per_minute").unwrap().as_u64(), Some(2));
+        assert_eq!(admission.get("burst").unwrap().as_u64(), Some(16));
+        assert!(matches!(admission.get("client"), Some(Json::Null)));
+        let store_block = result.get("store").unwrap();
+        assert_eq!(store_block.get("records_max").unwrap().as_u64(), Some(4096));
+        assert_eq!(store_block.get("free_slots").unwrap().as_u64(), Some(4096));
+        assert!(result.get("queue_mode").is_some());
+        // Params are rejected like every other nullary verb.
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"c\",\"method\":\"capacity.get\",\"params\":{\"bogus\":1}}",
+            &c,
+        );
+        assert!(response.contains("\"ok\":false"), "{response}");
+        // Under bench-v1 the effective budget is the raised one, and the
+        // client discipline is populated.
+        let bench = Mutex::new(AdmissionLimiter::with_profile(
+            send_store::AdmissionProfile::BenchV1,
+            0,
+        ));
+        let c = ctx(Some(501), &acl, &log, &store, &bench, 0);
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"c\",\"method\":\"capacity.get\",\"params\":{}}",
+            &c,
+        );
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let admission = parsed.get("result").unwrap().get("admission").unwrap();
+        assert_eq!(admission.get("profile").unwrap().as_str(), Some("bench-v1"));
+        assert_eq!(
+            admission.get("calls_per_minute").unwrap().as_u64(),
+            Some(600)
+        );
+        assert_eq!(admission.get("burst").unwrap().as_u64(), Some(8));
+        let client = admission.get("client").unwrap();
+        assert_eq!(client.get("inflight_max").unwrap().as_u64(), Some(4));
+        assert_eq!(client.get("run_window_calls").unwrap().as_u64(), Some(64));
+    }
+
+    /// D10 KG control profile end-to-end: a LATEST_PER_DESTINATION submit
+    /// retires the still-queued predecessor, names it in the response,
+    /// and the retired record reports the replacing operation id.
+    #[test]
+    fn control_queue_mode_supersedes_via_api() {
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
+        let control_line = |key: &str| {
+            format!(
+                "{{\"v\":1,\"request_id\":\"s\",\"method\":\"messages.submit\",\"params\":{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{key}\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"00ff\",\"payload_len\":2,\"options\":{{\"storage\":\"RAM_ONLY\",\"delivery\":\"BEST_EFFORT\",\"queue_mode\":\"LATEST_PER_DESTINATION\"}}}}}}"
+            )
+        };
+        let response = handle(
+            control_line("00112233445566778899aabbccddeeff").as_bytes(),
+            &c,
+        );
+        assert!(response.contains("\"ok\":true"), "{response}");
+        let first_id = result_field(&response, "operation_id");
+        let response = handle(
+            control_line("11112233445566778899aabbccddeeff").as_bytes(),
+            &c,
+        );
+        assert!(response.contains("\"ok\":true"), "{response}");
+        let second_id = result_field(&response, "operation_id");
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let superseded = parsed
+            .get("result")
+            .unwrap()
+            .get("superseded")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(superseded.len(), 1);
+        assert_eq!(superseded[0].as_str(), Some(first_id.as_str()));
+        // The retired record: CANCELLED_BEFORE_DISPATCH with the replacing
+        // operation id in `superseded_by`, never cancel_requested.
+        let get = format!(
+            "{{\"v\":1,\"request_id\":\"g\",\"method\":\"operations.get\",\"params\":{{\"operation_id\":\"{first_id}\"}}}}"
+        );
+        let response = handle(get.as_bytes(), &c);
+        assert!(response.contains("\"ok\":true"), "{response}");
+        assert!(response.contains("CANCELLED_BEFORE_DISPATCH"), "{response}");
+        assert!(
+            response.contains(&format!("\"superseded_by\":\"{second_id}\"")),
+            "{response}"
+        );
+        assert!(
+            response.contains("\"queue_mode\":\"LATEST_PER_DESTINATION\""),
+            "{response}"
+        );
+        assert!(
+            response.contains("\"cancel_requested\":false"),
+            "{response}"
+        );
+        // FIFO submits never emit the supersede field.
+        let response = handle(
+            submit_line("22112233445566778899aabbccddeeff", &epoch).as_bytes(),
+            &c,
+        );
+        assert!(response.contains("\"ok\":true"), "{response}");
+        assert!(!response.contains("superseded"), "{response}");
     }
 }
