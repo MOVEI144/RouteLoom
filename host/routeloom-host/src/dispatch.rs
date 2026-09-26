@@ -4782,6 +4782,12 @@ mod tests {
         assert_eq!(records[0].payload, vec![1, 2, 3]);
         assert_eq!(records[0].origin, 0xdead);
         assert_eq!(records[0].gateway, Some(NODE));
+        // A USB ingress record has no per-frame security proof.
+        let json = crate::api1::record_json(&records[0], "cursor");
+        assert!(
+            json.contains("\"assurance\":{\"profile\":\"UNKNOWN\",\"origin\":\"unverified\"}"),
+            "{json}"
+        );
     }
 
     #[test]
