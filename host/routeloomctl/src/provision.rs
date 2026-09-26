@@ -162,7 +162,7 @@ fn write_private_nvs_set(
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
     if !dir.exists() {
         let mut builder = std::fs::DirBuilder::new();
-        builder.mode(0o700).create(dir)?;
+        builder.recursive(true).mode(0o700).create(dir)?;
     }
     let meta = std::fs::symlink_metadata(dir)?;
     if !meta.is_dir() || meta.permissions().mode() & 0o777 != 0o700 {
@@ -626,6 +626,22 @@ mod tests {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(write_private_nvs_set(&dir, &set).is_err());
         std::fs::remove_dir(&dir).unwrap();
+
+        let nested = dir.join("new-parent").join("nvs");
+        write_private_nvs_set(&nested, &set).unwrap();
+        assert_eq!(
+            std::fs::metadata(nested.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&nested).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
