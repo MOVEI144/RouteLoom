@@ -249,6 +249,7 @@ USB frame上限4096Bに対し最大の本文はRRS1付きで約700B。gateway自
 1. 保守console有効の量産firmwareを書込み、USB consoleのbanner（`routeloom-maintenance v1 ready`）を確認して`status`を取る。`fw=`が投入予定imageのversion（build時のapp version。`build/project_description.json`に記録される）と一致しなければ作業中止（`unknown`を含む）。
 2. 機器内で鍵生成（Entropy READY後、[セキュリティ §9](../../spec/security.md)）：`keygen <node:16hex> <challenge:64hex>` → `OK pop_hex=<366hex>`。challengeは`provision-pop-challenge --node …`で作る。
 3. 署名端末が所持証明を検証し、DevCertを発行する：`provision-devcert --ca-key … --spec … --node … --serial … --challenge … --pop … --out-dir …`（注入鍵の開発・benchは`provision-identity`）。発行前に事務所台帳（JSONL。既定では`--ca-key`と同じdirの`office-ledger.jsonl`、`--ledger`で変更）が（Device CA, NodeId, serial）をlockfile排他で予約し、二重発行・serialのNodeIdまたぎを拒否する。成果物は一時dirに全部揃えて検証してからpublishする：失敗時は同じ`--work-id`（既定はout-dirの絶対path由来）の再実行で中断箇所から再開し、別作業の同slotは拒否する。
+   注入鍵経路はDevCert署名前に作業別の秘密鍵ファイル（0600）をfsyncして保持し、成功後に消す。電断でstagingにDevCertだけが残り鍵を復元できなければ同じNodeIdで再発行せず、新NodeIdを使う。台帳はOSのファイルロックで排他し、切れた最終行を次の追記前に除去する。成果物はDevCert署名を含む全ファイルを照合・fsyncしてから、既存dirを置換しないrenameで公開する。
 4. 保守verb `identity <identity-bundle.jsonのhex>`で封緘する（→ `OK sealed kid=…`）。`status`のreceipt行が`provision-expect --out-dir … --fw <手順1のversion>`の`expected_status`とbyte一致することを確認する（応答喪失時は`status`再読で照合。不一致はUSB差し違え・取り違えで先へ進まない）。
 5. 保守verb `lock <kid:64hex>`（kidは`provision-expect`の`lock_kid`）で封緘を確定する（→ `OK locked kid=…`。kid不一致は`key_mismatch`、同kid再送は成功再生）。`status`で`locked=1`を確認し、`provision-confirm-written --ledger … --node … --devcert-sha256 <statusの値> [--out-dir …]`で台帳を`issued`→`written`へ進める（digest不一致は拒否）。
 6. 現場用firmware（保守console無効build）をapp領域だけに書込む：`idf.py -p PORT flash`（`erase_flash`禁止 — `rlsec`のsealed identityを消す）。書込み後、`status`に応答が無いこと（console不在）と、boot logの`routeloom field boot: fw=<version>`が投入imageと一致することを確認する。
@@ -256,7 +257,9 @@ USB frame上限4096Bに対し最大の本文はRRS1付きで約700B。gateway自
 
 量産バッチ：`provision-batch --ca-key … --spec … --ledger … --csv lot.csv --out-root lot/ [--mode devcert|injected]`。CSV行は`node,serial[,work_id]`（injected）または`node,serial,challenge_hex,pop_hex[,work_id]`（devcert。`#`・空行・`node,…`header可）。行ごとに台帳予約→原子的発行し、`<out-root>/batch-report.jsonl`（行ごとのkid・devcert_sha256・成否）に残す。1行の失敗は他行を止めないがcommandは非0終了する。`provision-ledger-status --ledger …`で台帳一覧、`provision-ledger-release --ledger … --node … --serial … --work-id …`で未発行の予約取消（`issued`／`written`は消さない）、`provision-ledger-import --ledger … --out-dir …`で台帳以前の発行済み出力の取込み。
 
-返品・再provision（正式初期化）は保守consoleの`deprovision` → `OK deprovision node=… kid=… nonce=…` → `deprovision_confirm <nonce:32hex> <kid:64hex|none>` → `OK deprovisioned node=…`で全storeを未provisionへ戻す（`rlboot` witnessは単調のため残る）。事務所台帳の`issued`／`written`は消さない：再provisionは新NodeIdで手順1からやり直す（v1はNodeIdを再利用しない）。
+`provision-ledger-release`は鍵を台帳に束縛する前の`reserved`行で、出力dir・staging dir・作業別秘密鍵ファイルがいずれも存在しない場合だけ解除する。DevCertを署名した可能性がある作業は解除せず、新NodeIdでやり直す。台帳の鍵束縛済み・`issued`・`written`行は解除しない。
+
+返品・再provision（正式初期化）は保守consoleの`deprovision` → `OK deprovision node=… kid=… nonce=…` → `deprovision_confirm <nonce:32hex> <kid:64hex|none>` → `OK deprovisioned node=…`で全storeを未provisionへ戻す（`rlboot` witnessは単調のため残る）。確認時にidentityとstore状態を再照合し、challenge後に変われば拒否する。他storeの消去に失敗した場合はidentityを残して再実行できる。事務所台帳の`issued`／`written`は消さない：再provisionは新NodeIdで手順1からやり直す（v1はNodeIdを再利用しない）。
 
 鍵を外で作って注入する方法はtier T1未満の選択肢として残す（[04 provisioning §4.4](../sdk-completion/04-provisioning-lifecycle.md)）。事務所でnetwork id・現場鍵・channelを書く手順は無くなる。
 

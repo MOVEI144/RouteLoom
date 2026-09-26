@@ -920,8 +920,10 @@ void EspNowSecurityOwner::drain_lifecycle_actions(const MonotonicMs now_ms) noex
         // a second reboot on the same durable state.
         switch (sdkv1::adopt_network_disposition(
             action.network, adopted_network_, adopted_role_,
-            coordinator_live_ &&
-                coordinator().snapshot().mode == sdkv1::CoordinatorMode::Member)) {
+            coordinator_live_ && runtime_ != nullptr && runtime_->node().started() &&
+                coordinator().snapshot().mode == sdkv1::CoordinatorMode::Member,
+            runtime_ != nullptr &&
+                runtime_->committed_channel() == stores_->site().site().channel)) {
           case sdkv1::AdoptNetworkDisposition::Complete:
             ESP_LOGW(config_.log_tag, "p6: network 0x%llx adopted — completing",
                      static_cast<unsigned long long>(action.network));

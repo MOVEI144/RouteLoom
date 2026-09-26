@@ -422,6 +422,7 @@ MaintenanceConsole::~MaintenanceConsole() noexcept {
 void MaintenanceConsole::burn_deprovision_challenge() noexcept {
   deprovision_pending_ = false;
   deprovision_bound_ = false;
+  deprovision_impaired_ = false;
   deprovision_node_ = kInvalidNodeId;
   secure_clear(deprovision_kid_);
   secure_clear(deprovision_nonce_);
@@ -722,6 +723,7 @@ Status MaintenanceConsole::process_line(const ByteView line, char* response,
     deprovision_nonce_ = nonce;
     secure_clear(nonce);
     deprovision_pending_ = true;
+    deprovision_impaired_ = impaired;
     deprovision_bound_ = !impaired && store_.has_identity();
     if (deprovision_bound_) {
       deprovision_node_ = store_.identity().node_id;
@@ -780,6 +782,14 @@ Status MaintenanceConsole::process_line(const ByteView line, char* response,
     const bool nonce_ok = nonce == deprovision_nonce_;
     const bool bound_ok =
         deprovision_bound_ ? (kid_ok && kid == deprovision_kid_) : want_none;
+    // The challenge confirms the state that was shown to the operator.
+    // A new seal or a change in store health needs a fresh challenge.
+    const bool same_target = deprovision_impaired_ == impaired &&
+                             (deprovision_bound_
+                                  ? (!impaired && store_.has_identity() &&
+                                     store_.identity().node_id == deprovision_node_ &&
+                                     store_.identity().kid == deprovision_kid_)
+                                  : (impaired || !store_.has_identity()));
     const NodeId wiped_node = deprovision_node_;
     const bool had_identity = deprovision_bound_;
     burn_deprovision_challenge();
@@ -788,14 +798,13 @@ Status MaintenanceConsole::process_line(const ByteView line, char* response,
     if (!nonce_ok) {
       return fail("no_challenge");
     }
-    if (!bound_ok) {
+    if (!bound_ok || !same_target) {
       return fail("key_mismatch");
     }
-    // Every store is attempted even when one fails, so one bad store
-    // cannot pin another store's record in place; the first error is
-    // reported. Identity wipes last, so a power cut leaves a sealed
-    // identity behind and the deprovision stays re-runnable to
-    // completion. The rlboot witness is untouched (monotonic).
+    // Attempt every non-identity store and report the first error. Keep
+    // the identity if any of those wipes fails, so a retry retains its
+    // target binding. Identity wipes last, after the other stores are
+    // clear. The rlboot witness is untouched (monotonic).
     Status wiped = Status::success();
     const auto scrub = [&](const Status& step) {
       if (wiped.ok()) wiped = step;
@@ -805,7 +814,7 @@ Status MaintenanceConsole::process_line(const ByteView line, char* response,
     scrub(wipe_.local_revocation->clear());
     scrub(wipe_.resume->clear_all());
     scrub(wipe_.lifecycle->clear());
-    scrub(store_.clear());
+    if (wiped.ok()) scrub(store_.clear());
     if (!wiped.ok()) {
       return fail("wipe_failed");
     }

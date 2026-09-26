@@ -32,13 +32,17 @@ use std::path::{Path, PathBuf};
 
 use routeloom_json::Json;
 
-use crate::office_ledger::{default_work_id, staging_dir, IssueSlot, OfficeLedger, ReserveOutcome};
+use crate::office_ledger::{
+    default_work_id, staging_dir, staging_key_file, IssueSlot, LedgerStatus, OfficeLedger,
+    ReserveOutcome,
+};
 use crate::{is_hex, opt_value};
 
 use routeloom_provision::credential::{credential_kid, KeyLocation};
 use routeloom_provision::sdkv1::cert::{cert_decode, CertType};
 use routeloom_provision::sdkv1::devca::{
-    devcert_issue, DevCertProfile, DeviceCaSigner, FileDeviceCaSigner, DEVICE_CA_CUSTODY_WARNING,
+    devcert_issue, devcert_verify, DevCertProfile, DeviceCaSigner, FileDeviceCaSigner,
+    DEVICE_CA_CUSTODY_WARNING,
 };
 use routeloom_provision::sdkv1::identity::{
     identity_record_decode, identity_record_encode, AnchorKind, AnchorStatus, IdentityAnchor,
@@ -56,7 +60,7 @@ use routeloom_provision::sdkv1::siteca::{
     sitecert_issue, FileSiteCaSigner, SiteCaSigner, SiteCertProfile, SITE_CA_CUSTODY_WARNING,
 };
 use routeloom_provision::signer::{
-    generate_keypair, hex_decode_exact, hex_encode, write_private_file,
+    generate_keypair, hex_decode_exact, hex_encode, pubkey_from_secret, write_private_file,
 };
 
 type DynError = Box<dyn std::error::Error>;
@@ -213,7 +217,7 @@ impl IssuanceInputs {
     }
 
     fn out_dir_text(&self) -> String {
-        self.out_dir.to_string_lossy().into_owned()
+        default_work_id(&self.out_dir)
     }
 
     fn slot(&self) -> IssueSlot {
@@ -230,6 +234,7 @@ fn run_provision_devcert(
     challenge: &[u8; POP_CHALLENGE_SIZE],
     pop: &[u8],
 ) -> Result<IssuedOutput, DynError> {
+    let _work = OfficeLedger::lock_work(&staging_dir(&inputs.out_dir, &inputs.work_id))?;
     let key = pop_verify(pop, inputs.node, challenge)
         .map_err(|e| format!("proof of possession refused: {e}"))?;
     let kid = credential_kid(&key.pubkey());
@@ -256,10 +261,13 @@ fn run_provision_devcert(
         )?;
         Ok(())
     };
-    publish_work(inputs, &DEVCERT_FILES, false, &stage, adopts(&outcome))
+    publish_work(inputs, &DEVCERT_FILES, false, &stage, &outcome)
 }
 
 fn run_provision_identity(inputs: &IssuanceInputs) -> Result<IssuedOutput, DynError> {
+    let staging = staging_dir(&inputs.out_dir, &inputs.work_id);
+    let escrow = staging_key_file(&staging);
+    let _work = OfficeLedger::lock_work(&staging)?;
     let outcome = inputs
         .ledger
         .reserve(inputs.slot(), None, &inputs.work_id, &inputs.out_dir_text())
@@ -273,14 +281,14 @@ fn run_provision_identity(inputs: &IssuanceInputs) -> Result<IssuedOutput, DynEr
     // publish_work): the already-issued guard below only bites when this
     // run would actually stage fresh material.
     let out_intact = inputs.out_dir.is_dir()
-        && directory_matches(
-            &inputs.out_dir,
-            &IDENTITY_FILES,
-            inputs.node,
-            inputs.serial,
-            inputs.device_ca_id,
+        && directory_matches(&inputs.out_dir, &IDENTITY_FILES, inputs).unwrap_or(false);
+    if inputs.out_dir.exists() && !out_intact {
+        return Err(format!(
+            "{} exists and is not this work's complete output",
+            inputs.out_dir.display()
         )
-        .unwrap_or(false);
+        .into());
+    }
     if !out_intact {
         if let ReserveOutcome::Resume(entry) = &outcome {
             if let Some(issued_kid) = entry.kid {
@@ -309,11 +317,33 @@ fn run_provision_identity(inputs: &IssuanceInputs) -> Result<IssuedOutput, DynEr
             }
         }
     }
+    // Persist the key before signing a DevCert. A crash after signing but
+    // before RLI1 assembly can then retry with the same device identity.
+    let selected = if out_intact {
+        reused
+    } else {
+        match reused {
+            Some(key) => Some(key),
+            None => {
+                let (secret, pubkey) = generate_keypair()?;
+                write_private_file(&escrow, &secret)?;
+                sync_path(&escrow)?;
+                sync_path(escrow.parent().unwrap_or(Path::new(".")))?;
+                Some((secret, credential_kid(&pubkey)))
+            }
+        }
+    };
+    if !out_intact {
+        let kid = selected.ok_or("staged key is unavailable")?.1;
+        inputs.ledger.reserve(
+            inputs.slot(),
+            Some(kid),
+            &inputs.work_id,
+            &inputs.out_dir_text(),
+        )?;
+    }
     let stage = |staging: &Path| -> Result<(), DynError> {
-        let secret = match reused {
-            Some((secret, _)) => secret,
-            None => generate_keypair()?.0,
-        };
+        let secret = selected.ok_or("staged key is unavailable")?.0;
         let challenge = pop_challenge()?;
         let pop = pop_sign(&secret, inputs.node, KeyLocation::NvsPlaintext, &challenge)?;
         let key = pop_verify(&pop, inputs.node, &challenge)?;
@@ -345,14 +375,13 @@ fn run_provision_identity(inputs: &IssuanceInputs) -> Result<IssuedOutput, DynEr
         )?;
         Ok(())
     };
-    publish_work(inputs, &IDENTITY_FILES, true, &stage, adopts(&outcome))
-}
-
-/// Only the same work's re-run may adopt a published output: a fresh
-/// reservation landing on an occupied directory is another work's output
-/// (or a foreign directory) and refuses.
-fn adopts(outcome: &ReserveOutcome) -> bool {
-    matches!(outcome, ReserveOutcome::Resume(_))
+    let output = publish_work(inputs, &IDENTITY_FILES, true, &stage, &outcome)?;
+    match std::fs::remove_file(&escrow) {
+        Ok(()) => sync_path(escrow.parent().unwrap_or(Path::new(".")))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(output)
 }
 
 /// A staged key: the secret plus the kid it was staged under.
@@ -360,10 +389,37 @@ type StagedKey = ([u8; 32], [u8; 32]);
 
 /// Read a crashed run's staged key for reuse (injected path only).
 fn reuse_staged_key(inputs: &IssuanceInputs) -> Result<Option<StagedKey>, DynError> {
-    let staged = staging_dir(&inputs.out_dir, &inputs.work_id).join("identity.rli1");
+    let staging = staging_dir(&inputs.out_dir, &inputs.work_id);
+    let escrow = staging_key_file(&staging);
+    let staged = staging.join("identity.rli1");
+    let saved = match std::fs::read(&escrow) {
+        Ok(bytes) => {
+            if bytes.len() != 32 {
+                return Err(format!("{}: invalid staged key length", escrow.display()).into());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if std::fs::metadata(&escrow)?.permissions().mode() & 0o077 != 0 {
+                    return Err(format!("{}: staged key is not private", escrow.display()).into());
+                }
+            }
+            let secret: [u8; 32] = bytes.try_into().expect("32 bytes");
+            let pubkey = pubkey_from_secret(&secret).ok_or("staged key is invalid")?;
+            Some((secret, credential_kid(&pubkey)))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("{}: {e}", escrow.display()).into()),
+    };
     let bytes = match std::fs::read(&staged) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if saved.is_none() && staging.exists() && std::fs::read_dir(&staging)?.next().is_some()
+            {
+                return Err("staging contains issuance data but its device key is unavailable; use a new NodeId".into());
+            }
+            return Ok(saved);
+        }
         Err(e) => return Err(format!("{}: {e}", staged.display()).into()),
     };
     let record = identity_record_decode(&bytes)
@@ -375,6 +431,15 @@ fn reuse_staged_key(inputs: &IssuanceInputs) -> Result<Option<StagedKey>, DynErr
         )
         .into());
     }
+    if let Some((secret, kid)) = saved {
+        if record.key_material != secret || record.kid != kid {
+            return Err("staged identity does not match its saved device key".into());
+        }
+        return Ok(Some((secret, kid)));
+    }
+    write_private_file(&escrow, &record.key_material)?;
+    sync_path(&escrow)?;
+    sync_path(escrow.parent().unwrap_or(Path::new(".")))?;
     Ok(Some((record.key_material, record.kid)))
 }
 
@@ -386,19 +451,12 @@ fn publish_work(
     expected: &[&str],
     owner_only: bool,
     stage: &dyn Fn(&Path) -> Result<(), DynError>,
-    adoptable: bool,
+    outcome: &ReserveOutcome,
 ) -> Result<IssuedOutput, DynError> {
     let staging = staging_dir(&inputs.out_dir, &inputs.work_id);
-    let _work = OfficeLedger::lock_work(&staging)?;
     if inputs.out_dir.exists() {
-        if adoptable
-            && directory_matches(
-                &inputs.out_dir,
-                expected,
-                inputs.node,
-                inputs.serial,
-                inputs.device_ca_id,
-            )?
+        if matches!(outcome, ReserveOutcome::Resume(_))
+            && directory_matches(&inputs.out_dir, expected, inputs)?
         {
             // Adopt: this work already published (a crash after the
             // rename, or a plain re-run). The ledger mark retries here,
@@ -424,20 +482,34 @@ fn publish_work(
         std::fs::create_dir_all(&staging)?;
     }
     stage(&staging)?;
-    if !directory_matches(
-        &staging,
-        expected,
-        inputs.node,
-        inputs.serial,
-        inputs.device_ca_id,
-    )? {
+    if !directory_matches(&staging, expected, inputs)? {
         return Err("staged issuance does not verify; refusing to publish".into());
     }
+    let (staged_kid, staged_digest) = published_identity(&staging)?;
+    if let ReserveOutcome::Resume(entry) = outcome {
+        if entry.kid.is_some_and(|kid| kid != staged_kid)
+            || (matches!(entry.status, LedgerStatus::Issued | LedgerStatus::Written)
+                && entry.devcert_sha256 != Some(staged_digest))
+        {
+            return Err(
+                "staged issuance differs from the ledger's bound key or issued DevCert".into(),
+            );
+        }
+    }
+    for name in expected {
+        sync_path(&staging.join(name))?;
+    }
     sync_path(&staging)?;
-    std::fs::rename(&staging, &inputs.out_dir)
-        .map_err(|e| format!("publish {}: {e}", inputs.out_dir.display()))?;
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        &staging,
+        rustix::fs::CWD,
+        &inputs.out_dir,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(|e| format!("publish {}: {e}", inputs.out_dir.display()))?;
     if let Some(parent) = inputs.out_dir.parent() {
-        sync_path(parent).ok();
+        sync_path(parent)?;
     }
     // The kid and digest are re-read from the published output, never
     // from the RAM that wrote it.
@@ -471,14 +543,12 @@ fn adopted_output(inputs: &IssuanceInputs) -> Result<IssuedOutput, DynError> {
     })
 }
 
-/// A directory holds this work's output: every expected file present
-/// plus a DevCert naming exactly (node, serial, Device CA).
+/// A directory holds this work's output only when its entire published
+/// file set matches the DevCert, plan, inventory and NVS readback.
 fn directory_matches(
     dir: &Path,
     expected: &[&str],
-    node: u64,
-    serial: u32,
-    ca_id: u64,
+    inputs: &IssuanceInputs,
 ) -> Result<bool, DynError> {
     for name in expected {
         if !dir.join(name).is_file() {
@@ -486,11 +556,75 @@ fn directory_matches(
         }
     }
     let devcert = std::fs::read(dir.join("devcert.cwt"))?;
-    let claims = cert_decode(&devcert).map_err(|e| format!("devcert.cwt does not decode: {e}"))?;
-    Ok(claims.cert_type == CertType::Device
-        && claims.subject == node
-        && claims.serial == serial
-        && claims.issuer == ca_id)
+    let claims = match devcert_verify(&devcert, inputs.device_ca_id, &inputs.signer.pubkey()) {
+        Ok(claims) => claims,
+        Err(_) => return Ok(false),
+    };
+    if claims.cert_type != CertType::Device
+        || claims.subject != inputs.node
+        || claims.serial != inputs.serial
+        || claims.issuer != inputs.device_ca_id
+        || claims.model != inputs.profile.model
+        || claims.hw_rev != inputs.profile.hw_rev
+    {
+        return Ok(false);
+    }
+    let inventory = std::fs::read(dir.join("inventory.json"))?;
+    if inventory != inventory_file_json(&devcert, OFFICE_STATUS_ISSUED)?.as_bytes()
+        && inventory != inventory_file_json(&devcert, OFFICE_STATUS_WRITTEN)?.as_bytes()
+    {
+        return Ok(false);
+    }
+    if expected == DEVCERT_FILES {
+        return Ok(std::fs::read(dir.join("identity-bundle.json"))?
+            == identity_bundle_json(&inputs.plan, &devcert)?.as_bytes());
+    }
+    if expected != IDENTITY_FILES {
+        return Ok(false);
+    }
+    let identity = std::fs::read(dir.join("identity.rli1"))?;
+    let record = match identity_record_decode(&identity) {
+        Ok(record) => record,
+        Err(_) => return Ok(false),
+    };
+    if record.node_id != inputs.node
+        || record.flags != inputs.plan.flags
+        || record.anchors != inputs.plan.anchors
+        || record.devcert != devcert
+        || record.key_location != KeyLocation::NvsPlaintext
+        || record.kid != credential_kid(&claims.pubkey)
+    {
+        return Ok(false);
+    }
+    if std::fs::read(dir.join("rlident_i0.bin"))? != identity
+        || std::fs::read(dir.join("rlident_i1.bin"))? != identity
+    {
+        return Ok(false);
+    }
+    let set = rlsec_identity_set(&record)?;
+    if std::fs::read(dir.join("rlsec-nvs.csv"))? != set.partition_csv().as_bytes()
+        || std::fs::read(dir.join("rlsec-set.json"))? != set.descriptor_json().as_bytes()
+    {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(dir)?.permissions().mode() & 0o077 != 0 {
+            return Ok(false);
+        }
+        for name in [
+            "identity.rli1",
+            "rlident_i0.bin",
+            "rlident_i1.bin",
+            "rlsec-set.json",
+        ] {
+            if std::fs::metadata(dir.join(name))?.permissions().mode() & 0o077 != 0 {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 fn published_identity(out_dir: &Path) -> Result<([u8; 32], [u8; 32]), DynError> {
@@ -676,8 +810,8 @@ fn ledger_status_json(ledger: &OfficeLedger) -> Result<String, DynError> {
 }
 
 /// `provision-ledger-release --ledger <file> --node <16hex> --serial
-/// <u32> --work-id <id>` — drop an abandoned `reserved` entry (plus its
-/// staging) so the slot can be taken by another work. Issued history is
+/// <u32> --work-id <id>` — drop an abandoned `reserved` entry after verifying
+/// the work has no output, staging or saved device key. Issued history is
 /// never released.
 pub fn provision_ledger_release_command(args: &[String]) -> Result<(), DynError> {
     let mut ledger: Option<String> = None;
@@ -705,9 +839,7 @@ pub fn provision_ledger_release_command(args: &[String]) -> Result<(), DynError>
     let ledger = OfficeLedger::open(&PathBuf::from(
         ledger.ok_or("provision-ledger-release requires --ledger <file>")?,
     ))?;
-    let released = ledger.release(node, serial, &work_id)?;
-    // Best-effort: the abandoned work's staging goes with it.
-    std::fs::remove_dir_all(staging_dir(Path::new(&released.out_dir), &released.work_id)).ok();
+    let _released = ledger.release(node, serial, &work_id)?;
     println!(
         "{{\"released\":{{\"node_id\":\"{node:016x}\",\"serial\":{serial},\"work_id\":\"{}\"}}}}",
         routeloom_json::escape_string(&work_id)
@@ -1753,6 +1885,9 @@ mod tests {
             "no partial issuance may be visible"
         );
         assert!(!out.join("inventory.json").exists());
+        let ledger = OfficeLedger::open(&dir.join("office-ledger.jsonl")).unwrap();
+        assert_eq!(ledger.entries().unwrap()[0].kid, None);
+        assert!(!staging_key_file(&staging_dir(&out, &default_work_id(&out))).exists());
         // Clearing the blockage resumes the same work to completion.
         std::fs::remove_dir_all(out.join("identity.rli1")).unwrap();
         std::fs::remove_dir(&out).unwrap();
@@ -1802,6 +1937,75 @@ mod tests {
                 "{name} changed"
             );
         }
+    }
+
+    #[test]
+    fn equivalent_output_spelling_resumes_the_same_work() {
+        let (dir, key, spec) = office_setup("ledger-path-spelling");
+        let out = dir.join("out");
+        provision_identity_command(&identity_args(
+            &key,
+            &spec,
+            "00a1000000001234",
+            "90211",
+            &out,
+        ))
+        .unwrap();
+        let before = std::fs::read(out.join("devcert.cwt")).unwrap();
+        let alias = dir.join(".").join("out");
+        provision_identity_command(&identity_args(
+            &key,
+            &spec,
+            "00a1000000001234",
+            "90211",
+            &alias,
+        ))
+        .unwrap();
+        assert_eq!(std::fs::read(out.join("devcert.cwt")).unwrap(), before);
+    }
+
+    #[test]
+    fn published_output_with_corrupt_artifact_is_not_adopted() {
+        let (dir, key, spec) = office_setup("ledger-corrupt-published");
+        let out = dir.join("out");
+        let argv = identity_args(&key, &spec, "00a1000000001234", "90211", &out);
+        provision_identity_command(&argv).unwrap();
+        for name in ["rlident_i0.bin", "rlsec-nvs.csv", "inventory.json"] {
+            let path = out.join(name);
+            let original = std::fs::read(&path).unwrap();
+            std::fs::write(&path, b"corrupt").unwrap();
+            assert!(provision_identity_command(&argv).is_err(), "{name}");
+            std::fs::write(&path, original).unwrap();
+        }
+        provision_identity_command(&argv).unwrap();
+    }
+
+    #[test]
+    fn published_devcert_must_have_a_valid_ca_signature() {
+        let (dir, key, spec) = office_setup("ledger-cert-signature");
+        let out = dir.join("out");
+        let argv = identity_args(&key, &spec, "00a1000000001234", "90211", &out);
+        let opts = OfficeOptions::parse("provision-devcert", &argv, &[]).unwrap();
+        let inputs = IssuanceInputs::from_options(&opts).unwrap();
+        let challenge = [0x5a; 32];
+        let (secret, _) = test_keypair(0x54);
+        let pop = pop_sign(&secret, inputs.node, KeyLocation::NvsPlaintext, &challenge).unwrap();
+        run_provision_devcert(&inputs, &challenge, &pop).unwrap();
+
+        let mut cert = std::fs::read(out.join("devcert.cwt")).unwrap();
+        *cert.last_mut().unwrap() ^= 1;
+        std::fs::write(out.join("devcert.cwt"), &cert).unwrap();
+        std::fs::write(
+            out.join("inventory.json"),
+            inventory_file_json(&cert, OFFICE_STATUS_ISSUED).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            out.join("identity-bundle.json"),
+            identity_bundle_json(&inputs.plan, &cert).unwrap(),
+        )
+        .unwrap();
+        assert!(!directory_matches(&out, &DEVCERT_FILES, &inputs).unwrap());
     }
 
     #[test]
@@ -1887,6 +2091,94 @@ mod tests {
         assert_eq!(credential_kid(&claims.pubkey), staged_kid);
         assert!(!staging.exists(), "staging publishes away");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn signed_staging_without_a_recoverable_key_cannot_reissue() {
+        let (dir, key, spec) = office_setup("ledger-uncertain-key");
+        let out = dir.join("out");
+        let work = default_work_id(&out);
+        let ledger = OfficeLedger::open(&dir.join("office-ledger.jsonl")).unwrap();
+        ledger
+            .reserve(
+                IssueSlot {
+                    device_ca_id: 0x0DCA_0000_0000_0001,
+                    node_id: 0x00A1_0000_0000_1234,
+                    serial: 90211,
+                },
+                None,
+                &work,
+                &out.to_string_lossy(),
+            )
+            .unwrap();
+        let staging = staging_dir(&out, &work);
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("devcert.cwt"), b"signed but key lost").unwrap();
+        assert!(provision_identity_command(&identity_args(
+            &key,
+            &spec,
+            "00a1000000001234",
+            "90211",
+            &out,
+        ))
+        .is_err());
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn signed_staging_reuses_its_durable_key() {
+        let (dir, key, spec) = office_setup("ledger-durable-key");
+        let out = dir.join("out");
+        let work = default_work_id(&out);
+        let ledger = OfficeLedger::open(&dir.join("office-ledger.jsonl")).unwrap();
+        ledger
+            .reserve(
+                IssueSlot {
+                    device_ca_id: 0x0DCA_0000_0000_0001,
+                    node_id: 0x00A1_0000_0000_1234,
+                    serial: 90211,
+                },
+                None,
+                &work,
+                &out.to_string_lossy(),
+            )
+            .unwrap();
+        let staging = staging_dir(&out, &work);
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("devcert.cwt"), b"prior signed attempt").unwrap();
+        let escrow = PathBuf::from(format!("{}.key", staging.display()));
+        let (secret, pubkey) = test_keypair(0x54);
+        write_private_file(&escrow, &secret).unwrap();
+        provision_identity_command(&identity_args(
+            &key,
+            &spec,
+            "00a1000000001234",
+            "90211",
+            &out,
+        ))
+        .unwrap();
+        let claims = cert_decode(&std::fs::read(out.join("devcert.cwt")).unwrap()).unwrap();
+        assert_eq!(claims.pubkey, pubkey);
+        assert!(!escrow.exists());
+    }
+
+    #[test]
+    fn changed_devcert_cannot_publish_after_prior_issue() {
+        let (dir, key, spec) = office_setup("ledger-no-cert-swap");
+        let out = dir.join("out");
+        let argv = identity_args(&key, &spec, "00a1000000001234", "90211", &out);
+        let opts = OfficeOptions::parse("provision-devcert", &argv, &[]).unwrap();
+        let inputs = IssuanceInputs::from_options(&opts).unwrap();
+        let challenge = [0x5a; 32];
+        let (secret, _) = test_keypair(0x54);
+        let pop = pop_sign(&secret, inputs.node, KeyLocation::NvsPlaintext, &challenge).unwrap();
+        run_provision_devcert(&inputs, &challenge, &pop).unwrap();
+        std::fs::remove_dir_all(&out).unwrap();
+        std::fs::write(&spec, spec_text().replace("\"model\": 17", "\"model\": 18")).unwrap();
+        let changed = OfficeOptions::parse("provision-devcert", &argv, &[]).unwrap();
+        let changed_inputs = IssuanceInputs::from_options(&changed).unwrap();
+        assert!(run_provision_devcert(&changed_inputs, &challenge, &pop).is_err());
+        assert!(!out.exists());
     }
 
     #[test]

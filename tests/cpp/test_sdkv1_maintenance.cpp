@@ -1004,6 +1004,24 @@ void deprovision_without_identity_wipes_leftovers() {
   CHECK(device.clean());
 }
 
+void deprovision_unbound_challenge_cannot_wipe_new_identity() {
+  current = "deprovision_unbound_challenge_cannot_wipe_new_identity";
+  const Office office = load_office();
+  ProvisionedDevice device{};
+  CHECK(device.open());
+  const std::string challenge = run(device.console, "deprovision");
+  CHECK(challenge.rfind("OK deprovision node=none kid=none nonce=", 0) == 0);
+  const std::string nonce = response_field(challenge, "nonce");
+  device.entropy.fills = 0;
+  CHECK(run(device.console, std::string("keygen 00a1000000001234 ") + kChallenge64)
+            .rfind("OK pop_hex=", 0) == 0);
+  CHECK(run(device.console, "identity " + hex_encode(minimal_bundle(office))) ==
+        "OK sealed kid=" + office.kid_hex);
+  CHECK(run(device.console, "deprovision_confirm " + nonce + " none") ==
+        "ERR key_mismatch");
+  CHECK(device.identity.has_identity());
+}
+
 void deprovision_without_wipe_set_is_unsupported() {
   current = "deprovision_without_wipe_set_is_unsupported";
   FaultyRecordStorage storage(kIdentitySlotBytes);
@@ -1059,6 +1077,30 @@ void deprovision_retry_after_wipe_failure() {
   CHECK(device.clean());
 }
 
+void deprovision_keeps_identity_when_another_store_fails() {
+  current = "deprovision_keeps_identity_when_another_store_fails";
+  const Office office = load_office();
+  ProvisionedDevice device{};
+  CHECK(device.open());
+  CHECK(run(device.console, std::string("keygen 00a1000000001234 ") + kChallenge64)
+            .rfind("OK pop_hex=", 0) == 0);
+  CHECK(run(device.console, "identity " + hex_encode(minimal_bundle(office))) ==
+        "OK sealed kid=" + office.kid_hex);
+  CHECK(device.populate_field_state());
+  device.site_storage.fail_writes = true;
+  const std::string challenge = run(device.console, "deprovision");
+  CHECK(run(device.console,
+            "deprovision_confirm " + response_field(challenge, "nonce") + " " +
+                office.kid_hex) == "ERR wipe_failed");
+  CHECK(device.identity.has_identity());
+  device.site_storage.disarm();
+  const std::string retry = run(device.console, "deprovision");
+  CHECK(run(device.console,
+            "deprovision_confirm " + response_field(retry, "nonce") + " " +
+                office.kid_hex) == "OK deprovisioned node=00a1000000001234");
+  CHECK(device.clean());
+}
+
 }  // namespace
 
 int main() {
@@ -1085,9 +1127,11 @@ int main() {
   lock_needs_healthy_store();
   deprovision_returns_device_to_unprovisioned();
   deprovision_without_identity_wipes_leftovers();
+  deprovision_unbound_challenge_cannot_wipe_new_identity();
   deprovision_without_wipe_set_is_unsupported();
   deprovision_recovers_impaired_identity();
   deprovision_retry_after_wipe_failure();
+  deprovision_keeps_identity_when_another_store_fails();
   if (failures != 0) {
     std::fprintf(stderr, "%d maintenance console check(s) failed\n", failures);
     return 1;

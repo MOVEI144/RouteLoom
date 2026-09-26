@@ -2858,20 +2858,30 @@ void test_boot_unassigned_ready_does_not_reemit_reboot() {
 void test_adopt_network_disposition() {
   constexpr NetworkId kNew = 0x000300000A1B2C3DULL;
   constexpr NetworkId kOld = 0x000200000A1B2C3DULL;
-  // The installed binding is the action's network: complete, live or not.
-  CHECK(adopt_network_disposition(kNew, kNew, 3, true) == AdoptNetworkDisposition::Complete);
-  CHECK(adopt_network_disposition(kNew, kNew, 3, false) == AdoptNetworkDisposition::Complete);
+  // A configured binding is incomplete until the member node has started
+  // on its operating channel.
+  CHECK(adopt_network_disposition(kNew, kNew, 3, true, true) ==
+        AdoptNetworkDisposition::Complete);
+  CHECK(adopt_network_disposition(kNew, kNew, 3, true, false) ==
+        AdoptNetworkDisposition::WaitForAdoption);
+  CHECK(adopt_network_disposition(kNew, kNew, 3, false, true) ==
+        AdoptNetworkDisposition::WaitForAdoption);
   // A live Member binding on the old network: the single cutover reboot.
-  CHECK(adopt_network_disposition(kNew, kOld, 3, true) ==
+  CHECK(adopt_network_disposition(kNew, kOld, 3, true, true) ==
+        AdoptNetworkDisposition::RebootToAdopt);
+  // The site may already name the new channel while the old member is
+  // still live; that mismatch must not suppress the cutover reboot.
+  CHECK(adopt_network_disposition(kNew, kOld, 3, true, false) ==
         AdoptNetworkDisposition::RebootToAdopt);
   // A clean boot that has not adopted yet: wait, never reboot again.
-  CHECK(adopt_network_disposition(kNew, 0, 0, false) ==
+  CHECK(adopt_network_disposition(kNew, 0, 0, false, false) ==
         AdoptNetworkDisposition::WaitForAdoption);
-  CHECK(adopt_network_disposition(kNew, kOld, 3, false) ==
+  CHECK(adopt_network_disposition(kNew, kOld, 3, false, false) ==
         AdoptNetworkDisposition::WaitForAdoption);
   // Incoherent bindings never reboot blind.
-  CHECK(adopt_network_disposition(kNew, 0, 0, true) == AdoptNetworkDisposition::WaitForAdoption);
-  CHECK(adopt_network_disposition(kNew, kOld, 0, true) ==
+  CHECK(adopt_network_disposition(kNew, 0, 0, true, true) ==
+        AdoptNetworkDisposition::WaitForAdoption);
+  CHECK(adopt_network_disposition(kNew, kOld, 0, true, true) ==
         AdoptNetworkDisposition::WaitForAdoption);
 }
 

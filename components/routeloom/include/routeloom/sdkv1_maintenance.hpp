@@ -154,6 +154,7 @@ class MaintenanceConsole {
   P256PublicKey pending_pubkey_{};
   bool deprovision_pending_{false};
   bool deprovision_bound_{false};  // the challenge named a sealed identity
+  bool deprovision_impaired_{false};
   NodeId deprovision_node_{kInvalidNodeId};
   Digest256 deprovision_kid_{};
   std::array<std::uint8_t, kDeprovisionNonceSize> deprovision_nonce_{};

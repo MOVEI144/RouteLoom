@@ -23,6 +23,7 @@
 //! `provision-ledger-release`; `issued`/`written` entries are never
 //! released — they are the no-reissue history.
 
+use rustix::fs::{flock, FlockOperation};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -103,12 +104,30 @@ impl OfficeLedger {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        if !path.exists() {
-            std::fs::write(path, "")?;
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+        {
+            Ok(file) => {
+                file.sync_all()?;
+                sync_parent(path)?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
         }
-        Ok(OfficeLedger {
-            path: path.to_path_buf(),
-        })
+        let canonical = std::fs::canonicalize(path)?;
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(&canonical)?;
+        if !metadata.is_file() {
+            return Err("office ledger path is not a regular file".into());
+        }
+        if metadata.nlink() != 1 {
+            return Err("office ledger must not have hard-link aliases".into());
+        }
+        Ok(OfficeLedger { path: canonical })
     }
 
     /// Serialize concurrent runs of the same work (same staging
@@ -151,6 +170,16 @@ impl OfficeLedger {
             serial,
         } = slot;
         for entry in folded.values() {
+            let same_slot = entry.device_ca_id == device_ca_id
+                && entry.node_id == node_id
+                && entry.serial == serial;
+            if !same_slot && (entry.work_id == work_id || entry.out_dir == out_dir) {
+                return Err(format!(
+                    "work {work_id} or output {out_dir} already belongs to node {:016x} serial {}",
+                    entry.node_id, entry.serial
+                )
+                .into());
+            }
             if entry.device_ca_id == device_ca_id
                 && entry.serial == serial
                 && entry.node_id != node_id
@@ -200,6 +229,13 @@ impl OfficeLedger {
                     )
                     .into());
                 }
+                if entry.kid.is_none() && kid.is_some() && entry.status == LedgerStatus::Reserved {
+                    let mut bound = entry.clone();
+                    bound.kid = kid;
+                    bound.ts = unix_secs();
+                    Self::append(&self.path, &bound)?;
+                    return Ok(ReserveOutcome::Resume(bound));
+                }
                 return Ok(ReserveOutcome::Resume(entry.clone()));
             }
         }
@@ -236,25 +272,32 @@ impl OfficeLedger {
             node_id,
             serial,
         } = slot;
-        if let Some(entry) = folded.get(&slot) {
-            if entry.work_id != work_id {
+        let entry = folded
+            .get(&slot)
+            .ok_or_else(|| format!("node {node_id:016x} serial {serial} has no reservation"))?;
+        if entry.work_id != work_id || entry.out_dir != out_dir {
+            return Err(format!(
+                    "node {node_id:016x} serial {serial} belongs to work {} at {}, not {work_id} at {out_dir}",
+                    entry.work_id, entry.out_dir
+                )
+                .into());
+        }
+        if let Some(have) = entry.kid {
+            if have != kid {
                 return Err(format!(
-                    "node {node_id:016x} serial {serial} belongs to work {}, not {work_id}",
-                    entry.work_id
+                        "node {node_id:016x} serial {serial} was already issued for another device key; refusing a key swap"
+                    )
+                .into());
+            }
+        }
+        if matches!(entry.status, LedgerStatus::Issued | LedgerStatus::Written) {
+            if entry.devcert_sha256 != Some(devcert_sha256) {
+                return Err(format!(
+                    "node {node_id:016x} serial {serial} was issued with another DevCert digest"
                 )
                 .into());
             }
-            if let Some(have) = entry.kid {
-                if have != kid {
-                    return Err(format!(
-                        "node {node_id:016x} serial {serial} was already issued for another device key; refusing a key swap"
-                    )
-                    .into());
-                }
-                if matches!(entry.status, LedgerStatus::Issued | LedgerStatus::Written) {
-                    return Ok(());
-                }
-            }
+            return Ok(());
         }
         Self::append(
             &self.path,
@@ -311,6 +354,20 @@ impl OfficeLedger {
         serial: u32,
         work_id: &str,
     ) -> Result<LedgerEntry, Box<dyn std::error::Error>> {
+        let candidate = self
+            .entries()?
+            .into_iter()
+            .find(|entry| entry.node_id == node_id && entry.serial == serial)
+            .ok_or_else(|| format!("node {node_id:016x} serial {serial} has no ledger entry"))?;
+        if candidate.work_id != work_id {
+            return Err(format!(
+                "node {node_id:016x} serial {serial} belongs to work {}, not {work_id}",
+                candidate.work_id
+            )
+            .into());
+        }
+        let staging = staging_dir(Path::new(&candidate.out_dir), work_id);
+        let _work = Self::lock_work(&staging)?;
         let _guard = Lockfile::acquire(&self.lock_path())?;
         let folded = Self::read_folded(&self.path)?;
         let key = folded
@@ -334,6 +391,18 @@ impl OfficeLedger {
             )
             .into());
         }
+        if entry.kid.is_some() {
+            return Err(format!(
+                "node {node_id:016x} serial {serial} already has a bound device key; use a new NodeId"
+            )
+            .into());
+        }
+        if entry.out_dir != candidate.out_dir {
+            return Err("office ledger changed during release".into());
+        }
+        require_absent(Path::new(&entry.out_dir))?;
+        require_absent(&staging)?;
+        require_absent(&staging_key_file(&staging))?;
         let released = entry.clone();
         Self::rewrite_without(&self.path, &key)?;
         Ok(released)
@@ -346,30 +415,45 @@ impl OfficeLedger {
     }
 
     fn read_folded(path: &Path) -> Result<FoldedLedger, Box<dyn std::error::Error>> {
-        let text = Self::read_committed(path);
+        let text = Self::read_committed(path)?;
         let mut folded = FoldedLedger::new();
         for line in text.split('\n') {
             if line.trim().is_empty() {
                 continue;
             }
             let entry = parse_entry(line)?;
-            folded.insert(
-                IssueSlot {
-                    device_ca_id: entry.device_ca_id,
-                    node_id: entry.node_id,
-                    serial: entry.serial,
-                },
-                entry,
-            );
+            let slot = IssueSlot {
+                device_ca_id: entry.device_ca_id,
+                node_id: entry.node_id,
+                serial: entry.serial,
+            };
+            if let Some(previous) = folded.get(&slot) {
+                let valid_step = matches!(
+                    (previous.status, entry.status),
+                    (LedgerStatus::Reserved, LedgerStatus::Reserved)
+                        if previous.kid.is_none() && entry.kid.is_some()
+                ) || matches!(
+                    (previous.status, entry.status),
+                    (LedgerStatus::Reserved, LedgerStatus::Issued)
+                        | (LedgerStatus::Issued, LedgerStatus::Written)
+                );
+                if !valid_step
+                    || previous.work_id != entry.work_id
+                    || previous.out_dir != entry.out_dir
+                    || (previous.kid.is_some() && previous.kid != entry.kid)
+                    || (previous.devcert_sha256.is_some()
+                        && previous.devcert_sha256 != entry.devcert_sha256)
+                {
+                    return Err("office ledger has an inconsistent state transition".into());
+                }
+            }
+            folded.insert(slot, entry);
         }
         Ok(folded)
     }
 
     fn append(path: &Path, entry: &LedgerEntry) -> Result<(), Box<dyn std::error::Error>> {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
         let line = format_entry(entry);
         file.write_all(line.as_bytes())?;
         file.write_all(b"\n")?;
@@ -377,23 +461,34 @@ impl OfficeLedger {
         Ok(())
     }
 
-    fn read_committed(path: &Path) -> String {
-        let mut text = std::fs::read_to_string(path).unwrap_or_default();
-        // A torn last line (a crashed append without its newline) never
-        // landed: drop it before folding.
-        if !text.is_empty() && !text.ends_with('\n') {
-            if let Some(pos) = text.rfind('\n') {
-                text.truncate(pos + 1);
-            } else {
-                text.clear();
-            }
+    fn read_committed(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        // A crashed append is void only when it lacks the newline. Remove
+        // its bytes before the next append, under the ledger lock.
+        if !bytes.is_empty() && bytes.last() != Some(&b'\n') {
+            let committed = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |p| p + 1);
+            file.set_len(committed as u64)?;
+            file.sync_all()?;
+            bytes.truncate(committed);
         }
-        text
+        Ok(String::from_utf8(bytes)?)
     }
 
     fn rewrite_without(path: &Path, drop: &IssueSlot) -> Result<(), Box<dyn std::error::Error>> {
-        let text = Self::read_committed(path);
+        let text = Self::read_committed(path)?;
         let tmp = format!("{}.tmp-{}", path.display(), std::process::id());
+        // The ledger lock excludes a live writer; a leftover temporary
+        // file can only be from an interrupted rewrite.
+        match std::fs::remove_file(&tmp) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
         let mut kept = String::new();
         for line in text.split('\n') {
             if line.trim().is_empty() {
@@ -410,10 +505,39 @@ impl OfficeLedger {
                 kept.push('\n');
             }
         }
-        std::fs::write(&tmp, &kept)?;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(kept.as_bytes())?;
+        file.sync_all()?;
         std::fs::rename(&tmp, path)?;
+        sync_parent(path)?;
         Ok(())
     }
+}
+
+fn require_absent(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(format!(
+            "{} exists; inspect and securely remove work artifacts before releasing the reservation",
+            path.display()
+        )
+        .into()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn sync_parent(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
 }
 
 fn unix_secs() -> u64 {
@@ -480,12 +604,19 @@ fn parse_entry(line: &str) -> Result<LedgerEntry, Box<dyn std::error::Error>> {
         .and_then(|v| v.as_str())
         .and_then(LedgerStatus::parse)
         .ok_or("office ledger entry has a bad status")?;
+    let kid = opt_hex("kid")?;
+    let devcert_sha256 = opt_hex("devcert_sha256")?;
+    if (status == LedgerStatus::Reserved && devcert_sha256.is_some())
+        || (status != LedgerStatus::Reserved && (kid.is_none() || devcert_sha256.is_none()))
+    {
+        return Err("office ledger entry has incomplete issuance fields".into());
+    }
     Ok(LedgerEntry {
         device_ca_id,
         node_id,
         serial,
-        kid: opt_hex("kid")?,
-        devcert_sha256: opt_hex("devcert_sha256")?,
+        kid,
+        devcert_sha256,
         work_id: field("work_id")?,
         out_dir: field("out_dir")?,
         status,
@@ -559,9 +690,13 @@ pub fn default_work_id(out_dir: &Path) -> String {
         match part {
             Component::RootDir => parts.push(String::new()),
             Component::CurDir => {}
-            Component::ParentDir => {
-                parts.pop();
-            }
+            Component::ParentDir => match parts.last().map(String::as_str) {
+                Some("") => {}
+                Some("..") | None => parts.push("..".to_string()),
+                Some(_) => {
+                    parts.pop();
+                }
+            },
             Component::Normal(text) => parts.push(text.to_string_lossy().into_owned()),
             Component::Prefix(prefix) => {
                 parts.push(prefix.as_os_str().to_string_lossy().into_owned())
@@ -586,18 +721,22 @@ pub fn staging_dir(out_dir: &Path, work_id: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+pub fn staging_key_file(staging: &Path) -> PathBuf {
+    let mut name = staging.as_os_str().to_owned();
+    name.push(".key");
+    PathBuf::from(name)
+}
+
 /// Held across one work's stage → publish; dropping releases.
 pub(crate) struct WorkGuard {
     _guard: Lockfile,
 }
 
-/// Exclusive cross-process lock, std-only (`unsafe` is forbidden, so no
-/// `flock`): an atomic `create_new` lockfile holding the holder's pid.
-/// A lockfile whose pid is gone (`/proc` on Linux, the office platform)
-/// is stale and stolen; a live holder is waited on (30 s) before the
-/// command fails instead of issuing blind.
+/// Exclusive kernel lock on a persistent lockfile. The kernel releases it
+/// when a process exits; retaining the file preserves its inode for every
+/// office terminal, including after a crash.
 struct Lockfile {
-    path: PathBuf,
+    _file: std::fs::File,
 }
 
 impl Lockfile {
@@ -607,28 +746,19 @@ impl Lockfile {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        let me = std::process::id().to_string();
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)
-            {
-                Ok(mut file) => {
-                    file.write_all(me.as_bytes())?;
-                    file.sync_all()?;
-                    return Ok(Lockfile {
-                        path: path.to_path_buf(),
-                    });
-                }
-                Err(_) => {
-                    if Self::holder_gone(path) {
-                        // Stale: exactly one stealer wins the next
-                        // create_new; the losers loop back here.
-                        std::fs::remove_file(path).ok();
-                        continue;
-                    }
+            match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => return Ok(Lockfile { _file: file }),
+                Err(e) if e == rustix::io::Errno::WOULDBLOCK => {
                     if std::time::Instant::now() >= deadline {
                         return Err(format!(
                             "office ledger is locked by another process ({}); refusing to issue blind",
@@ -638,43 +768,7 @@ impl Lockfile {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
-            }
-        }
-    }
-
-    fn holder_gone(path: &Path) -> bool {
-        let mut pid = String::new();
-        let Ok(mut file) = std::fs::File::open(path) else {
-            return true;
-        };
-        if file.read_to_string(&mut pid).is_err() {
-            return false;
-        }
-        let pid: String = pid.trim().chars().filter(|c| c.is_ascii_digit()).collect();
-        if pid.is_empty() {
-            return false;
-        }
-        // A live holder keeps its /proc entry; anything else (gone,
-        // unreadable pid, non-Linux office box without /proc) is read
-        // as "gone" only when the entry is affirmatively absent. On a
-        // box without /proc at all, refuse to steal: concurrent
-        // terminals there must serialize some other way.
-        let proc = PathBuf::from("/proc").join(&pid);
-        if !Path::new("/proc").exists() {
-            return false;
-        }
-        !proc.exists()
-    }
-}
-
-impl Drop for Lockfile {
-    fn drop(&mut self) {
-        // Best-effort: a stale lockfile is stolen, never fatal.
-        if let Ok(mut file) = std::fs::File::open(&self.path) {
-            let mut pid = String::new();
-            if file.read_to_string(&mut pid).is_ok() && pid.trim() == std::process::id().to_string()
-            {
-                std::fs::remove_file(&self.path).ok();
+                Err(e) => return Err(e.into()),
             }
         }
     }
@@ -683,6 +777,11 @@ impl Drop for Lockfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_normalization_stays_under_root() {
+        assert_eq!(default_work_id(Path::new("/../tmp/issued")), "/tmp/issued");
+    }
 
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("rl-ctl-ledger-{}-{tag}", std::process::id()));
@@ -779,6 +878,152 @@ mod tests {
                 .unwrap(),
             ReserveOutcome::New
         );
+        assert_eq!(ledger.entries().unwrap().len(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unreadable_ledger_never_looks_empty() {
+        let dir = scratch("unreadable");
+        let path = dir.join("office-ledger.jsonl");
+        std::fs::create_dir(&path).unwrap();
+        assert!(OfficeLedger::open(&path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn issuance_requires_reservation_and_immutable_digest() {
+        let dir = scratch("issued-integrity");
+        let ledger = OfficeLedger::open(&dir.join("office-ledger.jsonl")).unwrap();
+        let slot_a = slot(1, 2, 3);
+        assert!(ledger
+            .mark_issued(slot_a, [1; 32], [2; 32], "work", "/tmp/work")
+            .is_err());
+        ledger.reserve(slot_a, None, "work", "/tmp/work").unwrap();
+        ledger
+            .mark_issued(slot_a, [1; 32], [2; 32], "work", "/tmp/work")
+            .unwrap();
+        assert!(ledger
+            .mark_issued(slot_a, [1; 32], [3; 32], "work", "/tmp/work")
+            .is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn lockfile_respects_an_existing_kernel_lock() {
+        let dir = scratch("kernel-lock");
+        let path = dir.join("ledger.lock");
+        std::fs::write(&path, b"99999999").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let contender = std::thread::spawn(move || {
+            let guard = Lockfile::acquire(&path).unwrap();
+            tx.send(()).unwrap();
+            drop(guard);
+        });
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err());
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::Unlock).unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        contender.join().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn release_cannot_overtake_publication() {
+        let dir = scratch("release-publish");
+        let ledger = OfficeLedger::open(&dir.join("office-ledger.jsonl")).unwrap();
+        let out = dir.join("device");
+        let work = "work";
+        let slot_a = slot(1, 2, 3);
+        ledger
+            .reserve(slot_a, None, work, out.to_str().unwrap())
+            .unwrap();
+        let guard = OfficeLedger::lock_work(&staging_dir(&out, work)).unwrap();
+        let contender = ledger.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            tx.send(contender.release(2, 3, work).is_err()).unwrap();
+        });
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err());
+        std::fs::create_dir(&out).unwrap();
+        drop(guard);
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap());
+        thread.join().unwrap();
+        assert_eq!(ledger.entries().unwrap().len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_bound_device_key_burns_the_reservation() {
+        let dir = scratch("bound-key");
+        let ledger = OfficeLedger::open(&dir.join("office-ledger.jsonl")).unwrap();
+        let slot_a = slot(1, 2, 3);
+        ledger
+            .reserve(slot_a, None, "work", "/tmp/bound-work")
+            .unwrap();
+        ledger
+            .reserve(slot_a, Some([7; 32]), "work", "/tmp/bound-work")
+            .unwrap();
+        assert_eq!(ledger.entries().unwrap()[0].kid, Some([7; 32]));
+        assert!(ledger.release(2, 3, "work").is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ledger_aliases_share_one_lock() {
+        let dir = scratch("alias-lock");
+        let real = dir.join("office-ledger.jsonl");
+        let first = OfficeLedger::open(&real).unwrap();
+        let alias = dir.join("alias.jsonl");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let second = OfficeLedger::open(&alias).unwrap();
+        assert_eq!(first.lock_path(), second.lock_path());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn complete_but_inconsistent_ledger_line_is_corruption() {
+        let dir = scratch("malformed-issued");
+        let path = dir.join("office-ledger.jsonl");
+        let ledger = OfficeLedger::open(&path).unwrap();
+        let slot_a = slot(1, 2, 3);
+        ledger.reserve(slot_a, None, "work", "/tmp/work").unwrap();
+        let mut malformed = ledger.entries().unwrap().remove(0);
+        malformed.status = LedgerStatus::Issued;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(format!("{}\n", format_entry(&malformed)).as_bytes())
+            .unwrap();
+        file.sync_all().unwrap();
+        assert!(ledger.entries().is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn one_work_and_output_directory_cannot_claim_two_slots() {
+        let dir = scratch("work-scope");
+        let ledger = OfficeLedger::open(&dir.join("office-ledger.jsonl")).unwrap();
+        ledger
+            .reserve(slot(1, 2, 3), None, "work-a", "/tmp/a")
+            .unwrap();
+        assert!(ledger
+            .reserve(slot(1, 4, 5), None, "work-a", "/tmp/b")
+            .is_err());
+        assert!(ledger
+            .reserve(slot(1, 4, 5), None, "work-b", "/tmp/a")
+            .is_err());
+        assert_eq!(ledger.entries().unwrap().len(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 

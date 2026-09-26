@@ -457,11 +457,14 @@ enum class AdoptNetworkDisposition : std::uint8_t {
 
 // Pure decision table over the Owner's installed binding
 // (`adopted_network`/`adopted_role`, zero until ApplyMemberConfig) and
-// whether the coordinator runs Member on it right now.
+// whether the coordinator and mesh node are live as a Member, and whether
+// the radio reached the action's operating channel.
 constexpr AdoptNetworkDisposition adopt_network_disposition(
     const NetworkId action_network, const NetworkId adopted_network,
-    const std::uint8_t adopted_role, const bool live_member_binding) noexcept {
-  if (adopted_role != 0 && adopted_network == action_network) {
+    const std::uint8_t adopted_role, const bool live_member_binding,
+    const bool on_target_channel) noexcept {
+  if (live_member_binding && on_target_channel && adopted_role != 0 &&
+      adopted_network == action_network) {
     return AdoptNetworkDisposition::Complete;
   }
   if (live_member_binding && adopted_role != 0 && adopted_network != 0 &&
