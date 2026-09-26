@@ -457,6 +457,129 @@ void test_member_link_expiry_rediscovers() {
   CHECK(pair.a.coordinator().counters().link_established > established);
 }
 
+// Four real coordinators/discovery engines on C--A--B--D. Radio frames
+// reach only adjacent nodes; a healthy side link must not suppress repair
+// of the expired central link's discovery carrier.
+void test_expired_link_with_healthy_side_neighbors() {
+  current = "expired_link_with_healthy_side_neighbors";
+  SimNode a{kSimNodeA, kSimMacA, 0xA1E, 8};
+  SimNode b{kSimNodeB, kSimMacB, 0xB2E, 8};
+  constexpr NodeId c_id = 0x00A1000000009876ULL;
+  constexpr NodeId d_id = 0x00A100000000ABCDULL;
+  const MacAddress c_mac{{0x02, 0, 0, 0, 0x12, 0xC3}};
+  const MacAddress d_mac{{0x02, 0, 0, 0, 0x12, 0xD4}};
+  SimNode c{c_id, c_mac, 0xC3E, 8};
+  SimNode d{d_id, d_mac, 0xD4E, 8};
+  std::array<SimNode*, 4> nodes{{&a, &b, &c, &d}};
+  keys::Secret psk{};
+  psk.fill(0x42);
+  MonotonicMs now = kSimT0;
+  for (auto* n : nodes) CHECK(n->init_stores());
+  CHECK(a.boot_dev(now, psk, kNetwork, 199));
+  CHECK(b.boot_dev(now, psk, kNetwork, 199));
+  bool side_enabled = false;
+  // Send all queued traffic before polling, as the radio does. C and D
+  // cannot hear each other or the opposite end of the central link.
+  auto tick = [&]() {
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+      SimNode& src = *nodes[i];
+      auto adjacent = [&](std::size_t x, std::size_t y) {
+        return (x == 0 && y == 1) || (x == 1 && y == 0) ||
+               (side_enabled && ((x == 0 && y == 2) || (x == 2 && y == 0) ||
+                                 (x == 1 && y == 3) || (x == 3 && y == 1)));
+      };
+      for (std::size_t j = 0; j < nodes.size(); ++j) {
+        if (!adjacent(i, j)) continue;
+        SimNode& dst = *nodes[j];
+        auto deliver_rld1 = [&](const Rld1Frame& frame) {
+          if (frame.dest != discovery_const::kBroadcastMac && frame.dest != dst.mac()) return;
+          CoordinatorEvent event{};
+          event.kind = CoordinatorEventKind::Rld1Rx;
+          event.now = now;
+          event.rld1_meta.source = src.mac();
+          event.rld1_meta.destination = frame.dest;
+          event.rld1_meta.channel = dst.operating_channel();
+          event.rld1_frame = ByteView{frame.bytes.data(), frame.bytes.size()};
+          (void)dst.coordinator().step(event);
+        };
+        for (const auto& frame : src.rld1_.out) deliver_rld1(frame);
+        for (const auto& frame : src.discovery_port_.rld1) deliver_rld1(frame);
+        if (dst.discovery() != nullptr) {
+          for (const auto& frame : src.discovery_port_.wire) {
+            // Firmware seals Probe/Result on the Link session; an expired
+            // context cannot refresh a lease via an unencrypted sim frame.
+            if (frame.dest == dst.mac() && src.link_session_to(dst.node()) &&
+                dst.link_session_to(src.node()))
+              dst.discovery()->on_wire_rx(src.mac(), frame.type,
+                  ByteView{frame.bytes.data(), frame.bytes.size()}, now);
+          }
+        }
+        for (const auto& frame : src.mesh_.out) {
+          if (frame.dest != dst.node()) continue;
+          BootstrapMeta meta{};
+          meta.origin = src.node();
+          meta.destination = frame.dest;
+          meta.id = MessageId{1, 1};
+          meta.previous_hop = src.node();
+          meta.hop_remaining = 5;
+          meta.remaining_deadline_ms = 5000;
+          (void)dst.coordinator().on_frame(meta, frame.type,
+              ByteView{frame.bytes.data(), frame.bytes.size()}, now);
+        }
+      }
+      src.rld1_.out.clear();
+      src.discovery_port_.rld1.clear();
+      src.discovery_port_.wire.clear();
+      src.mesh_.out.clear();
+    }
+    for (std::size_t i = 0; i < (side_enabled ? 4U : 2U); ++i) nodes[i]->poll(now);
+  };
+  auto pump = [&](int count) {
+    for (int i = 0; i < count; ++i) {
+      now += 10;
+      tick();
+    }
+  };
+  CHECK(a.demand_link(kSimNodeB));
+  CHECK(b.demand_link(kSimNodeA));
+  for (int i = 0; i < 1500 && !(a.link_session_to(kSimNodeB) && b.link_session_to(kSimNodeA)); ++i)
+    pump(1);
+  CHECK(a.link_session_to(kSimNodeB) && b.link_session_to(kSimNodeA));
+  const auto old_links = a.coordinator().counters().link_established;
+  // The side contexts are an hour younger than A--B at its expiry.
+  now += 60 * 60 * 1000;
+  CHECK(c.boot_dev(now, psk, kNetwork, 199));
+  CHECK(d.boot_dev(now, psk, kNetwork, 199));
+  side_enabled = true;
+  CHECK(a.demand_link(c_id));
+  CHECK(c.demand_link(kSimNodeA));
+  CHECK(b.demand_link(d_id));
+  CHECK(d.demand_link(kSimNodeB));
+  for (int i = 0; i < 1500 && !(a.link_session_to(c_id) && b.link_session_to(d_id)); ++i)
+    pump(1);
+  CHECK(a.link_session_to(c_id) && b.link_session_to(d_id));
+  now += SessionBank<1, 1>::kContextLifetimeMs - 60 * 60 * 1000 + 1000;
+  tick();
+  CHECK(a.link_session_to(c_id) && b.link_session_to(d_id));
+  CHECK(a.demand_link(kSimNodeB));
+  CHECK(b.demand_link(kSimNodeA));
+  bool restored = false;
+  bool stranded_with_healthy_sides = false;
+  for (int i = 0; i < 4000 && !restored; ++i) {
+    pump(1);
+    NeighborPhase ab{}, ac{}, bd{};
+    if (a.discovery()->phase_of(kSimNodeB, ab) && a.discovery()->phase_of(c_id, ac) &&
+        b.discovery()->phase_of(d_id, bd) && ab == NeighborPhase::Stale &&
+        ac == NeighborPhase::Reachable && bd == NeighborPhase::Reachable)
+      stranded_with_healthy_sides = true;
+    restored = a.link_session_to(kSimNodeB) && b.link_session_to(kSimNodeA) &&
+               a.coordinator().counters().link_established > old_links;
+  }
+  CHECK(stranded_with_healthy_sides);
+  CHECK(restored);
+  CHECK(a.link_session_to(c_id) && b.link_session_to(d_id));
+}
+
 void test_dev_resume_r3_loss_recovers_after_receiver_restart() {
   current = "dev_resume_r3_loss_recovers_after_receiver_restart";
   SimPair pair{};
@@ -814,6 +937,7 @@ void test_member_sleep_save_shapes() {
 int main() {
   test_member_link_binds_discovery();
   test_member_link_expiry_rediscovers();
+  test_expired_link_with_healthy_side_neighbors();
   test_dev_resume_r3_loss_recovers_after_receiver_restart();
   test_dev_destination_restart_without_report_stays_stale();
   test_dev_destination_restart_recovers_end_session_from_rx_report();
