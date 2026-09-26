@@ -496,9 +496,9 @@ pub mod ipc {
         }
 
         #[cfg(windows)]
-        fn from_file(file: std::fs::File) -> io::Result<Self> {
+        fn from_file(file: std::fs::File, accepted: bool) -> io::Result<Self> {
             Ok(Self {
-                inner: std::sync::Arc::new(super::win_ipc::PipeStream::new(file)?),
+                inner: std::sync::Arc::new(super::win_ipc::PipeStream::new(file, accepted)?),
             })
         }
 
@@ -512,7 +512,7 @@ pub mod ipc {
         pub fn connect<P: AsRef<Path>>(path: P) -> io::Result<Self> {
             let path_str = path.as_ref().to_string_lossy();
             let file = super::win_ipc::connect_pipe(&path_str)?;
-            Self::from_file(file)
+            Self::from_file(file, false)
         }
 
         #[cfg(not(any(unix, windows)))]
@@ -538,7 +538,10 @@ pub mod ipc {
             let listener = super::win_ipc::NamedPipeListener::bind(&name)?;
             let client = super::win_ipc::connect_pipe(&name)?;
             let (server, _) = listener.accept()?;
-            Ok((Self::from_file(client)?, Self::from_file(server)?))
+            Ok((
+                Self::from_file(client, true)?,
+                Self::from_file(server, true)?,
+            ))
         }
 
         #[cfg(not(any(unix, windows)))]
@@ -682,7 +685,7 @@ pub mod ipc {
             #[cfg(windows)]
             {
                 let (file, principal) = self.inner.accept()?;
-                Ok((IpcStream::from_file(file)?, principal))
+                Ok((IpcStream::from_file(file, true)?, principal))
             }
             #[cfg(not(any(unix, windows)))]
             {
@@ -1492,6 +1495,14 @@ pub mod win_ipc {
             max_collection: *mut u32,
             collection_timeout: *mut u32,
         ) -> i32;
+        fn PeekNamedPipe(
+            pipe: *mut c_void,
+            buffer: *mut c_void,
+            buffer_size: u32,
+            bytes_read: *mut u32,
+            bytes_available: *mut u32,
+            bytes_left: *mut u32,
+        ) -> i32;
         fn GetLastError() -> u32;
     }
 
@@ -1500,50 +1511,61 @@ pub mod win_ipc {
         file: File,
         read_timeout: Mutex<Option<Duration>>,
         write_timeout: Mutex<Option<Duration>>,
+        nonblocking: AtomicBool,
+        accepted: AtomicBool,
         read_closed: AtomicBool,
         write_closed: AtomicBool,
     }
 
     impl PipeStream {
-        pub fn new(file: File) -> io::Result<Self> {
-            let mut mode = PIPE_READMODE_BYTE | PIPE_NOWAIT;
-            if unsafe {
-                SetNamedPipeHandleState(
-                    file.as_raw_handle(),
-                    &mut mode,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            } == 0
-            {
-                return Err(io::Error::last_os_error());
-            }
+        pub fn new(file: File, accepted: bool) -> io::Result<Self> {
             Ok(Self {
                 file,
                 read_timeout: Mutex::new(None),
                 write_timeout: Mutex::new(None),
+                nonblocking: AtomicBool::new(false),
+                accepted: AtomicBool::new(accepted),
                 read_closed: AtomicBool::new(false),
                 write_closed: AtomicBool::new(false),
             })
         }
 
-        fn set_timeout(slot: &Mutex<Option<Duration>>, dur: Option<Duration>) -> io::Result<()> {
+        fn set_timeout(
+            &self,
+            slot: &Mutex<Option<Duration>>,
+            dur: Option<Duration>,
+        ) -> io::Result<()> {
             if dur == Some(Duration::ZERO) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "zero pipe timeout",
                 ));
             }
+            if dur.is_some() && !self.nonblocking.load(Ordering::Acquire) {
+                let mut mode = PIPE_READMODE_BYTE | PIPE_NOWAIT;
+                if unsafe {
+                    SetNamedPipeHandleState(
+                        self.file.as_raw_handle(),
+                        &mut mode,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    )
+                } == 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                self.nonblocking.store(true, Ordering::Release);
+            }
             *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = dur;
             Ok(())
         }
 
         pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
-            Self::set_timeout(&self.read_timeout, dur)
+            self.set_timeout(&self.read_timeout, dur)
         }
 
         pub fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
-            Self::set_timeout(&self.write_timeout, dur)
+            self.set_timeout(&self.write_timeout, dur)
         }
 
         pub fn shutdown(&self, how: Shutdown) {
@@ -1581,6 +1603,29 @@ pub mod win_ipc {
                 }
                 match (&self.file).read(buf) {
                     Err(e) if e.raw_os_error() == Some(ERROR_NO_DATA) => {
+                        if self.accepted.load(Ordering::Acquire) {
+                            let mut available = 0;
+                            let peek = unsafe {
+                                PeekNamedPipe(
+                                    self.file.as_raw_handle(),
+                                    std::ptr::null_mut(),
+                                    0,
+                                    std::ptr::null_mut(),
+                                    &mut available,
+                                    std::ptr::null_mut(),
+                                )
+                            };
+                            if peek == 0 {
+                                let error = io::Error::last_os_error();
+                                if matches!(
+                                    error.raw_os_error(),
+                                    Some(ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED)
+                                ) {
+                                    return Ok(0);
+                                }
+                                return Err(error);
+                            }
+                        }
                         Self::wait_for_space(started, timeout)?;
                     }
                     Err(e)
@@ -1589,9 +1634,21 @@ pub mod win_ipc {
                             Some(ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED)
                         ) =>
                     {
+                        // The client can open a pre-created instance before
+                        // the server enters ConnectNamedPipe.
+                        if !self.accepted.load(Ordering::Acquire)
+                            && started.elapsed() < Duration::from_secs(5)
+                        {
+                            Self::wait_for_space(started, timeout)?;
+                            continue;
+                        }
                         return Ok(0);
                     }
-                    result => return result,
+                    Ok(n) => {
+                        self.accepted.store(true, Ordering::Release);
+                        return Ok(n);
+                    }
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -1760,6 +1817,42 @@ mod tests {
         let mut buf = [0_u8; 32];
         fill_random(&mut buf).expect("fill_random succeeds");
         assert_ne!(buf, [0_u8; 32]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn named_pipe_client_waits_for_server_accept() {
+        use std::io::{Read, Write};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let name = format!(r"\\.\pipe\routeloom-wait-test-{}", std::process::id());
+        let listener = IpcListener::bind(&name).expect("bind pipe");
+        let mut client = IpcStream::connect(&name).expect("connect before accept");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut byte = [0];
+            tx.send(client.read_exact(&mut byte).map(|()| byte))
+                .expect("report read result");
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(20)).is_err(),
+            "client read closed before server accepted"
+        );
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream.write_all(b"x").expect("reply");
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2))
+                .expect("client read completed")
+                .expect("read reply"),
+            [b'x']
+        );
+        server.join().expect("server");
     }
 
     #[cfg(windows)]

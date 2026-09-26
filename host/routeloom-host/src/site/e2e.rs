@@ -41,13 +41,8 @@ struct Daemon {
 }
 
 impl Daemon {
-    fn start(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "routeloom-site-e2e-{tag}-{}-{}",
-            std::process::id(),
-            now_ms()
-        ));
-        routeloom_peercred::create_private_dir_all(&dir).unwrap();
+    fn start(_tag: &str) -> Self {
+        let dir = super::short_socket_test_dir("se");
         // This process's uid is the socket principal; grant it the three
         // membership permissions on the site network only.
         let uid = std::fs::metadata(&dir).unwrap().uid();
@@ -115,6 +110,13 @@ impl Daemon {
         self.ring(events);
         (exchange, outcome)
     }
+}
+
+#[test]
+fn api_socket_path_stays_below_macos_limit() {
+    let daemon = Daemon::start(&"long-test-name".repeat(20));
+    use std::os::unix::ffi::OsStrExt;
+    assert!(daemon.socket.as_os_str().as_bytes().len() < 104);
 }
 
 impl Drop for Daemon {

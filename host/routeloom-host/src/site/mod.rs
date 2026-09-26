@@ -6263,6 +6263,26 @@ mod cutover_tests;
 mod e2e;
 #[cfg(all(test, unix))]
 mod joiner_interop;
+#[cfg(all(test, unix))]
+fn short_socket_test_dir(prefix: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+    loop {
+        // macOS accepts at most 103 bytes in a Unix socket pathname.
+        let dir = std::path::Path::new("/tmp").join(format!(
+            "rl-{prefix}-{:x}-{:x}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => return dir,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("create socket test directory: {error}"),
+        }
+    }
+}
 #[cfg(test)]
 mod p6_channel_tests;
 #[cfg(test)]

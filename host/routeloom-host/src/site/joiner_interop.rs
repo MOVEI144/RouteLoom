@@ -630,19 +630,14 @@ impl Drop for InteropSite {
 
 impl InteropSite {
     fn start(
-        tag: &str,
+        _tag: &str,
         setup: &SiteSetup,
         sak: FileRootSigner,
         gateway: u64,
         network_low: u32,
         now: u64,
     ) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "routeloom-joiner-interop-{tag}-{}-{}",
-            std::process::id(),
-            now_ms()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = super::short_socket_test_dir("ji");
         let store = SqliteSiteStore::open(&dir.join("site.db")).unwrap();
         let authority = SiteAuthority::open(setup, Box::new(sak), Box::new(store), now).unwrap();
         let uid = std::fs::metadata(&dir).unwrap().uid();
