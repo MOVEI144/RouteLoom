@@ -1,8 +1,9 @@
 """Qt-free development provision plan and step runner (design-devflow §4.2, §7.3).
 
 The runner only orders the steps and keeps each board's resumable state. The
-steps themselves belong to other components: BoardConfig/setup (D02), the
-keygen/PoP/identity orchestration (D03a) and the lab inventory policy (D01).
+steps themselves belong to other components: BoardConfig/setup (D02) and the
+keygen/PoP/identity orchestration with its written receipt and
+`lab-inventory-import` (D03a).
 `ContractBackend` is the interface those components plug into; until they
 exist every such step reports 未対応 and the board never reaches Ready. A board
 is Ready only after the field readback matched (NodeId, kid, config, digest);
@@ -26,8 +27,8 @@ STEPS = (
     ('identity', 'identity commit と lock（OK sealed）', 'D03a'),
     ('field', 'field image（app 領域のみ）書込み', 'D02'),
     ('readback', 'read-only boot identity の照合', 'D02'),
-    ('inventory', 'inventory へ provision 完了を commit', 'D01'),
-    ('join', '通常 Join・自動承認・JoinConfirm', 'D01'),
+    ('inventory', 'lab-inventory-import（written receipt）', 'D03a'),
+    ('join', '通常 Join・自動承認・JoinConfirm', 'Site Authority'),
 )
 STEP_NAMES = tuple(step for step, _, _ in STEPS)
 STEP_LABELS = {step: label for step, label, _ in STEPS}
@@ -246,7 +247,8 @@ def job_status_text(job):
 
 
 def inventory_rows(result):
-    """lab.inventory.list (D01) → rows; None when the daemon does not serve it."""
+    """lab.inventory.list → rows; None when the daemon does not serve it (not on main:
+    the inventory is written by `routeloomctl lab-inventory-import`)."""
     if not isinstance(result, dict) or not isinstance(result.get('devices'), list):
         return None
     rows = []
@@ -257,21 +259,22 @@ def inventory_rows(result):
     return rows
 
 
-def auto_approval_text(policy, inventory_supported):
-    """Auto approval state from site.status.policy; absent lab policy fields are 未対応."""
-    if not isinstance(policy, dict):
+def auto_approval_text(status):
+    """Auto approval from site.status (purpose + policy.decision_mode/lab_enrollment_active)."""
+    if not isinstance(status, dict) or not isinstance(status.get('policy'), dict):
         return '不明（site.status 未取得）'
+    policy = status['policy']
+    purpose = status.get('purpose')
     mode = policy.get('decision_mode')
-    zero_touch = policy.get('zero_touch_open')
-    base = f'decision_mode={mode if mode is not None else "不明"}、zero_touch_open=' + \
-        ('不明' if zero_touch is None else 'はい' if zero_touch else 'いいえ')
-    lab = policy.get('lab_inventory')
-    if not inventory_supported or lab is None:
-        return base + '／開発 inventory 自動承認: 未対応（D01 の lab_inventory policy が無い）'
-    if not isinstance(lab, dict):
-        return base + '／開発 inventory 自動承認: 不明'
-    enabled = lab.get('enabled')
-    expires = lab.get('expires_ms')
-    return (base + '／開発 inventory 自動承認: ' +
-            ('有効' if enabled is True else '無効' if enabled is False else '不明') +
-            (f'（期限 {expires} ms）' if type(expires) is int else ''))
+    active = policy.get('lab_enrollment_active')
+    base = f'purpose={purpose if purpose is not None else "不明"}、decision_mode=' \
+        f'{mode if mode is not None else "不明"}'
+    if purpose is not None and purpose != 'development':
+        return base + '／開発 inventory 自動承認: 不可（development site だけ）'
+    if mode != 'lab_inventory':
+        return base + '／開発 inventory 自動承認: 無効'
+    if active is True:
+        return base + '／開発 inventory 自動承認: 有効（enrollment 期間中）'
+    if active is False:
+        return base + '／開発 inventory 自動承認: 閉鎖中（期限切れ・再起動・書込み失敗。再設定で再開）'
+    return base + '／開発 inventory 自動承認: 不明'

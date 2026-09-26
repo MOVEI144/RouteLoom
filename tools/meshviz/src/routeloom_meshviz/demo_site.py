@@ -1,8 +1,8 @@
 """Demo site for the fake API1 server: staggered joins, ledger reads and a fake rollcall.
 
 Stands in for the Site Authority reads that exist on main (site.status,
-join.requests.list, members.list) and for the D01/D09 methods that do not yet
-(lab.inventory.list, lab.rollcall.*), using the shapes the live monitor
+join.requests.list, members.list) and for the methods that do not yet
+(lab.inventory.list, lab.rollcall.* of D09), using the shapes the live monitor
 consumes. Nothing here is evidence about a real device.
 """
 from .demo import GATEWAY, DemoMesh, FakeMethodError
@@ -106,10 +106,10 @@ class DemoSiteMesh(DemoMesh):
                 'join_requests': sum(r['state'] == 'awaiting' for r in self._requests(elapsed)),
                 'authority': {'attached': True, 'channels': 1},
                 'usb': {'configured': True, 'attached': True, 'join_relay': 'ready'},
-                'policy': {'zero_touch_open': False, 'decision_mode': 'closed',
-                           'lab_inventory': {'enabled': True, 'expires_ms': None}},
-                'profile': {'security': 'MEMBER_EDHOC', 'routing': 'GATEWAY_SCOPED',
-                            'purpose': 'development'},
+                'purpose': 'development',
+                'policy': {'zero_touch_open': False, 'decision_mode': 'lab_inventory',
+                           'decision_timeout_ms': 1000, 'pending_retry_after_s': 30,
+                           'policy_generation': 1, 'lab_enrollment_active': True},
                 'clock': 'host_unix_ms', 'now_ms': unix}
 
     # --- fake RollcallService (D09 shape) ---

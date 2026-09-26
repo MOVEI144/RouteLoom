@@ -440,12 +440,11 @@ class LiveView(QWidget):
     def _refresh_labels(self):
         live = self.mode == 'LIVE'
         status = self.site_status or {}
-        profile = status.get('profile') if isinstance(status.get('profile'), dict) else {}
         site_note = read_status_text(self.poller, 'site') if live else None
         self.site_label.setText(
             f'<b>{self.mode}</b>　site {views.fmt(status.get("site_id"))}'
-            f'（{views.fmt(profile.get("purpose"))}）　security {views.fmt(profile.get("security"))}'
-            f'　routing {views.fmt(profile.get("routing"))}' +
+            f'（purpose {views.fmt(status.get("purpose"))}）　channel {views.fmt(status.get("channel"))}'
+            '　security／routing: 不明（daemon 未公開）' +
             (f'　site.status: {site_note}' if site_note else ''))
         usb = status.get('usb') if isinstance(status.get('usb'), dict) else {}
         authority = status.get('authority') if isinstance(status.get('authority'), dict) else {}

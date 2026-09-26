@@ -346,9 +346,8 @@ class MainWindow(QMainWindow):
         scope = (views.scopes(state) or ['不明'])[0]
         site = self.live.site_status if self.mode == 'LIVE' else None
         if site and isinstance(site.get('site_id'), str):
-            profile = site.get('profile') if isinstance(site.get('profile'), dict) else {}
-            self.header.set('site', f'site {site["site_id"]}（{views.fmt(profile.get("purpose"))}／'
-                                    f'{views.fmt(profile.get("security"))}）scope {scope}')
+            self.header.set('site', f'site {site["site_id"]}（{views.fmt(site.get("purpose"))}）'
+                                    f'scope {scope}')
         else:
             self.header.set('site', f'scope {scope}（site/profile: 未取得）')
         now = snapshot.get('now_unix_ms')

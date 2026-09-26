@@ -18,7 +18,7 @@ from ..live_monitor import read_status_text
 from ..site_supervisor import SiteSupervisor
 from ..provisioning import (LAB_ROLES, STEP_NAMES, ContractBackend, FakeProvisionBackend,
                             ProvisionRunner, auto_approval_text, inventory_rows, job_status_text,
-                            plan_jobs)
+                            plan_jobs, valid_lab_node_id)
 from .workers import ProvisionWorker, SupervisorWorker
 
 BOARD_COLUMNS = ['board（port）', 'chip', 'MAC 末尾', '役割', 'NodeId', 'provision 状態', '手順']
@@ -30,7 +30,7 @@ class SiteView(QWidget):
     start_site = Signal(dict)
     attach_site = Signal(dict)
     stop_site = Signal()
-    lab_init = Signal(int, str, str, int)
+    lab_init = Signal(int, str, str, int)  # serial, gateway NodeId, out dir, channel
     provision = Signal(int, object)
     provision_stop = Signal()
     site_ready = Signal(str)
@@ -52,7 +52,8 @@ class SiteView(QWidget):
         self.jobs = []
         self.board_rows = []
         # --- 1. site --------------------------------------------------------
-        self.site_name = QLineEdit('lab')
+        self.gateway_id = QLineEdit()
+        self.gateway_id.setPlaceholderText('bridge（gateway）の NodeId')
         self.channel = QSpinBox()
         self.channel.setRange(1, 14)
         self.channel.setValue(1)
@@ -80,7 +81,7 @@ class SiteView(QWidget):
         self.attach_button.clicked.connect(lambda: self._site_command(self.attach_site))
         self.stop_button.clicked.connect(self.stop_site.emit)
         new_form = QFormLayout()
-        new_form.addRow('site 名', self.site_name)
+        new_form.addRow('gateway', self.gateway_id)
         new_form.addRow('channel', self.channel)
         new_form.addRow('出力先', self.new_dir)
         new_form.addRow(create)
@@ -207,12 +208,11 @@ class SiteView(QWidget):
     def update_from(self, live):
         """Inventory and approval come from the live poller's reads (no duplicate requests)."""
         status = live.site_status or {}
-        supported = live.poller.supported('lab.inventory.list')
         site_note = read_status_text(live.poller, 'site') if self.mode == 'LIVE' else None
         if live.site_status is None and site_note is not None:
             self.approval_label.setText(f'自動承認: site.status {site_note}')
         else:
-            self.approval_label.setText('自動承認: ' + auto_approval_text(status.get('policy'), supported))
+            self.approval_label.setText('自動承認: ' + auto_approval_text(status))
         result = live.poller.results.get('inventory')
         rows = inventory_rows(result[0]) if result else None
         note = read_status_text(live.poller, 'inventory') if self.mode == 'LIVE' else '再生中は照会しない'
@@ -266,12 +266,15 @@ class SiteView(QWidget):
 
     def _create_site(self):
         out = self.new_dir.text().strip()
-        if not out:
-            self.lab_label.setText('出力先を指定してください')
+        gateway = valid_lab_node_id(self.gateway_id.text())
+        if not out or gateway is None:
+            self.lab_label.setText('出力先と bridge の NodeId を指定してください')
             return
         self.lab_serial += 1
+        # ids come from the CSPRNG into <out>.lab-spec.json; a retry reuses that spec
+        # so lab-site-init resumes the same site rather than minting new CAs.
         self.lab_label.setText('lab-site-init 実行中…')
-        self.lab_init.emit(self.lab_serial, self.site_name.text().strip(), out, self.channel.value())
+        self.lab_init.emit(self.lab_serial, gateway, out, self.channel.value())
 
     def _on_lab_init(self, serial, result):
         if serial != self.lab_serial:
@@ -282,6 +285,7 @@ class SiteView(QWidget):
         self.lab_label.setText(f'新規開発 site: {text}　{result.get("detail", "")[-300:]}')
         if state == 'created':
             self.site_dir.setText(self.new_dir.text().strip())
+            self.acl_file.setText(result.get('acl_file', ''))
 
     def _on_supervisor(self, status):
         self.supervisor_status = status

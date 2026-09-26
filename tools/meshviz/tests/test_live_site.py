@@ -1,5 +1,8 @@
 """Qt-free tests: join timeline, rollcall budget, site poller, supervisor and provision plan."""
+import json
+import os
 import subprocess
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,7 +19,7 @@ from routeloom_meshviz.provisioning import (ContractBackend, FakeProvisionBacken
                                             auto_approval_text, job_status_text, plan_jobs,
                                             valid_lab_node_id)
 from routeloom_meshviz.site_supervisor import (SiteConfig, SiteLock, SiteSupervisor, lab_site_init,
-                                               verify_daemon)
+                                               verify_daemon, write_lab_spec, write_self_acl)
 
 A, B, GW = f'{2:016x}', f'{3:016x}', f'{1:016x}'
 KID_A = 'aa' * 32
@@ -396,6 +399,20 @@ class SupervisorTests(unittest.TestCase):
         self.assertIn('別の Mesh Lab', sup.reason)
         self.assertEqual(self.processes, [])
 
+    def test_lab_spec_is_random_valid_and_reused_for_resume(self):
+        spec_path = Path(self.tmp.name) / 'lab.lab-spec.json'
+        write_lab_spec(spec_path, gateway=GW, channel=6)
+        first = json.loads(spec_path.read_text())
+        self.assertEqual(first['format'], 'routeloom-lab-site-spec-v1')
+        self.assertEqual(first['gateways'], [GW])
+        self.assertEqual(len(first['site_id']), 16)
+        self.assertEqual(len(first['network_low32']), 8)
+        self.assertEqual(spec_path.stat().st_mode & 0o777, 0o600)
+        write_lab_spec(spec_path, gateway=GW, channel=6)
+        self.assertEqual(json.loads(spec_path.read_text()), first)
+        with self.assertRaises(ValueError):
+            write_lab_spec(Path(self.tmp.name) / 'x.json', gateway='0' * 16, channel=6)
+
     def test_lab_site_init_reports_unsupported_cli(self):
         def run(argv, **kw):
             self.assertEqual(argv[1:3], ['lab-site-init', '--spec'])
@@ -404,6 +421,43 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(result['state'], 'unsupported')
         missing = lab_site_init('/nonexistent/routeloomctl', 'spec.json', 'out')
         self.assertEqual(missing['state'], 'unsupported')
+
+
+REPO = Path(__file__).resolve().parents[3]
+HOST_BIN = Path(os.environ.get('ROUTELOOM_HOST_BIN_DIR', REPO / 'host' / 'target' / 'debug'))
+
+
+@unittest.skipUnless((HOST_BIN / 'routeloomctl').exists() and (HOST_BIN / 'routeloom-host').exists(),
+                     'routeloomctl/routeloom-host not built')
+class RealDaemonTests(unittest.TestCase):
+    """lab-site-init → self ACL → SiteSupervisor starts, verifies and stops the real daemon."""
+    def test_created_lab_site_is_supervised_end_to_end(self):
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        spec = write_lab_spec(tmp / 'lab.lab-spec.json', gateway=GW, channel=3)
+        created = lab_site_init(str(HOST_BIN / 'routeloomctl'), spec, tmp / 'lab')
+        self.assertEqual(created['state'], 'created', created)
+        # A second run over the completed site is refused, never re-minted.
+        again = lab_site_init(str(HOST_BIN / 'routeloomctl'), spec, tmp / 'lab')
+        self.assertNotEqual(again['state'], 'created')
+        site_id = json.loads(spec.read_text())['site_id']
+        acl = write_self_acl(tmp / 'lab', json.loads(spec.read_text())['network_low32'])
+        sup = SiteSupervisor()
+        config = SiteConfig(tmp / 'lab', tmp / 'lab' / 'ipc' / 'api1.sock',
+                            daemon=str(HOST_BIN / 'routeloom-host'), acl_file=acl,
+                            expected_site_id=site_id)
+        sup.start(config, time.monotonic_ns() // 1_000_000)
+        self.addCleanup(sup.stop)
+        deadline = time.monotonic() + 15
+        while sup.state != 'ready' and time.monotonic() < deadline and sup.state != 'failed':
+            sup.tick(time.monotonic_ns() // 1_000_000)
+            time.sleep(0.1)
+        self.assertEqual(sup.state, 'ready', sup.reason)
+        self.assertEqual(sup.site_status['purpose'], 'development')
+        self.assertIn('無効', auto_approval_text(sup.site_status))
+        process = sup.process
+        sup.stop()
+        self.assertIsNotNone(process.returncode)
+        self.assertEqual(sup.state, 'stopped')
 
 
 class ProvisionTests(unittest.TestCase):
@@ -483,10 +537,15 @@ class ProvisionTests(unittest.TestCase):
         runner.run_job(jobs[0])
         self.assertTrue(jobs[0].ready)
 
-    def test_auto_approval_without_lab_policy_is_unsupported(self):
-        text = auto_approval_text({'zero_touch_open': False, 'decision_mode': 'kguard'}, False)
-        self.assertIn('未対応', text)
-        self.assertIn('不明', auto_approval_text(None, True))
+    def test_auto_approval_follows_purpose_mode_and_enrollment_window(self):
+        def text(purpose, mode, active):
+            return auto_approval_text({'purpose': purpose, 'policy': {
+                'decision_mode': mode, 'lab_enrollment_active': active}})
+        self.assertIn('有効', text('development', 'lab_inventory', True))
+        self.assertIn('閉鎖中', text('development', 'lab_inventory', False))
+        self.assertIn('無効', text('development', 'kguard', False))
+        self.assertIn('不可', text('production', 'lab_inventory', True))
+        self.assertIn('不明', auto_approval_text(None))
 
 
 class DemoSiteTests(unittest.TestCase):

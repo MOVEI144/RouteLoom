@@ -754,14 +754,20 @@ class SupervisorWorker(QObject):
         self._publish()
 
     @Slot(int, str, str, int)
-    def lab_init(self, serial, name, out_dir, channel):
-        from ..site_supervisor import lab_site_init, write_lab_spec
+    def lab_init(self, serial, gateway, out_dir, channel):
+        from ..site_supervisor import lab_site_init, write_lab_spec, write_self_acl
         try:
             out = Path(out_dir)
             out.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            spec = write_lab_spec(out.parent / f'{out.name}.lab-spec.json', name=name, channel=channel)
+            spec = write_lab_spec(out.parent / f'{out.name}.lab-spec.json', gateway=gateway,
+                                  channel=channel)
             result = lab_site_init(self.ctl, spec, out)
-        except (OSError, ValueError) as exc:
+            acl = out / 'ipc' / 'api-acl.json'
+            if result['state'] == 'created' and not acl.exists():
+                write_self_acl(out, json.loads(spec.read_text(encoding='utf-8'))['network_low32'])
+            if result['state'] == 'created':
+                result['acl_file'] = str(acl)
+        except (OSError, ValueError, KeyError) as exc:
             result = {'state': 'failed', 'detail': str(exc)}
         self.lab_init_done.emit(serial, result)
 

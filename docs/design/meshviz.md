@@ -598,10 +598,11 @@ export は `events.jsonl`、`nodes.csv`、`links.csv`、`routes.csv`、`samples.
 | `lab.rollcall.status` | `state`（running／waiting_members／stopped／budget_exceeded）、`run_id`、`poll_seq`、`roster_revision`、`desired_interval_ms`、`effective_interval_ms`、`extension_reason`、`settle_ms`、`airtime_estimate_us_per_s`、`airtime_observed_us_per_s`、`status_age_ms`、`lease_remaining_ms`、`skipped`、`counts{inventory_planned,active_members,tree_explained,delivered,nonmember,missing,unaccounted}`、`statuses[]{node,kid,first_status_received_ms,last_status_received_ms,milestones{boot_at,join_started_at,member_adopted_at,first_rollcall_rx_at:{at_unix_ms,estimated}}}` |
 | `lab.rollcall.start`／`update` | `{desired_interval_ms}`。拒否時の `retry_after_ms` まで再送しない |
 | `lab.rollcall.stop` | `{}` |
-| `lab.inventory.list` | `devices[]{node_id,kid,role,board,provision_state,site}` |
-| `site.status.policy.lab_inventory` | `{enabled,expires_ms}`。無ければ自動承認は「未対応」 |
+| `lab.inventory.list` | `devices[]{node_id,kid,role,board,provision_state,site}`（main に無い。inventory は `routeloomctl lab-inventory-import` が書く） |
 
-SiteSupervisor は site directory ごとの lock、bridge port の lease、`capabilities.get`（`caps_version`）と `site.status` の `site_id` 照合を通った daemon だけを使い、別 site の socket は拒否する（再結合しない）。所有 daemon の異常終了は後退付きで再起動（10 分に 5 回まで）、attach した daemon は再接続だけを試み、停止しない。`lab-site-init` は `routeloomctl lab-site-init --spec FILE --out DIR` を固定 argv で呼び、CLI に無ければ「未対応」。provision は D02／D03a の手順を契約 interface（`ContractBackend`）で呼び、未実装の手順は「未対応」、readback 一致前は Ready にしない。identity が `none` 以外の機器は要対応として止め、自動 deprovision しない。
+自動承認の表示は main の `site.status` の `purpose` と `policy.decision_mode`（`lab_inventory`）・`policy.lab_enrollment_active` から作る（development 以外は「不可」、期限切れ・再起動・書込み失敗は「閉鎖中」）。
+
+SiteSupervisor は site directory ごとの lock、bridge port の lease、`capabilities.get`（`caps_version`）と `site.status` の `site_id` 照合を通った daemon だけを使い、別 site の socket は拒否する（再結合しない）。所有 daemon の異常終了は後退付きで再起動（10 分に 5 回まで）、attach した daemon は再接続だけを試み、停止しない。`lab-site-init` は `routeloomctl lab-site-init --spec FILE --out DIR` を固定 argv で呼ぶ。spec（`routeloom-lab-site-spec-v1`）の site/CA id と network は OS の CSPRNG で作り、`<DIR>.lab-spec.json`（0600）を再試行でも再利用して作成途中の site を同じ spec で再開させる。新規作成した site にだけ、現在の uid・当該 network に限った ACL（`ipc/api-acl.json`）を作る。既存 site の権限は広げない。provision は D02／D03a の手順を契約 interface（`ContractBackend`）で呼び、未実装の手順は「未対応」、readback 一致前は Ready にしない。identity が `none` 以外の機器は要対応として止め、自動 deprovision しない。
 
 ## 5. 実験機能と指標
 

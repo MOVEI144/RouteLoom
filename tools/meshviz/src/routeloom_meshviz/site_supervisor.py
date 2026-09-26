@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import secrets
 import socket
 import subprocess
 
@@ -348,7 +349,7 @@ class SiteSupervisor:
 
 
 def lab_site_init(ctl, spec_path, out_dir, *, run=subprocess.run):
-    """`routeloomctl lab-site-init --spec FILE --out DIR` (D01); 未対応 when the CLI lacks it.
+    """`routeloomctl lab-site-init --spec FILE --out DIR`; 未対応 when the CLI predates it.
 
     The CLI owns key generation, private permissions and resuming a partial
     site; this wrapper never creates keys, retries with a fresh CA, or passes
@@ -366,18 +367,58 @@ def lab_site_init(ctl, spec_path, out_dir, *, run=subprocess.run):
     if done.returncode != 0:
         if 'invalid command' in error or 'unknown command' in error:
             return {'state': 'unsupported',
-                    'detail': 'routeloomctl に lab-site-init が無い（D01 未導入）'}
+                    'detail': 'routeloomctl に lab-site-init が無い（古い CLI）'}
         return {'state': 'failed', 'detail': error or output}
     return {'state': 'created', 'detail': output}
 
 
-def write_lab_spec(path, *, name, channel):
-    """Minimal lab site spec for lab-site-init; purpose=development is fixed, not an option."""
-    if not isinstance(name, str) or not name or len(name) > 64:
-        raise ValueError('site 名は 1..64 文字')
+def _random_id(bits):
+    """Non-reserved random id (not 0, not all ones) from the OS CSPRNG."""
+    while True:
+        value = secrets.randbits(bits)
+        if 0 < value < (1 << bits) - 1:
+            return f'{value:0{bits // 4}x}'
+
+
+def write_lab_spec(path, *, gateway, channel):
+    """routeloom-lab-site-spec-v1 for lab-site-init; an existing spec is reused unchanged.
+
+    Reusing the file keeps the site/CA/SAK ids of a partially created site, so
+    a retry resumes that site instead of making a new one.
+    """
+    path = Path(path)
+    if path.exists():
+        return path
     if type(channel) is not int or not 1 <= channel <= 14:
         raise ValueError('channel は 1..14')
-    Path(path).write_text(json.dumps({'schema': 'routeloom-lab-site-spec-v1', 'name': name,
-                                      'purpose': 'development', 'channel': channel}),
-                          encoding='utf-8')
-    return Path(path)
+    if (not isinstance(gateway, str) or len(gateway) != 16 or
+            any(c not in '0123456789abcdef' for c in gateway) or
+            int(gateway, 16) in (0, (1 << 64) - 1)):
+        raise ValueError('gateway（bridge）NodeId は 16 桁の hex')
+    spec = {'format': 'routeloom-lab-site-spec-v1', 'site_id': _random_id(64),
+            'device_ca_id': _random_id(64), 'site_ca_id': _random_id(64),
+            'network_low32': _random_id(32), 'channel': channel, 'gateways': [gateway]}
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+        json.dump(spec, stream)
+    return path
+
+
+def write_self_acl(site_dir, network_low32):
+    """ACL for a site this Mesh Lab just created: the current user only, this network only.
+
+    Only new lab sites get it; an existing site's grants are never widened here.
+    """
+    if not hasattr(os, 'getuid'):
+        raise OSError('この OS の ACL 生成は未対応（D13b）')
+    network = int(network_low32, 16)
+    if not 1 <= network <= 0xFFFF_FFFF:
+        raise ValueError('network_low32 が不正')
+    path = Path(site_dir) / 'ipc' / 'api-acl.json'
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    grants = {'principals': {str(os.getuid()): {'networks': {f'{network:016x}': [
+        'MEMBERSHIP_READ', 'MEMBERSHIP_DECIDE', 'MEMBERSHIP_ADMIN']}}}}
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+        json.dump(grants, stream)
+    return path
