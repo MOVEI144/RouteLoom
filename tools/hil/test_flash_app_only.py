@@ -15,6 +15,17 @@ class FlashAppOnlyTests(unittest.TestCase):
             with self.assertRaises(FlashError):
                 build_write_flash_cmd(build, '/dev/null', 'esptool', None, 115200, True)
 
+    def test_app_only_needs_no_fallback_boot_bins(self):
+        with tempfile.TemporaryDirectory() as build:
+            with open(os.path.join(build, 'flasher_args.json'), 'w') as f:
+                json.dump({'app': {'offset': '0x20000', 'file': 'app/image.bin'}}, f)
+            os.makedirs(os.path.join(build, 'app'))
+            open(os.path.join(build, 'app/image.bin'), 'wb').close()
+            _, files, fallback = build_write_flash_cmd(build, '/dev/null', 'esptool',
+                                                       None, 115200, True)
+            self.assertTrue(fallback)
+            self.assertEqual(set(files), {'0x20000'})
+
     def test_fallback_app_only(self):
         with tempfile.TemporaryDirectory() as build:
             with open(os.path.join(build, 'flasher_args.json'), 'w') as f:
