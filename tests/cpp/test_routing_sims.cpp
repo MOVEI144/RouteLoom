@@ -171,6 +171,57 @@ void test_ring() {
   check_no_forward_loops(w.net.sights);
 }
 
+void test_relay_first_gateway_route(bool scoped) {
+  // A member can bind the relay before that relay binds the gateway.
+  // Gateway downlink must learn the member through the relay, not require
+  // a direct gateway/member edge.
+  SimWorld w;
+  if (scoped) {
+    w.configure = [](NodeConfig& config) {
+      config.route_gateways[0] = 1;
+      config.route_refresh_ticks = 2;
+      config.route_lifetime_ms = 3000;
+    };
+  }
+  for (NodeId id = 1; id <= 3; ++id) w.add(id);
+  w.start_all();
+  w.link(2, 3, 1, 1);
+  w.run(2000);
+  CHECK(!w.at(1)->routes().best(3).valid);
+  w.link(1, 2, 1, 1);
+  w.run(scoped ? 7000 : 4000);
+  CHECK(w.at(1)->routes().best(3).next_hop == 2);
+  send_and_expect(w, 1, 3, 10000, "relay-first downlink");
+  check_no_forward_loops(w.net.sights);
+}
+
+void test_relay_first_three_hop_gateway_route(bool scoped) {
+  // The member binds a relay before either relay can reach the gateway.
+  // Advertisements must propagate across both relays without a direct edge.
+  SimWorld w;
+  if (scoped) {
+    w.configure = [](NodeConfig& config) {
+      config.route_gateways[0] = 1;
+      config.route_refresh_ticks = 2;
+      config.route_lifetime_ms = 3000;
+    };
+  }
+  for (NodeId id = 1; id <= 4; ++id) w.add(id);
+  w.start_all();
+  w.link(3, 4, 1, 1);
+  w.run(2000);
+  CHECK(!w.at(1)->routes().best(4).valid);
+  w.link(2, 3, 1, 1);
+  w.run(2000);
+  CHECK(!w.at(1)->routes().best(4).valid);
+  w.link(1, 2, 1, 1);
+  w.run(scoped ? 11000 : 7000);
+  CHECK(w.at(1)->routes().best(4).next_hop == 2);
+  CHECK(w.at(2)->routes().best(4).next_hop == 3);
+  send_and_expect(w, 1, 4, 10000, "relay-first three-hop downlink");
+  check_no_forward_loops(w.net.sights);
+}
+
 void test_relay_removal() {
   SimWorld w;
   for (NodeId id = 1; id <= 4; ++id) w.add(id);
@@ -686,6 +737,10 @@ void test_delivery_with_large_epochs() {
 }  // namespace
 
 int main() {
+  test_relay_first_gateway_route(false);
+  test_relay_first_gateway_route(true);
+  test_relay_first_three_hop_gateway_route(false);
+  test_relay_first_three_hop_gateway_route(true);
   test_line_delivery(1);
   test_line_delivery(3);
   test_line_delivery(5);

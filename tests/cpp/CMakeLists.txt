@@ -260,6 +260,21 @@ target_include_directories(routeloom_espnow_runtime_tests PRIVATE
 target_compile_options(routeloom_espnow_runtime_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_espnow_runtime_tests COMMAND routeloom_espnow_runtime_tests)
 
+add_executable(routeloom_espnow_owner_reapply_tests test_espnow_owner_reapply.cpp
+    espnow_idf_stubs/idf_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_security_owner.cpp)
+target_link_libraries(routeloom_espnow_owner_reapply_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_espnow_owner_reapply_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/espnow_idf_stubs
+    ${CMAKE_CURRENT_SOURCE_DIR}/esp_idf_stub
+    ${ROUTELOOM_UECC_DIR}
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include)
+target_compile_options(routeloom_espnow_owner_reapply_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Werror -Wno-unused-variable -Wno-unused-parameter)
+add_test(NAME routeloom_espnow_owner_reapply_tests COMMAND routeloom_espnow_owner_reapply_tests)
+
 add_executable(routeloom_c_header_test c_api_smoke.c)
 target_link_libraries(routeloom_c_header_test PRIVATE routeloom_core)
 set_target_properties(routeloom_c_header_test PROPERTIES LINKER_LANGUAGE CXX)

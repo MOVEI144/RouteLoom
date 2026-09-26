@@ -426,12 +426,13 @@ bool AuthorityEndpoint::pump_tx(const MonotonicMs now_ms) noexcept {
     return true;
   }
   if (tx_.acked >= tx_.total_len) return true;  // waiting for the Ok
+  // Even the final chunk attempt can be acknowledged during its resend window.
+  if (tx_.sends != 0 && now_ms - tx_.last_send_ms < kAuthorityChunkResendMs) return true;
   if (tx_.sends >= kAuthorityChunkSendsMax) {
     complete_tx(false);  // the receiver never caught up: the channel retries
     sat_inc(counters_.tx_timeouts);
     return true;
   }
-  if (tx_.sends != 0 && now_ms - tx_.last_send_ms < kAuthorityChunkResendMs) return true;
   if (tx_.acked == 0) {
     // The receiver cannot assemble chunks without the manifest: precede
     // the first chunk with it until progress arrives.
@@ -846,12 +847,13 @@ bool AuthorityGateway::pump_down_mesh(Slot& slot, const MonotonicMs now_ms) noex
     return true;
   }
   if (slot.emitted >= slot.total_len) return true;  // waiting for the Ok
+  // Keep the last downlink attempt alive for its full ACK window too.
+  if (slot.sends != 0 && now_ms - slot.last_send_ms < kAuthorityChunkResendMs) return true;
   if (slot.sends >= kAuthorityChunkSendsMax) {
     drop_slot(slot);
     sat_inc(counters_.timeouts);
     return true;
   }
-  if (slot.sends != 0 && now_ms - slot.last_send_ms < kAuthorityChunkResendMs) return true;
   if (slot.emitted == 0) {
     // The receiver cannot assemble chunks without the manifest: precede
     // the first chunk with it until progress arrives.

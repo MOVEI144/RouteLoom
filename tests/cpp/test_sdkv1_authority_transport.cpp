@@ -358,13 +358,17 @@ void test_endpoint_object_timeout() {
   CHECK(endpoint.try_send(kGateway, AuthorityCarrierKind::Envelope,
                           ByteView{envelope.data(), envelope.size()}, token));
   MonotonicMs now = 1000;
-  for (int i = 0; i < 6; ++i) {
+  for (int i = 0; i < 4; ++i) {
     endpoint.poll(now);
     port.flush(now);
     now += 500;
   }
-  // Five resend rounds exhaust the per-chunk budget well before 15 s.
+  endpoint.poll(now - 499);
+  // The last attempt must keep its full ACK window; an ACK at +50 ms
+  // can still advance the transfer rather than finding a retired slot.
   AuthorityTxResult result{};
+  CHECK(!endpoint.take_tx_result(result));
+  endpoint.poll(now);
   CHECK(endpoint.take_tx_result(result));
   CHECK(result.token == token);
   CHECK(!result.delivered);
@@ -680,6 +684,29 @@ void test_gateway_down_path() {
   CHECK(!gateway.authority_down(kDevice, fragment, complete, 3000));
 }
 
+void test_gateway_last_chunk_ack_window() {
+  RecordingPort port;
+  RecordingHostSink host;
+  RecordingLocalSink local;
+  AuthorityGateway gateway(port, host, local, kGateway);
+  const auto envelope = pattern(200);
+  usb::AuthorityFragment fragment{};
+  fragment.device = kDevice;
+  fragment.transfer_id = 42;
+  fragment.kind = AuthorityCarrierKind::Envelope;
+  fragment.total = envelope.size();
+  fragment.data = ByteView{envelope.data(), envelope.size()};
+  bool complete = false;
+  CHECK(gateway.authority_down(kDevice, fragment, complete, 1000));
+  CHECK(complete);
+  for (MonotonicMs now : {1000ULL, 1500ULL, 2000ULL, 2500ULL}) gateway.poll(now);
+  gateway.poll(2501);
+  CHECK(!gateway.quiescent());  // final attempt's ACK can still arrive
+  gateway.poll(3000);
+  CHECK(gateway.quiescent());
+  CHECK(gateway.counters().timeouts == 1);
+}
+
 void test_gateway_self_down() {
   RecordingPort port;
   RecordingHostSink host;
@@ -907,6 +934,7 @@ int main() {
   test_small_carrier_does_not_claim_old_object_hash();
   test_gateway_up_path();
   test_gateway_down_path();
+  test_gateway_last_chunk_ack_window();
   test_gateway_self_down();
   test_gateway_slot_exhaustion();
   test_gateway_direct_down_rejects_noncanonical_fragments();
