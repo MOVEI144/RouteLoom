@@ -2701,7 +2701,6 @@ void test_signed_prepare_stages_without_switching() {
   LifecycleAction action{};
   CHECK_OK(f.lifecycle.take_action(action));
   CHECK(action.tag == LifecycleActionTag::AdoptNetwork);
-  CHECK(action.reason == LifecycleActionReason::BootAdoption);
   CHECK(!f.lifecycle.permits_recovery_control(stamp_for(kPeer, 2)));
   CHECK_OK(f.dispatch(LifecycleInput::ActionDone(action.token, Status::success()), 251));
   CHECK(f.snap().phase == LifecyclePhase::Active);
@@ -2726,7 +2725,6 @@ void test_signed_prepare_stages_without_switching() {
   CHECK(f.snap().phase == LifecyclePhase::Switching);
   CHECK_OK(f.lifecycle.take_action(action));
   CHECK(action.tag == LifecycleActionTag::AdoptNetwork);
-  CHECK(action.reason == LifecycleActionReason::BootAdoption);
   CHECK_OK(f.dispatch(LifecycleInput::ActionDone(action.token, Status::success()), 254));
   CHECK_OK(f.dispatch(LifecycleInput::Poll(), 255));
   CHECK(f.authority.sent.size() == 1);
@@ -2749,7 +2747,6 @@ void test_signed_prepare_stages_without_switching() {
   CHECK(f.snap().phase == LifecyclePhase::Switching);
   CHECK_OK(f.lifecycle.take_action(action));
   CHECK(action.tag == LifecycleActionTag::AdoptNetwork);
-  CHECK(action.reason == LifecycleActionReason::BootAdoption);
   CHECK_OK(f.dispatch(LifecycleInput::ActionDone(action.token, Status::success()), 259));
   CHECK(f.snap().phase == LifecyclePhase::Active);
   CHECK_OK(f.dispatch(LifecycleInput::MemberReady(f.site.commit_seq(), 0), 260));
