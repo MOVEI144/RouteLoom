@@ -11,11 +11,11 @@ routeloom-provision = { path = "../routeloom-provision" }
 # Image/credential spec documents are JSON — the workspace's one parser.
 routeloom-json = { path = "../routeloom-json" }
 routeloom-peercred = { path = "../routeloom-peercred" }
+rusqlite = { version = "0.37", features = ["bundled"] }
+zeroize = "1"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "0.38.44", features = ["fs"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
-zeroize = "1"
 
 [lints]
 workspace = true
