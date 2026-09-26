@@ -57,20 +57,20 @@ class PortLeases:
             self.held.add(board_uuid)
         # Exclusive creation also fences other processes. Stale files require
         # explicit operator recovery rather than guessing that a port is free.
-        self.directory.mkdir(mode=0o700, exist_ok=True)
+        fd = None
         path = self.directory / hashlib.sha256(board_uuid.encode()).hexdigest()
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError as exc:
-            with self.lock:
-                self.held.remove(board_uuid)
-            raise ValueError('board leased by another process') from exc
-        try:
+            self.directory.mkdir(mode=0o700, exist_ok=True)
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError as exc:
+                raise ValueError('board leased by another process') from exc
             os.write(fd, str(os.getpid()).encode())
             yield
         finally:
-            os.close(fd)
-            path.unlink()
+            if fd is not None:
+                os.close(fd)
+                path.unlink()
             with self.lock:
                 self.held.remove(board_uuid)
 
@@ -124,17 +124,14 @@ class Result:
     error: str | None = None
 
 
-def run_batch(items, probe, write, leases=None):
-    """Sequential batch: one failure does not roll back successful boards."""
+def run_batch(items, worker, leases=None):
+    """The worker owns probe, preflight and write in one ROM session."""
     leases = leases or PortLeases()
     results = []
     for port, plan in items:
         try:
             with leases.acquire(plan.expected.base_mac):
-                # Probe must be read-only. The worker must use the same ROM session for write.
-                identity = probe(port)
-                plan.verify(port, identity)
-                write(port, identity, plan.images)
+                worker(port, plan)
             results.append(Result(port, True))
         except (ValueError, OSError, TimeoutError) as exc:
             results.append(Result(port, False, str(exc)))

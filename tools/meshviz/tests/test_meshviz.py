@@ -1,6 +1,7 @@
 import hashlib
 import json
 import socket
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -44,6 +45,38 @@ class ModelTests(unittest.TestCase):
             self.assertIsNone(replay(Path(td) / 'test.rlcapture', until_seq=1).nodes['site-1:02']['connected'])
             self.assertEqual(len(recovered.gaps), 1)
             self.assertEqual(recovered.clock_adjustments, [-5000])
+
+    def test_checkpoint_seek_and_uncommitted_recovery(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'test.rlcapture'
+            clock = FakeClock()
+            cap = Capture(path, 'id')
+            for seq in range(1, 5002):
+                clock.advance(1)
+                cap.add({'source': 'daemon', 'source_epoch': 'a', 'source_seq': seq,
+                         'scope': 's', 'kind': 'node', 'payload': {'node': '02', 'boot': 'a', 'count': seq}}, clock)
+            cap.close()
+            with sqlite3.connect(path / 'data.sqlite') as db:
+                self.assertEqual(db.execute('SELECT seq FROM checkpoints').fetchall(), [(5000,)])
+                # A seek after the checkpoint must not depend on parsing earlier events.
+                db.execute('UPDATE events SET payload_json=? WHERE seq=1', ('{"schema_version":99}',))
+            self.assertEqual(replay(path, until_seq=5001).nodes['s:02']['count'], 5001)
+            with self.assertRaises(ValueError):
+                replay(path, until_seq=1)
+
+    def test_unclean_capture_keeps_committed_prefix(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'test.rlcapture'
+            cap = Capture(path, 'id')
+            cap.add({'source': 'daemon', 'scope': 's', 'kind': 'node',
+                     'payload': {'node': '02'}}, FakeClock(900_000_000_000))
+            self.assertEqual(cap.db.execute('SELECT COUNT(*) FROM checkpoints').fetchone()[0], 0)
+            cap.flush()
+            # Simulate abrupt termination: no clean close or final manifest update.
+            cap.db.close()
+            recovered = replay(path)
+            self.assertIn('s:02', recovered.nodes)
+            self.assertEqual(recovered.gaps[-1]['reason'], 'UncleanEnd')
 
     def test_partial_snapshot_and_duplicate_source_sequence(self):
         state = State()
@@ -109,7 +142,10 @@ class DeviceTests(unittest.TestCase):
             p.write_bytes(b'image')
             image = Image(0x10000, p, len(b'image'), hashlib.sha256(b'image').hexdigest())
             calls = []
-            def write(port, identity, images):
+            def worker(port, plan):
+                # Probe and write belong to this one worker session.
+                identity = self.a if port != 'COM2' else self.b
+                plan.verify(port, identity)
                 calls.append(port)
                 if port == 'COM2':
                     raise OSError('unplugged')
@@ -119,8 +155,7 @@ class DeviceTests(unittest.TestCase):
                      FlashPlan(self.a, 'esp32s3', (image,), True, self.a.base_mac, True),
                      plan(self.a, expected_mac=self.a.base_mac),
                      plan(self.b, expected_mac=self.b.base_mac)]
-            results = run_batch(list(zip(['COM0', 'COM0a', 'COM1', 'COM2'], cases)),
-                                lambda port: self.a if port != 'COM2' else self.b, write)
+            results = run_batch(list(zip(['COM0', 'COM0a', 'COM1', 'COM2'], cases)), worker)
             self.assertEqual([r.ok for r in results], [False, False, True, False])
             self.assertEqual(calls, ['COM1', 'COM2'])
             for corrupt in [Image(-1, p, 5, image.sha256), Image(0x10000, p, 5, '0'*64),
@@ -172,6 +207,50 @@ class DeviceTests(unittest.TestCase):
                 flash('COM1', FlashPlan(self.a, 'esp32c3', (image,), True, self.a.base_mac, True), api)
             self.assertEqual(api.calls, 0)
 
+    def test_rom_same_session_and_unknown_security_fail_closed(self):
+        class ROM:
+            CHIP_NAME = 'ESP32-C3'
+            def __init__(self, secure):
+                self._port = self
+                self.secure = secure
+                self.closed = False
+            def close(self):
+                self.closed = True
+            def read_mac(self, kind):
+                return bytes.fromhex('aabbccddee01')
+            def flash_id(self):
+                return 0x164020
+            def get_chip_revision(self):
+                return 1
+            def get_security_info(self, cache=False):
+                return {'parsed_flags': {'SECURE_BOOT_EN': self.secure}, 'flash_crypt_cnt': 0}
+        class API:
+            __version__ = '5.4.0'
+            def __init__(self, secure):
+                self.rom = ROM(secure)
+                self.writes = []
+            def detect_chip(self, **kw):
+                return self.rom
+            def write_flash(self, esp, images, **kw):
+                self.writes.append(esp)
+            def verify_flash(self, esp, images):
+                self.writes.append(esp)
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / 'app.bin'
+            p.write_bytes(b'image')
+            image = Image(0x10000, p, 5, hashlib.sha256(b'image').hexdigest())
+            expected = Identity('esp32c3', '1', self.a.base_mac, self.a.sta_mac,
+                                '164020', 4 * 1024 * 1024, False, False)
+            plan = FlashPlan(expected, 'esp32c3', (image,), True, self.a.base_mac, True)
+            api = API(False)
+            flash('COM1', plan, api)
+            self.assertEqual(api.writes, [api.rom, api.rom])
+            self.assertTrue(api.rom.closed)
+            api = API(None)
+            with self.assertRaises(ValueError):
+                flash('COM1', plan, api)
+            self.assertEqual(api.writes, [])
+
     def test_default_plan_is_not_authorized(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / 'app.bin'
@@ -179,6 +258,19 @@ class DeviceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 FlashPlan(self.a, 'esp32c3', (Image(0x10000, p, 5, hashlib.sha256(b'image').hexdigest()),),
                           True, self.a.base_mac).verify('COM1', self.a)
+
+    def test_lease_recovers_after_directory_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            leases = PortLeases()
+            leases.directory = Path(td) / 'blocked'
+            leases.directory.write_text('not a directory', encoding='utf-8')
+            with self.assertRaises(OSError):
+                with leases.acquire('board-a'):
+                    pass
+            self.assertEqual(leases.held, set())
+            leases.directory.unlink()
+            with leases.acquire('board-a'):
+                self.assertEqual(leases.held, {'board-a'})
 
     def test_lease_and_rig_import(self):
         with PortLeases() as leases:
