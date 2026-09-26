@@ -44,6 +44,23 @@ DEFAULT_ESPTOOL = os.path.expanduser("~/.local/bin/esptool")
 DEFAULT_TIMEOUT_S = 120.0
 DEFAULT_BOOT_SECONDS = 8.0
 
+# Console lines that mean the firmware started but must count as a failed
+# start. The ESP-NOW runtime logs BOOT_HEAP_BELOW_FLOOR when the free heap
+# after Wi-Fi/PHY/ESP-NOW start is under CONFIG_ROUTELOOM_BOOT_HEAP_FLOOR_BYTES
+# (issue #166); the other two are the Wi-Fi/PHY allocation failures seen on
+# the 2026-09-26 bench before the fix.
+BOOT_FAILURE_MARKERS = (
+    "BOOT_HEAP_BELOW_FLOOR",
+    "esp_wifi_init failed",
+    "failed to allocate memory for RF calibration",
+)
+
+
+def boot_log_failures(text: str) -> list[str]:
+    """Boot-log lines that mark a failed start (issue #166), in order."""
+    return [line.rstrip() for line in text.splitlines()
+            if any(marker in line for marker in BOOT_FAILURE_MARKERS)]
+
 # Standard bootloader/partition-table offsets. Both firmware apps use a
 # custom partitions.csv (single app + the "rlsec" security NVS partition,
 # issue #37); the partition table itself stays at 0x8000, and the app offset
@@ -247,6 +264,14 @@ def flash_board(
             return manifest
         finally:
             cap.stop()
+    if manifest["boot_log"] is not None:
+        with open(boot_path, encoding="utf-8", errors="replace") as fh:
+            failures = boot_log_failures(fh.read())
+        if failures:
+            manifest["boot_failures"] = failures
+            manifest["error"] = ("flashed, but the boot log reports a failed start: "
+                                 + failures[0])
+            return manifest
     manifest["ok"] = True
     manifest["finished_utc"] = capture_mod.utc_stamp()
     return manifest

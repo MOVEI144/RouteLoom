@@ -10,6 +10,18 @@ import flash
 import rig
 
 
+class BootLogTest(unittest.TestCase):
+    def test_boot_log_failures_flag_heap_floor_and_wifi_init(self):
+        text = ("[t] I (754) RouteLoom: ESP-NOW ready heap: free=22940 largest=20480 min=22888 bytes\n"
+                "[t] E (760) RouteLoom: BOOT_HEAP_BELOW_FLOOR free=5956 largest=3968 floor=8192 bytes\n"
+                "[t] E (400) RouteLoomBridge: esp_wifi_init failed: ESP_ERR_NO_MEM\n"
+                "[t] E (410) phy_init: failed to allocate memory for RF calibration data\n")
+        failures = flash.boot_log_failures(text)
+        self.assertEqual(len(failures), 3)
+        self.assertIn("BOOT_HEAP_BELOW_FLOOR", failures[0])
+        self.assertEqual(flash.boot_log_failures("I (754) RouteLoom: ESP-NOW ready heap: free=22940\n"), [])
+
+
 class PreflightTest(unittest.TestCase):
     def test_only_expected_chip_and_mac_pass(self):
         board = rig.Board(name="ref", app="reference_node", chip="esp32c3",

@@ -61,6 +61,12 @@ python3 tools/hil/report.py --run-dir artifacts/hil/run-1
 `rig.py --selftest`, `scenarios.py --selftest` run dependency-free
 self-checks usable in CI without hardware.
 
+A boot capture that contains `BOOT_HEAP_BELOW_FLOOR` (the ESP-NOW runtime's
+on-device heap check, `CONFIG_ROUTELOOM_BOOT_HEAP_FLOOR_BYTES`) or a
+Wi-Fi/PHY allocation failure counts as a failed start: `flash.py` reports
+the flash as failed and `reset_cycles.py` records the lines as
+`boot_failures` and exits non-zero (issue #166).
+
 ## Built-in scenarios
 
 | Scenario | Checks |

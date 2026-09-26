@@ -202,6 +202,11 @@ def main() -> int:
         console.close()
         device.close()
     record["finished_unix"] = time.time()
+    # A reboot that logs BOOT_HEAP_BELOW_FLOOR (or a Wi-Fi/PHY allocation
+    # failure) is a failed start even if delivery later recovers (issue #166).
+    boot_failures = flash.boot_log_failures(
+        (out / "console.log").read_text(encoding="utf-8", errors="replace"))
+    record["boot_failure_lines"] = boot_failures[:20]
     delivered = [c["delivered"] for c in record["cycle_results"]]
     recoveries = [c["recovery_s"] for c in record["cycle_results"] if c["recovery_s"] is not None]
     record["summary"] = {
@@ -217,10 +222,12 @@ def main() -> int:
         "recovery_s_max": max(recoveries) if recoveries else None,
         "recovery_s_median": sorted(recoveries)[len(recoveries) // 2] if recoveries else None,
         "idempotency_full_total": sum(c["idempotency_full"] for c in record["cycle_results"]),
+        "boot_failures": len(boot_failures),
     }
     (out / "result.json").write_text(json.dumps(record, indent=2) + "\n")
     print(json.dumps(record["summary"]))
-    return 0 if record["summary"]["cycles_recovered"] == args.cycles else 1
+    return (0 if record["summary"]["cycles_recovered"] == args.cycles and not boot_failures
+            else 1)
 
 
 if __name__ == "__main__":
