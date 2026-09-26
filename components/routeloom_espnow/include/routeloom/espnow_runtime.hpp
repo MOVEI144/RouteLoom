@@ -92,10 +92,15 @@ class EspNowRuntime final : public RadioPort,
       discovery_const::kTransientPeerSlots;
   static constexpr std::int8_t kTxPowerUnset = -128;
   // The ESP-NOW send callback identifies a completion only by
-  // (des_addr, status). To keep completions attributable, at most one
-  // non-reserved autonomy send per MAC may be in flight, and the reserved
-  // DATA slot is refused while a raw send targets the same MAC.
-  static constexpr std::size_t kRawTxCapacity = 4;
+  // (des_addr, status) and ESP-IDF asks for the next send only after the
+  // previous callback. Raw (autonomy) and reserved (DATA) sends therefore
+  // share one physical slot: a raw send is refused while any send is in
+  // flight, so at most one raw entry ever exists.
+  static constexpr std::size_t kRawTxCapacity = 1;
+  // Watchdog-retired raw sends wait here until poll_once surfaces them as
+  // Unknown completions; a retire and a driver recovery can both land
+  // between two drains.
+  static constexpr std::size_t kExpiredTxCapacity = 4;
 
   EspNowRuntime(const EspNowRuntimeConfig& config, SecurityProvider& security,
                 NodeObserver& observer) noexcept;
@@ -580,7 +585,7 @@ class EspNowRuntime final : public RadioPort,
   std::size_t raw_tx_count_{0};
   // Watchdog-retired raw sends awaiting Unknown accounting on the poll task
   // (node state may only be touched there — never inside callback_lock_).
-  std::array<RawTx, kRawTxCapacity> expired_tx_{};
+  std::array<RawTx, kExpiredTxCapacity> expired_tx_{};
   std::size_t expired_tx_count_{0};
   // A fenced TX whose completion may still arrive: new sends to the same MAC
   // are guarded until the stale callback lands or the guard window passes,
