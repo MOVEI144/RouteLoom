@@ -2029,6 +2029,22 @@ impl ReconnectBackoff {
     }
 }
 
+/// Renders the `adapter/disconnected` event: the read-loop error (OS
+/// message plus errno when the OS supplied one) rides along so a cut
+/// cable, a dead writer, and a clean EOF read differently in the journal.
+fn adapter_drop_event(result: &io::Result<()>) -> String {
+    match result {
+        Ok(()) => "\"kind\":\"adapter\",\"state\":\"disconnected\"".to_string(),
+        Err(error) => format!(
+            "\"kind\":\"adapter\",\"state\":\"disconnected\",\"detail\":\"{}\",\"os_error\":{}",
+            json_escape(&error.to_string()),
+            error
+                .raw_os_error()
+                .map_or_else(|| "null".to_string(), |code| code.to_string()),
+        ),
+    }
+}
+
 fn adapter_supervisor(
     device: PathBuf,
     state: Arc<State>,
@@ -2093,14 +2109,10 @@ fn adapter_supervisor(
                 // stale — clear it so no schema-2 canonical can still cite
                 // the token (a reconnect re-registers under a fresh one).
                 state.gateway_lane.clear();
-                if let Err(error) = result {
+                if let Err(error) = &result {
                     set_error(&state, error.to_string());
                 }
-                push_event(
-                    &state,
-                    now_ms(),
-                    "\"kind\":\"adapter\",\"state\":\"disconnected\"".to_string(),
-                );
+                push_event(&state, now_ms(), adapter_drop_event(&result));
             }
             Err(error) => {
                 if !open_failed {
@@ -3629,6 +3641,18 @@ mod tests {
         record_diag(&state, &diag_body(2, "EVT1", 7, 1, 0), 103);
         let json = events_json(&state);
         assert!(!json.contains("\"kind\":\"diagnostic_loss\""), "{json}");
+    }
+
+    #[test]
+    fn adapter_drop_event_carries_the_os_reason() {
+        // The disconnect event names the read-loop error (OS message +
+        // errno) so a cut cable reads differently from a dead writer.
+        let fields = adapter_drop_event(&Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No such device (os error 19)",
+        )));
+        assert!(fields.contains("\"state\":\"disconnected\""), "{fields}");
+        assert!(fields.contains("No such device (os error 19)"), "{fields}");
     }
 
     #[test]
