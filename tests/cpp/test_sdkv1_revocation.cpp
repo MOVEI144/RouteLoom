@@ -308,6 +308,56 @@ struct NodeFixture {
                           default_es256_verifier(), &fixture.journal);
 }
 
+// A clean reboot: fresh lifecycle RAM over the same durable stores.
+void reboot_lifecycle(NodeFixture& fixture) {
+  LifecyclePorts ports{fixture.authority, fixture.peer, fixture.runtime,
+                       fixture.entropy, fixture.sink, &fixture.observer};
+  fixture.lifecycle.~MembershipLifecycle();
+  new (&fixture.lifecycle)
+      MembershipLifecycle(fixture.config, fixture.identity, fixture.site,
+                          fixture.revocations, fixture.resume, ports,
+                          default_es256_verifier(), &fixture.journal);
+}
+
+void test_lifecycle_journal_retains_recovery_history() {
+  LifecycleJournal journal;
+  CHECK(!journal.last().valid);
+  CHECK(!journal.recovery_needed() && !journal.recovery_active());
+  CHECK(journal.recovery_reports() == 0);
+  CHECK(journal.count(LifecycleEventKind::RrsApplied) == 0);
+  // A reported recovery (stores unusable) precedes the started/finished
+  // lifecycle events; the journal keeps the reason and the wait visible.
+  journal.note_recovery_reported(2 /* JoinRecoveryReason::SeqExhausted */, 1000);
+  CHECK(journal.recovery_reports() == 1);
+  CHECK(journal.recovery_needed() && !journal.recovery_active());
+  CHECK(journal.last_recovery_reason() == 2);
+  CHECK(journal.last_recovery_ms() == 1000);
+  LifecycleEvent applied{};
+  applied.kind = LifecycleEventKind::RrsApplied;
+  applied.epoch = 12;
+  journal.on_lifecycle_event(applied, 1100);
+  CHECK(journal.count(LifecycleEventKind::RrsApplied) == 1);
+  CHECK(journal.last().valid && journal.last().event.epoch == 12);
+  CHECK(journal.last().at_ms == 1100);
+  LifecycleEvent started{};
+  started.kind = LifecycleEventKind::RecoveryStarted;
+  started.detail = 3;  // LifecycleActionReason code
+  journal.on_lifecycle_event(started, 1200);
+  CHECK(journal.recovery_active() && !journal.recovery_needed());
+  CHECK(journal.last_recovery_reason() == 3);
+  CHECK(journal.last_recovery_ms() == 1200);
+  LifecycleEvent finished{};
+  finished.kind = LifecycleEventKind::RecoveryFinished;
+  finished.epoch = 12;
+  journal.on_lifecycle_event(finished, 1300);
+  CHECK(!journal.recovery_active() && !journal.recovery_needed());
+  CHECK(journal.last().event.kind == LifecycleEventKind::RecoveryFinished);
+  // A second report (new incident) re-arms the needed flag.
+  journal.note_recovery_reported(1, 1400);
+  CHECK(journal.recovery_reports() == 2);
+  CHECK(journal.recovery_needed());
+}
+
 void test_lifecycle_port_bundle_lifetime() {
   NodeFixture fixture;
   rebuild_with_short_lived_ports(fixture);
@@ -2816,9 +2866,71 @@ void test_reassigned_member_can_be_removed_again() {
   CHECK(live.snap().phase == LifecyclePhase::BootGate);
 }
 
+void test_boot_unassigned_ready_does_not_reemit_reboot() {
+  NodeFixture f{};
+  CHECK(f.provision(2, 14));
+  const auto notice = signed_removal_notice(2, 14);
+  CHECK_OK(f.dispatch(LifecycleInput::RemovalRequired(notice.view()), 100));
+  for (int i = 0; i < 24; ++i) CHECK_OK(f.dispatch(LifecycleInput::Poll(), 101 + i));
+  CHECK(f.snap().phase == LifecyclePhase::Holdoff);
+  CHECK_OK(f.dispatch(LifecycleInput::Poll(), 600124));
+  CHECK(f.snap().phase == LifecyclePhase::UnassignedReady);
+  CHECK(f.journal.record().mode == LifecycleMode::UnassignedReady);
+  // The holdoff expiry is the single reboot request: the Owner reboots to
+  // pick up the erased stores plus the watermark.
+  LifecycleAction action{};
+  CHECK_OK(f.lifecycle.take_action(action));
+  CHECK(action.tag == LifecycleActionTag::RestartUnassigned);
+  // Every clean boot after it just resumes unassigned: the Owner rebooted
+  // to get here, so Boot must not ask for another reboot.
+  for (int boot = 0; boot < 3; ++boot) {
+    reboot_lifecycle(f);
+    CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 700000 + boot));
+    CHECK(f.snap().phase == LifecyclePhase::UnassignedReady);
+    CHECK(f.journal.record().mode == LifecycleMode::UnassignedReady);
+    LifecycleAction repeat{};
+    CHECK(f.lifecycle.take_action(repeat).code == StatusCode::NotFound);
+  }
+  // Reassignment after removal still opens: a newer generation adopts.
+  CHECK_OK(f.site.commit(site_for(kNode, 3, 14)));
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 700003));
+  CHECK(f.snap().phase == LifecyclePhase::BootGate);
+}
+
+void test_adopt_network_disposition() {
+  constexpr NetworkId kNew = 0x000300000A1B2C3DULL;
+  constexpr NetworkId kOld = 0x000200000A1B2C3DULL;
+  // A configured binding is incomplete until the member node has started
+  // on its operating channel.
+  CHECK(adopt_network_disposition(kNew, kNew, 3, true, true) ==
+        AdoptNetworkDisposition::Complete);
+  CHECK(adopt_network_disposition(kNew, kNew, 3, true, false) ==
+        AdoptNetworkDisposition::WaitForAdoption);
+  CHECK(adopt_network_disposition(kNew, kNew, 3, false, true) ==
+        AdoptNetworkDisposition::WaitForAdoption);
+  // A live Member binding on the old network: the single cutover reboot.
+  CHECK(adopt_network_disposition(kNew, kOld, 3, true, true) ==
+        AdoptNetworkDisposition::RebootToAdopt);
+  // The site may already name the new channel while the old member is
+  // still live; that mismatch must not suppress the cutover reboot.
+  CHECK(adopt_network_disposition(kNew, kOld, 3, true, false) ==
+        AdoptNetworkDisposition::RebootToAdopt);
+  // A clean boot that has not adopted yet: wait, never reboot again.
+  CHECK(adopt_network_disposition(kNew, 0, 0, false, false) ==
+        AdoptNetworkDisposition::WaitForAdoption);
+  CHECK(adopt_network_disposition(kNew, kOld, 3, false, false) ==
+        AdoptNetworkDisposition::WaitForAdoption);
+  // Incoherent bindings never reboot blind.
+  CHECK(adopt_network_disposition(kNew, 0, 0, true, true) ==
+        AdoptNetworkDisposition::WaitForAdoption);
+  CHECK(adopt_network_disposition(kNew, kOld, 0, true, true) ==
+        AdoptNetworkDisposition::WaitForAdoption);
+}
+
 }  // namespace
 
 int main() {
+  test_lifecycle_journal_retains_recovery_history();
   test_lifecycle_port_bundle_lifetime();
   test_removal_preserves_stored_floor();
   test_removal_resumes_with_corrupt_cleared_site_sibling();
@@ -2828,6 +2940,8 @@ int main() {
   test_removal_notice_intent();
   test_removal_failure_after_intent_reboots_closed();
   test_reassigned_member_can_be_removed_again();
+  test_boot_unassigned_ready_does_not_reemit_reboot();
+  test_adopt_network_disposition();
   test_removal_journal_powercuts();
   test_signed_prepare_stages_without_switching();
   test_switching_intent_reboots_closed();

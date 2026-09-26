@@ -513,12 +513,15 @@ DispatchWindow::SkipOutcome DispatchWindow::skip(
 
 bool DispatchWindow::note_mesh_outcome(const std::uint32_t msg_session,
                                       const std::uint64_t msg_seq,
-                                      const DeliveryState mesh_state) noexcept {
+                                      const DeliveryState mesh_state,
+                                      std::array<std::uint8_t, kOperationIdSize>*
+                                          operation_id) noexcept {
   for (Slot& slot : slots_) {
     if (!slot.occupied || !slot.msg_valid || slot.msg_session != msg_session ||
         slot.msg_seq != msg_seq) {
       continue;
     }
+    if (operation_id != nullptr) *operation_id = slot.operation_id;
     if (slot.state == State::Sent) {
       switch (mesh_state) {
         case DeliveryState::Delivered:

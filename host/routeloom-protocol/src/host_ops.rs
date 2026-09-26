@@ -444,6 +444,31 @@ pub fn decode_receipt(inner: &[u8], sub: u8) -> Result<Receipt, HostOpsError> {
     })
 }
 
+/// A slot-free MeshRejected receipt uses the fixed hash position for a
+/// bounded ASCII reason (`RLFR`, length, bytes, zero padding). Older
+/// devices echoed the canonical hash there; that value is never a reason.
+pub fn mesh_refusal_detail<'a>(
+    receipt: &'a Receipt,
+    canonical_hash: &[u8; CANONICAL_HASH_SIZE],
+) -> Option<&'a str> {
+    let field = &receipt.hash;
+    if receipt.result != HostOpsResult::MeshRejected
+        || field == canonical_hash
+        || &field[..4] != b"RLFR"
+    {
+        return None;
+    }
+    let len = usize::from(field[4]);
+    if len == 0
+        || len > field.len() - 5
+        || !field[5..5 + len].iter().all(|b| (0x20..=0x7e).contains(b))
+        || field[5 + len..].iter().any(|b| *b != 0)
+    {
+        return None;
+    }
+    std::str::from_utf8(&field[5..5 + len]).ok()
+}
+
 /// QUERY_DISPATCH answer: receipt + bound operation id (98B fixed).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryResponse {

@@ -430,7 +430,8 @@ enum class LifecycleActionTag : std::uint8_t {
   None = 0,
   // PR B: hand store ownership to the Joiner for a recovery join.
   StartRecoveryJoin = 1,
-  // PR B: restart unassigned after the removal holdoff.
+  // PR B: restart unassigned after the removal holdoff. Emitted once by
+  // the holdoff expiry; Boot never re-emits (the reboot already happened).
   RestartUnassigned = 2,
   // PR C: adopt the staged next-network membership.
   AdoptNetwork = 3,
@@ -446,6 +447,35 @@ enum class LifecycleActionReason : std::uint8_t {
   // may finish adoption without another reboot.
   BootAdoption = 3,
 };
+
+// Owner-side AdoptNetwork disposition. The mesh node and discovery cannot
+// re-adopt live, so a live cutover reboots exactly once and the clean boot
+// completes the action after it re-adopts from the committed stores —
+// never a second reboot on the same durable state.
+enum class AdoptNetworkDisposition : std::uint8_t {
+  Complete = 0,        // the installed binding is the action's network: ActionDone
+  WaitForAdoption = 1,  // no live binding yet: leave pending (in flight or failed)
+  RebootToAdopt = 2,   // a live Member binding on the old network: reboot once
+};
+
+// Pure decision table over the Owner's installed binding
+// (`adopted_network`/`adopted_role`, zero until ApplyMemberConfig) and
+// whether the coordinator and mesh node are live as a Member, and whether
+// the radio reached the action's operating channel.
+constexpr AdoptNetworkDisposition adopt_network_disposition(
+    const NetworkId action_network, const NetworkId adopted_network,
+    const std::uint8_t adopted_role, const bool live_member_binding,
+    const bool on_target_channel) noexcept {
+  if (live_member_binding && on_target_channel && adopted_role != 0 &&
+      adopted_network == action_network) {
+    return AdoptNetworkDisposition::Complete;
+  }
+  if (live_member_binding && adopted_role != 0 && adopted_network != 0 &&
+      adopted_network != action_network) {
+    return AdoptNetworkDisposition::RebootToAdopt;
+  }
+  return AdoptNetworkDisposition::WaitForAdoption;
+}
 
 // Owner work order: tag, monotonic token, the RLS1 commit_seq the decision
 // was taken under (the Owner re-checks before acting), site/network, reason.
@@ -493,6 +523,70 @@ class LifecycleObserver {
   virtual ~LifecycleObserver() = default;
   virtual void on_lifecycle_event(const LifecycleEvent& event,
                                   MonotonicMs now_ms) noexcept = 0;
+};
+
+// Bounded retention for lifecycle/recovery triage: the last event,
+// per-kind totals, and the outstanding-recovery state (reported vs
+// started). The platform's LifecycleObserver owns one and feeds it; USB
+// diagnostics and the post-recovery mesh pull read it. Values only —
+// epochs, numeric reasons, node ids — never key material.
+class LifecycleJournal final : public LifecycleObserver {
+ public:
+  struct LastEvent {
+    LifecycleEvent event{};
+    MonotonicMs at_ms{0};
+    bool valid{false};
+  };
+
+  void on_lifecycle_event(const LifecycleEvent& event,
+                          const MonotonicMs now_ms) noexcept override {
+    last_ = LastEvent{event, now_ms, true};
+    const auto kind = static_cast<std::uint8_t>(event.kind);
+    if (kind >= 1 && kind <= counts_.size()) ++counts_[kind - 1];
+    if (event.kind == LifecycleEventKind::RecoveryStarted) {
+      recovery_active_ = true;
+      recovery_needed_ = false;
+      last_recovery_reason_ = static_cast<std::uint8_t>(event.detail & 0xFFU);
+      last_recovery_ms_ = now_ms;
+    } else if (event.kind == LifecycleEventKind::RecoveryFinished) {
+      recovery_active_ = false;
+      recovery_needed_ = false;
+    }
+  }
+
+  // A ReportRecovery coordinator action (not a lifecycle event): the
+  // stores need recovery before any mode can run. `reason` is the raw
+  // JoinRecoveryReason code; kept numeric like every other journal field.
+  void note_recovery_reported(const std::uint8_t reason,
+                              const MonotonicMs now_ms) noexcept {
+    ++recovery_reports_;
+    last_recovery_reason_ = reason;
+    last_recovery_ms_ = now_ms;
+    recovery_needed_ = true;
+  }
+
+  LastEvent last() const noexcept { return last_; }
+  std::uint64_t count(const LifecycleEventKind kind) const noexcept {
+    const auto index = static_cast<std::uint8_t>(kind);
+    if (index < 1 || index > counts_.size()) return 0;
+    return counts_[index - 1];
+  }
+  std::uint64_t recovery_reports() const noexcept { return recovery_reports_; }
+  bool recovery_needed() const noexcept { return recovery_needed_; }
+  bool recovery_active() const noexcept { return recovery_active_; }
+  std::uint8_t last_recovery_reason() const noexcept {
+    return last_recovery_reason_;
+  }
+  MonotonicMs last_recovery_ms() const noexcept { return last_recovery_ms_; }
+
+ private:
+  LastEvent last_{};
+  std::array<std::uint64_t, 7> counts_{};
+  std::uint64_t recovery_reports_{0};
+  bool recovery_needed_{false};
+  bool recovery_active_{false};
+  std::uint8_t last_recovery_reason_{0};
+  MonotonicMs last_recovery_ms_{0};
 };
 
 class LifecycleAuthorityPort {

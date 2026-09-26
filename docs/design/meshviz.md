@@ -268,7 +268,7 @@ loopback TCP だけに変更して peer credential/ACL を省く案は採用し�
 | `nodes.list` / `nodes.get` | node、role、connected、listed、neighbor、direct、hops、next_hop、route_metric、link_cost、RSSI last/EWMA、telemetry_stale、last_heard / heard_age / updated / changed | **gateway が観測した view**。gateway は hops=0、直結は1、multi-hop は null。connected は route の到達性であり、Member 証明書の加入状態ではない | `api1.rs:1886`、`:1953`、`nodes.rs:175`、`:470` |
 | 同 source | unavailable / unsupported / syncing / live、gateway、USB session、同期時刻、tracked/evicted | NodeTable は512件、page は最大128件。USB は16件/page、10秒周期の sweep と変化 event | `nodes.rs:41`、`:505`、`host/routeloom-protocol/src/node_status.rs:26` |
 | events `node_joined/node_left/link_changed` | node status と route_up/down、neighbor/next-hop 変化等 | 名前の joined/left を Site Authority の admission に転用しない | `nodes.rs:518` |
-| `messages.read` / subscribe messages | origin、gateway、network、message session/sequence、payload、cursor、host 時刻、endpoint/evidence | gateway mirror に届いた payload。全 RF packet capture ではない。`rx_events_v1=false`、`ingress_loss_observable=false`。現 JSON の `assurance` は固定の Dev PSK 表示なので Member の security 判定に使わない | `api1.rs:779`、`:799`、`:438` |
+| `messages.read` / subscribe messages | origin、gateway、network、message session/sequence、payload、cursor、host 時刻、endpoint/evidence | gateway mirror に届いた payload。全 RF packet capture ではない。`rx_events_v1=false`、`ingress_loss_observable=false`。現行 USB 受信本文にフレームごとの検証結果と実効 security profile がないため、`assurance` は全件 `UNKNOWN`／`unverified`。台帳登録から Member を推測しない | `docs/spec/host.md` §3、`api1.rs` の `record_json`／`record_meta_json` |
 | events stream | adapter/auth/credit、data_from_mesh 要約、delivery_event、diagnostic、dispatch、USB error、group_settled、node/link 変化等 | ring256件、フィルタ kinds 最大16。drop/gap あり。生 payload は別 messages stream | `host/routeloom-host/src/main.rs:40`、`subscribe.rs:36`、`:66` |
 | `messages.submit` / `operations.*` | admission epoch/key、operation id、destination、payload 長/hash、options、dispatch state、evidence、message key、期限/取消/時刻不確実フラグ | `application_outcome=null`。現通常 HostOps 経路では最終 reason と各 phase の時刻が不足する | `api1.rs:3506`、`send_store.rs:57` |
 | `group.send` / `group.get` | final/state/result/reason、message key、gateway、rounds、delivered/nonmember/missing/unaccounted、欠落 NodeId 最大12と truncated、submitted/admitted/settled 時刻 | payload127 B、queue8、unsettled16、記録256。RAM 保存。gateway 起点の group。membership 設定 API は未提供 | `api1.rs:2198`、`:2310`、`docs/spec/host.md:129` |
@@ -590,6 +590,19 @@ export は `events.jsonl`、`nodes.csv`、`links.csv`、`routes.csv`、`samples.
 **試験**：宛先(unicast/group)、回数、間隔、payload長/seed、delivery、TTL/hop limit、停止条件、観測budgetの入力。開始前に admission見積もり・所要時間・対象capabilityを表示。実行中は planned/submitted/admitted/settled/unknownを別counter、RTT分布、実効rate、停止理由を表示する。
 
 **再生**：上部にcapture A/Bとversion差、中央に同じnetwork/quality view、下部にseekbar・速度・marker・export。REPLAY中の書込み、承認、送信は操作可能にしない。
+
+**ライブ監視・開発 site（devflow D11 の実装）**：`live_monitor.py`（Qt 非依存）が読取りの予定と応答照合、参加時刻表、点呼摘要を持ち、`site_supervisor.py` が daemon の起動・attach・監視・再接続、`provisioning.py` が provision 手順の順序と再開状態を持つ。画面は「ライブ監視」「開発 site」。時刻表の各列は個別の証拠からだけ埋める：`request_verified_at`＝`join.requests.list` の `created_ms`、`approval_committed_at`＝`members.list` の `approved_ms`、`confirmed_at`＝`confirmed_ms`、`route_first_at`／`route_stable_at`＝gateway の `nodes.list` 各 poll（同じ next hop を 3 連続かつ 5 秒以上、その間に個別 STATUS）、`power_on_at`＝操作者 marker。機器側の時刻と初回 STATUS は下記の点呼 status が返す場合だけ表示し、無ければ空欄。main に無い method は広告の有無で判定して「未対応」と表示する。GUI が期待する形（D01／D09 の実装で確定させる。未確定）：
+
+| method | GUI が読む field（無ければ不明） |
+|---|---|
+| `lab.rollcall.status` | `state`（running／waiting_members／stopped／budget_exceeded）、`run_id`、`poll_seq`、`roster_revision`、`desired_interval_ms`、`effective_interval_ms`、`extension_reason`、`settle_ms`、`airtime_estimate_us_per_s`、`airtime_observed_us_per_s`、`status_age_ms`、`lease_remaining_ms`、`skipped`、`counts{inventory_planned,active_members,tree_explained,delivered,nonmember,missing,unaccounted}`、`statuses[]{node,kid,first_status_received_ms,last_status_received_ms,milestones{boot_at,join_started_at,member_adopted_at,first_rollcall_rx_at:{at_unix_ms,estimated}}}` |
+| `lab.rollcall.start`／`update` | `{desired_interval_ms}`。拒否時の `retry_after_ms` まで再送しない |
+| `lab.rollcall.stop` | `{}` |
+| `lab.inventory.list` | `devices[]{node_id,kid,role,board,provision_state,site}`（main に無い。inventory は `routeloomctl lab-inventory-import` が書く） |
+
+自動承認の表示は main の `site.status` の `purpose` と `policy.decision_mode`（`lab_inventory`）・`policy.lab_enrollment_active` から作る（development 以外は「不可」、期限切れ・再起動・書込み失敗は「閉鎖中」）。
+
+SiteSupervisor は site directory ごとの lock、bridge port の lease、`capabilities.get`（`caps_version`）と `site.status` の `site_id` 照合を通った daemon だけを使い、別 site の socket は拒否する（再結合しない）。所有 daemon の異常終了は後退付きで再起動（10 分に 5 回まで）、attach した daemon は再接続だけを試み、停止しない。`lab-site-init` は `routeloomctl lab-site-init --spec FILE --out DIR` を固定 argv で呼ぶ。spec（`routeloom-lab-site-spec-v1`）の site/CA id と network は OS の CSPRNG で作り、`<DIR>.lab-spec.json`（0600）を再試行でも再利用して作成途中の site を同じ spec で再開させる。新規作成した site にだけ、現在の uid・当該 network に限った ACL（`ipc/api-acl.json`）を作る。既存 site の権限は広げない。provision は D02／D03a の手順を契約 interface（`ContractBackend`）で呼び、未実装の手順は「未対応」、readback 一致前は Ready にしない。identity が `none` 以外の機器は要対応として止め、自動 deprovision しない。
 
 ## 5. 実験機能と指標
 

@@ -43,6 +43,9 @@ class LocalRevocationStore {
   // The recorded site/network is fully cleaned (RLS1/RLT1/RLP/RRS1
   // tombstones all read back): Blocked -> Cleaned. Refused unless Blocked.
   Status commit_cleaned() noexcept;
+  // Erase both slots back to factory-empty (deprovision): no evidence, no
+  // impairment, the RAM record zeroed. Works from any state.
+  Status clear() noexcept;
 
   bool initialized() const noexcept { return pair_.initialized(); }
   bool has_record() const noexcept { return pair_.has_active(); }

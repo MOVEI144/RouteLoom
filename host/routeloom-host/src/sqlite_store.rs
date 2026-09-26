@@ -2050,6 +2050,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn device_outcome_survives_reopen() {
+        let db = TestDb::new("device-outcome");
+        let key = "00112233445566778899aabbccddeeff";
+        {
+            let mut store = db.open();
+            store.open_epoch((501, 1), 0).unwrap();
+            let seq = submit(&mut store, 501, &durable(key, 1), 1000);
+            match store.prepare_dispatch(seq, [7; 16], [8; 16]) {
+                Ok(PrepareOutcome::Prepared(_)) => {}
+                _ => panic!("expected prepare"),
+            }
+            store
+                .update_operation(seq, &mut |op| {
+                    let d = op.dispatch.as_mut().unwrap();
+                    d.msg_session = Some(5);
+                    d.msg_seq = Some(900);
+                    true
+                })
+                .unwrap();
+            let mut operation_id = [8_u8; 24];
+            operation_id[16..].copy_from_slice(&seq.to_be_bytes());
+            assert!(store
+                .attach_device_outcome(&operation_id, 5, 900, "failed", Some("NO_ROUTE"))
+                .unwrap());
+        }
+        let store = db.open();
+        let identity = OpIdentity {
+            uid: 501,
+            network: 1,
+            epoch: 1,
+            key: durable(key, 1).key,
+        };
+        let op = store.get_by_key(&identity).unwrap().unwrap();
+        let dispatch = op.dispatch.as_ref().unwrap();
+        assert_eq!(dispatch.device_state.as_deref(), Some("failed"));
+        assert_eq!(dispatch.device_reason.as_deref(), Some("NO_ROUTE"));
+    }
+
     /// Write → reopen → same lineage, epochs and durable records; the
     /// sequence never rewinds and RAM_ONLY records do not survive.
     #[test]

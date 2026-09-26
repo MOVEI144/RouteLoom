@@ -128,6 +128,11 @@ pub const JOIN_REQUEST_TTL_MS: u64 = 24 * 3600 * 1000;
 /// Members + removed devices the ledger keeps rows for (08 §6 Q8: ~100
 /// boards per site; the bound leaves room for turnover).
 pub const DEVICE_CAP: usize = 1024;
+/// Node ids one `membership.archive` call archives at most (07 §2.2):
+/// bulk forget stays a bounded, single-commit batch.
+pub const ARCHIVE_BATCH_MAX: usize = 128;
+/// Meta key of the durable count of archived device rows.
+const META_ARCHIVED_TOTAL: &str = "archived_total";
 /// Idempotency records kept (oldest evicted).
 pub const DECISIONS_CAP: usize = 1024;
 /// Operations kept for `operations.get` (oldest evicted, but never the
@@ -249,6 +254,44 @@ pub struct SiteSetup {
     pub channel_epoch: u32,
     /// Gateway NodeIds announced in the SitePackage (1..=4).
     pub gateways: Vec<u64>,
+    /// Only a verified lab manifest may set this. Imported sites leave it absent.
+    pub lab: Option<LabBinding>,
+    pub purpose: SitePurpose,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SitePurpose {
+    Development,
+    Production,
+    Import,
+}
+
+impl SitePurpose {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Development => "development",
+            Self::Production => "production",
+            Self::Import => "import",
+        }
+    }
+}
+
+/// Provision-complete inventory is scoped to the site and to its issuing CA.
+#[derive(Clone, Debug)]
+pub struct LabBinding {
+    pub site_id: u64,
+    pub site_ca_fingerprint: [u8; 32],
+    pub device_ca_fingerprint: [u8; 32],
+    pub sak_fingerprint: [u8; 32],
+    pub inventory_revision: u64,
+    pub inventory: Vec<LabDevice>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LabDevice {
+    pub node: u64,
+    pub kid: [u8; 32],
+    pub role: u8,
 }
 
 struct Identity {
@@ -330,18 +373,36 @@ pub enum DecisionMode {
     Kguard,
     /// Never ask: unapproved devices get PendingAssignment.
     Closed,
+    /// Lab-only, authenticated and provision-complete inventory matching.
+    LabInventory,
+}
+
+/// One `join.policy.set` patch (07 §2): only `Some` fields change, the
+/// rest stay at whatever the policy holds when the patch applies.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PolicyPatch {
+    pub zero_touch_open: Option<bool>,
+    pub decision_mode: Option<DecisionMode>,
+    pub decision_timeout_ms: Option<u16>,
+    pub pending_retry_after_s: Option<u32>,
 }
 
 /// `join.policy.*` (07 §2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct JoinPolicy {
-    /// Members answer ZeroTouch DISCOVER (distributed to members by P3-2/P5;
-    /// the authority treats `false` like `closed` for unapproved devices).
+    /// The radio intake intent: members answer ZeroTouch DISCOVER while
+    /// open. The authority enforces `false` immediately for its own
+    /// verdicts (like `closed` for unapproved devices); the proxies learn
+    /// it through the versioned radio distribution (`policy_generation`),
+    /// which has no vehicle yet — see `policy_json`.
     pub zero_touch_open: bool,
     pub decision_mode: DecisionMode,
     pub decision_timeout_ms: u16,
     /// PendingAssignment retry when KGuard is silent or the policy closed.
     pub pending_retry_after_s: u32,
+    /// Content version, minted by `set_policy` (0 = never set). Two sets
+    /// with identical content share a generation; anything else bumps.
+    pub policy_generation: u32,
 }
 
 impl Default for JoinPolicy {
@@ -351,6 +412,7 @@ impl Default for JoinPolicy {
             decision_mode: DecisionMode::Kguard,
             decision_timeout_ms: 2000,
             pending_retry_after_s: 60,
+            policy_generation: 0,
         }
     }
 }
@@ -362,26 +424,35 @@ impl JoinPolicy {
             match self.decision_mode {
                 DecisionMode::Kguard => 0,
                 DecisionMode::Closed => 1,
+                DecisionMode::LabInventory => 2,
             },
         ];
         out.extend_from_slice(&self.decision_timeout_ms.to_be_bytes());
         out.extend_from_slice(&self.pending_retry_after_s.to_be_bytes());
+        out.extend_from_slice(&self.policy_generation.to_be_bytes());
         out
     }
 
     fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != 8 || bytes[0] > 1 || bytes[1] > 1 {
+        // Pre-generation rows are 8 bytes; they decode as generation 0.
+        let policy_generation = match bytes.len() {
+            8 => 0,
+            12 => u32::from_be_bytes(bytes[8..12].try_into().ok()?),
+            _ => return None,
+        };
+        if bytes[0] > 1 || bytes[1] > 2 {
             return None;
         }
         let policy = Self {
             zero_touch_open: bytes[0] == 1,
-            decision_mode: if bytes[1] == 0 {
-                DecisionMode::Kguard
-            } else {
-                DecisionMode::Closed
+            decision_mode: match bytes[1] {
+                0 => DecisionMode::Kguard,
+                1 => DecisionMode::Closed,
+                _ => DecisionMode::LabInventory,
             },
             decision_timeout_ms: u16::from_be_bytes([bytes[2], bytes[3]]),
             pending_retry_after_s: u32::from_be_bytes(bytes[4..8].try_into().ok()?),
+            policy_generation,
         };
         policy.validate().ok()?;
         Some(policy)
@@ -401,19 +472,21 @@ impl JoinPolicy {
 
     pub fn json(&self) -> String {
         format!(
-            "{{\"zero_touch_open\":{},\"decision_mode\":\"{}\",\"decision_timeout_ms\":{},\"pending_retry_after_s\":{}}}",
+            "{{\"zero_touch_open\":{},\"decision_mode\":\"{}\",\"decision_timeout_ms\":{},\"pending_retry_after_s\":{},\"policy_generation\":{}}}",
             self.zero_touch_open,
             match self.decision_mode {
                 DecisionMode::Kguard => "kguard",
                 DecisionMode::Closed => "closed",
+                DecisionMode::LabInventory => "lab_inventory",
             },
             self.decision_timeout_ms,
-            self.pending_retry_after_s
+            self.pending_retry_after_s,
+            self.policy_generation
         )
     }
 
     fn asks_kguard(&self) -> bool {
-        self.zero_touch_open && self.decision_mode == DecisionMode::Kguard
+        self.zero_touch_open && self.decision_mode != DecisionMode::Closed
     }
 }
 
@@ -484,6 +557,111 @@ struct Txn {
     recovery_profile: bool,
 }
 
+/// One ended relay attempt, kept for triage: abort and down-refusal
+/// reasons must survive the attempt they ended. `source` names who
+/// ended it (`gateway_abort`, `down_admission`, `proxy_abort`,
+/// `session_drop`, `timeout`); `reason` is that source's detail.
+/// `stage` is the join phase reached (`await_message_3` or `deciding`),
+/// with the device and join-request links when the attempt knew them.
+/// One record renders both the `join_relay_failed` event and the
+/// `recent_relay_failures` ring entry, so they can never disagree.
+#[derive(Clone, Debug)]
+pub struct RelayFailure {
+    ms: u64,
+    source: &'static str,
+    reason: String,
+    gateway: u64,
+    proxy: u64,
+    gateway_epoch: u32,
+    proxy_epoch: u32,
+    relay_id: u32,
+    joiner: [u8; 6],
+    stage: &'static str,
+    device: Option<u64>,
+    join_request: Option<u64>,
+}
+
+/// Recent relay failures kept for `site.status` (bounded: triage, not
+/// history — the event ring carries the live stream).
+const RECENT_RELAY_FAILURES_CAP: usize = 16;
+
+impl RelayFailure {
+    fn for_txn(ms: u64, source: &'static str, reason: String, txn: &Txn) -> Self {
+        let (stage, join_request) = match txn.state {
+            TxnState::AwaitMessage3 => ("await_message_3", None),
+            TxnState::Deciding(id) => ("deciding", Some(id)),
+        };
+        Self {
+            ms,
+            source,
+            reason,
+            gateway: txn.key.gateway,
+            proxy: txn.key.proxy,
+            gateway_epoch: txn.key.gateway_epoch,
+            proxy_epoch: txn.key.proxy_epoch,
+            relay_id: txn.key.relay_id,
+            joiner: txn.key.joiner_mac,
+            stage,
+            device: txn.device.as_ref().map(|d| d.facts.node),
+            join_request,
+        }
+    }
+
+    /// A failure for a relay with no live attempt (already timed out or
+    /// never admitted): only the key names anything.
+    fn for_unknown_key(source: &'static str, reason: String, key: RelayKey) -> Self {
+        Self {
+            ms: 0,
+            source,
+            reason,
+            gateway: key.gateway,
+            proxy: key.proxy,
+            gateway_epoch: key.gateway_epoch,
+            proxy_epoch: key.proxy_epoch,
+            relay_id: key.relay_id,
+            joiner: key.joiner_mac,
+            stage: "unknown",
+            device: None,
+            join_request: None,
+        }
+    }
+
+    fn common_fields(&self) -> String {
+        let device = self
+            .device
+            .map_or_else(|| "null".to_string(), |node| format!("\"{}\"", h16(node)));
+        let join_request = self.join_request.map_or_else(
+            || "null".to_string(),
+            |id| format!("\"{}\"", request_token(id)),
+        );
+        format!(
+            "\"source\":\"{}\",\"reason\":\"{}\",\"gateway\":\"{}\",\"proxy\":\"{}\",\"gateway_epoch\":{},\"proxy_epoch\":{},\"relay_id\":{},\"joiner\":\"{}\",\"stage\":\"{}\",\"device\":{device},\"join_request\":{join_request}",
+            self.source,
+            routeloom_json::escape_string(&self.reason),
+            h16(self.gateway),
+            h16(self.proxy),
+            self.gateway_epoch,
+            self.proxy_epoch,
+            self.relay_id,
+            hex_lower(&self.joiner),
+            self.stage,
+        )
+    }
+
+    /// Event body fields (the envelope stamps `ms`).
+    pub fn event_fields(&self) -> String {
+        format!("\"kind\":\"join_relay_failed\",{}", self.common_fields())
+    }
+
+    fn json(&self) -> String {
+        format!(
+            "{{\"ms\":{},\"kind\":\"join_relay_failed\",{}}}",
+            self.ms,
+            self.common_fields()
+        )
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Counters {
     pub message_1: u64,
@@ -505,6 +683,9 @@ pub struct Counters {
     pub store_failures: u64,
     /// Rejected GK ACKs/pulls by fence reason (stale epoch, DAMS, GK-id…).
     pub gk_rejected: BTreeMap<&'static str, u64>,
+    /// Downlink deliveries the transport refused, by `DeliverReject` name
+    /// (`queue_full`, `too_large`, `closed`).
+    pub downlink_rejected: BTreeMap<&'static str, u64>,
 }
 
 impl Counters {
@@ -521,8 +702,14 @@ impl Counters {
             .map(|(k, v)| format!("\"{k}\":{v}"))
             .collect::<Vec<_>>()
             .join(",");
+        let downlink_rejected = self
+            .downlink_rejected
+            .iter()
+            .map(|(k, v)| format!("\"{k}\":{v}"))
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
-            "{{\"message_1\":{},\"message_1_refused\":{},\"busy_aborts\":{},\"unknown_relay\":{},\"timeouts\":{},\"relay_failed\":{},\"rejected_unverified\":{{{rejected}}},\"allowed\":{},\"reissued\":{},\"pending\":{},\"denied\":{},\"removed_notices\":{},\"authority_busy\":{},\"store_failures\":{},\"gk_rejected\":{{{gk_rejected}}}}}",
+            "{{\"message_1\":{},\"message_1_refused\":{},\"busy_aborts\":{},\"unknown_relay\":{},\"timeouts\":{},\"relay_failed\":{},\"rejected_unverified\":{{{rejected}}},\"allowed\":{},\"reissued\":{},\"pending\":{},\"denied\":{},\"removed_notices\":{},\"authority_busy\":{},\"store_failures\":{},\"gk_rejected\":{{{gk_rejected}}},\"downlink_rejected\":{{{downlink_rejected}}}}}",
             self.message_1,
             self.message_1_refused,
             self.busy_aborts,
@@ -555,6 +742,15 @@ pub struct RevokeRequest {
     pub device: u64,
     pub expected_generation: u32,
     pub reason: RevocationReason,
+    pub key: String,
+}
+
+/// `membership.archive` input (after API validation): removed-device rows
+/// to forget. The authority sorts and dedups before digesting, so caller
+/// ordering never changes the idempotency identity.
+#[derive(Clone, Debug)]
+pub struct ArchiveRequest {
+    pub devices: Vec<u64>,
     pub key: String,
 }
 
@@ -646,12 +842,25 @@ pub struct SiteAuthority {
     sak: Box<dyn RootSigner + Send>,
     store: Box<dyn SiteStore>,
     policy: JoinPolicy,
+    purpose: SitePurpose,
+    lab: Option<LabBinding>,
+    /// Explicit admin enrollment window; never revived by a daemon restart.
+    lab_enrollment_window: Option<(u64, u64)>,
+    /// A failed write can have an uncertain outcome; re-open the DB first.
+    lab_write_poisoned: bool,
+    /// Newest policy generation the proxies confirmed applied (`None` =
+    /// never distributed). No distribution vehicle exists yet, so this
+    /// stays `None` and the radio intake follows the adoption-time
+    /// default; the vehicle will drive it and persist it.
+    policy_distributed_generation: Option<u32>,
     devices: BTreeMap<u64, DeviceRow>,
     discovered: BTreeMap<u64, Discovered>,
     requests: BTreeMap<u64, JoinRequestRec>,
     decisions: BTreeMap<(u32, String), StoredDecision>,
     operations: BTreeMap<u64, Operation>,
     txns: Vec<Txn>,
+    /// Ended relay attempts, newest last (triaged via `site.status`).
+    recent_relay_failures: VecDeque<RelayFailure>,
     joiner_last_m1: HashMap<[u8; 6], u64>,
     join_mono_ms: u64,
     rs_epoch: u32,
@@ -689,6 +898,9 @@ pub struct SiteAuthority {
     revision: u32,
     ledger_seq: u64,
     ledger_head: [u8; 32],
+    /// Removed-device rows forgotten by `membership.archive` so far
+    /// (durable `archived_total` meta; `site.status` reports it).
+    archived_total: u64,
     next_request_id: u64,
     next_op_id: u64,
     pub counters: Counters,
@@ -790,10 +1002,99 @@ impl SiteAuthority {
             Some(_) => {}
             None => init.meta.push(("site_binding", binding)),
         }
+        // A purpose is stamped with the site's first DB binding, not inferred
+        // from a process flag or its directory name on subsequent starts.
+        if (setup.purpose == SitePurpose::Development) != setup.lab.is_some() {
+            return Err("development purpose requires a verified lab manifest".into());
+        }
+        match snapshot.meta.get("site_purpose") {
+            Some(old) if old == setup.purpose.name().as_bytes() => {}
+            None if !snapshot.meta.contains_key("site_binding")
+                || setup.purpose == SitePurpose::Import =>
+            {
+                init.meta
+                    .push(("site_purpose", setup.purpose.name().as_bytes().to_vec()));
+            }
+            _ => return Err("site purpose disagrees with the immutable DB binding".into()),
+        }
+        // The binding is immutable. A copied manifest or different CA cannot
+        // turn an existing managed database into an auto-approving lab site.
+        let lab = setup.lab.clone();
+        if let Some(lab) = &lab {
+            if lab.site_id != id.site_id
+                || !setup
+                    .site_ca_pubkey
+                    .is_some_and(|ca| sha256(&ca) == lab.site_ca_fingerprint)
+                || sha256(&id.device_ca_pubkey) != lab.device_ca_fingerprint
+                || id.sak_kid != lab.sak_fingerprint
+                || lab.inventory.len() > MEMBER_CAP
+                || lab.inventory.iter().enumerate().any(|(i, row)| {
+                    !id_valid(row.node)
+                        || !matches!(row.role, ROLE_ENDPOINT | ROLE_RELAY | ROLE_GATEWAY)
+                        || (row.role == ROLE_GATEWAY
+                            && !id.gateways[..usize::from(id.gateway_count)].contains(&row.node))
+                        || lab.inventory[..i].iter().any(|prev| prev.node == row.node)
+                })
+            {
+                return Err("invalid development manifest or inventory".into());
+            }
+        }
+        let lab_binding = lab.as_ref().map(|lab| {
+            let mut bytes = lab.site_id.to_be_bytes().to_vec();
+            bytes.extend_from_slice(&lab.site_ca_fingerprint);
+            bytes.extend_from_slice(&lab.device_ca_fingerprint);
+            bytes.extend_from_slice(&lab.sak_fingerprint);
+            sha256(&bytes).to_vec()
+        });
+        match (snapshot.meta.get("lab_binding"), lab_binding) {
+            (Some(stored), Some(expected)) if *stored == expected => {}
+            (None, Some(expected)) if !snapshot.meta.contains_key("site_binding") => {
+                init.meta.push(("lab_binding", expected));
+            }
+            (None, None) => {}
+            _ => return Err("lab manifest does not match the immutable site DB binding".into()),
+        }
+        if let Some(lab) = &lab {
+            let mut bytes = lab.inventory_revision.to_be_bytes().to_vec();
+            for entry in &lab.inventory {
+                bytes.extend_from_slice(&entry.node.to_be_bytes());
+                bytes.extend_from_slice(&entry.kid);
+                bytes.push(entry.role);
+            }
+            let digest = sha256(&bytes);
+            match snapshot.meta.get("lab_inventory") {
+                Some(old) if old.len() == 40 => {
+                    let revision = u64::from_be_bytes(old[..8].try_into().expect("length"));
+                    if lab.inventory_revision < revision
+                        || (lab.inventory_revision == revision && old[8..] != digest)
+                    {
+                        return Err(
+                            "lab inventory revision went backwards or changed in place".into()
+                        );
+                    }
+                    if lab.inventory_revision > revision {
+                        init.meta.push((
+                            "lab_inventory",
+                            bytes[..8].iter().chain(digest.iter()).copied().collect(),
+                        ));
+                    }
+                }
+                None if !snapshot.meta.contains_key("site_binding") => {
+                    init.meta.push((
+                        "lab_inventory",
+                        bytes[..8].iter().chain(digest.iter()).copied().collect(),
+                    ));
+                }
+                _ => return Err("lab inventory DB binding missing or corrupt".into()),
+            }
+        }
         let policy = match snapshot.meta.get("policy") {
             Some(bytes) => JoinPolicy::decode(bytes).ok_or("site store policy corrupt")?,
             None => JoinPolicy::default(),
         };
+        if policy.decision_mode == DecisionMode::LabInventory && lab.is_none() {
+            return Err("lab inventory policy requires a bound development site".into());
+        }
         let mut devices = BTreeMap::new();
         for row in &snapshot.devices {
             devices.insert(row.node, row.clone());
@@ -1158,12 +1459,18 @@ impl SiteAuthority {
         let channel_site_epoch = id.site_claims.site_epoch;
         Ok(Self {
             policy,
+            purpose: setup.purpose,
+            lab,
+            lab_enrollment_window: None,
+            lab_write_poisoned: false,
+            policy_distributed_generation: None,
             devices,
             discovered,
             requests,
             decisions,
             operations,
             txns: Vec::new(),
+            recent_relay_failures: VecDeque::new(),
             joiner_last_m1: HashMap::new(),
             join_mono_ms: 0,
             rs_epoch,
@@ -1186,6 +1493,7 @@ impl SiteAuthority {
             revision,
             ledger_seq,
             ledger_head,
+            archived_total: meta_u64(&snapshot, META_ARCHIVED_TOTAL)?.unwrap_or(0),
             next_request_id,
             next_op_id,
             counters: Counters::default(),
@@ -1553,7 +1861,7 @@ impl SiteAuthority {
                         );
                         self.finish_allow(txn, &fresh, now_ms);
                     }
-                    None => self.finish_busy(txn, BUSY_RETRY_S),
+                    None => self.finish_busy(txn, BUSY_RETRY_S, now_ms),
                 }
                 return;
             }
@@ -1593,7 +1901,10 @@ impl SiteAuthority {
             kid_conflict,
             now_ms,
         );
-        if !self.policy.asks_kguard() {
+        if !self.policy.asks_kguard()
+            || (self.policy.decision_mode == DecisionMode::LabInventory
+                && !self.lab_enrollment_active())
+        {
             let retry = self.policy.pending_retry_after_s;
             self.finish_verdict(
                 txn,
@@ -1612,7 +1923,7 @@ impl SiteAuthority {
             .map(|r| (r.id, r.decision));
         if let Some((request_id, Some(verdict))) = open {
             // A decision taken after the previous attempt's deadline.
-            self.close_request(request_id);
+            self.close_request(request_id, now_ms);
             self.finish_verdict(txn, node, verdict, now_ms);
             return;
         }
@@ -1625,7 +1936,7 @@ impl SiteAuthority {
             let seconds = (at - now_ms)
                 .div_ceil(1000)
                 .clamp(1, u64::from(RETRY_AFTER_MAX_S));
-            self.finish_busy(txn, seconds as u32);
+            self.finish_busy(txn, seconds as u32, now_ms);
             return;
         }
         let deadline = now_ms.saturating_add(u64::from(self.policy.decision_timeout_ms));
@@ -1651,7 +1962,7 @@ impl SiteAuthority {
             _ => {
                 self.expire_requests(now_ms);
                 if self.requests.len() >= JOIN_REQUESTS_CAP {
-                    self.finish_busy(txn, BUSY_RETRY_S);
+                    self.finish_busy(txn, BUSY_RETRY_S, now_ms);
                     return;
                 }
                 let request_id = self.next_request_id;
@@ -1683,7 +1994,7 @@ impl SiteAuthority {
         };
         if let Err(error) = self.store.commit(&batch) {
             self.store_error(now_ms, &error);
-            self.finish_busy(txn, BUSY_RETRY_S);
+            self.finish_busy(txn, BUSY_RETRY_S, now_ms);
             return;
         }
         self.next_request_id = next_request_id;
@@ -1697,9 +2008,36 @@ impl SiteAuthority {
             .join_mono_ms
             .saturating_add(u64::from(self.policy.decision_timeout_ms));
         self.txns.push(txn);
+        if self.policy.decision_mode == DecisionMode::LabInventory {
+            // Only authenticated EAD/DevCert facts reach this point. The
+            // ordinary decide path enforces revocation, capacity and commit.
+            let eligible = self.lab.as_ref().is_some_and(|lab| {
+                lab.inventory.iter().any(|entry| {
+                    entry.node == node
+                        && entry.kid == device.facts.kid
+                        && entry.role == device.facts.requested_role
+                }) && lab.device_ca_fingerprint == sha256(&self.id.device_ca_pubkey)
+            });
+            if eligible && !kid_conflict && !previously_removed {
+                let _ = self.decide(
+                    u32::MAX,
+                    DecideRequest {
+                        join_request_id: request_id,
+                        device: node,
+                        verdict: Verdict::Allow {
+                            role: device.facts.requested_role,
+                        },
+                        key: format!("lab-inventory-v1-{request_id:016x}"),
+                    },
+                    now_ms,
+                );
+            }
+        }
     }
 
     fn store_error(&mut self, now_ms: u64, error: &store::StoreError) {
+        self.lab_write_poisoned = true;
+        self.lab_enrollment_window = None;
         self.counters.store_failures += 1;
         self.event(
             now_ms,
@@ -1710,12 +2048,14 @@ impl SiteAuthority {
         );
     }
 
-    fn close_request(&mut self, request_id: u64) {
+    fn close_request(&mut self, request_id: u64, now_ms: u64) {
         if self.requests.remove(&request_id).is_some() {
-            let _ = self.store.commit(&Batch {
+            if let Err(error) = self.store.commit(&Batch {
                 docs: vec![(DocKind::JoinRequest, h16(request_id), None)],
                 ..Batch::default()
-            });
+            }) {
+                self.store_error(now_ms, &error);
+            }
         }
     }
 
@@ -1728,7 +2068,7 @@ impl SiteAuthority {
             .collect();
         for id in stale {
             if !self.txns.iter().any(|t| t.state == TxnState::Deciding(id)) {
-                self.close_request(id);
+                self.close_request(id, now_ms);
             }
         }
     }
@@ -1752,10 +2092,12 @@ impl SiteAuthority {
                 .map(|d| d.facts.node)
             {
                 self.discovered.remove(&oldest);
-                let _ = self.store.commit(&Batch {
+                if let Err(error) = self.store.commit(&Batch {
                     docs: vec![(DocKind::Discovered, h16(oldest), None)],
                     ..Batch::default()
-                });
+                }) {
+                    self.store_error(now_ms, &error);
+                }
             }
         }
         let entry = self.discovered.entry(node).or_insert_with(|| Discovered {
@@ -1789,24 +2131,34 @@ impl SiteAuthority {
             facts.model,
             via.json()
         );
-        let _ = self.store.commit(&Batch {
+        if let Err(error) = self.store.commit(&Batch {
             docs: vec![(DocKind::Discovered, h16(node), Some(doc))],
             ..Batch::default()
-        });
+        }) {
+            self.store_error(now_ms, &error);
+        }
         if announce {
             self.event(now_ms, fields);
         }
     }
 
-    fn set_discovered_verdict(&mut self, node: u64, label: &str, retry_not_before: Option<u64>) {
+    fn set_discovered_verdict(
+        &mut self,
+        node: u64,
+        label: &str,
+        retry_not_before: Option<u64>,
+        now_ms: u64,
+    ) {
         if let Some(d) = self.discovered.get_mut(&node) {
             d.last_verdict = label.to_string();
             d.retry_not_before_ms = retry_not_before;
             let doc = d.doc();
-            let _ = self.store.commit(&Batch {
+            if let Err(error) = self.store.commit(&Batch {
                 docs: vec![(DocKind::Discovered, h16(node), Some(doc))],
                 ..Batch::default()
-            });
+            }) {
+                self.store_error(now_ms, &error);
+            }
         }
     }
 
@@ -1831,10 +2183,10 @@ impl SiteAuthority {
         }
     }
 
-    fn finish_busy(&mut self, txn: Txn, retry_after_s: u32) {
+    fn finish_busy(&mut self, txn: Txn, retry_after_s: u32, now_ms: u64) {
         self.counters.authority_busy += 1;
         if let Some(node) = txn.device.as_ref().map(|d| d.facts.node) {
-            self.set_discovered_verdict(node, "busy", None);
+            self.set_discovered_verdict(node, "busy", None, now_ms);
         }
         self.send_result(txn, &JoinResult::AuthorityBusy { retry_after_s });
     }
@@ -1851,7 +2203,7 @@ impl SiteAuthority {
                 {
                     self.finish_allow(txn, &row, now_ms)
                 }
-                _ => self.finish_busy(txn, BUSY_RETRY_S),
+                _ => self.finish_busy(txn, BUSY_RETRY_S, now_ms),
             },
             Verdict::Pending { retry_after_s } => {
                 self.counters.pending += 1;
@@ -1860,6 +2212,7 @@ impl SiteAuthority {
                     node,
                     "pending",
                     Some(retry_at.saturating_sub(RETRY_SLACK_MS)),
+                    now_ms,
                 );
                 let mut ticket = [0_u8; 16];
                 let _ = fill_random(&mut ticket);
@@ -1873,7 +2226,7 @@ impl SiteAuthority {
             }
             Verdict::DenyNotHere | Verdict::DenyBlocked => {
                 self.counters.denied += 1;
-                self.set_discovered_verdict(node, verdict.label(), None);
+                self.set_discovered_verdict(node, verdict.label(), None, now_ms);
                 let result = if verdict == Verdict::DenyNotHere {
                     JoinResult::DenyNotHere
                 } else {
@@ -2063,11 +2416,11 @@ impl SiteAuthority {
             ..Batch::default()
         }) {
             self.store_error(now_ms, &error);
-            self.finish_busy(txn, BUSY_RETRY_S);
+            self.finish_busy(txn, BUSY_RETRY_S, now_ms);
             return;
         }
         self.devices.insert(updated.node, updated.clone());
-        self.set_discovered_verdict(row.node, "allowed", None);
+        self.set_discovered_verdict(row.node, "allowed", None, now_ms);
         let result = JoinResult::Allow {
             member_cert: row.member_cert.clone(),
             site_package: self.site_package(row.role, now_ms),
@@ -2267,6 +2620,12 @@ impl SiteAuthority {
             match txn.state {
                 TxnState::AwaitMessage3 => {
                     self.counters.timeouts += 1;
+                    self.push_recent_failure(RelayFailure::for_txn(
+                        now_ms,
+                        "timeout",
+                        "message_3 deadline".to_string(),
+                        &txn,
+                    ));
                     self.abort(txn.key, AbortReason::Timeout);
                 }
                 TxnState::Deciding(_) => {
@@ -2288,31 +2647,66 @@ impl SiteAuthority {
         self.tick_distribution(now_ms);
     }
 
-    /// Ends one relayed exchange as failed: its answer could not be
-    /// admitted to the downlink, the gateway reported the relay over, or
-    /// a queue result arrived non-Ok. Queues no further outbound — the
-    /// device retries with a fresh relay, and answering a dead relay
-    /// could loop (`SiteService::with` relies on this: no recursion).
-    /// Returns whether a live exchange was dropped.
-    pub fn fail_attempt(&mut self, key: RelayKey) -> bool {
-        if !self.txns.iter().any(|t| t.key == key) {
-            return false;
-        }
-        self.txns.retain(|t| t.key != key);
+    /// Ends one relayed exchange as failed, keeping the reason, the
+    /// join stage reached and the device/request links for triage. The
+    /// returned record renders the `join_relay_failed` event AND the
+    /// `recent_relay_failures` ring entry from one source. Queues no
+    /// further outbound — the device retries with a fresh relay, and
+    /// answering a dead relay could loop (`SiteService::with` relies on
+    /// this: no recursion). Returns `None` when no live exchange holds
+    /// `key` (already timed out or never admitted).
+    pub fn fail_relay(
+        &mut self,
+        key: RelayKey,
+        source: &'static str,
+        reason: String,
+        now_ms: u64,
+    ) -> Option<RelayFailure> {
+        let txn = self.pop_txn(key)?;
         self.counters.relay_failed += 1;
-        true
+        let failure = RelayFailure::for_txn(now_ms, source, reason, &txn);
+        self.push_recent_failure(failure.clone());
+        Some(failure)
+    }
+
+    fn pop_txn(&mut self, key: RelayKey) -> Option<Txn> {
+        let pos = self.txns.iter().position(|t| t.key == key)?;
+        Some(self.txns.remove(pos))
+    }
+
+    fn push_recent_failure(&mut self, failure: RelayFailure) {
+        if self.recent_relay_failures.len() >= RECENT_RELAY_FAILURES_CAP {
+            self.recent_relay_failures.pop_front();
+        }
+        self.recent_relay_failures.push_back(failure);
     }
 
     /// Drops every live exchange relayed through `gateway`: its USB
     /// session died, and the proxy slots died with it. The lane logs the
     /// session boundary; the count lets it say how many relays went with
-    /// it. Returns the number dropped.
-    pub fn drop_gateway_relays(&mut self, gateway: u64) -> usize {
-        let before = self.txns.len();
-        self.txns.retain(|t| t.key.gateway != gateway);
-        let dropped = before - self.txns.len();
-        self.counters.relay_failed += dropped as u64;
-        dropped
+    /// it, and each dropped attempt keeps its stage and links in the
+    /// recent-failures ring. Returns the number dropped.
+    pub fn drop_gateway_relays(&mut self, gateway: u64, now_ms: u64) -> usize {
+        let mut kept = Vec::with_capacity(self.txns.len());
+        let mut dropped = Vec::new();
+        for txn in std::mem::take(&mut self.txns) {
+            if txn.key.gateway == gateway {
+                dropped.push(txn);
+            } else {
+                kept.push(txn);
+            }
+        }
+        self.txns = kept;
+        for txn in &dropped {
+            self.push_recent_failure(RelayFailure::for_txn(
+                now_ms,
+                "session_drop",
+                "usb session reset".to_string(),
+                txn,
+            ));
+        }
+        self.counters.relay_failed += dropped.len() as u64;
+        dropped.len()
     }
 
     // --- KGuard decisions --------------------------------------------------------------------
@@ -2551,6 +2945,16 @@ impl SiteAuthority {
             "next_attempt"
         };
         let mut batch = Batch::default();
+        // Internal actors use their own versioned namespace, never an OS UID.
+        let actor = if principal == u32::MAX {
+            let lab = self
+                .lab
+                .as_ref()
+                .ok_or_else(|| SiteError::new("CONFLICT", "lab policy no longer bound"))?;
+            format!("\"actor\":{{\"type\":\"internal_policy_v1\",\"id\":\"lab_inventory\"}},\"policy_id\":\"lab_inventory\",\"policy_version\":1,\"policy_generation\":{},\"inventory_revision\":{},\"decision_reason\":\"provisioned_inventory_match\"", self.policy.policy_generation, lab.inventory_revision)
+        } else {
+            format!("\"actor\":{{\"type\":\"peer_uid_v1\",\"id\":{principal}}},\"policy_id\":\"manual_v1\",\"policy_version\":1,\"decision_reason\":\"operator_verdict\"")
+        };
         let result;
         type Approved = (
             DeviceRow,
@@ -2769,7 +3173,7 @@ impl SiteAuthority {
                     notice: None,
                 };
                 result = format!(
-                    "{{\"state\":\"committed\",\"join_request_id\":\"{}\",\"device_id\":\"{}\",\"verdict\":\"allow\",\"role\":\"{}\",\"generation\":{generation},\"member_cert_serial\":{serial},\"operation_id\":\"{}\",\"applied\":\"{applied}\"}}",
+                    "{{\"state\":\"committed\",\"join_request_id\":\"{}\",\"device_id\":\"{}\",\"verdict\":\"allow\",\"role\":\"{}\",\"generation\":{generation},\"member_cert_serial\":{serial},\"operation_id\":\"{}\",\"applied\":\"{applied}\",{actor}}}",
                     request_token(open.id),
                     h16(row.node),
                     role_name(role),
@@ -2811,11 +3215,16 @@ impl SiteAuthority {
                         .push((DocKind::Operation, h16(joined.id), Some(joined.doc())));
                 }
                 let evicted = self.operation_doc(&mut batch, &op)?;
+                batch.approval_audit.push((op.id, format!(
+                    "{{\"operation_id\":\"{}\",\"join_request_id\":\"{}\",\"attempt\":{},\"device_id\":\"{}\",\"kid\":\"{}\",\"role\":\"{}\",{actor}}}",
+                    op_token(op.id), request_token(open.id), open.attempt,
+                    h16(row.node), hex_lower(&row.kid), role_name(role)
+                )));
                 approved = Some((row, ledger, op, joined_target, joined_cutover, evicted));
             }
             _ => {
                 result = format!(
-                    "{{\"state\":\"recorded\",\"join_request_id\":\"{}\",\"device_id\":\"{}\",{},\"applied\":\"{applied}\"}}",
+                    "{{\"state\":\"recorded\",\"join_request_id\":\"{}\",\"device_id\":\"{}\",{},\"applied\":\"{applied}\",{actor}}}",
                     request_token(open.id),
                     h16(open.facts.node),
                     request.verdict.json_fields()
@@ -2860,16 +3269,17 @@ impl SiteAuthority {
         self.event(
             now_ms,
             format!(
-                "\"kind\":\"join.decided\",\"join_request_id\":\"{}\",\"device_id\":\"{}\",{},\"applied\":\"{applied}\",\"late\":{}",
+                "\"kind\":\"join.decided\",\"join_request_id\":\"{}\",\"device_id\":\"{}\",{},\"applied\":\"{applied}\",\"late\":{},{}",
                 request_token(open.id),
                 h16(open.facts.node),
                 request.verdict.json_fields(),
-                waiting.is_none()
+                waiting.is_none(),
+                actor
             ),
         );
         if let Some(index) = waiting {
             let txn = self.txns.remove(index);
-            self.close_request(open.id);
+            self.close_request(open.id, now_ms);
             self.finish_verdict(txn, open.facts.node, request.verdict, now_ms);
         }
         Ok(result)
@@ -3206,6 +3616,145 @@ impl SiteAuthority {
                 op.id,
                 superseded,
                 now_ms,
+            );
+        }
+        Ok(result)
+    }
+
+    /// `membership.archive` (07 §2.2): forgets removed-device rows in one
+    /// atomic batch, reclaiming the 1024-row ledger capacity for future
+    /// joins. Ledger rows are never deleted, so the NodeId no-reuse rule
+    /// (`decide` refuses through `has_revocation`) survives the archive;
+    /// each deletion additionally commits an `archive` ledger row bound
+    /// to the forgotten row's last MemberCert.
+    ///
+    /// One live member in the batch vetoes the whole call — a bulk forget
+    /// must never half-run — while unknown ids are reported in
+    /// `skipped_unknown`, never refused (the caller may re-drive a stale
+    /// list). The idempotency digest covers the sorted id set, so a replay
+    /// returns the stored answer without touching state.
+    pub fn archive_removed(
+        &mut self,
+        principal: u32,
+        request: ArchiveRequest,
+        now_ms: u64,
+    ) -> Result<String, SiteError> {
+        let mut ids = request.devices;
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.len() > ARCHIVE_BATCH_MAX {
+            return Err(SiteError::new(
+                "INVALID_ARGUMENT",
+                format!("at most {ARCHIVE_BATCH_MAX} device ids per archive call"),
+            ));
+        }
+        let digest = sha256(
+            format!(
+                "membership.archive|{}",
+                ids.iter()
+                    .map(|n| format!("{n:016x}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+            .as_bytes(),
+        );
+        if let Some(answer) = self.idempotent(principal, &request.key, &digest) {
+            return answer;
+        }
+        let mut gone: Vec<DeviceRow> = Vec::new();
+        let mut skipped: Vec<u64> = Vec::new();
+        for node in &ids {
+            match self.devices.get(node) {
+                None => skipped.push(*node),
+                Some(row) if !row.member => gone.push(row.clone()),
+                Some(row) => {
+                    return Err(SiteError::new(
+                        "CONFLICT",
+                        "the batch holds a live member; archive removed devices only",
+                    )
+                    .with(format!(
+                        "\"device_id\":\"{}\",\"generation\":{}",
+                        h16(row.node),
+                        row.generation
+                    )));
+                }
+            }
+        }
+        // One chained `archive` ledger row per forgotten row (same shape
+        // `ledger_row` builds: seq chains, hash binds kind/node/kid/
+        // generation/digest/ms). The digest is the forgotten row's last
+        // MemberCert — the credential being forgotten.
+        let mut seq = self.ledger_seq;
+        let mut head = self.ledger_head;
+        let mut ledger = Vec::with_capacity(gone.len());
+        for row in &gone {
+            seq = seq
+                .checked_add(1)
+                .ok_or_else(|| SiteError::new("AUTHORITY_ERROR", "ledger seq exhausted"))?;
+            let mut entry = LedgerRow {
+                seq,
+                kind: "archive".to_string(),
+                node: row.node,
+                kid: row.kid,
+                generation: row.generation,
+                digest: sha256(&row.member_cert),
+                ms: now_ms,
+                hash: [0; 32],
+            };
+            entry.hash = ledger_hash(&head, &entry);
+            head = entry.hash;
+            ledger.push(entry);
+        }
+        let total = self
+            .archived_total
+            .checked_add(gone.len() as u64)
+            .ok_or_else(|| SiteError::new("AUTHORITY_ERROR", "archived total exhausted"))?;
+        let archived_list = gone
+            .iter()
+            .map(|row| format!("\"{}\"", h16(row.node)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let skipped_list = skipped
+            .iter()
+            .map(|node| format!("\"{node:016x}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let result =
+            format!("{{\"archived\":[{archived_list}],\"skipped_unknown\":[{skipped_list}]}}");
+        // One transaction: the row deletes, the `archive` ledger rows, the
+        // durable counter and the idempotency record. A commit failure
+        // leaves every row listed, so the operator can retry.
+        let mut batch = Batch {
+            devices_delete: gone.iter().map(|row| row.node).collect(),
+            ledger,
+            ..Batch::default()
+        };
+        if !gone.is_empty() {
+            batch
+                .meta
+                .push((META_ARCHIVED_TOTAL, total.to_be_bytes().to_vec()));
+        }
+        self.decision_doc(&mut batch, principal, &request.key, digest, &result, now_ms);
+        if let Err(error) = self.store.commit(&batch) {
+            self.store_error(now_ms, &error);
+            return Err(store_failure(&error));
+        }
+        for row in &gone {
+            self.devices.remove(&row.node);
+            self.pull_buckets.remove(&row.node);
+        }
+        self.ledger_seq = seq;
+        self.ledger_head = head;
+        self.archived_total = total;
+        self.remember_decision(principal, &request.key, digest, &result, now_ms);
+        if !gone.is_empty() {
+            self.event(
+                now_ms,
+                format!(
+                    "\"kind\":\"member.archived\",\"count\":{},\"skipped_unknown\":{}",
+                    gone.len(),
+                    skipped.len()
+                ),
             );
         }
         Ok(result)
@@ -4828,10 +5377,29 @@ impl SiteAuthority {
         std::mem::take(&mut self.channel_hints)
     }
 
-    pub fn set_policy(&mut self, policy: JoinPolicy) -> Result<String, SiteError> {
+    pub fn set_policy(&mut self, mut policy: JoinPolicy) -> Result<String, SiteError> {
         policy
             .validate()
             .map_err(|m| SiteError::new("INVALID_ARGUMENT", m))?;
+        if policy.decision_mode == DecisionMode::LabInventory && self.lab.is_none() {
+            return Err(SiteError::new(
+                "INVALID_ARGUMENT",
+                "lab inventory policy requires a bound development site",
+            ));
+        }
+        // The generation is minted here, never trusted from the caller: a
+        // set that changes no content keeps the stored generation (no new
+        // version to distribute); anything else bumps from the stored
+        // policy, so racing sets still strictly increase.
+        policy.policy_generation = self.policy.policy_generation;
+        if policy == self.policy {
+            return Ok(self.policy_json());
+        }
+        policy.policy_generation = self
+            .policy
+            .policy_generation
+            .checked_add(1)
+            .ok_or_else(|| SiteError::new("AUTHORITY_ERROR", "policy generation exhausted"))?;
         self.store
             .commit(&Batch {
                 meta: vec![("policy", policy.encode())],
@@ -4839,7 +5407,102 @@ impl SiteAuthority {
             })
             .map_err(|e| store_failure(&e))?;
         self.policy = policy;
-        Ok(policy.json())
+        Ok(self.policy_json())
+    }
+
+    /// `join.policy.get` body (07 §2.1): the policy content plus the radio
+    /// OFFER convergence state. Host approval (`decision_mode`, and the
+    /// `zero_touch_open=false` verdict rule) takes effect at set time;
+    /// the proxies converge on `policy_generation` through the versioned
+    /// radio distribution, whose newest confirmed generation is
+    /// `radio_distributed_generation` (`null` = nothing distributed yet).
+    pub fn policy_json(&self) -> String {
+        let content = self.policy.json();
+        let distributed = self
+            .policy_distributed_generation
+            .map_or_else(|| "null".to_string(), |g| g.to_string());
+        format!(
+            "{},\"radio_distributed_generation\":{},\"lab_enrollment_active\":{}}}",
+            &content[..content.len() - 1],
+            distributed,
+            !self.lab_write_poisoned
+                && self
+                    .lab_enrollment_window
+                    .is_some_and(
+                        |(start, end)| self.join_mono_ms >= start && self.join_mono_ms < end
+                    )
+        )
+    }
+
+    /// Applies a partial `join.policy.set` patch onto the CURRENT policy:
+    /// read, patch, validate and commit happen under the one authority
+    /// lock the caller holds, so two concurrent partial updates from two
+    /// connections cannot lose each other's fields.
+    fn lab_enrollment_active(&mut self) -> bool {
+        if self.lab_write_poisoned {
+            return false;
+        }
+        let Some((start, end)) = self.lab_enrollment_window else {
+            return false;
+        };
+        if self.join_mono_ms < start || self.join_mono_ms >= end {
+            // Unknown/backwards time never reopens an expired session.
+            self.lab_enrollment_window = None;
+            return false;
+        }
+        true
+    }
+
+    pub fn update_policy(&mut self, patch: &PolicyPatch) -> Result<String, SiteError> {
+        self.update_policy_at(patch, self.join_mono_ms)
+    }
+
+    pub fn update_policy_at(
+        &mut self,
+        patch: &PolicyPatch,
+        mono_ms: u64,
+    ) -> Result<String, SiteError> {
+        let mut policy = self.policy;
+        if let Some(zero_touch_open) = patch.zero_touch_open {
+            policy.zero_touch_open = zero_touch_open;
+        }
+        if let Some(decision_mode) = patch.decision_mode {
+            policy.decision_mode = decision_mode;
+        }
+        if let Some(decision_timeout_ms) = patch.decision_timeout_ms {
+            policy.decision_timeout_ms = decision_timeout_ms;
+        }
+        if let Some(pending_retry_after_s) = patch.pending_retry_after_s {
+            policy.pending_retry_after_s = pending_retry_after_s;
+        }
+        if mono_ms < self.join_mono_ms {
+            return Err(SiteError::new(
+                "INVALID_ARGUMENT",
+                "monotonic clock went backwards",
+            ));
+        }
+        if self.lab_write_poisoned && policy.decision_mode == DecisionMode::LabInventory {
+            return Err(SiteError::new(
+                "STORE_FAILURE",
+                "reopen the site database before rearming enrollment",
+            ));
+        }
+        if let Err(error) = self.set_policy(policy) {
+            if error.code == "STORE_FAILURE" {
+                self.lab_write_poisoned = true;
+                self.lab_enrollment_window = None;
+            }
+            return Err(error);
+        }
+        self.join_mono_ms = mono_ms;
+        if policy.decision_mode != DecisionMode::LabInventory {
+            self.lab_enrollment_window = None;
+        } else if patch.decision_mode == Some(DecisionMode::LabInventory) {
+            // Fixed one-hour maximum, volatile across daemon restarts.
+            self.lab_enrollment_window =
+                (mono_ms != 0).then(|| (mono_ms, mono_ms.saturating_add(3_600_000)));
+        }
+        Ok(self.policy_json())
     }
 
     // --- read side ------------------------------------------------------------------------------
@@ -4878,9 +5541,16 @@ impl SiteAuthority {
             .expect("authority channel poisoned")
             .stats()
             .channels;
+        let failures = self
+            .recent_relay_failures
+            .iter()
+            .map(RelayFailure::json)
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
-            "{{\"site_id\":\"{}\",\"network\":\"{}\",\"network_low32\":\"{:08x}\",\"site_epoch\":{},\"site_cert_serial\":{},\"sak_fingerprint\":\"{}\",\"device_ca_id\":\"{}\",\"rs_epoch\":{},\"gk_epoch\":{},\"gk_staged\":{staged},\"gk\":{{\"phase\":\"{phase}\",\"cause\":{cause},\"targets\":{targets},\"staged_ack\":{staged_ack},\"active_ack\":{active_ack},\"unknown\":{unknown}}},\"authority\":{{\"attached\":{authority_attached},\"channels\":{authority_channels}}},\"member_cap\":{MEMBER_CAP},\"members\":{members},\"members_unconfirmed\":{unconfirmed},\"removed\":{removed},\"discovered\":{},\"join_requests\":{},\"live_exchanges\":{},\"channel\":{},\"channel_epoch\":{},\"gateways\":[{gateways}],\"membership_revision\":{},\"ledger_seq\":{},\"storage_durable\":{},\"policy\":{},\"counters\":{},\"clock\":\"host_unix_ms\",\"now_ms\":{}}}",
+            "{{\"site_id\":\"{}\",\"purpose\":\"{}\",\"network\":\"{}\",\"network_low32\":\"{:08x}\",\"site_epoch\":{},\"site_cert_serial\":{},\"sak_fingerprint\":\"{}\",\"device_ca_id\":\"{}\",\"rs_epoch\":{},\"gk_epoch\":{},\"gk_staged\":{staged},\"gk\":{{\"phase\":\"{phase}\",\"cause\":{cause},\"targets\":{targets},\"staged_ack\":{staged_ack},\"active_ack\":{active_ack},\"unknown\":{unknown}}},\"authority\":{{\"attached\":{authority_attached},\"channels\":{authority_channels}}},\"member_cap\":{MEMBER_CAP},\"members\":{members},\"members_unconfirmed\":{unconfirmed},\"removed\":{removed},\"archived_total\":{},\"discovered\":{},\"join_requests\":{},\"live_exchanges\":{},\"recent_relay_failures\":[{failures}],\"channel\":{},\"channel_epoch\":{},\"gateways\":[{gateways}],\"membership_revision\":{},\"ledger_seq\":{},\"storage_durable\":{},\"policy\":{},\"counters\":{},\"clock\":\"host_unix_ms\",\"now_ms\":{}}}",
             h16(self.id.site_id),
+            self.purpose.name(),
             h16(self.id.network),
             self.id.network & 0xFFFF_FFFF,
             self.id.site_claims.site_epoch,
@@ -4889,6 +5559,7 @@ impl SiteAuthority {
             h16(self.id.device_ca_id),
             self.rs_epoch,
             self.gks.active_epoch(),
+            self.archived_total,
             self.discovered.len(),
             self.requests.len(),
             self.txns.len(),
@@ -4897,7 +5568,7 @@ impl SiteAuthority {
             self.revision,
             self.ledger_seq,
             self.store.durable(),
-            self.policy.json(),
+            self.policy_json(),
             self.counters.json(),
             time.unix_ms
         )
@@ -4949,6 +5620,15 @@ impl SiteAuthority {
             next.map_or_else(|| "null".to_string(), |n| format!("\"{}\"", h16(n))),
             self.discovered.len()
         )
+    }
+
+    /// Membership state for one node (`member`/`removed`), `None` when
+    /// the node is not in the ledger. Drives the legacy `NODES`
+    /// membership column so a lost route can never read as "left".
+    pub fn member_state(&self, node: u64) -> Option<&'static str> {
+        self.devices
+            .get(&node)
+            .map(|row| if row.member { "member" } else { "removed" })
     }
 
     fn member_json(row: &DeviceRow) -> String {
@@ -5366,7 +6046,7 @@ impl SiteService {
     /// gone) ends that relay's attempt as failed — re-locked after the
     /// delivery loop, so no transport mutex is ever held across an
     /// authority call and a rejection can never recurse into another
-    /// delivery (`fail_attempt` queues no outbound).
+    /// delivery (`fail_relay` queues no outbound).
     pub fn with<R>(&self, f: impl FnOnce(&mut SiteAuthority) -> R) -> (R, Events) {
         // Serialize the state change with the GK handoff: a removal cannot
         // commit while an earlier command to that member is still in send.
@@ -5420,26 +6100,41 @@ impl SiteService {
                 transport.deliver(carrier);
             }
         }
-        drop(handoff);
         if !outbound.is_empty() {
             let transport = self.transport.lock().expect("transport poisoned").clone();
             if let Some(transport) = transport {
                 let mut failed = Vec::new();
                 for message in outbound {
                     let key = message.key();
-                    if transport.deliver(message).is_err() {
-                        failed.push(key);
+                    if let Err(reject) = transport.deliver(message) {
+                        failed.push((key, reject.name()));
                     }
                 }
                 if !failed.is_empty() {
+                    let failed_at = crate::now_ms();
                     let mut authority = self.authority.lock().expect("site authority poisoned");
-                    for key in failed {
-                        authority.fail_attempt(key);
+                    for (key, reason) in failed {
+                        if let Some(failure) = authority.fail_relay(
+                            key,
+                            "downlink_rejected",
+                            reason.to_string(),
+                            failed_at,
+                        ) {
+                            events.push((failed_at, failure.event_fields()));
+                        }
+                        *authority
+                            .counters
+                            .downlink_rejected
+                            .entry(reason)
+                            .or_insert(0) += 1;
                     }
                     events.extend(authority.take_events());
                 }
             }
         }
+        // Delivery admission and its refusal share the authority update
+        // order, so another mutation cannot end the relay between them.
+        drop(handoff);
         (result, events)
     }
 

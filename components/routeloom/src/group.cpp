@@ -216,6 +216,12 @@ void MeshNode::group_mark_seen(GroupStream& stream, const std::uint32_t seq) noe
 
 // --- Source API ---------------------------------------------------------------------
 
+bool MeshNode::group_origin_servable() const noexcept {
+  // Same two gates as send_group below (flat profile, non-gateway
+  // source): kept adjacent so they cannot drift apart silently.
+  return gateway_scoped() && is_route_gateway(config_.node);
+}
+
 Status MeshNode::send_group(const GroupId group, const ByteView payload,
                             const GroupSendOptions& options, const MonotonicMs now_ms,
                             MessageId& id) noexcept {

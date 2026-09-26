@@ -529,8 +529,10 @@ class DispatchWindow {
   // non-terminal mesh states leave the slot unchanged. Mesh session restarts
   // inside one boot are outside this slice's model (firmware reboots as a
   // unit, minting a new lease that wipes the window).
-  bool note_mesh_outcome(std::uint32_t msg_session, std::uint64_t msg_seq,
-                         DeliveryState mesh_state) noexcept;
+  bool note_mesh_outcome(
+      std::uint32_t msg_session, std::uint64_t msg_seq,
+      DeliveryState mesh_state,
+      std::array<std::uint8_t, kOperationIdSize>* operation_id = nullptr) noexcept;
 
  private:
   bool lease_ok(const BootLease& lease) const noexcept {
@@ -556,9 +558,9 @@ static_assert(sizeof(DispatchWindow::Slot) <= DispatchWindow::kRecordBudgetBytes
               "window slot exceeds the 128B design RAM budget");
 
 // SUBMIT/SKIP answer. `hash`/`msg_*`/`evidence` come from the stored slot
-// whenever one exists (Ok/Existing/Conflict/SkipRefused); administrative
-// refusals (lease/lane/retired/full/invalid) echo the request seq with
-// zeroed record fields.
+// whenever one exists (Ok/Existing/Conflict/SkipRefused). MeshRejected
+// has no slot: its hash position instead holds "RLFR" | len:u8 | up to 27
+// ASCII reason bytes | zero padding. Older hosts ignore hash on refusal.
 struct DispatchReceipt {
   HostOpsSub sub{HostOpsSub::Submit};
   HostOpsResult result{HostOpsResult::Ok};

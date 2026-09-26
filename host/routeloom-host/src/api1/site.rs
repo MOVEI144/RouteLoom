@@ -1,20 +1,21 @@
 //! API1 surface of the Site Authority (docs/design/sdk-v1/07 §2, plan
 //! P3-3, G-SEC P5): `site.status`, `join.policy.get/set`,
 //! `join.requests.list`, `join.decide`, `devices.discovered.list`,
-//! `members.list/get`, `membership.revoke`, `membership.cutover`,
-//! `group_keys.status/rotate`, and `operations.get` for `op-` tokens.
+//! `members.list/get`, `membership.revoke`, `membership.archive`,
+//! `membership.cutover`, `group_keys.status/rotate`, and `operations.get`
+//! for `op-` tokens.
 //!
 //! Authorization (07 §2): `MEMBERSHIP_READ` for the read side,
 //! `MEMBERSHIP_DECIDE` for `join.decide` / `membership.revoke`,
-//! `MEMBERSHIP_ADMIN` for the policy, `membership.cutover` and
-//! `group_keys.rotate`. The network
+//! `MEMBERSHIP_ADMIN` for the policy, `membership.cutover`,
+//! `membership.archive` and `group_keys.rotate`. The network
 //! the ACL is checked on is the site's wire network (network_low32 of the
 //! SiteCert). The principal comes from the socket peer credential only;
 //! idempotency identity is `(principal, idempotency_key)`.
 //!
 //! Every successful call appends the authority's events (`join.decided`,
-//! `member.revoked`, …) to the daemon event ring — the `stream:"events"`
-//! subscribe source — after the authority lock is released.
+//! `member.revoked`, `member.archived`, …) to the daemon event ring — the
+//! `stream:"events"` subscribe source — after the authority lock is released.
 
 use routeloom_json::Json;
 
@@ -24,8 +25,8 @@ use crate::send_store::OperationStore;
 use crate::site::group_keys::HostTime;
 use crate::site::records::{parse_op_token, parse_request_token, parse_role, Verdict};
 use crate::site::{
-    parse_reason, CutoverRequest, DecideRequest, DecisionMode, Events, RevokeRequest,
-    RotateRequest, SiteError, SiteService,
+    parse_reason, ArchiveRequest, CutoverRequest, DecideRequest, DecisionMode, Events, PolicyPatch,
+    RevokeRequest, RotateRequest, SiteError, SiteService, ARCHIVE_BATCH_MAX,
 };
 
 /// `limit` ceiling of the paged site listings.
@@ -34,12 +35,19 @@ pub const SITE_PAGE_MAX: usize = 128;
 /// Kinds the Site Authority appends to the event ring (also accepted by
 /// `messages.subscribe {stream:"events", filter:{kinds:[...]}}`).
 pub const SITE_EVENT_KINDS: &[&str] = &[
+    "authority.channel_lost",
+    "authority.channel_ready",
+    "authority.passthrough",
+    "authority.pull",
+    "authority.pull_throttled",
     "join.request",
     "join.decided",
+    "join_relay_failed",
     "device.discovered",
     "member.reissued",
     "member.confirmed",
     "member.revoked",
+    "member.archived",
     "member.removal_notified",
     "rrs.published",
     "cutover.progress",
@@ -60,6 +68,7 @@ pub const SITE_METHODS: &[&str] = &[
     "members.list",
     "members.get",
     "membership.revoke",
+    "membership.archive",
     "membership.cutover",
     "group_keys.status",
     "group_keys.rotate",
@@ -207,6 +216,7 @@ pub(super) fn dispatch<S: OperationStore>(
         "members.list" => members_list,
         "members.get" => members_get,
         "membership.revoke" => membership_revoke,
+        "membership.archive" => membership_archive,
         "membership.cutover" => membership_cutover,
         "group_keys.status" => group_keys_status,
         "group_keys.rotate" => group_keys_rotate,
@@ -249,7 +259,7 @@ fn policy_get<S: OperationStore>(
     only(params, &[])?;
     let service = service(ctx)?;
     authorize(ctx, service, acl::PERM_MEMBERSHIP_ADMIN, "MEMBERSHIP_ADMIN")?;
-    Ok(service.with(|a| a.policy().json()).0)
+    Ok(service.with(|a| a.policy_json()).0)
 }
 
 fn policy_set<S: OperationStore>(
@@ -268,32 +278,46 @@ fn policy_set<S: OperationStore>(
     let service = service(ctx)?;
     authorize(ctx, service, acl::PERM_MEMBERSHIP_ADMIN, "MEMBERSHIP_ADMIN")?;
     let invalid = |m: &str| ApiError::simple("INVALID_ARGUMENT", m);
-    let mut policy = service.with(|a| a.policy()).0;
+    // Parse into a patch WITHOUT reading the policy: the read-modify-write
+    // below runs inside one authority lock, so a concurrent partial update
+    // cannot slip between our read and our write.
+    let mut patch = PolicyPatch::default();
     if let Some(value) = params.get("zero_touch_open") {
-        policy.zero_touch_open = value
-            .as_bool()
-            .ok_or_else(|| invalid("zero_touch_open must be a boolean"))?;
+        patch.zero_touch_open = Some(
+            value
+                .as_bool()
+                .ok_or_else(|| invalid("zero_touch_open must be a boolean"))?,
+        );
     }
     if let Some(value) = params.get("decision_mode") {
-        policy.decision_mode = match value.as_str() {
+        patch.decision_mode = Some(match value.as_str() {
             Some("kguard") => DecisionMode::Kguard,
             Some("closed") => DecisionMode::Closed,
-            _ => return Err(invalid("decision_mode must be \"kguard\" or \"closed\"")),
-        };
+            Some("lab_inventory") => DecisionMode::LabInventory,
+            _ => {
+                return Err(invalid(
+                    "decision_mode must be \"kguard\", \"closed\" or \"lab_inventory\"",
+                ))
+            }
+        });
     }
     if let Some(value) = params.get("decision_timeout_ms") {
-        policy.decision_timeout_ms = value
-            .as_u64()
-            .and_then(|v| u16::try_from(v).ok())
-            .ok_or_else(|| invalid("decision_timeout_ms must be 500..=5000"))?;
+        patch.decision_timeout_ms = Some(
+            value
+                .as_u64()
+                .and_then(|v| u16::try_from(v).ok())
+                .ok_or_else(|| invalid("decision_timeout_ms must be 500..=5000"))?,
+        );
     }
     if let Some(value) = params.get("pending_retry_after_s") {
-        policy.pending_retry_after_s = value
-            .as_u64()
-            .and_then(|v| u32::try_from(v).ok())
-            .ok_or_else(|| invalid("pending_retry_after_s must be 30..=3600"))?;
+        patch.pending_retry_after_s = Some(
+            value
+                .as_u64()
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or_else(|| invalid("pending_retry_after_s must be 30..=3600"))?,
+        );
     }
-    let (result, events) = service.with(|a| a.set_policy(policy));
+    let (result, events) = service.with(|a| a.update_policy_at(&patch, ctx.now_mono));
     push_events(ctx, events);
     Ok(result?)
 }
@@ -501,6 +525,50 @@ fn membership_revoke<S: OperationStore>(
     Ok(result?)
 }
 
+fn membership_archive<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    only(params, &["device_ids", "idempotency_key"])?;
+    let service = service(ctx)?;
+    // Bulk forget deletes audit rows: the join desk's DECIDE role must not
+    // reach it — ADMIN only (07 §2.2).
+    let principal = authorize(ctx, service, acl::PERM_MEMBERSHIP_ADMIN, "MEMBERSHIP_ADMIN")?;
+    let ids = params
+        .get("device_ids")
+        .and_then(Json::as_array)
+        .ok_or_else(|| {
+            ApiError::simple(
+                "INVALID_ARGUMENT",
+                "device_ids must be a non-empty array of 16-hex node ids",
+            )
+        })?;
+    if ids.is_empty() || ids.len() > ARCHIVE_BATCH_MAX {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            &format!("device_ids must hold 1..={ARCHIVE_BATCH_MAX} node ids"),
+        ));
+    }
+    let mut devices = Vec::with_capacity(ids.len());
+    for id in ids {
+        devices.push(
+            id.as_str()
+                .and_then(|t| super::parse_hex_u64(&t.to_ascii_lowercase()))
+                .ok_or_else(|| {
+                    ApiError::simple(
+                        "INVALID_ARGUMENT",
+                        "device_ids must be a non-empty array of 16-hex node ids",
+                    )
+                })?,
+        );
+    }
+    let key = idempotency_key(params)?;
+    let (result, events) =
+        service.with(|a| a.archive_removed(principal, ArchiveRequest { devices, key }, ctx.now_ms));
+    push_events(ctx, events);
+    Ok(result?)
+}
+
 fn membership_cutover<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
@@ -658,4 +726,23 @@ pub(super) fn capability_json<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Str
     format!(
         "{{\"configured\":{configured},\"edhoc\":\"rfc9528-method0-suite2\",\"verdicts\":[\"allow\",\"pending\",\"deny\"],\"permissions\":[\"MEMBERSHIP_READ\",\"MEMBERSHIP_DECIDE\",\"MEMBERSHIP_ADMIN\"],\"page_max\":{SITE_PAGE_MAX},\"events\":[{kinds}],\"join_relay\":\"{join_relay}\",\"distribution\":\"{distribution}\",\"storage_durable\":{durable}}}"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SITE_EVENT_KINDS;
+
+    #[test]
+    fn join_relay_failures_can_be_filtered_and_advertised() {
+        for kind in [
+            "join_relay_failed",
+            "authority.channel_ready",
+            "authority.channel_lost",
+            "authority.pull",
+            "authority.pull_throttled",
+            "authority.passthrough",
+        ] {
+            assert!(SITE_EVENT_KINDS.contains(&kind), "missing {kind}");
+        }
+    }
 }

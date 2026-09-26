@@ -13,6 +13,7 @@ from pathlib import Path
 
 from routeloom_meshviz.model import FakeClock, State, reduce, route_hops
 from routeloom_meshviz.capture import Capture, replay
+from routeloom_meshviz.playback import CaptureReader, export_capture
 from routeloom_meshviz.fake_api1 import FakeAPI1, serve_fake_api1
 from routeloom_meshviz.device import (Identity, Port, reconcile, PortLeases,
                                      Image, FlashPlan, run_batch, import_rig)
@@ -410,6 +411,48 @@ class ModelTests(unittest.TestCase):
                 self.assertIn('metric_series_time', indexes)
             self.assertEqual(replay(path).samples['s:rssi']['value'], -40)
 
+    def test_old_capture_with_legacy_sample_table_stays_readable(self):
+        # The pre-index layout stores metric_samples(seq, series,
+        # value_json); sample timestamps live on the joined events row.
+        # Readers must serve old captures, not raise OperationalError.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'old.rlcapture'
+            path.mkdir()
+            (path / 'manifest.json').write_text(json.dumps(
+                {'schema_version': 1, 'capture_id': 'old',
+                 'max_uncommitted_seconds': 1, 'closed': True}))
+            db = sqlite3.connect(path / 'data.sqlite')
+            try:
+                db.execute('PRAGMA user_version=1')
+                db.executescript('''
+                    CREATE TABLE events(seq INTEGER PRIMARY KEY, t_mono_ns INTEGER NOT NULL,
+                      t_unix_ns INTEGER NOT NULL, source TEXT, source_epoch TEXT,
+                      source_seq INTEGER, kind TEXT NOT NULL, scope TEXT, payload_json TEXT NOT NULL);
+                    CREATE TABLE metric_samples(seq INTEGER PRIMARY KEY, series TEXT, value_json TEXT);
+                    CREATE TABLE trial_runs(id TEXT PRIMARY KEY, plan_json TEXT);
+                    CREATE TABLE trial_messages(id TEXT PRIMARY KEY, result_json TEXT);
+                    CREATE TABLE checkpoints(seq INTEGER PRIMARY KEY, t_mono_ns INTEGER, state_json TEXT);
+                    CREATE TABLE metadata(key TEXT PRIMARY KEY, value_json TEXT);
+                ''')
+                event = {'schema_version': 1, 'source': 'daemon', 'scope': 's',
+                         'kind': 'sample', 'payload': {'series': 'rssi', 'value': -40}}
+                db.execute('INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?)',
+                           (1, 123_000_000, 456_000_000,
+                            'daemon', None, None, 'sample', 's', json.dumps(event)))
+                db.execute('INSERT INTO metric_samples VALUES (?,?,?)',
+                           (1, 'rssi', json.dumps(event['payload'])))
+                db.commit()
+            finally:
+                db.close()
+            self.assertEqual(replay(path).samples['s:rssi']['value'], -40)
+            reader = CaptureReader(path)
+            try:
+                self.assertEqual(reader.series(1)['rssi'], [(456, -40)])
+            finally:
+                reader.close()
+            out = export_capture(path, Path(td) / 'out')
+            self.assertEqual(len((out / 'samples.csv').read_text().splitlines()), 2)
+
     def test_closed_capture_has_versioned_manifest_and_database_digest(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / 'test.rlcapture'
@@ -475,6 +518,7 @@ class ModelTests(unittest.TestCase):
         capabilities = ask('c', 'capabilities.get')
         self.assertEqual(capabilities['v'], 1)
         self.assertTrue(capabilities['result']['methods']['nodes.list'])
+        self.assertEqual(capabilities['result']['caps_version'], 1)
         first = ask('n1', 'nodes.list', {'limit': 2})
         self.assertEqual([n['node'] for n in first['result']['nodes']],
                          ['0000000000000001', '0000000000000002'])
@@ -649,8 +693,13 @@ class DeviceTests(unittest.TestCase):
             expected = Identity('esp32c3', '1', self.a.base_mac, None,
                                 '164020', 4 * 1024 * 1024, False, False)
             api = API()
-            flash('COM1', FlashPlan(expected, 'esp32c3', (image,), True,
-                                   self.a.base_mac, True), api)
+            with patch('routeloom_meshviz.flash_worker.verify_bundle', return_value={
+                    'chip': 'esp32c3', 'chip_revision_range': [0, 255],
+                    'minimum_flash_bytes': 0x1b0000,
+                    'files': [{'offset': image.offset, 'path': 'app.bin',
+                               'size': image.size, 'sha256': image.sha256}]}):
+                flash('COM1', FlashPlan(expected, 'esp32c3', (image,), True,
+                                       self.a.base_mac, True, Path(td)), api)
             self.assertEqual(api.written, [(0x10000, b'image')])
             self.assertEqual(api.assert_images, api.written)
 
@@ -727,22 +776,29 @@ class DeviceTests(unittest.TestCase):
             image = Image(0x10000, p, 5, hashlib.sha256(b'image').hexdigest())
             expected = Identity('esp32c3', '1', self.a.base_mac, None,
                                 '164020', 4 * 1024 * 1024, False, False)
-            plan = FlashPlan(expected, 'esp32c3', (image,), True, self.a.base_mac, True)
+            plan = FlashPlan(expected, 'esp32c3', (image,), True, self.a.base_mac, True,
+                             Path(td))
+            verifier = patch('routeloom_meshviz.flash_worker.verify_bundle', return_value={
+                'chip': 'esp32c3', 'chip_revision_range': [0, 255],
+                'minimum_flash_bytes': 0x1b0000,
+                'files': [{'offset': image.offset, 'path': 'app.bin',
+                           'size': image.size, 'sha256': image.sha256}]})
+            verifier.start()
+            self.addCleanup(verifier.stop)
             api = API(False)
             flash('COM1', plan, api)
             self.assertEqual(api.writes, [api.rom, api.rom])
             self.assertTrue(api.rom.closed)
             api = API(False)
             with patch.dict(sys.modules, {'esptool': api}):
-                with self.assertRaises(ValueError):
-                    flash('COM1', plan)
-            self.assertEqual(api.writes, [])
+                flash('COM1', plan)
+            self.assertEqual(api.writes, [api.rom, api.rom])
             api = API(False)
             claimed_sta = Identity('esp32c3', '1', self.a.base_mac, self.a.base_mac,
                                    '164020', 4 * 1024 * 1024, False, False)
             with self.assertRaises(ValueError):
                 flash('COM1', FlashPlan(claimed_sta, 'esp32c3', (image,), True,
-                                       self.a.base_mac, True), api)
+                                       self.a.base_mac, True, Path(td)), api)
             self.assertEqual(api.writes, [])
             api = API(None)
             with self.assertRaises(ValueError):

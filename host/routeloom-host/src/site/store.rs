@@ -137,13 +137,15 @@ impl Drop for DeviceRow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LedgerRow {
     pub seq: u64,
-    /// "approve", "revoke", "reissue" or "cutover".
+    /// "approve", "revoke", "reissue", "cutover" or "archive".
     pub kind: String,
     pub node: u64,
     pub kid: [u8; 32],
     pub generation: u32,
-    /// SHA-256 of the MemberCert (approve/reissue), of the RRS1 object
-    /// (revoke) or of the CutoverCommit object (cutover).
+    /// SHA-256 of the MemberCert (approve/reissue/archive — the archived
+    /// row's last MemberCert, binding the entry to the credential being
+    /// forgotten), of the RRS1 object (revoke) or of the CutoverCommit
+    /// object (cutover).
     pub digest: [u8; 32],
     pub ms: u64,
     pub hash: [u8; 32],
@@ -191,7 +193,12 @@ pub enum RotationWrite {
 pub struct Batch {
     pub meta: Vec<(&'static str, Vec<u8>)>,
     pub devices: Vec<DeviceRow>,
+    /// Delete exactly these device rows (archive drops removed rows; the
+    /// ledger keeps every row, so the no-reissue history survives).
+    pub devices_delete: Vec<u64>,
     pub ledger: Vec<LedgerRow>,
+    /// Append-only approval actor/policy record, keyed by operation id.
+    pub approval_audit: Vec<(u64, String)>,
     pub rrs: Vec<(u32, Vec<u8>)>,
     pub group_keys: Vec<GroupKeyRow>,
     /// Delete group keys with an epoch below this.
@@ -210,7 +217,9 @@ impl Batch {
     pub fn is_empty(&self) -> bool {
         self.meta.is_empty()
             && self.devices.is_empty()
+            && self.devices_delete.is_empty()
             && self.ledger.is_empty()
+            && self.approval_audit.is_empty()
             && self.rrs.is_empty()
             && self.group_keys.is_empty()
             && self.group_keys_below.is_none()
@@ -227,6 +236,7 @@ pub struct Snapshot {
     pub meta: BTreeMap<String, Vec<u8>>,
     pub devices: Vec<DeviceRow>,
     pub ledger: Vec<LedgerRow>,
+    pub approval_audit: Vec<(u64, String)>,
     pub rrs: Vec<(u32, Vec<u8>)>,
     pub group_keys: Vec<GroupKeyRow>,
     pub gk_rotation: Option<RotationRow>,
@@ -243,7 +253,12 @@ impl Snapshot {
             self.devices.retain(|d| d.node != row.node);
             self.devices.push(row.clone());
         }
+        for node in &batch.devices_delete {
+            self.devices.retain(|d| &d.node != node);
+        }
         self.ledger.extend(batch.ledger.iter().cloned());
+        self.approval_audit
+            .extend(batch.approval_audit.iter().cloned());
         for (epoch, object) in &batch.rrs {
             self.rrs.retain(|(e, _)| e != epoch);
             self.rrs.push((*epoch, object.clone()));
@@ -362,6 +377,58 @@ fn arr32(mut bytes: Vec<u8>, what: &str) -> Result<[u8; 32], StoreError> {
     Ok(out)
 }
 
+/// Schema every site database owns (created by [`SqliteSiteStore::open`]).
+const SITE_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value BLOB NOT NULL);
+             CREATE TABLE IF NOT EXISTS devices (
+                node INTEGER PRIMARY KEY, kid BLOB NOT NULL, dev_cert BLOB NOT NULL,
+                model INTEGER NOT NULL, hw_rev INTEGER NOT NULL, cert_serial INTEGER NOT NULL,
+                member INTEGER NOT NULL, generation INTEGER NOT NULL, role INTEGER NOT NULL,
+                member_cert BLOB NOT NULL, member_cert_serial INTEGER NOT NULL,
+                confirmed INTEGER NOT NULL, dams BLOB NOT NULL, approved_ms INTEGER NOT NULL,
+                delivered_ms INTEGER, confirmed_ms INTEGER, last_seen_ms INTEGER,
+                removed_ms INTEGER, removal_reason INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS ledger (
+                seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, node INTEGER NOT NULL,
+                kid BLOB NOT NULL, generation INTEGER NOT NULL, digest BLOB NOT NULL,
+                ms INTEGER NOT NULL, hash BLOB NOT NULL);
+             CREATE TABLE IF NOT EXISTS approval_audit (
+                operation_id INTEGER PRIMARY KEY, body TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS rrs (rs_epoch INTEGER PRIMARY KEY, object BLOB NOT NULL);
+             CREATE TABLE IF NOT EXISTS group_keys (
+                gk_epoch INTEGER PRIMARY KEY, gk BLOB NOT NULL, state TEXT NOT NULL,
+                created_ms INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS gk_rotation (
+                operation_id INTEGER PRIMARY KEY, from_epoch INTEGER NOT NULL,
+                to_epoch INTEGER NOT NULL, cause INTEGER NOT NULL, phase TEXT NOT NULL,
+                members_revision INTEGER NOT NULL, created_ms INTEGER NOT NULL,
+                activated_ms INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS gk_targets (
+                rotation INTEGER NOT NULL, node INTEGER NOT NULL, kid BLOB NOT NULL,
+                generation INTEGER NOT NULL, state TEXT NOT NULL,
+                confirmed_epoch INTEGER NOT NULL, confirmed_gkid BLOB,
+                last_contact_ms INTEGER, PRIMARY KEY (rotation, node));
+             CREATE TABLE IF NOT EXISTS docs (
+                kind TEXT NOT NULL, key TEXT NOT NULL, body TEXT NOT NULL,
+                PRIMARY KEY (kind, key));
+             CREATE INDEX IF NOT EXISTS ledger_node_idx ON ledger (node);";
+
+/// Tables that may hold site rows: an existing database without a schema
+/// version is only safe to (re)initialize when NONE of these exists with
+/// rows — any row means a real database lost its version, which must stay
+/// an error rather than a silent wipe.
+const SITE_TABLES: &[&str] = &[
+    "meta",
+    "devices",
+    "ledger",
+    "approval_audit",
+    "rrs",
+    "group_keys",
+    "gk_rotation",
+    "gk_targets",
+    "docs",
+];
+
 impl SqliteSiteStore {
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         let fresh = !path.exists();
@@ -401,53 +468,18 @@ impl SqliteSiteStore {
         conn.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         if fresh {
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value BLOB NOT NULL);
-             CREATE TABLE IF NOT EXISTS devices (
-                node INTEGER PRIMARY KEY, kid BLOB NOT NULL, dev_cert BLOB NOT NULL,
-                model INTEGER NOT NULL, hw_rev INTEGER NOT NULL, cert_serial INTEGER NOT NULL,
-                member INTEGER NOT NULL, generation INTEGER NOT NULL, role INTEGER NOT NULL,
-                member_cert BLOB NOT NULL, member_cert_serial INTEGER NOT NULL,
-                confirmed INTEGER NOT NULL, dams BLOB NOT NULL, approved_ms INTEGER NOT NULL,
-                delivered_ms INTEGER, confirmed_ms INTEGER, last_seen_ms INTEGER,
-                removed_ms INTEGER, removal_reason INTEGER NOT NULL);
-             CREATE TABLE IF NOT EXISTS ledger (
-                seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, node INTEGER NOT NULL,
-                kid BLOB NOT NULL, generation INTEGER NOT NULL, digest BLOB NOT NULL,
-                ms INTEGER NOT NULL, hash BLOB NOT NULL);
-             CREATE TABLE IF NOT EXISTS rrs (rs_epoch INTEGER PRIMARY KEY, object BLOB NOT NULL);
-             CREATE TABLE IF NOT EXISTS group_keys (
-                gk_epoch INTEGER PRIMARY KEY, gk BLOB NOT NULL, state TEXT NOT NULL,
-                created_ms INTEGER NOT NULL);
-             CREATE TABLE IF NOT EXISTS gk_rotation (
-                operation_id INTEGER PRIMARY KEY, from_epoch INTEGER NOT NULL,
-                to_epoch INTEGER NOT NULL, cause INTEGER NOT NULL, phase TEXT NOT NULL,
-                members_revision INTEGER NOT NULL, created_ms INTEGER NOT NULL,
-                activated_ms INTEGER NOT NULL);
-             CREATE TABLE IF NOT EXISTS gk_targets (
-                rotation INTEGER NOT NULL, node INTEGER NOT NULL, kid BLOB NOT NULL,
-                generation INTEGER NOT NULL, state TEXT NOT NULL,
-                confirmed_epoch INTEGER NOT NULL, confirmed_gkid BLOB,
-                last_contact_ms INTEGER, PRIMARY KEY (rotation, node));
-             CREATE TABLE IF NOT EXISTS docs (
-                kind TEXT NOT NULL, key TEXT NOT NULL, body TEXT NOT NULL,
-                PRIMARY KEY (kind, key));
-             CREATE INDEX IF NOT EXISTS ledger_node_idx ON ledger (node);",
-            )?;
-            conn.execute(
-                "INSERT INTO meta (name, value) VALUES ('schema_version', ?1)",
-                params![SCHEMA_VERSION.to_be_bytes().to_vec()],
-            )?;
+            Self::init_schema(&mut conn)?;
             return Ok(Self { conn });
         }
-        let version: Option<Vec<u8>> = conn
-            .query_row(
-                "SELECT value FROM meta WHERE name='schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
+        let version = Self::schema_version(&conn)?;
         match version {
+            None if Self::is_pristine(&conn)? => {
+                // Interrupted init (empty file, partial schema, no rows
+                // anywhere): complete the initialization instead of
+                // refusing to start.
+                Self::init_schema(&mut conn)?;
+                return Ok(Self { conn });
+            }
             None => {
                 return Err(StoreError(format!(
                     "site store {} has no schema version",
@@ -467,8 +499,79 @@ impl SqliteSiteStore {
         }
         // Additive, versionless: old databases gain the recovery index
         // on open (no data moves, no version bump).
-        conn.execute_batch("CREATE INDEX IF NOT EXISTS ledger_node_idx ON ledger (node);")?;
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS ledger_node_idx ON ledger (node);
+            CREATE TABLE IF NOT EXISTS approval_audit (operation_id INTEGER PRIMARY KEY, body TEXT NOT NULL);")?;
         Ok(Self { conn })
+    }
+
+    /// Creates the schema and stamps the version in ONE transaction: a
+    /// crash anywhere inside leaves an unversioned database the next open
+    /// re-initializes (see `is_pristine`), never a half-schema that reads
+    /// as complete. Partial tables from an interrupted init are dropped
+    /// first — pristine means they hold no rows, so drop-then-create
+    /// always lands the canonical schema rather than keeping a divergent
+    /// one behind `IF NOT EXISTS`.
+    fn init_schema(conn: &mut Connection) -> Result<(), StoreError> {
+        let tx = conn.transaction()?;
+        let mut drop = String::from("DROP INDEX IF EXISTS ledger_node_idx;");
+        for table in SITE_TABLES {
+            drop.push_str(&format!("DROP TABLE IF EXISTS {table};"));
+        }
+        tx.execute_batch(&drop)?;
+        tx.execute_batch(SITE_SCHEMA)?;
+        tx.execute(
+            "INSERT INTO meta (name, value) VALUES ('schema_version', ?1)",
+            params![SCHEMA_VERSION.to_be_bytes().to_vec()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Stamped schema version: `None` when the `meta` table or the version
+    /// row is missing (interrupted init — never queried as an error).
+    fn schema_version(conn: &Connection) -> Result<Option<Vec<u8>>, StoreError> {
+        let meta: Option<String> = conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='meta'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if meta.is_none() {
+            return Ok(None);
+        }
+        Ok(conn
+            .query_row(
+                "SELECT value FROM meta WHERE name='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// True when no site table exists with rows: only such a database may
+    /// be (re)initialized — anything else lost its version for real.
+    fn is_pristine(conn: &Connection) -> Result<bool, StoreError> {
+        for table in SITE_TABLES {
+            let exists: Option<String> = conn
+                .query_row(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?1",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if exists.is_none() {
+                continue;
+            }
+            let count: i64 =
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })?;
+            if count != 0 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Version 1 → 2 inside one transaction: empty tables gain nothing but
@@ -841,6 +944,9 @@ impl SiteStore for SqliteSiteStore {
                 ],
             )?;
         }
+        for node in &batch.devices_delete {
+            tx.execute("DELETE FROM devices WHERE node = ?1", params![i(*node)])?;
+        }
         for l in &batch.ledger {
             tx.execute(
                 "INSERT INTO ledger (seq, kind, node, kid, generation, digest, ms, hash)
@@ -926,6 +1032,12 @@ impl SiteStore for SqliteSiteStore {
                 ],
             )?;
         }
+        for (op_id, body) in &batch.approval_audit {
+            tx.execute(
+                "INSERT INTO approval_audit (operation_id, body) VALUES (?1, ?2)",
+                params![i(*op_id), body],
+            )?;
+        }
         for (kind, key, body) in &batch.docs {
             match body {
                 Some(json) => {
@@ -995,6 +1107,7 @@ mod tests {
             let batch = Batch {
                 meta: vec![("rs_epoch", 5_u32.to_be_bytes().to_vec())],
                 devices: vec![device.clone()],
+                devices_delete: Vec::new(),
                 ledger: vec![LedgerRow {
                     seq: 1,
                     kind: "approve".into(),
@@ -1005,6 +1118,7 @@ mod tests {
                     ms: 100,
                     hash: [2; 32],
                 }],
+                approval_audit: vec![(1, "{\"actor\":\"test\"}".into())],
                 rrs: vec![(5, vec![0xD2])],
                 group_keys: vec![GroupKeyRow {
                     epoch: 1,
@@ -1046,6 +1160,16 @@ mod tests {
         let second = SqliteSiteStore::open(&path).and_then(|mut s| s.load());
         assert!(second.is_err());
         drop(store);
+        let conn = Connection::open(&path).unwrap();
+        let audit: String = conn
+            .query_row(
+                "SELECT body FROM approval_audit WHERE operation_id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(audit.contains("\"actor\""));
+        drop(conn);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -1378,6 +1502,84 @@ mod tests {
         let snapshot = store.load().unwrap();
         assert_eq!(snapshot.gk_rotation, None);
         assert!(snapshot.gk_targets.is_empty());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    fn owner_only(path: &std::path::Path) {
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+    }
+
+    #[test]
+    fn interrupted_init_empty_file_reopens() {
+        // Crash between file creation and schema commit: the next open
+        // must initialize the empty file, not refuse it.
+        let db = temp_path("interrupted-empty");
+        std::fs::write(&db, []).unwrap();
+        #[cfg(unix)]
+        owner_only(&db);
+        drop(SqliteSiteStore::open(&db).unwrap());
+        let mut store = SqliteSiteStore::open(&db).unwrap();
+        let snapshot = store.load().unwrap();
+        assert!(snapshot.devices.is_empty());
+        drop(store);
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn interrupted_init_partial_schema_without_rows_is_completed() {
+        // Crash mid-schema: tables exist but no version and no rows — the
+        // next open completes the initialization.
+        let db = temp_path("interrupted-partial");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (name TEXT PRIMARY KEY, value BLOB NOT NULL);
+             CREATE TABLE devices (node INTEGER PRIMARY KEY, kid BLOB NOT NULL);",
+        )
+        .unwrap();
+        drop(conn);
+        #[cfg(unix)]
+        owner_only(&db);
+        let mut store = SqliteSiteStore::open(&db).unwrap();
+        // The narrow foreign `devices` table is gone: a full load reads
+        // every canonical column.
+        store.load().unwrap();
+        drop(store);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let version: Vec<u8> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE name='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_be_bytes());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn unversioned_database_with_rows_is_still_rejected() {
+        // A version row lost from a database that holds data must stay an
+        // error — re-initializing would silently wipe real rows.
+        let db = temp_path("interrupted-used");
+        {
+            let store = SqliteSiteStore::open(&db).unwrap();
+            drop(store);
+        }
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("DELETE FROM meta WHERE name='schema_version'", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO meta (name, value) VALUES ('rs_epoch', x'00000001')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        match SqliteSiteStore::open(&db) {
+            Ok(_) => panic!("unversioned database with rows must be rejected"),
+            Err(error) => assert!(error.0.contains("no schema version"), "{error:?}"),
+        }
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 }

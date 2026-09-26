@@ -4,7 +4,7 @@
 
 Rust製routeloom-hostがUSB adapterを所有し、routeloomctlとTUI、利用アプリが同じHost APIへ接続する。PC上のアプリをESP32へ載せる必要はない。ESP32側にはGateway bridge＋通常Mesh SDKをビルドする。
 
-v0.1実装の状況：daemonは`--socket`（既定`/tmp/routeloom.sock`）の行指向Unix socket APIを提供する。コマンドは`STATUS`／`DIAGNOSTICS`（カウンタJSON）、`SEND <node> <hex>`、`ADAPTER`（機器・session・credit・カウンタ）、`NODES`（観測node一覧）、`DELIVERIES`（配送追跡）、`EVENTS`（有界event ring）、`AUTHORITY`（現状unknown返却）、`AUTONOMY`（EXPERIMENTAL：機器がDiagnostic経由で実際に報告した発見／migration event由来のmode・phase・判定・gate detail。未報告fieldはnull）、`QUIT`。これに加えてAPI1 JSON request面（`API1 <json>`）が§3のmethod一部を実装済み：`capabilities.get`、`messages.read/submit`、`operations.open_epoch/get/get_by_key/cancel`、`gateway.resolve/get`、`config.challenge/status/propose/get`（EXPERIMENTAL・dev profile。device capability未交渉・ACL不足・未登録はhonest拒否）、`link.get`、`nodes.list/get`（§9）、`group.send/get`（§10、EXPERIMENTAL）、SDK v1 Site Authorityの`site.status`・`join.policy.get/set`・`join.requests.list`・`join.decide`・`devices.discovered.list`・`members.list/get`・`membership.revoke`（§11、EXPERIMENTAL、`--site-authority`指定時）。`NODES`は機器がnode_status_v1（[USB §7](usb-protocol.md)）で報告した接続状態・RSSI・直結hop数を返し、報告の無いnodeだけ`unknown`とする。`routeloomctl`は1コマンド接続、`routeloom-tui`は同一JSONをpollして全画面を描画する観測者で、USB deviceは開かない。これは版管理RPC schema（§3）の前段の開発profileであり、authority・承認済みmembership等daemonに情報源が無いfieldは`unknown`として返す。
+v0.1実装の状況：daemonは`--socket`（既定`/tmp/routeloom.sock`）の行指向Unix socket APIを提供する。コマンドは`STATUS`／`DIAGNOSTICS`（カウンタJSON）、`SEND <node> <hex>`、`ADAPTER`（機器・session・credit・カウンタ）、`NODES`（観測node一覧）、`DELIVERIES`（配送追跡）、`EVENTS`（有界event ring）、`AUTHORITY`（現状unknown返却）、`AUTONOMY`（EXPERIMENTAL：機器がDiagnostic経由で実際に報告した発見／migration event由来のmode・phase・判定・gate detail。未報告fieldはnull）、`QUIT`。これに加えてAPI1 JSON request面（`API1 <json>`）が§3のmethod一部を実装済み：`capabilities.get`、`messages.read/submit`、`operations.open_epoch/get/get_by_key/cancel`、`gateway.resolve/get`、`config.challenge/status/propose/get`（EXPERIMENTAL・dev profile。device capability未交渉・ACL不足・未登録はhonest拒否）、`link.get`、`nodes.list/get`（§9）、`group.send/get`（§10、EXPERIMENTAL）、`diagnostics.snapshot`（RF snapshotをobserver／peer指定で取得、EXPERIMENTAL）、SDK v1 Site Authorityの`site.status`・`join.policy.get/set`・`join.requests.list`・`join.decide`・`devices.discovered.list`・`members.list/get`・`membership.revoke`（§11、EXPERIMENTAL、`--site-authority`指定時）。`NODES`は機器がnode_status_v1（[USB §7](usb-protocol.md)）で報告した接続状態・RSSI・直結hop数を返し、報告の無いnodeだけ`unknown`とする。`routeloomctl`は1コマンド接続、`routeloom-tui`は同一JSONをpollして全画面を描画する観測者で、USB deviceは開かない。これは版管理RPC schema（§3）の前段の開発profileであり、authority・承認済みmembership等daemonに情報源が無いfieldは`unknown`として返す。
 
 一つのdaemonが複数USB adapterと複数ネットワークを扱える。adapter、Network、Gateway、host serviceを別の識別子にする。相互転送は明示許可がある場合だけで、v1は異Networkの透過bridgeを提供しない。
 
@@ -33,6 +33,14 @@ Linux常駐、macOS/Windows開発利用を設計対象にする。USB device pat
 | objects.transfer/status | bounded保守転送 |
 
 API受付のoperation IDと無線Message IDは別に返す。idempotency keyはhost再接続後も指定scope内で有効。操作成功、管理commit、機器へのapplyを別stateで返す。
+
+**capabilities互換方針**。`capabilities.get` の応答文書は版付き（`caps_version`、現在 1）で、field・method は additive-only（追加のみ。改名・削除は版上げと仕様更新を伴う）。client は未知の field・method を ignore unknown（無視）し、文書全体の厳密一致で判定しない。版と方針の正本は [mesh-profiles.json](../reference/mesh-profiles.json) の `capabilities`。
+
+**profile 3軸**。security（`DEV_RAM`／`MEMBER_EDHOC`、互換用 `LEGACY_FIXTURE`）、routing（`FLAT`／`GATEWAY_SCOPED`）、resource（`leaf-small`／`relay-c3`／`gateway-s3`）。名前・値・成熟度（main／pr／proposal）の契約と根拠への参照は mesh-profiles.json が正本。これは repository の実装・提案状況を表し、接続中の gateway の構成や本番認定（Production 表示）を示さない。現行 capabilities.get は gateway の実効 security profile を広告しない。
+
+**受信記録の assurance**。現行 `messages.read` と購読通知は常に `{"profile":"UNKNOWN","origin":"unverified"}` を返す。USB session は gateway と network を認証するが、DataFromMesh／GATEWAY_INGRESS には gateway の実効 security profile、当該フレームの origin↔credential 検証結果、site epoch がない。`UNKNOWN` は daemon に本人確認の証拠がないという意味であり、検証失敗を示す値ではない。Site Authority の有無や台帳登録から DevRam／Member を推測せず、Member の security 判定に合格としない。検証結果を運ぶ USB HostOps 拡張まで、この値は固定する。
+
+**診断の正本**。失敗 `reason` は領域ごと（送信結果の `device_outcome`、group の `REFUSED` reason、event ring の `rx_drop` 等）で語彙が異なり、横断の共通 enum は設けない。欠落は `CURSOR_GAP`（cursor 読出し）、購読の in-band `gap` marker（追い出し範囲）、capture の `UncleanEnd`（未完了末尾）を使い分ける。`diagnostics.snapshot` は RF telemetry の on-demand 照会であり、legacy `DIAGNOSTICS`（daemon 内部 counter）とは別物。RF 取得路は telemetry lane、機器状態の購読は `events` stream が正本。
 
 ## 4. ローカル接続と認可
 
@@ -174,6 +182,8 @@ routeloomctl group-get --id grp00000001000000a1 --wait-ms 15000
 
 現場PCのdaemonがSDK v1のSite Authority（[設計07](../design/sdk-v1/07-host-api-tooling.md)、[02 §8](../design/sdk-v1/02-zero-touch-join.md)）を兼ねる。SAKはESP32に置かない。参加する機器とEDHOC（RFC 9528 method 0、suite 2）を直接行い、身元（DevCert）を検証してからKGuardに参加可否を聞き、答えをMemberCert・SitePackage・RemovalNoticeとして暗号的に執行する。
 
+**開発 site 作成**：`routeloomctl lab-site-init --spec FILE --out DIR`（spec format `routeloom-lab-site-spec-v1`、16桁hex `site_id`/`device_ca_id`/`site_ca_id`、8桁hex `network_low32`、`channel` 1..14、`gateways` 16桁hex 1..4件）。空の DIR のみ許可し、site ごとの CA・SAK・USB secret を別鍵として保存する。鍵・manifest・inventory.db は所有者だけが読み書きできる。既存の完了済み DIR は上書きせず、同じ spec の作成途中 DIR は private journal に記録した鍵を再読込して再開する。manifest 公開直後の中断は同じ内容を検証して完了記録を補う。記録済み鍵の欠損・不一致は拒否する。provision receipt を `provision-confirm-written` で ledger に記録した後、発行済み `devcert.cwt` が ledger の出力先に残り、当該 site の Device CA 署名・NodeId・kid・serial・digest が一致するときだけ `lab-inventory-import --site DIR --ledger FILE --node <16hex> --role endpoint|relay|gateway` で追加する。import site への自動承認は許さない。
+
 **起動**：`routeloom-host --site-authority DIR`。`DIR/site-authority.json`（`routeloom-site-authority-v1`：SiteCert、任意でSite CA公開鍵、Device CA id・公開鍵、channel、channel_epoch、gateway 1〜4台）、`DIR/sak.key`（`routeloom-root-key-v1`、0600、root_id＝site_id。開発用custodyで本番のHSM/TPMではない）、`DIR/site.db`（初回に0600で作成）。SAKとSiteCertの鍵・site_idが一致しない、別の現場の台帳、hash chainの破損はいずれも起動エラー。指定しなければSite Authorityは無く、各methodは`SITE_AUTHORITY_UNAVAILABLE`。
 
 **権限**：ACL file（§4）の新しいgrant `MEMBERSHIP_READ`（一覧・状態・event）、`MEMBERSHIP_DECIDE`（`join.decide`、`membership.revoke`）、`MEMBERSHIP_ADMIN`（`join.policy.*`）を、SiteCertのnetwork下位32bit（またはワイルドカード`*`）に対して与える。既存のSEND等からは導かれない。
@@ -181,7 +191,7 @@ routeloomctl group-get --id grp00000001000000a1 --wait-ms 15000
 **API1**：
 
 - `site.status` → 現場の識別（site_id、network、site_epoch、SAK fingerprint）、rs_epoch、gk_epoch／staged、member・removed・未確認・発見済み・参加要求の数、policy、counters、`usb{configured,attached,join_relay:"ready|not_ready"}`
-- `join.policy.get` / `join.policy.set {zero_touch_open?, decision_mode?:"kguard|closed", decision_timeout_ms?:500..5000, pending_retry_after_s?:30..3600}`
+- `join.policy.get` / `join.policy.set {zero_touch_open?, decision_mode?:"kguard|closed|lab_inventory", decision_timeout_ms?:500..5000, pending_retry_after_s?:30..3600}`。`lab_inventory` は `lab-site-init` 由来の development manifest・DB binding を持つ site だけに設定できる。閉鎖時は新規参加を pending にする。DevCert と JoinRequest の認証後、当該 site の written receipt を `lab-inventory-import` した (NodeId,kid,role,Device CA) だけ通常の `join.decide` で allow する。daemon 再起動で新 revision を読込む。`decision_mode=lab_inventory` を明示設定したときから単調時計で最大1時間だけ enrollment を開き、失効・時計逆行・daemon 再起動時は pending（同じ値を明示再設定して再開）。DB書込み失敗時は再起動して DB を読み直すまで自動 enrollment を閉じる。`join.policy.get` の `lab_enrollment_active` が実効状態を示す。import/production site では設定を拒否する。
 - `join.requests.list` → `requests[]`（`join_request_id`＝`jr-`＋16hex、device・kid・model・hw_rev・cert_serial・fw_version・capability・requested_role・previously_removed・kid_conflict・via・attempt・remaining_ms・`state:"awaiting|decided"`、≤256）
 - `join.decide {join_request_id, device_id, verdict:"allow"|"pending"|"deny", role|retry_after_s|reason, idempotency_key}` → allowは台帳commit後に`{"state":"committed","generation","member_cert_serial","operation_id","applied"}`、pending/denyは`"state":"recorded"`。`applied`は待っている試行へ届いた（`current_attempt`）か次の試行で効く（`next_attempt`）か
 - `devices.discovered.list {after?, limit?:1..128}` → `devices[]`、`next_after`、`total`（≤1024、last_seenのLRU）。検証に失敗した機器は載らない
@@ -191,7 +201,7 @@ routeloomctl group-get --id grp00000001000000a1 --wait-ms 15000
 
 JSONの例は[07 §2.4](../design/sdk-v1/07-host-api-tooling.md)。idempotencyのidentityは`(principal, idempotency_key)`で、同じkey・同じ内容は保存済みの答え、内容違いは`CONFLICT`。決定済みの要求に別のverdict、`expected_generation`の不一致、kid conflictのallowも`CONFLICT`。storeが書けなければ`STORE_FAILURE`（retryable、何も変えていない）で、成功に変換しない。
 
-**event**（`stream:"events"`、`filter.kinds`で選択）：`join.request`、`join.decided`、`device.discovered`、`member.reissued`、`member.confirmed`、`member.revoked`、`member.removal_notified`、`rrs.published`、`gk.staged`、`authority.error`、`site.session_drop`。
+**event**（`stream:"events"`、`filter.kinds`で選択）：`join.request`、`join.decided`、`device.discovered`、`member.reissued`、`member.confirmed`、`member.revoked`、`member.removal_notified`、`rrs.published`、`gk.staged`、`authority.error`、`site.session_drop`、`join_relay_failed`（`source`＋`reason`＋gateway/proxy/relay_id/joiner＋`stage`＋判明分の`device`／`join_request`）。直近の失敗は`site.status`の`recent_relay_failures`（最大16件）でも照会できる。
 
 **参加の中継**：機器のEDHOC messageはproxy→gateway→USB HostOps 0x60/0x61/0x62（[02 §7](../design/sdk-v1/02-zero-touch-join.md)、応答は0x63）でsite laneに届く。laneは認証済みsession＋CAP_JOIN_RELAY_V2（bit 9；bit 8はv1 historyで不受理）のgatewayにだけ中継を開き、phase 4だけSite Authorityへ渡す（phase 5はP3-5未対応として0x62で拒否）。Authorityの応答は有界queue（8件・1件≤1005 B・TTL 20 s）経由で送り（downは0x61、中止はfull token付き0x62のみ）、受付失敗は試行を失敗終了する。結線状態は`capabilities.get`の`site.join_relay:"ready|not_ready"`。
 
