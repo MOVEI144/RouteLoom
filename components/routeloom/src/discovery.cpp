@@ -2487,8 +2487,12 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
             now_ms >= n.next_reprobe_ms) {
           if (send_probe(n, now_ms).ok()) {
             ++n.stale_reprobes;
+            n.next_reprobe_ms = now_ms + config_.stale_reprobe_ms;
+          } else {
+            // A local refusal did not reach the air: retain the RF attempt
+            // budget and retry once the congested TX lane can drain.
+            n.next_reprobe_ms = now_ms + 50;
           }
-          n.next_reprobe_ms = now_ms + config_.stale_reprobe_ms;
         }
         break;
       default:

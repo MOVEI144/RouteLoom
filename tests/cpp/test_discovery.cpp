@@ -1358,6 +1358,34 @@ void test_result_waits_for_local_tx() {
   CHECK(b.port.count_wire(FrameType::NeighborResult) > results);
 }
 
+// A local refusal must not use up the long on-air STALE re-probe cadence.
+void test_stale_probe_local_refusal_retries_promptly() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, true, 0xC0FFEE, 7, 1000, 10);
+  Unit& b = world.add(2, 0xB2, true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+  world.medium.block(a.mac, b.mac);
+  world.medium.block(b.mac, a.mac);
+  world.run(31000);
+  NeighborPhase phase{};
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Stale);
+  // Release only a->b: b cannot return a Result, so the retry remains observable.
+  world.medium.blocked.erase(
+      std::remove(world.medium.blocked.begin(), world.medium.blocked.end(),
+                  std::make_pair(a.mac, b.mac)), world.medium.blocked.end());
+  a.port.fail_next = 1;
+  const auto before = a.port.count_wire(FrameType::NeighborProbe);
+  world.run(1005);
+  CHECK(a.engine.stats().send_failures > 0);
+  const auto refused = a.port.count_wire(FrameType::NeighborProbe);
+  world.run(200);
+  CHECK(refused >= before);
+  CHECK(a.port.count_wire(FrameType::NeighborProbe) > before);
+}
+
 void test_send_failure_stats() {
   DiscWorld world;
   Unit& a = world.add(1, 0xA1, /*member=*/true);
@@ -1634,6 +1662,7 @@ int main() {
   test_reauth_releases_transient_candidate();
   test_stale_peer_repaired_while_other_edge_reachable();
   test_result_waits_for_local_tx();
+  test_stale_probe_local_refusal_retries_promptly();
   test_send_failure_stats();
   test_forget_revoked_peer();
   test_reauth_revoked_rate_limit();

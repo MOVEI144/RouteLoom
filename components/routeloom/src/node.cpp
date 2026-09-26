@@ -5891,11 +5891,18 @@ void MeshNode::schedule_route_advertisements(const MonotonicMs now_ms) noexcept 
   }
   const NodeId peer = active[route_neighbor_cursor_ % count];
   route_neighbor_cursor_ = (route_neighbor_cursor_ + 1) % count;
-  (void)queue_route_update(peer, now_ms);
-  auto interval = std::max<std::uint32_t>(
+  const auto status = queue_route_update(peer, now_ms);
+  if (!status) {
+    // Retry the same neighbor and page; an admission refusal is not a
+    // route refresh and must not consume a full lease interval.
+    route_neighbor_cursor_ = (route_neighbor_cursor_ + count - 1) % count;
+    next_route_advertisement_ms_ = now_ms + 50;
+    return;
+  }
+  const auto interval = std::max<std::uint32_t>(
       50, config_.route_advertisement_period_ms / static_cast<std::uint32_t>(count));
-  // >=50% queue watermark: background work shrinks to half rate (03 §4).
-  if (scheduler_.background_reduced()) interval *= 2;
+  // Lease renewal cannot be halved at the DATA watermark: with a 15s
+  // flat lease, one lost update after a 10s interval expires the route.
   next_route_advertisement_ms_ = now_ms + interval;
 }
 
@@ -6049,10 +6056,17 @@ void MeshNode::run_triggered_advertisement(const MonotonicMs now_ms) noexcept {
     run_scoped_triggered(now_ms);
     return;
   }
+  bool retry = false;
   neighbors_.for_each([&](const Neighbor& neighbor) {
-    if (!neighbor.active || scheduler_.full()) return;
-    (void)queue_route_update(neighbor.node, now_ms);
+    if (!neighbor.active) return;
+    if (scheduler_.full() || !queue_route_update(neighbor.node, now_ms)) retry = true;
   });
+  if (retry) {
+    // The triggered update is still owed to at least one neighbor.
+    // Duplicate refreshes are harmless; losing a withdrawal is not.
+    triggered_advertisement_ = true;
+    triggered_at_ms_ = std::max(now_ms + 50, next_triggered_ms_);
+  }
 }
 
 void MeshNode::scan_selection_changes(const MonotonicMs now_ms) noexcept {

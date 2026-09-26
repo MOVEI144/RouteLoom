@@ -32,6 +32,8 @@ CONFLICT/REVOKEDの行は二つの拒否理由をまとめた表示であり、�
 
 REVOKED・CONFLICTの記録は、同じ(NodeId, MAC)の認証交換が完了しても暗黙に再bindしない。拒否は`REVOKED_REBIND_BLOCKED`／`CONFLICT_REBIND_BLOCKED`として観測できる。唯一の出口はOwnerの明示操作`forget_peer(NodeId)`で、そのNodeIdの失効・衝突記録だけを破棄し、次の認証交換で新しいbindingを作れるようにする。生きているbindingは`forget_peer`の対象外（先に`revoke_peer`する）。
 
+STALEの再Probeがローカル送信拒否になった場合は無線上の試行回数を消費せず、50ms後に再試行する。送信を受け付けた場合だけ低頻度の再確認周期へ進む。
+
 driver Peer登録はこの表の認証状態ではない。AUTHENTICATING中にも返信のため一時Peerが要るが、それで通常通信を許可しない。起床した同じ所属端末はResumeであり、初回Joinではない。
 
 ## 3. wireへ出る順序
