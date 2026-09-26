@@ -97,6 +97,32 @@ class BundleTests(unittest.TestCase):
                                    identity.base_mac, True, bundle), api)
             self.assertEqual(api.written, api.verified)
             self.assertEqual(len(api.written), 3)
+            # A signed app exceeding the factory partition must not overwrite rlsec.
+            oversized = bytes(header) + b'\0' * (0x180001 - len(header))
+            app_image = bundle / 'images/application.bin'
+            app_image.write_bytes(oversized)
+            oversized_manifest = {**manifest, 'files': [
+                {**e, 'size': len(oversized), 'sha256': catalog._hash(oversized)}
+                if e['offset'] == 0x10000 else e for e in manifest['files']]}
+            (bundle / 'manifest.json').write_bytes(catalog._json(oversized_manifest))
+            (bundle / 'signature.json').write_bytes(catalog._json(catalog._sign(oversized_manifest, key)))
+            (bundle / 'SHA256SUMS').write_text(''.join(
+                f'{catalog._hash((bundle / name).read_bytes())}  {name}\n'
+                for name in sorted([e['path'] for e in oversized_manifest['files']] +
+                                   list(oversized_manifest['auxiliary']) + ['manifest.json'])))
+            api = API()
+            with self.assertRaises(ValueError):
+                flash('COM1', FlashPlan(identity, 'esp32c3', tuple(
+                    Image(e['offset'], bundle / e['path'], e['size'], e['sha256'])
+                    for e in oversized_manifest['files']), True, identity.base_mac, True, bundle), api)
+            self.assertIsNone(api.written)
+            app_image.write_bytes(bytes(header))
+            (bundle / 'manifest.json').write_bytes(catalog._json(manifest))
+            (bundle / 'signature.json').write_bytes(catalog._json(catalog._sign(manifest, key)))
+            (bundle / 'SHA256SUMS').write_text(''.join(
+                f'{catalog._hash((bundle / name).read_bytes())}  {name}\n'
+                for name in sorted([e['path'] for e in manifest['files']] +
+                                   list(manifest['auxiliary']) + ['manifest.json'])))
             # Signed compatibility constraints must be enforced before writing.
             original_manifest = (bundle / 'manifest.json').read_bytes()
             original_sums = (bundle / 'SHA256SUMS').read_bytes()

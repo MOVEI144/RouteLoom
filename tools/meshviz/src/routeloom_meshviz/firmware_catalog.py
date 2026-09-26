@@ -119,6 +119,11 @@ def _flash_files(args, build):
         result.append((offset, names[offset], data))
     if set(o for o, _, _ in result) != set(names):
         raise ValueError('missing flash image')
+    # Keep bootloader, partition table and factory app inside their own regions;
+    # overflowing the factory image would erase persistent rlsec data.
+    limits = {0: 0x8000, 0x8000: 0x1000, 0x10000: 0x180000}
+    if any(not data or len(data) > limits[offset] for offset, _, data in result):
+        raise ValueError('image exceeds flash partition')
     return sorted(result)
 
 
@@ -205,8 +210,10 @@ def verify_bundle(root, public):
         raise ValueError('unexpected image layout')
     for entry in entries:
         data = _read(root, entry['path'])
-        if len(data) != entry['size'] or _hash(data) != entry['sha256']:
-            raise ValueError('image digest mismatch')
+        limits = {0: 0x8000, 0x8000: 0x1000, 0x10000: 0x180000}
+        if (type(entry['size']) is not int or not 0 < entry['size'] <= limits[entry['offset']] or
+                len(data) != entry['size'] or _hash(data) != entry['sha256']):
+            raise ValueError('image digest or partition size mismatch')
         if entry['offset'] in (0, 0x10000) and (
                 len(data) < 24 or data[0] != 0xe9 or
                 int.from_bytes(data[12:14], 'little') != {'esp32c3': 5, 'esp32s3': 9,
