@@ -1,0 +1,2 @@
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_espnow_owner_reapply.cpp:231: !runtime.node().transit_permitted()
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_espnow_owner_reapply.cpp:231: !runtime.node().transit_permitted()

@@ -1,0 +1,5 @@
+[ 45%] Built target routeloom_edhoc_third_party
+[ 95%] Built target routeloom_core
+[ 95%] Building CXX object tests/cpp/CMakeFiles/routeloom_espnow_owner_reapply_tests.dir/__/__/components/routeloom_espnow/src/espnow_security_owner.cpp.o
+[ 97%] Linking CXX executable routeloom_espnow_owner_reapply_tests
+[100%] Built target routeloom_espnow_owner_reapply_tests

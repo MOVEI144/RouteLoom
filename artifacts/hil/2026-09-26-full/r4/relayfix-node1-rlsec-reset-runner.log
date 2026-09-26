@@ -1,0 +1,1 @@
+{"board": "bridge", "chip": "esp32c3", "mac": "94:a9:90:6a:ee:c4", "offset": "0x190000", "size": "0x20000", "backup_sha256": "2149773158b4201edba9a57b6ee0ada09c226e78d672ef3992cb033c5c4f994e", "backup_path": "/tmp/routeloom-hil-full-2026-09-26/r4-relayfix-site/node1-pre-reset-rlsec.bin", "erased": true}

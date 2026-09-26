@@ -1,0 +1,146 @@
+[2026-09-26T18:54:35.399Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-26T18:54:37.710Z] I (111) esp_image: segment 1: paddr=0003046c vaddr=3fc91e00 sizeI (9685) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:54:37.712Z] I (9687) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:54:37.716Z] I (9691) RouteLoomRef: RLD1 tx kind=1 ch=1 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:54:37.719Z] I (9694) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:54:38.036Z] I (10011) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:54:38.038Z] I (10013) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:54:38.042Z] I (10017) RouteLoomRef: RLD1 tx kind=1 ch=6 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:54:38.045Z] I (10020) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:54:38.320Z] I (10295) RouteLoomRef: RLD1 rx kind=2 ch=6 generation=10 src=94:a9:90:6a:ee:c4 dest=94:a9:90:7a:b5:60
+[2026-09-26T18:54:38.321Z] I (10296) RouteLoomRef: RLD1 offer result state=4 expected_generation=10 observations=3 dropped=4
+[2026-09-26T18:54:38.363Z] I (10338) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:54:38.366Z] I (10340) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:54:38.369Z] I (10344) RouteLoomRef: RLD1 tx kind=1 ch=11 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:54:38.372Z] I (10347) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:54:38.689Z] I (10664) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-26T18:54:38.691Z] I (10666) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:54:38.697Z] I (10671) RouteLoomRef: RLD1 tx kind=1 ch=6 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:54:38.698Z] I (10672) RouteLoomRef: join mode=1 state=6 error=0
+[2026-09-26T18:54:38.854Z] I (10829) RouteLoomRef: RLD1 rx kind=2 ch=6 generation=12 src=94:a9:90:6a:ee:c4 dest=94:a9:90:7a:b5:60
+[2026-09-26T18:54:38.855Z] I (10830) RouteLoomRef: RLD1 offer result state=6 expected_generation=12 observations=4 dropped=4
+[2026-09-26T18:54:39.150Z] I (11124) RouteLoomRef: join mode=1 state=7 error=0
+[2026-09-26T18:54:39.285Z] I (11260) RouteLoomRef: join mode=1 state=8 error=0
+[2026-09-26T18:54:39.287Z] I (11262) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=12 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:54:40.970Z] I (12945) RouteLoomEdhoc: HIL EDHOC ECDH us=130938 ok=1
+[2026-09-26T18:54:41.287Z] I (13261) RouteLoomEdhoc: HIL EDHOC VERIFY us=151174 ok=1
+[2026-09-26T18:54:41.288Z] I (13263) RouteLoomRef: join mode=1 state=9 error=0
+[2026-09-26T18:54:41.429Z] I (13404) RouteLoomEdhoc: HIL EDHOC SIGN us=138247 ok=1
+[2026-09-26T18:54:41.434Z] I (13408) RouteLoomRef: join mode=1 state=10 error=0
+[2026-09-26T18:54:44.444Z] I (16419) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=12 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:54:45.097Z] I (17072) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=12 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:54:45.291Z] I (17265) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-26T18:54:45.294Z] I (17268) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-26T18:54:49.718Z] I (21693) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:54:49.720Z] I (21695) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:54:49.724Z] I (21699) RouteLoomRef: RLD1 tx kind=1 ch=1 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:54:49.728Z] I (21702) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:54:50.044Z] I (22019) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:54:50.046Z] I (22021) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:54:50.050Z] I (22025) RouteLoomRef: RLD1 tx kind=1 ch=6 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:54:50.053Z] I (22028) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:54:50.246Z] I (22221) RouteLoomRef: RLD1 rx kind=2 ch=6 generation=14 src=94:a9:90:6a:ee:c4 dest=94:a9:90:7a:b5:60
+[2026-09-26T18:54:50.247Z] I (22222) RouteLoomRef: RLD1 offer result state=4 expected_generation=14 observations=5 dropped=7
+[2026-09-26T18:54:50.371Z] I (22346) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:54:50.373Z] I (22348) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:54:50.377Z] I (22352) RouteLoomRef: RLD1 tx kind=1 ch=11 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:54:50.380Z] I (22355) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:54:50.697Z] I (22672) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-26T18:54:50.699Z] I (22674) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:54:50.705Z] I (22679) RouteLoomRef: RLD1 tx kind=1 ch=6 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:54:50.706Z] I (22680) RouteLoomRef: join mode=1 state=6 error=0
+[2026-09-26T18:54:50.740Z] I (22715) RouteLoomRef: RLD1 rx kind=2 ch=6 generation=16 src=94:a9:90:6a:ee:c4 dest=94:a9:90:7a:b5:60
+[2026-09-26T18:54:50.741Z] I (22716) RouteLoomRef: RLD1 offer result state=6 expected_generation=16 observations=6 dropped=7
+[2026-09-26T18:54:51.158Z] I (23132) RouteLoomRef: join mode=1 state=7 error=0
+[2026-09-26T18:54:51.293Z] I (23268) RouteLoomRef: join mode=1 state=8 error=0
+[2026-09-26T18:54:52.983Z] I (24957) RouteLoomEdhoc: HIL EDHOC ECDH us=130873 ok=1
+[2026-09-26T18:54:53.304Z] I (25278) RouteLoomEdhoc: HIL EDHOC VERIFY us=156515 ok=1
+[2026-09-26T18:54:53.305Z] I (25280) RouteLoomRef: join mode=1 state=9 error=0
+[2026-09-26T18:54:53.447Z] I (25422) RouteLoomEdhoc: HIL EDHOC SIGN us=138758 ok=1
+[2026-09-26T18:54:53.452Z] I (25426) RouteLoomRef: join mode=1 state=10 error=0
+[2026-09-26T18:54:54.910Z] I (26884) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-26T18:54:54.913Z] I (26887) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-26T18:54:57.774Z] I (29748) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=16 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:54:58.427Z] I (30401) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=16 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:55:04.382Z] I (36356) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:55:04.384Z] I (36358) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:55:04.388Z] I (36362) RouteLoomRef: RLD1 tx kind=1 ch=1 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:55:04.391Z] I (36365) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:55:04.708Z] I (36682) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:55:04.710Z] I (36684) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:55:04.714Z] I (36688) RouteLoomRef: RLD1 tx kind=1 ch=6 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:55:04.717Z] I (36691) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:55:04.930Z] I (36904) RouteLoomRef: RLD1 rx kind=2 ch=6 generation=18 src=94:a9:90:6a:ee:c4 dest=94:a9:90:7a:b5:60
+[2026-09-26T18:55:04.930Z] I (36905) RouteLoomRef: RLD1 offer result state=4 expected_generation=18 observations=7 dropped=9
+[2026-09-26T18:55:05.035Z] I (37009) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:55:05.037Z] I (37011) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:55:05.041Z] I (37015) RouteLoomRef: RLD1 tx kind=1 ch=11 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:55:05.044Z] I (37018) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:55:05.361Z] I (37335) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-26T18:55:05.363Z] I (37337) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:55:05.368Z] I (37342) RouteLoomRef: RLD1 tx kind=1 ch=6 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:55:05.369Z] I (37343) RouteLoomRef: join mode=1 state=6 error=0
+[2026-09-26T18:55:05.456Z] I (37430) RouteLoomRef: RLD1 rx kind=2 ch=6 generation=20 src=94:a9:90:6a:ee:c4 dest=94:a9:90:7a:b5:60
+[2026-09-26T18:55:05.457Z] I (37431) RouteLoomRef: RLD1 offer result state=6 expected_generation=20 observations=8 dropped=9
+[2026-09-26T18:55:05.821Z] I (37795) RouteLoomRef: join mode=1 state=7 error=0
+[2026-09-26T18:55:05.957Z] I (37931) RouteLoomRef: join mode=1 state=8 error=0
+[2026-09-26T18:55:07.824Z] I (39798) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-26T18:55:07.827Z] I (39801) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-26T18:55:17.388Z] I (49362) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=20 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:55:18.041Z] I (50015) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=20 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:55:27.042Z] I (59016) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:55:27.044Z] I (59018) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:55:27.048Z] I (59022) RouteLoomRef: RLD1 tx kind=1 ch=1 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:55:27.051Z] I (59025) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:55:27.368Z] I (59342) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:55:27.370Z] I (59344) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:55:27.374Z] I (59348) RouteLoomRef: RLD1 tx kind=1 ch=6 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:55:27.377Z] I (59351) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:55:27.630Z] I (59604) RouteLoomRef: RLD1 rx kind=2 ch=6 generation=22 src=94:a9:90:6a:ee:c4 dest=94:a9:90:7a:b5:60
+[2026-09-26T18:55:27.631Z] I (59605) RouteLoomRef: RLD1 offer result state=4 expected_generation=22 observations=9 dropped=12
+[2026-09-26T18:55:27.695Z] I (59669) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:55:27.697Z] I (59671) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:55:27.701Z] I (59675) RouteLoomRef: RLD1 tx kind=1 ch=11 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:55:27.704Z] I (59678) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:55:28.022Z] I (59996) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-26T18:55:28.024Z] I (59998) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:55:28.029Z] I (60003) RouteLoomRef: RLD1 tx kind=1 ch=6 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:55:28.030Z] I (60004) RouteLoomRef: join mode=1 state=6 error=0
+[2026-09-26T18:55:28.277Z] I (60251) RouteLoomRef: RLD1 rx kind=2 ch=6 generation=24 src=94:a9:90:6a:ee:c4 dest=94:a9:90:7a:b5:60
+[2026-09-26T18:55:28.277Z] I (60252) RouteLoomRef: RLD1 offer result state=6 expected_generation=24 observations=10 dropped=12
+[2026-09-26T18:55:28.482Z] I (60456) RouteLoomRef: join mode=1 state=7 error=0
+[2026-09-26T18:55:28.618Z] I (60592) RouteLoomRef: join mode=1 state=8 error=0
+[2026-09-26T18:55:30.485Z] I (62459) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-26T18:55:30.488Z] I (62462) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-26T18:55:56.467Z] I (88441) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=24 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:55:57.120Z] I (89094) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=24 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:56:03.634Z] I (95607) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=24 src=94:a9:90:7a:26:ac dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:56:06.318Z] I (98292) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:56:06.320Z] I (98294) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:56:06.325Z] I (98298) RouteLoomRef: RLD1 tx kind=1 ch=1 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:56:06.329Z] I (98301) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:56:06.645Z] I (98618) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:56:06.646Z] I (98620) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:56:06.650Z] I (98624) RouteLoomRef: RLD1 tx kind=1 ch=6 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:56:06.654Z] I (98627) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:56:06.778Z] I (98752) RouteLoomRef: RLD1 rx kind=2 ch=6 generation=26 src=94:a9:90:6a:ee:c4 dest=94:a9:90:7a:b5:60
+[2026-09-26T18:56:06.779Z] I (98753) RouteLoomRef: RLD1 offer result state=4 expected_generation=26 observations=11 dropped=15
+[2026-09-26T18:56:06.971Z] I (98945) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:56:06.973Z] I (98947) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:56:06.977Z] I (98951) RouteLoomRef: RLD1 tx kind=1 ch=11 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:56:06.981Z] I (98954) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:56:07.297Z] I (99271) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-26T18:56:07.299Z] I (99273) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:56:07.305Z] I (99278) RouteLoomRef: RLD1 tx kind=1 ch=6 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:56:07.307Z] I (99279) RouteLoomRef: join mode=1 state=6 error=0
+[2026-09-26T18:56:07.513Z] I (99486) RouteLoomRef: RLD1 rx kind=2 ch=6 generation=28 src=94:a9:90:6a:ee:c4 dest=94:a9:90:7a:b5:60
+[2026-09-26T18:56:07.513Z] I (99487) RouteLoomRef: RLD1 offer result state=6 expected_generation=28 observations=12 dropped=15
+[2026-09-26T18:56:07.757Z] I (99730) RouteLoomRef: join mode=1 state=7 error=0
+[2026-09-26T18:56:07.892Z] I (99866) RouteLoomRef: join mode=1 state=8 error=0
+[2026-09-26T18:56:09.586Z] I (101560) RouteLoomEdhoc: HIL EDHOC ECDH us=130630 ok=1
+[2026-09-26T18:56:09.906Z] I (101879) RouteLoomEdhoc: HIL EDHOC VERIFY us=154854 ok=1
+[2026-09-26T18:56:09.908Z] I (101881) RouteLoomRef: join mode=1 state=9 error=0
+[2026-09-26T18:56:10.049Z] I (102022) RouteLoomEdhoc: HIL EDHOC SIGN us=138288 ok=1
+[2026-09-26T18:56:10.055Z] I (102027) RouteLoomRef: join mode=1 state=10 error=0
+[2026-09-26T18:56:13.909Z] I (105882) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-26T18:56:13.912Z] I (105885) RouteLoomRef: join mode=1 state=14 error=0

@@ -1,0 +1,36 @@
+$ /home/sahur/.local/bin/esptool --chip esp32c3 --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00 --baud 460800 --before default-reset --after hard-reset write-flash --flash-mode dio --flash-size 2MB --flash-freq 80m 0x10000 artifacts/hil/2026-09-26/images/full-r1-console-bridge/build/routeloom_bridge_node.bin
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00:
+Connecting...
+Connected to ESP32-C3 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                94:a9:90:6a:ee:c4
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+Changing baud rate to 460800...
+Changed.
+
+Configuring flash size...
+Flash will be erased from 0x00010000 to 0x0005cfff...
+Compressed 312336 bytes to 175653...
+Writing at 0x0001addd ━━╸                              9.3% 16.00kB/171.54kB [0s] 
+Writing at 0x00022c29 ━━━━━╸                          18.7% 32.00kB/171.54kB [0s] 
+Writing at 0x000299bf ━━━━━━━━                        28.0% 48.00kB/171.54kB [0s] 
+Writing at 0x000307bd ━━━━━━━━━━━                     37.3% 64.00kB/171.54kB [1s] 
+Writing at 0x00037171 ━━━━━━━━━━━━━╸                  46.6% 80.00kB/171.54kB [1s] 
+Writing at 0x0003dfd6 ━━━━━━━━━━━━━━━━╸               56.0% 96.00kB/171.54kB [1s] 
+Writing at 0x00043f9a ━━━━━━━━━━━━━━━━━━━╸            65.3% 112.00kB/171.54kB [1s] 
+Writing at 0x0004a0ca ━━━━━━━━━━━━━━━━━━━━━━          74.6% 128.00kB/171.54kB [1s] 
+Writing at 0x000500f1 ━━━━━━━━━━━━━━━━━━━━━━━━━       83.9% 144.00kB/171.54kB [1s] 
+Writing at 0x00056c22 ━━━━━━━━━━━━━━━━━━━━━━━━━━━╸    93.3% 160.00kB/171.54kB [2s] 
+Writing at 0x0005c410 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 171.54kB/171.54kB [2s] 
+Wrote 312336 bytes (175653 compressed) at 0x00010000 in 2.2 seconds (1138.0 kbit/s).
+Verifying written data...
+Hash of data verified.
+
+Hard resetting via RTS pin...

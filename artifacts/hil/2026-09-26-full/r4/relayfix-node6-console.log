@@ -1,0 +1,30 @@
+[2026-09-26T18:53:02.782Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-26T18:53:10.355Z] I (37945) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:53:10.357Z] I (37947) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:53:10.361Z] I (37951) RouteLoomRef: RLD1 tx kind=1 ch=1 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:53:10.364Z] I (37954) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:53:10.682Z] I (38272) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:53:10.684Z] I (38274) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:53:10.688Z] I (38278) RouteLoomRef: RLD1 tx kind=1 ch=6 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:53:10.691Z] I (38281) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:53:11.009Z] I (38599) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:53:11.011Z] I (38601) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:53:11.015Z] I (38605) RouteLoomRef: RLD1 tx kind=1 ch=11 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:53:11.018Z] I (38608) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:53:11.336Z] I (38926) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-26T18:53:11.339Z] I (38928) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-26T18:53:34.646Z] I (62236) RouteLoomRef: RLD1 rx kind=1 ch=11 generation=15 src=94:a9:90:7a:b5:60 dest=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:53:49.531Z] I (77121) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:53:49.533Z] I (77123) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:53:49.537Z] I (77127) RouteLoomRef: RLD1 tx kind=1 ch=1 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:53:49.541Z] I (77130) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:53:49.859Z] I (77448) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:53:49.860Z] I (77450) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:53:49.865Z] I (77454) RouteLoomRef: RLD1 tx kind=1 ch=6 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:53:49.868Z] I (77457) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:53:50.186Z] I (77775) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-26T18:53:50.187Z] I (77777) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-26T18:53:50.191Z] I (77781) RouteLoomRef: RLD1 tx kind=1 ch=11 dst=ff:ff:ff:ff:ff:ff
+[2026-09-26T18:53:50.195Z] I (77784) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-26T18:53:50.512Z] I (78102) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-26T18:53:50.515Z] I (78104) RouteLoomRef: join mode=1 state=14 error=0
