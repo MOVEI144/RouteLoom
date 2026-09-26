@@ -109,6 +109,9 @@ fn usage() {
     eprintln!(
         "routeloomctl provision-devca-keygen --device-ca-id <16hex> --out <devca.key>|provision-pop-challenge --node <16hex>|provision-devcert --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --challenge <64hex> --pop <file> --out-dir <dir>|provision-identity --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --out-dir <dir>|provision-siteca-keygen --site-ca-id <16hex> --out <siteca.key>|site-cert --ca-key <siteca.key> --site-id <16hex> --sak-pubkey <128hex> --network-low32 <8hex> --site-epoch <u32> --serial <u32> --out <sitecert.cwt>  (SDK v1 office tooling — no daemon socket)"
     );
+    eprintln!(
+        "routeloomctl site join-list|approve --request <jr-token> --device <16hex> --role endpoint|relay|gateway [--idempotency-key K]|deny --request <jr-token> --device <16hex> --reason not_here|blocked [--idempotency-key K]|policy [--zero-touch-open true|false] [--decision-mode kguard|closed] [--decision-timeout-ms 500-5000] [--pending-retry-after-s 30-3600]|members [--device <16hex> | [--after <16hex>] [--limit 1-128] [--include-removed]]|revoke --device <16hex> --expected-generation <u32> --reason removed|lost|replaced|blocked [--idempotency-key K]|gk-rotate [--expected-active-epoch <u32> [--idempotency-key K]]|cutover --expected-site-epoch <u32> --next-site-cert <hex> [--idempotency-key K]|status  (site authority over API1; cutover progress via operation-get --id <op-token>)"
+    );
 }
 
 /// One ASCII request id per invocation (connection correlation only —
@@ -442,6 +445,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [name] if name == "node-events" => node_events_request(),
         [name, rest @ ..] if name == "group-send" => group_send_command(rest)?,
         [name, rest @ ..] if name == "group-get" => group_get_command(rest)?,
+        [name, rest @ ..] if name == "site" => site_command(rest)?,
         _ => {
             usage();
             return Err("invalid command".into());
@@ -965,11 +969,19 @@ fn operation_get_command(args: &[String]) -> Result<String, Box<dyn std::error::
         }
     }
     let id = id.ok_or("operation-get requires --id <operation-id>")?;
+    // Message operations (`<lineage>:<seq>`) and Site Authority operations
+    // (`op-<16hex>` from revoke/cutover/gk-rotate answers) share
+    // `operations.get` — the daemon routes the `op-` tokens to the site
+    // ledger, which is also where cutover progress is read.
     let well_formed = id
         .split_once(':')
-        .is_some_and(|(lineage, seq)| is_hex(lineage, 32) && is_hex(seq, 16));
+        .is_some_and(|(lineage, seq)| is_hex(lineage, 32) && is_hex(seq, 16))
+        || id
+            .strip_prefix("op-")
+            .or_else(|| id.strip_prefix("OP-"))
+            .is_some_and(|token| is_hex(token, 16));
     if !well_formed {
-        return Err("--id must be <32-hex lineage>:<16-hex sequence>".into());
+        return Err("--id must be <32-hex lineage>:<16-hex sequence> or op-<16hex>".into());
     }
     Ok(operation_get_request(&id.to_ascii_lowercase()))
 }
@@ -1622,6 +1634,382 @@ fn group_get_command(args: &[String]) -> Result<String, Box<dyn std::error::Erro
     ))
 }
 
+/// `site` family: Site Authority operations over API1 (`join.requests.list`,
+/// `join.decide`, `join.policy.get/set`, `members.list/get`,
+/// `membership.revoke`, `group_keys.rotate/status`, `membership.cutover`,
+/// `site.status`). Prints the daemon's JSON verbatim; the exit code follows
+/// the API envelope like every other command. Cutover progress is not a
+/// method — it arrives as `cutover.progress` events and stays readable via
+/// `operation-get --id <op-token>` from the cutover answer.
+fn site_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let (sub, rest) = args
+        .split_first()
+        .ok_or("site requires a subcommand: join-list|approve|deny|policy|members|revoke|gk-rotate|cutover|status")?;
+    match sub.as_str() {
+        "join-list" => {
+            if !rest.is_empty() {
+                return Err("unknown site join-list option".into());
+            }
+            Ok(site_request("join.requests.list", String::new()))
+        }
+        "approve" => site_decide_command(rest, true),
+        "deny" => site_decide_command(rest, false),
+        "policy" => site_policy_command(rest),
+        "members" => site_members_command(rest),
+        "revoke" => site_revoke_command(rest),
+        "gk-rotate" => site_gk_rotate_command(rest),
+        "cutover" => site_cutover_command(rest),
+        "status" => {
+            if !rest.is_empty() {
+                return Err("unknown site status option".into());
+            }
+            Ok(site_request("site.status", String::new()))
+        }
+        other => Err(format!("unknown site subcommand: {other}").into()),
+    }
+}
+
+/// One `API1 {"v":1,...}` line for a site `method`; `params` is the
+/// already-serialized inner object (without braces) or empty for `{}`.
+fn site_request(method: &str, params: String) -> String {
+    format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"{method}\",\"params\":{{{params}}}}}",
+        request_id(),
+    )
+}
+
+/// A `jr-<16hex>` join request token → lowercased.
+fn want_request_token(flag: &str, value: String) -> Result<String, Box<dyn std::error::Error>> {
+    let hex = value
+        .strip_prefix("jr-")
+        .or_else(|| value.strip_prefix("JR-"))
+        .ok_or_else(|| format!("{flag} must be a jr-<16hex> token"))?;
+    if !is_hex(hex, 16) {
+        return Err(format!("{flag} must be a jr-<16hex> token").into());
+    }
+    Ok(format!("jr-{}", hex.to_ascii_lowercase()))
+}
+
+/// An idempotency key: caller's (`--idempotency-key`, 1-64 printable ASCII
+/// without spaces, the daemon rule) or a generated one, announced on
+/// stderr like `submit --key` does.
+fn want_idempotency_key(key: Option<String>) -> Result<String, Box<dyn std::error::Error>> {
+    match key {
+        Some(key) => {
+            if key.is_empty() || key.len() > 64 || !key.bytes().all(|b| (0x21..=0x7e).contains(&b))
+            {
+                return Err(
+                    "--idempotency-key must be 1-64 printable ASCII characters without spaces"
+                        .into(),
+                );
+            }
+            Ok(key)
+        }
+        None => {
+            let generated = generate_key();
+            eprintln!("generated idempotency key: {generated}");
+            Ok(generated)
+        }
+    }
+}
+
+/// `site approve|deny --request <jr-token> --device <16hex> --role R|...`.
+fn site_decide_command(
+    args: &[String],
+    approve: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut request: Option<String> = None;
+    let mut device: Option<String> = None;
+    let mut role: Option<String> = None;
+    let mut reason: Option<String> = None;
+    let mut idempotency_key: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--request" => request = Some(opt_value(&mut args, "--request")?),
+            "--device" => device = Some(opt_value(&mut args, "--device")?),
+            "--role" => role = Some(opt_value(&mut args, "--role")?),
+            "--reason" => reason = Some(opt_value(&mut args, "--reason")?),
+            "--idempotency-key" => {
+                idempotency_key = Some(opt_value(&mut args, "--idempotency-key")?)
+            }
+            other => {
+                return Err(format!(
+                    "unknown site {} option: {other}",
+                    if approve { "approve" } else { "deny" }
+                )
+                .into())
+            }
+        }
+    }
+    let request = want_request_token(
+        "--request",
+        request.ok_or("site approve|deny requires --request <jr-token>")?,
+    )?;
+    let device = want_hex16(
+        "--device",
+        device.ok_or("site approve|deny requires --device <16hex>")?,
+    )?;
+    let verdict = if approve {
+        let role = role.ok_or("site approve requires --role endpoint|relay|gateway")?;
+        if !["endpoint", "relay", "gateway"].contains(&role.as_str()) {
+            return Err("site approve requires --role endpoint|relay|gateway".into());
+        }
+        if reason.is_some() {
+            return Err("--reason does not apply to site approve".into());
+        }
+        format!("\"verdict\":\"allow\",\"role\":\"{role}\"")
+    } else {
+        let reason = reason.ok_or("site deny requires --reason not_here|blocked")?;
+        if !["not_here", "blocked"].contains(&reason.as_str()) {
+            return Err("site deny requires --reason not_here|blocked".into());
+        }
+        if role.is_some() {
+            return Err("--role does not apply to site deny".into());
+        }
+        format!("\"verdict\":\"deny\",\"reason\":\"{reason}\"")
+    };
+    let key = want_idempotency_key(idempotency_key)?;
+    Ok(site_request(
+        "join.decide",
+        format!("\"join_request_id\":\"{request}\",\"device_id\":\"{device}\",{verdict},\"idempotency_key\":\"{key}\""),
+    ))
+}
+
+/// `site policy [flags...]`: bare reads (`join.policy.get`), any flag
+/// writes (`join.policy.set`). Ranges are the daemon's (07 §2) and are
+/// enforced there too — the CLI only checks the value shapes.
+fn site_policy_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut zero_touch_open: Option<bool> = None;
+    let mut decision_mode: Option<String> = None;
+    let mut decision_timeout_ms: Option<u16> = None;
+    let mut pending_retry_after_s: Option<u32> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--zero-touch-open" => {
+                zero_touch_open = Some(
+                    opt_value(&mut args, "--zero-touch-open")?
+                        .parse::<bool>()
+                        .map_err(|_| "--zero-touch-open must be true or false")?,
+                )
+            }
+            "--decision-mode" => {
+                let mode = opt_value(&mut args, "--decision-mode")?;
+                if !["kguard", "closed"].contains(&mode.as_str()) {
+                    return Err("--decision-mode must be kguard or closed".into());
+                }
+                decision_mode = Some(mode);
+            }
+            "--decision-timeout-ms" => {
+                decision_timeout_ms = Some(
+                    opt_value(&mut args, "--decision-timeout-ms")?
+                        .parse::<u16>()
+                        .map_err(|_| "--decision-timeout-ms must be an integer 500-5000")?,
+                )
+            }
+            "--pending-retry-after-s" => {
+                pending_retry_after_s = Some(
+                    opt_value(&mut args, "--pending-retry-after-s")?
+                        .parse::<u32>()
+                        .map_err(|_| "--pending-retry-after-s must be an integer 30-3600")?,
+                )
+            }
+            other => return Err(format!("unknown site policy option: {other}").into()),
+        }
+    }
+    if zero_touch_open.is_none()
+        && decision_mode.is_none()
+        && decision_timeout_ms.is_none()
+        && pending_retry_after_s.is_none()
+    {
+        return Ok(site_request("join.policy.get", String::new()));
+    }
+    let mut params = Vec::new();
+    if let Some(open) = zero_touch_open {
+        params.push(format!("\"zero_touch_open\":{open}"));
+    }
+    if let Some(mode) = decision_mode {
+        params.push(format!("\"decision_mode\":\"{mode}\""));
+    }
+    if let Some(ms) = decision_timeout_ms {
+        params.push(format!("\"decision_timeout_ms\":{ms}"));
+    }
+    if let Some(s) = pending_retry_after_s {
+        params.push(format!("\"pending_retry_after_s\":{s}"));
+    }
+    Ok(site_request("join.policy.set", params.join(",")))
+}
+
+/// `site members [--after/--limit/--include-removed]` lists;
+/// `site members --device <16hex>` reads one (`members.get`).
+fn site_members_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut device: Option<String> = None;
+    let mut after: Option<String> = None;
+    let mut limit: Option<u64> = None;
+    let mut include_removed = false;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--device" => device = Some(opt_value(&mut args, "--device")?),
+            "--after" => after = Some(opt_value(&mut args, "--after")?),
+            "--limit" => {
+                limit = Some(
+                    opt_value(&mut args, "--limit")?
+                        .parse::<u64>()
+                        .map_err(|_| "--limit must be an integer 1-128")?,
+                )
+            }
+            "--include-removed" => include_removed = true,
+            other => return Err(format!("unknown site members option: {other}").into()),
+        }
+    }
+    if let Some(device) = device {
+        if after.is_some() || limit.is_some() || include_removed {
+            return Err("--device reads one member and takes no list options".into());
+        }
+        return Ok(site_request(
+            "members.get",
+            format!("\"device_id\":\"{}\"", want_hex16("--device", device)?),
+        ));
+    }
+    let mut params = Vec::new();
+    if let Some(after) = after {
+        params.push(format!("\"after\":\"{}\"", want_hex16("--after", after)?));
+    }
+    if let Some(limit) = limit {
+        if !(1..=128).contains(&limit) {
+            return Err("--limit must be an integer 1-128".into());
+        }
+        params.push(format!("\"limit\":{limit}"));
+    }
+    if include_removed {
+        params.push("\"include_removed\":true".to_string());
+    }
+    Ok(site_request("members.list", params.join(",")))
+}
+
+/// `site revoke --device <16hex> --expected-generation <u32> --reason R`.
+fn site_revoke_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut device: Option<String> = None;
+    let mut expected_generation: Option<u32> = None;
+    let mut reason: Option<String> = None;
+    let mut idempotency_key: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--device" => device = Some(opt_value(&mut args, "--device")?),
+            "--expected-generation" => {
+                expected_generation = Some(
+                    opt_value(&mut args, "--expected-generation")?
+                        .parse::<u32>()
+                        .map_err(|_| "--expected-generation must be an integer >= 1")?,
+                )
+            }
+            "--reason" => reason = Some(opt_value(&mut args, "--reason")?),
+            "--idempotency-key" => {
+                idempotency_key = Some(opt_value(&mut args, "--idempotency-key")?)
+            }
+            other => return Err(format!("unknown site revoke option: {other}").into()),
+        }
+    }
+    let device = want_hex16(
+        "--device",
+        device.ok_or("site revoke requires --device <16hex>")?,
+    )?;
+    let expected_generation = expected_generation
+        .filter(|v| *v >= 1)
+        .ok_or("--expected-generation must be an integer >= 1")?;
+    let reason = reason.ok_or("site revoke requires --reason removed|lost|replaced|blocked")?;
+    if !["removed", "lost", "replaced", "blocked"].contains(&reason.as_str()) {
+        return Err("site revoke requires --reason removed|lost|replaced|blocked".into());
+    }
+    let key = want_idempotency_key(idempotency_key)?;
+    Ok(site_request(
+        "membership.revoke",
+        format!("\"device_id\":\"{device}\",\"expected_generation\":{expected_generation},\"reason\":\"{reason}\",\"idempotency_key\":\"{key}\""),
+    ))
+}
+
+/// `site gk-rotate`: bare reads (`group_keys.status`), with
+/// `--expected-active-epoch` rotates (`group_keys.rotate`).
+fn site_gk_rotate_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut expected_active_epoch: Option<u32> = None;
+    let mut idempotency_key: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--expected-active-epoch" => {
+                expected_active_epoch = Some(
+                    opt_value(&mut args, "--expected-active-epoch")?
+                        .parse::<u32>()
+                        .map_err(|_| "--expected-active-epoch must be an integer >= 1")?,
+                )
+            }
+            "--idempotency-key" => {
+                idempotency_key = Some(opt_value(&mut args, "--idempotency-key")?)
+            }
+            other => return Err(format!("unknown site gk-rotate option: {other}").into()),
+        }
+    }
+    match expected_active_epoch {
+        None => {
+            if idempotency_key.is_some() {
+                return Err("--idempotency-key needs --expected-active-epoch to rotate".into());
+            }
+            Ok(site_request("group_keys.status", String::new()))
+        }
+        Some(epoch) => {
+            if epoch < 1 {
+                return Err("--expected-active-epoch must be an integer >= 1".into());
+            }
+            let key = want_idempotency_key(idempotency_key)?;
+            Ok(site_request(
+                "group_keys.rotate",
+                format!("\"expected_active_epoch\":{epoch},\"idempotency_key\":\"{key}\""),
+            ))
+        }
+    }
+}
+
+/// `site cutover --expected-site-epoch <u32> --next-site-cert <hex>`.
+fn site_cutover_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut expected_site_epoch: Option<u32> = None;
+    let mut next_site_cert: Option<String> = None;
+    let mut idempotency_key: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--expected-site-epoch" => {
+                expected_site_epoch = Some(
+                    opt_value(&mut args, "--expected-site-epoch")?
+                        .parse::<u32>()
+                        .map_err(|_| "--expected-site-epoch must be an integer >= 1")?,
+                )
+            }
+            "--next-site-cert" => next_site_cert = Some(opt_value(&mut args, "--next-site-cert")?),
+            "--idempotency-key" => {
+                idempotency_key = Some(opt_value(&mut args, "--idempotency-key")?)
+            }
+            other => return Err(format!("unknown site cutover option: {other}").into()),
+        }
+    }
+    let expected_site_epoch = expected_site_epoch
+        .filter(|v| *v >= 1)
+        .ok_or("--expected-site-epoch must be an integer >= 1")?;
+    let cert = next_site_cert.ok_or("site cutover requires --next-site-cert <hex>")?;
+    // Even-length hex, daemon cap 2048 chars: the daemon would silently
+    // drop a trailing half-byte, so the CLI refuses it instead.
+    if !is_hex_max(&cert, 1024) || cert.is_empty() {
+        return Err("--next-site-cert must be even-length hex up to 2048 chars".into());
+    }
+    let key = want_idempotency_key(idempotency_key)?;
+    Ok(site_request(
+        "membership.cutover",
+        format!("\"expected_site_epoch\":{expected_site_epoch},\"next_site_cert\":\"{}\",\"idempotency_key\":\"{key}\"", cert.to_ascii_lowercase()),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2012,6 +2400,14 @@ mod tests {
             "{line}"
         );
         assert!(operation_get_command(&args(&["--id", "bogus"])).is_err());
+        // Site Authority `op-` tokens ride the same method (revoke/cutover
+        // progress); the daemon routes them to the site ledger.
+        let line = operation_get_command(&args(&["--id", "op-0000000000000001"])).unwrap();
+        assert!(
+            line.contains("\"operation_id\":\"op-0000000000000001\""),
+            "{line}"
+        );
+        assert!(operation_get_command(&args(&["--id", "op-1"])).is_err());
         let line = operation_get_by_key_command(&args(&[
             "--network",
             "0000000000000001",
@@ -2567,5 +2963,292 @@ mod tests {
         assert!(group_get_command(&args(&["--id", "cfg00000001000000a1"])).is_err());
         assert!(group_get_command(&args(&["--id", "grp1"])).is_err());
         assert!(group_get_command(&args(&[])).is_err());
+    }
+
+    #[test]
+    fn site_commands_build_api1_lines() {
+        // join-list / status: bare reads.
+        let line = site_command(&args(&["join-list"])).unwrap();
+        assert!(
+            line.contains("\"method\":\"join.requests.list\",\"params\":{}"),
+            "{line}"
+        );
+        let line = site_command(&args(&["status"])).unwrap();
+        assert!(
+            line.contains("\"method\":\"site.status\",\"params\":{}"),
+            "{line}"
+        );
+        assert!(site_command(&args(&["join-list", "--x"])).is_err());
+        assert!(site_command(&args(&[])).is_err());
+        assert!(site_command(&args(&["bogus"])).is_err());
+
+        // approve / deny: verdict owns exactly its parameter.
+        let line = site_command(&args(&[
+            "approve",
+            "--request",
+            "jr-0000000000000001",
+            "--device",
+            "00A1000000001234",
+            "--role",
+            "relay",
+            "--idempotency-key",
+            "k1",
+        ]))
+        .unwrap();
+        assert!(
+            line.contains("\"method\":\"join.decide\",\"params\":{\"join_request_id\":\"jr-0000000000000001\",\"device_id\":\"00a1000000001234\",\"verdict\":\"allow\",\"role\":\"relay\",\"idempotency_key\":\"k1\"}"),
+            "{line}"
+        );
+        let line = site_command(&args(&[
+            "deny",
+            "--request",
+            "JR-0000000000000002",
+            "--device",
+            "00a1000000001234",
+            "--reason",
+            "blocked",
+            "--idempotency-key",
+            "k2",
+        ]))
+        .unwrap();
+        assert!(
+            line.contains("\"verdict\":\"deny\",\"reason\":\"blocked\"")
+                && line.contains("\"join_request_id\":\"jr-0000000000000002\""),
+            "{line}"
+        );
+        // A generated key keeps the line valid when omitted.
+        let line = site_command(&args(&[
+            "approve",
+            "--request",
+            "jr-0000000000000001",
+            "--device",
+            "00a1000000001234",
+            "--role",
+            "endpoint",
+        ]))
+        .unwrap();
+        assert!(line.contains("\"idempotency_key\":\""), "{line}");
+        assert!(site_command(&args(&[
+            "approve",
+            "--request",
+            "jr-1",
+            "--device",
+            "00a1000000001234",
+            "--role",
+            "endpoint"
+        ]))
+        .is_err());
+        assert!(site_command(&args(&[
+            "approve",
+            "--request",
+            "jr-0000000000000001",
+            "--device",
+            "00a1000000001234",
+            "--role",
+            "owner"
+        ]))
+        .is_err());
+        assert!(site_command(&args(&[
+            "approve",
+            "--request",
+            "jr-0000000000000001",
+            "--device",
+            "00a1000000001234",
+            "--role",
+            "endpoint",
+            "--reason",
+            "blocked"
+        ]))
+        .is_err());
+        assert!(site_command(&args(&[
+            "deny",
+            "--request",
+            "jr-0000000000000001",
+            "--device",
+            "00a1000000001234",
+            "--reason",
+            "maybe"
+        ]))
+        .is_err());
+        assert!(site_command(&args(&[
+            "deny",
+            "--request",
+            "jr-0000000000000001",
+            "--device",
+            "00a1000000001234",
+            "--reason",
+            "blocked",
+            "--role",
+            "endpoint"
+        ]))
+        .is_err());
+        assert!(site_command(&args(&[
+            "approve",
+            "--request",
+            "jr-0000000000000001",
+            "--device",
+            "00a1000000001234",
+            "--role",
+            "endpoint",
+            "--idempotency-key",
+            "has space"
+        ]))
+        .is_err());
+
+        // policy: bare reads, flags write partial patches.
+        let line = site_command(&args(&["policy"])).unwrap();
+        assert!(
+            line.contains("\"method\":\"join.policy.get\",\"params\":{}"),
+            "{line}"
+        );
+        let line = site_command(&args(&[
+            "policy",
+            "--zero-touch-open",
+            "true",
+            "--decision-mode",
+            "closed",
+            "--decision-timeout-ms",
+            "800",
+            "--pending-retry-after-s",
+            "120",
+        ]))
+        .unwrap();
+        assert!(
+            line.contains("\"method\":\"join.policy.set\",\"params\":{\"zero_touch_open\":true,\"decision_mode\":\"closed\",\"decision_timeout_ms\":800,\"pending_retry_after_s\":120}"),
+            "{line}"
+        );
+        let line = site_command(&args(&["policy", "--decision-mode", "kguard"])).unwrap();
+        assert!(
+            line.contains(
+                "\"method\":\"join.policy.set\",\"params\":{\"decision_mode\":\"kguard\"}"
+            ),
+            "{line}"
+        );
+        assert!(site_command(&args(&["policy", "--zero-touch-open", "yes"])).is_err());
+        assert!(site_command(&args(&["policy", "--decision-mode", "open"])).is_err());
+        assert!(site_command(&args(&["policy", "--bogus", "1"])).is_err());
+
+        // members: list by default, one read with --device.
+        let line = site_command(&args(&[
+            "members",
+            "--after",
+            "00A1000000001234",
+            "--limit",
+            "10",
+            "--include-removed",
+        ]))
+        .unwrap();
+        assert!(
+            line.contains("\"method\":\"members.list\",\"params\":{\"after\":\"00a1000000001234\",\"limit\":10,\"include_removed\":true}"),
+            "{line}"
+        );
+        let line = site_command(&args(&["members", "--device", "00A1000000001234"])).unwrap();
+        assert!(
+            line.contains(
+                "\"method\":\"members.get\",\"params\":{\"device_id\":\"00a1000000001234\"}"
+            ),
+            "{line}"
+        );
+        assert!(site_command(&args(&["members", "--limit", "0"])).is_err());
+        assert!(site_command(&args(&["members", "--limit", "129"])).is_err());
+        assert!(site_command(&args(&[
+            "members",
+            "--device",
+            "00a1000000001234",
+            "--limit",
+            "1"
+        ]))
+        .is_err());
+
+        // revoke.
+        let line = site_command(&args(&[
+            "revoke",
+            "--device",
+            "00a1000000001234",
+            "--expected-generation",
+            "3",
+            "--reason",
+            "lost",
+            "--idempotency-key",
+            "rm-1",
+        ]))
+        .unwrap();
+        assert!(
+            line.contains("\"method\":\"membership.revoke\",\"params\":{\"device_id\":\"00a1000000001234\",\"expected_generation\":3,\"reason\":\"lost\",\"idempotency_key\":\"rm-1\"}"),
+            "{line}"
+        );
+        assert!(site_command(&args(&[
+            "revoke",
+            "--device",
+            "00a1000000001234",
+            "--expected-generation",
+            "0",
+            "--reason",
+            "lost"
+        ]))
+        .is_err());
+        assert!(site_command(&args(&[
+            "revoke",
+            "--device",
+            "00a1000000001234",
+            "--expected-generation",
+            "1",
+            "--reason",
+            "gone"
+        ]))
+        .is_err());
+
+        // gk-rotate: bare reads status, epoch rotates.
+        let line = site_command(&args(&["gk-rotate"])).unwrap();
+        assert!(
+            line.contains("\"method\":\"group_keys.status\",\"params\":{}"),
+            "{line}"
+        );
+        let line = site_command(&args(&[
+            "gk-rotate",
+            "--expected-active-epoch",
+            "2",
+            "--idempotency-key",
+            "gk-1",
+        ]))
+        .unwrap();
+        assert!(
+            line.contains("\"method\":\"group_keys.rotate\",\"params\":{\"expected_active_epoch\":2,\"idempotency_key\":\"gk-1\"}"),
+            "{line}"
+        );
+        assert!(site_command(&args(&["gk-rotate", "--expected-active-epoch", "0"])).is_err());
+        assert!(site_command(&args(&["gk-rotate", "--idempotency-key", "k"])).is_err());
+
+        // cutover.
+        let line = site_command(&args(&[
+            "cutover",
+            "--expected-site-epoch",
+            "2",
+            "--next-site-cert",
+            "AABBCC",
+            "--idempotency-key",
+            "co-1",
+        ]))
+        .unwrap();
+        assert!(
+            line.contains("\"method\":\"membership.cutover\",\"params\":{\"expected_site_epoch\":2,\"next_site_cert\":\"aabbcc\",\"idempotency_key\":\"co-1\"}"),
+            "{line}"
+        );
+        assert!(site_command(&args(&[
+            "cutover",
+            "--expected-site-epoch",
+            "2",
+            "--next-site-cert",
+            "abc"
+        ]))
+        .is_err());
+        assert!(site_command(&args(&[
+            "cutover",
+            "--expected-site-epoch",
+            "0",
+            "--next-site-cert",
+            "aa"
+        ]))
+        .is_err());
     }
 }
