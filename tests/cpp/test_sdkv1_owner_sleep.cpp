@@ -430,6 +430,33 @@ void test_member_link_binds_discovery() {
   CHECK(phase_b == NeighborPhase::Bound || phase_b == NeighborPhase::Reachable);
 }
 
+void test_member_link_expiry_rediscovers() {
+  current = "member_link_expiry_rediscovers";
+  SimPair pair{};
+  MonotonicMs now = kSimT0;
+  CHECK(boot_member_pair(pair, now));
+  CHECK(pair.a.demand_link(kSimNodeB));
+  CHECK(pair.b.demand_link(kSimNodeA));
+  CHECK(pump_until_link(pair, now));
+  if (!pair.a.link_session_to(kSimNodeB) || !pair.b.link_session_to(kSimNodeA)) return;
+
+  // A 24-hour context expires even if the neighbor lease had been healthy.
+  // The next discovery exchange must provide a new frozen link carrier.
+  const auto established = pair.a.coordinator().counters().link_established;
+  now += SessionBank<1, 1>::kContextLifetimeMs + 1000;
+  pair.link.pump_tick(now);
+  CHECK(pair.a.demand_link(kSimNodeB));
+  CHECK(pair.b.demand_link(kSimNodeA));
+  bool restored = false;
+  for (int tick = 0; tick < 4000 && !restored; ++tick) {
+    now += 10;
+    pair.link.pump_tick(now);
+    restored = pair.a.link_session_to(kSimNodeB) && pair.b.link_session_to(kSimNodeA);
+  }
+  CHECK(restored);
+  CHECK(pair.a.coordinator().counters().link_established > established);
+}
+
 void test_dev_resume_r3_loss_recovers_after_receiver_restart() {
   current = "dev_resume_r3_loss_recovers_after_receiver_restart";
   SimPair pair{};
@@ -786,6 +813,7 @@ void test_member_sleep_save_shapes() {
 
 int main() {
   test_member_link_binds_discovery();
+  test_member_link_expiry_rediscovers();
   test_dev_resume_r3_loss_recovers_after_receiver_restart();
   test_dev_destination_restart_without_report_stays_stale();
   test_dev_destination_restart_recovers_end_session_from_rx_report();
