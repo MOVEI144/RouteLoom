@@ -1,0 +1,1 @@
+{"v":1,"request_id":"hil-site-watch-1790445809786126397","ok":true,"result":{"active":3,"staged":null,"phase":"stable","cause":null,"targets":0,"staged_ack":0,"active_ack":0,"unknown":0,"last_rotation":{"from":1,"to":2,"cause":"manual","activated_ms":1790441909914},"next_due_ms":1790529161081,"clock":{"unix_ms":1790445809786,"mono_ms":17583}}}
