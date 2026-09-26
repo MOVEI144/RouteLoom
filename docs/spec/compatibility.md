@@ -97,9 +97,10 @@ The C boundary is [`routeloom.h`](../../components/routeloom/include/routeloom/r
   gateway-scoped routing profile (`route_gateway_count`,
   `route_refresh_ticks`, `route_gateways[2]`); `rl_init` still accepts the
   pre-extension size `RL_NODE_CONFIG_SIZE_BASE` (64 bytes) as the flat
-  profile and refuses sizes between the two layouts. A binary built against
-  an older header must not call a newer `rl_node_config_init()` (it writes
-  the whole current struct) — pre-1.0, rebuild from one source drop.
+  profile and refuses sizes between the two layouts. `rl_node_config_init()`
+  writes only the original 64 bytes so binaries built with the old header
+  remain safe. Call `rl_node_config_init_full()` with a current-size buffer
+  to initialize the appended gateway-scoped fields.
 - Group delivery was added the same additive way, without an ABI bump:
   `rl_send_options_t.ordered` takes the first former reserved byte (zero
   keeps the old unordered behaviour; the struct stays 28 bytes), and the new
@@ -147,7 +148,7 @@ unknown versions rather than guessing:
 | Authority ledger (device) | `kAuthorityLedgerSchemaVersion = 1` (`authority.hpp`) | Record reported `Unsupported`; never applied |
 | Config journal (device) | `kJournalSchemaVersion = 1` (`config.cpp`) | Slot rejected |
 | Config outbox (device) | `kOutboxSchemaVersion = 1` (`config.cpp`) | Slot rejected |
-| Power image (device) | `kPowerImageSchemaVersion = 1` (`power.hpp`) | Image rejected, cold resume |
+| Power image (device) | `kPowerImageSchemaVersion = 1` (`power.hpp`) | A CRC-valid unknown schema is diagnosed; stored pending is not restored and subsequent image writes are blocked until explicit migration/discard, including when an older readable sibling exists |
 | Host operation store | `SCHEMA_VERSION = 2` (`sqlite_store.rs`) | Accepts versions `1..=2` and migrates forward; anything else refused |
 
 Policy: schema bumps must ship an explicit migration or a loud refusal —

@@ -9,9 +9,8 @@
 
 namespace routeloom::sdkv1 {
 
-// Physical-maintenance-only purge of the three obsolete peer record shapes.
-// The caller must first check the full maintenance-domain fingerprint and
-// stop/drain radio, USB and Node; this port never makes that authorization.
+// Legacy peer record inspection. Old PSK images ignore the migration marker;
+// erasing replay floors is unsafe while those images can be restored.
 struct LegacyKey {
   const char* name_space{nullptr};
   const char* key{nullptr};
@@ -35,8 +34,8 @@ struct LegacyPurgeResult {
 };
 
 bool is_legacy_peer_key(const LegacyKey& key) noexcept;
-// One pass deletes at most 16 records. Caller repeats until remaining==0.
-// A failure returns without claiming completion; retries are idempotent.
+// Always refuses without accessing the port until rollback of old PSK
+// binaries can be fenced independently of the migration marker.
 Status purge_legacy_state(LegacyPurgePort& port, bool stopped, bool ram_only_build,
                           LegacyPurgeResult& result) noexcept;
 // Splits a physical-console line: `security legacy-state <rest>` yields the
@@ -46,7 +45,7 @@ Status purge_legacy_state(LegacyPurgePort& port, bool stopped, bool ram_only_bui
 // `line` and is cleared on refusal.
 Status strip_legacy_state_prefix(ByteView line, ByteView& rest) noexcept;
 
-// Physical-maintenance console for the purge (P4 §10.2): the portable logic
+// Physical-maintenance console for legacy state (P4 §10.2): the portable logic
 // behind the firmware's `security legacy-state` verb. The firmware runner
 // feeds one line at a time over an exclusive maintenance boot (never the
 // mesh/USB remote command path) and stops/drains radio, USB and Node first;
@@ -56,7 +55,7 @@ Status strip_legacy_state_prefix(ByteView line, ByteView& rest) noexcept;
 //
 // Protocol (one line in, one line out; tokens split on exactly one space):
 //   status                                    -> OK legacy=<n> marker=<0|1>
-//   purge --domain <32hex> --confirm          -> OK erased=<e> remaining=<r>
+//   purge --domain <32hex> --confirm          -> ERR rollback_unsafe
 // Failures are `ERR <token>`: `domain` (no match, malformed included),
 // `busy` (radio not stopped), `refused` (legacy build), `store` (port
 // failure), `invalid_argument`. Every refusal leaves the store untouched.

@@ -86,7 +86,7 @@ RLP1 slot（84B）:
 | D2-d floor/windowは消さない | 削除経路を作らない | C2を満たせないため |
 | D2-e 運用での回復 | 開発network id／PSK domainを全台で切り替え、保守verbで`rlreplay`/`rlcounter`名前空間を明示消去 | 新しい鍵空間になるため旧recordは無意味（明示操作であり自動eraseではない） |
 
-D2-bで1ピアあたり約6 entry（両scopeの`c*`）が回収され、約14 entry/ピアが残る。churnの多い現場ではD2-cの上限に達し得る。**根本解決はD1**：開発Providerも本番と同じRAM context engineへ移し、RLRES1のRMSに開発PSKを使う（EXPERIMENTAL表示は維持）。移行後、旧名前空間は保守verbで一度だけ消去する（[08](08-implementation-plan.md) P4-3）。
+D2-bで1ピアあたり約6 entry（両scopeの`c*`）が回収され、約14 entry/ピアが残る。churnの多い現場ではD2-cの上限に達し得る。**根本解決はD1**：開発Providerも本番と同じRAM context engineへ移し、RLRES1のRMSに開発PSKを使う（EXPERIMENTAL表示は維持）。ただし旧PSK binaryは新版のmigration markerを検査しない。旧版に戻せる間は保守consoleとportable `purge_legacy_state` APIの両方で消去を拒否し、`c*`/`f*`/`r*`を保持する。consoleは`ERR rollback_unsafe`、APIは`RecoveryRequired`を返す。旧版復帰を禁止する移行が成立するまで消去しない（[08](08-implementation-plan.md) P4-3）。
 
 ## 5. NVS entry予算とpartition推奨
 
@@ -138,12 +138,12 @@ rlsec,    data, nvs,     0x190000, 0x10000
 | 受信frame | **0** | window 1 commit/frame（[04 provisioning §4.9](../sdk-completion/04-provisioning-lifecycle.md)で最大の摩耗要因とされたもの） |
 | 送信frame | 0 | 256送信ごとにlease 1 |
 | 新しい近隣（full EDHOC） | 再開slot 1 | c/f/rの新規作成 |
-| 再開（RLRES1） | 0（まれに`last_used_boot`） | — |
+| 再開（RLRES1） | RLP2使用回数を8回単位で先行予約し、各予約で1 write（`last_used_boot`も同じwrite）。64-use上限でfull EDHOCへ戻る | — |
 | GK更新（24時間） | RLS1 stage 2 write＋activation twin 4 write＝計6 write（readbackを含まず） | — |
 | GK staged差替え | RLS1 twin 4 write（旧next鍵を両slotから消去） | — |
 | 削除 | RRS1 1 commit×2 slot | — |
 
-受信ごとの永続化が無くなるため、本番profileの摩耗は起動回数とGK更新でほぼ決まる。
+受信frameごとの永続化はないが、再接触の頻度も摩耗を支配する。RLP2のRAM予約枠は8相手分で、9相手以上を巡回すると追い出した未使用予約が失われる。cold bootでも残量を失う。1分1接触（年525,600回）、GKを毎日更新する保存層モデルでは、1相手は年72,777 RLP2 write（うち予約64,690）、9相手巡回は年295,663 write（うち予約262,806）。これにRLS1の年2,190 writeを足す。これらは論理write数であり、NVS GCのerase回数・flash寿命ではない。1/8/9相手の実機commit/eraseとGCコピー量を測るまで寿命認定しない。
 
 ## 7. 失敗の扱い
 

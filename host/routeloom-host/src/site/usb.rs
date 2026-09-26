@@ -601,7 +601,7 @@ impl JoinTransport for UsbSiteAdapter {
         // down_object), so a failure counts as a large rejection, like
         // the explicit item bound below.
         let (bytes, terminal) = encoded.inspect_err(|_| guard.stats.rejected_large += 1)?;
-        admit_bytes_locked(&mut guard, bytes, key, terminal, now_ms())
+        admit_bytes_locked(&mut guard, bytes, key, terminal, mono_ms())
     }
 }
 
@@ -942,9 +942,9 @@ impl UsbAuthorityAdapter {
     /// Queues one H→G 0x66 (the lane sends QueryLocal on every capable
     /// bind so a reconnected gateway resyncs its local epochs; a Wake
     /// for the gateway itself leaves as WakeLocal from `deliver`).
-    pub fn send_state_set(&self, set: &SiteStateSet, now_ms: u64) -> Result<(), DeliverReject> {
+    pub fn send_state_set(&self, set: &SiteStateSet) -> Result<(), DeliverReject> {
         let mut guard = self.lock();
-        self.send_state_set_locked(&mut guard, set, now_ms)
+        self.send_state_set_locked(&mut guard, set, mono_ms())
     }
 
     fn send_state_set_locked(
@@ -979,17 +979,13 @@ impl UsbAuthorityAdapter {
         site_epoch: u32,
         rs_epoch_hint: u32,
         gk_epoch_hint: u32,
-        now_ms: u64,
     ) -> Result<(), DeliverReject> {
-        self.send_state_set(
-            &SiteStateSet {
-                action: SiteStateAction::QueryLocal,
-                site_epoch,
-                rs_epoch_hint,
-                gk_epoch_hint,
-            },
-            now_ms,
-        )
+        self.send_state_set(&SiteStateSet {
+            action: SiteStateAction::QueryLocal,
+            site_epoch,
+            rs_epoch_hint,
+            gk_epoch_hint,
+        })
     }
 
     /// Fragments one sealed carrier into 0x65 downs (960 B grid, one
@@ -1129,7 +1125,7 @@ fn wake_local_set(body: &[u8]) -> Option<SiteStateSet> {
 impl AuthorityTransport for UsbAuthorityAdapter {
     fn deliver(&self, outbound: AuthorityOutbound) {
         let mut inner = self.lock();
-        self.deliver_locked(&mut inner, outbound, now_ms());
+        self.deliver_locked(&mut inner, outbound, mono_ms());
     }
 }
 
@@ -1224,6 +1220,7 @@ pub fn site_once(
     let Some(service) = state.site.as_deref() else {
         return;
     };
+    let mono = mono_ms();
     let link = site_link(state);
     let want = (link.active && link.capable).then_some((link.session, link.gateway));
     // The bound adapter must serve exactly this session: incarnation and
@@ -1287,7 +1284,7 @@ pub fn site_once(
             let adapter = UsbAuthorityAdapter::new(gateway, session);
             service.set_authority_transport(Some(adapter.clone()));
             let (site_epoch, rs_epoch, gk_epoch) = service.authority_epochs();
-            let _ = adapter.query_local(site_epoch, rs_epoch, gk_epoch, now);
+            let _ = adapter.query_local(site_epoch, rs_epoch, gk_epoch);
             adapter
         });
         if want_authority.is_none() {
@@ -1295,7 +1292,7 @@ pub fn site_once(
         }
     }
     for (ms, fields) in service.tick(super::group_keys::HostTime {
-        mono_ms: mono_ms(),
+        mono_ms: mono,
         unix_ms: now,
     }) {
         push_event(state, ms, fields);
@@ -1321,9 +1318,15 @@ pub fn site_once(
     for (request, body) in state.site_inbox.drain() {
         if let Some(adapter) = relay.as_ref() {
             match join_relay_sub(&body) {
-                Some(SUB_JOIN_RELAY_UP) => match adapter.handle_up(&body, now) {
+                Some(SUB_JOIN_RELAY_UP) => match adapter.handle_up(&body, mono) {
                     Ok(UpOutcome::Relay(up)) => {
-                        for (ms, fields) in service.handle_up(up, now) {
+                        for (ms, fields) in service.handle_up_time(
+                            up,
+                            super::group_keys::HostTime {
+                                unix_ms: now,
+                                mono_ms: mono,
+                            },
+                        ) {
                             push_event(state, ms, fields);
                         }
                     }
@@ -1407,7 +1410,7 @@ pub fn site_once(
         if let Some(adapter) = authority.as_ref() {
             match authority_sub(&body) {
                 Some(SUB_AUTHORITY_UP) => {
-                    if let Ok(ups) = adapter.handle_up(&body, now) {
+                    if let Ok(ups) = adapter.handle_up(&body, mono) {
                         for up in ups {
                             let time = HostTime {
                                 mono_ms: mono_ms(),
@@ -1431,7 +1434,7 @@ pub fn site_once(
         }
     }
     if let Some(adapter) = relay.as_ref() {
-        let pending = adapter.take_ready(now);
+        let pending = adapter.take_ready(mono);
         let mut unsent = Vec::new();
         let mut blocked = false;
         for item in pending {
@@ -1475,7 +1478,7 @@ pub fn site_once(
         adapter.requeue_front(unsent);
     }
     if let Some(adapter) = authority.as_ref() {
-        let pending = adapter.take_ready(now);
+        let pending = adapter.take_ready(mono);
         let mut unsent = Vec::new();
         let mut blocked = false;
         for item in pending {
@@ -1874,8 +1877,7 @@ mod tests {
         transport
             .deliver(down(key(), 2, DownStatus::Continue, vec![1]))
             .unwrap();
-        // (deliver stamps the wall clock; age it by draining in the future)
-        let ready = adapter.take_ready(crate::now_ms() + DOWN_TTL_MS + 1);
+        let ready = adapter.take_ready(crate::mono_ms() + DOWN_TTL_MS + 1);
         assert!(ready.is_empty());
         assert_eq!(adapter.stats().expired, 1);
     }
@@ -2305,7 +2307,7 @@ mod tests {
             kind: CarrierKind::Envelope,
             bytes,
         });
-        let ready = adapter.take_ready(crate::now_ms());
+        let ready = adapter.take_ready(crate::mono_ms());
         assert_eq!(ready.len(), 2);
         let first = decode_authority_down(&ready[0].bytes).unwrap();
         let second = decode_authority_down(&ready[1].bytes).unwrap();
@@ -2342,7 +2344,7 @@ mod tests {
             bytes: vec![0xCC; 1500],
         });
         assert_eq!(adapter.stats().rejected_full, 1);
-        assert_eq!(adapter.take_ready(crate::now_ms()).len(), DOWN_QUEUE_CAP);
+        assert_eq!(adapter.take_ready(crate::mono_ms()).len(), DOWN_QUEUE_CAP);
     }
 
     #[test]
@@ -2382,8 +2384,8 @@ mod tests {
     #[test]
     fn query_local_queues_a_keyless_state_set() {
         let adapter = UsbAuthorityAdapter::new(GATEWAY, SESSION);
-        adapter.query_local(3, 5, 9, NOW).unwrap();
-        let ready = adapter.take_ready(NOW);
+        adapter.query_local(3, 5, 9).unwrap();
+        let ready = adapter.take_ready(crate::mono_ms());
         assert_eq!(ready.len(), 1);
         assert_eq!(authority_sub(&ready[0].bytes), Some(SUB_SITE_STATE_SET));
         let set = routeloom_protocol::host_ops::decode_site_state_set(&ready[0].bytes).unwrap();
@@ -2392,6 +2394,34 @@ mod tests {
         assert_eq!(set.rs_epoch_hint, 5);
         assert_eq!(set.gk_epoch_hint, 9);
         assert_eq!(adapter.stats().state_sets, 1);
+    }
+
+    #[test]
+    fn down_queue_admissions_use_monotonic_time() {
+        let relay = live_relay();
+        let started = crate::mono_ms();
+        relay
+            .deliver(down(key(), 2, DownStatus::Continue, vec![1]))
+            .unwrap();
+        let relay_at = relay.lock().queue.front().unwrap().admitted_ms;
+        assert!(started <= relay_at && relay_at <= crate::mono_ms());
+        assert!(relay.take_ready(relay_at + DOWN_TTL_MS + 1).is_empty());
+
+        let authority = UsbAuthorityAdapter::new(GATEWAY, SESSION);
+        let started = crate::mono_ms();
+        authority.deliver(AuthorityOutbound {
+            device: DEVICE,
+            kind: CarrierKind::Wake,
+            bytes: vec![0; 8],
+        });
+        let authority_at = authority.lock().queue.front().unwrap().admitted_ms;
+        assert!(started <= authority_at && authority_at <= crate::mono_ms());
+
+        let started = crate::mono_ms();
+        authority.query_local(3, 5, 9).unwrap();
+        let query_at = authority.lock().queue.back().unwrap().admitted_ms;
+        assert!(started <= query_at && query_at <= crate::mono_ms());
+        assert!(authority.take_ready(query_at + DOWN_TTL_MS + 1).is_empty());
     }
 
     #[test]
@@ -2407,7 +2437,7 @@ mod tests {
             kind: CarrierKind::Wake,
             bytes: body,
         });
-        let ready = adapter.take_ready(crate::now_ms());
+        let ready = adapter.take_ready(crate::mono_ms());
         assert_eq!(ready.len(), 1);
         assert_eq!(authority_sub(&ready[0].bytes), Some(SUB_SITE_STATE_SET));
         let set = routeloom_protocol::host_ops::decode_site_state_set(&ready[0].bytes).unwrap();
@@ -2420,7 +2450,7 @@ mod tests {
             kind: CarrierKind::Wake,
             bytes: vec![0; 8],
         });
-        let ready = adapter.take_ready(crate::now_ms());
+        let ready = adapter.take_ready(crate::mono_ms());
         assert_eq!(ready.len(), 1);
         assert_eq!(authority_sub(&ready[0].bytes), Some(SUB_AUTHORITY_DOWN));
     }
@@ -2436,7 +2466,7 @@ mod tests {
             kind: CarrierKind::Wake,
             bytes: vec![0; 12],
         });
-        assert!(adapter.take_ready(crate::now_ms()).is_empty());
+        assert!(adapter.take_ready(crate::mono_ms()).is_empty());
         assert_eq!(adapter.stats().encode_refused, 1);
         assert_eq!(adapter.stats().state_sets, 0);
     }

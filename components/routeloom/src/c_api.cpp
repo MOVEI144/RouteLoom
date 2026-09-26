@@ -357,8 +357,9 @@ size_t rl_context_alignment(void) { return alignof(rl_context); }
 
 void rl_node_config_init(rl_node_config_t* config) {
   if (config == nullptr) return;
-  *config = {};
-  config->struct_size = sizeof(*config);
+  // The original ABI symbol may receive only the 64-byte pre-routing struct.
+  std::memset(config, 0, RL_NODE_CONFIG_SIZE_BASE);
+  config->struct_size = RL_NODE_CONFIG_SIZE_BASE;
   config->abi_version = RL_ABI_VERSION;
   config->link_epoch = 1;
   config->end_epoch = 1;
@@ -369,8 +370,14 @@ void rl_node_config_init(rl_node_config_t* config) {
   config->callback_watchdog_ms = 1000;
   config->max_link_attempts = 2;
   config->max_end_to_end_rounds = 3;
-  // Flat profile (route_gateway_count 0); the scoped refresh cadence is
-  // spelled out so a caller that only adds gateways sees the SDK value.
+}
+
+void rl_node_config_init_full(rl_node_config_t* config) {
+  if (config == nullptr) return;
+  rl_node_config_init(config);
+  config->struct_size = sizeof(*config);
+  std::memset(reinterpret_cast<std::uint8_t*>(config) + RL_NODE_CONFIG_SIZE_BASE, 0,
+              sizeof(*config) - RL_NODE_CONFIG_SIZE_BASE);
   config->route_refresh_ticks = kScopedDefaultRefreshTicks;
 }
 
