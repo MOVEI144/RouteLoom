@@ -546,8 +546,10 @@ void test_expired_link_with_healthy_side_neighbors() {
     pump(1);
   CHECK(a.link_session_to(kSimNodeB) && b.link_session_to(kSimNodeA));
   const auto old_links = a.coordinator().counters().link_established;
-  // The side contexts are an hour younger than A--B at its expiry.
-  now += 60 * 60 * 1000;
+  const MonotonicMs central_expiry = now + SessionBank<1, 1>::kContextLifetimeMs;
+  // Bring up side contexts just before the central session expires. Their
+  // discovery leases must still be Reachable when central repair begins.
+  now = central_expiry - 60000;
   CHECK(c.boot_dev(now, psk, kNetwork, 199));
   CHECK(d.boot_dev(now, psk, kNetwork, 199));
   side_enabled = true;
@@ -558,8 +560,14 @@ void test_expired_link_with_healthy_side_neighbors() {
   for (int i = 0; i < 1500 && !(a.link_session_to(c_id) && b.link_session_to(d_id)); ++i)
     pump(1);
   CHECK(a.link_session_to(c_id) && b.link_session_to(d_id));
-  now += SessionBank<1, 1>::kContextLifetimeMs - 60 * 60 * 1000 + 1000;
-  tick();
+  while (now <= central_expiry + 1000) {
+    now += 10000;
+    tick();
+  }
+  NeighborPhase side_a{}, side_b{};
+  CHECK(a.discovery()->phase_of(c_id, side_a) && side_a == NeighborPhase::Reachable);
+  CHECK(b.discovery()->phase_of(d_id, side_b) && side_b == NeighborPhase::Reachable);
+  CHECK(!a.link_session_to(kSimNodeB) && !b.link_session_to(kSimNodeA));
   CHECK(a.link_session_to(c_id) && b.link_session_to(d_id));
   CHECK(a.demand_link(kSimNodeB));
   CHECK(b.demand_link(kSimNodeA));
