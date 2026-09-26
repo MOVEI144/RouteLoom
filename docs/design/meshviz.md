@@ -591,6 +591,18 @@ export は `events.jsonl`、`nodes.csv`、`links.csv`、`routes.csv`、`samples.
 
 **再生**：上部にcapture A/Bとversion差、中央に同じnetwork/quality view、下部にseekbar・速度・marker・export。REPLAY中の書込み、承認、送信は操作可能にしない。
 
+**ライブ監視・開発 site（devflow D11 の実装）**：`live_monitor.py`（Qt 非依存）が読取りの予定と応答照合、参加時刻表、点呼摘要を持ち、`site_supervisor.py` が daemon の起動・attach・監視・再接続、`provisioning.py` が provision 手順の順序と再開状態を持つ。画面は「ライブ監視」「開発 site」。時刻表の各列は個別の証拠からだけ埋める：`request_verified_at`＝`join.requests.list` の `created_ms`、`approval_committed_at`＝`members.list` の `approved_ms`、`confirmed_at`＝`confirmed_ms`、`route_first_at`／`route_stable_at`＝gateway の `nodes.list` 各 poll（同じ next hop を 3 連続かつ 5 秒以上、その間に個別 STATUS）、`power_on_at`＝操作者 marker。機器側の時刻と初回 STATUS は下記の点呼 status が返す場合だけ表示し、無ければ空欄。main に無い method は広告の有無で判定して「未対応」と表示する。GUI が期待する形（D01／D09 の実装で確定させる。未確定）：
+
+| method | GUI が読む field（無ければ不明） |
+|---|---|
+| `lab.rollcall.status` | `state`（running／waiting_members／stopped／budget_exceeded）、`run_id`、`poll_seq`、`roster_revision`、`desired_interval_ms`、`effective_interval_ms`、`extension_reason`、`settle_ms`、`airtime_estimate_us_per_s`、`airtime_observed_us_per_s`、`status_age_ms`、`lease_remaining_ms`、`skipped`、`counts{inventory_planned,active_members,tree_explained,delivered,nonmember,missing,unaccounted}`、`statuses[]{node,kid,first_status_received_ms,last_status_received_ms,milestones{boot_at,join_started_at,member_adopted_at,first_rollcall_rx_at:{at_unix_ms,estimated}}}` |
+| `lab.rollcall.start`／`update` | `{desired_interval_ms}`。拒否時の `retry_after_ms` まで再送しない |
+| `lab.rollcall.stop` | `{}` |
+| `lab.inventory.list` | `devices[]{node_id,kid,role,board,provision_state,site}` |
+| `site.status.policy.lab_inventory` | `{enabled,expires_ms}`。無ければ自動承認は「未対応」 |
+
+SiteSupervisor は site directory ごとの lock、bridge port の lease、`capabilities.get`（`caps_version`）と `site.status` の `site_id` 照合を通った daemon だけを使い、別 site の socket は拒否する（再結合しない）。所有 daemon の異常終了は後退付きで再起動（10 分に 5 回まで）、attach した daemon は再接続だけを試み、停止しない。`lab-site-init` は `routeloomctl lab-site-init --spec FILE --out DIR` を固定 argv で呼び、CLI に無ければ「未対応」。provision は D02／D03a の手順を契約 interface（`ContractBackend`）で呼び、未実装の手順は「未対応」、readback 一致前は Ready にしない。identity が `none` 以外の機器は要対応として止め、自動 deprovision しない。
+
 ## 5. 実験機能と指標
 
 ### 5.1 共通実行手順
