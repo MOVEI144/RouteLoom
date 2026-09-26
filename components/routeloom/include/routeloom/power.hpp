@@ -220,6 +220,40 @@ enum class CarryPlanKind : std::uint8_t {
   Expired,  // deadline passed while awake: notify once, then drop
 };
 
+// The coordinator's own sleep/wake/abort/awake account for triage.
+// Accumulated in RAM: aborts and awake spans never reboot, so their
+// counts survive every incident short of a reset; sleep/wake counts
+// describe this boot (deep sleep reboots the RAM away — accumulation
+// across sleeps rides the post-recovery mesh pull that reads this
+// struct back). Fixed size, no heap, plain values only.
+struct PowerStats {
+  std::uint64_t sleeps{0};      // entries into Sleeping
+  std::uint64_t wakes{0};       // entries into Resuming
+  std::uint64_t deep_wakes{0};  // ... with a DeepSleepWake reset cause
+  std::uint64_t aborts{0};      // abort_to_running calls
+  // Per-reason abort buckets: the known policy literals, dynamic details
+  // that failed an operation with StorageFailure (the sleep-image save
+  // path), and everything else. last_abort keeps the exact text.
+  std::uint64_t aborts_abort_request{0};
+  std::uint64_t aborts_ticket_invalid{0};
+  std::uint64_t aborts_sequence_exhausted{0};
+  std::uint64_t aborts_enter_failed{0};
+  std::uint64_t aborts_group_hold_missing{0};
+  std::uint64_t aborts_books_inconsistent{0};
+  std::uint64_t aborts_storage{0};
+  std::uint64_t aborts_other{0};
+  std::uint64_t awake_ms{0};  // cumulative Running time, this boot
+  PowerState state{PowerState::Running};
+  PowerState last_from{PowerState::Running};
+  PowerState last_to{PowerState::Running};
+  char last_reason[48]{};
+  MonotonicMs last_ms{0};
+  char last_abort[48]{};
+  MonotonicMs last_abort_ms{0};
+  ResetCause last_wake_cause{ResetCause::ColdBoot};
+  MonotonicMs last_wake_ms{0};
+};
+
 class PowerCoordinator {
  public:
   PowerCoordinator(const PowerConfig& config, MeshNode& node, PowerPort& port,
@@ -249,7 +283,7 @@ class PowerCoordinator {
   // READY_TO_SLEEP keeps the committed image: it aborts the entry, it does
   // not erase the recovery snapshot. Abort never runs mid-settlement —
   // settlement always completes, so an abort lands before it or after it.
-  Status sleep_abort(const char* reason) noexcept;
+  Status sleep_abort(const char* reason, MonotonicMs now_ms) noexcept;
   // Only the current valid ticket may be submitted. The ticket is copied at
   // receipt (callers may alias ticket() itself) and revalidated after the
   // entry notifications and immediately before the platform handoff. At
@@ -266,11 +300,12 @@ class PowerCoordinator {
   // and abort an active sleep attempt at once; without an attempt only the
   // generation moves. Busy inside an application callback, like the calls
   // above — the event is then the caller's to re-signal after returning.
-  Status notify_app_event() noexcept;
+  Status notify_app_event(MonotonicMs now_ms) noexcept;
   // External radio resets (driver recovery) invalidate tickets the same way.
-  Status notify_radio_reset() noexcept;
+  Status notify_radio_reset(MonotonicMs now_ms) noexcept;
 
   PowerState state() const noexcept { return state_; }
+  const PowerStats& stats() const noexcept { return stats_; }
   ResetCause reset_cause() const noexcept { return cause_; }
   ResumeOutcome resume_outcome() const noexcept { return outcome_; }
   const SleepTicket& ticket() const noexcept { return ticket_; }
@@ -309,7 +344,8 @@ class PowerCoordinator {
   void notify_pending_result(const PendingDeliveryRecord& record,
                              StatusCode result) noexcept;
   void notify_diagnostic(const char* reason) noexcept;
-  void transition(PowerState next, const char* reason) noexcept;
+  void transition(PowerState next, const char* reason,
+                  MonotonicMs now_ms) noexcept;
   std::uint32_t pending_generation() const noexcept;
   void issue_ticket() noexcept;
   // Starts one attempt: drain mask, deadline, DRAINING.
@@ -339,7 +375,12 @@ class PowerCoordinator {
   Status commit_image(const PowerImage& image) noexcept;
   // Allocates the next image sequence number; false at the counter ceiling.
   bool next_image_sequence(std::uint32_t& out) noexcept;
-  void abort_to_running(const char* reason) noexcept;
+  // `code` names the failed operation when the abort was caused by one
+  // (Ok for policy aborts); the stats bucket storage failures apart.
+  void abort_to_running(const char* reason, StatusCode code,
+                        MonotonicMs now_ms) noexcept;
+  void note_abort(const char* reason, StatusCode code,
+                  MonotonicMs now_ms) noexcept;
   bool image_usable(const PowerImage& image) const noexcept;
 
   PowerConfig config_{};
@@ -348,6 +389,8 @@ class PowerCoordinator {
   PowerStorage& storage_;
   PowerEvents& events_;
   PowerState state_{PowerState::Running};
+  PowerStats stats_{};
+  MonotonicMs awake_entered_ms_{0};
   ResetCause cause_{ResetCause::ColdBoot};
   ResumeOutcome outcome_{ResumeOutcome::None};
   SleepRequest request_{};
