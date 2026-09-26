@@ -383,19 +383,29 @@ impl P6ChannelHub {
             | ChannelEvent::Passthrough { device, .. } => *device,
         };
         if !self.live.contains_key(&device) {
+            let retained = self.lookup(device, self.last_mono_ms);
             if let ChannelEvent::Passthrough {
                 env_type: 5, body, ..
             } = &event
             {
-                if body.len() >= BODY_HEAD
+                let notice = body.len() >= BODY_HEAD
                     && matches!(
                         decode_type5(&body[BODY_HEAD..]),
                         Some(P6Type5::NoticeAccepted { .. })
-                    )
-                {
-                    // The common receipt parser below still checks the
-                    // retained binding and authenticated generation.
-                } else {
+                    );
+                // A gateway may acknowledge COMMIT before the next tick
+                // repopulates live rows. Only its authenticated old binding
+                // may report APPLIED inside the bounded COMMIT grace.
+                let applied = body.len() >= BODY_HEAD
+                    && self.grace_active(self.last_mono_ms)
+                    && retained
+                        .as_ref()
+                        .is_some_and(|binding| binding.network == self.network())
+                    && matches!(
+                        decode_type5(&body[BODY_HEAD..]),
+                        Some(P6Type5::Applied { .. })
+                    );
+                if !notice && !applied {
                     return;
                 }
             } else {
