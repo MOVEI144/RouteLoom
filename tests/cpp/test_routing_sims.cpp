@@ -195,6 +195,33 @@ void test_relay_first_gateway_route(bool scoped) {
   check_no_forward_loops(w.net.sights);
 }
 
+void test_relay_first_three_hop_gateway_route(bool scoped) {
+  // The member binds a relay before either relay can reach the gateway.
+  // Advertisements must propagate across both relays without a direct edge.
+  SimWorld w;
+  if (scoped) {
+    w.configure = [](NodeConfig& config) {
+      config.route_gateways[0] = 1;
+      config.route_refresh_ticks = 2;
+      config.route_lifetime_ms = 3000;
+    };
+  }
+  for (NodeId id = 1; id <= 4; ++id) w.add(id);
+  w.start_all();
+  w.link(3, 4, 1, 1);
+  w.run(2000);
+  CHECK(!w.at(1)->routes().best(4).valid);
+  w.link(2, 3, 1, 1);
+  w.run(2000);
+  CHECK(!w.at(1)->routes().best(4).valid);
+  w.link(1, 2, 1, 1);
+  w.run(scoped ? 11000 : 7000);
+  CHECK(w.at(1)->routes().best(4).next_hop == 2);
+  CHECK(w.at(2)->routes().best(4).next_hop == 3);
+  send_and_expect(w, 1, 4, 10000, "relay-first three-hop downlink");
+  check_no_forward_loops(w.net.sights);
+}
+
 void test_relay_removal() {
   SimWorld w;
   for (NodeId id = 1; id <= 4; ++id) w.add(id);
@@ -712,6 +739,8 @@ void test_delivery_with_large_epochs() {
 int main() {
   test_relay_first_gateway_route(false);
   test_relay_first_gateway_route(true);
+  test_relay_first_three_hop_gateway_route(false);
+  test_relay_first_three_hop_gateway_route(true);
   test_line_delivery(1);
   test_line_delivery(3);
   test_line_delivery(5);
