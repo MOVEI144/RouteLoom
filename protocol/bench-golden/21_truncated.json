@@ -1,0 +1,6 @@
+{
+  "name": "truncated",
+  "expect": "truncated",
+  "wire_hex": "524c42310110000000112233445566778899aabbccddeeff0000000125d53d",
+  "note": "31 bytes: below the 32-byte header"
+}
