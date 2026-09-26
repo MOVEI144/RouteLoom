@@ -104,6 +104,23 @@ fn lab_site_init_is_private_unique_and_requires_written_inventory() {
     let journal = site.join("lab-init.journal");
     let recorded = fs::read_to_string(&journal).unwrap();
     fs::write(&journal, recorded.strip_suffix("complete\n").unwrap()).unwrap();
+    let published_manifest = fs::read(site.join("lab-manifest.json")).unwrap();
+    assert!(init().status.success());
+    assert_eq!(
+        fs::read(site.join("lab-manifest.json")).unwrap(),
+        published_manifest
+    );
+    assert_eq!(fs::read(site.join("keys/device-ca.key")).unwrap(), original);
+    let recorded = fs::read_to_string(&journal).unwrap();
+    fs::write(&journal, recorded.strip_suffix("complete\n").unwrap()).unwrap();
+    let mut torn = fs::OpenOptions::new().append(true).open(&journal).unwrap();
+    use std::io::Write;
+    torn.write_all(b"comple").unwrap();
+    drop(torn);
+    assert!(init().status.success());
+    assert!(!init().status.success());
+    let recorded = fs::read_to_string(&journal).unwrap();
+    fs::write(&journal, recorded.strip_suffix("complete\n").unwrap()).unwrap();
     fs::remove_file(site.join("lab-manifest.json")).unwrap();
     assert!(init().status.success());
     assert_eq!(fs::read(site.join("keys/device-ca.key")).unwrap(), original);

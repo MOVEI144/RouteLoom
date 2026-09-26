@@ -1861,7 +1861,7 @@ impl SiteAuthority {
                         );
                         self.finish_allow(txn, &fresh, now_ms);
                     }
-                    None => self.finish_busy(txn, BUSY_RETRY_S),
+                    None => self.finish_busy(txn, BUSY_RETRY_S, now_ms),
                 }
                 return;
             }
@@ -1923,7 +1923,7 @@ impl SiteAuthority {
             .map(|r| (r.id, r.decision));
         if let Some((request_id, Some(verdict))) = open {
             // A decision taken after the previous attempt's deadline.
-            self.close_request(request_id);
+            self.close_request(request_id, now_ms);
             self.finish_verdict(txn, node, verdict, now_ms);
             return;
         }
@@ -1936,7 +1936,7 @@ impl SiteAuthority {
             let seconds = (at - now_ms)
                 .div_ceil(1000)
                 .clamp(1, u64::from(RETRY_AFTER_MAX_S));
-            self.finish_busy(txn, seconds as u32);
+            self.finish_busy(txn, seconds as u32, now_ms);
             return;
         }
         let deadline = now_ms.saturating_add(u64::from(self.policy.decision_timeout_ms));
@@ -1962,7 +1962,7 @@ impl SiteAuthority {
             _ => {
                 self.expire_requests(now_ms);
                 if self.requests.len() >= JOIN_REQUESTS_CAP {
-                    self.finish_busy(txn, BUSY_RETRY_S);
+                    self.finish_busy(txn, BUSY_RETRY_S, now_ms);
                     return;
                 }
                 let request_id = self.next_request_id;
@@ -1994,7 +1994,7 @@ impl SiteAuthority {
         };
         if let Err(error) = self.store.commit(&batch) {
             self.store_error(now_ms, &error);
-            self.finish_busy(txn, BUSY_RETRY_S);
+            self.finish_busy(txn, BUSY_RETRY_S, now_ms);
             return;
         }
         self.next_request_id = next_request_id;
@@ -2048,12 +2048,14 @@ impl SiteAuthority {
         );
     }
 
-    fn close_request(&mut self, request_id: u64) {
+    fn close_request(&mut self, request_id: u64, now_ms: u64) {
         if self.requests.remove(&request_id).is_some() {
-            let _ = self.store.commit(&Batch {
+            if let Err(error) = self.store.commit(&Batch {
                 docs: vec![(DocKind::JoinRequest, h16(request_id), None)],
                 ..Batch::default()
-            });
+            }) {
+                self.store_error(now_ms, &error);
+            }
         }
     }
 
@@ -2066,7 +2068,7 @@ impl SiteAuthority {
             .collect();
         for id in stale {
             if !self.txns.iter().any(|t| t.state == TxnState::Deciding(id)) {
-                self.close_request(id);
+                self.close_request(id, now_ms);
             }
         }
     }
@@ -2090,10 +2092,12 @@ impl SiteAuthority {
                 .map(|d| d.facts.node)
             {
                 self.discovered.remove(&oldest);
-                let _ = self.store.commit(&Batch {
+                if let Err(error) = self.store.commit(&Batch {
                     docs: vec![(DocKind::Discovered, h16(oldest), None)],
                     ..Batch::default()
-                });
+                }) {
+                    self.store_error(now_ms, &error);
+                }
             }
         }
         let entry = self.discovered.entry(node).or_insert_with(|| Discovered {
@@ -2127,24 +2131,34 @@ impl SiteAuthority {
             facts.model,
             via.json()
         );
-        let _ = self.store.commit(&Batch {
+        if let Err(error) = self.store.commit(&Batch {
             docs: vec![(DocKind::Discovered, h16(node), Some(doc))],
             ..Batch::default()
-        });
+        }) {
+            self.store_error(now_ms, &error);
+        }
         if announce {
             self.event(now_ms, fields);
         }
     }
 
-    fn set_discovered_verdict(&mut self, node: u64, label: &str, retry_not_before: Option<u64>) {
+    fn set_discovered_verdict(
+        &mut self,
+        node: u64,
+        label: &str,
+        retry_not_before: Option<u64>,
+        now_ms: u64,
+    ) {
         if let Some(d) = self.discovered.get_mut(&node) {
             d.last_verdict = label.to_string();
             d.retry_not_before_ms = retry_not_before;
             let doc = d.doc();
-            let _ = self.store.commit(&Batch {
+            if let Err(error) = self.store.commit(&Batch {
                 docs: vec![(DocKind::Discovered, h16(node), Some(doc))],
                 ..Batch::default()
-            });
+            }) {
+                self.store_error(now_ms, &error);
+            }
         }
     }
 
@@ -2169,10 +2183,10 @@ impl SiteAuthority {
         }
     }
 
-    fn finish_busy(&mut self, txn: Txn, retry_after_s: u32) {
+    fn finish_busy(&mut self, txn: Txn, retry_after_s: u32, now_ms: u64) {
         self.counters.authority_busy += 1;
         if let Some(node) = txn.device.as_ref().map(|d| d.facts.node) {
-            self.set_discovered_verdict(node, "busy", None);
+            self.set_discovered_verdict(node, "busy", None, now_ms);
         }
         self.send_result(txn, &JoinResult::AuthorityBusy { retry_after_s });
     }
@@ -2189,7 +2203,7 @@ impl SiteAuthority {
                 {
                     self.finish_allow(txn, &row, now_ms)
                 }
-                _ => self.finish_busy(txn, BUSY_RETRY_S),
+                _ => self.finish_busy(txn, BUSY_RETRY_S, now_ms),
             },
             Verdict::Pending { retry_after_s } => {
                 self.counters.pending += 1;
@@ -2198,6 +2212,7 @@ impl SiteAuthority {
                     node,
                     "pending",
                     Some(retry_at.saturating_sub(RETRY_SLACK_MS)),
+                    now_ms,
                 );
                 let mut ticket = [0_u8; 16];
                 let _ = fill_random(&mut ticket);
@@ -2211,7 +2226,7 @@ impl SiteAuthority {
             }
             Verdict::DenyNotHere | Verdict::DenyBlocked => {
                 self.counters.denied += 1;
-                self.set_discovered_verdict(node, verdict.label(), None);
+                self.set_discovered_verdict(node, verdict.label(), None, now_ms);
                 let result = if verdict == Verdict::DenyNotHere {
                     JoinResult::DenyNotHere
                 } else {
@@ -2401,11 +2416,11 @@ impl SiteAuthority {
             ..Batch::default()
         }) {
             self.store_error(now_ms, &error);
-            self.finish_busy(txn, BUSY_RETRY_S);
+            self.finish_busy(txn, BUSY_RETRY_S, now_ms);
             return;
         }
         self.devices.insert(updated.node, updated.clone());
-        self.set_discovered_verdict(row.node, "allowed", None);
+        self.set_discovered_verdict(row.node, "allowed", None, now_ms);
         let result = JoinResult::Allow {
             member_cert: row.member_cert.clone(),
             site_package: self.site_package(row.role, now_ms),
@@ -3264,7 +3279,7 @@ impl SiteAuthority {
         );
         if let Some(index) = waiting {
             let txn = self.txns.remove(index);
-            self.close_request(open.id);
+            self.close_request(open.id, now_ms);
             self.finish_verdict(txn, open.facts.node, request.verdict, now_ms);
         }
         Ok(result)

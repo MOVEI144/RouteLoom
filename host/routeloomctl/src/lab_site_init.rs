@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use routeloom_json::Json;
 use routeloom_provision::credential::credential_kid;
-use routeloom_provision::sdkv1::devca::{DeviceCaSigner, FileDeviceCaSigner};
+use routeloom_provision::sdkv1::cert::CERT_MAX;
+use routeloom_provision::sdkv1::devca::{devcert_verify, DeviceCaSigner, FileDeviceCaSigner};
 use routeloom_provision::sdkv1::siteca::{
     sitecert_issue, FileSiteCaSigner, SiteCaSigner, SiteCertProfile,
 };
@@ -178,6 +179,21 @@ pub fn inventory_import(args: &[String]) -> Result<(), DynError> {
         })
         .ok_or("no provision-confirm-written receipt for this site CA and NodeId")?;
     let kid = matched.kid.ok_or("written receipt lacks kid")?;
+    let cert_path = Path::new(&matched.out_dir).join("devcert.cwt");
+    if fs::metadata(&cert_path)?.len() > CERT_MAX as u64 {
+        return Err("published DevCert exceeds protocol limit".into());
+    }
+    let cert = fs::read(&cert_path)?;
+    if matched.devcert_sha256 != Some(sha256(&cert)) {
+        return Err("published DevCert differs from written receipt".into());
+    }
+    let claims = devcert_verify(&cert, ca.device_ca_id(), &ca.pubkey())?;
+    if claims.subject != node
+        || claims.serial != matched.serial
+        || credential_kid(&claims.pubkey) != kid
+    {
+        return Err("written receipt and site Device CA certificate disagree".into());
+    }
     let mut db = rusqlite::Connection::open(inventory_path)?;
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let site_text = format!("{site_id:016x}");
@@ -298,9 +314,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
         Ok(_) => check_private(&out, true)?,
         Err(e) => return Err(e.into()),
     }
-    if file_exists(&out.join("lab-manifest.json"))? {
-        return Err("site already initialized; refusing to overwrite keys".into());
-    }
+    let published_manifest = file_exists(&out.join("lab-manifest.json"))?;
     let mut journal = if file_exists(&journal_path)? {
         fs::read_to_string(&journal_path)?
     } else {
@@ -311,7 +325,20 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
         fs::File::open(&journal_path)?.sync_all()?;
         header.clone()
     };
-    if !journal.starts_with(&header) || journal.lines().any(|line| line == "complete") {
+    if journal.starts_with(&header) && !journal.ends_with('\n') {
+        let complete_len = journal
+            .rfind('\n')
+            .ok_or("invalid initialization journal")?
+            + 1;
+        let file = fs::OpenOptions::new().write(true).open(&journal_path)?;
+        file.set_len(complete_len as u64)?;
+        file.sync_all()?;
+        journal.truncate(complete_len);
+    }
+    if !journal.starts_with(&header) {
+        return Err("initialization journal differs from spec".into());
+    }
+    if journal.lines().any(|line| line == "complete") {
         return Err("initialization journal differs from spec or site was completed".into());
     }
     let keys_dir = out.join("keys");
@@ -473,15 +500,22 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
     drop(db);
     fs::File::open(&inventory_path)?.sync_all()?;
     sync_dir(&out)?;
-    // Publish the manifest only after all keys/config/DB are durable.
-    let pending = out.join("lab-manifest.json.pending");
-    if file_exists(&pending)? {
-        fs::remove_file(&pending)?;
+    // The manifest is the last published artifact. A crash between its
+    // rename and the journal completion may only accept the same content.
+    if published_manifest {
+        if fs::read(out.join("lab-manifest.json"))? != manifest.as_bytes() {
+            return Err("published manifest differs from initialization journal".into());
+        }
+    } else {
+        let pending = out.join("lab-manifest.json.pending");
+        if file_exists(&pending)? {
+            fs::remove_file(&pending)?;
+        }
+        write_private_file(&pending, manifest.as_bytes())?;
+        fs::File::open(&pending)?.sync_all()?;
+        fs::rename(&pending, out.join("lab-manifest.json"))?;
+        sync_dir(&out)?;
     }
-    write_private_file(&pending, manifest.as_bytes())?;
-    fs::File::open(&pending)?.sync_all()?;
-    fs::rename(&pending, out.join("lab-manifest.json"))?;
-    sync_dir(&out)?;
     use std::io::Write;
     let mut journal_file = fs::OpenOptions::new().append(true).open(&journal_path)?;
     journal_file.write_all(b"complete\n")?;
@@ -494,6 +528,9 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
 mod tests {
     use super::*;
     use crate::office_ledger::IssueSlot;
+    use routeloom_provision::credential::KeyLocation;
+    use routeloom_provision::sdkv1::devca::{devcert_issue, DevCertProfile};
+    use routeloom_provision::sdkv1::pop::{pop_sign, pop_verify};
 
     #[test]
     fn written_receipt_import_is_revisioned_and_issued_only_is_refused() {
@@ -523,9 +560,33 @@ mod tests {
             node_id: 0x3023_4567_89ab_cdef,
             serial: 1,
         };
-        ledger.reserve(slot, Some([3; 32]), "work", "out").unwrap();
+        let challenge = [8; 32];
+        let pop = pop_sign(
+            &[7; 32],
+            slot.node_id,
+            KeyLocation::NvsPlaintext,
+            &challenge,
+        )
+        .unwrap();
+        let device = pop_verify(&pop, slot.node_id, &challenge).unwrap();
+        let kid = credential_kid(&device.pubkey());
+        let ca = FileDeviceCaSigner::load(&site.join("keys/device-ca.key")).unwrap();
+        let cert = devcert_issue(
+            &ca,
+            &device,
+            &DevCertProfile {
+                serial: slot.serial,
+                ..DevCertProfile::default()
+            },
+        )
+        .unwrap();
+        let out = parent.join("issued");
+        private_dir(&out).unwrap();
+        fs::write(out.join("devcert.cwt"), &cert).unwrap();
+        let out_text = out.to_str().unwrap();
+        ledger.reserve(slot, Some(kid), "work", out_text).unwrap();
         ledger
-            .mark_issued(slot, [3; 32], [4; 32], "work", "out")
+            .mark_issued(slot, kid, sha256(&cert), "work", out_text)
             .unwrap();
         let args = vec![
             "--site".into(),
@@ -554,6 +615,53 @@ mod tests {
         );
         assert_eq!((revision, count), (1, 1));
         drop(db);
+        let other_node = slot.node_id + 1;
+        let other_slot = IssueSlot {
+            node_id: other_node,
+            serial: 2,
+            ..slot
+        };
+        let pop = pop_sign(&[9; 32], other_node, KeyLocation::NvsPlaintext, &challenge).unwrap();
+        let device = pop_verify(&pop, other_node, &challenge).unwrap();
+        let other_kid = credential_kid(&device.pubkey());
+        let other_ca = FileDeviceCaSigner::from_secret(slot.device_ca_id, &[10; 32]).unwrap();
+        let other_cert = devcert_issue(
+            &other_ca,
+            &device,
+            &DevCertProfile {
+                serial: other_slot.serial,
+                ..DevCertProfile::default()
+            },
+        )
+        .unwrap();
+        let other_out = parent.join("other-issued");
+        private_dir(&other_out).unwrap();
+        fs::write(other_out.join("devcert.cwt"), &other_cert).unwrap();
+        let other_text = other_out.to_str().unwrap();
+        ledger
+            .reserve(other_slot, Some(other_kid), "other-work", other_text)
+            .unwrap();
+        ledger
+            .mark_issued(
+                other_slot,
+                other_kid,
+                sha256(&other_cert),
+                "other-work",
+                other_text,
+            )
+            .unwrap();
+        ledger.mark_written(other_slot).unwrap();
+        let other_args = [
+            "--site".into(),
+            site.to_string_lossy().into_owned(),
+            "--ledger".into(),
+            ledger_path.to_string_lossy().into_owned(),
+            "--node".into(),
+            format!("{other_node:016x}"),
+            "--role".into(),
+            "endpoint".into(),
+        ];
+        assert!(inventory_import(&other_args).is_err());
         let _ = fs::remove_dir_all(parent);
     }
 }

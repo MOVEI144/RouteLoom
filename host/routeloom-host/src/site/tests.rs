@@ -320,6 +320,7 @@ fn lab_enrollment_expires_on_monotonic_clock_and_must_be_rearmed() {
 struct FailLabApprovalStore {
     inner: MemoryStore,
     fail: Arc<AtomicBool>,
+    fail_discovery: bool,
 }
 
 impl SiteStore for FailLabApprovalStore {
@@ -327,7 +328,15 @@ impl SiteStore for FailLabApprovalStore {
         self.inner.load()
     }
     fn commit(&mut self, batch: &Batch) -> Result<(), StoreError> {
-        if !batch.approval_audit.is_empty() && self.fail.swap(false, Ordering::Relaxed) {
+        let target = if self.fail_discovery {
+            batch
+                .docs
+                .iter()
+                .any(|(kind, _, _)| *kind == store::DocKind::Discovered)
+        } else {
+            !batch.approval_audit.is_empty()
+        };
+        if target && self.fail.swap(false, Ordering::Relaxed) {
             return Err(StoreError("injected approval commit failure".into()));
         }
         self.inner.commit(batch)
@@ -362,6 +371,7 @@ fn lab_failed_commit_closes_automatic_enrollment_until_reopen() {
         Box::new(FailLabApprovalStore {
             inner: MemoryStore::default(),
             fail: Arc::clone(&fail),
+            fail_discovery: false,
         }),
         T0,
     )
@@ -404,6 +414,63 @@ fn lab_failed_commit_closes_automatic_enrollment_until_reopen() {
             .unwrap_err()
             .code,
         "STORE_FAILURE"
+    );
+}
+
+#[test]
+fn lab_discovery_storage_failure_closes_enrollment_before_approval() {
+    let node = 0x00a1_0000_0000_d0a1;
+    let device = SimDevice::new(node, 0xd1);
+    let mut setup = testkit::setup();
+    setup.purpose = SitePurpose::Development;
+    setup.lab = Some(LabBinding {
+        site_id: testkit::SITE,
+        site_ca_fingerprint: sha256(&testkit::site_ca_pub()),
+        device_ca_fingerprint: sha256(&setup.device_ca_pubkey),
+        sak_fingerprint: routeloom_provision::credential::credential_kid(&testkit::sak().pubkey()),
+        inventory_revision: 1,
+        inventory: vec![LabDevice {
+            node,
+            kid: device.kid,
+            role: ROLE_ENDPOINT,
+        }],
+    });
+    let fail = Arc::new(AtomicBool::new(true));
+    let authority = SiteAuthority::open(
+        &setup,
+        Box::new(testkit::sak()),
+        Box::new(FailLabApprovalStore {
+            inner: MemoryStore::default(),
+            fail: Arc::clone(&fail),
+            fail_discovery: true,
+        }),
+        T0,
+    )
+    .unwrap();
+    let service = SiteService::new(authority);
+    let transport = InProcessTransport::new();
+    service.set_transport(transport.clone());
+    service.with(|a| {
+        a.update_policy_at(
+            &PolicyPatch {
+                decision_mode: Some(DecisionMode::LabInventory),
+                ..Default::default()
+            },
+            T0,
+        )
+        .unwrap()
+    });
+    let mut device = SimDevice::new(node, 0xd1);
+    assert!(!matches!(
+        device.start(&service, &transport, T0).1,
+        Outcome::Result(JoinResult::Allow { .. })
+    ));
+    assert!(!fail.load(Ordering::Relaxed));
+    assert!(service.with(|a| a.lab_write_poisoned).0);
+    assert!(
+        service
+            .with(|a| a.store.load().unwrap().approval_audit.is_empty())
+            .0
     );
 }
 

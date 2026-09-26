@@ -24,6 +24,7 @@
 use std::path::Path;
 
 use routeloom_json::Json;
+use routeloom_provision::signer::hex_encode;
 use routeloom_provision::signer::{FileRootSigner, RootSigner, FILE_KEY_CUSTODY_WARNING};
 
 use super::records::{parse_h16, parse_hex};
@@ -169,6 +170,52 @@ pub fn open_dir(dir: &Path, now_ms: u64) -> Result<SiteAuthority, String> {
                     .and_then(|v| v.try_into().ok())
                     .ok_or_else(|| format!("lab manifest: invalid {name}"))
             };
+            let journal_path = dir.join("lab-init.journal");
+            let journal_meta = std::fs::symlink_metadata(&journal_path)
+                .map_err(|e| format!("lab initialization journal missing: {e}"))?;
+            if !journal_meta.file_type().is_file() {
+                return Err("lab initialization journal is not a regular file".into());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if journal_meta.permissions().mode() & 0o077 != 0 {
+                    return Err("lab initialization journal must be private (0600)".into());
+                }
+            }
+            let journal = std::fs::read_to_string(&journal_path)
+                .map_err(|e| format!("lab initialization journal: {e}"))?;
+            let lines: Vec<_> = journal.lines().collect();
+            let spec_recorded = lines
+                .get(1)
+                .and_then(|line| line.strip_prefix("spec:"))
+                .is_some_and(|value| parse_hex(value, 32).is_some());
+            let usb_recorded = lines
+                .get(5)
+                .and_then(|line| line.strip_prefix("usb-secret:"))
+                .is_some_and(|value| parse_hex(value, 32).is_some());
+            if !journal.ends_with("complete\n")
+                || lines.len() != 7
+                || lines[0] != "routeloom-lab-init-v1"
+                || !spec_recorded
+                || lines[2]
+                    != format!(
+                        "device-ca:{}",
+                        hex_encode(&fingerprint("device_ca_fingerprint")?)
+                    )
+                || lines[3]
+                    != format!(
+                        "site-ca:{}",
+                        hex_encode(&fingerprint("site_ca_fingerprint")?)
+                    )
+                || lines[4] != format!("sak:{}", hex_encode(&fingerprint("sak_fingerprint")?))
+                || !usb_recorded
+                || lines[6] != "complete"
+            {
+                return Err(
+                    "lab manifest lacks a completed matching initialization journal".into(),
+                );
+            }
             let site_id = manifest
                 .get("site_id")
                 .and_then(Json::as_str)
@@ -304,6 +351,16 @@ mod tests {
             ],
         )
         .unwrap();
+        assert!(open_dir(&dir, 1).is_err());
+        let journal = format!(
+            "routeloom-lab-init-v1\nspec:{}\ndevice-ca:{}\nsite-ca:{}\nsak:{}\nusb-secret:{}\ncomplete\n",
+            hex_lower(&[0; 32]),
+            hex_lower(&sha256(&setup.device_ca_pubkey)),
+            hex_lower(&sha256(&testkit::site_ca_pub())),
+            hex_lower(&credential_kid(&testkit::sak().pubkey())),
+            hex_lower(&[0; 32]),
+        );
+        write_private_file(&dir.join("lab-init.journal"), journal.as_bytes()).unwrap();
         let mut authority = open_dir(&dir, 1).unwrap();
         authority
             .update_policy(&super::super::PolicyPatch {
