@@ -29,6 +29,11 @@ class FaultyRecordStorage final : public sdkv1::RecordSlotStorage {
     if (call == cut_call) return Status::error(StatusCode::StorageFailure, "power cut");
     return Status::success();
   }
+  Status erase(std::uint8_t index) noexcept override {
+    if (index > 1) return Status::error(StatusCode::InvalidArgument, "slot erase");
+    slots_[index].fill(0xFF);
+    return Status::success();
+  }
   void disarm() { cut_call = std::numeric_limits<std::size_t>::max(); }
   std::size_t write_calls{0};
   std::size_t cut_call{std::numeric_limits<std::size_t>::max()};
