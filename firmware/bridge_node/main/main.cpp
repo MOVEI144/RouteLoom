@@ -256,13 +256,20 @@ class EspSystemHealthPort final : public routeloom::SystemHealthPort {
 
 class BridgeObservationSource final : public routeloom::ObservationSource {
  public:
+  // LEGACY_FIXTURE builds compile the coordinator out entirely, so the
+  // source takes no coordinator there; every mode below degrades to the
+  // same zero/unknown values the null coordinator yields elsewhere.
   BridgeObservationSource(
       const routeloom::MeshNode& node,
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
       const routeloom::sdkv1::SecurityCoordinator* coordinator,
+#endif
       const routeloom::SystemHealthPort& port, std::uint64_t boot_id,
       std::uint8_t profile) noexcept
       : node_(node),
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
         coordinator_(coordinator),
+#endif
         port_(port),
         boot_id_(boot_id),
         profile_(profile) {}
@@ -271,6 +278,7 @@ class BridgeObservationSource final : public routeloom::ObservationSource {
                    routeloom::ObservationSystem& out) const noexcept override {
     std::uint8_t power = routeloom::kPowerRunning;
     std::uint8_t mode = routeloom::kCoordModeUnknown;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
     if (coordinator_ != nullptr) {
       const routeloom::sdkv1::CoordinatorSnapshot snapshot =
           coordinator_->snapshot();
@@ -278,6 +286,7 @@ class BridgeObservationSource final : public routeloom::ObservationSource {
                                 : routeloom::kPowerRunning;
       mode = map_mode(snapshot.mode);
     }
+#endif
     routeloom::fill_observation_system(boot_id_, now_ms, port_, power, mode,
                                        profile_, out);
     return true;
@@ -286,6 +295,7 @@ class BridgeObservationSource final : public routeloom::ObservationSource {
   bool fill_tables(routeloom::MonotonicMs now_ms,
                    routeloom::ObservationTables& out) const noexcept override {
     std::uint16_t link = 0, link_cap = 0, end = 0, end_cap = 0;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
     if (coordinator_ != nullptr) {
       const routeloom::sdkv1::CoordinatorSnapshot snapshot =
           coordinator_->snapshot();
@@ -300,6 +310,7 @@ class BridgeObservationSource final : public routeloom::ObservationSource {
       end_cap = static_cast<std::uint16_t>(
           routeloom::sdkv1::GatewaySessionBank::end_capacity());
     }
+#endif
     routeloom::fill_observation_tables(node_, now_ms, link, link_cap, end,
                                        end_cap, out);
     return true;
@@ -307,8 +318,13 @@ class BridgeObservationSource final : public routeloom::ObservationSource {
 
   bool fill_milestones(routeloom::MonotonicMs now_ms,
                        routeloom::JoinMilestones& out) const noexcept override {
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
     out = coordinator_ != nullptr ? coordinator_->milestones(now_ms)
                                   : routeloom::JoinMilestones{};
+#else
+    static_cast<void>(now_ms);
+    out = routeloom::JoinMilestones{};
+#endif
     return true;
   }
 
@@ -334,6 +350,7 @@ class BridgeObservationSource final : public routeloom::ObservationSource {
   }
 
  private:
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   static std::uint8_t map_mode(
       routeloom::sdkv1::CoordinatorMode mode) noexcept {
     switch (mode) {
@@ -352,9 +369,12 @@ class BridgeObservationSource final : public routeloom::ObservationSource {
     }
     return routeloom::kCoordModeUnknown;
   }
+#endif
 
   const routeloom::MeshNode& node_;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   const routeloom::sdkv1::SecurityCoordinator* coordinator_;
+#endif
   const routeloom::SystemHealthPort& port_;
   std::uint64_t boot_id_;
   std::uint8_t profile_;
@@ -904,8 +924,8 @@ extern "C" void app_main(void) {
   // live at function scope (never inside the attach if below): the bridge
   // borrows the source past it.
 #if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
-  const routeloom::sdkv1::SecurityCoordinator* observation_coordinator =
-      nullptr;
+  // No coordinator exists in this mode, so neither the pointer nor the
+  // type is named here; the source degrades to zero/unknown milestones.
   constexpr std::uint8_t observation_profile =
       routeloom::kProfileLegacyFixture;
 #else
@@ -919,9 +939,15 @@ extern "C" void app_main(void) {
 #endif
 #endif
   EspSystemHealthPort observation_port;
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  BridgeObservationSource observation_source(
+      runtime.node(), observation_port, bridge_config.boot_id,
+      observation_profile);
+#else
   BridgeObservationSource observation_source(
       runtime.node(), observation_coordinator, observation_port,
       bridge_config.boot_id, observation_profile);
+#endif
   if ((bridge_config.capability & routeloom::usb::kCapObservationV1) != 0) {
     status = bridge.attach_observation(observation_source);
     if (!status) fail(status.detail);
