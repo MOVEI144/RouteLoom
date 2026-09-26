@@ -1,0 +1,13 @@
+{
+  "expected": [
+    "0000000000000002",
+    "0000000000000003",
+    "0000000000000004",
+    "0000000000000005"
+  ],
+  "authenticated_at_s": 0.0,
+  "routes_at_s": {},
+  "all_routes_at_s": null,
+  "elapsed_s": 120.19,
+  "source": "artifacts/hil/2026-09-26-full/five-devram-convergence.jsonl"
+}

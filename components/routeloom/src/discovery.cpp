@@ -1306,19 +1306,24 @@ void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
   // Binding generations advance independently on each side's re-auth: a
   // peer at a NEWER epoch proves its record moved forward — adopt that
   // epoch so a re-announced peer can never wedge the exchange (02 §9).
-  // A strictly-older generation is stale-epoch evidence and still rejects.
+  // A strictly-older generation is stale-epoch evidence: do not extend the
+  // lease from it. Still answer with our current generation so a live peer
+  // whose independent binding counter lagged can advance its own record.
+  const bool older_generation =
+      probe.binding_generation.value < neighbor.generation.value;
   if (probe.binding_generation.value > neighbor.generation.value) {
     neighbor.generation = probe.binding_generation;
-  } else if (probe.binding_generation.value < neighbor.generation.value) {
+  } else if (older_generation) {
     ++stats_.kind_rejects;
     reject_event("PROBE_GEN_MISMATCH", neighbor.node);
-    return;
   }
   // An authenticated probe is liveness evidence: refresh the lease, re-arm
   // the bounded Stale re-probe budget and reply.
-  neighbor.last_confirmed_ms = now_ms;
-  neighbor.stale_reprobes = 0;
-  neighbor.lease_expires_at_ms = now_ms + config_.awake_lease_ms;
+  if (!older_generation) {
+    neighbor.last_confirmed_ms = now_ms;
+    neighbor.stale_reprobes = 0;
+    neighbor.lease_expires_at_ms = now_ms + config_.awake_lease_ms;
+  }
 
   autonomy::NeighborResultPayload result{};
   result.binding_generation = neighbor.generation;
@@ -1334,6 +1339,7 @@ void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
       ++stats_.send_failures;
     }
   }
+  if (older_generation) return;
   // If we were stale/bound and have no outstanding probe of our own, start
   // one — bidirectional confirmation still requires our own Result.
   if (neighbor.probe_outstanding == 0 &&
@@ -1648,6 +1654,7 @@ Status NeighborDiscovery::take_member_start(MemberStartRequest& out,
     // the next begin_discovery. Attempts reset — engine retries are not
     // discovery retries.
     outbound_ = Outbound{};
+    release_transient();
     return Status::success();
   }
   return Status::error(StatusCode::NotFound, "no parked member start");

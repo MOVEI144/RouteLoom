@@ -1,0 +1,10 @@
+{
+  "serial": "94:A9:90:7A:B5:60",
+  "idVendor": "303a",
+  "idProduct": "1001",
+  "busnum": "1",
+  "devpath": "2",
+  "udev_path": "/devices/pci0000:00/0000:00:14.0/usb1/1-2/1-2:1.0/tty/ttyACM0",
+  "by_id": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00",
+  "time_utc": "2026-09-26T14:51:43.261612+00:00"
+}

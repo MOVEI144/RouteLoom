@@ -73,11 +73,11 @@ const DEFAULT_CONFIG_DEV_KEY_HEX: &str =
     "524f5554454c4f4f4d2d444556454c4f504d454e542d4b45592d4f4e4c592121";
 /// Idle interval between session keepalives.
 const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-/// Re-Hello cadence while the handshake is unfinished: a Hello sent while
-/// the device is still booting is lost forever, so without a retry the
-/// session would sit in AwaitHelloAck until the next cable reconnect
-/// (observed on real hardware after a device reset).
-const HELLO_RETRY_MS: u64 = 1_000;
+/// Re-Hello cadence while the handshake is unfinished. The C3 can take
+/// over 1.25 s to answer each step under cutover load; a shorter retry
+/// replaces the transcript nonce before the answer arrives. Stay within
+/// the device's 5 s handshake timeout.
+const HELLO_RETRY_MS: u64 = 4_000;
 /// An Active session that has seen no inbound frame for this long is dead
 /// at the far end even when the adapter fd stays healthy — the silent
 /// reboot/half-open case no wire error can signal. A live session always
@@ -404,6 +404,9 @@ impl DeviceSession {
                 };
                 self.proof = Some(proof);
                 self.phase = SessionPhase::AwaitAuthOk;
+                // AUTH has its own response window. Measuring it from the
+                // original HELLO can expire immediately after a slow Ack.
+                self.last_begin_ms = now_ms();
                 result.outbound.push(Outbound::Raw(auth));
             }
             SessionPhase::AwaitAuthOk => {
@@ -2772,7 +2775,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 authority.site_id(),
                 authority.network()
             );
-            Some(Arc::new(site::SiteService::new(authority)))
+            Some(site::SiteService::new_live(authority))
         }
         None => None,
     };
@@ -3399,6 +3402,23 @@ mod tests {
         assert!(session.handshake_retry_due(session.last_begin_ms + HELLO_RETRY_MS));
         complete_handshake(&mut session);
         assert!(!session.handshake_retry_due(session.last_begin_ms + HELLO_RETRY_MS));
+    }
+
+    #[test]
+    fn slow_device_handshake_keeps_each_response_window() {
+        // On the C3 under cutover load, successive HelloAck frames arrived
+        // about 1.26 s apart. Retrying Hello before either response lands
+        // changes the transcript nonce and can prevent AUTH_OK forever.
+        let mut session = DeviceSession::new();
+        let hello = session.begin();
+        assert!(!session.handshake_retry_due(session.last_begin_ms + 1_250));
+        let nonce = u64::from_be_bytes(hello.body[0..8].try_into().unwrap());
+        let (ack, _) = device_hello_ack(nonce);
+        session.last_begin_ms -= 3_200;
+        let inbound = session.handle(&frame(FrameKind::HelloAck, 0, 100, ack));
+        assert_eq!(inbound.outbound.len(), 1);
+        assert_eq!(session.phase, SessionPhase::AwaitAuthOk);
+        assert!(!session.handshake_retry_due(now_ms() + 1_250));
     }
 
     #[test]

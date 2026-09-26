@@ -1,0 +1,577 @@
+{"seq": 0, "ms": 1790448766083, "kind": "adapter", "state": "connected"}
+{"seq": 1, "ms": 1790448766086, "kind": "hello_ack", "version": 1, "node": 1, "boot": 852, "network": 1380712451, "capability": 1735}
+{"seq": 2, "ms": 1790448766088, "kind": "auth_ok", "session": 16798952039616770923}
+{"seq": 3, "ms": 1790448766088, "kind": "credit_grant", "grant_frames": 8, "grant_bytes": 16384}
+{"seq": 4, "ms": 1790448766095, "kind": "node_joined", "node": "0000000000000001", "gateway": "0000000000000001", "reason": "gateway_attached", "status": {"node": "0000000000000001", "role": "gateway", "connected": true, "listed": true, "neighbor": false, "direct": true, "hops": 0, "next_hop": null, "route_metric": null, "link_cost": null, "rssi_dbm": null, "rssi_avg_dbm": null, "telemetry_stale": false, "last_heard_ms": null, "heard_age_ms": null, "updated_ms": 1790448766095, "changed_ms": 1790448766095}}
+{"seq": 5, "ms": 1790448766126, "kind": "dispatch", "detail": "lease up 00000000000003540000000000000001"}
+{"seq": 6, "ms": 1790448766757, "kind": "credit_grant", "grant_frames": 9, "grant_bytes": 16452}
+{"seq": 7, "ms": 1790448766757, "kind": "credit_grant", "grant_frames": 10, "grant_bytes": 16548}
+{"seq": 8, "ms": 1790448766757, "kind": "credit_grant", "grant_frames": 11, "grant_bytes": 16622}
+{"seq": 9, "ms": 1790448766758, "kind": "host_ops_rx", "request": 1, "body_len": 27}
+{"seq": 10, "ms": 1790448766907, "kind": "credit_grant", "grant_frames": 12, "grant_bytes": 17086}
+{"seq": 11, "ms": 1790448767512, "kind": "device.discovered", "device_id": "0000000000000001", "kid": "486ee6f17c2e952cd83c71690a671ecb1b186b26e0451698fb8af6323d064691", "model": 17, "first": true, "previously_removed": false, "kid_conflict": false, "via": {"gateway": "0000000000000001", "proxy": "0000000000000001", "authority_hops": 0, "joiner_rssi_dbm": 0}}
+{"seq": 12, "ms": 1790448767512, "kind": "join.request", "join_request_id": "jr-0000000000000001", "device_id": "0000000000000001", "kid": "486ee6f17c2e952cd83c71690a671ecb1b186b26e0451698fb8af6323d064691", "model": 17, "hw_rev": 2, "cert_serial": 20, "fw_version": 0, "capability": ["sleepy", "relay", "gateway"], "requested_role": "gateway", "previously_removed": false, "kid_conflict": false, "via": {"gateway": "0000000000000001", "proxy": "0000000000000001", "authority_hops": 0, "joiner_rssi_dbm": 0}, "deadline_ms": 2000, "attempt": 1}
+{"seq": 13, "ms": 1790448769581, "kind": "credit_grant", "grant_frames": 13, "grant_bytes": 17229}
+{"seq": 14, "ms": 1790448773717, "kind": "join.decided", "join_request_id": "jr-0000000000000001", "device_id": "0000000000000001", "verdict": "allow", "role": "gateway", "applied": "next_attempt", "late": true}
+{"seq": 15, "ms": 1790448776783, "kind": "credit_grant", "grant_frames": 14, "grant_bytes": 17297}
+{"seq": 16, "ms": 1790448786812, "kind": "credit_grant", "grant_frames": 15, "grant_bytes": 17365}
+{"seq": 17, "ms": 1790448796837, "kind": "credit_grant", "grant_frames": 16, "grant_bytes": 17433}
+{"seq": 18, "ms": 1790448806860, "kind": "credit_grant", "grant_frames": 17, "grant_bytes": 17501}
+{"seq": 19, "ms": 1790448816893, "kind": "credit_grant", "grant_frames": 18, "grant_bytes": 17569}
+{"seq": 20, "ms": 1790448826922, "kind": "credit_grant", "grant_frames": 19, "grant_bytes": 17637}
+{"seq": 21, "ms": 1790448829872, "kind": "credit_grant", "grant_frames": 20, "grant_bytes": 18101}
+{"seq": 22, "ms": 1790448830482, "kind": "member.reissued", "device_id": "0000000000000001", "generation": 1, "member_cert_serial": 1}
+{"seq": 23, "ms": 1790448830516, "kind": "credit_grant", "grant_frames": 21, "grant_bytes": 18542}
+{"seq": 24, "ms": 1790448830521, "kind": "credit_query"}
+{"seq": 25, "ms": 1790448831022, "kind": "diagnostic", "peer": 0, "reason": "SECURITY_PROFILE_EXPERIMENTAL", "msg_session": null, "msg_seq": null}
+{"seq": 26, "ms": 1790448831040, "kind": "credit_grant", "grant_frames": 22, "grant_bytes": 18672}
+{"seq": 27, "ms": 1790448831048, "kind": "authority.channel_ready", "device_id": "0000000000000001"}
+{"seq": 28, "ms": 1790448831063, "kind": "member.confirmed", "device_id": "0000000000000001", "generation": 1}
+{"seq": 29, "ms": 1790448831063, "kind": "authority.pull", "device_id": "0000000000000001", "request_id": 2, "current": 1, "next": 0, "outcome": "answered", "detail": "", "coalesced": false}
+{"seq": 30, "ms": 1790448831100, "kind": "credit_grant", "grant_frames": 23, "grant_bytes": 18802}
+{"seq": 31, "ms": 1790448831102, "kind": "credit_grant", "grant_frames": 24, "grant_bytes": 18964}
+{"seq": 32, "ms": 1790448831102, "kind": "credit_grant", "grant_frames": 25, "grant_bytes": 19126}
+{"seq": 33, "ms": 1790448831114, "kind": "gk.member_applied", "device_id": "0000000000000001", "epoch": 1, "state": "active", "operation_id": null}
+{"seq": 34, "ms": 1790448836951, "kind": "credit_grant", "grant_frames": 26, "grant_bytes": 19194}
+{"seq": 35, "ms": 1790448846974, "kind": "credit_grant", "grant_frames": 27, "grant_bytes": 19262}
+{"seq": 36, "ms": 1790448857005, "kind": "credit_grant", "grant_frames": 28, "grant_bytes": 19330}
+{"seq": 37, "ms": 1790448862042, "kind": "diagnostic", "peer": 0, "reason": "DISCOVERY_FAILED", "msg_session": null, "msg_seq": null}
+{"seq": 38, "ms": 1790448867032, "kind": "credit_grant", "grant_frames": 29, "grant_bytes": 19398}
+{"seq": 39, "ms": 1790448871027, "kind": "credit_query"}
+{"seq": 40, "ms": 1790448871041, "kind": "credit_grant", "grant_frames": 30, "grant_bytes": 19862}
+{"seq": 41, "ms": 1790448873054, "kind": "join_relay_failed", "source": "gateway_abort", "reason": "ProxyAborted", "proxy": "0000000000000001", "relay_id": 1}
+{"seq": 42, "ms": 1790448874070, "kind": "credit_grant", "grant_frames": 31, "grant_bytes": 20326}
+{"seq": 43, "ms": 1790448876081, "kind": "join_relay_failed", "source": "gateway_abort", "reason": "ProxyAborted", "proxy": "0000000000000001", "relay_id": 2}
+{"seq": 44, "ms": 1790448877057, "kind": "credit_grant", "grant_frames": 32, "grant_bytes": 20394}
+{"seq": 45, "ms": 1790448879313, "kind": "credit_grant", "grant_frames": 33, "grant_bytes": 20858}
+{"seq": 46, "ms": 1790448882510, "kind": "device.discovered", "device_id": "0000000000000002", "kid": "0d6b8f680bcde1cfc144c01ceb68b4ba62da9f4ba158c5024f6fc0c738d1ad96", "model": 17, "first": true, "previously_removed": false, "kid_conflict": false, "via": {"gateway": "0000000000000001", "proxy": "0000000000000001", "authority_hops": 0, "joiner_rssi_dbm": -30}}
+{"seq": 47, "ms": 1790448882510, "kind": "join.request", "join_request_id": "jr-0000000000000002", "device_id": "0000000000000002", "kid": "0d6b8f680bcde1cfc144c01ceb68b4ba62da9f4ba158c5024f6fc0c738d1ad96", "model": 17, "hw_rev": 2, "cert_serial": 21, "fw_version": 0, "capability": ["sleepy", "relay"], "requested_role": "endpoint+relay", "previously_removed": false, "kid_conflict": false, "via": {"gateway": "0000000000000001", "proxy": "0000000000000001", "authority_hops": 0, "joiner_rssi_dbm": -30}, "deadline_ms": 2000, "attempt": 1}
+{"seq": 48, "ms": 1790448882613, "kind": "join.decided", "join_request_id": "jr-0000000000000002", "device_id": "0000000000000002", "verdict": "allow", "role": "relay", "applied": "current_attempt", "late": false}
+{"seq": 49, "ms": 1790448882663, "kind": "credit_grant", "grant_frames": 34, "grant_bytes": 21299}
+{"seq": 50, "ms": 1790448887089, "kind": "credit_grant", "grant_frames": 35, "grant_bytes": 21367}
+{"seq": 51, "ms": 1790448891325, "kind": "credit_grant", "grant_frames": 36, "grant_bytes": 21831}
+{"seq": 52, "ms": 1790448893335, "kind": "join_relay_failed", "source": "gateway_abort", "reason": "ProxyAborted", "proxy": "0000000000000001", "relay_id": 4}
+{"seq": 53, "ms": 1790448897119, "kind": "credit_grant", "grant_frames": 37, "grant_bytes": 21899}
+{"seq": 54, "ms": 1790448905973, "kind": "credit_query"}
+{"seq": 55, "ms": 1790448905996, "kind": "credit_grant", "grant_frames": 38, "grant_bytes": 22363}
+{"seq": 56, "ms": 1790448907144, "kind": "credit_grant", "grant_frames": 39, "grant_bytes": 22431}
+{"seq": 57, "ms": 1790448908007, "kind": "join_relay_failed", "source": "gateway_abort", "reason": "ProxyAborted", "proxy": "0000000000000001", "relay_id": 5}
+{"seq": 58, "ms": 1790448917170, "kind": "credit_grant", "grant_frames": 40, "grant_bytes": 22499}
+{"seq": 59, "ms": 1790448927194, "kind": "credit_grant", "grant_frames": 41, "grant_bytes": 22567}
+{"seq": 60, "ms": 1790448928643, "kind": "credit_grant", "grant_frames": 42, "grant_bytes": 23031}
+{"seq": 61, "ms": 1790448930653, "kind": "join_relay_failed", "source": "gateway_abort", "reason": "ProxyAborted", "proxy": "0000000000000001", "relay_id": 6}
+{"seq": 62, "ms": 1790448937211, "kind": "credit_grant", "grant_frames": 43, "grant_bytes": 23099}
+{"seq": 63, "ms": 1790448947234, "kind": "credit_grant", "grant_frames": 44, "grant_bytes": 23167}
+{"seq": 64, "ms": 1790448957259, "kind": "credit_grant", "grant_frames": 45, "grant_bytes": 23235}
+{"seq": 65, "ms": 1790448957733, "kind": "credit_grant", "grant_frames": 46, "grant_bytes": 23699}
+{"seq": 66, "ms": 1790448960932, "kind": "device.discovered", "device_id": "0000000000000006", "kid": "4d3c0287e7f2cfeb2f3da323fe676dc75b2dfae86f27d401e9f4199f09bc791c", "model": 17, "first": true, "previously_removed": false, "kid_conflict": false, "via": {"gateway": "0000000000000001", "proxy": "0000000000000001", "authority_hops": 0, "joiner_rssi_dbm": -30}}
+{"seq": 67, "ms": 1790448960932, "kind": "join.request", "join_request_id": "jr-0000000000000003", "device_id": "0000000000000006", "kid": "4d3c0287e7f2cfeb2f3da323fe676dc75b2dfae86f27d401e9f4199f09bc791c", "model": 17, "hw_rev": 2, "cert_serial": 22, "fw_version": 0, "capability": ["sleepy", "relay"], "requested_role": "endpoint+relay", "previously_removed": false, "kid_conflict": false, "via": {"gateway": "0000000000000001", "proxy": "0000000000000001", "authority_hops": 0, "joiner_rssi_dbm": -30}, "deadline_ms": 2000, "attempt": 1}
+{"seq": 68, "ms": 1790448960998, "kind": "join.decided", "join_request_id": "jr-0000000000000003", "device_id": "0000000000000006", "verdict": "allow", "role": "endpoint", "applied": "current_attempt", "late": false}
+{"seq": 69, "ms": 1790448961083, "kind": "credit_grant", "grant_frames": 47, "grant_bytes": 24140}
+{"seq": 70, "ms": 1790448965540, "kind": "credit_query"}
+{"seq": 71, "ms": 1790448965544, "kind": "diagnostic", "peer": 6, "reason": "BOUND", "msg_session": null, "msg_seq": null}
+{"seq": 72, "ms": 1790448967301, "kind": "credit_grant", "grant_frames": 48, "grant_bytes": 24208}
+{"seq": 73, "ms": 1790448967554, "kind": "diagnostic", "peer": 6, "reason": "REACHABLE", "msg_session": null, "msg_seq": null}
+{"seq": 74, "ms": 1790448967555, "kind": "link_changed", "node": "0000000000000006", "gateway": "0000000000000001", "change": "neighbor_up", "status": {"node": "0000000000000006", "role": "peer", "connected": true, "listed": true, "neighbor": true, "direct": true, "hops": 1, "next_hop": "0000000000000006", "route_metric": 1, "link_cost": 1, "rssi_dbm": -30, "rssi_avg_dbm": -29.83, "telemetry_stale": false, "last_heard_ms": 1790448967548, "heard_age_ms": 7, "updated_ms": 1790448967555, "changed_ms": 1790448967555}}
+{"seq": 75, "ms": 1790448967555, "kind": "node_joined", "node": "0000000000000006", "gateway": "0000000000000001", "reason": "route_up", "status": {"node": "0000000000000006", "role": "peer", "connected": true, "listed": true, "neighbor": true, "direct": true, "hops": 1, "next_hop": "0000000000000006", "route_metric": 1, "link_cost": 1, "rssi_dbm": -30, "rssi_avg_dbm": -29.83, "telemetry_stale": false, "last_heard_ms": 1790448967548, "heard_age_ms": 7, "updated_ms": 1790448967555, "changed_ms": 1790448967555}}
+{"seq": 76, "ms": 1790448967925, "kind": "credit_grant", "grant_frames": 49, "grant_bytes": 24672}
+{"seq": 77, "ms": 1790448971128, "kind": "member.reissued", "device_id": "0000000000000002", "generation": 1, "member_cert_serial": 2}
+{"seq": 78, "ms": 1790448971158, "kind": "credit_grant", "grant_frames": 50, "grant_bytes": 25113}
+{"seq": 79, "ms": 1790448972280, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 426}
+{"seq": 80, "ms": 1790448972281, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 427}
+{"seq": 81, "ms": 1790448972397, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 428}
+{"seq": 82, "ms": 1790448972404, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 429}
+{"seq": 83, "ms": 1790448972485, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 430}
+{"seq": 84, "ms": 1790448972492, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 431}
+{"seq": 85, "ms": 1790448972539, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 432}
+{"seq": 86, "ms": 1790448972590, "kind": "credit_query"}
+{"seq": 87, "ms": 1790448972597, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 433}
+{"seq": 88, "ms": 1790448972597, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 435}
+{"seq": 89, "ms": 1790448972679, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 436}
+{"seq": 90, "ms": 1790448972686, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 437}
+{"seq": 91, "ms": 1790448972933, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 438}
+{"seq": 92, "ms": 1790448977048, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 439}
+{"seq": 93, "ms": 1790448977060, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 440}
+{"seq": 94, "ms": 1790448977145, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 441}
+{"seq": 95, "ms": 1790448977155, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 442}
+{"seq": 96, "ms": 1790448977236, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 443}
+{"seq": 97, "ms": 1790448977247, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 444}
+{"seq": 98, "ms": 1790448977333, "kind": "credit_grant", "grant_frames": 51, "grant_bytes": 25181}
+{"seq": 99, "ms": 1790448977333, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 445}
+{"seq": 100, "ms": 1790448977341, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 446}
+{"seq": 101, "ms": 1790448978009, "kind": "diagnostic", "peer": 6, "reason": "UNMATCHED_HOP_ACCEPT", "msg_session": 3098622342, "msg_seq": 16}
+{"seq": 102, "ms": 1790448978023, "kind": "diagnostic", "peer": 6, "reason": "UNMATCHED_HOP_ACCEPT", "msg_session": 3098622342, "msg_seq": 16}
+{"seq": 103, "ms": 1790448978037, "kind": "credit_query"}
+{"seq": 104, "ms": 1790448978044, "kind": "diagnostic", "peer": 6, "reason": "UNMATCHED_HOP_ACCEPT", "msg_session": 3098622342, "msg_seq": 17}
+{"seq": 105, "ms": 1790448978044, "kind": "diagnostic", "peer": 6, "reason": "UNMATCHED_HOP_ACCEPT", "msg_session": 3098622342, "msg_seq": 17}
+{"seq": 106, "ms": 1790448978067, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 447}
+{"seq": 107, "ms": 1790448978085, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 448}
+{"seq": 108, "ms": 1790448978143, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 449}
+{"seq": 109, "ms": 1790448978192, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 450}
+{"seq": 110, "ms": 1790448978579, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 452}
+{"seq": 111, "ms": 1790448978595, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 453}
+{"seq": 112, "ms": 1790448978595, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 454}
+{"seq": 113, "ms": 1790448978711, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 455}
+{"seq": 114, "ms": 1790448978716, "kind": "credit_grant", "grant_frames": 52, "grant_bytes": 25311}
+{"seq": 115, "ms": 1790448978770, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 451}
+{"seq": 116, "ms": 1790448978782, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 467}
+{"seq": 117, "ms": 1790448978803, "kind": "credit_query"}
+{"seq": 118, "ms": 1790448978815, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 468}
+{"seq": 119, "ms": 1790448978772, "kind": "authority.channel_ready", "device_id": "0000000000000006"}
+{"seq": 120, "ms": 1790448978816, "kind": "member.confirmed", "device_id": "0000000000000006", "generation": 1}
+{"seq": 121, "ms": 1790448978816, "kind": "authority.pull", "device_id": "0000000000000006", "request_id": 2, "current": 1, "next": 0, "outcome": "answered", "detail": "", "coalesced": false}
+{"seq": 122, "ms": 1790448978854, "kind": "credit_grant", "grant_frames": 53, "grant_bytes": 25441}
+{"seq": 123, "ms": 1790448978854, "kind": "credit_grant", "grant_frames": 54, "grant_bytes": 25603}
+{"seq": 124, "ms": 1790448978854, "kind": "credit_grant", "grant_frames": 55, "grant_bytes": 25765}
+{"seq": 125, "ms": 1790448978932, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 469}
+{"seq": 126, "ms": 1790448978933, "kind": "gk.member_applied", "device_id": "0000000000000006", "epoch": 1, "state": "active", "operation_id": null}
+{"seq": 127, "ms": 1790448987360, "kind": "credit_grant", "grant_frames": 56, "grant_bytes": 25833}
+{"seq": 128, "ms": 1790448997380, "kind": "credit_grant", "grant_frames": 57, "grant_bytes": 25901}
+{"seq": 129, "ms": 1790449007399, "kind": "credit_grant", "grant_frames": 58, "grant_bytes": 25969}
+{"seq": 130, "ms": 1790449017427, "kind": "credit_grant", "grant_frames": 59, "grant_bytes": 26037}
+{"seq": 131, "ms": 1790449027454, "kind": "credit_grant", "grant_frames": 60, "grant_bytes": 26105}
+{"seq": 132, "ms": 1790449027903, "kind": "credit_grant", "grant_frames": 61, "grant_bytes": 26569}
+{"seq": 133, "ms": 1790449029916, "kind": "join_relay_failed", "source": "gateway_abort", "reason": "ProxyAborted", "proxy": "0000000000000001", "relay_id": 9}
+{"seq": 134, "ms": 1790449034325, "kind": "credit_grant", "grant_frames": 62, "grant_bytes": 27033}
+{"seq": 135, "ms": 1790449034332, "kind": "credit_query"}
+{"seq": 136, "ms": 1790449037482, "kind": "credit_grant", "grant_frames": 63, "grant_bytes": 27101}
+{"seq": 137, "ms": 1790449037514, "kind": "member.reissued", "device_id": "0000000000000002", "generation": 1, "member_cert_serial": 2}
+{"seq": 138, "ms": 1790449037540, "kind": "credit_grant", "grant_frames": 64, "grant_bytes": 27542}
+{"seq": 139, "ms": 1790449041563, "kind": "diagnostic", "peer": 2, "reason": "BOUND", "msg_session": null, "msg_seq": null}
+{"seq": 140, "ms": 1790449043573, "kind": "diagnostic", "peer": 2, "reason": "REACHABLE", "msg_session": null, "msg_seq": null}
+{"seq": 141, "ms": 1790449043578, "kind": "link_changed", "node": "0000000000000002", "gateway": "0000000000000001", "change": "neighbor_up", "status": {"node": "0000000000000002", "role": "peer", "connected": true, "listed": true, "neighbor": true, "direct": true, "hops": 1, "next_hop": "0000000000000002", "route_metric": 1, "link_cost": 1, "rssi_dbm": -31, "rssi_avg_dbm": -30.04, "telemetry_stale": false, "last_heard_ms": 1790449043566, "heard_age_ms": 12, "updated_ms": 1790449043578, "changed_ms": 1790449043578}}
+{"seq": 142, "ms": 1790449043578, "kind": "node_joined", "node": "0000000000000002", "gateway": "0000000000000001", "reason": "route_up", "status": {"node": "0000000000000002", "role": "peer", "connected": true, "listed": true, "neighbor": true, "direct": true, "hops": 1, "next_hop": "0000000000000002", "route_metric": 1, "link_cost": 1, "rssi_dbm": -31, "rssi_avg_dbm": -30.04, "telemetry_stale": false, "last_heard_ms": 1790449043566, "heard_age_ms": 12, "updated_ms": 1790449043578, "changed_ms": 1790449043578}}
+{"seq": 143, "ms": 1790449047494, "kind": "credit_grant", "grant_frames": 65, "grant_bytes": 27610}
+{"seq": 144, "ms": 1790449048267, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 321}
+{"seq": 145, "ms": 1790449048267, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 322}
+{"seq": 146, "ms": 1790449048379, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 323}
+{"seq": 147, "ms": 1790449048386, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 324}
+{"seq": 148, "ms": 1790449048471, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 325}
+{"seq": 149, "ms": 1790449048478, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 326}
+{"seq": 150, "ms": 1790449048525, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 327}
+{"seq": 151, "ms": 1790449048578, "kind": "credit_query"}
+{"seq": 152, "ms": 1790449048585, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 328}
+{"seq": 153, "ms": 1790449048585, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 330}
+{"seq": 154, "ms": 1790449048667, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 331}
+{"seq": 155, "ms": 1790449048674, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 332}
+{"seq": 156, "ms": 1790449048918, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 333}
+{"seq": 157, "ms": 1790449049847, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 334}
+{"seq": 158, "ms": 1790449050534, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 335}
+{"seq": 159, "ms": 1790449050547, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 336}
+{"seq": 160, "ms": 1790449050629, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 337}
+{"seq": 161, "ms": 1790449050639, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 338}
+{"seq": 162, "ms": 1790449050711, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 339}
+{"seq": 163, "ms": 1790449050752, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 340}
+{"seq": 164, "ms": 1790449050774, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 341}
+{"seq": 165, "ms": 1790449050823, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 342}
+{"seq": 166, "ms": 1790449051439, "kind": "diagnostic", "peer": 2, "reason": "UNMATCHED_HOP_ACCEPT", "msg_session": 3098622342, "msg_seq": 40}
+{"seq": 167, "ms": 1790449051453, "kind": "diagnostic", "peer": 2, "reason": "UNMATCHED_HOP_ACCEPT", "msg_session": 3098622342, "msg_seq": 41}
+{"seq": 168, "ms": 1790449051467, "kind": "credit_query"}
+{"seq": 169, "ms": 1790449051472, "kind": "diagnostic", "peer": 2, "reason": "UNMATCHED_HOP_ACCEPT", "msg_session": 3098622342, "msg_seq": 40}
+{"seq": 170, "ms": 1790449051478, "kind": "diagnostic", "peer": 2, "reason": "UNMATCHED_HOP_ACCEPT", "msg_session": 3098622342, "msg_seq": 41}
+{"seq": 171, "ms": 1790449051487, "kind": "diagnostic", "peer": 2, "reason": "UNMATCHED_HOP_ACCEPT", "msg_session": 3098622342, "msg_seq": 42}
+{"seq": 172, "ms": 1790449051498, "kind": "diagnostic", "peer": 2, "reason": "UNMATCHED_HOP_ACCEPT", "msg_session": 3098622342, "msg_seq": 42}
+{"seq": 173, "ms": 1790449051512, "kind": "diagnostic", "peer": 2, "reason": "UNMATCHED_HOP_ACCEPT", "msg_session": 3098622342, "msg_seq": 43}
+{"seq": 174, "ms": 1790449051523, "kind": "diagnostic", "peer": 2, "reason": "UNMATCHED_HOP_ACCEPT", "msg_session": 3098622342, "msg_seq": 43}
+{"seq": 175, "ms": 1790449051535, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 343}
+{"seq": 176, "ms": 1790449051547, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 344}
+{"seq": 177, "ms": 1790449051608, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 345}
+{"seq": 178, "ms": 1790449051658, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 346}
+{"seq": 179, "ms": 1790449052050, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 347}
+{"seq": 180, "ms": 1790449052065, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 348}
+{"seq": 181, "ms": 1790449052065, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 349}
+{"seq": 182, "ms": 1790449052634, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 350}
+{"seq": 183, "ms": 1790449052639, "kind": "credit_grant", "grant_frames": 66, "grant_bytes": 27740}
+{"seq": 184, "ms": 1790449052704, "kind": "credit_query"}
+{"seq": 185, "ms": 1790449052712, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 362}
+{"seq": 186, "ms": 1790449052714, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 363}
+{"seq": 187, "ms": 1790449052731, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 364}
+{"seq": 188, "ms": 1790449052714, "kind": "authority.channel_ready", "device_id": "0000000000000002"}
+{"seq": 189, "ms": 1790449052714, "kind": "member.confirmed", "device_id": "0000000000000002", "generation": 1}
+{"seq": 190, "ms": 1790449052801, "kind": "credit_grant", "grant_frames": 67, "grant_bytes": 27870}
+{"seq": 191, "ms": 1790449052803, "kind": "credit_grant", "grant_frames": 68, "grant_bytes": 28032}
+{"seq": 192, "ms": 1790449052797, "kind": "authority.pull", "device_id": "0000000000000002", "request_id": 2, "current": 1, "next": 0, "outcome": "answered", "detail": "", "coalesced": false}
+{"seq": 193, "ms": 1790449052816, "kind": "credit_grant", "grant_frames": 69, "grant_bytes": 28194}
+{"seq": 194, "ms": 1790449052899, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 365}
+{"seq": 195, "ms": 1790449052900, "kind": "gk.member_applied", "device_id": "0000000000000002", "epoch": 1, "state": "active", "operation_id": null}
+{"seq": 196, "ms": 1790449052909, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 366}
+{"seq": 197, "ms": 1790449052910, "kind": "gk.member_applied", "device_id": "0000000000000002", "epoch": 1, "state": "active", "operation_id": null}
+{"seq": 198, "ms": 1790449057539, "kind": "credit_grant", "grant_frames": 70, "grant_bytes": 28262}
+{"seq": 199, "ms": 1790449067566, "kind": "credit_grant", "grant_frames": 71, "grant_bytes": 28330}
+{"seq": 200, "ms": 1790449077594, "kind": "credit_grant", "grant_frames": 72, "grant_bytes": 28398}
+{"seq": 201, "ms": 1790449087626, "kind": "credit_grant", "grant_frames": 73, "grant_bytes": 28466}
+{"seq": 202, "ms": 1790449087631, "kind": "credit_query"}
+{"seq": 203, "ms": 1790449096941, "kind": "credit_grant", "grant_frames": 74, "grant_bytes": 28545}
+{"seq": 204, "ms": 1790449096942, "kind": "delivery_event", "request": 1, "state": "accepted", "msg_session": 3098622342, "msg_seq": 53, "reason": "TX_ACCEPTED"}
+{"seq": 205, "ms": 1790449096942, "kind": "delivery_event", "request": 1, "state": "queued", "msg_session": 3098622342, "msg_seq": 53, "reason": "QUEUED"}
+{"seq": 206, "ms": 1790449096950, "kind": "delivery_event", "request": 1, "state": "waiting-for-mac", "msg_session": 3098622342, "msg_seq": 53, "reason": "TX_MAC_PENDING"}
+{"seq": 207, "ms": 1790449096959, "kind": "delivery_event", "request": 1, "state": "waiting-for-hop-accept", "msg_session": 3098622342, "msg_seq": 53, "reason": "HOP_ACCEPT_PENDING"}
+{"seq": 208, "ms": 1790449096974, "kind": "delivery_event", "request": 1, "state": "waiting-for-end-receipt", "msg_session": 3098622342, "msg_seq": 53, "reason": "END_RECEIPT_PENDING"}
+{"seq": 209, "ms": 1790449096993, "kind": "delivery_event", "request": 1, "state": "delivered", "msg_session": 3098622342, "msg_seq": 53, "reason": "END_RECEIVED"}
+{"seq": 210, "ms": 1790449096998, "kind": "credit_grant", "grant_frames": 75, "grant_bytes": 28624}
+{"seq": 211, "ms": 1790449096999, "kind": "delivery_event", "request": 2, "state": "accepted", "msg_session": 3098622342, "msg_seq": 54, "reason": "TX_ACCEPTED"}
+{"seq": 212, "ms": 1790449096999, "kind": "delivery_event", "request": 2, "state": "queued", "msg_session": 3098622342, "msg_seq": 54, "reason": "QUEUED"}
+{"seq": 213, "ms": 1790449097007, "kind": "delivery_event", "request": 2, "state": "waiting-for-mac", "msg_session": 3098622342, "msg_seq": 54, "reason": "TX_MAC_PENDING"}
+{"seq": 214, "ms": 1790449097016, "kind": "delivery_event", "request": 2, "state": "waiting-for-hop-accept", "msg_session": 3098622342, "msg_seq": 54, "reason": "HOP_ACCEPT_PENDING"}
+{"seq": 215, "ms": 1790449097030, "kind": "delivery_event", "request": 2, "state": "waiting-for-end-receipt", "msg_session": 3098622342, "msg_seq": 54, "reason": "END_RECEIPT_PENDING"}
+{"seq": 216, "ms": 1790449097045, "kind": "delivery_event", "request": 2, "state": "delivered", "msg_session": 3098622342, "msg_seq": 54, "reason": "END_RECEIVED"}
+{"seq": 217, "ms": 1790449097663, "kind": "credit_grant", "grant_frames": 76, "grant_bytes": 28692}
+{"seq": 218, "ms": 1790449107671, "kind": "credit_grant", "grant_frames": 77, "grant_bytes": 28760}
+{"seq": 219, "ms": 1790449117699, "kind": "credit_grant", "grant_frames": 78, "grant_bytes": 28828}
+{"seq": 220, "ms": 1790449125606, "kind": "credit_grant", "grant_frames": 79, "grant_bytes": 28908}
+{"seq": 221, "ms": 1790449125608, "kind": "credit_query"}
+{"seq": 222, "ms": 1790449125646, "kind": "group_settled", "group_op": "grp871a6f1b00000001", "network": "00000000524c0003", "group": 65535, "all": true, "state": "DELIVERED", "final": true, "result": "OK", "reason": "GROUP_COMPLETE", "message": {"session": "b8b13986", "sequence": "8000000000000001"}, "gateway": "0000000000000001", "rounds": 1, "delivered": 2, "nonmember": 0, "missing_total": 0, "unaccounted": 0, "missing": [], "missing_truncated": false, "settled_ms": 1790449125646}
+{"seq": 223, "ms": 1790449127719, "kind": "credit_grant", "grant_frames": 80, "grant_bytes": 28976}
+{"seq": 224, "ms": 1790449137752, "kind": "credit_grant", "grant_frames": 81, "grant_bytes": 29044}
+{"seq": 225, "ms": 1790449147784, "kind": "credit_grant", "grant_frames": 82, "grant_bytes": 29112}
+{"seq": 226, "ms": 1790449157806, "kind": "credit_grant", "grant_frames": 83, "grant_bytes": 29180}
+{"seq": 227, "ms": 1790449167829, "kind": "credit_grant", "grant_frames": 84, "grant_bytes": 29248}
+{"seq": 228, "ms": 1790449177865, "kind": "credit_grant", "grant_frames": 85, "grant_bytes": 29316}
+{"seq": 229, "ms": 1790449178409, "kind": "cutover.progress", "operation_id": "op-0000000000000004", "phase": "preparing", "new_site_epoch": 2, "revision": 1, "targets": 3}
+{"seq": 230, "ms": 1790449178480, "kind": "credit_grant", "grant_frames": 86, "grant_bytes": 30005}
+{"seq": 231, "ms": 1790449178621, "kind": "credit_grant", "grant_frames": 87, "grant_bytes": 30694}
+{"seq": 232, "ms": 1790449178737, "kind": "credit_grant", "grant_frames": 88, "grant_bytes": 31383}
+{"seq": 233, "ms": 1790449183464, "kind": "credit_grant", "grant_frames": 89, "grant_bytes": 32072}
+{"seq": 234, "ms": 1790449183680, "kind": "credit_grant", "grant_frames": 90, "grant_bytes": 32761}
+{"seq": 235, "ms": 1790449183767, "kind": "diagnostic", "peer": 2, "reason": "UNMATCHED_HOP_ACCEPT", "msg_session": 3098622342, "msg_seq": 72}
+{"seq": 236, "ms": 1790449183792, "kind": "credit_grant", "grant_frames": 91, "grant_bytes": 33450}
+{"seq": 237, "ms": 1790449184055, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 368}
+{"seq": 238, "ms": 1790449184145, "kind": "credit_query"}
+{"seq": 239, "ms": 1790449184154, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 369}
+{"seq": 240, "ms": 1790449184162, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 471}
+{"seq": 241, "ms": 1790449184202, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 370}
+{"seq": 242, "ms": 1790449184242, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 472}
+{"seq": 243, "ms": 1790449184290, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3830985482, "msg_seq": 371}
+{"seq": 244, "ms": 1790449184319, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 473}
+{"seq": 245, "ms": 1790449184376, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 3695917710, "msg_seq": 474}
+{"seq": 246, "ms": 1790449187905, "kind": "credit_grant", "grant_frames": 92, "grant_bytes": 33518}
+{"seq": 247, "ms": 1790449193544, "kind": "credit_grant", "grant_frames": 93, "grant_bytes": 34207}
+{"seq": 248, "ms": 1790449193765, "kind": "credit_grant", "grant_frames": 94, "grant_bytes": 34896}
+{"seq": 249, "ms": 1790449193879, "kind": "credit_grant", "grant_frames": 95, "grant_bytes": 35585}
+{"seq": 250, "ms": 1790449197939, "kind": "credit_grant", "grant_frames": 96, "grant_bytes": 35653}
+{"seq": 251, "ms": 1790449207989, "kind": "credit_grant", "grant_frames": 97, "grant_bytes": 35721}
+{"seq": 252, "ms": 1790449213586, "kind": "credit_grant", "grant_frames": 98, "grant_bytes": 36410}
+{"seq": 253, "ms": 1790449213814, "kind": "credit_grant", "grant_frames": 99, "grant_bytes": 37099}
+{"seq": 254, "ms": 1790449213934, "kind": "credit_grant", "grant_frames": 100, "grant_bytes": 37788}
+{"seq": 255, "ms": 1790449218019, "kind": "credit_grant", "grant_frames": 101, "grant_bytes": 37856}
+{"seq": 256, "ms": 1790449218024, "kind": "credit_query"}
+{"seq": 257, "ms": 1790449228052, "kind": "credit_grant", "grant_frames": 102, "grant_bytes": 37924}
+{"seq": 258, "ms": 1790449238093, "kind": "credit_grant", "grant_frames": 103, "grant_bytes": 37992}
+{"seq": 259, "ms": 1790449248118, "kind": "credit_grant", "grant_frames": 104, "grant_bytes": 38060}
+{"seq": 260, "ms": 1790449253637, "kind": "credit_grant", "grant_frames": 105, "grant_bytes": 38749}
+{"seq": 261, "ms": 1790449253849, "kind": "credit_grant", "grant_frames": 106, "grant_bytes": 39438}
+{"seq": 262, "ms": 1790449253963, "kind": "credit_grant", "grant_frames": 107, "grant_bytes": 40127}
+{"seq": 263, "ms": 1790449258142, "kind": "credit_grant", "grant_frames": 108, "grant_bytes": 40195}
+{"seq": 264, "ms": 1790449268169, "kind": "credit_grant", "grant_frames": 109, "grant_bytes": 40263}
+{"seq": 265, "ms": 1790449278194, "kind": "credit_grant", "grant_frames": 110, "grant_bytes": 40331}
+{"seq": 266, "ms": 1790449288220, "kind": "credit_grant", "grant_frames": 111, "grant_bytes": 40399}
+{"seq": 267, "ms": 1790449298249, "kind": "credit_grant", "grant_frames": 112, "grant_bytes": 40467}
+{"seq": 268, "ms": 1790449308265, "kind": "credit_grant", "grant_frames": 113, "grant_bytes": 40535}
+{"seq": 269, "ms": 1790449313740, "kind": "credit_grant", "grant_frames": 114, "grant_bytes": 41224}
+{"seq": 270, "ms": 1790449313862, "kind": "credit_grant", "grant_frames": 115, "grant_bytes": 41913}
+{"seq": 271, "ms": 1790449313986, "kind": "credit_grant", "grant_frames": 116, "grant_bytes": 42602}
+{"seq": 272, "ms": 1790449318292, "kind": "credit_grant", "grant_frames": 117, "grant_bytes": 42670}
+{"seq": 273, "ms": 1790449318296, "kind": "credit_query"}
+{"seq": 274, "ms": 1790449328334, "kind": "credit_grant", "grant_frames": 118, "grant_bytes": 42738}
+{"seq": 275, "ms": 1790449338345, "kind": "credit_grant", "grant_frames": 119, "grant_bytes": 42806}
+{"seq": 276, "ms": 1790449348372, "kind": "credit_grant", "grant_frames": 120, "grant_bytes": 42874}
+{"seq": 277, "ms": 1790449358398, "kind": "credit_grant", "grant_frames": 121, "grant_bytes": 42942}
+{"seq": 278, "ms": 1790449368427, "kind": "credit_grant", "grant_frames": 122, "grant_bytes": 43010}
+{"seq": 279, "ms": 1790449372418, "kind": "diagnostic", "peer": 2, "reason": "PROBE_GEN_MISMATCH", "msg_session": null, "msg_seq": null}
+{"seq": 280, "ms": 1790449372435, "kind": "diagnostic", "peer": 2, "reason": "REACHABLE", "msg_session": null, "msg_seq": null}
+{"seq": 281, "ms": 1790449372480, "kind": "node_left", "node": "0000000000000002", "gateway": "0000000000000001", "reason": "route_down", "status": {"node": "0000000000000002", "role": "peer", "connected": false, "listed": true, "neighbor": true, "direct": false, "hops": null, "next_hop": null, "route_metric": null, "link_cost": 1, "rssi_dbm": -32, "rssi_avg_dbm": -32.0, "telemetry_stale": false, "last_heard_ms": 1790449372429, "heard_age_ms": 51, "updated_ms": 1790449372480, "changed_ms": 1790449372480}}
+{"seq": 282, "ms": 1790449373758, "kind": "credit_grant", "grant_frames": 123, "grant_bytes": 43699}
+{"seq": 283, "ms": 1790449373884, "kind": "credit_grant", "grant_frames": 124, "grant_bytes": 44388}
+{"seq": 284, "ms": 1790449374011, "kind": "credit_grant", "grant_frames": 125, "grant_bytes": 45077}
+{"seq": 285, "ms": 1790449374450, "kind": "diagnostic", "peer": 2, "reason": "PEER_RESTARTED_ROUTES_FLUSHED", "msg_session": null, "msg_seq": null}
+{"seq": 286, "ms": 1790449374495, "kind": "node_joined", "node": "0000000000000002", "gateway": "0000000000000001", "reason": "route_up", "status": {"node": "0000000000000002", "role": "peer", "connected": true, "listed": true, "neighbor": true, "direct": true, "hops": 1, "next_hop": "0000000000000002", "route_metric": 1, "link_cost": 1, "rssi_dbm": -31, "rssi_avg_dbm": -31.36, "telemetry_stale": false, "last_heard_ms": 1790449374473, "heard_age_ms": 22, "updated_ms": 1790449374495, "changed_ms": 1790449374495}}
+{"seq": 287, "ms": 1790449374624, "kind": "diagnostic", "peer": 2, "reason": "session unknown context", "msg_session": 4118048704, "msg_seq": 561}
+{"seq": 288, "ms": 1790449375616, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 4118048704, "msg_seq": 561}
+{"seq": 289, "ms": 1790449376122, "kind": "credit_query"}
+{"seq": 290, "ms": 1790449376127, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 4118048704, "msg_seq": 564}
+{"seq": 291, "ms": 1790449377507, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 4118048704, "msg_seq": 565}
+{"seq": 292, "ms": 1790449377512, "kind": "credit_grant", "grant_frames": 126, "grant_bytes": 45207}
+{"seq": 293, "ms": 1790449377570, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 4118048704, "msg_seq": 566}
+{"seq": 294, "ms": 1790449377583, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 4118048704, "msg_seq": 568}
+{"seq": 295, "ms": 1790449377570, "kind": "authority.channel_ready", "device_id": "0000000000000002"}
+{"seq": 296, "ms": 1790449377600, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 4118048704, "msg_seq": 569}
+{"seq": 297, "ms": 1790449377608, "kind": "credit_grant", "grant_frames": 127, "grant_bytes": 45337}
+{"seq": 298, "ms": 1790449377608, "kind": "credit_grant", "grant_frames": 128, "grant_bytes": 45499}
+{"seq": 299, "ms": 1790449377600, "kind": "authority.pull", "device_id": "0000000000000002", "request_id": 2, "current": 1, "next": 0, "outcome": "answered", "detail": "", "coalesced": false}
+{"seq": 300, "ms": 1790449377622, "kind": "credit_grant", "grant_frames": 129, "grant_bytes": 45661}
+{"seq": 301, "ms": 1790449377704, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 4118048704, "msg_seq": 570}
+{"seq": 302, "ms": 1790449377717, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 4118048704, "msg_seq": 571}
+{"seq": 303, "ms": 1790449377725, "kind": "credit_query"}
+{"seq": 304, "ms": 1790449377704, "kind": "gk.member_applied", "device_id": "0000000000000002", "epoch": 1, "state": "active", "operation_id": null}
+{"seq": 305, "ms": 1790449377756, "kind": "gk.member_applied", "device_id": "0000000000000002", "epoch": 1, "state": "active", "operation_id": null}
+{"seq": 306, "ms": 1790449378430, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 4118048704, "msg_seq": 572}
+{"seq": 307, "ms": 1790449378448, "kind": "credit_grant", "grant_frames": 130, "grant_bytes": 45886}
+{"seq": 308, "ms": 1790449378462, "kind": "credit_grant", "grant_frames": 131, "grant_bytes": 45954}
+{"seq": 309, "ms": 1790449378524, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 4118048704, "msg_seq": 575}
+{"seq": 310, "ms": 1790449378536, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 4118048704, "msg_seq": 576}
+{"seq": 311, "ms": 1790449378754, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 4118048704, "msg_seq": 577}
+{"seq": 312, "ms": 1790449379013, "kind": "diagnostic", "peer": 2, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 4118048704, "msg_seq": 578}
+{"seq": 313, "ms": 1790449388495, "kind": "credit_grant", "grant_frames": 132, "grant_bytes": 46022}
+{"seq": 314, "ms": 1790449398507, "kind": "credit_grant", "grant_frames": 133, "grant_bytes": 46090}
+{"seq": 315, "ms": 1790449398629, "kind": "diagnostic", "peer": 6, "reason": "STALE", "msg_session": null, "msg_seq": null}
+{"seq": 316, "ms": 1790449398690, "kind": "link_changed", "node": "0000000000000006", "gateway": "0000000000000001", "change": "neighbor_down", "status": {"node": "0000000000000006", "role": "peer", "connected": false, "listed": true, "neighbor": false, "direct": false, "hops": null, "next_hop": null, "route_metric": null, "link_cost": null, "rssi_dbm": -29, "rssi_avg_dbm": -29.96, "telemetry_stale": false, "last_heard_ms": 1790449368625, "heard_age_ms": 30065, "updated_ms": 1790449398690, "changed_ms": 1790449398690}}
+{"seq": 317, "ms": 1790449398690, "kind": "node_left", "node": "0000000000000006", "gateway": "0000000000000001", "reason": "route_down", "status": {"node": "0000000000000006", "role": "peer", "connected": false, "listed": true, "neighbor": false, "direct": false, "hops": null, "next_hop": null, "route_metric": null, "link_cost": null, "rssi_dbm": -29, "rssi_avg_dbm": -29.96, "telemetry_stale": false, "last_heard_ms": 1790449368625, "heard_age_ms": 30065, "updated_ms": 1790449398690, "changed_ms": 1790449398690}}
+{"seq": 318, "ms": 1790449400629, "kind": "diagnostic", "peer": 6, "reason": "REDISCOVERY", "msg_session": null, "msg_seq": null}
+{"seq": 319, "ms": 1790449402320, "kind": "credit_query"}
+{"seq": 320, "ms": 1790449402326, "kind": "diagnostic", "peer": 6, "reason": "REDISCOVERY", "msg_session": null, "msg_seq": null}
+{"seq": 321, "ms": 1790449404859, "kind": "diagnostic", "peer": 6, "reason": "REACHABLE", "msg_session": null, "msg_seq": null}
+{"seq": 322, "ms": 1790449404981, "kind": "link_changed", "node": "0000000000000006", "gateway": "0000000000000001", "change": "neighbor_up", "status": {"node": "0000000000000006", "role": "peer", "connected": true, "listed": true, "neighbor": true, "direct": true, "hops": 1, "next_hop": "0000000000000006", "route_metric": 1, "link_cost": 1, "rssi_dbm": -30, "rssi_avg_dbm": -30.6, "telemetry_stale": false, "last_heard_ms": 1790449404854, "heard_age_ms": 127, "updated_ms": 1790449404981, "changed_ms": 1790449404981}}
+{"seq": 323, "ms": 1790449404981, "kind": "node_joined", "node": "0000000000000006", "gateway": "0000000000000001", "reason": "route_up", "status": {"node": "0000000000000006", "role": "peer", "connected": true, "listed": true, "neighbor": true, "direct": true, "hops": 1, "next_hop": "0000000000000006", "route_metric": 1, "link_cost": 1, "rssi_dbm": -30, "rssi_avg_dbm": -30.6, "telemetry_stale": false, "last_heard_ms": 1790449404854, "heard_age_ms": 127, "updated_ms": 1790449404981, "changed_ms": 1790449404981}}
+{"seq": 324, "ms": 1790449407828, "kind": "diagnostic", "peer": 6, "reason": "session unknown context", "msg_session": 2998954671, "msg_seq": 7310}
+{"seq": 325, "ms": 1790449407887, "kind": "credit_grant", "grant_frames": 134, "grant_bytes": 46220}
+{"seq": 326, "ms": 1790449407944, "kind": "authority.channel_ready", "device_id": "0000000000000006"}
+{"seq": 327, "ms": 1790449407987, "kind": "credit_grant", "grant_frames": 135, "grant_bytes": 46350}
+{"seq": 328, "ms": 1790449407990, "kind": "credit_grant", "grant_frames": 136, "grant_bytes": 46512}
+{"seq": 329, "ms": 1790449407999, "kind": "authority.pull", "device_id": "0000000000000006", "request_id": 2, "current": 1, "next": 0, "outcome": "answered", "detail": "", "coalesced": false}
+{"seq": 330, "ms": 1790449408021, "kind": "credit_grant", "grant_frames": 137, "grant_bytes": 46674}
+{"seq": 331, "ms": 1790449408086, "kind": "gk.member_applied", "device_id": "0000000000000006", "epoch": 1, "state": "active", "operation_id": null}
+{"seq": 332, "ms": 1790449408115, "kind": "gk.member_applied", "device_id": "0000000000000006", "epoch": 1, "state": "active", "operation_id": null}
+{"seq": 333, "ms": 1790449408136, "kind": "credit_grant", "grant_frames": 138, "grant_bytes": 46899}
+{"seq": 334, "ms": 1790449408140, "kind": "credit_query"}
+{"seq": 335, "ms": 1790449408545, "kind": "credit_grant", "grant_frames": 139, "grant_bytes": 46967}
+{"seq": 336, "ms": 1790449408599, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 2998954671, "msg_seq": 7310}
+{"seq": 337, "ms": 1790449408700, "kind": "diagnostic", "peer": 6, "reason": "DEDUP_EVICTED_RESOLVED", "msg_session": 2998954671, "msg_seq": 7313}
+{"seq": 338, "ms": 1790449416641, "kind": "diagnostic", "peer": 6, "reason": "PEER_RESTARTED_ROUTES_FLUSHED", "msg_session": null, "msg_seq": null}
+{"seq": 339, "ms": 1790449418569, "kind": "credit_grant", "grant_frames": 140, "grant_bytes": 47035}
+{"seq": 340, "ms": 1790449428594, "kind": "credit_grant", "grant_frames": 141, "grant_bytes": 47103}
+{"seq": 341, "ms": 1790449433775, "kind": "credit_grant", "grant_frames": 142, "grant_bytes": 47792}
+{"seq": 342, "ms": 1790449433896, "kind": "credit_grant", "grant_frames": 143, "grant_bytes": 48481}
+{"seq": 343, "ms": 1790449434018, "kind": "credit_grant", "grant_frames": 144, "grant_bytes": 49170}
+{"seq": 344, "ms": 1790449438620, "kind": "credit_grant", "grant_frames": 145, "grant_bytes": 49238}
+{"seq": 345, "ms": 1790449448647, "kind": "credit_grant", "grant_frames": 146, "grant_bytes": 49306}
+{"seq": 346, "ms": 1790449458682, "kind": "credit_grant", "grant_frames": 147, "grant_bytes": 49374}
+{"seq": 347, "ms": 1790449468710, "kind": "credit_grant", "grant_frames": 148, "grant_bytes": 49442}
+{"seq": 348, "ms": 1790449468714, "kind": "credit_query"}
+{"seq": 349, "ms": 1790449478749, "kind": "credit_grant", "grant_frames": 149, "grant_bytes": 49510}
+{"seq": 350, "ms": 1790449488777, "kind": "credit_grant", "grant_frames": 150, "grant_bytes": 49578}
+{"seq": 351, "ms": 1790449490751, "kind": "adapter", "state": "disconnected"}
+{"seq": 352, "ms": 1790449490778, "kind": "dispatch", "detail": "link down"}
+{"seq": 353, "ms": 1790449490782, "kind": "node_left", "node": "0000000000000001", "gateway": "0000000000000001", "reason": "gateway_lost", "status": {"node": "0000000000000001", "role": "gateway", "connected": false, "listed": false, "neighbor": false, "direct": true, "hops": null, "next_hop": null, "route_metric": null, "link_cost": null, "rssi_dbm": null, "rssi_avg_dbm": null, "telemetry_stale": false, "last_heard_ms": null, "heard_age_ms": null, "updated_ms": 1790448766095, "changed_ms": 1790449490782}}
+{"seq": 354, "ms": 1790449490782, "kind": "node_left", "node": "0000000000000002", "gateway": "0000000000000001", "reason": "gateway_lost", "status": {"node": "0000000000000002", "role": "peer", "connected": false, "listed": false, "neighbor": false, "direct": false, "hops": null, "next_hop": null, "route_metric": null, "link_cost": null, "rssi_dbm": null, "rssi_avg_dbm": null, "telemetry_stale": false, "last_heard_ms": 1790449484975, "heard_age_ms": 5807, "updated_ms": 1790449488778, "changed_ms": 1790449490782}}
+{"seq": 355, "ms": 1790449490782, "kind": "node_left", "node": "0000000000000006", "gateway": "0000000000000001", "reason": "gateway_lost", "status": {"node": "0000000000000006", "role": "peer", "connected": false, "listed": false, "neighbor": false, "direct": false, "hops": null, "next_hop": null, "route_metric": null, "link_cost": null, "rssi_dbm": null, "rssi_avg_dbm": null, "telemetry_stale": false, "last_heard_ms": 1790449485085, "heard_age_ms": 5697, "updated_ms": 1790449488778, "changed_ms": 1790449490782}}
+{"seq": 356, "ms": 1790449491298, "kind": "adapter", "state": "connected"}
+{"seq": 357, "ms": 1790449492197, "kind": "decode_error", "detail": "InvalidCobs"}
+{"seq": 358, "ms": 1790449493217, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 359, "ms": 1790449493224, "kind": "auth_ok", "session": 10993414450730352837}
+{"seq": 360, "ms": 1790449493224, "kind": "credit_grant", "grant_frames": 8, "grant_bytes": 16384}
+{"seq": 361, "ms": 1790449493235, "kind": "credit_grant", "grant_frames": 9, "grant_bytes": 16458}
+{"seq": 362, "ms": 1790449493236, "kind": "node_joined", "node": "0000000000000001", "gateway": "0000000000000001", "reason": "gateway_attached", "status": {"node": "0000000000000001", "role": "gateway", "connected": true, "listed": true, "neighbor": false, "direct": true, "hops": 0, "next_hop": null, "route_metric": null, "link_cost": null, "rssi_dbm": null, "rssi_avg_dbm": null, "telemetry_stale": false, "last_heard_ms": null, "heard_age_ms": null, "updated_ms": 1790449493236, "changed_ms": 1790449493236}}
+{"seq": 363, "ms": 1790449493239, "kind": "dispatch", "detail": "lease up 00000000000003550000000000000001"}
+{"seq": 364, "ms": 1790449493265, "kind": "credit_grant", "grant_frames": 10, "grant_bytes": 16588}
+{"seq": 365, "ms": 1790449493366, "kind": "credit_grant", "grant_frames": 11, "grant_bytes": 16656}
+{"seq": 366, "ms": 1790449493464, "kind": "credit_grant", "grant_frames": 12, "grant_bytes": 16752}
+{"seq": 367, "ms": 1790449493465, "kind": "host_ops_rx", "request": 2, "body_len": 27}
+{"seq": 368, "ms": 1790449493467, "kind": "diagnostic", "peer": 6, "reason": "BOUND", "msg_session": null, "msg_seq": null}
+{"seq": 369, "ms": 1790449493464, "kind": "authority.channel_ready", "device_id": "0000000000000001"}
+{"seq": 370, "ms": 1790449493474, "kind": "authority.pull", "device_id": "0000000000000001", "request_id": 2, "current": 1, "next": 0, "outcome": "answered", "detail": "", "coalesced": false}
+{"seq": 371, "ms": 1790449493566, "kind": "credit_grant", "grant_frames": 13, "grant_bytes": 16882}
+{"seq": 372, "ms": 1790449493667, "kind": "credit_grant", "grant_frames": 14, "grant_bytes": 17044}
+{"seq": 373, "ms": 1790449493764, "kind": "credit_grant", "grant_frames": 15, "grant_bytes": 17206}
+{"seq": 374, "ms": 1790449493764, "kind": "gk.member_applied", "device_id": "0000000000000001", "epoch": 1, "state": "active", "operation_id": null}
+{"seq": 375, "ms": 1790449493764, "kind": "gk.member_applied", "device_id": "0000000000000001", "epoch": 1, "state": "active", "operation_id": null}
+{"seq": 376, "ms": 1790449493865, "kind": "credit_grant", "grant_frames": 16, "grant_bytes": 17895}
+{"seq": 377, "ms": 1790449494230, "kind": "credit_grant", "grant_frames": 17, "grant_bytes": 18120}
+{"seq": 378, "ms": 1790449494236, "kind": "credit_query"}
+{"seq": 379, "ms": 1790449495426, "kind": "diagnostic", "peer": 6, "reason": "REACHABLE", "msg_session": null, "msg_seq": null}
+{"seq": 380, "ms": 1790449495651, "kind": "link_changed", "node": "0000000000000006", "gateway": "0000000000000001", "change": "neighbor_up", "status": {"node": "0000000000000006", "role": "peer", "connected": true, "listed": true, "neighbor": true, "direct": true, "hops": 1, "next_hop": "0000000000000006", "route_metric": 1, "link_cost": 1, "rssi_dbm": -29, "rssi_avg_dbm": -29.0, "telemetry_stale": false, "last_heard_ms": 1790449495419, "heard_age_ms": 232, "updated_ms": 1790449495651, "changed_ms": 1790449495651}}
+{"seq": 381, "ms": 1790449495651, "kind": "node_joined", "node": "0000000000000006", "gateway": "0000000000000001", "reason": "route_up", "status": {"node": "0000000000000006", "role": "peer", "connected": true, "listed": true, "neighbor": true, "direct": true, "hops": 1, "next_hop": "0000000000000006", "route_metric": 1, "link_cost": 1, "rssi_dbm": -29, "rssi_avg_dbm": -29.0, "telemetry_stale": false, "last_heard_ms": 1790449495419, "heard_age_ms": 232, "updated_ms": 1790449495651, "changed_ms": 1790449495651}}
+{"seq": 382, "ms": 1790449503472, "kind": "credit_grant", "grant_frames": 18, "grant_bytes": 18188}
+{"seq": 383, "ms": 1790449513495, "kind": "credit_grant", "grant_frames": 19, "grant_bytes": 18256}
+{"seq": 384, "ms": 1790449518301, "kind": "diagnostic", "peer": 2, "reason": "BOUND", "msg_session": null, "msg_seq": null}
+{"seq": 385, "ms": 1790449518324, "kind": "diagnostic", "peer": 2, "reason": "REACHABLE", "msg_session": null, "msg_seq": null}
+{"seq": 386, "ms": 1790449518342, "kind": "link_changed", "node": "0000000000000002", "gateway": "0000000000000001", "change": "neighbor_up", "status": {"node": "0000000000000002", "role": "peer", "connected": true, "listed": true, "neighbor": true, "direct": true, "hops": 1, "next_hop": "0000000000000002", "route_metric": 1, "link_cost": 1, "rssi_dbm": -31, "rssi_avg_dbm": -31.0, "telemetry_stale": false, "last_heard_ms": 1790449518318, "heard_age_ms": 24, "updated_ms": 1790449518342, "changed_ms": 1790449518342}}
+{"seq": 387, "ms": 1790449518342, "kind": "node_joined", "node": "0000000000000002", "gateway": "0000000000000001", "reason": "route_up", "status": {"node": "0000000000000002", "role": "peer", "connected": true, "listed": true, "neighbor": true, "direct": true, "hops": 1, "next_hop": "0000000000000002", "route_metric": 1, "link_cost": 1, "rssi_dbm": -31, "rssi_avg_dbm": -31.0, "telemetry_stale": false, "last_heard_ms": 1790449518318, "heard_age_ms": 24, "updated_ms": 1790449518342, "changed_ms": 1790449518342}}
+{"seq": 388, "ms": 1790449523513, "kind": "credit_grant", "grant_frames": 20, "grant_bytes": 18324}
+{"seq": 389, "ms": 1790449533551, "kind": "credit_grant", "grant_frames": 21, "grant_bytes": 18392}
+{"seq": 390, "ms": 1790449543590, "kind": "credit_grant", "grant_frames": 22, "grant_bytes": 18460}
+{"seq": 391, "ms": 1790449553622, "kind": "credit_grant", "grant_frames": 23, "grant_bytes": 18528}
+{"seq": 392, "ms": 1790449553797, "kind": "credit_grant", "grant_frames": 24, "grant_bytes": 19217}
+{"seq": 393, "ms": 1790449554298, "kind": "credit_query"}
+{"seq": 394, "ms": 1790449563652, "kind": "credit_grant", "grant_frames": 25, "grant_bytes": 19285}
+{"seq": 395, "ms": 1790449573682, "kind": "credit_grant", "grant_frames": 26, "grant_bytes": 19353}
+{"seq": 396, "ms": 1790449583716, "kind": "credit_grant", "grant_frames": 27, "grant_bytes": 19421}
+{"seq": 397, "ms": 1790449593750, "kind": "credit_grant", "grant_frames": 28, "grant_bytes": 19489}
+{"seq": 398, "ms": 1790449603778, "kind": "credit_grant", "grant_frames": 29, "grant_bytes": 19557}
+{"seq": 399, "ms": 1790449613813, "kind": "credit_grant", "grant_frames": 30, "grant_bytes": 19625}
+{"seq": 400, "ms": 1790449620979, "kind": "diagnostic", "peer": 2, "reason": "ROUTE_UPDATE_REJECTED", "msg_session": null, "msg_seq": null}
+{"seq": 401, "ms": 1790449623844, "kind": "credit_grant", "grant_frames": 31, "grant_bytes": 19693}
+{"seq": 402, "ms": 1790449633869, "kind": "credit_grant", "grant_frames": 32, "grant_bytes": 19761}
+{"seq": 403, "ms": 1790449643899, "kind": "credit_grant", "grant_frames": 33, "grant_bytes": 19829}
+{"seq": 404, "ms": 1790449653924, "kind": "credit_grant", "grant_frames": 34, "grant_bytes": 19897}
+{"seq": 405, "ms": 1790449663958, "kind": "credit_grant", "grant_frames": 35, "grant_bytes": 19965}
+{"seq": 406, "ms": 1790449673987, "kind": "credit_grant", "grant_frames": 36, "grant_bytes": 20033}
+{"seq": 407, "ms": 1790449684016, "kind": "credit_grant", "grant_frames": 37, "grant_bytes": 20101}
+{"seq": 408, "ms": 1790449694048, "kind": "credit_grant", "grant_frames": 38, "grant_bytes": 20169}
+{"seq": 409, "ms": 1790449704077, "kind": "credit_grant", "grant_frames": 39, "grant_bytes": 20237}
+{"seq": 410, "ms": 1790449704081, "kind": "credit_query"}
+{"seq": 411, "ms": 1790449714133, "kind": "credit_grant", "grant_frames": 40, "grant_bytes": 20305}
+{"seq": 412, "ms": 1790449721792, "kind": "diagnostic", "peer": 2, "reason": "ROUTE_UPDATE_REJECTED", "msg_session": null, "msg_seq": null}
+{"seq": 413, "ms": 1790449724187, "kind": "credit_grant", "grant_frames": 41, "grant_bytes": 20373}
+{"seq": 414, "ms": 1790449734231, "kind": "credit_grant", "grant_frames": 42, "grant_bytes": 20441}
+{"seq": 415, "ms": 1790449744236, "kind": "credit_grant", "grant_frames": 43, "grant_bytes": 20509}
+{"seq": 416, "ms": 1790449754270, "kind": "credit_grant", "grant_frames": 44, "grant_bytes": 20577}
+{"seq": 417, "ms": 1790449764307, "kind": "credit_grant", "grant_frames": 45, "grant_bytes": 20645}
+{"seq": 418, "ms": 1790449774353, "kind": "credit_grant", "grant_frames": 46, "grant_bytes": 20713}
+{"seq": 419, "ms": 1790449778453, "kind": "cutover.progress", "operation_id": "op-0000000000000004", "phase": "committed", "new_site_epoch": 2, "revision": 1, "rs_epoch": 2, "gk_epoch": 2, "prepared": 3, "applied": 0, "unknown": 0}
+{"seq": 420, "ms": 1790449778638, "kind": "credit_grant", "grant_frames": 47, "grant_bytes": 21121}
+{"seq": 421, "ms": 1790449780703, "kind": "credit_grant", "grant_frames": 48, "grant_bytes": 21529}
+{"seq": 422, "ms": 1790449781966, "kind": "credit_grant", "grant_frames": 49, "grant_bytes": 21937}
+{"seq": 423, "ms": 1790449781966, "kind": "diagnostic", "peer": 2, "reason": "session bank not configured", "msg_session": null, "msg_seq": null}
+{"seq": 424, "ms": 1790449784484, "kind": "diagnostic", "peer": 2, "reason": "session bank not configured", "msg_session": null, "msg_seq": null}
+{"seq": 425, "ms": 1790449785742, "kind": "credit_grant", "grant_frames": 50, "grant_bytes": 22345}
+{"seq": 426, "ms": 1790449785743, "kind": "diagnostic", "peer": 2, "reason": "session bank not configured", "msg_session": null, "msg_seq": null}
+{"seq": 427, "ms": 1790449785895, "kind": "dispatch", "detail": "node status page timed out; re-issued"}
+{"seq": 428, "ms": 1790449787002, "kind": "credit_grant", "grant_frames": 51, "grant_bytes": 22753}
+{"seq": 429, "ms": 1790449787003, "kind": "error", "code": 3, "error": "replay-rejected", "request": 5643854758025363560, "reason": "REPLAY_REJECTED"}
+{"seq": 430, "ms": 1790449787026, "kind": "dispatch", "detail": "link down"}
+{"seq": 431, "ms": 1790449787047, "kind": "node_left", "node": "0000000000000001", "gateway": "0000000000000001", "reason": "gateway_lost", "status": {"node": "0000000000000001", "role": "gateway", "connected": false, "listed": false, "neighbor": false, "direct": true, "hops": null, "next_hop": null, "route_metric": null, "link_cost": null, "rssi_dbm": null, "rssi_avg_dbm": null, "telemetry_stale": false, "last_heard_ms": null, "heard_age_ms": null, "updated_ms": 1790449493236, "changed_ms": 1790449787047}}
+{"seq": 432, "ms": 1790449787047, "kind": "node_left", "node": "0000000000000002", "gateway": "0000000000000001", "reason": "gateway_lost", "status": {"node": "0000000000000002", "role": "peer", "connected": false, "listed": false, "neighbor": false, "direct": false, "hops": null, "next_hop": null, "route_metric": null, "link_cost": null, "rssi_dbm": null, "rssi_avg_dbm": null, "telemetry_stale": false, "last_heard_ms": 1790449770085, "heard_age_ms": 16962, "updated_ms": 1790449774353, "changed_ms": 1790449787047}}
+{"seq": 433, "ms": 1790449787047, "kind": "node_left", "node": "0000000000000006", "gateway": "0000000000000001", "reason": "gateway_lost", "status": {"node": "0000000000000006", "role": "peer", "connected": false, "listed": false, "neighbor": false, "direct": false, "hops": null, "next_hop": null, "route_metric": null, "link_cost": null, "rssi_dbm": null, "rssi_avg_dbm": null, "telemetry_stale": false, "last_heard_ms": 1790449765786, "heard_age_ms": 21261, "updated_ms": 1790449774353, "changed_ms": 1790449787047}}
+{"seq": 434, "ms": 1790449788262, "kind": "session_drop", "reason": "HELLO_TAG_INVALID"}
+{"seq": 435, "ms": 1790449789521, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 436, "ms": 1790449790876, "kind": "decode_error", "detail": "InvalidCobs"}
+{"seq": 437, "ms": 1790449792135, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 438, "ms": 1790449793394, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 439, "ms": 1790449794653, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 440, "ms": 1790449795911, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 441, "ms": 1790449797170, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 442, "ms": 1790449798526, "kind": "decode_error", "detail": "InvalidMagic"}
+{"seq": 443, "ms": 1790449799784, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 444, "ms": 1790449801044, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 445, "ms": 1790449803561, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 446, "ms": 1790449804819, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 447, "ms": 1790449806079, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 448, "ms": 1790449807339, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 449, "ms": 1790449808597, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 450, "ms": 1790449809857, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 451, "ms": 1790449811116, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 452, "ms": 1790449812375, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 453, "ms": 1790449813633, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 454, "ms": 1790449814891, "kind": "session_drop", "reason": "expected hello_ack"}
+{"seq": 455, "ms": 1790449814891, "kind": "session_drop", "reason": "expected hello_ack"}
+{"seq": 456, "ms": 1790449816150, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 457, "ms": 1790449817410, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 458, "ms": 1790449818668, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 459, "ms": 1790449819927, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 460, "ms": 1790449821185, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 461, "ms": 1790449822448, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 462, "ms": 1790449823709, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 463, "ms": 1790449824968, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 464, "ms": 1790449826226, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 465, "ms": 1790449827483, "kind": "session_drop", "reason": "expected hello_ack"}
+{"seq": 466, "ms": 1790449827483, "kind": "session_drop", "reason": "expected hello_ack"}
+{"seq": 467, "ms": 1790449828741, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 468, "ms": 1790449830000, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 469, "ms": 1790449831258, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 470, "ms": 1790449832518, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 471, "ms": 1790449833775, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 472, "ms": 1790449835035, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 473, "ms": 1790449836294, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 474, "ms": 1790449837555, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 475, "ms": 1790449838464, "kind": "cutover.progress", "operation_id": "op-0000000000000004", "phase": "recovery_pending"}
+{"seq": 476, "ms": 1790449838815, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 477, "ms": 1790449840074, "kind": "session_drop", "reason": "expected hello_ack"}
+{"seq": 478, "ms": 1790449840074, "kind": "session_drop", "reason": "expected hello_ack"}
+{"seq": 479, "ms": 1790449841334, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 480, "ms": 1790449842593, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 481, "ms": 1790449843852, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 482, "ms": 1790449845112, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 483, "ms": 1790449846371, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 484, "ms": 1790449847630, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 485, "ms": 1790449848888, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 486, "ms": 1790449850148, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 487, "ms": 1790449851408, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 488, "ms": 1790449852669, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 489, "ms": 1790449855185, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 490, "ms": 1790449856444, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 491, "ms": 1790449857703, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 492, "ms": 1790449858962, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 493, "ms": 1790449860221, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 494, "ms": 1790449861479, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 495, "ms": 1790449862738, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 496, "ms": 1790449863996, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 497, "ms": 1790449865255, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 498, "ms": 1790449867773, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 499, "ms": 1790449869033, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 500, "ms": 1790449870292, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 501, "ms": 1790449871550, "kind": "hello_ack", "version": 1, "node": 1, "boot": 853, "network": 1380712451, "capability": 1735}
+{"seq": 502, "ms": 1790449872445, "kind": "adapter", "state": "disconnected"}
+{"seq": 503, "ms": 1790449872978, "kind": "adapter", "state": "connected"}
+{"seq": 504, "ms": 1790449874555, "kind": "decode_error", "detail": "InvalidCobs"}
+{"seq": 505, "ms": 1790449875815, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 506, "ms": 1790449877074, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 507, "ms": 1790449878333, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 508, "ms": 1790449879591, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 509, "ms": 1790449880849, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 510, "ms": 1790449882107, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 511, "ms": 1790449883364, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 512, "ms": 1790449884622, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 513, "ms": 1790449885880, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 514, "ms": 1790449888397, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 515, "ms": 1790449889657, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 516, "ms": 1790449890915, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 517, "ms": 1790449892175, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 518, "ms": 1790449893433, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 519, "ms": 1790449894691, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 520, "ms": 1790449895950, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 521, "ms": 1790449897209, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 522, "ms": 1790449898467, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 523, "ms": 1790449900982, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 524, "ms": 1790449902240, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 525, "ms": 1790449903498, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 526, "ms": 1790449904756, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 527, "ms": 1790449906014, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 528, "ms": 1790449907272, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 529, "ms": 1790449908529, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 530, "ms": 1790449909787, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 531, "ms": 1790449911044, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 532, "ms": 1790449912301, "kind": "session_drop", "reason": "expected hello_ack"}
+{"seq": 533, "ms": 1790449912301, "kind": "session_drop", "reason": "expected hello_ack"}
+{"seq": 534, "ms": 1790449913559, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 535, "ms": 1790449914817, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 536, "ms": 1790449916074, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 537, "ms": 1790449917332, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 538, "ms": 1790449918590, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 539, "ms": 1790449919849, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 540, "ms": 1790449921107, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 541, "ms": 1790449922365, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 542, "ms": 1790449923623, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 543, "ms": 1790449924880, "kind": "session_drop", "reason": "expected hello_ack"}
+{"seq": 544, "ms": 1790449924880, "kind": "session_drop", "reason": "expected hello_ack"}
+{"seq": 545, "ms": 1790449926138, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 546, "ms": 1790449927397, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 547, "ms": 1790449928655, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 548, "ms": 1790449929913, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 549, "ms": 1790449931171, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 550, "ms": 1790449932431, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 551, "ms": 1790449933690, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 552, "ms": 1790449934948, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 553, "ms": 1790449936206, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 554, "ms": 1790449937464, "kind": "session_drop", "reason": "expected hello_ack"}
+{"seq": 555, "ms": 1790449937464, "kind": "session_drop", "reason": "expected hello_ack"}
+{"seq": 556, "ms": 1790449938722, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 557, "ms": 1790449939980, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 558, "ms": 1790449941238, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 559, "ms": 1790449942496, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 560, "ms": 1790449943754, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 561, "ms": 1790449945012, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 562, "ms": 1790449946270, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 563, "ms": 1790449947527, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 564, "ms": 1790449948786, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 565, "ms": 1790449950044, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 566, "ms": 1790449952560, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 567, "ms": 1790449953818, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 568, "ms": 1790449955076, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 569, "ms": 1790449956334, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 570, "ms": 1790449957592, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 571, "ms": 1790449958850, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 572, "ms": 1790449960110, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 573, "ms": 1790449961367, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 574, "ms": 1790449962624, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 575, "ms": 1790449965140, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}
+{"seq": 576, "ms": 1790449966396, "kind": "hello_ack", "version": 1, "node": 1, "boot": 854, "network": 1380712451, "capability": 1735}

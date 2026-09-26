@@ -1,0 +1,6 @@
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_sdkv1_joiner.cpp:2771 [direct-pending-retries]: rig.pump_until( [&] { return dev.joiner.snapshot().state == JoinState::Backoff; }, 30000)
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_sdkv1_joiner.cpp:2776 [direct-pending-retries]: rig.pump_until( [&] { return dev.joiner.snapshot().state == JoinState::Ready; }, 65000)
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_sdkv1_joiner.cpp:2779 [direct-pending-retries]: dev.joiner.snapshot().counters.attempts == 2
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_sdkv1_joiner.cpp:2780 [direct-pending-retries]: rig.port().ups.size() == 4
+sizeof(Joiner)=10664 (budget 12288)
+joiner tests FAILED: 4

@@ -1,0 +1,24 @@
+{
+  "requested": 2,
+  "host_accepted": 2,
+  "delivered": 2,
+  "stopped_reason": null,
+  "success_rate": 1.0,
+  "rate_limit_retries": 0,
+  "pace_s": 0,
+  "elapsed_s": 0.12,
+  "latency_ms_median": 56.760000000000005,
+  "latency_ms_p95": 56.83,
+  "latency_ms_max": 56.84,
+  "by_destination": {
+    "2": {
+      "accepted": 1,
+      "delivered": 1
+    },
+    "6": {
+      "accepted": 1,
+      "delivered": 1
+    }
+  },
+  "evidence": "artifacts/hil/2026-09-26-full/r4/relayfix-precutover-traffic.jsonl"
+}

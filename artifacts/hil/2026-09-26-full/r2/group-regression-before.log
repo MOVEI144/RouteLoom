@@ -1,0 +1,24 @@
+Internal ctest changing into directory: /tmp/routeloom-hil-full-asan
+Test project /tmp/routeloom-hil-full-asan
+    Start 47: routeloom_group_unit_tests
+1/1 Test #47: routeloom_group_unit_tests .......***Failed    4.21 sec
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_group.cpp:1940: transmitter.next_counter(end, counter) (group context binding)
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_group.cpp:1941: transmitter.seal(end, counter, ByteView{aad, sizeof(aad)}, ByteView{payload, sizeof(payload)}, MutableByteView{ciphertext.data(), ciphertext.size()}, tag) (group seal bounds)
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_group.cpp:1944: receiver.open(end, counter, ByteView{aad, sizeof(aad)}, ByteView{ciphertext.data(), ciphertext.size()}, tag, MutableByteView{opened.data(), opened.size()}) (group tag invalid)
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_group.cpp:1947: std::memcmp(opened.data(), payload, sizeof(payload)) == 0
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_group.cpp:1957: transmitter.next_counter(end, counter) (group context binding)
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_group.cpp:1958: transmitter.seal(end, counter, ByteView{aad, sizeof(aad)}, ByteView{payload, sizeof(payload)}, MutableByteView{ciphertext.data(), ciphertext.size()}, tag) (group seal bounds)
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_group.cpp:2007: fresh.next_counter(fresh_end, counter) (group context binding)
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_group.cpp:2008: fresh.seal(fresh_end, counter, ByteView{aad, sizeof(aad)}, ByteView{payload, sizeof(payload)}, MutableByteView{ciphertext.data(), ciphertext.size()}, tag) (group seal bounds)
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_group.cpp:2011: receiver.open(fresh_end, counter, ByteView{aad, sizeof(aad)}, ByteView{ciphertext.data(), ciphertext.size()}, tag, MutableByteView{opened.data(), opened.size()}) (group tag invalid)
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_group.cpp:2014: std::memcmp(opened.data(), payload, sizeof(payload)) == 0
+10 group checks failed
+
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =   4.21 sec
+
+The following tests FAILED:
+	 47 - routeloom_group_unit_tests (Failed)
+Errors while running CTest

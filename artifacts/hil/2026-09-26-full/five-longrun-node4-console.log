@@ -1,0 +1,312 @@
+[2026-09-26T08:55:53.115+00:00] !! connected /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00
+[2026-09-26T08:55:56.119+00:00] I (338) esp_image: segment 3: paddr=00150fc4 vaddr=408027a4 sizeW (21542) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=1 message=none
+[2026-09-26T08:55:56.119+00:00] W (21543) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=1 message=none
+[2026-09-26T08:55:56.119+00:00] W (21547) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=2 seq=1 att=1 peer=1 message=none
+[2026-09-26T08:55:56.319+00:00] W (21555) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=5 seq=1 att=1 peer=1 message=none
+[2026-09-26T08:55:58.121+00:00] W (23541) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=2 seq=1 att=2 peer=1 message=none
+[2026-09-26T08:55:58.121+00:00] W (23542) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=5 seq=1 att=2 peer=1 message=none
+[2026-09-26T08:55:59.523+00:00] W (24910) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=1 message=none
+[2026-09-26T08:55:59.523+00:00] W (24910) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=1 message=none
+[2026-09-26T08:56:02.126+00:00] W (27541) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=2 seq=1 att=3 peer=1 message=none
+[2026-09-26T08:56:02.126+00:00] W (27542) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=5 seq=1 att=3 peer=1 message=none
+[2026-09-26T08:56:04.530+00:00] W (29912) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=1 message=none
+[2026-09-26T08:56:04.530+00:00] W (29913) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=1 message=none
+[2026-09-26T08:56:07.133+00:00] W (32561) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=1 message=none
+[2026-09-26T08:56:07.133+00:00] W (32562) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=1 message=none
+[2026-09-26T08:56:08.135+00:00] W (33541) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=2 seq=1 att=4 peer=1 message=none
+[2026-09-26T08:56:08.135+00:00] W (33542) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=5 seq=1 att=4 peer=1 message=none
+[2026-09-26T08:56:09.536+00:00] W (34916) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=1 message=none
+[2026-09-26T08:56:09.536+00:00] W (34917) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=1 message=none
+[2026-09-26T08:56:35.172+00:00] I (60469) RouteLoom: stack hwm main 11096 B
+[2026-09-26T08:56:35.172+00:00] I (60469) RouteLoom: HIL HEAP free=106572 largest=90112 min=105728 B
+[2026-09-26T08:56:48.990+00:00] I (74428) RouteLoomRef: discovery event=STALE peer=1
+[2026-09-26T08:56:48.990+00:00] W (74428) RouteLoomRef: diagnostic reason=STALE peer=1 message=none
+[2026-09-26T08:56:50.992+00:00] I (76428) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-26T08:56:50.992+00:00] W (76429) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-26T08:56:52.795+00:00] I (78119) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T08:56:52.795+00:00] W (78119) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T08:56:52.795+00:00] W (78120) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T08:56:53.195+00:00] W (78615) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T08:56:53.796+00:00] W (79115) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T08:56:54.196+00:00] W (79615) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T08:57:14.225+00:00] I (99599) RouteLoomRef: discovery event=BOUND peer=3
+[2026-09-26T08:57:14.225+00:00] W (99599) RouteLoomRef: diagnostic reason=BOUND peer=3 message=none
+[2026-09-26T08:57:14.225+00:00] I (99624) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-26T08:57:14.225+00:00] W (99625) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-26T08:57:25.640+00:00] I (111060) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-26T08:57:25.640+00:00] W (111061) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-26T08:57:26.642+00:00] W (112020) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T08:57:26.642+00:00] W (112045) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-26T08:57:35.052+00:00] I (120471) RouteLoom: stack hwm main 10588 B
+[2026-09-26T08:57:35.052+00:00] I (120471) RouteLoom: HIL HEAP free=106564 largest=90112 min=105728 B
+[2026-09-26T08:57:44.269+00:00] I (129626) RouteLoomRef: discovery event=STALE peer=3
+[2026-09-26T08:57:44.269+00:00] W (129626) RouteLoomRef: diagnostic reason=STALE peer=3 message=none
+[2026-09-26T08:57:52.281+00:00] I (137719) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T08:57:52.281+00:00] W (137719) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T08:57:56.687+00:00] I (142045) RouteLoomRef: discovery event=STALE peer=1
+[2026-09-26T08:57:56.687+00:00] W (142045) RouteLoomRef: diagnostic reason=STALE peer=1 message=none
+[2026-09-26T08:58:35.139+00:00] I (180472) RouteLoom: stack hwm main 10588 B
+[2026-09-26T08:58:35.139+00:00] I (180472) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T08:58:44.952+00:00] I (190232) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T08:58:44.952+00:00] W (190233) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T08:59:16.594+00:00] I (221969) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T08:59:16.594+00:00] W (221970) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T08:59:35.220+00:00] I (240472) RouteLoom: stack hwm main 10588 B
+[2026-09-26T08:59:35.220+00:00] I (240472) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T08:59:49.237+00:00] I (254560) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T08:59:49.237+00:00] W (254560) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T09:00:30.499+00:00] I (295750) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:00:30.499+00:00] W (295751) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:00:35.111+00:00] I (300472) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:00:35.111+00:00] I (300472) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:01:35.209+00:00] I (360473) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:01:35.209+00:00] I (360473) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:01:37.411+00:00] I (362758) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:01:37.411+00:00] W (362759) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:02:35.111+00:00] I (420474) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:02:35.111+00:00] I (420474) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:02:49.131+00:00] I (434560) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T09:02:49.131+00:00] W (434560) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T09:03:35.198+00:00] I (480474) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:03:35.198+00:00] I (480474) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:04:30.285+00:00] I (535662) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:04:30.285+00:00] W (535663) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:04:35.096+00:00] I (540474) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:04:35.096+00:00] I (540474) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:05:35.181+00:00] I (600475) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:05:35.181+00:00] I (600475) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:05:38.185+00:00] I (603524) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:05:38.185+00:00] W (603525) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:06:35.066+00:00] I (660475) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:06:35.066+00:00] I (660475) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:06:49.291+00:00] I (674560) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T09:06:49.291+00:00] W (674560) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T09:07:35.169+00:00] I (720475) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:07:35.169+00:00] I (720475) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:08:30.265+00:00] I (775683) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:08:30.265+00:00] W (775684) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:08:35.071+00:00] I (780475) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:08:35.071+00:00] I (780475) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:09:16.139+00:00] I (821509) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:09:16.139+00:00] W (821510) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:09:33.161+00:00] I (838461) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:09:33.161+00:00] W (838462) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:09:35.167+00:00] I (840475) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:09:35.167+00:00] I (840475) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:09:58.404+00:00] I (863833) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:09:58.404+00:00] W (863834) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:10:33.455+00:00] I (898733) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:10:33.455+00:00] W (898734) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:10:35.057+00:00] I (900476) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:10:35.057+00:00] I (900476) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:11:25.137+00:00] I (950559) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:11:25.137+00:00] W (950560) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:11:35.158+00:00] I (960477) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:11:35.158+00:00] I (960477) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:12:20.634+00:00] I (1005999) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:12:20.634+00:00] W (1005999) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:12:35.080+00:00] I (1020477) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:12:35.080+00:00] I (1020477) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:12:49.172+00:00] I (1034563) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T09:12:49.172+00:00] W (1034563) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T09:13:35.048+00:00] I (1080478) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:13:35.048+00:00] I (1080478) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:13:39.854+00:00] I (1085117) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:13:39.855+00:00] W (1085118) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:14:35.055+00:00] I (1140478) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:14:35.055+00:00] I (1140478) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:14:38.661+00:00] I (1144072) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:14:38.661+00:00] W (1144072) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:15:35.103+00:00] I (1200478) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:15:35.103+00:00] I (1200478) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:15:37.105+00:00] I (1202451) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:15:37.105+00:00] W (1202452) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:16:31.285+00:00] I (1256594) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:16:31.286+00:00] W (1256595) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:16:35.090+00:00] I (1260478) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:16:35.090+00:00] I (1260478) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:17:30.181+00:00] I (1315450) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:17:30.181+00:00] W (1315451) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:17:35.190+00:00] I (1320478) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:17:35.190+00:00] I (1320478) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:18:22.065+00:00] I (1367365) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:18:22.065+00:00] W (1367366) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:18:35.081+00:00] I (1380479) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:18:35.081+00:00] I (1380479) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:19:20.346+00:00] I (1425647) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:19:20.346+00:00] W (1425648) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:19:35.172+00:00] I (1440480) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:19:35.172+00:00] I (1440480) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:19:38.777+00:00] I (1444134) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:19:38.777+00:00] W (1444135) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:20:35.060+00:00] I (1500480) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:20:35.060+00:00] I (1500480) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:20:43.070+00:00] I (1508462) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:20:43.070+00:00] W (1508463) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:21:33.340+00:00] I (1558583) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:21:33.340+00:00] W (1558584) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:21:35.143+00:00] I (1560480) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:21:35.143+00:00] I (1560480) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:22:29.625+00:00] I (1614899) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:22:29.625+00:00] W (1614900) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:22:35.232+00:00] I (1620480) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:22:35.233+00:00] I (1620480) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:23:24.307+00:00] I (1669557) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:23:24.307+00:00] W (1669558) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:23:35.120+00:00] I (1680481) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:23:35.120+00:00] I (1680481) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:24:29.194+00:00] I (1734585) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:24:29.194+00:00] W (1734586) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:24:35.202+00:00] I (1740482) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:24:35.202+00:00] I (1740482) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:25:33.918+00:00] I (1799252) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:25:33.918+00:00] W (1799253) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:25:35.119+00:00] I (1800483) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:25:35.119+00:00] I (1800483) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:26:28.997+00:00] I (1854386) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:26:28.997+00:00] W (1854387) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:26:35.206+00:00] I (1860484) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:26:35.207+00:00] I (1860484) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:27:20.319+00:00] I (1905648) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:27:20.319+00:00] W (1905649) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:27:35.139+00:00] I (1920485) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:27:35.139+00:00] I (1920485) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:27:48.164+00:00] I (1933565) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:27:48.164+00:00] W (1933566) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:28:35.229+00:00] I (1980485) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:28:35.229+00:00] I (1980485) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:28:42.839+00:00] I (1988172) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:28:42.839+00:00] W (1988173) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:29:32.109+00:00] I (2037493) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:29:32.109+00:00] W (2037494) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:29:35.114+00:00] I (2040485) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:29:35.114+00:00] I (2040485) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:30:29.990+00:00] I (2095281) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:30:29.991+00:00] W (2095282) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:30:35.197+00:00] I (2100486) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:30:35.197+00:00] I (2100486) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:31:21.865+00:00] I (2147123) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:31:21.865+00:00] W (2147124) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:31:35.081+00:00] I (2160486) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:31:35.081+00:00] I (2160486) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:31:47.899+00:00] I (2173180) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:31:47.899+00:00] W (2173181) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:32:34.366+00:00] I (2219769) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:32:34.366+00:00] W (2219770) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:32:35.167+00:00] I (2220486) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:32:35.167+00:00] I (2220486) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:33:32.655+00:00] I (2278066) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:33:32.655+00:00] W (2278066) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:33:35.059+00:00] I (2280486) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:33:35.059+00:00] I (2280486) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:34:35.146+00:00] I (2340486) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:34:35.146+00:00] I (2340486) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:34:35.546+00:00] I (2340875) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:34:35.546+00:00] W (2340876) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:35:35.231+00:00] I (2400486) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:35:35.231+00:00] I (2400486) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:35:49.260+00:00] I (2414573) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T09:35:49.260+00:00] W (2414573) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T09:36:35.126+00:00] I (2460487) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:36:35.126+00:00] I (2460487) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:36:57.158+00:00] I (2482496) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:36:57.158+00:00] W (2482497) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:37:35.211+00:00] I (2520487) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:37:35.211+00:00] I (2520487) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:37:49.230+00:00] I (2534573) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T09:37:49.230+00:00] W (2534573) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T09:38:35.095+00:00] I (2580488) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:38:35.095+00:00] I (2580488) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:38:49.513+00:00] I (2594848) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:38:49.513+00:00] W (2594849) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:39:35.175+00:00] I (2640488) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:39:35.175+00:00] I (2640488) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:40:29.252+00:00] I (2694573) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:40:29.252+00:00] W (2694574) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:40:35.059+00:00] I (2700488) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:40:35.060+00:00] I (2700488) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:41:34.562+00:00] I (2759947) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:41:34.562+00:00] W (2759948) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:41:35.163+00:00] I (2760488) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:41:35.163+00:00] I (2760488) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:42:32.449+00:00] I (2817863) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:42:32.449+00:00] W (2817864) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:42:35.053+00:00] I (2820488) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:42:35.054+00:00] I (2820488) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:43:30.376+00:00] I (2875679) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:43:30.376+00:00] W (2875680) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:43:35.182+00:00] I (2880488) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:43:35.182+00:00] I (2880488) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:44:24.654+00:00] I (2930035) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:44:24.654+00:00] W (2930036) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:44:35.066+00:00] I (2940488) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:44:35.066+00:00] I (2940488) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:45:28.353+00:00] I (2993705) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:45:28.353+00:00] W (2993706) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:45:35.162+00:00] I (3000489) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:45:35.162+00:00] I (3000489) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:46:22.031+00:00] I (3047272) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:46:22.031+00:00] W (3047273) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:46:35.050+00:00] I (3060490) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:46:35.050+00:00] I (3060490) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:46:49.274+00:00] I (3074579) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T09:46:49.274+00:00] W (3074579) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T09:47:35.162+00:00] I (3120490) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:47:35.162+00:00] I (3120490) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:47:45.377+00:00] I (3130807) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:47:45.377+00:00] W (3130808) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:48:34.054+00:00] I (3179326) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:48:34.054+00:00] W (3179327) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:48:35.056+00:00] I (3180491) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:48:35.056+00:00] I (3180491) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:49:29.999+00:00] I (3235247) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:49:29.999+00:00] W (3235248) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:49:35.206+00:00] I (3240492) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:49:35.206+00:00] I (3240492) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:50:22.396+00:00] I (3287645) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:50:22.396+00:00] W (3287646) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:50:35.220+00:00] I (3300492) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:50:35.220+00:00] I (3300492) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:51:20.904+00:00] I (3346243) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T09:51:20.905+00:00] W (3346244) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T09:51:35.124+00:00] I (3360492) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:51:35.124+00:00] I (3360492) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:51:46.540+00:00] I (3371968) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:51:46.540+00:00] W (3371969) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:52:35.213+00:00] I (3420493) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:52:35.213+00:00] I (3420493) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:52:38.819+00:00] I (3424158) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:52:38.819+00:00] W (3424159) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:53:35.156+00:00] I (3480494) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:53:35.156+00:00] I (3480494) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:53:42.367+00:00] I (3487684) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:53:42.367+00:00] W (3487685) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:54:34.245+00:00] I (3539611) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:54:34.245+00:00] W (3539612) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:54:35.250+00:00] I (3540494) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:54:35.250+00:00] I (3540494) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:55:35.159+00:00] I (3600495) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:55:35.159+00:00] I (3600495) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:55:40.166+00:00] I (3605514) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:55:40.166+00:00] W (3605515) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:56:35.241+00:00] I (3660495) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:56:35.248+00:00] I (3660495) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:56:36.850+00:00] I (3662110) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:56:36.851+00:00] W (3662111) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:57:35.212+00:00] I (3720495) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:57:35.212+00:00] I (3720495) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:57:38.818+00:00] I (3724106) RouteLoomRef: discovery event=PEER_CAPACITY peer=3
+[2026-09-26T09:57:38.818+00:00] W (3724107) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=3 message=none
+[2026-09-26T09:58:35.136+00:00] I (3780496) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:58:35.136+00:00] I (3780496) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:58:49.174+00:00] I (3794588) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T09:58:49.175+00:00] W (3794588) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T09:59:35.083+00:00] I (3840496) RouteLoom: stack hwm main 10588 B
+[2026-09-26T09:59:35.083+00:00] I (3840496) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:59:49.279+00:00] I (3854588) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T09:59:49.279+00:00] W (3854588) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T10:00:35.086+00:00] I (3900496) RouteLoom: stack hwm main 10588 B
+[2026-09-26T10:00:35.086+00:00] I (3900496) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T10:00:49.189+00:00] I (3914588) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T10:00:49.189+00:00] W (3914588) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T10:00:53.237+00:00] !! capture finished

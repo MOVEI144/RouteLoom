@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Back up and erase only the rlsec partition of a chip/MAC-verified board.
 
-Use when testing a fresh Site state on the same physical C3/C5 reference or
+Use when testing a fresh Site state on the same physical C3/C5/C6 reference or
 bridge. The backup contains private device identity material: keep it outside
 the repository in a mode-0700 directory.
 """
@@ -22,6 +22,17 @@ RLSEC_OFFSET = "0x190000"
 RLSEC_SIZES = {"reference_node": "0x10000", "bridge_node": "0x20000"}
 
 
+def private_backup_path(raw_path: str) -> pathlib.Path:
+    backup = pathlib.Path(raw_path)
+    parent = backup.parent.resolve(strict=True)
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    if parent == repo or repo in parent.parents or parent.stat().st_mode & 0o077:
+        raise ValueError("backup directory must be private and outside the repository")
+    if backup.exists() or backup.is_symlink():
+        raise ValueError("backup must be a new path")
+    return parent / backup.name
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--rig", required=True)
@@ -32,8 +43,8 @@ def main() -> int:
     p.add_argument("--esptool", default=flash.DEFAULT_ESPTOOL)
     args = p.parse_args()
     board = rig.load_rigs(args.rig)[args.bench].boards[args.board]
-    if board.chip not in ("esp32c3", "esp32c5") or not board.mac:
-        raise RuntimeError("rlsec erase requires a pinned C3/C5 MAC")
+    if board.chip not in ("esp32c3", "esp32c5", "esp32c6") or not board.mac:
+        raise RuntimeError("rlsec erase requires a pinned C3/C5/C6 MAC")
     if board.app not in RLSEC_SIZES:
         raise RuntimeError("no audited rlsec layout for this app")
     rlsec_size = RLSEC_SIZES[board.app]
@@ -41,17 +52,13 @@ def main() -> int:
     table = (repo / f"firmware/{board.app}/partitions.csv").read_text()
     if f"rlsec,    data, nvs,     {RLSEC_OFFSET}, {rlsec_size}" not in table:
         raise RuntimeError("rlsec partition map changed; refusing erase")
+    backup = private_backup_path(args.backup)
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     port, _, state = rig.resolve_board_port(board)
     if state != "ONLINE" or port is None:
         raise RuntimeError(f"board port unavailable: {state}")
     identity = flash.preflight_board(board, port, args.esptool, str(out))
-    backup = pathlib.Path(args.backup)
-    if backup.exists() or not backup.parent.is_dir():
-        raise RuntimeError("backup must be a new path in an existing private directory")
-    if backup.parent.stat().st_mode & 0o077:
-        raise RuntimeError("backup directory must be mode 0700")
     read = [args.esptool, "--chip", board.chip, "--port", port,
             "read-flash", RLSEC_OFFSET, rlsec_size, str(backup)]
     with (out / "read.log").open("w") as log:

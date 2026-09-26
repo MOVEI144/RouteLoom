@@ -1,0 +1,273 @@
+[2026-09-26T05:48:04.194+00:00] !! connected /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00
+[2026-09-26T05:48:12.809+00:00] I (2852027) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T05:48:12.809+00:00] W (2852027) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T05:48:41.070+00:00] I (2880485) RouteLoom: stack hwm main 10588 B
+[2026-09-26T05:49:41.173+00:00] I (2940486) RouteLoom: stack hwm main 10588 B
+[2026-09-26T05:50:41.145+00:00] I (3000486) RouteLoom: stack hwm main 10588 B
+[2026-09-26T05:51:41.095+00:00] I (3060487) RouteLoom: stack hwm main 10588 B
+[2026-09-26T05:52:41.226+00:00] I (3120487) RouteLoom: stack hwm main 10588 B
+[2026-09-26T05:53:41.106+00:00] I (3180487) RouteLoom: stack hwm main 10588 B
+[2026-09-26T05:54:41.187+00:00] I (3240488) RouteLoom: stack hwm main 10588 B
+[2026-09-26T05:55:12.630+00:00] I (3272030) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T05:55:12.630+00:00] W (3272030) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T05:55:41.070+00:00] I (3300489) RouteLoom: stack hwm main 10588 B
+[2026-09-26T05:56:41.158+00:00] I (3360489) RouteLoom: stack hwm main 10588 B
+[2026-09-26T05:57:41.260+00:00] I (3420490) RouteLoom: stack hwm main 10588 B
+[2026-09-26T05:58:41.217+00:00] I (3480491) RouteLoom: stack hwm main 10588 B
+[2026-09-26T05:59:41.099+00:00] I (3540492) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:00:41.189+00:00] I (3600493) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:01:41.076+00:00] I (3660494) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:02:41.163+00:00] I (3720495) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:03:12.805+00:00] I (3752035) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T06:03:12.805+00:00] W (3752035) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T06:03:41.242+00:00] I (3780495) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:04:41.121+00:00] I (3840495) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:05:41.206+00:00] I (3900495) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:06:41.093+00:00] I (3960495) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:07:41.179+00:00] I (4020496) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:08:41.267+00:00] I (4080497) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:09:41.150+00:00] I (4140498) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:10:41.231+00:00] I (4200498) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:11:12.675+00:00] I (4232041) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T06:11:12.675+00:00] W (4232041) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T06:11:41.113+00:00] I (4260498) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:12:41.194+00:00] I (4320499) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:13:41.279+00:00] I (4380499) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:14:41.162+00:00] I (4440500) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:15:41.250+00:00] I (4500501) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:16:41.142+00:00] I (4560501) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:17:41.095+00:00] I (4620502) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:18:41.178+00:00] I (4680502) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:19:12.820+00:00] I (4712044) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T06:19:12.821+00:00] W (4712044) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T06:19:41.262+00:00] I (4740503) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:20:41.163+00:00] I (4800504) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:21:41.250+00:00] I (4860504) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:22:41.143+00:00] I (4920505) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:23:41.253+00:00] I (4980506) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:24:41.132+00:00] I (5040507) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:25:41.216+00:00] I (5100508) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:26:41.102+00:00] I (5160509) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:27:12.744+00:00] I (5192048) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T06:27:12.744+00:00] W (5192048) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T06:27:41.183+00:00] I (5220509) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:28:41.273+00:00] I (5280509) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:29:41.156+00:00] I (5340510) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:30:41.253+00:00] I (5400510) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:31:41.138+00:00] I (5460510) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:32:41.217+00:00] I (5520511) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:33:41.095+00:00] I (5580511) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:34:41.177+00:00] I (5640511) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:35:12.823+00:00] I (5672052) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T06:35:12.823+00:00] W (5672052) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T06:35:34.654+00:00] W (5693991) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-26T06:35:34.855+00:00] I (5694076) RouteLoomRef: message origin=1 session=225 sequence=1 bytes=9
+[2026-09-26T06:35:34.855+00:00] I (5694218) RouteLoomRef: message origin=1 session=225 sequence=4 bytes=9
+[2026-09-26T06:35:35.055+00:00] I (5694383) RouteLoomRef: message origin=1 session=225 sequence=5 bytes=9
+[2026-09-26T06:35:35.255+00:00] I (5694547) RouteLoomRef: message origin=1 session=225 sequence=7 bytes=9
+[2026-09-26T06:35:35.255+00:00] I (5694664) RouteLoomRef: message origin=1 session=225 sequence=8 bytes=9
+[2026-09-26T06:35:35.455+00:00] I (5694784) RouteLoomRef: message origin=1 session=225 sequence=9 bytes=9
+[2026-09-26T06:35:35.655+00:00] I (5694893) RouteLoomRef: message origin=1 session=225 sequence=10 bytes=9
+[2026-09-26T06:35:35.655+00:00] I (5695012) RouteLoomRef: message origin=1 session=225 sequence=12 bytes=9
+[2026-09-26T06:35:35.856+00:00] I (5695123) RouteLoomRef: message origin=1 session=225 sequence=13 bytes=9
+[2026-09-26T06:35:35.856+00:00] I (5695248) RouteLoomRef: message origin=1 session=225 sequence=14 bytes=9
+[2026-09-26T06:35:36.056+00:00] I (5695417) RouteLoomRef: message origin=1 session=225 sequence=15 bytes=9
+[2026-09-26T06:35:36.256+00:00] I (5695598) RouteLoomRef: message origin=1 session=225 sequence=17 bytes=9
+[2026-09-26T06:35:36.456+00:00] I (5695713) RouteLoomRef: message origin=1 session=225 sequence=18 bytes=9
+[2026-09-26T06:35:36.456+00:00] I (5695828) RouteLoomRef: message origin=1 session=225 sequence=19 bytes=9
+[2026-09-26T06:35:36.656+00:00] I (5695946) RouteLoomRef: message origin=1 session=225 sequence=20 bytes=9
+[2026-09-26T06:35:36.857+00:00] I (5696121) RouteLoomRef: message origin=1 session=225 sequence=21 bytes=9
+[2026-09-26T06:35:41.262+00:00] I (5700511) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:36:04.697+00:00] I (5723935) RouteLoomRef: message origin=1 session=225 sequence=22 bytes=9
+[2026-09-26T06:36:34.558+00:00] I (5753937) RouteLoomRef: message origin=1 session=225 sequence=23 bytes=9
+[2026-09-26T06:36:41.167+00:00] I (5760511) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:36:50.413+00:00] I (5769813) RouteLoomRef: discovery event=PEER_CAPACITY peer=1
+[2026-09-26T06:36:50.413+00:00] W (5769813) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=1 message=none
+[2026-09-26T06:37:04.647+00:00] I (5783941) RouteLoomRef: message origin=1 session=225 sequence=24 bytes=9
+[2026-09-26T06:37:34.546+00:00] I (5813941) RouteLoomRef: message origin=1 session=225 sequence=25 bytes=9
+[2026-09-26T06:37:41.156+00:00] I (5820512) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:38:03.586+00:00] I (5842868) RouteLoomRef: discovery event=PEER_CAPACITY peer=1
+[2026-09-26T06:38:03.586+00:00] W (5842869) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=1 message=none
+[2026-09-26T06:38:04.587+00:00] I (5843934) RouteLoomRef: message origin=1 session=225 sequence=26 bytes=9
+[2026-09-26T06:38:35.232+00:00] I (5874614) RouteLoomRef: message origin=1 session=225 sequence=27 bytes=9
+[2026-09-26T06:38:35.232+00:00] W (5874625) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:38:35.232+00:00] W (5874626) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=1 seq=1 att=1 peer=5 message=none
+[2026-09-26T06:38:36.034+00:00] W (5875432) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:38:38.838+00:00] I (5878109) RouteLoomRef: discovery event=PEER_CAPACITY peer=1
+[2026-09-26T06:38:38.838+00:00] W (5878109) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=1 message=none
+[2026-09-26T06:38:41.241+00:00] I (5880512) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:39:04.675+00:00] I (5903937) RouteLoomRef: message origin=1 session=225 sequence=28 bytes=9
+[2026-09-26T06:39:34.713+00:00] I (5933949) RouteLoomRef: message origin=1 session=225 sequence=29 bytes=9
+[2026-09-26T06:39:35.714+00:00] I (5934941) RouteLoomRef: discovery event=PEER_CAPACITY peer=1
+[2026-09-26T06:39:35.715+00:00] W (5934941) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=1 message=none
+[2026-09-26T06:39:41.121+00:00] I (5940513) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:40:04.758+00:00] I (5964121) RouteLoomRef: message origin=1 session=225 sequence=30 bytes=9
+[2026-09-26T06:40:34.599+00:00] I (5993966) RouteLoomRef: message origin=1 session=225 sequence=31 bytes=9
+[2026-09-26T06:40:34.799+00:00] W (5994184) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=5 message=present
+[2026-09-26T06:40:41.209+00:00] I (6000513) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:41:04.642+00:00] I (6023940) RouteLoomRef: message origin=1 session=225 sequence=32 bytes=9
+[2026-09-26T06:41:25.271+00:00] I (6044590) RouteLoomRef: discovery event=PEER_CAPACITY peer=1
+[2026-09-26T06:41:25.271+00:00] W (6044590) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=1 message=none
+[2026-09-26T06:41:34.683+00:00] I (6053942) RouteLoomRef: message origin=1 session=225 sequence=33 bytes=9
+[2026-09-26T06:41:41.293+00:00] I (6060513) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:42:04.526+00:00] I (6083937) RouteLoomRef: message origin=1 session=225 sequence=34 bytes=9
+[2026-09-26T06:42:34.570+00:00] I (6113933) RouteLoomRef: message origin=1 session=225 sequence=35 bytes=9
+[2026-09-26T06:42:41.179+00:00] I (6120513) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:42:43.182+00:00] I (6122414) RouteLoomRef: discovery event=PEER_CAPACITY peer=1
+[2026-09-26T06:42:43.182+00:00] W (6122414) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=1 message=none
+[2026-09-26T06:43:04.615+00:00] I (6143934) RouteLoomRef: message origin=1 session=225 sequence=36 bytes=9
+[2026-09-26T06:43:34.656+00:00] I (6173936) RouteLoomRef: message origin=1 session=225 sequence=37 bytes=9
+[2026-09-26T06:43:41.265+00:00] I (6180513) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:44:04.700+00:00] I (6203940) RouteLoomRef: message origin=1 session=225 sequence=38 bytes=9
+[2026-09-26T06:44:26.927+00:00] I (6226212) RouteLoomRef: discovery event=PEER_CAPACITY peer=1
+[2026-09-26T06:44:26.927+00:00] W (6226213) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=1 message=none
+[2026-09-26T06:44:34.538+00:00] I (6233939) RouteLoomRef: message origin=1 session=225 sequence=39 bytes=9
+[2026-09-26T06:44:41.146+00:00] I (6240513) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:45:04.579+00:00] I (6263936) RouteLoomRef: message origin=1 session=225 sequence=40 bytes=9
+[2026-09-26T06:45:34.024+00:00] I (6293315) RouteLoomRef: discovery event=PEER_CAPACITY peer=1
+[2026-09-26T06:45:34.024+00:00] W (6293315) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=1 message=none
+[2026-09-26T06:45:34.625+00:00] I (6293942) RouteLoomRef: message origin=1 session=225 sequence=41 bytes=9
+[2026-09-26T06:45:41.234+00:00] I (6300514) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:46:04.667+00:00] I (6323943) RouteLoomRef: message origin=1 session=225 sequence=42 bytes=9
+[2026-09-26T06:46:34.708+00:00] I (6353937) RouteLoomRef: message origin=1 session=225 sequence=43 bytes=9
+[2026-09-26T06:46:41.116+00:00] I (6360514) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:47:04.552+00:00] I (6383936) RouteLoomRef: message origin=1 session=225 sequence=44 bytes=9
+[2026-09-26T06:47:12.761+00:00] I (6392056) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T06:47:12.761+00:00] W (6392056) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T06:47:35.392+00:00] I (6414723) RouteLoomRef: message origin=1 session=225 sequence=45 bytes=9
+[2026-09-26T06:47:35.392+00:00] W (6414733) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:47:35.392+00:00] W (6414735) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=1 seq=1 att=1 peer=5 message=none
+[2026-09-26T06:47:36.193+00:00] W (6415552) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:47:41.202+00:00] I (6420515) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:48:04.633+00:00] I (6443941) RouteLoomRef: message origin=1 session=225 sequence=46 bytes=9
+[2026-09-26T06:48:34.672+00:00] I (6473933) RouteLoomRef: message origin=1 session=225 sequence=47 bytes=9
+[2026-09-26T06:48:41.280+00:00] I (6480515) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:49:04.518+00:00] I (6503933) RouteLoomRef: message origin=1 session=225 sequence=48 bytes=9
+[2026-09-26T06:49:12.729+00:00] I (6512057) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T06:49:12.729+00:00] W (6512057) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T06:49:34.560+00:00] I (6533935) RouteLoomRef: message origin=1 session=225 sequence=49 bytes=9
+[2026-09-26T06:49:41.168+00:00] I (6540515) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:50:04.606+00:00] I (6563940) RouteLoomRef: message origin=1 session=225 sequence=50 bytes=9
+[2026-09-26T06:50:27.639+00:00] I (6586919) RouteLoomRef: discovery event=PEER_CAPACITY peer=1
+[2026-09-26T06:50:27.639+00:00] W (6586919) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=1 message=none
+[2026-09-26T06:50:34.649+00:00] I (6594003) RouteLoomRef: message origin=1 session=225 sequence=51 bytes=9
+[2026-09-26T06:50:35.650+00:00] W (6594888) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=5 message=present
+[2026-09-26T06:50:35.850+00:00] W (6595232) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=5 message=present
+[2026-09-26T06:50:36.451+00:00] W (6595689) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:50:36.451+00:00] W (6595691) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=1 seq=1 att=1 peer=5 message=none
+[2026-09-26T06:50:41.258+00:00] I (6600515) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:51:04.889+00:00] I (6624246) RouteLoomRef: message origin=1 session=225 sequence=52 bytes=9
+[2026-09-26T06:51:05.289+00:00] W (6624609) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=5 message=present
+[2026-09-26T06:51:35.529+00:00] I (6654847) RouteLoomRef: message origin=1 session=225 sequence=53 bytes=9
+[2026-09-26T06:51:35.529+00:00] W (6654858) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:51:35.529+00:00] W (6654860) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=1 seq=1 att=1 peer=5 message=none
+[2026-09-26T06:51:36.130+00:00] W (6655485) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:51:41.136+00:00] I (6660515) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:52:04.969+00:00] I (6684194) RouteLoomRef: message origin=1 session=225 sequence=54 bytes=9
+[2026-09-26T06:52:06.170+00:00] W (6685571) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:52:06.170+00:00] W (6685573) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=1 seq=1 att=2 peer=5 message=none
+[2026-09-26T06:52:07.172+00:00] W (6686574) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:52:08.374+00:00] W (6687598) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:52:12.781+00:00] I (6692058) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T06:52:12.781+00:00] W (6692058) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T06:52:34.617+00:00] I (6713932) RouteLoomRef: message origin=1 session=225 sequence=55 bytes=9
+[2026-09-26T06:52:41.226+00:00] I (6720516) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:53:04.658+00:00] I (6743934) RouteLoomRef: message origin=1 session=225 sequence=56 bytes=9
+[2026-09-26T06:53:27.491+00:00] I (6766717) RouteLoomRef: discovery event=PEER_CAPACITY peer=1
+[2026-09-26T06:53:27.491+00:00] W (6766718) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=1 message=none
+[2026-09-26T06:53:34.701+00:00] I (6773933) RouteLoomRef: message origin=1 session=225 sequence=57 bytes=9
+[2026-09-26T06:53:41.111+00:00] I (6780517) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:54:04.549+00:00] I (6803935) RouteLoomRef: message origin=1 session=225 sequence=58 bytes=9
+[2026-09-26T06:54:34.591+00:00] I (6833934) RouteLoomRef: message origin=1 session=225 sequence=59 bytes=9
+[2026-09-26T06:54:41.200+00:00] I (6840517) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:55:05.231+00:00] I (6864626) RouteLoomRef: message origin=1 session=225 sequence=60 bytes=9
+[2026-09-26T06:55:05.231+00:00] W (6864636) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:55:05.231+00:00] W (6864638) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=1 seq=1 att=1 peer=5 message=none
+[2026-09-26T06:55:06.032+00:00] W (6865440) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:55:35.073+00:00] I (6894306) RouteLoomRef: message origin=1 session=225 sequence=61 bytes=9
+[2026-09-26T06:55:35.474+00:00] W (6894848) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=5 message=present
+[2026-09-26T06:55:36.475+00:00] W (6895707) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:55:36.475+00:00] W (6895709) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=1 seq=1 att=2 peer=5 message=none
+[2026-09-26T06:55:41.282+00:00] I (6900519) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:56:05.316+00:00] I (6924640) RouteLoomRef: message origin=1 session=225 sequence=62 bytes=9
+[2026-09-26T06:56:05.316+00:00] W (6924651) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:56:05.316+00:00] W (6924653) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=1 seq=1 att=3 peer=5 message=none
+[2026-09-26T06:56:06.118+00:00] W (6925477) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:56:12.728+00:00] I (6932059) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T06:56:12.728+00:00] W (6932059) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T06:56:25.344+00:00] W (6944597) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:56:25.344+00:00] W (6944599) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=1 seq=1 att=4 peer=5 message=none
+[2026-09-26T06:56:26.346+00:00] W (6945725) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:56:26.946+00:00] W (6946240) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:56:31.952+00:00] W (6951241) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:56:33.354+00:00] W (6952596) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=1 seq=1 att=5 peer=5 message=none
+[2026-09-26T06:56:36.959+00:00] W (6956241) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=5 message=none
+[2026-09-26T06:56:41.164+00:00] I (6960519) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:57:23.423+00:00] I (7002651) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T06:57:23.423+00:00] W (7002651) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T06:57:41.243+00:00] I (7020520) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:57:49.453+00:00] I (7028847) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T06:57:49.453+00:00] W (7028847) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T06:58:24.098+00:00] I (7063411) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T06:58:24.098+00:00] W (7063411) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T06:58:41.122+00:00] I (7080521) RouteLoom: stack hwm main 10588 B
+[2026-09-26T06:59:02.954+00:00] I (7102242) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T06:59:02.954+00:00] W (7102242) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T06:59:41.207+00:00] I (7140521) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:00:41.291+00:00] I (7200522) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:01:04.724+00:00] I (7223986) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T07:01:04.724+00:00] W (7223986) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T07:01:41.171+00:00] I (7260523) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:02:12.815+00:00] I (7292062) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T07:02:12.815+00:00] W (7292062) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T07:02:41.253+00:00] I (7320524) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:03:41.134+00:00] I (7380525) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:03:56.958+00:00] I (7396250) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T07:03:56.958+00:00] W (7396251) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T07:04:41.217+00:00] I (7440525) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:05:41.297+00:00] I (7500526) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:05:52.912+00:00] I (7512173) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T07:05:52.912+00:00] W (7512173) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T07:06:41.173+00:00] I (7560526) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:06:55.993+00:00] I (7575375) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T07:06:55.993+00:00] W (7575376) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T07:07:41.262+00:00] I (7620527) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:08:04.091+00:00] I (7643484) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T07:08:04.091+00:00] W (7643484) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T07:08:41.138+00:00] I (7680527) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:09:41.214+00:00] I (7740527) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:09:55.031+00:00] I (7754371) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T07:09:55.031+00:00] W (7754372) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T07:10:41.304+00:00] I (7800528) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:11:03.562+00:00] I (7822898) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T07:11:03.563+00:00] W (7822898) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T07:11:41.168+00:00] I (7860529) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:12:41.270+00:00] I (7920530) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:12:54.487+00:00] I (7933856) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T07:12:54.487+00:00] W (7933857) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T07:13:41.178+00:00] I (7980530) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:14:10.814+00:00] I (8010044) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T07:14:10.815+00:00] W (8010044) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T07:14:41.261+00:00] I (8040530) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:15:41.144+00:00] I (8100531) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:15:56.167+00:00] I (8115419) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T07:15:56.168+00:00] W (8115420) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T07:16:41.282+00:00] I (8160531) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:17:13.738+00:00] I (8192957) RouteLoomRef: discovery event=PEER_CAPACITY peer=5
+[2026-09-26T07:17:13.738+00:00] W (8192957) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=5 message=none
+[2026-09-26T07:17:41.181+00:00] I (8220532) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:18:41.279+00:00] I (8280533) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:19:12.724+00:00] I (8312070) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T07:19:12.724+00:00] W (8312070) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T07:19:41.160+00:00] I (8340534) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:20:41.253+00:00] I (8400534) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:21:41.162+00:00] I (8460534) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:22:41.275+00:00] I (8520535) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:23:41.166+00:00] I (8580536) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:24:41.258+00:00] I (8640537) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:25:41.138+00:00] I (8700537) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:26:41.287+00:00] I (8760537) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:27:12.729+00:00] I (8792075) RouteLoomRef: discovery event=PEER_CAPACITY peer=0
+[2026-09-26T07:27:12.729+00:00] W (8792075) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=0 message=none
+[2026-09-26T07:27:41.311+00:00] I (8820537) RouteLoom: stack hwm main 10588 B
+[2026-09-26T07:28:34.492+00:00] !! capture finished

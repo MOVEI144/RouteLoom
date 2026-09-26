@@ -19,6 +19,8 @@ constexpr std::uint8_t kReconcileMaxRetries = 3;    // consecutive read failures
 constexpr std::uint32_t kDecisionMinMs = 500;       // m2 decision timeout clamp
 constexpr std::uint32_t kDecisionMaxMs = 5000;
 constexpr std::uint32_t kHintRetryMaxMs = 600000;  // unauthenticated hint cap
+constexpr std::uint32_t kDirectRetryFallbackMs = 5000;
+constexpr std::uint32_t kDirectRetryMaxMs = 600000;
 
 ZtJoinerConfig make_link_config(const JoinerConfig& config) noexcept {
   ZtJoinerConfig link{};
@@ -831,9 +833,24 @@ void Joiner::finish_attempt(const JoinAttemptOutcome outcome, const std::uint32_
   }
   teardown_attempt();
   emit(JoinEventKind::AttemptFinished);
-  // A direct run has no table to select from: park terminally so no scan
-  // can start behind the Owner's back. The Owner restarts for the next one.
-  set_state(direct_ ? JoinState::Stopped : JoinState::Select);
+  if (direct_) {
+    // A pending approval must be collected on this same USB session after
+    // its authenticated retry window. Stopping here would require an
+    // unrelated USB reconnect before the approved attempt could run.
+    if (outcome == JoinAttemptOutcome::PendingAssignment ||
+        outcome == JoinAttemptOutcome::AuthorityBusy) {
+      const std::uint64_t requested_ms = static_cast<std::uint64_t>(retry_after_s) * 1000;
+      const std::uint64_t retry_ms = requested_ms == 0 ? kDirectRetryFallbackMs
+                                      : requested_ms > kDirectRetryMaxMs ? kDirectRetryMaxMs
+                                                                         : requested_ms;
+      backoff_deadline_ = sat_add(now, retry_ms);
+      set_state(JoinState::Backoff);
+    } else {
+      set_state(JoinState::Stopped);
+    }
+    return;
+  }
+  set_state(JoinState::Select);
 }
 
 Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
@@ -1751,6 +1768,10 @@ Status Joiner::drive_backoff(const MonotonicMs now) noexcept {
   // Backoff always honors its deadline (a jittered ~1-2 s at k=0, cut by
   // the nearest pending eligibility) before the rescan.
   if (now < backoff_deadline_) return Status::success();
+  if (direct_) {
+    begin_direct_attempt();
+    return Status::success();
+  }
   start_scan();
   return Status::success();
 }
