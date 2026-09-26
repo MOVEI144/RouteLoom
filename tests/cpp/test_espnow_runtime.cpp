@@ -22,6 +22,9 @@
 
 namespace routeloom::espnow {
 struct EspNowRuntimeTestAccess {
+  static const NodeConfig& wire_config(const EspNowRuntime& runtime) noexcept {
+    return runtime.config_.node;
+  }
   static ReplyPeerPort& reply(EspNowRuntime& runtime) noexcept {
     return runtime.reply_port_;
   }
@@ -749,6 +752,12 @@ void test_adopt_member_node_keeps_node_startable() {
   CHECK(runtime.adopt_member_node(adopted).ok());
   CHECK(runtime.node().config_sink() == &config_sink);
   CHECK(runtime.node().gateway_sink() == &service_sink);
+  // Probe/Result wire headers must use the installed identity, not the
+  // firmware's pre-join static node/network after a reassigned join.
+  CHECK(EspNowRuntimeTestAccess::wire_config(runtime).node == adopted.node);
+  CHECK(EspNowRuntimeTestAccess::wire_config(runtime).network == adopted.network);
+  CHECK(EspNowRuntimeTestAccess::wire_config(runtime).message_session ==
+        adopted.message_session);
   // Adopted gateways run the product scoped timers (routing-scale.md §5):
   // the constructed flat defaults cannot satisfy the lease rule.
   CHECK(runtime.node().config().route_advertisement_period_ms ==

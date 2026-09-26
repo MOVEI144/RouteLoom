@@ -602,6 +602,9 @@ Status EspNowRuntime::adopt_member_node(const routeloom::NodeConfig& adopted) no
   ConfigEndpointSink* const config_sink = node_.config_sink();
   node_.~MeshNode();
   new (&node_) MeshNode(applied, *this, security_, observer_);
+  // Autonomy wire probes are assembled by the runtime, not MeshNode;
+  // use the same adopted identity and network as the rebuilt node.
+  config_.node = applied;
   // The reconstruction above drops every attached sink: the #117
   // reply-lease port is runtime-owned, so it is re-attached here — node
   // start refuses without it. Owner/observer sinks re-attach through
