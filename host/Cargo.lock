@@ -589,7 +589,9 @@ version = "0.1.0"
 dependencies = [
  "routeloom-json",
  "routeloom-provision",
+ "rusqlite",
  "rustix",
+ "zeroize",
 ]
 
 [[package]]
