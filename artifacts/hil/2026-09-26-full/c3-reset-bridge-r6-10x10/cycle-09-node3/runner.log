@@ -1,2 +1,0 @@
-accepted=10 delivered=2
-{"requested":10,"host_accepted":10,"delivered":2,"stopped_reason":null,"success_rate":0.2,"rate_limit_retries":0,"pace_s":0,"elapsed_s":40.61,"latency_ms_median":122.41,"latency_ms_p95":128.12,"latency_ms_max":128.75,"by_destination":{"3":{"accepted":10,"delivered":2}},"evidence":"artifacts/hil/2026-09-26-full/c3-reset-bridge-r6-10x10/cycle-09-node3/traffic.jsonl"}

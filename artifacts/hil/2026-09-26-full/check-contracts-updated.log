@@ -1,8 +1,0 @@
-{
-  "scope": "selected-design-contracts-and-document-consistency",
-  "checks": 172,
-  "passed": 172,
-  "failed": [],
-  "firmware_tested": false,
-  "rf_tested": false
-}

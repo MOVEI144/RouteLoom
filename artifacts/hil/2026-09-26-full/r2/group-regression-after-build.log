@@ -1,5 +1,0 @@
-[ 47%] Built target routeloom_edhoc_third_party
-[100%] Built target routeloom_core
-[100%] Building CXX object tests/cpp/CMakeFiles/routeloom_group_tests.dir/test_group.cpp.o
-[100%] Linking CXX executable routeloom_group_tests
-[100%] Built target routeloom_group_tests

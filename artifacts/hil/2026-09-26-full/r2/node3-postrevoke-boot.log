@@ -1,4 +1,0 @@
-[2026-09-26T16:46:13.106Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00 @ 115200 backend=pyserial dtr=1 rts=0
-[2026-09-26T16:46:16.409Z] I (7507) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
-[2026-09-26T16:46:30.661Z] I (21759) RouteLoomRef: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:6a:ee:c4 dest=ff:ff:ff:ff:ff:ff
-[2026-09-26T16:46:48.317Z] !! capture closed

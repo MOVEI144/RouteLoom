@@ -1,3 +1,0 @@
-{"index":0,"accepted":true,"request":12,"response":{"accepted":true,"request":12},"delivery":{"request":12,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":2518660971,"msg_seq":80,"updated_ms":1790442001323},"latency_ms":118.41}
-{"index":1,"accepted":true,"request":14,"response":{"accepted":true,"request":14},"delivery":{"request":14,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":2518660971,"msg_seq":82,"updated_ms":1790442001466},"latency_ms":117.86}
-{"index":2,"accepted":true,"request":16,"response":{"accepted":true,"request":16},"delivery":{"state":"timeout"}}

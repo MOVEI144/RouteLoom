@@ -1,5 +1,0 @@
-api acl loaded: revision 1
-operation store: sqlite at /tmp/routeloom-hil-full-2026-09-26/direct-retry-site/op-store.db (lineage 602e00bde4b6d55c2d964a11927d14b3)
-warning: operation store created fresh (lineage 602e00bde4b6d55c2d964a11927d14b3) — if this replaces a lost or corrupt store, any gateway still bound to the old lineage rejects dispatch with LaneMismatch until it is rebooted
-warning: development key custody — a plaintext P-256 root key file guarded only by POSIX 0600 permissions is NOT production custody; production root keys live on an offline machine/HSM behind the RootSigner seam (04-provisioning-lifecycle.md SS4.4, SS4.10)
-Error: Custom { kind: InvalidInput, error: "the SAK does not match the SiteCert (cnf key / site_id)" }

@@ -1,5 +1,0 @@
-[2026-09-26T08:35:17.333+00:00] !! connected /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00
-[2026-09-26T08:36:01.080+00:00] I (338) esp_image: segment 3: paddr=00150f84 vaddr=408027dc sizeI (60469) RouteLoom: stack hwm main 11096 B
-[2026-09-26T08:37:01.252+00:00] I (120470) RouteLoom: stack hwm main 11096 B
-[2026-09-26T08:38:01.146+00:00] I (180470) RouteLoom: stack hwm main 11096 B
-[2026-09-26T08:38:17.374+00:00] !! capture finished
