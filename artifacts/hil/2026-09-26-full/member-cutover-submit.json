@@ -1,0 +1,15 @@
+{
+  "cert_bytes": 191,
+  "response": {
+    "v": 1,
+    "request_id": "hil-cutover-1790437598396761391",
+    "ok": false,
+    "error": {
+      "code": "INVALID_ARGUMENT",
+      "detail": {
+        "message": "the next SiteCert must keep issuer / site / SAK / low32 / usage and step the epoch by exactly one"
+      },
+      "retryable": false
+    }
+  }
+}

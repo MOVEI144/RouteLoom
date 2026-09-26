@@ -1,0 +1,8 @@
+Internal ctest changing into directory: /tmp/routeloom-hil-full-asan
+Test project /tmp/routeloom-hil-full-asan
+    Start 47: routeloom_group_unit_tests
+1/1 Test #47: routeloom_group_unit_tests .......   Passed    4.51 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   4.51 sec

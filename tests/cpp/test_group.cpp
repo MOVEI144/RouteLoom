@@ -1926,9 +1926,12 @@ void test_revoked_group_sender_with_old_key() {
   const NodeId sender = site.gateways[0];
   sdkv1::GroupSecurityProvider transmitter(keys, pairwise, *aead, sender);
   sdkv1::GroupSecurityProvider receiver(keys, pairwise, *aead, 2, &revocations);
+  // Member adoption gives GROUP_DATA a random message_session, independent
+  // of the durable boot witness used by GroupLink route broadcasts.
+  const std::uint32_t message_session = site.boot_witness + 0x1234U;
   SecurityContext end{SecurityScope::Group, static_cast<std::uint32_t>(site.network),
                       sender, kBroadcastNodeId, site.gk_epoch_current, 0,
-                      site.boot_witness, group_address(kGroupAll)};
+                      message_session, group_address(kGroupAll)};
   const std::uint8_t payload[] = {'o', 'l', 'd'};
   const std::uint8_t aad[] = {0x42};
   std::array<std::uint8_t, sizeof(payload)> ciphertext{}, opened{};
@@ -2017,7 +2020,7 @@ void test_revoked_group_sender_with_old_key() {
   const NodeId relay = sender + 7;
   sdkv1::GroupSecurityProvider relay_provider(keys, pairwise, *aead, relay);
   wire::PlainFrame plain = group_plain_header(
-      sender, MessageId{site.boot_witness, kGroupSequenceFlag | 1});
+      sender, MessageId{message_session, kGroupSequenceFlag | 1});
   plain.header.network = static_cast<std::uint32_t>(site.network);
   plain.header.end_epoch = site.gk_epoch_current;
   GroupDataHeader head{};
@@ -2089,7 +2092,7 @@ void test_revoked_group_sender_with_old_key() {
   CHECK_OK(pending_node.start(2000));
   const auto ordered_frame = [&](std::uint32_t sequence, wire::EncodedFrame& out) {
     wire::PlainFrame message = group_plain_header(
-        sender, MessageId{site.boot_witness, kGroupSequenceFlag | sequence});
+        sender, MessageId{message_session, kGroupSequenceFlag | sequence});
     message.header.network = static_cast<std::uint32_t>(site.network);
     message.header.end_epoch = site.gk_epoch_current;
     GroupDataHeader ordered{};

@@ -1,0 +1,15 @@
+Internal ctest changing into directory: /tmp/routeloom-hil-full-asan
+Test project /tmp/routeloom-hil-full-asan
+    Start 14: routeloom_discovery_tests
+1/1 Test #14: routeloom_discovery_tests ........***Failed    0.35 sec
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_discovery.cpp:1167: b.port.count_wire(FrameType::NeighborResult) == before + 1
+1 discovery checks failed
+
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =   0.35 sec
+
+The following tests FAILED:
+	 14 - routeloom_discovery_tests (Failed)
+Errors while running CTest

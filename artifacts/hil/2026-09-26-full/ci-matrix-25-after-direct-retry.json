@@ -1,0 +1,392 @@
+{
+  "timestamp_utc": "2026-09-26T15:54:45.885685+00:00",
+  "expected": 25,
+  "completed": 25,
+  "passed": 25,
+  "results": [
+    {
+      "index": 0,
+      "label": "full-r11-ci-00-reference_node-esp32c3-normal",
+      "app": "reference_node",
+      "target": "esp32c3",
+      "profile": "normal",
+      "options": [],
+      "exit_code": 0,
+      "stdout": "built reference_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-00-reference_node-esp32c3-normal",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-00-reference_node-esp32c3-normal/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-00-reference_node-esp32c3-normal/ram-report.json"
+    },
+    {
+      "index": 1,
+      "label": "full-r11-ci-01-bridge_node-esp32c3-normal",
+      "app": "bridge_node",
+      "target": "esp32c3",
+      "profile": "normal",
+      "options": [],
+      "exit_code": 0,
+      "stdout": "built bridge_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-01-bridge_node-esp32c3-normal",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-01-bridge_node-esp32c3-normal/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-01-bridge_node-esp32c3-normal/ram-report.json"
+    },
+    {
+      "index": 2,
+      "label": "full-r11-ci-02-reference_node-esp32c3-legacy-sleep",
+      "app": "reference_node",
+      "target": "esp32c3",
+      "profile": "legacy-sleep",
+      "options": [
+        "CONFIG_ROUTELOOM_DEEP_SLEEP=y",
+        "CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y"
+      ],
+      "exit_code": 0,
+      "stdout": "built reference_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-02-reference_node-esp32c3-legacy-sleep",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-02-reference_node-esp32c3-legacy-sleep/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-02-reference_node-esp32c3-legacy-sleep/ram-report.json"
+    },
+    {
+      "index": 3,
+      "label": "full-r11-ci-03-reference_node-esp32s3-normal",
+      "app": "reference_node",
+      "target": "esp32s3",
+      "profile": "normal",
+      "options": [],
+      "exit_code": 0,
+      "stdout": "built reference_node/esp32s3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-03-reference_node-esp32s3-normal",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-03-reference_node-esp32s3-normal/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-03-reference_node-esp32s3-normal/ram-report.json"
+    },
+    {
+      "index": 4,
+      "label": "full-r11-ci-04-bridge_node-esp32s3-normal",
+      "app": "bridge_node",
+      "target": "esp32s3",
+      "profile": "normal",
+      "options": [],
+      "exit_code": 0,
+      "stdout": "built bridge_node/esp32s3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-04-bridge_node-esp32s3-normal",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-04-bridge_node-esp32s3-normal/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-04-bridge_node-esp32s3-normal/ram-report.json"
+    },
+    {
+      "index": 5,
+      "label": "full-r11-ci-05-reference_node-esp32s3-legacy-sleep",
+      "app": "reference_node",
+      "target": "esp32s3",
+      "profile": "legacy-sleep",
+      "options": [
+        "CONFIG_ROUTELOOM_DEEP_SLEEP=y",
+        "CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y"
+      ],
+      "exit_code": 0,
+      "stdout": "built reference_node/esp32s3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-05-reference_node-esp32s3-legacy-sleep",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-05-reference_node-esp32s3-legacy-sleep/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-05-reference_node-esp32s3-legacy-sleep/ram-report.json"
+    },
+    {
+      "index": 6,
+      "label": "full-r11-ci-06-reference_node-esp32c5-normal",
+      "app": "reference_node",
+      "target": "esp32c5",
+      "profile": "normal",
+      "options": [],
+      "exit_code": 0,
+      "stdout": "built reference_node/esp32c5 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-06-reference_node-esp32c5-normal",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-06-reference_node-esp32c5-normal/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-06-reference_node-esp32c5-normal/ram-report.json"
+    },
+    {
+      "index": 7,
+      "label": "full-r11-ci-07-bridge_node-esp32c5-normal",
+      "app": "bridge_node",
+      "target": "esp32c5",
+      "profile": "normal",
+      "options": [],
+      "exit_code": 0,
+      "stdout": "built bridge_node/esp32c5 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-07-bridge_node-esp32c5-normal",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-07-bridge_node-esp32c5-normal/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-07-bridge_node-esp32c5-normal/ram-report.json"
+    },
+    {
+      "index": 8,
+      "label": "full-r11-ci-08-reference_node-esp32c5-legacy-sleep",
+      "app": "reference_node",
+      "target": "esp32c5",
+      "profile": "legacy-sleep",
+      "options": [
+        "CONFIG_ROUTELOOM_DEEP_SLEEP=y",
+        "CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y"
+      ],
+      "exit_code": 0,
+      "stdout": "built reference_node/esp32c5 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-08-reference_node-esp32c5-legacy-sleep",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-08-reference_node-esp32c5-legacy-sleep/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-08-reference_node-esp32c5-legacy-sleep/ram-report.json"
+    },
+    {
+      "index": 9,
+      "label": "full-r11-ci-09-bridge_node-esp32c3-observe",
+      "app": "bridge_node",
+      "target": "esp32c3",
+      "profile": "observe",
+      "options": [
+        "CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y",
+        "CONFIG_ROUTELOOM_DISCOVERY=y",
+        "CONFIG_ROUTELOOM_MIGRATION=1"
+      ],
+      "exit_code": 0,
+      "stdout": "built bridge_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-09-bridge_node-esp32c3-observe",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-09-bridge_node-esp32c3-observe/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-09-bridge_node-esp32c3-observe/ram-report.json"
+    },
+    {
+      "index": 10,
+      "label": "full-r11-ci-10-bridge_node-esp32c3-endpoints",
+      "app": "bridge_node",
+      "target": "esp32c3",
+      "profile": "endpoints",
+      "options": [
+        "CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y",
+        "CONFIG_ROUTELOOM_CAPABILITY=0x1f"
+      ],
+      "exit_code": 0,
+      "stdout": "built bridge_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-10-bridge_node-esp32c3-endpoints",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-10-bridge_node-esp32c3-endpoints/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-10-bridge_node-esp32c3-endpoints/ram-report.json"
+    },
+    {
+      "index": 11,
+      "label": "full-r11-ci-11-reference_node-esp32c3-config",
+      "app": "reference_node",
+      "target": "esp32c3",
+      "profile": "config",
+      "options": [
+        "CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y",
+        "CONFIG_ROUTELOOM_CONFIG=y"
+      ],
+      "exit_code": 0,
+      "stdout": "built reference_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-11-reference_node-esp32c3-config",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-11-reference_node-esp32c3-config/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-11-reference_node-esp32c3-config/ram-report.json"
+    },
+    {
+      "index": 12,
+      "label": "full-r11-ci-12-reference_node-esp32c3-maintenance",
+      "app": "reference_node",
+      "target": "esp32c3",
+      "profile": "maintenance",
+      "options": [
+        "CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y"
+      ],
+      "exit_code": 0,
+      "stdout": "built reference_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-12-reference_node-esp32c3-maintenance",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-12-reference_node-esp32c3-maintenance/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-12-reference_node-esp32c3-maintenance/ram-report.json"
+    },
+    {
+      "index": 13,
+      "label": "full-r11-ci-13-bridge_node-esp32c3-maintenance",
+      "app": "bridge_node",
+      "target": "esp32c3",
+      "profile": "maintenance",
+      "options": [
+        "CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y",
+        "CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y"
+      ],
+      "exit_code": 0,
+      "stdout": "built bridge_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-13-bridge_node-esp32c3-maintenance",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-13-bridge_node-esp32c3-maintenance/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-13-bridge_node-esp32c3-maintenance/ram-report.json"
+    },
+    {
+      "index": 14,
+      "label": "full-r11-ci-14-reference_node-esp32c3-route-scoped",
+      "app": "reference_node",
+      "target": "esp32c3",
+      "profile": "route-scoped",
+      "options": [
+        "CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y",
+        "CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y"
+      ],
+      "exit_code": 0,
+      "stdout": "built reference_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-14-reference_node-esp32c3-route-scoped",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-14-reference_node-esp32c3-route-scoped/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-14-reference_node-esp32c3-route-scoped/ram-report.json"
+    },
+    {
+      "index": 15,
+      "label": "full-r11-ci-15-bridge_node-esp32c3-route-scoped",
+      "app": "bridge_node",
+      "target": "esp32c3",
+      "profile": "route-scoped",
+      "options": [
+        "CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y",
+        "CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y"
+      ],
+      "exit_code": 0,
+      "stdout": "built bridge_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-15-bridge_node-esp32c3-route-scoped",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-15-bridge_node-esp32c3-route-scoped/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-15-bridge_node-esp32c3-route-scoped/ram-report.json"
+    },
+    {
+      "index": 16,
+      "label": "full-r11-ci-16-reference_node-esp32c3-member",
+      "app": "reference_node",
+      "target": "esp32c3",
+      "profile": "member",
+      "options": [
+        "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"
+      ],
+      "exit_code": 0,
+      "stdout": "built reference_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-16-reference_node-esp32c3-member",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-16-reference_node-esp32c3-member/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-16-reference_node-esp32c3-member/ram-report.json"
+    },
+    {
+      "index": 17,
+      "label": "full-r11-ci-17-bridge_node-esp32c3-member",
+      "app": "bridge_node",
+      "target": "esp32c3",
+      "profile": "member",
+      "options": [
+        "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"
+      ],
+      "exit_code": 0,
+      "stdout": "built bridge_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-17-bridge_node-esp32c3-member",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-17-bridge_node-esp32c3-member/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-17-bridge_node-esp32c3-member/ram-report.json"
+    },
+    {
+      "index": 18,
+      "label": "full-r11-ci-18-reference_node-esp32s3-member",
+      "app": "reference_node",
+      "target": "esp32s3",
+      "profile": "member",
+      "options": [
+        "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"
+      ],
+      "exit_code": 0,
+      "stdout": "built reference_node/esp32s3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-18-reference_node-esp32s3-member",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-18-reference_node-esp32s3-member/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-18-reference_node-esp32s3-member/ram-report.json"
+    },
+    {
+      "index": 19,
+      "label": "full-r11-ci-19-bridge_node-esp32s3-member",
+      "app": "bridge_node",
+      "target": "esp32s3",
+      "profile": "member",
+      "options": [
+        "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"
+      ],
+      "exit_code": 0,
+      "stdout": "built bridge_node/esp32s3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-19-bridge_node-esp32s3-member",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-19-bridge_node-esp32s3-member/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-19-bridge_node-esp32s3-member/ram-report.json"
+    },
+    {
+      "index": 20,
+      "label": "full-r11-ci-20-reference_node-esp32c5-member",
+      "app": "reference_node",
+      "target": "esp32c5",
+      "profile": "member",
+      "options": [
+        "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"
+      ],
+      "exit_code": 0,
+      "stdout": "built reference_node/esp32c5 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-20-reference_node-esp32c5-member",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-20-reference_node-esp32c5-member/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-20-reference_node-esp32c5-member/ram-report.json"
+    },
+    {
+      "index": 21,
+      "label": "full-r11-ci-21-bridge_node-esp32c5-member",
+      "app": "bridge_node",
+      "target": "esp32c5",
+      "profile": "member",
+      "options": [
+        "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"
+      ],
+      "exit_code": 0,
+      "stdout": "built bridge_node/esp32c5 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-21-bridge_node-esp32c5-member",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-21-bridge_node-esp32c5-member/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-21-bridge_node-esp32c5-member/ram-report.json"
+    },
+    {
+      "index": 22,
+      "label": "full-r11-ci-22-reference_node-esp32c3-member-sleep",
+      "app": "reference_node",
+      "target": "esp32c3",
+      "profile": "member-sleep",
+      "options": [
+        "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y",
+        "CONFIG_ROUTELOOM_DEEP_SLEEP=y"
+      ],
+      "exit_code": 0,
+      "stdout": "built reference_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-22-reference_node-esp32c3-member-sleep",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-22-reference_node-esp32c3-member-sleep/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-22-reference_node-esp32c3-member-sleep/ram-report.json"
+    },
+    {
+      "index": 23,
+      "label": "full-r11-ci-23-bridge_node-esp32c3-paired",
+      "app": "bridge_node",
+      "target": "esp32c3",
+      "profile": "paired",
+      "options": [
+        "CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y",
+        "CONFIG_ROUTELOOM_DISCOVERY=y",
+        "CONFIG_ROUTELOOM_CAPABILITY=0x1f",
+        "CONFIG_ROUTELOOM_NODE_ID=0x1",
+        "CONFIG_ROUTELOOM_PEER_NODE_ID=0x2",
+        "CONFIG_ROUTELOOM_PEER_MAC=\"94:a9:90:7a:b5:60\""
+      ],
+      "exit_code": 0,
+      "stdout": "built bridge_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-23-bridge_node-esp32c3-paired",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-23-bridge_node-esp32c3-paired/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-23-bridge_node-esp32c3-paired/ram-report.json"
+    },
+    {
+      "index": 24,
+      "label": "full-r11-ci-24-reference_node-esp32c3-paired",
+      "app": "reference_node",
+      "target": "esp32c3",
+      "profile": "paired",
+      "options": [
+        "CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y",
+        "CONFIG_ROUTELOOM_DISCOVERY=y",
+        "CONFIG_ROUTELOOM_CONFIG=y",
+        "CONFIG_ROUTELOOM_NODE_ID=0x2",
+        "CONFIG_ROUTELOOM_PEER_NODE_ID=0x1",
+        "CONFIG_ROUTELOOM_PEER_MAC=\"94:a9:90:6a:ee:c4\""
+      ],
+      "exit_code": 0,
+      "stdout": "built reference_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-5node/artifacts/hil/2026-09-26/images/full-r11-ci-24-reference_node-esp32c3-paired",
+      "stderr": "",
+      "build_log": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-24-reference_node-esp32c3-paired/build.log",
+      "ram_report": "artifacts/hil/2026-09-26-full/ci-matrix-25-after-direct-retry-logs/full-r11-ci-24-reference_node-esp32c3-paired/ram-report.json"
+    }
+  ]
+}

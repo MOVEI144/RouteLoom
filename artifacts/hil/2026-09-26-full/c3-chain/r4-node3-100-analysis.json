@@ -1,0 +1,101 @@
+{
+  "traffic": {
+    "all": {
+      "accepted": 100,
+      "delivered": 100,
+      "success_rate": 1.0,
+      "latency_ms_median": 113.5,
+      "latency_ms_p95": 194.06,
+      "latency_ms_max": 379.49,
+      "outcomes": {
+        "delivered:END_RECEIVED": 100
+      }
+    },
+    "by_destination": {
+      "3": {
+        "accepted": 100,
+        "delivered": 100,
+        "success_rate": 1.0,
+        "latency_ms_median": 113.5,
+        "latency_ms_p95": 194.06,
+        "latency_ms_max": 379.49,
+        "outcomes": {
+          "delivered:END_RECEIVED": 100
+        }
+      }
+    },
+    "admission_retries": 259,
+    "first_admitted_unix": 1790418563.2587824,
+    "last_admitted_unix": 1790421154.6707103,
+    "admission_span_s": 2591.41
+  },
+  "health": {
+    "samples": 82,
+    "authenticated_samples": 82,
+    "bridge_sessions": 1,
+    "bridge_boots_seen": [
+      249
+    ],
+    "max_protocol_errors": 0,
+    "route_samples_by_destination": {
+      "0000000000000003": 82
+    },
+    "rssi_dbm_by_destination": {},
+    "event_kinds": {
+      "adapter": 1,
+      "hello_ack": 1,
+      "auth_ok": 1,
+      "credit_grant": 370,
+      "node_joined": 3,
+      "link_changed": 1,
+      "dispatch": 1,
+      "host_ops_rx": 1,
+      "delivery_event": 618,
+      "diagnostic": 97,
+      "credit_query": 61
+    },
+    "observation_span_s": 2430.0
+  },
+  "console": {
+    "node2": {
+      "heap_samples": 44,
+      "boot_ids_seen": [],
+      "stack_min_remaining_b": {
+        "main": 11096
+      },
+      "stale_events": 0,
+      "boot_heap_below_floor": 0,
+      "usb_connects": 0,
+      "usb_disconnects": 0,
+      "first_free_b": 21708,
+      "last_free_b": 21708,
+      "free_delta_b": 0,
+      "minimum_free_b": 21708,
+      "first_largest_b": 18432,
+      "last_largest_b": 18432,
+      "largest_delta_b": 0,
+      "minimum_largest_b": 18432,
+      "minimum_ever_free_b": 20932
+    },
+    "node3": {
+      "heap_samples": 43,
+      "boot_ids_seen": [],
+      "stack_min_remaining_b": {
+        "main": 11096
+      },
+      "stale_events": 0,
+      "boot_heap_below_floor": 0,
+      "usb_connects": 0,
+      "usb_disconnects": 0,
+      "first_free_b": 22172,
+      "last_free_b": 22172,
+      "free_delta_b": 0,
+      "minimum_free_b": 21832,
+      "first_largest_b": 19456,
+      "last_largest_b": 19456,
+      "largest_delta_b": 0,
+      "minimum_largest_b": 19456,
+      "minimum_ever_free_b": 21408
+    }
+  }
+}

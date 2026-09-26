@@ -27,7 +27,7 @@ use super::store::{MemoryStore, SiteStore, SqliteSiteStore};
 use super::testkit::{self, AuthorityNet, FakeDevice, Outcome, SimDevice};
 use super::transport::InProcessTransport;
 use super::usb::{authority_sub, UsbAuthorityAdapter};
-use super::{ChannelGroupKeyTransport, DecideRequest, Events, RevokeRequest, SiteService};
+use super::{DecideRequest, Events, RevokeRequest, SiteService};
 
 const T0: u64 = 1_790_000_000_000;
 const KGUARD: u32 = 501;
@@ -54,10 +54,9 @@ impl Rig {
     }
 
     fn with_store(store: Box<dyn SiteStore>) -> Self {
-        let service = Arc::new(SiteService::new(testkit::authority(store, T0)));
+        let service = SiteService::new_live(testkit::authority(store, T0));
         let relay = InProcessTransport::new();
         service.set_transport(relay.clone());
-        service.set_group_key_transport(ChannelGroupKeyTransport::new(&service));
         let usb = UsbAuthorityAdapter::new(testkit::GATEWAY, 7);
         service.set_authority_transport(Some(usb.clone()));
         Self {

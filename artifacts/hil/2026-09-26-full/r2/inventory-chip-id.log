@@ -1,0 +1,113 @@
+PORT /dev/ttyACM0 2026-09-27T01:14:57+09:00
+esptool v5.4.0
+Serial port /dev/ttyACM0:
+Connecting...
+Detecting chip type... ESP32-C3
+Connected to ESP32-C3 on /dev/ttyACM0:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                94:a9:90:7a:b5:60
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+WARNING: ESP32-C3 has no chip ID. Reading MAC address instead.
+MAC:                94:a9:90:7a:b5:60
+
+Hard resetting via RTS pin...
+EXIT /dev/ttyACM0 0
+PORT /dev/ttyACM1 2026-09-27T01:14:57+09:00
+esptool v5.4.0
+Serial port /dev/ttyACM1:
+Connecting...
+Detecting chip type... ESP32-C3
+Connected to ESP32-C3 on /dev/ttyACM1:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                94:a9:90:6a:ee:c4
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+WARNING: ESP32-C3 has no chip ID. Reading MAC address instead.
+MAC:                94:a9:90:6a:ee:c4
+
+Hard resetting via RTS pin...
+EXIT /dev/ttyACM1 0
+PORT /dev/ttyACM3 2026-09-27T01:14:58+09:00
+esptool v5.4.0
+Serial port /dev/ttyACM3:
+Connecting...
+Detecting chip type... ESP32-C3
+Connected to ESP32-C3 on /dev/ttyACM3:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                94:a9:90:7a:26:ac
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+WARNING: ESP32-C3 has no chip ID. Reading MAC address instead.
+MAC:                94:a9:90:7a:26:ac
+
+Hard resetting via RTS pin...
+EXIT /dev/ttyACM3 0
+PORT /dev/ttyACM4 2026-09-27T01:14:59+09:00
+esptool v5.4.0
+Serial port /dev/ttyACM4:
+Connecting...
+Detecting chip type... ESP32-C6
+Connected to ESP32-C6 on /dev/ttyACM4:
+Chip type:          ESP32-C6FH4 (QFN32) (revision v0.2)
+Features:           Wi-Fi 6, BT 5 (LE), IEEE802.15.4, Single Core + LP Core, 160MHz, Embedded Flash 4MB
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                10:bd:a3:ff:fe:b1:48:a8
+BASE MAC:           10:bd:a3:b1:48:a8
+MAC_EXT:            ff:fe
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+WARNING: ESP32-C6 has no chip ID. Reading MAC address instead.
+MAC:                10:bd:a3:ff:fe:b1:48:a8
+BASE MAC:           10:bd:a3:b1:48:a8
+MAC_EXT:            ff:fe
+
+Hard resetting via RTS pin...
+EXIT /dev/ttyACM4 0
+PORT /dev/ttyACM5 2026-09-27T01:15:00+09:00
+esptool v5.4.0
+Serial port /dev/ttyACM5:
+Connecting...
+Detecting chip type... ESP32-C6
+Connected to ESP32-C6 on /dev/ttyACM5:
+Chip type:          ESP32-C6FH4 (QFN32) (revision v0.2)
+Features:           Wi-Fi 6, BT 5 (LE), IEEE802.15.4, Single Core + LP Core, 160MHz, Embedded Flash 4MB
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                10:bd:a3:ff:fe:b1:47:54
+BASE MAC:           10:bd:a3:b1:47:54
+MAC_EXT:            ff:fe
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+WARNING: ESP32-C6 has no chip ID. Reading MAC address instead.
+MAC:                10:bd:a3:ff:fe:b1:47:54
+BASE MAC:           10:bd:a3:b1:47:54
+MAC_EXT:            ff:fe
+
+Hard resetting via RTS pin...
+EXIT /dev/ttyACM5 0

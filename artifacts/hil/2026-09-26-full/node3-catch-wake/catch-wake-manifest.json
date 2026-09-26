@@ -1,0 +1,51 @@
+{
+  "port": "/dev/ttyACM3",
+  "chip": "esp32c3",
+  "mac": "94:a9:90:7a:26:ac",
+  "attempt": 1,
+  "fallback_offsets": false,
+  "security": {
+    "secure_boot": false,
+    "flash_encryption": false
+  },
+  "files": {
+    "0x0": {
+      "path": "artifacts/hil/2026-09-26/images/full-r1-node3-c3-recovery/build/bootloader/bootloader.bin",
+      "sha256": "891b8a0cbf5aa6ff5cc894fe63dcf80308aa1bb33a849e25dbad9c0df72b94db"
+    },
+    "0x8000": {
+      "path": "artifacts/hil/2026-09-26/images/full-r1-node3-c3-recovery/build/partition_table/partition-table.bin",
+      "sha256": "068ab45eb37a4be22b3aea004e4e970cfbbf9a25bc0824c1572be5bf68a37fef"
+    },
+    "0x10000": {
+      "path": "artifacts/hil/2026-09-26/images/full-r1-node3-c3-recovery/build/routeloom_reference_node.bin",
+      "sha256": "30a3a2a2600e3f802aa8749defe30121f7ba8be4eea662bf5f782b617b39a8e0"
+    }
+  },
+  "command": [
+    "/root/.local/bin/esptool",
+    "--chip",
+    "esp32c3",
+    "--port",
+    "/dev/ttyACM3",
+    "--baud",
+    "460800",
+    "--before",
+    "no-reset",
+    "--after",
+    "hard-reset",
+    "write-flash",
+    "--flash-mode",
+    "dio",
+    "--flash-size",
+    "2MB",
+    "--flash-freq",
+    "80m",
+    "0x0",
+    "artifacts/hil/2026-09-26/images/full-r1-node3-c3-recovery/build/bootloader/bootloader.bin",
+    "0x8000",
+    "artifacts/hil/2026-09-26/images/full-r1-node3-c3-recovery/build/partition_table/partition-table.bin",
+    "0x10000",
+    "artifacts/hil/2026-09-26/images/full-r1-node3-c3-recovery/build/routeloom_reference_node.bin"
+  ]
+}

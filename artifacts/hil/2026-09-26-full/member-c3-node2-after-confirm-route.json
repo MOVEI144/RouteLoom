@@ -1,0 +1,19 @@
+{
+  "node": "0000000000000002",
+  "role": "peer",
+  "connected": true,
+  "listed": true,
+  "neighbor": true,
+  "direct": true,
+  "hops": 1,
+  "next_hop": "0000000000000002",
+  "route_metric": 1,
+  "link_cost": 1,
+  "rssi_dbm": -29,
+  "rssi_avg_dbm": -28.91,
+  "telemetry_stale": false,
+  "last_heard_ms": 1790438092289,
+  "heard_age_ms": 4021,
+  "updated_ms": 1790438093441,
+  "changed_ms": 1790438002084
+}

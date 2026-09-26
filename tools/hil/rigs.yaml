@@ -34,6 +34,31 @@
 # socket (routeloomctl) only.
 
 rigs:
+  bench-2026-09-26-c3-direct:
+    description: "two C3 references, device-originated traffic without a USB gateway"
+    host:
+      daemon_bin: host/target/debug/routeloom-host
+      ctl_bin: host/target/debug/routeloomctl
+      socket: /tmp/routeloom-hil-2026-09-26-c3-direct.sock
+    boards:
+      ref-node1:
+        app: reference_node
+        chip: esp32c3
+        mac: "94:a9:90:6a:ee:c4"
+        role: reference
+        node_id: 0x1
+        port_globs:
+          - "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00"
+        reset: esptool
+      ref-a:
+        app: reference_node
+        chip: esp32c3
+        mac: "94:a9:90:7a:b5:60"
+        role: reference
+        node_id: 0x2
+        port_globs:
+          - "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00"
+        reset: esptool
   bench-2026-09-26-mixed5:
     description: "experimental five-node bench: three C3s and two unsupported C6s"
     host:

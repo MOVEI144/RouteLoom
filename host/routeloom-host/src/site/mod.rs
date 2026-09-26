@@ -6061,6 +6061,15 @@ impl SiteService {
         }
     }
 
+    /// Construct the live daemon service with GK commands bound to the
+    /// authority channel. A bare service is useful for isolated tests, but
+    /// silently drops rotation commands until this transport is attached.
+    pub fn new_live(authority: SiteAuthority) -> Arc<Self> {
+        let service = Arc::new(Self::new(authority));
+        service.set_group_key_transport(ChannelGroupKeyTransport::new(&service));
+        service
+    }
+
     pub fn set_transport(&self, transport: Arc<dyn JoinTransport>) {
         *self.transport.lock().expect("transport poisoned") = Some(transport);
     }

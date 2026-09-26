@@ -1,0 +1,16 @@
+{
+  "active": 2,
+  "active_ack": 0,
+  "cause": "manual",
+  "clock": {
+    "mono_ms": 920043,
+    "unix_ms": 1790436310255
+  },
+  "last_rotation": null,
+  "next_due_ms": 1790522688868,
+  "phase": "catching_up",
+  "staged": 2,
+  "staged_ack": 0,
+  "targets": 5,
+  "unknown": 5
+}

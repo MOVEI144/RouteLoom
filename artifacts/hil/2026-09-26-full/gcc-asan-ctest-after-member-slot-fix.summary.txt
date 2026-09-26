@@ -1,0 +1,5 @@
+GCC host build: cmake --build /tmp/routeloom-hil-full-asan -j2, exit 0
+GCC ASan/UBSan ctest: ctest --test-dir /tmp/routeloom-hil-full-asan --output-on-failure, exit 0
+100% tests passed, 0 tests failed out of 96
+Total Test time (real) = 455.23 sec
+ROUTELOOM_ENABLE_SANITIZERS=ON; detailed output: gcc-asan-lasttest-after-member-slot-fix.log

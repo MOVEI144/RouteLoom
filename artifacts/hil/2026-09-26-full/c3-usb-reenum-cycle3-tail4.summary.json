@@ -1,0 +1,20 @@
+{
+  "requested": 4,
+  "host_accepted": 4,
+  "delivered": 4,
+  "stopped_reason": null,
+  "success_rate": 1.0,
+  "rate_limit_retries": 4,
+  "pace_s": 0,
+  "elapsed_s": 37.76,
+  "latency_ms_median": 112.545,
+  "latency_ms_p95": 115.06,
+  "latency_ms_max": 115.43,
+  "by_destination": {
+    "3": {
+      "accepted": 4,
+      "delivered": 4
+    }
+  },
+  "evidence": "artifacts/hil/2026-09-26-full/c3-usb-reenum-cycle3-tail4.jsonl"
+}
