@@ -4,7 +4,6 @@
 
 namespace routeloom::sdkv1 {
 namespace {
-constexpr std::size_t kBatch = 16;
 constexpr std::size_t kMaxScan = 4096;
 constexpr std::size_t kLineMax = 128;
 
@@ -145,51 +144,13 @@ bool is_legacy_peer_key(const LegacyKey& key) noexcept {
 
 Status purge_legacy_state(LegacyPurgePort& port, const bool stopped,
                           const bool ram_only_build, LegacyPurgeResult& result) noexcept {
-  if (!stopped || !ram_only_build) {
-    return Status::error(StatusCode::InvalidState, "legacy purge requires stopped RAM-only build");
-  }
-  bool marker = false;
-  Status status = port.migration(marker);
-  if (!status) return status;
-  if (!marker) {
-    status = port.commit_migration();
-    if (!status) return status;
-    status = port.migration(marker);
-    if (!status) return status;
-    if (!marker) return Status::error(StatusCode::StorageFailure, "migration readback");
-  }
-  LegacyPurgeResult observed{};
-  std::size_t cursor = 0;
-  std::size_t scanned = 0;
-  while (scanned < kMaxScan) {
-    LegacyKey key{};
-    bool found = false;
-    status = port.next(cursor, key, found);
-    if (!status) return status;
-    if (!found) break;
-    ++scanned;
-    if (!is_legacy_peer_key(key)) continue;
-    if (observed.erased < kBatch) {
-      status = port.erase(key);
-      if (!status) return status;
-      ++observed.erased;
-    }
-  }
-  if (scanned == kMaxScan) return Status::error(StatusCode::NoCapacity, "legacy scan limit");
-  // Erase acknowledgment is not evidence of durability. Start a fresh
-  // enumeration and report completion only when no matching keys survive.
-  cursor = 0;
-  scanned = 0;
-  while (scanned < kMaxScan) {
-    LegacyKey key{};
-    bool found = false;
-    status = port.next(cursor, key, found);
-    if (!status) return status;
-    if (!found) { result = observed; return Status::success(); }
-    ++scanned;
-    if (is_legacy_peer_key(key)) ++observed.remaining;
-  }
-  return Status::error(StatusCode::NoCapacity, "legacy scan limit");
+  (void)port;
+  (void)stopped;
+  (void)ram_only_build;
+  (void)result;
+  // The marker is invisible to older PSK images. No caller may erase
+  // their replay floors until rollback is fenced outside this binary.
+  return Status::error(StatusCode::RecoveryRequired, "legacy purge rollback unsafe");
 }
 
 LegacyStateConsole::LegacyStateConsole(LegacyPurgePort& port,
@@ -265,16 +226,9 @@ Status LegacyStateConsole::process_line(const ByteView line, const bool stopped,
       if (diff != 0) {
         out.put("ERR domain");
       } else {
-        LegacyPurgeResult result{};
-        const Status status = purge_legacy_state(port_, stopped, ram_only_, result);
-        if (!status.ok()) {
-          out.put("ERR store");
-        } else {
-          out.put("OK erased=");
-          out.put_u32(result.erased);
-          out.put(" remaining=");
-          out.put_u32(result.remaining);
-        }
+        // The marker cannot stop a pre-migration PSK binary. Keep its
+        // replay floors and counter leases until rollback can be fenced.
+        out.put("ERR rollback_unsafe");
       }
     }
   }

@@ -1,0 +1,64 @@
+name: Mesh Lab headless checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  meshviz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Install bundle verifier
+        run: python3 -m pip install 'cryptography>=41,<47'
+      - name: Qt-free model, capture and device tests
+        run: PYTHONPATH=tools/meshviz/src:tools python3 -m unittest discover -s tools/meshviz/tests -v
+  firmware-bundles:
+    # The committed key is DEVELOPMENT ONLY; this job has no release credentials.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        chip: [esp32c3, esp32s3, esp32c5]
+        app: [reference_node, bridge_node]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install 'cryptography>=41,<47'
+      - name: Build and verify offline bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/meshviz/build_bundle.sh '${{ matrix.app }}' '${{ matrix.chip }}' \
+            "$RUNNER_TEMP/bundle" tools/meshviz/packaging/dev-signing-key.pem \
+            "${GITHUB_SHA}"
+          export PYTHONPATH=tools/meshviz/src
+          python3 -m routeloom_meshviz.firmware_catalog verify "$RUNNER_TEMP/bundle" \
+            tools/meshviz/src/routeloom_meshviz/dev-signing-public.pem
+          python3 -m routeloom_meshviz.firmware_catalog catalog "$RUNNER_TEMP/catalog.json" \
+            tools/meshviz/packaging/dev-signing-key.pem "$RUNNER_TEMP/bundle"
+          python3 -m routeloom_meshviz.firmware_catalog verify-catalog \
+            "$RUNNER_TEMP/catalog.json" tools/meshviz/src/routeloom_meshviz/dev-signing-public.pem \
+            "$RUNNER_TEMP/bundle"
+          mkdir -p dist
+          cp "$RUNNER_TEMP/catalog.json" dist/
+          cp -a "$RUNNER_TEMP/bundle" dist/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: meshviz-dev-${{ matrix.app }}-${{ matrix.chip }}
+          path: dist/
+          retention-days: 14

@@ -114,8 +114,16 @@ GroupReplaySender* GroupSecurityProvider::free_sender(const SecurityScope scope)
     for (auto& s : keys_.end_rx_) if (s.sender == 0) return &s;
   } else {
     for (auto& s : keys_.link_rx_) if (s.sender == 0) return &s;
+    // Only an epoch still accepted by the GK state protects a replay bank.
+    // Do not evict a sender while an overlap frame can still arrive.
+    for (auto& s : keys_.link_rx_) {
+      bool live = false;
+      for (std::size_t i = 0; i < 2; ++i)
+        live = live || (s.banks[i].bitmap != 0 && keys_.accepts(keys_.replay_epochs_[i]));
+      if (!live) { s = {}; return &s; }
+    }
   }
-  return nullptr;  // never evict an authenticated sender: its boot floor matters
+  return nullptr;  // never evict a sender with an accepted replay bank
 }
 
 bool GroupSecurityProvider::replay_ok(const GroupReplaySender& s, const std::uint32_t epoch,

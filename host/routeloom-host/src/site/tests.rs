@@ -1076,6 +1076,54 @@ fn unverified_devices_are_refused_and_not_listed() {
 /// 02 §13: at most four exchanges at once, one message_1 per MAC per 2 s;
 /// beyond that the relay is aborted `busy`. Unknown relays are refused.
 #[test]
+fn join_deadlines_use_monotonic_time_after_wall_rollback() {
+    let (service, transport) = service();
+    let mut devices: Vec<SimDevice> = (0..4)
+        .map(|i| SimDevice::new(0x00A1_0000_0000_8800 + i, 0x88 + i as u8))
+        .collect();
+    for device in &mut devices {
+        let (_, outcome, _) = device.start(&service, &transport, T0);
+        assert!(matches!(outcome, Outcome::Waiting));
+    }
+    service.tick(HostTime {
+        unix_ms: T0 - 3_600_000,
+        mono_ms: T0 + 60_000,
+    });
+    let live = service.with(|a| a.txns.len()).0;
+    assert_eq!(live, 0);
+    transport.take();
+    let key = RelayKey {
+        gateway: 1,
+        proxy: 2,
+        gateway_epoch: 7,
+        proxy_epoch: 3,
+        relay_id: 99,
+        joiner_mac: devices[0].mac,
+    };
+    service.handle_up_time(
+        RelayUp {
+            key,
+            hops: 0,
+            phase: super::transport::PHASE_EDHOC,
+            step: 1,
+            joiner_rssi_dbm: 0,
+            body: vec![0x40],
+        },
+        HostTime {
+            unix_ms: T0 - 3_600_000,
+            mono_ms: T0 + 60_001,
+        },
+    );
+    assert!(!transport.take().iter().any(|event| matches!(
+        event,
+        transport::Outbound::Abort {
+            reason: AbortReason::Busy,
+            ..
+        }
+    )));
+}
+
+#[test]
 fn admission_is_bounded() {
     let (service, transport) = service();
     let mut devices: Vec<SimDevice> = (0..5)

@@ -7,7 +7,9 @@ using nvs_handle_t = std::uint32_t;
 struct NvsIterator;
 using nvs_iterator_t = NvsIterator*;
 
+#ifndef ESP_OK
 inline constexpr esp_err_t ESP_OK = 0;
+#endif
 inline constexpr esp_err_t ESP_ERR_NVS_NOT_FOUND = 1;
 inline constexpr esp_err_t ESP_ERR_INVALID_ARG = 2;
 inline constexpr esp_err_t ESP_ERR_NVS_TYPE_MISMATCH = 3;

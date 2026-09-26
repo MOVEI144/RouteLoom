@@ -20,6 +20,7 @@
 #include "routeloom/counter_store.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/power.hpp"
+#include "routeloom/crc32.hpp"
 
 #include "test_ledger.hpp"
 #include "test_security.hpp"
@@ -1249,6 +1250,39 @@ void test_image_slots_alternate() {
   CHECK(reach_ready(w).issued);
   CHECK(w.storage.last_slot == 0);
   CHECK(!w.storage.slot_blank(0) && !w.storage.slot_blank(1));
+}
+
+void test_unknown_sleep_schema_is_not_overwritten() {
+  MemoryPowerStorage storage;
+  {
+    PowerWorld w(storage);
+    w.platform_peer(2, 0xaa);
+    CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                                 ElapsedInterval{0, 0, false}, w.now));
+    w.pump(60);
+    (void)queue_pending(w, 2, true, 5000);
+    CHECK(reach_ready(w).issued);  // pending image in slot 1
+  }
+  std::array<std::uint8_t, kPowerImageRecordSize> record{};
+  CHECK_OK(storage.read(1, MutableByteView{record.data(), record.size()}));
+  record[5] = 2;  // valid future schema, same image including pending payload
+  const auto crc = crc32_iso_hdlc(ByteView{record.data(), record.size() - 4});
+  for (int i = 0; i < 4; ++i) record[record.size() - 4 + i] =
+      static_cast<std::uint8_t>(crc >> (24 - 8 * i));
+  CHECK_OK(storage.write(1, ByteView{record.data(), record.size()}));
+  const auto before = storage.write_calls;
+  PowerWorld restarted(storage);
+  CHECK_OK(restarted.coordinator.begin(ResetCause::ColdBoot,
+                                       ElapsedInterval{0, 0, false}, restarted.now));
+  CHECK(restarted.events.has_diag("SLEEP_IMAGE_SCHEMA_UNSUPPORTED"));
+  SleepRequest request{};
+  // Unknown durable state must prevent a new sleep commit.
+  CHECK(restarted.coordinator.sleep_prepare(request, restarted.now).code ==
+        StatusCode::CounterExhausted);
+  CHECK(storage.write_calls == before);
+  std::array<std::uint8_t, kPowerImageRecordSize> retained{};
+  CHECK_OK(storage.read(1, MutableByteView{retained.data(), retained.size()}));
+  CHECK(retained == record);
 }
 
 void test_persist_failure_aborts() {
@@ -5418,6 +5452,7 @@ int main() {
   test_completed_delivery_not_carried_over();
   test_resume_confirm_fast_and_discovery();
   test_image_slots_alternate();
+  test_unknown_sleep_schema_is_not_overwritten();
   test_persist_failure_aborts();
   test_persist_failure_keeps_pending_live();
   test_ready_wait_deducts_pending_lifetime();
