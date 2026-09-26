@@ -102,7 +102,7 @@ class NodeBootObserver final : public NodeObserver {
  public:
   void on_message(const MessageKey& key, const NodeId source,
                   const ByteView payload) noexcept override {
-    ESP_LOGI(kTag, "message origin=%llu session=%llu sequence=%llu bytes=%u",
+    ESP_LOGI(kTag, "message origin=%llu session=%lu sequence=%llu bytes=%u",
              static_cast<unsigned long long>(source),
              static_cast<unsigned long>(key.id.session),
              static_cast<unsigned long long>(key.id.sequence),

@@ -790,6 +790,12 @@ def validate(root: Path) -> dict:
         boot = (
             root / "components/routeloom_node_boot/src/node_boot.cpp"
         ).read_text(encoding="utf-8")
+        test(
+            "node_boot_session_log_width",
+            "message origin=%llu session=%lu sequence=%llu" in boot
+            and "static_cast<unsigned long>(key.id.session)" in boot,
+            "ESP32 unsigned long is 32-bit; the session format must match",
+        )
         for app, firmware in (
             ("bridge_node", (root / "firmware/bridge_node/main/main.cpp")
              .read_text(encoding="utf-8")),
