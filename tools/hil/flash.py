@@ -27,6 +27,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -78,26 +79,45 @@ class FlashError(RuntimeError):
 def preflight_board(board: "rig_mod.Board", port: str, esptool: str,
                     out_dir: str) -> dict:
     """Reidentify the device immediately before any write to avoid port drift."""
+    if not board.mac or board.chip not in ("esp32c3", "esp32c5", "esp32c6", "esp32s3"):
+        raise FlashError("preflight requires a pinned chip and MAC")
+    mac_octets = 8 if board.chip == "esp32c6" else 6
+    if re.fullmatch(r"[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){" +
+                    str(mac_octets - 1) + r"}", board.mac) is None:
+        raise FlashError("preflight expected MAC has the wrong format")
     cmd = [esptool, "--port", port, "chip-id"]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     output = (result.stdout or "") + (result.stderr or "")
     path = os.path.join(out_dir, f"flash-{board.name}-preflight.log")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(f"$ {' '.join(cmd)}\n{output}")
-    import re
-    chip = re.search(r"Chip type:\s*ESP32-(C3|C5|C6)(?!\d)", output, re.I)
-    # C6 reports an EUI-64 in the MAC field; C3/C5 report EUI-48.
-    mac = re.search(r"^MAC:\s*([0-9a-f]{2}(?::[0-9a-f]{2}){5,7})\s*$", output, re.I | re.M)
-    detected_chip = "esp32" + chip.group(1).lower() if chip else None
-    detected_mac = mac.group(1).lower() if mac else None
-    if result.returncode != 0 or detected_chip != board.chip or (
-        board.mac and detected_mac != board.mac.lower()
-    ):
+    def identify(text: str) -> tuple[Optional[str], Optional[str]]:
+        chip = re.search(r"^Chip type:\s*ESP32-(C3|S3|C5|C6)(?!\d)", text, re.I | re.M)
+        # C6 reports an EUI-64 in the MAC field; C3/C5 report EUI-48.
+        mac = re.search(r"^MAC:\s*([0-9a-f]{2}(?::[0-9a-f]{2}){5,7})\s*$", text, re.I | re.M)
+        return ("esp32" + chip.group(1).lower() if chip else None,
+                mac.group(1).lower() if mac else None)
+
+    detected_chip, detected_mac = identify(output)
+    if result.returncode != 0 or detected_chip != board.chip or detected_mac != board.mac.lower():
         raise FlashError(
             f"preflight mismatch on {port}: chip={detected_chip}, "
-            f"MAC={detected_mac}, expected={board.chip}/{board.mac or '*'} "
+            f"MAC={detected_mac}, expected={board.chip}/{board.mac} "
             f"(see {path})"
         )
+    security_cmd = [esptool, "--chip", board.chip, "--port", port,
+                    "get-security-info"]
+    security = subprocess.run(security_cmd, capture_output=True, text=True, timeout=30)
+    security_output = (security.stdout or "") + (security.stderr or "")
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(f"\n$ {' '.join(security_cmd)}\n{security_output}")
+    security_lines = {line.strip() for line in security_output.splitlines()}
+    security_chip, security_mac = identify(security_output)
+    if (security.returncode != 0 or security_chip != board.chip or
+            security_mac != board.mac.lower() or
+            "Secure Boot: Disabled" not in security_lines or
+            "Flash Encryption: Disabled" not in security_lines):
+        raise FlashError(f"preflight identity or security state changed or unknown (see {path})")
     return {"chip": detected_chip, "mac": detected_mac,
             "log": os.path.relpath(path, out_dir)}
 

@@ -243,8 +243,13 @@ class SessionBank {
   // and a context installed less than kRxUnknownGraceMs ago records
   // nothing — the origin's frames under the id it held before that
   // install are its expected straggle (its own install may still be in
-  // flight), not evidence of loss. Pending demands merge per peer.
+  // flight), not evidence of loss. Pending demands merge per peer; a global
+  // interval bounds initiator work from link-authenticated but unverified
+  // origin claims.
   static constexpr std::uint32_t kRxUnknownGraceMs = 10U * 1000U;
+  // End headers are only link-authenticated; their origin is still a claim.
+  // Limit receiver-initiated handshakes across all claimed origins.
+  static constexpr std::uint32_t kRxUnknownRateMs = 2000U;
   void note_rx_unknown(SecurityScope scope, NodeId peer) noexcept;
 
   // A nonzero RX id unique across live/overlap contexts (the handshake
@@ -342,6 +347,8 @@ class SessionBank {
   std::array<SessionOverlapEntry, kOverlapCapacity> overlap_{};
   std::array<bool, kOverlapCapacity> overlap_used_{};
   std::array<DemandEntry, kDemandCapacity> demand_{};
+  MonotonicMs last_rx_unknown_demand_ms_{0};
+  bool rx_unknown_demand_started_{false};
   std::array<std::uint8_t, kStagingBytes> staging_{};
 };
 

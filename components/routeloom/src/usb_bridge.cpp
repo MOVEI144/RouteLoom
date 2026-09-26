@@ -571,6 +571,10 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
     send_error(UsbErrorCode::Conflict, request, "IDEMPOTENCY_CONFLICT", now_ms);
     return;
   }
+  if (result == IdempotencyResult::WindowExpired) {
+    send_error(UsbErrorCode::Conflict, request, "IDEMPOTENCY_WINDOW_EXPIRED", now_ms);
+    return;
+  }
   if (result == IdempotencyResult::NoCapacity || record == nullptr) {
     send_error(UsbErrorCode::NoCapacity, request, "IDEMPOTENCY_FULL", now_ms);
     return;

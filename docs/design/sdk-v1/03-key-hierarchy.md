@@ -310,7 +310,7 @@ struct SessionStats { std::uint32_t tx_deferred, tx_unavailable, rx_auth_require
 - **`SecurityContext.group_epoch`**：P4-1では追加しない（GKを使うP5-1で要否を決める）。`SecurityContext`の大きさと既存の集成体初期化を変えない。
 - **C ABI**：`rl_security_vtable_t`にはstruct_sizeが無く、callbackを後ろに足すと古い呼出し側の構造体を読み越える。session callbackは追加せず（`RL_ABI_VERSION`は2のまま）、C Providerは常に設定epoch・常にReadyとして扱う。session型ProviderはC++のみで、C向けには独自struct_size付きの拡張を後で足す。
 - **ContextState**：案の4状態をそのまま採り、0を`None`にした（0初期化で「使える」と誤認しない）。期限切れ（§4.3）は`Rekeying`または`tx_epoch`の拒否で表し、別状態は設けない。
-- **handshake要求**：案の「Nodeがrate制限付きで要求」は、P4-1ではProviderが`None`を答えた時点で自ら開始する形にした（Nodeに相手ごとのtimerを持たせない＝RAMを増やさない）。rate制限はengine側（P4-2）の責務。
+- **handshake要求**：案の「Nodeがrate制限付きで要求」は、P4-1ではProviderが`None`を答えた時点で自ら開始する形にした（Nodeに相手ごとのtimerを持たせない＝RAMを増やさない）。通常の要求と暗号計算のbudgetはengine側が扱う。未知end contextの受信起点だけは、end headerのoriginがlink認証後も未検証なので、session bankが全origin合計で2秒に1件までdemandを記録する。
 
 ## 9. 失敗の扱い
 

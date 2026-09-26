@@ -445,8 +445,33 @@ void suite_rx_unknown_demand(const AeadGcm& port) {
   CHECK_OK(fix.bank.tx_epoch(SecurityScope::EndToEnd, kPeer, epoch));
   CHECK(epoch == 0x3131);
   // Another origin with no context: independent demand.
+  CHECK_OK(fix.bank.tick(1000 + Bank::kRxUnknownGraceMs + Bank::kRxUnknownRateMs));
   fix.bank.note_rx_unknown(SecurityScope::EndToEnd, kPeer + 1);
   CHECK(fix.bank.demand_count() == 1);
+  CHECK(fix.bank.take_demand(demand));
+  CHECK(demand.peer == kPeer + 1);
+}
+
+template <typename Bank>
+void suite_rx_unknown_rate(const AeadGcm& port) {
+  constexpr MonotonicMs kRateMs = 2000;
+  Fixture<Bank> fix;
+  CHECK_OK(fix.configure(port));
+  SessionDemand demand{};
+  fix.bank.note_rx_unknown(SecurityScope::EndToEnd, kPeer);
+  CHECK(fix.bank.take_demand(demand));
+  CHECK(demand.peer == kPeer);
+  // A taken demand must not allow the next authenticated but untrusted
+  // end header to start another handshake in the same receive burst.
+  for (NodeId peer = kPeer; peer < kPeer + 32; ++peer) {
+    fix.bank.note_rx_unknown(SecurityScope::EndToEnd, peer);
+  }
+  CHECK(fix.bank.demand_count() == 0);
+  CHECK_OK(fix.bank.tick(1000 + kRateMs - 1));
+  fix.bank.note_rx_unknown(SecurityScope::EndToEnd, kPeer + 1);
+  CHECK(fix.bank.demand_count() == 0);
+  CHECK_OK(fix.bank.tick(1000 + kRateMs));
+  fix.bank.note_rx_unknown(SecurityScope::EndToEnd, kPeer + 1);
   CHECK(fix.bank.take_demand(demand));
   CHECK(demand.peer == kPeer + 1);
 }
@@ -1075,6 +1100,7 @@ void run_suite(const AeadGcm& port, bool& fail_next) {
   suite_peer_summary<Bank>(port);
   suite_unknown_and_demand<Bank>(port);
   suite_rx_unknown_demand<Bank>(port);
+  suite_rx_unknown_rate<Bank>(port);
   suite_reservation<Bank>(port, fail_next);
   suite_install_retire<Bank>(port);
   suite_overlap<Bank>(port);

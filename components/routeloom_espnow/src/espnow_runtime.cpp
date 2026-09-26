@@ -595,10 +595,10 @@ Status EspNowRuntime::adopt_member_node(const routeloom::NodeConfig& adopted) no
     applied.route_advertisement_period_ms = routeloom::kScopedProductPeriodMs;
     applied.route_lifetime_ms = routeloom::kScopedProductLifetimeMs;
   }
-  // The firmware attaches the authority/config endpoint before the Owner's
-  // asynchronous member adoption. Keep that terminal sink across the node
-  // reconstruction or Pull/JoinConfirm frames are dropped as
-  // CONFIG_NO_ENDPOINT after a successful member join.
+  // Firmware components are attached before asynchronous member adoption.
+  // Keep both terminal sinks across placement reconstruction so authenticated
+  // service and config work still reaches their owners after a join.
+  GatewayServiceSink* const gateway_sink = node_.gateway_sink();
   ConfigEndpointSink* const config_sink = node_.config_sink();
   node_.~MeshNode();
   new (&node_) MeshNode(applied, *this, security_, observer_);
@@ -607,6 +607,7 @@ Status EspNowRuntime::adopt_member_node(const routeloom::NodeConfig& adopted) no
   // start refuses without it. Owner/observer sinks re-attach through
   // their own apply legs after this returns.
   (void)node_.set_reply_peer_port(&reply_port_);
+  if (gateway_sink != nullptr) (void)node_.set_gateway_sink(gateway_sink);
   if (config_sink != nullptr) (void)node_.set_config_sink(config_sink);
   return Status::success();
 }

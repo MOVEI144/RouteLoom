@@ -85,6 +85,8 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::configure(const LocalView& loca
   slot_salt_ready_ = true;
   last_tick_ = now;
   install_serial_ = 0;
+  last_rx_unknown_demand_ms_ = 0;
+  rx_unknown_demand_started_ = false;
   configured_ = true;
   return Status::success();
 }
@@ -749,12 +751,18 @@ void SessionBank<kLinkCapacity, kEndCapacity>::note_rx_unknown(const SecuritySco
   if (reentered() || !configured_) return;
   if (scope != SecurityScope::EndToEnd) return;
   if (!id_valid(peer) || peer == local_.self) return;
+  if (rx_unknown_demand_started_ &&
+      last_tick_ - last_rx_unknown_demand_ms_ < kRxUnknownRateMs) return;
   const SessionBankEntry* current = find_current(scope, peer);
   if (current != nullptr && entry_usable(*current) &&
       kContextLifetimeMs - current->remaining_ms < kRxUnknownGraceMs) {
     return;
   }
   record_demand(scope, peer);
+  if (demand_pending(scope, peer)) {
+    last_rx_unknown_demand_ms_ = last_tick_;
+    rx_unknown_demand_started_ = true;
+  }
 }
 
 template <std::size_t kLinkCapacity, std::size_t kEndCapacity>

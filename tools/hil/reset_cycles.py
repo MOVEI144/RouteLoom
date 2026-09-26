@@ -27,6 +27,16 @@ import rig  # noqa: E402
 TERMINAL = {"delivered", "expired", "failed", "rejected", "cancelled"}
 
 
+def count_idempotency_full(sends: list[dict]) -> int:
+    """Count refusals returned at admission or in the later delivery result."""
+    return sum(
+        1 for row in sends
+        if any("IDEMPOTENCY_FULL" in str(value) for value in (
+            row.get("response", {}).get("error", ""),
+            row.get("delivery", {}).get("reason", "")))
+    )
+
+
 def stamp() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds")
 
@@ -186,9 +196,7 @@ def main() -> int:
                 time.sleep(args.send_gap_s)
             result["delivered"] = sum(
                 1 for r in result["sends"] if r.get("delivery", {}).get("state") == "delivered")
-            result["idempotency_full"] = sum(
-                1 for r in result["sends"]
-                if "IDEMPOTENCY_FULL" in str(r.get("response", {}).get("error", "")))
+            result["idempotency_full"] = count_idempotency_full(result["sends"])
             try:
                 result["events_tail"] = ctl(base, "events")
             except Exception as exc:  # noqa: BLE001 - evidence only

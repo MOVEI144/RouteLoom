@@ -146,27 +146,25 @@ struct IdempotencyRecord {
   bool settled{false};
 };
 
-enum class IdempotencyResult : std::uint8_t { Accepted, Existing, Conflict, NoCapacity };
+enum class IdempotencyResult : std::uint8_t {
+  Accepted, Existing, Conflict, WindowExpired, NoCapacity
+};
 
 class IdempotencyTable {
  public:
   static constexpr std::size_t kCapacity = 16;
-  // Mirrors the host retention contract (docs/spec/host.md §8): results
-  // are replayable for 24h, and a full table evicts settled (terminal)
-  // records oldest-first — the host does the same at its 256-record cap
-  // and tombstones evicted keys. A record whose delivery is still in
-  // flight is never evicted: a full table of such records rejects with
-  // NoCapacity (IDEMPOTENCY_FULL), the specified backpressure signal.
-  // Without settled eviction, sixteen deliveries that failed during an
-  // outage wedged the gateway for 24h (issue #167). Expired records are
-  // evictable; a resubmitted evicted key is treated as a fresh operation
-  // (per-principal acceptance epochs and IDEMPOTENCY_WINDOW_EXPIRED
-  // remain host-side future work).
+  // A full table may evict settled records only after leaving an identity
+  // tombstone. A retry of an evicted identity fails closed instead of
+  // executing the mesh operation again. In-flight records stay replayable;
+  // a full tombstone set returns NoCapacity until its 24h retention expires.
+  // Longer send streams require a durable idempotency design above this
+  // bounded gateway cache (docs/spec/host.md §8).
   static constexpr MonotonicMs kRetentionMs = 24ULL * 3600ULL * 1000ULL;
   // A settled record stays replayable this long after its last use before
   // a full table may evict it: a host retry of a just-finished request
   // still replays instead of re-executing.
   static constexpr MonotonicMs kSettledHoldMs = 5000;
+  static constexpr std::size_t kTombstoneCapacity = 96;
 
   // Finds or creates the record for this identity. On Existing/Conflict,
   // `record` points at the stored entry. On Accepted the caller must fill the
@@ -182,8 +180,14 @@ class IdempotencyTable {
   void settle(std::uint32_t message_session, std::uint64_t message_sequence) noexcept;
 
  private:
+  struct Tombstone {
+    std::uint64_t identity_hash{0};
+    MonotonicMs last_use_ms{0};
+  };
   std::array<IdempotencyRecord, kCapacity> records_{};
   std::array<bool, kCapacity> used_{};
+  std::array<Tombstone, kTombstoneCapacity> tombstones_{};
+  std::size_t tombstone_count_{0};
 };
 
 }  // namespace routeloom::usb

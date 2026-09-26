@@ -572,22 +572,62 @@ void test_idempotency() {
   CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 1,
                        payload_hash(ByteView{tag_1.data(), tag_1.size()}),
                        s0 + 3 + IdempotencyTable::kSettledHoldMs,
-                       record) == IdempotencyResult::Accepted);
-  CHECK(record == rows[3]);
+                       record) == IdempotencyResult::WindowExpired);
   const std::array<std::uint8_t, 1> tag_98{{98}};
   CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 98,
                        payload_hash(ByteView{tag_98.data(), tag_98.size()}),
+                       s0 + 3 + IdempotencyTable::kSettledHoldMs,
+                       record) == IdempotencyResult::Accepted);
+  CHECK(record == rows[3]);
+  const std::array<std::uint8_t, 1> tag_97{{97}};
+  CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 97,
+                       payload_hash(ByteView{tag_97.data(), tag_97.size()}),
                        s0 + 3 + IdempotencyTable::kSettledHoldMs,
                        record) == IdempotencyResult::NoCapacity);
   // A refused admission is settled by the bridge as well; the table treats
   // the flag uniformly (the record is evictable after the hold).
   rows[5]->accepted = false;
   rows[5]->settled = true;
-  CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 98,
-                       payload_hash(ByteView{tag_98.data(), tag_98.size()}),
+  CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 97,
+                       payload_hash(ByteView{tag_97.data(), tag_97.size()}),
                        s0 + 5 + IdempotencyTable::kSettledHoldMs,
                        record) == IdempotencyResult::Accepted);
   CHECK(record == rows[5]);
+
+  // The finite tombstone set fails closed at capacity and becomes reusable
+  // only after its oldest identity passes the retention window.
+  IdempotencyTable bounded;
+  constexpr MonotonicMs base = 100000;
+  const auto tag_for = [](const std::uint64_t key) {
+    return std::array<std::uint8_t, 2>{{static_cast<std::uint8_t>(key >> 8),
+                                        static_cast<std::uint8_t>(key)}};
+  };
+  for (std::uint64_t key = 0;
+       key < IdempotencyTable::kCapacity + IdempotencyTable::kTombstoneCapacity; ++key) {
+    const auto tag = tag_for(key);
+    CHECK(bounded.submit(ByteView{principal.data(), principal.size()}, 7, 16, key,
+                         payload_hash(ByteView{tag.data(), tag.size()}),
+                         base + key * 6000, record) == IdempotencyResult::Accepted);
+    CHECK(record != nullptr);
+    record->settled = true;
+  }
+  const std::uint64_t exhausted_key =
+      IdempotencyTable::kCapacity + IdempotencyTable::kTombstoneCapacity;
+  const auto exhausted_tag = tag_for(exhausted_key);
+  const MonotonicMs exhausted_at = base + exhausted_key * 6000;
+  CHECK(bounded.submit(ByteView{principal.data(), principal.size()}, 7, 16,
+                       exhausted_key,
+                       payload_hash(ByteView{exhausted_tag.data(), exhausted_tag.size()}),
+                       exhausted_at, record) == IdempotencyResult::NoCapacity);
+  CHECK(record == nullptr);
+  CHECK(bounded.submit(ByteView{principal.data(), principal.size()}, 7, 16, 0,
+                       payload_hash(ByteView{tag0.data(), tag0.size()}),
+                       exhausted_at, record) == IdempotencyResult::WindowExpired);
+  CHECK(bounded.submit(ByteView{principal.data(), principal.size()}, 7, 16,
+                       exhausted_key,
+                       payload_hash(ByteView{exhausted_tag.data(), exhausted_tag.size()}),
+                       base + IdempotencyTable::kRetentionMs + 1,
+                       record) == IdempotencyResult::Accepted);
 }
 
 // -------------------------------------------------------- loopback bridge

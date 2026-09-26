@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
+#include "routeloom/discovery_scope.hpp"
 
 namespace routeloom::usb {
 namespace {
@@ -15,6 +16,23 @@ void absorb_be(DevMac& mac, const std::uint64_t value, const int bytes) noexcept
   for (int i = bytes - 1; i >= 0; --i) {
     mac.absorb_u8(static_cast<std::uint8_t>(value >> (i * 8)));
   }
+}
+
+std::uint64_t identity_hash(const ByteView principal, const NetworkId network,
+                            const std::uint8_t operation_class,
+                            const std::uint64_t key) noexcept {
+  std::array<std::uint8_t, 1 + kMaxPrincipalSize + 8 + 1 + 8> identity{};
+  ByteWriter writer(MutableByteView{identity.data(), identity.size()});
+  (void)writer.write_u8(static_cast<std::uint8_t>(principal.size));
+  (void)writer.write_bytes(principal);
+  (void)writer.write_u64(network);
+  (void)writer.write_u8(operation_class);
+  (void)writer.write_u64(key);
+  ScopeDigest digest{};
+  sha256(ByteView{identity.data(), writer.size()}, digest);
+  std::uint64_t out = 0;
+  for (std::size_t i = 0; i < 8; ++i) out = (out << 8) | digest[i];
+  return out;
 }
 
 }  // namespace
@@ -224,6 +242,15 @@ IdempotencyResult IdempotencyTable::submit(
     return entry.hash == hash ? IdempotencyResult::Existing
                               : IdempotencyResult::Conflict;
   }
+  const std::uint64_t incoming_hash = identity_hash(principal, network, operation_class, key);
+  for (std::size_t i = 0; i < tombstone_count_; ++i) {
+    const Tombstone& tombstone = tombstones_[i];
+    if (tombstone.identity_hash == incoming_hash &&
+        (now_ms < tombstone.last_use_ms ||
+         now_ms - tombstone.last_use_ms < kRetentionMs)) {
+      return IdempotencyResult::WindowExpired;
+    }
+  }
   std::size_t slot = kCapacity;
   MonotonicMs oldest_use = ~MonotonicMs{0};
   for (std::size_t i = 0; i < kCapacity; ++i) {
@@ -234,7 +261,8 @@ IdempotencyResult IdempotencyTable::submit(
     // Evictable: retention-expired, or settled and past the replay hold.
     // A record whose delivery is still in flight is never evicted — the
     // caller reports IDEMPOTENCY_FULL and the host backs off.
-    const MonotonicMs age = now_ms - records_[i].last_use_ms;
+    const MonotonicMs age = now_ms >= records_[i].last_use_ms
+                                ? now_ms - records_[i].last_use_ms : 0;
     const bool evictable = age >= kRetentionMs ||
                            (records_[i].settled && age >= kSettledHoldMs);
     if (evictable && records_[i].last_use_ms < oldest_use) {
@@ -243,6 +271,25 @@ IdempotencyResult IdempotencyTable::submit(
     }
   }
   if (slot == kCapacity) return IdempotencyResult::NoCapacity;
+  if (used_[slot] && now_ms - records_[slot].last_use_ms < kRetentionMs) {
+    std::size_t tombstone_slot = tombstone_count_;
+    for (std::size_t i = 0; i < tombstone_count_; ++i) {
+      if (now_ms >= tombstones_[i].last_use_ms &&
+          now_ms - tombstones_[i].last_use_ms >= kRetentionMs) {
+        tombstone_slot = i;
+        break;
+      }
+    }
+    if (tombstone_slot == tombstone_count_) {
+      if (tombstone_count_ == kTombstoneCapacity) return IdempotencyResult::NoCapacity;
+      ++tombstone_count_;
+    }
+    const IdempotencyRecord& evicted = records_[slot];
+    tombstones_[tombstone_slot] = Tombstone{
+        identity_hash(ByteView{evicted.principal.data(), evicted.principal_len},
+                      evicted.network, evicted.operation_class, evicted.key),
+        evicted.last_use_ms};
+  }
   used_[slot] = true;
   IdempotencyRecord& entry = records_[slot];
   entry = IdempotencyRecord{};

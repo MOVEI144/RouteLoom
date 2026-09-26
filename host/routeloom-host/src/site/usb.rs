@@ -1333,7 +1333,8 @@ pub fn site_once(
                     Ok(UpOutcome::Phase5Refused | UpOutcome::CapacityRefused) | Err(_) => {}
                 },
                 Some(SUB_JOIN_RELAY_ABORT) => {
-                    if let Ok(AbortOutcome::RelayOver { key, reason }) = adapter.handle_abort(&body) {
+                    if let Ok(AbortOutcome::RelayOver { key, reason }) = adapter.handle_abort(&body)
+                    {
                         push_event(state, now, format!(
                             "\"kind\":\"join_relay_failed\",\"source\":\"gateway_abort\",\"reason\":\"{:?}\",\"proxy\":\"{:016x}\",\"relay_id\":{}",
                             reason, key.proxy, key.relay_id));

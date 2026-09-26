@@ -729,7 +729,15 @@ void test_adopt_member_node_keeps_node_startable() {
                             routeloom::MonotonicMs) noexcept override {}
     void poll(routeloom::MonotonicMs) noexcept override {}
   } config_sink;
+  struct ServiceSink final : routeloom::GatewayServiceSink {
+    void on_service_payload(routeloom::NodeId, const routeloom::wire::PlainFrame&,
+                            routeloom::MonotonicMs) noexcept override {}
+    void on_service_job_done(const routeloom::MessageId&, bool, const char*,
+                             routeloom::MonotonicMs) noexcept override {}
+    void poll(routeloom::MonotonicMs) noexcept override {}
+  } service_sink;
   CHECK(runtime.node().set_config_sink(&config_sink).ok());
+  CHECK(runtime.node().set_gateway_sink(&service_sink).ok());
   routeloom::NodeConfig adopted = config.node;
   adopted.node = 0x00A1000000001234ULL;
   adopted.network = 0x0A1B2C3DUL;
@@ -740,6 +748,7 @@ void test_adopt_member_node_keeps_node_startable() {
   adopted.route_gateways[1] = 0x00A1000000000002ULL;
   CHECK(runtime.adopt_member_node(adopted).ok());
   CHECK(runtime.node().config_sink() == &config_sink);
+  CHECK(runtime.node().gateway_sink() == &service_sink);
   // Adopted gateways run the product scoped timers (routing-scale.md §5):
   // the constructed flat defaults cannot satisfy the lease rule.
   CHECK(runtime.node().config().route_advertisement_period_ms ==

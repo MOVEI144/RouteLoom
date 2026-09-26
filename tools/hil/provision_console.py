@@ -6,9 +6,12 @@ import json
 import pathlib
 import re
 import subprocess
+import tempfile
 import time
 
 import serial
+import flash
+import rig
 
 
 def exchange(port, command: bytes, label: str, timeout_s: float = 20) -> str:
@@ -46,17 +49,13 @@ def main() -> int:
         p.error("--node must be 16 hex characters")
     if not re.fullmatch(r"[0-9a-fA-F]{64}", args.challenge):
         p.error("--challenge must be 64 hex characters")
-    probe = subprocess.run([args.esptool, "--port", args.port, "chip-id"],
-                           capture_output=True, text=True, check=True, timeout=30)
-    chip = re.search(r"^Chip type:\s*ESP32-(C3|C5)\b", probe.stdout, re.M)
-    mac = re.search(r"^MAC:\s*([0-9a-f:]{17})\s*$", probe.stdout, re.M)
-    if not chip or not mac or "esp32" + chip.group(1).lower() != args.chip or \
-            mac.group(1).lower() != args.mac.lower():
-        raise RuntimeError("chip/MAC preflight mismatch; no console write attempted")
-    print(f"preflight {args.chip} {args.mac.lower()} on {args.port}", flush=True)
     out = pathlib.Path(args.out_dir)
     if out.exists():
         raise FileExistsError(out)
+    board = rig.Board(name="provision", chip=args.chip, mac=args.mac)
+    with tempfile.TemporaryDirectory(prefix="routeloom-provision-preflight-") as preflight:
+        flash.preflight_board(board, args.port, args.esptool, preflight)
+    print(f"preflight {args.chip} {args.mac.lower()} on {args.port}", flush=True)
     with serial.Serial(args.port, 115200, timeout=0.25) as port:
         port.dtr, port.rts = True, False
         status = exchange(port, b"status", "status")
