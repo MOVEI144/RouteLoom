@@ -1,0 +1,2 @@
+{"node_id":"0000000000000004","kid":"d0c62e28b7b568bd087873ead34b1d1077fcc13309c46d5bc423d5de22b7678d","model":17,"hw_rev":2,"cert_serial":3,"device_ca_id":"0dca000000000001"}
+warning: development Device CA custody — a plaintext P-256 key file guarded only by POSIX 0600 permissions is NOT production custody; the production Device CA lives on the office signing station/HSM behind the DeviceCaSigner seam (sdk-v1/07 SS6). Anyone holding this file can mint DevCerts for any NodeId

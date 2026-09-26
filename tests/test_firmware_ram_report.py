@@ -44,7 +44,7 @@ class Parse(unittest.TestCase):
         self.assertEqual(guard["free"], 321296 - 283642)
         self.assertEqual(guard["static_bss"], 174276)
         self.assertEqual(guard["static_data"], 21054)
-        self.assertEqual(guard["min_free"], 8192)
+        self.assertEqual(guard["min_free"], 27648)
         self.assertTrue(guard["passed"])
         # Flash is never RAM budget; RTC SLOW is reported but not guarded
         # although its RTC_DATA_ATTR section abbreviates to ".data" and its
@@ -118,16 +118,28 @@ class Parse(unittest.TestCase):
 
 class Guard(unittest.TestCase):
     def test_threshold_lookup(self):
-        self.assertEqual(frr.threshold("esp32c3", "bridge_node"), 8192)
-        self.assertEqual(frr.threshold("esp32c3", "reference_node"), 8192)
+        self.assertEqual(frr.threshold("esp32c3", "bridge_node"), 27648)
+        # Derived from the measured boot-heap model: radio peak + reserve -
+        # offset, rounded up to 512 B (27,182 -> 27,648).
+        model = frr.BOOT_HEAP_MODEL[("esp32c3", "bridge_node")]
+        self.assertEqual(model["radio_peak"] + model["reserve"] - model["offset"], 27182)
+        self.assertEqual(frr.derived_static_floor(model), 27648)
+        self.assertIsNone(frr.boot_heap_estimate("esp32s3", "bridge_node", 30000))
+        estimate = frr.boot_heap_estimate("esp32c3", "bridge_node", 29690)
+        self.assertEqual(estimate["estimate"], 14796)  # the measured bench value
+        self.assertEqual(frr.threshold("esp32c3", "reference_node"), 19456)
+        reference = frr.BOOT_HEAP_MODEL[("esp32c3", "reference_node")]
+        self.assertEqual(reference["radio_peak"] + reference["reserve"] - reference["offset"], 19348)
+        self.assertEqual(frr.boot_heap_estimate("esp32c3", "reference_node", 34044)["estimate"],
+                         22888)  # the measured bench value
         self.assertEqual(frr.threshold("esp32s3", "anything"), 8192)
         self.assertEqual(frr.threshold("esp32h2", "bridge_node"), frr.DEFAULT_MIN_FREE_BYTES)
 
     def test_below_floor_fails_with_report_written(self):
         report = load("esp32c3-json2.json")
         dram = report["layout"][1]
-        dram["used"] = dram["total"] - 8191
-        dram["free"] = 8191
+        dram["used"] = dram["total"] - 27647
+        dram["free"] = 27647
         with tempfile.TemporaryDirectory() as tmp:
             size = Path(tmp) / "size.json"
             size.write_text(json.dumps(report), encoding="utf-8")
@@ -137,7 +149,7 @@ class Guard(unittest.TestCase):
                                              "bridge_node", "--cell", "c3-bridge",
                                              "--summary", summary, "--json-out", out_json])
             self.assertEqual(code, 1)
-            self.assertIn("8191 B is below the 8192 B floor", stderr)
+            self.assertIn("27647 B is below the 27648 B floor", stderr)
             self.assertIn("**FAIL**", summary.read_text(encoding="utf-8"))
             written = json.loads(out_json.read_text(encoding="utf-8"))
             self.assertFalse(written["guard"]["passed"])
@@ -146,15 +158,18 @@ class Guard(unittest.TestCase):
     def test_at_floor_passes(self):
         report = load("esp32c3-json2.json")
         dram = report["layout"][1]
-        dram["used"] = dram["total"] - 8192
-        dram["free"] = 8192
+        dram["used"] = dram["total"] - 27648
+        dram["free"] = 27648
         with tempfile.TemporaryDirectory() as tmp:
             size = Path(tmp) / "size.json"
             size.write_text(json.dumps(report), encoding="utf-8")
             code, stdout, _ = run_main([size, "--target", "esp32c3", "--app", "bridge_node"])
             self.assertEqual(code, 0)
             self.assertIn("**PASS**", stdout)
-            self.assertIn("| DRAM | 313104 | 321296 | 8192 |", stdout)
+            self.assertIn("| DRAM | 293648 | 321296 | 27648 |", stdout)
+            self.assertIn("Boot heap model: 27648 + 12558 (pre-Wi-Fi offset) − 27452 "
+                          "(Wi-Fi/PHY/ESP-NOW peak) = 12754 B after radio start; "
+                          "reserve 12288 B", stdout)
 
     def test_unreadable_report_exits_2(self):
         with tempfile.TemporaryDirectory() as tmp:

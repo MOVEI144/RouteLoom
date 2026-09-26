@@ -233,6 +233,25 @@ class SessionBank {
     record_demand(scope, peer);
   }
 
+  // RX-side establishment demand (sdk-v1/03 §9): a link-authenticated end
+  // frame from `peer` (its origin) opened under a context id this bank
+  // does not hold — the origin still seals under a context this node lost,
+  // typically across this node's reboot, and no wire signal tells it so.
+  // Records the same demand a TX refusal would, so the Owner re-runs
+  // RLRES1/EDHOC toward the origin and the origin's install replaces its
+  // stale context. Guards: only EndToEnd (RLD1 discovery repairs links),
+  // and a context installed less than kRxUnknownGraceMs ago records
+  // nothing — the origin's frames under the id it held before that
+  // install are its expected straggle (its own install may still be in
+  // flight), not evidence of loss. Pending demands merge per peer; a global
+  // interval bounds initiator work from link-authenticated but unverified
+  // origin claims.
+  static constexpr std::uint32_t kRxUnknownGraceMs = 10U * 1000U;
+  // End headers are only link-authenticated; their origin is still a claim.
+  // Limit receiver-initiated handshakes across all claimed origins.
+  static constexpr std::uint32_t kRxUnknownRateMs = 2000U;
+  void note_rx_unknown(SecurityScope scope, NodeId peer) noexcept;
+
   // A nonzero RX id unique across live/overlap contexts (the handshake
   // engine additionally keeps its in-flight ids out); 8 draws max.
   Status allocate_context_id(std::uint32_t& out) noexcept;
@@ -328,6 +347,8 @@ class SessionBank {
   std::array<SessionOverlapEntry, kOverlapCapacity> overlap_{};
   std::array<bool, kOverlapCapacity> overlap_used_{};
   std::array<DemandEntry, kDemandCapacity> demand_{};
+  MonotonicMs last_rx_unknown_demand_ms_{0};
+  bool rx_unknown_demand_started_{false};
   std::array<std::uint8_t, kStagingBytes> staging_{};
 };
 
@@ -363,6 +384,10 @@ class RamSessionProvider final : public SecurityProvider, public SessionInstalle
               ByteView ciphertext, const std::array<std::uint8_t, kAeadTagSize>& tag,
               MutableByteView plaintext) noexcept override {
     return bank_.open(context, counter, aad, ciphertext, tag, plaintext);
+  }
+  // The origin of an end frame is `context.sender` (receiver is this node).
+  void note_rx_unknown_context(const SecurityContext& context) noexcept override {
+    bank_.note_rx_unknown(context.scope, context.sender);
   }
   Status install(const ContextKeys& keys) noexcept override { return bank_.install(keys); }
   Status retire(SecurityScope scope, NodeId peer) noexcept override {

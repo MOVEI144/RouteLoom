@@ -5,6 +5,7 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "routeloom/psa_edhoc_aead.hpp"
 #include "routeloom/secure_clear.hpp"
 
 namespace routeloom::espnow {
@@ -32,8 +33,8 @@ constexpr MonotonicMs kRetiredPullWindowMs = 10000;
 
 EspNowSecurityOwner::~EspNowSecurityOwner() noexcept {
   if (authority_live_) {
+    mesh_sink()->~AuthorityMeshSink();
     if (config_.gateway) {
-      mesh_sink()->~AuthorityMeshSink();
       gateway()->~AuthorityGateway();
     } else {
       endpoint()->~AuthorityEndpoint();
@@ -306,7 +307,7 @@ sdkv1::AuthorityGateway* EspNowSecurityOwner::gateway() noexcept {
 }
 
 sdkv1::AuthorityMeshSink* EspNowSecurityOwner::mesh_sink() noexcept {
-  if (!authority_live_ || !config_.gateway) return nullptr;
+  if (!authority_live_) return nullptr;
   return reinterpret_cast<sdkv1::AuthorityMeshSink*>(mesh_sink_box_.data());
 }
 
@@ -357,6 +358,7 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
   deps.usb = this;
   deps.verifier = &verifier();
   deps.bank_aead = psa_session_aead_gcm();
+  deps.join_aead = psa_edhoc_aead_ccm();
   deps.crypto_aead = *psa_aead_gcm();
   deps.proxy_sealer = &sealer();
   deps.authority_sink = this;
@@ -483,6 +485,7 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
   } else {
     new (transport_box_.endpoint.data())
         sdkv1::AuthorityEndpoint(*mesh_port(), config_.local_node);
+    new (mesh_sink_box_.data()) sdkv1::AuthorityMeshSink(*endpoint());
     const Status authority_status = coordinator().attach_authority_port(*endpoint());
     if (!authority_status) return authority_status;
   }
@@ -545,6 +548,118 @@ void EspNowSecurityOwner::poll(const MonotonicMs now_ms) noexcept {
   event.kind = sdkv1::CoordinatorEventKind::Poll;
   event.now = now_ms;
   (void)coordinator().step(event);
+  if (coordinator().snapshot().mode == sdkv1::CoordinatorMode::ZeroTouch) {
+    static unsigned logged_join_state = 255;
+    static unsigned logged_mode = 255;
+    static unsigned logged_error = 255;
+    const auto snapshot = coordinator().snapshot();
+    const unsigned state = static_cast<unsigned>(snapshot.joiner);
+    const unsigned mode = static_cast<unsigned>(snapshot.mode);
+    const unsigned error = static_cast<unsigned>(snapshot.joiner_last_error);
+    if (state != logged_join_state || mode != logged_mode || error != logged_error) {
+      ESP_LOGI(config_.log_tag, "join mode=%u state=%u error=%u", mode, state, error);
+      logged_join_state = state;
+      logged_mode = mode;
+      logged_error = error;
+    }
+  }
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+  if (coordinator().snapshot().mode == sdkv1::CoordinatorMode::Member) {
+    static MonotonicMs last_member_trace = 0;
+    if (now_ms >= last_member_trace + 5000) {
+      last_member_trace = now_ms;
+      const auto snap = coordinator().snapshot();
+      const auto counts = coordinator().counters();
+      const auto* disc = discovery();
+      ESP_LOGI(config_.log_tag,
+               "member state=%u links=%lu ends=%lu authority=%u/%u confirm=%u demux_drop=%lu",
+               static_cast<unsigned>(snap.membership),
+               static_cast<unsigned long>(snap.link_sessions),
+               static_cast<unsigned long>(snap.end_sessions),
+               static_cast<unsigned>(snap.authority_started),
+               static_cast<unsigned>(snap.authority_ready),
+               static_cast<unsigned>(snap.join_confirmed),
+               static_cast<unsigned long>(counts.demux_drops));
+      ESP_LOGI(config_.log_tag,
+               "member handshake starts=%lu requests=%lu rejected=%lu send_fail=%lu established=%lu failed=%lu last_error=%u active=%u",
+               static_cast<unsigned long>(counts.member_starts),
+               static_cast<unsigned long>(counts.link_requests),
+               static_cast<unsigned long>(counts.link_request_failures),
+               static_cast<unsigned long>(counts.link_send_failures),
+               static_cast<unsigned long>(counts.link_established),
+               static_cast<unsigned long>(counts.link_failed),
+               static_cast<unsigned>(counts.link_last_error),
+               static_cast<unsigned>(!snap.engine_quiescent));
+      ESP_LOGI(config_.log_tag,
+               "member end send_fail=%lu established=%lu failed=%lu last_error=%u",
+               static_cast<unsigned long>(counts.end_send_failures),
+               static_cast<unsigned long>(counts.end_established),
+               static_cast<unsigned long>(counts.end_failed),
+               static_cast<unsigned>(counts.end_last_error));
+      const auto authority = coordinator().authority_snapshot();
+      ESP_LOGI(config_.log_tag,
+               "authority state=%u tx_sent=%llu tx_failed=%llu rx_accepted=%llu rx_rejected=%llu pull=%u busy=%u backoff_s=%lu",
+               static_cast<unsigned>(authority.state),
+               static_cast<unsigned long long>(authority.tx_sent),
+               static_cast<unsigned long long>(authority.tx_failed),
+               static_cast<unsigned long long>(authority.rx_accepted),
+               static_cast<unsigned long long>(authority.rx_rejected),
+               static_cast<unsigned>(authority.pull_pending),
+               static_cast<unsigned>(authority.busy),
+               static_cast<unsigned long>(authority.backoff_s));
+      if (config_.gateway && gateway() != nullptr) {
+        const auto& relay = gateway()->counters();
+        ESP_LOGI(config_.log_tag,
+                 "authority relay rx_carrier=%lu rx_manifest=%lu rx_chunk=%lu up=%lu blocked=%lu denied=%lu timeout=%lu",
+                 static_cast<unsigned long>(relay.rx_carriers),
+                 static_cast<unsigned long>(relay.rx_manifests),
+                 static_cast<unsigned long>(relay.rx_chunks),
+                 static_cast<unsigned long>(relay.up_fragments),
+                 static_cast<unsigned long>(relay.up_blocked),
+                 static_cast<unsigned long>(relay.denied),
+                 static_cast<unsigned long>(relay.timeouts));
+      } else if (endpoint() != nullptr) {
+        const auto& mesh = endpoint()->counters();
+        ESP_LOGI(config_.log_tag,
+                 "authority mesh tx_carrier=%lu queued=%lu shed=%lu rx_carrier=%lu denied=%lu timeout=%lu",
+                 static_cast<unsigned long>(mesh.tx_carriers),
+                 static_cast<unsigned long>(mesh.mesh_queued),
+                 static_cast<unsigned long>(mesh.mesh_shed),
+                 static_cast<unsigned long>(mesh.rx_carriers),
+                 static_cast<unsigned long>(mesh.rx_denied),
+                 static_cast<unsigned long>(mesh.tx_timeouts));
+      }
+      if (mesh_sink() != nullptr) {
+        ESP_LOGI(config_.log_tag, "authority jobs accepted=%lu failed=%lu last=%s",
+                 static_cast<unsigned long>(mesh_sink()->jobs_accepted()),
+                 static_cast<unsigned long>(mesh_sink()->jobs_failed()),
+                 mesh_sink()->last_failure_reason());
+      }
+      if (disc != nullptr) {
+        const auto stats = disc->stats();
+        ESP_LOGI(config_.log_tag,
+                 "member discovery rx=%lu offer_tx=%lu offer_rx=%lu auth=%lu kind_reject=%lu capacity=%lu send_fail=%lu",
+                 static_cast<unsigned long>(stats.discovers_rx),
+                 static_cast<unsigned long>(stats.offers_tx),
+                 static_cast<unsigned long>(stats.offers_rx),
+                 static_cast<unsigned long>(stats.auths_completed),
+                 static_cast<unsigned long>(stats.kind_rejects),
+                 static_cast<unsigned long>(stats.peer_capacity),
+                 static_cast<unsigned long>(stats.send_failures));
+        const auto scope = disc->scope_stats();
+        ESP_LOGI(config_.log_tag,
+                 "member scope raw=%lu accepted=%lu mac_reject=%lu hint=%lu generation=%lu key_unavailable=%lu budget=%lu",
+                 static_cast<unsigned long>(scope.raw_rx),
+                 static_cast<unsigned long>(scope.scope_accepted),
+                 static_cast<unsigned long>(scope.mac_rejected),
+                 static_cast<unsigned long>(scope.hint_mismatch),
+                 static_cast<unsigned long>(scope.unknown_generation),
+                 static_cast<unsigned long>(scope.key_unavailable),
+                 static_cast<unsigned long>(scope.budget_dropped));
+      }
+    }
+  }
+#endif
   drive_authority(now_ms);
   poll_tune(now_ms);
   drain_actions(now_ms);
@@ -978,6 +1093,20 @@ void EspNowSecurityOwner::on_bootstrap_rld1(const sdkv1::JoinRxMeta& meta,
                                             const ByteView frame,
                                             const MonotonicMs received_ms) noexcept {
   if (!booted_) return;
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+  autonomy::Rld1Envelope trace{};
+  const bool trace_join = autonomy::rld1_decode(frame, trace).ok() &&
+      (trace.kind == FrameType::Discover || trace.kind == FrameType::Offer);
+  if (trace_join) {
+    ESP_LOGI(config_.log_tag, "RLD1 rx kind=%u ch=%u generation=%lu src=%02x:%02x:%02x:%02x:%02x:%02x dest=%02x:%02x:%02x:%02x:%02x:%02x",
+             static_cast<unsigned>(trace.kind), static_cast<unsigned>(meta.channel),
+             static_cast<unsigned long>(radio_generation), meta.source[0],
+             meta.source[1], meta.source[2], meta.source[3],
+             meta.source[4], meta.source[5], meta.destination[0],
+             meta.destination[1], meta.destination[2], meta.destination[3],
+             meta.destination[4], meta.destination[5]);
+  }
+#endif
   sdkv1::CoordinatorEvent event{};
   event.kind = sdkv1::CoordinatorEventKind::Rld1Rx;
   event.now = received_ms;
@@ -985,6 +1114,16 @@ void EspNowSecurityOwner::on_bootstrap_rld1(const sdkv1::JoinRxMeta& meta,
   event.rld1_frame = frame;
   event.radio_generation = radio_generation;
   (void)coordinator().step(event);
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+  if (trace_join && trace.kind == FrameType::Offer) {
+    const auto snap = coordinator().snapshot();
+    ESP_LOGI(config_.log_tag, "RLD1 offer result state=%u expected_generation=%lu observations=%lu dropped=%lu",
+             static_cast<unsigned>(snap.joiner),
+             static_cast<unsigned long>(snap.radio_generation),
+             static_cast<unsigned long>(snap.joiner_observations),
+             static_cast<unsigned long>(snap.joiner_rx_dropped));
+  }
+#endif
 }
 
 Status EspNowSecurityOwner::join_down(const NodeId to_proxy, const sdkv1::RelayObject& object,
@@ -993,13 +1132,15 @@ Status EspNowSecurityOwner::join_down(const NodeId to_proxy, const sdkv1::RelayO
   if (!booted_) return Status::error(StatusCode::InvalidState, "owner not booted");
   const NodeId self =
       adopted_node_ != kInvalidNodeId ? adopted_node_ : config_.local_node;
-  if (to_proxy == self) {
-    // LocalJoin (§8.2): exact match only — Down to self, our relay id,
-    // our radio MAC. Anything else is refused, never forwarded.
+  // A member gateway can host its own mesh join proxy. Both that proxy's
+  // relay and a direct USB join name `self`; only the boot-witness-bound
+  // LocalJoin token enters the direct lane. Other self-proxy downs go to
+  // the gateway relay, which validates its live exchange and full token.
+  if (to_proxy == self &&
+      sdkv1::local_join_token_matches(sdkv1::relay_token_of(object.header),
+                                       boot_witness_, local_join_relay_id_)) {
     const sdkv1::RelayHeader& header = object.header;
     if (header.dir != sdkv1::RelayDirection::Down || header.proxy != self ||
-        !sdkv1::local_join_token_matches(sdkv1::relay_token_of(header),
-                                         boot_witness_, local_join_relay_id_) ||
         header.joiner_mac != config_.local_mac) {
       return Status::error(StatusCode::InvalidArgument, "local join mismatch");
     }
@@ -1188,6 +1329,17 @@ Status EspNowSecurityOwner::send_rld1(const routeloom::MacAddress& destination,
   if (runtime_ == nullptr) {
     return Status::error(StatusCode::InvalidState, "runtime not attached");
   }
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+  autonomy::Rld1Envelope trace{};
+  if (autonomy::rld1_decode(frame, trace).ok() &&
+      (trace.kind == FrameType::Discover || trace.kind == FrameType::Offer)) {
+    ESP_LOGI(config_.log_tag, "RLD1 tx kind=%u ch=%u dst=%02x:%02x:%02x:%02x:%02x:%02x",
+             static_cast<unsigned>(trace.kind),
+             static_cast<unsigned>(runtime_->committed_channel()), destination[0],
+             destination[1], destination[2], destination[3],
+             destination[4], destination[5]);
+  }
+#endif
   return runtime_->send_rld1(destination, frame);
 }
 
@@ -1197,7 +1349,16 @@ Status EspNowSecurityOwner::send_bootstrap(const NodeId destination, const Frame
   if (runtime_ == nullptr) {
     return Status::error(StatusCode::InvalidState, "runtime not attached");
   }
-  return runtime_->node().send_bootstrap(destination, type, payload, lifetime_ms, now_ms, id);
+  const Status sent = runtime_->node().send_bootstrap(destination, type, payload,
+                                                      lifetime_ms, now_ms, id);
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+  if (!sent.ok()) {
+    ESP_LOGW(config_.log_tag, "end bootstrap tx peer=%u type=%u code=%u detail=%s",
+             static_cast<unsigned>(destination), static_cast<unsigned>(type),
+             static_cast<unsigned>(sent.code), sent.detail);
+  }
+#endif
+  return sent;
 }
 
 Status EspNowSecurityOwner::send_local_join_up(const sdkv1::JoinAuthPhase phase,
@@ -1233,7 +1394,15 @@ Status EspNowSecurityOwner::send_local_join_up(const sdkv1::JoinAuthPhase phase,
   const Status status = sdkv1::relay_object_encode(
       up, MutableByteView{encoded.data(), encoded.size()}, written);
   if (!status) return status;
-  return bridge_->relay_up(self, 0, ByteView{encoded.data(), written});
+  const Status sent = bridge_->relay_up(self, 0, ByteView{encoded.data(), written});
+  if (!sent) {
+    ESP_LOGW(config_.log_tag, "local join up step=%u failed: %s",
+             static_cast<unsigned>(step), sent.detail);
+  } else {
+    ESP_LOGI(config_.log_tag, "local join up step=%u queued (%lu bytes)",
+             static_cast<unsigned>(step), static_cast<unsigned long>(written));
+  }
+  return sent;
 }
 
 Status EspNowSecurityOwner::send_relay_up_to_host(const NodeId proxy, const std::uint8_t hops,
@@ -1397,7 +1566,10 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
     }
   }
   NodeConfig node = runtime_->node().config();
-  node.network = member.network;
+  // RLT1's mesh header carries the site's low 32-bit network id. The
+  // full 64-bit value (high word = site epoch) remains in adopted_network_
+  // for membership, authority and cryptographic binding.
+  node.network = static_cast<std::uint32_t>(member.network);
   node.node = member.node;
   node.message_session = member.message_session;
   node.boot_session = member.boot_session;
@@ -1416,6 +1588,10 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
                 StatusCode::RadioFailure, runtime_->now_ms());
     return;
   }
+  // MeshNode gates bootstrap transit on the adopted Relay/Gateway role.
+  // Enabling relay alone leaves its local role at zero and rejects routed
+  // session handshakes with BOOTSTRAP_TRANSIT_ROLE.
+  runtime_->node().set_local_role(member.role);
   // The gossip sink rides the member node: a fresh adopt placement-news
   // the node (install), a recovery re-adopt refuses the rebuild (the
   // running node already matches — re-assert and return). Idempotent

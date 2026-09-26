@@ -1,0 +1,1 @@
+{"v":1,"request_id":"hil-2211016-1790371204586887274","ok":true,"result":{"operation_id":"op-0000000000000005","state":"committed","device_id":"0000000000000004","generation":1,"rs_epoch":3,"gk_rotation":{"from":2,"to":3,"state":"staged"},"distribution":"pending"}}

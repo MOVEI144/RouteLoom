@@ -571,6 +571,10 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
     send_error(UsbErrorCode::Conflict, request, "IDEMPOTENCY_CONFLICT", now_ms);
     return;
   }
+  if (result == IdempotencyResult::WindowExpired) {
+    send_error(UsbErrorCode::Conflict, request, "IDEMPOTENCY_WINDOW_EXPIRED", now_ms);
+    return;
+  }
   if (result == IdempotencyResult::NoCapacity || record == nullptr) {
     send_error(UsbErrorCode::NoCapacity, request, "IDEMPOTENCY_FULL", now_ms);
     return;
@@ -598,12 +602,14 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
   // First submission: fill the stored outcome honestly.
   if (config_.mesh == nullptr) {
     record->accepted = false;
+    record->settled = true;
     record->error_code = static_cast<std::uint16_t>(UsbErrorCode::Unsupported);
     send_error(UsbErrorCode::Unsupported, request, "NO_MESH", now_ms);
     return;
   }
   if (payload.size > kMaxApplicationPayload) {
     record->accepted = false;
+    record->settled = true;
     record->error_code = static_cast<std::uint16_t>(UsbErrorCode::PayloadTooLarge);
     send_error(UsbErrorCode::PayloadTooLarge, request, "PAYLOAD_TOO_LARGE", now_ms);
     return;
@@ -615,6 +621,7 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
   pending_request_ = 0;
   if (!status) {
     record->accepted = false;
+    record->settled = true;
     record->error_code = static_cast<std::uint16_t>(UsbErrorCode::MeshRejected);
     send_error(UsbErrorCode::MeshRejected, request, status.detail, now_ms);
     return;
@@ -2384,6 +2391,15 @@ void UsbBridge::on_message(const MessageKey& key, const NodeId source,
 }
 
 void UsbBridge::on_delivery(const DeliveryResult& result) noexcept {
+  // A terminal outcome settles the legacy send's idempotency record: its
+  // stored admission result stays replayable, but a full table may now
+  // evict it (oldest first) instead of wedging on failed deliveries.
+  if (result.state == DeliveryState::Delivered || result.state == DeliveryState::Failed ||
+      result.state == DeliveryState::Expired ||
+      result.state == DeliveryState::CancelledBeforeTx ||
+      result.state == DeliveryState::Indeterminate) {
+    idempotency_.settle(result.id.session, result.id.sequence);
+  }
   // Host-ops-correlated deliveries update the dispatch window instead of
   // emitting a DeliveryEvent: their authoritative state is pulled via
   // QUERY_DISPATCH (TX-I2), and the SUBMIT request id is session-scoped while

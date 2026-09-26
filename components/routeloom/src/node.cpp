@@ -2068,6 +2068,21 @@ void MeshNode::note_rx_refusal(const Status& status, const NodeId peer,
   observer_.on_diagnostic(status.detail, peer, message);
 }
 
+void MeshNode::note_end_rx_refusal(const Status& status,
+                                   const wire::LinkOpenedFrame& frame,
+                                   const NodeId peer) noexcept {
+  // The link layer already authenticated this frame from `peer`. When the
+  // end layer finds no context for its stamped id, the origin still seals
+  // under a context this node lost (a reboot, sdk-v1/03 §4.3) and nothing
+  // on the wire tells it: the provider records the rate-limited
+  // re-handshake demand (03 §9) and the refusal is counted as before.
+  if (status.code == StatusCode::AuthRequired &&
+      (frame.header.flags & wire::kFlagEndProtected) != 0) {
+    security_.note_rx_unknown_context(wire::end_context(frame.header));
+  }
+  note_rx_refusal(status, peer, &frame.header.message);
+}
+
 void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
   if (physical_.active) {
     if (now_ms - physical_.submitted_at_ms >= config_.callback_watchdog_ms) {
@@ -3393,7 +3408,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
     wire::PlainFrame plain{};
     const auto status = wire::open_end(frame, config_.node, security_, plain);
     if (!status) {
-      note_rx_refusal(status, peer, &frame.header.message);
+      note_end_rx_refusal(status, frame, peer);
       return;
     }
     if (!rx.valid) {
@@ -3722,7 +3737,7 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
     wire::PlainFrame plain{};
     const auto status = wire::open_end(frame, config_.node, security_, plain);
     if (!status) {
-      note_rx_refusal(status, peer, &frame.header.message);
+      note_end_rx_refusal(status, frame, peer);
       return;
     }
     if (!rx.valid) {
@@ -4457,7 +4472,7 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
   wire::PlainFrame plain{};
   const auto status = wire::open_end(frame, config_.node, security_, plain);
   if (!status) {
-    note_rx_refusal(status, peer, &frame.header.message);
+    note_end_rx_refusal(status, frame, peer);
     return;
   }
   MessageKey original{};
@@ -5484,7 +5499,7 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
       wire::PlainFrame plain{};
       status = wire::open_end(frame, config_.node, security_, plain);
       if (!status) {
-        note_rx_refusal(status, peer, &frame.header.message);
+        note_end_rx_refusal(status, frame, peer);
         return;
       }
       if (frame.header.type == FrameType::HopAccept) {

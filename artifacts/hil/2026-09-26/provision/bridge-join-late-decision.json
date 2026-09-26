@@ -1,0 +1,1 @@
+{"v":1,"request_id":"hil-1227765-1790357883101603114","ok":true,"result":{"state":"committed","join_request_id":"jr-0000000000000001","device_id":"0000000000000001","verdict":"allow","role":"gateway","generation":1,"member_cert_serial":1,"operation_id":"op-0000000000000001","applied":"next_attempt"}}

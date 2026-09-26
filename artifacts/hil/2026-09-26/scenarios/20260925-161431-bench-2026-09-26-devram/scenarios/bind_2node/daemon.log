@@ -1,0 +1,2 @@
+[2026-09-25T16:14:31.405Z] $ /home/sahur/orca/workspaces/RouteLoom/hil-bench/host/target/debug/routeloom-host --socket /tmp/routeloom-hil-2026-09-26.sock --device /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00 --api-acl-file artifacts/hil/2026-09-26/scenarios/20260925-161431-bench-2026-09-26-devram/scenarios/bind_2node/hil-acl.json
+[2026-09-25T16:14:31.406Z] Error: Custom { kind: InvalidInput, error: "ACL: unknown top-level field \"_comment\"" }

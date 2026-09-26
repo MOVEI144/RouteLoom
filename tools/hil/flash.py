@@ -17,9 +17,8 @@ Usage:
     python3 tools/hil/flash.py --rig tools/hil/rigs.yaml --bench bench-a \
         --board ref-a [--app-only] [--out artifacts/hil/flash]
 
-Hardware note: this has not run against real boards yet (issue #18). It is
-written to be correct-by-construction; verify on the bench before trusting
-flash results.
+Hardware note: first used on identified C3 boards on 2026-09-26. Flash
+manifests and boot logs are retained with that run's report.
 """
 
 from __future__ import annotations
@@ -28,6 +27,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -41,9 +41,26 @@ except ImportError:  # running as a script: tools/hil on sys.path
     import rig as rig_mod  # type: ignore
     import capture as capture_mod  # type: ignore
 
-DEFAULT_ESPTOOL = os.path.expanduser("~/.local/bin/esptool.py")
+DEFAULT_ESPTOOL = os.path.expanduser("~/.local/bin/esptool")
 DEFAULT_TIMEOUT_S = 120.0
 DEFAULT_BOOT_SECONDS = 8.0
+
+# Console lines that mean the firmware started but must count as a failed
+# start. The ESP-NOW runtime logs BOOT_HEAP_BELOW_FLOOR when the free heap
+# after Wi-Fi/PHY/ESP-NOW start is under CONFIG_ROUTELOOM_BOOT_HEAP_FLOOR_BYTES
+# (issue #166); the other two are the Wi-Fi/PHY allocation failures seen on
+# the 2026-09-26 bench before the fix.
+BOOT_FAILURE_MARKERS = (
+    "BOOT_HEAP_BELOW_FLOOR",
+    "esp_wifi_init failed",
+    "failed to allocate memory for RF calibration",
+)
+
+
+def boot_log_failures(text: str) -> list[str]:
+    """Boot-log lines that mark a failed start (issue #166), in order."""
+    return [line.rstrip() for line in text.splitlines()
+            if any(marker in line for marker in BOOT_FAILURE_MARKERS)]
 
 # Standard bootloader/partition-table offsets. Both firmware apps use a
 # custom partitions.csv (single app + the "rlsec" security NVS partition,
@@ -57,6 +74,52 @@ FALLBACK_FLASH_FILES = {
 
 class FlashError(RuntimeError):
     pass
+
+
+def preflight_board(board: "rig_mod.Board", port: str, esptool: str,
+                    out_dir: str) -> dict:
+    """Reidentify the device immediately before any write to avoid port drift."""
+    if not board.mac or board.chip not in ("esp32c3", "esp32c5", "esp32c6", "esp32s3"):
+        raise FlashError("preflight requires a pinned chip and MAC")
+    mac_octets = 8 if board.chip == "esp32c6" else 6
+    if re.fullmatch(r"[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){" +
+                    str(mac_octets - 1) + r"}", board.mac) is None:
+        raise FlashError("preflight expected MAC has the wrong format")
+    cmd = [esptool, "--port", port, "chip-id"]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    output = (result.stdout or "") + (result.stderr or "")
+    path = os.path.join(out_dir, f"flash-{board.name}-preflight.log")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(f"$ {' '.join(cmd)}\n{output}")
+    def identify(text: str) -> tuple[Optional[str], Optional[str]]:
+        chip = re.search(r"^Chip type:\s*ESP32-(C3|S3|C5|C6)(?!\d)", text, re.I | re.M)
+        # C6 reports an EUI-64 in the MAC field; C3/C5 report EUI-48.
+        mac = re.search(r"^MAC:\s*([0-9a-f]{2}(?::[0-9a-f]{2}){5,7})\s*$", text, re.I | re.M)
+        return ("esp32" + chip.group(1).lower() if chip else None,
+                mac.group(1).lower() if mac else None)
+
+    detected_chip, detected_mac = identify(output)
+    if result.returncode != 0 or detected_chip != board.chip or detected_mac != board.mac.lower():
+        raise FlashError(
+            f"preflight mismatch on {port}: chip={detected_chip}, "
+            f"MAC={detected_mac}, expected={board.chip}/{board.mac} "
+            f"(see {path})"
+        )
+    security_cmd = [esptool, "--chip", board.chip, "--port", port,
+                    "get-security-info"]
+    security = subprocess.run(security_cmd, capture_output=True, text=True, timeout=30)
+    security_output = (security.stdout or "") + (security.stderr or "")
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(f"\n$ {' '.join(security_cmd)}\n{security_output}")
+    security_lines = {line.strip() for line in security_output.splitlines()}
+    security_chip, security_mac = identify(security_output)
+    if (security.returncode != 0 or security_chip != board.chip or
+            security_mac != board.mac.lower() or
+            "Secure Boot: Disabled" not in security_lines or
+            "Flash Encryption: Disabled" not in security_lines):
+        raise FlashError(f"preflight identity or security state changed or unknown (see {path})")
+    return {"chip": detected_chip, "mac": detected_mac,
+            "log": os.path.relpath(path, out_dir)}
 
 
 def load_flasher_args(build_dir: str) -> dict:
@@ -154,10 +217,12 @@ def flash_board(
     boot_seconds: float = DEFAULT_BOOT_SECONDS,
     timeout_s: float = DEFAULT_TIMEOUT_S,
     repo: str = rig_mod.REPO_ROOT,
+    image_dir: Optional[str] = None,
 ) -> dict:
     """Flash one board. Returns a manifest dict for the report."""
     os.makedirs(out_dir, exist_ok=True)
-    build_dir = board.build_dir(repo)
+    preflight = preflight_board(board, port, esptool, out_dir)
+    build_dir = os.path.join(image_dir, "build") if image_dir else board.build_dir(repo)
     cmd, files, fallback = build_write_flash_cmd(
         build_dir, port, esptool, board.chip or None, board.flash_baud, app_only
     )
@@ -166,6 +231,7 @@ def flash_board(
         "app": board.app,
         "port": port,
         "chip": board.chip,
+        "preflight": preflight,
         "app_only": app_only,
         "fallback_offsets": fallback,
         "cmd": cmd,
@@ -218,6 +284,14 @@ def flash_board(
             return manifest
         finally:
             cap.stop()
+    if manifest["boot_log"] is not None:
+        with open(boot_path, encoding="utf-8", errors="replace") as fh:
+            failures = boot_log_failures(fh.read())
+        if failures:
+            manifest["boot_failures"] = failures
+            manifest["error"] = ("flashed, but the boot log reports a failed start: "
+                                 + failures[0])
+            return manifest
     manifest["ok"] = True
     manifest["finished_utc"] = capture_mod.utc_stamp()
     return manifest
@@ -236,6 +310,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
     parser.add_argument("--out", default=os.path.join(
         rig_mod.REPO_ROOT, "artifacts", "hil", "flash"))
+    parser.add_argument("--image-dir", help="bench image directory containing build/flasher_args.json")
+    parser.add_argument("--capture-boot", action="store_true",
+                        help="capture USB boot text for a diagnostic image whose console is on USB")
     args = parser.parse_args(argv)
 
     rigs = rig_mod.load_rigs(args.rig)
@@ -248,6 +325,8 @@ def main(argv: Optional[list[str]] = None) -> int:
               f"(have: {', '.join(sorted(bench.boards))})", file=sys.stderr)
         return 2
     board = bench.boards[args.board]
+    if args.capture_boot:
+        board.console = "usb-serial-jtag"
 
     port, matches, status = rig_mod.resolve_board_port(board)
     if status != "ONLINE":
@@ -258,6 +337,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     manifest = flash_board(
         board, port, args.out, esptool=args.esptool, app_only=args.app_only,
         boot_seconds=args.boot_seconds, timeout_s=args.timeout,
+        image_dir=args.image_dir,
     )
     manifest_path = os.path.join(args.out, f"flash-{board.name}.json")
     with open(manifest_path, "w", encoding="utf-8") as fh:

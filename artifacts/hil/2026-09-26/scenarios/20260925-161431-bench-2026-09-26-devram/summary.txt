@@ -1,0 +1,2 @@
+[FAIL] bind_2node — step 0 (start_daemon): daemon exited rc=1 during startup — see daemon.log (0.6s)
+totals: PASS=0 FAIL=1 SKIP-OFFLINE=0

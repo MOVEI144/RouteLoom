@@ -1,0 +1,3 @@
+[FAIL] deliver_2node — step 7 (wait_for): timeout 90.0s waiting for /"destination":2,"state":"delivered","reason":"END_RECEIVED"/ on daemon:deliveries (tail dumped to timeout-tail-daemon_deliveries.txt) (94.7s)
+[FAIL] restart_resume — step 4 (wait_for): timeout 90.0s waiting for /"destination":2,"state":"delivered","reason":"END_RECEIVED"/ on daemon:deliveries (tail dumped to timeout-tail-daemon_deliveries.txt) (93.9s)
+totals: PASS=0 FAIL=2 SKIP-OFFLINE=0

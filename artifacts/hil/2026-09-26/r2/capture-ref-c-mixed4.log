@@ -1,0 +1,4 @@
+[2026-09-25T19:25:24.620Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-25T19:26:04.196Z] I (120484) RouteLoom: stack hwm main 10604 B
+[2026-09-25T19:27:04.196Z] I (180484) RouteLoom: stack hwm main 10604 B
+[2026-09-25T19:27:24.655Z] !! capture closed

@@ -1,0 +1,1 @@
+{"index":0,"attempts":1,"admission":{"v":1,"request_id":"ctl-1847009","ok":true,"result":{"operation_id":"2120431ecc382e463e7db9a8c4e7a9c9:0000000000000001","dispatch_state":"HOST_QUEUED","evidence":["HOST_RAM_RETAINED"],"message_key":null}},"admission_wait_ms":1.14,"outcome":{"dispatch_state":"POLL_TIMEOUT"}}

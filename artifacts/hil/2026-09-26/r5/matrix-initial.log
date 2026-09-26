@@ -1,0 +1,27 @@
+== OK reference_node / esp32c3
+== OK bridge_node / esp32c3
+== OK reference_node / esp32s3
+== OK bridge_node / esp32s3
+== OK reference_node / esp32s3
+== OK reference_node / esp32c5
+collect2: error: ld returned 1 exit status
+== FAILED bridge_node / esp32c5 (full log: /tmp/routeloom-idf.UCW3uN/log)
+== OK reference_node / esp32c5
+== OK reference_node / esp32c3
+== OK bridge_node / esp32c3
+== OK reference_node / esp32c3
+== OK bridge_node / esp32c3
+== OK reference_node / esp32c3
+== OK bridge_node / esp32c3
+== OK bridge_node / esp32c3
+== OK reference_node / esp32c3
+== OK reference_node / esp32c3
+== OK bridge_node / esp32c3
+== OK reference_node / esp32c3
+== OK bridge_node / esp32c3
+== OK reference_node / esp32s3
+== OK bridge_node / esp32s3
+== OK reference_node / esp32c5
+collect2: error: ld returned 1 exit status
+== FAILED bridge_node / esp32c5 (full log: /tmp/routeloom-idf.T06dlT/log)
+== OK reference_node / esp32c3

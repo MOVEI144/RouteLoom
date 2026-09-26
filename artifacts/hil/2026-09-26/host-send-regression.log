@@ -1,0 +1,12 @@
+   Compiling routeloom-host v0.1.0 (/home/sahur/orca/workspaces/RouteLoom/hil-bench/host/routeloom-host)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.46s
+     Running unittests src/main.rs (target/debug/deps/routeloom_host-fa3a818c0c9b0427)
+
+running 1 test
+test tests::legacy_send_accepts_granted_and_rejects_reserved_and_limits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 487 filtered out; finished in 0.00s
+
+   Compiling routeloomctl v0.1.0 (/home/sahur/orca/workspaces/RouteLoom/hil-bench/host/routeloomctl)
+   Compiling routeloom-host v0.1.0 (/home/sahur/orca/workspaces/RouteLoom/hil-bench/host/routeloom-host)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.71s

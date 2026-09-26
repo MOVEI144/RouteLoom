@@ -1,0 +1,97 @@
+$ /home/sahur/.local/bin/esptool --chip esp32c3 --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00 --baud 460800 --before default-reset --after hard-reset write-flash --flash-mode dio --flash-size 2MB --flash-freq 80m 0x0 artifacts/hil/2026-09-26/images/bridge-r2-lowmem/build/bootloader/bootloader.bin 0x8000 artifacts/hil/2026-09-26/images/bridge-r2-lowmem/build/partition_table/partition-table.bin 0x10000 artifacts/hil/2026-09-26/images/bridge-r2-lowmem/build/routeloom_bridge_node.bin
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00:
+Connecting...
+Connected to ESP32-C3 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                94:a9:90:6a:ee:c4
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+Changing baud rate to 460800...
+Changed.
+
+Configuring flash size...
+
+Writing 'artifacts/hil/2026-09-26/images/bridge-r2-lowmem/build/bootloader/bootloader.bin' at 0x00000000...
+SHA digest in image updated.
+Flash will be erased from 0x00000000 to 0x00005fff...
+Compressed 21280 bytes to 13471...
+Writing at 0x00005320 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 13.16kB/13.16kB [0s] 
+Wrote 21280 bytes (13471 compressed) at 0x00000000 in 0.3 seconds (665.9 kbit/s).
+Verifying written data...
+Hash of data verified.
+
+Writing 'artifacts/hil/2026-09-26/images/bridge-r2-lowmem/build/partition_table/partition-table.bin' at 0x00008000...
+Flash will be erased from 0x00008000 to 0x00008fff...
+Compressed 3072 bytes to 120...
+Writing at 0x00008c00 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 120B/120B [0s] 
+Wrote 3072 bytes (120 compressed) at 0x00008000 in 0.0 seconds (4196.4 kbit/s).
+Verifying written data...
+Hash of data verified.
+
+Writing 'artifacts/hil/2026-09-26/images/bridge-r2-lowmem/build/routeloom_bridge_node.bin' at 0x00010000...
+Flash will be erased from 0x00010000 to 0x00175fff...
+Compressed 1466320 bytes to 864194...
+Writing at 0x0001c4c8 ╸                                1.9% 16.00kB/843.94kB [0s] 
+Writing at 0x0002842f ━                                3.8% 32.00kB/843.94kB [0s] 
+Writing at 0x0002f872 ━╸                               5.7% 48.00kB/843.94kB [1s] 
+Writing at 0x00039c74 ━━                               7.6% 64.00kB/843.94kB [1s] 
+Writing at 0x00040051 ━━╸                              9.5% 80.00kB/843.94kB [2s] 
+Writing at 0x00046db4 ━━━                             11.4% 96.00kB/843.94kB [3s] 
+Writing at 0x0004df46 ━━━╸                            13.3% 112.00kB/843.94kB [3s] 
+Writing at 0x00054992 ━━━━╸                           15.2% 128.00kB/843.94kB [3s] 
+Writing at 0x0005b787 ━━━━━                           17.1% 144.00kB/843.94kB [4s] 
+Writing at 0x00062029 ━━━━━╸                          19.0% 160.00kB/843.94kB [5s] 
+Writing at 0x000687f5 ━━━━━━                          20.9% 176.00kB/843.94kB [5s] 
+Writing at 0x0006f79b ━━━━━━╸                         22.8% 192.00kB/843.94kB [5s] 
+Writing at 0x00075e22 ━━━━━━━                         24.6% 208.00kB/843.94kB [6s] 
+Writing at 0x0007cc20 ━━━━━━━╸                        26.5% 224.00kB/843.94kB [6s] 
+Writing at 0x000832f2 ━━━━━━━━╸                       28.4% 240.00kB/843.94kB [6s] 
+Writing at 0x00089bf5 ━━━━━━━━━                       30.3% 256.00kB/843.94kB [6s] 
+Writing at 0x000902fe ━━━━━━━━━╸                      32.2% 272.00kB/843.94kB [6s] 
+Writing at 0x00096a61 ━━━━━━━━━━                      34.1% 288.00kB/843.94kB [6s] 
+Writing at 0x0009d4b0 ━━━━━━━━━━╸                     36.0% 304.00kB/843.94kB [6s] 
+Writing at 0x000a3e29 ━━━━━━━━━━━                     37.9% 320.00kB/843.94kB [6s] 
+Writing at 0x000aa496 ━━━━━━━━━━━╸                    39.8% 336.00kB/843.94kB [6s] 
+Writing at 0x000b1272 ━━━━━━━━━━━━╸                   41.7% 352.00kB/843.94kB [7s] 
+Writing at 0x000b78aa ━━━━━━━━━━━━━                   43.6% 368.00kB/843.94kB [7s] 
+Writing at 0x000be207 ━━━━━━━━━━━━━╸                  45.5% 384.00kB/843.94kB [7s] 
+Writing at 0x000c4dfe ━━━━━━━━━━━━━━                  47.4% 400.00kB/843.94kB [7s] 
+Writing at 0x000cb53f ━━━━━━━━━━━━━━╸                 49.3% 416.00kB/843.94kB [7s] 
+Writing at 0x000d241d ━━━━━━━━━━━━━━━                 51.2% 432.00kB/843.94kB [7s] 
+Writing at 0x000d9c87 ━━━━━━━━━━━━━━━╸                53.1% 448.00kB/843.94kB [7s] 
+Writing at 0x000e08c1 ━━━━━━━━━━━━━━━━                55.0% 464.00kB/843.94kB [7s] 
+Writing at 0x000e7ae9 ━━━━━━━━━━━━━━━━━               56.9% 480.00kB/843.94kB [7s] 
+Writing at 0x000ed664 ━━━━━━━━━━━━━━━━━╸              58.8% 496.00kB/843.94kB [7s] 
+Writing at 0x000f34fc ━━━━━━━━━━━━━━━━━━              60.7% 512.00kB/843.94kB [7s] 
+Writing at 0x000f8ff3 ━━━━━━━━━━━━━━━━━━╸             62.6% 528.00kB/843.94kB [8s] 
+Writing at 0x000feb95 ━━━━━━━━━━━━━━━━━━━             64.5% 544.00kB/843.94kB [8s] 
+Writing at 0x0010492e ━━━━━━━━━━━━━━━━━━━╸            66.4% 560.00kB/843.94kB [8s] 
+Writing at 0x0010b3f2 ━━━━━━━━━━━━━━━━━━━━            68.3% 576.00kB/843.94kB [8s] 
+Writing at 0x00111056 ━━━━━━━━━━━━━━━━━━━━━           70.1% 592.00kB/843.94kB [8s] 
+Writing at 0x00116ea3 ━━━━━━━━━━━━━━━━━━━━━╸          72.0% 608.00kB/843.94kB [8s] 
+Writing at 0x0011d0ea ━━━━━━━━━━━━━━━━━━━━━━          73.9% 624.00kB/843.94kB [8s] 
+Writing at 0x0012367d ━━━━━━━━━━━━━━━━━━━━━━╸         75.8% 640.00kB/843.94kB [8s] 
+Writing at 0x001296f5 ━━━━━━━━━━━━━━━━━━━━━━━         77.7% 656.00kB/843.94kB [8s] 
+Writing at 0x0012f5b5 ━━━━━━━━━━━━━━━━━━━━━━━╸        79.6% 672.00kB/843.94kB [8s] 
+Writing at 0x00135c5b ━━━━━━━━━━━━━━━━━━━━━━━━        81.5% 688.00kB/843.94kB [8s] 
+Writing at 0x0013cadc ━━━━━━━━━━━━━━━━━━━━━━━━━       83.4% 704.00kB/843.94kB [9s] 
+Writing at 0x001437a7 ━━━━━━━━━━━━━━━━━━━━━━━━━╸      85.3% 720.00kB/843.94kB [9s] 
+Writing at 0x0014a241 ━━━━━━━━━━━━━━━━━━━━━━━━━━      87.2% 736.00kB/843.94kB [9s] 
+Writing at 0x001505db ━━━━━━━━━━━━━━━━━━━━━━━━━━╸     89.1% 752.00kB/843.94kB [9s] 
+Writing at 0x001568ca ━━━━━━━━━━━━━━━━━━━━━━━━━━━     91.0% 768.00kB/843.94kB [9s] 
+Writing at 0x0015cc3b ━━━━━━━━━━━━━━━━━━━━━━━━━━━╸    92.9% 784.00kB/843.94kB [9s] 
+Writing at 0x001621d8 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━    94.8% 800.00kB/843.94kB [9s] 
+Writing at 0x00167f77 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   96.7% 816.00kB/843.94kB [9s] 
+Writing at 0x0016edee ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸  98.6% 832.00kB/843.94kB [9s] 
+Writing at 0x00175fd0 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 843.94kB/843.94kB [9s] 
+Wrote 1466320 bytes (864194 compressed) at 0x00010000 in 10.1 seconds (1161.4 kbit/s).
+Verifying written data...
+Hash of data verified.
+
+Hard resetting via RTS pin...

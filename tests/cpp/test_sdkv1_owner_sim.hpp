@@ -433,6 +433,23 @@ class SimNode {
     return coordinator_->session_provider().tx_epoch(SecurityScope::Link, peer, epoch).ok();
   }
 
+  // Same two probes for the end-to-end scope (origin/destination).
+  bool demand_end(const NodeId peer) {
+    std::uint32_t epoch = 1;
+    return coordinator_->session_provider().tx_epoch(SecurityScope::EndToEnd, peer, epoch).code ==
+           StatusCode::AuthRequired;
+  }
+  bool end_session_to(const NodeId peer) {
+    std::uint32_t epoch = 1;
+    return coordinator_->session_provider().tx_epoch(SecurityScope::EndToEnd, peer, epoch).ok();
+  }
+  // Side-effect-free: whether a live end context with `peer` stands (a
+  // tx_epoch probe would record a demand, which some tests must avoid).
+  bool holds_end_session_with(const NodeId peer) {
+    NodeId live = kInvalidNodeId;
+    return coordinator_->first_live_peer(SecurityScope::EndToEnd, live) && live == peer;
+  }
+
   // Owner-mirrored dev adoption (dev profile): static PSK config through
   // the coordinator, then the same action drain as the member route.
   bool boot_dev(const MonotonicMs now, const keys::Secret& psk, const NetworkId network,
@@ -502,6 +519,12 @@ class SimLink {
  public:
   SimLink(SimNode& a, SimNode& b) noexcept : a_(a), b_(b) {}
 
+  void drop_next_resume_r3_from(const NodeId source) noexcept {
+    drop_resume_r3_ = true;
+    drop_resume_r3_source_ = source;
+  }
+  std::uint32_t dropped_resume_r3() const noexcept { return dropped_resume_r3_; }
+
   void move_transports() {
     move_rld1(a_, b_);
     move_rld1(b_, a_);
@@ -528,10 +551,26 @@ class SimLink {
   }
 
  private:
-  static void move_rld1(SimNode& from, SimNode& to) {
-    for (auto& frame : from.rld1_.out) to.inbound_rld1_.push_back(std::move(frame));
+  bool should_drop_resume_r3(const NodeId source, const Rld1Frame& frame) noexcept {
+    if (!drop_resume_r3_ || source != drop_resume_r3_source_) return false;
+    autonomy::Rld1Envelope env{};
+    if (!autonomy::rld1_decode(ByteView{frame.bytes.data(), frame.bytes.size()}, env).ok() ||
+        env.kind != FrameType::BootstrapAuth) return false;
+    JoinAuthObject object{};
+    if (!join_object_decode(ByteView{env.body.data(), env.body_size}, object).ok() ||
+        object.phase != JoinAuthPhase::Resume || object.step != 3) return false;
+    drop_resume_r3_ = false;
+    ++dropped_resume_r3_;
+    return true;
+  }
+  void move_rld1(SimNode& from, SimNode& to) {
+    for (auto& frame : from.rld1_.out) {
+      if (!should_drop_resume_r3(from.node(), frame)) to.inbound_rld1_.push_back(std::move(frame));
+    }
     from.rld1_.out.clear();
-    for (auto& frame : from.discovery_port_.rld1) to.inbound_rld1_.push_back(std::move(frame));
+    for (auto& frame : from.discovery_port_.rld1) {
+      if (!should_drop_resume_r3(from.node(), frame)) to.inbound_rld1_.push_back(std::move(frame));
+    }
     from.discovery_port_.rld1.clear();
   }
   static void move_wire(SimNode& from, SimNode& to) {
@@ -590,6 +629,9 @@ class SimLink {
 
   SimNode& a_;
   SimNode& b_;
+  bool drop_resume_r3_{false};
+  NodeId drop_resume_r3_source_{kInvalidNodeId};
+  std::uint32_t dropped_resume_r3_{0};
 };
 
 }  // namespace owner_sim

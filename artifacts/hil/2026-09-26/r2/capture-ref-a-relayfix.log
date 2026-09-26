@@ -1,0 +1,15 @@
+[2026-09-25T19:34:33.872Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-25T19:34:52.562Z] W (44420) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-25T19:34:52.616Z] I (44474) RouteLoomRef: message origin=1 session=160 sequence=1 bytes=28
+[2026-09-25T19:34:53.289Z] W (45147) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-25T19:34:53.304Z] W (45162) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-25T19:34:53.898Z] I (45757) RouteLoomRef: message origin=1 session=160 sequence=16 bytes=28
+[2026-09-25T19:34:54.254Z] W (46112) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=5 message=none
+[2026-09-25T19:34:54.260Z] W (46114) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=4 seq=4 att=1 peer=5 message=none
+[2026-09-25T19:34:54.731Z] W (46589) RouteLoomRef: diagnostic reason=BOOTSTRAP_TRANSIT_NO_ROUTE peer=1 message=present
+[2026-09-25T19:34:54.780Z] W (46638) RouteLoomRef: diagnostic reason=BOOTSTRAP_TRANSIT_NO_ROUTE peer=1 message=present
+[2026-09-25T19:34:55.245Z] W (47103) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=5 message=none
+[2026-09-25T19:34:56.254Z] W (48113) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=4 seq=4 att=2 peer=5 message=none
+[2026-09-25T19:35:08.568Z] I (60426) RouteLoom: stack hwm main 11328 B
+[2026-09-25T19:36:08.571Z] I (120428) RouteLoom: stack hwm main 11328 B
+[2026-09-25T19:36:34.011Z] !! capture closed

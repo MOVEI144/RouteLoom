@@ -1,0 +1,26 @@
+[
+ {
+  "i": 0,
+  "accepted": true,
+  "error": null,
+  "state": "delivered",
+  "reason": "END_RECEIVED",
+  "latency_ms": 208.9
+ },
+ {
+  "i": 1,
+  "accepted": true,
+  "error": null,
+  "state": "delivered",
+  "reason": "END_RECEIVED",
+  "latency_ms": 106.7
+ },
+ {
+  "i": 2,
+  "accepted": true,
+  "error": null,
+  "state": "delivered",
+  "reason": "END_RECEIVED",
+  "latency_ms": 55.6
+ }
+]

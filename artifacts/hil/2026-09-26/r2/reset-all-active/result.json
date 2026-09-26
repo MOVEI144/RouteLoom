@@ -1,0 +1,45 @@
+{
+  "boards": [
+    {
+      "name": "bridge",
+      "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+      "identity": {
+        "chip": "esp32c3",
+        "mac": "94:a9:90:6a:ee:c4",
+        "log": "flash-bridge-preflight.log"
+      }
+    },
+    {
+      "name": "ref-a",
+      "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00",
+      "identity": {
+        "chip": "esp32c3",
+        "mac": "94:a9:90:7a:b5:60",
+        "log": "flash-ref-a-preflight.log"
+      }
+    },
+    {
+      "name": "ref-c",
+      "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00",
+      "identity": {
+        "chip": "esp32c6",
+        "mac": "10:bd:a3:ff:fe:b1:47:54",
+        "log": "flash-ref-c-preflight.log"
+      }
+    },
+    {
+      "name": "ref-d",
+      "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00",
+      "identity": {
+        "chip": "esp32c6",
+        "mac": "10:bd:a3:ff:fe:b1:48:a8",
+        "log": "flash-ref-d-preflight.log"
+      }
+    }
+  ],
+  "hold_s": 0.5,
+  "assert_skew_ms": 0.139,
+  "release_skew_ms": 34.96,
+  "errors": [],
+  "finished_unix": 1790365458.792454
+}

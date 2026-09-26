@@ -1,0 +1,36 @@
+[
+  {
+    "time_utc": "2026-09-25T20:28:59.778418+00:00",
+    "method": "site.status",
+    "exit": 0,
+    "stdout": "{\"v\":1,\"request_id\":\"hil-2014419-1790368139774893454\",\"ok\":true,\"result\":{\"site_id\":\"5173000000000042\",\"network\":\"00000001524c0001\",\"network_low32\":\"524c0001\",\"site_epoch\":1,\"site_cert_serial\":1,\"sak_fingerprint\":\"565c49d06c9d2b338f8a33cb80d8ad00e7977dd3bb679aa09a4fc8c21634720c\",\"device_ca_id\":\"0dca000000000001\",\"rs_epoch\":2,\"gk_epoch\":2,\"gk_staged\":null,\"gk\":{\"phase\":\"catching_up\",\"cause\":\"removal\",\"targets\":2,\"staged_ack\":0,\"active_ack\":0,\"unknown\":2},\"authority\":{\"attached\":true,\"channels\":1},\"member_cap\":128,\"members\":2,\"members_unconfirmed\":1,\"removed\":1,\"discovered\":3,\"join_requests\":1,\"live_exchanges\":0,\"channel\":6,\"channel_epoch\":1,\"gateways\":[\"0000000000000001\"],\"membership_revision\":4,\"ledger_seq\":4,\"storage_durable\":true,\"policy\":{\"zero_touch_open\":true,\"decision_mode\":\"kguard\",\"decision_timeout_ms\":5000,\"pending_retry_after_s\":60},\"counters\":{\"message_1\":0,\"message_1_refused\":0,\"busy_aborts\":0,\"unknown_relay\":0,\"timeouts\":0,\"relay_failed\":0,\"rejected_unverified\":{},\"allowed\":0,\"reissued\":0,\"pending\":0,\"denied\":0,\"removed_notices\":0,\"authority_busy\":0,\"store_failures\":0,\"gk_rejected\":{}},\"clock\":\"host_unix_ms\",\"now_ms\":1790368139775,\"usb\":{\"configured\":true,\"attached\":true,\"join_relay\":\"ready\"}}}\n",
+    "stderr": ""
+  },
+  {
+    "time_utc": "2026-09-25T20:28:59.800601+00:00",
+    "method": "members.list",
+    "exit": 0,
+    "stdout": "{\"v\":1,\"request_id\":\"hil-2014421-1790368139797609697\",\"ok\":true,\"result\":{\"members\":[{\"device_id\":\"0000000000000001\",\"kid\":\"3a7d8197c53cce2bd4e0aac77b23d8b52e65c359c1adc3752131fcb0863ba3a1\",\"state\":\"member\",\"generation\":1,\"role\":\"gateway\",\"member_cert_serial\":1,\"confirm_state\":\"active\",\"delivered\":true,\"model\":17,\"hw_rev\":2,\"cert_serial\":2,\"approved_ms\":1790357883101,\"delivered_ms\":1790362125229,\"confirmed_ms\":1790358207080,\"last_seen_ms\":1790368132073,\"removed_ms\":null,\"removal_reason\":null},{\"device_id\":\"0000000000000004\",\"kid\":\"d0c62e28b7b568bd087873ead34b1d1077fcc13309c46d5bc423d5de22b7678d\",\"state\":\"member\",\"generation\":1,\"role\":\"relay\",\"member_cert_serial\":3,\"confirm_state\":\"allowed_unconfirmed\",\"delivered\":true,\"model\":17,\"hw_rev\":2,\"cert_serial\":3,\"approved_ms\":1790362119363,\"delivered_ms\":1790362119363,\"confirmed_ms\":null,\"last_seen_ms\":1790362119363,\"removed_ms\":null,\"removal_reason\":null}],\"next_after\":null,\"clock\":\"host_unix_ms\"}}\n",
+    "stderr": ""
+  },
+  {
+    "time_utc": "2026-09-25T20:28:59.822698+00:00",
+    "method": "group_keys.status",
+    "exit": 0,
+    "stdout": "{\"v\":1,\"request_id\":\"hil-2014423-1790368139819379131\",\"ok\":true,\"result\":{\"active\":2,\"staged\":2,\"phase\":\"catching_up\",\"cause\":\"removal\",\"targets\":2,\"staged_ack\":0,\"active_ack\":0,\"unknown\":2,\"last_rotation\":null,\"next_due_ms\":1790448314738,\"clock\":{\"unix_ms\":1790368139819,\"mono_ms\":9619}}}\n",
+    "stderr": ""
+  },
+  {
+    "time_utc": "2026-09-25T20:28:59.839532+00:00",
+    "method": "join.requests.list",
+    "exit": 0,
+    "stdout": "{\"v\":1,\"request_id\":\"hil-2014425-1790368139836587787\",\"ok\":true,\"result\":{\"requests\":[{\"join_request_id\":\"jr-0000000000000001\",\"device_id\":\"0000000000000001\",\"kid\":\"3a7d8197c53cce2bd4e0aac77b23d8b52e65c359c1adc3752131fcb0863ba3a1\",\"model\":17,\"hw_rev\":2,\"cert_serial\":2,\"fw_version\":0,\"capability\":[\"sleepy\",\"relay\",\"gateway\"],\"requested_role\":\"gateway\",\"previously_removed\":false,\"kid_conflict\":false,\"via\":{\"gateway\":\"0000000000000001\",\"proxy\":\"0000000000000001\",\"authority_hops\":0,\"joiner_rssi_dbm\":0},\"attempt\":1,\"created_ms\":1790357862285,\"updated_ms\":1790357862285,\"deadline_ms\":1790357867285,\"remaining_ms\":0,\"state\":\"decided\",\"decision\":{\"verdict\":\"allow\",\"role\":\"gateway\",\"decided_ms\":1790357883101}}],\"max\":256,\"clock\":\"host_unix_ms\"}}\n",
+    "stderr": ""
+  },
+  {
+    "method": "adapter",
+    "exit": 0,
+    "stdout": "{\"device\":\"/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00\",\"connected\":true,\"session\":{\"authenticated\":true,\"id\":16213028905252755105,\"node\":1,\"boot\":180,\"network\":1380712449,\"capability\":1543,\"version\":1},\"credit\":{\"observed\":true,\"grant_frames\":12,\"grant_bytes\":16814},\"rx_frames\":53,\"tx_frames\":9,\"tx_bytes\":762,\"protocol_errors\":0,\"last_error\":null}\n",
+    "stderr": ""
+  }
+]

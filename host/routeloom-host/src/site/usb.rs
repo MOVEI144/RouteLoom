@@ -1325,18 +1325,31 @@ pub fn site_once(
                         }
                     }
                     Ok(UpOutcome::ProxyAbort { key }) => {
+                        push_event(state, now, format!(
+                            "\"kind\":\"join_relay_failed\",\"source\":\"proxy_abort\",\"proxy\":\"{:016x}\",\"relay_id\":{}",
+                            key.proxy, key.relay_id));
                         service.with(|a| a.fail_attempt(key));
                     }
                     Ok(UpOutcome::Phase5Refused | UpOutcome::CapacityRefused) | Err(_) => {}
                 },
                 Some(SUB_JOIN_RELAY_ABORT) => {
-                    if let Ok(AbortOutcome::RelayOver { key, .. }) = adapter.handle_abort(&body) {
+                    if let Ok(AbortOutcome::RelayOver { key, reason }) = adapter.handle_abort(&body)
+                    {
+                        push_event(state, now, format!(
+                            "\"kind\":\"join_relay_failed\",\"source\":\"gateway_abort\",\"reason\":\"{:?}\",\"proxy\":\"{:016x}\",\"relay_id\":{}",
+                            reason, key.proxy, key.relay_id));
                         service.with(|a| a.fail_attempt(key));
                     }
                 }
                 Some(SUB_JOIN_RELAY_RESULT) => {
+                    let result_code = decode_join_relay_result(&body)
+                        .map(|result| format!("{:?}", result.result))
+                        .unwrap_or_else(|_| "Malformed".to_string());
                     if let Ok(ResultOutcome::Failed { key }) = adapter.handle_result(request, &body)
                     {
+                        push_event(state, now, format!(
+                            "\"kind\":\"join_relay_failed\",\"source\":\"down_admission\",\"result\":\"{}\",\"proxy\":\"{:016x}\",\"relay_id\":{}",
+                            result_code, key.proxy, key.relay_id));
                         service.with(|a| a.fail_attempt(key));
                     }
                 }

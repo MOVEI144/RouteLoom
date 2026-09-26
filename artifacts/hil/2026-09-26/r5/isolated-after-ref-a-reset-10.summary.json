@@ -1,0 +1,19 @@
+{
+  "requested": 10,
+  "host_accepted": 10,
+  "delivered": 0,
+  "stopped_reason": null,
+  "success_rate": 0.0,
+  "rate_limit_retries": 0,
+  "elapsed_s": 6.22,
+  "latency_ms_median": null,
+  "latency_ms_p95": null,
+  "latency_ms_max": null,
+  "by_destination": {
+    "2": {
+      "accepted": 10,
+      "delivered": 0
+    }
+  },
+  "evidence": "artifacts/hil/2026-09-26/r5/isolated-after-ref-a-reset-10.jsonl"
+}

@@ -1,0 +1,99 @@
+{
+    "version": "1.2",
+    "total_size": 1020015,
+    "layout": [
+        {
+            "name": "Flash Code",
+            "total": 0,
+            "used": 786870,
+            "free": 0,
+            "parts": {
+                ".text": {
+                    "size": 786870
+                }
+            }
+        },
+        {
+            "name": "DIRAM",
+            "total": 341760,
+            "used": 217233,
+            "free": 124527,
+            "parts": {
+                ".bss": {
+                    "size": 130528
+                },
+                ".text": {
+                    "size": 65923
+                },
+                ".data": {
+                    "size": 20782
+                }
+            }
+        },
+        {
+            "name": "Flash Data",
+            "total": 0,
+            "used": 129904,
+            "free": 0,
+            "parts": {
+                ".rodata": {
+                    "size": 129632
+                },
+                ".appdesc": {
+                    "size": 256
+                },
+                ".tdata": {
+                    "size": 16
+                }
+            }
+        },
+        {
+            "name": "IRAM",
+            "total": 16384,
+            "used": 16384,
+            "free": 0,
+            "parts": {
+                ".text": {
+                    "size": 15356
+                },
+                ".vectors": {
+                    "size": 1028
+                }
+            }
+        },
+        {
+            "name": "RTC FAST",
+            "total": 8192,
+            "used": 132,
+            "free": 8060,
+            "parts": {
+                ".text": {
+                    "size": 104
+                },
+                ".rtc_reserved": {
+                    "size": 24
+                },
+                ".force_fast": {
+                    "size": 4
+                }
+            }
+        },
+        {
+            "name": "RTC SLOW",
+            "total": 8192,
+            "used": 52,
+            "free": 8140,
+            "parts": {
+                ".force_slow": {
+                    "size": 36
+                },
+                ".rtc_noinit": {
+                    "size": 8
+                },
+                ".data": {
+                    "size": 8
+                }
+            }
+        }
+    ]
+}

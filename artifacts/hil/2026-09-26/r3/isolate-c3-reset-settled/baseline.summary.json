@@ -1,0 +1,12 @@
+{
+  "count": 1,
+  "accepted": 1,
+  "delivered": 1,
+  "success_rate": 1.0,
+  "rtt_ms_min": 207.37,
+  "rtt_ms_median": 207.37,
+  "rtt_ms_p95": 207.37,
+  "rtt_ms_p99": 207.37,
+  "rtt_ms_max": 207.37,
+  "evidence": "artifacts/hil/2026-09-26/r3/isolate-c3-reset-settled/baseline.jsonl"
+}

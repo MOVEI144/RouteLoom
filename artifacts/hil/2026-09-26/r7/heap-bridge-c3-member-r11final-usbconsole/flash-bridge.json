@@ -1,0 +1,60 @@
+{
+  "app": "bridge_node",
+  "app_only": false,
+  "board": "bridge",
+  "boot_log": "flash-bridge-boot.log",
+  "chip": "esp32c3",
+  "cmd": [
+    "/home/sahur/.local/bin/esptool",
+    "--chip",
+    "esp32c3",
+    "--port",
+    "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+    "--baud",
+    "460800",
+    "--before",
+    "default-reset",
+    "--after",
+    "hard-reset",
+    "write-flash",
+    "--flash-mode",
+    "dio",
+    "--flash-size",
+    "2MB",
+    "--flash-freq",
+    "80m",
+    "0x0",
+    "artifacts/hil/2026-09-26/images/bridge-c3-member-r11final-usbconsole/build/bootloader/bootloader.bin",
+    "0x8000",
+    "artifacts/hil/2026-09-26/images/bridge-c3-member-r11final-usbconsole/build/partition_table/partition-table.bin",
+    "0x10000",
+    "artifacts/hil/2026-09-26/images/bridge-c3-member-r11final-usbconsole/build/routeloom_bridge_node.bin"
+  ],
+  "error": null,
+  "esptool_log": "flash-bridge-esptool.log",
+  "exit_code": 0,
+  "fallback_offsets": false,
+  "files": {
+    "0x0": {
+      "path": "artifacts/hil/2026-09-26/images/bridge-c3-member-r11final-usbconsole/build/bootloader/bootloader.bin",
+      "sha256": "7ae4bc58d0dc6942fcc5440b2b37aabe2584bece3668fc4f4531d40007ca411f"
+    },
+    "0x10000": {
+      "path": "artifacts/hil/2026-09-26/images/bridge-c3-member-r11final-usbconsole/build/routeloom_bridge_node.bin",
+      "sha256": "9c710e0e9bb6291d1d0b36f3a90a887cba226e3bab8abc94234f86f43197ef57"
+    },
+    "0x8000": {
+      "path": "artifacts/hil/2026-09-26/images/bridge-c3-member-r11final-usbconsole/build/partition_table/partition-table.bin",
+      "sha256": "e61421139c6406f44aa78de50a0c30a7a99d778fcdb619eb2035fb57878dc0f7"
+    }
+  },
+  "finished_utc": "2026-09-26T00:49:16.354Z",
+  "ok": true,
+  "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+  "preflight": {
+    "chip": "esp32c3",
+    "log": "flash-bridge-preflight.log",
+    "mac": "94:a9:90:6a:ee:c4"
+  },
+  "started_utc": "2026-09-26T00:48:53.011Z"
+}

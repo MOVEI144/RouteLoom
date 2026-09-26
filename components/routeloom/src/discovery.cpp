@@ -342,7 +342,8 @@ Status NeighborDiscovery::start(const MonotonicMs now_ms) noexcept {
   return Status::success();
 }
 
-Status NeighborDiscovery::begin_discovery(const MonotonicMs now_ms) noexcept {
+Status NeighborDiscovery::begin_discovery(const MonotonicMs now_ms,
+                                          const NodeId preferred_peer) noexcept {
   if (!started_) {
     return Status::error(StatusCode::InvalidState, "discovery not started");
   }
@@ -368,6 +369,13 @@ Status NeighborDiscovery::begin_discovery(const MonotonicMs now_ms) noexcept {
     return Status::error(StatusCode::WouldBlock,
                          "responder authentication in flight");
   }
+  const Neighbor* preferred = nullptr;
+  if (preferred_peer != kInvalidNodeId) {
+    preferred = find_neighbor(preferred_peer);
+    if (preferred == nullptr || preferred->phase != NeighborPhase::Stale) {
+      return Status::error(StatusCode::NotFound, "stale repair peer unavailable");
+    }
+  }
   if (!reserve_transient()) {
     ++stats_.peer_capacity;
     reject_event("PEER_CAPACITY", kInvalidNodeId);
@@ -376,6 +384,10 @@ Status NeighborDiscovery::begin_discovery(const MonotonicMs now_ms) noexcept {
   outbound_ = Outbound{};
   outbound_.active = true;
   outbound_.transient_held = true;
+  if (preferred != nullptr) {
+    outbound_.preferred_peer = preferred_peer;
+    outbound_.preferred_mac = preferred->mac;
+  }
   outbound_.stage = OutboundStage::AwaitingOffers;
   const Status nonce = entropy_.fill(
       MutableByteView{outbound_.our_nonce.data(), outbound_.our_nonce.size()});
@@ -806,6 +818,11 @@ void NeighborDiscovery::handle_offer(const DiscoveryRxMetadata& rx,
   }
   if (!outbound_.active || outbound_.stage != OutboundStage::AwaitingOffers ||
       outbound_.have_offer || now_ms > outbound_.stage_deadline_ms) {
+    return;
+  }
+  if (outbound_.preferred_peer != kInvalidNodeId &&
+      (env.claimed_node != outbound_.preferred_peer ||
+       rx.source != outbound_.preferred_mac)) {
     return;
   }
   // The OFFER echoes our transaction nonce; anything else is not ours.
@@ -1510,6 +1527,10 @@ void NeighborDiscovery::elevate_confirmed_peer(const MacAddress& peer_mac,
       same->lease_expires_at_ms = now_ms + config_.candidate_ttl_ms;
       event("MEMBERSHIP_PENDING", peer_node);
     }
+    // Re-authentication consumed this RLD1 exchange just like a fresh bind.
+    // Retaining its Candidate holds one of only three transient peer slots
+    // until TTL and can starve a simultaneous reset recovery on this bench.
+    cancel_competing(peer_mac, peer_node);
     return;
   }
 
@@ -2440,25 +2461,21 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
     }
   }
 
-  // Stranded-node re-discovery (issue #40, 04 §9.2): when every usable edge
-  // is gone but resolvable Stale records survive, only a fresh RLD1
-  // exchange re-opens the lane — a migration helper dwells on the old
-  // channel on a plan clock this node cannot observe, so it re-announces
-  // on a bounded backoff until an edge returns. The unicast re-probe above
-  // gets the first probe_timeout window before broadcasts start; the
-  // schedule then doubles backoff_base -> backoff_max and holds there.
-  // begin_discovery already refuses safely while an exchange or responder
-  // authentication is in flight.
+  // An old encrypted Probe cannot be opened by a peer that rebooted and
+  // lost its RAM session. Repair each stale binding through a fresh RLD1
+  // exchange even if another neighbor remains reachable. A targeted OFFER
+  // filter prevents that healthy neighbor from winning every round. The
+  // first Probe gets a window before the bounded discovery schedule starts.
   {
-    bool any_bound = false;
-    bool any_stale = false;
+    const Neighbor* first_stale = nullptr;
+    const Neighbor* next_stale = nullptr;
     neighbors_.for_each([&](const Neighbor& n) {
-      any_bound = any_bound || n.phase == NeighborPhase::Bound ||
-                  n.phase == NeighborPhase::Reachable;
-      any_stale = any_stale || n.phase == NeighborPhase::Stale;
+      if (n.phase != NeighborPhase::Stale) return;
+      if (first_stale == nullptr || n.node < first_stale->node) first_stale = &n;
+      if (n.node > last_repair_peer_ &&
+          (next_stale == nullptr || n.node < next_stale->node)) next_stale = &n;
     });
-    if (any_bound || !any_stale ||
-        membership_.state() == MembershipState::Revoked) {
+    if (first_stale == nullptr || membership_.state() == MembershipState::Revoked) {
       next_rediscovery_ms_ = 0;
       rediscovery_backoff_ms_ = 0;
     } else if (rediscovery_backoff_ms_ == 0) {
@@ -2471,8 +2488,10 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
       }
       next_rediscovery_ms_ = now_ms + config_.probe_timeout_ms;
     } else if (!outbound_.active && now_ms >= next_rediscovery_ms_) {
-      if (begin_discovery(now_ms).ok()) {
-        event("REDISCOVERY", kInvalidNodeId);
+      const Neighbor* target = next_stale != nullptr ? next_stale : first_stale;
+      if (begin_discovery(now_ms, target->node).ok()) {
+        last_repair_peer_ = target->node;
+        event("REDISCOVERY", target->node);
       }
       const std::uint64_t step =
           static_cast<std::uint64_t>(rediscovery_backoff_ms_) * 2;

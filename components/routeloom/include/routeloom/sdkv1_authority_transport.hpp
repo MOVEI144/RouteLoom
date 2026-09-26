@@ -91,7 +91,7 @@ Status authority_carrier_decode(ByteView input, AuthorityCarrierKind& kind,
                                 std::uint32_t& exchange_id, ByteView& body) noexcept;
 
 // --- Mesh demux ---------------------------------------------------------------
-// Offered to ConfigTarget::attach_authority: authority frames are claimed
+// Offered to ConfigTarget/ConfigGateway::attach_authority: authority frames are claimed
 // before the config path sees them. Chunks and acks carry no kind, so
 // they route by the live transfer hash only — never broadcast to every
 // sink. All intake copies into bounded slots; nothing sends from here
@@ -172,6 +172,8 @@ class AuthorityEndpoint final : public AuthorityMeshDemux, public AuthorityPort 
     std::uint32_t rx_denied{0};
     std::uint32_t tx_carriers{0};
     std::uint32_t tx_objects{0};
+    std::uint32_t mesh_queued{0};
+    std::uint32_t mesh_shed{0};
     std::uint32_t tx_timeouts{0};
   };
   const Counters& counters() const noexcept { return counters_; }
@@ -298,7 +300,11 @@ class AuthorityGateway final : public AuthorityMeshDemux {
   void set_self(NodeId self) noexcept { self_ = self; }
 
   struct Counters {
+    std::uint32_t rx_carriers{0};
+    std::uint32_t rx_manifests{0};
+    std::uint32_t rx_chunks{0};
     std::uint32_t up_fragments{0};
+    std::uint32_t up_blocked{0};
     std::uint32_t down_objects{0};
     std::uint32_t denied{0};
     std::uint32_t timeouts{0};
@@ -349,7 +355,7 @@ class AuthorityGateway final : public AuthorityMeshDemux {
 
 // --- Standalone mesh sink ---------------------------------------------------------
 // A ConfigEndpointSink that serves ONLY the authority lane (for nodes
-// without a ConfigTarget, i.e. USB gateways): claimed frames route to
+// without a ConfigTarget or ConfigGateway): claimed frames route to
 // the demux, everything else is ignored — never denied, never answered.
 // Nodes with a real config endpoint attach the demux to their
 // ConfigTarget instead (ConfigTarget::attach_authority).
@@ -358,18 +364,23 @@ class AuthorityMeshSink final : public ConfigEndpointSink {
   explicit AuthorityMeshSink(AuthorityMeshDemux& demux) noexcept : demux_(demux) {}
   void on_config_frame(NodeId peer, const wire::PlainFrame& frame,
                        MonotonicMs now_ms) noexcept override;
-  // The authority lane issues no send_typed jobs, so no completion can
-  // correlate to it; the job-done callback is unreachable by
-  // construction, not by trust.
-  void on_config_job_done(const MessageId& /*id*/, bool /*hop_accepted*/,
-                          const char* /*reason*/,
-                          MonotonicMs /*now_ms*/) noexcept override {}
+  // The mesh node reports hop-accept outcomes for authority send_typed
+  // jobs here. These counters distinguish local queueing from wire delivery.
+  void on_config_job_done(const MessageId& id, bool hop_accepted,
+                          const char* reason, MonotonicMs now_ms) noexcept override;
   // A pure frame router: the Owner polls the concrete endpoint/gateway
   // itself (retries, TX pump, RX expiry), so the sink tick does nothing.
   void poll(MonotonicMs /*now_ms*/) noexcept override {}
 
+  std::uint32_t jobs_accepted() const noexcept { return jobs_accepted_; }
+  std::uint32_t jobs_failed() const noexcept { return jobs_failed_; }
+  const char* last_failure_reason() const noexcept { return last_failure_reason_.data(); }
+
  private:
   AuthorityMeshDemux& demux_;
+  std::uint32_t jobs_accepted_{0};
+  std::uint32_t jobs_failed_{0};
+  std::array<char, 40> last_failure_reason_{};
 };
 
 }  // namespace routeloom::sdkv1

@@ -1,0 +1,60 @@
+{
+  "app": "bridge_node",
+  "app_only": false,
+  "board": "bridge",
+  "boot_log": null,
+  "chip": "esp32c3",
+  "cmd": [
+    "/home/sahur/.local/bin/esptool",
+    "--chip",
+    "esp32c3",
+    "--port",
+    "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+    "--baud",
+    "460800",
+    "--before",
+    "default-reset",
+    "--after",
+    "hard-reset",
+    "write-flash",
+    "--flash-mode",
+    "dio",
+    "--flash-size",
+    "2MB",
+    "--flash-freq",
+    "80m",
+    "0x0",
+    "artifacts/hil/2026-09-26/images/bridge-member-chunkpaced-host/build/bootloader/bootloader.bin",
+    "0x8000",
+    "artifacts/hil/2026-09-26/images/bridge-member-chunkpaced-host/build/partition_table/partition-table.bin",
+    "0x10000",
+    "artifacts/hil/2026-09-26/images/bridge-member-chunkpaced-host/build/routeloom_bridge_node.bin"
+  ],
+  "error": null,
+  "esptool_log": "flash-bridge-esptool.log",
+  "exit_code": 0,
+  "fallback_offsets": false,
+  "files": {
+    "0x0": {
+      "path": "artifacts/hil/2026-09-26/images/bridge-member-chunkpaced-host/build/bootloader/bootloader.bin",
+      "sha256": "b20572733e64696a48f58eb713d5625ef0dc24acb0942127e6720daff241247c"
+    },
+    "0x10000": {
+      "path": "artifacts/hil/2026-09-26/images/bridge-member-chunkpaced-host/build/routeloom_bridge_node.bin",
+      "sha256": "f375b1d37455dc4522c17f1129102967d3f850984acf271b1eb9fdb7f8e4fb60"
+    },
+    "0x8000": {
+      "path": "artifacts/hil/2026-09-26/images/bridge-member-chunkpaced-host/build/partition_table/partition-table.bin",
+      "sha256": "e61421139c6406f44aa78de50a0c30a7a99d778fcdb619eb2035fb57878dc0f7"
+    }
+  },
+  "finished_utc": "2026-09-25T18:41:43.289Z",
+  "ok": true,
+  "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+  "preflight": {
+    "chip": "esp32c3",
+    "log": "flash-bridge-preflight.log",
+    "mac": "94:a9:90:6a:ee:c4"
+  },
+  "started_utc": "2026-09-25T18:41:30.915Z"
+}

@@ -492,7 +492,11 @@ void ConfigTarget::on_config_job_done(const MessageId& id, const bool hop_accept
   // A target emits replies and acks fire-and-forget: their hop-level
   // completion is the sender's concern, not evidence the endpoint needs.
   (void)id;
-  (void)hop_accepted;
+  if (hop_accepted) {
+    ++jobs_accepted_;
+  } else {
+    ++jobs_failed_;
+  }
   (void)reason;
   (void)now_ms;
 }
@@ -760,10 +764,54 @@ void ConfigGateway::pump_transfer(const MonotonicMs now_ms) noexcept {
   }
 }
 
+void ConfigGateway::attach_authority(sdkv1::AuthorityMeshDemux* demux) noexcept {
+  authority_ = demux;
+}
+
 void ConfigGateway::on_config_frame(const NodeId peer, const wire::PlainFrame& frame,
                                     const MonotonicMs now_ms) noexcept {
   (void)peer;  // replies/acks are matched on the end-authenticated origin
   const NodeId origin = frame.header.origin;
+  if (authority_ != nullptr) {
+    const ByteView payload{frame.payload.data(), frame.payload_size};
+    switch (frame.header.type) {
+      case FrameType::Control:
+        if (authority_->claim_control(control_subtype(frame))) {
+          authority_->on_control(origin, payload, now_ms);
+          return;
+        }
+        break;
+      case FrameType::ControlObject: {
+        autonomy::ControlObjectPayload manifest{};
+        if (autonomy::control_object_decode(payload, manifest) &&
+            authority_->claim_kind(manifest.kind)) {
+          authority_->on_manifest(origin, manifest, now_ms);
+          return;
+        }
+        break;
+      }
+      case FrameType::ObjectChunk: {
+        autonomy::ObjectChunkPayload chunk{};
+        if (autonomy::object_chunk_decode(payload, chunk) &&
+            authority_->claim_transfer(origin, chunk.object_hash)) {
+          authority_->on_chunk(origin, chunk, now_ms);
+          return;
+        }
+        break;
+      }
+      case FrameType::ObjectAck: {
+        autonomy::ObjectAckPayload ack{};
+        if (autonomy::object_ack_decode(payload, ack) &&
+            authority_->claim_transfer(origin, ack.object_hash)) {
+          authority_->on_ack(origin, ack, now_ms);
+          return;
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
   switch (frame.header.type) {
     case FrameType::Control: {
       if (!query_.active || origin != query_.target) return;

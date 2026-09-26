@@ -1,0 +1,72 @@
+{
+    "version": "1.2",
+    "total_size": 1168781,
+    "layout": [
+        {
+            "name": "Flash",
+            "total": 0,
+            "used": 1058686,
+            "free": 0,
+            "parts": {
+                ".text": {
+                    "size": 911138
+                },
+                ".rodata": {
+                    "size": 146992
+                },
+                ".init_array": {
+                    "size": 284
+                },
+                ".appdesc": {
+                    "size": 256
+                },
+                ".tdata": {
+                    "size": 16
+                }
+            }
+        },
+        {
+            "name": "HP SRAM",
+            "total": 320928,
+            "used": 248691,
+            "free": 72237,
+            "parts": {
+                ".bss": {
+                    "size": 138488
+                },
+                ".text": {
+                    "size": 92486
+                },
+                ".data": {
+                    "size": 17717
+                }
+            }
+        },
+        {
+            "name": "LP SRAM",
+            "total": 16384,
+            "used": 208,
+            "free": 16176,
+            "parts": {
+                ".text": {
+                    "size": 128
+                },
+                ".force_slow": {
+                    "size": 36
+                },
+                ".rtc_reserved": {
+                    "size": 24
+                },
+                ".rtc_noinit": {
+                    "size": 8
+                },
+                ".data": {
+                    "size": 8
+                },
+                ".force_fast": {
+                    "size": 4
+                }
+            }
+        }
+    ]
+}

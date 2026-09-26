@@ -1,0 +1,19 @@
+{
+  "requested": 3,
+  "host_accepted": 3,
+  "delivered": 3,
+  "stopped_reason": null,
+  "success_rate": 1.0,
+  "rate_limit_retries": 0,
+  "elapsed_s": 0.37,
+  "latency_ms_median": 104.31,
+  "latency_ms_p95": 149.8,
+  "latency_ms_max": 154.85,
+  "by_destination": {
+    "6": {
+      "accepted": 3,
+      "delivered": 3
+    }
+  },
+  "evidence": "artifacts/hil/2026-09-26/r4/member-node6-after-recovery-send.jsonl"
+}

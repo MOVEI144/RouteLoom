@@ -280,7 +280,8 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
 
   HandshakeEngine(ResumeCache2& cache, HandshakeSessionSink& sink, MemberCookie& cookie,
                   HandshakeMembershipView& membership, SessionCredentialVerifier& verifier,
-                  RandomFn random, void* random_ctx) noexcept;
+                  RandomFn random, void* random_ctx,
+                  const edhoc::AeadCcm* aead = nullptr) noexcept;
   // Wipes the armed dev PSK (exchange secrets die with their records and
   // flights; the policy is configuration and outlives them otherwise).
   ~HandshakeEngine() noexcept;
@@ -313,6 +314,9 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
                      std::uint8_t step) noexcept;
   Status cancel(NodeId peer, HandshakeCancelReason reason) noexcept;
   Status cancel_all() noexcept;
+  // An RLRES1 initiator keeps its R3 for quiet retransmission after its
+  // local session has installed. The RLD1 owner must retain that send leg.
+  bool has_quiet_link_retry(std::uint32_t token) const noexcept;
   // Side-effect-free and readable any time (false while a call is inside).
   bool quiescent() const noexcept;
 
@@ -573,6 +577,7 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   SessionCredentialVerifier& verifier_;
   RandomFn random_;
   void* random_ctx_;
+  const edhoc::AeadCcm* aead_;
   HandshakeLocal local_{};
   bool local_set_{false};
   bool configured_{false};

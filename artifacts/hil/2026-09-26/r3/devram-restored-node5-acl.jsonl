@@ -1,0 +1,1 @@
+{"index":0,"accepted":true,"request":2,"response":{"accepted":true,"request":2},"delivery":{"request":2,"destination":5,"state":"delivered","reason":"END_RECEIVED","msg_session":186,"msg_seq":7,"updated_ms":1790369858973},"latency_ms":310.57}

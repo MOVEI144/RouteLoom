@@ -1,0 +1,73 @@
+{
+  "run_id": "20260925-161800-bench-2026-09-26-fallback-fallback-bind",
+  "rig": "bench-2026-09-26-fallback",
+  "generated_utc": "2026-09-25T16:18:45Z",
+  "meta": {
+    "environment": {
+      "utc": "2026-09-25T16:18:00Z",
+      "os": "Linux 7.0.0-31-generic (x86_64)",
+      "python": "3.12.3",
+      "serial_backend": "pyserial",
+      "esptool_path": "/home/sahur/.local/bin/esptool",
+      "esptool_version": "5.4.0",
+      "hardware_note": "issue #18 bootstrap: tooling verified without attached boards; PASS requires real captured evidence, OFFLINE rigs are SKIP"
+    },
+    "repo": {
+      "git_head": "1aad7d391123cf6a70805a0775c686d7c5bf0074",
+      "git_describe": "1aad7d3-dirty",
+      "git_dirty": true,
+      "repo_root": "/home/sahur/orca/workspaces/RouteLoom/hil-bench"
+    },
+    "firmware": {
+      "bridge_node": {
+        "app": "bridge_node",
+        "build_dir": "firmware/bridge_node/build",
+        "present": false
+      },
+      "reference_node": {
+        "app": "reference_node",
+        "build_dir": "firmware/reference_node/build",
+        "present": false
+      }
+    },
+    "boards": {
+      "bridge": {
+        "status": "ONLINE",
+        "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00",
+        "detail": ""
+      },
+      "ref-a": {
+        "status": "ONLINE",
+        "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00",
+        "detail": ""
+      }
+    }
+  },
+  "totals": {
+    "PASS": 0,
+    "FAIL": 1,
+    "SKIP-OFFLINE": 0
+  },
+  "scenarios": [
+    {
+      "name": "bind_2node",
+      "verdict": "FAIL",
+      "detail": "step 0 (start_daemon): daemon did not reach an authenticated session within 45.0s",
+      "started_utc": "2026-09-25T16:18:00Z",
+      "duration_s": 45.261,
+      "steps": [
+        {
+          "step": "0:start_daemon",
+          "ok": false,
+          "detail": "daemon did not reach an authenticated session within 45.0s",
+          "duration_s": 45.016
+        }
+      ],
+      "evidence": [
+        "scenarios/bind_2node/ref-a.log",
+        "scenarios/bind_2node/daemon.log",
+        "scenarios/bind_2node/daemon-adapter.log"
+      ]
+    }
+  ]
+}

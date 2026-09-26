@@ -1,0 +1,24 @@
+2026-09-26T04:25:33+0900 $ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-2026-09-26-mixed5.sock status exit=0
+{"connected":true,"device":"/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00","rx_frames":9,"tx_frames":8,"protocol_errors":0,"last_error":null}
+
+2026-09-26T04:25:33+0900 $ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-2026-09-26-mixed5.sock nodes exit=0
+{"v":1,"request_id":"ctl-1775286","ok":true,"result":{"source":{"state":"unsupported","gateway":"0000000000000001","session_id":13998397394823187819,"synced_ms":null,"tracked":1,"evicted":0,"clock":"host_unix_ms"},"nodes":[{"node":"0000000000000001","role":"gateway","connected":true,"listed":true,"neighbor":false,"direct":true,"hops":0,"next_hop":null,"route_metric":null,"link_cost":null,"rssi_dbm":null,"rssi_avg_dbm":null,"telemetry_stale":false,"last_heard_ms":null,"heard_age_ms":null,"updated_ms":1790364312366,"changed_ms":1790364312366}],"next_after":null}}
+
+2026-09-26T04:25:33+0900 $ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-2026-09-26-mixed5.sock node-get --node 0000000000000002 exit=0
+{"v":1,"request_id":"ctl-1775288","ok":false,"error":{"code":"NOT_FOUND","detail":{"message":"node not reported by the attached gateway","node":"0000000000000002","source":{"state":"unsupported","gateway":"0000000000000001","session_id":13998397394823187819,"synced_ms":null,"tracked":1,"evicted":0,"clock":"host_unix_ms"}},"retryable":true}}
+
+2026-09-26T04:25:33+0900 $ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-2026-09-26-mixed5.sock node-get --node 0000000000000004 exit=0
+{"v":1,"request_id":"ctl-1775290","ok":false,"error":{"code":"NOT_FOUND","detail":{"message":"node not reported by the attached gateway","node":"0000000000000004","source":{"state":"unsupported","gateway":"0000000000000001","session_id":13998397394823187819,"synced_ms":null,"tracked":1,"evicted":0,"clock":"host_unix_ms"}},"retryable":true}}
+
+2026-09-26T04:25:33+0900 $ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-2026-09-26-mixed5.sock node-get --node 0000000000000005 exit=0
+{"v":1,"request_id":"ctl-1775292","ok":false,"error":{"code":"NOT_FOUND","detail":{"message":"node not reported by the attached gateway","node":"0000000000000005","source":{"state":"unsupported","gateway":"0000000000000001","session_id":13998397394823187819,"synced_ms":null,"tracked":1,"evicted":0,"clock":"host_unix_ms"}},"retryable":true}}
+
+2026-09-26T04:25:33+0900 $ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-2026-09-26-mixed5.sock diagnostics exit=0
+{"connected":true,"device":"/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00","rx_frames":9,"tx_frames":8,"protocol_errors":0,"last_error":null}
+
+2026-09-26T04:25:33+0900 $ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-2026-09-26-mixed5.sock adapter exit=0
+{"device":"/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00","connected":true,"session":{"authenticated":true,"id":13998397394823187819,"node":1,"boot":150,"network":1380712449,"capability":519,"version":1},"credit":{"observed":true,"grant_frames":9,"grant_bytes":16480},"rx_frames":9,"tx_frames":8,"tx_bytes":500,"protocol_errors":0,"last_error":null}
+
+2026-09-26T04:25:33+0900 $ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-2026-09-26-mixed5.sock events exit=0
+{"events":[{"seq":0,"ms":1790364312319,"kind":"adapter","state":"connected"},{"seq":1,"ms":1790364312322,"kind":"hello_ack","version":1,"node":1,"boot":150,"network":1380712449,"capability":519},{"seq":2,"ms":1790364312325,"kind":"auth_ok","session":13998397394823187819},{"seq":3,"ms":1790364312326,"kind":"credit_grant","grant_frames":8,"grant_bytes":16384},{"seq":4,"ms":1790364312356,"kind":"dispatch","detail":"lease up 00000000000000960000000000000001"},{"seq":5,"ms":1790364312360,"kind":"credit_grant","grant_frames":9,"grant_bytes":16480},{"seq":6,"ms":1790364312360,"kind":"host_ops_rx","request":1,"body_len":27},{"seq":7,"ms":1790364312366,"kind":"node_joined","node":"0000000000000001","gateway":"0000000000000001","reason":"gateway_attached","status":{"node":"0000000000000001","role":"gateway","connected":true,"listed":true,"neighbor":false,"direct":true,"hops":0,"next_hop":null,"route_metric":null,"link_cost":null,"rssi_dbm":null,"rssi_avg_dbm":null,"telemetry_stale":false,"last_heard_ms":null,"heard_age_ms":null,"updated_ms":1790364312366,"changed_ms":1790364312366}}],"dropped":0,"next_seq":8}
+

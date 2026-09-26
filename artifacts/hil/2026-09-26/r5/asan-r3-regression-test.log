@@ -1,0 +1,15 @@
+Internal ctest changing into directory: /tmp/routeloom-hil2-asan
+Test project /tmp/routeloom-hil2-asan
+    Start 66: routeloom_sdkv1_owner_sleep_tests
+1/1 Test #66: routeloom_sdkv1_owner_sleep_tests ...***Failed    1.86 sec
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/hil-bench/tests/cpp/test_sdkv1_owner_sleep.cpp:275 [dev_resume_r3_loss_recovers_after_receiver_restart]: recovered
+test_sdkv1_owner_sleep: 1 failure(s)
+
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =   1.86 sec
+
+The following tests FAILED:
+	 66 - routeloom_sdkv1_owner_sleep_tests (Failed)
+Errors while running CTest

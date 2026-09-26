@@ -1,0 +1,15 @@
+$ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-group.sock status
+{"connected":true,"device":"/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00","rx_frames":12,"tx_frames":9,"protocol_errors":0,"last_error":null}
+exit=0
+$ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-group.sock adapter
+{"device":"/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00","connected":true,"session":{"authenticated":true,"id":14419582603903013272,"node":1,"boot":105,"network":1380712449,"capability":199,"version":1},"credit":{"observed":true,"grant_frames":11,"grant_bytes":16616},"rx_frames":12,"tx_frames":9,"tx_bytes":584,"protocol_errors":0,"last_error":null}
+exit=0
+$ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-group.sock nodes
+{"v":1,"request_id":"ctl-1096750","ok":true,"result":{"source":{"state":"live","gateway":"0000000000000001","session_id":14419582603903013272,"synced_ms":1790356165216,"tracked":2,"evicted":0,"clock":"host_unix_ms"},"nodes":[{"node":"0000000000000001","role":"gateway","connected":true,"listed":true,"neighbor":false,"direct":true,"hops":0,"next_hop":null,"route_metric":null,"link_cost":null,"rssi_dbm":null,"rssi_avg_dbm":null,"telemetry_stale":false,"last_heard_ms":null,"heard_age_ms":null,"updated_ms":1790356155183,"changed_ms":1790356155183},{"node":"0000000000000002","role":"peer","connected":true,"listed":true,"neighbor":true,"direct":true,"hops":1,"next_hop":"0000000000000002","route_metric":1,"link_cost":1,"rssi_dbm":-24,"rssi_avg_dbm":-24.03,"telemetry_stale":false,"last_heard_ms":1790356155327,"heard_age_ms":15524,"updated_ms":1790356165216,"changed_ms":1790356155185}],"next_after":null}}
+exit=0
+$ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-group.sock node-get --node 0000000000000002
+{"v":1,"request_id":"ctl-1096752","ok":true,"result":{"source":{"state":"live","gateway":"0000000000000001","session_id":14419582603903013272,"synced_ms":1790356165216,"tracked":2,"evicted":0,"clock":"host_unix_ms"},"node":{"node":"0000000000000002","role":"peer","connected":true,"listed":true,"neighbor":true,"direct":true,"hops":1,"next_hop":"0000000000000002","route_metric":1,"link_cost":1,"rssi_dbm":-24,"rssi_avg_dbm":-24.03,"telemetry_stale":false,"last_heard_ms":1790356155327,"heard_age_ms":15525,"updated_ms":1790356165216,"changed_ms":1790356155185}}}
+exit=0
+$ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-group.sock diagnostics
+{"connected":true,"device":"/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00","rx_frames":12,"tx_frames":9,"protocol_errors":0,"last_error":null}
+exit=0

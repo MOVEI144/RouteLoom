@@ -1,0 +1,10 @@
+[2026-09-25T19:36:42.736Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-25T19:36:48.662Z] I (160518) RouteLoomRef: message origin=1 session=160 sequence=21 bytes=9
+[2026-09-25T19:36:49.134Z] I (160991) RouteLoomRef: message origin=1 session=160 sequence=24 bytes=9
+[2026-09-25T19:36:49.501Z] I (161357) RouteLoomRef: message origin=1 session=160 sequence=27 bytes=9
+[2026-09-25T19:36:49.868Z] I (161725) RouteLoomRef: message origin=1 session=160 sequence=30 bytes=9
+[2026-09-25T19:37:08.572Z] I (180428) RouteLoom: stack hwm main 11328 B
+[2026-09-25T19:38:08.574Z] I (240429) RouteLoom: stack hwm main 11328 B
+[2026-09-25T19:39:08.576Z] I (300431) RouteLoom: stack hwm main 11328 B
+[2026-09-25T19:40:08.579Z] I (360433) RouteLoom: stack hwm main 11328 B
+[2026-09-25T19:40:35.829Z] !! capture closed

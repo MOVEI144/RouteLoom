@@ -1,0 +1,4 @@
+waiting for esp32c3/94:a9:90:6a:ee:c4 at /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00
+port appeared; flash attempt 1
+flashed bridge_node -> bridge on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00; manifest artifacts/hil/2026-09-26/flash-wake-original/flash-bridge.json
+flash succeeded

@@ -1,0 +1,39 @@
+[2026-09-25T16:48:17.308Z] $ esptool reset ref-a on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00
+[2026-09-25T16:48:17.308Z]   esptool v5.4.0
+[2026-09-25T16:48:17.308Z]   Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00:
+[2026-09-25T16:48:17.308Z]   Connecting...
+[2026-09-25T16:48:17.308Z]   Connected to ESP32-C3 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00:
+[2026-09-25T16:48:17.308Z]   Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+[2026-09-25T16:48:17.308Z]   Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+[2026-09-25T16:48:17.308Z]   Crystal frequency:  40MHz
+[2026-09-25T16:48:17.308Z]   USB mode:           USB-Serial/JTAG
+[2026-09-25T16:48:17.308Z]   MAC:                94:a9:90:7a:b5:60
+[2026-09-25T16:48:17.308Z]   
+[2026-09-25T16:48:17.308Z]   Uploading stub flasher...
+[2026-09-25T16:48:17.308Z]   Running stub flasher...
+[2026-09-25T16:48:17.308Z]   Stub flasher running.
+[2026-09-25T16:48:17.308Z]   
+[2026-09-25T16:48:17.308Z]   MAC:                94:a9:90:7a:b5:60
+[2026-09-25T16:48:17.308Z]   
+[2026-09-25T16:48:17.308Z]   Hard resetting via RTS pin...
+[2026-09-25T16:48:17.832Z] $ esptool reset bridge on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00
+[2026-09-25T16:48:17.833Z]   esptool v5.4.0
+[2026-09-25T16:48:17.833Z]   Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00:
+[2026-09-25T16:48:17.833Z]   Connecting...
+[2026-09-25T16:48:17.833Z]   Connected to ESP32-C3 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00:
+[2026-09-25T16:48:17.833Z]   Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+[2026-09-25T16:48:17.833Z]   Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+[2026-09-25T16:48:17.833Z]   Crystal frequency:  40MHz
+[2026-09-25T16:48:17.833Z]   USB mode:           USB-Serial/JTAG
+[2026-09-25T16:48:17.833Z]   MAC:                94:a9:90:6a:ee:c4
+[2026-09-25T16:48:17.833Z]   
+[2026-09-25T16:48:17.833Z]   Uploading stub flasher...
+[2026-09-25T16:48:17.833Z]   Running stub flasher...
+[2026-09-25T16:48:17.833Z]   Stub flasher running.
+[2026-09-25T16:48:17.833Z]   
+[2026-09-25T16:48:17.833Z]   MAC:                94:a9:90:6a:ee:c4
+[2026-09-25T16:48:17.833Z]   
+[2026-09-25T16:48:17.833Z]   Hard resetting via RTS pin...
+[2026-09-25T16:48:19.420Z] $ /home/sahur/orca/workspaces/RouteLoom/hil-bench/host/target/debug/routeloomctl --socket /tmp/routeloom-hil-2026-09-26.sock send 2 524c48494c32
+[2026-09-25T16:48:19.421Z] {"accepted":true,"request":1}
+[2026-09-25T16:48:19.421Z] !exit=0!

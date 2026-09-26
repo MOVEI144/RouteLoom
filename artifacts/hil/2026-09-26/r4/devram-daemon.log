@@ -1,0 +1,5 @@
+api acl loaded: revision 1
+operation store: sqlite at artifacts/hil/2026-09-26/r4/op-store.json (lineage d40f47e7b31a37af2acb98d022ca3477)
+warning: operation store created fresh (lineage d40f47e7b31a37af2acb98d022ca3477) — if this replaces a lost or corrupt store, any gateway still bound to the old lineage rejects dispatch with LaneMismatch until it is rebooted
+config authority: none — config.propose refused; challenge/status queries still run (pass --config-authority)
+RouteLoom host listening on /tmp/routeloom-hil-r4.sock

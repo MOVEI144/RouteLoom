@@ -1,0 +1,19 @@
+{
+  "requested": 1,
+  "host_accepted": 1,
+  "delivered": 0,
+  "stopped_reason": null,
+  "success_rate": 0.0,
+  "rate_limit_retries": 0,
+  "elapsed_s": 5.01,
+  "latency_ms_median": null,
+  "latency_ms_p95": null,
+  "latency_ms_max": null,
+  "by_destination": {
+    "6": {
+      "accepted": 1,
+      "delivered": 0
+    }
+  },
+  "evidence": "artifacts/hil/2026-09-26/r4/member-node6-first-send.jsonl"
+}

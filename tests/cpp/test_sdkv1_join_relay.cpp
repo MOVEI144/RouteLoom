@@ -1089,6 +1089,35 @@ Bytes up_frame(const std::uint32_t relay_id, const std::uint8_t step, const Rela
   return out;
 }
 
+void test_colocated_gateway_proxy_down() {
+  current = "colocated_gateway_proxy_down";
+  std::deque<WireFrame> mesh;
+  WirePort port(mesh, kProxy);
+  FakeAuthority authority;
+  JoinRelayGatewayConfig config{};
+  config.node = kProxy;
+  config.gateway_epoch = kGatewayEpoch;
+  const Bytes m1 = up_frame(73, 1, RelayState::Continue, kProxy);
+  {
+    JoinRelayGateway ordinary(config, port);
+    CHECK(ordinary.set_membership(MembershipState::Member).ok());
+    CHECK(ordinary.set_host_sink(&authority).ok());
+    CHECK(ordinary.on_relay_rx(kProxy, 0, FrameType::BootstrapAuth, view(m1), 100).ok());
+    CHECK(authority.ups.empty());
+  }
+  config.colocated_proxy = true;
+  JoinRelayGateway colocated(config, port);
+  CHECK(colocated.set_membership(MembershipState::Member).ok());
+  CHECK(colocated.set_host_sink(&authority).ok());
+  CHECK(colocated.on_relay_rx(kProxy, 0, FrameType::BootstrapAuth, view(m1), 100).ok());
+  CHECK(authority.ups.size() == 1);
+  if (authority.ups.empty()) return;
+  const Bytes m2 = down_object(parse_up(authority.ups.back().object).header, 2,
+                               RelayState::Continue, filler(20, 2));
+  CHECK(colocated.host_down(kProxy, view(m2), 101).ok());
+  CHECK(mesh.size() == 1 && mesh.front().to == kProxy);
+}
+
 void test_busy_inside_relay_up() {
   current = "busy_inside_relay_up";
   // Sink callbacks must not re-enter the gateway: mutating calls inside
@@ -1902,6 +1931,7 @@ int main() {
   test_busy_inside_relay_abort();
   test_delivery_failed_callback_busy();
   test_q116_stage_and_terminal_dedup();
+  test_colocated_gateway_proxy_down();
   test_q116_proxy_old_up_keeps_down();
   test_q116_gateway_stage_and_abort_identity();
   test_q116_invalid_complete_does_not_poison_floor();

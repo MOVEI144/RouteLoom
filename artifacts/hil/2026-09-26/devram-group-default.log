@@ -1,0 +1,4 @@
+$ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-manual2.sock group-send --network 00000000524c0001 --group ALL --payload 524c48494c47 --wait-ms 5000
+{"v":1,"request_id":"ctl-1023960","ok":false,"error":{"code":"UNSUPPORTED","detail":{"message":"the attached gateway does not advertise group_delivery_v1 (HelloAck capability bit 7 with host_ops_v1)","required_capability":"group_delivery_v1","capability":519},"retryable":false}}
+generated key: 8de51ed06690402bac7c2e78ea03f642
+exit=0

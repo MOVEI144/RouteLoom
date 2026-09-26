@@ -1,0 +1,99 @@
+{
+    "version": "1.2",
+    "total_size": 1421539,
+    "layout": [
+        {
+            "name": "Flash Code",
+            "total": 0,
+            "used": 1150706,
+            "free": 0,
+            "parts": {
+                ".text": {
+                    "size": 1150706
+                }
+            }
+        },
+        {
+            "name": "DIRAM",
+            "total": 341760,
+            "used": 320077,
+            "free": 21683,
+            "parts": {
+                ".bss": {
+                    "size": 230944
+                },
+                ".text": {
+                    "size": 68511
+                },
+                ".data": {
+                    "size": 20622
+                }
+            }
+        },
+        {
+            "name": "Flash Data",
+            "total": 0,
+            "used": 159356,
+            "free": 0,
+            "parts": {
+                ".rodata": {
+                    "size": 159080
+                },
+                ".appdesc": {
+                    "size": 256
+                },
+                ".tdata": {
+                    "size": 20
+                }
+            }
+        },
+        {
+            "name": "IRAM",
+            "total": 16384,
+            "used": 16384,
+            "free": 0,
+            "parts": {
+                ".text": {
+                    "size": 15356
+                },
+                ".vectors": {
+                    "size": 1028
+                }
+            }
+        },
+        {
+            "name": "RTC SLOW",
+            "total": 8192,
+            "used": 5860,
+            "free": 2332,
+            "parts": {
+                ".data": {
+                    "size": 5816
+                },
+                ".force_slow": {
+                    "size": 36
+                },
+                ".rtc_noinit": {
+                    "size": 8
+                }
+            }
+        },
+        {
+            "name": "RTC FAST",
+            "total": 8192,
+            "used": 132,
+            "free": 8060,
+            "parts": {
+                ".text": {
+                    "size": 104
+                },
+                ".rtc_reserved": {
+                    "size": 24
+                },
+                ".force_fast": {
+                    "size": 4
+                }
+            }
+        }
+    ]
+}

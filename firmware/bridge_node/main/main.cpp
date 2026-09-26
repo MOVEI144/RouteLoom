@@ -329,6 +329,11 @@ extern "C" void app_main(void) {
   }
   owner_config.joiner.node = owner_config.local_node;
   owner_config.joiner.mac = owner_config.local_mac;
+  owner_config.joiner.capability = routeloom::sdkv1::kMemberRoleEndpoint |
+                                   routeloom::sdkv1::kMemberRoleRelay |
+                                   routeloom::sdkv1::kMemberRoleGateway;
+  owner_config.joiner.requested_role =
+      static_cast<std::uint8_t>(routeloom::sdkv1::kMemberRoleGateway);
   owner_config.log_tag = kTag;
   owner_config.gateway = true;  // USB-attached: relay + direct local channel
   status = owner.begin(sdkv1_stores, entropy, owner_config);
@@ -686,6 +691,9 @@ extern "C" void app_main(void) {
   static ROUTELOOM_MEMBER_SMALL_LP routeloom::ConfigGateway config_gateway(config_port, bridge);
   status = bridge.attach_config(config_gateway);
   if (!status) fail(status.detail);
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+  config_gateway.attach_authority(owner.authority_demux());
+#endif
 #endif
 
   // M1 diagnostics (m1-completion D1d): the bridge answers HostOps 0x30
@@ -854,6 +862,21 @@ extern "C" void app_main(void) {
           monotonic_now_ms());
     }
     bridge.poll(monotonic_now_ms());
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+    static std::uint64_t last_usb_stats_ms = 0;
+    const std::uint64_t usb_stats_now = monotonic_now_ms();
+    if (usb_stats_now - last_usb_stats_ms >= 2000) {
+      last_usb_stats_ms = usb_stats_now;
+      const auto& s = bridge.stats();
+      ESP_LOGI(kTag, "usb state=%u rx=%llu tx=%llu drop=%llu credit_denied=%llu write_err=%llu",
+               static_cast<unsigned>(bridge.state()),
+               static_cast<unsigned long long>(s.rx_frames),
+               static_cast<unsigned long long>(s.tx_frames),
+               static_cast<unsigned long long>(s.dropped_frames),
+               static_cast<unsigned long long>(s.credit_denied),
+               static_cast<unsigned long long>(s.tx_write_errors));
+    }
+#endif
     runtime.poll_once();
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
     owner.poll(monotonic_now_ms());

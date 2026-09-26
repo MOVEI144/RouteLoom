@@ -1,0 +1,15 @@
+[2026-09-25T19:36:42.731Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-25T19:36:48.793Z] I (164841) RouteLoomRef: message origin=1 session=160 sequence=22 bytes=9
+[2026-09-25T19:36:48.993Z] W (165040) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=4 message=present
+[2026-09-25T19:36:49.037Z] W (165084) RouteLoomRef: diagnostic reason=RECEIPT_DEDUP_CONFLICT peer=4 message=present
+[2026-09-25T19:36:49.105Z] W (165152) RouteLoomRef: diagnostic reason=RECEIPT_DEDUP_CONFLICT peer=4 message=present
+[2026-09-25T19:36:49.216Z] I (165263) RouteLoomRef: message origin=1 session=160 sequence=25 bytes=9
+[2026-09-25T19:36:49.583Z] I (165630) RouteLoomRef: message origin=1 session=160 sequence=28 bytes=9
+[2026-09-25T19:36:49.946Z] I (165993) RouteLoomRef: message origin=1 session=160 sequence=31 bytes=9
+[2026-09-25T19:36:50.308Z] W (166355) RouteLoomRef: diagnostic reason=ROUTE_INFEASIBLE_SEQNO_NEEDED peer=2 message=none
+[2026-09-25T19:36:50.314Z] W (166357) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=1 seq=3 att=1 peer=2 message=none
+[2026-09-25T19:37:04.436Z] I (180483) RouteLoom: stack hwm main 10604 B
+[2026-09-25T19:38:04.437Z] I (240484) RouteLoom: stack hwm main 10604 B
+[2026-09-25T19:39:04.437Z] I (300484) RouteLoom: stack hwm main 10604 B
+[2026-09-25T19:40:04.437Z] I (360485) RouteLoom: stack hwm main 10604 B
+[2026-09-25T19:40:35.886Z] !! capture closed

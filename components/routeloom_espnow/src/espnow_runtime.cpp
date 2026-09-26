@@ -5,6 +5,7 @@
 #include <new>
 
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_now.h"
@@ -12,6 +13,9 @@
 #include "esp_wifi.h"
 #include "routeloom/wire.hpp"
 #include "routeloom/sdkv1_revocation.hpp"
+#if CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
+#include "routeloom/sdkv1_join_transport.hpp"
+#endif
 
 namespace routeloom::espnow {
 namespace {
@@ -21,6 +25,20 @@ namespace {
 constexpr std::uint32_t kAutonomyWireLifetimeMs = 500;
 // poll_once runs every ~2ms: stack headroom is logged once a minute.
 constexpr std::uint64_t kStackHwmLogIntervalMs = 60000;
+
+#if CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
+void trace_rld1(const char* direction, const ByteView frame) noexcept {
+  autonomy::Rld1Envelope envelope{};
+  if (!autonomy::rld1_decode(frame, envelope).ok()) return;
+  if (envelope.kind != FrameType::BootstrapAuth) return;
+  sdkv1::JoinAuthObject object{};
+  if (!sdkv1::join_object_decode(ByteView{envelope.body.data(), envelope.body_size},
+                                 object).ok()) return;
+  ESP_LOGI(kTag, "HIL RLD1 %s claimed=%llu phase=%u step=%u",
+           direction, static_cast<unsigned long long>(envelope.claimed_node),
+           static_cast<unsigned>(object.phase), static_cast<unsigned>(object.step));
+}
+#endif
 
 Status esp_status(const esp_err_t error, const StatusCode code,
                   const char* detail) noexcept {
@@ -168,23 +186,38 @@ Status EspNowRuntime::initialize_wifi() noexcept {
     return Status::error(StatusCode::InvalidArgument,
                          "approved channel and tx power are required");
   }
-  esp_err_t error = esp_netif_init();
+  esp_err_t error = ESP_OK;
+#if CONFIG_ROUTELOOM_WIFI_NETIF_INIT
+  // ESP-NOW does not need lwIP; the TCP/IP task is opt-in (Kconfig).
+  error = esp_netif_init();
   if (error != ESP_OK && error != ESP_ERR_INVALID_STATE) {
     return esp_status(error, StatusCode::RadioFailure,
                       "esp_netif_init failed");
   }
+#endif
   error = esp_event_loop_create_default();
   if (error != ESP_OK && error != ESP_ERR_INVALID_STATE) {
     return esp_status(error, StatusCode::RadioFailure,
                       "event loop init failed");
   }
   wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
+  ESP_LOGI(kTag, "Wi-Fi init heap: free=%lu largest=%lu bytes",
+           static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+           static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
   error = esp_wifi_init(&init);
   if (error != ESP_OK) {
+    ESP_LOGE(kTag, "esp_wifi_init: %s (0x%x), heap free=%lu largest=%lu bytes",
+             esp_err_to_name(error), static_cast<unsigned>(error),
+             static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+             static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
     return esp_status(error, StatusCode::RadioFailure,
                       "esp_wifi_init failed");
   }
   wifi_initialized_ = true;
+  ESP_LOGI(kTag, "Wi-Fi initialized heap: free=%lu largest=%lu min=%lu bytes",
+           static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+           static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+           static_cast<unsigned long>(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)));
   if ((error = esp_wifi_set_storage(WIFI_STORAGE_RAM)) != ESP_OK ||
       (error = esp_wifi_set_mode(WIFI_MODE_STA)) != ESP_OK) {
     return esp_status(error, StatusCode::RadioFailure,
@@ -220,6 +253,10 @@ Status EspNowRuntime::initialize_wifi() noexcept {
     return esp_status(error, StatusCode::RadioFailure,
                       "reading station MAC failed");
   }
+  ESP_LOGI(kTag, "Wi-Fi started heap: free=%lu largest=%lu min=%lu bytes",
+           static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+           static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+           static_cast<unsigned long>(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)));
   return Status::success();
 }
 
@@ -326,6 +363,24 @@ Status EspNowRuntime::initialize_espnow() noexcept {
       }
     }
   }
+  ESP_LOGI(kTag, "ESP-NOW ready heap: free=%lu largest=%lu min=%lu bytes",
+           static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+           static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+           static_cast<unsigned long>(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)));
+#if CONFIG_ROUTELOOM_BOOT_HEAP_FLOOR_BYTES > 0
+  // On-device counterpart of the CI static-RAM guard (ram-budget.md): the
+  // radio started, but session crypto and USB work still need heap. Not
+  // fatal — the bench reads this line as a failed start.
+  const std::size_t ready_free = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  const std::size_t ready_largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (ready_free < CONFIG_ROUTELOOM_BOOT_HEAP_FLOOR_BYTES ||
+      ready_largest < CONFIG_ROUTELOOM_BOOT_HEAP_FLOOR_BYTES / 2) {
+    ESP_LOGE(kTag, "BOOT_HEAP_BELOW_FLOOR free=%lu largest=%lu floor=%u bytes",
+             static_cast<unsigned long>(ready_free),
+             static_cast<unsigned long>(ready_largest),
+             static_cast<unsigned>(CONFIG_ROUTELOOM_BOOT_HEAP_FLOOR_BYTES));
+  }
+#endif
   return Status::success();
 }
 
@@ -540,6 +595,11 @@ Status EspNowRuntime::adopt_member_node(const routeloom::NodeConfig& adopted) no
     applied.route_advertisement_period_ms = routeloom::kScopedProductPeriodMs;
     applied.route_lifetime_ms = routeloom::kScopedProductLifetimeMs;
   }
+  // Firmware components are attached before asynchronous member adoption.
+  // Keep both terminal sinks across placement reconstruction so authenticated
+  // service and config work still reaches their owners after a join.
+  GatewayServiceSink* const gateway_sink = node_.gateway_sink();
+  ConfigEndpointSink* const config_sink = node_.config_sink();
   node_.~MeshNode();
   new (&node_) MeshNode(applied, *this, security_, observer_);
   // The reconstruction above drops every attached sink: the #117
@@ -547,6 +607,8 @@ Status EspNowRuntime::adopt_member_node(const routeloom::NodeConfig& adopted) no
   // start refuses without it. Owner/observer sinks re-attach through
   // their own apply legs after this returns.
   (void)node_.set_reply_peer_port(&reply_port_);
+  if (gateway_sink != nullptr) (void)node_.set_gateway_sink(gateway_sink);
+  if (config_sink != nullptr) (void)node_.set_config_sink(config_sink);
   return Status::success();
 }
 
@@ -884,6 +946,22 @@ void EspNowRuntime::poll_once() noexcept {
         }
       }
       rx_source_ = event.source;
+#if CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
+      wire::Header trace{};
+      if (wire::peek_header(ByteView{event.data.data(), event.length}, trace).ok() &&
+          trace.next_hop == config_.node.node && trace.previous_hop == event.peer) {
+        std::uint32_t current = 0;
+        const Status expected = security_.current_rx_epoch(SecurityScope::Link,
+                                                            event.peer, current);
+        ESP_LOGI(kTag, "HIL LINK rx peer=%llu type=%u cid=%lu current=%lu status=%u seq=%llu",
+                 static_cast<unsigned long long>(event.peer),
+                 static_cast<unsigned>(trace.type),
+                 static_cast<unsigned long>(trace.link_epoch),
+                 static_cast<unsigned long>(current),
+                 static_cast<unsigned>(expected.code),
+                 static_cast<unsigned long long>(trace.message.sequence));
+      }
+#endif
       node_.on_radio_receive(
           event.peer, ByteView{event.data.data(), event.length}, meta, now);
       rx_source_ = {};
@@ -985,6 +1063,45 @@ void EspNowRuntime::poll_once() noexcept {
     migration_->poll(now);
   }
   node_.poll(now);
+  // Node admission and job completion only queue component events. Deliver
+  // them after the node call returns, while this Owner still has exclusive
+  // access to the node. A taken payload past its transaction deadline must
+  // be completed without starting new component work.
+  for (std::size_t i = 0; i < kComponentEventsMax; ++i) {
+    ComponentEvent event{};
+    if (!node_.take_component_event(event)) break;
+    const bool payload = event.target == ComponentEventTarget::ServicePayload ||
+                         event.target == ComponentEventTarget::ConfigFrame;
+    if (!payload || now < event.deadline_ms) {
+      switch (event.target) {
+        case ComponentEventTarget::ServicePayload:
+          if (auto* sink = node_.gateway_sink()) {
+            sink->on_service_payload(event.peer, event.frame, now);
+          }
+          break;
+        case ComponentEventTarget::ServiceJobDone:
+          if (auto* sink = node_.gateway_sink()) {
+            sink->on_service_job_done(event.job_id, event.job_accepted,
+                                      event.job_reason, now);
+          }
+          break;
+        case ComponentEventTarget::ConfigFrame:
+          if (auto* sink = node_.config_sink()) {
+            sink->on_config_frame(event.peer, event.frame, now);
+          }
+          break;
+        case ComponentEventTarget::ConfigJobDone:
+          if (auto* sink = node_.config_sink()) {
+            sink->on_config_job_done(event.job_id, event.job_accepted,
+                                     event.job_reason, now);
+          }
+          break;
+      }
+    }
+    (void)node_.complete_component_event(event.handle);
+  }
+  if (auto* sink = node_.gateway_sink()) sink->poll(now);
+  if (auto* sink = node_.config_sink()) sink->poll(now);
 }
 
 void EspNowRuntime::poll_bootstrap(const MonotonicMs now) noexcept {
@@ -994,6 +1111,9 @@ void EspNowRuntime::poll_bootstrap(const MonotonicMs now) noexcept {
     for (std::size_t i = 0; i < kBootstrapQueueCapacity &&
                             xQueueReceive(bootstrap_queue_, &rx, 0) == pdTRUE; ++i) {
       if (bootstrap_sink_ != nullptr) {
+#if CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
+        trace_rld1("rx", ByteView{rx.data.data(), rx.length});
+#endif
         // The security owner demuxes: ZT to its Joiner, member link
         // frames to its engine, member Discovers back into discovery.
         sdkv1::JoinRxMeta meta{};
@@ -1148,6 +1268,9 @@ Status EspNowRuntime::send_raw(const MacAddress& mac,
   portEXIT_CRITICAL(&callback_lock_);
   const esp_err_t error =
       esp_now_send(mac.bytes.data(), frame.data, frame.size);
+#if CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
+  if (error == ESP_OK) trace_rld1("tx", frame);
+#endif
   if (error != ESP_OK) {
     portENTER_CRITICAL(&callback_lock_);
     for (std::size_t i = 0; i < raw_tx_count_; ++i) {
@@ -1475,6 +1598,18 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
   if (peer != kBroadcastNodeId) node_.note_tx_submit_identity(token, submit_key);
   const esp_err_t error =
       esp_now_send(peer_mac.bytes.data(), frame.data, frame.size);
+#if CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
+  if (error == ESP_OK) {
+    wire::Header trace{};
+    if (wire::peek_header(frame, trace).ok()) {
+      ESP_LOGI(kTag, "HIL LINK tx peer=%llu type=%u cid=%lu seq=%llu",
+               static_cast<unsigned long long>(peer),
+               static_cast<unsigned>(trace.type),
+               static_cast<unsigned long>(trace.link_epoch),
+               static_cast<unsigned long long>(trace.message.sequence));
+    }
+  }
+#endif
   if (error != ESP_OK) {
     portENTER_CRITICAL(&callback_lock_);
     pending_tx_ = false;

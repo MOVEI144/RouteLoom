@@ -389,6 +389,93 @@ void suite_use_budget() {
   CHECK(!Bank::rx_counter_admissible(0xFFFFFFFFFFFFULL));
 }
 
+// RX-side demand (03 §9): an authenticated end frame under an unknown id
+// records the same demand a TX refusal would; link scope, an unconfigured
+// bank and a freshly installed context record nothing.
+template <typename Bank>
+void suite_rx_unknown_demand(const AeadGcm& port) {
+  Fixture<Bank> fix;
+  SessionDemand demand{};
+  // Unconfigured: ignored, no demand.
+  fix.bank.note_rx_unknown(SecurityScope::EndToEnd, kPeer);
+  CHECK(fix.bank.demand_count() == 0);
+  CHECK_OK(fix.configure(port));
+  // Link scope, self, broadcast and invalid peers never demand.
+  fix.bank.note_rx_unknown(SecurityScope::Link, kPeer);
+  fix.bank.note_rx_unknown(SecurityScope::EndToEnd, kSelf);
+  fix.bank.note_rx_unknown(SecurityScope::EndToEnd, kBroadcastNodeId);
+  fix.bank.note_rx_unknown(SecurityScope::EndToEnd, kInvalidNodeId);
+  fix.bank.note_rx_unknown(SecurityScope::Group, kPeer);
+  CHECK(fix.bank.demand_count() == 0);
+  // No context for the origin: one merged EndToEnd demand.
+  fix.bank.note_rx_unknown(SecurityScope::EndToEnd, kPeer);
+  fix.bank.note_rx_unknown(SecurityScope::EndToEnd, kPeer);
+  CHECK(fix.bank.demand_count() == 1);
+  CHECK(fix.bank.context_state(SecurityScope::EndToEnd, kPeer) == ContextState::Establishing);
+  CHECK(fix.bank.take_demand(demand));
+  CHECK(demand.scope == SecurityScope::EndToEnd && demand.peer == kPeer);
+  CHECK(!fix.bank.take_demand(demand));
+  // A context installed just now: the origin's stragglers under its old
+  // id are expected while its own install may still be in flight.
+  ContextKeys keys{};
+  keys.scope = SecurityScope::EndToEnd;
+  keys.network = kNet;
+  keys.peer = kPeer;
+  keys.tx_context_id = 0x3131;
+  keys.rx_context_id = 0x3232;
+  keys.tx_key.fill(0x11);
+  keys.rx_key.fill(0x22);
+  keys.tx_iv.fill(0x33);
+  keys.rx_iv.fill(0x44);
+  CHECK_OK(fix.bank.install(keys));
+  fix.bank.note_rx_unknown(SecurityScope::EndToEnd, kPeer);
+  CHECK(fix.bank.demand_count() == 0);
+  CHECK_OK(fix.bank.tick(1000 + Bank::kRxUnknownGraceMs - 1));
+  fix.bank.note_rx_unknown(SecurityScope::EndToEnd, kPeer);
+  CHECK(fix.bank.demand_count() == 0);
+  // Past the grace the mismatch is real: a new handshake replaces the
+  // context (the origin's install never happened, or it moved on).
+  CHECK_OK(fix.bank.tick(1000 + Bank::kRxUnknownGraceMs));
+  fix.bank.note_rx_unknown(SecurityScope::EndToEnd, kPeer);
+  CHECK(fix.bank.demand_count() == 1);
+  CHECK(fix.bank.take_demand(demand));
+  CHECK(demand.scope == SecurityScope::EndToEnd && demand.peer == kPeer);
+  // The live context stays usable throughout; TX never stalled.
+  std::uint32_t epoch = 0;
+  CHECK_OK(fix.bank.tx_epoch(SecurityScope::EndToEnd, kPeer, epoch));
+  CHECK(epoch == 0x3131);
+  // Another origin with no context: independent demand.
+  CHECK_OK(fix.bank.tick(1000 + Bank::kRxUnknownGraceMs + Bank::kRxUnknownRateMs));
+  fix.bank.note_rx_unknown(SecurityScope::EndToEnd, kPeer + 1);
+  CHECK(fix.bank.demand_count() == 1);
+  CHECK(fix.bank.take_demand(demand));
+  CHECK(demand.peer == kPeer + 1);
+}
+
+template <typename Bank>
+void suite_rx_unknown_rate(const AeadGcm& port) {
+  constexpr MonotonicMs kRateMs = 2000;
+  Fixture<Bank> fix;
+  CHECK_OK(fix.configure(port));
+  SessionDemand demand{};
+  fix.bank.note_rx_unknown(SecurityScope::EndToEnd, kPeer);
+  CHECK(fix.bank.take_demand(demand));
+  CHECK(demand.peer == kPeer);
+  // A taken demand must not allow the next authenticated but untrusted
+  // end header to start another handshake in the same receive burst.
+  for (NodeId peer = kPeer; peer < kPeer + 32; ++peer) {
+    fix.bank.note_rx_unknown(SecurityScope::EndToEnd, peer);
+  }
+  CHECK(fix.bank.demand_count() == 0);
+  CHECK_OK(fix.bank.tick(1000 + kRateMs - 1));
+  fix.bank.note_rx_unknown(SecurityScope::EndToEnd, kPeer + 1);
+  CHECK(fix.bank.demand_count() == 0);
+  CHECK_OK(fix.bank.tick(1000 + kRateMs));
+  fix.bank.note_rx_unknown(SecurityScope::EndToEnd, kPeer + 1);
+  CHECK(fix.bank.take_demand(demand));
+  CHECK(demand.peer == kPeer + 1);
+}
+
 template <typename Bank>
 void suite_reservation(const AeadGcm& port, bool& fail_next) {
   Fixture<Bank> fix;
@@ -1012,6 +1099,8 @@ void run_suite(const AeadGcm& port, bool& fail_next) {
   suite_hash_hints_transparent<Bank>(port);
   suite_peer_summary<Bank>(port);
   suite_unknown_and_demand<Bank>(port);
+  suite_rx_unknown_demand<Bank>(port);
+  suite_rx_unknown_rate<Bank>(port);
   suite_reservation<Bank>(port, fail_next);
   suite_install_retire<Bank>(port);
   suite_overlap<Bank>(port);

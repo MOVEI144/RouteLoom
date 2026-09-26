@@ -1,0 +1,3 @@
+# The C5 reference image has limited HP SRAM headroom. This profile keeps
+# the route and session capacities while bounding duplicate evidence to 32.
+CONFIG_ROUTELOOM_DEDUP_PROFILE_LEAF=y

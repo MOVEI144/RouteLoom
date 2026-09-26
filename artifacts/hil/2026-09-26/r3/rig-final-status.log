@@ -1,0 +1,9 @@
+bench bench-2026-09-26-mixed5: OFFLINE
+  offline: board 'ref-b': no port matched ['/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00']
+  offline: board 'ref-c': MISMATCH rig expects esp32c6, probe saw esp32c6fh4
+  offline: board 'ref-d': MISMATCH rig expects esp32c6, probe saw esp32c6fh4
+  bridge: ONLINE port=/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00 app=bridge_node chip=esp32c3 console=none
+  ref-a: ONLINE port=/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 app=reference_node chip=esp32c3 console=usb-serial-jtag
+  ref-b: OFFLINE port=- app=reference_node chip=esp32c3 console=usb-serial-jtag
+  ref-c: MISMATCH port=/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00 app=reference_node chip=esp32c6 console=usb-serial-jtag
+  ref-d: MISMATCH port=/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00 app=reference_node chip=esp32c6 console=usb-serial-jtag

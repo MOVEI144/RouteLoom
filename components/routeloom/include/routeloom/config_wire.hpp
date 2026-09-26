@@ -150,6 +150,8 @@ class ConfigTarget final : public ConfigEndpointSink {
   // Diagnostics surface.
   std::uint32_t control_denied() const noexcept { return control_denied_; }
   std::uint32_t object_acks() const noexcept { return object_acks_; }
+  std::uint32_t jobs_accepted() const noexcept { return jobs_accepted_; }
+  std::uint32_t jobs_failed() const noexcept { return jobs_failed_; }
   bool object_active() const noexcept { return assembly_.active; }
 
  private:
@@ -202,6 +204,8 @@ class ConfigTarget final : public ConfigEndpointSink {
   Assembly assembly_{};
   std::uint32_t control_denied_{0};
   std::uint32_t object_acks_{0};
+  std::uint32_t jobs_accepted_{0};
+  std::uint32_t jobs_failed_{0};
 };
 
 // --- ConfigGateway (bridge node) --------------------------------------------
@@ -226,6 +230,10 @@ class ConfigGateway final : public ConfigEndpointSink {
  public:
   ConfigGateway(ConfigWirePort& wire, ConfigHostSink& host) noexcept
       : wire_(wire), host_(host) {}
+
+  // The gateway's config endpoint also receives terminal authority frames.
+  // Route only claimed carriers/transfers to the authority transport.
+  void attach_authority(sdkv1::AuthorityMeshDemux* demux) noexcept;
 
   // 0x20 ConfigQuery: issue a StatusQuery3 for (target, ns, operation_id).
   // Busy while any query is outstanding.
@@ -335,6 +343,7 @@ class ConfigGateway final : public ConfigEndpointSink {
 
   ConfigWirePort& wire_;
   ConfigHostSink& host_;
+  sdkv1::AuthorityMeshDemux* authority_{nullptr};
   PendingQuery query_{};
   TransferSlot transfer_{};
   std::uint32_t replies_reported_{0};

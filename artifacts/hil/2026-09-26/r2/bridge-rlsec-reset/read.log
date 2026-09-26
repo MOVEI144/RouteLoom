@@ -1,0 +1,50 @@
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00:
+Connecting...
+Connected to ESP32-C3 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                94:a9:90:6a:ee:c4
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+Configuring flash size...
+Reading from 0x00191000 ╸                                3.1% 4.00kB/128.00kB [0s] 
+Reading from 0x00192000 ━╸                               6.2% 8.00kB/128.00kB [0s] 
+Reading from 0x00193000 ━━╸                              9.4% 12.00kB/128.00kB [0s] 
+Reading from 0x00194000 ━━━╸                            12.5% 16.00kB/128.00kB [0s] 
+Reading from 0x00195000 ━━━━╸                           15.6% 20.00kB/128.00kB [0s] 
+Reading from 0x00196000 ━━━━━╸                          18.8% 24.00kB/128.00kB [0s] 
+Reading from 0x00197000 ━━━━━━╸                         21.9% 28.00kB/128.00kB [0s] 
+Reading from 0x00198000 ━━━━━━━╸                        25.0% 32.00kB/128.00kB [0s] 
+Reading from 0x00199000 ━━━━━━━━                        28.1% 36.00kB/128.00kB [0s] 
+Reading from 0x0019a000 ━━━━━━━━━                       31.2% 40.00kB/128.00kB [0s] 
+Reading from 0x0019b000 ━━━━━━━━━━                      34.4% 44.00kB/128.00kB [0s] 
+Reading from 0x0019c000 ━━━━━━━━━━━                     37.5% 48.00kB/128.00kB [0s] 
+Reading from 0x0019d000 ━━━━━━━━━━━━                    40.6% 52.00kB/128.00kB [0s] 
+Reading from 0x0019e000 ━━━━━━━━━━━━━                   43.8% 56.00kB/128.00kB [0s] 
+Reading from 0x0019f000 ━━━━━━━━━━━━━━                  46.9% 60.00kB/128.00kB [0s] 
+Reading from 0x001a0000 ━━━━━━━━━━━━━━━                 50.0% 64.00kB/128.00kB [0s] 
+Reading from 0x001a1000 ━━━━━━━━━━━━━━━╸                53.1% 68.00kB/128.00kB [0s] 
+Reading from 0x001a2000 ━━━━━━━━━━━━━━━━╸               56.2% 72.00kB/128.00kB [0s] 
+Reading from 0x001a3000 ━━━━━━━━━━━━━━━━━╸              59.4% 76.00kB/128.00kB [0s] 
+Reading from 0x001a4000 ━━━━━━━━━━━━━━━━━━╸             62.5% 80.00kB/128.00kB [0s] 
+Reading from 0x001a5000 ━━━━━━━━━━━━━━━━━━━╸            65.6% 84.00kB/128.00kB [0s] 
+Reading from 0x001a6000 ━━━━━━━━━━━━━━━━━━━━╸           68.8% 88.00kB/128.00kB [0s] 
+Reading from 0x001a7000 ━━━━━━━━━━━━━━━━━━━━━╸          71.9% 92.00kB/128.00kB [0s] 
+Reading from 0x001a8000 ━━━━━━━━━━━━━━━━━━━━━━╸         75.0% 96.00kB/128.00kB [0s] 
+Reading from 0x001a9000 ━━━━━━━━━━━━━━━━━━━━━━━         78.1% 100.00kB/128.00kB [0s] 
+Reading from 0x001aa000 ━━━━━━━━━━━━━━━━━━━━━━━━        81.2% 104.00kB/128.00kB [0s] 
+Reading from 0x001ab000 ━━━━━━━━━━━━━━━━━━━━━━━━━       84.4% 108.00kB/128.00kB [0s] 
+Reading from 0x001ac000 ━━━━━━━━━━━━━━━━━━━━━━━━━━      87.5% 112.00kB/128.00kB [0s] 
+Reading from 0x001ad000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━     90.6% 116.00kB/128.00kB [0s] 
+Reading from 0x001ae000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━    93.8% 120.00kB/128.00kB [0s] 
+Reading from 0x001af000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   96.9% 124.00kB/128.00kB [0s] 
+Reading from 0x001b0000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 128.00kB/128.00kB [0s] 
+Read 131072 bytes from 0x00190000 in 0.5 seconds (2287.3 kbit/s) to '/tmp/routeloom-hil-r2-private/bridge-rlsec-before-devram.bin'.
+
+Hard resetting via RTS pin...

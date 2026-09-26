@@ -1,0 +1,10 @@
+f83109ffd3c20462ad5905001983e384fed902fc75878e67ef4d4696fbc21824  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-member-r4/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+7256ae90f7ae6b17bbc3fe844f46cc7832af24ee7b093042182466aa6aab844f  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-member-r4/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+f83109ffd3c20462ad5905001983e384fed902fc75878e67ef4d4696fbc21824  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-member-r4/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+7256ae90f7ae6b17bbc3fe844f46cc7832af24ee7b093042182466aa6aab844f  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-member-r4/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+8031f1734b9490c56225bff99de0ea5e3da7748fc1544b10aac20c4e279c07a4  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-member-r4/build/bootloader/bootloader.bin
+b04cbe107c9ab592842780179b2213538b7d477025d5969d1181868f98cae811  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-member-r4/build/flasher_args.json
+068ab45eb37a4be22b3aea004e4e970cfbbf9a25bc0824c1572be5bf68a37fef  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-member-r4/build/partition_table/partition-table.bin
+64806d988680aaa8911effcbe7dc72e7b16ddd337d8c67b09ad7909ac491cb2e  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-member-r4/build/ram-report.json
+bbd5e55d28f5fe1f0904d07513e607727412b355d28b54f71e74c3351bf93da1  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-member-r4/build/routeloom_reference_node.bin
+0b165fb9769de1b5b7b94f7b002642d39c7cb88c131d2ac6e3b1dcfbcf9f5f8b  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-c5-member-r4/build/size.json

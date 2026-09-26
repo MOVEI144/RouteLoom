@@ -1,0 +1,28 @@
+[2026-09-25T17:56:10.097+00:00] !! connected /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00
+[2026-09-25T17:56:11.498+00:00] I (126318) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_deniI (172321) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denied=42557 write_err=0
+[2026-09-25T17:56:13.501+00:00] I (174321) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denied=43057 write_err=0
+[2026-09-25T17:56:15.503+00:00] I (176321) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denied=43557 write_err=0
+[2026-09-25T17:56:17.506+00:00] I (178321) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denied=44057 write_err=0
+[2026-09-25T17:56:17.906+00:00] I (178721) RouteLoomBr: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60
+[2026-09-25T17:56:18.107+00:00] I (178840) RouteLoomBr: RLD1 tx kind=2 ch=6 dst=94:a9:90:7a:b5:60
+[2026-09-25T17:56:19.509+00:00] I (180291) RouteLoom: stack hwm main 10688 B
+[2026-09-25T17:56:19.509+00:00] I (180324) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denied=44557 write_err=0
+[2026-09-25T17:56:21.312+00:00] I (182188) RouteLoomBr: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60
+[2026-09-25T17:56:21.512+00:00] I (182325) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denied=45057 write_err=0
+[2026-09-25T17:56:21.512+00:00] I (182391) RouteLoomBr: RLD1 tx kind=2 ch=6 dst=94:a9:90:7a:b5:60
+[2026-09-25T17:56:23.515+00:00] I (184326) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denied=45557 write_err=0
+[2026-09-25T17:56:25.517+00:00] I (186326) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denied=46057 write_err=0
+[2026-09-25T17:56:27.319+00:00] I (188110) RouteLoomBr: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60
+[2026-09-25T17:56:27.520+00:00] I (188327) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denied=46557 write_err=0
+[2026-09-25T17:56:27.520+00:00] I (188341) RouteLoomBr: RLD1 tx kind=2 ch=6 dst=94:a9:90:7a:b5:60
+[2026-09-25T17:56:29.523+00:00] I (190328) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denied=47057 write_err=0
+[2026-09-25T17:56:31.526+00:00] I (192328) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denied=47557 write_err=0
+[2026-09-25T17:56:33.529+00:00] I (194328) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denied=48057 write_err=0
+[2026-09-25T17:56:35.532+00:00] I (196328) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denied=48557 write_err=0
+[2026-09-25T17:56:36.733+00:00] I (197620) RouteLoomBr: RLD1 rx kind=1 ch=6 generation=0 src=94:a9:90:7a:b5:60
+[2026-09-25T17:56:36.933+00:00] I (197831) RouteLoomBr: RLD1 tx kind=2 ch=6 dst=94:a9:90:7a:b5:60
+[2026-09-25T17:56:37.534+00:00] I (198330) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denied=49057 write_err=0
+[2026-09-25T17:56:39.536+00:00] I (200330) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denied=49557 write_err=0
+[2026-09-25T17:56:41.539+00:00] I (202330) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denied=50057 write_err=0
+[2026-09-25T17:56:43.543+00:00] I (204330) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denied=50557 write_err=0
+[2026-09-25T17:56:45.146+00:00] !! capture finished

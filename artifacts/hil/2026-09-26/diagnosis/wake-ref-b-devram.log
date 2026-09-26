@@ -1,0 +1,8 @@
+waiting for esp32c3/94:a9:90:7a:26:ac at /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00
+Traceback (most recent call last):
+  File "/home/sahur/orca/workspaces/RouteLoom/hil-bench/tools/hil/wake_flash.py", line 65, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/home/sahur/orca/workspaces/RouteLoom/hil-bench/tools/hil/wake_flash.py", line 38, in main
+    time.sleep(0.005)
+KeyboardInterrupt

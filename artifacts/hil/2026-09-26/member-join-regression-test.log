@@ -1,0 +1,8 @@
+Internal ctest changing into directory: /tmp/routeloom-hil-host-build
+Test project /tmp/routeloom-hil-host-build
+    Start 65: routeloom_sdkv1_coordinator_tests
+1/1 Test #65: routeloom_sdkv1_coordinator_tests ...   Passed    0.38 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   0.38 sec

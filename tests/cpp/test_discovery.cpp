@@ -1253,6 +1253,63 @@ void test_stranded_rediscovery_rebinds() {
   CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Reachable);
 }
 
+void test_reauth_releases_transient_candidate() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, true);
+  Unit& b = world.add(2, 0xB2, true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+  CHECK(a.engine.candidate_count() == 0);
+  CHECK(b.engine.candidate_count() == 0);
+
+  // A fresh RLD1 exchange to an already-bound MAC is the reset/reauth path.
+  // Its responder Candidate must be removed at elevation, before its 5 s TTL.
+  run_exchange(world, a);
+  CHECK(a.engine.candidate_count() == 0);
+  CHECK(b.engine.candidate_count() == 0);
+}
+
+void test_stale_peer_repaired_while_other_edge_reachable() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, true);
+  Unit& b = world.add(2, 0xB2, true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+
+  Unit& c = world.add(3, 0xC3, true);
+  a.hooks.peer_members.insert(3);
+  c.hooks.peer_members.insert(1);
+  CHECK_OK(c.engine.start(world.medium.now));
+  world.medium.block(b.mac, a.mac);  // let c win this initial exchange
+  run_exchange(world, a);
+  world.medium.blocked.clear();
+  NeighborPhase phase{};
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Reachable);
+  CHECK(a.engine.phase_of(c.mac, phase) && phase == NeighborPhase::Reachable);
+
+  const auto discovers = a.port.count_kind(FrameType::Discover);
+  const auto b_auths = b.engine.stats().auths_completed;
+  const auto c_auths = c.engine.stats().auths_completed;
+  world.medium.block(a.mac, b.mac);
+  world.medium.block(b.mac, a.mac);
+  world.run(35000);
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Stale);
+  CHECK(a.engine.phase_of(c.mac, phase) && phase == NeighborPhase::Reachable);
+  CHECK(a.port.count_kind(FrameType::Discover) > discovers);
+  CHECK(a.observer.has("REDISCOVERY"));
+  // An unrelated OFFER must not consume a repair round for the stale MAC.
+  CHECK(c.engine.stats().auths_completed == c_auths);
+
+  world.medium.blocked.clear();
+  world.run(20000);
+  CHECK(b.engine.stats().auths_completed > b_auths);
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Reachable);
+}
+
 // Port-level send refusal is counted: the RLD1 and wire lanes both bump
 // stats().send_failures, retries still complete the exchange, and the
 // refused send never counts toward offers_tx/probes_tx.
@@ -1528,6 +1585,8 @@ int main() {
   test_stale_reprobe_bounded();
   test_stale_reprobe_never_targets_dead();
   test_stranded_rediscovery_rebinds();
+  test_reauth_releases_transient_candidate();
+  test_stale_peer_repaired_while_other_edge_reachable();
   test_send_failure_stats();
   test_forget_revoked_peer();
   test_reauth_revoked_rate_limit();

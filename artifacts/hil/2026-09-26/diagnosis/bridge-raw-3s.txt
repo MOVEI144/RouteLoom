@@ -1,0 +1,1 @@
+port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00 dtr True rts False

@@ -1,0 +1,1 @@
+{"index":0,"accepted":true,"request":10,"response":{"accepted":true,"request":10},"delivery":{"request":10,"destination":2,"state":"failed","reason":"HOP_ACCEPT_TIMEOUT","msg_session":188,"msg_seq":25,"updated_ms":1790370502486},"latency_ms":2841.68}

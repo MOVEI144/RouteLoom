@@ -238,6 +238,10 @@ struct CoordinatorSnapshot {
   bool sleeping{false};
   bool action_pending{false};
   JoinState joiner{JoinState::Stopped};
+  StatusCode joiner_last_error{StatusCode::Ok};
+  std::uint32_t joiner_rx_dropped{0};
+  std::uint32_t joiner_observations{0};
+  std::uint32_t radio_generation{0};
   bool engine_quiescent{true};
   std::uint32_t link_sessions{0};
   std::uint32_t end_sessions{0};
@@ -261,6 +265,17 @@ struct CoordinatorCounters {
   std::uint32_t dev_adoptions{0};
   std::uint32_t removals{0};
   std::uint32_t demux_drops{0};
+  std::uint32_t member_starts{0};
+  std::uint32_t link_requests{0};
+  std::uint32_t link_request_failures{0};
+  std::uint32_t link_send_failures{0};
+  std::uint32_t link_established{0};
+  std::uint32_t link_failed{0};
+  StatusCode link_last_error{StatusCode::Ok};
+  std::uint32_t end_send_failures{0};
+  std::uint32_t end_established{0};
+  std::uint32_t end_failed{0};
+  StatusCode end_last_error{StatusCode::Ok};
   std::uint32_t staged_drops{0};
   std::uint32_t usb_drops{0};
   std::uint32_t sleep_parks{0};
@@ -315,6 +330,8 @@ class SecurityCoordinator final : public BootstrapSink,
     CoordinatorUsbPort* usb{nullptr};
     SessionCredentialVerifier* verifier{nullptr};
     AeadGcm bank_aead{};
+    // EDHOC suite 2 AES-CCM. ESP-IDF has no portable builtin backend.
+    const edhoc::AeadCcm* join_aead{nullptr};
     // Combined-tag GCM for the group provider and the authority channel
     // (a different port than the bank's split-tag AeadGcm above).
     routeloom::AeadGcm crypto_aead{};
@@ -550,6 +567,7 @@ class SecurityCoordinator final : public BootstrapSink,
     bool initiator{false};
     keys::LinkCarrier carrier{};
     std::uint32_t discovery_token{NeighborDiscovery::kMemberHandshakeNone};
+    std::uint32_t quiet_retry_token{0};  // RLRES1 R3 may need three more sends
     // Our transaction nonce (initiator: drawn on first send; responder:
     // echoed from the inbound m1/R1). object_id is its first 4 bytes.
     std::array<std::uint8_t, 16> txn{};
@@ -657,6 +675,7 @@ class SecurityCoordinator final : public BootstrapSink,
     Status open(const SecurityContext& context, std::uint64_t counter, ByteView aad,
                 ByteView ciphertext, const std::array<std::uint8_t, kAeadTagSize>& tag,
                 MutableByteView plaintext) noexcept override;
+    void note_rx_unknown_context(const SecurityContext& context) noexcept override;
 
    private:
     static bool is_group(SecurityScope scope) noexcept {
@@ -731,7 +750,9 @@ class SecurityCoordinator final : public BootstrapSink,
   Status drive_engine(MonotonicMs now) noexcept;
   Status emit_send(const HandshakeResult& result, MonotonicMs now) noexcept;
   Status emit_link_send(const HandshakeResult& result, MonotonicMs now) noexcept;
+  Status pump_link_tx(MonotonicMs now) noexcept;
   Status emit_end_send(const HandshakeResult& result, MonotonicMs now) noexcept;
+  Status pump_end_tx(MonotonicMs now) noexcept;
   Status installed_link(const HandshakeResult& result, MonotonicMs now) noexcept;
   void drain_demands(MonotonicMs now) noexcept;
   void drain_engine_results(MonotonicMs now) noexcept;
@@ -781,8 +802,22 @@ class SecurityCoordinator final : public BootstrapSink,
     JoinObjectSlot link_rx;
     JoinObjectSlot end_tx;
     JoinObjectSlot end_rx;
+    NodeId end_tx_peer{kInvalidNodeId};
+    MonotonicMs end_tx_last_attempt_ms{0};
     JoinProxy proxy;
     JoinRelayGateway gateway;
+    // A colocated gateway and proxy use one Owner callback stack. Defer
+    // local relay frames until poll so replies and chunk receipts never
+    // re-enter either engine's guarded port callback.
+    static constexpr std::size_t kLocalRelaySlots = 16;
+    struct LocalRelayFrame {
+      FrameType type{FrameType::BootstrapAuth};
+      std::uint8_t size{0};
+      std::array<std::uint8_t, kMaxApplicationPayload> bytes{};
+    };
+    std::array<LocalRelayFrame, kLocalRelaySlots> local_relay{};
+    std::uint8_t local_relay_head{0};
+    std::uint8_t local_relay_count{0};
     std::array<DemuxEntry, kDemuxEntries> demux{};
     bool gateway_active{false};
 
@@ -791,7 +826,8 @@ class SecurityCoordinator final : public BootstrapSink,
                  SessionCredentialVerifier& verifier, EntropySource& entropy, ZtRld1Port& rld1,
                  ZtRelayPort& relay, JoinCookieSealer& sealer,
                  const JoinProxyConfig& proxy_config,
-                 const JoinRelayGatewayConfig& gateway_config) noexcept;
+                 const JoinRelayGatewayConfig& gateway_config,
+                 const edhoc::AeadCcm* aead) noexcept;
   };
 
   // Tagged by mode_: joiner iff ZeroTouch, member iff Member or Dev,

@@ -1,0 +1,14 @@
+{
+  "sent_unix": 1790365578.1194463,
+  "response": "{\"accepted\":true,\"request\":7}",
+  "delivery": {
+    "request": 7,
+    "destination": 2,
+    "state": "expired",
+    "reason": "DEADLINE_EXPIRED",
+    "msg_session": 163,
+    "msg_seq": 7,
+    "updated_ms": 1790365583124
+  },
+  "latency_ms": 5019.0
+}

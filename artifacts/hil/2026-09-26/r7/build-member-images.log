@@ -1,0 +1,4 @@
+built bridge_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c3-member-r11final-usbconsole
+bridge-member rc=0
+built reference_node/esp32c3 -> /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-c3-member-r11final-node2
+ref-member rc=0

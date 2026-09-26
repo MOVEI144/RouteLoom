@@ -1,0 +1,63 @@
+[2026-09-25T16:19:44.181Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-25T16:19:44.298Z] I (261) esp_image: segment 4: paddr=0016c5dc vaddr=40386c4c size=07368h ( 29544) load
+[2026-09-25T16:19:44.304Z] I (267) esp_image: segment 5: paddr=0017394c vaddr=50000000 size=0001ch (    28) load
+[2026-09-25T16:19:44.304Z] I (268) esp_image: segment 6: paddr=00173970 vaddr=50000020 size=016b8h (  5816) load
+[2026-09-25T16:19:44.306Z] I (269) esp_image: segment 7: paddr=00175030 vaddr=500016e0 size=00024h (    36) load
+[2026-09-25T16:19:44.311Z] I (275) boot: Loaded app from partition at offset 0x10000
+[2026-09-25T16:19:44.311Z] I (275) boot: Disabling RNG early entropy source...
+[2026-09-25T16:19:44.313Z] I (277) cpu_start: Unicore app
+[2026-09-25T16:19:44.321Z] I (285) cpu_start: Pro cpu start user code
+[2026-09-25T16:19:44.321Z] I (285) cpu_start: cpu freq: 160000000 Hz
+[2026-09-25T16:19:44.321Z] I (285) app_init: Application information:
+[2026-09-25T16:19:44.321Z] I (285) app_init: Project name:     routeloom_bridge_node
+[2026-09-25T16:19:44.321Z] I (286) app_init: App version:      1
+[2026-09-25T16:19:44.322Z] I (286) app_init: Compile time:     Sep 25 2026 16:18:41
+[2026-09-25T16:19:44.322Z] I (286) app_init: ELF file SHA256:  a9aff39ec...
+[2026-09-25T16:19:44.322Z] I (286) app_init: ESP-IDF:          v6.0.3
+[2026-09-25T16:19:44.322Z] I (286) efuse_init: Min chip rev:     v0.3
+[2026-09-25T16:19:44.322Z] I (286) efuse_init: Max chip rev:     v1.99 
+[2026-09-25T16:19:44.322Z] I (286) efuse_init: Chip rev:         v0.4
+[2026-09-25T16:19:44.322Z] I (286) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-25T16:19:44.323Z] I (287) heap_init: At 3FCC9780 len 00012F90 (75 KiB): Retention RAM
+[2026-09-25T16:19:44.323Z] I (287) heap_init: At 3FCDC710 len 00002950 (10 KiB): Retention RAM
+[2026-09-25T16:19:44.323Z] I (287) heap_init: At 50001704 len 000008E4 (2 KiB): RTCRAM
+[2026-09-25T16:19:44.324Z] I (288) spi_flash: detected chip: generic
+[2026-09-25T16:19:44.324Z] I (288) spi_flash: flash io: dio
+[2026-09-25T16:19:44.324Z] W (288) spi_flash: Detected size(4096k) larger than the size in the binary image header(2048k). Using the size in the binary image header.
+[2026-09-25T16:19:44.325Z] I (289) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-25T16:19:44.325Z] I (289) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-25T16:19:44.326Z] I (290) main_task: Started on CPU0
+[2026-09-25T16:19:44.327Z] I (290) main_task: Calling app_main()
+[2026-09-25T16:19:44.357Z] I (320) RouteLoomBr: sdkv1 identity: none provisioned
+[2026-09-25T16:19:44.357Z] I (320) RouteLoomBr: sdkv1 site: not a member
+[2026-09-25T16:19:44.357Z] I (321) RouteLoomBr: sdkv1 revocation: none rs_epoch=0 resume_slots=160
+[2026-09-25T16:19:44.357Z] I (321) RouteLoomBr: sdkv1 local_revocation: none
+[2026-09-25T16:19:44.357Z] I (321) RouteLoomBr: sdkv1 lifecycle: none
+[2026-09-25T16:19:44.363Z] I (326) RouteLoomBr: security owner ready (node 0x1)
+[2026-09-25T16:19:44.365Z] I (329) pp: pp rom version: 9387209
+[2026-09-25T16:19:44.365Z] I (329) net80211: net80211 rom version: 9387209
+[2026-09-25T16:19:44.367Z] I (331) wifi:wifi driver task: 3fcd843c, prio:23, stack:6656, core=0
+[2026-09-25T16:19:44.371Z] I (335) wifi:wifi firmware version: da143fa
+[2026-09-25T16:19:44.371Z] I (335) wifi:wifi certification version: v7.0
+[2026-09-25T16:19:44.372Z] I (335) wifi:config NVS flash: enabled
+[2026-09-25T16:19:44.372Z] I (335) wifi:config nano formatting: disabled
+[2026-09-25T16:19:44.372Z] I (335) wifi:Init data frame dynamic rx buffer num: 16
+[2026-09-25T16:19:44.372Z] I (336) wifi:Init static rx mgmt buffer num: 5
+[2026-09-25T16:19:44.372Z] I (336) wifi:Init management short buffer num: 32
+[2026-09-25T16:19:44.372Z] I (336) wifi:Init dynamic tx buffer num: 16
+[2026-09-25T16:19:44.373Z] I (336) wifi:Init static tx FG buffer num: 2
+[2026-09-25T16:19:44.373Z] I (336) wifi:Init static rx buffer size: 1600
+[2026-09-25T16:19:44.373Z] W (337) wifi:malloc buffer fail
+[2026-09-25T16:19:44.373Z] I (337) wifi:Init static rx buffer num: 4
+[2026-09-25T16:19:44.373Z] I (337) wifi:Init dynamic rx buffer num: 16
+[2026-09-25T16:19:44.373Z] E (337) wifi:Expected to init 10 rx buffer, actual is 4
+[2026-09-25T16:19:44.374Z] I (337) wifi:Deinit lldesc rx mblock:0
+[2026-09-25T16:19:44.374Z] I (337) wifi:Deinit lldesc rx mblock:0
+[2026-09-25T16:19:44.374Z] I (338) wifi:Deinit lldesc rx mblock:0
+[2026-09-25T16:19:44.374Z] I (338) wifi:Deinit lldesc rx mblock:0
+[2026-09-25T16:19:44.375Z] W (339) wifi_init: Failed to unregister Rx callbacks
+[2026-09-25T16:19:44.375Z] E (339) wifi_init: Failed to deinit Wi-Fi driver (0x3001)
+[2026-09-25T16:19:44.376Z] E (339) wifi_init: Failed to deinit Wi-Fi (0x3001)
+[2026-09-25T16:19:44.376Z] E (339) RouteLoomBr: fatal: esp_wifi_init failed (streak=9, deep sleep 1800000 ms)
+[2026-09-25T16:19:44.552Z] !! serial read error on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00: pyserial read failed: device reports readiness to read but returned no data (device disconnected or multiple access on port?)
+[2026-09-25T16:19:59.181Z] !! capture closed

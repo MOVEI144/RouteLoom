@@ -1,0 +1,8 @@
+[2026-09-25T16:54:04.762Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-25T16:54:39.686Z] I (114) esp_image: segment 1: paddr=00034540 vaddr=3fc91e00 sizeESP-ROM:esp32c3-api1-20210207
+[2026-09-25T16:54:39.686Z] Build:Feb  7 2021
+[2026-09-25T16:54:39.687Z] rst:0x15 (USB_UART_CHIP_RESET),boot:0x4 (DOWNLOAD(USB/UART0/1))
+[2026-09-25T16:54:39.687Z] Saved PC:0x40385a48
+[2026-09-25T16:54:39.688Z] waiting for download
+[2026-09-25T16:54:39.788Z] !! serial read error on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00: pyserial read failed: device reports readiness to read but returned no data (device disconnected or multiple access on port?)
+[2026-09-25T16:55:09.763Z] !! capture closed

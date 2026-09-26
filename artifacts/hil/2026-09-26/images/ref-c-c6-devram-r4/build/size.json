@@ -1,0 +1,72 @@
+{
+    "version": "1.2",
+    "total_size": 1527533,
+    "layout": [
+        {
+            "name": "Flash Code",
+            "total": 0,
+            "used": 1405764,
+            "free": 0,
+            "parts": {
+                ".text": {
+                    "size": 1237460
+                },
+                ".rodata": {
+                    "size": 167764
+                },
+                ".init_array": {
+                    "size": 264
+                },
+                ".appdesc": {
+                    "size": 256
+                },
+                ".tdata": {
+                    "size": 16
+                },
+                ".tbss": {
+                    "size": 4
+                }
+            }
+        },
+        {
+            "name": "DIRAM",
+            "total": 452112,
+            "used": 335793,
+            "free": 116319,
+            "parts": {
+                ".bss": {
+                    "size": 213888
+                },
+                ".text": {
+                    "size": 106518
+                },
+                ".data": {
+                    "size": 15387
+                }
+            }
+        },
+        {
+            "name": "LP SRAM",
+            "total": 16384,
+            "used": 164,
+            "free": 16220,
+            "parts": {
+                ".text": {
+                    "size": 92
+                },
+                ".force_slow": {
+                    "size": 36
+                },
+                ".rtc_reserved": {
+                    "size": 24
+                },
+                ".rtc_noinit": {
+                    "size": 8
+                },
+                ".force_fast": {
+                    "size": 4
+                }
+            }
+        }
+    ]
+}

@@ -46,9 +46,8 @@ Verdicts: PASS (all steps ok AND evidence files exist), FAIL (a step
 failed), SKIP-OFFLINE (rig/board/daemon unavailable before the scenario
 ran — never a verdict about firmware).
 
-NOTE: written without attached hardware (issue #18); every step is
-bounded and honest but the firmware-side log regexes are contract-derived
-and still await on-bench confirmation.
+The first partial C3 run is recorded in docs/hil/2026-09-26-bench-5node.md.
+Full scenario regexes still await a working gateway bench.
 """
 
 from __future__ import annotations
@@ -74,7 +73,7 @@ except ImportError:
     import capture as cap_mod  # type: ignore
     import report as report_mod  # type: ignore
 
-DEFAULT_ESPTOOL = os.path.expanduser("~/.local/bin/esptool.py")
+DEFAULT_ESPTOOL = os.path.expanduser("~/.local/bin/esptool")
 TAIL_LINES = 40
 DAEMON_AUTH_TIMEOUT_S = 45.0
 RESET_SETTLE_S = 0.5
@@ -285,8 +284,6 @@ class Runner:
         """
         path = os.path.join(self.dir, "hil-acl.json")
         doc = {
-            "_comment": "HIL-generated bench ACL: the scenario runner's uid "
-                        "gets send/read on every network for this run only.",
             "principals": {
                 str(os.getuid()): {
                     "networks": {
@@ -811,7 +808,6 @@ def _selftest() -> int:
             pass
         else:
             raise AssertionError("bad daemon verb should be rejected")
-        cap.stop()
     print("scenarios.py selftest OK")
     return 0
 
@@ -819,7 +815,7 @@ def _selftest() -> int:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Run RouteLoom HIL scenarios against a rig.")
-    parser.add_argument("--rig", required=True, help="path to rigs.yaml")
+    parser.add_argument("--rig", help="path to rigs.yaml (required for a run)")
     parser.add_argument("--bench", help="bench name (default: first in file)")
     parser.add_argument("--scenario", action="append",
                         help="scenario name (repeatable); default: all")
@@ -840,6 +836,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         for name, spec in SCENARIOS.items():
             print(f"{name}: {spec['description']}")
         return 0
+
+    if not args.rig:
+        parser.error("--rig is required for a run")
 
     rigs = rig_mod.load_rigs(args.rig)
     if not rigs:

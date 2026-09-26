@@ -1,0 +1,4 @@
+$ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-manual2.sock submit --network 00000000524c0001 --epoch 0000000000000001 --to 0000000000000002 --payload 524c48494c535542 --delivery RELIABLE --storage RAM_ONLY --ttl-ms 30000
+{"v":1,"request_id":"ctl-1024195","ok":true,"result":{"operation_id":"b56ef0d8b8c7a84ef5edadba352b4227:0000000000000001","dispatch_state":"HOST_QUEUED","evidence":["HOST_RAM_RETAINED"],"message_key":null}}
+generated key: b3ec08059fd2d235399a23fc092c0d4f
+exit=0

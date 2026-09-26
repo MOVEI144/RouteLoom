@@ -1820,7 +1820,7 @@ Status JoinRelayGateway::on_relay_rx(const NodeId from, const std::uint8_t hops,
 void JoinRelayGateway::on_relay_rx_impl(const NodeId from, const std::uint8_t hops,
                                         const FrameType type, const ByteView payload,
                                         const MonotonicMs now_ms) noexcept {
-  if (from == config_.node ||
+  if ((from == config_.node && !config_.colocated_proxy) ||
       !zt_admit_relay(membership_, true, AdmissionDirection::Rx, type, from, config_.node)) {
     ++stats_.frames_rejected;
     return;
@@ -2249,7 +2249,8 @@ Status JoinRelayGateway::host_down(const NodeId to_proxy, const ByteView object,
   Status status = relay_object_decode(object, decoded);
   if (!status) return status;
   const RelayHeader& h = decoded.header;
-  if (h.dir != RelayDirection::Down || h.proxy != to_proxy || to_proxy == config_.node) {
+  if (h.dir != RelayDirection::Down || h.proxy != to_proxy ||
+      (to_proxy == config_.node && !config_.colocated_proxy)) {
     return invalid("relay down header");
   }
   if (h.state == RelayState::Abort) {

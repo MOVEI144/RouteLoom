@@ -1,0 +1,5 @@
+[ 45%] Built target routeloom_edhoc_third_party
+[ 97%] Built target routeloom_core
+[100%] Building CXX object tests/cpp/CMakeFiles/routeloom_sdkv1_coordinator_tests.dir/test_sdkv1_security_coordinator.cpp.o
+[100%] Linking CXX executable routeloom_sdkv1_coordinator_tests
+[100%] Built target routeloom_sdkv1_coordinator_tests

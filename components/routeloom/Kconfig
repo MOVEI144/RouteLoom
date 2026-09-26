@@ -1,5 +1,35 @@
 menu "RouteLoom"
 
+    config ROUTELOOM_HIL_TRACE_LINK_EPOCHS
+        bool "HIL trace of link context IDs and RLD1 handshake steps"
+        default n
+        help
+            Bench-only diagnostic logs for reset recovery. Context IDs and
+            handshake step numbers are logged, never keys or payloads.
+
+    config ROUTELOOM_WIFI_NETIF_INIT
+        bool "Start esp_netif (lwIP TCP/IP task) before the Wi-Fi driver"
+        default n
+        help
+            ESP-NOW needs the Wi-Fi driver and the default event loop only.
+            esp_netif_init() additionally starts the lwIP TCP/IP task and
+            its mailboxes, which cost boot heap on ESP32-C3 gateways that
+            never use IP networking. Enable only for firmware that also
+            runs esp_netif/lwIP.
+
+    config ROUTELOOM_BOOT_HEAP_FLOOR_BYTES
+        int "Boot heap floor after ESP-NOW start (bytes, 0 disables)"
+        range 0 262144
+        default 8192
+        help
+            After Wi-Fi, PHY and ESP-NOW are up the runtime logs the free
+            internal heap and its largest block. Below this floor it logs
+            the BOOT_HEAP_BELOW_FLOOR error (the node keeps running); the
+            HIL harness treats that line as a failed start. The static-RAM
+            guard in CI (tools/firmware_ram_report.py) models the same
+            figure from measured per-target offsets; this is the on-device
+            check of the real number (docs/design/sdk-v1/ram-budget.md).
+
     choice ROUTELOOM_DEDUP_PROFILE
         prompt "Dedup capacity profile"
         default ROUTELOOM_DEDUP_PROFILE_RELAY

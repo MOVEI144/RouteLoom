@@ -1,0 +1,10 @@
+f83109ffd3c20462ad5905001983e384fed902fc75878e67ef4d4696fbc21824  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c5-buildonly/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+7256ae90f7ae6b17bbc3fe844f46cc7832af24ee7b093042182466aa6aab844f  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c5-buildonly/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+f83109ffd3c20462ad5905001983e384fed902fc75878e67ef4d4696fbc21824  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c5-buildonly/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+7256ae90f7ae6b17bbc3fe844f46cc7832af24ee7b093042182466aa6aab844f  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c5-buildonly/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+604e812a34680126ffaf9907654bd46fbaa8479b1037e037ee93c2bea573336e  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c5-buildonly/build/bootloader/bootloader.bin
+a6ed68987847f8322c3179c3242ce7c795b0c850a108a562fb559e737c7200a6  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c5-buildonly/build/flasher_args.json
+e61421139c6406f44aa78de50a0c30a7a99d778fcdb619eb2035fb57878dc0f7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c5-buildonly/build/partition_table/partition-table.bin
+9580e4709c4a23c2e6fe16c5d424c4132f032f1bca58491b1acfe27354183992  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c5-buildonly/build/ram-report.json
+1c84950f0e527b128b9a14d6e5dda4cec44595e28048c23994083bc1561e3d58  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c5-buildonly/build/routeloom_bridge_node.bin
+7d3dbe19a288665ea1b0d8ca7f5ba6fc5ae0ca796d27c2cdc550e0eed3170275  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-c5-buildonly/build/size.json

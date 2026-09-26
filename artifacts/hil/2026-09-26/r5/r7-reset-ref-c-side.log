@@ -1,0 +1,35 @@
+[2026-09-25T22:19:09.037+00:00] !! connected /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00
+[2026-09-25T22:19:13.243+00:00] I (31792) RouteLoomRef: discovery event=BOUND peer=5
+[2026-09-25T22:19:13.244+00:00] W (31793) RouteLoomRef: diagnostic reason=BOUND peer=5 message=none
+[2026-09-25T22:19:16.447+00:00] W (35095) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-25T22:19:16.648+00:00] I (35136) RouteLoomRef: message origin=1 session=202 sequence=4 bytes=9
+[2026-09-25T22:19:41.886+00:00] I (60486) RouteLoom: stack hwm main 10588 B
+[2026-09-25T22:19:43.288+00:00] I (61798) RouteLoomRef: discovery event=STALE peer=5
+[2026-09-25T22:19:43.288+00:00] W (61798) RouteLoomRef: diagnostic reason=STALE peer=5 message=none
+[2026-09-25T22:19:45.291+00:00] I (63799) RouteLoomRef: discovery event=REDISCOVERY peer=5
+[2026-09-25T22:19:45.291+00:00] W (63800) RouteLoomRef: diagnostic reason=REDISCOVERY peer=5 message=none
+[2026-09-25T22:19:50.900+00:00] W (69577) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=1 message=none
+[2026-09-25T22:19:50.900+00:00] W (69579) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=2 seq=1 att=1 peer=1 message=none
+[2026-09-25T22:19:51.100+00:00] W (69593) RouteLoomRef: diagnostic reason=ROUTE_UPDATE_REJECTED peer=1 message=none
+[2026-09-25T22:19:52.902+00:00] W (71577) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=2 seq=1 att=2 peer=1 message=none
+[2026-09-25T22:19:59.110+00:00] I (77755) RouteLoomRef: message origin=1 session=202 sequence=20 bytes=9
+[2026-09-25T22:19:59.911+00:00] I (78473) RouteLoomRef: message origin=1 session=202 sequence=23 bytes=9
+[2026-09-25T22:19:59.911+00:00] I (78514) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-25T22:19:59.911+00:00] W (78514) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-25T22:19:59.911+00:00] I (78516) RouteLoomRef: discovery event=REDISCOVERY peer=5
+[2026-09-25T22:19:59.911+00:00] W (78521) RouteLoomRef: diagnostic reason=REDISCOVERY peer=5 message=none
+[2026-09-25T22:20:00.712+00:00] I (79246) RouteLoomRef: message origin=1 session=202 sequence=26 bytes=9
+[2026-09-25T22:20:13.328+00:00] W (91845) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=5 message=present
+[2026-09-25T22:20:16.733+00:00] I (95391) RouteLoomRef: discovery event=REDISCOVERY peer=5
+[2026-09-25T22:20:16.733+00:00] W (95392) RouteLoomRef: diagnostic reason=REDISCOVERY peer=5 message=none
+[2026-09-25T22:20:27.548+00:00] I (106065) RouteLoomRef: discovery event=REDISCOVERY peer=5
+[2026-09-25T22:20:27.549+00:00] W (106066) RouteLoomRef: diagnostic reason=REDISCOVERY peer=5 message=none
+[2026-09-25T22:20:41.969+00:00] I (120487) RouteLoom: stack hwm main 10588 B
+[2026-09-25T22:20:52.383+00:00] I (130913) RouteLoomRef: discovery event=REDISCOVERY peer=5
+[2026-09-25T22:20:52.383+00:00] W (130914) RouteLoomRef: diagnostic reason=REDISCOVERY peer=5 message=none
+[2026-09-25T22:21:17.616+00:00] I (156120) RouteLoomRef: discovery event=REDISCOVERY peer=5
+[2026-09-25T22:21:17.616+00:00] W (156121) RouteLoomRef: diagnostic reason=REDISCOVERY peer=5 message=none
+[2026-09-25T22:21:41.852+00:00] I (180487) RouteLoom: stack hwm main 10588 B
+[2026-09-25T22:21:56.070+00:00] I (194648) RouteLoomRef: discovery event=REDISCOVERY peer=5
+[2026-09-25T22:21:56.070+00:00] W (194649) RouteLoomRef: diagnostic reason=REDISCOVERY peer=5 message=none
+[2026-09-25T22:22:09.122+00:00] !! capture finished

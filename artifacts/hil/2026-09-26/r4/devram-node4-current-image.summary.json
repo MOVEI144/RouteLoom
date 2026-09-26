@@ -1,0 +1,12 @@
+{
+  "count": 2,
+  "accepted": 2,
+  "delivered": 2,
+  "success_rate": 1.0,
+  "rtt_ms_min": 53.36,
+  "rtt_ms_median": 181.475,
+  "rtt_ms_p95": 296.78,
+  "rtt_ms_p99": 307.03,
+  "rtt_ms_max": 309.59,
+  "evidence": "artifacts/hil/2026-09-26/r4/devram-node4-current-image.jsonl"
+}

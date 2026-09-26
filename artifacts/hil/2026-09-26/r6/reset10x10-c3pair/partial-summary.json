@@ -1,0 +1,38 @@
+{
+ "note": "run stopped early by the operator after 2 complete cycles (host admission contract 2/min made a 100-send run take ~45 min); rerun on final images follows",
+ "baseline": [
+  "!! send B0 -> delivered END_RECEIVED 3420.74 ms",
+  "!! send B1 -> delivered END_RECEIVED 53.61 ms",
+  "!! send B2 -> delivered END_RECEIVED 52.84 ms"
+ ],
+ "cycles": [
+  "!! cycle 0 delivered 9/10 recovery_s=1.624",
+  "!! cycle 1 delivered 9/10 recovery_s=1.572"
+ ],
+ "sends_seen": [
+  "!! send C0-0 -> failed HOP_ACCEPT_TIMEOUT 619.9 ms",
+  "!! send C0-1 -> delivered END_RECEIVED 2071.48 ms",
+  "!! send C0-2 -> delivered END_RECEIVED 53.04 ms",
+  "!! send C0-3 -> delivered END_RECEIVED 53.32 ms",
+  "!! send C0-4 -> delivered END_RECEIVED 53.08 ms",
+  "!! send C0-5 -> delivered END_RECEIVED 52.79 ms",
+  "!! send C0-6 -> delivered END_RECEIVED 52.38 ms",
+  "!! send C0-7 -> delivered END_RECEIVED 52.82 ms",
+  "!! send C0-8 -> delivered END_RECEIVED 52.62 ms",
+  "!! send C0-9 -> delivered END_RECEIVED 52.78 ms",
+  "!! send C1-0 -> failed HOP_ACCEPT_TIMEOUT 568.85 ms",
+  "!! send C1-1 -> delivered END_RECEIVED 1342.79 ms",
+  "!! send C1-2 -> delivered END_RECEIVED 52.49 ms",
+  "!! send C1-3 -> delivered END_RECEIVED 52.71 ms",
+  "!! send C1-4 -> delivered END_RECEIVED 52.95 ms",
+  "!! send C1-5 -> delivered END_RECEIVED 52.89 ms",
+  "!! send C1-6 -> delivered END_RECEIVED 52.78 ms",
+  "!! send C1-7 -> delivered END_RECEIVED 52.95 ms",
+  "!! send C1-8 -> delivered END_RECEIVED 52.88 ms",
+  "!! send C1-9 -> delivered END_RECEIVED 52.76 ms",
+  "!! send C2-0 -> delivered END_RECEIVED 155.41 ms",
+  "!! send C2-1 -> delivered END_RECEIVED 53.06 ms",
+  "!! send C2-2 -> delivered END_RECEIVED 53.08 ms",
+  "!! send C2-3 -> delivered END_RECEIVED 57.75 ms"
+ ]
+}

@@ -82,12 +82,16 @@ python3 tools/firmware_ram_report.py build/size.json --target <target> --app <ap
 
 | Target | App | 最小の静的RAM残量（bytes） |
 |---|---|---:|
-| `esp32c3` | `bridge_node` | 8,192 |
-| `esp32c3` | `reference_node` | 8,192 |
+| `esp32c3` | `bridge_node` | 27,648 |
+| `esp32c3` | `reference_node` | 19,456 |
 | `esp32s3` | `*` | 8,192 |
 | `esp32c5` | `*` | 8,192 |
 
 **8 KiBの根拠**：静的状態の1機能分の増分（group配送はMeshNodeに約5 KBを足した）に余裕を加えた値である。最後の8 KiBを使う変更は、自分で同じだけ取り戻すか、この表を理由付きで変えるレビューを通す必要がある。linkが失敗して初めて気づく状態には戻さない。これは実行時のheap目標（resource-profilesの空きheap 32 KiB・最大block 16 KiB、HILで測る）とは別の、link前の床である。
+
+**2026-09-26 実機根拠（C3、ESP-IDF v6.0.3）**：issue #166 の既定 C3 bridge（dedup 96、esp_netif 有効）は静的空き 20,512 B で link したが `esp_wifi_init` の heap 不足で起動せず、8 KiB floor は起動を保証していなかった。dedup を 32 件にした image は静的空き 27,016 B で起動したものの ESP-NOW 開始後の heap は free 5,956 B・largest 3,968 B しか残らなかった。ESP-NOW しか使わない firmware で lwIP の TCP/IP task を止め（`ROUTELOOM_WIFI_NETIF_INIT=n`、既定）、A-MPDU と余分な management buffer・softAP・enterprise・Wi-Fi NVS を切った既定構成では、bridge が静的空き 29,690 B、`esp_wifi_init` 直前の heap 42,248 B、Wi-Fi/PHY/ESP-NOW 起動の最小 heap 14,796 B（起動後 free 14,856 B・largest 12,800 B）、reference が静的空き 34,044 B、起動前 50,316 B、起動後 free 22,940 B・largest 20,480 B（最小 22,888 B）だった。bridge の実測は console を USB Serial/JTAG に向けた計測 image（静的空き 29,690 B）で行った。既定 image（console は UART0）は静的空き 29,744 B で、model はその分だけ保守的になる。MemberEdhoc image も同じ source で起動し、bridge は起動後 free 14,840 B・largest 12,800 B（最小 14,780 B）、reference は DevRam と同値だった。無線起動の消費は両 app で約 27.4 KB。上表の C3 の床はこの実測から `tools/firmware_ram_report.py` の boot-heap model（無線起動前 offset ＝ heap − 静的空き、無線 peak、起動後に残す reserve：gateway 12 KiB、通常機器 8 KiB）で導出した値（bridge 27,182→27,648 B、reference 19,348→19,456 B）で、report はその推定値も出力する。model の定数は Wi-Fi・lwIP・main task stack・console 構成を変えたら再計測する。機器側では `ROUTELOOM_BOOT_HEAP_FLOOR_BYTES`（既定 8 KiB）を下回ると `BOOT_HEAP_BELOW_FLOOR` を log し、HIL はそれを起動失敗として扱う。C5/S3 は接続機がなく build-only であり、8 KiB floor で起動保証を主張しない。C3 gateway の起動後 heap は resource-profiles の目標（32 KiB／16 KiB）にまだ届かない。次の削減候補は 03 §5.2 が C3 gateway に認める E2E context 上限の引き下げ（128→64 で約 8 KB）である。
+
+後続の USB idempotency 墓標 96 件は静的領域を約 1.5 KiB 増やす。上記の起動時 heap 実測は追加前の image の値であり、追加後の静的 floor は ESP-IDF v6.0.3 の firmware matrix 25 構成で再検査済みである。
 
 **P5-2 broadcast（PR5）**：`MeshNode`に**+272 B**（host LP64実測 89,080 → 89,352。RISC-V ILP32も同一layout）。内訳は`Neighbor`×32が`cap_features` u32で160 → 168 B（+4 B実体＋4 B tail padding、計+256 B）、`RouteScaleStats`のbroadcast counter +8 B、未知GK hint時刻 +8 B。Kconfig `ROUTELOOM_ROUTE_BROADCAST` 自体は実行時flagで静的RAM +0（reference_node C3 scoped cellでscoped／scoped+broadcastとも `.bss` 132,592 B、`free` 102,272 B、floor PASS）。8 KiB guardの対象増分として記録する。
 
@@ -104,7 +108,7 @@ python3 tools/firmware_ram_report.py build/size.json --target <target> --app <ap
 | USB bridge | `bridge_node`だけがlinkする | — | 33.8 KB |
 | discovery／migration／config journal | `CONFIG_ROUTELOOM_DISCOVERY`／`CONFIG_ROUTELOOM_MIGRATION`／`CONFIG_ROUTELOOM_CONFIG` | 既定off | 16.3 KB／15.0 KB／約43.7 KB |
 
-製品構成（S3の表示板約100台＋PCにUSB接続したgateway 1台）での目安：表示板はrelay（既定）、S3のgatewayはgateway profile（256件）を選べる。C3のgatewayは既定のrelayのままでも§4のとおり余裕がある。
+製品構成（S3の表示板約100台＋PCにUSB接続したgateway 1台）での目安：表示板はrelay（共通既定）、S3のgatewayはgateway profile（256件）を選べる。C3のbridge_nodeは起動heap確保のためtarget別既定をleaf（32件）にしている（§5.1）。Live／Terminalのdedup recordは容量不足でも追い出されず、受付を拒否する。
 
 **下げなかった容量と、将来の候補**（下げるなら、その値でのtestを追加し、host既定は変えない）：
 

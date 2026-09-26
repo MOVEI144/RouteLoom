@@ -1,0 +1,48 @@
+{
+  "app": "bridge_node",
+  "app_only": true,
+  "board": "bridge",
+  "boot_log": null,
+  "chip": "esp32c3",
+  "cmd": [
+    "/home/sahur/.local/bin/esptool",
+    "--chip",
+    "esp32c3",
+    "--port",
+    "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+    "--baud",
+    "460800",
+    "--before",
+    "default-reset",
+    "--after",
+    "hard-reset",
+    "write-flash",
+    "--flash-mode",
+    "dio",
+    "--flash-size",
+    "2MB",
+    "--flash-freq",
+    "80m",
+    "0x10000",
+    "artifacts/hil/2026-09-26/images/bridge-c3-devram-r7idem/build/routeloom_bridge_node.bin"
+  ],
+  "error": null,
+  "esptool_log": "flash-bridge-esptool.log",
+  "exit_code": 0,
+  "fallback_offsets": false,
+  "files": {
+    "0x10000": {
+      "path": "artifacts/hil/2026-09-26/images/bridge-c3-devram-r7idem/build/routeloom_bridge_node.bin",
+      "sha256": "a885c43b244943595fd705663fe15e9a22ad0c9b18f8859a7d30aaa1a5cbdb5d"
+    }
+  },
+  "finished_utc": "2026-09-25T23:22:24.417Z",
+  "ok": true,
+  "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+  "preflight": {
+    "chip": "esp32c3",
+    "log": "flash-bridge-preflight.log",
+    "mac": "94:a9:90:6a:ee:c4"
+  },
+  "started_utc": "2026-09-25T23:22:12.274Z"
+}

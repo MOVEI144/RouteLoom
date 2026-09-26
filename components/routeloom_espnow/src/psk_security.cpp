@@ -174,6 +174,22 @@ void DevelopmentPskSecurityProvider::close() noexcept {
   secure_clear(master_key_);
 }
 
+Status DevelopmentPskSecurityProvider::prepare_sleep() noexcept {
+  if (!ready_) {
+    return Status::error(StatusCode::InvalidState,
+                         "security provider not ready for sleep");
+  }
+  Status result = Status::success();
+  rx_contexts_.for_each([&](RxContext& value) {
+    const Status closed = replay_guard_.close_context(value.window);
+    if (!closed && result) result = closed;
+  });
+  // close_context resets the window, so the cached context must be reopened
+  // from the tightened floor if sleep entry is aborted and radio resumes.
+  rx_contexts_.clear();
+  return result;
+}
+
 bool DevelopmentPskSecurityProvider::same_context(
     const SecurityContext& left, const SecurityContext& right) noexcept {
   return left.scope == right.scope && left.network == right.network &&

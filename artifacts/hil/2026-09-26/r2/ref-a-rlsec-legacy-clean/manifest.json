@@ -1,0 +1,10 @@
+{
+  "board": "ref-a",
+  "chip": "esp32c3",
+  "mac": "94:a9:90:7a:b5:60",
+  "offset": "0x190000",
+  "size": "0x10000",
+  "backup_sha256": "46768d932606d9039598b4b3055cf80ed7c76e7918b414d25310b7e9c770bf4f",
+  "backup_path": "/tmp/routeloom-hil-r2-private/ref-a-rlsec-before-legacy-clean.bin",
+  "erased": true
+}

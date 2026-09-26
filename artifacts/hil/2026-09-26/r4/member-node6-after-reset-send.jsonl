@@ -1,0 +1,1 @@
+{"index":0,"destination":6,"request":2,"admitted_at_unix":1790371798.2611365,"admission_attempts":1,"delivery":{"request":2,"destination":6,"state":"expired","reason":"DEADLINE_EXPIRED","msg_session":2012394367,"msg_seq":2,"updated_ms":1790371803268},"latency_ms":5008.7}

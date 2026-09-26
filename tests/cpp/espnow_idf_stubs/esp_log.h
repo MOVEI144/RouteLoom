@@ -6,3 +6,4 @@
 // GNU extension the real IDF headers rely on) must also expand cleanly.
 #define ESP_LOGI(...) ((void)0)
 #define ESP_LOGW(...) ((void)0)
+#define ESP_LOGE(...) ((void)0)

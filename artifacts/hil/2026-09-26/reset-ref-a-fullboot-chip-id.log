@@ -1,0 +1,7 @@
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00:
+Connecting.....
+Detecting chip type... ESP32-C3
+Connected to ESP32-C3 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00:
+
+ERROR: A fatal error occurred: No more data to read from the serial port. This can have many causes, for troubleshooting steps visit: https://docs.espressif.com/projects/esptool/en/latest/troubleshooting.html

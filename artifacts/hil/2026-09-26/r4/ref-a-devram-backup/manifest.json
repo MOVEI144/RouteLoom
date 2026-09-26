@@ -1,0 +1,10 @@
+{
+  "board": "ref-a",
+  "chip": "esp32c3",
+  "mac": "94:a9:90:7a:b5:60",
+  "offset": "0x190000",
+  "size": "0x10000",
+  "backup_sha256": "89dcf0b92ce69ea3855c265608cae007c135f43c4038d119b46b4daff6b4e1f0",
+  "backup_path": "/tmp/routeloom-hil-r4-private/ref-a-devram-before-member.bin",
+  "erased": true
+}

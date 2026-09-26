@@ -1,0 +1,10 @@
+2e17a82b1b3d62c0d63d2a940e35310d0f99983f44a2e91f48368edae07f15e9  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-s3-legacy-sleep-r3/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+1f2415b09fad4f709656624f0d5e7f9926ce931e2e0e0f7e3f9ba2591373ecef  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-s3-legacy-sleep-r3/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+2e17a82b1b3d62c0d63d2a940e35310d0f99983f44a2e91f48368edae07f15e9  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-s3-legacy-sleep-r3/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+1f2415b09fad4f709656624f0d5e7f9926ce931e2e0e0f7e3f9ba2591373ecef  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-s3-legacy-sleep-r3/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+5ac8abea83f021c79dd734423cd1a11904ef6cabf67b53ef8ecb83907079a00d  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-s3-legacy-sleep-r3/build/bootloader/bootloader.bin
+cd6dd2aa68f7a8679385196c5b18b68272a340f1422af4305ede89e3f2dc47b7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-s3-legacy-sleep-r3/build/flasher_args.json
+068ab45eb37a4be22b3aea004e4e970cfbbf9a25bc0824c1572be5bf68a37fef  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-s3-legacy-sleep-r3/build/partition_table/partition-table.bin
+11cde94a956e77e3574c345d1bcf2ffe617c163e7d2ddede5f8914cbb236b9ef  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-s3-legacy-sleep-r3/build/ram-report.json
+de9d872372a7afe7a9d6bbe6805eb214682560c8894716029fd75dec83f17271  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-s3-legacy-sleep-r3/build/routeloom_reference_node.bin
+45308824c1ca79348cb266ade5a25d1770673a3b0751e3f4ab7de76e134fb695  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-s3-legacy-sleep-r3/build/size.json

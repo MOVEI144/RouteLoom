@@ -1,0 +1,2 @@
+[2026-09-25T16:14:31.405Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-25T16:14:32.008Z] !! capture closed

@@ -1,0 +1,4 @@
+$ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-group.sock group-send --network 00000000524c0001 --group ALL --payload 524c47524f555031 --wait-ms 10000
+{"v":1,"request_id":"ctl-1096943","ok":true,"result":{"group_op":"grpe0edc91900000001","network":"00000000524c0001","group":65535,"all":true,"state":"WAITING_FOR_END_RECEIPT","final":false,"result":"OK","reason":"GROUP_ROUND_PENDING","message":{"session":"00000069","sequence":"8000000000000001"},"gateway":"0000000000000001","rounds":0,"delivered":0,"nonmember":0,"missing_total":0,"unaccounted":0,"missing":[],"missing_truncated":false,"priority":"NORMAL","ordered":false,"ttl_ms":5000,"hop_limit":10,"payload_len":8,"submitted_ms":1790356177616,"admitted_ms":1790356177621,"settled_ms":null,"clock":"host_unix_ms"}}
+generated key: 933073b84ad869e55bfa8ae4551e0795
+exit=0

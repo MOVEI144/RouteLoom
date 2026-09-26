@@ -1,0 +1,40 @@
+{
+  "cell": "hil",
+  "target": "esp32c5",
+  "app": "bridge_node",
+  "memory": [
+    {
+      "name": "HP SRAM",
+      "total": 320928,
+      "used": 303877,
+      "free": 17051,
+      "parts": {
+        ".bss": 227704,
+        ".text": 59532,
+        ".data": 16641
+      }
+    },
+    {
+      "name": "LP SRAM",
+      "total": 16384,
+      "used": 8352,
+      "free": 8032,
+      "parts": {
+        ".data": 8152,
+        ".text": 128,
+        ".force_slow": 36,
+        ".rtc_reserved": 24,
+        ".rtc_noinit": 8,
+        ".force_fast": 4
+      }
+    }
+  ],
+  "guard": {
+    "memory_type": "HP SRAM",
+    "static_bss": 227704,
+    "static_data": 16641,
+    "free": 17051,
+    "min_free": 8192,
+    "passed": true
+  }
+}
