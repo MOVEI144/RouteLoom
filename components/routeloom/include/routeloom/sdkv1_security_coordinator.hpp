@@ -186,8 +186,19 @@ struct CoordinatorMemberConfig {
   std::uint32_t end_epoch{1};
   std::uint64_t boot_incarnation{0};
   std::uint32_t role{0};  // rlcw1 member role bits
-  std::array<NodeId, kSiteGatewayMax> route_gateways{};
+  // The two root lists are mutually exclusive — install_dev_config refuses
+  // a config carrying both — so the arrays share one storage block. The
+  // live arm follows the counts: route_gateway_count>0 selects
+  // route_gateways, group_root_count>0 selects group_roots.
+  // Flat-profile group tree roots (dev-flow §6.3): set by the dev adoption
+  // path when the board config chooses flat routing; always empty on the
+  // member path (the owner's local routing policy decides there).
+  union {
+    std::array<NodeId, kSiteGatewayMax> route_gateways;
+    std::array<NodeId, kSiteGatewayMax> group_roots;
+  };
   std::size_t route_gateway_count{0};
+  std::size_t group_root_count{0};
 };
 
 struct CoordinatorRemoval {
@@ -201,10 +212,15 @@ struct CoordinatorRemoval {
 
 struct CoordinatorAction {
   CoordinatorActionKind kind{CoordinatorActionKind::None};
-  CoordinatorTune tune{};
-  CoordinatorMemberConfig member{};
-  CoordinatorRemoval removal{};
-  JoinRecoveryReason recovery{JoinRecoveryReason::BootWitnessMismatch};
+  // Single-slot staging (action_pending_ allows one action at a time), so
+  // the payloads share storage; only the arm named by kind is live. All
+  // arms are trivially copyable, so assigning an arm activates it.
+  union {
+    CoordinatorTune tune;
+    CoordinatorMemberConfig member;
+    CoordinatorRemoval removal;
+    JoinRecoveryReason recovery;
+  };
 };
 
 enum class CoordinatorMode : std::uint8_t {
@@ -230,6 +246,14 @@ struct CoordinatorDevConfig {
   std::uint32_t boot{0};  // reserved durable boot (message/boot session)
   std::uint32_t role{0};  // local allow-role (nonzero member-role bits)
   std::uint8_t channel{0};
+  // Routing/group roots the board config picked for the dev profile
+  // (dev-flow §6.1): gateways for the scoped profile, group_roots for the
+  // flat group tree — at most one list is non-empty. Empty both keeps the
+  // previous no-tree dev posture.
+  std::array<NodeId, kSiteGatewayMax> route_gateways{};
+  std::size_t route_gateway_count{0};
+  std::array<NodeId, kSiteGatewayMax> group_roots{};
+  std::size_t group_root_count{0};
 };
 
 struct CoordinatorSnapshot {

@@ -9,6 +9,7 @@ mod dispatch;
 mod group;
 mod nodes;
 mod receive_log;
+mod rollcall;
 mod send_store;
 mod site;
 mod sqlite_store;
@@ -827,6 +828,11 @@ struct State {
     /// api1 `group.send`/`group.get` submit and read here, the group lane
     /// thread drives the device exchange and emits `group_settled`.
     group_ops: group::GroupOps,
+    /// The single owned rollcall run (design-devflow §6.4, D09): the
+    /// rollcall lane drives it through `group_ops`; api1 `lab.rollcall.*`
+    /// starts, steers and reads it. A State singleton, so a disconnected
+    /// GUI can never leave a second loop running.
+    rollcall: rollcall::RollcallService,
     /// m1 diagnostics query table (HostOps 0x30/0x31): api1
     /// `diagnostics.snapshot` submits and waits here, the telemetry lane
     /// thread drives the device exchange.
@@ -2254,6 +2260,7 @@ fn serve_client(
                 node_table: &state.node_table,
                 config_ops: &state.config_ops,
                 group_ops: &state.group_ops,
+                rollcall: &state.rollcall,
                 telemetry_ops: &state.telemetry_ops,
                 site: state.site.as_deref(),
                 config_authority: state.config_authority,
@@ -2896,6 +2903,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let telemetry_state = Arc::clone(&state);
         let telemetry_outbound = outbound_tx.clone();
         thread::spawn(move || telemetry::telemetry_loop(telemetry_state, telemetry_outbound));
+    }
+    // Rollcall lane (design-devflow §6.4): drives the single owned run
+    // through the group op table — parked until lab.rollcall.start, then
+    // ticks on the lane cadence. Shares no writer queue of its own: the
+    // sends it schedules travel the existing group lane.
+    {
+        let rollcall_state = Arc::clone(&state);
+        thread::spawn(move || rollcall::rollcall_loop(rollcall_state));
     }
     if let Some(device_path) = device {
         let writer_slot: Arc<Mutex<Option<File>>> = Arc::new(Mutex::new(None));

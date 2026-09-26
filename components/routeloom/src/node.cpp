@@ -534,6 +534,18 @@ Status MeshNode::validate_config() const noexcept {
       return Status::error(StatusCode::InvalidArgument, "invalid route gateway");
     }
   }
+  bool has_group_root = false;
+  for (const NodeId root : config_.group_roots) {
+    if (root != kInvalidNodeId && reserved_node_id(root)) {
+      return Status::error(StatusCode::InvalidArgument, "invalid group root");
+    }
+    has_group_root |= root != kInvalidNodeId;
+  }
+  // Roots and routing policy are separate knobs but never ambiguous: a flat
+  // group tree may not coexist with a configured gateway-scoped profile.
+  if (has_group_root && gateway_scoped()) {
+    return Status::error(StatusCode::InvalidArgument, "GROUP_ROOTS_WITH_GATEWAYS");
+  }
   if (config_.route_broadcast && !gateway_scoped()) {
     return Status::error(StatusCode::Unsupported, "BROADCAST_REQUIRES_SCOPED_ROUTES");
   }
@@ -666,11 +678,10 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
   record->cap_valid_until_ms = 0;
   record->cap_node_boot = 0;
   record->last_cap_exchange_ms = 0;
-  // Tree roles are re-learned from the peer's own advertisements.
-  record->child_until_ms = 0;
-  record->interest_until_ms = 0;
-  record->last_pull_answer_ms = 0;
-  record->pull_target = kInvalidNodeId;
+  // Tree roles are re-learned from the peer's own advertisements. Both
+  // profile arms share this storage and every member's idle value is zero
+  // (kInvalidNodeId == 0), so one reset serves either profile.
+  record->tree = Neighbor::TreeRoles{};
   record->pull_answer_pending = false;
   record->active = true;
   // Direct route to the neighbor itself, seeded at the last-seen generation
@@ -1595,6 +1606,34 @@ Status MeshNode::queue_route_update(const NodeId neighbor,
     return false;
   };
   append(config_.node, config_.route_generation, self_route_sequence_, 0);
+  // Flat group tree (dev-flow §6.3): group-root records lead every update —
+  // the per-root child lease in the receiver is only as fresh as its last
+  // poisoned/finite root record, so roots must not wait for the rotating
+  // sweep. The same split-horizon poison applies; a duplicate from the dump
+  // below is idempotent.
+  if (!gateway_scoped()) {
+    for (const NodeId root : config_.group_roots) {
+      if (root == kInvalidNodeId || root == config_.node) continue;
+      const RouteSelection selected = routes_.best(root);
+      if (selected.valid) {
+        // Same rules as scoped_record(): a generation-0 placeholder (a
+        // direct-neighbor seed before the peer's own record) is never
+        // advertised; otherwise split-horizon poison applies.
+        if (selected.generation == 0) continue;
+        append(root, selected.generation, selected.sequence,
+               (!relay_enabled_ || selected.next_hop == neighbor) ? kInfiniteRouteMetric
+                                                                  : selected.metric);
+        continue;
+      }
+      // A lost root route still announces at infinity (same rule as the
+      // scoped tree): the parent's child lease for us stays useful — we get
+      // its downward refresh instead of dropping off the group tree.
+      RouteTable::LostRoute lost{};
+      if (routes_.lost_route(root, lost)) {
+        append(root, lost.generation, lost.sequence, kInfiniteRouteMetric);
+      }
+    }
+  }
   // A frame holds at most kMaxRouteRecordsPerFrame records. Rotate a
   // per-neighbor cursor through the selected routes so a full dump spans
   // successive updates instead of permanently starving the tail entries.
@@ -5182,6 +5221,11 @@ void MeshNode::apply_route_records(const RouteAdvertisement* records,
     // Only pairwise authentication can retire per-peer measurement. A
     // GroupLink frame may update route generation but proves no peer boot.
     if (pairwise_authenticated) reset_neighbor_measurement(*neighbor);
+    // The restarted peer's previous-incarnation group child evidence is
+    // stale too: its next hops toward the group roots may differ. (Flat
+    // profile only — under scoped this storage is the tree-role arm, which
+    // keeps its own lease lifecycle.)
+    if (!gateway_scoped()) neighbor->tree.group_child_until_ms.fill(0);
     trigger_route_advertisement(now_ms);
     observer_.on_diagnostic("PEER_RESTARTED_ROUTES_FLUSHED", peer, nullptr);
   }
@@ -5189,6 +5233,9 @@ void MeshNode::apply_route_records(const RouteAdvertisement* records,
   // routes to that gateway through us). Scheduling state only — route state
   // below still moves exclusively through consider().
   note_scoped_update(*neighbor, records, count, now_ms);
+  // Flat profile: per-root child leases (poisoned group-root record = the
+  // peer's committed next hop toward that root is us).
+  note_flat_group_update(*neighbor, records, count, now_ms);
 
   for (std::size_t i = 0; i < count; ++i) {
     const auto& advertisement = records[i];
@@ -5279,7 +5326,7 @@ void MeshNode::handle_seqno_request(const wire::PlainFrame& frame, const NodeId 
       if (requesting != nullptr) {
         // Scoped profile: a generic trigger would only carry self + gateway
         // records; the requester needs THIS destination's record.
-        requesting->pull_target = destination;
+        requesting->tree.scoped.pull_target = destination;
         requesting->pull_answer_pending = true;
       } else {
         trigger_route_advertisement(now_ms);

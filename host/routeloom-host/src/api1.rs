@@ -115,6 +115,10 @@ pub struct ApiContext<'a, S: OperationStore> {
     /// group_delivery_v1 op table: `group.send` admits here, `group.get`
     /// reads; the group lane thread is the only driver.
     pub group_ops: &'a crate::group::GroupOps,
+    /// The daemon-owned rollcall run (design-devflow §6.4, D09):
+    /// `lab.rollcall.*` starts, steers and reads it; the rollcall lane
+    /// thread drives its polls through `group_ops`.
+    pub rollcall: &'a crate::rollcall::RollcallService,
     /// m1 diagnostics query table: `diagnostics.snapshot` submits and
     /// waits here; the telemetry lane thread drives the device exchange.
     pub telemetry_ops: &'a crate::telemetry::TelemetryOps,
@@ -346,6 +350,10 @@ pub fn handle_conn<S: OperationStore>(
         "config.get" => config_get(&params, ctx).map(|r| (r, None)),
         "group.send" => group_send(&params, ctx).map(|r| (r, None)),
         "group.get" => group_get(&params, ctx).map(|r| (r, None)),
+        "lab.rollcall.start" => rollcall_start(&params, ctx).map(|r| (r, None)),
+        "lab.rollcall.update" => rollcall_update(&params, ctx).map(|r| (r, None)),
+        "lab.rollcall.stop" => rollcall_stop(&params, ctx).map(|r| (r, None)),
+        "lab.rollcall.status" => rollcall_status(&params, ctx).map(|r| (r, None)),
         method if site::SITE_METHODS.contains(&method) => site::dispatch(method, &params, ctx)
             .unwrap_or_else(|| Err(ApiError::simple("INTERNAL", "site method table mismatch")))
             .map(|r| (r, None)),
@@ -439,7 +447,7 @@ fn capabilities<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.retry\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true,\"diagnostics.snapshot\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"site\":{site_caps},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.retry\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true,\"lab.rollcall.start\":true,\"lab.rollcall.update\":true,\"lab.rollcall.stop\":true,\"lab.rollcall.status\":true,\"diagnostics.snapshot\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"site\":{site_caps},\"rollcall\":{{\"dispatch\":\"usb_group_delivery_v1\",\"min_interval_ms\":{rollcall_min},\"max_inflight\":1}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -477,6 +485,7 @@ fn capabilities<S: OperationStore>(
                 out
             }),
         site_caps = site::capability_json(ctx),
+        rollcall_min = crate::rollcall::MIN_INTERVAL_MS,
     ))
 }
 
@@ -2617,6 +2626,226 @@ fn group_get<S: OperationStore>(
     Ok(crate::group::record_json(&record))
 }
 
+// --- lab.rollcall.* (RollcallService, design-devflow §6.4–6.5, D09) --------
+//
+// The service owns one run per daemon: `start` is idempotent for a matching
+// request — a GUI reconnect or a racing scenario runner answers the live
+// run's id instead of stacking a second loop (the acceptance's "GUI 切断で
+// 二重 loop なし" property). `start`/`update`/`stop` command wire traffic,
+// so they need SEND on the run's network; `status` needs READ_OPERATION.
+// The run's actual polls still travel the group lane — they inherit its
+// session/network/capability gates at write time.
+
+/// The network the run operates on: the session's own network (a lab run
+/// always calls its own site). `network` in params must match it.
+fn rollcall_network<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<u64, ApiError> {
+    let session_network = ctx.session.lock().expect("session poisoned").network;
+    let Some(session_network) = session_network else {
+        return Err(ApiError {
+            code: "GATEWAY_UNAVAILABLE",
+            message: "no authenticated gateway session; rollcall cannot start without a site"
+                .to_string(),
+            extra_fields: "\"reason\":\"no_session\"".to_string(),
+            retryable: true,
+        });
+    };
+    match params.get("network") {
+        None => Ok(session_network),
+        Some(Json::String(text)) => {
+            let network = acl::parse_network_hex(text)
+                .map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?;
+            if network != session_network {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    "network does not match the attached gateway's session",
+                ));
+            }
+            Ok(network)
+        }
+        Some(_) => Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "network must be a 16-hex string",
+        )),
+    }
+}
+
+fn rollcall_start<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(key.as_str(), "network" | "group") {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let network = rollcall_network(params, ctx)?;
+    let Some(uid) = ctx
+        .uid
+        .filter(|uid| ctx.acl.permit(*uid, network, acl::PERM_SEND))
+    else {
+        return Err(ApiError::simple(
+            "AuthorizationFailed",
+            "principal lacks SEND on this network",
+        ));
+    };
+    let group = match params.get("group") {
+        None => crate::rollcall::DEFAULT_GROUP,
+        Some(value) => group_id_field(Some(value))?,
+    };
+    // The run's polls ride the group lane — refuse up front when the
+    // session could never write them (capability bit 7 + host_ops).
+    if let Some(error) = group_gate(ctx, network) {
+        return Err(error);
+    }
+    match ctx.rollcall.start(uid, network, group, ctx.now_ms) {
+        Ok(run_uuid) => Ok(format!(
+            "{{\"running\":true,\"run_uuid\":\"{}\",\"group\":{},\"network\":\"{network:016x}\"}}",
+            crate::rollcall::RunUuid(run_uuid),
+            group,
+        )),
+        Err(message) => Err(ApiError {
+            code: "CONFLICT",
+            message: message.to_string(),
+            extra_fields: String::new(),
+            retryable: false,
+        }),
+    }
+}
+
+fn rollcall_update<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(key.as_str(), "run_uuid" | "group") {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let Some(run_uuid) = params
+        .get("run_uuid")
+        .and_then(Json::as_str)
+        .and_then(crate::rollcall::parse_run_uuid)
+    else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "run_uuid must be the 32-hex id lab.rollcall.start returned",
+        ));
+    };
+    let group = group_id_field(params.get("group"))?;
+    let network = ctx.session.lock().expect("session poisoned").network;
+    let Some(network) = network else {
+        return Err(ApiError::simple(
+            "GATEWAY_UNAVAILABLE",
+            "no authenticated gateway session",
+        ));
+    };
+    let Some(uid) = ctx
+        .uid
+        .filter(|uid| ctx.acl.permit(*uid, network, acl::PERM_SEND))
+    else {
+        return Err(ApiError::simple(
+            "AuthorizationFailed",
+            "principal lacks SEND on this network",
+        ));
+    };
+    ctx.rollcall
+        .update(uid, &run_uuid, group)
+        .map_err(|message| ApiError {
+            code: "CONFLICT",
+            message: message.to_string(),
+            extra_fields: String::new(),
+            retryable: false,
+        })?;
+    Ok(format!(
+        "{{\"running\":true,\"run_uuid\":\"{}\",\"group\":{group}}}",
+        crate::rollcall::RunUuid(run_uuid),
+    ))
+}
+
+fn rollcall_stop<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(key.as_str(), "run_uuid") {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let network = ctx.session.lock().expect("session poisoned").network;
+    let Some(network) = network else {
+        return Err(ApiError::simple(
+            "GATEWAY_UNAVAILABLE",
+            "no authenticated gateway session",
+        ));
+    };
+    if !ctx
+        .uid
+        .is_some_and(|uid| ctx.acl.permit(uid, network, acl::PERM_SEND))
+    {
+        return Err(ApiError::simple(
+            "AuthorizationFailed",
+            "principal lacks SEND on this network",
+        ));
+    }
+    let stopped = match params.get("run_uuid") {
+        None => ctx.rollcall.stop(),
+        Some(Json::String(text)) => match crate::rollcall::parse_run_uuid(text) {
+            Some(uuid) => ctx.rollcall.stop_if(&uuid),
+            None => {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    "run_uuid must be the 32-hex id lab.rollcall.start returned",
+                ))
+            }
+        },
+        Some(_) => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "run_uuid must be the 32-hex id lab.rollcall.start returned",
+            ))
+        }
+    };
+    Ok(format!("{{\"stopped\":{stopped}}}"))
+}
+
+fn rollcall_status<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    if !params.object_entries().is_empty() {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "lab.rollcall.status takes no params",
+        ));
+    }
+    // READ_OPERATION on the run's network — a principal without it gets
+    // the same answer as "no run" (no existence oracle, matching group.get).
+    let run_network = ctx.rollcall.run_network();
+    let authorized = run_network.is_some_and(|network| {
+        ctx.uid
+            .is_some_and(|uid| ctx.acl.permit(uid, network, acl::PERM_READ_OPERATION))
+    });
+    if !authorized {
+        return Err(ApiError::simple(
+            "NOT_FOUND",
+            "no rollcall run visible to this principal",
+        ));
+    }
+    Ok(ctx.rollcall.status_json())
+}
+
 fn parse_hex_u64(text: &str) -> Option<u64> {
     if text.len() != 16 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
@@ -3952,6 +4181,10 @@ mod tests {
         Box::leak(Box::new(crate::group::GroupOps::default()))
     }
 
+    fn leaked_rollcall() -> &'static crate::rollcall::RollcallService {
+        Box::leak(Box::new(crate::rollcall::RollcallService::default()))
+    }
+
     fn leaked_telemetry_ops() -> &'static crate::telemetry::TelemetryOps {
         Box::leak(Box::new(crate::telemetry::TelemetryOps::default()))
     }
@@ -3998,6 +4231,7 @@ mod tests {
             node_table: &EMPTY_NODE_TABLE,
             config_ops,
             group_ops: leaked_group_ops(),
+            rollcall: leaked_rollcall(),
             telemetry_ops: leaked_telemetry_ops(),
             site: None,
             config_authority,
@@ -7638,5 +7872,317 @@ mod tests {
         assert!(handle(line, &c).contains("\"gateway_capable\":false"));
         // group_settled is a subscribable event kind.
         assert!(crate::subscribe::EVENT_KINDS.contains(&"group_settled"));
+    }
+
+    // --- lab.rollcall.* (design-devflow §6.4–6.5, D09) ----------------------
+
+    /// ctx with the rollcall service and group ops the test drives by hand
+    /// — the service is otherwise owned by the daemon `State`.
+    #[allow(clippy::too_many_arguments)]
+    fn rollcall_ctx<'a, S: OperationStore>(
+        uid: Option<u32>,
+        acl: &'a Acl,
+        log: &'a Mutex<ReceiveLog>,
+        store: &'a Mutex<S>,
+        limiter: &'a Mutex<AdmissionLimiter>,
+        session: &'a Mutex<SessionInfo>,
+        rollcall: &'a crate::rollcall::RollcallService,
+        group_ops: &'a crate::group::GroupOps,
+    ) -> ApiContext<'a, S> {
+        ApiContext {
+            session,
+            rollcall,
+            group_ops,
+            ..ctx_lane(
+                uid,
+                acl,
+                log,
+                store,
+                limiter,
+                session,
+                leaked_lane(),
+                leaked_config_ops(),
+                None,
+                leaked_hub(),
+                7,
+                leaked_event_ring(),
+                1_000,
+            )
+        }
+    }
+
+    #[test]
+    fn lab_rollcall_advertised_and_gated() {
+        let (acl, log, store, limiter) = test_env();
+        let rollcall: &'static crate::rollcall::RollcallService =
+            Box::leak(Box::new(crate::rollcall::RollcallService::default()));
+        let c = rollcall_ctx(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            group_session(0x87, 1),
+            rollcall,
+            leaked_group_ops(),
+        );
+        // Advertised with the dispatch + the 2 s floor.
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"c\",\"method\":\"capabilities.get\"}",
+            &c,
+        );
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let methods = parsed.get("result").unwrap().get("methods").unwrap();
+        assert_eq!(
+            methods.get("lab.rollcall.start").and_then(Json::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            methods.get("lab.rollcall.status").and_then(Json::as_bool),
+            Some(true)
+        );
+        let roll = parsed.get("result").unwrap().get("rollcall").unwrap();
+        assert_eq!(
+            roll.get("dispatch").and_then(Json::as_str),
+            Some("usb_group_delivery_v1")
+        );
+        assert_eq!(
+            roll.get("min_interval_ms").and_then(Json::as_u64),
+            Some(2_000)
+        );
+
+        // Schema: start takes only network/group, status takes none.
+        let response = handle(
+            group_line(
+                "lab.rollcall.start",
+                "{\"network\":\"0000000000000001\",\"bogus\":1}",
+            )
+            .as_bytes(),
+            &c,
+        );
+        assert_error_schema(&response, "INVALID_ARGUMENT");
+        let response = handle(
+            group_line("lab.rollcall.status", "{\"x\":1}").as_bytes(),
+            &c,
+        );
+        assert_error_schema(&response, "INVALID_ARGUMENT");
+
+        // No run yet — status is the same NOT_FOUND a missing group op gets.
+        let response = handle(group_line("lab.rollcall.status", "{}").as_bytes(), &c);
+        assert_error_schema(&response, "NOT_FOUND");
+
+        // Without SEND, start is denied before any run exists.
+        let denied = ApiContext {
+            uid: Some(7),
+            ..rollcall_ctx(
+                Some(7),
+                &acl,
+                &log,
+                &store,
+                &limiter,
+                group_session(0x87, 1),
+                rollcall,
+                leaked_group_ops(),
+            )
+        };
+        let response = handle(group_line("lab.rollcall.start", "{}").as_bytes(), &denied);
+        assert_error_schema(&response, "AuthorizationFailed");
+        assert!(rollcall.run_network().is_none(), "no run was created");
+    }
+
+    /// A disconnected GUI re-issuing `start` answers the single owned run —
+    /// the "no duplicate loop" acceptance lives in the service; this test
+    /// proves the API hands it through.
+    #[test]
+    fn lab_rollcall_single_run_across_clients() {
+        let (acl, log, store, limiter) = test_env();
+        let rollcall: &'static crate::rollcall::RollcallService =
+            Box::leak(Box::new(crate::rollcall::RollcallService::default()));
+        let ops = leaked_group_ops();
+        let session = group_session(0x87, 1);
+        let c = rollcall_ctx(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            session,
+            rollcall,
+            ops,
+        );
+        let start = |params: &str, ctx: &ApiContext<'_, MemoryOperationStore>| {
+            handle(group_line("lab.rollcall.start", params).as_bytes(), ctx)
+        };
+        let response = start("{}", &c);
+        let parsed = routeloom_json::parse(&response).unwrap();
+        assert_eq!(parsed.get("ok").and_then(Json::as_bool), Some(true));
+        let run_uuid = parsed
+            .get("result")
+            .unwrap()
+            .get("run_uuid")
+            .and_then(Json::as_str)
+            .unwrap()
+            .to_string();
+        assert_eq!(run_uuid.len(), 32);
+
+        // Same params from the same or another authorized principal: the
+        // live run's uuid, never a second loop.
+        for uid in [Some(501), Some(501)] {
+            let c = rollcall_ctx(uid, &acl, &log, &store, &limiter, session, rollcall, ops);
+            let response = start("{}", &c);
+            let reparsed = routeloom_json::parse(&response).unwrap();
+            assert_eq!(
+                reparsed
+                    .get("result")
+                    .unwrap()
+                    .get("run_uuid")
+                    .and_then(Json::as_str),
+                Some(run_uuid.as_str())
+            );
+        }
+        // A different group is a conflict — the run keeps its group.
+        let response = start("{\"group\":7}", &c);
+        assert_error_schema(&response, "CONFLICT");
+
+        // A poll actually schedules through the shared GroupOps lane once
+        // the service ticks with a nonempty roster.
+        crate::rollcall::service_step(rollcall, ops, 5, false, 1_100);
+        let status = routeloom_json::parse(&rollcall.status_json()).unwrap();
+        assert_eq!(status.get("poll_seq").and_then(Json::as_u64), Some(1));
+        assert!(status.get("in_flight").and_then(Json::as_str).is_some());
+
+        // update is owner-bound; a stranger's run_uuid is refused.
+        let stranger = rollcall_ctx(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            session,
+            rollcall,
+            ops,
+        );
+        let response = handle(
+            group_line(
+                "lab.rollcall.update",
+                "{\"run_uuid\":\"00000000000000000000000000000000\",\"group\":7}",
+            )
+            .as_bytes(),
+            &stranger,
+        );
+        assert_error_schema(&response, "CONFLICT");
+
+        // status reads under READ_OPERATION; a foreign-network principal
+        // sees the same NOT_FOUND as group.get.
+        let response = handle(group_line("lab.rollcall.status", "{}").as_bytes(), &c);
+        let parsed = routeloom_json::parse(&response).unwrap();
+        assert_eq!(parsed.get("ok").and_then(Json::as_bool), Some(true));
+        assert_eq!(
+            parsed
+                .get("result")
+                .unwrap()
+                .get("run_uuid")
+                .and_then(Json::as_str),
+            Some(run_uuid.as_str())
+        );
+        let foreign = rollcall_ctx(
+            Some(7),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            session,
+            rollcall,
+            ops,
+        );
+        let response = handle(group_line("lab.rollcall.status", "{}").as_bytes(), &foreign);
+        assert_error_schema(&response, "NOT_FOUND");
+
+        // stop{run_uuid} ends the run; a second stop is just false.
+        let response = handle(
+            group_line(
+                "lab.rollcall.stop",
+                &format!("{{\"run_uuid\":\"{run_uuid}\"}}"),
+            )
+            .as_bytes(),
+            &c,
+        );
+        let parsed = routeloom_json::parse(&response).unwrap();
+        assert_eq!(
+            parsed
+                .get("result")
+                .unwrap()
+                .get("stopped")
+                .and_then(Json::as_bool),
+            Some(true)
+        );
+        let response = handle(
+            group_line(
+                "lab.rollcall.stop",
+                &format!("{{\"run_uuid\":\"{run_uuid}\"}}"),
+            )
+            .as_bytes(),
+            &c,
+        );
+        let parsed = routeloom_json::parse(&response).unwrap();
+        assert_eq!(
+            parsed
+                .get("result")
+                .unwrap()
+                .get("stopped")
+                .and_then(Json::as_bool),
+            Some(false)
+        );
+        let response = handle(group_line("lab.rollcall.status", "{}").as_bytes(), &c);
+        assert_error_schema(&response, "NOT_FOUND");
+    }
+
+    /// `lab.rollcall.start` reuses the same session/network/capability gates
+    /// as `group.send`: a poll cannot schedule where a send could not fly.
+    #[test]
+    fn lab_rollcall_start_inherits_group_gates() {
+        let (acl, log, store, limiter) = test_env();
+        // No session at all.
+        let c = rollcall_ctx(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            leaked_session(),
+            leaked_rollcall(),
+            leaked_group_ops(),
+        );
+        let response = handle(group_line("lab.rollcall.start", "{}").as_bytes(), &c);
+        assert_error_schema(&response, "GATEWAY_UNAVAILABLE");
+        // Session on a different network.
+        let c = rollcall_ctx(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            group_session(0x87, 2),
+            leaked_rollcall(),
+            leaked_group_ops(),
+        );
+        let response = handle(
+            group_line("lab.rollcall.start", "{\"network\":\"0000000000000001\"}").as_bytes(),
+            &c,
+        );
+        assert_error_schema(&response, "INVALID_ARGUMENT");
+        // Gateway lacking the group capability.
+        let c = rollcall_ctx(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            group_session(0x07, 1),
+            leaked_rollcall(),
+            leaked_group_ops(),
+        );
+        let response = handle(group_line("lab.rollcall.start", "{}").as_bytes(), &c);
+        assert_error_schema(&response, "UNSUPPORTED");
     }
 }

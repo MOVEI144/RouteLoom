@@ -342,6 +342,11 @@ extern "C" void app_main(void) {
       static_cast<std::uint8_t>(routeloom::sdkv1::kMemberRoleGateway);
   owner_config.log_tag = kTag;
   owner_config.gateway = true;  // USB-attached: relay + direct local channel
+#if CONFIG_ROUTELOOM_GROUP_TREE_FLAT
+  // Flat group profile (dev-flow §6.3): the adopted SitePackage gateways
+  // become group_roots; the scoped routing policy is not engaged.
+  owner_config.flat_group_routing = true;
+#endif
   status = owner.begin(sdkv1_stores, entropy, owner_config);
   if (!status) fail(status.detail);
   routeloom::SecurityProvider& session_security = owner.session_provider();
@@ -652,6 +657,15 @@ extern "C" void app_main(void) {
   dev_config.channel = static_cast<std::uint8_t>(CONFIG_ROUTELOOM_CHANNEL);
   dev_config.boot = message_session;
   dev_config.role = routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay;
+#if CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED
+  // The dev route has no BoardConfig carrier yet: propagate the Kconfig
+  // gateway set so adopt_dev keeps the scoped profile (a missing list
+  // would silently fall back to flat on apply).
+  dev_config.route_gateways[0] = dev_config.node;
+  dev_config.route_gateways[1] =
+      static_cast<routeloom::NodeId>(CONFIG_ROUTELOOM_ROUTE_GATEWAY_2);
+  dev_config.route_gateway_count = 2;
+#endif
   status = owner.adopt_dev(dev_config, monotonic_now_ms());
   if (!status) fail(status.detail);
 #else

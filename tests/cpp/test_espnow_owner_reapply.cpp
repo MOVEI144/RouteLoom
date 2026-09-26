@@ -48,6 +48,9 @@ struct EspNowSecurityOwnerTestAccess {
   static NetworkId adopted_network(const EspNowSecurityOwner& owner) noexcept {
     return owner.adopted_network_;
   }
+  static void set_flat_group_routing(EspNowSecurityOwner& owner, bool flat) noexcept {
+    owner.config_.flat_group_routing = flat;
+  }
 };
 
 // The real Owner's boot-only PSA and NVS wiring is outside this test. Its
@@ -260,10 +263,52 @@ void test_same_boot_reapply(bool change_site_epoch) {
   runtime.stop();
 }
 
+// MemberEdhoc root mapping (dev-flow §6.1): the verified SitePackage
+// gateway list lands on route_gateways (scoped) or group_roots (flat
+// profile, Config::flat_group_routing) — the routing policy stays
+// separate from the root set.
+void test_member_root_mapping(bool flat) {
+  idf_stub::reset();
+  Stores stores{};
+  CHECK(stores.init());
+  EspNowSecurityOwner owner{};
+  EspNowSecurityOwnerTestAccess::install_coordinator(owner, stores.deps(owner));
+  EspNowSecurityOwnerTestAccess::set_flat_group_routing(owner, flat);
+  routeloom_test::CapturingObserver observer{};
+  EspNowRuntime runtime(radio_config(), owner.session_provider(), observer);
+  EspNowSecurityOwnerTestAccess::attach_runtime(owner, runtime);
+  CHECK(runtime.initialize().ok());
+
+  CoordinatorEvent boot{};
+  boot.kind = CoordinatorEventKind::Boot;
+  boot.now = kStart;
+  boot.boot_witness = kBoot;
+  boot.boot_prepared = true;
+  CHECK(owner.coordinator().step(boot).ok());
+  MonotonicMs now = kStart;
+  CoordinatorMemberConfig member{};
+  CHECK(take_apply(owner.coordinator(), now, member));
+  EspNowSecurityOwnerTestAccess::apply(owner, member);
+  CHECK(runtime.node().started());
+  const NodeConfig& node = runtime.node().config();
+  if (flat) {
+    CHECK(node.group_roots[0] == site_record().gateways[0] &&
+          node.group_roots[1] == site_record().gateways[1]);
+    CHECK(node.route_gateways[0] == kInvalidNodeId);
+  } else {
+    CHECK(node.route_gateways[0] == site_record().gateways[0] &&
+          node.route_gateways[1] == site_record().gateways[1]);
+    CHECK(node.group_roots[0] == kInvalidNodeId);
+  }
+  runtime.stop();
+}
+
 }  // namespace
 
 int main() {
   test_same_boot_reapply(false);
   test_same_boot_reapply(true);
+  test_member_root_mapping(false);
+  test_member_root_mapping(true);
   return failures == 0 ? 0 : 1;
 }

@@ -5315,6 +5315,31 @@ impl SiteAuthority {
         self.gks.status_json(time)
     }
 
+    /// True while control-plane work that competes for mesh airtime is
+    /// live: an open join request or EDHOC exchange, a GK rotation with
+    /// undelivered targets, or a pre-converged cutover. The rollcall lane
+    /// reads it to extend its poll interval — the point is only that
+    /// rollcall yields, not how much.
+    pub fn control_pressure(&self) -> bool {
+        if !self.requests.is_empty() || !self.txns.is_empty() {
+            return true;
+        }
+        if self.gks.rotation().is_some() {
+            return true;
+        }
+        self.operations.values().any(|op| {
+            op.kind == "cutover"
+                && op.cutover.as_ref().is_some_and(|state| {
+                    matches!(
+                        state.phase,
+                        cutover::CutoverPhase::Preparing
+                            | cutover::CutoverPhase::WaitingGateway
+                            | cutover::CutoverPhase::Committed
+                    )
+                })
+        })
+    }
+
     pub fn join_requests_json(&self, now_ms: u64) -> String {
         let items = self
             .requests
@@ -5896,6 +5921,15 @@ impl SiteService {
     ) -> Events {
         self.with(|a| a.handle_authority_up(device, kind, bytes, time, rng))
             .1
+    }
+
+    /// The rollcall lane's read-only pressure probe — locks the authority
+    /// for the flag only and never drains a queue (unlike `with`).
+    pub fn control_pressure(&self) -> bool {
+        self.authority
+            .lock()
+            .expect("site authority poisoned")
+            .control_pressure()
     }
 
     /// Seals one GK command into the channel outbox. Locks the authority

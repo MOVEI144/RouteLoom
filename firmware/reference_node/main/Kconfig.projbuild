@@ -33,7 +33,7 @@ config ROUTELOOM_PEER_MAC
 config ROUTELOOM_ROUTE_GATEWAY_SCOPED
     bool "Gateway-scoped routing profile (100-node sites)"
     default n
-    depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE || ROUTELOOM_SECURITY_MODE_DEV_RAM
     help
         Switches the node from the flat routing profile to the
         gateway-scoped profile (docs/design/sdk-v1/routing-scale.md,
@@ -42,6 +42,17 @@ config ROUTELOOM_ROUTE_GATEWAY_SCOPED
         up the tree or on demand (ROUTE_REQUEST). Every node of a site
         must enable it with the same gateway set. Disabled keeps the flat
         profile and the SDK route timers (5000 ms / 15000 ms) unchanged.
+        Under DEV_RAM the set is the dev profile's scoped routing policy.
+
+config ROUTELOOM_GROUP_TREE_FLAT
+    bool "Flat group tree: site gateways are group roots, not scoped routes"
+    default n
+    depends on ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+    help
+        dev-flow §6.3 separates the group tree root set from the routing
+        policy. Enabled, the verified SitePackage gateway list lands in
+        node.group_roots and routing stays flat; disabled (default), the
+        list keeps engaging the gateway-scoped profile it always has.
 
 config ROUTELOOM_ROUTE_GATEWAY_1
     hex "Primary route gateway Node ID"
