@@ -1,1 +1,0 @@
-{"board": "ref-b", "chip": "esp32c3", "mac": "94:a9:90:7a:26:ac", "offset": "0x190000", "size": "0x10000", "backup_sha256": "a5b13759abec2b3b5876e62d549036225d1eebb180e64d41390abdc87c944ac8", "backup_path": "/tmp/routeloom-hil-full-2026-09-26/r4-cutover-site/node6-pre-reset-rlsec.bin", "erased": true}

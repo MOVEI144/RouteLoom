@@ -1,2 +1,0 @@
-{"index":0,"destination":2,"request":1,"admitted_at_unix":1790449096.9373243,"admission_attempts":1,"delivery":{"request":1,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":3098622342,"msg_seq":53,"updated_ms":1790449096993},"latency_ms":56.84}
-{"index":1,"destination":6,"request":2,"admitted_at_unix":1790449096.997513,"admission_attempts":1,"delivery":{"request":2,"destination":0,"state":"delivered","reason":"END_RECEIVED","msg_session":3098622342,"msg_seq":54,"updated_ms":1790449097045},"latency_ms":56.68}

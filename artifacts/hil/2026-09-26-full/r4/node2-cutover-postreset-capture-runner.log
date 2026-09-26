@@ -1,1 +1,0 @@
-capturing /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 -> artifacts/hil/2026-09-26-full/r4/node2-cutover-postreset-console.log (backend=pyserial)

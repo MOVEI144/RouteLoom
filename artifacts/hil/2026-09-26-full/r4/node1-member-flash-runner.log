@@ -1,1 +1,0 @@
-flashed bridge_node -> bridge on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00; manifest artifacts/hil/2026-09-26-full/r4/node1-member-flash/flash-bridge.json
