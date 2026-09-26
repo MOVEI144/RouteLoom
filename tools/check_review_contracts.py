@@ -892,15 +892,23 @@ def validate(root: Path) -> dict:
             and int(default_cap.group(1)) == profile_entries["Relay"],
         )
         kconfig = (root / "components/routeloom/Kconfig").read_text(encoding="utf-8")
+        # Only the ROUTELOOM_DEDUP_CAPACITY block carries dedup capacities;
+        # other integer options (e.g. ROUTELOOM_BOOT_HEAP_FLOOR_BYTES) have
+        # their own defaults.
+        dedup_block = re.search(
+            r"^\s*config ROUTELOOM_DEDUP_CAPACITY\b(.*?)(?=^\s*(?:config|choice|menu|endmenu)\b)",
+            kconfig, re.M | re.S,
+        )
         kconfig_caps = sorted(
             int(value)
             for value in re.findall(
-                r"^\s*default (\d+)\b", kconfig, re.M
+                r"^\s*default (\d+)\b", dedup_block.group(1) if dedup_block else "", re.M
             )
         )
         test(
             "dedup_kconfig_capacities",
             kconfig_caps == sorted(profile_entries.values()),
+            "components/routeloom/Kconfig ROUTELOOM_DEDUP_CAPACITY defaults vs dedup_entries",
         )
         preauth = resources["preauth"]
         test(
