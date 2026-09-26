@@ -1860,6 +1860,9 @@ class MeshNode {
     // the deferral is applied when the TX result lands (03 §5).
     bool busy_deferred{false};
     std::uint32_t busy_retry_ms{0};
+    // RX can precede the MAC callback; retain the authenticated accept
+    // until the physical fence is released by that callback.
+    bool early_hop_accept{false};
   };
 
   struct AwaitingHop {

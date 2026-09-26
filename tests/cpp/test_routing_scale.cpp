@@ -634,6 +634,68 @@ void test_flat_no_route_pull() {
   CHECK(w.at(1)->delivery(id).state == DeliveryState::Delivered);
 }
 
+void test_flat_relay_binds_before_gateway() {
+  // A reference node can first bind to a relay with no gateway route.
+  // The later gateway link must propagate a route in both directions.
+  SimWorld w;
+  w.add(1, 1, 500, 3000);
+  w.add(2, 1, 500, 3000);
+  w.add(3, 1, 500, 3000);
+  w.start_all();
+  w.link(2, 3, 1, 1);
+  w.run(1000);
+  CHECK(!w.at(1)->routes().best(2).valid);
+  w.link(1, 3, 1, 1);
+  w.run(3000);
+  CHECK(follow_chain(w, 1, 2) == 1);
+  CHECK(follow_chain(w, 2, 1) == 1);
+  MessageId id{};
+  CHECK(send_data(w, 1, 2, id, 5000));
+  w.run(2000);
+  CHECK(w.at(1)->delivery(id).state == DeliveryState::Delivered);
+  CHECK(w.obs(2)->messages.size() == 1);
+  // Exercise the long 100-message cadence without rebooting away the
+  // relay's routing state; the first 16 are close together, then 30s apart.
+  std::array<MessageId, 16> first{};
+  for (auto& next : first) {
+    CHECK(send_data(w, 1, 2, next, 10000));
+    w.run(200, 100);
+  }
+  w.run(2000, 100);
+  for (const auto& next : first) {
+    CHECK(std::any_of(w.obs(1)->delivery_events.begin(), w.obs(1)->delivery_events.end(),
+                      [&](const DeliveryResult& result) {
+                        return result.id == next && result.state == DeliveryState::Delivered;
+                      }));
+  }
+  for (int i = 16; i < 100; ++i) {
+    MessageId next{};
+    CHECK(send_data(w, 1, 2, next, 10000));
+    w.run(30000, 100);
+    CHECK(std::any_of(w.obs(1)->delivery_events.begin(), w.obs(1)->delivery_events.end(),
+                      [&](const DeliveryResult& result) {
+                        return result.id == next && result.state == DeliveryState::Delivered;
+                      }));
+  }
+  CHECK(w.obs(2)->messages.size() == 101);
+}
+
+void test_early_hop_accept_before_data_callback() {
+  SimWorld w;
+  w.add(1, 1, 100, 1000);
+  w.add(2, 1, 100, 1000);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.run(200);
+  w.net.delay_data_callback = true;
+  MessageId id{};
+  CHECK(send_data(w, 1, 2, id, 5000));
+  w.run(500);
+  CHECK(w.at(1)->delivery(id).state == DeliveryState::Delivered);
+  CHECK(w.obs(2)->messages.size() == 1);
+  CHECK(!w.obs(1)->has_diag("UNMATCHED_HOP_ACCEPT"));
+}
+
 void test_flat_node_ignores_route_request() {
   // A flat neighbor answers only 1-hop pulls with ordinary advertisements;
   // it cannot invent a path to the absent gateway.
@@ -1843,6 +1905,8 @@ int main(int argc, char** argv) {
     test_parent_switch_keeps_downward_reachability();
     test_on_demand_discovery();
     test_flat_no_route_pull();
+    test_flat_relay_binds_before_gateway();
+    test_early_hop_accept_before_data_callback();
     test_flat_node_ignores_route_request();
     test_scoped_loop_freedom_under_churn();
     test_broadcast_grant_lifecycle();

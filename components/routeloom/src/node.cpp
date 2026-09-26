@@ -2372,6 +2372,7 @@ Status MeshNode::on_radio_tx_result(const std::uint64_t token, const bool succes
   TxJob job = physical_.job;
   const bool busy_deferred = physical_.busy_deferred;
   const std::uint32_t busy_retry_ms = physical_.busy_retry_ms;
+  const bool early_hop_accept = physical_.early_hop_accept;
   // Driver service time is recorded ONLY by note_radio_tx from the
   // runtime's own submitted/completed timestamps — a second measurement
   // here would double-record and inflate it with Owner/RX backlog (03 §3).
@@ -2391,6 +2392,14 @@ Status MeshNode::on_radio_tx_result(const std::uint64_t token, const bool succes
     return Status::success();
   }
   auto* neighbor = find_neighbor(job.peer);
+  if (early_hop_accept) {
+    // A binding-matched accept is stronger evidence than the MAC callback;
+    // keep the physical fence until now even if the callback reports loss.
+    if (neighbor != nullptr) neighbor->consecutive_failures = 0;
+    obs_hop_result(job, true, now_ms);
+    complete_job(job, true, now_ms);
+    return Status::success();
+  }
   if (!success) {
     if (neighbor != nullptr && neighbor->consecutive_failures < UINT8_MAX) {
       ++neighbor->consecutive_failures;
@@ -3236,6 +3245,17 @@ void MeshNode::handle_hop_accept(const wire::PlainFrame& frame, const NodeId pee
            value.job.submitted_rx_context == rx.binding.rx_context_id;
   });
   if (awaiting == nullptr) {
+    auto& in_flight = physical_;
+    const auto& job = in_flight.job;
+    if (in_flight.active && job.requires_hop_accept && job.peer == peer &&
+        job.ack.accepted_type == key.accepted_type && job.ack.key == key.key &&
+        job.ack.round == key.round && job.submitted_binding_set && rx.valid &&
+        job.submitted_binding == rx.binding.id &&
+        job.submitted_generation == rx.binding.generation &&
+        job.submitted_rx_context == rx.binding.rx_context_id) {
+      in_flight.early_hop_accept = true;
+      return;
+    }
     observer_.on_diagnostic("UNMATCHED_HOP_ACCEPT", peer, &key.key.id);
     return;
   }

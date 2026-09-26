@@ -54,6 +54,8 @@ FQ-CoDelのflow分離とsojourn観測を参考にするが、TCP前提のdrop制
 
 BUSYのv1 payloadは最大64B。version、reason、参照type/origin/session/sequence/round、binding incarnation、feedback sequence、retry_after_ms、pressureを含む。未対応peerへは送らずlegacy受理/timeoutへ戻る。
 
+送信側は物理TXのcallbackより先に届いた認証済みHOP_ACCEPTをbindingとmessage/roundで照合して保持し、callback fenceを解放してからhop成功として確定する。早着応答を未照合として捨てない。
+
 BUSYは**受理前拒否**。HOP_ACCEPT済みの仕事をBUSYで後から取り消さない。受理後に混んだ場合は責任を保持しつつ、別の負荷hintで上流へ減速を依頼する。END_RECEIPTを発行したことにもしない。
 
 送信側は未完の(peer, Message ID, round)に一致し、認証・TTLが有効なBUSYだけ採用する。retry_afterは20〜1000msにclamp。小さすぎる値で即時再送storm、大きすぎる値で永久停止にしない。
