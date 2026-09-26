@@ -64,7 +64,8 @@ class FakeAPI1:
                       'methods': {'capabilities.get': True, 'nodes.list': True,
                                   **{method: True for method in
                                      (self.mesh.METHODS if self.mesh is not None else ())}},
-                      'nodes': {'page_max': 128, 'clock': 'host_unix_ms'}}
+                      'nodes': {'page_max': 128, 'clock': 'host_unix_ms'},
+                      'caps_version': 1}
         elif request['method'] == 'nodes.list':
             if set(params) - {'after', 'limit', 'connected'}:
                 return self._error(request_id, 'INVALID_ARGUMENT')
