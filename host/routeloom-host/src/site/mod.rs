@@ -5151,6 +5151,15 @@ impl SiteAuthority {
         )
     }
 
+    /// Membership state for one node (`member`/`removed`), `None` when
+    /// the node is not in the ledger. Drives the legacy `NODES`
+    /// membership column so a lost route can never read as "left".
+    pub fn member_state(&self, node: u64) -> Option<&'static str> {
+        self.devices
+            .get(&node)
+            .map(|row| if row.member { "member" } else { "removed" })
+    }
+
     fn member_json(row: &DeviceRow) -> String {
         let opt = |v: Option<u64>| v.map_or_else(|| "null".to_string(), |v| v.to_string());
         format!(

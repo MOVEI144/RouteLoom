@@ -1410,10 +1410,13 @@ fn adapter_json(state: &State) -> String {
 }
 
 /// Legacy `NODES` view: the union of nodes observed in USB traffic and the
-/// node_status_v1 table. membership/reachability/rssi/hop_count come from
-/// the gateway's status report when one exists; a node the report does not
-/// cover — or any node while no capable session is live — stays
-/// "unknown"/null: absent data is never presented as observed.
+/// node_status_v1 table. Reachability/rssi/hop_count come from the
+/// gateway's status report when one exists; membership comes from the
+/// Site Authority ledger when one is configured — a route state must
+/// never pose as membership ("left" for a lost route misled triage).
+/// A node the report does not cover — or any node while no capable
+/// session is live — stays "unknown"/null: absent data is never
+/// presented as observed.
 fn nodes_json(state: &State) -> String {
     let observed: Vec<(u64, &'static str, u64)> = state
         .nodes
@@ -1441,16 +1444,24 @@ fn nodes_json(state: &State) -> String {
             (_, Some((_, role, _))) => role,
             _ => "peer",
         };
-        let (membership, reachability) = match record {
+        let reachability = match record {
             Some(record) if live || record.gateway => {
                 if record.connected {
-                    ("joined", "reachable")
+                    "reachable"
                 } else {
-                    ("left", "unreachable")
+                    "unreachable"
                 }
             }
-            _ => ("unknown", "unknown"),
+            _ => "unknown",
         };
+        // Membership is a ledger fact, not a route observation: without
+        // a site authority — or for a node the ledger never admitted —
+        // it stays honestly unknown.
+        let membership = state
+            .site
+            .as_ref()
+            .and_then(|service| service.with(|a| a.member_state(*id)).0)
+            .unwrap_or("unknown");
         let status = record.and_then(nodes::NodeRecord::live_status);
         let rssi = status
             .filter(|s| s.rssi_valid())
@@ -4048,7 +4059,10 @@ mod tests {
         );
         nodes::node_status_once(&state, &tx, &mut lane, now + 1);
         let view = nodes_json(&state);
-        assert!(view.contains("\"membership\":\"joined\""), "{view}");
+        // No site authority here: membership is unknown — reachability
+        // carries the route state, never the membership column.
+        assert!(view.contains("\"membership\":\"unknown\""), "{view}");
+        assert!(view.contains("\"reachability\":\"reachable\""), "{view}");
         assert!(view.contains("\"rssi_dbm\":-64"));
         assert!(view.contains("\"hop_count\":1"));
         assert!(view.contains("\"state\":\"live\""));
@@ -4085,7 +4099,10 @@ mod tests {
             now + 2,
         );
         nodes::node_status_once(&state, &tx, &mut lane, now + 3);
-        assert!(nodes_json(&state).contains("\"membership\":\"left\""));
+        // A lost route reads as unreachable — never as "left".
+        let view = nodes_json(&state);
+        assert!(view.contains("\"membership\":\"unknown\""), "{view}");
+        assert!(view.contains("\"reachability\":\"unreachable\""), "{view}");
         assert!(state
             .events
             .lock()
@@ -4104,6 +4121,143 @@ mod tests {
             .unwrap()
             .iter()
             .any(|e| e.kind == "node_left" && e.json.contains("\"reason\":\"gateway_lost\"")));
+    }
+
+    #[test]
+    fn nodes_membership_follows_ledger_not_route() {
+        use crate::site::testkit::{self, Outcome, SimDevice};
+        use crate::site::{DecideRequest, SiteService};
+        use routeloom_protocol::node_status::{
+            encode_node_event, encode_node_status_page, NodeEvent, NodeEventKind, NodeStatusEntry,
+            NodeStatusPage, CAP_NODE_STATUS_V1, FLAG_DIRECT, FLAG_NEIGHBOR, FLAG_NEIGHBOR_ACTIVE,
+            FLAG_REACHABLE, FLAG_RSSI_VALID, PAGE_ARMED,
+        };
+        let now = 1_790_000_000_000;
+        let store = Box::<crate::site::store::MemoryStore>::default();
+        let service = Arc::new(SiteService::new(testkit::authority(store, now)));
+        let transport = crate::site::transport::InProcessTransport::new();
+        service.set_transport(transport.clone());
+        let state = State {
+            site: Some(Arc::clone(&service)),
+            ..State::default()
+        };
+        // Join a member through the real flow.
+        let node = 0x00A1_0000_0000_7001;
+        let mut device = SimDevice::new(node, 0x79);
+        let (_, outcome, events) = device.start(&service, &transport, now);
+        assert!(matches!(outcome, Outcome::Waiting));
+        let request = testkit::request_id(&events).expect("join request");
+        service
+            .with(|a| {
+                a.decide(
+                    501,
+                    DecideRequest {
+                        join_request_id: request,
+                        device: node,
+                        verdict: crate::site::records::Verdict::Allow {
+                            role: crate::site::records::ROLE_ENDPOINT,
+                        },
+                        key: "allow-7001".into(),
+                    },
+                    now + 10,
+                )
+            })
+            .0
+            .unwrap();
+        // Ledger admission alone names the membership (no route needed).
+        touch_node(&state, node, "peer", now + 11);
+        let view = nodes_json(&state);
+        assert!(view.contains("\"membership\":\"member\""), "{view}");
+
+        // A lost route reads as unreachable — the member stays a member.
+        {
+            let mut info = state.session.lock().unwrap();
+            info.authenticated = true;
+            info.id = Some(42);
+            info.node = Some(1);
+            info.network = Some(7);
+            info.capability = Some(0x7 | CAP_NODE_STATUS_V1);
+        }
+        let (tx, rx) = mpsc::sync_channel::<Outbound>(MAX_OUTBOUND);
+        let mut lane = nodes::NodeStatusLane::default();
+        nodes::node_status_once(&state, &tx, &mut lane, now + 12);
+        let Ok(Outbound::Seal(query)) = rx.try_recv() else {
+            panic!("expected a sealed node status query");
+        };
+        let entry = NodeStatusEntry {
+            node,
+            flags: FLAG_NEIGHBOR
+                | FLAG_NEIGHBOR_ACTIVE
+                | FLAG_REACHABLE
+                | FLAG_DIRECT
+                | FLAG_RSSI_VALID,
+            rssi_last_dbm: -64,
+            rssi_ewma_q8_8: -64 * 256,
+            link_cost: 1,
+            route_metric: 1,
+            next_hop: node,
+            heard_age_ms: 0,
+        };
+        let page = encode_node_status_page(&NodeStatusPage {
+            result: 0,
+            flags: PAGE_ARMED,
+            next_after: node,
+            event_seq: 0,
+            entries: vec![entry],
+        })
+        .unwrap();
+        record_frame(
+            &state,
+            &frame(FrameKind::HostOps, 0, query.request, page.clone()),
+            &page,
+            now + 12,
+        );
+        nodes::node_status_once(&state, &tx, &mut lane, now + 13);
+        let view = nodes_json(&state);
+        assert!(view.contains("\"membership\":\"member\""), "{view}");
+        assert!(view.contains("\"reachability\":\"reachable\""), "{view}");
+        let gone = NodeStatusEntry {
+            flags: FLAG_NEIGHBOR,
+            link_cost: u16::MAX,
+            route_metric: u16::MAX,
+            next_hop: 0,
+            ..entry
+        };
+        let body = encode_node_event(&NodeEvent {
+            sequence: 1,
+            kind: NodeEventKind::RouteDown,
+            status: gone,
+        })
+        .unwrap();
+        record_frame(
+            &state,
+            &frame(FrameKind::HostOps, 0, 0, body.clone()),
+            &body,
+            now + 14,
+        );
+        nodes::node_status_once(&state, &tx, &mut lane, now + 15);
+        let view = nodes_json(&state);
+        assert!(view.contains("\"membership\":\"member\""), "{view}");
+        assert!(view.contains("\"reachability\":\"unreachable\""), "{view}");
+
+        // Revocation flips the ledger state, not the route.
+        service
+            .with(|a| {
+                a.revoke(
+                    501,
+                    crate::site::RevokeRequest {
+                        device: node,
+                        expected_generation: 1,
+                        reason: crate::site::parse_reason("removed").unwrap(),
+                        key: "revoke-7001".into(),
+                    },
+                    crate::site::group_keys::HostTime::sync(now + 16),
+                )
+            })
+            .0
+            .unwrap();
+        let view = nodes_json(&state);
+        assert!(view.contains("\"membership\":\"removed\""), "{view}");
     }
 
     /// Inner bytes of one frame of protocol/usb-golden/group-ops.
