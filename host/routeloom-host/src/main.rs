@@ -1432,6 +1432,31 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
     }
 }
 
+/// Resolve a record's origin assurance from the effective security
+/// profile: no Site Authority means the development shared-key profile;
+/// otherwise the origin must be ledger-enrolled on this network, or the
+/// claim stays unattributed. Runs before the receive-log lock is taken
+/// (sequential locks only — site, then ring, then log) and forwards any
+/// authority events the lookup drained, so a read never swallows them.
+pub(crate) fn ingress_assurance(
+    state: &State,
+    network: u64,
+    origin: u64,
+) -> receive_log::RxAssurance {
+    let Some(site) = state.site.as_deref() else {
+        return receive_log::RxAssurance::DevPskClaim;
+    };
+    let ((site_network, member), events) = site.with(|a| (a.acl_network(), a.member_state(origin)));
+    for (ms, fields) in events {
+        push_event(state, ms, fields);
+    }
+    if site_network == network && member == Some("member") {
+        receive_log::RxAssurance::MemberEnrolled
+    } else {
+        receive_log::RxAssurance::Unverified
+    }
+}
+
 /// Copy one verified mesh payload into the bounded receive log. Network and
 /// gateway attribution come from the authenticated session, never from the
 /// payload. Non-stored outcomes (conflict, caps, oversize) surface as bounded
@@ -1479,6 +1504,9 @@ fn receive_ingest(
         );
         return;
     }
+    // Attribution is fixed before the record is stored, from the
+    // ledger — never from payload self-claims.
+    let assurance = ingress_assurance(state, network, origin);
     let outcome = {
         let outcome = state
             .receive_log
@@ -1492,6 +1520,7 @@ fn receive_ingest(
                     msg_session,
                     msg_seq,
                     payload: payload.to_vec(),
+                    assurance,
                 },
                 ms,
             );
@@ -3930,6 +3959,78 @@ mod tests {
             "API1 {\"v\":1,\"request_id\":\"rx2\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"earliest\"}}",
         );
         assert!(denied.contains("AuthorizationFailed"), "{denied}");
+    }
+
+    #[test]
+    fn ingest_assurance_follows_site_ledger() {
+        use crate::site::testkit::{self, Outcome, SimDevice};
+        use crate::site::{DecideRequest, SiteService};
+        let now = 1_790_000_000_000;
+        let store = Box::<crate::site::store::MemoryStore>::default();
+        let service = Arc::new(SiteService::new(testkit::authority(store, now)));
+        let transport = crate::site::transport::InProcessTransport::new();
+        service.set_transport(transport.clone());
+        // Enroll one member through the real join flow.
+        let node = 0x00A1_0000_0000_7001;
+        let mut device = SimDevice::new(node, 0x79);
+        let (_, outcome, events) = device.start(&service, &transport, now);
+        assert!(matches!(outcome, Outcome::Waiting));
+        let request = testkit::request_id(&events).expect("join request");
+        service
+            .with(|a| {
+                a.decide(
+                    501,
+                    DecideRequest {
+                        join_request_id: request,
+                        device: node,
+                        verdict: crate::site::records::Verdict::Allow {
+                            role: crate::site::records::ROLE_ENDPOINT,
+                        },
+                        key: "allow-7001".into(),
+                    },
+                    now + 10,
+                )
+            })
+            .0
+            .unwrap();
+        let network = u64::from(testkit::NETWORK_LOW);
+        let state = State {
+            site: Some(Arc::clone(&service)),
+            ..State::default()
+        };
+        {
+            let mut session = state.session.lock().expect("session");
+            session.network = Some(network);
+            session.node = Some(1);
+        }
+        // A ledger-enrolled origin on the site network carries member
+        // assurance; an unenrolled origin on the same deployment is
+        // unattributed rather than mislabeled as a dev-PSK claim.
+        for (origin, seq) in [(node, 11u64), (0x99, 12)] {
+            receive_ingest(&state, Some(origin), Some(5), Some(seq), &[0xaa], now + 20);
+        }
+        let mut log = state.receive_log.lock().expect("receive log");
+        let crate::receive_log::ReadOutcome::Batch(batch) =
+            log.read(network, 0, 8, now + 20, false)
+        else {
+            panic!("ingested records must be readable");
+        };
+        assert_eq!(batch.records.len(), 2);
+        assert_eq!(
+            batch.records[0].assurance,
+            crate::receive_log::RxAssurance::MemberEnrolled
+        );
+        assert_eq!(
+            batch.records[1].assurance,
+            crate::receive_log::RxAssurance::Unverified
+        );
+        // Without an authority there is no ledger to consult: the dev
+        // profile claim is the honest attribution.
+        let bare = State::default();
+        assert_eq!(
+            ingress_assurance(&bare, network, node),
+            crate::receive_log::RxAssurance::DevPskClaim
+        );
     }
 
     #[test]

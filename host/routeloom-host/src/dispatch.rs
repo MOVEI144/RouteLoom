@@ -2463,6 +2463,9 @@ fn gateway_ingress_ack(state: &State, inner: &[u8], now: u64) -> Option<Vec<u8>>
         event("invalid", "request digest mismatch".to_string());
         return answer(GatewayOpsResult::Invalid);
     }
+    // Same attribution as the DataFromMesh path: the ledger, fixed
+    // before the record is stored — never payload self-claims.
+    let assurance = crate::ingress_assurance(state, network, ingress.ref_origin);
     let outcome = {
         let mut log = state.receive_log.lock().expect("receive log poisoned");
         log.ingest(
@@ -2473,6 +2476,7 @@ fn gateway_ingress_ack(state: &State, inner: &[u8], now: u64) -> Option<Vec<u8>>
                 msg_session: ingress.ref_session,
                 msg_seq: ingress.ref_sequence,
                 payload: ingress.payload.clone(),
+                assurance,
             },
             now,
         )
@@ -4782,6 +4786,11 @@ mod tests {
         assert_eq!(records[0].payload, vec![1, 2, 3]);
         assert_eq!(records[0].origin, 0xdead);
         assert_eq!(records[0].gateway, Some(NODE));
+        // No Site Authority on this fixture: the dev profile claim.
+        assert_eq!(
+            records[0].assurance,
+            crate::receive_log::RxAssurance::DevPskClaim
+        );
     }
 
     #[test]
@@ -4961,6 +4970,7 @@ mod tests {
                         msg_session: 1,
                         msg_seq: 1,
                         payload: vec![0xaa],
+                        assurance: crate::receive_log::RxAssurance::DevPskClaim,
                     },
                     4_000,
                 );
