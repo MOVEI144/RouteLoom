@@ -143,6 +143,29 @@ class BundleTests(unittest.TestCase):
             (bundle / 'manifest.json').write_bytes(original_manifest)
             (bundle / 'SHA256SUMS').write_bytes(original_sums)
             (bundle / 'signature.json').write_bytes(original_sig)
+            # A correctly signed bundle must not distribute a personalized USB
+            # credential inside its public resolved sdkconfig.
+            config_file = bundle / 'sdkconfig'
+            original_config = config_file.read_bytes()
+            private_config = original_config + b'CONFIG_ROUTELOOM_USB_DEV_SECRET="private-usb-password"\n'
+            config_file.write_bytes(private_config)
+            private_manifest = {**manifest, 'auxiliary': {
+                **manifest['auxiliary'], 'sdkconfig': catalog._hash(private_config)}}
+            (bundle / 'manifest.json').write_bytes(catalog._json(private_manifest))
+            (bundle / 'signature.json').write_bytes(catalog._json(catalog._sign(private_manifest, key)))
+            (bundle / 'SHA256SUMS').write_text(''.join(
+                f'{catalog._hash((bundle / name).read_bytes())}  {name}\n'
+                for name in sorted([e['path'] for e in manifest['files']] +
+                                   list(manifest['auxiliary']) + ['manifest.json'])))
+            api = API()
+            with self.assertRaises(ValueError):
+                flash('COM1', FlashPlan(identity, 'esp32c3', images, True,
+                                       identity.base_mac, True, bundle), api)
+            self.assertIsNone(api.written)
+            config_file.write_bytes(original_config)
+            (bundle / 'manifest.json').write_bytes(original_manifest)
+            (bundle / 'SHA256SUMS').write_bytes(original_sums)
+            (bundle / 'signature.json').write_bytes(original_sig)
             # Even correctly signed partition bytes must not map persistent data
             # into the factory image that will be written by this bundle.
             partition_image = bundle / 'images/partition_table/partition-table.bin'
@@ -236,7 +259,8 @@ class BundleTests(unittest.TestCase):
                      'CONFIG_FLASH_ENCRYPTION_MODE_RELEASE=y',
                      'CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK=y',
                      'CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX="1234"',
-                     'CONFIG_ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX="1234"'):
+                     'CONFIG_ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX="1234"',
+                     'CONFIG_ROUTELOOM_USB_DEV_SECRET="private-usb-password"'):
             with self.subTest(line=line), self.assertRaises(ValueError):
                 catalog.check_config(base + line + '\n', 'esp32c3')
 

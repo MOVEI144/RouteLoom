@@ -83,6 +83,11 @@ def check_config(text, chip):
         if line.startswith('CONFIG_ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX=') and line != (
                 'CONFIG_ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX=""'):
             raise ValueError('private discovery key in bundle')
+        # The resolved sdkconfig is distributed verbatim, so only the public
+        # legacy USB development secret may be exported with bridge images.
+        if line.startswith('CONFIG_ROUTELOOM_USB_DEV_SECRET=') and line != (
+                'CONFIG_ROUTELOOM_USB_DEV_SECRET="routeloom-dev-secret"'):
+            raise ValueError('private USB secret in bundle')
         passive = ('CONFIG_SOC_', 'CONFIG_SECURE_BOOT_V2_RSA_SUPPORTED=',
                    'CONFIG_SECURE_BOOT_V2_PREFERRED=', 'CONFIG_SECURE_BOOT_IMAGE_DIGEST_LEN=',
                    'CONFIG_SECURE_BOOT_ROM_FAST_WAKE_RESERVE_SIZE=',
