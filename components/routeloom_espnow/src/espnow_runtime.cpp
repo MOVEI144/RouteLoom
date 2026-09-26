@@ -596,12 +596,16 @@ Status EspNowRuntime::adopt_member_node(const routeloom::NodeConfig& adopted) no
     applied.route_lifetime_ms = routeloom::kScopedProductLifetimeMs;
   }
   // Firmware components are attached before asynchronous member adoption.
-  // Keep both terminal sinks across placement reconstruction so authenticated
-  // service and config work still reaches their owners after a join.
+  // Keep attached terminal sinks across placement reconstruction so routed
+  // service, config and diagnostic work reaches their owners after a join.
   GatewayServiceSink* const gateway_sink = node_.gateway_sink();
   ConfigEndpointSink* const config_sink = node_.config_sink();
+  DiagnosticSink* const diagnostic_sink = node_.diagnostic_sink();
   node_.~MeshNode();
   new (&node_) MeshNode(applied, *this, security_, observer_);
+  // Autonomy wire probes are assembled by the runtime, not MeshNode;
+  // use the same adopted identity and network as the rebuilt node.
+  config_.node = applied;
   // The reconstruction above drops every attached sink: the #117
   // reply-lease port is runtime-owned, so it is re-attached here — node
   // start refuses without it. Owner/observer sinks re-attach through
@@ -609,6 +613,7 @@ Status EspNowRuntime::adopt_member_node(const routeloom::NodeConfig& adopted) no
   (void)node_.set_reply_peer_port(&reply_port_);
   if (gateway_sink != nullptr) (void)node_.set_gateway_sink(gateway_sink);
   if (config_sink != nullptr) (void)node_.set_config_sink(config_sink);
+  if (diagnostic_sink != nullptr) (void)node_.set_diagnostic_sink(diagnostic_sink);
   return Status::success();
 }
 

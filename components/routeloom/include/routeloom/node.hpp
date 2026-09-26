@@ -849,6 +849,7 @@ class MeshNode {
   // Install/clear the end-protected Diagnostic (48) terminal sink — the
   // surface remote TelemetrySnapshot/Reject bodies arrive on (02 §4.2).
   Status set_diagnostic_sink(DiagnosticSink* sink) noexcept;
+  DiagnosticSink* diagnostic_sink() const noexcept { return diagnostic_sink_; }
   // Install/clear the Owner's ExpectedReply lease port. Nullptr means the
   // Owner cannot reserve a protected reply binding — start() refuses without
   // one, and swapping it while transactions are live is Busy.

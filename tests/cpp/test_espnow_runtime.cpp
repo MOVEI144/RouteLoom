@@ -22,6 +22,9 @@
 
 namespace routeloom::espnow {
 struct EspNowRuntimeTestAccess {
+  static const NodeConfig& wire_config(const EspNowRuntime& runtime) noexcept {
+    return runtime.config_.node;
+  }
   static ReplyPeerPort& reply(EspNowRuntime& runtime) noexcept {
     return runtime.reply_port_;
   }
@@ -278,7 +281,9 @@ void test_owner_drives_config_component() {
   TestSecurity security;
   CapturingObserver observer;
   CountingConfigSink sink;
-  EspNowRuntime runtime(make_config(), security, observer);
+  EspNowRuntimeConfig config = make_config();
+  config.node.route_lifetime_ms = 60000;
+  EspNowRuntime runtime(config, security, observer);
   CHECK(runtime.initialize().ok());
   CHECK(runtime.node().set_config_sink(&sink).ok());
   CHECK(runtime.start().ok());
@@ -311,16 +316,22 @@ void test_owner_drives_config_component() {
 
   // The same Owner drive must deliver outbound job completion as well.
   // No peer hop ACK is injected, so the bounded job fails honestly.
-  MessageId job{};
-  CHECK(runtime.node().send_typed(routeloom::FrameType::Control, kPeer,
-                                  ByteView{plain.payload.data(), 1}, 1000,
-                                  runtime.now_ms(), job).ok());
-  for (unsigned i = 0; i < 600 && sink.jobs == 0; ++i) {
-    idf_stub::advance_ms(5);
-    runtime.poll_once();
-    idf_stub::complete_send(true);
+  for (unsigned sent = 0; sent < 9; ++sent) {
+    MessageId job{};
+    const routeloom::Status queued = runtime.node().send_typed(routeloom::FrameType::Control, kPeer,
+                                    ByteView{plain.payload.data(), 1}, 1000,
+                                    runtime.now_ms(), job);
+    if (!queued) std::fprintf(stderr, "config send %u: %s\n", sent, queued.detail);
+    CHECK(queued.ok());
+    if (!queued) break;
+    for (unsigned i = 0; i < 600 && sink.jobs <= sent; ++i) {
+      idf_stub::advance_ms(5);
+      runtime.poll_once();
+      idf_stub::complete_send(true);
+    }
+    CHECK(sink.jobs == sent + 1);
+    CHECK(runtime.node().component_events_pending() == 0);
   }
-  CHECK(sink.jobs == 1);
   CHECK(!sink.last_hop_accepted);
   runtime.stop();
 }
@@ -736,8 +747,13 @@ void test_adopt_member_node_keeps_node_startable() {
                              routeloom::MonotonicMs) noexcept override {}
     void poll(routeloom::MonotonicMs) noexcept override {}
   } service_sink;
+  struct DiagnosticReceiver final : routeloom::DiagnosticSink {
+    void on_diagnostic_body(routeloom::NodeId, ByteView,
+                            routeloom::MonotonicMs) noexcept override {}
+  } diagnostic_sink;
   CHECK(runtime.node().set_config_sink(&config_sink).ok());
   CHECK(runtime.node().set_gateway_sink(&service_sink).ok());
+  CHECK(runtime.node().set_diagnostic_sink(&diagnostic_sink).ok());
   routeloom::NodeConfig adopted = config.node;
   adopted.node = 0x00A1000000001234ULL;
   adopted.network = 0x0A1B2C3DUL;
@@ -749,6 +765,13 @@ void test_adopt_member_node_keeps_node_startable() {
   CHECK(runtime.adopt_member_node(adopted).ok());
   CHECK(runtime.node().config_sink() == &config_sink);
   CHECK(runtime.node().gateway_sink() == &service_sink);
+  CHECK(runtime.node().diagnostic_sink() == &diagnostic_sink);
+  // Probe/Result wire headers must use the installed identity, not the
+  // firmware's pre-join static node/network after a reassigned join.
+  CHECK(EspNowRuntimeTestAccess::wire_config(runtime).node == adopted.node);
+  CHECK(EspNowRuntimeTestAccess::wire_config(runtime).network == adopted.network);
+  CHECK(EspNowRuntimeTestAccess::wire_config(runtime).message_session ==
+        adopted.message_session);
   // Adopted gateways run the product scoped timers (routing-scale.md §5):
   // the constructed flat defaults cannot satisfy the lease rule.
   CHECK(runtime.node().config().route_advertisement_period_ms ==

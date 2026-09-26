@@ -1615,6 +1615,42 @@ void EspNowSecurityOwner::on_tune_channel(const sdkv1::CoordinatorTune& tune,
 
 void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig& member,
                                            const MonotonicMs now_ms) noexcept {
+  NodeConfig node = runtime_->node().config();
+  // RLT1's mesh header carries the site's low 32-bit network id. The
+  // full 64-bit value (high word = site epoch) remains in adopted_network_
+  // for membership, authority and cryptographic binding.
+  node.network = static_cast<std::uint32_t>(member.network);
+  node.node = member.node;
+  node.message_session = member.message_session;
+  node.boot_session = member.boot_session;
+  node.link_epoch = member.link_epoch;
+  node.end_epoch = member.end_epoch;
+  node.boot_incarnation = member.boot_incarnation;
+  node.route_gateways.fill(kInvalidNodeId);
+  for (std::size_t i = 0; i < member.route_gateway_count && i < node.route_gateways.size(); ++i) {
+    node.route_gateways[i] = member.route_gateways[i];
+  }
+  const std::uint8_t operating = member.channel;
+  Status status = runtime_->adopt_member_node(node);
+  bool same = false;
+  if (!status && status.code == StatusCode::InvalidState && runtime_->node().started()) {
+    const NodeConfig& live = runtime_->node().config();
+    // The mesh header holds only the low network word. The retained full
+    // site epoch must match too before a running node can be reused.
+    same = adopted_network_ == member.network && live.network == node.network &&
+           live.node == node.node && live.message_session == node.message_session &&
+           live.boot_session == node.boot_session && live.link_epoch == node.link_epoch &&
+           live.end_epoch == node.end_epoch && live.boot_incarnation == node.boot_incarnation &&
+           live.route_gateways == node.route_gateways &&
+           runtime_->node().local_role() == member.role &&
+           runtime_->committed_channel() == operating;
+  }
+  if (!status && !same) {
+    ESP_LOGE(config_.log_tag, "member node adopt failed: %s", status.detail);
+    report_tune(Tune{0, kInvalidOperationToken, operating, true},
+                StatusCode::RadioFailure, runtime_->now_ms());
+    return;
+  }
   adopted_node_ = member.node;
   adopted_network_ = member.network;
   adopted_role_ = member.role;
@@ -1635,27 +1671,16 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
       endpoint()->set_self(member.node);
     }
   }
-  NodeConfig node = runtime_->node().config();
-  // RLT1's mesh header carries the site's low 32-bit network id. The
-  // full 64-bit value (high word = site epoch) remains in adopted_network_
-  // for membership, authority and cryptographic binding.
-  node.network = static_cast<std::uint32_t>(member.network);
-  node.node = member.node;
-  node.message_session = member.message_session;
-  node.boot_session = member.boot_session;
-  node.link_epoch = member.link_epoch;
-  node.end_epoch = member.end_epoch;
-  node.boot_incarnation = member.boot_incarnation;
-  node.route_gateways.fill(kInvalidNodeId);
-  for (std::size_t i = 0; i < member.route_gateway_count && i < node.route_gateways.size(); ++i) {
-    node.route_gateways[i] = member.route_gateways[i];
-  }
-  const std::uint8_t operating = member.channel;
-  Status status = runtime_->adopt_member_node(node);
-  if (!status && status.code != StatusCode::InvalidState) {
-    ESP_LOGE(config_.log_tag, "member node adopt failed: %s", status.detail);
-    report_tune(Tune{0, kInvalidOperationToken, operating, true},
-                StatusCode::RadioFailure, runtime_->now_ms());
+  if (same) {
+    // Re-proved membership on a running node still owes the coordinator
+    // ChannelReady; a second runtime start would incorrectly fail.
+    sdkv1::CoordinatorEvent ready{};
+    ready.kind = sdkv1::CoordinatorEventKind::ChannelReady;
+    ready.now = runtime_->now_ms();
+    ready.channel_result = StatusCode::Ok;
+    ready.channel = operating;
+    ready.channel_generation = runtime_->radio_generation().value;
+    (void)coordinator().step(ready);
     return;
   }
   // MeshNode gates bootstrap transit on the adopted Relay/Gateway role.
@@ -1663,11 +1688,8 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   // session handshakes with BOOTSTRAP_TRANSIT_ROLE.
   runtime_->node().set_local_role(member.role);
   // The gossip sink rides the member node: a fresh adopt placement-news
-  // the node (install), a recovery re-adopt refuses the rebuild (the
-  // running node already matches — re-assert and return). Idempotent
-  // either way; without it P6 frames honestly reject.
+  // the node after reconstruction. Without it P6 frames reject.
   (void)runtime_->node().set_rrs_sink(this);
-  if (!status) return;
   runtime_->node().set_bootstrap_sink(&coordinator());
   // Relay duties are role-gated (unknown role 0 never transits).
   runtime_->node().set_relay_enabled(member.role != 0);

@@ -2520,24 +2520,33 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
   cfg.rs_epoch_to_fetch = rs_epoch_to_fetch;
   cfg.node = identity.node_id;
   cfg.channel = site.channel;
-  // The message session names this boot on the mesh: entropy-drawn when
-  // the RNG answers, else the rlboot witness (durable, nonzero, distinct
-  // per boot). The node refuses 0 either way.
-  std::uint32_t session = 0;
-  if (!entropy_fill(deps_.entropy, reinterpret_cast<std::uint8_t*>(&session), sizeof(session)) ||
-      session == 0) {
-    session = boot_session;
+  // The started MeshNode retains its message sequence across a same-boot
+  // membership refresh. Keep both wire identities for that same site and
+  // boot; changing either while the node runs would split dedup attribution.
+  const bool same_boot_site = adopted_.message_session != 0 &&
+                              adopted_.network == site.network &&
+                              adopted_.node == identity.node_id &&
+                              adopted_.boot_session == boot_session;
+  if (same_boot_site) {
+    cfg.message_session = adopted_.message_session;
+    cfg.boot_incarnation = adopted_.boot_incarnation;
+  } else {
+    // A new boot draws a fresh session, with the durable witness as the
+    // nonzero fallback if entropy is unavailable.
+    std::uint32_t session = 0;
+    if (!entropy_fill(deps_.entropy, reinterpret_cast<std::uint8_t*>(&session), sizeof(session)) ||
+        session == 0) {
+      session = boot_session;
+    }
+    cfg.message_session = session;
+    if (!entropy_fill(deps_.entropy, reinterpret_cast<std::uint8_t*>(&cfg.boot_incarnation),
+                      sizeof(cfg.boot_incarnation))) {
+      cfg.boot_incarnation = 0;
+    }
   }
-  cfg.message_session = session;
   cfg.boot_session = boot_session;
   cfg.link_epoch = 1;  // configured defaults; the session provider stamps
   cfg.end_epoch = 1;   // the live per-peer epochs over these
-  std::uint64_t incarnation = 0;
-  if (!entropy_fill(deps_.entropy, reinterpret_cast<std::uint8_t*>(&incarnation),
-                    sizeof(incarnation))) {
-    incarnation = 0;  // unset: hosts treat boot attribution as unknown
-  }
-  cfg.boot_incarnation = incarnation;
   cfg.role = site.role;
   for (std::size_t i = 0; i < site.gateway_count && i < cfg.route_gateways.size(); ++i) {
     cfg.route_gateways[cfg.route_gateway_count++] = site.gateways[i];

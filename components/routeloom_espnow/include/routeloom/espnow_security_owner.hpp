@@ -214,6 +214,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   void on_verified_authority(std::uint8_t type, ByteView plaintext) noexcept override;
 
  private:
+  friend struct EspNowSecurityOwnerTestAccess;
   // One outstanding radio tune: a TuneChannel action (coord_token != 0)
   // or the ApplyMemberConfig channel move (coord_token == 0, reported as
   // the firmware's apply-time ChannelReady).
