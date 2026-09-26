@@ -522,6 +522,70 @@ class LifecycleObserver {
                                   MonotonicMs now_ms) noexcept = 0;
 };
 
+// Bounded retention for lifecycle/recovery triage: the last event,
+// per-kind totals, and the outstanding-recovery state (reported vs
+// started). The platform's LifecycleObserver owns one and feeds it; USB
+// diagnostics and the post-recovery mesh pull read it. Values only —
+// epochs, numeric reasons, node ids — never key material.
+class LifecycleJournal final : public LifecycleObserver {
+ public:
+  struct LastEvent {
+    LifecycleEvent event{};
+    MonotonicMs at_ms{0};
+    bool valid{false};
+  };
+
+  void on_lifecycle_event(const LifecycleEvent& event,
+                          const MonotonicMs now_ms) noexcept override {
+    last_ = LastEvent{event, now_ms, true};
+    const auto kind = static_cast<std::uint8_t>(event.kind);
+    if (kind >= 1 && kind <= counts_.size()) ++counts_[kind - 1];
+    if (event.kind == LifecycleEventKind::RecoveryStarted) {
+      recovery_active_ = true;
+      recovery_needed_ = false;
+      last_recovery_reason_ = static_cast<std::uint8_t>(event.detail & 0xFFU);
+      last_recovery_ms_ = now_ms;
+    } else if (event.kind == LifecycleEventKind::RecoveryFinished) {
+      recovery_active_ = false;
+      recovery_needed_ = false;
+    }
+  }
+
+  // A ReportRecovery coordinator action (not a lifecycle event): the
+  // stores need recovery before any mode can run. `reason` is the raw
+  // JoinRecoveryReason code; kept numeric like every other journal field.
+  void note_recovery_reported(const std::uint8_t reason,
+                              const MonotonicMs now_ms) noexcept {
+    ++recovery_reports_;
+    last_recovery_reason_ = reason;
+    last_recovery_ms_ = now_ms;
+    recovery_needed_ = true;
+  }
+
+  LastEvent last() const noexcept { return last_; }
+  std::uint64_t count(const LifecycleEventKind kind) const noexcept {
+    const auto index = static_cast<std::uint8_t>(kind);
+    if (index < 1 || index > counts_.size()) return 0;
+    return counts_[index - 1];
+  }
+  std::uint64_t recovery_reports() const noexcept { return recovery_reports_; }
+  bool recovery_needed() const noexcept { return recovery_needed_; }
+  bool recovery_active() const noexcept { return recovery_active_; }
+  std::uint8_t last_recovery_reason() const noexcept {
+    return last_recovery_reason_;
+  }
+  MonotonicMs last_recovery_ms() const noexcept { return last_recovery_ms_; }
+
+ private:
+  LastEvent last_{};
+  std::array<std::uint64_t, 7> counts_{};
+  std::uint64_t recovery_reports_{0};
+  bool recovery_needed_{false};
+  bool recovery_active_{false};
+  std::uint8_t last_recovery_reason_{0};
+  MonotonicMs last_recovery_ms_{0};
+};
+
 class LifecycleAuthorityPort {
  public:
   virtual ~LifecycleAuthorityPort() = default;

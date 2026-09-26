@@ -43,6 +43,25 @@ void write_u16(std::uint8_t* p, std::uint16_t v) noexcept {
   p[1] = static_cast<std::uint8_t>(v & 0xFFU);
 }
 
+// A MeshRejected SUBMIT has no stored slot, so the receipt's 32-byte hash
+// position carries a bounded refusal detail instead. The fixed receipt
+// size and all other result layouts remain unchanged; older hosts ignore
+// this field on MeshRejected.
+void set_mesh_refusal(DispatchReceipt& receipt, const char* detail) noexcept {
+  receipt.hash.fill(0);
+  receipt.hash[0] = 'R';
+  receipt.hash[1] = 'L';
+  receipt.hash[2] = 'F';
+  receipt.hash[3] = 'R';
+  if (detail == nullptr) detail = "MESH_REJECTED";
+  std::size_t size = 0;
+  while (detail[size] != '\0' && size < receipt.hash.size() - 5) {
+    receipt.hash[5 + size] = static_cast<std::uint8_t>(detail[size]);
+    ++size;
+  }
+  receipt.hash[4] = static_cast<std::uint8_t>(size);
+}
+
 }  // namespace
 
 UsbBridge::UsbBridge(const Config& config, ByteStream& stream) noexcept
@@ -101,6 +120,16 @@ Status UsbBridge::attach_node_status() noexcept {
 Status UsbBridge::attach_group() noexcept {
   if (config_.mesh == nullptr) {
     return Status::error(StatusCode::InvalidState, "group needs mesh");
+  }
+  // Group delivery rides the gateway tree: a node that cannot source one
+  // (flat profile, or a scoped node that is no route gateway) must not
+  // advertise group_delivery_v1 — the host would accept group.send and
+  // every send would fail. The Kconfig bitmap is a request; servability
+  // decides, so clear the bit (success: the family then answers
+  // Unsupported at the gate) instead of failing the boot.
+  if (!config_.mesh->group_origin_servable()) {
+    config_.capability &= ~kCapGroupDeliveryV1;
+    return Status::success();
   }
   config_.capability |= kCapGroupDeliveryV1;
   return Status::success();
@@ -1896,6 +1925,7 @@ void UsbBridge::handle_ops_submit(const std::uint64_t request,
 
   if (config_.mesh == nullptr) {
     receipt.result = HostOpsResult::MeshRejected;
+    set_mesh_refusal(receipt, "MESH_UNAVAILABLE");
     send_receipt(receipt, request, now_ms);
     return;
   }
@@ -1923,6 +1953,7 @@ void UsbBridge::handle_ops_submit(const std::uint64_t request,
     // Refused or full: no record is created, so a later retry is a clean
     // Admit — never a Conflict against a half-created entry.
     receipt.result = HostOpsResult::MeshRejected;
+    set_mesh_refusal(receipt, status.detail);
     send_receipt(receipt, request, now_ms);
     return;
   }
@@ -2406,16 +2437,41 @@ void UsbBridge::on_delivery(const DeliveryResult& result) noexcept {
   // window records outlive reconnects. (A duplicate callback for an already
   // retired record is the one case that still emits: the record is gone by
   // design, so the host reads it as a stale event.)
-  if (ops_send_active_ ||
-      window_.note_mesh_outcome(result.id.session, result.id.sequence,
-                                result.state)) {
+  if (ops_send_active_) {
+    // A callback re-entering SUBMIT cannot correlate yet (no record and
+    // no receipt have been produced): suppress, as before.
     return;
   }
-  // inner: request(8) || msg_session(4) || msg_seq(8) || state(1) ||
-  //        reason_len(1) || reason
+  std::array<std::uint8_t, kOperationIdSize> operation_id{};
+  if (window_.note_mesh_outcome(result.id.session, result.id.sequence,
+                                result.state, &operation_id)) {
+    // Correlated — but a terminal failure without its reason would leave
+    // the API1 send result unexplained (HOP_TIMEOUT and END_RECEIPT_TIMEOUT
+    // share one window state). Emit the reason-carrying event for terminal
+    // non-deliveries only: Delivered needs no reason, non-terminal states
+    // stay pollable via QUERY, and the window (not the event) stays the
+    // authoritative state.
+    if (result.state == DeliveryState::Failed ||
+        result.state == DeliveryState::Expired ||
+        result.state == DeliveryState::Indeterminate ||
+        result.state == DeliveryState::CancelledBeforeTx) {
+      emit_delivery_event(request_for(result.id), result, &operation_id);
+    }
+    return;
+  }
   const std::uint64_t request =
       pending_request_ != 0 ? pending_request_ : request_for(result.id);
-  std::array<std::uint8_t, 8 + 4 + 8 + 1 + 1 + kMaxReasonLen> inner{};
+  emit_delivery_event(request, result);
+}
+
+void UsbBridge::emit_delivery_event(const std::uint64_t request,
+                                    const DeliveryResult& result,
+                                    const std::array<std::uint8_t, kOperationIdSize>*
+                                        operation_id) noexcept {
+  // inner: request(8) || msg_session(4) || msg_seq(8) || state(1) ||
+  //        reason_len(1) || reason || [operation_id(24)]
+  std::array<std::uint8_t, 8 + 4 + 8 + 1 + 1 + kMaxReasonLen + kOperationIdSize>
+      inner{};
   write_u64(inner.data(), request);
   write_u32(inner.data() + 8, result.id.session);
   write_u64(inner.data() + 12, result.id.sequence);
@@ -2426,20 +2482,27 @@ void UsbBridge::on_delivery(const DeliveryResult& result) noexcept {
   if (reason_len > 0) {
     std::memcpy(inner.data() + 22, result.reason, reason_len);
   }
+  const std::size_t tail = 22 + reason_len;
+  if (operation_id != nullptr) {
+    std::memcpy(inner.data() + tail, operation_id->data(), operation_id->size());
+  }
   enqueue(FrameKind::DeliveryEvent, 0, request,
-          ByteView{inner.data(), 22 + reason_len}, now_ms_);
+          ByteView{inner.data(), tail + (operation_id != nullptr ? kOperationIdSize : 0)},
+          now_ms_);
 }
 
-void UsbBridge::on_diagnostic(const char* reason, const NodeId peer,
-                              const MessageId* message) noexcept {
+bool UsbBridge::emit_diagnostic(const char* reason, const NodeId peer,
+                                   const MessageId* message,
+                                   const MonotonicMs now_ms) noexcept {
   // inner: peer(8) || flags(1) || [msg_session(4) || msg_seq(8)] ||
-  //        reason_len(1) || reason
-  std::array<std::uint8_t, 8 + 1 + 12 + 1 + kMaxReasonLen> inner{};
+  //        reason_len(1) || reason || boot(8) || seq(4) || dropped_total(8)
+  std::array<std::uint8_t, 8 + 1 + 12 + 1 + kMaxReasonLen + kDiagAccountingTailSize>
+      inner{};
   write_u64(inner.data(), peer);
   std::size_t size = 9;
-  inner[8] = 0;
+  inner[8] = kDiagFlagHasAccounting;
   if (message != nullptr) {
-    inner[8] = kDiagFlagHasMessage;
+    inner[8] |= kDiagFlagHasMessage;
     write_u32(inner.data() + 9, message->session);
     write_u64(inner.data() + 13, message->sequence);
     size = 21;
@@ -2448,8 +2511,32 @@ void UsbBridge::on_diagnostic(const char* reason, const NodeId peer,
   if (reason_len > kMaxReasonLen) reason_len = kMaxReasonLen;
   inner[size] = static_cast<std::uint8_t>(reason_len);
   if (reason_len > 0) std::memcpy(inner.data() + size + 1, reason, reason_len);
-  enqueue(FrameKind::Diagnostic, 0, 0,
-          ByteView{inner.data(), size + 1 + reason_len}, now_ms_);
+  size += 1 + reason_len;
+  write_u64(inner.data() + size, config_.boot_id);
+  write_u32(inner.data() + size + 8, diag_seq_);
+  write_u64(inner.data() + size + 12, stats_.diagnostics_dropped);
+  ++diag_seq_;
+  return enqueue(FrameKind::Diagnostic, 0, 0,
+                 ByteView{inner.data(), size + kDiagAccountingTailSize},
+                 now_ms);
+}
+
+void UsbBridge::on_diagnostic(const char* reason, const NodeId peer,
+                              const MessageId* message) noexcept {
+  // A drop the queue could not take earlier goes out ahead of this
+  // diagnostic as an explicit marker — recovery is announced, and the
+  // marker's own seq keeps the host's gap math exact.
+  if (diag_loss_pending_) {
+    if (emit_diagnostic("DIAG_LOSS", config_.node, nullptr, now_ms_)) {
+      diag_loss_pending_ = false;
+    } else {
+      ++stats_.diagnostics_dropped;
+    }
+  }
+  if (!emit_diagnostic(reason, peer, message, now_ms_)) {
+    ++stats_.diagnostics_dropped;
+    diag_loss_pending_ = true;
+  }
 }
 
 // --- Gateway host lane (scope-gateway-config/05-wire-api.md §5.6, P3) ------
@@ -2590,8 +2677,9 @@ void UsbBridge::handle_gateway_submit(const SubmitRequest& submit,
                                       DispatchReceipt& receipt,
                                       const std::uint64_t request,
                                       const MonotonicMs now_ms) noexcept {
-  const auto refuse = [&](const HostOpsResult result) {
+  const auto refuse = [&](const HostOpsResult result, const char* detail = nullptr) {
     receipt.result = result;
+    if (result == HostOpsResult::MeshRejected) set_mesh_refusal(receipt, detail);
     send_receipt(receipt, request, now_ms);
   };
   if ((config_.capability & kCapGatewayEndpointV1) == 0 || gateway_ == nullptr ||
@@ -2678,7 +2766,7 @@ void UsbBridge::handle_gateway_submit(const SubmitRequest& submit,
                       ByteView{prefix.data(), prefix.size()}, fields.payload,
                       submit.dispatch_seq, now_ms);
     if (!queued) {
-      refuse(HostOpsResult::MeshRejected);
+      refuse(HostOpsResult::MeshRejected, queued.detail);
       return;
     }
     if (!window_.record_sent(submit.dispatcher, submit.dispatch_seq,
@@ -2712,7 +2800,7 @@ void UsbBridge::handle_gateway_submit(const SubmitRequest& submit,
     }
   }
   if (send == nullptr) {
-    refuse(HostOpsResult::MeshRejected);
+    refuse(HostOpsResult::MeshRejected, "GATEWAY_SEND_FULL");
     return;
   }
   if (!window_.record_pending(submit.dispatcher, submit.dispatch_seq,

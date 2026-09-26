@@ -239,6 +239,9 @@ config ROUTELOOM_CAPABILITY
         bridge serves the 0x50 GROUP_SEND / 0x52 GROUP_QUERY subcommands
         and answers 0x51 GROUP_STATUS summaries; a send is only admitted
         when this node is a route gateway of the gateway-scoped profile.
+        The bit is masked from the HelloAck advertisement unless the node
+        can actually serve a send (flat profile, e.g. DevRam, answers
+        Unsupported at the gate instead of failing every send).
         Cleared answers Unsupported. Also rides the HostOps carrier (bit 2).
         The bitmap is bound into the HelloAck authentication transcript —
         a bit is only advertised when the matching endpoint is actually

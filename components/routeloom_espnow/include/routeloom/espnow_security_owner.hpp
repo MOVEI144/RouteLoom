@@ -143,6 +143,10 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // installs it as the node's config sink. Null on devices.
   // ConfigEndpointSink lives in routeloom (node.hpp), not in sdkv1.
   ConfigEndpointSink* authority_mesh_sink() noexcept;
+  // The retained lifecycle/recovery account (last event, per-kind
+  // totals, outstanding-recovery state) for USB diagnostics and the
+  // post-recovery mesh pull.
+  const sdkv1::LifecycleJournal& lifecycle_journal() const noexcept;
   // A GROUP_KEY_RETIRED diagnostic was observed (node observer context:
   // records only). The next poll turns it into a throttled authority
   // pull — the backstop for a missed rotation Wake.
@@ -311,6 +315,11 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   void drain_lifecycle_actions(MonotonicMs now_ms) noexcept;
   void on_lifecycle_recovery(const sdkv1::LifecycleAction& action, MonotonicMs now_ms) noexcept;
   void complete_lifecycle_recovery(bool reprovisioned, MonotonicMs now_ms) noexcept;
+  // Forwards one lifecycle/recovery event to the attached USB bridge as a
+  // Diagnostic frame (no-op without a bridge). Stable reason vocabulary,
+  // numeric fields only — the PC reads these from its event ring.
+  void emit_lifecycle_diagnostic(const sdkv1::LifecycleEvent& event) noexcept;
+  void emit_recovery_diagnostic(std::uint8_t reason) noexcept;
   // AdoptNetwork/RestartUnassigned reboot: the mesh node and discovery
   // cannot re-adopt live (adopt_member_node/attach_autonomy refuse past
   // start), so the durable post-condition (new stores + Idle journal /
@@ -367,6 +376,11 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   LifecycleRuntimePort lifecycle_runtime_{*this};
   LifecycleObjectSink lifecycle_sink_{*this};
   LifecycleObserver lifecycle_observer_{*this};
+  // Bounded retention for lifecycle/recovery triage (last event,
+  // per-kind totals, outstanding-recovery state). Fed by the observer
+  // above and the ReportRecovery site; read by USB diagnostics and the
+  // post-recovery mesh pull.
+  sdkv1::LifecycleJournal lifecycle_journal_{};
   alignas(sdkv1::MembershipLifecycle)
       static std::array<std::uint8_t, sizeof(sdkv1::MembershipLifecycle)> lifecycle_box_;
   static bool lifecycle_box_in_use_;

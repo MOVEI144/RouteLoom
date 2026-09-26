@@ -4,22 +4,111 @@ compile_error!("routeloomctl v0.1 currently requires a Unix platform");
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 mod office_ledger;
 mod provision;
 mod provision_office;
 
+/// A query must never hang forever on a silent socket — but the read
+/// budget still covers the longest daemon long-poll (`group-get --wait-ms`
+/// up to 15 s) with margin. Streaming (`node-events`) clears the read
+/// deadline after the first line and blocks until interrupted instead.
+const CLI_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const CLI_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// True when an API1 `command`'s `response` line carries `"ok":false`.
+/// Only the envelope head is scanned — the verdict comes from the `ok`
+/// member right after `request_id`, so a payload string that mentions
+/// `"ok":false` cannot flip it. Legacy verbs have no envelope and never
+/// fail here; a line that is not an API1 envelope at all fails closed
+/// (success the CLI cannot confirm is not success).
+fn api_response_is_error(command: &str, response: &str) -> bool {
+    if !command.starts_with("API1 ") {
+        return false;
+    }
+    let Some(rest) = response
+        .trim_start()
+        .strip_prefix("{\"v\":1,\"request_id\":")
+    else {
+        return true;
+    };
+    let after_id = if let Some(rest) = rest.strip_prefix("null") {
+        rest
+    } else if let Some(inner) = rest.strip_prefix('"') {
+        // Request ids are `ctl-<pid>`; still skip escapes honestly.
+        let mut chars = inner.chars();
+        let mut closed = false;
+        let mut bytes = 1;
+        while let Some(c) = chars.next() {
+            bytes += c.len_utf8();
+            if c == '\\' {
+                if let Some(escaped) = chars.next() {
+                    bytes += escaped.len_utf8();
+                }
+                continue;
+            }
+            if c == '"' {
+                closed = true;
+                break;
+            }
+        }
+        if !closed {
+            return true;
+        }
+        &rest[bytes..]
+    } else {
+        return true;
+    };
+    let Some(flag) = after_id.strip_prefix(",\"ok\":") else {
+        return true;
+    };
+    // Only an explicit `"ok":true` clears the error verdict.
+    !flag.starts_with("true")
+}
+
+/// Sends one `command` line and reads the first response line, bounded by
+/// `read_timeout`/`write_timeout`. Returns the line plus the reader so the
+/// caller can keep streaming (`node-events`) after printing it.
+fn exchange_first(
+    socket: &Path,
+    command: &str,
+    read_timeout: Duration,
+    write_timeout: Duration,
+) -> Result<(String, BufReader<UnixStream>), Box<dyn std::error::Error>> {
+    let mut stream = UnixStream::connect(socket)?;
+    stream.set_write_timeout(Some(write_timeout))?;
+    stream.set_read_timeout(Some(read_timeout))?;
+    stream.write_all(command.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+    reader.read_line(&mut response)?;
+    if response.is_empty() {
+        return Err(
+            io::Error::new(io::ErrorKind::UnexpectedEof, "daemon closed connection").into(),
+        );
+    }
+    Ok((response, reader))
+}
+
 fn usage() {
-    eprintln!("Read-only daemon diagnostics: adapter | events | deliveries");
     eprintln!(
-        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-retry --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-recover --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --mode adopt-known|reprovision --new-store-generation <u32> --new-revision <u64> [--snapshot-hash <64hex>] [--baseline <hex>]|config-recovery-info --network <16hex> --target <16hex> --config-namespace <u16>|trust-install --network <16hex> --target <16hex> --manifest <file>|trust-status --network <16hex> --target <16hex>|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)|group-send --network <16hex> --group <1-65535|ALL> --payload <hex> [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered] [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]|group-get --id <grp-opid> [--wait-ms 0-15000]"
+        "Read-only daemon diagnostics: adapter | events [--follow [--kinds k1,k2]] | deliveries"
+    );
+    eprintln!(
+        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-retry --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-recover --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --mode adopt-known|reprovision --new-store-generation <u32> --new-revision <u64> [--snapshot-hash <64hex>] [--baseline <hex>]|config-recovery-info --network <16hex> --target <16hex> --config-namespace <u16>|trust-install --network <16hex> --target <16hex> --manifest <file>|trust-status --network <16hex> --target <16hex>|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)|telemetry --observer <16hex> --peer <16hex> [--direction egress|ingress] [--length-class 0|1|2|255] [--max-age-ms 0-3000]|group-send --network <16hex> --group <1-65535|ALL> --payload <hex> [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered] [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]|group-get --id <grp-opid> [--wait-ms 0-15000]"
     );
     eprintln!(
         "routeloomctl provision-keygen --root-id <16hex> --out <key.json>|provision-authority-keygen --authority-id <16hex> --out <key.json>|provision-image --spec <image-spec.json> --out <image.rlt1> [--nvs-dir <dir> [--credential <cred-spec.json>]]|provision-manifest --image <spec.json|image.rlt1> --key <root.key> --out <manifest.rtm1>|provision-verify --manifest <file> --current <spec.json|image.rlt1>  (local provisioning — no daemon socket)"
     );
     eprintln!(
         "routeloomctl provision-devca-keygen --device-ca-id <16hex> --out <devca.key>|provision-pop-challenge --node <16hex>|provision-devcert --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --challenge <64hex> --pop <file> --out-dir <dir> [--ledger <file>] [--work-id <id>]|provision-identity --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --out-dir <dir> [--ledger <file>] [--work-id <id>]|provision-ledger-status --ledger <file>|provision-ledger-release --ledger <file> --node <16hex> --serial <u32> --work-id <id>|provision-ledger-import --ledger <file> --out-dir <dir> [--work-id <id>]|provision-confirm-written --ledger <file> --node <16hex> --devcert-sha256 <64hex> [--out-dir <dir>]|provision-expect --out-dir <dir> [--fw <version>]|provision-batch --ca-key <devca.key> --spec <identity-spec.json> --ledger <file> --csv <file> --out-root <dir> [--mode injected|devcert]|provision-siteca-keygen --site-ca-id <16hex> --out <siteca.key>|site-cert --ca-key <siteca.key> --site-id <16hex> --sak-pubkey <128hex> --network-low32 <8hex> --site-epoch <u32> --serial <u32> --out <sitecert.cwt>  (SDK v1 office tooling — no daemon socket)"
+    );
+    eprintln!(
+        "routeloomctl site join-list|approve --request <jr-token> --device <16hex> --role endpoint|relay|gateway [--idempotency-key K]|deny --request <jr-token> --device <16hex> --reason not_here|blocked [--idempotency-key K]|policy [--zero-touch-open true|false] [--decision-mode kguard|closed] [--decision-timeout-ms 500-5000] [--pending-retry-after-s 30-3600]|members [--device <16hex> | [--after <16hex>] [--limit 1-128] [--include-removed]]|revoke --device <16hex> --expected-generation <u32> --reason removed|lost|replaced|blocked [--idempotency-key K]|gk-rotate [--expected-active-epoch <u32> [--idempotency-key K]]|cutover --expected-site-epoch <u32> --next-site-cert <hex> [--idempotency-key K]|status  (site authority over API1; cutover progress via operation-get --id <op-token>)"
     );
 }
 
@@ -339,7 +428,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let command = match remaining.as_slice() {
         [name] if name == "status" => "STATUS".to_string(),
         [name] if name == "adapter" => "ADAPTER".to_string(),
-        [name] if name == "events" => "EVENTS".to_string(),
+        [name, rest @ ..] if name == "events" => events_command(rest)?,
         [name] if name == "deliveries" => "DELIVERIES".to_string(),
         [name] if name == "diagnostics" => "DIAGNOSTICS".to_string(),
         [name] if name == "autonomy" => "AUTONOMY".to_string(),
@@ -368,29 +457,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [name, rest @ ..] if name == "nodes" => nodes_command(rest)?,
         [name, rest @ ..] if name == "node-get" => node_get_command(rest)?,
         [name] if name == "node-events" => node_events_request(),
+        [name, rest @ ..] if name == "telemetry" => telemetry_command(rest)?,
         [name, rest @ ..] if name == "group-send" => group_send_command(rest)?,
         [name, rest @ ..] if name == "group-get" => group_get_command(rest)?,
+        [name, rest @ ..] if name == "site" => site_command(rest)?,
         _ => {
             usage();
             return Err("invalid command".into());
         }
     };
-    let mut stream = UnixStream::connect(socket)?;
-    stream.write_all(command.as_bytes())?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
-    let mut reader = BufReader::new(stream);
-    let mut response = String::new();
-    reader.read_line(&mut response)?;
-    if response.is_empty() {
-        return Err(
-            io::Error::new(io::ErrorKind::UnexpectedEof, "daemon closed connection").into(),
-        );
-    }
+    let streaming = is_streaming_command(&remaining);
+    let (response, mut reader) =
+        exchange_first(&socket, &command, CLI_READ_TIMEOUT, CLI_WRITE_TIMEOUT)?;
     print!("{response}");
+    // The JSON stays on stdout either way; an API error only flips the
+    // exit code, so scripts can rely on it without parsing.
+    if api_response_is_error(&command, &response) {
+        return Err("daemon answered an API error (response printed above)".into());
+    }
     // Streaming verbs keep the connection open: every further line is one
-    // subscription notification, printed as it arrives.
-    if remaining.first().map(String::as_str) == Some("node-events") {
+    // subscription notification, printed as it arrives. The first line met
+    // the query deadline; the tail waits until interrupted.
+    if streaming {
+        reader.get_mut().set_read_timeout(None)?;
         let stdout = io::stdout();
         for line in reader.lines() {
             let mut out = stdout.lock();
@@ -467,6 +556,133 @@ fn node_get_command(args: &[String]) -> Result<String, Box<dyn std::error::Error
     Ok(format!(
         "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"nodes.get\",\"params\":{{\"node\":\"{node}\"}}}}",
         request_id()
+    ))
+}
+
+/// `telemetry --observer <16hex> --peer <16hex> [--direction
+/// egress|ingress] [--length-class 0|1|2|255] [--max-age-ms 0-3000]`: one
+/// on-demand RF snapshot for a directed (observer, peer) link. Only
+/// explicit options are sent — the daemon owns the defaults (egress,
+/// peer summary, latest).
+fn telemetry_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut observer = None;
+    let mut peer = None;
+    let mut direction = None;
+    let mut length_class = None;
+    let mut max_age_ms = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--observer" => {
+                observer = Some(want_hex16(
+                    "--observer",
+                    opt_value(&mut args, "--observer")?,
+                )?)
+            }
+            "--peer" => peer = Some(want_hex16("--peer", opt_value(&mut args, "--peer")?)?),
+            "--direction" => {
+                let value = opt_value(&mut args, "--direction")?;
+                if value != "egress" && value != "ingress" {
+                    return Err("telemetry --direction must be egress or ingress".into());
+                }
+                direction = Some(value);
+            }
+            "--length-class" => {
+                let value = opt_value(&mut args, "--length-class")?;
+                if !matches!(value.as_str(), "0" | "1" | "2" | "255") {
+                    return Err("telemetry --length-class must be 0, 1, 2 or 255".into());
+                }
+                length_class = Some(value);
+            }
+            "--max-age-ms" => {
+                let value = opt_value(&mut args, "--max-age-ms")?;
+                let ms: u32 = value
+                    .parse()
+                    .ok()
+                    .filter(|ms| *ms <= 3000)
+                    .ok_or("telemetry --max-age-ms must be 0-3000")?;
+                max_age_ms = Some(ms.to_string());
+            }
+            other => return Err(format!("unknown telemetry option: {other}").into()),
+        }
+    }
+    let observer: String = observer.ok_or("telemetry requires --observer <16hex>")?;
+    let peer: String = peer.ok_or("telemetry requires --peer <16hex>")?;
+    let mut params = format!("\"observer\":\"{observer}\",\"peer\":\"{peer}\"");
+    if let Some(direction) = direction {
+        params.push_str(&format!(",\"direction\":\"{direction}\""));
+    }
+    if let Some(length_class) = length_class {
+        params.push_str(&format!(",\"length_class\":{length_class}"));
+    }
+    if let Some(max_age_ms) = max_age_ms {
+        params.push_str(&format!(",\"max_age_ms\":{max_age_ms}"));
+    }
+    Ok(format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"diagnostics.snapshot\",\"params\":{{{params}}}}}",
+        request_id(),
+    ))
+}
+
+/// Verbs that hold the connection after the first line: every further
+/// line is one subscription notification, printed until interrupted.
+fn is_streaming_command(remaining: &[String]) -> bool {
+    let Some(first) = remaining.first().map(String::as_str) else {
+        return false;
+    };
+    if first == "node-events" {
+        return true;
+    }
+    first == "events" && remaining.iter().any(|arg| arg == "--follow")
+}
+
+/// `events [--follow [--kinds k1,k2]]`: bare form keeps the one-shot
+/// EVENTS ring dump; `--follow` replays the ring from the oldest entry
+/// and then streams every event until interrupted. Redirect the follow
+/// stream to a file for the post-mortem journal — it carries the boot
+/// boundary, overflow markers, and heartbeats in-band.
+fn events_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    if args.is_empty() {
+        return Ok("EVENTS".to_string());
+    }
+    let mut follow = false;
+    let mut kinds: Option<Vec<String>> = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--follow" => {
+                follow = true;
+                index += 1;
+            }
+            "--kinds" => {
+                index += 1;
+                let Some(list) = args.get(index) else {
+                    return Err("events --kinds needs a comma-separated kind list".into());
+                };
+                let entries: Vec<String> = list.split(',').map(str::to_string).collect();
+                if entries.iter().any(|entry| entry.is_empty()) {
+                    return Err("events --kinds entries must be non-empty".into());
+                }
+                kinds = Some(entries);
+                index += 1;
+            }
+            other => return Err(format!("events: unexpected argument {other}").into()),
+        }
+    }
+    if !follow {
+        return Err("events --kinds needs --follow".into());
+    }
+    let filter = kinds.map_or_else(String::new, |entries| {
+        let joined = entries
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(",\"filter\":{{\"kinds\":[{joined}]}}")
+    });
+    Ok(format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"messages.subscribe\",\"params\":{{\"stream\":\"events\",\"from\":\"earliest\"{filter}}}}}",
+        request_id(),
     ))
 }
 
@@ -895,11 +1111,19 @@ fn operation_get_command(args: &[String]) -> Result<String, Box<dyn std::error::
         }
     }
     let id = id.ok_or("operation-get requires --id <operation-id>")?;
+    // Message operations (`<lineage>:<seq>`) and Site Authority operations
+    // (`op-<16hex>` from revoke/cutover/gk-rotate answers) share
+    // `operations.get` — the daemon routes the `op-` tokens to the site
+    // ledger, which is also where cutover progress is read.
     let well_formed = id
         .split_once(':')
-        .is_some_and(|(lineage, seq)| is_hex(lineage, 32) && is_hex(seq, 16));
+        .is_some_and(|(lineage, seq)| is_hex(lineage, 32) && is_hex(seq, 16))
+        || id
+            .strip_prefix("op-")
+            .or_else(|| id.strip_prefix("OP-"))
+            .is_some_and(|token| is_hex(token, 16));
     if !well_formed {
-        return Err("--id must be <32-hex lineage>:<16-hex sequence>".into());
+        return Err("--id must be <32-hex lineage>:<16-hex sequence> or op-<16hex>".into());
     }
     Ok(operation_get_request(&id.to_ascii_lowercase()))
 }
@@ -1552,9 +1776,498 @@ fn group_get_command(args: &[String]) -> Result<String, Box<dyn std::error::Erro
     ))
 }
 
+/// `site` family: Site Authority operations over API1 (`join.requests.list`,
+/// `join.decide`, `join.policy.get/set`, `members.list/get`,
+/// `membership.revoke`, `group_keys.rotate/status`, `membership.cutover`,
+/// `site.status`). Prints the daemon's JSON verbatim; the exit code follows
+/// the API envelope like every other command. Cutover progress is not a
+/// method — it arrives as `cutover.progress` events and stays readable via
+/// `operation-get --id <op-token>` from the cutover answer.
+fn site_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let (sub, rest) = args
+        .split_first()
+        .ok_or("site requires a subcommand: join-list|approve|deny|policy|members|revoke|gk-rotate|cutover|status")?;
+    match sub.as_str() {
+        "join-list" => {
+            if !rest.is_empty() {
+                return Err("unknown site join-list option".into());
+            }
+            Ok(site_request("join.requests.list", String::new()))
+        }
+        "approve" => site_decide_command(rest, true),
+        "deny" => site_decide_command(rest, false),
+        "policy" => site_policy_command(rest),
+        "members" => site_members_command(rest),
+        "revoke" => site_revoke_command(rest),
+        "gk-rotate" => site_gk_rotate_command(rest),
+        "cutover" => site_cutover_command(rest),
+        "status" => {
+            if !rest.is_empty() {
+                return Err("unknown site status option".into());
+            }
+            Ok(site_request("site.status", String::new()))
+        }
+        other => Err(format!("unknown site subcommand: {other}").into()),
+    }
+}
+
+/// One `API1 {"v":1,...}` line for a site `method`; `params` is the
+/// already-serialized inner object (without braces) or empty for `{}`.
+fn site_request(method: &str, params: String) -> String {
+    format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"{method}\",\"params\":{{{params}}}}}",
+        request_id(),
+    )
+}
+
+/// A `jr-<16hex>` join request token → lowercased.
+fn want_request_token(flag: &str, value: String) -> Result<String, Box<dyn std::error::Error>> {
+    let hex = value
+        .strip_prefix("jr-")
+        .or_else(|| value.strip_prefix("JR-"))
+        .ok_or_else(|| format!("{flag} must be a jr-<16hex> token"))?;
+    if !is_hex(hex, 16) {
+        return Err(format!("{flag} must be a jr-<16hex> token").into());
+    }
+    Ok(format!("jr-{}", hex.to_ascii_lowercase()))
+}
+
+/// An idempotency key: caller's (`--idempotency-key`, 1-64 printable ASCII
+/// without spaces, the daemon rule) or a generated one, announced on
+/// stderr like `submit --key` does.
+fn want_idempotency_key(key: Option<String>) -> Result<String, Box<dyn std::error::Error>> {
+    match key {
+        Some(key) => {
+            if key.is_empty() || key.len() > 64 || !key.bytes().all(|b| (0x21..=0x7e).contains(&b))
+            {
+                return Err(
+                    "--idempotency-key must be 1-64 printable ASCII characters without spaces"
+                        .into(),
+                );
+            }
+            Ok(key)
+        }
+        None => {
+            let generated = generate_key();
+            eprintln!("generated idempotency key: {generated}");
+            Ok(generated)
+        }
+    }
+}
+
+/// `site approve|deny --request <jr-token> --device <16hex> --role R|...`.
+fn site_decide_command(
+    args: &[String],
+    approve: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut request: Option<String> = None;
+    let mut device: Option<String> = None;
+    let mut role: Option<String> = None;
+    let mut reason: Option<String> = None;
+    let mut idempotency_key: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--request" => request = Some(opt_value(&mut args, "--request")?),
+            "--device" => device = Some(opt_value(&mut args, "--device")?),
+            "--role" => role = Some(opt_value(&mut args, "--role")?),
+            "--reason" => reason = Some(opt_value(&mut args, "--reason")?),
+            "--idempotency-key" => {
+                idempotency_key = Some(opt_value(&mut args, "--idempotency-key")?)
+            }
+            other => {
+                return Err(format!(
+                    "unknown site {} option: {other}",
+                    if approve { "approve" } else { "deny" }
+                )
+                .into())
+            }
+        }
+    }
+    let request = want_request_token(
+        "--request",
+        request.ok_or("site approve|deny requires --request <jr-token>")?,
+    )?;
+    let device = want_hex16(
+        "--device",
+        device.ok_or("site approve|deny requires --device <16hex>")?,
+    )?;
+    let verdict = if approve {
+        let role = role.ok_or("site approve requires --role endpoint|relay|gateway")?;
+        if !["endpoint", "relay", "gateway"].contains(&role.as_str()) {
+            return Err("site approve requires --role endpoint|relay|gateway".into());
+        }
+        if reason.is_some() {
+            return Err("--reason does not apply to site approve".into());
+        }
+        format!("\"verdict\":\"allow\",\"role\":\"{role}\"")
+    } else {
+        let reason = reason.ok_or("site deny requires --reason not_here|blocked")?;
+        if !["not_here", "blocked"].contains(&reason.as_str()) {
+            return Err("site deny requires --reason not_here|blocked".into());
+        }
+        if role.is_some() {
+            return Err("--role does not apply to site deny".into());
+        }
+        format!("\"verdict\":\"deny\",\"reason\":\"{reason}\"")
+    };
+    let key = want_idempotency_key(idempotency_key)?;
+    Ok(site_request(
+        "join.decide",
+        format!("\"join_request_id\":\"{request}\",\"device_id\":\"{device}\",{verdict},\"idempotency_key\":\"{key}\""),
+    ))
+}
+
+/// `site policy [flags...]`: bare reads (`join.policy.get`), any flag
+/// writes (`join.policy.set`). Ranges are the daemon's (07 §2) and are
+/// enforced there too — the CLI only checks the value shapes.
+fn site_policy_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut zero_touch_open: Option<bool> = None;
+    let mut decision_mode: Option<String> = None;
+    let mut decision_timeout_ms: Option<u16> = None;
+    let mut pending_retry_after_s: Option<u32> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--zero-touch-open" => {
+                zero_touch_open = Some(
+                    opt_value(&mut args, "--zero-touch-open")?
+                        .parse::<bool>()
+                        .map_err(|_| "--zero-touch-open must be true or false")?,
+                )
+            }
+            "--decision-mode" => {
+                let mode = opt_value(&mut args, "--decision-mode")?;
+                if !["kguard", "closed"].contains(&mode.as_str()) {
+                    return Err("--decision-mode must be kguard or closed".into());
+                }
+                decision_mode = Some(mode);
+            }
+            "--decision-timeout-ms" => {
+                decision_timeout_ms = Some(
+                    opt_value(&mut args, "--decision-timeout-ms")?
+                        .parse::<u16>()
+                        .map_err(|_| "--decision-timeout-ms must be an integer 500-5000")?,
+                )
+            }
+            "--pending-retry-after-s" => {
+                pending_retry_after_s = Some(
+                    opt_value(&mut args, "--pending-retry-after-s")?
+                        .parse::<u32>()
+                        .map_err(|_| "--pending-retry-after-s must be an integer 30-3600")?,
+                )
+            }
+            other => return Err(format!("unknown site policy option: {other}").into()),
+        }
+    }
+    if zero_touch_open.is_none()
+        && decision_mode.is_none()
+        && decision_timeout_ms.is_none()
+        && pending_retry_after_s.is_none()
+    {
+        return Ok(site_request("join.policy.get", String::new()));
+    }
+    let mut params = Vec::new();
+    if let Some(open) = zero_touch_open {
+        params.push(format!("\"zero_touch_open\":{open}"));
+    }
+    if let Some(mode) = decision_mode {
+        params.push(format!("\"decision_mode\":\"{mode}\""));
+    }
+    if let Some(ms) = decision_timeout_ms {
+        params.push(format!("\"decision_timeout_ms\":{ms}"));
+    }
+    if let Some(s) = pending_retry_after_s {
+        params.push(format!("\"pending_retry_after_s\":{s}"));
+    }
+    Ok(site_request("join.policy.set", params.join(",")))
+}
+
+/// `site members [--after/--limit/--include-removed]` lists;
+/// `site members --device <16hex>` reads one (`members.get`).
+fn site_members_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut device: Option<String> = None;
+    let mut after: Option<String> = None;
+    let mut limit: Option<u64> = None;
+    let mut include_removed = false;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--device" => device = Some(opt_value(&mut args, "--device")?),
+            "--after" => after = Some(opt_value(&mut args, "--after")?),
+            "--limit" => {
+                limit = Some(
+                    opt_value(&mut args, "--limit")?
+                        .parse::<u64>()
+                        .map_err(|_| "--limit must be an integer 1-128")?,
+                )
+            }
+            "--include-removed" => include_removed = true,
+            other => return Err(format!("unknown site members option: {other}").into()),
+        }
+    }
+    if let Some(device) = device {
+        if after.is_some() || limit.is_some() || include_removed {
+            return Err("--device reads one member and takes no list options".into());
+        }
+        return Ok(site_request(
+            "members.get",
+            format!("\"device_id\":\"{}\"", want_hex16("--device", device)?),
+        ));
+    }
+    let mut params = Vec::new();
+    if let Some(after) = after {
+        params.push(format!("\"after\":\"{}\"", want_hex16("--after", after)?));
+    }
+    if let Some(limit) = limit {
+        if !(1..=128).contains(&limit) {
+            return Err("--limit must be an integer 1-128".into());
+        }
+        params.push(format!("\"limit\":{limit}"));
+    }
+    if include_removed {
+        params.push("\"include_removed\":true".to_string());
+    }
+    Ok(site_request("members.list", params.join(",")))
+}
+
+/// `site revoke --device <16hex> --expected-generation <u32> --reason R`.
+fn site_revoke_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut device: Option<String> = None;
+    let mut expected_generation: Option<u32> = None;
+    let mut reason: Option<String> = None;
+    let mut idempotency_key: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--device" => device = Some(opt_value(&mut args, "--device")?),
+            "--expected-generation" => {
+                expected_generation = Some(
+                    opt_value(&mut args, "--expected-generation")?
+                        .parse::<u32>()
+                        .map_err(|_| "--expected-generation must be an integer >= 1")?,
+                )
+            }
+            "--reason" => reason = Some(opt_value(&mut args, "--reason")?),
+            "--idempotency-key" => {
+                idempotency_key = Some(opt_value(&mut args, "--idempotency-key")?)
+            }
+            other => return Err(format!("unknown site revoke option: {other}").into()),
+        }
+    }
+    let device = want_hex16(
+        "--device",
+        device.ok_or("site revoke requires --device <16hex>")?,
+    )?;
+    let expected_generation = expected_generation
+        .filter(|v| *v >= 1)
+        .ok_or("--expected-generation must be an integer >= 1")?;
+    let reason = reason.ok_or("site revoke requires --reason removed|lost|replaced|blocked")?;
+    if !["removed", "lost", "replaced", "blocked"].contains(&reason.as_str()) {
+        return Err("site revoke requires --reason removed|lost|replaced|blocked".into());
+    }
+    let key = want_idempotency_key(idempotency_key)?;
+    Ok(site_request(
+        "membership.revoke",
+        format!("\"device_id\":\"{device}\",\"expected_generation\":{expected_generation},\"reason\":\"{reason}\",\"idempotency_key\":\"{key}\""),
+    ))
+}
+
+/// `site gk-rotate`: bare reads (`group_keys.status`), with
+/// `--expected-active-epoch` rotates (`group_keys.rotate`).
+fn site_gk_rotate_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut expected_active_epoch: Option<u32> = None;
+    let mut idempotency_key: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--expected-active-epoch" => {
+                expected_active_epoch = Some(
+                    opt_value(&mut args, "--expected-active-epoch")?
+                        .parse::<u32>()
+                        .map_err(|_| "--expected-active-epoch must be an integer >= 1")?,
+                )
+            }
+            "--idempotency-key" => {
+                idempotency_key = Some(opt_value(&mut args, "--idempotency-key")?)
+            }
+            other => return Err(format!("unknown site gk-rotate option: {other}").into()),
+        }
+    }
+    match expected_active_epoch {
+        None => {
+            if idempotency_key.is_some() {
+                return Err("--idempotency-key needs --expected-active-epoch to rotate".into());
+            }
+            Ok(site_request("group_keys.status", String::new()))
+        }
+        Some(epoch) => {
+            if epoch < 1 {
+                return Err("--expected-active-epoch must be an integer >= 1".into());
+            }
+            let key = want_idempotency_key(idempotency_key)?;
+            Ok(site_request(
+                "group_keys.rotate",
+                format!("\"expected_active_epoch\":{epoch},\"idempotency_key\":\"{key}\""),
+            ))
+        }
+    }
+}
+
+/// `site cutover --expected-site-epoch <u32> --next-site-cert <hex>`.
+fn site_cutover_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut expected_site_epoch: Option<u32> = None;
+    let mut next_site_cert: Option<String> = None;
+    let mut idempotency_key: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--expected-site-epoch" => {
+                expected_site_epoch = Some(
+                    opt_value(&mut args, "--expected-site-epoch")?
+                        .parse::<u32>()
+                        .map_err(|_| "--expected-site-epoch must be an integer >= 1")?,
+                )
+            }
+            "--next-site-cert" => next_site_cert = Some(opt_value(&mut args, "--next-site-cert")?),
+            "--idempotency-key" => {
+                idempotency_key = Some(opt_value(&mut args, "--idempotency-key")?)
+            }
+            other => return Err(format!("unknown site cutover option: {other}").into()),
+        }
+    }
+    let expected_site_epoch = expected_site_epoch
+        .filter(|v| *v >= 1)
+        .ok_or("--expected-site-epoch must be an integer >= 1")?;
+    let cert = next_site_cert.ok_or("site cutover requires --next-site-cert <hex>")?;
+    // Even-length hex, daemon cap 2048 chars: the daemon would silently
+    // drop a trailing half-byte, so the CLI refuses it instead.
+    if !is_hex_max(&cert, 1024) || cert.is_empty() {
+        return Err("--next-site-cert must be even-length hex up to 2048 chars".into());
+    }
+    let key = want_idempotency_key(idempotency_key)?;
+    Ok(site_request(
+        "membership.cutover",
+        format!("\"expected_site_epoch\":{expected_site_epoch},\"next_site_cert\":\"{}\",\"idempotency_key\":\"{key}\"", cert.to_ascii_lowercase()),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixListener;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Unique socket path per test (parallel tests must not share one).
+    fn test_socket_path(tag: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "routeloomctl-test-{}-{}-{tag}.sock",
+            std::process::id(),
+            id
+        ))
+    }
+
+    /// Serves one connection: reads the command line, then runs `answer`
+    /// with the connected stream. Returns the path to query.
+    fn serve_once(tag: &str, answer: impl FnOnce(UnixStream) + Send + 'static) -> PathBuf {
+        let path = test_socket_path(tag);
+        let listener = UnixListener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            // Read the command line, then answer.
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(!line.is_empty());
+            answer(stream);
+        });
+        path
+    }
+
+    #[test]
+    fn api_error_envelope_is_detected() {
+        let api = "API1 {\"v\":1}";
+        assert!(api_response_is_error(
+            api,
+            "{\"v\":1,\"request_id\":\"ctl-9\",\"ok\":false,\"error\":{\"code\":\"NOT_FOUND\",\"detail\":{\"message\":\"nope\"},\"retryable\":false}}\n"
+        ));
+        assert!(api_response_is_error(
+            api,
+            "{\"v\":1,\"request_id\":null,\"ok\":false,\"error\":{\"code\":\"INVALID_REQUEST\",\"detail\":{\"message\":\"request exceeds 8192 bytes\"},\"retryable\":false}}\n"
+        ));
+        assert!(!api_response_is_error(
+            api,
+            "{\"v\":1,\"request_id\":\"ctl-9\",\"ok\":true,\"result\":{}}\n"
+        ));
+        // A payload that mentions `"ok":false` must not flip the verdict.
+        assert!(!api_response_is_error(
+            api,
+            "{\"v\":1,\"request_id\":\"ctl-9\",\"ok\":true,\"result\":{\"note\":\"say \\\"ok\\\":false\"}}\n"
+        ));
+        // Legacy verbs have no envelope and never fail here.
+        assert!(!api_response_is_error(
+            "STATUS",
+            "{\"connected\":true,\"ok\":false}\n"
+        ));
+        // Not an envelope at all: fail closed.
+        assert!(api_response_is_error(api, "{\"error\":\"broken\"}\n"));
+        assert!(api_response_is_error(api, "garbage\n"));
+    }
+
+    #[test]
+    fn error_envelope_round_trip_is_readable() {
+        let path = serve_once("api-error", |stream| {
+            let mut stream = stream;
+            stream
+                .write_all(
+                    b"{\"v\":1,\"request_id\":\"ctl-9\",\"ok\":false,\"error\":{\"code\":\"NOT_FOUND\",\"detail\":{\"message\":\"nope\"},\"retryable\":false}}\n",
+                )
+                .unwrap();
+        });
+        let command = operation_get_request("abababababababababababababababab:0000000000000009");
+        let (response, _) = exchange_first(
+            &path,
+            &command,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(response.contains("\"code\":\"NOT_FOUND\""), "{response}");
+        assert!(api_response_is_error(&command, &response));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn silent_socket_times_out_instead_of_hanging() {
+        let path = serve_once("silent", |_| {
+            // Never answer: the query must time out, not hang.
+            std::thread::sleep(Duration::from_secs(30));
+        });
+        let start = std::time::Instant::now();
+        let error = exchange_first(
+            &path,
+            "STATUS",
+            Duration::from_millis(100),
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "query hung: {:?}",
+            start.elapsed()
+        );
+        let kind = error
+            .downcast_ref::<io::Error>()
+            .map(io::Error::kind)
+            .unwrap_or(io::ErrorKind::Other);
+        assert!(
+            matches!(kind, io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock),
+            "{error:?}"
+        );
+        std::fs::remove_file(&path).ok();
+    }
 
     #[test]
     fn receive_builds_api1_line() {
@@ -1611,6 +2324,121 @@ mod tests {
         ] {
             assert!(routeloom_json::parse(line.strip_prefix("API1 ").unwrap()).is_ok());
         }
+    }
+
+    #[test]
+    fn events_command_dump_and_follow() {
+        // Bare `events` keeps the one-shot EVENTS ring dump.
+        assert_eq!(events_command(&args(&[])).unwrap(), "EVENTS");
+        // `--follow` replays the ring from the oldest entry, then streams
+        // every event until interrupted: redirect to a file for the
+        // post-mortem journal.
+        let line = events_command(&args(&["--follow"])).unwrap();
+        assert!(line.starts_with("API1 {"), "{line}");
+        assert!(line.contains("\"method\":\"messages.subscribe\""), "{line}");
+        assert!(line.contains("\"stream\":\"events\""), "{line}");
+        assert!(line.contains("\"from\":\"earliest\""), "{line}");
+        assert!(!line.contains("\"filter\""), "{line}");
+        assert!(routeloom_json::parse(line.strip_prefix("API1 ").unwrap()).is_ok());
+        let line = events_command(&args(&["--follow", "--kinds", "boot,error"])).unwrap();
+        assert!(line.contains("\"kinds\":[\"boot\",\"error\"]"), "{line}");
+        assert!(routeloom_json::parse(line.strip_prefix("API1 ").unwrap()).is_ok());
+        // --kinds without --follow, unknown flags, and empty kinds fail.
+        assert!(events_command(&args(&["--kinds", "boot"])).is_err());
+        assert!(events_command(&args(&["--follow", "--bogus"])).is_err());
+        assert!(events_command(&args(&["--follow", "--kinds"])).is_err());
+        assert!(events_command(&args(&["--follow", "--kinds", ""])).is_err());
+        assert!(events_command(&args(&["--follow", "--kinds", "boot,,error"])).is_err());
+        assert!(events_command(&args(&["extra"])).is_err());
+    }
+
+    #[test]
+    fn streaming_verbs_hold_the_connection() {
+        assert!(is_streaming_command(&args(&["node-events"])));
+        assert!(is_streaming_command(&args(&["events", "--follow"])));
+        assert!(is_streaming_command(&args(&[
+            "events", "--follow", "--kinds", "boot"
+        ])));
+        assert!(!is_streaming_command(&args(&["events"])));
+        assert!(!is_streaming_command(&args(&["status"])));
+        assert!(!is_streaming_command(&args(&[])));
+    }
+
+    #[test]
+    fn telemetry_builds_snapshot_line() {
+        let line = telemetry_command(&args(&[
+            "--observer",
+            "0000000000000ABC",
+            "--peer",
+            "0000000000000005",
+        ]))
+        .unwrap();
+        assert!(line.starts_with("API1 {"), "{line}");
+        assert!(
+            line.contains("\"method\":\"diagnostics.snapshot\""),
+            "{line}"
+        );
+        assert!(line.contains("\"observer\":\"0000000000000abc\""), "{line}");
+        assert!(line.contains("\"peer\":\"0000000000000005\""), "{line}");
+        // Defaults stay daemon-side: only explicit options are sent.
+        assert!(!line.contains("direction"), "{line}");
+        let line = telemetry_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--peer",
+            "0000000000000005",
+            "--direction",
+            "ingress",
+            "--length-class",
+            "1",
+            "--max-age-ms",
+            "500",
+        ]))
+        .unwrap();
+        assert!(line.contains("\"direction\":\"ingress\""), "{line}");
+        assert!(line.contains("\"length_class\":1"), "{line}");
+        assert!(line.contains("\"max_age_ms\":500"), "{line}");
+        assert!(routeloom_json::parse(line.strip_prefix("API1 ").unwrap()).is_ok());
+        assert!(telemetry_command(&args(&["--observer", "0000000000000abc"])).is_err());
+        assert!(telemetry_command(&args(&["--peer", "0000000000000005"])).is_err());
+        assert!(
+            telemetry_command(&args(&["--observer", "zz", "--peer", "0000000000000005"])).is_err()
+        );
+        assert!(telemetry_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--peer",
+            "0000000000000005",
+            "--direction",
+            "up"
+        ]))
+        .is_err());
+        assert!(telemetry_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--peer",
+            "0000000000000005",
+            "--length-class",
+            "3"
+        ]))
+        .is_err());
+        assert!(telemetry_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--peer",
+            "0000000000000005",
+            "--max-age-ms",
+            "3001"
+        ]))
+        .is_err());
+        assert!(telemetry_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--peer",
+            "0000000000000005",
+            "--bogus"
+        ]))
+        .is_err());
     }
 
     #[test]
@@ -1829,6 +2657,14 @@ mod tests {
             "{line}"
         );
         assert!(operation_get_command(&args(&["--id", "bogus"])).is_err());
+        // Site Authority `op-` tokens ride the same method (revoke/cutover
+        // progress); the daemon routes them to the site ledger.
+        let line = operation_get_command(&args(&["--id", "op-0000000000000001"])).unwrap();
+        assert!(
+            line.contains("\"operation_id\":\"op-0000000000000001\""),
+            "{line}"
+        );
+        assert!(operation_get_command(&args(&["--id", "op-1"])).is_err());
         let line = operation_get_by_key_command(&args(&[
             "--network",
             "0000000000000001",
@@ -2384,5 +3220,292 @@ mod tests {
         assert!(group_get_command(&args(&["--id", "cfg00000001000000a1"])).is_err());
         assert!(group_get_command(&args(&["--id", "grp1"])).is_err());
         assert!(group_get_command(&args(&[])).is_err());
+    }
+
+    #[test]
+    fn site_commands_build_api1_lines() {
+        // join-list / status: bare reads.
+        let line = site_command(&args(&["join-list"])).unwrap();
+        assert!(
+            line.contains("\"method\":\"join.requests.list\",\"params\":{}"),
+            "{line}"
+        );
+        let line = site_command(&args(&["status"])).unwrap();
+        assert!(
+            line.contains("\"method\":\"site.status\",\"params\":{}"),
+            "{line}"
+        );
+        assert!(site_command(&args(&["join-list", "--x"])).is_err());
+        assert!(site_command(&args(&[])).is_err());
+        assert!(site_command(&args(&["bogus"])).is_err());
+
+        // approve / deny: verdict owns exactly its parameter.
+        let line = site_command(&args(&[
+            "approve",
+            "--request",
+            "jr-0000000000000001",
+            "--device",
+            "00A1000000001234",
+            "--role",
+            "relay",
+            "--idempotency-key",
+            "k1",
+        ]))
+        .unwrap();
+        assert!(
+            line.contains("\"method\":\"join.decide\",\"params\":{\"join_request_id\":\"jr-0000000000000001\",\"device_id\":\"00a1000000001234\",\"verdict\":\"allow\",\"role\":\"relay\",\"idempotency_key\":\"k1\"}"),
+            "{line}"
+        );
+        let line = site_command(&args(&[
+            "deny",
+            "--request",
+            "JR-0000000000000002",
+            "--device",
+            "00a1000000001234",
+            "--reason",
+            "blocked",
+            "--idempotency-key",
+            "k2",
+        ]))
+        .unwrap();
+        assert!(
+            line.contains("\"verdict\":\"deny\",\"reason\":\"blocked\"")
+                && line.contains("\"join_request_id\":\"jr-0000000000000002\""),
+            "{line}"
+        );
+        // A generated key keeps the line valid when omitted.
+        let line = site_command(&args(&[
+            "approve",
+            "--request",
+            "jr-0000000000000001",
+            "--device",
+            "00a1000000001234",
+            "--role",
+            "endpoint",
+        ]))
+        .unwrap();
+        assert!(line.contains("\"idempotency_key\":\""), "{line}");
+        assert!(site_command(&args(&[
+            "approve",
+            "--request",
+            "jr-1",
+            "--device",
+            "00a1000000001234",
+            "--role",
+            "endpoint"
+        ]))
+        .is_err());
+        assert!(site_command(&args(&[
+            "approve",
+            "--request",
+            "jr-0000000000000001",
+            "--device",
+            "00a1000000001234",
+            "--role",
+            "owner"
+        ]))
+        .is_err());
+        assert!(site_command(&args(&[
+            "approve",
+            "--request",
+            "jr-0000000000000001",
+            "--device",
+            "00a1000000001234",
+            "--role",
+            "endpoint",
+            "--reason",
+            "blocked"
+        ]))
+        .is_err());
+        assert!(site_command(&args(&[
+            "deny",
+            "--request",
+            "jr-0000000000000001",
+            "--device",
+            "00a1000000001234",
+            "--reason",
+            "maybe"
+        ]))
+        .is_err());
+        assert!(site_command(&args(&[
+            "deny",
+            "--request",
+            "jr-0000000000000001",
+            "--device",
+            "00a1000000001234",
+            "--reason",
+            "blocked",
+            "--role",
+            "endpoint"
+        ]))
+        .is_err());
+        assert!(site_command(&args(&[
+            "approve",
+            "--request",
+            "jr-0000000000000001",
+            "--device",
+            "00a1000000001234",
+            "--role",
+            "endpoint",
+            "--idempotency-key",
+            "has space"
+        ]))
+        .is_err());
+
+        // policy: bare reads, flags write partial patches.
+        let line = site_command(&args(&["policy"])).unwrap();
+        assert!(
+            line.contains("\"method\":\"join.policy.get\",\"params\":{}"),
+            "{line}"
+        );
+        let line = site_command(&args(&[
+            "policy",
+            "--zero-touch-open",
+            "true",
+            "--decision-mode",
+            "closed",
+            "--decision-timeout-ms",
+            "800",
+            "--pending-retry-after-s",
+            "120",
+        ]))
+        .unwrap();
+        assert!(
+            line.contains("\"method\":\"join.policy.set\",\"params\":{\"zero_touch_open\":true,\"decision_mode\":\"closed\",\"decision_timeout_ms\":800,\"pending_retry_after_s\":120}"),
+            "{line}"
+        );
+        let line = site_command(&args(&["policy", "--decision-mode", "kguard"])).unwrap();
+        assert!(
+            line.contains(
+                "\"method\":\"join.policy.set\",\"params\":{\"decision_mode\":\"kguard\"}"
+            ),
+            "{line}"
+        );
+        assert!(site_command(&args(&["policy", "--zero-touch-open", "yes"])).is_err());
+        assert!(site_command(&args(&["policy", "--decision-mode", "open"])).is_err());
+        assert!(site_command(&args(&["policy", "--bogus", "1"])).is_err());
+
+        // members: list by default, one read with --device.
+        let line = site_command(&args(&[
+            "members",
+            "--after",
+            "00A1000000001234",
+            "--limit",
+            "10",
+            "--include-removed",
+        ]))
+        .unwrap();
+        assert!(
+            line.contains("\"method\":\"members.list\",\"params\":{\"after\":\"00a1000000001234\",\"limit\":10,\"include_removed\":true}"),
+            "{line}"
+        );
+        let line = site_command(&args(&["members", "--device", "00A1000000001234"])).unwrap();
+        assert!(
+            line.contains(
+                "\"method\":\"members.get\",\"params\":{\"device_id\":\"00a1000000001234\"}"
+            ),
+            "{line}"
+        );
+        assert!(site_command(&args(&["members", "--limit", "0"])).is_err());
+        assert!(site_command(&args(&["members", "--limit", "129"])).is_err());
+        assert!(site_command(&args(&[
+            "members",
+            "--device",
+            "00a1000000001234",
+            "--limit",
+            "1"
+        ]))
+        .is_err());
+
+        // revoke.
+        let line = site_command(&args(&[
+            "revoke",
+            "--device",
+            "00a1000000001234",
+            "--expected-generation",
+            "3",
+            "--reason",
+            "lost",
+            "--idempotency-key",
+            "rm-1",
+        ]))
+        .unwrap();
+        assert!(
+            line.contains("\"method\":\"membership.revoke\",\"params\":{\"device_id\":\"00a1000000001234\",\"expected_generation\":3,\"reason\":\"lost\",\"idempotency_key\":\"rm-1\"}"),
+            "{line}"
+        );
+        assert!(site_command(&args(&[
+            "revoke",
+            "--device",
+            "00a1000000001234",
+            "--expected-generation",
+            "0",
+            "--reason",
+            "lost"
+        ]))
+        .is_err());
+        assert!(site_command(&args(&[
+            "revoke",
+            "--device",
+            "00a1000000001234",
+            "--expected-generation",
+            "1",
+            "--reason",
+            "gone"
+        ]))
+        .is_err());
+
+        // gk-rotate: bare reads status, epoch rotates.
+        let line = site_command(&args(&["gk-rotate"])).unwrap();
+        assert!(
+            line.contains("\"method\":\"group_keys.status\",\"params\":{}"),
+            "{line}"
+        );
+        let line = site_command(&args(&[
+            "gk-rotate",
+            "--expected-active-epoch",
+            "2",
+            "--idempotency-key",
+            "gk-1",
+        ]))
+        .unwrap();
+        assert!(
+            line.contains("\"method\":\"group_keys.rotate\",\"params\":{\"expected_active_epoch\":2,\"idempotency_key\":\"gk-1\"}"),
+            "{line}"
+        );
+        assert!(site_command(&args(&["gk-rotate", "--expected-active-epoch", "0"])).is_err());
+        assert!(site_command(&args(&["gk-rotate", "--idempotency-key", "k"])).is_err());
+
+        // cutover.
+        let line = site_command(&args(&[
+            "cutover",
+            "--expected-site-epoch",
+            "2",
+            "--next-site-cert",
+            "AABBCC",
+            "--idempotency-key",
+            "co-1",
+        ]))
+        .unwrap();
+        assert!(
+            line.contains("\"method\":\"membership.cutover\",\"params\":{\"expected_site_epoch\":2,\"next_site_cert\":\"aabbcc\",\"idempotency_key\":\"co-1\"}"),
+            "{line}"
+        );
+        assert!(site_command(&args(&[
+            "cutover",
+            "--expected-site-epoch",
+            "2",
+            "--next-site-cert",
+            "abc"
+        ]))
+        .is_err());
+        assert!(site_command(&args(&[
+            "cutover",
+            "--expected-site-epoch",
+            "0",
+            "--next-site-cert",
+            "aa"
+        ]))
+        .is_err());
     }
 }

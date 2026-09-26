@@ -319,6 +319,45 @@ void reboot_lifecycle(NodeFixture& fixture) {
                           default_es256_verifier(), &fixture.journal);
 }
 
+void test_lifecycle_journal_retains_recovery_history() {
+  LifecycleJournal journal;
+  CHECK(!journal.last().valid);
+  CHECK(!journal.recovery_needed() && !journal.recovery_active());
+  CHECK(journal.recovery_reports() == 0);
+  CHECK(journal.count(LifecycleEventKind::RrsApplied) == 0);
+  // A reported recovery (stores unusable) precedes the started/finished
+  // lifecycle events; the journal keeps the reason and the wait visible.
+  journal.note_recovery_reported(2 /* JoinRecoveryReason::SeqExhausted */, 1000);
+  CHECK(journal.recovery_reports() == 1);
+  CHECK(journal.recovery_needed() && !journal.recovery_active());
+  CHECK(journal.last_recovery_reason() == 2);
+  CHECK(journal.last_recovery_ms() == 1000);
+  LifecycleEvent applied{};
+  applied.kind = LifecycleEventKind::RrsApplied;
+  applied.epoch = 12;
+  journal.on_lifecycle_event(applied, 1100);
+  CHECK(journal.count(LifecycleEventKind::RrsApplied) == 1);
+  CHECK(journal.last().valid && journal.last().event.epoch == 12);
+  CHECK(journal.last().at_ms == 1100);
+  LifecycleEvent started{};
+  started.kind = LifecycleEventKind::RecoveryStarted;
+  started.detail = 3;  // LifecycleActionReason code
+  journal.on_lifecycle_event(started, 1200);
+  CHECK(journal.recovery_active() && !journal.recovery_needed());
+  CHECK(journal.last_recovery_reason() == 3);
+  CHECK(journal.last_recovery_ms() == 1200);
+  LifecycleEvent finished{};
+  finished.kind = LifecycleEventKind::RecoveryFinished;
+  finished.epoch = 12;
+  journal.on_lifecycle_event(finished, 1300);
+  CHECK(!journal.recovery_active() && !journal.recovery_needed());
+  CHECK(journal.last().event.kind == LifecycleEventKind::RecoveryFinished);
+  // A second report (new incident) re-arms the needed flag.
+  journal.note_recovery_reported(1, 1400);
+  CHECK(journal.recovery_reports() == 2);
+  CHECK(journal.recovery_needed());
+}
+
 void test_lifecycle_port_bundle_lifetime() {
   NodeFixture fixture;
   rebuild_with_short_lived_ports(fixture);
@@ -2888,6 +2927,7 @@ void test_adopt_network_disposition() {
 }  // namespace
 
 int main() {
+  test_lifecycle_journal_retains_recovery_history();
   test_lifecycle_port_bundle_lifetime();
   test_removal_preserves_stored_floor();
   test_removal_resumes_with_corrupt_cleared_site_sibling();

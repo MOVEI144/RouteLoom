@@ -25,7 +25,7 @@ use crate::send_store::OperationStore;
 use crate::site::group_keys::HostTime;
 use crate::site::records::{parse_op_token, parse_request_token, parse_role, Verdict};
 use crate::site::{
-    parse_reason, ArchiveRequest, CutoverRequest, DecideRequest, DecisionMode, Events,
+    parse_reason, ArchiveRequest, CutoverRequest, DecideRequest, DecisionMode, Events, PolicyPatch,
     RevokeRequest, RotateRequest, SiteError, SiteService, ARCHIVE_BATCH_MAX,
 };
 
@@ -35,8 +35,14 @@ pub const SITE_PAGE_MAX: usize = 128;
 /// Kinds the Site Authority appends to the event ring (also accepted by
 /// `messages.subscribe {stream:"events", filter:{kinds:[...]}}`).
 pub const SITE_EVENT_KINDS: &[&str] = &[
+    "authority.channel_lost",
+    "authority.channel_ready",
+    "authority.passthrough",
+    "authority.pull",
+    "authority.pull_throttled",
     "join.request",
     "join.decided",
+    "join_relay_failed",
     "device.discovered",
     "member.reissued",
     "member.confirmed",
@@ -272,32 +278,41 @@ fn policy_set<S: OperationStore>(
     let service = service(ctx)?;
     authorize(ctx, service, acl::PERM_MEMBERSHIP_ADMIN, "MEMBERSHIP_ADMIN")?;
     let invalid = |m: &str| ApiError::simple("INVALID_ARGUMENT", m);
-    let mut policy = service.with(|a| a.policy()).0;
+    // Parse into a patch WITHOUT reading the policy: the read-modify-write
+    // below runs inside one authority lock, so a concurrent partial update
+    // cannot slip between our read and our write.
+    let mut patch = PolicyPatch::default();
     if let Some(value) = params.get("zero_touch_open") {
-        policy.zero_touch_open = value
-            .as_bool()
-            .ok_or_else(|| invalid("zero_touch_open must be a boolean"))?;
+        patch.zero_touch_open = Some(
+            value
+                .as_bool()
+                .ok_or_else(|| invalid("zero_touch_open must be a boolean"))?,
+        );
     }
     if let Some(value) = params.get("decision_mode") {
-        policy.decision_mode = match value.as_str() {
+        patch.decision_mode = Some(match value.as_str() {
             Some("kguard") => DecisionMode::Kguard,
             Some("closed") => DecisionMode::Closed,
             _ => return Err(invalid("decision_mode must be \"kguard\" or \"closed\"")),
-        };
+        });
     }
     if let Some(value) = params.get("decision_timeout_ms") {
-        policy.decision_timeout_ms = value
-            .as_u64()
-            .and_then(|v| u16::try_from(v).ok())
-            .ok_or_else(|| invalid("decision_timeout_ms must be 500..=5000"))?;
+        patch.decision_timeout_ms = Some(
+            value
+                .as_u64()
+                .and_then(|v| u16::try_from(v).ok())
+                .ok_or_else(|| invalid("decision_timeout_ms must be 500..=5000"))?,
+        );
     }
     if let Some(value) = params.get("pending_retry_after_s") {
-        policy.pending_retry_after_s = value
-            .as_u64()
-            .and_then(|v| u32::try_from(v).ok())
-            .ok_or_else(|| invalid("pending_retry_after_s must be 30..=3600"))?;
+        patch.pending_retry_after_s = Some(
+            value
+                .as_u64()
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or_else(|| invalid("pending_retry_after_s must be 30..=3600"))?,
+        );
     }
-    let (result, events) = service.with(|a| a.set_policy(policy));
+    let (result, events) = service.with(|a| a.update_policy(&patch));
     push_events(ctx, events);
     Ok(result?)
 }
@@ -706,4 +721,23 @@ pub(super) fn capability_json<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Str
     format!(
         "{{\"configured\":{configured},\"edhoc\":\"rfc9528-method0-suite2\",\"verdicts\":[\"allow\",\"pending\",\"deny\"],\"permissions\":[\"MEMBERSHIP_READ\",\"MEMBERSHIP_DECIDE\",\"MEMBERSHIP_ADMIN\"],\"page_max\":{SITE_PAGE_MAX},\"events\":[{kinds}],\"join_relay\":\"{join_relay}\",\"distribution\":\"{distribution}\",\"storage_durable\":{durable}}}"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SITE_EVENT_KINDS;
+
+    #[test]
+    fn join_relay_failures_can_be_filtered_and_advertised() {
+        for kind in [
+            "join_relay_failed",
+            "authority.channel_ready",
+            "authority.channel_lost",
+            "authority.pull",
+            "authority.pull_throttled",
+            "authority.passthrough",
+        ] {
+            assert!(SITE_EVENT_KINDS.contains(&kind), "missing {kind}");
+        }
+    }
 }

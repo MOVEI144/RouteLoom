@@ -1758,9 +1758,17 @@ impl Dispatcher {
             }
             // The position is provably empty — retry (or cancel/expire)
             // stays honest.
-            HostOpsResult::WindowFull
-            | HostOpsResult::MeshRejected
-            | HostOpsResult::NotRetained => {
+            HostOpsResult::MeshRejected => {
+                let reason = host_ops::mesh_refusal_detail(receipt, &op.hash);
+                let _ = store.update_operation(op_seq, &mut |o| {
+                    if let Some(d) = o.dispatch.as_mut() {
+                        d.submitted = false;
+                        d.attach_device_outcome("submit_refused", reason);
+                    }
+                    true
+                });
+            }
+            HostOpsResult::WindowFull | HostOpsResult::NotRetained => {
                 let _ = store.update_operation(op_seq, &mut |o| {
                     if let Some(d) = o.dispatch.as_mut() {
                         d.submitted = false;
@@ -2179,6 +2187,20 @@ impl Dispatcher {
             let concluded = o.concluded();
             let prepared = o.dispatch_state == DispatchState::DispatchPrepared;
             let d = o.dispatch.as_mut().expect("checked above");
+            if state != SlotState::Empty && d.device_state.as_deref() == Some("submit_refused") {
+                d.device_state = None;
+                d.device_reason = None;
+            }
+            // The message key belongs to the position whatever the slot
+            // state: bind it on every observation (except Empty, which is
+            // a hole and carries no key). The receipt for an
+            // already-terminal position must still bind the key —
+            // otherwise the reason-carrying DeliveryEvent for that send
+            // could never correlate to the operation.
+            if msg_valid && state != SlotState::Empty {
+                d.msg_session = Some(msg_session);
+                d.msg_seq = Some(msg_seq);
+            }
             match state {
                 SlotState::Empty => {
                     if concluded || o.canonical.is_empty() {
@@ -2210,10 +2232,6 @@ impl Dispatcher {
                         o.dispatch_state = DispatchState::GatewayAccepted;
                     }
                     d.ev_gateway_accepted = true;
-                    if msg_valid {
-                        d.msg_session = Some(msg_session);
-                        d.msg_seq = Some(msg_seq);
-                    }
                 }
                 SlotState::Delivered => {
                     // Delivered implies the gateway accepted the record —
@@ -2222,10 +2240,6 @@ impl Dispatcher {
                         o.dispatch_state = DispatchState::GatewayAccepted;
                     }
                     d.ev_gateway_accepted = true;
-                    if msg_valid {
-                        d.msg_session = Some(msg_session);
-                        d.msg_seq = Some(msg_seq);
-                    }
                     match evidence {
                         Evidence::EndSdkReceived => {
                             d.ev_end_sdk = true;
@@ -2813,6 +2827,37 @@ mod tests {
             msg_valid: true,
             evidence,
         })
+    }
+
+    #[test]
+    fn mesh_refusal_reason_is_kept_on_the_submit_operation() {
+        let mut store = MemoryOperationStore::test_store();
+        let mut dispatcher = Dispatcher::new([7; 16]);
+        let seq = admitted(&mut store, 0x11, 30_000, 1_000);
+        let submit = drive_to_submit(&mut dispatcher, &mut store, 1_000);
+        let mut detail = [0_u8; 32];
+        detail[..4].copy_from_slice(b"RLFR");
+        detail[4] = 8;
+        detail[5..13].copy_from_slice(b"NO_ROUTE");
+        dispatcher.handle_reply(
+            &mut store,
+            submit.request,
+            &receipt(
+                host_ops::SUB_SUBMIT,
+                HostOpsResult::MeshRejected,
+                SlotState::Empty,
+                1,
+                Evidence::None,
+                detail,
+            ),
+            1_020,
+        );
+        let record = op(&store, seq);
+        assert_eq!(record.dispatch_state, DispatchState::DispatchPrepared);
+        assert_eq!(
+            record.dispatch.as_ref().unwrap().device_reason.as_deref(),
+            Some("NO_ROUTE")
+        );
     }
 
     /// Same for QUERY responses: hash + operation id are verified on Ok.

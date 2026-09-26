@@ -13,6 +13,7 @@ mod send_store;
 mod site;
 mod sqlite_store;
 mod subscribe;
+mod telemetry;
 
 use acl::Acl;
 use receive_log::{Ingress, ReceiveLog};
@@ -96,6 +97,10 @@ fn session_stalled(now: u64, last_rx: u64) -> bool {
 /// handshake and opens inbound bodies before parsing the inner layouts used
 /// by the device bridge (components/routeloom/src/usb_bridge.cpp).
 const DIAG_FLAG_HAS_MESSAGE: u8 = 0x01;
+/// Set on every Diagnostic from a loss-accounting bridge: boot(8) ||
+/// seq(4) || dropped_total(8), big-endian, appended after the reason.
+const DIAG_FLAG_HAS_ACCOUNTING: u8 = 0x02;
+const DIAG_ACCOUNTING_TAIL: usize = 20;
 const CREDIT_GRANT: u8 = 0;
 const CREDIT_QUERY: u8 = 1;
 const CREDIT_CLOSE: u8 = 2;
@@ -582,6 +587,17 @@ struct AutonomyState {
     migration_events: u64,
 }
 
+/// Baseline for device-diagnostic loss detection: the last accounted
+/// (boot, seq, dropped_total) triple the read loop ingested. `boot` is
+/// None until the first accounted frame — legacy frames (no trailer)
+/// never touch the baseline.
+#[derive(Default)]
+struct DiagLossBaseline {
+    boot: Option<u64>,
+    seq: u32,
+    dropped: u64,
+}
+
 /// Discovery-engine reason strings (components/routeloom/src/discovery.cpp).
 /// Everything else autonomy-related is a migration-lane event.
 const DISCOVERY_REASONS: &[&str] = &[
@@ -600,6 +616,62 @@ const DISCOVERY_REASONS: &[&str] = &[
 
 /// Classify a device diagnostic reason into the autonomy view. Reasons are
 /// bounded engine strings — classified, never parsed for data.
+/// Compares one accounted diagnostic against the baseline and pushes a
+/// `diagnostic_loss` event when device-side drops left a seq gap, when a
+/// fresh boot's counter already moved (pre-history loss, range unknown),
+/// or — defensively — when the counter jumped without a gap. Duplicates,
+/// out-of-order arrivals, and legacy frames never move the baseline.
+fn check_diag_loss(state: &State, ms: u64, boot: u64, seq: u32, dropped: u64) {
+    let mut base = state.diag_loss.lock().expect("diag loss poisoned");
+    // (lost_from, lost_to, lost) — the range stays None when only the
+    // counter proves the loss.
+    let mut loss: Option<(Option<u32>, Option<u32>, u64)> = None;
+    let mut advance = true;
+    match base.boot {
+        Some(known) if known == boot => {
+            let ahead = seq.wrapping_sub(base.seq);
+            if ahead == 1 {
+                if dropped > base.dropped {
+                    loss = Some((None, None, dropped - base.dropped));
+                }
+            } else if ahead != 0 && ahead <= u32::MAX / 2 {
+                // USB never reorders: every seq between the baseline and
+                // this arrival was dropped on the device. Wrapping math
+                // keeps the u32 rollover exact.
+                loss = Some((
+                    Some(base.seq.wrapping_add(1)),
+                    Some(seq.wrapping_sub(1)),
+                    u64::from(ahead - 1),
+                ));
+            } else {
+                advance = false;
+            }
+        }
+        _ => {
+            if dropped > 0 {
+                loss = Some((None, None, dropped));
+            }
+        }
+    }
+    if advance {
+        base.boot = Some(boot);
+        base.seq = seq;
+        base.dropped = dropped;
+    }
+    drop(base);
+    if let Some((from, to, lost)) = loss {
+        push_event(
+            state,
+            ms,
+            format!(
+                "\"kind\":\"diagnostic_loss\",\"boot\":{boot},\"lost_from\":{},\"lost_to\":{},\"lost\":{lost},\"dropped_total\":{dropped}",
+                json_opt_u64(from.map(u64::from)),
+                json_opt_u64(to.map(u64::from)),
+            ),
+        );
+    }
+}
+
 fn note_autonomy(state: &State, ms: u64, reason: &str) {
     let migration = reason.starts_with("PHASE_")
         || reason.starts_with("ASSESS_")
@@ -685,6 +757,7 @@ struct State {
     /// process-local and never on the wire.
     next_conn: AtomicU64,
     autonomy: Mutex<AutonomyState>,
+    diag_loss: Mutex<DiagLossBaseline>,
     /// Bounded receive log for the API1 `messages.read` surface (Issue #7):
     /// retains actual DataFromMesh payloads as HOST_RAM_RETAINED evidence.
     /// Separate from `events` — the diagnostic ring never carried bodies.
@@ -754,6 +827,10 @@ struct State {
     /// api1 `group.send`/`group.get` submit and read here, the group lane
     /// thread drives the device exchange and emits `group_settled`.
     group_ops: group::GroupOps,
+    /// m1 diagnostics query table (HostOps 0x30/0x31): api1
+    /// `diagnostics.snapshot` submits and waits here, the telemetry lane
+    /// thread drives the device exchange.
+    telemetry_ops: telemetry::TelemetryOps,
     /// SDK v1 Site Authority (--site-authority DIR): EDHOC Responder, member
     /// ledger and the KGuard decision surface. None when not configured.
     site: Option<Arc<site::SiteService>>,
@@ -791,7 +868,7 @@ fn mono_ms_from_elapsed(elapsed: Duration) -> u64 {
 /// Escapes for JSON string contexts: quotes, backslashes and every C0
 /// control character (which would otherwise produce invalid JSON — e.g. a
 /// raw newline in a device-supplied reason string).
-fn json_escape(input: &str) -> String {
+pub(crate) fn json_escape(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
         match ch {
@@ -829,6 +906,18 @@ fn event_kind(fields: &str) -> String {
     let rest = &fields[start + KEY.len()..];
     let end = rest.find('"').unwrap_or(rest.len());
     rest[..end].to_string()
+}
+
+/// First ring entry of every daemon run (seq 0): the journal's restart
+/// boundary. Besides the incarnation id it carries the build/config
+/// identity an offline inspection record needs — daemon version,
+/// operation-store durability, config profile, site authority presence.
+/// Values only; no secrets (host_boot is a random per-run tag).
+fn boot_event_fields(host_boot: u64, storage: &str, config_profile: u8, site: bool) -> String {
+    format!(
+        "\"kind\":\"boot\",\"host_boot\":{host_boot},\"daemon\":\"routeloom-host\",\"version\":\"{}\",\"storage\":\"{storage}\",\"config_profile\":{config_profile},\"site\":{site}",
+        env!("CARGO_PKG_VERSION"),
+    )
 }
 
 fn push_event(state: &State, ms: u64, fields: String) {
@@ -876,6 +965,44 @@ struct DeliveryPatch {
     msg_seq: Option<u64>,
 }
 
+fn apply_delivery_patch(
+    delivery: &mut Delivery,
+    new_state: &str,
+    patch: DeliveryPatch,
+    updated_ms: u64,
+) {
+    delivery.state = new_state.to_string();
+    if patch.reason.is_some() {
+        delivery.reason = patch.reason;
+    }
+    if patch.msg_session.is_some() {
+        delivery.msg_session = patch.msg_session;
+    }
+    if patch.msg_seq.is_some() {
+        delivery.msg_seq = patch.msg_seq;
+    }
+    delivery.updated_ms = updated_ms;
+}
+
+/// Updates the legacy delivery tracked under `request`; true when one
+/// was found. The DeliveryEvent pump uses this to route: a SUBMIT
+/// request id must never invent a legacy delivery entry (its outcome
+/// attaches to the operation by message key instead).
+fn delivery_update_tracked(
+    state: &State,
+    request: u64,
+    new_state: &str,
+    patch: DeliveryPatch,
+    updated_ms: u64,
+) -> bool {
+    let mut deliveries = state.deliveries.lock().expect("deliveries poisoned");
+    if let Some(delivery) = deliveries.iter_mut().find(|d| d.request == request) {
+        apply_delivery_patch(delivery, new_state, patch, updated_ms);
+        return true;
+    }
+    false
+}
+
 fn delivery_update(
     state: &State,
     request: u64,
@@ -885,17 +1012,7 @@ fn delivery_update(
 ) {
     let mut deliveries = state.deliveries.lock().expect("deliveries poisoned");
     if let Some(delivery) = deliveries.iter_mut().find(|d| d.request == request) {
-        delivery.state = new_state.to_string();
-        if patch.reason.is_some() {
-            delivery.reason = patch.reason;
-        }
-        if patch.msg_session.is_some() {
-            delivery.msg_session = patch.msg_session;
-        }
-        if patch.msg_seq.is_some() {
-            delivery.msg_seq = patch.msg_seq;
-        }
-        delivery.updated_ms = updated_ms;
+        apply_delivery_patch(delivery, new_state, patch, updated_ms);
         return;
     }
     if deliveries.len() >= MAX_DELIVERIES {
@@ -1028,7 +1145,17 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                 let msg_seq = u64_at(body, 12);
                 let name = delivery_state_name(body[20]);
                 let reason = reason_at(body, 21);
-                delivery_update(
+                let tail = 22 + usize::from(body[21]);
+                let operation_id: Option<&[u8; 24]> = body
+                    .get(tail..)
+                    .filter(|bytes| bytes.len() == 24)
+                    .and_then(|bytes| bytes.try_into().ok());
+                // Route by request: a legacy SEND tracks its request id
+                // in the deliveries table; a SUBMIT (host-ops) request id
+                // never appears there, so its event carries the device
+                // outcome for the exact dispatch operation in the trailer.
+                // The message key alone can recur after a mesh restart.
+                let tracked = delivery_update_tracked(
                     state,
                     request,
                     name,
@@ -1040,11 +1167,30 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                     },
                     ms,
                 );
+                if !tracked {
+                    if let (Some(id), Some(session), Some(seq)) =
+                        (operation_id, u32_at(body, 8), u64_at(body, 12))
+                    {
+                        if let Ok(mut store) = state.operation_store.lock() {
+                            let _ = store.attach_device_outcome(
+                                id,
+                                session,
+                                seq,
+                                name,
+                                reason.as_deref(),
+                            );
+                        }
+                    }
+                }
+                let dispatch_operation = operation_id.map_or_else(
+                    || "null".to_string(),
+                    |id| format!("\"{}\"", crate::receive_log::hex_lower(id)),
+                );
                 push_event(
                     state,
                     ms,
                     format!(
-                        "\"kind\":\"delivery_event\",\"request\":{request},\"state\":\"{name}\",\"msg_session\":{},\"msg_seq\":{},\"reason\":{}",
+                        "\"kind\":\"delivery_event\",\"request\":{request},\"state\":\"{name}\",\"msg_session\":{},\"msg_seq\":{},\"reason\":{},\"dispatch_operation\":{dispatch_operation}",
                         msg_session.map_or_else(|| "null".to_string(), |v| v.to_string()),
                         json_opt_u64(msg_seq),
                         json_opt_str(reason.as_deref()),
@@ -1068,6 +1214,21 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                     (None, None, 9)
                 };
                 let reason = reason_at(body, reason_offset);
+                // Loss-accounting trailer after the reason (absent on
+                // legacy builds — unknown stays null, never synthesized).
+                let reason_len = body.get(reason_offset).copied().unwrap_or(0) as usize;
+                let tail = reason_offset + 1 + reason_len;
+                let (diag_boot, diag_seq, diag_dropped) = if flags & DIAG_FLAG_HAS_ACCOUNTING != 0
+                    && body.len() >= tail + DIAG_ACCOUNTING_TAIL
+                {
+                    (
+                        u64_at(body, tail),
+                        u32_at(body, tail + 8),
+                        u64_at(body, tail + 12),
+                    )
+                } else {
+                    (None, None, None)
+                };
                 if let Some(peer) = peer {
                     touch_node(state, peer, "peer", ms);
                 }
@@ -1078,13 +1239,22 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                     state,
                     ms,
                     format!(
-                        "\"kind\":\"diagnostic\",\"peer\":{},\"reason\":{},\"msg_session\":{},\"msg_seq\":{}",
+                        "\"kind\":\"diagnostic\",\"peer\":{},\"reason\":{},\"msg_session\":{},\"msg_seq\":{},\"diag_boot\":{},\"diag_seq\":{},\"diag_dropped\":{}",
                         json_opt_u64(peer),
                         json_opt_str(reason.as_deref()),
                         msg_session.map_or_else(|| "null".to_string(), |v| v.to_string()),
                         json_opt_u64(msg_seq),
+                        json_opt_u64(diag_boot),
+                        json_opt_u64(diag_seq.map(u64::from)),
+                        json_opt_u64(diag_dropped),
                     ),
                 );
+                // Gap check after the arrival itself: the ring reads
+                // "frame N arrived, and it revealed seqs X..Y missing".
+                if let (Some(boot), Some(seq), Some(dropped)) = (diag_boot, diag_seq, diag_dropped)
+                {
+                    check_diag_loss(state, ms, boot, seq, dropped);
+                }
             } else {
                 push_event(
                     state,
@@ -1103,6 +1273,13 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                 state
                     .group_ops
                     .post_error(request, code.unwrap_or(0), reason.clone());
+            }
+            if let Some(request) = request.filter(|r| telemetry::owns_request(*r)) {
+                // A 0x30 the device refused at the frame level: the query
+                // resolves as an error, never a silent timeout.
+                state
+                    .telemetry_ops
+                    .post_error(request, frame.session, code.unwrap_or(0));
             }
             if let Some(request) = request {
                 // Error requests share the session request space (credit,
@@ -1207,6 +1384,14 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                     "\"kind\":\"rx_drop\",\"reason\":\"node_inbox_full\"".to_string(),
                 );
             }
+        }
+        // m1 diagnostics 0x31 replies belong to the telemetry lane. A
+        // refused post is a stale answer past our timeout — expected and
+        // silent, never ring spam.
+        FrameKind::HostOps if telemetry::owns(body) => {
+            state
+                .telemetry_ops
+                .post_reply(frame.request, frame.session, body.to_vec());
         }
         FrameKind::HostOps if site::owns(body) => {
             if !state.site_inbox.post(frame.request, body.to_vec()) {
@@ -1368,10 +1553,13 @@ fn adapter_json(state: &State) -> String {
 }
 
 /// Legacy `NODES` view: the union of nodes observed in USB traffic and the
-/// node_status_v1 table. membership/reachability/rssi/hop_count come from
-/// the gateway's status report when one exists; a node the report does not
-/// cover — or any node while no capable session is live — stays
-/// "unknown"/null: absent data is never presented as observed.
+/// node_status_v1 table. Reachability/rssi/hop_count come from the
+/// gateway's status report when one exists; membership comes from the
+/// Site Authority ledger when one is configured — a route state must
+/// never pose as membership ("left" for a lost route misled triage).
+/// A node the report does not cover — or any node while no capable
+/// session is live — stays "unknown"/null: absent data is never
+/// presented as observed.
 fn nodes_json(state: &State) -> String {
     let observed: Vec<(u64, &'static str, u64)> = state
         .nodes
@@ -1399,16 +1587,24 @@ fn nodes_json(state: &State) -> String {
             (_, Some((_, role, _))) => role,
             _ => "peer",
         };
-        let (membership, reachability) = match record {
+        let reachability = match record {
             Some(record) if live || record.gateway => {
                 if record.connected {
-                    ("joined", "reachable")
+                    "reachable"
                 } else {
-                    ("left", "unreachable")
+                    "unreachable"
                 }
             }
-            _ => ("unknown", "unknown"),
+            _ => "unknown",
         };
+        // Membership is a ledger fact, not a route observation: without
+        // a site authority — or for a node the ledger never admitted —
+        // it stays honestly unknown.
+        let membership = state
+            .site
+            .as_ref()
+            .and_then(|service| service.with(|a| a.member_state(*id)).0)
+            .unwrap_or("unknown");
         let status = record.and_then(nodes::NodeRecord::live_status);
         let rssi = status
             .filter(|s| s.rssi_valid())
@@ -1563,7 +1759,10 @@ fn adapter_read_loop(
                 ))
             }
             Ok(count) => {
-                for result in decoder.push(&buffer[..count]) {
+                // Timed decode: a partial frame stalled past one second is
+                // dropped before these bytes, so it can never glue onto a
+                // later frame (usb-protocol.md §framing, firmware rule).
+                for result in decoder.push_timed(&buffer[..count], mono_ms()) {
                     match result {
                         Ok(frame) => {
                             state.rx_frames.fetch_add(1, Ordering::Relaxed);
@@ -1849,6 +2048,22 @@ impl ReconnectBackoff {
     }
 }
 
+/// Renders the `adapter/disconnected` event: the read-loop error (OS
+/// message plus errno when the OS supplied one) rides along so a cut
+/// cable, a dead writer, and a clean EOF read differently in the journal.
+fn adapter_drop_event(result: &io::Result<()>) -> String {
+    match result {
+        Ok(()) => "\"kind\":\"adapter\",\"state\":\"disconnected\"".to_string(),
+        Err(error) => format!(
+            "\"kind\":\"adapter\",\"state\":\"disconnected\",\"detail\":\"{}\",\"os_error\":{}",
+            json_escape(&error.to_string()),
+            error
+                .raw_os_error()
+                .map_or_else(|| "null".to_string(), |code| code.to_string()),
+        ),
+    }
+}
+
 fn adapter_supervisor(
     device: PathBuf,
     state: Arc<State>,
@@ -1913,14 +2128,10 @@ fn adapter_supervisor(
                 // stale — clear it so no schema-2 canonical can still cite
                 // the token (a reconnect re-registers under a fresh one).
                 state.gateway_lane.clear();
-                if let Err(error) = result {
+                if let Err(error) = &result {
                     set_error(&state, error.to_string());
                 }
-                push_event(
-                    &state,
-                    now_ms(),
-                    "\"kind\":\"adapter\",\"state\":\"disconnected\"".to_string(),
-                );
+                push_event(&state, now_ms(), adapter_drop_event(&result));
             }
             Err(error) => {
                 if !open_failed {
@@ -2043,6 +2254,7 @@ fn serve_client(
                 node_table: &state.node_table,
                 config_ops: &state.config_ops,
                 group_ops: &state.group_ops,
+                telemetry_ops: &state.telemetry_ops,
                 site: state.site.as_deref(),
                 config_authority: state.config_authority,
                 config_profile: state.config_profile,
@@ -2583,6 +2795,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_authority_key: args.config_authority_key.clone(),
         ..State::default()
     });
+    // The ring opens with the run's own restart boundary — before the
+    // dispatch thread or any client can push, so it is always seq 0.
+    push_event(
+        &state,
+        now_ms(),
+        boot_event_fields(
+            host_boot,
+            if args.op_store.is_some() {
+                "sqlite"
+            } else {
+                "memory"
+            },
+            args.config_profile,
+            args.site_authority.is_some(),
+        ),
+    );
     // Fail fast on an unloadable COSE key: the lane would otherwise refuse
     // every issuance at runtime with the cause buried in a dispatch log.
     if args.config_profile == config::ISSUE_PROFILE_COSE {
@@ -2660,6 +2888,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let group_state = Arc::clone(&state);
         let group_outbound = outbound_tx.clone();
         thread::spawn(move || group::group_loop(group_state, group_outbound));
+    }
+    // m1 diagnostics lane: issues 0x30 telemetry queries for
+    // `diagnostics.snapshot` and resolves them from the 0x31 answers.
+    // Idle while nothing is submitted; same writer queue.
+    {
+        let telemetry_state = Arc::clone(&state);
+        let telemetry_outbound = outbound_tx.clone();
+        thread::spawn(move || telemetry::telemetry_loop(telemetry_state, telemetry_outbound));
     }
     if let Some(device_path) = device {
         let writer_slot: Arc<Mutex<Option<File>>> = Arc::new(Mutex::new(None));
@@ -3216,6 +3452,100 @@ mod tests {
     }
 
     #[test]
+    fn delivery_event_for_submit_request_attaches_to_operation() {
+        use crate::send_store::{PrepareOutcome, SubmitOutcome};
+        let state = State::default();
+        // Admit an operation and bind its message key, as the dispatch
+        // lane does when the SUBMIT receipt lands.
+        let (seq, seq2) = {
+            let mut store = state.operation_store.lock().unwrap();
+            store.open_epoch((501, 1), 0).unwrap();
+            let json = "{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000001\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"00ff\",\"payload_len\":2,\"options\":{\"storage\":\"RAM_ONLY\"}}";
+            let mut req =
+                crate::canonical::parse_submit(&routeloom_json::parse(json).unwrap(), None)
+                    .unwrap();
+            req.epoch = 1;
+            let seq = match store.submit(501, &req, 1000) {
+                SubmitOutcome::Accepted { seq } => seq,
+                _ => panic!("expected accept"),
+            };
+            match store.prepare_dispatch(seq, [7; 16], [8; 16]) {
+                Ok(PrepareOutcome::Prepared(_)) => {}
+                _ => panic!("expected prepare"),
+            }
+            store
+                .update_operation(seq, &mut |op| {
+                    let d = op.dispatch.as_mut().unwrap();
+                    d.msg_session = Some(5);
+                    d.msg_seq = Some(900);
+                    true
+                })
+                .unwrap();
+            // A previously retained operation can carry the same message
+            // key after a mesh session restart. The event belongs to the
+            // second operation named by its dispatch identity.
+            let second_json = json.replace(
+                "00112233445566778899aabbccddeeff",
+                "00112233445566778899aabbccddeeee",
+            );
+            let mut second =
+                crate::canonical::parse_submit(&routeloom_json::parse(&second_json).unwrap(), None)
+                    .unwrap();
+            second.epoch = 1;
+            let seq2 = match store.submit(501, &second, 1001) {
+                SubmitOutcome::Accepted { seq } => seq,
+                _ => panic!("expected second accept"),
+            };
+            assert!(matches!(
+                store.prepare_dispatch(seq2, [7; 16], [8; 16]),
+                Ok(PrepareOutcome::Prepared(_))
+            ));
+            store
+                .update_operation(seq2, &mut |op| {
+                    let d = op.dispatch.as_mut().unwrap();
+                    d.msg_session = Some(5);
+                    d.msg_seq = Some(900);
+                    true
+                })
+                .unwrap();
+            (seq, seq2)
+        };
+        // A reason-carrying DeliveryEvent for the SUBMIT request id
+        // (never tracked by the legacy SEND path).
+        let mut body = Vec::new();
+        body.extend_from_slice(&4242_u64.to_be_bytes());
+        body.extend_from_slice(&5_u32.to_be_bytes());
+        body.extend_from_slice(&900_u64.to_be_bytes());
+        body.push(8); // failed
+        body.extend_from_slice(b"\x08NO_ROUTE");
+        body.extend_from_slice(&[8; 16]);
+        body.extend_from_slice(&seq2.to_be_bytes());
+        record_frame(
+            &state,
+            &frame(FrameKind::DeliveryEvent, 0, 4242, body.clone()),
+            &body,
+            200,
+        );
+        // No legacy delivery entry is invented for the SUBMIT request...
+        assert!(!deliveries_json(&state).contains("4242"));
+        // ...the device outcome attaches to the keyed operation instead.
+        let store = state.operation_store.lock().unwrap();
+        assert!(store
+            .get_by_seq(seq)
+            .unwrap()
+            .unwrap()
+            .dispatch
+            .unwrap()
+            .device_reason
+            .is_none());
+        let dispatch = store.get_by_seq(seq2).unwrap().unwrap().dispatch.unwrap();
+        assert_eq!(dispatch.device_state.as_deref(), Some("failed"));
+        assert_eq!(dispatch.device_reason.as_deref(), Some("NO_ROUTE"));
+        // And the event ring still carries the reason for triage.
+        assert!(events_json(&state).contains("NO_ROUTE"));
+    }
+
+    #[test]
     fn error_frame_marks_delivery_failed() {
         let state = State::default();
         delivery_update(
@@ -3283,6 +3613,131 @@ mod tests {
         assert!(json.contains("\"peer\":55"));
         assert!(json.contains("\"reason\":\"RETRY!\""));
         assert!(json.contains("\"msg_seq\":300"));
+    }
+
+    /// Diagnostic body with the loss-accounting trailer: peer(8) ||
+    /// flags(1) || reason_len(1) || reason || boot(8) || seq(4) ||
+    /// dropped_total(8).
+    fn diag_body(peer: u64, reason: &str, boot: u64, seq: u32, dropped: u64) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&peer.to_be_bytes());
+        body.push(DIAG_FLAG_HAS_ACCOUNTING);
+        body.push(reason.len() as u8);
+        body.extend_from_slice(reason.as_bytes());
+        body.extend_from_slice(&boot.to_be_bytes());
+        body.extend_from_slice(&seq.to_be_bytes());
+        body.extend_from_slice(&dropped.to_be_bytes());
+        body
+    }
+
+    fn record_diag(state: &State, body: &[u8], ms: u64) {
+        record_frame(
+            state,
+            &frame(FrameKind::Diagnostic, 0, 0, body.to_vec()),
+            body,
+            ms,
+        );
+    }
+
+    #[test]
+    fn diagnostic_seq_gap_raises_loss_event() {
+        let state = State::default();
+        record_diag(&state, &diag_body(2, "EVT0", 7, 0, 0), 100);
+        record_diag(&state, &diag_body(2, "EVT1", 7, 1, 0), 101);
+        // Seq 2 was dropped on the device; the marker + next diagnostic
+        // arrive with the gap visible.
+        record_diag(&state, &diag_body(1, "DIAG_LOSS", 7, 3, 1), 102);
+        let json = events_json(&state);
+        assert!(json.contains("\"kind\":\"diagnostic_loss\""), "{json}");
+        assert!(json.contains("\"boot\":7"), "{json}");
+        assert!(json.contains("\"lost_from\":2"), "{json}");
+        assert!(json.contains("\"lost_to\":2"), "{json}");
+        assert!(json.contains("\"lost\":1"), "{json}");
+        assert!(json.contains("\"dropped_total\":1"), "{json}");
+        // The arrivals themselves carry the accounting fields.
+        assert!(json.contains("\"diag_boot\":7"), "{json}");
+        assert!(json.contains("\"diag_seq\":3"), "{json}");
+        assert!(json.contains("\"diag_dropped\":1"), "{json}");
+    }
+
+    #[test]
+    fn diagnostic_boot_change_rebaselines() {
+        let state = State::default();
+        record_diag(&state, &diag_body(2, "EVT0", 7, 5, 0), 100);
+        // Same-device reboot: seq restarts, no loss claimed.
+        record_diag(&state, &diag_body(2, "EVT0", 8, 0, 0), 101);
+        let json = events_json(&state);
+        assert!(!json.contains("\"kind\":\"diagnostic_loss\""), "{json}");
+        // A fresh boot whose counter already moved lost pre-history
+        // diagnostics the host never saw — reported without a range.
+        record_diag(&state, &diag_body(2, "EVT4", 9, 4, 2), 102);
+        let json = events_json(&state);
+        assert!(json.contains("\"kind\":\"diagnostic_loss\""), "{json}");
+        assert!(json.contains("\"boot\":9"), "{json}");
+        assert!(json.contains("\"lost\":2"), "{json}");
+        assert!(json.contains("\"lost_from\":null"), "{json}");
+    }
+
+    #[test]
+    fn legacy_diagnostic_without_trailer_is_untracked() {
+        let state = State::default();
+        let mut body = Vec::new();
+        body.extend_from_slice(&55_u64.to_be_bytes());
+        body.push(0);
+        body.push(6);
+        body.extend_from_slice(b"RETRY!");
+        record_diag(&state, &body, 100);
+        let json = events_json(&state);
+        assert!(json.contains("\"reason\":\"RETRY!\""), "{json}");
+        assert!(json.contains("\"diag_boot\":null"), "{json}");
+        assert!(!json.contains("\"kind\":\"diagnostic_loss\""), "{json}");
+        // Untracked frames never disturb the baseline.
+        record_diag(&state, &diag_body(2, "EVT0", 7, 0, 0), 101);
+        record_diag(&state, &body, 102);
+        record_diag(&state, &diag_body(2, "EVT1", 7, 1, 0), 103);
+        let json = events_json(&state);
+        assert!(!json.contains("\"kind\":\"diagnostic_loss\""), "{json}");
+    }
+
+    #[test]
+    fn adapter_drop_event_carries_the_os_reason() {
+        // The disconnect event names the read-loop error (OS message +
+        // errno) so a cut cable reads differently from a dead writer.
+        let fields = adapter_drop_event(&Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No such device (os error 19)",
+        )));
+        assert!(fields.contains("\"state\":\"disconnected\""), "{fields}");
+        assert!(fields.contains("No such device (os error 19)"), "{fields}");
+    }
+
+    #[test]
+    fn boot_event_opens_the_ring() {
+        // Every daemon run starts the ring with its own restart boundary:
+        // seq 0 carries the incarnation id plus the build/config identity
+        // an offline journal needs.
+        let state = State::default();
+        push_event(
+            &state,
+            1_700_000_000_000,
+            boot_event_fields(0x505, "sqlite", 1, true),
+        );
+        push_event(
+            &state,
+            1_700_000_000_001,
+            "\"kind\":\"keepalive\"".to_string(),
+        );
+        let json = events_json(&state);
+        assert!(
+            json.contains("\"seq\":0,\"ms\":1700000000000,\"kind\":\"boot\""),
+            "{json}"
+        );
+        assert!(json.contains("\"host_boot\":1285"), "{json}");
+        assert!(json.contains("\"version\":\""), "{json}");
+        assert!(json.contains("\"storage\":\"sqlite\""), "{json}");
+        assert!(json.contains("\"config_profile\":1"), "{json}");
+        assert!(json.contains("\"site\":true"), "{json}");
+        assert!(json.contains("\"dropped\":0,\"next_seq\":2"), "{json}");
     }
 
     #[test]
@@ -3946,7 +4401,10 @@ mod tests {
         );
         nodes::node_status_once(&state, &tx, &mut lane, now + 1);
         let view = nodes_json(&state);
-        assert!(view.contains("\"membership\":\"joined\""), "{view}");
+        // No site authority here: membership is unknown — reachability
+        // carries the route state, never the membership column.
+        assert!(view.contains("\"membership\":\"unknown\""), "{view}");
+        assert!(view.contains("\"reachability\":\"reachable\""), "{view}");
         assert!(view.contains("\"rssi_dbm\":-64"));
         assert!(view.contains("\"hop_count\":1"));
         assert!(view.contains("\"state\":\"live\""));
@@ -3983,7 +4441,10 @@ mod tests {
             now + 2,
         );
         nodes::node_status_once(&state, &tx, &mut lane, now + 3);
-        assert!(nodes_json(&state).contains("\"membership\":\"left\""));
+        // A lost route reads as unreachable — never as "left".
+        let view = nodes_json(&state);
+        assert!(view.contains("\"membership\":\"unknown\""), "{view}");
+        assert!(view.contains("\"reachability\":\"unreachable\""), "{view}");
         assert!(state
             .events
             .lock()
@@ -4002,6 +4463,143 @@ mod tests {
             .unwrap()
             .iter()
             .any(|e| e.kind == "node_left" && e.json.contains("\"reason\":\"gateway_lost\"")));
+    }
+
+    #[test]
+    fn nodes_membership_follows_ledger_not_route() {
+        use crate::site::testkit::{self, Outcome, SimDevice};
+        use crate::site::{DecideRequest, SiteService};
+        use routeloom_protocol::node_status::{
+            encode_node_event, encode_node_status_page, NodeEvent, NodeEventKind, NodeStatusEntry,
+            NodeStatusPage, CAP_NODE_STATUS_V1, FLAG_DIRECT, FLAG_NEIGHBOR, FLAG_NEIGHBOR_ACTIVE,
+            FLAG_REACHABLE, FLAG_RSSI_VALID, PAGE_ARMED,
+        };
+        let now = 1_790_000_000_000;
+        let store = Box::<crate::site::store::MemoryStore>::default();
+        let service = Arc::new(SiteService::new(testkit::authority(store, now)));
+        let transport = crate::site::transport::InProcessTransport::new();
+        service.set_transport(transport.clone());
+        let state = State {
+            site: Some(Arc::clone(&service)),
+            ..State::default()
+        };
+        // Join a member through the real flow.
+        let node = 0x00A1_0000_0000_7001;
+        let mut device = SimDevice::new(node, 0x79);
+        let (_, outcome, events) = device.start(&service, &transport, now);
+        assert!(matches!(outcome, Outcome::Waiting));
+        let request = testkit::request_id(&events).expect("join request");
+        service
+            .with(|a| {
+                a.decide(
+                    501,
+                    DecideRequest {
+                        join_request_id: request,
+                        device: node,
+                        verdict: crate::site::records::Verdict::Allow {
+                            role: crate::site::records::ROLE_ENDPOINT,
+                        },
+                        key: "allow-7001".into(),
+                    },
+                    now + 10,
+                )
+            })
+            .0
+            .unwrap();
+        // Ledger admission alone names the membership (no route needed).
+        touch_node(&state, node, "peer", now + 11);
+        let view = nodes_json(&state);
+        assert!(view.contains("\"membership\":\"member\""), "{view}");
+
+        // A lost route reads as unreachable — the member stays a member.
+        {
+            let mut info = state.session.lock().unwrap();
+            info.authenticated = true;
+            info.id = Some(42);
+            info.node = Some(1);
+            info.network = Some(7);
+            info.capability = Some(0x7 | CAP_NODE_STATUS_V1);
+        }
+        let (tx, rx) = mpsc::sync_channel::<Outbound>(MAX_OUTBOUND);
+        let mut lane = nodes::NodeStatusLane::default();
+        nodes::node_status_once(&state, &tx, &mut lane, now + 12);
+        let Ok(Outbound::Seal(query)) = rx.try_recv() else {
+            panic!("expected a sealed node status query");
+        };
+        let entry = NodeStatusEntry {
+            node,
+            flags: FLAG_NEIGHBOR
+                | FLAG_NEIGHBOR_ACTIVE
+                | FLAG_REACHABLE
+                | FLAG_DIRECT
+                | FLAG_RSSI_VALID,
+            rssi_last_dbm: -64,
+            rssi_ewma_q8_8: -64 * 256,
+            link_cost: 1,
+            route_metric: 1,
+            next_hop: node,
+            heard_age_ms: 0,
+        };
+        let page = encode_node_status_page(&NodeStatusPage {
+            result: 0,
+            flags: PAGE_ARMED,
+            next_after: node,
+            event_seq: 0,
+            entries: vec![entry],
+        })
+        .unwrap();
+        record_frame(
+            &state,
+            &frame(FrameKind::HostOps, 0, query.request, page.clone()),
+            &page,
+            now + 12,
+        );
+        nodes::node_status_once(&state, &tx, &mut lane, now + 13);
+        let view = nodes_json(&state);
+        assert!(view.contains("\"membership\":\"member\""), "{view}");
+        assert!(view.contains("\"reachability\":\"reachable\""), "{view}");
+        let gone = NodeStatusEntry {
+            flags: FLAG_NEIGHBOR,
+            link_cost: u16::MAX,
+            route_metric: u16::MAX,
+            next_hop: 0,
+            ..entry
+        };
+        let body = encode_node_event(&NodeEvent {
+            sequence: 1,
+            kind: NodeEventKind::RouteDown,
+            status: gone,
+        })
+        .unwrap();
+        record_frame(
+            &state,
+            &frame(FrameKind::HostOps, 0, 0, body.clone()),
+            &body,
+            now + 14,
+        );
+        nodes::node_status_once(&state, &tx, &mut lane, now + 15);
+        let view = nodes_json(&state);
+        assert!(view.contains("\"membership\":\"member\""), "{view}");
+        assert!(view.contains("\"reachability\":\"unreachable\""), "{view}");
+
+        // Revocation flips the ledger state, not the route.
+        service
+            .with(|a| {
+                a.revoke(
+                    501,
+                    crate::site::RevokeRequest {
+                        device: node,
+                        expected_generation: 1,
+                        reason: crate::site::parse_reason("removed").unwrap(),
+                        key: "revoke-7001".into(),
+                    },
+                    crate::site::group_keys::HostTime::sync(now + 16),
+                )
+            })
+            .0
+            .unwrap();
+        let view = nodes_json(&state);
+        assert!(view.contains("\"membership\":\"removed\""), "{view}");
     }
 
     /// Inner bytes of one frame of protocol/usb-golden/group-ops.
