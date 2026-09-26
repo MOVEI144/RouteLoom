@@ -10,3 +10,6 @@ nvs,      data, nvs,     0x9000,   0x6000
 phy_init, data, phy,     0xf000,   0x1000
 factory,  app,  factory, 0x10000,  0x180000
 rlsec,    data, nvs,     0x190000, 0x20000
+# App-only updates preserve both per-board config and private secrets.
+rlcfg,    data, nvs,     0x1B0000, 0x6000
+rlkeys,   data, nvs,     0x1B6000, 0x3000
