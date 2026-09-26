@@ -114,6 +114,7 @@ void test_nvs_app_update_and_power_cut() {
     newer.generation++;
     nvs.cut_at = nvs.writes;
     CHECK(!setup.commit(newer).ok());
+    CHECK(!setup.authorize_rf({c.chip, c.sta_mac, c.role, c.security, c.node}).ok());
     nvs.cut_at = std::numeric_limits<std::size_t>::max();
     auto app_slot = sdkv1::BlobRecordSlotStorage::board_config(nvs);
     BoardConfigStore updated(app_slot);
@@ -140,11 +141,17 @@ void test_nvs_app_update_and_power_cut() {
       nvs.cut_at = nvs.writes + phase;
       nvs.cut_lands = lands;
       CHECK(!writer.commit(newer).ok());
+      // An acknowledged failure can still have landed the seal; the live
+      // writer must not authorize the stale in-memory identity before readback.
+      CHECK(!writer.authorize_rf({c.chip, c.sta_mac, c.role, c.security, c.node}).ok());
       nvs.cut_at = std::numeric_limits<std::size_t>::max();
+      CHECK(!writer.commit(newer).ok());  // reconcile the possibly landed seal first
       auto app_slot = sdkv1::BlobRecordSlotStorage::board_config(nvs);
       BoardConfigStore reboot(app_slot);
       CHECK(reboot.initialize().ok());
       CHECK(reboot.config().node == ((phase == 1 && lands) ? newer.node : c.node));
+      CHECK(reboot.authorize_rf({c.chip, c.sta_mac, c.role, c.security,
+                                reboot.config().node}).ok());
       CHECK(nvs.blobs["rlsec-boot-witness"] == std::vector<std::uint8_t>({1, 2, 3}));
     }
   }
@@ -212,6 +219,7 @@ void test_interrupted_commit_preserves_old() {
       storage.cut_call = storage.write_calls + call;
       storage.cut_bytes = byte;
       CHECK(!setup.commit(next).ok());
+      CHECK(!setup.authorize_rf({old.chip, old.sta_mac, old.role, old.security, old.node}).ok());
       storage.disarm();
       BoardConfigStore reboot(storage);
       const auto status = reboot.initialize();

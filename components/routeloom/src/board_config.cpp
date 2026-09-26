@@ -81,6 +81,7 @@ BoardConfigStore::BoardConfigStore(sdkv1::RecordSlotStorage& storage) noexcept
     : pair_(storage, kFormat, scratch_.writable(), &config_) {}
 
 Status BoardConfigStore::initialize() noexcept {
+  readback_ready_ = false;
   const Status status = pair_.initialize();
   config_ = BoardConfig{};
   if (pair_.has_active()) {
@@ -89,11 +90,13 @@ Status BoardConfigStore::initialize() noexcept {
     if (loaded) loaded = decode(record, config_);
     if (!loaded) return loaded;
   }
+  readback_ready_ = status.ok();
   return status;
 }
 
 Status BoardConfigStore::commit(const BoardConfig& config) noexcept {
   if (!pair_.initialized()) return Status::error(StatusCode::InvalidState, "board store unopened");
+  if (!readback_ready_) return Status::error(StatusCode::RecoveryRequired, "board readback required");
   Status status = validate(config);
   if (!status) return status;
   if (pair_.has_active() && config.generation <= config_.generation) {
@@ -117,11 +120,13 @@ Status BoardConfigStore::commit(const BoardConfig& config) noexcept {
   put32(p + 46, 0);  // SealedSlotPair writes CRC after sequence and seal.
   status = pair_.commit_prepared(kBoardConfigRecordBytes);
   if (status) config_ = config;
+  else readback_ready_ = false;  // A failed acknowledgement may have committed the seal.
   return status;
 }
 
 Status BoardConfigStore::authorize_rf(const BoardBootIdentity& identity) const noexcept {
-  if (!pair_.initialized() || !pair_.has_active() || pair_.uncertain() || pair_.quarantined()) {
+  if (!readback_ready_ || !pair_.initialized() || !pair_.has_active() ||
+      pair_.uncertain() || pair_.quarantined()) {
     return Status::error(StatusCode::InvalidState, "board configuration required");
   }
   if (config_.chip != identity.chip || config_.sta_mac != identity.sta_mac ||

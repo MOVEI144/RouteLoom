@@ -49,6 +49,7 @@ class BoardConfigStore {
   ByteBuffer<kBoardConfigSlotBytes> scratch_{};
   sdkv1::SealedSlotPair pair_;
   BoardConfig config_{};
+  bool readback_ready_{false};
 };
 
 }  // namespace routeloom
