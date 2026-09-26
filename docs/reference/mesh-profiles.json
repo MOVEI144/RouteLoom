@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "note": "D00 baseline: the three profile axes (security/routing/resource) with their contract names, values, and maturity. maturity is main (merged), pr (in review), or proposal (design only) so claims stay distinguishable. No value here is production-qualified.",
+  "axes": {
+    "security": {
+      "values": {
+        "DEV_RAM": {
+          "maturity": "main",
+          "display": "Development / DevRam / No enrollment",
+          "note": "Development shared key; origins are group-key claims, not verified identities.",
+          "evidence": [
+            "components/routeloom/Kconfig",
+            "components/routeloom_espnow/src/psk_security.cpp"
+          ]
+        },
+        "MEMBER_EDHOC": {
+          "maturity": "main",
+          "display": "Experimental / MemberEdhoc",
+          "note": "Zero-touch join with EDHOC and ledger enrollment; no Production display until qualified.",
+          "evidence": [
+            "components/routeloom/Kconfig",
+            "components/routeloom/src/sdkv1_security_coordinator.cpp"
+          ]
+        },
+        "LEGACY_FIXTURE": {
+          "maturity": "main",
+          "display": "compat harness only",
+          "note": "Compatibility fixture, not a deployment profile; never merged with DevRam claims.",
+          "evidence": [
+            "components/routeloom/Kconfig",
+            "firmware/reference_node/main/Kconfig.projbuild"
+          ]
+        }
+      }
+    },
+    "routing": {
+      "values": {
+        "FLAT": {
+          "maturity": "main",
+          "note": "Full-table flat routing; group delivery currently refuses flat (GROUP_REQUIRES_GATEWAY_SCOPED).",
+          "evidence": [
+            "components/routeloom/include/routeloom/routing.hpp",
+            "docs/spec/routing.md"
+          ]
+        },
+        "GATEWAY_SCOPED": {
+          "maturity": "main",
+          "note": "Gateway-scoped routing for the 100-node target; group delivery requires it.",
+          "evidence": [
+            "components/routeloom/include/routeloom/routing.hpp",
+            "docs/spec/routing.md"
+          ]
+        }
+      }
+    },
+    "resource": {
+      "values": {
+        "leaf-small": {
+          "maturity": "main",
+          "note": "Design budget only; qualified=false in resource-profiles.json.",
+          "evidence": [
+            "docs/reference/resource-profiles.json",
+            "components/routeloom/Kconfig"
+          ]
+        },
+        "relay-c3": {
+          "maturity": "main",
+          "note": "Design budget only; qualified=false in resource-profiles.json.",
+          "evidence": [
+            "docs/reference/resource-profiles.json",
+            "components/routeloom/Kconfig"
+          ]
+        },
+        "gateway-s3": {
+          "maturity": "main",
+          "note": "Design budget only; qualified=false in resource-profiles.json.",
+          "evidence": [
+            "docs/reference/resource-profiles.json",
+            "components/routeloom/Kconfig"
+          ]
+        }
+      }
+    }
+  },
+  "capabilities": {
+    "caps_version": 1,
+    "policy": "additive-only: fields and methods are added, never renamed or removed without a version bump. Clients must ignore unknown fields and methods, never exact-match the document.",
+    "spec": "docs/spec/host.md"
+  }
+}

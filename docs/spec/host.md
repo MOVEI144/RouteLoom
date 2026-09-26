@@ -34,6 +34,14 @@ Linux常駐、macOS/Windows開発利用を設計対象にする。USB device pat
 
 API受付のoperation IDと無線Message IDは別に返す。idempotency keyはhost再接続後も指定scope内で有効。操作成功、管理commit、機器へのapplyを別stateで返す。
 
+**capabilities互換方針**。`capabilities.get` の応答文書は版付き（`caps_version`、現在 1）で、field・method は additive-only（追加のみ。改名・削除は版上げと仕様更新を伴う）。client は未知の field・method を ignore unknown（無視）し、文書全体の厳密一致で判定しない。版と方針の正本は [mesh-profiles.json](../reference/mesh-profiles.json) の `capabilities`。
+
+**profile 3軸**。security（`DEV_RAM`／`MEMBER_EDHOC`、互換用 `LEGACY_FIXTURE`）、routing（`FLAT`／`GATEWAY_SCOPED`）、resource（`leaf-small`／`relay-c3`／`gateway-s3`）。名前・値・成熟度（main／pr／proposal）の契約は mesh-profiles.json が正本で、成熟度の証拠は feature-profiles.json と `capabilities.get` の実装広告で裏付ける。いずれも本番認定（Production 表示）ではない。
+
+**受信記録の assurance**。`messages.read` と購読通知の `assurance` は daemon が ingest 時に確定した送信元確認の水準で、payload の自己申告を写さない。`EXPERIMENTAL_DEV_PSK`／`group-key-claim`（Site Authority 無し＝開発共有鍵）、`MEMBER_EDHOC`／`enrolled-member`（当該 network の台帳に登録済み。daemon は member 鍵を持たないため登録の保証であり per-frame 暗号検証ではない）、`UNKNOWN`／`unverified`（Authority ありで未登録）。Member の security 判定に `UNKNOWN` を合格としない。
+
+**診断の正本**。失敗 `reason` は領域ごと（送信結果の `device_outcome`、group の `REFUSED` reason、event ring の `rx_drop` 等）で語彙が異なり、横断の共通 enum は設けない。欠落は `CURSOR_GAP`（cursor 読出し）、購読の in-band `gap` marker（追い出し範囲）、capture の `UncleanEnd`（未完了末尾）を使い分ける。`diagnostics.snapshot` は RF telemetry の on-demand 照会であり、legacy `DIAGNOSTICS`（daemon 内部 counter）とは別物。RF 取得路は telemetry lane、機器状態の購読は `events` stream が正本。
+
 ## 4. ローカル接続と認可
 
 既定はローカルIPC（Unix socket／対応するWindows IPC）で、OS権限を用いる。TCPを使う開発構成もloopback限定で認証する。LAN公開、リモート管理、ブラウザアクセスは既定OFF。明示TLS/認証/認可なしで0.0.0.0へbindしない。
