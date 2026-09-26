@@ -2179,6 +2179,16 @@ impl Dispatcher {
             let concluded = o.concluded();
             let prepared = o.dispatch_state == DispatchState::DispatchPrepared;
             let d = o.dispatch.as_mut().expect("checked above");
+            // The message key belongs to the position whatever the slot
+            // state: bind it on every observation (except Empty, which is
+            // a hole and carries no key). The receipt for an
+            // already-terminal position must still bind the key —
+            // otherwise the reason-carrying DeliveryEvent for that send
+            // could never correlate to the operation.
+            if msg_valid && state != SlotState::Empty {
+                d.msg_session = Some(msg_session);
+                d.msg_seq = Some(msg_seq);
+            }
             match state {
                 SlotState::Empty => {
                     if concluded || o.canonical.is_empty() {
@@ -2210,10 +2220,6 @@ impl Dispatcher {
                         o.dispatch_state = DispatchState::GatewayAccepted;
                     }
                     d.ev_gateway_accepted = true;
-                    if msg_valid {
-                        d.msg_session = Some(msg_session);
-                        d.msg_seq = Some(msg_seq);
-                    }
                 }
                 SlotState::Delivered => {
                     // Delivered implies the gateway accepted the record —
@@ -2222,10 +2228,6 @@ impl Dispatcher {
                         o.dispatch_state = DispatchState::GatewayAccepted;
                     }
                     d.ev_gateway_accepted = true;
-                    if msg_valid {
-                        d.msg_session = Some(msg_session);
-                        d.msg_seq = Some(msg_seq);
-                    }
                     match evidence {
                         Evidence::EndSdkReceived => {
                             d.ev_end_sdk = true;

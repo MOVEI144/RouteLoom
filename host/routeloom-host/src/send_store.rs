@@ -269,13 +269,24 @@ pub struct DispatchAttachment {
     /// late so the record keeps the honest observation.
     pub cancel_requested: bool,
     pub time_uncertain: bool,
+    /// Device-attested terminal detail from the reason-carrying
+    /// DeliveryEvent (mesh state name + reason, e.g. `failed`/`NO_ROUTE`):
+    /// the window state stays authoritative for terminality, this names
+    /// the cause. `None` until such an event arrives for the message key.
+    pub device_state: Option<String>,
+    pub device_reason: Option<String>,
 }
 
-/// Versioned blob layout for the durable `operations.dispatch` column
-/// (55 bytes). A single opaque column lets later fields extend the inner
-/// version without another schema migration.
-const ATTACH_BLOB_VERSION: u8 = 1;
-const ATTACH_BLOB_SIZE: usize = 55;
+/// Versioned blob layout for the durable `operations.dispatch` column. v1
+/// is 55 fixed bytes; v2 appends the device-reported terminal outcome
+/// (length-prefixed, so the column only grows past 56 bytes for sends
+/// whose failure reason arrived). A single opaque column lets later
+/// fields extend the inner version without another schema migration.
+const ATTACH_BLOB_VERSION: u8 = 2;
+const ATTACH_BLOB_V1_SIZE: usize = 55;
+/// Mesh reason vocabulary fits the wire `kMaxReasonLen` (64); longer
+/// values are truncated at attach, never grown in the blob.
+const ATTACH_OUTCOME_MAX: usize = 64;
 
 impl DispatchAttachment {
     pub fn fresh(lease: [u8; 16], dispatcher: [u8; 16], dispatch_seq: u64) -> Self {
@@ -294,12 +305,23 @@ impl DispatchAttachment {
             ev_host_receive: false,
             cancel_requested: false,
             time_uncertain: false,
+            device_state: None,
+            device_reason: None,
         }
+    }
+
+    /// Records the device-attested terminal detail for this send (latest
+    /// event wins; duplicates carry the same outcome). Values longer than
+    /// [`ATTACH_OUTCOME_MAX`] are truncated — mesh reasons fit the wire
+    /// budget, anything longer is not one.
+    pub fn attach_device_outcome(&mut self, state: &str, reason: Option<&str>) {
+        self.device_state = Some(truncate_outcome(state).to_string());
+        self.device_reason = reason.map(|r| truncate_outcome(r).to_string());
     }
 
     /// Serialize for the durable `operations.dispatch` column.
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(ATTACH_BLOB_SIZE);
+        let mut out = Vec::with_capacity(ATTACH_BLOB_V1_SIZE + 1);
         out.push(ATTACH_BLOB_VERSION);
         out.extend_from_slice(&self.lease);
         out.extend_from_slice(&self.dispatcher);
@@ -341,26 +363,89 @@ impl DispatchAttachment {
         out.push(evidence);
         out.extend_from_slice(&self.msg_session.unwrap_or(0).to_be_bytes());
         out.extend_from_slice(&self.msg_seq.unwrap_or(0).to_be_bytes());
+        // v2 tail: 0 = no device outcome (56 bytes total); 1 = state_len,
+        // state, reason_present, [reason_len, reason]. Encode truncates
+        // defensively — attach() already caps, but the blob must never
+        // lie about a length.
+        match (&self.device_state, &self.device_reason) {
+            (Some(state), reason) => {
+                out.push(1);
+                push_capped(&mut out, state.as_bytes());
+                match reason {
+                    Some(reason) => {
+                        out.push(1);
+                        push_capped(&mut out, reason.as_bytes());
+                    }
+                    None => out.push(0),
+                }
+            }
+            (None, _) => out.push(0),
+        }
         out
     }
 
-    /// Parse the durable blob; `None` on wrong version or length.
+    /// Parse the durable blob; `None` on wrong version or length. Reads
+    /// v1 (pre-outcome stores) and v2; anything else is refused, never
+    /// guessed.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != ATTACH_BLOB_SIZE || bytes[0] != ATTACH_BLOB_VERSION {
-            return None;
+        match bytes.first() {
+            Some(1) => {
+                if bytes.len() != ATTACH_BLOB_V1_SIZE {
+                    return None;
+                }
+                Self::decode_body(&bytes[..ATTACH_BLOB_V1_SIZE])
+            }
+            Some(2) => {
+                if bytes.len() < ATTACH_BLOB_V1_SIZE + 1 {
+                    return None;
+                }
+                let mut attachment = Self::decode_body(&bytes[..ATTACH_BLOB_V1_SIZE])?;
+                let mut rest = &bytes[ATTACH_BLOB_V1_SIZE..];
+                let present = *rest.first()?;
+                rest = rest.get(1..)?;
+                if present == 0 {
+                    if !rest.is_empty() {
+                        return None;
+                    }
+                    return Some(attachment);
+                }
+                if present != 1 {
+                    return None;
+                }
+                let (state, tail) = take_capped(rest)?;
+                let (reason, tail) = match tail.first() {
+                    Some(0) => (None, tail.get(1..)?),
+                    Some(1) => {
+                        let (reason, tail) = take_capped(tail.get(1..)?)?;
+                        (Some(reason), tail)
+                    }
+                    _ => return None,
+                };
+                if !tail.is_empty() {
+                    return None;
+                }
+                attachment.device_state = Some(state);
+                attachment.device_reason = reason;
+                Some(attachment)
+            }
+            _ => None,
         }
+    }
+
+    /// The 55-byte v1 body shared by both blob versions (outcome `None`).
+    fn decode_body(bytes: &[u8]) -> Option<Self> {
         let mut lease = [0u8; 16];
-        lease.copy_from_slice(&bytes[1..17]);
+        lease.copy_from_slice(bytes.get(1..17)?);
         let mut dispatcher = [0u8; 16];
-        dispatcher.copy_from_slice(&bytes[17..33]);
+        dispatcher.copy_from_slice(bytes.get(17..33)?);
         let mut seq = [0u8; 8];
-        seq.copy_from_slice(&bytes[33..41]);
-        let flags = bytes[41];
-        let evidence = bytes[42];
+        seq.copy_from_slice(bytes.get(33..41)?);
+        let flags = *bytes.get(41)?;
+        let evidence = *bytes.get(42)?;
         let mut session = [0u8; 4];
-        session.copy_from_slice(&bytes[43..47]);
+        session.copy_from_slice(bytes.get(43..47)?);
         let mut msg_seq = [0u8; 8];
-        msg_seq.copy_from_slice(&bytes[47..55]);
+        msg_seq.copy_from_slice(bytes.get(47..55)?);
         let msg_session = u32::from_be_bytes(session);
         let msg_seq = u64::from_be_bytes(msg_seq);
         Some(Self {
@@ -378,8 +463,44 @@ impl DispatchAttachment {
             ev_host_receive: evidence == 4,
             cancel_requested: flags & 16 != 0,
             time_uncertain: flags & 32 != 0,
+            device_state: None,
+            device_reason: None,
         })
     }
+}
+
+/// Truncates an outcome string to [`ATTACH_OUTCOME_MAX`] bytes on a
+/// character boundary.
+fn truncate_outcome(text: &str) -> &str {
+    if text.len() <= ATTACH_OUTCOME_MAX {
+        return text;
+    }
+    let mut end = ATTACH_OUTCOME_MAX;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// Appends a length-prefixed outcome string (capped, never lying).
+fn push_capped(out: &mut Vec<u8>, bytes: &[u8]) {
+    let capped = bytes.len().min(ATTACH_OUTCOME_MAX);
+    out.push(capped as u8);
+    out.extend_from_slice(&bytes[..capped]);
+}
+
+/// Splits one length-prefixed outcome string; `None` on truncation,
+/// overlength, or invalid UTF-8.
+fn take_capped(bytes: &[u8]) -> Option<(String, &[u8])> {
+    let len = usize::from(*bytes.first()?);
+    if len > ATTACH_OUTCOME_MAX {
+        return None;
+    }
+    let text = bytes.get(1..1 + len)?;
+    Some((
+        String::from_utf8(text.to_vec()).ok()?,
+        bytes.get(1 + len..)?,
+    ))
 }
 
 pub enum SubmitOutcome {
@@ -495,6 +616,39 @@ pub trait OperationStore {
         } else {
             CancelOutcome::NotFound
         })
+    }
+    /// Records a device-attested terminal detail on the operation holding
+    /// `msg_session`/`msg_seq` (reason-carrying DeliveryEvent, 01 §5: late
+    /// evidence appends to the same OperationId). True when an operation
+    /// matched. Message keys are unique per send, so at most one record
+    /// matches; concluded records keep their attachment, so they stay
+    /// findable. The default scans `dispatch_view` and rewrites through
+    /// `update_operation`, which every provider implements.
+    fn attach_device_outcome(
+        &mut self,
+        msg_session: u32,
+        msg_seq: u64,
+        state: &str,
+        reason: Option<&str>,
+    ) -> Result<bool, ()> {
+        for op in self.dispatch_view()? {
+            let keyed = op
+                .dispatch
+                .as_ref()
+                .is_some_and(|d| d.msg_session == Some(msg_session) && d.msg_seq == Some(msg_seq));
+            if !keyed {
+                continue;
+            }
+            return self.update_operation(op.seq, &mut |target| {
+                if let Some(dispatch) = target.dispatch.as_mut() {
+                    dispatch.attach_device_outcome(state, reason);
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+        Ok(false)
     }
 }
 
@@ -1401,6 +1555,74 @@ mod tests {
             SubmitOutcome::Accepted { seq } => seq,
             _ => panic!("expected accept"),
         }
+    }
+
+    #[test]
+    fn device_outcome_attaches_by_message_key() {
+        let mut store = MemoryOperationStore::test_store();
+        store.open_epoch((501, 1), 0).unwrap();
+        let req = request("00112233445566778899aabbccddeeff", 1, "00ff", 2);
+        let seq = submit(&mut store, &req);
+        match store.prepare_dispatch(seq, [7; 16], [8; 16]) {
+            Ok(PrepareOutcome::Prepared(_)) => {}
+            _ => panic!("expected prepare"),
+        }
+        store
+            .update_operation(seq, &mut |op| {
+                let d = op.dispatch.as_mut().unwrap();
+                d.msg_session = Some(5);
+                d.msg_seq = Some(900);
+                true
+            })
+            .unwrap();
+        // The reason-carrying DeliveryEvent lands on the keyed operation;
+        // an unknown key matches nothing.
+        assert!(store
+            .attach_device_outcome(5, 900, "failed", Some("NO_ROUTE"))
+            .unwrap());
+        assert!(!store.attach_device_outcome(5, 901, "failed", None).unwrap());
+        let op = store.get_by_seq(seq).unwrap().unwrap();
+        let dispatch = op.dispatch.as_ref().unwrap();
+        assert_eq!(dispatch.device_state.as_deref(), Some("failed"));
+        assert_eq!(dispatch.device_reason.as_deref(), Some("NO_ROUTE"));
+        // The outcome survives the durable blob round trip.
+        let blob = dispatch.encode();
+        assert_eq!(DispatchAttachment::decode(&blob).as_ref(), Some(dispatch));
+    }
+
+    #[test]
+    fn attachment_blob_versions_and_limits() {
+        // v1 stores (pre-outcome) still decode, outcome absent.
+        let mut v1 = vec![0u8; ATTACH_BLOB_V1_SIZE];
+        v1[0] = 1;
+        let decoded = DispatchAttachment::decode(&v1).unwrap();
+        assert_eq!(decoded.device_state, None);
+        assert_eq!(decoded.device_reason, None);
+        // Wrong version, short v1, and trailing garbage are refused.
+        assert!(DispatchAttachment::decode(&v1[..ATTACH_BLOB_V1_SIZE - 1]).is_none());
+        assert!(DispatchAttachment::decode(&[3u8; ATTACH_BLOB_V1_SIZE]).is_none());
+        let mut bad = DispatchAttachment::fresh([0; 16], [0; 16], 1).encode();
+        bad.push(0xff);
+        assert!(DispatchAttachment::decode(&bad).is_none());
+        // An outcome without a reason round-trips too.
+        let mut bare = DispatchAttachment::fresh([0; 16], [0; 16], 2);
+        bare.attach_device_outcome("expired", None);
+        let back = DispatchAttachment::decode(&bare.encode()).unwrap();
+        assert_eq!(back.device_state.as_deref(), Some("expired"));
+        assert_eq!(back.device_reason, None);
+        // Overlong values truncate to the wire budget, never grow.
+        let mut capped = DispatchAttachment::fresh([0; 16], [0; 16], 3);
+        capped.attach_device_outcome("failed", Some(&"R".repeat(100)));
+        assert_eq!(
+            capped.device_reason.as_ref().unwrap().len(),
+            ATTACH_OUTCOME_MAX
+        );
+        let blob = capped.encode();
+        assert!(blob.len() <= ATTACH_BLOB_V1_SIZE + 1 + 1 + 6 + 1 + 1 + ATTACH_OUTCOME_MAX);
+        assert_eq!(
+            DispatchAttachment::decode(&blob).unwrap().device_reason,
+            capped.device_reason
+        );
     }
 
     #[test]

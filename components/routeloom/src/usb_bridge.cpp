@@ -1,5 +1,6 @@
 #include "routeloom/usb_bridge.hpp"
 
+#include <cstdio>
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
@@ -1907,6 +1908,8 @@ void UsbBridge::handle_ops_submit(const std::uint64_t request,
   if (config_.mesh == nullptr) {
     receipt.result = HostOpsResult::MeshRejected;
     send_receipt(receipt, request, now_ms);
+    note_submit_refused(submit.dispatch_seq, fields.destination,
+                        "MESH_UNAVAILABLE");
     return;
   }
   SendOptions options{};
@@ -1931,9 +1934,12 @@ void UsbBridge::handle_ops_submit(const std::uint64_t request,
   ops_send_active_ = false;
   if (!status) {
     // Refused or full: no record is created, so a later retry is a clean
-    // Admit — never a Conflict against a half-created entry.
+    // Admit — never a Conflict against a half-created entry. The receipt
+    // cannot name the cause, so the mesh detail goes out as a diagnostic.
     receipt.result = HostOpsResult::MeshRejected;
     send_receipt(receipt, request, now_ms);
+    note_submit_refused(submit.dispatch_seq, fields.destination,
+                        status.detail);
     return;
   }
   if (!window_.record_sent(submit.dispatcher, submit.dispatch_seq,
@@ -2416,15 +2422,36 @@ void UsbBridge::on_delivery(const DeliveryResult& result) noexcept {
   // window records outlive reconnects. (A duplicate callback for an already
   // retired record is the one case that still emits: the record is gone by
   // design, so the host reads it as a stale event.)
-  if (ops_send_active_ ||
-      window_.note_mesh_outcome(result.id.session, result.id.sequence,
-                                result.state)) {
+  if (ops_send_active_) {
+    // A callback re-entering SUBMIT cannot correlate yet (no record and
+    // no receipt have been produced): suppress, as before.
     return;
   }
-  // inner: request(8) || msg_session(4) || msg_seq(8) || state(1) ||
-  //        reason_len(1) || reason
+  if (window_.note_mesh_outcome(result.id.session, result.id.sequence,
+                                result.state)) {
+    // Correlated — but a terminal failure without its reason would leave
+    // the API1 send result unexplained (HOP_TIMEOUT and END_RECEIPT_TIMEOUT
+    // share one window state). Emit the reason-carrying event for terminal
+    // non-deliveries only: Delivered needs no reason, non-terminal states
+    // stay pollable via QUERY, and the window (not the event) stays the
+    // authoritative state.
+    if (result.state == DeliveryState::Failed ||
+        result.state == DeliveryState::Expired ||
+        result.state == DeliveryState::Indeterminate ||
+        result.state == DeliveryState::CancelledBeforeTx) {
+      emit_delivery_event(request_for(result.id), result);
+    }
+    return;
+  }
   const std::uint64_t request =
       pending_request_ != 0 ? pending_request_ : request_for(result.id);
+  emit_delivery_event(request, result);
+}
+
+void UsbBridge::emit_delivery_event(const std::uint64_t request,
+                                    const DeliveryResult& result) noexcept {
+  // inner: request(8) || msg_session(4) || msg_seq(8) || state(1) ||
+  //        reason_len(1) || reason
   std::array<std::uint8_t, 8 + 4 + 8 + 1 + 1 + kMaxReasonLen> inner{};
   write_u64(inner.data(), request);
   write_u32(inner.data() + 8, result.id.session);
@@ -2438,6 +2465,16 @@ void UsbBridge::on_delivery(const DeliveryResult& result) noexcept {
   }
   enqueue(FrameKind::DeliveryEvent, 0, request,
           ByteView{inner.data(), 22 + reason_len}, now_ms_);
+}
+
+void UsbBridge::note_submit_refused(const std::uint64_t dispatch_seq,
+                                    const NodeId destination,
+                                    const char* detail) noexcept {
+  char text[kMaxReasonLen + 1];
+  std::snprintf(text, sizeof text, "SUBMIT_REFUSED:%llu:%s",
+                static_cast<unsigned long long>(dispatch_seq),
+                detail != nullptr ? detail : "");
+  on_diagnostic(text, destination, nullptr);
 }
 
 void UsbBridge::on_diagnostic(const char* reason, const NodeId peer,

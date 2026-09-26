@@ -791,7 +791,7 @@ fn mono_ms_from_elapsed(elapsed: Duration) -> u64 {
 /// Escapes for JSON string contexts: quotes, backslashes and every C0
 /// control character (which would otherwise produce invalid JSON — e.g. a
 /// raw newline in a device-supplied reason string).
-fn json_escape(input: &str) -> String {
+pub(crate) fn json_escape(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
         match ch {
@@ -876,6 +876,44 @@ struct DeliveryPatch {
     msg_seq: Option<u64>,
 }
 
+fn apply_delivery_patch(
+    delivery: &mut Delivery,
+    new_state: &str,
+    patch: DeliveryPatch,
+    updated_ms: u64,
+) {
+    delivery.state = new_state.to_string();
+    if patch.reason.is_some() {
+        delivery.reason = patch.reason;
+    }
+    if patch.msg_session.is_some() {
+        delivery.msg_session = patch.msg_session;
+    }
+    if patch.msg_seq.is_some() {
+        delivery.msg_seq = patch.msg_seq;
+    }
+    delivery.updated_ms = updated_ms;
+}
+
+/// Updates the legacy delivery tracked under `request`; true when one
+/// was found. The DeliveryEvent pump uses this to route: a SUBMIT
+/// request id must never invent a legacy delivery entry (its outcome
+/// attaches to the operation by message key instead).
+fn delivery_update_tracked(
+    state: &State,
+    request: u64,
+    new_state: &str,
+    patch: DeliveryPatch,
+    updated_ms: u64,
+) -> bool {
+    let mut deliveries = state.deliveries.lock().expect("deliveries poisoned");
+    if let Some(delivery) = deliveries.iter_mut().find(|d| d.request == request) {
+        apply_delivery_patch(delivery, new_state, patch, updated_ms);
+        return true;
+    }
+    false
+}
+
 fn delivery_update(
     state: &State,
     request: u64,
@@ -885,17 +923,7 @@ fn delivery_update(
 ) {
     let mut deliveries = state.deliveries.lock().expect("deliveries poisoned");
     if let Some(delivery) = deliveries.iter_mut().find(|d| d.request == request) {
-        delivery.state = new_state.to_string();
-        if patch.reason.is_some() {
-            delivery.reason = patch.reason;
-        }
-        if patch.msg_session.is_some() {
-            delivery.msg_session = patch.msg_session;
-        }
-        if patch.msg_seq.is_some() {
-            delivery.msg_seq = patch.msg_seq;
-        }
-        delivery.updated_ms = updated_ms;
+        apply_delivery_patch(delivery, new_state, patch, updated_ms);
         return;
     }
     if deliveries.len() >= MAX_DELIVERIES {
@@ -1028,7 +1056,13 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                 let msg_seq = u64_at(body, 12);
                 let name = delivery_state_name(body[20]);
                 let reason = reason_at(body, 21);
-                delivery_update(
+                // Route by request: a legacy SEND tracks its request id
+                // in the deliveries table; a SUBMIT (host-ops) request id
+                // never appears there, so its event carries the device
+                // outcome for the operation holding this message key —
+                // attach it there instead of inventing a legacy
+                // delivery entry for it.
+                let tracked = delivery_update_tracked(
                     state,
                     request,
                     name,
@@ -1040,6 +1074,14 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                     },
                     ms,
                 );
+                if !tracked {
+                    if let (Some(session), Some(seq)) = (u32_at(body, 8), u64_at(body, 12)) {
+                        if let Ok(mut store) = state.operation_store.lock() {
+                            let _ =
+                                store.attach_device_outcome(session, seq, name, reason.as_deref());
+                        }
+                    }
+                }
                 push_event(
                     state,
                     ms,
@@ -3216,6 +3258,63 @@ mod tests {
         let json = deliveries_json(&state);
         assert!(json.contains("\"state\":\"delivered\""));
         assert!(json.contains("\"msg_seq\":900"));
+    }
+
+    #[test]
+    fn delivery_event_for_submit_request_attaches_to_operation() {
+        use crate::send_store::{PrepareOutcome, SubmitOutcome};
+        let state = State::default();
+        // Admit an operation and bind its message key, as the dispatch
+        // lane does when the SUBMIT receipt lands.
+        let seq = {
+            let mut store = state.operation_store.lock().unwrap();
+            store.open_epoch((501, 1), 0).unwrap();
+            let json = "{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000001\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"00ff\",\"payload_len\":2,\"options\":{\"storage\":\"RAM_ONLY\"}}";
+            let mut req =
+                crate::canonical::parse_submit(&routeloom_json::parse(json).unwrap(), None)
+                    .unwrap();
+            req.epoch = 1;
+            let seq = match store.submit(501, &req, 1000) {
+                SubmitOutcome::Accepted { seq } => seq,
+                _ => panic!("expected accept"),
+            };
+            match store.prepare_dispatch(seq, [7; 16], [8; 16]) {
+                Ok(PrepareOutcome::Prepared(_)) => {}
+                _ => panic!("expected prepare"),
+            }
+            store
+                .update_operation(seq, &mut |op| {
+                    let d = op.dispatch.as_mut().unwrap();
+                    d.msg_session = Some(5);
+                    d.msg_seq = Some(900);
+                    true
+                })
+                .unwrap();
+            seq
+        };
+        // A reason-carrying DeliveryEvent for the SUBMIT request id
+        // (never tracked by the legacy SEND path).
+        let mut body = Vec::new();
+        body.extend_from_slice(&4242_u64.to_be_bytes());
+        body.extend_from_slice(&5_u32.to_be_bytes());
+        body.extend_from_slice(&900_u64.to_be_bytes());
+        body.push(8); // failed
+        body.extend_from_slice(b"\x08NO_ROUTE");
+        record_frame(
+            &state,
+            &frame(FrameKind::DeliveryEvent, 0, 4242, body.clone()),
+            &body,
+            200,
+        );
+        // No legacy delivery entry is invented for the SUBMIT request...
+        assert!(!deliveries_json(&state).contains("4242"));
+        // ...the device outcome attaches to the keyed operation instead.
+        let store = state.operation_store.lock().unwrap();
+        let dispatch = store.get_by_seq(seq).unwrap().unwrap().dispatch.unwrap();
+        assert_eq!(dispatch.device_state.as_deref(), Some("failed"));
+        assert_eq!(dispatch.device_reason.as_deref(), Some("NO_ROUTE"));
+        // And the event ring still carries the reason for triage.
+        assert!(events_json(&state).contains("NO_ROUTE"));
     }
 
     #[test]

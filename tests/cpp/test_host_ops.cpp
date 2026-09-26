@@ -1069,6 +1069,12 @@ std::uint64_t read_u64(const std::uint8_t* p) {
   return v;
 }
 
+std::uint32_t read_u32(const std::uint8_t* p) {
+  std::uint32_t v = 0;
+  for (int i = 0; i < 4; ++i) v = (v << 8U) | p[i];
+  return v;
+}
+
 void write_u64(std::uint8_t* p, std::uint64_t v) {
   for (int i = 7; i >= 0; --i) {
     p[i] = static_cast<std::uint8_t>(v & 0xFFU);
@@ -1938,15 +1944,47 @@ void test_bridge_mesh_rejected() {
 
   // The next send is refused by the mesh: honest MeshRejected, and no
   // half-created record — QUERY proves the position stayed empty.
+  // (Manual feed/drain: transact() clears the sink, which would discard
+  // the refusal diagnostic asserted below.)
   const auto ninth = submit_bytes(9, ByteView{canonical.data(), canonical.size()});
-  const auto ninth_answer =
-      transact(world, host, now, 260, ByteView{ninth.data(), ninth.size()},
-               got_error, error_code);
+  world.device_sink.frames.clear();
+  world.feed(host.sealed(FrameKind::HostOps, 260,
+                         ByteView{ninth.data(), ninth.size()}),
+             now);
+  world.drain(now);
+  now += 200;
+  std::vector<std::uint8_t> ninth_answer;
+  bool refused_diag = false;
+  for (const auto& record : world.device_sink.frames) {
+    std::uint64_t counter = 0;
+    ByteView opened{};
+    CHECK(open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+                    opened));
+    if (record.frame.kind == FrameKind::HostOps && ninth_answer.empty()) {
+      ninth_answer.assign(opened.data, opened.data + opened.size);
+    }
+    // The pre-admission refusal also emits a diagnostic carrying the mesh
+    // detail: the receipt alone (MeshRejected) cannot tell a full delivery
+    // table from a paused node.
+    if (record.frame.kind != FrameKind::Diagnostic) continue;
+    CHECK(opened.size >= 10);
+    CHECK(read_u64(opened.data) == 2);  // refused destination
+    CHECK(opened.data[8] == 0);         // no message key: nothing was sent
+    const std::size_t reason_len = opened.data[9];
+    CHECK(opened.size == 10 + reason_len);
+    const std::string reason(reinterpret_cast<const char*>(opened.data + 10),
+                             reason_len);
+    CHECK(reason.rfind("SUBMIT_REFUSED:9:", 0) == 0);
+    CHECK(reason.size() > std::strlen("SUBMIT_REFUSED:9:"));
+    refused_diag = true;
+  }
+  world.device_sink.frames.clear();
   DispatchReceipt ninth_resp{};
   CHECK(decode_receipt(ByteView{ninth_answer.data(), ninth_answer.size()},
                        HostOpsSub::Submit, ninth_resp));
   CHECK(ninth_resp.result == HostOpsResult::MeshRejected);
   CHECK(!ninth_resp.msg_valid);
+  CHECK(refused_diag);
 
   const auto query = lane_bytes(HostOpsSub::QueryDispatch, 9);
   const auto query_answer =
@@ -1969,6 +2007,132 @@ void test_bridge_mesh_rejected() {
                        HostOpsSub::Submit, retry_resp));
   CHECK(retry_resp.result == HostOpsResult::Expired);
   CHECK(retry_resp.state == WindowState::Expired);
+}
+
+void test_bridge_submit_refused_without_mesh() {
+  // Defensive path: no mesh attached — MeshRejected plus the diagnostic
+  // naming the cause, never a silent refusal.
+  World world;
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0xEEEE, 290) != 0);
+  world.bridge.set_mesh(nullptr);
+  world.device_sink.frames.clear();
+  const auto canonical = build_canonical();
+  const auto submit = submit_bytes(1, ByteView{canonical.data(), canonical.size()});
+  // Manual feed/drain: transact() clears the sink, which would discard
+  // the refusal diagnostic asserted below.
+  world.feed(host.sealed(FrameKind::HostOps, 300,
+                         ByteView{submit.data(), submit.size()}),
+             now);
+  world.drain(now);
+  now += 200;
+  std::vector<std::uint8_t> answer;
+  bool refused_diag = false;
+  for (const auto& record : world.device_sink.frames) {
+    std::uint64_t counter = 0;
+    ByteView opened{};
+    CHECK(open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+                    opened));
+    if (record.frame.kind == FrameKind::HostOps && answer.empty()) {
+      answer.assign(opened.data, opened.data + opened.size);
+    }
+    if (record.frame.kind != FrameKind::Diagnostic) continue;
+    CHECK(opened.size >= 10);
+    const std::size_t reason_len = opened.data[9];
+    CHECK(opened.size == 10 + reason_len);
+    const std::string reason(reinterpret_cast<const char*>(opened.data + 10),
+                             reason_len);
+    CHECK(reason == "SUBMIT_REFUSED:1:MESH_UNAVAILABLE");
+    refused_diag = true;
+  }
+  world.device_sink.frames.clear();
+  DispatchReceipt resp{};
+  CHECK(decode_receipt(ByteView{answer.data(), answer.size()},
+                       HostOpsSub::Submit, resp));
+  CHECK(resp.result == HostOpsResult::MeshRejected);
+  CHECK(refused_diag);
+  world.bridge.set_mesh(&world.n1);
+}
+
+void test_bridge_window_failure_reason_reaches_host() {
+  // A window-correlated terminal FAILURE still suppresses nothing the host
+  // needs for state (QUERY stays authoritative) but emits the
+  // reason-carrying DeliveryEvent: without it the API1 send result cannot
+  // tell HOP_TIMEOUT from END_RECEIPT_TIMEOUT from NO_ROUTE.
+  World world;
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0xDDDD, 290) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  const auto canonical = build_canonical();
+
+  const auto submit = submit_bytes(1, ByteView{canonical.data(), canonical.size()});
+  const auto answer =
+      transact(world, host, now, 300, ByteView{submit.data(), submit.size()},
+               got_error, error_code);
+  DispatchReceipt receipt{};
+  CHECK(decode_receipt(ByteView{answer.data(), answer.size()},
+                       HostOpsSub::Submit, receipt));
+  CHECK(receipt.result == HostOpsResult::Ok && receipt.msg_valid);
+  world.device_sink.frames.clear();
+
+  world.bridge.on_delivery(
+      DeliveryResult{MessageId{receipt.msg_session, receipt.msg_seq},
+                     DeliveryState::Failed, "HOP_TIMEOUT"});
+  world.drain(now);
+  bool reason_event = false;
+  for (const auto& record : world.device_sink.frames) {
+    if (record.frame.kind != FrameKind::DeliveryEvent) continue;
+    std::uint64_t counter = 0;
+    ByteView opened{};
+    CHECK(open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+                    opened));
+    CHECK(opened.size >= 22);
+    CHECK(read_u32(opened.data + 8) == receipt.msg_session);
+    CHECK(read_u64(opened.data + 12) == receipt.msg_seq);
+    CHECK(opened.data[20] == static_cast<std::uint8_t>(DeliveryState::Failed));
+    const std::size_t reason_len = opened.data[21];
+    CHECK(opened.size == 22 + reason_len);
+    CHECK(std::string(reinterpret_cast<const char*>(opened.data + 22),
+                      reason_len) == "HOP_TIMEOUT");
+    reason_event = true;
+  }
+  CHECK(reason_event);
+  world.device_sink.frames.clear();
+
+  // QUERY still reports the authoritative terminal state for the position.
+  const auto query = lane_bytes(HostOpsSub::QueryDispatch, 1);
+  const auto query_answer =
+      transact(world, host, now, 301, ByteView{query.data(), query.size()},
+               got_error, error_code);
+  QueryResponse queried{};
+  CHECK(decode_query_response(
+      ByteView{query_answer.data(), query_answer.size()}, queried));
+  CHECK(queried.result == HostOpsResult::Ok);
+  CHECK(queried.state == WindowState::Failed);
+
+  // A correlated DELIVERY stays suppressed: no reason is needed and the
+  // state is pulled via QUERY.
+  const auto submit2 =
+      submit_bytes(2, ByteView{canonical.data(), canonical.size()});
+  const auto answer2 =
+      transact(world, host, now, 302, ByteView{submit2.data(), submit2.size()},
+               got_error, error_code);
+  DispatchReceipt receipt2{};
+  CHECK(decode_receipt(ByteView{answer2.data(), answer2.size()},
+                       HostOpsSub::Submit, receipt2));
+  CHECK(receipt2.result == HostOpsResult::Ok && receipt2.msg_valid);
+  world.device_sink.frames.clear();
+  world.bridge.on_delivery(
+      DeliveryResult{MessageId{receipt2.msg_session, receipt2.msg_seq},
+                     DeliveryState::Delivered, "END_RECEIVED"});
+  world.drain(now);
+  for (const auto& record : world.device_sink.frames) {
+    CHECK(record.frame.kind != FrameKind::DeliveryEvent);
+  }
+  world.device_sink.frames.clear();
 }
 
 void test_bridge_stale_delivery_event_after_retire() {
@@ -4321,6 +4485,8 @@ int main() {
   test_bridge_submit_rejections();
   test_bridge_lifetime_clamped_to_ttl();
   test_bridge_mesh_rejected();
+  test_bridge_submit_refused_without_mesh();
+  test_bridge_window_failure_reason_reaches_host();
   test_bridge_stale_delivery_event_after_retire();
   test_gateway_inner_codecs();
   test_bridge_gateway_register();

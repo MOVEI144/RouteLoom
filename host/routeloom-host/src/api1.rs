@@ -3511,6 +3511,7 @@ fn op_status(record: &StoredOperation, lineage: &[u8; 16], now_ms: u64) -> Strin
         "HOST_RAM_RETAINED"
     }];
     let mut message_key = "null".to_string();
+    let mut device_outcome = "null".to_string();
     let mut cancel_requested = false;
     let mut time_uncertain = record.dispatch_state == DispatchState::TimeUncertain;
     if let Some(att) = &record.dispatch {
@@ -3531,6 +3532,19 @@ fn op_status(record: &StoredOperation, lineage: &[u8; 16], now_ms: u64) -> Strin
         if let (Some(session), Some(seq)) = (att.msg_session, att.msg_seq) {
             message_key = format!("{{\"session\":\"{session:08x}\",\"sequence\":\"{seq:016x}\"}}");
         }
+        // Device-attested terminal detail (reason-carrying DeliveryEvent):
+        // names the failure cause without touching terminality — the
+        // window-derived `dispatch_state` stays authoritative.
+        if let Some(state) = &att.device_state {
+            let reason = att.device_reason.as_deref().map_or_else(
+                || "null".to_string(),
+                |r| format!("\"{}\"", crate::json_escape(r)),
+            );
+            device_outcome = format!(
+                "{{\"state\":\"{}\",\"reason\":{reason}}}",
+                crate::json_escape(state)
+            );
+        }
         cancel_requested = att.cancel_requested;
         time_uncertain |= att.time_uncertain;
     }
@@ -3550,7 +3564,7 @@ fn op_status(record: &StoredOperation, lineage: &[u8; 16], now_ms: u64) -> Strin
         )
     });
     format!(
-        "{{\"operation_id\":\"{}\",\"network\":\"{:016x}\",\"admission_epoch\":\"{:016x}\",\"key\":\"{}\",\"destination\":{destination_json},\"payload_len\":{},\"canonical_hash\":\"{}\",\"options\":{{\"delivery\":\"{}\",\"priority\":\"{}\",\"ttl_ms\":{},\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"storage\":\"{}\",\"hop_limit\":{},\"persist_across_sleep\":false}},\"dispatch_state\":\"{}\",\"evidence\":[{evidence_json}],\"message_key\":{message_key},\"application_outcome\":null,\"observation\":{{\"deadline_elapsed\":{elapsed},\"cancel_requested\":{cancel_requested},\"time_uncertain\":{time_uncertain}}}}}",
+        "{{\"operation_id\":\"{}\",\"network\":\"{:016x}\",\"admission_epoch\":\"{:016x}\",\"key\":\"{}\",\"destination\":{destination_json},\"payload_len\":{},\"canonical_hash\":\"{}\",\"options\":{{\"delivery\":\"{}\",\"priority\":\"{}\",\"ttl_ms\":{},\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"storage\":\"{}\",\"hop_limit\":{},\"persist_across_sleep\":false}},\"dispatch_state\":\"{}\",\"evidence\":[{evidence_json}],\"message_key\":{message_key},\"device_outcome\":{device_outcome},\"application_outcome\":null,\"observation\":{{\"deadline_elapsed\":{elapsed},\"cancel_requested\":{cancel_requested},\"time_uncertain\":{time_uncertain}}}}}",
         canonical::format_operation_id(lineage, record.seq),
         record.network,
         record.epoch,
@@ -4373,6 +4387,77 @@ mod tests {
             let response = handle(request.as_bytes(), &c);
             assert!(response.contains(code), "{params} → {response}");
         }
+    }
+
+    #[test]
+    fn operations_get_reports_device_outcome() {
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 1000);
+        let key = "00112233445566778899aabbccddeeff";
+        let accepted = handle(submit_line(key, &epoch).as_bytes(), &c);
+        let id = result_field(&accepted, "operation_id");
+        // No device outcome yet: null, and terminality untouched.
+        let before = handle(
+            format!(
+                "{{\"v\":1,\"request_id\":\"g\",\"method\":\"operations.get\",\"params\":{{\"operation_id\":\"{id}\"}}}}"
+            )
+            .as_bytes(),
+            &c,
+        );
+        assert!(before.contains("\"device_outcome\":null"), "{before}");
+        // The dispatch lane binds the key; the DeliveryEvent pump
+        // attaches the device-attested failure detail.
+        {
+            let mut store = store.lock().unwrap();
+            let seq = 1;
+            match store.prepare_dispatch(seq, [7; 16], [8; 16]) {
+                Ok(crate::send_store::PrepareOutcome::Prepared(_)) => {}
+                _ => panic!("expected prepare"),
+            }
+            store
+                .update_operation(seq, &mut |op| {
+                    let d = op.dispatch.as_mut().unwrap();
+                    d.msg_session = Some(5);
+                    d.msg_seq = Some(900);
+                    true
+                })
+                .unwrap();
+            assert!(store
+                .attach_device_outcome(5, 900, "failed", Some("NO_ROUTE"))
+                .unwrap());
+        }
+        let after = handle(
+            format!(
+                "{{\"v\":1,\"request_id\":\"g\",\"method\":\"operations.get\",\"params\":{{\"operation_id\":\"{id}\"}}}}"
+            )
+            .as_bytes(),
+            &c,
+        );
+        assert!(
+            after.contains("\"device_outcome\":{\"state\":\"failed\",\"reason\":\"NO_ROUTE\"}"),
+            "{after}"
+        );
+        // Two different failure causes stay distinguishable on the API.
+        {
+            let mut store = store.lock().unwrap();
+            store
+                .attach_device_outcome(5, 900, "indeterminate", Some("END_RECEIPT_TIMEOUT"))
+                .unwrap();
+        }
+        let later = handle(
+            format!(
+                "{{\"v\":1,\"request_id\":\"g\",\"method\":\"operations.get\",\"params\":{{\"operation_id\":\"{id}\"}}}}"
+            )
+            .as_bytes(),
+            &c,
+        );
+        assert!(
+            later.contains(
+                "\"device_outcome\":{\"state\":\"indeterminate\",\"reason\":\"END_RECEIPT_TIMEOUT\"}"
+            ),
+            "{later}"
+        );
     }
 
     #[test]

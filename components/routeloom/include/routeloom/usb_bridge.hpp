@@ -493,6 +493,15 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
                                    const SubmitRequest& submit,
                                    std::uint64_t request,
                                    MonotonicMs now_ms) noexcept;
+  // Frames one reason-carrying DeliveryEvent (shared by the legacy path
+  // and by window-correlated terminal failures).
+  void emit_delivery_event(std::uint64_t request,
+                           const DeliveryResult& result) noexcept;
+  // A SUBMIT the mesh refused before admission (MeshRejected receipt):
+  // the fixed receipt cannot carry the mesh detail, so it is emitted as
+  // a `SUBMIT_REFUSED:<seq>:<detail>` diagnostic for the destination.
+  void note_submit_refused(std::uint64_t dispatch_seq, NodeId destination,
+                           const char* detail) noexcept;
   void handle_credit(std::uint64_t request, ByteView inner,
                      MonotonicMs now_ms) noexcept;
   void issue_rx_grant(bool initial, MonotonicMs now_ms) noexcept;
