@@ -1555,6 +1555,7 @@ class MeshNode {
     std::uint8_t result_size{0};
   };
 
+  // Sealed keeps an origin's End envelope in the frame union for link retries.
   enum class JobForm : std::uint8_t { Plain, Forwarded, Sealed };
   enum class JobOwner : std::uint8_t { None, OriginDelivery, Transit,
                                        GatewayService, Config, Diagnostic,

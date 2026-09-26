@@ -644,10 +644,6 @@ class NeighborDiscovery {
     MonotonicMs suspended_until_ms{0};
     std::uint32_t probe_outstanding{0};
     MonotonicMs probe_deadline_ms{0};
-    // One coalesced reply per peer; local TX contention must not discard it.
-    std::uint32_t result_sequence{0};
-    BindingGeneration result_generation{0};
-    MonotonicMs result_retry_ms{0};
     // Stale re-confirmation scheduler (02 §9): first tick fires immediately
     // on the demotion poll, then every stale_reprobe_ms. The attempt count
     // only counts emitted probes; verified RX evidence re-arms it.
@@ -888,6 +884,14 @@ class NeighborDiscovery {
   std::array<MonotonicMs, discovery_const::kCandidateCapacity> discover_times_{};
   std::size_t discover_cursor_{0};
 
+  // Pending recovery replies share three bounded slots rather than growing
+  // every neighbor record on RAM-limited gateways.
+  struct PendingResult {
+    NodeId peer{kInvalidNodeId};
+    std::uint32_t sequence{0};
+    std::uint32_t retry_ms{0};
+  };
+  std::array<PendingResult, discovery_const::kTransientPeerSlots> pending_results_{};
   Outbound outbound_{};
   // Member-handshake mode (P4 §7.2): park frozen starts for the Owner's
   // engine instead of running the dev PROVE/CONFIRM exchange. Armed only

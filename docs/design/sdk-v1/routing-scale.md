@@ -29,7 +29,7 @@ air timeは`congestion.hpp`と同じ推定モデルで数える：`frame_us = (e
 
 ## 3. 採用設計：gateway-scoped profile
 
-`NodeConfig::route_gateways`（最大4、`kMaxRouteGateways`。G-SEC P4でRLS1の一覧に合わせて2→4へ拡張）に1つ以上のgatewayを設定すると有効になる。site内の全nodeが同じ一覧を持ち、gateway自身も自分を載せる。未設定ならflat profileのまま（既存の挙動・試験は不変）。
+`NodeConfig::route_gateways`（最大4、`kMaxRouteGateways`。G-SEC P4でRLS1の一覧に合わせて2→4へ拡張）に1つ以上のgatewayを設定すると有効になる。site内の全nodeが同じ一覧を持ち、gateway自身も自分を載せる。未設定ならflat profileのまま。flat profileでも送信待ちの`NO_ROUTE`に対しては、最大4宛先を保持して2秒からのbackoffで隣接へ1-hop Neighbor pullを送り、通常のfeasibilityとsplit horizonを満たす宛先recordだけを返す（floodしない）。
 
 各nodeにとって**親**＝gatewayへのcommitted next hop、**子**＝自分を親としている隣接。gateway木はBabelの経路選択そのもので、別のparent選択規則は持たない。
 

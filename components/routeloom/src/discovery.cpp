@@ -1316,10 +1316,23 @@ void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
   neighbor.stale_reprobes = 0;
   neighbor.lease_expires_at_ms = now_ms + config_.awake_lease_ms;
 
-  neighbor.result_sequence = probe.probe_sequence;
-  neighbor.result_generation = neighbor.generation;
-  neighbor.result_retry_ms = now_ms;
-  send_pending_result(neighbor, now_ms);
+  PendingResult* pending = nullptr;
+  for (auto& slot : pending_results_) {
+    if (slot.peer == neighbor.node) { pending = &slot; break; }
+  }
+  if (pending == nullptr) {
+    for (auto& slot : pending_results_) {
+      if (slot.peer == kInvalidNodeId) { pending = &slot; break; }
+    }
+  }
+  if (pending != nullptr) {
+    *pending = PendingResult{neighbor.node, probe.probe_sequence,
+                             static_cast<std::uint32_t>(now_ms)};
+    send_pending_result(neighbor, now_ms);
+  } else {
+    ++stats_.peer_capacity;
+    reject_event("PEER_CAPACITY", neighbor.node);
+  }
   // If we were stale/bound and have no outstanding probe of our own, start
   // one — bidirectional confirmation still requires our own Result.
   if (neighbor.probe_outstanding == 0 &&
@@ -1331,22 +1344,30 @@ void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
 
 void NeighborDiscovery::send_pending_result(Neighbor& neighbor,
                                             const MonotonicMs now_ms) noexcept {
-  if (neighbor.result_sequence == 0 || now_ms < neighbor.result_retry_ms) return;
+  PendingResult* pending = nullptr;
+  for (auto& slot : pending_results_) {
+    if (slot.peer == neighbor.node) { pending = &slot; break; }
+  }
+  if (pending == nullptr ||
+      static_cast<std::int32_t>(static_cast<std::uint32_t>(now_ms) -
+                                pending->retry_ms) < 0) return;
   autonomy::NeighborResultPayload result{};
-  result.binding_generation = neighbor.result_generation;
-  result.probe_sequence = neighbor.result_sequence;
+  result.binding_generation = neighbor.generation;
+  result.probe_sequence = pending->sequence;
   result.result = autonomy::NeighborResultCode::Reachable;
   result.lease_granted_ms = config_.awake_lease_ms;
   autonomy::EncodedPayload encoded{};
   if (!autonomy::neighbor_result_encode(result, encoded)) return;
   // Clear before submission: synchronous transports may reenter via RX.
-  const auto sequence = neighbor.result_sequence;
-  neighbor.result_sequence = 0;
+  const auto sequence = pending->sequence;
+  *pending = PendingResult{};
   if (!port_.send_wire(neighbor.binding, neighbor.mac, FrameType::NeighborResult,
                        encoded.view())) {
     ++stats_.send_failures;
-    if (neighbor.result_sequence == 0) neighbor.result_sequence = sequence;
-    neighbor.result_retry_ms = now_ms + 50;
+    if (pending->peer == kInvalidNodeId) {
+      *pending = PendingResult{neighbor.node, sequence,
+                               static_cast<std::uint32_t>(now_ms + 50)};
+    }
   }
 }
 
@@ -1522,7 +1543,9 @@ void NeighborDiscovery::elevate_confirmed_peer(const MacAddress& peer_mac,
       return;
     }
     same->probe_outstanding = 0;
-    same->result_sequence = 0;
+    for (auto& slot : pending_results_) {
+      if (slot.peer == peer_node) slot = PendingResult{};
+    }
     same->stale_reprobes = 0;
     if (membership_.state() == MembershipState::Member && peer_member) {
       same->peer_member_verified = true;
