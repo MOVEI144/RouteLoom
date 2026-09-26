@@ -473,11 +473,18 @@ fn publish_work(
     let _ = std::fs::remove_dir_all(&staging);
     if owner_only {
         // The directory holds the device secret: owner-only.
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&staging)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&staging)?;
+        }
+        #[cfg(windows)]
+        {
+            routeloom_peercred::create_private_dir_all(&staging)?;
+        }
     } else {
         std::fs::create_dir_all(&staging)?;
     }
@@ -500,14 +507,22 @@ fn publish_work(
         sync_path(&staging.join(name))?;
     }
     sync_path(&staging)?;
-    rustix::fs::renameat_with(
-        rustix::fs::CWD,
-        &staging,
-        rustix::fs::CWD,
-        &inputs.out_dir,
-        rustix::fs::RenameFlags::NOREPLACE,
-    )
-    .map_err(|e| format!("publish {}: {e}", inputs.out_dir.display()))?;
+    #[cfg(target_os = "linux")]
+    {
+        rustix::fs::renameat_with(
+            rustix::fs::CWD,
+            &staging,
+            rustix::fs::CWD,
+            &inputs.out_dir,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+        .map_err(|e| format!("publish {}: {e}", inputs.out_dir.display()))?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        routeloom_peercred::publish_dir_noreplace(&staging, &inputs.out_dir)
+            .map_err(|e| format!("publish {}: {e}", inputs.out_dir.display()))?;
+    }
     if let Some(parent) = inputs.out_dir.parent() {
         sync_path(parent)?;
     }
@@ -607,10 +622,9 @@ fn directory_matches(
     {
         return Ok(false);
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if std::fs::metadata(dir)?.permissions().mode() & 0o077 != 0 {
+        if routeloom_peercred::verify_private_dir_perms(dir).is_err() {
             return Ok(false);
         }
         for name in [
@@ -619,7 +633,7 @@ fn directory_matches(
             "rlident_i1.bin",
             "rlsec-set.json",
         ] {
-            if std::fs::metadata(dir.join(name))?.permissions().mode() & 0o077 != 0 {
+            if routeloom_peercred::verify_private_file_perms(&dir.join(name)).is_err() {
                 return Ok(false);
             }
         }
@@ -638,6 +652,10 @@ fn published_identity(out_dir: &Path) -> Result<([u8; 32], [u8; 32]), DynError> 
 }
 
 fn sync_path(path: &Path) -> Result<(), DynError> {
+    #[cfg(windows)]
+    if path.is_dir() {
+        return Ok(());
+    }
     let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     file.sync_all()
         .map_err(|e| format!("{}: {e}", path.display()))?;

@@ -461,6 +461,64 @@ jobs:
             firmware/${{ matrix.app }}/build/log/*
             firmware/${{ matrix.app }}/sdkconfig
           retention-days: 30
+  c6-experimental:
+    # C6 is a separate build-only target; these results never qualify C5.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {app: bridge_node, profile: devram}
+          - {app: reference_node, profile: devram}
+          - {app: bridge_node, profile: member}
+          - {app: reference_node, profile: member}
+          - {app: reference_node, profile: member_sleep}
+    container:
+      image: espressif/idf:v6.0.3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build experimental C6 firmware and guard RAM
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . "$IDF_PATH/export.sh"
+          test "$(git -C "$IDF_PATH" rev-parse HEAD)" = 76f5dedd9950a3012fee8fb7d5586df21fc67802
+          cd "firmware/${{ matrix.app }}"
+          idf.py set-target esp32c6
+          if [ '${{ matrix.profile }}' != devram ]; then
+            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y\n' >> sdkconfig
+          fi
+          if [ '${{ matrix.profile }}' = member_sleep ]; then
+            printf 'CONFIG_ROUTELOOM_DEEP_SLEEP=y\n' >> sdkconfig
+          fi
+          idf.py build
+          if [ '${{ matrix.profile }}' != devram ]; then
+            grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y' sdkconfig
+          fi
+          if [ '${{ matrix.profile }}' = member_sleep ]; then
+            grep -q '^CONFIG_ROUTELOOM_DEEP_SLEEP=y' sdkconfig
+          fi
+          idf.py size --format json2 --output-file build/size.json
+          python3 "$GITHUB_WORKSPACE/tools/firmware_ram_report.py" build/size.json \
+            --target esp32c6 --app '${{ matrix.app }}' \
+            --cell 'experimental-c6-${{ matrix.app }}-${{ matrix.profile }}' \
+            --json-out build/ram-report.json --summary "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: experimental-c6-${{ matrix.app }}-${{ matrix.profile }}
+          path: |
+            firmware/${{ matrix.app }}/build/*.bin
+            firmware/${{ matrix.app }}/build/*.elf
+            firmware/${{ matrix.app }}/build/*.map
+            firmware/${{ matrix.app }}/build/size.json
+            firmware/${{ matrix.app }}/build/ram-report.json
+            firmware/${{ matrix.app }}/sdkconfig
+          retention-days: 30
   rust:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

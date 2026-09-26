@@ -16,6 +16,7 @@ p256 = { version = "0.13", default-features = false, features = ["arithmetic", "
 # Minimal in-workspace JSON: the dev root-key file and the manufactured
 # NVS set descriptor are JSON documents — one protocol, no new parser.
 routeloom-json = { path = "../routeloom-json" }
+routeloom-peercred = { path = "../routeloom-peercred" }
 zeroize = "1"
 
 [lints]

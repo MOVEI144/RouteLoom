@@ -18,8 +18,8 @@
 //! (--api-acl-file); `membership`/`link_status`/`links` need no grant.
 //! `send_group` needs SEND and `group_result` READ_OPERATION.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
+use routeloom_peercred::IpcStream;
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -260,23 +260,15 @@ fn result_of(line: &str) -> Result<Json, TransportError> {
     }
 }
 
-/// 128-bit idempotency key: OS entropy, with a clock/pid/counter fallback
-/// that is still unique per process.
-fn fresh_key(counter: u64) -> String {
+/// 128-bit idempotency key from the OS CSPRNG. A failed draw cannot
+/// produce a key that might alias an earlier request.
+fn fresh_key() -> Result<String, TransportError> {
     let mut bytes = [0_u8; 16];
-    let filled = std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut bytes))
-        .is_ok();
-    if !filled || bytes.iter().all(|b| *b == 0) || bytes.iter().all(|b| *b == 0xff) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(1);
-        bytes[..8].copy_from_slice(&now.to_be_bytes());
-        bytes[8..12].copy_from_slice(&std::process::id().to_be_bytes());
-        bytes[12..].copy_from_slice(&(counter as u32 | 1).to_be_bytes());
+    routeloom_peercred::fill_random(&mut bytes)?;
+    if bytes.iter().all(|b| *b == 0) || bytes.iter().all(|b| *b == 0xff) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "reserved random key").into());
     }
-    hex(&bytes)
+    Ok(hex(&bytes))
 }
 
 impl RouteLoomTransport {
@@ -299,8 +291,8 @@ impl RouteLoomTransport {
         )
     }
 
-    fn connect(&self, method: &str, params: &str) -> Result<BufReader<UnixStream>, TransportError> {
-        let mut stream = UnixStream::connect(&self.socket)?;
+    fn connect(&self, method: &str, params: &str) -> Result<BufReader<IpcStream>, TransportError> {
+        let mut stream = IpcStream::connect(&self.socket)?;
         stream.write_all(self.request_line(method, params).as_bytes())?;
         stream.flush()?;
         Ok(BufReader::new(stream))
@@ -388,7 +380,7 @@ impl RouteLoomTransport {
 
     /// Opens a subscription and returns its reader positioned after the ok
     /// line — every following line is a notification.
-    fn subscribe(&self, params: &str) -> Result<BufReader<UnixStream>, TransportError> {
+    fn subscribe(&self, params: &str) -> Result<BufReader<IpcStream>, TransportError> {
         let mut reader = self.connect("messages.subscribe", params)?;
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
@@ -403,7 +395,7 @@ impl RouteLoomTransport {
 /// surfaces gap/overflow markers as [`TransportError::Gap`], ends on EOF or
 /// the `ended` notification.
 struct Notifications<T> {
-    reader: BufReader<UnixStream>,
+    reader: BufReader<IpcStream>,
     parse: fn(&Json) -> Option<Option<T>>,
     done: bool,
 }
@@ -469,7 +461,7 @@ impl MeshTransport for RouteLoomTransport {
         payload: &[u8],
         options: &SendOptions,
     ) -> Result<SendHandle, TransportError> {
-        let key = fresh_key(self.counter.load(Ordering::Relaxed));
+        let key = fresh_key()?;
         let epoch = self.epoch(false)?;
         let result = match self.submit(&epoch, &key, dest, payload, options) {
             // The cached epoch was closed/forgotten by the daemon (restart,
@@ -562,7 +554,7 @@ impl MeshTransport for RouteLoomTransport {
         payload: &[u8],
         options: &GroupSendOptions,
     ) -> Result<GroupHandle, TransportError> {
-        let key = fresh_key(self.counter.load(Ordering::Relaxed));
+        let key = fresh_key()?;
         // The key makes the request idempotent at the daemon: a connection
         // that failed mid-exchange is retried once under the SAME key, so
         // the retry replays the first attempt instead of sending twice.
@@ -610,9 +602,17 @@ impl MeshTransport for RouteLoomTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixListener;
+    use routeloom_peercred::IpcListener;
     use std::path::Path;
     use std::thread;
+
+    #[cfg(windows)]
+    #[test]
+    fn generated_key_does_not_embed_process_id() {
+        let key = fresh_key().unwrap();
+        let bytes = unhex(&key).unwrap();
+        assert_ne!(&bytes[8..12], &std::process::id().to_be_bytes());
+    }
 
     /// Canned daemon: answers each connection's request line by method
     /// with a scripted response (plus notification lines for subscribe),
@@ -624,11 +624,11 @@ mod tests {
     ) -> (PathBuf, thread::JoinHandle<Vec<String>>) {
         let path = dir.join("api.sock");
         let _ = std::fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = IpcListener::bind(&path).unwrap();
         let handle = thread::spawn(move || {
             let mut seen = Vec::new();
-            for stream in listener.incoming().take(connections) {
-                let mut stream = stream.unwrap();
+            for _ in 0..connections {
+                let (mut stream, _) = listener.accept().unwrap();
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();

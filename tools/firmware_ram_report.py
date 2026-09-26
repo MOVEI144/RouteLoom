@@ -72,6 +72,7 @@ MIN_FREE_BYTES: Dict[tuple, int] = {
         derived_static_floor(BOOT_HEAP_MODEL[("esp32c3", "reference_node")]),
     ("esp32s3", "*"): 8 * 1024,
     ("esp32c5", "*"): 8 * 1024,
+    ("esp32c6", "*"): 8 * 1024,
 }
 DEFAULT_MIN_FREE_BYTES = 8 * 1024
 assert MIN_FREE_BYTES[("esp32c3", "bridge_node")] == 27648

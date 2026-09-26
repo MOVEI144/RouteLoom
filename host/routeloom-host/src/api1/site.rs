@@ -127,10 +127,12 @@ fn authorize<S: OperationStore>(
     service: &SiteService,
     permission: u8,
     name: &str,
-) -> Result<u32, ApiError> {
+) -> Result<routeloom_peercred::Principal, ApiError> {
     let network = service.acl_network();
-    ctx.uid
-        .filter(|uid| ctx.acl.permit(*uid, network, permission))
+    ctx.principal
+        .as_ref()
+        .filter(|principal| ctx.acl.permit_principal(principal, network, permission))
+        .cloned()
         .ok_or_else(|| {
             ApiError::simple(
                 "AuthorizationFailed",

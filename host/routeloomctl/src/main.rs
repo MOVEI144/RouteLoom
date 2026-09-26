@@ -1,9 +1,6 @@
-#[cfg(not(unix))]
-compile_error!("routeloomctl v0.1 currently requires a Unix platform");
-
+use routeloom_peercred::IpcStream;
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -77,8 +74,8 @@ fn exchange_first(
     command: &str,
     read_timeout: Duration,
     write_timeout: Duration,
-) -> Result<(String, BufReader<UnixStream>), Box<dyn std::error::Error>> {
-    let mut stream = UnixStream::connect(socket)?;
+) -> Result<(String, BufReader<IpcStream>), Box<dyn std::error::Error>> {
+    let mut stream = IpcStream::connect(socket)?;
     stream.set_write_timeout(Some(write_timeout))?;
     stream.set_read_timeout(Some(read_timeout))?;
     stream.write_all(command.as_bytes())?;
@@ -371,9 +368,20 @@ fn receive_request(network: &str, from: &str, cursor: Option<&str>, limit: u64) 
     )
 }
 
+fn default_socket_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(r"\\.\pipe\routeloom.sock")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/tmp/routeloom.sock")
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
-    let mut socket = PathBuf::from("/tmp/routeloom.sock");
+    let mut socket = default_socket_path();
     let mut remaining = Vec::new();
     // --socket is accepted in any position, not only before the command.
     while let Some(argument) = args.next() {
@@ -921,7 +929,7 @@ fn submit_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>>
             key.to_ascii_lowercase()
         }
         None => {
-            let generated = generate_key();
+            let generated = generate_key()?;
             eprintln!("generated key: {generated}");
             generated
         }
@@ -1075,28 +1083,17 @@ fn gateway_get_command(args: &[String]) -> Result<String, Box<dyn std::error::Er
     Ok(gateway_get_request(&id.to_ascii_lowercase()))
 }
 
-/// Fresh 128-bit caller key from /dev/urandom (time^pid fallback).
-fn generate_key() -> String {
-    use std::io::Read;
+/// Fresh 128-bit caller key from the OS CSPRNG.
+fn generate_key() -> io::Result<String> {
     let mut bytes = [0_u8; 16];
-    let random = std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut bytes))
-        .is_ok();
-    if !random {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-            ^ u128::from(std::process::id());
-        bytes = (seed ^ seed.rotate_left(64)).to_be_bytes();
-    }
+    routeloom_peercred::fill_random(&mut bytes)?;
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(32);
     for byte in bytes {
         out.push(HEX[(byte >> 4) as usize] as char);
         out.push(HEX[(byte & 0xf) as usize] as char);
     }
-    out
+    Ok(out)
 }
 
 /// `operation-get --id <opid>` and `operation-get-by-key --network/--epoch/
@@ -1735,7 +1732,7 @@ fn group_send_command(args: &[String]) -> Result<String, Box<dyn std::error::Err
             key.to_ascii_lowercase()
         }
         None => {
-            let generated = generate_key();
+            let generated = generate_key()?;
             eprintln!("generated key: {generated}");
             generated
         }
@@ -1854,7 +1851,7 @@ fn want_idempotency_key(key: Option<String>) -> Result<String, Box<dyn std::erro
             Ok(key)
         }
         None => {
-            let generated = generate_key();
+            let generated = generate_key()?;
             eprintln!("generated idempotency key: {generated}");
             Ok(generated)
         }
@@ -2161,25 +2158,36 @@ fn site_cutover_command(args: &[String]) -> Result<String, Box<dyn std::error::E
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixListener;
+    use routeloom_peercred::IpcListener;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Unique socket path per test (parallel tests must not share one).
     fn test_socket_path(tag: &str) -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "routeloomctl-test-{}-{}-{tag}.sock",
-            std::process::id(),
-            id
-        ))
+        #[cfg(windows)]
+        {
+            PathBuf::from(format!(
+                r"\\.\pipe\routeloomctl-test-{}-{}-{tag}",
+                std::process::id(),
+                id
+            ))
+        }
+        #[cfg(not(windows))]
+        {
+            std::env::temp_dir().join(format!(
+                "routeloomctl-test-{}-{}-{tag}.sock",
+                std::process::id(),
+                id
+            ))
+        }
     }
 
     /// Serves one connection: reads the command line, then runs `answer`
     /// with the connected stream. Returns the path to query.
-    fn serve_once(tag: &str, answer: impl FnOnce(UnixStream) + Send + 'static) -> PathBuf {
+    fn serve_once(tag: &str, answer: impl FnOnce(IpcStream) + Send + 'static) -> PathBuf {
         let path = test_socket_path(tag);
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = IpcListener::bind(&path).unwrap();
         std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             // Read the command line, then answer.
@@ -2650,7 +2658,14 @@ mod tests {
             .unwrap();
         assert_eq!(key.len(), 32, "{line}");
         assert!(key.bytes().all(|b| b.is_ascii_hexdigit()), "{line}");
-        assert!(is_hex(&generate_key(), 32));
+        assert!(is_hex(&generate_key().unwrap(), 32));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn generated_key_has_no_repeated_clock_halves() {
+        let key = generate_key().unwrap();
+        assert_ne!(&key[..16], &key[16..]);
     }
 
     #[test]

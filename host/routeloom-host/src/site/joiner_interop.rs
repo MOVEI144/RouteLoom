@@ -668,16 +668,17 @@ impl InteropSite {
                 let uid = routeloom_peercred::peer_uid(&stream).ok();
                 let state = Arc::clone(&accept_state);
                 let outbound = outbound_tx.clone();
+                let ipc_stream = routeloom_peercred::IpcStream::from_unix(stream);
                 thread::spawn(move || {
                     let _ = serve_client(
-                        stream,
+                        ipc_stream,
                         state,
                         outbound,
                         0,
                         Arc::new(AtomicU64::new(1)),
                         Arc::new(AtomicU64::new(1)),
                         Arc::new(Mutex::new(DeviceSession::new())),
-                        uid,
+                        uid.map(routeloom_peercred::Principal::UnixUid),
                     );
                 });
             }
@@ -905,7 +906,7 @@ impl World {
                             self.allow_forwards.push((site, forwarded_at, delivered));
                         } else {
                             assert!(
-                                row.as_ref().is_none_or(|r| !r.member),
+                                row.as_ref().map_or(true, |r| !r.member),
                                 "no member row without an Allow"
                             );
                         }

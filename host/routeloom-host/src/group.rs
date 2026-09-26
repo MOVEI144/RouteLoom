@@ -26,6 +26,7 @@
 //! remembered idempotency identities of evicted records, [`INBOX_CAP`]
 //! device replies waiting for the lane.
 
+use routeloom_peercred::Principal;
 use routeloom_protocol::group_ops::{
     decode_group_status, encode_group_query, encode_group_send, group_ops_sub, GroupQuery,
     GroupSend, GroupStatus, CAP_GROUP_DELIVERY_V1, GROUP_ALL, GROUP_PAYLOAD_MAX, MAX_LIFETIME_MS,
@@ -210,7 +211,7 @@ impl Phase {
 #[derive(Clone, Debug)]
 pub struct GroupOpRecord {
     pub op_id: u64,
-    pub uid: u32,
+    pub principal: Principal,
     pub key: [u8; 16],
     pub request: GroupRequest,
     pub phase: Phase,
@@ -349,7 +350,7 @@ pub enum SubmitOutcome {
     Replay(u64),
 }
 
-type Identity = (u32, u64, [u8; 16]);
+type Identity = (Principal, u64, [u8; 16]);
 
 /// Device input for the lane.
 #[derive(Clone, Debug)]
@@ -387,14 +388,14 @@ impl Inner {
     fn evict_one_terminal(&mut self) -> bool {
         while let Some(oldest) = self.terminal_order.pop_front() {
             if let Some(record) = self.records.remove(&oldest) {
-                let identity = (record.uid, record.request.network, record.key);
+                let identity = (record.principal, record.request.network, record.key);
                 self.identities.remove(&identity);
                 if self.tombstone_order.len() >= TOMBSTONE_CAP {
                     if let Some(old) = self.tombstone_order.pop_front() {
                         self.tombstones.remove(&old);
                     }
                 }
-                if self.tombstones.insert(identity) {
+                if self.tombstones.insert(identity.clone()) {
                     self.tombstone_order.push_back(identity);
                 }
                 self.evicted += 1;
@@ -478,6 +479,7 @@ impl GroupOps {
 
     /// Admit one request for `uid`. A known identity answers its existing
     /// record (Replay) or CONFLICT; an evicted one WindowExpired.
+    #[cfg(test)]
     pub fn submit(
         &self,
         uid: u32,
@@ -485,8 +487,18 @@ impl GroupOps {
         request: GroupRequest,
         now_ms: u64,
     ) -> Result<SubmitOutcome, SubmitError> {
+        self.submit_principal(&Principal::UnixUid(uid), key, request, now_ms)
+    }
+
+    pub fn submit_principal(
+        &self,
+        principal: &Principal,
+        key: [u8; 16],
+        request: GroupRequest,
+        now_ms: u64,
+    ) -> Result<SubmitOutcome, SubmitError> {
         let mut inner = self.lock();
-        let identity = (uid, request.network, key);
+        let identity = (principal.clone(), request.network, key);
         if let Some(&existing) = inner.identities.get(&identity) {
             let same = inner
                 .records
@@ -520,7 +532,7 @@ impl GroupOps {
             op_id,
             GroupOpRecord {
                 op_id,
-                uid,
+                principal: principal.clone(),
                 key,
                 request,
                 phase: Phase::HostQueued,
@@ -543,9 +555,14 @@ impl GroupOps {
 
     /// True when the identity has a record or a tombstone — a resubmit is
     /// then answered from the table, never gated on the live session.
+    #[cfg(test)]
     pub fn knows(&self, uid: u32, network: u64, key: &[u8; 16]) -> bool {
+        self.knows_principal(&Principal::UnixUid(uid), network, key)
+    }
+
+    pub fn knows_principal(&self, principal: &Principal, network: u64, key: &[u8; 16]) -> bool {
         let inner = self.lock();
-        let identity = (uid, network, *key);
+        let identity = (principal.clone(), network, *key);
         inner.identities.contains_key(&identity) || inner.tombstones.contains(&identity)
     }
 

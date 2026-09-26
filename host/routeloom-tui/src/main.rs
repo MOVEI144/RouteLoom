@@ -1,6 +1,3 @@
-#[cfg(not(unix))]
-compile_error!("routeloom-tui v0.1 currently requires a Unix platform");
-
 use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyModifiers},
@@ -17,6 +14,17 @@ use std::path::PathBuf;
 use std::process;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+fn default_socket_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(r"\\.\pipe\routeloom.sock")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/tmp/routeloom.sock")
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -32,7 +40,7 @@ fn parse_interval_ms(text: &str) -> Option<u64> {
 }
 
 fn parse_args() -> (PathBuf, u64) {
-    let mut socket = PathBuf::from("/tmp/routeloom.sock");
+    let mut socket = default_socket_path();
     let mut interval = 500_u64;
     let mut args = env::args().skip(1);
     while let Some(argument) = args.next() {

@@ -40,12 +40,10 @@ fn id(value: Option<&Json>, name: &str) -> Result<u64, DynError> {
 }
 
 fn private_dir(path: &Path) -> Result<(), DynError> {
-    fs::create_dir(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    if path.exists() {
+        return Err(format!("{} already exists", path.display()).into());
     }
+    routeloom_peercred::create_private_dir_all(path)?;
     Ok(())
 }
 
@@ -58,18 +56,24 @@ fn check_private(path: &Path, directory: bool) -> Result<(), DynError> {
     }) {
         return Err(format!("{} must not be a symlink", path.display()).into());
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if meta.permissions().mode() & 0o077 != 0 {
-            return Err(format!("{} is not private", path.display()).into());
-        }
+    if directory {
+        routeloom_peercred::verify_private_dir_perms(path)?;
+    } else {
+        routeloom_peercred::verify_private_file_perms(path)?;
     }
     Ok(())
 }
 
 fn sync_dir(path: &Path) -> Result<(), DynError> {
+    #[cfg(unix)]
     fs::File::open(path)?.sync_all()?;
+    #[cfg(windows)]
+    let _ = path; // NTFS flushes each newly written file; directories are not openable as File.
+    Ok(())
+}
+
+fn sync_file(path: &Path) -> Result<(), DynError> {
+    fs::OpenOptions::new().write(true).open(path)?.sync_all()?;
     Ok(())
 }
 
@@ -322,7 +326,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
             return Err("nonempty site directory without initialization journal".into());
         }
         write_private_file(&journal_path, header.as_bytes())?;
-        fs::File::open(&journal_path)?.sync_all()?;
+        sync_file(&journal_path)?;
         header.clone()
     };
     if journal.starts_with(&header) && !journal.ends_with('\n') {
@@ -361,7 +365,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
     if device_ca.device_ca_id() != device_id {
         return Err("Device CA id differs from spec".into());
     }
-    fs::File::open(&device_path)?.sync_all()?;
+    sync_file(&device_path)?;
     sync_dir(&keys_dir)?;
     journal_record(
         &journal_path,
@@ -383,7 +387,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
     if site_ca.site_ca_id() != ca_id {
         return Err("Site CA id differs from spec".into());
     }
-    fs::File::open(&site_path)?.sync_all()?;
+    sync_file(&site_path)?;
     sync_dir(&keys_dir)?;
     journal_record(
         &journal_path,
@@ -405,7 +409,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
     if sak.root_id() != site {
         return Err("SAK id differs from spec".into());
     }
-    fs::File::open(&sak_path)?.sync_all()?;
+    sync_file(&sak_path)?;
     sync_dir(&out)?;
     journal_record(
         &journal_path,
@@ -440,7 +444,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
     if usb_hex.len() != 64 || !usb_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("USB secret corrupt".into());
     }
-    fs::File::open(&usb_path)?.sync_all()?;
+    sync_file(&usb_path)?;
     sync_dir(&out)?;
     journal_record(
         &journal_path,
@@ -463,7 +467,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
     } else {
         write_private_file(&config_path, config.as_bytes())?;
     }
-    fs::File::open(&config_path)?.sync_all()?;
+    sync_file(&config_path)?;
     let manifest = format!(
         "{{\"format\":\"routeloom-lab-site-v1\",\"purpose\":\"development\",\"site_id\":\"{site:016x}\",\"site_ca_fingerprint\":\"{}\",\"device_ca_fingerprint\":\"{}\",\"sak_fingerprint\":\"{}\"}}",
         hex_encode(&sha256(&site_ca.pubkey())), hex_encode(&sha256(&device_ca.pubkey())), hex_encode(&credential_kid(&sak.pubkey()))
@@ -471,15 +475,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
     let inventory_path = out.join("inventory.db");
     let existing_inventory = file_exists(&inventory_path)?;
     if !existing_inventory {
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&inventory_path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        }
+        let file = routeloom_peercred::open_private_file_for_write(&inventory_path)?;
         file.sync_all()?;
     }
     let db = rusqlite::Connection::open(&inventory_path)?;
@@ -498,7 +494,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
         return Err("partial site inventory is not empty".into());
     }
     drop(db);
-    fs::File::open(&inventory_path)?.sync_all()?;
+    sync_file(&inventory_path)?;
     sync_dir(&out)?;
     // The manifest is the last published artifact. A crash between its
     // rename and the journal completion may only accept the same content.
@@ -512,7 +508,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
             fs::remove_file(&pending)?;
         }
         write_private_file(&pending, manifest.as_bytes())?;
-        fs::File::open(&pending)?.sync_all()?;
+        sync_file(&pending)?;
         fs::rename(&pending, out.join("lab-manifest.json"))?;
         sync_dir(&out)?;
     }

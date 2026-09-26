@@ -10,7 +10,6 @@
 //! RFC 6979 deterministic nonce, and the low-S canonicality rule — a
 //! signer MUST emit `s <= (n-1)/2` or every device rejects the manifest.
 
-use std::io::Read;
 use std::path::Path;
 
 use p256::ecdsa::signature::Signer;
@@ -129,13 +128,10 @@ pub fn generate_keypair() -> Result<([u8; 32], [u8; 64])> {
     }
 }
 
-/// Fill `out` from /dev/urandom — the host's CSPRNG. Any read failure is
-/// an error, never a downgrade to time/pid material.
+/// Fill `out` from the OS CSPRNG. Any read failure is an error, never a downgrade
+/// to time/pid material.
 pub fn fill_random(out: &mut [u8]) -> Result<()> {
-    let mut file = std::fs::File::open("/dev/urandom")
-        .map_err(|_| Error::new(Code::Io, "open /dev/urandom"))?;
-    file.read_exact(out)
-        .map_err(|_| Error::new(Code::Io, "read /dev/urandom"))
+    routeloom_peercred::fill_random(out).map_err(|_| Error::new(Code::Io, "OS CSPRNG draw failed"))
 }
 
 /// Fixed test keypair — the host mirror of `test_keypair(seed)` in
@@ -242,15 +238,7 @@ pub(crate) fn key_document_json(
 /// a private scalar (injected-key identity records and their NVS blobs).
 pub fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
+    let mut file = routeloom_peercred::open_private_file_for_write(path)
         .map_err(|_| Error::new(Code::Io, "key file create (exists? refusing to overwrite)"))?;
     file.write_all(bytes)
         .map_err(|_| Error::new(Code::Io, "key file write"))?;
@@ -258,26 +246,14 @@ pub fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// Refuse to hand out a key whose file is group/other-accessible — POSIX
-/// permissions are the only custody this path has (§4.10).
-#[cfg(unix)]
+/// permissions or Windows file protection are the custody this path has.
 fn enforce_private_perms(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(path)
-        .map_err(|_| Error::new(Code::Io, "key file stat"))?
-        .permissions()
-        .mode();
-    if mode & 0o077 != 0 {
-        return err(
+    routeloom_peercred::verify_private_file_perms(path).map_err(|_| {
+        Error::new(
             Code::AuthorizationFailed,
-            "key file is group/other-accessible (chmod 0600 required)",
-        );
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn enforce_private_perms(_path: &Path) -> Result<()> {
-    Ok(())
+            "key file is not owner-only (Unix 0600 or Windows owner DACL required)",
+        )
+    })
 }
 
 /// Parse a dev key document: enforce 0600, check the format marker, and

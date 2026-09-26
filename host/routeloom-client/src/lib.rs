@@ -36,7 +36,6 @@
 use std::fmt;
 use std::io;
 
-#[cfg(unix)]
 pub mod api1;
 
 /// KGuard's decision surface of the SDK v1 Site Authority (zero-touch
