@@ -1,0 +1,32 @@
+{
+  "delayed": {
+    "event_counts": {
+      "hello_ack": 1,
+      "auth_ok": 1,
+      "session_drop": 0,
+      "error": 1,
+      "decode_error": 0
+    },
+    "first_auth_after_connected_ms": 2530,
+    "auth_after_replay_ms": null,
+    "replay_rejected": 0,
+    "adapter_connected": true,
+    "protocol_errors": 0,
+    "last_error_is_sticky": "CONNECTION_STALLED"
+  },
+  "drop": {
+    "event_counts": {
+      "hello_ack": 2,
+      "auth_ok": 2,
+      "session_drop": 2,
+      "error": 2,
+      "decode_error": 0
+    },
+    "first_auth_after_connected_ms": 2530,
+    "auth_after_replay_ms": 12,
+    "replay_rejected": 1,
+    "adapter_connected": true,
+    "protocol_errors": 0,
+    "last_error_is_sticky": "REPLAY_REJECTED"
+  }
+}
