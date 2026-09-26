@@ -40,6 +40,9 @@ struct EspNowRuntimeTestAccess {
     const auto* record = runtime.find_peer(peer);
     return record != nullptr && record->driver_registered;
   }
+  static void make_driverless(EspNowRuntime& runtime, NodeId peer) noexcept {
+    if (auto* record = runtime.find_peer(peer)) record->driver_registered = false;
+  }
   static std::size_t live_uses(const EspNowRuntime& runtime) noexcept {
     return runtime.reply_leases_.live_use_count();
   }
@@ -548,6 +551,23 @@ void test_stale_binding_keeps_reserved_reply_sendable() {
   runtime.stop();
 }
 
+void test_driverless_authenticated_recovery() {
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize().ok());
+  CHECK(runtime.start().ok());
+  CHECK(runtime.register_neighbor(kPeer, peer_mac(), 1).ok());
+  CHECK(EspNowRuntimeTestAccess::observe_context(runtime, kPeer, 1).ok());
+  EspNowRuntimeTestAccess::make_driverless(runtime, kPeer);
+  // A stale binding is still valid for authenticated Probe/Result RX even
+  // when the send-side driver peer has been released.
+  CHECK(EspNowRuntimeTestAccess::observe_context(runtime, kPeer, 1).ok());
+  CHECK(!EspNowRuntimeTestAccess::observe_context(runtime, kPeer, 0).ok());
+  runtime.stop();
+}
+
 void test_driver_release_waits_for_use_and_callback() {
   idf_stub::reset();
   TestSecurity security;
@@ -819,6 +839,7 @@ int main() {
   test_distinct_session_tx_and_rx_contexts();
   test_stop_drains_node_reply_uses();
   test_stale_binding_keeps_reserved_reply_sendable();
+  test_driverless_authenticated_recovery();
   test_driver_release_waits_for_use_and_callback();
   test_route_broadcast_uses_reserved_radio_slot();
   test_driver_delete_failure_keeps_slot_occupied();

@@ -1550,7 +1550,7 @@ class MeshNode {
     std::uint8_t result_size{0};
   };
 
-  enum class JobForm : std::uint8_t { Plain, Forwarded };
+  enum class JobForm : std::uint8_t { Plain, Forwarded, Sealed };
   enum class JobOwner : std::uint8_t { None, OriginDelivery, Transit,
                                        GatewayService, Config, Diagnostic,
                                        Applied, Group, Bootstrap };

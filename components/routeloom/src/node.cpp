@@ -1603,6 +1603,8 @@ Status MeshNode::queue_route_update(const NodeId neighbor,
       neighbor_record != nullptr ? neighbor_record->route_cursor : 0;
   std::size_t index = 0;
   std::size_t advertised_count = 0;
+  std::array<NodeId, kMaxRouteRecordsPerFrame> finite_records{};
+  std::size_t finite_count = 0;
   bool writer_full = false;
   routes_.for_each_selected([&](const RouteSelection& selection) {
     if (selection.destination == config_.node) return;
@@ -1622,13 +1624,10 @@ Status MeshNode::queue_route_update(const NodeId neighbor,
     ++advertised_count;
     // FD is refreshed only when a finite advertisement actually leaves; a
     // split-horizon retraction (infinity) must not touch feasibility state.
-    if (advertised != kInfiniteRouteMetric) routes_.mark_advertised(selection.destination);
+    if (advertised != kInfiniteRouteMetric) finite_records[finite_count++] = selection.destination;
   });
-  if (neighbor_record != nullptr) {
-    const std::size_t next = skip + advertised_count;
-    neighbor_record->route_cursor =
-        static_cast<std::uint8_t>(next >= index ? 0 : next);
-  }
+  const std::size_t next = skip + advertised_count;
+  const std::uint8_t next_cursor = static_cast<std::uint8_t>(next >= index ? 0 : next);
   // Retractions: destinations that lost their last feasible route are
   // advertised as infinity so neighbors withdraw promptly instead of waiting
   // out the lease (RFC 8966 §3.7.2). The record budget bounds the burst.
@@ -1641,7 +1640,16 @@ Status MeshNode::queue_route_update(const NodeId neighbor,
   });
   job.plain.payload[0] = count;
   job.plain.payload_size = writer.size();
-  return scheduler_.enqueue(std::move(job), config_.node, now_ms);
+  status = scheduler_.enqueue(std::move(job), config_.node, now_ms);
+  // Failed admission cannot advance the advertisement cursor or FD: the
+  // route was never queued and the next update must retry the same page.
+  if (status) {
+    if (neighbor_record != nullptr) neighbor_record->route_cursor = next_cursor;
+    for (std::size_t i = 0; i < finite_count; ++i) {
+      routes_.mark_advertised(finite_records[i]);
+    }
+  }
+  return status;
 }
 
 Status MeshNode::queue_seqno_request(const NodeId peer, const NodeId requester,
@@ -2007,7 +2015,20 @@ Status MeshNode::encode_job(TxJob& job, const MonotonicMs now_ms) noexcept {
     job.plain.header.next_hop = job.peer;
     job.plain.header.remaining_deadline_ms = std::min(job.plain.header.remaining_deadline_ms,
                                                       remaining);
-    status = wire::encode_new(job.plain, security_, tx_encoded_);
+    if ((job.plain.header.flags & wire::kFlagEndProtected) != 0) {
+      wire::LinkOpenedFrame sealed{};
+      status = wire::encode_new(job.plain, security_, tx_encoded_, &sealed);
+      if (status) {
+        // Preserve the End counter/ciphertext across hop retries. Only the
+        // Link wrapper and its deadline are re-created on retransmission.
+        job.set_forwarded(sealed);
+        job.form = JobForm::Sealed;
+      }
+    } else {
+      status = wire::encode_new(job.plain, security_, tx_encoded_);
+    }
+  } else if (job.form == JobForm::Sealed) {
+    status = wire::retry_local(job.forwarded, job.peer, remaining, security_, tx_encoded_);
   } else {
     status = wire::forward(job.forwarded, config_.node, job.peer, config_.link_epoch,
                            remaining, security_, tx_encoded_);
@@ -6079,6 +6100,7 @@ Status MeshNode::poll(const MonotonicMs now_ms) noexcept {
     run_triggered_advertisement(now_ms);
     schedule_sequence_requests(now_ms);
     schedule_route_advertisements(now_ms);
+    if (!gateway_scoped()) schedule_route_discovery(now_ms);
     if (gateway_scoped()) {
       // Scoped profile repair/bootstrap and on-demand paths (routing-scale
       // §3.3/§4): answers to pulls, pulls for a lost gateway route and

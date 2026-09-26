@@ -1351,8 +1351,9 @@ Status EspNowRuntime::reply_observe_authenticated_rx(
   portENTER_CRITICAL(&callback_lock_);
   Peer* record = find_peer(captured.peer);
   Status status = Status::success();
-  if (record == nullptr || !record->driver_registered ||
-      record->binding_retired ||
+  // Driver registration pins outgoing replies, not authenticated recovery
+  // traffic: a STALE binding can receive Probe/Result while driverless.
+  if (record == nullptr || record->binding_retired ||
       record->binding_id != captured.id ||
       record->binding != captured.generation) {
     status = Status::error(StatusCode::Conflict, "binding mapping changed");
@@ -2173,7 +2174,8 @@ Status EspNowRuntime::release_driver_peer(const MacAddress& mac,
   evidence.other_lease_hold = raw_outstanding || channel_runner_.busy();
   evidence.topology_pin_live =
       node != kInvalidNodeId && discovery_ != nullptr &&
-      discovery_->topology_pinned(node);
+      (discovery_->topology_pinned(node) ||
+       discovery_->awaiting_probe_result(node));
   evidence.callbacks_drained =
       !evidence.tx_in_flight && !raw_outstanding && !quarantined && !fenced;
   portEXIT_CRITICAL(&callback_lock_);

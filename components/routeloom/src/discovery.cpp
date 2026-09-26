@@ -392,8 +392,7 @@ Status NeighborDiscovery::begin_discovery(const MonotonicMs now_ms,
   const Status nonce = entropy_.fill(
       MutableByteView{outbound_.our_nonce.data(), outbound_.our_nonce.size()});
   if (!nonce) {
-    outbound_ = Outbound{};
-    release_transient();
+    clear_outbound();
     return nonce;
   }
   // Cold-start spread (radio.md §13): a fresh requester exchange defers its
@@ -405,8 +404,7 @@ Status NeighborDiscovery::begin_discovery(const MonotonicMs now_ms,
   if (config_.cold_start_jitter_max_ms > 0) {
     std::uint64_t roll = 0;
     if (!next_u64(roll)) {
-      outbound_ = Outbound{};
-      release_transient();
+      clear_outbound();
       return Status::error(StatusCode::InternalError, "entropy unavailable");
     }
     jitter_ms =
@@ -1058,8 +1056,7 @@ void NeighborDiscovery::handle_prove(const MacAddress& source,
     if (same_peer) {
       if (env.claimed_node < config_.node) {
         // Peer is the lower NodeId: cancel our requester exchange, respond.
-        outbound_ = Outbound{};
-        release_transient();
+        clear_outbound();
       } else {
         ++stats_.simultaneous_resolved;
         return;  // our exchange wins; peer will mirror this rule
@@ -1112,8 +1109,7 @@ void NeighborDiscovery::handle_confirm(const MacAddress& source,
   const auto req_nonce = outbound_.our_nonce;
   const auto resp_nonce = outbound_.peer_nonce;
   const ScopeExchangeContext exchange = outbound_.exchange;
-  outbound_ = Outbound{};
-  release_transient();
+  clear_outbound();
   complete_exchange(peer_mac, peer_node, peer_cap, req_nonce, resp_nonce,
                     confirm_tag, exchange, /*we_are_requester=*/true, now_ms);
 }
@@ -1320,26 +1316,37 @@ void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
   neighbor.stale_reprobes = 0;
   neighbor.lease_expires_at_ms = now_ms + config_.awake_lease_ms;
 
-  autonomy::NeighborResultPayload result{};
-  result.binding_generation = neighbor.generation;
-  result.probe_sequence = probe.probe_sequence;
-  result.result = autonomy::NeighborResultCode::Reachable;
-  result.lease_granted_ms = config_.awake_lease_ms;
-  autonomy::EncodedPayload encoded{};
-  if (autonomy::neighbor_result_encode(result, encoded).ok()) {
-    const Status sent = port_.send_wire(neighbor.binding, neighbor.mac,
-                                        FrameType::NeighborResult,
-                                        encoded.view());
-    if (!sent) {
-      ++stats_.send_failures;
-    }
-  }
+  neighbor.result_sequence = probe.probe_sequence;
+  neighbor.result_generation = neighbor.generation;
+  neighbor.result_retry_ms = now_ms;
+  send_pending_result(neighbor, now_ms);
   // If we were stale/bound and have no outstanding probe of our own, start
   // one — bidirectional confirmation still requires our own Result.
   if (neighbor.probe_outstanding == 0 &&
       (neighbor.phase == NeighborPhase::Bound ||
        neighbor.phase == NeighborPhase::Stale)) {
     send_probe(neighbor, now_ms);
+  }
+}
+
+void NeighborDiscovery::send_pending_result(Neighbor& neighbor,
+                                            const MonotonicMs now_ms) noexcept {
+  if (neighbor.result_sequence == 0 || now_ms < neighbor.result_retry_ms) return;
+  autonomy::NeighborResultPayload result{};
+  result.binding_generation = neighbor.result_generation;
+  result.probe_sequence = neighbor.result_sequence;
+  result.result = autonomy::NeighborResultCode::Reachable;
+  result.lease_granted_ms = config_.awake_lease_ms;
+  autonomy::EncodedPayload encoded{};
+  if (!autonomy::neighbor_result_encode(result, encoded)) return;
+  // Clear before submission: synchronous transports may reenter via RX.
+  const auto sequence = neighbor.result_sequence;
+  neighbor.result_sequence = 0;
+  if (!port_.send_wire(neighbor.binding, neighbor.mac, FrameType::NeighborResult,
+                       encoded.view())) {
+    ++stats_.send_failures;
+    if (neighbor.result_sequence == 0) neighbor.result_sequence = sequence;
+    neighbor.result_retry_ms = now_ms + 50;
   }
 }
 
@@ -1515,6 +1522,7 @@ void NeighborDiscovery::elevate_confirmed_peer(const MacAddress& peer_mac,
       return;
     }
     same->probe_outstanding = 0;
+    same->result_sequence = 0;
     same->stale_reprobes = 0;
     if (membership_.state() == MembershipState::Member && peer_member) {
       same->peer_member_verified = true;
@@ -1644,10 +1652,9 @@ Status NeighborDiscovery::take_member_start(MemberStartRequest& out,
     out.carrier.capability_r = outbound_.peer_capability;
     out.carrier.scope_binding = outbound_.exchange.binding();
     out.expires_at_ms = outbound_.stage_deadline_ms;
-    // Consumed: the engine owns the exchange now and the slot frees for
-    // the next begin_discovery. Attempts reset — engine retries are not
-    // discovery retries.
-    outbound_ = Outbound{};
+    // The coordinator owns its own reservation; discovery frees its slot
+    // on handoff even if the handshake later fails.
+    clear_outbound();
     return Status::success();
   }
   return Status::error(StatusCode::NotFound, "no parked member start");
@@ -1785,18 +1792,22 @@ void NeighborDiscovery::cancel_competing(const MacAddress& mac,
       [&](const Candidate& c) { return mac_equal(c.mac, mac); });
   if (leftover != nullptr) release_candidate(*leftover);
   if (outbound_.active && mac_equal(outbound_.peer_mac, mac)) {
-    outbound_ = Outbound{};
-    release_transient();
+    clear_outbound();
   }
   (void)node;
+}
+
+void NeighborDiscovery::clear_outbound() noexcept {
+  const bool held = outbound_.transient_held;
+  outbound_ = Outbound{};
+  if (held) release_transient();
 }
 
 void NeighborDiscovery::fail_outbound(const MonotonicMs now_ms,
                                       const char* reason) noexcept {
   (void)now_ms;
   reject_event(reason, outbound_.peer_node);
-  outbound_ = Outbound{};
-  release_transient();
+  clear_outbound();
   relax_membership();
 }
 
@@ -2366,6 +2377,7 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
   neighbors_.for_each([&](Neighbor& n) { pending[pending_count++] = &n; });
   for (std::size_t i = 0; i < pending_count; ++i) {
     Neighbor& n = *pending[i];
+    if (resolvable_phase(n.phase)) send_pending_result(n, now_ms);
     switch (n.phase) {
       case NeighborPhase::ApprovalPending:
         if (now_ms >= n.lease_expires_at_ms) {
@@ -2682,6 +2694,12 @@ bool NeighborDiscovery::binding_generation_of(
 bool NeighborDiscovery::topology_pinned(const NodeId peer) const noexcept {
   const Neighbor* neighbor = find_neighbor(peer);
   return neighbor != nullptr && neighbor->pinned;
+}
+
+bool NeighborDiscovery::awaiting_probe_result(const NodeId peer) const noexcept {
+  const Neighbor* neighbor = find_neighbor(peer);
+  return neighbor != nullptr && resolvable_phase(neighbor->phase) &&
+         neighbor->probe_outstanding != 0;
 }
 
 bool NeighborDiscovery::node_of(const MacAddress& mac, NodeId& out) const noexcept {

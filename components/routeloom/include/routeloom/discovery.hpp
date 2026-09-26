@@ -495,6 +495,8 @@ class NeighborDiscovery {
   // resolvability bar as binding_of; false when no live binding exists.
   bool binding_generation_of(NodeId peer, BindingGeneration& out) const noexcept;
   bool topology_pinned(NodeId peer) const noexcept;
+  // A submitted Probe needs its driver peer until its Result or timeout.
+  bool awaiting_probe_result(NodeId peer) const noexcept;
   // Owner-side lease sync: resolve the verified NodeId recorded for a radio
   // MAC (bound neighbor records only — candidates are unverified and never
   // resolve). False when the MAC has no neighbor record.
@@ -642,6 +644,10 @@ class NeighborDiscovery {
     MonotonicMs suspended_until_ms{0};
     std::uint32_t probe_outstanding{0};
     MonotonicMs probe_deadline_ms{0};
+    // One coalesced reply per peer; local TX contention must not discard it.
+    std::uint32_t result_sequence{0};
+    BindingGeneration result_generation{0};
+    MonotonicMs result_retry_ms{0};
     // Stale re-confirmation scheduler (02 §9): first tick fires immediately
     // on the demotion poll, then every stale_reprobe_ms. The attempt count
     // only counts emitted probes; verified RX evidence re-arms it.
@@ -735,6 +741,7 @@ class NeighborDiscovery {
 
   // Wire-lane handlers (post-BIND probes only).
   void handle_probe(Neighbor& neighbor, ByteView payload, MonotonicMs now_ms) noexcept;
+  void send_pending_result(Neighbor& neighbor, MonotonicMs now_ms) noexcept;
   void handle_probe_result(Neighbor& neighbor, ByteView payload,
                            MonotonicMs now_ms) noexcept;
 
@@ -796,6 +803,7 @@ class NeighborDiscovery {
                          bool we_are_requester,
                          MonotonicMs now_ms) noexcept;
   void fail_outbound(MonotonicMs now_ms, const char* reason) noexcept;
+  void clear_outbound() noexcept;
   // Shared elevation tail: membership advance + re-check, MAC-conflict
   // handling, re-auth generation bump or fresh bind, Bound→Probe. Both the
   // dev exchange path and complete_handshake converge here.

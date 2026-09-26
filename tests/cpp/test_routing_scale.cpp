@@ -603,9 +603,40 @@ void test_on_demand_discovery() {
   CHECK(!w.at(4)->routes().best(5).valid);
 }
 
+bool drop_flat_advertisement(const routeloom_test::SimNetwork::Pending& pending) {
+  FrameSight sight{};
+  return pending.from == 2 && pending.to == 1 &&
+         sight_frame(ByteView{pending.frame.data(), pending.frame.size()}, sight) &&
+         sight.type == FrameType::RouteUpdate;
+}
+
+void test_flat_no_route_pull() {
+  SimWorld w;
+  w.add(1, 1, 100, 1000);
+  w.add(2, 1, 100, 1000);
+  w.add(3, 1, 100, 1000);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.link(2, 3, 1, 1);
+  w.run(1500);
+  CHECK(w.at(1)->routes().best(3).valid);
+  w.net.silent_drop = drop_flat_advertisement;
+  w.run(1600);
+  CHECK(!w.at(1)->routes().best(3).valid);
+  w.net.silent_drop = nullptr;
+  MessageId id{};
+  CHECK(send_data(w, 1, 3, id, 5000));
+  w.run(500);
+  CHECK(w.at(1)->route_scale_stats().pulls_sent > 0);
+  CHECK(w.at(1)->routes().best(3).valid);
+  w.net.silent_drop = nullptr;
+  w.run(2000);
+  CHECK(w.at(1)->delivery(id).state == DeliveryState::Delivered);
+}
+
 void test_flat_node_ignores_route_request() {
-  // A scoped node whose gateway is unreachable pulls its neighbors; a flat
-  // neighbor never answers and never acts on the frame.
+  // A flat neighbor answers only 1-hop pulls with ordinary advertisements;
+  // it cannot invent a path to the absent gateway.
   SimWorld w;
   w.configure = [](NodeConfig& config) {
     if (config.node == 1) {
@@ -620,7 +651,7 @@ void test_flat_node_ignores_route_request() {
   w.link(1, 2, 1, 1);
   w.run(1500);
   CHECK(w.at(1)->route_scale_stats().pulls_sent >= 1);
-  CHECK(w.obs(2)->has_diag("ROUTE_REQUEST_UNSUPPORTED"));
+  CHECK(w.at(2)->route_scale_stats().pull_answers >= 1);
   CHECK(!w.at(2)->routes().best(99).valid);
 }
 
@@ -1811,6 +1842,7 @@ int main(int argc, char** argv) {
     test_repair_after_parent_loss();
     test_parent_switch_keeps_downward_reachability();
     test_on_demand_discovery();
+    test_flat_no_route_pull();
     test_flat_node_ignores_route_request();
     test_scoped_loop_freedom_under_churn();
     test_broadcast_grant_lifecycle();

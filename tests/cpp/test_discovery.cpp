@@ -1253,6 +1253,26 @@ void test_stranded_rediscovery_rebinds() {
   CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Reachable);
 }
 
+// Handing a parked initiator exchange to the member coordinator must release
+// its discovery reservation; otherwise the fourth attempt cannot start.
+void test_member_start_releases_transient() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, true);
+  Unit& b = world.add(2, 0xB2, true);
+  a.engine.set_member_handshake_mode(true);
+  b.engine.set_member_handshake_mode(true);
+  world.start_all();
+  for (int i = 0; i < 10; ++i) {
+    CHECK_OK(a.engine.begin_discovery(world.medium.now));
+    world.run(1000);
+    NeighborDiscovery::MemberStartRequest start{};
+    CHECK_OK(a.engine.take_member_start(start, world.medium.now));
+    CHECK(start.initiator && start.peer == b.node);
+    // The coordinator may reject the exchange; its reservation is separate.
+    world.run(6000);
+  }
+}
+
 void test_reauth_releases_transient_candidate() {
   DiscWorld world;
   Unit& a = world.add(1, 0xA1, true);
@@ -1313,6 +1333,31 @@ void test_stale_peer_repaired_while_other_edge_reachable() {
 // Port-level send refusal is counted: the RLD1 and wire lanes both bump
 // stats().send_failures, retries still complete the exchange, and the
 // refused send never counts toward offers_tx/probes_tx.
+void test_result_waits_for_local_tx() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, true);
+  Unit& b = world.add(2, 0xB2, true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+  const auto results = b.port.count_wire(FrameType::NeighborResult);
+  autonomy::NeighborProbePayload probe{};
+  BindingGeneration gen{};
+  CHECK(b.engine.binding_generation_of(a.node, gen));
+  probe.binding_generation = gen;
+  probe.probe_sequence = 987;
+  probe.sent_ms = world.medium.now;
+  probe.requested_lease_ms = 30000;
+  autonomy::EncodedPayload encoded{};
+  CHECK_OK(autonomy::neighbor_probe_encode(probe, encoded));
+  b.port.fail_next = 1;
+  b.engine.on_wire_rx(a.mac, FrameType::NeighborProbe, encoded.view(), world.medium.now);
+  CHECK(b.port.count_wire(FrameType::NeighborResult) == results);
+  world.run(200);
+  CHECK(b.port.count_wire(FrameType::NeighborResult) > results);
+}
+
 void test_send_failure_stats() {
   DiscWorld world;
   Unit& a = world.add(1, 0xA1, /*member=*/true);
@@ -1585,8 +1630,10 @@ int main() {
   test_stale_reprobe_bounded();
   test_stale_reprobe_never_targets_dead();
   test_stranded_rediscovery_rebinds();
+  test_member_start_releases_transient();
   test_reauth_releases_transient_candidate();
   test_stale_peer_repaired_while_other_edge_reachable();
+  test_result_waits_for_local_tx();
   test_send_failure_stats();
   test_forget_revoked_peer();
   test_reauth_revoked_rate_limit();
