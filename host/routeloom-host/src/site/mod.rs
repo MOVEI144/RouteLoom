@@ -846,6 +846,8 @@ pub struct SiteAuthority {
     lab: Option<LabBinding>,
     /// Explicit admin enrollment window; never revived by a daemon restart.
     lab_enrollment_window: Option<(u64, u64)>,
+    /// A failed write can have an uncertain outcome; re-open the DB first.
+    lab_write_poisoned: bool,
     /// Newest policy generation the proxies confirmed applied (`None` =
     /// never distributed). No distribution vehicle exists yet, so this
     /// stays `None` and the radio intake follows the adoption-time
@@ -1460,6 +1462,7 @@ impl SiteAuthority {
             purpose: setup.purpose,
             lab,
             lab_enrollment_window: None,
+            lab_write_poisoned: false,
             policy_distributed_generation: None,
             devices,
             discovered,
@@ -2033,6 +2036,8 @@ impl SiteAuthority {
     }
 
     fn store_error(&mut self, now_ms: u64, error: &store::StoreError) {
+        self.lab_write_poisoned = true;
+        self.lab_enrollment_window = None;
         self.counters.store_failures += 1;
         self.event(
             now_ms,
@@ -5405,8 +5410,12 @@ impl SiteAuthority {
             "{},\"radio_distributed_generation\":{},\"lab_enrollment_active\":{}}}",
             &content[..content.len() - 1],
             distributed,
-            self.lab_enrollment_window
-                .is_some_and(|(start, end)| self.join_mono_ms >= start && self.join_mono_ms < end)
+            !self.lab_write_poisoned
+                && self
+                    .lab_enrollment_window
+                    .is_some_and(
+                        |(start, end)| self.join_mono_ms >= start && self.join_mono_ms < end
+                    )
         )
     }
 
@@ -5415,6 +5424,9 @@ impl SiteAuthority {
     /// lock the caller holds, so two concurrent partial updates from two
     /// connections cannot lose each other's fields.
     fn lab_enrollment_active(&mut self) -> bool {
+        if self.lab_write_poisoned {
+            return false;
+        }
         let Some((start, end)) = self.lab_enrollment_window else {
             return false;
         };
@@ -5454,7 +5466,19 @@ impl SiteAuthority {
                 "monotonic clock went backwards",
             ));
         }
-        self.set_policy(policy)?;
+        if self.lab_write_poisoned && policy.decision_mode == DecisionMode::LabInventory {
+            return Err(SiteError::new(
+                "STORE_FAILURE",
+                "reopen the site database before rearming enrollment",
+            ));
+        }
+        if let Err(error) = self.set_policy(policy) {
+            if error.code == "STORE_FAILURE" {
+                self.lab_write_poisoned = true;
+                self.lab_enrollment_window = None;
+            }
+            return Err(error);
+        }
         self.join_mono_ms = mono_ms;
         if policy.decision_mode != DecisionMode::LabInventory {
             self.lab_enrollment_window = None;
