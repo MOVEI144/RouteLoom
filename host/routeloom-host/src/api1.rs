@@ -115,6 +115,9 @@ pub struct ApiContext<'a, S: OperationStore> {
     /// group_delivery_v1 op table: `group.send` admits here, `group.get`
     /// reads; the group lane thread is the only driver.
     pub group_ops: &'a crate::group::GroupOps,
+    /// m1 diagnostics query table: `diagnostics.snapshot` submits and
+    /// waits here; the telemetry lane thread drives the device exchange.
+    pub telemetry_ops: &'a crate::telemetry::TelemetryOps,
     /// SDK v1 Site Authority (`--site-authority`); None = not configured,
     /// the site methods then answer SITE_AUTHORITY_UNAVAILABLE.
     pub site: Option<&'a crate::site::SiteService>,
@@ -331,6 +334,7 @@ pub fn handle_conn<S: OperationStore>(
         "link.get" => link_get(&params, ctx).map(|r| (r, None)),
         "nodes.list" => nodes_list(&params, ctx).map(|r| (r, None)),
         "nodes.get" => nodes_get(&params, ctx).map(|r| (r, None)),
+        "diagnostics.snapshot" => diagnostics_snapshot(&params, ctx).map(|r| (r, None)),
         "config.challenge" => config_challenge(&params, ctx).map(|r| (r, None)),
         "config.status" => config_status(&params, ctx).map(|r| (r, None)),
         "config.retry" => config_retry(&params, ctx).map(|r| (r, None)),
@@ -435,7 +439,7 @@ fn capabilities<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.retry\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"site\":{site_caps},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.retry\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true,\"diagnostics.snapshot\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"site\":{site_caps},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -1986,6 +1990,265 @@ fn nodes_get<S: OperationStore>(
             retryable: true,
         }),
     }
+}
+
+/// Gates a telemetry query on the live session: an authenticated
+/// gateway whose HelloAck advertises m1_diagnostics_v1. No ACL grant is
+/// needed (diagnostics class, like link.get) — snapshots carry RF
+/// observations, never payloads or secrets.
+fn telemetry_gate<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Result<u64, ApiError> {
+    let (authenticated, session, capability) = {
+        let info = ctx.session.lock().expect("session poisoned");
+        (
+            info.authenticated && info.id.is_some(),
+            info.id.unwrap_or(0),
+            info.capability,
+        )
+    };
+    if !authenticated {
+        return Err(ApiError {
+            code: "GATEWAY_UNAVAILABLE",
+            message: "no authenticated gateway session; telemetry queries are not queued across a disconnect"
+                .to_string(),
+            extra_fields: "\"reason\":\"no_session\"".to_string(),
+            retryable: true,
+        });
+    }
+    if !capability.is_some_and(crate::telemetry::telemetry_capable) {
+        return Err(ApiError {
+            code: "UNSUPPORTED",
+            message: "the attached gateway does not advertise m1_diagnostics_v1 (HelloAck capability bit 5 with host_ops_v1)".to_string(),
+            extra_fields: format!(
+                "\"required_capability\":\"m1_diagnostics_v1\",\"capability\":{}",
+                capability.map_or_else(|| "null".to_string(), |c| c.to_string())
+            ),
+            retryable: false,
+        });
+    }
+    Ok(session)
+}
+
+/// Maps a resolved query onto the API answer. A snapshot or a mesh
+/// refusal is a successful query (the device proved the step); anything
+/// else is the honest error for why no answer arrived.
+fn telemetry_outcome_result(
+    outcome: crate::telemetry::QueryOutcome,
+    observer: u64,
+    peer: u64,
+) -> Result<String, ApiError> {
+    use crate::telemetry::QueryOutcome;
+    let scope = format!("\"observer\":\"{observer:016x}\",\"peer\":\"{peer:016x}\"");
+    match outcome {
+        QueryOutcome::Snapshot(snapshot) => Ok(format!(
+            "{{\"outcome\":\"snapshot\",\"scope\":{{{scope}}},\"snapshot\":{}}}",
+            crate::telemetry::snapshot_json(&snapshot),
+        )),
+        QueryOutcome::Reject(reject) => Ok(format!(
+            "{{\"outcome\":\"reject\",\"scope\":{{{scope}}},\"reject\":{}}}",
+            crate::telemetry::reject_json(&reject),
+        )),
+        QueryOutcome::Device(result) => Err(device_result_error(result, &scope)),
+        QueryOutcome::DecodeError(detail) => Err(ApiError {
+            code: "INDETERMINATE",
+            message: format!("the gateway answered with a malformed 0x31 body: {detail}"),
+            extra_fields: scope,
+            retryable: true,
+        }),
+        QueryOutcome::Timeout => Err(ApiError {
+            code: "TIMEOUT",
+            message: format!(
+                "no telemetry answer inside {} ms",
+                crate::telemetry::API_WAIT_MS
+            ),
+            extra_fields: scope,
+            retryable: true,
+        }),
+        QueryOutcome::SessionLost => Err(ApiError {
+            code: "GATEWAY_UNAVAILABLE",
+            message: "the gateway session changed while the query was in flight".to_string(),
+            extra_fields: format!("{scope},\"reason\":\"session_lost\""),
+            retryable: true,
+        }),
+        QueryOutcome::ErrorFrame(code) => Err(ApiError {
+            code: "INDETERMINATE",
+            message: "the gateway refused the query at the frame level".to_string(),
+            extra_fields: format!("{scope},\"error_code\":{code}"),
+            retryable: true,
+        }),
+    }
+}
+
+/// A non-Ok 0x31 device result, mapped onto the API error vocabulary.
+/// Busy/Timeout/NoRoute are retryable states of the mesh; the rest name
+/// a configuration or daemon-side defect.
+fn device_result_error(
+    result: routeloom_protocol::host_ops::ConfigOpsResult,
+    scope: &str,
+) -> ApiError {
+    use routeloom_protocol::host_ops::ConfigOpsResult;
+    let (code, message, retryable) = match result {
+        ConfigOpsResult::Ok => ("INTERNAL", "unreachable device Ok", false),
+        ConfigOpsResult::Busy => (
+            "NO_CAPACITY",
+            "the gateway is busy; retry the telemetry query",
+            true,
+        ),
+        ConfigOpsResult::Denied => (
+            "AuthorizationFailed",
+            "the gateway denied the telemetry query",
+            false,
+        ),
+        ConfigOpsResult::Unsupported => (
+            "UNSUPPORTED",
+            "the gateway no longer serves telemetry queries",
+            false,
+        ),
+        ConfigOpsResult::Invalid => (
+            "INTERNAL",
+            "the gateway rejected the telemetry query as malformed",
+            false,
+        ),
+        ConfigOpsResult::Indeterminate => (
+            "INDETERMINATE",
+            "the gateway cannot prove the telemetry outcome",
+            true,
+        ),
+        ConfigOpsResult::NoRoute => ("NO_ROUTE", "no mesh route to the telemetry observer", true),
+        ConfigOpsResult::Timeout => (
+            "TIMEOUT",
+            "the telemetry observer did not answer the gateway",
+            true,
+        ),
+    };
+    ApiError {
+        code,
+        message: message.to_string(),
+        extra_fields: format!(
+            "{scope},\"device_result\":\"{}\"",
+            config_ops_result_name(result)
+        ),
+        retryable,
+    }
+}
+
+/// `diagnostics.snapshot {observer, peer, direction?, length_class?,
+/// max_age_ms?}`: one on-demand RF telemetry snapshot for a directed
+/// (observer, peer) link. No ACL grant needed (diagnostics class).
+/// Answers within `telemetry::API_WAIT_MS` — a mesh refusal arrives as
+/// `outcome:reject`, never an error.
+fn diagnostics_snapshot<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    use routeloom_protocol::telemetry::{
+        DIRECTION_EGRESS, DIRECTION_INGRESS, LENGTH_CLASS_PEER_SUMMARY, MAX_AGE_LIMIT_MS,
+    };
+    for (key, _) in params.object_entries() {
+        if !matches!(
+            key.as_str(),
+            "observer" | "peer" | "direction" | "length_class" | "max_age_ms"
+        ) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let observer = params
+        .get("observer")
+        .and_then(Json::as_str)
+        .and_then(parse_hex_u64)
+        .filter(|id| *id != 0 && *id != u64::MAX)
+        .ok_or_else(|| {
+            ApiError::simple(
+                "INVALID_ARGUMENT",
+                "observer must be a non-reserved 16-hex node id",
+            )
+        })?;
+    let peer = params
+        .get("peer")
+        .and_then(Json::as_str)
+        .and_then(parse_hex_u64)
+        .filter(|id| *id != 0 && *id != u64::MAX)
+        .ok_or_else(|| {
+            ApiError::simple(
+                "INVALID_ARGUMENT",
+                "peer must be a non-reserved 16-hex node id",
+            )
+        })?;
+    let direction = match params.get("direction") {
+        None | Some(Json::Null) => DIRECTION_EGRESS,
+        Some(value) => match value.as_str() {
+            Some("egress") => DIRECTION_EGRESS,
+            Some("ingress") => DIRECTION_INGRESS,
+            _ => {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    "direction must be \"egress\" or \"ingress\"",
+                ));
+            }
+        },
+    };
+    let length_class = match params.get("length_class") {
+        None | Some(Json::Null) => LENGTH_CLASS_PEER_SUMMARY,
+        Some(value) => match value.as_u64() {
+            Some(0) => 0,
+            Some(1) => 1,
+            Some(2) => 2,
+            Some(255) => LENGTH_CLASS_PEER_SUMMARY,
+            _ => {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    "length_class must be 0, 1, 2 or 255 (peer summary)",
+                ));
+            }
+        },
+    };
+    let max_age_ms = match params.get("max_age_ms") {
+        None | Some(Json::Null) => 0,
+        Some(value) => match value.as_u64() {
+            Some(ms) if ms <= u64::from(MAX_AGE_LIMIT_MS) => ms as u32,
+            _ => {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    "max_age_ms must be 0..3000 (0 = latest)",
+                ));
+            }
+        },
+    };
+    let session = telemetry_gate(ctx)?;
+    let token = ctx
+        .telemetry_ops
+        .submit(
+            crate::telemetry::TelemetryQueryParams {
+                observer,
+                peer,
+                direction,
+                length_class,
+                max_age_ms,
+            },
+            session,
+            ctx.now_ms,
+        )
+        .map_err(|_| ApiError {
+            code: "NO_CAPACITY",
+            message: "too many telemetry queries in flight; retry when one settles".to_string(),
+            extra_fields: format!("\"in_flight\":{}", ctx.telemetry_ops.pending()),
+            retryable: true,
+        })?;
+    let outcome = ctx
+        .telemetry_ops
+        .wait_for(token, Duration::from_millis(crate::telemetry::API_WAIT_MS))
+        .ok_or_else(|| ApiError {
+            code: "TIMEOUT",
+            message: format!(
+                "telemetry query did not resolve inside {} ms",
+                crate::telemetry::API_WAIT_MS
+            ),
+            extra_fields: format!("\"observer\":\"{observer:016x}\",\"peer\":\"{peer:016x}\""),
+            retryable: true,
+        })?;
+    telemetry_outcome_result(outcome, observer, peer)
 }
 
 // --- group_delivery_v1 (group.send / group.get) --------------------------
@@ -3689,6 +3952,10 @@ mod tests {
         Box::leak(Box::new(crate::group::GroupOps::default()))
     }
 
+    fn leaked_telemetry_ops() -> &'static crate::telemetry::TelemetryOps {
+        Box::leak(Box::new(crate::telemetry::TelemetryOps::default()))
+    }
+
     fn leaked_hub() -> &'static SubscriptionHub {
         Box::leak(Box::new(SubscriptionHub::default()))
     }
@@ -3731,6 +3998,7 @@ mod tests {
             node_table: &EMPTY_NODE_TABLE,
             config_ops,
             group_ops: leaked_group_ops(),
+            telemetry_ops: leaked_telemetry_ops(),
             site: None,
             config_authority,
             config_profile: crate::config::ISSUE_PROFILE_DEV,
@@ -6759,6 +7027,185 @@ mod tests {
 
     fn group_line(method: &str, params: &str) -> String {
         format!("{{\"v\":1,\"request_id\":\"g\",\"method\":\"{method}\",\"params\":{params}}}")
+    }
+
+    fn snapshot_line(params: &str) -> String {
+        format!(
+            "{{\"v\":1,\"request_id\":\"t\",\"method\":\"diagnostics.snapshot\",\"params\":{params}}}"
+        )
+    }
+
+    fn snapshot_params() -> String {
+        "{\"observer\":\"0000000000000abc\",\"peer\":\"0000000000000005\"}".to_string()
+    }
+
+    #[test]
+    fn diagnostics_snapshot_is_advertised() {
+        let (acl, log, store, limiter) = test_env();
+        let line = b"{\"v\":1,\"request_id\":\"c\",\"method\":\"capabilities.get\"}";
+        let c = ctx(None, &acl, &log, &store, &limiter, 0);
+        let response = handle(line, &c);
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let methods = parsed.get("result").unwrap().get("methods").unwrap();
+        assert_eq!(
+            methods.get("diagnostics.snapshot").and_then(Json::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn diagnostics_snapshot_rejects_bad_params() {
+        let (acl, log, store, limiter) = test_env();
+        let base = ctx(None, &acl, &log, &store, &limiter, 0);
+        let c = ApiContext {
+            session: group_session(0xFFFF_FFFF, 1),
+            ..base
+        };
+        let cases = [
+            "{\"observer\":\"0000000000000abc\"}",
+            "{\"peer\":\"0000000000000005\"}",
+            "{\"observer\":\"zz\",\"peer\":\"0000000000000005\"}",
+            "{\"observer\":\"0000000000000000\",\"peer\":\"0000000000000005\"}",
+            "{\"observer\":\"0000000000000abc\",\"peer\":\"ffffffffffffffff\"}",
+            "{\"observer\":\"0000000000000abc\",\"peer\":\"0000000000000005\",\"direction\":\"sideways\"}",
+            "{\"observer\":\"0000000000000abc\",\"peer\":\"0000000000000005\",\"length_class\":3}",
+            "{\"observer\":\"0000000000000abc\",\"peer\":\"0000000000000005\",\"max_age_ms\":3001}",
+            "{\"observer\":\"0000000000000abc\",\"peer\":\"0000000000000005\",\"bogus\":1}",
+        ];
+        for params in cases {
+            let line = snapshot_line(params);
+            let response = handle(line.as_bytes(), &c);
+            assert!(
+                response.contains("\"code\":\"INVALID_ARGUMENT\""),
+                "{params}: {response}"
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostics_snapshot_gates_session_and_capability() {
+        let (acl, log, store, limiter) = test_env();
+        let line = snapshot_line(&snapshot_params());
+        // No session at all.
+        let c = ctx(None, &acl, &log, &store, &limiter, 0);
+        let response = handle(line.as_bytes(), &c);
+        assert!(
+            response.contains("\"code\":\"GATEWAY_UNAVAILABLE\""),
+            "{response}"
+        );
+        // Session without the diagnostics bit.
+        let c = ApiContext {
+            session: group_session(0x04, 1),
+            ..ctx(None, &acl, &log, &store, &limiter, 0)
+        };
+        let response = handle(line.as_bytes(), &c);
+        assert!(response.contains("\"code\":\"UNSUPPORTED\""), "{response}");
+    }
+
+    #[test]
+    fn telemetry_outcomes_map_honestly() {
+        use crate::telemetry::QueryOutcome;
+        use routeloom_protocol::telemetry::decode_telemetry_snapshot;
+        // A snapshot is a successful query with the evidence inline.
+        let body = hex_bytes("010400000000004d00000000000000c300000000deadbeef00000000000000050000000700000003000000010b00011300000000075bcd15000007d000000028c9b0ce00c40000000000000c00000064000000600000000300000001000000040000005f0000000200000001000004d20000162e000023340000000200000200");
+        let snapshot = decode_telemetry_snapshot(&body).unwrap();
+        let result = match telemetry_outcome_result(QueryOutcome::Snapshot(snapshot), 0x0abc, 0x05)
+        {
+            Ok(result) => result,
+            Err(error) => panic!("expected snapshot ok: {}", error.message),
+        };
+        assert!(result.contains("\"outcome\":\"snapshot\""), "{result}");
+        assert!(result.contains("\"sample_age_ms\":40"), "{result}");
+        // A mesh refusal is data, not an error.
+        let reject = routeloom_protocol::telemetry::DiagnosticReject {
+            request_id: 42,
+            reason: routeloom_protocol::telemetry::RejectReason::NoPeer,
+            observer: 0x0abc,
+            detail: 0,
+        };
+        let result = match telemetry_outcome_result(QueryOutcome::Reject(reject), 0x0abc, 0x05) {
+            Ok(result) => result,
+            Err(error) => panic!("expected reject ok: {}", error.message),
+        };
+        assert!(result.contains("\"outcome\":\"reject\""), "{result}");
+        assert!(result.contains("\"reason\":\"NO_PEER\""), "{result}");
+        // Everything else is the honest error for the missing answer.
+        let cases = [
+            (
+                QueryOutcome::Device(routeloom_protocol::host_ops::ConfigOpsResult::Busy),
+                "\"code\":\"NO_CAPACITY\"",
+            ),
+            (
+                QueryOutcome::Device(routeloom_protocol::host_ops::ConfigOpsResult::NoRoute),
+                "\"code\":\"NO_ROUTE\"",
+            ),
+            (QueryOutcome::Timeout, "\"code\":\"TIMEOUT\""),
+            (
+                QueryOutcome::SessionLost,
+                "\"code\":\"GATEWAY_UNAVAILABLE\"",
+            ),
+            (
+                QueryOutcome::DecodeError("truncated".to_string()),
+                "\"code\":\"INDETERMINATE\"",
+            ),
+            (QueryOutcome::ErrorFrame(7), "\"code\":\"INDETERMINATE\""),
+        ];
+        for (outcome, code) in cases {
+            let error = telemetry_outcome_result(outcome, 0x0abc, 0x05).unwrap_err();
+            let response = error_response(Some("t"), &error);
+            assert!(response.contains(code), "{code}: {response}");
+            assert!(
+                response.contains("\"observer\":\"0000000000000abc\""),
+                "{response}"
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostics_snapshot_round_trip_through_the_table() {
+        // The method submits and waits; a 0x31 posted from another thread
+        // (here the test thread, standing in for the USB read loop)
+        // resolves it with the snapshot inline.
+        let ops: &'static crate::telemetry::TelemetryOps = leaked_telemetry_ops();
+        let line = snapshot_line(&snapshot_params());
+        let (acl, log, store, limiter) = test_env();
+        let answer = std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                let c = ApiContext {
+                    session: group_session(0xFFFF_FFFF, 1),
+                    telemetry_ops: ops,
+                    ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+                };
+                handle(line.as_bytes(), &c)
+            });
+            let request = {
+                let mut request = None;
+                for _ in 0..500 {
+                    if let Some(token) = ops.tokens().first() {
+                        request = ops.request_for(*token);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                request.expect("the method submits a query")
+            };
+            let mut body = vec![0x01, 0x31, 0x00, 0x8c, 0x00, 0x00];
+            body.extend_from_slice(&0x0abc_u64.to_be_bytes());
+            body.extend_from_slice(&128_u16.to_be_bytes());
+            body.extend_from_slice(&hex_bytes("010400000000004d00000000000000c300000000deadbeef00000000000000050000000700000003000000010b00011300000000075bcd15000007d000000028c9b0ce00c40000000000000c00000064000000600000000300000001000000040000005f0000000200000001000004d20000162e000023340000000200000200"));
+            assert!(ops.post_reply(request, body));
+            waiter.join().unwrap()
+        });
+        assert!(answer.contains("\"ok\":true"), "{answer}");
+        assert!(answer.contains("\"outcome\":\"snapshot\""), "{answer}");
+        assert!(answer.contains("\"mac_fail\":3"), "{answer}");
+    }
+
+    fn hex_bytes(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     const ALARM_PARAMS: &str = "{\"network\":\"0000000000000001\",\"group\":\"ALL\",\"key\":\"000102030405060708090a0b0c0d0e0f\",\"payload_hex\":\"50554d5033204f56455254454d50\",\"payload_len\":14,\"options\":{\"priority\":\"URGENT\",\"ttl_ms\":5000,\"hop_limit\":10}}";

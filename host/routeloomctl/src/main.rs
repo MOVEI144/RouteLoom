@@ -35,9 +35,9 @@ fn api_response_is_error(command: &str, response: &str) -> bool {
     };
     let after_id = if let Some(rest) = rest.strip_prefix("null") {
         rest
-    } else if rest.starts_with('"') {
+    } else if let Some(inner) = rest.strip_prefix('"') {
         // Request ids are `ctl-<pid>`; still skip escapes honestly.
-        let mut chars = rest[1..].chars();
+        let mut chars = inner.chars();
         let mut closed = false;
         let mut bytes = 1;
         while let Some(c) = chars.next() {
@@ -63,13 +63,8 @@ fn api_response_is_error(command: &str, response: &str) -> bool {
     let Some(flag) = after_id.strip_prefix(",\"ok\":") else {
         return true;
     };
-    if flag.starts_with("false") {
-        true
-    } else if flag.starts_with("true") {
-        false
-    } else {
-        true
-    }
+    // Only an explicit `"ok":true` clears the error verdict.
+    !flag.starts_with("true")
 }
 
 /// Sends one `command` line and reads the first response line, bounded by
@@ -103,7 +98,7 @@ fn usage() {
         "Read-only daemon diagnostics: adapter | events [--follow [--kinds k1,k2]] | deliveries"
     );
     eprintln!(
-        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-retry --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-recover --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --mode adopt-known|reprovision --new-store-generation <u32> --new-revision <u64> [--snapshot-hash <64hex>] [--baseline <hex>]|config-recovery-info --network <16hex> --target <16hex> --config-namespace <u16>|trust-install --network <16hex> --target <16hex> --manifest <file>|trust-status --network <16hex> --target <16hex>|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)|group-send --network <16hex> --group <1-65535|ALL> --payload <hex> [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered] [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]|group-get --id <grp-opid> [--wait-ms 0-15000]"
+        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-retry --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-recover --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --mode adopt-known|reprovision --new-store-generation <u32> --new-revision <u64> [--snapshot-hash <64hex>] [--baseline <hex>]|config-recovery-info --network <16hex> --target <16hex> --config-namespace <u16>|trust-install --network <16hex> --target <16hex> --manifest <file>|trust-status --network <16hex> --target <16hex>|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)|telemetry --observer <16hex> --peer <16hex> [--direction egress|ingress] [--length-class 0|1|2|255] [--max-age-ms 0-3000]|group-send --network <16hex> --group <1-65535|ALL> --payload <hex> [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered] [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]|group-get --id <grp-opid> [--wait-ms 0-15000]"
     );
     eprintln!(
         "routeloomctl provision-keygen --root-id <16hex> --out <key.json>|provision-authority-keygen --authority-id <16hex> --out <key.json>|provision-image --spec <image-spec.json> --out <image.rlt1> [--nvs-dir <dir> [--credential <cred-spec.json>]]|provision-manifest --image <spec.json|image.rlt1> --key <root.key> --out <manifest.rtm1>|provision-verify --manifest <file> --current <spec.json|image.rlt1>  (local provisioning — no daemon socket)"
@@ -445,6 +440,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [name, rest @ ..] if name == "nodes" => nodes_command(rest)?,
         [name, rest @ ..] if name == "node-get" => node_get_command(rest)?,
         [name] if name == "node-events" => node_events_request(),
+        [name, rest @ ..] if name == "telemetry" => telemetry_command(rest)?,
         [name, rest @ ..] if name == "group-send" => group_send_command(rest)?,
         [name, rest @ ..] if name == "group-get" => group_get_command(rest)?,
         [name, rest @ ..] if name == "site" => site_command(rest)?,
@@ -546,8 +542,71 @@ fn node_get_command(args: &[String]) -> Result<String, Box<dyn std::error::Error
     ))
 }
 
-/// `node-events`: an events-stream subscription filtered to the membership
-/// kinds; the connection stays open and notifications stream to stdout.
+/// `telemetry --observer <16hex> --peer <16hex> [--direction
+/// egress|ingress] [--length-class 0|1|2|255] [--max-age-ms 0-3000]`: one
+/// on-demand RF snapshot for a directed (observer, peer) link. Only
+/// explicit options are sent — the daemon owns the defaults (egress,
+/// peer summary, latest).
+fn telemetry_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut observer = None;
+    let mut peer = None;
+    let mut direction = None;
+    let mut length_class = None;
+    let mut max_age_ms = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--observer" => {
+                observer = Some(want_hex16(
+                    "--observer",
+                    opt_value(&mut args, "--observer")?,
+                )?)
+            }
+            "--peer" => peer = Some(want_hex16("--peer", opt_value(&mut args, "--peer")?)?),
+            "--direction" => {
+                let value = opt_value(&mut args, "--direction")?;
+                if value != "egress" && value != "ingress" {
+                    return Err("telemetry --direction must be egress or ingress".into());
+                }
+                direction = Some(value);
+            }
+            "--length-class" => {
+                let value = opt_value(&mut args, "--length-class")?;
+                if !matches!(value.as_str(), "0" | "1" | "2" | "255") {
+                    return Err("telemetry --length-class must be 0, 1, 2 or 255".into());
+                }
+                length_class = Some(value);
+            }
+            "--max-age-ms" => {
+                let value = opt_value(&mut args, "--max-age-ms")?;
+                let ms: u32 = value
+                    .parse()
+                    .ok()
+                    .filter(|ms| *ms <= 3000)
+                    .ok_or("telemetry --max-age-ms must be 0-3000")?;
+                max_age_ms = Some(ms.to_string());
+            }
+            other => return Err(format!("unknown telemetry option: {other}").into()),
+        }
+    }
+    let observer: String = observer.ok_or("telemetry requires --observer <16hex>")?;
+    let peer: String = peer.ok_or("telemetry requires --peer <16hex>")?;
+    let mut params = format!("\"observer\":\"{observer}\",\"peer\":\"{peer}\"");
+    if let Some(direction) = direction {
+        params.push_str(&format!(",\"direction\":\"{direction}\""));
+    }
+    if let Some(length_class) = length_class {
+        params.push_str(&format!(",\"length_class\":{length_class}"));
+    }
+    if let Some(max_age_ms) = max_age_ms {
+        params.push_str(&format!(",\"max_age_ms\":{max_age_ms}"));
+    }
+    Ok(format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"diagnostics.snapshot\",\"params\":{{{params}}}}}",
+        request_id(),
+    ))
+}
+
 /// Verbs that hold the connection after the first line: every further
 /// line is one subscription notification, printed until interrupted.
 fn is_streaming_command(remaining: &[String]) -> bool {
@@ -610,6 +669,8 @@ fn events_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>>
     ))
 }
 
+/// `node-events`: an events-stream subscription filtered to the membership
+/// kinds; the connection stays open and notifications stream to stdout.
 fn node_events_request() -> String {
     format!(
         "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"messages.subscribe\",\"params\":{{\"stream\":\"events\",\"from\":\"latest\",\"filter\":{{\"kinds\":[\"node_joined\",\"node_left\",\"link_changed\"]}}}}}}",
@@ -2284,6 +2345,83 @@ mod tests {
         assert!(!is_streaming_command(&args(&["events"])));
         assert!(!is_streaming_command(&args(&["status"])));
         assert!(!is_streaming_command(&args(&[])));
+    }
+
+    #[test]
+    fn telemetry_builds_snapshot_line() {
+        let line = telemetry_command(&args(&[
+            "--observer",
+            "0000000000000ABC",
+            "--peer",
+            "0000000000000005",
+        ]))
+        .unwrap();
+        assert!(line.starts_with("API1 {"), "{line}");
+        assert!(
+            line.contains("\"method\":\"diagnostics.snapshot\""),
+            "{line}"
+        );
+        assert!(line.contains("\"observer\":\"0000000000000abc\""), "{line}");
+        assert!(line.contains("\"peer\":\"0000000000000005\""), "{line}");
+        // Defaults stay daemon-side: only explicit options are sent.
+        assert!(!line.contains("direction"), "{line}");
+        let line = telemetry_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--peer",
+            "0000000000000005",
+            "--direction",
+            "ingress",
+            "--length-class",
+            "1",
+            "--max-age-ms",
+            "500",
+        ]))
+        .unwrap();
+        assert!(line.contains("\"direction\":\"ingress\""), "{line}");
+        assert!(line.contains("\"length_class\":1"), "{line}");
+        assert!(line.contains("\"max_age_ms\":500"), "{line}");
+        assert!(routeloom_json::parse(line.strip_prefix("API1 ").unwrap()).is_ok());
+        assert!(telemetry_command(&args(&["--observer", "0000000000000abc"])).is_err());
+        assert!(telemetry_command(&args(&["--peer", "0000000000000005"])).is_err());
+        assert!(
+            telemetry_command(&args(&["--observer", "zz", "--peer", "0000000000000005"])).is_err()
+        );
+        assert!(telemetry_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--peer",
+            "0000000000000005",
+            "--direction",
+            "up"
+        ]))
+        .is_err());
+        assert!(telemetry_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--peer",
+            "0000000000000005",
+            "--length-class",
+            "3"
+        ]))
+        .is_err());
+        assert!(telemetry_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--peer",
+            "0000000000000005",
+            "--max-age-ms",
+            "3001"
+        ]))
+        .is_err());
+        assert!(telemetry_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--peer",
+            "0000000000000005",
+            "--bogus"
+        ]))
+        .is_err());
     }
 
     #[test]

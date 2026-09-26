@@ -13,6 +13,7 @@ mod send_store;
 mod site;
 mod sqlite_store;
 mod subscribe;
+mod telemetry;
 
 use acl::Acl;
 use receive_log::{Ingress, ReceiveLog};
@@ -826,6 +827,10 @@ struct State {
     /// api1 `group.send`/`group.get` submit and read here, the group lane
     /// thread drives the device exchange and emits `group_settled`.
     group_ops: group::GroupOps,
+    /// m1 diagnostics query table (HostOps 0x30/0x31): api1
+    /// `diagnostics.snapshot` submits and waits here, the telemetry lane
+    /// thread drives the device exchange.
+    telemetry_ops: telemetry::TelemetryOps,
     /// SDK v1 Site Authority (--site-authority DIR): EDHOC Responder, member
     /// ledger and the KGuard decision surface. None when not configured.
     site: Option<Arc<site::SiteService>>,
@@ -1254,6 +1259,11 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                     .group_ops
                     .post_error(request, code.unwrap_or(0), reason.clone());
             }
+            if let Some(request) = request.filter(|r| telemetry::owns_request(*r)) {
+                // A 0x30 the device refused at the frame level: the query
+                // resolves as an error, never a silent timeout.
+                state.telemetry_ops.post_error(request, code.unwrap_or(0));
+            }
             if let Some(request) = request {
                 // Error requests share the session request space (credit,
                 // auth, data): only transition a delivery we actually track —
@@ -1357,6 +1367,12 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                     "\"kind\":\"rx_drop\",\"reason\":\"node_inbox_full\"".to_string(),
                 );
             }
+        }
+        // m1 diagnostics 0x31 replies belong to the telemetry lane. A
+        // refused post is a stale answer past our timeout — expected and
+        // silent, never ring spam.
+        FrameKind::HostOps if telemetry::owns(body) => {
+            state.telemetry_ops.post_reply(frame.request, body.to_vec());
         }
         FrameKind::HostOps if site::owns(body) => {
             if !state.site_inbox.post(frame.request, body.to_vec()) {
@@ -2207,6 +2223,7 @@ fn serve_client(
                 node_table: &state.node_table,
                 config_ops: &state.config_ops,
                 group_ops: &state.group_ops,
+                telemetry_ops: &state.telemetry_ops,
                 site: state.site.as_deref(),
                 config_authority: state.config_authority,
                 config_profile: state.config_profile,
@@ -2840,6 +2857,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let group_state = Arc::clone(&state);
         let group_outbound = outbound_tx.clone();
         thread::spawn(move || group::group_loop(group_state, group_outbound));
+    }
+    // m1 diagnostics lane: issues 0x30 telemetry queries for
+    // `diagnostics.snapshot` and resolves them from the 0x31 answers.
+    // Idle while nothing is submitted; same writer queue.
+    {
+        let telemetry_state = Arc::clone(&state);
+        let telemetry_outbound = outbound_tx.clone();
+        thread::spawn(move || telemetry::telemetry_loop(telemetry_state, telemetry_outbound));
     }
     if let Some(device_path) = device {
         let writer_slot: Arc<Mutex<Option<File>>> = Arc::new(Mutex::new(None));
