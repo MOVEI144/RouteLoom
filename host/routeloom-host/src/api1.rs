@@ -74,6 +74,14 @@ pub const REQUEST_MAX_BYTES: usize = 8192;
 pub const RESPONSE_MAX_BYTES: usize = 65536;
 pub const JSON_MAX_DEPTH: usize = 8;
 pub const REQUEST_ID_MAX: usize = 64;
+/// Capabilities document version: clients key their parsing off this and
+/// ignore unknown fields/methods — never an exact document match.
+/// Additive-only: a removal or rename bumps this and the spec
+/// (docs/spec/host.md §3 records the policy).
+pub const CAPS_VERSION: u32 = 1;
+// USB receive bodies do not carry the gateway's effective security profile
+// or a per-frame origin verification result.
+const RX_ASSURANCE: &str = "\"assurance\":{\"profile\":\"UNKNOWN\",\"origin\":\"unverified\"}";
 
 /// Per-request inputs the dispatch layer needs. `uid` is the socket peer's
 /// OS credential (None when the platform cannot supply one — default deny).
@@ -439,7 +447,7 @@ fn capabilities<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.retry\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true,\"diagnostics.snapshot\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"site\":{site_caps},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.retry\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true,\"diagnostics.snapshot\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"site\":{site_caps},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known},\"caps_version\":{CAPS_VERSION}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -782,7 +790,7 @@ fn read_result(
 /// notifications. `cursor` is the per-record cursor (seq position).
 pub(crate) fn record_json(record: &RxRecord, cursor: &str) -> String {
     format!(
-        "{{\"v\":1,\"network\":\"{:016x}\",\"gateway\":{},\"origin\":\"{:016x}\",\"message\":{{\"session\":\"{:08x}\",\"sequence\":\"{:016x}\"}},\"payload_hex\":\"{}\",\"payload_len\":{},\"cursor\":\"{}\",\"endpoint_kind\":\"gateway_mirror\",\"evidence\":\"HOST_RAM_RETAINED\",\"assurance\":{{\"profile\":\"EXPERIMENTAL_DEV_PSK\",\"origin\":\"group-key-claim\"}}}}",
+        "{{\"v\":1,\"network\":\"{:016x}\",\"gateway\":{},\"origin\":\"{:016x}\",\"message\":{{\"session\":\"{:08x}\",\"sequence\":\"{:016x}\"}},\"payload_hex\":\"{}\",\"payload_len\":{},\"cursor\":\"{}\",\"endpoint_kind\":\"gateway_mirror\",\"evidence\":\"HOST_RAM_RETAINED\",{}}}",
         record.network,
         record.gateway.map_or_else(
             || "null".to_string(),
@@ -794,6 +802,7 @@ pub(crate) fn record_json(record: &RxRecord, cursor: &str) -> String {
         crate::receive_log::hex_lower(&record.payload),
         record.payload.len(),
         cursor,
+        RX_ASSURANCE,
     )
 }
 
@@ -802,7 +811,7 @@ pub(crate) fn record_json(record: &RxRecord, cursor: &str) -> String {
 /// sha256 so a metadata client can still deduplicate/audit.
 pub(crate) fn record_meta_json(record: &RxRecord, cursor: &str) -> String {
     format!(
-        "{{\"v\":1,\"network\":\"{:016x}\",\"gateway\":{},\"origin\":\"{:016x}\",\"message\":{{\"session\":\"{:08x}\",\"sequence\":\"{:016x}\"}},\"payload_len\":{},\"payload_sha256\":\"{}\",\"cursor\":\"{}\",\"endpoint_kind\":\"gateway_mirror\",\"evidence\":\"HOST_RAM_RETAINED\",\"assurance\":{{\"profile\":\"EXPERIMENTAL_DEV_PSK\",\"origin\":\"group-key-claim\"}}}}",
+        "{{\"v\":1,\"network\":\"{:016x}\",\"gateway\":{},\"origin\":\"{:016x}\",\"message\":{{\"session\":\"{:08x}\",\"sequence\":\"{:016x}\"}},\"payload_len\":{},\"payload_sha256\":\"{}\",\"cursor\":\"{}\",\"endpoint_kind\":\"gateway_mirror\",\"evidence\":\"HOST_RAM_RETAINED\",{}}}",
         record.network,
         record.gateway.map_or_else(
             || "null".to_string(),
@@ -814,6 +823,7 @@ pub(crate) fn record_meta_json(record: &RxRecord, cursor: &str) -> String {
         record.payload.len(),
         hex_lower(&canonical::sha256(&record.payload)),
         cursor,
+        RX_ASSURANCE,
     )
 }
 
@@ -1996,36 +2006,90 @@ fn nodes_get<S: OperationStore>(
 /// gateway whose HelloAck advertises m1_diagnostics_v1. No ACL grant is
 /// needed (diagnostics class, like link.get) — snapshots carry RF
 /// observations, never payloads or secrets.
-fn telemetry_gate<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Result<u64, ApiError> {
-    let (authenticated, session, capability) = {
+/// Method-specific wording for the shared live-gateway gate, so
+/// errors keep naming the refused method.
+struct GateScope {
+    /// "telemetry queries" / "group sends" — completes "…; {action} are
+    /// not queued across a disconnect".
+    action: &'static str,
+    /// Network the live session must serve, when the method is
+    /// network-scoped (`group.send`); mesh-relayed queries pass None.
+    network: Option<u64>,
+    /// `required_capability` value for the UNSUPPORTED arm.
+    required_capability: &'static str,
+    /// "(HelloAck capability bit 5 with host_ops_v1)"-style hint.
+    capability_hint: &'static str,
+    capable: fn(u32) -> bool,
+}
+
+/// The live-gateway gate shared by capability-gated methods
+/// (`diagnostics.snapshot`, `group.send`): an authenticated session that
+/// serves the method's network when scoped and advertises the required
+/// capability. Returns the session id the lane binds its exchange to.
+fn live_gateway_gate<S: OperationStore>(
+    ctx: &ApiContext<'_, S>,
+    scope: GateScope,
+) -> Result<u64, ApiError> {
+    let (authenticated, session, session_network, capability) = {
         let info = ctx.session.lock().expect("session poisoned");
         (
             info.authenticated && info.id.is_some(),
             info.id.unwrap_or(0),
+            info.network,
             info.capability,
         )
     };
     if !authenticated {
         return Err(ApiError {
             code: "GATEWAY_UNAVAILABLE",
-            message: "no authenticated gateway session; telemetry queries are not queued across a disconnect"
-                .to_string(),
+            message: format!(
+                "no authenticated gateway session; {} are not queued across a disconnect",
+                scope.action
+            ),
             extra_fields: "\"reason\":\"no_session\"".to_string(),
             retryable: true,
         });
     }
-    if !capability.is_some_and(crate::telemetry::telemetry_capable) {
+    if scope
+        .network
+        .is_some_and(|network| session_network != Some(network))
+    {
+        return Err(ApiError {
+            code: "GATEWAY_UNAVAILABLE",
+            message: "the attached gateway serves a different network".to_string(),
+            extra_fields: "\"reason\":\"network_mismatch\"".to_string(),
+            retryable: true,
+        });
+    }
+    if !capability.is_some_and(scope.capable) {
         return Err(ApiError {
             code: "UNSUPPORTED",
-            message: "the attached gateway does not advertise m1_diagnostics_v1 (HelloAck capability bit 5 with host_ops_v1)".to_string(),
+            message: format!(
+                "the attached gateway does not advertise {} ({})",
+                scope.required_capability, scope.capability_hint
+            ),
             extra_fields: format!(
-                "\"required_capability\":\"m1_diagnostics_v1\",\"capability\":{}",
+                "\"required_capability\":\"{}\",\"capability\":{}",
+                scope.required_capability,
                 capability.map_or_else(|| "null".to_string(), |c| c.to_string())
             ),
             retryable: false,
         });
     }
     Ok(session)
+}
+
+fn telemetry_gate<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Result<u64, ApiError> {
+    live_gateway_gate(
+        ctx,
+        GateScope {
+            action: "telemetry queries",
+            network: None,
+            required_capability: "m1_diagnostics_v1",
+            capability_hint: "HelloAck capability bit 5 with host_ops_v1",
+            capable: crate::telemetry::telemetry_capable,
+        },
+    )
 }
 
 /// Maps a resolved query onto the API answer. A snapshot or a mesh
@@ -2410,44 +2474,17 @@ fn group_payload(params: &Json) -> Result<Vec<u8>, ApiError> {
 
 /// The live-gateway gates for a NEW group send (replays skip them).
 fn group_gate<S: OperationStore>(ctx: &ApiContext<'_, S>, network: u64) -> Option<ApiError> {
-    let (authenticated, session_network, capability) = {
-        let info = ctx.session.lock().expect("session poisoned");
-        (
-            info.authenticated && info.id.is_some(),
-            info.network,
-            info.capability,
-        )
-    };
-    if !authenticated {
-        return Some(ApiError {
-            code: "GATEWAY_UNAVAILABLE",
-            message:
-                "no authenticated gateway session; group sends are not queued across a disconnect"
-                    .to_string(),
-            extra_fields: "\"reason\":\"no_session\"".to_string(),
-            retryable: true,
-        });
-    }
-    if session_network != Some(network) {
-        return Some(ApiError {
-            code: "GATEWAY_UNAVAILABLE",
-            message: "the attached gateway serves a different network".to_string(),
-            extra_fields: "\"reason\":\"network_mismatch\"".to_string(),
-            retryable: true,
-        });
-    }
-    if !capability.is_some_and(crate::group::group_capable) {
-        return Some(ApiError {
-            code: "UNSUPPORTED",
-            message: "the attached gateway does not advertise group_delivery_v1 (HelloAck capability bit 7 with host_ops_v1)".to_string(),
-            extra_fields: format!(
-                "\"required_capability\":\"group_delivery_v1\",\"capability\":{}",
-                capability.map_or_else(|| "null".to_string(), |c| c.to_string())
-            ),
-            retryable: false,
-        });
-    }
-    None
+    live_gateway_gate(
+        ctx,
+        GateScope {
+            action: "group sends",
+            network: Some(network),
+            required_capability: "group_delivery_v1",
+            capability_hint: "HelloAck capability bit 7 with host_ops_v1",
+            capable: crate::group::group_capable,
+        },
+    )
+    .err()
 }
 
 /// `group.send` params: `{network, group, key, payload_hex, payload_len,
@@ -4199,6 +4236,51 @@ mod tests {
         assert!(response.contains("\"permit_profile\":\"dev-hmac-sha256-16\""));
     }
 
+    #[test]
+    fn capabilities_reports_version_and_keeps_known_keys() {
+        // Clients key their parsing off caps_version and ignore unknown
+        // fields — never an exact document match. This golden pins the
+        // baseline keys: additions are welcome, removals are a break.
+        let acl = Acl::empty();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::test_store());
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let c = ctx(None, &acl, &log, &store, &limiter, 0);
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"c1\",\"method\":\"capabilities.get\"}",
+            &c,
+        );
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let result = parsed.get("result").expect("ok result");
+        assert_eq!(
+            result.get("caps_version").and_then(Json::as_u64),
+            Some(1),
+            "{response}"
+        );
+        let keys: Vec<&str> = result
+            .object_entries()
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect();
+        for key in [
+            "api",
+            "methods",
+            "receive",
+            "send",
+            "config",
+            "nodes",
+            "group",
+            "site",
+            "rx_events_v1",
+            "ingress_loss_observable",
+            "acl_revision",
+            "peer_credential_resolved",
+            "caps_version",
+        ] {
+            assert!(keys.contains(&key), "capabilities dropped {key}: {keys:?}");
+        }
+    }
+
     /// nodes.list / nodes.get JSON shapes against a populated node table:
     /// source block, ascending pagination with `next_after`, the connected
     /// filter, NOT_FOUND for unreported nodes and param validation.
@@ -4396,6 +4478,52 @@ mod tests {
             );
             assert!(response.contains("AuthorizationFailed"), "{response}");
         }
+    }
+
+    #[test]
+    fn messages_read_and_metadata_report_unknown_assurance() {
+        let acl = acl_with(501);
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::test_store());
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        log.lock().unwrap().ingest(
+            Ingress {
+                network: 1,
+                gateway: Some(2),
+                origin: 3,
+                msg_session: 5,
+                msg_seq: 1,
+                payload: vec![1],
+            },
+            100,
+        );
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 200);
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"r\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"earliest\"}}",
+            &c,
+        );
+        assert!(response.contains("\"ok\":true"), "{response}");
+        assert!(
+            response.contains("\"profile\":\"UNKNOWN\",\"origin\":\"unverified\""),
+            "{response}"
+        );
+        // The metadata-only sibling renders the same assurance.
+        let record = RxRecord {
+            seq: 9,
+            network: 1,
+            gateway: Some(2),
+            origin: 3,
+            msg_session: 5,
+            msg_seq: 2,
+            payload: vec![2],
+            stored_ms: 100,
+        };
+        assert!(
+            record_meta_json(&record, "cursor")
+                .contains("\"assurance\":{\"profile\":\"UNKNOWN\",\"origin\":\"unverified\"}"),
+            "{}",
+            record_meta_json(&record, "cursor")
+        );
     }
 
     #[test]

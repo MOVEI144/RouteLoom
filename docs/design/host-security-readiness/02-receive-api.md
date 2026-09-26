@@ -9,10 +9,10 @@
 ## 2. レコードと具体例
 
 ```json
-{"v":1,"network":"0000000000000001","gateway":"0000000000000002","origin":"0000000000000003","message":{"session":"00000004","sequence":"0000000000000005"},"payload_hex":"00ff80","payload_len":3,"cursor":"opaque-token","endpoint_kind":"gateway_mirror","evidence":"HOST_RAM_RETAINED","assurance":{"profile":"EXPERIMENTAL_DEV_PSK","origin":"group-key-claim"}}
+{"v":1,"network":"0000000000000001","gateway":"0000000000000002","origin":"0000000000000003","message":{"session":"00000004","sequence":"0000000000000005"},"payload_hex":"00ff80","payload_len":3,"cursor":"opaque-token","endpoint_kind":"gateway_mirror","evidence":"HOST_RAM_RETAINED","assurance":{"profile":"UNKNOWN","origin":"unverified"}}
 ```
 
-本文はbyte列。非UTF-8や0x00を変換・置換しない。開発共有鍵でのoriginは個体の公開鍵本人確認とは異なるので、assuranceを表示する。本番profileでは認証済みのorigin↔credential bindingから値を生成し、payload内の自己申告をコピーしない。
+本文はbyte列。非UTF-8や0x00を変換・置換しない。現行 USB 受信本文にフレームごとの security profile と origin↔credential 検証結果がないため、assurance は Site Authority／台帳の状態にかかわらず `UNKNOWN`。これは検証失敗ではなく、host に検証証拠が届いていないことを表す。将来は gateway が認証済みの結果を伝え、payload 内の自己申告をコピーしない。
 
 ```text
 API1 {"v":1,"request_id":"r1","method":"messages.read","params":{"network":"0000000000000001","from":"earliest","limit":32}}
