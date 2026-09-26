@@ -86,7 +86,7 @@ RLP1 slot（84B）:
 | D2-d floor/windowは消さない | 削除経路を作らない | C2を満たせないため |
 | D2-e 運用での回復 | 開発network id／PSK domainを全台で切り替え、保守verbで`rlreplay`/`rlcounter`名前空間を明示消去 | 新しい鍵空間になるため旧recordは無意味（明示操作であり自動eraseではない） |
 
-D2-bで1ピアあたり約6 entry（両scopeの`c*`）が回収され、約14 entry/ピアが残る。churnの多い現場ではD2-cの上限に達し得る。**根本解決はD1**：開発Providerも本番と同じRAM context engineへ移し、RLRES1のRMSに開発PSKを使う（EXPERIMENTAL表示は維持）。ただし旧PSK binaryは新版のmigration markerを検査しない。旧版に戻せる間は`security legacy-state purge`を`ERR rollback_unsafe`で拒否し、`c*`/`f*`/`r*`を保持する。旧版復帰を禁止する移行が成立するまで消去しない（[08](08-implementation-plan.md) P4-3）。
+D2-bで1ピアあたり約6 entry（両scopeの`c*`）が回収され、約14 entry/ピアが残る。churnの多い現場ではD2-cの上限に達し得る。**根本解決はD1**：開発Providerも本番と同じRAM context engineへ移し、RLRES1のRMSに開発PSKを使う（EXPERIMENTAL表示は維持）。ただし旧PSK binaryは新版のmigration markerを検査しない。旧版に戻せる間は保守consoleとportable `purge_legacy_state` APIの両方で消去を拒否し、`c*`/`f*`/`r*`を保持する。consoleは`ERR rollback_unsafe`、APIは`RecoveryRequired`を返す。旧版復帰を禁止する移行が成立するまで消去しない（[08](08-implementation-plan.md) P4-3）。
 
 ## 5. NVS entry予算とpartition推奨
 

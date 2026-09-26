@@ -150,12 +150,12 @@ int main() {
   CHECK(port.commit_migration().ok());
   CHECK(port.migration(marker).ok() && marker);
   CHECK(refuse_legacy_boot_after_migration().code == StatusCode::RecoveryRequired);
-  CHECK(purge_legacy_state(port, true, true, result).code == StatusCode::StorageFailure);
+  CHECK(purge_legacy_state(port, true, true, result).code == StatusCode::RecoveryRequired);
   CHECK(erase_calls == 0);
   CHECK(entries[1].live && entries[2].live && entries[3].live);
   rlsec_full = false;
-  CHECK(purge_legacy_state(port, true, true, result).ok());
-  CHECK(result.erased == 3 && result.remaining == 0 && erase_calls == 3);
+  CHECK(purge_legacy_state(port, true, true, result).code == StatusCode::RecoveryRequired);
+  CHECK(entries[1].live && entries[2].live && entries[3].live && erase_calls == 0);
 
   // Marker schema discipline: a wrong magic or a wrong type is a store
   // fault, never absence; only a missing key reads back absent.
@@ -165,17 +165,16 @@ int main() {
   CHECK(port.migration(marker).code == StatusCode::StorageFailure);
   CHECK(!marker);
   CHECK(refuse_legacy_boot_after_migration().code == StatusCode::StorageFailure);
-  CHECK(purge_legacy_state(port, true, true, result).code == StatusCode::StorageFailure);
+  CHECK(purge_legacy_state(port, true, true, result).code == StatusCode::RecoveryRequired);
   entries[0].value = kLegacyMigrationMagic;
   CHECK(port.migration(marker).ok() && marker);
   CHECK(refuse_legacy_boot_after_migration().code == StatusCode::RecoveryRequired);
   invalid_find = true;
-  CHECK(purge_legacy_state(port, true, true, result).code == StatusCode::StorageFailure);
-  CHECK(erase_calls == 3);
+  CHECK(purge_legacy_state(port, true, true, result).code == StatusCode::RecoveryRequired);
+  CHECK(erase_calls == 0);
   invalid_find = false;
-  CHECK(purge_legacy_state(port, true, true, result).ok());
-  CHECK(result.erased == 0 && result.remaining == 0);
-  CHECK(port.erase(sdkv1::LegacyKey{"rlcounter", "c00000001"}).ok());  // idempotent
+  CHECK(purge_legacy_state(port, true, true, result).code == StatusCode::RecoveryRequired);
+  CHECK(entries[1].live && entries[2].live && entries[3].live);
   CHECK(entries[4].live && entries[5].live && entries[6].live && entries[7].live);
   entries[0].u32 = false;
   CHECK(port.migration(marker).code == StatusCode::StorageFailure);
