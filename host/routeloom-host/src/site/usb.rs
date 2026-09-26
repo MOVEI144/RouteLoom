@@ -1241,12 +1241,15 @@ pub fn site_once(
             // adapter fails any in-flight delivery so its attempts end
             // instead of hanging.
             old.close();
-            let (dropped, _) = service.with(|a| a.drop_gateway_relays(old.gateway()));
+            let gateway = old.gateway();
+            let (dropped, _) = service.with(|a| a.drop_gateway_relays(gateway, now));
             if dropped > 0 {
                 push_event(
                     state,
                     now,
-                    format!("\"kind\":\"site.session_drop\",\"relays\":{dropped}"),
+                    format!(
+                        "\"kind\":\"site.session_drop\",\"gateway\":\"{gateway:016x}\",\"relays\":{dropped}"
+                    ),
                 );
             }
         }
@@ -1325,20 +1328,51 @@ pub fn site_once(
                         }
                     }
                     Ok(UpOutcome::ProxyAbort { key }) => {
-                        push_event(state, now, format!(
-                            "\"kind\":\"join_relay_failed\",\"source\":\"proxy_abort\",\"proxy\":\"{:016x}\",\"relay_id\":{}",
-                            key.proxy, key.relay_id));
-                        service.with(|a| a.fail_attempt(key));
+                        // The abort object names no sub-reason; the source
+                        // is the reason. The event renders from the ended
+                        // attempt, so it carries the stage and links.
+                        let (failure, _) = service.with(|a| {
+                            a.fail_relay(key, "proxy_abort", "proxy aborted".to_string(), now)
+                        });
+                        push_event(
+                            state,
+                            now,
+                            failure.map_or_else(
+                                || {
+                                    super::RelayFailure::for_unknown_key(
+                                        "proxy_abort",
+                                        "proxy aborted".to_string(),
+                                        key,
+                                    )
+                                    .event_fields()
+                                },
+                                |failure| failure.event_fields(),
+                            ),
+                        );
                     }
                     Ok(UpOutcome::Phase5Refused | UpOutcome::CapacityRefused) | Err(_) => {}
                 },
                 Some(SUB_JOIN_RELAY_ABORT) => {
                     if let Ok(AbortOutcome::RelayOver { key, reason }) = adapter.handle_abort(&body)
                     {
-                        push_event(state, now, format!(
-                            "\"kind\":\"join_relay_failed\",\"source\":\"gateway_abort\",\"reason\":\"{:?}\",\"proxy\":\"{:016x}\",\"relay_id\":{}",
-                            reason, key.proxy, key.relay_id));
-                        service.with(|a| a.fail_attempt(key));
+                        let (failure, _) = service.with(|a| {
+                            a.fail_relay(key, "gateway_abort", format!("{reason:?}"), now)
+                        });
+                        push_event(
+                            state,
+                            now,
+                            failure.map_or_else(
+                                || {
+                                    super::RelayFailure::for_unknown_key(
+                                        "gateway_abort",
+                                        format!("{reason:?}"),
+                                        key,
+                                    )
+                                    .event_fields()
+                                },
+                                |failure| failure.event_fields(),
+                            ),
+                        );
                     }
                 }
                 Some(SUB_JOIN_RELAY_RESULT) => {
@@ -1347,10 +1381,24 @@ pub fn site_once(
                         .unwrap_or_else(|_| "Malformed".to_string());
                     if let Ok(ResultOutcome::Failed { key }) = adapter.handle_result(request, &body)
                     {
-                        push_event(state, now, format!(
-                            "\"kind\":\"join_relay_failed\",\"source\":\"down_admission\",\"result\":\"{}\",\"proxy\":\"{:016x}\",\"relay_id\":{}",
-                            result_code, key.proxy, key.relay_id));
-                        service.with(|a| a.fail_attempt(key));
+                        let (failure, _) = service.with(|a| {
+                            a.fail_relay(key, "down_admission", result_code.clone(), now)
+                        });
+                        push_event(
+                            state,
+                            now,
+                            failure.map_or_else(
+                                || {
+                                    super::RelayFailure::for_unknown_key(
+                                        "down_admission",
+                                        result_code,
+                                        key,
+                                    )
+                                    .event_fields()
+                                },
+                                |failure| failure.event_fields(),
+                            ),
+                        );
                     }
                 }
                 _ => {}

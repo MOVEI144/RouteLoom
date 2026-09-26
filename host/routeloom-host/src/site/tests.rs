@@ -414,6 +414,49 @@ fn member_rows(members: usize, active_epoch: u32) -> MemoryStore {
     store
 }
 
+/// A failed relay attempt keeps its reason, stage and links: the USB
+/// lane fails the live attempt on gateway abort, and the failure stays
+/// queryable in `site.status` for triage.
+#[test]
+fn relay_failure_keeps_reason_stage_and_links() {
+    let (service, transport) = service();
+    let node = 0x00A1_0000_0000_7001;
+    let mut device = SimDevice::new(node, 0x79);
+    let (_, outcome, events) = device.start(&service, &transport, T0);
+    assert!(matches!(outcome, Outcome::Waiting));
+    let request = request_id(&events).expect("join request");
+    let keys: Vec<RelayKey> = service.with(|a| a.txns.iter().map(|t| t.key).collect()).0;
+    assert_eq!(keys.len(), 1);
+    let failure = service
+        .with(|a| {
+            a.fail_relay(
+                keys[0],
+                "gateway_abort",
+                "GatewayExpired".to_string(),
+                T0 + 5,
+            )
+        })
+        .0
+        .expect("live attempt");
+    let fields = failure.event_fields();
+    for want in [
+        "\"kind\":\"join_relay_failed\"",
+        "\"source\":\"gateway_abort\"",
+        "\"reason\":\"GatewayExpired\"",
+        "\"gateway\":\"00a1000000000001\"",
+        "\"stage\":\"deciding\"",
+        &format!("\"device\":\"{node:016x}\""),
+        &format!("\"join_request\":\"jr-{request:016x}\""),
+    ] {
+        assert!(fields.contains(want), "{fields}");
+    }
+    let (status, _) = service.with(|a| a.status_json(HostTime::sync(T0 + 5)));
+    assert!(
+        status.contains("\"recent_relay_failures\":[{") && status.contains("GatewayExpired"),
+        "{status}"
+    );
+}
+
 /// V1-H01 (host part) / V1-J03: unassigned → pending → assigned → allow;
 /// the approval is committed before message_4, DAMS agrees on both ends.
 #[test]
