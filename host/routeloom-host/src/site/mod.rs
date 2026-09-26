@@ -254,6 +254,44 @@ pub struct SiteSetup {
     pub channel_epoch: u32,
     /// Gateway NodeIds announced in the SitePackage (1..=4).
     pub gateways: Vec<u64>,
+    /// Only a verified lab manifest may set this. Imported sites leave it absent.
+    pub lab: Option<LabBinding>,
+    pub purpose: SitePurpose,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SitePurpose {
+    Development,
+    Production,
+    Import,
+}
+
+impl SitePurpose {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Development => "development",
+            Self::Production => "production",
+            Self::Import => "import",
+        }
+    }
+}
+
+/// Provision-complete inventory is scoped to the site and to its issuing CA.
+#[derive(Clone, Debug)]
+pub struct LabBinding {
+    pub site_id: u64,
+    pub site_ca_fingerprint: [u8; 32],
+    pub device_ca_fingerprint: [u8; 32],
+    pub sak_fingerprint: [u8; 32],
+    pub inventory_revision: u64,
+    pub inventory: Vec<LabDevice>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LabDevice {
+    pub node: u64,
+    pub kid: [u8; 32],
+    pub role: u8,
 }
 
 struct Identity {
@@ -335,6 +373,8 @@ pub enum DecisionMode {
     Kguard,
     /// Never ask: unapproved devices get PendingAssignment.
     Closed,
+    /// Lab-only, authenticated and provision-complete inventory matching.
+    LabInventory,
 }
 
 /// One `join.policy.set` patch (07 §2): only `Some` fields change, the
@@ -384,6 +424,7 @@ impl JoinPolicy {
             match self.decision_mode {
                 DecisionMode::Kguard => 0,
                 DecisionMode::Closed => 1,
+                DecisionMode::LabInventory => 2,
             },
         ];
         out.extend_from_slice(&self.decision_timeout_ms.to_be_bytes());
@@ -399,15 +440,15 @@ impl JoinPolicy {
             12 => u32::from_be_bytes(bytes[8..12].try_into().ok()?),
             _ => return None,
         };
-        if bytes[0] > 1 || bytes[1] > 1 {
+        if bytes[0] > 1 || bytes[1] > 2 {
             return None;
         }
         let policy = Self {
             zero_touch_open: bytes[0] == 1,
-            decision_mode: if bytes[1] == 0 {
-                DecisionMode::Kguard
-            } else {
-                DecisionMode::Closed
+            decision_mode: match bytes[1] {
+                0 => DecisionMode::Kguard,
+                1 => DecisionMode::Closed,
+                _ => DecisionMode::LabInventory,
             },
             decision_timeout_ms: u16::from_be_bytes([bytes[2], bytes[3]]),
             pending_retry_after_s: u32::from_be_bytes(bytes[4..8].try_into().ok()?),
@@ -436,6 +477,7 @@ impl JoinPolicy {
             match self.decision_mode {
                 DecisionMode::Kguard => "kguard",
                 DecisionMode::Closed => "closed",
+                DecisionMode::LabInventory => "lab_inventory",
             },
             self.decision_timeout_ms,
             self.pending_retry_after_s,
@@ -444,7 +486,7 @@ impl JoinPolicy {
     }
 
     fn asks_kguard(&self) -> bool {
-        self.zero_touch_open && self.decision_mode == DecisionMode::Kguard
+        self.zero_touch_open && self.decision_mode != DecisionMode::Closed
     }
 }
 
@@ -800,6 +842,10 @@ pub struct SiteAuthority {
     sak: Box<dyn RootSigner + Send>,
     store: Box<dyn SiteStore>,
     policy: JoinPolicy,
+    purpose: SitePurpose,
+    lab: Option<LabBinding>,
+    /// Explicit admin enrollment window; never revived by a daemon restart.
+    lab_enrollment_window: Option<(u64, u64)>,
     /// Newest policy generation the proxies confirmed applied (`None` =
     /// never distributed). No distribution vehicle exists yet, so this
     /// stays `None` and the radio intake follows the adoption-time
@@ -954,10 +1000,99 @@ impl SiteAuthority {
             Some(_) => {}
             None => init.meta.push(("site_binding", binding)),
         }
+        // A purpose is stamped with the site's first DB binding, not inferred
+        // from a process flag or its directory name on subsequent starts.
+        if (setup.purpose == SitePurpose::Development) != setup.lab.is_some() {
+            return Err("development purpose requires a verified lab manifest".into());
+        }
+        match snapshot.meta.get("site_purpose") {
+            Some(old) if old == setup.purpose.name().as_bytes() => {}
+            None if !snapshot.meta.contains_key("site_binding")
+                || setup.purpose == SitePurpose::Import =>
+            {
+                init.meta
+                    .push(("site_purpose", setup.purpose.name().as_bytes().to_vec()));
+            }
+            _ => return Err("site purpose disagrees with the immutable DB binding".into()),
+        }
+        // The binding is immutable. A copied manifest or different CA cannot
+        // turn an existing managed database into an auto-approving lab site.
+        let lab = setup.lab.clone();
+        if let Some(lab) = &lab {
+            if lab.site_id != id.site_id
+                || !setup
+                    .site_ca_pubkey
+                    .is_some_and(|ca| sha256(&ca) == lab.site_ca_fingerprint)
+                || sha256(&id.device_ca_pubkey) != lab.device_ca_fingerprint
+                || id.sak_kid != lab.sak_fingerprint
+                || lab.inventory.len() > MEMBER_CAP
+                || lab.inventory.iter().enumerate().any(|(i, row)| {
+                    !id_valid(row.node)
+                        || !matches!(row.role, ROLE_ENDPOINT | ROLE_RELAY | ROLE_GATEWAY)
+                        || (row.role == ROLE_GATEWAY
+                            && !id.gateways[..usize::from(id.gateway_count)].contains(&row.node))
+                        || lab.inventory[..i].iter().any(|prev| prev.node == row.node)
+                })
+            {
+                return Err("invalid development manifest or inventory".into());
+            }
+        }
+        let lab_binding = lab.as_ref().map(|lab| {
+            let mut bytes = lab.site_id.to_be_bytes().to_vec();
+            bytes.extend_from_slice(&lab.site_ca_fingerprint);
+            bytes.extend_from_slice(&lab.device_ca_fingerprint);
+            bytes.extend_from_slice(&lab.sak_fingerprint);
+            sha256(&bytes).to_vec()
+        });
+        match (snapshot.meta.get("lab_binding"), lab_binding) {
+            (Some(stored), Some(expected)) if *stored == expected => {}
+            (None, Some(expected)) if !snapshot.meta.contains_key("site_binding") => {
+                init.meta.push(("lab_binding", expected));
+            }
+            (None, None) => {}
+            _ => return Err("lab manifest does not match the immutable site DB binding".into()),
+        }
+        if let Some(lab) = &lab {
+            let mut bytes = lab.inventory_revision.to_be_bytes().to_vec();
+            for entry in &lab.inventory {
+                bytes.extend_from_slice(&entry.node.to_be_bytes());
+                bytes.extend_from_slice(&entry.kid);
+                bytes.push(entry.role);
+            }
+            let digest = sha256(&bytes);
+            match snapshot.meta.get("lab_inventory") {
+                Some(old) if old.len() == 40 => {
+                    let revision = u64::from_be_bytes(old[..8].try_into().expect("length"));
+                    if lab.inventory_revision < revision
+                        || (lab.inventory_revision == revision && old[8..] != digest)
+                    {
+                        return Err(
+                            "lab inventory revision went backwards or changed in place".into()
+                        );
+                    }
+                    if lab.inventory_revision > revision {
+                        init.meta.push((
+                            "lab_inventory",
+                            bytes[..8].iter().chain(digest.iter()).copied().collect(),
+                        ));
+                    }
+                }
+                None if !snapshot.meta.contains_key("site_binding") => {
+                    init.meta.push((
+                        "lab_inventory",
+                        bytes[..8].iter().chain(digest.iter()).copied().collect(),
+                    ));
+                }
+                _ => return Err("lab inventory DB binding missing or corrupt".into()),
+            }
+        }
         let policy = match snapshot.meta.get("policy") {
             Some(bytes) => JoinPolicy::decode(bytes).ok_or("site store policy corrupt")?,
             None => JoinPolicy::default(),
         };
+        if policy.decision_mode == DecisionMode::LabInventory && lab.is_none() {
+            return Err("lab inventory policy requires a bound development site".into());
+        }
         let mut devices = BTreeMap::new();
         for row in &snapshot.devices {
             devices.insert(row.node, row.clone());
@@ -1322,6 +1457,9 @@ impl SiteAuthority {
         let channel_site_epoch = id.site_claims.site_epoch;
         Ok(Self {
             policy,
+            purpose: setup.purpose,
+            lab,
+            lab_enrollment_window: None,
             policy_distributed_generation: None,
             devices,
             discovered,
@@ -1760,7 +1898,10 @@ impl SiteAuthority {
             kid_conflict,
             now_ms,
         );
-        if !self.policy.asks_kguard() {
+        if !self.policy.asks_kguard()
+            || (self.policy.decision_mode == DecisionMode::LabInventory
+                && !self.lab_enrollment_active())
+        {
             let retry = self.policy.pending_retry_after_s;
             self.finish_verdict(
                 txn,
@@ -1864,6 +2005,31 @@ impl SiteAuthority {
             .join_mono_ms
             .saturating_add(u64::from(self.policy.decision_timeout_ms));
         self.txns.push(txn);
+        if self.policy.decision_mode == DecisionMode::LabInventory {
+            // Only authenticated EAD/DevCert facts reach this point. The
+            // ordinary decide path enforces revocation, capacity and commit.
+            let eligible = self.lab.as_ref().is_some_and(|lab| {
+                lab.inventory.iter().any(|entry| {
+                    entry.node == node
+                        && entry.kid == device.facts.kid
+                        && entry.role == device.facts.requested_role
+                }) && lab.device_ca_fingerprint == sha256(&self.id.device_ca_pubkey)
+            });
+            if eligible && !kid_conflict && !previously_removed {
+                let _ = self.decide(
+                    u32::MAX,
+                    DecideRequest {
+                        join_request_id: request_id,
+                        device: node,
+                        verdict: Verdict::Allow {
+                            role: device.facts.requested_role,
+                        },
+                        key: format!("lab-inventory-v1-{request_id:016x}"),
+                    },
+                    now_ms,
+                );
+            }
+        }
     }
 
     fn store_error(&mut self, now_ms: u64, error: &store::StoreError) {
@@ -2759,6 +2925,16 @@ impl SiteAuthority {
             "next_attempt"
         };
         let mut batch = Batch::default();
+        // Internal actors use their own versioned namespace, never an OS UID.
+        let actor = if principal == u32::MAX {
+            let lab = self
+                .lab
+                .as_ref()
+                .ok_or_else(|| SiteError::new("CONFLICT", "lab policy no longer bound"))?;
+            format!("\"actor\":{{\"type\":\"internal_policy_v1\",\"id\":\"lab_inventory\"}},\"policy_id\":\"lab_inventory\",\"policy_version\":1,\"policy_generation\":{},\"inventory_revision\":{},\"decision_reason\":\"provisioned_inventory_match\"", self.policy.policy_generation, lab.inventory_revision)
+        } else {
+            format!("\"actor\":{{\"type\":\"peer_uid_v1\",\"id\":{principal}}},\"policy_id\":\"manual_v1\",\"policy_version\":1,\"decision_reason\":\"operator_verdict\"")
+        };
         let result;
         type Approved = (
             DeviceRow,
@@ -2977,7 +3153,7 @@ impl SiteAuthority {
                     notice: None,
                 };
                 result = format!(
-                    "{{\"state\":\"committed\",\"join_request_id\":\"{}\",\"device_id\":\"{}\",\"verdict\":\"allow\",\"role\":\"{}\",\"generation\":{generation},\"member_cert_serial\":{serial},\"operation_id\":\"{}\",\"applied\":\"{applied}\"}}",
+                    "{{\"state\":\"committed\",\"join_request_id\":\"{}\",\"device_id\":\"{}\",\"verdict\":\"allow\",\"role\":\"{}\",\"generation\":{generation},\"member_cert_serial\":{serial},\"operation_id\":\"{}\",\"applied\":\"{applied}\",{actor}}}",
                     request_token(open.id),
                     h16(row.node),
                     role_name(role),
@@ -3019,11 +3195,16 @@ impl SiteAuthority {
                         .push((DocKind::Operation, h16(joined.id), Some(joined.doc())));
                 }
                 let evicted = self.operation_doc(&mut batch, &op)?;
+                batch.approval_audit.push((op.id, format!(
+                    "{{\"operation_id\":\"{}\",\"join_request_id\":\"{}\",\"attempt\":{},\"device_id\":\"{}\",\"kid\":\"{}\",\"role\":\"{}\",{actor}}}",
+                    op_token(op.id), request_token(open.id), open.attempt,
+                    h16(row.node), hex_lower(&row.kid), role_name(role)
+                )));
                 approved = Some((row, ledger, op, joined_target, joined_cutover, evicted));
             }
             _ => {
                 result = format!(
-                    "{{\"state\":\"recorded\",\"join_request_id\":\"{}\",\"device_id\":\"{}\",{},\"applied\":\"{applied}\"}}",
+                    "{{\"state\":\"recorded\",\"join_request_id\":\"{}\",\"device_id\":\"{}\",{},\"applied\":\"{applied}\",{actor}}}",
                     request_token(open.id),
                     h16(open.facts.node),
                     request.verdict.json_fields()
@@ -3068,11 +3249,12 @@ impl SiteAuthority {
         self.event(
             now_ms,
             format!(
-                "\"kind\":\"join.decided\",\"join_request_id\":\"{}\",\"device_id\":\"{}\",{},\"applied\":\"{applied}\",\"late\":{}",
+                "\"kind\":\"join.decided\",\"join_request_id\":\"{}\",\"device_id\":\"{}\",{},\"applied\":\"{applied}\",\"late\":{},{}",
                 request_token(open.id),
                 h16(open.facts.node),
                 request.verdict.json_fields(),
-                waiting.is_none()
+                waiting.is_none(),
+                actor
             ),
         );
         if let Some(index) = waiting {
@@ -5179,6 +5361,12 @@ impl SiteAuthority {
         policy
             .validate()
             .map_err(|m| SiteError::new("INVALID_ARGUMENT", m))?;
+        if policy.decision_mode == DecisionMode::LabInventory && self.lab.is_none() {
+            return Err(SiteError::new(
+                "INVALID_ARGUMENT",
+                "lab inventory policy requires a bound development site",
+            ));
+        }
         // The generation is minted here, never trusted from the caller: a
         // set that changes no content keeps the stored generation (no new
         // version to distribute); anything else bumps from the stored
@@ -5214,9 +5402,11 @@ impl SiteAuthority {
             .policy_distributed_generation
             .map_or_else(|| "null".to_string(), |g| g.to_string());
         format!(
-            "{},\"radio_distributed_generation\":{}}}",
+            "{},\"radio_distributed_generation\":{},\"lab_enrollment_active\":{}}}",
             &content[..content.len() - 1],
-            distributed
+            distributed,
+            self.lab_enrollment_window
+                .is_some_and(|(start, end)| self.join_mono_ms >= start && self.join_mono_ms < end)
         )
     }
 
@@ -5224,7 +5414,27 @@ impl SiteAuthority {
     /// read, patch, validate and commit happen under the one authority
     /// lock the caller holds, so two concurrent partial updates from two
     /// connections cannot lose each other's fields.
+    fn lab_enrollment_active(&mut self) -> bool {
+        let Some((start, end)) = self.lab_enrollment_window else {
+            return false;
+        };
+        if self.join_mono_ms < start || self.join_mono_ms >= end {
+            // Unknown/backwards time never reopens an expired session.
+            self.lab_enrollment_window = None;
+            return false;
+        }
+        true
+    }
+
     pub fn update_policy(&mut self, patch: &PolicyPatch) -> Result<String, SiteError> {
+        self.update_policy_at(patch, self.join_mono_ms)
+    }
+
+    pub fn update_policy_at(
+        &mut self,
+        patch: &PolicyPatch,
+        mono_ms: u64,
+    ) -> Result<String, SiteError> {
         let mut policy = self.policy;
         if let Some(zero_touch_open) = patch.zero_touch_open {
             policy.zero_touch_open = zero_touch_open;
@@ -5238,7 +5448,22 @@ impl SiteAuthority {
         if let Some(pending_retry_after_s) = patch.pending_retry_after_s {
             policy.pending_retry_after_s = pending_retry_after_s;
         }
-        self.set_policy(policy)
+        if mono_ms < self.join_mono_ms {
+            return Err(SiteError::new(
+                "INVALID_ARGUMENT",
+                "monotonic clock went backwards",
+            ));
+        }
+        self.set_policy(policy)?;
+        self.join_mono_ms = mono_ms;
+        if policy.decision_mode != DecisionMode::LabInventory {
+            self.lab_enrollment_window = None;
+        } else if patch.decision_mode == Some(DecisionMode::LabInventory) {
+            // Fixed one-hour maximum, volatile across daemon restarts.
+            self.lab_enrollment_window =
+                (mono_ms != 0).then(|| (mono_ms, mono_ms.saturating_add(3_600_000)));
+        }
+        Ok(self.policy_json())
     }
 
     // --- read side ------------------------------------------------------------------------------
@@ -5284,8 +5509,9 @@ impl SiteAuthority {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "{{\"site_id\":\"{}\",\"network\":\"{}\",\"network_low32\":\"{:08x}\",\"site_epoch\":{},\"site_cert_serial\":{},\"sak_fingerprint\":\"{}\",\"device_ca_id\":\"{}\",\"rs_epoch\":{},\"gk_epoch\":{},\"gk_staged\":{staged},\"gk\":{{\"phase\":\"{phase}\",\"cause\":{cause},\"targets\":{targets},\"staged_ack\":{staged_ack},\"active_ack\":{active_ack},\"unknown\":{unknown}}},\"authority\":{{\"attached\":{authority_attached},\"channels\":{authority_channels}}},\"member_cap\":{MEMBER_CAP},\"members\":{members},\"members_unconfirmed\":{unconfirmed},\"removed\":{removed},\"archived_total\":{},\"discovered\":{},\"join_requests\":{},\"live_exchanges\":{},\"recent_relay_failures\":[{failures}],\"channel\":{},\"channel_epoch\":{},\"gateways\":[{gateways}],\"membership_revision\":{},\"ledger_seq\":{},\"storage_durable\":{},\"policy\":{},\"counters\":{},\"clock\":\"host_unix_ms\",\"now_ms\":{}}}",
+            "{{\"site_id\":\"{}\",\"purpose\":\"{}\",\"network\":\"{}\",\"network_low32\":\"{:08x}\",\"site_epoch\":{},\"site_cert_serial\":{},\"sak_fingerprint\":\"{}\",\"device_ca_id\":\"{}\",\"rs_epoch\":{},\"gk_epoch\":{},\"gk_staged\":{staged},\"gk\":{{\"phase\":\"{phase}\",\"cause\":{cause},\"targets\":{targets},\"staged_ack\":{staged_ack},\"active_ack\":{active_ack},\"unknown\":{unknown}}},\"authority\":{{\"attached\":{authority_attached},\"channels\":{authority_channels}}},\"member_cap\":{MEMBER_CAP},\"members\":{members},\"members_unconfirmed\":{unconfirmed},\"removed\":{removed},\"archived_total\":{},\"discovered\":{},\"join_requests\":{},\"live_exchanges\":{},\"recent_relay_failures\":[{failures}],\"channel\":{},\"channel_epoch\":{},\"gateways\":[{gateways}],\"membership_revision\":{},\"ledger_seq\":{},\"storage_durable\":{},\"policy\":{},\"counters\":{},\"clock\":\"host_unix_ms\",\"now_ms\":{}}}",
             h16(self.id.site_id),
+            self.purpose.name(),
             h16(self.id.network),
             self.id.network & 0xFFFF_FFFF,
             self.id.site_claims.site_epoch,

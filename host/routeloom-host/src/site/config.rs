@@ -24,11 +24,12 @@
 use std::path::Path;
 
 use routeloom_json::Json;
-use routeloom_provision::signer::{FileRootSigner, FILE_KEY_CUSTODY_WARNING};
+use routeloom_provision::signer::{FileRootSigner, RootSigner, FILE_KEY_CUSTODY_WARNING};
 
 use super::records::{parse_h16, parse_hex};
 use super::store::SqliteSiteStore;
-use super::{SiteAuthority, SiteSetup};
+use super::{LabBinding, LabDevice, SiteAuthority, SitePurpose, SiteSetup};
+use rusqlite::Connection;
 
 pub const CONFIG_FORMAT: &str = "routeloom-site-authority-v1";
 pub const CONFIG_FILE: &str = "site-authority.json";
@@ -107,6 +108,8 @@ pub fn parse_setup(text: &str) -> Result<SiteSetup, String> {
         channel,
         channel_epoch,
         gateways,
+        lab: None,
+        purpose: SitePurpose::Import,
     })
 }
 
@@ -114,9 +117,128 @@ pub fn parse_setup(text: &str) -> Result<SiteSetup, String> {
 pub fn open_dir(dir: &Path, now_ms: u64) -> Result<SiteAuthority, String> {
     let config = std::fs::read_to_string(dir.join(CONFIG_FILE))
         .map_err(|e| format!("cannot read {}: {e}", dir.join(CONFIG_FILE).display()))?;
-    let setup = parse_setup(&config)?;
+    let mut setup = parse_setup(&config)?;
+    let lab_metadata = match std::fs::symlink_metadata(dir.join("lab-manifest.json")) {
+        Ok(metadata) => Some(metadata),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("cannot inspect lab manifest: {e}")),
+    };
+    let mut manifest_site_id = None;
+    if let Some(metadata) = lab_metadata {
+        if !metadata.file_type().is_file() {
+            return Err("lab manifest must be a regular file, not a symlink".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err("lab manifest must be private (0600)".into());
+            }
+        }
+        let text = std::fs::read_to_string(dir.join("lab-manifest.json"))
+            .map_err(|e| format!("lab manifest: {e}"))?;
+        let manifest =
+            routeloom_json::parse_bounded(&text, 4).map_err(|e| format!("lab manifest: {e}"))?;
+        let purpose = manifest.get("purpose").and_then(Json::as_str);
+        if manifest.get("format").and_then(Json::as_str) != Some("routeloom-lab-site-v1")
+            || !matches!(purpose, Some("development" | "production" | "import"))
+        {
+            return Err("invalid site purpose manifest".into());
+        }
+        manifest_site_id = Some(
+            manifest
+                .get("site_id")
+                .and_then(Json::as_str)
+                .and_then(parse_h16)
+                .ok_or("site purpose manifest: invalid site_id")?,
+        );
+        if purpose != Some("development") {
+            setup.purpose = if purpose == Some("production") {
+                SitePurpose::Production
+            } else {
+                SitePurpose::Import
+            };
+            // A non-development manifest never loads inventory or enables
+            // automatic approval, regardless of its displayed name.
+        } else {
+            let fingerprint = |name| -> Result<[u8; 32], String> {
+                manifest
+                    .get(name)
+                    .and_then(Json::as_str)
+                    .and_then(|s| parse_hex(s, 32))
+                    .and_then(|v| v.try_into().ok())
+                    .ok_or_else(|| format!("lab manifest: invalid {name}"))
+            };
+            let site_id = manifest
+                .get("site_id")
+                .and_then(Json::as_str)
+                .and_then(parse_h16)
+                .ok_or("lab manifest: invalid site_id")?;
+            let path = dir.join("inventory.db");
+            let inventory_meta = std::fs::symlink_metadata(&path)
+                .map_err(|e| format!("lab inventory database missing: {e}"))?;
+            if !inventory_meta.file_type().is_file() {
+                return Err("lab inventory database is not a regular file".into());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if inventory_meta.permissions().mode() & 0o077 != 0 {
+                    return Err("lab inventory database must be private (0600)".into());
+                }
+            }
+            let db = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|e| format!("lab inventory: {e}"))?;
+            // Rows and revision must come from one snapshot; an import
+            // racing startup cannot yield a mixed policy generation.
+            db.execute_batch("BEGIN DEFERRED TRANSACTION")
+                .map_err(|e| format!("lab inventory: {e}"))?;
+            let mut stmt = db.prepare("SELECT node, kid, role FROM inventory WHERE site_id=?1 AND completed=1 ORDER BY node LIMIT 129")
+            .map_err(|e| format!("lab inventory: {e}"))?;
+            let rows = stmt
+                .query_map([format!("{site_id:016x}")], |row| {
+                    let node: String = row.get(0)?;
+                    let kid: String = row.get(1)?;
+                    let role: u8 = row.get(2)?;
+                    Ok((node, kid, role))
+                })
+                .map_err(|e| format!("lab inventory: {e}"))?;
+            let mut inventory = Vec::new();
+            for row in rows {
+                let (node, kid, role) = row.map_err(|e| format!("lab inventory: {e}"))?;
+                inventory.push(LabDevice {
+                    node: parse_h16(&node).ok_or("lab inventory: invalid node")?,
+                    kid: parse_hex(&kid, 32)
+                        .and_then(|v| v.try_into().ok())
+                        .ok_or("lab inventory: invalid kid")?,
+                    role,
+                });
+            }
+            let inventory_revision = db
+                .query_row(
+                    "SELECT revision FROM inventory_meta WHERE site_id=?1",
+                    [format!("{site_id:016x}")],
+                    |r| r.get(0),
+                )
+                .map_err(|e| format!("lab inventory: {e}"))?;
+            db.execute_batch("COMMIT")
+                .map_err(|e| format!("lab inventory: {e}"))?;
+            setup.purpose = SitePurpose::Development;
+            setup.lab = Some(LabBinding {
+                site_id,
+                site_ca_fingerprint: fingerprint("site_ca_fingerprint")?,
+                device_ca_fingerprint: fingerprint("device_ca_fingerprint")?,
+                sak_fingerprint: fingerprint("sak_fingerprint")?,
+                inventory_revision,
+                inventory,
+            });
+        }
+    }
     let sak = FileRootSigner::load(&dir.join(SAK_FILE))
         .map_err(|e| format!("{}: {e}", dir.join(SAK_FILE).display()))?;
+    if manifest_site_id.is_some_and(|site| site != sak.root_id()) {
+        return Err("site purpose manifest belongs to a different site".into());
+    }
     eprintln!("{FILE_KEY_CUSTODY_WARNING}");
     let store = SqliteSiteStore::open(&dir.join(STORE_FILE)).map_err(|e| e.to_string())?;
     SiteAuthority::open(&setup, Box::new(sak), Box::new(store), now_ms)
@@ -144,6 +266,61 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(",")
         )
+    }
+
+    #[test]
+    fn development_manifest_binds_inventory_and_policy_to_the_database() {
+        use routeloom_provision::credential::credential_kid;
+        use routeloom_provision::sha256::sha256;
+        use routeloom_provision::signer::{write_private_file, RootSigner};
+        let dir = std::env::temp_dir().join(format!(
+            "routeloom-lab-config-{}-{}",
+            std::process::id(),
+            crate::now_ms()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let setup = testkit::setup();
+        std::fs::write(dir.join(CONFIG_FILE), config_json(&setup)).unwrap();
+        testkit::sak().save(&dir.join(SAK_FILE)).unwrap();
+        let manifest = format!("{{\"format\":\"routeloom-lab-site-v1\",\"purpose\":\"development\",\"site_id\":\"{:016x}\",\"site_ca_fingerprint\":\"{}\",\"device_ca_fingerprint\":\"{}\",\"sak_fingerprint\":\"{}\"}}",
+            testkit::SITE, hex_lower(&sha256(&testkit::site_ca_pub())), hex_lower(&sha256(&setup.device_ca_pubkey)), hex_lower(&credential_kid(&testkit::sak().pubkey())));
+        write_private_file(&dir.join("lab-manifest.json"), manifest.as_bytes()).unwrap();
+        let path = dir.join("inventory.db");
+        write_private_file(&path, b"").unwrap();
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE inventory_meta(site_id TEXT PRIMARY KEY, revision INTEGER NOT NULL); CREATE TABLE inventory(site_id TEXT NOT NULL, node TEXT NOT NULL, kid TEXT NOT NULL, role INTEGER NOT NULL, completed INTEGER NOT NULL);").unwrap();
+        db.execute(
+            "INSERT INTO inventory_meta VALUES (?1, 1)",
+            [format!("{:016x}", testkit::SITE)],
+        )
+        .unwrap();
+        let device = testkit::SimDevice::new(0x00a1_0000_0000_d0a1, 0xd1);
+        db.execute(
+            "INSERT INTO inventory VALUES (?1, ?2, ?3, 1, 1)",
+            rusqlite::params![
+                format!("{:016x}", testkit::SITE),
+                format!("{:016x}", device.node),
+                hex_lower(&device.kid)
+            ],
+        )
+        .unwrap();
+        let mut authority = open_dir(&dir, 1).unwrap();
+        authority
+            .update_policy(&super::super::PolicyPatch {
+                decision_mode: Some(super::super::DecisionMode::LabInventory),
+                ..Default::default()
+            })
+            .unwrap();
+        drop(authority);
+        assert!(open_dir(&dir, 2).is_ok());
+        db.execute("UPDATE inventory_meta SET revision=0", [])
+            .unwrap();
+        assert!(open_dir(&dir, 3).is_err());
+        db.execute("UPDATE inventory_meta SET revision=1", [])
+            .unwrap();
+        std::fs::remove_file(dir.join("lab-manifest.json")).unwrap();
+        assert!(open_dir(&dir, 4).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
