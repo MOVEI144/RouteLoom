@@ -73,6 +73,7 @@ use routeloom_join::{
     RemovalNotice, SiteOffer, SitePackage, DAMS_SIZE, EXPORTER_LABEL_DAMS,
     JOIN_EAD_CREDENTIAL_LABEL, PENDING_RETRY_MIN_S, RETRY_AFTER_MAX_S,
 };
+use routeloom_peercred::Principal;
 use routeloom_protocol::authority::CarrierKind;
 use routeloom_provision::credential::credential_kid;
 use routeloom_provision::sdkv1::cert::{
@@ -856,7 +857,7 @@ pub struct SiteAuthority {
     devices: BTreeMap<u64, DeviceRow>,
     discovered: BTreeMap<u64, Discovered>,
     requests: BTreeMap<u64, JoinRequestRec>,
-    decisions: BTreeMap<(u32, String), StoredDecision>,
+    decisions: BTreeMap<(Principal, String), StoredDecision>,
     operations: BTreeMap<u64, Operation>,
     txns: Vec<Txn>,
     /// Ended relay attempts, newest last (triaged via `site.status`).
@@ -1125,7 +1126,7 @@ impl SiteAuthority {
                 }
                 DocKind::Decision => {
                     let d = StoredDecision::from_doc(body).ok_or_else(bad)?;
-                    decisions.insert((d.principal, d.key.clone()), d);
+                    decisions.insert((d.principal.clone(), d.key.clone()), d);
                 }
                 DocKind::Operation => {
                     let o = Operation::from_doc(body).ok_or_else(bad)?;
@@ -2713,11 +2714,11 @@ impl SiteAuthority {
 
     fn idempotent(
         &self,
-        principal: u32,
+        principal: &Principal,
         key: &str,
         digest: &[u8; 32],
     ) -> Option<Result<String, SiteError>> {
-        let stored = self.decisions.get(&(principal, key.to_string()))?;
+        let stored = self.decisions.get(&(principal.clone(), key.to_string()))?;
         Some(if stored.digest == *digest {
             Ok(stored.result.clone())
         } else {
@@ -2731,14 +2732,14 @@ impl SiteAuthority {
     fn decision_doc(
         &mut self,
         batch: &mut Batch,
-        principal: u32,
+        principal: &Principal,
         key: &str,
         digest: [u8; 32],
         result: &str,
         now_ms: u64,
     ) {
         let stored = StoredDecision {
-            principal,
+            principal: principal.clone(),
             key: key.to_string(),
             digest,
             result: result.to_string(),
@@ -2754,11 +2755,11 @@ impl SiteAuthority {
                 .decisions
                 .values()
                 .min_by_key(|d| d.ms)
-                .map(|d| (d.principal, d.key.clone()))
+                .map(|d| (d.principal.clone(), d.key.clone()))
             {
                 batch.docs.push((
                     DocKind::Decision,
-                    StoredDecision::doc_key(oldest.0, &oldest.1),
+                    StoredDecision::doc_key(&oldest.0, &oldest.1),
                     None,
                 ));
             }
@@ -2767,7 +2768,7 @@ impl SiteAuthority {
 
     fn remember_decision(
         &mut self,
-        principal: u32,
+        principal: &Principal,
         key: &str,
         digest: [u8; 32],
         result: &str,
@@ -2778,15 +2779,15 @@ impl SiteAuthority {
                 .decisions
                 .values()
                 .min_by_key(|d| d.ms)
-                .map(|d| (d.principal, d.key.clone()))
+                .map(|d| (d.principal.clone(), d.key.clone()))
             {
                 self.decisions.remove(&oldest);
             }
         }
         self.decisions.insert(
-            (principal, key.to_string()),
+            (principal.clone(), key.to_string()),
             StoredDecision {
-                principal,
+                principal: principal.clone(),
                 key: key.to_string(),
                 digest,
                 result: result.to_string(),
@@ -2874,10 +2875,11 @@ impl SiteAuthority {
     /// otherwise the device's next attempt.
     pub fn decide(
         &mut self,
-        principal: u32,
+        principal: impl Into<Principal>,
         request: DecideRequest,
         now_ms: u64,
     ) -> Result<String, SiteError> {
+        let principal = principal.into();
         let digest = sha256(
             format!(
                 "join.decide|{}|{}|{{{}}}",
@@ -2887,7 +2889,7 @@ impl SiteAuthority {
             )
             .as_bytes(),
         );
-        if let Some(answer) = self.idempotent(principal, &request.key, &digest) {
+        if let Some(answer) = self.idempotent(&principal, &request.key, &digest) {
             return answer;
         }
         let Some(open) = self.requests.get(&request.join_request_id).cloned() else {
@@ -2920,12 +2922,12 @@ impl SiteAuthority {
                     // its key, so its own resends replay under the
                     // idempotency contract even after the state moves on.
                     let mut batch = Batch::default();
-                    self.decision_doc(&mut batch, principal, &request.key, digest, result, now_ms);
+                    self.decision_doc(&mut batch, &principal, &request.key, digest, result, now_ms);
                     if let Err(error) = self.store.commit(&batch) {
                         self.store_error(now_ms, &error);
                         return Err(store_failure(&error));
                     }
-                    self.remember_decision(principal, &request.key, digest, result, now_ms);
+                    self.remember_decision(&principal, &request.key, digest, result, now_ms);
                     return Ok(result.clone());
                 }
             }
@@ -2946,14 +2948,21 @@ impl SiteAuthority {
         };
         let mut batch = Batch::default();
         // Internal actors use their own versioned namespace, never an OS UID.
-        let actor = if principal == u32::MAX {
+        let actor = if principal == Principal::UnixUid(u32::MAX) {
             let lab = self
                 .lab
                 .as_ref()
                 .ok_or_else(|| SiteError::new("CONFLICT", "lab policy no longer bound"))?;
             format!("\"actor\":{{\"type\":\"internal_policy_v1\",\"id\":\"lab_inventory\"}},\"policy_id\":\"lab_inventory\",\"policy_version\":1,\"policy_generation\":{},\"inventory_revision\":{},\"decision_reason\":\"provisioned_inventory_match\"", self.policy.policy_generation, lab.inventory_revision)
         } else {
-            format!("\"actor\":{{\"type\":\"peer_uid_v1\",\"id\":{principal}}},\"policy_id\":\"manual_v1\",\"policy_version\":1,\"decision_reason\":\"operator_verdict\"")
+            let identity = match &principal {
+                Principal::UnixUid(uid) => format!("\"type\":\"peer_uid_v1\",\"id\":{uid}"),
+                Principal::WindowsSid(sid) => format!(
+                    "\"type\":\"peer_sid_v1\",\"id\":\"{}\"",
+                    routeloom_json::escape_string(sid)
+                ),
+            };
+            format!("\"actor\":{{{identity}}},\"policy_id\":\"manual_v1\",\"policy_version\":1,\"decision_reason\":\"operator_verdict\"")
         };
         let result;
         type Approved = (
@@ -3238,7 +3247,14 @@ impl SiteAuthority {
         batch
             .docs
             .push((DocKind::JoinRequest, h16(open.id), Some(updated.doc())));
-        self.decision_doc(&mut batch, principal, &request.key, digest, &result, now_ms);
+        self.decision_doc(
+            &mut batch,
+            &principal,
+            &request.key,
+            digest,
+            &result,
+            now_ms,
+        );
         if let Err(error) = self.store.commit(&batch) {
             self.store_error(now_ms, &error);
             return Err(store_failure(&error));
@@ -3264,7 +3280,7 @@ impl SiteAuthority {
             }
             self.remember_operation(op, evicted);
         }
-        self.remember_decision(principal, &request.key, digest, &result, now_ms);
+        self.remember_decision(&principal, &request.key, digest, &result, now_ms);
         self.requests.insert(open.id, updated);
         self.event(
             now_ms,
@@ -3288,10 +3304,11 @@ impl SiteAuthority {
     /// `membership.revoke` (04 §3, 07 §2.2).
     pub fn revoke(
         &mut self,
-        principal: u32,
+        principal: impl Into<Principal>,
         request: RevokeRequest,
         time: HostTime,
     ) -> Result<String, SiteError> {
+        let principal = principal.into();
         let now_ms = time.unix_ms;
         let digest = sha256(
             format!(
@@ -3300,7 +3317,7 @@ impl SiteAuthority {
             )
             .as_bytes(),
         );
-        if let Some(answer) = self.idempotent(principal, &request.key, &digest) {
+        if let Some(answer) = self.idempotent(&principal, &request.key, &digest) {
             return answer;
         }
         let Some(row) = self.devices.get(&request.device).cloned() else {
@@ -3532,7 +3549,14 @@ impl SiteAuthority {
                 .push((DocKind::Operation, h16(rop.id), Some(rop.doc())));
         }
 
-        self.decision_doc(&mut batch, principal, &request.key, digest, &result, now_ms);
+        self.decision_doc(
+            &mut batch,
+            &principal,
+            &request.key,
+            digest,
+            &result,
+            now_ms,
+        );
         if let Err(error) = self.store.commit(&batch) {
             self.store_error(now_ms, &error);
             return Err(store_failure(&error));
@@ -3582,7 +3606,7 @@ impl SiteAuthority {
         }
         self.prune_rrs_history();
 
-        self.remember_decision(principal, &request.key, digest, &result, now_ms);
+        self.remember_decision(&principal, &request.key, digest, &result, now_ms);
         self.event(
             now_ms,
             format!(
@@ -3635,10 +3659,11 @@ impl SiteAuthority {
     /// returns the stored answer without touching state.
     pub fn archive_removed(
         &mut self,
-        principal: u32,
+        principal: impl Into<Principal>,
         request: ArchiveRequest,
         now_ms: u64,
     ) -> Result<String, SiteError> {
+        let principal = principal.into();
         let mut ids = request.devices;
         ids.sort_unstable();
         ids.dedup();
@@ -3658,7 +3683,7 @@ impl SiteAuthority {
             )
             .as_bytes(),
         );
-        if let Some(answer) = self.idempotent(principal, &request.key, &digest) {
+        if let Some(answer) = self.idempotent(&principal, &request.key, &digest) {
             return answer;
         }
         let mut gone: Vec<DeviceRow> = Vec::new();
@@ -3734,7 +3759,14 @@ impl SiteAuthority {
                 .meta
                 .push((META_ARCHIVED_TOTAL, total.to_be_bytes().to_vec()));
         }
-        self.decision_doc(&mut batch, principal, &request.key, digest, &result, now_ms);
+        self.decision_doc(
+            &mut batch,
+            &principal,
+            &request.key,
+            digest,
+            &result,
+            now_ms,
+        );
         if let Err(error) = self.store.commit(&batch) {
             self.store_error(now_ms, &error);
             return Err(store_failure(&error));
@@ -3746,7 +3778,7 @@ impl SiteAuthority {
         self.ledger_seq = seq;
         self.ledger_head = head;
         self.archived_total = total;
-        self.remember_decision(principal, &request.key, digest, &result, now_ms);
+        self.remember_decision(&principal, &request.key, digest, &result, now_ms);
         if !gone.is_empty() {
             self.event(
                 now_ms,
@@ -3911,13 +3943,14 @@ impl SiteAuthority {
     /// a second live rotation).
     pub fn rotate(
         &mut self,
-        principal: u32,
+        principal: impl Into<Principal>,
         request: RotateRequest,
         time: HostTime,
     ) -> Result<String, SiteError> {
+        let principal = principal.into();
         let digest =
             sha256(format!("group_keys.rotate|{}", request.expected_active_epoch).as_bytes());
-        if let Some(answer) = self.idempotent(principal, &request.key, &digest) {
+        if let Some(answer) = self.idempotent(&principal, &request.key, &digest) {
             return answer;
         }
         if request.expected_active_epoch != self.gks.active_epoch() {
@@ -3986,7 +4019,7 @@ impl SiteAuthority {
         let evicted = self.fill_staging_batch(&mut batch, &plan, &op)?;
         self.decision_doc(
             &mut batch,
-            principal,
+            &principal,
             &request.key,
             digest,
             &result,
@@ -3998,7 +4031,7 @@ impl SiteAuthority {
         }
         let superseded = plan.superseded_op;
         self.publish_staging_plan(plan, op.clone(), evicted);
-        self.remember_decision(principal, &request.key, digest, &result, time.unix_ms);
+        self.remember_decision(&principal, &request.key, digest, &result, time.unix_ms);
         self.emit_staged(
             RotationCause::Manual,
             op.gk_from,
@@ -6217,9 +6250,9 @@ impl SiteService {
 mod authority_e2e;
 #[cfg(test)]
 mod cutover_tests;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod e2e;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod joiner_interop;
 #[cfg(test)]
 mod p6_channel_tests;

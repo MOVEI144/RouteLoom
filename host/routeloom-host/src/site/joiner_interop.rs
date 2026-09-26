@@ -678,7 +678,7 @@ impl InteropSite {
                         Arc::new(AtomicU64::new(1)),
                         Arc::new(AtomicU64::new(1)),
                         Arc::new(Mutex::new(DeviceSession::new())),
-                        uid,
+                        uid.map(routeloom_peercred::Principal::UnixUid),
                     );
                 });
             }
@@ -906,7 +906,7 @@ impl World {
                             self.allow_forwards.push((site, forwarded_at, delivered));
                         } else {
                             assert!(
-                                row.as_ref().is_none_or(|r| !r.member),
+                                row.as_ref().map_or(true, |r| !r.member),
                                 "no member row without an Allow"
                             );
                         }

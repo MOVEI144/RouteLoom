@@ -40,12 +40,10 @@ fn id(value: Option<&Json>, name: &str) -> Result<u64, DynError> {
 }
 
 fn private_dir(path: &Path) -> Result<(), DynError> {
-    fs::create_dir(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    if path.exists() {
+        return Err(format!("{} already exists", path.display()).into());
     }
+    routeloom_peercred::create_private_dir_all(path)?;
     Ok(())
 }
 
@@ -58,18 +56,19 @@ fn check_private(path: &Path, directory: bool) -> Result<(), DynError> {
     }) {
         return Err(format!("{} must not be a symlink", path.display()).into());
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if meta.permissions().mode() & 0o077 != 0 {
-            return Err(format!("{} is not private", path.display()).into());
-        }
+    if directory {
+        routeloom_peercred::verify_private_dir_perms(path)?;
+    } else {
+        routeloom_peercred::verify_private_file_perms(path)?;
     }
     Ok(())
 }
 
 fn sync_dir(path: &Path) -> Result<(), DynError> {
+    #[cfg(unix)]
     fs::File::open(path)?.sync_all()?;
+    #[cfg(windows)]
+    let _ = path; // NTFS flushes each newly written file; directories are not openable as File.
     Ok(())
 }
 
@@ -471,15 +470,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
     let inventory_path = out.join("inventory.db");
     let existing_inventory = file_exists(&inventory_path)?;
     if !existing_inventory {
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&inventory_path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        }
+        let file = routeloom_peercred::open_private_file_for_write(&inventory_path)?;
         file.sync_all()?;
     }
     let db = rusqlite::Connection::open(&inventory_path)?;

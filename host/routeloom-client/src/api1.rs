@@ -610,7 +610,7 @@ impl MeshTransport for RouteLoomTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixListener;
+    use routeloom_peercred::IpcListener;
     use std::path::Path;
     use std::thread;
 
@@ -624,11 +624,11 @@ mod tests {
     ) -> (PathBuf, thread::JoinHandle<Vec<String>>) {
         let path = dir.join("api.sock");
         let _ = std::fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = IpcListener::bind(&path).unwrap();
         let handle = thread::spawn(move || {
             let mut seen = Vec::new();
-            for stream in listener.incoming().take(connections) {
-                let mut stream = stream.unwrap();
+            for _ in 0..connections {
+                let (mut stream, _) = listener.accept().unwrap();
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();

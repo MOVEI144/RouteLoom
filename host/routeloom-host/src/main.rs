@@ -23,7 +23,7 @@ use routeloom_protocol::{encode_frame, CumulativeCredit, Frame, FrameKind, Strea
 use send_store::{mint_id128, MemoryOperationStore, OperationStore, StoreBackend};
 use std::collections::{HashMap, VecDeque};
 use std::env;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -1751,6 +1751,13 @@ fn adapter_read_loop(
     let mut buffer = [0_u8; 512];
     loop {
         match reader.read(&mut buffer) {
+            #[cfg(windows)]
+            Ok(0) => {
+                // A timeout is idle; a removed COM device must enter reconnect.
+                routeloom_peercred::serial_idle_check(&reader)?;
+                continue;
+            }
+            #[cfg(not(windows))]
             Ok(0) => {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -1999,10 +2006,9 @@ fn adapter_writer_loop(
     }
 }
 
-/// A serial TTY left in canonical mode corrupts the binary framing (echo,
-/// line buffering, ICRNL/ONLCR/XON translation both ways). Configure raw
-/// mode via stty — this workspace carries no termios crate — and continue on
-/// failure: plain files and PTYs used by tests need nothing.
+/// A Unix TTY left in canonical mode corrupts the binary framing (echo,
+/// line buffering, ICRNL/ONLCR/XON translation). Use stty here; Windows COM
+/// settings are applied by open_serial. Plain files and test PTYs need none.
 fn configure_raw_tty(path: &Path) {
     #[cfg(unix)]
     {
@@ -2083,10 +2089,7 @@ fn adapter_supervisor(
     let mut open_failed = false;
     loop {
         configure_raw_tty(&device);
-        match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&device)
+        match routeloom_peercred::open_serial(&device)
             .and_then(|reader| reader.try_clone().map(|writer| (reader, writer)))
         {
             Ok((reader, writer)) => {
@@ -2171,7 +2174,7 @@ fn serve_client(
     next_request: Arc<AtomicU64>,
     next_idem_key: Arc<AtomicU64>,
     device_session: Arc<Mutex<DeviceSession>>,
-    peer_uid: Option<u32>,
+    peer_principal: Option<Principal>,
 ) -> io::Result<()> {
     // A slow socket must never pin the shared log or hang this thread.
     let _ = stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
@@ -2250,7 +2253,7 @@ fn serve_client(
         }
         let (response, effect) = if raw.starts_with(b"API1 ") {
             let ctx = api1::ApiContext {
-                uid: peer_uid,
+                principal: peer_principal.clone(),
                 acl: &state.acl,
                 receive_log: &state.receive_log,
                 operation_store: &state.operation_store,
@@ -2311,10 +2314,9 @@ fn serve_client(
                     let guard = device_session.lock().expect("device session poisoned");
                     (guard.phase == SessionPhase::Active).then_some(guard.session_id)
                 };
-                // Legacy mode is still gated by the same contract as
-                // messages.submit: the USB host authority is never granted
-                // unconditionally to every local client
-                // (05-production-security.md). The peer's OS uid must hold
+                // Legacy mode is still gated by the SEND grant: the USB
+                // host authority is never granted to every local client
+                // (05-production-security.md). The peer's OS principal must hold
                 // SEND on the session's own network — an unknown
                 // credential or an absent session network denies.
                 let session_network = state
@@ -2322,16 +2324,16 @@ fn serve_client(
                     .lock()
                     .expect("session poisoned")
                     .network;
-                let send_uid = match (peer_uid, session_network) {
-                    (Some(uid), Some(network))
-                        if state.acl.permit(uid, network, acl::PERM_SEND) =>
+                let send_principal = match (peer_principal.as_ref(), session_network) {
+                    (Some(principal), Some(network))
+                        if state.acl.permit_principal(principal, network, acl::PERM_SEND) =>
                     {
-                        Some(uid)
+                        Some(principal)
                     }
                     _ => None,
                 };
                 match (destination, payload) {
-                    _ if send_uid.is_none() => {
+                    _ if send_principal.is_none() => {
                         "{\"accepted\":false,\"error\":\"authorization failed\"}".into()
                     }
                     _ if active_session.is_none() => {
@@ -2344,7 +2346,7 @@ fn serve_client(
                             .rate_limiter
                             .lock()
                             .expect("rate limiter poisoned")
-                            .admit(send_uid.expect("authorized above"), now_ms())
+                            .admit_principal(send_principal.expect("authorized above"), now_ms())
                         {
                             format!(
                                 "{{\"accepted\":false,\"error\":\"rate limited ({} scope, retry in {} ms)\"}}",
@@ -2977,7 +2979,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     *entry += 1;
                 }
-                let peer_uid = peer_principal.as_unix_uid();
                 let client_state = Arc::clone(&state);
                 let client_outbound = outbound_tx.clone();
                 let client_requests = Arc::clone(&next_request);
@@ -3001,7 +3002,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         client_requests,
                         client_idem_keys,
                         client_session,
-                        peer_uid,
+                        Some(peer_principal),
                     );
                 });
             }
@@ -3822,7 +3823,7 @@ mod tests {
                 Arc::new(AtomicU64::new(1)),
                 Arc::new(AtomicU64::new(1)),
                 session,
-                peer_uid,
+                peer_uid.map(Principal::UnixUid),
             );
         });
         let reader = BufReader::new(client.try_clone().expect("clone"));
@@ -4236,6 +4237,71 @@ mod tests {
         );
         let response = exchange(&mut reader, &mut writer, "SEND 3 00ff");
         assert!(response.contains("authorization failed"), "{response}");
+    }
+
+    #[test]
+    fn legacy_send_uses_authenticated_sid_grant() {
+        let sid = Principal::WindowsSid("S-1-5-21-100-200-300-1001".into());
+        let acl = Acl::parse("{\"principals\":{\"S-1-5-21-100-200-300-1001\":{\"networks\":{\"0000000000000001\":[\"SEND\"]}}}}")
+            .unwrap();
+        let state = Arc::new(State {
+            acl,
+            ..State::default()
+        });
+        state.session.lock().unwrap().network = Some(1);
+        let (client, server) = IpcStream::pair().unwrap();
+        let (tx, _rx) = mpsc::sync_channel(4);
+        let server_state = Arc::clone(&state);
+        thread::spawn(move || {
+            let _ = serve_client(
+                server,
+                server_state,
+                tx,
+                0,
+                Arc::new(AtomicU64::new(1)),
+                Arc::new(AtomicU64::new(1)),
+                Arc::new(Mutex::new(DeviceSession::new())),
+                Some(sid),
+            );
+        });
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        let mut writer = client;
+        let response = exchange(&mut reader, &mut writer, "SEND 3 00ff");
+        assert!(response.contains("session not authenticated"), "{response}");
+        assert!(!response.contains("authorization failed"), "{response}");
+    }
+
+    #[test]
+    fn api1_uses_authenticated_sid_for_epoch_and_submit() {
+        let sid = Principal::WindowsSid("S-1-5-21-100-200-300-1001".into());
+        let acl = Acl::parse("{\"principals\":{\"S-1-5-21-100-200-300-1001\":{\"networks\":{\"0000000000000001\":[\"SEND\",\"READ_OPERATION\"]}}}}")
+            .unwrap();
+        let state = Arc::new(State {
+            acl,
+            ..State::default()
+        });
+        let (client, server) = IpcStream::pair().unwrap();
+        let (tx, _rx) = mpsc::sync_channel(4);
+        thread::spawn(move || {
+            let _ = serve_client(
+                server,
+                state,
+                tx,
+                0,
+                Arc::new(AtomicU64::new(1)),
+                Arc::new(AtomicU64::new(1)),
+                Arc::new(Mutex::new(DeviceSession::new())),
+                Some(sid),
+            );
+        });
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        let mut writer = client;
+        let response = exchange(&mut reader, &mut writer, "API1 {\"v\":1,\"request_id\":\"sid\",\"method\":\"operations.open_epoch\",\"params\":{\"network\":\"0000000000000001\"}}");
+        assert!(response.contains("\"ok\":true"), "{response}");
+        let response = exchange(&mut reader, &mut writer, "API1 {\"v\":1,\"request_id\":\"send\",\"method\":\"messages.submit\",\"params\":{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000001\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"00ff\",\"payload_len\":2,\"options\":{\"storage\":\"RAM_ONLY\"}}}");
+        assert!(response.contains("\"ok\":true"), "{response}");
+        let response = exchange(&mut reader, &mut writer, "API1 {\"v\":1,\"request_id\":\"read\",\"method\":\"operations.get_by_key\",\"params\":{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000001\",\"key\":\"00112233445566778899aabbccddeeff\"}}");
+        assert!(response.contains("\"ok\":true"), "{response}");
     }
 
     /// With a grant and an authenticated device session the verb queues —

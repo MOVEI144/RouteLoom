@@ -47,7 +47,7 @@ impl Daemon {
             std::process::id(),
             now_ms()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
+        routeloom_peercred::create_private_dir_all(&dir).unwrap();
         // This process's uid is the socket principal; grant it the three
         // membership permissions on the site network only.
         let uid = std::fs::metadata(&dir).unwrap().uid();
@@ -88,7 +88,7 @@ impl Daemon {
                         Arc::new(AtomicU64::new(1)),
                         Arc::new(AtomicU64::new(1)),
                         Arc::new(Mutex::new(DeviceSession::new())),
-                        uid,
+                        uid.map(routeloom_peercred::Principal::UnixUid),
                     );
                 });
             }
@@ -136,7 +136,7 @@ fn raw_api1(state: &Arc<State>, uid: u32, line: &str) -> String {
             Arc::new(AtomicU64::new(1)),
             Arc::new(AtomicU64::new(1)),
             Arc::new(Mutex::new(DeviceSession::new())),
-            Some(uid),
+            Some(routeloom_peercred::Principal::UnixUid(uid)),
         );
     });
     let mut writer = client.try_clone().unwrap();

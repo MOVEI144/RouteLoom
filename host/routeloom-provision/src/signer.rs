@@ -238,15 +238,7 @@ pub(crate) fn key_document_json(
 /// a private scalar (injected-key identity records and their NVS blobs).
 pub fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
+    let mut file = routeloom_peercred::open_private_file_for_write(path)
         .map_err(|_| Error::new(Code::Io, "key file create (exists? refusing to overwrite)"))?;
     file.write_all(bytes)
         .map_err(|_| Error::new(Code::Io, "key file write"))?;
@@ -259,7 +251,7 @@ fn enforce_private_perms(path: &Path) -> Result<()> {
     routeloom_peercred::verify_private_file_perms(path).map_err(|_| {
         Error::new(
             Code::AuthorizationFailed,
-            "key file is group/other-accessible (chmod 0600 required)",
+            "key file is not owner-only (Unix 0600 or Windows owner DACL required)",
         )
     })
 }

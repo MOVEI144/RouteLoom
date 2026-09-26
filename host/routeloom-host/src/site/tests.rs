@@ -100,7 +100,7 @@ fn lab_approval_audit_survives_sqlite_restart() {
     let dir =
         std::env::temp_dir().join(format!("routeloom-lab-audit-{}-{}", std::process::id(), T0));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir(&dir).unwrap();
+    routeloom_peercred::create_private_dir_all(&dir).unwrap();
     let db = dir.join("site.db");
     {
         let store = SqliteSiteStore::open(&db).unwrap();
@@ -648,6 +648,66 @@ fn service_with(store: Box<dyn SiteStore>) -> (SiteService, Arc<InProcessTranspo
 
 fn service() -> (SiteService, Arc<InProcessTransport>) {
     service_with(Box::<MemoryStore>::default())
+}
+
+#[test]
+fn sid_decision_records_actor_and_keeps_uid_idempotency_separate() {
+    let (service, transport) = service();
+    let mut device = SimDevice::new(0x00a1_0000_0000_d0a1, 0xd1);
+    let (_, outcome, events) = device.start(&service, &transport, T0);
+    assert!(matches!(outcome, Outcome::Waiting));
+    let id = request_id(&events).unwrap();
+    let sid = Principal::WindowsSid("S-1-5-21-100-200-300-501".into());
+    let request = DecideRequest {
+        join_request_id: id,
+        device: device.node,
+        verdict: Verdict::DenyNotHere,
+        key: "same-key".into(),
+    };
+    let (result, _) = service.with(|a| a.decide(sid.clone(), request.clone(), T0 + 1));
+    let result = result.unwrap();
+    assert!(result.contains("peer_sid_v1"), "{result}");
+    let (replay, _) = service.with(|a| a.decide(sid.clone(), request.clone(), T0 + 2));
+    assert_eq!(replay.unwrap(), result);
+    let (other, _) = service.with(|a| a.decide(501, request, T0 + 3));
+    assert_eq!(other.unwrap_err().code, "NOT_FOUND");
+    service.with(|a| {
+        assert!(a.decisions.contains_key(&(sid, "same-key".into())));
+        assert!(!a
+            .decisions
+            .contains_key(&(Principal::UnixUid(501), "same-key".into())));
+    });
+}
+
+#[test]
+fn sid_decision_replays_after_sqlite_restart() {
+    let dir = std::env::temp_dir().join(format!(
+        "routeloom-site-sid-decision-{}-{T0}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    routeloom_peercred::create_private_dir_all(&dir).unwrap();
+    let db = dir.join("site.db");
+    let sid = Principal::WindowsSid("S-1-5-21-100-200-300-501".into());
+    let mut device = SimDevice::new(0x00a1_0000_0000_d0a2, 0xd2);
+    let (request, answer) = {
+        let (service, transport) = service_with(Box::new(SqliteSiteStore::open(&db).unwrap()));
+        let (_, outcome, events) = device.start(&service, &transport, T0);
+        assert!(matches!(outcome, Outcome::Waiting));
+        let request = DecideRequest {
+            join_request_id: request_id(&events).unwrap(),
+            device: device.node,
+            verdict: Verdict::DenyNotHere,
+            key: "sid-replay".into(),
+        };
+        let (answer, _) = service.with(|a| a.decide(sid.clone(), request.clone(), T0 + 1));
+        (request, answer.unwrap())
+    };
+    let (service, _) = service_with(Box::new(SqliteSiteStore::open(&db).unwrap()));
+    let (replay, _) = service.with(|a| a.decide(sid, request, T0 + 2));
+    assert_eq!(replay.unwrap(), answer);
+    drop(service);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 struct RejectDownlink(DeliverReject);
@@ -1520,7 +1580,7 @@ fn restart_after_commit_reissues_the_same_member_cert() {
         std::process::id(),
         T0
     ));
-    std::fs::create_dir_all(&dir).unwrap();
+    routeloom_peercred::create_private_dir_all(&dir).unwrap();
     let db = dir.join("site.db");
     let mut device = SimDevice::new(0x00A1_0000_0000_5001, 0x77);
     let member_cert = {
@@ -2185,7 +2245,7 @@ fn message_1_refusals_answer_edhoc_errors() {
 fn a_store_is_bound_to_its_site() {
     let dir =
         std::env::temp_dir().join(format!("routeloom-site-bind-{}-{}", std::process::id(), T0));
-    std::fs::create_dir_all(&dir).unwrap();
+    routeloom_peercred::create_private_dir_all(&dir).unwrap();
     let db = dir.join("site.db");
     drop(testkit::authority(
         Box::new(SqliteSiteStore::open(&db).unwrap()),
@@ -2415,7 +2475,7 @@ fn review_replacement_flow_survives_a_restart() {
         std::process::id(),
         T0
     ));
-    std::fs::create_dir_all(&dir).unwrap();
+    routeloom_peercred::create_private_dir_all(&dir).unwrap();
     let db = dir.join("site.db");
     let node = 0x00A1_0000_0000_C003;
     {
@@ -3963,7 +4023,7 @@ fn crash_db(tag: &str) -> std::path::PathBuf {
         T0
     ));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    routeloom_peercred::create_private_dir_all(&dir).unwrap();
     dir.join("site.db")
 }
 
@@ -4157,6 +4217,7 @@ fn gk_migrated_staged_key_rebuilds_its_rotation() {
         )
         .unwrap();
     }
+    #[cfg(unix)]
     std::fs::set_permissions(&db, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
     let (service, _) = service_with(Box::new(SqliteSiteStore::open(&db).unwrap()));
     let gk = FakeGroupKeyTransport::new();
@@ -5280,7 +5341,7 @@ fn revocation_distribution_survives_restart() {
         "routeloom-site-rrs-restart-{}-{T0}",
         std::process::id()
     ));
-    std::fs::create_dir_all(&dir).unwrap();
+    routeloom_peercred::create_private_dir_all(&dir).unwrap();
     let db = dir.join("site.db");
     let (keeper_node, op) = {
         let (service, transport) = service_with(Box::new(SqliteSiteStore::open(&db).unwrap()));
@@ -5607,7 +5668,7 @@ fn archive_survives_restart() {
         std::process::id(),
         T0
     ));
-    std::fs::create_dir_all(&dir).unwrap();
+    routeloom_peercred::create_private_dir_all(&dir).unwrap();
     let db = dir.join("site.db");
     let node = 0x00A1_0000_0000_C004;
     {

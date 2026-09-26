@@ -84,6 +84,7 @@ impl Acl {
 
     /// `network` is the concrete network being accessed; `None` grants in
     /// the file mean "any network".
+    #[cfg(test)]
     pub fn permit(&self, uid: u32, network: u64, permission: u8) -> bool {
         self.permit_principal(&Principal::UnixUid(uid), network, permission)
     }

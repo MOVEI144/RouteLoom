@@ -3071,9 +3071,11 @@ mod tests {
 
     impl TempDb {
         fn open(name: &str) -> (Self, crate::sqlite_store::SqliteOperationStore) {
-            let path = std::env::temp_dir()
-                .join(format!("routeloom-cfg51-{}-{name}.db", std::process::id()));
-            let _ = std::fs::remove_file(&path);
+            let dir =
+                std::env::temp_dir().join(format!("routeloom-cfg51-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            routeloom_peercred::create_private_dir_all(&dir).unwrap();
+            let path = dir.join("ops.db");
             let store = crate::sqlite_store::SqliteOperationStore::open(&path).unwrap();
             (Self { path }, store)
         }
@@ -3087,6 +3089,7 @@ mod tests {
                 sidecar.push(suffix);
                 let _ = std::fs::remove_file(sidecar);
             }
+            let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
         }
     }
 

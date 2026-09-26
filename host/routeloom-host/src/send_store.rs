@@ -11,7 +11,7 @@
 //! `cancel_operation` shares that boundary so a cancel and a submit can
 //! never both win.
 //!
-//! Identity is `(uid, network, admission_epoch, caller_key)`; the first
+//! Identity is `(principal, network, admission_epoch, caller_key)`; the first
 //! submit assigns `lineage:seq` and replays return the same id. Same
 //! identity with different canonical bytes is a CONFLICT and the stored
 //! record is never overwritten. Admission epochs rotate one hour after
@@ -23,6 +23,7 @@
 
 use crate::canonical::SendRequest;
 use crate::sqlite_store::SqliteOperationStore;
+use routeloom_peercred::Principal;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
 // contracts.json `capacity.*`.
@@ -117,12 +118,12 @@ impl DispatchState {
 }
 
 /// Scope whose admission epoch is tracked: one epoch per principal×network.
-pub type EpochScope = (u32, u64);
+pub type EpochScope = (Principal, u64);
 
 /// Full identity of one caller submission (03-send-api.md §3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct OpIdentity {
-    pub uid: u32,
+    pub principal: Principal,
     pub network: u64,
     pub epoch: u64,
     pub key: [u8; 16],
@@ -133,7 +134,7 @@ pub struct StoredOperation {
     pub seq: u64,
     /// Owning principal — queries authorize on the network grant;
     /// `operations.cancel` additionally requires the owning uid.
-    pub uid: u32,
+    pub principal: Principal,
     pub network: u64,
     pub epoch: u64,
     pub key: [u8; 16],
@@ -547,8 +548,20 @@ pub trait OperationStore {
     /// Bind the scope's admission epoch, rotating hourly. `Ok((epoch,
     /// created))` with `created` true when a new epoch was issued;
     /// `NoCapacity` at the unretired-epoch ceiling or scope bound.
-    fn open_epoch(&mut self, scope: EpochScope, now_ms: u64)
-        -> Result<(u64, bool), OpenEpochError>;
+    fn open_epoch_principal(
+        &mut self,
+        scope: EpochScope,
+        now_ms: u64,
+    ) -> Result<(u64, bool), OpenEpochError>;
+
+    #[cfg(test)]
+    fn open_epoch(
+        &mut self,
+        scope: (u32, u64),
+        now_ms: u64,
+    ) -> Result<(u64, bool), OpenEpochError> {
+        self.open_epoch_principal((Principal::UnixUid(scope.0), scope.1), now_ms)
+    }
     /// Wall-clock-only admit used by tests and legacy callers: leaves the
     /// record unanchored (`accepted_mono_ms == 0`), which keeps the
     /// pre-anchor deadline semantics.
@@ -560,9 +573,20 @@ pub trait OperationStore {
     /// pass `mono_ms()` so the dispatcher can bound deadlines by real
     /// elapsed time even when the wall clock rewinds. `mono_ms == 0`
     /// leaves the record unanchored (legacy/tests).
+    #[cfg(test)]
     fn submit_at(
         &mut self,
         uid: u32,
+        req: &SendRequest,
+        now_ms: u64,
+        mono_ms: u64,
+    ) -> SubmitOutcome {
+        self.submit_at_principal(&Principal::UnixUid(uid), req, now_ms, mono_ms)
+    }
+
+    fn submit_at_principal(
+        &mut self,
+        principal: &Principal,
         req: &SendRequest,
         now_ms: u64,
         mono_ms: u64,
@@ -857,7 +881,7 @@ pub struct RateDeny {
 /// a restart simply reopens full buckets.
 pub struct AdmissionLimiter {
     global: RateBucket,
-    per_principal: HashMap<u32, RateBucket>,
+    per_principal: HashMap<Principal, RateBucket>,
 }
 
 impl AdmissionLimiter {
@@ -871,20 +895,25 @@ impl AdmissionLimiter {
     /// Charge one admission call at both scopes. The principal bucket is
     /// consulted first so a lone spammer is blamed on its own budget;
     /// denial consumes nothing.
+    #[cfg(test)]
     pub fn admit(&mut self, uid: u32, now_ms: u64) -> Result<(), RateDeny> {
+        self.admit_principal(&Principal::UnixUid(uid), now_ms)
+    }
+
+    pub fn admit_principal(&mut self, principal: &Principal, now_ms: u64) -> Result<(), RateDeny> {
         self.global.refill(now_ms);
         if self.per_principal.len() >= MAX_TRACKED_PRINCIPALS
-            && !self.per_principal.contains_key(&uid)
+            && !self.per_principal.contains_key(principal)
         {
             self.per_principal
                 .retain(|_, bucket| bucket.tokens < HOST_RATE_BURST);
         }
         let trackable = self.per_principal.len() < MAX_TRACKED_PRINCIPALS
-            || self.per_principal.contains_key(&uid);
+            || self.per_principal.contains_key(principal);
         if trackable {
             let bucket = self
                 .per_principal
-                .entry(uid)
+                .entry(principal.clone())
                 .or_insert_with(|| RateBucket::full(now_ms));
             bucket.refill(now_ms);
             if bucket.tokens == 0 {
@@ -902,7 +931,7 @@ impl AdmissionLimiter {
         }
         if trackable {
             self.per_principal
-                .get_mut(&uid)
+                .get_mut(principal)
                 .expect("inserted above")
                 .tokens -= 1;
         }
@@ -1004,7 +1033,9 @@ impl MemoryOperationStore {
             let eligible = self
                 .by_seq
                 .values()
-                .filter(|op| op.uid == scope.0 && op.network == scope.1 && op.epoch == candidate)
+                .filter(|op| {
+                    op.principal == scope.0 && op.network == scope.1 && op.epoch == candidate
+                })
                 .all(|op| {
                     op.concluded()
                         && op
@@ -1019,8 +1050,10 @@ impl MemoryOperationStore {
             let stale: Vec<OpIdentity> = self
                 .by_identity
                 .keys()
-                .filter(|id| id.uid == scope.0 && id.network == scope.1 && id.epoch == candidate)
-                .copied()
+                .filter(|id| {
+                    id.principal == scope.0 && id.network == scope.1 && id.epoch == candidate
+                })
+                .cloned()
                 .collect();
             for identity in stale {
                 if let Some(seq) = self.by_identity.remove(&identity) {
@@ -1030,13 +1063,13 @@ impl MemoryOperationStore {
         }
     }
 
-    fn counts(&self) -> (usize, usize, HashMap<u32, usize>) {
+    fn counts(&self) -> (usize, usize, HashMap<Principal, usize>) {
         let mut active = 0;
-        let mut per_principal: HashMap<u32, usize> = HashMap::new();
+        let mut per_principal: HashMap<Principal, usize> = HashMap::new();
         for op in self.by_seq.values() {
             if op.dispatch_state.is_active() && !op.concluded() {
                 active += 1;
-                *per_principal.entry(op.uid).or_default() += 1;
+                *per_principal.entry(op.principal.clone()).or_default() += 1;
             }
         }
         (self.by_seq.len(), active, per_principal)
@@ -1074,8 +1107,9 @@ impl MemoryOperationStore {
 
     /// Test hook: run the retire pass directly and report the new floor.
     #[cfg(test)]
-    pub fn retire_for_test(&mut self, scope: EpochScope, now_ms: u64) -> u64 {
-        self.retire_scope(scope, now_ms);
+    pub fn retire_for_test(&mut self, scope: (u32, u64), now_ms: u64) -> u64 {
+        let scope = (Principal::UnixUid(scope.0), scope.1);
+        self.retire_scope(scope.clone(), now_ms);
         self.epochs.get(&scope).map(|s| s.floor).unwrap_or(0)
     }
 }
@@ -1095,7 +1129,7 @@ impl OperationStore for MemoryOperationStore {
         false
     }
 
-    fn open_epoch(
+    fn open_epoch_principal(
         &mut self,
         scope: EpochScope,
         now_ms: u64,
@@ -1107,7 +1141,7 @@ impl OperationStore for MemoryOperationStore {
             self.epochs.insert(scope, ScopeEpochs::fresh(now_ms));
             return Ok((1, true));
         }
-        self.retire_scope(scope, now_ms);
+        self.retire_scope(scope.clone(), now_ms);
         let state = self.epochs.get_mut(&scope).expect("scope inserted above");
         if let Some((open, opened_ms)) = state.open {
             if now_ms < opened_ms.saturating_add(EPOCH_WINDOW_MS) {
@@ -1127,15 +1161,15 @@ impl OperationStore for MemoryOperationStore {
         Ok((epoch, true))
     }
 
-    fn submit_at(
+    fn submit_at_principal(
         &mut self,
-        uid: u32,
+        principal: &Principal,
         req: &SendRequest,
         now_ms: u64,
         mono_ms: u64,
     ) -> SubmitOutcome {
         let identity = OpIdentity {
-            uid,
+            principal: principal.clone(),
             network: req.network,
             epoch: req.epoch,
             key: req.key,
@@ -1150,8 +1184,8 @@ impl OperationStore for MemoryOperationStore {
                 SubmitOutcome::Conflict { existing_seq: *seq }
             };
         }
-        let scope = (uid, req.network);
-        self.retire_scope(scope, now_ms);
+        let scope = (principal.clone(), req.network);
+        self.retire_scope(scope.clone(), now_ms);
         match self.epochs.get(&scope).map(|s| s.status(req.epoch, now_ms)) {
             Some(EpochStatus::Open) => {}
             Some(EpochStatus::Closed) => return SubmitOutcome::EpochClosed,
@@ -1160,7 +1194,7 @@ impl OperationStore for MemoryOperationStore {
         let (records, active, per_principal) = self.counts();
         if records >= RECORD_CAP
             || active >= ACTIVE_CAP
-            || per_principal.get(&uid).copied().unwrap_or(0) >= ACTIVE_PER_PRINCIPAL_CAP
+            || per_principal.get(principal).copied().unwrap_or(0) >= ACTIVE_PER_PRINCIPAL_CAP
         {
             return SubmitOutcome::NoCapacity;
         }
@@ -1171,7 +1205,7 @@ impl OperationStore for MemoryOperationStore {
             seq,
             StoredOperation {
                 seq,
-                uid,
+                principal: principal.clone(),
                 network: req.network,
                 epoch: req.epoch,
                 key: req.key,
@@ -1298,27 +1332,27 @@ impl OperationStore for StoreBackend {
         }
     }
 
-    fn open_epoch(
+    fn open_epoch_principal(
         &mut self,
         scope: EpochScope,
         now_ms: u64,
     ) -> Result<(u64, bool), OpenEpochError> {
         match self {
-            Self::Memory(store) => store.open_epoch(scope, now_ms),
-            Self::Sqlite(store) => store.open_epoch(scope, now_ms),
+            Self::Memory(store) => store.open_epoch_principal(scope, now_ms),
+            Self::Sqlite(store) => store.open_epoch_principal(scope, now_ms),
         }
     }
 
-    fn submit_at(
+    fn submit_at_principal(
         &mut self,
-        uid: u32,
+        principal: &Principal,
         req: &SendRequest,
         now_ms: u64,
         mono_ms: u64,
     ) -> SubmitOutcome {
         match self {
-            Self::Memory(store) => store.submit_at(uid, req, now_ms, mono_ms),
-            Self::Sqlite(store) => store.submit_at(uid, req, now_ms, mono_ms),
+            Self::Memory(store) => store.submit_at_principal(principal, req, now_ms, mono_ms),
+            Self::Sqlite(store) => store.submit_at_principal(principal, req, now_ms, mono_ms),
         }
     }
 
@@ -1668,7 +1702,7 @@ mod tests {
         assert_eq!(by_seq.payload, vec![0x00, 0xff]);
         assert_eq!(by_seq.accepted_ms, 1000); // replay does not re-stamp
         let identity = OpIdentity {
-            uid: 501,
+            principal: Principal::UnixUid(501),
             network: 1,
             epoch: 1,
             key: req.key,
@@ -1795,7 +1829,7 @@ mod tests {
             _ => panic!("expected replay"),
         }
         let identity = OpIdentity {
-            uid: 501,
+            principal: Principal::UnixUid(501),
             network: 1,
             epoch: 1,
             key: known.key,
@@ -1872,6 +1906,20 @@ mod tests {
         assert!(limiter.admit(1, RATE_TOKEN_INTERVAL_MS).is_err());
         assert!(limiter.admit(1, 0).is_err());
         assert!(limiter.admit(2, 2 * RATE_TOKEN_INTERVAL_MS).is_ok());
+    }
+
+    #[test]
+    fn sid_and_unix_uid_have_distinct_rate_buckets() {
+        let mut limiter = AdmissionLimiter::new(0);
+        let sid = Principal::WindowsSid("S-1-5-21-100-200-300-501".into());
+        assert!(limiter.admit(501, 0).is_ok());
+        assert!(limiter.admit_principal(&sid, 0).is_ok());
+        assert_eq!(limiter.per_principal.len(), 2);
+        assert_eq!(
+            limiter.per_principal[&Principal::UnixUid(501)].tokens,
+            HOST_RATE_BURST - 1
+        );
+        assert_eq!(limiter.per_principal[&sid].tokens, HOST_RATE_BURST - 1);
     }
 
     /// CAP06: at 32 unretired epochs admission stops; once retire frees
@@ -2014,7 +2062,7 @@ mod tests {
             _ => panic!("retired key must fail closed, not re-execute"),
         }
         let identity = OpIdentity {
-            uid: 501,
+            principal: Principal::UnixUid(501),
             network: 1,
             epoch: 1,
             key: req.key,
@@ -2032,7 +2080,7 @@ mod tests {
         let seq = submit(&mut store, &req);
         store.set_state_for_test(seq, DispatchState::EndSdkReceived, Some(1000));
         let identity = OpIdentity {
-            uid: 501,
+            principal: Principal::UnixUid(501),
             network: 1,
             epoch: 1,
             key: req.key,

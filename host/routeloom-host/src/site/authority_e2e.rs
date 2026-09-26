@@ -375,12 +375,14 @@ fn detached_usb_keeps_presealed_notice_for_reconnect() {
 
 #[test]
 fn host_restart_replays_exact_committed_notice_without_channel() {
-    let path = std::env::temp_dir().join(format!(
-        "routeloom-p6-presealed-{}-{}.db",
+    let dir = std::env::temp_dir().join(format!(
+        "routeloom-p6-presealed-{}-{}",
         std::process::id(),
         T0
     ));
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&dir);
+    routeloom_peercred::create_private_dir_all(&dir).unwrap();
+    let path = dir.join("site.db");
     let mut rig = Rig::with_store(Box::new(SqliteSiteStore::open(&path).unwrap()));
     let _ = rig.join(NODE_A, 0xA1, T0);
     let row = rig.service.with(|a| a.devices[&NODE_A].clone()).0;
@@ -426,7 +428,7 @@ fn host_restart_replays_exact_committed_notice_without_channel() {
             && *kind == CarrierKind::Envelope
             && *bytes == sealed));
     drop(restarted);
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

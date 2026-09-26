@@ -4117,7 +4117,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
+        routeloom_peercred::create_private_dir_all(&dir).unwrap();
         let path = dir.join("ops.db");
         // Boot N of the daemon: 34 volatile records claim lane positions
         // under this device's lease, then the process "dies".

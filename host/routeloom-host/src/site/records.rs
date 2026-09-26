@@ -417,7 +417,7 @@ impl JoinRequestRec {
 /// An idempotency record: `(principal, key)` → request digest + result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredDecision {
-    pub principal: u32,
+    pub principal: routeloom_peercred::Principal,
     pub key: String,
     pub digest: [u8; 32],
     pub result: String,
@@ -425,14 +425,21 @@ pub struct StoredDecision {
 }
 
 impl StoredDecision {
-    pub fn doc_key(principal: u32, key: &str) -> String {
-        format!("{principal}:{key}")
+    pub fn doc_key(principal: &routeloom_peercred::Principal, key: &str) -> String {
+        match principal {
+            routeloom_peercred::Principal::UnixUid(uid) => format!("{uid}:{key}"),
+            _ => format!("{}:{key}", principal.storage_key()),
+        }
     }
 
     pub fn doc(&self) -> String {
+        let principal = match &self.principal {
+            routeloom_peercred::Principal::UnixUid(uid) => uid.to_string(),
+            sid => format!("\"{}\"", escape_string(&sid.storage_key())),
+        };
         format!(
             "{{\"principal\":{},\"key\":\"{}\",\"digest\":\"{}\",\"result\":\"{}\",\"ms\":{}}}",
-            self.principal,
+            principal,
             escape_string(&self.key),
             hex_lower(&self.digest),
             escape_string(&self.result),
@@ -443,7 +450,12 @@ impl StoredDecision {
     pub fn from_doc(text: &str) -> Option<Self> {
         let json = routeloom_json::parse(text).ok()?;
         Some(Self {
-            principal: u32::try_from(num(&json, "principal")?).ok()?,
+            principal: match json.get("principal")? {
+                Json::String(key) => routeloom_peercred::Principal::from_storage_key(key).ok()?,
+                _ => routeloom_peercred::Principal::UnixUid(
+                    u32::try_from(num(&json, "principal")?).ok()?,
+                ),
+            },
             key: json.get("key")?.as_str()?.to_string(),
             digest: arr(&json, "digest")?,
             result: json.get("result")?.as_str()?.to_string(),
@@ -643,13 +655,31 @@ mod tests {
             );
         }
         let decision = StoredDecision {
-            principal: 501,
+            principal: routeloom_peercred::Principal::UnixUid(501),
             key: "kg-\"1".into(),
             digest: [1; 32],
             result: "{\"a\":1}".into(),
             ms: 4,
         };
         assert_eq!(StoredDecision::from_doc(&decision.doc()), Some(decision));
+        let sid_decision = StoredDecision {
+            principal: routeloom_peercred::Principal::WindowsSid("S-1-5-21-100-200-300-501".into()),
+            key: "same-key".into(),
+            digest: [2; 32],
+            result: "{}".into(),
+            ms: 5,
+        };
+        assert_eq!(
+            StoredDecision::from_doc(&sid_decision.doc()),
+            Some(sid_decision.clone())
+        );
+        assert_ne!(
+            StoredDecision::doc_key(&sid_decision.principal, &sid_decision.key),
+            StoredDecision::doc_key(
+                &routeloom_peercred::Principal::UnixUid(501),
+                &sid_decision.key
+            ),
+        );
         let op = Operation {
             id: 9,
             kind: "revoke".into(),

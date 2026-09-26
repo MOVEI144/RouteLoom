@@ -41,14 +41,15 @@ use crate::send_store::{
     SubmitOutcome, ACTIVE_CAP, ACTIVE_PER_PRINCIPAL_CAP, EPOCH_WINDOW_MS, ISSUE_OUTBOX_CAP,
     MAX_UNRETIRED_EPOCHS, RECORD_CAP, RECORD_RESERVATION_BYTES, RETENTION_MS, STORE_BYTES_CAP,
 };
+use routeloom_peercred::Principal;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Schema v2 added the TX-I2 `operations.dispatch` attachment. Schema v3
-/// adds the bounded config outbox and its terminal marker. v1/v2 files are
-/// migrated atomically; unknown versions still refuse to open.
-const SCHEMA_VERSION: u32 = 3;
+/// added the bounded config outbox and its terminal marker. Schema v4
+/// stores versioned principals; v1-v3 files migrate atomically.
+const SCHEMA_VERSION: u32 = 4;
 
 /// Mirror of the device dispatch window (contracts `DISPATCH_WINDOW`,
 /// kept in `dispatch.rs`): lane positions further than this below the
@@ -60,16 +61,16 @@ const LANE_HOLE_WINDOW: u64 = 32;
 const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS scope_epoch(
-    uid INTEGER NOT NULL, network INTEGER NOT NULL,
+    uid TEXT NOT NULL, network INTEGER NOT NULL,
     floor BLOB NOT NULL, next_epoch BLOB NOT NULL,
     open_epoch BLOB, open_ms INTEGER,
     PRIMARY KEY(uid, network));
 CREATE TABLE IF NOT EXISTS closed_epoch(
-    uid INTEGER NOT NULL, network INTEGER NOT NULL, epoch BLOB NOT NULL,
+    uid TEXT NOT NULL, network INTEGER NOT NULL, epoch BLOB NOT NULL,
     PRIMARY KEY(uid, network, epoch));
 CREATE TABLE IF NOT EXISTS operations(
     seq INTEGER PRIMARY KEY,
-    uid INTEGER NOT NULL, network INTEGER NOT NULL,
+    uid TEXT NOT NULL, network INTEGER NOT NULL,
     epoch BLOB NOT NULL, key BLOB NOT NULL,
     dest_kind INTEGER NOT NULL, dest BLOB NOT NULL,
     delivery INTEGER NOT NULL, priority INTEGER NOT NULL,
@@ -185,10 +186,43 @@ fn enforce_owner_only(path: &Path) -> Result<(), OpenError> {
     Ok(())
 }
 
-/// Non-unix builds have no POSIX mode to enforce; the platform's own ACLs
-/// govern the files instead.
-#[cfg(not(unix))]
-fn enforce_owner_only(_path: &Path) -> Result<(), OpenError> {
+#[cfg(windows)]
+fn enforce_owner_only(path: &Path) -> Result<(), OpenError> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    routeloom_peercred::verify_private_dir_perms(parent).map_err(|e| OpenError {
+        message: format!(
+            "STORE_RECOVERY_REQUIRED: operation store directory {} is not private: {e}",
+            parent.display()
+        ),
+    })?;
+    for (index, suffix) in ["", "-wal", "-shm", "-journal"].iter().enumerate() {
+        let mut target = path.as_os_str().to_os_string();
+        target.push(suffix);
+        let target = PathBuf::from(target);
+        if index != 0 && target.exists() {
+            routeloom_peercred::protect_private_sidecar(&target).map_err(|e| OpenError {
+                message: format!(
+                    "STORE_RECOVERY_REQUIRED: cannot protect operation store sidecar {}: {e}",
+                    target.display()
+                ),
+            })?;
+        }
+        match routeloom_peercred::verify_private_file_perms(&target) {
+            Ok(()) => {}
+            Err(e) if index != 0 && e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(OpenError {
+                    message: format!(
+                        "STORE_RECOVERY_REQUIRED: operation store file {} is not private: {e}",
+                        target.display()
+                    ),
+                })
+            }
+        }
+    }
     Ok(())
 }
 
@@ -202,13 +236,13 @@ type ScopeRowParts = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<i64>);
 
 fn read_scope(
     tx: &Transaction<'_>,
-    scope: EpochScope,
+    scope: &EpochScope,
 ) -> Result<Option<ScopeRow>, rusqlite::Error> {
     let (uid, network) = scope;
     let row: Option<ScopeRowParts> = tx
         .query_row(
             "SELECT floor, next_epoch, open_epoch, open_ms FROM scope_epoch WHERE uid=?1 AND network=?2",
-            params![uid, network as i64],
+            params![uid.storage_key(), *network as i64],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?;
@@ -238,32 +272,32 @@ fn read_scope(
 
 fn open_epoch_of(
     tx: &Transaction<'_>,
-    scope: EpochScope,
+    scope: &EpochScope,
 ) -> Result<Option<(u64, u64)>, rusqlite::Error> {
     Ok(read_scope(tx, scope)?.and_then(|row| row.open))
 }
 
 fn closed_contains(
     tx: &Transaction<'_>,
-    scope: EpochScope,
+    scope: &EpochScope,
     epoch: u64,
 ) -> Result<bool, rusqlite::Error> {
     let (uid, network) = scope;
     Ok(tx
         .query_row(
             "SELECT 1 FROM closed_epoch WHERE uid=?1 AND network=?2 AND epoch=?3",
-            params![uid, network as i64, u64_blob(epoch)],
+            params![uid.storage_key(), *network as i64, u64_blob(epoch)],
             |_| Ok(()),
         )
         .optional()?
         .is_some())
 }
 
-fn unretired_count(tx: &Transaction<'_>, scope: EpochScope) -> Result<usize, rusqlite::Error> {
+fn unretired_count(tx: &Transaction<'_>, scope: &EpochScope) -> Result<usize, rusqlite::Error> {
     let (uid, network) = scope;
     let closed: i64 = tx.query_row(
         "SELECT COUNT(*) FROM closed_epoch WHERE uid=?1 AND network=?2",
-        params![uid, network as i64],
+        params![uid.storage_key(), *network as i64],
         |row| row.get(0),
     )?;
     let open = usize::from(open_epoch_of(tx, scope)?.is_some());
@@ -305,7 +339,8 @@ fn read_operation_row(row: &rusqlite::Row<'_>) -> Result<StoredOperation, rusqli
     };
     Ok(StoredOperation {
         seq: int_u64(0, "seq")?,
-        uid: int_u32(1, "uid")?,
+        principal: Principal::from_storage_key(&row.get::<_, String>(1)?)
+            .map_err(|_| corrupt("uid"))?,
         network: int_u64(2, "network")?,
         epoch,
         key,
@@ -395,9 +430,17 @@ impl SqliteOperationStore {
         let fresh = !path.exists();
         if fresh {
             if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                #[cfg(unix)]
                 std::fs::create_dir_all(parent).map_err(|e| OpenError {
                     message: format!(
                         "STORE_RECOVERY_REQUIRED: cannot create store directory {}: {e}",
+                        parent.display()
+                    ),
+                })?;
+                #[cfg(windows)]
+                routeloom_peercred::create_private_dir_all(parent).map_err(|e| OpenError {
+                    message: format!(
+                        "STORE_RECOVERY_REQUIRED: cannot create private store directory {}: {e}",
                         parent.display()
                     ),
                 })?;
@@ -424,6 +467,13 @@ impl SqliteOperationStore {
                         ),
                     })?;
             }
+            #[cfg(windows)]
+            routeloom_peercred::open_private_file_for_write(path).map_err(|e| OpenError {
+                message: format!(
+                    "STORE_RECOVERY_REQUIRED: cannot create private operation store {}: {e}",
+                    path.display()
+                ),
+            })?;
         }
         let mut conn = Connection::open(path).map_err(|e| OpenError {
             message: format!(
@@ -524,9 +574,9 @@ impl SqliteOperationStore {
         }
         match version {
             None | Some(SCHEMA_VERSION) => {}
-            // v1/v2 → v3: preserve the dispatch attachment and add the
-            // bounded config outbox with an explicit terminal marker.
-            Some(1) | Some(2) => {
+            // v4 keeps ownership as a versioned principal string. The
+            // conversion is atomic with the older schema additions.
+            Some(1) | Some(2) | Some(3) => {
                 let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let has_dispatch: i64 = tx.query_row(
                     "SELECT COUNT(*) FROM pragma_table_info('operations') WHERE name='dispatch'",
@@ -547,6 +597,19 @@ impl SqliteOperationStore {
                         "ALTER TABLE config_outbox ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0",
                         [],
                     )?;
+                }
+                for table in ["scope_epoch", "closed_epoch", "operations"] {
+                    let invalid: i64 = tx.query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE typeof(uid)!='integer' OR uid<0 OR uid>4294967295"),
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    if invalid != 0 {
+                        return Err(OpenError {
+                            message: format!("STORE_RECOVERY_REQUIRED: invalid uid in {table}"),
+                        });
+                    }
+                    tx.execute(&format!("UPDATE {table} SET uid='v1:uid:' || uid"), [])?;
                 }
                 tx.execute(
                     "UPDATE meta SET value=?1 WHERE key='schema_version'",
@@ -712,7 +775,7 @@ impl SqliteOperationStore {
                             op_seq,
                             StoredOperation {
                                 seq: op_seq,
-                                uid: 0,
+                                principal: Principal::UnixUid(0),
                                 network: 0,
                                 epoch: 0,
                                 key: [0; 16],
@@ -831,7 +894,7 @@ impl SqliteOperationStore {
         ram_by_identity: &HashMap<OpIdentity, StoredOperation>,
         delta: &mut RamDelta,
         tx: &Transaction<'_>,
-        scope: EpochScope,
+        scope: &EpochScope,
         now_ms: u64,
     ) -> Result<(), rusqlite::Error> {
         let (uid, network) = scope;
@@ -857,10 +920,10 @@ impl SqliteOperationStore {
                 let mut stmt = tx.prepare(
                     "SELECT terminal_ms FROM operations WHERE uid=?1 AND network=?2 AND epoch=?3",
                 )?;
-                let rows = stmt
-                    .query_map(params![uid, network as i64, u64_blob(candidate)], |row| {
-                        row.get::<_, Option<i64>>(0)
-                    })?;
+                let rows = stmt.query_map(
+                    params![uid.storage_key(), *network as i64, u64_blob(candidate)],
+                    |row| row.get::<_, Option<i64>>(0),
+                )?;
                 for row in rows {
                     let lapsed = row?
                         .and_then(db_to_ms)
@@ -874,7 +937,9 @@ impl SqliteOperationStore {
             if eligible {
                 eligible = ram_by_identity
                     .values()
-                    .filter(|op| op.uid == uid && op.network == network && op.epoch == candidate)
+                    .filter(|op| {
+                        op.principal == *uid && op.network == *network && op.epoch == candidate
+                    })
                     .all(|op| {
                         op.concluded()
                             && op
@@ -888,21 +953,23 @@ impl SqliteOperationStore {
             floor = candidate;
             tx.execute(
                 "UPDATE scope_epoch SET floor=?3 WHERE uid=?1 AND network=?2",
-                params![uid, network as i64, u64_blob(floor)],
+                params![uid.storage_key(), *network as i64, u64_blob(floor)],
             )?;
             tx.execute(
                 "DELETE FROM closed_epoch WHERE uid=?1 AND network=?2 AND epoch=?3",
-                params![uid, network as i64, u64_blob(candidate)],
+                params![uid.storage_key(), *network as i64, u64_blob(candidate)],
             )?;
             tx.execute(
                 "DELETE FROM operations WHERE uid=?1 AND network=?2 AND epoch=?3",
-                params![uid, network as i64, u64_blob(candidate)],
+                params![uid.storage_key(), *network as i64, u64_blob(candidate)],
             )?;
             delta.retired.extend(
                 ram_by_identity
                     .keys()
-                    .filter(|id| id.uid == uid && id.network == network && id.epoch == candidate)
-                    .copied(),
+                    .filter(|id| {
+                        id.principal == *uid && id.network == *network && id.epoch == candidate
+                    })
+                    .cloned(),
             );
         }
         Ok(())
@@ -921,7 +988,7 @@ impl SqliteOperationStore {
             }
         }
         if let Some((identity, op)) = delta.admitted {
-            ram_by_seq.insert(op.seq, identity);
+            ram_by_seq.insert(op.seq, identity.clone());
             ram_by_identity.insert(identity, op);
         }
     }
@@ -931,7 +998,7 @@ impl SqliteOperationStore {
         delta: &mut RamDelta,
         tx: &Transaction<'_>,
         path: &Path,
-        uid: u32,
+        principal: &Principal,
         req: &SendRequest,
         // Wall and monotonic admit stamps travel together: the record's
         // TTL runs on `now_ms`, the rewind-proof budget on `mono_ms`.
@@ -939,7 +1006,7 @@ impl SqliteOperationStore {
     ) -> Result<SubmitOutcome, rusqlite::Error> {
         let (now_ms, mono_ms) = stamps;
         let identity = OpIdentity {
-            uid,
+            principal: principal.clone(),
             network: req.network,
             epoch: req.epoch,
             key: req.key,
@@ -957,7 +1024,7 @@ impl SqliteOperationStore {
             .query_row(
                 "SELECT seq, canonical FROM operations WHERE uid=?1 AND network=?2 AND epoch=?3 AND key=?4",
                 params![
-                    uid,
+                    principal.storage_key(),
                     req.network as i64,
                     u64_blob(req.epoch),
                     req.key.to_vec()
@@ -974,9 +1041,9 @@ impl SqliteOperationStore {
                 }
             });
         }
-        let scope = (uid, req.network);
-        Self::retire_tx(ram_by_identity, delta, tx, scope, now_ms)?;
-        match read_scope(tx, scope)? {
+        let scope = (principal.clone(), req.network);
+        Self::retire_tx(ram_by_identity, delta, tx, &scope, now_ms)?;
+        match read_scope(tx, &scope)? {
             Some(row) if row.open.is_some_and(|(open, _)| open == req.epoch) => {
                 // Same rule as the memory provider: an unrotated epoch
                 // still closes to new keys once its admission window
@@ -987,7 +1054,7 @@ impl SqliteOperationStore {
                 }
             }
             Some(row) if req.epoch <= row.floor => return Ok(SubmitOutcome::EpochClosed),
-            Some(_) if closed_contains(tx, scope, req.epoch)? => {
+            Some(_) if closed_contains(tx, &scope, req.epoch)? => {
                 return Ok(SubmitOutcome::EpochClosed)
             }
             _ => return Ok(SubmitOutcome::UnknownEpoch),
@@ -1024,7 +1091,7 @@ impl SqliteOperationStore {
         for op in ram_by_identity.values() {
             if op.dispatch_state.is_active() && !op.concluded() {
                 total_active += 1;
-                if op.uid == uid {
+                if &op.principal == principal {
                     principal_active += 1;
                 }
             }
@@ -1036,7 +1103,7 @@ impl SqliteOperationStore {
             &format!(
                 "SELECT COUNT(*) FROM operations WHERE uid=?1 AND dispatch_state IN ({ACTIVE_SQL}) AND terminal_ms IS NULL"
             ),
-            params![uid],
+            params![principal.storage_key()],
             |row| row.get(0),
         )?;
         if durable_principal as usize + principal_active >= ACTIVE_PER_PRINCIPAL_CAP {
@@ -1052,7 +1119,7 @@ impl SqliteOperationStore {
         )?;
         let op = StoredOperation {
             seq,
-            uid,
+            principal: principal.clone(),
             network: req.network,
             epoch: req.epoch,
             key: req.key,
@@ -1082,7 +1149,7 @@ impl SqliteOperationStore {
                 "INSERT INTO operations(seq, uid, network, epoch, key, dest_kind, dest, delivery, priority, ttl_ms, storage, hop_limit, payload, canonical, hash, accepted_ms, dispatch_state, terminal_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,'HOST_QUEUED',NULL)",
                 params![
                     seq as i64,
-                    uid,
+                    principal.storage_key(),
                     req.network as i64,
                     u64_blob(req.epoch),
                     req.key.to_vec(),
@@ -1107,7 +1174,7 @@ impl SqliteOperationStore {
     /// memory provider's hook. Persists when the record is durable.
     #[cfg(test)]
     pub fn set_state_for_test(&mut self, seq: u64, state: DispatchState, terminal_ms: Option<u64>) {
-        if let Some(identity) = self.ram_by_seq.get(&seq).copied() {
+        if let Some(identity) = self.ram_by_seq.get(&seq).cloned() {
             if let Some(op) = self.ram_by_identity.get_mut(&identity) {
                 op.dispatch_state = state;
                 op.terminal_ms = terminal_ms;
@@ -1126,14 +1193,15 @@ impl SqliteOperationStore {
 
     /// Test hook: run the retire pass directly and report the new floor.
     #[cfg(test)]
-    pub fn retire_for_test(&mut self, scope: EpochScope, now_ms: u64) -> u64 {
+    pub fn retire_for_test(&mut self, scope: (u32, u64), now_ms: u64) -> u64 {
+        let scope = (Principal::UnixUid(scope.0), scope.1);
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .expect("retire txn");
         let mut delta = RamDelta::default();
-        Self::retire_tx(&self.ram_by_identity, &mut delta, &tx, scope, now_ms).expect("retire");
-        let floor = read_scope(&tx, scope)
+        Self::retire_tx(&self.ram_by_identity, &mut delta, &tx, &scope, now_ms).expect("retire");
+        let floor = read_scope(&tx, &scope)
             .expect("scope")
             .map(|row| row.floor)
             .unwrap_or(0);
@@ -1157,7 +1225,7 @@ impl SqliteOperationStore {
         ram_by_identity: &HashMap<OpIdentity, StoredOperation>,
         delta: &mut RamDelta,
         tx: &Transaction<'_>,
-        scope: EpochScope,
+        scope: &EpochScope,
         now_ms: u64,
     ) -> Result<Result<(u64, bool), OpenEpochError>, rusqlite::Error> {
         let (uid, network) = scope;
@@ -1165,8 +1233,8 @@ impl SqliteOperationStore {
             tx.execute(
                 "INSERT INTO scope_epoch(uid, network, floor, next_epoch, open_epoch, open_ms) VALUES (?1,?2,?3,?4,?5,?6)",
                 params![
-                    uid,
-                    network as i64,
+                    uid.storage_key(),
+                    *network as i64,
                     u64_blob(0),
                     u64_blob(2),
                     u64_blob(1),
@@ -1183,11 +1251,11 @@ impl SqliteOperationStore {
             }
             tx.execute(
                 "INSERT INTO closed_epoch(uid, network, epoch) VALUES (?1,?2,?3)",
-                params![uid, network as i64, u64_blob(open)],
+                params![uid.storage_key(), *network as i64, u64_blob(open)],
             )?;
             tx.execute(
                 "UPDATE scope_epoch SET open_epoch=NULL, open_ms=NULL WHERE uid=?1 AND network=?2",
-                params![uid, network as i64],
+                params![uid.storage_key(), *network as i64],
             )?;
         }
         if unretired_count(tx, scope)? >= MAX_UNRETIRED_EPOCHS || row.next_epoch == u64::MAX {
@@ -1197,8 +1265,8 @@ impl SqliteOperationStore {
         tx.execute(
             "UPDATE scope_epoch SET next_epoch=?3, open_epoch=?4, open_ms=?5 WHERE uid=?1 AND network=?2",
             params![
-                uid,
-                network as i64,
+                uid.storage_key(),
+                *network as i64,
                 u64_blob(epoch.saturating_add(1)),
                 u64_blob(epoch),
                 ms_to_db(now_ms),
@@ -1605,7 +1673,7 @@ impl OperationStore for SqliteOperationStore {
         true
     }
 
-    fn open_epoch(
+    fn open_epoch_principal(
         &mut self,
         scope: EpochScope,
         now_ms: u64,
@@ -1624,7 +1692,7 @@ impl OperationStore for SqliteOperationStore {
             }
         };
         let mut delta = RamDelta::default();
-        let outcome = match Self::open_epoch_tx(ram_by_identity, &mut delta, &tx, scope, now_ms) {
+        let outcome = match Self::open_epoch_tx(ram_by_identity, &mut delta, &tx, &scope, now_ms) {
             Ok(outcome) => outcome,
             Err(error) => {
                 eprintln!("opstore fault: {error}");
@@ -1639,9 +1707,9 @@ impl OperationStore for SqliteOperationStore {
         outcome
     }
 
-    fn submit_at(
+    fn submit_at_principal(
         &mut self,
-        uid: u32,
+        principal: &Principal,
         req: &SendRequest,
         now_ms: u64,
         mono_ms: u64,
@@ -1664,7 +1732,7 @@ impl OperationStore for SqliteOperationStore {
             &mut delta,
             &tx,
             path.as_path(),
-            uid,
+            principal,
             req,
             (now_ms, mono_ms),
         ) {
@@ -1720,7 +1788,7 @@ impl OperationStore for SqliteOperationStore {
                     "SELECT {OPERATION_COLUMNS} FROM operations WHERE uid=?1 AND network=?2 AND epoch=?3 AND key=?4"
                 ),
                 params![
-                    identity.uid,
+                    identity.principal.storage_key(),
                     identity.network as i64,
                     u64_blob(identity.epoch),
                     identity.key.to_vec(),
@@ -1781,7 +1849,7 @@ impl OperationStore for SqliteOperationStore {
         dispatcher: [u8; 16],
     ) -> Result<PrepareOutcome, ()> {
         // RAM-overlay records are volatile by contract; mutate in place.
-        if let Some(identity) = self.ram_by_seq.get(&op_seq).copied() {
+        if let Some(identity) = self.ram_by_seq.get(&op_seq).cloned() {
             let Some(op) = self.ram_by_identity.get_mut(&identity) else {
                 return Ok(PrepareOutcome::NotFound);
             };
@@ -1853,7 +1921,7 @@ impl OperationStore for SqliteOperationStore {
         op_seq: u64,
         mutate: &mut dyn FnMut(&mut StoredOperation) -> bool,
     ) -> Result<bool, ()> {
-        if let Some(identity) = self.ram_by_seq.get(&op_seq).copied() {
+        if let Some(identity) = self.ram_by_seq.get(&op_seq).cloned() {
             // Same veto rule as the durable path: snapshot so a false
             // return leaves no partial mutation committed.
             let Some(op) = self.ram_by_identity.get_mut(&identity) else {
@@ -1985,11 +2053,14 @@ mod tests {
     impl TestDb {
         fn new(name: &str) -> Self {
             let id = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "routeloom-cap1-{}-{}-{id}.db",
+            let dir = std::env::temp_dir().join(format!(
+                "routeloom-cap1-{}-{}-{id}",
                 std::process::id(),
                 name
             ));
+            let _ = std::fs::remove_dir_all(&dir);
+            routeloom_peercred::create_private_dir_all(&dir).unwrap();
+            let path = dir.join("ops.db");
             Self::remove(&path);
             Self { path }
         }
@@ -2011,6 +2082,7 @@ mod tests {
     impl Drop for TestDb {
         fn drop(&mut self) {
             Self::remove(&self.path);
+            let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
         }
     }
 
@@ -2078,7 +2150,7 @@ mod tests {
         }
         let store = db.open();
         let identity = OpIdentity {
-            uid: 501,
+            principal: Principal::UnixUid(501),
             network: 1,
             epoch: 1,
             key: durable(key, 1).key,
@@ -2087,6 +2159,114 @@ mod tests {
         let dispatch = op.dispatch.as_ref().unwrap();
         assert_eq!(dispatch.device_state.as_deref(), Some("failed"));
         assert_eq!(dispatch.device_reason.as_deref(), Some("NO_ROUTE"));
+    }
+
+    #[test]
+    fn sid_epoch_and_operation_survive_restart_without_uid_alias() {
+        let db = TestDb::new("sid-principal");
+        let sid = Principal::WindowsSid("S-1-5-21-100-200-300-501".into());
+        let unix = Principal::UnixUid(501);
+        let req = durable("00112233445566778899aabbccddeeff", 1);
+        let sid_seq;
+        {
+            let mut store = db.open();
+            assert_eq!(
+                store.open_epoch_principal((sid.clone(), 1), 0),
+                Ok((1, true))
+            );
+            assert_eq!(
+                store.open_epoch_principal((unix.clone(), 1), 0),
+                Ok((1, true))
+            );
+            sid_seq = match store.submit_at_principal(&sid, &req, 1000, 0) {
+                SubmitOutcome::Accepted { seq } => seq,
+                other => panic!("SID admission: {}", outcome_name(&other)),
+            };
+            assert!(matches!(
+                store.submit_at_principal(&unix, &req, 1000, 0),
+                SubmitOutcome::Accepted { .. }
+            ));
+        }
+        let mut store = db.open();
+        let identity = OpIdentity {
+            principal: sid.clone(),
+            network: 1,
+            epoch: 1,
+            key: req.key,
+        };
+        assert_eq!(store.get_by_key(&identity).unwrap().unwrap().seq, sid_seq);
+        assert_eq!(store.get_by_seq(sid_seq).unwrap().unwrap().principal, sid);
+        assert!(
+            matches!(store.submit_at_principal(&unix, &req, 2000, 0), SubmitOutcome::Replay { seq } if seq != sid_seq)
+        );
+        assert!(
+            matches!(store.submit_at_principal(&identity.principal, &req, 2000, 0), SubmitOutcome::Replay { seq } if seq == sid_seq)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn existing_operation_db_requires_owner_dacl() {
+        let db = TestDb::new("dacl");
+        // A normal create inherits directory grants and is not an explicit
+        // protected owner-only file, even inside a private directory.
+        std::fs::write(&db.path, []).unwrap();
+        let error = SqliteOperationStore::open(&db.path).unwrap_err();
+        assert!(error.message.contains("not private"), "{error}");
+    }
+
+    #[test]
+    fn schema_three_uid_fixture_migrates_to_versioned_principal() {
+        let db = TestDb::new("uid-v3");
+        let req = durable("00112233445566778899aabbccddeeff", 1);
+        {
+            let conn = Connection::open(&db.path).unwrap();
+            conn.execute_batch(&SCHEMA_SQL.replace("uid TEXT", "uid INTEGER"))
+                .unwrap();
+            conn.execute_batch(CONFIG_OUTBOX_SQL).unwrap();
+            for (key, value) in [
+                ("schema_version", 3u32.to_be_bytes().to_vec()),
+                ("lineage", vec![1; 16]),
+                ("next_seq", u64_blob(2)),
+            ] {
+                conn.execute(
+                    "INSERT INTO meta(key,value) VALUES (?1,?2)",
+                    params![key, value],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO scope_epoch(uid,network,floor,next_epoch,open_epoch,open_ms) VALUES (501,1,?1,?2,?3,0)",
+                params![u64_blob(0), u64_blob(2), u64_blob(1)],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO operations(seq,uid,network,epoch,key,dest_kind,dest,delivery,priority,ttl_ms,storage,hop_limit,payload,canonical,hash,accepted_ms,dispatch_state,terminal_ms) VALUES (1,501,1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,1000,'HOST_QUEUED',NULL)",
+                params![u64_blob(1), req.key.to_vec(), req.dest_kind, u64_blob(req.dest), req.delivery, req.priority, req.ttl_ms, req.storage, req.hop_limit, req.payload, req.canonical, req.hash.to_vec()],
+            ).unwrap();
+        }
+        let mut store = db.open();
+        let op = store.get_by_seq(1).unwrap().unwrap();
+        assert_eq!(op.principal, Principal::UnixUid(501));
+        assert!(matches!(
+            store.submit_at_principal(&Principal::UnixUid(501), &req, 2000, 0),
+            SubmitOutcome::Replay { seq: 1 }
+        ));
+        let version: Vec<u8> = store
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_be_bytes());
+        let key: String = store
+            .conn
+            .query_row("SELECT uid FROM operations WHERE seq=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(key, "v1:uid:501");
     }
 
     /// Write → reopen → same lineage, epochs and durable records; the
@@ -2129,7 +2309,7 @@ mod tests {
             assert_eq!(op.accepted_ms, 1000);
             assert_eq!(op.dispatch_state, DispatchState::HostQueued);
             let identity = OpIdentity {
-                uid: 501,
+                principal: Principal::UnixUid(501),
                 network: 1,
                 epoch: 1,
                 key: durable("00112233445566778899aabbccddeeff", 1).key,
@@ -2411,7 +2591,7 @@ mod tests {
             let mut conn = rusqlite::Connection::open(&db.path).unwrap();
             let tx = conn.transaction().unwrap();
             tx.execute(
-                "INSERT INTO operations(seq, uid, network, epoch, key, dest_kind, dest, delivery, priority, ttl_ms, storage, hop_limit, payload, canonical, hash, accepted_ms, dispatch_state, terminal_ms) VALUES (99,501,1,?1,?2,0,?3,1,1,5000,1,10,x'00',x'00',?4,0,'HOST_QUEUED',NULL)",
+                "INSERT INTO operations(seq, uid, network, epoch, key, dest_kind, dest, delivery, priority, ttl_ms, storage, hop_limit, payload, canonical, hash, accepted_ms, dispatch_state, terminal_ms) VALUES (99,'v1:uid:501',1,?1,?2,0,?3,1,1,5000,1,10,x'00',x'00',?4,0,'HOST_QUEUED',NULL)",
                 params![
                     u64_blob(1),
                     vec![0xeeu8; 16],
@@ -2443,7 +2623,7 @@ mod tests {
             for seq in 1..RECORD_CAP as i64 {
                 let key = (seq as u128).to_be_bytes().to_vec();
                 tx.execute(
-                    "INSERT INTO operations(seq, uid, network, epoch, key, dest_kind, dest, delivery, priority, ttl_ms, storage, hop_limit, payload, canonical, hash, accepted_ms, dispatch_state, terminal_ms) VALUES (?1,501,1,?2,?3,0,?4,1,1,5000,1,10,x'',x'',?5,0,'HOST_QUEUED',NULL)",
+                    "INSERT INTO operations(seq, uid, network, epoch, key, dest_kind, dest, delivery, priority, ttl_ms, storage, hop_limit, payload, canonical, hash, accepted_ms, dispatch_state, terminal_ms) VALUES (?1,'v1:uid:501',1,?2,?3,0,?4,1,1,5000,1,10,x'',x'',?5,0,'HOST_QUEUED',NULL)",
                     params![
                         seq,
                         u64_blob(1),
@@ -2614,7 +2794,10 @@ mod tests {
         assert_eq!(store.retire_for_test((7, 1), RETENTION_MS), 1);
         assert!(store.get_by_seq(done).unwrap().is_none());
         // 501's record is untouched in its own scope.
-        assert_eq!(store.get_by_seq(ram_seq).unwrap().unwrap().uid, 501);
+        assert_eq!(
+            store.get_by_seq(ram_seq).unwrap().unwrap().principal,
+            Principal::UnixUid(501)
+        );
     }
 
     /// A vetoed commit must leave no RAM residue: the record never
@@ -2632,7 +2815,7 @@ mod tests {
             SubmitOutcome::StoreFault
         ));
         let identity = OpIdentity {
-            uid: 501,
+            principal: Principal::UnixUid(501),
             network: 1,
             epoch: 1,
             key: req.key,
@@ -2668,7 +2851,7 @@ mod tests {
         store.set_state_for_test(seq, DispatchState::EndSdkReceived, Some(0));
         store.open_epoch((501, 1), EPOCH_WINDOW_MS).unwrap();
         let identity = OpIdentity {
-            uid: 501,
+            principal: Principal::UnixUid(501),
             network: 1,
             epoch: 1,
             key: req.key,
@@ -2894,7 +3077,7 @@ mod tests {
                 SubmitOutcome::EpochClosed
             ));
             let identity = OpIdentity {
-                uid: 501,
+                principal: Principal::UnixUid(501),
                 network: 1,
                 epoch: 1,
                 key: ram_req.key,

@@ -22,7 +22,7 @@ use crate::acl;
 use crate::api1::{record_json, record_meta_json};
 use crate::receive_log::{Cursor, ReadOutcome, RxRecord, PAGE_LIMIT};
 use crate::{now_ms, State};
-use routeloom_peercred::IpcStream;
+use routeloom_peercred::{IpcStream, Principal};
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::net::Shutdown;
@@ -301,7 +301,7 @@ impl StageQueue {
 /// event seq to deliver.
 pub struct Subscription {
     pub id: u64,
-    pub uid: Option<u32>,
+    pub principal: Option<Principal>,
     /// ACL revision the subscription was authorized under — the lazy
     /// per-pass re-check compares it to the live revision and ends the
     /// stream with `acl_view_changed` if they ever diverge (§5.6).
@@ -386,7 +386,7 @@ pub struct SubListEntry {
 /// the pump then reads the log/events WITHOUT holding the hub).
 pub struct SubSnap {
     pub id: u64,
-    pub uid: Option<u32>,
+    pub principal: Option<Principal>,
     pub acl_view: u64,
     pub kind: SubKind,
     pub position: u64,
@@ -447,10 +447,33 @@ impl SubscriptionHub {
     /// per-principal and global caps — a denied subscribe costs nothing
     /// and the error is retryable (§5.5 rule 4).
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub fn subscribe(
         &self,
         conn_id: u64,
         uid: Option<u32>,
+        kind: SubKind,
+        position: u64,
+        acl_view: u64,
+        heartbeat_ms: u64,
+        now_ms: u64,
+    ) -> Result<u64, CapacityDeny> {
+        self.subscribe_principal(
+            conn_id,
+            uid.map(Principal::UnixUid),
+            kind,
+            position,
+            acl_view,
+            heartbeat_ms,
+            now_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn subscribe_principal(
+        &self,
+        conn_id: u64,
+        principal: Option<Principal>,
         kind: SubKind,
         position: u64,
         acl_view: u64,
@@ -465,7 +488,7 @@ impl SubscriptionHub {
             .conns
             .values()
             .flat_map(|c| &c.subs)
-            .filter(|s| s.uid == uid)
+            .filter(|s| s.principal == principal)
             .count()
             >= SUBS_PER_PRINCIPAL
         {
@@ -486,7 +509,7 @@ impl SubscriptionHub {
             .subs
             .push(Subscription {
                 id,
-                uid,
+                principal,
                 acl_view,
                 kind,
                 position,
@@ -625,7 +648,7 @@ impl SubscriptionHub {
                 .filter(|sub| !sub.pending && sub.ending.is_none())
                 .map(|sub| SubSnap {
                     id: sub.id,
-                    uid: sub.uid,
+                    principal: sub.principal.clone(),
                     acl_view: sub.acl_view,
                     kind: sub.kind.clone(),
                     position: sub.position,
@@ -996,8 +1019,9 @@ fn produce_messages(
         acl::PERM_READ_OPERATION
     };
     if !snap
-        .uid
-        .is_some_and(|uid| state.acl.permit(uid, filter.network, perm))
+        .principal
+        .as_ref()
+        .is_some_and(|principal| state.acl.permit_principal(principal, filter.network, perm))
     {
         work.end_reason = Some("unauthorized");
         return (work, true);

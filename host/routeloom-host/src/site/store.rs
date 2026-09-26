@@ -429,9 +429,50 @@ const SITE_TABLES: &[&str] = &[
     "docs",
 ];
 
+#[cfg(windows)]
+fn verify_site_sidecars(path: &Path) -> Result<(), StoreError> {
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        let file = std::path::PathBuf::from(name);
+        if file.exists() {
+            routeloom_peercred::protect_private_sidecar(&file).map_err(|e| {
+                StoreError(format!(
+                    "cannot protect site store sidecar {}: {e}",
+                    file.display()
+                ))
+            })?;
+        }
+        match routeloom_peercred::verify_private_file_perms(&file) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(StoreError(format!(
+                    "site store sidecar {} is not private: {e}",
+                    file.display()
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
 impl SqliteSiteStore {
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         let fresh = !path.exists();
+        #[cfg(windows)]
+        {
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            routeloom_peercred::verify_private_dir_perms(parent).map_err(|e| {
+                StoreError(format!(
+                    "site store directory {} is not private: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
         if fresh {
             #[cfg(unix)]
             {
@@ -446,6 +487,13 @@ impl SqliteSiteStore {
                         StoreError(format!("cannot create site store {}: {e}", path.display()))
                     })?;
             }
+            #[cfg(windows)]
+            routeloom_peercred::open_private_file_for_write(path).map_err(|e| {
+                StoreError(format!(
+                    "cannot create private site store {}: {e}",
+                    path.display()
+                ))
+            })?;
         } else {
             #[cfg(unix)]
             {
@@ -462,6 +510,10 @@ impl SqliteSiteStore {
                     )));
                 }
             }
+            #[cfg(windows)]
+            routeloom_peercred::verify_private_file_perms(path).map_err(|e| {
+                StoreError(format!("site store {} is not private: {e}", path.display()))
+            })?;
         }
         let mut conn = Connection::open(path)?;
         conn.pragma_update(None, "busy_timeout", 100)?;
@@ -469,6 +521,8 @@ impl SqliteSiteStore {
         conn.pragma_update(None, "synchronous", "FULL")?;
         if fresh {
             Self::init_schema(&mut conn)?;
+            #[cfg(windows)]
+            verify_site_sidecars(path)?;
             return Ok(Self { conn });
         }
         let version = Self::schema_version(&conn)?;
@@ -478,6 +532,8 @@ impl SqliteSiteStore {
                 // anywhere): complete the initialization instead of
                 // refusing to start.
                 Self::init_schema(&mut conn)?;
+                #[cfg(windows)]
+                verify_site_sidecars(path)?;
                 return Ok(Self { conn });
             }
             None => {
@@ -501,6 +557,8 @@ impl SqliteSiteStore {
         // on open (no data moves, no version bump).
         conn.execute_batch("CREATE INDEX IF NOT EXISTS ledger_node_idx ON ledger (node);
             CREATE TABLE IF NOT EXISTS approval_audit (operation_id INTEGER PRIMARY KEY, body TEXT NOT NULL);")?;
+        #[cfg(windows)]
+        verify_site_sidecars(path)?;
         Ok(Self { conn })
     }
 
@@ -1074,8 +1132,13 @@ mod tests {
             std::process::id(),
             crate::now_ms()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
+        routeloom_peercred::create_private_dir_all(&dir).unwrap();
         dir.join("site.db")
+    }
+
+    #[cfg(windows)]
+    fn private_fixture_file(path: &Path) {
+        routeloom_peercred::open_private_file_for_write(path).unwrap();
     }
 
     #[test]
@@ -1194,6 +1257,8 @@ mod tests {
     /// A hand-built version-1 database; `setup` adds rows after the schema.
     fn v1_db(tag: &str, setup: impl FnOnce(&rusqlite::Connection)) -> std::path::PathBuf {
         let db = temp_path(tag);
+        #[cfg(windows)]
+        private_fixture_file(&db);
         {
             let conn = rusqlite::Connection::open(&db).unwrap();
             conn.execute_batch(
@@ -1226,6 +1291,7 @@ mod tests {
             .unwrap();
             setup(&conn);
         }
+        #[cfg(unix)]
         std::fs::set_permissions(&db, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
         db
     }
@@ -1356,6 +1422,8 @@ mod tests {
     #[test]
     fn review_missing_schema_version_in_used_database_is_rejected() {
         let db = temp_path("review-missing-version");
+        #[cfg(windows)]
+        private_fixture_file(&db);
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute_batch(
             "CREATE TABLE meta (name TEXT PRIMARY KEY, value BLOB NOT NULL);
@@ -1363,6 +1431,7 @@ mod tests {
         )
         .unwrap();
         drop(conn);
+        #[cfg(unix)]
         std::fs::set_permissions(&db, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
         assert!(SqliteSiteStore::open(&db).is_err());
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
@@ -1516,6 +1585,9 @@ mod tests {
         // Crash between file creation and schema commit: the next open
         // must initialize the empty file, not refuse it.
         let db = temp_path("interrupted-empty");
+        #[cfg(windows)]
+        private_fixture_file(&db);
+        #[cfg(unix)]
         std::fs::write(&db, []).unwrap();
         #[cfg(unix)]
         owner_only(&db);
@@ -1527,11 +1599,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn existing_site_db_requires_owner_dacl() {
+        let db = temp_path("dacl");
+        std::fs::write(&db, []).unwrap();
+        let error = match SqliteSiteStore::open(&db) {
+            Ok(_) => panic!("unprotected site DB opened"),
+            Err(error) => error,
+        };
+        assert!(error.0.contains("not private"), "{error}");
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
     #[test]
     fn interrupted_init_partial_schema_without_rows_is_completed() {
         // Crash mid-schema: tables exist but no version and no rows — the
         // next open completes the initialization.
         let db = temp_path("interrupted-partial");
+        #[cfg(windows)]
+        private_fixture_file(&db);
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute_batch(
             "CREATE TABLE meta (name TEXT PRIMARY KEY, value BLOB NOT NULL);

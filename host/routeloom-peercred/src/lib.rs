@@ -3,12 +3,12 @@
 //! This crate is the *only* unsafe FFI boundary in the host workspace (the
 //! workspace lint `unsafe_code = "forbid"` is deliberately not inherited
 //! here — see Cargo.toml). `std` still marks `UnixStream::peer_cred`
-//! unstable, and Windows Named Pipe client impersonation / SID queries
+//! unstable, and Windows Named Pipe client token / SID queries
 //! require platform FFI.
 //!
 //! Platform features provided:
 //! - Unix peer UID (`getpeereid` on macOS/BSD, `getsockopt(SO_PEERCRED)` on Linux)
-//! - Windows peer SID (Named Pipe client impersonation -> token user SID)
+//! - Windows peer SID (kernel-supplied pipe client PID -> process token SID)
 //! - [`Principal`] unified identity representation (UnixUid / WindowsSid)
 //! - [`fill_random`] OS CSPRNG (`/dev/urandom` on Unix, `BCryptGenRandom` on Windows)
 //! - Private file and directory permission checks (Unix 0600/0700, Windows ACLs)
@@ -28,7 +28,33 @@ pub enum Principal {
     WindowsSid(String),
 }
 
+impl From<u32> for Principal {
+    fn from(uid: u32) -> Self {
+        Self::UnixUid(uid)
+    }
+}
+
 impl Principal {
+    /// Versioned, lossless key for durable ownership and idempotency records.
+    /// The prefix keeps a Unix UID distinct from a Windows SID in every store.
+    pub fn storage_key(&self) -> String {
+        match self {
+            Principal::UnixUid(uid) => format!("v1:uid:{uid}"),
+            Principal::WindowsSid(sid) => format!("v1:sid:{sid}"),
+        }
+    }
+
+    pub fn from_storage_key(key: &str) -> Result<Self, String> {
+        let value = key
+            .strip_prefix("v1:")
+            .ok_or_else(|| "unknown principal storage version".to_string())?;
+        let principal: Principal = value.parse()?;
+        if principal.storage_key() != key {
+            return Err("noncanonical principal storage key".into());
+        }
+        Ok(principal)
+    }
+
     pub fn as_unix_uid(&self) -> Option<u32> {
         match self {
             Principal::UnixUid(uid) => Some(*uid),
@@ -118,7 +144,7 @@ pub fn fill_random(out: &mut [u8]) -> io::Result<()> {
 }
 
 /// Verifies that `path` is a regular file with owner-only access permissions
-/// (Unix 0600 or Windows regular file).
+/// (Unix 0600 or Windows owner-only DACL).
 pub fn verify_private_file_perms(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -141,14 +167,14 @@ pub fn verify_private_file_perms(path: &Path) -> io::Result<()> {
     }
     #[cfg(windows)]
     {
-        let meta = std::fs::metadata(path)?;
+        let meta = std::fs::symlink_metadata(path)?;
         if !meta.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "file is not a regular file",
             ));
         }
-        Ok(())
+        win_acl::verify_owner_only(path)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -159,8 +185,22 @@ pub fn verify_private_file_perms(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Protects a SQLite sidecar created under a verified private directory.
+/// SQLite creates WAL/journal files itself, so their inherited ACL must be
+/// made explicit before the daemon serves requests.
+#[cfg(windows)]
+pub fn protect_private_sidecar(path: &Path) -> io::Result<()> {
+    if !std::fs::symlink_metadata(path)?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "sidecar is not a regular file",
+        ));
+    }
+    win_acl::protect_owner_only(path)
+}
+
 /// Verifies that `path` is a directory with owner-only access permissions
-/// (Unix 0700 or Windows regular directory).
+/// (Unix 0700 or Windows owner-only DACL).
 pub fn verify_private_dir_perms(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -183,14 +223,14 @@ pub fn verify_private_dir_perms(path: &Path) -> io::Result<()> {
     }
     #[cfg(windows)]
     {
-        let meta = std::fs::metadata(path)?;
+        let meta = std::fs::symlink_metadata(path)?;
         if !meta.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "path is not a directory",
             ));
         }
-        Ok(())
+        win_acl::verify_owner_only(path)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -211,7 +251,11 @@ pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
             .mode(0o700)
             .create(path)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        win_acl::create_private_dir_all(path)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         std::fs::create_dir_all(path)
     }
@@ -228,12 +272,70 @@ pub fn open_private_file_for_write(path: &Path) -> io::Result<std::fs::File> {
             .mode(0o600)
             .open(path)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        win_acl::open_private_file_for_write(path)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(path)
+    }
+}
+
+/// Opens the bridge serial port with exclusive access and raw 8N1 settings.
+pub fn open_serial(path: &Path) -> io::Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        win_serial::open(path)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+    }
+}
+
+/// Distinguishes a COM read timeout from a disconnected adapter.
+#[cfg(windows)]
+pub fn serial_idle_check(file: &std::fs::File) -> io::Result<()> {
+    win_serial::idle_check(file)
+}
+
+/// Publishes a staged directory without replacing a concurrent publisher.
+pub fn publish_dir_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        extern "C" {
+            fn renamex_np(from: *const i8, to: *const i8, flags: u32) -> i32;
+        }
+        let source = std::ffi::CString::new(from.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))?;
+        let target = std::ffi::CString::new(to.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))?;
+        // RENAME_EXCL makes publication atomic even if another process races.
+        if unsafe { renamex_np(source.as_ptr(), target.as_ptr(), 0x4) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+    #[cfg(windows)]
+    {
+        win_acl::publish_dir_noreplace(from, to)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = (from, to);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "publish requires platform rename",
+        ))
     }
 }
 
@@ -521,7 +623,8 @@ pub mod ipc {
             }
             #[cfg(windows)]
             {
-                Ok(Principal::WindowsSid("S-1-5-local".to_string()))
+                use std::os::windows::io::AsRawHandle;
+                unsafe { super::win_pipe::get_pipe_client_sid(self.inner.as_raw_handle()) }
             }
             #[cfg(not(any(unix, windows)))]
             {
@@ -583,7 +686,7 @@ pub mod ipc {
             #[cfg(unix)]
             {
                 let (stream, _) = self.inner.accept()?;
-                let principal = peer_principal(&stream).unwrap_or(Principal::UnixUid(u32::MAX));
+                let principal = peer_principal(&stream)?;
                 Ok((IpcStream { inner: stream }, principal))
             }
             #[cfg(windows)]
@@ -728,11 +831,13 @@ mod win_rand {
     }
 
     pub fn fill_random(buf: &mut [u8]) -> io::Result<()> {
+        let len = u32::try_from(buf.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "random request too large"))?;
         let status = unsafe {
             BCryptGenRandom(
                 std::ptr::null_mut(),
                 buf.as_mut_ptr(),
-                buf.len() as u32,
+                len,
                 BCRYPT_USE_SYSTEM_PREFERRED_RNG,
             )
         };
@@ -769,12 +874,9 @@ pub mod win_pipe {
 
     #[link(name = "advapi32")]
     extern "system" {
-        fn ImpersonateNamedPipeClient(hNamedPipe: *mut c_void) -> i32;
-        fn RevertToSelf() -> i32;
-        fn OpenThreadToken(
-            ThreadHandle: *mut c_void,
+        fn OpenProcessToken(
+            ProcessHandle: *mut c_void,
             DesiredAccess: u32,
-            OpenAsSelf: i32,
             TokenHandle: *mut *mut c_void,
         ) -> i32;
         fn GetTokenInformation(
@@ -789,12 +891,15 @@ pub mod win_pipe {
 
     #[link(name = "kernel32")]
     extern "system" {
-        fn GetCurrentThread() -> *mut c_void;
+        fn GetNamedPipeClientProcessId(Pipe: *mut c_void, ClientProcessId: *mut u32) -> i32;
+        fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> *mut c_void;
         fn CloseHandle(hObject: *mut c_void) -> i32;
         fn LocalFree(hMem: *mut c_void) -> *mut c_void;
     }
 
-    pub fn get_pipe_client_sid(pipe: *mut c_void) -> io::Result<Principal> {
+    /// # Safety
+    /// `pipe` must be a live server-side handle for a connected named pipe.
+    pub unsafe fn get_pipe_client_sid(pipe: *mut c_void) -> io::Result<Principal> {
         if pipe.is_null() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -802,44 +907,68 @@ pub mod win_pipe {
             ));
         }
         unsafe {
-            if ImpersonateNamedPipeClient(pipe) == 0 {
+            // The kernel supplies the connected client's PID. Resolve its
+            // process token before admitting any request; failure denies it.
+            let mut pid = 0;
+            if GetNamedPipeClientProcessId(pipe, &mut pid) == 0 || pid == 0 {
                 return Err(io::Error::last_os_error());
             }
-            let mut thread_token: *mut c_void = std::ptr::null_mut();
-            let open_res = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut thread_token);
-            let _ = RevertToSelf(); // Always revert immediately
-            if open_res == 0 || thread_token.is_null() {
+            let process = OpenProcess(0x1000, 0, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+            if process.is_null() {
                 return Err(io::Error::last_os_error());
+            }
+            let mut client_token: *mut c_void = std::ptr::null_mut();
+            let open_res = OpenProcessToken(process, TOKEN_QUERY, &mut client_token);
+            let open_error = io::Error::last_os_error();
+            let mut current_pid = 0;
+            let same_client =
+                GetNamedPipeClientProcessId(pipe, &mut current_pid) != 0 && current_pid == pid;
+            CloseHandle(process);
+            if open_res == 0 || client_token.is_null() || !same_client {
+                if !client_token.is_null() {
+                    CloseHandle(client_token);
+                }
+                return Err(if same_client {
+                    open_error
+                } else {
+                    io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "pipe client changed during SID lookup",
+                    )
+                });
             }
 
             let mut ret_len: u32 = 0;
             GetTokenInformation(
-                thread_token,
+                client_token,
                 TOKEN_USER_CLASS,
                 std::ptr::null_mut(),
                 0,
                 &mut ret_len,
             );
-            if ret_len == 0 {
-                CloseHandle(thread_token);
-                return Err(io::Error::last_os_error());
+            if ret_len < std::mem::size_of::<TokenUser>() as u32 || ret_len > 1024 {
+                CloseHandle(client_token);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid token user length",
+                ));
             }
 
             let mut buf = vec![0_u8; ret_len as usize];
             let get_info = GetTokenInformation(
-                thread_token,
+                client_token,
                 TOKEN_USER_CLASS,
                 buf.as_mut_ptr().cast(),
                 ret_len,
                 &mut ret_len,
             );
-            CloseHandle(thread_token);
+            CloseHandle(client_token);
 
             if get_info == 0 {
                 return Err(io::Error::last_os_error());
             }
 
-            let token_user = &*(buf.as_ptr().cast::<TokenUser>());
+            let token_user = std::ptr::read_unaligned(buf.as_ptr().cast::<TokenUser>());
             let mut sid_str_ptr: *mut u16 = std::ptr::null_mut();
             if ConvertSidToStringSidW(token_user.user.sid, &mut sid_str_ptr) == 0
                 || sid_str_ptr.is_null()
@@ -861,12 +990,481 @@ pub mod win_pipe {
 }
 
 #[cfg(windows)]
+mod win_acl {
+    use std::ffi::c_void;
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use std::path::Path;
+
+    const TOKEN_QUERY: u32 = 0x0008;
+    const TOKEN_USER: u32 = 1;
+    const OWNER_SECURITY_INFORMATION: u32 = 1;
+    const DACL_SECURITY_INFORMATION: u32 = 4;
+    const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
+    const SE_FILE_OBJECT: u32 = 1;
+    const SE_DACL_PROTECTED: u16 = 0x1000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const CREATE_NEW: u32 = 1;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+    const INVALID_HANDLE_VALUE: *mut c_void = -1isize as *mut c_void;
+
+    #[repr(C)]
+    struct SecurityAttributes {
+        len: u32,
+        descriptor: *mut c_void,
+        inherit: i32,
+    }
+
+    #[repr(C)]
+    struct SidAndAttributes {
+        sid: *mut c_void,
+        attributes: u32,
+    }
+
+    #[repr(C)]
+    struct TokenUser {
+        user: SidAndAttributes,
+    }
+
+    #[repr(C)]
+    struct Acl {
+        revision: u8,
+        reserved: u8,
+        size: u16,
+        ace_count: u16,
+        reserved2: u16,
+    }
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn OpenProcessToken(process: *mut c_void, access: u32, token: *mut *mut c_void) -> i32;
+        fn GetTokenInformation(
+            token: *mut c_void,
+            class: u32,
+            out: *mut c_void,
+            len: u32,
+            used: *mut u32,
+        ) -> i32;
+        fn ConvertSidToStringSidW(sid: *mut c_void, text: *mut *mut u16) -> i32;
+        fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            text: *const u16,
+            version: u32,
+            out: *mut *mut c_void,
+            size: *mut u32,
+        ) -> i32;
+        fn GetNamedSecurityInfoW(
+            name: *const u16,
+            object_type: u32,
+            info: u32,
+            owner: *mut *mut c_void,
+            group: *mut *mut c_void,
+            dacl: *mut *mut c_void,
+            sacl: *mut *mut c_void,
+            descriptor: *mut *mut c_void,
+        ) -> u32;
+        fn SetFileSecurityW(name: *const u16, info: u32, descriptor: *mut c_void) -> i32;
+        fn GetSecurityDescriptorControl(
+            descriptor: *mut c_void,
+            control: *mut u16,
+            revision: *mut u32,
+        ) -> i32;
+        fn GetAce(acl: *mut c_void, index: u32, ace: *mut *mut c_void) -> i32;
+        fn EqualSid(a: *mut c_void, b: *mut c_void) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> *mut c_void;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+        fn LocalFree(ptr: *mut c_void) -> *mut c_void;
+        fn CreateFileW(
+            name: *const u16,
+            access: u32,
+            share: u32,
+            attrs: *mut SecurityAttributes,
+            disposition: u32,
+            flags: u32,
+            template: *mut c_void,
+        ) -> *mut c_void;
+        fn CreateDirectoryW(name: *const u16, attrs: *mut SecurityAttributes) -> i32;
+        fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
+    }
+
+    fn wide(text: &std::ffi::OsStr) -> Vec<u16> {
+        text.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    fn current_sid<R>(f: impl FnOnce(*mut c_void) -> io::Result<R>) -> io::Result<R> {
+        unsafe {
+            let mut token = std::ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut len = 0;
+            GetTokenInformation(token, TOKEN_USER, std::ptr::null_mut(), 0, &mut len);
+            if len < std::mem::size_of::<TokenUser>() as u32 || len > 1024 {
+                CloseHandle(token);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid token user length",
+                ));
+            }
+            let mut buf = vec![0u8; len as usize];
+            let ok = GetTokenInformation(token, TOKEN_USER, buf.as_mut_ptr().cast(), len, &mut len);
+            let err = io::Error::last_os_error();
+            CloseHandle(token);
+            if ok == 0 {
+                return Err(err);
+            }
+            f(std::ptr::read_unaligned(buf.as_ptr().cast::<TokenUser>())
+                .user
+                .sid)
+        }
+    }
+
+    fn owner_descriptor<R>(
+        directory: bool,
+        f: impl FnOnce(*mut SecurityAttributes) -> io::Result<R>,
+    ) -> io::Result<R> {
+        current_sid(|sid| unsafe {
+            let mut sid_text = std::ptr::null_mut();
+            if ConvertSidToStringSidW(sid, &mut sid_text) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut len = 0;
+            while *sid_text.add(len) != 0 {
+                len += 1;
+            }
+            let owner = String::from_utf16_lossy(std::slice::from_raw_parts(sid_text, len));
+            LocalFree(sid_text.cast());
+            // Protected DACL prevents inherited grants from widening access.
+            let inheritance = if directory { "OICI" } else { "" };
+            let sddl = format!("O:{owner}D:P(A;{inheritance};GA;;;{owner})");
+            let mut descriptor = std::ptr::null_mut();
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide(sddl.as_ref()).as_ptr(),
+                1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            ) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let mut attrs = SecurityAttributes {
+                len: std::mem::size_of::<SecurityAttributes>() as u32,
+                descriptor,
+                inherit: 0,
+            };
+            let result = f(&mut attrs);
+            LocalFree(descriptor);
+            result
+        })
+    }
+
+    pub(super) fn with_owner_security_attributes<R>(
+        f: impl FnOnce(*mut c_void) -> io::Result<R>,
+    ) -> io::Result<R> {
+        owner_descriptor(false, |attrs| f(attrs.cast()))
+    }
+
+    pub fn protect_owner_only(path: &Path) -> io::Result<()> {
+        owner_descriptor(false, |attrs| unsafe {
+            if SetFileSecurityW(
+                wide(path.as_os_str()).as_ptr(),
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                (*attrs).descriptor,
+            ) == 0
+            {
+                Err(io::Error::last_os_error())
+            } else {
+                verify_owner_only(path)
+            }
+        })
+    }
+
+    pub fn verify_owner_only(path: &Path) -> io::Result<()> {
+        let name = wide(path.as_os_str());
+        current_sid(|current| unsafe {
+            let mut owner = std::ptr::null_mut();
+            let mut dacl = std::ptr::null_mut();
+            let mut descriptor = std::ptr::null_mut();
+            let status = GetNamedSecurityInfoW(
+                name.as_ptr(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut descriptor,
+            );
+            if status != 0 {
+                return Err(io::Error::from_raw_os_error(status as i32));
+            }
+            let result = (|| {
+                if owner.is_null() || dacl.is_null() || EqualSid(owner, current) == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "private path owner or DACL missing",
+                    ));
+                }
+                let mut control = 0;
+                let mut revision = 0;
+                if GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) == 0
+                    || control & SE_DACL_PROTECTED == 0
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "private path DACL inherits grants",
+                    ));
+                }
+                let acl = &*(dacl.cast::<Acl>());
+                if acl.ace_count == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "private path DACL has no owner grant",
+                    ));
+                }
+                for index in 0..u32::from(acl.ace_count) {
+                    let mut ace = std::ptr::null_mut();
+                    if GetAce(dacl, index, &mut ace) == 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    // ACCESS_ALLOWED_ACE: header(4), mask(4), SID starts at byte 8.
+                    if *(ace.cast::<u8>()) != 0
+                        || EqualSid(ace.cast::<u8>().add(8).cast(), current) == 0
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "private path grants another principal",
+                        ));
+                    }
+                }
+                Ok(())
+            })();
+            LocalFree(descriptor);
+            result
+        })
+    }
+
+    pub fn open_private_file_for_write(path: &Path) -> io::Result<std::fs::File> {
+        owner_descriptor(false, |attrs| unsafe {
+            let name = wide(path.as_os_str());
+            let handle = CreateFileW(
+                name.as_ptr(),
+                GENERIC_WRITE,
+                0,
+                attrs,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            );
+            if handle == INVALID_HANDLE_VALUE {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(std::fs::File::from_raw_handle(handle))
+            }
+        })
+    }
+
+    pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
+        if path.exists() {
+            return super::verify_private_dir_perms(path);
+        }
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                create_private_dir_all(parent)?;
+            }
+        }
+        owner_descriptor(true, |attrs| unsafe {
+            let name = wide(path.as_os_str());
+            if CreateDirectoryW(name.as_ptr(), attrs) == 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    pub fn publish_dir_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+        unsafe {
+            // MOVEFILE_WRITE_THROUGH, without REPLACE_EXISTING: existing
+            // published output always wins, including concurrent creation.
+            if MoveFileExW(
+                wide(from.as_os_str()).as_ptr(),
+                wide(to.as_os_str()).as_ptr(),
+                0x8,
+            ) == 0
+            {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn create_world_file(path: &Path) -> io::Result<()> {
+        unsafe {
+            let mut descriptor = std::ptr::null_mut();
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide("D:P(A;;GA;;;WD)".as_ref()).as_ptr(),
+                1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            ) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let mut attrs = SecurityAttributes {
+                len: std::mem::size_of::<SecurityAttributes>() as u32,
+                descriptor,
+                inherit: 0,
+            };
+            let name = wide(path.as_os_str());
+            let handle = CreateFileW(
+                name.as_ptr(),
+                GENERIC_WRITE,
+                0,
+                &mut attrs,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            );
+            let error = io::Error::last_os_error();
+            LocalFree(descriptor);
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(error);
+            }
+            CloseHandle(handle);
+            Ok(())
+        }
+    }
+}
+
+#[cfg(windows)]
+mod win_serial {
+    use std::fs::{File, OpenOptions};
+    use std::io;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
+
+    #[repr(C)]
+    struct Dcb {
+        len: u32,
+        baud: u32,
+        flags: u32,
+        reserved: u16,
+        xon_limit: u16,
+        xoff_limit: u16,
+        byte_size: u8,
+        parity: u8,
+        stop_bits: u8,
+        xon: i8,
+        xoff: i8,
+        error: i8,
+        eof: i8,
+        evt: i8,
+        reserved2: u16,
+    }
+
+    #[repr(C)]
+    struct CommTimeouts {
+        read_interval: u32,
+        read_multiplier: u32,
+        read_constant: u32,
+        write_multiplier: u32,
+        write_constant: u32,
+    }
+
+    #[repr(C)]
+    struct CommStat {
+        flags: u32,
+        in_queue: u32,
+        out_queue: u32,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCommState(handle: *mut std::ffi::c_void, dcb: *mut Dcb) -> i32;
+        fn SetCommState(handle: *mut std::ffi::c_void, dcb: *const Dcb) -> i32;
+        fn SetCommTimeouts(handle: *mut std::ffi::c_void, timeouts: *const CommTimeouts) -> i32;
+        fn ClearCommError(
+            handle: *mut std::ffi::c_void,
+            errors: *mut u32,
+            stat: *mut CommStat,
+        ) -> i32;
+    }
+
+    pub fn open(path: &Path) -> io::Result<File> {
+        let name = path.to_string_lossy();
+        let device = if name.len() >= 4
+            && name
+                .get(..3)
+                .is_some_and(|head| head.eq_ignore_ascii_case("COM"))
+            && name[3..].bytes().all(|b| b.is_ascii_digit())
+        {
+            format!(r"\\.\{name}")
+        } else {
+            name.into_owned()
+        };
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(device)?;
+        unsafe {
+            let handle = file.as_raw_handle();
+            let mut dcb: Dcb = std::mem::zeroed();
+            dcb.len = std::mem::size_of::<Dcb>() as u32;
+            if GetCommState(handle, &mut dcb) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            dcb.baud = 115_200;
+            dcb.flags = 1 | 0x10 | 0x1000; // binary, DTR and RTS enabled; no software flow control
+            dcb.byte_size = 8;
+            dcb.parity = 0;
+            dcb.stop_bits = 0;
+            if SetCommState(handle, &dcb) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let timeouts = CommTimeouts {
+                read_interval: u32::MAX,
+                read_multiplier: 0,
+                read_constant: 1_000,
+                write_multiplier: 0,
+                write_constant: 2_000,
+            };
+            if SetCommTimeouts(handle, &timeouts) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(file)
+    }
+
+    pub fn idle_check(file: &File) -> io::Result<()> {
+        unsafe {
+            let mut errors = 0;
+            let mut stat: CommStat = std::mem::zeroed();
+            if ClearCommError(file.as_raw_handle(), &mut errors, &mut stat) == 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
 pub mod win_ipc {
     use super::Principal;
     use std::ffi::c_void;
     use std::fs::File;
     use std::io;
-    use std::os::windows::io::FromRawHandle;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use std::sync::Mutex;
 
     const PIPE_ACCESS_DUPLEX: u32 = 0x00000003;
     const PIPE_TYPE_BYTE: u32 = 0x00000000;
@@ -874,6 +1472,7 @@ pub mod win_ipc {
     const PIPE_WAIT: u32 = 0x00000000;
     const PIPE_REJECT_REMOTE_CLIENTS: u32 = 0x00000008;
     const PIPE_UNLIMITED_INSTANCES: u32 = 255;
+    const FILE_FLAG_FIRST_PIPE_INSTANCE: u32 = 0x0008_0000;
     const INVALID_HANDLE_VALUE: *mut c_void = -1isize as *mut c_void;
 
     #[link(name = "kernel32")]
@@ -890,13 +1489,13 @@ pub mod win_ipc {
         ) -> *mut c_void;
 
         fn ConnectNamedPipe(hNamedPipe: *mut c_void, lpOverlapped: *mut c_void) -> i32;
-        fn CloseHandle(hObject: *mut c_void) -> i32;
         fn GetLastError() -> u32;
     }
 
     #[derive(Debug)]
     pub struct NamedPipeListener {
         pipe_name: Vec<u16>,
+        first: Mutex<Option<File>>,
     }
 
     impl NamedPipeListener {
@@ -904,45 +1503,70 @@ pub mod win_ipc {
             let full_name = normalize_pipe_name(name);
             let mut wide: Vec<u16> = full_name.encode_utf16().collect();
             wide.push(0);
-            Ok(Self { pipe_name: wide })
+            let first = Self::create_instance(&wide, true)?;
+            Ok(Self {
+                pipe_name: wide,
+                first: Mutex::new(Some(first)),
+            })
         }
 
-        pub fn accept(&self) -> io::Result<(File, Principal)> {
-            unsafe {
+        fn create_instance(name: &[u16], first: bool) -> io::Result<File> {
+            super::win_acl::with_owner_security_attributes(|attrs| unsafe {
                 let handle = CreateNamedPipeW(
-                    self.pipe_name.as_ptr(),
-                    PIPE_ACCESS_DUPLEX,
+                    name.as_ptr(),
+                    PIPE_ACCESS_DUPLEX
+                        | if first {
+                            FILE_FLAG_FIRST_PIPE_INSTANCE
+                        } else {
+                            0
+                        },
                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                     PIPE_UNLIMITED_INSTANCES,
                     65536,
                     65536,
                     5000,
-                    std::ptr::null_mut(),
+                    attrs,
                 );
                 if handle == INVALID_HANDLE_VALUE {
                     return Err(io::Error::last_os_error());
                 }
+                Ok(File::from_raw_handle(handle))
+            })
+        }
 
+        pub fn accept(&self) -> io::Result<(File, Principal)> {
+            let mut waiting = self.first.lock().expect("pipe listener poisoned");
+            let file = match waiting.take() {
+                Some(file) => file,
+                None => Self::create_instance(&self.pipe_name, false)?,
+            };
+            let handle = file.as_raw_handle();
+            unsafe {
                 let connect_res = ConnectNamedPipe(handle, std::ptr::null_mut());
                 if connect_res == 0 {
                     let err = GetLastError();
                     // 535 = ERROR_PIPE_CONNECTED
                     if err != 535 {
-                        CloseHandle(handle);
                         return Err(io::Error::from_raw_os_error(err as i32));
                     }
                 }
-
-                let principal = super::win_pipe::get_pipe_client_sid(handle)
-                    .unwrap_or_else(|_| Principal::WindowsSid("S-1-5-local".to_string()));
-
-                let file = File::from_raw_handle(handle as std::os::windows::io::RawHandle);
+                let principal = super::win_pipe::get_pipe_client_sid(handle)?;
+                // Keep one server instance available while the daemon hands
+                // this connection to a worker; clients never race a gap.
+                let next = Self::create_instance(&self.pipe_name, false)?;
+                *waiting = Some(next);
                 Ok((file, principal))
             }
         }
     }
 
     pub fn connect_pipe(name: &str) -> io::Result<File> {
+        if name.starts_with(r"\\") && !name.starts_with(r"\\.\pipe\") {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "remote pipe address rejected",
+            ));
+        }
         let full_name = normalize_pipe_name(name);
         std::fs::OpenOptions::new()
             .read(true)
@@ -1005,6 +1629,80 @@ mod tests {
         let mut buf = [0_u8; 32];
         fill_random(&mut buf).expect("fill_random succeeds");
         assert_ne!(buf, [0_u8; 32]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn named_pipe_authenticates_local_sid_and_rejects_remote_address() {
+        use std::io::{Read, Write};
+        let name = format!(r"\\.\pipe\routeloom-auth-test-{}", std::process::id());
+        let listener = IpcListener::bind(&name).expect("bind pipe");
+        assert!(
+            IpcListener::bind(&name).is_err(),
+            "pipe name cannot be taken twice"
+        );
+        let server = std::thread::spawn(move || {
+            let (mut stream, principal) = listener.accept().expect("accept authenticated client");
+            let mut byte = [0];
+            stream.read_exact(&mut byte).expect("read");
+            assert_eq!(byte, [42]);
+            principal
+        });
+        let mut client = (0..100)
+            .find_map(|_| match IpcStream::connect(&name) {
+                Ok(stream) => Some(stream),
+                Err(_) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    None
+                }
+            })
+            .expect("connect own pipe");
+        client.write_all(&[42]).expect("write");
+        let principal = server.join().expect("server");
+        assert!(matches!(principal, Principal::WindowsSid(ref sid) if sid.starts_with("S-1-")));
+        assert!(IpcStream::connect(r"\\localhost\pipe\routeloom-auth-test").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn named_pipe_rejects_a_non_owner_token() {
+        #[link(name = "advapi32")]
+        extern "system" {
+            fn ImpersonateAnonymousToken(thread: *mut std::ffi::c_void) -> i32;
+            fn RevertToSelf() -> i32;
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentThread() -> *mut std::ffi::c_void;
+        }
+        let name = format!(r"\\.\pipe\routeloom-nonowner-test-{}", std::process::id());
+        let _listener = IpcListener::bind(&name).expect("bind owner-only pipe");
+        std::thread::spawn(move || unsafe {
+            assert_ne!(ImpersonateAnonymousToken(GetCurrentThread()), 0);
+            let result = IpcStream::connect(&name);
+            assert_ne!(RevertToSelf(), 0);
+            assert!(result.is_err(), "anonymous non-owner opened the pipe");
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_file_rejects_other_user_grant() {
+        let dir = tempfile_dir();
+        let private = dir.join("private.key");
+        open_private_file_for_write(&private).expect("create owner-only key");
+        verify_private_file_perms(&private).expect("owner-only key accepted");
+        let public = dir.join("public.key");
+        win_acl::create_world_file(&public).expect("create permissive fixture");
+        assert_eq!(
+            verify_private_file_perms(&public).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let _ = std::fs::remove_file(private);
+        let _ = std::fs::remove_file(public);
+        let _ = std::fs::remove_dir(dir);
     }
 
     #[cfg(unix)]
