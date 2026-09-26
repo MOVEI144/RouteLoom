@@ -1,0 +1,11 @@
+{
+  "name": "echo_request",
+  "opcode": 16,
+  "flags": 0,
+  "run_uuid_hex": "00112233445566778899aabbccddeeff",
+  "sequence": 7,
+  "body_hex": "70696e67",
+  "wire_hex": "524c42310110000000112233445566778899aabbccddeeff0000000725d53dfd70696e67",
+  "expect": "ok",
+  "note": "opaque echo body, stored for the reply"
+}

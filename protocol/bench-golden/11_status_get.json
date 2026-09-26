@@ -1,0 +1,11 @@
+{
+  "name": "status_get",
+  "opcode": 64,
+  "flags": 0,
+  "run_uuid_hex": "00112233445566778899aabbccddeeff",
+  "sequence": 12,
+  "body_hex": "05",
+  "wire_hex": "524c42310140000000112233445566778899aabbccddeeff0000000ca2681b0205",
+  "expect": "ok",
+  "note": "request the generator STATUS page"
+}

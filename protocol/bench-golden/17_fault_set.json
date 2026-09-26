@@ -1,0 +1,11 @@
+{
+  "name": "fault_set",
+  "opcode": 97,
+  "flags": 0,
+  "run_uuid_hex": "deadbeefcafe01020304050607080910",
+  "sequence": 4,
+  "body_hex": "000000b0071d00010200001388000000fa",
+  "wire_hex": "524c423101610000deadbeefcafe01020304050607080910000000049606637d000000b0071d00010200001388000000fa",
+  "expect": "ok",
+  "note": "arm echo-delay: hold replies 250 ms for 5 s, then auto-clear"
+}

@@ -1,0 +1,25 @@
+# ESP-IDF Component Manager manifest for the bench application module.
+# Mirrors the CMake REQUIRES: routeloom (public mesh API only). The module
+# itself is portable C++17 with no ESP-IDF API dependencies — the ESP port
+# (heap/stack/reset-cause) lives in firmware/bench_node.
+name: routeloom/routeloom_bench
+version: 0.1.0
+description: >-
+  RouteLoom bench application (design-devflow.md §5): the RLB1 protocol
+  codec and the bounded echo/counter/rollcall/STATUS/peer-send state machine
+  behind firmware/bench_node, built only on the public MeshNode API.
+url: https://github.com/MOVEI144/RouteLoom
+repository: https://github.com/MOVEI144/RouteLoom.git
+issues: https://github.com/MOVEI144/RouteLoom/issues
+license: Apache-2.0
+tags:
+  - mesh
+  - routeloom
+targets:
+  - esp32c3
+  - esp32s3
+  - esp32c5
+dependencies:
+  idf: ">=6.0"
+  # Resolved locally via EXTRA_COMPONENT_DIRS, like routeloom_espnow.
+  routeloom/routeloom: "^0.1.0"

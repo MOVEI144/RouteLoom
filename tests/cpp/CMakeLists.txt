@@ -8,6 +8,16 @@ target_link_libraries(routeloom_routing_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_routing_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_routing_tests COMMAND routeloom_routing_tests)
 
+# Bench application (design-devflow.md §5): wire codec + the portable
+# BenchApp driven through real MeshNode instances on SimNetwork.
+add_executable(routeloom_bench_tests test_bench.cpp)
+target_link_libraries(routeloom_bench_tests PRIVATE routeloom_core routeloom_bench)
+target_include_directories(routeloom_bench_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(routeloom_bench_tests PRIVATE
+  ROUTELOOM_BENCH_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/bench-golden")
+target_compile_options(routeloom_bench_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_bench_tests COMMAND routeloom_bench_tests)
+
 # Gateway-scoped routing profile (docs/design/sdk-v1/routing-scale.md): the
 # fast unit/small-mesh cases and the 100-node product-timer run are separate
 # ctest entries so the long run parallelises with the rest of the suite.
