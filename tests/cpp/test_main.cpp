@@ -269,7 +269,7 @@ rl_status_code_t capi_open(void*, const rl_security_context_t*, uint64_t,
 
 void test_c_api_lifecycle() {
   rl_node_config_t config{};
-  rl_node_config_init(&config);
+  rl_node_config_init_full(&config);
   config.network = 1;
   config.node = 7;
   config.message_session = 77;
@@ -300,7 +300,7 @@ void test_c_api_lifecycle() {
 
 void test_c_api_reply_port_detach_reentrant_busy() {
   rl_node_config_t config{};
-  rl_node_config_init(&config);
+  rl_node_config_init_full(&config);
   config.network = 1;
   config.node = 7;
   config.message_session = 77;
@@ -359,7 +359,7 @@ struct CApiNode {
 
 rl_node_config_t capi_scoped_base() {
   rl_node_config_t config{};
-  rl_node_config_init(&config);
+  rl_node_config_init_full(&config);
   config.network = 1;
   config.node = 7;
   config.message_session = 77;
@@ -455,6 +455,14 @@ void test_c_api_group() {
 }
 
 void test_c_api_route_profile() {
+  // An old binary allocates only the original 64 bytes behind this symbol.
+  {
+    alignas(rl_node_config_t) std::array<std::uint8_t, RL_NODE_CONFIG_SIZE_BASE + 40> bytes{};
+    bytes.fill(0xA5);
+    rl_node_config_init(reinterpret_cast<rl_node_config_t*>(bytes.data()));
+    for (std::size_t i = RL_NODE_CONFIG_SIZE_BASE; i < bytes.size(); ++i)
+      CHECK(bytes[i] == 0xA5);
+  }
   // Defaults: the full struct, flat profile, SDK refresh cadence.
   {
     const rl_node_config_t config = capi_scoped_base();
@@ -1098,7 +1106,7 @@ rl_status_code_t capi_probe_send(void* user, rl_node_id_t, uint64_t token,
 void test_c_api_tx_result_owner_task() {
   CApiTxProbe probe{};
   rl_node_config_t config{};
-  rl_node_config_init(&config);
+  rl_node_config_init_full(&config);
   config.network = 1;
   config.node = 7;
   config.message_session = 77;

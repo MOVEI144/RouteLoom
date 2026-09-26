@@ -15,7 +15,7 @@ use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -81,10 +81,12 @@ fn run_inner(stdout: &mut impl Write, socket: PathBuf, interval_ms: u64) -> io::
     let mut state = State::new(socket.display().to_string());
     let mut client = DaemonClient::new(socket);
     let mut tab = Tab::Overview;
+    let started = Instant::now();
 
     loop {
         let now = now_ms();
-        client.tick(&mut state, now);
+        // Backoff is elapsed time; wall time is retained for display only.
+        client.tick(&mut state, now, started.elapsed().as_millis() as u64);
         let (width, height) = terminal::size()?;
         let frame = render(&state, tab, usize::from(width), usize::from(height), now);
         draw(stdout, &frame, height)?;

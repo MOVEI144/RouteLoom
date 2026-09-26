@@ -155,7 +155,8 @@ typedef struct rl_node_config {
      profile; a caller built against the two-gateway header passes
      RL_NODE_CONFIG_SIZE_GATEWAY2 and is limited to two gateways (a larger
      count is rejected, never silently truncated). Any other size below
-     the full struct is rejected. rl_node_config_init() fills the full struct.
+     the full struct is rejected. rl_node_config_init_full() fills the full struct;
+     the old rl_node_config_init() symbol writes only the 64-byte base.
 
      Gateway-scoped routing profile (docs/design/sdk-v1/routing-scale.md).
      route_gateway_count == 0 (the default) keeps the flat profile. 1..4
@@ -324,7 +325,10 @@ typedef struct rl_context rl_context_t;
 
 size_t rl_context_size(void);
 size_t rl_context_alignment(void);
+/* ABI-compatible with the original 64-byte configuration allocation. */
 void rl_node_config_init(rl_node_config_t* config);
+/* For callers built with the extended configuration layout. */
+void rl_node_config_init_full(rl_node_config_t* config);
 void rl_send_options_init(rl_send_options_t* options);
 
 rl_status_code_t rl_init(void* storage, size_t storage_size,

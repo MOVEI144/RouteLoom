@@ -179,7 +179,7 @@ impl Rig {
     fn recv_downs(&mut self) -> Vec<(u64, CarrierKind, Vec<u8>)> {
         let mut partial: HashMap<(u64, u32), (CarrierKind, Vec<u8>, usize)> = HashMap::new();
         let mut whole = Vec::new();
-        for down in self.usb.take_ready(self.now) {
+        for down in self.usb.take_ready(crate::mono_ms()) {
             if authority_sub(&down.bytes) != Some(SUB_AUTHORITY_DOWN) {
                 continue;
             }

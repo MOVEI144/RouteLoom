@@ -653,6 +653,7 @@ pub struct SiteAuthority {
     operations: BTreeMap<u64, Operation>,
     txns: Vec<Txn>,
     joiner_last_m1: HashMap<[u8; 6], u64>,
+    join_mono_ms: u64,
     rs_epoch: u32,
     rrs_entries: Vec<RevocationEntry>,
     /// The single RAM owner of GK state (§2.1): active/staged keys,
@@ -1164,6 +1165,7 @@ impl SiteAuthority {
             operations,
             txns: Vec::new(),
             joiner_last_m1: HashMap::new(),
+            join_mono_ms: 0,
             rs_epoch,
             rrs_entries,
             gks,
@@ -1293,7 +1295,9 @@ impl SiteAuthority {
 
     // --- relay input ---------------------------------------------------------------------
 
-    pub fn handle_up(&mut self, up: RelayUp, now_ms: u64) {
+    pub fn handle_up_time(&mut self, up: RelayUp, time: HostTime) {
+        let now_ms = time.unix_ms;
+        self.join_mono_ms = time.mono_ms;
         // Joins only: the GK lifecycle runs on the timer's HostTime (wall
         // milliseconds must never pose as the monotonic axis).
         self.tick_joins(now_ms);
@@ -1301,7 +1305,7 @@ impl SiteAuthority {
         // ambiguous, so any other phase is never processed as an EDHOC
         // message — it ends the relay instead (#116).
         match (up.phase, up.step) {
-            (PHASE_EDHOC, 1) => self.on_message_1(up, now_ms),
+            (PHASE_EDHOC, 1) => self.on_message_1(up),
             (PHASE_EDHOC, 3) => self.on_message_3(up, now_ms),
             _ => {
                 // An Initiator error message or a stray step ends the relay.
@@ -1315,18 +1319,19 @@ impl SiteAuthority {
         }
     }
 
-    fn on_message_1(&mut self, up: RelayUp, now_ms: u64) {
+    fn on_message_1(&mut self, up: RelayUp) {
         self.counters.message_1 += 1;
         self.txns.retain(|t| t.key != up.key);
         self.joiner_last_m1
-            .retain(|_, at| now_ms.saturating_sub(*at) < JOINER_RATE_MS);
+            .retain(|_, at| self.join_mono_ms.saturating_sub(*at) < JOINER_RATE_MS);
         if self.txns.len() >= MAX_LIVE_TXNS || self.joiner_last_m1.contains_key(&up.key.joiner_mac)
         {
             self.counters.busy_aborts += 1;
             self.abort(up.key, AbortReason::Busy);
             return;
         }
-        self.joiner_last_m1.insert(up.key.joiner_mac, now_ms);
+        self.joiner_last_m1
+            .insert(up.key.joiner_mac, self.join_mono_ms);
         let mut c_r = [0_u8; 4];
         loop {
             if fill_random(&mut c_r).is_err() {
@@ -1405,7 +1410,7 @@ impl SiteAuthority {
                         hops: up.hops,
                         rssi_dbm: up.joiner_rssi_dbm,
                     },
-                    deadline_ms: now_ms + M3_TIMEOUT_MS,
+                    deadline_ms: self.join_mono_ms.saturating_add(M3_TIMEOUT_MS),
                     state: TxnState::AwaitMessage3,
                     responder,
                     device: None,
@@ -1688,7 +1693,9 @@ impl SiteAuthority {
         }
         self.event(now_ms, request.event_fields(now_ms));
         txn.state = TxnState::Deciding(request_id);
-        txn.deadline_ms = deadline;
+        txn.deadline_ms = self
+            .join_mono_ms
+            .saturating_add(u64::from(self.policy.decision_timeout_ms));
         self.txns.push(txn);
     }
 
@@ -2109,6 +2116,7 @@ impl SiteAuthority {
     pub fn tick(&mut self, time: HostTime) {
         self.tick_p6_channel(time);
         self.tick_cutover(time);
+        self.join_mono_ms = time.mono_ms;
         self.tick_joins(time.unix_ms);
         self.tick_channels(time);
         self.tick_gk(time);
@@ -2249,7 +2257,7 @@ impl SiteAuthority {
         let mut expired = Vec::new();
         let mut i = 0;
         while i < self.txns.len() {
-            if self.txns[i].deadline_ms <= now_ms {
+            if self.txns[i].deadline_ms <= self.join_mono_ms {
                 expired.push(self.txns.remove(i));
             } else {
                 i += 1;
@@ -5435,7 +5443,17 @@ impl SiteService {
     }
 
     pub fn handle_up(&self, up: RelayUp, now_ms: u64) -> Events {
-        self.with(|a| a.handle_up(up, now_ms)).1
+        self.handle_up_time(
+            up,
+            HostTime {
+                unix_ms: now_ms,
+                mono_ms: now_ms,
+            },
+        )
+    }
+
+    pub fn handle_up_time(&self, up: RelayUp, time: HostTime) -> Events {
+        self.with(|a| a.handle_up_time(up, time)).1
     }
 
     pub fn handle_authority_up(
