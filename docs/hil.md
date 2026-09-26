@@ -1,8 +1,9 @@
 # Hardware-in-the-loop (HIL) harness
 
 `tools/hil/` automates real-board validation: rig description, firmware
-flashing, serial capture, scenario runs, and run reports. Everything is
-stdlib-only Python — no third-party dependencies.
+flashing, serial capture, scenario runs, and run reports. Serial controls
+require `pyserial`; read-only reports and many self-checks use the standard
+library.
 
 **Hardware status:** the [2026-09-26 bench report](hil/2026-09-26-bench-5node.md)
 records the first hardware run and its continuation. The bench contained
@@ -56,6 +57,55 @@ python3 tools/hil/capture.py --port /dev/cu.usbmodemXXXX --out run.log
 python3 tools/hil/reset_cycles.py --rig tools/hil/rigs.yaml --bench bench-a \
     --board ref-a --ctl host/target/debug/routeloomctl --socket /tmp/rl.sock \
     --destination 2 --cycles 10 --sends 10 --out artifacts/hil/reset-run
+
+# For 10×10 after a reference reset, use --cycle-gap-s 300 so the host's
+# two-per-minute admission tokens refill before the next reset.
+
+# With daemon/serial readers stopped, preflight every named board and pulse
+# their reset lines as closely together as USB allows. Inspect reset skew
+# and by-id re-enumeration in result.json.
+python3 tools/hil/reset_all.py --rig tools/hil/rigs.yaml \
+    --bench bench-2026-09-26-mixed5 --boards bridge ref-a ref-c ref-d \
+    --out artifacts/hil/all-reset-run
+
+# Each 100-send target gets a fresh, chip/MAC-pinned bridge boot. This stays
+# below the gateway's per-boot idempotency history bound.
+python3 tools/hil/unicast_campaign.py --rig tools/hil/rigs.yaml \
+    --bench bench-2026-09-26-mixed5 --destinations 2 4 5 --count 100 \
+    --daemon host/target/debug/routeloom-host \
+    --ctl host/target/debug/routeloomctl \
+    --acl artifacts/hil/2026-09-26-full/hil-acl.json \
+    --socket /tmp/rl.sock --out artifacts/hil/unicast-run
+
+# Compare host terminal results with a receiver's application log, matched
+# by message session and sequence. A timeout can precede a late receipt.
+python3 tools/hil/correlate_receipts.py \
+    --traffic artifacts/hil/unicast-run/cycle-01-node4/traffic.jsonl \
+    --console artifacts/hil/ref-c-console.log \
+    --out artifacts/hil/node4-receipts.json
+
+# After starting a diagnostic-capable bridge daemon, poll its live routes
+# and record first authentication and first route to each requested NodeId.
+python3 tools/hil/route_convergence.py --ctl host/target/debug/routeloomctl \
+    --socket /tmp/rl.sock --nodes 2 3 --seconds 90 \
+    --out artifacts/hil/routes.jsonl
+
+# Read only the pinned board's rlsec partition. Raw NVS stays in a private
+# mode-0700 directory outside the repo; --out contains counter metadata only.
+python3 tools/hil/counter_snapshot.py --rig tools/hil/rigs.yaml \
+    --bench bench-2026-09-26-mixed5 --board ref-a \
+    --private-dir /tmp/routeloom-hil-private --label before-reset \
+    --out artifacts/hil/ref-a-counters-before.json
+
+# A deep-sleep image can expose USB for only ~0.2 s. This preloads esptool
+# and checks sysfs serial/vendor/product before opening an early tty. It
+# still requires chip-id/MAC and disabled security before any flash write.
+/home/sahur/.local/share/uv/tools/esptool/bin/python tools/hil/catch_wake.py \
+    --fast-probe --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00 \
+    --early-tty /dev/ttyACM4 --usb-sysfs /sys/bus/usb/devices/1-4.2.3 \
+    --chip esp32c3 --mac 94:a9:90:7a:26:ac \
+    --image-dir artifacts/hil/2026-09-26/images/full-r1-node3-c3-recovery \
+    --out artifacts/hil/node3-catch-wake
 
 # Run scenarios (all, or --scenario name repeatedly); --list shows names
 python3 tools/hil/scenarios.py --rig tools/hil/rigs.yaml --bench bench-a \
