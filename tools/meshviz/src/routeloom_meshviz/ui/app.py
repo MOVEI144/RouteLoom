@@ -1,4 +1,4 @@
-"""Main window: header, five screens, source switching (fake/daemon/replay) and shutdown."""
+"""Main window: header, seven screens, source switching (fake/daemon/replay) and shutdown."""
 from contextlib import ExitStack
 from pathlib import Path
 import tempfile
@@ -10,11 +10,13 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QLabel, Q
                                QVBoxLayout, QWidget)
 
 from .. import views
-from ..demo import DemoMesh
+from ..demo_site import DemoSiteMesh
 from ..fake_api1 import serve_fake_api1
 from .boards import BoardsView
+from .live import LiveView
 from .playback import PlaybackView
 from .quality import QualityView
+from .site import SiteView
 from .topology import TopologyView
 from .trials import TrialsView
 from .workers import ApiClient, FakeBoards, ModelWorker, RealBoards, ReplayWorker
@@ -70,7 +72,8 @@ class MainWindow(QMainWindow):
     replay_playing = Signal(bool)
     replay_step = Signal()
 
-    def __init__(self, *, socket_path=None, replay_path=None, fake_nodes=8, fake_boards=None):
+    def __init__(self, *, socket_path=None, replay_path=None, fake_nodes=8, fake_boards=None,
+                 supervisor=None):
         super().__init__()
         self.setWindowTitle('RouteLoom Mesh Lab')
         self.resize(1280, 820)
@@ -92,12 +95,15 @@ class MainWindow(QMainWindow):
         self.header = Header()
         use_fake_boards = fake_boards if fake_boards is not None else socket_path is None
         self.boards = BoardsView(FakeBoards() if use_fake_boards else RealBoards())
+        self.live = LiveView()
+        self.site = SiteView(self.boards, fake=use_fake_boards, supervisor=supervisor)
         self.topology = TopologyView()
         self.quality = QualityView()
         self.trials = TrialsView()
         self.playback = PlaybackView()
         self.tabs = QTabWidget()
-        for widget, title in ((self.boards, 'ボード'), (self.topology, 'トポロジ'),
+        for widget, title in ((self.live, 'ライブ監視'), (self.site, '開発 site'),
+                              (self.boards, 'ボード'), (self.topology, 'トポロジ'),
                               (self.quality, '品質'), (self.trials, '試験'),
                               (self.playback, '記録と再生')):
             self.tabs.addTab(widget, title)
@@ -111,6 +117,11 @@ class MainWindow(QMainWindow):
         self._menus()
         self.trials.send_request.connect(self.api_request.emit)
         self.trials.record.connect(self.model_events.emit)
+        self.live.send_request.connect(self.api_request.emit)
+        self.live.record.connect(self.model_events.emit)
+        self.site.site_ready.connect(self._on_site_ready)
+        self.site.site_lost.connect(self._on_site_lost)
+        self.site.shutdown_finished.connect(self._maybe_close)
         self.playback.start_recording.connect(self.model_start_recording.emit)
         self.playback.stop_recording.connect(self.model_stop_recording.emit)
         self.playback.open_capture.connect(self.use_replay)
@@ -126,6 +137,8 @@ class MainWindow(QMainWindow):
         self.render_timer.timeout.connect(self._render)
         self.render_timer.start(RENDER_MS)
         self.live_target = socket_path
+        self.supervised_socket = None
+        self.supervised_site_id = None
         if replay_path:
             self.use_replay(str(replay_path))
         elif socket_path:
@@ -165,6 +178,8 @@ class MainWindow(QMainWindow):
     def _stop_sources(self, after=None):
         self.trials.shutdown()
         self.trials.set_capabilities('REPLAY', {})
+        self.live.set_source('REPLAY', {})
+        self.site.set_source('REPLAY', {})
         self.boards.set_mode('REPLAY')
         self.playback.set_mode('REPLAY')
         self.after_retire = after
@@ -208,29 +223,34 @@ class MainWindow(QMainWindow):
     def _start_fake(self):
         directory = Path(self.exit_stack.enter_context(tempfile.TemporaryDirectory(prefix='meshviz-')))
         socket_path = directory / 'api1.sock'
-        self.exit_stack.enter_context(serve_fake_api1(socket_path, mesh=DemoMesh(self.fake_nodes)))
+        self.exit_stack.enter_context(serve_fake_api1(socket_path, mesh=DemoSiteMesh(self.fake_nodes)))
         self._start_live(str(socket_path), 'fake API1（demo mesh）')
 
-    def use_live(self, path):
+    def use_live(self, path, *, expected_site_id=None):
         if self.shutdown_started:
             return
         self.live_target = path
-        self._stop_sources(lambda: self._start_live(path, f'daemon {path}'))
+        self._stop_sources(lambda: self._start_live(path, f'daemon {path}', expected_site_id))
 
     def _back_to_live(self):
         if self.live_target:
-            self.use_live(self.live_target)
+            expected = (self.supervised_site_id if self.live_target == self.supervised_socket
+                        else None)
+            self.use_live(self.live_target, expected_site_id=expected)
         else:
             self.use_fake()
 
-    def _start_live(self, path, label):
+    def _start_live(self, path, label, expected_site_id=None):
         self.mode = 'LIVE'
         self.source_label = label
-        self.api = ApiClient(path)
+        self.api = ApiClient(path, expected_site_id=expected_site_id)
         self.model = ModelWorker('LIVE')
+        self.live.reset_timeline()
         self.api.events.connect(self.model.ingest)
         self.connections.append(self.api.status.connect(self._on_source_status))
         self.connections.append(self.api.reply.connect(self.trials.on_reply))
+        self.connections.append(self.api.reply.connect(self.live.on_reply))
+        self.connections.append(self.api.routes_observed.connect(self.live.on_routes))
         self.connections.append(self.api_request.connect(self.api.request))
         self.connections.append(self.model_events.connect(self.model.ingest))
         self.connections.append(self.model_start_recording.connect(self.model.start_recording))
@@ -250,6 +270,7 @@ class MainWindow(QMainWindow):
         self.mode = 'REPLAY'
         self.source_label = f'capture {path}'
         self.replay = ReplayWorker()
+        self.live.reset_timeline()
         self.connections.append(self.replay.snapshot.connect(self._on_snapshot))
         self.connections.append(self.replay.position.connect(self.playback.on_position))
         self.connections.append(self.replay.failed.connect(
@@ -268,6 +289,8 @@ class MainWindow(QMainWindow):
         self.boards.set_mode(self.mode)
         self.playback.set_mode(self.mode)
         self.trials.set_capabilities(self.mode, self.source_status.get('methods', {}) if self.mode == 'LIVE' else {})
+        self.live.set_source(self.mode, self.source_status if self.mode == 'LIVE' else {})
+        self.site.set_source(self.mode, self.source_status if self.mode == 'LIVE' else {})
         self.header.set('mode', f'<b>{self.mode}</b>')
         self.header.set('record', '記録: なし' if self.mode == 'LIVE' else '記録: 再生中は無効')
         self.header.set('trial', '試験: なし')
@@ -278,6 +301,8 @@ class MainWindow(QMainWindow):
     def _on_source_status(self, status):
         self.source_status = status
         self.trials.set_capabilities(self.mode, status.get('methods', {}))
+        self.live.set_source(self.mode, status)
+        self.site.set_source(self.mode, status)
         source = status.get('source') or {}
         gateway = source.get('gateway')
         if not status.get('connected'):
@@ -287,6 +312,28 @@ class MainWindow(QMainWindow):
                     f'source {source.get("state", "不明")}'
                     + (f'（{status["error"]}）' if status.get('error') else ''))
         self.header.set('gateway', text)
+
+    def _on_site_ready(self, socket_path):
+        # A supervised daemon (new session) becomes the live source; ApiClient
+        # re-reads capabilities and snapshots on its own connection.
+        self.supervised_socket = socket_path
+        self.supervised_site_id = self.site.supervisor_status.get('site_id')
+        if self.mode != 'LIVE':
+            self.live_target = socket_path
+            return
+        if (self.live_target != socket_path or self.api is None or
+                self.api.expected_site_id != self.supervised_site_id):
+            self.use_live(socket_path, expected_site_id=self.supervised_site_id)
+
+    def _on_site_lost(self, socket_path):
+        if self.supervised_socket == socket_path:
+            self.supervised_socket = None
+            self.supervised_site_id = None
+        if self.mode == 'LIVE' and self.live_target == socket_path:
+            self.live_target = None
+            self.use_fake()
+        elif self.live_target == socket_path:
+            self.live_target = None
 
     def _on_recording(self, status):
         self.recording_status = status
@@ -306,7 +353,10 @@ class MainWindow(QMainWindow):
         snapshot = self.pending
         clock_ns = time.monotonic_ns()
         refresh_age = self.mode == 'LIVE' and clock_ns - self.last_clock_render_ns >= AGE_RENDER_NS
-        if snapshot is None or (not self.dirty and not force and not refresh_age):
+        current = self.tabs.currentWidget()
+        # Join/route transitions keep animating between snapshots (still ≤ 20 fps).
+        animate = current is self.live and self.live.animating()
+        if snapshot is None or (not self.dirty and not force and not refresh_age and not animate):
             return
         self.last_clock_render_ns = clock_ns
         self.dirty = False
@@ -315,7 +365,12 @@ class MainWindow(QMainWindow):
                         'now_mono_ns': clock_ns}
         state = snapshot['state']
         scope = (views.scopes(state) or ['不明'])[0]
-        self.header.set('site', f'scope {scope}（site/profile: 未取得）')
+        site = self.live.site_status if self.mode == 'LIVE' else None
+        if site and isinstance(site.get('site_id'), str):
+            self.header.set('site', f'site {site["site_id"]}（{views.fmt(site.get("purpose"))}）'
+                                    f'scope {scope}')
+        else:
+            self.header.set('site', f'scope {scope}（site/profile: 未取得）')
         now = snapshot.get('now_unix_ms')
         heard = [n.get('last_heard_ms') for n in state.nodes.values()
                  if type(n.get('last_heard_ms')) is int and n.get('connected')]
@@ -328,9 +383,12 @@ class MainWindow(QMainWindow):
             self.header.set('trial', f'試験: {runner.state}' if runner else '試験: なし')
         nodes = sorted({key.split(':', 1)[1] for key in state.nodes if key.startswith(scope + ':')})
         self.trials.set_nodes(nodes)
-        current = self.tabs.currentWidget()
         # Only the visible screen repaints; others refresh when shown.
-        if current is self.topology:
+        if current is self.live:
+            self.live.update_snapshot(snapshot)
+        elif current is self.site:
+            self.site.update_from(self.live)
+        elif current is self.topology:
             self.topology.update_snapshot(snapshot)
         elif current is self.quality:
             self.quality.update_snapshot(snapshot)
@@ -340,7 +398,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.close_requested = True
         self.shutdown()
-        if self.retirer is not None or not self.boards.stopped or self.playback.export_job is not None:
+        if (self.retirer is not None or not self.boards.stopped or not self.site.stopped or
+                self.playback.export_job is not None):
             event.ignore()
             return
         self.close_requested = False
@@ -352,12 +411,14 @@ class MainWindow(QMainWindow):
             return
         self.shutdown_started = True
         self.render_timer.stop()
+        self.live.shutdown()
         self._stop_sources()
         self.boards.shutdown()
+        self.site.shutdown()
 
     def _maybe_close(self):
         if (self.close_requested and self.retirer is None and self.boards.stopped and
-                self.playback.export_job is None):
+                self.site.stopped and self.playback.export_job is None):
             QTimer.singleShot(0, self.close)
 
 

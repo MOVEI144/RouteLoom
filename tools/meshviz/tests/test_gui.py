@@ -58,7 +58,8 @@ class GuiSmokeTests(unittest.TestCase):
         window = MainWindow(**kw)
         def cleanup():
             window.shutdown()
-            self.assertTrue(spin(self.app, lambda: window.retirer is None and window.boards.stopped))
+            self.assertTrue(spin(self.app, lambda: window.retirer is None and window.boards.stopped
+                                 and window.site.stopped))
         self.addCleanup(cleanup)
         window.show()
         return window

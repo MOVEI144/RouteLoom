@@ -106,6 +106,14 @@ class CaptureReader:
                 messages[(body['run_id'], body['index'])] = body
         return plans, [messages[key] for key in sorted(messages)]
 
+    def site_events(self, until_seq=None, limit=4096):
+        """Recorded join milestones and rollcall summaries up to the cursor (latest `limit`)."""
+        rows = self.db.execute(
+            "SELECT payload_json FROM events WHERE kind IN ('join_milestone','rollcall_status') "
+            'AND seq<=? ORDER BY seq DESC LIMIT ?',
+            (until_seq if until_seq is not None else 2**63 - 1, limit)).fetchall()
+        return [json.loads(payload) for (payload,) in reversed(rows)]
+
 
 def _iso(unix_ms):
     if type(unix_ms) is not int:
