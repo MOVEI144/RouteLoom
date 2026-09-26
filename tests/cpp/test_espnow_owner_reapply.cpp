@@ -11,6 +11,7 @@
 #include "routeloom/psa_edhoc_aead.hpp"
 #include "routeloom/psa_session_aead.hpp"
 
+#include "../../firmware/bridge_node/main/bridge_network.hpp"
 #include "idf_stubs.hpp"
 #include "test_sdkv1.hpp"
 #include "test_security.hpp"
@@ -202,6 +203,24 @@ bool take_apply(SecurityCoordinator& coordinator, MonotonicMs& now,
   return false;
 }
 
+void test_usb_network_after_cutover() {
+  // A restarted gateway has a committed RLS1 for epoch 2, but the mesh
+  // header and the legacy trust/bootstrap network still carry epoch 1.
+  Stores stores{};
+  CHECK(stores.init());
+  const auto next = site_record(3, 204, kNetwork + (1ULL << 32U));
+  CHECK(stores.site.commit(next).ok());
+  const NetworkId bootstrap = static_cast<std::uint32_t>(next.network);
+  CHECK(bridge_node::usb_boot_network(stores.site, bootstrap) == next.network);
+  CHECK(static_cast<std::uint32_t>(bridge_node::usb_boot_network(stores.site, bootstrap)) ==
+        bootstrap);
+
+  FaultyRecordStorage empty_storage{kSiteSlotBytes};
+  SiteStore empty{empty_storage};
+  CHECK(empty.initialize().ok());
+  CHECK(bridge_node::usb_boot_network(empty, bootstrap) == bootstrap);
+}
+
 void test_same_boot_reapply(bool change_site_epoch) {
   idf_stub::reset();
   Stores stores{};
@@ -263,6 +282,7 @@ void test_same_boot_reapply(bool change_site_epoch) {
 }  // namespace
 
 int main() {
+  test_usb_network_after_cutover();
   test_same_boot_reapply(false);
   test_same_boot_reapply(true);
   return failures == 0 ? 0 : 1;
