@@ -561,10 +561,10 @@ class EspNowRuntime final : public RadioPort,
   BindingGeneration pending_binding_{0};
   ChannelEpoch pending_channel_epoch_{0};
   std::uint8_t pending_length_class_{0};
-  // In-flight non-reserved (bootstrap/probe/migration) sends, one entry per
-  // destination MAC. Entries retire on their completion callback or after
-  // callback_watchdog_ms; while an entry exists both send_raw() to that MAC
-  // and a reserved DATA send() to that MAC are refused.
+  // In-flight non-reserved (bootstrap/probe/migration) sends. Entries retire
+  // on their completion callback or after callback_watchdog_ms; while any
+  // entry exists both send_raw() and a reserved DATA send() are refused, so
+  // at most one driver send is outstanding across both lanes.
   struct RawTx {
     MacAddress mac{};
     MonotonicMs sent_ms{0};

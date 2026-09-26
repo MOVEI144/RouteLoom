@@ -738,7 +738,7 @@ class NeighborDiscovery {
   // Wire-lane handlers (post-BIND probes only).
   void handle_probe(Neighbor& neighbor, ByteView payload, MonotonicMs now_ms) noexcept;
   void send_pending_result(Neighbor& neighbor, MonotonicMs now_ms) noexcept;
-  void clear_pending_result(NodeId peer) noexcept;
+  void clear_pending_result(BindingId binding) noexcept;
   void handle_probe_result(Neighbor& neighbor, ByteView payload,
                            MonotonicMs now_ms) noexcept;
 
@@ -886,11 +886,14 @@ class NeighborDiscovery {
   std::size_t discover_cursor_{0};
 
   // Pending recovery replies share three bounded slots rather than growing
-  // every neighbor record on RAM-limited gateways.
+  // every neighbor record on RAM-limited gateways. A reply is useful only
+  // until the requester's probe timeout; a transport refusal retries after
+  // 50 ms, any other local failure drops it (the requester re-probes).
   struct PendingResult {
-    NodeId peer{kInvalidNodeId};
+    BindingId binding{kInvalidBindingId};  // the record the Probe arrived on
     std::uint32_t sequence{0};
     std::uint32_t retry_ms{0};
+    std::uint32_t expires_ms{0};
   };
   std::array<PendingResult, discovery_const::kTransientPeerSlots> pending_results_{};
   Outbound outbound_{};
