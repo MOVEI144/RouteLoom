@@ -1640,8 +1640,9 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   // the node after reconstruction. Without it P6 frames reject.
   (void)runtime_->node().set_rrs_sink(this);
   runtime_->node().set_bootstrap_sink(&coordinator());
-  // Relay duties are role-gated (unknown role 0 never transits).
-  runtime_->node().set_relay_enabled(member.role != 0);
+  // Endpoint-only members must not advertise transit routes.
+  runtime_->node().set_relay_enabled(
+      (member.role & (sdkv1::kMemberRoleRelay | sdkv1::kMemberRoleGateway)) != 0);
   // The radio may still sit on the join channel: move it to the adopted
   // operating channel before the node starts (no member traffic flows
   // during the move). Already there → start immediately.
