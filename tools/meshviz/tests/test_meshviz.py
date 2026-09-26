@@ -3,6 +3,7 @@ import json
 import socket
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -99,6 +100,52 @@ class ModelTests(unittest.TestCase):
             state = replay(path)
             self.assertEqual(set(state.nodes), {'s:02'})
             self.assertEqual(state.gaps[-1]['reason'], 'UncleanEnd')
+
+    def test_idle_capture_commits_without_more_events(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'test.rlcapture'
+            cap = Capture(path, 'id')
+            try:
+                cap.add({'source': 'daemon', 'scope': 's', 'kind': 'node',
+                         'payload': {'node': '02'}}, FakeClock())
+                deadline = time.monotonic() + 2.5
+                committed = 0
+                while time.monotonic() < deadline and not committed:
+                    with sqlite3.connect(path / 'data.sqlite') as reader:
+                        committed = reader.execute('SELECT COUNT(*) FROM events').fetchone()[0]
+                    if not committed:
+                        time.sleep(0.05)
+                self.assertEqual(committed, 1)
+                self.assertFalse(json.loads((path / 'manifest.json').read_text())['closed'])
+            finally:
+                cap.close()
+
+    def test_capture_rejects_unknown_event_schema_before_recording(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'test.rlcapture'
+            with Capture(path, 'id') as cap:
+                with self.assertRaises(ValueError):
+                    cap.add({'schema_version': 2, 'source': 'daemon', 'scope': 's',
+                             'kind': 'node', 'payload': {'node': '02'}}, FakeClock())
+                self.assertEqual(cap.seq, 0)
+                cap.add({'source': 'daemon', 'scope': 's', 'kind': 'node',
+                         'payload': {'node': '03'}}, FakeClock())
+            self.assertEqual(set(replay(path).nodes), {'s:03'})
+
+    def test_corrupt_checkpoint_schema_cannot_bypass_version_check(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'test.rlcapture'
+            clock = FakeClock()
+            with Capture(path, 'id') as cap:
+                for seq in range(1, 5001):
+                    cap.add({'source': 'daemon', 'scope': 's', 'source_seq': seq,
+                             'kind': 'node', 'payload': {'node': '02'}}, clock)
+            with sqlite3.connect(path / 'data.sqlite') as db:
+                data = json.loads(db.execute('SELECT state_json FROM checkpoints').fetchone()[0])
+                data['schema_version'] = 2
+                db.execute('UPDATE checkpoints SET state_json=?', (json.dumps(data),))
+            with self.assertRaises(ValueError):
+                replay(path)
 
     def test_partial_snapshot_and_duplicate_source_sequence(self):
         state = State()
