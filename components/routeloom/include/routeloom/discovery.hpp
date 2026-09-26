@@ -753,6 +753,7 @@ class NeighborDiscovery {
                    ScopeDigest* frame_digest = nullptr) noexcept;
 
   // Scope pipeline (02-discovery-scope §2.4-§2.7).
+  void note_unknown_generation(std::uint32_t current, std::uint32_t observed) noexcept;
   void drain_scope_pending(MonotonicMs now_ms) noexcept;
   void admit_scoped_discover(PendingVerify& pending, MonotonicMs now_ms) noexcept;
   void accept_scoped_offer(PendingVerify& pending, MonotonicMs now_ms) noexcept;

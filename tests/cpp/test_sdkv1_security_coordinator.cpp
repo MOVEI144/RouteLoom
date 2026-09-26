@@ -1875,9 +1875,17 @@ void test_coordinator_group_cached_revocation() {
 }
 
 void bump_unknown_generations(NeighborDiscovery& discovery, std::uint32_t fresh) {
-  // White-box stand-in for discovery observing unknown-generation
+  // White-box stand-in for discovery observing unknown-AHEAD-generation
   // DISCOVERs (the counting itself is covered by the discovery suite);
   // the Owner logic under test turns fresh observations into strikes.
+  ScopeStats& stats = const_cast<ScopeStats&>(discovery.scope_stats());
+  stats.unknown_generation += fresh;
+  stats.unknown_newer_generation += fresh;
+}
+
+void bump_lagging_generations(NeighborDiscovery& discovery, std::uint32_t fresh) {
+  // White-box stand-in for discovery observing unknown OLDER-generation
+  // DISCOVERs (cutover laggards): counted, but never refresh evidence.
   const_cast<ScopeStats&>(discovery.scope_stats()).unknown_generation += fresh;
 }
 
@@ -1923,6 +1931,37 @@ void test_refresh_stale_gk() {
   CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
   CHECK(coordinator.counters().refreshes == 1);
   CHECK(coordinator.snapshot().refresh_strikes == 0);
+}
+
+void test_refresh_ignores_lagging_generations() {
+  current = "refresh_ignores_lagging_generations";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  FakeAuthorityPort port;
+  CHECK(coordinator.attach_authority_port(port));
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  CHECK(poll_drain(coordinator, now, 5));  // StartMemberDiscovery emitted
+  CHECK(coordinator.snapshot().link_sessions == 0);
+  // Unknown OLDER generations while linkless (a cutover adopter whose
+  // peers have not followed yet) are counted but never strike: the
+  // member holds its engine instead of refreshing a good adoption.
+  for (int i = 0; i < 5; ++i) {
+    bump_lagging_generations(*f.deps().discovery, 2);
+    CHECK(poll_drain(coordinator, now));
+  }
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+  CHECK(coordinator.counters().refreshes == 0);
+  CHECK(coordinator.snapshot().refresh_strikes == 0);
+  // ... while one ahead generation still strikes.
+  bump_unknown_generations(*f.deps().discovery, 2);
+  CHECK(poll_drain(coordinator, now));
+  CHECK(coordinator.snapshot().refresh_strikes == 1);
 }
 
 void test_workspace_arm_survives_member_adoption_and_refresh() {
@@ -2444,6 +2483,7 @@ int main() {
   test_group_provider_routing();
   test_coordinator_group_cached_revocation();
   test_refresh_stale_gk();
+  test_refresh_ignores_lagging_generations();
   test_workspace_arm_survives_member_adoption_and_refresh();
   test_failed_refresh_re_adopts_configured_member();
   test_link_failure_refresh_waits_for_poll_boundary();

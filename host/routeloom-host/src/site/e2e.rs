@@ -641,7 +641,9 @@ fn cutover_flows_end_to_end_over_the_api_socket() {
     use routeloom_provision::sha256::sha256;
     use routeloom_provision::signer::{test_keypair, FileRootSigner};
 
-    use super::cutover::CUTOVER_PREPARE_WINDOW_MS;
+    use super::cutover::{
+        CUTOVER_GATEWAY_FLUSH_MS, CUTOVER_GRACE_MS, CUTOVER_PREPARE_WINDOW_MS,
+    };
     use super::group_keys::HostTime;
     use super::revocation::RevocationTransport;
 
@@ -810,7 +812,9 @@ fn cutover_flows_end_to_end_over_the_api_socket() {
         .filter(|(_, _, bytes)| bytes[1] == Phase::Commit as u8)
         .cloned()
         .collect();
-    assert_eq!(commits.len(), 3);
+    // The member and the straggler go first; the gateway adopts last
+    // so its retire+reboot cannot partition them (#168 cutover).
+    assert_eq!(commits.len(), 2);
     let (commit_object, commit_rs) = daemon
         .service
         .with(|a| {
@@ -825,10 +829,7 @@ fn cutover_flows_end_to_end_over_the_api_socket() {
             (state.commit_object.clone(), state.commit_rs_epoch)
         })
         .0;
-    for (node, _, _) in &commits {
-        if *node == straggler.node {
-            continue;
-        }
+    let applied = |node: u64, at: u64| {
         let receipt = Receipt {
             head: Head {
                 phase: Phase::Applied,
@@ -847,9 +848,33 @@ fn cutover_flows_end_to_end_over_the_api_socket() {
         .to_vec();
         let (moved, _) = daemon
             .service
-            .with(|a| a.handle_grant_receipt(*node, 1, new_network, &receipt, lapse + 400));
+            .with(|a| a.handle_grant_receipt(node, 1, new_network, &receipt, at));
         assert!(moved);
+    };
+    for (node, _, _) in &commits {
+        if *node == straggler.node {
+            continue;
+        }
+        applied(*node, lapse + 400);
     }
+    // The straggler never settles, so the held gateway COMMIT waits
+    // for the flush near the grace end (a dead member must not wedge
+    // the site); the straggler's own retry may interleave.
+    let flush_at = lapse + CUTOVER_GRACE_MS - CUTOVER_GATEWAY_FLUSH_MS + 100;
+    daemon.service.with(|a| a.tick(HostTime::sync(flush_at)));
+    daemon.service.with(|a| a.tick(HostTime::sync(flush_at + 100)));
+    let commits: Vec<_> = grants
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, _, bytes)| bytes[1] == Phase::Commit as u8)
+        .cloned()
+        .collect();
+    assert!(
+        commits.iter().any(|(n, _, _)| *n == gateway.node),
+        "gateway COMMIT flushed: {commits:?}"
+    );
+    applied(gateway.node, flush_at + 200);
     let progress = admin
         .cutover_operation(&outcome.operation_id)
         .unwrap()
@@ -860,7 +885,7 @@ fn cutover_flows_end_to_end_over_the_api_socket() {
     // reissue on the new epoch, with no join.request for KGuard.
     let open_before = admin.join_requests().unwrap().len();
     straggler.recovery_existing = true;
-    let (outcome, _) = straggler.attempt(&daemon.service, &daemon.transport, lapse + 5_000);
+    let (outcome, _) = straggler.attempt(&daemon.service, &daemon.transport, flush_at + 5_000);
     assert!(
         matches!(outcome, Outcome::Result(JoinResult::Allow { .. })),
         "{outcome:?}"

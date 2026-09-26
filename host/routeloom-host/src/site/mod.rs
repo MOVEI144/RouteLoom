@@ -4854,6 +4854,11 @@ impl SiteAuthority {
                 // this; the row DAMS is the ready incarnation.
                 let dams = self.devices.get(&device).map(|row| row.dams);
                 self.channel_hints.push((device, dams));
+                // A (re)opened channel re-arms the device's due
+                // grants: the next tick queues them immediately, so a
+                // COMMIT sealed into the wake window lands on an awake
+                // device instead of at a backoff deadline past it.
+                self.rearm_grants_for_channel(device, time.unix_ms);
                 self.touch_member(device, time.unix_ms);
                 self.event(
                     time.unix_ms,
@@ -5956,6 +5961,8 @@ mod cutover_tests;
 mod e2e;
 #[cfg(test)]
 mod joiner_interop;
+#[cfg(test)]
+mod owner_mesh_interop;
 #[cfg(test)]
 mod p6_channel_tests;
 #[cfg(test)]

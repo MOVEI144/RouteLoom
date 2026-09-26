@@ -697,6 +697,68 @@ void test_responder_waits_for_m4_admission() {
   CHECK(result.event == HandshakeEvent::Established);
 }
 
+void test_m1_park_yields_to_live_m4() {
+  // A responder that composed M4 but could not send it (transport
+  // WouldBlock, like the RLD1 per-destination race against the final
+  // chunk reply) must keep its retry bytes when a second initiator's
+  // M1 arrives: the park is refused and the M4 retransmit still emits
+  // M4 — never the parked M1. The refused M1 is transient: once the
+  // first exchange completes, the second initiator links.
+  Pair pair = Pair::make();
+  const FrozenLink frozen_ab = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen_ab, kT0));
+  HandshakeResult m1{}, m2{}, m3{}, m4{}, result{};
+  CHECK_OK(pair.a->engine.take_result(m1));
+  CHECK_OK(deliver_to(*pair.b, *pair.a, m1, frozen_ab, kT0 + 50));
+  CHECK_OK(pair.b->engine.take_result(m2));
+  CHECK_OK(deliver_to(*pair.a, *pair.b, m2, frozen_ab, kT0 + 100));
+  CHECK_OK(pair.a->engine.take_result(m3));
+  CHECK_OK(deliver_to(*pair.b, *pair.a, m3, frozen_ab, kT0 + 150));
+  CHECK_OK(pair.b->engine.take_result(m4));
+  CHECK(m4.event == HandshakeEvent::Send && m4.phase == 4 && m4.step == 4);
+  // The M4 send is refused (never accepted): the responder holds it
+  // for the retransmit while a second initiator C knocks.
+  constexpr NodeId kNodeC = 0x00A1000000000999ULL;
+  const auto cert_c = member_cert_for(kNodeC, sdkv1_test::verifier_key().pub, kMemberRoleEndpoint,
+                                      5);
+  Side c(kNodeC, kNodeB, mac_of(0x0C), mac_of(0x0B), sdkv1_test::verifier_key(), cert_c, 5,
+         kMemberRoleEndpoint, 0xC3, kGk);
+  CHECK(c.start());
+  const FrozenLink frozen_cb = freeze_link(c, *pair.b, kT0 + 200, kCapsFull, kCapsFull);
+  CHECK_OK(request_link(c, *pair.b, frozen_cb, kT0 + 200));
+  HandshakeResult m1c{};
+  CHECK_OK(c.engine.take_result(m1c));
+  CHECK(m1c.event == HandshakeEvent::Send && m1c.phase == 4 && m1c.step == 1);
+  CHECK_OK(deliver_to(*pair.b, c, m1c, frozen_cb, kT0 + 250));
+  CHECK(pair.b->engine.take_result(result).code == StatusCode::NotFound);
+  CHECK_OK(pair.b->engine.poll(kT0 + 550));
+  HandshakeResult retry{};
+  CHECK_OK(pair.b->engine.take_result(retry));
+  CHECK(retry.event == HandshakeEvent::Send && retry.phase == 4 && retry.step == 4);
+  CHECK(retry.message_size == m4.message_size);
+  CHECK(retry.message_size != m1c.message_size);
+  CHECK(std::memcmp(retry.message.data(), m4.message.data(), m4.message_size) == 0);
+  // A's exchange completes on the retried M4; the refused peer then
+  // links on a fresh round (the responder is not wedged by the
+  // refusal). B's responder flight stays with A until A's record
+  // retires, so C re-knocks after that.
+  CHECK_OK(pair.b->engine.accept_send(retry.token, retry.phase, retry.step));
+  CHECK_OK(deliver_to(*pair.a, *pair.b, retry, frozen_ab, kT0 + 600));
+  CHECK_OK(pair.a->engine.take_result(result));
+  CHECK(result.event == HandshakeEvent::Established);
+  CHECK_OK(pair.b->engine.take_result(result));
+  CHECK(result.event == HandshakeEvent::Established);
+  CHECK_OK(pair.b->engine.poll(kT0 + 9100));
+  Side c2(kNodeC, kNodeB, mac_of(0x0C), mac_of(0x0B), sdkv1_test::verifier_key(), cert_c, 5,
+          kMemberRoleEndpoint, 0xC4, kGk);
+  CHECK(c2.start());
+  const FrozenLink frozen_c2b = freeze_link(c2, *pair.b, kT0 + 9150, kCapsFull, kCapsFull);
+  CHECK_OK(request_link(c2, *pair.b, frozen_c2b, kT0 + 9150));
+  const PumpResult late = pump(c2, *pair.b, frozen_c2b, kT0 + 9200);
+  CHECK(late.established_a && late.established_b);
+  CHECK(late.failed_a == StatusCode::Ok && late.failed_b == StatusCode::Ok);
+}
+
 void test_resume_after_edhoc() {
   Pair pair = Pair::make();
   FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
@@ -1877,6 +1939,7 @@ void test_dev_configure_busy_while_in_flight() {
 int main() {
   test_link_edhoc_full();
   test_responder_waits_for_m4_admission();
+  test_m1_park_yields_to_live_m4();
   test_resume_after_edhoc();
   test_gateway_resume_lookup_budget();
   test_routed_end_exchange();

@@ -467,8 +467,14 @@ constexpr AdoptNetworkDisposition adopt_network_disposition(
       adopted_network == action_network) {
     return AdoptNetworkDisposition::Complete;
   }
-  if (live_member_binding && adopted_role != 0 && adopted_network != 0 &&
-      adopted_network != action_network) {
+  if (adopted_role != 0 && adopted_network != 0 && adopted_network != action_network) {
+    // A stale installed binding: live on the old network, or already
+    // retired by the switch's retire step (which stops the coordinator
+    // before the stores commit, so no binding is live when the action
+    // lands). Either way the committed stores wait for the post-reboot
+    // re-adoption: reboot once. Never a second reboot on the same
+    // durable state — post-reboot the adopted binding is the action's
+    // own (Complete) or still zero while adoption is in flight (wait).
     return AdoptNetworkDisposition::RebootToAdopt;
   }
   return AdoptNetworkDisposition::WaitForAdoption;

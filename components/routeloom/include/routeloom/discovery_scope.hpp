@@ -275,6 +275,9 @@ struct ScopeStats {
   std::uint32_t hint_mismatch{0};       // hint matches no accepted candidate
   std::uint32_t mac_rejected{0};        // tag verify failed / required tag absent
   std::uint32_t unknown_generation{0};  // generation not current/previous-in-window
+  std::uint32_t unknown_newer_generation{0};  // ... and ahead of our current one
+                                              // (stale-GK refresh evidence; a
+                                              // lagging neighbor proves nothing)
   std::uint32_t duplicate{0};           // dedup same key, same content
   std::uint32_t scope_accepted{0};      // verified scoped frames admitted
   std::uint32_t legacy_used{0};         // legacy-path admissions

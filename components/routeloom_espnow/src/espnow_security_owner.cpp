@@ -128,6 +128,18 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::enforce_revocation(
   if (owner.stores_ == nullptr || !owner.coordinator_live_) {
     return Status::error(StatusCode::InvalidState, "enforce before wiring");
   }
+  // A live notice transfer to a set peer holds enforcement: retiring
+  // its sessions and routes mid-transfer would strand the RemovalNotice
+  // itself on NoRoute (04 §6.2 reachable case). The lifecycle retries
+  // WouldBlock enforcement every Poll, and the transfer always ends in
+  // delivery or timeout — enforcement is delayed, never skipped.
+  if (owner.config_.gateway && owner.authority_live_) {
+    for (std::size_t i = 0; i < set.count; ++i) {
+      if (owner.gateway()->has_live_down_to(set.entries[i].node_id)) {
+        return Status::error(StatusCode::WouldBlock, "notice transfer live");
+      }
+    }
+  }
   // The P4 bank, pending handshakes and Discovery bindings retire before
   // any durable resume sweep. The route withdrawal also closes queued
   // sends to revoked peers. The RLP2 resume sweep itself belongs to the

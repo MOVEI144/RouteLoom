@@ -579,7 +579,7 @@ void NeighborDiscovery::handle_discover_scoped(
   }
   if (!config_.scope_provider->accepted_generation(config_.scope, body.generation,
                                                    now_ms)) {
-    ++scope_stats_.unknown_generation;
+    note_unknown_generation(current, body.generation);
     return;
   }
   // Cheap hint candidate check against OUR configured class: the hint space
@@ -612,6 +612,15 @@ void NeighborDiscovery::handle_discover_scoped(
   pending->expected_tag = body.tag;
 }
 
+void NeighborDiscovery::note_unknown_generation(const std::uint32_t current,
+                                                   const std::uint32_t observed) noexcept {
+  ++scope_stats_.unknown_generation;
+  // Only an ahead generation evidences our own staleness (P5 §7.4): a
+  // lagging neighbor — a cutover adopter waiting for its peers to
+  // follow — must never strike us into a refresh.
+  if (observed > current) ++scope_stats_.unknown_newer_generation;
+}
+
 void NeighborDiscovery::drain_scope_pending(const MonotonicMs now_ms) noexcept {
   std::size_t spent = 0;
   std::array<PendingVerify*, kScopePendingCapacity> done{};
@@ -624,7 +633,15 @@ void NeighborDiscovery::drain_scope_pending(const MonotonicMs now_ms) noexcept {
     if (!config_.scope_provider->accepted_generation(config_.scope,
                                                      pending.generation,
                                                      now_ms)) {
-      ++scope_stats_.unknown_generation;
+      // The queue-time gate admitted this frame, so our keys were
+      // usable moments ago; if they are gone now the observation
+      // proves nothing about our staleness (not newer).
+      std::uint32_t current = 0;
+      if (config_.scope_provider->current_generation(config_.scope, current)) {
+        note_unknown_generation(current, pending.generation);
+      } else {
+        ++scope_stats_.unknown_generation;
+      }
       done[done_count++] = &pending;
       return;
     }
@@ -879,7 +896,7 @@ void NeighborDiscovery::queue_offer_verify(
   }
   if (!config_.scope_provider->accepted_generation(config_.scope, body.generation,
                                                    now_ms)) {
-    ++scope_stats_.unknown_generation;
+    note_unknown_generation(current, body.generation);
     return;
   }
   // The OFFER must answer OUR scoped DISCOVER: class/generation pin to the

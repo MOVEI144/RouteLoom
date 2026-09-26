@@ -13,7 +13,10 @@ use routeloom_provision::sdkv1::revocation::RevocationReason;
 use routeloom_provision::sha256::sha256;
 use routeloom_provision::signer::{test_keypair, FileRootSigner};
 
-use super::cutover::{CutoverRequest, CutoverState, CUTOVER_PREPARE_WINDOW_MS};
+use super::cutover::{
+    CutoverRequest, CutoverState, CUTOVER_GATEWAY_FLUSH_MS, CUTOVER_GRACE_MS,
+    CUTOVER_PREPARE_WINDOW_MS,
+};
 use super::group_keys::HostTime;
 use super::records::{parse_op_token, Verdict, ROLE_ENDPOINT, ROLE_GATEWAY};
 use super::revocation::{OutboundKind, RevocationTransport};
@@ -767,7 +770,9 @@ fn cutover_holds_the_window_and_the_gateway_gate() {
     let (status, _) =
         service.with(|a| a.status_json(HostTime::sync(T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS)));
     assert!(status.contains("\"site_epoch\":4"), "{status}");
-    // COMMITs flow over the old context; APPLIEDs converge.
+    // COMMITs flow over the old context — the member first: the
+    // gateway adopts last, so its retire+reboot cannot partition
+    // members that have not been served yet (#168 cutover).
     let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
     tick(&service, committed_at + 100);
     tick(&service, committed_at + 200);
@@ -779,9 +784,10 @@ fn cutover_holds_the_window_and_the_gateway_gate() {
         .filter(|(_, _, b)| b[1] == Phase::Commit as u8)
         .cloned()
         .collect();
-    assert_eq!(commits.len(), 2);
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].0, member.node);
     let new_network = (u64::from(testkit::SITE_EPOCH + 1) << 32) | u64::from(testkit::NETWORK_LOW);
-    for (node, _, _) in &commits {
+    let applied = |node: u64, at: u64| {
         let commit_object = service
             .with(|a| {
                 a.operations
@@ -800,7 +806,7 @@ fn cutover_holds_the_window_and_the_gateway_gate() {
             revision: 1,
             old_network: testkit::network(),
         };
-        let view = operation(&service, op, committed_at + 300);
+        let view = operation(&service, op, at);
         let rs = view.get("commit_rs_epoch").unwrap().as_u64().unwrap() as u32;
         let receipt = Receipt {
             head,
@@ -811,14 +817,206 @@ fn cutover_holds_the_window_and_the_gateway_gate() {
             status: 0,
         };
         let bytes = receipt.encode().unwrap().to_vec();
-        let (moved, _) = service
-            .with(|a| a.handle_grant_receipt(*node, 1, new_network, &bytes, committed_at + 300));
+        let (moved, _) = service.with(|a| a.handle_grant_receipt(node, 1, new_network, &bytes, at));
         assert!(moved);
-    }
+    };
+    // The member APPLIEDs; the held gateway COMMIT follows on the tick.
+    applied(member.node, committed_at + 300);
     tick(&service, committed_at + 400);
-    let view = operation(&service, op, committed_at + 400);
+    let commits: Vec<_> = sends
+        .lock()
+        .unwrap()
+        .grants
+        .iter()
+        .filter(|(_, _, b)| b[1] == Phase::Commit as u8)
+        .cloned()
+        .collect();
+    assert_eq!(commits.len(), 2);
+    assert_eq!(commits[1].0, gateway.node);
+    applied(gateway.node, committed_at + 500);
+    tick(&service, committed_at + 600);
+    let view = operation(&service, op, committed_at + 600);
     assert_eq!(view.get("phase").unwrap().as_str(), Some("converged"));
     assert_eq!(view.get("unknown").unwrap().as_u64(), Some(0));
+}
+
+/// #168 cutover: the held gateway COMMIT flushes once little grace
+/// remains, even while a member never settles — a dead member must
+/// not wedge the site (the unserved fall back to the ZT reissue).
+#[test]
+fn cutover_flushes_the_held_gateway_commit() {
+    let (service, transport) = service();
+    let mut gateway = SimDevice::new(testkit::GATEWAY, 0x60);
+    gateway.capability |= routeloom_join::JOIN_CAPABILITY_GATEWAY;
+    let mut member = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    join_member(&service, &transport, &mut gateway, ROLE_GATEWAY, "g", T0);
+    join_member(
+        &service,
+        &transport,
+        &mut member,
+        ROLE_ENDPOINT,
+        "m",
+        T0 + 5_000,
+    );
+    let sends = with_grant_transport(&service);
+    let (_op, _) = start_cutover(&service, "cut-flush", T0 + 10_000);
+    tick(&service, T0 + 10_000);
+    tick(&service, T0 + 10_100);
+    tick(&service, T0 + 10_200);
+    for (node, _, bytes) in sends.lock().unwrap().grants.clone() {
+        let receipt = Receipt {
+            head: Head {
+                phase: Phase::Prepared,
+                cutover_id: _op,
+                revision: 1,
+                old_network: testkit::network(),
+            },
+            new_network: (u64::from(testkit::SITE_EPOCH + 1) << 32)
+                | u64::from(testkit::NETWORK_LOW),
+            gk_epoch: cutover_gk_epoch(&service, _op),
+            rs_epoch: 0,
+            digest: sha256(&bytes),
+            status: 0,
+        };
+        let bytes = receipt.encode().unwrap().to_vec();
+        let (moved, _) = service
+            .with(|a| a.handle_grant_receipt(node, 1, testkit::network(), &bytes, T0 + 20_000));
+        assert!(moved);
+    }
+    let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
+    tick(&service, committed_at);
+    // The member COMMIT flows; the gateway's is held (no flush yet).
+    tick(&service, committed_at + 100);
+    tick(&service, committed_at + 200);
+    let commits = || {
+        sends
+            .lock()
+            .unwrap()
+            .grants
+            .iter()
+            .filter(|(_, _, b)| b[1] == Phase::Commit as u8)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(commits().len(), 1);
+    assert_eq!(commits()[0].0, member.node);
+    // The member never settles; near the grace end the gateway COMMIT
+    // flushes anyway (targets order puts it ahead of the member retry).
+    let flush_at = committed_at + CUTOVER_GRACE_MS - CUTOVER_GATEWAY_FLUSH_MS + 100;
+    tick(&service, flush_at);
+    tick(&service, flush_at + 100);
+    let flushed = commits();
+    assert_eq!(flushed.len(), 3);
+    assert_eq!(flushed[1].0, gateway.node);
+    assert_eq!(flushed[2].0, member.node);
+}
+
+/// #168 cutover / 04 §7: an authenticated old-context APPLIED counts
+/// inside the COMMIT grace (the device adopts over its old channel
+/// and reports before any new-context channel exists); past the
+/// grace only the new context proves.
+#[test]
+fn cutover_accepts_grace_applied_only_in_grace() {
+    let (service, transport) = service();
+    let mut gateway = SimDevice::new(testkit::GATEWAY, 0x60);
+    gateway.capability |= routeloom_join::JOIN_CAPABILITY_GATEWAY;
+    let mut member = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    join_member(&service, &transport, &mut gateway, ROLE_GATEWAY, "g", T0);
+    join_member(
+        &service,
+        &transport,
+        &mut member,
+        ROLE_ENDPOINT,
+        "m",
+        T0 + 5_000,
+    );
+    let sends = with_grant_transport(&service);
+    let (op, _) = start_cutover(&service, "cut-grace-applied", T0 + 10_000);
+    tick(&service, T0 + 10_000);
+    tick(&service, T0 + 10_100);
+    tick(&service, T0 + 10_200);
+    for (node, _, bytes) in sends.lock().unwrap().grants.clone() {
+        let receipt = Receipt {
+            head: Head {
+                phase: Phase::Prepared,
+                cutover_id: op,
+                revision: 1,
+                old_network: testkit::network(),
+            },
+            new_network: (u64::from(testkit::SITE_EPOCH + 1) << 32)
+                | u64::from(testkit::NETWORK_LOW),
+            gk_epoch: cutover_gk_epoch(&service, op),
+            rs_epoch: 0,
+            digest: sha256(&bytes),
+            status: 0,
+        };
+        let bytes = receipt.encode().unwrap().to_vec();
+        let (moved, _) = service
+            .with(|a| a.handle_grant_receipt(node, 1, testkit::network(), &bytes, T0 + 20_000));
+        assert!(moved);
+    }
+    let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
+    tick(&service, committed_at);
+    let new_network = (u64::from(testkit::SITE_EPOCH + 1) << 32) | u64::from(testkit::NETWORK_LOW);
+    let applied_bytes = || {
+        let (commit_object, rs) = service
+            .with(|a| {
+                let state = a.operations.get(&op).unwrap().cutover.as_ref().unwrap();
+                (state.commit_object.clone(), state.commit_rs_epoch)
+            })
+            .0;
+        Receipt {
+            head: Head {
+                phase: Phase::Applied,
+                cutover_id: op,
+                revision: 1,
+                old_network: testkit::network(),
+            },
+            new_network,
+            gk_epoch: cutover_gk_epoch(&service, op),
+            rs_epoch: rs,
+            digest: sha256(&commit_object),
+            status: 0,
+        }
+        .encode()
+        .unwrap()
+        .to_vec()
+    };
+    // Old-context APPLIED while Committed (inside the grace): counts.
+    // (The bytes are built outside `with`: the builder locks too.)
+    let bytes = applied_bytes();
+    let (moved, _) = service
+        .with(|a| a.handle_grant_receipt(member.node, 1, testkit::network(), &bytes, committed_at));
+    assert!(moved);
+    // The grace lapses with the gateway unsettled: recovery_pending.
+    tick(&service, committed_at + CUTOVER_GRACE_MS + 100);
+    let view = operation(&service, op, committed_at + CUTOVER_GRACE_MS + 100);
+    assert_eq!(
+        view.get("phase").unwrap().as_str(),
+        Some("recovery_pending")
+    );
+    // Old-context APPLIED past the grace: ignored; new-context counts.
+    let bytes = applied_bytes();
+    let (moved, _) = service.with(|a| {
+        a.handle_grant_receipt(
+            gateway.node,
+            1,
+            testkit::network(),
+            &bytes,
+            committed_at + CUTOVER_GRACE_MS + 200,
+        )
+    });
+    assert!(!moved);
+    let (moved, _) = service.with(|a| {
+        a.handle_grant_receipt(
+            gateway.node,
+            1,
+            new_network,
+            &bytes,
+            committed_at + CUTOVER_GRACE_MS + 200,
+        )
+    });
+    assert!(moved);
 }
 
 /// V1-R08: without a gateway PREPARED the lapse parks in

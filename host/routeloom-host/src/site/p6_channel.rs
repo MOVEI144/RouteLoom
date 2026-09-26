@@ -129,6 +129,9 @@ pub struct P6ChannelHub {
     current_network: u64,
     grace_until_mono_ms: u64,
     last_mono_ms: u64,
+    /// Latest active GK epoch from `refresh` (Wake hint body only; the
+    /// seal path reads epochs from the channel table instead).
+    gk_epoch: u32,
 }
 
 impl P6ChannelHub {
@@ -160,6 +163,7 @@ impl P6ChannelHub {
             current_network: network,
             grace_until_mono_ms: 0,
             last_mono_ms: 0,
+            gk_epoch: 0,
         }
     }
 
@@ -222,6 +226,7 @@ impl P6ChannelHub {
         }
         self.last_mono_ms = mono_ms;
         self.current_network = current_network;
+        self.gk_epoch = gk_epoch;
         self.channels
             .lock()
             .expect("authority channel poisoned")
@@ -650,6 +655,34 @@ impl P6ChannelHub {
         let live_only = network == self.current_network;
         self.send_on(node, 7, network, plaintext, live_only, mono_ms)
     }
+
+    /// Queues a Wake hint so a dormant device re-opens its channel for
+    /// a grant. The 600 s prepare window outlasts the 10-minute idle
+    /// retire on both ends, so a COMMIT target is usually dormant —
+    /// and a half-dormant one (authority channel live, device
+    /// retired) would only reject the sealed envelope. The hint needs
+    /// no channel, is fenced on the same directory the seal uses
+    /// (retained bindings serve it during the COMMIT grace), and a
+    /// Ready device ignores it; the distributor's refusal backoff
+    /// paces repeats.
+    pub fn send_wake(&mut self, device: u64, mono_ms: u64) -> bool {
+        let directory = HubDirectory {
+            live: &self.live,
+            retained: &self.retained,
+            grace_until_mono_ms: self.grace_until_mono_ms,
+            now: mono_ms,
+        };
+        self.channels
+            .lock()
+            .expect("authority channel poisoned")
+            .queue_wake(
+                &directory,
+                device,
+                (self.current_network >> 32) as u32,
+                self.gk_epoch,
+            )
+            .is_ok()
+    }
 }
 
 impl std::fmt::Debug for P6ChannelHub {
@@ -766,6 +799,10 @@ impl RevocationTransport for P6ChannelTransport {
         }
         self.lock()
             .send_grant(node, network, plaintext, self.mono_ms)
+    }
+
+    fn send_wake(&mut self, node: u64) -> bool {
+        self.lock().send_wake(node, self.mono_ms)
     }
 
     fn carries_notice(&self) -> bool {

@@ -2151,7 +2151,7 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now,
   join_confirmed_ = false;
   refresh_active_ = false;
   refresh_strikes_ = 0;
-  last_unknown_generation_ = 0;
+  last_unknown_newer_generation_ = 0;
   adopted_ = CoordinatorMemberConfig{};
   member_valid_ = false;
   tune_outstanding_ = 0;
@@ -2379,11 +2379,13 @@ void SecurityCoordinator::on_event(const AuthorityEvent& event) noexcept {
 // neighbors silently drop its DISCOVERs. Evidence accrues only while no
 // usable link exists — a lone node with quiet neighbors never refreshes
 // on linklessness alone. Three strikes (failed re-establishes and
-// discovery rounds that observed unknown generations) tear the member
-// engine down around the retained RLS1 and re-verify the same site over
-// the ZT lane; ordinary DATA admission has no engine to admit through
-// while the refresh runs. A refresh that cannot re-verify abandons back
-// to the retained membership instead of wedging in ZeroTouch.
+// discovery rounds that observed unknown AHEAD generations — a lagging
+// neighbor proves nothing about our own staleness, so only newer
+// observations strike) tear the member engine down around the retained
+// RLS1 and re-verify the same site over the ZT lane; ordinary DATA
+// admission has no engine to admit through while the refresh runs. A
+// refresh that cannot re-verify abandons back to the retained membership
+// instead of wedging in ZeroTouch.
 
 void SecurityCoordinator::note_link_established() noexcept { refresh_strikes_ = 0; }
 
@@ -2398,7 +2400,7 @@ void SecurityCoordinator::watch_linkless(const MonotonicMs now) noexcept {
   if (bank_.live_count(SecurityScope::Link) != 0) {
     refresh_strikes_ = 0;
     if (deps_.discovery != nullptr) {
-      last_unknown_generation_ = deps_.discovery->scope_stats().unknown_generation;
+      last_unknown_newer_generation_ = deps_.discovery->scope_stats().unknown_newer_generation;
     }
     return;
   }
@@ -2409,11 +2411,12 @@ void SecurityCoordinator::watch_linkless(const MonotonicMs now) noexcept {
     return;
   }
   if (deps_.discovery == nullptr) return;
-  const std::uint32_t unknown = deps_.discovery->scope_stats().unknown_generation;
-  if (unknown != last_unknown_generation_) {
-    // Fresh unknown-generation observations while linkless: one strike
-    // per poll at most (a flood still counts once).
-    last_unknown_generation_ = unknown;
+  const std::uint32_t unknown = deps_.discovery->scope_stats().unknown_newer_generation;
+  if (unknown != last_unknown_newer_generation_) {
+    // Fresh unknown-AHEAD-generation observations while linkless: one
+    // strike per poll at most (a flood still counts once). Lagging
+    // neighbors (a cutover mid-adoption) never strike.
+    last_unknown_newer_generation_ = unknown;
     if (refresh_strikes_ < kRefreshStrikesMax) ++refresh_strikes_;
     if (refresh_strikes_ >= kRefreshStrikesMax) start_refresh(now);
   }

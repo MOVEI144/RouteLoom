@@ -38,7 +38,7 @@ use routeloom_provision::sha256::sha256;
 use routeloom_provision::signer::fill_random;
 
 use super::group_keys::{fresh_group_key, GkSecret, HostTime, META_HIGH_WATER};
-use super::records::{h16, op_token, parse_h16, parse_hex, Operation};
+use super::records::{h16, op_token, parse_h16, parse_hex, Operation, ROLE_GATEWAY};
 use super::revocation::{
     checked_next, OutboundKind, OutboundRrs, DISTRIBUTION_BACKOFF_S, DISTRIBUTION_OUTBOX_MAX,
 };
@@ -52,6 +52,10 @@ pub const CUTOVER_PREPARE_WINDOW_MS: u64 = 600_000;
 /// Post-commit old-network delivery grace (RAM-only: a restart ends it
 /// and stragglers fall back to the ZT reissue).
 pub const CUTOVER_GRACE_MS: u64 = 60_000;
+/// Held gateway COMMITs flush once this much grace remains: the
+/// gateway needs ~15 s (a possible re-handshake + COMMIT + adopt +
+/// reboot + re-adopt), and one dead member must not wedge the site.
+pub const CUTOVER_GATEWAY_FLUSH_MS: u64 = 20_000;
 /// Grant snapshot cap, the same P6 profile as RRS distribution (~100
 /// boards plus headroom, gateways included). The live-member cap
 /// ([`super::group_keys::MEMBER_CAP`]) already enforces it; a snapshot
@@ -877,7 +881,7 @@ impl SiteAuthority {
             .map(|state| state.phase);
         match phase {
             Some(CutoverPhase::Preparing | CutoverPhase::WaitingGateway) => {
-                self.queue_grants(id, OutboundKind::Prepare, time.unix_ms);
+                self.queue_grants(id, OutboundKind::Prepare, time);
                 let lapsed = self.operations.get(&id).and_then(|op| {
                     op.cutover.as_ref().map(|state| {
                         time.mono_ms
@@ -900,7 +904,7 @@ impl SiteAuthority {
                     .cutover_grace()
                     .map_or(true, |(_, until)| time.mono_ms > until);
                 if !grace_over {
-                    self.queue_grants(id, OutboundKind::Commit, time.unix_ms);
+                    self.queue_grants(id, OutboundKind::Commit, time);
                 }
                 let terminal = self.operations.get(&id).and_then(|op| {
                     op.cutover.as_ref().map(|state| {
@@ -1007,7 +1011,7 @@ impl SiteAuthority {
     /// most 4 live mails, 10 objects/s, newest work first). Pre-commit
     /// only PREPAREs go out; post-commit only COMMITs — never a new
     /// PREPARE on the retired network (04 §8.5).
-    fn queue_grants(&mut self, id: u64, kind: OutboundKind, now_ms: u64) {
+    fn queue_grants(&mut self, id: u64, kind: OutboundKind, time: HostTime) {
         if self
             .rrs_transport
             .as_ref()
@@ -1019,6 +1023,22 @@ impl SiteAuthority {
             Some(state) => state.clone(),
             None => return,
         };
+        // The gateway adopts last: its retire+reboot drops the relay
+        // every member COMMIT rides, so a gateway COMMIT queues only
+        // once all other targets settled (Applied/Retired) or the
+        // grace nearly lapses (flush — a dead member must not wedge
+        // the site; the unserved go to ZT reissue per 04 §7 item 4).
+        // PREPARE needs no ordering: staging never retires.
+        let gateway_hold = kind == OutboundKind::Commit
+            && self.cutover_grace_until_mono.saturating_sub(time.mono_ms)
+                >= CUTOVER_GATEWAY_FLUSH_MS
+            && !state.targets.iter().all(|t| {
+                self.devices
+                    .get(&t.node)
+                    .is_some_and(|row| row.role & ROLE_GATEWAY != 0)
+                    || matches!(t.state, GrantState::Applied | GrantState::Retired)
+            });
+        let now_ms = time.unix_ms;
         for target in &state.targets {
             if self.rrs_outbox.len() >= DISTRIBUTION_OUTBOX_MAX {
                 break;
@@ -1032,6 +1052,14 @@ impl SiteAuthority {
                     continue;
                 }
                 _ => {}
+            }
+            if gateway_hold
+                && self
+                    .devices
+                    .get(&target.node)
+                    .is_some_and(|row| row.role & ROLE_GATEWAY != 0)
+            {
+                continue;
             }
             if matches!(target.state, GrantState::Unknown | GrantState::Prepared)
                 && target.next_retry_ms > now_ms
@@ -1095,6 +1123,45 @@ impl SiteAuthority {
                 [(target.attempts as usize - 1).min(DISTRIBUTION_BACKOFF_S.len() - 1)]
             .saturating_mul(1000);
             target.next_retry_ms = now_ms.saturating_add(wait);
+        }
+    }
+
+    /// Re-arms `device`'s due grants on a (re)opened channel: the
+    /// retry and refusal deadlines drop to now, so the next tick
+    /// queues the grant immediately instead of at a backoff deadline
+    /// the fresh channel may not live to see (a COMMIT cadence that
+    /// keeps missing every Ready window stalls past the 60 s grace
+    /// otherwise). RAM-only like all backoff timers: no persist.
+    pub(super) fn rearm_grants_for_channel(&mut self, device: u64, now_ms: u64) {
+        let ids: Vec<u64> = self.operations.keys().copied().collect();
+        for id in ids {
+            let mut rearmed = false;
+            if let Some(state) = self
+                .operations
+                .get_mut(&id)
+                .and_then(|op| op.cutover.as_mut())
+            {
+                for target in state.targets.iter_mut() {
+                    if target.node != device {
+                        continue;
+                    }
+                    if matches!(target.state, GrantState::Applied | GrantState::Retired) {
+                        continue;
+                    }
+                    if target.next_retry_ms > now_ms {
+                        target.next_retry_ms = now_ms;
+                        rearmed = true;
+                    }
+                }
+            }
+            if rearmed {
+                // A pending refusal would gate the re-queue past the
+                // window the fresh channel just opened.
+                self.rrs_refusals
+                    .remove(&(id, device, OutboundKind::Prepare));
+                self.rrs_refusals
+                    .remove(&(id, device, OutboundKind::Commit));
+            }
         }
     }
 
@@ -1471,9 +1538,10 @@ impl SiteAuthority {
     /// authority channel with the context-bound node/generation/
     /// network). PREPARED counts pre-commit only, at the latest
     /// revision, with the exact PREPARE digest; APPLIED counts
-    /// post-commit only, over the new context, with the exact COMMIT
-    /// digest. Anything else is ignored. Returns true when a target
-    /// moved.
+    /// post-commit only, over the new context — or over the old
+    /// context inside the COMMIT grace (04 §7) — with the exact
+    /// COMMIT digest. Anything else is ignored. Returns true when a
+    /// target moved.
     pub fn handle_grant_receipt(
         &mut self,
         node: u64,
@@ -1538,13 +1606,21 @@ impl SiteAuthority {
                 self.set_grant_state(id, node, GrantState::Prepared, state.revision, now_ms)
             }
             Phase::Applied => {
+                // 04 §7: the device adopts over its old channel and
+                // reports before any new-context channel exists, so an
+                // authenticated old-context APPLIED counts inside the
+                // COMMIT grace. `Committed` is exactly the grace: the
+                // phase parks in RecoveryPending when it lapses, and
+                // the channel table flips to the new network with it.
+                let grace_applied =
+                    network == state.old_network && state.phase == CutoverPhase::Committed;
                 if !matches!(
                     state.phase,
                     CutoverPhase::Committed
                         | CutoverPhase::RecoveryPending
                         | CutoverPhase::Converged
                 ) || self.id.network != state.new_network
-                    || network != state.new_network
+                    || !(network == state.new_network || grace_applied)
                     || receipt.rs_epoch != state.commit_rs_epoch
                     || receipt.gk_epoch != state.next_gk_epoch
                 {

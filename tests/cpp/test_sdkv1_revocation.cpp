@@ -2915,8 +2915,14 @@ void test_adopt_network_disposition() {
   // A clean boot that has not adopted yet: wait, never reboot again.
   CHECK(adopt_network_disposition(kNew, 0, 0, false, false) ==
         AdoptNetworkDisposition::WaitForAdoption);
+  // The switch's retire step stops the coordinator before the stores
+  // commit, so no binding is live when AdoptNetwork lands — yet the
+  // committed stores still wait for the post-reboot re-adoption (#168
+  // cutover: waiting here strands the device in Switching forever).
   CHECK(adopt_network_disposition(kNew, kOld, 3, false, false) ==
-        AdoptNetworkDisposition::WaitForAdoption);
+        AdoptNetworkDisposition::RebootToAdopt);
+  CHECK(adopt_network_disposition(kNew, kOld, 3, false, true) ==
+        AdoptNetworkDisposition::RebootToAdopt);
   // Incoherent bindings never reboot blind.
   CHECK(adopt_network_disposition(kNew, 0, 0, true, true) ==
         AdoptNetworkDisposition::WaitForAdoption);

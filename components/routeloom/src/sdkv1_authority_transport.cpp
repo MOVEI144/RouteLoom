@@ -546,6 +546,16 @@ void AuthorityGateway::drop_all() noexcept {
   for (auto& slot : slots_) drop_slot(slot);
 }
 
+bool AuthorityGateway::has_live_down_to(const NodeId device) const noexcept {
+  if (device == kInvalidNodeId || device == kBroadcastNodeId) return false;
+  for (const auto& slot : slots_) {
+    if (slot.active && slot.direction == Direction::Down && slot.device == device) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void AuthorityGateway::send_ack(const NodeId dest, const autonomy::ObjectHash& hash,
                                 const std::uint16_t received,
                                 const autonomy::ObjectAckStatus status,

@@ -955,7 +955,7 @@ class SecurityCoordinator final : public BootstrapSink,
   bool authority_wanted_{false};  // adopted: the channel (re)starts on poll
   bool join_confirmed_{false};    // latched on the verified JoinConfirm ACK
   std::uint8_t refresh_strikes_{0};
-  std::uint32_t last_unknown_generation_{0};  // discovery scope_stats sample
+  std::uint32_t last_unknown_newer_generation_{0};  // discovery scope_stats sample
   bool refresh_active_{false};
   MonotonicMs refresh_start_{0};
   MonotonicMs refresh_cooldown_until_{0};

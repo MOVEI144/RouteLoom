@@ -102,6 +102,15 @@ pub trait RevocationTransport {
     fn send_grant(&mut self, _node: u64, _network: u64, _plaintext: &[u8]) -> bool {
         false
     }
+    /// Queues a Wake hint so a dormant device re-opens its channel
+    /// for a grant (the hint needs no channel; a Ready device
+    /// ignores it). The grant distributor calls this on every grant
+    /// dispatch — a sealed send is no proof the device is awake. The
+    /// distributor's refusal backoff paces repeats; default sends
+    /// nothing (fakes deliver reports by calling handlers directly).
+    fn send_wake(&mut self, _node: u64) -> bool {
+        false
+    }
     /// True when `send_notice` can deliver. The distributor only queues
     /// supported kinds, so an RRS-only port never wedges behind
     /// notices it cannot carry (the outbox dispatches head-first).
@@ -809,6 +818,13 @@ impl SiteAuthority {
                     }
                     OutboundKind::Notice => transport.send_notice(head.node, network, &bytes),
                     OutboundKind::Prepare | OutboundKind::Commit => {
+                        // A dormant target holds no channel to seal
+                        // into — and a sealed send is no proof it is
+                        // awake (its own idle retire runs
+                        // independently). Wake it first: a Ready
+                        // device ignores the hint, and the refusal
+                        // backoff below paces repeats.
+                        transport.send_wake(head.node);
                         transport.send_grant(head.node, network, &bytes)
                     }
                 },
