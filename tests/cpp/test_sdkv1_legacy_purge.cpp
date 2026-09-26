@@ -233,13 +233,16 @@ int main() {
   CHECK(verb.process_line(line(kPurge), false, response, sizeof(response), size).ok());
   CHECK(std::strcmp(response, "ERR busy") == 0);  // live radio refuses first
   CHECK(!verb_port.marker && verb_port.erased == 0);
+  // An old PSK binary does not inspect the new marker. Its durable replay
+  // floor must survive a rollback to the old image under the same PSK.
   CHECK(verb.process_line(line(kPurge), true, response, sizeof(response), size).ok());
-  CHECK(std::strcmp(response, "OK erased=5 remaining=0") == 0);
-  CHECK(verb_port.marker && verb_port.erased == 5);
+  CHECK(std::strcmp(response, "ERR rollback_unsafe") == 0);
+  CHECK(verb_port.entries[1].live && verb_port.entries[2].live);
+  CHECK(!verb_port.marker && verb_port.erased == 0);
   CHECK(verb.process_line(line(kPurge), true, response, sizeof(response), size).ok());
-  CHECK(std::strcmp(response, "OK erased=0 remaining=0") == 0);  // idempotent
+  CHECK(std::strcmp(response, "ERR rollback_unsafe") == 0);
   CHECK(verb.process_line(line("status"), true, response, sizeof(response), size).ok());
-  CHECK(std::strcmp(response, "OK legacy=0 marker=1") == 0);
+  CHECK(std::strcmp(response, "OK legacy=5 marker=0") == 0);
   char small[8];
   CHECK(verb.process_line(line("status"), true, small, sizeof(small), size).code ==
         StatusCode::InvalidArgument);

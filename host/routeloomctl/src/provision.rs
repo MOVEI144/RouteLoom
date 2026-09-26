@@ -142,11 +142,7 @@ pub fn provision_image_command(args: &[String]) -> Result<(), DynError> {
             None => None,
         };
         let set = manufacture_nvs_set(&image, credential.as_ref(), 0)?;
-        std::fs::create_dir_all(&dir)?;
-        for entry in &set.entries {
-            std::fs::write(dir.join(entry.file_name()), entry.bytes())?;
-        }
-        std::fs::write(dir.join("nvs-set.json"), set.descriptor_json())?;
+        write_private_nvs_set(&dir, &set)?;
     }
     println!(
         "{{\"image\":\"{}\",\"image_bytes\":{},\"fingerprint\":\"{}\"}}",
@@ -155,6 +151,38 @@ pub fn provision_image_command(args: &[String]) -> Result<(), DynError> {
         hex_encode(&routeloom_provision::image::image_fingerprint(&record)?)
     );
     Ok(())
+}
+
+#[cfg(unix)]
+fn write_private_nvs_set(
+    dir: &Path,
+    set: &routeloom_provision::nvs::ManufacturedNvs,
+) -> Result<(), DynError> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+    if !dir.exists() {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700).create(dir)?;
+    }
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.is_dir() || meta.permissions().mode() & 0o777 != 0o700 {
+        return Err("nvs-dir must be an owner-only directory (0700)".into());
+    }
+    // The descriptor also contains credential data_hex. Never truncate an
+    // existing path (including symlinks), and set permissions at creation.
+    let write = |name: &str, bytes: &[u8]| -> Result<(), DynError> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(dir.join(name))?;
+        file.write_all(bytes)?;
+        Ok(())
+    };
+    for entry in &set.entries {
+        write(&entry.file_name(), &entry.bytes())?;
+    }
+    write("nvs-set.json", set.descriptor_json().as_bytes())
 }
 
 /// `provision-manifest --image <spec-or-rlt1> --key <root.key> --out
@@ -544,6 +572,60 @@ mod tests {
         assert!(bad.contains("bogus"));
         let doc = routeloom_json::parse(&bad).unwrap();
         assert!(trust_image_from_spec(&doc).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nvs_output_is_private_and_refuses_existing_paths() {
+        use std::os::unix::fs::PermissionsExt;
+        let image = trust_image_from_spec(
+            &routeloom_json::parse(&image_spec(&pubkey_hex(0x11), &pubkey_hex(0x33))).unwrap(),
+        )
+        .unwrap();
+        let (secret, pubkey) = test_keypair(0x55);
+        let credential = credential_from_spec(&routeloom_json::parse(&format!(
+            r#"{{"format":"routeloom-credential-spec-v1","network":"0000000000000007","node_id":"00000000000000c3","generation_base_session":0,"key_location":"nvs-plaintext","cred_status":"active","secret_hex":"{}","pubkey_hex":"{}"}}"#,
+            hex_encode(&secret), hex_encode(&pubkey),
+        )).unwrap()).unwrap();
+        let set = manufacture_nvs_set(&image, Some(&credential), 0).unwrap();
+        assert!(set.descriptor_json().contains(&hex_encode(&secret)));
+        let dir = std::env::temp_dir().join(format!(
+            "routeloom-private-nvs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        write_private_nvs_set(&dir, &set).unwrap();
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        for entry in &set.entries {
+            assert_eq!(
+                std::fs::metadata(dir.join(entry.file_name()))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(
+            std::fs::metadata(dir.join("nvs-set.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(write_private_nvs_set(&dir, &set).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(write_private_nvs_set(&dir, &set).is_err());
+        std::fs::remove_dir(&dir).unwrap();
     }
 
     #[test]

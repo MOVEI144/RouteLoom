@@ -87,8 +87,16 @@ Status decode_image(const ByteView record, PowerImage& image) noexcept {
   } while (false)
   RL_READ(reader.read_u32(magic));
   RL_READ(reader.read_u16(schema));
-  if (magic != kImageMagic || schema != kPowerImageSchemaVersion) {
-    return Status::error(StatusCode::IntegrityError, "sleep image magic/schema");
+  if (magic != kImageMagic) {
+    return Status::error(StatusCode::IntegrityError, "sleep image magic");
+  }
+  if (schema != kPowerImageSchemaVersion) {
+    const std::uint8_t* tail = record.data + kImageCrcOffset;
+    const std::uint32_t stored = (std::uint32_t{tail[0]} << 24) |
+                                 (std::uint32_t{tail[1]} << 16) |
+                                 (std::uint32_t{tail[2]} << 8) | tail[3];
+    return Status::error(stored == expected ? StatusCode::Unsupported : StatusCode::IntegrityError,
+                         "SLEEP_IMAGE_SCHEMA_UNSUPPORTED");
   }
   RL_READ(reader.read_u32(image.sequence));
   RL_READ(reader.read_u64(image.network));
@@ -877,6 +885,7 @@ Status PowerCoordinator::load_image(PowerImage& image, bool& found) noexcept {
   std::array<std::uint8_t, kPowerImageRecordSize> record{};
   bool any = false;
   bool any_pending = false;
+  bool unknown_schema = false;
   std::uint32_t best_sequence = 0;
   for (std::uint8_t slot = 0; slot < kPowerImageSlots; ++slot) {
     const auto status =
@@ -886,7 +895,12 @@ Status PowerCoordinator::load_image(PowerImage& image, bool& found) noexcept {
       continue;
     }
     PowerImage candidate{};
-    if (!decode_image(ByteView{record.data(), record.size()}, candidate)) {
+    const Status decoded = decode_image(ByteView{record.data(), record.size()}, candidate);
+    if (!decoded) {
+      if (decoded.code == StatusCode::Unsupported) {
+        unknown_schema = true;
+        notify_diagnostic(decoded.detail);
+      }
       continue;  // torn/corrupt slot: discard, never erase
     }
     any_pending = any_pending || has_pending(candidate);
@@ -895,6 +909,13 @@ Status PowerCoordinator::load_image(PowerImage& image, bool& found) noexcept {
       best_sequence = candidate.sequence;
       any = true;
     }
+  }
+  if (unknown_schema) {
+    // An older sibling cannot prove that a newer schema has no pending work.
+    // Refuse subsequent writes until an explicit migration/discard occurs.
+    image_sequence_ = UINT32_MAX;
+    disk_pending_possible_ = true;
+    return Status::error(StatusCode::Unsupported, "SLEEP_IMAGE_SCHEMA_UNSUPPORTED");
   }
   if (any) {
     found = true;

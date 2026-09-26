@@ -35,7 +35,7 @@ pub struct DaemonClient {
     socket: PathBuf,
     pipe: Option<Pipe>,
     attempts: u32,
-    next_retry_ms: u64,
+    next_retry_mono_ms: u64,
 }
 
 impl DaemonClient {
@@ -44,7 +44,7 @@ impl DaemonClient {
             socket: socket.into(),
             pipe: None,
             attempts: 0,
-            next_retry_ms: 0,
+            next_retry_mono_ms: 0,
         }
     }
 
@@ -62,9 +62,9 @@ impl DaemonClient {
     /// Drive one refresh cycle. Connects when due, then issues every
     /// POLL_COMMAND and applies the JSON line to `state`. Never blocks beyond
     /// IO_TIMEOUT per command; any failure returns to disconnected state.
-    pub fn tick(&mut self, state: &mut State, now_ms: u64) {
+    pub fn tick(&mut self, state: &mut State, now_ms: u64, mono_ms: u64) {
         if self.pipe.is_none() {
-            if now_ms < self.next_retry_ms {
+            if mono_ms < self.next_retry_mono_ms {
                 return; // still backing off
             }
             match self.connect() {
@@ -75,11 +75,12 @@ impl DaemonClient {
                 }
                 Err(error) => {
                     self.attempts = self.attempts.saturating_add(1);
-                    self.next_retry_ms = now_ms + Self::backoff_ms(self.attempts);
+                    let backoff = Self::backoff_ms(self.attempts);
+                    self.next_retry_mono_ms = mono_ms.saturating_add(backoff);
                     state.conn = Conn::Disconnected {
                         since_ms: now_ms,
                         attempts: self.attempts,
-                        next_retry_ms: self.next_retry_ms,
+                        next_retry_ms: now_ms.saturating_add(backoff),
                         error: Some(error.to_string()),
                     };
                     return;
@@ -124,11 +125,12 @@ impl DaemonClient {
                 // A mid-poll drop is still a failed attempt: keep backing off
                 // instead of resetting to the minimum delay every cycle.
                 self.attempts = self.attempts.saturating_add(1);
-                self.next_retry_ms = now_ms + Self::backoff_ms(self.attempts);
+                let backoff = Self::backoff_ms(self.attempts);
+                self.next_retry_mono_ms = mono_ms.saturating_add(backoff);
                 state.conn = Conn::Disconnected {
                     since_ms: now_ms,
                     attempts: self.attempts,
-                    next_retry_ms: self.next_retry_ms,
+                    next_retry_ms: now_ms.saturating_add(backoff),
                     error: Some(error),
                 };
             }

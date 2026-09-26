@@ -882,6 +882,32 @@ void test_group_gcm_replay() {
                          MutableByteView{opened.data(), opened.size()}));
   keys::clear(traffic);
   secure_clear(prk);
+
+  // Churn across a completed GK overlap must release the old 128 senders.
+  in = {};
+  in.op = sdkv1::GroupKeyState::Op::Stage;
+  in.generation = site.assignment_generation;
+  in.epoch = keys.current() + 1;
+  in.key.fill(0xBC);
+  CHECK_OK(keys.advance(in, 200));
+  in.op = sdkv1::GroupKeyState::Op::Activate;
+  in.boot = keys.boot();
+  CHECK_OK(keys.advance(in, 201));
+  in = {};
+  in.op = sdkv1::GroupKeyState::Op::Tick;
+  CHECK_OK(keys.advance(in, 10202));
+  link.sender = 0x1000;
+  link.group_epoch = keys.current();
+  keys::group_prk(site.network, store.site().gk_current, prk);
+  CHECK_OK(keys::group_bcast_key(prk, link.group_epoch, link.sender, link.epoch, traffic));
+  CHECK_OK(keys::aead_nonce(traffic.iv, 0, nonce));
+  CHECK(aead->seal(aead->ctx, traffic.key.data(), nonce.data(), ByteView{aad, 1},
+                   ByteView{plain.data(), plain.size()}, sealed.data()));
+  std::memcpy(tag.data(), sealed.data() + 3, tag.size());
+  CHECK_OK(receiver.open(link, 0, ByteView{aad, 1}, ByteView{sealed.data(), 3}, tag,
+                         MutableByteView{opened.data(), opened.size()}));
+  keys::clear(traffic);
+  secure_clear(prk);
 }
 
 void test_group_end_sender_capacity() {

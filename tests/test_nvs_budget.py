@@ -37,6 +37,14 @@ class RepositoryBudget(unittest.TestCase):
         for app in apps.values():
             self.assertLessEqual(app["worst_case_entries"], app["budget_entries"])
 
+    def test_resume_write_budget_mentions_reservations(self):
+        design = (ROOT / 'docs/design/sdk-v1/05-nvs-state-37.md').read_text()
+        store = (ROOT / 'components/routeloom/src/sdkv1_store.cpp').read_text()
+        self.assertIn('年295,663 write', design)
+        self.assertIn('年72,777 RLP2 write', design)
+        self.assertIn('slot.reserved_uses += quantum', store)
+        self.assertIn('budget_next_ = (budget_next_ + 1) % kUseBudgetEntries', store)
+
     def test_blob_entry_formula(self):
         self.assertEqual(nvs_budget.blob_entries(32, 32), 3)
         self.assertEqual(nvs_budget.blob_entries(24, 32), 3)

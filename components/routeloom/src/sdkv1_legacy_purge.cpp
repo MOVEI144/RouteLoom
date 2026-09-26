@@ -265,16 +265,9 @@ Status LegacyStateConsole::process_line(const ByteView line, const bool stopped,
       if (diff != 0) {
         out.put("ERR domain");
       } else {
-        LegacyPurgeResult result{};
-        const Status status = purge_legacy_state(port_, stopped, ram_only_, result);
-        if (!status.ok()) {
-          out.put("ERR store");
-        } else {
-          out.put("OK erased=");
-          out.put_u32(result.erased);
-          out.put(" remaining=");
-          out.put_u32(result.remaining);
-        }
+        // The marker cannot stop a pre-migration PSK binary. Keep its
+        // replay floors and counter leases until rollback can be fenced.
+        out.put("ERR rollback_unsafe");
       }
     }
   }

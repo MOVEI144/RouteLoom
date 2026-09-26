@@ -160,10 +160,12 @@ def build_write_flash_cmd(
         flash_files = dict(FALLBACK_FLASH_FILES)
         app_bin = _find_app_bin(build_dir)
         flash_files["0x10000"] = app_bin
-    elif app_only:
+    if app_only:
         app_entry = args.get("app") or {}
-        offset = app_entry.get("offset", "0x10000")
-        file = app_entry.get("file") or _find_app_bin(build_dir)
+        offset = app_entry.get("offset")
+        file = app_entry.get("file")
+        if not offset or not file:
+            raise FlashError("app-only requires an explicit app offset and file")
         flash_files = {offset: file}
 
     cmd = [esptool]

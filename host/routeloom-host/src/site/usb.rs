@@ -1224,6 +1224,7 @@ pub fn site_once(
     let Some(service) = state.site.as_deref() else {
         return;
     };
+    let mono = mono_ms();
     let link = site_link(state);
     let want = (link.active && link.capable).then_some((link.session, link.gateway));
     // The bound adapter must serve exactly this session: incarnation and
@@ -1292,7 +1293,7 @@ pub fn site_once(
         }
     }
     for (ms, fields) in service.tick(super::group_keys::HostTime {
-        mono_ms: mono_ms(),
+        mono_ms: mono,
         unix_ms: now,
     }) {
         push_event(state, ms, fields);
@@ -1318,9 +1319,15 @@ pub fn site_once(
     for (request, body) in state.site_inbox.drain() {
         if let Some(adapter) = relay.as_ref() {
             match join_relay_sub(&body) {
-                Some(SUB_JOIN_RELAY_UP) => match adapter.handle_up(&body, now) {
+                Some(SUB_JOIN_RELAY_UP) => match adapter.handle_up(&body, mono) {
                     Ok(UpOutcome::Relay(up)) => {
-                        for (ms, fields) in service.handle_up(up, now) {
+                        for (ms, fields) in service.handle_up_time(
+                            up,
+                            super::group_keys::HostTime {
+                                unix_ms: now,
+                                mono_ms: mono,
+                            },
+                        ) {
                             push_event(state, ms, fields);
                         }
                     }
@@ -1383,7 +1390,7 @@ pub fn site_once(
         }
     }
     if let Some(adapter) = relay.as_ref() {
-        let pending = adapter.take_ready(now);
+        let pending = adapter.take_ready(mono);
         let mut unsent = Vec::new();
         let mut blocked = false;
         for item in pending {
@@ -1427,7 +1434,7 @@ pub fn site_once(
         adapter.requeue_front(unsent);
     }
     if let Some(adapter) = authority.as_ref() {
-        let pending = adapter.take_ready(now);
+        let pending = adapter.take_ready(mono);
         let mut unsent = Vec::new();
         let mut blocked = false;
         for item in pending {
