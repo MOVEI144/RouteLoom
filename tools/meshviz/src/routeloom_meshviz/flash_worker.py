@@ -1,4 +1,5 @@
 """Isolated esptool 5.4.0 adapter. No arbitrary command or eFuse write API."""
+from dataclasses import asdict
 import json
 import sys
 from pathlib import Path
@@ -22,30 +23,11 @@ def flash(port: str, plan: FlashPlan, api=None):
             for e in manifest['files']) != tuple(
             (i.offset, i.path, i.size, i.sha256) for i in plan.images):
         raise ValueError('flash plan differs from signed bundle')
-    if api is None:
-        import esptool as api
-    if api.__version__ != '5.4.0':
-        raise ValueError('unreviewed esptool version')
+    api = _api(api)
     esp = api.detect_chip(port=port, connect_attempts=1)
     try:
-        chip = esp.CHIP_NAME.lower().replace('-', '')
-        base = ':'.join(f'{byte:02x}' for byte in esp.read_mac('BASE_MAC'))
-        # The ROM base MAC is not a field STA MAC attestation.
-        sta = None
-        api.attach_flash(esp)
-        flash_id = esp.flash_id()
-        # JEDEC size exponent; unknown/non-standard flash must not be written.
-        size_exponent = flash_id >> 16
-        flash_bytes = 1 << size_exponent if 20 <= size_exponent <= 26 else 0
-        security = esp.get_security_info(cache=False)
-        flags = security['parsed_flags']
-        secure_boot = flags.get('SECURE_BOOT_EN')
-        crypt_cnt = security.get('flash_crypt_cnt')
-        # Missing or malformed read-only protection data must not become "disabled".
-        encryption = (bool(crypt_cnt.bit_count() % 2)
-                      if type(crypt_cnt) is int and crypt_cnt >= 0 else None)
-        measured = Identity(chip, str(esp.get_chip_revision()), base, sta,
-                            f'{flash_id:06x}', flash_bytes, secure_boot, encryption)
+        measured = _measure(esp, api)
+        flash_bytes = measured.flash_bytes
         # A matching chip alone cannot authorize a revision or flash size the
         # signed image did not declare compatible.
         revision = measured.revision
@@ -60,9 +42,51 @@ def flash(port: str, plan: FlashPlan, api=None):
         esp._port.close()
 
 
+def _api(api):
+    if api is None:
+        import esptool as api
+    if api.__version__ != '5.4.0':
+        raise ValueError('unreviewed esptool version')
+    return api
+
+
+def _measure(esp, api):
+    chip = esp.CHIP_NAME.lower().replace('-', '')
+    base = ':'.join(f'{byte:02x}' for byte in esp.read_mac('BASE_MAC'))
+    # The ROM base MAC is not a field STA MAC attestation.
+    sta = None
+    api.attach_flash(esp)
+    flash_id = esp.flash_id()
+    # JEDEC size exponent; unknown/non-standard flash must not be written.
+    size_exponent = flash_id >> 16
+    flash_bytes = 1 << size_exponent if 20 <= size_exponent <= 26 else 0
+    security = esp.get_security_info(cache=False)
+    flags = security['parsed_flags']
+    secure_boot = flags.get('SECURE_BOOT_EN')
+    crypt_cnt = security.get('flash_crypt_cnt')
+    # Missing or malformed read-only protection data must not become "disabled".
+    encryption = (bool(crypt_cnt.bit_count() % 2)
+                  if type(crypt_cnt) is int and crypt_cnt >= 0 else None)
+    return Identity(chip, str(esp.get_chip_revision()), base, sta,
+                    f'{flash_id:06x}', flash_bytes, secure_boot, encryption)
+
+
+def probe(port: str, api=None) -> Identity:
+    """Read-only ROM identification (resets the board); never writes flash."""
+    api = _api(api)
+    esp = api.detect_chip(port=port, connect_attempts=1)
+    try:
+        return _measure(esp, api)
+    finally:
+        esp._port.close()
+
+
 def main():
     try:
         request = json.load(sys.stdin)
+        if request.get('op') == 'probe':
+            print(json.dumps({'ok': True, 'identity': asdict(probe(request['port']))}))
+            return 0
         # The trust anchor is packaged with the worker, never supplied by JSON.
         root = Path(request['bundle'])
         manifest = verify_bundle(root, PUBLIC_KEY)
