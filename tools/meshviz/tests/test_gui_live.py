@@ -88,6 +88,21 @@ class LiveMonitorGuiTests(unittest.TestCase):
         client.stop()
         self.assertFalse(client.reconnect_timer.isActive())
 
+    def test_supervised_api_client_rejects_wrong_site_before_commands(self):
+        from routeloom_meshviz.ui.workers import ApiClient
+        path = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'api1.sock'
+        self.enterContext(serve_fake_api1(path, mesh=DemoSiteMesh(4)))
+        client = ApiClient(path, expected_site_id='ffffffffffffffff')
+        self.addCleanup(client.stop)
+        replies = []
+        client.reply.connect(lambda tag, reply: replies.append((tag, reply)))
+        client.start()
+        self.assertTrue(spin(self.app, lambda: 'site_id' in (client.info['error'] or '')))
+        client.request('command', 'lab.rollcall.start', {'desired_interval_ms': 2000})
+        self.assertTrue(spin(self.app, lambda: bool(replies)))
+        self.assertIsNone(replies[-1][1])
+        self.assertFalse(client.info['connected'])
+
     def test_stale_replies_and_selection_are_dropped_on_reconnect(self):
         window = self.window(fake_nodes=4)
         live = window.live
@@ -204,6 +219,8 @@ class LiveMonitorGuiTests(unittest.TestCase):
         self.assertIn('attach', site.supervisor_label.text())
         site.stop_button.click()
         self.assertTrue(spin(self.app, lambda: 'stopped' in site.supervisor_label.text()))
+        self.assertTrue(spin(self.app, lambda: window.live_target != str(path)))
+        self.assertTrue(spin(self.app, lambda: window.api is not None and window.api.path != str(path)))
 
     def test_supervisor_refuses_a_daemon_of_another_site(self):
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -217,6 +234,15 @@ class LiveMonitorGuiTests(unittest.TestCase):
         site.attach_button.click()
         self.assertTrue(spin(self.app, lambda: 'mismatch' in site.supervisor_label.text(), 10))
         self.assertNotEqual(window.live_target, str(path))
+
+    def test_supervisor_ready_does_not_interrupt_replay(self):
+        window = self.window(fake_nodes=4)
+        path = str(Path(self.enterContext(tempfile.TemporaryDirectory())) / 'daemon.sock')
+        window.use_replay(path)
+        self.assertTrue(spin(self.app, lambda: window.mode == 'REPLAY'))
+        window.site.supervisor_status = {'site_id': SITE_ID}
+        window._on_site_ready(path)
+        self.assertFalse(spin(self.app, lambda: window.mode == 'LIVE', 2))
 
 
 if __name__ == '__main__':

@@ -34,6 +34,7 @@ class SiteView(QWidget):
     provision = Signal(int, object)
     provision_stop = Signal()
     site_ready = Signal(str)
+    site_lost = Signal(str)
     stop_requested = Signal()
     shutdown_finished = Signal()
 
@@ -229,7 +230,7 @@ class SiteView(QWidget):
                 elif cell.text() != text:
                     cell.setText(text)
         if self.jobs:
-            ProvisionRunner(None, self.jobs).observe_join(live.timeline.states())
+            ProvisionRunner(None, self.jobs).observe_join(live.timeline.rows)
             self._render_boards()
 
     # --- site ------------------------------------------------------------------
@@ -288,6 +289,7 @@ class SiteView(QWidget):
             self.acl_file.setText(result.get('acl_file', ''))
 
     def _on_supervisor(self, status):
+        previous = self.supervisor_status
         self.supervisor_status = status
         state = status.get('state')
         usb = status.get('usb') or {}
@@ -304,6 +306,8 @@ class SiteView(QWidget):
         if state == 'ready' and status.get('session') != self.ready_session:
             self.ready_session = status.get('session')
             self.site_ready.emit(status['socket'])
+        if state != 'ready' and previous.get('state') == 'ready':
+            self.site_lost.emit(previous['socket'])
         if state != 'ready':
             self.confirm.setChecked(False)
         self._refresh_buttons()

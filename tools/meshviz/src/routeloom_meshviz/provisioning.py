@@ -217,10 +217,13 @@ class ProvisionRunner:
                 break
         return job
 
-    def observe_join(self, states):
-        """states: {node: join state}; Member evidence closes the join step."""
+    def observe_join(self, rows):
+        """A confirmed Member with the read-back identity closes the join step."""
         for job in self.jobs:
-            if job.steps.get('join') == 'waiting' and states.get(job.node_id) in ('Member', '到達可能'):
+            row = rows.get(job.node_id)
+            if (job.steps.get('join') == 'waiting' and job.ready and row is not None
+                    and job.readback.get('kid') and row.kid == job.readback['kid']
+                    and row.state() in ('Member', '到達可能')):
                 job.steps['join'] = 'done'
                 job.details['join'] = '台帳 member かつ JoinConfirm 観測'
 

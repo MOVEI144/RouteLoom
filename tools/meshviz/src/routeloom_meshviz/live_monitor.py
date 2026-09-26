@@ -162,7 +162,11 @@ class JoinTimeline:
         for item in requests if isinstance(requests, list) else ():
             if not isinstance(item, dict):
                 continue
-            row = self._row(item.get('device_id'), _str(item.get('kid')))
+            node, kid = item.get('device_id'), _str(item.get('kid'))
+            active = self.rows.get(node)
+            if active is not None and active.ledger_state is not None and active.kid != kid:
+                continue
+            row = self._row(node, kid)
             if row is None:
                 continue
             row.requested = True
@@ -464,8 +468,10 @@ class SitePoller:
         if kind == 'members':
             members = result.get('members')
             after = result.get('next_after')
-            if self.member_pages is None or not isinstance(members, list):
+            if (self.member_pages is None or not isinstance(members, list) or len(members) > 128
+                    or len(self.member_pages) + len(members) > 128 * MAX_MEMBER_PAGES):
                 self.errors[kind] = 'invalid'
+                self.member_pages = None
                 return None
             self.member_pages.extend(members)
             if after is not None:

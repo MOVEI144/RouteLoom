@@ -64,9 +64,11 @@ class ApiClient(QObject):
     # events cannot provide.
     routes_observed = Signal(dict)
 
-    def __init__(self, path):
+    def __init__(self, path, *, expected_site_id=None):
         super().__init__()
         self.path = str(path)
+        self.expected_site_id = expected_site_id
+        self.bound = expected_site_id is None
         self.socket = None
         self.connection = 0
         self.counter = 0
@@ -106,10 +108,17 @@ class ApiClient(QObject):
 
     def _on_connected(self):
         self.connection += 1
+        self.bound = self.expected_site_id is None
         self.normalizer = NodesNormalizer(self.connection)
         self.pages = None
         self.page_source = None
-        self._publish(connected=True, error=None, methods={}, connection=self.connection)
+        self._publish(connected=self.bound, error=None, methods={}, connection=self.connection)
+        if self.bound:
+            self._begin_reads()
+        else:
+            self._send(('site_binding',), 'site.status', {})
+
+    def _begin_reads(self):
         self._send(('capabilities',), 'capabilities.get', {})
         self._poll()
         self.poll_timer.start(POLL_MS)
@@ -138,7 +147,8 @@ class ApiClient(QObject):
         self.page_source = None
 
     def _send(self, kind, method, params):
-        if self.socket is None or self.socket.state() != QLocalSocket.LocalSocketState.ConnectedState:
+        if (self.socket is None or self.socket.state() != QLocalSocket.LocalSocketState.ConnectedState
+                or (not self.bound and kind[0] != 'site_binding')):
             if kind[0] == 'user':
                 self.reply.emit(kind[1], None)
             return
@@ -186,7 +196,17 @@ class ApiClient(QObject):
             if entry is None:
                 continue
             kind = entry[0]
-            if kind[0] == 'user':
+            if kind[0] == 'site_binding':
+                result = response.get('result') if response.get('ok') else None
+                actual = result.get('site_id') if isinstance(result, dict) else None
+                if actual != self.expected_site_id:
+                    self._publish(connected=False, error='site_id が一致しない', methods={})
+                    self.socket.abort()
+                    return
+                self.bound = True
+                self._publish(connected=True, error=None, methods={})
+                self._begin_reads()
+            elif kind[0] == 'user':
                 self.reply.emit(kind[1], response)
             elif kind[0] == 'capabilities' and response.get('ok'):
                 methods = response['result'].get('methods', {})

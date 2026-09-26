@@ -64,23 +64,49 @@ def probe_api1(path, *, timeout=PROBE_TIMEOUT_S):
     return replies.get('sv-caps'), replies.get('sv-site')
 
 
+def probe_usb_gateway(path, *, timeout=PROBE_TIMEOUT_S):
+    """Read the gateway identity reported by the active USB node session."""
+    if not hasattr(socket, 'AF_UNIX'):
+        raise OSError('この OS の daemon IPC は未対応（D13a/b）')
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        conn.settimeout(timeout)
+        conn.connect(str(path))
+        conn.sendall(encode_request('sv-nodes', 'nodes.list', {'limit': 1}))
+        decoder = LineDecoder()
+        while True:
+            chunk = conn.recv(65536)
+            if not chunk:
+                raise OSError('daemon closed the USB identity probe')
+            for reply in decoder.feed(chunk):
+                if reply.get('request_id') != 'sv-nodes':
+                    continue
+                result = reply.get('result') if reply.get('ok') else None
+                source = result.get('source') if isinstance(result, dict) else None
+                gateway = source.get('gateway') if isinstance(source, dict) else None
+                if not isinstance(gateway, str) or len(gateway) != 16:
+                    raise ValueError('nodes.list に USB gateway identity が無い')
+                return gateway
+
+
 def verify_daemon(caps, site, bound_site_id):
     """→ (site_id, problem). A problem means the daemon must not be used for this site."""
-    if not caps or not caps.get('ok'):
+    if not isinstance(caps, dict) or not caps.get('ok') or not isinstance(caps.get('result'), dict):
         return None, 'capabilities.get が失敗'
     result = caps['result']
     version = result.get('caps_version')
     api = result.get('api') if isinstance(result.get('api'), dict) else {}
-    if type(version) is not int or version < 1 or api.get('version') != 1:
+    if type(version) is not int or version < 1 or type(api.get('version')) is not int or api['version'] != 1:
         return None, 'capabilities の版が不明（caps_version／api.version）'
     methods = result.get('methods') if isinstance(result.get('methods'), dict) else {}
     if methods.get('site.status') is not True:
         return None, 'daemon が site.status を広告していない（Site Authority なし）'
-    if not site or not site.get('ok'):
-        code = (site or {}).get('error', {}).get('code')
+    if not isinstance(site, dict) or not site.get('ok') or not isinstance(site.get('result'), dict):
+        error = site.get('error') if isinstance(site, dict) else None
+        code = error.get('code') if isinstance(error, dict) else None
         return None, f'site.status が失敗（{code or "応答なし"}）'
     site_id = site['result'].get('site_id')
-    if not isinstance(site_id, str) or len(site_id) != 16:
+    if (not isinstance(site_id, str) or len(site_id) != 16 or
+            any(c not in '0123456789abcdef' for c in site_id)):
         return None, 'site.status の site_id が不正'
     if bound_site_id is not None and site_id != bound_site_id:
         return site_id, f'別 site の daemon（{site_id} ≠ {bound_site_id}）'
@@ -115,8 +141,10 @@ class SiteLock:
 
 class SiteSupervisor:
     """State: idle → starting|attaching → ready ⇄ reconnecting → stopped | mismatch | failed."""
-    def __init__(self, *, probe=probe_api1, launcher=subprocess.Popen, leases=None):
+    def __init__(self, *, probe=probe_api1, usb_probe=probe_usb_gateway,
+                 launcher=subprocess.Popen, leases=None):
         self.probe = probe
+        self.usb_probe = usb_probe
         self.launcher = launcher
         self.leases = leases
         self.config = None
@@ -143,6 +171,13 @@ class SiteSupervisor:
     def attach(self, config, now_ms):
         """Use an existing daemon; it is never stopped or replaced by this supervisor."""
         self._begin(config, owned=False)
+        try:
+            self.lock = SiteLock(config.site_dir)
+            self.lock.acquire()
+        except (RuntimeError, OSError) as exc:
+            self._release()
+            self._fail(f'attach 前の占有に失敗: {exc}')
+            return
         self.state = 'attaching'
         self.deadline_ms = now_ms + START_DEADLINE_MS
         self.next_probe_ms = now_ms
@@ -174,14 +209,7 @@ class SiteSupervisor:
         """Stop an owned daemon (terminate, then kill); an attached one is only detached."""
         if self.process is not None:
             self.state = 'stopping'
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=STOP_WAIT_S)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=STOP_WAIT_S)
-            self._note(f'所有 daemon を停止（exit {self.process.returncode}）')
-            self.process = None
+            self._stop_process()
         elif self.state not in ('idle', 'stopped'):
             self._note('attach を解除（daemon は停止しない）')
         self._release()
@@ -215,18 +243,22 @@ class SiteSupervisor:
         if problem is not None:
             if site_id is not None and self.site_id is not None and site_id != self.site_id:
                 # Another site's daemon on our socket path: refuse, never re-bind.
-                self._note(problem)
-                self.state = 'mismatch'
-                self.reason = problem
-                if self.process is not None:
-                    self.stop()
-                    self.state = 'mismatch'
-                else:
-                    self._release()
-                self.methods = {}
+                self._mismatch(problem)
                 return
             self._probe_failed(problem, now_ms)
             return
+        status = site['result']
+        usb = status.get('usb') if isinstance(status.get('usb'), dict) else {}
+        if usb.get('attached') is True:
+            try:
+                gateway = self.usb_probe(self.config.socket)
+            except (OSError, ValueError) as exc:
+                self._probe_failed(f'USB identity: {exc}', now_ms)
+                return
+            gateways = status.get('gateways')
+            if not isinstance(gateways, list) or gateway not in gateways:
+                self._mismatch(f'USB gateway {gateway} は site {site_id} の gateway ではない')
+                return
         if self.site_id is None:
             self.site_id = site_id
         self.failures = 0
@@ -241,6 +273,17 @@ class SiteSupervisor:
             self.state = 'ready'
             self.reason = None
             self._note(f'daemon 接続（session {self.session}、site {site_id}）')
+
+    def _mismatch(self, problem):
+        self._note(problem)
+        self.reason = problem
+        if self.process is not None:
+            self.stop()
+        else:
+            self._release()
+        self.state = 'mismatch'
+        self.methods = {}
+        self.site_status = None
 
     # --- internals -------------------------------------------------------------
 
@@ -295,7 +338,20 @@ class SiteSupervisor:
             return
         self.failures += 1
         if self.state == 'ready' and self.failures >= HEALTH_FAILURES:
-            self._lost(f'応答なし: {reason}', now_ms, restart=False)
+            if self.owned and self.process is not None:
+                self._stop_process()
+            self._lost(f'応答なし: {reason}', now_ms, restart=self.owned)
+
+    def _stop_process(self):
+        process = self.process
+        process.terminate()
+        try:
+            process.wait(timeout=STOP_WAIT_S)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=STOP_WAIT_S)
+        self._note(f'所有 daemon を停止（exit {process.returncode}）')
+        self.process = None
 
     def _lost(self, reason, now_ms, *, restart):
         self._note(reason)

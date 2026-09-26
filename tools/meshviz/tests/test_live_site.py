@@ -87,6 +87,14 @@ class JoinTimelineTests(unittest.TestCase):
         self.assertEqual(row.fields['request_verified_at'].at_unix_ms, 9000)
         self.assertEqual(row.identity_changes, 1)
 
+    def test_old_request_cannot_replace_current_member_identity(self):
+        timeline = JoinTimeline()
+        current = 'bb' * 32
+        timeline.on_members([member(A, 2000, 3000, kid=current)])
+        timeline.on_requests([request(A, 1000, kid=KID_A)])
+        self.assertEqual(timeline.rows[A].kid, current)
+        self.assertEqual(timeline.rows[A].state(), 'Member')
+
     def test_gateway_sighting_is_never_membership(self):
         timeline = JoinTimeline()
         timeline.on_routes({'mono_ns': S, 'unix_ms': 1000, 'gateway': GW,
@@ -240,6 +248,15 @@ class SitePollerTests(unittest.TestCase):
         kind, result = poller.on_reply(tag2, ok({'members': [member(B, 2)], 'next_after': None}), 3)
         self.assertEqual([m['device_id'] for m in result['members']], [A, B])
 
+    def test_oversized_final_member_page_is_rejected(self):
+        poller = SitePoller()
+        poller.reset({'members.list': True})
+        tag = poller.due(0)[0][0]
+        self.assertIsNone(poller.on_reply(tag, ok({'members': [member(A, 1)] * 1025,
+                                                  'next_after': None}), 1))
+        self.assertNotIn('members', poller.results)
+        self.assertEqual(poller.errors['members'], 'invalid')
+
     def test_timeout_is_unknown_and_reissued(self):
         poller = SitePoller()
         poller.reset({'site.status': True})
@@ -321,10 +338,31 @@ class SupervisorTests(unittest.TestCase):
         sup.tick(0)
         self.assertEqual(sup.state, 'mismatch')
 
+    def test_attached_usb_gateway_must_belong_to_site(self):
+        self.answer = (caps(), ok({'site_id': SITE_ID, 'gateways': [GW],
+                                   'usb': {'attached': True}}))
+        sup = SiteSupervisor(probe=self.probe, launcher=self.launcher,
+                             usb_probe=lambda path: B)
+        sup.attach(self.config(), 0)
+        sup.tick(0)
+        self.assertEqual(sup.state, 'mismatch')
+        self.assertEqual(sup.session, 0)
+        sup.stop()
+
     def test_unversioned_capabilities_are_refused(self):
         self.assertIsNotNone(verify_daemon(caps(version=None), ok({'site_id': SITE_ID}), None)[1])
         self.assertIsNotNone(verify_daemon(ok({'api': {'version': 1}, 'caps_version': 1, 'methods': {}}),
                                            ok({'site_id': SITE_ID}), None)[1])
+
+    def test_boolean_api_version_and_nonhex_site_id_are_refused(self):
+        self.assertIsNotNone(verify_daemon(ok({'api': {'version': True}, 'caps_version': 1,
+                                               'methods': {'site.status': True}}),
+                                           ok({'site_id': SITE_ID}), None)[1])
+        self.assertIsNotNone(verify_daemon(caps(), ok({'site_id': 'zzzzzzzzzzzzzzzz'}), None)[1])
+
+    def test_malformed_probe_reply_is_rejected_without_worker_exception(self):
+        self.assertIsNotNone(verify_daemon(ok([]), ok({'site_id': SITE_ID}), None)[1])
+        self.assertIsNotNone(verify_daemon(caps(), ok([]), None)[1])
 
     def test_owned_daemon_restarts_with_backoff_and_new_session(self):
         sup = self.supervisor()
@@ -374,6 +412,17 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(sup.state, 'failed')
         self.assertEqual(self.processes, [])
 
+    def test_second_supervisor_cannot_attach_to_same_site(self):
+        if os.name != 'posix':
+            self.skipTest('flock is Linux/POSIX only')
+        self.answer = (caps(), ok({'site_id': SITE_ID}))
+        first, second = self.supervisor(), self.supervisor()
+        first.attach(self.config(), 0)
+        first.tick(0)
+        self.addCleanup(first.stop)
+        second.attach(self.config(), 0)
+        self.assertEqual(second.state, 'failed')
+
     def test_attached_daemon_loss_reconnects_without_spawning(self):
         sup = self.supervisor()
         self.answer = (caps(), ok({'site_id': SITE_ID}))
@@ -388,6 +437,22 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual((sup.state, sup.session), ('ready', 2))
         sup.stop()
         self.assertEqual(self.processes, [])
+
+    def test_owned_unresponsive_daemon_is_stopped_before_restart(self):
+        sup = self.supervisor()
+        sup.start(self.config(), 0)
+        self.answer = (caps(), ok({'site_id': SITE_ID}))
+        sup.tick(500)
+        self.assertEqual(sup.state, 'ready')
+        self.answer = None
+        for at in (2_500, 4_500, 6_500):
+            sup.tick(at)
+        self.assertEqual(sup.state, 'reconnecting')
+        self.assertTrue(self.processes[0].terminated)
+        self.assertIsNone(sup.process)
+        sup.tick(7_500)
+        self.assertEqual(len(self.processes), 2)
+        sup.stop()
 
     def test_one_supervisor_per_site_directory(self):
         first = SiteLock(self.site_dir)
@@ -495,9 +560,15 @@ class ProvisionTests(unittest.TestCase):
             runner.run_job(job)
         self.assertTrue(all(job.ready for job in jobs))
         self.assertEqual(jobs[1].steps['join'], 'waiting')
-        runner.observe_join({jobs[1].node_id: '承認'})
+        timeline = JoinTimeline()
+        timeline.on_members([member(jobs[1].node_id, 10, kid=jobs[1].readback['kid'])])
+        runner.observe_join(timeline.rows)
         self.assertFalse(jobs[1].joined)
-        runner.observe_join({jobs[1].node_id: 'Member'})
+        timeline.on_members([member(jobs[1].node_id, 10, 20, kid='ff' * 32)])
+        runner.observe_join(timeline.rows)
+        self.assertFalse(jobs[1].joined)
+        timeline.on_members([member(jobs[1].node_id, 10, 20, kid=jobs[1].readback['kid'])])
+        runner.observe_join(timeline.rows)
         self.assertTrue(jobs[1].joined)
 
     def test_sealed_board_needs_attention_and_is_not_reprovisioned(self):

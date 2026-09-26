@@ -101,6 +101,7 @@ class DemoSiteMesh(DemoMesh):
     def _status(self, elapsed, unix):
         members = self._members(elapsed)
         return {'site_id': SITE_ID, 'network': '000000000000a1b2', 'site_epoch': 1,
+                'gateways': [GATEWAY],
                 'members': len(members),
                 'members_unconfirmed': sum(m['confirm_state'] != 'active' for m in members),
                 'join_requests': sum(r['state'] == 'awaiting' for r in self._requests(elapsed)),

@@ -120,6 +120,7 @@ class MainWindow(QMainWindow):
         self.live.send_request.connect(self.api_request.emit)
         self.live.record.connect(self.model_events.emit)
         self.site.site_ready.connect(self._on_site_ready)
+        self.site.site_lost.connect(self._on_site_lost)
         self.site.shutdown_finished.connect(self._maybe_close)
         self.playback.start_recording.connect(self.model_start_recording.emit)
         self.playback.stop_recording.connect(self.model_stop_recording.emit)
@@ -136,6 +137,8 @@ class MainWindow(QMainWindow):
         self.render_timer.timeout.connect(self._render)
         self.render_timer.start(RENDER_MS)
         self.live_target = socket_path
+        self.supervised_socket = None
+        self.supervised_site_id = None
         if replay_path:
             self.use_replay(str(replay_path))
         elif socket_path:
@@ -223,22 +226,24 @@ class MainWindow(QMainWindow):
         self.exit_stack.enter_context(serve_fake_api1(socket_path, mesh=DemoSiteMesh(self.fake_nodes)))
         self._start_live(str(socket_path), 'fake API1（demo mesh）')
 
-    def use_live(self, path):
+    def use_live(self, path, *, expected_site_id=None):
         if self.shutdown_started:
             return
         self.live_target = path
-        self._stop_sources(lambda: self._start_live(path, f'daemon {path}'))
+        self._stop_sources(lambda: self._start_live(path, f'daemon {path}', expected_site_id))
 
     def _back_to_live(self):
         if self.live_target:
-            self.use_live(self.live_target)
+            expected = (self.supervised_site_id if self.live_target == self.supervised_socket
+                        else None)
+            self.use_live(self.live_target, expected_site_id=expected)
         else:
             self.use_fake()
 
-    def _start_live(self, path, label):
+    def _start_live(self, path, label, expected_site_id=None):
         self.mode = 'LIVE'
         self.source_label = label
-        self.api = ApiClient(path)
+        self.api = ApiClient(path, expected_site_id=expected_site_id)
         self.model = ModelWorker('LIVE')
         self.live.reset_timeline()
         self.api.events.connect(self.model.ingest)
@@ -311,8 +316,24 @@ class MainWindow(QMainWindow):
     def _on_site_ready(self, socket_path):
         # A supervised daemon (new session) becomes the live source; ApiClient
         # re-reads capabilities and snapshots on its own connection.
-        if self.mode != 'LIVE' or self.live_target != socket_path:
-            self.use_live(socket_path)
+        self.supervised_socket = socket_path
+        self.supervised_site_id = self.site.supervisor_status.get('site_id')
+        if self.mode != 'LIVE':
+            self.live_target = socket_path
+            return
+        if (self.live_target != socket_path or self.api is None or
+                self.api.expected_site_id != self.supervised_site_id):
+            self.use_live(socket_path, expected_site_id=self.supervised_site_id)
+
+    def _on_site_lost(self, socket_path):
+        if self.supervised_socket == socket_path:
+            self.supervised_socket = None
+            self.supervised_site_id = None
+        if self.mode == 'LIVE' and self.live_target == socket_path:
+            self.live_target = None
+            self.use_fake()
+        elif self.live_target == socket_path:
+            self.live_target = None
 
     def _on_recording(self, status):
         self.recording_status = status
