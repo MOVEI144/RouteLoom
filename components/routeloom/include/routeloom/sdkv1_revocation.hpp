@@ -442,6 +442,9 @@ enum class LifecycleActionReason : std::uint8_t {
   None = 0,
   SelfRevocation = 1,
   LinkFailure = 2,
+  // Idle journal was validated on a fresh boot; the Owner's new runtime
+  // may finish adoption without another reboot.
+  BootAdoption = 3,
 };
 
 // Owner work order: tag, monotonic token, the RLS1 commit_seq the decision

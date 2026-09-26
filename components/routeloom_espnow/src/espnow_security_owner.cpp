@@ -907,7 +907,7 @@ void EspNowSecurityOwner::drain_lifecycle_actions(const MonotonicMs now_ms) noex
         ESP_LOGW(config_.log_tag, "p6: removal holdoff done — rebooting unassigned");
         reboot_for_lifecycle("p6 restart-unassigned");
         break;
-      case sdkv1::LifecycleActionTag::AdoptNetwork:
+      case sdkv1::LifecycleActionTag::AdoptNetwork: {
         if (stores_ == nullptr ||
             stores_->site().commit_seq() != action.expected_site_commit_seq) {
           // The stores moved under the decision: the action stays pending
@@ -915,10 +915,29 @@ void EspNowSecurityOwner::drain_lifecycle_actions(const MonotonicMs now_ms) noex
           ESP_LOGW(config_.log_tag, "p6: adopt raced a store commit — retaking");
           break;
         }
+        if (action.reason == sdkv1::LifecycleActionReason::BootAdoption) {
+          // Boot has already rebuilt the coordinator and radio from RLS1.
+          // The Idle journal is validated by Lifecycle::on_boot, but P6
+          // stays closed until the new Member runtime is actually adopted.
+          if (adopted_network_ != action.network || adopted_role_ == 0 ||
+              coordinator().snapshot().mode != sdkv1::CoordinatorMode::Member) {
+            break;
+          }
+          const Status done = lifecycle().dispatch(
+              sdkv1::LifecycleInput::ActionDone(action.token, Status::success()), now_ms);
+          if (!done) {
+            ESP_LOGW(config_.log_tag, "p6: boot adoption completion failed: %s", done.detail);
+          } else {
+            ESP_LOGI(config_.log_tag, "p6: adopted network 0x%llx after boot",
+                     static_cast<unsigned long long>(action.network));
+          }
+          break;
+        }
         ESP_LOGW(config_.log_tag, "p6: adopting network 0x%llx — rebooting",
                  static_cast<unsigned long long>(action.network));
         reboot_for_lifecycle("p6 adopt-network");
         break;
+      }
       case sdkv1::LifecycleActionTag::None:
         break;
     }

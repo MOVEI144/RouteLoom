@@ -1466,7 +1466,7 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
           return Status::success();
         }
         phase_ = LifecyclePhase::Switching;
-        emit_action(LifecycleActionTag::AdoptNetwork, LifecycleActionReason::None);
+        emit_action(LifecycleActionTag::AdoptNetwork, LifecycleActionReason::BootAdoption);
         return Status::success();
       }
       if (record.mode == LifecycleMode::UnassignedReady) {
