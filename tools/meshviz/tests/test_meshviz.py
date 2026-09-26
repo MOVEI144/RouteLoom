@@ -650,8 +650,10 @@ class DeviceTests(unittest.TestCase):
                                 '164020', 4 * 1024 * 1024, False, False)
             api = API()
             with patch('routeloom_meshviz.flash_worker.verify_bundle', return_value={
-                    'chip': 'esp32c3', 'files': [{'offset': image.offset, 'path': 'app.bin',
-                                                 'size': image.size, 'sha256': image.sha256}]}):
+                    'chip': 'esp32c3', 'chip_revision_range': [0, 255],
+                    'minimum_flash_bytes': 0x1b0000,
+                    'files': [{'offset': image.offset, 'path': 'app.bin',
+                               'size': image.size, 'sha256': image.sha256}]}):
                 flash('COM1', FlashPlan(expected, 'esp32c3', (image,), True,
                                        self.a.base_mac, True, Path(td)), api)
             self.assertEqual(api.written, [(0x10000, b'image')])
@@ -733,8 +735,10 @@ class DeviceTests(unittest.TestCase):
             plan = FlashPlan(expected, 'esp32c3', (image,), True, self.a.base_mac, True,
                              Path(td))
             verifier = patch('routeloom_meshviz.flash_worker.verify_bundle', return_value={
-                'chip': 'esp32c3', 'files': [{'offset': image.offset, 'path': 'app.bin',
-                                             'size': image.size, 'sha256': image.sha256}]})
+                'chip': 'esp32c3', 'chip_revision_range': [0, 255],
+                'minimum_flash_bytes': 0x1b0000,
+                'files': [{'offset': image.offset, 'path': 'app.bin',
+                           'size': image.size, 'sha256': image.sha256}]})
             verifier.start()
             self.addCleanup(verifier.stop)
             api = API(False)

@@ -44,6 +44,13 @@ def flash(port: str, plan: FlashPlan, api=None):
                       if type(crypt_cnt) is int and crypt_cnt >= 0 else None)
         measured = Identity(chip, str(esp.get_chip_revision()), base, sta,
                             f'{flash_id:06x}', flash_bytes, secure_boot, encryption)
+        # A matching chip alone cannot authorize a revision or flash size the
+        # signed image did not declare compatible.
+        revision = measured.revision
+        low, high = manifest['chip_revision_range']
+        if (not revision.isdecimal() or not low <= int(revision) <= high or
+                flash_bytes < manifest['minimum_flash_bytes']):
+            raise ValueError('bundle incompatible with measured board')
         images = plan.verified_images(port, measured)
         api.write_flash(esp, images, flash_mode='keep', flash_freq='keep', flash_size='keep')
         api.verify_flash(esp, images)

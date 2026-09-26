@@ -185,7 +185,13 @@ def verify_bundle(root, public):
             manifest.get('idf_commit') != IDF_COMMIT or
             manifest.get('chip') not in CHIPS or
             manifest.get('flash_mode') not in ('dio', 'dout', 'qio', 'qout') or
-            manifest.get('flash_frequency') not in ('40m', '80m')):
+            manifest.get('flash_frequency') not in ('40m', '80m') or
+            type(manifest.get('minimum_flash_bytes')) is not int or
+            manifest['minimum_flash_bytes'] <= 0 or
+            type(manifest.get('chip_revision_range')) is not list or
+            len(manifest['chip_revision_range']) != 2 or
+            any(type(n) is not int or n < 0 for n in manifest['chip_revision_range']) or
+            manifest['chip_revision_range'][0] > manifest['chip_revision_range'][1]):
         raise ValueError('unsupported bundle')
     chip = manifest['chip']
     check_config(_read(root, 'sdkconfig').decode(), chip)

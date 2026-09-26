@@ -97,6 +97,26 @@ class BundleTests(unittest.TestCase):
                                    identity.base_mac, True, bundle), api)
             self.assertEqual(api.written, api.verified)
             self.assertEqual(len(api.written), 3)
+            # Signed compatibility constraints must be enforced before writing.
+            original_manifest = (bundle / 'manifest.json').read_bytes()
+            original_sums = (bundle / 'SHA256SUMS').read_bytes()
+            original_sig = (bundle / 'signature.json').read_bytes()
+            for change in ({'chip_revision_range': [2, 3]},
+                           {'minimum_flash_bytes': 8 * 1024 * 1024}):
+                restricted = {**manifest, **change}
+                (bundle / 'manifest.json').write_bytes(catalog._json(restricted))
+                (bundle / 'signature.json').write_bytes(catalog._json(catalog._sign(restricted, key)))
+                (bundle / 'SHA256SUMS').write_bytes(original_sums.replace(
+                    catalog._hash(original_manifest).encode(),
+                    catalog._hash(catalog._json(restricted)).encode()))
+                api = API()
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    flash('COM1', FlashPlan(identity, 'esp32c3', images, True,
+                                           identity.base_mac, True, bundle), api)
+                self.assertIsNone(api.written)
+            (bundle / 'manifest.json').write_bytes(original_manifest)
+            (bundle / 'SHA256SUMS').write_bytes(original_sums)
+            (bundle / 'signature.json').write_bytes(original_sig)
             rogue = root / 'rogue.pem'
             catalog.generate_key(rogue)
             signature_file = bundle / 'signature.json'
