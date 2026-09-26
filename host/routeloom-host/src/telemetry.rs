@@ -107,6 +107,13 @@ pub struct TelemetryOps {
 }
 
 impl TelemetryOps {
+    pub fn request_pending(&self, request: u64) -> bool {
+        self.ops
+            .lock()
+            .expect("telemetry ops poisoned")
+            .values()
+            .any(|op| op.request == request && op.outcome.is_none())
+    }
     fn mint(&self) -> (u64, u64) {
         let mut next = self.next.lock().expect("telemetry ops poisoned");
         *next = next.wrapping_add(1);
@@ -369,6 +376,7 @@ pub fn telemetry_once(state: &State, outbound: &mpsc::SyncSender<Outbound>, now_
         }
     }
     let mut progressed = false;
+    state.refresh_radio_budget();
     for (request, body) in send {
         let frame = Frame {
             kind: FrameKind::HostOps,
@@ -380,7 +388,9 @@ pub fn telemetry_once(state: &State, outbound: &mpsc::SyncSender<Outbound>, now_
         // The writer queue refused the frame: provably never sent, so the
         // query stays unsent for the next tick (its timeout still bounds
         // the wait — a clogged queue resolves Timeout, honestly).
-        if outbound.try_send(Outbound::Seal(frame)).is_ok() {
+        if state.radio_budget.send(request, now_ms, || {
+            outbound.try_send(Outbound::Seal(frame)).is_ok()
+        }) {
             let mut table = state
                 .telemetry_ops
                 .ops
@@ -390,6 +400,8 @@ pub fn telemetry_once(state: &State, outbound: &mpsc::SyncSender<Outbound>, now_
                 op.sent = true;
             }
             progressed = true;
+        } else {
+            break;
         }
     }
     if progressed {

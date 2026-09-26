@@ -6,12 +6,55 @@
 #include "routeloom/observation.hpp"
 
 #include <cstdint>
+#include <cinttypes>
+#include <cstdio>
 
 #include "routeloom/discovery.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/usb_host_ops.hpp"
 
 namespace routeloom {
+
+Status format_observation_console_system(const NodeId observer,
+                                         const ObservationSystem& system,
+                                         char* const out, const std::size_t capacity,
+                                         std::size_t& used) noexcept {
+  used = 0;
+  if (out == nullptr || capacity == 0 || observer == kInvalidNodeId ||
+      observer == kBroadcastNodeId) {
+    return Status::error(StatusCode::InvalidArgument, "observation console fields");
+  }
+  // Unknown heap readings stay null; the console never fabricates zero.
+  char heap_free[16]{};
+  char heap_min[16]{};
+  char heap_largest[16]{};
+  auto heap_field = [](const std::uint32_t value, char* const field) noexcept {
+    if (value == kHeapBytesUnknown) {
+      std::snprintf(field, 16, "null");
+    } else {
+      std::snprintf(field, 16, "%" PRIu32, value);
+    }
+  };
+  heap_field(system.heap_free_bytes, heap_free);
+  heap_field(system.heap_min_bytes, heap_min);
+  heap_field(system.heap_largest_bytes, heap_largest);
+  const int n = std::snprintf(
+      out, capacity,
+      "OBS1 {\"schema\":1,\"section\":\"system\",\"source\":{\"observer\":\"%016" PRIx64
+      "\",\"observer_boot\":\"%016" PRIx64 "\"},\"sampled_at_device_ms\":%" PRIu64
+      ",\"system\":{\"uptime_ms\":%" PRIu64 ",\"heap_free_bytes\":%s"
+      ",\"heap_min_bytes\":%s,\"heap_largest_bytes\":%s,\"reset_code\":%u"
+      ",\"power_mode\":%u,\"coord_mode\":%u,\"sec_profile\":%u}}\n",
+      observer, system.boot_id, system.uptime_ms, system.uptime_ms,
+      heap_free, heap_min, heap_largest, static_cast<unsigned>(system.reset_code),
+      static_cast<unsigned>(system.power_mode), static_cast<unsigned>(system.coord_mode),
+      static_cast<unsigned>(system.sec_profile));
+  if (n < 0 || static_cast<std::size_t>(n) >= capacity) {
+    return Status::error(StatusCode::NoCapacity, "observation console output");
+  }
+  used = static_cast<std::size_t>(n);
+  return Status::success();
+}
 
 namespace {
 
@@ -242,6 +285,7 @@ Status MeshNode::build_observation_snapshot_impl(
   out.observer = config_.node;
   out.observer_boot = config_.boot_incarnation;
   out.section = query.section;
+  out.sampled_ms = now_ms;
   const bool exact = (query.flags & kObservationRemoteQueryExact) != 0;
   switch (query.section) {
     case ObservationSection::System: {
@@ -520,6 +564,26 @@ std::uint32_t observation_neighbor_digest(const MeshNode& node,
       if (page[i].neighbor_active()) digest.add_u64(page[i].node);
     }
     cursor = page[n - 1].node;
+  }
+  return digest.finish();
+}
+
+std::uint32_t observation_neighbor_source_digest(const ObservationSource& source,
+                                                 const MonotonicMs now_ms) noexcept {
+  Digest digest{};
+  NodeId cursor = kInvalidNodeId;
+  bool more = true;
+  for (std::size_t page_index = 0; more && page_index < kNodeStatusTrackCapacity; ++page_index) {
+    NeighborDetailEntry page[kObservationRoutesPageMax]{};
+    const std::size_t n = source.neighbor_detail_page(cursor, page,
+                                                       kObservationRoutesPageMax, now_ms, more);
+    if (n == 0 || n > kObservationRoutesPageMax || page[n - 1].peer <= cursor) break;
+    for (std::size_t i = 0; i < n; ++i) {
+      digest.add_u64(page[i].peer);
+      digest.add_u8(page[i].phase);
+      digest.add_u8(page[i].flags & kNeighborActive);
+    }
+    cursor = page[n - 1].peer;
   }
   return digest.finish();
 }

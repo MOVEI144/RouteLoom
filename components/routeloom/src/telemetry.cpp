@@ -750,6 +750,8 @@ Status remote_observation_snapshot_encode(const RemoteObservationSnapshot& snaps
   if (!status) return status;
   status = writer.write_u32(snapshot.revision);
   if (!status) return status;
+  status = writer.write_u64(snapshot.sampled_ms);
+  if (!status) return status;
   if (want > 0) status = writer.write_bytes(ByteView{snapshot.body.data(), want});
   return status;
 }
@@ -770,6 +772,7 @@ Status remote_observation_snapshot_decode(const ByteView body, RemoteObservation
   std::uint8_t count = 0;
   std::uint8_t reserved = 0;
   std::uint32_t revision = 0;
+  std::uint64_t sampled_ms = 0;
   status = reader.read_u32(request_id);
   if (!status) return status;
   status = reader.read_u64(observer);
@@ -785,6 +788,8 @@ Status remote_observation_snapshot_decode(const ByteView body, RemoteObservation
   status = reader.read_u8(reserved);
   if (!status) return status;
   status = reader.read_u32(revision);
+  if (!status) return status;
+  status = reader.read_u64(sampled_ms);
   if (!status) return status;
   if (section > static_cast<std::uint8_t>(ObservationSection::Neighbors) ||
       (flags & ~kRemoteObservationSnapshotMore) != 0 || reserved != 0 ||
@@ -804,6 +809,7 @@ Status remote_observation_snapshot_decode(const ByteView body, RemoteObservation
   }
   if (!expect_consumed(reader)) return reject();
   out.request_id = request_id;
+  out.sampled_ms = sampled_ms;
   out.observer = observer;
   out.observer_boot = observer_boot;
   out.section = parsed;

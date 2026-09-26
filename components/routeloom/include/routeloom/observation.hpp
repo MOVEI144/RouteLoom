@@ -9,8 +9,8 @@
 // occupancy, join-attempt milestones and the selected-route table. It never
 // touches route selection, leases or advertisement baselines: every fill
 // below runs on const tables and reports durations (ages) on the device
-// monotonic clock, like node_status.hpp. Absolute device timestamps never
-// leave the device; the host maps an age onto its own receive time.
+// monotonic clock, like node_status.hpp. Remote snapshots carry a boot-local
+// sample time; the host maps ages with a bounded transfer uncertainty.
 //
 // Unknown conventions (device → host): numeric 0/empty means "none" only
 // where documented; otherwise the section documents an explicit unknown
@@ -166,6 +166,13 @@ struct ObservationSystem {
   std::uint8_t coord_mode{kCoordModeUnknown};
   std::uint8_t sec_profile{kProfileUnknown};
 };
+
+// Read-only serial evidence for a reference node. The caller owns the
+// bounded buffer and emits this single OBS1 line outside RF callbacks.
+Status format_observation_console_system(NodeId observer,
+                                         const ObservationSystem& system,
+                                         char* out, std::size_t capacity,
+                                         std::size_t& used) noexcept;
 
 // Live table occupancy. Counts are exact (never estimates from another
 // table); *_cap is the fixed pool bound. dedup_refused saturates the three
@@ -328,6 +335,12 @@ class ObservationSource {
                                      NeighborDetailEntry& out) const noexcept = 0;
 };
 
+// The page revision includes stable neighbor structure from the same
+// source that serves detail rows. Ages, lease countdowns and RSSI samples
+// change with time/traffic and deliberately do not invalidate a walk.
+std::uint32_t observation_neighbor_source_digest(const ObservationSource& source,
+                                                 MonotonicMs now_ms) noexcept;
+
 // --- Portable fill helpers ------------------------------------------------------
 //
 // The firmware source forwards to these; each takes plain inputs so host
@@ -353,7 +366,8 @@ void fill_observation_tables(const MeshNode& node, MonotonicMs now_ms,
 
 // FNV-1a digests over the sorted (id, next_hop, generation, sequence,
 // metric) selection set (routes) and the sorted active-neighbor id set
-// (neighbors). Read-only; two digests let the host tell which half moved.
+// (basic neighbor view). The served neighbor page revision additionally
+// includes each detail row's phase through observation_neighbor_source_digest.
 std::uint32_t observation_route_digest(const MeshNode& node, MonotonicMs now_ms) noexcept;
 std::uint32_t observation_neighbor_digest(const MeshNode& node, MonotonicMs now_ms) noexcept;
 

@@ -164,15 +164,33 @@ class FakeAPI1:
                 not self._is_hex16(destination) or
                 destination.lower() in ('0000000000000000', 'ffffffffffffffff')):
             return self._error(request_id, 'INVALID_ARGUMENT')
-        if cursor is not None and (not self._is_hex16(cursor) or
-                                   cursor.lower() == 'ffffffffffffffff'):
-            return self._error(request_id, 'INVALID_ARGUMENT')
+        after = None
+        if cursor is not None:
+            parts = cursor.split('.') if isinstance(cursor, str) else []
+            if (len(parts) != 7 or not self._is_hex16(parts[0]) or
+                    parts[0].lower() == 'ffffffffffffffff' or
+                    len(parts[1]) != 8 or
+                    any(char not in '0123456789abcdefABCDEF' for char in parts[1]) or
+                    any(not self._is_hex16(part) for part in parts[2:6]) or
+                    len(parts[6]) != 2 or
+                    any(char not in '0123456789abcdefABCDEF' for char in parts[6])):
+                return self._error(request_id, 'INVALID_ARGUMENT')
+            after = parts[0].lower()
         if section not in ('routes', 'neighbors') and (
                 destination is not None or cursor is not None):
             return self._error(request_id, 'INVALID_ARGUMENT')
         snapshot = {'schema': 1, 'section': section, 'source': source,
                     'revision': fix.get('revision', 0), 'received_unix_ms': 1000,
                     'age_ms': 0, 'stale': False, 'armed': False}
+        section_id = 4 if section == 'routes' else 5
+        if cursor is not None and (
+                parts[1].lower() != f"{snapshot['revision']:08x}" or
+                parts[2].lower() != fix['boot'] or
+                parts[3].lower() != fix['boot'] or
+                parts[4].lower() != f"{fix['session_id']:016x}" or
+                parts[5].lower() != gateway or
+                parts[6].lower() != f"{section_id:02x}"):
+            return self._error(request_id, 'SNAPSHOT_CHANGED', retryable=True)
         if section == 'summary':
             snapshot.update({'complete': True, 'summary': fix['sections']['summary'],
                              'entries': [], 'next_cursor': None})
@@ -185,10 +203,13 @@ class FakeAPI1:
             snapshot.update({'complete': True, 'present': bool(entries),
                              'entries': entries, 'next_cursor': None})
             return {'outcome': 'snapshot', 'scope': {'observer': gateway}, 'snapshot': snapshot}
-        rest = [entry for entry in rows if cursor is None or entry[key] > cursor.lower()]
+        rest = [entry for entry in rows if after is None or entry[key] > after]
         page, more = rest[:8], len(rest) > 8
+        next_cursor = (f"{page[-1][key]}.{snapshot['revision']:08x}.{fix['boot']}."
+                       f"{fix['boot']}.{fix['session_id']:016x}.{gateway}.{section_id:02x}"
+                       if more else None)
         snapshot.update({'complete': not more, 'entries': page,
-                         'next_cursor': page[-1][key] if more else None})
+                         'next_cursor': next_cursor})
         return {'outcome': 'snapshot', 'scope': {'observer': gateway}, 'snapshot': snapshot}
 
     def _error(self, request_id, code, detail=None, retryable=False):

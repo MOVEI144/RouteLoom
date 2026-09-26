@@ -333,6 +333,7 @@ class BridgeObservationSource final : public routeloom::ObservationSource {
     // The milestone generation is bridge-owned; the bridge overwrites the
     // zero this helper leaves before the page goes out.
     routeloom::fill_observation_summary(node_, now_ms, 0, out);
+    out.neighbor_digest = routeloom::observation_neighbor_source_digest(*this, now_ms);
     return true;
   }
 

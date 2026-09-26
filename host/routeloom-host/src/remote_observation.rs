@@ -5,8 +5,8 @@
 //! snapshot, mesh refusal, or device result — verbatim. The section
 //! bytes are the 0x71 page bodies, so both legs decode with one codec.
 //!
-//! Radio discipline: at most MAX_IN_FLIGHT queries ride the mesh at
-//! once; concurrent identical calls join the in-flight row
+//! Radio discipline: telemetry and this lane share one daemon RF slot
+//! and a two-second interval; concurrent identical calls join the in-flight row
 //! (singleflight) instead of doubling the radio; and recent mesh
 //! failures are served from a bounded negative cache instead of
 //! re-querying. Every answer reports its radio cost (`radio_queries`)
@@ -119,6 +119,7 @@ struct PendingQuery {
 /// Negative-cache key: the exact question the mesh already refused.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct NegKey {
+    session: u64,
     observer: u64,
     section: u8,
     after: u64,
@@ -163,6 +164,13 @@ pub struct RemoteObservationOps {
 }
 
 impl RemoteObservationOps {
+    pub fn request_pending(&self, request: u64) -> bool {
+        self.ops
+            .lock()
+            .expect("remote observation ops poisoned")
+            .values()
+            .any(|op| op.request == request && op.outcome.is_none())
+    }
     fn mint(&self) -> (u64, u64) {
         let mut next = self.next.lock().expect("remote observation ops poisoned");
         *next = next.wrapping_add(1);
@@ -171,8 +179,9 @@ impl RemoteObservationOps {
         (token, REQUEST_BASE | (token & !REQUEST_MASK))
     }
 
-    fn neg_key(params: &RemoteObservationParams) -> NegKey {
+    fn neg_key(params: &RemoteObservationParams, session: u64) -> NegKey {
         NegKey {
+            session,
             observer: params.observer,
             section: params.section,
             after: params.after,
@@ -216,7 +225,7 @@ impl RemoteObservationOps {
     ) -> Result<SubmitOutcome, SubmitError> {
         // A failure the mesh just gave us is served without touching the
         // radio — and without consuming an in-flight slot.
-        if let Some(cached) = self.neg_lookup(&Self::neg_key(&params), now_ms) {
+        if let Some(cached) = self.neg_lookup(&Self::neg_key(&params, session), now_ms) {
             return Ok(SubmitOutcome::Cached(cached));
         }
         let mut ops = self.ops.lock().expect("remote observation ops poisoned");
@@ -413,7 +422,7 @@ impl RemoteObservationOps {
             op.received_ms = received_ms;
             op.received_mono_ms = received_mono_ms;
             op.settled_ms = Some(received_mono_ms);
-            let key = Self::neg_key(&op.params);
+            let key = Self::neg_key(&op.params, op.session);
             drop(ops);
             if let Some(neg) = neg {
                 self.neg_record(key, neg, received_mono_ms);
@@ -495,7 +504,7 @@ pub fn remote_observation_once(state: &State, outbound: &mpsc::SyncSender<Outbou
                 op.received_ms = now_ms;
                 op.received_mono_ms = now_ms;
                 op.settled_ms = Some(now_ms);
-                timeouts.push(RemoteObservationOps::neg_key(&op.params));
+                timeouts.push(RemoteObservationOps::neg_key(&op.params, op.session));
                 continue;
             }
             if op.sent {
@@ -537,6 +546,7 @@ pub fn remote_observation_once(state: &State, outbound: &mpsc::SyncSender<Outbou
         }
     }
     let mut progressed = false;
+    state.refresh_radio_budget();
     for (request, body) in send {
         let frame = Frame {
             kind: FrameKind::HostOps,
@@ -548,7 +558,9 @@ pub fn remote_observation_once(state: &State, outbound: &mpsc::SyncSender<Outbou
         // The writer queue refused the frame: provably never sent, so the
         // query stays unsent for the next tick (its timeout still bounds
         // the wait — a clogged queue resolves Timeout, honestly).
-        if outbound.try_send(Outbound::Seal(frame)).is_ok() {
+        if state.radio_budget.send(request, now_ms, || {
+            outbound.try_send(Outbound::Seal(frame)).is_ok()
+        }) {
             let mut table = state
                 .remote_observation_ops
                 .ops
@@ -558,6 +570,8 @@ pub fn remote_observation_once(state: &State, outbound: &mpsc::SyncSender<Outbou
                 op.sent = true;
             }
             progressed = true;
+        } else {
+            break;
         }
     }
     if progressed {
@@ -601,6 +615,60 @@ mod tests {
     use routeloom_protocol::observation::SECTION_NEIGHBORS;
     use routeloom_protocol::telemetry::SUB_DIAGNOSTIC_RESPONSE;
 
+    #[test]
+    fn telemetry_and_observation_share_one_radio_budget() {
+        let state = State::default();
+        {
+            let mut session = state.session.lock().unwrap();
+            session.authenticated = true;
+            session.id = Some(0x5e55);
+        }
+        let (tx, rx) = mpsc::sync_channel(4);
+        state
+            .telemetry_ops
+            .submit(
+                crate::telemetry::TelemetryQueryParams {
+                    observer: 0x0abc,
+                    peer: 2,
+                    direction: 0,
+                    length_class: 0,
+                    max_age_ms: 0,
+                },
+                0x5e55,
+                1_000,
+            )
+            .unwrap();
+        state
+            .remote_observation_ops
+            .submit(
+                RemoteObservationParams {
+                    observer: 0x0abc,
+                    section: SECTION_NEIGHBORS,
+                    max_entries: 3,
+                    exact: false,
+                    after: 0,
+                },
+                0x5e55,
+                1_000,
+            )
+            .unwrap();
+        crate::telemetry::telemetry_once(&state, &tx, 1_000);
+        remote_observation_once(&state, &tx, 1_000);
+        let first = rx.try_recv().unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "only one RF transaction may be outstanding"
+        );
+        let Outbound::Seal(first) = first else {
+            panic!("diagnostic requests are sealed")
+        };
+        assert!(state.telemetry_ops.post_error(first.request, 0x5e55, 1));
+        remote_observation_once(&state, &tx, 2_999);
+        assert!(rx.try_recv().is_err(), "the shared interval is two seconds");
+        remote_observation_once(&state, &tx, 3_000);
+        assert!(rx.try_recv().is_ok());
+    }
+
     fn hex(text: &str) -> Vec<u8> {
         (0..text.len())
             .step_by(2)
@@ -612,7 +680,7 @@ mod tests {
     // The snapshot's inner request id (0x01020304) deliberately differs
     // from any lane-minted id: the bridge mints its own for the mesh leg
     // and the lane must NOT match on it.
-    const SNAPSHOT_HEX: &str = "01080000010203040000000000000abc112233445566778805010100a5a5a5a500000000000000020000007800013880000100000607b900";
+    const SNAPSHOT_HEX: &str = "01080000010203040000000000000abc112233445566778805010100a5a5a5a500000000000003e800000000000000020000007800013880000100000607b900";
     const REJECT_HEX: &str = "010600000000002a00040000000000000000009900000000";
 
     fn reply_inner(result: u16, observer: u64, body: &[u8]) -> Vec<u8> {
@@ -629,7 +697,7 @@ mod tests {
         RemoteObservationParams {
             observer: 0x0abc,
             section: SECTION_NEIGHBORS,
-            max_entries: 4,
+            max_entries: 3,
             exact: false,
             after: 0,
         }
@@ -809,6 +877,13 @@ mod tests {
             other => panic!("expected a cached reject, got {other:?}"),
         }
         assert_eq!(ops.tokens().len(), rows);
+        assert!(
+            matches!(
+                ops.submit(params(), 0x5e56, 2_001).unwrap(),
+                SubmitOutcome::Live { fresh: true, .. }
+            ),
+            "a refusal from an old USB session cannot answer a new one"
+        );
         // Past the TTL the mesh is asked again.
         assert!(matches!(
             ops.submit(params(), 0x5e55, 2_000 + NEG_TTL_MS + 1)

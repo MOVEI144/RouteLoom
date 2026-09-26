@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_rom_sys.h"
+#include "esp_rom_serial_output.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -610,7 +611,6 @@ class RefNodeMaintenanceGate final : public routeloom::ConfigMaintenanceGate {
 
 #endif  // CONFIG_ROUTELOOM_CONFIG
 
-#if CONFIG_ROUTELOOM_OBSERVATION_REMOTE
 // --- Read-only remote observation (subtypes 7/8) -------------------------------
 // Same read-only section fills as the bridge's USB observation, served to
 // end-protected Diagnostic(48) queries when the remote opt-in is on.
@@ -729,6 +729,7 @@ class ReferenceObservationSource final : public routeloom::ObservationSource {
   bool fill_summary(routeloom::MonotonicMs now_ms,
                     routeloom::ObservationSummary& out) const noexcept override {
     routeloom::fill_observation_summary(node_, now_ms, 0, out);
+    out.neighbor_digest = routeloom::observation_neighbor_source_digest(*this, now_ms);
     return true;
   }
 
@@ -798,7 +799,7 @@ class ReferenceObservationSource final : public routeloom::ObservationSource {
   std::uint8_t profile_;
 };
 
-#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+#if CONFIG_ROUTELOOM_OBSERVATION_REMOTE && !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
 // Owner-profile answer rule for subtype-7 queries: only adopted modes
 // answer. Fresh (never enrolled), ZeroTouch (still joining), Removed
 // (evicted) and Recovery refuse — the Kconfig symbol only compiles the
@@ -809,7 +810,62 @@ bool observation_member_mode(
          mode == routeloom::sdkv1::CoordinatorMode::Dev;
 }
 #endif
-#endif  // CONFIG_ROUTELOOM_OBSERVATION_REMOTE
+
+// One bounded read-only request per line, at most once per second. The
+// active console channel is polled in the owner loop, never an RF callback.
+class ReferenceObsConsole final {
+ public:
+  void poll(const ReferenceObservationSource& source, const NodeId observer,
+            const routeloom::MonotonicMs now_ms) noexcept {
+    for (unsigned i = 0; i < 32; ++i) {
+      std::uint8_t byte = 0;
+      if (esp_rom_output_rx_one_char(&byte) != 0) break;
+      if (byte == '\n') {
+        if (!overflow_ && length_ > 0 && line_[length_ - 1] == '\r') --length_;
+        if (!overflow_ && length_ == 11 &&
+            std::memcmp(line_, "obs1 health", 11) == 0) {
+          if (answered_ && (now_ms < last_answer_ms_ ||
+                            now_ms - last_answer_ms_ < 1000)) {
+            emit("OBS1 {\"error\":\"rate_limited\"}\n");
+          } else {
+            routeloom::ObservationSystem system{};
+            char response[512]{};
+            std::size_t used = 0;
+            if (source.fill_system(now_ms, system) &&
+                routeloom::format_observation_console_system(
+                    observer, system, response, sizeof(response), used)) {
+              for (std::size_t j = 0; j < used; ++j) {
+                esp_rom_output_putc(response[j]);
+              }
+              last_answer_ms_ = now_ms;
+              answered_ = true;
+            } else {
+              emit("OBS1 {\"error\":\"unavailable\"}\n");
+            }
+          }
+        } else if (length_ >= 4 && std::memcmp(line_, "obs1", 4) == 0) {
+          emit("OBS1 {\"error\":\"invalid_request\"}\n");
+        }
+        length_ = 0;
+        overflow_ = false;
+      } else if (length_ < sizeof(line_)) {
+        line_[length_++] = static_cast<char>(byte);
+      } else {
+        overflow_ = true;  // drain to newline before accepting another command
+      }
+    }
+  }
+
+ private:
+  static void emit(const char* line) noexcept {
+    for (const char* p = line; *p != '\0'; ++p) esp_rom_output_putc(*p);
+  }
+  char line_[32]{};
+  std::size_t length_{0};
+  routeloom::MonotonicMs last_answer_ms_{0};
+  bool answered_{false};
+  bool overflow_{false};
+};
 
 }  // namespace
 
@@ -1569,7 +1625,6 @@ extern "C" void app_main(void) {
   runtime.node().set_telemetry_remote(true);
 #endif
 
-#if CONFIG_ROUTELOOM_OBSERVATION_REMOTE
   // Remote observation answers (subtypes 7/8): read-only section fills
   // shared with the bridge's USB observation, served to end-protected
   // Diagnostic(48) queries. The fills attach unconditionally (answering
@@ -1596,6 +1651,8 @@ extern "C" void app_main(void) {
 #endif
   status = runtime.node().set_observation_source(&observation_source);
   if (!status) fail(status.detail);
+  ReferenceObsConsole observation_console;
+#if CONFIG_ROUTELOOM_OBSERVATION_REMOTE
 #if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   // The fixture profile has no enrollment, so the build opt-in is the
   // membership claim (same DEV standing as DISCOVERY_MEMBER).
@@ -1643,6 +1700,8 @@ extern "C" void app_main(void) {
   for (;;) {
     runtime.poll_once();
     owner.poll(monotonic_now_ms());
+    observation_console.poll(observation_source, runtime.node().node_id(),
+                             monotonic_now_ms());
 #if CONFIG_ROUTELOOM_OBSERVATION_REMOTE
     // Adoption can land after boot (ZeroTouch -> Member) or be revoked
     // (Member -> Removed): re-evaluate the subtype-7 answer decision

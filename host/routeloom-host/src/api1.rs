@@ -2407,8 +2407,21 @@ fn observation_require_local<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Resu
 /// Requires the m1 diagnostics bit (capability bit 5 with host_ops_v1)
 /// for a remote (foreign observer) query: the forward leg rides
 /// Diagnostic 0x30, so the gateway's own observation_v1 bit is
-/// irrelevant to a peer's sections. Same diagnostics class as local.
-fn observation_require_remote<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Result<(), ApiError> {
+/// irrelevant to a peer's sections. OBSERVE is independently required
+/// because a remote pull reveals another node's state and costs radio.
+fn observation_require_remote<S: OperationStore>(
+    ctx: &ApiContext<'_, S>,
+    network: Option<u64>,
+) -> Result<(), ApiError> {
+    if !network.is_some_and(|network| {
+        ctx.uid
+            .is_some_and(|uid| ctx.acl.permit(uid, network, acl::PERM_OBSERVE))
+    }) {
+        return Err(ApiError::simple(
+            "AuthorizationFailed",
+            "principal lacks OBSERVE on this network",
+        ));
+    }
     let capable = ctx
         .session
         .lock()
@@ -2507,6 +2520,7 @@ fn observation_subscribe_param(params: &Json) -> Result<bool, ApiError> {
 struct ObservationAnswer {
     revision: u32,
     boot: u64,
+    sampled_ms: Option<u64>,
     received_ms: u64,
     received_mono_ms: u64,
     rtt_ms: u64,
@@ -2592,6 +2606,7 @@ fn observation_query_local<S: OperationStore>(
             return Ok(ObservationAnswer {
                 revision: cached.revision,
                 boot: link.boot,
+                sampled_ms: None,
                 received_ms: cached.received_ms,
                 received_mono_ms: cached.received_mono_ms,
                 rtt_ms: cached.rtt_ms,
@@ -2651,6 +2666,7 @@ fn observation_query_local<S: OperationStore>(
             Ok(ObservationAnswer {
                 revision: header.revision,
                 boot: header.boot_id,
+                sampled_ms: None,
                 received_ms,
                 received_mono_ms,
                 rtt_ms,
@@ -2844,6 +2860,7 @@ fn observation_query_remote<S: OperationStore>(
         QueryOutcome::Snapshot(snapshot) => Ok(RemoteSection::Answer(ObservationAnswer {
             revision: snapshot.revision,
             boot: snapshot.observer_boot,
+            sampled_ms: Some(snapshot.sampled_ms),
             received_ms,
             received_mono_ms,
             rtt_ms,
@@ -2929,7 +2946,7 @@ fn observation_envelope(
     session: u64,
     observer: u64,
     answer: &ObservationAnswer,
-    now_ms: u64,
+    now_mono: u64,
     complete: bool,
 ) -> String {
     // The transport names the leg that served the body: local USB for the
@@ -2941,17 +2958,102 @@ fn observation_envelope(
     } else {
         "mesh_remote"
     };
+    let transfer_bound = if answer.sampled_ms.is_some() {
+        answer.rtt_ms
+    } else {
+        0
+    };
+    let sampled = answer
+        .sampled_ms
+        .map_or("null".to_string(), |ms| ms.to_string());
+    let (sample_earliest, sample_latest) = if answer.sampled_ms.is_some() {
+        (
+            answer.received_ms.saturating_sub(answer.rtt_ms).to_string(),
+            answer.received_ms.to_string(),
+        )
+    } else {
+        ("null".to_string(), "null".to_string())
+    };
     format!(
-        "\"schema\":1,\"section\":\"{section}\",\"source\":{{\"gateway\":\"{gateway:016x}\",\"usb_session\":{session},\"observer\":\"{observer:016x}\",\"observer_boot\":\"{:016x}\",\"transport\":\"{transport}\"}},\"revision\":{},\"received_unix_ms\":{},\"received_mono_ms\":{},\"rtt_ms\":{},\"age_ms\":{},\"stale\":false,\"complete\":{complete},\"armed\":{},\"radio_queries\":{}",
+        "\"schema\":1,\"section\":\"{section}\",\"source\":{{\"gateway\":\"{gateway:016x}\",\"usb_session\":{session},\"observer\":\"{observer:016x}\",\"observer_boot\":\"{:016x}\",\"transport\":\"{transport}\"}},\"revision\":{},\"sampled_at_device_ms\":{sampled},\"sampled_unix_ms_earliest\":{sample_earliest},\"sampled_unix_ms_latest\":{sample_latest},\"received_unix_ms\":{},\"received_mono_ms\":{},\"rtt_ms\":{},\"age_ms\":{},\"age_uncertainty_ms\":{transfer_bound},\"stale\":false,\"complete\":{complete},\"armed\":{},\"radio_queries\":{}",
         answer.boot,
         answer.revision,
         answer.received_ms,
         answer.received_mono_ms,
         answer.rtt_ms,
-        now_ms.saturating_sub(answer.received_ms),
+        now_mono.saturating_sub(answer.received_mono_ms).saturating_add(transfer_bound),
         answer.armed,
         answer.radio_queries,
     )
+}
+
+// A page token binds the last id to the producing snapshot and both
+// device incarnations. A changed table must restart at its first page.
+#[derive(Clone, Copy)]
+struct ObservationCursor {
+    after: u64,
+    revision: u32,
+    observer_boot: u64,
+    gateway_boot: u64,
+    session: u64,
+    observer: u64,
+    section: u8,
+}
+
+impl ObservationCursor {
+    fn parse(text: &str) -> Option<Self> {
+        let mut fields = text.split('.');
+        let parts = [
+            fields.next()?,
+            fields.next()?,
+            fields.next()?,
+            fields.next()?,
+            fields.next()?,
+            fields.next()?,
+            fields.next()?,
+        ];
+        if fields.next().is_some()
+            || [16, 8, 16, 16, 16, 16, 2]
+                .iter()
+                .zip(&parts)
+                .any(|(len, part)| {
+                    part.len() != *len || !part.bytes().all(|b| b.is_ascii_hexdigit())
+                })
+        {
+            return None;
+        }
+        Some(Self {
+            after: u64::from_str_radix(parts[0], 16).ok()?,
+            revision: u32::from_str_radix(parts[1], 16).ok()?,
+            observer_boot: u64::from_str_radix(parts[2], 16).ok()?,
+            gateway_boot: u64::from_str_radix(parts[3], 16).ok()?,
+            session: u64::from_str_radix(parts[4], 16).ok()?,
+            observer: u64::from_str_radix(parts[5], 16).ok()?,
+            section: u8::from_str_radix(parts[6], 16).ok()?,
+        })
+    }
+
+    fn encode(self) -> String {
+        format!(
+            "{:016x}.{:08x}.{:016x}.{:016x}.{:016x}.{:016x}.{:02x}",
+            self.after,
+            self.revision,
+            self.observer_boot,
+            self.gateway_boot,
+            self.session,
+            self.observer,
+            self.section
+        )
+    }
+}
+
+fn observation_page_changed() -> ApiError {
+    ApiError {
+        code: "SNAPSHOT_CHANGED",
+        message: "snapshot changed; restart from the first page".to_string(),
+        extra_fields: String::new(),
+        retryable: true,
+    }
 }
 
 /// `health.get {observer, section?:"system"|"tables"|"milestones",
@@ -2959,7 +3061,7 @@ fn observation_envelope(
 /// singleton of the attached gateway — or, for a foreign observer, of
 /// that mesh node over the gateway-forwarded remote leg (pull-only:
 /// `subscribe` is refused and `max_age_ms` ignored there). Diagnostics
-/// class, like link.get.
+/// class for local USB; remote pulls require OBSERVE on the live network.
 fn health_get<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
@@ -2982,7 +3084,7 @@ fn health_get<S: OperationStore>(
     if observer == link.gateway {
         observation_require_local(ctx)?;
     } else {
-        observation_require_remote(ctx)?;
+        observation_require_remote(ctx, link.network)?;
     }
     let section = match params.get("section") {
         None | Some(Json::Null) => SECTION_SYSTEM,
@@ -3064,7 +3166,7 @@ fn health_get<S: OperationStore>(
             link.session,
             observer,
             &answer,
-            ctx.now_ms,
+            ctx.now_mono,
             true,
         ),
     ))
@@ -3099,8 +3201,8 @@ fn render_health_section(section: u8, body: &[u8], received_ms: u64) -> Option<S
 /// gateway's selected-route table or neighbor table (one page per call,
 /// or one exact destination/peer) or its topology summary — or, for a
 /// foreign observer, that mesh node's, over the gateway-forwarded
-/// remote leg (pull-only, 3 routes / 4 neighbors per page). Diagnostics
-/// class.
+/// remote leg (pull-only, 2 routes / 3 neighbors per page). Remote pulls
+/// require OBSERVE on the live network.
 fn topology_get<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
@@ -3131,7 +3233,7 @@ fn topology_get<S: OperationStore>(
     if observer == link.gateway {
         observation_require_local(ctx)?;
     } else {
-        observation_require_remote(ctx)?;
+        observation_require_remote(ctx, link.network)?;
     }
     let section = match params.get("section").and_then(Json::as_str) {
         Some("routes") => SECTION_ROUTES,
@@ -3163,18 +3265,18 @@ fn topology_get<S: OperationStore>(
         }
     };
     let cursor = match params.get("cursor") {
-        None | Some(Json::Null) => 0,
-        Some(value) => match value.as_str().and_then(parse_hex_u64) {
-            Some(after) if after != u64::MAX => after,
-            _ => {
-                return Err(ApiError::simple(
-                    "INVALID_ARGUMENT",
-                    "cursor must be a 16-hex node id below ffff…ffff",
-                ));
-            }
-        },
+        None | Some(Json::Null) => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .and_then(ObservationCursor::parse)
+                .ok_or_else(|| {
+                    ApiError::simple("INVALID_ARGUMENT", "cursor must be a snapshot page token")
+                })?,
+        ),
     };
-    if !crate::observation::is_paged_section(section) && (destination.is_some() || cursor != 0) {
+    if !crate::observation::is_paged_section(section) && (destination.is_some() || cursor.is_some())
+    {
         return Err(ApiError::simple(
             "INVALID_ARGUMENT",
             "destination and cursor are routes/neighbors-only",
@@ -3185,6 +3287,15 @@ fn topology_get<S: OperationStore>(
             "INVALID_ARGUMENT",
             "destination and cursor are mutually exclusive",
         ));
+    }
+    if cursor.is_some_and(|cursor| {
+        cursor.after == u64::MAX
+            || cursor.observer != observer
+            || cursor.section != section
+            || cursor.session != link.session
+            || cursor.gateway_boot != link.boot
+    }) {
+        return Err(observation_page_changed());
     }
     let max_age_ms = observation_max_age_param(params)?;
     let subscribe = observation_subscribe_param(params)?;
@@ -3242,22 +3353,42 @@ fn topology_get<S: OperationStore>(
                 link.session,
                 observer,
                 &answer,
-                ctx.now_ms,
+                ctx.now_mono,
                 true,
             ),
         ));
     }
     let exact = destination.is_some();
-    let after = destination.unwrap_or(cursor);
+    let after = destination.unwrap_or(cursor.map_or(0, |cursor| cursor.after));
     let answer = match observation_query(
         ctx, &link, &scope, observer, section, after, exact, subscribe, 0,
     )? {
         RemoteSection::Answer(answer) => answer,
         RemoteSection::Reject(reject) => return Ok(remote_reject_json(&scope, &reject)),
     };
+    if answer.more && (answer.count == 0 || answer.next_after <= after) {
+        return Err(observation_page_changed());
+    }
+    if cursor.is_some_and(|cursor| {
+        cursor.revision != answer.revision || cursor.observer_boot != answer.boot
+    }) {
+        return Err(observation_page_changed());
+    }
     let complete = !answer.more;
     let next_cursor = if answer.more {
-        format!("\"{:016x}\"", answer.next_after)
+        format!(
+            "\"{}\"",
+            ObservationCursor {
+                after: answer.next_after,
+                revision: answer.revision,
+                observer_boot: answer.boot,
+                gateway_boot: link.boot,
+                session: link.session,
+                observer,
+                section
+            }
+            .encode()
+        )
     } else {
         "null".to_string()
     };
@@ -3285,7 +3416,7 @@ fn topology_get<S: OperationStore>(
             link.session,
             observer,
             &answer,
-            ctx.now_ms,
+            ctx.now_mono,
             complete,
         ),
         entries = entries.join(","),
@@ -5012,7 +5143,7 @@ mod tests {
 
     fn send_acl() -> Acl {
         Acl::parse(
-            "{\"principals\":{\"501\":{\"networks\":{\"0000000000000001\":[\"SEND\",\"READ_OPERATION\"]}},\"7\":{\"networks\":{\"0000000000000002\":[\"SEND\",\"READ_OPERATION\"]}}}}",
+            "{\"principals\":{\"501\":{\"networks\":{\"0000000000000001\":[\"SEND\",\"READ_OPERATION\",\"OBSERVE\"]}},\"7\":{\"networks\":{\"0000000000000002\":[\"SEND\",\"READ_OPERATION\"]}}}}",
         )
         .unwrap()
     }
@@ -7469,7 +7600,7 @@ mod tests {
 
     fn config_acl() -> Acl {
         Acl::parse(
-            "{\"principals\":{\"9\":{\"networks\":{\"*\":[\"CONFIG\"]}},\"501\":{\"networks\":{\"0000000000000001\":[\"SEND\",\"READ_OPERATION\"]}}}}",
+            "{\"principals\":{\"9\":{\"networks\":{\"*\":[\"CONFIG\"]}},\"501\":{\"networks\":{\"0000000000000001\":[\"SEND\",\"READ_OPERATION\",\"OBSERVE\"]}}}}",
         )
         .unwrap()
     }
@@ -8877,6 +9008,29 @@ mod tests {
     const OBSERVER: &str = "\"observer\":\"0000000000000abc\"";
 
     #[test]
+    fn remote_observation_requires_observe_grant() {
+        let (acl, log, store, limiter) = test_env();
+        for uid in [None, Some(7)] {
+            let c = ApiContext {
+                session: observation_session(0x04 | 0x20),
+                ..ctx(uid, &acl, &log, &store, &limiter, 1_000)
+            };
+            for method in ["health.get", "topology.get"] {
+                let section = if method == "health.get" {
+                    "system"
+                } else {
+                    "routes"
+                };
+                let line = observation_line(
+                    method,
+                    &format!("{{\"observer\":\"0000000000000005\",\"section\":\"{section}\"}}"),
+                );
+                assert_error_schema(&handle(line.as_bytes(), &c), "AuthorizationFailed");
+            }
+        }
+    }
+
+    #[test]
     fn observation_methods_are_advertised() {
         let (acl, log, store, limiter) = test_env();
         let line = b"{\"v\":1,\"request_id\":\"c\",\"method\":\"capabilities.get\"}";
@@ -9018,7 +9172,7 @@ mod tests {
         // is UNSUPPORTED (the observation bit does not serve peers).
         let c = ApiContext {
             session: observation_session(0x04 | 0x800),
-            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
         };
         let foreign = observation_line(
             "health.get",
@@ -9039,7 +9193,7 @@ mod tests {
         // the gate opened); the observation bit is not required.
         let c = ApiContext {
             session: observation_session(0x04 | 0x20),
-            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
         };
         let response = handle(foreign.as_bytes(), &c);
         assert!(response.contains("\"code\":\"TIMEOUT\""), "{response}");
@@ -9160,7 +9314,7 @@ mod tests {
     // C++-encoded subtype-8 oracle (components/routeloom/src/telemetry.cpp):
     // neighbors, MORE, one entry (peer 2). The observer bytes are patched
     // per test — the gateway here is 0xabc, so foreign means anything else.
-    const REMOTE_SNAPSHOT_HEX: &str = "01080000010203040000000000000abc112233445566778805010100a5a5a5a500000000000000020000007800013880000100000607b900";
+    const REMOTE_SNAPSHOT_HEX: &str = "01080000010203040000000000000abc112233445566778805010100a5a5a5a500000000000003e800000000000000020000007800013880000100000607b900";
 
     #[test]
     fn topology_get_remote_neighbors_roundtrip() {
@@ -9170,7 +9324,7 @@ mod tests {
         let c = ApiContext {
             session: observation_session(0xFFFF_FFFF),
             remote_observation_ops: ops,
-            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
         };
         let line = observation_line(
             "topology.get",
@@ -9206,6 +9360,23 @@ mod tests {
             Some("0000000000000005")
         );
         assert_eq!(snap.get("radio_queries").and_then(Json::as_u64), Some(0));
+        assert_eq!(
+            snap.get("sampled_at_device_ms").and_then(Json::as_u64),
+            Some(1_000)
+        );
+        assert_eq!(snap.get("age_ms").and_then(Json::as_u64), Some(1_000));
+        assert_eq!(
+            snap.get("age_uncertainty_ms").and_then(Json::as_u64),
+            Some(1_000)
+        );
+        assert_eq!(
+            snap.get("sampled_unix_ms_earliest").and_then(Json::as_u64),
+            Some(1_000)
+        );
+        assert_eq!(
+            snap.get("sampled_unix_ms_latest").and_then(Json::as_u64),
+            Some(2_000)
+        );
         let entries = snap.get("entries").unwrap().as_array().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(
@@ -9213,15 +9384,59 @@ mod tests {
             Some("0000000000000002")
         );
         // MORE with an ascending page: the cursor is the last entry's id.
-        assert_eq!(
-            snap.get("next_cursor").and_then(Json::as_str),
-            Some("0000000000000002")
-        );
+        assert!(snap
+            .get("next_cursor")
+            .and_then(Json::as_str)
+            .unwrap()
+            .contains('.'));
         // The remote age maps onto the host receive time like a local one.
         assert_eq!(
             entries[0].get("last_heard_at_ms").and_then(Json::as_u64),
             Some(1_880)
         );
+        let cursor = snap.get("next_cursor").and_then(Json::as_str).unwrap();
+        let next_ops = leaked_remote_observation_ops();
+        let next_ctx = ApiContext {
+            session: c.session,
+            remote_observation_ops: next_ops,
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
+        };
+        let next_line = observation_line("topology.get", &format!(
+            "{{\"observer\":\"0000000000000005\",\"section\":\"neighbors\",\"cursor\":\"{cursor}\"}}"
+        ));
+        let mut changed = hex_bytes(REMOTE_SNAPSHOT_HEX);
+        changed[8..16].copy_from_slice(&5_u64.to_be_bytes());
+        changed[28..32].copy_from_slice(&0xb6b6b6b6_u32.to_be_bytes());
+        let response = drive_remote_observation_once(
+            next_ops,
+            &next_line,
+            &next_ctx,
+            remote_reply_inner(0, 5, &changed),
+            2_100,
+        );
+        assert_error_schema(&response, "SNAPSHOT_CHANGED");
+    }
+
+    #[test]
+    fn topology_get_refuses_empty_nonterminal_page() {
+        let (acl, log, store, limiter) = test_env();
+        let ops = leaked_remote_observation_ops();
+        let c = ApiContext {
+            session: observation_session(0xFFFF_FFFF),
+            remote_observation_ops: ops,
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
+        };
+        let line = observation_line(
+            "topology.get",
+            "{\"observer\":\"0000000000000005\",\"section\":\"neighbors\"}",
+        );
+        let mut empty = hex_bytes(REMOTE_SNAPSHOT_HEX);
+        empty[8..16].copy_from_slice(&5_u64.to_be_bytes());
+        empty[26] = 0;
+        empty.truncate(40);
+        let response =
+            drive_remote_observation_once(ops, &line, &c, remote_reply_inner(0, 5, &empty), 2_000);
+        assert_error_schema(&response, "SNAPSHOT_CHANGED");
     }
 
     #[test]
@@ -9232,7 +9447,7 @@ mod tests {
         let c = ApiContext {
             session: observation_session(0xFFFF_FFFF),
             remote_observation_ops: ops,
-            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
         };
         let line = observation_line(
             "health.get",
@@ -9271,7 +9486,7 @@ mod tests {
         let (acl, log, store, limiter) = test_env();
         let c = ApiContext {
             session: observation_session(0xFFFF_FFFF),
-            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
         };
         let line = observation_line(
             "topology.get",
@@ -9430,10 +9645,11 @@ mod tests {
             snapshot.get("complete").and_then(Json::as_bool),
             Some(false)
         );
-        assert_eq!(
-            snapshot.get("next_cursor").and_then(Json::as_str),
-            Some("0000000000000003")
-        );
+        assert!(snapshot
+            .get("next_cursor")
+            .and_then(Json::as_str)
+            .unwrap()
+            .starts_with("0000000000000003.11223344."));
         assert_eq!(
             snapshot.get("revision").and_then(Json::as_u64),
             Some(0x1122_3344)
@@ -9528,10 +9744,11 @@ mod tests {
             snapshot.get("section").and_then(Json::as_str),
             Some("neighbors")
         );
-        assert_eq!(
-            snapshot.get("next_cursor").and_then(Json::as_str),
-            Some("0000000000000003")
-        );
+        assert!(snapshot
+            .get("next_cursor")
+            .and_then(Json::as_str)
+            .unwrap()
+            .starts_with("0000000000000003.a5a5a5a5."));
         let entries = snapshot.get("entries").unwrap().as_array().unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(

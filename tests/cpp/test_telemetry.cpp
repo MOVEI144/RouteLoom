@@ -616,7 +616,7 @@ void test_remote_observation_query_codec() {
   RemoteObservationQuery q{};
   q.request_id = 0xA1B2C3D4;
   q.section = ObservationSection::Routes;
-  q.max_entries = 3;
+  q.max_entries = 2;
   q.after = 0x1122334455;
 
   std::array<std::uint8_t, kRemoteObservationQueryBodySize> buf{};
@@ -626,7 +626,7 @@ void test_remote_observation_query_codec() {
   // Exact layout: prefix(4) then fields, big-endian.
   CHECK(buf[0] == 1 && buf[1] == 7 && buf[2] == 0 && buf[3] == 0);
   CHECK(buf[4] == 0xA1 && buf[5] == 0xB2 && buf[6] == 0xC3 && buf[7] == 0xD4);
-  CHECK(buf[8] == 4 && buf[9] == 3 && buf[10] == 0 && buf[11] == 0);
+  CHECK(buf[8] == 4 && buf[9] == 2 && buf[10] == 0 && buf[11] == 0);
   CHECK(buf[15] == 0x11 && buf[16] == 0x22 && buf[17] == 0x33 &&  // after u64 BE
         buf[18] == 0x44 && buf[19] == 0x55);
   CHECK(buf[20] == 0 && buf[21] == 0 && buf[22] == 0 && buf[23] == 0);
@@ -634,7 +634,7 @@ void test_remote_observation_query_codec() {
   RemoteObservationQuery back{};
   CHECK_OK(remote_observation_query_decode(ByteView{buf.data(), buf.size()}, back));
   CHECK(back.request_id == q.request_id && back.section == q.section);
-  CHECK(back.max_entries == 3 && back.after == q.after);
+  CHECK(back.max_entries == 2 && back.after == q.after);
 
   // EXACT names one peer on the neighbors section.
   RemoteObservationQuery exact{};
@@ -651,7 +651,7 @@ void test_remote_observation_query_codec() {
   bad.request_id = 0;
   CHECK(!remote_observation_query_encode(bad, out).ok());
   bad = q;
-  bad.max_entries = 4;  // routes page 4 x 30 B overflows the 128 B reply
+  bad.max_entries = 3;  // timestamp leaves room for only two routes
   CHECK(!remote_observation_query_encode(bad, out).ok());
   bad = q;
   bad.section = ObservationSection::System;
@@ -696,6 +696,7 @@ void test_remote_observation_snapshot_codec() {
   s.section = ObservationSection::Routes;
   s.count = 2;
   s.revision = 0x11223344;
+  s.sampled_ms = 1234;
   CHECK_OK(usb::encode_observation_route_entry(
       e0, MutableByteView{s.body.data(), usb::kObservationRouteEntrySize}));
   CHECK_OK(usb::encode_observation_route_entry(
@@ -713,6 +714,7 @@ void test_remote_observation_snapshot_codec() {
   CHECK(back.request_id == 77 && back.observer == 0xC3 && back.observer_boot == 0xB007);
   CHECK(back.section == ObservationSection::Routes && back.count == 2);
   CHECK(back.revision == 0x11223344 && back.body_size == s.body_size);
+  CHECK(back.sampled_ms == 1234);
 
   // Rejections: count/body mismatch, non-ascending entries, over-bound
   // count, singleton count != 1.
@@ -758,6 +760,7 @@ void test_remote_observation_snapshot_codec() {
 class TestNodeObservationSource final : public ObservationSource {
  public:
   explicit TestNodeObservationSource(const MeshNode& mesh) : mesh_(mesh) {}
+  void set_phase(std::uint8_t phase) noexcept { phase_ = phase; }
 
   bool fill_system(MonotonicMs now_ms, ObservationSystem& out) const noexcept override {
     fill_observation_system(0xB0071D0001ULL, now_ms, port_, kPowerRunning,
@@ -774,6 +777,7 @@ class TestNodeObservationSource final : public ObservationSource {
   }
   bool fill_summary(MonotonicMs now_ms, ObservationSummary& out) const noexcept override {
     fill_observation_summary(mesh_, now_ms, 0, out);
+    out.neighbor_digest = observation_neighbor_source_digest(*this, now_ms);
     return true;
   }
   std::size_t route_detail_page(NodeId after, RouteDetailEntry* out, std::size_t capacity,
@@ -786,17 +790,44 @@ class TestNodeObservationSource final : public ObservationSource {
   }
   std::size_t neighbor_detail_page(NodeId after, NeighborDetailEntry* out, std::size_t capacity,
                                    MonotonicMs now_ms, bool& more) const noexcept override {
-    return ::routeloom::neighbor_detail_page(mesh_, nullptr, after, out, capacity, now_ms, more);
+    const std::size_t n = ::routeloom::neighbor_detail_page(mesh_, nullptr, after, out, capacity,
+                                                             now_ms, more);
+    for (std::size_t i = 0; i < n; ++i) out[i].phase = phase_;
+    return n;
   }
   bool neighbor_detail_exact(NodeId peer, MonotonicMs now_ms,
                              NeighborDetailEntry& out) const noexcept override {
-    return ::routeloom::neighbor_detail_exact(mesh_, nullptr, peer, now_ms, out);
+    if (!::routeloom::neighbor_detail_exact(mesh_, nullptr, peer, now_ms, out)) return false;
+    out.phase = phase_;
+    return true;
   }
 
  private:
   const MeshNode& mesh_;
   NullSystemHealthPort port_;
+  std::uint8_t phase_{0};
 };
+
+void test_neighbor_page_revision_tracks_phase() {
+  routeloom_test::SimWorld world;
+  world.network_id = kNet;
+  auto* node = world.add(2);
+  world.add(3);
+  world.start_all();
+  world.link(2, 3, 1, 1);
+  TestNodeObservationSource source(*node);
+  CHECK_OK(node->set_observation_source(&source));
+  RemoteObservationQuery q{};
+  q.request_id = 1;
+  q.section = ObservationSection::Neighbors;
+  q.max_entries = 1;
+  RemoteObservationSnapshot before{}, after{};
+  DiagnosticRejectReason reason{};
+  CHECK_OK(node->build_observation_snapshot(q, world.now, before, reason));
+  source.set_phase(kNeighborPhaseReachable);
+  CHECK_OK(node->build_observation_snapshot(q, world.now, after, reason));
+  CHECK(before.revision != after.revision);
+}
 
 // End-to-end remote observation: A queries B's summary over the radio, B
 // answers from its wired source, A's sink gets the subtype-8 body whose
@@ -818,6 +849,10 @@ void test_node_remote_observation_snapshot() {
   q.request_id = 0xCAFE;
   q.section = ObservationSection::Summary;
   q.max_entries = 1;
+  RemoteObservationSnapshot direct{};
+  DiagnosticRejectReason reason{};
+  CHECK_OK(b->build_observation_snapshot(q, 1234, direct, reason));
+  CHECK(direct.sampled_ms == 1234);
   CHECK_OK(a->send_observation_query(2, q, world.now));
   world.run(500, 5);
 
@@ -836,6 +871,7 @@ void test_node_remote_observation_snapshot() {
   CHECK(summary.neighbor_total == 1);
   CHECK(summary.route_total >= 1);
   CHECK(snap.revision == summary.route_digest);
+  CHECK(snap.sampled_ms <= world.now);
 }
 
 // Remote answering is opt-in: a node with observation_remote off answers
@@ -1304,6 +1340,7 @@ int main() {
   test_node_remote_query_nopeer();
   test_remote_observation_query_codec();
   test_remote_observation_snapshot_codec();
+  test_neighbor_page_revision_tracks_phase();
   test_node_remote_observation_snapshot();
   test_node_remote_observation_denied();
   test_node_remote_observation_unsupported();

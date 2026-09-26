@@ -9,6 +9,7 @@ mod dispatch;
 mod group;
 mod nodes;
 mod observation;
+mod radio_budget;
 mod receive_log;
 mod remote_observation;
 mod send_store;
@@ -834,6 +835,8 @@ struct State {
     /// `diagnostics.snapshot` submits and waits here, the telemetry lane
     /// thread drives the device exchange.
     telemetry_ops: telemetry::TelemetryOps,
+    /// One RF diagnostic at a time, spaced by two seconds across both lanes.
+    radio_budget: radio_budget::RadioBudget,
     /// observation_v1 query table + singleton cache (HostOps 0x70-0x72):
     /// api1 `health.get` / `topology.get` submit and wait here, the
     /// observation lane thread drives the device exchange, and the read
@@ -853,6 +856,21 @@ struct State {
     /// session-verified bodies; the lane additionally gates on the
     /// gateway's CAP_JOIN_RELAY_V2 bit before touching the authority.
     site_inbox: site::usb::SiteInbox,
+}
+
+impl State {
+    fn refresh_radio_budget(&self) {
+        if let Some(request) = self.radio_budget.active() {
+            let pending = if telemetry::owns_request(request) {
+                self.telemetry_ops.request_pending(request)
+            } else {
+                self.remote_observation_ops.request_pending(request)
+            };
+            if !pending {
+                self.radio_budget.release(request);
+            }
+        }
+    }
 }
 
 fn now_ms() -> u64 {

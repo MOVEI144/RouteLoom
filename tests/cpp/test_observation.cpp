@@ -966,7 +966,27 @@ void test_fixed_vectors() {
 
 }  // namespace
 
+void test_reference_obs1_receipt() {
+  routeloom::ObservationSystem system{};
+  system.boot_id = 7;
+  system.uptime_ms = 1234;
+  system.heap_free_bytes = 4096;
+  char response[512]{};
+  std::size_t used = 0;
+  CHECK(routeloom::format_observation_console_system(
+      2, system, response, sizeof(response), used).ok());
+  CHECK(used < sizeof(response));
+  CHECK(std::strncmp(response, "OBS1 {", 6) == 0);
+  CHECK(std::strstr(response, "\"observer_boot\":\"0000000000000007\"") != nullptr);
+  CHECK(std::strstr(response, "\"uptime_ms\":1234") != nullptr);
+  char small[8]{};
+  CHECK(!routeloom::format_observation_console_system(
+      2, system, small, sizeof(small), used).ok());
+  CHECK(used == 0);
+}
+
 int main() {
+  test_reference_obs1_receipt();
   test_route_detail_line_topology();
   test_route_detail_page_walk();
   test_neighbor_detail_line_topology();

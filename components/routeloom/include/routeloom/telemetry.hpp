@@ -308,15 +308,14 @@ Status telemetry_snapshot_decode(ByteView body, TelemetrySnapshot& out) noexcept
 //
 // Query flags: bit0 EXACT (routes/neighbors only — `after` names one
 // destination/peer). Snapshot flags: bit0 MORE. Ages inside the body are
-// device-monotonic against the observer's sample time (upper bound once
-// mapped at the host — the forwarding latency is inside the daemon's
-// measured round trip, never hidden in the sample).
+// device-monotonic against sampled_ms. The host reports the transfer
+// uncertainty separately from the sample's boot-local clock reading.
 constexpr std::size_t kRemoteObservationQueryBodySize = 24;       // prefix included
-constexpr std::size_t kRemoteObservationSnapshotHeadSize = 32;    // prefix..revision
-constexpr std::size_t kRemoteObservationSnapshotSectionMax = 96;  // section bytes max
+constexpr std::size_t kRemoteObservationSnapshotHeadSize = 40;    // prefix..sample time
+constexpr std::size_t kRemoteObservationSnapshotSectionMax = 96;  // bounded storage
 constexpr std::size_t kRemoteObservationSnapshotBodyMax = 128;    // prefix included
-constexpr std::uint8_t kObservationRemoteRoutesMax = 3;
-constexpr std::uint8_t kObservationRemoteNeighborsMax = 4;
+constexpr std::uint8_t kObservationRemoteRoutesMax = 2;
+constexpr std::uint8_t kObservationRemoteNeighborsMax = 3;
 constexpr std::uint8_t kObservationRemoteQueryExact = 1u << 0;
 constexpr std::uint8_t kRemoteObservationSnapshotMore = 1u << 0;
 
@@ -336,7 +335,8 @@ Status remote_observation_query_decode(ByteView body, RemoteObservationQuery& ou
 // digest for routes/neighbors/summary (change cookie across pulls) and 0
 // for the point-sample singletons (system/tables/milestones — the daemon
 // compares bodies). No next_after field: entries ascend like 0x71 pages,
-// so the cursor is the last entry's id.
+// so the cursor is the last entry's id. sampled_ms is the observer's
+// monotonic clock at the fill, before mesh forwarding.
 struct RemoteObservationSnapshot {
   std::uint32_t request_id{0};
   NodeId observer{kInvalidNodeId};
@@ -345,6 +345,7 @@ struct RemoteObservationSnapshot {
   std::uint8_t flags{0};  // kRemoteObservationSnapshotMore only
   std::uint8_t count{0};
   std::uint32_t revision{0};
+  MonotonicMs sampled_ms{0};  // observer boot clock at the section fill
   std::array<std::uint8_t, kRemoteObservationSnapshotSectionMax> body{};
   std::size_t body_size{0};
 };

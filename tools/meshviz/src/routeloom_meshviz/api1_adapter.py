@@ -4,11 +4,11 @@ The gateway view is all today's API1 exposes: the physical links it proves are t
 gateway's direct neighbors, and its routes are logical next hops, never physical
 edges. Values the daemon reports as null stay null (displayed as unknown).
 
-Observation (health.get / topology.get) is local-only in M1: the observer must be
-the attached gateway itself, and snapshots describe that one device — never the
-mesh. Remote observers are refused by the daemon, never routed.
+The current meshviz snapshot parser renders the attached gateway's local
+observation. The daemon's remote pull requires OBSERVE on its network.
 """
 import json
+import re
 
 REQUEST_MAX_BYTES = 8192
 RESPONSE_MAX_BYTES = 65536
@@ -66,9 +66,11 @@ def encode_topology_request(request_id, observer, section, *, destination=None, 
         if params['destination'] in ('0000000000000000', 'ffffffffffffffff'):
             raise ValueError('destination must be a non-reserved node id')
     if cursor is not None:
-        params['cursor'] = _node_id(cursor, 'cursor')
-        if params['cursor'] == 'ffffffffffffffff':
-            raise ValueError('cursor must be below ffff…ffff')
+        if not isinstance(cursor, str) or not re.fullmatch(
+                r'[0-9a-fA-F]{16}\.[0-9a-fA-F]{8}(\.[0-9a-fA-F]{16}){4}\.[0-9a-fA-F]{2}',
+                cursor):
+            raise ValueError('cursor must be an observation page token')
+        params['cursor'] = cursor.lower()
     if section not in ('routes', 'neighbors') and (
             destination is not None or cursor is not None):
         raise ValueError('destination and cursor are routes/neighbors-only')

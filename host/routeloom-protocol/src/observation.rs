@@ -856,7 +856,7 @@ pub fn decode_observation_event(inner: &[u8]) -> Result<ObservationEvent, HostOp
 // and relays the answer: the observer serves the SAME section bytes the
 // USB 0x71 page carries (same encoders), so the daemon decodes both legs
 // with one codec. Pull-only (no change notifications cross the radio);
-// the 128 B reply bound pages routes 3 and neighbors 4 rows at a time.
+// the 128 B reply bound pages routes 2 and neighbors 3 rows at a time.
 // Byte-identical to `RemoteObservationQuery`/`RemoteObservationSnapshot`
 // in `components/routeloom/{include/routeloom/telemetry.hpp,src/telemetry.cpp}`.
 
@@ -865,16 +865,16 @@ pub fn decode_observation_event(inner: &[u8]) -> Result<ObservationEvent, HostOp
 pub const REMOTE_QUERY_BODY_SIZE: usize = 24;
 /// Diagnostic subtype 8 head: prefix + request_id:u32, observer:u64,
 /// observer_boot:u64, section:u8, flags:u8, count:u8, reserved:u8,
-/// revision:u32 — then the 0x71-identical section bytes (0..96).
-pub const REMOTE_SNAPSHOT_HEAD_SIZE: usize = 32;
+/// revision:u32, sampled_ms:u64 — then the 0x71-identical section bytes.
+pub const REMOTE_SNAPSHOT_HEAD_SIZE: usize = 40;
 /// Largest subtype 8 body (head + section bytes), prefix included.
 pub const REMOTE_SNAPSHOT_BODY_MAX: usize = 128;
-/// Largest section payload inside a subtype 8 body.
+/// Fixed decoder storage bound; the valid page shapes occupy at most 72 bytes.
 pub const REMOTE_SECTION_MAX: usize = 96;
 /// Remote page bounds (the 128 B reply bound pages routes 3 and
-/// neighbors 4 rows at a time); singletons answer exactly one body.
-pub const REMOTE_ROUTES_MAX: u8 = 3;
-pub const REMOTE_NEIGHBORS_MAX: u8 = 4;
+/// neighbors 3 rows at a time); singletons answer exactly one body.
+pub const REMOTE_ROUTES_MAX: u8 = 2;
+pub const REMOTE_NEIGHBORS_MAX: u8 = 3;
 /// Query flags: bit0 EXACT (routes/neighbors only — `after` names one
 /// destination/peer). Snapshot flags: bit0 MORE.
 pub const REMOTE_QUERY_EXACT: u8 = 1 << 0;
@@ -953,6 +953,7 @@ pub struct RemoteObservationSnapshot {
     pub flags: u8,
     pub count: u8,
     pub revision: u32,
+    pub sampled_ms: u64,
     pub body: Vec<u8>,
 }
 
@@ -1013,6 +1014,7 @@ pub fn decode_remote_observation_snapshot(
         flags,
         count,
         revision: u32::from_be_bytes(be(body, 28)?),
+        sampled_ms: u64::from_be_bytes(be(body, 32)?),
         body: body[REMOTE_SNAPSHOT_HEAD_SIZE..].to_vec(),
     })
 }
@@ -1521,15 +1523,15 @@ mod tests {
     }
 
     // C++-encoded (`components/routeloom/src/telemetry.cpp`) oracle vectors.
-    const REMOTE_QUERY_HEX: &str = "01070000a1b2c3d405040100000000000000000900000000";
-    const REMOTE_SNAPSHOT_HEX: &str = "01080000010203040000000000000abc112233445566778805010100a5a5a5a500000000000000020000007800013880000100000607b900";
+    const REMOTE_QUERY_HEX: &str = "01070000a1b2c3d405030100000000000000000900000000";
+    const REMOTE_SNAPSHOT_HEX: &str = "01080000010203040000000000000abc112233445566778805010100a5a5a5a500000000000003e800000000000000020000007800013880000100000607b900";
 
     #[test]
     fn remote_query_encodes_the_cpp_layout() {
         let query = RemoteObservationQuery {
             request_id: 0xA1B2_C3D4,
             section: SECTION_NEIGHBORS,
-            max_entries: 4,
+            max_entries: 3,
             flags: REMOTE_QUERY_EXACT,
             after: 9,
         };
@@ -1551,7 +1553,7 @@ mod tests {
                 ..query
             },
             RemoteObservationQuery {
-                max_entries: 5,
+                max_entries: 4,
                 ..query
             },
             RemoteObservationQuery {
@@ -1596,6 +1598,7 @@ mod tests {
         assert_eq!(snapshot.flags, REMOTE_SNAPSHOT_MORE);
         assert_eq!(snapshot.count, 1);
         assert_eq!(snapshot.revision, 0xA5A5_A5A5);
+        assert_eq!(snapshot.sampled_ms, 1_000);
         // The section bytes are the 0x71 neighbor entry verbatim — the
         // local page codec decodes the remote leg unchanged.
         let entry = decode_neighbor_detail_entry(&snapshot.body).unwrap();
