@@ -2160,6 +2160,8 @@ class MeshNode {
   void obs_final(const Delivery& delivery, DeliveryState state,
                  MonotonicMs now_ms) noexcept;
 
+  void finish_hop_accept(TxJob& job, bool rtt_sampled, std::uint32_t rtt_ms,
+                         MonotonicMs now_ms) noexcept;
   void handle_hop_accept(const wire::PlainFrame& frame, NodeId peer,
                          const RxBinding& rx, MonotonicMs now_ms) noexcept;
   void handle_data(const wire::LinkOpenedFrame& frame, NodeId peer,

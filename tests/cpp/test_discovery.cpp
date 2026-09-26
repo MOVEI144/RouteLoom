@@ -1135,9 +1135,9 @@ void test_older_peer_probe_gets_current_generation_result() {
 
   world.medium.drop_wire = true;
   world.medium.drop_rld1 = true;
-  world.run(31000);
+  world.run(29000);
   NeighborPhase phase{};
-  CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Stale);
+  CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Reachable);
   const std::size_t before = b.port.count_wire(FrameType::NeighborResult);
   probe.binding_generation = original;
   probe.probe_sequence = 902;
@@ -1145,6 +1145,10 @@ void test_older_peer_probe_gets_current_generation_result() {
   b.engine.on_wire_rx(a.mac, FrameType::NeighborProbe, encoded.view(),
                       world.medium.now);
   CHECK(b.port.count_wire(FrameType::NeighborResult) == before + 1);
+  // An older epoch gets a recovery answer, but cannot extend this binding's
+  // lease or reset its bounded stale-reprobe budget.
+  world.run(2000);
+  CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Stale);
   if (b.port.count_wire(FrameType::NeighborResult) > before) {
     const auto sent = std::find_if(b.port.sent.rbegin(), b.port.sent.rend(),
                                    [](const TestPort::Sent& s) {
@@ -1411,6 +1415,49 @@ void test_result_waits_for_local_tx() {
   CHECK(b.port.count_wire(FrameType::NeighborResult) == results);
   world.run(200);
   CHECK(b.port.count_wire(FrameType::NeighborResult) > results);
+}
+
+void test_revoked_peers_release_pending_result_slots() {
+  DiscWorld world;
+  Unit& center = world.add(1, 0xA1, true);
+  std::array<Unit*, 4> leaves{};
+  for (std::size_t i = 0; i < leaves.size(); ++i) {
+    leaves[i] = &world.add(2 + i, static_cast<std::uint8_t>(0xB2 + i), true);
+    center.hooks.peer_members.insert(leaves[i]->node);
+    leaves[i]->hooks.peer_members.insert(center.node);
+  }
+  for (std::size_t i = 0; i < leaves.size(); ++i) {
+    for (std::size_t j = 0; j < leaves.size(); ++j) {
+      if (i != j) world.medium.block(leaves[i]->mac, leaves[j]->mac);
+    }
+  }
+  world.start_all();
+  for (Unit* leaf : leaves) run_exchange(world, *leaf);
+
+  autonomy::NeighborProbePayload probe{};
+  probe.probe_sequence = 400;
+  probe.sent_ms = world.medium.now;
+  probe.requested_lease_ms = 30000;
+  autonomy::EncodedPayload encoded{};
+  for (std::size_t i = 0; i < 3; ++i) {
+    CHECK(center.engine.binding_generation_of(leaves[i]->node,
+                                              probe.binding_generation));
+    probe.probe_sequence = 400 + static_cast<std::uint32_t>(i);
+    CHECK_OK(autonomy::neighbor_probe_encode(probe, encoded));
+    center.port.fail_next = 1;
+    center.engine.on_wire_rx(leaves[i]->mac, FrameType::NeighborProbe,
+                             encoded.view(), world.medium.now);
+    CHECK_OK(center.engine.revoke_peer(leaves[i]->node));
+  }
+
+  CHECK(center.engine.binding_generation_of(leaves[3]->node,
+                                            probe.binding_generation));
+  probe.probe_sequence = 403;
+  CHECK_OK(autonomy::neighbor_probe_encode(probe, encoded));
+  const auto before = center.port.count_wire(FrameType::NeighborResult);
+  center.engine.on_wire_rx(leaves[3]->mac, FrameType::NeighborProbe,
+                           encoded.view(), world.medium.now);
+  CHECK(center.port.count_wire(FrameType::NeighborResult) == before + 1);
 }
 
 // A local refusal must not use up the long on-air STALE re-probe cadence.
@@ -1718,6 +1765,7 @@ int main() {
   test_reauth_releases_transient_candidate();
   test_stale_peer_repaired_while_other_edge_reachable();
   test_result_waits_for_local_tx();
+  test_revoked_peers_release_pending_result_slots();
   test_stale_probe_local_refusal_retries_promptly();
   test_send_failure_stats();
   test_forget_revoked_peer();

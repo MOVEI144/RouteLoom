@@ -738,6 +738,7 @@ class NeighborDiscovery {
   // Wire-lane handlers (post-BIND probes only).
   void handle_probe(Neighbor& neighbor, ByteView payload, MonotonicMs now_ms) noexcept;
   void send_pending_result(Neighbor& neighbor, MonotonicMs now_ms) noexcept;
+  void clear_pending_result(NodeId peer) noexcept;
   void handle_probe_result(Neighbor& neighbor, ByteView payload,
                            MonotonicMs now_ms) noexcept;
 

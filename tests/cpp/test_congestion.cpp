@@ -60,7 +60,7 @@ struct Harness {
 
   MeshNode* add(NodeId id, std::uint8_t rounds = 3, std::uint8_t attempts = 2,
                 std::uint32_t adv_ms = 30000, std::uint32_t life_ms = 60000,
-                bool budget_gate = false) {
+                bool budget_gate = false, std::uint32_t watchdog_ms = 1000) {
     NodeConfig cfg{};
     cfg.network = kNet;
     cfg.node = id;
@@ -72,6 +72,7 @@ struct Harness {
     cfg.hop_accept_timeout_ms = 60;
     cfg.max_link_attempts = attempts;
     cfg.max_end_to_end_rounds = rounds;
+    cfg.callback_watchdog_ms = watchdog_ms;
     sec[id] = std::make_unique<TestSecurity>();
     obs[id] = std::make_unique<CapturingObserver>();
     radio[id] = std::make_unique<SimRadio>(net, id);
@@ -452,6 +453,61 @@ void test_route_maintenance_has_two_slots_under_data_load() {
   a->poll(h.now + 50);
   a->poll(h.now + 100);
   CHECK(a->congestion_stats().queued == 31);
+}
+
+void test_accepted_data_retry_keeps_its_queue_slot() {
+  Harness h;
+  MeshNode* a = h.add(1, 3, 2, 50, 60000, false, 5000);
+  (void)h.add(2);
+  (void)h.add(3);
+  h.link(1, 2);
+  h.link(1, 3);
+  // Leave a DATA attempt with the driver, then fill the scheduler with
+  // route updates. The already admitted DATA must retain a retry slot.
+  h.step(1);
+  std::array<std::uint8_t, kMaxApplicationPayload> body{};
+  MessageId id{};
+  CHECK_OK(a->send(2, ByteView{body.data(), body.size()}, SendOptions{}, h.now, id));
+  for (int i = 0; i < 10 && h.net.first_pending() == nullptr; ++i) {
+    a->poll(h.now);
+    ++h.now;
+  }
+  CHECK(h.net.first_pending() != nullptr);
+  if (h.net.first_pending() == nullptr) return;
+  FrameSight pending_sight{};
+  CHECK(sight_frame(ByteView{h.net.first_pending()->frame.data(),
+                             h.net.first_pending()->frame.size()}, pending_sight));
+  CHECK(pending_sight.type == FrameType::Data);
+  for (; h.now < 3000 && a->congestion_stats().queued < 29; h.now += 50) {
+    a->poll(h.now);
+  }
+  CHECK(a->congestion_stats().queued == 29);
+  SimNetwork::Pending failed{};
+  CHECK(h.net.pop_first_pending(failed));
+  CHECK_OK(a->on_radio_tx_result(failed.token, false, h.now));
+  CHECK(a->congestion_stats().queued == 30);
+  for (int i = 0; i < 200 && h.data_sights(id.sequence) == 0; ++i) {
+    h.step(1);
+    ++h.now;
+  }
+  CHECK(h.data_sights(id.sequence) > 0);
+}
+
+void test_route_updates_do_not_spend_origin_data_cap() {
+  Harness h;
+  MeshNode* a = h.add(1, 3, 2, 50, 60000, false, 5000);
+  (void)h.add(2);
+  h.link(1, 2);
+  // Keep the boot advertisement in flight while local route updates queue.
+  // Their source is this node, but they do not consume its DATA flow cap.
+  for (h.now = 0; h.now < 1000 && a->congestion_stats().queued < 12;
+       h.now += 50) {
+    a->poll(h.now);
+  }
+  CHECK(a->congestion_stats().queued == 12);
+  MessageId id{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, id));
+  CHECK(a->congestion_stats().queued == 13);
 }
 
 void test_physical_token_never_wraps() {
@@ -1636,6 +1692,8 @@ int main() {
   test_full_control_lane_never_commits_a_forward();
   test_failed_route_advertisement_rearmed();
   test_route_maintenance_has_two_slots_under_data_load();
+  test_accepted_data_retry_keeps_its_queue_slot();
+  test_route_updates_do_not_spend_origin_data_cap();
   test_physical_token_never_wraps();
   test_flow_caps();
   test_busy_emission();

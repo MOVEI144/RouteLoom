@@ -120,6 +120,15 @@ class SimNetwork {
                             std::vector<std::uint8_t>(frame.data, frame.data + frame.size)});
     return routeloom::Status::success();
   }
+  const Pending* first_pending() const noexcept {
+    return queue.empty() ? nullptr : &queue.front();
+  }
+  bool pop_first_pending(Pending& out) {
+    if (queue.empty()) return false;
+    out = std::move(queue.front());
+    queue.pop_front();
+    return true;
+  }
 
   // Deterministic service-time steering: every TX completes `service_us`
   // µs after submission unless a test overrides it per-Pending (issue #46).

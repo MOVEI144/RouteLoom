@@ -167,7 +167,7 @@ void MeshNode::TxScheduler::charge_cost(TxJob& job) noexcept {
   // for the MAC header + preamble + MAC ACK every frame occupies (radio.md
   // §9 — body bytes alone undercharge a frame by ~70-105B of air time).
   std::uint64_t cost = wire::kHeaderSize + kAeadTagSize + kTxFrameFixedCostBytes;
-  if (job.form == JobForm::Forwarded) {
+  if (job.form != JobForm::Plain) {
     cost += job.forwarded.protected_payload_size;
   } else {
     cost += job.plain.payload_size;
@@ -181,6 +181,10 @@ void MeshNode::TxScheduler::charge_cost(TxJob& job) noexcept {
 std::size_t MeshNode::TxScheduler::origin_count(const NodeId origin) const noexcept {
   std::size_t count = 0;
   pool_.for_each([&](const TxJob& job) {
+    if (job.form == JobForm::Plain &&
+        (job.plain.header.type == FrameType::RouteUpdate ||
+         job.plain.header.type == FrameType::SeqnoRequest ||
+         job.plain.header.type == FrameType::RouteRequest)) return;
     const NodeId value = job.form == JobForm::Forwarded
                              ? job.forwarded.header.origin
                              : job.plain.header.origin;
@@ -252,7 +256,8 @@ Status MeshNode::TxScheduler::enqueue(TxJob&& job, const NodeId self,
        type == FrameType::RouteRequest);
   // Required work already accepted under check() keeps its slot; only new
   // unreserved jobs may be refused to preserve route and ACK capacity.
-  if (job.txn == kInvalidTxnHandle &&
+  if (job.txn == kInvalidTxnHandle && job.attempts == 0 &&
+      job.physical_attempts == 0 &&
       free_slots() <= kControlReserveSlots + (route_maintenance ? 0 : kRouteReserveSlots)) {
     ++stats_.admissions_rejected;
     return Status::error(StatusCode::WouldBlock, "TX_QUEUE_RESERVED");
@@ -265,7 +270,7 @@ Status MeshNode::TxScheduler::enqueue(TxJob&& job, const NodeId self,
     return Status::error(StatusCode::Congested, "BULK_SUSPENDED_AT_WATERMARK");
   }
   // Global pool bound + per-origin/per-neighbor caps resist spoofed floods.
-  if (data_class(cls)) {
+  if (data_class(cls) && job.attempts == 0 && job.physical_attempts == 0) {
     if (origin_count(origin) >= kMaxJobsPerOrigin) {
       ++stats_.admissions_rejected;
       return Status::error(StatusCode::Congested, "ORIGIN_QUEUE_CAP");
@@ -2120,6 +2125,7 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
   if (physical_.active) {
     if (now_ms - physical_.submitted_at_ms >= config_.callback_watchdog_ms) {
       TxJob job = physical_.job;
+      const bool early_hop_accept = physical_.early_hop_accept;
       physical_ = PhysicalInflight{};
       observer_.on_diagnostic("DRIVER_RESULT_UNKNOWN", job.peer, &job.ack.key.id);
       // Callback-uncertain results are accounted separately from RF loss
@@ -2137,7 +2143,12 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
         --bucket->pending_completions;
       }
       (void)radio_.recover();
-      retry_or_fail(job, "DRIVER_RESULT_UNKNOWN", now_ms);
+      if (early_hop_accept) {
+        if (auto* neighbor = find_neighbor(job.peer)) neighbor->consecutive_failures = 0;
+        finish_hop_accept(job, false, 0, now_ms);
+      } else {
+        retry_or_fail(job, "DRIVER_RESULT_UNKNOWN", now_ms);
+      }
     }
     return;
   }
@@ -2185,22 +2196,25 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
     // launching it on a next hop the table no longer selects — a frame
     // sent down an infeasible route can close a forwarding loop (D4-02).
     NodeId routed = kInvalidNodeId;
+    const wire::Header& route_header = queued->form == JobForm::Plain
+                                           ? queued->plain.header
+                                           : queued->forwarded.header;
     if (queued->form == JobForm::Forwarded &&
-        queued->forwarded.header.type != FrameType::GroupData) {
+        route_header.type != FrameType::GroupData) {
       // Group copies target a tree child chosen at round start; their
       // destination is a group address, never a unicast route.
-      routed = queued->forwarded.header.destination;
-    } else if (queued->form == JobForm::Plain &&
-               (queued->plain.header.type == FrameType::Data ||
-                queued->plain.header.type == FrameType::Service ||
-                queued->plain.header.type == FrameType::EndReceipt)) {
-      routed = queued->plain.header.destination;
+      routed = route_header.destination;
+    } else if (queued->form != JobForm::Forwarded &&
+               (route_header.type == FrameType::Data ||
+                route_header.type == FrameType::Service ||
+                route_header.type == FrameType::EndReceipt)) {
+      routed = route_header.destination;
     }
     if (routed != kInvalidNodeId) {
       const auto live = routes_.best(routed);
       if (!live.valid || find_neighbor(live.next_hop) == nullptr) {
-        if (queued->form == JobForm::Plain &&
-            queued->plain.header.type == FrameType::EndReceipt &&
+        if (queued->form != JobForm::Forwarded &&
+            route_header.type == FrameType::EndReceipt &&
             queued->peer == kInvalidNodeId) {
           TxJob failed{};
           scheduler_.take_selected(failed);
@@ -2407,9 +2421,9 @@ Status MeshNode::on_radio_tx_result(const std::uint64_t token, const bool succes
   if (early_hop_accept) {
     // A binding-matched accept is stronger evidence than the MAC callback;
     // keep the physical fence until now even if the callback reports loss.
+    // The accept preceded MAC completion, so there is no MAC-to-ACK RTT.
     if (neighbor != nullptr) neighbor->consecutive_failures = 0;
-    obs_hop_result(job, true, now_ms);
-    complete_job(job, true, now_ms);
+    finish_hop_accept(job, false, 0, now_ms);
     return Status::success();
   }
   if (!success) {
@@ -2550,7 +2564,7 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
   if (job.form == JobForm::Plain && job.plain.header.type == FrameType::RouteUpdate &&
       job.peer != kBroadcastNodeId) {
     const auto* neighbor = find_neighbor(job.peer);
-    if (neighbor != nullptr && neighbor->active) arm_triggered_advertisement(now_ms + 50);
+    if (neighbor != nullptr && neighbor->active) trigger_route_advertisement(now_ms + 50);
   }
   // Terminate the transaction work item first: the failure report below
   // reserves a fresh short transaction, which must see the freed capacity.
@@ -3238,6 +3252,46 @@ bool MeshNode::tx_admitted_now(const TxJob& job) const noexcept {
   return peer_inflight(job.peer) < peer_window(job.peer);
 }
 
+void MeshNode::finish_hop_accept(TxJob& job, const bool rtt_sampled,
+                                 const std::uint32_t rtt_ms,
+                                 const MonotonicMs now_ms) noexcept {
+  obs_hop_result(job, true, now_ms);
+  if (auto* bucket = job_bucket(job, now_ms)) {
+    ++bucket->current.hop_accepts;
+    if (rtt_sampled) {
+      ++bucket->current.hop_rtt_samples;
+      ewma_add(bucket->current.hop_rtt_us_ewma, rtt_ms * 1000u,
+               bucket->current.hop_rtt_samples);
+    }
+    bucket->current.present = true;
+    if (bucket->current.first_sample_ms == 0) {
+      bucket->current.first_sample_ms = now_ms;
+    }
+    bucket->current.last_sample_ms = now_ms;
+  }
+  if (auto* neighbor = find_neighbor(job.peer)) {
+    if (rtt_sampled) {
+      ++neighbor->hop_rtt_samples;
+      ewma_add(neighbor->hop_rtt_ewma_ms, rtt_ms,
+               neighbor->hop_rtt_samples);
+    }
+    // An authenticated accept clears sustained busy and advances the
+    // peer window, regardless of whether it precedes MAC completion.
+    neighbor->busy_active = false;
+    neighbor->busy_since_ms = 0;
+    neighbor->last_busy_feedback_ms = 0;
+    if (neighbor->window_accepts < kWindowGrowAccepts) {
+      ++neighbor->window_accepts;
+    }
+    if (neighbor->window_accepts >= kWindowGrowAccepts &&
+        neighbor->tx_window < kPeerWindowMax) {
+      ++neighbor->tx_window;
+      neighbor->window_accepts = 0;
+    }
+  }
+  complete_job(job, true, now_ms);
+}
+
 void MeshNode::handle_hop_accept(const wire::PlainFrame& frame, const NodeId peer,
                                  const RxBinding& rx,
                                  const MonotonicMs now_ms) noexcept {
@@ -3282,7 +3336,6 @@ void MeshNode::handle_hop_accept(const wire::PlainFrame& frame, const NodeId pee
   const bool was_deferred = awaiting->busy_deferred;
   const MonotonicMs sent_at_ms = awaiting->sent_at_ms;
   awaiting_hop_.release(awaiting);
-  obs_hop_result(job, true, now_ms);
   // HOP_ACCEPT round trip, MAC-accept -> authenticated accept. Only a live
   // exchange measures the path — a BUSY deferral's wait is peer-directed
   // and must never enter the adaptive RTO average (radio.md §8). The match
@@ -3294,44 +3347,7 @@ void MeshNode::handle_hop_accept(const wire::PlainFrame& frame, const NodeId pee
                            now_ms >= sent_at_ms;
   const std::uint32_t rtt_ms =
       rtt_sampled ? static_cast<std::uint32_t>(now_ms - sent_at_ms) : 0;
-  if (auto* bucket = job_bucket(job, now_ms)) {
-    ++bucket->current.hop_accepts;
-    if (rtt_sampled) {
-      ++bucket->current.hop_rtt_samples;
-      ewma_add(bucket->current.hop_rtt_us_ewma, rtt_ms * 1000u,
-               bucket->current.hop_rtt_samples);
-    }
-    bucket->current.present = true;
-    if (bucket->current.first_sample_ms == 0) {
-      bucket->current.first_sample_ms = now_ms;
-    }
-    bucket->current.last_sample_ms = now_ms;
-  }
-  if (auto* neighbor = find_neighbor(peer)) {
-    if (rtt_sampled) {
-      ++neighbor->hop_rtt_samples;
-      ewma_add(neighbor->hop_rtt_ewma_ms, rtt_ms,
-               neighbor->hop_rtt_samples);
-    }
-    // An authenticated accept proves work gets through: it releases the
-    // sustained-busy state that feeds the severe-busy repair path (03 §7).
-    // A BUSY-deferred exchange that still completes does not break the
-    // authenticated-accept streak — the accept is authoritative.
-    neighbor->busy_active = false;
-    neighbor->busy_since_ms = 0;
-    neighbor->last_busy_feedback_ms = 0;
-    if (neighbor->window_accepts < kWindowGrowAccepts) {
-      ++neighbor->window_accepts;
-    }
-    // 8 consecutive authenticated accepts grow the window by one (03 §5).
-    // Window growth is decoupled from memory-slot release on purpose.
-    if (neighbor->window_accepts >= kWindowGrowAccepts &&
-        neighbor->tx_window < kPeerWindowMax) {
-      ++neighbor->tx_window;
-      neighbor->window_accepts = 0;
-    }
-  }
-  complete_job(job, true, now_ms);
+  finish_hop_accept(job, rtt_sampled, rtt_ms, now_ms);
 }
 
 void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer,

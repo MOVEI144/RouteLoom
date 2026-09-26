@@ -1304,15 +1304,18 @@ void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
   // epoch so a re-announced peer can never wedge the exchange (02 §9).
   // A lower local counter on an authenticated peer can result from an
   // independent re-authentication. Reply with our current generation so the
-  // peer can catch up; only a valid binding can reach this handler.
+  // peer can catch up, but do not extend the lease from stale-epoch evidence.
+  const bool older_generation =
+      probe.binding_generation.value < neighbor.generation.value;
   if (probe.binding_generation.value > neighbor.generation.value) {
     neighbor.generation = probe.binding_generation;
   }
-  // An authenticated probe is liveness evidence: refresh the lease, re-arm
-  // the bounded Stale re-probe budget and reply.
-  neighbor.last_confirmed_ms = now_ms;
-  neighbor.stale_reprobes = 0;
-  neighbor.lease_expires_at_ms = now_ms + config_.awake_lease_ms;
+  if (!older_generation) {
+    // A current-generation probe is liveness evidence.
+    neighbor.last_confirmed_ms = now_ms;
+    neighbor.stale_reprobes = 0;
+    neighbor.lease_expires_at_ms = now_ms + config_.awake_lease_ms;
+  }
 
   PendingResult* pending = nullptr;
   for (auto& slot : pending_results_) {
@@ -1331,6 +1334,7 @@ void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
     ++stats_.peer_capacity;
     reject_event("PEER_CAPACITY", neighbor.node);
   }
+  if (older_generation) return;
   // If we were stale/bound and have no outstanding probe of our own, start
   // one — bidirectional confirmation still requires our own Result.
   if (neighbor.probe_outstanding == 0 &&
@@ -1366,6 +1370,12 @@ void NeighborDiscovery::send_pending_result(Neighbor& neighbor,
       *pending = PendingResult{neighbor.node, sequence,
                                static_cast<std::uint32_t>(now_ms + 50)};
     }
+  }
+}
+
+void NeighborDiscovery::clear_pending_result(const NodeId peer) noexcept {
+  for (auto& slot : pending_results_) {
+    if (slot.peer == peer) slot = PendingResult{};
   }
 }
 
@@ -1499,6 +1509,7 @@ void NeighborDiscovery::elevate_confirmed_peer(const MacAddress& peer_mac,
       }
       // Old binding is dead: revoke it and re-bind at a new generation so
       // stale TX/ACK/feedback can never attach to the new binding (02 §8).
+      clear_pending_result(existing->node);
       existing->phase = NeighborPhase::Revoked;
       if (existing->regular_held) {
         existing->regular_held = false;
@@ -1541,9 +1552,7 @@ void NeighborDiscovery::elevate_confirmed_peer(const MacAddress& peer_mac,
       return;
     }
     same->probe_outstanding = 0;
-    for (auto& slot : pending_results_) {
-      if (slot.peer == peer_node) slot = PendingResult{};
-    }
+    clear_pending_result(peer_node);
     same->stale_reprobes = 0;
     if (membership_.state() == MembershipState::Member && peer_member) {
       same->peer_member_verified = true;
@@ -1573,6 +1582,7 @@ void NeighborDiscovery::elevate_confirmed_peer(const MacAddress& peer_mac,
     });
     if (victim != nullptr) {
       if (victim->regular_held) --regular_used_;
+      clear_pending_result(victim->node);
       neighbors_.release(victim);
       neighbor = neighbors_.allocate();
     }
@@ -2403,6 +2413,7 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
       case NeighborPhase::ApprovalPending:
         if (now_ms >= n.lease_expires_at_ms) {
           if (n.regular_held) --regular_used_;
+          clear_pending_result(n.node);
           neighbors_.release(&n);
           break;
         }
@@ -2742,6 +2753,7 @@ Status NeighborDiscovery::revoke_peer(const NodeId peer) noexcept {
   if (neighbor == nullptr) {
     return Status::error(StatusCode::NotFound, "peer not bound");
   }
+  clear_pending_result(peer);
   neighbor->phase = NeighborPhase::Revoked;
   neighbor->probe_outstanding = 0;
   if (neighbor->regular_held) {
