@@ -128,6 +128,11 @@ pub const JOIN_REQUEST_TTL_MS: u64 = 24 * 3600 * 1000;
 /// Members + removed devices the ledger keeps rows for (08 §6 Q8: ~100
 /// boards per site; the bound leaves room for turnover).
 pub const DEVICE_CAP: usize = 1024;
+/// Node ids one `membership.archive` call archives at most (07 §2.2):
+/// bulk forget stays a bounded, single-commit batch.
+pub const ARCHIVE_BATCH_MAX: usize = 128;
+/// Meta key of the durable count of archived device rows.
+const META_ARCHIVED_TOTAL: &str = "archived_total";
 /// Idempotency records kept (oldest evicted).
 pub const DECISIONS_CAP: usize = 1024;
 /// Operations kept for `operations.get` (oldest evicted, but never the
@@ -335,13 +340,19 @@ pub enum DecisionMode {
 /// `join.policy.*` (07 §2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct JoinPolicy {
-    /// Members answer ZeroTouch DISCOVER (distributed to members by P3-2/P5;
-    /// the authority treats `false` like `closed` for unapproved devices).
+    /// The radio intake intent: members answer ZeroTouch DISCOVER while
+    /// open. The authority enforces `false` immediately for its own
+    /// verdicts (like `closed` for unapproved devices); the proxies learn
+    /// it through the versioned radio distribution (`policy_generation`),
+    /// which has no vehicle yet — see `policy_json`.
     pub zero_touch_open: bool,
     pub decision_mode: DecisionMode,
     pub decision_timeout_ms: u16,
     /// PendingAssignment retry when KGuard is silent or the policy closed.
     pub pending_retry_after_s: u32,
+    /// Content version, minted by `set_policy` (0 = never set). Two sets
+    /// with identical content share a generation; anything else bumps.
+    pub policy_generation: u32,
 }
 
 impl Default for JoinPolicy {
@@ -351,6 +362,7 @@ impl Default for JoinPolicy {
             decision_mode: DecisionMode::Kguard,
             decision_timeout_ms: 2000,
             pending_retry_after_s: 60,
+            policy_generation: 0,
         }
     }
 }
@@ -366,11 +378,18 @@ impl JoinPolicy {
         ];
         out.extend_from_slice(&self.decision_timeout_ms.to_be_bytes());
         out.extend_from_slice(&self.pending_retry_after_s.to_be_bytes());
+        out.extend_from_slice(&self.policy_generation.to_be_bytes());
         out
     }
 
     fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != 8 || bytes[0] > 1 || bytes[1] > 1 {
+        // Pre-generation rows are 8 bytes; they decode as generation 0.
+        let policy_generation = match bytes.len() {
+            8 => 0,
+            12 => u32::from_be_bytes(bytes[8..12].try_into().ok()?),
+            _ => return None,
+        };
+        if bytes[0] > 1 || bytes[1] > 1 {
             return None;
         }
         let policy = Self {
@@ -382,6 +401,7 @@ impl JoinPolicy {
             },
             decision_timeout_ms: u16::from_be_bytes([bytes[2], bytes[3]]),
             pending_retry_after_s: u32::from_be_bytes(bytes[4..8].try_into().ok()?),
+            policy_generation,
         };
         policy.validate().ok()?;
         Some(policy)
@@ -401,14 +421,15 @@ impl JoinPolicy {
 
     pub fn json(&self) -> String {
         format!(
-            "{{\"zero_touch_open\":{},\"decision_mode\":\"{}\",\"decision_timeout_ms\":{},\"pending_retry_after_s\":{}}}",
+            "{{\"zero_touch_open\":{},\"decision_mode\":\"{}\",\"decision_timeout_ms\":{},\"pending_retry_after_s\":{},\"policy_generation\":{}}}",
             self.zero_touch_open,
             match self.decision_mode {
                 DecisionMode::Kguard => "kguard",
                 DecisionMode::Closed => "closed",
             },
             self.decision_timeout_ms,
-            self.pending_retry_after_s
+            self.pending_retry_after_s,
+            self.policy_generation
         )
     }
 
@@ -558,6 +579,15 @@ pub struct RevokeRequest {
     pub key: String,
 }
 
+/// `membership.archive` input (after API validation): removed-device rows
+/// to forget. The authority sorts and dedups before digesting, so caller
+/// ordering never changes the idempotency identity.
+#[derive(Clone, Debug)]
+pub struct ArchiveRequest {
+    pub devices: Vec<u64>,
+    pub key: String,
+}
+
 /// `group_keys.rotate` input (after API validation): a manual rotation.
 /// Cause is always manual here — callers cannot ask for removal handling,
 /// arbitrary keys or arbitrary epochs (§6.4).
@@ -646,6 +676,11 @@ pub struct SiteAuthority {
     sak: Box<dyn RootSigner + Send>,
     store: Box<dyn SiteStore>,
     policy: JoinPolicy,
+    /// Newest policy generation the proxies confirmed applied (`None` =
+    /// never distributed). No distribution vehicle exists yet, so this
+    /// stays `None` and the radio intake follows the adoption-time
+    /// default; the vehicle will drive it and persist it.
+    policy_distributed_generation: Option<u32>,
     devices: BTreeMap<u64, DeviceRow>,
     discovered: BTreeMap<u64, Discovered>,
     requests: BTreeMap<u64, JoinRequestRec>,
@@ -688,6 +723,9 @@ pub struct SiteAuthority {
     revision: u32,
     ledger_seq: u64,
     ledger_head: [u8; 32],
+    /// Removed-device rows forgotten by `membership.archive` so far
+    /// (durable `archived_total` meta; `site.status` reports it).
+    archived_total: u64,
     next_request_id: u64,
     next_op_id: u64,
     pub counters: Counters,
@@ -1157,6 +1195,7 @@ impl SiteAuthority {
         let channel_site_epoch = id.site_claims.site_epoch;
         Ok(Self {
             policy,
+            policy_distributed_generation: None,
             devices,
             discovered,
             requests,
@@ -1184,6 +1223,7 @@ impl SiteAuthority {
             revision,
             ledger_seq,
             ledger_head,
+            archived_total: meta_u64(&snapshot, META_ARCHIVED_TOTAL)?.unwrap_or(0),
             next_request_id,
             next_op_id,
             counters: Counters::default(),
@@ -3203,6 +3243,145 @@ impl SiteAuthority {
         Ok(result)
     }
 
+    /// `membership.archive` (07 §2.2): forgets removed-device rows in one
+    /// atomic batch, reclaiming the 1024-row ledger capacity for future
+    /// joins. Ledger rows are never deleted, so the NodeId no-reuse rule
+    /// (`decide` refuses through `has_revocation`) survives the archive;
+    /// each deletion additionally commits an `archive` ledger row bound
+    /// to the forgotten row's last MemberCert.
+    ///
+    /// One live member in the batch vetoes the whole call — a bulk forget
+    /// must never half-run — while unknown ids are reported in
+    /// `skipped_unknown`, never refused (the caller may re-drive a stale
+    /// list). The idempotency digest covers the sorted id set, so a replay
+    /// returns the stored answer without touching state.
+    pub fn archive_removed(
+        &mut self,
+        principal: u32,
+        request: ArchiveRequest,
+        now_ms: u64,
+    ) -> Result<String, SiteError> {
+        let mut ids = request.devices;
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.len() > ARCHIVE_BATCH_MAX {
+            return Err(SiteError::new(
+                "INVALID_ARGUMENT",
+                format!("at most {ARCHIVE_BATCH_MAX} device ids per archive call"),
+            ));
+        }
+        let digest = sha256(
+            format!(
+                "membership.archive|{}",
+                ids.iter()
+                    .map(|n| format!("{n:016x}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+            .as_bytes(),
+        );
+        if let Some(answer) = self.idempotent(principal, &request.key, &digest) {
+            return answer;
+        }
+        let mut gone: Vec<DeviceRow> = Vec::new();
+        let mut skipped: Vec<u64> = Vec::new();
+        for node in &ids {
+            match self.devices.get(node) {
+                None => skipped.push(*node),
+                Some(row) if !row.member => gone.push(row.clone()),
+                Some(row) => {
+                    return Err(SiteError::new(
+                        "CONFLICT",
+                        "the batch holds a live member; archive removed devices only",
+                    )
+                    .with(format!(
+                        "\"device_id\":\"{}\",\"generation\":{}",
+                        h16(row.node),
+                        row.generation
+                    )));
+                }
+            }
+        }
+        // One chained `archive` ledger row per forgotten row (same shape
+        // `ledger_row` builds: seq chains, hash binds kind/node/kid/
+        // generation/digest/ms). The digest is the forgotten row's last
+        // MemberCert — the credential being forgotten.
+        let mut seq = self.ledger_seq;
+        let mut head = self.ledger_head;
+        let mut ledger = Vec::with_capacity(gone.len());
+        for row in &gone {
+            seq = seq
+                .checked_add(1)
+                .ok_or_else(|| SiteError::new("AUTHORITY_ERROR", "ledger seq exhausted"))?;
+            let mut entry = LedgerRow {
+                seq,
+                kind: "archive".to_string(),
+                node: row.node,
+                kid: row.kid,
+                generation: row.generation,
+                digest: sha256(&row.member_cert),
+                ms: now_ms,
+                hash: [0; 32],
+            };
+            entry.hash = ledger_hash(&head, &entry);
+            head = entry.hash;
+            ledger.push(entry);
+        }
+        let total = self
+            .archived_total
+            .checked_add(gone.len() as u64)
+            .ok_or_else(|| SiteError::new("AUTHORITY_ERROR", "archived total exhausted"))?;
+        let archived_list = gone
+            .iter()
+            .map(|row| format!("\"{}\"", h16(row.node)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let skipped_list = skipped
+            .iter()
+            .map(|node| format!("\"{node:016x}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let result =
+            format!("{{\"archived\":[{archived_list}],\"skipped_unknown\":[{skipped_list}]}}");
+        // One transaction: the row deletes, the `archive` ledger rows, the
+        // durable counter and the idempotency record. A commit failure
+        // leaves every row listed, so the operator can retry.
+        let mut batch = Batch {
+            devices_delete: gone.iter().map(|row| row.node).collect(),
+            ledger,
+            ..Batch::default()
+        };
+        if !gone.is_empty() {
+            batch
+                .meta
+                .push((META_ARCHIVED_TOTAL, total.to_be_bytes().to_vec()));
+        }
+        self.decision_doc(&mut batch, principal, &request.key, digest, &result, now_ms);
+        if let Err(error) = self.store.commit(&batch) {
+            self.store_error(now_ms, &error);
+            return Err(store_failure(&error));
+        }
+        for row in &gone {
+            self.devices.remove(&row.node);
+            self.pull_buckets.remove(&row.node);
+        }
+        self.ledger_seq = seq;
+        self.ledger_head = head;
+        self.archived_total = total;
+        self.remember_decision(principal, &request.key, digest, &result, now_ms);
+        if !gone.is_empty() {
+            self.event(
+                now_ms,
+                format!(
+                    "\"kind\":\"member.archived\",\"count\":{},\"skipped_unknown\":{}",
+                    gone.len(),
+                    skipped.len()
+                ),
+            );
+        }
+        Ok(result)
+    }
+
     // --- group keys ----------------------------------------------------------------------
 
     fn checked_next_op_id(&self) -> Result<u64, SiteError> {
@@ -4820,10 +4999,23 @@ impl SiteAuthority {
         std::mem::take(&mut self.channel_hints)
     }
 
-    pub fn set_policy(&mut self, policy: JoinPolicy) -> Result<String, SiteError> {
+    pub fn set_policy(&mut self, mut policy: JoinPolicy) -> Result<String, SiteError> {
         policy
             .validate()
             .map_err(|m| SiteError::new("INVALID_ARGUMENT", m))?;
+        // The generation is minted here, never trusted from the caller: a
+        // set that changes no content keeps the stored generation (no new
+        // version to distribute); anything else bumps from the stored
+        // policy, so racing sets still strictly increase.
+        policy.policy_generation = self.policy.policy_generation;
+        if policy == self.policy {
+            return Ok(self.policy_json());
+        }
+        policy.policy_generation = self
+            .policy
+            .policy_generation
+            .checked_add(1)
+            .ok_or_else(|| SiteError::new("AUTHORITY_ERROR", "policy generation exhausted"))?;
         self.store
             .commit(&Batch {
                 meta: vec![("policy", policy.encode())],
@@ -4831,7 +5023,25 @@ impl SiteAuthority {
             })
             .map_err(|e| store_failure(&e))?;
         self.policy = policy;
-        Ok(policy.json())
+        Ok(self.policy_json())
+    }
+
+    /// `join.policy.get` body (07 §2.1): the policy content plus the radio
+    /// OFFER convergence state. Host approval (`decision_mode`, and the
+    /// `zero_touch_open=false` verdict rule) takes effect at set time;
+    /// the proxies converge on `policy_generation` through the versioned
+    /// radio distribution, whose newest confirmed generation is
+    /// `radio_distributed_generation` (`null` = nothing distributed yet).
+    pub fn policy_json(&self) -> String {
+        let content = self.policy.json();
+        let distributed = self
+            .policy_distributed_generation
+            .map_or_else(|| "null".to_string(), |g| g.to_string());
+        format!(
+            "{},\"radio_distributed_generation\":{}}}",
+            &content[..content.len() - 1],
+            distributed
+        )
     }
 
     // --- read side ------------------------------------------------------------------------------
@@ -4871,7 +5081,7 @@ impl SiteAuthority {
             .stats()
             .channels;
         format!(
-            "{{\"site_id\":\"{}\",\"network\":\"{}\",\"network_low32\":\"{:08x}\",\"site_epoch\":{},\"site_cert_serial\":{},\"sak_fingerprint\":\"{}\",\"device_ca_id\":\"{}\",\"rs_epoch\":{},\"gk_epoch\":{},\"gk_staged\":{staged},\"gk\":{{\"phase\":\"{phase}\",\"cause\":{cause},\"targets\":{targets},\"staged_ack\":{staged_ack},\"active_ack\":{active_ack},\"unknown\":{unknown}}},\"authority\":{{\"attached\":{authority_attached},\"channels\":{authority_channels}}},\"member_cap\":{MEMBER_CAP},\"members\":{members},\"members_unconfirmed\":{unconfirmed},\"removed\":{removed},\"discovered\":{},\"join_requests\":{},\"live_exchanges\":{},\"channel\":{},\"channel_epoch\":{},\"gateways\":[{gateways}],\"membership_revision\":{},\"ledger_seq\":{},\"storage_durable\":{},\"policy\":{},\"counters\":{},\"clock\":\"host_unix_ms\",\"now_ms\":{}}}",
+            "{{\"site_id\":\"{}\",\"network\":\"{}\",\"network_low32\":\"{:08x}\",\"site_epoch\":{},\"site_cert_serial\":{},\"sak_fingerprint\":\"{}\",\"device_ca_id\":\"{}\",\"rs_epoch\":{},\"gk_epoch\":{},\"gk_staged\":{staged},\"gk\":{{\"phase\":\"{phase}\",\"cause\":{cause},\"targets\":{targets},\"staged_ack\":{staged_ack},\"active_ack\":{active_ack},\"unknown\":{unknown}}},\"authority\":{{\"attached\":{authority_attached},\"channels\":{authority_channels}}},\"member_cap\":{MEMBER_CAP},\"members\":{members},\"members_unconfirmed\":{unconfirmed},\"removed\":{removed},\"archived_total\":{},\"discovered\":{},\"join_requests\":{},\"live_exchanges\":{},\"channel\":{},\"channel_epoch\":{},\"gateways\":[{gateways}],\"membership_revision\":{},\"ledger_seq\":{},\"storage_durable\":{},\"policy\":{},\"counters\":{},\"clock\":\"host_unix_ms\",\"now_ms\":{}}}",
             h16(self.id.site_id),
             h16(self.id.network),
             self.id.network & 0xFFFF_FFFF,
@@ -4881,6 +5091,7 @@ impl SiteAuthority {
             h16(self.id.device_ca_id),
             self.rs_epoch,
             self.gks.active_epoch(),
+            self.archived_total,
             self.discovered.len(),
             self.requests.len(),
             self.txns.len(),
@@ -4889,7 +5100,7 @@ impl SiteAuthority {
             self.revision,
             self.ledger_seq,
             self.store.durable(),
-            self.policy.json(),
+            self.policy_json(),
             self.counters.json(),
             time.unix_ms
         )

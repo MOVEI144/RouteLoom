@@ -268,6 +268,19 @@ Status LifecycleStore::finish_switch(const Digest256& commit_digest) noexcept {
   std::memcpy(done.payload.bytes.data(), commit_digest.data(), commit_digest.size());
   return commit(done, true);  // no old DAMS/GK in either journal slot
 }
+Status LifecycleStore::clear() noexcept {
+  const Status status = pair_.erase_all();
+  secure_clear(scratch_.bytes.data(), scratch_.bytes.size());
+  scratch_.size = 0;
+  if (!status) {
+    // A failed erase leaves unknown slot state: re-observe rather than
+    // claim an empty journal, so the next deprovision retries honestly.
+    (void)initialize();
+    return status;
+  }
+  record_ = LifecycleRecord{};
+  return Status::success();
+}
 Status LifecycleStore::scrub_idle() noexcept {
   if (!has_record() || record_.mode != LifecycleMode::Idle || unknown_sibling() ||
       pair_.quarantined() || pair_.uncertain())

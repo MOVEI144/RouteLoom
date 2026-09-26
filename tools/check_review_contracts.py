@@ -39,10 +39,10 @@ ACCEPTANCE_NO_HOST_TEST = {
 }
 
 ACCEPTANCE_ID_RE = re.compile(r"\bV1-[A-Z]\d+\b")
-# The six design acceptance tables currently define 62 stable IDs. Keep
+# The six design acceptance tables currently define 65 stable IDs. Keep
 # their roster independent of the table scan so deleting a table row
 # cannot silently shrink the set being checked.
-ACCEPTANCE_SERIES_END = {"J": 15, "K": 12, "R": 10, "N": 8, "F": 8, "H": 9}
+ACCEPTANCE_SERIES_END = {"J": 15, "K": 12, "R": 10, "N": 8, "F": 8, "H": 12}
 EXPECTED_ACCEPTANCE_IDS = {
     f"V1-{series}{number:02d}"
     for series, end in ACCEPTANCE_SERIES_END.items()

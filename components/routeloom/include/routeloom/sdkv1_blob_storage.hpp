@@ -29,7 +29,8 @@
 //   - the record lands as a blob of exactly data.size bytes; the unread tail
 //     of the slot view reads 0xFF, matching what the store wrote;
 //   - backend errors surface as StorageFailure; nothing here erases, resets
-//     or reformats (recovery is the stores' explicit recover()).
+//     or reformats (recovery is the stores' explicit recover(); erase is
+//     the console's explicit deprovision).
 // Resume slots have no seal: any size other than the slot size reads as
 // the non-erased pattern, which fails the CRC and is treated as an empty
 // slot (the only consequence of a torn resume slot is one full EDHOC,
@@ -97,6 +98,10 @@ class BlobNamespace {
   virtual Status blob_read(const char* key, MutableByteView target,
                            std::size_t& read_len) noexcept = 0;
   virtual Status blob_write(const char* key, ByteView data) noexcept = 0;
+  // Erase `key` (durably, like a write). A missing key is success: erase
+  // is the explicit deprovision primitive, never an implicit recovery —
+  // only the maintenance console's deprovision verb erases store keys.
+  virtual Status blob_erase(const char* key) noexcept = 0;
 };
 
 // The read-back contract above for one key into a slot view of
@@ -115,6 +120,7 @@ class BlobRecordSlotStorage final : public RecordSlotStorage {
 
   Status read(std::uint8_t slot, MutableByteView target) noexcept override;
   Status write(std::uint8_t slot, ByteView data) noexcept override;
+  Status erase(std::uint8_t slot) noexcept override;
 
   // The fixed layouts above.
   static BlobRecordSlotStorage identity(BlobNamespace& blobs) noexcept;

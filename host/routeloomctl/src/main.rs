@@ -6,6 +6,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
+mod office_ledger;
 mod provision;
 mod provision_office;
 
@@ -18,7 +19,7 @@ fn usage() {
         "routeloomctl provision-keygen --root-id <16hex> --out <key.json>|provision-authority-keygen --authority-id <16hex> --out <key.json>|provision-image --spec <image-spec.json> --out <image.rlt1> [--nvs-dir <dir> [--credential <cred-spec.json>]]|provision-manifest --image <spec.json|image.rlt1> --key <root.key> --out <manifest.rtm1>|provision-verify --manifest <file> --current <spec.json|image.rlt1>  (local provisioning — no daemon socket)"
     );
     eprintln!(
-        "routeloomctl provision-devca-keygen --device-ca-id <16hex> --out <devca.key>|provision-pop-challenge --node <16hex>|provision-devcert --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --challenge <64hex> --pop <file> --out-dir <dir>|provision-identity --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --out-dir <dir>|provision-siteca-keygen --site-ca-id <16hex> --out <siteca.key>|site-cert --ca-key <siteca.key> --site-id <16hex> --sak-pubkey <128hex> --network-low32 <8hex> --site-epoch <u32> --serial <u32> --out <sitecert.cwt>  (SDK v1 office tooling — no daemon socket)"
+        "routeloomctl provision-devca-keygen --device-ca-id <16hex> --out <devca.key>|provision-pop-challenge --node <16hex>|provision-devcert --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --challenge <64hex> --pop <file> --out-dir <dir> [--ledger <file>] [--work-id <id>]|provision-identity --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --out-dir <dir> [--ledger <file>] [--work-id <id>]|provision-ledger-status --ledger <file>|provision-ledger-release --ledger <file> --node <16hex> --serial <u32> --work-id <id>|provision-ledger-import --ledger <file> --out-dir <dir> [--work-id <id>]|provision-confirm-written --ledger <file> --node <16hex> --devcert-sha256 <64hex> [--out-dir <dir>]|provision-expect --out-dir <dir> [--fw <version>]|provision-batch --ca-key <devca.key> --spec <identity-spec.json> --ledger <file> --csv <file> --out-root <dir> [--mode injected|devcert]|provision-siteca-keygen --site-ca-id <16hex> --out <siteca.key>|site-cert --ca-key <siteca.key> --site-id <16hex> --sak-pubkey <128hex> --network-low32 <8hex> --site-epoch <u32> --serial <u32> --out <sitecert.cwt>  (SDK v1 office tooling — no daemon socket)"
     );
 }
 
@@ -312,6 +313,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "provision-identity" => {
                 return provision_office::provision_identity_command(&remaining[1..])
             }
+            "provision-ledger-status" => {
+                return provision_office::provision_ledger_status_command(&remaining[1..])
+            }
+            "provision-ledger-release" => {
+                return provision_office::provision_ledger_release_command(&remaining[1..])
+            }
+            "provision-ledger-import" => {
+                return provision_office::provision_ledger_import_command(&remaining[1..])
+            }
+            "provision-confirm-written" => {
+                return provision_office::provision_confirm_written_command(&remaining[1..])
+            }
+            "provision-expect" => {
+                return provision_office::provision_expect_command(&remaining[1..])
+            }
+            "provision-batch" => return provision_office::provision_batch_command(&remaining[1..]),
             "provision-siteca-keygen" => {
                 return provision_office::provision_siteca_keygen_command(&remaining[1..])
             }

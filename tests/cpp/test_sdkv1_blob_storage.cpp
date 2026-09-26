@@ -66,6 +66,10 @@ class FakeNvs final : public BlobNamespace {
     blobs[key].assign(data.data, data.data + data.size);
     return Status::success();
   }
+  Status blob_erase(const char* key) noexcept override {
+    blobs.erase(key);
+    return Status::success();
+  }
   void disarm() {
     cut_call = kNever;
     size_error = read_error = short_read = false;
@@ -289,6 +293,30 @@ void test_identity_store_over_nvs() {
   }
 }
 
+void test_erase_restores_factory_empty() {
+  // The deprovision primitive: both keys erased, the store re-observes
+  // factory-empty (missing keys, never present-but-erased), and a fresh
+  // provision commits cleanly.
+  FakeNvs nvs;
+  auto storage = BlobRecordSlotStorage::identity(nvs);
+  IdentityStore store(storage);
+  CHECK_OK(store.initialize());
+  CHECK_OK(store.commit(identity_record()));
+  CHECK(nvs.blobs.size() == 2);
+  CHECK_OK(store.clear());
+  CHECK(nvs.blobs.empty());
+  CHECK(!store.has_identity() && !store.quarantined() && !store.uncertain());
+  IdentityStore reboot(storage);
+  CHECK_OK(reboot.initialize());
+  CHECK(!reboot.has_identity() && !reboot.quarantined() && !reboot.uncertain());
+  CHECK_OK(reboot.commit(identity_record()));
+  CHECK(reboot.has_identity());
+  // Erasing an already-empty slot and an out-of-range slot.
+  CHECK_OK(storage.erase(0));
+  CHECK_OK(store.clear());
+  CHECK(storage.erase(2).code == StatusCode::InvalidArgument);
+}
+
 void test_identity_power_cuts_over_nvs() {
   // Replace an identity with a cut at each of the four blob writes (pending
   // and sealed for i0 then i1), the interrupted update landing or not.
@@ -479,6 +507,7 @@ int main() {
   test_record_storage_mapping();
   test_resume_keys();
   test_identity_store_over_nvs();
+  test_erase_restores_factory_empty();
   test_identity_power_cuts_over_nvs();
   test_site_and_revocation_over_nvs();
   test_resume_cache_over_nvs();

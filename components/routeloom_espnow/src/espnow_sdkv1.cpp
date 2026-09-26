@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "driver/usb_serial_jtag.h"
+#include "esp_app_desc.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -134,7 +135,19 @@ void console_task(void* arg) {
   if (!entropy_status) {
     ESP_LOGE(kTag, "maintenance entropy unavailable: %s", entropy_status.detail);
   }
-  sdkv1::MaintenanceConsole console(stores->identity(), entropy);
+  sdkv1::MaintenanceWipeStores wipe{};
+  wipe.site = &stores->site();
+  wipe.revocation = &stores->revocation();
+  wipe.local_revocation = &stores->local_revocation();
+  wipe.resume = &stores->resume_cache();
+  wipe.lifecycle = &stores->lifecycle();
+  sdkv1::MaintenanceConsole console(stores->identity(), entropy, wipe);
+  // The status receipt identifies the running image: the office verifies
+  // the maintenance build before the field switch (07 §6, V1-H10).
+  if (const esp_app_desc_t* app = esp_app_get_description()) {
+    console.set_firmware_version(routeloom::ByteView{
+        reinterpret_cast<const std::uint8_t*>(app->version), std::strlen(app->version)});
+  }
   // The `security legacy-state` verb rides the same exclusive physical
   // console (P4 §10.2): the maintenance boot never starts radio, USB
   // lanes or the Node, so `stopped` below is structural, not polled.

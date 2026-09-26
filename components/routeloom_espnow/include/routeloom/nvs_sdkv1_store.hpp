@@ -13,7 +13,8 @@ namespace routeloom::espnow {
 // erased, present-but-erased = corrupt, oversize = corrupt, no implicit
 // erase) live in the portable sdkv1_blob_storage and are host-tested
 // against a fake NVS; this class only forwards to nvs_get_blob /
-// nvs_set_blob + nvs_commit.
+// nvs_set_blob + nvs_commit (and nvs_erase_key for the console's explicit
+// deprovision).
 //
 // Wiring (the partition must already be mounted with
 // nvs_flash_init_partition(kSecurityNvsPartition)):
@@ -27,7 +28,8 @@ namespace routeloom::espnow {
 // and likewise kSiteNamespace + ::site, kRevocationNamespace +
 // ::revocation, kResume2Namespace + BlobResumeSlotStorage2(ns,
 // sdkv1::kResumeNodeSlots or kResumeGatewaySlots). Opening a missing
-// namespace READWRITE creates it immediately; nothing here erases a key.
+// namespace READWRITE creates it immediately; only the explicit
+// blob_erase (console deprovision) removes a key.
 class NvsBlobNamespace final : public sdkv1::BlobNamespace {
  public:
   // Committed-write accounting for the flash-wear budget (05 §6).
@@ -52,6 +54,7 @@ class NvsBlobNamespace final : public sdkv1::BlobNamespace {
   Status blob_read(const char* key, MutableByteView target,
                    std::size_t& read_len) noexcept override;
   Status blob_write(const char* key, ByteView data) noexcept override;
+  Status blob_erase(const char* key) noexcept override;
 
   WriteStats write_stats() const noexcept { return stats_; }
 

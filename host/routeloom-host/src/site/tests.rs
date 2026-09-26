@@ -141,6 +141,24 @@ fn revoke(
         .0
 }
 
+fn archive(
+    service: &SiteService,
+    devices: &[u64],
+    key: &str,
+    now: u64,
+) -> (Result<String, SiteError>, Events) {
+    service.with(|a| {
+        a.archive_removed(
+            KGUARD,
+            ArchiveRequest {
+                devices: devices.to_vec(),
+                key: key.into(),
+            },
+            now,
+        )
+    })
+}
+
 fn gk_rotation_of(answer: &str) -> (u32, u32) {
     let rotation = json(answer).get("gk_rotation").unwrap().clone();
     (
@@ -4598,4 +4616,267 @@ fn revocation_baseline_bootstrap_on_first_get() {
     let (op, _) = revoke_rrs(&service2, leaver.node, 1, "r-base", T0 + 10_000);
     let (view, _) = service2.with(|a| a.operation_json(op, HostTime::sync(T0)).unwrap());
     assert_eq!(json(&view).get("rs_epoch").unwrap().as_u64(), Some(2));
+}
+
+/// V1-H11 (P2-6): archiving removed rows deletes the device rows
+/// (reclaiming the 1024-row ledger capacity) while the `revoke` ledger
+/// rows keep the no-reissue rule intact: the NodeId still refuses a
+/// fresh key.
+#[test]
+fn archive_removed_reclaims_capacity_without_losing_no_reissue_history() {
+    let (service, transport) = service();
+    let mut device = SimDevice::new(0x00A1_0000_0000_C002, 0xC3);
+    let (mut exchange, _, events) = device.start(&service, &transport, T0);
+    decide(
+        &service,
+        request_id(&events).unwrap(),
+        device.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "a",
+        T0 + 10,
+    )
+    .unwrap();
+    device.finish(&mut exchange, &transport);
+    revoke(&service, device.node, 1, "rv", T0 + 20).unwrap();
+
+    let (answer, events) = archive(&service, &[device.node], "arc", T0 + 30);
+    let answer = json(&answer.unwrap());
+    let archived = answer.get("archived").unwrap().as_array().unwrap();
+    assert_eq!(archived.len(), 1);
+    assert_eq!(
+        archived[0].as_str().unwrap(),
+        format!("{:016x}", device.node)
+    );
+    assert!(answer
+        .get("skipped_unknown")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(kinds(&events), vec!["member.archived".to_string()]);
+
+    // The row is gone from the member surface and the ledger map.
+    assert!(service.with(|a| a.member_get_json(device.node)).0.is_none());
+    assert_eq!(service.with(|a| a.devices.len()).0, 0);
+
+    // ... but the NodeId still refuses a fresh key.
+    let mut fresh_key = SimDevice::new(device.node, 0xC4);
+    let (_, outcome, events) = fresh_key.start(&service, &transport, T0 + 40_000);
+    assert!(matches!(outcome, Outcome::Waiting));
+    assert_eq!(
+        decide(
+            &service,
+            request_id(&events).unwrap(),
+            fresh_key.node,
+            Verdict::Allow {
+                role: ROLE_ENDPOINT
+            },
+            "b",
+            T0 + 40_010
+        )
+        .unwrap_err()
+        .code,
+        "CONFLICT"
+    );
+    let rows = service.with(|a| a.store.ledger_for(device.node).unwrap()).0;
+    assert!(rows.iter().any(|r| r.kind == "revoke"));
+    assert!(rows.iter().any(|r| r.kind == "archive"));
+    let status = service
+        .with(|a| a.status_json(HostTime::sync(T0 + 40_010)))
+        .0;
+    assert!(status.contains("\"archived_total\":1"), "{status}");
+}
+
+/// P2-6: one live member in the batch vetoes the whole call — no partial
+/// delete — and unknown ids are reported, not refused.
+#[test]
+fn archive_refuses_live_member_without_partial_delete() {
+    let (service, transport) = service();
+    let mut keeper = SimDevice::new(0x00A1_0000_0000_A001, 0xA1);
+    let (mut exchange, _, events) = keeper.start(&service, &transport, T0);
+    decide(
+        &service,
+        request_id(&events).unwrap(),
+        keeper.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "a",
+        T0 + 10,
+    )
+    .unwrap();
+    keeper.finish(&mut exchange, &transport);
+    let mut leaver = SimDevice::new(0x00A1_0000_0000_A002, 0xA2);
+    let (mut exchange, _, events) = leaver.start(&service, &transport, T0 + 100);
+    decide(
+        &service,
+        request_id(&events).unwrap(),
+        leaver.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "b",
+        T0 + 110,
+    )
+    .unwrap();
+    leaver.finish(&mut exchange, &transport);
+    revoke(&service, leaver.node, 1, "rv", T0 + 120).unwrap();
+
+    let error = archive(&service, &[keeper.node, leaver.node], "arc", T0 + 130)
+        .0
+        .unwrap_err();
+    assert_eq!(error.code, "CONFLICT");
+    // Nothing was deleted: both rows are still listed.
+    assert_eq!(service.with(|a| a.devices.len()).0, 2);
+    assert!(service.with(|a| a.member_get_json(leaver.node)).0.is_some());
+
+    let (answer, _) = archive(
+        &service,
+        &[leaver.node, 0x00A1_0000_0000_FFFF],
+        "arc-ok",
+        T0 + 140,
+    );
+    let answer = json(&answer.unwrap());
+    assert_eq!(answer.get("archived").unwrap().as_array().unwrap().len(), 1);
+    let skipped = answer.get("skipped_unknown").unwrap().as_array().unwrap();
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].as_str(), Some("00a100000000ffff"));
+    assert_eq!(service.with(|a| a.devices.len()).0, 1);
+}
+
+/// P2-6: an archive replay under the same idempotency key returns the
+/// stored answer without touching state; the key binds the id set.
+#[test]
+fn archive_replay_returns_stored_answer() {
+    let (service, transport) = service();
+    let mut device = SimDevice::new(0x00A1_0000_0000_C003, 0xC3);
+    let (mut exchange, _, events) = device.start(&service, &transport, T0);
+    decide(
+        &service,
+        request_id(&events).unwrap(),
+        device.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "a",
+        T0 + 10,
+    )
+    .unwrap();
+    device.finish(&mut exchange, &transport);
+    revoke(&service, device.node, 1, "rv", T0 + 20).unwrap();
+
+    let (first, _) = archive(&service, &[device.node], "arc", T0 + 30);
+    let first = first.unwrap();
+    let (second, events) = archive(&service, &[device.node], "arc", T0 + 40);
+    assert_eq!(second.unwrap(), first);
+    assert!(events.is_empty());
+    let status = service.with(|a| a.status_json(HostTime::sync(T0 + 40))).0;
+    assert!(status.contains("\"archived_total\":1"), "{status}");
+
+    let error = archive(&service, &[0x00A1_0000_0000_FFFF], "arc", T0 + 50)
+        .0
+        .unwrap_err();
+    assert_eq!(error.code, "CONFLICT");
+}
+
+/// P2-6: the archive is durable — after a restart the row stays gone, the
+/// counter stays, and the `revoke` ledger row still refuses the NodeId.
+#[test]
+fn archive_survives_restart() {
+    let dir = std::env::temp_dir().join(format!(
+        "routeloom-site-archive-{}-{}",
+        std::process::id(),
+        T0
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("site.db");
+    let node = 0x00A1_0000_0000_C004;
+    {
+        let (service, transport) = service_with(Box::new(SqliteSiteStore::open(&db).unwrap()));
+        let mut device = SimDevice::new(node, 0xC3);
+        let (mut exchange, _, events) = device.start(&service, &transport, T0);
+        decide(
+            &service,
+            request_id(&events).unwrap(),
+            node,
+            Verdict::Allow {
+                role: ROLE_ENDPOINT,
+            },
+            "a",
+            T0 + 10,
+        )
+        .unwrap();
+        device.finish(&mut exchange, &transport);
+        revoke(&service, node, 1, "rv", T0 + 20).unwrap();
+        archive(&service, &[node], "arc", T0 + 30).0.unwrap();
+    }
+    // Reopen replays the snapshot and verifies the ledger chain — a
+    // corrupt `archive` row would refuse to start.
+    let reopened = SiteService::new(testkit::authority(
+        Box::new(SqliteSiteStore::open(&db).unwrap()),
+        T0 + 40,
+    ));
+    let status = reopened.with(|a| a.status_json(HostTime::sync(T0 + 40))).0;
+    assert!(status.contains("\"archived_total\":1"), "{status}");
+    assert!(reopened.with(|a| a.member_get_json(node)).0.is_none());
+    assert!(reopened.with(|a| a.store.has_revocation(node).unwrap()).0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// V1-H12 (P2-5): every policy content change mints a new durable
+/// generation (the version the radio distribution will converge on); a
+/// no-op set keeps the generation. `radio_distributed_generation`
+/// reports how far the proxies have confirmed — null while
+/// undistributed.
+#[test]
+fn policy_set_versions_content_changes() {
+    let (service, _) = service();
+    assert_eq!(service.with(|a| a.policy()).0.policy_generation, 0);
+
+    let mut policy = JoinPolicy {
+        zero_touch_open: false,
+        ..JoinPolicy::default()
+    };
+    service.with(|a| a.set_policy(policy)).0.unwrap();
+    assert_eq!(service.with(|a| a.policy()).0.policy_generation, 1);
+
+    // A no-op set is not a new version.
+    service.with(|a| a.set_policy(policy)).0.unwrap();
+    assert_eq!(service.with(|a| a.policy()).0.policy_generation, 1);
+
+    policy.decision_mode = DecisionMode::Closed;
+    service.with(|a| a.set_policy(policy)).0.unwrap();
+    assert_eq!(service.with(|a| a.policy()).0.policy_generation, 2);
+
+    let body = service.with(|a| a.policy_json()).0;
+    assert!(body.contains("\"policy_generation\":2"), "{body}");
+    assert!(
+        body.contains("\"radio_distributed_generation\":null"),
+        "{body}"
+    );
+}
+
+/// P2-5: the policy encoding carries the generation; pre-generation
+/// 8-byte rows decode as generation 0.
+#[test]
+fn policy_encoding_roundtrips_generation() {
+    let policy = JoinPolicy {
+        zero_touch_open: false,
+        policy_generation: 41,
+        ..JoinPolicy::default()
+    };
+    let bytes = policy.encode();
+    assert_eq!(bytes.len(), 12);
+    assert_eq!(JoinPolicy::decode(&bytes).unwrap(), policy);
+
+    let legacy = JoinPolicy {
+        zero_touch_open: false,
+        ..JoinPolicy::default()
+    };
+    let full = legacy.encode();
+    let decoded = JoinPolicy::decode(&full[..8]).unwrap();
+    assert_eq!(decoded.policy_generation, 0);
+    assert!(!decoded.zero_touch_open);
 }

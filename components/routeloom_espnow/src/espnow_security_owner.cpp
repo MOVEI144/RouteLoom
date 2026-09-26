@@ -915,9 +915,29 @@ void EspNowSecurityOwner::drain_lifecycle_actions(const MonotonicMs now_ms) noex
           ESP_LOGW(config_.log_tag, "p6: adopt raced a store commit — retaking");
           break;
         }
-        ESP_LOGW(config_.log_tag, "p6: adopting network 0x%llx — rebooting",
-                 static_cast<unsigned long long>(action.network));
-        reboot_for_lifecycle("p6 adopt-network");
+        // A live cutover reboots exactly once; the clean boot completes
+        // the action after it re-adopts from the committed stores — never
+        // a second reboot on the same durable state.
+        switch (sdkv1::adopt_network_disposition(
+            action.network, adopted_network_, adopted_role_,
+            coordinator_live_ &&
+                coordinator().snapshot().mode == sdkv1::CoordinatorMode::Member)) {
+          case sdkv1::AdoptNetworkDisposition::Complete:
+            ESP_LOGW(config_.log_tag, "p6: network 0x%llx adopted — completing",
+                     static_cast<unsigned long long>(action.network));
+            (void)lifecycle().dispatch(
+                sdkv1::LifecycleInput::ActionDone(action.token, Status::success()), now_ms);
+            break;
+          case sdkv1::AdoptNetworkDisposition::WaitForAdoption:
+            // The adoption is in flight (or failed and awaits
+            // maintenance): the action stays pending for a retake.
+            break;
+          case sdkv1::AdoptNetworkDisposition::RebootToAdopt:
+            ESP_LOGW(config_.log_tag, "p6: adopting network 0x%llx — rebooting",
+                     static_cast<unsigned long long>(action.network));
+            reboot_for_lifecycle("p6 adopt-network");
+            break;
+        }
         break;
       case sdkv1::LifecycleActionTag::None:
         break;

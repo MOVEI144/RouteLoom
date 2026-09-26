@@ -1,20 +1,21 @@
 //! API1 surface of the Site Authority (docs/design/sdk-v1/07 §2, plan
 //! P3-3, G-SEC P5): `site.status`, `join.policy.get/set`,
 //! `join.requests.list`, `join.decide`, `devices.discovered.list`,
-//! `members.list/get`, `membership.revoke`, `membership.cutover`,
-//! `group_keys.status/rotate`, and `operations.get` for `op-` tokens.
+//! `members.list/get`, `membership.revoke`, `membership.archive`,
+//! `membership.cutover`, `group_keys.status/rotate`, and `operations.get`
+//! for `op-` tokens.
 //!
 //! Authorization (07 §2): `MEMBERSHIP_READ` for the read side,
 //! `MEMBERSHIP_DECIDE` for `join.decide` / `membership.revoke`,
-//! `MEMBERSHIP_ADMIN` for the policy, `membership.cutover` and
-//! `group_keys.rotate`. The network
+//! `MEMBERSHIP_ADMIN` for the policy, `membership.cutover`,
+//! `membership.archive` and `group_keys.rotate`. The network
 //! the ACL is checked on is the site's wire network (network_low32 of the
 //! SiteCert). The principal comes from the socket peer credential only;
 //! idempotency identity is `(principal, idempotency_key)`.
 //!
 //! Every successful call appends the authority's events (`join.decided`,
-//! `member.revoked`, …) to the daemon event ring — the `stream:"events"`
-//! subscribe source — after the authority lock is released.
+//! `member.revoked`, `member.archived`, …) to the daemon event ring — the
+//! `stream:"events"` subscribe source — after the authority lock is released.
 
 use routeloom_json::Json;
 
@@ -24,8 +25,8 @@ use crate::send_store::OperationStore;
 use crate::site::group_keys::HostTime;
 use crate::site::records::{parse_op_token, parse_request_token, parse_role, Verdict};
 use crate::site::{
-    parse_reason, CutoverRequest, DecideRequest, DecisionMode, Events, RevokeRequest,
-    RotateRequest, SiteError, SiteService,
+    parse_reason, ArchiveRequest, CutoverRequest, DecideRequest, DecisionMode, Events,
+    RevokeRequest, RotateRequest, SiteError, SiteService, ARCHIVE_BATCH_MAX,
 };
 
 /// `limit` ceiling of the paged site listings.
@@ -40,6 +41,7 @@ pub const SITE_EVENT_KINDS: &[&str] = &[
     "member.reissued",
     "member.confirmed",
     "member.revoked",
+    "member.archived",
     "member.removal_notified",
     "rrs.published",
     "cutover.progress",
@@ -60,6 +62,7 @@ pub const SITE_METHODS: &[&str] = &[
     "members.list",
     "members.get",
     "membership.revoke",
+    "membership.archive",
     "membership.cutover",
     "group_keys.status",
     "group_keys.rotate",
@@ -207,6 +210,7 @@ pub(super) fn dispatch<S: OperationStore>(
         "members.list" => members_list,
         "members.get" => members_get,
         "membership.revoke" => membership_revoke,
+        "membership.archive" => membership_archive,
         "membership.cutover" => membership_cutover,
         "group_keys.status" => group_keys_status,
         "group_keys.rotate" => group_keys_rotate,
@@ -249,7 +253,7 @@ fn policy_get<S: OperationStore>(
     only(params, &[])?;
     let service = service(ctx)?;
     authorize(ctx, service, acl::PERM_MEMBERSHIP_ADMIN, "MEMBERSHIP_ADMIN")?;
-    Ok(service.with(|a| a.policy().json()).0)
+    Ok(service.with(|a| a.policy_json()).0)
 }
 
 fn policy_set<S: OperationStore>(
@@ -497,6 +501,50 @@ fn membership_revoke<S: OperationStore>(
             time,
         )
     });
+    push_events(ctx, events);
+    Ok(result?)
+}
+
+fn membership_archive<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    only(params, &["device_ids", "idempotency_key"])?;
+    let service = service(ctx)?;
+    // Bulk forget deletes audit rows: the join desk's DECIDE role must not
+    // reach it — ADMIN only (07 §2.2).
+    let principal = authorize(ctx, service, acl::PERM_MEMBERSHIP_ADMIN, "MEMBERSHIP_ADMIN")?;
+    let ids = params
+        .get("device_ids")
+        .and_then(Json::as_array)
+        .ok_or_else(|| {
+            ApiError::simple(
+                "INVALID_ARGUMENT",
+                "device_ids must be a non-empty array of 16-hex node ids",
+            )
+        })?;
+    if ids.is_empty() || ids.len() > ARCHIVE_BATCH_MAX {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            &format!("device_ids must hold 1..={ARCHIVE_BATCH_MAX} node ids"),
+        ));
+    }
+    let mut devices = Vec::with_capacity(ids.len());
+    for id in ids {
+        devices.push(
+            id.as_str()
+                .and_then(|t| super::parse_hex_u64(&t.to_ascii_lowercase()))
+                .ok_or_else(|| {
+                    ApiError::simple(
+                        "INVALID_ARGUMENT",
+                        "device_ids must be a non-empty array of 16-hex node ids",
+                    )
+                })?,
+        );
+    }
+    let key = idempotency_key(params)?;
+    let (result, events) =
+        service.with(|a| a.archive_removed(principal, ArchiveRequest { devices, key }, ctx.now_ms));
     push_events(ctx, events);
     Ok(result?)
 }

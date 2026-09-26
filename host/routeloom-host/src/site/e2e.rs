@@ -346,6 +346,13 @@ fn api_surface_validates_and_advertises() {
     );
     assert!(policy.contains("\"decision_timeout_ms\":800"), "{policy}");
     assert!(policy.contains("\"decision_mode\":\"closed\""), "{policy}");
+    // P2-5: the set minted generation 1, and the read side distinguishes
+    // the Host approval state from the undistributed radio intent.
+    assert!(policy.contains("\"policy_generation\":1"), "{policy}");
+    assert!(
+        policy.contains("\"radio_distributed_generation\":null"),
+        "{policy}"
+    );
     assert!(call("join.policy.set", "{\"decision_timeout_ms\":100}").contains("INVALID_ARGUMENT"));
     assert!(call("join.policy.set", "{\"bogus\":1}").contains("INVALID_ARGUMENT"));
     assert!(call("join.policy.get", "{}").contains("\"pending_retry_after_s\":60"));
@@ -820,4 +827,123 @@ fn cutover_flows_end_to_end_over_the_api_socket() {
     );
     let member_view = admin.member(member.node).unwrap().unwrap();
     assert_eq!(member_view.generation, 1);
+}
+
+/// P2-6 over the API socket (SQLite store): `membership.archive` forgets
+/// the removed row, validates its inputs, and requires MEMBERSHIP_ADMIN
+/// (restart durability is covered in `tests.rs`, where the store can be
+/// reopened without the daemon's live connection).
+#[test]
+fn membership_archive_over_the_api_socket() {
+    let daemon = Daemon::start("archive");
+    let uid = std::fs::metadata(&daemon.dir).unwrap().uid();
+    let kguard_link = RouteLoomTransport::new(&daemon.socket, u64::from(testkit::NETWORK_LOW));
+    let kguard = KGuardMock::default();
+    kguard.assign(0x00A1_0000_0000_1234, Assignment::Here(Role::Endpoint));
+
+    let stream = kguard_link.site_events().unwrap();
+    let (event_tx, event_rx) = mpsc::channel();
+    thread::spawn(move || {
+        for event in stream {
+            if event_tx.send(event).is_err() {
+                return;
+            }
+        }
+    });
+    let next_event = |kind: &str| loop {
+        let event = event_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("no {kind} event"))
+            .unwrap();
+        if event.kind == kind {
+            return event;
+        }
+    };
+
+    let t0 = now_ms();
+    let mut device = SimDevice::new(0x00A1_0000_0000_1234, 0x71);
+    let (mut exchange, outcome) = daemon.start_join(&mut device, t0);
+    assert!(matches!(outcome, Outcome::Waiting));
+    next_event("join.request");
+    kguard.serve_once(&kguard_link).unwrap();
+    let Outcome::Result(JoinResult::Allow { .. }) = device.finish(&mut exchange, &daemon.transport)
+    else {
+        panic!("expected Allow");
+    };
+    kguard_link
+        .revoke(device.node, 1, RemovalReason::Lost, "rm-1")
+        .unwrap();
+
+    // A read-only principal may list but not archive (ADMIN only).
+    let denied = raw_api1(
+        &daemon.state,
+        7,
+        &format!(
+            "API1 {{\"v\":1,\"request_id\":\"d\",\"method\":\"membership.archive\",\"params\":{{\"device_ids\":[\"{:016x}\"],\"idempotency_key\":\"x\"}}}}",
+            device.node
+        ),
+    );
+    assert!(denied.contains("AuthorizationFailed"), "{denied}");
+
+    // Wire validation: empty, over-long, bad-hex and unknown params.
+    let bad_cases = [
+        "\"device_ids\":[],\"idempotency_key\":\"x\"".to_string(),
+        format!(
+            "\"device_ids\":[{}],\"idempotency_key\":\"x\"",
+            (0..129)
+                .map(|_| "\"00a1000000000001\"".to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        "\"device_ids\":[\"zz\"],\"idempotency_key\":\"x\"".to_string(),
+        format!(
+            "\"device_ids\":[\"{:016x}\"],\"idempotency_key\":\"x\",\"extra\":1",
+            device.node
+        ),
+    ];
+    for params in &bad_cases {
+        let refused = raw_api1(
+            &daemon.state,
+            uid,
+            &format!("API1 {{\"v\":1,\"request_id\":\"v\",\"method\":\"membership.archive\",\"params\":{{{params}}}}}"),
+        );
+        assert!(refused.contains("INVALID_ARGUMENT"), "{params}: {refused}");
+    }
+
+    let answer = kguard_link
+        .call(
+            "membership.archive",
+            &format!(
+                "{{\"device_ids\":[\"{:016x}\",\"00a100000000ffff\"],\"idempotency_key\":\"arc-1\"}}",
+                device.node
+            ),
+        )
+        .unwrap();
+    let archived = answer.get("archived").unwrap().as_array().unwrap();
+    assert_eq!(archived.len(), 1);
+    assert_eq!(
+        archived[0].as_str().unwrap(),
+        format!("{:016x}", device.node)
+    );
+    let skipped = answer.get("skipped_unknown").unwrap().as_array().unwrap();
+    assert_eq!(skipped.len(), 1);
+    next_event("member.archived");
+
+    // The row is gone from the member surface; the counter is up.
+    let gone = raw_api1(
+        &daemon.state,
+        uid,
+        &format!(
+            "API1 {{\"v\":1,\"request_id\":\"g\",\"method\":\"members.get\",\"params\":{{\"device_id\":\"{:016x}\"}}}}",
+            device.node
+        ),
+    );
+    assert!(gone.contains("NOT_FOUND"), "{gone}");
+    assert!(kguard_link.members().unwrap().is_empty());
+    let status = raw_api1(
+        &daemon.state,
+        uid,
+        "API1 {\"v\":1,\"request_id\":\"s\",\"method\":\"site.status\",\"params\":{}}",
+    );
+    assert!(status.contains("\"archived_total\":1"), "{status}");
 }

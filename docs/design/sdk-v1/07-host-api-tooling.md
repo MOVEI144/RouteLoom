@@ -73,6 +73,14 @@ KGuardは「参加させてよいか」を答え、RouteLoomは「その答え�
 `expected_generation`が現在と違えば`Conflict`（古い画面からの誤削除を防ぐ）。段階：`accepted → committed → distributing → converged`。到達できないmemberは`unknown`として数え続け、適用済みとは言わない。
 
 ```json
+{"v":1,"request_id":"k-7","method":"membership.archive",
+ "params":{"device_ids":["00a1000000001234","00a100000000ffff"],"idempotency_key":"kg-arc-3"}}
+// result: {"archived":["00a1000000001234"],"skipped_unknown":["00a100000000ffff"]}
+```
+
+ADMIN。撤去済み行だけを忘却する（`devices`行を削除、`revoke`台帳行は残す）。1件でも現役が混じれば全体が`CONFLICT`で何も消さない。未知idは`skipped_unknown`に載せて成功する。同じkeyの再送は保存済み応答、別id集合での再利用は`CONFLICT`。
+
+```json
 {"v":1,"request_id":"k-9","method":"membership.cutover",
  "params":{"expected_site_epoch":3,"next_site_cert":"c0…(hex)","idempotency_key":"kg-cut-1"}}
 // result: {"operation_id":"op-93","state":"preparing","expected_site_epoch":3,
@@ -103,13 +111,14 @@ ADMIN。次SiteCertは設定済みSite CAの署名を検証し、issuer／site�
 
 | method | 権限 | params → result |
 |---|---|---|
-| `site.status` | READ | なし → site_id、network、site_epoch、SAK fingerprint（kid）、rs_epoch、gk_epoch／gk_staged、GK要約`gk{phase,cause,targets,staged_ack,active_ack,unknown}`、authority状態`authority{attached,channels}`（Host結線のPR4までfalse/0）、`member_cap:128`、member・removed・unconfirmed数、discovered・join_requests数、live exchange数、channel、gateways、ledger_seq、policy、counters（`rejected_unverified{reason}`・`gk_rejected{reason}`等）、`usb{configured,attached,join_relay:"not_wired"}` |
-| `join.policy.get` / `.set` | ADMIN | `zero_touch_open`、`decision_mode`（`kguard`/`closed`）、`decision_timeout_ms`（500〜5000）、`pending_retry_after_s`（30〜3600）。setは部分更新 |
+| `site.status` | READ | なし → site_id、network、site_epoch、SAK fingerprint（kid）、rs_epoch、gk_epoch／gk_staged、GK要約`gk{phase,cause,targets,staged_ack,active_ack,unknown}`、authority状態`authority{attached,channels}`（Host結線のPR4までfalse/0）、`member_cap:128`、member・removed・unconfirmed数、`archived_total`（archive累計）、discovered・join_requests数、live exchange数、channel、gateways、ledger_seq、policy、counters（`rejected_unverified{reason}`・`gk_rejected{reason}`等）、`usb{configured,attached,join_relay:"not_wired"}` |
+| `join.policy.get` / `.set` | ADMIN | `zero_touch_open`、`decision_mode`（`kguard`/`closed`）、`decision_timeout_ms`（500〜5000）、`pending_retry_after_s`（30〜3600）。setは部分更新。内容が変わるsetは`policy_generation`を+1（同内容の再送は据え置き）。get/set応答は`policy_generation`と`radio_distributed_generation`（proxyが適用確認した最新世代。無線配布の搬送が無いため現状は常にnull）も返す |
 | `join.requests.list` | READ | 開いている参加要求（≤256）：`state`＝`awaiting`／`decided`、`remaining_ms` |
 | `join.decide` | DECIDE | `join_request_id`、`device_id`、`verdict`＋その引数だけ（allow→`role`、pending→`retry_after_s`、deny→`reason`）、`idempotency_key` |
 | `devices.discovered.list` | READ | `after?`、`limit?`（1〜128）→ `devices[]`、`next_after`、`total`、`max:1024` |
 | `members.list` / `members.get` | READ | `after?`、`limit?`、`include_removed?` ／ `device_id` |
 | `membership.revoke` | DECIDE | `device_id`、`expected_generation`、`reason`（removed/lost/replaced/blocked）、`idempotency_key`。P6-2で署名済みRemovalNoticeを同transactionでcommitし、`operations.get`に`notice{delivery,intent_confirmed,erase_confirmed:null}`が付く |
+| `membership.archive` | ADMIN | `device_ids[]`（1〜128件の16-hex NodeId）、`idempotency_key` → `{"archived":[],"skipped_unknown":[]}`。撤去済み行の削除と行ごとの`archive`台帳行を1 transactionでcommitし、`archived_total`を進める。`revoke`行は残るのでNodeId再利用禁止は維持。現役混じりは全体`CONFLICT`（部分削除なし）。archive後は`members.list/get`から消える |
 | `membership.cutover` | ADMIN | `expected_site_epoch`、`next_site_cert`（hex）、`idempotency_key`。P6-2で実装（上記§2.2） |
 | `group_keys.status` | READ | active／staged／phase（stable/staging/activating/catching_up）／cause／target・staged_ack・active_ack・unknown数／last_rotation／next_due（G-SEC P5 PR3で実装。秘密・GK-id列・DAMSは出さない） |
 | `group_keys.rotate` | ADMIN | `expected_active_epoch`、`idempotency_key` → 手動更新をstage（causeはmanual固定。配布中・cleanup中は`BUSY`） |
@@ -153,22 +162,22 @@ ADMIN。次SiteCertは設定済みSite CAの署名を検証し、issuer／site�
  "removed_ms":null,"removal_reason":null}}
 ```
 
-エラー：grant不足は`AuthorizationFailed`、未設定は`SITE_AUTHORITY_UNAVAILABLE`、引数は`INVALID_ARGUMENT`、閉じた／無い要求は`NOT_FOUND`、同keyで別内容・決定済み要求への別verdict・device_id不一致・kid conflictのallow・`expected_generation`／`expected_active_epoch`／`expected_site_epoch`不一致・削除済みへのrevoke・live cutover中の2件目cutoverは`CONFLICT`、配布中・cleanup中・cutover準備中の`group_keys.rotate`は`BUSY`（retryable）、129番目のallow・128超えでの更新開始・cutover snapshot／次RRS1持越しの満杯は`NO_CAPACITY`（retryable。P5 PR3、P6-2）、RRS1が32件で満杯なら`CUTOVER_REQUIRED`、Site CA未設定のcutoverは`CUTOVER_CERT_REQUIRED`、GrantRenew配送port未接続のcutoverは`CUTOVER_UNAVAILABLE`（retryable。何もstageしない）、storeの読取／書込が失敗すれば`STORE_FAILURE`（retryable、成功として応答しない）。
+エラー：grant不足は`AuthorizationFailed`、未設定は`SITE_AUTHORITY_UNAVAILABLE`、引数は`INVALID_ARGUMENT`（空・129件超・非hexの`device_ids`を含む）、閉じた／無い要求は`NOT_FOUND`、同keyで別内容・決定済み要求への別verdict・device_id不一致・kid conflictのallow・`expected_generation`／`expected_active_epoch`／`expected_site_epoch`不一致・削除済みへのrevoke・archiveへの現役混じり・live cutover中の2件目cutoverは`CONFLICT`、配布中・cleanup中・cutover準備中の`group_keys.rotate`は`BUSY`（retryable）、129番目のallow・128超えでの更新開始・cutover snapshot／次RRS1持越しの満杯は`NO_CAPACITY`（retryable。P5 PR3、P6-2）、RRS1が32件で満杯なら`CUTOVER_REQUIRED`、Site CA未設定のcutoverは`CUTOVER_CERT_REQUIRED`、GrantRenew配送port未接続のcutoverは`CUTOVER_UNAVAILABLE`（retryable。何もstageしない）、storeの読取／書込が失敗すれば`STORE_FAILURE`（retryable、成功として応答しない）。
 
 **配布の進捗（P6-1 PR Aで実装）**：revokeの`operations.get`はcommit時のmember snapshotに対する適用状況を返す。top-level `state`は`committed`（配布開始前）→`distributing`（送信開始後）→`converged`（snapshotの`unknown`が0）。`distribution` objectは`state`（`pending`/`distributing`/`converged`、P6-1以前のoperationは`unknown`）、`applied`（context拘束つきApplied ACK済み）、`retired`（後続revokeで対象外になった割当）、`unknown`、`total`（`applied+retired+unknown`）、互換field `reached=applied`・`members=total`。送信・link ACK・ObjectAckは適用人数に含めない。**`converged`はRRS執行のsnapshot収束であり、本人の消去（`notice`）やGK更新完了（`gk_rotation`）とは別**——CLI（`operation-get`の素通し表示）・client（`routeloom_client::site::OperationProgress`）・TUI（Events tab）はいずれも`unknown`/nullを成功表示へ潰さない。P6-2でrevokeの`notice{delivery,intent_confirmed,erase_confirmed:null}`とcutoverの`operations.get`（`phase`・改訂・prepared/applied/unknown・gateway/recovery flag・window残量。clientは`CutoverProgress`）を追加した。配布transportはfake port（`set_rrs_transport`未設定時は送信が起きないので`pending`のまま進まず、`capabilities.get`の`distribution`は`rrs_no_transport`）：P4/P5の実adapterが入るまでproductionでは有効化しない。
 
-**イベント**：案のstream `membership`ではなく既存の`events` stream（event ring）へ出す。kind：`join.request`、`join.decided`、`device.discovered`（初回と1分以上空いた再出現）、`member.reissued`、`member.confirmed`、`member.revoked`、`member.removal_notified`（P6-2で`route`＝`authority_direct`／`join_recovery`と`intent_confirmed`を追加）、`rrs.published`、`gk.staged`、`gk.rotated`、`gk.member_applied`（P5 PR3で追加）、`cutover.progress`（P6-2で追加。cutoverの`operation_id`・`phase`・epoch・`revision`・件数）、`authority.error`。`messages.subscribe`の`filter.kinds`で選べる。
+**イベント**：案のstream `membership`ではなく既存の`events` stream（event ring）へ出す。kind：`join.request`、`join.decided`、`device.discovered`（初回と1分以上空いた再出現）、`member.reissued`、`member.confirmed`、`member.revoked`、`member.archived`（`count`・`skipped_unknown`件数の要約を1件）、`member.removal_notified`（P6-2で`route`＝`authority_direct`／`join_recovery`と`intent_confirmed`を追加）、`rrs.published`、`gk.staged`、`gk.rotated`、`gk.member_applied`（P5 PR3で追加）、`cutover.progress`（P6-2で追加。cutoverの`operation_id`・`phase`・epoch・`revision`・件数）、`authority.error`。`messages.subscribe`の`filter.kinds`で選べる。
 
 
-**判定の規則（実装）**：(node, kid)に有効な承認があればKGuardへ聞かずMemberCertを再発行（`member.reissued`。P6-2でcutover取り逃しの旧epoch資格はactive epochで再鋳造し、DAMSはこのfull joinのExporterで更新する）。削除済みで`JoinRequest.last_site_id`がこの現場なら`Removed`＋RemovalNotice、そうでなければ`previously_removed:true`の新しい参加要求。旧kidの復帰問い合わせはrevoke台帳（node索引）で照合し、該当すれば旧network向け`Removed`を返す（P6-2）。同じNodeIdの有効なmembershipと別kidは`kid_conflict:true`で、allowは`CONFLICT`（そのNodeIdを再利用せず新NodeIdを事務所で発行する）。競合は要求作成時のflagではなくcommit時の現行DeviceRowで判定する。v1では失効履歴に載ったNodeIdは別kid／同kidのいずれも再allowできず、事務所で新NodeIdのRLI1／DevCertを発行する必要がある（[04 §1](04-removal-revocation.md)）。決定済み要求への同一verdictの再呼出しは、同一idempotency keyならidempotency記録の保持範囲（最新1,024件）内で保存済みの応答を返す。別keyのallowは現行DeviceRowを検査し、承認した(kid, generation)がmemberとして有効なときだけ保存済みの結果を返し、失効・置換済みなら`CONFLICT`。別keyへの成功応答もそのkeyのidempotency記録として残る。KGuardが`decision_timeout_ms`内に答えなければPendingAssignment（`pending_retry_after_s`）で、要求は開いたまま残り、後の決定は次の試行で即反映。KGuardのpendingを配送した後、`retry_after`より5秒以上早い再試行はAuthorityBusy（残り秒数）。`decision_mode:"closed"`または`zero_touch_open:false`ではKGuardへ聞かずpending（発見済み一覧には載る）。同時参加は4件、同じjoiner MACのmessage_1は2秒に1件で、超過はrelay abort（`busy`、EDHOC sessionが無いのでJoinResultは送れない）。
+**判定の規則（実装）**：(node, kid)に有効な承認があればKGuardへ聞かずMemberCertを再発行（`member.reissued`。P6-2でcutover取り逃しの旧epoch資格はactive epochで再鋳造し、DAMSはこのfull joinのExporterで更新する）。削除済みで`JoinRequest.last_site_id`がこの現場なら`Removed`＋RemovalNotice、そうでなければ`previously_removed:true`の新しい参加要求。旧kidの復帰問い合わせはrevoke台帳（node索引）で照合し、該当すれば旧network向け`Removed`を返す（P6-2）。同じNodeIdの有効なmembershipと別kidは`kid_conflict:true`で、allowは`CONFLICT`（そのNodeIdを再利用せず新NodeIdを事務所で発行する）。競合は要求作成時のflagではなくcommit時の現行DeviceRowで判定する。v1では失効履歴に載ったNodeIdは別kid／同kidのいずれも再allowできず、事務所で新NodeIdのRLI1／DevCertを発行する必要がある（[04 §1](04-removal-revocation.md)）。決定済み要求への同一verdictの再呼出しは、同一idempotency keyならidempotency記録の保持範囲（最新1,024件）内で保存済みの応答を返す。別keyのallowは現行DeviceRowを検査し、承認した(kid, generation)がmemberとして有効なときだけ保存済みの結果を返し、失効・置換済みなら`CONFLICT`。別keyへの成功応答もそのkeyのidempotency記録として残る。KGuardが`decision_timeout_ms`内に答えなければPendingAssignment（`pending_retry_after_s`）で、要求は開いたまま残り、後の決定は次の試行で即反映。KGuardのpendingを配送した後、`retry_after`より5秒以上早い再試行はAuthorityBusy（残り秒数）。`decision_mode:"closed"`または`zero_touch_open:false`ではKGuardへ聞かずpending（発見済み一覧には載る）。同時参加は4件、同じjoiner MACのmessage_1は2秒に1件で、超過はrelay abort（`busy`、EDHOC sessionが無いのでJoinResultは送れない）。**承認停止とOFFER停止の区別**：`decision_mode:"closed"`はHost承認をset時に止める。`zero_touch_open:false`はHost verdictも止めるが、proxyのOFFER停止は`policy_generation`の無線配布が収束して初めて効く — 配布の搬送が無い現状では`radio_distributed_generation`はnullのままで、OFFERは止まらない。archive済みNodeIdの再joinは新規要求として上がり、失効履歴でallowが`CONFLICT`になる（撤去済み行が無いため`previously_removed`は立たない）。
 
-**永続化（実装）**：`DIR/site.db`（SQLite、作成時0600、exclusive lock、`synchronous=FULL`）。`meta`（site binding＝site_id・network・SAK kid。別の現場の台帳では起動を拒否。P6-2でcutover確定後の`active_site_cert`とepoch履歴`cutover_epochs`を追加）、`devices`（kid、DevCert、member/removed、generation、role、MemberCert＋serial、confirm、DAMS、時刻、削除理由）、`ledger`（approve/revoke/reissue/cutoverのSHA-256 hash chain。起動時に検証し、切れていれば拒否。P6-2で`ledger(node)`索引を追加）、`rrs`（発行した全RRS1。P6-2で新旧network混在をcutover境界で検証）、`group_keys`（active＋staged）、`docs`（発見済み機器・参加要求・idempotency記録・operationのJSON。P6-2で`cutover`／`notice` fragmentを追加）。1回の変更は1 transactionで、allowは台帳・device行・MemberCertのcommit後にだけ`committed`を返し、配送はDAMSの保存後。DAMS・GKはDB fileの0600だけで守られる（host鍵による封緘・TPMは未実装）。SAKは`DIR/sak.key`（`routeloom-root-key-v1`、FileRootSignerと同じ開発custody、起動時に警告）で、SiteCertのcnf・site_idと一致しなければ起動を拒否。SiteCertは`routeloomctl site-cert`（P7-2）で本部のSite CA鍵から発行する。
+**永続化（実装）**：`DIR/site.db`（SQLite、作成時0600、exclusive lock、`synchronous=FULL`）。`meta`（site binding＝site_id・network・SAK kid。別の現場の台帳では起動を拒否。P6-2でcutover確定後の`active_site_cert`とepoch履歴`cutover_epochs`を追加。policy行は世代付き12B — 旧8B行は世代0として読む。`archived_total`はarchive累計）、`devices`（kid、DevCert、member/removed、generation、role、MemberCert＋serial、confirm、DAMS、時刻、削除理由。archiveは撤去済み行を削除する）、`ledger`（approve/revoke/reissue/cutover/archiveのSHA-256 hash chain。起動時に検証し、切れていれば拒否。P6-2で`ledger(node)`索引を追加。`archive`行のdigestは忘却した行の最終MemberCert）、`rrs`（発行した全RRS1。P6-2で新旧network混在をcutover境界で検証）、`group_keys`（active＋staged）、`docs`（発見済み機器・参加要求・idempotency記録・operationのJSON。P6-2で`cutover`／`notice` fragmentを追加）。1回の変更は1 transactionで、allowは台帳・device行・MemberCertのcommit後にだけ`committed`を返し、配送はDAMSの保存後。DAMS・GKはDB fileの0600だけで守られる（host鍵による封緘・TPMは未実装）。SAKは`DIR/sak.key`（`routeloom-root-key-v1`、FileRootSignerと同じ開発custody、起動時に警告）で、SiteCertのcnf・site_idと一致しなければ起動を拒否。SiteCertは`routeloomctl site-cert`（P7-2）で本部のSite CA鍵から発行する。
 
 **GKの境界（P5）**：初回起動時にGK epoch 1を生成してSitePackageに載せる。削除時と24時間周期の更新では次のGKを`staged`で作り、Host側の配布・durable ACK記録・activationを進める（P5 PR3）。stagedは新規参加者にも渡さない。機器・USBへの結線はP5 PR2／PR4に残る。
 
 **transport**：`site::transport::JoinTransport`（`RelayUp`＝0x40の中身、`Outbound::Down`＝0x41、`Outbound::Abort`＝0x42、step 1〜4＝EDHOC message、5＝EDHOC error、status 0継続／1最終）とin-process実装。USBへの結線（HostOps codec・capability bit）は並行作業（P3-2）の後に統合者が`UsbJoinRelay`経由で行う。authority channelのportable実装はP5 PR1で完了したが、JoinConfirm→`member_confirmed`のHost結線はP5 PR4に残るため、memberは現時点で`allowed_unconfirmed`のまま。
 
-**試験**：`cargo test -p routeloom-edhoc`（RFC 9529、method 0、interop replay）、`cargo test -p routeloom-host site::`（状態機械、SQLite、再起動後の同一MemberCert再発行、削除とRRS1／RemovalNoticeの検証、admission上限、store故障、API面）、daemonのAPI1 socket経由で`KGuardMock`が`SiteAdmin`を操作する端から端までの試験（未割当→pending→割当→Allowを`join_allow_verify`で検証、deny not_here、ACL、idempotency、削除）。
+**試験**：`cargo test -p routeloom-edhoc`（RFC 9529、method 0、interop replay）、`cargo test -p routeloom-host site::`（状態機械、SQLite、再起動後の同一MemberCert再発行、削除とRRS1／RemovalNoticeの検証、admission上限、store故障、API面、archiveの行削除とNodeId再利用禁止の維持・idempotency・再起動耐久、policy世代の+1／据え置き／旧8B互換）、daemonのAPI1 socket経由で`KGuardMock`が`SiteAdmin`を操作する端から端までの試験（未割当→pending→割当→Allowを`join_allow_verify`で検証、deny not_here、ACL、idempotency、削除、archiveの入力検証・ADMIN認可）。
 
 ## 3. 永続化（host）
 
@@ -218,6 +227,7 @@ USB frame上限4096Bに対し最大の本文はRRS1付きで約700B。gateway自
 | 未割当機器 | `join.request`→KGuardが`pending`→画面の「発見済み機器」に表示→担当者が割当→次の試行（≤retry_after）でallow |
 | 他現場の機器が見える | `join.request`→KGuardが`deny not_here`（中央の割当DBで他現場と分かる場合）または`pending` |
 | 取外し | `membership.revoke`→`operations.get`で収束確認 |
+| 撤去済み行の掃除 | `members.list(include_removed)`で撤去済みを選び`membership.archive`（ADMIN）→`archived[]`を確認。`revoke`履歴は残るのでNodeId再利用は不可のまま。`archived_total`が累計 |
 | 別現場へ移設 | 元の現場で`revoke`→機器は未割当へ戻る→新しい現場の`join.request`で`allow` |
 | 停電 | 何もしない（[06](06-fast-rejoin.md)） |
 
@@ -234,13 +244,19 @@ USB frame上限4096Bに対し最大の本文はRRS1付きで約700B。gateway自
 | `site-cert`コマンド | Site CAでSiteCertを発行（現場PC導入時、本部で実施） |
 | 在庫出力 | `(node_id, kid, model, cert_serial)`のJSON/CSVをKGuardへ渡す（割当の事前登録用） |
 
-事務所の手順（1台あたり）：
+事務所の手順（1台あたり。量産は下のバッチ手順）：
 
-1. 量産firmwareを書込み（保守console有効build、またはstrap）。
-2. 機器内で鍵生成（Entropy READY後、[セキュリティ §9](../../spec/security.md)）。機器は公開鍵と所持証明（nonceへの署名）をUSBで返す。
-3. 署名端末が所持証明を検証し、DevCertを発行。
-4. RLI1（NodeId、DevCert、Site CA anchor、flags）を書込み、readbackで確認。
-5. `console_locked`を立てる（量産時）。在庫記録を出力。
+1. 保守console有効の量産firmwareを書込み、USB consoleのbanner（`routeloom-maintenance v1 ready`）を確認して`status`を取る。`fw=`が投入予定imageのversion（build時のapp version。`build/project_description.json`に記録される）と一致しなければ作業中止（`unknown`を含む）。
+2. 機器内で鍵生成（Entropy READY後、[セキュリティ §9](../../spec/security.md)）：`keygen <node:16hex> <challenge:64hex>` → `OK pop_hex=<366hex>`。challengeは`provision-pop-challenge --node …`で作る。
+3. 署名端末が所持証明を検証し、DevCertを発行する：`provision-devcert --ca-key … --spec … --node … --serial … --challenge … --pop … --out-dir …`（注入鍵の開発・benchは`provision-identity`）。発行前に事務所台帳（JSONL。既定では`--ca-key`と同じdirの`office-ledger.jsonl`、`--ledger`で変更）が（Device CA, NodeId, serial）をlockfile排他で予約し、二重発行・serialのNodeIdまたぎを拒否する。成果物は一時dirに全部揃えて検証してからpublishする：失敗時は同じ`--work-id`（既定はout-dirの絶対path由来）の再実行で中断箇所から再開し、別作業の同slotは拒否する。
+4. 保守verb `identity <identity-bundle.jsonのhex>`で封緘する（→ `OK sealed kid=…`）。`status`のreceipt行が`provision-expect --out-dir … --fw <手順1のversion>`の`expected_status`とbyte一致することを確認する（応答喪失時は`status`再読で照合。不一致はUSB差し違え・取り違えで先へ進まない）。
+5. 保守verb `lock <kid:64hex>`（kidは`provision-expect`の`lock_kid`）で封緘を確定する（→ `OK locked kid=…`。kid不一致は`key_mismatch`、同kid再送は成功再生）。`status`で`locked=1`を確認し、`provision-confirm-written --ledger … --node … --devcert-sha256 <statusの値> [--out-dir …]`で台帳を`issued`→`written`へ進める（digest不一致は拒否）。
+6. 現場用firmware（保守console無効build）をapp領域だけに書込む：`idf.py -p PORT flash`（`erase_flash`禁止 — `rlsec`のsealed identityを消す）。書込み後、`status`に応答が無いこと（console不在）と、boot logの`routeloom field boot: fw=<version>`が投入imageと一致することを確認する。
+7. 出荷検査：検査用現場の圏内で電源投入し、boot logの`sdkv1 identity: node=<10進> … flags=0x01`（console_locked）が在庫NodeIdと一致すること、DISCOVER→`join.request`→allow→Member（`confirm_state`はchannel結線済みなら`active`）を検査台帳に記録する。console bannerが出たら切替忘れで不合格、join不能は手順4のreceiptと事務所台帳の照合へ戻る。
+
+量産バッチ：`provision-batch --ca-key … --spec … --ledger … --csv lot.csv --out-root lot/ [--mode devcert|injected]`。CSV行は`node,serial[,work_id]`（injected）または`node,serial,challenge_hex,pop_hex[,work_id]`（devcert。`#`・空行・`node,…`header可）。行ごとに台帳予約→原子的発行し、`<out-root>/batch-report.jsonl`（行ごとのkid・devcert_sha256・成否）に残す。1行の失敗は他行を止めないがcommandは非0終了する。`provision-ledger-status --ledger …`で台帳一覧、`provision-ledger-release --ledger … --node … --serial … --work-id …`で未発行の予約取消（`issued`／`written`は消さない）、`provision-ledger-import --ledger … --out-dir …`で台帳以前の発行済み出力の取込み。
+
+返品・再provision（正式初期化）は保守consoleの`deprovision` → `OK deprovision node=… kid=… nonce=…` → `deprovision_confirm <nonce:32hex> <kid:64hex|none>` → `OK deprovisioned node=…`で全storeを未provisionへ戻す（`rlboot` witnessは単調のため残る）。事務所台帳の`issued`／`written`は消さない：再provisionは新NodeIdで手順1からやり直す（v1はNodeIdを再利用しない）。
 
 鍵を外で作って注入する方法はtier T1未満の選択肢として残す（[04 provisioning §4.4](../sdk-completion/04-provisioning-lifecycle.md)）。事務所でnetwork id・現場鍵・channelを書く手順は無くなる。
 
@@ -256,6 +272,9 @@ P7-1で実装した事務所側tooling。本番custody（HSM）・実機での�
 | RLI1組立て | `sdkv1::office` | 注入鍵（`nvs-plaintext`）のRLI1を機器の起動検査と同じ規則で作る。機器内生成鍵では秘密を持たないため、機器の保守verbがRLI1を封緘するための`routeloom-identity-bundle-v1`（node_id・flags・anchor・DevCert、秘密なし）を出す。在庫行（node_id・kid・model・hw_rev・cert_serial・device_ca_id、DevCertから導出） |
 | `rlsec` NVS image | `sdkv1::rlsec`、`nvs::nvs_partition_csv` | `rlident`の`i0`/`i1`に同一のcommitted RLI1（used_lenちょうど）。既存P-A1と同じくblob fileとJSON記述子（`routeloom-rlsec-nvs-v1`、partition名付き）を出し、加えてESP-IDF `nvs_partition_gen.py`用CSVを出す。出力前に二重slotとしての読戻し（両blob一致・committed・起動検査合格）を確認 |
 | CLI | `routeloomctl provision-devca-keygen`／`provision-pop-challenge`／`provision-devcert`／`provision-identity` | daemon socketを使わない。使い方は[routeloom-provision README](../../../host/routeloom-provision/README.md) |
+| 発行台帳 | `routeloomctl`の`office_ledger` | JSONL＋lockfile排他の耐久台帳（既定は`--ca-key`と同じdir）。発行前に（Device CA, NodeId, serial）を予約し、二重発行とserialのNodeIdまたぎを拒否。状態は`reserved`→`issued`→`written`。`issued`／`written`は消さない（NodeId再利用禁止の履歴）。`provision-ledger-status`で一覧、`provision-ledger-release`で未発行予約の取消、`provision-ledger-import`で台帳以前の発行済み出力の取込み |
+| 原子的発行と再開 | `provision_office`のstaging publish | `--ledger`/`--work-id`付きで一時dirへ全成果物を揃えて検証後にpublishする。失敗時は同`--work-id`の再実行で中断箇所から再開し、別作業の同slotは拒否する。`provision-expect --out-dir … [--fw …]`は封緘後に機器が返すべき`status`行・`lock`用kid・在庫状態を出す。`provision-confirm-written --ledger … --node … --devcert-sha256 … [--out-dir …]`は機器receiptとの照合で台帳を`written`へ進める（`--out-dir`付きは在庫も`written`へ） |
+| 量産バッチ | `provision-batch` | `--ca-key --spec --ledger --csv --out-root [--mode devcert\|injected]`。CSV行（`node,serial[,work_id]`または`node,serial,challenge_hex,pop_hex[,work_id]`）ごとに行単位のout-dirへ台帳予約→原子的発行し、`<out-root>/batch-report.jsonl`にkid・devcert_sha256・成否を残す。1行の失敗は他行を止めない |
 | 機器側NVS adapter | [sdkv1_blob_storage.hpp](../../../components/routeloom/include/routeloom/sdkv1_blob_storage.hpp)、`routeloom_espnow`の`nvs_sdkv1_store` | 4つのstoreを`rlsec`の`rlident`（`i0`/`i1`）・`rlsite`（`s0`/`s1`）・`rlrevo`（`r0`/`r1`）・`rlres`（`s00`〜`s15`、gatewayは`s000`〜`s159`）へ写す。読戻し規約はtrust/credential adapterと同じ（key無し＝未書込み、存在するが全0xFF／全0／長さ0＝破損、slot超過・読込長不一致＝破損、暗黙のeraseなし）。規約とslot対応はportable側にあり、NVSと同じ原子的更新を持つfake NVSでhost試験。ESP-IDF側は`nvs_open_from_partition`・`nvs_get_blob`・`nvs_set_blob`＋`nvs_commit`への転送だけ。§6.2で両firmwareに配線した |
 
 `rlsec`の書込み手順（注入鍵、開発・bench）：
@@ -280,8 +299,8 @@ esptool.py write_flash 0x190000 rlsec.bin                                      #
 | 部品 | 場所 | 内容 |
 |---|---|---|
 | PoPのC++ codec | `sdkv1_pop.{hpp,cpp}` | payloadのencode／厳密decode、AAD、検証（形式不正はProtocolError、node・challenge不一致と署名不正はverified=false）、機器の署名（micro-ecc決定的署名＋low-S正規化）。`protocol/sdkv1-golden/`の`pop` codec（独立Python生成器）でRust側とbyte一致し、Rust harnessはRFC 6979で再署名して一致を確認。C++側は証明書と同じくverify-only |
-| 保守console engine | `sdkv1_maintenance.{hpp,cpp}` | 1行入出力のportable engine。`status`／`keygen <node> <challenge>`／`identity <bundle hex>`。entropy portの失敗で鍵生成を拒否（security §9）。bundleは`routeloom-identity-bundle-v1`の厳密JSON読み（順序・鍵・列挙値を固定、未知のfieldは拒否）。node・公開鍵・kidをpending鍵と照合し、RLI1起動検査→twin commit→boot相当の再読込で照合してから成功を返す。`console_locked`は全verb拒否。host試験（`routeloom_sdkv1_maintenance_tests`）は共通vectorのDevCert・anchor・kidを束ねた本物のbundleで密封まで通す |
-| firmware配線 | `routeloom_espnow`の`espnow_sdkv1`、両firmwareの`main.cpp`・Kconfig | 4 store（`rlident`／`rlsite`／`rlrevo`／`rlres`、gatewayは160 resume slot）を`rlsec`上に開いて初期化し、状態をboot診断に出す（秘密なし）。consoleは`CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE`のbuildだけがRF前にUSB Serial/JTAGで起動し、8 KiBの専用taskで回る。chip内部entropy源を有効化してPSA Cryptoの乱数Providerを初期化し、成功後だけ鍵生成を許す。firmware CIに`maintenance_on` cellを追加し、console分岐のbuildを確認する。静的RAM増は約5.2 KiB（console bufferはfield buildではlinkで落ちる） |
+| 保守console engine | `sdkv1_maintenance.{hpp,cpp}` | 1行入出力のportable engine。`status`／`keygen <node> <challenge>`／`identity <bundle hex>`／`lock <kid>`／`deprovision`／`deprovision_confirm <nonce> <kid\|none>`。entropy portの失敗で鍵生成を拒否（security §9）。bundleは`routeloom-identity-bundle-v1`の厳密JSON読み（順序・鍵・列挙値を固定、未知のfieldは拒否）。node・公開鍵・kidをpending鍵と照合し、RLI1起動検査→twin commit→boot相当の再読込で照合してから成功を返す。`status`は秘密を出さないreceipt（`identity/pending/locked`＋sealed時は`node/kid/serial/devcert_sha256`＋`fw=<build version\|unknown>`）で、lock後・応答喪失後・USB差し違え時の照合に使う。`lock`はkid照合の冪等 finalize（同kid再送は成功再生）。lock後は`status`／`lock`／deprovision対以外を`locked`で拒否。deprovision対はnonce単発・kid束縛で全storeを未provisionへ戻す（`rlboot`は残る）。host試験（`routeloom_sdkv1_maintenance_tests`）は共通vectorのDevCert・anchor・kidを束ねた本物のbundleで密封まで通す |
+| firmware配線 | `routeloom_espnow`の`espnow_sdkv1`、両firmwareの`main.cpp`・Kconfig | 4 store（`rlident`／`rlsite`／`rlrevo`／`rlres`、gatewayは160 resume slot）を`rlsec`上に開いて初期化し、状態をboot診断に出す（秘密なし）。consoleは`CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE`のbuildだけがRF前にUSB Serial/JTAGで起動し、8 KiBの専用taskで回る。`status`の`fw=`にはfirmwareがapp versionを渡す。field buildはboot logに`routeloom field boot: fw=<version>`を出し、console bannerを出さない（§6手順6-7の出荷検査marker。`sdkv1 identity: node=…`行と合わせてidentity保持を確認する）。chip内部entropy源を有効化してPSA Cryptoの乱数Providerを初期化し、成功後だけ鍵生成を許す。firmware CIに`maintenance_on` cellを追加し、console分岐のbuildを確認する。静的RAM増は約5.2 KiB（console bufferはfield buildではlinkで落ちる） |
 | `SiteCaSigner` | `routeloom-provision`の`sdkv1::siteca` | `DeviceCaSigner`と同じ境界のtrait。開発用`FileSiteCaSigner`は鍵文書`routeloom-site-ca-key-v1`（0600・上書き拒否・Device CA文書と相互不可）。SiteCert発行は発行後にSite CA公開鍵で自己検証する |
 | CLI | `routeloomctl provision-siteca-keygen`／`site-cert` | `site-cert --ca-key <siteca.key> --site-id … --sak-pubkey … --network-low32 … --site-epoch … --serial … --out sitecert.cwt`。SAK公開鍵はsite PCから帯域外で受け取り、Site Authorityが起動時に不一致を拒否する。daemon socketを使わない |
 | 在庫出力 | `sdkv1::office`の`inventory_file_json` | `provision-devcert`／`provision-identity`が`inventory.json`（`routeloom-inventory-v1`、DevCert由来の6 field＋format marker）をout-dirへ書く。stdoutの1行はbyte互換で残す |
@@ -310,3 +329,6 @@ esptool.py write_flash 0x190000 rlsec.bin                                      #
 | V1-H07 | host crash（commit後・送信前）→機器の再試行で冪等再発行（**P3-3でhost試験済み**：SQLite storeを開き直し、同じMemberCert byte列を再発行） |
 | V1-H08 | USB 0x40〜0x46 codecのC++/Rust共通vector、capability無しでUnsupported |
 | V1-H09 | routeloom-provision：RLI1・DevCertのgolden一致、所持証明の無い公開鍵には発行しない（**P7-1でhost試験済み**：`tests/sdkv1_office.rs`が発行したDevCert・注入鍵RLI1を共通vectorとbyte一致で確認し、PoPの不一致・改ざん・再送を拒否。**P7の残りでhost試験済み**：PoPのC++/Rust共通vectorとbyte一致、保守verbの鍵生成・PoP・bundle密封・readback（共通vectorの本物bundle）、SiteCert発行のgolden一致と`inventory.json`。HILは未実施） |
+| V1-H10 | 現場用firmwareへの切替と出荷検査（§6手順6-7）：app領域だけの再書込みで`rlsec` identityを保持し、`routeloom field boot: fw=`と`sdkv1 identity: node=`で照合、検査用現場でjoin→Memberを確認。console buildのままは不合格。**host試験済み**：`status`の`fw=`報告・`unknown`時fail-closed・`provision-expect --fw`照合（`routeloom_sdkv1_maintenance_tests`、`routeloomctl`）。実機の切替・joinはHIL未実施 |
+| V1-H11 | `membership.archive`：撤去済み行だけを1 transactionで忘却し、`revoke`履歴を残してNodeId再利用を禁止し続ける（**host試験済み**：容量回収・現役混じりCONFLICT・idempotency・再起動耐久、socket経由の入力検証・ADMIN認可） |
+| V1-H12 | join policyの世代管理：内容変更で`policy_generation`+1（同内容は据え置き）、getは`radio_distributed_generation`でHost承認停止と無線OFFER停止を区別する（**host試験済み**：+1／据え置き／旧8B互換、socket経由）。無線配布の搬送は未実装（将来の版配布が`policy_generation`に収束させる） |

@@ -1481,8 +1481,10 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
           return Status::success();
         }
         if (health.has_site) return adopt_and_enter(now_ms);
+        // Boot never re-emits the reboot: the Owner rebooted to get here
+        // (the holdoff expiry emitted the single request), so the
+        // post-condition is already picked up — just resume unassigned.
         phase_ = LifecyclePhase::UnassignedReady;
-        emit_action(LifecycleActionTag::RestartUnassigned, LifecycleActionReason::None);
         return Status::success();
       }
     }

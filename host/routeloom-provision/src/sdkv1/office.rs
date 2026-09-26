@@ -145,11 +145,21 @@ pub fn inventory_json(devcert: &[u8]) -> Result<String> {
 /// pre-registration. The stdout line stays byte-identical for scripts.
 pub const INVENTORY_FORMAT: &str = "routeloom-inventory-v1";
 
-/// The `inventory.json` file content for one issued DevCert.
-pub fn inventory_file_json(devcert: &[u8]) -> Result<String> {
+/// `inventory.json` office states: `issued` at publish time,
+/// `provision-confirm-written` flips it to `written` once the device
+/// receipt matches.
+pub const OFFICE_STATUS_ISSUED: &str = "issued";
+pub const OFFICE_STATUS_WRITTEN: &str = "written";
+
+/// The `inventory.json` file content for one issued DevCert, with the
+/// office state (`issued` / `written`) split from the DevCert record.
+pub fn inventory_file_json(devcert: &[u8], office_status: &str) -> Result<String> {
+    if office_status != OFFICE_STATUS_ISSUED && office_status != OFFICE_STATUS_WRITTEN {
+        return err(Code::InvalidArgument, "inventory office status");
+    }
     let claims = inventory_claims(devcert)?;
     Ok(format!(
-        "{{\n  \"format\": \"{INVENTORY_FORMAT}\",\n  \"node_id\": \"{:016x}\",\n  \"kid\": \"{}\",\n  \"model\": {},\n  \"hw_rev\": {},\n  \"cert_serial\": {},\n  \"device_ca_id\": \"{:016x}\"\n}}\n",
+        "{{\n  \"format\": \"{INVENTORY_FORMAT}\",\n  \"node_id\": \"{:016x}\",\n  \"kid\": \"{}\",\n  \"model\": {},\n  \"hw_rev\": {},\n  \"cert_serial\": {},\n  \"device_ca_id\": \"{:016x}\",\n  \"office_status\": \"{office_status}\"\n}}\n",
         claims.subject,
         hex_encode(&credential_kid(&claims.pubkey)),
         claims.model,

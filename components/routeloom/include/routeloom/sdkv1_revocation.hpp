@@ -430,7 +430,8 @@ enum class LifecycleActionTag : std::uint8_t {
   None = 0,
   // PR B: hand store ownership to the Joiner for a recovery join.
   StartRecoveryJoin = 1,
-  // PR B: restart unassigned after the removal holdoff.
+  // PR B: restart unassigned after the removal holdoff. Emitted once by
+  // the holdoff expiry; Boot never re-emits (the reboot already happened).
   RestartUnassigned = 2,
   // PR C: adopt the staged next-network membership.
   AdoptNetwork = 3,
@@ -443,6 +444,32 @@ enum class LifecycleActionReason : std::uint8_t {
   SelfRevocation = 1,
   LinkFailure = 2,
 };
+
+// Owner-side AdoptNetwork disposition. The mesh node and discovery cannot
+// re-adopt live, so a live cutover reboots exactly once and the clean boot
+// completes the action after it re-adopts from the committed stores —
+// never a second reboot on the same durable state.
+enum class AdoptNetworkDisposition : std::uint8_t {
+  Complete = 0,        // the installed binding is the action's network: ActionDone
+  WaitForAdoption = 1,  // no live binding yet: leave pending (in flight or failed)
+  RebootToAdopt = 2,   // a live Member binding on the old network: reboot once
+};
+
+// Pure decision table over the Owner's installed binding
+// (`adopted_network`/`adopted_role`, zero until ApplyMemberConfig) and
+// whether the coordinator runs Member on it right now.
+constexpr AdoptNetworkDisposition adopt_network_disposition(
+    const NetworkId action_network, const NetworkId adopted_network,
+    const std::uint8_t adopted_role, const bool live_member_binding) noexcept {
+  if (adopted_role != 0 && adopted_network == action_network) {
+    return AdoptNetworkDisposition::Complete;
+  }
+  if (live_member_binding && adopted_role != 0 && adopted_network != 0 &&
+      adopted_network != action_network) {
+    return AdoptNetworkDisposition::RebootToAdopt;
+  }
+  return AdoptNetworkDisposition::WaitForAdoption;
+}
 
 // Owner work order: tag, monotonic token, the RLS1 commit_seq the decision
 // was taken under (the Owner re-checks before acting), site/network, reason.

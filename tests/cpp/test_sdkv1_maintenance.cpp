@@ -19,6 +19,7 @@
 
 #include "routeloom/config_cose.hpp"
 #include "routeloom/device_credential.hpp"
+#include "routeloom/discovery_scope.hpp"
 #include "routeloom/sdkv1_maintenance.hpp"
 #include "routeloom/sdkv1_pop.hpp"
 
@@ -172,6 +173,7 @@ struct Office {
   std::string kid_hex;
   std::string device_pubkey_hex;
   std::string peer_pubkey_hex;
+  std::uint64_t cert_serial{0};
   std::vector<BundleAnchor> strict_anchors;
   BundleAnchor site_ca;
 };
@@ -179,7 +181,9 @@ struct Office {
 Office load_office() {
   const std::filesystem::path dir(ROUTELOOM_SDKV1_GOLDEN_DIR);
   Office office;
-  office.devcert_hex = json_string(read_file(dir / "valid" / "cert_devcert.json"), "cert_hex");
+  const std::string devcert = read_file(dir / "valid" / "cert_devcert.json");
+  office.devcert_hex = json_string(devcert, "cert_hex");
+  office.cert_serial = json_number(devcert, "serial");
   const std::string rli1 = read_file(dir / "valid" / "rli1_strict_three_anchors.json");
   office.kid_hex = json_string(rli1, "kid_hex");
   office.device_pubkey_hex = json_string(rli1, "pubkey_hex");
@@ -206,13 +210,61 @@ std::string minimal_bundle(const Office& office, unsigned flags = 0) {
                      {office.site_ca}, office.devcert_hex);
 }
 
+// The sealed `status` receipt: node/kid/serial from the golden office
+// fixtures, devcert_sha256 over the golden DevCert bytes.
+std::string sealed_status(const Office& office, int pending, int locked) {
+  const std::vector<std::uint8_t> cert = unhex(office.devcert_hex);
+  ScopeDigest digest{};
+  sha256(ByteView{cert.data(), cert.size()}, digest);
+  std::ostringstream out;
+  out << "OK identity=sealed pending=" << pending << " locked=" << locked
+      << " node=00a1000000001234 kid=" << office.kid_hex << " serial=" << office.cert_serial
+      << " devcert_sha256=" << hex_encode(digest.data(), digest.size()) << " fw=unknown";
+  return out.str();
+}
+
 void status_fresh() {
   current = "status_fresh";
   FaultyRecordStorage storage(kIdentitySlotBytes);
   IdentityStore store(storage);
   FakeEntropy entropy;
   MaintenanceConsole console(store, entropy);
-  CHECK(run(console, "status") == "OK identity=none pending=0");
+  CHECK(run(console, "status") == "OK identity=none pending=0 locked=0 fw=unknown");
+}
+
+// V1-H10: the status receipt identifies the firmware build, so the office
+// verifies the maintenance image before the field switch (07 §6) — and an
+// unset or malformed version fails closed as `unknown`, never blank.
+void status_reports_firmware_version() {
+  current = "status_reports_firmware_version";
+  FaultyRecordStorage storage(kIdentitySlotBytes);
+  IdentityStore store(storage);
+  FakeEntropy entropy;
+  MaintenanceConsole console(store, entropy);
+  CHECK(run(console, "status") == "OK identity=none pending=0 locked=0 fw=unknown");
+  static const char kFw[] = "rl-1.2.3-maintenance";
+  console.set_firmware_version(
+      ByteView{reinterpret_cast<const std::uint8_t*>(kFw), sizeof(kFw) - 1});
+  CHECK(run(console, "status") ==
+        "OK identity=none pending=0 locked=0 fw=rl-1.2.3-maintenance");
+}
+
+void status_rejects_bad_firmware_version() {
+  current = "status_rejects_bad_firmware_version";
+  FaultyRecordStorage storage(kIdentitySlotBytes);
+  IdentityStore store(storage);
+  FakeEntropy entropy;
+  MaintenanceConsole console(store, entropy);
+  static const char kLong[] = "0123456789abcdef0123456789abcdef0";  // 33 chars
+  console.set_firmware_version(
+      ByteView{reinterpret_cast<const std::uint8_t*>(kLong), sizeof(kLong) - 1});
+  CHECK(run(console, "status") == "OK identity=none pending=0 locked=0 fw=unknown");
+  static const char kSpace[] = "rl 1.2";
+  console.set_firmware_version(
+      ByteView{reinterpret_cast<const std::uint8_t*>(kSpace), sizeof(kSpace) - 1});
+  CHECK(run(console, "status") == "OK identity=none pending=0 locked=0 fw=unknown");
+  console.set_firmware_version(ByteView{nullptr, 0});
+  CHECK(run(console, "status") == "OK identity=none pending=0 locked=0 fw=unknown");
 }
 
 void keygen_ok() {
@@ -240,7 +292,7 @@ void keygen_ok() {
   P256PublicKey expected{};
   CHECK(uECC_compute_public_key(scalar.data(), expected.data(), uECC_secp256r1()) != 0);
   CHECK(claims.pubkey == expected);
-  CHECK(run(console, "status") == "OK identity=none pending=1");
+  CHECK(run(console, "status") == "OK identity=none pending=1 locked=0 fw=unknown");
 }
 
 void keygen_entropy_not_ready() {
@@ -252,7 +304,7 @@ void keygen_entropy_not_ready() {
   MaintenanceConsole console(store, entropy);
   CHECK(run(console, std::string("keygen 00a1000000001234 ") + kChallenge64) ==
         "ERR entropy_not_ready");
-  CHECK(run(console, "status") == "OK identity=none pending=0");
+  CHECK(run(console, "status") == "OK identity=none pending=0 locked=0 fw=unknown");
   entropy.ready = true;
   CHECK(run(console, std::string("keygen 00a1000000001234 ") + kChallenge64)
             .rfind("OK pop_hex=", 0) == 0);
@@ -282,11 +334,18 @@ void keygen_rejects_bad_input() {
       "keygen 00a1000000001234 " + std::string(64, 'z'),
       " keygen 00a1000000001234 " + challenge,  // leading space
       "identity",
+      "lock",
+      "lock 00",
+      "lock " + std::string(64, '0') + " extra",
+      "deprovision x",
+      "deprovision_confirm",
+      "deprovision_confirm " + std::string(32, '0'),
+      "deprovision_confirm a b c",
   };
   for (const auto& line : bad) {
     CHECK(run(console, line) == "ERR invalid_argument");
   }
-  CHECK(run(console, "status") == "OK identity=none pending=0");
+  CHECK(run(console, "status") == "OK identity=none pending=0 locked=0 fw=unknown");
 }
 
 void identity_ok() {
@@ -314,11 +373,14 @@ void identity_ok() {
   CHECK(adopted.anchors[0].anchor_id == 0x05CA000000000001ULL);
   CHECK(hex_encode(adopted.devcert.bytes.data(), adopted.devcert.size) ==
         office.devcert_hex);
-  CHECK(run(console, "status") == "OK identity=sealed pending=0");
-  // Sealed: no second key, no second identity.
+  CHECK(run(console, "status") == sealed_status(office, 0, 0));
+  // Sealed: no second key. Resending the identical bundle replays the
+  // success (a lost USB response re-asks); a different bundle refuses.
   CHECK(run(console, std::string("keygen 00a1000000001234 ") + kChallenge64) ==
         "ERR already_provisioned");
   CHECK(run(console, "identity " + hex_encode(minimal_bundle(office))) ==
+        "OK sealed kid=" + office.kid_hex);
+  CHECK(run(console, "identity " + hex_encode(minimal_bundle(office, 0x01))) ==
         "ERR already_provisioned");
 }
 
@@ -484,7 +546,9 @@ void console_locked_seals_the_console() {
   (void)run(console, std::string("keygen 00a1000000001234 ") + kChallenge64);
   CHECK(run(console, "identity " + hex_encode(minimal_bundle(office, 0x01))) ==
         "OK sealed kid=" + office.kid_hex);
-  CHECK(run(console, "status") == "ERR locked");
+  // Locked: the seal receipt stays readable (manufacturing confirmation),
+  // but provisioning verbs refuse.
+  CHECK(run(console, "status") == sealed_status(office, 0, 1));
   CHECK(run(console, std::string("keygen 00a1000000001234 ") + kChallenge64) == "ERR locked");
   CHECK(run(console, "identity " + hex_encode(minimal_bundle(office))) == "ERR locked");
 }
@@ -667,10 +731,340 @@ void uppercase_hex_is_accepted() {
   CHECK(run(console, "identity " + bundle) == "OK sealed kid=" + office.kid_hex);
 }
 
+void status_reports_seal_receipt() {
+  current = "status_reports_seal_receipt";
+  const Office office = load_office();
+  FaultyRecordStorage storage(kIdentitySlotBytes);
+  IdentityStore store(storage);
+  FakeEntropy entropy;
+  MaintenanceConsole console(store, entropy);
+  CHECK(run(console, "status") == "OK identity=none pending=0 locked=0 fw=unknown");
+  (void)run(console, std::string("keygen 00a1000000001234 ") + kChallenge64);
+  CHECK(run(console, "identity " + hex_encode(minimal_bundle(office))) ==
+        "OK sealed kid=" + office.kid_hex);
+  // The receipt carries the non-secret identifiers the office matches
+  // against the inventory: node, kid, DevCert serial and DevCert digest.
+  CHECK(run(console, "status") == sealed_status(office, 0, 0));
+}
+
+void lock_finalizes_the_seal() {
+  current = "lock_finalizes_the_seal";
+  const Office office = load_office();
+  FaultyRecordStorage storage(kIdentitySlotBytes);
+  IdentityStore store(storage);
+  FakeEntropy entropy;
+  MaintenanceConsole console(store, entropy);
+  CHECK(run(console, "lock " + office.kid_hex) == "ERR no_identity");
+  (void)run(console, std::string("keygen 00a1000000001234 ") + kChallenge64);
+  (void)run(console, "identity " + hex_encode(minimal_bundle(office)));
+  // The lock binds to the sealed target: another kid refuses.
+  std::string other_kid = office.kid_hex;
+  other_kid[0] = (other_kid[0] == '0') ? '1' : '0';
+  CHECK(run(console, "lock " + other_kid) == "ERR key_mismatch");
+  CHECK(run(console, "lock " + office.kid_hex) == "OK locked kid=" + office.kid_hex);
+  CHECK((store.identity().flags & kIdentityFlagConsoleLocked) != 0);
+  CHECK(run(console, "status") == sealed_status(office, 0, 1));
+  // Idempotent: re-locking the same target replays the success, and the
+  // lock survives a reboot (a fresh console over the same slots).
+  CHECK(run(console, "lock " + office.kid_hex) == "OK locked kid=" + office.kid_hex);
+  CHECK(run(console, std::string("keygen 00a1000000001234 ") + kChallenge64) == "ERR locked");
+  CHECK(run(console, "identity " + hex_encode(minimal_bundle(office))) == "ERR locked");
+  IdentityStore rebooted(storage);
+  FakeEntropy entropy2;
+  MaintenanceConsole console2(rebooted, entropy2);
+  CHECK(run(console2, "status") == sealed_status(office, 0, 1));
+  CHECK(run(console2, "lock " + office.kid_hex) == "OK locked kid=" + office.kid_hex);
+}
+
+void identity_resend_is_idempotent() {
+  current = "identity_resend_is_idempotent";
+  const Office office = load_office();
+  FaultyRecordStorage storage(kIdentitySlotBytes);
+  IdentityStore store(storage);
+  FakeEntropy entropy;
+  MaintenanceConsole console(store, entropy);
+  (void)run(console, std::string("keygen 00a1000000001234 ") + kChallenge64);
+  const std::string bundle_hex = hex_encode(minimal_bundle(office));
+  CHECK(run(console, "identity " + bundle_hex) == "OK sealed kid=" + office.kid_hex);
+  // A lost USB response re-asks with the same bundle — after a reconnect
+  // the pending key is gone, so the replay must not need it.
+  IdentityStore reconnected(storage);
+  FakeEntropy entropy2;
+  MaintenanceConsole console2(reconnected, entropy2);
+  CHECK(run(console2, "identity " + bundle_hex) == "OK sealed kid=" + office.kid_hex);
+  CHECK(run(console2, "status") == sealed_status(office, 0, 0));
+  // A different bundle for the same slot is a provisioning conflict, not
+  // a key mismatch: the seal stands.
+  CHECK(run(console2, "identity " + hex_encode(minimal_bundle(office, 0x01))) ==
+        "ERR already_provisioned");
+  CHECK(run(console2, "status") == sealed_status(office, 0, 0));
+}
+
+void lock_needs_healthy_store() {
+  current = "lock_needs_healthy_store";
+  const Office office = load_office();
+  FaultyRecordStorage storage(kIdentitySlotBytes);
+  IdentityStore store(storage);
+  FakeEntropy entropy;
+  MaintenanceConsole console(store, entropy);
+  (void)run(console, std::string("keygen 00a1000000001234 ") + kChallenge64);
+  (void)run(console, "identity " + hex_encode(minimal_bundle(office)));
+  storage.slot(1)[40] ^= 0x01;
+  CHECK(run(console, "lock " + office.kid_hex) == "ERR store_unavailable");
+}
+
+// --- Deprovision ------------------------------------------------------------------
+// (sdkv1_test builders, qualified: this file has its own kNode.)
+
+struct ProvisionedDevice {
+  FaultyRecordStorage identity_storage{kIdentitySlotBytes};
+  FaultyRecordStorage site_storage{kSiteSlotBytes};
+  FaultyRecordStorage revo_storage{kRevocationSlotBytes};
+  FaultyRecordStorage local_revo_storage{kLocalRevocationSlotBytes};
+  sdkv1_test::FaultyResumeStorage2 resume_storage{16};
+  FaultyRecordStorage lifecycle_storage{kLifecycleSlotBytes};
+  IdentityStore identity{identity_storage};
+  SiteStore site{site_storage};
+  RevocationStore revocations{revo_storage};
+  LocalRevocationStore local_revocation{local_revo_storage};
+  ResumeCache2 resume{resume_storage, kResume2NodeLinkQuota, kResume2NodeEndQuota};
+  LifecycleStore lifecycle{lifecycle_storage};
+  FakeEntropy entropy;
+  MaintenanceWipeStores wipe{&site, &revocations, &local_revocation, &resume, &lifecycle};
+  MaintenanceConsole console{identity, entropy, wipe};
+
+  bool open() {
+    return identity.initialize().ok() && site.initialize().ok() &&
+           revocations.initialize().ok() && local_revocation.initialize().ok() &&
+           lifecycle.initialize().ok();
+  }
+
+  // A fielded device's durable state around the sealed identity.
+  bool populate_field_state() {
+    if (!site.commit(sdkv1_test::site_record()).ok()) return false;
+    const auto rrs = sdkv1_test::revocation_object(sdkv1_test::revocation_set(14));
+    if (!revocations
+             .accept(rrs.view(), sdkv1_test::sak().pub, sdkv1_test::kSiteId,
+                     sdkv1_test::kNetwork)
+             .ok())
+      return false;
+    LocalRevocationRecord removal{};
+    removal.state = LocalRevocationState::Blocked;
+    removal.cause = LocalRevocationCause::Notice;
+    removal.local_node = kNode;
+    removal.site_id = sdkv1_test::kSiteId;
+    removal.network = sdkv1_test::kNetwork;
+    removal.removed_generation = 3;
+    removal.evidence_digest.fill(0xE4);
+    if (!local_revocation.commit_blocked(removal).ok()) return false;
+    ResumeContext resume_context{sdkv1_test::kNetwork, 203, nullptr};
+    if (!resume.put(sdkv1_test::resume2_slot(sdkv1_test::kPeer), resume_context).ok())
+      return false;
+    LifecycleRecord intent{};
+    intent.mode = LifecycleMode::Removing;
+    intent.self = kNode;
+    intent.site_id = sdkv1_test::kSiteId;
+    intent.old_network = sdkv1_test::kNetwork;
+    intent.generation = 2;
+    intent.rs_floor = 14;
+    ByteBuffer<kRemovalNoticePayloadSize> payload{};
+    if (!removal_notice_payload_encode(
+             RemovalNotice{RevocationReason::Removed, sdkv1_test::kSiteId, kNode, 2, 14},
+             payload)
+             .ok())
+      return false;
+    ByteBuffer<kRemovalNoticeAadSize> aad{};
+    if (!removal_notice_aad(sdkv1_test::kNetwork, aad).ok()) return false;
+    Es256Signature signature{};
+    sdkv1_test::sign_payload(sdkv1_test::sak(), payload.view(), aad.view(), signature);
+    ByteBuffer<kRemovalNoticeObjectSize> notice{};
+    if (!removal_notice_assemble(payload.view(),
+                                 ByteView{signature.data(), signature.size()}, notice)
+             .ok())
+      return false;
+    // Proof = cert_len + notice_len + cert + notice (the store checks the
+    // shape and the notice binding; the caller verified the signature).
+    intent.payload.size = 4 + 64 + notice.size;
+    auto* proof = intent.payload.bytes.data();
+    proof[0] = 0;
+    proof[1] = 64;
+    proof[2] = 0;
+    proof[3] = static_cast<std::uint8_t>(notice.size);
+    std::memset(proof + 4, 0xAA, 64);
+    std::memcpy(proof + 4 + 64, notice.bytes.data(), notice.size);
+    return lifecycle.begin_removal(intent).ok();
+  }
+
+  // Unprovisioned: every store empty and healthy, every resume slot invalid.
+  bool clean() {
+    if (identity.has_identity() || site.has_site() || revocations.has_set() ||
+        local_revocation.has_record() || lifecycle.has_record())
+      return false;
+    if (identity.quarantined() || identity.uncertain() || site.quarantined() ||
+        site.uncertain() || revocations.quarantined() || revocations.uncertain() ||
+        local_revocation.quarantined() || local_revocation.uncertain() ||
+        lifecycle.quarantined() || lifecycle.uncertain())
+      return false;
+    for (std::size_t i = 0; i < 16; ++i) {
+      ResumeSlot2 slot{};
+      bool intact = false;
+      if (!resume.read_at(i, slot, intact).ok() || slot.valid) return false;
+    }
+    return true;
+  }
+};
+
+std::string response_field(const std::string& response, const std::string& key) {
+  const std::string needle = key + "=";
+  const std::size_t begin = response.find(needle);
+  CHECK(begin != std::string::npos);
+  if (begin == std::string::npos) return "";
+  const std::size_t start = begin + needle.size();
+  const std::size_t end = response.find(' ', start);
+  return end == std::string::npos ? response.substr(start)
+                                  : response.substr(start, end - start);
+}
+
+void deprovision_returns_device_to_unprovisioned() {
+  current = "deprovision_returns_device_to_unprovisioned";
+  const Office office = load_office();
+  ProvisionedDevice device{};
+  CHECK(device.open());
+  // A fielded device: sealed + locked identity, membership, revocation
+  // evidence, resume state and a journal.
+  CHECK(run(device.console, std::string("keygen 00a1000000001234 ") + kChallenge64)
+            .rfind("OK pop_hex=", 0) == 0);
+  CHECK(run(device.console, "identity " + hex_encode(minimal_bundle(office))) ==
+        "OK sealed kid=" + office.kid_hex);
+  CHECK(run(device.console, "lock " + office.kid_hex) == "OK locked kid=" + office.kid_hex);
+  CHECK(device.populate_field_state());
+  CHECK(!device.clean());
+  // The challenge names the sealed target; a wrong target refuses, and the
+  // single-use challenge burns with the attempt.
+  const std::string challenge = run(device.console, "deprovision");
+  CHECK(challenge.rfind("OK deprovision node=00a1000000001234 kid=" + office.kid_hex +
+                            " nonce=",
+                        0) == 0);
+  const std::string nonce = response_field(challenge, "nonce");
+  CHECK(nonce.size() == 32);
+  std::string other_kid = office.kid_hex;
+  other_kid[0] = (other_kid[0] == '0') ? '1' : '0';
+  CHECK(run(device.console, "deprovision_confirm " + nonce + " " + other_kid) ==
+        "ERR key_mismatch");
+  CHECK(run(device.console, "deprovision_confirm " + nonce + " " + office.kid_hex) ==
+        "ERR no_challenge");
+  CHECK(device.identity.has_identity());  // refused confirms wipe nothing
+  // A fresh challenge confirms: every store returns to unprovisioned.
+  const std::string second = run(device.console, "deprovision");
+  const std::string nonce2 = response_field(second, "nonce");
+  CHECK(nonce2.size() == 32 && nonce2 != nonce);
+  CHECK(run(device.console, "deprovision_confirm " + nonce2 + " " + office.kid_hex) ==
+        "OK deprovisioned node=00a1000000001234");
+  CHECK(device.clean());
+  CHECK(run(device.console, "status") == "OK identity=none pending=0 locked=0 fw=unknown");
+  // ... and the device reprovisions with a NEW NodeId (v1 never reissues
+  // the revoked one): the office mints a DevCert for the new node.
+  constexpr NodeId kNewNode = 0x00A1000000005678ULL;
+  FakeEntropy fresh_entropy;
+  MaintenanceConsole repro(device.identity, fresh_entropy, device.wipe);
+  CHECK(run(repro, "keygen 00a1000000005678 " + std::string(kChallenge64))
+            .rfind("OK pop_hex=", 0) == 0);
+  CertClaims claims{};
+  claims.type = CertType::Device;
+  claims.issuer = sdkv1_test::kDeviceCaId;
+  claims.subject = kNewNode;
+  claims.pubkey = sdkv1_test::device_key().pub;
+  claims.model = 17;
+  claims.hw_rev = 2;
+  claims.serial = 90212;
+  const auto cert = sdkv1_test::issue(claims, sdkv1_test::device_ca());
+  CHECK(cert.size > 0);
+  const std::string bundle =
+      bundle_json("00a1000000005678", 0, office.kid_hex, office.device_pubkey_hex,
+                  {office.site_ca}, hex_encode(cert.bytes.data(), cert.size));
+  CHECK(run(repro, "identity " + hex_encode(bundle)) == "OK sealed kid=" + office.kid_hex);
+  CHECK(device.identity.identity().node_id == kNewNode);
+  const std::string receipt = run(repro, "status");
+  CHECK(receipt.find("node=00a1000000005678") != std::string::npos);
+  CHECK(receipt.find("serial=90212") != std::string::npos);
+}
+
+void deprovision_without_identity_wipes_leftovers() {
+  current = "deprovision_without_identity_wipes_leftovers";
+  ProvisionedDevice device{};
+  CHECK(device.open());
+  CHECK(device.populate_field_state());  // site etc., but no identity
+  CHECK(!device.clean());
+  const std::string challenge = run(device.console, "deprovision");
+  CHECK(challenge.rfind("OK deprovision node=none kid=none nonce=", 0) == 0);
+  const std::string nonce = response_field(challenge, "nonce");
+  CHECK(nonce.size() == 32);
+  CHECK(run(device.console, "deprovision_confirm " + nonce + " none") ==
+        "OK deprovisioned node=none");
+  CHECK(device.clean());
+}
+
+void deprovision_without_wipe_set_is_unsupported() {
+  current = "deprovision_without_wipe_set_is_unsupported";
+  FaultyRecordStorage storage(kIdentitySlotBytes);
+  IdentityStore store(storage);
+  FakeEntropy entropy;
+  MaintenanceConsole console(store, entropy);  // no wipe set
+  CHECK(run(console, "deprovision") == "ERR unsupported");
+  CHECK(run(console, "deprovision_confirm " + std::string(32, '0') + " none") ==
+        "ERR unsupported");
+}
+
+void deprovision_recovers_impaired_identity() {
+  current = "deprovision_recovers_impaired_identity";
+  const Office office = load_office();
+  ProvisionedDevice device{};
+  CHECK(device.open());
+  CHECK(run(device.console, std::string("keygen 00a1000000001234 ") + kChallenge64)
+            .rfind("OK pop_hex=", 0) == 0);
+  CHECK(run(device.console, "identity " + hex_encode(minimal_bundle(office))) ==
+        "OK sealed kid=" + office.kid_hex);
+  CHECK(device.populate_field_state());
+  device.identity_storage.slot(1)[40] ^= 0x01;  // twin mismatch: uncertain
+  CHECK(run(device.console, "status") == "ERR store_unavailable");
+  // Deprovision still runs: the unreadable identity binds nonce-only.
+  const std::string challenge = run(device.console, "deprovision");
+  CHECK(challenge.rfind("OK deprovision node=none kid=none nonce=", 0) == 0);
+  const std::string nonce = response_field(challenge, "nonce");
+  CHECK(run(device.console, "deprovision_confirm " + nonce + " none") ==
+        "OK deprovisioned node=none");
+  CHECK(device.clean());
+}
+
+void deprovision_retry_after_wipe_failure() {
+  current = "deprovision_retry_after_wipe_failure";
+  const Office office = load_office();
+  ProvisionedDevice device{};
+  CHECK(device.open());
+  CHECK(run(device.console, std::string("keygen 00a1000000001234 ") + kChallenge64)
+            .rfind("OK pop_hex=", 0) == 0);
+  CHECK(run(device.console, "identity " + hex_encode(minimal_bundle(office))) ==
+        "OK sealed kid=" + office.kid_hex);
+  device.identity_storage.fail_writes = true;
+  const std::string challenge = run(device.console, "deprovision");
+  const std::string nonce = response_field(challenge, "nonce");
+  CHECK(run(device.console, "deprovision_confirm " + nonce + " " + office.kid_hex) ==
+        "ERR wipe_failed");
+  CHECK(device.identity.has_identity());  // identity wipes last, so it survived
+  device.identity_storage.disarm();
+  const std::string retry = run(device.console, "deprovision");
+  CHECK(run(device.console,
+            "deprovision_confirm " + response_field(retry, "nonce") + " " + office.kid_hex) ==
+        "OK deprovisioned node=00a1000000001234");
+  CHECK(device.clean());
+}
+
 }  // namespace
 
 int main() {
   status_fresh();
+  status_reports_firmware_version();
+  status_rejects_bad_firmware_version();
   keygen_ok();
   keygen_entropy_not_ready();
   keygen_rejects_bad_input();
@@ -685,6 +1079,15 @@ int main() {
   pop_signatures_verify();
   keygen_overwrites_pending();
   uppercase_hex_is_accepted();
+  status_reports_seal_receipt();
+  lock_finalizes_the_seal();
+  identity_resend_is_idempotent();
+  lock_needs_healthy_store();
+  deprovision_returns_device_to_unprovisioned();
+  deprovision_without_identity_wipes_leftovers();
+  deprovision_without_wipe_set_is_unsupported();
+  deprovision_recovers_impaired_identity();
+  deprovision_retry_after_wipe_failure();
   if (failures != 0) {
     std::fprintf(stderr, "%d maintenance console check(s) failed\n", failures);
     return 1;
