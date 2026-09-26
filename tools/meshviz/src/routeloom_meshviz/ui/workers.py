@@ -22,6 +22,9 @@ REQUEST_TIMEOUT_MS = 10_000
 RECONNECT_MS = 3000
 SNAPSHOT_MS = 100
 HISTORY_POINTS = 2000
+SITE_EVENTS = 4096
+# Live-monitor records: join milestones, rollcall summaries and operator markers.
+SITE_EVENT_KINDS = ('join_milestone', 'rollcall_status')
 
 
 class SystemClock:
@@ -56,10 +59,16 @@ class ApiClient(QObject):
     events = Signal(list)
     reply = Signal(str, object)
     status = Signal(dict)
+    # One per complete nodes.list listing, changed or not: the join timeline
+    # counts consecutive gateway snapshots, which the deduplicated model
+    # events cannot provide.
+    routes_observed = Signal(dict)
 
-    def __init__(self, path):
+    def __init__(self, path, *, expected_site_id=None):
         super().__init__()
         self.path = str(path)
+        self.expected_site_id = expected_site_id
+        self.bound = expected_site_id is None
         self.socket = None
         self.connection = 0
         self.counter = 0
@@ -68,7 +77,7 @@ class ApiClient(QObject):
         self.page_source = None
         self.capabilities = None
         self.info = {'connected': False, 'error': None, 'source': None, 'last_poll_unix_ms': None,
-                     'methods': {}}
+                     'methods': {}, 'connection': 0}
 
     @Slot()
     def start(self):
@@ -99,10 +108,17 @@ class ApiClient(QObject):
 
     def _on_connected(self):
         self.connection += 1
+        self.bound = self.expected_site_id is None
         self.normalizer = NodesNormalizer(self.connection)
         self.pages = None
         self.page_source = None
-        self._publish(connected=True, error=None, methods={})
+        self._publish(connected=self.bound, error=None, methods={}, connection=self.connection)
+        if self.bound:
+            self._begin_reads()
+        else:
+            self._send(('site_binding',), 'site.status', {})
+
+    def _begin_reads(self):
         self._send(('capabilities',), 'capabilities.get', {})
         self._poll()
         self.poll_timer.start(POLL_MS)
@@ -131,7 +147,8 @@ class ApiClient(QObject):
         self.page_source = None
 
     def _send(self, kind, method, params):
-        if self.socket is None or self.socket.state() != QLocalSocket.LocalSocketState.ConnectedState:
+        if (self.socket is None or self.socket.state() != QLocalSocket.LocalSocketState.ConnectedState
+                or (not self.bound and kind[0] != 'site_binding')):
             if kind[0] == 'user':
                 self.reply.emit(kind[1], None)
             return
@@ -179,7 +196,17 @@ class ApiClient(QObject):
             if entry is None:
                 continue
             kind = entry[0]
-            if kind[0] == 'user':
+            if kind[0] == 'site_binding':
+                result = response.get('result') if response.get('ok') else None
+                actual = result.get('site_id') if isinstance(result, dict) else None
+                if actual != self.expected_site_id:
+                    self._publish(connected=False, error='site_id が一致しない', methods={})
+                    self.socket.abort()
+                    return
+                self.bound = True
+                self._publish(connected=True, error=None, methods={})
+                self._begin_reads()
+            elif kind[0] == 'user':
                 self.reply.emit(kind[1], response)
             elif kind[0] == 'capabilities' and response.get('ok'):
                 methods = response['result'].get('methods', {})
@@ -228,6 +255,12 @@ class ApiClient(QObject):
         self._publish(source=source, last_poll_unix_ms=now, error=None)
         if events:
             self.events.emit(events)
+        gateway = source.get('gateway')
+        self.routes_observed.emit({
+            'connection': self.connection, 'mono_ns': time.monotonic_ns(), 'unix_ms': now,
+            'gateway': gateway,
+            'routes': {node['node']: node.get('next_hop') if node.get('connected') is True else None
+                       for node in nodes if node.get('listed') is not False}})
 
     @Slot()
     def stop(self):
@@ -236,6 +269,10 @@ class ApiClient(QObject):
                 getattr(self, timer).stop()
         if self.socket is not None:
             self._fail_pending()
+            # abort() emits disconnected synchronously; a retired client must not
+            # re-arm its reconnect timer and dial the daemon again.
+            self.socket.disconnected.disconnect(self._on_disconnected)
+            self.socket.errorOccurred.disconnect(self._on_error)
             self.socket.abort()
         _release(self)
 
@@ -254,6 +291,7 @@ class ModelWorker(QObject):
         self.dirty = True
         self.clock = SystemClock()
         self.trial_events = []
+        self.site_events = deque(maxlen=SITE_EVENTS)
 
     @Slot()
     def start(self):
@@ -286,6 +324,8 @@ class ModelWorker(QObject):
                     (observed if type(observed) is int else now_unix_ms(), payload.get('value')))
             elif event['kind'] in ('trial_run', 'trial_message'):
                 self.trial_events.append(event)
+            elif event['kind'] in SITE_EVENT_KINDS:
+                self.site_events.append(event)
         self.dirty = True
 
     def _recording_failed(self, exc):
@@ -354,7 +394,8 @@ class ModelWorker(QObject):
         self.snapshot.emit({'mode': self.mode, 'state': public_state(self.state),
                             'history': {k: list(v) for k, v in self.history.items()},
                             'now_unix_ms': now_unix_ms(), 'now_mono_ns': time.monotonic_ns(),
-                            'trial_events': list(self.trial_events)})
+                            'trial_events': list(self.trial_events),
+                            'site_events': list(self.site_events)})
 
     @Slot()
     def stop(self):
@@ -476,7 +517,8 @@ class ReplayWorker(QObject):
         self.snapshot.emit({'mode': 'REPLAY', 'state': public_state(self.state), 'history': history,
                             'now_unix_ms': t_unix, 'now_mono_ns': self.virtual_ns,
                             'trial_events': [{'kind': 'trial_run', 'payload': p} for p in plans.values()] +
-                                            [{'kind': 'trial_message', 'payload': m} for m in messages]})
+                                            [{'kind': 'trial_message', 'payload': m} for m in messages],
+                            'site_events': self.reader.site_events(self.seq, SITE_EVENTS)})
         self.position.emit({'seq': self.seq, 'first': self.reader.index[0][0] if self.reader.index else 0,
                             'last': self.reader.index[-1][0] if self.reader.index else 0,
                             't_unix_ms': t_unix, 'playing': self.playing,
@@ -676,3 +718,117 @@ class FakeBoards:
         from ..flash_worker import flash
         flash(port, plan, api=self._api(port))
         return True
+
+
+SUPERVISOR_TICK_MS = 500
+
+
+class SupervisorWorker(QObject):
+    """SiteSupervisor on its own thread: probes, process waits and lab-site-init never block the GUI."""
+    status = Signal(dict)
+    lab_init_done = Signal(int, dict)
+    stopped = Signal()
+
+    def __init__(self, supervisor=None, *, ctl='routeloomctl'):
+        super().__init__()
+        from ..site_supervisor import SiteSupervisor
+        self.supervisor = supervisor or SiteSupervisor()
+        self.ctl = ctl
+        self.last = None
+
+    @Slot()
+    def start(self):
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(SUPERVISOR_TICK_MS)
+        self._publish()
+
+    def _now(self):
+        return time.monotonic_ns() // 1_000_000
+
+    def _tick(self):
+        self.supervisor.tick(self._now())
+        self._publish()
+
+    def _publish(self):
+        snapshot = self.supervisor.snapshot()
+        if snapshot != self.last:
+            self.last = snapshot
+            self.status.emit(snapshot)
+
+    @Slot(dict)
+    def start_site(self, config):
+        from ..site_supervisor import SiteConfig
+        self.supervisor.start(SiteConfig(**config), self._now())
+        self._publish()
+
+    @Slot(dict)
+    def attach_site(self, config):
+        from ..site_supervisor import SiteConfig
+        self.supervisor.attach(SiteConfig(**config), self._now())
+        self._publish()
+
+    @Slot()
+    def stop_site(self):
+        self.supervisor.stop()
+        self._publish()
+
+    @Slot(int, str, str, int)
+    def lab_init(self, serial, gateway, out_dir, channel):
+        from ..site_supervisor import lab_site_init, write_lab_spec, write_self_acl
+        try:
+            out = Path(out_dir)
+            out.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            spec = write_lab_spec(out.parent / f'{out.name}.lab-spec.json', gateway=gateway,
+                                  channel=channel)
+            result = lab_site_init(self.ctl, spec, out)
+            acl = out / 'ipc' / 'api-acl.json'
+            if result['state'] == 'created' and not acl.exists():
+                write_self_acl(out, json.loads(spec.read_text(encoding='utf-8'))['network_low32'])
+            if result['state'] == 'created':
+                result['acl_file'] = str(acl)
+        except (OSError, ValueError, KeyError) as exc:
+            result = {'state': 'failed', 'detail': str(exc)}
+        self.lab_init_done.emit(serial, result)
+
+    @Slot()
+    def stop(self):
+        # Window close: an owned daemon is stopped, an attached one only detached.
+        if hasattr(self, 'timer'):
+            self.timer.stop()
+        self.supervisor.stop()
+        _release(self)
+        self.stopped.emit()
+
+
+class ProvisionWorker(QObject):
+    """Runs provision steps off the GUI thread; each board result is posted as a copy."""
+    job_updated = Signal(int, object)
+    finished = Signal(int)
+    stopped = Signal()
+
+    def __init__(self, backend):
+        super().__init__()
+        self.backend = backend
+        # Runs with a serial at or below this are cancelled between steps. An int
+        # store is the only state the GUI thread writes.
+        self.cancel_through = 0
+
+    @Slot(int, object)
+    def run(self, serial, jobs):
+        from copy import deepcopy
+        from ..provisioning import ProvisionRunner
+        runner = ProvisionRunner(self.backend, jobs,
+                                 should_cancel=lambda: self.cancel_through >= serial)
+        for job in runner.jobs:
+            runner.run_job(job)
+            self.job_updated.emit(serial, deepcopy(job))
+        self.finished.emit(serial)
+
+    def cancel(self, serial):
+        self.cancel_through = max(self.cancel_through, serial)
+
+    @Slot()
+    def stop(self):
+        _release(self)
+        self.stopped.emit()
