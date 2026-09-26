@@ -7,6 +7,8 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod lab_site_init;
+mod office_ledger;
 mod provision;
 mod provision_office;
 
@@ -104,10 +106,13 @@ fn usage() {
         "routeloomctl provision-keygen --root-id <16hex> --out <key.json>|provision-authority-keygen --authority-id <16hex> --out <key.json>|provision-image --spec <image-spec.json> --out <image.rlt1> [--nvs-dir <dir> [--credential <cred-spec.json>]]|provision-manifest --image <spec.json|image.rlt1> --key <root.key> --out <manifest.rtm1>|provision-verify --manifest <file> --current <spec.json|image.rlt1>  (local provisioning — no daemon socket)"
     );
     eprintln!(
-        "routeloomctl provision-devca-keygen --device-ca-id <16hex> --out <devca.key>|provision-pop-challenge --node <16hex>|provision-devcert --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --challenge <64hex> --pop <file> --out-dir <dir>|provision-identity --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --out-dir <dir>|provision-siteca-keygen --site-ca-id <16hex> --out <siteca.key>|site-cert --ca-key <siteca.key> --site-id <16hex> --sak-pubkey <128hex> --network-low32 <8hex> --site-epoch <u32> --serial <u32> --out <sitecert.cwt>  (SDK v1 office tooling — no daemon socket)"
+        "routeloomctl provision-devca-keygen --device-ca-id <16hex> --out <devca.key>|provision-pop-challenge --node <16hex>|provision-devcert --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --challenge <64hex> --pop <file> --out-dir <dir> [--ledger <file>] [--work-id <id>]|provision-identity --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --out-dir <dir> [--ledger <file>] [--work-id <id>]|provision-ledger-status --ledger <file>|provision-ledger-release --ledger <file> --node <16hex> --serial <u32> --work-id <id>|provision-ledger-import --ledger <file> --out-dir <dir> [--work-id <id>]|provision-confirm-written --ledger <file> --node <16hex> --devcert-sha256 <64hex> [--out-dir <dir>]|provision-expect --out-dir <dir> [--fw <version>]|provision-batch --ca-key <devca.key> --spec <identity-spec.json> --ledger <file> --csv <file> --out-root <dir> [--mode injected|devcert]|provision-siteca-keygen --site-ca-id <16hex> --out <siteca.key>|site-cert --ca-key <siteca.key> --site-id <16hex> --sak-pubkey <128hex> --network-low32 <8hex> --site-epoch <u32> --serial <u32> --out <sitecert.cwt>  (SDK v1 office tooling — no daemon socket)"
     );
     eprintln!(
-        "routeloomctl site join-list|approve --request <jr-token> --device <16hex> --role endpoint|relay|gateway [--idempotency-key K]|deny --request <jr-token> --device <16hex> --reason not_here|blocked [--idempotency-key K]|policy [--zero-touch-open true|false] [--decision-mode kguard|closed] [--decision-timeout-ms 500-5000] [--pending-retry-after-s 30-3600]|members [--device <16hex> | [--after <16hex>] [--limit 1-128] [--include-removed]]|revoke --device <16hex> --expected-generation <u32> --reason removed|lost|replaced|blocked [--idempotency-key K]|gk-rotate [--expected-active-epoch <u32> [--idempotency-key K]]|cutover --expected-site-epoch <u32> --next-site-cert <hex> [--idempotency-key K]|status  (site authority over API1; cutover progress via operation-get --id <op-token>)"
+        "routeloomctl lab-site-init --spec FILE --out DIR|lab-inventory-import --site DIR --ledger FILE --node <16hex> --role endpoint|relay|gateway (local only)"
+    );
+    eprintln!(
+        "routeloomctl site join-list|approve --request <jr-token> --device <16hex> --role endpoint|relay|gateway [--idempotency-key K]|deny --request <jr-token> --device <16hex> --reason not_here|blocked [--idempotency-key K]|policy [--zero-touch-open true|false] [--decision-mode kguard|closed|lab_inventory] [--decision-timeout-ms 500-5000] [--pending-retry-after-s 30-3600]|members [--device <16hex> | [--after <16hex>] [--limit 1-128] [--include-removed]]|revoke --device <16hex> --expected-generation <u32> --reason removed|lost|replaced|blocked [--idempotency-key K]|gk-rotate [--expected-active-epoch <u32> [--idempotency-key K]]|cutover --expected-site-epoch <u32> --next-site-cert <hex> [--idempotency-key K]|status  (site authority over API1; cutover progress via operation-get --id <op-token>)"
     );
 }
 
@@ -389,6 +394,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "provision-image" => return provision::provision_image_command(&remaining[1..]),
             "provision-manifest" => return provision::provision_manifest_command(&remaining[1..]),
             "provision-verify" => return provision::provision_verify_command(&remaining[1..]),
+            "lab-site-init" => return lab_site_init::command(&remaining[1..]),
+            "lab-inventory-import" => return lab_site_init::inventory_import(&remaining[1..]),
             "provision-devca-keygen" => {
                 return provision_office::provision_devca_keygen_command(&remaining[1..])
             }
@@ -401,6 +408,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "provision-identity" => {
                 return provision_office::provision_identity_command(&remaining[1..])
             }
+            "provision-ledger-status" => {
+                return provision_office::provision_ledger_status_command(&remaining[1..])
+            }
+            "provision-ledger-release" => {
+                return provision_office::provision_ledger_release_command(&remaining[1..])
+            }
+            "provision-ledger-import" => {
+                return provision_office::provision_ledger_import_command(&remaining[1..])
+            }
+            "provision-confirm-written" => {
+                return provision_office::provision_confirm_written_command(&remaining[1..])
+            }
+            "provision-expect" => {
+                return provision_office::provision_expect_command(&remaining[1..])
+            }
+            "provision-batch" => return provision_office::provision_batch_command(&remaining[1..]),
             "provision-siteca-keygen" => {
                 return provision_office::provision_siteca_keygen_command(&remaining[1..])
             }
@@ -2072,8 +2095,8 @@ fn site_policy_command(args: &[String]) -> Result<String, Box<dyn std::error::Er
             }
             "--decision-mode" => {
                 let mode = opt_value(&mut args, "--decision-mode")?;
-                if !["kguard", "closed"].contains(&mode.as_str()) {
-                    return Err("--decision-mode must be kguard or closed".into());
+                if !["kguard", "closed", "lab_inventory"].contains(&mode.as_str()) {
+                    return Err("--decision-mode must be kguard, closed or lab_inventory".into());
                 }
                 decision_mode = Some(mode);
             }

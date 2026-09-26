@@ -58,7 +58,7 @@ pub struct RxRecord {
     pub stored_ms: u64,
 }
 
-/// Fields a verified DataFromMesh body contributes to the log.
+/// Fields a USB-session-verified DataFromMesh body contributes to the log.
 pub struct Ingress {
     pub network: u64,
     pub gateway: Option<u64>,

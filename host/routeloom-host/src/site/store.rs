@@ -137,13 +137,15 @@ impl Drop for DeviceRow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LedgerRow {
     pub seq: u64,
-    /// "approve", "revoke", "reissue" or "cutover".
+    /// "approve", "revoke", "reissue", "cutover" or "archive".
     pub kind: String,
     pub node: u64,
     pub kid: [u8; 32],
     pub generation: u32,
-    /// SHA-256 of the MemberCert (approve/reissue), of the RRS1 object
-    /// (revoke) or of the CutoverCommit object (cutover).
+    /// SHA-256 of the MemberCert (approve/reissue/archive — the archived
+    /// row's last MemberCert, binding the entry to the credential being
+    /// forgotten), of the RRS1 object (revoke) or of the CutoverCommit
+    /// object (cutover).
     pub digest: [u8; 32],
     pub ms: u64,
     pub hash: [u8; 32],
@@ -191,7 +193,12 @@ pub enum RotationWrite {
 pub struct Batch {
     pub meta: Vec<(&'static str, Vec<u8>)>,
     pub devices: Vec<DeviceRow>,
+    /// Delete exactly these device rows (archive drops removed rows; the
+    /// ledger keeps every row, so the no-reissue history survives).
+    pub devices_delete: Vec<u64>,
     pub ledger: Vec<LedgerRow>,
+    /// Append-only approval actor/policy record, keyed by operation id.
+    pub approval_audit: Vec<(u64, String)>,
     pub rrs: Vec<(u32, Vec<u8>)>,
     pub group_keys: Vec<GroupKeyRow>,
     /// Delete group keys with an epoch below this.
@@ -210,7 +217,9 @@ impl Batch {
     pub fn is_empty(&self) -> bool {
         self.meta.is_empty()
             && self.devices.is_empty()
+            && self.devices_delete.is_empty()
             && self.ledger.is_empty()
+            && self.approval_audit.is_empty()
             && self.rrs.is_empty()
             && self.group_keys.is_empty()
             && self.group_keys_below.is_none()
@@ -227,6 +236,7 @@ pub struct Snapshot {
     pub meta: BTreeMap<String, Vec<u8>>,
     pub devices: Vec<DeviceRow>,
     pub ledger: Vec<LedgerRow>,
+    pub approval_audit: Vec<(u64, String)>,
     pub rrs: Vec<(u32, Vec<u8>)>,
     pub group_keys: Vec<GroupKeyRow>,
     pub gk_rotation: Option<RotationRow>,
@@ -243,7 +253,12 @@ impl Snapshot {
             self.devices.retain(|d| d.node != row.node);
             self.devices.push(row.clone());
         }
+        for node in &batch.devices_delete {
+            self.devices.retain(|d| &d.node != node);
+        }
         self.ledger.extend(batch.ledger.iter().cloned());
+        self.approval_audit
+            .extend(batch.approval_audit.iter().cloned());
         for (epoch, object) in &batch.rrs {
             self.rrs.retain(|(e, _)| e != epoch);
             self.rrs.push((*epoch, object.clone()));
@@ -377,6 +392,8 @@ const SITE_SCHEMA: &str =
                 seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, node INTEGER NOT NULL,
                 kid BLOB NOT NULL, generation INTEGER NOT NULL, digest BLOB NOT NULL,
                 ms INTEGER NOT NULL, hash BLOB NOT NULL);
+             CREATE TABLE IF NOT EXISTS approval_audit (
+                operation_id INTEGER PRIMARY KEY, body TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS rrs (rs_epoch INTEGER PRIMARY KEY, object BLOB NOT NULL);
              CREATE TABLE IF NOT EXISTS group_keys (
                 gk_epoch INTEGER PRIMARY KEY, gk BLOB NOT NULL, state TEXT NOT NULL,
@@ -404,6 +421,7 @@ const SITE_TABLES: &[&str] = &[
     "meta",
     "devices",
     "ledger",
+    "approval_audit",
     "rrs",
     "group_keys",
     "gk_rotation",
@@ -481,7 +499,8 @@ impl SqliteSiteStore {
         }
         // Additive, versionless: old databases gain the recovery index
         // on open (no data moves, no version bump).
-        conn.execute_batch("CREATE INDEX IF NOT EXISTS ledger_node_idx ON ledger (node);")?;
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS ledger_node_idx ON ledger (node);
+            CREATE TABLE IF NOT EXISTS approval_audit (operation_id INTEGER PRIMARY KEY, body TEXT NOT NULL);")?;
         Ok(Self { conn })
     }
 
@@ -925,6 +944,9 @@ impl SiteStore for SqliteSiteStore {
                 ],
             )?;
         }
+        for node in &batch.devices_delete {
+            tx.execute("DELETE FROM devices WHERE node = ?1", params![i(*node)])?;
+        }
         for l in &batch.ledger {
             tx.execute(
                 "INSERT INTO ledger (seq, kind, node, kid, generation, digest, ms, hash)
@@ -1010,6 +1032,12 @@ impl SiteStore for SqliteSiteStore {
                 ],
             )?;
         }
+        for (op_id, body) in &batch.approval_audit {
+            tx.execute(
+                "INSERT INTO approval_audit (operation_id, body) VALUES (?1, ?2)",
+                params![i(*op_id), body],
+            )?;
+        }
         for (kind, key, body) in &batch.docs {
             match body {
                 Some(json) => {
@@ -1079,6 +1107,7 @@ mod tests {
             let batch = Batch {
                 meta: vec![("rs_epoch", 5_u32.to_be_bytes().to_vec())],
                 devices: vec![device.clone()],
+                devices_delete: Vec::new(),
                 ledger: vec![LedgerRow {
                     seq: 1,
                     kind: "approve".into(),
@@ -1089,6 +1118,7 @@ mod tests {
                     ms: 100,
                     hash: [2; 32],
                 }],
+                approval_audit: vec![(1, "{\"actor\":\"test\"}".into())],
                 rrs: vec![(5, vec![0xD2])],
                 group_keys: vec![GroupKeyRow {
                     epoch: 1,
@@ -1130,6 +1160,16 @@ mod tests {
         let second = SqliteSiteStore::open(&path).and_then(|mut s| s.load());
         assert!(second.is_err());
         drop(store);
+        let conn = Connection::open(&path).unwrap();
+        let audit: String = conn
+            .query_row(
+                "SELECT body FROM approval_audit WHERE operation_id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(audit.contains("\"actor\""));
+        drop(conn);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

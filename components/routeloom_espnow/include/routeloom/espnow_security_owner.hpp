@@ -324,7 +324,10 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // cannot re-adopt live (adopt_member_node/attach_autonomy refuse past
   // start), so the durable post-condition (new stores + Idle journal /
   // erased stores + UnassignedReady watermark) is picked up by a clean
-  // boot. Never returns.
+  // boot. The reboot happens at most once per action: the clean boot
+  // resumes UnassignedReady without an action, and completes AdoptNetwork
+  // via ActionDone once it re-adopts (adopt_network_disposition). Never
+  // returns.
   [[noreturn]] void reboot_for_lifecycle(const char* reason) noexcept;
 
   Config config_{};
