@@ -72,6 +72,11 @@ fn sync_dir(path: &Path) -> Result<(), DynError> {
     Ok(())
 }
 
+fn sync_file(path: &Path) -> Result<(), DynError> {
+    fs::OpenOptions::new().write(true).open(path)?.sync_all()?;
+    Ok(())
+}
+
 fn journal_record(
     path: &Path,
     name: &str,
@@ -321,7 +326,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
             return Err("nonempty site directory without initialization journal".into());
         }
         write_private_file(&journal_path, header.as_bytes())?;
-        fs::File::open(&journal_path)?.sync_all()?;
+        sync_file(&journal_path)?;
         header.clone()
     };
     if journal.starts_with(&header) && !journal.ends_with('\n') {
@@ -360,7 +365,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
     if device_ca.device_ca_id() != device_id {
         return Err("Device CA id differs from spec".into());
     }
-    fs::File::open(&device_path)?.sync_all()?;
+    sync_file(&device_path)?;
     sync_dir(&keys_dir)?;
     journal_record(
         &journal_path,
@@ -382,7 +387,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
     if site_ca.site_ca_id() != ca_id {
         return Err("Site CA id differs from spec".into());
     }
-    fs::File::open(&site_path)?.sync_all()?;
+    sync_file(&site_path)?;
     sync_dir(&keys_dir)?;
     journal_record(
         &journal_path,
@@ -404,7 +409,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
     if sak.root_id() != site {
         return Err("SAK id differs from spec".into());
     }
-    fs::File::open(&sak_path)?.sync_all()?;
+    sync_file(&sak_path)?;
     sync_dir(&out)?;
     journal_record(
         &journal_path,
@@ -439,7 +444,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
     if usb_hex.len() != 64 || !usb_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("USB secret corrupt".into());
     }
-    fs::File::open(&usb_path)?.sync_all()?;
+    sync_file(&usb_path)?;
     sync_dir(&out)?;
     journal_record(
         &journal_path,
@@ -462,7 +467,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
     } else {
         write_private_file(&config_path, config.as_bytes())?;
     }
-    fs::File::open(&config_path)?.sync_all()?;
+    sync_file(&config_path)?;
     let manifest = format!(
         "{{\"format\":\"routeloom-lab-site-v1\",\"purpose\":\"development\",\"site_id\":\"{site:016x}\",\"site_ca_fingerprint\":\"{}\",\"device_ca_fingerprint\":\"{}\",\"sak_fingerprint\":\"{}\"}}",
         hex_encode(&sha256(&site_ca.pubkey())), hex_encode(&sha256(&device_ca.pubkey())), hex_encode(&credential_kid(&sak.pubkey()))
@@ -489,7 +494,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
         return Err("partial site inventory is not empty".into());
     }
     drop(db);
-    fs::File::open(&inventory_path)?.sync_all()?;
+    sync_file(&inventory_path)?;
     sync_dir(&out)?;
     // The manifest is the last published artifact. A crash between its
     // rename and the journal completion may only accept the same content.
@@ -503,7 +508,7 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
             fs::remove_file(&pending)?;
         }
         write_private_file(&pending, manifest.as_bytes())?;
-        fs::File::open(&pending)?.sync_all()?;
+        sync_file(&pending)?;
         fs::rename(&pending, out.join("lab-manifest.json"))?;
         sync_dir(&out)?;
     }

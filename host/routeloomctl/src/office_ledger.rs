@@ -111,9 +111,11 @@ impl OfficeLedger {
             o.mode(0o600);
             o
         };
-        #[cfg(not(unix))]
-        let mut opts = std::fs::OpenOptions::new();
-        match opts.write(true).create_new(true).open(path) {
+        #[cfg(unix)]
+        let created = opts.write(true).create_new(true).open(path);
+        #[cfg(windows)]
+        let created = routeloom_peercred::open_private_file_for_write(path);
+        match created {
             Ok(file) => {
                 file.sync_all()?;
                 sync_parent(path)?;
@@ -126,6 +128,8 @@ impl OfficeLedger {
         if !metadata.is_file() {
             return Err("office ledger path is not a regular file".into());
         }
+        #[cfg(windows)]
+        routeloom_peercred::verify_private_file_perms(&canonical)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -518,11 +522,13 @@ impl OfficeLedger {
             o.mode(0o600);
             o
         };
-        #[cfg(not(unix))]
-        let mut opts = std::fs::OpenOptions::new();
+        #[cfg(unix)]
         let mut file = opts.write(true).create_new(true).open(&tmp)?;
+        #[cfg(windows)]
+        let mut file = routeloom_peercred::open_private_file_for_write(Path::new(&tmp))?;
         file.write_all(kept.as_bytes())?;
         file.sync_all()?;
+        std::mem::drop(file);
         std::fs::rename(&tmp, path)?;
         sync_parent(path)?;
         Ok(())
@@ -542,11 +548,16 @@ fn require_absent(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn sync_parent(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    std::fs::File::open(parent)?.sync_all()?;
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    #[cfg(windows)]
+    let _ = path;
     Ok(())
 }
 
@@ -811,6 +822,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ledger_remains_owner_only_after_rewrite() {
+        let dir = scratch("private-rewrite");
+        let path = dir.join("office-ledger.jsonl");
+        let ledger = OfficeLedger::open(&path).unwrap();
+        routeloom_peercred::verify_private_file_perms(&path).unwrap();
+        let entry = slot(0x0DCA_0000_0000_0001, 0x00A1_0000_0000_1234, 90211);
+        let output = dir.join("issued").display().to_string();
+        ledger
+            .reserve(entry, None, "private-work", &output)
+            .unwrap();
+        ledger
+            .release(entry.node_id, entry.serial, "private-work")
+            .unwrap();
+        routeloom_peercred::verify_private_file_perms(&path).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn slot(device_ca_id: u64, node_id: u64, serial: u32) -> IssueSlot {

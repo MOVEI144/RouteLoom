@@ -481,7 +481,7 @@ pub mod ipc {
         #[cfg(unix)]
         pub(crate) inner: UnixStream,
         #[cfg(windows)]
-        pub(crate) inner: std::fs::File,
+        pub(crate) inner: std::sync::Arc<super::win_ipc::PipeStream>,
     }
 
     impl IpcStream {
@@ -496,8 +496,10 @@ pub mod ipc {
         }
 
         #[cfg(windows)]
-        pub fn from_file(file: std::fs::File) -> Self {
-            Self { inner: file }
+        fn from_file(file: std::fs::File) -> io::Result<Self> {
+            Ok(Self {
+                inner: std::sync::Arc::new(super::win_ipc::PipeStream::new(file)?),
+            })
         }
 
         #[cfg(unix)]
@@ -510,7 +512,7 @@ pub mod ipc {
         pub fn connect<P: AsRef<Path>>(path: P) -> io::Result<Self> {
             let path_str = path.as_ref().to_string_lossy();
             let file = super::win_ipc::connect_pipe(&path_str)?;
-            Ok(Self { inner: file })
+            Self::from_file(file)
         }
 
         #[cfg(not(any(unix, windows)))]
@@ -536,7 +538,7 @@ pub mod ipc {
             let listener = super::win_ipc::NamedPipeListener::bind(&name)?;
             let client = super::win_ipc::connect_pipe(&name)?;
             let (server, _) = listener.accept()?;
-            Ok((Self { inner: client }, Self { inner: server }))
+            Ok((Self::from_file(client)?, Self::from_file(server)?))
         }
 
         #[cfg(not(any(unix, windows)))]
@@ -554,7 +556,9 @@ pub mod ipc {
             }
             #[cfg(windows)]
             {
-                self.inner.try_clone().map(|f| Self { inner: f })
+                Ok(Self {
+                    inner: std::sync::Arc::clone(&self.inner),
+                })
             }
             #[cfg(not(any(unix, windows)))]
             {
@@ -572,8 +576,7 @@ pub mod ipc {
             }
             #[cfg(windows)]
             {
-                let _ = dur;
-                Ok(())
+                self.inner.set_read_timeout(dur)
             }
             #[cfg(not(any(unix, windows)))]
             {
@@ -589,8 +592,7 @@ pub mod ipc {
             }
             #[cfg(windows)]
             {
-                let _ = dur;
-                Ok(())
+                self.inner.set_write_timeout(dur)
             }
             #[cfg(not(any(unix, windows)))]
             {
@@ -606,32 +608,13 @@ pub mod ipc {
             }
             #[cfg(windows)]
             {
-                let _ = how;
+                self.inner.shutdown(how);
                 Ok(())
             }
             #[cfg(not(any(unix, windows)))]
             {
                 let _ = how;
                 Ok(())
-            }
-        }
-
-        pub fn peer_principal(&self) -> io::Result<Principal> {
-            #[cfg(unix)]
-            {
-                peer_principal(&self.inner)
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::io::AsRawHandle;
-                unsafe { super::win_pipe::get_pipe_client_sid(self.inner.as_raw_handle()) }
-            }
-            #[cfg(not(any(unix, windows)))]
-            {
-                Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "unsupported platform",
-                ))
             }
         }
     }
@@ -647,7 +630,14 @@ pub mod ipc {
             self.inner.write(buf)
         }
         fn flush(&mut self) -> io::Result<()> {
-            self.inner.flush()
+            #[cfg(unix)]
+            {
+                self.inner.flush()
+            }
+            #[cfg(windows)]
+            {
+                Ok(())
+            }
         }
     }
 
@@ -692,7 +682,7 @@ pub mod ipc {
             #[cfg(windows)]
             {
                 let (file, principal) = self.inner.accept()?;
-                Ok((IpcStream { inner: file }, principal))
+                Ok((IpcStream::from_file(file)?, principal))
             }
             #[cfg(not(any(unix, windows)))]
             {
@@ -1462,9 +1452,12 @@ pub mod win_ipc {
     use super::Principal;
     use std::ffi::c_void;
     use std::fs::File;
-    use std::io;
+    use std::io::{self, Read, Write};
+    use std::net::Shutdown;
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
+    use std::time::{Duration, Instant};
 
     const PIPE_ACCESS_DUPLEX: u32 = 0x00000003;
     const PIPE_TYPE_BYTE: u32 = 0x00000000;
@@ -1473,6 +1466,10 @@ pub mod win_ipc {
     const PIPE_REJECT_REMOTE_CLIENTS: u32 = 0x00000008;
     const PIPE_UNLIMITED_INSTANCES: u32 = 255;
     const FILE_FLAG_FIRST_PIPE_INSTANCE: u32 = 0x0008_0000;
+    const PIPE_NOWAIT: u32 = 1;
+    const ERROR_BROKEN_PIPE: i32 = 109;
+    const ERROR_NO_DATA: i32 = 232;
+    const ERROR_PIPE_NOT_CONNECTED: i32 = 233;
     const INVALID_HANDLE_VALUE: *mut c_void = -1isize as *mut c_void;
 
     #[link(name = "kernel32")]
@@ -1489,7 +1486,141 @@ pub mod win_ipc {
         ) -> *mut c_void;
 
         fn ConnectNamedPipe(hNamedPipe: *mut c_void, lpOverlapped: *mut c_void) -> i32;
+        fn SetNamedPipeHandleState(
+            pipe: *mut c_void,
+            mode: *mut u32,
+            max_collection: *mut u32,
+            collection_timeout: *mut u32,
+        ) -> i32;
         fn GetLastError() -> u32;
+    }
+
+    #[derive(Debug)]
+    pub struct PipeStream {
+        file: File,
+        read_timeout: Mutex<Option<Duration>>,
+        write_timeout: Mutex<Option<Duration>>,
+        read_closed: AtomicBool,
+        write_closed: AtomicBool,
+    }
+
+    impl PipeStream {
+        pub fn new(file: File) -> io::Result<Self> {
+            let mut mode = PIPE_READMODE_BYTE | PIPE_NOWAIT;
+            if unsafe {
+                SetNamedPipeHandleState(
+                    file.as_raw_handle(),
+                    &mut mode,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self {
+                file,
+                read_timeout: Mutex::new(None),
+                write_timeout: Mutex::new(None),
+                read_closed: AtomicBool::new(false),
+                write_closed: AtomicBool::new(false),
+            })
+        }
+
+        fn set_timeout(slot: &Mutex<Option<Duration>>, dur: Option<Duration>) -> io::Result<()> {
+            if dur == Some(Duration::ZERO) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "zero pipe timeout",
+                ));
+            }
+            *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = dur;
+            Ok(())
+        }
+
+        pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+            Self::set_timeout(&self.read_timeout, dur)
+        }
+
+        pub fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+            Self::set_timeout(&self.write_timeout, dur)
+        }
+
+        pub fn shutdown(&self, how: Shutdown) {
+            if matches!(how, Shutdown::Read | Shutdown::Both) {
+                self.read_closed.store(true, Ordering::Release);
+            }
+            if matches!(how, Shutdown::Write | Shutdown::Both) {
+                self.write_closed.store(true, Ordering::Release);
+            }
+        }
+
+        fn wait_for_space(start: Instant, timeout: Option<Duration>) -> io::Result<()> {
+            if timeout.is_some_and(|dur| start.elapsed() >= dur) {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "pipe I/O timed out",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            Ok(())
+        }
+
+        pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            let timeout = *self
+                .read_timeout
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let started = Instant::now();
+            loop {
+                if self.read_closed.load(Ordering::Acquire) {
+                    return Ok(0);
+                }
+                match (&self.file).read(buf) {
+                    Err(e) if e.raw_os_error() == Some(ERROR_NO_DATA) => {
+                        Self::wait_for_space(started, timeout)?;
+                    }
+                    Err(e)
+                        if matches!(
+                            e.raw_os_error(),
+                            Some(ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED)
+                        ) =>
+                    {
+                        return Ok(0);
+                    }
+                    result => return result,
+                }
+            }
+        }
+
+        pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            let timeout = *self
+                .write_timeout
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let started = Instant::now();
+            loop {
+                if self.write_closed.load(Ordering::Acquire) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "pipe write closed",
+                    ));
+                }
+                match (&self.file).write(buf) {
+                    Ok(0) => Self::wait_for_space(started, timeout)?,
+                    Err(e) if e.raw_os_error() == Some(ERROR_NO_DATA) => {
+                        Self::wait_for_space(started, timeout)?;
+                    }
+                    result => return result,
+                }
+            }
+        }
     }
 
     #[derive(Debug)]
@@ -1685,6 +1816,65 @@ mod tests {
         })
         .join()
         .unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn named_pipe_read_and_write_timeouts_are_enforced() {
+        use std::io::{Read, Write};
+        use std::time::Duration;
+
+        let (mut client, mut server) = IpcStream::pair().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let (read_tx, read_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut byte = [0];
+            read_tx
+                .send(server.read(&mut byte).map_err(|e| e.kind()))
+                .unwrap();
+            server
+        });
+        assert_eq!(
+            read_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Err(io::ErrorKind::TimedOut)
+        );
+        let _server = reader.join().unwrap();
+
+        client
+            .set_write_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let (write_tx, write_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let block = [7u8; 131_072];
+            loop {
+                if let Err(error) = client.write_all(&block) {
+                    write_tx.send(error.kind()).unwrap();
+                    break;
+                }
+            }
+        });
+        assert_eq!(
+            write_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            io::ErrorKind::TimedOut
+        );
+        writer.join().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn named_pipe_peer_close_reads_as_eof() {
+        use std::io::Read;
+        use std::time::Duration;
+
+        let (mut client, server) = IpcStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        drop(server);
+        let mut byte = [0];
+        assert_eq!(client.read(&mut byte).unwrap(), 0);
     }
 
     #[cfg(windows)]

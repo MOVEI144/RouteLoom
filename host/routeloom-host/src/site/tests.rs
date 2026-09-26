@@ -4153,6 +4153,8 @@ fn gk_three_day_outage_rotates_once() {
 #[test]
 fn gk_migrated_staged_key_rebuilds_its_rotation() {
     let db = crash_db("migrate");
+    #[cfg(windows)]
+    routeloom_peercred::open_private_file_for_write(&db).unwrap();
     // A hand-built version-1 database: active + staged keys, one member,
     // and the revoke operation that staged epoch 2.
     {

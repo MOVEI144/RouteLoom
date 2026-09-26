@@ -763,21 +763,11 @@ pub trait ConfigAuthorityLedger {
     fn issue_complete(&mut self, op_id: &[u8; 16]) -> Result<(), IssueRefusal>;
 }
 
-/// Fresh 128-bit id minted once per store lineage. Falls back to time^pid
-/// if /dev/urandom is unavailable — still non-repeating.
+/// Fresh 128-bit id for store lineages and authority operations. A failed
+/// CSPRNG draw must stop the issuer before it exposes a guessed identity.
 pub fn mint_id128() -> [u8; 16] {
     let mut id = [0_u8; 16];
-    if std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut id))
-        .is_err()
-    {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-            ^ u128::from(std::process::id());
-        id = seed.to_be_bytes();
-    }
+    routeloom_peercred::fill_random(&mut id).expect("OS CSPRNG required for host identity");
     id
 }
 
@@ -1577,6 +1567,22 @@ impl ConfigAuthorityLedger for StoreBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn lineage_is_not_a_timestamp_and_pid() {
+        let stamp = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        };
+        let before = stamp();
+        let id = mint_id128();
+        let after = stamp();
+        let old_seed = u128::from_be_bytes(id) ^ u128::from(std::process::id());
+        assert!(old_seed < before || old_seed > after);
+    }
     use crate::canonical::{parse_submit, STORAGE_RAM};
 
     fn request(key: &str, epoch: u64, payload_hex: &str, payload_len: u64) -> SendRequest {

@@ -929,7 +929,7 @@ fn submit_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>>
             key.to_ascii_lowercase()
         }
         None => {
-            let generated = generate_key();
+            let generated = generate_key()?;
             eprintln!("generated key: {generated}");
             generated
         }
@@ -1083,28 +1083,17 @@ fn gateway_get_command(args: &[String]) -> Result<String, Box<dyn std::error::Er
     Ok(gateway_get_request(&id.to_ascii_lowercase()))
 }
 
-/// Fresh 128-bit caller key from /dev/urandom (time^pid fallback).
-fn generate_key() -> String {
-    use std::io::Read;
+/// Fresh 128-bit caller key from the OS CSPRNG.
+fn generate_key() -> io::Result<String> {
     let mut bytes = [0_u8; 16];
-    let random = std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut bytes))
-        .is_ok();
-    if !random {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-            ^ u128::from(std::process::id());
-        bytes = (seed ^ seed.rotate_left(64)).to_be_bytes();
-    }
+    routeloom_peercred::fill_random(&mut bytes)?;
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(32);
     for byte in bytes {
         out.push(HEX[(byte >> 4) as usize] as char);
         out.push(HEX[(byte & 0xf) as usize] as char);
     }
-    out
+    Ok(out)
 }
 
 /// `operation-get --id <opid>` and `operation-get-by-key --network/--epoch/
@@ -1743,7 +1732,7 @@ fn group_send_command(args: &[String]) -> Result<String, Box<dyn std::error::Err
             key.to_ascii_lowercase()
         }
         None => {
-            let generated = generate_key();
+            let generated = generate_key()?;
             eprintln!("generated key: {generated}");
             generated
         }
@@ -1862,7 +1851,7 @@ fn want_idempotency_key(key: Option<String>) -> Result<String, Box<dyn std::erro
             Ok(key)
         }
         None => {
-            let generated = generate_key();
+            let generated = generate_key()?;
             eprintln!("generated idempotency key: {generated}");
             Ok(generated)
         }
@@ -2669,7 +2658,14 @@ mod tests {
             .unwrap();
         assert_eq!(key.len(), 32, "{line}");
         assert!(key.bytes().all(|b| b.is_ascii_hexdigit()), "{line}");
-        assert!(is_hex(&generate_key(), 32));
+        assert!(is_hex(&generate_key().unwrap(), 32));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn generated_key_has_no_repeated_clock_halves() {
+        let key = generate_key().unwrap();
+        assert_ne!(&key[..16], &key[16..]);
     }
 
     #[test]

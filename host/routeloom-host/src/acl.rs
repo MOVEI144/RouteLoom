@@ -146,6 +146,11 @@ impl Acl {
                         "ACL: principal key \"{uid_key}\" is not a decimal uid"
                     ));
                 };
+                if acl.grants.contains_key(&principal_id) {
+                    return Err(format!(
+                        "ACL: principal key \"{uid_key}\" duplicates another principal"
+                    ));
+                }
                 let grants = acl.grants.entry(principal_id).or_default();
                 let Json::Object(fields) = principal else {
                     return Err(format!("ACL: principal \"{uid_key}\" must be an object"));
@@ -343,5 +348,16 @@ mod tests {
         assert!(!acl.permit_principal(&p2, 2, PERM_CONFIG));
 
         assert!(!acl.permit_principal(&p_other, 1, PERM_READ_PAYLOAD));
+    }
+
+    #[test]
+    fn principal_aliases_do_not_merge_grants() {
+        for keys in [["501", "uid:501"], ["S-1-5-21-100", "sid:S-1-5-21-100"]] {
+            let doc = format!(
+                "{{\"principals\":{{\"{}\":{{\"networks\":{{\"*\":[\"SEND\"]}}}},\"{}\":{{\"networks\":{{\"*\":[\"CONFIG\"]}}}}}}}}",
+                keys[0], keys[1]
+            );
+            assert!(Acl::parse(&doc).is_err(), "should reject alias: {doc}");
+        }
     }
 }

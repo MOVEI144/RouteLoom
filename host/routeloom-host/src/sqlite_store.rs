@@ -2219,6 +2219,8 @@ mod tests {
     fn schema_three_uid_fixture_migrates_to_versioned_principal() {
         let db = TestDb::new("uid-v3");
         let req = durable("00112233445566778899aabbccddeeff", 1);
+        #[cfg(windows)]
+        routeloom_peercred::open_private_file_for_write(&db.path).unwrap();
         {
             let conn = Connection::open(&db.path).unwrap();
             conn.execute_batch(&SCHEMA_SQL.replace("uid TEXT", "uid INTEGER"))

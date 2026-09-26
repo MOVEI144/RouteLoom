@@ -2609,8 +2609,8 @@ pub fn dispatch_once(
 /// never cut to the wire's last millisecond.
 const CONFIG_SAFETY_MARGIN_MS: u32 = 500;
 
-/// Fill `buf` with fresh entropy from the store's 128-bit minter (urandom
-/// with a non-repeating fallback) — the lane's operation_id / client_nonce
+/// Fill `buf` with fresh entropy from the store's OS CSPRNG minter —
+/// the lane's operation_id / client_nonce
 /// draws. Injected as a closure so tests stay deterministic.
 fn fill_config_entropy(buf: &mut [u8]) {
     let mut filled = 0;
