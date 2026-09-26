@@ -291,12 +291,12 @@ class AuthorityGateway final : public AuthorityMeshDemux {
   // USB session death: drop every slot. Epoch/key application is never
   // resumed from a slot — the endpoints resync over a fresh channel.
   void drop_all() noexcept;
-  // True while a USB-down object for `device` is still moving to the
-  // mesh. Revocation enforcement consults this: retiring the sessions
-  // and routes of a RemovalNotice target mid-transfer would strand the
-  // notice itself (the lifecycle retries WouldBlock enforcement, and
-  // the transfer always ends in drop or timeout).
-  bool has_live_down_to(NodeId device) const noexcept;
+  // Drops every USB-down slot addressed to `device` (revocation
+  // enforcement calls this for each revoked peer: a RemovalNotice
+  // transfer never delays session/route retirement — the notice
+  // replays over the ZT recovery path instead). Up slots and other
+  // devices are untouched; invalid ids are a no-op.
+  void cancel_down_to(NodeId device) noexcept;
   // Pump mesh TX (manifest/chunks/retries) and USB egress cursors.
   void poll(MonotonicMs now_ms) noexcept;
   bool quiescent() const noexcept;

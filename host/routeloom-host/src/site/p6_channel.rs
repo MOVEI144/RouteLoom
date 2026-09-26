@@ -596,6 +596,23 @@ impl P6ChannelHub {
             .is_some_and(|binding| binding.network == network)
     }
 
+    /// Retires a removed member's retained binding once its
+    /// NoticeAccepted verified: the notice exchange is over, so the
+    /// binding must not seal or verify anything further. A live row
+    /// (re-added meanwhile) keeps its channel.
+    pub fn retire_retained(&mut self, node: u64) {
+        if self.live.contains_key(&node) {
+            self.retained.remove(&node);
+            return;
+        }
+        if self.retained.remove(&node).is_some() {
+            self.channels
+                .lock()
+                .expect("authority channel poisoned")
+                .retire_device(node);
+        }
+    }
+
     /// Seals an RRS1 object for a live member of the current network.
     pub fn send_rrs(&mut self, node: u64, object: &[u8], mono_ms: u64) -> bool {
         self.send_on(node, 5, self.current_network, object, true, mono_ms)
@@ -861,5 +878,9 @@ impl RevocationTransport for P6ChannelTransport {
 
     fn notice_sealable(&self, node: u64, network: u64, mono_ms: u64) -> bool {
         self.lock().notice_sealable(node, network, mono_ms)
+    }
+
+    fn retire_notice_binding(&mut self, node: u64) {
+        self.lock().retire_retained(node);
     }
 }

@@ -90,6 +90,10 @@ namespace {
 constexpr std::uint8_t kSubApplied = 1;
 constexpr std::uint8_t kSubGet = 2;
 constexpr std::uint8_t kSubNoticeAccepted = 3;
+// COMMIT_STORED drain budget: one authority transfer window (the same
+// 15 s as kAuthorityTransferTimeoutMs), then the switch rolls forward
+// with or without the receipt's terminal result.
+constexpr MonotonicMs kSwitchReceiptDrainMs = 15000;
 
 Status head_read(ByteReader& reader, const std::uint8_t sub) noexcept {
   std::uint8_t ver = 0, got = 0;
@@ -2133,7 +2137,10 @@ void MembershipLifecycle::send_renew_receipt(GrantRenewPhase phase, ByteView dig
   receipt.head = {phase, record.cutover_id, record.revision, record.old_network};
   receipt.new_network = record.new_network;
   receipt.gk_epoch = record.gk_floor;
-  receipt.rs_epoch = phase == GrantRenewPhase::Applied ? record.rs_floor : 0;
+  receipt.rs_epoch = (phase == GrantRenewPhase::Applied ||
+                      phase == GrantRenewPhase::CommitStored)
+                         ? record.rs_floor
+                         : 0;
   if (digest.size == receipt.digest.size())
     std::memcpy(receipt.digest.data(), digest.data, digest.size);
   std::array<std::uint8_t, kGrantReceiptSize> bytes{};
@@ -2148,7 +2155,33 @@ Status MembershipLifecycle::on_renew(ByteView body, MonotonicMs now_ms) noexcept
   if (head.old_network != adopted_.network) return Status::error(StatusCode::Conflict, "renew old binding");
   if (head.phase == GrantRenewPhase::Prepare) return renew_prepare(body);
   if (head.phase == GrantRenewPhase::Commit) return renew_commit(body, now_ms);
+  if (head.phase == GrantRenewPhase::RouteState) return renew_routestate(body, now_ms);
   return Status::error(StatusCode::ProtocolError, "renew response from authority");
+}
+
+Status MembershipLifecycle::renew_routestate(ByteView body, MonotonicMs now_ms) noexcept {
+  GrantRouteState query{};
+  Status st = grant_route_state_decode(body, query);
+  if (!st) return st;
+  if (query.mode != 0) return Status::error(StatusCode::ProtocolError, "renew routestate report inbound");
+  // The query binds to the live cutover intent: Prepared pre-commit,
+  // or Switching while still on the old network (post-commit
+  // re-queries). Anything else has no route tree to report.
+  if (!journal_ || !journal_->has_record())
+    return Status::error(StatusCode::InvalidState, "renew routestate without intent");
+  const LifecycleRecord& record = journal_->record();
+  if ((record.mode != LifecycleMode::Prepared && record.mode != LifecycleMode::Switching) ||
+      query.head.cutover_id != record.cutover_id || query.head.revision != record.revision ||
+      query.head.old_network != record.old_network)
+    return Status::error(StatusCode::Conflict, "renew routestate binding");
+  GrantRouteState report{};
+  if (!ports_.runtime.route_state_snapshot(query, report, now_ms))
+    return Status::error(StatusCode::InternalError, "renew routestate snapshot");
+  std::array<std::uint8_t, kGrantRouteStateSize> bytes{};
+  st = grant_route_state_encode(report, bytes);
+  if (!st) return st;
+  (void)ports_.authority.authority_send(7, ByteView{bytes.data(), bytes.size()});
+  return Status::success();
 }
 
 Status MembershipLifecycle::renew_commit(ByteView body, MonotonicMs now_ms) noexcept {
@@ -2227,6 +2260,16 @@ Status MembershipLifecycle::renew_commit(ByteView body, MonotonicMs now_ms) noex
     enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
     return st;
   }
+  // Durable now: prove the irreversible COMMIT acceptance to the Host
+  // over the still-open old context, then drain that single receipt
+  // before step 0 retires the network (04 §7). The drain is best
+  // effort — the switch rolls forward on its budget either way.
+  Digest256 commit_digest{};
+  sha256(commit.proof.view(), commit_digest);
+  send_renew_receipt(GrantRenewPhase::CommitStored,
+                     ByteView{commit_digest.data(), commit_digest.size()});
+  switch_drained_ = false;
+  switch_drain_start_ = now_ms;
   switch_step_ = 0;
   switch_cursor_ = 0;
   return Status::success();
@@ -2289,6 +2332,18 @@ Status MembershipLifecycle::switch_poll(MonotonicMs now_ms) noexcept {
   Status st{};
   switch (switch_step_) {
     case 0:
+      // Drain the COMMIT_STORED receipt over the still-open old
+      // context before retiring it: the terminal transport result
+      // ends the drain, else the budget does (roll-forward either
+      // way — a lost receipt only costs the parent its fast path).
+      if (!switch_drained_) {
+        if (ports_.authority.authority_tx_settled() ||
+            now_ms - switch_drain_start_ >= kSwitchReceiptDrainMs) {
+          switch_drained_ = true;
+        } else {
+          return Status::success();
+        }
+      }
       st = ports_.runtime.retire_network();
       if (st.code == StatusCode::WouldBlock) return Status::success();
       break;

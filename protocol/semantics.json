@@ -292,7 +292,8 @@
       "advertised": true,
       "subcommands": {"AUTHORITY_UP": 100, "AUTHORITY_DOWN": 101, "SITE_STATE_SET": 102, "SITE_STATE_REPORT": 103},
       "note": "bit 9 was already join-relay-v2; the lane takes the next free bit 10 and advertises it once the gateway attaches the sink"
-    }
+    },
+    "grant_renew": {"envelope_type": 7, "phases": {"PREPARE": 1, "COMMIT": 2, "PREPARED": 3, "APPLIED": 4, "COMMIT_STORED": 5, "ROUTE_STATE": 6}, "head_bytes": 24, "receipt_bytes": 76, "routestate_bytes": 60, "routestate_modes": {"QUERY": 0, "REPORT": 1}, "routestate_status": {"OK": 0, "UNAVAILABLE": 1}, "note": "phase 5 proves durable Switching receipt for leaf-first COMMIT dispatch; phase 6 carries the uplink route tree. COMMIT_STORED reuses the 76 B receipt layout with the CutoverCommit digest; RouteState is head + mode/status/reserved + root/parent + boot/stamp/query/lease"}
   },
   "max_espnow_body_bytes": 250,
   "max_normal_payload_bytes": 128,

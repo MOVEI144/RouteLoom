@@ -684,16 +684,15 @@ void test_gateway_down_path() {
   CHECK(!gateway.authority_down(kDevice, fragment, complete, 3000));
 }
 
-// Revocation enforcement consults the live-down query: a RemovalNotice
-// transfer to a revoked peer must hold session/route retirement until
-// the transfer ends, or the notice strands itself on NoRoute.
-void test_gateway_live_down_tracks_transfers() {
+// Revocation enforcement cancels a revoked peer's down transfers
+// instead of waiting for them: only that peer's slots drop, other
+// devices and up slots are untouched.
+void test_gateway_cancel_down_to_revoked_peer() {
   RecordingPort port;
   RecordingHostSink host;
   RecordingLocalSink local;
   AuthorityGateway gateway(port, host, local, kGateway);
-  CHECK(!gateway.has_live_down_to(kDevice));
-  CHECK(!gateway.has_live_down_to(kInvalidNodeId));
+  CHECK(gateway.quiescent());
   const auto envelope = pattern(200);
   usb::AuthorityFragment fragment{};
   fragment.device = kDevice;
@@ -704,30 +703,32 @@ void test_gateway_live_down_tracks_transfers() {
   bool complete = false;
   CHECK(gateway.authority_down(kDevice, fragment, complete, 1000));
   CHECK(complete);
-  CHECK(gateway.has_live_down_to(kDevice));
-  CHECK(!gateway.has_live_down_to(kGateway));
+  CHECK(!gateway.quiescent());
   gateway.poll(1000);  // manifest + first chunk go out; transfer still live
-  CHECK(gateway.has_live_down_to(kDevice));
-  // Progress acks keep it live; the final Ok retires the transfer.
+  CHECK(!gateway.quiescent());
+  const std::size_t sends_before = port.queue.size();
+  CHECK(sends_before > 0);
+  // Invalid ids are a no-op: the live transfer survives.
+  gateway.cancel_down_to(kInvalidNodeId);
+  gateway.cancel_down_to(kBroadcastNodeId);
+  gateway.cancel_down_to(kGateway);
+  CHECK(!gateway.quiescent());
+  // Cancelling the revoked peer drops its slot: no further mesh
+  // sends for it, and the gateway goes quiescent.
+  gateway.cancel_down_to(kDevice);
+  CHECK(gateway.quiescent());
+  gateway.poll(2000);
+  CHECK(port.queue.size() == sends_before);
+  // A late ack for the cancelled transfer is ignored, not resurrected.
   autonomy::ControlObjectPayload manifest{};
   CHECK(autonomy::control_object_decode(
       ByteView{port.queue[0].payload.data(), port.queue[0].payload.size()},
       manifest));
   autonomy::ObjectAckPayload ack{};
   ack.object_hash = manifest.object_hash;
-  ack.status = autonomy::ObjectAckStatus::Incomplete;
-  ack.received_len = 90;
-  gateway.on_ack(kDevice, ack, 1500);
-  CHECK(gateway.has_live_down_to(kDevice));
-  gateway.poll(2000);  // next chunk goes out, ack budget refreshes
-  ack.received_len = 180;
-  gateway.on_ack(kDevice, ack, 2000);
-  CHECK(gateway.has_live_down_to(kDevice));
-  gateway.poll(2500);
   ack.status = autonomy::ObjectAckStatus::Ok;
   ack.received_len = static_cast<std::uint16_t>(envelope.size());
   gateway.on_ack(kDevice, ack, 2500);
-  CHECK(!gateway.has_live_down_to(kDevice));
   CHECK(gateway.quiescent());
 }
 
@@ -981,7 +982,7 @@ int main() {
   test_small_carrier_does_not_claim_old_object_hash();
   test_gateway_up_path();
   test_gateway_down_path();
-  test_gateway_live_down_tracks_transfers();
+  test_gateway_cancel_down_to_revoked_peer();
   test_gateway_last_chunk_ack_window();
   test_gateway_self_down();
   test_gateway_slot_exhaustion();

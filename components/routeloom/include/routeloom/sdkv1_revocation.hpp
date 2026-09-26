@@ -598,6 +598,11 @@ class LifecycleAuthorityPort {
   // One message for P5 sealing/sending (PR A: type 5 only). WouldBlock or
   // failure = unsent; the port copies `body` during the call.
   virtual Status authority_send(std::uint8_t authority_type, ByteView body) noexcept = 0;
+  // True when no authority TX is outstanding (every staged transfer
+  // reached a terminal transport result). The cutover switch drain
+  // polls this before retiring the old network; ports without
+  // transport visibility report true and never hold the drain.
+  virtual bool authority_tx_settled() noexcept { return true; }
 };
 
 // The single side-effecting enforcement entry, run on the Owner thread:
@@ -625,6 +630,21 @@ class LifecycleRuntimePort {
   }
   virtual Status install_site_trust(const SiteRecord&) noexcept {
     return Status::error(StatusCode::Unsupported, "site trust install not wired");
+  }
+  // Answers a RouteState query (phase 6, mode 0) with this node's
+  // committed uplink snapshot for the cutover route tree (04 §7).
+  // `query` is the decoded query; on true `report` is the mode-1
+  // report to send (head/query id echoed, root/parent/boot/stamp/
+  // lease filled, status set). Default answers unavailable.
+  virtual bool route_state_snapshot(const GrantRouteState& query, GrantRouteState& report,
+                                    MonotonicMs now_ms) noexcept {
+    (void)now_ms;
+    report = GrantRouteState{};
+    report.head = query.head;
+    report.mode = 1;
+    report.status = 1;
+    report.query_id = query.query_id;
+    return true;
   }
 };
 
@@ -766,6 +786,7 @@ class MembershipLifecycle final {
   Status on_renew(ByteView body, MonotonicMs now_ms) noexcept;
   Status renew_prepare(ByteView body) noexcept;
   Status renew_commit(ByteView body, MonotonicMs now_ms) noexcept;
+  Status renew_routestate(ByteView body, MonotonicMs now_ms) noexcept;
   bool staged_site(const LifecycleRecord& record, SiteRecord& out) noexcept;
   bool switching_proof(const LifecycleRecord& record, SiteRecord& out,
                        RevocationSet& rrs) noexcept;
@@ -870,6 +891,12 @@ class MembershipLifecycle final {
   std::uint8_t switch_step_{0};
   GrantReceipt applied_receipt_{};
   bool applied_receipt_pending_{false};
+  // COMMIT_STORED drain (RAM-only): a live renew_commit arms it;
+  // a boot that resumes Switching skips it — the receipt never
+  // delays a resumed roll-forward. The budget compares elapsed
+  // (regression ends the drain instead of extending it).
+  bool switch_drained_{true};
+  MonotonicMs switch_drain_start_{0};
 
   LifecycleAction action_{};
   bool action_pending_{false};

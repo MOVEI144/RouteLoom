@@ -1671,6 +1671,85 @@ fn removal_notice_outbox_and_accept() {
         a.handle_notice_accepted(leaver.node, 1, testkit::network(), 999, &digest, T0 + 2_300)
     });
     assert!(!moved);
+    // The confirmed notice never resends, even inside its window.
+    tick(&service, T0 + 2_400);
+    tick(&service, T0 + 2_500);
+    assert_eq!(sends.lock().unwrap().notices.len(), 1);
+}
+
+/// The direct-notice window is 60 s from the revoke commit: past it
+/// the notice closes (attempts capped, delivery history kept) and
+/// never sends again — while the RRS1 fan-out to survivors proceeds
+/// independently of the unconfirmed notice.
+#[test]
+fn notice_direct_send_closes_after_60s() {
+    use super::p6_channel::P6_BINDING_GRACE_MS;
+    use super::revocation::NOTICE_SEND_MAX;
+
+    let (service, transport) = service();
+    let mut keeper = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    let mut leaver = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    join_member(&service, &transport, &mut keeper, ROLE_ENDPOINT, "k", T0);
+    join_member(
+        &service,
+        &transport,
+        &mut leaver,
+        ROLE_ENDPOINT,
+        "l",
+        T0 + 1_000,
+    );
+    let sends = with_grant_transport(&service);
+    let commit_at = T0 + 2_000;
+    let (answer, _) = service.with(|a| {
+        a.revoke(
+            KGUARD,
+            RevokeRequest {
+                device: leaver.node,
+                expected_generation: 1,
+                reason: RevocationReason::Lost,
+                key: "r-notice-window".into(),
+            },
+            HostTime::sync(commit_at),
+        )
+    });
+    let answer = json(&answer.unwrap());
+    let op = parse_op_token(answer.get("operation_id").unwrap().as_str().unwrap()).unwrap();
+    tick(&service, commit_at + 100);
+    assert_eq!(sends.lock().unwrap().notices.len(), 1);
+    // Past the window the direct send closes: no more airtime even
+    // though the transport would still deliver.
+    tick(&service, commit_at + P6_BINDING_GRACE_MS);
+    tick(&service, commit_at + P6_BINDING_GRACE_MS + 1_000);
+    assert_eq!(sends.lock().unwrap().notices.len(), 1);
+    let view = operation(&service, op, commit_at + P6_BINDING_GRACE_MS + 1_000);
+    let notice = view.get("notice").unwrap();
+    assert_eq!(notice.get("delivery").unwrap().as_str(), Some("sent"));
+    assert_eq!(
+        notice.get("intent_confirmed").unwrap().as_bool(),
+        Some(false)
+    );
+    let attempts = service
+        .with(|a| {
+            a.operations
+                .get(&op)
+                .unwrap()
+                .notice
+                .as_ref()
+                .unwrap()
+                .attempts
+        })
+        .0;
+    assert_eq!(attempts, NOTICE_SEND_MAX);
+    // The survivor's RRS1 fan-out never waited on the notice.
+    assert!(
+        sends
+            .lock()
+            .unwrap()
+            .rrs
+            .iter()
+            .any(|(node, _)| *node == keeper.node),
+        "RRS1 reaches the survivor while the notice stays unconfirmed"
+    );
 }
 
 /// Cutover start refuses a next SiteCert that is not exactly the next

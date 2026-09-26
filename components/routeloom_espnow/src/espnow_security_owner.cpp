@@ -93,6 +93,21 @@ Status EspNowSecurityOwner::LifecycleAuthorityPort::authority_send(
   return Status::error(StatusCode::WouldBlock, "p6 authority queue full");
 }
 
+bool EspNowSecurityOwner::LifecycleAuthorityPort::authority_tx_settled() noexcept {
+  EspNowSecurityOwner& owner = owner_;
+  for (const AuthorityTxStage& slot : owner.authority_tx_staged_) {
+    if (slot.used) return false;
+  }
+  if (!owner.coordinator_live_ || !owner.authority_live_) return true;
+  // Below Ready there is nothing to drain: a down channel never holds
+  // the cutover switch (no re-establishment waits here).
+  const sdkv1::AuthoritySnapshot snap = owner.coordinator().authority_snapshot();
+  if (snap.state != sdkv1::AuthoritySnapshot::State::Ready) return true;
+  if (snap.busy) return false;
+  if (owner.config_.gateway) return !owner.usb_tx_pending_;
+  return owner.endpoint()->quiescent();
+}
+
 Status EspNowSecurityOwner::LifecyclePeerPort::peer_send(const NodeId peer, const FrameType carrier,
                                                          const ByteView body) noexcept {
   EspNowSecurityOwner& owner = owner_;
@@ -128,16 +143,14 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::enforce_revocation(
   if (owner.stores_ == nullptr || !owner.coordinator_live_) {
     return Status::error(StatusCode::InvalidState, "enforce before wiring");
   }
-  // A live notice transfer to a set peer holds enforcement: retiring
-  // its sessions and routes mid-transfer would strand the RemovalNotice
-  // itself on NoRoute (04 §6.2 reachable case). The lifecycle retries
-  // WouldBlock enforcement every Poll, and the transfer always ends in
-  // delivery or timeout — enforcement is delayed, never skipped.
+  // Enforcement never waits for a live notice transfer: the RRS1
+  // predicate retires sessions and routes now, and the matching
+  // authority down transfers cancel with them (no notice may extend a
+  // revoked peer's mesh lifetime). The revoked device still learns
+  // its removal over the ZT recovery path (04 §6.3).
   if (owner.config_.gateway && owner.authority_live_) {
     for (std::size_t i = 0; i < set.count; ++i) {
-      if (owner.gateway()->has_live_down_to(set.entries[i].node_id)) {
-        return Status::error(StatusCode::WouldBlock, "notice transfer live");
-      }
+      owner.gateway()->cancel_down_to(set.entries[i].node_id);
     }
   }
   // The P4 bank, pending handshakes and Discovery bindings retire before
@@ -208,6 +221,65 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::retire_network() noexcept {
   // Cutover retirement: member traffic halts like a removal, but the
   // stores (old + staged site) stay for the switch to commit.
   return remove_member_runtime();
+}
+
+bool EspNowSecurityOwner::LifecycleRuntimePort::route_state_snapshot(
+    const sdkv1::GrantRouteState& query, sdkv1::GrantRouteState& report,
+    const MonotonicMs now_ms) noexcept {
+  EspNowSecurityOwner& owner = owner_;
+  report = sdkv1::GrantRouteState{};
+  report.head = query.head;
+  report.mode = 1;
+  report.status = 1;
+  report.query_id = query.query_id;
+  report.boot = owner.boot_witness_;
+  // Unavailable unless every input below checks out; the Host treats
+  // it as an unroutable target, never as evidence.
+  if (owner.runtime_ == nullptr || !owner.coordinator_live_ || owner.stores_ == nullptr ||
+      !owner.stores_->site().has_site() || owner.adopted_network_ == 0) {
+    return true;
+  }
+  const sdkv1::SiteRecord& site = owner.stores_->site().site();
+  const NodeId self = owner.self_node();
+  for (std::uint8_t i = 0; i < site.gateway_count; ++i) {
+    const NodeId gateway = site.gateways[i];
+    if (gateway == kInvalidNodeId) continue;
+    if (gateway == self) {
+      // This node is the root: no parent, an unexpiring self route.
+      report.status = 0;
+      report.root = self;
+      report.parent = 0;
+      report.valid_for_ms = 0xFFFFFFFFU;
+      return true;
+    }
+  }
+  for (std::uint8_t i = 0; i < site.gateway_count; ++i) {
+    const NodeId gateway = site.gateways[i];
+    if (gateway == kInvalidNodeId || gateway == self) continue;
+    const RouteSelection selection = owner.runtime_->node().routes().best(gateway);
+    if (!selection.valid || selection.next_hop == kInvalidNodeId) continue;
+    std::uint32_t generation = 0, role = 0;
+    if (!owner.coordinator().authenticated_link(selection.next_hop, owner.adopted_network_,
+                                                generation, role)) {
+      continue;
+    }
+    const MonotonicMs expires =
+        owner.runtime_->node().routes().selection_expires_at(gateway);
+    const std::uint64_t remaining = expires > now_ms ? expires - now_ms : 0;
+    report.status = 0;
+    report.root = gateway;
+    report.parent = selection.next_hop;
+    // Change detector over the committed selection: any parent,
+    // sequence or metric move flips it (collisions only delay a
+    // re-query, never forge a route).
+    const std::uint64_t mixed = selection.next_hop ^ (selection.next_hop >> 32U);
+    report.route_stamp = static_cast<std::uint32_t>(mixed) ^
+                         selection.sequence * 0x9E3779B1U ^ selection.metric;
+    report.valid_for_ms =
+        remaining > 0xFFFFFFFFU ? 0xFFFFFFFFU : static_cast<std::uint32_t>(remaining);
+    return true;
+  }
+  return true;
 }
 
 Status EspNowSecurityOwner::LifecycleRuntimePort::install_site_trust(

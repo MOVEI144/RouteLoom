@@ -224,6 +224,10 @@ class RouteTable {
   void evaluate(MonotonicMs now_ms) noexcept;
 
   RouteSelection best(NodeId destination) const noexcept;
+  // Cutover RouteState (04 §7): the lease expiry of the current
+  // selection toward `destination` (0 = no selection). Read-only:
+  // selection, feasibility and leases never read it.
+  MonotonicMs selection_expires_at(NodeId destination) const noexcept;
   bool mark_advertised(NodeId destination) noexcept;
   // Scoped-profile scheduling flag (see Entry::announced_up). Pure
   // bookkeeping: selection, feasibility and leases never read it.

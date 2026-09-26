@@ -29,7 +29,7 @@ Status bad(const char* reason) noexcept { return Status::error(StatusCode::Proto
 
 Status grant_renew_head_encode(const GrantRenewHead& head,
                                std::array<std::uint8_t, kGrantRenewHeadSize>& out) noexcept {
-  if (head.phase < GrantRenewPhase::Prepare || head.phase > GrantRenewPhase::Applied ||
+  if (head.phase < GrantRenewPhase::Prepare || head.phase > GrantRenewPhase::RouteState ||
       head.cutover_id == 0 || head.revision == 0 || head.old_network == 0) return bad("renew head");
   out.fill(0);
   out[0] = 1; out[1] = static_cast<std::uint8_t>(head.phase);
@@ -40,7 +40,7 @@ Status grant_renew_head_encode(const GrantRenewHead& head,
 }
 Status grant_renew_head_decode(ByteView bytes, GrantRenewHead& out) noexcept {
   if (bytes.data == nullptr || bytes.size < kGrantRenewHeadSize || bytes.data[0] != 1 ||
-      bytes.data[1] < 1 || bytes.data[1] > 4 || u16(bytes.data + 2) != 0 ||
+      bytes.data[1] < 1 || bytes.data[1] > 6 || u16(bytes.data + 2) != 0 ||
       u64(bytes.data + 4) == 0 || u32(bytes.data + 12) == 0 || u64(bytes.data + 16) == 0)
     return bad("renew head");
   out.phase = static_cast<GrantRenewPhase>(bytes.data[1]);
@@ -101,7 +101,9 @@ Status grant_commit_decode(ByteView bytes, GrantCommit& out) noexcept {
 }
 Status grant_receipt_encode(const GrantReceipt& receipt,
                             std::array<std::uint8_t, kGrantReceiptSize>& out) noexcept {
-  if (receipt.head.phase != GrantRenewPhase::Prepared && receipt.head.phase != GrantRenewPhase::Applied)
+  if (receipt.head.phase != GrantRenewPhase::Prepared &&
+      receipt.head.phase != GrantRenewPhase::Applied &&
+      receipt.head.phase != GrantRenewPhase::CommitStored)
     return bad("renew receipt phase");
   std::array<std::uint8_t, kGrantRenewHeadSize> head{};
   Status st = grant_renew_head_encode(receipt.head, head);
@@ -122,7 +124,8 @@ Status grant_receipt_decode(ByteView bytes, GrantReceipt& out) noexcept {
   GrantRenewHead head{};
   Status st = grant_renew_head_decode(bytes, head);
   if (!st) return st;
-  if ((head.phase != GrantRenewPhase::Prepared && head.phase != GrantRenewPhase::Applied) ||
+  if ((head.phase != GrantRenewPhase::Prepared && head.phase != GrantRenewPhase::Applied &&
+       head.phase != GrantRenewPhase::CommitStored) ||
       u64(bytes.data + 24) == 0 || bytes.data[72] > 4 || bytes.data[73] != 0 ||
       bytes.data[74] != 0 || bytes.data[75] != 0 ||
       (head.phase == GrantRenewPhase::Prepared && u32(bytes.data + 36) != 0))
@@ -133,6 +136,63 @@ Status grant_receipt_decode(ByteView bytes, GrantReceipt& out) noexcept {
   out.rs_epoch = u32(bytes.data + 36);
   std::memcpy(out.digest.data(), bytes.data + 40, 32);
   out.status = bytes.data[72];
+  return Status::success();
+}
+Status grant_route_state_encode(const GrantRouteState& state,
+                                std::array<std::uint8_t, kGrantRouteStateSize>& out) noexcept {
+  if (state.head.phase != GrantRenewPhase::RouteState || state.mode > 1 || state.query_id == 0)
+    return bad("renew routestate shape");
+  if (state.mode == 0) {
+    // A query names only the binding and its id; every other field is 0.
+    if (state.status != 0 || state.root != 0 || state.parent != 0 || state.boot != 0 ||
+        state.route_stamp != 0 || state.valid_for_ms != 0)
+      return bad("renew routestate query");
+  } else if (state.status > 1) {
+    return bad("renew routestate status");
+  } else if (state.status == 1) {
+    // Unavailable carries no parent and no lease.
+    if (state.parent != 0 || state.valid_for_ms != 0) return bad("renew routestate unavailable");
+  } else if (state.root == 0) {
+    return bad("renew routestate root");
+  }
+  std::array<std::uint8_t, kGrantRenewHeadSize> head{};
+  Status st = grant_renew_head_encode(state.head, head);
+  if (!st) return st;
+  out.fill(0);
+  std::memcpy(out.data(), head.data(), head.size());
+  out[24] = state.mode;
+  out[25] = state.status;
+  put64(out.data() + 28, state.root);
+  put64(out.data() + 36, state.parent);
+  put32(out.data() + 44, state.boot);
+  put32(out.data() + 48, state.route_stamp);
+  put32(out.data() + 52, state.query_id);
+  put32(out.data() + 56, state.valid_for_ms);
+  return Status::success();
+}
+Status grant_route_state_decode(ByteView bytes, GrantRouteState& out) noexcept {
+  out = GrantRouteState{};
+  if (bytes.data == nullptr || bytes.size != kGrantRouteStateSize) return bad("renew routestate length");
+  GrantRenewHead head{};
+  Status st = grant_renew_head_decode(bytes, head);
+  if (!st) return st;
+  if (head.phase != GrantRenewPhase::RouteState || u16(bytes.data + 26) != 0) return bad("renew routestate head");
+  GrantRouteState state{};
+  state.head = head;
+  state.mode = bytes.data[24];
+  state.status = bytes.data[25];
+  state.root = u64(bytes.data + 28);
+  state.parent = u64(bytes.data + 36);
+  state.boot = u32(bytes.data + 44);
+  state.route_stamp = u32(bytes.data + 48);
+  state.query_id = u32(bytes.data + 52);
+  state.valid_for_ms = u32(bytes.data + 56);
+  std::array<std::uint8_t, kGrantRouteStateSize> canonical{};
+  st = grant_route_state_encode(state, canonical);
+  if (!st) return st;
+  for (std::size_t i = 0; i < canonical.size(); ++i)
+    if (canonical[i] != bytes.data[i]) return bad("renew routestate canonical");
+  out = state;
   return Status::success();
 }
 Status cutover_commit_aad(NetworkId old_network,

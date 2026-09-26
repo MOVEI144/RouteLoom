@@ -1631,7 +1631,9 @@ impl SiteAuthority {
                 }
                 self.set_grant_state(id, node, GrantState::Applied, state.revision, now_ms)
             }
-            Phase::Prepare | Phase::Commit => false,
+            // COMMIT_STORED and RouteState ride their own handlers
+            // (leaf-first dispatch); never PREPARED/APPLIED evidence.
+            Phase::Prepare | Phase::Commit | Phase::CommitStored | Phase::RouteState => false,
         }
     }
 

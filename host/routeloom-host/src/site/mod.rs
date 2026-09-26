@@ -916,6 +916,12 @@ pub struct SiteAuthority {
     rrs_history: BTreeMap<u32, Vec<RevocationEntry>>,
     rrs_history_digests: BTreeMap<u32, [u8; 32]>,
     rrs_latest_object: Vec<u8>,
+    // RemovalNotice direct-send eligibility (04 §7.1): revoke-commit
+    // monotonic ms per operation. RAM-only — a restart empties it, so
+    // no post-restart tick may revive a direct send (the notice then
+    // rides the ZT recovery path instead). Entries drop when the
+    // notice closes (accepted, expired, unreachable, evicted).
+    notice_commit_mono: BTreeMap<u64, u64>,
     // P6-2 cutover (site/cutover.rs): the old-network COMMIT grace is
     // RAM-only (0 = none; a restart ends it), and the reopen collects
     // the pre-commit cutovers whose window restarts on the first tick
@@ -1503,6 +1509,7 @@ impl SiteAuthority {
             rrs_outbox: VecDeque::new(),
             rrs_next_dispatch_ms: 0,
             rrs_refusals: HashMap::new(),
+            notice_commit_mono: BTreeMap::new(),
             rrs_history,
             rrs_history_digests,
             rrs_latest_object,
@@ -2829,6 +2836,7 @@ impl SiteAuthority {
     fn remember_operation(&mut self, op: Operation, evicted: Option<u64>) {
         if let Some(id) = evicted {
             self.operations.remove(&id);
+            self.notice_commit_mono.remove(&id);
         }
         self.next_op_id = op.id + 1;
         self.operations.insert(op.id, op);
@@ -3559,6 +3567,17 @@ impl SiteAuthority {
         self.rrs_history_digests.insert(rs_epoch, sha256(&object));
         self.rrs_latest_object = object;
         self.devices.insert(removed.node, removed);
+        // A queued direct notice owns a 60 s best-effort window from
+        // this commit (mono axis; never extended by retries). Past it —
+        // or after a restart, which drops this RAM map — the notice
+        // closes and the ZT recovery path takes over (04 §7.1).
+        if op
+            .notice
+            .as_ref()
+            .is_some_and(|notice| notice.delivery == revocation::NoticeDelivery::Pending)
+        {
+            self.notice_commit_mono.insert(op.id, time.mono_ms);
+        }
         // The row is dead: retire the channel and its ready hint now
         // rather than at the next dispatch, and echo the new epochs.
         if !self

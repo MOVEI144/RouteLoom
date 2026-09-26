@@ -171,6 +171,11 @@ pub trait RevocationTransport {
     fn notice_sealable(&self, _node: u64, _network: u64, _mono_ms: u64) -> bool {
         true
     }
+    /// Retires `node`'s retained removed binding after its
+    /// NoticeAccepted verified: the notice exchange is over and the
+    /// context must not serve anything else. Default ignores: fakes
+    /// hold no bindings.
+    fn retire_notice_binding(&mut self, _node: u64) {}
 }
 
 /// Per-target delivery state. `Pending` never left the Host; `Unknown`
@@ -867,8 +872,11 @@ impl SiteAuthority {
 
     /// Queues pending RemovalNotices ahead of grants and RRS1 fan-out
     /// (04 §7.1: the notice goes first). Best-effort: at most
-    /// [`NOTICE_SEND_MAX`] transport sends, then the target is on its
-    /// own until its ZT recovery.
+    /// [`NOTICE_SEND_MAX`] transport sends inside a 60 s window from
+    /// the revoke commit, then the direct send closes and the target
+    /// is on its own until its ZT recovery. Notices stop one slot
+    /// short of a full outbox so the RRS1 fan-out — the revocation
+    /// itself — always has airtime behind them.
     pub(super) fn queue_notices(&mut self, time: super::group_keys::HostTime) {
         if self
             .rrs_transport
@@ -880,7 +888,7 @@ impl SiteAuthority {
         let mut ops: Vec<u64> = self.operations.keys().copied().collect();
         ops.sort_by_key(|id| std::cmp::Reverse(*id));
         for id in ops {
-            if self.rrs_outbox.len() >= DISTRIBUTION_OUTBOX_MAX {
+            if self.rrs_outbox.len() + 1 >= DISTRIBUTION_OUTBOX_MAX {
                 break;
             }
             let due = match self.operations.get(&id) {
@@ -891,6 +899,7 @@ impl SiteAuthority {
                                 notice.delivery,
                                 NoticeDelivery::Pending | NoticeDelivery::Sent
                             )
+                            && !notice.intent_confirmed
                             && notice.attempts < NOTICE_SEND_MAX =>
                     {
                         op.node
@@ -899,6 +908,18 @@ impl SiteAuthority {
                 },
                 None => continue,
             };
+            // The direct-send window is RAM-fenced: past the 60 s from
+            // commit — or after a restart or clock regression, which
+            // both drop the commit entry — the notice closes instead
+            // of queueing. Retries never extend it.
+            let eligible = self.notice_commit_mono.get(&id).is_some_and(|commit| {
+                time.mono_ms >= *commit
+                    && time.mono_ms - *commit < super::p6_channel::P6_BINDING_GRACE_MS
+            });
+            if !eligible {
+                self.close_notice_direct(id, time.unix_ms);
+                continue;
+            }
             if self
                 .rrs_outbox
                 .iter()
@@ -915,16 +936,12 @@ impl SiteAuthority {
             }
             // No live or retained binding (and the row being removed,
             // none can form): mark `unreachable` instead of retrying
-            // past the best-effort window. Fakes always seal, so
-            // their queueing is unchanged.
-            let sealable = self
-                .operations
-                .get(&id)
-                .and_then(|op| op.notice.as_ref())
-                .is_some_and(|notice| notice.sealed.is_some())
-                || self.rrs_transport.as_ref().is_some_and(|transport| {
-                    transport.notice_sealable(due, self.id.network, time.mono_ms)
-                });
+            // past the best-effort window. A stored ciphertext alone
+            // never qualifies — only an existing channel does — and
+            // fakes always seal, so their queueing is unchanged.
+            let sealable = self.rrs_transport.as_ref().is_some_and(|transport| {
+                transport.notice_sealable(due, self.id.network, time.mono_ms)
+            });
             if !sealable {
                 self.note_notice_unreachable(id, time.unix_ms);
                 continue;
@@ -960,6 +977,29 @@ impl SiteAuthority {
         if changed {
             self.persist_operation(op, now_ms);
         }
+        self.notice_commit_mono.remove(&op);
+    }
+
+    /// Closes a direct send whose window lapsed (or never opened in
+    /// this boot): the attempts cap stops every requeue and every
+    /// lingering dispatch, while `delivery` keeps the honest
+    /// transport history (`sent` still means handed to the transport,
+    /// never reached). Silent, like the unreachable marking.
+    fn close_notice_direct(&mut self, op: u64, now_ms: u64) {
+        let changed = match self.operations.get_mut(&op) {
+            Some(operation) => match operation.notice.as_mut() {
+                Some(notice) if notice.attempts < NOTICE_SEND_MAX => {
+                    notice.attempts = NOTICE_SEND_MAX;
+                    true
+                }
+                _ => false,
+            },
+            None => false,
+        };
+        if changed {
+            self.persist_operation(op, now_ms);
+        }
+        self.notice_commit_mono.remove(&op);
     }
 
     /// Resolves one queued notice to `(bytes, network)`. A notice whose
@@ -972,6 +1012,7 @@ impl SiteAuthority {
                 notice.delivery,
                 NoticeDelivery::Pending | NoticeDelivery::Sent
             )
+            || notice.intent_confirmed
             || notice.attempts >= NOTICE_SEND_MAX
         {
             return None;
@@ -1069,6 +1110,14 @@ impl SiteAuthority {
             match self.store.commit(&batch) {
                 Ok(()) => {
                     self.operations.insert(id, updated);
+                    // Confirmed: resends stop (the queue and dispatch
+                    // gates read `intent_confirmed`), the window entry
+                    // drops, and the retained removed binding retires —
+                    // the notice exchange is over.
+                    self.notice_commit_mono.remove(&id);
+                    if let Some(transport) = self.rrs_transport.as_mut() {
+                        transport.retire_notice_binding(node);
+                    }
                     self.event(
                         now_ms,
                         format!(
