@@ -634,6 +634,30 @@ void test_flat_no_route_pull() {
   CHECK(w.at(1)->delivery(id).state == DeliveryState::Delivered);
 }
 
+void test_flat_pull_does_not_spend_attempts_without_neighbors() {
+  SimWorld w;
+  w.add(1, 1, 100, 1000);
+  w.add(2, 1, 100, 1000);
+  w.add(3, 1, 100, 1000);
+  w.start_all();
+  w.link(2, 3, 1, 1);
+  w.run(1200);
+  MessageId id{};
+  CHECK(send_data(w, 1, 3, id, 30000));
+  // Repeated NO_ROUTE polls with no reachable neighbor must not push the
+  // first actual one-hop pull onto the saturated discovery backoff.
+  w.run(13000);
+  const auto before = w.at(1)->route_scale_stats().pulls_sent;
+  // Isolate the pull from unsolicited advertisements at the new link.
+  w.net.silent_drop = drop_flat_advertisement;
+  w.link(1, 2, 1, 1);
+  w.run(2500);
+  CHECK(w.at(1)->route_scale_stats().pulls_sent > before);
+  w.net.silent_drop = nullptr;
+  w.run(2500);
+  CHECK(w.at(1)->delivery(id).state == DeliveryState::Delivered);
+}
+
 void test_flat_relay_binds_before_gateway() {
   // A reference node can first bind to a relay with no gateway route.
   // The later gateway link must propagate a route in both directions.
@@ -1905,6 +1929,7 @@ int main(int argc, char** argv) {
     test_parent_switch_keeps_downward_reachability();
     test_on_demand_discovery();
     test_flat_no_route_pull();
+    test_flat_pull_does_not_spend_attempts_without_neighbors();
     test_flat_relay_binds_before_gateway();
     test_early_hop_accept_before_data_callback();
     test_flat_node_ignores_route_request();

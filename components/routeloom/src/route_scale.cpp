@@ -969,9 +969,6 @@ void MeshNode::schedule_route_discovery(const MonotonicMs now_ms) noexcept {
   }
   discoveries_.for_each([&](DiscoveryState& state) {
     if (now_ms < state.next_request_ms || scheduler_.full()) return;
-    if (state.attempts != UINT8_MAX) ++state.attempts;
-    state.next_request_ms =
-        now_ms + std::min<std::uint32_t>(kDiscoveryMaxMs, kDiscoveryBaseMs * state.attempts);
     // Toward the gateway: the tree root (or the first ancestor that holds
     // the target in its subtree) turns the request down toward the target.
     // A node without an uplink (the gateway itself) cannot discover — its
@@ -984,14 +981,27 @@ void MeshNode::schedule_route_discovery(const MonotonicMs now_ms) noexcept {
           next_route_request_id_++,
           RouteAdvertisement{config_.node, config_.route_generation,
                              self_route_sequence_, 0}};
+      bool sent = false;
+      bool has_neighbor = false;
       neighbors_.for_each([&](const Neighbor& neighbor) {
-        if (neighbor.active && !scheduler_.full() &&
-            queue_route_request(neighbor.node, pull, now_ms)) {
+        if (!neighbor.active) return;
+        has_neighbor = true;
+        if (!scheduler_.full() && queue_route_request(neighbor.node, pull, now_ms)) {
+          sent = true;
           saturating_inc(route_scale_stats_.pulls_sent);
         }
       });
+      // No radio request was accepted: do not consume an RF retry or grow
+      // the backoff while the last neighbor is absent (or the queue is busy).
+      if (sent && state.attempts != UINT8_MAX) ++state.attempts;
+      state.next_request_ms = now_ms + (sent
+          ? std::min<std::uint32_t>(kDiscoveryMaxMs, kDiscoveryBaseMs * state.attempts)
+          : (has_neighbor ? 50 : kDiscoveryBaseMs));
       return;
     }
+    if (state.attempts != UINT8_MAX) ++state.attempts;
+    state.next_request_ms =
+        now_ms + std::min<std::uint32_t>(kDiscoveryMaxMs, kDiscoveryBaseMs * state.attempts);
     const NodeId next = scoped_uplink(kInvalidNodeId);
     if (next == kInvalidNodeId) return;
     const std::uint32_t request_id = next_route_request_id_++;
