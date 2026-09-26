@@ -197,6 +197,8 @@ pub struct Batch {
     /// ledger keeps every row, so the no-reissue history survives).
     pub devices_delete: Vec<u64>,
     pub ledger: Vec<LedgerRow>,
+    /// Append-only approval actor/policy record, keyed by operation id.
+    pub approval_audit: Vec<(u64, String)>,
     pub rrs: Vec<(u32, Vec<u8>)>,
     pub group_keys: Vec<GroupKeyRow>,
     /// Delete group keys with an epoch below this.
@@ -217,6 +219,7 @@ impl Batch {
             && self.devices.is_empty()
             && self.devices_delete.is_empty()
             && self.ledger.is_empty()
+            && self.approval_audit.is_empty()
             && self.rrs.is_empty()
             && self.group_keys.is_empty()
             && self.group_keys_below.is_none()
@@ -233,6 +236,7 @@ pub struct Snapshot {
     pub meta: BTreeMap<String, Vec<u8>>,
     pub devices: Vec<DeviceRow>,
     pub ledger: Vec<LedgerRow>,
+    pub approval_audit: Vec<(u64, String)>,
     pub rrs: Vec<(u32, Vec<u8>)>,
     pub group_keys: Vec<GroupKeyRow>,
     pub gk_rotation: Option<RotationRow>,
@@ -253,6 +257,8 @@ impl Snapshot {
             self.devices.retain(|d| &d.node != node);
         }
         self.ledger.extend(batch.ledger.iter().cloned());
+        self.approval_audit
+            .extend(batch.approval_audit.iter().cloned());
         for (epoch, object) in &batch.rrs {
             self.rrs.retain(|(e, _)| e != epoch);
             self.rrs.push((*epoch, object.clone()));
@@ -386,6 +392,8 @@ const SITE_SCHEMA: &str =
                 seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, node INTEGER NOT NULL,
                 kid BLOB NOT NULL, generation INTEGER NOT NULL, digest BLOB NOT NULL,
                 ms INTEGER NOT NULL, hash BLOB NOT NULL);
+             CREATE TABLE IF NOT EXISTS approval_audit (
+                operation_id INTEGER PRIMARY KEY, body TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS rrs (rs_epoch INTEGER PRIMARY KEY, object BLOB NOT NULL);
              CREATE TABLE IF NOT EXISTS group_keys (
                 gk_epoch INTEGER PRIMARY KEY, gk BLOB NOT NULL, state TEXT NOT NULL,
@@ -413,6 +421,7 @@ const SITE_TABLES: &[&str] = &[
     "meta",
     "devices",
     "ledger",
+    "approval_audit",
     "rrs",
     "group_keys",
     "gk_rotation",
@@ -490,7 +499,8 @@ impl SqliteSiteStore {
         }
         // Additive, versionless: old databases gain the recovery index
         // on open (no data moves, no version bump).
-        conn.execute_batch("CREATE INDEX IF NOT EXISTS ledger_node_idx ON ledger (node);")?;
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS ledger_node_idx ON ledger (node);
+            CREATE TABLE IF NOT EXISTS approval_audit (operation_id INTEGER PRIMARY KEY, body TEXT NOT NULL);")?;
         Ok(Self { conn })
     }
 
@@ -1022,6 +1032,12 @@ impl SiteStore for SqliteSiteStore {
                 ],
             )?;
         }
+        for (op_id, body) in &batch.approval_audit {
+            tx.execute(
+                "INSERT INTO approval_audit (operation_id, body) VALUES (?1, ?2)",
+                params![i(*op_id), body],
+            )?;
+        }
         for (kind, key, body) in &batch.docs {
             match body {
                 Some(json) => {
@@ -1102,6 +1118,7 @@ mod tests {
                     ms: 100,
                     hash: [2; 32],
                 }],
+                approval_audit: vec![(1, "{\"actor\":\"test\"}".into())],
                 rrs: vec![(5, vec![0xD2])],
                 group_keys: vec![GroupKeyRow {
                     epoch: 1,
@@ -1143,6 +1160,16 @@ mod tests {
         let second = SqliteSiteStore::open(&path).and_then(|mut s| s.load());
         assert!(second.is_err());
         drop(store);
+        let conn = Connection::open(&path).unwrap();
+        let audit: String = conn
+            .query_row(
+                "SELECT body FROM approval_audit WHERE operation_id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(audit.contains("\"actor\""));
+        drop(conn);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
