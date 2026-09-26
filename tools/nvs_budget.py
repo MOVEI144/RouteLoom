@@ -32,8 +32,17 @@ SECURITY_PARTITION = "rlsec"
 APPS = (
     "firmware/reference_node",
     "firmware/bridge_node",
+    "firmware/bench_node",
     "examples/espnow_node",
 )
+
+# Apps on the shared components/routeloom_node_boot bring-up no longer keep
+# the peer-capacity constant in their own main.cpp — it lives in the shared
+# source, which is what these builds actually compile.
+BOOT_SOURCE = {
+    "firmware/reference_node": "components/routeloom_node_boot/src/node_boot.cpp",
+    "firmware/bench_node": "components/routeloom_node_boot/src/node_boot.cpp",
+}
 
 HEADERS = {
     "counter": "components/routeloom/include/routeloom/counter_store.hpp",
@@ -166,7 +175,7 @@ def check_app(app: str, sources: dict[str, str], constants: dict[str, int]) -> d
         checks.append({"name": f"{app}:{name}", "passed": bool(ok), "detail": detail})
 
     defaults = sources[f"{app}/sdkconfig.defaults"]
-    main = sources[f"{app}/main/main.cpp"]
+    main = sources[BOOT_SOURCE.get(app, f"{app}/main/main.cpp")]
     check("custom_table_selected",
           re.search(r"^CONFIG_PARTITION_TABLE_CUSTOM=y$", defaults, re.M) is not None
           and re.search(r'^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"$',
@@ -280,6 +289,8 @@ def load_sources(root: Path, apps: tuple[str, ...] = APPS) -> dict[str, str]:
         for name in ("sdkconfig.defaults", "partitions.csv", "main/main.cpp"):
             path = root / app / name
             sources[f"{app}/{name}"] = path.read_text(encoding="utf-8") if path.exists() else ""
+    for extra in {BOOT_SOURCE[app] for app in apps if app in BOOT_SOURCE}:
+        sources[extra] = (root / extra).read_text(encoding="utf-8")
     return sources
 
 

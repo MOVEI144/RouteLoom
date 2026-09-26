@@ -1,0 +1,11 @@
+{
+  "name": "unknown_opcode",
+  "opcode": 127,
+  "flags": 0,
+  "run_uuid_hex": "00112233445566778899aabbccddeeff",
+  "sequence": 20,
+  "body_hex": "",
+  "wire_hex": "524c4231017f000000112233445566778899aabbccddeeff0000001400000000",
+  "expect": "ok",
+  "note": "well-formed header with an opcode the app does not know: decode succeeds, opcode_known is false"
+}

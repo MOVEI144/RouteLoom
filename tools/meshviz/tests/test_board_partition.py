@@ -8,8 +8,25 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class BoardPartitionTest(unittest.TestCase):
+    def test_shared_field_boot_uses_verified_identity(self):
+        boot = (ROOT / "components/routeloom_node_boot/src/node_boot.cpp").read_text()
+        gate = boot.index("resolve_field_identity(board_stores.config()")
+        self.assertLess(gate, boot.index("owner.begin(sdkv1_stores"))
+        self.assertLess(gate, boot.index("runtime.initialize("))
+        for binding in (
+            "owner_config.local_node = board.node;",
+            "config.node.network = board.network;",
+            "config.node.node = board.node;",
+            "config.channel = board.channel;",
+            "journal_config.network = board.network;",
+            "journal_config.target = board.node;",
+            "dev_config.psk = board_secrets->psk;",
+        ):
+            with self.subTest(binding=binding):
+                self.assertIn(binding, boot)
+
     def test_app_upgrade_preserves_individual_state(self):
-        for role in ("bridge_node", "reference_node"):
+        for role in ("bridge_node", "reference_node", "bench_node"):
             with self.subTest(role=role):
                 with (ROOT / "firmware" / role / "partitions.csv").open() as source:
                     entries = {
