@@ -983,6 +983,11 @@ class MeshNode {
   // not take the last one — it is reserved for Urgent).
   Status send_group(GroupId group, ByteView payload, const GroupSendOptions& options,
                     MonotonicMs now_ms, MessageId& id) noexcept;
+  // Admission precondition of send_group as a query: the gateway-scoped
+  // profile with this node as a route gateway. The USB bridge masks the
+  // group_delivery_v1 capability bit unless this holds, so the host never
+  // accepts a group.send the node would refuse per send.
+  bool group_origin_servable() const noexcept;
   // Latest summary of a group message this node sourced (state Empty /
   // reason NOT_FOUND once its record was evicted).
   GroupDeliveryResult group_delivery(const MessageId& id) const noexcept;

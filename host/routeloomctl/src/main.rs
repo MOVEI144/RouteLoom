@@ -4,10 +4,99 @@ compile_error!("routeloomctl v0.1 currently requires a Unix platform");
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 mod provision;
 mod provision_office;
+
+/// A query must never hang forever on a silent socket — but the read
+/// budget still covers the longest daemon long-poll (`group-get --wait-ms`
+/// up to 15 s) with margin. Streaming (`node-events`) clears the read
+/// deadline after the first line and blocks until interrupted instead.
+const CLI_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const CLI_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// True when an API1 `command`'s `response` line carries `"ok":false`.
+/// Only the envelope head is scanned — the verdict comes from the `ok`
+/// member right after `request_id`, so a payload string that mentions
+/// `"ok":false` cannot flip it. Legacy verbs have no envelope and never
+/// fail here; a line that is not an API1 envelope at all fails closed
+/// (success the CLI cannot confirm is not success).
+fn api_response_is_error(command: &str, response: &str) -> bool {
+    if !command.starts_with("API1 ") {
+        return false;
+    }
+    let Some(rest) = response
+        .trim_start()
+        .strip_prefix("{\"v\":1,\"request_id\":")
+    else {
+        return true;
+    };
+    let after_id = if let Some(rest) = rest.strip_prefix("null") {
+        rest
+    } else if rest.starts_with('"') {
+        // Request ids are `ctl-<pid>`; still skip escapes honestly.
+        let mut chars = rest[1..].chars();
+        let mut closed = false;
+        let mut bytes = 1;
+        while let Some(c) = chars.next() {
+            bytes += c.len_utf8();
+            if c == '\\' {
+                if let Some(escaped) = chars.next() {
+                    bytes += escaped.len_utf8();
+                }
+                continue;
+            }
+            if c == '"' {
+                closed = true;
+                break;
+            }
+        }
+        if !closed {
+            return true;
+        }
+        &rest[bytes..]
+    } else {
+        return true;
+    };
+    let Some(flag) = after_id.strip_prefix(",\"ok\":") else {
+        return true;
+    };
+    if flag.starts_with("false") {
+        true
+    } else if flag.starts_with("true") {
+        false
+    } else {
+        true
+    }
+}
+
+/// Sends one `command` line and reads the first response line, bounded by
+/// `read_timeout`/`write_timeout`. Returns the line plus the reader so the
+/// caller can keep streaming (`node-events`) after printing it.
+fn exchange_first(
+    socket: &Path,
+    command: &str,
+    read_timeout: Duration,
+    write_timeout: Duration,
+) -> Result<(String, BufReader<UnixStream>), Box<dyn std::error::Error>> {
+    let mut stream = UnixStream::connect(socket)?;
+    stream.set_write_timeout(Some(write_timeout))?;
+    stream.set_read_timeout(Some(read_timeout))?;
+    stream.write_all(command.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+    reader.read_line(&mut response)?;
+    if response.is_empty() {
+        return Err(
+            io::Error::new(io::ErrorKind::UnexpectedEof, "daemon closed connection").into(),
+        );
+    }
+    Ok((response, reader))
+}
 
 fn usage() {
     eprintln!("Read-only daemon diagnostics: adapter | events | deliveries");
@@ -358,22 +447,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("invalid command".into());
         }
     };
-    let mut stream = UnixStream::connect(socket)?;
-    stream.write_all(command.as_bytes())?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
-    let mut reader = BufReader::new(stream);
-    let mut response = String::new();
-    reader.read_line(&mut response)?;
-    if response.is_empty() {
-        return Err(
-            io::Error::new(io::ErrorKind::UnexpectedEof, "daemon closed connection").into(),
-        );
-    }
+    let streaming = remaining.first().map(String::as_str) == Some("node-events");
+    let (response, mut reader) =
+        exchange_first(&socket, &command, CLI_READ_TIMEOUT, CLI_WRITE_TIMEOUT)?;
     print!("{response}");
+    // The JSON stays on stdout either way; an API error only flips the
+    // exit code, so scripts can rely on it without parsing.
+    if api_response_is_error(&command, &response) {
+        return Err("daemon answered an API error (response printed above)".into());
+    }
     // Streaming verbs keep the connection open: every further line is one
-    // subscription notification, printed as it arrives.
-    if remaining.first().map(String::as_str) == Some("node-events") {
+    // subscription notification, printed as it arrives. The first line met
+    // the query deadline; the tail waits until interrupted.
+    if streaming {
+        reader.get_mut().set_read_timeout(None)?;
         let stdout = io::stdout();
         for line in reader.lines() {
             let mut out = stdout.lock();
@@ -1538,6 +1625,119 @@ fn group_get_command(args: &[String]) -> Result<String, Box<dyn std::error::Erro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixListener;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Unique socket path per test (parallel tests must not share one).
+    fn test_socket_path(tag: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "routeloomctl-test-{}-{}-{tag}.sock",
+            std::process::id(),
+            id
+        ))
+    }
+
+    /// Serves one connection: reads the command line, then runs `answer`
+    /// with the connected stream. Returns the path to query.
+    fn serve_once(tag: &str, answer: impl FnOnce(UnixStream) + Send + 'static) -> PathBuf {
+        let path = test_socket_path(tag);
+        let listener = UnixListener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            // Read the command line, then answer.
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(!line.is_empty());
+            answer(stream);
+        });
+        path
+    }
+
+    #[test]
+    fn api_error_envelope_is_detected() {
+        let api = "API1 {\"v\":1}";
+        assert!(api_response_is_error(
+            api,
+            "{\"v\":1,\"request_id\":\"ctl-9\",\"ok\":false,\"error\":{\"code\":\"NOT_FOUND\",\"detail\":{\"message\":\"nope\"},\"retryable\":false}}\n"
+        ));
+        assert!(api_response_is_error(
+            api,
+            "{\"v\":1,\"request_id\":null,\"ok\":false,\"error\":{\"code\":\"INVALID_REQUEST\",\"detail\":{\"message\":\"request exceeds 8192 bytes\"},\"retryable\":false}}\n"
+        ));
+        assert!(!api_response_is_error(
+            api,
+            "{\"v\":1,\"request_id\":\"ctl-9\",\"ok\":true,\"result\":{}}\n"
+        ));
+        // A payload that mentions `"ok":false` must not flip the verdict.
+        assert!(!api_response_is_error(
+            api,
+            "{\"v\":1,\"request_id\":\"ctl-9\",\"ok\":true,\"result\":{\"note\":\"say \\\"ok\\\":false\"}}\n"
+        ));
+        // Legacy verbs have no envelope and never fail here.
+        assert!(!api_response_is_error(
+            "STATUS",
+            "{\"connected\":true,\"ok\":false}\n"
+        ));
+        // Not an envelope at all: fail closed.
+        assert!(api_response_is_error(api, "{\"error\":\"broken\"}\n"));
+        assert!(api_response_is_error(api, "garbage\n"));
+    }
+
+    #[test]
+    fn error_envelope_round_trip_is_readable() {
+        let path = serve_once("api-error", |stream| {
+            let mut stream = stream;
+            stream
+                .write_all(
+                    b"{\"v\":1,\"request_id\":\"ctl-9\",\"ok\":false,\"error\":{\"code\":\"NOT_FOUND\",\"detail\":{\"message\":\"nope\"},\"retryable\":false}}\n",
+                )
+                .unwrap();
+        });
+        let command = operation_get_request("abababababababababababababababab:0000000000000009");
+        let (response, _) = exchange_first(
+            &path,
+            &command,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(response.contains("\"code\":\"NOT_FOUND\""), "{response}");
+        assert!(api_response_is_error(&command, &response));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn silent_socket_times_out_instead_of_hanging() {
+        let path = serve_once("silent", |_| {
+            // Never answer: the query must time out, not hang.
+            std::thread::sleep(Duration::from_secs(30));
+        });
+        let start = std::time::Instant::now();
+        let error = exchange_first(
+            &path,
+            "STATUS",
+            Duration::from_millis(100),
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "query hung: {:?}",
+            start.elapsed()
+        );
+        let kind = error
+            .downcast_ref::<io::Error>()
+            .map(io::Error::kind)
+            .unwrap_or(io::ErrorKind::Other);
+        assert!(
+            matches!(kind, io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock),
+            "{error:?}"
+        );
+        std::fs::remove_file(&path).ok();
+    }
 
     #[test]
     fn receive_builds_api1_line() {

@@ -1563,7 +1563,10 @@ fn adapter_read_loop(
                 ))
             }
             Ok(count) => {
-                for result in decoder.push(&buffer[..count]) {
+                // Timed decode: a partial frame stalled past one second is
+                // dropped before these bytes, so it can never glue onto a
+                // later frame (usb-protocol.md §framing, firmware rule).
+                for result in decoder.push_timed(&buffer[..count], mono_ms()) {
                     match result {
                         Ok(frame) => {
                             state.rx_frames.fetch_add(1, Ordering::Relaxed);

@@ -102,6 +102,16 @@ Status UsbBridge::attach_group() noexcept {
   if (config_.mesh == nullptr) {
     return Status::error(StatusCode::InvalidState, "group needs mesh");
   }
+  // Group delivery rides the gateway tree: a node that cannot source one
+  // (flat profile, or a scoped node that is no route gateway) must not
+  // advertise group_delivery_v1 — the host would accept group.send and
+  // every send would fail. The Kconfig bitmap is a request; servability
+  // decides, so clear the bit (success: the family then answers
+  // Unsupported at the gate) instead of failing the boot.
+  if (!config_.mesh->group_origin_servable()) {
+    config_.capability &= ~kCapGroupDeliveryV1;
+    return Status::success();
+  }
   config_.capability |= kCapGroupDeliveryV1;
   return Status::success();
 }

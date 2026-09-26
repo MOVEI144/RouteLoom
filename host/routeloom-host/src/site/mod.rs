@@ -332,6 +332,16 @@ pub enum DecisionMode {
     Closed,
 }
 
+/// One `join.policy.set` patch (07 §2): only `Some` fields change, the
+/// rest stay at whatever the policy holds when the patch applies.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PolicyPatch {
+    pub zero_touch_open: Option<bool>,
+    pub decision_mode: Option<DecisionMode>,
+    pub decision_timeout_ms: Option<u16>,
+    pub pending_retry_after_s: Option<u32>,
+}
+
 /// `join.policy.*` (07 §2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct JoinPolicy {
@@ -4832,6 +4842,27 @@ impl SiteAuthority {
             .map_err(|e| store_failure(&e))?;
         self.policy = policy;
         Ok(policy.json())
+    }
+
+    /// Applies a partial `join.policy.set` patch onto the CURRENT policy:
+    /// read, patch, validate and commit happen under the one authority
+    /// lock the caller holds, so two concurrent partial updates from two
+    /// connections cannot lose each other's fields.
+    pub fn update_policy(&mut self, patch: &PolicyPatch) -> Result<String, SiteError> {
+        let mut policy = self.policy;
+        if let Some(zero_touch_open) = patch.zero_touch_open {
+            policy.zero_touch_open = zero_touch_open;
+        }
+        if let Some(decision_mode) = patch.decision_mode {
+            policy.decision_mode = decision_mode;
+        }
+        if let Some(decision_timeout_ms) = patch.decision_timeout_ms {
+            policy.decision_timeout_ms = decision_timeout_ms;
+        }
+        if let Some(pending_retry_after_s) = patch.pending_retry_after_s {
+            policy.pending_retry_after_s = pending_retry_after_s;
+        }
+        self.set_policy(policy)
     }
 
     // --- read side ------------------------------------------------------------------------------

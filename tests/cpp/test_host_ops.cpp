@@ -3246,6 +3246,59 @@ void test_bridge_group_send_and_final() {
   CHECK(world.n1.group_stats().sent == 1);
 }
 
+std::uint32_t hello_ack_capability(World& world, HostDriver& host, MonotonicMs now) {
+  std::array<std::uint8_t, 64> hello_body{};
+  write_u64(hello_body.data(), 0xC0FFEE);
+  hello_body[8] = 1;
+  hello_body[9] = 1;
+  const char* principal = "host-operator";
+  hello_body[10] = 13;
+  std::memcpy(hello_body.data() + 11, principal, 13);
+  world.feed(host.plain(FrameKind::Hello, 0, 500, ByteView{hello_body.data(), 24}), now);
+  world.drain(now);
+  if (world.device_sink.frames.size() != 1) return 0;
+  const auto& ack = world.device_sink.frames.back().frame;
+  if (ack.kind != FrameKind::HelloAck || ack.body.size != 53) return 0;
+  const std::uint32_t capability =
+      (static_cast<std::uint32_t>(ack.body.data[33]) << 24U) |
+      (static_cast<std::uint32_t>(ack.body.data[34]) << 16U) |
+      (static_cast<std::uint32_t>(ack.body.data[35]) << 8U) | ack.body.data[36];
+  world.device_sink.frames.clear();
+  return capability;
+}
+
+void test_bridge_group_capability_masked_when_unservable() {
+  // The admission predicate mirrors send_group: scoped profile AND this
+  // node a route gateway.
+  {
+    World flat;
+    CHECK(!flat.n1.group_origin_servable());
+    GroupWorld scoped;
+    CHECK(scoped.n1.group_origin_servable());
+    CHECK(!scoped.n2.group_origin_servable());  // scoped profile, not a gateway
+  }
+  // Flat node with the Kconfig bit (the DevRam 0x87 repro): HelloAck must
+  // not advertise group_delivery_v1 — the host would accept group.send
+  // and every send would fail.
+  {
+    World world(0x7 | kCapGroupDeliveryV1, /*scoped=*/false);
+    CHECK(world.bridge.attach_group().ok());
+    HostDriver host;
+    const std::uint32_t capability = hello_ack_capability(world, host, 1000);
+    CHECK(capability != 0);
+    CHECK((capability & kCapGroupDeliveryV1) == 0);
+    CHECK((capability & kCapHostOpsV1) != 0);  // only the unservable bit is masked
+  }
+  // Scoped gateway node with the Kconfig bit: the advertisement stays.
+  {
+    World world(0x7 | kCapGroupDeliveryV1, /*scoped=*/true);
+    CHECK(world.bridge.attach_group().ok());
+    HostDriver host;
+    const std::uint32_t capability = hello_ack_capability(world, host, 1000);
+    CHECK((capability & kCapGroupDeliveryV1) != 0);
+  }
+}
+
 void test_bridge_group_refusals() {
   // Without attach_group the family answers Unsupported and sends nothing.
   {
@@ -3270,10 +3323,13 @@ void test_bridge_group_refusals() {
           group_reason(reply) == "GROUP_UNSUPPORTED");
     CHECK(world.n1.group_stats().sent == 0);
   }
-  // Attached on a flat-profile node: the node refuses (no tree, no flood)
-  // and the refusal reason reaches the host.
-  {
-    World world;
+  // Attached on a flat-profile node (with or without the Kconfig bit —
+  // the DevRam 0x87 case): the bit is masked as unservable, so GROUP_SEND
+  // answers Unsupported at the gate and the mesh send is never attempted
+  // (no tree, no flood, no per-send refusal).
+  for (const std::uint32_t capability :
+       {0x3 | kCapHostOpsV1, 0x7 | kCapGroupDeliveryV1}) {
+    World world(capability, /*scoped=*/false);
     CHECK(world.bridge.attach_group().ok());
     MonotonicMs now = 1000;
     HostDriver host;
@@ -3289,7 +3345,8 @@ void test_bridge_group_refusals() {
     GroupStatusReply reply{};
     CHECK(decode_group_status_bytes(answer, reply));
     CHECK(reply.result == static_cast<std::uint16_t>(ConfigOpsResult::Unsupported) &&
-          group_reason(reply) == "GROUP_REQUIRES_GATEWAY_SCOPED");
+          group_reason(reply) == "GROUP_UNSUPPORTED");
+    CHECK(world.n1.group_stats().sent == 0);
   }
   // Source table full: Normal sends keep the Urgent reserve -> Busy.
   {
@@ -4277,6 +4334,7 @@ int main() {
   test_bridge_gateway_stale_session();
   test_group_ops_codecs();
   test_bridge_group_send_and_final();
+  test_bridge_group_capability_masked_when_unservable();
   test_bridge_group_refusals();
   test_config_trust_codecs();
   test_host_ops_sub_registry();

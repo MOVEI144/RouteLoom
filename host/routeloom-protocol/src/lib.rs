@@ -77,6 +77,9 @@ pub enum ProtocolError {
     CreditRegression,
     CreditExhausted,
     PrincipalTooLong,
+    /// A partial frame stalled past [`PARTIAL_FRAME_TIMEOUT_MS`] and was
+    /// discarded before the next input (firmware `PARTIAL_FRAME_TIMEOUT`).
+    PartialFrameTimeout,
 }
 
 impl fmt::Display for ProtocolError {
@@ -213,13 +216,50 @@ pub fn decode_frame(encoded_without_delimiter: &[u8]) -> Result<Frame, ProtocolE
     })
 }
 
+/// A partial frame with no new byte for this long is discarded before
+/// the next input is processed (usb-protocol.md §framing, same value as
+/// the firmware `kPartialFrameTimeoutMs`): a frame interrupted for more
+/// than a second never resumes.
+pub const PARTIAL_FRAME_TIMEOUT_MS: u64 = 1000;
+
 #[derive(Default)]
 pub struct StreamDecoder {
     pending: Vec<u8>,
     discarding: bool,
+    last_byte_ms: Option<u64>,
 }
 
 impl StreamDecoder {
+    /// Timed input: `now_ms` is monotonic (same axis as the firmware
+    /// decoder). A partial frame — or a discard run — stalled for
+    /// [`PARTIAL_FRAME_TIMEOUT_MS`] is dropped BEFORE the new bytes are
+    /// processed, so a stale fragment can never glue onto a later frame.
+    /// A dropped partial reports `PartialFrameTimeout` ahead of any
+    /// results from `input`, mirroring the firmware sink; a stale
+    /// discard run resyncs silently, as its overlength was already
+    /// reported. An empty `input` only runs the expiry (the periodic
+    /// tick for callers that have one).
+    pub fn push_timed(&mut self, input: &[u8], now_ms: u64) -> Vec<Result<Frame, ProtocolError>> {
+        let mut results = Vec::new();
+        let stalled = (!self.pending.is_empty() || self.discarding)
+            && self
+                .last_byte_ms
+                .is_some_and(|last| now_ms.saturating_sub(last) >= PARTIAL_FRAME_TIMEOUT_MS);
+        if stalled {
+            let had_partial = !self.pending.is_empty();
+            self.pending.clear();
+            self.discarding = false;
+            if had_partial {
+                results.push(Err(ProtocolError::PartialFrameTimeout));
+            }
+        }
+        if !input.is_empty() {
+            self.last_byte_ms = Some(now_ms);
+        }
+        results.extend(self.push(input));
+        results
+    }
+
     pub fn push(&mut self, input: &[u8]) -> Vec<Result<Frame, ProtocolError>> {
         let mut results = Vec::new();
         for byte in input {
@@ -247,6 +287,7 @@ impl StreamDecoder {
     pub fn reset(&mut self) {
         self.pending.clear();
         self.discarding = false;
+        self.last_byte_ms = None;
     }
 }
 
@@ -357,6 +398,42 @@ mod tests {
         credit.consume(10).unwrap();
         assert_eq!(credit.consume(1), Err(ProtocolError::CreditExhausted));
         assert_eq!(credit.available(), (0, 0));
+    }
+
+    #[test]
+    fn stale_partial_frame_is_dropped_before_later_input() {
+        // The review repro: a 4-byte fragment, 1.1 s of silence, then a
+        // full frame. The stale fragment must be dropped (reported once)
+        // and the later frame must decode — never glue together.
+        let frame = Frame {
+            kind: FrameKind::KeepAlive,
+            flags: 0,
+            session: 1,
+            request: 2,
+            body: vec![3],
+        };
+        let encoded = encode_frame(&frame).unwrap();
+        let mut decoder = StreamDecoder::default();
+        assert!(decoder.push_timed(&encoded[..4], 0).is_empty());
+        assert_eq!(
+            decoder.push_timed(&encoded, 1100),
+            vec![Err(ProtocolError::PartialFrameTimeout), Ok(frame.clone()),]
+        );
+        // Within the timeout the fragment still continues the frame.
+        let mut decoder = StreamDecoder::default();
+        assert!(decoder.push_timed(&encoded[..4], 0).is_empty());
+        assert_eq!(
+            decoder.push_timed(&encoded[4..], 999),
+            vec![Ok(frame.clone())]
+        );
+        // An empty input only runs the expiry tick.
+        let mut decoder = StreamDecoder::default();
+        assert!(decoder.push_timed(&encoded[..4], 0).is_empty());
+        assert_eq!(
+            decoder.push_timed(&[], 1000),
+            vec![Err(ProtocolError::PartialFrameTimeout)]
+        );
+        assert_eq!(decoder.push_timed(&encoded, 1000), vec![Ok(frame)]);
     }
 
     #[test]
