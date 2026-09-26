@@ -2198,6 +2198,23 @@ Status EspNowRuntime::release_driver_peer(const MacAddress& mac,
   return Status::success();
 }
 
+bool EspNowRuntime::release_transient_peer(TransientPeer& slot,
+                                           const NodeId node) noexcept {
+  // A re-auth exchange may leave transient bookkeeping beside a regular
+  // mapping for the same MAC. The regular record owns that physical driver
+  // peer; deleting it here leaves driver_registered=true but every later
+  // esp_now_send returns ESP_ERR_ESPNOW_NOT_FOUND.
+  portENTER_CRITICAL(&callback_lock_);
+  const Peer* regular = find_peer(slot.mac.bytes.data());
+  const bool transferred = regular != nullptr && regular->driver_registered;
+  if (transferred) slot.used = false;
+  portEXIT_CRITICAL(&callback_lock_);
+  if (transferred) return true;
+  if (!release_driver_peer(slot.mac, node)) return false;
+  slot.used = false;
+  return true;
+}
+
 void EspNowRuntime::release_autonomy_peer(Peer& peer,
                                           const MonotonicMs now) noexcept {
   if (peer.neighbor_added) {
@@ -2269,7 +2286,7 @@ void EspNowRuntime::reconcile_autonomy(const MonotonicMs now) noexcept {
     }
     NeighborPhase phase{};
     if (!discovery_->phase_of(slot.mac.bytes, phase)) {
-      if (release_driver_peer(slot.mac, kInvalidNodeId)) slot.used = false;
+      (void)release_transient_peer(slot, kInvalidNodeId);
       continue;
     }
     switch (phase) {
@@ -2292,13 +2309,13 @@ void EspNowRuntime::reconcile_autonomy(const MonotonicMs now) noexcept {
         }
         // peers_ partition full: do not park a bound peer in the transient
         // budget — release it and let wire sends surface PEER_CAPACITY.
-        if (release_driver_peer(slot.mac, node)) slot.used = false;
+        (void)release_transient_peer(slot, node);
         break;
       }
       default:
         // Conflict/Revoked (or a record the engine dropped): dead records
         // keep no driver peer.
-        if (release_driver_peer(slot.mac, kInvalidNodeId)) slot.used = false;
+        (void)release_transient_peer(slot, kInvalidNodeId);
         break;
     }
   }
