@@ -14,6 +14,8 @@ routeloom-peercred = { path = "../routeloom-peercred" }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "0.38.44", features = ["fs"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+zeroize = "1"
 
 [lints]
 workspace = true

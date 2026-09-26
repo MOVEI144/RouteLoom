@@ -594,7 +594,9 @@ dependencies = [
  "routeloom-json",
  "routeloom-peercred",
  "routeloom-provision",
+ "rusqlite",
  "rustix",
+ "zeroize",
 ]
 
 [[package]]
