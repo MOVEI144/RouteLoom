@@ -570,6 +570,13 @@ target_include_directories(routeloom_sdkv1_records_tests PRIVATE
 target_compile_options(routeloom_sdkv1_records_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_records_tests COMMAND routeloom_sdkv1_records_tests)
 
+add_executable(routeloom_board_config_tests test_board_config.cpp)
+target_link_libraries(routeloom_board_config_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_board_config_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/components/routeloom/include)
+target_compile_options(routeloom_board_config_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_board_config_tests COMMAND routeloom_board_config_tests)
+
 add_executable(routeloom_sdkv1_store_tests test_sdkv1_store.cpp)
 target_link_libraries(routeloom_sdkv1_store_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_sdkv1_store_tests PRIVATE
