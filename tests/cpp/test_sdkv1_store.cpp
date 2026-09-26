@@ -1679,6 +1679,35 @@ void test_resume2_uses() {
   }
 }
 
+void test_resume2_peer_churn_writes() {
+  // The eight RAM grants amortize repeated contacts with up to eight peers;
+  // cycling nine discards each unused remainder and incurs a write per use.
+  for (std::uint32_t peers : {1U, 8U, 9U}) {
+    FaultyResumeStorage2 storage(16);
+    ResumeCache2 cache(storage, 12, 4);
+    std::size_t indices[9]{};
+    for (std::uint32_t peer = 0; peer < peers; ++peer) {
+      CHECK_OK(cache.put(resume2_slot(100 + peer, 0, 1000), context()));
+      ResumeSlot2 slot{};
+      CHECK_OK(cache.find_by_peer(ResumePurpose::Link, 100 + peer, context(), slot,
+                                  indices[peer]));
+    }
+    const auto initial_writes = storage.write_calls;
+    for (std::uint32_t cycle = 0; cycle < 2; ++cycle) {
+      for (std::uint32_t peer = 0; peer < peers; ++peer) {
+        CHECK_OK(cache.reserve_uses(indices[peer], context(), 1000, false));
+      }
+    }
+    CHECK(storage.write_calls - initial_writes == (peers == 9 ? 18U : peers));
+    for (std::uint32_t peer = 0; peer < peers; ++peer) {
+      ResumeSlot2 slot{};
+      bool intact = true;
+      CHECK_OK(cache.read_at(indices[peer], slot, intact));
+      CHECK(intact && slot.reserved_uses == (peers == 9 ? 16U : 8U));
+    }
+  }
+}
+
 void test_resume2_power_cuts() {
   // Cut a use-grant at every byte: afterwards the slot grants at most the
   // uses its durable high-water proves — never more (V1-F05).
@@ -1975,6 +2004,7 @@ int main() {
   test_resume2_incremental_lookup();
   test_resume2_incremental_revocation_and_clear();
   test_resume2_uses();
+  test_resume2_peer_churn_writes();
   test_resume2_power_cuts();
   test_resume2_touch_wear_rule();
   test_local_revocation_basic();
