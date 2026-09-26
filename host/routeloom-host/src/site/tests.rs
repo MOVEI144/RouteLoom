@@ -24,6 +24,621 @@ use super::*;
 const T0: u64 = 1_790_000_000_000;
 const KGUARD: u32 = 501;
 
+#[test]
+fn lab_inventory_only_allows_the_bound_site_and_key() {
+    let mut setup = testkit::setup();
+    let node = 0x00a1_0000_0000_d0a1;
+    let device = SimDevice::new(node, 0xd1);
+    let kid = routeloom_provision::credential::credential_kid(&device.pubkey);
+    setup.purpose = SitePurpose::Development;
+    setup.lab = Some(LabBinding {
+        site_id: testkit::SITE,
+        site_ca_fingerprint: sha256(&testkit::site_ca_pub()),
+        device_ca_fingerprint: sha256(&setup.device_ca_pubkey),
+        sak_fingerprint: routeloom_provision::credential::credential_kid(&testkit::sak().pubkey()),
+        inventory_revision: 1,
+        inventory: vec![LabDevice {
+            node,
+            kid,
+            role: ROLE_ENDPOINT,
+        }],
+    });
+    let authority = SiteAuthority::open(
+        &setup,
+        Box::new(testkit::sak()),
+        Box::<MemoryStore>::default(),
+        T0,
+    )
+    .unwrap();
+    let service = SiteService::new(authority);
+    let transport = InProcessTransport::new();
+    service.set_transport(transport.clone());
+    service.with(|a| {
+        a.update_policy_at(
+            &PolicyPatch {
+                decision_mode: Some(DecisionMode::LabInventory),
+                ..PolicyPatch::default()
+            },
+            T0,
+        )
+        .unwrap()
+    });
+    let mut device = SimDevice::new(node, 0xd1);
+    let (_, outcome, events) = device.start(&service, &transport, T0);
+    assert!(
+        matches!(outcome, Outcome::Result(JoinResult::Allow { .. })),
+        "{events:?}"
+    );
+    assert!(events
+        .iter()
+        .any(|(_, fields)| fields.contains("\"internal_policy_v1\"")
+            && fields.contains("\"inventory_revision\":1")
+            && fields.contains("\"policy_generation\":1")));
+    let audit = service.with(|a| a.store.load().unwrap().approval_audit).0;
+    assert_eq!(audit.len(), 1);
+    assert!(audit[0].1.contains("\"internal_policy_v1\""));
+}
+
+#[test]
+fn lab_approval_audit_survives_sqlite_restart() {
+    let node = 0x00a1_0000_0000_d0a1;
+    let device = SimDevice::new(node, 0xd1);
+    let mut setup = testkit::setup();
+    setup.purpose = SitePurpose::Development;
+    setup.lab = Some(LabBinding {
+        site_id: testkit::SITE,
+        site_ca_fingerprint: sha256(&testkit::site_ca_pub()),
+        device_ca_fingerprint: sha256(&setup.device_ca_pubkey),
+        sak_fingerprint: routeloom_provision::credential::credential_kid(&testkit::sak().pubkey()),
+        inventory_revision: 1,
+        inventory: vec![LabDevice {
+            node,
+            kid: device.kid,
+            role: ROLE_ENDPOINT,
+        }],
+    });
+    let dir =
+        std::env::temp_dir().join(format!("routeloom-lab-audit-{}-{}", std::process::id(), T0));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let db = dir.join("site.db");
+    {
+        let store = SqliteSiteStore::open(&db).unwrap();
+        let service = SiteService::new(
+            SiteAuthority::open(&setup, Box::new(testkit::sak()), Box::new(store), T0).unwrap(),
+        );
+        let transport = InProcessTransport::new();
+        service.set_transport(transport.clone());
+        service.with(|a| {
+            a.update_policy_at(
+                &PolicyPatch {
+                    decision_mode: Some(DecisionMode::LabInventory),
+                    ..PolicyPatch::default()
+                },
+                T0,
+            )
+            .unwrap()
+        });
+        let mut device = SimDevice::new(node, 0xd1);
+        assert!(matches!(
+            device.start(&service, &transport, T0).1,
+            Outcome::Result(JoinResult::Allow { .. })
+        ));
+    }
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let body: String = conn
+        .query_row("SELECT body FROM approval_audit", [], |row| row.get(0))
+        .unwrap();
+    assert!(body.contains("\"internal_policy_v1\""));
+    assert!(body.contains("\"inventory_revision\":1"));
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn lab_policy_rejects_unbound_import_and_wrong_manifest() {
+    let setup = testkit::setup();
+    for purpose in [SitePurpose::Import, SitePurpose::Production] {
+        let mut managed = setup.clone();
+        managed.purpose = purpose;
+        let mut authority = SiteAuthority::open(
+            &managed,
+            Box::new(testkit::sak()),
+            Box::<MemoryStore>::default(),
+            T0,
+        )
+        .unwrap();
+        assert_eq!(
+            authority
+                .update_policy(&PolicyPatch {
+                    decision_mode: Some(DecisionMode::LabInventory),
+                    ..PolicyPatch::default()
+                })
+                .unwrap_err()
+                .code,
+            "INVALID_ARGUMENT"
+        );
+    }
+    let device = SimDevice::new(0x00a1_0000_0000_d0a1, 0xd1);
+    let mut lab = setup;
+    lab.purpose = SitePurpose::Development;
+    lab.lab = Some(LabBinding {
+        site_id: testkit::SITE,
+        site_ca_fingerprint: sha256(&testkit::site_ca_pub()),
+        device_ca_fingerprint: sha256(&lab.device_ca_pubkey),
+        sak_fingerprint: routeloom_provision::credential::credential_kid(&testkit::sak().pubkey()),
+        inventory_revision: 1,
+        inventory: vec![LabDevice {
+            node: device.node,
+            kid: device.kid,
+            role: ROLE_ENDPOINT,
+        }],
+    });
+    assert!(SiteAuthority::open(
+        &lab,
+        Box::new(testkit::sak()),
+        Box::<MemoryStore>::default(),
+        T0
+    )
+    .is_ok());
+    lab.lab.as_mut().unwrap().site_ca_fingerprint = [0; 32];
+    assert!(SiteAuthority::open(
+        &lab,
+        Box::new(testkit::sak()),
+        Box::<MemoryStore>::default(),
+        T0
+    )
+    .is_err());
+}
+
+#[test]
+fn lab_inventory_mismatch_and_closed_never_auto_allow() {
+    let node = 0x00a1_0000_0000_d0a1;
+    let device = SimDevice::new(node, 0xd1);
+    let mut setup = testkit::setup();
+    setup.purpose = SitePurpose::Development;
+    setup.lab = Some(LabBinding {
+        site_id: testkit::SITE,
+        site_ca_fingerprint: sha256(&testkit::site_ca_pub()),
+        device_ca_fingerprint: sha256(&setup.device_ca_pubkey),
+        sak_fingerprint: routeloom_provision::credential::credential_kid(&testkit::sak().pubkey()),
+        inventory_revision: 1,
+        inventory: vec![LabDevice {
+            node,
+            kid: device.kid,
+            role: ROLE_ENDPOINT,
+        }],
+    });
+    for (wrong_kid, wrong_role, closed) in [
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
+        let mut current = setup.clone();
+        if wrong_kid {
+            current.lab.as_mut().unwrap().inventory[0].kid = [1; 32];
+        }
+        if wrong_role {
+            current.lab.as_mut().unwrap().inventory[0].role = ROLE_RELAY;
+        }
+        let authority = SiteAuthority::open(
+            &current,
+            Box::new(testkit::sak()),
+            Box::<MemoryStore>::default(),
+            T0,
+        )
+        .unwrap();
+        let service = SiteService::new(authority);
+        let transport = InProcessTransport::new();
+        service.set_transport(transport.clone());
+        service.with(|a| {
+            a.update_policy_at(
+                &PolicyPatch {
+                    decision_mode: Some(if closed {
+                        DecisionMode::Closed
+                    } else {
+                        DecisionMode::LabInventory
+                    }),
+                    ..PolicyPatch::default()
+                },
+                T0,
+            )
+            .unwrap()
+        });
+        let mut device = SimDevice::new(node, 0xd1);
+        let (_, outcome, _) = device.start(&service, &transport, T0);
+        if closed {
+            assert!(matches!(
+                outcome,
+                Outcome::Result(JoinResult::PendingAssignment { .. })
+            ));
+        } else {
+            assert!(matches!(outcome, Outcome::Waiting));
+        }
+        assert_eq!(service.with(|a| a.devices.len()).0, 0);
+    }
+}
+
+#[test]
+fn lab_enrollment_expires_on_monotonic_clock_and_must_be_rearmed() {
+    let node = 0x00a1_0000_0000_d0a1;
+    let device = SimDevice::new(node, 0xd1);
+    let mut setup = testkit::setup();
+    setup.purpose = SitePurpose::Development;
+    setup.lab = Some(LabBinding {
+        site_id: testkit::SITE,
+        site_ca_fingerprint: sha256(&testkit::site_ca_pub()),
+        device_ca_fingerprint: sha256(&setup.device_ca_pubkey),
+        sak_fingerprint: routeloom_provision::credential::credential_kid(&testkit::sak().pubkey()),
+        inventory_revision: 1,
+        inventory: vec![LabDevice {
+            node,
+            kid: device.kid,
+            role: ROLE_ENDPOINT,
+        }],
+    });
+    let service = SiteService::new(
+        SiteAuthority::open(
+            &setup,
+            Box::new(testkit::sak()),
+            Box::<MemoryStore>::default(),
+            T0,
+        )
+        .unwrap(),
+    );
+    let transport = InProcessTransport::new();
+    service.set_transport(transport.clone());
+    service.with(|a| {
+        a.update_policy_at(
+            &PolicyPatch {
+                decision_mode: Some(DecisionMode::LabInventory),
+                ..PolicyPatch::default()
+            },
+            T0,
+        )
+        .unwrap()
+    });
+    service.tick(HostTime::sync(T0 + 3_600_001));
+    let mut device = SimDevice::new(node, 0xd1);
+    let (_, outcome, _) = device.start(&service, &transport, T0 + 3_600_001);
+    assert!(matches!(
+        outcome,
+        Outcome::Result(JoinResult::PendingAssignment { .. })
+    ));
+    assert!(
+        service
+            .with(|a| a.store.load().unwrap().approval_audit.is_empty())
+            .0
+    );
+    assert!(
+        service
+            .with(|a| a.policy_json().contains("\"lab_enrollment_active\":false"))
+            .0
+    );
+}
+
+struct FailLabApprovalStore {
+    inner: MemoryStore,
+    fail: Arc<AtomicBool>,
+    fail_discovery: bool,
+}
+
+impl SiteStore for FailLabApprovalStore {
+    fn load(&mut self) -> Result<Snapshot, StoreError> {
+        self.inner.load()
+    }
+    fn commit(&mut self, batch: &Batch) -> Result<(), StoreError> {
+        let target = if self.fail_discovery {
+            batch
+                .docs
+                .iter()
+                .any(|(kind, _, _)| *kind == store::DocKind::Discovered)
+        } else {
+            !batch.approval_audit.is_empty()
+        };
+        if target && self.fail.swap(false, Ordering::Relaxed) {
+            return Err(StoreError("injected approval commit failure".into()));
+        }
+        self.inner.commit(batch)
+    }
+    fn durable(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn lab_failed_commit_closes_automatic_enrollment_until_reopen() {
+    let node = 0x00a1_0000_0000_d0a1;
+    let device = SimDevice::new(node, 0xd1);
+    let mut setup = testkit::setup();
+    setup.purpose = SitePurpose::Development;
+    setup.lab = Some(LabBinding {
+        site_id: testkit::SITE,
+        site_ca_fingerprint: sha256(&testkit::site_ca_pub()),
+        device_ca_fingerprint: sha256(&setup.device_ca_pubkey),
+        sak_fingerprint: routeloom_provision::credential::credential_kid(&testkit::sak().pubkey()),
+        inventory_revision: 1,
+        inventory: vec![LabDevice {
+            node,
+            kid: device.kid,
+            role: ROLE_ENDPOINT,
+        }],
+    });
+    let fail = Arc::new(AtomicBool::new(true));
+    let authority = SiteAuthority::open(
+        &setup,
+        Box::new(testkit::sak()),
+        Box::new(FailLabApprovalStore {
+            inner: MemoryStore::default(),
+            fail: Arc::clone(&fail),
+            fail_discovery: false,
+        }),
+        T0,
+    )
+    .unwrap();
+    let service = SiteService::new(authority);
+    let transport = InProcessTransport::new();
+    service.set_transport(transport.clone());
+    service.with(|a| {
+        a.update_policy_at(
+            &PolicyPatch {
+                decision_mode: Some(DecisionMode::LabInventory),
+                ..Default::default()
+            },
+            T0,
+        )
+        .unwrap()
+    });
+    let mut device = SimDevice::new(node, 0xd1);
+    assert!(matches!(
+        device.start(&service, &transport, T0).1,
+        Outcome::Waiting
+    ));
+    assert!(!fail.load(Ordering::Relaxed));
+    assert!(service.with(|a| a.lab_write_poisoned).0);
+    assert!(
+        service
+            .with(|a| a.store.load().unwrap().approval_audit.is_empty())
+            .0
+    );
+    assert_eq!(
+        service
+            .with(|a| a.update_policy_at(
+                &PolicyPatch {
+                    decision_mode: Some(DecisionMode::LabInventory),
+                    ..Default::default()
+                },
+                T0 + 1
+            ))
+            .0
+            .unwrap_err()
+            .code,
+        "STORE_FAILURE"
+    );
+}
+
+#[test]
+fn lab_discovery_storage_failure_closes_enrollment_before_approval() {
+    let node = 0x00a1_0000_0000_d0a1;
+    let device = SimDevice::new(node, 0xd1);
+    let mut setup = testkit::setup();
+    setup.purpose = SitePurpose::Development;
+    setup.lab = Some(LabBinding {
+        site_id: testkit::SITE,
+        site_ca_fingerprint: sha256(&testkit::site_ca_pub()),
+        device_ca_fingerprint: sha256(&setup.device_ca_pubkey),
+        sak_fingerprint: routeloom_provision::credential::credential_kid(&testkit::sak().pubkey()),
+        inventory_revision: 1,
+        inventory: vec![LabDevice {
+            node,
+            kid: device.kid,
+            role: ROLE_ENDPOINT,
+        }],
+    });
+    let fail = Arc::new(AtomicBool::new(true));
+    let authority = SiteAuthority::open(
+        &setup,
+        Box::new(testkit::sak()),
+        Box::new(FailLabApprovalStore {
+            inner: MemoryStore::default(),
+            fail: Arc::clone(&fail),
+            fail_discovery: true,
+        }),
+        T0,
+    )
+    .unwrap();
+    let service = SiteService::new(authority);
+    let transport = InProcessTransport::new();
+    service.set_transport(transport.clone());
+    service.with(|a| {
+        a.update_policy_at(
+            &PolicyPatch {
+                decision_mode: Some(DecisionMode::LabInventory),
+                ..Default::default()
+            },
+            T0,
+        )
+        .unwrap()
+    });
+    let mut device = SimDevice::new(node, 0xd1);
+    assert!(!matches!(
+        device.start(&service, &transport, T0).1,
+        Outcome::Result(JoinResult::Allow { .. })
+    ));
+    assert!(!fail.load(Ordering::Relaxed));
+    assert!(service.with(|a| a.lab_write_poisoned).0);
+    assert!(
+        service
+            .with(|a| a.store.load().unwrap().approval_audit.is_empty())
+            .0
+    );
+}
+
+#[test]
+fn two_development_sites_with_one_node_never_share_inventory_kids() {
+    use routeloom_provision::sdkv1::cert::{cert_issue, CertClaims, CertType};
+    use routeloom_provision::signer::{test_keypair, FileRootSigner};
+    let node = 0x00a1_0000_0000_d0a1;
+    let device_a = SimDevice::new(node, 0xd1);
+    let mut a = testkit::setup();
+    a.purpose = SitePurpose::Development;
+    a.lab = Some(LabBinding {
+        site_id: testkit::SITE,
+        site_ca_fingerprint: sha256(&testkit::site_ca_pub()),
+        device_ca_fingerprint: sha256(&a.device_ca_pubkey),
+        sak_fingerprint: routeloom_provision::credential::credential_kid(&testkit::sak().pubkey()),
+        inventory_revision: 1,
+        inventory: vec![LabDevice {
+            node,
+            kid: device_a.kid,
+            role: ROLE_ENDPOINT,
+        }],
+    });
+    let site_b = 0x00b1_0000_0000_0001;
+    let device_ca_b =
+        FileRootSigner::from_secret(0x00ca_0000_0000_0002, &test_keypair(0xb1).0).unwrap();
+    // The initiator fixture anchors one Site CA; independent site/SAK and
+    // Device CA bindings still exercise cross-site inventory isolation.
+    let site_ca_b = FileRootSigner::from_secret(testkit::SITE_CA, &test_keypair(0x61).0).unwrap();
+    let sak_b = FileRootSigner::from_secret(site_b, &test_keypair(0xb3).0).unwrap();
+    let cert_b = cert_issue(
+        &CertClaims {
+            cert_type: CertType::Site,
+            issuer: site_ca_b.root_id(),
+            subject: site_b,
+            pubkey: sak_b.pubkey(),
+            network_low32: testkit::NETWORK_LOW,
+            site_epoch: testkit::SITE_EPOCH,
+            usage: 1,
+            serial: 1,
+            ..CertClaims::default()
+        },
+        &site_ca_b,
+    )
+    .unwrap();
+    let device_b = SimDevice::with_ca(node, 0xd2, &device_ca_b);
+    let b = SiteSetup {
+        site_cert: cert_b,
+        site_ca_pubkey: Some(site_ca_b.pubkey()),
+        device_ca_id: device_ca_b.root_id(),
+        device_ca_pubkey: device_ca_b.pubkey(),
+        channel: 1,
+        channel_epoch: 1,
+        gateways: a.gateways.clone(),
+        purpose: SitePurpose::Development,
+        lab: Some(LabBinding {
+            site_id: site_b,
+            site_ca_fingerprint: sha256(&site_ca_b.pubkey()),
+            device_ca_fingerprint: sha256(&device_ca_b.pubkey()),
+            sak_fingerprint: routeloom_provision::credential::credential_kid(&sak_b.pubkey()),
+            inventory_revision: 1,
+            inventory: vec![LabDevice {
+                node,
+                kid: device_b.kid,
+                role: ROLE_ENDPOINT,
+            }],
+        }),
+    };
+    for (setup, sak, mut device, allowed) in [
+        (a.clone(), testkit::sak(), SimDevice::new(node, 0xd1), true),
+        (
+            a.clone(),
+            testkit::sak(),
+            SimDevice::with_ca(node, 0xd2, &device_ca_b),
+            false,
+        ),
+        (a, testkit::sak(), SimDevice::new(node, 0xd2), false),
+        (b, sak_b, SimDevice::with_ca(node, 0xd2, &device_ca_b), true),
+    ] {
+        let service = SiteService::new(
+            SiteAuthority::open(&setup, Box::new(sak), Box::<MemoryStore>::default(), T0).unwrap(),
+        );
+        let transport = InProcessTransport::new();
+        service.set_transport(transport.clone());
+        service.with(|authority| {
+            authority
+                .update_policy_at(
+                    &PolicyPatch {
+                        decision_mode: Some(DecisionMode::LabInventory),
+                        ..PolicyPatch::default()
+                    },
+                    T0,
+                )
+                .unwrap()
+        });
+        let (_, outcome, _) = device.start(&service, &transport, T0);
+        assert_eq!(
+            matches!(outcome, Outcome::Result(JoinResult::Allow { .. })),
+            allowed
+        );
+    }
+}
+
+#[test]
+fn lab_revoked_node_is_not_reapproved_from_inventory() {
+    let node = 0x00a1_0000_0000_d0a1;
+    let mut device = SimDevice::new(node, 0xd1);
+    let mut setup = testkit::setup();
+    setup.purpose = SitePurpose::Development;
+    setup.lab = Some(LabBinding {
+        site_id: testkit::SITE,
+        site_ca_fingerprint: sha256(&testkit::site_ca_pub()),
+        device_ca_fingerprint: sha256(&setup.device_ca_pubkey),
+        sak_fingerprint: routeloom_provision::credential::credential_kid(&testkit::sak().pubkey()),
+        inventory_revision: 1,
+        inventory: vec![LabDevice {
+            node,
+            kid: device.kid,
+            role: ROLE_ENDPOINT,
+        }],
+    });
+    let service = SiteService::new(
+        SiteAuthority::open(
+            &setup,
+            Box::new(testkit::sak()),
+            Box::<MemoryStore>::default(),
+            T0,
+        )
+        .unwrap(),
+    );
+    let transport = InProcessTransport::new();
+    service.set_transport(transport.clone());
+    service.with(|a| {
+        a.update_policy_at(
+            &PolicyPatch {
+                decision_mode: Some(DecisionMode::LabInventory),
+                ..PolicyPatch::default()
+            },
+            T0,
+        )
+        .unwrap()
+    });
+    let (_, outcome, _) = device.start(&service, &transport, T0);
+    assert!(matches!(outcome, Outcome::Result(JoinResult::Allow { .. })));
+    service
+        .with(|a| {
+            a.revoke(
+                KGUARD,
+                RevokeRequest {
+                    device: node,
+                    expected_generation: 1,
+                    reason: RevocationReason::Lost,
+                    key: "lab-revoke".into(),
+                },
+                HostTime::sync(T0 + 1),
+            )
+        })
+        .0
+        .unwrap();
+    let mut rebooted = SimDevice::new(node, 0xd1);
+    let (_, outcome, _) = rebooted.start(&service, &transport, T0 + 10_000);
+    assert!(!matches!(
+        outcome,
+        Outcome::Result(JoinResult::Allow { .. })
+    ));
+    assert!(!service.with(|a| a.devices[&node].member).0);
+}
+
 fn service_with(store: Box<dyn SiteStore>) -> (SiteService, Arc<InProcessTransport>) {
     let service = SiteService::new(testkit::authority(store, T0));
     let transport = InProcessTransport::new();

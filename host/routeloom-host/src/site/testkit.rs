@@ -80,6 +80,8 @@ pub fn setup() -> SiteSetup {
         channel: 1,
         channel_epoch: 1,
         gateways: vec![GATEWAY],
+        lab: None,
+        purpose: super::SitePurpose::Import,
     }
 }
 
