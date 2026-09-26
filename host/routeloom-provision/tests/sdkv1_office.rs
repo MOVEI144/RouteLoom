@@ -25,7 +25,7 @@ use routeloom_provision::sdkv1::identity::{
 };
 use routeloom_provision::sdkv1::office::{
     identity_build_injected, identity_bundle_json, inventory_file_json, inventory_json,
-    IdentityPlan, INVENTORY_FORMAT,
+    IdentityPlan, INVENTORY_FORMAT, OFFICE_STATUS_ISSUED,
 };
 use routeloom_provision::sdkv1::pop::{pop_challenge, pop_sign, pop_verify};
 use routeloom_provision::sdkv1::rlsec::{rlsec_identity_readback, rlsec_identity_set};
@@ -493,11 +493,17 @@ fn inventory_file_is_the_formal_record() {
     )
     .unwrap();
     let devcert = devcert_issue(&device_ca, &key, &golden_profile()).unwrap();
-    let file = routeloom_json::parse(&inventory_file_json(&devcert).unwrap()).unwrap();
+    let file = routeloom_json::parse(&inventory_file_json(&devcert, OFFICE_STATUS_ISSUED).unwrap())
+        .unwrap();
     assert_eq!(
         file.get("format").and_then(|v| v.as_str()),
         Some(INVENTORY_FORMAT)
     );
+    assert_eq!(
+        file.get("office_status").and_then(|v| v.as_str()),
+        Some(OFFICE_STATUS_ISSUED)
+    );
+    assert!(inventory_file_json(&devcert, "bogus").is_err());
     // Same record as the stdout line, derived from the DevCert alone.
     let line = routeloom_json::parse(&inventory_json(&devcert).unwrap()).unwrap();
     for field in [
@@ -510,7 +516,7 @@ fn inventory_file_is_the_formal_record() {
     ] {
         assert_eq!(file.get(field), line.get(field), "{field}");
     }
-    assert!(inventory_file_json(b"not a certificate").is_err());
+    assert!(inventory_file_json(b"not a certificate", OFFICE_STATUS_ISSUED).is_err());
 }
 
 #[test]
