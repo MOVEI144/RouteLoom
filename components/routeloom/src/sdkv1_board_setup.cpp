@@ -111,7 +111,7 @@ struct Line {
 
 Line split_line(const ByteView line) noexcept {
   Line out{};
-  if (line.data == nullptr || line.size == 0 || line.size > kMaintenanceLineMax) {
+  if (line.data == nullptr || line.size == 0 || line.size > kBoardSetupLineMax) {
     return out;
   }
   if (line.data[line.size - 1] == ' ') return out;

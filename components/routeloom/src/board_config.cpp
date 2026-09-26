@@ -77,7 +77,8 @@ const sdkv1::SealedRecordFormat kFormat{kMagic, kSeal, kBoardConfigSlotBytes,
 }  // namespace
 
 Status board_config_fields_valid(const BoardConfig& c) noexcept {
-  if (reserved_node_id(c.node) || c.chip == 0 ||
+  if (reserved_node_id(c.node) || c.chip < kBoardChipEsp32C3 ||
+      c.chip > kBoardChipEsp32C6 ||
       (c.sta_mac[0] & 1U) != 0 ||
       (c.sta_mac == std::array<std::uint8_t, 6>{}) ||
       (c.role != BoardRole::Bridge && c.role != BoardRole::Reference) ||

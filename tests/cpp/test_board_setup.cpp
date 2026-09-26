@@ -414,6 +414,23 @@ void test_console_guards() {
     CHECK(run(bench.console, "benchcfg") == "ERR invalid_argument");
     CHECK(run(bench.console, "wrenchcfg status") == "ERR invalid_argument");
   }
+  // The declared 2 KiB staging limit must fit on one setup-console line.
+  {
+    BoardBench bench;
+    const std::vector<std::uint8_t> max_doc(sdkv1::kBoardSetupDocMax, 0);
+    CHECK(run(bench.console, "benchcfg stage " + hex_encode(max_doc)) ==
+          "OK staged bytes=2048");
+    CHECK(run(bench.console, "benchcfg validate") == "ERR invalid_argument");
+  }
+  // A syntactically valid document cannot name an unsupported chip.
+  {
+    BoardBench bench;
+    const auto doc = build_doc(kBoardNode, kBoardMac, 0x7f,
+                               BoardRole::Reference, BoardSecurity::Member, 6, 42);
+    CHECK(run(bench.console, "benchcfg stage " + hex_encode(doc)) ==
+          "OK staged bytes=42");
+    CHECK(run(bench.console, "benchcfg validate") == "ERR invalid_argument");
+  }
   // A document naming a different profile/MAC than this image's cannot
   // commit (§4.2): the setup image catches what the field gate would.
   {

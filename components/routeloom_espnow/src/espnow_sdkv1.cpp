@@ -28,6 +28,7 @@ constexpr char kTag[] = "RouteLoomSdkv1";
 // The console task owns the engine's worst-case ~4 KiB frame plus the USB
 // driver calls; 8 KiB leaves headroom without touching the main task.
 constexpr std::uint32_t kConsoleTaskStack = 8192;
+static_assert(sdkv1::kMaintenanceLineMax >= sdkv1::kBoardSetupLineMax);
 
 // This translation unit links into field images too, so a plain static
 // would spend DRAM-tight .bss on a console-only store; the guarded C3

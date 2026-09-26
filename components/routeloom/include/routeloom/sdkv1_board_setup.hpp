@@ -45,6 +45,8 @@ namespace routeloom::sdkv1 {
 // The staged public document bound (design-devflow §4.1: "小さい
 // （≤2 KiB）binary document"). The v1 RLC1 layout itself is 42 bytes.
 constexpr std::size_t kBoardSetupDocMax = 2048;
+constexpr std::size_t kBoardSetupLineMax = sizeof("benchcfg stage ") - 1 +
+                                           2 * kBoardSetupDocMax;
 constexpr std::size_t kBoardDocV1Bytes = 42;
 
 // RLC1 document layout (42 B, big-endian like the records):
