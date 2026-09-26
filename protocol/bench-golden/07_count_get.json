@@ -1,0 +1,11 @@
+{
+  "name": "count_get",
+  "opcode": 33,
+  "flags": 0,
+  "run_uuid_hex": "00112233445566778899aabbccddeeff",
+  "sequence": 9,
+  "body_hex": "",
+  "wire_hex": "524c42310121000000112233445566778899aabbccddeeff0000000900000000",
+  "expect": "ok",
+  "note": "ask for the header run's reception state"
+}

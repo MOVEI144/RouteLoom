@@ -1,0 +1,3 @@
+# Same C5 profile as reference_node: bounded duplicate evidence (leaf dedup)
+# keeps the HP SRAM headroom the bench app increment consumes.
+CONFIG_ROUTELOOM_DEDUP_PROFILE_LEAF=y
