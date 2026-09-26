@@ -1302,13 +1302,11 @@ void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
   // Binding generations advance independently on each side's re-auth: a
   // peer at a NEWER epoch proves its record moved forward — adopt that
   // epoch so a re-announced peer can never wedge the exchange (02 §9).
-  // A strictly-older generation is stale-epoch evidence and still rejects.
+  // A lower local counter on an authenticated peer can result from an
+  // independent re-authentication. Reply with our current generation so the
+  // peer can catch up; only a valid binding can reach this handler.
   if (probe.binding_generation.value > neighbor.generation.value) {
     neighbor.generation = probe.binding_generation;
-  } else if (probe.binding_generation.value < neighbor.generation.value) {
-    ++stats_.kind_rejects;
-    reject_event("PROBE_GEN_MISMATCH", neighbor.node);
-    return;
   }
   // An authenticated probe is liveness evidence: refresh the lease, re-arm
   // the bounded Stale re-probe budget and reply.

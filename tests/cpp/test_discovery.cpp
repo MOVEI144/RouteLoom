@@ -1106,6 +1106,61 @@ void test_stale_reprobe_recovers() {
   CHECK(a.engine.data_permitted(b.mac));
 }
 
+// An authenticated peer may have a lower local binding counter after an
+// independent re-authentication. Its probe still needs a Result carrying our
+// current generation so it can advance rather than losing its route.
+void test_older_peer_probe_gets_current_generation_result() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, true);
+  Unit& b = world.add(2, 0xB2, true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+
+  BindingGeneration original{};
+  CHECK(b.engine.binding_generation_of(1, original));
+  autonomy::NeighborProbePayload probe{};
+  probe.binding_generation = BindingGeneration{original.value + 1};
+  probe.probe_sequence = 901;
+  probe.sent_ms = world.medium.now;
+  probe.requested_lease_ms = 30000;
+  autonomy::EncodedPayload encoded{};
+  CHECK_OK(autonomy::neighbor_probe_encode(probe, encoded));
+  b.engine.on_wire_rx(a.mac, FrameType::NeighborProbe, encoded.view(),
+                      world.medium.now);
+  BindingGeneration current{};
+  CHECK(b.engine.binding_generation_of(1, current));
+  CHECK(current.value == original.value + 1);
+
+  world.medium.drop_wire = true;
+  world.medium.drop_rld1 = true;
+  world.run(31000);
+  NeighborPhase phase{};
+  CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Stale);
+  const std::size_t before = b.port.count_wire(FrameType::NeighborResult);
+  probe.binding_generation = original;
+  probe.probe_sequence = 902;
+  CHECK_OK(autonomy::neighbor_probe_encode(probe, encoded));
+  b.engine.on_wire_rx(a.mac, FrameType::NeighborProbe, encoded.view(),
+                      world.medium.now);
+  CHECK(b.port.count_wire(FrameType::NeighborResult) == before + 1);
+  if (b.port.count_wire(FrameType::NeighborResult) > before) {
+    const auto sent = std::find_if(b.port.sent.rbegin(), b.port.sent.rend(),
+                                   [](const TestPort::Sent& s) {
+                                     return s.wire && s.kind == FrameType::NeighborResult;
+                                   });
+    CHECK(sent != b.port.sent.rend());
+    autonomy::NeighborResultPayload result{};
+    if (sent != b.port.sent.rend()) {
+      CHECK_OK(autonomy::neighbor_result_decode(
+          ByteView{sent->bytes.data(), sent->bytes.size()}, result));
+    }
+    CHECK(result.binding_generation == current);
+    CHECK(result.probe_sequence == probe.probe_sequence);
+  }
+}
+
 // The re-probe lane is strictly bounded (02 §6): exactly
 // stale_reprobe_attempts probes at stale_reprobe_ms spacing, then dormancy
 // until fresh RX evidence re-arms the budget.
@@ -1655,6 +1710,7 @@ int main() {
   test_suspend_revoke();
   test_candidate_ttl();
   test_stale_reprobe_recovers();
+  test_older_peer_probe_gets_current_generation_result();
   test_stale_reprobe_bounded();
   test_stale_reprobe_never_targets_dead();
   test_stranded_rediscovery_rebinds();
