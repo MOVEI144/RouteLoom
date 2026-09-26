@@ -139,6 +139,7 @@ class BenchApp final : public NodeObserver {
   // A generator run lives at most this long regardless of pace (design
   // §5.2: 64 packets or 60 s, whichever first).
   static constexpr std::uint32_t kGeneratorMaxDurationMs = 60000;
+  static constexpr std::uint32_t kMaxFaultDurationMs = 60000;
   // An echo/counter run with no traffic for this long retires to the
   // tombstone ring; further packets for it are late, never a restart.
   static constexpr std::uint32_t kRunIdleMs = 60000;
@@ -148,6 +149,10 @@ class BenchApp final : public NodeObserver {
   static constexpr std::uint32_t kRollcallJitterMs = 200;
 
   explicit BenchApp(const BenchConfig& config) noexcept;
+
+  // Apply the image/board settings after platform initialization, before
+  // traffic starts. Firmware digests are unavailable during static init.
+  void configure(const BenchConfig& config) noexcept { config_ = config; }
 
   // The node must outlive the app. Call before traffic; boot is read from
   // node.config() at use time so member adoption can re-bind it.
@@ -193,6 +198,7 @@ class BenchApp final : public NodeObserver {
     std::array<std::uint8_t, kMaxApplicationPayload> buf{};
     std::uint8_t len{0};
     bool used{false};
+    bool reset_ack{false};
   };
 
   struct DeliveryEvent {
@@ -314,6 +320,10 @@ class BenchApp final : public NodeObserver {
                               MonotonicMs now_ms) noexcept;
   void handle_peer_send_stop(const RxEntry& entry, const Message& msg,
                              MonotonicMs now_ms) noexcept;
+  void handle_peer_send_status(const RxEntry& entry, const Message& msg,
+                               MonotonicMs now_ms) noexcept;
+  void fill_generator_status(const RunUuid& run,
+                             PeerSendStatusBody& reply) const noexcept;
   void handle_counter_reset(const RxEntry& entry, const Message& msg,
                             MonotonicMs now_ms) noexcept;
   void handle_fault_set(const RxEntry& entry, const Message& msg,
@@ -324,7 +334,8 @@ class BenchApp final : public NodeObserver {
   bool enqueue_reply(NodeId destination, std::uint8_t opcode,
                      std::uint16_t flags, const RunUuid& run,
                      std::uint32_t sequence, ByteView body,
-                     MonotonicMs not_before, MonotonicMs now_ms) noexcept;
+                     MonotonicMs not_before, MonotonicMs now_ms,
+                     bool reset_ack = false) noexcept;
   RunRecord* find_run(const RunUuid& uuid) noexcept;
   const RunRecord* find_run(const RunUuid& uuid) const noexcept;
   RunRecord* open_run(const RunUuid& uuid, std::uint32_t seq,
@@ -355,7 +366,13 @@ class BenchApp final : public NodeObserver {
   RollcallTrack rollcall_{};
   Faults faults_{};
   bool reset_armed_{false};
+  bool reset_pending_{false};
+  bool reset_ack_submitted_{false};
+  bool reset_ack_result_pending_{false};
+  std::uint32_t reset_delay_ms_{0};
   MonotonicMs reset_at_ms_{0};
+  MessageId reset_ack_id_{};
+  DeliveryState reset_ack_delivery_{DeliveryState::Empty};
   RxEntry rx_[kRxQueueDepth];
   ReplyEntry replies_[kReplyQueueDepth];
   DeliveryEvent deliveries_[kDeliveryEventDepth];

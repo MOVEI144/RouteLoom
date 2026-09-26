@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
+#include "routeloom/admission.hpp"
 #include "routeloom/group.hpp"
 
 namespace routeloom::bench {
@@ -37,9 +38,7 @@ std::uint64_t BenchApp::boot_incarnation() const noexcept {
 }
 
 bool BenchApp::authorized(NodeId origin) const noexcept {
-  if (config_.controller != kInvalidNodeId && origin == config_.controller) {
-    return true;
-  }
+  if (config_.controller != kInvalidNodeId) return origin == config_.controller;
   // Member sites: the first adopted route gateway is the bridge that hosts
   // the authority; nothing else may drive control commands.
   const NodeId gateway =
@@ -58,6 +57,22 @@ void BenchApp::on_group_message(const GroupMessageInfo& info,
 }
 
 void BenchApp::on_delivery(const DeliveryResult& result) noexcept {
+  switch (result.state) {
+    case DeliveryState::Delivered:
+    case DeliveryState::Failed:
+    case DeliveryState::Expired:
+    case DeliveryState::CancelledBeforeTx:
+    case DeliveryState::Indeterminate:
+      break;
+    default:
+      return;
+  }
+  if (reset_pending_ && reset_ack_submitted_ && result.id == reset_ack_id_) {
+    reset_ack_delivery_ = result.state;
+    reset_ack_result_pending_ = true;
+    return;
+  }
+  if (!generator_.inflight || result.id != generator_.inflight_id) return;
   for (DeliveryEvent& event : deliveries_) {
     if (!event.used) {
       event.id = result.id;
@@ -138,13 +153,28 @@ void BenchApp::dispatch(const RxEntry& entry, const Message& msg,
                         MonotonicMs now_ms) noexcept {
   // Replies are terminal traffic: a peer's reply never starts work here.
   // This is the "no echoing replies" rule for every reply opcode at once.
-  if ((msg.flags & kFlagResponse) != 0 || opcode_is_reply(msg.opcode)) {
+  if ((msg.flags & kFlagResponse) != 0 ||
+      (opcode_is_reply(msg.opcode) &&
+       msg.opcode != static_cast<std::uint8_t>(Opcode::PeerSendStatus))) {
     ++stats_.responses_seen;
     return;
   }
   if (!opcode_known(msg.opcode)) {
     ++stats_.unknown_opcode;
     return;
+  }
+  if (entry.is_group && msg.opcode != static_cast<std::uint8_t>(Opcode::Rollcall)) {
+    switch (static_cast<Opcode>(msg.opcode)) {
+      case Opcode::PeerSendStart:
+      case Opcode::PeerSendStop:
+      case Opcode::CounterReset:
+      case Opcode::FaultSet:
+      case Opcode::ResetRequest:
+        break;  // handlers count a group-carried control as unauthorized
+      default:
+        ++stats_.group_ignored;
+        return;
+    }
   }
   switch (static_cast<Opcode>(msg.opcode)) {
     case Opcode::Hello:
@@ -175,6 +205,9 @@ void BenchApp::dispatch(const RxEntry& entry, const Message& msg,
       break;
     case Opcode::PeerSendStop:
       handle_peer_send_stop(entry, msg, now_ms);
+      break;
+    case Opcode::PeerSendStatus:
+      handle_peer_send_status(entry, msg, now_ms);
       break;
     case Opcode::CounterReset:
       handle_counter_reset(entry, msg, now_ms);
@@ -233,8 +266,14 @@ bool BenchApp::run_retired(const RunUuid& uuid) const noexcept {
 
 void BenchApp::tombstone(const RunUuid& uuid) noexcept {
   if (run_retired(uuid)) return;
-  retired_[retired_count_ % kRetiredDepth] = uuid;
-  ++retired_count_;
+  if (retired_count_ < kRetiredDepth) {
+    retired_[retired_count_++] = uuid;
+  } else {
+    for (std::size_t i = 1; i < kRetiredDepth; ++i) {
+      retired_[i - 1] = retired_[i];
+    }
+    retired_[kRetiredDepth - 1] = uuid;
+  }
   bump_version();
 }
 
@@ -294,7 +333,8 @@ bool BenchApp::enqueue_reply(NodeId destination, std::uint8_t opcode,
                              std::uint16_t flags, const RunUuid& run,
                              std::uint32_t sequence, ByteView body,
                              MonotonicMs not_before,
-                             MonotonicMs now_ms) noexcept {
+                             MonotonicMs now_ms,
+                             bool reset_ack) noexcept {
   for (ReplyEntry& reply : replies_) {
     if (!reply.used) {
       std::size_t written = 0;
@@ -309,6 +349,7 @@ bool BenchApp::enqueue_reply(NodeId destination, std::uint8_t opcode,
       reply.not_before = not_before;
       reply.expires_ms = now_ms + kReplyTtlMs;
       reply.len = static_cast<std::uint8_t>(written);
+      reply.reset_ack = reset_ack;
       reply.used = true;
       return true;
     }
@@ -500,6 +541,43 @@ void BenchApp::send_status(NodeId to, const RunUuid& run, std::uint32_t seq,
   }
 }
 
+void BenchApp::fill_generator_status(const RunUuid& run,
+                                      PeerSendStatusBody& reply) const noexcept {
+  if (generator_.uuid != run) return;
+  reply.state = generator_.state;
+  reply.planned = generator_.count;
+  reply.submitted = generator_.submitted;
+  reply.admitted = generator_.admitted;
+  reply.delivered = generator_.delivered;
+  reply.failed = generator_.failed;
+  reply.unknown = generator_.unknown;
+  reply.first_ms = generator_.first_ms;
+  reply.last_ms = generator_.last_ms;
+}
+
+void BenchApp::handle_peer_send_status(const RxEntry& entry,
+                                       const Message& msg,
+                                       MonotonicMs now_ms) noexcept {
+  if (entry.is_group || !authorized(entry.origin)) {
+    ++stats_.unauthorized;
+    return;
+  }
+  if (msg.body.size != 0) {
+    ++stats_.invalid_requests;
+    return;
+  }
+  PeerSendStatusBody reply{};
+  reply.result = result::kQuery;
+  fill_generator_status(msg.run, reply);
+  std::array<std::uint8_t, kPeerSendStatusBodySize> raw{};
+  ByteWriter writer{MutableByteView{raw.data(), raw.size()}};
+  (void)encode(reply, writer);
+  enqueue_reply(entry.origin,
+                static_cast<std::uint8_t>(Opcode::PeerSendStatus),
+                kFlagResponse, msg.run, msg.sequence,
+                ByteView{raw.data(), writer.size()}, now_ms, now_ms);
+}
+
 void BenchApp::handle_peer_send_start(const RxEntry& entry, const Message& msg,
                                       MonotonicMs now_ms) noexcept {
   PeerSendStartBody start{};
@@ -529,6 +607,9 @@ void BenchApp::handle_peer_send_start(const RxEntry& entry, const Message& msg,
   } else if (start.count == 0 || start.count > kGeneratorMaxCount ||
              start.payload_len > kMaxBody || start.ttl_ms == 0 ||
              start.ttl_ms > kMaxMessageLifetimeMs ||
+             start.max_inflight == 0 ||
+             static_cast<std::uint64_t>(start.sequence_begin) +
+                     start.count - 1 > 0xffffffffULL ||
              start.destination == kInvalidNodeId ||
              start.destination == kBroadcastNodeId ||
              start.destination == node_->node_id()) {
@@ -553,15 +634,7 @@ void BenchApp::handle_peer_send_start(const RxEntry& entry, const Message& msg,
     reply.planned = start.count;
     bump_version();
   }
-  if (reply.state == 0) reply.state = generator_.state;
-  reply.planned = reply.planned != 0 ? reply.planned : generator_.count;
-  reply.submitted = generator_.submitted;
-  reply.admitted = generator_.admitted;
-  reply.delivered = generator_.delivered;
-  reply.failed = generator_.failed;
-  reply.unknown = generator_.unknown;
-  reply.first_ms = generator_.first_ms;
-  reply.last_ms = generator_.last_ms;
+  fill_generator_status(msg.run, reply);
   std::array<std::uint8_t, kPeerSendStatusBodySize> raw{};
   ByteWriter writer{MutableByteView{raw.data(), raw.size()}};
   (void)encode(reply, writer);
@@ -613,15 +686,7 @@ void BenchApp::handle_peer_send_stop(const RxEntry& entry, const Message& msg,
   } else {
     reply.result = result::kNotRunning;
   }
-  reply.state = generator_.state;
-  reply.planned = generator_.count;
-  reply.submitted = generator_.submitted;
-  reply.admitted = generator_.admitted;
-  reply.delivered = generator_.delivered;
-  reply.failed = generator_.failed;
-  reply.unknown = generator_.unknown;
-  reply.first_ms = generator_.first_ms;
-  reply.last_ms = generator_.last_ms;
+  fill_generator_status(msg.run, reply);
   std::array<std::uint8_t, kPeerSendStatusBodySize> raw{};
   ByteWriter writer{MutableByteView{raw.data(), raw.size()}};
   (void)encode(reply, writer);
@@ -688,7 +753,16 @@ void BenchApp::handle_fault_set(const RxEntry& entry, const Message& msg,
     ++stats_.stale_boot;
     return;
   }
+  if (fault.duration_ms > kMaxFaultDurationMs ||
+      (fault.fault == fault::kNone &&
+       (fault.duration_ms != 0 || fault.param != 0))) {
+    ++stats_.invalid_requests;
+    return;
+  }
   switch (fault.fault) {
+    case fault::kNone:
+      faults_ = Faults{};
+      break;
     case fault::kEchoSuppress:
       faults_.echo_suppress_until = now_ms + fault.duration_ms;
       break;
@@ -736,7 +810,7 @@ void BenchApp::handle_reset_request(const RxEntry& entry, const Message& msg,
   if (request.expected_boot != boot_incarnation()) {
     ++stats_.stale_boot;
     ack.accepted = 0;
-  } else if (platform_ == nullptr) {
+  } else if (platform_ == nullptr || reset_pending_ || reset_armed_) {
     ack.accepted = 0;
   } else {
     ack.accepted = 1;
@@ -749,28 +823,29 @@ void BenchApp::handle_reset_request(const RxEntry& entry, const Message& msg,
       request.expected_boot != boot_incarnation()) {
     flags |= kFlagLate;
   }
-  // The reset is armed only once the ACK is actually queued for TX —
-  // "reply first, reset after" is the ordering contract (§5.2).
+  // Queue the ACK before arming the reset. The delay begins only after the
+  // SDK accepts the ACK for transmission.
   if (enqueue_reply(entry.origin,
                     static_cast<std::uint8_t>(Opcode::ResetAck), flags,
                     msg.run, msg.sequence,
-                    ByteView{raw.data(), writer.size()}, now_ms, now_ms) &&
+                    ByteView{raw.data(), writer.size()}, now_ms, now_ms,
+                    ack.accepted != 0) &&
         ack.accepted != 0) {
-    reset_armed_ = true;
-    // Floor of 20 ms: the ACK needs a few owner polls to leave on the air.
-    const MonotonicMs delay = request.delay_ms < 20 ? 20 : request.delay_ms;
-    reset_at_ms_ = now_ms + delay;
+    reset_pending_ = true;
+    reset_delay_ms_ = request.delay_ms < 20 ? 20 : request.delay_ms;
   }
 }
 
 void BenchApp::drain_replies(MonotonicMs now_ms) noexcept {
   for (ReplyEntry& reply : replies_) {
-    if (!reply.used || now_ms < reply.not_before) continue;
+    if (!reply.used) continue;
     if (now_ms > reply.expires_ms) {
+      if (reply.reset_ack) reset_pending_ = false;
       reply.used = false;
       ++stats_.reply_dropped;
       continue;
     }
+    if (now_ms < reply.not_before) continue;
     SendOptions options{};
     options.delivery = DeliveryClass::Reliable;
     options.priority = Priority::Normal;
@@ -785,10 +860,16 @@ void BenchApp::drain_replies(MonotonicMs now_ms) noexcept {
                     ByteView{reply.buf.data(), reply.len}, options, now_ms, id);
     if (status) {
       reply.used = false;
+      if (reply.reset_ack) {
+        reset_ack_id_ = id;
+        reset_ack_submitted_ = true;
+        reset_at_ms_ = now_ms + options.lifetime_ms;
+      }
     } else if (status.code == StatusCode::InvalidArgument ||
                status.code == StatusCode::InvalidState) {
       // Programmer error — retrying can never help.
       reply.used = false;
+      if (reply.reset_ack) reset_pending_ = false;
       ++stats_.reply_send_failed;
     } else {
       // Transient (NoRoute during join, queue pressure, Busy): park with a
@@ -864,7 +945,19 @@ void BenchApp::drive_generator(MonotonicMs now_ms) noexcept {
 }
 
 void BenchApp::drain_delivery(MonotonicMs now_ms) noexcept {
-  (void)now_ms;
+  if (reset_ack_result_pending_) {
+    reset_ack_result_pending_ = false;
+    reset_pending_ = false;
+    reset_ack_submitted_ = false;
+    if (reset_ack_delivery_ == DeliveryState::Delivered) {
+      reset_armed_ = true;
+      reset_at_ms_ = now_ms + reset_delay_ms_;
+    }
+  } else if (reset_pending_ && reset_ack_submitted_ &&
+             now_ms >= reset_at_ms_) {
+    reset_pending_ = false;
+    reset_ack_submitted_ = false;
+  }
   for (DeliveryEvent& event : deliveries_) {
     if (!event.used) continue;
     event.used = false;
@@ -945,6 +1038,14 @@ void BenchApp::retire_idle_runs(MonotonicMs now_ms) noexcept {
 
 void BenchApp::maybe_announce(MonotonicMs now_ms) noexcept {
   if (announced_ || node_ == nullptr || !node_->started()) return;
+  if (probe_ != nullptr) {
+    BenchProbeSample sample{};
+    probe_->sample(sample);
+    if (sample.participation_valid &&
+        sample.membership != static_cast<std::uint8_t>(MembershipState::Member)) {
+      return;
+    }
+  }
   NodeId controller = config_.controller;
   if (controller == kInvalidNodeId) {
     controller = node_->config().route_gateways[0];
@@ -952,7 +1053,6 @@ void BenchApp::maybe_announce(MonotonicMs now_ms) noexcept {
   if (controller == kInvalidNodeId) return;
   // Once per participation: announce capabilities to the controller so a
   // freshly joined bench node is discoverable without a host round-trip.
-  announced_ = true;
   CapabilitiesBody caps{};
   caps.app_version = config_.app_version;
   caps.run_slots = kRunSlots;
@@ -970,10 +1070,10 @@ void BenchApp::maybe_announce(MonotonicMs now_ms) noexcept {
   ByteWriter writer{MutableByteView{raw.data(), raw.size()}};
   (void)encode(caps, writer);
   const RunUuid announce_run{};
-  (void)enqueue_reply(controller,
-                      static_cast<std::uint8_t>(Opcode::Capabilities),
-                      kFlagResponse, announce_run, 0,
-                      ByteView{raw.data(), writer.size()}, now_ms, now_ms);
+  announced_ = enqueue_reply(controller,
+                             static_cast<std::uint8_t>(Opcode::Capabilities),
+                             kFlagResponse, announce_run, 0,
+                             ByteView{raw.data(), writer.size()}, now_ms, now_ms);
 }
 
 void BenchApp::status_page_fields(std::uint8_t page, ByteWriter& writer,

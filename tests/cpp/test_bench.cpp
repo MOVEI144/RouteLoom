@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "routeloom/admission.hpp"
 #include "routeloom/bench/app.hpp"
 #include "routeloom/bench/protocol.hpp"
 #include "routeloom/group.hpp"
@@ -1245,6 +1246,308 @@ void test_peer_send_stop() {
   CHECK(decode(nr_reader, ps) && ps.result == result::kNotRunning);
 }
 
+void test_configured_controller_and_digest() {
+  BenchWorld w;
+  w.add(1, false);
+  w.add(2, true);
+  w.add(3, false);
+  BenchConfig configured{};
+  configured.controller = 3;
+  configured.firmware_digest = 0x12345678;
+  configured.config_digest = 0x87654321;
+  w.app(2)->configure(configured);
+  w.start_all();
+  w.link(1, 2);
+  w.link(2, 3);
+  w.run(8000);
+
+  const RunUuid run = make_run(31);
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::Hello), run,
+                   1, ByteView{}, 0, 1));
+  w.run(500);
+  const HostMessage* caps_msg = last_opcode(
+      host_messages(w, 1), static_cast<std::uint8_t>(Opcode::Capabilities));
+  CHECK(caps_msg != nullptr);
+  if (caps_msg != nullptr) {
+    CapabilitiesBody caps{};
+    ByteReader reader{ByteView{caps_msg->body.data(), caps_msg->body.size()}};
+    CHECK(decode(reader, caps));
+    CHECK(caps.firmware_digest == configured.firmware_digest);
+    CHECK(caps.config_digest == configured.config_digest);
+  }
+
+  PeerSendStartBody start{};
+  start.expected_boot = w.boot(2);
+  start.destination = 3;
+  start.sequence_begin = 1;
+  start.count = 1;
+  start.payload_len = 1;
+  start.ttl_ms = 2000;
+  const auto body = body_bytes(start);
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::PeerSendStart),
+                   run, 2, ByteView{body.data(), body.size()}, 0, 1));
+  w.run(400);
+  CHECK(w.app(2)->stats().unauthorized == 1);
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::PeerSendStart),
+                   run, 3, ByteView{body.data(), body.size()}, 0, 3));
+  w.run(400);
+  const HostMessage* accepted = last_opcode(
+      host_messages(w, 3), static_cast<std::uint8_t>(Opcode::PeerSendStatus));
+  CHECK(accepted != nullptr);
+  if (accepted != nullptr) {
+    PeerSendStatusBody status{};
+    ByteReader reader{ByteView{accepted->body.data(), accepted->body.size()}};
+    CHECK(decode(reader, status) && status.result == result::kStarted);
+  }
+}
+
+void test_peer_send_status_query() {
+  BenchWorld w;
+  build(w, 2);
+  const RunUuid run = make_run(32);
+  PeerSendStartBody start{};
+  start.expected_boot = w.boot(2);
+  start.destination = 3;
+  start.sequence_begin = 10;
+  start.count = 2;
+  start.payload_len = 4;
+  start.ttl_ms = 1000;
+  const auto body = body_bytes(start);
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::PeerSendStart),
+                   run, 1, ByteView{body.data(), body.size()}));
+  w.run(3000);
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::PeerSendStatus),
+                   run, 2, ByteView{}));
+  w.run(400);
+  const HostMessage* answer = last_opcode(
+      host_messages(w, 1), static_cast<std::uint8_t>(Opcode::PeerSendStatus));
+  CHECK(answer != nullptr && answer->sequence == 2);
+  if (answer != nullptr && answer->sequence == 2) {
+    PeerSendStatusBody status{};
+    ByteReader reader{ByteView{answer->body.data(), answer->body.size()}};
+    CHECK(decode(reader, status));
+    CHECK(status.result == result::kQuery);
+    CHECK(status.state == gen_state::kComplete && status.planned == 2);
+  }
+  const RunUuid other = make_run(33);
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::PeerSendStatus),
+                   other, 3, ByteView{}));
+  w.run(400);
+  answer = last_opcode(host_messages(w, 1),
+                       static_cast<std::uint8_t>(Opcode::PeerSendStatus));
+  CHECK(answer != nullptr && answer->sequence == 3);
+  if (answer != nullptr && answer->sequence == 3) {
+    PeerSendStatusBody status{};
+    ByteReader reader{ByteView{answer->body.data(), answer->body.size()}};
+    CHECK(decode(reader, status));
+    CHECK(status.state == gen_state::kIdle && status.planned == 0);
+  }
+}
+
+void test_reset_waits_for_ack_send() {
+  BenchWorld w;
+  w.add(1, false);
+  w.add(2, true);
+  w.start_all();  // No route back to the controller.
+  ResetRequestBody req{};
+  req.expected_boot = w.boot(2);
+  req.delay_ms = 20;
+  const auto body = body_bytes(req);
+  std::array<std::uint8_t, kMaxMessage> wire{};
+  std::size_t written = 0;
+  CHECK_OK(encode(static_cast<std::uint8_t>(Opcode::ResetRequest), 0,
+                  make_run(34), 1, ByteView{body.data(), body.size()},
+                  MutableByteView{wire.data(), wire.size()}, written));
+  MessageKey key{};
+  key.origin = 1;
+  w.app(2)->on_message(key, 1, ByteView{wire.data(), written});
+  w.app(2)->poll(0);
+  w.app(2)->poll(100);
+  CHECK(w.platform(2)->restarts == 0);
+  w.link(1, 2);
+  w.run(500);
+  CHECK(w.platform(2)->restarts == 1);
+}
+
+void test_tombstone_counter_wrap() {
+  BenchWorld w;
+  build(w, 1);
+  MessageKey key{};
+  key.origin = 1;
+  for (std::uint16_t i = 0; i < 258; ++i) {
+    RunUuid run = make_run(static_cast<std::uint8_t>(i));
+    run[14] = static_cast<std::uint8_t>(i >> 8);
+    std::array<std::uint8_t, kMaxMessage> wire{};
+    std::size_t written = 0;
+    CHECK_OK(encode(static_cast<std::uint8_t>(Opcode::CountOnly), 0, run, 1,
+                    ByteView{}, MutableByteView{wire.data(), wire.size()},
+                    written));
+    w.app(2)->on_message(key, 1, ByteView{wire.data(), written});
+    w.app(2)->poll(w.now);
+    ++w.now;
+  }
+  RunUuid recent = make_run(255);
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::CountGet),
+                   recent, 1, ByteView{}));
+  w.run(400);
+  const HostMessage* answer = last_opcode(
+      host_messages(w, 1), static_cast<std::uint8_t>(Opcode::CountStatus));
+  CHECK(answer != nullptr);
+  if (answer != nullptr) {
+    CountStatusBody count{};
+    ByteReader reader{ByteView{answer->body.data(), answer->body.size()}};
+    CHECK(decode(reader, count) && count.state == 2);
+  }
+}
+
+void test_unrelated_deliveries_do_not_fill_generator_queue() {
+  BenchWorld w;
+  build(w, 1);
+  DeliveryResult result{};
+  result.id.session = 987;
+  result.id.sequence = 1;
+  result.state = DeliveryState::Delivered;
+  w.app(2)->on_delivery(result);
+  result.id.sequence = 2;
+  w.app(2)->on_delivery(result);
+  CHECK(w.app(2)->stats().delivery_events_dropped == 0);
+}
+
+void test_announce_after_membership() {
+  BenchWorld w;
+  w.add(1, false);
+  w.add(2, true);
+  w.probes[2]->fixed.participation_valid = true;
+  w.probes[2]->fixed.membership =
+      static_cast<std::uint8_t>(MembershipState::Unprovisioned);
+  w.start_all();
+  w.link(1, 2);
+  w.run(1000);
+  CHECK(last_opcode(host_messages(w, 1),
+                    static_cast<std::uint8_t>(Opcode::Capabilities)) ==
+        nullptr);
+  w.probes[2]->fixed.membership =
+      static_cast<std::uint8_t>(MembershipState::Member);
+  w.run(1000);
+  CHECK(last_opcode(host_messages(w, 1),
+                    static_cast<std::uint8_t>(Opcode::Capabilities)) !=
+        nullptr);
+}
+
+void test_group_hello_does_not_amplify() {
+  BenchWorld w;
+  build(w, 2);
+  const auto before = w.obs(1)->messages.size();
+  std::array<std::uint8_t, kMaxMessage> wire{};
+  std::size_t written = 0;
+  CHECK_OK(encode(static_cast<std::uint8_t>(Opcode::Hello), 0, make_run(35),
+                  1, ByteView{}, MutableByteView{wire.data(), wire.size()},
+                  written));
+  GroupSendOptions options{};
+  MessageId id{};
+  CHECK_OK(w.at(1)->send_group(kGroupAll, ByteView{wire.data(), written},
+                               options, w.now, id));
+  w.run(1000);
+  CHECK(w.obs(1)->messages.size() == before);
+  CHECK(w.app(2)->stats().group_ignored >= 1);
+}
+
+void test_delayed_reply_expires_before_due() {
+  BenchWorld w;
+  build(w, 1);
+  const RunUuid run = make_run(36);
+  FaultSetBody fault{};
+  fault.expected_boot = w.boot(2);
+  fault.fault = fault::kEchoDelay;
+  fault.duration_ms = 20000;
+  fault.param = 10000;
+  const auto fbody = body_bytes(fault);
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::FaultSet), run,
+                   1, ByteView{fbody.data(), fbody.size()}));
+  w.run(100);
+  for (std::uint32_t seq = 2; seq < 6; ++seq) {
+    CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::EchoRequest),
+                     run, seq, ByteView{}));
+    w.run(100);
+  }
+  w.run(6000);
+  CHECK(w.app(2)->stats().reply_dropped == 4);
+}
+
+void test_peer_send_rejects_impossible_bounds() {
+  BenchWorld w;
+  build(w, 2);
+  PeerSendStartBody start{};
+  start.expected_boot = w.boot(2);
+  start.destination = 3;
+  start.sequence_begin = 1;
+  start.count = 2;
+  start.payload_len = 1;
+  start.ttl_ms = 1000;
+  start.max_inflight = 0;
+  auto body = body_bytes(start);
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::PeerSendStart),
+                   make_run(37), 1, ByteView{body.data(), body.size()}));
+  w.run(400);
+  const HostMessage* reply = last_opcode(
+      host_messages(w, 1), static_cast<std::uint8_t>(Opcode::PeerSendStatus));
+  CHECK(reply != nullptr);
+  if (reply != nullptr) {
+    PeerSendStatusBody status{};
+    ByteReader reader{ByteView{reply->body.data(), reply->body.size()}};
+    CHECK(decode(reader, status) && status.result == result::kInvalid);
+  }
+  start.max_inflight = 1;
+  start.sequence_begin = 0xffffffffu;
+  body = body_bytes(start);
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::PeerSendStart),
+                   make_run(38), 1, ByteView{body.data(), body.size()}));
+  w.run(400);
+  reply = last_opcode(host_messages(w, 1),
+                      static_cast<std::uint8_t>(Opcode::PeerSendStatus));
+  CHECK(reply != nullptr);
+  if (reply != nullptr) {
+    PeerSendStatusBody status{};
+    ByteReader reader{ByteView{reply->body.data(), reply->body.size()}};
+    CHECK(decode(reader, status) && status.result == result::kInvalid);
+  }
+}
+
+void test_fault_duration_bound_and_clear() {
+  BenchWorld w;
+  build(w, 1);
+  const RunUuid run = make_run(39);
+  FaultSetBody fault{};
+  fault.expected_boot = w.boot(2);
+  fault.fault = fault::kEchoSuppress;
+  fault.duration_ms = BenchApp::kGeneratorMaxDurationMs + 1;
+  auto body = body_bytes(fault);
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::FaultSet), run,
+                   1, ByteView{body.data(), body.size()}));
+  w.run(200);
+  CHECK(w.app(2)->stats().invalid_requests == 1);
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::EchoRequest), run,
+                   2, ByteView{}));
+  w.run(200);
+  CHECK(w.app(2)->stats().echo_suppressed == 0);
+
+  fault.duration_ms = 10000;
+  body = body_bytes(fault);
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::FaultSet), run,
+                   3, ByteView{body.data(), body.size()}));
+  w.run(200);
+  fault.fault = fault::kNone;
+  fault.duration_ms = 0;
+  body = body_bytes(fault);
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::FaultSet), run,
+                   4, ByteView{body.data(), body.size()}));
+  w.run(200);
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::EchoRequest), run,
+                   5, ByteView{}));
+  w.run(200);
+  CHECK(w.app(2)->stats().echo_suppressed == 0);
+}
+
 // --- Shared golden vectors -------------------------------------------------
 // protocol/bench-golden: the same flat "key": value JSON subset as
 // test_usb.cpp. Positive vectors decode and re-encode byte-identically;
@@ -1402,6 +1705,17 @@ int main(int argc, char** argv) {
   run_test("send_load_fault", test_send_load_fault);
   run_test("fault_suppress_and_delay", test_fault_suppress_and_delay);
   run_test("peer_send_stop", test_peer_send_stop);
+  run_test("configured_controller_and_digest", test_configured_controller_and_digest);
+  run_test("peer_send_status_query", test_peer_send_status_query);
+  run_test("reset_waits_for_ack_send", test_reset_waits_for_ack_send);
+  run_test("tombstone_counter_wrap", test_tombstone_counter_wrap);
+  run_test("unrelated_deliveries_do_not_fill_generator_queue",
+           test_unrelated_deliveries_do_not_fill_generator_queue);
+  run_test("announce_after_membership", test_announce_after_membership);
+  run_test("group_hello_does_not_amplify", test_group_hello_does_not_amplify);
+  run_test("delayed_reply_expires_before_due", test_delayed_reply_expires_before_due);
+  run_test("peer_send_rejects_impossible_bounds", test_peer_send_rejects_impossible_bounds);
+  run_test("fault_duration_bound_and_clear", test_fault_duration_bound_and_clear);
   run_test("golden", test_golden);
   if (failures != 0) {
     std::fprintf(stderr, "%d bench checks failed\n", failures);

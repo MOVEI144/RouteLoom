@@ -173,6 +173,7 @@ extern "C" void app_main(void) {
     std::memcpy(&s_bench.config.firmware_digest, desc->app_elf_sha256,
                 sizeof(s_bench.config.firmware_digest));
   }
+  s_bench.app.configure(s_bench.config);
   routeloom::espnow::NodeBootHooks hooks{};
   hooks.log_tag = "RouteLoomBench";
   hooks.observer = &s_bench.app;

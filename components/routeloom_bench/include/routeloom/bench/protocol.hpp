@@ -189,7 +189,7 @@ struct PeerSendStartBody {
   std::uint32_t seed{0};           // deterministic payload fill
   std::uint32_t interval_ms{0};    // spacing between sends
   std::uint32_t ttl_ms{0};         // per-packet delivery lifetime
-  std::uint8_t max_inflight{0};    // clamped to the device bound
+  std::uint8_t max_inflight{1};    // clamped to the device bound; zero is invalid
 };
 Status encode(const PeerSendStartBody& body, ByteWriter& out) noexcept;
 bool decode(ByteReader& in, PeerSendStartBody& out) noexcept;
