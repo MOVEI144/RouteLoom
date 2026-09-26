@@ -2533,6 +2533,13 @@ void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
 
 void MeshNode::fail_job(TxJob& job, const char* reason,
                         const MonotonicMs now_ms, const bool terminal) noexcept {
+  // A route update that failed after enqueue never refreshed its peer's
+  // lease. Re-arm a bounded burst instead of waiting for the next period.
+  if (job.form == JobForm::Plain && job.plain.header.type == FrameType::RouteUpdate &&
+      job.peer != kBroadcastNodeId) {
+    const auto* neighbor = find_neighbor(job.peer);
+    if (neighbor != nullptr && neighbor->active) arm_triggered_advertisement(now_ms + 50);
+  }
   // Terminate the transaction work item first: the failure report below
   // reserves a fresh short transaction, which must see the freed capacity.
   finish_txn_work(job.txn);

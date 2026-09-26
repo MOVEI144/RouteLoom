@@ -110,6 +110,8 @@ feasibilityは**隣接が広告したdistanceと現在のFD**で再評価する�
 
 100ms/s等の古い全網予算を各ノードへ丸ごと配らない。このprofileではまず校正されたlocal token bucketと制御予約から始め、全網の実占有は別に測る。推定Airtimeとdriver待ち時間を混同しない。
 
+経路広告は enqueue 成功後でも MAC 失敗や送信期限切れなら近隣の lease を更新していない。生存近隣への失敗時には triggered 広告を再 pending 化し、次の定期周期まで待たない（有界な最小間隔は維持）。
+
 ## 9. 失敗時の動き
 
 NO_MEM/Peer不足はLOCAL_RESOURCE、認証済みBUSYはREMOTE_BUSY、予定surveyはPLANNED_ABSENCE。原因不明のlossはUNKNOWNまたはLINK_DEGRADED。MAC成功だけで混雑解消ともアプリ到達とも判断しない。

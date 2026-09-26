@@ -398,6 +398,40 @@ void test_full_control_lane_never_commits_a_forward() {
   }
 }
 
+bool route_update_dropped = false;
+bool drop_first_route_update(const SimNetwork::Pending& pending) {
+  wire::Header header{};
+  if (!route_update_dropped && pending.from == 2 && pending.to == 1 &&
+      wire::peek_header(ByteView{pending.frame.data(), pending.frame.size()}, header) &&
+      header.type == FrameType::RouteUpdate) {
+    route_update_dropped = true;
+    return true;
+  }
+  return false;
+}
+
+void test_failed_route_advertisement_rearmed() {
+  Harness h;
+  (void)h.add(1);
+  (void)h.add(2);
+  h.link(1, 2);
+  for (h.now = 1; h.now < 3000; h.now += 25) {
+    h.step(2);
+    h.step(1);
+  }
+  const auto before = h.net.route_control_tx[2].frames;
+  route_update_dropped = false;
+  h.net.drop_frame = drop_first_route_update;
+  for (h.now = 30000; h.now < 32000; h.now += 25) {
+    h.step(2);
+    h.step(1);
+  }
+  // The periodic MAC failure must not wait for the next 30-second tick.
+  CHECK(route_update_dropped);
+  CHECK(h.net.route_control_tx[2].frames >= before + 2);
+  CHECK(h.at(1)->routes().best(2).valid);
+}
+
 void test_physical_token_never_wraps() {
   std::uint64_t next = UINT64_MAX;
   std::uint64_t issued = 0;
@@ -1578,6 +1612,7 @@ int main() {
   test_drr_fairness();
   test_control_lane();
   test_full_control_lane_never_commits_a_forward();
+  test_failed_route_advertisement_rearmed();
   test_physical_token_never_wraps();
   test_flow_caps();
   test_busy_emission();
