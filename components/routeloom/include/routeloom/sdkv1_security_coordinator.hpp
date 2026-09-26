@@ -49,6 +49,7 @@
 #include "routeloom/sdkv1_join_relay.hpp"
 #include "routeloom/sdkv1_join_transport.hpp"
 #include "routeloom/sdkv1_joiner.hpp"
+#include "routeloom/observation.hpp"
 #include "routeloom/sdkv1_membership.hpp"
 #include "routeloom/sdkv1_records.hpp"
 #include "routeloom/sdkv1_session_rtc.hpp"
@@ -361,6 +362,12 @@ class SecurityCoordinator final : public BootstrapSink,
   Status adopt_dev(const CoordinatorDevConfig& config, MonotonicMs now) noexcept;
   Status take_action(CoordinatorAction& out) noexcept;
   CoordinatorSnapshot snapshot() const noexcept;
+  // Join-lifecycle record for this run (observation_v1, lab timetables).
+  // Ages are durations against `now`; unstamped stages read unknown. The
+  // flags mirror the live adoption latches (member_valid_, join_confirmed_);
+  // the stamps are set beside those latches and cleared with them, so a
+  // failed adoption or a stop can never leave a stale milestone behind.
+  JoinMilestones milestones(MonotonicMs now) const noexcept;
   const CoordinatorCounters& counters() const noexcept { return counters_; }
   // Next service time for the firmware scheduler; kNoDeadline when idle.
   MonotonicMs next_deadline(MonotonicMs now) const noexcept;
@@ -954,6 +961,34 @@ class SecurityCoordinator final : public BootstrapSink,
   bool action_pending_{false};
   bool authority_wanted_{false};  // adopted: the channel (re)starts on poll
   bool join_confirmed_{false};    // latched on the verified JoinConfirm ACK
+  // Milestone stamps (observation_v1): each lives and dies with the latch
+  // it mirrors — join_started_ with the current join leg, adopted_ with
+  // member_valid_, confirmed_ with join_confirmed_. A stop clears all
+  // three; a failed adoption clears adopted_/confirmed_ with member_valid_.
+  // Packed for the bridge DRAM floor: the leg start keeps only its low 32
+  // ms bits (legs die to join timeouts in minutes, reconstructed against
+  // now across the 49-day wrap), and confirmed is whole seconds past
+  // adopted (the JoinConfirm round trip is seconds; 18h of range).
+  MonotonicMs milestone_adopted_ms_{0};
+  std::uint32_t milestone_join_started_lo_{0};
+  // Handshake attempts in the current leg: live from the Joiner while
+  // ZeroTouch, latched here at adoption (the Joiner is destroyed once the
+  // member side goes live).
+  std::uint32_t milestone_attempts_{0};
+  std::uint16_t milestone_confirmed_gap_s_{0};
+  std::uint8_t milestone_flags_{0};
+  std::uint8_t milestone_joiner_latched_{kJoinerUnknown};
+  static constexpr std::uint8_t kMilestoneStarted = 0x01;
+  static constexpr std::uint8_t kMilestoneAdoptedBit = 0x02;
+  static constexpr std::uint8_t kMilestoneConfirmedBit = 0x04;
+  static constexpr std::uint8_t kMilestoneLatched = 0x08;
+  void note_milestone_leg_started(MonotonicMs now) noexcept;
+  void note_milestone_adopted(MonotonicMs now) noexcept;
+  void note_milestone_dev_adopted(MonotonicMs now) noexcept;
+  void note_milestone_confirmed() noexcept;
+  void clear_milestone_adopted() noexcept;
+  void clear_milestone_confirmed() noexcept;
+  void clear_milestones() noexcept;
   std::uint8_t refresh_strikes_{0};
   std::uint32_t last_unknown_generation_{0};  // discovery scope_stats sample
   bool refresh_active_{false};

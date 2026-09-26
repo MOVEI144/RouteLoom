@@ -25,6 +25,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/migration_wire.cpp
   src/node.cpp
   src/node_status.cpp
+  src/observation.cpp
   src/peer_state.cpp
   src/power.cpp
   src/replay.cpp

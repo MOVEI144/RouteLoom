@@ -87,4 +87,18 @@ SDK v1ゼロタッチ参加で、member proxyが中継する未割当機器のED
 
 `Ok`は機器への配送を意味しない（配送の結果は次の上り、または`0x62`の`delivery_failed`で分かる）。gatewayは分割されたobjectを2件まで同時に組み立て／送信し、hostが居ない（sessionが無い・queue満杯）間の上りはproxyへ`authority_unreachable`の中止を返して捨てる。形式不正はError frame（ProtocolError）、`0x60`/`0x63`をhostが送ればdirection違反。共有vectorは`protocol/usb-golden/join-relay`（gateway 1・proxy 2の交換をC++ bridgeがbyte一致で再生、Rust `routeloom-protocol::join_relay`が復号）とrelay objectの`protocol/sdkv1-golden/join-transport`。Site Authority側（daemon）はP3-3。
 
+## 10. 観測（observation_v1、EXPERIMENTAL）
+
+USBで直結したnode自身のread-only snapshot：system health、table占有、参加milestone、topology summary、選択経路のpage。経路・lease・広告の状態は一切変えない。HelloAck capability bit 11（`0x800`、`kCapObservationV1`／`CAP_OBSERVATION_V1`）を広告する機器だけがHostOps `0x70`〜`0x72`を扱う（bit 2も必要）。形式は§7と同じ4B head＋payload（big-endian、長さ完全一致）。
+
+| sub | 向き | payload |
+|---|---|---|
+| `0x70` OBSERVATION_QUERY | H→G | `section:u8`（0 system／1 tables／2 milestones／3 summary／4 routes）、`flags:u8`（bit0 SUBSCRIBE：pageを取る前にevent streamを(再)arm、bit1 EXACT：routes専用で`after`をcursorではなく1宛先指定）、`max_entries:u8`（1〜8、singletonは常に1）、`reserved:u8=0`、`after:u64`（排他cursor。`u64::MAX`不可） |
+| `0x71` OBSERVATION_PAGE | G→H（同request id） | `result:u16`（ConfigOpsResult空間）、`section:u8`、`flags:u8`（bit0 MORE、bit1 ARMED）、`count:u8`、`reserved:u8=0`、`boot_id:u64`、`revision:u32`、`next_after:u64`、`body` |
+| `0x72` OBSERVATION_EVENT | G→H（非要求、request id 0） | `sequence:u32`（arm毎に1から連続）、`kind:u8`（1 topology／2 milestone）、`mask:u8`（topologyのみ：bit0 neighbors／bit1 routes変化、milestoneは0）、`reserved:u16=0`、`boot_id:u64`、`revision:u32`（topology＝route digest、milestone＝milestone世代）、`extra:u32`（topology＝neighbor digest、milestone＝0） |
+
+section bodyは固定長（system 28B：`uptime_ms:u64`・heap free/min/largest:u32・reset/power/coord/profile:u8・予約u32／tables 36B：neighbor・route・link/end session・dedup resident/terminal/cap・tx used/cap・group trees/origins・dedup refused/evicted・予約u16／milestones 32B：mode/membership/joiner/flags:u8・attempts:u32・join_started/adopted/confirmedのage:u32・adopted_node:u64・予約u32／summary 24B：neighbor/route digest:u32・各active/total:u16・milestone_gen:u32・予約u32）とroutes可変長（30B entry×count：`destination:u64、next_hop:u64、generation:u32、sequence:u16、metric:u16、valid:u8(0/1)、reserved:u8=0、remaining_ms:u32`）。confirmedのageはadopted起点の秒単位（1秒未満切り捨て、機器DRAM節約のため。served ageは真値以上になる）。reset_codeはmask-ROMのreset reason直読（IDFのhint精製を使わないためpanic起因のSW resetはsoftwareと読む）。pageの`revision`はmilestones＝milestone世代、summary/routes＝route digest、system/tables＝0。非Ok pageはcount 0・空body。routes pageのentryは宛先昇順で、`next_after`は末尾entryの宛先（空pageはqueryの`after`）。機器は絶対時刻を送らずuptime・age（`u32::MAX`＝不明）だけを送り、hostが受信時刻から逆算する。
+
+(再)armはevent sequenceを1に戻す。hostはSUBSCRIBE付きqueryの送信時に自前のwatermarkを再同期し、sequenceの飛びを欠落（再pull）として扱う。page/eventはowner loop内で組み立て、無線callbackで表走査やJSON化をしない。共有vectorはC++／Rustの固定byte試験（`tests/cpp/test_observation.cpp`の`test_fixed_vectors`と`routeloom-protocol::observation`の`fixed_vectors_match_device_encoder`が同一byteを検証）。host側の扱いは[Host §12](host.md)。
+
 [Host](host.md)／[Wire](wire-protocol.md)／[電源断](crash-time-resources.md)

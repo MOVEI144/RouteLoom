@@ -224,6 +224,12 @@ class RouteTable {
   void evaluate(MonotonicMs now_ms) noexcept;
 
   RouteSelection best(NodeId destination) const noexcept;
+  // Remaining lease of the CURRENTLY selected candidate for `destination`
+  // (now_ms on the device monotonic clock; saturates at UINT32_MAX). Pure
+  // read: selection, leases and advertisement baselines are untouched.
+  // False when the destination is unknown or has no valid selection.
+  bool selection_remaining(NodeId destination, MonotonicMs now_ms,
+                           MonotonicMs& remaining_ms) const noexcept;
   bool mark_advertised(NodeId destination) noexcept;
   // Scoped-profile scheduling flag (see Entry::announced_up). Pure
   // bookkeeping: selection, feasibility and leases never read it.

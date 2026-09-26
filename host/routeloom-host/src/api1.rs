@@ -118,6 +118,7 @@ pub struct ApiContext<'a, S: OperationStore> {
     /// m1 diagnostics query table: `diagnostics.snapshot` submits and
     /// waits here; the telemetry lane thread drives the device exchange.
     pub telemetry_ops: &'a crate::telemetry::TelemetryOps,
+    pub observation_ops: &'a crate::observation::ObservationOps,
     /// SDK v1 Site Authority (`--site-authority`); None = not configured,
     /// the site methods then answer SITE_AUTHORITY_UNAVAILABLE.
     pub site: Option<&'a crate::site::SiteService>,
@@ -335,6 +336,8 @@ pub fn handle_conn<S: OperationStore>(
         "nodes.list" => nodes_list(&params, ctx).map(|r| (r, None)),
         "nodes.get" => nodes_get(&params, ctx).map(|r| (r, None)),
         "diagnostics.snapshot" => diagnostics_snapshot(&params, ctx).map(|r| (r, None)),
+        "health.get" => health_get(&params, ctx).map(|r| (r, None)),
+        "topology.get" => topology_get(&params, ctx).map(|r| (r, None)),
         "config.challenge" => config_challenge(&params, ctx).map(|r| (r, None)),
         "config.status" => config_status(&params, ctx).map(|r| (r, None)),
         "config.retry" => config_retry(&params, ctx).map(|r| (r, None)),
@@ -439,7 +442,7 @@ fn capabilities<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.retry\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true,\"diagnostics.snapshot\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"site\":{site_caps},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.retry\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true,\"diagnostics.snapshot\":true,\"health.get\":true,\"topology.get\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"observation\":{observation_caps},\"site\":{site_caps},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -468,6 +471,7 @@ fn capabilities<S: OperationStore>(
         config_auth = ctx.config_authority.is_some(),
         config_profile = config_profile_name(ctx.config_profile),
         group_capable = group_capability_json(ctx),
+        observation_caps = observation_capability_json(ctx),
         site_methods = site::SITE_METHODS
             .iter()
             .fold(String::new(), |mut out, m| {
@@ -2251,6 +2255,675 @@ fn diagnostics_snapshot<S: OperationStore>(
     telemetry_outcome_result(outcome, observer, peer)
 }
 
+/// The live session an observation query runs against: authenticated,
+/// carrying the gateway identity, and advertising observation_v1.
+struct ObservationLink {
+    session: u64,
+    gateway: u64,
+    boot: u64,
+    network: Option<u64>,
+}
+
+/// Gates an observation query on the live session: an authenticated
+/// gateway whose HelloAck advertises observation_v1 (capability bit 11
+/// with host_ops_v1). No ACL grant is needed (diagnostics class, like
+/// link.get) — snapshots carry device health and routing views, never
+/// payloads or secrets.
+fn observation_gate<S: OperationStore>(
+    ctx: &ApiContext<'_, S>,
+) -> Result<ObservationLink, ApiError> {
+    let info = ctx.session.lock().expect("session poisoned");
+    let link = ObservationLink {
+        session: info.id.unwrap_or(0),
+        gateway: info.node.unwrap_or(0),
+        boot: info.boot.unwrap_or(0),
+        network: info.network,
+    };
+    let capable = info
+        .capability
+        .is_some_and(crate::observation::observation_capable);
+    let identified = info.authenticated && info.id.is_some() && info.node.is_some();
+    drop(info);
+    if !identified {
+        return Err(ApiError {
+            code: "GATEWAY_UNAVAILABLE",
+            message: "no authenticated gateway session; observation queries are not queued across a disconnect"
+                .to_string(),
+            extra_fields: "\"reason\":\"no_session\"".to_string(),
+            retryable: true,
+        });
+    }
+    if !capable {
+        return Err(ApiError {
+            code: "UNSUPPORTED",
+            message: "the attached gateway does not advertise observation_v1 (HelloAck capability bit 11 with host_ops_v1)".to_string(),
+            extra_fields: "\"required_capability\":\"observation_v1\"".to_string(),
+            retryable: false,
+        });
+    }
+    Ok(link)
+}
+
+/// `network` is an optional scope check: when present it must name the
+/// attached session's network (same GATEWAY_UNAVAILABLE shape as the
+/// group gate — never a silent cross-scope read).
+fn observation_network_param(params: &Json, link: &ObservationLink) -> Result<(), ApiError> {
+    let Some(text) = params.get("network") else {
+        return Ok(());
+    };
+    if text.is_null() {
+        return Ok(());
+    }
+    let network = text
+        .as_str()
+        .and_then(|text| acl::parse_network_hex(text).ok())
+        .ok_or_else(|| ApiError::simple("INVALID_ARGUMENT", "network must be a 16-hex string"))?;
+    if link.network.is_some_and(|session| session != network) {
+        return Err(ApiError {
+            code: "GATEWAY_UNAVAILABLE",
+            message: "the attached gateway session is on another network".to_string(),
+            extra_fields: "\"reason\":\"network_mismatch\"".to_string(),
+            retryable: true,
+        });
+    }
+    Ok(())
+}
+
+/// `observer` names the observed node and must be the attached gateway
+/// itself — M1 serves local USB observation only, so a foreign observer
+/// is NOT_FOUND (no such observable here), never a routed query.
+fn observation_observer_param(params: &Json, gateway: u64) -> Result<u64, ApiError> {
+    let Some(observer) = params
+        .get("observer")
+        .and_then(Json::as_str)
+        .and_then(parse_hex_u64)
+    else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "observer must be the 16-hex id of the attached gateway",
+        ));
+    };
+    if observer != gateway {
+        return Err(ApiError {
+            code: "NOT_FOUND",
+            message:
+                "this daemon only observes its attached gateway; remote observation is not served"
+                    .to_string(),
+            extra_fields: format!(
+                "\"observer\":\"{observer:016x}\",\"reason\":\"remote_not_served\""
+            ),
+            retryable: false,
+        });
+    }
+    Ok(observer)
+}
+
+/// `max_age_ms`: 0..=60000, default 10000. Zero bypasses the singleton
+/// cache (a fresh device pull); routes pages are never cached.
+fn observation_max_age_param(params: &Json) -> Result<u64, ApiError> {
+    match params.get("max_age_ms") {
+        None | Some(Json::Null) => Ok(10_000),
+        Some(value) => match value.as_u64() {
+            Some(ms) if ms <= crate::observation::MAX_AGE_LIMIT_MS => Ok(ms),
+            _ => Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "max_age_ms must be an integer 0..=60000",
+            )),
+        },
+    }
+}
+
+/// `subscribe`: false by default. True (re)arms the 0x72 change-event
+/// stream — and restarts the device event sequence, which the lane
+/// absorbs by re-syncing its watermark when it sends the query.
+fn observation_subscribe_param(params: &Json) -> Result<bool, ApiError> {
+    match params.get("subscribe") {
+        None | Some(Json::Null) => Ok(false),
+        Some(Json::Bool(subscribe)) => Ok(*subscribe),
+        Some(_) => Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "subscribe must be a boolean",
+        )),
+    }
+}
+
+/// One answered observation section: the decoded body plus the envelope
+/// readings, whether freshly queried or served from the singleton cache.
+/// `store_mark` is Some only for a fresh page (the dirty mark its query
+/// took — the caller offers it to the cache); cache hits never re-store.
+struct ObservationAnswer {
+    revision: u32,
+    boot: u64,
+    received_ms: u64,
+    armed: bool,
+    more: bool,
+    next_after: u64,
+    count: u8,
+    body: Vec<u8>,
+    store_mark: Option<u64>,
+}
+
+/// Runs one 0x70 query (or answers from the singleton cache): submit,
+/// wait within `observation::API_WAIT_MS`, decode. A non-page outcome
+/// maps onto the honest error for why no answer arrived.
+#[allow(clippy::too_many_arguments)]
+fn observation_query<S: OperationStore>(
+    ctx: &ApiContext<'_, S>,
+    link: &ObservationLink,
+    scope: &str,
+    section: u8,
+    after: u64,
+    exact: bool,
+    subscribe: bool,
+    max_age_ms: u64,
+) -> Result<ObservationAnswer, ApiError> {
+    use crate::observation::{ObservationOps, QueryOutcome};
+    use routeloom_protocol::observation::PAGE_MAX;
+    if !crate::observation::is_routes_section(section) && max_age_ms > 0 {
+        if let Some(cached) =
+            ctx.observation_ops
+                .cached(section, link.session, link.boot, max_age_ms, ctx.now_ms)
+        {
+            return Ok(ObservationAnswer {
+                revision: cached.revision,
+                boot: link.boot,
+                received_ms: cached.received_ms,
+                armed: cached.armed,
+                more: false,
+                next_after: 0,
+                count: 1,
+                body: cached.body,
+                store_mark: None,
+            });
+        }
+    }
+    let ops: &ObservationOps = ctx.observation_ops;
+    let dirty_mark = ops.dirty_mark();
+    let token = ops
+        .submit(
+            crate::observation::ObservationQueryParams {
+                section,
+                after,
+                max_entries: PAGE_MAX as u8,
+                exact,
+                subscribe,
+            },
+            link.session,
+            ctx.now_mono,
+        )
+        .map_err(|_| ApiError {
+            code: "NO_CAPACITY",
+            message: "too many observation queries in flight; retry when one settles".to_string(),
+            extra_fields: format!("\"in_flight\":{}", ops.pending()),
+            retryable: true,
+        })?;
+    let outcome = ops
+        .wait_for(
+            token,
+            Duration::from_millis(crate::observation::API_WAIT_MS),
+        )
+        .ok_or_else(|| ApiError {
+            code: "TIMEOUT",
+            message: format!(
+                "observation query did not resolve inside {} ms",
+                crate::observation::API_WAIT_MS
+            ),
+            extra_fields: scope.to_string(),
+            retryable: true,
+        })?;
+    match outcome {
+        QueryOutcome::Page {
+            header,
+            body,
+            received_ms,
+        } => {
+            use routeloom_protocol::observation::{PAGE_ARMED, PAGE_MORE};
+            Ok(ObservationAnswer {
+                revision: header.revision,
+                boot: header.boot_id,
+                received_ms,
+                armed: header.flags & PAGE_ARMED != 0,
+                more: header.flags & PAGE_MORE != 0,
+                next_after: header.next_after,
+                count: header.count,
+                body,
+                store_mark: Some(dirty_mark),
+            })
+        }
+        outcome => Err(observation_outcome_error(outcome, scope)),
+    }
+}
+
+/// A resolved-but-not-a-page outcome, mapped onto the API error
+/// vocabulary. A mesh refusal cannot happen here (local USB round trip);
+/// anything else names why no answer arrived.
+fn observation_outcome_error(outcome: crate::observation::QueryOutcome, scope: &str) -> ApiError {
+    use crate::observation::QueryOutcome;
+    match outcome {
+        QueryOutcome::Page { .. } => ApiError::simple("INTERNAL", "unreachable observation page"),
+        QueryOutcome::Device(result) => observation_device_error(result, scope),
+        QueryOutcome::DecodeError(detail) => ApiError {
+            code: "INDETERMINATE",
+            message: format!("the gateway answered with a malformed 0x71 body: {detail}"),
+            extra_fields: scope.to_string(),
+            retryable: true,
+        },
+        QueryOutcome::Timeout => ApiError {
+            code: "TIMEOUT",
+            message: format!(
+                "no observation answer inside {} ms",
+                crate::observation::QUERY_TIMEOUT_MS
+            ),
+            extra_fields: scope.to_string(),
+            retryable: true,
+        },
+        QueryOutcome::SessionLost => ApiError {
+            code: "GATEWAY_UNAVAILABLE",
+            message: "the gateway session changed while the query was in flight".to_string(),
+            extra_fields: format!("{scope},\"reason\":\"session_lost\""),
+            retryable: true,
+        },
+        QueryOutcome::ErrorFrame(code) => ApiError {
+            code: "INDETERMINATE",
+            message: "the gateway refused the query at the frame level".to_string(),
+            extra_fields: format!("{scope},\"error_code\":{code}"),
+            retryable: true,
+        },
+    }
+}
+
+/// A non-Ok 0x71 device result, mapped onto the API error vocabulary.
+fn observation_device_error(
+    result: routeloom_protocol::host_ops::ConfigOpsResult,
+    scope: &str,
+) -> ApiError {
+    use routeloom_protocol::host_ops::ConfigOpsResult;
+    let (code, message, retryable) = match result {
+        ConfigOpsResult::Ok => ("INTERNAL", "unreachable device Ok", false),
+        ConfigOpsResult::Busy => (
+            "NO_CAPACITY",
+            "the gateway is busy; retry the observation query",
+            true,
+        ),
+        ConfigOpsResult::Denied => (
+            "AuthorizationFailed",
+            "the gateway denied the observation query",
+            false,
+        ),
+        ConfigOpsResult::Unsupported => (
+            "UNSUPPORTED",
+            "the gateway does not serve this observation section",
+            false,
+        ),
+        ConfigOpsResult::Invalid => (
+            "INTERNAL",
+            "the gateway rejected the observation query as malformed",
+            false,
+        ),
+        ConfigOpsResult::Indeterminate => (
+            "INDETERMINATE",
+            "the gateway cannot prove the observation outcome",
+            true,
+        ),
+        ConfigOpsResult::NoRoute => ("NO_ROUTE", "no mesh route to the observation target", true),
+        ConfigOpsResult::Timeout => (
+            "TIMEOUT",
+            "the observation target did not answer the gateway",
+            true,
+        ),
+    };
+    ApiError {
+        code,
+        message: message.to_string(),
+        extra_fields: format!(
+            "{scope},\"device_result\":\"{}\"",
+            config_ops_result_name(result)
+        ),
+        retryable,
+    }
+}
+
+/// The common observation envelope: schema, source identity (host-side
+/// session plus the device-reported boot), revision and freshness. Ages
+/// inside the section body map against `received_unix_ms`.
+#[allow(clippy::too_many_arguments)]
+fn observation_envelope(
+    section: &str,
+    gateway: u64,
+    session: u64,
+    observer: u64,
+    answer: &ObservationAnswer,
+    now_ms: u64,
+    complete: bool,
+) -> String {
+    format!(
+        "\"schema\":1,\"section\":\"{section}\",\"source\":{{\"gateway\":\"{gateway:016x}\",\"usb_session\":{session},\"observer\":\"{observer:016x}\",\"observer_boot\":\"{:016x}\",\"transport\":\"usb_local\"}},\"revision\":{},\"received_unix_ms\":{},\"age_ms\":{},\"stale\":false,\"complete\":{complete},\"armed\":{}",
+        answer.boot,
+        answer.revision,
+        answer.received_ms,
+        now_ms.saturating_sub(answer.received_ms),
+        answer.armed,
+    )
+}
+
+/// `health.get {observer, section?:"system"|"tables"|"milestones",
+/// network?, max_age_ms?, subscribe?}`: one read-only device-health
+/// singleton of the attached gateway. Diagnostics class, like link.get.
+fn health_get<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    use routeloom_protocol::observation::{SECTION_MILESTONES, SECTION_SYSTEM, SECTION_TABLES};
+    for (key, _) in params.object_entries() {
+        if !matches!(
+            key.as_str(),
+            "observer" | "section" | "network" | "max_age_ms" | "subscribe"
+        ) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let link = observation_gate(ctx)?;
+    observation_network_param(params, &link)?;
+    let observer = observation_observer_param(params, link.gateway)?;
+    let section = match params.get("section") {
+        None | Some(Json::Null) => SECTION_SYSTEM,
+        Some(value) => match value.as_str() {
+            Some("system") => SECTION_SYSTEM,
+            Some("tables") => SECTION_TABLES,
+            Some("milestones") => SECTION_MILESTONES,
+            _ => {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    "section must be \"system\", \"tables\" or \"milestones\"",
+                ));
+            }
+        },
+    };
+    let max_age_ms = observation_max_age_param(params)?;
+    let subscribe = observation_subscribe_param(params)?;
+    let scope = format!("\"observer\":\"{observer:016x}\"");
+    let section_name = match section {
+        SECTION_SYSTEM => "system",
+        SECTION_TABLES => "tables",
+        _ => "milestones",
+    };
+    // A cached body that no longer decodes is never served: fall through
+    // to a fresh query (bodies are only stored after a decode, so this is
+    // a can't-happen made honest anyway).
+    let mut answer =
+        observation_query(ctx, &link, &scope, section, 0, false, subscribe, max_age_ms)?;
+    let mut rendered = render_health_section(section, &answer.body, answer.received_ms);
+    if rendered.is_none() {
+        answer = observation_query(ctx, &link, &scope, section, 0, false, subscribe, 0)?;
+        rendered = render_health_section(section, &answer.body, answer.received_ms);
+    }
+    let Some(body_json) = rendered else {
+        return Err(ApiError {
+            code: "INDETERMINATE",
+            message: "the gateway answered with a malformed 0x71 section body".to_string(),
+            extra_fields: scope,
+            retryable: true,
+        });
+    };
+    // Only singletons reach here, only fresh pages (never a cache hit),
+    // and only after a successful decode. A skipped store (an event
+    // landed mid-query) just costs the next call a re-pull.
+    if let Some(dirty_mark) = answer.store_mark {
+        ctx.observation_ops.store(crate::observation::CacheStore {
+            section,
+            session: link.session,
+            boot: answer.boot,
+            body: answer.body.clone(),
+            revision: answer.revision,
+            received_ms: answer.received_ms,
+            armed: answer.armed,
+            dirty_mark,
+        });
+    }
+    Ok(format!(
+        "{{\"outcome\":\"snapshot\",\"scope\":{{{scope}}},\"snapshot\":{{{envelope},\"{section_name}\":{body_json}}}}}",
+        envelope = observation_envelope(
+            section_name,
+            link.gateway,
+            link.session,
+            observer,
+            &answer,
+            ctx.now_ms,
+            true,
+        ),
+    ))
+}
+
+/// Decodes and renders one health section body; None when the body the
+/// device sent does not match its section.
+fn render_health_section(section: u8, body: &[u8], received_ms: u64) -> Option<String> {
+    use routeloom_protocol::observation::{
+        decode_observation_milestones, decode_observation_system, decode_observation_tables,
+        SECTION_MILESTONES, SECTION_SYSTEM, SECTION_TABLES,
+    };
+    if section == SECTION_SYSTEM {
+        decode_observation_system(body)
+            .ok()
+            .map(|system| crate::observation::system_json(&system, received_ms))
+    } else if section == SECTION_TABLES {
+        decode_observation_tables(body)
+            .ok()
+            .map(|tables| crate::observation::tables_json(&tables))
+    } else if section == SECTION_MILESTONES {
+        decode_observation_milestones(body)
+            .ok()
+            .map(|milestones| crate::observation::milestones_json(&milestones, received_ms))
+    } else {
+        None
+    }
+}
+
+/// `topology.get {observer, section:"routes"|"summary", network?,
+/// destination?, cursor?, max_age_ms?, subscribe?}`: the attached
+/// gateway's selected-route table (one page per call, or one exact
+/// destination) or its topology summary. `section:"neighbors"` needs a
+/// per-neighbor device section M1 does not define — UNSUPPORTED, never a
+/// NodeStatus blend the caller could mistake for it. Diagnostics class.
+fn topology_get<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    use routeloom_protocol::observation::{
+        decode_observation_summary, SECTION_ROUTES, SECTION_SUMMARY,
+    };
+    for (key, _) in params.object_entries() {
+        if !matches!(
+            key.as_str(),
+            "observer"
+                | "section"
+                | "network"
+                | "destination"
+                | "cursor"
+                | "max_age_ms"
+                | "subscribe"
+        ) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let link = observation_gate(ctx)?;
+    observation_network_param(params, &link)?;
+    let observer = observation_observer_param(params, link.gateway)?;
+    let section = match params.get("section").and_then(Json::as_str) {
+        Some("routes") => SECTION_ROUTES,
+        Some("summary") => SECTION_SUMMARY,
+        Some("neighbors") => {
+            return Err(ApiError {
+                code: "UNSUPPORTED",
+                message: "per-neighbor detail has no observation_v1 section in M1; routes and summary only"
+                    .to_string(),
+                extra_fields: "\"section\":\"neighbors\"".to_string(),
+                retryable: false,
+            });
+        }
+        _ => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "section must be \"routes\" or \"summary\"",
+            ));
+        }
+    };
+    let destination = match params.get("destination") {
+        None | Some(Json::Null) => None,
+        Some(value) => {
+            let id = value
+                .as_str()
+                .and_then(parse_hex_u64)
+                .filter(|id| *id != 0 && *id != u64::MAX);
+            match id {
+                Some(id) => Some(id),
+                None => {
+                    return Err(ApiError::simple(
+                        "INVALID_ARGUMENT",
+                        "destination must be a non-reserved 16-hex node id",
+                    ));
+                }
+            }
+        }
+    };
+    let cursor = match params.get("cursor") {
+        None | Some(Json::Null) => 0,
+        Some(value) => match value.as_str().and_then(parse_hex_u64) {
+            Some(after) if after != u64::MAX => after,
+            _ => {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    "cursor must be a 16-hex node id below ffff…ffff",
+                ));
+            }
+        },
+    };
+    if section != SECTION_ROUTES && (destination.is_some() || cursor != 0) {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "destination and cursor are routes-only",
+        ));
+    }
+    if destination.is_some() && params.get("cursor").is_some_and(|v| !v.is_null()) {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "destination and cursor are mutually exclusive",
+        ));
+    }
+    let max_age_ms = observation_max_age_param(params)?;
+    let subscribe = observation_subscribe_param(params)?;
+    let scope = format!("\"observer\":\"{observer:016x}\"");
+    if section == SECTION_SUMMARY {
+        let mut answer =
+            observation_query(ctx, &link, &scope, section, 0, false, subscribe, max_age_ms)?;
+        let mut summary = decode_observation_summary(&answer.body).ok();
+        if summary.is_none() {
+            answer = observation_query(ctx, &link, &scope, section, 0, false, subscribe, 0)?;
+            summary = decode_observation_summary(&answer.body).ok();
+        }
+        let Some(summary) = summary else {
+            return Err(ApiError {
+                code: "INDETERMINATE",
+                message: "the gateway answered with a malformed 0x71 section body".to_string(),
+                extra_fields: scope,
+                retryable: true,
+            });
+        };
+        if let Some(dirty_mark) = answer.store_mark {
+            ctx.observation_ops.store(crate::observation::CacheStore {
+                section,
+                session: link.session,
+                boot: answer.boot,
+                body: answer.body.clone(),
+                revision: answer.revision,
+                received_ms: answer.received_ms,
+                armed: answer.armed,
+                dirty_mark,
+            });
+        }
+        return Ok(format!(
+            "{{\"outcome\":\"snapshot\",\"scope\":{{{scope}}},\"snapshot\":{{{envelope},\"summary\":{},\"entries\":[],\"next_cursor\":null}}}}",
+            crate::observation::summary_json(&summary),
+            envelope = observation_envelope(
+                "summary",
+                link.gateway,
+                link.session,
+                observer,
+                &answer,
+                ctx.now_ms,
+                true,
+            ),
+        ));
+    }
+    let exact = destination.is_some();
+    let after = destination.unwrap_or(cursor);
+    let answer = observation_query(
+        ctx,
+        &link,
+        &scope,
+        SECTION_ROUTES,
+        after,
+        exact,
+        subscribe,
+        0,
+    )?;
+    let entries = decode_route_entries(&answer.body)?;
+    let complete = !answer.more;
+    let next_cursor = if answer.more {
+        format!("\"{:016x}\"", answer.next_after)
+    } else {
+        "null".to_string()
+    };
+    let present = if exact {
+        format!("\"present\":{},", answer.count > 0)
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        "{{\"outcome\":\"snapshot\",\"scope\":{{{scope}}},\"snapshot\":{{{envelope},{present}\"entries\":[{entries}],\"next_cursor\":{next_cursor}}}}}",
+        envelope = observation_envelope(
+            "routes",
+            link.gateway,
+            link.session,
+            observer,
+            &answer,
+            ctx.now_ms,
+            complete,
+        ),
+        entries = entries.join(","),
+    ))
+}
+
+/// Decodes a routes page body into rendered entries; a body that does
+/// not match its validated page header is INDETERMINATE, never partial.
+fn decode_route_entries(body: &[u8]) -> Result<Vec<String>, ApiError> {
+    use routeloom_protocol::observation::{decode_route_detail_entry, ROUTE_ENTRY_SIZE};
+    if body.len() % ROUTE_ENTRY_SIZE != 0 {
+        return Err(ApiError::simple(
+            "INDETERMINATE",
+            "the gateway answered with a malformed 0x71 routes body",
+        ));
+    }
+    let mut entries = Vec::new();
+    for chunk in body.chunks_exact(ROUTE_ENTRY_SIZE) {
+        match decode_route_detail_entry(chunk) {
+            Ok(entry) => entries.push(crate::observation::route_entry_json(&entry)),
+            Err(_) => {
+                return Err(ApiError::simple(
+                    "INDETERMINATE",
+                    "the gateway answered with a malformed 0x71 routes body",
+                ));
+            }
+        }
+    }
+    Ok(entries)
+}
+
 // --- group_delivery_v1 (group.send / group.get) --------------------------
 //
 // `group.send` needs SEND on the network (it transmits application data to
@@ -2268,6 +2941,31 @@ fn group_capability_json<S: OperationStore>(ctx: &ApiContext<'_, S>) -> String {
         (true, Some(capability)) => crate::group::group_capable(capability).to_string(),
         _ => "null".to_string(),
     }
+}
+
+/// `observation` for capabilities.get: which observation methods the
+/// attached gateway can actually serve (false while detached — link.get
+/// tells those apart), plus the static local bounds. `remote` is false
+/// in M1: only the attached gateway is observable.
+fn observation_capability_json<S: OperationStore>(ctx: &ApiContext<'_, S>) -> String {
+    let info = ctx.session.lock().expect("session poisoned");
+    let live = info.authenticated && info.id.is_some();
+    let telemetry = live
+        && info
+            .capability
+            .is_some_and(crate::telemetry::telemetry_capable);
+    let observation = live
+        && info
+            .capability
+            .is_some_and(crate::observation::observation_capable);
+    drop(info);
+    format!(
+        "{{\"telemetry\":{telemetry},\"topology\":{observation},\"health\":{observation},\"board\":false,\"remote\":false,\"limits\":{{\"routes_page_max\":{},\"max_in_flight\":{},\"max_age_ms_max\":{},\"api_wait_ms\":{}}},\"events\":[\"topology.changed\",\"milestone.advanced\",\"observation.gap\"]}}",
+        routeloom_protocol::observation::PAGE_MAX,
+        crate::observation::MAX_IN_FLIGHT,
+        crate::observation::MAX_AGE_LIMIT_MS,
+        crate::observation::API_WAIT_MS,
+    )
 }
 
 /// `wait_ms`: 0..=WAIT_MS_MAX (default 0 = answer immediately).
@@ -3956,6 +4654,10 @@ mod tests {
         Box::leak(Box::new(crate::telemetry::TelemetryOps::default()))
     }
 
+    fn leaked_observation_ops() -> &'static crate::observation::ObservationOps {
+        Box::leak(Box::new(crate::observation::ObservationOps::default()))
+    }
+
     fn leaked_hub() -> &'static SubscriptionHub {
         Box::leak(Box::new(SubscriptionHub::default()))
     }
@@ -3999,6 +4701,7 @@ mod tests {
             config_ops,
             group_ops: leaked_group_ops(),
             telemetry_ops: leaked_telemetry_ops(),
+            observation_ops: leaked_observation_ops(),
             site: None,
             config_authority,
             config_profile: crate::config::ISSUE_PROFILE_DEV,
@@ -7638,5 +8341,503 @@ mod tests {
         assert!(handle(line, &c).contains("\"gateway_capable\":false"));
         // group_settled is a subscribable event kind.
         assert!(crate::subscribe::EVENT_KINDS.contains(&"group_settled"));
+    }
+
+    // --- health.get / topology.get ----------------------------------------
+
+    fn observation_session(capability: u32) -> &'static Mutex<SessionInfo> {
+        let session = leaked_session();
+        {
+            let mut info = session.lock().unwrap();
+            info.authenticated = true;
+            info.id = Some(0x5e55);
+            info.node = Some(0x0abc);
+            info.boot = Some(0xB007);
+            info.network = Some(1);
+            info.capability = Some(capability);
+        }
+        session
+    }
+
+    fn observation_line(method: &str, params: &str) -> String {
+        format!("{{\"v\":1,\"request_id\":\"o\",\"method\":\"{method}\",\"params\":{params}}}")
+    }
+
+    const OBSERVER: &str = "\"observer\":\"0000000000000abc\"";
+
+    #[test]
+    fn observation_methods_are_advertised() {
+        let (acl, log, store, limiter) = test_env();
+        let line = b"{\"v\":1,\"request_id\":\"c\",\"method\":\"capabilities.get\"}";
+        let c = ctx(None, &acl, &log, &store, &limiter, 0);
+        let response = handle(line, &c);
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let result = parsed.get("result").unwrap();
+        let methods = result.get("methods").unwrap();
+        assert_eq!(
+            methods.get("health.get").and_then(Json::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            methods.get("topology.get").and_then(Json::as_bool),
+            Some(true)
+        );
+        let observation = result.get("observation").unwrap();
+        // Detached: servable flags are false, limits static.
+        assert_eq!(
+            observation.get("health").and_then(Json::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            observation.get("remote").and_then(Json::as_bool),
+            Some(false)
+        );
+        let limits = observation.get("limits").unwrap();
+        assert_eq!(
+            limits.get("routes_page_max").and_then(Json::as_u64),
+            Some(8)
+        );
+        // Attached with bit 11: servable; without: not.
+        let c = ApiContext {
+            session: observation_session(0xFFFF_FFFF),
+            ..ctx(None, &acl, &log, &store, &limiter, 0)
+        };
+        let response = handle(line, &c);
+        assert!(response.contains("\"topology\":true"), "{response}");
+        assert!(response.contains("\"health\":true"), "{response}");
+        let c = ApiContext {
+            session: observation_session(0x07),
+            ..ctx(None, &acl, &log, &store, &limiter, 0)
+        };
+        let response = handle(line, &c);
+        assert!(response.contains("\"topology\":false"), "{response}");
+        // The 0x72-fed ring events are subscribable.
+        for kind in ["topology.changed", "milestone.advanced", "observation.gap"] {
+            assert!(crate::subscribe::EVENT_KINDS.contains(&kind), "{kind}");
+        }
+    }
+
+    #[test]
+    fn health_get_rejects_bad_params() {
+        let (acl, log, store, limiter) = test_env();
+        let c = ApiContext {
+            session: observation_session(0xFFFF_FFFF),
+            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+        };
+        let cases = [
+            "{}",
+            "{\"observer\":\"zz\"}",
+            "{\"observer\":\"0000000000000abc\",\"section\":\"neighbors\"}",
+            "{\"observer\":\"0000000000000abc\",\"section\":0}",
+            "{\"observer\":\"0000000000000abc\",\"max_age_ms\":60001}",
+            "{\"observer\":\"0000000000000abc\",\"max_age_ms\":-1}",
+            "{\"observer\":\"0000000000000abc\",\"subscribe\":\"yes\"}",
+            "{\"observer\":\"0000000000000abc\",\"network\":\"zz\"}",
+            "{\"observer\":\"0000000000000abc\",\"destination\":\"0000000000000005\"}",
+            "{\"observer\":\"0000000000000abc\",\"bogus\":1}",
+        ];
+        for params in cases {
+            let response = handle(observation_line("health.get", params).as_bytes(), &c);
+            assert!(
+                response.contains("\"code\":\"INVALID_ARGUMENT\""),
+                "{params}: {response}"
+            );
+        }
+    }
+
+    #[test]
+    fn observation_network_param_treats_null_as_absent() {
+        let link = ObservationLink {
+            session: 1,
+            gateway: 2,
+            boot: 3,
+            network: Some(1),
+        };
+        for (params, ok) in [
+            ("{}", true),
+            ("{\"network\":null}", true),
+            ("{\"network\":\"0000000000000001\"}", true),
+            ("{\"network\":\"0000000000000002\"}", false),
+            ("{\"network\":\"zz\"}", false),
+        ] {
+            let parsed = routeloom_json::parse(params).unwrap();
+            assert_eq!(
+                observation_network_param(&parsed, &link).is_ok(),
+                ok,
+                "{params}"
+            );
+        }
+    }
+
+    #[test]
+    fn observation_gate_and_scope() {
+        let (acl, log, store, limiter) = test_env();
+        let params = format!("{{{OBSERVER},\"section\":\"system\"}}");
+        let line = observation_line("health.get", &params);
+        // No session.
+        let c = ctx(None, &acl, &log, &store, &limiter, 1_000);
+        let response = handle(line.as_bytes(), &c);
+        assert_error_schema(&response, "GATEWAY_UNAVAILABLE");
+        // Session without the observation bit.
+        let c = ApiContext {
+            session: observation_session(0x07),
+            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+        };
+        let doc = assert_error_schema(&handle(line.as_bytes(), &c), "UNSUPPORTED");
+        assert_eq!(
+            doc.get("error")
+                .unwrap()
+                .get("detail")
+                .unwrap()
+                .get("required_capability")
+                .and_then(Json::as_str),
+            Some("observation_v1")
+        );
+        // Foreign observer: NOT_FOUND, never a routed query.
+        let c = ApiContext {
+            session: observation_session(0xFFFF_FFFF),
+            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+        };
+        let foreign = observation_line(
+            "health.get",
+            "{\"observer\":\"0000000000000005\",\"section\":\"system\"}",
+        );
+        let doc = assert_error_schema(&handle(foreign.as_bytes(), &c), "NOT_FOUND");
+        assert_eq!(
+            doc.get("error")
+                .unwrap()
+                .get("detail")
+                .unwrap()
+                .get("reason")
+                .and_then(Json::as_str),
+            Some("remote_not_served")
+        );
+        // Network scope mismatch.
+        let scoped = observation_line(
+            "health.get",
+            &format!("{{{OBSERVER},\"section\":\"system\",\"network\":\"0000000000000002\"}}"),
+        );
+        let doc = assert_error_schema(&handle(scoped.as_bytes(), &c), "GATEWAY_UNAVAILABLE");
+        assert_eq!(
+            doc.get("error")
+                .unwrap()
+                .get("detail")
+                .unwrap()
+                .get("reason")
+                .and_then(Json::as_str),
+            Some("network_mismatch")
+        );
+        // Matching network passes the gate (then times out with no lane —
+        // the wait budget is what proves the gate opened).
+        let scoped = observation_line(
+            "topology.get",
+            &format!("{{{OBSERVER},\"section\":\"routes\",\"network\":\"0000000000000001\"}}"),
+        );
+        let response = handle(scoped.as_bytes(), &c);
+        assert!(response.contains("\"code\":\"TIMEOUT\""), "{response}");
+    }
+
+    /// Posts one 0x71 page for the single in-flight query and returns the
+    /// method response the waiter observed.
+    fn drive_observation_once(
+        ops: &'static crate::observation::ObservationOps,
+        line: &str,
+        c: &ApiContext<'_, MemoryOperationStore>,
+        page: Vec<u8>,
+        received_ms: u64,
+    ) -> String {
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| handle(line.as_bytes(), c));
+            let request = {
+                let mut request = None;
+                for _ in 0..500 {
+                    if let Some(token) = ops.tokens().first() {
+                        // Submitted against the monotonic clock (ctx.now_mono),
+                        // never the wall clock the ages render in.
+                        assert_eq!(ops.submitted_ms_for(*token), Some(1_000));
+                        request = ops.request_for(*token);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                request.expect("the method submits a query")
+            };
+            assert!(ops.post_reply(request, 0x5e55, page, received_ms));
+            waiter.join().unwrap()
+        })
+    }
+
+    #[test]
+    fn health_get_roundtrip_serves_and_caches() {
+        use routeloom_protocol::observation::*;
+        let (acl, log, store, limiter) = test_env();
+        let ops: &'static crate::observation::ObservationOps = leaked_observation_ops();
+        let c = ApiContext {
+            session: observation_session(0xFFFF_FFFF),
+            observation_ops: ops,
+            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+        };
+        let body = encode_observation_system(&ObservationSystem {
+            uptime_ms: 400,
+            heap_free_bytes: 100,
+            heap_min_bytes: 90,
+            heap_largest_bytes: 80,
+            reset_code: 3,
+            power_mode: 1,
+            coord_mode: 3,
+            sec_profile: 1,
+        });
+        let page = encode_observation_page(
+            &ObservationPageHeader {
+                result: RESULT_OK,
+                section: SECTION_SYSTEM,
+                flags: 0,
+                count: 1,
+                boot_id: 0xB007,
+                revision: 0,
+                next_after: 0,
+            },
+            &body,
+        )
+        .unwrap();
+        let line = observation_line("health.get", &format!("{{{OBSERVER}}}"));
+        let response = drive_observation_once(ops, &line, &c, page, 1_000);
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let result = parsed.get("result").expect("ok result");
+        assert_eq!(
+            result.get("outcome").and_then(Json::as_str),
+            Some("snapshot")
+        );
+        let snapshot = result.get("snapshot").unwrap();
+        assert_eq!(
+            snapshot.get("section").and_then(Json::as_str),
+            Some("system")
+        );
+        assert_eq!(
+            snapshot
+                .get("source")
+                .unwrap()
+                .get("observer_boot")
+                .and_then(Json::as_str),
+            Some("000000000000b007")
+        );
+        assert_eq!(
+            snapshot
+                .get("system")
+                .unwrap()
+                .get("uptime_ms")
+                .and_then(Json::as_u64),
+            Some(400)
+        );
+        assert_eq!(
+            snapshot
+                .get("system")
+                .unwrap()
+                .get("reset")
+                .unwrap()
+                .get("name")
+                .and_then(Json::as_str),
+            Some("watchdog")
+        );
+        // Second call within max_age: served from cache, no new submit.
+        let response = handle(line.as_bytes(), &c);
+        assert!(response.contains("\"outcome\":\"snapshot\""), "{response}");
+        assert!(ops.tokens().is_empty());
+        // max_age_ms:0 bypasses the cache: a fresh submit appears (and
+        // times out with no lane driving it).
+        let fresh = observation_line("health.get", &format!("{{{OBSERVER},\"max_age_ms\":0}}"));
+        let response = handle(fresh.as_bytes(), &c);
+        assert!(response.contains("\"code\":\"TIMEOUT\""), "{response}");
+    }
+
+    #[test]
+    fn topology_get_routes_pages_and_exact() {
+        use routeloom_protocol::observation::*;
+        let (acl, log, store, limiter) = test_env();
+        let ops: &'static crate::observation::ObservationOps = leaked_observation_ops();
+        let c = ApiContext {
+            session: observation_session(0xFFFF_FFFF),
+            observation_ops: ops,
+            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+        };
+        let entry = |destination: u64, valid: bool| RouteDetailEntry {
+            destination,
+            next_hop: 2,
+            generation: 1,
+            sequence: 9,
+            metric: 3,
+            valid,
+            remaining_ms: 500,
+        };
+        let mut body = encode_route_detail_entry(&entry(2, true));
+        body.extend_from_slice(&encode_route_detail_entry(&entry(3, false)));
+        let page = encode_observation_page(
+            &ObservationPageHeader {
+                result: RESULT_OK,
+                section: SECTION_ROUTES,
+                flags: PAGE_MORE,
+                count: 2,
+                boot_id: 0xB007,
+                revision: 0x1122_3344,
+                next_after: 3,
+            },
+            &body,
+        )
+        .unwrap();
+        let line = observation_line(
+            "topology.get",
+            &format!("{{{OBSERVER},\"section\":\"routes\"}}"),
+        );
+        let response = drive_observation_once(ops, &line, &c, page, 1_000);
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let snapshot = parsed.get("result").unwrap().get("snapshot").unwrap();
+        assert_eq!(
+            snapshot.get("complete").and_then(Json::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            snapshot.get("next_cursor").and_then(Json::as_str),
+            Some("0000000000000003")
+        );
+        assert_eq!(
+            snapshot.get("revision").and_then(Json::as_u64),
+            Some(0x1122_3344)
+        );
+        let entries = snapshot.get("entries").unwrap().as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0].get("next_hop").and_then(Json::as_str),
+            Some("0000000000000002")
+        );
+        assert_eq!(entries[1].get("valid").and_then(Json::as_bool), Some(false));
+        assert!(entries[1].get("next_hop").unwrap().is_null());
+        // Exact destination with no selection: present:false.
+        let empty = encode_observation_page(
+            &ObservationPageHeader {
+                result: RESULT_OK,
+                section: SECTION_ROUTES,
+                flags: 0,
+                count: 0,
+                boot_id: 0xB007,
+                revision: 0x1122_3344,
+                next_after: 9,
+            },
+            &[],
+        )
+        .unwrap();
+        let line = observation_line(
+            "topology.get",
+            &format!("{{{OBSERVER},\"section\":\"routes\",\"destination\":\"0000000000000009\"}}"),
+        );
+        let response = drive_observation_once(ops, &line, &c, empty, 1_000);
+        assert!(response.contains("\"present\":false"), "{response}");
+        // Routes pages are never cached: every call queries.
+        let line = observation_line(
+            "topology.get",
+            &format!("{{{OBSERVER},\"section\":\"routes\"}}"),
+        );
+        let response = handle(line.as_bytes(), &c);
+        assert!(response.contains("\"code\":\"TIMEOUT\""), "{response}");
+    }
+
+    #[test]
+    fn topology_get_rejects_bad_cursor_and_neighbors() {
+        let (acl, log, store, limiter) = test_env();
+        let c = ApiContext {
+            session: observation_session(0xFFFF_FFFF),
+            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+        };
+        for params in [
+            format!("{{{OBSERVER}}}"),
+            format!("{{{OBSERVER},\"section\":\"routes\",\"cursor\":\"ffffffffffffffff\"}}"),
+            format!("{{{OBSERVER},\"section\":\"routes\",\"cursor\":\"zz\"}}"),
+            format!("{{{OBSERVER},\"section\":\"routes\",\"destination\":\"0000000000000000\"}}"),
+            format!(
+                "{{{OBSERVER},\"section\":\"routes\",\"destination\":\"0000000000000009\",\"cursor\":\"0000000000000001\"}}"
+            ),
+            format!("{{{OBSERVER},\"section\":\"summary\",\"cursor\":\"0000000000000001\"}}"),
+            format!("{{{OBSERVER},\"section\":\"routes\",\"bogus\":1}}"),
+        ] {
+            let response = handle(observation_line("topology.get", &params).as_bytes(), &c);
+            assert!(
+                response.contains("\"code\":\"INVALID_ARGUMENT\""),
+                "{params}: {response}"
+            );
+        }
+        // neighbors has no M1 device section: UNSUPPORTED, never a blend.
+        let line = observation_line(
+            "topology.get",
+            &format!("{{{OBSERVER},\"section\":\"neighbors\"}}"),
+        );
+        assert_error_schema(&handle(line.as_bytes(), &c), "UNSUPPORTED");
+    }
+
+    #[test]
+    fn observation_device_outcomes_map_honestly() {
+        use routeloom_protocol::observation::*;
+        let (acl, log, store, limiter) = test_env();
+        let ops: &'static crate::observation::ObservationOps = leaked_observation_ops();
+        let c = ApiContext {
+            session: observation_session(0xFFFF_FFFF),
+            observation_ops: ops,
+            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+        };
+        // A summary page round-trips through the cache path.
+        let summary = encode_observation_summary(&ObservationSummary {
+            neighbor_digest: 0xA5A5_A5A5,
+            route_digest: 0x5A5A_5A5A,
+            milestone_gen: 7,
+            ..ObservationSummary::default()
+        });
+        let page = encode_observation_page(
+            &ObservationPageHeader {
+                result: RESULT_OK,
+                section: SECTION_SUMMARY,
+                flags: PAGE_ARMED,
+                count: 1,
+                boot_id: 0xB007,
+                revision: 0x5A5A_5A5A,
+                next_after: 0,
+            },
+            &summary,
+        )
+        .unwrap();
+        let line = observation_line(
+            "topology.get",
+            &format!("{{{OBSERVER},\"section\":\"summary\"}}"),
+        );
+        let response = drive_observation_once(ops, &line, &c, page, 1_000);
+        assert!(response.contains("\"milestone_gen\":7"), "{response}");
+        assert!(response.contains("\"armed\":true"), "{response}");
+        // A device refusal arrives as its honest error, with the device
+        // result attached.
+        let refused = encode_observation_page(
+            &ObservationPageHeader {
+                result: RESULT_UNSUPPORTED,
+                section: SECTION_TABLES,
+                flags: 0,
+                count: 0,
+                boot_id: 0xB007,
+                revision: 0,
+                next_after: 0,
+            },
+            &[],
+        )
+        .unwrap();
+        let line = observation_line(
+            "health.get",
+            &format!("{{{OBSERVER},\"section\":\"tables\",\"max_age_ms\":0}}"),
+        );
+        let response = drive_observation_once(ops, &line, &c, refused, 1_000);
+        let doc = assert_error_schema(&response, "UNSUPPORTED");
+        assert_eq!(
+            doc.get("error")
+                .unwrap()
+                .get("detail")
+                .unwrap()
+                .get("device_result")
+                .and_then(Json::as_str),
+            Some("UNSUPPORTED")
+        );
     }
 }

@@ -13,6 +13,7 @@
 #include "routeloom/fixed_containers.hpp"
 #include "routeloom/group.hpp"
 #include "routeloom/node_status.hpp"
+#include "routeloom/observation.hpp"
 #include "routeloom/reply_peer_leases.hpp"
 #include "routeloom/route_request.hpp"
 #include "routeloom/routing.hpp"
@@ -920,6 +921,8 @@ class MeshNode {
   // atomic admission reservation (pending + dedup + reply budget) the
   // contract demands before accepting work (03 §3.4).
   std::size_t tx_free_slots() const noexcept { return scheduler_.free_slots(); }
+  // TX queue bound for the health surface (used = capacity - free_slots).
+  static constexpr std::size_t tx_queue_capacity() noexcept { return kTxQueueCapacity; }
   // Resolve the in-flight driver attempt. Must be called on the node's
   // single owner task — a driver completion callback hands the event over
   // instead of invoking inline (issue #60-3). This resolves only: the next
@@ -965,6 +968,20 @@ class MeshNode {
   std::size_t node_status_page(NodeId after, NodeStatus* out, std::size_t capacity,
                                MonotonicMs now_ms, bool& more) const noexcept;
 
+  // --- Route detail snapshot (observation.hpp, observation.cpp) ---------------
+  // Read-only projection of the selected-route table: destination, next hop,
+  // generation, sequence, metric and the remaining lease of the selected
+  // candidate. Same cursor contract as node_status_page (strictly ascending
+  // ids, stable under churn for nodes present across pages); route_detail
+  // answers one destination (false when no route entry is remembered — an
+  // unremembered destination is NOT reported as an invalid selection).
+  // Neither call touches selection, leases or advertisement baselines.
+  bool route_detail(NodeId destination, MonotonicMs now_ms,
+                    RouteDetailEntry& out) const noexcept;
+  std::size_t route_detail_page(NodeId after, RouteDetailEntry* out,
+                                std::size_t capacity, MonotonicMs now_ms,
+                                bool& more) const noexcept;
+
   // Gateway-scoped profile (routing-scale.md): true when at least one
   // gateway is configured. scoped_child() reports whether `neighbor`
   // currently routes to a gateway through this node (test/diagnostic view).
@@ -1002,6 +1019,8 @@ class MeshNode {
   const SessionStats& session_stats() const noexcept { return session_stats_; }
   // Group lane occupancy (tests/diagnostics): relay/receiver trees in use.
   std::size_t group_trees_in_use() const noexcept { return group_trees_.size(); }
+  // Sourced group messages with a live origin record (tests/diagnostics).
+  std::size_t group_origins_in_use() const noexcept { return group_origins_.size(); }
   // Ordered messages currently held for a gap (tests/diagnostics).
   std::size_t group_holds_in_use() const noexcept { return group_holds_.size(); }
   // Receive-side stream/hold snapshots (tests/diagnostics), pool order:
@@ -1093,6 +1112,10 @@ class MeshNode {
   // Read-only test/diagnostic surface for the capacity invariants of
   // sdk-completion/02 §2.5 — always <= kDedupCapacity (profile) by construction.
   std::size_t dedup_resident() const noexcept { return dedup_.size(); }
+  // Live terminal (exactly-once pin) records — the health surface reports
+  // this beside resident/capacity so pin exhaustion is visible before the
+  // reserve refuses. Read-only scan of the fixed pool.
+  std::size_t dedup_terminal_pins() const noexcept;
   // Current per-peer in-flight window (1..4) used by the dispatch gate.
   std::uint8_t peer_tx_window(NodeId peer) const noexcept;
   // Marks a peer as implementing the Busy(20) feedback payload. Until

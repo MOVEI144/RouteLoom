@@ -117,6 +117,12 @@ Status UsbBridge::attach_node_status() noexcept {
   return Status::success();
 }
 
+Status UsbBridge::attach_observation(const ObservationSource& source) noexcept {
+  observation_source_ = &source;
+  config_.capability |= kCapObservationV1;
+  return Status::success();
+}
+
 Status UsbBridge::attach_group() noexcept {
   if (config_.mesh == nullptr) {
     return Status::error(StatusCode::InvalidState, "group needs mesh");
@@ -267,6 +273,7 @@ void UsbBridge::poll(const MonotonicMs now_ms) noexcept {
     }
   }
   pump_node_events(now_ms);
+  pump_observation_events(now_ms);
   pump_tx(now_ms);
   if (state_ == SessionState::Draining && !tx_wire_active_ && control_q_.empty() &&
       data_q_.empty()) {
@@ -761,6 +768,15 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
       send_error(UsbErrorCode::ProtocolError, request, "NODE_STATUS_DIRECTION",
                  now_ms);
       break;
+    case HostOpsSub::ObservationQuery:
+      handle_observation_query(request, inner, now_ms);
+      break;
+    case HostOpsSub::ObservationPage:
+    case HostOpsSub::ObservationEvent:
+      // 0x71/0x72 are device→host only.
+      send_error(UsbErrorCode::ProtocolError, request, "OBSERVATION_DIRECTION",
+                 now_ms);
+      break;
     case HostOpsSub::GroupSend:
       handle_group_send(request, inner, now_ms);
       break;
@@ -1111,6 +1127,166 @@ void UsbBridge::handle_node_status_query(const std::uint64_t request,
           written)) {
     enqueue(FrameKind::HostOps, 0, request,
             ByteView{tx_body_.data(), written}, now_ms);
+  } else {
+    ++stats_.dropped_frames;
+  }
+}
+
+void UsbBridge::handle_observation_query(const std::uint64_t request,
+                                         const ByteView inner,
+                                         const MonotonicMs now_ms) noexcept {
+  ObservationQuery query{};
+  if (!decode_observation_query(inner, query).ok()) {
+    send_error(UsbErrorCode::ProtocolError, request, "OBSERVATION_MALFORMED",
+               now_ms);
+    return;
+  }
+  ObservationPageHeader header{};
+  header.section = query.section;
+  header.boot_id = config_.boot_id;
+  header.next_after = query.after;
+  std::size_t count = 0;
+  std::size_t body_size = 0;
+  // Bodies encode straight into tx_body_ at the page-body offset (the tx
+  // scratch is idle between pumps — the same transient use the
+  // node-status page makes of it).
+  constexpr std::size_t kPageBodyOffset = kGatewayInnerHeadSize + kObservationPageFixed;
+  const MutableByteView tx{tx_body_.data(), kGatewayInnerHeadSize + kObservationPageMaxPayload};
+  const MutableByteView body{tx_body_.data() + kPageBodyOffset, kObservationPageMaxPayload};
+  const bool servable =
+      (config_.capability & kCapObservationV1) != 0 && observation_source_ != nullptr;
+  if (!servable) {
+    header.result = static_cast<std::uint16_t>(ConfigOpsResult::Unsupported);
+  } else {
+    // Arm BEFORE taking the page: the baselines and the first page then
+    // describe the same instant, so no transition can fall between them.
+    if ((query.flags & kObservationQuerySubscribe) != 0) {
+      arm_observation(now_ms);
+    }
+    bool filled = false;
+    switch (query.section) {
+      case ObservationSection::System: {
+        ObservationSystem system{};
+        filled = observation_source_->fill_system(now_ms, system) &&
+                 encode_observation_system(system, body).ok();
+        if (filled) {
+          count = 1;
+          body_size = kObservationSystemBody;
+        }
+        break;
+      }
+      case ObservationSection::Tables: {
+        ObservationTables tables{};
+        filled = observation_source_->fill_tables(now_ms, tables) &&
+                 encode_observation_tables(tables, body).ok();
+        if (filled) {
+          count = 1;
+          body_size = kObservationTablesBody;
+        }
+        break;
+      }
+      case ObservationSection::Milestones: {
+        JoinMilestones milestones{};
+        filled = observation_source_->fill_milestones(now_ms, milestones) &&
+                 encode_observation_milestones(milestones, body).ok();
+        if (filled) {
+          count = 1;
+          body_size = kObservationMilestonesBody;
+          refresh_milestone_gen(milestones);
+          header.revision = observation_milestone_gen_;
+        }
+        break;
+      }
+      case ObservationSection::Summary: {
+        ObservationSummary summary{};
+        JoinMilestones milestones{};
+        filled = observation_source_->fill_summary(now_ms, summary) &&
+                 observation_source_->fill_milestones(now_ms, milestones);
+        if (filled) {
+          // The generation is bridge-owned (it sees every served tuple);
+          // the source leaves its copy zero.
+          refresh_milestone_gen(milestones);
+          summary.milestone_gen = observation_milestone_gen_;
+          filled = encode_observation_summary(summary, body).ok();
+        }
+        if (filled) {
+          count = 1;
+          body_size = kObservationSummaryBody;
+          header.revision = summary.route_digest;
+        }
+        break;
+      }
+      case ObservationSection::Routes: {
+        const bool exact = (query.flags & kObservationQueryExact) != 0;
+        bool more = false;
+        // One entry stages in a handler-local at a time (32 B of transient
+        // stack, like the event encoder's frame scratch): the table cannot
+        // move under this synchronous handler, so capacity-1 walks equal
+        // one capacity-N page.
+        RouteDetailEntry staging{};
+        NodeId cursor = query.after;
+        if (exact) {
+          if (observation_source_->route_detail_exact(query.after, now_ms, staging)) {
+            filled = encode_observation_route_entry(
+                         staging, MutableByteView{body.data, kObservationRouteEntrySize})
+                         .ok();
+            count = filled ? 1 : 0;
+            if (filled) cursor = staging.destination;
+          } else {
+            filled = true;
+            count = 0;
+          }
+        } else {
+          filled = true;
+          count = 0;
+          for (std::size_t i = 0; filled && i < query.max_entries; ++i) {
+            bool page_more = false;
+            if (observation_source_->route_detail_page(cursor, &staging, 1, now_ms, page_more) ==
+                0) {
+              break;
+            }
+            filled = encode_observation_route_entry(
+                         staging,
+                         MutableByteView{body.data + count * kObservationRouteEntrySize,
+                                         kObservationRouteEntrySize})
+                         .ok();
+            if (!filled) break;
+            cursor = staging.destination;
+            ++count;
+            more = page_more;
+            if (!more) break;
+          }
+        }
+        if (filled) {
+          ObservationSummary summary{};
+          if (observation_source_->fill_summary(now_ms, summary)) {
+            header.revision = summary.route_digest;
+          }
+          body_size = count * kObservationRouteEntrySize;
+          if (more) header.flags |= kObservationPageMore;
+          header.next_after = count > 0 ? cursor : query.after;
+        }
+        break;
+      }
+    }
+    header.result = static_cast<std::uint16_t>(
+        filled ? ConfigOpsResult::Ok : ConfigOpsResult::Indeterminate);
+    if (!filled) {
+      count = 0;
+      body_size = 0;
+    }
+    if (observation_armed_) header.flags |= kObservationPageArmed;
+  }
+  header.count = static_cast<std::uint8_t>(count);
+  // The body is already staged in tx_body_ at the page-body offset; only
+  // the head still needs encoding (over the same prefix it validates).
+  std::size_t head_written = 0;
+  if (encode_observation_page_head(header, ByteView{body.data, body_size}, count, tx,
+                                   head_written)
+          .ok() &&
+      head_written == kPageBodyOffset) {
+    enqueue(FrameKind::HostOps, 0, request,
+            ByteView{tx_body_.data(), kPageBodyOffset + body_size}, now_ms);
   } else {
     ++stats_.dropped_frames;
   }
@@ -1474,6 +1650,107 @@ void UsbBridge::pump_node_events(const MonotonicMs now_ms) noexcept {
         ++stats_.node_events;
         return true;
       });
+}
+
+void UsbBridge::refresh_milestone_gen(const JoinMilestones& milestones) noexcept {
+  const std::uint32_t key = observation_milestones_key(milestones);
+  if (key != observation_milestone_key_) {
+    observation_milestone_key_ = key;
+    // Saturating: a wrap would alias a new tuple onto an old generation.
+    if (observation_milestone_gen_ < UINT32_MAX) ++observation_milestone_gen_;
+  }
+}
+
+void UsbBridge::arm_observation(const MonotonicMs now_ms) noexcept {
+  observation_armed_ = true;
+  observation_ms_lo_ = static_cast<std::uint32_t>(now_ms);
+  observation_seq_ = 0;
+  observation_topology_mask_ = 0;
+  observation_milestone_pending_ = false;
+  if (observation_source_ == nullptr) return;
+  ObservationSummary summary{};
+  if (observation_source_->fill_summary(now_ms, summary)) {
+    observation_neighbor_digest_ = summary.neighbor_digest;
+    observation_route_digest_ = summary.route_digest;
+  }
+  JoinMilestones milestones{};
+  if (observation_source_->fill_milestones(now_ms, milestones)) {
+    refresh_milestone_gen(milestones);
+  }
+}
+
+bool UsbBridge::emit_observation_event(const ObservationEvent& event,
+                                       const MonotonicMs now_ms) noexcept {
+  // Same application-traffic reserve as node events: a refused emission
+  // waits for the next pass instead of displacing a delivery.
+  if (data_q_.size() + kNodeEventQueueReserve >= data_q_.capacity()) {
+    return false;
+  }
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kObservationEventPayload> body{};
+  std::size_t written = 0;
+  if (!encode_observation_event(event, MutableByteView{body.data(), body.size()}, written)) {
+    return false;
+  }
+  if (!enqueue(FrameKind::HostOps, 0, 0, ByteView{body.data(), written}, now_ms)) {
+    return false;
+  }
+  return true;
+}
+
+void UsbBridge::pump_observation_events(const MonotonicMs now_ms) noexcept {
+  // Unsigned 32-bit elapsed: exact while passes run (the poll cadence is
+  // milliseconds against the 49-day wrap); only a 49-day poll stall could
+  // alias it small, and that heals on the next pass.
+  const std::uint32_t elapsed =
+      static_cast<std::uint32_t>(now_ms) - observation_ms_lo_;
+  if (state_ != SessionState::Active || !observation_armed_ ||
+      observation_source_ == nullptr || elapsed < kObservationIntervalMs) {
+    return;
+  }
+  observation_ms_lo_ = static_cast<std::uint32_t>(now_ms);
+  // Detection first (baselines advance at once — level-triggered), then
+  // emission with the latest values; a refused emission stays pending.
+  ObservationSummary summary{};
+  if (observation_source_->fill_summary(now_ms, summary)) {
+    std::uint8_t mask = 0;
+    if (summary.neighbor_digest != observation_neighbor_digest_) {
+      observation_neighbor_digest_ = summary.neighbor_digest;
+      mask |= kObservationEventMaskNeighbors;
+    }
+    if (summary.route_digest != observation_route_digest_) {
+      observation_route_digest_ = summary.route_digest;
+      mask |= kObservationEventMaskRoutes;
+    }
+    observation_topology_mask_ |= mask;
+  }
+  JoinMilestones milestones{};
+  if (observation_source_->fill_milestones(now_ms, milestones)) {
+    const std::uint32_t gen = observation_milestone_gen_;
+    refresh_milestone_gen(milestones);
+    if (observation_milestone_gen_ != gen) observation_milestone_pending_ = true;
+  }
+  if (observation_topology_mask_ != 0) {
+    ObservationEvent event{};
+    event.sequence = observation_seq_ + 1U;
+    event.kind = kObservationEventTopology;
+    event.mask = observation_topology_mask_;
+    event.boot_id = config_.boot_id;
+    event.revision = observation_route_digest_;
+    event.extra = observation_neighbor_digest_;
+    if (!emit_observation_event(event, now_ms)) return;
+    ++observation_seq_;
+    observation_topology_mask_ = 0;
+  }
+  if (observation_milestone_pending_) {
+    ObservationEvent event{};
+    event.sequence = observation_seq_ + 1U;
+    event.kind = kObservationEventMilestone;
+    event.boot_id = config_.boot_id;
+    event.revision = observation_milestone_gen_;
+    if (!emit_observation_event(event, now_ms)) return;
+    ++observation_seq_;
+    observation_milestone_pending_ = false;
+  }
 }
 
 void UsbBridge::handle_config_query(const std::uint64_t request,
@@ -2374,6 +2651,12 @@ void UsbBridge::reset_session_state() noexcept {
   // session starts silent until its host queries with SUBSCRIBE.
   node_monitor_.disarm();
   node_monitor_ms_ = 0;
+  // The observation subscription belongs to the session that armed it.
+  observation_armed_ = false;
+  observation_topology_mask_ = 0;
+  observation_milestone_pending_ = false;
+  observation_ms_lo_ = 0;
+  observation_seq_ = 0;
   // FINAL 0x51 correlation is session state too: request ids are
   // session-scoped, so a new session polls 0x52 instead.
   for (auto& slot : pending_group_) slot = PendingGroup{};

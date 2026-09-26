@@ -209,3 +209,28 @@ for event in site.site_events()? {
 ```
 
 制約：EXPERIMENTAL（本番Profileではない）。host試験のみで、実機のgateway・proxyとの疎通は無い。GKの配布・更新とauthority channel（JoinConfirm、P5）、RRS1の配布（P6）、site_epoch cutover、SiteCert発行tool（P7-2）は未実装。DAMS・GKはDB fileの0600で守るだけでhost鍵の封緘は無い。
+
+## 12. 機器観測（observation_v1、EXPERIMENTAL）
+
+USB直結gateway自身のread-only snapshotをAPI1で読む面（USB面は[USB §10](usb-protocol.md)）。M1はlocalのみ：`observer`は直結gateway自身でなければならず、他nodeの指定は`NOT_FOUND`（`detail.reason:\"remote_not_served\"`）で、mesh経由の遠隔観測はしない。gatewayがHelloAck bit 11（observation_v1）とbit 2の両方を広告する時だけ使える。経路・lease・広告の状態は変えない（ACL不要、`link.get`と同じ診断区分。payload・秘密鍵は含まない）。
+
+**API1**：
+
+- `health.get` params `{observer:\"16hex\", section?:\"system\"|\"tables\"|\"milestones\"(既定system), network?:\"16hex\", max_age_ms?:0..60000(既定10000、0は新規取得), subscribe?:bool}` → `{\"outcome\":\"snapshot\",\"scope\":{\"observer\"},\"snapshot\":{...}}`
+- `topology.get` params `{observer:\"16hex\", section:\"routes\"|\"summary\", network?, destination?:\"16hex\"(routes専用・1宛先), cursor?:\"16hex\"(routes専用・排他、destinationと排他), max_age_ms?, subscribe?}` → 同上。`section:\"neighbors\"`はM1の機器面に無いので`UNSUPPORTED`（node statusとの合成はしない）。
+- `snapshot`：`{\"schema\":1,\"section\",\"source\":{\"gateway\",\"usb_session\",\"observer\",\"observer_boot\",\"transport\":\"usb_local\"},\"revision\",\"received_unix_ms\",\"age_ms\",\"stale\":false,\"complete\",\"armed\", section本体|\"entries\"+\"next_cursor\"}`。`revision`はmilestones＝milestone世代、summary/routes＝route digest。routesは1呼で1 page（最大8件、`next_cursor`で継続、`complete`が終端）。`destination`指定は`present:true|false`付きの0/1件（未選択は`present:false`）。失効（`valid:false`）entryはretraction identity（generation/sequence）だけを持ち、next_hop・metric・remainingは`null`。
+- 不明値は`null`（heap不明・未到達のmilestone時刻・未adoptの`adopted_node`）。機器のageは`received_unix_ms`起点の上限値に写像する（node statusの`last_heard_ms`と同じ約束）。`confirmed_at_ms`は秒単位（機器がadopted起点の秒差分だけ保持するため1秒未満切り捨て）。`system.reset`の`panic`はmask-ROM直読では`software`と読む（IDF hint未使用の既知の限定）。`network`指定がsessionと違えば`GATEWAY_UNAVAILABLE`（`detail.reason:\"network_mismatch\"`）。機器の非Ok結果は`device_result`付きの正直なAPIエラー（`Unsupported`→`UNSUPPORTED`等）。
+- event（`stream:\"events\"`、要`subscribe:true`の(再)arm）：`topology.changed`（`mask`・両digest）、`milestone.advanced`（`generation`）、`observation.gap`（`expected`・`received`・`lost`）。(再)armは機器のevent sequenceを1に戻すため、daemonはSUBSCRIBE付きqueryの送信時にwatermarkを再同期する。
+
+**daemonの動き**：observation laneのthreadが0x70を送り（同時最大4件、超過は`NO_CAPACITY`、応答待ち2秒・lane timeout 1.5秒）、同request idの0x71で決着する（laneのrequest idは上位16bit `0x4F42`の専用範囲）。singleton（system/tables/milestones/summary）は`(session, boot)`にpinしたcacheを持ち、`max_age_ms`以内なら再queryしない（0x72のdirty・gap・boot変化で失効）。routesはcacheせず毎回queryする。
+
+`capabilities.get`は`methods`に`health.get`/`topology.get`、`observation:{telemetry,topology,health,board:false,remote:false,limits:{routes_page_max:8,max_in_flight:4,max_age_ms_max:60000,api_wait_ms:2000},events:[\"topology.changed\",\"milestone.advanced\",\"observation.gap\"]}`を返す（可否は接続中のsessionのcapabilityに連動、未接続はfalse）。
+
+```sh
+routeloomctl health --observer 0000000000000abc --section milestones --subscribe
+routeloomctl topology --observer 0000000000000abc --section routes
+routeloomctl topology --observer 0000000000000abc --section routes --cursor 0000000000000003
+routeloomctl topology --observer 0000000000000abc --section routes --destination 0000000000000009
+```
+
+meshvizのAPI1 client（`tools/meshviz/src/routeloom_meshviz/api1_adapter.py`の`encode_health_request`／`encode_topology_request`／`parse_observation_snapshot`）からも同じ契約で取れる（画面変更なし、fixtureは`fake_api1.py`の`observation`引数）。\n\n制約：開発profileのEXPERIMENTAL機能。host試験（lane・API1・daemon配線・固定byte一致）とmeshviz fixtureのみで、実機との疎通・実RFは未確認。遠隔観測・`neighbors` sectionはM1の範囲外。

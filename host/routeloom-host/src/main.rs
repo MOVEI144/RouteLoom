@@ -8,6 +8,7 @@ mod config;
 mod dispatch;
 mod group;
 mod nodes;
+mod observation;
 mod receive_log;
 mod send_store;
 mod site;
@@ -831,6 +832,11 @@ struct State {
     /// `diagnostics.snapshot` submits and waits here, the telemetry lane
     /// thread drives the device exchange.
     telemetry_ops: telemetry::TelemetryOps,
+    /// observation_v1 query table + singleton cache (HostOps 0x70-0x72):
+    /// api1 `health.get` / `topology.get` submit and wait here, the
+    /// observation lane thread drives the device exchange, and the read
+    /// thread folds 0x72 change events into the cache.
+    observation_ops: observation::ObservationOps,
     /// SDK v1 Site Authority (--site-authority DIR): EDHOC Responder, member
     /// ledger and the KGuard decision surface. None when not configured.
     site: Option<Arc<site::SiteService>>,
@@ -1281,6 +1287,13 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                     .telemetry_ops
                     .post_error(request, frame.session, code.unwrap_or(0));
             }
+            if let Some(request) = request.filter(|r| observation::owns_request(*r)) {
+                // A 0x70 the device refused at the frame level: the query
+                // resolves as an error, never a silent timeout.
+                state
+                    .observation_ops
+                    .post_error(request, frame.session, code.unwrap_or(0));
+            }
             if let Some(request) = request {
                 // Error requests share the session request space (credit,
                 // auth, data): only transition a delivery we actually track —
@@ -1392,6 +1405,38 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
             state
                 .telemetry_ops
                 .post_reply(frame.request, frame.session, body.to_vec());
+        }
+        // observation_v1 0x71 replies resolve a lane query; 0x72 change
+        // events fold into the cache and surface as one ring event each
+        // (plus an observation.gap when the sequence skips).
+        FrameKind::HostOps if observation::owns_page(body) => {
+            state
+                .observation_ops
+                .post_reply(frame.request, frame.session, body.to_vec(), ms);
+        }
+        FrameKind::HostOps if observation::owns_event(body) => {
+            for notice in state.observation_ops.on_event(frame.session, body) {
+                let fields = match notice {
+                    observation::ObservationNotice::TopologyChanged {
+                        mask,
+                        route_digest,
+                        neighbor_digest,
+                    } => format!(
+                        "\"kind\":\"topology.changed\",\"mask\":{mask},\"route_digest\":{route_digest},\"neighbor_digest\":{neighbor_digest}"
+                    ),
+                    observation::ObservationNotice::MilestoneAdvanced { generation } => format!(
+                        "\"kind\":\"milestone.advanced\",\"generation\":{generation}"
+                    ),
+                    observation::ObservationNotice::Gap {
+                        expected,
+                        received,
+                        lost,
+                    } => format!(
+                        "\"kind\":\"observation.gap\",\"expected\":{expected},\"received\":{received},\"lost\":{lost}"
+                    ),
+                };
+                push_event(state, ms, fields);
+            }
         }
         FrameKind::HostOps if site::owns(body) => {
             if !state.site_inbox.post(frame.request, body.to_vec()) {
@@ -2255,6 +2300,7 @@ fn serve_client(
                 config_ops: &state.config_ops,
                 group_ops: &state.group_ops,
                 telemetry_ops: &state.telemetry_ops,
+                observation_ops: &state.observation_ops,
                 site: state.site.as_deref(),
                 config_authority: state.config_authority,
                 config_profile: state.config_profile,
@@ -2896,6 +2942,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let telemetry_state = Arc::clone(&state);
         let telemetry_outbound = outbound_tx.clone();
         thread::spawn(move || telemetry::telemetry_loop(telemetry_state, telemetry_outbound));
+    }
+    // observation_v1 lane: issues 0x70 queries for `health.get` /
+    // `topology.get` and resolves them from the 0x71 answers. Idle while
+    // nothing is submitted; same writer queue.
+    {
+        let observation_state = Arc::clone(&state);
+        let observation_outbound = outbound_tx.clone();
+        thread::spawn(move || {
+            observation::observation_loop(observation_state, observation_outbound)
+        });
     }
     if let Some(device_path) = device {
         let writer_slot: Arc<Mutex<Option<File>>> = Arc::new(Mutex::new(None));
