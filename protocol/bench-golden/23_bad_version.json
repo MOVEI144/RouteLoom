@@ -1,0 +1,6 @@
+{
+  "name": "bad_version",
+  "expect": "unsupported_version",
+  "wire_hex": "524c42310910000000112233445566778899aabbccddeeff0000000125d53dfd70696e67",
+  "note": "protocol version is 1"
+}

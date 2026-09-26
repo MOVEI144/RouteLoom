@@ -49,6 +49,12 @@ BOOT_HEAP_MODEL: Dict[tuple, Dict[str, int]] = {
     # minimum free during radio start 22,888 B (offset 16,272; peak 27,428).
     # Reserve 8 KiB: a normal device holds far fewer sessions than a gateway.
     ("esp32c3", "reference_node"): {"offset": 16272, "radio_peak": 27428, "reserve": 8192},
+    # bench_node esp32c3 (design-devflow.md §5.4): the image runs the same
+    # components/routeloom_node_boot bring-up, so the reference offset/peak
+    # carry over — the app delta is pure static .bss and already lands in
+    # `static_free`. Values stay a link-time model until a bench board is
+    # measured; the floor below is reference's, as the design requires.
+    ("esp32c3", "bench_node"): {"offset": 16272, "radio_peak": 27428, "reserve": 8192},
 }
 
 
@@ -70,12 +76,18 @@ MIN_FREE_BYTES: Dict[tuple, int] = {
     ("esp32c3", "bridge_node"): derived_static_floor(BOOT_HEAP_MODEL[("esp32c3", "bridge_node")]),
     ("esp32c3", "reference_node"):
         derived_static_floor(BOOT_HEAP_MODEL[("esp32c3", "reference_node")]),
+    # bench_node keeps an independent floor at the reference value
+    # (design-devflow.md §5.4: "reference以上の独立floor"); the shared boot
+    # path means the same boot-heap model applies.
+    ("esp32c3", "bench_node"):
+        derived_static_floor(BOOT_HEAP_MODEL[("esp32c3", "bench_node")]),
     ("esp32s3", "*"): 8 * 1024,
     ("esp32c5", "*"): 8 * 1024,
 }
 DEFAULT_MIN_FREE_BYTES = 8 * 1024
 assert MIN_FREE_BYTES[("esp32c3", "bridge_node")] == 27648
 assert MIN_FREE_BYTES[("esp32c3", "reference_node")] == 19456
+assert MIN_FREE_BYTES[("esp32c3", "bench_node")] == 19456
 
 # Section names that mark the memory type holding static data (abbreviated
 # names as esp-idf-size prints them by default, and the full output-section

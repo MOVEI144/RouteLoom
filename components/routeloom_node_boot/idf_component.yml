@@ -1,0 +1,27 @@
+# ESP-IDF Component Manager manifest for the shared node boot.
+# Mirrors the CMake REQUIRES: routeloom_espnow (runtime + security owner +
+# sdkv1 stores), plus the IDF builtins nvs_flash, esp_wifi, esp_timer,
+# freertos, esp_driver_usb_serial_jtag and app_update.
+name: routeloom/routeloom_node_boot
+version: 0.1.0
+description: >-
+  Shared RouteLoom node bring-up (design-devflow.md §5.1): NVS, boot
+  session, sdkv1 stores, the EspNowSecurityOwner, EspNowRuntime wiring,
+  discovery/migration/config opt-ins and the owner pump loops. Firmware
+  applications (reference_node, bench_node) install their observer and
+  hooks through NodeBootHooks.
+url: https://github.com/MOVEI144/RouteLoom
+repository: https://github.com/MOVEI144/RouteLoom.git
+issues: https://github.com/MOVEI144/RouteLoom/issues
+license: Apache-2.0
+tags:
+  - mesh
+  - espnow
+  - routeloom
+targets:
+  - esp32c3
+  - esp32s3
+  - esp32c5
+dependencies:
+  idf: ">=6.0"
+  routeloom/routeloom_espnow: "^0.1.0"

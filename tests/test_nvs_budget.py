@@ -34,6 +34,7 @@ class RepositoryBudget(unittest.TestCase):
         self.assertEqual(node["max_persisted_peers"], 64)
         self.assertEqual(gateway["max_persisted_peers"], 128)
         self.assertEqual(apps["examples/espnow_node"]["max_persisted_peers"], 64)
+        self.assertEqual(apps["firmware/bench_node"]["max_persisted_peers"], 64)
         for app in apps.values():
             self.assertLessEqual(app["worst_case_entries"], app["budget_entries"])
 
