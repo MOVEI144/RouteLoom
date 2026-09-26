@@ -143,6 +143,35 @@ class BundleTests(unittest.TestCase):
             (bundle / 'manifest.json').write_bytes(original_manifest)
             (bundle / 'SHA256SUMS').write_bytes(original_sums)
             (bundle / 'signature.json').write_bytes(original_sig)
+            # Even correctly signed partition bytes must not map persistent data
+            # into the factory image that will be written by this bundle.
+            partition_image = bundle / 'images/partition_table/partition-table.bin'
+            original_partition = partition_image.read_bytes()
+            overlapping = bytearray(32)
+            overlapping[:4] = b'\xaa\x50\x01\x02'
+            overlapping[4:8] = (0x180000).to_bytes(4, 'little')
+            overlapping[8:12] = (0x20000).to_bytes(4, 'little')
+            partition_image.write_bytes(original_partition + overlapping)
+            overlap_manifest = {**manifest, 'files': [
+                {**e, 'size': partition_image.stat().st_size,
+                 'sha256': catalog._hash(partition_image.read_bytes())}
+                if e['offset'] == 0x8000 else e for e in manifest['files']]}
+            (bundle / 'manifest.json').write_bytes(catalog._json(overlap_manifest))
+            (bundle / 'signature.json').write_bytes(catalog._json(catalog._sign(overlap_manifest, key)))
+            (bundle / 'SHA256SUMS').write_text(''.join(
+                f'{catalog._hash((bundle / name).read_bytes())}  {name}\n'
+                for name in sorted([e['path'] for e in overlap_manifest['files']] +
+                                   list(overlap_manifest['auxiliary']) + ['manifest.json'])))
+            api = API()
+            with self.assertRaises(ValueError):
+                flash('COM1', FlashPlan(identity, 'esp32c3', tuple(
+                    Image(e['offset'], bundle / e['path'], e['size'], e['sha256'])
+                    for e in overlap_manifest['files']), True, identity.base_mac, True, bundle), api)
+            self.assertIsNone(api.written)
+            partition_image.write_bytes(original_partition)
+            (bundle / 'manifest.json').write_bytes(original_manifest)
+            (bundle / 'SHA256SUMS').write_bytes(original_sums)
+            (bundle / 'signature.json').write_bytes(original_sig)
             rogue = root / 'rogue.pem'
             catalog.generate_key(rogue)
             signature_file = bundle / 'signature.json'

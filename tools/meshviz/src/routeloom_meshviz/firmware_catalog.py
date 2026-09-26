@@ -182,6 +182,33 @@ def package(app, build, out, private, chip, role, version, sdk_commit, source_di
     return manifest
 
 
+def _check_partition_table(data):
+    # A valid factory entry alone is insufficient: another partition may
+    # alias its flash range and destroy persisted state during first boot.
+    if len(data) > 0x1000 or len(data) % 32:
+        raise ValueError('invalid partition table size')
+    regions = []
+    factory = 0
+    for i in range(0, len(data), 32):
+        entry = data[i:i+32]
+        if entry == b'\xff' * 32:
+            break
+        if entry[:2] == b'\xeb\xeb':  # ESP-IDF partition-table MD5 trailer
+            break
+        if entry[:2] != b'\xaa\x50':
+            raise ValueError('invalid partition entry')
+        offset = int.from_bytes(entry[4:8], 'little')
+        size = int.from_bytes(entry[8:12], 'little')
+        if size == 0 or offset < 0x9000 or offset + size > 0x1000000 or any(
+                offset < end and start < offset + size for start, end in regions):
+            raise ValueError('overlapping or invalid partition')
+        regions.append((offset, offset + size))
+        if entry[2:4] == b'\x00\x00' and offset == 0x10000 and size == 0x180000:
+            factory += 1
+    if factory != 1:
+        raise ValueError('partition table missing factory layout')
+
+
 def verify_bundle(root, public):
     root = Path(root)
     manifest = json.loads(_read(root, 'manifest.json'))
@@ -219,12 +246,8 @@ def verify_bundle(root, public):
                 int.from_bytes(data[12:14], 'little') != {'esp32c3': 5, 'esp32s3': 9,
                                                           'esp32c5': 23}[chip]):
             raise ValueError('image header does not match chip')
-        if entry['offset'] == 0x8000 and not any(
-                data[i:i+2] == b'\xaa\x50' and data[i+2:i+4] == b'\x00\x00' and
-                int.from_bytes(data[i+4:i+8], 'little') == 0x10000 and
-                int.from_bytes(data[i+8:i+12], 'little') == 0x180000
-                for i in range(0, len(data) - 31, 32)):
-            raise ValueError('partition table missing factory layout')
+        if entry['offset'] == 0x8000:
+            _check_partition_table(data)
     args = json.loads(_read(root, 'flasher_args.json'))
     if (args.get('flash_files') != {hex(o): p for o, p in expected.items()} or
             args.get('app') != {'offset': '0x10000', 'file': 'images/application.bin'} or
