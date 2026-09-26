@@ -22,6 +22,10 @@ Boundaries this module keeps:
 """
 from __future__ import annotations
 
+from .provision_plan import (LAB_ROLES, STEP_NAMES, ContractBackend, FakeProvisionBackend,
+                             ProvisionRunner, auto_approval_text, inventory_rows,
+                             job_status_text, plan_jobs, valid_lab_node_id)
+
 import json
 import os
 import re
