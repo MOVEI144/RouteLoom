@@ -96,7 +96,7 @@ struct BenchStats {
   std::uint32_t unknown_opcode{0};
   std::uint32_t responses_seen{0};    // kFlagResponse input — never answered
   std::uint32_t unauthorized{0};      // control from a non-controller origin or group
-  std::uint32_t stale_boot{0};        // control bound to a previous incarnation
+  std::uint32_t stale_boot{0};        // control/bound traffic for a previous incarnation
   std::uint32_t duplicate_commands{0};
   std::uint32_t late_requests{0};     // requests for retired/unknown runs
   std::uint32_t echo_answered{0};
@@ -132,8 +132,12 @@ class BenchApp final : public NodeObserver {
   // second slot would sit empty forever.
   static constexpr std::size_t kDeliveryEventDepth = 1;
   static constexpr std::size_t kRunSlots = 2;
-  static constexpr std::size_t kRetiredDepth = 4;
-  static constexpr std::size_t kCmdLogDepth = 4;
+  // Tombstone ring for just-evicted runs — deeper than the live slots so a
+  // run displaced by two newer arrivals still reads as late, never reopened.
+  static constexpr std::size_t kRetiredDepth = 3;
+  // Command-replay window; cross-incarnation replays are refused by the
+  // expected_boot check, so the log only covers in-incarnation replays.
+  static constexpr std::size_t kCmdLogDepth = 2;
   static constexpr std::uint8_t kGeneratorMaxInflight = 1;
   static constexpr std::uint16_t kGeneratorMaxCount = 64;
   // A generator run lives at most this long regardless of pace (design
@@ -242,6 +246,14 @@ class BenchApp final : public NodeObserver {
     bool inflight{false};
     MessageId inflight_id{};
     MonotonicMs inflight_deadline{0};
+    // The destination boot incarnation this run is bound to (stamped into
+    // every COUNT_ONLY); dest_reset latches when the destination reports
+    // the run stale, i.e. it rebooted — further outcomes are unknown.
+    std::uint64_t dest_boot{0};
+    bool dest_reset{false};
+    // Highest COUNT_ONLY sequence a stale notice has reclassified —
+    // refuses double-counting a retransmitted refusal.
+    std::uint32_t stale_mark{0};
     std::uint16_t submitted{0};
     std::uint16_t admitted{0};
     std::uint16_t delivered{0};
@@ -310,6 +322,10 @@ class BenchApp final : public NodeObserver {
                    MonotonicMs now_ms) noexcept;
   void handle_count(const RxEntry& entry, const Message& msg,
                     MonotonicMs now_ms) noexcept;
+  // A COUNT_STATUS reply that names the live generator run is the
+  // destination's stale-binding notice — not ordinary reply traffic.
+  void handle_count_status(const RxEntry& entry, const Message& msg,
+                           MonotonicMs now_ms) noexcept;
   void handle_count_get(const RxEntry& entry, const Message& msg,
                         MonotonicMs now_ms) noexcept;
   void handle_rollcall(const RxEntry& entry, const Message& msg,

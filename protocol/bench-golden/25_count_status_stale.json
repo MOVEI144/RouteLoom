@@ -1,0 +1,11 @@
+{
+  "name": "count_status_stale",
+  "opcode": 34,
+  "flags": 5,
+  "run_uuid_hex": "00112233445566778899aabbccddeeff",
+  "sequence": 8,
+  "body_hex": "03000000000000000000000000000000000000000000000000000000000000000000000000",
+  "wire_hex": "524c42310122000500112233445566778899aabbccddeeff000000087eb0400403000000000000000000000000000000000000000000000000000000000000000000000000",
+  "expect": "ok",
+  "note": "stale notice: a bound COUNT_ONLY named a boot incarnation this node no longer is \u2014 state 3, counters zero"
+}

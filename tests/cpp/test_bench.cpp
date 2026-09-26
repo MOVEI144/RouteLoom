@@ -321,6 +321,18 @@ std::vector<std::uint8_t> vec(const char* text) {
           reinterpret_cast<const std::uint8_t*>(text) + std::strlen(text)};
 }
 
+// COUNT_ONLY wire body: 8-byte bound destination boot + opaque fill.
+// `boot == 0` is unbound traffic; nonzero binds the packet to that
+// destination incarnation.
+std::vector<std::uint8_t> count_body(std::uint64_t boot, const char* fill) {
+  const std::size_t fill_len = std::strlen(fill);
+  std::vector<std::uint8_t> body(kCountBindSize + fill_len);
+  ByteWriter prefix{MutableByteView{body.data(), kCountBindSize}};
+  (void)prefix.write_u64(boot);
+  std::memcpy(body.data() + kCountBindSize, fill, fill_len);
+  return body;
+}
+
 // Scoped two/three-node fixture: gateway host 1 + bench members.
 void build(BenchWorld& w, int bench_count) {
   w.add(1, false);
@@ -402,6 +414,7 @@ void test_codec_encode_bounds() {
 void test_codec_bodies() {
   PeerSendStartBody start{};
   start.expected_boot = 0x1122334455667788ULL;
+  start.expected_dest_boot = 0x99AABBCCDDEEFF00ULL;
   start.destination = 3;
   start.sequence_begin = 10;
   start.count = 64;
@@ -416,6 +429,7 @@ void test_codec_bodies() {
   ByteReader reader{ByteView{raw.data(), raw.size()}};
   CHECK(decode(reader, back));
   CHECK(back.expected_boot == start.expected_boot &&
+        back.expected_dest_boot == start.expected_dest_boot &&
         back.destination == 3 && back.count == 64 &&
         back.interval_ms == 250 && back.max_inflight == 4);
   // Trailing garbage is refused.
@@ -591,7 +605,7 @@ void test_counter_and_count_get() {
   BenchWorld w;
   build(w, 1);
   const RunUuid run = make_run(4);
-  const auto body = vec("payload16bytes_____");
+  const auto body = count_body(w.boot(2), "payload16_");
   for (std::uint32_t seq = 1; seq <= 3; ++seq) {
     CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::CountOnly), run,
                      seq, ByteView{body.data(), body.size()}));
@@ -797,6 +811,7 @@ void test_peer_send_run() {
   PeerSendStartBody start{};
   start.expected_boot = w.boot(2);
   start.destination = 3;
+  start.expected_dest_boot = w.boot(3);
   start.sequence_begin = 1000;
   start.count = 4;
   start.payload_len = 16;
@@ -872,6 +887,7 @@ void test_peer_send_duplicate_and_stale() {
   PeerSendStartBody start{};
   start.expected_boot = w.boot(2);
   start.destination = 3;
+  start.expected_dest_boot = w.boot(3);
   start.sequence_begin = 1;
   start.count = 2;
   start.payload_len = 8;
@@ -916,6 +932,7 @@ void test_peer_send_unauthorized() {
   PeerSendStartBody start{};
   start.expected_boot = w.boot(2);
   start.destination = 3;
+  start.expected_dest_boot = w.boot(3);
   start.sequence_begin = 1;
   start.count = 1;
   start.payload_len = 8;
@@ -991,6 +1008,7 @@ void test_source_reset_no_restart() {
   PeerSendStartBody start{};
   start.expected_boot = w.boot(2);
   start.destination = 3;
+  start.expected_dest_boot = w.boot(3);
   start.sequence_begin = 1;
   start.count = 64;
   start.payload_len = 8;
@@ -1020,22 +1038,90 @@ void test_source_reset_no_restart() {
   CHECK(w.app(2)->stats().stale_boot == 1);
 }
 
+void test_count_binding_contract() {
+  BenchWorld w;
+  build(w, 1);
+  const RunUuid run = make_run(41);
+  // Bound to the live incarnation: counted.
+  const auto bound = count_body(w.boot(2), "aa");
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::CountOnly), run, 1,
+                   ByteView{bound.data(), bound.size()}));
+  // Bound to a dead incarnation: refused stale — never opened or counted,
+  // and the sender gets a stale COUNT_STATUS so it can close as unknown.
+  const auto stale = count_body(w.boot(2) + 9, "bb");
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::CountOnly), run, 2,
+                   ByteView{stale.data(), stale.size()}));
+  // A short body cannot carry the binding: unbound traffic, plain counting.
+  const auto tiny = vec("z");
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::CountOnly), run, 3,
+                   ByteView{tiny.data(), tiny.size()}));
+  w.run(500);
+  CHECK(w.app(2)->stats().stale_boot == 1);
+  const auto msgs = host_messages(w, 1);
+  const HostMessage* notice = nullptr;
+  for (const auto& msg : msgs) {
+    if (msg.opcode == static_cast<std::uint8_t>(Opcode::CountStatus) &&
+        (msg.flags & kFlagLate) != 0) {
+      notice = &msg;
+    }
+  }
+  CHECK(notice != nullptr);
+  if (notice != nullptr) {
+    CountStatusBody cs{};
+    ByteReader reader{ByteView{notice->body.data(), notice->body.size()}};
+    CHECK(decode(reader, cs) && cs.state == count_state::kStaleBoot);
+  }
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::CountGet), run, 0,
+                   ByteView{}));
+  w.run(400);
+  const HostMessage* answer = last_opcode(
+      host_messages(w, 1), static_cast<std::uint8_t>(Opcode::CountStatus));
+  CHECK(answer != nullptr);
+  if (answer != nullptr) {
+    CountStatusBody cs{};
+    ByteReader reader{ByteView{answer->body.data(), answer->body.size()}};
+    CHECK(decode(reader, cs));
+    // The stale packet never counted: two uniques (bound-live + unbound),
+    // zero duplicates.
+    CHECK(cs.state == count_state::kActive && cs.unique_packets == 2 &&
+          cs.duplicates == 0);
+  }
+}
+
 void test_destination_reset() {
   BenchWorld w;
   build(w, 2);
   const RunUuid run = make_run(14);
+  // The controller learns the destination incarnation first (HELLO) and
+  // binds the run to it — that value is what makes the reset contract
+  // enforceable.
+  CHECK(bench_send(w, 3, static_cast<std::uint8_t>(Opcode::Hello), run, 1,
+                   ByteView{}));
+  w.run(400);
+  const HostMessage* caps_msg = last_opcode(
+      host_messages(w, 1), static_cast<std::uint8_t>(Opcode::Capabilities));
+  CHECK(caps_msg != nullptr);
+  std::uint64_t dest_boot = 0;
+  if (caps_msg != nullptr) {
+    CapabilitiesBody caps{};
+    ByteReader reader{ByteView{caps_msg->body.data(), caps_msg->body.size()}};
+    if (decode(reader, caps)) dest_boot = caps.boot_incarnation;
+  }
+  CHECK(dest_boot == w.boot(3));
+
   PeerSendStartBody start{};
   start.expected_boot = w.boot(2);
   start.destination = 3;
+  start.expected_dest_boot = dest_boot;
   start.sequence_begin = 1;
-  start.count = 6;
-  start.payload_len = 8;
-  start.interval_ms = 400;  // slow enough that ~2 land before the reset
+  start.count = 8;
+  start.payload_len = 16;
+  start.interval_ms = 250;  // ~2 packets land before the reset
   start.ttl_ms = 2000;
   const auto body = body_bytes(start);
   CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::PeerSendStart), run,
-                   1, ByteView{body.data(), body.size()}));
-  w.run(800);  // a few packets already counted at node 3
+                   2, ByteView{body.data(), body.size()}));
+  w.run(700);  // a few packets already counted at node 3
   CHECK(bench_send(w, 3, static_cast<std::uint8_t>(Opcode::CountGet), run, 0,
                    ByteView{}));
   w.run(400);
@@ -1047,15 +1133,21 @@ void test_destination_reset() {
     if (msg != nullptr) {
       CountStatusBody cs{};
       ByteReader reader{ByteView{msg->body.data(), msg->body.size()}};
-      if (decode(reader, cs)) before_reset_unique = cs.unique_packets;
+      if (decode(reader, cs)) {
+        CHECK(cs.state == count_state::kActive);
+        before_reset_unique = cs.unique_packets;
+      }
     }
   }
-  CHECK(before_reset_unique > 0 && before_reset_unique < 6);
+  CHECK(before_reset_unique > 0 && before_reset_unique < 8);
 
-  // Destination resets mid-run; remaining packets still arrive but the
-  // destination's counting restarted — no phantom pre-reset history.
+  // Destination resets mid-run. The still-arriving packets are bound to the
+  // dead incarnation: the new incarnation refuses to reopen or count the
+  // run (zero duplicate processing), and its stale notice lets the source
+  // close the run as unknown instead of claiming deliveries.
   w.reset_bench(3);
-  w.run(4000);
+  w.run(3000);
+  CHECK(w.app(3)->stats().stale_boot >= 1);
   CHECK(bench_send(w, 3, static_cast<std::uint8_t>(Opcode::CountGet), run, 0,
                    ByteView{}));
   w.run(400);
@@ -1065,8 +1157,25 @@ void test_destination_reset() {
   CountStatusBody cs{};
   ByteReader reader{ByteView{msg->body.data(), msg->body.size()}};
   CHECK(decode(reader, cs));
-  CHECK(cs.unique_packets < 6);  // restarted from zero, not continued
-  CHECK(w.app(3)->stats().rx_total > 0);
+  CHECK(cs.state == count_state::kUnknown);  // never opened on this boot
+  CHECK(cs.unique_packets == 0 && cs.duplicates == 0);
+
+  // The source closed the bounded run finitely: no restart, and the
+  // post-reset sends count as unknown — never as delivered.
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::PeerSendStatus),
+                   run, 3, ByteView{}));
+  w.run(400);
+  const HostMessage* status = last_opcode(
+      host_messages(w, 1), static_cast<std::uint8_t>(Opcode::PeerSendStatus));
+  CHECK(status != nullptr);
+  PeerSendStatusBody ps{};
+  ByteReader pr{ByteView{status->body.data(), status->body.size()}};
+  CHECK(decode(pr, ps));
+  CHECK(ps.state == gen_state::kPeerReset);
+  CHECK(ps.unknown >= 1);
+  CHECK(ps.submitted < ps.planned);  // sending stopped on the stale notice
+  CHECK(ps.delivered + ps.failed + ps.unknown == ps.submitted);
+  CHECK(w.app(2)->stats().duplicate_commands == 0);
 }
 
 void test_counter_reset() {
@@ -1213,6 +1322,7 @@ void test_peer_send_stop() {
   PeerSendStartBody start{};
   start.expected_boot = w.boot(2);
   start.destination = 3;
+  start.expected_dest_boot = w.boot(3);
   start.sequence_begin = 1;
   start.count = 64;
   start.payload_len = 8;
@@ -1279,9 +1389,10 @@ void test_configured_controller_and_digest() {
   PeerSendStartBody start{};
   start.expected_boot = w.boot(2);
   start.destination = 3;
+  start.expected_dest_boot = w.boot(3);
   start.sequence_begin = 1;
   start.count = 1;
-  start.payload_len = 1;
+  start.payload_len = 8;
   start.ttl_ms = 2000;
   const auto body = body_bytes(start);
   CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::PeerSendStart),
@@ -1308,9 +1419,10 @@ void test_peer_send_status_query() {
   PeerSendStartBody start{};
   start.expected_boot = w.boot(2);
   start.destination = 3;
+  start.expected_dest_boot = w.boot(3);
   start.sequence_begin = 10;
   start.count = 2;
-  start.payload_len = 4;
+  start.payload_len = 8;
   start.ttl_ms = 1000;
   const auto body = body_bytes(start);
   CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::PeerSendStart),
@@ -1480,9 +1592,10 @@ void test_peer_send_rejects_impossible_bounds() {
   PeerSendStartBody start{};
   start.expected_boot = w.boot(2);
   start.destination = 3;
+  start.expected_dest_boot = w.boot(3);
   start.sequence_begin = 1;
   start.count = 2;
-  start.payload_len = 1;
+  start.payload_len = 8;
   start.ttl_ms = 1000;
   start.max_inflight = 0;
   auto body = body_bytes(start);
@@ -1698,6 +1811,7 @@ int main(int argc, char** argv) {
   run_test("peer_send_unauthorized", test_peer_send_unauthorized);
   run_test("reset_request", test_reset_request);
   run_test("source_reset_no_restart", test_source_reset_no_restart);
+  run_test("count_binding_contract", test_count_binding_contract);
   run_test("destination_reset", test_destination_reset);
   run_test("counter_reset", test_counter_reset);
   run_test("malformed_and_unknown", test_malformed_and_unknown);

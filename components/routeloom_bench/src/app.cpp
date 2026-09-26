@@ -157,6 +157,13 @@ void BenchApp::dispatch(const RxEntry& entry, const Message& msg,
       (opcode_is_reply(msg.opcode) &&
        msg.opcode != static_cast<std::uint8_t>(Opcode::PeerSendStatus))) {
     ++stats_.responses_seen;
+    // One reply is also input: a COUNT_STATUS naming the live generator
+    // run is the bound destination's stale-binding notice. It closes the
+    // run — it can never open one.
+    if (msg.opcode == static_cast<std::uint8_t>(Opcode::CountStatus) &&
+        !entry.is_group && generator_.uuid == msg.run && generator_.active) {
+      handle_count_status(entry, msg, now_ms);
+    }
     return;
   }
   if (!opcode_known(msg.opcode)) {
@@ -410,6 +417,31 @@ void BenchApp::handle_count(const RxEntry& entry, const Message& msg,
     ++stats_.group_ignored;
     return;
   }
+  // A bound COUNT packet leads its body with the destination boot
+  // incarnation the run was minted against (0 = unbound). A nonzero
+  // mismatch means this traffic predates a reset of this node: the run
+  // must not be (re)opened or counted — report stale so the sender can
+  // close its side as unknown. Unbound traffic keeps plain semantics.
+  std::uint64_t bound_boot = 0;
+  if (msg.body.size >= kCountBindSize) {
+    ByteReader prefix{msg.body};
+    (void)prefix.read_u64(bound_boot);
+  }
+  if (bound_boot != 0 && bound_boot != boot_incarnation()) {
+    ++stats_.stale_boot;
+    std::array<std::uint8_t, kCountStatusBodySize> raw{};
+    ByteWriter writer{MutableByteView{raw.data(), raw.size()}};
+    CountStatusBody stale{};
+    stale.state = count_state::kStaleBoot;
+    (void)encode(stale, writer);
+    // Bounded like every reply; a queue-full drop only delays the
+    // sender's stale notice until the next bound packet lands.
+    (void)enqueue_reply(entry.origin,
+                        static_cast<std::uint8_t>(Opcode::CountStatus),
+                        kFlagResponse | kFlagLate, msg.run, msg.sequence,
+                        ByteView{raw.data(), writer.size()}, now_ms, now_ms);
+    return;
+  }
   if (run_retired(msg.run)) {
     ++stats_.late_requests;
     return;
@@ -433,7 +465,7 @@ void BenchApp::handle_count_get(const RxEntry& entry, const Message& msg,
   CountStatusBody body{};
   const RunRecord* run = find_run(msg.run);
   if (run != nullptr) {
-    body.state = 1;
+    body.state = count_state::kActive;
     body.unique_packets = run->unique_packets;
     body.unique_bytes = run->unique_bytes;
     body.duplicates = run->duplicates;
@@ -443,7 +475,8 @@ void BenchApp::handle_count_get(const RxEntry& entry, const Message& msg,
     body.window_base = run->window_base;
     body.window = run->window;
   } else {
-    body.state = run_retired(msg.run) ? 2 : 0;
+    body.state =
+        run_retired(msg.run) ? count_state::kRetired : count_state::kUnknown;
   }
   std::array<std::uint8_t, kCountStatusBodySize> raw{};
   ByteWriter writer{MutableByteView{raw.data(), raw.size()}};
@@ -451,6 +484,48 @@ void BenchApp::handle_count_get(const RxEntry& entry, const Message& msg,
   enqueue_reply(entry.origin, static_cast<std::uint8_t>(Opcode::CountStatus),
                 kFlagResponse, msg.run, msg.sequence,
                 ByteView{raw.data(), writer.size()}, now_ms, now_ms);
+}
+
+void BenchApp::handle_count_status(const RxEntry& entry, const Message& msg,
+                                   MonotonicMs /*now_ms*/) noexcept {
+  Generator& gen = generator_;
+  if (!gen.active || gen.uuid != msg.run || entry.is_group ||
+      entry.origin != gen.destination) {
+    // Only the bound destination may close the run it is bound to.
+    return;
+  }
+  CountStatusBody status{};
+  {
+    ByteReader reader{msg.body};
+    if (!decode(reader, status)) return;
+  }
+  if (status.state != count_state::kStaleBoot) return;
+  // The notice's sequence names a refused packet, so it provably reached
+  // only the post-reset incarnation: its earlier MAC-level "delivered" is
+  // not evidence the bound incarnation counted it — reclassify to unknown.
+  // (The delivery result is consumed before its notice can ever arrive:
+  // TX-complete lands with the frame's own flush, the notice takes a full
+  // reply round-trip.) A retransmitted refusal repeats the sequence; the
+  // high-water mark counts each refused packet once. A refused packet that
+  // is still in flight needs no reclassify — its late result already lands
+  // in unknown via the dest_reset branch in drain_delivery.
+  if (msg.sequence > gen.stale_mark) {
+    gen.stale_mark = msg.sequence;
+    const bool pending_result = gen.inflight && gen.sent > 0 &&
+                                msg.sequence ==
+                                    gen.sequence_begin + gen.sent - 1;
+    if (!pending_result && gen.delivered > 0) {
+      --gen.delivered;
+      ++gen.unknown;
+    }
+  }
+  if (!gen.dest_reset) {
+    // The bound incarnation is gone, so the rest of this run's traffic
+    // can never be counted. drive_generator stops sending and unresolved
+    // sends land in `unknown` — not in a delivered/failed guess.
+    gen.dest_reset = true;
+    bump_version();
+  }
 }
 
 void BenchApp::handle_rollcall(const RxEntry& entry, const Message& msg,
@@ -605,14 +680,20 @@ void BenchApp::handle_peer_send_start(const RxEntry& entry, const Message& msg,
   } else if (generator_.active) {
     reply.result = result::kBusy;
   } else if (start.count == 0 || start.count > kGeneratorMaxCount ||
-             start.payload_len > kMaxBody || start.ttl_ms == 0 ||
+             start.payload_len < kCountBindSize ||
+             static_cast<std::size_t>(start.payload_len) > kMaxBody ||
+             start.ttl_ms == 0 ||
              start.ttl_ms > kMaxMessageLifetimeMs ||
              start.max_inflight == 0 ||
              static_cast<std::uint64_t>(start.sequence_begin) +
                      start.count - 1 > 0xffffffffULL ||
              start.destination == kInvalidNodeId ||
              start.destination == kBroadcastNodeId ||
-             start.destination == node_->node_id()) {
+             start.destination == node_->node_id() ||
+             start.expected_dest_boot == 0) {
+    // expected_dest_boot == 0 would mint an unbound run — and an unbound
+    // run cannot honor the "no reopen across a destination reset"
+    // contract, so the command is invalid rather than quietly weaker.
     reply.result = result::kInvalid;
   } else {
     generator_ = Generator{};
@@ -621,6 +702,7 @@ void BenchApp::handle_peer_send_start(const RxEntry& entry, const Message& msg,
     generator_.uuid = msg.run;
     generator_.commander = entry.origin;
     generator_.destination = start.destination;
+    generator_.dest_boot = start.expected_dest_boot;
     generator_.sequence_begin = start.sequence_begin;
     generator_.count = start.count;
     generator_.payload_len = start.payload_len;
@@ -891,12 +973,16 @@ void BenchApp::drive_generator(MonotonicMs now_ms) noexcept {
     ++gen.unknown;
     gen.last_ms = low32(now_ms);
   }
-  if (!gen.inflight && gen.sent < gen.count && now_ms >= gen.next_due &&
-      now_ms < gen.deadline_ms) {
+  if (!gen.inflight && !gen.dest_reset && gen.sent < gen.count &&
+      now_ms >= gen.next_due && now_ms < gen.deadline_ms) {
     std::array<std::uint8_t, kMaxMessage> wire{};
     std::array<std::uint8_t, kMaxBody> body{};
     const std::uint32_t seq = gen.sequence_begin + gen.sent;
-    for (std::size_t i = 0; i < gen.payload_len; ++i) {
+    // Body = bound destination boot || deterministic fill — the prefix is
+    // what lets a reset destination refuse the stale run.
+    ByteWriter prefix{MutableByteView{body.data(), kCountBindSize}};
+    (void)prefix.write_u64(gen.dest_boot);
+    for (std::size_t i = kCountBindSize; i < gen.payload_len; ++i) {
       body[i] = payload_byte(gen.seed, seq, static_cast<std::uint32_t>(i));
     }
     std::size_t written = 0;
@@ -935,10 +1021,11 @@ void BenchApp::drive_generator(MonotonicMs now_ms) noexcept {
   }
   const bool exhausted = gen.sent >= gen.count;
   const bool timed_out = now_ms >= gen.deadline_ms;
-  if ((exhausted || timed_out) && !gen.inflight) {
+  if ((exhausted || timed_out || gen.dest_reset) && !gen.inflight) {
     gen.active = false;
-    gen.state = timed_out && !exhausted ? gen_state::kTimeBound
-                                        : gen_state::kComplete;
+    gen.state = gen.dest_reset ? gen_state::kPeerReset
+                : timed_out && !exhausted ? gen_state::kTimeBound
+                                         : gen_state::kComplete;
     tombstone(gen.uuid);
     bump_version();
   }
@@ -964,6 +1051,12 @@ void BenchApp::drain_delivery(MonotonicMs now_ms) noexcept {
     Generator& gen = generator_;
     if (!gen.inflight || event.id != gen.inflight_id) continue;
     gen.inflight = false;
+    if (gen.dest_reset) {
+      // The run's destination rebooted: a MAC-level verdict cannot prove
+      // the bound incarnation counted the packet — the outcome is unknown.
+      ++gen.unknown;
+      continue;
+    }
     switch (event.state) {
       case DeliveryState::Delivered:
         ++gen.delivered;
@@ -997,7 +1090,11 @@ void BenchApp::drive_send_load(MonotonicMs now_ms) noexcept {
   }
   const std::uint32_t seq = 0x80000000u + faults_.send_load_seq;
   std::array<std::uint8_t, 16> body{};
-  for (std::size_t i = 0; i < body.size(); ++i) {
+  // Bind prefix 0: fault traffic is deliberately unbound — it makes no run
+  // claim, so it counts on whichever incarnation receives it.
+  ByteWriter prefix{MutableByteView{body.data(), kCountBindSize}};
+  (void)prefix.write_u64(0);
+  for (std::size_t i = kCountBindSize; i < body.size(); ++i) {
     body[i] = payload_byte(0x5A5A5A5Au, seq, static_cast<std::uint32_t>(i));
   }
   std::array<std::uint8_t, kMaxMessage> wire{};

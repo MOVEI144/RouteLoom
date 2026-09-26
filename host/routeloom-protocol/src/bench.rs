@@ -340,11 +340,31 @@ pub fn decode_capabilities(body: &[u8]) -> Result<CapabilitiesBody, BenchError> 
     Ok(out)
 }
 
+/// COUNT_ONLY carries one convention inside its opaque body: the first 8
+/// bytes are the destination boot incarnation the sending run is bound to
+/// (0 = unbound traffic). A bound packet that arrives at a different
+/// incarnation predates a reset — the receiver refuses to open or count the
+/// run and answers a stale COUNT_STATUS, so a dead boot's traffic can never
+/// masquerade as a fresh run.
+pub const COUNT_BIND_SIZE: usize = 8;
+
+/// `state` field values of [`CountStatusBody`].
+pub mod count_state {
+    /// The run never existed on this incarnation.
+    pub const UNKNOWN: u8 = 0;
+    pub const ACTIVE: u8 = 1;
+    pub const RETIRED: u8 = 2;
+    /// The packet is bound to a boot that is not this incarnation — never
+    /// opened or counted; reported so the sender can close the run as
+    /// unknown.
+    pub const STALE_BOOT: u8 = 3;
+}
+
 /// COUNT_STATUS body — the state of one tracked run (header run_uuid).
 /// `window` covers sequences [window_base - 63, window_base] seen uniquely.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CountStatusBody {
-    /// 0 unknown run, 1 active, 2 retired.
+    /// count_state::* value.
     pub state: u8,
     pub unique_packets: u32,
     pub unique_bytes: u32,
@@ -444,19 +464,26 @@ pub mod status_page {
     pub const COUNT: u8 = 7;
 }
 
-/// PEER_SEND_START body: start a bounded device-to-device run.
+/// PEER_SEND_START body: start a bounded device-to-device run. The command
+/// carries two boot incarnations: `expected_boot` pins the command to the
+/// source's own incarnation, `expected_dest_boot` binds the run to the
+/// destination's incarnation (learned via HELLO/STATUS beforehand) — every
+/// COUNT_ONLY of the run carries it, so a destination that reset mid-run
+/// never reopens the old run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PeerSendStartBody {
     /// Must equal the device's boot_incarnation — a replayed command after
     /// a reset mismatches and is refused.
     pub expected_boot: u64,
+    /// Nonzero: the run's bound destination boot incarnation.
+    pub expected_dest_boot: u64,
     pub destination: u64,
     pub sequence_begin: u32,
     /// Planned packets, <= the device bound (64).
     pub count: u16,
-    /// Bench body bytes per packet.
+    /// Wire body bytes per packet, >= COUNT_BIND_SIZE.
     pub payload_len: u8,
-    /// Deterministic payload fill.
+    /// Deterministic payload fill after the bind prefix.
     pub seed: u32,
     /// Spacing between sends.
     pub interval_ms: u32,
@@ -466,11 +493,12 @@ pub struct PeerSendStartBody {
     pub max_inflight: u8,
 }
 
-pub const PEER_SEND_START_SIZE: usize = 36;
+pub const PEER_SEND_START_SIZE: usize = 44;
 
 pub fn encode_peer_send_start(body: &PeerSendStartBody) -> Vec<u8> {
     let mut out = Vec::with_capacity(PEER_SEND_START_SIZE);
     out.extend_from_slice(&body.expected_boot.to_be_bytes());
+    out.extend_from_slice(&body.expected_dest_boot.to_be_bytes());
     out.extend_from_slice(&body.destination.to_be_bytes());
     out.extend_from_slice(&body.sequence_begin.to_be_bytes());
     out.extend_from_slice(&body.count.to_be_bytes());
@@ -486,6 +514,7 @@ pub fn decode_peer_send_start(body: &[u8]) -> Result<PeerSendStartBody, BenchErr
     let mut r = Reader { input: body };
     let out = PeerSendStartBody {
         expected_boot: r.u64()?,
+        expected_dest_boot: r.u64()?,
         destination: r.u64()?,
         sequence_begin: r.u32()?,
         count: r.u16()?,
@@ -541,6 +570,9 @@ pub mod gen_state {
     pub const STOPPED: u8 = 3;
     /// Stopped by the 60 s run bound.
     pub const TIME_BOUND: u8 = 4;
+    /// The bound destination reset mid-run — the run never restarted; its
+    /// unresolved packets close as unknown.
+    pub const PEER_RESET: u8 = 5;
 }
 
 pub fn encode_peer_send_status(body: &PeerSendStatusBody) -> Vec<u8> {
@@ -769,6 +801,7 @@ mod tests {
 
         let start = PeerSendStartBody {
             expected_boot: 0x0102_0304_0506_0708,
+            expected_dest_boot: 0x0908_0706_0504_0302,
             destination: 0xB,
             sequence_begin: 100,
             count: 64,

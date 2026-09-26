@@ -139,10 +139,28 @@ bool decode(ByteReader& in, CapabilitiesBody& out) noexcept;
 // Max wire size: 25 fixed bytes + opcode_count + the full opcode array.
 inline constexpr std::size_t kCapabilitiesBodySize = 49;
 
+// COUNT_ONLY carries one convention inside its opaque body: the first 8
+// bytes are the destination boot incarnation the sending run is bound to
+// (0 = unbound traffic). A bound packet that arrives at a different
+// incarnation predates a reset — the receiver refuses to open or count the
+// run and answers a stale COUNT_STATUS, so a dead boot's traffic can never
+// masquerade as a fresh run.
+inline constexpr std::size_t kCountBindSize = 8;
+
+namespace count_state {
+// state field values of CountStatusBody.
+inline constexpr std::uint8_t kUnknown = 0;    // the run never existed here
+inline constexpr std::uint8_t kActive = 1;
+inline constexpr std::uint8_t kRetired = 2;
+// The packet is bound to a boot that is not this incarnation — never
+// opened or counted; reported so the sender can close the run as unknown.
+inline constexpr std::uint8_t kStaleBoot = 3;
+}  // namespace count_state
+
 // COUNT_STATUS body — the state of one tracked run (header run_uuid).
 // `window` covers sequences [window_base - 63, window_base] seen uniquely.
 struct CountStatusBody {
-  std::uint8_t state{0};  // 0 unknown run, 1 active, 2 retired
+  std::uint8_t state{0};  // count_state::*
   std::uint32_t unique_packets{0};
   std::uint32_t unique_bytes{0};
   std::uint32_t duplicates{0};
@@ -179,21 +197,27 @@ struct StatusBody {
 };
 Status encode_status_head(const StatusBody& body, ByteWriter& out) noexcept;
 
-// PEER_SEND_START body: start a bounded device-to-device run.
+// PEER_SEND_START body: start a bounded device-to-device run. The command
+// carries two boot incarnations: `expected_boot` pins the command to the
+// source's own incarnation, `expected_dest_boot` binds the run to the
+// destination's incarnation (learned via HELLO/STATUS beforehand) — every
+// COUNT_ONLY of the run carries it, so a destination that reset mid-run
+// never reopens the old run.
 struct PeerSendStartBody {
-  std::uint64_t expected_boot{0};  // must equal this device's boot_incarnation
+  std::uint64_t expected_boot{0};       // must equal this device's boot_incarnation
+  std::uint64_t expected_dest_boot{0};  // nonzero: the run's bound destination boot
   NodeId destination{kInvalidNodeId};
   std::uint32_t sequence_begin{0};
   std::uint16_t count{0};          // planned packets, <= kGeneratorMaxCount
-  std::uint8_t payload_len{0};     // bench body bytes per packet
-  std::uint32_t seed{0};           // deterministic payload fill
+  std::uint8_t payload_len{0};     // wire body bytes per packet, >= kCountBindSize
+  std::uint32_t seed{0};           // deterministic payload fill after the bind prefix
   std::uint32_t interval_ms{0};    // spacing between sends
   std::uint32_t ttl_ms{0};         // per-packet delivery lifetime
   std::uint8_t max_inflight{1};    // clamped to the device bound; zero is invalid
 };
 Status encode(const PeerSendStartBody& body, ByteWriter& out) noexcept;
 bool decode(ByteReader& in, PeerSendStartBody& out) noexcept;
-inline constexpr std::size_t kPeerSendStartBodySize = 36;
+inline constexpr std::size_t kPeerSendStartBodySize = 44;
 
 // PEER_SEND_STATUS body — answer to START/STOP and to an empty-body query.
 struct PeerSendStatusBody {
@@ -231,6 +255,9 @@ inline constexpr std::uint8_t kRunning = 1;
 inline constexpr std::uint8_t kComplete = 2;
 inline constexpr std::uint8_t kStopped = 3;
 inline constexpr std::uint8_t kTimeBound = 4;  // stopped by the 60 s run bound
+// The bound destination reset mid-run: unsent packets were never emitted
+// and inflight/unresolved sends counted unknown instead of a verdict.
+inline constexpr std::uint8_t kPeerReset = 5;
 }  // namespace gen_state
 
 // Control commands carry the device boot incarnation they were minted

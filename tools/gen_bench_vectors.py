@@ -122,8 +122,10 @@ def count_status_body():
 
 
 def peer_send_start_body():
-    return (u64(BOOT) + u64(0xB) + u32(100) + u16(64) + u8(24) +
-            u32(0xDEADBEEF) + u32(250) + u32(30000) + u8(1))
+    # expected_boot (source), expected_dest_boot (the run binds to this
+    # destination incarnation; 0 is refused), destination, then the plan.
+    return (u64(BOOT) + u64(BOOT2) + u64(0xB) + u32(100) + u16(64) +
+            u8(24) + u32(0xDEADBEEF) + u32(250) + u32(30000) + u8(1))
 
 
 def peer_send_status_body():
@@ -164,8 +166,10 @@ def main() -> None:
         vector("echo_reply_duplicate", ECHO_REPLY,
                FLAG_RESPONSE | FLAG_DUPLICATE, RUN, 7, b"ping",
                "re-answer to a request already seen inside the run window"),
-        vector("count_only", COUNT_ONLY, 0, RUN, 8, bytes(range(24)),
-               "counted, never answered"),
+        vector("count_only", COUNT_ONLY, 0, RUN, 8,
+               u64(0) + bytes(range(16)),
+               "counted, never answered; body leads with the destination "
+               "boot-incarnation bind (0 = unbound traffic)"),
         vector("count_get", COUNT_GET, 0, RUN, 9, b"",
                "ask for the header run's reception state"),
         vector("count_status", COUNT_STATUS, FLAG_RESPONSE, RUN, 9,
@@ -216,6 +220,11 @@ def main() -> None:
         negative("bad_crc",
                  wire(ECHO_REQUEST, 0, RUN, 1, b"ping")[:-1] + b"X",
                  "crc_mismatch", "last body byte corrupted"),
+        vector("count_status_stale", COUNT_STATUS,
+               FLAG_RESPONSE | FLAG_LATE, RUN, 8,
+               u8(3) + bytes(36),
+               "stale notice: a bound COUNT_ONLY named a boot incarnation "
+               "this node no longer is — state 3, counters zero"),
     ]
 
     for index, v in enumerate(vectors, 1):

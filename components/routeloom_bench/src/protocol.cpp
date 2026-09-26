@@ -167,6 +167,7 @@ Status encode_status_head(const StatusBody& body, ByteWriter& out) noexcept {
 
 Status encode(const PeerSendStartBody& body, ByteWriter& out) noexcept {
   Status status = out.write_u64(body.expected_boot);
+  if (status) status = out.write_u64(body.expected_dest_boot);
   if (status) status = out.write_u64(body.destination);
   if (status) status = out.write_u32(body.sequence_begin);
   if (status) status = out.write_u16(body.count);
@@ -179,7 +180,8 @@ Status encode(const PeerSendStartBody& body, ByteWriter& out) noexcept {
 }
 
 bool decode(ByteReader& in, PeerSendStartBody& out) noexcept {
-  if (!in.read_u64(out.expected_boot) || !in.read_u64(out.destination) ||
+  if (!in.read_u64(out.expected_boot) || !in.read_u64(out.expected_dest_boot) ||
+      !in.read_u64(out.destination) ||
       !in.read_u32(out.sequence_begin) || !in.read_u16(out.count) ||
       !in.read_u8(out.payload_len) || !in.read_u32(out.seed) ||
       !in.read_u32(out.interval_ms) || !in.read_u32(out.ttl_ms) ||
