@@ -16,7 +16,7 @@
         "MEMBER_EDHOC": {
           "maturity": "main",
           "display": "Experimental / MemberEdhoc",
-          "note": "Zero-touch join with EDHOC and ledger enrollment; no Production display until qualified.",
+          "note": "Zero-touch join with EDHOC and ledger enrollment; no Production display until qualified. Enrollment alone is not per-frame receive assurance.",
           "evidence": [
             "components/routeloom/Kconfig",
             "components/routeloom/src/sdkv1_security_coordinator.cpp"

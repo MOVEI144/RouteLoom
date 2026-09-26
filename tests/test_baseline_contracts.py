@@ -39,6 +39,9 @@ class MeshProfilesTests(unittest.TestCase):
         self.assertIn('caps_version', host)
         self.assertIn('additive-only', host)
         self.assertIn('ignore unknown', host)
+        self.assertIn('{"profile":"UNKNOWN","origin":"unverified"}', host)
+        self.assertIn('台帳登録から DevRam／Member を推測せず', host)
+        self.assertIn('capabilities.get は gateway の実効 security profile を広告しない', host)
 
 
 if __name__ == '__main__':

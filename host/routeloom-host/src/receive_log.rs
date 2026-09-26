@@ -42,40 +42,6 @@ const DEDUP_MS: u64 = DEDUP_SECONDS * 1000;
 /// purged anyway, so this only bounds worst-case distinct keys per window.
 const DEDUP_MAX_KEYS: usize = ENTRIES_PER_NETWORK;
 
-/// How strongly the daemon can vouch for a record's origin. Resolved
-/// once at ingest from the effective security profile — never from
-/// payload self-claims (02-receive-api.md §1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RxAssurance {
-    /// No Site Authority: the development shared-key profile, where any
-    /// holder of the group key can claim any origin.
-    DevPskClaim,
-    /// The origin is enrolled in this site's ledger on this network
-    /// (DevCert-verified at enrollment). The daemon holds no member
-    /// keys, so this vouches for enrollment, not per-frame crypto.
-    MemberEnrolled,
-    /// A Site Authority is configured but the origin is not an enrolled
-    /// member of this network — the claim is unattributed.
-    Unverified,
-}
-
-/// The `"assurance":{...}` JSON fragment for one retained record — the
-/// single renderer shared by `messages.read` and subscription
-/// notifications so the two can never disagree.
-pub fn assurance_json(assurance: RxAssurance) -> &'static str {
-    match assurance {
-        RxAssurance::DevPskClaim => {
-            "\"assurance\":{\"profile\":\"EXPERIMENTAL_DEV_PSK\",\"origin\":\"group-key-claim\"}"
-        }
-        RxAssurance::MemberEnrolled => {
-            "\"assurance\":{\"profile\":\"MEMBER_EDHOC\",\"origin\":\"enrolled-member\"}"
-        }
-        RxAssurance::Unverified => {
-            "\"assurance\":{\"profile\":\"UNKNOWN\",\"origin\":\"unverified\"}"
-        }
-    }
-}
-
 /// One retained receive record. `seq` is the log-local monotone position
 /// (per network, per epoch, starting at 1) — *not* the mesh MessageId.
 #[derive(Clone, Debug)]
@@ -90,10 +56,9 @@ pub struct RxRecord {
     pub msg_seq: u64,
     pub payload: Vec<u8>,
     pub stored_ms: u64,
-    pub assurance: RxAssurance,
 }
 
-/// Fields a verified DataFromMesh body contributes to the log.
+/// Fields a USB-session-verified DataFromMesh body contributes to the log.
 pub struct Ingress {
     pub network: u64,
     pub gateway: Option<u64>,
@@ -101,7 +66,6 @@ pub struct Ingress {
     pub msg_session: u32,
     pub msg_seq: u64,
     pub payload: Vec<u8>,
-    pub assurance: RxAssurance,
 }
 
 pub enum IngestOutcome {
@@ -328,7 +292,6 @@ impl ReceiveLog {
             msg_seq: ingress.msg_seq,
             payload: ingress.payload,
             stored_ms: now_ms,
-            assurance: ingress.assurance,
         });
         log.bytes += RECORD_CHARGE_BYTES;
         self.total_bytes += RECORD_CHARGE_BYTES;
@@ -581,24 +544,7 @@ mod tests {
             msg_session: 5,
             msg_seq,
             payload: payload.to_vec(),
-            assurance: RxAssurance::DevPskClaim,
         }
-    }
-
-    #[test]
-    fn assurance_json_names_each_profile_once() {
-        assert_eq!(
-            assurance_json(RxAssurance::DevPskClaim),
-            "\"assurance\":{\"profile\":\"EXPERIMENTAL_DEV_PSK\",\"origin\":\"group-key-claim\"}"
-        );
-        assert_eq!(
-            assurance_json(RxAssurance::MemberEnrolled),
-            "\"assurance\":{\"profile\":\"MEMBER_EDHOC\",\"origin\":\"enrolled-member\"}"
-        );
-        assert_eq!(
-            assurance_json(RxAssurance::Unverified),
-            "\"assurance\":{\"profile\":\"UNKNOWN\",\"origin\":\"unverified\"}"
-        );
     }
 
     #[test]

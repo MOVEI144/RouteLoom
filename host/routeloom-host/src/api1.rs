@@ -79,6 +79,9 @@ pub const REQUEST_ID_MAX: usize = 64;
 /// Additive-only: a removal or rename bumps this and the spec
 /// (docs/spec/host.md §3 records the policy).
 pub const CAPS_VERSION: u32 = 1;
+// USB receive bodies do not carry the gateway's effective security profile
+// or a per-frame origin verification result.
+const RX_ASSURANCE: &str = "\"assurance\":{\"profile\":\"UNKNOWN\",\"origin\":\"unverified\"}";
 
 /// Per-request inputs the dispatch layer needs. `uid` is the socket peer's
 /// OS credential (None when the platform cannot supply one — default deny).
@@ -799,7 +802,7 @@ pub(crate) fn record_json(record: &RxRecord, cursor: &str) -> String {
         crate::receive_log::hex_lower(&record.payload),
         record.payload.len(),
         cursor,
-        crate::receive_log::assurance_json(record.assurance),
+        RX_ASSURANCE,
     )
 }
 
@@ -820,7 +823,7 @@ pub(crate) fn record_meta_json(record: &RxRecord, cursor: &str) -> String {
         record.payload.len(),
         hex_lower(&canonical::sha256(&record.payload)),
         cursor,
-        crate::receive_log::assurance_json(record.assurance),
+        RX_ASSURANCE,
     )
 }
 
@@ -4149,7 +4152,6 @@ mod tests {
                 msg_session: 5,
                 msg_seq,
                 payload: payload.to_vec(),
-                assurance: crate::receive_log::RxAssurance::DevPskClaim,
             },
             ms,
         );
@@ -4479,45 +4481,28 @@ mod tests {
     }
 
     #[test]
-    fn messages_read_emits_the_record_stored_assurance() {
-        use crate::receive_log::RxAssurance;
+    fn messages_read_and_metadata_report_unknown_assurance() {
         let acl = acl_with(501);
         let log = Mutex::new(ReceiveLog::new([9; 16]));
         let store = Mutex::new(MemoryOperationStore::test_store());
         let limiter = Mutex::new(AdmissionLimiter::new(0));
-        for (seq, assurance) in [
-            (1, RxAssurance::DevPskClaim),
-            (2, RxAssurance::MemberEnrolled),
-            (3, RxAssurance::Unverified),
-        ] {
-            log.lock().unwrap().ingest(
-                Ingress {
-                    network: 1,
-                    gateway: Some(2),
-                    origin: 3,
-                    msg_session: 5,
-                    msg_seq: seq,
-                    payload: vec![seq as u8],
-                    assurance,
-                },
-                100,
-            );
-        }
+        log.lock().unwrap().ingest(
+            Ingress {
+                network: 1,
+                gateway: Some(2),
+                origin: 3,
+                msg_session: 5,
+                msg_seq: 1,
+                payload: vec![1],
+            },
+            100,
+        );
         let c = ctx(Some(501), &acl, &log, &store, &limiter, 200);
         let response = handle(
             b"{\"v\":1,\"request_id\":\"r\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"earliest\"}}",
             &c,
         );
         assert!(response.contains("\"ok\":true"), "{response}");
-        assert!(
-            response
-                .contains("\"profile\":\"EXPERIMENTAL_DEV_PSK\",\"origin\":\"group-key-claim\""),
-            "{response}"
-        );
-        assert!(
-            response.contains("\"profile\":\"MEMBER_EDHOC\",\"origin\":\"enrolled-member\""),
-            "{response}"
-        );
         assert!(
             response.contains("\"profile\":\"UNKNOWN\",\"origin\":\"unverified\""),
             "{response}"
@@ -4532,12 +4517,10 @@ mod tests {
             msg_seq: 2,
             payload: vec![2],
             stored_ms: 100,
-            assurance: RxAssurance::MemberEnrolled,
         };
         assert!(
-            record_meta_json(&record, "cursor").contains(
-                "\"assurance\":{\"profile\":\"MEMBER_EDHOC\",\"origin\":\"enrolled-member\"}"
-            ),
+            record_meta_json(&record, "cursor")
+                .contains("\"assurance\":{\"profile\":\"UNKNOWN\",\"origin\":\"unverified\"}"),
             "{}",
             record_meta_json(&record, "cursor")
         );
