@@ -1196,14 +1196,14 @@ Status EspNowRuntime::send_raw(const MacAddress& mac,
     return Status::error(StatusCode::InvalidArgument,
                          "invalid ESP-NOW frame");
   }
-  // Completion callbacks identify a send only by des_addr: never let two
-  // sends share a destination MAC while a completion is outstanding.
+  // ESP-NOW recommends waiting for the prior callback before the next send;
+  // this also prevents completion order ambiguity across destinations.
   const MonotonicMs now = now_ms();
   portENTER_CRITICAL(&callback_lock_);
-  if (pending_tx_ && pending_mac_ == mac) {
+  if (pending_tx_) {
     portEXIT_CRITICAL(&callback_lock_);
     return Status::error(StatusCode::WouldBlock,
-                         "reserved DATA TX in flight to peer");
+                         "physical TX already in flight");
   }
   // Retire entries whose completion never arrived (callback watchdog). The
   // expiry is evidence too: each retires into expired_tx_ for Unknown
@@ -1230,6 +1230,11 @@ Status EspNowRuntime::send_raw(const MacAddress& mac,
     raw_tx_[kept++] = raw_tx_[i];  // stays outstanding — MAC remains blocked
   }
   raw_tx_count_ = kept;
+  // One outstanding driver send across both lanes preserves callback order.
+  if (raw_tx_count_ != 0) {
+    portEXIT_CRITICAL(&callback_lock_);
+    return Status::error(StatusCode::WouldBlock, "physical TX already in flight");
+  }
   if (tx_quarantined(mac)) {
     portEXIT_CRITICAL(&callback_lock_);
     return Status::error(StatusCode::WouldBlock,
@@ -1530,13 +1535,11 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
                          "physical TX already in flight");
   }
   {
-    // A raw autonomy send to this MAC may still owe a callback that would
-    // otherwise satisfy this reservation — refuse until it retires.
-    bool raw_outstanding = false;
+    // Keep the driver slot exclusive across raw and reserved traffic;
+    // an old callback must not complete this reservation.
     std::size_t kept = 0;
     for (std::size_t i = 0; i < raw_tx_count_; ++i) {
       if (now - raw_tx_[i].sent_ms < config_.node.callback_watchdog_ms) {
-        raw_outstanding |= raw_tx_[i].mac == peer_mac;
         raw_tx_[kept++] = raw_tx_[i];
         continue;
       }
@@ -1552,14 +1555,13 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
       }
       // Quarantine full: keep it outstanding — its MAC stays blocked
       // rather than losing callback tracking (X-02).
-      raw_outstanding |= raw_tx_[i].mac == peer_mac;
       raw_tx_[kept++] = raw_tx_[i];
     }
     raw_tx_count_ = kept;
-    if (raw_outstanding) {
+    if (raw_tx_count_ != 0) {
       portEXIT_CRITICAL(&callback_lock_);
       return Status::error(StatusCode::WouldBlock,
-                           "autonomy TX in flight to peer");
+                           "physical TX already in flight");
     }
   }
   if (tx_quarantined(peer_mac)) {

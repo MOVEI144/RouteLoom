@@ -28,6 +28,10 @@ struct EspNowRuntimeTestAccess {
   static ReplyPeerPort& reply(EspNowRuntime& runtime) noexcept {
     return runtime.reply_port_;
   }
+  static Status raw_send(EspNowRuntime& runtime, const MacAddress& mac) noexcept {
+    const std::uint8_t frame = 0x42;
+    return runtime.send_raw(mac, ByteView{&frame, 1});
+  }
   static void set_release_pending(EspNowRuntime& runtime, NodeId peer) noexcept {
     if (auto* record = runtime.find_peer(peer)) record->release_pending = true;
   }
@@ -625,6 +629,33 @@ void test_route_broadcast_uses_reserved_radio_slot() {
   runtime.stop();
 }
 
+void test_physical_tx_arbitrates_across_peers() {
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize().ok());
+  CHECK(runtime.start().ok());
+  CHECK(runtime.register_neighbor(kPeer, peer_mac(), 1).ok());
+  MacAddress other = peer_mac();
+  other.bytes[5] = 3;
+  CHECK(runtime.register_neighbor(3, other, 1).ok());
+  const std::uint8_t frame = 0x42;
+  CHECK(runtime.send(kPeer, 1, ByteView{&frame, 1}).ok());
+  CHECK(EspNowRuntimeTestAccess::raw_send(runtime, other).code ==
+        routeloom::StatusCode::WouldBlock);
+  CHECK(idf_stub::send_count() == 1);
+  CHECK(idf_stub::complete_send(true));
+  CHECK(EspNowRuntimeTestAccess::raw_send(runtime, other).ok());
+  CHECK(runtime.send(kPeer, 2, ByteView{&frame, 1}).code ==
+        routeloom::StatusCode::WouldBlock);
+  CHECK(idf_stub::send_count() == 2);
+  CHECK(idf_stub::complete_send(true));
+  CHECK(runtime.send(kPeer, 2, ByteView{&frame, 1}).ok());
+  CHECK(idf_stub::complete_send(true));
+  runtime.stop();
+}
+
 void test_driver_delete_failure_keeps_slot_occupied() {
   idf_stub::reset();
   TestSecurity security;
@@ -842,6 +873,7 @@ int main() {
   test_driverless_authenticated_recovery();
   test_driver_release_waits_for_use_and_callback();
   test_route_broadcast_uses_reserved_radio_slot();
+  test_physical_tx_arbitrates_across_peers();
   test_driver_delete_failure_keeps_slot_occupied();
   test_failed_static_registration_does_not_claim_a_slot();
   test_route_capacity_registration_rolls_back_driver_peer();
