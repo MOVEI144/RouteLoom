@@ -7767,4 +7767,348 @@ mod tests {
         // group_settled is a subscribable event kind.
         assert!(crate::subscribe::EVENT_KINDS.contains(&"group_settled"));
     }
+
+    // --- Bench (RLB1) commands through API1 + HostOps (design-devflow §5) ---
+    // firmware/bench_node speaks RLB1 as the application payload. This
+    // harness drives a command down the real daemon path — API1
+    // messages.submit -> operation store -> Dispatcher -> HostOps SUBMIT
+    // body -> receipt -> operations.get — and the device's reply back
+    // through the receive log -> messages.read -> bench codec. Neither leg
+    // is replayed from goldens: every byte crosses the interfaces the
+    // daemon uses in production.
+
+    use routeloom_protocol::bench;
+
+    /// Hex-decode the `payload_hex` field of one messages.read record.
+    fn read_payload(response: &str) -> (String, Vec<u8>) {
+        let parsed = routeloom_json::parse(response).unwrap();
+        let records = parsed
+            .get("result")
+            .and_then(|r| r.get("records"))
+            .expect("records member");
+        let Json::Array(list) = records else {
+            panic!("records is not an array: {response}")
+        };
+        assert!(!list.is_empty(), "expected at least one record: {response}");
+        let record = &list[list.len() - 1];
+        let origin = record
+            .get("origin")
+            .and_then(Json::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let text = record
+            .get("payload_hex")
+            .and_then(Json::as_str)
+            .expect("payload_hex");
+        let mut payload = Vec::with_capacity(text.len() / 2);
+        let bytes = text.as_bytes();
+        for i in (0..bytes.len()).step_by(2) {
+            payload.push(
+                u8::from_str_radix(std::str::from_utf8(&bytes[i..i + 2]).unwrap(), 16).unwrap(),
+            );
+        }
+        (origin, payload)
+    }
+
+    fn bench_acl() -> Acl {
+        Acl::parse(
+            "{\"principals\":{\"501\":{\"networks\":{\"0000000000000001\":[\"SEND\",\"READ_OPERATION\",\"READ_PAYLOAD\"]}}}}",
+        )
+        .unwrap()
+    }
+
+    fn bench_submit(epoch: &str, key: &str, dest: &str, payload: &[u8]) -> String {
+        format!(
+            "{{\"v\":1,\"request_id\":\"s\",\"method\":\"messages.submit\",\"params\":{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{key}\",\"destination\":{{\"kind\":\"node\",\"id\":\"{dest}\"}},\"payload_hex\":\"{}\",\"payload_len\":{},\"options\":{{\"storage\":\"RAM_ONLY\"}}}}}}",
+            hex_lower(payload),
+            payload.len(),
+        )
+    }
+
+    /// Drive the operation store's queued records to a HostOps SUBMIT and
+    /// return the emitted request. Mirrors the dispatcher's own test driver:
+    /// lease change emits a floor probe and a time sample, both answered,
+    /// then the dispatch pass emits SUBMIT.
+    fn drive_to_submit_request(
+        dispatcher: &mut crate::dispatch::Dispatcher,
+        store: &mut MemoryOperationStore,
+        link: &crate::dispatch::LinkSnapshot,
+        now: u64,
+    ) -> crate::dispatch::DispatchRequest {
+        use routeloom_protocol::host_ops;
+        let out = dispatcher.tick_mono(store, link, now, now);
+        let retire = out
+            .iter()
+            .find(|r| r.body[1] == host_ops::SUB_RETIRE_THROUGH)
+            .expect("floor probe emitted");
+        let sample = out
+            .iter()
+            .find(|r| r.body[1] == host_ops::SUB_TIME_SAMPLE)
+            .expect("time sample emitted");
+        let retire_req = retire.request;
+        let sample_req = sample.request;
+        let nonce = host_ops::decode_time_sample_request(&sample.body)
+            .unwrap()
+            .nonce;
+        let lease = routeloom_protocol::host_ops::BootLease::derive(link.boot, link.node);
+        dispatcher.handle_reply(
+            store,
+            retire_req,
+            &host_ops::encode_retire_response(&host_ops::RetireResponse {
+                result: host_ops::HostOpsResult::Ok,
+                lease,
+                retired_through: 0,
+            }),
+            now + 5,
+        );
+        dispatcher.handle_reply(
+            store,
+            sample_req,
+            &host_ops::encode_time_sample_response(&host_ops::TimeSampleResponse {
+                result: host_ops::HostOpsResult::Ok,
+                lease,
+                nonce,
+                device_time: 42_000,
+            }),
+            now + 5,
+        );
+        dispatcher
+            .tick_mono(store, link, now + 10, now + 10)
+            .into_iter()
+            .find(|r| r.body[1] == host_ops::SUB_SUBMIT)
+            .expect("submit emitted")
+    }
+
+    /// The node-destination canonical body: 26B head + payload
+    /// (canonical.rs §schema-1), so the application payload starts at 26.
+    fn canonical_payload(canonical_bytes: &[u8]) -> &[u8] {
+        assert_eq!(canonical_bytes[0], canonical::SCHEMA_VERSION);
+        let len = u16::from_be_bytes([canonical_bytes[24], canonical_bytes[25]]) as usize;
+        assert_eq!(canonical_bytes.len(), 26 + len, "canonical length field");
+        &canonical_bytes[26..]
+    }
+
+    #[test]
+    fn bench_echo_command_round_trips_api1_host_ops() {
+        use routeloom_protocol::host_ops;
+
+        let acl = bench_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+
+        // A real RLB1 ECHO_REQUEST addressed at bench node 3.
+        let mut run = [0u8; 16];
+        run[0] = 0x52;
+        run[1] = 0x55;
+        run[15] = 0x42;
+        let wire = bench::encode(bench::Opcode::EchoRequest, 0, &run, 7, b"ping").unwrap();
+        let line = bench_submit(
+            &epoch,
+            "00112233445566778899aabbccddeeff",
+            "0000000000000003",
+            &wire,
+        );
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
+        let response = handle(line.as_bytes(), &c);
+        assert!(response.contains("\"ok\":true"), "{response}");
+        let operation_id = result_field(&response, "operation_id");
+
+        // The dispatcher emits a HostOps SUBMIT whose canonical carries the
+        // RLB1 frame unchanged — decode at both layers to prove it.
+        let mut dispatcher = crate::dispatch::Dispatcher::new([7; 16]);
+        let link = crate::dispatch::LinkSnapshot {
+            active: true,
+            host_ops: true,
+            gateway_ops: true,
+            config_ops: true,
+            session: 0,
+            host_boot: 0x99,
+            node: 0x0abc,
+            boot: 7,
+            network: 1,
+        };
+        let submit = {
+            let mut guard = store.lock().unwrap();
+            drive_to_submit_request(&mut dispatcher, &mut guard, &link, 1_000)
+        };
+        let parsed = host_ops::decode_submit(&submit.body).unwrap();
+        let payload = canonical_payload(&parsed.canonical).to_vec();
+        let msg = bench::decode(&payload).expect("canonical payload is RLB1");
+        assert_eq!(msg.opcode, bench::Opcode::EchoRequest as u8);
+        assert_eq!(msg.sequence, 7);
+        assert_eq!(msg.run, run);
+        assert_eq!(msg.body, b"ping");
+
+        // The gateway accepted the position: a receipt resolves the
+        // operation, and API1 operations.get reports committed state.
+        let hash = canonical::sha256(&parsed.canonical);
+        {
+            let mut guard = store.lock().unwrap();
+            dispatcher.handle_reply(
+                &mut *guard,
+                submit.request,
+                &host_ops::encode_receipt(&host_ops::Receipt {
+                    sub: host_ops::SUB_SUBMIT,
+                    result: host_ops::HostOpsResult::Ok,
+                    state: host_ops::SlotState::Sent,
+                    lease: routeloom_protocol::host_ops::BootLease::derive(link.boot, link.node),
+                    dispatch_seq: parsed.dispatch_seq,
+                    hash,
+                    msg_session: 9,
+                    msg_seq: 77,
+                    msg_valid: true,
+                    evidence: host_ops::Evidence::GatewayAccepted,
+                }),
+                1_020,
+            );
+        }
+        let get = format!(
+            "{{\"v\":1,\"request_id\":\"g\",\"method\":\"operations.get\",\"params\":{{\"operation_id\":\"{operation_id}\"}}}}"
+        );
+        let response = handle(
+            get.as_bytes(),
+            &ctx(Some(501), &acl, &log, &store, &limiter, 1_050),
+        );
+        assert!(
+            response.contains("\"dispatch_state\":\"GATEWAY_ACCEPTED\""),
+            "{response}"
+        );
+        assert!(response.contains("GATEWAY_ACCEPTED"), "{response}");
+
+        // The bench node's ECHO_REPLY arrives as a scope-1 ingress record:
+        // the daemon stores the raw application payload, and messages.read
+        // returns it byte-identical for the bench codec to decode.
+        let reply = bench::encode(
+            bench::Opcode::EchoReply,
+            bench::FLAG_RESPONSE,
+            &run,
+            7,
+            b"ping",
+        )
+        .unwrap();
+        log.lock().unwrap().ingest(
+            Ingress {
+                network: 1,
+                gateway: Some(2),
+                origin: 3,
+                msg_session: 5,
+                msg_seq: 88,
+                payload: reply,
+            },
+            1_100,
+        );
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"r\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"earliest\"}}",
+            &ctx(Some(501), &acl, &log, &store, &limiter, 1_100),
+        );
+        let (origin, payload) = read_payload(&response);
+        assert_eq!(origin, "0000000000000003");
+        let reply_msg = bench::decode(&payload).expect("read payload is RLB1");
+        assert_eq!(reply_msg.opcode, bench::Opcode::EchoReply as u8);
+        assert_ne!(reply_msg.flags & bench::FLAG_RESPONSE, 0);
+        assert_eq!(reply_msg.sequence, 7);
+        assert_eq!(reply_msg.run, run);
+        assert_eq!(reply_msg.body, b"ping");
+    }
+
+    #[test]
+    fn bench_stale_notice_and_malformed_via_api1_read() {
+        let acl = bench_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+
+        // A post-reset destination's stale COUNT_STATUS: the daemon must
+        // deliver it untouched so the controller sees the STALE_BOOT state
+        // (the source-side run then closes unknown, never restarts).
+        let mut run = [0u8; 16];
+        run[0] = 0x52;
+        run[1] = 0x55;
+        run[15] = 0x43;
+        let stale_body = bench::encode_count_status(&bench::CountStatusBody {
+            state: bench::count_state::STALE_BOOT,
+            ..bench::CountStatusBody::default()
+        });
+        let stale_wire = bench::encode(
+            bench::Opcode::CountStatus,
+            bench::FLAG_RESPONSE | bench::FLAG_LATE,
+            &run,
+            9,
+            &stale_body,
+        )
+        .unwrap();
+        // Garbage that is not RLB1 at all — corrupted on the wire or a
+        // non-bench payload; the log stores it verbatim either way. Long
+        // enough to reach the magic check rather than stopping at truncated.
+        let garbage = vec![0xde; 36];
+        {
+            let mut guard = log.lock().unwrap();
+            guard.ingest(
+                Ingress {
+                    network: 1,
+                    gateway: Some(2),
+                    origin: 3,
+                    msg_session: 5,
+                    msg_seq: 90,
+                    payload: stale_wire,
+                },
+                1_000,
+            );
+            guard.ingest(
+                Ingress {
+                    network: 1,
+                    gateway: Some(2),
+                    origin: 3,
+                    msg_session: 5,
+                    msg_seq: 91,
+                    payload: garbage,
+                },
+                1_001,
+            );
+        }
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 1_010);
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"r\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"earliest\"}}",
+            &c,
+        );
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let Json::Array(records) = parsed
+            .get("result")
+            .and_then(|r| r.get("records"))
+            .expect("records member")
+        else {
+            panic!("records is not an array: {response}")
+        };
+        assert_eq!(records.len(), 2, "{response}");
+        let decode_at = |index: usize| {
+            let hex = records[index]
+                .get("payload_hex")
+                .and_then(Json::as_str)
+                .expect("payload_hex");
+            let mut payload = Vec::with_capacity(hex.len() / 2);
+            let bytes = hex.as_bytes();
+            for i in (0..bytes.len()).step_by(2) {
+                payload.push(
+                    u8::from_str_radix(std::str::from_utf8(&bytes[i..i + 2]).unwrap(), 16).unwrap(),
+                );
+            }
+            payload
+        };
+        let stale_payload = decode_at(0);
+        let stale = bench::decode(&stale_payload).expect("stale notice is RLB1");
+        assert_eq!(stale.opcode, bench::Opcode::CountStatus as u8);
+        assert_ne!(stale.flags & bench::FLAG_LATE, 0);
+        assert_eq!(
+            bench::decode_count_status(stale.body).unwrap().state,
+            bench::count_state::STALE_BOOT
+        );
+        // Corrupt payload: honest codec verdict, never silently dropped or
+        // re-interpreted.
+        assert_eq!(
+            bench::decode(&decode_at(1)),
+            Err(bench::DecodeError::BadMagic)
+        );
+    }
 }
