@@ -103,17 +103,17 @@ fn daemon_restart_reconnects() {
     let mut client = DaemonClient::new(socket.clone());
 
     // No daemon yet: connect attempt fails and backs off.
-    client.tick(&mut state, 0);
+    client.tick(&mut state, 0, 0);
     assert!(!client.is_connected());
     assert!(matches!(state.conn, Conn::Disconnected { attempts: 1, .. }));
 
     // Still inside the backoff window: no new attempt.
-    client.tick(&mut state, 100);
+    client.tick(&mut state, 100, 100);
     assert!(matches!(state.conn, Conn::Disconnected { attempts: 1, .. }));
 
     // Daemon comes up; past the backoff window the client connects.
     let daemon1 = spawn_fake_daemon(&socket, "42");
-    client.tick(&mut state, 1_000);
+    client.tick(&mut state, 1_000, 1_000);
     assert!(client.is_connected());
     assert_eq!(state.conn, Conn::Connected);
     assert_eq!(state.nodes.len(), 1);
@@ -126,29 +126,44 @@ fn daemon_restart_reconnects() {
     // The socket file is gone only after unlink; remove it to be sure the
     // old listener cannot be re-accepted.
     let _ = std::fs::remove_file(&socket);
-    client.tick(&mut state, 2_000);
+    client.tick(&mut state, 2_000, 2_000);
     assert!(!client.is_connected());
     assert!(matches!(state.conn, Conn::Disconnected { attempts: 1, .. }));
 
     // Backoff: several ticks below the retry time change nothing.
-    client.tick(&mut state, 2_100);
+    client.tick(&mut state, 2_100, 2_100);
     assert!(matches!(state.conn, Conn::Disconnected { attempts: 1, .. }));
-    client.tick(&mut state, 2_300);
+    client.tick(&mut state, 2_300, 2_300);
     assert!(matches!(state.conn, Conn::Disconnected { attempts: 1, .. }));
     // Past the retry deadline a new connect attempt is made and fails.
-    client.tick(&mut state, 2_600);
+    client.tick(&mut state, 2_600, 2_600);
     assert!(matches!(state.conn, Conn::Disconnected { attempts: 2, .. }));
 
     // Restarted daemon (different node marker). Client reconnects once the
     // backoff expires and refreshes the model — no panic, no stale conn.
     let daemon2 = spawn_fake_daemon(&socket, "77");
-    client.tick(&mut state, 4_000);
+    client.tick(&mut state, 4_000, 4_000);
     assert!(client.is_connected());
     assert_eq!(state.conn, Conn::Connected);
     assert_eq!(state.nodes[0].id, 77);
 
     let _ = daemon2.stop.send(());
     daemon2.join.join().expect("daemon2 joins");
+    let _ = std::fs::remove_file(&socket);
+}
+
+#[test]
+fn wall_clock_rollback_does_not_delay_retry() {
+    let socket = temp_socket("rollback");
+    let mut state = State::new(socket.display().to_string());
+    let mut client = DaemonClient::new(socket.clone());
+    client.tick(&mut state, 3_600_000, 100);
+    assert!(!client.is_connected());
+    let daemon = spawn_fake_daemon(&socket, "42");
+    client.tick(&mut state, 0, 60_100);
+    assert!(client.is_connected());
+    let _ = daemon.stop.send(());
+    daemon.join.join().expect("daemon joins");
     let _ = std::fs::remove_file(&socket);
 }
 

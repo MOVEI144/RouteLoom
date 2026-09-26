@@ -110,7 +110,7 @@ flat profileの規則は`lifetime > (ceil(D/6) + 1) × period`（`flat_lifetime_
 
 `rl_node_config_init()`はflat既定（5s／15s、gatewayなし）のままなので、C callerがscopedにするときは5s／90sを明示する（15sのままでは`rl_start`が拒否する）。実効gateway一覧は`rl_route_gateways()`で読める（0件＝flat）。
 
-**C ABIの拡張方針**：新fieldは`rl_node_config_t`の**末尾**に足し、`RL_ABI_VERSION`は2のまま据え置いた。`rl_init`は`struct_size`が構造体全体以上なら新fieldを読み、拡張前の大きさ（`RL_NODE_CONFIG_SIZE_BASE`＝64B）なら末尾を一切読まずflat profileとする。その間の大きさは拒否する。`reserved[3]`の転用を採らなかったのは、gateway ID（u64×2）が3Bに入らないことと、`rl_init`がreservedの0を検査してこなかったため旧callerのreservedを意味ある値として読めないことによる。ABI versionを上げると`abi_version`の完全一致検査で既存callerが全て拒否されるので上げない。`rl_node_config_init()`は新しい全体を書くので、旧header（64B）でbuildしたbinaryがこのlibraryの`rl_node_config_init()`を呼ぶ組合せは不可（pre-1.0は同じsource dropからbuildする前提、[compatibility §4](../../spec/compatibility.md)）。
+**C ABIの拡張方針**：新fieldは`rl_node_config_t`の**末尾**に足し、`RL_ABI_VERSION`は2のまま据え置いた。`rl_init`は`struct_size`が構造体全体以上なら新fieldを読み、拡張前の大きさ（`RL_NODE_CONFIG_SIZE_BASE`＝64B）なら末尾を一切読まずflat profileとする。その間の大きさは拒否する。`reserved[3]`の転用を採らなかったのは、gateway ID（u64×2）が3Bに入らないことと、`rl_init`がreservedの0を検査してこなかったため旧callerのreservedを意味ある値として読めないことによる。ABI versionを上げると`abi_version`の完全一致検査で既存callerが全て拒否されるので上げない。`rl_node_config_init()`は旧64Bだけを書くため旧headerでbuildしたbinaryも安全。拡張fieldを使う現行callerは現行サイズの領域に`rl_node_config_init_full()`を呼ぶ（[compatibility §4](../../spec/compatibility.md)）。
 
 ## 6. 資源（動的確保なし）
 

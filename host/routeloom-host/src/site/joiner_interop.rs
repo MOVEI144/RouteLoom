@@ -1039,11 +1039,9 @@ impl World {
         let mut partial: std::collections::HashMap<(u64, u32), (CarrierKind, Vec<u8>, usize)> =
             std::collections::HashMap::new();
         let mut whole = Vec::new();
-        // The adapter stamps admissions with the wall clock while this
-        // harness runs virtual time ahead of it; draining on the wall
-        // clock keeps the 20 s TTL honest (production runs the two
-        // together, so this skew exists only in the test).
-        for down in usb.take_ready(now_ms()) {
+        // The adapter stamps admissions with the process monotonic clock;
+        // this harness advances its authority's virtual clock separately.
+        for down in usb.take_ready(crate::mono_ms()) {
             if authority_sub(&down.bytes) != Some(SUB_AUTHORITY_DOWN) {
                 continue;
             }
