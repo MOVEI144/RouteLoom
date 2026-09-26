@@ -666,9 +666,10 @@ impl InteropSite {
                 let uid = routeloom_peercred::peer_uid(&stream).ok();
                 let state = Arc::clone(&accept_state);
                 let outbound = outbound_tx.clone();
+                let ipc_stream = routeloom_peercred::IpcStream::from_unix(stream);
                 thread::spawn(move || {
                     let _ = serve_client(
-                        stream,
+                        ipc_stream,
                         state,
                         outbound,
                         0,

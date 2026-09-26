@@ -490,6 +490,7 @@ name = "routeloom-client"
 version = "0.1.0"
 dependencies = [
  "routeloom-json",
+ "routeloom-peercred",
 ]
 
 [[package]]
@@ -502,6 +503,7 @@ dependencies = [
  "p256",
  "routeloom-join",
  "routeloom-keysched",
+ "routeloom-peercred",
  "routeloom-provision",
  "sha2",
  "zeroize",
@@ -564,6 +566,7 @@ version = "0.1.0"
 dependencies = [
  "p256",
  "routeloom-json",
+ "routeloom-peercred",
  "zeroize",
 ]
 
@@ -573,6 +576,7 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "routeloom-json",
+ "routeloom-peercred",
 ]
 
 [[package]]
@@ -588,6 +592,7 @@ name = "routeloomctl"
 version = "0.1.0"
 dependencies = [
  "routeloom-json",
+ "routeloom-peercred",
  "routeloom-provision",
  "rustix",
 ]

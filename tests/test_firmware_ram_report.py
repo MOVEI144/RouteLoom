@@ -67,6 +67,22 @@ class Parse(unittest.TestCase):
         self.assertTrue(result["guard"]["passed"])
         self.assertEqual([m["name"] for m in result["memory"]], ["HP SRAM", "LP SRAM"])
 
+    def test_c6_guards_hp_sram_not_lp_sram(self):
+        report = {"version": "1.2", "layout": [
+            {"name": "HP SRAM", "total": 524288, "used": 300000, "free": 224288,
+             "parts": {".bss": {"size": 180000}, ".text": {"size": 100000},
+                       ".data": {"size": 20000}}},
+            {"name": "LP SRAM", "total": 16384, "used": 16000, "free": 384,
+             "parts": {".bss": {"size": 8000}, ".data": {"size": 8000}}},
+            {"name": "Flash", "total": 33554432, "used": 900000, "free": 32654432,
+             "parts": {".text": {"size": 700000}, ".rodata": {"size": 200000}}},
+        ]}
+        result = frr.evaluate(report, "esp32c6", "reference_node")
+        self.assertEqual(result["guard"]["memory_type"], "HP SRAM")
+        self.assertTrue(result["guard"]["passed"])
+        self.assertEqual([m["name"] for m in result["memory"]], ["HP SRAM", "LP SRAM"])
+
+
     def test_s3_json2_guards_diram_not_iram(self):
         result = frr.evaluate(load("esp32s3-json2.json"), "esp32s3", "bridge_node")
         # IRAM is almost full but holds no static data: the guard must pick

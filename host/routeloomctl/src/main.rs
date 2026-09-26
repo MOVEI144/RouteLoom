@@ -1,9 +1,6 @@
-#[cfg(not(unix))]
-compile_error!("routeloomctl v0.1 currently requires a Unix platform");
-
+use routeloom_peercred::IpcStream;
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -76,8 +73,8 @@ fn exchange_first(
     command: &str,
     read_timeout: Duration,
     write_timeout: Duration,
-) -> Result<(String, BufReader<UnixStream>), Box<dyn std::error::Error>> {
-    let mut stream = UnixStream::connect(socket)?;
+) -> Result<(String, BufReader<IpcStream>), Box<dyn std::error::Error>> {
+    let mut stream = IpcStream::connect(socket)?;
     stream.set_write_timeout(Some(write_timeout))?;
     stream.set_read_timeout(Some(read_timeout))?;
     stream.write_all(command.as_bytes())?;
@@ -367,9 +364,20 @@ fn receive_request(network: &str, from: &str, cursor: Option<&str>, limit: u64) 
     )
 }
 
+fn default_socket_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(r"\\.\pipe\routeloom.sock")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/tmp/routeloom.sock")
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
-    let mut socket = PathBuf::from("/tmp/routeloom.sock");
+    let mut socket = default_socket_path();
     let mut remaining = Vec::new();
     // --socket is accepted in any position, not only before the command.
     while let Some(argument) = args.next() {
@@ -2155,25 +2163,36 @@ fn site_cutover_command(args: &[String]) -> Result<String, Box<dyn std::error::E
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixListener;
+    use routeloom_peercred::IpcListener;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Unique socket path per test (parallel tests must not share one).
     fn test_socket_path(tag: &str) -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "routeloomctl-test-{}-{}-{tag}.sock",
-            std::process::id(),
-            id
-        ))
+        #[cfg(windows)]
+        {
+            PathBuf::from(format!(
+                r"\\.\pipe\routeloomctl-test-{}-{}-{tag}",
+                std::process::id(),
+                id
+            ))
+        }
+        #[cfg(not(windows))]
+        {
+            std::env::temp_dir().join(format!(
+                "routeloomctl-test-{}-{}-{tag}.sock",
+                std::process::id(),
+                id
+            ))
+        }
     }
 
     /// Serves one connection: reads the command line, then runs `answer`
     /// with the connected stream. Returns the path to query.
-    fn serve_once(tag: &str, answer: impl FnOnce(UnixStream) + Send + 'static) -> PathBuf {
+    fn serve_once(tag: &str, answer: impl FnOnce(IpcStream) + Send + 'static) -> PathBuf {
         let path = test_socket_path(tag);
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = IpcListener::bind(&path).unwrap();
         std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             // Read the command line, then answer.

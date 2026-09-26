@@ -23,7 +23,7 @@
 //! `provision-ledger-release`; `issued`/`written` entries are never
 //! released — they are the no-reissue history.
 
-use rustix::fs::{flock, FlockOperation};
+use routeloom_peercred::{try_lock_file_exclusive, unlock_file};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -104,13 +104,16 @@ impl OfficeLedger {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        use std::os::unix::fs::OpenOptionsExt;
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-        {
+        #[cfg(unix)]
+        let mut opts = {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut o = std::fs::OpenOptions::new();
+            o.mode(0o600);
+            o
+        };
+        #[cfg(not(unix))]
+        let mut opts = std::fs::OpenOptions::new();
+        match opts.write(true).create_new(true).open(path) {
             Ok(file) => {
                 file.sync_all()?;
                 sync_parent(path)?;
@@ -119,13 +122,16 @@ impl OfficeLedger {
             Err(e) => return Err(e.into()),
         }
         let canonical = std::fs::canonicalize(path)?;
-        use std::os::unix::fs::MetadataExt;
         let metadata = std::fs::metadata(&canonical)?;
         if !metadata.is_file() {
             return Err("office ledger path is not a regular file".into());
         }
-        if metadata.nlink() != 1 {
-            return Err("office ledger must not have hard-link aliases".into());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.nlink() != 1 {
+                return Err("office ledger must not have hard-link aliases".into());
+            }
         }
         Ok(OfficeLedger { path: canonical })
     }
@@ -505,12 +511,16 @@ impl OfficeLedger {
                 kept.push('\n');
             }
         }
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)?;
+        #[cfg(unix)]
+        let mut opts = {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut o = std::fs::OpenOptions::new();
+            o.mode(0o600);
+            o
+        };
+        #[cfg(not(unix))]
+        let mut opts = std::fs::OpenOptions::new();
+        let mut file = opts.write(true).create_new(true).open(&tmp)?;
         file.write_all(kept.as_bytes())?;
         file.sync_all()?;
         std::fs::rename(&tmp, path)?;
@@ -746,19 +756,26 @@ impl Lockfile {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        use std::os::unix::fs::OpenOptionsExt;
-        let file = std::fs::OpenOptions::new()
+        #[cfg(unix)]
+        let mut opts = {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut o = std::fs::OpenOptions::new();
+            o.mode(0o600);
+            o
+        };
+        #[cfg(not(unix))]
+        let mut opts = std::fs::OpenOptions::new();
+        let file = opts
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .mode(0o600)
             .open(path)?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
-            match flock(&file, FlockOperation::NonBlockingLockExclusive) {
-                Ok(()) => return Ok(Lockfile { _file: file }),
-                Err(e) if e == rustix::io::Errno::WOULDBLOCK => {
+            match try_lock_file_exclusive(&file) {
+                Ok(true) => return Ok(Lockfile { _file: file }),
+                Ok(false) => {
                     if std::time::Instant::now() >= deadline {
                         return Err(format!(
                             "office ledger is locked by another process ({}); refusing to issue blind",
@@ -771,6 +788,12 @@ impl Lockfile {
                 Err(e) => return Err(e.into()),
             }
         }
+    }
+}
+
+impl Drop for Lockfile {
+    fn drop(&mut self) {
+        let _ = unlock_file(&self._file);
     }
 }
 
@@ -919,7 +942,7 @@ mod tests {
             .write(true)
             .open(&path)
             .unwrap();
-        rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive).unwrap();
+        assert!(try_lock_file_exclusive(&held).unwrap());
         let (tx, rx) = std::sync::mpsc::channel();
         let contender = std::thread::spawn(move || {
             let guard = Lockfile::acquire(&path).unwrap();
@@ -929,7 +952,7 @@ mod tests {
         assert!(rx
             .recv_timeout(std::time::Duration::from_millis(200))
             .is_err());
-        rustix::fs::flock(&held, rustix::fs::FlockOperation::Unlock).unwrap();
+        unlock_file(&held).unwrap();
         rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
         contender.join().unwrap();
         std::fs::remove_dir_all(&dir).ok();
@@ -978,6 +1001,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn ledger_aliases_share_one_lock() {
         let dir = scratch("alias-lock");

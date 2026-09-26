@@ -185,6 +185,29 @@ fn write_private_nvs_set(
     write("nvs-set.json", set.descriptor_json().as_bytes())
 }
 
+#[cfg(not(unix))]
+fn write_private_nvs_set(
+    dir: &Path,
+    set: &routeloom_provision::nvs::ManufacturedNvs,
+) -> Result<(), DynError> {
+    use std::io::Write;
+    if !dir.exists() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let write = |name: &str, bytes: &[u8]| -> Result<(), DynError> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(name))?;
+        file.write_all(bytes)?;
+        Ok(())
+    };
+    for entry in &set.entries {
+        write(&entry.file_name(), &entry.bytes())?;
+    }
+    write("nvs-set.json", set.descriptor_json().as_bytes())
+}
+
 /// `provision-manifest --image <spec-or-rlt1> --key <root.key> --out
 /// <manifest>` — sign the image's RLT1 body into an RTM1 object under
 /// the dev root key. The AAD binds the image's own network — the only

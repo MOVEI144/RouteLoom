@@ -473,11 +473,18 @@ fn publish_work(
     let _ = std::fs::remove_dir_all(&staging);
     if owner_only {
         // The directory holds the device secret: owner-only.
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&staging)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&staging)?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir_all(&staging)?;
+        }
     } else {
         std::fs::create_dir_all(&staging)?;
     }
@@ -500,14 +507,29 @@ fn publish_work(
         sync_path(&staging.join(name))?;
     }
     sync_path(&staging)?;
-    rustix::fs::renameat_with(
-        rustix::fs::CWD,
-        &staging,
-        rustix::fs::CWD,
-        &inputs.out_dir,
-        rustix::fs::RenameFlags::NOREPLACE,
-    )
-    .map_err(|e| format!("publish {}: {e}", inputs.out_dir.display()))?;
+    #[cfg(unix)]
+    {
+        rustix::fs::renameat_with(
+            rustix::fs::CWD,
+            &staging,
+            rustix::fs::CWD,
+            &inputs.out_dir,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+        .map_err(|e| format!("publish {}: {e}", inputs.out_dir.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        if inputs.out_dir.exists() {
+            return Err(format!(
+                "publish {}: target already exists",
+                inputs.out_dir.display()
+            )
+            .into());
+        }
+        std::fs::rename(&staging, &inputs.out_dir)
+            .map_err(|e| format!("publish {}: {e}", inputs.out_dir.display()))?;
+    }
     if let Some(parent) = inputs.out_dir.parent() {
         sync_path(parent)?;
     }

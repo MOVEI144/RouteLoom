@@ -1,6 +1,3 @@
-#[cfg(not(unix))]
-compile_error!("routeloom-host v0.1 currently requires a Unix platform");
-
 mod acl;
 mod api1;
 mod canonical;
@@ -17,6 +14,7 @@ mod telemetry;
 
 use acl::Acl;
 use receive_log::{Ingress, ReceiveLog};
+use routeloom_peercred::{IpcListener, IpcStream, Principal};
 use routeloom_protocol::dev_session::{
     derive_session_proof, open_body, seal_body, SessionProof, Transcript, DIRECTION_DEVICE_TO_HOST,
     DIRECTION_HOST_TO_DEVICE, FLAG_AUTH, PROTECTED_BODY_OVERHEAD,
@@ -27,8 +25,8 @@ use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -2005,16 +2003,23 @@ fn adapter_writer_loop(
 /// mode via stty — this workspace carries no termios crate — and continue on
 /// failure: plain files and PTYs used by tests need nothing.
 fn configure_raw_tty(path: &Path) {
-    let flag = if cfg!(target_os = "macos") {
-        "-f"
-    } else {
-        "-F"
-    };
-    let _ = std::process::Command::new("stty")
-        .arg(flag)
-        .arg(path)
-        .args(["raw", "-echo"])
-        .status();
+    #[cfg(unix)]
+    {
+        let flag = if cfg!(target_os = "macos") {
+            "-f"
+        } else {
+            "-F"
+        };
+        let _ = std::process::Command::new("stty")
+            .arg(flag)
+            .arg(path)
+            .args(["raw", "-echo"])
+            .status();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 }
 
 /// Bounded exponential backoff for adapter (re)open attempts: an unplugged
@@ -2158,7 +2163,7 @@ fn adapter_supervisor(
 // boxing it into a struct would only rename the same state.
 #[allow(clippy::too_many_arguments)]
 fn serve_client(
-    stream: UnixStream,
+    stream: IpcStream,
     state: Arc<State>,
     outbound: mpsc::SyncSender<Outbound>,
     _process_session: u64,
@@ -2479,8 +2484,19 @@ fn parse_args() -> Result<DaemonArgs, String> {
     parse_args_from(env::args().skip(1))
 }
 
+fn default_socket_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(r"\\.\pipe\routeloom.sock")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/tmp/routeloom.sock")
+    }
+}
+
 fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, String> {
-    let mut socket = PathBuf::from("/tmp/routeloom.sock");
+    let mut socket = default_socket_path();
     let mut device = None;
     let mut acl_file = None;
     let mut op_store = None;
@@ -2614,31 +2630,34 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
 /// ignores unix-socket file perms on connect() — the mode still
 /// documents intent). A world-writable parent outside the system temp
 /// dir warns but does not fail: dev environments bind there legitimately.
-fn bind_api_listener(socket_path: &Path) -> io::Result<UnixListener> {
-    let listener = UnixListener::bind(socket_path)?;
-    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
-    if let Some(parent) = socket_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        let world_writable = std::fs::metadata(parent)
-            .map(|m| m.permissions().mode() & 0o002 != 0)
-            .unwrap_or(false);
-        if world_writable {
-            let canonical_parent = parent.canonicalize().ok();
-            let is_temp = [
-                env::temp_dir(),
-                PathBuf::from("/tmp"),
-                PathBuf::from("/var/tmp"),
-            ]
-            .iter()
-            .any(|d| {
-                d == parent
-                    || (canonical_parent.is_some()
-                        && d.canonicalize().ok().as_ref() == canonical_parent.as_ref())
-            });
-            if !is_temp {
-                eprintln!(
-                    "warning: socket directory {} is world-writable; another local user could replace the socket file — prefer a private directory",
-                    parent.display()
-                );
+fn bind_api_listener(socket_path: &Path) -> io::Result<IpcListener> {
+    let listener = IpcListener::bind(socket_path)?;
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+        if let Some(parent) = socket_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            let world_writable = std::fs::metadata(parent)
+                .map(|m| m.permissions().mode() & 0o002 != 0)
+                .unwrap_or(false);
+            if world_writable {
+                let canonical_parent = parent.canonicalize().ok();
+                let is_temp = [
+                    env::temp_dir(),
+                    PathBuf::from("/tmp"),
+                    PathBuf::from("/var/tmp"),
+                ]
+                .iter()
+                .any(|d| {
+                    d == parent
+                        || (canonical_parent.is_some()
+                            && d.canonicalize().ok().as_ref() == canonical_parent.as_ref())
+                });
+                if !is_temp {
+                    eprintln!(
+                        "warning: socket directory {} is world-writable; another local user could replace the socket file — prefer a private directory",
+                        parent.display()
+                    );
+                }
             }
         }
     }
@@ -2652,8 +2671,8 @@ fn bind_api_listener(socket_path: &Path) -> io::Result<UnixListener> {
 /// entries are removed so the map cannot accumulate dead principals.
 struct ClientGuard {
     active: Arc<AtomicUsize>,
-    principals: Arc<Mutex<HashMap<Option<u32>, usize>>>,
-    uid: Option<u32>,
+    principals: Arc<Mutex<HashMap<Option<Principal>, usize>>>,
+    principal: Option<Principal>,
 }
 
 impl Drop for ClientGuard {
@@ -2665,7 +2684,7 @@ impl Drop for ClientGuard {
             .principals
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let emptied = match counts.get_mut(&self.uid) {
+        let emptied = match counts.get_mut(&self.principal) {
             Some(entry) => {
                 *entry = entry.saturating_sub(1);
                 *entry == 0
@@ -2673,7 +2692,7 @@ impl Drop for ClientGuard {
             None => false,
         };
         if emptied {
-            counts.remove(&self.uid);
+            counts.remove(&self.principal);
         }
     }
 }
@@ -2740,6 +2759,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     // Only remove a leftover unix socket — never unlink a regular file or a
     // path a second instance happens to point at.
+    #[cfg(unix)]
     if let Ok(meta) = std::fs::metadata(&socket_path) {
         use std::os::unix::fs::FileTypeExt;
         if meta.file_type().is_socket() {
@@ -2931,11 +2951,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // principal is the socket peer's OS uid — `None` (credential lookup
     // unsupported/failed) shares one bucket, so unidentified principals are
     // bounded rather than trusted.
-    let principal_clients: Arc<Mutex<HashMap<Option<u32>, usize>>> =
+    let principal_clients: Arc<Mutex<HashMap<Option<Principal>, usize>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    for incoming in listener.incoming() {
-        match incoming {
-            Ok(stream) => {
+    loop {
+        match listener.accept() {
+            Ok((stream, peer_principal)) => {
                 let count = active_clients.fetch_add(1, Ordering::Relaxed);
                 if count >= MAX_CLIENTS {
                     active_clients.fetch_sub(1, Ordering::Relaxed);
@@ -2944,10 +2964,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     drop(stream);
                     continue;
                 }
-                let peer_uid = routeloom_peercred::peer_uid(&stream).ok();
+                let principal_opt = Some(peer_principal.clone());
                 {
                     let mut counts = principal_clients.lock().expect("client counts poisoned");
-                    let entry = counts.entry(peer_uid).or_insert(0);
+                    let entry = counts.entry(principal_opt.clone()).or_insert(0);
                     if *entry >= MAX_CLIENTS_PER_PRINCIPAL {
                         drop(counts);
                         active_clients.fetch_sub(1, Ordering::Relaxed);
@@ -2956,6 +2976,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     *entry += 1;
                 }
+                let peer_uid = peer_principal.as_unix_uid();
                 let client_state = Arc::clone(&state);
                 let client_outbound = outbound_tx.clone();
                 let client_requests = Arc::clone(&next_request);
@@ -2969,7 +2990,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _guard = ClientGuard {
                         active: clients,
                         principals: client_counts,
-                        uid: peer_uid,
+                        principal: principal_opt,
                     };
                     let _ = serve_client(
                         stream,
@@ -2986,6 +3007,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(error) => eprintln!("accept failed: {error}"),
         }
     }
+    #[allow(unreachable_code)]
     Ok(())
 }
 
@@ -3787,8 +3809,8 @@ mod tests {
         state: Arc<State>,
         peer_uid: Option<u32>,
         session: Arc<Mutex<DeviceSession>>,
-    ) -> (BufReader<UnixStream>, UnixStream, mpsc::Receiver<Outbound>) {
-        let (client, server) = UnixStream::pair().expect("socketpair");
+    ) -> (BufReader<IpcStream>, IpcStream, mpsc::Receiver<Outbound>) {
+        let (client, server) = IpcStream::pair().expect("ipc pair");
         let (tx, rx) = mpsc::sync_channel(4);
         thread::spawn(move || {
             let _ = serve_client(
@@ -3806,16 +3828,13 @@ mod tests {
         (reader, client, rx)
     }
 
-    fn spawn_client(
-        state: Arc<State>,
-        peer_uid: Option<u32>,
-    ) -> (BufReader<UnixStream>, UnixStream) {
+    fn spawn_client(state: Arc<State>, peer_uid: Option<u32>) -> (BufReader<IpcStream>, IpcStream) {
         let (reader, client, _rx) =
             spawn_client_with(state, peer_uid, Arc::new(Mutex::new(DeviceSession::new())));
         (reader, client)
     }
 
-    fn exchange(reader: &mut BufReader<UnixStream>, writer: &mut UnixStream, line: &str) -> String {
+    fn exchange(reader: &mut BufReader<IpcStream>, writer: &mut IpcStream, line: &str) -> String {
         writer.write_all(line.as_bytes()).expect("write");
         writer.write_all(b"\n").expect("write");
         let mut response = String::new();
@@ -4183,6 +4202,7 @@ mod tests {
     /// The control socket file mode is tightened to 0600 before any
     /// accept — restricting IPC to the owning uid where the OS honors
     /// socket perms (Linux), and documenting intent elsewhere.
+    #[cfg(unix)]
     #[test]
     fn api_listener_mode_is_owner_only() {
         let dir = env::temp_dir().join(format!("routeloom-sock-test-{}", process::id()));
@@ -4203,23 +4223,25 @@ mod tests {
     #[test]
     fn client_guard_restores_counts_on_panic() {
         let active = Arc::new(AtomicUsize::new(1));
-        let principals: Arc<Mutex<HashMap<Option<u32>, usize>>> =
-            Arc::new(Mutex::new(HashMap::from([(Some(501_u32), 1)])));
+        let test_principal = Some(Principal::UnixUid(501));
+        let principals: Arc<Mutex<HashMap<Option<Principal>, usize>>> =
+            Arc::new(Mutex::new(HashMap::from([(test_principal.clone(), 1)])));
         let outcome = std::panic::catch_unwind({
             let active = Arc::clone(&active);
             let principals = Arc::clone(&principals);
+            let principal = test_principal.clone();
             move || {
                 let _guard = ClientGuard {
                     active,
                     principals,
-                    uid: Some(501),
+                    principal,
                 };
                 panic!("simulated client handler panic");
             }
         });
         assert!(outcome.is_err());
         assert_eq!(active.load(Ordering::Relaxed), 0);
-        assert!(!principals.lock().unwrap().contains_key(&Some(501)));
+        assert!(!principals.lock().unwrap().contains_key(&test_principal));
     }
 
     /// Reserved origins (0/u64::MAX) can never appear on the wire: the
@@ -4258,7 +4280,7 @@ mod tests {
         let args =
             |words: &[&str]| parse_args_from(words.iter().map(|w| w.to_string())).expect("parse");
         let defaults = args(&[]);
-        assert_eq!(defaults.socket, PathBuf::from("/tmp/routeloom.sock"));
+        assert_eq!(defaults.socket, default_socket_path());
         assert!(defaults.device.is_none());
         assert!(defaults.acl_file.is_none());
         assert!(defaults.op_store.is_none());

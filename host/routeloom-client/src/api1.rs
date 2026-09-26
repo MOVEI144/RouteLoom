@@ -18,8 +18,8 @@
 //! (--api-acl-file); `membership`/`link_status`/`links` need no grant.
 //! `send_group` needs SEND and `group_result` READ_OPERATION.
 
+use routeloom_peercred::IpcStream;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -299,8 +299,8 @@ impl RouteLoomTransport {
         )
     }
 
-    fn connect(&self, method: &str, params: &str) -> Result<BufReader<UnixStream>, TransportError> {
-        let mut stream = UnixStream::connect(&self.socket)?;
+    fn connect(&self, method: &str, params: &str) -> Result<BufReader<IpcStream>, TransportError> {
+        let mut stream = IpcStream::connect(&self.socket)?;
         stream.write_all(self.request_line(method, params).as_bytes())?;
         stream.flush()?;
         Ok(BufReader::new(stream))
@@ -388,7 +388,7 @@ impl RouteLoomTransport {
 
     /// Opens a subscription and returns its reader positioned after the ok
     /// line — every following line is a notification.
-    fn subscribe(&self, params: &str) -> Result<BufReader<UnixStream>, TransportError> {
+    fn subscribe(&self, params: &str) -> Result<BufReader<IpcStream>, TransportError> {
         let mut reader = self.connect("messages.subscribe", params)?;
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
@@ -403,7 +403,7 @@ impl RouteLoomTransport {
 /// surfaces gap/overflow markers as [`TransportError::Gap`], ends on EOF or
 /// the `ended` notification.
 struct Notifications<T> {
-    reader: BufReader<UnixStream>,
+    reader: BufReader<IpcStream>,
     parse: fn(&Json) -> Option<Option<T>>,
     done: bool,
 }

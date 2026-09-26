@@ -13,7 +13,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixListener;
 use std::sync::atomic::AtomicU64;
 use std::sync::{mpsc, Arc, Barrier, Mutex};
 use std::thread;
@@ -78,9 +78,10 @@ impl Daemon {
                 let uid = routeloom_peercred::peer_uid(&stream).ok();
                 let state = Arc::clone(&accept_state);
                 let outbound = outbound_tx.clone();
+                let ipc_stream = routeloom_peercred::IpcStream::from_unix(stream);
                 thread::spawn(move || {
                     let _ = serve_client(
-                        stream,
+                        ipc_stream,
                         state,
                         outbound,
                         0,
@@ -123,7 +124,7 @@ impl Drop for Daemon {
 }
 
 fn raw_api1(state: &Arc<State>, uid: u32, line: &str) -> String {
-    let (client, server) = UnixStream::pair().unwrap();
+    let (client, server) = routeloom_peercred::IpcStream::pair().unwrap();
     let (tx, _rx) = mpsc::sync_channel(4);
     let state = Arc::clone(state);
     thread::spawn(move || {

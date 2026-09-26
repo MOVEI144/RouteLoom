@@ -22,10 +22,10 @@ use crate::acl;
 use crate::api1::{record_json, record_meta_json};
 use crate::receive_log::{Cursor, ReadOutcome, RxRecord, PAGE_LIMIT};
 use crate::{now_ms, State};
+use routeloom_peercred::IpcStream;
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -829,7 +829,7 @@ enum PassOutcome {
 pub fn pump_connection(
     state: Arc<State>,
     conn_id: u64,
-    writer: Arc<Mutex<UnixStream>>,
+    writer: Arc<Mutex<IpcStream>>,
     conn_alive: Arc<AtomicBool>,
 ) {
     // The log epoch is fixed per run — cursors minted on this connection
@@ -869,7 +869,7 @@ pub fn pump_connection(
 fn pump_pass(
     state: &State,
     conn_id: u64,
-    writer: &Mutex<UnixStream>,
+    writer: &Mutex<IpcStream>,
     epoch: &[u8; 16],
 ) -> PassOutcome {
     let Some(snaps) = state.subscriptions.snapshot(conn_id) else {

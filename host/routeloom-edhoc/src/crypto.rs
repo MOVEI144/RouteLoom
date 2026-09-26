@@ -185,16 +185,13 @@ pub fn aead_open(
     Ok(buffer)
 }
 
-/// Reads a fresh P-256 scalar from the OS CSPRNG (/dev/urandom), retrying
-/// the ~2^-32 out-of-range draws.
+/// Reads a fresh P-256 scalar from the OS CSPRNG, retrying the ~2^-32
+/// out-of-range draws. Never falls back to time/pid.
 pub fn random_scalar() -> Result<[u8; 32]> {
-    use std::io::Read;
-    let mut file =
-        std::fs::File::open("/dev/urandom").map_err(|_| Error::Crypto("open /dev/urandom"))?;
     for _ in 0..16 {
         let mut scalar = [0_u8; 32];
-        file.read_exact(&mut scalar)
-            .map_err(|_| Error::Crypto("read /dev/urandom"))?;
+        routeloom_peercred::fill_random(&mut scalar)
+            .map_err(|_| Error::Crypto("OS CSPRNG draw failed"))?;
         if SecretKey::from_slice(&scalar).is_ok() {
             return Ok(scalar);
         }

@@ -44,6 +44,8 @@ use routeloom_json::Json;
 use std::collections::HashMap;
 use std::path::Path;
 
+use routeloom_peercred::Principal;
+
 pub const PERM_READ_PAYLOAD: u8 = 1;
 pub const PERM_SEND: u8 = 2;
 pub const PERM_READ_OPERATION: u8 = 4;
@@ -66,8 +68,8 @@ const ACL_MAX_DEPTH: usize = 8;
 pub struct Acl {
     /// View revision: 0 = no ACL configured, otherwise load counter.
     revision: u64,
-    /// (uid, network pattern) -> permission bits.
-    grants: HashMap<u32, Vec<(Option<u64>, u8)>>,
+    /// (principal, network pattern) -> permission bits.
+    grants: HashMap<Principal, Vec<(Option<u64>, u8)>>,
 }
 
 impl Acl {
@@ -83,7 +85,11 @@ impl Acl {
     /// `network` is the concrete network being accessed; `None` grants in
     /// the file mean "any network".
     pub fn permit(&self, uid: u32, network: u64, permission: u8) -> bool {
-        self.grants.get(&uid).is_some_and(|grants| {
+        self.permit_principal(&Principal::UnixUid(uid), network, permission)
+    }
+
+    pub fn permit_principal(&self, principal: &Principal, network: u64, permission: u8) -> bool {
+        self.grants.get(principal).is_some_and(|grants| {
             grants.iter().any(|(pattern, bits)| {
                 bits & permission != 0 && pattern.map_or(true, |n| n == network)
             })
@@ -116,19 +122,30 @@ impl Acl {
                 return Err("ACL: \"principals\" must be an object".to_string());
             };
             for (uid_key, principal) in principals {
-                let uid: u32 = uid_key.parse().map_err(|_| {
-                    format!("ACL: principal key \"{uid_key}\" is not a decimal uid")
-                })?;
-                // Non-canonical spellings ("+501", "0501") parse to the
-                // same uid yet are distinct JSON keys — grants would merge
-                // silently. Only the canonical decimal form may name a
-                // principal.
-                if uid_key.as_str() != uid.to_string() {
+                let principal_id = if let Ok(uid) = uid_key.parse::<u32>() {
+                    // Non-canonical spellings ("+501", "0501") parse to the
+                    // same uid yet are distinct JSON keys — grants would merge
+                    // silently. Only the canonical decimal form may name a
+                    // principal.
+                    if uid_key.as_str() != uid.to_string() {
+                        return Err(format!(
+                            "ACL: principal key \"{uid_key}\" is not canonical decimal"
+                        ));
+                    }
+                    Principal::UnixUid(uid)
+                } else if uid_key.starts_with("S-")
+                    || uid_key.starts_with("sid:")
+                    || uid_key.starts_with("uid:")
+                {
+                    uid_key
+                        .parse::<Principal>()
+                        .map_err(|e| format!("ACL: {e}"))?
+                } else {
                     return Err(format!(
-                        "ACL: principal key \"{uid_key}\" is not canonical decimal"
+                        "ACL: principal key \"{uid_key}\" is not a decimal uid"
                     ));
-                }
-                let grants = acl.grants.entry(uid).or_default();
+                };
+                let grants = acl.grants.entry(principal_id).or_default();
                 let Json::Object(fields) = principal else {
                     return Err(format!("ACL: principal \"{uid_key}\" must be an object"));
                 };
@@ -294,5 +311,36 @@ mod tests {
         assert!(parse_network_hex("0000000000000000").is_err());
         assert!(parse_network_hex("1").is_err());
         assert!(parse_network_hex("00000000000000gg").is_err());
+    }
+
+    #[test]
+    fn windows_sid_principals_load_and_permit() {
+        let doc = r#"{
+            "principals": {
+                "S-1-5-21-3623811015-3361044348-30300820-1013": {
+                    "networks": {
+                        "*": ["READ_PAYLOAD", "SEND"]
+                    }
+                },
+                "sid:S-1-5-18": {
+                    "networks": {
+                        "0000000000000001": ["CONFIG"]
+                    }
+                }
+            }
+        }"#;
+        let acl = Acl::parse(doc).expect("parse sid acl");
+        let p1 = Principal::WindowsSid("S-1-5-21-3623811015-3361044348-30300820-1013".to_string());
+        let p2 = Principal::WindowsSid("S-1-5-18".to_string());
+        let p_other = Principal::WindowsSid("S-1-5-21-999".to_string());
+
+        assert!(acl.permit_principal(&p1, 1, PERM_READ_PAYLOAD));
+        assert!(acl.permit_principal(&p1, 9, PERM_SEND));
+        assert!(!acl.permit_principal(&p1, 1, PERM_CONFIG));
+
+        assert!(acl.permit_principal(&p2, 1, PERM_CONFIG));
+        assert!(!acl.permit_principal(&p2, 2, PERM_CONFIG));
+
+        assert!(!acl.permit_principal(&p_other, 1, PERM_READ_PAYLOAD));
     }
 }

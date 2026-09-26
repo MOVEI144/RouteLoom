@@ -10,6 +10,9 @@ rust-version.workspace = true
 routeloom-provision = { path = "../routeloom-provision" }
 # Image/credential spec documents are JSON — the workspace's one parser.
 routeloom-json = { path = "../routeloom-json" }
+routeloom-peercred = { path = "../routeloom-peercred" }
+
+[target.'cfg(unix)'.dependencies]
 rustix = { version = "0.38.44", features = ["fs"] }
 
 [lints]
