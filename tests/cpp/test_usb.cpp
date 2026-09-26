@@ -1225,6 +1225,91 @@ std::vector<std::uint8_t> diag_request(HostDriver& host, std::uint64_t request,
                      ByteView{inner.data(), inner.size()});
 }
 
+struct ObservedDiag {
+  std::string reason;
+  std::uint64_t boot{0};
+  std::uint32_t seq{0};
+  std::uint64_t dropped{0};
+};
+
+// Opens every Diagnostic frame in the sink: inner = peer(8) || flags(1) ||
+// reason_len(1) || reason || boot(8) || seq(4) || dropped_total(8).
+std::vector<ObservedDiag> collect_diagnostics(const HostDriver& host,
+                                              const CollectSink& sink) {
+  std::vector<ObservedDiag> out;
+  for (const auto& record : sink.frames) {
+    if (record.frame.kind != FrameKind::Diagnostic) continue;
+    std::uint64_t counter = 0;
+    ByteView opened{};
+    if (!open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+                   opened)) {
+      continue;
+    }
+    CHECK(opened.size >= 10);
+    if (opened.size < 10) continue;
+    CHECK((opened.data[8] & kDiagFlagHasAccounting) != 0);
+    const std::size_t rlen = opened.data[9];
+    const std::size_t tail = 10 + rlen;
+    CHECK(opened.size == tail + 20);
+    if (opened.size != tail + 20) continue;
+    ObservedDiag diag;
+    diag.reason.assign(reinterpret_cast<const char*>(opened.data + 10), rlen);
+    diag.boot = read_u64(opened.data + tail);
+    diag.seq = read_u32(opened.data + tail + 8);
+    diag.dropped = read_u64(opened.data + tail + 12);
+    out.push_back(diag);
+  }
+  return out;
+}
+
+void test_bridge_diagnostic_loss_accounting() {
+  World world;
+  HostDriver host;
+  MonotonicMs now = 0;
+  CHECK(host_handshake(world, host, now, 0xD1A6, 80) != 0);
+  // No device→host credit yet: 9 diagnostics overfill the 8-slot data
+  // queue and the 9th is a counted diagnostic drop, never silent.
+  for (int i = 0; i < 9; ++i) {
+    char reason[16];
+    std::snprintf(reason, sizeof reason, "EVT%d", i);
+    world.bridge.on_diagnostic(reason, 2, nullptr);
+  }
+  CHECK(world.bridge.stats().diagnostics_dropped == 1);
+  // Grant credit and drain: the 8 queued diagnostics arrive stamped with
+  // (boot, seq, dropped_total).
+  const auto grant = grant_body(32, 65536);
+  world.feed(host.sealed(FrameKind::Credit, 81,
+                         ByteView{grant.data(), grant.size()}),
+             now);
+  world.drain(now);
+  const auto first = collect_diagnostics(host, world.device_sink);
+  // Seqs are relative: node start already emitted diagnostics before the
+  // handshake drained them; what matters is consecutiveness + stamping.
+  CHECK(first.size() == 8);
+  for (std::size_t i = 0; i < first.size(); ++i) {
+    if (i > 0) CHECK(first[i].seq == first[i - 1].seq + 1);
+    CHECK(first[i].dropped == 0);
+    CHECK(first[i].boot == 0xB0071D0001ULL);
+  }
+  // The next diagnostic first emits the loss marker, then itself: the PC
+  // sees the gap (the dropped 9th fill) bracketed by an explicit marker.
+  world.device_sink.frames.clear();
+  world.bridge.on_diagnostic("EVT9", 2, nullptr);
+  world.drain(now);
+  const auto second = collect_diagnostics(host, world.device_sink);
+  CHECK(second.size() == 2);
+  if (second.size() == 2 && first.size() == 8) {
+    const std::uint32_t base = first.back().seq;
+    CHECK(second[0].reason == "DIAG_LOSS");
+    CHECK(second[0].seq == base + 2);  // base+1 was the dropped fill
+    CHECK(second[0].dropped == 1);
+    CHECK(second[1].reason == "EVT9");
+    CHECK(second[1].seq == base + 3);
+    CHECK(second[1].dropped == 1);
+  }
+  CHECK(world.bridge.stats().diagnostics_dropped == 1);
+}
+
 void test_bridge_diagnostics() {
   World world;
   // Diagnostics must be attached BEFORE the handshake so bit5 lands in the
@@ -2359,6 +2444,7 @@ int main() {
   test_bridge_set_device_nonce();
   test_bridge_idempotent_send();
   test_bridge_partial_write();
+  test_bridge_diagnostic_loss_accounting();
   test_bridge_diagnostics();
   test_bridge_node_status();
   test_golden_session();

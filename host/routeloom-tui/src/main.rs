@@ -24,6 +24,13 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Refresh interval in milliseconds: a present value must be a positive
+/// integer — `--interval 0` would busy-poll the daemon (a review finding),
+/// so it is rejected instead of spinning.
+fn parse_interval_ms(text: &str) -> Option<u64> {
+    text.parse::<u64>().ok().filter(|ms| *ms >= 1)
+}
+
 fn parse_args() -> (PathBuf, u64) {
     let mut socket = PathBuf::from("/tmp/routeloom.sock");
     let mut interval = 500_u64;
@@ -37,7 +44,13 @@ fn parse_args() -> (PathBuf, u64) {
             }
             "--interval" => {
                 if let Some(value) = args.next() {
-                    interval = value.parse().unwrap_or(500);
+                    match parse_interval_ms(&value) {
+                        Some(ms) => interval = ms,
+                        None => {
+                            eprintln!("--interval must be a positive integer (milliseconds)");
+                            process::exit(2);
+                        }
+                    }
                 }
             }
             "--help" | "-h" => {
@@ -122,4 +135,20 @@ fn run_inner(stdout: &mut impl Write, socket: PathBuf, interval_ms: u64) -> io::
 fn main() -> io::Result<()> {
     let (socket, interval) = parse_args();
     run(socket, interval)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interval_rejects_zero_and_garbage() {
+        // A zero interval used to be accepted and busy-poll the daemon.
+        assert_eq!(parse_interval_ms("0"), None);
+        assert_eq!(parse_interval_ms("-5"), None);
+        assert_eq!(parse_interval_ms("fast"), None);
+        assert_eq!(parse_interval_ms(""), None);
+        assert_eq!(parse_interval_ms("1"), Some(1));
+        assert_eq!(parse_interval_ms("500"), Some(500));
+    }
 }

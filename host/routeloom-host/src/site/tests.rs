@@ -16,7 +16,9 @@ use super::group_keys::{
 use super::records::{Verdict, ROLE_ENDPOINT, ROLE_RELAY};
 use super::store::{Batch, DeviceRow, MemoryStore, Snapshot, SqliteSiteStore, StoreError};
 use super::testkit::{self, kinds, request_id, FakeGroupKeyTransport, Outcome, SimDevice};
-use super::transport::{AbortReason, InProcessTransport, RelayKey, RelayUp};
+use super::transport::{
+    AbortReason, DeliverReject, InProcessTransport, JoinTransport, RelayKey, RelayUp,
+};
 use super::*;
 
 const T0: u64 = 1_790_000_000_000;
@@ -31,6 +33,115 @@ fn service_with(store: Box<dyn SiteStore>) -> (SiteService, Arc<InProcessTranspo
 
 fn service() -> (SiteService, Arc<InProcessTransport>) {
     service_with(Box::<MemoryStore>::default())
+}
+
+struct RejectDownlink(DeliverReject);
+
+impl JoinTransport for RejectDownlink {
+    fn deliver(&self, _: super::transport::Outbound) -> Result<(), DeliverReject> {
+        Err(self.0)
+    }
+}
+
+struct PausedReject {
+    entered: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl JoinTransport for PausedReject {
+    fn deliver(&self, _: super::transport::Outbound) -> Result<(), DeliverReject> {
+        self.entered.send(()).unwrap();
+        self.release
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        Err(DeliverReject::QueueFull)
+    }
+}
+
+#[test]
+fn rejected_downlink_is_recorded_before_another_authority_mutation() {
+    let (service, transport) = service();
+    let service = Arc::new(service);
+    let mut device = SimDevice::new(0x00A1_0000_0000_D0A1, 0xD1);
+    assert!(matches!(
+        device.start(&service, &transport, T0).1,
+        Outcome::Waiting
+    ));
+    let key = service.with(|a| a.txns[0].key).0;
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    service.set_transport(Arc::new(PausedReject {
+        entered: entered_tx,
+        release: Mutex::new(release_rx),
+    }));
+    let first_service = Arc::clone(&service);
+    let first =
+        std::thread::spawn(move || first_service.with(|a| a.abort(key, AbortReason::Timeout)).1);
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let (mutated_tx, mutated_rx) = mpsc::channel();
+    let second_service = Arc::clone(&service);
+    let second = std::thread::spawn(move || {
+        second_service
+            .with(|a| {
+                mutated_tx.send(()).unwrap();
+                a.fail_relay(key, "concurrent", "later".to_string(), T0)
+            })
+            .0
+    });
+    let mutated_during_delivery = mutated_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+    release_tx.send(()).unwrap();
+    let events = first.join().unwrap();
+    let later_failure = second.join().unwrap();
+    assert!(
+        !mutated_during_delivery,
+        "authority changed before the delivery result"
+    );
+    assert!(later_failure.is_none());
+    assert!(events
+        .iter()
+        .any(|(_, fields)| fields.contains("\"reason\":\"queue_full\"")));
+}
+
+#[test]
+fn rejected_downlink_keeps_the_reason_on_the_ended_relay() {
+    let (service, transport) = service();
+    let mut device = SimDevice::new(0x00A1_0000_0000_D0A1, 0xD1);
+    let (_, outcome, _) = device.start(&service, &transport, T0);
+    assert!(matches!(outcome, Outcome::Waiting));
+    let key = service.with(|a| a.txns[0].key).0;
+    service.set_transport(Arc::new(RejectDownlink(DeliverReject::QueueFull)));
+    let (_, events) = service.with(|a| a.abort(key, AbortReason::Timeout));
+    let failure = events
+        .iter()
+        .map(|(_, fields)| json(&format!("{{{fields}}}")))
+        .find(|event| {
+            event.get("kind").and_then(routeloom_json::Json::as_str) == Some("join_relay_failed")
+        })
+        .expect("the rejected attempt needs an event");
+    assert_eq!(
+        failure.get("source").unwrap().as_str(),
+        Some("downlink_rejected")
+    );
+    assert_eq!(failure.get("reason").unwrap().as_str(), Some("queue_full"));
+    assert_eq!(
+        failure.get("proxy").unwrap().as_str(),
+        Some("00a1000000000777")
+    );
+    assert_eq!(failure.get("stage").unwrap().as_str(), Some("deciding"));
+    let (status, _) = service.with(|a| a.status_json(HostTime::sync(T0)));
+    let status = json(&status);
+    let recent = status
+        .get("recent_relay_failures")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        recent.last().unwrap().get("reason").unwrap().as_str(),
+        Some("queue_full")
+    );
+    assert!(service.with(|a| a.txns.is_empty()).0);
 }
 
 struct PresenceOnlyStore {
@@ -412,6 +523,49 @@ fn member_rows(members: usize, active_epoch: u32) -> MemoryStore {
         })
         .unwrap();
     store
+}
+
+/// A failed relay attempt keeps its reason, stage and links: the USB
+/// lane fails the live attempt on gateway abort, and the failure stays
+/// queryable in `site.status` for triage.
+#[test]
+fn relay_failure_keeps_reason_stage_and_links() {
+    let (service, transport) = service();
+    let node = 0x00A1_0000_0000_7001;
+    let mut device = SimDevice::new(node, 0x79);
+    let (_, outcome, events) = device.start(&service, &transport, T0);
+    assert!(matches!(outcome, Outcome::Waiting));
+    let request = request_id(&events).expect("join request");
+    let keys: Vec<RelayKey> = service.with(|a| a.txns.iter().map(|t| t.key).collect()).0;
+    assert_eq!(keys.len(), 1);
+    let failure = service
+        .with(|a| {
+            a.fail_relay(
+                keys[0],
+                "gateway_abort",
+                "GatewayExpired".to_string(),
+                T0 + 5,
+            )
+        })
+        .0
+        .expect("live attempt");
+    let fields = failure.event_fields();
+    for want in [
+        "\"kind\":\"join_relay_failed\"",
+        "\"source\":\"gateway_abort\"",
+        "\"reason\":\"GatewayExpired\"",
+        "\"gateway\":\"00a1000000000001\"",
+        "\"stage\":\"deciding\"",
+        &format!("\"device\":\"{node:016x}\""),
+        &format!("\"join_request\":\"jr-{request:016x}\""),
+    ] {
+        assert!(fields.contains(want), "{fields}");
+    }
+    let (status, _) = service.with(|a| a.status_json(HostTime::sync(T0 + 5)));
+    assert!(
+        status.contains("\"recent_relay_failures\":[{") && status.contains("GatewayExpired"),
+        "{status}"
+    );
 }
 
 /// V1-H01 (host part) / V1-J03: unassigned → pending → assigned → allow;

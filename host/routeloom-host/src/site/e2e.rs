@@ -15,7 +15,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::AtomicU64;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Barrier, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -319,6 +319,57 @@ fn kguard_drives_the_join_over_the_api_socket() {
     assert_eq!(member.removal_reason.as_deref(), Some("lost"));
     let status = kguard_link.site_status().unwrap();
     assert_eq!((status.members, status.removed, status.rs_epoch), (0, 1, 1));
+}
+
+#[test]
+fn concurrent_partial_policy_updates_keep_both_fields() {
+    // Two admins change disjoint fields at once: each must see the
+    // other's committed field afterwards. A read-outside-the-lock
+    // implementation lets the second write clobber the first.
+    let daemon = Daemon::start("policy-race");
+    let uid = std::fs::metadata(&daemon.dir).unwrap().uid();
+    let call = |params: &str| {
+        raw_api1(
+            &daemon.state,
+            uid,
+            &format!(
+                "API1 {{\"v\":1,\"request_id\":\"t\",\"method\":\"join.policy.set\",\"params\":{params}}}"
+            ),
+        )
+    };
+    for round in 0..25 {
+        let base = call("{\"zero_touch_open\":false,\"decision_mode\":\"kguard\"}");
+        assert!(base.contains("\"ok\":true"), "{base}");
+        let barrier = Arc::new(Barrier::new(2));
+        let worker = |state: Arc<State>, params: &'static str| {
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                raw_api1(
+                    &state,
+                    uid,
+                    &format!(
+                        "API1 {{\"v\":1,\"request_id\":\"t\",\"method\":\"join.policy.set\",\"params\":{params}}}"
+                    ),
+                )
+            })
+        };
+        let first = worker(Arc::clone(&daemon.state), "{\"zero_touch_open\":true}");
+        let second = worker(Arc::clone(&daemon.state), "{\"decision_mode\":\"closed\"}");
+        let (a, b) = (first.join().unwrap(), second.join().unwrap());
+        assert!(a.contains("\"ok\":true"), "round {round}: {a}");
+        assert!(b.contains("\"ok\":true"), "round {round}: {b}");
+        let policy = raw_api1(
+            &daemon.state,
+            uid,
+            "API1 {\"v\":1,\"request_id\":\"t\",\"method\":\"join.policy.get\",\"params\":{}}",
+        );
+        assert!(
+            policy.contains("\"zero_touch_open\":true")
+                && policy.contains("\"decision_mode\":\"closed\""),
+            "round {round}: {policy}"
+        );
+    }
 }
 
 #[test]
