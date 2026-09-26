@@ -48,11 +48,11 @@ jobs:
             "${GITHUB_SHA}"
           export PYTHONPATH=tools/meshviz/src
           python3 -m routeloom_meshviz.firmware_catalog verify "$RUNNER_TEMP/bundle" \
-            tools/meshviz/packaging/dev-signing-public.pem
+            tools/meshviz/src/routeloom_meshviz/dev-signing-public.pem
           python3 -m routeloom_meshviz.firmware_catalog catalog "$RUNNER_TEMP/catalog.json" \
             tools/meshviz/packaging/dev-signing-key.pem "$RUNNER_TEMP/bundle"
           python3 -m routeloom_meshviz.firmware_catalog verify-catalog \
-            "$RUNNER_TEMP/catalog.json" tools/meshviz/packaging/dev-signing-public.pem \
+            "$RUNNER_TEMP/catalog.json" tools/meshviz/src/routeloom_meshviz/dev-signing-public.pem \
             "$RUNNER_TEMP/bundle"
           mkdir -p dist
           cp "$RUNNER_TEMP/catalog.json" dist/

@@ -30,7 +30,9 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
+from pathlib import Path
 from typing import Optional
 
 try:
@@ -77,7 +79,8 @@ class FlashError(RuntimeError):
 
 
 def preflight_board(board: "rig_mod.Board", port: str, esptool: str,
-                    out_dir: str) -> dict:
+                    out_dir: str, minimum_flash_bytes: Optional[int] = None,
+                    chip_revision_range: Optional[tuple[int, int]] = None) -> dict:
     """Reidentify the device immediately before any write to avoid port drift."""
     if not board.mac or board.chip not in ("esp32c3", "esp32c5", "esp32c6", "esp32s3"):
         raise FlashError("preflight requires a pinned chip and MAC")
@@ -105,6 +108,14 @@ def preflight_board(board: "rig_mod.Board", port: str, esptool: str,
             f"MAC={detected_mac}, expected={board.chip}/{board.mac} "
             f"(see {path})"
         )
+    if chip_revision_range is not None:
+        revision = re.search(r"^Chip type:.*\brevision v(\d+)\.(\d+)\b",
+                             output, re.I | re.M)
+        if revision is None or int(revision.group(2)) >= 100 or not (
+                chip_revision_range[0] <=
+                int(revision.group(1)) * 100 + int(revision.group(2)) <=
+                chip_revision_range[1]):
+            raise FlashError(f"preflight chip revision incompatible with bundle (see {path})")
     security_cmd = [esptool, "--chip", board.chip, "--port", port,
                     "get-security-info"]
     security = subprocess.run(security_cmd, capture_output=True, text=True, timeout=30)
@@ -118,8 +129,22 @@ def preflight_board(board: "rig_mod.Board", port: str, esptool: str,
             "Secure Boot: Disabled" not in security_lines or
             "Flash Encryption: Disabled" not in security_lines):
         raise FlashError(f"preflight identity or security state changed or unknown (see {path})")
-    return {"chip": detected_chip, "mac": detected_mac,
-            "log": os.path.relpath(path, out_dir)}
+    result = {"chip": detected_chip, "mac": detected_mac,
+              "log": os.path.relpath(path, out_dir)}
+    if minimum_flash_bytes is not None:
+        flash_cmd = [esptool, "--chip", board.chip, "--port", port, "flash-id"]
+        flash = subprocess.run(flash_cmd, capture_output=True, text=True, timeout=30)
+        flash_output = (flash.stdout or "") + (flash.stderr or "")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"\n$ {' '.join(flash_cmd)}\n{flash_output}")
+        flash_chip, flash_mac = identify(flash_output)
+        size = re.search(r"^Detected flash size:\s*(\d+)MB\s*$", flash_output, re.M)
+        flash_bytes = int(size.group(1)) * 1024 * 1024 if size else 0
+        if (flash.returncode != 0 or flash_chip != board.chip or
+                flash_mac != board.mac.lower() or flash_bytes < minimum_flash_bytes):
+            raise FlashError(f"preflight flash capacity or identity mismatch (see {path})")
+        result["flash_bytes"] = flash_bytes
+    return result
 
 
 def load_flasher_args(build_dir: str) -> dict:
@@ -221,19 +246,43 @@ def flash_board(
 ) -> dict:
     """Flash one board. Returns a manifest dict for the report."""
     if image_dir and os.path.isfile(os.path.join(image_dir, 'manifest.json')):
-        # Bench and Mesh Lab share the same development trust anchor and layout.
-        from pathlib import Path
+        # Flash only a private snapshot that is verified after copying.
         sys.path.insert(0, os.path.join(repo, 'tools', 'meshviz', 'src'))
-        from routeloom_meshviz.firmware_catalog import verify_bundle
-        public = Path(repo) / 'tools/meshviz/packaging/dev-signing-public.pem'
-        signed = verify_bundle(image_dir, public)
+        from routeloom_meshviz.firmware_catalog import (
+            DEV_PUBLIC_KEY, _read as read_bundle_file, verify_bundle)
+        signed = verify_bundle(image_dir, DEV_PUBLIC_KEY)
         if signed['chip'] != board.chip or signed['role'] != board.app:
             raise FlashError('signed bundle does not match board')
-        build_dir = image_dir
+        if app_only:
+            raise FlashError('signed bundle requires the complete flash layout')
+        names = ('manifest.json', 'signature.json', 'SHA256SUMS',
+                 *(entry['path'] for entry in signed['files']), *signed['auxiliary'])
+        with tempfile.TemporaryDirectory(prefix='routeloom-hil-flash-') as td:
+            snapshot = Path(td)
+            for name in names:
+                target = snapshot / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(read_bundle_file(Path(image_dir), name))
+            snapshot_signed = verify_bundle(snapshot, DEV_PUBLIC_KEY)
+            if snapshot_signed['chip'] != board.chip or snapshot_signed['role'] != board.app:
+                raise FlashError('signed bundle does not match board')
+            return _flash_board_from_dir(board, port, out_dir, esptool, app_only,
+                                         boot_seconds, timeout_s, str(snapshot),
+                                         snapshot_signed['minimum_flash_bytes'],
+                                         tuple(snapshot_signed['chip_revision_range']))
     else:
         build_dir = os.path.join(image_dir, 'build') if image_dir else board.build_dir(repo)
+        return _flash_board_from_dir(board, port, out_dir, esptool, app_only,
+                                     boot_seconds, timeout_s, build_dir)
+
+
+def _flash_board_from_dir(board, port, out_dir, esptool, app_only, boot_seconds,
+                          timeout_s, build_dir, minimum_flash_bytes=None,
+                          chip_revision_range=None):
     os.makedirs(out_dir, exist_ok=True)
-    preflight = preflight_board(board, port, esptool, out_dir)
+    preflight = preflight_board(board, port, esptool, out_dir,
+                                minimum_flash_bytes=minimum_flash_bytes,
+                                chip_revision_range=chip_revision_range)
     cmd, files, fallback = build_write_flash_cmd(
         build_dir, port, esptool, board.chip or None, board.flash_baud, app_only
     )

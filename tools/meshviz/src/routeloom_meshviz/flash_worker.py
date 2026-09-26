@@ -4,10 +4,10 @@ import sys
 from pathlib import Path
 
 from .device import FlashPlan, Identity, Image
-from .firmware_catalog import verify_bundle
+from .firmware_catalog import DEV_PUBLIC_KEY, verify_bundle
 
 
-PUBLIC_KEY = Path(__file__).resolve().parents[2] / 'packaging' / 'dev-signing-public.pem'
+PUBLIC_KEY = DEV_PUBLIC_KEY
 
 
 def flash(port: str, plan: FlashPlan, api=None):
@@ -15,6 +15,8 @@ def flash(port: str, plan: FlashPlan, api=None):
     if plan.bundle is None:
         raise ValueError('trusted bundle signature verifier unavailable')
     manifest = verify_bundle(plan.bundle, PUBLIC_KEY)
+    if manifest['chip'] == 'esp32c6':
+        raise ValueError('C6 is experimental HIL only')
     if manifest['chip'] != plan.chip or tuple(
             (e['offset'], Path(plan.bundle) / e['path'], e['size'], e['sha256'])
             for e in manifest['files']) != tuple(

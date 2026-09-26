@@ -2,7 +2,8 @@
 
 `tools/hil/` automates real-board validation: rig description, firmware
 flashing, serial capture, scenario runs, and run reports. Everything is
-stdlib-only Python — no third-party dependencies.
+stdlib-only Python except signed bundle verification, which requires
+`cryptography`.
 
 **Hardware status:** the [2026-09-26 bench report](hil/2026-09-26-bench-5node.md)
 records the first hardware run and its continuation. The bench contained
@@ -41,10 +42,10 @@ python3 tools/hil/rig.py --rig tools/hil/rigs.yaml --bench bench-a --probe
 python3 tools/hil/flash.py --rig tools/hil/rigs.yaml --bench bench-a \
     --board bridge --app-only
 
-# Build an isolated image in ESP-IDF v6.0.3, then flash its saved inputs.
+# Build a signed development bundle in the pinned ESP-IDF container, then flash it.
 tools/hil/build_image.sh reference_node esp32c3 ref-a CONFIG_ROUTELOOM_NODE_ID=0x2
 python3 tools/hil/flash.py --rig tools/hil/rigs.yaml --bench bench-a \
-    --board ref-a --image-dir artifacts/hil/2026-09-26/images/ref-a
+    --board ref-a --image-dir artifacts/hil/images/ref-a
 
 # Capture a serial console (DTR asserted by default — required for the
 # reference node's USB-Serial-JTAG console)
@@ -62,6 +63,9 @@ python3 tools/hil/scenarios.py --rig tools/hil/rigs.yaml --bench bench-a \
     --out artifacts/hil/run-1
 python3 tools/hil/report.py --run-dir artifacts/hil/run-1
 ```
+
+Signed bundles require a full flash. The HIL flasher cannot establish the
+existing partition layout before an app-only write.
 
 `rig.py --selftest`, `scenarios.py --selftest` run dependency-free
 self-checks usable in CI without hardware.

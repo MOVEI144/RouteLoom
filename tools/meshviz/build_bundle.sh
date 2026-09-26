@@ -8,7 +8,7 @@ fi
 app=$1 chip=$2 out=$3 key=$4 version=$5
 shift 5
 case "$app/$chip" in
-  reference_node/esp32c3|reference_node/esp32s3|reference_node/esp32c5|bridge_node/esp32c3|bridge_node/esp32s3|bridge_node/esp32c5) ;;
+  reference_node/esp32c3|reference_node/esp32s3|reference_node/esp32c5|reference_node/esp32c6|bridge_node/esp32c3|bridge_node/esp32s3|bridge_node/esp32c5|bridge_node/esp32c6) ;;
   *) echo 'unsupported app/chip' >&2; exit 2 ;;
 esac
 [[ ! -e $out ]] || { echo 'output already exists' >&2; exit 2; }
@@ -28,9 +28,10 @@ repo=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d /tmp/routeloom-bundle.XXXXXX)
 trap 'rm -rf "$work"' EXIT
 # Exclude generated sdkconfig, build output, private credentials and archives.
-rsync -a --exclude='.git' --exclude='artifacts' --exclude='build*' \
+rsync -a --exclude='.git' --exclude='artifacts/' --exclude='build*/' \
   --exclude='sdkconfig' --exclude='sdkconfig.old' --exclude='host/target' \
-  --exclude='__pycache__' --exclude='*.pyc' \
+  --exclude='__pycache__/' --exclude='*.pyc' --exclude='*.egg-info/' \
+  --exclude='.venv/' --exclude='dist/' \
   "$repo/" "$work/src/"
 source_digest=$(python3 - "$work/src" <<'PY'
 import hashlib
@@ -39,15 +40,19 @@ import sys
 root = Path(sys.argv[1])
 h = hashlib.sha256()
 for path in sorted(root.rglob('*')):
-    if path.is_file() and not path.is_symlink():
+    if path.is_symlink():
+        raise SystemExit(f'symlink input is not allowed: {path.relative_to(root)}')
+    if path.is_file():
         h.update(path.relative_to(root).as_posix().encode() + b'\0')
         h.update(hashlib.sha256(path.read_bytes()).digest())
 print(h.hexdigest())
 PY
 )
 sdk_commit=$(git -C "$repo" rev-parse HEAD)
+idf_image=$(PYTHONPATH="$work/src/tools/meshviz/src" python3 -c \
+  'from routeloom_meshviz.firmware_catalog import IDF_IMAGE; print(IDF_IMAGE)')
 docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e EXTRA="$extra" \
-  -v "$work/src:/src" -w "/src/firmware/$app" espressif/idf:v6.0.3 bash -c '
+  -v "$work/src:/src" -w "/src/firmware/$app" "$idf_image" bash -c '
     set -euo pipefail
     . "$IDF_PATH/export.sh" >/dev/null
     test "$(git -C "$IDF_PATH" rev-parse HEAD)" = 76f5dedd9950a3012fee8fb7d5586df21fc67802
@@ -65,7 +70,7 @@ for line in "$@"; do
     echo "Kconfig override not applied: $line" >&2; exit 1;
   }
 done
-PYTHONPATH="$repo/tools/meshviz/src" python3 -m routeloom_meshviz.firmware_catalog package \
+PYTHONPATH="$work/src/tools/meshviz/src" python3 -m routeloom_meshviz.firmware_catalog package \
   "$work/src/firmware/$app" "$work/src/firmware/$app/build" "$out" "$key" \
   "$chip" "$app" "$version" "$sdk_commit" "$source_digest"
 echo "bundle: $out"
