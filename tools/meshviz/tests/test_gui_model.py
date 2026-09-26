@@ -120,8 +120,16 @@ class ObservationClientTests(unittest.TestCase):
                   for n in range(2, 12)]
         routes.append({'destination': f'{99:016x}', 'next_hop': None, 'generation': 4,
                        'sequence': 9, 'metric': None, 'valid': False, 'remaining_ms': None})
+        neighbors = [{'peer': f'{2:016x}', 'active': True, 'link_cost': 1,
+                      'phase': {'code': 6, 'name': 'reachable'},
+                      'rssi_last_dbm': -71, 'rssi_ewma_q8_8': -70 * 256,
+                      'last_heard_at_ms': 880, 'lease_remaining_ms': 80000},
+                     {'peer': f'{3:016x}', 'active': False, 'link_cost': 2,
+                      'phase': {'code': 0, 'name': 'unknown'},
+                      'rssi_last_dbm': None, 'rssi_ewma_q8_8': None,
+                      'last_heard_at_ms': None, 'lease_remaining_ms': None}]
         return {'gateway': self.GATEWAY, 'boot': f'{0xb007:016x}', 'session_id': 0x5e55,
-                'revision': 0x11223344,
+                'revision': 0x11223344, 'neighbors': neighbors,
                 'sections': {
                     'system': {'uptime_ms': 400, 'booted_at_ms': 600,
                                'heap': {'free_bytes': 100, 'min_bytes': 90,
@@ -161,10 +169,14 @@ class ObservationClientTests(unittest.TestCase):
                                        destination=f'{9:016x}')
         self.assertIn(b'"destination":"0000000000000009"', line)
         self.assertNotIn(b'cursor', line)
+        line = encode_topology_request('t2', self.GATEWAY, 'neighbors',
+                                       destination=f'{2:016x}')
+        self.assertIn(b'"section":"neighbors"', line)
+        self.assertIn(b'"destination":"0000000000000002"', line)
         for bad in (lambda: encode_health_request('h', 'zz'),
                     lambda: encode_health_request('h', self.GATEWAY, 'routes'),
                     lambda: encode_health_request('h', self.GATEWAY, max_age_ms=60001),
-                    lambda: encode_topology_request('t', self.GATEWAY, 'neighbors'),
+                    lambda: encode_topology_request('t', self.GATEWAY, 'bogus'),
                     lambda: encode_topology_request('t', self.GATEWAY, 'routes',
                                                     destination='0000000000000000'),
                     lambda: encode_topology_request('t', self.GATEWAY, 'routes',
@@ -230,6 +242,25 @@ class ObservationClientTests(unittest.TestCase):
         summary = parse_observation_snapshot(reply, 'summary')
         self.assertEqual(summary['summary']['milestone_gen'], 7)
         self.assertEqual(summary['entries'], [])
+
+    def test_topology_neighbors_roundtrip(self):
+        fake = FakeAPI1(observation=self.fixture())
+        reply = self.ask(fake, encode_topology_request('t', self.GATEWAY, 'neighbors'))
+        snapshot = parse_observation_snapshot(reply, 'neighbors')
+        self.assertTrue(snapshot['complete'])
+        entries = snapshot['entries']
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]['phase']['name'], 'reachable')
+        self.assertEqual(entries[0]['lease_remaining_ms'], 80000)
+        # The bare row carries no evidence: nulls, never zeros.
+        self.assertIsNone(entries[1]['rssi_last_dbm'])
+        self.assertIsNone(entries[1]['last_heard_at_ms'])
+        self.assertIsNone(entries[1]['lease_remaining_ms'])
+        reply = self.ask(fake, encode_topology_request('t', self.GATEWAY, 'neighbors',
+                                                        destination=f'{77:016x}'))
+        snapshot = parse_observation_snapshot(reply, 'neighbors')
+        self.assertFalse(snapshot['present'])
+        self.assertEqual(snapshot['entries'], [])
 
 
 class DemoAndFakeServerTests(unittest.TestCase):

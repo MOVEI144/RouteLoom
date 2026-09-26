@@ -692,6 +692,32 @@ void test_lease_expiry() {
   CHECK(a.engine.stats().stale_expirations >= 1);
 }
 
+// Read-only lease inspection for the neighbor snapshot: a bound record
+// reports its remaining lease, an unknown peer reads false (no lease to
+// report), and an expired-but-retained record reads 0 — never invented.
+void test_lease_remaining_ms() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, /*member=*/true);
+  Unit& b = world.add(2, 0xB2, /*member=*/true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+
+  MonotonicMs remaining = 0;
+  CHECK(a.engine.lease_remaining_ms(2, world.medium.now, remaining));
+  CHECK(remaining > 0 && remaining <= 30000);
+  CHECK(!a.engine.lease_remaining_ms(99, world.medium.now, remaining));
+
+  world.medium.drop_wire = true;
+  world.medium.drop_rld1 = true;
+  world.run(31000);
+  NeighborPhase phase{};
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Stale);
+  CHECK(a.engine.lease_remaining_ms(2, world.medium.now, remaining));
+  CHECK(remaining == 0);
+}
+
 // Same NodeId appearing on a new MAC while the old binding is alive must be
 // quarantined, not overwritten (02 §8, D3-03).
 void test_mac_change_conflict() {
@@ -1571,6 +1597,7 @@ int main() {
   test_capacity();
   test_density_suppression();
   test_lease_expiry();
+  test_lease_remaining_ms();
   test_mac_change_conflict();
   test_simultaneous_open();
   test_handshake_rate_limit();

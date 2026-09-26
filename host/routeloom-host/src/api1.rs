@@ -79,9 +79,30 @@ pub const REQUEST_ID_MAX: usize = 64;
 /// Additive-only: a removal or rename bumps this and the spec
 /// (docs/spec/host.md §3 records the policy).
 pub const CAPS_VERSION: u32 = 1;
-// USB receive bodies do not carry the gateway's effective security profile
-// or a per-frame origin verification result.
+// Legacy assurance for records without per-delivery evidence: USB receive
+// bodies on an unnegotiated session carry no profile or verdict.
 const RX_ASSURANCE: &str = "\"assurance\":{\"profile\":\"UNKNOWN\",\"origin\":\"unverified\"}";
+
+/// Renders a record's assurance: the gateway's evidence when the flagged
+/// DataFromMesh tail carried it (profile names share the observation
+/// registry — the same id space `health.get` reports), else the legacy
+/// UNKNOWN/unverified shape above. `site_epoch` only exists on the
+/// evidenced shape (additive — no caps bump).
+fn assurance_json(record: &RxRecord) -> String {
+    match &record.assurance {
+        None => RX_ASSURANCE.to_string(),
+        Some(assurance) => format!(
+            "\"assurance\":{{\"profile\":\"{}\",\"origin\":\"{}\",\"site_epoch\":{}}}",
+            routeloom_protocol::observation::profile_name(assurance.profile),
+            if assurance.verified {
+                "verified"
+            } else {
+                "unverified"
+            },
+            assurance.site_epoch,
+        ),
+    }
+}
 
 /// Per-request inputs the dispatch layer needs. `uid` is the socket peer's
 /// OS credential (None when the platform cannot supply one — default deny).
@@ -127,6 +148,7 @@ pub struct ApiContext<'a, S: OperationStore> {
     /// waits here; the telemetry lane thread drives the device exchange.
     pub telemetry_ops: &'a crate::telemetry::TelemetryOps,
     pub observation_ops: &'a crate::observation::ObservationOps,
+    pub remote_observation_ops: &'a crate::remote_observation::RemoteObservationOps,
     /// SDK v1 Site Authority (`--site-authority`); None = not configured,
     /// the site methods then answer SITE_AUTHORITY_UNAVAILABLE.
     pub site: Option<&'a crate::site::SiteService>,
@@ -806,7 +828,7 @@ pub(crate) fn record_json(record: &RxRecord, cursor: &str) -> String {
         crate::receive_log::hex_lower(&record.payload),
         record.payload.len(),
         cursor,
-        RX_ASSURANCE,
+        assurance_json(record),
     )
 }
 
@@ -827,7 +849,7 @@ pub(crate) fn record_meta_json(record: &RxRecord, cursor: &str) -> String {
         record.payload.len(),
         hex_lower(&canonical::sha256(&record.payload)),
         cursor,
-        RX_ASSURANCE,
+        assurance_json(record),
     )
 }
 
@@ -2328,12 +2350,11 @@ struct ObservationLink {
     network: Option<u64>,
 }
 
-/// Gates an observation query on the live session: an authenticated
-/// gateway whose HelloAck advertises observation_v1 (capability bit 11
-/// with host_ops_v1). No ACL grant is needed (diagnostics class, like
-/// link.get) — snapshots carry device health and routing views, never
-/// payloads or secrets.
-fn observation_gate<S: OperationStore>(
+/// The live session an observation query runs against, without the
+/// capability bit: the locality (gateway or foreign observer) decides
+/// which bit the caller must hold (`observation_require_local` vs
+/// `observation_require_remote` below).
+fn observation_session_link<S: OperationStore>(
     ctx: &ApiContext<'_, S>,
 ) -> Result<ObservationLink, ApiError> {
     let info = ctx.session.lock().expect("session poisoned");
@@ -2343,9 +2364,6 @@ fn observation_gate<S: OperationStore>(
         boot: info.boot.unwrap_or(0),
         network: info.network,
     };
-    let capable = info
-        .capability
-        .is_some_and(crate::observation::observation_capable);
     let identified = info.authenticated && info.id.is_some() && info.node.is_some();
     drop(info);
     if !identified {
@@ -2357,6 +2375,24 @@ fn observation_gate<S: OperationStore>(
             retryable: true,
         });
     }
+    Ok(link)
+}
+
+/// Gates a local observation query on the live session: an authenticated
+/// gateway whose HelloAck advertises observation_v1 (capability bit 11
+/// with host_ops_v1). No ACL grant is needed (diagnostics class, like
+/// link.get) — snapshots carry device health and routing views, never
+/// payloads or secrets.
+/// Requires the observation_v1 bit (capability bit 11 with
+/// host_ops_v1) for a local (gateway) query, after
+/// `observation_session_link` fixed the session.
+fn observation_require_local<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Result<(), ApiError> {
+    let capable = ctx
+        .session
+        .lock()
+        .expect("session poisoned")
+        .capability
+        .is_some_and(crate::observation::observation_capable);
     if !capable {
         return Err(ApiError {
             code: "UNSUPPORTED",
@@ -2365,7 +2401,29 @@ fn observation_gate<S: OperationStore>(
             retryable: false,
         });
     }
-    Ok(link)
+    Ok(())
+}
+
+/// Requires the m1 diagnostics bit (capability bit 5 with host_ops_v1)
+/// for a remote (foreign observer) query: the forward leg rides
+/// Diagnostic 0x30, so the gateway's own observation_v1 bit is
+/// irrelevant to a peer's sections. Same diagnostics class as local.
+fn observation_require_remote<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Result<(), ApiError> {
+    let capable = ctx
+        .session
+        .lock()
+        .expect("session poisoned")
+        .capability
+        .is_some_and(crate::telemetry::telemetry_capable);
+    if !capable {
+        return Err(ApiError {
+            code: "UNSUPPORTED",
+            message: "the attached gateway does not advertise m1 diagnostics (HelloAck capability bit 5 with host_ops_v1) for remote observation".to_string(),
+            extra_fields: "\"required_capability\":\"diagnostics_v1\"".to_string(),
+            retryable: false,
+        });
+    }
+    Ok(())
 }
 
 /// `network` is an optional scope check: when present it must name the
@@ -2393,33 +2451,21 @@ fn observation_network_param(params: &Json, link: &ObservationLink) -> Result<()
     Ok(())
 }
 
-/// `observer` names the observed node and must be the attached gateway
-/// itself — M1 serves local USB observation only, so a foreign observer
-/// is NOT_FOUND (no such observable here), never a routed query.
-fn observation_observer_param(params: &Json, gateway: u64) -> Result<u64, ApiError> {
-    let Some(observer) = params
+/// `observer` names the observed node: the attached gateway itself
+/// (served over local USB) or any foreign mesh node (served over the
+/// gateway-forwarded remote leg). Reserved ids are never observable.
+fn observation_observer_param(params: &Json) -> Result<u64, ApiError> {
+    params
         .get("observer")
         .and_then(Json::as_str)
         .and_then(parse_hex_u64)
-    else {
-        return Err(ApiError::simple(
-            "INVALID_ARGUMENT",
-            "observer must be the 16-hex id of the attached gateway",
-        ));
-    };
-    if observer != gateway {
-        return Err(ApiError {
-            code: "NOT_FOUND",
-            message:
-                "this daemon only observes its attached gateway; remote observation is not served"
-                    .to_string(),
-            extra_fields: format!(
-                "\"observer\":\"{observer:016x}\",\"reason\":\"remote_not_served\""
-            ),
-            retryable: false,
-        });
-    }
-    Ok(observer)
+        .filter(|id| *id != 0 && *id != u64::MAX)
+        .ok_or_else(|| {
+            ApiError::simple(
+                "INVALID_ARGUMENT",
+                "observer must be a non-reserved 16-hex node id",
+            )
+        })
 }
 
 /// `max_age_ms`: 0..=60000, default 10000. Zero bypasses the singleton
@@ -2455,23 +2501,78 @@ fn observation_subscribe_param(params: &Json) -> Result<bool, ApiError> {
 /// readings, whether freshly queried or served from the singleton cache.
 /// `store_mark` is Some only for a fresh page (the dirty mark its query
 /// took — the caller offers it to the cache); cache hits never re-store.
+/// `radio_queries` is the mesh load this call spent: 0 on the local USB
+/// leg, 0/1 on the remote leg (singleflight join or negative-cache hit
+/// vs a fresh mesh query).
 struct ObservationAnswer {
     revision: u32,
     boot: u64,
     received_ms: u64,
+    received_mono_ms: u64,
+    rtt_ms: u64,
     armed: bool,
     more: bool,
     next_after: u64,
     count: u8,
     body: Vec<u8>,
     store_mark: Option<u64>,
+    radio_queries: u32,
+}
+
+/// One answered remote section: the decoded answer, or the mesh
+/// refusal the observer (or the path) returned — data, like telemetry's
+/// `outcome:reject`, never an error. The local leg answers
+/// `Answer` only.
+enum RemoteSection {
+    Answer(ObservationAnswer),
+    Reject(routeloom_protocol::telemetry::DiagnosticReject),
+}
+
+/// Renders a remote refusal: the same `outcome:reject` shape as
+/// `diagnostics.snapshot`, scoped to the observed node.
+fn remote_reject_json(
+    scope: &str,
+    reject: &routeloom_protocol::telemetry::DiagnosticReject,
+) -> String {
+    format!(
+        "{{\"outcome\":\"reject\",\"scope\":{{{scope}}},\"reject\":{}}}",
+        crate::telemetry::reject_json(reject),
+    )
+}
+
+/// Runs one section query on the leg the observer selects: the 0x70
+/// local leg for the gateway itself (or the singleton cache), the
+/// gateway-forwarded 0x30 remote leg for a foreign observer. A
+/// non-answer outcome maps onto the honest error for why no answer
+/// arrived; a mesh refusal arrives as `RemoteSection::Reject`.
+#[allow(clippy::too_many_arguments)]
+fn observation_query<S: OperationStore>(
+    ctx: &ApiContext<'_, S>,
+    link: &ObservationLink,
+    scope: &str,
+    observer: u64,
+    section: u8,
+    after: u64,
+    exact: bool,
+    subscribe: bool,
+    max_age_ms: u64,
+) -> Result<RemoteSection, ApiError> {
+    if observer != link.gateway {
+        return observation_query_remote(
+            ctx, link, scope, observer, section, after, exact, subscribe,
+        );
+    }
+    let answer = observation_query_local(
+        ctx, link, scope, section, after, exact, subscribe, max_age_ms,
+    )?;
+    Ok(RemoteSection::Answer(answer))
 }
 
 /// Runs one 0x70 query (or answers from the singleton cache): submit,
 /// wait within `observation::API_WAIT_MS`, decode. A non-page outcome
 /// maps onto the honest error for why no answer arrived.
 #[allow(clippy::too_many_arguments)]
-fn observation_query<S: OperationStore>(
+fn observation_query_local<S: OperationStore>(
     ctx: &ApiContext<'_, S>,
     link: &ObservationLink,
     scope: &str,
@@ -2483,7 +2584,7 @@ fn observation_query<S: OperationStore>(
 ) -> Result<ObservationAnswer, ApiError> {
     use crate::observation::{ObservationOps, QueryOutcome};
     use routeloom_protocol::observation::PAGE_MAX;
-    if !crate::observation::is_routes_section(section) && max_age_ms > 0 {
+    if !crate::observation::is_paged_section(section) && max_age_ms > 0 {
         if let Some(cached) =
             ctx.observation_ops
                 .cached(section, link.session, link.boot, max_age_ms, ctx.now_ms)
@@ -2492,12 +2593,15 @@ fn observation_query<S: OperationStore>(
                 revision: cached.revision,
                 boot: link.boot,
                 received_ms: cached.received_ms,
+                received_mono_ms: cached.received_mono_ms,
+                rtt_ms: cached.rtt_ms,
                 armed: cached.armed,
                 more: false,
                 next_after: 0,
                 count: 1,
                 body: cached.body,
                 store_mark: None,
+                radio_queries: 0,
             });
         }
     }
@@ -2540,18 +2644,23 @@ fn observation_query<S: OperationStore>(
             header,
             body,
             received_ms,
+            received_mono_ms,
+            rtt_ms,
         } => {
             use routeloom_protocol::observation::{PAGE_ARMED, PAGE_MORE};
             Ok(ObservationAnswer {
                 revision: header.revision,
                 boot: header.boot_id,
                 received_ms,
+                received_mono_ms,
+                rtt_ms,
                 armed: header.flags & PAGE_ARMED != 0,
                 more: header.flags & PAGE_MORE != 0,
                 next_after: header.next_after,
                 count: header.count,
                 body,
                 store_mark: Some(dirty_mark),
+                radio_queries: 0,
             })
         }
         outcome => Err(observation_outcome_error(outcome, scope)),
@@ -2647,9 +2756,172 @@ fn observation_device_error(
     }
 }
 
+/// Runs one gateway-forwarded 0x30 subtype-7 query for a foreign
+/// observer: submit, wait within `remote_observation::API_WAIT_MS`,
+/// decode. Always a fresh pull (no change events cross the radio, so
+/// there is no cache to honor — `max_age_ms` does not apply); the lane
+/// still bounds the load (in-flight cap, singleflight, negative cache)
+/// and every answer reports its `radio_queries`. A mesh refusal arrives
+/// as `RemoteSection::Reject`, never an error.
+#[allow(clippy::too_many_arguments)]
+fn observation_query_remote<S: OperationStore>(
+    ctx: &ApiContext<'_, S>,
+    link: &ObservationLink,
+    scope: &str,
+    observer: u64,
+    section: u8,
+    after: u64,
+    exact: bool,
+    subscribe: bool,
+) -> Result<RemoteSection, ApiError> {
+    use crate::remote_observation::{QueryOutcome, RemoteObservationParams, SubmitOutcome};
+    use routeloom_protocol::observation::{
+        REMOTE_NEIGHBORS_MAX, REMOTE_ROUTES_MAX, REMOTE_SNAPSHOT_MORE, SECTION_NEIGHBORS,
+        SECTION_ROUTES,
+    };
+    if subscribe {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "subscribe is local-only; remote observation is pull-only",
+        ));
+    }
+    let max_entries = match section {
+        SECTION_ROUTES => REMOTE_ROUTES_MAX,
+        SECTION_NEIGHBORS => REMOTE_NEIGHBORS_MAX,
+        _ => 1,
+    };
+    let ops = ctx.remote_observation_ops;
+    let submitted = ops
+        .submit(
+            RemoteObservationParams {
+                observer,
+                section,
+                max_entries,
+                exact,
+                after,
+            },
+            link.session,
+            ctx.now_mono,
+        )
+        .map_err(|_| ApiError {
+            code: "NO_CAPACITY",
+            message: "too many remote observation queries in flight; retry when one settles"
+                .to_string(),
+            extra_fields: format!("\"in_flight\":{}", ops.pending()),
+            retryable: true,
+        })?;
+    let (outcome, received_ms, received_mono_ms, rtt_ms, radio_queries) = match submitted {
+        // A cached mesh failure: served without radio, stamped now.
+        SubmitOutcome::Cached(outcome) => (outcome, ctx.now_ms, ctx.now_mono, 0, 0),
+        SubmitOutcome::Live { token, fresh } => {
+            let answer = ops
+                .wait_for(
+                    token,
+                    Duration::from_millis(crate::remote_observation::API_WAIT_MS),
+                )
+                .ok_or_else(|| ApiError {
+                    code: "TIMEOUT",
+                    message: format!(
+                        "remote observation query did not resolve inside {} ms",
+                        crate::remote_observation::API_WAIT_MS
+                    ),
+                    extra_fields: scope.to_string(),
+                    retryable: true,
+                })?;
+            // Marginal radio: a singleflight join reports 0 — the shared
+            // row's query is the leader's cost, not this call's.
+            let radio_queries = u32::from(fresh && answer.sent);
+            (
+                answer.outcome,
+                answer.received_ms,
+                answer.received_mono_ms,
+                answer.rtt_ms,
+                radio_queries,
+            )
+        }
+    };
+    match outcome {
+        QueryOutcome::Snapshot(snapshot) => Ok(RemoteSection::Answer(ObservationAnswer {
+            revision: snapshot.revision,
+            boot: snapshot.observer_boot,
+            received_ms,
+            received_mono_ms,
+            rtt_ms,
+            armed: false,
+            more: snapshot.flags & REMOTE_SNAPSHOT_MORE != 0,
+            next_after: remote_next_after(section, after, &snapshot.body),
+            count: snapshot.count,
+            body: snapshot.body,
+            store_mark: None,
+            radio_queries,
+        })),
+        QueryOutcome::Reject(reject) => Ok(RemoteSection::Reject(reject)),
+        QueryOutcome::Device(result) => Err(observation_device_error(result, scope)),
+        QueryOutcome::DecodeError(detail) => Err(ApiError {
+            code: "INDETERMINATE",
+            message: format!("the gateway answered with a malformed 0x31 body: {detail}"),
+            extra_fields: scope.to_string(),
+            retryable: true,
+        }),
+        QueryOutcome::Timeout => Err(ApiError {
+            code: "TIMEOUT",
+            message: format!(
+                "no remote observation answer inside {} ms",
+                crate::remote_observation::QUERY_TIMEOUT_MS
+            ),
+            extra_fields: scope.to_string(),
+            retryable: true,
+        }),
+        QueryOutcome::SessionLost => Err(ApiError {
+            code: "GATEWAY_UNAVAILABLE",
+            message: "the gateway session changed while the query was in flight".to_string(),
+            extra_fields: format!("{scope},\"reason\":\"session_lost\""),
+            retryable: true,
+        }),
+        QueryOutcome::ErrorFrame(code) => Err(ApiError {
+            code: "INDETERMINATE",
+            message: "the gateway refused the query at the frame level".to_string(),
+            extra_fields: format!("{scope},\"error_code\":{code}"),
+            retryable: true,
+        }),
+    }
+}
+
+/// The follow-up cursor for a remote paged section: entries ascend like
+/// 0x71 pages, so it is the last entry's destination/peer id. An empty
+/// page echoes the query cursor (honest past-the-end); an undecodable
+/// body echoes it too — the caller fails INDETERMINATE on the render
+/// anyway, so the cursor value is never served.
+fn remote_next_after(section: u8, after: u64, body: &[u8]) -> u64 {
+    use routeloom_protocol::observation::{
+        decode_neighbor_detail_entry, decode_route_detail_entry, NEIGHBOR_ENTRY_SIZE,
+        ROUTE_ENTRY_SIZE, SECTION_NEIGHBORS, SECTION_ROUTES,
+    };
+    let entry_size = if section == SECTION_ROUTES {
+        ROUTE_ENTRY_SIZE
+    } else if section == SECTION_NEIGHBORS {
+        NEIGHBOR_ENTRY_SIZE
+    } else {
+        return after;
+    };
+    if body.is_empty() || body.len() % entry_size != 0 {
+        return after;
+    }
+    let last = &body[body.len() - entry_size..];
+    if section == SECTION_ROUTES {
+        decode_route_detail_entry(last).map_or(after, |entry| entry.destination)
+    } else {
+        decode_neighbor_detail_entry(last).map_or(after, |entry| entry.peer)
+    }
+}
+
 /// The common observation envelope: schema, source identity (host-side
 /// session plus the device-reported boot), revision and freshness. Ages
-/// inside the section body map against `received_unix_ms`.
+/// inside the section body map against `received_unix_ms`
+/// (`received_unix_ms - age`, an upper bound); `received_mono_ms` is the
+/// same instant on the host monotonic clock and `rtt_ms` the measured
+/// submit→receive round trip — the mapping's uncertainty bound (the true
+/// sample time is at most `rtt_ms` before the receive).
 #[allow(clippy::too_many_arguments)]
 fn observation_envelope(
     section: &str,
@@ -2660,19 +2932,34 @@ fn observation_envelope(
     now_ms: u64,
     complete: bool,
 ) -> String {
+    // The transport names the leg that served the body: local USB for the
+    // gateway itself, the gateway-forwarded mesh leg for a foreign
+    // observer. `radio_queries` is the mesh load this call spent (0 on
+    // the local leg; 0/1 remote for a shared/cached vs fresh query).
+    let transport = if observer == gateway {
+        "usb_local"
+    } else {
+        "mesh_remote"
+    };
     format!(
-        "\"schema\":1,\"section\":\"{section}\",\"source\":{{\"gateway\":\"{gateway:016x}\",\"usb_session\":{session},\"observer\":\"{observer:016x}\",\"observer_boot\":\"{:016x}\",\"transport\":\"usb_local\"}},\"revision\":{},\"received_unix_ms\":{},\"age_ms\":{},\"stale\":false,\"complete\":{complete},\"armed\":{}",
+        "\"schema\":1,\"section\":\"{section}\",\"source\":{{\"gateway\":\"{gateway:016x}\",\"usb_session\":{session},\"observer\":\"{observer:016x}\",\"observer_boot\":\"{:016x}\",\"transport\":\"{transport}\"}},\"revision\":{},\"received_unix_ms\":{},\"received_mono_ms\":{},\"rtt_ms\":{},\"age_ms\":{},\"stale\":false,\"complete\":{complete},\"armed\":{},\"radio_queries\":{}",
         answer.boot,
         answer.revision,
         answer.received_ms,
+        answer.received_mono_ms,
+        answer.rtt_ms,
         now_ms.saturating_sub(answer.received_ms),
         answer.armed,
+        answer.radio_queries,
     )
 }
 
 /// `health.get {observer, section?:"system"|"tables"|"milestones",
 /// network?, max_age_ms?, subscribe?}`: one read-only device-health
-/// singleton of the attached gateway. Diagnostics class, like link.get.
+/// singleton of the attached gateway — or, for a foreign observer, of
+/// that mesh node over the gateway-forwarded remote leg (pull-only:
+/// `subscribe` is refused and `max_age_ms` ignored there). Diagnostics
+/// class, like link.get.
 fn health_get<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
@@ -2689,9 +2976,14 @@ fn health_get<S: OperationStore>(
             ));
         }
     }
-    let link = observation_gate(ctx)?;
+    let link = observation_session_link(ctx)?;
     observation_network_param(params, &link)?;
-    let observer = observation_observer_param(params, link.gateway)?;
+    let observer = observation_observer_param(params)?;
+    if observer == link.gateway {
+        observation_require_local(ctx)?;
+    } else {
+        observation_require_remote(ctx)?;
+    }
     let section = match params.get("section") {
         None | Some(Json::Null) => SECTION_SYSTEM,
         Some(value) => match value.as_str() {
@@ -2716,18 +3008,33 @@ fn health_get<S: OperationStore>(
     };
     // A cached body that no longer decodes is never served: fall through
     // to a fresh query (bodies are only stored after a decode, so this is
-    // a can't-happen made honest anyway).
-    let mut answer =
-        observation_query(ctx, &link, &scope, section, 0, false, subscribe, max_age_ms)?;
+    // a can't-happen made honest anyway). A mesh refusal is data, not an
+    // error — it renders `outcome:reject` as-is.
+    let mut answer = match observation_query(
+        ctx, &link, &scope, observer, section, 0, false, subscribe, max_age_ms,
+    )? {
+        RemoteSection::Answer(answer) => answer,
+        RemoteSection::Reject(reject) => return Ok(remote_reject_json(&scope, &reject)),
+    };
     let mut rendered = render_health_section(section, &answer.body, answer.received_ms);
     if rendered.is_none() {
-        answer = observation_query(ctx, &link, &scope, section, 0, false, subscribe, 0)?;
+        answer = match observation_query(
+            ctx, &link, &scope, observer, section, 0, false, subscribe, 0,
+        )? {
+            RemoteSection::Answer(answer) => answer,
+            RemoteSection::Reject(reject) => return Ok(remote_reject_json(&scope, &reject)),
+        };
         rendered = render_health_section(section, &answer.body, answer.received_ms);
     }
     let Some(body_json) = rendered else {
+        let message = if observer == link.gateway {
+            "the gateway answered with a malformed 0x71 section body"
+        } else {
+            "the observer answered with a malformed section body"
+        };
         return Err(ApiError {
             code: "INDETERMINATE",
-            message: "the gateway answered with a malformed 0x71 section body".to_string(),
+            message: message.to_string(),
             extra_fields: scope,
             retryable: true,
         });
@@ -2743,6 +3050,8 @@ fn health_get<S: OperationStore>(
             body: answer.body.clone(),
             revision: answer.revision,
             received_ms: answer.received_ms,
+            received_mono_ms: answer.received_mono_ms,
+            rtt_ms: answer.rtt_ms,
             armed: answer.armed,
             dirty_mark,
         });
@@ -2787,16 +3096,17 @@ fn render_health_section(section: u8, body: &[u8], received_ms: u64) -> Option<S
 
 /// `topology.get {observer, section:"routes"|"summary", network?,
 /// destination?, cursor?, max_age_ms?, subscribe?}`: the attached
-/// gateway's selected-route table (one page per call, or one exact
-/// destination) or its topology summary. `section:"neighbors"` needs a
-/// per-neighbor device section M1 does not define — UNSUPPORTED, never a
-/// NodeStatus blend the caller could mistake for it. Diagnostics class.
+/// gateway's selected-route table or neighbor table (one page per call,
+/// or one exact destination/peer) or its topology summary — or, for a
+/// foreign observer, that mesh node's, over the gateway-forwarded
+/// remote leg (pull-only, 3 routes / 4 neighbors per page). Diagnostics
+/// class.
 fn topology_get<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
 ) -> Result<String, ApiError> {
     use routeloom_protocol::observation::{
-        decode_observation_summary, SECTION_ROUTES, SECTION_SUMMARY,
+        decode_observation_summary, SECTION_NEIGHBORS, SECTION_ROUTES, SECTION_SUMMARY,
     };
     for (key, _) in params.object_entries() {
         if !matches!(
@@ -2815,25 +3125,22 @@ fn topology_get<S: OperationStore>(
             ));
         }
     }
-    let link = observation_gate(ctx)?;
+    let link = observation_session_link(ctx)?;
     observation_network_param(params, &link)?;
-    let observer = observation_observer_param(params, link.gateway)?;
+    let observer = observation_observer_param(params)?;
+    if observer == link.gateway {
+        observation_require_local(ctx)?;
+    } else {
+        observation_require_remote(ctx)?;
+    }
     let section = match params.get("section").and_then(Json::as_str) {
         Some("routes") => SECTION_ROUTES,
         Some("summary") => SECTION_SUMMARY,
-        Some("neighbors") => {
-            return Err(ApiError {
-                code: "UNSUPPORTED",
-                message: "per-neighbor detail has no observation_v1 section in M1; routes and summary only"
-                    .to_string(),
-                extra_fields: "\"section\":\"neighbors\"".to_string(),
-                retryable: false,
-            });
-        }
+        Some("neighbors") => SECTION_NEIGHBORS,
         _ => {
             return Err(ApiError::simple(
                 "INVALID_ARGUMENT",
-                "section must be \"routes\" or \"summary\"",
+                "section must be \"routes\", \"neighbors\" or \"summary\"",
             ));
         }
     };
@@ -2867,10 +3174,10 @@ fn topology_get<S: OperationStore>(
             }
         },
     };
-    if section != SECTION_ROUTES && (destination.is_some() || cursor != 0) {
+    if !crate::observation::is_paged_section(section) && (destination.is_some() || cursor != 0) {
         return Err(ApiError::simple(
             "INVALID_ARGUMENT",
-            "destination and cursor are routes-only",
+            "destination and cursor are routes/neighbors-only",
         ));
     }
     if destination.is_some() && params.get("cursor").is_some_and(|v| !v.is_null()) {
@@ -2883,17 +3190,31 @@ fn topology_get<S: OperationStore>(
     let subscribe = observation_subscribe_param(params)?;
     let scope = format!("\"observer\":\"{observer:016x}\"");
     if section == SECTION_SUMMARY {
-        let mut answer =
-            observation_query(ctx, &link, &scope, section, 0, false, subscribe, max_age_ms)?;
+        let mut answer = match observation_query(
+            ctx, &link, &scope, observer, section, 0, false, subscribe, max_age_ms,
+        )? {
+            RemoteSection::Answer(answer) => answer,
+            RemoteSection::Reject(reject) => return Ok(remote_reject_json(&scope, &reject)),
+        };
         let mut summary = decode_observation_summary(&answer.body).ok();
         if summary.is_none() {
-            answer = observation_query(ctx, &link, &scope, section, 0, false, subscribe, 0)?;
+            answer = match observation_query(
+                ctx, &link, &scope, observer, section, 0, false, subscribe, 0,
+            )? {
+                RemoteSection::Answer(answer) => answer,
+                RemoteSection::Reject(reject) => return Ok(remote_reject_json(&scope, &reject)),
+            };
             summary = decode_observation_summary(&answer.body).ok();
         }
         let Some(summary) = summary else {
+            let message = if observer == link.gateway {
+                "the gateway answered with a malformed 0x71 section body"
+            } else {
+                "the observer answered with a malformed section body"
+            };
             return Err(ApiError {
                 code: "INDETERMINATE",
-                message: "the gateway answered with a malformed 0x71 section body".to_string(),
+                message: message.to_string(),
                 extra_fields: scope,
                 retryable: true,
             });
@@ -2906,6 +3227,8 @@ fn topology_get<S: OperationStore>(
                 body: answer.body.clone(),
                 revision: answer.revision,
                 received_ms: answer.received_ms,
+                received_mono_ms: answer.received_mono_ms,
+                rtt_ms: answer.rtt_ms,
                 armed: answer.armed,
                 dirty_mark,
             });
@@ -2926,17 +3249,12 @@ fn topology_get<S: OperationStore>(
     }
     let exact = destination.is_some();
     let after = destination.unwrap_or(cursor);
-    let answer = observation_query(
-        ctx,
-        &link,
-        &scope,
-        SECTION_ROUTES,
-        after,
-        exact,
-        subscribe,
-        0,
-    )?;
-    let entries = decode_route_entries(&answer.body)?;
+    let answer = match observation_query(
+        ctx, &link, &scope, observer, section, after, exact, subscribe, 0,
+    )? {
+        RemoteSection::Answer(answer) => answer,
+        RemoteSection::Reject(reject) => return Ok(remote_reject_json(&scope, &reject)),
+    };
     let complete = !answer.more;
     let next_cursor = if answer.more {
         format!("\"{:016x}\"", answer.next_after)
@@ -2948,10 +3266,21 @@ fn topology_get<S: OperationStore>(
     } else {
         String::new()
     };
+    let section_name = if section == SECTION_ROUTES {
+        "routes"
+    } else {
+        "neighbors"
+    };
+    let remote = observer != link.gateway;
+    let entries = if section == SECTION_ROUTES {
+        decode_route_entries(&answer.body, remote)?
+    } else {
+        decode_neighbor_entries(&answer.body, answer.received_ms, remote)?
+    };
     Ok(format!(
         "{{\"outcome\":\"snapshot\",\"scope\":{{{scope}}},\"snapshot\":{{{envelope},{present}\"entries\":[{entries}],\"next_cursor\":{next_cursor}}}}}",
         envelope = observation_envelope(
-            "routes",
+            section_name,
             link.gateway,
             link.session,
             observer,
@@ -2965,23 +3294,60 @@ fn topology_get<S: OperationStore>(
 
 /// Decodes a routes page body into rendered entries; a body that does
 /// not match its validated page header is INDETERMINATE, never partial.
-fn decode_route_entries(body: &[u8]) -> Result<Vec<String>, ApiError> {
+fn decode_route_entries(body: &[u8], remote: bool) -> Result<Vec<String>, ApiError> {
     use routeloom_protocol::observation::{decode_route_detail_entry, ROUTE_ENTRY_SIZE};
-    if body.len() % ROUTE_ENTRY_SIZE != 0 {
-        return Err(ApiError::simple(
+    let malformed = || {
+        ApiError::simple(
             "INDETERMINATE",
-            "the gateway answered with a malformed 0x71 routes body",
-        ));
+            if remote {
+                "the observer answered with a malformed routes section body"
+            } else {
+                "the gateway answered with a malformed 0x71 routes body"
+            },
+        )
+    };
+    if body.len() % ROUTE_ENTRY_SIZE != 0 {
+        return Err(malformed());
     }
     let mut entries = Vec::new();
     for chunk in body.chunks_exact(ROUTE_ENTRY_SIZE) {
         match decode_route_detail_entry(chunk) {
             Ok(entry) => entries.push(crate::observation::route_entry_json(&entry)),
             Err(_) => {
-                return Err(ApiError::simple(
-                    "INDETERMINATE",
-                    "the gateway answered with a malformed 0x71 routes body",
-                ));
+                return Err(malformed());
+            }
+        }
+    }
+    Ok(entries)
+}
+
+/// Decodes a neighbors page body into rendered entries; heard ages map
+/// onto the host receive time like every other device age.
+fn decode_neighbor_entries(
+    body: &[u8],
+    received_ms: u64,
+    remote: bool,
+) -> Result<Vec<String>, ApiError> {
+    use routeloom_protocol::observation::{decode_neighbor_detail_entry, NEIGHBOR_ENTRY_SIZE};
+    let malformed = || {
+        ApiError::simple(
+            "INDETERMINATE",
+            if remote {
+                "the observer answered with a malformed neighbors section body"
+            } else {
+                "the gateway answered with a malformed 0x71 neighbors body"
+            },
+        )
+    };
+    if body.len() % NEIGHBOR_ENTRY_SIZE != 0 {
+        return Err(malformed());
+    }
+    let mut entries = Vec::new();
+    for chunk in body.chunks_exact(NEIGHBOR_ENTRY_SIZE) {
+        match decode_neighbor_detail_entry(chunk) {
+            Ok(entry) => entries.push(crate::observation::neighbor_entry_json(&entry, received_ms)),
+            Err(_) => {
+                return Err(malformed());
             }
         }
     }
@@ -3009,8 +3375,10 @@ fn group_capability_json<S: OperationStore>(ctx: &ApiContext<'_, S>) -> String {
 
 /// `observation` for capabilities.get: which observation methods the
 /// attached gateway can actually serve (false while detached — link.get
-/// tells those apart), plus the static local bounds. `remote` is false
-/// in M1: only the attached gateway is observable.
+/// tells those apart), plus the static local bounds. `remote` is true
+/// when the gateway forwards subtype-7 queries (the m1 diagnostics bit
+/// — the remote leg's only requirement); `max_in_flight`/`api_wait_ms`
+/// below are the local leg's bounds.
 fn observation_capability_json<S: OperationStore>(ctx: &ApiContext<'_, S>) -> String {
     let info = ctx.session.lock().expect("session poisoned");
     let live = info.authenticated && info.id.is_some();
@@ -3022,9 +3390,14 @@ fn observation_capability_json<S: OperationStore>(ctx: &ApiContext<'_, S>) -> St
         && info
             .capability
             .is_some_and(crate::observation::observation_capable);
+    let remote = live
+        && info
+            .capability
+            .is_some_and(crate::telemetry::telemetry_capable);
     drop(info);
     format!(
-        "{{\"telemetry\":{telemetry},\"topology\":{observation},\"health\":{observation},\"board\":false,\"remote\":false,\"limits\":{{\"routes_page_max\":{},\"max_in_flight\":{},\"max_age_ms_max\":{},\"api_wait_ms\":{}}},\"events\":[\"topology.changed\",\"milestone.advanced\",\"observation.gap\"]}}",
+        "{{\"telemetry\":{telemetry},\"topology\":{observation},\"health\":{observation},\"board\":false,\"remote\":{remote},\"limits\":{{\"routes_page_max\":{},\"neighbors_page_max\":{},\"max_in_flight\":{},\"max_age_ms_max\":{},\"api_wait_ms\":{}}},\"events\":[\"topology.changed\",\"milestone.advanced\",\"observation.gap\"]}}",
+        routeloom_protocol::observation::PAGE_MAX,
         routeloom_protocol::observation::PAGE_MAX,
         crate::observation::MAX_IN_FLIGHT,
         crate::observation::MAX_AGE_LIMIT_MS,
@@ -4695,6 +5068,12 @@ mod tests {
         Box::leak(Box::new(crate::observation::ObservationOps::default()))
     }
 
+    fn leaked_remote_observation_ops() -> &'static crate::remote_observation::RemoteObservationOps {
+        Box::leak(Box::new(
+            crate::remote_observation::RemoteObservationOps::default(),
+        ))
+    }
+
     fn leaked_hub() -> &'static SubscriptionHub {
         Box::leak(Box::new(SubscriptionHub::default()))
     }
@@ -4739,6 +5118,7 @@ mod tests {
             group_ops: leaked_group_ops(),
             telemetry_ops: leaked_telemetry_ops(),
             observation_ops: leaked_observation_ops(),
+            remote_observation_ops: leaked_remote_observation_ops(),
             site: None,
             config_authority,
             config_profile: crate::config::ISSUE_PROFILE_DEV,
@@ -4855,6 +5235,7 @@ mod tests {
                 msg_session: 5,
                 msg_seq,
                 payload: payload.to_vec(),
+                assurance: None,
             },
             ms,
         );
@@ -5197,6 +5578,7 @@ mod tests {
                 msg_session: 5,
                 msg_seq: 1,
                 payload: vec![1],
+                assurance: None,
             },
             100,
         );
@@ -5220,6 +5602,7 @@ mod tests {
             msg_seq: 2,
             payload: vec![2],
             stored_ms: 100,
+            assurance: None,
         };
         assert!(
             record_meta_json(&record, "cursor")
@@ -8533,12 +8916,20 @@ mod tests {
         let response = handle(line, &c);
         assert!(response.contains("\"topology\":true"), "{response}");
         assert!(response.contains("\"health\":true"), "{response}");
+        assert!(response.contains("\"remote\":true"), "{response}");
         let c = ApiContext {
             session: observation_session(0x07),
             ..ctx(None, &acl, &log, &store, &limiter, 0)
         };
         let response = handle(line, &c);
         assert!(response.contains("\"topology\":false"), "{response}");
+        // Diagnostics bit without host_ops: neither telemetry nor remote.
+        let c = ApiContext {
+            session: observation_session(0x20),
+            ..ctx(None, &acl, &log, &store, &limiter, 0)
+        };
+        let response = handle(line, &c);
+        assert!(response.contains("\"remote\":false"), "{response}");
         // The 0x72-fed ring events are subscribable.
         for kind in ["topology.changed", "milestone.advanced", "observation.gap"] {
             assert!(crate::subscribe::EVENT_KINDS.contains(&kind), "{kind}");
@@ -8555,6 +8946,8 @@ mod tests {
         let cases = [
             "{}",
             "{\"observer\":\"zz\"}",
+            "{\"observer\":\"0000000000000000\"}",
+            "{\"observer\":\"ffffffffffffffff\"}",
             "{\"observer\":\"0000000000000abc\",\"section\":\"neighbors\"}",
             "{\"observer\":\"0000000000000abc\",\"section\":0}",
             "{\"observer\":\"0000000000000abc\",\"max_age_ms\":60001}",
@@ -8621,25 +9014,35 @@ mod tests {
                 .and_then(Json::as_str),
             Some("observation_v1")
         );
-        // Foreign observer: NOT_FOUND, never a routed query.
+        // Foreign observer without the diagnostics bit: the remote leg
+        // is UNSUPPORTED (the observation bit does not serve peers).
         let c = ApiContext {
-            session: observation_session(0xFFFF_FFFF),
+            session: observation_session(0x04 | 0x800),
             ..ctx(None, &acl, &log, &store, &limiter, 1_000)
         };
         let foreign = observation_line(
             "health.get",
             "{\"observer\":\"0000000000000005\",\"section\":\"system\"}",
         );
-        let doc = assert_error_schema(&handle(foreign.as_bytes(), &c), "NOT_FOUND");
+        let doc = assert_error_schema(&handle(foreign.as_bytes(), &c), "UNSUPPORTED");
         assert_eq!(
             doc.get("error")
                 .unwrap()
                 .get("detail")
                 .unwrap()
-                .get("reason")
+                .get("required_capability")
                 .and_then(Json::as_str),
-            Some("remote_not_served")
+            Some("diagnostics_v1")
         );
+        // Foreign observer with the diagnostics bit: the remote leg opens
+        // (then times out with no lane — the wait budget is what proves
+        // the gate opened); the observation bit is not required.
+        let c = ApiContext {
+            session: observation_session(0x04 | 0x20),
+            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+        };
+        let response = handle(foreign.as_bytes(), &c);
+        assert!(response.contains("\"code\":\"TIMEOUT\""), "{response}");
         // Network scope mismatch.
         let scoped = observation_line(
             "health.get",
@@ -8657,6 +9060,10 @@ mod tests {
         );
         // Matching network passes the gate (then times out with no lane —
         // the wait budget is what proves the gate opened).
+        let c = ApiContext {
+            session: observation_session(0xFFFF_FFFF),
+            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+        };
         let scoped = observation_line(
             "topology.get",
             &format!("{{{OBSERVER},\"section\":\"routes\",\"network\":\"0000000000000001\"}}"),
@@ -8674,6 +9081,19 @@ mod tests {
         page: Vec<u8>,
         received_ms: u64,
     ) -> String {
+        drive_observation_once_at(ops, line, c, page, received_ms, 1_060)
+    }
+
+    /// Same, with an explicit monotonic receive time (the round trip is
+    /// measured against the submit's mono clock, never the wall clock).
+    fn drive_observation_once_at(
+        ops: &'static crate::observation::ObservationOps,
+        line: &str,
+        c: &ApiContext<'_, MemoryOperationStore>,
+        page: Vec<u8>,
+        received_ms: u64,
+        received_mono_ms: u64,
+    ) -> String {
         std::thread::scope(|scope| {
             let waiter = scope.spawn(|| handle(line.as_bytes(), c));
             let request = {
@@ -8690,9 +9110,185 @@ mod tests {
                 }
                 request.expect("the method submits a query")
             };
-            assert!(ops.post_reply(request, 0x5e55, page, received_ms));
+            assert!(ops.post_reply(request, 0x5e55, page, received_ms, received_mono_ms));
             waiter.join().unwrap()
         })
+    }
+
+    /// Posts one 0x31 subtype-8/reject reply for the single in-flight
+    /// remote query and returns the method response the waiter observed.
+    /// No lane runs, so the row never sends (`radio_queries` 0 — the
+    /// lane tests own the sent flag; here the envelope leg and the
+    /// section decode are what matter).
+    fn drive_remote_observation_once(
+        ops: &'static crate::remote_observation::RemoteObservationOps,
+        line: &str,
+        c: &ApiContext<'_, MemoryOperationStore>,
+        reply: Vec<u8>,
+        received_ms: u64,
+    ) -> String {
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| handle(line.as_bytes(), c));
+            let request = {
+                let mut request = None;
+                for _ in 0..500 {
+                    if let Some(token) = ops.tokens().first() {
+                        request = ops.request_for(*token);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                request.expect("the method submits a remote query")
+            };
+            assert!(crate::remote_observation::owns_request(request));
+            assert!(ops.post_reply(request, 0x5e55, reply, received_ms, received_ms));
+            waiter.join().unwrap()
+        })
+    }
+
+    fn remote_reply_inner(result: u16, observer: u64, body: &[u8]) -> Vec<u8> {
+        use routeloom_protocol::telemetry::SUB_DIAGNOSTIC_RESPONSE;
+        let mut inner = vec![0x01, SUB_DIAGNOSTIC_RESPONSE];
+        inner.extend_from_slice(&((12 + body.len()) as u16).to_be_bytes());
+        inner.extend_from_slice(&result.to_be_bytes());
+        inner.extend_from_slice(&observer.to_be_bytes());
+        inner.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        inner.extend_from_slice(body);
+        inner
+    }
+
+    // C++-encoded subtype-8 oracle (components/routeloom/src/telemetry.cpp):
+    // neighbors, MORE, one entry (peer 2). The observer bytes are patched
+    // per test — the gateway here is 0xabc, so foreign means anything else.
+    const REMOTE_SNAPSHOT_HEX: &str = "01080000010203040000000000000abc112233445566778805010100a5a5a5a500000000000000020000007800013880000100000607b900";
+
+    #[test]
+    fn topology_get_remote_neighbors_roundtrip() {
+        let (acl, log, store, limiter) = test_env();
+        let ops: &'static crate::remote_observation::RemoteObservationOps =
+            leaked_remote_observation_ops();
+        let c = ApiContext {
+            session: observation_session(0xFFFF_FFFF),
+            remote_observation_ops: ops,
+            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+        };
+        let line = observation_line(
+            "topology.get",
+            "{\"observer\":\"0000000000000005\",\"section\":\"neighbors\"}",
+        );
+        let mut snapshot = hex_bytes(REMOTE_SNAPSHOT_HEX);
+        snapshot[8..16].copy_from_slice(&5_u64.to_be_bytes());
+        let response = drive_remote_observation_once(
+            ops,
+            &line,
+            &c,
+            remote_reply_inner(0, 5, &snapshot),
+            2_000,
+        );
+        let doc: Json = routeloom_json::parse(&response).unwrap();
+        let result = doc.get("result").unwrap();
+        assert_eq!(
+            result.get("outcome").and_then(Json::as_str),
+            Some("snapshot")
+        );
+        let snap = result.get("snapshot").unwrap();
+        assert_eq!(
+            snap.get("section").and_then(Json::as_str),
+            Some("neighbors")
+        );
+        let source = snap.get("source").unwrap();
+        assert_eq!(
+            source.get("transport").and_then(Json::as_str),
+            Some("mesh_remote")
+        );
+        assert_eq!(
+            source.get("observer").and_then(Json::as_str),
+            Some("0000000000000005")
+        );
+        assert_eq!(snap.get("radio_queries").and_then(Json::as_u64), Some(0));
+        let entries = snap.get("entries").unwrap().as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].get("peer").and_then(Json::as_str),
+            Some("0000000000000002")
+        );
+        // MORE with an ascending page: the cursor is the last entry's id.
+        assert_eq!(
+            snap.get("next_cursor").and_then(Json::as_str),
+            Some("0000000000000002")
+        );
+        // The remote age maps onto the host receive time like a local one.
+        assert_eq!(
+            entries[0].get("last_heard_at_ms").and_then(Json::as_u64),
+            Some(1_880)
+        );
+    }
+
+    #[test]
+    fn health_get_remote_reject_is_data() {
+        let (acl, log, store, limiter) = test_env();
+        let ops: &'static crate::remote_observation::RemoteObservationOps =
+            leaked_remote_observation_ops();
+        let c = ApiContext {
+            session: observation_session(0xFFFF_FFFF),
+            remote_observation_ops: ops,
+            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+        };
+        let line = observation_line(
+            "health.get",
+            "{\"observer\":\"0000000000000005\",\"section\":\"system\"}",
+        );
+        // DiagnosticReject NO_PEER for observer 5 (the reason space the
+        // device encodes in usb_bridge.cpp).
+        let mut reject = hex_bytes("010600000000002a00040000000000000000009900000000");
+        reject[12..20].copy_from_slice(&5_u64.to_be_bytes());
+        let response =
+            drive_remote_observation_once(ops, &line, &c, remote_reply_inner(0, 5, &reject), 2_000);
+        let doc: Json = routeloom_json::parse(&response).unwrap();
+        let result = doc.get("result").unwrap();
+        assert_eq!(result.get("outcome").and_then(Json::as_str), Some("reject"));
+        let rendered = result.get("reject").unwrap();
+        assert_eq!(
+            rendered.get("reason").and_then(Json::as_str),
+            Some("NO_PEER")
+        );
+        // The refusal is negative-cached: the same call costs no radio
+        // and no lane — it resolves from the cache immediately.
+        let again = handle(line.as_bytes(), &c);
+        assert_eq!(
+            routeloom_json::parse(&again)
+                .unwrap()
+                .get("result")
+                .unwrap()
+                .get("outcome")
+                .and_then(Json::as_str),
+            Some("reject")
+        );
+    }
+
+    #[test]
+    fn topology_get_remote_subscribe_is_refused() {
+        let (acl, log, store, limiter) = test_env();
+        let c = ApiContext {
+            session: observation_session(0xFFFF_FFFF),
+            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+        };
+        let line = observation_line(
+            "topology.get",
+            "{\"observer\":\"0000000000000005\",\"section\":\"neighbors\",\"subscribe\":true}",
+        );
+        let doc = assert_error_schema(&handle(line.as_bytes(), &c), "INVALID_ARGUMENT");
+        assert!(
+            doc.get("error")
+                .unwrap()
+                .get("detail")
+                .unwrap()
+                .get("message")
+                .and_then(Json::as_str)
+                .unwrap()
+                .contains("pull-only"),
+            "{doc:?}"
+        );
     }
 
     #[test]
@@ -8757,6 +9353,17 @@ mod tests {
                 .and_then(Json::as_u64),
             Some(400)
         );
+        // The clock mapping: wall receive renders the ages, mono receive
+        // plus the submit→receive round trip bounds the mapping.
+        assert_eq!(
+            snapshot.get("received_unix_ms").and_then(Json::as_u64),
+            Some(1_000)
+        );
+        assert_eq!(
+            snapshot.get("received_mono_ms").and_then(Json::as_u64),
+            Some(1_060)
+        );
+        assert_eq!(snapshot.get("rtt_ms").and_then(Json::as_u64), Some(60));
         assert_eq!(
             snapshot
                 .get("system")
@@ -8869,7 +9476,121 @@ mod tests {
     }
 
     #[test]
-    fn topology_get_rejects_bad_cursor_and_neighbors() {
+    fn topology_get_neighbors_pages_and_exact() {
+        use routeloom_protocol::observation::*;
+        let (acl, log, store, limiter) = test_env();
+        let ops: &'static crate::observation::ObservationOps = leaked_observation_ops();
+        let c = ApiContext {
+            session: observation_session(0xFFFF_FFFF),
+            observation_ops: ops,
+            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+        };
+        let bound = NeighborDetailEntry {
+            peer: 2,
+            heard_age_ms: 120,
+            lease_remaining_ms: 80_000,
+            link_cost: 1,
+            rssi_ewma_q8_8: -70 * 256,
+            phase: 6,
+            flags: NBR_ACTIVE | NBR_RSSI_VALID | NBR_HEARD_VALID,
+            rssi_last_dbm: -71,
+        };
+        let bare = NeighborDetailEntry {
+            peer: 3,
+            heard_age_ms: AGE_UNKNOWN,
+            lease_remaining_ms: AGE_UNKNOWN,
+            link_cost: 2,
+            ..NeighborDetailEntry::default()
+        };
+        let mut body = encode_neighbor_detail_entry(&bound);
+        body.extend_from_slice(&encode_neighbor_detail_entry(&bare));
+        let page = encode_observation_page(
+            &ObservationPageHeader {
+                result: RESULT_OK,
+                section: SECTION_NEIGHBORS,
+                flags: PAGE_MORE,
+                count: 2,
+                boot_id: 0xB007,
+                revision: 0xA5A5_A5A5,
+                next_after: 3,
+            },
+            &body,
+        )
+        .unwrap();
+        let line = observation_line(
+            "topology.get",
+            &format!("{{{OBSERVER},\"section\":\"neighbors\"}}"),
+        );
+        let response = drive_observation_once(ops, &line, &c, page, 1_000);
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let snapshot = parsed.get("result").unwrap().get("snapshot").unwrap();
+        assert_eq!(
+            snapshot.get("section").and_then(Json::as_str),
+            Some("neighbors")
+        );
+        assert_eq!(
+            snapshot.get("next_cursor").and_then(Json::as_str),
+            Some("0000000000000003")
+        );
+        let entries = snapshot.get("entries").unwrap().as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0].get("peer").and_then(Json::as_str),
+            Some("0000000000000002")
+        );
+        assert_eq!(
+            entries[0]
+                .get("phase")
+                .unwrap()
+                .get("name")
+                .and_then(Json::as_str),
+            Some("reachable")
+        );
+        assert_eq!(
+            entries[0].get("lease_remaining_ms").and_then(Json::as_u64),
+            Some(80_000)
+        );
+        assert_eq!(
+            entries[0].get("last_heard_at_ms").and_then(Json::as_u64),
+            Some(880)
+        );
+        // The bare row carries no evidence: nulls, never zeros.
+        assert!(entries[1].get("rssi_last_dbm").unwrap().is_null());
+        assert!(entries[1].get("last_heard_at_ms").unwrap().is_null());
+        assert!(entries[1].get("lease_remaining_ms").unwrap().is_null());
+        // Exact peer with no neighbor record: present:false.
+        let empty = encode_observation_page(
+            &ObservationPageHeader {
+                result: RESULT_OK,
+                section: SECTION_NEIGHBORS,
+                flags: 0,
+                count: 0,
+                boot_id: 0xB007,
+                revision: 0xA5A5_A5A5,
+                next_after: 9,
+            },
+            &[],
+        )
+        .unwrap();
+        let line = observation_line(
+            "topology.get",
+            &format!(
+                "{{{OBSERVER},\"section\":\"neighbors\",\"destination\":\"0000000000000009\"}}"
+            ),
+        );
+        let response = drive_observation_once(ops, &line, &c, empty, 1_000);
+        assert!(response.contains("\"present\":false"), "{response}");
+        // Neighbors pages are never cached: every call queries.
+        let line = observation_line(
+            "topology.get",
+            &format!("{{{OBSERVER},\"section\":\"neighbors\"}}"),
+        );
+        let response = handle(line.as_bytes(), &c);
+        assert!(response.contains("\"code\":\"TIMEOUT\""), "{response}");
+    }
+
+    #[test]
+    fn topology_get_rejects_bad_cursor() {
         let (acl, log, store, limiter) = test_env();
         let c = ApiContext {
             session: observation_session(0xFFFF_FFFF),
@@ -8892,12 +9613,13 @@ mod tests {
                 "{params}: {response}"
             );
         }
-        // neighbors has no M1 device section: UNSUPPORTED, never a blend.
+        // neighbors is a real section now: the call queries the device
+        // (TIMEOUT with no reply posted) instead of UNSUPPORTED.
         let line = observation_line(
             "topology.get",
             &format!("{{{OBSERVER},\"section\":\"neighbors\"}}"),
         );
-        assert_error_schema(&handle(line.as_bytes(), &c), "UNSUPPORTED");
+        assert_error_schema(&handle(line.as_bytes(), &c), "TIMEOUT");
     }
 
     #[test]

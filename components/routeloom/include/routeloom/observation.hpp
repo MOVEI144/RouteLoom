@@ -30,15 +30,18 @@ namespace routeloom {
 // --- Sections (USB 0x70 query / 0x71 page) ----------------------------------
 //
 // System/Tables/Milestones/Summary are singleton bodies (count is always 1).
-// Routes is a paginated id-ordered cursor walk like node_status_page; the
-// per-node neighbor detail stays in node_status_v1 (0x40-0x42) and is NOT
-// duplicated here — Summary carries the neighbor/route counts instead.
+// Routes and Neighbors are paginated id-ordered cursor walks like
+// node_status_page. Neighbors carries the link layer per neighbor-record
+// row (discovery phase, cost, RSSI evidence, lease) — the phase/lease half
+// node_status_v1 (0x40-0x42) does not project; node_status stays the
+// integrated link+route view, this the discovery-lease view.
 enum class ObservationSection : std::uint8_t {
   System = 0,      // boot identity, uptime, reset cause, heap, power, mode
   Tables = 1,      // neighbor/route/session/dedup/queue occupancy
   Milestones = 2,  // join-attempt lifecycle record for this boot
   Summary = 3,     // topology digests + counts (cheap poll / cache key)
   Routes = 4,      // selected-route detail entries (paginated)
+  Neighbors = 5,   // neighbor-table rows (paginated)
 };
 
 // Reset-cause registry for ObservationSystem::reset_code. 0 is unknown — a
@@ -114,11 +117,38 @@ enum ObservationJoiner : std::uint8_t {
 constexpr std::uint8_t kMilestoneAdopted = 1u << 0;    // member/dev config adopted this boot
 constexpr std::uint8_t kMilestoneConfirmed = 1u << 1;  // JoinConfirm ACK verified this boot
 
+// NeighborPhase registry for NeighborDetailEntry::phase: 0 is unknown,
+// 1..10 the discovery NeighborPhase shifted by one (a node without
+// discovery — DevRam, LegacyFixture, pre-adoption — reports unknown and
+// never invents a phase from reachability).
+enum ObservationNeighborPhase : std::uint8_t {
+  kNeighborPhaseUnknown = 0,
+  kNeighborPhaseCandidate = 1,
+  kNeighborPhaseAuthenticating = 2,
+  kNeighborPhaseAuthenticated = 3,
+  kNeighborPhaseApprovalPending = 4,
+  kNeighborPhaseBound = 5,
+  kNeighborPhaseReachable = 6,
+  kNeighborPhaseSuspended = 7,
+  kNeighborPhaseStale = 8,
+  kNeighborPhaseConflict = 9,
+  kNeighborPhaseRevoked = 10,
+};
+
+// NeighborDetailEntry::flags bits.
+constexpr std::uint8_t kNeighborActive = 1u << 0;     // admitted direct neighbor right now
+constexpr std::uint8_t kNeighborRssiValid = 1u << 1;  // rssi_* carry a real measurement
+constexpr std::uint8_t kNeighborHeardValid = 1u << 2;  // heard_age_ms carries a real observation
+
 // Age sentinel: the milestone was not reached this boot (or was never
 // recorded). Ages saturate here rather than wrapping.
 constexpr std::uint32_t kMilestoneAgeUnknown = UINT32_MAX;
 // Heap sentinel: the platform port cannot read this figure.
 constexpr std::uint32_t kHeapBytesUnknown = UINT32_MAX;
+// Neighbor sentinel: no heard observation / no discovery lease on record.
+// (A saturated-then-valid age reads UINT32_MAX-1 like milestones, so the
+// top value stays an exact unknown.)
+constexpr std::uint32_t kNeighborAgeUnknown = UINT32_MAX;
 
 // Boot identity, uptime, reset cause, heap and running mode. uptime_ms is
 // the device monotonic now (the tree-wide clock starts at boot); the host
@@ -161,9 +191,10 @@ struct ObservationTables {
 };
 
 // Join-lifecycle record for this boot. Ages are durations against the fill
-// time (kMilestoneAgeUnknown when the stage was not reached): join_started
-// is the first join-attempt start, adopted the member/dev config adoption,
-// confirmed the verified JoinConfirm ACK. attempts counts handshake
+// time (kMilestoneAgeUnknown when the stage was not reached, clamping one
+// below it past 49.7 days so a very old stamp never reads as unknown):
+// join_started is the first join-attempt start, adopted the member/dev
+// config adoption, confirmed the verified JoinConfirm ACK. attempts counts handshake
 // attempts this boot (latched at adoption — the Joiner is destroyed once
 // the member side goes live). First-STATUS and route-stable times are
 // observer-side derivations (the host/mesh lab layer owns them, dev-flow
@@ -229,6 +260,22 @@ struct RouteDetailEntry {
   std::uint32_t remaining_ms{0};
 };
 
+// One neighbor-table row: the link this node holds toward a peer. RSSI
+// bytes are meaningful only with kNeighborRssiValid, heard_age_ms only
+// with kNeighborHeardValid (else kNeighborAgeUnknown); lease_remaining_ms
+// is the discovery lease (kNeighborAgeUnknown without a discovery record,
+// 0 once expired), saturating like milestone ages.
+struct NeighborDetailEntry {
+  NodeId peer{kInvalidNodeId};
+  std::uint32_t heard_age_ms{kNeighborAgeUnknown};
+  std::uint32_t lease_remaining_ms{kNeighborAgeUnknown};
+  RouteMetric link_cost{kInfiniteRouteMetric};
+  std::int16_t rssi_ewma_q8_8{0};
+  std::uint8_t phase{kNeighborPhaseUnknown};
+  std::uint8_t flags{0};
+  std::int8_t rssi_last_dbm{0};
+};
+
 // Page bound shared by the USB page codec and the bridge staging buffer.
 constexpr std::size_t kObservationRoutesPageMax = 8;
 
@@ -274,6 +321,11 @@ class ObservationSource {
                                         bool& more) const noexcept = 0;
   virtual bool route_detail_exact(NodeId destination, MonotonicMs now_ms,
                                   RouteDetailEntry& out) const noexcept = 0;
+  virtual std::size_t neighbor_detail_page(NodeId after, NeighborDetailEntry* out,
+                                           std::size_t capacity, MonotonicMs now_ms,
+                                           bool& more) const noexcept = 0;
+  virtual bool neighbor_detail_exact(NodeId peer, MonotonicMs now_ms,
+                                     NeighborDetailEntry& out) const noexcept = 0;
 };
 
 // --- Portable fill helpers ------------------------------------------------------
@@ -286,6 +338,7 @@ void fill_observation_system(std::uint64_t boot_id, MonotonicMs now_ms,
                              ObservationSystem& out) noexcept;
 
 class MeshNode;  // node.hpp (observation.cpp implements against it)
+class NeighborDiscovery;  // discovery.hpp (phase/lease sidecar, may be null)
 
 // Counts scanned from the node's public read-only views. O(table) per
 // call — a diagnostic-query cost, never hot-path work.
@@ -307,5 +360,17 @@ std::uint32_t observation_neighbor_digest(const MeshNode& node, MonotonicMs now_
 void fill_observation_summary(const MeshNode& node, MonotonicMs now_ms,
                               std::uint32_t milestone_gen,
                               ObservationSummary& out) noexcept;
+
+// Neighbor-table cursor walk over the node_status rows flagged
+// kNodeStatusNeighbor (active or departed-with-record), smallest peer id
+// strictly greater than `after` first — the same cursor idiom as the
+// routes walk. Phase/lease come from `discovery` (null, or a peer it
+// never recorded, reads unknown — never invented from reachability).
+// Read-only; one diagnostic-query scan per call, never hot-path work.
+std::size_t neighbor_detail_page(const MeshNode& node, const NeighborDiscovery* discovery,
+                                 NodeId after, NeighborDetailEntry* out, std::size_t capacity,
+                                 MonotonicMs now_ms, bool& more) noexcept;
+bool neighbor_detail_exact(const MeshNode& node, const NeighborDiscovery* discovery, NodeId peer,
+                           MonotonicMs now_ms, NeighborDetailEntry& out) noexcept;
 
 }  // namespace routeloom

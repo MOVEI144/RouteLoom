@@ -3546,8 +3546,16 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       dispatch_applied(frame.header, ByteView{plain.payload.data(), plain.payload_size},
                        *applied, applied_new, now_ms);
     } else {
+      // open_end above is the origin proof (wire.hpp): this delivery is
+      // origin-verified under the header's end_epoch. The evidence rides
+      // the callback — group deliveries take the default forward instead
+      // (group-key verification is not an origin END proof).
+      DeliveryAssurance assurance{};
+      assurance.origin_verified = true;
+      assurance.site_epoch = frame.header.end_epoch;
       observer_.on_message(key, frame.header.origin,
-                           ByteView{plain.payload.data(), plain.payload_size});
+                           ByteView{plain.payload.data(), plain.payload_size},
+                           assurance);
     }
     return;
   }
@@ -6466,6 +6474,30 @@ Status MeshNode::send_telemetry_query(const NodeId observer,
                          kTelemetryQueryLifetimeMs, Priority::Normal, now_ms);
 }
 
+Status MeshNode::send_observation_query(const NodeId observer,
+                                        const RemoteObservationQuery& query,
+                                        const MonotonicMs now_ms) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+  NodeGuard guard(in_call_);
+  if (!started_) {
+    return Status::error(StatusCode::InvalidState, "node not started");
+  }
+  if (observer == kInvalidNodeId || observer == kBroadcastNodeId ||
+      observer == config_.node) {
+    return Status::error(StatusCode::InvalidArgument, "invalid observer");
+  }
+  std::array<std::uint8_t, kRemoteObservationQueryBodySize> body{};
+  const Status status =
+      remote_observation_query_encode(query, MutableByteView{body.data(), body.size()});
+  if (!status) return status;
+  // Same 5 s routed-lane bound as the telemetry query: the reply borrows
+  // the query's own remaining deadline and never extends it.
+  const MessageId id{config_.message_session, next_control_sequence_++};
+  return queue_typed_job(FrameType::Diagnostic, JobOwner::Diagnostic, id,
+                         observer, ByteView{body.data(), body.size()}, 0,
+                         kTelemetryQueryLifetimeMs, Priority::Normal, now_ms);
+}
+
 Status MeshNode::send_capabilities_query(
     const NodeId peer,
     const std::array<std::uint8_t, kCapabilitiesNonceSize>& nonce,
@@ -6844,11 +6876,12 @@ void MeshNode::handle_diagnostic(const wire::PlainFrame& frame,
                                 &frame.header.message);
         return;
       }
-      // Bounded intake: at most one telemetry query per origin per
+      // Bounded intake: at most one diagnostic query per origin per
       // interval — a requester cannot convert authenticated queries into
       // airtime floods (telemetry §2.7; queries are costly: 644 B/edge).
-      // Budget-table exhaustion refuses rather than admitting untracked
-      // work.
+      // The telemetry and observation subtypes share the one pacing
+      // stamp per origin. Budget-table exhaustion refuses rather than
+      // admitting untracked work.
       DiagBudget* const qbudget = diag_budget(origin, now_ms);
       if (qbudget == nullptr ||
           (qbudget->last_query_ms != 0 &&
@@ -6879,7 +6912,48 @@ void MeshNode::handle_diagnostic(const wire::PlainFrame& frame,
       }
       return;
     }
+    case DiagnosticSubtype::RemoteObservationQuery: {
+      RemoteObservationQuery query{};
+      if (!remote_observation_query_decode(body, query).ok()) {
+        observer_.on_diagnostic("DIAGNOSTIC_QUERY_REJECTED", peer,
+                                &frame.header.message);
+        return;
+      }
+      // Same shared pacing stamp as the telemetry query above: one
+      // diagnostic query per origin per interval, whatever the subtype.
+      DiagBudget* const qbudget = diag_budget(origin, now_ms);
+      if (qbudget == nullptr ||
+          (qbudget->last_query_ms != 0 &&
+           now_ms - qbudget->last_query_ms < kDiagQueryMinIntervalMs)) {
+        ++telemetry_event_drops_;
+        return;
+      }
+      qbudget->last_query_ms = now_ms;
+      if (!observation_remote_) {
+        reply_reject(DiagnosticRejectReason::Denied, query.request_id);
+        return;
+      }
+      RemoteObservationSnapshot snapshot{};
+      DiagnosticRejectReason reason{};
+      if (!build_observation_snapshot_impl(query, now_ms, snapshot, reason)) {
+        reply_reject(reason, query.request_id);
+        return;
+      }
+      std::array<std::uint8_t, kRemoteObservationSnapshotBodyMax> out{};
+      if (!remote_observation_snapshot_encode(snapshot,
+                                       MutableByteView{out.data(), out.size()})) {
+        ++telemetry_event_drops_;
+        return;
+      }
+      const std::size_t total = kRemoteObservationSnapshotHeadSize + snapshot.body_size;
+      if (!queue_diagnostic_reply(origin, ByteView{out.data(), total},
+                                  lifetime_ms, now_ms)) {
+        ++telemetry_event_drops_;
+      }
+      return;
+    }
     case DiagnosticSubtype::TelemetrySnapshot:
+    case DiagnosticSubtype::RemoteObservationSnapshot:
     case DiagnosticSubtype::DiagnosticReject:
       if (diagnostic_sink_ != nullptr) {
         ExternalCallbackScope scope(in_external_callback_);
@@ -7569,6 +7643,18 @@ Status MeshNode::set_applied_sink(AppliedEndpointSink* sink) noexcept {
 Status MeshNode::set_telemetry_remote(const bool enabled) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
   telemetry_remote_ = enabled;
+  return Status::success();
+}
+
+Status MeshNode::set_observation_remote(const bool enabled) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+  observation_remote_ = enabled;
+  return Status::success();
+}
+
+Status MeshNode::set_observation_source(const ObservationSource* source) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+  observation_source_ = source;
   return Status::success();
 }
 

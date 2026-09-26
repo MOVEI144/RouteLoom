@@ -7,7 +7,9 @@
 
 #include <cstdint>
 
+#include "routeloom/discovery.hpp"
 #include "routeloom/node.hpp"
+#include "routeloom/usb_host_ops.hpp"
 
 namespace routeloom {
 
@@ -21,6 +23,42 @@ constexpr std::uint32_t kU32Max = UINT32_MAX;
 
 std::uint32_t saturate_u32(const std::uint64_t value) noexcept {
   return value > kU32Max ? kU32Max : static_cast<std::uint32_t>(value);
+}
+
+// Like saturate_u32 but reserving the top value for the unknown sentinel
+// (milestone ages and neighbor ages/leases share the idiom).
+std::uint32_t saturate_age_u32(const std::uint64_t value) noexcept {
+  if (value >= kNeighborAgeUnknown) return kNeighborAgeUnknown - 1;
+  return static_cast<std::uint32_t>(value);
+}
+
+std::uint8_t map_neighbor_phase(const NeighborPhase phase) noexcept {
+  return static_cast<std::uint8_t>(static_cast<std::uint8_t>(phase) + 1);
+}
+
+void fill_neighbor_row(const NeighborDiscovery* const discovery, const NodeStatus& status,
+                       const MonotonicMs now_ms, NeighborDetailEntry& out) noexcept {
+  out = NeighborDetailEntry{};
+  out.peer = status.node;
+  out.link_cost = status.link_cost;
+  if ((status.flags & kNodeStatusNeighborActive) != 0) out.flags |= kNeighborActive;
+  if ((status.flags & kNodeStatusRssiValid) != 0) {
+    out.flags |= kNeighborRssiValid;
+    out.rssi_last_dbm = status.rssi_last_dbm;
+    out.rssi_ewma_q8_8 = status.rssi_ewma_q8_8;
+  }
+  if ((status.flags & kNodeStatusHeardValid) != 0) {
+    out.flags |= kNeighborHeardValid;
+    out.heard_age_ms = saturate_age_u32(status.heard_age_ms);
+  }
+  if (discovery != nullptr) {
+    NeighborPhase phase{};
+    if (discovery->phase_of(status.node, phase)) out.phase = map_neighbor_phase(phase);
+    MonotonicMs remaining = 0;
+    if (discovery->lease_remaining_ms(status.node, now_ms, remaining)) {
+      out.lease_remaining_ms = saturate_age_u32(remaining);
+    }
+  }
 }
 
 std::uint16_t saturate_u16(const std::size_t value) noexcept {
@@ -125,6 +163,235 @@ std::size_t MeshNode::route_detail_page(const NodeId after, RouteDetailEntry* co
   }
   more = next_after(cursor) != kInvalidNodeId;
   return count;
+}
+
+std::size_t neighbor_detail_page(const MeshNode& node, const NeighborDiscovery* discovery,
+                                 const NodeId after, NeighborDetailEntry* const out,
+                                 const std::size_t capacity, const MonotonicMs now_ms,
+                                 bool& more) noexcept {
+  more = false;
+  if (out == nullptr) return 0;
+  // One capacity-1 node_status scan per row (32 B of transient stack, no
+  // scan buffer): the rows arrive strictly ascending, so the first
+  // neighbor-flagged row past the page is exactly the `more` witness.
+  std::size_t count = 0;
+  NodeId cursor = after;
+  bool scan_more = true;
+  while (scan_more) {
+    NodeStatus row{};
+    bool row_more = false;
+    if (node.node_status_page(cursor, &row, 1, now_ms, row_more) == 0) break;
+    cursor = row.node;
+    scan_more = row_more;
+    if ((row.flags & kNodeStatusNeighbor) == 0) continue;
+    if (count < capacity) {
+      fill_neighbor_row(discovery, row, now_ms, out[count]);
+      ++count;
+    } else {
+      more = true;
+      break;
+    }
+  }
+  return count;
+}
+
+bool neighbor_detail_exact(const MeshNode& node, const NeighborDiscovery* discovery,
+                           const NodeId peer, const MonotonicMs now_ms,
+                           NeighborDetailEntry& out) noexcept {
+  out = NeighborDetailEntry{};
+  if (!listable(peer, node.node_id())) return false;
+  // Ascending scan with early stop: a row past the peer ends the search.
+  NodeId cursor = kInvalidNodeId;
+  bool scan_more = true;
+  while (scan_more) {
+    NodeStatus row{};
+    bool row_more = false;
+    if (node.node_status_page(cursor, &row, 1, now_ms, row_more) == 0) break;
+    cursor = row.node;
+    scan_more = row_more;
+    if (row.node == peer) {
+      if ((row.flags & kNodeStatusNeighbor) == 0) return false;
+      fill_neighbor_row(discovery, row, now_ms, out);
+      return true;
+    }
+    if (row.node > peer) break;
+  }
+  return false;
+}
+
+Status MeshNode::build_observation_snapshot(
+    const RemoteObservationQuery& query, const MonotonicMs now_ms,
+    RemoteObservationSnapshot& out, DiagnosticRejectReason& reject_reason) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+  NodeGuard guard(in_call_);
+  return build_observation_snapshot_impl(query, now_ms, out, reject_reason);
+}
+
+Status MeshNode::build_observation_snapshot_impl(
+    const RemoteObservationQuery& query, const MonotonicMs now_ms,
+    RemoteObservationSnapshot& out, DiagnosticRejectReason& reject_reason) noexcept {
+  out = RemoteObservationSnapshot{};
+  const ObservationSource* const source = observation_source_;
+  if (source == nullptr) {
+    reject_reason = DiagnosticRejectReason::Unsupported;
+    return Status::error(StatusCode::InvalidState, "no observation source wired");
+  }
+  // One section body, encoded with the USB 0x71 body encoders verbatim —
+  // the snapshot carries exactly what a local page would.
+  out.request_id = query.request_id;
+  out.observer = config_.node;
+  out.observer_boot = config_.boot_incarnation;
+  out.section = query.section;
+  const bool exact = (query.flags & kObservationRemoteQueryExact) != 0;
+  switch (query.section) {
+    case ObservationSection::System: {
+      ObservationSystem system{};
+      if (!source->fill_system(now_ms, system)) break;
+      if (!usb::encode_observation_system(
+              system, MutableByteView{out.body.data(), usb::kObservationSystemBody})
+               .ok()) {
+        break;
+      }
+      out.count = 1;
+      out.body_size = usb::kObservationSystemBody;
+      out.revision = 0;
+      return Status::success();
+    }
+    case ObservationSection::Tables: {
+      ObservationTables tables{};
+      if (!source->fill_tables(now_ms, tables)) break;
+      if (!usb::encode_observation_tables(
+              tables, MutableByteView{out.body.data(), usb::kObservationTablesBody})
+               .ok()) {
+        break;
+      }
+      out.count = 1;
+      out.body_size = usb::kObservationTablesBody;
+      out.revision = 0;
+      return Status::success();
+    }
+    case ObservationSection::Milestones: {
+      JoinMilestones milestones{};
+      if (!source->fill_milestones(now_ms, milestones)) break;
+      if (!usb::encode_observation_milestones(
+              milestones,
+              MutableByteView{out.body.data(), usb::kObservationMilestonesBody})
+               .ok()) {
+        break;
+      }
+      out.count = 1;
+      out.body_size = usb::kObservationMilestonesBody;
+      // Point sample, not a generation: the daemon compares bodies across
+      // pulls (the USB-side generation lives on the serving bridge).
+      out.revision = 0;
+      return Status::success();
+    }
+    case ObservationSection::Summary: {
+      ObservationSummary summary{};
+      if (!source->fill_summary(now_ms, summary)) break;
+      if (!usb::encode_observation_summary(
+              summary, MutableByteView{out.body.data(), usb::kObservationSummaryBody})
+               .ok()) {
+        break;
+      }
+      out.count = 1;
+      out.body_size = usb::kObservationSummaryBody;
+      out.revision = summary.route_digest;
+      return Status::success();
+    }
+    case ObservationSection::Routes: {
+      ObservationSummary summary{};
+      if (!source->fill_summary(now_ms, summary)) break;
+      std::uint8_t count = 0;
+      bool more = false;
+      if (exact) {
+        RouteDetailEntry entry{};
+        if (source->route_detail_exact(query.after, now_ms, entry)) {
+          if (!usb::encode_observation_route_entry(
+                  entry,
+                  MutableByteView{out.body.data(), usb::kObservationRouteEntrySize})
+                   .ok()) {
+            break;
+          }
+          count = 1;
+        }
+      } else {
+        NodeId cursor = query.after;
+        for (std::uint8_t i = 0; i < query.max_entries; ++i) {
+          RouteDetailEntry entry{};
+          bool page_more = false;
+          if (source->route_detail_page(cursor, &entry, 1, now_ms, page_more) == 0) break;
+          if (!usb::encode_observation_route_entry(
+                  entry,
+                  MutableByteView{out.body.data() + count * usb::kObservationRouteEntrySize,
+                                  usb::kObservationRouteEntrySize})
+                   .ok()) {
+            // Unreachable (a valid struct always encodes into its exact
+            // buffer): stop with MORE rather than a short page that
+            // claims completeness.
+            more = true;
+            break;
+          }
+          cursor = entry.destination;
+          ++count;
+          more = page_more;
+          if (!more) break;
+        }
+      }
+      out.count = count;
+      out.body_size = static_cast<std::size_t>(count) * usb::kObservationRouteEntrySize;
+      out.revision = summary.route_digest;
+      if (more) out.flags |= kRemoteObservationSnapshotMore;
+      return Status::success();
+    }
+    case ObservationSection::Neighbors: {
+      ObservationSummary summary{};
+      if (!source->fill_summary(now_ms, summary)) break;
+      std::uint8_t count = 0;
+      bool more = false;
+      if (exact) {
+        NeighborDetailEntry entry{};
+        if (source->neighbor_detail_exact(query.after, now_ms, entry)) {
+          if (!usb::encode_observation_neighbor_entry(
+                  entry,
+                  MutableByteView{out.body.data(), usb::kObservationNeighborEntrySize})
+                   .ok()) {
+            break;
+          }
+          count = 1;
+        }
+      } else {
+        NodeId cursor = query.after;
+        for (std::uint8_t i = 0; i < query.max_entries; ++i) {
+          NeighborDetailEntry entry{};
+          bool page_more = false;
+          if (source->neighbor_detail_page(cursor, &entry, 1, now_ms, page_more) == 0) break;
+          if (!usb::encode_observation_neighbor_entry(
+                  entry,
+                  MutableByteView{out.body.data() + count * usb::kObservationNeighborEntrySize,
+                                  usb::kObservationNeighborEntrySize})
+                   .ok()) {
+            // Unreachable (a valid struct always encodes into its exact
+            // buffer): stop with MORE rather than a short page that
+            // claims completeness.
+            more = true;
+            break;
+          }
+          cursor = entry.peer;
+          ++count;
+          more = page_more;
+          if (!more) break;
+        }
+      }
+      out.count = count;
+      out.body_size = static_cast<std::size_t>(count) * usb::kObservationNeighborEntrySize;
+      out.revision = summary.neighbor_digest;
+      if (more) out.flags |= kRemoteObservationSnapshotMore;
+      return Status::success();
+    }
+  }
+  reject_reason = DiagnosticRejectReason::Unsupported;
+  return Status::error(StatusCode::InvalidState, "observation fill failed");
 }
 
 std::size_t MeshNode::dedup_terminal_pins() const noexcept {

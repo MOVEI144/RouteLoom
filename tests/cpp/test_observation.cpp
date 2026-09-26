@@ -9,6 +9,7 @@
 #include <cstring>
 #include <vector>
 
+#include "routeloom/discovery.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/observation.hpp"
 #include "routeloom/usb_host_ops.hpp"
@@ -120,6 +121,112 @@ void test_observation_counts() {
   CHECK(remembered == 2);
 }
 
+// --- neighbor detail ------------------------------------------------------------
+
+void test_neighbor_detail_line_topology() {
+  SimWorld world;
+  make_line(world);
+  const MeshNode& n1 = *world.at(1);
+
+  // Node 1's neighbor table holds 2 only (3 is multi-hop, no neighbor
+  // record) — with the discovery sidecar absent, phase/lease read unknown.
+  NeighborDetailEntry page[8];
+  bool more = true;
+  const std::size_t n = neighbor_detail_page(n1, nullptr, 0, page, 8, world.now, more);
+  CHECK(n == 1 && !more);
+  CHECK(page[0].peer == 2);
+  CHECK((page[0].flags & kNeighborActive) != 0);
+  CHECK(page[0].link_cost == 1);
+  CHECK(page[0].phase == kNeighborPhaseUnknown);
+  CHECK(page[0].lease_remaining_ms == kNeighborAgeUnknown);
+  // RSSI/heard mirror the node_status row (the sim delivers valid -60 dBm
+  // evidence): the entry projects, never invents.
+  NodeStatus row{};
+  CHECK(n1.node_status_page(1, &row, 1, world.now, more) == 1);
+  CHECK(row.node == 2);
+  CHECK(((page[0].flags & kNeighborRssiValid) != 0) ==
+        ((row.flags & kNodeStatusRssiValid) != 0));
+  CHECK(((page[0].flags & kNeighborHeardValid) != 0) ==
+        ((row.flags & kNodeStatusHeardValid) != 0));
+  if ((row.flags & kNodeStatusRssiValid) != 0) {
+    CHECK(page[0].rssi_last_dbm == row.rssi_last_dbm);
+    CHECK(page[0].rssi_ewma_q8_8 == row.rssi_ewma_q8_8);
+  } else {
+    CHECK(page[0].rssi_last_dbm == 0);
+    CHECK(page[0].rssi_ewma_q8_8 == 0);
+  }
+  if ((row.flags & kNodeStatusHeardValid) != 0) {
+    CHECK(page[0].heard_age_ms == row.heard_age_ms);
+  } else {
+    CHECK(page[0].heard_age_ms == kNeighborAgeUnknown);
+  }
+
+  // Exact lookup: the direct neighbor resolves, the multi-hop peer and
+  // self do not (they hold no neighbor record).
+  NeighborDetailEntry exact{};
+  CHECK(neighbor_detail_exact(n1, nullptr, 2, world.now, exact));
+  CHECK(exact.peer == 2);
+  CHECK(!neighbor_detail_exact(n1, nullptr, 3, world.now, exact));
+  CHECK(!neighbor_detail_exact(n1, nullptr, 1, world.now, exact));
+  CHECK(!neighbor_detail_exact(n1, nullptr, kBroadcastNodeId, world.now, exact));
+}
+
+void test_neighbor_detail_page_walk() {
+  SimWorld world;
+  world.add(1);
+  for (NodeId id = 2; id <= 11; ++id) {
+    world.add(id);
+  }
+  world.start_all();
+  for (NodeId id = 2; id <= 11; ++id) {
+    world.link(1, id, 1, 1);
+  }
+  world.run(1500);
+  const MeshNode& n1 = *world.at(1);
+
+  // Two-entry pages walk all ten neighbors ascending with `more` set
+  // until the last page.
+  std::vector<NodeId> seen;
+  NodeId cursor = 0;
+  bool more = true;
+  while (more) {
+    NeighborDetailEntry page[2];
+    const std::size_t n = neighbor_detail_page(n1, nullptr, cursor, page, 2, world.now, more);
+    CHECK(n <= 2);
+    if (n == 0) break;
+    for (std::size_t i = 0; i < n; ++i) {
+      CHECK(seen.empty() || page[i].peer > seen.back());
+      seen.push_back(page[i].peer);
+    }
+    cursor = page[n - 1].peer;
+  }
+  CHECK(seen.size() == 10);
+  for (std::size_t i = 0; i < seen.size(); ++i) {
+    CHECK(seen[i] == 2 + i);
+  }
+  NeighborDetailEntry empty[2];
+  more = true;
+  CHECK(neighbor_detail_page(n1, nullptr, 11, empty, 2, world.now, more) == 0);
+  CHECK(!more);
+}
+
+void test_neighbor_phase_registry_pins_discovery_order() {
+  // The observation phase registry is the discovery NeighborPhase shifted
+  // by one (0 stays unknown): pin the wire assumption so an enum reorder
+  // fails loudly instead of mislabeling rows.
+  CHECK(static_cast<std::uint8_t>(NeighborPhase::Candidate) == 0);
+  CHECK(static_cast<std::uint8_t>(NeighborPhase::Authenticating) == 1);
+  CHECK(static_cast<std::uint8_t>(NeighborPhase::Authenticated) == 2);
+  CHECK(static_cast<std::uint8_t>(NeighborPhase::ApprovalPending) == 3);
+  CHECK(static_cast<std::uint8_t>(NeighborPhase::Bound) == 4);
+  CHECK(static_cast<std::uint8_t>(NeighborPhase::Reachable) == 5);
+  CHECK(static_cast<std::uint8_t>(NeighborPhase::Suspended) == 6);
+  CHECK(static_cast<std::uint8_t>(NeighborPhase::Stale) == 7);
+  CHECK(static_cast<std::uint8_t>(NeighborPhase::Conflict) == 8);
+  CHECK(static_cast<std::uint8_t>(NeighborPhase::Revoked) == 9);
+  CHECK(kNeighborPhaseReachable == 6);
+}
+
 // --- read-only proof ------------------------------------------------------------
 
 struct SelectionSnapshot {
@@ -172,6 +279,16 @@ void test_observation_reads_change_nothing() {
     }
     RouteDetailEntry exact{};
     CHECK(n1.route_detail(3, world.now, exact));
+    NodeId ncursor = 0;
+    bool nmore = true;
+    while (nmore) {
+      NeighborDetailEntry npage[8];
+      const std::size_t nn = neighbor_detail_page(n1, nullptr, ncursor, npage, 8, world.now, nmore);
+      if (nn == 0) break;
+      ncursor = npage[nn - 1].peer;
+    }
+    NeighborDetailEntry nexact{};
+    CHECK(neighbor_detail_exact(n1, nullptr, 2, world.now, nexact));
     std::uint16_t a = 0, t = 0, r = 0, m = 0;
     observation_counts(n1, world.now, a, t, r, m);
     ObservationTables tables{};
@@ -309,17 +426,21 @@ void test_query_codec() {
   CHECK(decoded.flags == kObservationQuerySubscribe);
   CHECK(decoded.after == 0x0102030405060708ULL);
 
-  // EXACT names one destination on the routes section.
+  // EXACT names one destination on the routes section, one peer on the
+  // neighbors section.
   ObservationQuery exact{};
   exact.section = ObservationSection::Routes;
   exact.flags = kObservationQueryExact;
   exact.after = 9;
   CHECK(encode_observation_query(exact, MutableByteView{buffer.data(), buffer.size()}, written).ok());
+  exact.section = ObservationSection::Neighbors;
+  CHECK(encode_observation_query(exact, MutableByteView{buffer.data(), buffer.size()}, written).ok());
 
-  // Rejects: unknown section, bad flags, EXACT off-routes, EXACT with a
-  // zero cursor, all-ones cursor, out-of-range page size, truncation.
+  // Rejects: unknown section, bad flags, EXACT off the paged sections,
+  // EXACT with a zero cursor, all-ones cursor, out-of-range page size,
+  // truncation.
   ObservationQuery bad = query;
-  bad.section = static_cast<ObservationSection>(5);
+  bad.section = static_cast<ObservationSection>(6);
   CHECK(!encode_observation_query(bad, MutableByteView{buffer.data(), buffer.size()}, written).ok());
   bad = query;
   bad.flags = 0xFC;
@@ -469,6 +590,47 @@ void test_route_entry_codec() {
   CHECK(!decode_observation_route_entry(ByteView{buffer.data(), buffer.size()}, back).ok());
 }
 
+void test_neighbor_entry_codec() {
+  NeighborDetailEntry entry{};
+  entry.peer = 0x0102030405060708ULL;
+  entry.heard_age_ms = 4242;
+  entry.lease_remaining_ms = 80000;
+  entry.link_cost = 12;
+  entry.rssi_ewma_q8_8 = static_cast<std::int16_t>(-70 * 256 + 128);
+  entry.phase = kNeighborPhaseReachable;
+  entry.flags = kNeighborActive | kNeighborRssiValid | kNeighborHeardValid;
+  entry.rssi_last_dbm = -71;
+  std::array<std::uint8_t, kObservationNeighborEntrySize> buffer{};
+  CHECK(encode_observation_neighbor_entry(entry, MutableByteView{buffer.data(), buffer.size()})
+            .ok());
+  NeighborDetailEntry back{};
+  CHECK(decode_observation_neighbor_entry(ByteView{buffer.data(), buffer.size()}, back).ok());
+  CHECK(back.peer == entry.peer);
+  CHECK(back.heard_age_ms == 4242);
+  CHECK(back.lease_remaining_ms == 80000);
+  CHECK(back.link_cost == 12);
+  CHECK(back.rssi_ewma_q8_8 == static_cast<std::int16_t>(-70 * 256 + 128));
+  CHECK(back.phase == kNeighborPhaseReachable);
+  CHECK(back.flags == entry.flags);
+  CHECK(back.rssi_last_dbm == -71);
+  // Unknown flag bits and nonzero reserved are rejected; unknown phase
+  // and sentinel ages round-trip (they are data, not errors).
+  buffer[21] = 0xF8;
+  CHECK(!decode_observation_neighbor_entry(ByteView{buffer.data(), buffer.size()}, back).ok());
+  buffer[21] = entry.flags;
+  buffer[23] = 1;
+  CHECK(!decode_observation_neighbor_entry(ByteView{buffer.data(), buffer.size()}, back).ok());
+  buffer[23] = 0;
+  NeighborDetailEntry unknown{};
+  unknown.peer = 9;
+  CHECK(encode_observation_neighbor_entry(unknown, MutableByteView{buffer.data(), buffer.size()})
+            .ok());
+  CHECK(decode_observation_neighbor_entry(ByteView{buffer.data(), buffer.size()}, back).ok());
+  CHECK(back.phase == kNeighborPhaseUnknown);
+  CHECK(back.heard_age_ms == kNeighborAgeUnknown);
+  CHECK(back.lease_remaining_ms == kNeighborAgeUnknown);
+}
+
 void test_page_codec() {
   std::array<std::uint8_t, kGatewayInnerHeadSize + kObservationPageMaxPayload> buffer{};
   // Singleton page round-trip.
@@ -532,6 +694,45 @@ void test_page_codec() {
   CHECK(header_back.count == 2);
   CHECK(header_back.next_after == 3);
   CHECK(body_back.size == 2 * kObservationRouteEntrySize);
+
+  // Neighbors page round-trip (ascending peers, same cursor rule).
+  NeighborDetailEntry peers[2]{};
+  peers[0].peer = 2;
+  peers[0].link_cost = 1;
+  peers[0].phase = kNeighborPhaseReachable;
+  peers[0].flags = kNeighborActive | kNeighborHeardValid;
+  peers[0].heard_age_ms = 120;
+  peers[1].peer = 3;
+  peers[1].link_cost = 2;
+  std::array<std::uint8_t, 2 * kObservationNeighborEntrySize> neighbors_body{};
+  for (int i = 0; i < 2; ++i) {
+    CHECK(encode_observation_neighbor_entry(
+              peers[i],
+              MutableByteView{neighbors_body.data() + i * kObservationNeighborEntrySize,
+                              kObservationNeighborEntrySize})
+              .ok());
+  }
+  ObservationPageHeader neighbors_header{};
+  neighbors_header.result = static_cast<std::uint16_t>(ConfigOpsResult::Ok);
+  neighbors_header.section = ObservationSection::Neighbors;
+  neighbors_header.count = 2;
+  neighbors_header.boot_id = 9;
+  neighbors_header.revision = 0xA5A5A5A5U;
+  neighbors_header.next_after = 3;
+  CHECK(encode_observation_page(neighbors_header,
+                                ByteView{neighbors_body.data(), neighbors_body.size()}, 2,
+                                MutableByteView{buffer.data(), buffer.size()}, written)
+            .ok());
+  CHECK(decode_observation_page(ByteView{buffer.data(), written}, header_back, body_back).ok());
+  CHECK(header_back.count == 2);
+  CHECK(header_back.next_after == 3);
+  CHECK(body_back.size == 2 * kObservationNeighborEntrySize);
+  ObservationPageHeader neighbors_bad_cursor = neighbors_header;
+  neighbors_bad_cursor.next_after = 2;
+  CHECK(!encode_observation_page(neighbors_bad_cursor,
+                                 ByteView{neighbors_body.data(), neighbors_body.size()}, 2,
+                                 MutableByteView{buffer.data(), buffer.size()}, written)
+             .ok());
 
   // Rejects: count/body mismatch, non-ascending entries, wrong cursor,
   // singleton count != 1, non-Ok with entries.
@@ -731,6 +932,27 @@ void test_fixed_vectors() {
   CHECK(e0.generation == 1 && e0.sequence == 9 && e0.metric == 1);
   CHECK(e0.valid && e0.remaining_ms == 500);
 
+  const auto neighbors_page = hex_decode(
+      "01710032000005000100000000b0071d0001a5a5a5a50000000000000002"
+      "000000000000000200000078000138800001ba800605b900");
+  CHECK(decode_observation_page(
+            ByteView{neighbors_page.data(), neighbors_page.size()}, header,
+            body)
+            .ok());
+  CHECK(header.section == ObservationSection::Neighbors);
+  CHECK(header.count == 1);
+  CHECK(header.revision == 0xA5A5A5A5U);
+  CHECK(header.next_after == 2);
+  NeighborDetailEntry n0{};
+  CHECK(decode_observation_neighbor_entry(
+            ByteView{body.data, kObservationNeighborEntrySize}, n0)
+            .ok());
+  CHECK(n0.peer == 2);
+  CHECK(n0.heard_age_ms == 120 && n0.lease_remaining_ms == 80000);
+  CHECK(n0.link_cost == 1 && n0.phase == kNeighborPhaseReachable);
+  CHECK(n0.flags == (kNeighborActive | kNeighborHeardValid));
+  CHECK(n0.rssi_last_dbm == -71);
+
   const auto event = hex_decode(
       "017200180000002901020000000000b0071d00011111111122222222");
   ObservationEvent decoded_event{};
@@ -747,6 +969,9 @@ void test_fixed_vectors() {
 int main() {
   test_route_detail_line_topology();
   test_route_detail_page_walk();
+  test_neighbor_detail_line_topology();
+  test_neighbor_detail_page_walk();
+  test_neighbor_phase_registry_pins_discovery_order();
   test_observation_counts();
   test_observation_reads_change_nothing();
   test_digests_track_structure_only();
@@ -755,6 +980,7 @@ int main() {
   test_query_codec();
   test_singleton_codecs();
   test_route_entry_codec();
+  test_neighbor_entry_codec();
   test_page_codec();
   test_event_codec();
   test_fixed_vectors();

@@ -2527,13 +2527,14 @@ void test_milestones_leg_start_survives_u32_wrap() {
   CHECK(f.init_stores());
   CHECK(f.identity.commit(identity_record()).ok());
   SecurityCoordinator coordinator(f.deps());
-  // Boot a leg just below the 32-bit ms wrap; the stored low half still
-  // rebuilds the true start past it.
-  constexpr MonotonicMs kT1 = std::uint64_t{0xFFFFFFFFu} - 15;
+  // Boot a leg just below the 32-bit ms wrap; the stored whole-second
+  // start still reports the true age past it.
+  constexpr MonotonicMs kT1 = 4294967000;
   CHECK(coordinator.step(boot_event(kT1, kBoot)).ok());
   CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
-  const JoinMilestones m = coordinator.milestones(kT1 + 0x20);
-  CHECK(m.join_started_age_ms == 0x20);
+  const JoinMilestones m = coordinator.milestones(kT1 + 500);
+  CHECK(kT1 + 500 > std::uint64_t{0xFFFFFFFFu});
+  CHECK(m.join_started_age_ms == 500);
   CHECK(m.adopted_age_ms == kMilestoneAgeUnknown);
 }
 
@@ -2557,6 +2558,51 @@ void test_milestones_silent_adopt_has_no_leg() {
   CHECK(m.join_started_age_ms == now - kT0);
   CHECK(m.attempts == 0);
   CHECK(m.adopted_node == kNode);
+}
+
+void test_milestones_join_started_survives_49_days() {
+  current = "milestones_join_started_survives_49_days";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  // A leg that stays open past the 32-bit ms wrap (49.7 days) must
+  // neither wrap nor read as unknown: the served age clamps one below
+  // the unknown sentinel ("at least that old").
+  constexpr MonotonicMs kFiftyDays = MonotonicMs{50} * 24 * 3600 * 1000;
+  const JoinMilestones m = coordinator.milestones(kT0 + kFiftyDays);
+  CHECK(m.join_started_age_ms == kMilestoneAgeUnknown - 1);
+  CHECK(m.adopted_age_ms == kMilestoneAgeUnknown);
+}
+
+void test_milestones_confirmed_gap_past_18h() {
+  current = "milestones_confirmed_gap_past_18h";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  JoinAction ready{};
+  ready.kind = JoinActionKind::MemberReady;
+  ready.rs_epoch_to_fetch = 345;
+  const MonotonicMs adopted_at = kT0 + 500;
+  CHECK(SecurityCoordinatorTestAccess::adopt(coordinator, ready, adopted_at).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+  // The JoinConfirm ACK lands 20 h after adoption: the latched gap must
+  // not saturate at the old u16-seconds range (18.2 h).
+  constexpr MonotonicMs kTwentyHours = MonotonicMs{20} * 3600 * 1000;
+  CHECK(coordinator.step(poll_at(adopted_at + kTwentyHours)).ok());
+  AuthorityEvent ack{};
+  ack.kind = AuthorityEvent::Kind::JoinConfirmAck;
+  coordinator.on_event(ack);
+  CHECK(coordinator.snapshot().join_confirmed);
+  const JoinMilestones m = coordinator.milestones(adopted_at + kTwentyHours + 1000);
+  CHECK((m.flags & kMilestoneConfirmed) != 0);
+  CHECK(m.adopted_age_ms == kTwentyHours + 1000);
+  CHECK(m.confirmed_age_ms == 1000);
 }
 
 int main() {
@@ -2609,6 +2655,8 @@ int main() {
   test_milestones_join_leg_adopt_confirm();
   test_milestones_leg_start_survives_u32_wrap();
   test_milestones_silent_adopt_has_no_leg();
+  test_milestones_join_started_survives_49_days();
+  test_milestones_confirmed_gap_past_18h();
   if (failures != 0) {
     std::fprintf(stderr, "FAILURES: %d\n", failures);
     return 1;

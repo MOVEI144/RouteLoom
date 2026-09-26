@@ -154,9 +154,7 @@ class FakeAPI1:
                                  'stale': False, 'complete': True, 'armed': False,
                                  section: fix['sections'][section]}}
         section = params.get('section')
-        if section == 'neighbors':
-            return self._error(request_id, 'UNSUPPORTED', {'section': 'neighbors'})
-        if section not in ('routes', 'summary'):
+        if section not in ('routes', 'neighbors', 'summary'):
             return self._error(request_id, 'INVALID_ARGUMENT')
         destination = params.get('destination')
         cursor = params.get('cursor')
@@ -169,7 +167,8 @@ class FakeAPI1:
         if cursor is not None and (not self._is_hex16(cursor) or
                                    cursor.lower() == 'ffffffffffffffff'):
             return self._error(request_id, 'INVALID_ARGUMENT')
-        if section != 'routes' and (destination is not None or cursor is not None):
+        if section not in ('routes', 'neighbors') and (
+                destination is not None or cursor is not None):
             return self._error(request_id, 'INVALID_ARGUMENT')
         snapshot = {'schema': 1, 'section': section, 'source': source,
                     'revision': fix.get('revision', 0), 'received_unix_ms': 1000,
@@ -178,18 +177,18 @@ class FakeAPI1:
             snapshot.update({'complete': True, 'summary': fix['sections']['summary'],
                              'entries': [], 'next_cursor': None})
             return {'outcome': 'snapshot', 'scope': {'observer': gateway}, 'snapshot': snapshot}
-        routes = sorted(fix['routes'], key=lambda entry: entry['destination'])
+        key = 'destination' if section == 'routes' else 'peer'
+        rows = sorted(fix['routes'] if section == 'routes' else fix.get('neighbors', []),
+                      key=lambda entry: entry[key])
         if destination is not None:
-            entries = [entry for entry in routes
-                       if entry['destination'] == destination.lower()]
+            entries = [entry for entry in rows if entry[key] == destination.lower()]
             snapshot.update({'complete': True, 'present': bool(entries),
                              'entries': entries, 'next_cursor': None})
             return {'outcome': 'snapshot', 'scope': {'observer': gateway}, 'snapshot': snapshot}
-        rest = [entry for entry in routes
-                if cursor is None or entry['destination'] > cursor.lower()]
+        rest = [entry for entry in rows if cursor is None or entry[key] > cursor.lower()]
         page, more = rest[:8], len(rest) > 8
         snapshot.update({'complete': not more, 'entries': page,
-                         'next_cursor': page[-1]['destination'] if more else None})
+                         'next_cursor': page[-1][key] if more else None})
         return {'outcome': 'snapshot', 'scope': {'observer': gateway}, 'snapshot': snapshot}
 
     def _error(self, request_id, code, detail=None, retryable=False):

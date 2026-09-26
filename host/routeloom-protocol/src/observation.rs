@@ -28,6 +28,7 @@ pub const SECTION_TABLES: u8 = 1;
 pub const SECTION_MILESTONES: u8 = 2;
 pub const SECTION_SUMMARY: u8 = 3;
 pub const SECTION_ROUTES: u8 = 4;
+pub const SECTION_NEIGHBORS: u8 = 5;
 
 pub const QUERY_SUBSCRIBE: u8 = 0x01;
 pub const QUERY_EXACT: u8 = 0x02;
@@ -47,6 +48,7 @@ pub const TABLES_BODY: usize = 36;
 pub const MILESTONES_BODY: usize = 32;
 pub const SUMMARY_BODY: usize = 24;
 pub const ROUTE_ENTRY_SIZE: usize = 30;
+pub const NEIGHBOR_ENTRY_SIZE: usize = 24;
 /// Device page buffer bound (kObservationRoutesPageMax).
 pub const PAGE_MAX: usize = 8;
 pub const PAGE_MAX_PAYLOAD: usize = PAGE_FIXED + PAGE_MAX * ROUTE_ENTRY_SIZE;
@@ -77,6 +79,14 @@ pub const PROFILE_UNKNOWN: u8 = 0;
 pub const MEMBERSHIP_UNKNOWN: u8 = 0;
 /// Joiner-state registry (ObservationJoiner).
 pub const JOINER_UNKNOWN: u8 = 0;
+/// Neighbor-phase registry (ObservationNeighborPhase): 0 is unknown, 1..=10
+/// the discovery NeighborPhase shifted by one.
+pub const PHASE_UNKNOWN: u8 = 0;
+
+/// Neighbor entry flags.
+pub const NBR_ACTIVE: u8 = 1 << 0;
+pub const NBR_RSSI_VALID: u8 = 1 << 1;
+pub const NBR_HEARD_VALID: u8 = 1 << 2;
 
 pub const MILESTONE_ADOPTED: u8 = 1 << 0;
 pub const MILESTONE_CONFIRMED: u8 = 1 << 1;
@@ -156,6 +166,23 @@ pub const fn joiner_name(code: u8) -> &'static str {
     }
 }
 
+#[must_use]
+pub const fn neighbor_phase_name(code: u8) -> &'static str {
+    match code {
+        1 => "candidate",
+        2 => "authenticating",
+        3 => "authenticated",
+        4 => "approval_pending",
+        5 => "bound",
+        6 => "reachable",
+        7 => "suspended",
+        8 => "stale",
+        9 => "conflict",
+        10 => "revoked",
+        _ => "unknown",
+    }
+}
+
 /// The sub byte of an observation inner body (0x70-0x72), if it is one.
 #[must_use]
 pub fn observation_sub(inner: &[u8]) -> Option<u8> {
@@ -201,7 +228,7 @@ fn be<const N: usize>(bytes: &[u8], offset: usize) -> Result<[u8; N], HostOpsErr
 }
 
 fn section_valid(section: u8) -> bool {
-    section <= SECTION_ROUTES
+    section <= SECTION_NEIGHBORS
 }
 
 /// 0x70 OBSERVATION_QUERY (H→G).
@@ -230,7 +257,10 @@ fn check_query(query: &ObservationQuery) -> Result<(), HostOpsError> {
     if query.flags & !(QUERY_SUBSCRIBE | QUERY_EXACT) != 0 {
         return Err(HostOpsError::Invalid("observation query flags"));
     }
-    if query.flags & QUERY_EXACT != 0 && (query.section != SECTION_ROUTES || query.after == 0) {
+    if query.flags & QUERY_EXACT != 0
+        && ((query.section != SECTION_ROUTES && query.section != SECTION_NEIGHBORS)
+            || query.after == 0)
+    {
         return Err(HostOpsError::Invalid("observation exact"));
     }
     Ok(())
@@ -540,6 +570,67 @@ pub fn decode_route_detail_entry(entry: &[u8]) -> Result<RouteDetailEntry, HostO
     })
 }
 
+/// One neighbor-table row (24-byte entry): the link the observer holds
+/// toward `peer` — discovery phase, cost, RSSI evidence and the neighbor
+/// lease. Unknown ages/leases read `AGE_UNKNOWN`; RSSI bytes are only
+/// meaningful with their validity flag.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NeighborDetailEntry {
+    pub peer: u64,
+    pub heard_age_ms: u32,
+    pub lease_remaining_ms: u32,
+    pub link_cost: u16,
+    pub rssi_ewma_q8_8: i16,
+    pub phase: u8,
+    pub flags: u8,
+    pub rssi_last_dbm: i8,
+}
+
+impl NeighborDetailEntry {
+    pub fn active(&self) -> bool {
+        self.flags & NBR_ACTIVE != 0
+    }
+    pub fn rssi_valid(&self) -> bool {
+        self.flags & NBR_RSSI_VALID != 0
+    }
+    pub fn heard_valid(&self) -> bool {
+        self.flags & NBR_HEARD_VALID != 0
+    }
+}
+
+pub fn encode_neighbor_detail_entry(entry: &NeighborDetailEntry) -> Vec<u8> {
+    let mut out = Vec::with_capacity(NEIGHBOR_ENTRY_SIZE);
+    out.extend_from_slice(&entry.peer.to_be_bytes());
+    out.extend_from_slice(&entry.heard_age_ms.to_be_bytes());
+    out.extend_from_slice(&entry.lease_remaining_ms.to_be_bytes());
+    out.extend_from_slice(&entry.link_cost.to_be_bytes());
+    out.extend_from_slice(&entry.rssi_ewma_q8_8.to_be_bytes());
+    out.push(entry.phase);
+    out.push(entry.flags);
+    out.push(entry.rssi_last_dbm as u8);
+    out.push(0);
+    out
+}
+
+pub fn decode_neighbor_detail_entry(entry: &[u8]) -> Result<NeighborDetailEntry, HostOpsError> {
+    if entry.len() != NEIGHBOR_ENTRY_SIZE {
+        return Err(HostOpsError::LengthMismatch);
+    }
+    if entry[21] & !(NBR_ACTIVE | NBR_RSSI_VALID | NBR_HEARD_VALID) != 0 || entry[23] != 0 {
+        return Err(HostOpsError::Invalid("observation neighbor flags"));
+    }
+    Ok(NeighborDetailEntry {
+        peer: u64::from_be_bytes(be(entry, 0)?),
+        heard_age_ms: u32::from_be_bytes(be(entry, 8)?),
+        lease_remaining_ms: u32::from_be_bytes(be(entry, 12)?),
+        link_cost: u16::from_be_bytes(be(entry, 16)?),
+        rssi_ewma_q8_8: i16::from_be_bytes(be(entry, 18)?),
+        phase: entry[20],
+        flags: entry[21],
+        rssi_last_dbm: entry[22] as i8,
+    })
+}
+
 fn singleton_body(section: u8) -> usize {
     match section {
         SECTION_SYSTEM => SYSTEM_BODY,
@@ -586,13 +677,17 @@ fn check_page(header: &ObservationPageHeader, body_len: usize) -> Result<(), Hos
         if body_len != count * ROUTE_ENTRY_SIZE {
             return Err(HostOpsError::LengthMismatch);
         }
+    } else if header.section == SECTION_NEIGHBORS {
+        if body_len != count * NEIGHBOR_ENTRY_SIZE {
+            return Err(HostOpsError::LengthMismatch);
+        }
     } else {
         if count != 1 || body_len != singleton_body(header.section) {
             return Err(HostOpsError::LengthMismatch);
         }
         return Ok(());
     }
-    // Routes entries must arrive strictly ascending, with the cursor on
+    // Paged entries must arrive strictly ascending, with the cursor on
     // the last one — checked by the caller-provided body below.
     Ok(())
 }
@@ -617,6 +712,27 @@ fn check_routes_body(body: &[u8], header: &ObservationPageHeader) -> Result<(), 
     Ok(())
 }
 
+fn check_neighbors_body(body: &[u8], header: &ObservationPageHeader) -> Result<(), HostOpsError> {
+    let count = usize::from(header.count);
+    let mut previous: Option<u64> = None;
+    for i in 0..count {
+        let entry =
+            decode_neighbor_detail_entry(&body[i * NEIGHBOR_ENTRY_SIZE..][..NEIGHBOR_ENTRY_SIZE])?;
+        if let Some(prev) = previous {
+            if entry.peer <= prev {
+                return Err(HostOpsError::Invalid("observation page order"));
+            }
+        }
+        previous = Some(entry.peer);
+    }
+    if let Some(last) = previous {
+        if header.next_after != last {
+            return Err(HostOpsError::Invalid("observation page cursor"));
+        }
+    }
+    Ok(())
+}
+
 pub fn encode_observation_page(
     header: &ObservationPageHeader,
     body: &[u8],
@@ -624,6 +740,9 @@ pub fn encode_observation_page(
     check_page(header, body.len())?;
     if header.result == RESULT_OK && header.section == SECTION_ROUTES {
         check_routes_body(body, header)?;
+    }
+    if header.result == RESULT_OK && header.section == SECTION_NEIGHBORS {
+        check_neighbors_body(body, header)?;
     }
     let mut out = Vec::with_capacity(INNER_HEAD_SIZE + PAGE_FIXED + body.len());
     head(&mut out, SUB_OBSERVATION_PAGE, PAGE_FIXED + body.len());
@@ -659,6 +778,9 @@ pub fn decode_observation_page(
     check_page(&header, rest.len())?;
     if header.result == RESULT_OK && header.section == SECTION_ROUTES {
         check_routes_body(rest, &header)?;
+    }
+    if header.result == RESULT_OK && header.section == SECTION_NEIGHBORS {
+        check_neighbors_body(rest, &header)?;
     }
     Ok((header, rest.to_vec()))
 }
@@ -728,6 +850,173 @@ pub fn decode_observation_event(inner: &[u8]) -> Result<ObservationEvent, HostOp
     Ok(event)
 }
 
+// --- Remote observation (observation_v1 over Diagnostic 0x30/0x31) ---
+//
+// A gateway forwards one observer's 0x70-shaped question to a mesh peer
+// and relays the answer: the observer serves the SAME section bytes the
+// USB 0x71 page carries (same encoders), so the daemon decodes both legs
+// with one codec. Pull-only (no change notifications cross the radio);
+// the 128 B reply bound pages routes 3 and neighbors 4 rows at a time.
+// Byte-identical to `RemoteObservationQuery`/`RemoteObservationSnapshot`
+// in `components/routeloom/{include/routeloom/telemetry.hpp,src/telemetry.cpp}`.
+
+/// Diagnostic subtype 7 query body: prefix + request_id:u32, section:u8,
+/// max_entries:u8, flags:u8, reserved:u8, after:u64, reserved:u32.
+pub const REMOTE_QUERY_BODY_SIZE: usize = 24;
+/// Diagnostic subtype 8 head: prefix + request_id:u32, observer:u64,
+/// observer_boot:u64, section:u8, flags:u8, count:u8, reserved:u8,
+/// revision:u32 — then the 0x71-identical section bytes (0..96).
+pub const REMOTE_SNAPSHOT_HEAD_SIZE: usize = 32;
+/// Largest subtype 8 body (head + section bytes), prefix included.
+pub const REMOTE_SNAPSHOT_BODY_MAX: usize = 128;
+/// Largest section payload inside a subtype 8 body.
+pub const REMOTE_SECTION_MAX: usize = 96;
+/// Remote page bounds (the 128 B reply bound pages routes 3 and
+/// neighbors 4 rows at a time); singletons answer exactly one body.
+pub const REMOTE_ROUTES_MAX: u8 = 3;
+pub const REMOTE_NEIGHBORS_MAX: u8 = 4;
+/// Query flags: bit0 EXACT (routes/neighbors only — `after` names one
+/// destination/peer). Snapshot flags: bit0 MORE.
+pub const REMOTE_QUERY_EXACT: u8 = 1 << 0;
+pub const REMOTE_SNAPSHOT_MORE: u8 = 1 << 0;
+
+/// One subtype-7 RemoteObservationQuery, validated like the device
+/// encoder (`remote_observation_query_encode`): nonzero request id, a
+/// known section, 1..=remote bound entries, EXACT only on paged sections
+/// with a non-cursor `after`, and a non-broadcast cursor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RemoteObservationQuery {
+    pub request_id: u32,
+    pub section: u8,
+    pub max_entries: u8,
+    pub flags: u8,
+    pub after: u64,
+}
+
+fn remote_bound(section: u8) -> Option<u8> {
+    match section {
+        SECTION_ROUTES => Some(REMOTE_ROUTES_MAX),
+        SECTION_NEIGHBORS => Some(REMOTE_NEIGHBORS_MAX),
+        SECTION_SYSTEM | SECTION_TABLES | SECTION_MILESTONES | SECTION_SUMMARY => Some(1),
+        _ => None,
+    }
+}
+
+fn remote_paged(section: u8) -> bool {
+    section == SECTION_ROUTES || section == SECTION_NEIGHBORS
+}
+
+pub fn encode_remote_observation_query(
+    query: &RemoteObservationQuery,
+) -> Result<Vec<u8>, HostOpsError> {
+    let Some(bound) = remote_bound(query.section) else {
+        return Err(HostOpsError::Invalid("remote query section"));
+    };
+    let exact = query.flags & REMOTE_QUERY_EXACT != 0;
+    if query.request_id == 0
+        || query.max_entries == 0
+        || query.max_entries > bound
+        || query.flags & !REMOTE_QUERY_EXACT != 0
+        || query.after == u64::MAX
+        || (exact && (!remote_paged(query.section) || query.after == 0))
+    {
+        return Err(HostOpsError::Invalid("remote query fields"));
+    }
+    let mut out = Vec::with_capacity(REMOTE_QUERY_BODY_SIZE);
+    out.extend_from_slice(&[
+        crate::telemetry::DIAG_BODY_VERSION,
+        crate::telemetry::DIAG_SUB_REMOTE_OBSERVATION_QUERY,
+        0,
+        0,
+    ]);
+    out.extend_from_slice(&query.request_id.to_be_bytes());
+    out.push(query.section);
+    out.push(query.max_entries);
+    out.push(query.flags);
+    out.push(0);
+    out.extend_from_slice(&query.after.to_be_bytes());
+    out.extend_from_slice(&0_u32.to_be_bytes());
+    Ok(out)
+}
+
+/// One subtype-8 RemoteObservationSnapshot: the answering node's point
+/// sample. `revision` carries the section digest for
+/// routes/neighbors/summary and 0 for the point-sample singletons. No
+/// next_after field: entries ascend like 0x71 pages, so the cursor is
+/// the last entry's id.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteObservationSnapshot {
+    pub request_id: u32,
+    pub observer: u64,
+    pub observer_boot: u64,
+    pub section: u8,
+    pub flags: u8,
+    pub count: u8,
+    pub revision: u32,
+    pub body: Vec<u8>,
+}
+
+/// Servable (section, count) shapes, mirroring
+/// `observation_remote_shape`: singletons answer exactly one body, paged
+/// sections up to their remote bound — count 0 with an empty body is the
+/// honest absent/past-the-end page, like 0x71.
+fn remote_shape(section: u8, count: u8) -> Option<usize> {
+    match section {
+        SECTION_SYSTEM if count == 1 => Some(SYSTEM_BODY),
+        SECTION_TABLES if count == 1 => Some(TABLES_BODY),
+        SECTION_MILESTONES if count == 1 => Some(MILESTONES_BODY),
+        SECTION_SUMMARY if count == 1 => Some(SUMMARY_BODY),
+        SECTION_ROUTES if count <= REMOTE_ROUTES_MAX => Some(count as usize * ROUTE_ENTRY_SIZE),
+        SECTION_NEIGHBORS if count <= REMOTE_NEIGHBORS_MAX => {
+            Some(count as usize * NEIGHBOR_ENTRY_SIZE)
+        }
+        _ => None,
+    }
+}
+
+pub fn decode_remote_observation_snapshot(
+    body: &[u8],
+) -> Result<RemoteObservationSnapshot, HostOpsError> {
+    if body.len() < REMOTE_SNAPSHOT_HEAD_SIZE || body.len() > REMOTE_SNAPSHOT_BODY_MAX {
+        return Err(HostOpsError::LengthMismatch);
+    }
+    if body[0] != crate::telemetry::DIAG_BODY_VERSION
+        || body[1] != crate::telemetry::DIAG_SUB_REMOTE_OBSERVATION_SNAPSHOT
+        || body[2] != 0
+        || body[3] != 0
+    {
+        return Err(HostOpsError::Invalid("remote snapshot prefix"));
+    }
+    let observer = u64::from_be_bytes(be(body, 8)?);
+    let section = body[24];
+    let flags = body[25];
+    let count = body[26];
+    if section > SECTION_NEIGHBORS
+        || flags & !REMOTE_SNAPSHOT_MORE != 0
+        || body[27] != 0
+        || observer == 0
+        || observer == u64::MAX
+    {
+        return Err(HostOpsError::Invalid("remote snapshot fields"));
+    }
+    let Some(want) = remote_shape(section, count) else {
+        return Err(HostOpsError::Invalid("remote snapshot shape"));
+    };
+    if body.len() - REMOTE_SNAPSHOT_HEAD_SIZE != want {
+        return Err(HostOpsError::LengthMismatch);
+    }
+    Ok(RemoteObservationSnapshot {
+        request_id: u32::from_be_bytes(be(body, 4)?),
+        observer,
+        observer_boot: u64::from_be_bytes(be(body, 16)?),
+        section,
+        flags,
+        count,
+        revision: u32::from_be_bytes(be(body, 28)?),
+        body: body[REMOTE_SNAPSHOT_HEAD_SIZE..].to_vec(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,7 +1051,7 @@ mod tests {
             after: 0,
         };
         for bad in [
-            ObservationQuery { section: 5, ..good },
+            ObservationQuery { section: 6, ..good },
             ObservationQuery {
                 max_entries: 0,
                 ..good
@@ -863,6 +1152,83 @@ mod tests {
         let bytes = encode_observation_summary(&summary);
         assert_eq!(bytes.len(), SUMMARY_BODY);
         assert_eq!(decode_observation_summary(&bytes).unwrap(), summary);
+    }
+
+    #[test]
+    fn neighbor_entry_round_trip() {
+        let entry = NeighborDetailEntry {
+            peer: 0x0102_0304_0506_0708,
+            heard_age_ms: 4242,
+            lease_remaining_ms: 80_000,
+            link_cost: 12,
+            rssi_ewma_q8_8: -70 * 256 + 128,
+            phase: 6,
+            flags: NBR_ACTIVE | NBR_RSSI_VALID | NBR_HEARD_VALID,
+            rssi_last_dbm: -71,
+        };
+        let bytes = encode_neighbor_detail_entry(&entry);
+        assert_eq!(bytes.len(), NEIGHBOR_ENTRY_SIZE);
+        assert_eq!(decode_neighbor_detail_entry(&bytes).unwrap(), entry);
+        // Unknown lease/heard read as the sentinel with validity cleared.
+        let unknown = NeighborDetailEntry {
+            peer: 9,
+            heard_age_ms: AGE_UNKNOWN,
+            lease_remaining_ms: AGE_UNKNOWN,
+            link_cost: 0xFFFF,
+            phase: PHASE_UNKNOWN,
+            ..NeighborDetailEntry::default()
+        };
+        let bytes = encode_neighbor_detail_entry(&unknown);
+        assert_eq!(decode_neighbor_detail_entry(&bytes).unwrap(), unknown);
+        let mut bad = bytes.clone();
+        bad[21] = 0xF8;
+        assert!(decode_neighbor_detail_entry(&bad).is_err());
+        let mut bad = bytes.clone();
+        bad[23] = 1;
+        assert!(decode_neighbor_detail_entry(&bad).is_err());
+    }
+
+    #[test]
+    fn neighbors_page_orders_and_cursors_like_routes() {
+        let e1 = NeighborDetailEntry {
+            peer: 2,
+            ..NeighborDetailEntry::default()
+        };
+        let e2 = NeighborDetailEntry {
+            peer: 3,
+            ..NeighborDetailEntry::default()
+        };
+        let mut body = encode_neighbor_detail_entry(&e1);
+        body.extend_from_slice(&encode_neighbor_detail_entry(&e2));
+        let header = ObservationPageHeader {
+            result: RESULT_OK,
+            section: SECTION_NEIGHBORS,
+            flags: PAGE_MORE,
+            count: 2,
+            boot_id: 9,
+            revision: 0xA5A5_A5A5,
+            next_after: 3,
+        };
+        let bytes = encode_observation_page(&header, &body).unwrap();
+        let (back, _) = decode_observation_page(&bytes).unwrap();
+        assert_eq!(back.count, 2);
+        // Non-ascending peers and a wrong cursor are rejected.
+        let mut swapped = encode_neighbor_detail_entry(&e2);
+        swapped.extend_from_slice(&encode_neighbor_detail_entry(&e1));
+        assert!(encode_observation_page(&header, &swapped).is_err());
+        let bad_cursor = ObservationPageHeader {
+            next_after: 2,
+            ..header
+        };
+        assert!(encode_observation_page(&bad_cursor, &body).is_err());
+        // EXACT names one neighbor like one route.
+        let exact = ObservationQuery {
+            section: SECTION_NEIGHBORS,
+            max_entries: 1,
+            flags: QUERY_EXACT,
+            after: 7,
+        };
+        assert!(encode_observation_query(&exact).is_ok());
     }
 
     #[test]
@@ -1108,6 +1474,29 @@ mod tests {
             hex(&page)
         );
 
+        // 0x71 neighbors page: one row, phase reachable, lease 80 s.
+        let page = hex_decode(
+            "01710032000005000100000000b0071d0001a5a5a5a50000000000000002\
+             000000000000000200000078000138800001ba800605b900",
+        );
+        let (header, body) = decode_observation_page(&page).unwrap();
+        assert_eq!(header.section, SECTION_NEIGHBORS);
+        assert_eq!(header.count, 1);
+        assert_eq!(header.revision, 0xA5A5_A5A5);
+        assert_eq!(header.next_after, 2);
+        let n0 = decode_neighbor_detail_entry(&body).unwrap();
+        assert_eq!(n0.peer, 2);
+        assert_eq!((n0.heard_age_ms, n0.lease_remaining_ms), (120, 80_000));
+        assert_eq!(n0.link_cost, 1);
+        assert_eq!(n0.phase, 6);
+        assert_eq!(neighbor_phase_name(n0.phase), "reachable");
+        assert!(n0.active() && n0.heard_valid() && !n0.rssi_valid());
+        assert_eq!(n0.rssi_last_dbm, -71);
+        assert_eq!(
+            hex(&encode_observation_page(&header, &body).unwrap()),
+            hex(&page)
+        );
+
         // 0x72 topology event: seq 41, kind 1, mask routes, digests.
         let event = hex_decode("017200180000002901020000000000b0071d00011111111122222222");
         let decoded = decode_observation_event(&event).unwrap();
@@ -1129,5 +1518,105 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&clean[i..i + 2], 16).unwrap())
             .collect()
+    }
+
+    // C++-encoded (`components/routeloom/src/telemetry.cpp`) oracle vectors.
+    const REMOTE_QUERY_HEX: &str = "01070000a1b2c3d405040100000000000000000900000000";
+    const REMOTE_SNAPSHOT_HEX: &str = "01080000010203040000000000000abc112233445566778805010100a5a5a5a500000000000000020000007800013880000100000607b900";
+
+    #[test]
+    fn remote_query_encodes_the_cpp_layout() {
+        let query = RemoteObservationQuery {
+            request_id: 0xA1B2_C3D4,
+            section: SECTION_NEIGHBORS,
+            max_entries: 4,
+            flags: REMOTE_QUERY_EXACT,
+            after: 9,
+        };
+        assert_eq!(
+            hex(&encode_remote_observation_query(&query).unwrap()),
+            REMOTE_QUERY_HEX
+        );
+
+        // The device encoder's validation, mirrored: zero id, unknown
+        // section, over-bound count, stray flags, broadcast cursor and
+        // EXACT on a singleton all fail before any byte is emitted.
+        let bad = [
+            RemoteObservationQuery {
+                request_id: 0,
+                ..query
+            },
+            RemoteObservationQuery {
+                section: 6,
+                ..query
+            },
+            RemoteObservationQuery {
+                max_entries: 5,
+                ..query
+            },
+            RemoteObservationQuery {
+                max_entries: 0,
+                ..query
+            },
+            RemoteObservationQuery {
+                flags: 0x02,
+                ..query
+            },
+            RemoteObservationQuery {
+                after: u64::MAX,
+                ..query
+            },
+            RemoteObservationQuery {
+                section: SECTION_SYSTEM,
+                max_entries: 1,
+                ..query
+            },
+        ];
+        for q in bad {
+            assert!(encode_remote_observation_query(&q).is_err());
+        }
+        // EXACT on a paged section with a cursor id is the one legal shape.
+        assert!(encode_remote_observation_query(&query).is_ok());
+        let page = RemoteObservationQuery {
+            flags: 0,
+            after: 9,
+            ..query
+        };
+        assert!(encode_remote_observation_query(&page).is_ok());
+    }
+
+    #[test]
+    fn remote_snapshot_decodes_the_cpp_layout() {
+        let body = hex_decode(REMOTE_SNAPSHOT_HEX);
+        let snapshot = decode_remote_observation_snapshot(&body).unwrap();
+        assert_eq!(snapshot.request_id, 0x0102_0304);
+        assert_eq!(snapshot.observer, 0x0abc);
+        assert_eq!(snapshot.observer_boot, 0x1122_3344_5566_7788);
+        assert_eq!(snapshot.section, SECTION_NEIGHBORS);
+        assert_eq!(snapshot.flags, REMOTE_SNAPSHOT_MORE);
+        assert_eq!(snapshot.count, 1);
+        assert_eq!(snapshot.revision, 0xA5A5_A5A5);
+        // The section bytes are the 0x71 neighbor entry verbatim — the
+        // local page codec decodes the remote leg unchanged.
+        let entry = decode_neighbor_detail_entry(&snapshot.body).unwrap();
+        assert_eq!(entry.peer, 2);
+        assert_eq!(
+            (entry.heard_age_ms, entry.lease_remaining_ms),
+            (120, 80_000)
+        );
+        assert_eq!(entry.phase, 6);
+
+        // Shape violations fail: singleton count, over-bound page, short
+        // body, stray flags, reserved observer.
+        let mut bad = body.clone();
+        bad[25] = 0x02;
+        assert!(decode_remote_observation_snapshot(&bad).is_err());
+        let mut bad = body.clone();
+        bad[26] = 2;
+        assert!(decode_remote_observation_snapshot(&bad).is_err());
+        assert!(decode_remote_observation_snapshot(&body[..body.len() - 1]).is_err());
+        let mut bad = body.clone();
+        bad[24] = SECTION_SYSTEM;
+        assert!(decode_remote_observation_snapshot(&bad).is_err());
     }
 }

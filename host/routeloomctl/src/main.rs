@@ -100,7 +100,7 @@ fn usage() {
         "Read-only daemon diagnostics: adapter | events [--follow [--kinds k1,k2]] | deliveries"
     );
     eprintln!(
-        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-retry --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-recover --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --mode adopt-known|reprovision --new-store-generation <u32> --new-revision <u64> [--snapshot-hash <64hex>] [--baseline <hex>]|config-recovery-info --network <16hex> --target <16hex> --config-namespace <u16>|trust-install --network <16hex> --target <16hex> --manifest <file>|trust-status --network <16hex> --target <16hex>|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)|telemetry --observer <16hex> --peer <16hex> [--direction egress|ingress] [--length-class 0|1|2|255] [--max-age-ms 0-3000]|health --observer <16hex> [--section system|tables|milestones] [--network <16hex>] [--max-age-ms 0-60000] [--subscribe]|topology --observer <16hex> --section routes|summary [--destination <16hex>|--cursor <16hex>] [--network <16hex>] [--max-age-ms 0-60000] [--subscribe]|group-send --network <16hex> --group <1-65535|ALL> --payload <hex> [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered] [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]|group-get --id <grp-opid> [--wait-ms 0-15000]"
+        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-retry --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-recover --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --mode adopt-known|reprovision --new-store-generation <u32> --new-revision <u64> [--snapshot-hash <64hex>] [--baseline <hex>]|config-recovery-info --network <16hex> --target <16hex> --config-namespace <u16>|trust-install --network <16hex> --target <16hex> --manifest <file>|trust-status --network <16hex> --target <16hex>|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)|telemetry --observer <16hex> --peer <16hex> [--direction egress|ingress] [--length-class 0|1|2|255] [--max-age-ms 0-3000]|health --observer <16hex> [--section system|tables|milestones] [--network <16hex>] [--max-age-ms 0-60000] [--subscribe]|topology --observer <16hex> --section routes|neighbors|summary [--destination <16hex>|--cursor <16hex>] [--network <16hex>] [--max-age-ms 0-60000] [--subscribe]|group-send --network <16hex> --group <1-65535|ALL> --payload <hex> [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered] [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]|group-get --id <grp-opid> [--wait-ms 0-15000]"
     );
     eprintln!(
         "routeloomctl provision-keygen --root-id <16hex> --out <key.json>|provision-authority-keygen --authority-id <16hex> --out <key.json>|provision-image --spec <image-spec.json> --out <image.rlt1> [--nvs-dir <dir> [--credential <cred-spec.json>]]|provision-manifest --image <spec.json|image.rlt1> --key <root.key> --out <manifest.rtm1>|provision-verify --manifest <file> --current <spec.json|image.rlt1>  (local provisioning — no daemon socket)"
@@ -702,11 +702,12 @@ fn health_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>>
     ))
 }
 
-/// `topology --observer <16hex> --section routes|summary [--destination
-/// <16hex> | --cursor <16hex>] [--network <16hex>] [--max-age-ms
-/// 0-60000] [--subscribe]`: the attached gateway's selected-route table
-/// (one page per call, or one exact destination) or its topology
-/// summary. Only explicit options are sent.
+/// `topology --observer <16hex> --section routes|neighbors|summary
+/// [--destination <16hex> | --cursor <16hex>] [--network <16hex>]
+/// [--max-age-ms 0-60000] [--subscribe]`: the attached gateway's
+/// selected-route or neighbor table (one page per call, or one exact
+/// destination/peer) or its topology summary. Only explicit options are
+/// sent.
 fn topology_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
     let mut observer = None;
     let mut section = None;
@@ -726,8 +727,8 @@ fn topology_command(args: &[String]) -> Result<String, Box<dyn std::error::Error
             }
             "--section" => {
                 let value = opt_value(&mut args, "--section")?;
-                if !matches!(value.as_str(), "routes" | "summary") {
-                    return Err("topology --section must be routes or summary".into());
+                if !matches!(value.as_str(), "routes" | "neighbors" | "summary") {
+                    return Err("topology --section must be routes, neighbors or summary".into());
                 }
                 section = Some(value);
             }
@@ -752,12 +753,13 @@ fn topology_command(args: &[String]) -> Result<String, Box<dyn std::error::Error
         }
     }
     let observer: String = observer.ok_or("topology requires --observer <16hex>")?;
-    let section: String = section.ok_or("topology requires --section routes|summary")?;
+    let section: String = section.ok_or("topology requires --section routes|neighbors|summary")?;
     if destination.is_some() && cursor.is_some() {
         return Err("topology --destination and --cursor are mutually exclusive".into());
     }
-    if section != "routes" && (destination.is_some() || cursor.is_some()) {
-        return Err("topology --destination and --cursor are routes-only".into());
+    if section != "routes" && section != "neighbors" && (destination.is_some() || cursor.is_some())
+    {
+        return Err("topology --destination and --cursor are routes/neighbors-only".into());
     }
     let mut params = format!("\"observer\":\"{observer}\",\"section\":\"{section}\"");
     if let Some(destination) = destination {
@@ -2677,13 +2679,19 @@ mod tests {
         assert!(routeloom_json::parse(line.strip_prefix("API1 ").unwrap()).is_ok());
         assert!(topology_command(&args(&["--observer", "0000000000000abc"])).is_err());
         assert!(topology_command(&args(&["--section", "routes"])).is_err());
-        assert!(topology_command(&args(&[
+        // neighbors is a served section (M2): it builds a line like routes.
+        let line = topology_command(&args(&[
             "--observer",
             "0000000000000abc",
             "--section",
-            "neighbors"
+            "neighbors",
+            "--cursor",
+            "0000000000000003",
         ]))
-        .is_err());
+        .unwrap();
+        assert!(line.contains("\"section\":\"neighbors\""), "{line}");
+        assert!(line.contains("\"cursor\":\"0000000000000003\""), "{line}");
+        assert!(routeloom_json::parse(line.strip_prefix("API1 ").unwrap()).is_ok());
         assert!(topology_command(&args(&[
             "--observer",
             "0000000000000abc",

@@ -1,6 +1,6 @@
 //! Device dispatch-window protocol (CAP-I2): the host_ops_v1 subcommand
 //! codec the daemon uses to drive SUBMIT / QUERY_DISPATCH / RETIRE_THROUGH /
-//! SKIP / TIME_SAMPLE. Byte-identical to the device side in
+//! SKIP / TIME_SAMPLE / RX_ASSURANCE_ENABLE. Byte-identical to the device side in
 //! `components/routeloom/{include/routeloom/usb_host_ops.hpp,src/usb_host_ops.cpp}`
 //! — the two files together are the shared USB source of truth the design
 //! (03-send-api.md §6) requires subcommands to be registered in once.
@@ -23,6 +23,10 @@ pub const CAP_GATEWAY_ENDPOINT_V1: u32 = 1 << 3;
 /// permit-object transfer — through the attached ConfigGateway. Advertised
 /// separately from host_ops_v1 and the gateway endpoint.
 pub const CAP_CONFIG_ENDPOINT_V1: u32 = 1 << 4;
+/// scope-rx-assurance: the device serves HostOps subcommand 0x08 and,
+/// once enabled, appends the 8 B ingress assurance tail to flagged
+/// DataFromMesh frames. Advertised separately from host_ops_v1.
+pub const CAP_RX_ASSURANCE_V1: u32 = 1 << 12;
 pub const HOST_OPS_SCHEMA: u8 = 1;
 
 pub const SUB_SUBMIT: u8 = 0x01;
@@ -30,6 +34,7 @@ pub const SUB_QUERY_DISPATCH: u8 = 0x02;
 pub const SUB_RETIRE_THROUGH: u8 = 0x03;
 pub const SUB_SKIP: u8 = 0x04;
 pub const SUB_TIME_SAMPLE: u8 = 0x05;
+pub const SUB_RX_ASSURANCE_ENABLE: u8 = 0x08;
 pub const SUB_HOST_REGISTER: u8 = 0x10;
 pub const SUB_GATEWAY_INGRESS: u8 = 0x11;
 pub const SUB_GATEWAY_INGRESS_ACK: u8 = 0x12;
@@ -585,6 +590,63 @@ pub fn decode_time_sample_response(inner: &[u8]) -> Result<TimeSampleResponse, H
         lease: BootLease(fixed(inner, 3)?),
         nonce: u64_at(inner, 19)?,
         device_time: u64_at(inner, 27)?,
+    })
+}
+
+// --- Receive assurance (0x08 + the DataFromMesh tail) ----------------------
+//
+// The request is the bare 0x01-0x05-family head (presence is the enable);
+// the reply carries the admission result. Ok arms extended ingress for
+// the session: every evidence-carrying delivery then arrives flagged
+// (`FLAG_INGRESS_ASSURANCE`) with the 8 B tail after the payload —
+// flags:u16 (bit0 VERIFIED) || profile:u8 (the observation kProfile* id)
+// || reserved:u8 || site_epoch:u32. Byte-identical to the device side in
+// `components/routeloom/{include/routeloom/usb_host_ops.hpp,src/usb_host_ops.cpp}`.
+pub const RX_ASSURANCE_REQUEST_SIZE: usize = 2;
+pub const RX_ASSURANCE_RESPONSE_SIZE: usize = 3;
+pub const INGRESS_ASSURANCE_TAIL_SIZE: usize = 8;
+pub const INGRESS_ASSURANCE_VERIFIED: u16 = 1 << 0;
+/// Highest valid profile id (observation kProfileLegacyFixture); anything
+/// above is rejected, never rendered.
+pub const INGRESS_ASSURANCE_PROFILE_MAX: u8 = 3;
+
+pub fn encode_rx_assurance_enable() -> Vec<u8> {
+    vec![HOST_OPS_SCHEMA, SUB_RX_ASSURANCE_ENABLE]
+}
+
+pub fn decode_rx_assurance_response(inner: &[u8]) -> Result<HostOpsResult, HostOpsError> {
+    if inner.len() != RX_ASSURANCE_RESPONSE_SIZE {
+        return Err(HostOpsError::LengthMismatch);
+    }
+    check_head(inner, SUB_RX_ASSURANCE_ENABLE)?;
+    HostOpsResult::try_from_byte(inner[2])
+}
+
+/// One decoded ingress assurance tail: the open_end verdict the gateway
+/// observed for this delivery, its own effective profile, and the header
+/// end_epoch the origin was verified under.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IngressAssurance {
+    pub verified: bool,
+    pub profile: u8,
+    pub site_epoch: u32,
+}
+
+pub fn decode_ingress_assurance_tail(tail: &[u8]) -> Result<IngressAssurance, HostOpsError> {
+    if tail.len() != INGRESS_ASSURANCE_TAIL_SIZE {
+        return Err(HostOpsError::LengthMismatch);
+    }
+    let flags = u16::from_be_bytes([tail[0], tail[1]]);
+    if flags & !INGRESS_ASSURANCE_VERIFIED != 0 || tail[3] != 0 {
+        return Err(HostOpsError::Invalid("ingress assurance reserved"));
+    }
+    if tail[2] > INGRESS_ASSURANCE_PROFILE_MAX {
+        return Err(HostOpsError::Invalid("ingress assurance profile"));
+    }
+    Ok(IngressAssurance {
+        verified: flags & INGRESS_ASSURANCE_VERIFIED != 0,
+        profile: tail[2],
+        site_epoch: u32::from_be_bytes([tail[4], tail[5], tail[6], tail[7]]),
     })
 }
 
@@ -2140,5 +2202,72 @@ mod tests {
             decode_site_state_report(&bad).unwrap_err().name(),
             "bad_result"
         );
+    }
+
+    // C++-encoded (`components/routeloom/src/usb_host_ops.cpp`) oracles:
+    // the 0x08 Ok reply and one verified member_edhoc tail.
+    const RX_ASSURANCE_RESPONSE_HEX: &str = "010800";
+    const INGRESS_TAIL_HEX: &str = "00010100a5a5a5a5";
+
+    fn hex_bytes(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn rx_assurance_enable_round_trip() {
+        assert_eq!(
+            encode_rx_assurance_enable(),
+            vec![HOST_OPS_SCHEMA, SUB_RX_ASSURANCE_ENABLE]
+        );
+        let reply = hex_bytes(RX_ASSURANCE_RESPONSE_HEX);
+        assert_eq!(
+            decode_rx_assurance_response(&reply).unwrap(),
+            HostOpsResult::Ok
+        );
+        let mut unsupported = reply.clone();
+        unsupported[2] = HostOpsResult::Unsupported as u8;
+        assert_eq!(
+            decode_rx_assurance_response(&unsupported).unwrap(),
+            HostOpsResult::Unsupported
+        );
+        // Wrong length, schema, sub and result enum all fail.
+        assert!(decode_rx_assurance_response(&reply[..2]).is_err());
+        let mut bad = reply.clone();
+        bad[0] = 0x7f;
+        assert!(decode_rx_assurance_response(&bad).is_err());
+        let mut bad = reply.clone();
+        bad[1] = SUB_TIME_SAMPLE;
+        assert!(decode_rx_assurance_response(&bad).is_err());
+        let mut bad = reply.clone();
+        bad[2] = 0x40;
+        assert!(decode_rx_assurance_response(&bad).is_err());
+    }
+
+    #[test]
+    fn ingress_assurance_tail_decodes_the_cpp_layout() {
+        let tail = hex_bytes(INGRESS_TAIL_HEX);
+        assert_eq!(
+            decode_ingress_assurance_tail(&tail).unwrap(),
+            IngressAssurance {
+                verified: true,
+                profile: 1,
+                site_epoch: 0xA5A5_A5A5,
+            }
+        );
+        // Short tail, stray flag bit, reserved byte and unknown profile
+        // fail closed — never a half-read verdict.
+        assert!(decode_ingress_assurance_tail(&tail[..7]).is_err());
+        let mut bad = tail.clone();
+        bad[0] = 0x02;
+        assert!(decode_ingress_assurance_tail(&bad).is_err());
+        let mut bad = tail.clone();
+        bad[3] = 0x01;
+        assert!(decode_ingress_assurance_tail(&bad).is_err());
+        let mut bad = tail.clone();
+        bad[2] = 0x04;
+        assert!(decode_ingress_assurance_tail(&bad).is_err());
     }
 }

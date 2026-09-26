@@ -19,7 +19,7 @@ use routeloom_protocol::host_ops::{ConfigOpsResult, CAP_HOST_OPS_V1};
 use routeloom_protocol::observation::{
     decode_observation_event, decode_observation_page, encode_observation_query, observation_sub,
     ObservationPageHeader, ObservationQuery, CAP_OBSERVATION_V1, QUERY_EXACT, QUERY_SUBSCRIBE,
-    RESULT_OK, SECTION_ROUTES, SUB_OBSERVATION_EVENT, SUB_OBSERVATION_PAGE,
+    RESULT_OK, SECTION_NEIGHBORS, SECTION_ROUTES, SUB_OBSERVATION_EVENT, SUB_OBSERVATION_PAGE,
 };
 use routeloom_protocol::{Frame, FrameKind};
 use std::collections::HashMap;
@@ -85,6 +85,10 @@ pub enum QueryOutcome {
         header: ObservationPageHeader,
         body: Vec<u8>,
         received_ms: u64,
+        /// Host-monotonic receive time and the submit→receive round trip
+        /// (the uncertainty bound of the device→host clock mapping).
+        received_mono_ms: u64,
+        rtt_ms: u64,
     },
     Device(ConfigOpsResult),
     DecodeError(String),
@@ -227,6 +231,8 @@ impl ObservationOps {
             store.body,
             store.revision,
             store.received_ms,
+            store.received_mono_ms,
+            store.rtt_ms,
             store.armed,
         );
         true
@@ -280,12 +286,29 @@ impl ObservationOps {
     /// Posted by the USB read thread; never blocks it. Unknown requests
     /// are stale/foreign replies (a late answer past our timeout):
     /// ignored, never an event.
-    pub fn post_reply(&self, request: u64, session: u64, body: Vec<u8>, now_ms: u64) -> bool {
+    pub fn post_reply(
+        &self,
+        request: u64,
+        session: u64,
+        body: Vec<u8>,
+        wall_ms: u64,
+        mono_ms: u64,
+    ) -> bool {
+        // The round trip is measured on the monotonic clock (submit and
+        // receive share it); the wall clock only renders the mapping.
+        let submitted = {
+            let ops = self.ops.lock().expect("observation ops poisoned");
+            ops.values()
+                .find(|op| op.request == request && op.session == session)
+                .map(|op| (op.params.section, op.submitted_ms))
+        };
         let outcome = match decode_observation_page(&body) {
             Ok((header, page_body)) if header.result == RESULT_OK => QueryOutcome::Page {
                 header,
                 body: page_body,
-                received_ms: now_ms,
+                received_ms: wall_ms,
+                received_mono_ms: mono_ms,
+                rtt_ms: submitted.map_or(0, |(_, submitted)| mono_ms.saturating_sub(submitted)),
             },
             Ok((header, _)) => match ConfigOpsResult::try_from_u16(header.result) {
                 Ok(result) => QueryOutcome::Device(result),
@@ -294,15 +317,11 @@ impl ObservationOps {
             Err(error) => QueryOutcome::DecodeError(error.to_string()),
         };
         // A page for another section than queried is a device bug made
-        // visible (the request id matched, the content did not).
+        // visible (the request id matched, the content did not). Settles on
+        // the monotonic clock like every other resolve — the lane reaps on
+        // it, while the wall clock only renders the age mapping.
         if let QueryOutcome::Page { header, .. } = &outcome {
-            let asked = {
-                let ops = self.ops.lock().expect("observation ops poisoned");
-                ops.values()
-                    .find(|op| op.request == request && op.session == session)
-                    .map(|op| op.params.section)
-            };
-            if let Some(asked) = asked {
+            if let Some((asked, _)) = submitted {
                 if header.section != asked {
                     return self.resolve(
                         request,
@@ -311,12 +330,12 @@ impl ObservationOps {
                             "observation section mismatch: asked {asked} got {}",
                             header.section
                         )),
-                        now_ms,
+                        mono_ms,
                     );
                 }
             }
         }
-        self.resolve(request, session, outcome, now_ms)
+        self.resolve(request, session, outcome, mono_ms)
     }
 
     /// Posted by the USB read thread for an Error frame echoing our
@@ -478,13 +497,16 @@ pub struct ObservationCache {
     dirtied: u64,
 }
 
-/// One cached singleton: raw section body plus the host receive time the
-/// ages inside it are mapped against.
+/// One cached singleton: raw section body plus the host receive times the
+/// ages inside it are mapped against (wall for the mapping, mono plus the
+/// round trip for the mapping's uncertainty bound).
 #[derive(Clone, Debug)]
 pub struct CachedBody {
     pub body: Vec<u8>,
     pub revision: u32,
     pub received_ms: u64,
+    pub received_mono_ms: u64,
+    pub rtt_ms: u64,
     pub armed: bool,
 }
 
@@ -497,6 +519,8 @@ pub struct CacheStore {
     pub body: Vec<u8>,
     pub revision: u32,
     pub received_ms: u64,
+    pub received_mono_ms: u64,
+    pub rtt_ms: u64,
     pub armed: bool,
     pub dirty_mark: u64,
 }
@@ -570,6 +594,8 @@ impl ObservationCache {
         body: Vec<u8>,
         revision: u32,
         received_ms: u64,
+        received_mono_ms: u64,
+        rtt_ms: u64,
         armed: bool,
     ) {
         self.note_page(session, boot);
@@ -577,6 +603,8 @@ impl ObservationCache {
             body,
             revision,
             received_ms,
+            received_mono_ms,
+            rtt_ms,
             armed,
         });
         // A fresh read clears the change flag for its sections: the cache
@@ -699,10 +727,10 @@ pub fn age_to_host_ms(received_ms: u64, age_ms: u32) -> Option<u64> {
     }
 }
 
-/// True for the routes section (the only paginated one).
+/// True for the paged sections (routes, neighbors).
 #[must_use]
-pub fn is_routes_section(section: u8) -> bool {
-    section == SECTION_ROUTES
+pub fn is_paged_section(section: u8) -> bool {
+    section == SECTION_ROUTES || section == SECTION_NEIGHBORS
 }
 
 /// Renders one decoded section body as JSON. Unknown sentinels become
@@ -834,6 +862,47 @@ pub fn route_entry_json(entry: &routeloom_protocol::observation::RouteDetailEntr
     )
 }
 
+/// Renders one neighbor entry. RSSI/heard fields are only meaningful
+/// with their validity flags (else null); the phase name falls back to
+/// "unknown" and an unknown lease to null — never a zero that would read
+/// as "expired".
+pub fn neighbor_entry_json(
+    entry: &routeloom_protocol::observation::NeighborDetailEntry,
+    received_ms: u64,
+) -> String {
+    use routeloom_protocol::observation::{neighbor_phase_name, AGE_UNKNOWN};
+    let heard_at = if entry.heard_valid() && entry.heard_age_ms != AGE_UNKNOWN {
+        age_to_host_ms(received_ms, entry.heard_age_ms)
+            .map_or("null".to_string(), |ms| ms.to_string())
+    } else {
+        "null".to_string()
+    };
+    format!(
+        "{{\"peer\":\"{:016x}\",\"active\":{},\"link_cost\":{},\"phase\":{{\"code\":{},\"name\":\"{}\"}},\"rssi_last_dbm\":{},\"rssi_ewma_q8_8\":{},\"last_heard_at_ms\":{},\"lease_remaining_ms\":{}}}",
+        entry.peer,
+        entry.active(),
+        entry.link_cost,
+        entry.phase,
+        neighbor_phase_name(entry.phase),
+        if entry.rssi_valid() {
+            entry.rssi_last_dbm.to_string()
+        } else {
+            "null".to_string()
+        },
+        if entry.rssi_valid() {
+            entry.rssi_ewma_q8_8.to_string()
+        } else {
+            "null".to_string()
+        },
+        heard_at,
+        if entry.lease_remaining_ms == AGE_UNKNOWN {
+            "null".to_string()
+        } else {
+            entry.lease_remaining_ms.to_string()
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -848,7 +917,7 @@ mod tests {
     #[test]
     fn cache_pins_session_and_boot() {
         let mut cache = ObservationCache::default();
-        cache.put(0, 11, 22, vec![1, 2], 0, 1000, false);
+        cache.put(0, 11, 22, vec![1, 2], 0, 1000, 900, 12, false);
         assert!(cache.get(0, 11, 22, 60_000, 2000).is_some());
         assert!(cache.get(0, 11, 22, 60_000, 1000 + 60_001).is_none());
         assert!(cache.get(0, 11, 22, 0, 1000).is_none());
@@ -889,6 +958,8 @@ mod tests {
             body: vec![0; 24],
             revision: 1,
             received_ms: 1000,
+            received_mono_ms: 900,
+            rtt_ms: 12,
             armed: true,
             dirty_mark: mark,
         }));
@@ -916,6 +987,8 @@ mod tests {
             body: vec![0; 32],
             revision: 1,
             received_ms: 1000,
+            received_mono_ms: 900,
+            rtt_ms: 12,
             armed: true,
             dirty_mark: mark,
         }));
@@ -1025,6 +1098,8 @@ mod tests {
             body: vec![0; 24],
             revision: 1,
             received_ms: 1000,
+            received_mono_ms: 900,
+            rtt_ms: 12,
             armed: true,
             dirty_mark: mark,
         }));
@@ -1038,6 +1113,8 @@ mod tests {
             body: vec![0; 24],
             revision: 1,
             received_ms: 1000,
+            received_mono_ms: 900,
+            rtt_ms: 12,
             armed: true,
             dirty_mark: mark,
         }));

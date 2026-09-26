@@ -253,6 +253,19 @@ config ROUTELOOM_TELEMETRY_REMOTE
         measured link state. Collection is always on; this only controls
         remote answering (02-telemetry §4.2 opt-in).
 
+config ROUTELOOM_OBSERVATION_REMOTE
+    bool "Answer remote Diagnostic (48) observation queries over the mesh"
+    default n
+    help
+        The node serves its read-only observation sections to
+        end-protected RemoteObservationQuery frames (subtype 7). This
+        only compiles the responder in; answering is a runtime
+        decision: adopted coordinator modes (Member, Dev) answer and
+        every other mode refuses, re-evaluated each pump. The legacy
+        fixture profile has no enrollment, so there the build opt-in
+        itself is the membership claim (same DEV standing as
+        ROUTELOOM_DISCOVERY_MEMBER).
+
 config ROUTELOOM_MIGRATION
     int "Channel migration mode (0=Disabled, 1=Observe, 2=Manual)"
     range 0 2

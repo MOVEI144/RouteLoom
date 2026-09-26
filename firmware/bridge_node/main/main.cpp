@@ -349,6 +349,21 @@ class BridgeObservationSource final : public routeloom::ObservationSource {
     return node_.route_detail(destination, now_ms, out);
   }
 
+  std::size_t neighbor_detail_page(
+      routeloom::NodeId after, routeloom::NeighborDetailEntry* out,
+      std::size_t capacity, routeloom::MonotonicMs now_ms,
+      bool& more) const noexcept override {
+    return routeloom::neighbor_detail_page(node_, live_discovery(), after, out,
+                                           capacity, now_ms, more);
+  }
+
+  bool neighbor_detail_exact(routeloom::NodeId peer,
+                             routeloom::MonotonicMs now_ms,
+                             routeloom::NeighborDetailEntry& out) const noexcept override {
+    return routeloom::neighbor_detail_exact(node_, live_discovery(), peer,
+                                            now_ms, out);
+  }
+
  private:
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   static std::uint8_t map_mode(
@@ -370,6 +385,15 @@ class BridgeObservationSource final : public routeloom::ObservationSource {
     return routeloom::kCoordModeUnknown;
   }
 #endif
+
+  // Live discovery for neighbor phase/lease (null without a coordinator
+  // or before it attaches one — rows then read phase/lease unknown).
+  const routeloom::NeighborDiscovery* live_discovery() const noexcept {
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    if (coordinator_ != nullptr) return coordinator_->discovery();
+#endif
+    return nullptr;
+  }
 
   const routeloom::MeshNode& node_;
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
@@ -952,6 +976,11 @@ extern "C" void app_main(void) {
     status = bridge.attach_observation(observation_source);
     if (!status) fail(status.detail);
   }
+  // Receive assurance rides the same profile id the observation source
+  // reports: per-delivery origin-verification evidence on DataFromMesh
+  // once the host enables 0x08 (legacy shape otherwise).
+  status = bridge.set_rx_assurance_profile(observation_profile);
+  if (!status) fail(status.detail);
 
   // Group delivery (group_delivery_v1): the bridge answers HostOps 0x50
   // GROUP_SEND / 0x52 GROUP_QUERY with 0x51 summaries. The node itself

@@ -123,6 +123,20 @@ Status UsbBridge::attach_observation(const ObservationSource& source) noexcept {
   return Status::success();
 }
 
+Status UsbBridge::set_rx_assurance_profile(const std::uint8_t profile) noexcept {
+  if (config_.mesh == nullptr) {
+    return Status::error(StatusCode::InvalidState, "rx assurance needs mesh");
+  }
+  if (profile > kProfileLegacyFixture) {
+    return Status::error(StatusCode::InvalidArgument, "rx assurance profile");
+  }
+  rx_assurance_ = static_cast<std::uint8_t>(
+      (rx_assurance_ & kRxAssuranceEnabled) |
+      ((profile & kRxAssuranceProfileMask) << kRxAssuranceProfileShift));
+  config_.capability |= kCapRxAssuranceV1;
+  return Status::success();
+}
+
 Status UsbBridge::attach_group() noexcept {
   if (config_.mesh == nullptr) {
     return Status::error(StatusCode::InvalidState, "group needs mesh");
@@ -708,6 +722,9 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
     case HostOpsSub::TimeSample:
       handle_ops_time_sample(request, inner, now_ms);
       break;
+    case HostOpsSub::RxAssuranceEnable:
+      handle_rx_assurance_enable(request, inner, now_ms);
+      break;
     case HostOpsSub::HostRegister:
       handle_host_register(request, inner, now_ms);
       break;
@@ -975,6 +992,11 @@ void UsbBridge::handle_diagnostic_request(const std::uint64_t request,
     return;
   }
 
+  if (subtype == DiagnosticSubtype::RemoteObservationQuery) {
+    handle_observation_diagnostic(request, req, now_ms);
+    return;
+  }
+
   if (subtype != DiagnosticSubtype::TelemetryQuery) {
     send_diagnostic_reply(request, ConfigOpsResult::Unsupported, req.observer,
                           ByteView{}, now_ms);
@@ -1047,6 +1069,82 @@ void UsbBridge::handle_diagnostic_request(const std::uint64_t request,
   slot->expires_ms = now_ms + kTelemetryQueryLifetimeMs;
 }
 
+// Remote observation rides on the diagnostic tunnel: the observer serves
+// the same section bytes the USB 0x71 page carries, and the gateway
+// forwards the query and relays the answer through the SHARED pending
+// slots (no new bridge state — the reply's subtype is opaque to the
+// correlation, only the minted request id and observer match).
+void UsbBridge::handle_observation_diagnostic(
+    const std::uint64_t request, const DiagnosticRequestView& req,
+    const MonotonicMs now_ms) noexcept {
+  RemoteObservationQuery query{};
+  if (!remote_observation_query_decode(req.body, query).ok()) {
+    send_diagnostic_reply(request, ConfigOpsResult::Invalid, req.observer,
+                          ByteView{}, now_ms);
+    return;
+  }
+  const bool local = req.observer == config_.node;
+  if (local) {
+    RemoteObservationSnapshot snapshot{};
+    DiagnosticRejectReason reason{};
+    if (config_.mesh->build_observation_snapshot(query, now_ms, snapshot,
+                                                 reason)) {
+      std::array<std::uint8_t, kRemoteObservationSnapshotBodyMax> out{};
+      if (!remote_observation_snapshot_encode(snapshot,
+                                       MutableByteView{out.data(), out.size()})) {
+        ++stats_.dropped_frames;
+        return;
+      }
+      const std::size_t total = kRemoteObservationSnapshotHeadSize + snapshot.body_size;
+      send_diagnostic_reply(request, ConfigOpsResult::Ok, config_.node,
+                            ByteView{out.data(), total}, now_ms);
+    } else {
+      // Local rejection surfaces as a verbatim DiagnosticReject body —
+      // the host sees the same reason space a remote observer would.
+      DiagnosticReject reject{};
+      reject.request_id = query.request_id;
+      reject.reason = reason;
+      reject.observer = config_.node;
+      std::array<std::uint8_t, kDiagnosticRejectBodySize> out{};
+      if (diagnostic_reject_encode(reject,
+                                   MutableByteView{out.data(), out.size()})) {
+        send_diagnostic_reply(request, ConfigOpsResult::Ok, config_.node,
+                              ByteView{out.data(), out.size()}, now_ms);
+      } else {
+        ++stats_.dropped_frames;
+      }
+    }
+    return;
+  }
+
+  // Remote: bounded async query through the shared slots — slot
+  // exhaustion or a duplicate observer is an honest Busy, and the
+  // request's own lifetime bounds the wait.
+  PendingDiagnostic* slot = alloc_pending_diagnostic(req.observer);
+  if (slot == nullptr) {
+    send_diagnostic_reply(request, ConfigOpsResult::Busy, req.observer,
+                          ByteView{}, now_ms);
+    return;
+  }
+  // The bridge mints the mesh correlation id — the host's request_id is
+  // never forwarded, so a replayed 0x30 request or a stale cross-session
+  // response cannot resolve a live slot.
+  query.request_id = next_diag_request_id();
+  const Status status =
+      config_.mesh->send_observation_query(req.observer, query, now_ms);
+  if (!status) {
+    send_diagnostic_reply(request, config_result_for(status), req.observer,
+                          ByteView{}, now_ms);
+    return;
+  }
+  slot->active = true;
+  slot->request_id = query.request_id;
+  slot->usb_request = request;
+  slot->usb_session = session_id();
+  slot->observer = req.observer;
+  slot->expires_ms = now_ms + kTelemetryQueryLifetimeMs;
+}
+
 void UsbBridge::on_diagnostic_body(const NodeId observer, const ByteView body,
                                    const MonotonicMs now_ms) noexcept {
   if (body.size < kDiagnosticPrefixSize ||
@@ -1059,6 +1157,10 @@ void UsbBridge::on_diagnostic_body(const NodeId observer, const ByteView body,
   if (subtype == DiagnosticSubtype::TelemetrySnapshot) {
     TelemetrySnapshot snapshot{};
     if (!telemetry_snapshot_decode(body, snapshot).ok()) return;
+    request_id = snapshot.request_id;
+  } else if (subtype == DiagnosticSubtype::RemoteObservationSnapshot) {
+    RemoteObservationSnapshot snapshot{};
+    if (!remote_observation_snapshot_decode(body, snapshot).ok()) return;
     request_id = snapshot.request_id;
   } else if (subtype == DiagnosticSubtype::DiagnosticReject) {
     DiagnosticReject reject{};
@@ -1263,6 +1365,56 @@ void UsbBridge::handle_observation_query(const std::uint64_t request,
             header.revision = summary.route_digest;
           }
           body_size = count * kObservationRouteEntrySize;
+          if (more) header.flags |= kObservationPageMore;
+          header.next_after = count > 0 ? cursor : query.after;
+        }
+        break;
+      }
+      case ObservationSection::Neighbors: {
+        const bool exact = (query.flags & kObservationQueryExact) != 0;
+        bool more = false;
+        // Same capacity-1 staging as routes (one 24 B handler-local at a
+        // time, encoded straight into the tx scratch).
+        NeighborDetailEntry staging{};
+        NodeId cursor = query.after;
+        if (exact) {
+          if (observation_source_->neighbor_detail_exact(query.after, now_ms, staging)) {
+            filled = encode_observation_neighbor_entry(
+                         staging, MutableByteView{body.data, kObservationNeighborEntrySize})
+                         .ok();
+            count = filled ? 1 : 0;
+            if (filled) cursor = staging.peer;
+          } else {
+            filled = true;
+            count = 0;
+          }
+        } else {
+          filled = true;
+          count = 0;
+          for (std::size_t i = 0; filled && i < query.max_entries; ++i) {
+            bool page_more = false;
+            if (observation_source_->neighbor_detail_page(cursor, &staging, 1, now_ms, page_more) ==
+                0) {
+              break;
+            }
+            filled = encode_observation_neighbor_entry(
+                         staging,
+                         MutableByteView{body.data + count * kObservationNeighborEntrySize,
+                                         kObservationNeighborEntrySize})
+                         .ok();
+            if (!filled) break;
+            cursor = staging.peer;
+            ++count;
+            more = page_more;
+            if (!more) break;
+          }
+        }
+        if (filled) {
+          ObservationSummary summary{};
+          if (observation_source_->fill_summary(now_ms, summary)) {
+            header.revision = summary.neighbor_digest;
+          }
+          body_size = count * kObservationNeighborEntrySize;
           if (more) header.flags |= kObservationPageMore;
           header.next_after = count > 0 ? cursor : query.after;
         }
@@ -2403,6 +2555,38 @@ void UsbBridge::handle_ops_time_sample(const std::uint64_t request,
   send_time_sample_response(response, request, now_ms);
 }
 
+void UsbBridge::handle_rx_assurance_enable(const std::uint64_t request,
+                                           const ByteView inner,
+                                           const MonotonicMs now_ms) noexcept {
+  if (!decode_rx_assurance_request(inner).ok()) {
+    send_error(UsbErrorCode::ProtocolError, request, "RX_ASSURANCE_MALFORMED",
+               now_ms);
+    return;
+  }
+  RxAssuranceResponse response{};
+  if ((config_.capability & kCapRxAssuranceV1) == 0 || config_.mesh == nullptr) {
+    response.result = HostOpsResult::Unsupported;
+  } else {
+    response.result = HostOpsResult::Ok;
+    rx_assurance_ |= kRxAssuranceEnabled;
+  }
+  send_rx_assurance_response(response, request, now_ms);
+}
+
+void UsbBridge::send_rx_assurance_response(const RxAssuranceResponse& response,
+                                           const std::uint64_t request,
+                                           const MonotonicMs now_ms) noexcept {
+  std::array<std::uint8_t, kRxAssuranceResponseSize> body{};
+  std::size_t body_size = 0;
+  if (!encode_rx_assurance_response(
+          response, MutableByteView{body.data(), body.size()}, body_size)) {
+    ++stats_.dropped_frames;
+    return;
+  }
+  enqueue(FrameKind::HostOps, 0, request, ByteView{body.data(), body_size},
+          now_ms);
+}
+
 void UsbBridge::issue_rx_grant(const bool initial, const MonotonicMs now_ms) noexcept {
   if (!initial) {
     // Advance the cumulative ceiling by the released buffer amount; never
@@ -2655,6 +2839,9 @@ void UsbBridge::reset_session_state() noexcept {
   observation_armed_ = false;
   observation_topology_mask_ = 0;
   observation_milestone_pending_ = false;
+  // The 0x08 enable dies with the session (a new session re-enables);
+  // the boot-scoped profile id in the same byte survives.
+  rx_assurance_ &= static_cast<std::uint8_t>(~kRxAssuranceEnabled);
   observation_ms_lo_ = 0;
   observation_seq_ = 0;
   // FINAL 0x51 correlation is session state too: request ids are
@@ -2691,8 +2878,32 @@ std::uint64_t UsbBridge::request_for(const MessageId& id) const noexcept {
 void UsbBridge::on_message(const MessageKey& key, const NodeId source,
                            const ByteView payload) noexcept {
   (void)source;
-  // inner: origin(8) || msg_session(4) || msg_seq(8) || payload
-  std::array<std::uint8_t, 20 + kMaxApplicationPayload> inner{};
+  emit_ingress(key, payload, nullptr);
+}
+
+void UsbBridge::on_message(const MessageKey& key, const NodeId source,
+                           const ByteView payload,
+                           const DeliveryAssurance& assurance) noexcept {
+  (void)source;
+  if ((rx_assurance_ & kRxAssuranceEnabled) == 0) {
+    emit_ingress(key, payload, nullptr);
+    return;
+  }
+  IngressAssurance tail{};
+  tail.verified = assurance.origin_verified;
+  tail.profile = static_cast<std::uint8_t>(
+      (rx_assurance_ >> kRxAssuranceProfileShift) & kRxAssuranceProfileMask);
+  tail.site_epoch = assurance.site_epoch;
+  emit_ingress(key, payload, &tail);
+}
+
+void UsbBridge::emit_ingress(const MessageKey& key, const ByteView payload,
+                             const IngressAssurance* assurance) noexcept {
+  // inner: origin(8) || msg_session(4) || msg_seq(8) || payload ||
+  //   [assurance tail(8) iff flagged]
+  std::array<std::uint8_t,
+             20 + kMaxApplicationPayload + kIngressAssuranceTailSize>
+      inner{};
   if (payload.size > kMaxApplicationPayload) return;
   write_u64(inner.data(), key.origin);
   write_u32(inner.data() + 8, key.id.session);
@@ -2700,8 +2911,19 @@ void UsbBridge::on_message(const MessageKey& key, const NodeId source,
   if (payload.size > 0) {
     std::memcpy(inner.data() + 20, payload.data, payload.size);
   }
-  enqueue(FrameKind::DataFromMesh, 0, 0,
-          ByteView{inner.data(), 20 + payload.size}, now_ms_);
+  std::uint16_t flags = 0;
+  std::size_t total = 20 + payload.size;
+  if (assurance != nullptr) {
+    if (!encode_ingress_assurance_tail(
+            *assurance,
+            MutableByteView{inner.data() + total, kIngressAssuranceTailSize})) {
+      return;
+    }
+    flags = kFlagIngressAssurance;
+    total += kIngressAssuranceTailSize;
+  }
+  enqueue(FrameKind::DataFromMesh, flags, 0, ByteView{inner.data(), total},
+          now_ms_);
 }
 
 void UsbBridge::on_delivery(const DeliveryResult& result) noexcept {

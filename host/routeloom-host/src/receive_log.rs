@@ -42,6 +42,17 @@ const DEDUP_MS: u64 = DEDUP_SECONDS * 1000;
 /// purged anyway, so this only bounds worst-case distinct keys per window.
 const DEDUP_MAX_KEYS: usize = ENTRIES_PER_NETWORK;
 
+/// Per-delivery origin-verification evidence the gateway observed: the
+/// open_end verdict at the bound destination, the gateway's effective
+/// security profile (the observation kProfile* id), and the header
+/// end_epoch the origin was verified under.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RxAssurance {
+    pub verified: bool,
+    pub profile: u8,
+    pub site_epoch: u32,
+}
+
 /// One retained receive record. `seq` is the log-local monotone position
 /// (per network, per epoch, starting at 1) — *not* the mesh MessageId.
 #[derive(Clone, Debug)]
@@ -56,6 +67,10 @@ pub struct RxRecord {
     pub msg_seq: u64,
     pub payload: Vec<u8>,
     pub stored_ms: u64,
+    /// Evidence the flagged DataFromMesh tail carried; `None` renders the
+    /// legacy UNKNOWN/unverified assurance (unnegotiated session, group
+    /// delivery, or a gateway without the bit).
+    pub assurance: Option<RxAssurance>,
 }
 
 /// Fields a USB-session-verified DataFromMesh body contributes to the log.
@@ -66,6 +81,7 @@ pub struct Ingress {
     pub msg_session: u32,
     pub msg_seq: u64,
     pub payload: Vec<u8>,
+    pub assurance: Option<RxAssurance>,
 }
 
 pub enum IngestOutcome {
@@ -272,6 +288,9 @@ impl ReceiveLog {
         }
         if let Some(existing_seq) = known_seq {
             if let Some(record) = log.records.iter().find(|r| r.seq == existing_seq) {
+                // Dedup compares the payload only: a redelivery of the
+                // same bytes carries the same verdict, so the fold keeps
+                // the first record's assurance untouched.
                 return if record.payload == ingress.payload {
                     IngestOutcome::Duplicate { seq: existing_seq }
                 } else {
@@ -292,6 +311,7 @@ impl ReceiveLog {
             msg_seq: ingress.msg_seq,
             payload: ingress.payload,
             stored_ms: now_ms,
+            assurance: ingress.assurance,
         });
         log.bytes += RECORD_CHARGE_BYTES;
         self.total_bytes += RECORD_CHARGE_BYTES;
@@ -544,6 +564,7 @@ mod tests {
             msg_session: 5,
             msg_seq,
             payload: payload.to_vec(),
+            assurance: None,
         }
     }
 

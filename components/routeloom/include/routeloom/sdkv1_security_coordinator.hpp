@@ -453,6 +453,10 @@ class SecurityCoordinator final : public BootstrapSink,
     deps_.discovery = &discovery;
     return Status::success();
   }
+  // The live member discovery for read-only observation (neighbor
+  // phase/lease): nullptr until attach_discovery, detached on P6 cutover
+  // re-adoption — readers through here always see the current engine.
+  const NeighborDiscovery* discovery() const noexcept { return deps_.discovery; }
   // Detaches the member discovery (P6 cutover re-adoption): the
   // firmware destroys the old-network engine and attaches a fresh one.
   // Refuses unless `discovery` is the attached instance.
@@ -965,17 +969,20 @@ class SecurityCoordinator final : public BootstrapSink,
   // it mirrors — join_started_ with the current join leg, adopted_ with
   // member_valid_, confirmed_ with join_confirmed_. A stop clears all
   // three; a failed adoption clears adopted_/confirmed_ with member_valid_.
-  // Packed for the bridge DRAM floor: the leg start keeps only its low 32
-  // ms bits (legs die to join timeouts in minutes, reconstructed against
-  // now across the 49-day wrap), and confirmed is whole seconds past
-  // adopted (the JoinConfirm round trip is seconds; 18h of range).
+  // Packed for the bridge DRAM floor without wrapping within a boot: the
+  // leg start keeps whole seconds since boot (136 years of range — the
+  // 49-day u32-ms wrap is gone; the served age is floored to the start's
+  // second and so never claims fresher than the truth), and confirmed is
+  // whole seconds past adopted in u32 (the old u16 saturated at 18 h).
+  // Attempts saturate at u16: one leg cannot handshake that often in a
+  // boot. Same 24 bytes as before: the bridge floor leaves no room to grow.
   MonotonicMs milestone_adopted_ms_{0};
-  std::uint32_t milestone_join_started_lo_{0};
+  std::uint32_t milestone_join_started_s_{0};
   // Handshake attempts in the current leg: live from the Joiner while
   // ZeroTouch, latched here at adoption (the Joiner is destroyed once the
   // member side goes live).
-  std::uint32_t milestone_attempts_{0};
-  std::uint16_t milestone_confirmed_gap_s_{0};
+  std::uint16_t milestone_attempts_{0};
+  std::uint32_t milestone_confirmed_gap_s_{0};
   std::uint8_t milestone_flags_{0};
   std::uint8_t milestone_joiner_latched_{kJoinerUnknown};
   static constexpr std::uint8_t kMilestoneStarted = 0x01;

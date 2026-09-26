@@ -8,8 +8,10 @@
 
 #include "esp_app_desc.h"
 #include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_rom_sys.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -607,6 +609,207 @@ class RefNodeMaintenanceGate final : public routeloom::ConfigMaintenanceGate {
 };
 
 #endif  // CONFIG_ROUTELOOM_CONFIG
+
+#if CONFIG_ROUTELOOM_OBSERVATION_REMOTE
+// --- Read-only remote observation (subtypes 7/8) -------------------------------
+// Same read-only section fills as the bridge's USB observation, served to
+// end-protected Diagnostic(48) queries when the remote opt-in is on.
+// app_main frame, not statics (same .bss discipline as the bridge).
+class RefSystemHealthPort final : public routeloom::SystemHealthPort {
+ public:
+  std::uint32_t heap_free_bytes() const noexcept override {
+    return static_cast<std::uint32_t>(esp_get_free_heap_size());
+  }
+  std::uint32_t heap_min_bytes() const noexcept override {
+    return static_cast<std::uint32_t>(esp_get_minimum_free_heap_size());
+  }
+  std::uint32_t heap_largest_bytes() const noexcept override {
+    return static_cast<std::uint32_t>(
+        heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+  }
+  std::uint8_t reset_code() const noexcept override {
+    // Mask-ROM reason, never esp_reset_reason() (same .bss discipline as
+    // the bridge: the cached IDF API pulls guarded DRAM for no new
+    // evidence here).
+    switch (esp_rom_get_reset_reason(0)) {
+      case RESET_REASON_CHIP_POWER_ON:
+        return routeloom::kResetPowerOn;
+      case RESET_REASON_CORE_SW:
+      case RESET_REASON_CPU0_SW:
+        return routeloom::kResetSoftware;
+      case RESET_REASON_CORE_MWDT0:
+      case RESET_REASON_CORE_MWDT1:
+      case RESET_REASON_CORE_RTC_WDT:
+      case RESET_REASON_CPU0_MWDT0:
+      case RESET_REASON_CPU0_MWDT1:
+      case RESET_REASON_CPU0_RTC_WDT:
+      case RESET_REASON_SYS_RTC_WDT:
+      case RESET_REASON_SYS_SUPER_WDT:
+        return routeloom::kResetWatchdog;
+      case RESET_REASON_CORE_DEEP_SLEEP:
+        return routeloom::kResetDeepSleepWake;
+      case RESET_REASON_SYS_BROWN_OUT:
+        return routeloom::kResetBrownout;
+      default:
+        return routeloom::kResetUnknown;
+    }
+  }
+};
+
+class ReferenceObservationSource final : public routeloom::ObservationSource {
+ public:
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  ReferenceObservationSource(const routeloom::MeshNode& node,
+                             const routeloom::SystemHealthPort& port,
+                             std::uint64_t boot_id, std::uint8_t profile)
+      : node_(node), port_(port), boot_id_(boot_id), profile_(profile) {}
+#else
+  ReferenceObservationSource(const routeloom::MeshNode& node,
+                             const routeloom::sdkv1::SecurityCoordinator* coordinator,
+                             const routeloom::SystemHealthPort& port,
+                             std::uint64_t boot_id, std::uint8_t profile)
+      : node_(node),
+        coordinator_(coordinator),
+        port_(port),
+        boot_id_(boot_id),
+        profile_(profile) {}
+#endif
+
+  bool fill_system(routeloom::MonotonicMs now_ms,
+                   routeloom::ObservationSystem& out) const noexcept override {
+    std::uint8_t mode = routeloom::kCoordModeUnknown;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    if (coordinator_ != nullptr) {
+      mode = map_coord_mode(coordinator_->snapshot().mode);
+    }
+#endif
+    // Legacy fixture has no coordinator: unknown, like the bridge.
+    routeloom::fill_observation_system(boot_id_, now_ms, port_,
+                                       routeloom::kPowerRunning, mode, profile_,
+                                       out);
+    return true;
+  }
+
+  bool fill_tables(routeloom::MonotonicMs now_ms,
+                   routeloom::ObservationTables& out) const noexcept override {
+    std::uint16_t link = 0, link_cap = 0, end = 0, end_cap = 0;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    if (coordinator_ != nullptr) {
+      const routeloom::sdkv1::CoordinatorSnapshot snapshot =
+          coordinator_->snapshot();
+      link = snapshot.link_sessions > UINT16_MAX
+                 ? UINT16_MAX
+                 : static_cast<std::uint16_t>(snapshot.link_sessions);
+      end = snapshot.end_sessions > UINT16_MAX
+                ? UINT16_MAX
+                : static_cast<std::uint16_t>(snapshot.end_sessions);
+      link_cap = static_cast<std::uint16_t>(
+          routeloom::sdkv1::GatewaySessionBank::link_capacity());
+      end_cap = static_cast<std::uint16_t>(
+          routeloom::sdkv1::GatewaySessionBank::end_capacity());
+    }
+#endif
+    routeloom::fill_observation_tables(node_, now_ms, link, link_cap, end,
+                                       end_cap, out);
+    return true;
+  }
+
+  bool fill_milestones(routeloom::MonotonicMs now_ms,
+                       routeloom::JoinMilestones& out) const noexcept override {
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    if (coordinator_ != nullptr) {
+      out = coordinator_->milestones(now_ms);
+      return true;
+    }
+#endif
+    out = routeloom::JoinMilestones{};
+    return true;
+  }
+
+  bool fill_summary(routeloom::MonotonicMs now_ms,
+                    routeloom::ObservationSummary& out) const noexcept override {
+    routeloom::fill_observation_summary(node_, now_ms, 0, out);
+    return true;
+  }
+
+  std::size_t route_detail_page(
+      routeloom::NodeId after, routeloom::RouteDetailEntry* out,
+      std::size_t capacity, routeloom::MonotonicMs now_ms,
+      bool& more) const noexcept override {
+    return node_.route_detail_page(after, out, capacity, now_ms, more);
+  }
+
+  bool route_detail_exact(routeloom::NodeId destination,
+                          routeloom::MonotonicMs now_ms,
+                          routeloom::RouteDetailEntry& out) const noexcept override {
+    return node_.route_detail(destination, now_ms, out);
+  }
+
+  std::size_t neighbor_detail_page(
+      routeloom::NodeId after, routeloom::NeighborDetailEntry* out,
+      std::size_t capacity, routeloom::MonotonicMs now_ms,
+      bool& more) const noexcept override {
+    return routeloom::neighbor_detail_page(node_, live_discovery(), after, out,
+                                           capacity, now_ms, more);
+  }
+
+  bool neighbor_detail_exact(routeloom::NodeId peer,
+                             routeloom::MonotonicMs now_ms,
+                             routeloom::NeighborDetailEntry& out) const noexcept override {
+    return routeloom::neighbor_detail_exact(node_, live_discovery(), peer,
+                                            now_ms, out);
+  }
+
+ private:
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  static std::uint8_t map_coord_mode(
+      routeloom::sdkv1::CoordinatorMode mode) noexcept {
+    switch (mode) {
+      case routeloom::sdkv1::CoordinatorMode::Fresh:
+        return routeloom::kCoordModeFresh;
+      case routeloom::sdkv1::CoordinatorMode::ZeroTouch:
+        return routeloom::kCoordModeZeroTouch;
+      case routeloom::sdkv1::CoordinatorMode::Member:
+        return routeloom::kCoordModeMember;
+      case routeloom::sdkv1::CoordinatorMode::Dev:
+        return routeloom::kCoordModeDev;
+      case routeloom::sdkv1::CoordinatorMode::Removed:
+        return routeloom::kCoordModeRemoved;
+      case routeloom::sdkv1::CoordinatorMode::Recovery:
+        return routeloom::kCoordModeRecovery;
+    }
+    return routeloom::kCoordModeUnknown;
+  }
+#endif
+
+  const routeloom::NeighborDiscovery* live_discovery() const noexcept {
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    if (coordinator_ != nullptr) return coordinator_->discovery();
+#endif
+    return nullptr;
+  }
+
+  const routeloom::MeshNode& node_;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  const routeloom::sdkv1::SecurityCoordinator* coordinator_;
+#endif
+  const routeloom::SystemHealthPort& port_;
+  std::uint64_t boot_id_;
+  std::uint8_t profile_;
+};
+
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+// Owner-profile answer rule for subtype-7 queries: only adopted modes
+// answer. Fresh (never enrolled), ZeroTouch (still joining), Removed
+// (evicted) and Recovery refuse — the Kconfig symbol only compiles the
+// responder in, this runtime decision opens or closes it.
+bool observation_member_mode(
+    routeloom::sdkv1::CoordinatorMode mode) noexcept {
+  return mode == routeloom::sdkv1::CoordinatorMode::Member ||
+         mode == routeloom::sdkv1::CoordinatorMode::Dev;
+}
+#endif
+#endif  // CONFIG_ROUTELOOM_OBSERVATION_REMOTE
 
 }  // namespace
 
@@ -1366,6 +1569,48 @@ extern "C" void app_main(void) {
   runtime.node().set_telemetry_remote(true);
 #endif
 
+#if CONFIG_ROUTELOOM_OBSERVATION_REMOTE
+  // Remote observation answers (subtypes 7/8): read-only section fills
+  // shared with the bridge's USB observation, served to end-protected
+  // Diagnostic(48) queries. The fills attach unconditionally (answering
+  // stays closed until the runtime decision below opens it); app_main
+  // frame, not statics (same .bss discipline as the bridge).
+  RefSystemHealthPort observation_port;
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  constexpr std::uint8_t observation_profile =
+      routeloom::kProfileLegacyFixture;
+  ReferenceObservationSource observation_source(
+      runtime.node(), observation_port, message_session, observation_profile);
+#else
+  const routeloom::sdkv1::SecurityCoordinator* observation_coordinator =
+      &owner.coordinator();
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+  constexpr std::uint8_t observation_profile =
+      routeloom::kProfileMemberEdhoc;
+#else
+  constexpr std::uint8_t observation_profile = routeloom::kProfileDevRam;
+#endif
+  ReferenceObservationSource observation_source(
+      runtime.node(), observation_coordinator, observation_port,
+      message_session, observation_profile);
+#endif
+  status = runtime.node().set_observation_source(&observation_source);
+  if (!status) fail(status.detail);
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  // The fixture profile has no enrollment, so the build opt-in is the
+  // membership claim (same DEV standing as DISCOVERY_MEMBER).
+  status = runtime.node().set_observation_remote(true);
+  if (!status) fail(status.detail);
+#else
+  // Owner profile: the initial answer decision comes from the live
+  // coordinator mode, re-evaluated every pump below as adoption lands.
+  bool observation_remote_allowed = observation_member_mode(
+      observation_coordinator->snapshot().mode);
+  status = runtime.node().set_observation_remote(observation_remote_allowed);
+  if (!status) fail(status.detail);
+#endif
+#endif
+
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   // Owner profile: the runtime task is not started (the node starts on
   // ApplyMemberConfig), so app_main owns the event drain and the owner
@@ -1398,6 +1643,20 @@ extern "C" void app_main(void) {
   for (;;) {
     runtime.poll_once();
     owner.poll(monotonic_now_ms());
+#if CONFIG_ROUTELOOM_OBSERVATION_REMOTE
+    // Adoption can land after boot (ZeroTouch -> Member) or be revoked
+    // (Member -> Removed): re-evaluate the subtype-7 answer decision
+    // against the live mode. The setter runs only on change and only
+    // arms the cache on success, so a Busy retry keeps coming back.
+    {
+      const bool allow = observation_member_mode(
+          owner.coordinator().snapshot().mode);
+      if (allow != observation_remote_allowed &&
+          runtime.node().set_observation_remote(allow)) {
+        observation_remote_allowed = allow;
+      }
+    }
+#endif
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG && CONFIG_ROUTELOOM_CONFIG
     static routeloom::MonotonicMs last_config_trace = 0;
     const routeloom::MonotonicMs config_now = monotonic_now_ms();

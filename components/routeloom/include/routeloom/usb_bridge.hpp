@@ -23,6 +23,10 @@ namespace routeloom::usb {
 
 // Hello/HelloAck flag bit marking the AUTH step of the handshake.
 constexpr std::uint16_t kFlagAuth = 0x0001;
+// DataFromMesh flag bit marking the extended shape: the 8 B ingress
+// assurance tail follows the payload. Set only inside a 0x08-enabled
+// session, so a legacy host never meets a frame it cannot parse.
+constexpr std::uint16_t kFlagIngressAssurance = 0x0002;
 
 // Credit inner-body subtypes.
 constexpr std::uint8_t kCreditGrant = 0;
@@ -171,6 +175,15 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // is firmware-owned and must outlive the bridge.
   Status attach_observation(const ObservationSource& source) noexcept;
   bool observation_armed() const noexcept { return observation_armed_; }
+  // Declares the gateway's effective security profile (observation
+  // kProfile* id) for receive assurance and advertises kCapRxAssuranceV1.
+  // Requires config_.mesh; without it 0x08 answers Unsupported and every
+  // DataFromMesh stays legacy. Boot-scoped (survives session teardown —
+  // only the 0x08 enable is per-session).
+  Status set_rx_assurance_profile(std::uint8_t profile) noexcept;
+  bool rx_assurance_enabled() const noexcept {
+    return (rx_assurance_ & kRxAssuranceEnabled) != 0;
+  }
 
   // Late group binding (group_delivery_v1): serves HostOps 0x50 GROUP_SEND
   // and 0x52 GROUP_QUERY on the bridge's mesh node (which must be a route
@@ -261,6 +274,12 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
 
   // NodeObserver: mesh events become host frames.
   void on_message(const MessageKey& key, NodeId source, ByteView payload) noexcept override;
+  // Evidence-carrying delivery: emits the extended (flagged + tailed)
+  // DataFromMesh when the session enabled 0x08, else the legacy shape.
+  // Group deliveries arrive via the proving-nothing form above and stay
+  // legacy — group-key verification is not an origin END proof.
+  void on_message(const MessageKey& key, NodeId source, ByteView payload,
+                  const DeliveryAssurance& assurance) noexcept override;
   void on_delivery(const DeliveryResult& result) noexcept override;
   // Group sends admitted through 0x50: a terminal summary becomes the FINAL
   // 0x51 under the original request id. (Group messages RECEIVED by this
@@ -325,6 +344,11 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
       kControlMaxDecoded - kHeaderSize - kCrcSize - kProtectedBodyOverhead;
   static constexpr std::uint64_t kRxGrantFrames = 8;
   static constexpr std::uint64_t kRxGrantBytes = 16384;
+  // Receive-assurance packing (rx_assurance_): bit0 = the session's 0x08
+  // enable, bits1-2 = the boot-scoped effective profile id.
+  static constexpr std::uint8_t kRxAssuranceEnabled = 1u << 0;
+  static constexpr std::uint8_t kRxAssuranceProfileShift = 1;
+  static constexpr std::uint8_t kRxAssuranceProfileMask = 0x03;
   static constexpr MonotonicMs kHandshakeTimeoutMs = 5000;
   static constexpr std::uint8_t kPreAuthBudget = 8;
   static constexpr std::uint32_t kPreAuthRefillMs = 2000;
@@ -401,6 +425,18 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
                        MonotonicMs now_ms) noexcept;
   void handle_ops_time_sample(std::uint64_t request, ByteView inner,
                               MonotonicMs now_ms) noexcept;
+  // 0x08 RX_ASSURANCE_ENABLE: decode, gate on kCapRxAssuranceV1 + mesh,
+  // then arm extended DataFromMesh for this session and answer one 0x08
+  // with the admission result.
+  void handle_rx_assurance_enable(std::uint64_t request, ByteView inner,
+                                  MonotonicMs now_ms) noexcept;
+  void send_rx_assurance_response(const RxAssuranceResponse& response,
+                                  std::uint64_t request,
+                                  MonotonicMs now_ms) noexcept;
+  // Shared DataFromMesh emit: the legacy 20 B head + payload, plus the
+  // flagged 8 B assurance tail when `assurance` is set.
+  void emit_ingress(const MessageKey& key, ByteView payload,
+                    const IngressAssurance* assurance) noexcept;
   // Config endpoint requests (0x20/0x21/0x23/0x24/0x25/0x26/0x27):
   // decode, gate on CAP_CONFIG_ENDPOINT_V1 + an attached component, then
   // hand to ConfigGateway. Synchronous refusals answer immediately with the
@@ -438,6 +474,11 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // bounded remote TelemetryQuery whose reply lands on on_diagnostic_body.
   void handle_diagnostic_request(std::uint64_t request, ByteView inner,
                                  MonotonicMs now_ms) noexcept;
+  // ObservationQuery leg of the handler above: local serve or bounded
+  // remote forward through the shared pending slots.
+  void handle_observation_diagnostic(std::uint64_t request,
+                                     const DiagnosticRequestView& req,
+                                     MonotonicMs now_ms) noexcept;
   // NodeStatus query (0x40): decode, gate on CAP_NODE_STATUS_V1, optionally
   // (re)arm the event monitor for this session, then answer one 0x41 page.
   void handle_node_status_query(std::uint64_t request, ByteView inner,
@@ -722,6 +763,10 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // coalesced event names every half that moved since the last emission.
   std::uint8_t observation_topology_mask_{0};
   bool observation_milestone_pending_{false};
+  // Receive-assurance state (see packing above): deliberately placed in
+  // the alignment pad before observation_ms_lo_, so the bridge object —
+  // and bridge static DRAM against the floor — does not grow.
+  std::uint8_t rx_assurance_{0};
   // Low 32 ms bits of the last 0x72 pass (the 250 ms cadence gate is
   // wrap-safe unsigned arithmetic).
   std::uint32_t observation_ms_lo_{0};

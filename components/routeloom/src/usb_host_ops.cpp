@@ -169,6 +169,118 @@ Status encode_lane_request(const HostOpsSub sub, const LaneRequest& request,
   return Status::success();
 }
 
+Status decode_rx_assurance_request(const ByteView inner) noexcept {
+  if (inner.size != kRxAssuranceRequestSize) {
+    return Status::error(StatusCode::ProtocolError, "RX_ASSURANCE_LENGTH");
+  }
+  ByteReader reader(inner);
+  std::uint8_t schema = 0;
+  std::uint8_t sub = 0;
+  Status status = reader.read_u8(schema);
+  if (status) status = reader.read_u8(sub);
+  if (!status) return status;
+  if (schema != kHostOpsSchema) {
+    return Status::error(StatusCode::ProtocolError, "HOST_OPS_SCHEMA");
+  }
+  if (sub != static_cast<std::uint8_t>(HostOpsSub::RxAssuranceEnable)) {
+    return Status::error(StatusCode::ProtocolError, "SUBCOMMAND_MISMATCH");
+  }
+  return Status::success();
+}
+
+Status encode_rx_assurance_response(const RxAssuranceResponse& response,
+                                    const MutableByteView out,
+                                    std::size_t& written) noexcept {
+  written = 0;
+  ByteWriter writer(out);
+  Status status = writer.write_u8(kHostOpsSchema);
+  if (status) {
+    status = writer.write_u8(
+        static_cast<std::uint8_t>(HostOpsSub::RxAssuranceEnable));
+  }
+  if (status) {
+    status = writer.write_u8(static_cast<std::uint8_t>(response.result));
+  }
+  if (!status) return status;
+  if (writer.size() != kRxAssuranceResponseSize) {
+    return Status::error(StatusCode::InternalError, "rx assurance size drift");
+  }
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_rx_assurance_response(const ByteView inner,
+                                    RxAssuranceResponse& out) noexcept {
+  out = RxAssuranceResponse{};
+  if (inner.size != kRxAssuranceResponseSize) {
+    return Status::error(StatusCode::ProtocolError,
+                         "RX_ASSURANCE_RESPONSE_LENGTH");
+  }
+  ByteReader reader(inner);
+  std::uint8_t schema = 0;
+  std::uint8_t sub = 0;
+  std::uint8_t result_byte = 0;
+  Status status = reader.read_u8(schema);
+  if (status) status = reader.read_u8(sub);
+  if (status) status = reader.read_u8(result_byte);
+  if (!status) return status;
+  if (schema != kHostOpsSchema) {
+    return Status::error(StatusCode::ProtocolError, "HOST_OPS_SCHEMA");
+  }
+  if (sub != static_cast<std::uint8_t>(HostOpsSub::RxAssuranceEnable)) {
+    return Status::error(StatusCode::ProtocolError, "SUBCOMMAND_MISMATCH");
+  }
+  if (result_byte > static_cast<std::uint8_t>(HostOpsResult::Unsupported)) {
+    return Status::error(StatusCode::ProtocolError, "HOST_OPS_ENUM");
+  }
+  out.result = static_cast<HostOpsResult>(result_byte);
+  return Status::success();
+}
+
+Status encode_ingress_assurance_tail(const IngressAssurance& assurance,
+                                     const MutableByteView out) noexcept {
+  if (out.size < kIngressAssuranceTailSize) {
+    return Status::error(StatusCode::NoCapacity, "ingress assurance output");
+  }
+  if (assurance.profile > kProfileLegacyFixture) {
+    return Status::error(StatusCode::InvalidArgument,
+                         "ingress assurance profile");
+  }
+  ByteWriter writer(MutableByteView{out.data, kIngressAssuranceTailSize});
+  Status status = writer.write_u16(
+      assurance.verified ? kIngressAssuranceVerified : 0);
+  if (status) status = writer.write_u8(assurance.profile);
+  if (status) status = writer.write_u8(0);
+  if (status) status = writer.write_u32(assurance.site_epoch);
+  return status;
+}
+
+Status decode_ingress_assurance_tail(const ByteView tail,
+                                     IngressAssurance& out) noexcept {
+  out = IngressAssurance{};
+  if (tail.size != kIngressAssuranceTailSize) {
+    return Status::error(StatusCode::ProtocolError, "INGRESS_ASSURANCE_LENGTH");
+  }
+  ByteReader reader(tail);
+  std::uint16_t flags = 0;
+  std::uint8_t profile = 0;
+  std::uint8_t reserved = 0;
+  std::uint32_t site_epoch = 0;
+  Status status = reader.read_u16(flags);
+  if (status) status = reader.read_u8(profile);
+  if (status) status = reader.read_u8(reserved);
+  if (status) status = reader.read_u32(site_epoch);
+  if (!status) return status;
+  if ((flags & ~kIngressAssuranceVerified) != 0 || reserved != 0 ||
+      profile > kProfileLegacyFixture) {
+    return Status::error(StatusCode::ProtocolError, "INGRESS_ASSURANCE_FIELDS");
+  }
+  out.verified = (flags & kIngressAssuranceVerified) != 0;
+  out.profile = profile;
+  out.site_epoch = site_epoch;
+  return Status::success();
+}
+
 Status decode_time_sample_request(const ByteView inner,
                                   TimeSampleRequest& out) noexcept {
   out = TimeSampleRequest{};
@@ -2515,11 +2627,12 @@ Status encode_observation_query(const ObservationQuery& query, const MutableByte
                                 std::size_t& written) noexcept {
   written = 0;
   const std::uint8_t section = static_cast<std::uint8_t>(query.section);
-  if (section > static_cast<std::uint8_t>(ObservationSection::Routes) ||
+  const bool exactable =
+      query.section == ObservationSection::Routes || query.section == ObservationSection::Neighbors;
+  if (section > static_cast<std::uint8_t>(ObservationSection::Neighbors) ||
       query.max_entries == 0 || query.max_entries > kObservationRoutesPageMax ||
       (query.flags & ~(kObservationQuerySubscribe | kObservationQueryExact)) != 0 ||
-      ((query.flags & kObservationQueryExact) != 0 &&
-       (query.section != ObservationSection::Routes || query.after == 0))) {
+      ((query.flags & kObservationQueryExact) != 0 && (!exactable || query.after == 0))) {
     return Status::error(StatusCode::InvalidArgument, "observation query");
   }
   ByteWriter writer(out);
@@ -2551,12 +2664,14 @@ Status decode_observation_query(const ByteView inner, ObservationQuery& out) noe
   if (status) status = reader.read_u64(out.after);
   if (!status) return status;
   // `after` may be 0 (start) but never the broadcast/all-ones id; EXACT
-  // names one real destination on the routes section only.
-  if (section > static_cast<std::uint8_t>(ObservationSection::Routes) || out.after == UINT64_MAX ||
-      out.max_entries == 0 || out.max_entries > kObservationRoutesPageMax || reserved != 0 ||
+  // names one real destination on the routes/neighbors sections only.
+  const bool exactable = section == static_cast<std::uint8_t>(ObservationSection::Routes) ||
+                         section == static_cast<std::uint8_t>(ObservationSection::Neighbors);
+  if (section > static_cast<std::uint8_t>(ObservationSection::Neighbors) ||
+      out.after == UINT64_MAX || out.max_entries == 0 ||
+      out.max_entries > kObservationRoutesPageMax || reserved != 0 ||
       (out.flags & ~(kObservationQuerySubscribe | kObservationQueryExact)) != 0 ||
-      ((out.flags & kObservationQueryExact) != 0 &&
-       (section != static_cast<std::uint8_t>(ObservationSection::Routes) || out.after == 0))) {
+      ((out.flags & kObservationQueryExact) != 0 && (!exactable || out.after == 0))) {
     return Status::error(StatusCode::ProtocolError, "OBSERVATION_QUERY");
   }
   out.section = static_cast<ObservationSection>(section);
@@ -2781,6 +2896,52 @@ Status decode_observation_route_entry(const ByteView entry, RouteDetailEntry& ou
   return Status::success();
 }
 
+Status encode_observation_neighbor_entry(const NeighborDetailEntry& entry,
+                                         const MutableByteView out) noexcept {
+  if (out.size < kObservationNeighborEntrySize) {
+    return Status::error(StatusCode::InvalidArgument, "observation neighbor entry buffer");
+  }
+  ByteWriter writer(MutableByteView{out.data, kObservationNeighborEntrySize});
+  Status status = writer.write_u64(entry.peer);
+  if (status) status = writer.write_u32(entry.heard_age_ms);
+  if (status) status = writer.write_u32(entry.lease_remaining_ms);
+  if (status) status = writer.write_u16(entry.link_cost);
+  if (status) status = writer.write_u16(static_cast<std::uint16_t>(entry.rssi_ewma_q8_8));
+  if (status) status = writer.write_u8(entry.phase);
+  if (status) status = writer.write_u8(entry.flags);
+  if (status) status = writer.write_u8(static_cast<std::uint8_t>(entry.rssi_last_dbm));
+  if (status) status = writer.write_u8(0);
+  return status;
+}
+
+Status decode_observation_neighbor_entry(const ByteView entry, NeighborDetailEntry& out) noexcept {
+  out = NeighborDetailEntry{};
+  if (entry.size != kObservationNeighborEntrySize) {
+    return Status::error(StatusCode::ProtocolError, "OBSERVATION_NEIGHBOR_ENTRY");
+  }
+  ByteReader reader(entry);
+  std::uint16_t ewma = 0;
+  std::uint8_t rssi_last = 0;
+  std::uint8_t reserved = 0;
+  Status status = reader.read_u64(out.peer);
+  if (status) status = reader.read_u32(out.heard_age_ms);
+  if (status) status = reader.read_u32(out.lease_remaining_ms);
+  if (status) status = reader.read_u16(out.link_cost);
+  if (status) status = reader.read_u16(ewma);
+  if (status) status = reader.read_u8(out.phase);
+  if (status) status = reader.read_u8(out.flags);
+  if (status) status = reader.read_u8(rssi_last);
+  if (status) status = reader.read_u8(reserved);
+  if (!status) return status;
+  if ((out.flags & ~(kNeighborActive | kNeighborRssiValid | kNeighborHeardValid)) != 0 ||
+      reserved != 0) {
+    return Status::error(StatusCode::ProtocolError, "OBSERVATION_NEIGHBOR_ENTRY");
+  }
+  out.rssi_ewma_q8_8 = static_cast<std::int16_t>(ewma);
+  out.rssi_last_dbm = static_cast<std::int8_t>(rssi_last);
+  return Status::success();
+}
+
 namespace {
 
 std::size_t observation_singleton_body(const ObservationSection section) noexcept {
@@ -2794,6 +2955,7 @@ std::size_t observation_singleton_body(const ObservationSection section) noexcep
     case ObservationSection::Summary:
       return kObservationSummaryBody;
     case ObservationSection::Routes:
+    case ObservationSection::Neighbors:
       return 0;
   }
   return 0;
@@ -2802,12 +2964,15 @@ std::size_t observation_singleton_body(const ObservationSection section) noexcep
 Status observation_page_valid(const ObservationPageHeader& header, const ByteView body,
                                 const std::size_t count) noexcept {
   const std::uint8_t section = static_cast<std::uint8_t>(header.section);
-  const bool singleton = header.section != ObservationSection::Routes;
+  const bool singleton = header.section != ObservationSection::Routes &&
+                         header.section != ObservationSection::Neighbors;
+  const bool neighbors = header.section == ObservationSection::Neighbors;
   const bool ok = header.result == static_cast<std::uint16_t>(ConfigOpsResult::Ok);
-  const std::size_t want = !ok ? 0
-      : singleton         ? observation_singleton_body(header.section)
-                          : count * kObservationRouteEntrySize;
-  if (section > static_cast<std::uint8_t>(ObservationSection::Routes) || body.size != want ||
+  const std::size_t want = !ok        ? 0
+                           : singleton ? observation_singleton_body(header.section)
+                           : neighbors ? count * kObservationNeighborEntrySize
+                                       : count * kObservationRouteEntrySize;
+  if (section > static_cast<std::uint8_t>(ObservationSection::Neighbors) || body.size != want ||
       header.count != count || count > kObservationRoutesPageMax ||
       (singleton && ok && count != 1) ||
       (header.flags & ~(kObservationPageMore | kObservationPageArmed)) != 0 ||
@@ -2817,16 +2982,29 @@ Status observation_page_valid(const ObservationPageHeader& header, const ByteVie
   if (!singleton) {
     NodeId previous = kInvalidNodeId;
     for (std::size_t i = 0; i < count; ++i) {
-      RouteDetailEntry entry{};
-      if (!decode_observation_route_entry(
-              ByteView{body.data + i * kObservationRouteEntrySize, kObservationRouteEntrySize},
-              entry)) {
-        return Status::error(StatusCode::InvalidArgument, "observation page entry");
+      NodeId id = kInvalidNodeId;
+      if (neighbors) {
+        NeighborDetailEntry entry{};
+        if (!decode_observation_neighbor_entry(
+                ByteView{body.data + i * kObservationNeighborEntrySize,
+                         kObservationNeighborEntrySize},
+                entry)) {
+          return Status::error(StatusCode::InvalidArgument, "observation page entry");
+        }
+        id = entry.peer;
+      } else {
+        RouteDetailEntry entry{};
+        if (!decode_observation_route_entry(
+                ByteView{body.data + i * kObservationRouteEntrySize, kObservationRouteEntrySize},
+                entry)) {
+          return Status::error(StatusCode::InvalidArgument, "observation page entry");
+        }
+        id = entry.destination;
       }
-      if (i > 0 && entry.destination <= previous) {
+      if (i > 0 && id <= previous) {
         return Status::error(StatusCode::InvalidArgument, "observation page order");
       }
-      previous = entry.destination;
+      previous = id;
     }
     if (count > 0 && header.next_after != previous) {
       return Status::error(StatusCode::InvalidArgument, "observation page cursor");
@@ -2895,12 +3073,18 @@ Status decode_observation_page(const ByteView inner, ObservationPageHeader& head
   if (status) status = reader.read_u32(header.revision);
   if (status) status = reader.read_u64(header.next_after);
   if (!status) return status;
-  const bool singleton = section != static_cast<std::uint8_t>(ObservationSection::Routes);
+  const bool singleton = section != static_cast<std::uint8_t>(ObservationSection::Routes) &&
+                         section != static_cast<std::uint8_t>(ObservationSection::Neighbors);
+  const bool neighbors = section == static_cast<std::uint8_t>(ObservationSection::Neighbors);
   const bool ok = header.result == static_cast<std::uint16_t>(ConfigOpsResult::Ok);
-  const std::size_t want = !ok ? 0
-      : singleton         ? observation_singleton_body(static_cast<ObservationSection>(section))
-                          : static_cast<std::size_t>(header.count) * kObservationRouteEntrySize;
-  if (section > static_cast<std::uint8_t>(ObservationSection::Routes) || reserved != 0 ||
+  const std::size_t want = !ok        ? 0
+                           : singleton ? observation_singleton_body(
+                                             static_cast<ObservationSection>(section))
+                           : neighbors ? static_cast<std::size_t>(header.count) *
+                                             kObservationNeighborEntrySize
+                                       : static_cast<std::size_t>(header.count) *
+                                             kObservationRouteEntrySize;
+  if (section > static_cast<std::uint8_t>(ObservationSection::Neighbors) || reserved != 0 ||
       !config_result_valid(header.result) ||
       (header.flags & ~(kObservationPageMore | kObservationPageArmed)) != 0 ||
       header.count > kObservationRoutesPageMax || (singleton && ok && header.count != 1) ||
@@ -2912,14 +3096,26 @@ Status decode_observation_page(const ByteView inner, ObservationPageHeader& head
   if (!singleton) {
     NodeId previous = kInvalidNodeId;
     for (std::size_t i = 0; i < header.count; ++i) {
-      RouteDetailEntry entry{};
-      status = decode_observation_route_entry(
-          ByteView{body.data + i * kObservationRouteEntrySize, kObservationRouteEntrySize}, entry);
-      if (!status) return status;
-      if (i > 0 && entry.destination <= previous) {
+      NodeId id = kInvalidNodeId;
+      if (neighbors) {
+        NeighborDetailEntry entry{};
+        status = decode_observation_neighbor_entry(
+            ByteView{body.data + i * kObservationNeighborEntrySize, kObservationNeighborEntrySize},
+            entry);
+        if (!status) return status;
+        id = entry.peer;
+      } else {
+        RouteDetailEntry entry{};
+        status = decode_observation_route_entry(
+            ByteView{body.data + i * kObservationRouteEntrySize, kObservationRouteEntrySize},
+            entry);
+        if (!status) return status;
+        id = entry.destination;
+      }
+      if (i > 0 && id <= previous) {
         return Status::error(StatusCode::ProtocolError, "OBSERVATION_ORDER");
       }
-      previous = entry.destination;
+      previous = id;
     }
     if (header.count > 0 && header.next_after != previous) {
       return Status::error(StatusCode::ProtocolError, "OBSERVATION_CURSOR");

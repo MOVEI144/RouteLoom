@@ -25,7 +25,7 @@ def encode_request(request_id: str, method: str, params: dict) -> bytes:
 
 
 HEALTH_SECTIONS = ('system', 'tables', 'milestones')
-TOPOLOGY_SECTIONS = ('routes', 'summary')
+TOPOLOGY_SECTIONS = ('routes', 'neighbors', 'summary')
 OBSERVATION_MAX_AGE_MS = 60_000
 
 
@@ -69,8 +69,9 @@ def encode_topology_request(request_id, observer, section, *, destination=None, 
         params['cursor'] = _node_id(cursor, 'cursor')
         if params['cursor'] == 'ffffffffffffffff':
             raise ValueError('cursor must be below ffff…ffff')
-    if section != 'routes' and (destination is not None or cursor is not None):
-        raise ValueError('destination and cursor are routes-only')
+    if section not in ('routes', 'neighbors') and (
+            destination is not None or cursor is not None):
+        raise ValueError('destination and cursor are routes/neighbors-only')
     if network is not None:
         params['network'] = _node_id(network, 'network')
     if max_age_ms is not None:

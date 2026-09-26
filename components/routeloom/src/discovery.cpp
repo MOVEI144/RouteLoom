@@ -2549,6 +2549,16 @@ bool NeighborDiscovery::phase_of(const NodeId peer, NeighborPhase& out) const no
   return false;
 }
 
+bool NeighborDiscovery::lease_remaining_ms(const NodeId peer, const MonotonicMs now_ms,
+                                           MonotonicMs& remaining_ms) const noexcept {
+  const Neighbor* neighbor = find_neighbor(peer);
+  if (neighbor == nullptr) return false;
+  remaining_ms = neighbor->lease_expires_at_ms > now_ms
+                     ? neighbor->lease_expires_at_ms - now_ms
+                     : 0;
+  return true;
+}
+
 bool NeighborDiscovery::data_permitted(const MacAddress& mac) const noexcept {
   const Neighbor* neighbor = find_neighbor(mac);
   return neighbor != nullptr && neighbor->phase == NeighborPhase::Reachable &&

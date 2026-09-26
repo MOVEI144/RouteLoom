@@ -10,6 +10,7 @@ mod group;
 mod nodes;
 mod observation;
 mod receive_log;
+mod remote_observation;
 mod send_store;
 mod site;
 mod sqlite_store;
@@ -17,11 +18,12 @@ mod subscribe;
 mod telemetry;
 
 use acl::Acl;
-use receive_log::{Ingress, ReceiveLog};
+use receive_log::{Ingress, ReceiveLog, RxAssurance};
 use routeloom_protocol::dev_session::{
     derive_session_proof, open_body, seal_body, SessionProof, Transcript, DIRECTION_DEVICE_TO_HOST,
-    DIRECTION_HOST_TO_DEVICE, FLAG_AUTH, PROTECTED_BODY_OVERHEAD,
+    DIRECTION_HOST_TO_DEVICE, FLAG_AUTH, FLAG_INGRESS_ASSURANCE, PROTECTED_BODY_OVERHEAD,
 };
+use routeloom_protocol::host_ops::{decode_ingress_assurance_tail, INGRESS_ASSURANCE_TAIL_SIZE};
 use routeloom_protocol::{encode_frame, CumulativeCredit, Frame, FrameKind, StreamDecoder};
 use send_store::{mint_id128, MemoryOperationStore, OperationStore, StoreBackend};
 use std::collections::{HashMap, VecDeque};
@@ -837,6 +839,11 @@ struct State {
     /// observation lane thread drives the device exchange, and the read
     /// thread folds 0x72 change events into the cache.
     observation_ops: observation::ObservationOps,
+    /// remote observation query table + negative cache (Diagnostic
+    /// 0x30/0x31 subtypes 7/8): api1 `health.get` / `topology.get` with
+    /// a foreign observer submit and wait here, the remote lane thread
+    /// drives the gateway-forwarded exchange.
+    remote_observation_ops: remote_observation::RemoteObservationOps,
     /// SDK v1 Site Authority (--site-authority DIR): EDHOC Responder, member
     /// ledger and the KGuard decision surface. None when not configured.
     site: Option<Arc<site::SiteService>>,
@@ -1114,6 +1121,35 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
             );
         }
         FrameKind::DataFromMesh => {
+            // Extended shape (flagged): the 8 B assurance tail follows the
+            // payload. A flagged frame too short to hold the tail, or with
+            // an undecodable tail, is malformed — degraded to nothing, so
+            // a gateway bug can never ride in as a forged verdict.
+            let extended = frame.flags & FLAG_INGRESS_ASSURANCE != 0;
+            let tail = if extended {
+                if body.len() < 28 {
+                    push_event(
+                        state,
+                        ms,
+                        "\"kind\":\"data_from_mesh\",\"malformed\":true".to_string(),
+                    );
+                    return;
+                }
+                match decode_ingress_assurance_tail(&body[body.len() - 8..]) {
+                    Ok(assurance) => Some(assurance),
+                    Err(_) => {
+                        push_event(
+                            state,
+                            ms,
+                            "\"kind\":\"data_from_mesh\",\"malformed\":true".to_string(),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            let payload_end = body.len() - tail.map_or(0, |_| INGRESS_ASSURANCE_TAIL_SIZE);
             if body.len() >= 20 {
                 let (origin, msg_session, msg_seq) =
                     (u64_at(body, 0), u32_at(body, 8), u64_at(body, 12));
@@ -1124,7 +1160,19 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                 // here after the session layer verified the body, and the
                 // network/gateway attribution comes from the authenticated
                 // session — never from the payload itself.
-                receive_ingest(state, origin, msg_session, msg_seq, &body[20..], ms);
+                receive_ingest(
+                    state,
+                    origin,
+                    msg_session,
+                    msg_seq,
+                    &body[20..payload_end],
+                    tail.map(|assurance| RxAssurance {
+                        verified: assurance.verified,
+                        profile: assurance.profile,
+                        site_epoch: assurance.site_epoch,
+                    }),
+                    ms,
+                );
                 push_event(
                     state,
                     ms,
@@ -1133,7 +1181,7 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                         json_opt_u64(origin),
                         msg_session.map_or_else(|| "null".to_string(), |v| v.to_string()),
                         json_opt_u64(msg_seq),
-                        body.len() - 20,
+                        payload_end - 20,
                     ),
                 );
             } else {
@@ -1287,6 +1335,13 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                     .telemetry_ops
                     .post_error(request, frame.session, code.unwrap_or(0));
             }
+            if let Some(request) = request.filter(|r| remote_observation::owns_request(*r)) {
+                // A remote-observation 0x30 the device refused at the
+                // frame level: same honest error, different lane range.
+                state
+                    .remote_observation_ops
+                    .post_error(request, frame.session, code.unwrap_or(0));
+            }
             if let Some(request) = request.filter(|r| observation::owns_request(*r)) {
                 // A 0x70 the device refused at the frame level: the query
                 // resolves as an error, never a silent timeout.
@@ -1398,21 +1453,37 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                 );
             }
         }
-        // m1 diagnostics 0x31 replies belong to the telemetry lane. A
-        // refused post is a stale answer past our timeout — expected and
-        // silent, never ring spam.
+        // m1 diagnostics 0x31 replies belong to the telemetry lane —
+        // unless the request id is the remote observation lane's (both
+        // legs share the 0x31 sub, so the range demuxes). A refused post
+        // is a stale answer past our timeout — expected and silent,
+        // never ring spam.
         FrameKind::HostOps if telemetry::owns(body) => {
-            state
-                .telemetry_ops
-                .post_reply(frame.request, frame.session, body.to_vec());
+            if remote_observation::owns_request(frame.request) {
+                state.remote_observation_ops.post_reply(
+                    frame.request,
+                    frame.session,
+                    body.to_vec(),
+                    ms,
+                    mono_ms(),
+                );
+            } else {
+                state
+                    .telemetry_ops
+                    .post_reply(frame.request, frame.session, body.to_vec());
+            }
         }
         // observation_v1 0x71 replies resolve a lane query; 0x72 change
         // events fold into the cache and surface as one ring event each
         // (plus an observation.gap when the sequence skips).
         FrameKind::HostOps if observation::owns_page(body) => {
-            state
-                .observation_ops
-                .post_reply(frame.request, frame.session, body.to_vec(), ms);
+            state.observation_ops.post_reply(
+                frame.request,
+                frame.session,
+                body.to_vec(),
+                ms,
+                mono_ms(),
+            );
         }
         FrameKind::HostOps if observation::owns_event(body) => {
             for notice in state.observation_ops.on_event(frame.session, body) {
@@ -1488,6 +1559,7 @@ fn receive_ingest(
     msg_session: Option<u32>,
     msg_seq: Option<u64>,
     payload: &[u8],
+    assurance: Option<RxAssurance>,
     ms: u64,
 ) {
     let (Some(origin), Some(msg_session), Some(msg_seq)) = (origin, msg_session, msg_seq) else {
@@ -1538,6 +1610,7 @@ fn receive_ingest(
                     msg_session,
                     msg_seq,
                     payload: payload.to_vec(),
+                    assurance,
                 },
                 ms,
             );
@@ -2302,6 +2375,7 @@ fn serve_client(
                 group_ops: &state.group_ops,
                 telemetry_ops: &state.telemetry_ops,
                 observation_ops: &state.observation_ops,
+                remote_observation_ops: &state.remote_observation_ops,
                 site: state.site.as_deref(),
                 config_authority: state.config_authority,
                 config_profile: state.config_profile,
@@ -2952,6 +3026,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let observation_outbound = outbound_tx.clone();
         thread::spawn(move || {
             observation::observation_loop(observation_state, observation_outbound)
+        });
+    }
+    // remote observation lane: issues 0x30 subtype-7 queries for
+    // `health.get` / `topology.get` with a foreign observer and resolves
+    // them from the 0x31 subtype-8 answers. Idle while nothing is
+    // submitted; same writer queue.
+    {
+        let remote_state = Arc::clone(&state);
+        let remote_outbound = outbound_tx.clone();
+        thread::spawn(move || {
+            remote_observation::remote_observation_loop(remote_state, remote_outbound)
         });
     }
     if let Some(device_path) = device {
@@ -4034,7 +4119,15 @@ mod tests {
         // Enrollment records do not prove which security profile protected
         // either received frame.
         for (origin, seq) in [(node, 11u64), (0x99, 12)] {
-            receive_ingest(&state, Some(origin), Some(5), Some(seq), &[0xaa], now + 20);
+            receive_ingest(
+                &state,
+                Some(origin),
+                Some(5),
+                Some(seq),
+                &[0xaa],
+                None,
+                now + 20,
+            );
         }
         let mut log = state.receive_log.lock().expect("receive log");
         let crate::receive_log::ReadOutcome::Batch(batch) =
@@ -4057,7 +4150,15 @@ mod tests {
             session.network = Some(network);
             session.node = Some(1);
         }
-        receive_ingest(&bare, Some(node), Some(5), Some(13), &[0xbb], now + 20);
+        receive_ingest(
+            &bare,
+            Some(node),
+            Some(5),
+            Some(13),
+            &[0xbb],
+            None,
+            now + 20,
+        );
         let mut log = bare.receive_log.lock().expect("receive log");
         let crate::receive_log::ReadOutcome::Batch(batch) =
             log.read(network, 0, 8, now + 20, false)
@@ -4070,6 +4171,93 @@ mod tests {
             json.contains("\"assurance\":{\"profile\":\"UNKNOWN\",\"origin\":\"unverified\"}"),
             "{json}"
         );
+    }
+
+    #[test]
+    fn data_from_mesh_flagged_tail_lands_on_the_record() {
+        let state = State::default();
+        {
+            let mut session = state.session.lock().expect("session");
+            session.network = Some(7);
+            session.node = Some(1);
+        }
+        // origin(8) || session(4) || seq(8) || payload(2) || tail(8):
+        // verified member_edhoc under site epoch 0xA5A5A5A5.
+        let mut inner = vec![0u8; 20];
+        inner[0..8].copy_from_slice(&9_u64.to_be_bytes());
+        inner[8..12].copy_from_slice(&5_u32.to_be_bytes());
+        inner[12..20].copy_from_slice(&13_u64.to_be_bytes());
+        inner.extend_from_slice(&[0xaa, 0xbb]);
+        inner.extend_from_slice(&[0x00, 0x01, 0x01, 0x00, 0xa5, 0xa5, 0xa5, 0xa5]);
+        let frame = frame(
+            FrameKind::DataFromMesh,
+            FLAG_INGRESS_ASSURANCE,
+            0,
+            inner.clone(),
+        );
+        record_frame(&state, &frame, &inner, 1_000);
+        let mut log = state.receive_log.lock().expect("receive log");
+        let crate::receive_log::ReadOutcome::Batch(batch) = log.read(7, 0, 8, 1_000, false) else {
+            panic!("evidenced record must be readable");
+        };
+        assert_eq!(batch.records.len(), 1);
+        let record = &batch.records[0];
+        // The tail is evidence, never payload bytes.
+        assert_eq!(record.payload, vec![0xaa, 0xbb]);
+        assert_eq!(
+            record.assurance,
+            Some(RxAssurance {
+                verified: true,
+                profile: 1,
+                site_epoch: 0xA5A5_A5A5,
+            })
+        );
+        let json = api1::record_json(record, "cursor");
+        assert!(
+            json.contains("\"assurance\":{\"profile\":\"member_edhoc\",\"origin\":\"verified\",\"site_epoch\":2779096485}"),
+            "{json}"
+        );
+        let meta = api1::record_meta_json(record, "cursor");
+        assert!(
+            meta.contains("\"assurance\":{\"profile\":\"member_edhoc\",\"origin\":\"verified\",\"site_epoch\":2779096485}"),
+            "{meta}"
+        );
+    }
+
+    #[test]
+    fn data_from_mesh_bad_tail_is_malformed_never_degraded() {
+        let state = State::default();
+        {
+            let mut session = state.session.lock().expect("session");
+            session.network = Some(7);
+            session.node = Some(1);
+        }
+        // Flagged but too short for the tail.
+        let mut inner = vec![0u8; 20];
+        inner.extend_from_slice(&[0xaa, 0xbb, 0xcc]);
+        let frame1 = frame(
+            FrameKind::DataFromMesh,
+            FLAG_INGRESS_ASSURANCE,
+            0,
+            inner.clone(),
+        );
+        record_frame(&state, &frame1, &inner, 1_000);
+        // Flagged with an undecodable tail (unknown profile id).
+        let mut inner2 = vec![0u8; 20];
+        inner2.extend_from_slice(&[0xaa, 0xbb]);
+        inner2.extend_from_slice(&[0x00, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let frame2 = frame(
+            FrameKind::DataFromMesh,
+            FLAG_INGRESS_ASSURANCE,
+            0,
+            inner2.clone(),
+        );
+        record_frame(&state, &frame2, &inner2, 1_000);
+        let mut log = state.receive_log.lock().expect("receive log");
+        let crate::receive_log::ReadOutcome::Batch(batch) = log.read(7, 0, 8, 1_000, false) else {
+            panic!("log must be readable");
+        };
+        assert!(batch.records.is_empty(), "malformed tails store nothing");
     }
 
     #[test]
