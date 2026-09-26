@@ -1,0 +1,51 @@
+{
+  "per_cycle": [
+    9,
+    10,
+    10,
+    10,
+    10,
+    6,
+    10,
+    10,
+    10,
+    10
+  ],
+  "delivered": 95,
+  "attempted": 100,
+  "reasons": {
+    "END_RECEIPT_TIMEOUT": 1,
+    "END_RECEIVED": 95,
+    "DEADLINE_EXPIRED": 4
+  },
+  "latency_ms": {
+    "median": 114.13,
+    "p95": 1353.53,
+    "max": 2550.31
+  },
+  "recovery_s": 146.38,
+  "boot_ids": [
+    90,
+    91,
+    92,
+    93,
+    94,
+    95,
+    96,
+    97,
+    98,
+    99,
+    100
+  ],
+  "boot_strictly_increasing": true,
+  "boot_floor_events": 0,
+  "peer_not_found_events": 0,
+  "peer_exists_events": 0,
+  "host_health": {
+    "samples": 525,
+    "authenticated": 525,
+    "protocol_errors_max": 0,
+    "node3_route_up": 498,
+    "node3_route_down": 27
+  }
+}

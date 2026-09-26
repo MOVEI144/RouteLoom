@@ -1,0 +1,20 @@
+{
+  "counter_records": [
+    {
+      "slot": "cbfe9b009",
+      "context_id": "bfe9b009",
+      "key_epoch": 123,
+      "direction": 1,
+      "high_water_exclusive": 256,
+      "generation": 1
+    }
+  ],
+  "counter_witness": 122,
+  "invalid_records": [],
+  "board": "ref-a",
+  "chip": "esp32c3",
+  "mac": "94:a9:90:7a:b5:60",
+  "label": "before-relay-r6",
+  "raw_sha256": "6a6c352c00b336ef6979b3298d6cf40b7c9ddc1cd4c480e9510a165aec986403",
+  "raw_size": 65536
+}

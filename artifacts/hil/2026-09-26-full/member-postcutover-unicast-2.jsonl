@@ -1,0 +1,2 @@
+{"index":0,"destination":2,"request":9,"admitted_at_unix":1790438292.509091,"admission_attempts":1,"delivery":{"request":9,"destination":2,"state":"expired","reason":"DEADLINE_EXPIRED","msg_session":2160743203,"msg_seq":111,"updated_ms":1790438297519},"latency_ms":5032.89}
+{"index":1,"destination":4,"request":10,"admitted_at_unix":1790438297.5430398,"admission_attempts":1,"delivery":{"request":10,"destination":4,"state":"expired","reason":"DEADLINE_EXPIRED","msg_session":2160743203,"msg_seq":112,"updated_ms":1790438302549},"latency_ms":5018.27}

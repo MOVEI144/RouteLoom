@@ -7,6 +7,39 @@ menu "RouteLoom"
             Bench-only diagnostic logs for reset recovery. Context IDs and
             handshake step numbers are logged, never keys or payloads.
 
+    config ROUTELOOM_HIL_HEAP_TELEMETRY
+        bool "HIL free heap and largest block once per minute"
+        default n
+        help
+            Bench-only heap samples beside the existing stack high-water log.
+            Logs free, largest and minimum free 8-bit heap in bytes so a
+            long hardware run can detect leaks and fragmentation. Also logs
+            aggregate neighbor-discovery counts for route diagnosis.
+
+    config ROUTELOOM_HIL_EDHOC_TIMING
+        bool "HIL timings for EDHOC P-256 operations and full exchange"
+        default n
+        help
+            Logs operation durations and the full handshake duration on an
+            ESP bench. No key, transcript or payload bytes are logged.
+
+    config ROUTELOOM_HIL_LR250_TELEMETRY
+        bool "HIL log of the ESP-NOW LR250 driver rate call"
+        default n
+        help
+            Logs the status returned by esp_now_set_peer_rate_config for
+            each peer registration. This proves driver acceptance; air-rate
+            confirmation still requires an independent sniffer.
+
+    config ROUTELOOM_HIL_DROP_RX_MAC
+        string "HIL drop frames received from one peer MAC (empty disables)"
+        default ""
+        help
+            Bench-only one-hop topology control. Set a 17-character colon
+            separated MAC address to discard that sender's ESP-NOW frames
+            before discovery and Wire processing. Use paired images to
+            prevent a direct BIND and force a relay path. Empty by default.
+
     config ROUTELOOM_WIFI_NETIF_INIT
         bool "Start esp_netif (lwIP TCP/IP task) before the Wi-Fi driver"
         default n

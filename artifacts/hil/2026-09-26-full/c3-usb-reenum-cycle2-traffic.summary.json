@@ -1,0 +1,20 @@
+{
+  "requested": 10,
+  "host_accepted": 10,
+  "delivered": 10,
+  "stopped_reason": null,
+  "success_rate": 1.0,
+  "rate_limit_retries": 3,
+  "pace_s": 0,
+  "elapsed_s": 26.12,
+  "latency_ms_median": 113.075,
+  "latency_ms_p95": 142.79,
+  "latency_ms_max": 165.35,
+  "by_destination": {
+    "3": {
+      "accepted": 10,
+      "delivered": 10
+    }
+  },
+  "evidence": "artifacts/hil/2026-09-26-full/c3-usb-reenum-cycle2-traffic.jsonl"
+}

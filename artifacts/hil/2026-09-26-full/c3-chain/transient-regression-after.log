@@ -1,0 +1,6 @@
+[ 46%] Built target routeloom_edhoc_third_party
+[ 97%] Built target routeloom_core
+[100%] Building CXX object tests/cpp/CMakeFiles/routeloom_espnow_runtime_tests.dir/__/__/components/routeloom_espnow/src/espnow_runtime.cpp.o
+[100%] Linking CXX executable routeloom_espnow_runtime_tests
+[100%] Built target routeloom_espnow_runtime_tests
+test_espnow_runtime: ok

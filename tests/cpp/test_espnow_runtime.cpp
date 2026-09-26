@@ -40,6 +40,17 @@ struct EspNowRuntimeTestAccess {
     const auto* record = runtime.find_peer(peer);
     return record != nullptr && record->driver_registered;
   }
+  static void mark_transient(EspNowRuntime& runtime, const MacAddress& mac) noexcept {
+    runtime.transient_peers_[0].mac = mac;
+    runtime.transient_peers_[0].used = true;
+  }
+  static bool release_transient(EspNowRuntime& runtime) noexcept {
+    return runtime.release_transient_peer(runtime.transient_peers_[0],
+                                          kInvalidNodeId);
+  }
+  static bool transient_used(EspNowRuntime& runtime) noexcept {
+    return runtime.transient_peers_[0].used;
+  }
   static std::size_t live_uses(const EspNowRuntime& runtime) noexcept {
     return runtime.reply_leases_.live_use_count();
   }
@@ -625,6 +636,27 @@ void test_driver_delete_failure_keeps_slot_occupied() {
   runtime.stop();
 }
 
+// Re-auth can leave transient bookkeeping beside a regular mapping for the
+// same MAC. Releasing that bookkeeping must not delete the regular peer's
+// physical ESP-NOW registration (C3 1->2->3 reset HIL, issue #169).
+void test_transient_cleanup_keeps_regular_driver_peer() {
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize().ok());
+  CHECK(runtime.start().ok());
+  CHECK(runtime.register_neighbor(kPeer, peer_mac(), 1).ok());
+  CHECK(EspNowRuntimeTestAccess::peer_registered(runtime, kPeer));
+  EspNowRuntimeTestAccess::mark_transient(runtime, peer_mac());
+  const unsigned deletes_before = idf_stub::del_peer_count();
+  CHECK(EspNowRuntimeTestAccess::release_transient(runtime));
+  CHECK(!EspNowRuntimeTestAccess::transient_used(runtime));
+  CHECK(idf_stub::del_peer_count() == deletes_before);
+  CHECK(EspNowRuntimeTestAccess::peer_registered(runtime, kPeer));
+  runtime.stop();
+}
+
 void test_failed_static_registration_does_not_claim_a_slot() {
   idf_stub::reset();
   TestSecurity security;
@@ -822,6 +854,7 @@ int main() {
   test_driver_release_waits_for_use_and_callback();
   test_route_broadcast_uses_reserved_radio_slot();
   test_driver_delete_failure_keeps_slot_occupied();
+  test_transient_cleanup_keeps_regular_driver_peer();
   test_failed_static_registration_does_not_claim_a_slot();
   test_route_capacity_registration_rolls_back_driver_peer();
   test_failed_registration_delete_retries_before_slot_reuse();

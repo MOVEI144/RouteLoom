@@ -1,0 +1,93 @@
+{"t": 235214.603369, "direction": "host_to_device", "frame": 1, "bytes": 57}
+{"t": 235214.607404, "direction": "queued", "frame": 1, "delay_ms": 1250, "bytes": 85}
+{"t": 235215.873291, "direction": "device_to_host", "frame": 1, "bytes": 85}
+{"t": 235215.874929, "direction": "host_to_device", "frame": 2, "bytes": 48}
+{"t": 235215.877392, "direction": "queued", "frame": 2, "delay_ms": 1250, "bytes": 56}
+{"t": 235215.877631, "direction": "queued", "frame": 3, "delay_ms": 0, "bytes": 73}
+{"t": 235215.886244, "direction": "queued", "frame": 4, "delay_ms": 0, "bytes": 57}
+{"t": 235216.386294, "direction": "queued", "frame": 5, "delay_ms": 0, "bytes": 57}
+{"t": 235216.886379, "direction": "queued", "frame": 6, "delay_ms": 0, "bytes": 57}
+{"t": 235216.890578, "direction": "queued", "frame": 7, "delay_ms": 0, "bytes": 85}
+{"t": 235217.13193, "direction": "device_to_host", "frame": 2, "bytes": 56}
+{"t": 235217.13193, "direction": "device_to_host", "frame": 3, "bytes": 73}
+{"t": 235217.13193, "direction": "device_to_host", "frame": 4, "bytes": 57}
+{"t": 235217.13193, "direction": "device_to_host", "frame": 5, "bytes": 57}
+{"t": 235217.13193, "direction": "device_to_host", "frame": 6, "bytes": 57}
+{"t": 235217.13193, "direction": "device_to_host", "frame": 7, "bytes": 85}
+{"t": 235217.132312, "direction": "dropped_host_frame", "frame": 3, "bytes": 73}
+{"t": 235217.132548, "direction": "host_to_device", "frame": 4, "bytes": 73}
+{"t": 235217.13283, "direction": "host_to_device", "frame": 5, "bytes": 73}
+{"t": 235217.133031, "direction": "host_to_device", "frame": 6, "bytes": 73}
+{"t": 235217.134804, "direction": "queued", "frame": 8, "delay_ms": 0, "bytes": 82}
+{"t": 235217.134843, "direction": "device_to_host", "frame": 8, "bytes": 82}
+{"t": 235217.135048, "direction": "queued", "frame": 9, "delay_ms": 0, "bytes": 82}
+{"t": 235217.135223, "direction": "host_to_device", "frame": 7, "bytes": 57}
+{"t": 235217.135234, "direction": "device_to_host", "frame": 9, "bytes": 82}
+{"t": 235217.135266, "direction": "queued", "frame": 10, "delay_ms": 0, "bytes": 82}
+{"t": 235217.135274, "direction": "device_to_host", "frame": 10, "bytes": 82}
+{"t": 235217.140423, "direction": "queued", "frame": 11, "delay_ms": 0, "bytes": 85}
+{"t": 235217.140473, "direction": "device_to_host", "frame": 11, "bytes": 85}
+{"t": 235217.140777, "direction": "host_to_device", "frame": 8, "bytes": 48}
+{"t": 235217.146368, "direction": "queued", "frame": 12, "delay_ms": 0, "bytes": 56}
+{"t": 235217.146421, "direction": "device_to_host", "frame": 12, "bytes": 56}
+{"t": 235217.146617, "direction": "queued", "frame": 13, "delay_ms": 0, "bytes": 73}
+{"t": 235217.150057, "direction": "host_to_device", "frame": 9, "bytes": 73}
+{"t": 235217.15011, "direction": "device_to_host", "frame": 13, "bytes": 73}
+{"t": 235217.151693, "direction": "queued", "frame": 14, "delay_ms": 0, "bytes": 140}
+{"t": 235217.151729, "direction": "device_to_host", "frame": 14, "bytes": 140}
+{"t": 235217.153853, "direction": "host_to_device", "frame": 10, "bytes": 76}
+{"t": 235217.15591, "direction": "host_to_device", "frame": 11, "bytes": 132}
+{"t": 235217.15707, "direction": "host_to_device", "frame": 12, "bytes": 70}
+{"t": 235217.157726, "direction": "queued", "frame": 15, "delay_ms": 0, "bytes": 73}
+{"t": 235217.157764, "direction": "device_to_host", "frame": 15, "bytes": 73}
+{"t": 235217.182044, "direction": "host_to_device", "frame": 13, "bytes": 98}
+{"t": 235217.211523, "direction": "queued", "frame": 16, "delay_ms": 0, "bytes": 73}
+{"t": 235217.211583, "direction": "device_to_host", "frame": 16, "bytes": 73}
+{"t": 235217.31176, "direction": "queued", "frame": 17, "delay_ms": 0, "bytes": 73}
+{"t": 235217.311825, "direction": "device_to_host", "frame": 17, "bytes": 73}
+{"t": 235217.411439, "direction": "queued", "frame": 18, "delay_ms": 0, "bytes": 73}
+{"t": 235217.41152, "direction": "device_to_host", "frame": 18, "bytes": 73}
+{"t": 235217.411584, "direction": "queued", "frame": 19, "delay_ms": 0, "bytes": 88}
+{"t": 235217.411602, "direction": "device_to_host", "frame": 19, "bytes": 88}
+{"t": 235217.411642, "direction": "queued", "frame": 20, "delay_ms": 0, "bytes": 88}
+{"t": 235217.41167, "direction": "device_to_host", "frame": 20, "bytes": 88}
+{"t": 235217.41183, "direction": "queued", "frame": 21, "delay_ms": 0, "bytes": 96}
+{"t": 235217.411872, "direction": "device_to_host", "frame": 21, "bytes": 96}
+{"t": 235217.413044, "direction": "queued", "frame": 22, "delay_ms": 0, "bytes": 168}
+{"t": 235217.413085, "direction": "queued", "frame": 23, "delay_ms": 0, "bytes": 76}
+{"t": 235217.413099, "direction": "queued", "frame": 24, "delay_ms": 0, "bytes": 83}
+{"t": 235217.413109, "direction": "device_to_host", "frame": 22, "bytes": 168}
+{"t": 235217.413109, "direction": "device_to_host", "frame": 23, "bytes": 76}
+{"t": 235217.413109, "direction": "device_to_host", "frame": 24, "bytes": 83}
+{"t": 235217.446687, "direction": "host_to_device", "frame": 14, "bytes": 132}
+{"t": 235217.448035, "direction": "host_to_device", "frame": 15, "bytes": 164}
+{"t": 235217.514128, "direction": "queued", "frame": 25, "delay_ms": 0, "bytes": 73}
+{"t": 235217.51418, "direction": "device_to_host", "frame": 25, "bytes": 73}
+{"t": 235217.613522, "direction": "queued", "frame": 26, "delay_ms": 0, "bytes": 73}
+{"t": 235217.61358, "direction": "device_to_host", "frame": 26, "bytes": 73}
+{"t": 235217.613907, "direction": "queued", "frame": 27, "delay_ms": 0, "bytes": 88}
+{"t": 235217.613943, "direction": "queued", "frame": 28, "delay_ms": 0, "bytes": 88}
+{"t": 235217.613953, "direction": "device_to_host", "frame": 27, "bytes": 88}
+{"t": 235217.613953, "direction": "device_to_host", "frame": 28, "bytes": 88}
+{"t": 235217.614091, "direction": "queued", "frame": 29, "delay_ms": 0, "bytes": 164}
+{"t": 235217.614137, "direction": "device_to_host", "frame": 29, "bytes": 164}
+{"t": 235225.446759, "direction": "host_to_device", "frame": 16, "bytes": 56}
+{"t": 235225.450599, "direction": "queued", "frame": 30, "delay_ms": 0, "bytes": 56}
+{"t": 235225.450621, "direction": "device_to_host", "frame": 30, "bytes": 56}
+{"t": 235225.632635, "direction": "queued", "frame": 31, "delay_ms": 0, "bytes": 136}
+{"t": 235225.632681, "direction": "device_to_host", "frame": 31, "bytes": 136}
+{"t": 235225.63546, "direction": "host_to_device", "frame": 17, "bytes": 164}
+{"t": 235225.637275, "direction": "queued", "frame": 32, "delay_ms": 0, "bytes": 73}
+{"t": 235225.637318, "direction": "device_to_host", "frame": 32, "bytes": 73}
+{"t": 235225.637349, "direction": "queued", "frame": 33, "delay_ms": 0, "bytes": 88}
+{"t": 235225.637359, "direction": "device_to_host", "frame": 33, "bytes": 88}
+{"t": 235225.644684, "direction": "queued", "frame": 34, "delay_ms": 0, "bytes": 164}
+{"t": 235225.644729, "direction": "device_to_host", "frame": 34, "bytes": 164}
+{"t": 235227.4418, "direction": "host_to_device", "frame": 18, "bytes": 70}
+{"t": 235227.444979, "direction": "queued", "frame": 35, "delay_ms": 0, "bytes": 73}
+{"t": 235227.445036, "direction": "device_to_host", "frame": 35, "bytes": 73}
+{"t": 235227.445149, "direction": "queued", "frame": 36, "delay_ms": 0, "bytes": 76}
+{"t": 235227.44516, "direction": "device_to_host", "frame": 36, "bytes": 76}
+{"t": 235235.442045, "direction": "host_to_device", "frame": 19, "bytes": 56}
+{"t": 235235.44584, "direction": "queued", "frame": 37, "delay_ms": 0, "bytes": 56}
+{"t": 235235.445904, "direction": "device_to_host", "frame": 37, "bytes": 56}

@@ -422,6 +422,7 @@ class EspNowRuntime final : public RadioPort,
   bool evict_driverless_marker() noexcept;
   Status release_driver_peer(const MacAddress& mac, NodeId node,
                              bool transfer = false) noexcept;
+  bool release_transient_peer(TransientPeer& slot, NodeId node) noexcept;
   void release_autonomy_peer(Peer& peer, MonotonicMs now) noexcept;
   void reconcile_autonomy(MonotonicMs now) noexcept;
   void poll_bootstrap(MonotonicMs now) noexcept;

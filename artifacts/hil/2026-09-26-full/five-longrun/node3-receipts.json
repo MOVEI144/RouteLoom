@@ -1,0 +1,240 @@
+{
+  "traffic": "artifacts/hil/2026-09-26-full/five-longrun/traffic-node3.jsonl",
+  "console": "artifacts/hil/2026-09-26-full/five-longrun-node3-after-reset-console.log",
+  "origin": 1,
+  "host_accepted": 25,
+  "host_delivered": 0,
+  "receiver_confirmed": 0,
+  "host_failed_receiver_confirmed": [],
+  "host_delivered_receiver_missing": [],
+  "receiver_delay_ms_median": null,
+  "receiver_delay_ms_p95": null,
+  "receiver_delay_ms_max": null,
+  "rows": [
+    {
+      "index": 1,
+      "request": 3,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 8,
+      "receiver_count": 0
+    },
+    {
+      "index": 5,
+      "request": 7,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 17,
+      "receiver_count": 0
+    },
+    {
+      "index": 9,
+      "request": 11,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 21,
+      "receiver_count": 0
+    },
+    {
+      "index": 13,
+      "request": 15,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 25,
+      "receiver_count": 0
+    },
+    {
+      "index": 17,
+      "request": 19,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 29,
+      "receiver_count": 0
+    },
+    {
+      "index": 21,
+      "request": 23,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 33,
+      "receiver_count": 0
+    },
+    {
+      "index": 25,
+      "request": 27,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 37,
+      "receiver_count": 0
+    },
+    {
+      "index": 29,
+      "request": 31,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 41,
+      "receiver_count": 0
+    },
+    {
+      "index": 33,
+      "request": 35,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 45,
+      "receiver_count": 0
+    },
+    {
+      "index": 37,
+      "request": 39,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 49,
+      "receiver_count": 0
+    },
+    {
+      "index": 41,
+      "request": 43,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 53,
+      "receiver_count": 0
+    },
+    {
+      "index": 45,
+      "request": 47,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 57,
+      "receiver_count": 0
+    },
+    {
+      "index": 49,
+      "request": 51,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 61,
+      "receiver_count": 0
+    },
+    {
+      "index": 53,
+      "request": 55,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 65,
+      "receiver_count": 0
+    },
+    {
+      "index": 57,
+      "request": 59,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 69,
+      "receiver_count": 0
+    },
+    {
+      "index": 61,
+      "request": 63,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 73,
+      "receiver_count": 0
+    },
+    {
+      "index": 65,
+      "request": 67,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 77,
+      "receiver_count": 0
+    },
+    {
+      "index": 69,
+      "request": 71,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 81,
+      "receiver_count": 0
+    },
+    {
+      "index": 73,
+      "request": 75,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 85,
+      "receiver_count": 0
+    },
+    {
+      "index": 77,
+      "request": 79,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 89,
+      "receiver_count": 0
+    },
+    {
+      "index": 81,
+      "request": 83,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 93,
+      "receiver_count": 0
+    },
+    {
+      "index": 85,
+      "request": 87,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 97,
+      "receiver_count": 0
+    },
+    {
+      "index": 89,
+      "request": 91,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 101,
+      "receiver_count": 0
+    },
+    {
+      "index": 93,
+      "request": 95,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 105,
+      "receiver_count": 0
+    },
+    {
+      "index": 97,
+      "request": 99,
+      "host_state": "expired",
+      "host_reason": "DEADLINE_EXPIRED",
+      "msg_session": 242,
+      "msg_seq": 109,
+      "receiver_count": 0
+    }
+  ]
+}

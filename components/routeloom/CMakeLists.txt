@@ -130,6 +130,7 @@ if(COMMAND idf_component_register)
          ${ROUTELOOM_LIBEDHOC_SRC} ${ROUTELOOM_ZCBOR_SRC} ${ROUTELOOM_EDHOC_GLUE_SRC}
     INCLUDE_DIRS include ${CMAKE_CURRENT_LIST_DIR}/third_party/micro-ecc
     PRIV_INCLUDE_DIRS ${ROUTELOOM_EDHOC_INCLUDE_DIRS}
+    PRIV_REQUIRES esp_timer heap
   )
   target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
   target_compile_definitions(${COMPONENT_LIB} PRIVATE ${ROUTELOOM_UECC_DEFS}

@@ -1,0 +1,20 @@
+accepted=10 delivered=10
+accepted=20 delivered=20
+accepted=30 delivered=30
+accepted=40 delivered=40
+accepted=50 delivered=50
+accepted=60 delivered=60
+accepted=70 delivered=70
+accepted=80 delivered=80
+accepted=90 delivered=90
+Traceback (most recent call last):
+  File "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tools/hil/accepted_traffic.py", line 116, in <module>
+    "evidence": str(out)}
+          ^^^^^^
+  File "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tools/hil/accepted_traffic.py", line 61, in main
+    payload = b"R2HIL" + index.to_bytes(4, "big")
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tools/hil/accepted_traffic.py", line 19, in command
+    raise RuntimeError(f"{' '.join(args)}: {run.stderr or run.stdout}")
+RuntimeError: send 2 523248494c00000063: Error: Os { code: 111, kind: ConnectionRefused, message: "Connection refused" }
+
