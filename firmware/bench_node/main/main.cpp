@@ -139,6 +139,8 @@ struct BenchContext {
   EspNowBenchPlatform platform;
   EspNowBenchProbe probe;
 };
+static_assert(sizeof(BenchContext) <= 2048,
+              "bench application state exceeds the 2 KiB budget");
 
 void bench_attach(routeloom::espnow::EspNowRuntime& runtime,
                   routeloom::espnow::EspNowSecurityOwner* owner,

@@ -96,6 +96,10 @@ Status encode(std::uint8_t opcode, std::uint16_t flags, const RunUuid& run,
 }
 
 Status encode(const CapabilitiesBody& body, ByteWriter& out) noexcept {
+  if (body.opcode_count > body.opcodes.size()) {
+    return Status::error(StatusCode::InvalidArgument,
+                         "bench capabilities opcode count");
+  }
   Status status = out.write_u8(body.app_protocol);
   if (status) status = out.write_u8(body.app_version);
   if (status) status = out.write_u8(body.max_unicast_body);
@@ -108,10 +112,7 @@ Status encode(const CapabilitiesBody& body, ByteWriter& out) noexcept {
   if (status) status = out.write_u32(body.firmware_digest);
   if (status) status = out.write_u32(body.config_digest);
   if (status) status = out.write_u8(body.opcode_count);
-  const std::uint8_t count = body.opcode_count < body.opcodes.size()
-                                 ? body.opcode_count
-                                 : static_cast<std::uint8_t>(body.opcodes.size());
-  for (std::uint8_t i = 0; i < count; ++i) {
+  for (std::uint8_t i = 0; i < body.opcode_count; ++i) {
     if (status) status = out.write_u8(body.opcodes[i]);
   }
   return status;

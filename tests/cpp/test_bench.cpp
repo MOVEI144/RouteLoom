@@ -483,6 +483,10 @@ void test_codec_bodies() {
   ByteReader capr{ByteView{capraw.data(), capraw.size()}};
   CHECK(decode(capr, capback) && capback.opcode_count == 17 &&
         capback.opcodes[16] == 17 && capback.max_unicast_body == kMaxBody);
+  caps.opcode_count = static_cast<std::uint8_t>(caps.opcodes.size() + 1);
+  std::array<std::uint8_t, kCapabilitiesBodySize> invalid_caps{};
+  ByteWriter invalid_writer{MutableByteView{invalid_caps.data(), invalid_caps.size()}};
+  CHECK(!encode(caps, invalid_writer));
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,6 +1182,78 @@ void test_destination_reset() {
   CHECK(w.app(2)->stats().duplicate_commands == 0);
 }
 
+void test_destination_reset_after_last_packet() {
+  BenchWorld w;
+  build(w, 2);
+  const RunUuid run = make_run(40);
+  PeerSendStartBody start{};
+  start.expected_boot = w.boot(2);
+  start.destination = 3;
+  start.expected_dest_boot = w.boot(3);
+  start.sequence_begin = 0;
+  start.count = 1;
+  start.payload_len = 8;
+  start.ttl_ms = 2000;
+  const auto body = body_bytes(start);
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::PeerSendStart), run,
+                   1, ByteView{body.data(), body.size()}));
+  w.reset_bench(3);
+  w.run(2000);
+  CHECK(w.app(3)->stats().stale_boot == 1);
+  CHECK(bench_send(w, 2, static_cast<std::uint8_t>(Opcode::PeerSendStatus),
+                   run, 2, ByteView{}));
+  w.run(400);
+  const HostMessage* answer = last_opcode(
+      host_messages(w, 1), static_cast<std::uint8_t>(Opcode::PeerSendStatus));
+  CHECK(answer != nullptr);
+  if (answer != nullptr) {
+    PeerSendStatusBody status{};
+    ByteReader reader{ByteView{answer->body.data(), answer->body.size()}};
+    CHECK(decode(reader, status));
+    CHECK(status.state == gen_state::kPeerReset);
+    CHECK(status.submitted == 1 && status.delivered == 0 &&
+          status.unknown == 1);
+  }
+
+  // A stale notice may also arrive after the source has closed its last
+  // send. Its sequence still names that send and must correct the verdict.
+  BenchWorld late;
+  build(late, 2);
+  start.expected_boot = late.boot(2);
+  start.expected_dest_boot = late.boot(3);
+  const auto late_body = body_bytes(start);
+  CHECK(bench_send(late, 2, static_cast<std::uint8_t>(Opcode::PeerSendStart),
+                   run, 1, ByteView{late_body.data(), late_body.size()}));
+  late.run(400);
+  CountStatusBody stale{};
+  stale.state = count_state::kStaleBoot;
+  const auto stale_body = body_bytes(stale);
+  std::array<std::uint8_t, kMaxMessage> stale_wire{};
+  std::size_t written = 0;
+  CHECK_OK(encode(static_cast<std::uint8_t>(Opcode::CountStatus),
+                  kFlagResponse | kFlagLate, run, 0,
+                  ByteView{stale_body.data(), stale_body.size()},
+                  MutableByteView{stale_wire.data(), stale_wire.size()}, written));
+  MessageKey key{};
+  key.origin = 3;
+  late.app(2)->on_message(key, 3, ByteView{stale_wire.data(), written});
+  late.app(2)->on_message(key, 3, ByteView{stale_wire.data(), written});
+  late.app(2)->poll(late.now);
+  CHECK(bench_send(late, 2, static_cast<std::uint8_t>(Opcode::PeerSendStatus),
+                   run, 2, ByteView{}));
+  late.run(400);
+  answer = last_opcode(host_messages(late, 1),
+                       static_cast<std::uint8_t>(Opcode::PeerSendStatus));
+  CHECK(answer != nullptr);
+  if (answer != nullptr) {
+    PeerSendStatusBody status{};
+    ByteReader reader{ByteView{answer->body.data(), answer->body.size()}};
+    CHECK(decode(reader, status));
+    CHECK(status.state == gen_state::kPeerReset && status.delivered == 0 &&
+          status.unknown == 1);
+  }
+}
+
 void test_counter_reset() {
   BenchWorld w;
   build(w, 1);
@@ -1354,6 +1430,54 @@ void test_peer_send_stop() {
       host_messages(w, 1), static_cast<std::uint8_t>(Opcode::PeerSendStatus));
   ByteReader nr_reader{ByteView{nr->body.data(), nr->body.size()}};
   CHECK(decode(nr_reader, ps) && ps.result == result::kNotRunning);
+}
+
+void test_peer_send_stop_accounts_pending_packet() {
+  BenchWorld w;
+  build(w, 2);
+  const RunUuid run = make_run(41);
+  PeerSendStartBody start{};
+  start.expected_boot = w.boot(2);
+  start.destination = 3;
+  start.expected_dest_boot = w.boot(3);
+  start.sequence_begin = 1;
+  start.count = 2;
+  start.payload_len = 8;
+  start.interval_ms = 1000;
+  start.ttl_ms = 2000;
+  const auto body = body_bytes(start);
+  std::array<std::uint8_t, kMaxMessage> wire{};
+  std::size_t written = 0;
+  CHECK_OK(encode(static_cast<std::uint8_t>(Opcode::PeerSendStart), 0, run, 1,
+                  ByteView{body.data(), body.size()},
+                  MutableByteView{wire.data(), wire.size()}, written));
+  MessageKey key{};
+  key.origin = 1;
+  w.app(2)->on_message(key, 1, ByteView{wire.data(), written});
+  w.app(2)->poll(w.now);  // one packet is queued, with no delivery event yet
+
+  ExpectedBootBody stop{};
+  stop.expected_boot = w.boot(2);
+  const auto stop_body = body_bytes(stop);
+  CHECK_OK(encode(static_cast<std::uint8_t>(Opcode::PeerSendStop), 0, run, 2,
+                  ByteView{stop_body.data(), stop_body.size()},
+                  MutableByteView{wire.data(), wire.size()}, written));
+  w.app(2)->on_message(key, 1, ByteView{wire.data(), written});
+  w.app(2)->poll(w.now + 1);
+  w.net.flush(w.now + 1);
+  w.run(400);
+  const HostMessage* answer = last_opcode(
+      host_messages(w, 1), static_cast<std::uint8_t>(Opcode::PeerSendStatus));
+  CHECK(answer != nullptr);
+  if (answer != nullptr) {
+    PeerSendStatusBody status{};
+    ByteReader reader{ByteView{answer->body.data(), answer->body.size()}};
+    CHECK(decode(reader, status));
+    CHECK(status.result == result::kStopped &&
+          status.state == gen_state::kStopped);
+    CHECK(status.submitted == 1 && status.delivered == 0 &&
+          status.failed == 0 && status.unknown == 1);
+  }
 }
 
 void test_configured_controller_and_digest() {
@@ -1541,9 +1665,24 @@ void test_announce_after_membership() {
   w.probes[2]->fixed.membership =
       static_cast<std::uint8_t>(MembershipState::Member);
   w.run(1000);
-  CHECK(last_opcode(host_messages(w, 1),
-                    static_cast<std::uint8_t>(Opcode::Capabilities)) !=
-        nullptr);
+  const auto capability_count = [&]() {
+    std::size_t count = 0;
+    for (const HostMessage& message : host_messages(w, 1)) {
+      if (message.opcode == static_cast<std::uint8_t>(Opcode::Capabilities)) {
+        ++count;
+      }
+    }
+    return count;
+  };
+  CHECK(capability_count() == 1);
+  w.probes[2]->fixed.membership =
+      static_cast<std::uint8_t>(MembershipState::Unprovisioned);
+  w.run(1000);
+  CHECK(capability_count() == 1);
+  w.probes[2]->fixed.membership =
+      static_cast<std::uint8_t>(MembershipState::Member);
+  w.run(1000);
+  CHECK(capability_count() == 2);
 }
 
 void test_group_hello_does_not_amplify() {
@@ -1813,12 +1952,16 @@ int main(int argc, char** argv) {
   run_test("source_reset_no_restart", test_source_reset_no_restart);
   run_test("count_binding_contract", test_count_binding_contract);
   run_test("destination_reset", test_destination_reset);
+  run_test("destination_reset_after_last_packet",
+           test_destination_reset_after_last_packet);
   run_test("counter_reset", test_counter_reset);
   run_test("malformed_and_unknown", test_malformed_and_unknown);
   run_test("rx_queue_overflow", test_rx_queue_overflow);
   run_test("send_load_fault", test_send_load_fault);
   run_test("fault_suppress_and_delay", test_fault_suppress_and_delay);
   run_test("peer_send_stop", test_peer_send_stop);
+  run_test("peer_send_stop_accounts_pending_packet",
+           test_peer_send_stop_accounts_pending_packet);
   run_test("configured_controller_and_digest", test_configured_controller_and_digest);
   run_test("peer_send_status_query", test_peer_send_status_query);
   run_test("reset_waits_for_ack_send", test_reset_waits_for_ack_send);

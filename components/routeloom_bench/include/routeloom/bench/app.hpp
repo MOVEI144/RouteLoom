@@ -251,9 +251,11 @@ class BenchApp final : public NodeObserver {
     // the run stale, i.e. it rebooted — further outcomes are unknown.
     std::uint64_t dest_boot{0};
     bool dest_reset{false};
-    // Highest COUNT_ONLY sequence a stale notice has reclassified —
-    // refuses double-counting a retransmitted refusal.
-    std::uint32_t stale_mark{0};
+    // Terminal SDK verdicts for the at-most-64 submitted sequences. A
+    // delayed stale notice can correct exactly its own verdict once, even
+    // if the generator has already finished or notices arrive out of order.
+    std::uint64_t delivered_mask{0};
+    std::uint64_t failed_mask{0};
     std::uint16_t submitted{0};
     std::uint16_t admitted{0};
     std::uint16_t delivered{0};
@@ -322,8 +324,8 @@ class BenchApp final : public NodeObserver {
                    MonotonicMs now_ms) noexcept;
   void handle_count(const RxEntry& entry, const Message& msg,
                     MonotonicMs now_ms) noexcept;
-  // A COUNT_STATUS reply that names the live generator run is the
-  // destination's stale-binding notice — not ordinary reply traffic.
+  // A COUNT_STATUS reply that names the current or last generator run can
+  // be the destination's stale-binding notice.
   void handle_count_status(const RxEntry& entry, const Message& msg,
                            MonotonicMs now_ms) noexcept;
   void handle_count_get(const RxEntry& entry, const Message& msg,

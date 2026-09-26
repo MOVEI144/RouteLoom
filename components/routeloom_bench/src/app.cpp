@@ -157,11 +157,11 @@ void BenchApp::dispatch(const RxEntry& entry, const Message& msg,
       (opcode_is_reply(msg.opcode) &&
        msg.opcode != static_cast<std::uint8_t>(Opcode::PeerSendStatus))) {
     ++stats_.responses_seen;
-    // One reply is also input: a COUNT_STATUS naming the live generator
-    // run is the bound destination's stale-binding notice. It closes the
-    // run — it can never open one.
+    // A COUNT_STATUS can correct a verdict for the current generator run
+    // after its final send has already completed.
     if (msg.opcode == static_cast<std::uint8_t>(Opcode::CountStatus) &&
-        !entry.is_group && generator_.uuid == msg.run && generator_.active) {
+        !entry.is_group && generator_.uuid == msg.run &&
+        generator_.state != gen_state::kIdle) {
       handle_count_status(entry, msg, now_ms);
     }
     return;
@@ -489,8 +489,12 @@ void BenchApp::handle_count_get(const RxEntry& entry, const Message& msg,
 void BenchApp::handle_count_status(const RxEntry& entry, const Message& msg,
                                    MonotonicMs /*now_ms*/) noexcept {
   Generator& gen = generator_;
-  if (!gen.active || gen.uuid != msg.run || entry.is_group ||
-      entry.origin != gen.destination) {
+  if (gen.state == gen_state::kIdle || gen.uuid != msg.run || entry.is_group ||
+      entry.origin != gen.destination ||
+      (msg.flags & (kFlagResponse | kFlagLate)) !=
+          (kFlagResponse | kFlagLate) ||
+      msg.sequence < gen.sequence_begin ||
+      msg.sequence - gen.sequence_begin >= gen.sent) {
     // Only the bound destination may close the run it is bound to.
     return;
   }
@@ -500,32 +504,29 @@ void BenchApp::handle_count_status(const RxEntry& entry, const Message& msg,
     if (!decode(reader, status)) return;
   }
   if (status.state != count_state::kStaleBoot) return;
-  // The notice's sequence names a refused packet, so it provably reached
-  // only the post-reset incarnation: its earlier MAC-level "delivered" is
-  // not evidence the bound incarnation counted it — reclassify to unknown.
-  // (The delivery result is consumed before its notice can ever arrive:
-  // TX-complete lands with the frame's own flush, the notice takes a full
-  // reply round-trip.) A retransmitted refusal repeats the sequence; the
-  // high-water mark counts each refused packet once. A refused packet that
-  // is still in flight needs no reclassify — its late result already lands
-  // in unknown via the dest_reset branch in drain_delivery.
-  if (msg.sequence > gen.stale_mark) {
-    gen.stale_mark = msg.sequence;
-    const bool pending_result = gen.inflight && gen.sent > 0 &&
-                                msg.sequence ==
-                                    gen.sequence_begin + gen.sent - 1;
-    if (!pending_result && gen.delivered > 0) {
-      --gen.delivered;
-      ++gen.unknown;
-    }
+  // The refused packet reached only the post-reset incarnation. Correct
+  // that sequence's terminal SDK verdict; a missing result is resolved by
+  // drain_delivery after dest_reset latches. Clearing the bit also makes a
+  // retransmitted or out-of-order notice harmless.
+  const std::uint64_t bit = 1ULL << (msg.sequence - gen.sequence_begin);
+  bool changed = false;
+  if ((gen.delivered_mask & bit) != 0) {
+    gen.delivered_mask &= ~bit;
+    --gen.delivered;
+    ++gen.unknown;
+    changed = true;
+  } else if ((gen.failed_mask & bit) != 0) {
+    gen.failed_mask &= ~bit;
+    --gen.failed;
+    ++gen.unknown;
+    changed = true;
   }
   if (!gen.dest_reset) {
-    // The bound incarnation is gone, so the rest of this run's traffic
-    // can never be counted. drive_generator stops sending and unresolved
-    // sends land in `unknown` — not in a delivered/failed guess.
     gen.dest_reset = true;
-    bump_version();
+    if (!gen.active) gen.state = gen_state::kPeerReset;
+    changed = true;
   }
+  if (changed) bump_version();
 }
 
 void BenchApp::handle_rollcall(const RxEntry& entry, const Message& msg,
@@ -760,6 +761,12 @@ void BenchApp::handle_peer_send_stop(const RxEntry& entry, const Message& msg,
     reply.result = result::kStaleBoot;
     flags |= kFlagLate;
   } else if (generator_.active && generator_.uuid == msg.run) {
+    if (generator_.inflight) {
+      // STOP closes the run before that send's final delivery verdict.
+      // Later callbacks cannot be attributed after another run starts.
+      generator_.inflight = false;
+      ++generator_.unknown;
+    }
     generator_.active = false;
     generator_.state = gen_state::kStopped;
     reply.result = result::kStopped;
@@ -1060,12 +1067,14 @@ void BenchApp::drain_delivery(MonotonicMs now_ms) noexcept {
     switch (event.state) {
       case DeliveryState::Delivered:
         ++gen.delivered;
+        gen.delivered_mask |= 1ULL << (gen.sent - 1);
         break;
       case DeliveryState::Indeterminate:
         ++gen.unknown;
         break;
       default:
         ++gen.failed;
+        gen.failed_mask |= 1ULL << (gen.sent - 1);
         break;
     }
   }
@@ -1134,15 +1143,17 @@ void BenchApp::retire_idle_runs(MonotonicMs now_ms) noexcept {
 }
 
 void BenchApp::maybe_announce(MonotonicMs now_ms) noexcept {
-  if (announced_ || node_ == nullptr || !node_->started()) return;
+  if (node_ == nullptr || !node_->started()) return;
   if (probe_ != nullptr) {
     BenchProbeSample sample{};
     probe_->sample(sample);
     if (sample.participation_valid &&
         sample.membership != static_cast<std::uint8_t>(MembershipState::Member)) {
+      announced_ = false;
       return;
     }
   }
+  if (announced_) return;
   NodeId controller = config_.controller;
   if (controller == kInvalidNodeId) {
     controller = node_->config().route_gateways[0];
