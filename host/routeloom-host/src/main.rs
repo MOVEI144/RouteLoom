@@ -831,6 +831,18 @@ fn event_kind(fields: &str) -> String {
     rest[..end].to_string()
 }
 
+/// First ring entry of every daemon run (seq 0): the journal's restart
+/// boundary. Besides the incarnation id it carries the build/config
+/// identity an offline inspection record needs — daemon version,
+/// operation-store durability, config profile, site authority presence.
+/// Values only; no secrets (host_boot is a random per-run tag).
+fn boot_event_fields(host_boot: u64, storage: &str, config_profile: u8, site: bool) -> String {
+    format!(
+        "\"kind\":\"boot\",\"host_boot\":{host_boot},\"daemon\":\"routeloom-host\",\"version\":\"{}\",\"storage\":\"{storage}\",\"config_profile\":{config_profile},\"site\":{site}",
+        env!("CARGO_PKG_VERSION"),
+    )
+}
+
 fn push_event(state: &State, ms: u64, fields: String) {
     // Allocate the sequence under the events lock: concurrent producers
     // otherwise interleave fetch_add and push_back so stored order diverges
@@ -2639,6 +2651,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_authority_key: args.config_authority_key.clone(),
         ..State::default()
     });
+    // The ring opens with the run's own restart boundary — before the
+    // dispatch thread or any client can push, so it is always seq 0.
+    push_event(
+        &state,
+        now_ms(),
+        boot_event_fields(
+            host_boot,
+            if args.op_store.is_some() {
+                "sqlite"
+            } else {
+                "memory"
+            },
+            args.config_profile,
+            args.site_authority.is_some(),
+        ),
+    );
     // Fail fast on an unloadable COSE key: the lane would otherwise refuse
     // every issuance at runtime with the cause buried in a dispatch log.
     if args.config_profile == config::ISSUE_PROFILE_COSE {
@@ -3396,6 +3424,35 @@ mod tests {
         assert!(json.contains("\"peer\":55"));
         assert!(json.contains("\"reason\":\"RETRY!\""));
         assert!(json.contains("\"msg_seq\":300"));
+    }
+
+    #[test]
+    fn boot_event_opens_the_ring() {
+        // Every daemon run starts the ring with its own restart boundary:
+        // seq 0 carries the incarnation id plus the build/config identity
+        // an offline journal needs.
+        let state = State::default();
+        push_event(
+            &state,
+            1_700_000_000_000,
+            boot_event_fields(0x505, "sqlite", 1, true),
+        );
+        push_event(
+            &state,
+            1_700_000_000_001,
+            "\"kind\":\"keepalive\"".to_string(),
+        );
+        let json = events_json(&state);
+        assert!(
+            json.contains("\"seq\":0,\"ms\":1700000000000,\"kind\":\"boot\""),
+            "{json}"
+        );
+        assert!(json.contains("\"host_boot\":1285"), "{json}");
+        assert!(json.contains("\"version\":\""), "{json}");
+        assert!(json.contains("\"storage\":\"sqlite\""), "{json}");
+        assert!(json.contains("\"config_profile\":1"), "{json}");
+        assert!(json.contains("\"site\":true"), "{json}");
+        assert!(json.contains("\"dropped\":0,\"next_seq\":2"), "{json}");
     }
 
     #[test]

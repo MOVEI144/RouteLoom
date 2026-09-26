@@ -66,6 +66,7 @@ const LINE_OVERHEAD: usize = 96;
 pub const EVENT_KINDS: &[&str] = &[
     "adapter",
     "auth_ok",
+    "boot",
     "credit",
     "credit_close",
     "credit_grant",
@@ -1166,6 +1167,13 @@ mod tests {
             gateways: None,
             payloads: true,
         })
+    }
+
+    #[test]
+    fn boot_is_a_subscribable_event_kind() {
+        // The daemon's first ring entry (restart boundary + build/config
+        // identity) must survive a kinds filter so journals can select it.
+        assert!(EVENT_KINDS.contains(&"boot"));
     }
 
     #[test]

@@ -99,7 +99,9 @@ fn exchange_first(
 }
 
 fn usage() {
-    eprintln!("Read-only daemon diagnostics: adapter | events | deliveries");
+    eprintln!(
+        "Read-only daemon diagnostics: adapter | events [--follow [--kinds k1,k2]] | deliveries"
+    );
     eprintln!(
         "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-retry --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-recover --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --mode adopt-known|reprovision --new-store-generation <u32> --new-revision <u64> [--snapshot-hash <64hex>] [--baseline <hex>]|config-recovery-info --network <16hex> --target <16hex> --config-namespace <u16>|trust-install --network <16hex> --target <16hex> --manifest <file>|trust-status --network <16hex> --target <16hex>|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)|group-send --network <16hex> --group <1-65535|ALL> --payload <hex> [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered] [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]|group-get --id <grp-opid> [--wait-ms 0-15000]"
     );
@@ -414,7 +416,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let command = match remaining.as_slice() {
         [name] if name == "status" => "STATUS".to_string(),
         [name] if name == "adapter" => "ADAPTER".to_string(),
-        [name] if name == "events" => "EVENTS".to_string(),
+        [name, rest @ ..] if name == "events" => events_command(rest)?,
         [name] if name == "deliveries" => "DELIVERIES".to_string(),
         [name] if name == "diagnostics" => "DIAGNOSTICS".to_string(),
         [name] if name == "autonomy" => "AUTONOMY".to_string(),
@@ -451,7 +453,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("invalid command".into());
         }
     };
-    let streaming = remaining.first().map(String::as_str) == Some("node-events");
+    let streaming = is_streaming_command(&remaining);
     let (response, mut reader) =
         exchange_first(&socket, &command, CLI_READ_TIMEOUT, CLI_WRITE_TIMEOUT)?;
     print!("{response}");
@@ -546,6 +548,68 @@ fn node_get_command(args: &[String]) -> Result<String, Box<dyn std::error::Error
 
 /// `node-events`: an events-stream subscription filtered to the membership
 /// kinds; the connection stays open and notifications stream to stdout.
+/// Verbs that hold the connection after the first line: every further
+/// line is one subscription notification, printed until interrupted.
+fn is_streaming_command(remaining: &[String]) -> bool {
+    let Some(first) = remaining.first().map(String::as_str) else {
+        return false;
+    };
+    if first == "node-events" {
+        return true;
+    }
+    first == "events" && remaining.iter().any(|arg| arg == "--follow")
+}
+
+/// `events [--follow [--kinds k1,k2]]`: bare form keeps the one-shot
+/// EVENTS ring dump; `--follow` replays the ring from the oldest entry
+/// and then streams every event until interrupted. Redirect the follow
+/// stream to a file for the post-mortem journal — it carries the boot
+/// boundary, overflow markers, and heartbeats in-band.
+fn events_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    if args.is_empty() {
+        return Ok("EVENTS".to_string());
+    }
+    let mut follow = false;
+    let mut kinds: Option<Vec<String>> = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--follow" => {
+                follow = true;
+                index += 1;
+            }
+            "--kinds" => {
+                index += 1;
+                let Some(list) = args.get(index) else {
+                    return Err("events --kinds needs a comma-separated kind list".into());
+                };
+                let entries: Vec<String> = list.split(',').map(str::to_string).collect();
+                if entries.iter().any(|entry| entry.is_empty()) {
+                    return Err("events --kinds entries must be non-empty".into());
+                }
+                kinds = Some(entries);
+                index += 1;
+            }
+            other => return Err(format!("events: unexpected argument {other}").into()),
+        }
+    }
+    if !follow {
+        return Err("events --kinds needs --follow".into());
+    }
+    let filter = kinds.map_or_else(String::new, |entries| {
+        let joined = entries
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(",\"filter\":{{\"kinds\":[{joined}]}}")
+    });
+    Ok(format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"messages.subscribe\",\"params\":{{\"stream\":\"events\",\"from\":\"earliest\"{filter}}}}}",
+        request_id(),
+    ))
+}
+
 fn node_events_request() -> String {
     format!(
         "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"messages.subscribe\",\"params\":{{\"stream\":\"events\",\"from\":\"latest\",\"filter\":{{\"kinds\":[\"node_joined\",\"node_left\",\"link_changed\"]}}}}}}",
@@ -2182,6 +2246,44 @@ mod tests {
         ] {
             assert!(routeloom_json::parse(line.strip_prefix("API1 ").unwrap()).is_ok());
         }
+    }
+
+    #[test]
+    fn events_command_dump_and_follow() {
+        // Bare `events` keeps the one-shot EVENTS ring dump.
+        assert_eq!(events_command(&args(&[])).unwrap(), "EVENTS");
+        // `--follow` replays the ring from the oldest entry, then streams
+        // every event until interrupted: redirect to a file for the
+        // post-mortem journal.
+        let line = events_command(&args(&["--follow"])).unwrap();
+        assert!(line.starts_with("API1 {"), "{line}");
+        assert!(line.contains("\"method\":\"messages.subscribe\""), "{line}");
+        assert!(line.contains("\"stream\":\"events\""), "{line}");
+        assert!(line.contains("\"from\":\"earliest\""), "{line}");
+        assert!(!line.contains("\"filter\""), "{line}");
+        assert!(routeloom_json::parse(line.strip_prefix("API1 ").unwrap()).is_ok());
+        let line = events_command(&args(&["--follow", "--kinds", "boot,error"])).unwrap();
+        assert!(line.contains("\"kinds\":[\"boot\",\"error\"]"), "{line}");
+        assert!(routeloom_json::parse(line.strip_prefix("API1 ").unwrap()).is_ok());
+        // --kinds without --follow, unknown flags, and empty kinds fail.
+        assert!(events_command(&args(&["--kinds", "boot"])).is_err());
+        assert!(events_command(&args(&["--follow", "--bogus"])).is_err());
+        assert!(events_command(&args(&["--follow", "--kinds"])).is_err());
+        assert!(events_command(&args(&["--follow", "--kinds", ""])).is_err());
+        assert!(events_command(&args(&["--follow", "--kinds", "boot,,error"])).is_err());
+        assert!(events_command(&args(&["extra"])).is_err());
+    }
+
+    #[test]
+    fn streaming_verbs_hold_the_connection() {
+        assert!(is_streaming_command(&args(&["node-events"])));
+        assert!(is_streaming_command(&args(&["events", "--follow"])));
+        assert!(is_streaming_command(&args(&[
+            "events", "--follow", "--kinds", "boot"
+        ])));
+        assert!(!is_streaming_command(&args(&["events"])));
+        assert!(!is_streaming_command(&args(&["status"])));
+        assert!(!is_streaming_command(&args(&[])));
     }
 
     #[test]
