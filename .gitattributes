@@ -1,0 +1,2 @@
+# Raw hardware evidence (serial/USB logs) is kept byte-for-byte.
+artifacts/** -whitespace
