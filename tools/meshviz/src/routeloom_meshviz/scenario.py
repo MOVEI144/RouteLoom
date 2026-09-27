@@ -22,6 +22,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import rlb1
+
 SCHEMA = 'routeloom-lab-scenario-v1'
 JOURNAL_FORMAT = 'routeloom-scenario-journal-v1'
 
@@ -48,12 +50,18 @@ STEP_DEFS = {
     'formation_wait': ('api1', False, {'count'}),
     'rollcall': ('api1', False, {'action', 'group'}),
     'ping': ('api1', False, {'to', 'count', 'interval_ms', 'payload_len', 'ttl_ms'}),
-    'peer_send': ('api1', False, {'targets', 'count', 'interval_ms', 'payload_len', 'ttl_ms',
-                                  'delivery'}),
+    # peer_send/soak are device-generated traffic (D10/D12): the runner
+    # issues bounded RLB1 generator commands on the bench channel — the
+    # device, not the host, produces the data packets (design §5.2/§7.4).
+    # They are dangerous like the other state-mutating steps: a timeout means
+    # the generator's fate is unproven → incomplete, never a claimed failure.
+    'peer_send': ('bench', True, {'pairs', 'count', 'interval_ms', 'payload_len',
+                                  'ttl_ms', 'seed'}),
     'control_send': ('api1', False, {'target', 'period_ms', 'duration_ms',
                                      'payload_len'}),
-    'soak': ('api1', False, {'targets', 'duration_ms', 'per_node_interval_ms',
-                             'payload_len', 'ttl_ms', 'queue_mode'}),
+    'soak': ('bench', True, {'pairs', 'duration_ms', 'interval_ms',
+                             'payload_len', 'ttl_ms', 'seed',
+                             'max_data_messages'}),
     'drain': (None, False, set()),
     'reset_rejoin': ('device', True, {'target'}),
     'exclusion': ('api1', True, {'target', 'reason', 'expected_generation'}),
@@ -78,6 +86,26 @@ BENCH_RUN_WINDOW_CALLS = 64
 BENCH_RUN_WINDOW_MS = 60_000
 BENCH_INFLIGHT_MAX = 4
 
+# bench_node generator bounds (components/routeloom_bench/app.hpp): a run is
+# at most 64 packets or 60 s, whichever first; every packet body carries the
+# 8-byte destination-boot bind prefix, so payload_len is at least 8.
+GEN_MAX_COUNT = 64
+GEN_MAX_RUN_MS = 60_000
+GEN_PAYLOAD_MIN = 8
+GEN_PAYLOAD_MAX = 96                        # RLB1 body bound on unicast
+GEN_TTL_MAX_MS = 30_000                     # kMaxMessageLifetimeMs
+MAX_PAIRS = 8
+# Bounded-interval collection: the runner polls generator status every
+# BENCH_STATUS_POLL_MS while a run is live.
+BENCH_STATUS_POLL_MS = 5_000
+# One command per phase gets at most one same-(run,seq) re-issue — the
+# device dedups commands, so the retry can never mint a second run.
+BENCH_PHASE_ATTEMPTS = 2
+# After soak's duration ends, an in-flight run gets this drain allowance
+# inside the step deadline before the step is called unverifiable.
+SOAK_DRAIN_SLACK_MS = 90_000
+MAX_BENCH_RUNS_PER_STEP = 512
+
 # Device-channel ops a caller-side driver implements. `provision` maps onto
 # provisioning.Provisioner (D03a/b journaled flow); `power_on`/`reset` are
 # board power control — USB disconnect is never accepted as a substitute.
@@ -99,6 +127,43 @@ def _is_hex_id(value, length=HEX_ID_LEN):
 def _is_idem_key(value):
     return isinstance(value, str) and 8 <= len(value) <= 64 and \
         all(c in '0123456789abcdefABCDEF-_' for c in value)
+
+
+def bench_run_ms(count: int, interval_ms: int) -> int:
+    """One generator run's nominal data span — the device caps it at
+    GEN_MAX_RUN_MS regardless of pace."""
+    return min(count * interval_ms, GEN_MAX_RUN_MS)
+
+
+def bench_calls_per_run(run_ms: int) -> int:
+    """Host admission calls for one bounded run: hello×2 + start + status
+    polls over the run's life + count_get (+ the stop on a drain path)."""
+    return 4 + run_ms // BENCH_STATUS_POLL_MS + 1
+
+
+def bench_calls_per_minute() -> int:
+    """Admission demand while a run is live: one status poll per interval."""
+    return 60_000 // BENCH_STATUS_POLL_MS + 5
+
+
+PEER_SEND_RESULT_NAMES = {
+    rlb1.PS_QUERY: 'query', rlb1.PS_STARTED: 'started',
+    rlb1.PS_DUPLICATE: 'duplicate', rlb1.PS_STALE_BOOT: 'stale_boot',
+    rlb1.PS_BUSY: 'busy', rlb1.PS_INVALID: 'invalid',
+    rlb1.PS_STOPPED: 'stopped', rlb1.PS_NOT_RUNNING: 'not_running'}
+
+GEN_STATE_NAMES = {
+    rlb1.GEN_IDLE: 'idle', rlb1.GEN_RUNNING: 'running',
+    rlb1.GEN_COMPLETE: 'complete', rlb1.GEN_STOPPED: 'stopped',
+    rlb1.GEN_TIME_BOUND: 'time_bound', rlb1.GEN_PEER_RESET: 'peer_reset'}
+
+
+def peer_send_result_name(code) -> str:
+    return PEER_SEND_RESULT_NAMES.get(code, f'result_{code}')
+
+
+def gen_state_name(state) -> str:
+    return GEN_STATE_NAMES.get(state, f'state_{state}')
 
 
 def load_document(text: str) -> dict:
@@ -212,6 +277,36 @@ def validate(doc: dict, capacity: dict | None = None) -> list[str]:
         def _target_id(t):
             return t if _is_hex_id(t) else t  # declared names resolve at arm time
 
+        def pair_list():
+            """peer_send/soak 'pairs': a list of [src, dst] (or {src,dst})
+            naming bench endpoints; aliases resolve at arm time."""
+            raw = step.get('pairs')
+            out = []
+            if not isinstance(raw, list) or not raw:
+                errors.append(f'{where}: pairs must be a non-empty list of [src,dst]')
+                return out
+            if len(raw) > MAX_PAIRS:
+                errors.append(f'{where}: pairs exceeds {MAX_PAIRS}')
+                return out
+            for p in raw:
+                if isinstance(p, dict):
+                    pair = (p.get('src'), p.get('dst'))
+                elif isinstance(p, (list, tuple)) and len(p) == 2:
+                    pair = (p[0], p[1])
+                else:
+                    errors.append(f'{where}: pair must be [src,dst]')
+                    continue
+                src, dst = pair
+                if not _is_id_or_declared(src) or not _is_id_or_declared(dst):
+                    errors.append(f'{where}: bad pair "{p}" (16-hex ids or declared nodes)')
+                    continue
+                if isinstance(src, str) and isinstance(dst, str) and \
+                        src.lower() == dst.lower():
+                    errors.append(f'{where}: pair src == dst')
+                    continue
+                out.append((src, dst))
+            return out
+
         def bounded_int(name, lo, hi, required=False):
             v = step.get(name)
             if v is None and not required:
@@ -249,17 +344,47 @@ def validate(doc: dict, capacity: dict | None = None) -> list[str]:
             worst_minute = max(worst_minute,
                                min(sends, -(-60_000 // max(interval, 1))))
             bounded_int('payload_len', 0, PAYLOAD_MAX_NODE)
-        elif kind == 'peer_send':
-            targets = target_list('targets')
-            count = bounded_int('count', 1, 4096, required=True)
-            interval = bounded_int('interval_ms', 50, 3_600_000, required=True)
-            sends = count * max(1, len(targets))
-            total_calls += sends
-            worst_minute = max(worst_minute,
-                               min(sends, -(-60_000 // max(interval, 1))))
-            bounded_int('payload_len', 0, PAYLOAD_MAX_NODE)
-            if step.get('delivery') not in (None, 'BEST_EFFORT', 'RELIABLE'):
-                errors.append(f'{where}: delivery must be BEST_EFFORT|RELIABLE')
+        elif kind in ('peer_send', 'soak'):
+            # Both kinds drive bench_node generators: the host submits only
+            # the bounded RLB1 commands (hello/start/polls/stop/count_get);
+            # the device owns the data packets. Admission cost is the
+            # command count, never count×pairs packets.
+            pairs = pair_list()
+            interval = bounded_int('interval_ms', 50, 600_000, required=True)
+            bounded_int('payload_len', GEN_PAYLOAD_MIN, GEN_PAYLOAD_MAX)
+            bounded_int('ttl_ms', 1, GEN_TTL_MAX_MS)
+            seed = step.get('seed')
+            if seed is not None and (type(seed) is not int or
+                                     not 0 <= seed <= 0xFFFFFFFF):
+                errors.append(f'{where}: seed must be a u32')
+            if kind == 'peer_send':
+                count = bounded_int('count', 1, GEN_MAX_COUNT, required=True)
+                run_ms = bench_run_ms(count, interval)
+                if count * interval > GEN_MAX_RUN_MS:
+                    errors.append(f'{where}: count*interval_ms exceeds the device '
+                                  f'{GEN_MAX_RUN_MS}ms run bound')
+                calls = len(pairs) * bench_calls_per_run(run_ms) + 1
+                total_calls += calls
+                if timeout < len(pairs) * (run_ms + 15_000):
+                    errors.append(f'{where}: timeout_ms must cover {len(pairs)} '
+                                  f'sequential bounded runs (~{run_ms}ms each + drain)')
+            else:
+                duration = bounded_int('duration_ms', 1000, MAX_DURATION_MS,
+                                       required=True)
+                bounded_int('max_data_messages', 1, 1_000_000)
+                count_per_run = min(GEN_MAX_COUNT,
+                                    max(1, GEN_MAX_RUN_MS // max(interval, 1)))
+                run_ms = bench_run_ms(count_per_run, interval)
+                runs = -(-duration // run_ms) if run_ms else 0
+                calls = runs * bench_calls_per_run(run_ms) + 1
+                total_calls += calls
+                # The step deadline must outlive the soak plus one run's
+                # drain — a tighter timeout would truncate interval evidence.
+                if timeout < duration + SOAK_DRAIN_SLACK_MS:
+                    errors.append(f'{where}: timeout_ms must be >= duration_ms + '
+                                  f'{SOAK_DRAIN_SLACK_MS} (bounded-interval drain)')
+                total_duration += max(0, duration + SOAK_DRAIN_SLACK_MS - timeout)
+            worst_minute = max(worst_minute, bench_calls_per_minute())
         elif kind == 'control_send':
             target_list('target')
             period = bounded_int('period_ms', 100, 600_000, required=True)
@@ -273,16 +398,22 @@ def validate(doc: dict, capacity: dict | None = None) -> list[str]:
                     f'(max {CONTROL_PERIOD_MAX_MS})')
             bounded_int('payload_len', 0, PAYLOAD_MAX_NODE)
         elif kind == 'soak':
-            targets = target_list('targets')
+            pairs = pair_list()
             duration = bounded_int('duration_ms', 1000, MAX_DURATION_MS, required=True)
-            per_node = bounded_int('per_node_interval_ms', 100, 600_000, required=True)
-            calls = len(targets) * max(1, duration // per_node)
+            interval = bounded_int('interval_ms', 50, 600_000, required=True)
+            bounded_int('max_data_messages', 1, 1_000_000)
+            count_per_run = min(GEN_MAX_COUNT, max(1, GEN_MAX_RUN_MS // interval))
+            run_ms = bench_run_ms(count_per_run, interval)
+            runs = -(-duration // run_ms) if run_ms else 0
+            calls = runs * bench_calls_per_run(run_ms) + 1
             total_calls += calls
-            worst_minute = max(worst_minute,
-                               min(calls, -(-60_000 * len(targets) // per_node)))
-            bounded_int('payload_len', 0, PAYLOAD_MAX_NODE)
-            if step.get('queue_mode') not in (None, 'FIFO', 'LATEST_PER_DESTINATION'):
-                errors.append(f'{where}: queue_mode must be FIFO|LATEST_PER_DESTINATION')
+            worst_minute = max(worst_minute, bench_calls_per_minute())
+            # The step deadline must outlive the soak plus one run's drain —
+            # a tighter timeout would truncate an interval's evidence.
+            if timeout < duration + SOAK_DRAIN_SLACK_MS:
+                errors.append(f'{where}: timeout_ms must be >= duration_ms + '
+                              f'{SOAK_DRAIN_SLACK_MS} (bounded-interval drain)')
+            total_duration += max(0, duration + SOAK_DRAIN_SLACK_MS - timeout)
         elif kind == 'reset_rejoin':
             target_list('target')
         elif kind == 'exclusion':
@@ -385,6 +516,7 @@ class Op:
     result: dict | None = None
     idempotency_key: str | None = None
     params: dict | None = None
+    reconciles: str | None = None    # set on the op re-issued FOR a lost op
 
 
 @dataclass
@@ -583,6 +715,7 @@ class ScenarioRunner:
                     runner.ops.append(existing)
                     runner.tag_counter += 1
                     unresolved.append(existing)
+                existing.reconciles = entry.get('reconciles', existing.reconciles)
                 existing.status = entry['status']
                 existing.reply_ms = entry.get('reply_ms')
                 existing.ok = entry.get('ok')
@@ -701,7 +834,7 @@ class ScenarioRunner:
         spec = step.spec
         kind = step.kind
         step.detail.setdefault('rejoined', False)
-        if kind in ('ping', 'peer_send', 'control_send', 'soak'):
+        if kind in ('ping', 'control_send'):
             step.detail.setdefault('targets', self._send_targets(spec))
             step.detail.setdefault('duration_ms', spec.get('duration_ms'))
             # next_index = distinct planned indices consumed — 'send' rows
@@ -723,6 +856,8 @@ class ScenarioRunner:
             if sent:
                 step.detail['t0_ms'] = min(sent)
             step.next_at_ms = 0
+        elif kind in ('peer_send', 'soak'):
+            self._rehydrate_bench(step, now_ms)
         elif kind in ('sequential_power_on', 'flash_provision'):
             targets = [self._target_id(t) for t in spec['targets']]
             done = set()
@@ -773,6 +908,138 @@ class ScenarioRunner:
                            if k in ('rejoined',)}
             self._step_enter(step, now_ms)
 
+    def _rehydrate_bench(self, step: StepState, now_ms: int):
+        """Rebuild a running bench step's volatile state from journaled ops —
+        per run_uuid, in issue order. Replied ops carry their decoded result
+        on the journal row, so boots/counters survive a restart; a command
+        that is still 'sent' leaves its phase pending for reconcile."""
+        spec = step.spec
+        pairs = [(self._target_id(p[0]), self._target_id(p[1]))
+                 for p in spec.get('pairs', [])]
+        bench = {'pairs': pairs, 'pair_i': 0, 'runs': [], 'gen': None}
+        if step.kind == 'soak':
+            bench['pair_share_ms'] = max(1, spec['duration_ms'] // max(1, len(pairs)))
+            bench['pair_end_ms'] = None
+            bench['interval'] = 0
+            bench['ended'] = False
+            bench['max_data_messages'] = spec.get('max_data_messages')
+            bench['accum'] = {'planned': 0, 'submitted': 0, 'admitted': 0,
+                              'delivered': 0, 'failed': 0, 'unknown': 0,
+                              'dst_unique': 0, 'dst_duplicates': 0}
+        step.detail['bench'] = bench
+        count_default = spec.get('count') or min(
+            GEN_MAX_COUNT, max(1, GEN_MAX_RUN_MS // spec['interval_ms']))
+        # Group the step's bench ops by run uuid in issue order — each run is
+        # one pair's (or one soak interval's) command sequence.
+        runs: dict[str, dict] = {}
+        order = []
+        for o in self.ops:
+            if o.step != step.index or o.channel != 'bench':
+                continue
+            p = o.params or {}
+            run_uuid = p.get('run')
+            if not isinstance(run_uuid, str):
+                continue
+            if run_uuid not in runs:
+                # A run belongs to the pair its commands address — first op's
+                # node is the source (hellos/start), later hellos/count_get
+                # name the destination.
+                pair_i = next((i for i, (s, d) in enumerate(pairs)
+                               if s.lower() == str(p.get('node', '')).lower()
+                               or d.lower() == str(p.get('node', '')).lower()), 0)
+                runs[run_uuid] = {'run': run_uuid, 'seq': 0, 'phase': 'hello_src',
+                                  'pair_i': pair_i, 'interval': 0,
+                                  'src_boot': None, 'dst_boot': None,
+                                  'pending': None, 'attempts': 0,
+                                  'poll_misses': 0, 'last_poll_ms': 0,
+                                  'last_status': None, 'dst_count': None,
+                                  'count': count_default, 'deadline_ms': None,
+                                  'closed': None}
+                order.append(run_uuid)
+                if step.kind == 'soak':
+                    bench['interval'] += 1
+                    runs[run_uuid]['interval'] = bench['interval']
+            gen = runs[run_uuid]
+            if not isinstance(p.get('seq'), int):
+                continue
+            if o.status == 'sent':
+                # In-flight at crash: pending reuse keeps its (run, seq) so a
+                # reconcile re-issue dedups inside the device command log.
+                gen['seq'] = p['seq']
+                gen['pending'] = {'method': o.method, **p}
+                continue
+            gen['seq'] = max(gen['seq'], p['seq'])
+            gen['pending'] = None
+            result = o.result if isinstance(o.result, dict) else None
+            if o.status == 'replied' and o.ok is True and result is not None:
+                src, dst = pairs[gen['pair_i']]
+                node = str(p.get('node', '')).lower()
+                if o.method == 'hello':
+                    if node == src.lower():
+                        gen['src_boot'] = result.get('boot_incarnation')
+                        if gen['phase'] == 'hello_src':
+                            gen['phase'] = 'hello_dst'
+                    elif node == dst.lower():
+                        gen['dst_boot'] = result.get('boot_incarnation')
+                        if gen['phase'] in ('hello_src', 'hello_dst'):
+                            gen['phase'] = 'start'
+                elif o.method == 'peer_send_start':
+                    gen['last_status'] = result
+                    code = result.get('result')
+                    if code in (rlb1.PS_STARTED, rlb1.PS_DUPLICATE):
+                        gen['phase'] = 'running'
+                    elif code == rlb1.PS_BUSY:
+                        gen['closed'] = 'busy'
+                    else:
+                        gen['closed'] = 'refused'
+                        gen['reason'] = peer_send_result_name(code)
+                elif o.method in ('peer_send_status', 'peer_send_stop'):
+                    gen['last_status'] = result
+                    state = result.get('state')
+                    if state in rlb1.GEN_TERMINAL or state == rlb1.GEN_IDLE \
+                            or result.get('result') in (rlb1.PS_STOPPED,
+                                                        rlb1.PS_NOT_RUNNING):
+                        gen['phase'] = 'count_dst'
+                elif o.method == 'count_get':
+                    gen['dst_count'] = result
+                    status = gen.get('last_status') or {}
+                    gen['closed'] = gen_state_name(status.get('state'))
+            elif o.status == 'replied' and o.ok is not True:
+                # A refused/missed command mid-run: the run's evidence is no
+                # longer provable — close it unknown (the live path would
+                # have retried; on resume the miss stands once).
+                if gen['closed'] is None:
+                    gen['closed'] = 'unknown'
+                    gen['reason'] = f'resumed:{o.code or "unreplied"}'
+        # Fold closed runs into evidence; reopen the live tail.
+        for run_uuid in order:
+            gen = runs[run_uuid]
+            if gen['closed'] is None:
+                bench['pair_i'] = gen['pair_i']
+                if step.kind == 'soak':
+                    bench['interval'] = gen['interval']
+                bench['gen'] = gen
+                # A run reopened mid-'running' keeps polling; its deadline is
+                # recomputed on the next emit.
+                continue
+            bench['pair_i'] = gen['pair_i'] + (0 if step.kind == 'soak' else 1)
+            status = gen.get('last_status')
+            row = {'pair': gen['pair_i'], 'interval': gen['interval'],
+                   'run': gen['run'], 'outcome': gen['closed'],
+                   'reason': gen.get('reason'),
+                   'src_boot': gen.get('src_boot'), 'dst_boot': gen.get('dst_boot'),
+                   'status': status, 'dst_count': gen.get('dst_count'),
+                   'dst_unobserved': gen['dst_count'] is None}
+            bench['runs'].append(row)
+            if step.kind == 'soak':
+                accum = bench['accum']
+                for name in ('planned', 'submitted', 'admitted', 'delivered',
+                             'failed', 'unknown'):
+                    accum[name] += (status or {}).get(name, 0)
+                dst_count = gen.get('dst_count') or {}
+                accum['dst_unique'] += dst_count.get('unique_packets', 0)
+                accum['dst_duplicates'] += dst_count.get('duplicates', 0)
+
     # -- plumbing --------------------------------------------------------------
 
     def _target_id(self, t) -> str:
@@ -787,6 +1054,11 @@ class ScenarioRunner:
             self.gap(now_ms, f'{now_ms - self._last_emit_ms}ms without runner output',
                      self._last_emit_ms)
         self._last_emit_ms = now_ms
+        if channel == 'bench':
+            # The op tag salts the bench submit key — each attempt is a
+            # distinct host operation while the device still dedups by
+            # (run, seq) inside the frame.
+            params = {'op_tag': tag, **params}
         op = Op(tag=tag, step=step.index, channel=channel, method=method,
                 sent_ms=now_ms, idempotency_key=idempotency_key,
                 params=dict(params))
@@ -976,13 +1248,32 @@ class ScenarioRunner:
             if spec.get('group'):
                 params['group'] = spec['group']
             self._emit('api1', method, params, step, now_ms)
-        elif kind in ('ping', 'peer_send', 'control_send', 'soak'):
+        elif kind in ('ping', 'control_send'):
             step.detail['targets'] = self._send_targets(spec)
             step.next_index = 0
             step.next_at_ms = now_ms
             step.detail['duration_ms'] = spec.get('duration_ms')
             step.detail['deadline'] = step.deadline_ms
             self._ensure_epoch(step, now_ms)
+        elif kind in ('peer_send', 'soak'):
+            # Device-generated traffic: the runner only issues the bounded
+            # RLB1 commands; the device owns the data path. `bench` state is
+            # rebuilt from journaled ops on resume — it is a cache, never a
+            # source of truth.
+            pairs = [(self._target_id(p[0]), self._target_id(p[1]))
+                     for p in spec.get('pairs', [])]
+            bench = {'pairs': pairs, 'pair_i': 0, 'runs': [], 'gen': None}
+            if kind == 'soak':
+                share = spec['duration_ms'] // max(1, len(pairs))
+                bench['pair_share_ms'] = max(1, share)
+                bench['pair_end_ms'] = None
+                bench['interval'] = 0
+                bench['ended'] = False
+                bench['max_data_messages'] = spec.get('max_data_messages')
+                bench['accum'] = {'planned': 0, 'submitted': 0, 'admitted': 0,
+                                  'delivered': 0, 'failed': 0, 'unknown': 0,
+                                  'dst_unique': 0, 'dst_duplicates': 0}
+            step.detail['bench'] = bench
         elif kind == 'drain':
             pass                                    # _step_poll waits outstanding
         elif kind == 'reset_rejoin':
@@ -1068,8 +1359,10 @@ class ScenarioRunner:
                     not any(o.method == 'members.list' for o in self.outstanding.values()):
                 step.detail['last_poll_ms'] = now_ms
                 self._emit('api1', 'members.list', {}, step, now_ms)
-        elif kind in ('ping', 'peer_send', 'control_send', 'soak'):
+        elif kind in ('ping', 'control_send'):
             self._send_poll(step, now_ms)
+        elif kind in ('peer_send', 'soak'):
+            self._bench_poll(step, now_ms)
         elif kind == 'drain':
             if not self.outstanding:
                 self._step_done(step, now_ms)
@@ -1193,6 +1486,291 @@ class ScenarioRunner:
         n = spec.get('payload_len', 8)
         return (body * (n // 32 + 1))[:n].hex()
 
+    # -- bench device-generator steps (D10/D12) --------------------------------
+    #
+    # The runner never puts data-plane packets on the wire for peer_send/soak.
+    # Per pair it runs one bounded generator run on the SOURCE bench node —
+    # hello → hello → start → status polls → stop/count — then moves on. Every
+    # RLB1 command is a journaled 'bench' op; a lost command re-issues under
+    # the same (run_uuid, seq) so the device's command dedup never mints a
+    # second run. A command that never produces evidence closes the run as
+    # unknown — missing replies are never counted as success.
+    #
+    # gen phases: hello_src → hello_dst → start → running → (stop) → count_dst.
+    # 'running' emits bounded status queries; every other phase emits exactly
+    # one command, re-issued under the SAME seq on a transport miss.
+
+    def _bench_poll(self, step: StepState, now_ms: int):
+        bench = step.detail['bench']
+        if any(o.step == step.index and o.channel == 'bench' and o.status == 'sent'
+               for o in self.outstanding.values()):
+            return                       # one command in flight — replies stay paired
+        gen = bench['gen']
+        if gen is None:
+            gen = self._bench_open_run(step, now_ms)
+            if gen is None:
+                return                   # _bench_finish already settled the step
+        self._bench_emit_phase(step, gen, now_ms)
+
+    def _bench_open_run(self, step: StepState, now_ms: int):
+        """Pick the next pair/interval and open its run; returns None when the
+        step has no work left (and settles it)."""
+        bench = step.detail['bench']
+        pairs = bench['pairs']
+        if not pairs:
+            self._step_done(step, now_ms, 'failed', reason='no_pairs')
+            return None
+        while bench['pair_i'] < len(pairs):
+            if step.kind == 'soak':
+                pair_end = bench['pair_end_ms']
+                if pair_end is None:
+                    bench['pair_end_ms'] = now_ms + bench['pair_share_ms']
+                elif now_ms >= pair_end or bench.get('ended'):
+                    bench['pair_i'] += 1
+                    bench['pair_end_ms'] = None
+                    continue
+                bench['interval'] += 1
+            elif bench.get('pair_done'):
+                bench['pair_i'] += 1
+                bench['pair_done'] = False
+                continue
+            gen = self._bench_new_gen(step, bench['pair_i'],
+                                      bench.get('interval', 0))
+            bench['gen'] = gen
+            return gen
+        self._bench_finish(step, now_ms)
+        return None
+
+    def _bench_new_gen(self, step: StepState, pair_i: int, interval: int) -> dict:
+        run = hashlib.sha256(
+            f'{self.journal.run_id}:{step.index}:{pair_i}:{interval}'
+            .encode()).digest()[:16].hex()
+        spec = step.spec
+        interval_ms = spec['interval_ms']
+        count = spec.get('count') or min(
+            GEN_MAX_COUNT, max(1, GEN_MAX_RUN_MS // interval_ms))
+        return {'run': run, 'seq': 0, 'phase': 'hello_src', 'pair_i': pair_i,
+                'interval': interval, 'src_boot': None, 'dst_boot': None,
+                'pending': None, 'attempts': 0, 'poll_misses': 0,
+                'last_poll_ms': 0, 'last_status': None, 'dst_count': None,
+                'count': count,
+                'deadline_ms': None}
+
+    def _bench_emit_phase(self, step: StepState, gen: dict, now_ms: int):
+        bench = step.detail['bench']
+        phase = gen['phase']
+        src, dst = bench['pairs'][gen['pair_i']]
+        if phase == 'running':
+            spec = step.spec
+            if step.kind == 'soak' and not gen.get('stop_sent') and \
+                    (bench.get('ended') or
+                     (bench.get('pair_end_ms') is not None
+                      and now_ms >= bench['pair_end_ms'])):
+                # The bounded interval ended — drain explicitly; the device
+                # closes the run as STOPPED, never by silence.
+                gen['stop_sent'] = True
+                gen['phase'] = 'stop'
+                self._bench_emit_phase(step, gen, now_ms)
+                return
+            if gen['deadline_ms'] is None:
+                # Nominal run span + the longest packet lifetime + slack —
+                # past this an unpolled run is unverifiable.
+                gen['deadline_ms'] = now_ms + \
+                    bench_run_ms(gen['count'], spec['interval_ms']) + \
+                    spec.get('ttl_ms', GEN_TTL_MAX_MS) + 10_000
+            if now_ms >= gen['deadline_ms']:
+                self._bench_close_run(step, gen, 'unknown', now_ms,
+                                      reason='status_deadline')
+                return
+            if now_ms - gen['last_poll_ms'] < BENCH_STATUS_POLL_MS:
+                return
+            gen['last_poll_ms'] = now_ms
+            gen['seq'] += 1
+            self._emit('bench', 'peer_send_status',
+                       {'node': src, 'run': gen['run'], 'seq': gen['seq']},
+                       step, now_ms)
+            return
+        if gen['pending'] is None:
+            gen['seq'] += 1
+            gen['pending'] = self._bench_command(step, gen, phase, src, dst)
+        params = dict(gen['pending'])
+        method = params.pop('method')
+        self._emit('bench', method, params, step, now_ms)
+
+    def _bench_command(self, step: StepState, gen: dict, phase: str,
+                       src: str, dst: str) -> dict:
+        spec = step.spec
+        params = {'node': src, 'run': gen['run'], 'seq': gen['seq']}
+        if phase == 'hello_src':
+            params['method'] = 'hello'
+        elif phase == 'hello_dst':
+            params['method'] = 'hello'
+            params['node'] = dst
+        elif phase == 'start':
+            params.update({'method': 'peer_send_start',
+                           'expected_boot': gen['src_boot'] or 0,
+                           'expected_dest_boot': gen['dst_boot'] or 0,
+                           'destination': dst,
+                           'sequence_begin': 1,
+                           'count': gen['count'],
+                           'payload_len': spec.get('payload_len', GEN_PAYLOAD_MIN),
+                           'seed': spec.get('seed', 0),
+                           'interval_ms': spec['interval_ms'],
+                           'ttl_ms': spec.get('ttl_ms', GEN_TTL_MAX_MS),
+                           'max_inflight': 1})
+        elif phase == 'stop':
+            params.update({'method': 'peer_send_stop',
+                           'expected_boot': gen['src_boot'] or 0})
+        elif phase == 'count_dst':
+            params.update({'method': 'count_get', 'node': dst})
+        else:
+            raise ScenarioError('bad_phase', phase)
+        return params
+
+    def _bench_reply(self, step: StepState, op: Op, result: dict, now_ms: int):
+        """A bench op answered — advance the run's phase on the reply's own
+        evidence, keyed by (run, seq) so a reconciled re-issue lands in the
+        same slot."""
+        bench = step.detail['bench']
+        gen = bench.get('gen')
+        params = op.params or {}
+        if gen is None or params.get('run') != gen['run'] \
+                or params.get('seq') != gen['seq']:
+            return                       # stale/superseded — journaled, unused
+        gen['pending'] = None
+        gen['attempts'] = 0
+        method = op.method
+        if method == 'hello':
+            boot = result.get('boot_incarnation')
+            src, dst = bench['pairs'][gen['pair_i']]
+            if params.get('node', '').lower() == src.lower():
+                gen['src_boot'] = boot
+                gen['phase'] = 'hello_dst'
+            else:
+                gen['dst_boot'] = boot
+                gen['phase'] = 'start'
+        elif method == 'peer_send_start':
+            gen['last_status'] = result
+            code = result.get('result')
+            if code in (rlb1.PS_STARTED, rlb1.PS_DUPLICATE):
+                # STARTED = accepted; DUPLICATE = a lost first reply —
+                # dedup proved this (run,seq) is the already-running one.
+                gen['phase'] = 'running'
+                gen['last_poll_ms'] = now_ms
+            elif code == rlb1.PS_BUSY:
+                self._bench_close_run(step, gen, 'busy', now_ms)
+            else:                        # STALE_BOOT / INVALID — a refusal
+                self._bench_close_run(
+                    step, gen, 'refused', now_ms,
+                    reason=peer_send_result_name(code))
+        elif method in ('peer_send_status', 'peer_send_stop'):
+            gen['last_status'] = result
+            gen['poll_misses'] = 0
+            state = result.get('state')
+            if state in rlb1.GEN_TERMINAL or state == rlb1.GEN_IDLE \
+                    or result.get('result') in (rlb1.PS_STOPPED, rlb1.PS_NOT_RUNNING):
+                gen['phase'] = 'count_dst'
+            elif method == 'peer_send_status' and step.kind == 'soak' \
+                    and bench.get('max_data_messages') is not None:
+                # The soak's data budget is spent — drain the live run
+                # explicitly rather than letting it run to its own bound.
+                if bench['accum']['submitted'] + \
+                        result.get('submitted', 0) >= \
+                        bench['max_data_messages']:
+                    bench['ended'] = True
+        elif method == 'count_get':
+            gen['dst_count'] = result
+            status = gen.get('last_status') or {}
+            self._bench_close_run(
+                step, gen, gen_state_name(status.get('state')), now_ms)
+
+    def _bench_failed(self, step: StepState, op: Op, code: str, now_ms: int):
+        bench = step.detail['bench']
+        gen = bench.get('gen')
+        params = op.params or {}
+        if gen is None or params.get('run') != gen['run'] \
+                or params.get('seq') != gen['seq']:
+            return                       # superseded — the journaled row stands
+        if code in ('INVALID_ARGUMENT', 'BENCH_DECODE', 'UNKNOWN_BENCH_OP'):
+            # A caller-side bug or an unparseable reply — not recoverable by
+            # re-issue; the step fails honestly.
+            self._step_done(step, now_ms, 'failed',
+                            reason=f'bench:{code}', op=op.tag)
+            return
+        gen['attempts'] += 1
+        if gen['phase'] == 'running':
+            gen['poll_misses'] += 1
+            if gen['poll_misses'] < 3:
+                return                   # bounded interval: next poll retries
+            self._bench_close_run(step, gen, 'unknown', now_ms,
+                                  reason='status_unanswered')
+            return
+        if gen['attempts'] < BENCH_PHASE_ATTEMPTS:
+            return                       # same-(run,seq) re-issue on next poll
+        if gen['phase'] == 'count_dst':
+            # The source's status evidence still stands; only the receiver
+            # side is unobserved.
+            status = gen.get('last_status') or {}
+            self._bench_close_run(
+                step, gen, gen_state_name(status.get('state')), now_ms,
+                dst_unobserved=True)
+            return
+        self._bench_close_run(step, gen, 'unknown', now_ms,
+                              reason=f'{gen["phase"]}:{code}')
+
+    def _bench_close_run(self, step: StepState, gen: dict, outcome: str,
+                         now_ms: int, reason: str | None = None,
+                         dst_unobserved: bool = False):
+        """Seal the run's evidence row and release the generator slot. The
+        row records exactly what the device reported — source counters and
+        receiver counters stay separate facts."""
+        bench = step.detail['bench']
+        status = gen.get('last_status')
+        row = {'pair': gen['pair_i'], 'interval': gen['interval'],
+               'run': gen['run'], 'outcome': outcome,
+               'reason': reason,
+               'src_boot': gen.get('src_boot'),
+               'dst_boot': gen.get('dst_boot'),
+               'status': status, 'dst_count': gen.get('dst_count'),
+               'dst_unobserved': dst_unobserved}
+        bench['runs'].append(row)
+        if step.kind == 'soak':
+            accum = bench['accum']
+            for name in ('planned', 'submitted', 'admitted', 'delivered',
+                         'failed', 'unknown'):
+                accum[name] += (status or {}).get(name, 0)
+            dst = gen.get('dst_count') or {}
+            accum['dst_unique'] += dst.get('unique_packets', 0)
+            accum['dst_duplicates'] += dst.get('duplicates', 0)
+            if bench.get('max_data_messages') is not None and \
+                    accum['submitted'] >= bench['max_data_messages']:
+                bench['ended'] = True
+        if step.kind == 'peer_send':
+            # One bounded run per pair — closing it finishes the pair.
+            bench['pair_done'] = True
+        bench['gen'] = None
+
+    def _bench_finish(self, step: StepState, now_ms: int):
+        bench = step.detail['bench']
+        runs = bench['runs']
+        detail = {'bench_runs': runs, 'pairs': len(bench['pairs'])}
+        if step.kind == 'soak':
+            detail['accum'] = bench['accum']
+            detail['intervals'] = len(runs)
+        # Evidence rule: the step is 'done' only when every run reached a
+        # device-terminal state. Refused/busy/unknown runs are evidence of a
+        # run that never produced its data plane — the step is incomplete,
+        # never a silent pass.
+        terminal = {'complete', 'stopped', 'time_bound', 'peer_reset'}
+        if runs and all(r['outcome'] in terminal for r in runs):
+            self._step_done(step, now_ms, **detail)
+        elif any(r['outcome'] == 'refused' for r in runs):
+            reason = next(r['reason'] for r in runs if r['outcome'] == 'refused')
+            self._step_done(step, now_ms, 'failed', reason=reason, **detail)
+        else:
+            self._step_done(step, now_ms, 'incomplete',
+                            reason='runs_without_terminal_evidence', **detail)
+
     def _next_provision(self, step, now_ms):
         left = step.detail['targets_left']
         if not left:
@@ -1244,6 +1822,16 @@ class ScenarioRunner:
             self._emit_reconcile(op.method, params, op, now_ms,
                                  keep_key=op.idempotency_key)
             return
+        elif op.channel == 'bench':
+            # A bench command's identity is (run_uuid, seq) — re-issuing the
+            # journaled params dedups inside the device command log exactly
+            # like a site verb. One re-issue only: a second miss means the
+            # evidence path is gone.
+            if op.reconciles is None:
+                params = dict(self._op_params(op))
+                op.status = 'lost'
+                self._emit_reconcile(op.method, params, op, now_ms)
+                return
         op.status = 'lost'
         self.outstanding.pop(op.tag, None)
         self.journal.record({'type': 'op', 'tag': op.tag, 'step': op.step,
@@ -1255,9 +1843,13 @@ class ScenarioRunner:
 
     def _emit_reconcile(self, method, params, op: Op, now_ms: int, keep_key=None) -> Call:
         tag = f'{self.journal.run_id[:8]}-r{op.tag.rsplit("-", 1)[-1]}'
+        if op.channel == 'bench':
+            # Fresh submit key — the daemon would otherwise dedup the retry
+            # against the lost attempt and the device would never see it.
+            params = {**params, 'op_tag': tag}
         reconciled = Op(tag=tag, step=op.step, channel=op.channel, method=method,
                         sent_ms=now_ms, status='sent', idempotency_key=keep_key,
-                        params=dict(params))
+                        params=dict(params), reconciles=op.tag)
         self.ops.append(reconciled)
         self.outstanding[tag] = reconciled
         self.journal.record({'type': 'op', 'tag': tag, 'step': op.step,
@@ -1308,9 +1900,10 @@ class ScenarioRunner:
         record = {'type': 'op', 'tag': tag, 'step': op.step,
                   'status': 'replied', 'reply_ms': now_ms, 'ok': ok,
                   'code': code}
-        if ok and op.method == 'members.get':
+        if ok and (op.method == 'members.get' or op.channel == 'bench'):
             # The reset_rejoin baseline survives on the result — journal it so
-            # a resume still compares against the pre-reset snapshot.
+            # a resume still compares against the pre-reset snapshot. Bench
+            # replies carry the device counters the resume re-folds.
             record['result'] = op.result
         self.journal.record(record)
         step = self.steps[op.step]
@@ -1333,6 +1926,9 @@ class ScenarioRunner:
             # "never admitted"; any other failure leaves the verdict unknown.
             step.detail.pop('reconcile_pending', None)
             self._mark_result(op, 'not_admitted' if code == 'NOT_FOUND' else 'unknown')
+            return
+        if op.channel == 'bench':
+            self._bench_failed(step, op, code, now_ms)
             return
         if op.method == 'messages.submit':
             if code == 'RATE_LIMITED':
@@ -1409,6 +2005,10 @@ class ScenarioRunner:
                 rec['result'] = 'admitted'
                 rec['operation_id'] = (result or {}).get('operation_id')
                 rec['superseded'] = (result or {}).get('superseded', [])
+            return
+        if op.channel == 'bench':
+            self._bench_reply(step, op, result if isinstance(result, dict) else {},
+                              now_ms)
             return
         if kind == 'rollcall':
             step.detail['rollcall'] = result
@@ -1501,6 +2101,30 @@ class ScenarioRunner:
         for row in self.results:
             verdicts[row['result']] = verdicts.get(row['result'], 0) + 1
         unknown = sum(1 for o in sends if o.ok is not True)
+        # Device-generator evidence (D10/D12): bench commands are the host's
+        # only submissions; per-run counters come from the device itself.
+        bench_runs = []
+        for s in self.steps:
+            for r in (s.detail.get('bench') or {}).get('runs', []):
+                bench_runs.append({'step': s.index, **r})
+        gen_totals = {'planned': 0, 'submitted': 0, 'admitted': 0,
+                      'delivered': 0, 'failed': 0, 'unknown': 0}
+        dst_totals = {'unique_packets': 0, 'duplicates': 0,
+                      'crc_invalid': 0, 'stale_boot': 0, 'unobserved_runs': 0}
+        for r in bench_runs:
+            status = r.get('status') or {}
+            for name in gen_totals:
+                gen_totals[name] += status.get(name, 0)
+            dst = r.get('dst_count')
+            if dst is None:
+                dst_totals['unobserved_runs'] += 1
+            else:
+                dst_totals['unique_packets'] += dst.get('unique_packets', 0)
+                dst_totals['duplicates'] += dst.get('duplicates', 0)
+                dst_totals['crc_invalid'] += dst.get('crc_invalid', 0)
+                if dst.get('state') == rlb1.COUNT_STALE_BOOT:
+                    dst_totals['stale_boot'] += 1
+        bench_commands = [o for o in self.ops if o.channel == 'bench']
         return {
             'run_id': self.journal.run_id, 'state': self.state,
             'stop_reason': self.stop_reason,
@@ -1511,6 +2135,14 @@ class ScenarioRunner:
                       # The denominator is always reported; unknowns are
                       # never folded into the success count (D12 honesty).
                       'admit_rate': len(admitted) / len(sends) if sends else None},
+            'bench': {
+                # Host-side admission cost: the bounded RLB1 commands —
+                # the data packets are the device's, counted by the device.
+                'host_commands': len(bench_commands),
+                'runs': bench_runs,
+                'generator': gen_totals,          # source-side counters
+                'destination': dst_totals,        # receiver-side counters
+            },
             'gaps': self.gaps,
             'incomplete_steps': [s.id for s in self.steps if s.status == 'incomplete'],
         }
@@ -1537,6 +2169,25 @@ class ScenarioRunner:
                                            'planned_ms', 'submit_ms', 'late_ms',
                                            'result', 'operation_id')))
         (out / 'sends.csv').write_text('\n'.join(rows) + '\n', encoding='utf-8')
+        # bench_runs.csv — device-generator evidence, one row per bounded
+        # run: the source's own counters plus the destination's receive
+        # count, kept as separate facts (D10/D12).
+        rows = ['step,pair,interval,run,src_boot,dst_boot,outcome,reason,'
+                'planned,submitted,admitted,delivered,failed,unknown,'
+                'dst_unique,dst_duplicates,dst_crc_invalid,dst_state']
+        for r in summary['bench']['runs']:
+            status = r.get('status') or {}
+            dst = r.get('dst_count') or {}
+            rows.append(','.join(str(v if v is not None else '') for v in (
+                r.get('step'), r.get('pair'), r.get('interval'), r.get('run'),
+                r.get('src_boot'), r.get('dst_boot'), r.get('outcome'),
+                r.get('reason'),
+                status.get('planned'), status.get('submitted'),
+                status.get('admitted'), status.get('delivered'),
+                status.get('failed'), status.get('unknown'),
+                dst.get('unique_packets'), dst.get('duplicates'),
+                dst.get('crc_invalid'), dst.get('state'))))
+        (out / 'bench_runs.csv').write_text('\n'.join(rows) + '\n', encoding='utf-8')
         from collections import Counter
         status_counts = Counter(s['status'] for s in summary['steps'])
         lines = [

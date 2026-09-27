@@ -3,6 +3,10 @@ against a live daemon's API1 Unix socket.
 
 Channel mapping:
   api1   → `API1 {json}\\n` lines on the daemon socket (request_id = call tag)
+  bench  → a synchronous RLB1 round trip via BenchChannel — submit the frame
+           over messages.submit, then poll messages.read for the matching
+           reply; foreign replies seen while polling are fed back to the
+           runner so a device poll never eats another op's answer
   device → a `--device-cmd` template executed per op, rc==0 means ok; without
            a driver every device op answers NO_DRIVER so dangerous steps
            degrade to `incomplete` instead of silently passing
@@ -21,6 +25,7 @@ import time
 from pathlib import Path
 
 from .api1_adapter import LineDecoder, NodesNormalizer, encode_request
+from .bench_channel import BenchChannel
 from .capture import Capture
 from .model import FakeClock
 from .scenario import (ScenarioRunner, ScenarioJournal, ScenarioError,
@@ -204,6 +209,12 @@ def run(plan_path, *, journal_dir, api1_path, device_cmd=None,
         device = DeviceDriver(device_cmd)
         local = LocalOps(report_dir)
         clock = FakeClock()
+        # The bench channel shares the API1 socket; replies it sees that
+        # belong to other in-flight ops are fed back into the runner.
+        bench = BenchChannel(api1, runner.network)
+
+        def feed(tag, reply):
+            runner.on_reply(tag, reply, tick_now)
         try:
             while not runner.finished:
                 clock.mono_ns = time.monotonic_ns()
@@ -225,6 +236,9 @@ def run(plan_path, *, journal_dir, api1_path, device_cmd=None,
                             api1.send(call)
                         except OSError:
                             runner.on_reply(call.tag, None, tick_now)
+                    elif call.channel == 'bench':
+                        runner.on_reply(call.tag, bench.execute(call, feed),
+                                        tick_now)
                     elif call.channel == 'device':
                         runner.on_reply(call.tag, device.execute(call), tick_now)
                     else:
