@@ -8788,6 +8788,41 @@ mod tests {
     }
 
     #[test]
+    fn group_send_accepts_full64_site_network() {
+        // A MemberEdhoc site network is 64-bit (site_epoch << 32 | low32);
+        // the gateway session reports only the low-32 wire network, so the
+        // spelled site id must fold to it rather than die at the parser
+        // (docs/hil/2026-09-26-full-5node.md: INVALID_ARGUMENT on
+        // "00000002524c0003"). The ACL grant spells the site id too.
+        let acl = Acl::parse(
+            "{\"principals\":{\"501\":{\"networks\":{\"00000002524c0003\":[\"SEND\"]}}}}",
+        )
+        .unwrap();
+        let (_, log, store, limiter) = test_env();
+        let c = ApiContext {
+            session: group_session(0x87, 0x524c_0003),
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
+        };
+        let params = ALARM_PARAMS.replace(
+            "\"network\":\"0000000000000001\"",
+            "\"network\":\"00000002524c0003\"",
+        );
+        let response = handle(group_line("group.send", &params).as_bytes(), &c);
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let result = parsed.get("result").expect("ok result");
+        assert_eq!(
+            result.get("state").and_then(Json::as_str),
+            Some("HOST_QUEUED"),
+            "{response}"
+        );
+        assert_eq!(
+            result.get("network").and_then(Json::as_str),
+            Some("00000000524c0003"),
+            "{response}"
+        );
+    }
+
+    #[test]
     fn group_send_admits_replays_and_get_follows_the_lane() {
         use crate::group::{GroupLane, GroupLink, GroupOps};
         use routeloom_protocol::group_ops::{encode_group_status, GroupStatus};

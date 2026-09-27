@@ -24,7 +24,8 @@
 //!   silently grant).
 //! - `principals` maps a *decimal* uid string to `{ "networks": {...} }`.
 //! - `networks` maps a 16-hex network id — or `"*"` for all networks — to a
-//!   non-empty array of permission names.
+//!   non-empty array of permission names. A full 64-bit site network id
+//!   folds to its low-32 wire network, same as request parameters.
 //! - Permission names: `READ_PAYLOAD`, `SEND`, `READ_OPERATION`, `CONFIG`, `OBSERVE`,
 //!   and the Site Authority grants `MEMBERSHIP_READ` / `MEMBERSHIP_DECIDE`
 //!   / `MEMBERSHIP_ADMIN` (scoped to the site's wire network). Unknown
@@ -219,18 +220,21 @@ fn parse_permissions(value: &Json) -> Result<u8, String> {
 }
 
 /// 16-hex network id, normalized to lowercase before parsing (IPC contract).
-/// Wire v1 networks are `1..=0xffffffff` — outside that range the id can
-/// never appear on the wire, so it is rejected rather than stored.
+/// SDK v1 site networks are 64-bit (`site_epoch << 32 | network_low32`) but
+/// Wire v1 carries only the low 32 bits — the same low half the attached
+/// gateway reports as its session network — so a spelled site id folds to
+/// its wire half. A fold landing on 0 names no live network and is rejected.
 pub fn parse_network_hex(text: &str) -> Result<u64, String> {
     let normalized = text.to_ascii_lowercase();
     if normalized.len() != 16 || !normalized.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!("\"{text}\" is not a 16-hex id"));
     }
     let value = u64::from_str_radix(&normalized, 16).map_err(|_| "invalid hex".to_string())?;
-    if !(1..=0xffff_ffff).contains(&value) {
+    let wire = value & 0xffff_ffff;
+    if wire == 0 {
         return Err(format!("\"{text}\" is outside the wire-v1 network range"));
     }
-    Ok(value)
+    Ok(wire)
 }
 
 #[cfg(test)]
@@ -316,7 +320,9 @@ mod tests {
     fn network_hex_normalizes_and_ranges() {
         assert_eq!(parse_network_hex("00000000000000AB").unwrap(), 0xAB);
         assert_eq!(parse_network_hex("00000000FFFFFFFF").unwrap(), 0xffff_ffff);
-        assert!(parse_network_hex("0000000100000000").is_err()); // > wire v1 range
+        // A full 64-bit site network id folds to its low-32 wire network.
+        assert_eq!(parse_network_hex("00000002524C0003").unwrap(), 0x524c_0003);
+        assert!(parse_network_hex("0000000100000000").is_err()); // folds to 0
         assert!(parse_network_hex("0000000000000000").is_err());
         assert!(parse_network_hex("1").is_err());
         assert!(parse_network_hex("00000000000000gg").is_err());
