@@ -1003,6 +1003,7 @@ mod tests {
             session: SESSION,
             gateway: 1,
             network: NET,
+            site_network: None,
         }
     }
 

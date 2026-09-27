@@ -3855,13 +3855,25 @@ fn group_gate<S: OperationStore>(ctx: &ApiContext<'_, S>, network: u64) -> Optio
         ctx,
         GateScope {
             action: "group sends",
-            network: Some(network),
+            network: Some(network & 0xffff_ffff),
             required_capability: "group_delivery_v1",
             capability_hint: "HelloAck capability bit 7 with host_ops_v1",
             capable: crate::group::group_capable,
         },
     )
     .err()
+}
+
+fn group_permitted(
+    acl: &Acl,
+    uid: &routeloom_peercred::Principal,
+    network: u64,
+    permission: u8,
+) -> bool {
+    // A full Site grant is epoch-scoped; a wire grant covers its low-32
+    // network across epochs.
+    acl.permit_principal(uid, network, permission)
+        || (network > 0xffff_ffff && acl.permit_principal(uid, network & 0xffff_ffff, permission))
 }
 
 /// `group.send` params: `{network, group, key, payload_hex, payload_len,
@@ -3894,12 +3906,18 @@ fn group_send<S: OperationStore>(
             "network must be a 16-hex string",
         ));
     };
-    let network = acl::parse_network_hex(network_text)
+    let spelled_network = acl::parse_site_network_hex(network_text)
         .map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?;
+    let current_site = ctx.site.map(|site| site.network());
+    // Both spellings of the active Site share one idempotency identity.
+    let network = match current_site {
+        Some(site) if spelled_network == (site & 0xffff_ffff) => site,
+        _ => spelled_network,
+    };
     let Some(uid) = ctx
         .principal
         .as_ref()
-        .filter(|uid| ctx.acl.permit_principal(uid, network, acl::PERM_SEND))
+        .filter(|uid| group_permitted(ctx.acl, uid, network, acl::PERM_SEND))
     else {
         return Err(ApiError::simple(
             "AuthorizationFailed",
@@ -3939,6 +3957,12 @@ fn group_send<S: OperationStore>(
     // apply only to an identity the table has never seen.
     let known = ctx.group_ops.knows_principal(uid, network, &key);
     if !known {
+        if network > 0xffff_ffff && current_site != Some(network) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "network is not the current Site network",
+            ));
+        }
         if let Some(error) = group_gate(ctx, network) {
             return Err(error);
         }
@@ -4015,10 +4039,11 @@ fn group_get<S: OperationStore>(
         .ok_or_else(not_found)?
         .request
         .network;
-    if !ctx.principal.as_ref().is_some_and(|uid| {
-        ctx.acl
-            .permit_principal(uid, network, acl::PERM_READ_OPERATION)
-    }) {
+    if !ctx
+        .principal
+        .as_ref()
+        .is_some_and(|uid| group_permitted(ctx.acl, uid, network, acl::PERM_READ_OPERATION))
+    {
         return Err(not_found());
     }
     let record = ctx
@@ -9206,6 +9231,83 @@ mod tests {
     }
 
     #[test]
+    fn group_send_accepts_full64_site_network() {
+        use crate::site::{store::MemoryStore, testkit, SiteService};
+
+        let site = SiteService::new(testkit::authority(Box::new(MemoryStore::default()), 1_000));
+        let active = format!("{:016x}", testkit::network());
+        let old = format!("{:016x}", testkit::network() - (1_u64 << 32));
+        let grant = |network: &str| {
+            Acl::parse(&format!(
+                "{{\"principals\":{{\"501\":{{\"networks\":{{\"{network}\":[\"SEND\",\"READ_OPERATION\"]}}}}}}}}"
+            ))
+            .unwrap()
+        };
+        let acl = grant(&active);
+        let (_, log, store, limiter) = test_env();
+        let params = ALARM_PARAMS.replace("0000000000000001", &active);
+        let session = group_session(0x87, u64::from(testkit::NETWORK_LOW));
+        let c = ApiContext {
+            session,
+            site: Some(&site),
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
+        };
+        let response = handle(group_line("group.send", &params).as_bytes(), &c);
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let result = parsed.get("result").expect("ok result");
+        assert_eq!(
+            result.get("state").and_then(Json::as_str),
+            Some("HOST_QUEUED")
+        );
+        assert_eq!(
+            result.get("network").and_then(Json::as_str),
+            Some(active.as_str())
+        );
+        let group_op = result.get("group_op").and_then(Json::as_str).unwrap();
+        let get = group_line("group.get", &format!("{{\"group_op\":\"{group_op}\"}}"));
+        assert_eq!(result_field(&handle(get.as_bytes(), &c), "network"), active);
+
+        let wire_params = ALARM_PARAMS.replace(
+            "0000000000000001",
+            &format!("{:016x}", testkit::NETWORK_LOW),
+        );
+        let alias = handle(group_line("group.send", &wire_params).as_bytes(), &c);
+        let alias_doc = routeloom_json::parse(&alias).unwrap();
+        assert_eq!(
+            result.get("group_op").and_then(Json::as_str),
+            alias_doc
+                .get("result")
+                .and_then(|result| result.get("group_op"))
+                .and_then(Json::as_str),
+        );
+
+        let wire_acl = grant(&format!("{:016x}", testkit::NETWORK_LOW));
+        let wire_c = ApiContext {
+            session,
+            site: Some(&site),
+            ..ctx(Some(501), &wire_acl, &log, &store, &limiter, 1_000)
+        };
+        let wire_response = handle(group_line("group.send", &params).as_bytes(), &wire_c);
+        assert!(wire_response.contains("\"ok\":true"), "{wire_response}");
+
+        let old_acl = grant(&old);
+        let old_params = ALARM_PARAMS.replace("0000000000000001", &old);
+        let old_c = ApiContext {
+            session,
+            site: Some(&site),
+            ..ctx(Some(501), &old_acl, &log, &store, &limiter, 1_000)
+        };
+        assert_error_schema(
+            &handle(group_line("group.send", &old_params).as_bytes(), &old_c),
+            "INVALID_ARGUMENT",
+        );
+        assert_error_schema(
+            &handle(group_line("group.send", &params).as_bytes(), &old_c),
+            "AuthorizationFailed",
+        );
+    }
+
+    #[test]
     fn group_send_admits_replays_and_get_follows_the_lane() {
         use crate::group::{GroupLane, GroupLink, GroupOps};
         use routeloom_protocol::group_ops::{encode_group_status, GroupStatus};
@@ -9302,6 +9404,7 @@ mod tests {
             session: 0x5e55,
             gateway: 1,
             network: 1,
+            site_network: None,
         };
         let mut lane = GroupLane::default();
         let out = ops.step(&mut lane, &link, 1_000);
@@ -9380,6 +9483,7 @@ mod tests {
                 session: 0x5e55,
                 gateway: 1,
                 network: 1,
+                site_network: None,
             };
             let mut lane = GroupLane::default();
             for _ in 0..400 {

@@ -110,10 +110,15 @@ jobs:
           python3 tools/gen_sdkv1_join_relay_v2_vectors.py
           python3 tools/gen_sdkv1_revocation_vectors.py
           python3 tools/gen_bench_vectors.py
-          git diff --exit-code -- protocol/golden protocol/usb-golden protocol/autonomy-golden protocol/provisioning-golden protocol/sdkv1-golden protocol/bench-golden tests/fuzz/corpus/sdkv1_ead tests/fuzz/corpus/sdkv1_join
-          # git diff ignores untracked files: a generator that starts
-          # emitting an unreviewed vector must fail too.
-          test -z "$(git status --porcelain -- protocol/sdkv1-golden protocol/usb-golden protocol/bench-golden tests/fuzz/corpus/sdkv1_ead tests/fuzz/corpus/sdkv1_join)"
+          python3 tools/gen_endpoint_vectors.py
+          # Every generated-vector directory must be checked: diff catches
+          # changed bytes, porcelain catches a generator that starts
+          # emitting an unreviewed (untracked) vector. Goldens without a
+          # generator (e.g. the hand-written tests/fuzz/corpus/rlres1
+          # seeds) stay out.
+          GENERATED_GOLDENS="protocol/golden protocol/usb-golden protocol/autonomy-golden protocol/provisioning-golden protocol/sdkv1-golden protocol/bench-golden protocol/endpoint-golden protocol/config-signed-golden protocol/edhoc-interop protocol/edhoc-rfc9529 tests/fuzz/corpus/sdkv1_ead tests/fuzz/corpus/sdkv1_handshake tests/fuzz/corpus/sdkv1_join"
+          git diff --exit-code -- $GENERATED_GOLDENS
+          test -z "$(git status --porcelain -- $GENERATED_GOLDENS)"
   firmware:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

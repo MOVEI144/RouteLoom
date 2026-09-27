@@ -2966,7 +2966,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // session; never fall back to the public legacy secret on file errors.
     let usb_dev_secret = match &args.usb_dev_secret_file {
         Some(path) => load_usb_dev_secret(path)?,
-        None => DEV_SECRET.to_vec(),
+        // The development secret is public (it ships in the firmware
+        // Kconfig default): any device flashed with it accepts this
+        // daemon, so the fallback must not be silent.
+        None => {
+            eprintln!(
+                "WARNING: --usb-dev-secret-file not given; using the public \
+                 development USB secret (not a deployment credential)"
+            );
+            DEV_SECRET.to_vec()
+        }
     };
     let socket_path = args.socket;
     let device = args.device;

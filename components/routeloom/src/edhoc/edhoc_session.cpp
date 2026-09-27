@@ -9,6 +9,7 @@
 
 #include "libedhoc_api.hpp"
 #include "routeloom/kdf.hpp"
+#include "routeloom/rlcw1.hpp"  // es256_signature_normalize_low_s
 #include "routeloom/secure_clear.hpp"
 #include "uECC.h"
 #if defined(ESP_PLATFORM) && CONFIG_ROUTELOOM_HIL_EDHOC_TIMING
@@ -451,6 +452,14 @@ struct Session::Backend {
     if (ok == 0) {
       return EDHOC_ERROR_CRYPTO_FAILURE;
     }
+    // RLCW1-side verifiers gate S to the canonical low half; emit that
+    // form here too (the sdkv1 PoP signer normalizes the same way) so an
+    // EDHOC signature never depends on which twin micro-ecc produced.
+    // Verification keeps accepting both S values for interop.
+    sdkv1::Es256Signature canonical{};
+    std::memcpy(canonical.data(), signature, canonical.size());
+    sdkv1::es256_signature_normalize_low_s(canonical);
+    std::memcpy(signature, canonical.data(), canonical.size());
     *signature_length = kEs256SignatureSize;
     return EDHOC_SUCCESS;
   }
