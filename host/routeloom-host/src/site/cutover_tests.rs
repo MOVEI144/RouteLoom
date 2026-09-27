@@ -1148,6 +1148,7 @@ fn cutover_survives_restart() {
     // One member: serial 1 (current cert) + 2 (next cert) consumed at
     // allow/prepare time; the restart consumed nothing more.
     assert_eq!(serial_meta, 3);
+    drop(service);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
