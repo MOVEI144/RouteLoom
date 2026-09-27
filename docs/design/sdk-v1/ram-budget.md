@@ -87,6 +87,7 @@ python3 tools/firmware_ram_report.py build/size.json --target <target> --app <ap
 | `esp32c3` | `bench_node` | 19,456 |
 | `esp32s3` | `*` | 8,192 |
 | `esp32c5` | `*` | 8,192 |
+| `esp32c6` | `*` | 8,192 |
 
 `bench_node`の床はdesign-devflow.md §5.4の「reference以上の独立floor」に従いreferenceと同じ19,456 Bとする。bench imageは同じ`components/routeloom_node_boot`の起動経路を通り、アプリ増分は静的`.bss`のみなのでboot-heap modelのoffset/radio_peakはreferenceの実測を引き継ぐ（bench機での再計測はHILラウンドの課題）。
 

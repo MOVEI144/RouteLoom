@@ -104,7 +104,7 @@ fn assurance_json(record: &RxRecord) -> String {
     }
 }
 
-/// Per-request inputs the dispatch layer needs. `uid` is the socket peer's
+/// Per-request inputs the dispatch layer needs. `principal` is the socket peer's
 /// OS credential (None when the platform cannot supply one — default deny).
 /// The store is generic over `OperationStore` so CAP-I1 can swap the memory
 /// table for SQLite without touching this dispatch layer. `rate_limiter`
@@ -128,7 +128,7 @@ pub struct LinkStatus {
 }
 
 pub struct ApiContext<'a, S: OperationStore> {
-    pub uid: Option<u32>,
+    pub principal: Option<routeloom_peercred::Principal>,
     pub acl: &'a Acl,
     pub receive_log: &'a Mutex<ReceiveLog>,
     pub operation_store: &'a Mutex<S>,
@@ -474,7 +474,7 @@ fn capabilities<S: OperationStore>(
             "capabilities.get takes no params",
         ));
     }
-    let epoch_known = ctx.uid.is_some();
+    let epoch_known = ctx.principal.is_some();
     let durable = ctx
         .operation_store
         .lock()
@@ -667,9 +667,10 @@ fn messages_read<S: OperationStore>(
 
     // The token is a position, not a permission: re-check the OS principal's
     // ACL grant on every request, before any cursor is trusted.
-    let authorized = ctx
-        .uid
-        .is_some_and(|uid| ctx.acl.permit(uid, network, acl::PERM_READ_PAYLOAD));
+    let authorized = ctx.principal.as_ref().is_some_and(|uid| {
+        ctx.acl
+            .permit_principal(uid, network, acl::PERM_READ_PAYLOAD)
+    });
     if !authorized {
         return Err(ApiError::simple(
             "AuthorizationFailed",
@@ -1177,9 +1178,9 @@ fn messages_subscribe<S: OperationStore>(
         let acl_view = ctx.acl.revision();
         let id = ctx
             .subscriptions
-            .subscribe(
+            .subscribe_principal(
                 ctx.conn_id,
-                ctx.uid,
+                ctx.principal.clone(),
                 SubKind::Events(EvFilter { kinds }),
                 position,
                 acl_view,
@@ -1276,8 +1277,9 @@ fn messages_subscribe<S: OperationStore>(
         acl::PERM_READ_OPERATION
     };
     if !ctx
-        .uid
-        .is_some_and(|uid| ctx.acl.permit(uid, network, permission))
+        .principal
+        .as_ref()
+        .is_some_and(|uid| ctx.acl.permit_principal(uid, network, permission))
     {
         return Err(ApiError::simple(
             "AuthorizationFailed",
@@ -1348,9 +1350,9 @@ fn messages_subscribe<S: OperationStore>(
 
     let id = ctx
         .subscriptions
-        .subscribe(
+        .subscribe_principal(
             ctx.conn_id,
-            ctx.uid,
+            ctx.principal.clone(),
             SubKind::Messages(MsgFilter {
                 network,
                 origins,
@@ -1503,8 +1505,9 @@ fn operations_open_epoch<S: OperationStore>(
     let network = acl::parse_network_hex(network_text)
         .map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?;
     let Some(uid) = ctx
-        .uid
-        .filter(|uid| ctx.acl.permit(*uid, network, acl::PERM_SEND))
+        .principal
+        .as_ref()
+        .filter(|uid| ctx.acl.permit_principal(uid, network, acl::PERM_SEND))
     else {
         return Err(ApiError::simple(
             "AuthorizationFailed",
@@ -1517,7 +1520,7 @@ fn operations_open_epoch<S: OperationStore>(
         .rate_limiter
         .lock()
         .expect("rate limiter poisoned")
-        .admit(uid, ctx.now_ms)
+        .admit_principal(uid, ctx.now_ms)
     {
         return Err(rate_limited(deny));
     }
@@ -1525,7 +1528,7 @@ fn operations_open_epoch<S: OperationStore>(
         .operation_store
         .lock()
         .expect("operation store poisoned");
-    match store.open_epoch((uid, network), ctx.now_ms) {
+    match store.open_epoch_principal((uid.clone(), network), ctx.now_ms) {
         Ok((epoch, _)) => Ok(format!(
             "\"network\":\"{network:016x}\",\"admission_epoch\":\"{epoch:016x}\""
         )),
@@ -1557,8 +1560,9 @@ fn messages_submit<S: OperationStore>(
         .and_then(Json::as_str)
         .and_then(|text| acl::parse_network_hex(text).ok())
     {
-        ctx.uid
-            .filter(|uid| ctx.acl.permit(*uid, network, acl::PERM_SEND))
+        ctx.principal
+            .as_ref()
+            .filter(|uid| ctx.acl.permit_principal(uid, network, acl::PERM_SEND))
             .ok_or_else(|| {
                 ApiError::simple(
                     "AuthorizationFailed",
@@ -1593,8 +1597,9 @@ fn messages_submit<S: OperationStore>(
             retryable: reject.retryable,
         })?;
     let Some(uid) = ctx
-        .uid
-        .filter(|uid| ctx.acl.permit(*uid, req.network, acl::PERM_SEND))
+        .principal
+        .as_ref()
+        .filter(|uid| ctx.acl.permit_principal(uid, req.network, acl::PERM_SEND))
     else {
         return Err(ApiError::simple(
             "AuthorizationFailed",
@@ -1608,7 +1613,7 @@ fn messages_submit<S: OperationStore>(
         .rate_limiter
         .lock()
         .expect("rate limiter poisoned")
-        .admit(uid, ctx.now_ms)
+        .admit_principal(uid, ctx.now_ms)
     {
         return Err(rate_limited(deny));
     }
@@ -1618,7 +1623,7 @@ fn messages_submit<S: OperationStore>(
         .expect("operation store poisoned");
     // The monotonic stamp rides alongside the wall admit time so a
     // wall-clock rewind can never stretch the dispatch deadline.
-    match store.submit_at(uid, &req, ctx.now_ms, crate::mono_ms()) {
+    match store.submit_at_principal(uid, &req, ctx.now_ms, crate::mono_ms()) {
         SubmitOutcome::Accepted { seq } => {
             // KG control discipline (D10): once the replacement is
             // committed, retire still-queued older values to the same
@@ -1860,10 +1865,10 @@ fn gateway_resolve<S: OperationStore>(
     // The query reads daemon state only — still an operation read on the
     // named network, so an unauthorized principal gets the same denial
     // shape the other queries use.
-    if !ctx
-        .uid
-        .is_some_and(|uid| ctx.acl.permit(uid, network, acl::PERM_READ_OPERATION))
-    {
+    if !ctx.principal.as_ref().is_some_and(|uid| {
+        ctx.acl
+            .permit_principal(uid, network, acl::PERM_READ_OPERATION)
+    }) {
         return Err(ApiError::simple(
             "AuthorizationFailed",
             "principal lacks READ_OPERATION on this network",
@@ -1957,9 +1962,9 @@ fn gateway_get<S: OperationStore>(
         }
         Err(()) => return Err(store_fault()),
     };
-    if !ctx.uid.is_some_and(|uid| {
+    if !ctx.principal.as_ref().is_some_and(|uid| {
         ctx.acl
-            .permit(uid, record.network, acl::PERM_READ_OPERATION)
+            .permit_principal(uid, record.network, acl::PERM_READ_OPERATION)
     }) {
         return Err(ApiError::simple(
             "NOT_FOUND",
@@ -2525,8 +2530,10 @@ fn observation_require_remote<S: OperationStore>(
     network: Option<u64>,
 ) -> Result<(), ApiError> {
     if !network.is_some_and(|network| {
-        ctx.uid
-            .is_some_and(|uid| ctx.acl.permit(uid, network, acl::PERM_OBSERVE))
+        ctx.principal.as_ref().is_some_and(|principal| {
+            ctx.acl
+                .permit_principal(principal, network, acl::PERM_OBSERVE)
+        })
     }) {
         return Err(ApiError::simple(
             "AuthorizationFailed",
@@ -3890,8 +3897,9 @@ fn group_send<S: OperationStore>(
     let network = acl::parse_network_hex(network_text)
         .map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?;
     let Some(uid) = ctx
-        .uid
-        .filter(|uid| ctx.acl.permit(*uid, network, acl::PERM_SEND))
+        .principal
+        .as_ref()
+        .filter(|uid| ctx.acl.permit_principal(uid, network, acl::PERM_SEND))
     else {
         return Err(ApiError::simple(
             "AuthorizationFailed",
@@ -3929,13 +3937,13 @@ fn group_send<S: OperationStore>(
     };
     // A replay must not depend on the gateway still being there: the gates
     // apply only to an identity the table has never seen.
-    let known = ctx.group_ops.knows(uid, network, &key);
+    let known = ctx.group_ops.knows_principal(uid, network, &key);
     if !known {
         if let Some(error) = group_gate(ctx, network) {
             return Err(error);
         }
     }
-    let op_id = match ctx.group_ops.submit(uid, key, request, ctx.now_ms) {
+    let op_id = match ctx.group_ops.submit_principal(uid, key, request, ctx.now_ms) {
         Ok(SubmitOutcome::Accepted(op_id) | SubmitOutcome::Replay(op_id)) => op_id,
         Err(SubmitError::Conflict { existing }) => {
             return Err(ApiError {
@@ -4007,10 +4015,10 @@ fn group_get<S: OperationStore>(
         .ok_or_else(not_found)?
         .request
         .network;
-    if !ctx
-        .uid
-        .is_some_and(|uid| ctx.acl.permit(uid, network, acl::PERM_READ_OPERATION))
-    {
+    if !ctx.principal.as_ref().is_some_and(|uid| {
+        ctx.acl
+            .permit_principal(uid, network, acl::PERM_READ_OPERATION)
+    }) {
         return Err(not_found());
     }
     let record = ctx
@@ -4106,8 +4114,9 @@ fn rollcall_start<S: OperationStore>(
     let network = rollcall_network(params, ctx)?;
     let desired = desired_interval_ms(params)?.unwrap_or(crate::rollcall::MIN_INTERVAL_MS);
     let Some(uid) = ctx
-        .uid
-        .filter(|uid| ctx.acl.permit(*uid, network, acl::PERM_SEND))
+        .principal
+        .as_ref()
+        .filter(|p| ctx.acl.permit_principal(p, network, acl::PERM_SEND))
     else {
         return Err(ApiError::simple(
             "AuthorizationFailed",
@@ -4123,7 +4132,7 @@ fn rollcall_start<S: OperationStore>(
     if let Some(error) = group_gate(ctx, network) {
         return Err(error);
     }
-    match ctx.rollcall.start(uid, network, group, desired, ctx.now_ms) {
+    match ctx.rollcall.start(uid.clone(), network, group, desired, ctx.now_ms) {
         Ok(run_uuid) => Ok(format!(
             "{{\"running\":true,\"state\":\"running\",\"run_id\":\"{}\",\"run_uuid\":\"{}\",\"group\":{},\"network\":\"{network:016x}\",\"desired_interval_ms\":{desired}}}",
             crate::rollcall::RunUuid(run_uuid),
@@ -4179,8 +4188,9 @@ fn rollcall_update<S: OperationStore>(
         ));
     };
     let Some(uid) = ctx
-        .uid
-        .filter(|uid| ctx.acl.permit(*uid, network, acl::PERM_SEND))
+        .principal
+        .as_ref()
+        .filter(|p| ctx.acl.permit_principal(p, network, acl::PERM_SEND))
     else {
         return Err(ApiError::simple(
             "AuthorizationFailed",
@@ -4222,8 +4232,9 @@ fn rollcall_stop<S: OperationStore>(
         ));
     };
     if !ctx
-        .uid
-        .is_some_and(|uid| ctx.acl.permit(uid, network, acl::PERM_SEND))
+        .principal
+        .as_ref()
+        .is_some_and(|p| ctx.acl.permit_principal(p, network, acl::PERM_SEND))
     {
         return Err(ApiError::simple(
             "AuthorizationFailed",
@@ -4265,8 +4276,9 @@ fn rollcall_status<S: OperationStore>(
     // the same answer as "no run" (no existence oracle, matching group.get).
     let run_network = ctx.rollcall.run_network();
     let authorized = run_network.is_some_and(|network| {
-        ctx.uid
-            .is_some_and(|uid| ctx.acl.permit(uid, network, acl::PERM_READ_OPERATION))
+        ctx.principal
+            .as_ref()
+            .is_some_and(|p| ctx.acl.permit_principal(p, network, acl::PERM_READ_OPERATION))
     });
     if !authorized {
         return Err(ApiError::simple(
@@ -4377,9 +4389,9 @@ fn operations_get<S: OperationStore>(
         }
         Err(()) => return Err(store_fault()),
     };
-    if !ctx.uid.is_some_and(|uid| {
+    if !ctx.principal.as_ref().is_some_and(|uid| {
         ctx.acl
-            .permit(uid, record.network, acl::PERM_READ_OPERATION)
+            .permit_principal(uid, record.network, acl::PERM_READ_OPERATION)
     }) {
         return Err(ApiError::simple(
             "NOT_FOUND",
@@ -4436,10 +4448,10 @@ fn operations_get_by_key<S: OperationStore>(
             ))
         }
     };
-    let Some(uid) = ctx
-        .uid
-        .filter(|uid| ctx.acl.permit(*uid, network, acl::PERM_READ_OPERATION))
-    else {
+    let Some(uid) = ctx.principal.as_ref().filter(|uid| {
+        ctx.acl
+            .permit_principal(uid, network, acl::PERM_READ_OPERATION)
+    }) else {
         return Err(ApiError::simple(
             "AuthorizationFailed",
             "principal lacks READ_OPERATION on this network",
@@ -4450,7 +4462,7 @@ fn operations_get_by_key<S: OperationStore>(
         .lock()
         .expect("operation store poisoned");
     let identity = OpIdentity {
-        uid,
+        principal: uid.clone(),
         network,
         epoch,
         key,
@@ -4519,8 +4531,11 @@ fn operations_cancel<S: OperationStore>(
         }
         Err(()) => return Err(store_fault()),
     };
-    let owns = ctx.uid.is_some_and(|uid| {
-        uid == record.uid && ctx.acl.permit(uid, record.network, acl::PERM_SEND)
+    let owns = ctx.principal.as_ref().is_some_and(|uid| {
+        uid == &record.principal
+            && ctx
+                .acl
+                .permit_principal(uid, record.network, acl::PERM_SEND)
     });
     if !owns {
         return Err(ApiError::simple(
@@ -4661,8 +4676,9 @@ fn parse_hex_16(text: &str) -> Option<[u8; 16]> {
 /// unauthorized principal gets the same denial shape as the other admin
 /// verbs — never a hint about what the config surface can do.
 fn config_permit(ctx: &ApiContext<'_, impl OperationStore>, network: u64) -> bool {
-    ctx.uid
-        .is_some_and(|uid| ctx.acl.permit(uid, network, acl::PERM_CONFIG))
+    ctx.principal
+        .as_ref()
+        .is_some_and(|uid| ctx.acl.permit_principal(uid, network, acl::PERM_CONFIG))
 }
 
 fn config_denied() -> ApiError {
@@ -5155,10 +5171,10 @@ fn config_get<S: OperationStore>(
             "no config operation with that id",
         ));
     };
-    if !ctx
-        .uid
-        .is_some_and(|uid| ctx.acl.permit(uid, record.network, acl::PERM_CONFIG))
-    {
+    if !ctx.principal.as_ref().is_some_and(|uid| {
+        ctx.acl
+            .permit_principal(uid, record.network, acl::PERM_CONFIG)
+    }) {
         return Err(ApiError::simple(
             "NOT_FOUND",
             "no config operation with that id",
@@ -5613,6 +5629,14 @@ mod tests {
         .unwrap()
     }
 
+    fn private_test_db(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("routeloom-api1-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        routeloom_peercred::create_private_dir_all(&dir).unwrap();
+        dir.join("ops.db")
+    }
+
     fn ctx<'a, S: OperationStore>(
         uid: Option<u32>,
         acl: &'a Acl,
@@ -5706,7 +5730,7 @@ mod tests {
         now: u64,
     ) -> ApiContext<'a, S> {
         ApiContext {
-            uid,
+            principal: uid.map(routeloom_peercred::Principal::UnixUid),
             acl,
             receive_log: log,
             operation_store: store,
@@ -6787,12 +6811,7 @@ mod tests {
     #[test]
     fn durable_submit_survives_store_reopen() {
         use crate::sqlite_store::SqliteOperationStore;
-        let path = std::env::temp_dir().join(format!(
-            "routeloom-cap1-api1-{}-{}.db",
-            std::process::id(),
-            "restart"
-        ));
-        let _ = std::fs::remove_file(&path);
+        let path = private_test_db("restart");
         let acl = send_acl();
         let log = Mutex::new(ReceiveLog::new([9; 16]));
         let limiter = Mutex::new(AdmissionLimiter::new(0));
@@ -6862,10 +6881,7 @@ mod tests {
             );
             assert!(gone.contains("NOT_FOUND"), "{gone}");
         }
-        let _ = std::fs::remove_file(&path);
-        for suffix in ["-wal", "-shm", "-journal"] {
-            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
@@ -7447,9 +7463,7 @@ mod tests {
     #[test]
     fn store_fault_response_is_valid_json() {
         use crate::sqlite_store::SqliteOperationStore;
-        let path =
-            std::env::temp_dir().join(format!("routeloom-api1-fault-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&path);
+        let path = private_test_db("fault");
         let acl = send_acl();
         let log = Mutex::new(ReceiveLog::new([9; 16]));
         let limiter = Mutex::new(AdmissionLimiter::new(0));
@@ -7469,10 +7483,7 @@ mod tests {
             "STORE_RECOVERY_REQUIRED",
         );
         drop(fault_store);
-        let _ = std::fs::remove_file(&path);
-        for suffix in ["-wal", "-shm", "-journal"] {
-            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     /// A replayed submit reports the record's committed state — the same
@@ -9050,7 +9061,7 @@ mod tests {
         let c = ApiContext { session, ..base };
         // uid 7 holds SEND only on network 2.
         let other = ApiContext {
-            uid: Some(7),
+            principal: Some(routeloom_peercred::Principal::UnixUid(7)),
             ..ctx(Some(7), &acl, &log, &store, &limiter, 1_000)
         };
         let response = handle(group_line("group.send", ALARM_PARAMS).as_bytes(), &other);
@@ -9263,7 +9274,7 @@ mod tests {
         // group.get: READ_OPERATION on the op's network, else NOT_FOUND.
         let get = group_line("group.get", &format!("{{\"group_op\":\"{token}\"}}"));
         let stranger = ApiContext {
-            uid: Some(7),
+            principal: Some(routeloom_peercred::Principal::UnixUid(7)),
             ..ApiContext {
                 session,
                 group_ops: ops,
@@ -9599,7 +9610,7 @@ mod tests {
 
         // Without SEND, start is denied before any run exists.
         let denied = ApiContext {
-            uid: Some(7),
+            principal: Some(routeloom_peercred::Principal::UnixUid(7)),
             ..rollcall_ctx(
                 Some(7),
                 &acl,
@@ -9928,6 +9939,22 @@ mod tests {
         );
         assert!(response.contains("\"ok\":true"), "{response}");
         assert!(!response.contains("superseded"), "{response}");
+    }
+
+    #[test]
+    fn remote_observation_accepts_authenticated_sid_grant() {
+        let (_, log, store, limiter) = test_env();
+        let sid = "S-1-5-21-100-200-300-1001";
+        let acl = Acl::parse(&format!(
+            "{{\"principals\":{{\"{sid}\":{{\"networks\":{{\"0000000000000001\":[\"OBSERVE\"]}}}}}}}}"
+        ))
+        .unwrap();
+        let c = ApiContext {
+            principal: Some(routeloom_peercred::Principal::WindowsSid(sid.into())),
+            session: observation_session(0x04 | 0x20),
+            ..ctx(None, &acl, &log, &store, &limiter, 1_000)
+        };
+        assert!(observation_require_remote(&c, Some(1)).is_ok());
     }
 
     #[test]

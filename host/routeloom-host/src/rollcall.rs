@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use routeloom_peercred::Principal;
 use routeloom_protocol::bench::{self, Opcode};
 
 use crate::group::{self, GroupOps, GroupRequest};
@@ -168,7 +169,7 @@ struct Run {
     /// Minted at start; bound into every poll key and the status surface.
     run_uuid: [u8; 16],
     /// The principal that started it (the lease owner on the API surface).
-    owner: u32,
+    owner: Principal,
     network: u64,
     group: u16,
     started_ms: u64,
@@ -337,7 +338,7 @@ impl RollcallService {
     /// a differing group is a conflict, never a second loop.
     pub fn start(
         &self,
-        uid: u32,
+        owner: Principal,
         network: u64,
         group: u16,
         desired_ms: u64,
@@ -361,7 +362,7 @@ impl RollcallService {
         inner.replies.clear();
         inner.run = Some(Run {
             run_uuid,
-            owner: uid,
+            owner,
             network,
             group,
             started_ms: now_ms,
@@ -417,7 +418,7 @@ impl RollcallService {
     /// it is applied by the next step's `max(desired, budget)`.
     pub fn update(
         &self,
-        uid: u32,
+        owner: &Principal,
         run_uuid: &[u8; 16],
         group: Option<u16>,
         desired_ms: Option<u64>,
@@ -426,7 +427,7 @@ impl RollcallService {
         let Some(run) = inner.run.as_mut() else {
             return Err("no rollcall run");
         };
-        if run.owner != uid || &run.run_uuid != run_uuid {
+        if run.owner != *owner || &run.run_uuid != run_uuid {
             return Err("run_uuid/owner mismatch");
         }
         if let Some(group) = group {
@@ -613,7 +614,9 @@ impl RollcallService {
             opt_u16_json(last.and_then(|s| s.unaccounted)),
             statuses,
             run_uuid_hex(run.run_uuid),
-            run.owner,
+            run.owner
+                .as_unix_uid()
+                .map_or_else(|| "null".to_string(), |uid| uid.to_string()),
             run.network,
             run.group,
             run.started_ms,
@@ -924,7 +927,7 @@ pub fn service_step(
         hop_limit: 254,
         payload,
     };
-    match ops.submit(ROLLCALL_UID, key, request, now) {
+    match ops.submit_principal(&Principal::UnixUid(ROLLCALL_UID), key, request, now) {
         Ok(group::SubmitOutcome::Accepted(op_id)) | Ok(group::SubmitOutcome::Replay(op_id)) => {
             run.in_flight = Some(op_id);
             run.next_ms = now + run.interval_ms;
@@ -1072,29 +1075,29 @@ mod tests {
     fn start_is_idempotent_and_single_owner() {
         let service = RollcallService::default();
         let a = service
-            .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
+            .start(Principal::UnixUid(501), NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
             .unwrap();
         // A reconnecting GUI asking the same thing gets the same run —
         // never a second loop.
         assert_eq!(
             service
-                .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 2_000)
+                .start(Principal::UnixUid(501), NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 2_000)
                 .unwrap(),
             a
         );
         assert_eq!(
             service
-                .start(502, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 3_000)
+                .start(Principal::UnixUid(502), NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 3_000)
                 .unwrap(),
             a,
             "the single owned run answers every matching start"
         );
         // A different group is a conflict, not a second loop.
-        assert!(service.start(501, NET, 7, MIN_INTERVAL_MS, 4_000).is_err());
+        assert!(service.start(Principal::UnixUid(501), NET, 7, MIN_INTERVAL_MS, 4_000).is_err());
         // update is owner-only and run-bound.
-        assert!(service.update(502, &a, Some(9), None).is_err());
-        assert!(service.update(501, &[0xde; 16], Some(9), None).is_err());
-        service.update(501, &a, Some(9), None).unwrap();
+        assert!(service.update(&Principal::UnixUid(502), &a, Some(9), None).is_err());
+        assert!(service.update(&Principal::UnixUid(501), &[0xde; 16], Some(9), None).is_err());
+        service.update(&Principal::UnixUid(501), &a, Some(9), None).unwrap();
         assert!(!service.stop_if(&[0xde; 16]), "stale id cannot stop");
         assert!(service.stop_if(&a));
         assert!(!service.stop(), "already stopped");
@@ -1105,7 +1108,7 @@ mod tests {
         let service = RollcallService::default();
         let ops = GroupOps::default();
         service
-            .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
+            .start(Principal::UnixUid(501), NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
             .unwrap();
         for tick in 0..10 {
             service_step(&service, &ops, 0, false, 1_000 + tick * TICK_MS);
@@ -1128,7 +1131,7 @@ mod tests {
         let ops = GroupOps::default();
         let mut lane = GroupLane::default();
         service
-            .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
+            .start(Principal::UnixUid(501), NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
             .unwrap();
         // Roster 10 → still at the 2 s floor.
         service_step(&service, &ops, 10, false, 1_000);
@@ -1182,7 +1185,7 @@ mod tests {
         let service = RollcallService::default();
         let ops = GroupOps::default();
         service
-            .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
+            .start(Principal::UnixUid(501), NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
             .unwrap();
         service_step(&service, &ops, 10, false, 1_000);
         let first = service.in_flight_op().unwrap();
@@ -1206,7 +1209,7 @@ mod tests {
         let ops = GroupOps::default();
         let mut lane = GroupLane::default();
         service
-            .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
+            .start(Principal::UnixUid(501), NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
             .unwrap();
         service_step(&service, &ops, 10, false, 1_000);
         settle_poll(
@@ -1233,7 +1236,7 @@ mod tests {
         let ops = GroupOps::default();
         let mut lane = GroupLane::default();
         service
-            .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
+            .start(Principal::UnixUid(501), NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
             .unwrap();
         // Force the interval up on a big roster, then shrink the roster and
         // run SHRINK_AFTER_ROUNDS clean polls — the interval steps down in
@@ -1301,7 +1304,7 @@ mod tests {
         let service = RollcallService::default();
         let ops = GroupOps::default();
         service
-            .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
+            .start(Principal::UnixUid(501), NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
             .unwrap();
         service_step(&service, &ops, 10, false, 1_000);
         let op = service.in_flight_op().unwrap();
@@ -1372,7 +1375,7 @@ mod tests {
         let service = RollcallService::default();
         let ops = GroupOps::default();
         service
-            .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
+            .start(Principal::UnixUid(501), NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
             .unwrap();
         service_step(&service, &ops, 10, false, 1_000);
         let run_uuid = service.lock().run.as_ref().map(|r| r.run_uuid).unwrap();
@@ -1449,7 +1452,7 @@ mod tests {
         let service = RollcallService::default();
         let ops = GroupOps::default();
         service
-            .start(501, NET, DEFAULT_GROUP, 60_000, 1_000)
+            .start(Principal::UnixUid(501), NET, DEFAULT_GROUP, 60_000, 1_000)
             .unwrap();
         service_step(&service, &ops, 10, false, 1_000);
         assert_eq!(service.interval_ms(), Some(60_000));
@@ -1464,7 +1467,7 @@ mod tests {
         );
         // update lowers the floor; the budgeted effective stays larger.
         let run = service.lock().run.as_ref().map(|r| r.run_uuid).unwrap();
-        service.update(501, &run, None, Some(2_000)).unwrap();
+        service.update(&Principal::UnixUid(501), &run, None, Some(2_000)).unwrap();
         let status = routeloom_json::parse(&service.status_json(&StatusView::default())).unwrap();
         assert_eq!(
             status.get("desired_interval_ms").and_then(Json::as_u64),

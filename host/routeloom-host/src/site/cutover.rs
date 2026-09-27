@@ -28,6 +28,7 @@
 use routeloom_join::renew::{Commit, CutoverCommit, Head, Phase, Prepare, Receipt};
 use routeloom_join::SitePackage;
 use routeloom_json::Json;
+use routeloom_peercred::Principal;
 use routeloom_provision::sdkv1::cert::{
     cert_decode, cert_issue, cert_verify, CertClaims, CertType, CERT_MAX,
 };
@@ -515,10 +516,11 @@ impl SiteAuthority {
     /// sent before that commit; the tick paces PREPAREs after it.
     pub fn cutover(
         &mut self,
-        principal: u32,
+        principal: impl Into<Principal>,
         request: CutoverRequest,
         time: HostTime,
     ) -> Result<String, SiteError> {
+        let principal = principal.into();
         let now_ms = time.unix_ms;
         let digest = sha256(
             format!(
@@ -528,7 +530,7 @@ impl SiteAuthority {
             )
             .as_bytes(),
         );
-        if let Some(answer) = self.idempotent(principal, &request.key, &digest) {
+        if let Some(answer) = self.idempotent(&principal, &request.key, &digest) {
             return answer;
         }
         let current_epoch = self.id.site_claims.site_epoch;
@@ -760,7 +762,14 @@ impl SiteAuthority {
             }
         }
         let evicted = self.operation_doc(&mut batch, &op)?;
-        self.decision_doc(&mut batch, principal, &request.key, digest, &result, now_ms);
+        self.decision_doc(
+            &mut batch,
+            &principal,
+            &request.key,
+            digest,
+            &result,
+            now_ms,
+        );
         if let Err(error) = self.store.commit(&batch) {
             self.store_error(now_ms, &error);
             return Err(store_failure(&error));
@@ -775,7 +784,7 @@ impl SiteAuthority {
         self.gk_outbox.clear();
         self.next_serial = serial;
         self.remember_operation(op.clone(), evicted);
-        self.remember_decision(principal, &request.key, digest, &result, now_ms);
+        self.remember_decision(&principal, &request.key, digest, &result, now_ms);
         self.event(
             now_ms,
             format!(
