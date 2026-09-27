@@ -1,0 +1,1 @@
+{"v":1,"request_id":"ctl-657484","ok":false,"error":{"code":"UNSUPPORTED","detail":{"message":"the attached gateway does not advertise group_delivery_v1 (HelloAck capability bit 7 with host_ops_v1)","required_capability":"group_delivery_v1","capability":519},"retryable":false}}

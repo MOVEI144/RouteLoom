@@ -60,7 +60,11 @@ class NvsBlobNamespace final : public sdkv1::BlobNamespace {
   // `partition` nullptr selects the default "nvs" partition (bench only;
   // the SDK v1 records belong in kSecurityNvsPartition). The labels are
   // snapshotted on entry so even a failed open stays attributable.
-  Status open(const char* partition, const char* name_space) noexcept;
+  // NVS_READONLY is the field-boot mode (design-devflow §4.1): it never
+  // creates a missing namespace and the driver itself refuses any later
+  // write/erase — read-only is enforced, not just intended.
+  Status open(const char* partition, const char* name_space,
+              nvs_open_mode_t open_mode = NVS_READWRITE) noexcept;
   void close() noexcept;
   bool is_open() const noexcept { return open_; }
 

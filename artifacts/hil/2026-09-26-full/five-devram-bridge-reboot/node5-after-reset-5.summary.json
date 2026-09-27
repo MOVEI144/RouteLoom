@@ -1,0 +1,12 @@
+{
+  "count": 5,
+  "accepted": 5,
+  "delivered": 5,
+  "success_rate": 1.0,
+  "rtt_ms_min": 104.83,
+  "rtt_ms_median": 156.32,
+  "rtt_ms_p95": 280.63,
+  "rtt_ms_p99": 305.49,
+  "rtt_ms_max": 311.7,
+  "evidence": "artifacts/hil/2026-09-26-full/five-devram-bridge-reboot/node5-after-reset-5.jsonl"
+}

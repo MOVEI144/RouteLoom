@@ -1,0 +1,32 @@
+{
+  "requested": 20,
+  "host_accepted": 20,
+  "delivered": 15,
+  "stopped_reason": null,
+  "success_rate": 0.75,
+  "rate_limit_retries": 10,
+  "pace_s": 1.0,
+  "elapsed_s": 120.21,
+  "latency_ms_median": 104.62,
+  "latency_ms_p95": 116.71,
+  "latency_ms_max": 121.12,
+  "by_destination": {
+    "2": {
+      "accepted": 5,
+      "delivered": 0
+    },
+    "3": {
+      "accepted": 5,
+      "delivered": 5
+    },
+    "4": {
+      "accepted": 5,
+      "delivered": 5
+    },
+    "5": {
+      "accepted": 5,
+      "delivered": 5
+    }
+  },
+  "evidence": "artifacts/hil/2026-09-26-full/member-unicast-after-gk-rotate.jsonl"
+}

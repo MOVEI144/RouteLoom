@@ -230,6 +230,8 @@ void test_same_boot_reapply(bool change_site_epoch) {
   CHECK(take_apply(owner.coordinator(), now, first));
   EspNowSecurityOwnerTestAccess::apply(owner, first);
   CHECK(runtime.node().started());
+  CHECK(first.role == kMemberRoleEndpoint);
+  CHECK(!runtime.node().transit_permitted());
   CHECK(!SecurityCoordinatorTestAccess::apply_pending(owner.coordinator()));
   CHECK(runtime.node().config().network == static_cast<std::uint32_t>(first.network));
   CHECK(first.network >> 32U != 0);

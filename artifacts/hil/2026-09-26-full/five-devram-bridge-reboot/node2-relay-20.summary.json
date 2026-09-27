@@ -1,0 +1,20 @@
+{
+  "requested": 20,
+  "host_accepted": 20,
+  "delivered": 20,
+  "stopped_reason": null,
+  "success_rate": 1.0,
+  "rate_limit_retries": 46,
+  "pace_s": 0,
+  "elapsed_s": 455.86,
+  "latency_ms_median": 112.21,
+  "latency_ms_p95": 165.23,
+  "latency_ms_max": 170.72,
+  "by_destination": {
+    "2": {
+      "accepted": 20,
+      "delivered": 20
+    }
+  },
+  "evidence": "artifacts/hil/2026-09-26-full/five-devram-bridge-reboot/node2-relay-20.jsonl"
+}

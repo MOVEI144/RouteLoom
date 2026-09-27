@@ -1,0 +1,11 @@
+{
+  "name": "reset_ack",
+  "opcode": 113,
+  "flags": 1,
+  "run_uuid_hex": "deadbeefcafe01020304050607080910",
+  "sequence": 5,
+  "body_hex": "01",
+  "wire_hex": "524c423101710001deadbeefcafe0102030405060708091000000005a505df1b01",
+  "expect": "ok",
+  "note": "reset accepted; the device restarts after the delay"
+}

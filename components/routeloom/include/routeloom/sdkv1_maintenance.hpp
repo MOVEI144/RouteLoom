@@ -97,8 +97,9 @@ struct MaintenanceWipeStores {
 // Largest accepted bundle JSON: the office emitter's worst case (3 anchors,
 // longest enum spellings, 256-byte DevCert) is 1591 bytes.
 constexpr std::size_t kMaintenanceBundleMax = 2048;
-// Longest input line: "identity " + the bundle as hex.
-constexpr std::size_t kMaintenanceLineMax = 9 + 2 * kMaintenanceBundleMax;
+// Longest pre-RF console line: "benchcfg stage " + the 2 KiB document as hex.
+// This also covers "identity " + the bundle as hex.
+constexpr std::size_t kMaintenanceLineMax = 15 + 2 * kMaintenanceBundleMax;
 // Longest response (`OK pop_hex=` + 366 hex) plus the NUL terminator;
 // responses are always NUL-terminated with size excluding the NUL.
 constexpr std::size_t kMaintenanceResponseMax = 384;

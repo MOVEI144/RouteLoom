@@ -1,0 +1,16 @@
+[
+  {
+    "node": 2,
+    "time_ms": 1790443030561,
+    "exit": 0,
+    "stdout": "{\"accepted\":false,\"error\":\"session not authenticated\"}\n",
+    "stderr": ""
+  },
+  {
+    "node": 6,
+    "time_ms": 1790443030563,
+    "exit": 0,
+    "stdout": "{\"accepted\":false,\"error\":\"session not authenticated\"}\n",
+    "stderr": ""
+  }
+]

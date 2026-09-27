@@ -1,0 +1,18 @@
+2026-09-26T15:07:38,022995+09:00 cdc_acm 1-4.2.3:1.0: ttyACM4: USB ACM device
+2026-09-26T15:07:38,232689+09:00 usb 1-4.2.3: USB disconnect, device number 69
+2026-09-26T15:37:35,555308+09:00 usb 1-4.2.3: new full-speed USB device number 70 using xhci_hcd
+2026-09-26T15:37:35,665523+09:00 usb 1-4.2.3: New USB device found, idVendor=303a, idProduct=1001, bcdDevice= 1.01
+2026-09-26T15:37:35,665529+09:00 usb 1-4.2.3: New USB device strings: Mfr=1, Product=2, SerialNumber=3
+2026-09-26T15:37:35,665531+09:00 usb 1-4.2.3: Product: USB JTAG/serial debug unit
+2026-09-26T15:37:35,665533+09:00 usb 1-4.2.3: Manufacturer: Espressif
+2026-09-26T15:37:35,665534+09:00 usb 1-4.2.3: SerialNumber: 94:A9:90:7A:26:AC
+2026-09-26T15:37:35,679269+09:00 cdc_acm 1-4.2.3:1.0: ttyACM4: USB ACM device
+2026-09-26T15:37:35,864690+09:00 usb 1-4.2.3: USB disconnect, device number 70
+2026-09-26T16:07:31,386465+09:00 usb 1-4.2.3: new full-speed USB device number 71 using xhci_hcd
+2026-09-26T16:07:31,485719+09:00 usb 1-4.2.3: New USB device found, idVendor=303a, idProduct=1001, bcdDevice= 1.01
+2026-09-26T16:07:31,485723+09:00 usb 1-4.2.3: New USB device strings: Mfr=1, Product=2, SerialNumber=3
+2026-09-26T16:07:31,485723+09:00 usb 1-4.2.3: Product: USB JTAG/serial debug unit
+2026-09-26T16:07:31,485724+09:00 usb 1-4.2.3: Manufacturer: Espressif
+2026-09-26T16:07:31,485725+09:00 usb 1-4.2.3: SerialNumber: 94:A9:90:7A:26:AC
+2026-09-26T16:07:31,499307+09:00 cdc_acm 1-4.2.3:1.0: ttyACM4: USB ACM device
+2026-09-26T16:07:31,705013+09:00 usb 1-4.2.3: USB disconnect, device number 71

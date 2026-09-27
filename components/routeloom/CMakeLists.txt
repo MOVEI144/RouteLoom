@@ -57,6 +57,9 @@ set(ROUTELOOM_CORE_SOURCES
   src/sdkv1_revocation.cpp
   src/sdkv1_lifecycle_store.cpp
   src/sdkv1_store.cpp
+  src/board_config.cpp
+  src/board_secrets.cpp
+  src/sdkv1_board_setup.cpp
   src/security_floor.cpp
   src/sdkv1_group_keys.cpp
   src/sdkv1_group_security.cpp
@@ -127,6 +130,7 @@ if(COMMAND idf_component_register)
          ${ROUTELOOM_LIBEDHOC_SRC} ${ROUTELOOM_ZCBOR_SRC} ${ROUTELOOM_EDHOC_GLUE_SRC}
     INCLUDE_DIRS include ${CMAKE_CURRENT_LIST_DIR}/third_party/micro-ecc
     PRIV_INCLUDE_DIRS ${ROUTELOOM_EDHOC_INCLUDE_DIRS}
+    PRIV_REQUIRES esp_timer heap
   )
   target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
   target_compile_definitions(${COMPONENT_LIB} PRIVATE ${ROUTELOOM_UECC_DEFS}

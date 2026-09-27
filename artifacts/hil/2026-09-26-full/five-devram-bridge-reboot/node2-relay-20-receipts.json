@@ -1,0 +1,285 @@
+{
+  "traffic": "artifacts/hil/2026-09-26-full/five-devram-bridge-reboot/node2-relay-20.jsonl",
+  "console": "artifacts/hil/2026-09-26-full/five-devram-bridge-reboot/node2-combined-console.log",
+  "origin": 1,
+  "host_accepted": 20,
+  "host_delivered": 20,
+  "receiver_confirmed": 13,
+  "host_failed_receiver_confirmed": [],
+  "host_delivered_receiver_missing": [
+    {
+      "index": 5,
+      "request": 20,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 39,
+      "receiver_count": 0
+    },
+    {
+      "index": 6,
+      "request": 21,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 40,
+      "receiver_count": 0
+    },
+    {
+      "index": 7,
+      "request": 22,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 41,
+      "receiver_count": 0
+    },
+    {
+      "index": 8,
+      "request": 23,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 42,
+      "receiver_count": 0
+    },
+    {
+      "index": 9,
+      "request": 24,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 43,
+      "receiver_count": 0
+    },
+    {
+      "index": 10,
+      "request": 25,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 44,
+      "receiver_count": 0
+    },
+    {
+      "index": 11,
+      "request": 26,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 45,
+      "receiver_count": 0
+    }
+  ],
+  "receiver_delay_ms_median": 182.15,
+  "receiver_delay_ms_p95": 244.15,
+  "receiver_delay_ms_max": 252.17,
+  "rows": [
+    {
+      "index": 0,
+      "request": 15,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 34,
+      "receiver_count": 1,
+      "receiver_observed_at": "2026-09-26T08:41:26.938+00:00",
+      "receiver_delay_ms": 146.46
+    },
+    {
+      "index": 1,
+      "request": 16,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 35,
+      "receiver_count": 1,
+      "receiver_observed_at": "2026-09-26T08:41:27.139+00:00",
+      "receiver_delay_ms": 231.86
+    },
+    {
+      "index": 2,
+      "request": 17,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 36,
+      "receiver_count": 1,
+      "receiver_observed_at": "2026-09-26T08:41:27.139+00:00",
+      "receiver_delay_ms": 118.85
+    },
+    {
+      "index": 3,
+      "request": 18,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 37,
+      "receiver_count": 1,
+      "receiver_observed_at": "2026-09-26T08:41:27.339+00:00",
+      "receiver_delay_ms": 204.68
+    },
+    {
+      "index": 4,
+      "request": 19,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 38,
+      "receiver_count": 1,
+      "receiver_observed_at": "2026-09-26T08:41:32.746+00:00",
+      "receiver_delay_ms": 214.28
+    },
+    {
+      "index": 5,
+      "request": 20,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 39,
+      "receiver_count": 0
+    },
+    {
+      "index": 6,
+      "request": 21,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 40,
+      "receiver_count": 0
+    },
+    {
+      "index": 7,
+      "request": 22,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 41,
+      "receiver_count": 0
+    },
+    {
+      "index": 8,
+      "request": 23,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 42,
+      "receiver_count": 0
+    },
+    {
+      "index": 9,
+      "request": 24,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 43,
+      "receiver_count": 0
+    },
+    {
+      "index": 10,
+      "request": 25,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 44,
+      "receiver_count": 0
+    },
+    {
+      "index": 11,
+      "request": 26,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 45,
+      "receiver_count": 0
+    },
+    {
+      "index": 12,
+      "request": 27,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 46,
+      "receiver_count": 1,
+      "receiver_observed_at": "2026-09-26T08:45:32.612+00:00",
+      "receiver_delay_ms": 82.83
+    },
+    {
+      "index": 13,
+      "request": 28,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 47,
+      "receiver_count": 1,
+      "receiver_observed_at": "2026-09-26T08:46:02.672+00:00",
+      "receiver_delay_ms": 141.67
+    },
+    {
+      "index": 14,
+      "request": 29,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 48,
+      "receiver_count": 1,
+      "receiver_observed_at": "2026-09-26T08:46:32.713+00:00",
+      "receiver_delay_ms": 182.15
+    },
+    {
+      "index": 15,
+      "request": 30,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 49,
+      "receiver_count": 1,
+      "receiver_observed_at": "2026-09-26T08:47:02.785+00:00",
+      "receiver_delay_ms": 252.17
+    },
+    {
+      "index": 16,
+      "request": 31,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 50,
+      "receiver_count": 1,
+      "receiver_observed_at": "2026-09-26T08:47:32.634+00:00",
+      "receiver_delay_ms": 101.99
+    },
+    {
+      "index": 17,
+      "request": 32,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 51,
+      "receiver_count": 1,
+      "receiver_observed_at": "2026-09-26T08:48:02.686+00:00",
+      "receiver_delay_ms": 153.96
+    },
+    {
+      "index": 18,
+      "request": 33,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 52,
+      "receiver_count": 1,
+      "receiver_observed_at": "2026-09-26T08:48:32.732+00:00",
+      "receiver_delay_ms": 202.27
+    },
+    {
+      "index": 19,
+      "request": 34,
+      "host_state": "delivered",
+      "host_reason": "END_RECEIVED",
+      "msg_session": 238,
+      "msg_seq": 53,
+      "receiver_count": 1,
+      "receiver_observed_at": "2026-09-26T08:49:02.772+00:00",
+      "receiver_delay_ms": 238.8
+    }
+  ]
+}

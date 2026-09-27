@@ -11,6 +11,13 @@
 #include "routeloom/kdf.hpp"
 #include "routeloom/secure_clear.hpp"
 #include "uECC.h"
+#if defined(ESP_PLATFORM) && CONFIG_ROUTELOOM_HIL_EDHOC_TIMING
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#include "esp_log.h"
+#include "esp_timer.h"
+#pragma GCC diagnostic pop
+#endif
 
 extern "C" std::size_t routeloom_edhoc_peer_cid(const struct edhoc_context* ctx,
                                                         std::uint8_t* out,
@@ -118,8 +125,17 @@ bool ecdh(const ByteView scalar, const std::uint8_t* peer, const std::size_t pee
   if (!load_peer_point(peer, peer_size, point)) {
     return false;
   }
-  return uECC_shared_secret(point.data(), scalar.data, secret.data(),
-                            uECC_secp256r1()) != 0;
+#if defined(ESP_PLATFORM) && CONFIG_ROUTELOOM_HIL_EDHOC_TIMING
+  const std::int64_t started_us = esp_timer_get_time();
+#endif
+  const bool ok = uECC_shared_secret(point.data(), scalar.data, secret.data(),
+                                     uECC_secp256r1()) != 0;
+#if defined(ESP_PLATFORM) && CONFIG_ROUTELOOM_HIL_EDHOC_TIMING
+  ESP_LOGI("RouteLoomEdhoc", "HIL EDHOC ECDH us=%lld ok=%u",
+           static_cast<long long>(esp_timer_get_time() - started_us),
+           static_cast<unsigned>(ok));
+#endif
+  return ok;
 }
 
 }  // namespace
@@ -419,9 +435,17 @@ struct Session::Backend {
     sha256(ByteView{input, input_length}, digest);
     DeterministicSha256 context{};
     context.base = {&det_init, &det_update, &det_finish, 64, 32, context.tmp.data()};
+#if defined(ESP_PLATFORM) && CONFIG_ROUTELOOM_HIL_EDHOC_TIMING
+    const std::int64_t started_us = esp_timer_get_time();
+#endif
     const int ok = uECC_sign_deterministic(scalar.data, digest.data(),
                                            static_cast<unsigned>(digest.size()),
                                            &context.base, signature, uECC_secp256r1());
+#if defined(ESP_PLATFORM) && CONFIG_ROUTELOOM_HIL_EDHOC_TIMING
+    ESP_LOGI("RouteLoomEdhoc", "HIL EDHOC SIGN us=%lld ok=%u",
+             static_cast<long long>(esp_timer_get_time() - started_us),
+             static_cast<unsigned>(ok != 0));
+#endif
     secure_clear(context.tmp);
     secure_clear(digest);
     if (ok == 0) {
@@ -446,9 +470,17 @@ struct Session::Backend {
     }
     ScopeDigest digest{};
     sha256(ByteView{input, input_length}, digest);
+#if defined(ESP_PLATFORM) && CONFIG_ROUTELOOM_HIL_EDHOC_TIMING
+    const std::int64_t started_us = esp_timer_get_time();
+#endif
     const int ok = uECC_verify(point.data(), digest.data(),
                                static_cast<unsigned>(digest.size()), signature,
                                uECC_secp256r1());
+#if defined(ESP_PLATFORM) && CONFIG_ROUTELOOM_HIL_EDHOC_TIMING
+    ESP_LOGI("RouteLoomEdhoc", "HIL EDHOC VERIFY us=%lld ok=%u",
+             static_cast<long long>(esp_timer_get_time() - started_us),
+             static_cast<unsigned>(ok != 0));
+#endif
     return ok != 0 ? EDHOC_SUCCESS : EDHOC_ERROR_CRYPTO_FAILURE;
   }
 
