@@ -22,8 +22,11 @@ PARTITIONS = {
     role: (('nvs', 1, 2, 0x9000, 0x6000),
            ('phy_init', 1, 1, 0xf000, 0x1000),
            ('factory', 0, 0, 0x10000, 0x180000),
-           ('rlsec', 1, 2, 0x190000, rlsec_size))
-    for role, rlsec_size in (('reference_node', 0x10000), ('bridge_node', 0x20000))
+           ('rlsec', 1, 2, 0x190000, rlsec_size),
+           ('rlcfg', 1, 2, 0x1B0000, 0x6000),
+           ('rlkeys', 1, 2, 0x1B6000, 0x3000))
+    for role, rlsec_size in (('reference_node', 0x10000), ('bench_node', 0x10000),
+                             ('bridge_node', 0x20000))
 }
 AUXILIARY_FILES = frozenset(('flasher_args.json', 'sdkconfig', 'partition-table.csv',
                              'ram-report.json', 'build-info.json', 'LICENSES/LICENSE',
@@ -263,7 +266,7 @@ def _flash_files(args, build, chip):
 
 def package(app, build, out, private, chip, role, version, sdk_commit, source_digest):
     app, build, out = Path(app), Path(build), Path(out)
-    if out.exists() or chip not in CHIPS or role not in ('bridge_node', 'reference_node'):
+    if out.exists() or chip not in CHIPS or role not in PARTITIONS:
         raise ValueError('invalid output or profile')
     config = _read(app, 'sdkconfig').decode()
     security_profile, power_profile, flash_mode, flash_frequency, flash_size = check_config(config, chip)
@@ -320,6 +323,10 @@ def package(app, build, out, private, chip, role, version, sdk_commit, source_di
                 **info, 'chip_revision_range': [revision_low, revision_high],
                 'board_compatibility': [chip],
                 'security_profile': security_profile, 'power_profile': power_profile,
+                # BoardConfig-gated images take NodeId from rlcfg at boot, so
+                # one signed image serves every board of the chip x role pair;
+                # legacy fixtures embed the NodeId in the signed sdkconfig.
+                'generic_config': security_profile != 'legacy-fixture',
                 'capabilities': [], 'minimum_flash_bytes': max(
                     max(offset + size for _, _, _, offset, size in PARTITIONS[role]),
                     int(flash_size[:-2]) * 1024 * 1024),
@@ -361,6 +368,11 @@ def verify_bundle(root, public):
     if (manifest.get('board_compatibility') != [chip] or
             manifest.get('security_profile') != security_profile or
             manifest.get('power_profile') != power_profile or
+            # generic_config is signed claim vs resolved sdkconfig fact: a
+            # legacy-fixture bundle claiming generic would skip the assigned
+            # NodeId check, so the flag must match the security profile.
+            (manifest.get('generic_config') is True)
+            != (security_profile != 'legacy-fixture') or
             manifest.get('flash_mode') != flash_mode or
             manifest.get('flash_frequency') != flash_frequency or
             (role == 'bridge_node' and power_profile == 'deep-sleep') or

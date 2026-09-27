@@ -11,7 +11,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "routeloom/discovery_scope.hpp"
 #include "routeloom/espnow_board_config.hpp"
+#include "routeloom/hex.hpp"
 #include "routeloom/espnow_sdkv1_entropy.hpp"
 #include "routeloom/nvs_legacy_purge.hpp"
 #include "routeloom/sdkv1_board_setup.hpp"
@@ -389,10 +391,17 @@ Status Sdkv1Stores::initialize() noexcept {
 void Sdkv1Stores::log_state(const char* tag) const noexcept {
   if (identity_.has_identity()) {
     const sdkv1::IdentityRecord& identity = identity_.identity();
-    ESP_LOGI(tag, "sdkv1 identity: node=%llu key_location=%u flags=0x%02x anchors=%u "
-                  "devcert=%uB",
-             static_cast<unsigned long long>(identity.node_id),
-             static_cast<unsigned>(identity.key_location),
+    char kid_hex[sizeof(identity.kid) * 2 + 1];
+    hex_encode(identity.kid.data(), identity.kid.size(), kid_hex);
+    ScopeDigest devcert_digest{};
+    sha256(ByteView{identity.devcert.bytes.data(), identity.devcert.size},
+           devcert_digest);
+    char devcert_hex[sizeof(devcert_digest) * 2 + 1];
+    hex_encode(devcert_digest.data(), devcert_digest.size(), devcert_hex);
+    ESP_LOGI(tag, "sdkv1 identity: node=%llu kid=%s devcert_sha256=%s "
+                  "key_location=%u flags=0x%02x anchors=%u devcert=%uB",
+             static_cast<unsigned long long>(identity.node_id), kid_hex,
+             devcert_hex, static_cast<unsigned>(identity.key_location),
              static_cast<unsigned>(identity.flags),
              static_cast<unsigned>(identity.anchor_count),
              static_cast<unsigned>(identity.devcert.size));

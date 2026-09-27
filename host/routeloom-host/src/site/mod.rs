@@ -1563,6 +1563,10 @@ impl SiteAuthority {
         self.id.site_id
     }
 
+    pub fn purpose(&self) -> SitePurpose {
+        self.purpose
+    }
+
     pub fn network(&self) -> u64 {
         self.id.network
     }
@@ -5613,6 +5617,31 @@ impl SiteAuthority {
         self.gks.status_json(time)
     }
 
+    /// True while control-plane work that competes for mesh airtime is
+    /// live: an open join request or EDHOC exchange, a GK rotation with
+    /// undelivered targets, or a pre-converged cutover. The rollcall lane
+    /// reads it to extend its poll interval — the point is only that
+    /// rollcall yields, not how much.
+    pub fn control_pressure(&self) -> bool {
+        if !self.requests.is_empty() || !self.txns.is_empty() {
+            return true;
+        }
+        if self.gks.rotation().is_some() {
+            return true;
+        }
+        self.operations.values().any(|op| {
+            op.kind == "cutover"
+                && op.cutover.as_ref().is_some_and(|state| {
+                    matches!(
+                        state.phase,
+                        cutover::CutoverPhase::Preparing
+                            | cutover::CutoverPhase::WaitingGateway
+                            | cutover::CutoverPhase::Committed
+                    )
+                })
+        })
+    }
+
     pub fn join_requests_json(&self, now_ms: u64) -> String {
         let items = self
             .requests
@@ -5717,6 +5746,23 @@ impl SiteAuthority {
         self.devices
             .get(&node)
             .map(|row| format!("{{\"member\":{}}}", Self::member_json(row)))
+    }
+
+    /// Structured member rows for the rollcall status view — the JSON
+    /// surface (`members_json`) cannot be recomposed into another
+    /// method's response. Returns (node, kid, approved_ms, confirmed_ms).
+    pub fn member_briefs(&self) -> Vec<(u64, [u8; 32], u64, Option<u64>)> {
+        self.devices
+            .values()
+            .filter(|row| row.member)
+            .map(|row| (row.node, row.kid, row.approved_ms, row.confirmed_ms))
+            .collect()
+    }
+
+    /// Planned device count when this site is bound to a lab inventory —
+    /// `counts.inventory_planned` on the rollcall status. None otherwise.
+    pub fn lab_inventory_planned(&self) -> Option<u64> {
+        self.lab.as_ref().map(|lab| lab.inventory.len() as u64)
     }
 
     /// The GK lifecycle state of a rotate/revoke operation (§6.4):
@@ -6203,6 +6249,15 @@ impl SiteService {
     ) -> Events {
         self.with(|a| a.handle_authority_up(device, kind, bytes, time, rng))
             .1
+    }
+
+    /// The rollcall lane's read-only pressure probe — locks the authority
+    /// for the flag only and never drains a queue (unlike `with`).
+    pub fn control_pressure(&self) -> bool {
+        self.authority
+            .lock()
+            .expect("site authority poisoned")
+            .control_pressure()
     }
 
     /// Seals one GK command into the channel outbox. Locks the authority

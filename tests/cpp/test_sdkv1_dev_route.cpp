@@ -328,6 +328,48 @@ void test_dev_ignores_stale_member_channel() {
   CHECK(node.coordinator().snapshot().mode == CoordinatorMode::Dev);
 }
 
+void test_dev_root_propagation() {
+  // DevRam board roots (dev-flow §6.4): the dev board config hands either a
+  // scoped gateway set or a flat group-root set to adopt_dev; both land in
+  // the adopted member config untouched, and both-at-once is refused.
+  current = "dev_root_propagation";
+  const keys::Secret psk = dev_test_psk();
+  {
+    SimNode node{kDevNodeA, kDevMacA, 0xD1A,
+                 kResume2NodeLinkQuota + kResume2NodeEndQuota};
+    CHECK(node.init_stores());
+    CHECK(node.boot_dev(kDevT0, psk, kNetwork, kDevBoot, {kDevNodeA, kDevNodeB}));
+    node.drain_actions(kDevT0);
+    CHECK(node.adopted_valid());
+    const CoordinatorMemberConfig& adopted = node.adopted();
+    CHECK(adopted.route_gateway_count == 2);
+    CHECK(adopted.route_gateways[0] == kDevNodeA &&
+          adopted.route_gateways[1] == kDevNodeB);
+    CHECK(adopted.group_root_count == 0);
+  }
+  {
+    SimNode node{kDevNodeA, kDevMacA, 0xD1A,
+                 kResume2NodeLinkQuota + kResume2NodeEndQuota};
+    CHECK(node.init_stores());
+    CHECK(node.boot_dev(kDevT0, psk, kNetwork, kDevBoot, {}, {kDevNodeA}));
+    node.drain_actions(kDevT0);
+    CHECK(node.adopted_valid());
+    const CoordinatorMemberConfig& adopted = node.adopted();
+    CHECK(adopted.group_root_count == 1 && adopted.group_roots[0] == kDevNodeA);
+    CHECK(adopted.route_gateway_count == 0);
+  }
+  {
+    SimNode node{kDevNodeA, kDevMacA, 0xD1A,
+                 kResume2NodeLinkQuota + kResume2NodeEndQuota};
+    CHECK(node.init_stores());
+    // Both policies at once is ambiguous: refused before adoption.
+    CHECK(!node.boot_dev(kDevT0, psk, kNetwork, kDevBoot, {kDevNodeA}, {kDevNodeB}));
+    CHECK(node.coordinator().snapshot().mode != CoordinatorMode::Dev);
+    // A reserved root id is refused the same way.
+    CHECK(!node.boot_dev(kDevT0, psk, kNetwork, kDevBoot, {}, {kBroadcastNodeId}));
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -337,6 +379,7 @@ int main() {
   test_dev_wrong_psk_no_session();
   test_dev_end_scope();
   test_dev_ignores_stale_member_channel();
+  test_dev_root_propagation();
   if (failures != 0) {
     std::fprintf(stderr, "FAILURES: %d\n", failures);
     return 1;

@@ -213,6 +213,30 @@ jobs:
             profile: normal
             autonomy: off
             features: route_scoped
+          # dev-flow D07/D08: scoped gateways are also selectable on the
+          # DevRam owner profile (BoardConfig's interim carrier), and the
+          # flat group tree profile is an explicit member opt-in.
+          # Compile-time coverage only.
+          - app: reference_node
+            target: esp32c3
+            profile: normal
+            autonomy: off
+            features: dev_scoped
+          - app: bridge_node
+            target: esp32c3
+            profile: normal
+            autonomy: off
+            features: dev_scoped
+          - app: reference_node
+            target: esp32c3
+            profile: normal
+            autonomy: off
+            features: group_flat
+          - app: bridge_node
+            target: esp32c3
+            profile: normal
+            autonomy: off
+            features: group_flat
           # Owner-profile cells (G-SEC P4 §8.4): the reference node and
           # the bridge boot the shared EspNowSecurityOwner with the
           # legacy dev-PSK lane compiled out. Compile-time coverage
@@ -357,6 +381,18 @@ jobs:
             printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
             printf 'CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y\n' >> sdkconfig
           fi
+          if [ '${{ matrix.features }}' = dev_scoped ]; then
+            # DevRam + scoped (dev-flow D07): the same gateway set, under
+            # the explicit dev profile instead of the legacy fixture.
+            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y\n' >> sdkconfig
+            printf 'CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y\n' >> sdkconfig
+          fi
+          if [ '${{ matrix.features }}' = group_flat ]; then
+            # Member + flat group tree (dev-flow D08): SitePackage
+            # gateways map to group_roots; scoped routing stays off.
+            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y\n' >> sdkconfig
+            printf 'CONFIG_ROUTELOOM_GROUP_TREE_FLAT=y\n' >> sdkconfig
+          fi
           if [ '${{ matrix.features }}' = owner_member ]; then
             # Security-owner profile (G-SEC P4 §8.4): the legacy-only
             # options vanish by `depends on`, so nothing else is set.
@@ -409,7 +445,7 @@ jobs:
             *) ! grep -q '^CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y' sdkconfig ;;
           esac
           case '${{ matrix.features }}' in
-            route_scoped)
+            route_scoped|dev_scoped)
               # Prove the scoped symbols resolved to the product timers.
               grep -q '^CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y' sdkconfig
               grep -q '^CONFIG_ROUTELOOM_ROUTE_PERIOD_MS=5000$' sdkconfig
@@ -417,20 +453,30 @@ jobs:
               ;;
             *) ! grep -q '^CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y' sdkconfig ;;
           esac
-          # bench_node defaults to MemberEdhoc in normal cells; its
-          # deep_sleep/off cells explicitly select LegacyFixture above.
+          # Member cells: owner_member pins the profile, group_flat's flat
+          # tree is a member opt-in (D08), and bench_node defaults to
+          # MemberEdhoc in normal cells — its deep_sleep/off cells
+          # explicitly select LegacyFixture above.
           member_expected=n
           if [ '${{ matrix.features }}' = owner_member ] ||
+             [ '${{ matrix.features }}' = group_flat ] ||
              { [ '${{ matrix.app }}' = bench_node ] &&
                [ '${{ matrix.profile }}' = normal ] &&
                [ '${{ matrix.features }}' = off ]; }; then
             member_expected=y
           fi
           if [ "$member_expected" = y ]; then
+            # Prove the owner profile survived re-resolution.
             grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y' sdkconfig
           else
             ! grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y' sdkconfig
           fi
+          case '${{ matrix.features }}' in
+            group_flat)
+              grep -q '^CONFIG_ROUTELOOM_GROUP_TREE_FLAT=y' sdkconfig
+              ;;
+            *) ! grep -q '^CONFIG_ROUTELOOM_GROUP_TREE_FLAT=y' sdkconfig ;;
+          esac
           # Other normal/off cells default to DevRam; legacy-only cells
           # explicitly select LegacyFixture above.
           legacy_expected=n

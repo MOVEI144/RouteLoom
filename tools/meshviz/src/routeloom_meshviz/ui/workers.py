@@ -1,11 +1,8 @@
 """Worker objects moved to QThreads; the GUI thread never blocks on socket, SQLite or USB."""
 from collections import deque
 import json
-import os
 from pathlib import Path
 import sqlite3
-import subprocess
-import sys
 import threading
 import time
 
@@ -14,6 +11,8 @@ from PySide6.QtNetwork import QLocalSocket
 
 from ..api1_adapter import RESPONSE_MAX_BYTES, LineDecoder, NodesNormalizer, encode_request
 from ..capture import Capture
+# Re-exported: the Qt-free boards driver lives with the other device code.
+from ..device import RealBoards  # noqa: F401
 from ..model import State, reduce
 from ..playback import CaptureReader
 
@@ -598,48 +597,6 @@ class BoardWorker(QObject):
     def stop(self):
         _release(self)
         self.stopped.emit()
-
-
-def _worker_env():
-    env = dict(os.environ)
-    package_root = str(Path(__file__).resolve().parents[2])
-    env['PYTHONPATH'] = os.pathsep.join(filter(None, [package_root, env.get('PYTHONPATH')]))
-    return env
-
-
-class RealBoards:
-    """pyserial enumeration; probe/flash run in the isolated esptool worker process."""
-    def __init__(self):
-        from ..device import PortLeases
-        self.leases = PortLeases()
-
-    def list_ports(self):
-        from ..device import list_ports
-        # Mesh Lab boards are USB serial devices; legacy on-board UARTs have no VID.
-        return [port for port in list_ports() if port.vid is not None]
-
-    @staticmethod
-    def _run(request, timeout):
-        # Fixed argv and JSON stdin: no shell string, no caller-controlled trust anchor.
-        done = subprocess.run([sys.executable, '-m', 'routeloom_meshviz.flash_worker'],
-                              input=json.dumps(request), capture_output=True, text=True,
-                              timeout=timeout, env=_worker_env())
-        lines = done.stdout.strip().splitlines()
-        result = json.loads(lines[-1]) if lines else {'ok': False, 'error': done.stderr[-400:]}
-        if not result.get('ok'):
-            raise RuntimeError(result.get('error') or 'flash worker failed')
-        return result
-
-    def probe(self, port):
-        from ..device import Identity
-        return Identity(**self._run({'op': 'probe', 'port': port}, 30)['identity'])
-
-    def flash(self, port, plan):
-        from dataclasses import asdict
-        self._run({'port': port, 'bundle': str(plan.bundle), 'expected': asdict(plan.expected),
-                   'expected_mac': plan.expected_mac, 'quiesced': plan.quiesced,
-                   'assigned_node_id': plan.assigned_node_id}, 180)
-        return True
 
 
 class FakeBoards:

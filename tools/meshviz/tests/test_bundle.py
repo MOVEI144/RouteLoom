@@ -36,7 +36,9 @@ class BundleTests(unittest.TestCase):
                 ('nvs', 1, 2, 0x9000, 0x6000),
                 ('phy_init', 1, 1, 0xf000, 0x1000),
                 ('factory', 0, 0, 0x10000, 0x180000),
-                ('rlsec', 1, 2, 0x190000, 0x10000)):
+                ('rlsec', 1, 2, 0x190000, 0x10000),
+                ('rlcfg', 1, 2, 0x1b0000, 0x6000),
+                ('rlkeys', 1, 2, 0x1b6000, 0x3000)):
             entry = bytearray(32)
             entry[:2] = bytes.fromhex('aa50')
             entry[2:4] = bytes((kind, subtype))
@@ -80,7 +82,9 @@ class BundleTests(unittest.TestCase):
             'nvs,data,nvs,0x9000,0x6000\n'
             'phy_init,data,phy,0xf000,0x1000\n'
             'factory,app,factory,0x10000,0x180000\n'
-            'rlsec,data,nvs,0x190000,0x10000\n')
+            'rlsec,data,nvs,0x190000,0x10000\n'
+            'rlcfg,data,nvs,0x1b0000,0x6000\n'
+            'rlkeys,data,nvs,0x1b6000,0x3000\n')
         (build / 'ram-report.json').write_text('{}')
         key = root / 'private.pem'
         shutil.copyfile(Path(__file__).resolve().parents[1] /
@@ -148,6 +152,11 @@ class BundleTests(unittest.TestCase):
                                    identity.base_mac, True, bundle), api)
             self.assertEqual(api.written, api.verified)
             self.assertEqual(len(api.written), 3)
+            app_image = next(image for image in images if image.offset == 0x10000)
+            api = API()
+            flash('COM1', FlashPlan(identity, 'esp32c3', (app_image,), True,
+                                   identity.base_mac, True, bundle, None, True), api)
+            self.assertEqual([offset for offset, _ in api.written], [0x10000])
             # A signed app exceeding the factory partition must not overwrite rlsec.
             oversized = bytes(header) + b'\0' * (0x180001 - len(header))
             app_image = bundle / 'images/application.bin'
@@ -333,7 +342,7 @@ class BundleTests(unittest.TestCase):
             path = bundle / 'images/partition_table/partition-table.bin'
             table = bytearray(path.read_bytes())
             table[96 + 8:96 + 12] = (0x8000).to_bytes(4, 'little')
-            table[128 + 16:128 + 32] = hashlib.md5(table[:128]).digest()
+            table[192 + 16:192 + 32] = hashlib.md5(table[:192]).digest()
             path.write_bytes(table)
             manifest = json.loads((bundle / 'manifest.json').read_text())
             for entry in manifest['files']:

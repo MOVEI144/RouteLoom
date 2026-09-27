@@ -5760,3 +5760,37 @@ fn policy_encoding_roundtrips_generation() {
     assert_eq!(decoded.policy_generation, 0);
     assert!(!decoded.zero_touch_open);
 }
+
+/// dev-flow §6.5 / D09: the rollcall lane's pressure probe is true while
+/// any join request or EDHOC exchange is open, and clears once the request
+/// is decided and its transaction is done — the point is rollcall yields
+/// to live control-plane work, not how much.
+#[test]
+fn control_pressure_tracks_join_lifecycle() {
+    let (service, transport) = service();
+    assert!(!service.control_pressure(), "idle service is quiet");
+    let mut device = SimDevice::new(0x00A1_0000_0000_4567, 0x71);
+    let (mut exchange, outcome, events) = device.start(&service, &transport, T0);
+    assert!(matches!(outcome, Outcome::Waiting));
+    assert!(
+        service.control_pressure(),
+        "an open join request is pressure"
+    );
+    decide(
+        &service,
+        request_id(&events).unwrap(),
+        device.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "allow-pressure",
+        T0 + 1,
+    )
+    .unwrap();
+    assert!(matches!(
+        device.finish(&mut exchange, &transport),
+        Outcome::Result(JoinResult::Allow { .. })
+    ));
+    // The decided request and the settled exchange no longer press.
+    assert!(!service.control_pressure(), "joined service is quiet");
+}

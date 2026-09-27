@@ -740,6 +740,219 @@ void test_not_child_is_counted_once() {
 }
 
 // ---------------------------------------------------------------------------
+// Flat-profile group tree (dev-flow §6.3/D08): the same engine runs over the
+// flat routing table — roots are configured in group_roots, child evidence is
+// the poisoned root record in pairwise route updates, the parent toward a
+// root is the committed next hop.
+// ---------------------------------------------------------------------------
+
+void flat_profile(SimWorld& w, const NodeId root, const std::uint32_t period_ms,
+                  const std::uint32_t lifetime_ms) {
+  w.configure = [=](NodeConfig& config) {
+    config.group_roots = {root, kInvalidNodeId};
+    config.route_advertisement_period_ms = period_ms;
+    config.route_lifetime_ms = lifetime_ms;
+  };
+}
+
+// Same physical tree as build_tree, but the flat profile with group root 1.
+void build_flat_tree(SimWorld& w) {
+  flat_profile(w, 1, kFastPeriodMs, kFastLifetimeMs);
+  for (NodeId id = 1; id <= 7; ++id) w.add(id);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.link(1, 3, 1, 1);
+  w.link(2, 4, 1, 1);
+  w.link(2, 5, 1, 1);
+  w.link(3, 6, 1, 1);
+  w.link(6, 7, 1, 1);
+  w.run(8000);
+}
+
+void test_group_roots_config_rules() {
+  // group_roots and route_gateways are mutually exclusive (one routing
+  // policy per config); reserved ids are never valid roots.
+  SimWorld w;
+  w.configure = [](NodeConfig& config) {
+    config.route_gateways = {1, kInvalidNodeId};
+    config.group_roots = {1, kInvalidNodeId};
+  };
+  w.add(9);
+  MeshNode* ambiguous = w.at(9);
+  CHECK(!ambiguous->start(w.now).ok());
+  w.remove_node(9);
+
+  SimWorld bad;
+  bad.configure = [](NodeConfig& config) {
+    config.group_roots = {kBroadcastNodeId, kInvalidNodeId};
+  };
+  bad.add(9);
+  CHECK(!bad.at(9)->start(bad.now).ok());
+}
+
+void test_flat_tree_all() {
+  SimWorld w;
+  build_flat_tree(w);
+  // The flat tree shadowed the physical one: child leases toward root 1.
+  CHECK(w.at(1)->flat_group_child(2, 1) && w.at(1)->flat_group_child(3, 1) &&
+        w.at(6)->flat_group_child(7, 1));
+  CHECK(!w.at(1)->flat_group_child(4, 1));  // 4's next hop to the root is 2
+  MessageId id{};
+  CHECK(send_group(w, 1, kGroupAll, id, Priority::Urgent));
+  w.run(1000);
+  for (NodeId node = 2; node <= 7; ++node) {
+    CHECK(group_count(w, node, id) == 1);
+  }
+  const auto result = w.at(1)->group_delivery(id);
+  CHECK(result.state == DeliveryState::Delivered);
+  CHECK(result.delivered == 6 && result.nonmember == 0 && result.missing_total == 0 &&
+        result.unaccounted == 0 && result.rounds == 1);
+  // One copy + one report per tree edge, exactly like the scoped profile.
+  std::uint64_t copies = 0;
+  std::uint64_t reports = 0;
+  for (const auto& [node, ptr] : w.nodes) {
+    copies += ptr->group_stats().copies_queued;
+    reports += ptr->group_stats().reports_sent;
+    CHECK(ptr->group_stats().not_child_sent == 0);
+  }
+  CHECK(copies == 6 && reports == 6);
+  CHECK(w.net.tx_by_type[FrameType::GroupData].frames == 6);
+  CHECK(w.net.tx_by_type[FrameType::GroupReport].frames == 6);
+}
+
+void test_flat_source_rules() {
+  // The flat profile refuses group sends at non-roots and at nodes with no
+  // group tree at all (no roots, no gateways).
+  SimWorld bare;
+  bare.add(1);
+  bare.add(2);
+  bare.start_all();
+  bare.link(1, 2, 1, 1);
+  bare.run(500);
+  MessageId id{};
+  GroupSendOptions options{};
+  const std::uint8_t byte = 1;
+  auto status = bare.at(1)->send_group(kGroupAll, ByteView{&byte, 1}, options, bare.now, id);
+  CHECK(status.code == StatusCode::Unsupported);
+
+  SimWorld w;
+  build_flat_tree(w);
+  status = w.at(4)->send_group(kGroupAll, ByteView{&byte, 1}, options, w.now, id);
+  CHECK(status.code == StatusCode::Unsupported);
+  CHECK(std::string(status.detail) == "GROUP_SOURCE_NOT_GATEWAY");
+}
+
+void test_flat_membership_counts() {
+  SimWorld w;
+  build_flat_tree(w);
+  const GroupId g = 7;
+  CHECK_OK(w.at(4)->set_group_membership(&g, 1));
+  CHECK_OK(w.at(7)->set_group_membership(&g, 1));
+  MessageId id{};
+  CHECK(send_group(w, 1, g, id));
+  w.run(1000);
+  CHECK(group_count(w, 4, id) == 1);
+  CHECK(group_count(w, 7, id) == 1);
+  for (const NodeId other : {2, 3, 5, 6}) CHECK(group_count(w, other, id) == 0);
+  const auto result = w.at(1)->group_delivery(id);
+  CHECK(result.state == DeliveryState::Delivered);
+  CHECK(result.delivered == 2 && result.nonmember == 4 && result.missing_total == 0);
+}
+
+// Drops pairwise ROUTE_UPDATE frames 4 -> 2 so 2's stale child lease for 4
+// survives the re-parent below — the flat lease-lag window the scoped
+// profile models with its release delay.
+bool flat_parent_lag_hook(const SimNetwork::Pending& pending) {
+  if (pending.from != 4 || pending.to != 2) return false;
+  routeloom_test::FrameSight sight{};
+  return routeloom_test::sight_frame(
+             ByteView{pending.frame.data(), pending.frame.size()}, sight) &&
+         sight.type == FrameType::RouteUpdate;
+}
+
+void test_flat_reparent_no_double_count() {
+  // Same diamond as the scoped NOT_CHILD case, flat profile: 4 re-parents
+  // from 2 to 3 for the root route; while both child leases are live only
+  // the committed next hop's copy may count it.
+  SimWorld w;
+  flat_profile(w, 1, kFastPeriodMs, kFastLifetimeMs);
+  for (NodeId id = 1; id <= 4; ++id) w.add(id);
+  w.start_all();
+  w.link(1, 2, 3, 3);  // old parent 2: a costly uplink
+  w.link(1, 3, 1, 1);
+  w.link(2, 4, 1, 1);
+  w.run(6000);
+  CHECK(w.at(4)->routes().best(1).next_hop == 2);
+  CHECK(w.at(2)->flat_group_child(4, 1));
+  // 4's fresh route updates to 2 never land: 2 keeps its child lease while
+  // 4 re-parents to 3 and arms 3's — both parents forward round 0.
+  w.net.drop_frame = flat_parent_lag_hook;
+  w.link(3, 4, 1, 1);
+  bool both = false;
+  for (int step = 0; step < 2000 && !both; ++step) {
+    w.run(0);
+    both = w.at(4)->routes().best(1).next_hop == 3 &&
+           w.at(3)->flat_group_child(4, 1) && w.at(2)->flat_group_child(4, 1);
+  }
+  CHECK(both);
+  MessageId id{};
+  CHECK(send_group(w, 1, kGroupAll, id));
+  w.run(1500);
+  const auto result = w.at(1)->group_delivery(id);
+  CHECK(result.state == DeliveryState::Delivered);
+  CHECK(result.delivered == 3 && result.missing_total == 0 && result.unaccounted == 0);
+  CHECK(group_count(w, 4, id) == 1);
+  CHECK(w.at(4)->group_stats().not_child_sent >= 1);
+  w.net.drop_frame = nullptr;
+}
+
+void test_flat_dead_node_summary() {
+  SimWorld w;
+  build_flat_tree(w);
+  w.net.unregister_node(5);  // leaf 5 dies silently, routes still leased
+  MessageId id{};
+  CHECK(send_group(w, 1, kGroupAll, id, Priority::Normal, false, 6000));
+  w.run(7000);
+  const auto result = w.at(1)->group_delivery(id);
+  CHECK(result.state == DeliveryState::Failed);
+  CHECK(std::string(result.reason) == "GROUP_INCOMPLETE");
+  CHECK(result.delivered == 5 && result.missing_total == 1 && result.missing_count == 1 &&
+        result.missing[0] == 5);
+  for (const NodeId node : {3, 4, 6, 7}) CHECK(group_count(w, node, id) == 1);
+}
+
+void test_flat_restart_clears_child_lease() {
+  // Peer 4 restarts while its route to the root moves to 3: the previous
+  // incarnation's poisoned root record at 2 no longer proves a lease —
+  // only post-restart advertisements may arm one.
+  SimWorld w;
+  flat_profile(w, 1, kFastPeriodMs, kFastLifetimeMs);
+  for (NodeId id = 1; id <= 4; ++id) w.add(id);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.link(1, 3, 1, 1);
+  w.link(2, 4, 1, 5);  // 4->2 is costly: only path now, worse than via 3 later
+  w.run(4000);
+  CHECK(w.at(4)->routes().best(1).next_hop == 2);
+  CHECK(w.at(2)->flat_group_child(4, 1));
+  CHECK(!w.at(3)->flat_group_child(4, 1));
+  // Restart 4 (new route generation) with a cheaper uplink via 3. The
+  // neighbor record at 2 survives (a node leaving does not re-write the
+  // peer's view); only 4's fresh table needs both links.
+  w.remove_node(4);
+  w.add(4, /*generation=*/2);
+  w.at(4)->start(w.now);
+  w.at(4)->add_neighbor(2, 5, w.now);
+  w.link(3, 4, 1, 1);
+  w.run(4000);
+  CHECK(w.at(4)->routes().best(1).next_hop == 3);
+  // 2's stale lease is gone (restart cleared it; the post-restart root
+  // record toward 2 is finite) and 3's is armed by 4's fresh poison.
+  CHECK(!w.at(2)->flat_group_child(4, 1));
+  CHECK(w.at(3)->flat_group_child(4, 1));
+}
+
+// ---------------------------------------------------------------------------
 // Ordering
 // ---------------------------------------------------------------------------
 
@@ -2169,6 +2382,13 @@ int main(int argc, char** argv) {
     test_small_tree_all();
     test_membership_counts();
     test_profile_and_source_rules();
+    test_group_roots_config_rules();
+    test_flat_tree_all();
+    test_flat_source_rules();
+    test_flat_membership_counts();
+    test_flat_reparent_no_double_count();
+    test_flat_dead_node_summary();
+    test_flat_restart_clears_child_lease();
     test_source_queue_and_urgent_reserve();
     test_repair_after_loss();
     test_dead_node_summary();

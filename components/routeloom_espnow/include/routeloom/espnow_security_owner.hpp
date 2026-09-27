@@ -67,6 +67,11 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
     // the mesh and USB 0x64/0x65 and run their own channel over direct
     // USB; devices run one mesh endpoint for the local channel only.
     bool gateway{false};
+    // Member joins run the flat-profile group tree (dev-flow §6.1): the
+    // verified SitePackage gateway list is adopted as group roots, not as
+    // gateway-scoped anchors. Board config (D02) or a Kconfig opt-in sets
+    // this; default keeps the gateway-scoped profile.
+    bool flat_group_routing{false};
   };
 
   EspNowSecurityOwner() noexcept = default;
@@ -111,6 +116,12 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
     std::uint8_t channel{0};
     std::uint32_t boot{0};  // reserved durable boot (message/boot session)
     std::uint32_t role{0};  // local allow-role (nonzero member-role bits)
+    // Board-configured roots for the dev profile (dev-flow §6.1): scoped
+    // gateways, or flat group tree roots — at most one list non-empty.
+    std::array<NodeId, sdkv1::kSiteGatewayMax> route_gateways{};
+    std::size_t route_gateway_count{0};
+    std::array<NodeId, sdkv1::kSiteGatewayMax> group_roots{};
+    std::size_t group_root_count{0};
   };
   // Adopts the dev config INSTEAD of boot(): the coordinator arms the
   // dev-resume engine, adopts the dev group/scope/hooks, and emits

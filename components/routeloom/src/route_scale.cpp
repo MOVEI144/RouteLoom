@@ -241,11 +241,86 @@ bool MeshNode::is_route_gateway(const NodeId destination) const noexcept {
 
 bool MeshNode::neighbor_is_child(const NodeId neighbor, const MonotonicMs now_ms) const noexcept {
   const auto* record = find_neighbor(neighbor);
-  return record != nullptr && record->active && record->child_until_ms > now_ms;
+  return record != nullptr && record->active && record->tree.scoped.child_until_ms > now_ms;
+}
+
+bool MeshNode::group_supported() const noexcept {
+  // A group tree exists under either profile: gateway-scoped has its
+  // gateway tree, the flat profile needs an explicit configured root set.
+  if (gateway_scoped()) return true;
+  for (const NodeId root : config_.group_roots) {
+    if (root != kInvalidNodeId) return true;
+  }
+  return false;
+}
+
+std::size_t MeshNode::group_root_index(const NodeId root) const noexcept {
+  for (std::size_t i = 0; i < config_.group_roots.size(); ++i) {
+    if (config_.group_roots[i] == root) return i;
+  }
+  return kMaxRouteGateways;
+}
+
+bool MeshNode::is_group_root(const NodeId node) const noexcept {
+  if (gateway_scoped()) return is_route_gateway(node);
+  return group_root_index(node) != kMaxRouteGateways;
+}
+
+bool MeshNode::group_child_of(const NodeId neighbor, const NodeId root,
+                              const MonotonicMs now_ms) const noexcept {
+  if (gateway_scoped()) return neighbor_is_child(neighbor, now_ms);
+  const std::size_t index = group_root_index(root);
+  if (index == kMaxRouteGateways) return false;
+  const auto* record = find_neighbor(neighbor);
+  return record != nullptr && record->active &&
+         record->tree.group_child_until_ms[index] > now_ms;
+}
+
+NodeId MeshNode::flat_group_parent(const NodeId root) const noexcept {
+  // The committed next hop toward the root is our group parent — the same
+  // selection rule ordinary forwarding uses (no second algorithm).
+  const RouteSelection selected = routes_.best(root);
+  if (!selected.valid || selected.next_hop == config_.node) return kInvalidNodeId;
+  return selected.next_hop;
+}
+
+void MeshNode::note_flat_group_update(Neighbor& neighbor, const RouteAdvertisement* records,
+                                      const std::size_t count,
+                                      const MonotonicMs now_ms) noexcept {
+  if (gateway_scoped()) return;
+  // Same poison-reverse evidence as the scoped tree, per configured flat
+  // group root: the peer advertises the root's destination back to us at
+  // infinity exactly when its committed next hop toward that root is us
+  // (a peer that lost the route also poisons — a child for refresh purposes
+  // is the useful answer, same as scoped). A finite record clears the
+  // lease. Bounded by route_lifetime_ms; pairwise-authenticated input only.
+  for (std::size_t index = 0; index < config_.group_roots.size(); ++index) {
+    const NodeId root = config_.group_roots[index];
+    if (root == kInvalidNodeId || root == neighbor.node) continue;
+    bool poisoned = false;
+    bool finite = false;
+    for (std::size_t i = 0; i < count; ++i) {
+      if (records[i].destination != root) continue;
+      if (records[i].metric == kInfiniteRouteMetric) {
+        poisoned = true;
+      } else {
+        finite = true;
+      }
+    }
+    if (poisoned) {
+      neighbor.tree.group_child_until_ms[index] = now_ms + config_.route_lifetime_ms;
+    } else if (finite) {
+      neighbor.tree.group_child_until_ms[index] = 0;
+    }
+  }
 }
 
 bool MeshNode::scoped_child(const NodeId neighbor) const noexcept {
   return gateway_scoped() && neighbor_is_child(neighbor, last_clock_ms_);
+}
+
+bool MeshNode::flat_group_child(const NodeId neighbor, const NodeId root) const noexcept {
+  return !gateway_scoped() && group_child_of(neighbor, root, last_clock_ms_);
 }
 
 NodeId MeshNode::scoped_uplink(const NodeId exclude) const noexcept {
@@ -335,9 +410,9 @@ void MeshNode::note_scoped_update(Neighbor& neighbor, const RouteAdvertisement* 
       finite = true;
     }
   }
-  const bool was_child = neighbor.child_until_ms > now_ms;
+  const bool was_child = neighbor.tree.scoped.child_until_ms > now_ms;
   if (poisoned) {
-    neighbor.child_until_ms = now_ms + config_.route_lifetime_ms;
+    neighbor.tree.scoped.child_until_ms = now_ms + config_.route_lifetime_ms;
     if (!was_child) {
       // A new child: it and the subtree we already reach through it travel
       // upward now, not at our next cycle — a returning child's routes may
@@ -351,11 +426,11 @@ void MeshNode::note_scoped_update(Neighbor& neighbor, const RouteAdvertisement* 
           mark_scoped_dirty(selection.destination, now_ms);
         }
       });
-      if (!neighbor.pull_answer_pending) neighbor.pull_target = kInvalidNodeId;
+      if (!neighbor.pull_answer_pending) neighbor.tree.scoped.pull_target = kInvalidNodeId;
       neighbor.pull_answer_pending = true;
     }
   } else if (finite) {
-    neighbor.child_until_ms = 0;
+    neighbor.tree.scoped.child_until_ms = 0;
     if (was_child) {
       // The subtree behind this neighbor moved to another parent. Retract
       // what we announced upward for it while our own (still working) route
@@ -699,7 +774,7 @@ void MeshNode::note_scoped_interest(Neighbor& neighbor, const MonotonicMs now_ms
   // Short-lived: long enough for a pending answer (a route we are about to
   // learn, a fresher sequence) to be pushed, short enough that a bootstrap
   // pull does not turn every neighbor into a push target for a whole lease.
-  neighbor.interest_until_ms = now_ms + kScopedInterestPeriods *
+  neighbor.tree.scoped.interest_until_ms = now_ms + kScopedInterestPeriods *
                                             static_cast<MonotonicMs>(
                                                 config_.route_advertisement_period_ms);
 }
@@ -788,7 +863,7 @@ void MeshNode::run_scoped_tick(const MonotonicMs now_ms) noexcept {
   std::size_t other_count = 0;
   neighbors_.for_each([&](const Neighbor& neighbor) {
     if (!neighbor.active || is_parent(neighbor.node)) return;
-    if (neighbor.child_until_ms > now_ms) {
+    if (neighbor.tree.scoped.child_until_ms > now_ms) {
       if ((scoped_tick_ + scoped_link_phase(neighbor.node)) % ticks == 0) {
         due[due_count++] = neighbor.node;
       }
@@ -852,7 +927,7 @@ void MeshNode::run_scoped_triggered(const MonotonicMs now_ms) noexcept {
       for (std::size_t j = 0; j < parent_count; ++j) {
         if (parents[j] == neighbor.node) return;
       }
-      if (neighbor.child_until_ms > now_ms || neighbor.interest_until_ms > now_ms) {
+      if (neighbor.tree.scoped.child_until_ms > now_ms || neighbor.tree.scoped.interest_until_ms > now_ms) {
         targets[target_count++] = neighbor.node;
       }
     });
@@ -917,12 +992,12 @@ void MeshNode::flush_pull_answers(const MonotonicMs now_ms) noexcept {
   std::size_t count = 0;
   neighbors_.for_each([&](Neighbor& neighbor) {
     if (!neighbor.active || !neighbor.pull_answer_pending) return;
-    if (neighbor.last_pull_answer_ms != 0 &&
-        now_ms - neighbor.last_pull_answer_ms < kPullAnswerGapMs) {
+    if (neighbor.tree.scoped.last_pull_answer_ms != 0 &&
+        now_ms - neighbor.tree.scoped.last_pull_answer_ms < kPullAnswerGapMs) {
       return;  // coalesced: stays pending until the gap passes
     }
     neighbor.pull_answer_pending = false;
-    const NodeId wanted = neighbor.pull_target;
+    const NodeId wanted = neighbor.tree.scoped.pull_target;
     // Nothing useful to say yet: the interest mark makes the triggered
     // update carry the route to this neighbor as soon as we learn it.
     // (kInvalidNodeId = a plain self + gateway refresh for a new child.)
@@ -930,7 +1005,7 @@ void MeshNode::flush_pull_answers(const MonotonicMs now_ms) noexcept {
         !routes_.best(wanted).valid) {
       return;
     }
-    neighbor.last_pull_answer_ms = now_ms;
+    neighbor.tree.scoped.last_pull_answer_ms = now_ms;
     answer[count] = neighbor.node;
     target[count++] = wanted;
   });
@@ -1119,7 +1194,7 @@ void MeshNode::handle_route_request(const wire::PlainFrame& frame, const NodeId 
     }
     consider_record(request.record);
     note_scoped_interest(*neighbor, now_ms);
-    neighbor->pull_target = request.target;
+    neighbor->tree.scoped.pull_target = request.target;
     neighbor->pull_answer_pending = true;  // answered from poll(), coalesced
     return;
   }

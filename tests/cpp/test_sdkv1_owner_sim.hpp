@@ -452,8 +452,12 @@ class SimNode {
 
   // Owner-mirrored dev adoption (dev profile): static PSK config through
   // the coordinator, then the same action drain as the member route.
+  // `roots` carries the dev board's routing policy: scoped route gateways
+  // or flat group roots (dev-flow §6.4), never both.
   bool boot_dev(const MonotonicMs now, const keys::Secret& psk, const NetworkId network,
-                const std::uint32_t boot) {
+                const std::uint32_t boot,
+                const std::initializer_list<NodeId>& route_gateways = {},
+                const std::initializer_list<NodeId>& group_roots = {}) {
     CoordinatorDevConfig dev{};
     dev.psk = psk;
     dev.network = network;
@@ -461,6 +465,12 @@ class SimNode {
     dev.boot = boot;
     dev.role = kMemberRoleEndpoint | kMemberRoleRelay;
     dev.channel = kSimChannel;
+    for (const NodeId gateway : route_gateways) {
+      dev.route_gateways[dev.route_gateway_count++] = gateway;
+    }
+    for (const NodeId root : group_roots) {
+      dev.group_roots[dev.group_root_count++] = root;
+    }
     if (!coordinator_->adopt_dev(dev, now).ok()) return false;
     operating_channel_ = kSimChannel;
     return true;
