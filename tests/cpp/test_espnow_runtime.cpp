@@ -125,6 +125,144 @@ MacAddress peer_mac() {
   return mac;
 }
 
+MacAddress self_mac() {
+  MacAddress mac{};
+  const std::uint8_t bytes[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
+  std::memcpy(mac.bytes.data(), bytes, sizeof(bytes));
+  return mac;
+}
+
+// --- Real NeighborDiscovery engines bound to the real runtime --------------
+// The §4-B/D regression needs the actual runtime surfaces the portable
+// harness cannot reach: driver-peer release for a STALE binding, on-demand
+// re-registration inside send_wire, and note_route_repair bridging a mesh
+// demand into the discovery engine.
+
+class MemberHooks final : public routeloom::MembershipHooks {
+ public:
+  bool local_member(routeloom::NetworkId) const noexcept override { return true; }
+  bool known_member(routeloom::NodeId, routeloom::NetworkId) const noexcept override {
+    return true;
+  }
+  bool approve_join(routeloom::NodeId, routeloom::NetworkId) noexcept override {
+    return true;
+  }
+};
+
+class SequenceEntropy final : public routeloom::EntropySource {
+ public:
+  explicit SequenceEntropy(const std::uint32_t seed) : state_(seed) {}
+  routeloom::Status fill(const routeloom::MutableByteView out) noexcept override {
+    for (std::size_t i = 0; i < out.size; ++i) {
+      state_ = state_ * 1664525u + 1013904223u;
+      out.data[i] = static_cast<std::uint8_t>(state_ >> 24U);
+    }
+    return routeloom::Status::success();
+  }
+
+ private:
+  std::uint32_t state_;
+};
+
+routeloom::MacAddress core_mac(const MacAddress& mac) {
+  routeloom::MacAddress out{};
+  std::memcpy(out.data(), mac.bytes.data(), out.size());
+  return out;
+}
+
+routeloom::DiscoveryConfig discovery_cfg(const NodeId node,
+                                         const routeloom::MacAddress mac) {
+  routeloom::DiscoveryConfig cfg{};
+  cfg.node = node;
+  cfg.mac = mac;
+  cfg.network = make_config().node.network;
+  cfg.network_hint = 0xC0FFEE;
+  cfg.capability_bits = 1;
+  cfg.probe_timeout_ms = 200;
+  cfg.cold_start_jitter_max_ms = 0;
+  cfg.backoff_min_ms = 50;
+  cfg.backoff_initial_max_ms = 100;
+  cfg.backoff_max_ms = 400;
+  cfg.awake_lease_ms = 400;
+  cfg.idle_refresh_ms = 60000;
+  // Park the steady-state stale cadence: recovery must come from the
+  // mesh's repair demand, not the background re-probe budget.
+  cfg.stale_reprobe_ms = 60000;
+  cfg.stale_reprobe_attempts = 60;
+  return cfg;
+}
+
+// Peer-side radio port: RLD1 replies are injected straight into the
+// runtime's RX queue; Wire-lane autonomy payloads are wrapped into a sealed
+// one-hop frame first — the peer's own TX path builds the same shape.
+class PeerAutonomyPort final : public routeloom::DiscoveryPort {
+ public:
+  PeerAutonomyPort(TestSecurity& security, const routeloom::MacAddress self,
+                   const NodeId node, const routeloom::NetworkId network,
+                   const NodeId host)
+      : security_(security), self_(self), node_(node), network_(network),
+        host_(host) {}
+
+  routeloom::Status send_rld1(const routeloom::MacAddress&,
+                              const ByteView encoded) noexcept override {
+    if (paused_) return refused();
+    if (!idf_stub::inject_rx(self_.data(), encoded.data, encoded.size)) {
+      return refused();
+    }
+    return routeloom::Status::success();
+  }
+
+  routeloom::Status send_wire(routeloom::BindingId,
+                              const routeloom::MacAddress&,
+                              const routeloom::FrameType type,
+                              const ByteView payload) noexcept override {
+    if (paused_) return refused();
+    routeloom::wire::PlainFrame frame{};
+    frame.header.type = type;
+    frame.header.delivery = routeloom::DeliveryClass::BestEffort;
+    frame.header.hop_remaining = 1;
+    frame.header.network = network_;
+    frame.header.origin = node_;
+    frame.header.destination = host_;
+    frame.header.previous_hop = node_;
+    frame.header.next_hop = host_;
+    frame.header.message = MessageId{0xBEEF0001, ++sequence_};
+    frame.header.remaining_deadline_ms = 500;
+    frame.header.original_lifetime_ms = 500;
+    frame.header.link_epoch = 1;
+    frame.header.end_epoch = 1;
+    frame.payload_size = payload.size;
+    if (payload.size > 0) {
+      std::memcpy(frame.payload.data(), payload.data, payload.size);
+    }
+    routeloom::wire::EncodedFrame encoded{};
+    const routeloom::Status sealed =
+        routeloom::wire::encode_new(frame, security_, encoded);
+    if (!sealed) return sealed;
+    if (!idf_stub::inject_rx(self_.data(), encoded.bytes.data(),
+                            encoded.size)) {
+      return refused();
+    }
+    return routeloom::Status::success();
+  }
+
+  // A partition: both TX directions stop delivering until cleared.
+  bool paused_{false};
+
+ private:
+  static routeloom::Status refused() {
+    return routeloom::Status::error(routeloom::StatusCode::WouldBlock,
+                                    "radio cut");
+  }
+
+  TestSecurity& security_;
+  routeloom::MacAddress self_{};
+  NodeId node_;
+  routeloom::NetworkId network_;
+  NodeId host_;
+  std::uint32_t sequence_{0};
+};
+
 class ReenteringSecurity final : public routeloom::SecurityProvider {
  public:
   EspNowRuntime* runtime{nullptr};
@@ -583,6 +721,129 @@ void test_driverless_authenticated_recovery() {
   runtime.stop();
 }
 
+// §4 B/D end-to-end over the real runtime: bind a real NeighborDiscovery
+// engine to the runtime, partition the radio until the peer lapses Stale
+// and the runtime releases its driver peer, then repair on mesh demand —
+// the early probe must re-arm the physical peer and the authenticated
+// Result must restore Reachable without a new exchange.
+void test_stale_peer_probe_recovery_over_runtime() {
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize().ok());
+
+  MemberHooks hooks_a;
+  MemberHooks hooks_b;
+  SequenceEntropy entropy_a(11);
+  SequenceEntropy entropy_b(22);
+  routeloom::NullDiscoveryObserver disc_observer;
+  routeloom::DevPskAuthenticator auth_a(security, 1);
+  TestSecurity peer_security;
+  routeloom::DevPskAuthenticator auth_b(peer_security, 1);
+
+  routeloom::NeighborDiscovery engine_a(
+      discovery_cfg(kSelf, core_mac(self_mac())), runtime, auth_a, hooks_a,
+      entropy_a, disc_observer);
+  CHECK(runtime.attach_autonomy(engine_a).ok());
+  CHECK(runtime.start().ok());
+
+  PeerAutonomyPort port_b(peer_security, core_mac(peer_mac()), kPeer,
+                          make_config().node.network, kSelf);
+  routeloom::NeighborDiscovery engine_b(
+      discovery_cfg(kPeer, core_mac(peer_mac())), port_b, auth_b, hooks_b,
+      entropy_b, disc_observer);
+
+  const routeloom::MonotonicMs t0 = runtime.now_ms();
+  CHECK(engine_a.start(t0).ok());
+  CHECK(engine_b.start(t0).ok());
+
+  // Deliver one captured physical send to the peer engine. RLD1 envelopes
+  // ride the bootstrap lane; everything else is a sealed wire-lane frame.
+  bool cut = false;
+  const auto ferry = [&] {
+    idf_stub::TxFrame tx{};
+    while (idf_stub::pop_tx(tx)) {
+      if (cut) continue;
+      const routeloom::MonotonicMs now = idf_stub::now_us() / 1000;
+      const ByteView bytes{tx.bytes, tx.length};
+      if (bytes.size >= 4 && std::memcmp(bytes.data, "RLD1", 4) == 0) {
+        routeloom::MacAddress dest{};
+        std::memcpy(dest.data(), tx.dest, dest.size());
+        engine_b.on_rld1_rx(
+            routeloom::DiscoveryRxMetadata{core_mac(self_mac()), dest}, bytes,
+            now);
+        continue;
+      }
+      routeloom::wire::LinkOpenedFrame opened{};
+      if (!routeloom::wire::open_link(bytes, kPeer, peer_security, opened)
+               .ok()) {
+        continue;
+      }
+      engine_b.on_wire_rx(
+          core_mac(self_mac()), opened.header.type,
+          ByteView{opened.protected_payload.data(),
+                   opened.protected_payload_size},
+          now);
+    }
+  };
+  const auto step = [&] {
+    idf_stub::advance_ms(5);
+    runtime.poll_once();
+    idf_stub::complete_send(true);
+    engine_b.poll(idf_stub::now_us() / 1000);
+    ferry();
+  };
+  const auto phase_of = [](routeloom::NeighborDiscovery& engine,
+                           const NodeId peer) {
+    routeloom::NeighborPhase phase = routeloom::NeighborPhase::Candidate;
+    engine.phase_of(peer, phase);
+    return phase;
+  };
+
+  CHECK(engine_a.begin_discovery(t0).ok());
+  bool bound = false;
+  for (int i = 0; i < 4000 && !bound; ++i) {
+    step();
+    bound = phase_of(engine_a, kPeer) == routeloom::NeighborPhase::Reachable &&
+            phase_of(engine_b, kSelf) == routeloom::NeighborPhase::Reachable;
+  }
+  CHECK(bound);
+  CHECK(EspNowRuntimeTestAccess::peer_registered(runtime, kPeer));
+
+  // Partition both directions until the lease lapses Stale on both engines
+  // and the runtime releases the physical driver peer (binding kept).
+  cut = true;
+  port_b.paused_ = true;
+  bool stale = false;
+  for (int i = 0; i < 4000 && !stale; ++i) {
+    step();
+    stale = phase_of(engine_a, kPeer) == routeloom::NeighborPhase::Stale &&
+            phase_of(engine_b, kSelf) == routeloom::NeighborPhase::Stale;
+  }
+  CHECK(stale);
+  CHECK(!EspNowRuntimeTestAccess::peer_registered(runtime, kPeer));
+
+  // The mesh loses its route through the peer: the demand must drive an
+  // early probe through send_wire, which re-arms the driver peer on demand.
+  cut = false;
+  port_b.paused_ = false;
+  runtime.note_route_repair(kPeer, runtime.now_ms());
+  CHECK(engine_a.stats().repair_demands == 1);
+  CHECK(EspNowRuntimeTestAccess::peer_registered(runtime, kPeer));
+
+  bool recovered = false;
+  for (int i = 0; i < 2000 && !recovered; ++i) {
+    step();
+    recovered =
+        phase_of(engine_a, kPeer) == routeloom::NeighborPhase::Reachable &&
+        phase_of(engine_b, kSelf) == routeloom::NeighborPhase::Reachable;
+  }
+  CHECK(recovered);
+  CHECK(idf_stub::tx_drops() == 0);
+  runtime.stop();
+}
+
 void test_driver_release_waits_for_use_and_callback() {
   idf_stub::reset();
   TestSecurity security;
@@ -903,6 +1164,7 @@ int main() {
   test_stop_drains_node_reply_uses();
   test_stale_binding_keeps_reserved_reply_sendable();
   test_driverless_authenticated_recovery();
+  test_stale_peer_probe_recovery_over_runtime();
   test_driver_release_waits_for_use_and_callback();
   test_route_broadcast_uses_reserved_radio_slot();
   test_physical_tx_arbitrates_across_peers();

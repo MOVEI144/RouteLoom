@@ -390,6 +390,17 @@ class AutonomyFrameSink {
     (void)peer;
     (void)now_ms;
   }
+  // Route-repair demand (route-loss recovery): the mesh just lost its only
+  // route and the stale record for `peer` — the last next hop that carried
+  // it — is the most likely repair. The sink (the radio Owner's discovery
+  // runtime) may accelerate an authenticated re-probe/rebind of that peer;
+  // the demand is bounded upstream (per-destination cooldown + the engine's
+  // own probe/attempt budgets). Default no-op for sinks without a
+  // discovery engine.
+  virtual void note_route_repair(NodeId peer, MonotonicMs now_ms) noexcept {
+    (void)peer;
+    (void)now_ms;
+  }
 };
 
 // Service=21 terminal endpoint (docs/design/scope-gateway-config/
@@ -1545,7 +1556,31 @@ class MeshNode {
     // Replay bounding: a duplicate storm cannot turn one retained failure
     // into unbounded re-emissions (cap + minimum spacing).
     MonotonicMs last_replay_ms{0};
-    std::array<std::uint8_t, 32> fingerprint{};
+    // Role-exclusive evidence overlay: the frame destination that admitted
+    // the record fixes its role, so transit-only fingerprinting and
+    // terminal-only receipt pinning share one 32-byte block and the entry
+    // size — hence the relay C3 .bss total — stays unchanged. Transit
+    // member: fingerprint of the forwarded end-protected bytes (01 §failure
+    // evidence). Terminal member: the END_RECEIPT pin — the end
+    // (counter, epoch) this record's receipt sealed under for
+    // `receipt.round` — so a same-round duplicate reissue replays the pair
+    // byte-identically instead of colliding as RECEIPT_DEDUP_CONFLICT at a
+    // relay's transit dedup (route-loss repair, design E). `receipt.sealed`
+    // is the pin's validity (a minted counter of 0 is legitimate);
+    // `receipt.round` ties it to its mint round — the cross-round terminal
+    // match can surface a record pinned for an older round, which must seal
+    // fresh. Readers gate the pin on !has_fingerprint so an overlaid
+    // transit fingerprint can never be mistaken for a pin.
+    union DedupEvidence {
+      std::array<std::uint8_t, 32> fingerprint;
+      struct ReceiptPin {
+        std::uint64_t end_counter;
+        std::uint32_t end_epoch;
+        std::uint8_t round;
+        bool sealed;
+      } receipt;
+    };
+    DedupEvidence evidence{};
     // The downstream's binding generation captured when the forward was
     // physically submitted — a report is only valid against the attempt we
     // actually made (dispatch may retarget the route after admission).
@@ -1564,11 +1599,10 @@ class MeshNode {
     std::uint8_t reported_reason{0};
     std::uint8_t failure_replays{0};
   };
-  // sdk-completion/02 §2.4 budget: 152 B measured on host after the phase +
-  // first_seen_ms addition (144 B before); the member order above packs it
-  // to 136 B on LP64 and on RISC-V/Xtensa (which align u64 to 8). A larger
-  // entry shrinks real capacity silently, so growth is a deliberate,
-  // documented change.
+  // sdk-completion/02 §2.4 budget: 136 B measured on host; the member order
+  // above packs it to the same size on LP64 and on RISC-V/Xtensa (which
+  // align u64 to 8). A larger entry shrinks real capacity silently, so
+  // growth is a deliberate, documented change.
   static_assert(sizeof(DedupEntry) <= 176, "dedup entry size budget");
   struct Delivery {
     MessageId id{};
@@ -2017,8 +2051,12 @@ class MeshNode {
                        TxnHandle txn, MonotonicMs now_ms) noexcept;
   Status queue_hop_accept(const wire::Header& accepted, TxnHandle txn,
                           MonotonicMs now_ms) noexcept;
+  // `carrier` is the dedup record this receipt answers (same message key):
+  // when present, the receipt seals its End envelope eagerly and pins the
+  // (counter, epoch) pair on the record so a same-round reissue replays
+  // byte-identical bytes instead of colliding at transit dedup.
   Status queue_end_receipt(const wire::Header& data, TxnHandle txn,
-                           MonotonicMs now_ms) noexcept;
+                           MonotonicMs now_ms, DedupEntry* carrier) noexcept;
   // BUSY emission (03 §5): pre-admission refusal for a NEW authenticated
   // inbound DATA — never for already HOP_ACCEPT-ed work. Emits only when the
   // peer is busy-capable and a reply slot is affordable; otherwise drops and
@@ -2807,6 +2845,9 @@ class MeshNode {
   // Earliest next unknown-GK hint from a broadcast (at most one per minute;
   // the pull itself is the Owner's job).
   MonotonicMs next_broadcast_gk_hint_ms_{0};
+  // Earliest next stale-next-hop repair demand toward the autonomy sink
+  // (route-loss recovery): one emission per probe window, node-wide.
+  MonotonicMs route_repair_next_ms_{0};
   RouteScaleStats route_scale_stats_{};
   // Group delivery state (bounded; group-delivery.md §9).
   std::array<GroupId, kGroupMembershipMax> group_membership_{};

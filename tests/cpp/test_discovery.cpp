@@ -1158,6 +1158,65 @@ void test_stale_reprobe_recovers() {
   CHECK(a.engine.data_permitted(b.mac));
 }
 
+// Route-loss repair demand (issue #169, design §D): a mesh NO_ROUTE asks
+// discovery to re-confirm the lost route's last next hop ahead of the
+// stale cadence. The demand emits at most a bounded run of early Probes
+// (never spins the steady scheduler) and steers the next targeted
+// re-discovery at the demanded peer.
+void test_repair_demand_emits_bounded_early_probe() {
+  DiscWorld world;
+  // Park the steady stale machinery: a 60s re-probe cadence cannot fire
+  // inside the test window, so every observed Probe is demand-driven.
+  Unit& a = world.add(1, 0xA1, true, 0xC0FFEE, 7, /*reprobe_ms=*/60000,
+                      /*attempts=*/60);
+  Unit& b = world.add(2, 0xB2, true, 0xC0FFEE, 7, 60000, 60);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+
+  NeighborPhase phase{};
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Reachable);
+
+  // Strand only this pair (the port still accepts sends — frames are
+  // emitted but never delivered) so the lease lapses to Stale and stays.
+  world.medium.block(a.mac, b.mac);
+  world.medium.block(b.mac, a.mac);
+  world.run(31000);
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Stale);
+
+  // One demand emits an early Probe immediately; a demand burst while the
+  // probe is outstanding emits nothing more.
+  const std::size_t probes_before =
+      a.port.count_wire(FrameType::NeighborProbe);
+  a.engine.request_repair(2, world.medium.now);
+  CHECK(a.engine.stats().repair_demands == 1);
+  CHECK(a.port.count_wire(FrameType::NeighborProbe) == probes_before + 1);
+  a.engine.request_repair(2, world.medium.now);
+  a.engine.request_repair(2, world.medium.now);
+  CHECK(a.port.count_wire(FrameType::NeighborProbe) == probes_before + 1);
+
+  // The early-probe run is bounded at three: demands spaced past each
+  // probe window still stop spending once the budget is gone.
+  for (int i = 0; i < 4; ++i) {
+    world.run(300);  // probe_timeout_ms = 200: the outstanding probe dies
+    a.engine.request_repair(2, world.medium.now);
+  }
+  CHECK(a.engine.stats().repair_demands == 7);
+  CHECK(a.port.count_wire(FrameType::NeighborProbe) <= probes_before + 3);
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Stale);
+
+  // With the link back, the demanded peer is steered into the next
+  // targeted re-discovery (the early-probe budget is already spent): the
+  // exchange repairs the record instead of waiting out the stale cadence.
+  world.medium.blocked.clear();
+  const std::uint32_t auths = a.engine.stats().auths_completed;
+  a.engine.request_repair(2, world.medium.now);
+  world.run(2000);
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Reachable);
+  CHECK(a.engine.stats().auths_completed == auths + 1);
+}
+
 // An authenticated peer may have a lower local binding counter after an
 // independent re-authentication. Its probe still needs a Result carrying our
 // current generation so it can advance rather than losing its route.
@@ -1887,6 +1946,7 @@ int main() {
   test_suspend_revoke();
   test_candidate_ttl();
   test_stale_reprobe_recovers();
+  test_repair_demand_emits_bounded_early_probe();
   test_older_peer_probe_gets_current_generation_result();
   test_stale_reprobe_bounded();
   test_stale_reprobe_never_targets_dead();

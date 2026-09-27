@@ -26,4 +26,17 @@ bool inject_rx(const std::uint8_t source[6], const std::uint8_t* frame,
 // completion was delivered.
 bool complete_send(bool success) noexcept;
 
+// One captured esp_now_send payload, for tests that emulate the peer side
+// of the radio (ferry captures into a bound peer's RX path).
+struct TxFrame {
+  static constexpr std::size_t kMaxBytes = 280;
+  std::uint8_t dest[6];
+  std::uint16_t length;
+  std::uint8_t bytes[kMaxBytes];
+};
+// Pop the oldest captured TX frame; false when the capture ring is empty.
+bool pop_tx(TxFrame& out) noexcept;
+// TX frames dropped because the capture ring was full or oversized.
+unsigned tx_drops() noexcept;
+
 }  // namespace idf_stub
