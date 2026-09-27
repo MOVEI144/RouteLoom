@@ -247,9 +247,11 @@ struct JoinSnapshot {
 // --- The FSM ---------------------------------------------------------------------------------------
 class Joiner final {
  public:
+  // `revocations` backs the cross-network reissue adopt: a set bound to
+  // a superseded network drops (fresh RRS state) with the site commit.
   Joiner(const JoinerConfig& config, IdentityStore& identity, SiteStore& site,
-         EntropySource& entropy, ZtRld1Port& port, JoinObserver& observer,
-         const edhoc::AeadCcm* aead = nullptr) noexcept;
+         RevocationStore& revocations, EntropySource& entropy, ZtRld1Port& port,
+         JoinObserver& observer, const edhoc::AeadCcm* aead = nullptr) noexcept;
   ~Joiner();
   Joiner(const Joiner&) = delete;
   Joiner& operator=(const Joiner&) = delete;
@@ -369,6 +371,7 @@ class Joiner final {
   JoinerConfig config_{};
   IdentityStore& identity_;
   SiteStore& site_;
+  RevocationStore& revocations_;
   EntropySource& entropy_;
   JoinObserver& observer_;
   const edhoc::AeadCcm* aead_{nullptr};
@@ -378,6 +381,11 @@ class Joiner final {
   JoinHandshake handshake_;
 
   JoinState state_{JoinState::Stopped};
+  // True until the first DISCOVER of a scan cycle: one nonce per cycle
+  // (not per channel step), so a slotted proxy answer stays current
+  // until the cycle ends (D04 R1). Set by start_scan, spent by the
+  // first open_scan_window.
+  bool cycle_fresh_{true};
   MembershipState projection_{MembershipState::Unprovisioned};
   MonotonicMs last_now_{0};
   bool clock_uncertain_{false};

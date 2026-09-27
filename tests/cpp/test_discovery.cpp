@@ -755,6 +755,43 @@ void test_simultaneous_open() {
   CHECK(b.engine.stats().auths_completed == 1);
 }
 
+// Member-handshake take order: when WE accepted an OFFER from a peer (our
+// initiator leg is parked) and that same peer's DISCOVER also parked a
+// responder leg, take_member_start must yield OUR initiator — not the
+// responder. Yielding the responder aliases the demux and strands our
+// initiator (the coordinator's leg_live skip consumes it with no retry),
+// which wedged rejoining leaves after a cutover adoption (C1): the leaf
+// heard its parent's rejoin discovers while awaiting its own handshake,
+// took the responder leg, and never initiated again.
+void test_member_take_prefers_initiator_over_same_peer_responder() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, /*member=*/true);
+  Unit& b = world.add(2, 0xB2, /*member=*/true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  a.engine.set_member_handshake_mode(true);
+  b.engine.set_member_handshake_mode(true);
+  world.start_all();
+
+  // A discovers; B offers; A accepts (A's initiator parks for B).
+  CHECK_OK(a.engine.begin_discovery(world.medium.now));
+  world.run(500);
+  // B discovers; A offers (A parks a responder for B too).
+  CHECK_OK(b.engine.begin_discovery(world.medium.now));
+  world.run(500);
+
+  // The initiator yields first even though the responder parked.
+  NeighborDiscovery::MemberStartRequest start{};
+  CHECK_OK(a.engine.take_member_start(start, world.medium.now));
+  CHECK(start.initiator);
+  CHECK(start.peer == 2);
+  // The responder leg survives for a later take — deferred, not dropped.
+  NeighborDiscovery::MemberStartRequest second{};
+  CHECK_OK(a.engine.take_member_start(second, world.medium.now));
+  CHECK(!second.initiator);
+  CHECK(second.peer == 2);
+}
+
 // Requester storm control: a second handshake start waits out the 1/s burst-1
 // token; a concurrent begin is refused (02 §6).
 void test_handshake_rate_limit() {
@@ -1573,6 +1610,7 @@ int main() {
   test_lease_expiry();
   test_mac_change_conflict();
   test_simultaneous_open();
+  test_member_take_prefers_initiator_over_same_peer_responder();
   test_handshake_rate_limit();
   test_revoked_silent();
   test_production_unavailable();

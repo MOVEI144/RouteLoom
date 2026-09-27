@@ -1631,7 +1631,15 @@ Status NeighborDiscovery::take_member_start(MemberStartRequest& out,
     if (!c.member_start_parked || now_ms >= c.expires_at_ms) return;
     if (oldest == nullptr || c.expires_at_ms < oldest->expires_at_ms) oldest = &c;
   });
-  if (oldest != nullptr) {
+  // When WE are initiating to this same peer (an accepted OFFER is
+  // parked), skip the responder leg: our m1 (initiator) drives the
+  // exchange, and taking a responder leg now would alias the demux and
+  // strand our initiator (the leg_live skip consumes it with no retry —
+  // a rejoining leaf would never come back). The responder stays parked
+  // for a later take; the peer's m1 (if any) re-parks on retry.
+  if (oldest != nullptr &&
+      !(outbound_.active && outbound_.have_offer &&
+        oldest->claimed_node == outbound_.peer_node)) {
     out.initiator = false;
     out.peer = oldest->claimed_node;
     out.peer_mac = oldest->mac;

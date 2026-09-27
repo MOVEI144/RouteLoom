@@ -31,8 +31,12 @@
 //                              harness decides per frame from its switch
 //                              (unicast succeeds iff delivered)
 //   S <dst u64le><payload>      app-level MeshNode send (reliable, 30 s
-//                              lifetime); at most 4 tracked at once
+//                              lifetime); at most 16 tracked at once
 //   N                          dump the fake-NVS image (reply: N <image>)
+//   P                          power-cycle: persist the NVS image and take
+//                              the reboot marker (exit 42), like a field
+//                              power cut mid-RAM — the respawn recovers
+//                              through the production boot path only
 //   Q                          quit (exit 0)
 //
 // C++ -> Rust, emitted after each T in this order:
@@ -65,7 +69,17 @@
 // cookie_rejects u32 | auth_tag_rejects u32 | send_failures u32 |
 // scope_raw_rx u32 | scope_hint_mismatch u32 | scope_mac_rejected u32 |
 // scope_unknown_generation u32 | scope_accepted u32 |
-// scope_key_unavailable u32 | scope_budget_dropped u32
+// scope_key_unavailable u32 | scope_budget_dropped u32 |
+// id_fp u64 (first 8 bytes of the RLI1 kid, 0 without an identity —
+// the nonsecret fingerprint a revoke must leave untouched) |
+// join_state u8 | join_error u8 | proxy_disc_rx u32 |
+// proxy_offers_tx u32 | proxy_suppressed u32 | proxy_relays_started u32 |
+// proxy_relays_completed u32 (the ZT legs a recovery must cross) |
+// auth_rx u64 | auth_tx u64 (verified authority RX / TX carriers —
+// the quiet-channel evidence a present-check probe samples) |
+// strikes u8 (refresh strikes — the recovery evidence ladder) |
+// j_attempts u32 | j_m1 u32 | j_dropped u32 (the joiner's attempt/M1/
+// dropped-offer counters — the ZT attempt evidence)
 //
 // Setup arrives on argv (all integers accept 0x hex; blobs are hex):
 //
@@ -452,7 +466,9 @@ using Bytes = std::vector<std::uint8_t>;
 constexpr std::size_t kRpcMax = 65535;
 constexpr std::size_t kUsbChunkMax = 4096;
 constexpr std::size_t kAppRxKeep = 96;
-constexpr std::size_t kAppTxMax = 4;
+// 16 tracked app sends: refusal loops (D04 R1) retry a revoked leg
+// for minutes, and every attempt stays observable (host-side peer).
+constexpr std::size_t kAppTxMax = 16;
 
 [[noreturn]] void fatal(const char* detail) {
   Bytes payload;
@@ -918,6 +934,35 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
   put_u32(out, scope.scope_accepted);
   put_u32(out, scope.key_unavailable);
   put_u32(out, scope.budget_dropped);
+  // RLI1 fingerprint (D04 R2): the kid's first 8 bytes, never key
+  // material — the harness compares it across the erasure.
+  std::uint64_t id_fp = 0;
+  if (stores.identity().has_identity()) {
+    const auto& kid = stores.identity().identity().kid;
+    for (int i = 0; i < 8; ++i) id_fp |= static_cast<std::uint64_t>(kid[i]) << (8 * i);
+  }
+  put_u64(out, id_fp);
+  // ZT legs (D04 §5.1): the joiner's state/error and the member
+  // proxy's discover/offer/relay counters — all secret-free.
+  out.push_back(static_cast<std::uint8_t>(coord.joiner));
+  out.push_back(static_cast<std::uint8_t>(coord.joiner_last_error));
+  const JoinProxyStats proxy = owner.coordinator().proxy_stats();
+  put_u32(out, proxy.discovers_rx);
+  put_u32(out, proxy.offers_tx);
+  put_u32(out, proxy.offers_suppressed);
+  put_u32(out, proxy.relays_started);
+  put_u32(out, proxy.relays_completed);
+  const AuthoritySnapshot auth = owner.coordinator().authority_snapshot();
+  put_u64(out, auth.rx_accepted);
+  put_u64(out, auth.tx_sent);
+  out.push_back(coord.refresh_strikes);
+  const JoinSnapshot joiner = owner.coordinator().joiner_snapshot();
+  put_u32(out, joiner.counters.attempts);
+  put_u32(out, joiner.counters.m1_sent);
+  put_u32(out, joiner.counters.rx_dropped);
+  // TEMPORARY D04 debug (revert before commit): runtime RX drops.
+  put_u32(out, runtime.bootstrap_rx_dropped());
+  put_u32(out, runtime.rx_dropped());
   write_frame(out);
 }
 
@@ -1134,6 +1179,13 @@ int main(int argc, char** argv) {
         write_frame(reply);
         break;
       }
+      case 'P':
+        // A harness-driven power cut (D04 C3): the NVS image persists
+        // and the process takes the same reboot marker as a lifecycle
+        // esp_restart — the respawned peer recovers from flash through
+        // the production boot path, with no test-written state.
+        // (noreturn: no break — the marker exits the process.)
+        esp_restart();
       case 'Q':
         return 0;
       default:

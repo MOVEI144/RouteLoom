@@ -838,10 +838,12 @@ class DeviceEnds {
         radio(air, config.mac, channel, now_ms, faults),
         identity_store(identity_storage),
         site_store(site_storage),
-        joiner(config, identity_store, site_store, entropy, radio, observer) {
+        revocation_store(revocation_storage),
+        joiner(config, identity_store, site_store, revocation_store, entropy, radio, observer) {
     if (!identity_store.initialize()) std::abort();
     if (provision && !identity_store.commit(identity)) std::abort();
     if (!site_store.initialize()) std::abort();
+    if (!revocation_store.initialize()) std::abort();
   }
 
   std::uint64_t now_ms{0};
@@ -851,8 +853,10 @@ class DeviceEnds {
   DeviceRadioPort radio;
   LoggingStorage identity_storage{kIdentitySlotBytes};
   LoggingStorage site_storage{kSiteSlotBytes};
+  LoggingStorage revocation_storage{kRevocationSlotBytes};
   IdentityStore identity_store;
   SiteStore site_store;
+  RevocationStore revocation_store;
   JoinObserverLog observer;
   Joiner joiner;
 };

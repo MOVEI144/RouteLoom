@@ -300,6 +300,7 @@ pub struct CutoverProgress {
     pub revision: u32,
     pub prepared: u64,
     pub applied: u64,
+    pub recovered: u64,
     pub unknown: u64,
     pub total: u64,
     pub waiting_gateway: bool,

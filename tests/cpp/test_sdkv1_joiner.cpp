@@ -1448,15 +1448,18 @@ void test_reentry_refused() {
   // the FSM walks BootCheck -> scan -> Backoff and rescans.
   ReentrantStorage id_storage{kIdentitySlotBytes};
   ReentrantStorage site_storage{kSiteSlotBytes};
+  FaultyRecordStorage revocation_storage{kRevocationSlotBytes};
   IdentityStore identity(id_storage);
   SiteStore site(site_storage);
+  RevocationStore revocations(revocation_storage);
   CHECK(identity.initialize().ok());
   CHECK(identity.commit(device_identity()).ok());
   CHECK(site.initialize().ok());
+  CHECK(revocations.initialize().ok());
   SimEntropy entropy(0xEE);
   ReentrantPort port;
   ReentrantObserver observer;
-  Joiner joiner(device_config(), identity, site, entropy, port, observer);
+  Joiner joiner(device_config(), identity, site, revocations, entropy, port, observer);
   port.joiner = &joiner;
   observer.joiner = &joiner;
   id_storage.joiner = &joiner;
@@ -1893,6 +1896,109 @@ void test_offer_wrong_destination_dropped() {
   CHECK(dev.joiner.on_rld1_rx(meta, ByteView{frame.bytes.data(), frame.size}, net.now())
             .ok());
   CHECK(dev.joiner.snapshot().candidates.observations == obs + 1);
+  current.clear();
+}
+
+// A late OFFER — one that arrives after its 320 ms scan window closed
+// (proxy slot delay + poll/airtime slop, D04 R1) — still tables, and
+// Backoff selects it on the next poll instead of rescanning with a
+// fresh nonce that would orphan it. Without this the §3.5 re-verify
+// never binds: every offer misses the window, the table stays empty,
+// the 5-minute refresh abandons into Recovery instead of erasing.
+void test_late_offer_tables_and_selects_from_backoff() {
+  current = "late-offer-backoff";
+  // Single-channel scan: the offer's channel always matches the tuned
+  // channel (the multi-channel ch-6 rounds of D04 R1, where the proxy
+  // hears the joiner and the same-round nonce is still current).
+  JoinerConfig config = device_config();
+  config.scan_channels[0] = 6;
+  config.scan_channel_count = 1;
+  JoinSimNetwork net(config, device_identity());
+  // No site yet: the first window closes with an empty table, so the
+  // joiner parks in Backoff (the state a late offer must rescue).
+  DeviceEnds& dev = net.device();
+  CHECK(dev.joiner.start(boot_input(), 0).ok());
+  CHECK(net.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::ScanWindow; }, 30000));
+  CHECK(net.pump_until([&] { return dev.joiner.snapshot().state == JoinState::Backoff; },
+                       30000));
+  // The live DISCOVER nonce (no rescan ran, so it is still current).
+  JoinNonce live{};
+  bool have_live = false;
+  const auto scan = [&](const Bytes& bytes) {
+    autonomy::Rld1Envelope env{};
+    if (!autonomy::rld1_decode(view(bytes), env)) return;
+    if (env.kind == FrameType::Discover) {
+      std::copy(env.transaction_nonce.begin(), env.transaction_nonce.end(), live.begin());
+      have_live = true;
+    }
+  };
+  for (const auto& bytes : net.air_history()) scan(bytes);
+  for (const auto& frame : dev.air) scan(frame.bytes);
+  CHECK(have_live);
+  // The proxy appears now (its slotted offer would have missed the
+  // window); inject that late offer straight into the Backoff joiner.
+  net.add_site(site_a_params());
+  const SimProxyParams proxy = site_a_params().proxies[0];
+  ZtOfferBody body{};
+  body.flags = kZtOfferAuthorityReachable;
+  body.org_hint = join_org_hint(site_ca().pub);
+  body.site_hint = join_site_hint(kSiteA);
+  body.authority_hops = 1;
+  autonomy::Rld1Encoded frame{};
+  CHECK(zt_offer_frame_encode(proxy.node, static_cast<std::uint32_t>(kNetworkA), live, body,
+                              frame)
+            .ok());
+  const std::uint32_t obs = dev.joiner.snapshot().candidates.observations;
+  JoinRxMeta meta{};
+  meta.source = proxy.mac;
+  meta.destination = kDeviceMac;
+  meta.channel = dev.channel;
+  meta.rssi = -50;
+  CHECK(dev.joiner.on_rld1_rx(meta, ByteView{frame.bytes.data(), frame.size}, net.now())
+            .ok());
+  CHECK(dev.joiner.snapshot().candidates.observations == obs + 1);
+  // Backoff binds the tabled offer on the next poll (no rescan, the
+  // same-round nonce still connects) and the handshake starts.
+  CHECK(net.pump_until(
+      [&] { return dev.joiner.snapshot().state != JoinState::Backoff; }, 5000));
+  CHECK(net.pump_until([&] { return dev.joiner.snapshot().counters.attempts == 1; },
+                       30000));
+  current.clear();
+}
+
+// One nonce per scan cycle (not per channel step): every step's proxy
+// answer shares the current transaction, so a slotted offer for an
+// early step is still fresh when it lands mid-cycle (D04 R1). The
+// next cycle rotates.
+void test_cycle_nonce_shared_across_steps() {
+  current = "cycle-nonce";
+  JoinSimNetwork net(device_config(), device_identity());
+  DeviceEnds& dev = net.device();
+  CHECK(dev.joiner.start(boot_input(), 0).ok());
+  // Two full cycles with no site (3 channels x 1 org hint = 3 steps
+  // each, then Backoff on the empty table).
+  CHECK(net.pump_until([&] { return dev.joiner.snapshot().state == JoinState::Backoff; },
+                       30000));
+  CHECK(net.pump_until([&] { return dev.joiner.snapshot().state == JoinState::ScanWindow; },
+                       60000));
+  CHECK(net.pump_until([&] { return dev.joiner.snapshot().state == JoinState::Backoff; },
+                       30000));
+  std::vector<JoinNonce> nonces;
+  for (const auto& bytes : net.air_history()) {
+    autonomy::Rld1Envelope env{};
+    if (!autonomy::rld1_decode(view(bytes), env)) continue;
+    if (env.kind != FrameType::Discover) continue;
+    JoinNonce nonce{};
+    std::copy(env.transaction_nonce.begin(), env.transaction_nonce.end(), nonce.begin());
+    nonces.push_back(nonce);
+  }
+  CHECK(nonces.size() == 6);
+  CHECK(nonces[0] == nonces[1]);
+  CHECK(nonces[1] == nonces[2]);
+  CHECK(nonces[3] == nonces[4]);
+  CHECK(nonces[4] == nonces[5]);
+  CHECK(!(nonces[0] == nonces[3]));
   current.clear();
 }
 
@@ -2867,6 +2973,8 @@ int main() {
   test_tune_failure_all_stalls();
   test_multi_anchor_scan();
   test_offer_wrong_destination_dropped();
+  test_late_offer_tables_and_selects_from_backoff();
+  test_cycle_nonce_shared_across_steps();
   test_mailbox_full_keeps_first();
   test_hint_flood_ignored();
   test_unreachable_proxy_never_attempted();

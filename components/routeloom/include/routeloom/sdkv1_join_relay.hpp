@@ -175,6 +175,10 @@ class ZtJoinerLink {
 
   // New attempt: fresh nonce, forget any proxy, broadcast one DISCOVER.
   Status discover(const ZtDiscoverBody& body, MonotonicMs now_ms) noexcept;
+  // Same-cycle re-DISCOVER (next scan step): keep the current nonce so a
+  // slotted proxy answer stays answerable until the cycle ends (D04 R1).
+  // Redraws when no valid nonce exists yet (first use).
+  Status rediscover(const ZtDiscoverBody& body, MonotonicMs now_ms) noexcept;
   // Pin the exchange to one OFFER of the current DISCOVER.
   Status connect(const ZtOfferView& offer) noexcept;
   // Send an up message (phase 4 steps 1/3/5, phase 5 steps 1/3). The cookie
@@ -197,6 +201,8 @@ class ZtJoinerLink {
  private:
   Status emit(const MacAddress& destination, FrameType kind, ByteView body) noexcept;
   Status discover_impl(const ZtDiscoverBody& body, MonotonicMs now_ms) noexcept;
+  Status discover_inner(const ZtDiscoverBody& body, MonotonicMs now_ms,
+                        bool fresh_nonce) noexcept;
   Status connect_impl(const ZtOfferView& offer) noexcept;
   Status send_impl(JoinAuthPhase phase, std::uint8_t step, ByteView message,
                    MonotonicMs now_ms) noexcept;
@@ -205,7 +211,9 @@ class ZtJoinerLink {
                        MonotonicMs now_ms) noexcept;
   void poll_impl(MonotonicMs now_ms) noexcept;
   void send_reply(const JoinReply& reply) noexcept;
-  void send_due_chunks(MonotonicMs now_ms) noexcept;
+  // `bill_round=false` runs an ack-clocked pump: the send time advances
+  // but the retry budget is not billed (see note_advanced).
+  void send_due_chunks(MonotonicMs now_ms, bool bill_round = true) noexcept;
   bool from_proxy(const MacAddress& source, const autonomy::Rld1Envelope& env) const noexcept;
 
   ZtJoinerConfig config_{};
@@ -392,7 +400,9 @@ class JoinProxy {
                          std::uint32_t retry_after_ms) noexcept;
   void send_rld1_reply(const JoinReply& reply) noexcept;
   void send_wire_receipt(const JoinReply& reply) noexcept;
-  void send_due_chunks(MonotonicMs now_ms) noexcept;
+  // `bill_round=false` runs an ack-clocked pump: the send time advances
+  // but the retry budget is not billed (see note_advanced).
+  void send_due_chunks(MonotonicMs now_ms, bool bill_round = true) noexcept;
   void abort_relay(RelayStatusCode device_status, bool notify_gateway) noexcept;
   void end_relay() noexcept;
   Status emit_rld1(const MacAddress& mac, const JoinNonce& nonce, FrameType kind,
@@ -621,7 +631,10 @@ class JoinRelayGateway {
                   const RelayObject& object, ByteView bytes) noexcept;
   // A valid new up stage implicitly received the down object in flight.
   void implicit_down_receipt(ActiveRelay& relay) noexcept;
-  Status send_due_chunks(Slot& slot, NodeId proxy, MonotonicMs now_ms) noexcept;
+  // `bill_round=false` runs an ack-clocked pump: the send time advances
+  // but the retry budget is not billed (see note_advanced).
+  Status send_due_chunks(Slot& slot, NodeId proxy, MonotonicMs now_ms,
+                         bool bill_round = true) noexcept;
   void send_down_abort(NodeId proxy, const RelayHeader& up, RelayStatusCode status,
                        std::uint32_t retry_after_ms) noexcept;
   void send_up_complete(NodeId proxy, const RelayToken& token, JoinAuthPhase phase,

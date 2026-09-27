@@ -1423,14 +1423,29 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
       if (record.mode == LifecycleMode::Prepared) {
         SiteRecord staged{};
         if (adopt_stores() != LifecycleBlockReason::None ||
-            !staged_site(record, staged) || !site_.has_site() ||
-            site_.site().network != record.old_network ||
-            site_.site().assignment_generation != record.generation) {
+            !staged_site(record, staged) || !site_.has_site()) {
+          enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+          return Status::success();
+        }
+        const bool live_old = site_.site().network == record.old_network &&
+                              site_.site().assignment_generation == record.generation;
+        if (!live_old && !adopted_prepared_target(staged)) {
+          // The site matches neither the old network nor the prepared
+          // target: an unrelated site under a stale stage stays
+          // blocked, never silently adopted.
           enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
           return Status::success();
         }
         const Status status = adopt_and_enter(now_ms);
-        if (phase_ == LifecyclePhase::Active) phase_ = LifecyclePhase::Prepared;
+        if (live_old) {
+          if (phase_ == LifecyclePhase::Active) phase_ = LifecyclePhase::Prepared;
+        } else if (!journal_->cut_prepared()) {
+          // The rebooted ZT reissue (04 §7): the site already adopted
+          // the prepared target itself before the reboot. Cut the
+          // stage and run as the adopted member — the same
+          // reconciliation MemberReady runs live.
+          enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+        }
         return status;
       }
       if (record.mode == LifecycleMode::Removing || record.mode == LifecycleMode::Holdoff) {
@@ -1575,13 +1590,26 @@ Status MembershipLifecycle::on_member_ready(const LifecycleMemberReady& ready,
     const bool was_prepared = phase_ == LifecyclePhase::Prepared;
     phase_ = LifecyclePhase::BootGate;
     const Status status = adopt_and_enter(now_ms);
-    if (was_prepared && phase_ == LifecyclePhase::Active) {
+    if (was_prepared) {
       SiteRecord staged{};
-      if (!journal_ || !staged_site(journal_->record(), staged) ||
-          !site_.has_site() || site_.site().network != journal_->record().old_network ||
-          site_.site().assignment_generation != journal_->record().generation)
-        enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
-      else phase_ = LifecyclePhase::Prepared;
+      const bool have_stage =
+          journal_ && staged_site(journal_->record(), staged) && site_.has_site();
+      const bool live_old =
+          have_stage && site_.site().network == journal_->record().old_network &&
+          site_.site().assignment_generation == journal_->record().generation;
+      if (have_stage && !live_old && adopted_prepared_target(staged)) {
+        // The ZT reissue adopted the cutover target itself (04 §7):
+        // the COMMIT path is over. Cut the stage (NVS, stage only —
+        // the adopted network settings stay); whatever phase the
+        // adoption landed keeps running, RRS fetch included.
+        if (!journal_->cut_prepared())
+          enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+      } else if (phase_ == LifecyclePhase::Active) {
+        if (!have_stage || !live_old)
+          enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+        else
+          phase_ = LifecyclePhase::Prepared;
+      }
     }
     return status;
   }
@@ -2018,6 +2046,18 @@ bool MembershipLifecycle::staged_site(const LifecycleRecord& record, SiteRecord&
       !join_membership_verify(out, identity_.identity(), verified, verifier_) || !verified)
     return false;
   return true;
+}
+
+bool MembershipLifecycle::adopted_prepared_target(const SiteRecord& staged) const noexcept {
+  if (!journal_ || !journal_->has_record() || !site_.has_site()) return false;
+  if (journal_->record().mode != LifecycleMode::Prepared) return false;
+  // `staged` is this record's verified target (staged_site checked the
+  // certs, the SAK, the epoch against the new network high bits, and
+  // the membership): the adoption matches it when site, network
+  // (epoch included) and binding all agree.
+  const SiteRecord& adopted = site_.site();
+  return adopted.site_id == staged.site_id && adopted.network == staged.network &&
+         adopted.assignment_generation == staged.assignment_generation;
 }
 
 bool MembershipLifecycle::switching_proof(const LifecycleRecord& record, SiteRecord& out,

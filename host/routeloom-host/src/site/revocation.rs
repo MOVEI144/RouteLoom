@@ -363,6 +363,9 @@ pub enum OutboundKind {
     Notice,
     Prepare,
     Commit,
+    /// A type-7 RouteState query (04 §7): asks one target for its
+    /// committed uplink so COMMITs dispatch leaf-first.
+    RouteQuery,
 }
 
 /// One queued object send (RAM-only; rebuilt from the snapshot).
@@ -804,6 +807,18 @@ impl SiteAuthority {
                     self.grant_bytes(head.op, head.node, head.what)
                         .and_then(|bytes| network.map(|network| (bytes, network)))
                 }
+                OutboundKind::RouteQuery => {
+                    if !self.route_query_still_due(head.op, head.node, now_ms) {
+                        continue;
+                    }
+                    let network = self
+                        .operations
+                        .get(&head.op)
+                        .and_then(|op| op.cutover.as_ref())
+                        .map(|state| state.old_network);
+                    self.route_query_bytes(head.op, head.node)
+                        .and_then(|bytes| network.map(|network| (bytes, network)))
+                }
             };
             let Some((bytes, network)) = bytes else {
                 self.rrs_refusals.remove(&(head.op, head.node, head.what));
@@ -822,7 +837,7 @@ impl SiteAuthority {
                         transport.send_presealed_notice(head.node, &bytes)
                     }
                     OutboundKind::Notice => transport.send_notice(head.node, network, &bytes),
-                    OutboundKind::Prepare | OutboundKind::Commit => {
+                    OutboundKind::Prepare | OutboundKind::Commit | OutboundKind::RouteQuery => {
                         // A dormant target holds no channel to seal
                         // into — and a sealed send is no proof it is
                         // awake (its own idle retire runs
@@ -861,6 +876,7 @@ impl SiteAuthority {
                 OutboundKind::Prepare | OutboundKind::Commit => {
                     self.note_grant_sent(op, node, now_ms)
                 }
+                OutboundKind::RouteQuery => self.note_route_query_sent(op, node, now_ms),
             }
         }
         for id in touched {

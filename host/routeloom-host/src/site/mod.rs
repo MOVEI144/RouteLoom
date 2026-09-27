@@ -930,6 +930,15 @@ pub struct SiteAuthority {
     cutover_grace_network: u64,
     cutover_grace_until_mono: u64,
     cutover_resume_pending: Vec<u64>,
+    // Leaf-first COMMIT dispatch (04 §7): per-(cutover, target) route
+    // plans plus the RouteState query sequence. RAM-only like the
+    // grace it paces; entries for non-live cutovers prune every tick.
+    cutover_routes: BTreeMap<(u64, u64), cutover::CutoverRoutePlan>,
+    cutover_query_seq: u32,
+    // Per-(cutover, target) current-GK proof for Recovered (04 §7): a
+    // gk_id-checked ACK or a verified JoinConfirm view at the active
+    // epoch. RAM-only like the plans; pruned with them.
+    cutover_gk_proved: BTreeMap<(u64, u64), u32>,
 }
 
 /// The channel layer's read-only view of the live rows (P5 §4: every
@@ -1516,6 +1525,9 @@ impl SiteAuthority {
             cutover_grace_network: 0,
             cutover_grace_until_mono: 0,
             cutover_resume_pending,
+            cutover_routes: BTreeMap::new(),
+            cutover_query_seq: 0,
+            cutover_gk_proved: BTreeMap::new(),
             id,
             sak,
             store,
@@ -2487,7 +2499,24 @@ impl SiteAuthority {
     /// then routes verified device reports to the revocation/cutover
     /// sinks. Outbound carriers leave via `SiteService::with`, which
     /// drains them with the lock released like the join outbox.
+    /// Ends the COMMIT grace with the channel table (04 §7): a
+    /// clock regression unbinds every old-context receipt, so the
+    /// grace and the RAM route plan end with it. The cutover parks
+    /// in RecoveryPending at the next tick and the ZT reissue takes
+    /// over — the unknown set never shrinks by guessing.
+    fn end_cutover_grace(&mut self) {
+        self.cutover_grace_network = 0;
+        self.cutover_grace_until_mono = 0;
+        self.cutover_routes.clear();
+        // The GK proofs stay: they carry no timing, so a regression
+        // cannot invalidate them — and a JoinConfirm never repeats,
+        // so clearing would strand an in-progress recovery for good.
+    }
+
     pub(super) fn tick_p6_channel(&mut self, time: HostTime) {
+        if time.mono_ms < self.last_channel_mono_ms {
+            self.end_cutover_grace();
+        }
         self.last_channel_mono_ms = time.mono_ms;
         let live: Vec<(u64, ChannelMember)> = self
             .devices
@@ -2557,13 +2586,39 @@ impl SiteAuthority {
             match receipt.env_type {
                 5 => self.apply_type5_receipt(receipt, time),
                 7 => {
-                    self.handle_grant_receipt(
-                        receipt.device,
-                        receipt.generation,
-                        receipt.network,
-                        &receipt.body,
-                        time.unix_ms,
-                    );
+                    // Type 7 phases ride separate handlers:
+                    // COMMIT_STORED (5) and RouteState (6) steer
+                    // leaf-first dispatch, never PREPARED/APPLIED
+                    // evidence (04 §7).
+                    match receipt.body.get(1).copied().unwrap_or(0) {
+                        5 => {
+                            self.handle_commit_stored(
+                                receipt.device,
+                                receipt.generation,
+                                receipt.network,
+                                &receipt.body,
+                                time.mono_ms,
+                            );
+                        }
+                        6 => {
+                            self.handle_route_report(
+                                receipt.device,
+                                receipt.generation,
+                                receipt.network,
+                                &receipt.body,
+                                time.mono_ms,
+                            );
+                        }
+                        _ => {
+                            self.handle_grant_receipt(
+                                receipt.device,
+                                receipt.generation,
+                                receipt.network,
+                                &receipt.body,
+                                time.unix_ms,
+                            );
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -2573,14 +2628,18 @@ impl SiteAuthority {
     fn apply_type5_receipt(&mut self, receipt: P6Receipt, time: HostTime) {
         match decode_type5(&receipt.body) {
             Some(P6Type5::Applied { rs_epoch, sha }) => {
-                self.handle_rrs_applied(
+                if self.handle_rrs_applied(
                     receipt.device,
                     receipt.generation,
                     receipt.network,
                     rs_epoch,
                     &sha,
                     time.unix_ms,
-                );
+                ) {
+                    // The RRS half of a cutover recovery just landed
+                    // (04 §7); the JoinConfirm/GK halves check inside.
+                    self.cutover_maybe_recover(receipt.device, time.unix_ms);
+                }
             }
             Some(P6Type5::NoticeAccepted { rs_epoch, sha }) => {
                 self.handle_notice_accepted(
@@ -3576,7 +3635,12 @@ impl SiteAuthority {
             .as_ref()
             .is_some_and(|notice| notice.delivery == revocation::NoticeDelivery::Pending)
         {
-            self.notice_commit_mono.insert(op.id, time.mono_ms);
+            // The window starts at the latest instant known across
+            // the API clock and the tick clock: the queue runs on
+            // ticks, so a commit that lands between them must not
+            // start behind the tick that will serve it.
+            self.notice_commit_mono
+                .insert(op.id, time.mono_ms.max(self.last_channel_mono_ms));
         }
         // The row is dead: retire the channel and its ready hint now
         // rather than at the next dispatch, and echo the new epochs.
@@ -4454,8 +4518,21 @@ impl SiteAuthority {
             return AckOutcome::Stale { reason: "ack_gkid" };
         }
         match (ack.result, ack.stored_state) {
-            (0, 1) => self.record_staged_ack(&ack, time),
-            (0, 2) => self.record_active_ack(&ack, time),
+            (0, 1) | (0, 2) => {
+                // Past the binding/gk_id fences above, an ACK at the
+                // active epoch proves the current key even with no live
+                // rotation tracking it (04 §7 recovery evidence).
+                let outcome = if ack.stored_state == 1 {
+                    self.record_staged_ack(&ack, time)
+                } else {
+                    self.record_active_ack(&ack, time)
+                };
+                if ack.epoch == self.gks.active_epoch() {
+                    self.note_cutover_gk_proved(ack.node, ack.epoch);
+                    self.cutover_maybe_recover(ack.node, time.unix_ms);
+                }
+                outcome
+            }
             (0, _) => {
                 self.bump_gk_rejected("ack_unapplied");
                 AckOutcome::Stale {
@@ -4934,6 +5011,12 @@ impl SiteAuthority {
         time: HostTime,
         rng: &mut dyn FnMut(&mut [u8]) -> bool,
     ) {
+        // Regression ends the COMMIT grace (checked before the
+        // assignment below — and before tick_p6_channel refreshes —
+        // so a backward carrier never revives the old context).
+        if time.mono_ms < self.last_channel_mono_ms {
+            self.end_cutover_grace();
+        }
         self.last_channel_mono_ms = time.mono_ms;
         if self
             .rrs_transport
@@ -5151,6 +5234,13 @@ impl SiteAuthority {
                             );
                         }
                         self.sync_confirmed_member(&row, &confirm, time);
+                        // A verified JoinConfirm at the active GK is the
+                        // current-key half of a cutover recovery (04 §7);
+                        // the RRS half lands through its own receipt.
+                        if confirm.current == self.gks.active_epoch() {
+                            self.note_cutover_gk_proved(device, confirm.current);
+                        }
+                        self.cutover_maybe_recover(device, time.unix_ms);
                     }
                     ConfirmOutcome::Stale => {
                         self.bump_gk_rejected("confirm_stale");

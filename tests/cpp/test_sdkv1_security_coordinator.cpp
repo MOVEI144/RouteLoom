@@ -20,6 +20,7 @@
 #include "routeloom/sdkv1_group_security.hpp"
 #include "routeloom/wire.hpp"
 #include "routeloom/sdkv1_ead.hpp"
+#include "routeloom/sdkv1_join_transport.hpp"
 #include "routeloom/sdkv1_security_coordinator.hpp"
 #include "routeloom/sdkv1_store.hpp"
 #include "routeloom/trust_store.hpp"
@@ -37,6 +38,18 @@ struct SecurityCoordinatorTestAccess {
   }
   static void link_failed(SecurityCoordinator& coordinator) noexcept {
     coordinator.note_link_failed();
+  }
+  // Plants one live old-group link session (04 §3.5): a restored Link
+  // entry with a full lifetime, like a neighbor the member still
+  // hears while its authority road is gone.
+  static Status plant_link(SecurityCoordinator& coordinator, const NodeId peer) noexcept {
+    SessionBankEntry entry{};
+    entry.peer = peer;
+    entry.tx_cid = 0x11111111U;
+    entry.rx_cid = 0x22222222U;
+    entry.created_gk = 203;  // site_record().gk_epoch_current
+    entry.remaining_ms = GatewaySessionBank::kContextLifetimeMs;
+    return coordinator.bank_.restore_entry(SecurityScope::Link, peer, entry);
   }
   static JoinSnapshot join_snapshot(const SecurityCoordinator& coordinator) noexcept {
     return coordinator.joiner().snapshot();
@@ -97,6 +110,9 @@ struct SecurityCoordinatorTestAccess {
     reply.status = JoinReplyStatus::Progress;
     reply.received = received;
     return coordinator.member().end_tx.on_reply(reply, now);
+  }
+  static JoinRelayGateway& gateway(SecurityCoordinator& coordinator) noexcept {
+    return coordinator.member().gateway;
   }
 };
 }  // namespace routeloom::sdkv1
@@ -1106,6 +1122,124 @@ void test_staged_bootstrap_rx() {
   CHECK(coordinator.counters().staged_drops == staged0 + 2);
 }
 
+// A gateway epoch reply shares byte 1 with the end-lane Edhoc phase
+// (kEpochReplyKind == EdhocMessage): the staged dispatch must classify
+// first so the reply reaches the proxy, never the end slot (D04 R1).
+// Without it the proxy never learns the epoch, its offers carry no
+// authority-reachable flag, and no joiner ever selects it.
+void test_epoch_reply_routes_to_proxy() {
+  current = "epoch_reply_to_proxy";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+
+  CoordinatorEvent applied{};
+  applied.kind = CoordinatorEventKind::ChannelReady;
+  applied.now = now;
+  applied.channel_token = 0;
+  applied.channel_result = StatusCode::Ok;
+  applied.channel = f.site.site().channel;
+  applied.channel_generation = 7;
+  CHECK(coordinator.step(applied).ok());
+
+  EpochReply reply{};
+  reply.gateway_epoch = 7;
+  reply.authority_ready = true;
+  reply.nonce[0] = 1;
+  std::array<std::uint8_t, kEpochReplySize> encoded{};
+  std::size_t written = 0;
+  CHECK(epoch_reply_encode(reply, MutableByteView{encoded.data(), encoded.size()}, written));
+  BootstrapMeta meta{};
+  meta.origin = 0x00A1000000000001ULL;  // site gateways[0]
+  meta.hop_remaining = kDefaultHopLimit;
+  const std::uint32_t demux0 = coordinator.counters().demux_drops;
+  const std::uint32_t rej0 =
+      SecurityCoordinatorTestAccess::proxy_stats(coordinator).frames_rejected;
+  CHECK(coordinator.on_frame(meta, FrameType::BootstrapAuth,
+                             ByteView{encoded.data(), written}, now)
+            .ok());
+  now += 100;
+  CHECK(coordinator.step(poll_at(now)).ok());
+  // The proxy (not the end slot) took it: no query is outstanding, so
+  // it counts a proxy-side rejection instead of caching.
+  CHECK(coordinator.counters().demux_drops == demux0);
+  CHECK(SecurityCoordinatorTestAccess::proxy_stats(coordinator).frames_rejected == rej0 + 1);
+}
+
+namespace {
+// Captures the hops of the first relay_up handed to the host.
+struct HopsTap final : public JoinRelayHostSink {
+  bool seen{false};
+  std::uint8_t hops{0};
+  Status relay_up(NodeId, std::uint8_t h, ByteView) noexcept override {
+    seen = true;
+    hops = h;
+    return Status::success();
+  }
+  Status relay_abort(NodeId, RelayToken, RelayAbortReason) noexcept override {
+    return Status::success();
+  }
+};
+}  // namespace
+
+// Relay hops are a distance: a direct neighbor is 1 hop away (D04 R1).
+// 0 is the local join only; the USB check fails a remote 0 closed, so
+// a direct proxy's M1 up never reached the host before this fix.
+void test_relay_hops_direct_is_one() {
+  current = "relay_hops_direct";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(gateway_site()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+
+  HopsTap tap{};
+  CHECK(SecurityCoordinatorTestAccess::gateway(coordinator).set_host_sink(&tap).ok());
+
+  CoordinatorEvent applied{};
+  applied.kind = CoordinatorEventKind::ChannelReady;
+  applied.now = now;
+  applied.channel_token = 0;
+  applied.channel_result = StatusCode::Ok;
+  applied.channel = f.site.site().channel;
+  applied.channel_generation = 7;
+  CHECK(coordinator.step(applied).ok());
+
+  RelayObject up{};
+  up.header.dir = RelayDirection::Up;
+  up.header.relay_id = 7;
+  up.header.proxy = kNode + 1;
+  up.header.joiner_mac = kPeerMac;
+  up.header.phase = JoinAuthPhase::EdhocMessage;
+  up.header.step = 1;
+  up.header.state = RelayState::Continue;
+  up.header.gateway_epoch = kBoot;  // incarnation binding (#116 §4.2): must match
+  up.header.proxy_epoch = 1;
+  const std::uint8_t message[8] = {9, 9, 9, 9, 9, 9, 9, 9};
+  up.message = ByteView{message, sizeof(message)};
+  std::array<std::uint8_t, kRelayObjectMax> encoded{};
+  std::size_t written = 0;
+  CHECK(relay_object_encode(up, MutableByteView{encoded.data(), encoded.size()}, written));
+  BootstrapMeta meta{};
+  meta.origin = kNode + 1;
+  meta.hop_remaining = kDefaultHopLimit;  // direct neighbor: nothing consumed
+  CHECK(coordinator.on_frame(meta, FrameType::BootstrapAuth,
+                             ByteView{encoded.data(), written}, now)
+            .ok());
+  now += 100;
+  CHECK(coordinator.step(poll_at(now)).ok());
+  CHECK(tap.seen);
+  CHECK(tap.hops == 1);
+}
+
 void test_usb_queue_admission() {
   current = "usb_queue_admission";
   Fixture f{};
@@ -2021,6 +2155,49 @@ void test_failed_refresh_re_adopts_configured_member() {
   CHECK(coordinator.snapshot().resume_link_slots == kResume2NodeLinkQuota);
 }
 
+// A same-boot re-adopt after a reissue keeps the running node's wire
+// identity: the reissued record stamps the current rlboot witness,
+// which legitimately advances past the stored one without a reboot
+// (D04 R2 — the group variant's B wedged in Recovery/RadioFailure
+// when the refresh drew fresh sessions the started node could not
+// adopt). Only the witness moves; the site and node are unchanged.
+void test_reissued_refresh_preserves_wire_sessions() {
+  current = "reissued_refresh_preserves_wire_sessions";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  SiteRecord first_record = site_record();
+  first_record.boot_witness = 1000;  // predates this boot's rlboot
+  CHECK(f.site.commit(first_record).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  const CoordinatorMemberConfig first = SecurityCoordinatorTestAccess::adopted(coordinator);
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  CHECK(poll_drain(coordinator, now));
+  // The reissue lands (verified over ZT): same site and node, the
+  // current boot witness stamped.
+  SiteRecord reissued = site_record();
+  reissued.boot_witness = kBoot;
+  CHECK(f.site.commit(reissued).ok());
+  SecurityCoordinatorTestAccess::invalidate_joiner_channels(coordinator);
+  for (int i = 0; i < 2; ++i) {
+    bump_unknown_generations(*f.deps().discovery, 2);
+    CHECK(poll_drain(coordinator, now));
+  }
+  bump_unknown_generations(*f.deps().discovery, 2);
+  CHECK(coordinator.step(poll_at(now += 5000)).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+  CoordinatorAction action{};
+  CHECK(coordinator.take_action(action).ok());
+  CHECK(action.kind == CoordinatorActionKind::ApplyMemberConfig);
+  CHECK(action.member.node == kNode);
+  CHECK(action.member.message_session == first.message_session);
+  CHECK(action.member.boot_session == first.boot_session);
+  CHECK(action.member.boot_incarnation == first.boot_incarnation);
+}
+
 void test_link_failure_refresh_waits_for_poll_boundary() {
   current = "link_failure_refresh_waits_for_poll_boundary";
   Fixture f{};
@@ -2043,6 +2220,81 @@ void test_link_failure_refresh_waits_for_poll_boundary() {
   CHECK(poll_drain(coordinator, now));
   CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
   CHECK(coordinator.counters().refreshes == 1);
+}
+
+void test_refresh_quiet_channel_with_live_links_never_strikes() {
+  current = "refresh_quiet_channel_with_live_links_never_strikes";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  FakeAuthorityPort port;
+  CHECK(coordinator.attach_authority_port(port));
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  CHECK(poll_drain(coordinator, now, 5));  // StartMemberDiscovery emitted
+  // One live old-group link and a channel that never answers — but a
+  // quiet radio (no newer generations observed). 04 §3.5: the channel
+  // state alone is never refresh evidence (an idle-retired channel is
+  // quiet, not unreachable), so a healthy but quiet member never
+  // refreshes, however long the quiet lasts.
+  CHECK(SecurityCoordinatorTestAccess::plant_link(coordinator, 0x00A1000000000001ULL).ok());
+  CHECK(coordinator.snapshot().link_sessions == 1);
+  CHECK(!coordinator.snapshot().authority_ready);
+  for (int i = 0; i < 5; ++i) {
+    now += 61000;
+    CHECK(coordinator.step(poll_at(now)).ok());
+  }
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+  CHECK(coordinator.snapshot().refresh_strikes == 0);
+  CHECK(coordinator.counters().refreshes == 0);
+}
+
+void test_refresh_newer_generations_with_live_links() {
+  current = "refresh_newer_generations_with_live_links";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  FakeAuthorityPort port;
+  CHECK(coordinator.attach_authority_port(port));
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  CHECK(poll_drain(coordinator, now, 5));  // StartMemberDiscovery emitted
+  CHECK(SecurityCoordinatorTestAccess::plant_link(coordinator, 0x00A1000000000001ULL).ok());
+  CHECK(coordinator.snapshot().link_sessions == 1);
+  CHECK(!coordinator.snapshot().authority_ready);
+  // Lagging neighbors never strike, even on the live-links road.
+  for (int i = 0; i < 3; ++i) {
+    bump_lagging_generations(*f.deps().discovery, 2);
+    CHECK(poll_drain(coordinator, now));
+  }
+  CHECK(coordinator.snapshot().refresh_strikes == 0);
+  // Ahead generations strike — but spaced: a burst inside one window
+  // counts once, so a single rotation overlap cannot refresh alone.
+  bump_unknown_generations(*f.deps().discovery, 2);
+  CHECK(poll_drain(coordinator, now));
+  CHECK(coordinator.snapshot().refresh_strikes == 1);
+  bump_unknown_generations(*f.deps().discovery, 2);
+  CHECK(poll_drain(coordinator, now));
+  CHECK(coordinator.snapshot().refresh_strikes == 1);
+  // ... while rounds that stay ahead across windows re-verify over ZT.
+  now += 21000;
+  bump_unknown_generations(*f.deps().discovery, 2);
+  CHECK(coordinator.step(poll_at(now)).ok());
+  CHECK(coordinator.snapshot().refresh_strikes == 2);
+  now += 21000;
+  bump_unknown_generations(*f.deps().discovery, 2);
+  CHECK(coordinator.step(poll_at(now)).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  CHECK(coordinator.counters().refreshes == 1);
+  CHECK(f.site.has_site());  // RLS1 retained, never erased first
 }
 
 CoordinatorDevConfig dev_config() {
@@ -2473,6 +2725,8 @@ int main() {
   test_clock_regression_refused();
   test_gateway_resume_quotas();
   test_staged_bootstrap_rx();
+  test_epoch_reply_routes_to_proxy();
+  test_relay_hops_direct_is_one();
   test_usb_queue_admission();
   test_usb_refused_without_gateway_role();
   test_relay_loopback_and_mesh_send();
@@ -2486,7 +2740,10 @@ int main() {
   test_refresh_ignores_lagging_generations();
   test_workspace_arm_survives_member_adoption_and_refresh();
   test_failed_refresh_re_adopts_configured_member();
+  test_reissued_refresh_preserves_wire_sessions();
   test_link_failure_refresh_waits_for_poll_boundary();
+  test_refresh_quiet_channel_with_live_links_never_strikes();
+  test_refresh_newer_generations_with_live_links();
   test_commit_veto();
   test_store_credential_verifier();
   test_channel_ready_flow();

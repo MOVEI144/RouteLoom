@@ -1752,6 +1752,17 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
            runtime_->committed_channel() == operating;
   }
   if (!status && !same) {
+    // A re-issued membership for another network (a cutover straggler
+    // back over ZT, 04 §7): the mesh node and discovery cannot
+    // re-adopt live, so reboot once like AdoptNetwork — the clean
+    // boot re-adopts from the committed (reissued) stores and the
+    // lifecycle cuts the stale Prepared stage there. Never a second
+    // reboot on the same durable state: post-reboot the node starts
+    // fresh and the adopt below succeeds.
+    if (status.code == StatusCode::InvalidState && runtime_->node().started() &&
+        adopted_network_ != 0 && adopted_role_ != 0 && member.network != adopted_network_) {
+      reboot_for_lifecycle("member re-adopt");
+    }
     ESP_LOGE(config_.log_tag, "member node adopt failed: %s", status.detail);
     report_tune(Tune{0, kInvalidOperationToken, operating, true},
                 StatusCode::RadioFailure, runtime_->now_ms());

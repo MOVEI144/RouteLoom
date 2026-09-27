@@ -74,11 +74,12 @@ bool boot_valid(const JoinBootInput& boot) noexcept {
 // --- Lifetime -------------------------------------------------------------------------------
 
 Joiner::Joiner(const JoinerConfig& config, IdentityStore& identity, SiteStore& site,
-               EntropySource& entropy, ZtRld1Port& port, JoinObserver& observer,
-               const edhoc::AeadCcm* aead) noexcept
+               RevocationStore& revocations, EntropySource& entropy, ZtRld1Port& port,
+               JoinObserver& observer, const edhoc::AeadCcm* aead) noexcept
     : config_(config),
       identity_(identity),
       site_(site),
+      revocations_(revocations),
       entropy_(entropy),
       observer_(observer),
       aead_(aead),
@@ -253,8 +254,12 @@ bool Joiner::recovery_match(const JoinCandidateKey& key) const noexcept {
 // entry: it must never call back into the Joiner or the link.
 
 void Joiner::LinkObserver::on_offer(const ZtOfferView& offer) noexcept {
+  // No window gate: a slotted proxy answer routinely lands after the
+  // 320 ms scan window closed (D04 R1), while the same-round nonce is
+  // still current. The table is the cross-window bridge — Select and
+  // connect re-validate (recovery match, nonce freshness), so tabling
+  // early-or-late never binds a stale or foreign offer.
   JoinState state = owner_.state_;
-  if (state != JoinState::ScanWindow && state != JoinState::RefreshWindow) return;
   JoinCandidateKey key{};
   key.org_hint = offer.body.org_hint;
   key.site_hint = offer.body.site_hint;
@@ -513,10 +518,11 @@ Status Joiner::on_rld1_rx(const JoinRxMeta& meta, const ByteView frame,
   const ByteView body{env.body.data(), env.body_size};
   switch (env.kind) {
     case FrameType::Offer:
-      if (state_ != JoinState::ScanWindow && state_ != JoinState::RefreshWindow) {
-        sat_inc(counters_.rx_dropped);
-        return Status::success();
-      }
+      // No window gate (like the link observer below): a slotted proxy
+      // answer routinely lands after the 320 ms scan window closed
+      // (D04 R1), while the same-round nonce is still current. Channel,
+      // destination, envelope, org and nonce checks above and below
+      // still apply — only the arrival-state test falls.
       break;
     case FrameType::BootstrapAuth: {
       if (state_ != JoinState::WaitM2 && state_ != JoinState::WaitM4) {
@@ -762,6 +768,7 @@ bool Joiner::retain_membership(const SiteRecord& site, const IdentityRecord& ide
 
 void Joiner::start_scan() noexcept {
   candidates_.scan_begin();
+  cycle_fresh_ = true;
   set_state(JoinState::ScanTune);
 }
 
@@ -1030,7 +1037,11 @@ bool Joiner::open_scan_window(const MonotonicMs now) noexcept {
     body.org_hint = step.org_hint;
     body.preferred_site_hint = candidates_.preferred_hint(step.org_hint);
     candidates_.avoid_hints(step.org_hint, now, body.avoid_site_hints);
-    if (link_.discover(body, now)) {
+    // First step of the cycle draws the nonce; later steps re-emit it,
+    // so every step's proxy answer shares the current transaction.
+    const Status sent = cycle_fresh_ ? link_.discover(body, now) : link_.rediscover(body, now);
+    if (sent.ok()) {
+      cycle_fresh_ = false;
       window_deadline_ = sat_add(now, kJoinScanWindowMs);
       set_state(JoinState::ScanWindow);
       return true;
@@ -1751,6 +1762,29 @@ Status Joiner::drive_backoff(const MonotonicMs now) noexcept {
   // Backoff always honors its deadline (a jittered ~1-2 s at k=0, cut by
   // the nearest pending eligibility) before the rescan.
   if (now < backoff_deadline_) return Status::success();
+  // A late offer tabled while parked (its window closed before the
+  // slotted answer arrived, D04 R1) still carries the current round's
+  // nonce — no rescan ran since. Bind it before rescanning, whose fresh
+  // nonce would orphan it; an empty table rescans exactly as before.
+  JoinAttempt attempt{};
+  JoinSelect selected{};
+  if (candidates_.select_and_begin(now, attempt, selected).ok() &&
+      selected.candidate != nullptr) {
+    if (!recovery_only_ || recovery_match(selected.candidate->key)) {
+      const bool site_ok = !recovery_only_ || !selected.candidate->site_id_authenticated ||
+                           selected.candidate->site_id == recovery_site_id_;
+      if (site_ok) {
+        attempt_ = attempt;
+        attempt_record_ = const_cast<JoinCandidate*>(selected.candidate);
+        attempt_key_ = selected.candidate->key;
+        attempt_proxy_ = selected.proxy.mac;
+        attempt_hops_ = selected.proxy.authority_hops;
+        begin_refresh();
+        return Status::success();
+      }
+    }
+    candidates_.apply_outcome(attempt, JoinAttemptOutcome::Failed, 0, now, entropy_);
+  }
   start_scan();
   return Status::success();
 }

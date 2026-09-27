@@ -6,7 +6,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use routeloom_join::renew::{Head, Phase, Receipt};
+use routeloom_join::renew::{Head, Phase, Receipt, RouteState};
 use routeloom_join::JoinResult;
 use routeloom_provision::sdkv1::cert::{cert_issue, CertClaims, CertType};
 use routeloom_provision::sdkv1::revocation::RevocationReason;
@@ -14,7 +14,7 @@ use routeloom_provision::sha256::sha256;
 use routeloom_provision::signer::{test_keypair, FileRootSigner};
 
 use super::cutover::{
-    CutoverRequest, CutoverState, CUTOVER_GATEWAY_FLUSH_MS, CUTOVER_GRACE_MS,
+    CutoverRequest, CutoverState, GrantState, CUTOVER_GATEWAY_FLUSH_MS, CUTOVER_GRACE_MS,
     CUTOVER_PREPARE_WINDOW_MS,
 };
 use super::group_keys::HostTime;
@@ -303,6 +303,136 @@ fn committed_cutover_reopens_with_old_network_rrs_history() {
     assert!(reopened.is_ok(), "{}", reopened.err().unwrap_or_default());
     assert_eq!(reopened.unwrap().network() >> 32, 4);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Mints a RouteState query for `node` and adopts a matching report
+/// (04 §7): the direct-drive equivalent of a query round trip, for
+/// frontier tests that steer the tree rather than the queue.
+fn adopt_route_report(
+    service: &SiteService,
+    op: u64,
+    node: u64,
+    root: u64,
+    parent: u64,
+    at: u64,
+) -> bool {
+    let query_id = service
+        .with(|a| {
+            a.route_query_bytes(op, node);
+            a.cutover_routes
+                .get(&(op, node))
+                .map(|plan| plan.query_id)
+                .unwrap_or(0)
+        })
+        .0;
+    assert_ne!(query_id, 0, "query mints an id for {node:016x}");
+    let revision = service
+        .with(|a| {
+            a.operations
+                .get(&op)
+                .unwrap()
+                .cutover
+                .as_ref()
+                .unwrap()
+                .revision
+        })
+        .0;
+    let report = RouteState {
+        head: Head {
+            phase: Phase::RouteState,
+            cutover_id: op,
+            revision,
+            old_network: testkit::network(),
+        },
+        mode: 1,
+        status: 0,
+        root,
+        parent,
+        boot: 7,
+        route_stamp: 9,
+        query_id,
+        valid_for_ms: 3_600_000,
+    }
+    .encode()
+    .unwrap()
+    .to_vec();
+    service
+        .with(|a| a.handle_route_report(node, 1, testkit::network(), &report, at))
+        .0
+}
+
+/// Injects `node`'s new-network APPLIED receipt (04 §7): the
+/// adoption proof, over the current binding.
+fn inject_applied(service: &SiteService, op: u64, node: u64, at: u64) -> bool {
+    let (commit_object, commit_rs) = service
+        .with(|a| {
+            let state = a
+                .operations
+                .get(&op)
+                .unwrap()
+                .cutover
+                .as_ref()
+                .unwrap();
+            (state.commit_object.clone(), state.commit_rs_epoch)
+        })
+        .0;
+    let new_network =
+        (u64::from(testkit::SITE_EPOCH + 1) << 32) | u64::from(testkit::NETWORK_LOW);
+    let receipt = Receipt {
+        head: Head {
+            phase: Phase::Applied,
+            cutover_id: op,
+            revision: 1,
+            old_network: testkit::network(),
+        },
+        new_network,
+        gk_epoch: cutover_gk_epoch(service, op),
+        rs_epoch: commit_rs,
+        digest: sha256(&commit_object),
+        status: 0,
+    }
+    .encode()
+    .unwrap()
+    .to_vec();
+    service
+        .with(|a| a.handle_grant_receipt(node, 1, new_network, &receipt, at))
+        .0
+}
+
+/// Injects `node`'s verified COMMIT_STORED receipt (04 §7): same
+/// cutover/revision/digest/epochs over the live old binding.
+fn inject_commit_stored(service: &SiteService, op: u64, node: u64, at: u64) -> bool {
+    let (commit_object, commit_rs) = service
+        .with(|a| {
+            let state = a
+                .operations
+                .get(&op)
+                .unwrap()
+                .cutover
+                .as_ref()
+                .unwrap();
+            (state.commit_object.clone(), state.commit_rs_epoch)
+        })
+        .0;
+    let receipt = Receipt {
+        head: Head {
+            phase: Phase::CommitStored,
+            cutover_id: op,
+            revision: 1,
+            old_network: testkit::network(),
+        },
+        new_network: (u64::from(testkit::SITE_EPOCH + 1) << 32) | u64::from(testkit::NETWORK_LOW),
+        gk_epoch: cutover_gk_epoch(service, op),
+        rs_epoch: commit_rs,
+        digest: sha256(&commit_object),
+        status: 0,
+    }
+    .encode()
+    .unwrap()
+    .to_vec();
+    service
+        .with(|a| a.handle_commit_stored(node, 1, testkit::network(), &receipt, at))
+        .0
 }
 
 #[test]
@@ -773,19 +903,29 @@ fn cutover_holds_the_window_and_the_gateway_gate() {
     // COMMITs flow over the old context — the member first: the
     // gateway adopts last, so its retire+reboot cannot partition
     // members that have not been served yet (#168 cutover).
+    // RouteState queries drain ahead of the COMMITs (04 §7), one
+    // mail per paced tick, so pump until the member COMMIT lands.
     let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
-    tick(&service, committed_at + 100);
-    tick(&service, committed_at + 200);
-    let commits: Vec<_> = sends
-        .lock()
-        .unwrap()
-        .grants
-        .iter()
-        .filter(|(_, _, b)| b[1] == Phase::Commit as u8)
-        .cloned()
-        .collect();
-    assert_eq!(commits.len(), 1);
-    assert_eq!(commits[0].0, member.node);
+    let commits = || {
+        sends
+            .lock()
+            .unwrap()
+            .grants
+            .iter()
+            .filter(|(_, _, b)| b[1] == Phase::Commit as u8)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let mut at = committed_at;
+    for _ in 0..8 {
+        if commits().len() == 1 {
+            break;
+        }
+        at += 100;
+        tick(&service, at);
+    }
+    assert_eq!(commits().len(), 1);
+    assert_eq!(commits()[0].0, member.node);
     let new_network = (u64::from(testkit::SITE_EPOCH + 1) << 32) | u64::from(testkit::NETWORK_LOW);
     let applied = |node: u64, at: u64| {
         let commit_object = service
@@ -821,21 +961,19 @@ fn cutover_holds_the_window_and_the_gateway_gate() {
         assert!(moved);
     };
     // The member APPLIEDs; the held gateway COMMIT follows on the tick.
-    applied(member.node, committed_at + 300);
-    tick(&service, committed_at + 400);
-    let commits: Vec<_> = sends
-        .lock()
-        .unwrap()
-        .grants
-        .iter()
-        .filter(|(_, _, b)| b[1] == Phase::Commit as u8)
-        .cloned()
-        .collect();
-    assert_eq!(commits.len(), 2);
-    assert_eq!(commits[1].0, gateway.node);
-    applied(gateway.node, committed_at + 500);
-    tick(&service, committed_at + 600);
-    let view = operation(&service, op, committed_at + 600);
+    applied(member.node, at + 100);
+    for _ in 0..8 {
+        if commits().len() == 2 {
+            break;
+        }
+        at += 100;
+        tick(&service, at);
+    }
+    assert_eq!(commits().len(), 2);
+    assert_eq!(commits()[1].0, gateway.node);
+    applied(gateway.node, at + 100);
+    tick(&service, at + 200);
+    let view = operation(&service, op, at + 200);
     assert_eq!(view.get("phase").unwrap().as_str(), Some("converged"));
     assert_eq!(view.get("unknown").unwrap().as_u64(), Some(0));
 }
@@ -886,8 +1024,7 @@ fn cutover_flushes_the_held_gateway_commit() {
     let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
     tick(&service, committed_at);
     // The member COMMIT flows; the gateway's is held (no flush yet).
-    tick(&service, committed_at + 100);
-    tick(&service, committed_at + 200);
+    // Queries drain first (04 §7), so pump until it lands.
     let commits = || {
         sends
             .lock()
@@ -898,17 +1035,33 @@ fn cutover_flushes_the_held_gateway_commit() {
             .cloned()
             .collect::<Vec<_>>()
     };
+    let mut at = committed_at;
+    for _ in 0..8 {
+        if commits().len() == 1 {
+            break;
+        }
+        at += 100;
+        tick(&service, at);
+    }
     assert_eq!(commits().len(), 1);
     assert_eq!(commits()[0].0, member.node);
     // The member never settles; near the grace end the gateway COMMIT
-    // flushes anyway (targets order puts it ahead of the member retry).
+    // flushes anyway while the member plan closes (no more retries —
+    // the unserved fall back to the ZT reissue).
     let flush_at = committed_at + CUTOVER_GRACE_MS - CUTOVER_GATEWAY_FLUSH_MS + 100;
     tick(&service, flush_at);
     tick(&service, flush_at + 100);
     let flushed = commits();
-    assert_eq!(flushed.len(), 3);
+    assert_eq!(flushed.len(), 2);
     assert_eq!(flushed[1].0, gateway.node);
-    assert_eq!(flushed[2].0, member.node);
+    let deferred = service
+        .with(|a| {
+            a.cutover_routes
+                .get(&(_op, member.node))
+                .is_some_and(|plan| plan.deferred)
+        })
+        .0;
+    assert!(deferred, "the plan closes the unsettled member");
 }
 
 /// #168 cutover / 04 §7: an authenticated old-context APPLIED counts
@@ -1801,4 +1954,587 @@ fn cutover_refuses_a_bad_next_cert() {
     });
     let err = answer.unwrap_err();
     assert_eq!(err.code, "CONFLICT");
+}
+
+/// Joins the gateway plus `members`, stages a cutover, and PREPAREs
+/// every target: the common route-tree-test setup. Returns the op and
+/// the shared sends; member nodes keep their join order.
+fn start_tree(
+    service: &SiteService,
+    transport: &Arc<InProcessTransport>,
+    key: &str,
+    members: &[u64],
+) -> (u64, Arc<Mutex<GrantSends>>) {
+    let mut gateway = SimDevice::new(testkit::GATEWAY, 0x60);
+    gateway.capability |= routeloom_join::JOIN_CAPABILITY_GATEWAY;
+    join_member(service, transport, &mut gateway, ROLE_GATEWAY, "g", T0);
+    for (i, node) in members.iter().enumerate() {
+        let mut member = SimDevice::new(*node, 0x71 + i as u8);
+        join_member(
+            service,
+            transport,
+            &mut member,
+            ROLE_ENDPOINT,
+            &format!("m{i}"),
+            T0 + 1_000 * (i as u64 + 1),
+        );
+    }
+    let sends = with_grant_transport(service);
+    let (op, _) = start_cutover(service, key, T0 + 10_000);
+    for t in 0..(members.len() + 2) {
+        tick(service, T0 + 10_000 + t as u64 * 100);
+    }
+    for (node, _, bytes) in sends.lock().unwrap().grants.clone() {
+        if bytes[1] != Phase::Prepare as u8 {
+            continue;
+        }
+        let receipt = Receipt {
+            head: Head {
+                phase: Phase::Prepared,
+                cutover_id: op,
+                revision: 1,
+                old_network: testkit::network(),
+            },
+            new_network: (u64::from(testkit::SITE_EPOCH + 1) << 32)
+                | u64::from(testkit::NETWORK_LOW),
+            gk_epoch: cutover_gk_epoch(service, op),
+            rs_epoch: 0,
+            digest: sha256(&bytes),
+            status: 0,
+        };
+        let bytes = receipt.encode().unwrap().to_vec();
+        let (moved, _) = service
+            .with(|a| a.handle_grant_receipt(node, 1, testkit::network(), &bytes, T0 + 20_000));
+        assert!(moved, "PREPARED counts for {node:016x}");
+    }
+    (op, sends)
+}
+
+/// 04 §7: COMMITs dispatch leaf-first over the route tree — a relay
+/// moves only after its whole reporting subtree stored, the gateway
+/// after every member settled. APPLIED stays zero throughout: parents
+/// move on COMMIT_STORED, never on adoption.
+#[test]
+fn cutover_commits_leaf_first_over_the_route_tree() {
+    let (service, transport) = service();
+    let r1 = 0x00A1_0000_0000_7101;
+    let r2 = 0x00A1_0000_0000_7102;
+    let leaf = 0x00A1_0000_0000_7103;
+    let branch = 0x00A1_0000_0000_7104;
+    let gw = testkit::GATEWAY;
+    let (op, sends) = start_tree(&service, &transport, "cut-tree", &[r1, r2, leaf, branch]);
+    for (node, parent) in [(r1, gw), (r2, r1), (leaf, r2), (branch, gw)] {
+        assert!(
+            adopt_route_report(&service, op, node, gw, parent, T0 + 20_000),
+            "report adopts for {node:016x}"
+        );
+    }
+    let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
+    tick(&service, committed_at);
+    let commits = || {
+        sends
+            .lock()
+            .unwrap()
+            .grants
+            .iter()
+            .filter(|(_, _, b)| b[1] == Phase::Commit as u8)
+            .map(|(n, _, _)| *n)
+            .collect::<Vec<_>>()
+    };
+    let mut at = committed_at;
+    let pump = |sends: &Arc<Mutex<GrantSends>>, service: &SiteService, at: &mut u64, want: usize| {
+        for _ in 0..12 {
+            let n = sends
+                .lock()
+                .unwrap()
+                .grants
+                .iter()
+                .filter(|(_, _, b)| b[1] == Phase::Commit as u8)
+                .count();
+            if n == want {
+                break;
+            }
+            *at += 100;
+            tick(service, *at);
+        }
+    };
+    // The two leaves go first, in target order; relays hold.
+    pump(&sends, &service, &mut at, 2);
+    assert_eq!(commits(), vec![leaf, branch]);
+    // Each stored receipt releases exactly its parent, down the chain.
+    assert!(inject_commit_stored(&service, op, leaf, at + 50));
+    pump(&sends, &service, &mut at, 3);
+    assert_eq!(commits()[2], r2);
+    assert!(inject_commit_stored(&service, op, r2, at + 50));
+    pump(&sends, &service, &mut at, 4);
+    assert_eq!(commits()[3], r1);
+    assert!(inject_commit_stored(&service, op, branch, at + 50));
+    assert!(inject_commit_stored(&service, op, r1, at + 50));
+    pump(&sends, &service, &mut at, 5);
+    assert_eq!(commits()[4], gw);
+    // No APPLIED anywhere: the whole chain moved on STORED alone.
+    let view = operation(&service, op, at);
+    assert_eq!(view.get("applied").unwrap().as_u64(), Some(0));
+}
+
+/// 04 §7: a route cycle resolves to nothing — the pair holds each
+/// other past the deepest layer, then defers to the ZT reissue at the
+/// earliest cutoff while the healthy chain proceeds. The gateway only
+/// moves once the cycle settled (deferred).
+#[test]
+fn cutover_cycle_defers_early_without_blocking_the_chain() {
+    let (service, transport) = service();
+    let r = 0x00A1_0000_0000_7201;
+    let leaf = 0x00A1_0000_0000_7202;
+    let m = 0x00A1_0000_0000_7203;
+    let n = 0x00A1_0000_0000_7204;
+    let gw = testkit::GATEWAY;
+    let (op, sends) = start_tree(&service, &transport, "cut-cycle", &[r, leaf, m, n]);
+    for (node, parent) in [(r, gw), (leaf, r), (m, n), (n, m)] {
+        assert!(adopt_route_report(&service, op, node, gw, parent, T0 + 20_000));
+    }
+    let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
+    tick(&service, committed_at);
+    let commits = || {
+        sends
+            .lock()
+            .unwrap()
+            .grants
+            .iter()
+            .filter(|(_, _, b)| b[1] == Phase::Commit as u8)
+            .map(|(n, _, _)| *n)
+            .collect::<Vec<_>>()
+    };
+    // The healthy leaf moves at once; the cycle and the relay hold.
+    let mut at = committed_at;
+    for _ in 0..12 {
+        if commits().len() == 1 {
+            break;
+        }
+        at += 100;
+        tick(&service, at);
+    }
+    assert_eq!(commits(), vec![leaf]);
+    assert!(inject_commit_stored(&service, op, leaf, at + 50));
+    for _ in 0..12 {
+        if commits().len() == 2 {
+            break;
+        }
+        at += 100;
+        tick(&service, at);
+    }
+    assert_eq!(commits()[1], r);
+    // The cycle (unresolved, deepest layer) defers at the earliest
+    // cutoff — H=2 here, so T0+20 s — without ever dispatching.
+    assert!(!commits().contains(&m) && !commits().contains(&n));
+    tick(&service, committed_at + 21_000);
+    at = committed_at + 21_000;
+    assert!(!commits().contains(&m) && !commits().contains(&n));
+    for node in [m, n] {
+        let deferred = service
+            .with(|a| {
+                a.cutover_routes
+                    .get(&(op, node))
+                    .is_some_and(|plan| plan.deferred)
+            })
+            .0;
+        assert!(deferred, "cycle member {node:016x} deferred");
+    }
+    // With the cycle settled, the relay's stored receipt releases the
+    // gateway; the healthy three apply, and only the cycle pair stays
+    // unknown for the ZT reissue.
+    assert!(inject_commit_stored(&service, op, r, at + 50));
+    for _ in 0..12 {
+        if commits().contains(&gw) {
+            break;
+        }
+        at += 100;
+        tick(&service, at);
+    }
+    assert!(commits().contains(&gw));
+    for node in [leaf, r, gw] {
+        assert!(inject_applied(&service, op, node, at + 50));
+    }
+    tick(&service, at + 100);
+    let view = operation(&service, op, at + 100);
+    assert_eq!(view.get("applied").unwrap().as_u64(), Some(3));
+    assert_eq!(view.get("unknown").unwrap().as_u64(), Some(2));
+}
+
+/// 04 §7: the first 40 s split into H layer frames from the deepest
+/// layer — each unconfirmed layer defers at its own cutoff, which
+/// releases its parent, and a deferred target sends no more COMMITs.
+#[test]
+fn cutover_layer_deadlines_defer_deepest_first() {
+    let (service, transport) = service();
+    let r = 0x00A1_0000_0000_7301;
+    let leaf = 0x00A1_0000_0000_7302;
+    let gw = testkit::GATEWAY;
+    let (op, sends) = start_tree(&service, &transport, "cut-layer", &[r, leaf]);
+    assert!(adopt_route_report(&service, op, r, gw, gw, T0 + 20_000));
+    assert!(adopt_route_report(&service, op, leaf, gw, r, T0 + 20_000));
+    let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
+    tick(&service, committed_at);
+    let commits_to = |node: u64| {
+        sends
+            .lock()
+            .unwrap()
+            .grants
+            .iter()
+            .filter(|(n, _, b)| *n == node && b[1] == Phase::Commit as u8)
+            .count()
+    };
+    // H=2: the leaf (depth 2) owns the first frame, T0+20 s.
+    let mut at = committed_at;
+    for _ in 0..12 {
+        if commits_to(leaf) == 1 {
+            break;
+        }
+        at += 100;
+        tick(&service, at);
+    }
+    assert_eq!(commits_to(r), 0, "relay holds for the leaf");
+    tick(&service, committed_at + 19_000);
+    assert_eq!(commits_to(r), 0, "still held before the leaf cutoff");
+    // Past T0+20 s the leaf defers, its COMMITs stop, and the relay —
+    // settled child — moves.
+    tick(&service, committed_at + 21_000);
+    at = committed_at + 21_000;
+    let leaf_deferred = service
+        .with(|a| {
+            a.cutover_routes
+                .get(&(op, leaf))
+                .is_some_and(|plan| plan.deferred)
+        })
+        .0;
+    assert!(leaf_deferred);
+    for _ in 0..12 {
+        if commits_to(r) == 1 {
+            break;
+        }
+        at += 100;
+        tick(&service, at);
+    }
+    assert_eq!(commits_to(r), 1);
+    let leaf_sends = commits_to(leaf);
+    tick(&service, committed_at + 30_000);
+    assert_eq!(
+        commits_to(leaf),
+        leaf_sends,
+        "deferred leaf sends no more COMMITs"
+    );
+    // The relay (depth 1) defers at T0+40 s with the plan, and only
+    // the gateway still moves.
+    tick(&service, committed_at + 41_000);
+    at = committed_at + 41_000;
+    for _ in 0..12 {
+        if commits_to(gw) == 1 {
+            break;
+        }
+        at += 100;
+        tick(&service, at);
+    }
+    assert_eq!(commits_to(gw), 1);
+    let relay_sends = commits_to(r);
+    tick(&service, committed_at + 50_000);
+    assert_eq!(commits_to(r), relay_sends, "plan closed for members");
+}
+
+/// 04 §7: the frontier re-checks at dispatch — a COMMIT mail queued
+/// while its target looked like a leaf must not jump the queue once
+/// a report shows an unsettled child underneath it.
+#[test]
+fn cutover_dispatch_rechecks_the_frontier() {
+    let (service, transport) = service();
+    let r = 0x00A1_0000_0000_7401;
+    let leaf = 0x00A1_0000_0000_7402;
+    let (op, sends) = start_tree(&service, &transport, "cut-recheck", &[r, leaf]);
+    // No reports: both members queue as unknown leaves.
+    let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
+    tick(&service, committed_at);
+    tick(&service, committed_at + 100);
+    // Before either mail drains, the tree resolves: the leaf hangs
+    // under the relay, so the relay's queued COMMIT is stale.
+    let gw = testkit::GATEWAY;
+    assert!(adopt_route_report(
+        &service,
+        op,
+        leaf,
+        gw,
+        r,
+        committed_at + 100
+    ));
+    assert!(adopt_route_report(
+        &service,
+        op,
+        r,
+        gw,
+        gw,
+        committed_at + 100
+    ));
+    let commits = || {
+        sends
+            .lock()
+            .unwrap()
+            .grants
+            .iter()
+            .filter(|(_, _, b)| b[1] == Phase::Commit as u8)
+            .map(|(n, _, _)| *n)
+            .collect::<Vec<_>>()
+    };
+    // The leaf's mail still dispatches; the relay's drops at the gate.
+    let mut at = committed_at + 100;
+    for _ in 0..12 {
+        if commits().len() == 1 {
+            break;
+        }
+        at += 100;
+        tick(&service, at);
+    }
+    assert_eq!(commits(), vec![leaf]);
+    for _ in 0..8 {
+        at += 100;
+        tick(&service, at);
+    }
+    assert_eq!(commits(), vec![leaf], "stale relay mail never sends");
+    // Once the leaf stores, the relay re-queues honestly and sends.
+    assert!(inject_commit_stored(&service, op, leaf, at + 50));
+    for _ in 0..12 {
+        if commits().len() == 2 {
+            break;
+        }
+        at += 100;
+        tick(&service, at);
+    }
+    assert_eq!(commits(), vec![leaf, r]);
+}
+
+/// 04 §7: RouteState queries go out only in the last minute of
+/// PREPARE and never to gateways — earlier reports would expire
+/// before the commit, and a root needs no uplink.
+#[test]
+fn cutover_queries_only_late_prepare_and_never_gateways() {
+    use super::cutover::CUTOVER_ROUTE_QUERY_WINDOW_MS;
+    let (service, transport) = service();
+    let m = 0x00A1_0000_0000_7501;
+    let (op, sends) = start_tree(&service, &transport, "cut-query", &[m]);
+    let queries = || {
+        sends
+            .lock()
+            .unwrap()
+            .grants
+            .iter()
+            .filter(|(_, _, b)| b[1] == Phase::RouteState as u8)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let started = T0 + 10_000;
+    // Early and mid window: nothing asks, even fully PREPARED.
+    tick(&service, started + 100_000);
+    tick(&service, started + CUTOVER_PREPARE_WINDOW_MS - CUTOVER_ROUTE_QUERY_WINDOW_MS - 1_000);
+    assert!(queries().is_empty(), "no early queries");
+    // The last minute: the member gets exactly one query; the gateway
+    // never does.
+    tick(
+        &service,
+        started + CUTOVER_PREPARE_WINDOW_MS - CUTOVER_ROUTE_QUERY_WINDOW_MS + 1_000,
+    );
+    let asked = queries();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].0, m);
+    let query = RouteState::decode(&asked[0].2).unwrap();
+    assert_eq!(query.mode, 0);
+    assert_ne!(query.query_id, 0);
+    assert_eq!(query.head.cutover_id, op);
+    assert_eq!(query.head.revision, 1);
+    assert_eq!(query.head.old_network, testkit::network());
+    let _ = (op, query);
+}
+
+/// 04 §7: a straggler that missed the COMMIT rejoins through the ZT
+/// reissue and counts Recovered — never Applied — once its JoinConfirm
+/// (current MemberCert), its RRS Applied, and its current GK all
+/// evidenced. Any missing third keeps it unknown; the reissue alone
+/// moves nothing.
+#[test]
+fn cutover_straggler_recovers_through_the_reissue() {
+    use super::authority_channel::{ChannelEvent, JoinConfirmFields};
+    let (service, transport) = service();
+    let mut gateway = SimDevice::new(testkit::GATEWAY, 0x60);
+    gateway.capability |= routeloom_join::JOIN_CAPABILITY_GATEWAY;
+    let mut straggler = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    join_member(&service, &transport, &mut gateway, ROLE_GATEWAY, "g", T0);
+    join_member(
+        &service,
+        &transport,
+        &mut straggler,
+        ROLE_ENDPOINT,
+        "m",
+        T0 + 1_000,
+    );
+    let sends = with_grant_transport(&service);
+    let (op, _) = start_cutover(&service, "cut-rec", T0 + 10_000);
+    for t in 0..3 {
+        tick(&service, T0 + 10_000 + t * 100);
+    }
+    // Only the gateway PREPAREs; the straggler hears nothing.
+    let gw_prepare = sends
+        .lock()
+        .unwrap()
+        .grants
+        .iter()
+        .find(|(n, _, _)| *n == gateway.node)
+        .unwrap()
+        .2
+        .clone();
+    let prepared = Receipt {
+        head: Head {
+            phase: Phase::Prepared,
+            cutover_id: op,
+            revision: 1,
+            old_network: testkit::network(),
+        },
+        new_network: (u64::from(testkit::SITE_EPOCH + 1) << 32) | u64::from(testkit::NETWORK_LOW),
+        gk_epoch: cutover_gk_epoch(&service, op),
+        rs_epoch: 0,
+        digest: sha256(&gw_prepare),
+        status: 0,
+    }
+    .encode()
+    .unwrap()
+    .to_vec();
+    let (moved, _) = service.with(|a| {
+        a.handle_grant_receipt(gateway.node, 1, testkit::network(), &prepared, T0 + 11_000)
+    });
+    assert!(moved);
+    let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
+    tick(&service, committed_at);
+    // Past the member plan the gateway COMMIT flows; it adopts while
+    // the straggler — never PREPARED, never COMMITted — waits out the
+    // grace into RecoveryPending.
+    tick(&service, committed_at + 41_000);
+    tick(&service, committed_at + 41_100);
+    assert!(inject_applied(&service, op, gateway.node, committed_at + 41_100));
+    tick(&service, committed_at + 61_000);
+    let view = operation(&service, op, committed_at + 61_000);
+    assert_eq!(view.get("phase").unwrap().as_str(), Some("recovery_pending"));
+    assert_eq!(view.get("unknown").unwrap().as_u64(), Some(1));
+    // The straggler comes back on its old RLS1: reissued, no KGuard —
+    // but the reissue alone is not recovery evidence.
+    straggler.recovery_existing = true;
+    let (outcome, _) = straggler.attempt(&service, &transport, committed_at + 65_000);
+    assert!(matches!(outcome, Outcome::Result(JoinResult::Allow { .. })));
+    let target_state = |service: &SiteService| {
+        service
+            .with(|a| {
+                a.operations
+                    .get(&op)
+                    .unwrap()
+                    .cutover
+                    .as_ref()
+                    .unwrap()
+                    .targets
+                    .iter()
+                    .find(|t| t.node == straggler.node)
+                    .unwrap()
+                    .state
+            })
+            .0
+    };
+    assert_eq!(target_state(&service), GrantState::Unknown);
+    // JoinConfirm with the current MemberCert and the active GK: two
+    // thirds evidenced, still unknown without the RRS Applied.
+    let (cert_hash, generation, active) = service
+        .with(|a| {
+            let row = a.devices.get(&straggler.node).unwrap();
+            (
+                sha256(&row.member_cert),
+                row.generation,
+                a.gks.active_epoch(),
+            )
+        })
+        .0;
+    assert_ne!(active, 0);
+    service.with(|a| {
+        a.map_channel_event(
+            ChannelEvent::JoinConfirm {
+                device: straggler.node,
+                confirm: JoinConfirmFields {
+                    generation,
+                    request_id: 3,
+                    cert_hash,
+                    boot: 1,
+                    current: active,
+                    next: 0,
+                },
+            },
+            HostTime::sync(committed_at + 66_000),
+        );
+    });
+    assert_eq!(target_state(&service), GrantState::Unknown);
+    // A later revoke distributes the current RRS on the new network;
+    // the straggler's Applied for it completes the recovery.
+    let mut victim = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    join_member(
+        &service,
+        &transport,
+        &mut victim,
+        ROLE_ENDPOINT,
+        "v",
+        committed_at + 67_000,
+    );
+    let (answer, _) = service.with(|a| {
+        a.revoke(
+            KGUARD,
+            RevokeRequest {
+                device: victim.node,
+                expected_generation: 1,
+                reason: RevocationReason::Removed,
+                key: "rev-v".into(),
+            },
+            HostTime::sync(committed_at + 68_000),
+        )
+    });
+    answer.unwrap();
+    let new_network =
+        (u64::from(testkit::SITE_EPOCH + 1) << 32) | u64::from(testkit::NETWORK_LOW);
+    let (rs_epoch, digest) = service
+        .with(|a| {
+            let dist = a
+                .operations
+                .values()
+                .filter_map(|op| op.distribution.as_ref())
+                .find(|dist| {
+                    dist.network == new_network
+                        && dist.targets.iter().any(|t| t.node == straggler.node)
+                })
+                .unwrap();
+            let rs = dist.rs_epoch;
+            (rs, *a.rrs_history_digests.get(&rs).unwrap())
+        })
+        .0;
+    let mut body = vec![1u8, 1, 0, 0];
+    body.extend_from_slice(&rs_epoch.to_be_bytes());
+    body.extend_from_slice(&digest);
+    service.with(|a| {
+        a.apply_type5_receipt(
+            super::p6_channel::P6Receipt {
+                device: straggler.node,
+                generation,
+                network: new_network,
+                env_type: 5,
+                body,
+            },
+            HostTime::sync(committed_at + 69_000),
+        );
+    });
+    assert_eq!(target_state(&service), GrantState::Recovered);
+    // Recovered converges like Applied but never counts as it: the
+    // straggler never sent an APPLIED for a COMMIT it never held.
+    let view = operation(&service, op, committed_at + 69_000);
+    assert_eq!(view.get("applied").unwrap().as_u64(), Some(1));
+    assert_eq!(view.get("recovered").unwrap().as_u64(), Some(1));
+    assert_eq!(view.get("unknown").unwrap().as_u64(), Some(0));
+    assert_eq!(view.get("total").unwrap().as_u64(), Some(2));
+    assert_eq!(view.get("phase").unwrap().as_str(), Some("converged"));
 }

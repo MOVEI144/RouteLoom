@@ -90,11 +90,15 @@ class RadioPort final : public ZtRld1Port {
  public:
   RadioPort(std::deque<RadioFrame>& air, const MacAddress& self) : air_(air), self_(self) {}
   Status send_rld1(const MacAddress& destination, const ByteView frame) noexcept override {
-    if (refuse) return Status::error(StatusCode::NoRoute, "radio unavailable");
+    if (refuse || send_budget == 0) return Status::error(StatusCode::NoRoute, "radio unavailable");
+    if (send_budget > 0) --send_budget;
     air_.push_back(RadioFrame{self_, destination, Bytes(frame.data, frame.data + frame.size)});
     return Status::success();
   }
   bool refuse{false};
+  // Sends left before the port refuses (-1: unlimited). Models the
+  // one-outstanding-frame radio rule one pump round at a time.
+  int send_budget{-1};
 
  private:
   std::deque<RadioFrame>& air_;
@@ -106,11 +110,15 @@ class WirePort final : public ZtRelayPort {
   WirePort(std::deque<WireFrame>& mesh, const NodeId self) : mesh_(mesh), self_(self) {}
   Status send_relay(const NodeId destination, const FrameType type,
                     const ByteView payload) noexcept override {
-    if (refuse) return Status::error(StatusCode::NoRoute, "no route");
+    if (refuse || send_budget == 0) return Status::error(StatusCode::NoRoute, "no route");
+    if (send_budget > 0) --send_budget;
     mesh_.push_back(WireFrame{self_, destination, type, Bytes(payload.data, payload.data + payload.size)});
     return Status::success();
   }
   bool refuse{false};
+  // Sends left before the port refuses (-1: unlimited). Models the
+  // one-outstanding-frame mesh rule one pump round at a time.
+  int send_budget{-1};
 
  private:
   std::deque<WireFrame>& mesh_;
@@ -1913,8 +1921,109 @@ void test_q116_size_budgets() {
               sizeof(JoinProxy), sizeof(JoinObjectSlot));
 }
 
+void test_progress_receipt_pumps_the_window() {
+  current = "progress_receipt_pumps_the_window";
+  // Ack-clocked chunk advance: the radio/mesh ports hold one frame
+  // per peer, so a burst emits its first chunk and refuses the rest;
+  // each receipt must then pump the next chunk at once. Without
+  // ack-clocking the object costs a retransmit round per chunk and
+  // the joiner's step deadline fires first (C2's 4-chunk M4 Allow
+  // never lands, so no cutover straggler recovers). Every block runs
+  // with the timer frozen (no advance): receipts alone move the
+  // window, and retransmissions must stay zero.
+  {
+    // RLD1 down, Final: the C2 shape. The proxy's port takes one
+    // frame per pump round; the c0..c2 receipts pump c1..c3.
+    World world;
+    CHECK(world.connect());
+    const Bytes m1 = filler(59, 1);
+    const Bytes m2 = filler(372, 2);
+    const Bytes m3 = filler(404, 3);
+    const Bytes m4 = filler(353, 4);
+    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(m1), world.now).ok());
+    world.pump();
+    answer(world, 2, RelayState::Continue, m2);
+    world.pump();
+    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(m3), world.now).ok());
+    world.pump();
+    answer(world, 4, RelayState::Final, m4);
+    for (int i = 0; i < 32 && world.observers[0]->messages.size() < 2; ++i) {
+      world.proxy_radio.send_budget = 1;
+      world.pump(1);
+    }
+    CHECK(world.observers[0]->messages.size() == 2 &&
+          message_is(world.observers[0]->messages[1], 4, m4));
+    world.pump();  // drain the final receipt; the timer still never ran
+    CHECK(world.proxy.state() == JoinProxy::State::Idle);
+    CHECK(world.proxy.stats().relays_completed == 1);
+    CHECK(world.proxy.stats().retransmissions == 0);
+  }
+  {
+    // RLD1 up: the joiner's port takes one frame per pump round;
+    // the receipts pump m3's chunks with no timer advance.
+    World world;
+    CHECK(world.connect());
+    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now)
+              .ok());
+    world.pump();
+    answer(world, 2, RelayState::Continue, filler(372, 2));
+    world.pump();
+    const Bytes m3 = filler(404, 3);
+    world.radios[0]->send_budget = 1;
+    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(m3), world.now).ok());
+    for (int i = 0; i < 32 && world.authority.ups.size() < 2; ++i) {
+      world.radios[0]->send_budget = 1;
+      world.pump(1);
+    }
+    CHECK(world.authority.ups.size() == 2 &&
+          parse_up(world.authority.ups[1].object).header.step == 3);
+    CHECK(world.links[0]->stats().retransmissions == 0);
+  }
+  {
+    // Wire down: the gateway's port takes one frame per pump round;
+    // the proxy's receipts pump the rest with no timer advance.
+    World world;
+    CHECK(world.connect());
+    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now)
+              .ok());
+    world.pump();
+    const Bytes m2 = filler(372, 2);
+    world.gateway_wire.send_budget = 1;
+    answer(world, 2, RelayState::Continue, m2);
+    for (int i = 0; i < 32 && world.observers[0]->messages.size() < 1; ++i) {
+      world.gateway_wire.send_budget = 1;
+      world.pump(1);
+    }
+    CHECK(world.observers[0]->messages.size() == 1 &&
+          message_is(world.observers[0]->messages[0], 2, m2));
+    CHECK(world.gateway.stats().retransmissions == 0);
+  }
+  {
+    // Wire up: the proxy's port takes one frame per pump round; the
+    // gateway's receipts pump the rest with no timer advance.
+    World world;
+    CHECK(world.connect());
+    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now)
+              .ok());
+    world.pump();
+    answer(world, 2, RelayState::Continue, filler(372, 2));
+    world.pump();
+    const Bytes m3 = filler(404, 3);
+    world.proxy_wire.send_budget = 1;
+    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(m3), world.now).ok());
+    for (int i = 0; i < 40 && world.authority.ups.size() < 2; ++i) {
+      world.proxy_wire.send_budget = 1;
+      world.pump(1);
+    }
+    CHECK(world.authority.ups.size() == 2 &&
+          parse_up(world.authority.ups[1].object).header.step == 3);
+    CHECK(world.proxy.stats().retransmissions == 0);
+  }
+}
+
 int main() {
   test_happy_path();
+  test_progress_receipt_pumps_the_window();
   test_loss_and_reorder();
   test_resume_chunked_opening();
   test_unreachable_and_busy();

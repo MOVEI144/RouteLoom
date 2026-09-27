@@ -134,12 +134,15 @@ Status zt_offer_frame_decode(ByteView frame, autonomy::Rld1Envelope& env,
                              ZtOfferBody& out) noexcept;
 
 // ===================================================================================
-// BootstrapAuth phases 4-6 (02 §5.3) — the assembled join object
+// BootstrapAuth phases 4-7 (02 §5.3) — the assembled join object
 // ===================================================================================
 enum class JoinAuthPhase : std::uint8_t {
   EdhocMessage = 4,  // step 1..4 = EDHOC message_1..4, 5 = EDHOC error
   Resume = 5,        // step 1..3 = RLRES1 R1..R3 (06 §2.1)
   RelayStatus = 6,   // step 1, proxy -> device, unauthenticated hint
+  RrsDelivery = 7,   // step 1, authority -> device: the current RRS1 object
+                     // (<= kRevocationObjectMax) for a reissue that moves
+                     // networks (04 §7 step 4). Down only, no cookie.
 };
 constexpr std::uint8_t kJoinEdhocErrorStep = 5;
 
@@ -152,11 +155,12 @@ enum class RelayStatusCode : std::uint8_t {
 
 // Object layout (<= 1024 B):
 //   0 u8 version = 1 | 1 u8 phase | 2 u8 step | 3 u8 reserved = 0   (BA prefix)
-//   phase 4/5: 4 u8 cookie_echo_present | 5 u8 reserved = 0 | [cookie 16B] |
+//   phase 4/5/7: 4 u8 cookie_echo_present | 5 u8 reserved = 0 | [cookie 16B] |
 //              message 1..960 B
 //     cookie_echo_present is 1 exactly for phase 4 step 1 (m1); phase 5
 //     step 1 (R1) may carry it (0/1, the carrier policy decides), every
-//     other step carries 0.
+//     other step carries 0; phase 7 never carries one (the relay binds it
+//     to the live join instead).
 //   phase 6:   4 u8 status (1..4) | 5 u32 retry_after_ms (<= 600000) — 9 B
 constexpr std::size_t kJoinAuthPrefixSize = autonomy::kBootstrapAuthHeaderSize;  // 4
 constexpr std::size_t kJoinObjectHeadSize = kJoinAuthPrefixSize + 2;               // 6
@@ -419,8 +423,17 @@ class JoinObjectSlot {
   ReplyOutcome on_reply(const JoinReply& reply, MonotonicMs now_ms) noexcept;
   // Retransmission bookkeeping for Sending: marks the send time; the owner
   // decides when to retransmit (last_send_ms + interval) and gives up after
-  // its own attempt budget.
-  void note_sent(MonotonicMs now_ms) noexcept;
+  // its own attempt budget. `blocked` records whether the round left due
+  // chunks unemitted (the port refused them), so a Progress receipt can
+  // pump the rest at once (ack-clocked advance).
+  void note_sent(MonotonicMs now_ms, bool blocked) noexcept;
+  // An ack-clocked pump: stamps the send time and the blocked state like
+  // note_sent, but does not bill the retry budget — a round the receiver
+  // asked for by making progress is an advance, not a retransmission.
+  void note_advanced(MonotonicMs now_ms, bool blocked) noexcept;
+  // True when the last pump left due chunks unemitted (meaningful while
+  // Sending): a Progress receipt should pump again at once.
+  bool send_blocked() const noexcept { return send_blocked_; }
   MonotonicMs last_send_ms() const noexcept { return last_send_ms_; }
   std::uint8_t sends() const noexcept { return sends_; }
 
@@ -449,6 +462,7 @@ class JoinObjectSlot {
   MonotonicMs started_ms_{0};
   MonotonicMs last_send_ms_{0};
   std::uint8_t sends_{0};
+  bool send_blocked_{false};
   // Bumped on every mode change: separates the occupant a callback saw
   // from one a reentrant call installed (see release_assembled_if).
   std::uint32_t generation_{0};

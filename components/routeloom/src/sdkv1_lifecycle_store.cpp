@@ -268,6 +268,24 @@ Status LifecycleStore::finish_switch(const Digest256& commit_digest) noexcept {
   std::memcpy(done.payload.bytes.data(), commit_digest.data(), commit_digest.size());
   return commit(done, true);  // no old DAMS/GK in either journal slot
 }
+Status LifecycleStore::cut_prepared() noexcept {
+  if (!has_record() || record_.mode != LifecycleMode::Prepared || pair_.uncertain() ||
+      pair_.quarantined()) {
+    return Status::error(StatusCode::InvalidState, "rlx cut state");
+  }
+  LifecycleRecord done = record_;
+  done.mode = LifecycleMode::Idle;
+  done.old_network = record_.new_network;
+  done.new_network = 0;
+  // No watermark and no cutover binding: unlike finish_switch there is
+  // no COMMIT digest to retain, and none may be fabricated for an
+  // APPLIED retry. The record reads as a clean adopted marker.
+  secure_clear(done.payload.bytes.data(), done.payload.bytes.size());
+  done.payload.size = 0;
+  done.cutover_id = 0;
+  done.revision = 0;
+  return commit(done, true);  // no staged DAMS/GK in either journal slot
+}
 Status LifecycleStore::clear() noexcept {
   const Status status = pair_.erase_all();
   secure_clear(scratch_.bytes.data(), scratch_.bytes.size());

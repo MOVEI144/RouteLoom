@@ -3112,6 +3112,92 @@ void test_adopt_network_disposition() {
         AdoptNetworkDisposition::WaitForAdoption);
 }
 
+void test_zt_adopt_cuts_prepared_stage() {
+  // Prepared for `next`, then the ZT reissue adopts `next` itself (04 §7,
+  // the C2 straggler): the stage is cut — NVS Idle, no watermark (no
+  // COMMIT was ever held, so no APPLIED may be built) — while the
+  // adopted network settings stay and the RRS fetch proceeds.
+  NodeFixture f{};
+  CHECK(f.provision(2, 14));
+  CHECK_OK(f.site.commit(f.site.site()));
+  const NetworkId next = kNetwork + (1ULL << 32U);
+  const auto site_cert = issue(sitecert_claims(next), site_ca());
+  const auto member_cert = issue(membercert_claims(2, next), sak());
+  const std::uint32_t next_gk = f.site.site().gk_epoch_current + 1;
+  auto send_prepare = [&](NodeFixture& fx) {
+    SitePackage package{};
+    package.site_id = kSiteId;
+    package.network = next;
+    package.gk_epoch = next_gk;
+    package.gk.fill(0x51);
+    package.channel = fx.site.site().channel;
+    package.channel_epoch = fx.site.site().channel_epoch;
+    package.role = fx.site.site().role;
+    package.gateway_count = fx.site.site().gateway_count;
+    package.gateways = fx.site.site().gateways;
+    ByteBuffer<kSitePackageSize> encoded{};
+    if (!site_package_encode(package, encoded)) return false;
+    std::array<std::uint8_t, kGrantRenewHeadSize> head{};
+    if (!grant_renew_head_encode({GrantRenewPhase::Prepare, 7, 1, kNetwork}, head)) return false;
+    std::array<std::uint8_t, kGrantPrepareMax> wire{};
+    std::memcpy(wire.data(), head.data(), head.size());
+    for (int i = 0; i < 8; ++i) wire[24 + i] = static_cast<std::uint8_t>(next >> (56 - 8 * i));
+    wire[32] = static_cast<std::uint8_t>(site_cert.size >> 8U);
+    wire[33] = static_cast<std::uint8_t>(site_cert.size);
+    wire[34] = static_cast<std::uint8_t>(member_cert.size >> 8U);
+    wire[35] = static_cast<std::uint8_t>(member_cert.size);
+    std::size_t pos = 36;
+    std::memcpy(wire.data() + pos, site_cert.bytes.data(), site_cert.size);
+    pos += site_cert.size;
+    std::memcpy(wire.data() + pos, member_cert.bytes.data(), member_cert.size);
+    pos += member_cert.size;
+    std::memcpy(wire.data() + pos, encoded.bytes.data(), encoded.size);
+    pos += encoded.size;
+    std::memset(wire.data() + pos, 0x62, 32);
+    pos += 32;
+    return fx.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7,
+                                                 ByteView{wire.data(), pos}), 200)
+        .ok();
+  };
+  CHECK(send_prepare(f));
+  CHECK(f.journal.record().mode == LifecycleMode::Prepared);
+  CHECK(f.snap().phase == LifecyclePhase::Prepared);
+  // The reissue lands the target: same generation (the cutover keeps
+  // it), the staged certs and key, nothing applied on the new network
+  // yet — so the adoption parks in BootGate behind the RRS fetch.
+  SiteRecord adopted = f.site.site();
+  adopted.network = next;
+  adopted.site_cert = site_cert;
+  adopted.member_cert = member_cert;
+  adopted.gk_epoch_current = next_gk;
+  adopted.gk_current.fill(0x51);
+  adopted.gk_epoch_next = 0;
+  adopted.gk_next.fill(0);
+  adopted.dams.fill(0x63);
+  CHECK_OK(f.site.commit(adopted));
+  CHECK_OK(f.dispatch(LifecycleInput::MemberReady(f.site.commit_seq(), 15), 201));
+  CHECK(f.journal.record().mode == LifecycleMode::Idle);
+  CHECK(f.journal.record().payload.size == 0);
+  CHECK(f.journal.record().old_network == next);
+  CHECK(f.site.site().network == next);
+  CHECK(f.site.site().gk_epoch_current == next_gk);
+  CHECK(f.snap().phase == LifecyclePhase::BootGate);
+  // Already Idle: a second cut refuses, and a reboot stays consistent
+  // instead of wedging on the stale stage.
+  CHECK(!f.journal.cut_prepared());
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 202));
+  CHECK(f.snap().phase != LifecyclePhase::StorageBlocked);
+  // Adopting the OLD site instead keeps the stage live (stay Prepared).
+  NodeFixture g{};
+  CHECK(g.provision(2, 14));
+  CHECK_OK(g.site.commit(g.site.site()));
+  CHECK(send_prepare(g));
+  CHECK_OK(g.site.commit(g.site.site()));  // same RLS1, new commit seq
+  CHECK_OK(g.dispatch(LifecycleInput::MemberReady(g.site.commit_seq(), 14), 201));
+  CHECK(g.journal.record().mode == LifecycleMode::Prepared);
+  CHECK(g.snap().phase == LifecyclePhase::Prepared);
+}
+
 }  // namespace
 
 int main() {
@@ -3129,6 +3215,7 @@ int main() {
   test_adopt_network_disposition();
   test_removal_journal_powercuts();
   test_signed_prepare_stages_without_switching();
+  test_zt_adopt_cuts_prepared_stage();
   test_commit_stored_receipt_drain_and_routestate();
   test_switching_intent_reboots_closed();
   test_rrs_wire_codecs();

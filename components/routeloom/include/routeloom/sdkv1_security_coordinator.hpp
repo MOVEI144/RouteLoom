@@ -509,6 +509,19 @@ class SecurityCoordinator final : public BootstrapSink,
     if (mode_ == CoordinatorMode::Dev) return AuthoritySnapshot{};
     return small().authority.snapshot();
   }
+  // Secret-free ZT proxy view for diagnostics and the D04 mesh harness
+  // (zero without a member engine — a refreshing joiner proxies for no
+  // one while it re-verifies).
+  JoinProxyStats proxy_stats() const noexcept {
+    if (!has_member_engine()) return JoinProxyStats{};
+    return member().proxy.stats();
+  }
+  // Secret-free ZT joiner view for diagnostics and the D04 mesh
+  // harness (zero outside ZeroTouch mode).
+  JoinSnapshot joiner_snapshot() const noexcept {
+    if (mode_ != CoordinatorMode::ZeroTouch) return JoinSnapshot{};
+    return joiner().snapshot();
+  }
   Status send_authority_typed(std::uint8_t type, ByteView body, MonotonicMs now) noexcept;
   // Adopted GK epochs for the 0x66 QueryLocal answer (0/0 pre-adoption;
   // false until the member config lands).
@@ -708,6 +721,7 @@ class SecurityCoordinator final : public BootstrapSink,
   Status on_request_pull(const CoordinatorEvent& event) noexcept;
   Status on_usb_session_up(MonotonicMs now) noexcept;
   void drive_authority(MonotonicMs now) noexcept;
+  void probe_quiet_authority(MonotonicMs now) noexcept;
   bool build_authority_start(AuthorityStart& out) const noexcept;
   void suspend_authority() noexcept;
   // --- stale-GK refresh (P5 §7.4) ---
@@ -960,6 +974,18 @@ class SecurityCoordinator final : public BootstrapSink,
   MonotonicMs refresh_start_{0};
   MonotonicMs refresh_cooldown_until_{0};
   MonotonicMs last_authority_start_{0};
+  // 04 §3.5: last live-links strike (spacing clock — the live road
+  // strikes once per window at most, so one rotation overlap cannot
+  // refresh a converging member by itself).
+  MonotonicMs last_live_strike_{0};
+  // 04 §3.5: quiet-channel present-check probe. A Ready channel with
+  // no verified RX for the idle-retire span asks (Pull) instead of
+  // retiring silently; consecutive unanswered probes strike. Poll-
+  // gated (a sleeping member never probes), so the power cost lands
+  // only on awake-but-quiet members, one Pull per interval.
+  MonotonicMs last_probe_ms_{0};
+  MonotonicMs last_rx_ms_{0};    // last verified-RX growth (0 = never)
+  std::uint64_t last_rx_value_{0};
   CoordinatorMemberConfig adopted_{};
   bool member_valid_{false};
   std::uint32_t tune_token_{0};

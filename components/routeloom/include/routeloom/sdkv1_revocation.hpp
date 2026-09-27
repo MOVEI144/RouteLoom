@@ -788,6 +788,10 @@ class MembershipLifecycle final {
   Status renew_commit(ByteView body, MonotonicMs now_ms) noexcept;
   Status renew_routestate(ByteView body, MonotonicMs now_ms) noexcept;
   bool staged_site(const LifecycleRecord& record, SiteRecord& out) noexcept;
+  // True when the adopted site IS the Prepared stage's target (04 §7):
+  // same site, the stage's new network (epoch included) and binding.
+  // The caller verified `staged` through staged_site first.
+  bool adopted_prepared_target(const SiteRecord& staged) const noexcept;
   bool switching_proof(const LifecycleRecord& record, SiteRecord& out,
                        RevocationSet& rrs) noexcept;
   Status switch_poll(MonotonicMs now_ms) noexcept;

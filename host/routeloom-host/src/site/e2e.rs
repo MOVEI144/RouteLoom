@@ -810,9 +810,12 @@ fn cutover_flows_end_to_end_over_the_api_socket() {
         .filter(|(_, _, bytes)| bytes[1] == Phase::Commit as u8)
         .cloned()
         .collect();
-    // The member and the straggler go first; the gateway adopts last
-    // so its retire+reboot cannot partition them (#168 cutover).
-    assert_eq!(commits.len(), 2);
+    // The prepared member goes first; the gateway adopts last so its
+    // retire+reboot cannot partition the members (#168 cutover). The
+    // straggler never PREPAREd, so it receives no COMMIT at all (04
+    // §7: no staged intent, no COMMIT — it stays unknown for the ZT
+    // reissue instead of burning airtime).
+    assert_eq!(commits.len(), 1);
     let (commit_object, commit_rs) = daemon
         .service
         .with(|a| {
