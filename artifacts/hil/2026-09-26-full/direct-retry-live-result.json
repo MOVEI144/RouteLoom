@@ -1,0 +1,972 @@
+{
+  "started_utc": "2026-09-26T16:02:48.232+00:00",
+  "request": {
+    "join_request_id": "jr-0000000000000001",
+    "device_id": "0000000000000001",
+    "kid": "06a77e4ae52c1c65a54906872340769fe9662acbc97123bb7af898dd3e4972d0",
+    "model": 17,
+    "hw_rev": 2,
+    "cert_serial": 11,
+    "fw_version": 0,
+    "capability": [
+      "sleepy",
+      "relay",
+      "gateway"
+    ],
+    "requested_role": "gateway",
+    "previously_removed": false,
+    "kid_conflict": false,
+    "via": {
+      "gateway": "0000000000000001",
+      "proxy": "0000000000000001",
+      "authority_hops": 0,
+      "joiner_rssi_dbm": 0
+    },
+    "attempt": 1,
+    "created_ms": 1790438580873,
+    "updated_ms": 1790438580873,
+    "deadline_ms": 1790438585873,
+    "remaining_ms": 4910,
+    "state": "awaiting",
+    "decision": null
+  },
+  "decision": {
+    "state": "committed",
+    "join_request_id": "jr-0000000000000001",
+    "device_id": "0000000000000001",
+    "verdict": "allow",
+    "role": "gateway",
+    "generation": 1,
+    "member_cert_serial": 1,
+    "operation_id": "op-0000000000000001",
+    "applied": "next_attempt"
+  },
+  "first_adapter": {
+    "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+    "connected": true,
+    "session": {
+      "authenticated": true,
+      "id": 14020275812009412558,
+      "node": 1,
+      "boot": 338,
+      "network": 1380712449,
+      "capability": 1735,
+      "version": 1
+    },
+    "credit": {
+      "observed": true,
+      "grant_frames": 12,
+      "grant_bytes": 17086
+    },
+    "rx_frames": 13,
+    "tx_frames": 7,
+    "tx_bytes": 889,
+    "protocol_errors": 0,
+    "last_error": null
+  },
+  "observations": [
+    {
+      "utc": "2026-09-26T16:03:07.974+00:00",
+      "i": 0,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 13,
+          "grant_bytes": 17229
+        },
+        "rx_frames": 16,
+        "tx_frames": 9,
+        "tx_bytes": 1090,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:08.977+00:00",
+      "i": 1,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 13,
+          "grant_bytes": 17229
+        },
+        "rx_frames": 16,
+        "tx_frames": 9,
+        "tx_bytes": 1090,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:09.981+00:00",
+      "i": 2,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 13,
+          "grant_bytes": 17229
+        },
+        "rx_frames": 16,
+        "tx_frames": 9,
+        "tx_bytes": 1090,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:10.985+00:00",
+      "i": 3,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 14,
+          "grant_bytes": 17297
+        },
+        "rx_frames": 18,
+        "tx_frames": 10,
+        "tx_bytes": 1160,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:11.991+00:00",
+      "i": 4,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 14,
+          "grant_bytes": 17297
+        },
+        "rx_frames": 18,
+        "tx_frames": 10,
+        "tx_bytes": 1160,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:12.996+00:00",
+      "i": 5,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 14,
+          "grant_bytes": 17297
+        },
+        "rx_frames": 18,
+        "tx_frames": 10,
+        "tx_bytes": 1160,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:14.003+00:00",
+      "i": 6,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 14,
+          "grant_bytes": 17297
+        },
+        "rx_frames": 18,
+        "tx_frames": 10,
+        "tx_bytes": 1160,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:15.010+00:00",
+      "i": 7,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 14,
+          "grant_bytes": 17297
+        },
+        "rx_frames": 18,
+        "tx_frames": 10,
+        "tx_bytes": 1160,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:16.016+00:00",
+      "i": 8,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 14,
+          "grant_bytes": 17297
+        },
+        "rx_frames": 19,
+        "tx_frames": 11,
+        "tx_bytes": 1216,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:17.022+00:00",
+      "i": 9,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 14,
+          "grant_bytes": 17297
+        },
+        "rx_frames": 19,
+        "tx_frames": 11,
+        "tx_bytes": 1216,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:18.028+00:00",
+      "i": 10,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 14,
+          "grant_bytes": 17297
+        },
+        "rx_frames": 19,
+        "tx_frames": 11,
+        "tx_bytes": 1216,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:19.033+00:00",
+      "i": 11,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 14,
+          "grant_bytes": 17297
+        },
+        "rx_frames": 19,
+        "tx_frames": 11,
+        "tx_bytes": 1216,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:20.038+00:00",
+      "i": 12,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 14,
+          "grant_bytes": 17297
+        },
+        "rx_frames": 19,
+        "tx_frames": 11,
+        "tx_bytes": 1216,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:21.043+00:00",
+      "i": 13,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 15,
+          "grant_bytes": 17365
+        },
+        "rx_frames": 22,
+        "tx_frames": 13,
+        "tx_bytes": 1342,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:22.049+00:00",
+      "i": 14,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 15,
+          "grant_bytes": 17365
+        },
+        "rx_frames": 22,
+        "tx_frames": 13,
+        "tx_bytes": 1342,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:23.056+00:00",
+      "i": 15,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 15,
+          "grant_bytes": 17365
+        },
+        "rx_frames": 22,
+        "tx_frames": 13,
+        "tx_bytes": 1342,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:24.062+00:00",
+      "i": 16,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 15,
+          "grant_bytes": 17365
+        },
+        "rx_frames": 22,
+        "tx_frames": 13,
+        "tx_bytes": 1342,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:25.070+00:00",
+      "i": 17,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 15,
+          "grant_bytes": 17365
+        },
+        "rx_frames": 22,
+        "tx_frames": 13,
+        "tx_bytes": 1342,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:26.075+00:00",
+      "i": 18,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 15,
+          "grant_bytes": 17365
+        },
+        "rx_frames": 23,
+        "tx_frames": 14,
+        "tx_bytes": 1398,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:27.078+00:00",
+      "i": 19,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 15,
+          "grant_bytes": 17365
+        },
+        "rx_frames": 23,
+        "tx_frames": 14,
+        "tx_bytes": 1398,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:28.086+00:00",
+      "i": 20,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 15,
+          "grant_bytes": 17365
+        },
+        "rx_frames": 23,
+        "tx_frames": 14,
+        "tx_bytes": 1398,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:29.093+00:00",
+      "i": 21,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 15,
+          "grant_bytes": 17365
+        },
+        "rx_frames": 23,
+        "tx_frames": 14,
+        "tx_bytes": 1398,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:30.099+00:00",
+      "i": 22,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 15,
+          "grant_bytes": 17365
+        },
+        "rx_frames": 23,
+        "tx_frames": 14,
+        "tx_bytes": 1398,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:31.105+00:00",
+      "i": 23,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 16,
+          "grant_bytes": 17433
+        },
+        "rx_frames": 26,
+        "tx_frames": 16,
+        "tx_bytes": 1524,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:32.110+00:00",
+      "i": 24,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 16,
+          "grant_bytes": 17433
+        },
+        "rx_frames": 26,
+        "tx_frames": 16,
+        "tx_bytes": 1524,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:33.115+00:00",
+      "i": 25,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 16,
+          "grant_bytes": 17433
+        },
+        "rx_frames": 26,
+        "tx_frames": 16,
+        "tx_bytes": 1524,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:34.121+00:00",
+      "i": 26,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 16,
+          "grant_bytes": 17433
+        },
+        "rx_frames": 26,
+        "tx_frames": 16,
+        "tx_bytes": 1524,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:35.130+00:00",
+      "i": 27,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 16,
+          "grant_bytes": 17433
+        },
+        "rx_frames": 26,
+        "tx_frames": 16,
+        "tx_bytes": 1524,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:36.137+00:00",
+      "i": 28,
+      "state": "allowed_unconfirmed",
+      "delivered": false,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 16,
+          "grant_bytes": 17433
+        },
+        "rx_frames": 27,
+        "tx_frames": 17,
+        "tx_bytes": 1580,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:37.146+00:00",
+      "i": 29,
+      "state": "allowed_unconfirmed",
+      "delivered": true,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 18,
+          "grant_bytes": 18338
+        },
+        "rx_frames": 33,
+        "tx_frames": 19,
+        "tx_bytes": 2489,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    },
+    {
+      "utc": "2026-09-26T16:03:38.152+00:00",
+      "i": 30,
+      "state": "active",
+      "delivered": true,
+      "adapter": {
+        "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "connected": true,
+        "session": {
+          "authenticated": true,
+          "id": 14020275812009412558,
+          "node": 1,
+          "boot": 338,
+          "network": 1380712449,
+          "capability": 1735,
+          "version": 1
+        },
+        "credit": {
+          "observed": true,
+          "grant_frames": 20,
+          "grant_bytes": 18598
+        },
+        "rx_frames": 43,
+        "tx_frames": 22,
+        "tx_bytes": 2826,
+        "protocol_errors": 0,
+        "last_error": null
+      }
+    }
+  ],
+  "first_seen_utc": "2026-09-26T16:03:00.963+00:00",
+  "decided_utc": "2026-09-26T16:03:07.973+00:00",
+  "finished_utc": "2026-09-26T16:03:38.159+00:00",
+  "active": true
+}

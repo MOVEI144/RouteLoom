@@ -73,11 +73,11 @@ const DEFAULT_CONFIG_DEV_KEY_HEX: &str =
     "524f5554454c4f4f4d2d444556454c4f504d454e542d4b45592d4f4e4c592121";
 /// Idle interval between session keepalives.
 const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-/// Re-Hello cadence while the handshake is unfinished: a Hello sent while
-/// the device is still booting is lost forever, so without a retry the
-/// session would sit in AwaitHelloAck until the next cable reconnect
-/// (observed on real hardware after a device reset).
-const HELLO_RETRY_MS: u64 = 1_000;
+/// Re-Hello cadence while the handshake is unfinished. The C3 can take
+/// over 1.25 s to answer each step under cutover load; a shorter retry
+/// replaces the transcript nonce before the answer arrives. Stay within
+/// the device's 5 s handshake timeout.
+const HELLO_RETRY_MS: u64 = 4_000;
 /// An Active session that has seen no inbound frame for this long is dead
 /// at the far end even when the adapter fd stays healthy — the silent
 /// reboot/half-open case no wire error can signal. A live session always
@@ -404,6 +404,9 @@ impl DeviceSession {
                 };
                 self.proof = Some(proof);
                 self.phase = SessionPhase::AwaitAuthOk;
+                // AUTH has its own response window. Measuring it from the
+                // original HELLO can expire immediately after a slow Ack.
+                self.last_begin_ms = now_ms();
                 result.outbound.push(Outbound::Raw(auth));
             }
             SessionPhase::AwaitAuthOk => {
@@ -2450,6 +2453,7 @@ struct DaemonArgs {
     config_profile: u8,
     config_authority_key: Option<PathBuf>,
     site_authority: Option<PathBuf>,
+    usb_dev_secret_file: Option<PathBuf>,
 }
 
 /// Parse a node/authority id argument as hexadecimal — the codebase's node
@@ -2491,6 +2495,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
     let mut config_profile = config::ISSUE_PROFILE_DEV;
     let mut config_authority_key = None;
     let mut site_authority = None;
+    let mut usb_dev_secret_file = None;
     let mut args = args;
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -2569,9 +2574,14 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
                     args.next().ok_or("--site-authority requires a directory")?,
                 ))
             }
+            "--usb-dev-secret-file" => {
+                usb_dev_secret_file = Some(PathBuf::from(
+                    args.next().ok_or("--usb-dev-secret-file requires a path")?,
+                ))
+            }
             "--help" | "-h" => {
                 println!(
-                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N] [--config-dev-key-hex HEX] [--config-profile dev|cose] [--config-authority-key PATH] [--site-authority DIR]"
+                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N] [--config-dev-key-hex HEX] [--config-profile dev|cose] [--config-authority-key PATH] [--site-authority DIR] [--usb-dev-secret-file PATH]"
                 );
                 process::exit(0);
             }
@@ -2607,7 +2617,45 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
         config_profile,
         config_authority_key,
         site_authority,
+        usb_dev_secret_file,
     })
+}
+
+/// Read the exact development USB secret; do not trim or print key material.
+/// Legacy firmware still uses the fixed secret when no file is supplied.
+fn load_usb_dev_secret(path: &Path) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let before = std::fs::symlink_metadata(path)?;
+    if !before.file_type().is_file() || before.permissions().mode() & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "USB secret must be a private regular file",
+        ));
+    }
+    let file = std::fs::File::open(path)?;
+    let after = file.metadata()?;
+    use std::os::unix::fs::MetadataExt;
+    if !after.is_file()
+        || before.dev() != after.dev()
+        || before.ino() != after.ino()
+        || after.permissions().mode() & 0o077 != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "USB secret file changed or is not private",
+        ));
+    }
+    // The firmware's development USB credential is a printable ASCII string
+    // of at most 63 bytes. Read one extra byte to reject oversized files.
+    let mut secret = Vec::new();
+    file.take(64).read_to_end(&mut secret)?;
+    if secret.is_empty() || secret.len() > 63 || !secret.iter().all(|b| (0x21..=0x7e).contains(b)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid USB secret length or encoding",
+        ));
+    }
+    Ok(secret)
 }
 
 /// Bind the control socket and tighten its file mode before any client
@@ -2685,6 +2733,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // than time-since-first-admitted-operation.
     let _ = mono_ms();
     let args = parse_args().map_err(io::Error::other)?;
+    // Refuse an unreadable/misconfigured credential before opening any USB
+    // session; never fall back to the public legacy secret on file errors.
+    let usb_dev_secret = match &args.usb_dev_secret_file {
+        Some(path) => load_usb_dev_secret(path)?,
+        None => DEV_SECRET.to_vec(),
+    };
     let socket_path = args.socket;
     let device = args.device;
     let acl_path = args.acl_file;
@@ -2772,7 +2826,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 authority.site_id(),
                 authority.network()
             );
-            Some(Arc::new(site::SiteService::new(authority)))
+            Some(site::SiteService::new_live(authority))
         }
         None => None,
     };
@@ -2854,7 +2908,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // frames instead of growing memory without limit while the adapter is
     // down.
     let (outbound_tx, outbound_rx) = mpsc::sync_channel(MAX_OUTBOUND);
-    let device_session = Arc::new(Mutex::new(DeviceSession::new()));
+    let mut session = DeviceSession::new();
+    session.secret = usb_dev_secret;
+    let device_session = Arc::new(Mutex::new(session));
     // The TX-I2 dispatch thread runs whether or not a device is attached:
     // it performs the host-side expiry/cancel sweeps while USB is absent
     // and starts driving SUBMIT/QUERY/SKIP/RETIRE/TIME_SAMPLE the moment
@@ -3399,6 +3455,23 @@ mod tests {
         assert!(session.handshake_retry_due(session.last_begin_ms + HELLO_RETRY_MS));
         complete_handshake(&mut session);
         assert!(!session.handshake_retry_due(session.last_begin_ms + HELLO_RETRY_MS));
+    }
+
+    #[test]
+    fn slow_device_handshake_keeps_each_response_window() {
+        // On the C3 under cutover load, successive HelloAck frames arrived
+        // about 1.26 s apart. Retrying Hello before either response lands
+        // changes the transcript nonce and can prevent AUTH_OK forever.
+        let mut session = DeviceSession::new();
+        let hello = session.begin();
+        assert!(!session.handshake_retry_due(session.last_begin_ms + 1_250));
+        let nonce = u64::from_be_bytes(hello.body[0..8].try_into().unwrap());
+        let (ack, _) = device_hello_ack(nonce);
+        session.last_begin_ms -= 3_200;
+        let inbound = session.handle(&frame(FrameKind::HelloAck, 0, 100, ack));
+        assert_eq!(inbound.outbound.len(), 1);
+        assert_eq!(session.phase, SessionPhase::AwaitAuthOk);
+        assert!(!session.handshake_retry_due(now_ms() + 1_250));
     }
 
     #[test]
@@ -4353,6 +4426,80 @@ mod tests {
         );
         assert!(parse_args_from(["--op-store".to_string()].into_iter()).is_err());
         assert!(parse_args_from(["--bogus".to_string()].into_iter()).is_err());
+    }
+
+    #[test]
+    fn usb_secret_file_flag_requires_a_path() {
+        let args = parse_args_from(
+            ["--usb-dev-secret-file", "/private/usb.key"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("private USB secret file");
+        assert_eq!(
+            args.usb_dev_secret_file,
+            Some(PathBuf::from("/private/usb.key"))
+        );
+        assert!(parse_args_from(["--usb-dev-secret-file".to_string()].into_iter()).is_err());
+    }
+
+    #[test]
+    fn usb_secret_file_is_private_exact_and_survives_reconnect() {
+        use std::os::unix::fs::symlink;
+        let dir = env::temp_dir().join(format!("routeloom-usb-secret-{}", process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("usb.key");
+        std::fs::write(&path, b"not-the-legacy-usb-secret").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let secret = load_usb_dev_secret(&path).unwrap();
+        assert_eq!(secret, b"not-the-legacy-usb-secret");
+        let mut session = DeviceSession::new();
+        session.secret = secret.clone();
+        let hello = session.begin();
+        assert_eq!(session.secret, secret);
+        let host_nonce = u64::from_be_bytes(hello.body[0..8].try_into().unwrap());
+        let (legacy_ack, _) = device_hello_ack(host_nonce);
+        let rejected = session.handle(&frame(FrameKind::HelloAck, 0, 100, legacy_ack));
+        assert!(rejected
+            .notes
+            .iter()
+            .any(|note| note.contains("HELLO_TAG_INVALID")));
+        assert_eq!(session.phase, SessionPhase::AwaitHelloAck);
+        let hello = session.begin();
+        let host_nonce = u64::from_be_bytes(hello.body[0..8].try_into().unwrap());
+        let transcript = Transcript {
+            host_nonce,
+            device_nonce: 0xAABB,
+            version: 1,
+            node: 42,
+            boot: 7,
+            network: 9,
+            capability: 3,
+            principal: DEV_PRINCIPAL.to_vec(),
+        };
+        let proof = derive_session_proof(&secret, &transcript.encode().unwrap());
+        let (mut ack, _) = device_hello_ack(host_nonce);
+        ack[37..].copy_from_slice(&proof.hello_tag);
+        assert_eq!(
+            session
+                .handle(&frame(FrameKind::HelloAck, 0, 100, ack))
+                .outbound
+                .len(),
+            1
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(load_usb_dev_secret(&path).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.join("alias.key");
+        symlink(&path, &link).unwrap();
+        assert!(load_usb_dev_secret(&link).is_err());
+        std::fs::write(&path, b"trailing-newline\n").unwrap();
+        assert!(load_usb_dev_secret(&path).is_err());
+        std::fs::write(&path, [b'a'; 64]).unwrap();
+        assert!(load_usb_dev_secret(&path).is_err());
+        std::fs::remove_file(link).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]

@@ -1,0 +1,20 @@
+{
+  "requested": 3,
+  "host_accepted": 3,
+  "delivered": 3,
+  "stopped_reason": null,
+  "success_rate": 1.0,
+  "rate_limit_retries": 0,
+  "pace_s": 1.0,
+  "elapsed_s": 2.17,
+  "latency_ms_median": 165.59,
+  "latency_ms_p95": 312.78,
+  "latency_ms_max": 329.14,
+  "by_destination": {
+    "3": {
+      "accepted": 3,
+      "delivered": 3
+    }
+  },
+  "evidence": "artifacts/hil/2026-09-26-full/c3-usb-reenum-baseline.jsonl"
+}

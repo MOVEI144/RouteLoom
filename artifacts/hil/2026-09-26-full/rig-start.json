@@ -1,0 +1,76 @@
+{
+  "benches": {
+    "bench-2026-09-26-mixed5": {
+      "boards": {
+        "bridge": {
+          "app": "bridge_node",
+          "chip": "esp32c3",
+          "console": "none",
+          "detail": "",
+          "matches": [
+            "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00"
+          ],
+          "node_id": 1,
+          "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+          "role": "bridge",
+          "status": "ONLINE"
+        },
+        "ref-a": {
+          "app": "reference_node",
+          "chip": "esp32c3",
+          "console": "usb-serial-jtag",
+          "detail": "",
+          "matches": [
+            "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00"
+          ],
+          "node_id": 2,
+          "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00",
+          "role": "reference",
+          "status": "ONLINE"
+        },
+        "ref-b": {
+          "app": "reference_node",
+          "chip": "esp32c3",
+          "console": "usb-serial-jtag",
+          "detail": "",
+          "matches": [],
+          "node_id": 3,
+          "port": null,
+          "role": "reference",
+          "status": "OFFLINE"
+        },
+        "ref-c": {
+          "app": "reference_node",
+          "chip": "esp32c6",
+          "console": "usb-serial-jtag",
+          "detail": "",
+          "matches": [
+            "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00"
+          ],
+          "node_id": 4,
+          "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00",
+          "role": "reference",
+          "status": "ONLINE"
+        },
+        "ref-d": {
+          "app": "reference_node",
+          "chip": "esp32c6",
+          "console": "usb-serial-jtag",
+          "detail": "",
+          "matches": [
+            "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00"
+          ],
+          "node_id": 5,
+          "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00",
+          "role": "reference",
+          "status": "ONLINE"
+        }
+      },
+      "description": "experimental five-node bench: three C3s and two unsupported C6s",
+      "offline_reasons": [
+        "board 'ref-b': no port matched ['/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00']"
+      ],
+      "status": "OFFLINE"
+    }
+  }
+}

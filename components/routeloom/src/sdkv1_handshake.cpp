@@ -2,6 +2,13 @@
 
 #include <cstring>
 #include <cstdio>
+#if defined(ESP_PLATFORM) && CONFIG_ROUTELOOM_HIL_EDHOC_TIMING
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#include "esp_heap_caps.h"
+#include "esp_timer.h"
+#pragma GCC diagnostic pop
+#endif
 
 #include "routeloom/discovery_scope.hpp"  // sha256, hmac_sha256
 #include "routeloom/rlcw1.hpp"  // cert_decode, cert_subject_kid (kid rule)
@@ -1335,6 +1342,9 @@ Status HandshakeEngine::begin_edhoc(CarrierRecord& record, const MonotonicMs now
   }
   flight.kid_local = local_kid;
   edhoc_flight_ = flight;
+#if defined(ESP_PLATFORM) && CONFIG_ROUTELOOM_HIL_EDHOC_TIMING
+  edhoc_flight_.hil_started_us = esp_timer_get_time();
+#endif
   secure_clear(flight.local_cred.privkey);
   edhoc_flight_.local_cred_set = true;
   put_u32_be(edhoc_cid_bytes_.data(), cid);
@@ -2567,6 +2577,15 @@ Status HandshakeEngine::edhoc_commit(CarrierRecord& record) noexcept {
   pending_commit_tx_ = keys.tx_context_id;
   pending_commit_rx_ = keys.rx_context_id;
   pending_commit_proof_ = proof;
+#if defined(ESP_PLATFORM) && CONFIG_ROUTELOOM_HIL_EDHOC_TIMING
+  std::printf("HIL EDHOC HANDSHAKE us=%lld role=%u scope=%u peer=%llu "
+              "heap_free=%lu heap_min=%lu\n",
+              static_cast<long long>(esp_timer_get_time() - flight.hil_started_us),
+              static_cast<unsigned>(record.role), static_cast<unsigned>(record.scope),
+              static_cast<unsigned long long>(record.peer),
+              static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+              static_cast<unsigned long>(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)));
+#endif
   return Status::success();
 }
 

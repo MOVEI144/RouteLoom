@@ -1,0 +1,158 @@
+{
+  "node1": {
+    "site": [
+      {
+        "slot": "s0",
+        "used_bytes": 579,
+        "crc_ok": true,
+        "seal": "5173ab1e",
+        "seq": 6,
+        "network": "00000002524c0003",
+        "generation": 1,
+        "rs_floor": 2,
+        "gk_current": 3,
+        "gk_next": 0,
+        "boot_witness": 357
+      },
+      {
+        "slot": "s1",
+        "used_bytes": 579,
+        "crc_ok": true,
+        "seal": "5173ab1e",
+        "seq": 6,
+        "network": "00000002524c0003",
+        "generation": 1,
+        "rs_floor": 2,
+        "gk_current": 3,
+        "gk_next": 0,
+        "boot_witness": 357
+      }
+    ],
+    "lifecycle": [
+      {
+        "slot": "x0",
+        "used_bytes": 120,
+        "crc_ok": true,
+        "seal": "4c583101",
+        "seq": 3,
+        "mode": 0,
+        "old_network": "00000002524c0003",
+        "new_network": "0000000000000000",
+        "generation": 1,
+        "rs_floor": 2,
+        "gk_floor": 3,
+        "boot_witness": 357,
+        "cutover_id": 5
+      },
+      {
+        "slot": "x1",
+        "used_bytes": 120,
+        "crc_ok": true,
+        "seal": "4c583101",
+        "seq": 3,
+        "mode": 0,
+        "old_network": "00000002524c0003",
+        "new_network": "0000000000000000",
+        "generation": 1,
+        "rs_floor": 2,
+        "gk_floor": 3,
+        "boot_witness": 357,
+        "cutover_id": 5
+      }
+    ]
+  },
+  "node2": {
+    "site": [
+      {
+        "slot": "s0",
+        "used_bytes": 579,
+        "crc_ok": true,
+        "seal": "5173ab1e",
+        "seq": 3,
+        "network": "00000001524c0003",
+        "generation": 1,
+        "rs_floor": 0,
+        "gk_current": 2,
+        "gk_next": 0,
+        "boot_witness": 1311
+      },
+      {
+        "slot": "s1",
+        "used_bytes": 579,
+        "crc_ok": true,
+        "seal": "5173ab1e",
+        "seq": 4,
+        "network": "00000001524c0003",
+        "generation": 1,
+        "rs_floor": 1,
+        "gk_current": 2,
+        "gk_next": 0,
+        "boot_witness": 1311
+      }
+    ],
+    "lifecycle": [
+      {
+        "slot": "x0",
+        "used_bytes": 701,
+        "crc_ok": true,
+        "seal": "4c583101",
+        "seq": 1,
+        "mode": 4,
+        "old_network": "00000001524c0003",
+        "new_network": "00000002524c0003",
+        "generation": 1,
+        "rs_floor": 1,
+        "gk_floor": 3,
+        "boot_witness": 1311,
+        "cutover_id": 5
+      }
+    ]
+  },
+  "node6": {
+    "site": [
+      {
+        "slot": "s0",
+        "used_bytes": 579,
+        "crc_ok": true,
+        "seal": "5173ab1e",
+        "seq": 4,
+        "network": "00000001524c0003",
+        "generation": 1,
+        "rs_floor": 1,
+        "gk_current": 2,
+        "gk_next": 0,
+        "boot_witness": 189
+      },
+      {
+        "slot": "s1",
+        "used_bytes": 579,
+        "crc_ok": true,
+        "seal": "5173ab1e",
+        "seq": 4,
+        "network": "00000001524c0003",
+        "generation": 1,
+        "rs_floor": 1,
+        "gk_current": 2,
+        "gk_next": 0,
+        "boot_witness": 189
+      }
+    ],
+    "lifecycle": [
+      {
+        "slot": "x0",
+        "used_bytes": 701,
+        "crc_ok": true,
+        "seal": "4c583101",
+        "seq": 1,
+        "mode": 4,
+        "old_network": "00000001524c0003",
+        "new_network": "00000002524c0003",
+        "generation": 1,
+        "rs_floor": 1,
+        "gk_floor": 3,
+        "boot_witness": 189,
+        "cutover_id": 5
+      }
+    ]
+  }
+}

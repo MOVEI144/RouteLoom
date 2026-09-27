@@ -1,0 +1,19 @@
+   Compiling routeloom-host v0.1.0 (/home/sahur/orca/workspaces/RouteLoom/hil-5node/host/routeloom-host)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.46s
+     Running unittests src/main.rs (target/debug/deps/routeloom_host-b68ae9ef9b77ac49)
+
+running 11 tests
+test site::authority_e2e::live_unknown_device_gets_no_channel ... ok
+test site::authority_e2e::live_revoke_persists_presealed_notice_before_delivery ... ok
+test site::authority_e2e::live_pull_answers_and_throttles ... ok
+test site::authority_e2e::live_keyless_pull_recovers_member ... ok
+test site::authority_e2e::live_confirm_pull_update_ack_over_usb_fragments ... ok
+test site::authority_e2e::live_channel_idle_uses_monotonic_time_after_group_key_send ... ok
+test site::authority_e2e::live_passthrough_diagnoses_without_answer ... ok
+test site::authority_e2e::live_rotation_excludes_removed_member ... ok
+test site::authority_e2e::detached_usb_keeps_presealed_notice_for_reconnect ... ok
+test site::authority_e2e::live_p6_uses_the_existing_usb_authority_channel ... ok
+test site::authority_e2e::host_restart_replays_exact_committed_notice_without_channel ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 480 filtered out; finished in 0.17s
+

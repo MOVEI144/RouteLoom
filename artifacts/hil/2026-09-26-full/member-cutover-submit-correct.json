@@ -1,0 +1,16 @@
+{
+  "cert_bytes": 191,
+  "response": {
+    "v": 1,
+    "request_id": "hil-cutover-valid-1790437663821849949",
+    "ok": true,
+    "result": {
+      "operation_id": "op-0000000000000009",
+      "state": "preparing",
+      "expected_site_epoch": 1,
+      "new_site_epoch": 2,
+      "revision": 1,
+      "targets": 5
+    }
+  }
+}

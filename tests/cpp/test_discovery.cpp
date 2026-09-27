@@ -451,6 +451,30 @@ void test_member_member_exchange() {
   CHECK(b.engine.stats().auths_completed == 1);
 }
 
+// Taking a parked MemberEdhoc initiator start relinquishes its discovery
+// transient reservation. Repeated starts must not exhaust the three slots.
+void test_member_start_releases_transient() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, /*member=*/true);
+  Unit& b = world.add(2, 0xB2, /*member=*/true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  a.engine.set_member_handshake_mode(true);
+  b.engine.set_member_handshake_mode(true);
+
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    CHECK_OK(a.engine.begin_discovery(world.medium.now));
+    world.run(500);
+    NeighborDiscovery::MemberStartRequest start{};
+    CHECK_OK(a.engine.take_member_start(start, world.medium.now));
+    CHECK(start.initiator && start.peer == b.node);
+    // The responder's parked candidate is allowed to expire naturally.
+    world.run(10'000);
+  }
+  CHECK(!a.observer.has("PEER_CAPACITY"));
+}
+
 // New-node join: device auth alone is not membership; pending commit blocks
 // DATA; the dev approval hook commits -> Member + REACHABLE (D3-02, D3-12).
 void test_new_node_join() {
@@ -1314,26 +1338,6 @@ void test_stranded_rediscovery_rebinds() {
   CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Reachable);
 }
 
-// Handing a parked initiator exchange to the member coordinator must release
-// its discovery reservation; otherwise the fourth attempt cannot start.
-void test_member_start_releases_transient() {
-  DiscWorld world;
-  Unit& a = world.add(1, 0xA1, true);
-  Unit& b = world.add(2, 0xB2, true);
-  a.engine.set_member_handshake_mode(true);
-  b.engine.set_member_handshake_mode(true);
-  world.start_all();
-  for (int i = 0; i < 10; ++i) {
-    CHECK_OK(a.engine.begin_discovery(world.medium.now));
-    world.run(1000);
-    NeighborDiscovery::MemberStartRequest start{};
-    CHECK_OK(a.engine.take_member_start(start, world.medium.now));
-    CHECK(start.initiator && start.peer == b.node);
-    // The coordinator may reject the exchange; its reservation is separate.
-    world.run(6000);
-  }
-}
-
 void test_reauth_releases_transient_candidate() {
   DiscWorld world;
   Unit& a = world.add(1, 0xA1, true);
@@ -1837,6 +1841,7 @@ void test_handle_issuance_never_zero_never_wraps() {
 int main() {
   test_rld1_envelope_bytes();
   test_member_member_exchange();
+  test_member_start_releases_transient();
   test_new_node_join();
   test_rld1_kind_rejects();
   test_cookie_rejects();
@@ -1859,7 +1864,6 @@ int main() {
   test_stale_reprobe_bounded();
   test_stale_reprobe_never_targets_dead();
   test_stranded_rediscovery_rebinds();
-  test_member_start_releases_transient();
   test_reauth_releases_transient_candidate();
   test_stale_peer_repaired_while_other_edge_reachable();
   test_result_waits_for_local_tx();

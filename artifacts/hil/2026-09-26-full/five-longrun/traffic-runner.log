@@ -1,0 +1,11 @@
+accepted=10 delivered=4
+accepted=20 delivered=7
+accepted=30 delivered=10
+accepted=40 delivered=12
+accepted=50 delivered=15
+accepted=60 delivered=17
+accepted=70 delivered=20
+accepted=80 delivered=22
+accepted=90 delivered=25
+accepted=100 delivered=27
+{"requested":100,"host_accepted":100,"delivered":27,"stopped_reason":null,"success_rate":0.27,"rate_limit_retries":0,"pace_s":37.0,"elapsed_s":3668.02,"latency_ms_median":59.06,"latency_ms_p95":204.03,"latency_ms_max":330.94,"by_destination":{"2":{"accepted":25,"delivered":25},"3":{"accepted":25,"delivered":0},"4":{"accepted":25,"delivered":0},"5":{"accepted":25,"delivered":2}},"evidence":"artifacts/hil/2026-09-26-full/five-longrun/traffic-100.jsonl"}

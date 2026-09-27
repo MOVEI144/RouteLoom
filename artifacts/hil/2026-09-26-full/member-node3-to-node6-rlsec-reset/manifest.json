@@ -1,0 +1,10 @@
+{
+  "board": "ref-b",
+  "chip": "esp32c3",
+  "mac": "94:a9:90:7a:26:ac",
+  "offset": "0x190000",
+  "size": "0x10000",
+  "backup_sha256": "2554afdf5e474f08e54b2546da58a1ee80508855dcd6272f89d28a211205712e",
+  "backup_path": "/tmp/routeloom-hil-full-2026-09-26/rlsec-node3-postrevoke-before-node6.bin",
+  "erased": true
+}

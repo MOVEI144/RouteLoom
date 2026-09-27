@@ -37,10 +37,12 @@ def main() -> int:
     parser.add_argument("--destinations", type=int, nargs="+", required=True)
     parser.add_argument("--count", type=int, default=100)
     parser.add_argument("--timeout-s", type=float, default=1800)
+    parser.add_argument("--pace-s", type=float, default=0,
+                        help="minimum spacing between scheduled sends")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
-    if args.count < 1 or args.count > 1000 or args.timeout_s <= 0:
-        parser.error("count must be 1..1000 and timeout must be positive")
+    if args.count < 1 or args.count > 1000 or args.timeout_s <= 0 or args.pace_s < 0:
+        parser.error("count must be 1..1000, timeout positive, pace nonnegative")
     base = [args.ctl, "--socket", args.socket]
     out = pathlib.Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -49,8 +51,12 @@ def main() -> int:
     limited = 0
     stopped_reason = None
     started = time.time()
+    next_slot = time.monotonic()
     with out.open("w", encoding="utf-8") as log:
         for index in range(args.count):
+            if args.pace_s:
+                time.sleep(max(0, next_slot - time.monotonic()))
+                next_slot += args.pace_s
             node = args.destinations[index % len(args.destinations)]
             payload = b"R2HIL" + index.to_bytes(4, "big")
             attempts = 0
@@ -96,7 +102,8 @@ def main() -> int:
     summary = {"requested": args.count, "host_accepted": len(rows),
                "delivered": len(latencies), "stopped_reason": stopped_reason,
                "success_rate": len(latencies) / len(rows),
-               "rate_limit_retries": limited, "elapsed_s": round(time.time() - started, 2),
+               "rate_limit_retries": limited, "pace_s": args.pace_s,
+               "elapsed_s": round(time.time() - started, 2),
                "latency_ms_median": statistics.median(latencies) if latencies else None,
                "latency_ms_p95": percentile(latencies, 0.95),
                "latency_ms_max": max(latencies) if latencies else None,

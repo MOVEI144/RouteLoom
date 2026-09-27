@@ -1,0 +1,22 @@
+   Compiling routeloom-host v0.1.0 (/home/sahur/orca/workspaces/RouteLoom/hil-5node/host/routeloom-host)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.84s
+     Running unittests src/main.rs (target/debug/deps/routeloom_host-b68ae9ef9b77ac49)
+
+running 1 test
+test tests::slow_device_handshake_keeps_each_response_window ... FAILED
+
+failures:
+
+---- tests::slow_device_handshake_keeps_each_response_window stdout ----
+
+thread 'tests::slow_device_handshake_keeps_each_response_window' panicked at routeloom-host/src/main.rs:3174:9:
+assertion failed: !session.handshake_retry_due(session.last_begin_ms + 1_250)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::slow_device_handshake_keeps_each_response_window
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 491 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p routeloom-host --bin routeloom-host`

@@ -75,7 +75,10 @@ Status GroupSecurityProvider::material(const SecurityContext& c, keys::TrafficKe
       c.sender == kInvalidNodeId || c.sender == kBroadcastNodeId ||
       c.receiver != kBroadcastNodeId || sender_boot(c) == 0 || gk_epoch(c) == 0 ||
       (transmit && (c.sender != self_ || !keys_.tx_ready() ||
-                    gk_epoch(c) != keys_.current() || sender_boot(c) != keys_.boot()))) {
+                    gk_epoch(c) != keys_.current() ||
+                    (c.scope == SecurityScope::GroupLink && sender_boot(c) != keys_.boot())))) {
+    // GroupLink carries the durable boot witness. GroupEnd carries the
+    // independently allocated message_session in the same context field.
     return Status::error(StatusCode::AuthorizationFailed, "group context binding");
   }
   if (c.scope == SecurityScope::Group &&
