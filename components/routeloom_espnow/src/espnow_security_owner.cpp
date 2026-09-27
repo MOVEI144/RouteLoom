@@ -1712,6 +1712,16 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   adopted_node_ = member.node;
   adopted_network_ = member.network;
   adopted_role_ = member.role;
+  // The adopted config may have made this bridge a group root for the
+  // first time — attach_group() ran before membership existed, so the
+  // Hello bitmap never advertised it. The bit is bound into the
+  // authenticated HelloAck: re-evaluate it here, which drains a live
+  // session behind a sealed error so the host's re-hello observes the
+  // restored capability (the authority lane resyncs and a pending
+  // JoinConfirm is retransmitted across the bounce).
+  if (bridge_ != nullptr) {
+    (void)bridge_->refresh_group_capability(now_ms);
+  }
   // The lifecycle needs the verified package RS target at fresh adoption;
   // boot re-adoption carries zero and uses its durable floor.
   if (lifecycle_live_ && lifecycle_booted_ && stores_ != nullptr) {
