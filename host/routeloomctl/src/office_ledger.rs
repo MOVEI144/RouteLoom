@@ -884,6 +884,14 @@ mod tests {
                 default_work_id(Path::new(r"\\SERVER\Share\Device")),
                 "//server/share/device"
             );
+            assert_eq!(
+                default_work_id(Path::new(r"\\Server\Share\..\Device")),
+                "//server/share/device"
+            );
+            assert_eq!(
+                default_work_id(Path::new("//Server/Share/../Device")),
+                "//server/share/device"
+            );
             let cwd = std::env::current_dir().unwrap();
             if let Some(std::path::Component::Prefix(prefix)) = cwd.components().next() {
                 use std::path::Prefix;
@@ -908,6 +916,20 @@ mod tests {
         assert!(ledger
             .reserve(slot(1, 4, 5), None, "work-b", "c:/lot/device")
             .is_err());
+        ledger
+            .reserve(
+                slot(1, 6, 7),
+                None,
+                "work-c",
+                r"\\?\UNC\Server\Share\..\Device",
+            )
+            .unwrap();
+        assert!(ledger
+            .reserve(slot(1, 8, 9), None, "work-d", "//server/share/device")
+            .is_err());
+        ledger
+            .reserve(slot(1, 10, 11), None, "work-e", "//server/other/device")
+            .unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 

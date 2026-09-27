@@ -300,6 +300,11 @@ pub fn open_private_file_for_read(path: &Path) -> io::Result<std::fs::File> {
 /// Resolves rooted and drive-relative Windows paths without requiring them to exist.
 #[cfg(windows)]
 pub fn windows_absolute_path(path: &Path) -> io::Result<std::path::PathBuf> {
+    if path.is_absolute() {
+        // UNC server/share and drive roots must remain intact while callers
+        // resolve parent components below the root.
+        return Ok(path.to_path_buf());
+    }
     win_acl::absolute_path(path)
 }
 
