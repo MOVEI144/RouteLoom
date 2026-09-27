@@ -524,6 +524,28 @@ RouteSelection RouteTable::best(const NodeId destination) const noexcept {
   return entry == nullptr ? RouteSelection{} : select(*entry);
 }
 
+bool RouteTable::selection_remaining(const NodeId destination, const MonotonicMs now_ms,
+                                     MonotonicMs& remaining_ms) const noexcept {
+  remaining_ms = 0;
+  const auto* entry = find(destination);
+  if (entry == nullptr) return false;
+  const RouteSelection selection = select(*entry);
+  if (!selection.valid) return false;
+  // The selection names its candidate (next hop + sequence); the lease is
+  // the candidate's own expiry. A lapsed-but-unswept lease reads 0 —
+  // honest "expired, sweep pending", never a fabricated lifetime.
+  for (const auto& candidate : entry->candidates) {
+    if (!candidate.valid || candidate.next_hop != selection.next_hop ||
+        candidate.sequence != selection.sequence) {
+      continue;
+    }
+    remaining_ms =
+        candidate.expires_at_ms > now_ms ? candidate.expires_at_ms - now_ms : 0;
+    return true;
+  }
+  return false;
+}
+
 bool RouteTable::mark_advertised(const NodeId destination) noexcept {
   auto* entry = entries_.find([&](const Entry& value) { return value.destination == destination; });
   if (entry == nullptr) return false;

@@ -85,12 +85,15 @@ pub const EVENT_KINDS: &[&str] = &[
     "host_ops_rx",
     "keepalive",
     "link_changed",
+    "milestone.advanced",
     "node_joined",
     "node_left",
+    "observation.gap",
     "rx_conflict",
     "rx_drop",
     "session",
     "session_drop",
+    "topology.changed",
 ];
 
 /// `sub%016x` — the subscription token handed to clients. Ids carry a

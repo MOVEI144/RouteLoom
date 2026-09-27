@@ -25,7 +25,7 @@
 //! - `principals` maps a *decimal* uid string to `{ "networks": {...} }`.
 //! - `networks` maps a 16-hex network id — or `"*"` for all networks — to a
 //!   non-empty array of permission names.
-//! - Permission names: `READ_PAYLOAD`, `SEND`, `READ_OPERATION`, `CONFIG`,
+//! - Permission names: `READ_PAYLOAD`, `SEND`, `READ_OPERATION`, `CONFIG`, `OBSERVE`,
 //!   and the Site Authority grants `MEMBERSHIP_READ` / `MEMBERSHIP_DECIDE`
 //!   / `MEMBERSHIP_ADMIN` (scoped to the site's wire network). Unknown
 //!   names are rejected at load time.
@@ -60,6 +60,8 @@ pub const PERM_CONFIG: u8 = 8;
 pub const PERM_MEMBERSHIP_READ: u8 = 16;
 pub const PERM_MEMBERSHIP_DECIDE: u8 = 32;
 pub const PERM_MEMBERSHIP_ADMIN: u8 = 64;
+/// Mesh-wide health/topology pulls consume radio and reveal peer state.
+pub const PERM_OBSERVE: u8 = 128;
 
 /// Depth bound for the ACL document itself (same strict parser as IPC).
 const ACL_MAX_DEPTH: usize = 8;
@@ -208,6 +210,7 @@ fn parse_permissions(value: &Json) -> Result<u8, String> {
             Some("MEMBERSHIP_READ") => PERM_MEMBERSHIP_READ,
             Some("MEMBERSHIP_DECIDE") => PERM_MEMBERSHIP_DECIDE,
             Some("MEMBERSHIP_ADMIN") => PERM_MEMBERSHIP_ADMIN,
+            Some("OBSERVE") => PERM_OBSERVE,
             Some(other) => return Err(format!("unknown permission \"{other}\"")),
             None => return Err("permission entries must be strings".to_string()),
         };

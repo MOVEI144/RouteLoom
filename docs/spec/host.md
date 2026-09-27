@@ -38,7 +38,7 @@ API受付のoperation IDと無線Message IDは別に返す。idempotency keyはh
 
 **profile 3軸**。security（`DEV_RAM`／`MEMBER_EDHOC`、互換用 `LEGACY_FIXTURE`）、routing（`FLAT`／`GATEWAY_SCOPED`）、resource（`leaf-small`／`relay-c3`／`gateway-s3`）。名前・値・成熟度（main／pr／proposal）の契約と根拠への参照は mesh-profiles.json が正本。これは repository の実装・提案状況を表し、接続中の gateway の構成や本番認定（Production 表示）を示さない。現行 capabilities.get は gateway の実効 security profile を広告しない。
 
-**受信記録の assurance**。現行 `messages.read` と購読通知は常に `{"profile":"UNKNOWN","origin":"unverified"}` を返す。USB session は gateway と network を認証するが、DataFromMesh／GATEWAY_INGRESS には gateway の実効 security profile、当該フレームの origin↔credential 検証結果、site epoch がない。`UNKNOWN` は daemon に本人確認の証拠がないという意味であり、検証失敗を示す値ではない。Site Authority の有無や台帳登録から DevRam／Member を推測せず、Member の security 判定に合格としない。検証結果を運ぶ USB HostOps 拡張まで、この値は固定する。
+**受信記録の assurance**。`messages.read` と購読通知の `assurance` は、session が 0x08 受信保証を交渉済みで DataFromMesh が証拠 tail 付きの時だけ `{"profile":"member_edhoc"|"dev_ram"|"legacy_fixture"|"unknown","origin":"verified"|"unverified","site_epoch":u32}` を返す（profile は health の `sec_profile` と同一 registry、`origin` は gateway の open_end 判定、`site_epoch` は配送 header の end_epoch。素性不明な現物は `unknown`・`unverified` と正直に読む）。未交渉 session・legacy 形・group 配送・GATEWAY_INGRESS の記録は従来どおり `{"profile":"UNKNOWN","origin":"unverified"}` を返す。`UNKNOWN` は daemon に本人確認の証拠がないという意味であり、検証失敗を示す値ではない。Site Authority の有無や台帳登録から DevRam／Member を推測せず、Member の security 判定に合格としない。USB 面は[USB §11](usb-protocol.md)。
 
 **診断の正本**。失敗 `reason` は領域ごと（送信結果の `device_outcome`、group の `REFUSED` reason、event ring の `rx_drop` 等）で語彙が異なり、横断の共通 enum は設けない。欠落は `CURSOR_GAP`（cursor 読出し）、購読の in-band `gap` marker（追い出し範囲）、capture の `UncleanEnd`（未完了末尾）を使い分ける。`diagnostics.snapshot` は RF telemetry の on-demand 照会であり、legacy `DIAGNOSTICS`（daemon 内部 counter）とは別物。RF 取得路は telemetry lane、機器状態の購読は `events` stream が正本。
 
@@ -221,3 +221,32 @@ for event in site.site_events()? {
 ```
 
 制約：EXPERIMENTAL（本番Profileではない）。host試験のみで、実機のgateway・proxyとの疎通は無い。GKの配布・更新とauthority channel（JoinConfirm、P5）、RRS1の配布（P6）、site_epoch cutover、SiteCert発行tool（P7-2）は未実装。DAMS・GKはDB fileの0600で守るだけでhost鍵の封緘は無い。
+
+## 12. 機器観測（observation_v1、EXPERIMENTAL）
+
+USB直結gateway自身のread-only snapshotをAPI1で読む面（USB面は[USB §10](usb-protocol.md)）。M2で遠隔観測が開いた：`observer`が直結gateway自身ならlocal USB路（gatewayがHelloAck bit 11＝observation_v1とbit 2を広告する時のみ）、他nodeならgateway転送の遠隔路（gatewayがHelloAck bit 5＝m1 diagnosticsとbit 2を広告する時のみ。現物を欠くbit不足は`UNSUPPORTED`）。遠隔路はpull専用（`subscribe:true`は`INVALID_ARGUMENT`、`max_age_ms`は無視して毎回取得）で、1呼1 section・routes 2件・neighbors 3件までのpage、`outcome:reject`はmesh拒否の素通し。経路・lease・広告の状態は変えない。local USB照会は従来の診断区分、遠隔照会は接続networkのACL `OBSERVE` が必要（diagnostics capabilityだけでは不可）。payload・秘密鍵は含まない。
+
+**API1**：
+
+- `health.get` params `{observer:\"16hex\", section?:\"system\"|\"tables\"|\"milestones\"(既定system), network?:\"16hex\", max_age_ms?:0..60000(既定10000、0は新規取得), subscribe?:bool}` → `{\"outcome\":\"snapshot\",\"scope\":{\"observer\"},\"snapshot\":{...}}`
+- `topology.get` params `{observer:\"16hex\", section:\"routes\"|\"neighbors\"|\"summary\", network?, destination?:\"16hex\"(routes/neighbors専用・1宛先/peer), cursor?:\"page token\"(routes/neighbors専用・revision/boot/sessionに束縛、destinationと排他), max_age_ms?, subscribe?}` → 同上。`neighbors`は近隣 snapshot の1 page（peer・heard age・lease残・link cost・phase・RSSI、peer昇順）。
+- `snapshot`：`{\"schema\":1,\"section\",\"source\":{\"gateway\",\"usb_session\",\"observer\",\"observer_boot\",\"transport\":\"usb_local\"|\"mesh_remote\"},\"revision\",\"sampled_at_device_ms\",\"sampled_unix_ms_earliest\",\"sampled_unix_ms_latest\",\"received_unix_ms\",\"age_ms\",\"age_uncertainty_ms\",\"stale\":false,\"complete\",\"armed\",\"radio_queries\":0|1, section本体|\"entries\"+\"next_cursor\"}`。`revision`はmilestones＝milestone世代、summary/routes＝route digest、neighbors＝neighbor digest。routesは1呼で1 page（最大8件、`next_cursor`で継続、`complete`が終端）。`next_cursor`は最後のNodeIdとrevision・observer/gateway boot・USB session・observer/sectionを束縛する。継続時にrevisionやbootが変わる、pageが空のまま非終端を主張する、またはentryがcursorより進まなければ`SNAPSHOT_CHANGED`で拒否し、先頭から再取得する。`destination`指定は照会先NodeIdとの一致を検査した`present:true|false`付きの0/1件（未選択は`present:false`）。失効（`valid:false`）entryはretraction identity（generation/sequence）だけを持ち、next_hop・metric・remainingは`null`。`transport`は応答路、`radio_queries`はこの呼のmesh消費（local路は0、遠隔路は新規query 1・共有/拒否cache 0）。
+- 遠隔snapshotの`sampled_at_device_ms`はobserverのboot内単調時計で採取した時刻。hostは送信前から受信までの単調時計RTTを転送時間の上限として扱い、`age_ms`を「受信後経過＋RTT」の保守的上限、`age_uncertainty_ms`をRTTとして返す。`sampled_unix_ms_earliest/latest`は受信壁時計時刻からRTTを引いた下限と受信時刻の上限で、機器時計とhost時計を一点に同一視しない。local USBにはdevice採取stampがないため`sampled_at_device_ms:null`、`age_uncertainty_ms:0`。壁時計の逆行でageを減らさない。
+
+- 不明値は`null`（heap不明・未到達のmilestone時刻・未adoptの`adopted_node`）。機器のageは`received_unix_ms`起点の上限値に写像する（node statusの`last_heard_ms`と同じ約束）。`confirmed_at_ms`を含むmilestone時刻はboot内のミリ秒精度で保持し、49日を超えても周回・飽和しない。`system.reset`の`panic`はmask-ROM直読では`software`と読む（IDF hint未使用の既知の限定）。`network`指定がsessionと違えば`GATEWAY_UNAVAILABLE`（`detail.reason:\"network_mismatch\"`）。機器の非Ok結果は`device_result`付きの正直なAPIエラー（`Unsupported`→`UNSUPPORTED`等）。
+- event（`stream:\"events\"`、要`subscribe:true`の(再)arm）：`topology.changed`（`mask`・両digest）、`milestone.advanced`（`generation`）、`observation.gap`（`expected`・`received`・`lost`）。(再)armは機器のevent sequenceを1に戻すため、daemonはSUBSCRIBE付きqueryの送信時にwatermarkを再同期する。
+
+**daemonの動き**：observation laneのthreadが0x70を送り（同時最大4件、超過は`NO_CAPACITY`、応答待ち2秒・lane timeout 1.5秒）、同request idの0x71で決着する（laneのrequest idは上位16bit `0x4F42`の専用範囲）。singleton（system/tables/milestones/summary）は`(session, boot)`にpinしたcacheを持ち、`max_age_ms`以内なら再queryしない（0x72のdirty・gap・boot変化で失効）。routes・neighborsはcacheせず毎回queryする。遠隔路は別lane（request id上位`0x524F`）が0x30 subtype 7を送り、0x31 subtype 8／診断拒否で決着する（同時最大4件を受け付けるが、telemetryと共通のdaemon無線予算は2秒に1 transaction・送信済みoutstanding 1。応答待ち6秒・lane timeout 5.5秒）。同一queryの同時呼はin-flight行を共有し（singleflight）、直近のmesh失敗は同一USB sessionに限り陰性cacheから応答して無線を叩かない（Unsupported・timeoutは60秒、その他の拒否は5秒）。内側のmesh相関idはgatewayが振り直すため、hostはUSB request id＋observer/section一致だけで照合する。
+
+`capabilities.get`は`methods`に`health.get`/`topology.get`、`observation:{telemetry,topology,health,board:false,remote,limits:{routes_page_max:8,neighbors_page_max:8,max_in_flight:4,max_age_ms_max:60000,api_wait_ms:2000},events:[\"topology.changed\",\"milestone.advanced\",\"observation.gap\"]}`を返す（可否は接続中のsessionのcapabilityに連動、未接続はfalse。`remote`はm1 diagnostics bitの有無＝遠隔路の可否）。
+
+```sh
+routeloomctl health --observer 0000000000000abc --section milestones --subscribe
+routeloomctl topology --observer 0000000000000abc --section routes
+routeloomctl topology --observer 0000000000000abc --section routes --cursor 0000000000000003
+routeloomctl topology --observer 0000000000000abc --section routes --destination 0000000000000009
+```
+
+meshvizのAPI1 client（`tools/meshviz/src/routeloom_meshviz/api1_adapter.py`の`encode_health_request`／`encode_topology_request`／`parse_observation_snapshot`）からも同じ契約で取れる（画面変更なし、fixtureは`fake_api1.py`の`observation`引数）。\n\n制約：開発profileのEXPERIMENTAL機能。host試験（lane・API1・daemon配線・固定byte一致）とmeshviz fixtureのみで、実機との疎通・実RFは未確認。
+
+reference field firmwareのread-only consoleは`obs1 health`を受け、同じsystem fillから`OBS1 `接頭辞の1行JSONを返す（512B以内、1秒1応答、単一owner loop）。書込みverbと独立し、機器のboot・uptime・heap・reset・modeをconsole logと照合できる。

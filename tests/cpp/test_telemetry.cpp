@@ -8,6 +8,7 @@
 #include "routeloom/byte_io.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/telemetry.hpp"
+#include "routeloom/usb_host_ops.hpp"
 #include "routeloom/wire.hpp"
 
 #include "test_security.hpp"
@@ -609,6 +610,327 @@ void test_node_remote_query_nopeer() {
         rej.reason == DiagnosticRejectReason::NoPeer);
 }
 
+// --- Remote observation (subtypes 7/8) --------------------------------------------
+
+void test_remote_observation_query_codec() {
+  RemoteObservationQuery q{};
+  q.request_id = 0xA1B2C3D4;
+  q.section = ObservationSection::Routes;
+  q.max_entries = 2;
+  q.after = 0x1122334455;
+
+  std::array<std::uint8_t, kRemoteObservationQueryBodySize> buf{};
+  MutableByteView out{buf.data(), buf.size()};
+  CHECK_OK(remote_observation_query_encode(q, out));
+
+  // Exact layout: prefix(4) then fields, big-endian.
+  CHECK(buf[0] == 1 && buf[1] == 7 && buf[2] == 0 && buf[3] == 0);
+  CHECK(buf[4] == 0xA1 && buf[5] == 0xB2 && buf[6] == 0xC3 && buf[7] == 0xD4);
+  CHECK(buf[8] == 4 && buf[9] == 2 && buf[10] == 0 && buf[11] == 0);
+  CHECK(buf[15] == 0x11 && buf[16] == 0x22 && buf[17] == 0x33 &&  // after u64 BE
+        buf[18] == 0x44 && buf[19] == 0x55);
+  CHECK(buf[20] == 0 && buf[21] == 0 && buf[22] == 0 && buf[23] == 0);
+
+  RemoteObservationQuery back{};
+  CHECK_OK(remote_observation_query_decode(ByteView{buf.data(), buf.size()}, back));
+  CHECK(back.request_id == q.request_id && back.section == q.section);
+  CHECK(back.max_entries == 2 && back.after == q.after);
+
+  // EXACT names one peer on the neighbors section.
+  RemoteObservationQuery exact{};
+  exact.request_id = 9;
+  exact.section = ObservationSection::Neighbors;
+  exact.max_entries = 1;
+  exact.flags = kObservationRemoteQueryExact;
+  exact.after = 2;
+  CHECK_OK(remote_observation_query_encode(exact, out));
+
+  // Rejections: zero id, over-bound page size, EXACT off the paged
+  // sections or with a zero cursor, all-ones cursor, bad flags.
+  RemoteObservationQuery bad = q;
+  bad.request_id = 0;
+  CHECK(!remote_observation_query_encode(bad, out).ok());
+  bad = q;
+  bad.max_entries = 3;  // timestamp leaves room for only two routes
+  CHECK(!remote_observation_query_encode(bad, out).ok());
+  bad = q;
+  bad.section = ObservationSection::System;
+  bad.max_entries = 2;
+  CHECK(!remote_observation_query_encode(bad, out).ok());
+  bad = q;
+  bad.flags = kObservationRemoteQueryExact;
+  bad.after = 0;
+  CHECK(!remote_observation_query_encode(bad, out).ok());
+  bad = q;
+  bad.section = ObservationSection::System;
+  bad.flags = kObservationRemoteQueryExact;
+  bad.after = 9;
+  CHECK(!remote_observation_query_encode(bad, out).ok());
+
+  std::array<std::uint8_t, kRemoteObservationQueryBodySize> tampered = buf;
+  tampered[10] = 0x02;  // unknown flag bit
+  CHECK(!remote_observation_query_decode(ByteView{tampered.data(), tampered.size()}, back).ok());
+  tampered = buf;
+  tampered[8] = 6;  // unknown section
+  CHECK(!remote_observation_query_decode(ByteView{tampered.data(), tampered.size()}, back).ok());
+}
+
+void test_remote_observation_snapshot_codec() {
+  // Routes page with two ascending entries.
+  RouteDetailEntry e0{};
+  e0.destination = 2;
+  e0.next_hop = 2;
+  e0.generation = 1;
+  e0.valid = true;
+  e0.remaining_ms = 500;
+  RouteDetailEntry e1{};
+  e1.destination = 3;
+  e1.next_hop = 2;
+  e1.generation = 1;
+  e1.valid = true;
+  e1.remaining_ms = 400;
+  RemoteObservationSnapshot s{};
+  s.request_id = 77;
+  s.observer = 0xC3;
+  s.observer_boot = 0xB007;
+  s.section = ObservationSection::Routes;
+  s.count = 2;
+  s.revision = 0x11223344;
+  s.sampled_ms = 1234;
+  CHECK_OK(usb::encode_observation_route_entry(
+      e0, MutableByteView{s.body.data(), usb::kObservationRouteEntrySize}));
+  CHECK_OK(usb::encode_observation_route_entry(
+      e1, MutableByteView{s.body.data() + usb::kObservationRouteEntrySize,
+                          usb::kObservationRouteEntrySize}));
+  s.body_size = 2 * usb::kObservationRouteEntrySize;
+
+  std::array<std::uint8_t, kRemoteObservationSnapshotBodyMax> buf{};
+  CHECK_OK(remote_observation_snapshot_encode(
+      s, MutableByteView{buf.data(), buf.size()}));
+  CHECK(buf[0] == 1 && buf[1] == 8 && buf[2] == 0 && buf[3] == 0);
+  const std::size_t total = kRemoteObservationSnapshotHeadSize + s.body_size;
+  RemoteObservationSnapshot back{};
+  CHECK_OK(remote_observation_snapshot_decode(ByteView{buf.data(), total}, back));
+  CHECK(back.request_id == 77 && back.observer == 0xC3 && back.observer_boot == 0xB007);
+  CHECK(back.section == ObservationSection::Routes && back.count == 2);
+  CHECK(back.revision == 0x11223344 && back.body_size == s.body_size);
+  CHECK(back.sampled_ms == 1234);
+
+  // Rejections: count/body mismatch, non-ascending entries, over-bound
+  // count, singleton count != 1.
+  RemoteObservationSnapshot bad = s;
+  bad.count = 1;
+  CHECK(!remote_observation_snapshot_encode(
+            bad, MutableByteView{buf.data(), buf.size()})
+             .ok());
+  bad = s;
+  bad.count = 4;
+  bad.body_size = 4 * usb::kObservationRouteEntrySize;
+  CHECK(!remote_observation_snapshot_encode(
+            bad, MutableByteView{buf.data(), buf.size()})
+             .ok());
+  bad = s;
+  bad.section = ObservationSection::Summary;
+  CHECK(!remote_observation_snapshot_encode(
+            bad, MutableByteView{buf.data(), buf.size()})
+             .ok());
+  // Swapped entries fail the ascending rule on decode.
+  std::array<std::uint8_t, kRemoteObservationSnapshotBodyMax> swapped = buf;
+  for (std::size_t i = 0; i < usb::kObservationRouteEntrySize; ++i) {
+    const std::uint8_t tmp = swapped[kRemoteObservationSnapshotHeadSize + i];
+    swapped[kRemoteObservationSnapshotHeadSize + i] =
+        swapped[kRemoteObservationSnapshotHeadSize + usb::kObservationRouteEntrySize + i];
+    swapped[kRemoteObservationSnapshotHeadSize + usb::kObservationRouteEntrySize + i] = tmp;
+  }
+  CHECK(!remote_observation_snapshot_decode(ByteView{swapped.data(), total}, back).ok());
+
+  // Empty page (absent EXACT / past the end): head only, count 0.
+  RemoteObservationSnapshot empty{};
+  empty.request_id = 78;
+  empty.observer = 0xC3;
+  empty.section = ObservationSection::Neighbors;
+  CHECK_OK(remote_observation_snapshot_encode(
+      empty, MutableByteView{buf.data(), buf.size()}));
+  CHECK_OK(remote_observation_snapshot_decode(
+      ByteView{buf.data(), kRemoteObservationSnapshotHeadSize}, back));
+  CHECK(back.count == 0 && back.body_size == 0);
+}
+
+// Minimal wired source for the RF serving tests below.
+class TestNodeObservationSource final : public ObservationSource {
+ public:
+  explicit TestNodeObservationSource(const MeshNode& mesh) : mesh_(mesh) {}
+  void set_phase(std::uint8_t phase) noexcept { phase_ = phase; }
+
+  bool fill_system(MonotonicMs now_ms, ObservationSystem& out) const noexcept override {
+    fill_observation_system(0xB0071D0001ULL, now_ms, port_, kPowerRunning,
+                            kCoordModeDev, kProfileDevRam, out);
+    return true;
+  }
+  bool fill_tables(MonotonicMs now_ms, ObservationTables& out) const noexcept override {
+    fill_observation_tables(mesh_, now_ms, 0, 32, 0, 128, out);
+    return true;
+  }
+  bool fill_milestones(MonotonicMs, JoinMilestones& out) const noexcept override {
+    out = JoinMilestones{};
+    return true;
+  }
+  bool fill_summary(MonotonicMs now_ms, ObservationSummary& out) const noexcept override {
+    fill_observation_summary(mesh_, now_ms, 0, out);
+    out.neighbor_digest = observation_neighbor_source_digest(*this, now_ms);
+    return true;
+  }
+  std::size_t route_detail_page(NodeId after, RouteDetailEntry* out, std::size_t capacity,
+                                MonotonicMs now_ms, bool& more) const noexcept override {
+    return mesh_.route_detail_page(after, out, capacity, now_ms, more);
+  }
+  bool route_detail_exact(NodeId destination, MonotonicMs now_ms,
+                          RouteDetailEntry& out) const noexcept override {
+    return mesh_.route_detail(destination, now_ms, out);
+  }
+  std::size_t neighbor_detail_page(NodeId after, NeighborDetailEntry* out, std::size_t capacity,
+                                   MonotonicMs now_ms, bool& more) const noexcept override {
+    const std::size_t n = ::routeloom::neighbor_detail_page(mesh_, nullptr, after, out, capacity,
+                                                             now_ms, more);
+    for (std::size_t i = 0; i < n; ++i) out[i].phase = phase_;
+    return n;
+  }
+  bool neighbor_detail_exact(NodeId peer, MonotonicMs now_ms,
+                             NeighborDetailEntry& out) const noexcept override {
+    if (!::routeloom::neighbor_detail_exact(mesh_, nullptr, peer, now_ms, out)) return false;
+    out.phase = phase_;
+    return true;
+  }
+
+ private:
+  const MeshNode& mesh_;
+  NullSystemHealthPort port_;
+  std::uint8_t phase_{0};
+};
+
+void test_neighbor_page_revision_tracks_phase() {
+  routeloom_test::SimWorld world;
+  world.network_id = kNet;
+  auto* node = world.add(2);
+  world.add(3);
+  world.start_all();
+  world.link(2, 3, 1, 1);
+  TestNodeObservationSource source(*node);
+  CHECK_OK(node->set_observation_source(&source));
+  RemoteObservationQuery q{};
+  q.request_id = 1;
+  q.section = ObservationSection::Neighbors;
+  q.max_entries = 1;
+  RemoteObservationSnapshot before{}, after{};
+  DiagnosticRejectReason reason{};
+  CHECK_OK(node->build_observation_snapshot(q, world.now, before, reason));
+  source.set_phase(kNeighborPhaseReachable);
+  CHECK_OK(node->build_observation_snapshot(q, world.now, after, reason));
+  CHECK(before.revision != after.revision);
+}
+
+// End-to-end remote observation: A queries B's summary over the radio, B
+// answers from its wired source, A's sink gets the subtype-8 body whose
+// section bytes decode with the USB body codec.
+void test_node_remote_observation_snapshot() {
+  routeloom_test::SimWorld world;
+  world.network_id = kNet;
+  auto* a = world.add(1);
+  auto* b = world.add(2);
+  DiagSink sink_a;
+  a->set_diagnostic_sink(&sink_a);
+  TestNodeObservationSource source_b(*b);
+  CHECK_OK(b->set_observation_source(&source_b));
+  CHECK_OK(b->set_observation_remote(true));
+  world.start_all();
+  world.link(1, 2, 1, 1);
+
+  RemoteObservationQuery q{};
+  q.request_id = 0xCAFE;
+  q.section = ObservationSection::Summary;
+  q.max_entries = 1;
+  RemoteObservationSnapshot direct{};
+  DiagnosticRejectReason reason{};
+  CHECK_OK(b->build_observation_snapshot(q, 1234, direct, reason));
+  CHECK(direct.sampled_ms == 1234);
+  CHECK_OK(a->send_observation_query(2, q, world.now));
+  world.run(500, 5);
+
+  CHECK(!sink_a.bodies.empty());
+  if (sink_a.bodies.empty()) return;
+  const auto& body = sink_a.bodies.back();
+  CHECK(body[0] == kDiagnosticBodyVersion && body[1] == 8);
+  RemoteObservationSnapshot snap{};
+  CHECK_OK(remote_observation_snapshot_decode(ByteView{body.data(), body.size()}, snap));
+  CHECK(snap.request_id == 0xCAFE);
+  CHECK(snap.observer == 2);
+  CHECK(snap.section == ObservationSection::Summary && snap.count == 1);
+  ObservationSummary summary{};
+  CHECK_OK(usb::decode_observation_summary(
+      ByteView{snap.body.data(), snap.body_size}, summary));
+  CHECK(summary.neighbor_total == 1);
+  CHECK(summary.route_total >= 1);
+  CHECK(snap.revision == summary.route_digest);
+  CHECK(snap.sampled_ms <= world.now);
+}
+
+// Remote answering is opt-in: a node with observation_remote off answers
+// an authenticated query with an honest Denied reject, not silence.
+void test_node_remote_observation_denied() {
+  routeloom_test::SimWorld world;
+  world.network_id = kNet;
+  auto* a = world.add(1);
+  world.add(2);
+  DiagSink sink_a;
+  a->set_diagnostic_sink(&sink_a);
+  world.start_all();
+  world.link(1, 2, 1, 1);
+
+  RemoteObservationQuery q{};
+  q.request_id = 7;
+  q.section = ObservationSection::System;
+  q.max_entries = 1;
+  CHECK_OK(a->send_observation_query(2, q, world.now));
+  world.run(500, 5);
+
+  CHECK(!sink_a.bodies.empty());
+  if (sink_a.bodies.empty()) return;
+  const auto& body = sink_a.bodies.back();
+  CHECK(body.size() == kDiagnosticRejectBodySize && body[1] == 6);
+  DiagnosticReject rej{};
+  CHECK_OK(diagnostic_reject_decode(ByteView{body.data(), body.size()}, rej));
+  CHECK(rej.request_id == 7 &&
+        rej.reason == DiagnosticRejectReason::Denied &&
+        rej.observer == 2);
+}
+
+// Opted-in but sourceless: nothing to serve from reads Unsupported (the
+// firmware wired the flag but no section fills).
+void test_node_remote_observation_unsupported() {
+  routeloom_test::SimWorld world;
+  world.network_id = kNet;
+  auto* b = world.add(2);
+  CHECK_OK(b->set_observation_remote(true));
+  world.start_all();
+
+  RemoteObservationQuery q{};
+  q.request_id = 9;
+  q.section = ObservationSection::Tables;
+  q.max_entries = 1;
+  RemoteObservationSnapshot snap{};
+  DiagnosticRejectReason reason{};
+  CHECK(!b->build_observation_snapshot(q, world.now, snap, reason).ok());
+  CHECK(reason == DiagnosticRejectReason::Unsupported);
+}
+
+// NOTE: the shared 200 ms pacing stamp (one diagnostic query per origin
+// per interval across the telemetry/observation subtypes) is not pinned by
+// an RF test — the sim delivers back-to-back routed frames 200+ ms apart,
+// so no RF schedule lands two queries deterministically inside the window
+// (the pre-existing per-subtype pacing is untested for the same reason).
+// The sharing is three lines plus the comment at the intake; covered by
+// inspection.
+
 // --- D2: relay gate -----------------------------------------------------------
 
 // A node with relay disabled refuses new transit work honestly — the frame
@@ -1016,6 +1338,12 @@ int main() {
   test_node_remote_query_snapshot();
   test_node_remote_query_denied();
   test_node_remote_query_nopeer();
+  test_remote_observation_query_codec();
+  test_remote_observation_snapshot_codec();
+  test_neighbor_page_revision_tracks_phase();
+  test_node_remote_observation_snapshot();
+  test_node_remote_observation_denied();
+  test_node_remote_observation_unsupported();
   test_relay_gate();
   test_transit_failure_codec();
   test_transit_failure_relay_disabled();

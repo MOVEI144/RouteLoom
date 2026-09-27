@@ -174,6 +174,13 @@ jobs:
             profile: normal
             autonomy: off
             features: config_target_on
+          # The reference app compiles observation and the HIL sender into
+          # the same shared-boot poll hook.
+          - app: reference_node
+            target: esp32s3
+            profile: normal
+            autonomy: off
+            features: hil_observation
           # maintenance_on compiles the factory maintenance-console branch
           # (CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y, sdk-v1/07 §6 P7):
           # pre-RF console instead of the mesh. The reference cell rides
@@ -324,6 +331,11 @@ jobs:
             printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
             printf 'CONFIG_ROUTELOOM_CONFIG=y\n' >> sdkconfig
           fi
+          if [ '${{ matrix.features }}' = hil_observation ]; then
+            printf 'CONFIG_ROUTELOOM_HIL_SEND_DESTINATION=0x2\n' >> sdkconfig
+            printf 'CONFIG_ROUTELOOM_HIL_SEND_COUNT=1\n' >> sdkconfig
+            printf 'CONFIG_ROUTELOOM_OBSERVATION_REMOTE=y\n' >> sdkconfig
+          fi
           if [ '${{ matrix.features }}' = maintenance_on ]; then
             # reference_node opt-in: the factory maintenance console
             # branch instead of the mesh (sdk-v1/07 §6 P7). The bridge
@@ -380,6 +392,11 @@ jobs:
               ;;
             *) ! grep -q '^CONFIG_ROUTELOOM_CONFIG=y' sdkconfig ;;
           esac
+          if [ '${{ matrix.features }}' = hil_observation ]; then
+            grep -q '^CONFIG_ROUTELOOM_HIL_SEND_DESTINATION=0x2' sdkconfig
+            grep -q '^CONFIG_ROUTELOOM_HIL_SEND_COUNT=1' sdkconfig
+            grep -q '^CONFIG_ROUTELOOM_OBSERVATION_REMOTE=y' sdkconfig
+          fi
           case '${{ matrix.features }}' in
             maintenance_on)
               grep -q '^CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y' sdkconfig
