@@ -520,12 +520,7 @@ mod tests {
             .to_json()
             .replace(&hex_encode(&signer.pubkey())[..4], "dead");
         let bad = dir.join("bad.key");
-        std::fs::write(&bad, text).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o600)).unwrap();
-        }
+        write_private_file(&bad, text.as_bytes()).unwrap();
         let err = FileRootSigner::load(&bad).err().expect("must fail");
         assert!(
             err.code == Code::IntegrityError || err.code == Code::ProtocolError,
