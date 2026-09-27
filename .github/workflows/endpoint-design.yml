@@ -5,12 +5,16 @@ on:
     paths:
       - docs/design/scope-gateway-config/**
       - tools/check_endpoint_design.py
+      - tools/gen_endpoint_vectors.py
+      - protocol/endpoint-golden/**
       - components/routeloom/include/routeloom/routeloom.h
       - .github/workflows/endpoint-design.yml
   pull_request:
     paths:
       - docs/design/scope-gateway-config/**
       - tools/check_endpoint_design.py
+      - tools/gen_endpoint_vectors.py
+      - protocol/endpoint-golden/**
       - components/routeloom/include/routeloom/routeloom.h
       - .github/workflows/endpoint-design.yml
   workflow_dispatch:
