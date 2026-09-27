@@ -4276,9 +4276,10 @@ fn rollcall_status<S: OperationStore>(
     // the same answer as "no run" (no existence oracle, matching group.get).
     let run_network = ctx.rollcall.run_network();
     let authorized = run_network.is_some_and(|network| {
-        ctx.principal
-            .as_ref()
-            .is_some_and(|p| ctx.acl.permit_principal(p, network, acl::PERM_READ_OPERATION))
+        ctx.principal.as_ref().is_some_and(|p| {
+            ctx.acl
+                .permit_principal(p, network, acl::PERM_READ_OPERATION)
+        })
     });
     if !authorized {
         return Err(ApiError::simple(
