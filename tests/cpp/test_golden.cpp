@@ -184,6 +184,28 @@ void run_valid_vector(const std::filesystem::path& path) {
   CHECK_OK(wire::encode_new(plain, encode_security, produced));
   CHECK(produced.size <= kMaxEspNowBody);
   CHECK(same_bytes(encoded, produced.view()));
+  if ((plain.header.flags & wire::kFlagEndProtected) != 0) {
+    // A hop retry must be a new Link wrap around the same End envelope.
+    TestSecurity retry_security;
+    wire::EncodedFrame first{};
+    wire::LinkOpenedFrame sealed{};
+    CHECK_OK(wire::encode_new(plain, retry_security, first, &sealed));
+    wire::EncodedFrame retry{};
+    CHECK_OK(wire::retry_local(sealed, plain.header.next_hop,
+                               plain.header.remaining_deadline_ms - 1,
+                               retry_security, retry));
+    TestSecurity first_rx;
+    TestSecurity retry_rx;
+    wire::LinkOpenedFrame first_open{};
+    wire::LinkOpenedFrame retry_open{};
+    CHECK_OK(wire::open_link(first.view(), plain.header.next_hop, first_rx, first_open));
+    CHECK_OK(wire::open_link(retry.view(), plain.header.next_hop, retry_rx, retry_open));
+    CHECK(first_open.header.end_counter == retry_open.header.end_counter);
+    CHECK(first_open.header.link_counter != retry_open.header.link_counter);
+    CHECK(first_open.protected_payload_size == retry_open.protected_payload_size);
+    CHECK(std::memcmp(first_open.protected_payload.data(), retry_open.protected_payload.data(),
+                      first_open.protected_payload_size) == 0);
+  }
 
   // Decode at the addressed hop must recover header and protected payload.
   TestSecurity decode_security;

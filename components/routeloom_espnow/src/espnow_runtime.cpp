@@ -1234,14 +1234,14 @@ Status EspNowRuntime::send_raw(const MacAddress& mac,
     return Status::error(StatusCode::InvalidArgument,
                          "invalid ESP-NOW frame");
   }
-  // Completion callbacks identify a send only by des_addr: never let two
-  // sends share a destination MAC while a completion is outstanding.
+  // ESP-NOW recommends waiting for the prior callback before the next send;
+  // this also prevents completion order ambiguity across destinations.
   const MonotonicMs now = now_ms();
   portENTER_CRITICAL(&callback_lock_);
-  if (pending_tx_ && pending_mac_ == mac) {
+  if (pending_tx_) {
     portEXIT_CRITICAL(&callback_lock_);
     return Status::error(StatusCode::WouldBlock,
-                         "reserved DATA TX in flight to peer");
+                         "physical TX already in flight");
   }
   // Retire entries whose completion never arrived (callback watchdog). The
   // expiry is evidence too: each retires into expired_tx_ for Unknown
@@ -1268,6 +1268,11 @@ Status EspNowRuntime::send_raw(const MacAddress& mac,
     raw_tx_[kept++] = raw_tx_[i];  // stays outstanding — MAC remains blocked
   }
   raw_tx_count_ = kept;
+  // One outstanding driver send across both lanes preserves callback order.
+  if (raw_tx_count_ != 0) {
+    portEXIT_CRITICAL(&callback_lock_);
+    return Status::error(StatusCode::WouldBlock, "physical TX already in flight");
+  }
   if (tx_quarantined(mac)) {
     portEXIT_CRITICAL(&callback_lock_);
     return Status::error(StatusCode::WouldBlock,
@@ -1389,8 +1394,9 @@ Status EspNowRuntime::reply_observe_authenticated_rx(
   portENTER_CRITICAL(&callback_lock_);
   Peer* record = find_peer(captured.peer);
   Status status = Status::success();
-  if (record == nullptr || !record->driver_registered ||
-      record->binding_retired ||
+  // Driver registration pins outgoing replies, not authenticated recovery
+  // traffic: a STALE binding can receive Probe/Result while driverless.
+  if (record == nullptr || record->binding_retired ||
       record->binding_id != captured.id ||
       record->binding != captured.generation) {
     status = Status::error(StatusCode::Conflict, "binding mapping changed");
@@ -1567,13 +1573,11 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
                          "physical TX already in flight");
   }
   {
-    // A raw autonomy send to this MAC may still owe a callback that would
-    // otherwise satisfy this reservation — refuse until it retires.
-    bool raw_outstanding = false;
+    // Keep the driver slot exclusive across raw and reserved traffic;
+    // an old callback must not complete this reservation.
     std::size_t kept = 0;
     for (std::size_t i = 0; i < raw_tx_count_; ++i) {
       if (now - raw_tx_[i].sent_ms < config_.node.callback_watchdog_ms) {
-        raw_outstanding |= raw_tx_[i].mac == peer_mac;
         raw_tx_[kept++] = raw_tx_[i];
         continue;
       }
@@ -1589,14 +1593,13 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
       }
       // Quarantine full: keep it outstanding — its MAC stays blocked
       // rather than losing callback tracking (X-02).
-      raw_outstanding |= raw_tx_[i].mac == peer_mac;
       raw_tx_[kept++] = raw_tx_[i];
     }
     raw_tx_count_ = kept;
-    if (raw_outstanding) {
+    if (raw_tx_count_ != 0) {
       portEXIT_CRITICAL(&callback_lock_);
       return Status::error(StatusCode::WouldBlock,
-                           "autonomy TX in flight to peer");
+                           "physical TX already in flight");
     }
   }
   if (tx_quarantined(peer_mac)) {
@@ -2217,7 +2220,8 @@ Status EspNowRuntime::release_driver_peer(const MacAddress& mac,
   evidence.other_lease_hold = raw_outstanding || channel_runner_.busy();
   evidence.topology_pin_live =
       node != kInvalidNodeId && discovery_ != nullptr &&
-      discovery_->topology_pinned(node);
+      (discovery_->topology_pinned(node) ||
+       discovery_->awaiting_probe_result(node));
   evidence.callbacks_drained =
       !evidence.tx_in_flight && !raw_outstanding && !quarantined && !fenced;
   portEXIT_CRITICAL(&callback_lock_);

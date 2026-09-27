@@ -120,10 +120,21 @@ class SimNetwork {
                             std::vector<std::uint8_t>(frame.data, frame.data + frame.size)});
     return routeloom::Status::success();
   }
+  const Pending* first_pending() const noexcept {
+    return queue.empty() ? nullptr : &queue.front();
+  }
+  bool pop_first_pending(Pending& out) {
+    if (queue.empty()) return false;
+    out = std::move(queue.front());
+    queue.pop_front();
+    return true;
+  }
 
   // Deterministic service-time steering: every TX completes `service_us`
   // µs after submission unless a test overrides it per-Pending (issue #46).
   std::uint64_t service_us{50};
+  // Deliver RX and its response before the sender's delayed DATA callback.
+  bool delay_data_callback{false};
 
   // Optional deterministic loss hook for the property tests (issue #19):
   // when non-null, flush() consults it once per queued frame and a true
@@ -378,7 +389,8 @@ inline std::size_t SimNetwork::flush(routeloom::MonotonicMs now) {
     std::size_t dropped = 0;
     constexpr std::size_t kFlushLimit = 10000;
     std::size_t processed = 0;
-    while (!queue.empty() && processed < kFlushLimit) {
+    std::vector<Pending> delayed_callbacks;
+    while ((!queue.empty() || !delayed_callbacks.empty()) && processed < kFlushLimit) {
       std::set<routeloom::NodeId> woken;
       while (!queue.empty() && processed < kFlushLimit) {
         ++processed;
@@ -459,7 +471,10 @@ inline std::size_t SimNetwork::flush(routeloom::MonotonicMs now) {
         } else {
           ++dropped;
         }
-        {
+        const bool delayed = delay_data_callback && success && pending.frame.size() > 4 &&
+                             pending.frame[4] == static_cast<std::uint8_t>(routeloom::FrameType::Data);
+        if (delayed) delayed_callbacks.push_back(pending);
+        if (!delayed) {
           // The simulated driver emits the same TX-complete observation the
           // real runtime's callback produces — driver service is measured
           // here, not inside on_radio_tx_result (02-telemetry §2.3).
@@ -475,9 +490,10 @@ inline std::size_t SimNetwork::flush(routeloom::MonotonicMs now) {
           obs.token = pending.token;
           (void)nodes.at(pending.from)->note_radio_tx(obs, now);
         }
-        (void)nodes.at(pending.from)
-            ->on_radio_tx_result(pending.token, success, now);
-        woken.insert(pending.from);
+        if (!delayed) {
+          (void)nodes.at(pending.from)->on_radio_tx_result(pending.token, success, now);
+          woken.insert(pending.from);
+        }
         if (success && silent_drop != nullptr && silent_drop(pending)) {
           ++dropped;
           continue;
@@ -493,8 +509,24 @@ inline std::size_t SimNetwork::flush(routeloom::MonotonicMs now) {
               pending.from,
               routeloom::ByteView{pending.frame.data(), pending.frame.size()},
               meta, now);
+          if (delayed) nodes.at(pending.to)->poll(now);
         }
       }
+      // The response queued by RX is drained before the delayed callback.
+      for (const Pending& pending : delayed_callbacks) {
+        if (nodes.count(pending.from) == 0) continue;
+        routeloom::RadioTxObservation obs{};
+        obs.peer = pending.to;
+        obs.submitted_us = static_cast<std::uint64_t>(now) * 1000u;
+        obs.completed_us = obs.submitted_us + pending.service_us;
+        obs.outcome = routeloom::RadioTxOutcome::Success;
+        obs.provenance = routeloom::ObservationProvenance::LocalDriver;
+        obs.token = pending.token;
+        (void)nodes.at(pending.from)->note_radio_tx(obs, now);
+        (void)nodes.at(pending.from)->on_radio_tx_result(pending.token, true, now);
+        woken.insert(pending.from);
+      }
+      delayed_callbacks.clear();
       // The queue is drained: every sender a completion reached wakes and
       // runs its post-drain poll — submissions from these polls land in
       // the queue the next iteration delivers.

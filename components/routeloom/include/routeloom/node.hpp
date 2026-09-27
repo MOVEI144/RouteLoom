@@ -1623,7 +1623,8 @@ class MeshNode {
     std::uint8_t result_size{0};
   };
 
-  enum class JobForm : std::uint8_t { Plain, Forwarded };
+  // Sealed keeps an origin's End envelope in the frame union for link retries.
+  enum class JobForm : std::uint8_t { Plain, Forwarded, Sealed };
   enum class JobOwner : std::uint8_t { None, OriginDelivery, Transit,
                                        GatewayService, Config, Diagnostic,
                                        Applied, Group, Bootstrap };
@@ -1896,6 +1897,9 @@ class MeshNode {
     // refuses with a BUSY. Without this reserve the refusal that most needs
     // backpressure finds no slot and degrades to a silent drop.
     static constexpr std::size_t kControlReserveSlots = 1;
+    // Two further pool slots remain available for route repair/refresh even
+    // when new DATA admissions saturate the scheduler.
+    static constexpr std::size_t kRouteReserveSlots = 2;
     static constexpr std::size_t kMaxJobsPerOrigin = 12;
     static constexpr std::size_t kMaxJobsPerScope = 12;
     // DRR: quantum per round per class = weight * 64 bytes of estimated
@@ -1927,6 +1931,9 @@ class MeshNode {
     // the deferral is applied when the TX result lands (03 §5).
     bool busy_deferred{false};
     std::uint32_t busy_retry_ms{0};
+    // RX can precede the MAC callback; retain the authenticated accept
+    // until the physical fence is released by that callback.
+    bool early_hop_accept{false};
   };
 
   struct AwaitingHop {
@@ -2221,6 +2228,8 @@ class MeshNode {
   void obs_final(const Delivery& delivery, DeliveryState state,
                  MonotonicMs now_ms) noexcept;
 
+  void finish_hop_accept(TxJob& job, bool rtt_sampled, std::uint32_t rtt_ms,
+                         MonotonicMs now_ms) noexcept;
   void handle_hop_accept(const wire::PlainFrame& frame, NodeId peer,
                          const RxBinding& rx, MonotonicMs now_ms) noexcept;
   void handle_data(const wire::LinkOpenedFrame& frame, NodeId peer,
