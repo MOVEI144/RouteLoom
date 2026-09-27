@@ -1195,6 +1195,9 @@ extern "C" void app_main(void) {
   // work (handshake/credit/partial-frame timeouts, TX pump) and the runtime
   // event drain, so no extra task can interleave bridge polls.
   static std::array<std::uint8_t, 512> rx{};
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+  std::uint64_t last_usb_stats_ms = 0;
+#endif
   for (;;) {
     const int received = usb_serial_jtag_read_bytes(
         rx.data(), rx.size(), pdMS_TO_TICKS(0));
@@ -1205,7 +1208,6 @@ extern "C" void app_main(void) {
     }
     bridge.poll(monotonic_now_ms());
 #if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
-    static std::uint64_t last_usb_stats_ms = 0;
     const std::uint64_t usb_stats_now = monotonic_now_ms();
     if (usb_stats_now - last_usb_stats_ms >= 2000) {
       last_usb_stats_ms = usb_stats_now;
