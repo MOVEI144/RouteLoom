@@ -1,13 +1,17 @@
 #pragma once
 
 // Storage ports of the SDK v1 stores (sdkv1_store.hpp) over a key/blob
-// namespace — the portable half of the `rlsec` NVS adapter
+// namespace — the portable half of the `rlsec`/`rlcfg` NVS adapter
 // (docs/design/sdk-v1/05 §5, 08 P1-3 follow-up / P7-1). The ESP-IDF
 // adapter (routeloom_espnow nvs_sdkv1_store) implements BlobNamespace with
 // nvs_open_from_partition("rlsec", …); host tests implement it with a fake
 // NVS. Keeping the slot/blob mapping here means the read-back contract is
 // exercised by host tests instead of only compiled for the device.
 //
+// BoardConfig uses partition `rlcfg`, namespace `board`, keys b0/b1;
+// BoardSecrets uses partition `rlkeys`, namespace `keys`, keys k0/k1
+// (design-devflow §4.1: config and secret material are separate durable
+// stores so app-only updates can never touch either).
 // NVS layout (partition `rlsec`, 05 §5.1):
 //   rlident  i0 / i1        RLI1 twin pair        (blob ≤ 664 B, slot 1024 B)
 //   rlsite   s0 / s1        RLS1 A/B pair         (blob ≤ 712 B, slot 1024 B)
@@ -52,6 +56,15 @@ namespace routeloom::sdkv1 {
 
 // Namespaces of the `rlsec` partition (05 §5.1). NVS limits namespace and
 // key names to 15 characters.
+// Public board configuration is isolated from rlsec in the rlcfg partition.
+inline constexpr char kBoardConfigPartition[] = "rlcfg";
+inline constexpr char kBoardConfigNamespace[] = "board";
+inline constexpr char kBoardConfigKey0[] = "b0";
+inline constexpr char kBoardConfigKey1[] = "b1";
+inline constexpr char kBoardSecretsPartition[] = "rlkeys";
+inline constexpr char kBoardSecretsNamespace[] = "keys";
+inline constexpr char kBoardSecretsKey0[] = "k0";
+inline constexpr char kBoardSecretsKey1[] = "k1";
 inline constexpr char kIdentityNamespace[] = "rlident";
 inline constexpr char kSiteNamespace[] = "rlsite";
 inline constexpr char kRevocationNamespace[] = "rlrevo";
@@ -108,7 +121,8 @@ class BlobNamespace {
 // target.size bytes (the blob must fit the view).
 Status read_blob_slot(BlobNamespace& blobs, const char* key, MutableByteView target) noexcept;
 
-// RecordSlotStorage (IdentityStore / SiteStore / RevocationStore) over the
+// RecordSlotStorage (BoardConfigStore / IdentityStore / SiteStore /
+// RevocationStore) over the
 // two keys of one namespace. `slot_bytes` is the store's slot view size
 // (kIdentitySlotBytes / kSiteSlotBytes / kRevocationSlotBytes); reads
 // with any other view size and writes larger than it are refused.
@@ -123,6 +137,8 @@ class BlobRecordSlotStorage final : public RecordSlotStorage {
   Status erase(std::uint8_t slot) noexcept override;
 
   // The fixed layouts above.
+  static BlobRecordSlotStorage board_config(BlobNamespace& blobs) noexcept;
+  static BlobRecordSlotStorage board_secrets(BlobNamespace& blobs) noexcept;
   static BlobRecordSlotStorage identity(BlobNamespace& blobs) noexcept;
   static BlobRecordSlotStorage site(BlobNamespace& blobs) noexcept;
   static BlobRecordSlotStorage revocation(BlobNamespace& blobs) noexcept;
