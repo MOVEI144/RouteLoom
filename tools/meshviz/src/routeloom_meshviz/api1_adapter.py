@@ -1,10 +1,14 @@
-"""Qt-free API1 line codec and nodes.list → reducer event normalization.
+"""Qt-free API1 line codec, observation queries, and nodes.list → reducer normalization.
 
 The gateway view is all today's API1 exposes: the physical links it proves are the
 gateway's direct neighbors, and its routes are logical next hops, never physical
 edges. Values the daemon reports as null stay null (displayed as unknown).
+
+The current meshviz snapshot parser renders the attached gateway's local
+observation. The daemon's remote pull requires OBSERVE on its network.
 """
 import json
+import re
 
 REQUEST_MAX_BYTES = 8192
 RESPONSE_MAX_BYTES = 65536
@@ -18,6 +22,89 @@ def encode_request(request_id: str, method: str, params: dict) -> bytes:
     if len(line) > REQUEST_MAX_BYTES:
         raise ValueError('API1 request too long')
     return line
+
+
+HEALTH_SECTIONS = ('system', 'tables', 'milestones')
+TOPOLOGY_SECTIONS = ('routes', 'neighbors', 'summary')
+OBSERVATION_MAX_AGE_MS = 60_000
+
+
+def _node_id(value, name):
+    if not isinstance(value, str) or len(value) != 16 or any(
+            char not in '0123456789abcdefABCDEF' for char in value):
+        raise ValueError(f'{name} must be a 16-hex node id')
+    return value.lower()
+
+
+def encode_health_request(request_id, observer, section='system', *, network=None,
+                           max_age_ms=None, subscribe=False):
+    """Builds one health.get line; only explicit options are sent."""
+    if section not in HEALTH_SECTIONS:
+        raise ValueError(f'section must be one of {HEALTH_SECTIONS}')
+    params = {'observer': _node_id(observer, 'observer'), 'section': section}
+    if network is not None:
+        params['network'] = _node_id(network, 'network')
+    if max_age_ms is not None:
+        if type(max_age_ms) is not int or not 0 <= max_age_ms <= OBSERVATION_MAX_AGE_MS:
+            raise ValueError('max_age_ms must be an integer 0..=60000')
+        params['max_age_ms'] = max_age_ms
+    if subscribe:
+        params['subscribe'] = True
+    return encode_request(request_id, 'health.get', params)
+
+
+def encode_topology_request(request_id, observer, section, *, destination=None, cursor=None,
+                             network=None, max_age_ms=None, subscribe=False):
+    """Builds one topology.get line; only explicit options are sent."""
+    if section not in TOPOLOGY_SECTIONS:
+        raise ValueError(f'section must be one of {TOPOLOGY_SECTIONS}')
+    params = {'observer': _node_id(observer, 'observer'), 'section': section}
+    if destination is not None and cursor is not None:
+        raise ValueError('destination and cursor are mutually exclusive')
+    if destination is not None:
+        params['destination'] = _node_id(destination, 'destination')
+        if params['destination'] in ('0000000000000000', 'ffffffffffffffff'):
+            raise ValueError('destination must be a non-reserved node id')
+    if cursor is not None:
+        if not isinstance(cursor, str) or not re.fullmatch(
+                r'[0-9a-fA-F]{16}\.[0-9a-fA-F]{8}(\.[0-9a-fA-F]{16}){4}\.[0-9a-fA-F]{2}',
+                cursor):
+            raise ValueError('cursor must be an observation page token')
+        params['cursor'] = cursor.lower()
+    if section not in ('routes', 'neighbors') and (
+            destination is not None or cursor is not None):
+        raise ValueError('destination and cursor are routes/neighbors-only')
+    if network is not None:
+        params['network'] = _node_id(network, 'network')
+    if max_age_ms is not None:
+        if type(max_age_ms) is not int or not 0 <= max_age_ms <= OBSERVATION_MAX_AGE_MS:
+            raise ValueError('max_age_ms must be an integer 0..=60000')
+        params['max_age_ms'] = max_age_ms
+    if subscribe:
+        params['subscribe'] = True
+    return encode_request(request_id, 'topology.get', params)
+
+
+def parse_observation_snapshot(reply, section):
+    """Unwraps one health.get/topology.get snapshot; the envelope is checked, not trusted.
+
+    Returns the snapshot dict (source, revision, freshness plus the section body or
+    route entries). A daemon error or a malformed envelope raises ValueError — the
+    caller must not render a partial snapshot as a complete one.
+    """
+    if not isinstance(reply, dict) or reply.get('ok') is not True:
+        error = reply.get('error') if isinstance(reply, dict) else None
+        code = error.get('code') if isinstance(error, dict) else 'invalid reply'
+        raise ValueError(f'observation query failed: {code}')
+    result = reply.get('result')
+    snapshot = result.get('snapshot') if isinstance(result, dict) else None
+    if (not isinstance(result, dict) or result.get('outcome') != 'snapshot' or
+            not isinstance(snapshot, dict) or snapshot.get('schema') != 1 or
+            snapshot.get('section') != section or
+            not isinstance(snapshot.get('source'), dict) or
+            snapshot['source'].get('transport') != 'usb_local'):
+        raise ValueError('malformed observation snapshot')
+    return snapshot
 
 
 class LineDecoder:

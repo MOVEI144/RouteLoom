@@ -342,6 +342,16 @@ target_include_directories(routeloom_node_status_tests PRIVATE ${CMAKE_CURRENT_S
 target_compile_options(routeloom_node_status_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_node_status_tests COMMAND routeloom_node_status_tests)
 
+# Read-only device observation (observation_v1, dev-flow D05): route-detail
+# accessors, fill helpers, digests and the 0x70-0x72 codecs, with an
+# explicit proof that observation reads never move route selection, leases
+# or the advertisement baseline.
+add_executable(routeloom_observation_tests test_observation.cpp)
+target_link_libraries(routeloom_observation_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_observation_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_observation_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_observation_tests COMMAND routeloom_observation_tests)
+
 # Bounded persistent peer state (issue #37, docs/design/sdk-v1/05-nvs-state-37.md
 # §4 / plan P0-2): TX counter sweep behind a durable witness, per-peer caps,
 # NVS entry budget arithmetic, and a 200-peer churn against a fixed-capacity

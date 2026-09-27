@@ -1,6 +1,8 @@
 //! m1 diagnostics HostOps codec (subcommands 0x30/0x31): a
-//! DiagnosticRequest tunnels one TelemetryQuery to an observer and the
-//! DiagnosticResponse carries a TelemetrySnapshot or DiagnosticReject.
+//! DiagnosticRequest tunnels one TelemetryQuery (or one
+//! RemoteObservationQuery) to an observer and the DiagnosticResponse
+//! carries a TelemetrySnapshot, a RemoteObservationSnapshot or a
+//! DiagnosticReject.
 //! Byte-identical to the device side in
 //! `components/routeloom/{include/routeloom/{usb_host_ops,telemetry}.hpp,src/{usb_host_ops,telemetry}.cpp}`.
 //!
@@ -31,6 +33,8 @@ pub const DIAG_BODY_VERSION: u8 = 1;
 pub const DIAG_SUB_TELEMETRY_QUERY: u8 = 3;
 pub const DIAG_SUB_TELEMETRY_SNAPSHOT: u8 = 4;
 pub const DIAG_SUB_DIAGNOSTIC_REJECT: u8 = 6;
+pub const DIAG_SUB_REMOTE_OBSERVATION_QUERY: u8 = 7;
+pub const DIAG_SUB_REMOTE_OBSERVATION_SNAPSHOT: u8 = 8;
 pub const DIAG_PREFIX_SIZE: usize = 4;
 
 pub const QUERY_BODY_SIZE: usize = 24;
@@ -150,10 +154,31 @@ pub fn encode_diagnostic_request(
     observer: u64,
     query: &TelemetryQuery,
 ) -> Result<Vec<u8>, HostOpsError> {
+    check_query(query)?;
+    let mut query_body = Vec::with_capacity(QUERY_BODY_SIZE);
+    query_body.extend_from_slice(&[DIAG_BODY_VERSION, DIAG_SUB_TELEMETRY_QUERY, 0, 0]);
+    query_body.extend_from_slice(&query.request_id.to_be_bytes());
+    query_body.extend_from_slice(&query.peer.to_be_bytes());
+    query_body.push(query.direction);
+    query_body.push(query.length_class);
+    query_body.extend_from_slice(&0_u16.to_be_bytes());
+    query_body.extend_from_slice(&query.max_age_ms.to_be_bytes());
+    encode_diagnostic_request_raw(observer, &query_body)
+}
+
+/// 0x30 DIAGNOSTIC_REQUEST (H→G) around an already-encoded diagnostic
+/// query body (telemetry subtype 3 or remote-observation subtype 7).
+/// The typed encoder above is this with the body builder inlined.
+pub fn encode_diagnostic_request_raw(
+    observer: u64,
+    query_body: &[u8],
+) -> Result<Vec<u8>, HostOpsError> {
     if reserved_id(observer) {
         return Err(HostOpsError::Invalid("observer"));
     }
-    check_query(query)?;
+    if query_body.len() != QUERY_BODY_SIZE {
+        return Err(HostOpsError::LengthMismatch);
+    }
     let mut out = Vec::with_capacity(INNER_HEAD_SIZE + REQUEST_FIXED + QUERY_BODY_SIZE);
     head(
         &mut out,
@@ -161,13 +186,7 @@ pub fn encode_diagnostic_request(
         REQUEST_FIXED + QUERY_BODY_SIZE,
     );
     out.extend_from_slice(&observer.to_be_bytes());
-    out.extend_from_slice(&[DIAG_BODY_VERSION, DIAG_SUB_TELEMETRY_QUERY, 0, 0]);
-    out.extend_from_slice(&query.request_id.to_be_bytes());
-    out.extend_from_slice(&query.peer.to_be_bytes());
-    out.push(query.direction);
-    out.push(query.length_class);
-    out.extend_from_slice(&0_u16.to_be_bytes());
-    out.extend_from_slice(&query.max_age_ms.to_be_bytes());
+    out.extend_from_slice(query_body);
     Ok(out)
 }
 

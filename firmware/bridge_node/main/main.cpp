@@ -9,14 +9,17 @@
 #include "driver/usb_serial_jtag.h"
 #include "esp_app_desc.h"
 #include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_random.h"
+#include "esp_rom_sys.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "soc/reset_reasons.h"
 #include "esp_wifi.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -190,6 +193,219 @@ RTC_NOINIT_ATTR routeloom::FailStreak s_fail;
 routeloom::MonotonicMs monotonic_now_ms() noexcept {
   return static_cast<routeloom::MonotonicMs>(esp_timer_get_time() / 1000);
 }
+
+// --- Read-only device observation (observation_v1) ----------------------------
+// The USB health/milestone/topology surface: heap and reset cause from
+// ESP-IDF, table occupancy from the MeshNode, sessions and join milestones
+// from the security coordinator (owner builds; the legacy profile reports
+// those unknown). Single-threaded with the pump loop; no heap, no locks,
+// and every fill is const over the node's tables.
+class EspSystemHealthPort final : public routeloom::SystemHealthPort {
+ public:
+  std::uint32_t heap_free_bytes() const noexcept override {
+    return static_cast<std::uint32_t>(esp_get_free_heap_size());
+  }
+  std::uint32_t heap_min_bytes() const noexcept override {
+    return static_cast<std::uint32_t>(esp_get_minimum_free_heap_size());
+  }
+  std::uint32_t heap_largest_bytes() const noexcept override {
+    return static_cast<std::uint32_t>(
+        heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+  }
+  std::uint8_t reset_code() const noexcept override {
+    // Mask-ROM reason, never esp_reset_reason(): the cached IDF API pulls
+    // reset_reason.c (IRAM .text + .data + assert literals ≈ 164 B of
+    // guarded DRAM), and its panic/brownout/WDT hint refines nothing here
+    // anyway — the setter is a weak no-op unless that object is linked, so
+    // a panic-induced software reset honestly reads as software.
+    switch (esp_rom_get_reset_reason(0)) {
+      case RESET_REASON_CHIP_POWER_ON:
+        return routeloom::kResetPowerOn;
+      case RESET_REASON_CORE_SW:
+      case RESET_REASON_CPU0_SW:
+        return routeloom::kResetSoftware;
+      case RESET_REASON_CORE_MWDT0:
+      case RESET_REASON_CORE_MWDT1:
+      case RESET_REASON_CORE_RTC_WDT:
+      case RESET_REASON_CPU0_MWDT0:
+      case RESET_REASON_CPU0_MWDT1:
+      case RESET_REASON_CPU0_RTC_WDT:
+      case RESET_REASON_SYS_RTC_WDT:
+      case RESET_REASON_SYS_SUPER_WDT:
+        return routeloom::kResetWatchdog;
+      case RESET_REASON_CORE_DEEP_SLEEP:
+        return routeloom::kResetDeepSleepWake;
+      case RESET_REASON_SYS_BROWN_OUT:
+        return routeloom::kResetBrownout;
+      case RESET_REASON_CORE_EFUSE_CRC:
+      case RESET_REASON_CORE_USB_UART:
+      case RESET_REASON_CORE_USB_JTAG:
+#if CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32S3
+      case RESET_REASON_SYS_CLK_GLITCH:
+      case RESET_REASON_CORE_PWR_GLITCH:
+#endif
+#if CONFIG_IDF_TARGET_ESP32C5
+      case RESET_REASON_CPU0_JTAG:
+      case RESET_REASON_CORE_PWR_GLITCH:
+      case RESET_REASON_CPU0_LOCKUP:
+#endif
+        return routeloom::kResetOther;
+      default:
+        return routeloom::kResetUnknown;
+    }
+  }
+};
+
+class BridgeObservationSource final : public routeloom::ObservationSource {
+ public:
+  // LEGACY_FIXTURE builds compile the coordinator out entirely, so the
+  // source takes no coordinator there; every mode below degrades to the
+  // same zero/unknown values the null coordinator yields elsewhere.
+  BridgeObservationSource(
+      const routeloom::MeshNode& node,
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+      const routeloom::sdkv1::SecurityCoordinator* coordinator,
+#endif
+      const routeloom::SystemHealthPort& port, std::uint64_t boot_id,
+      std::uint8_t profile) noexcept
+      : node_(node),
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+        coordinator_(coordinator),
+#endif
+        port_(port),
+        boot_id_(boot_id),
+        profile_(profile) {}
+
+  bool fill_system(routeloom::MonotonicMs now_ms,
+                   routeloom::ObservationSystem& out) const noexcept override {
+    std::uint8_t power = routeloom::kPowerRunning;
+    std::uint8_t mode = routeloom::kCoordModeUnknown;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    if (coordinator_ != nullptr) {
+      const routeloom::sdkv1::CoordinatorSnapshot snapshot =
+          coordinator_->snapshot();
+      power = snapshot.sleeping ? routeloom::kPowerSleeping
+                                : routeloom::kPowerRunning;
+      mode = map_mode(snapshot.mode);
+    }
+#endif
+    routeloom::fill_observation_system(boot_id_, now_ms, port_, power, mode,
+                                       profile_, out);
+    return true;
+  }
+
+  bool fill_tables(routeloom::MonotonicMs now_ms,
+                   routeloom::ObservationTables& out) const noexcept override {
+    std::uint16_t link = 0, link_cap = 0, end = 0, end_cap = 0;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    if (coordinator_ != nullptr) {
+      const routeloom::sdkv1::CoordinatorSnapshot snapshot =
+          coordinator_->snapshot();
+      link = snapshot.link_sessions > UINT16_MAX
+                 ? UINT16_MAX
+                 : static_cast<std::uint16_t>(snapshot.link_sessions);
+      end = snapshot.end_sessions > UINT16_MAX
+                ? UINT16_MAX
+                : static_cast<std::uint16_t>(snapshot.end_sessions);
+      link_cap = static_cast<std::uint16_t>(
+          routeloom::sdkv1::GatewaySessionBank::link_capacity());
+      end_cap = static_cast<std::uint16_t>(
+          routeloom::sdkv1::GatewaySessionBank::end_capacity());
+    }
+#endif
+    routeloom::fill_observation_tables(node_, now_ms, link, link_cap, end,
+                                       end_cap, out);
+    return true;
+  }
+
+  bool fill_milestones(routeloom::MonotonicMs now_ms,
+                       routeloom::JoinMilestones& out) const noexcept override {
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    out = coordinator_ != nullptr ? coordinator_->milestones(now_ms)
+                                  : routeloom::JoinMilestones{};
+#else
+    static_cast<void>(now_ms);
+    out = routeloom::JoinMilestones{};
+#endif
+    return true;
+  }
+
+  bool fill_summary(routeloom::MonotonicMs now_ms,
+                    routeloom::ObservationSummary& out) const noexcept override {
+    // The milestone generation is bridge-owned; the bridge overwrites the
+    // zero this helper leaves before the page goes out.
+    routeloom::fill_observation_summary(node_, now_ms, 0, out);
+    out.neighbor_digest = routeloom::observation_neighbor_source_digest(*this, now_ms);
+    return true;
+  }
+
+  std::size_t route_detail_page(
+      routeloom::NodeId after, routeloom::RouteDetailEntry* out,
+      std::size_t capacity, routeloom::MonotonicMs now_ms,
+      bool& more) const noexcept override {
+    return node_.route_detail_page(after, out, capacity, now_ms, more);
+  }
+
+  bool route_detail_exact(routeloom::NodeId destination,
+                          routeloom::MonotonicMs now_ms,
+                          routeloom::RouteDetailEntry& out) const noexcept override {
+    return node_.route_detail(destination, now_ms, out);
+  }
+
+  std::size_t neighbor_detail_page(
+      routeloom::NodeId after, routeloom::NeighborDetailEntry* out,
+      std::size_t capacity, routeloom::MonotonicMs now_ms,
+      bool& more) const noexcept override {
+    return routeloom::neighbor_detail_page(node_, live_discovery(), after, out,
+                                           capacity, now_ms, more);
+  }
+
+  bool neighbor_detail_exact(routeloom::NodeId peer,
+                             routeloom::MonotonicMs now_ms,
+                             routeloom::NeighborDetailEntry& out) const noexcept override {
+    return routeloom::neighbor_detail_exact(node_, live_discovery(), peer,
+                                            now_ms, out);
+  }
+
+ private:
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  static std::uint8_t map_mode(
+      routeloom::sdkv1::CoordinatorMode mode) noexcept {
+    switch (mode) {
+      case routeloom::sdkv1::CoordinatorMode::Fresh:
+        return routeloom::kCoordModeFresh;
+      case routeloom::sdkv1::CoordinatorMode::ZeroTouch:
+        return routeloom::kCoordModeZeroTouch;
+      case routeloom::sdkv1::CoordinatorMode::Member:
+        return routeloom::kCoordModeMember;
+      case routeloom::sdkv1::CoordinatorMode::Dev:
+        return routeloom::kCoordModeDev;
+      case routeloom::sdkv1::CoordinatorMode::Removed:
+        return routeloom::kCoordModeRemoved;
+      case routeloom::sdkv1::CoordinatorMode::Recovery:
+        return routeloom::kCoordModeRecovery;
+    }
+    return routeloom::kCoordModeUnknown;
+  }
+#endif
+
+  // Live discovery for neighbor phase/lease (null without a coordinator
+  // or before it attaches one — rows then read phase/lease unknown).
+  const routeloom::NeighborDiscovery* live_discovery() const noexcept {
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    if (coordinator_ != nullptr) return coordinator_->discovery();
+#endif
+    return nullptr;
+  }
+
+  const routeloom::MeshNode& node_;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  const routeloom::sdkv1::SecurityCoordinator* coordinator_;
+#endif
+  const routeloom::SystemHealthPort& port_;
+  std::uint64_t boot_id_;
+  std::uint8_t profile_;
+};
 
 }  // namespace
 
@@ -793,6 +1009,53 @@ extern "C" void app_main(void) {
     if (!status) fail(status.detail);
   }
 
+  // Device observation (observation_v1, meshviz §2.4-§2.5): the bridge
+  // answers HostOps 0x70 read-only queries — system health, table
+  // occupancy, join milestones, topology summary and paginated
+  // selected-route detail — and, once the host subscribes, streams 0x72
+  // topology/milestone change events. Without the bit the query answers
+  // Unsupported and no event is emitted.
+  // app_main frame, not function statics: these outlive everything
+  // (app_main never returns; the bridge/coordinator they borrow are
+  // constructed above) and statics would cost .bss plus 8 B guards each
+  // against the DRAM floor. The 8 KB task absorbs 36 B at its root. They
+  // live at function scope (never inside the attach if below): the bridge
+  // borrows the source past it.
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  // No coordinator exists in this mode, so neither the pointer nor the
+  // type is named here; the source degrades to zero/unknown milestones.
+  constexpr std::uint8_t observation_profile =
+      routeloom::kProfileLegacyFixture;
+#else
+  const routeloom::sdkv1::SecurityCoordinator* observation_coordinator =
+      &owner.coordinator();
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+  constexpr std::uint8_t observation_profile =
+      routeloom::kProfileMemberEdhoc;
+#else
+  constexpr std::uint8_t observation_profile = routeloom::kProfileDevRam;
+#endif
+#endif
+  EspSystemHealthPort observation_port;
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  BridgeObservationSource observation_source(
+      runtime.node(), observation_port, bridge_config.boot_id,
+      observation_profile);
+#else
+  BridgeObservationSource observation_source(
+      runtime.node(), observation_coordinator, observation_port,
+      bridge_config.boot_id, observation_profile);
+#endif
+  if ((bridge_config.capability & routeloom::usb::kCapObservationV1) != 0) {
+    status = bridge.attach_observation(observation_source);
+    if (!status) fail(status.detail);
+  }
+  // Receive assurance rides the same profile id the observation source
+  // reports: per-delivery origin-verification evidence on DataFromMesh
+  // once the host enables 0x08 (legacy shape otherwise).
+  status = bridge.set_rx_assurance_profile(observation_profile);
+  if (!status) fail(status.detail);
+
   // Group delivery (group_delivery_v1): the bridge answers HostOps 0x50
   // GROUP_SEND / 0x52 GROUP_QUERY with 0x51 summaries. The node itself
   // refuses a send unless it is a route gateway of the gateway-scoped
@@ -932,6 +1195,9 @@ extern "C" void app_main(void) {
   // work (handshake/credit/partial-frame timeouts, TX pump) and the runtime
   // event drain, so no extra task can interleave bridge polls.
   static std::array<std::uint8_t, 512> rx{};
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+  std::uint64_t last_usb_stats_ms = 0;
+#endif
   for (;;) {
     const int received = usb_serial_jtag_read_bytes(
         rx.data(), rx.size(), pdMS_TO_TICKS(0));
@@ -942,7 +1208,6 @@ extern "C" void app_main(void) {
     }
     bridge.poll(monotonic_now_ms());
 #if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
-    static std::uint64_t last_usb_stats_ms = 0;
     const std::uint64_t usb_stats_now = monotonic_now_ms();
     if (usb_stats_now - last_usb_stats_ms >= 2000) {
       last_usb_stats_ms = usb_stats_now;
