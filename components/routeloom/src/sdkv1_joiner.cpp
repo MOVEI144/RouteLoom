@@ -76,12 +76,11 @@ bool boot_valid(const JoinBootInput& boot) noexcept {
 // --- Lifetime -------------------------------------------------------------------------------
 
 Joiner::Joiner(const JoinerConfig& config, IdentityStore& identity, SiteStore& site,
-               RevocationStore& revocations, EntropySource& entropy, ZtRld1Port& port,
+               RevocationStore&, EntropySource& entropy, ZtRld1Port& port,
                JoinObserver& observer, const edhoc::AeadCcm* aead) noexcept
     : config_(config),
       identity_(identity),
       site_(site),
-      revocations_(revocations),
       entropy_(entropy),
       observer_(observer),
       aead_(aead),

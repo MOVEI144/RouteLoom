@@ -247,8 +247,6 @@ struct JoinSnapshot {
 // --- The FSM ---------------------------------------------------------------------------------------
 class Joiner final {
  public:
-  // `revocations` backs the cross-network reissue adopt: a set bound to
-  // a superseded network drops (fresh RRS state) with the site commit.
   Joiner(const JoinerConfig& config, IdentityStore& identity, SiteStore& site,
          RevocationStore& revocations, EntropySource& entropy, ZtRld1Port& port,
          JoinObserver& observer, const edhoc::AeadCcm* aead = nullptr) noexcept;
@@ -371,7 +369,6 @@ class Joiner final {
   JoinerConfig config_{};
   IdentityStore& identity_;
   SiteStore& site_;
-  RevocationStore& revocations_;
   EntropySource& entropy_;
   JoinObserver& observer_;
   const edhoc::AeadCcm* aead_{nullptr};

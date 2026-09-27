@@ -530,9 +530,14 @@ MonotonicMs RouteTable::selection_expires_at(const NodeId destination) const noe
   const RouteSelection selection = select(*entry);
   if (!selection.valid) return 0;
   for (const auto& candidate : entry->candidates) {
-    if (candidate.valid && candidate.next_hop == selection.next_hop) return candidate.expires_at_ms;
+    if (candidate.valid && candidate.next_hop == selection.next_hop &&
+        candidate.sequence == selection.sequence) {
+      return candidate.expires_at_ms;
+    }
   }
   return 0;
+}
+
 bool RouteTable::selection_remaining(const NodeId destination, const MonotonicMs now_ms,
                                      MonotonicMs& remaining_ms) const noexcept {
   remaining_ms = 0;

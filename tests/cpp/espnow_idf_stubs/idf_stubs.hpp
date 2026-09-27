@@ -31,6 +31,8 @@ void set_mac(const std::uint8_t mac[6]) noexcept;
 // destination would silently discard real RLD1 traffic.
 bool inject_rx(const std::uint8_t source[6], const std::uint8_t dest[6],
                const std::uint8_t* frame, std::size_t length) noexcept;
+bool inject_rx(const std::uint8_t source[6], const std::uint8_t* frame,
+               std::size_t length) noexcept;
 // Complete the oldest uncompleted esp_now_send through the registered
 // send callback, as the driver would. Destinations attribute in send
 // order even after take_tx drained the capture queue. No-op when nothing

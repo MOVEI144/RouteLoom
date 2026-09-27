@@ -573,6 +573,7 @@ add_executable(routeloom_owner_mesh_peer owner_mesh_peer.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_security_owner.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1_entropy.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_board_config.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_sdkv1_store.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_boot_session.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_legacy_purge.cpp)

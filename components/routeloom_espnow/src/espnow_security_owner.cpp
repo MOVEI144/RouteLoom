@@ -1761,7 +1761,9 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
     // reboot on the same durable state: post-reboot the node starts
     // fresh and the adopt below succeeds.
     if (status.code == StatusCode::InvalidState && runtime_->node().started() &&
-        adopted_network_ != 0 && adopted_role_ != 0 && member.network != adopted_network_) {
+        adopted_network_ != 0 && adopted_role_ != 0 && member.network != adopted_network_ &&
+        stores_ != nullptr && stores_->site().has_site() &&
+        stores_->site().site().network == member.network) {
       reboot_for_lifecycle("member re-adopt");
     }
     ESP_LOGE(config_.log_tag, "member node adopt failed: %s", status.detail);

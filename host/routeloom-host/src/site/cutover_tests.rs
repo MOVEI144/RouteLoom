@@ -366,18 +366,11 @@ fn adopt_route_report(
 fn inject_applied(service: &SiteService, op: u64, node: u64, at: u64) -> bool {
     let (commit_object, commit_rs) = service
         .with(|a| {
-            let state = a
-                .operations
-                .get(&op)
-                .unwrap()
-                .cutover
-                .as_ref()
-                .unwrap();
+            let state = a.operations.get(&op).unwrap().cutover.as_ref().unwrap();
             (state.commit_object.clone(), state.commit_rs_epoch)
         })
         .0;
-    let new_network =
-        (u64::from(testkit::SITE_EPOCH + 1) << 32) | u64::from(testkit::NETWORK_LOW);
+    let new_network = (u64::from(testkit::SITE_EPOCH + 1) << 32) | u64::from(testkit::NETWORK_LOW);
     let receipt = Receipt {
         head: Head {
             phase: Phase::Applied,
@@ -404,13 +397,7 @@ fn inject_applied(service: &SiteService, op: u64, node: u64, at: u64) -> bool {
 fn inject_commit_stored(service: &SiteService, op: u64, node: u64, at: u64) -> bool {
     let (commit_object, commit_rs) = service
         .with(|a| {
-            let state = a
-                .operations
-                .get(&op)
-                .unwrap()
-                .cutover
-                .as_ref()
-                .unwrap();
+            let state = a.operations.get(&op).unwrap().cutover.as_ref().unwrap();
             (state.commit_object.clone(), state.commit_rs_epoch)
         })
         .0;
@@ -2043,22 +2030,23 @@ fn cutover_commits_leaf_first_over_the_route_tree() {
             .collect::<Vec<_>>()
     };
     let mut at = committed_at;
-    let pump = |sends: &Arc<Mutex<GrantSends>>, service: &SiteService, at: &mut u64, want: usize| {
-        for _ in 0..12 {
-            let n = sends
-                .lock()
-                .unwrap()
-                .grants
-                .iter()
-                .filter(|(_, _, b)| b[1] == Phase::Commit as u8)
-                .count();
-            if n == want {
-                break;
+    let pump =
+        |sends: &Arc<Mutex<GrantSends>>, service: &SiteService, at: &mut u64, want: usize| {
+            for _ in 0..12 {
+                let n = sends
+                    .lock()
+                    .unwrap()
+                    .grants
+                    .iter()
+                    .filter(|(_, _, b)| b[1] == Phase::Commit as u8)
+                    .count();
+                if n == want {
+                    break;
+                }
+                *at += 100;
+                tick(service, *at);
             }
-            *at += 100;
-            tick(service, *at);
-        }
-    };
+        };
     // The two leaves go first, in target order; relays hold.
     pump(&sends, &service, &mut at, 2);
     assert_eq!(commits(), vec![leaf, branch]);
@@ -2092,7 +2080,14 @@ fn cutover_cycle_defers_early_without_blocking_the_chain() {
     let gw = testkit::GATEWAY;
     let (op, sends) = start_tree(&service, &transport, "cut-cycle", &[r, leaf, m, n]);
     for (node, parent) in [(r, gw), (leaf, r), (m, n), (n, m)] {
-        assert!(adopt_route_report(&service, op, node, gw, parent, T0 + 20_000));
+        assert!(adopt_route_report(
+            &service,
+            op,
+            node,
+            gw,
+            parent,
+            T0 + 20_000
+        ));
     }
     let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
     tick(&service, committed_at);
@@ -2332,7 +2327,10 @@ fn cutover_queries_only_late_prepare_and_never_gateways() {
     let started = T0 + 10_000;
     // Early and mid window: nothing asks, even fully PREPARED.
     tick(&service, started + 100_000);
-    tick(&service, started + CUTOVER_PREPARE_WINDOW_MS - CUTOVER_ROUTE_QUERY_WINDOW_MS - 1_000);
+    tick(
+        &service,
+        started + CUTOVER_PREPARE_WINDOW_MS - CUTOVER_ROUTE_QUERY_WINDOW_MS - 1_000,
+    );
     assert!(queries().is_empty(), "no early queries");
     // The last minute: the member gets exactly one query; the gateway
     // never does.
@@ -2415,10 +2413,18 @@ fn cutover_straggler_recovers_through_the_reissue() {
     // grace into RecoveryPending.
     tick(&service, committed_at + 41_000);
     tick(&service, committed_at + 41_100);
-    assert!(inject_applied(&service, op, gateway.node, committed_at + 41_100));
+    assert!(inject_applied(
+        &service,
+        op,
+        gateway.node,
+        committed_at + 41_100
+    ));
     tick(&service, committed_at + 61_000);
     let view = operation(&service, op, committed_at + 61_000);
-    assert_eq!(view.get("phase").unwrap().as_str(), Some("recovery_pending"));
+    assert_eq!(
+        view.get("phase").unwrap().as_str(),
+        Some("recovery_pending")
+    );
     assert_eq!(view.get("unknown").unwrap().as_u64(), Some(1));
     // The straggler comes back on its old RLS1: reissued, no KGuard —
     // but the reissue alone is not recovery evidence.
@@ -2497,8 +2503,7 @@ fn cutover_straggler_recovers_through_the_reissue() {
         )
     });
     answer.unwrap();
-    let new_network =
-        (u64::from(testkit::SITE_EPOCH + 1) << 32) | u64::from(testkit::NETWORK_LOW);
+    let new_network = (u64::from(testkit::SITE_EPOCH + 1) << 32) | u64::from(testkit::NETWORK_LOW);
     let (rs_epoch, digest) = service
         .with(|a| {
             let dist = a

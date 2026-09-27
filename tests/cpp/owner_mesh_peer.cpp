@@ -960,9 +960,6 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
   put_u32(out, joiner.counters.attempts);
   put_u32(out, joiner.counters.m1_sent);
   put_u32(out, joiner.counters.rx_dropped);
-  // TEMPORARY D04 debug (revert before commit): runtime RX drops.
-  put_u32(out, runtime.bootstrap_rx_dropped());
-  put_u32(out, runtime.rx_dropped());
   write_frame(out);
 }
 

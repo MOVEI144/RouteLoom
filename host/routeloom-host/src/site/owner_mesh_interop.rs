@@ -204,14 +204,14 @@ impl MeshSite {
                 let outbound = outbound_tx.clone();
                 thread::spawn(move || {
                     let _ = serve_client(
-                        stream,
+                        routeloom_peercred::IpcStream::from_unix(stream),
                         state,
                         outbound,
                         0,
                         Arc::new(AtomicU64::new(1)),
                         Arc::new(AtomicU64::new(1)),
                         Arc::new(Mutex::new(DeviceSession::new())),
-                        uid,
+                        uid.map(routeloom_peercred::Principal::UnixUid),
                     );
                 });
             }
@@ -887,9 +887,6 @@ struct MeshSnap {
     j_attempts: u32,
     j_m1: u32,
     j_dropped: u32,
-    // TEMPORARY D04 debug (revert before commit).
-    rt_boot_drop: u32,
-    rt_rx_drop: u32,
 }
 
 #[allow(dead_code)]
@@ -1021,8 +1018,6 @@ fn parse_mesh_snap(payload: &[u8]) -> MeshSnap {
     snap.j_attempts = get_u32(payload, &mut pos);
     snap.j_m1 = get_u32(payload, &mut pos);
     snap.j_dropped = get_u32(payload, &mut pos);
-    snap.rt_boot_drop = get_u32(payload, &mut pos);
-    snap.rt_rx_drop = get_u32(payload, &mut pos);
     assert_eq!(pos, payload.len(), "G fully consumed");
     snap
 }
@@ -1318,21 +1313,6 @@ impl MeshPeer {
         command.extend_from_slice(payload);
         self.send(&command);
     }
-
-    /// A harness-driven power cut (D04 C3): the peer persists its NVS
-    /// image and exits with the reboot marker; the respawn recovers
-    /// from flash through the production boot path. Any other exit is
-    /// a crash. Like a lifecycle reboot this bumps `reboots` — tests
-    /// that power-cycle account for the extra respawn.
-    fn power_cycle(&mut self, now: u64) {
-        self.send(&[b'P']);
-        assert!(
-            self.recv().is_none(),
-            "peer {:x} answered a power cut",
-            self.node
-        );
-        self.respawn(now);
-    }
 }
 
 /// The switched radio: `audible[from][to]` plus same-channel delivery.
@@ -1501,7 +1481,13 @@ impl UsbHost {
         request
     }
 
-    fn queue_join_down(&mut self, join: &Arc<UsbSiteAdapter>, key: RelayKey, terminal: bool, body: Vec<u8>) {
+    fn queue_join_down(
+        &mut self,
+        join: &Arc<UsbSiteAdapter>,
+        key: RelayKey,
+        terminal: bool,
+        body: Vec<u8>,
+    ) {
         let request = self.request;
         self.request += 1;
         self.pending.push(PendingFrame {
@@ -1533,11 +1519,7 @@ impl UsbHost {
             SUB_JOIN_RELAY_UP => match join.handle_up(inner, now) {
                 Ok(UpOutcome::Relay(up)) => {
                     self.join_ups_seen += 1;
-                    for (_, fields) in service.handle_up_time(up, HostTime::sync(now)) {
-                        if fields.contains("member.reissued") || fields.contains("Removed") {
-                            eprintln!("zt-dbg t={now} {fields}");
-                        }
-                    }
+                    let _ = service.handle_up_time(up, HostTime::sync(now));
                 }
                 Ok(UpOutcome::ProxyAbort { key }) => {
                     let _ = service.with(|a| {
@@ -1548,9 +1530,8 @@ impl UsbHost {
             },
             SUB_JOIN_RELAY_ABORT => {
                 if let Ok(AbortOutcome::RelayOver { key, reason }) = join.handle_abort(inner) {
-                    let _ = service.with(|a| {
-                        a.fail_relay(key, "gateway_abort", format!("{reason:?}"), now)
-                    });
+                    let _ = service
+                        .with(|a| a.fail_relay(key, "gateway_abort", format!("{reason:?}"), now));
                 }
             }
             SUB_JOIN_RELAY_RESULT => {
@@ -1558,9 +1539,7 @@ impl UsbHost {
                     let result_code = decode_join_relay_result(inner)
                         .map(|result| format!("{:?}", result.result))
                         .unwrap_or_else(|_| "Malformed".to_string());
-                    let _ = service.with(|a| {
-                        a.fail_relay(key, "down_admission", result_code, now)
-                    });
+                    let _ = service.with(|a| a.fail_relay(key, "down_admission", result_code, now));
                 }
             }
             _ => {
@@ -1701,8 +1680,6 @@ struct MeshWorld {
     usb_auth_total: u64,
     /// Delayed switch deliveries: (release_at, delivery).
     delayed: Vec<(u64, SwitchDelivery)>,
-    /// Daemon restarts so far (fresh API socket per restart).
-    restarts: u32,
 }
 
 impl MeshWorld {
@@ -1761,10 +1738,7 @@ impl MeshWorld {
         // Both adapter families share incarnation 7 — the session the
         // authority adapter already holds from `Provision::start`.
         let join_adapter = UsbSiteAdapter::new(testkit::GATEWAY, 7);
-        provision
-            .site
-            .service
-            .set_transport(join_adapter.clone());
+        provision.site.service.set_transport(join_adapter.clone());
         let mut world = Self {
             peers,
             macs: [personas[0].mac, personas[1].mac, personas[2].mac],
@@ -1782,7 +1756,6 @@ impl MeshWorld {
             usb_incarnation: 7,
             usb_auth_total: 0,
             delayed: Vec::new(),
-            restarts: 0,
         };
         // The USB Hello goes out before the first tick; the gateway
         // answers from its pump.
@@ -1824,69 +1797,12 @@ impl MeshWorld {
             .set_authority_transport(Some(usb.clone()));
         self.provision.usb = usb;
         let (site_epoch, rs_epoch, gk_epoch) = self.provision.site.service.authority_epochs();
-        let _ = self.provision.usb.query_local(site_epoch, rs_epoch, gk_epoch);
+        let _ = self
+            .provision
+            .usb
+            .query_local(site_epoch, rs_epoch, gk_epoch);
         let hello = self.usb_host.hello_bytes();
         self.peers[0].send_usb(&hello);
-    }
-
-    /// A daemon restart (D04 C4): the Site Authority, service and API
-    /// connection are rebuilt from the same SQLite; the old session's
-    /// adapters and outbox close, no RAM carries over, and the office
-    /// side (`KGuardMock`) survives like the real office tool. The old
-    /// API listener idles on its own socket with the retired service.
-    fn restart_daemon(&mut self) {
-        let dir = self.provision.site.dir.clone();
-        let mut setup = testkit::setup();
-        setup.channel = 6;
-        let store = SqliteSiteStore::open(&dir.join("site.db")).unwrap();
-        let authority =
-            SiteAuthority::open(&setup, Box::new(testkit::sak()), Box::new(store), self.now)
-                .unwrap();
-        let service = Arc::new(SiteService::new(authority));
-        service.set_group_key_transport(ChannelGroupKeyTransport::new(&service));
-        self.provision.site.service = service;
-        // The USB session is a new boot too: fresh host end, fresh
-        // adapters, the gateway re-authenticates from the new Hello.
-        self.gateway_usb_rebind();
-        // A fresh API socket for the rebuilt daemon (the old listener
-        // cannot be rebound while its thread holds it).
-        self.restarts += 1;
-        let socket = dir.join(format!("api-r{}.sock", self.restarts));
-        let uid = std::fs::metadata(&dir).unwrap().uid();
-        let acl = Acl::parse(&format!(
-            "{{\"principals\":{{\"{uid}\":{{\"networks\":{{\"{:016x}\":[\"MEMBERSHIP_READ\",\"MEMBERSHIP_DECIDE\",\"MEMBERSHIP_ADMIN\"]}}}},\"7\":{{\"networks\":{{\"*\":[\"MEMBERSHIP_READ\"]}}}}}}}}",
-            testkit::NETWORK_LOW
-        ))
-        .unwrap();
-        let state = Arc::new(State {
-            acl,
-            site: Some(Arc::clone(&self.provision.site.service)),
-            ..State::default()
-        });
-        let listener = UnixListener::bind(&socket).unwrap();
-        let (outbound_tx, _outbound_rx) = mpsc::sync_channel(64);
-        thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { return };
-                let uid = routeloom_peercred::peer_uid(&stream).ok();
-                let state = Arc::clone(&state);
-                let outbound = outbound_tx.clone();
-                thread::spawn(move || {
-                    let _ = serve_client(
-                        stream,
-                        state,
-                        outbound,
-                        0,
-                        Arc::new(AtomicU64::new(1)),
-                        Arc::new(AtomicU64::new(1)),
-                        Arc::new(Mutex::new(DeviceSession::new())),
-                        uid,
-                    );
-                });
-            }
-        });
-        self.provision.site.link =
-            RouteLoomTransport::new(&socket, u64::from(testkit::NETWORK_LOW));
     }
 
     /// One virtual step: tick every booted peer, switch the radio
@@ -2012,9 +1928,13 @@ impl MeshWorld {
         let adapter = self.provision.usb.clone();
         let join = self.join_adapter.clone();
         let gw_usb = ticks[0].as_ref().map(|t| t.usb.as_slice()).unwrap_or(&[]);
-        let (usb_out, completed) =
-            self.usb_host
-                .pump(gw_usb, self.now, &adapter, &join, &self.provision.site.service);
+        let (usb_out, completed) = self.usb_host.pump(
+            gw_usb,
+            self.now,
+            &adapter,
+            &join,
+            &self.provision.site.service,
+        );
         self.peers[0].send_usb(&usb_out);
         for (device, kind, bytes) in completed {
             let mut state = self.rng_state;
@@ -2195,7 +2115,11 @@ impl MeshWorld {
 
     /// One target's live route plan (report/stored/deferred), if the
     /// cutover tracks it — the RAM the scheduler actually steers by.
-    fn cutover_route(&self, operation_id: &str, node: u64) -> Option<super::cutover::CutoverRoutePlan> {
+    fn cutover_route(
+        &self,
+        operation_id: &str,
+        node: u64,
+    ) -> Option<super::cutover::CutoverRoutePlan> {
         let op = super::records::parse_op_token(operation_id).unwrap();
         self.provision
             .site
@@ -2701,7 +2625,12 @@ fn converge_gated(world: &mut MeshWorld, gated: usize, what: &str) {
             .all(|(_, s)| s.authority_ready && s.join_confirmed)
     });
     assert!(
-        world.snaps.iter().enumerate().filter(|(i, _)| *i != gated).all(|(_, s)| s.authority_ready),
+        world
+            .snaps
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != gated)
+            .all(|(_, s)| s.authority_ready),
         "relay converged before {what}"
     );
     world.gate[gated] = false;
@@ -2830,7 +2759,11 @@ fn r1_once(tag: &str, stall: bool) {
     // (A peer tracks 16 app sends per lifetime.)
     for round in 0..3 {
         // Alternate the direct and the relayed revoked leg.
-        let dst = if round % 2 == 0 { NODE_B } else { testkit::GATEWAY };
+        let dst = if round % 2 == 0 {
+            NODE_B
+        } else {
+            testkit::GATEWAY
+        };
         world.peers[1].app_send(dst, b"r1-revoked-data");
         world.peers[2].app_send(testkit::GATEWAY, b"r1-healthy-data");
         for _ in 0..40 {
@@ -2908,7 +2841,11 @@ fn r1_once(tag: &str, stall: bool) {
         // evidence rides on (04 §3.5).
         if i % 1200 == 1199 && chatter_rounds < 8 {
             chatter_rounds += 1;
-            let a_dst = if chatter_rounds % 2 == 0 { NODE_B } else { NODE_GHOST };
+            let a_dst = if chatter_rounds % 2 == 0 {
+                NODE_B
+            } else {
+                NODE_GHOST
+            };
             world.peers[1].app_send(a_dst, b"r1-retry");
             let b_dst = if chatter_rounds % 2 == 0 {
                 testkit::GATEWAY
@@ -2916,29 +2853,6 @@ fn r1_once(tag: &str, stall: bool) {
                 NODE_GHOST
             };
             world.peers[2].app_send(b_dst, b"r1-chatter");
-        }
-        if i % 4000 == 0 {
-            let a = &world.snaps[1];
-            let (failed, timeouts, reissued, removed, arow) = world
-                .provision
-                .site
-                .service
-                .with(|x| {
-                    (
-                        x.counters.relay_failed,
-                        x.counters.timeouts,
-                        x.counters.reissued,
-                        x.counters.removed_notices,
-                        x.devices.get(&NODE_A).cloned(),
-                    )
-                })
-                .0;
-            let b = &world.snaps[2];
-            eprintln!(
-                "r1dbg t={} i={} a_mode={} a_bootdrop={} a_rxdrop={} b_off={}",
-                world.now, i, a.mode, a.rt_boot_drop, a.rt_rx_drop,
-                b.proxy_offers_tx,
-            );
         }
     }
     let a = &world.snaps[1];
@@ -3019,7 +2933,11 @@ fn revoked_a_to_holdoff(world: &mut MeshWorld, tag: &str, id_fp_before: u64) {
         }
         if i % 1200 == 1199 && chatter_rounds < 8 {
             chatter_rounds += 1;
-            let a_dst = if chatter_rounds % 2 == 0 { NODE_B } else { NODE_GHOST };
+            let a_dst = if chatter_rounds % 2 == 0 {
+                NODE_B
+            } else {
+                NODE_GHOST
+            };
             world.peers[1].app_send(a_dst, b"r2-retry");
             let b_dst = if chatter_rounds % 2 == 0 {
                 testkit::GATEWAY
@@ -3276,7 +3194,11 @@ fn r2_once(tag: &str, group: bool) {
         .filter(|tx| tx.state == DELIVERY_DELIVERED)
         .count();
     for round in 0..3 {
-        let dst = if round % 2 == 0 { NODE_B } else { testkit::GATEWAY };
+        let dst = if round % 2 == 0 {
+            NODE_B
+        } else {
+            testkit::GATEWAY
+        };
         world.peers[1].app_send(dst, b"r2-revoked-data");
         for _ in 0..40 {
             world.step(25);
@@ -3350,10 +3272,7 @@ fn rotate_direct(world: &mut MeshWorld, expected: u32, key: &str) -> Result<u32,
                 value.get("state").and_then(|v| v.as_str()),
                 Some("committed")
             );
-            Ok(value
-                .get("to")
-                .and_then(|v| v.as_u64())
-                .expect("to epoch") as u32)
+            Ok(value.get("to").and_then(|v| v.as_u64()).expect("to epoch") as u32)
         }
         Err(error) => Err(error.code.to_string()),
     }
@@ -3365,8 +3284,7 @@ fn rotate_direct(world: &mut MeshWorld, expected: u32, key: &str) -> Result<u32,
 /// the GK rotations work around). Returns the operation id.
 fn stage_cutover(world: &mut MeshWorld, key: &str) -> String {
     use routeloom_provision::signer::FileRootSigner;
-    let site_ca =
-        FileRootSigner::from_secret(testkit::SITE_CA, &test_keypair(0x61).0).unwrap();
+    let site_ca = FileRootSigner::from_secret(testkit::SITE_CA, &test_keypair(0x61).0).unwrap();
     let next_cert = cert_issue(
         &CertClaims {
             cert_type: CertType::Site,
@@ -3624,10 +3542,6 @@ fn c1_once(tag: &str, switch: Switch, gate: usize, leaf: usize, relay: usize) {
         return; // no C++ peers: skip (ignore-equivalent)
     };
     converge_gated(&mut world, gate, "c1 cutover");
-    assert!(
-        NODE_A < NODE_B,
-        "the NodeId order (A first) is the test's control input"
-    );
     // Pre-cutover delivery works end to end (leaf to gateway).
     world.peers[leaf].app_send(testkit::GATEWAY, b"c1-before");
     world.pump_until(3000, |snaps| {
@@ -3740,8 +3654,7 @@ fn c1_once(tag: &str, switch: Switch, gate: usize, leaf: usize, relay: usize) {
                 }
             }
         }
-        let done = world.snaps.iter().all(|s| s.phase == PHASE_ACTIVE)
-            && progress.applied == 3;
+        let done = world.snaps.iter().all(|s| s.phase == PHASE_ACTIVE) && progress.applied == 3;
         // The root's stored gates nothing (nobody waits for it), so
         // only the gated children must show receipts.
         if done
@@ -3756,7 +3669,13 @@ fn c1_once(tag: &str, switch: Switch, gate: usize, leaf: usize, relay: usize) {
     // sent; the relay's before the gateway's. Neither parent adopts
     // (leaves Prepared) before its child's receipt verifies, and both
     // parents advance while APPLIED is still 0.
-    let send = send_tick.map(|t| t.expect("every target sent"));
+    assert!(
+        send_tick.iter().all(Option::is_some),
+        "every target sent: send={send_tick:?} stored={stored_tick:?} targets={:?} routes={:?}",
+        world.cutover_targets(&operation_id),
+        nodes.map(|node| world.cutover_route(&operation_id, node))
+    );
+    let send = send_tick.map(Option::unwrap);
     let stored_leaf = stored_tick[leaf].expect("leaf stored");
     let stored_relay = stored_tick[relay].expect("relay stored");
     let stored = [stored_tick[0], stored_tick[1], stored_tick[2]];
@@ -3935,12 +3854,7 @@ fn kguard_requests_for(world: &MeshWorld, node: u64) -> usize {
         .provision
         .site
         .service
-        .with(|a| {
-            a.requests
-                .values()
-                .filter(|r| r.facts.node == node)
-                .count()
-        })
+        .with(|a| a.requests.values().filter(|r| r.facts.node == node).count())
         .0
 }
 
@@ -4235,16 +4149,10 @@ fn c2_once(tag: &str, island: bool) {
         "stragglers recovered: {progress:?}"
     );
     assert_eq!(progress.unknown, 0, "unknown drained: {progress:?}");
-    assert!(
-        !progress.recovery_pending,
-        "converged: {progress:?}"
-    );
+    assert!(!progress.recovery_pending, "converged: {progress:?}");
     let targets = world.cutover_targets(&operation_id);
     assert_eq!(
-        targets
-            .iter()
-            .find(|t| t.0 == NODE_A)
-            .map(|t| t.1.as_str()),
+        targets.iter().find(|t| t.0 == NODE_A).map(|t| t.1.as_str()),
         Some("recovered"),
         "A recovered: {targets:?}"
     );
@@ -4255,10 +4163,7 @@ fn c2_once(tag: &str, island: bool) {
     );
     if island {
         assert_eq!(
-            targets
-                .iter()
-                .find(|t| t.0 == NODE_B)
-                .map(|t| t.1.as_str()),
+            targets.iter().find(|t| t.0 == NODE_B).map(|t| t.1.as_str()),
             Some("recovered"),
             "island B recovered: {targets:?}"
         );

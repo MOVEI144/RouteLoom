@@ -419,7 +419,7 @@ def invalid_objects() -> None:
         bad(name, "join_object", obj, note)
 
     jbad("join_object_phase_3", join_object(3, 1, m), "phases 1-3 are the dev-PSK exchange")
-    jbad("join_object_phase_7", join_object(7, 1, m), "unknown phase")
+    jbad("join_object_phase_8", join_object(8, 1, m), "unknown phase")
     jbad("join_object_step_0", join_object(EDHOC, 0, m), "EDHOC steps 1..5")
     jbad("join_object_step_6", join_object(EDHOC, 6, m), "EDHOC steps 1..5")
     jbad("join_object_resume_step_4", join_object(RESUME, 4, m), "RLRES1 steps 1..3")

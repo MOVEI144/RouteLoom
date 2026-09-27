@@ -11,6 +11,7 @@
 #include "esp_app_desc.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_now.h"
 #include "esp_timer.h"
@@ -19,6 +20,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "idf_stubs.hpp"
+#include "nvs_flash.h"
 
 namespace {
 
@@ -118,6 +120,11 @@ bool inject_rx(const std::uint8_t source[6], const std::uint8_t dest[6],
   return true;
 }
 
+bool inject_rx(const std::uint8_t source[6], const std::uint8_t* frame,
+               const std::size_t length) noexcept {
+  return inject_rx(source, g_mac, frame, length);
+}
+
 bool complete_send(const bool success) noexcept {
   if (g_send_outstanding == 0 || g_send_cb == nullptr) return false;
   --g_send_outstanding;
@@ -154,6 +161,14 @@ unsigned tx_drops() noexcept { return tx_overruns(); }
 }  // namespace idf_stub
 
 int64_t esp_timer_get_time(void) { return g_now_us; }
+
+esp_err_t nvs_flash_init_partition(const char* partition) {
+  return partition == nullptr ? ESP_FAIL : ESP_OK;
+}
+
+esp_err_t nvs_flash_deinit_partition(const char* partition) {
+  return partition == nullptr ? ESP_FAIL : ESP_OK;
+}
 
 QueueHandle_t xQueueCreate(const UBaseType_t length,
                            const UBaseType_t item_size) {
@@ -408,6 +423,12 @@ esp_err_t esp_wifi_get_channel(uint8_t* primary,
 esp_err_t esp_wifi_get_mac(const wifi_interface_t ifx, uint8_t mac[6]) {
   (void)ifx;
   if (mac == nullptr) return ESP_FAIL;
+  std::memcpy(mac, g_mac, sizeof(g_mac));
+  return ESP_OK;
+}
+
+esp_err_t esp_read_mac(uint8_t mac[6], const esp_mac_type_t type) {
+  if (mac == nullptr || type != ESP_MAC_WIFI_STA) return ESP_FAIL;
   std::memcpy(mac, g_mac, sizeof(g_mac));
   return ESP_OK;
 }

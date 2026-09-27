@@ -43,8 +43,8 @@ use routeloom_provision::signer::fill_random;
 use super::group_keys::{fresh_group_key, GkSecret, HostTime, META_HIGH_WATER};
 use super::records::{h16, op_token, parse_h16, parse_hex, Operation};
 use super::revocation::{
-    checked_next, OutboundKind, OutboundRrs, TargetState as RrsTargetState,
-    DISTRIBUTION_BACKOFF_S, DISTRIBUTION_OUTBOX_MAX,
+    checked_next, OutboundKind, OutboundRrs, TargetState as RrsTargetState, DISTRIBUTION_BACKOFF_S,
+    DISTRIBUTION_OUTBOX_MAX,
 };
 use super::store::{Batch, DeviceRow, DocKind, GroupKeyRow, RotationWrite};
 use super::{store_failure, SiteAuthority, SiteError};
@@ -366,12 +366,7 @@ fn route_tree(
     }
     let mut h: u32 = 0;
     for target in targets {
-        if target.gateway
-            || matches!(
-                target.state,
-                GrantState::Retired | GrantState::Recovered
-            )
-        {
+        if target.gateway || matches!(target.state, GrantState::Retired | GrantState::Recovered) {
             continue;
         }
         let layer = depths.get(&target.node).copied().flatten().unwrap_or(1);
@@ -1293,9 +1288,10 @@ impl SiteAuthority {
     /// move. D and this instant never move (04 §7).
     fn cutover_plan_closed(&self, now_mono: u64) -> bool {
         self.cutover_grace_until_mono == 0
-            || now_mono >= self.cutover_commit_t0().saturating_add(
-                CUTOVER_GRACE_MS.saturating_sub(CUTOVER_GATEWAY_FLUSH_MS),
-            )
+            || now_mono
+                >= self
+                    .cutover_commit_t0()
+                    .saturating_add(CUTOVER_GRACE_MS.saturating_sub(CUTOVER_GATEWAY_FLUSH_MS))
     }
 
     /// The leaf-first release gate for one COMMIT (04 §7): a member
@@ -1307,11 +1303,7 @@ impl SiteAuthority {
     /// closes; with no non-gateway target it moves at once. The
     /// latest-PREPARED and binding checks stay with the caller.
     fn commit_releasable(&self, id: u64, node: u64, now_mono: u64) -> bool {
-        let Some(state) = self
-            .operations
-            .get(&id)
-            .and_then(|op| op.cutover.as_ref())
-        else {
+        let Some(state) = self.operations.get(&id).and_then(|op| op.cutover.as_ref()) else {
             return false;
         };
         let Some(target) = state.targets.iter().find(|t| t.node == node) else {
@@ -1409,11 +1401,7 @@ impl SiteAuthority {
             return;
         }
         for target in &state.targets {
-            if target.gateway
-                || matches!(
-                    target.state,
-                    GrantState::Retired | GrantState::Recovered
-                )
+            if target.gateway || matches!(target.state, GrantState::Retired | GrantState::Recovered)
             {
                 continue;
             }
@@ -1432,7 +1420,8 @@ impl SiteAuthority {
                 .flatten()
                 .unwrap_or(tree.h)
                 .clamp(1, tree.h);
-            let cutoff = t0.saturating_add(frames.saturating_mul((tree.h - layer + 1) as u64) / tree.h as u64);
+            let cutoff = t0
+                .saturating_add(frames.saturating_mul((tree.h - layer + 1) as u64) / tree.h as u64);
             if now_mono >= cutoff {
                 self.cutover_routes
                     .entry((id, target.node))
@@ -1569,15 +1558,16 @@ impl SiteAuthority {
                 .cutover_routes
                 .get(&(id, target.node))
                 .is_some_and(|plan| {
-                    plan.deferred
-                        || plan.usable(state.revision, time.mono_ms).is_some()
+                    plan.deferred || plan.usable(state.revision, time.mono_ms).is_some()
                 })
             {
                 continue;
             }
-            if self.rrs_outbox.iter().any(|o| {
-                o.op == id && o.node == target.node && o.what == OutboundKind::RouteQuery
-            }) {
+            if self
+                .rrs_outbox
+                .iter()
+                .any(|o| o.op == id && o.node == target.node && o.what == OutboundKind::RouteQuery)
+            {
                 continue;
             }
             if self
@@ -1619,13 +1609,12 @@ impl SiteAuthority {
         if target.state != GrantState::Prepared || target.prepared_revision != state.revision {
             return false;
         }
-        if self
-            .cutover_routes
-            .get(&(op, node))
-            .is_some_and(|plan| {
-                plan.deferred || plan.usable(state.revision, self.last_channel_mono_ms).is_some()
-            })
-        {
+        if self.cutover_routes.get(&(op, node)).is_some_and(|plan| {
+            plan.deferred
+                || plan
+                    .usable(state.revision, self.last_channel_mono_ms)
+                    .is_some()
+        }) {
             return false;
         }
         if self
@@ -2300,9 +2289,10 @@ impl SiteAuthority {
         let Some(target) = state.targets.iter().find(|t| t.node == node) else {
             return false;
         };
-        let live = self.devices.get(&node).is_some_and(|row| {
-            row.member && row.generation == generation && row.kid == target.kid
-        });
+        let live = self
+            .devices
+            .get(&node)
+            .is_some_and(|row| row.member && row.generation == generation && row.kid == target.kid);
         if !live || generation != target.generation {
             return false;
         }
@@ -2312,10 +2302,7 @@ impl SiteAuthority {
         {
             return false;
         }
-        self.cutover_routes
-            .entry((id, node))
-            .or_default()
-            .stored = true;
+        self.cutover_routes.entry((id, node)).or_default().stored = true;
         true
     }
 
@@ -2366,9 +2353,10 @@ impl SiteAuthority {
         ) {
             return false;
         }
-        let live = self.devices.get(&node).is_some_and(|row| {
-            row.member && row.generation == generation && row.kid == target.kid
-        });
+        let live = self
+            .devices
+            .get(&node)
+            .is_some_and(|row| row.member && row.generation == generation && row.kid == target.kid);
         if !live || generation != target.generation {
             return false;
         }
@@ -2428,15 +2416,12 @@ impl SiteAuthority {
                 if !moved {
                     return false;
                 }
-                cutover
-                    .targets
-                    .iter()
-                    .all(|t| {
-                        matches!(
-                            t.state,
-                            GrantState::Applied | GrantState::Recovered | GrantState::Retired
-                        )
-                    })
+                cutover.targets.iter().all(|t| {
+                    matches!(
+                        t.state,
+                        GrantState::Applied | GrantState::Recovered | GrantState::Retired
+                    )
+                })
             }
             None => return false,
         };
@@ -2545,9 +2530,7 @@ impl SiteAuthority {
             return false;
         }
         let active = self.gks.active_epoch();
-        if active == 0
-            || self.cutover_gk_proved.get(&(id, node)) != Some(&active)
-        {
+        if active == 0 || self.cutover_gk_proved.get(&(id, node)) != Some(&active) {
             return false;
         }
         if !self.set_grant_state(id, node, GrantState::Recovered, state.revision, now_ms) {
