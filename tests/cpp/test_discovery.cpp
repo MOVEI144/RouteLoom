@@ -150,8 +150,10 @@ class TestPort final : public DiscoveryPort {
 
   std::vector<Sent> sent;
   // When >0, the next N sends fail without delivering — the deterministic
-  // radio-refusal path for failure-accounting tests.
+  // radio-refusal path for failure-accounting tests. The code defaults to
+  // the transport refusal the runtime reports for a busy TX lane.
   int fail_next{0};
+  StatusCode fail_code{StatusCode::WouldBlock};
 
  private:
   DiscMedium* medium_;
@@ -241,7 +243,7 @@ struct Unit {
 Status TestPort::send_rld1(const MacAddress& dest, const ByteView encoded) noexcept {
   if (fail_next > 0) {
     --fail_next;
-    return Status::error(StatusCode::RadioFailure, "injected send failure");
+    return Status::error(fail_code, "injected send failure");
   }
   const FrameType kind = encoded.size > 5
                              ? static_cast<FrameType>(encoded.data[5])
@@ -257,7 +259,7 @@ Status TestPort::send_wire(BindingId, const MacAddress& dest, const FrameType ty
                            const ByteView payload) noexcept {
   if (fail_next > 0) {
     --fail_next;
-    return Status::error(StatusCode::RadioFailure, "injected send failure");
+    return Status::error(fail_code, "injected send failure");
   }
   sent.push_back(Sent{dest, true, type, medium_->now,
                       std::vector<std::uint8_t>(payload.data,
@@ -1156,10 +1158,9 @@ void test_stale_reprobe_recovers() {
   CHECK(a.engine.data_permitted(b.mac));
 }
 
-// An authenticated peer can have a lower local BIND counter after an
-// independent reboot. Answer its older-generation probe with our current
-// generation so the peer can advance; rejecting it leaves the lower side
-// probing until both leases expire (C3 HIL issue #169).
+// An authenticated peer may have a lower local binding counter after an
+// independent re-authentication. Its probe still needs a Result carrying our
+// current generation so it can advance rather than losing its route.
 void test_older_peer_probe_gets_current_generation_result() {
   DiscWorld world;
   Unit& a = world.add(1, 0xA1, true);
@@ -1184,6 +1185,11 @@ void test_older_peer_probe_gets_current_generation_result() {
   CHECK(b.engine.binding_generation_of(1, current));
   CHECK(current.value == original.value + 1);
 
+  world.medium.drop_wire = true;
+  world.medium.drop_rld1 = true;
+  world.run(29000);
+  NeighborPhase phase{};
+  CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Reachable);
   const std::size_t before = b.port.count_wire(FrameType::NeighborResult);
   probe.binding_generation = original;
   probe.probe_sequence = 902;
@@ -1191,12 +1197,21 @@ void test_older_peer_probe_gets_current_generation_result() {
   b.engine.on_wire_rx(a.mac, FrameType::NeighborProbe, encoded.view(),
                       world.medium.now);
   CHECK(b.port.count_wire(FrameType::NeighborResult) == before + 1);
+  // An older epoch gets a recovery answer, but cannot extend this binding's
+  // lease or reset its bounded stale-reprobe budget.
+  world.run(2000);
+  CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Stale);
   if (b.port.count_wire(FrameType::NeighborResult) > before) {
-    const auto& sent = b.port.sent.back();
+    const auto sent = std::find_if(b.port.sent.rbegin(), b.port.sent.rend(),
+                                   [](const TestPort::Sent& s) {
+                                     return s.wire && s.kind == FrameType::NeighborResult;
+                                   });
+    CHECK(sent != b.port.sent.rend());
     autonomy::NeighborResultPayload result{};
-    CHECK(sent.kind == FrameType::NeighborResult);
-    CHECK_OK(autonomy::neighbor_result_decode(
-        ByteView{sent.bytes.data(), sent.bytes.size()}, result));
+    if (sent != b.port.sent.rend()) {
+      CHECK_OK(autonomy::neighbor_result_decode(
+          ByteView{sent->bytes.data(), sent->bytes.size()}, result));
+    }
     CHECK(result.binding_generation == current);
     CHECK(result.probe_sequence == probe.probe_sequence);
   }
@@ -1409,6 +1424,198 @@ void test_stale_peer_repaired_while_other_edge_reachable() {
 // Port-level send refusal is counted: the RLD1 and wire lanes both bump
 // stats().send_failures, retries still complete the exchange, and the
 // refused send never counts toward offers_tx/probes_tx.
+void test_result_waits_for_local_tx() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, true);
+  Unit& b = world.add(2, 0xB2, true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+  const auto results = b.port.count_wire(FrameType::NeighborResult);
+  autonomy::NeighborProbePayload probe{};
+  BindingGeneration gen{};
+  CHECK(b.engine.binding_generation_of(a.node, gen));
+  probe.binding_generation = gen;
+  probe.probe_sequence = 987;
+  probe.sent_ms = world.medium.now;
+  probe.requested_lease_ms = 30000;
+  autonomy::EncodedPayload encoded{};
+  CHECK_OK(autonomy::neighbor_probe_encode(probe, encoded));
+  b.port.fail_next = 1;
+  b.engine.on_wire_rx(a.mac, FrameType::NeighborProbe, encoded.view(), world.medium.now);
+  CHECK(b.port.count_wire(FrameType::NeighborResult) == results);
+  world.run(200);
+  CHECK(b.port.count_wire(FrameType::NeighborResult) > results);
+}
+
+void test_revoked_peers_release_pending_result_slots() {
+  DiscWorld world;
+  Unit& center = world.add(1, 0xA1, true);
+  std::array<Unit*, 4> leaves{};
+  for (std::size_t i = 0; i < leaves.size(); ++i) {
+    leaves[i] = &world.add(2 + i, static_cast<std::uint8_t>(0xB2 + i), true);
+    center.hooks.peer_members.insert(leaves[i]->node);
+    leaves[i]->hooks.peer_members.insert(center.node);
+  }
+  for (std::size_t i = 0; i < leaves.size(); ++i) {
+    for (std::size_t j = 0; j < leaves.size(); ++j) {
+      if (i != j) world.medium.block(leaves[i]->mac, leaves[j]->mac);
+    }
+  }
+  world.start_all();
+  for (Unit* leaf : leaves) run_exchange(world, *leaf);
+
+  autonomy::NeighborProbePayload probe{};
+  probe.probe_sequence = 400;
+  probe.sent_ms = world.medium.now;
+  probe.requested_lease_ms = 30000;
+  autonomy::EncodedPayload encoded{};
+  for (std::size_t i = 0; i < 3; ++i) {
+    CHECK(center.engine.binding_generation_of(leaves[i]->node,
+                                              probe.binding_generation));
+    probe.probe_sequence = 400 + static_cast<std::uint32_t>(i);
+    CHECK_OK(autonomy::neighbor_probe_encode(probe, encoded));
+    center.port.fail_next = 1;
+    center.engine.on_wire_rx(leaves[i]->mac, FrameType::NeighborProbe,
+                             encoded.view(), world.medium.now);
+    CHECK_OK(center.engine.revoke_peer(leaves[i]->node));
+  }
+
+  CHECK(center.engine.binding_generation_of(leaves[3]->node,
+                                            probe.binding_generation));
+  probe.probe_sequence = 403;
+  CHECK_OK(autonomy::neighbor_probe_encode(probe, encoded));
+  const auto before = center.port.count_wire(FrameType::NeighborResult);
+  center.engine.on_wire_rx(leaves[3]->mac, FrameType::NeighborProbe,
+                           encoded.view(), world.medium.now);
+  CHECK(center.port.count_wire(FrameType::NeighborResult) == before + 1);
+}
+
+// A local refusal must not use up the long on-air STALE re-probe cadence.
+void test_stale_probe_local_refusal_retries_promptly() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, true, 0xC0FFEE, 7, 1000, 10);
+  Unit& b = world.add(2, 0xB2, true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+  world.medium.block(a.mac, b.mac);
+  world.medium.block(b.mac, a.mac);
+  world.run(31000);
+  NeighborPhase phase{};
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Stale);
+  // Release only a->b: b cannot return a Result, so the retry remains observable.
+  world.medium.blocked.erase(
+      std::remove(world.medium.blocked.begin(), world.medium.blocked.end(),
+                  std::make_pair(a.mac, b.mac)), world.medium.blocked.end());
+  a.port.fail_next = 1;
+  const auto before = a.port.count_wire(FrameType::NeighborProbe);
+  world.run(1005);
+  CHECK(a.engine.stats().send_failures > 0);
+  const auto refused = a.port.count_wire(FrameType::NeighborProbe);
+  world.run(200);
+  CHECK(refused >= before);
+  CHECK(a.port.count_wire(FrameType::NeighborProbe) > before);
+}
+
+// Pending replies are a bounded shared resource: exhaustion is reported
+// under its own reason (never as peer capacity), no reply outlives the
+// requester's probe timeout, and an expired slot frees without being sent.
+void test_pending_result_slots_are_bounded() {
+  DiscWorld world;
+  Unit& center = world.add(1, 0xA1, true);
+  std::array<Unit*, 4> leaves{};
+  for (std::size_t i = 0; i < leaves.size(); ++i) {
+    leaves[i] = &world.add(2 + i, static_cast<std::uint8_t>(0xB2 + i), true);
+    center.hooks.peer_members.insert(leaves[i]->node);
+    leaves[i]->hooks.peer_members.insert(center.node);
+  }
+  for (std::size_t i = 0; i < leaves.size(); ++i) {
+    for (std::size_t j = 0; j < leaves.size(); ++j) {
+      if (i != j) world.medium.block(leaves[i]->mac, leaves[j]->mac);
+    }
+  }
+  world.start_all();
+  for (Unit* leaf : leaves) run_exchange(world, *leaf);
+
+  const auto probe_from = [&](const std::size_t leaf, const std::uint32_t sequence) {
+    autonomy::NeighborProbePayload probe{};
+    CHECK(center.engine.binding_generation_of(leaves[leaf]->node,
+                                              probe.binding_generation));
+    probe.probe_sequence = sequence;
+    probe.sent_ms = world.medium.now;
+    probe.requested_lease_ms = 30000;
+    autonomy::EncodedPayload encoded{};
+    CHECK_OK(autonomy::neighbor_probe_encode(probe, encoded));
+    center.engine.on_wire_rx(leaves[leaf]->mac, FrameType::NeighborProbe,
+                             encoded.view(), world.medium.now);
+  };
+  // The transport refuses every send: three replies park, the fourth is
+  // reported as reply-slot exhaustion, not as a peer-slot shortage.
+  center.port.fail_next = 1 << 20;
+  const auto capacity = center.engine.stats().peer_capacity;
+  const auto refusals = center.engine.stats().send_failures;
+  for (std::size_t i = 0; i < 3; ++i) probe_from(i, 500 + static_cast<std::uint32_t>(i));
+  CHECK(!center.observer.has("RESULT_SLOTS_FULL"));
+  probe_from(3, 503);
+  CHECK(center.observer.has("RESULT_SLOTS_FULL"));
+  CHECK(!center.observer.has("PEER_CAPACITY"));
+  CHECK(center.engine.stats().peer_capacity == capacity);
+  CHECK(center.engine.stats().send_failures > refusals);
+  // Past the probe timeout (200 ms in this harness) the parked replies can
+  // no longer match the requesters' outstanding probes: they free their
+  // slots while the transport still refuses, so a new probe parks again.
+  world.run(300);
+  probe_from(3, 504);
+  center.port.fail_next = 0;
+  const auto sent_before = center.port.sent.size();
+  world.run(100);
+  bool expired_reply = false;
+  bool fresh_reply = false;
+  for (std::size_t i = sent_before; i < center.port.sent.size(); ++i) {
+    const auto& s = center.port.sent[i];
+    if (!s.wire || s.kind != FrameType::NeighborResult) continue;
+    autonomy::NeighborResultPayload result{};
+    CHECK_OK(autonomy::neighbor_result_decode(
+        ByteView{s.bytes.data(), s.bytes.size()}, result));
+    expired_reply |= result.probe_sequence >= 500 && result.probe_sequence <= 503;
+    fresh_reply |= result.probe_sequence == 504;
+  }
+  CHECK(fresh_reply);
+  CHECK(!expired_reply);
+}
+
+// A hard local failure (no driver slot, no security context) is not relieved
+// by spinning: the STALE re-probe keeps its cadence without spending a try.
+void test_stale_probe_hard_failure_keeps_cadence() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, true, 0xC0FFEE, 7, 1000, 10);
+  Unit& b = world.add(2, 0xB2, true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+  world.medium.block(a.mac, b.mac);
+  world.medium.block(b.mac, a.mac);
+  world.run(31000);
+  NeighborPhase phase{};
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Stale);
+  a.port.fail_code = StatusCode::RadioFailure;
+  a.port.fail_next = 1;
+  const auto refusals = a.engine.stats().send_failures;
+  for (int i = 0; i < 300 && a.engine.stats().send_failures == refusals; ++i) {
+    world.run(5);
+  }
+  CHECK(a.engine.stats().send_failures > refusals);
+  const auto refused = a.port.count_wire(FrameType::NeighborProbe);
+  world.run(200);
+  CHECK(a.port.count_wire(FrameType::NeighborProbe) == refused);
+  world.run(900);
+  CHECK(a.port.count_wire(FrameType::NeighborProbe) > refused);
+}
+
 void test_send_failure_stats() {
   DiscWorld world;
   Unit& a = world.add(1, 0xA1, /*member=*/true);
@@ -1686,6 +1893,11 @@ int main() {
   test_stranded_rediscovery_rebinds();
   test_reauth_releases_transient_candidate();
   test_stale_peer_repaired_while_other_edge_reachable();
+  test_result_waits_for_local_tx();
+  test_revoked_peers_release_pending_result_slots();
+  test_stale_probe_local_refusal_retries_promptly();
+  test_pending_result_slots_are_bounded();
+  test_stale_probe_hard_failure_keeps_cadence();
   test_send_failure_stats();
   test_forget_revoked_peer();
   test_reauth_revoked_rate_limit();

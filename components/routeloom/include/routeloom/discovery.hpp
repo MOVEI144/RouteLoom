@@ -500,6 +500,8 @@ class NeighborDiscovery {
   // resolvability bar as binding_of; false when no live binding exists.
   bool binding_generation_of(NodeId peer, BindingGeneration& out) const noexcept;
   bool topology_pinned(NodeId peer) const noexcept;
+  // A submitted Probe needs its driver peer until its Result or timeout.
+  bool awaiting_probe_result(NodeId peer) const noexcept;
   // Owner-side lease sync: resolve the verified NodeId recorded for a radio
   // MAC (bound neighbor records only — candidates are unverified and never
   // resolve). False when the MAC has no neighbor record.
@@ -740,6 +742,8 @@ class NeighborDiscovery {
 
   // Wire-lane handlers (post-BIND probes only).
   void handle_probe(Neighbor& neighbor, ByteView payload, MonotonicMs now_ms) noexcept;
+  void send_pending_result(Neighbor& neighbor, MonotonicMs now_ms) noexcept;
+  void clear_pending_result(BindingId binding) noexcept;
   void handle_probe_result(Neighbor& neighbor, ByteView payload,
                            MonotonicMs now_ms) noexcept;
 
@@ -801,6 +805,7 @@ class NeighborDiscovery {
                          bool we_are_requester,
                          MonotonicMs now_ms) noexcept;
   void fail_outbound(MonotonicMs now_ms, const char* reason) noexcept;
+  void clear_outbound() noexcept;
   // Shared elevation tail: membership advance + re-check, MAC-conflict
   // handling, re-auth generation bump or fresh bind, Bound→Probe. Both the
   // dev exchange path and complete_handshake converge here.
@@ -885,6 +890,17 @@ class NeighborDiscovery {
   std::array<MonotonicMs, discovery_const::kCandidateCapacity> discover_times_{};
   std::size_t discover_cursor_{0};
 
+  // Pending recovery replies share three bounded slots rather than growing
+  // every neighbor record on RAM-limited gateways. A reply is useful only
+  // until the requester's probe timeout; a transport refusal retries after
+  // 50 ms, any other local failure drops it (the requester re-probes).
+  struct PendingResult {
+    BindingId binding{kInvalidBindingId};  // the record the Probe arrived on
+    std::uint32_t sequence{0};
+    std::uint32_t retry_ms{0};
+    std::uint32_t expires_ms{0};
+  };
+  std::array<PendingResult, discovery_const::kTransientPeerSlots> pending_results_{};
   Outbound outbound_{};
   // Member-handshake mode (P4 §7.2): park frozen starts for the Owner's
   // engine instead of running the dev PROVE/CONFIRM exchange. Armed only

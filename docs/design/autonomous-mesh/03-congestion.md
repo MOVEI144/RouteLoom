@@ -54,6 +54,8 @@ FQ-CoDelのflow分離とsojourn観測を参考にするが、TCP前提のdrop制
 
 BUSYのv1 payloadは最大64B。version、reason、参照type/origin/session/sequence/round、binding incarnation、feedback sequence、retry_after_ms、pressureを含む。未対応peerへは送らずlegacy受理/timeoutへ戻る。
 
+送信側は物理TXのcallbackより先に届いた認証済みHOP_ACCEPTをbindingとmessage/roundで照合して保持し、callback fenceを解放してからhop成功として確定する。早着応答を未照合として捨てない。ESP-NOW の raw／reserved 送信は宛先を問わず callback まで物理送信を1本に制限する。異なる宛先でも同時送信すると callback の順序が保証されないため。
+
 BUSYは**受理前拒否**。HOP_ACCEPT済みの仕事をBUSYで後から取り消さない。受理後に混んだ場合は責任を保持しつつ、別の負荷hintで上流へ減速を依頼する。END_RECEIPTを発行したことにもしない。
 
 送信側は未完の(peer, Message ID, round)に一致し、認証・TTLが有効なBUSYだけ採用する。retry_afterは20〜1000msにclamp。小さすぎる値で即時再送storm、大きすぎる値で永久停止にしない。
@@ -107,6 +109,8 @@ feasibilityは**隣接が広告したdistanceと現在のFD**で再評価する�
 ルート数・ページ数・neighbor数を増やすと既存の5秒周期/15秒leaseだけではfull tableを更新し切れない可能性がある。実装時に `refresh_bound = pages_per_neighbor * round_period + budget_wait + jitter + loss_margin` を計算し、`lease > refresh_bound`を要求する。自分のbudget待ちで正常routeをexpireさせてはならない。
 
 100ms/s等の古い全網予算を各ノードへ丸ごと配らない。このprofileではまず校正されたlocal token bucketと制御予約から始め、全網の実占有は別に測る。推定Airtimeとdriver待ち時間を混同しない。
+
+経路広告は enqueue 成功後でも MAC 失敗や送信期限切れなら近隣の lease を更新していない。生存近隣への失敗時には triggered 広告を再 pending 化し、次の定期周期まで待たない（有界な最小間隔は維持）。TX pool 32枠内のACK/BUSY用1枠に加え、経路更新・修復用2枠を新規DATA受付から確保する。受理済みの仕事の返信枠は取り消さない。
 
 ## 9. 失敗時の動き
 

@@ -293,7 +293,8 @@ Status peek_header(const ByteView encoded, Header& header) noexcept {
 
 Status encode_new(const PlainFrame& input,
                   SecurityProvider& security,
-                  EncodedFrame& output) noexcept {
+                  EncodedFrame& output,
+                  LinkOpenedFrame* sealed_end) noexcept {
   if (!security.ready()) {
     return Status::error(StatusCode::InvalidState, "security provider is not ready");
   }
@@ -346,7 +347,38 @@ Status encode_new(const PlainFrame& input,
     std::memcpy(link_plaintext.data(), input.payload.data(), input.payload_size);
   }
 
-  return wrap_link(header, ByteView{link_plaintext.data(), link_plaintext_size}, security, output);
+  status = wrap_link(header, ByteView{link_plaintext.data(), link_plaintext_size}, security,
+                     output);
+  if (status && sealed_end != nullptr && (header.flags & kFlagEndProtected) != 0) {
+    sealed_end->header = header;
+    sealed_end->protected_payload_size = link_plaintext_size;
+    std::memcpy(sealed_end->protected_payload.data(), link_plaintext.data(),
+                link_plaintext_size);
+  }
+  return status;
+}
+
+Status retry_local(const LinkOpenedFrame& sealed, const NodeId next_hop,
+                   const std::uint32_t remaining_deadline_ms,
+                   SecurityProvider& security, EncodedFrame& output) noexcept {
+  const Header& original = sealed.header;
+  if ((original.flags & kFlagEndProtected) == 0 ||
+      original.payload_length > kMaxApplicationPayload ||
+      sealed.protected_payload_size != original.payload_length + kAeadTagSize ||
+      next_hop == kInvalidNodeId || remaining_deadline_ms == 0) {
+    return Status::error(StatusCode::InvalidArgument, "invalid cached End envelope");
+  }
+  Header header = original;
+  header.next_hop = next_hop;
+  header.remaining_deadline_ms = std::min(remaining_deadline_ms,
+                                         header.remaining_deadline_ms);
+  auto status = stamp_link_epoch(header, security);
+  if (!status) return status;
+  status = security.next_counter(link_context(header), header.link_counter);
+  if (!status) return status;
+  return wrap_link(header,
+                   ByteView{sealed.protected_payload.data(), sealed.protected_payload_size},
+                   security, output);
 }
 
 Status open_link(const ByteView encoded,

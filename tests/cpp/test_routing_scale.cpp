@@ -603,9 +603,265 @@ void test_on_demand_discovery() {
   CHECK(!w.at(4)->routes().best(5).valid);
 }
 
+bool drop_flat_advertisement(const routeloom_test::SimNetwork::Pending& pending) {
+  FrameSight sight{};
+  return pending.from == 2 && pending.to == 1 &&
+         sight_frame(ByteView{pending.frame.data(), pending.frame.size()}, sight) &&
+         sight.type == FrameType::RouteUpdate;
+}
+
+bool scoped_update_dropped = false;
+bool drop_first_scoped_update(const routeloom_test::SimNetwork::Pending& pending) {
+  wire::Header header{};
+  if (!scoped_update_dropped && pending.from == 2 && pending.to == 1 &&
+      wire::peek_header(ByteView{pending.frame.data(), pending.frame.size()}, header) &&
+      header.type == FrameType::RouteUpdate) {
+    scoped_update_dropped = true;
+    return true;
+  }
+  return false;
+}
+
+void test_failed_scoped_advertisement_rearmed() {
+  SimWorld w;
+  scoped_profile(w, 1, 10000, 150000);
+  w.add(1);
+  w.add(2);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.run(3000);
+  CHECK(follow_chain(w, 2, 1) == 1);
+  const auto before = w.net.route_control_tx[2].frames;
+  scoped_update_dropped = false;
+  w.net.drop_frame = drop_first_scoped_update;
+  CHECK_OK(w.at(2)->set_relay_enabled(false));
+  w.run(2500);
+  CHECK(scoped_update_dropped);
+  CHECK(w.net.route_control_tx[2].frames >= before + 2);
+}
+
+void test_flat_no_route_pull() {
+  SimWorld w;
+  w.add(1, 1, 100, 1000);
+  w.add(2, 1, 100, 1000);
+  w.add(3, 1, 100, 1000);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.link(2, 3, 1, 1);
+  w.run(1500);
+  CHECK(w.at(1)->routes().best(3).valid);
+  w.net.silent_drop = drop_flat_advertisement;
+  w.run(1600);
+  CHECK(!w.at(1)->routes().best(3).valid);
+  w.net.silent_drop = nullptr;
+  MessageId id{};
+  CHECK(send_data(w, 1, 3, id, 5000));
+  w.run(500);
+  CHECK(w.at(1)->route_scale_stats().pulls_sent > 0);
+  CHECK(w.at(1)->routes().best(3).valid);
+  w.net.silent_drop = nullptr;
+  w.run(2000);
+  CHECK(w.at(1)->delivery(id).state == DeliveryState::Delivered);
+}
+
+void test_flat_pull_does_not_spend_attempts_without_neighbors() {
+  SimWorld w;
+  w.add(1, 1, 100, 1000);
+  w.add(2, 1, 100, 1000);
+  w.add(3, 1, 100, 1000);
+  w.start_all();
+  w.link(2, 3, 1, 1);
+  w.run(1200);
+  MessageId id{};
+  CHECK(send_data(w, 1, 3, id, 30000));
+  // Repeated NO_ROUTE polls with no reachable neighbor must not push the
+  // first actual one-hop pull onto the saturated discovery backoff.
+  w.run(13000);
+  const auto before = w.at(1)->route_scale_stats().pulls_sent;
+  // Isolate the pull from unsolicited advertisements at the new link.
+  w.net.silent_drop = drop_flat_advertisement;
+  w.link(1, 2, 1, 1);
+  w.run(2500);
+  CHECK(w.at(1)->route_scale_stats().pulls_sent > before);
+  w.net.silent_drop = nullptr;
+  w.run(2500);
+  CHECK(w.at(1)->delivery(id).state == DeliveryState::Delivered);
+}
+
+void test_flat_relay_binds_before_gateway() {
+  // A reference node can first bind to a relay with no gateway route.
+  // The later gateway link must propagate a route in both directions.
+  SimWorld w;
+  w.add(1, 1, 500, 3000);
+  w.add(2, 1, 500, 3000);
+  w.add(3, 1, 500, 3000);
+  w.start_all();
+  w.link(2, 3, 1, 1);
+  w.run(1000);
+  CHECK(!w.at(1)->routes().best(2).valid);
+  w.link(1, 3, 1, 1);
+  w.run(3000);
+  CHECK(follow_chain(w, 1, 2) == 1);
+  CHECK(follow_chain(w, 2, 1) == 1);
+  MessageId id{};
+  CHECK(send_data(w, 1, 2, id, 5000));
+  w.run(2000);
+  CHECK(w.at(1)->delivery(id).state == DeliveryState::Delivered);
+  CHECK(w.obs(2)->messages.size() == 1);
+  // Exercise the long 100-message cadence without rebooting away the
+  // relay's routing state; the first 16 are close together, then 30s apart.
+  std::array<MessageId, 16> first{};
+  for (auto& next : first) {
+    CHECK(send_data(w, 1, 2, next, 10000));
+    w.run(200, 100);
+  }
+  w.run(2000, 100);
+  for (const auto& next : first) {
+    CHECK(std::any_of(w.obs(1)->delivery_events.begin(), w.obs(1)->delivery_events.end(),
+                      [&](const DeliveryResult& result) {
+                        return result.id == next && result.state == DeliveryState::Delivered;
+                      }));
+  }
+  for (int i = 16; i < 100; ++i) {
+    MessageId next{};
+    CHECK(send_data(w, 1, 2, next, 10000));
+    w.run(30000, 100);
+    CHECK(std::any_of(w.obs(1)->delivery_events.begin(), w.obs(1)->delivery_events.end(),
+                      [&](const DeliveryResult& result) {
+                        return result.id == next && result.state == DeliveryState::Delivered;
+                      }));
+  }
+  CHECK(w.obs(2)->messages.size() == 101);
+}
+
+void test_early_hop_accept_before_data_callback() {
+  SimWorld w;
+  w.add(1, 1, 100, 1000);
+  w.add(2, 1, 100, 1000);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.run(200);
+  w.net.delay_data_callback = true;
+  const auto initial_window = w.at(1)->peer_tx_window(2);
+  std::uint64_t early_accepts = 0;
+  for (int i = 0; i < 8; ++i) {
+    MessageId id{};
+    CHECK(send_data(w, 1, 2, id, 5000));
+    w.run(500);
+    CHECK(w.at(1)->delivery(id).state == DeliveryState::Delivered);
+    if (i == 0) {
+      w.at(1)->for_each_observation([&](const ObservationBucket& bucket) {
+        if (bucket.key.peer == 2) early_accepts += bucket.current.hop_accepts;
+      });
+    }
+  }
+  CHECK(w.obs(2)->messages.size() == 8);
+  CHECK(!w.obs(1)->has_diag("UNMATCHED_HOP_ACCEPT"));
+  CHECK(early_accepts >= 1);
+  CHECK(w.at(1)->peer_tx_window(2) > initial_window);
+}
+
+void test_sealed_retry_rechecks_route() {
+  SimWorld w;
+  for (NodeId id = 1; id <= 4; ++id) w.add(id);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.link(1, 3, 1, 1);
+  w.link(2, 4, 1, 1);
+  w.link(3, 4, 1, 1);
+  w.run(1200);
+  const auto initial = w.at(1)->routes().best(4);
+  CHECK(initial.valid && (initial.next_hop == 2 || initial.next_hop == 3));
+  if (!initial.valid) return;
+
+  MessageId id{};
+  CHECK(send_data(w, 1, 4, id, 5000));
+  w.at(1)->poll(w.now);
+  routeloom_test::SimNetwork::Pending first{};
+  CHECK(w.net.pop_first_pending(first));
+  FrameSight sight{};
+  CHECK(sight_frame(ByteView{first.frame.data(), first.frame.size()}, sight));
+  CHECK(sight.type == FrameType::Data && sight.sequence == id.sequence);
+  CHECK(first.to == initial.next_hop);
+  CHECK_OK(w.at(1)->on_radio_tx_result(first.token, false, w.now));
+
+  w.unlink(1, initial.next_hop);
+  const NodeId alternate = initial.next_hop == 2 ? 3 : 2;
+  CHECK(w.at(1)->routes().best(4).valid);
+  CHECK(w.at(1)->routes().best(4).next_hop == alternate);
+  NodeId retried_to = kInvalidNodeId;
+  for (int i = 0; i < 250 && retried_to == kInvalidNodeId; ++i) {
+    ++w.now;
+    w.at(1)->poll(w.now);
+    routeloom_test::SimNetwork::Pending pending{};
+    while (w.net.pop_first_pending(pending)) {
+      FrameSight next{};
+      if (sight_frame(ByteView{pending.frame.data(), pending.frame.size()}, next) &&
+          next.type == FrameType::Data && next.sequence == id.sequence) {
+        retried_to = pending.to;
+        break;
+      }
+      CHECK_OK(w.at(pending.from)->on_radio_tx_result(pending.token, true, w.now));
+    }
+  }
+  CHECK(retried_to == alternate);
+}
+
+void test_early_hop_accept_survives_callback_watchdog() {
+  SimWorld w;
+  w.add(1, 1, 5000, 15000);
+  w.add(2, 1, 5000, 15000);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.run(200);
+  MessageId id{};
+  CHECK(send_data(w, 1, 2, id, 5000));
+  w.at(1)->poll(w.now);
+  routeloom_test::SimNetwork::Pending data{};
+  CHECK(w.net.pop_first_pending(data));
+  if (data.frame.empty()) return;
+  FrameSight sight{};
+  CHECK(sight_frame(ByteView{data.frame.data(), data.frame.size()}, sight));
+  CHECK(sight.type == FrameType::Data);
+
+  CHECK_OK(w.at(2)->on_radio_receive(
+      1, ByteView{data.frame.data(), data.frame.size()},
+      routeloom_test::sim_rx_metadata(w.reply_ports[2].get(), 1), w.now));
+  w.at(2)->poll(w.now);
+  routeloom_test::SimNetwork::Pending accept{};
+  CHECK(w.net.pop_first_pending(accept));
+  if (accept.frame.empty()) return;
+  CHECK(sight_frame(ByteView{accept.frame.data(), accept.frame.size()}, sight));
+  CHECK(sight.type == FrameType::HopAccept);
+  CHECK_OK(w.at(2)->on_radio_tx_result(accept.token, true, w.now));
+  CHECK_OK(w.at(1)->on_radio_receive(
+      2, ByteView{accept.frame.data(), accept.frame.size()},
+      routeloom_test::sim_rx_metadata(w.reply_ports[1].get(), 2), w.now));
+  CHECK(!w.obs(1)->has_diag("UNMATCHED_HOP_ACCEPT"));
+
+  // The driver never calls back. A watchdog may release its physical fence,
+  // but the authenticated accept already settled this hop.
+  w.now += 1001;
+  bool retried = false;
+  for (int i = 0; i < 100; ++i) {
+    ++w.now;
+    w.at(1)->poll(w.now);
+    routeloom_test::SimNetwork::Pending pending{};
+    while (w.net.pop_first_pending(pending)) {
+      FrameSight next{};
+      if (sight_frame(ByteView{pending.frame.data(), pending.frame.size()}, next) &&
+          next.type == FrameType::Data && next.sequence == id.sequence) {
+        retried = true;
+      }
+      CHECK_OK(w.at(pending.from)->on_radio_tx_result(pending.token, true, w.now));
+    }
+  }
+  CHECK(!retried);
+}
+
 void test_flat_node_ignores_route_request() {
-  // A scoped node whose gateway is unreachable pulls its neighbors; a flat
-  // neighbor never answers and never acts on the frame.
+  // A flat neighbor answers only 1-hop pulls with ordinary advertisements;
+  // it cannot invent a path to the absent gateway.
   SimWorld w;
   w.configure = [](NodeConfig& config) {
     if (config.node == 1) {
@@ -620,7 +876,7 @@ void test_flat_node_ignores_route_request() {
   w.link(1, 2, 1, 1);
   w.run(1500);
   CHECK(w.at(1)->route_scale_stats().pulls_sent >= 1);
-  CHECK(w.obs(2)->has_diag("ROUTE_REQUEST_UNSUPPORTED"));
+  CHECK(w.at(2)->route_scale_stats().pull_answers >= 1);
   CHECK(!w.at(2)->routes().best(99).valid);
 }
 
@@ -1811,6 +2067,13 @@ int main(int argc, char** argv) {
     test_repair_after_parent_loss();
     test_parent_switch_keeps_downward_reachability();
     test_on_demand_discovery();
+    test_flat_no_route_pull();
+    test_failed_scoped_advertisement_rearmed();
+    test_flat_pull_does_not_spend_attempts_without_neighbors();
+    test_flat_relay_binds_before_gateway();
+    test_early_hop_accept_before_data_callback();
+    test_sealed_retry_rechecks_route();
+    test_early_hop_accept_survives_callback_watchdog();
     test_flat_node_ignores_route_request();
     test_scoped_loop_freedom_under_churn();
     test_broadcast_grant_lifecycle();
