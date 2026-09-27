@@ -16,6 +16,11 @@
 use std::io;
 use std::path::Path;
 
+#[cfg(any(windows, test))]
+fn private_windows_owner(owner_is_user: bool, owner_is_admin: bool, admin_enabled: bool) -> bool {
+    owner_is_user || (owner_is_admin && admin_enabled)
+}
+
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 #[cfg(unix)]
@@ -1052,6 +1057,8 @@ mod win_acl {
             used: *mut u32,
         ) -> i32;
         fn ConvertSidToStringSidW(sid: *mut c_void, text: *mut *mut u16) -> i32;
+        fn ConvertStringSidToSidW(text: *const u16, sid: *mut *mut c_void) -> i32;
+        fn CheckTokenMembership(token: *mut c_void, sid: *mut c_void, is_member: *mut i32) -> i32;
         fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
             text: *const u16,
             version: u32,
@@ -1082,6 +1089,12 @@ mod win_acl {
             descriptor: *mut c_void,
             present: *mut i32,
             dacl: *mut *mut c_void,
+            defaulted: *mut i32,
+        ) -> i32;
+        #[cfg(test)]
+        fn GetSecurityDescriptorOwner(
+            descriptor: *mut c_void,
+            owner: *mut *mut c_void,
             defaulted: *mut i32,
         ) -> i32;
         fn SetNamedSecurityInfoW(
@@ -1149,6 +1162,29 @@ mod win_acl {
             f(std::ptr::read_unaligned(buf.as_ptr().cast::<TokenUser>())
                 .user
                 .sid)
+        }
+    }
+
+    fn with_privileged_sids<R>(
+        f: impl FnOnce(*mut c_void, *mut c_void) -> io::Result<R>,
+    ) -> io::Result<R> {
+        unsafe {
+            let mut administrators = std::ptr::null_mut();
+            if ConvertStringSidToSidW(wide("S-1-5-32-544".as_ref()).as_ptr(), &mut administrators)
+                == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let mut system = std::ptr::null_mut();
+            if ConvertStringSidToSidW(wide("S-1-5-18".as_ref()).as_ptr(), &mut system) == 0 {
+                let error = io::Error::last_os_error();
+                LocalFree(administrators);
+                return Err(error);
+            }
+            let result = f(administrators, system);
+            LocalFree(system);
+            LocalFree(administrators);
+            result
         }
     }
 
@@ -1264,10 +1300,47 @@ mod win_acl {
         descriptor: *mut c_void,
         current: *mut c_void,
     ) -> io::Result<()> {
-        if owner.is_null() || dacl.is_null() || EqualSid(owner, current) == 0 {
+        with_privileged_sids(|administrators, system| unsafe {
+            verify_owner_descriptor_with_sids(
+                owner,
+                dacl,
+                descriptor,
+                current,
+                administrators,
+                system,
+            )
+        })
+    }
+
+    unsafe fn verify_owner_descriptor_with_sids(
+        owner: *mut c_void,
+        dacl: *mut c_void,
+        descriptor: *mut c_void,
+        current: *mut c_void,
+        administrators: *mut c_void,
+        system: *mut c_void,
+    ) -> io::Result<()> {
+        if owner.is_null() || dacl.is_null() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "private path owner or DACL missing",
+            ));
+        }
+        let owner_is_user = EqualSid(owner, current) != 0;
+        let owner_is_admin = EqualSid(owner, administrators) != 0;
+        let admin_enabled = if owner_is_admin {
+            let mut enabled = 0;
+            if CheckTokenMembership(std::ptr::null_mut(), administrators, &mut enabled) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            enabled != 0
+        } else {
+            false
+        };
+        if !super::private_windows_owner(owner_is_user, owner_is_admin, admin_enabled) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private path owner is not current user or enabled administrators",
             ));
         }
         let mut control = 0;
@@ -1287,18 +1360,31 @@ mod win_acl {
                 "private path DACL has no owner grant",
             ));
         }
+        let mut has_user_grant = false;
         for index in 0..u32::from(acl.ace_count) {
             let mut ace = std::ptr::null_mut();
             if GetAce(dacl, index, &mut ace) == 0 {
                 return Err(io::Error::last_os_error());
             }
             // ACCESS_ALLOWED_ACE: header(4), mask(4), SID starts at byte 8.
-            if *(ace.cast::<u8>()) != 0 || EqualSid(ace.cast::<u8>().add(8).cast(), current) == 0 {
+            let grantee = ace.cast::<u8>().add(8).cast();
+            if *(ace.cast::<u8>()) != 0
+                || (EqualSid(grantee, current) == 0
+                    && EqualSid(grantee, administrators) == 0
+                    && EqualSid(grantee, system) == 0)
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "private path grants another principal",
                 ));
             }
+            has_user_grant |= EqualSid(grantee, current) != 0;
+        }
+        if !has_user_grant {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private path DACL has no current-user grant",
+            ));
         }
         Ok(())
     }
@@ -1445,6 +1531,67 @@ mod win_acl {
             }
             CloseHandle(handle);
             Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn administrators_owner_with_private_dacl_follows_active_token() {
+            current_sid(|current| unsafe {
+                let mut user_text = std::ptr::null_mut();
+                assert_ne!(ConvertSidToStringSidW(current, &mut user_text), 0);
+                let mut len = 0;
+                while *user_text.add(len) != 0 {
+                    len += 1;
+                }
+                let user = String::from_utf16_lossy(std::slice::from_raw_parts(user_text, len));
+                LocalFree(user_text.cast());
+                let sddl = format!("O:BAD:P(A;;GA;;;{user})(A;;GA;;;SY)(A;;GA;;;BA)");
+                let mut descriptor = std::ptr::null_mut();
+                assert_ne!(
+                    ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                        wide(sddl.as_ref()).as_ptr(),
+                        1,
+                        &mut descriptor,
+                        std::ptr::null_mut(),
+                    ),
+                    0
+                );
+                let result = with_privileged_sids(|administrators, _system| {
+                    let mut owner = std::ptr::null_mut();
+                    let mut dacl = std::ptr::null_mut();
+                    let mut present = 0;
+                    let mut defaulted = 0;
+                    assert_ne!(
+                        GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted),
+                        0
+                    );
+                    assert_ne!(
+                        GetSecurityDescriptorDacl(
+                            descriptor,
+                            &mut present,
+                            &mut dacl,
+                            &mut defaulted,
+                        ),
+                        0
+                    );
+                    assert_ne!(present, 0);
+                    let mut enabled = 0;
+                    assert_ne!(
+                        CheckTokenMembership(std::ptr::null_mut(), administrators, &mut enabled),
+                        0
+                    );
+                    let verdict = verify_owner_descriptor(owner, dacl, descriptor, current);
+                    assert_eq!(verdict.is_ok(), enabled != 0, "{verdict:?}");
+                    Ok(())
+                });
+                LocalFree(descriptor);
+                result
+            })
+            .unwrap();
         }
     }
 }
@@ -2141,6 +2288,14 @@ mod tests {
         verify_private_file_perms(&sidecar).unwrap();
         let _ = std::fs::remove_file(sidecar);
         let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn windows_private_owner_accepts_enabled_administrators_only() {
+        assert!(super::private_windows_owner(true, false, false));
+        assert!(super::private_windows_owner(false, true, true));
+        assert!(!super::private_windows_owner(false, true, false));
+        assert!(!super::private_windows_owner(false, false, true));
     }
 
     #[cfg(windows)]
