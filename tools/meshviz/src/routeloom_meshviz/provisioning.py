@@ -34,6 +34,7 @@ import re
 import shlex
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import zlib
@@ -1435,6 +1436,19 @@ class LabProvisionBackend(ContractBackend):
         ctx = self._require_ctx(job)
         journal = ProvisionJournal.load(
             self._journals() / f'{ctx["plan"].work_id}.journal.json')
+        if journal.has('field'):
+            # The field image serves no maintenance console — a `status`
+            # exchange would hang on a dead link. The journaled seal is the
+            # identity evidence on a resume that crossed the field write;
+            # 'field' is only ever recorded after 'locked'.
+            sealed = journal.latest('sealed')
+            if sealed is None:
+                raise ProvisionError(
+                    'bad_journal', 'field written without seal evidence')
+            return StepResult('done', 'identity=sealed（field・journal）',
+                              {'identity': 'sealed', 'identity_mine': True,
+                               'node': ctx['plan'].node_id,
+                               'kid': sealed['kid']})
         status = DeviceStatus.parse(self._link(job).exchange('status'))
         mine = False
         if status.identity == 'sealed':
@@ -1447,6 +1461,13 @@ class LabProvisionBackend(ContractBackend):
     def _ensure_provisioned(self, job):
         """The journaled status→lock run; idempotent across step re-entry."""
         ctx = self._require_ctx(job)
+        journal = ProvisionJournal.load(
+            self._journals() / f'{ctx["plan"].work_id}.journal.json')
+        # 'field' implies 'locked': the whole status→lock run already
+        # committed and the field image it wrote serves no maintenance
+        # console, so re-verifying over it would die on a dead link.
+        if journal.has('field'):
+            return
         self._provisioner(ctx).run(ctx['plan'], self._link(job))
 
     def _step_keygen(self, job):
@@ -1487,6 +1508,10 @@ class LabProvisionBackend(ContractBackend):
         if journal.has('field'):
             return StepResult('done', 'field image written（resume）')
         self._flash(job.board, ctx['field_bundle'], ctx['identity'])
+        # Journal the write itself, not just the eventual readback: after a
+        # restart the field image owns the board and its maintenance console
+        # is gone — resume decisions (status/identity steps) key off this.
+        journal.record('field', digest=ctx['plan'].field_digest)
         return StepResult('done', f'field {manifest["bundle_id"]} written')
 
     def _step_readback(self, job):
@@ -1515,41 +1540,84 @@ class LabProvisionBackend(ContractBackend):
         return StepResult('done', 'inventory import 済み')
 
 
-def main(argv=None):
-    """`python -m routeloom_meshviz.provisioning` — headless provision/deprovision."""
+def main(argv=None, *, backend=None):
+    """`python -m routeloom_meshviz.provisioning` — headless provision/deprovision.
+
+    `provision` runs the full lab orchestration — the same
+    LabProvisionBackend + ProvisionRunner steps Mesh Lab drives: ROM
+    revalidation, setup image + BoardConfig, keygen/PoP/issue/seal/lock on
+    the maintenance console, the field-image write, the post-boot readback
+    and the inventory import. `provisioned` is printed only after readback
+    matched and inventory landed; a run that stops early resumes from the
+    journal on the next invocation (default location shared with Mesh Lab:
+    <site>/provision-journal).
+    """
     import argparse
+    from .device import RealBoards
+    from .provision_plan import ProvisionJob
 
     parser = argparse.ArgumentParser(prog='routeloom_meshviz.provisioning')
     parser.add_argument('--ctl', default='routeloomctl', help='routeloomctl path')
-    parser.add_argument('--journal-dir', required=True)
+    parser.add_argument('--journal-dir', default=None,
+                        help='journal dir (default: <site>/provision-journal)')
     sub = parser.add_subparsers(dest='verb', required=True)
-    for name in ('provision', 'deprovision'):
-        cmd = sub.add_parser(name)
-        cmd.add_argument('--plan', required=True, help='plan JSON file')
-        cmd.add_argument('--port', required=True, help='console serial port')
-        cmd.add_argument('--baud', type=int, default=115200)
-        if name == 'provision':
-            cmd.add_argument('--ca-key', required=True)
-            cmd.add_argument('--spec', required=True)
-            cmd.add_argument('--ledger', required=True)
+    cmd = sub.add_parser('provision')
+    cmd.add_argument('--port', required=True, help='board serial port')
+    cmd.add_argument('--node-id', required=True, help='NodeId to assign (hex)')
+    cmd.add_argument('--role', required=True, choices=LAB_ROLES)
+    cmd.add_argument('--chip', default=None, help='expected chip (checked when given)')
+    cmd.add_argument('--base-mac', default=None,
+                     help='expected ROM base MAC (checked when given)')
+    cmd.add_argument('--site-dir', required=True, help='lab site directory')
+    cmd.add_argument('--bundles-dir', required=True,
+                     help='signed bundle directory')
+    cmd.add_argument('--baud', type=int, default=115200)
+    cmd = sub.add_parser('deprovision')
+    cmd.add_argument('--plan', required=True, help='plan JSON file')
+    cmd.add_argument('--port', required=True, help='console serial port')
+    cmd.add_argument('--baud', type=int, default=115200)
     args = parser.parse_args(argv)
 
-    link = SerialMaintenanceLink(args.port, baudrate=args.baud)
-    try:
-        if args.verb == 'provision':
-            plan_json = json.loads(Path(args.plan).read_text(encoding='utf-8'))
-            plan = BoardProvisionPlan(**plan_json)
-            office = CtlOffice(args.ctl, args.ca_key, args.spec, args.ledger)
-            journal = Provisioner(args.journal_dir, office).run(plan, link)
-            print(f'provisioned node={plan.node_id} journal={journal.path}')
-        else:
-            plan_json = json.loads(Path(args.plan).read_text(encoding='utf-8'))
-            plan = DeprovisionPlan(**plan_json)
+    if args.verb == 'deprovision':
+        if not args.journal_dir:
+            parser.error('deprovision requires --journal-dir')
+        plan_json = json.loads(Path(args.plan).read_text(encoding='utf-8'))
+        plan = DeprovisionPlan(**plan_json)
+        link = SerialMaintenanceLink(args.port, baudrate=args.baud)
+        try:
             journal = Deprovisioner(args.journal_dir).run(plan, link)
-            print(f'deprovisioned journal={journal.path}')
-    finally:
-        link.close()
-    return 0
+        finally:
+            link.close()
+        print(f'deprovisioned journal={journal.path}')
+        return 0
+
+    node = valid_lab_node_id(args.node_id)
+    if node is None:
+        parser.error('--node-id must be 1..16 hex digits '
+                     '(not 0, not the group namespace)')
+    if backend is None:
+        backend = LabProvisionBackend(
+            site_dir=args.site_dir, boards=RealBoards(),
+            bundles_dir=args.bundles_dir, ctl=args.ctl,
+            journal_dir=args.journal_dir,
+            link_factory=lambda port: SerialMaintenanceLink(
+                port, baudrate=args.baud))
+    job = ProvisionJob(args.port, args.chip, args.base_mac, args.role, node,
+                       steps={'plan': 'done'})
+    try:
+        ProvisionRunner(backend, [job]).run_job(job)
+    except Exception as exc:  # hardware/tooling failure — journal kept
+        print(f'provision failed: {exc}', file=sys.stderr)
+        return 1
+    journal = backend._journals() / f'node-{job.node_id}.journal.json'
+    if job.ready and job.steps.get('inventory') == 'done':
+        print(f'provisioned node={job.node_id} journal={journal}')
+        return 0
+    step = job.resume_from or job.next_step() or 'join'
+    detail = job.details.get(step) or job_status_text(job)
+    print(f'provision stopped at {step}: {detail} '
+          f'(journal={journal}; re-run to resume)', file=sys.stderr)
+    return 1
 
 
 if __name__ == '__main__':

@@ -3,7 +3,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
+import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 
@@ -203,3 +206,50 @@ def import_rig(path):
             del sys.modules[module_name]
             raise
     return module.load_rigs(str(path))
+
+
+def _worker_env():
+    env = dict(os.environ)
+    package_root = str(Path(__file__).resolve().parents[1])
+    env['PYTHONPATH'] = os.pathsep.join(
+        filter(None, [package_root, env.get('PYTHONPATH')]))
+    return env
+
+
+class RealBoards:
+    """pyserial enumeration; probe/flash run in the isolated esptool worker process.
+
+    Qt-free so the provisioning CLI and the GUI share the same driver.
+    """
+
+    def __init__(self):
+        self.leases = PortLeases()
+
+    def list_ports(self):
+        # Mesh Lab boards are USB serial devices; legacy on-board UARTs have no VID.
+        return [port for port in list_ports() if port.vid is not None]
+
+    @staticmethod
+    def _run(request, timeout):
+        # Fixed argv and JSON stdin: no shell string, no caller-controlled trust anchor.
+        done = subprocess.run(
+            [sys.executable, '-m', 'routeloom_meshviz.flash_worker'],
+            input=json.dumps(request), capture_output=True, text=True,
+            timeout=timeout, env=_worker_env())
+        lines = done.stdout.strip().splitlines()
+        result = json.loads(lines[-1]) if lines else \
+            {'ok': False, 'error': done.stderr[-400:]}
+        if not result.get('ok'):
+            raise RuntimeError(result.get('error') or 'flash worker failed')
+        return result
+
+    def probe(self, port):
+        return Identity(**self._run({'op': 'probe', 'port': port}, 30)['identity'])
+
+    def flash(self, port, plan):
+        from dataclasses import asdict
+        self._run({'port': port, 'bundle': str(plan.bundle),
+                   'expected': asdict(plan.expected),
+                   'expected_mac': plan.expected_mac, 'quiesced': plan.quiesced,
+                   'assigned_node_id': plan.assigned_node_id}, 180)
+        return True

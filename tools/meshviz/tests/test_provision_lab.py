@@ -6,7 +6,9 @@ field-boot readback, and the LabProvisionBackend step orchestration.
 stands in for the ROM probe/flash worker; `RecordingOffice` for the
 routeloomctl provision-* family plus lab-inventory-import.
 """
+import contextlib
 import hashlib
+import io
 import json
 import tempfile
 import unittest
@@ -526,6 +528,94 @@ class LabBackendTests(unittest.TestCase):
         result = backend.run('preflight', job)
         self.assertEqual(result.state, 'failed')
         self.assertIn('bundle', result.detail)
+
+    def test_restart_after_field_write_never_uses_console(self):
+        """D03 resume: a restart after the field image was written must not
+        dial the maintenance console — the field image serves none. The
+        journal answers the status/identity steps and the boot readback
+        closes the run."""
+        job = self._job()
+        journal_path = (self.backend._journals() /
+                        f'node-{job.node_id}.journal.json')
+
+        def past_field_write():
+            return (journal_path.exists()
+                    and prov.ProvisionJournal.load(journal_path).has('field'))
+
+        # First process: stops once the field write is journaled (host died
+        # between the write and the boot readback).
+        runner = ProvisionRunner(self.backend, [job],
+                                 should_cancel=past_field_write)
+        runner.run_job(job)
+        self.assertEqual(job.steps.get('field'), 'done')
+        self.assertEqual(job.resume_from, 'readback')
+        self.assertFalse(job.ready)
+        self.assertEqual(len(self.boards.flashed), 2)
+
+        # Restart: a fresh backend has an empty step ctx — every step re-runs
+        # from the journal. The console is dead: any exchange is the bug.
+        class DeadConsole(SetupConsole):
+            def exchange(self, line):
+                raise AssertionError(f'console used post-field: {line}')
+
+        backend2 = prov.LabProvisionBackend(
+            site_dir=self.backend.site_dir, boards=self.boards,
+            bundles_dir=self.backend.bundles_dir, office=self.office,
+            link_factory=lambda port: DeadConsole(),
+            boot_capture=lambda port: self._expected_boot(job))
+        job2 = ProvisionJob('/dev/ttyUSB0', 'esp32c3', IDENTITY.base_mac,
+                            'bench', job.node_id, steps={'plan': 'done'})
+        ProvisionRunner(backend2, [job2]).run_job(job2)
+        self.assertTrue(job2.ready)
+        self.assertEqual(job2.steps.get('inventory'), 'done')
+        self.assertEqual(len(self.boards.flashed), 2)  # no re-flash
+        self.assertEqual(len(self.office.confirmed), 1)
+        journal = prov.ProvisionJournal.load(journal_path)
+        self.assertTrue(journal.done)
+        self.assertTrue(journal.has('written'))
+
+    def test_cli_provision_completes_full_flow(self):
+        """D03 CLI: `provisioned` is printed only after the field write,
+        boot readback and inventory all completed — never at identity seal."""
+        def capture(port):
+            return self._expected_boot(
+                ProvisionJob('/dev/ttyUSB0', 'esp32c3', IDENTITY.base_mac,
+                             'bench', '0000000000000007'))
+
+        self.backend._boot_capture = capture
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = prov.main(
+                ['provision', '--port', '/dev/ttyUSB0',
+                 '--node-id', '0000000000000007', '--role', 'bench',
+                 '--site-dir', str(self.backend.site_dir),
+                 '--bundles-dir', str(self.backend.bundles_dir)],
+                backend=self.backend)
+        self.assertEqual(rc, 0)
+        self.assertIn('provisioned node=0000000000000007', out.getvalue())
+        self.assertEqual(len(self.boards.flashed), 2)
+        self.assertTrue(self.console.locked)
+        self.assertEqual(
+            self.office.imported,
+            [(str(self.backend.site_dir), '0000000000000007', 'endpoint')])
+
+    def test_cli_provision_does_not_claim_partial(self):
+        """A stop before a matching readback must not print `provisioned`."""
+        self.backend._boot_capture = lambda port: _boot_lines(
+            node=7, kid='00' * 32, devcert_sha='11' * 32)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            rc = prov.main(
+                ['provision', '--port', '/dev/ttyUSB0',
+                 '--node-id', '0000000000000007', '--role', 'bench',
+                 '--site-dir', str(self.backend.site_dir),
+                 '--bundles-dir', str(self.backend.bundles_dir)],
+                backend=self.backend)
+        self.assertEqual(rc, 1)
+        self.assertNotIn('provisioned', out.getvalue())
+        self.assertIn('provision stopped', err.getvalue())
+        self.assertEqual(self.office.imported, [])
 
 
 if __name__ == '__main__':
