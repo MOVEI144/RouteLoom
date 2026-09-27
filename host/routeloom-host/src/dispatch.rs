@@ -29,7 +29,8 @@
 use routeloom_protocol::host_ops::{
     self, BootLease, ConfigOpsResult, Evidence, GatewayOpsResult, HostOpsResult, LaneRequest,
     QueryResponse, Receipt, SlotState, SubmitRequest, TimeSampleRequest, CAP_CONFIG_ENDPOINT_V1,
-    CAP_GATEWAY_ENDPOINT_V1, CAP_HOST_OPS_V1, SUB_QUERY_DISPATCH, SUB_RETIRE_THROUGH, SUB_SKIP,
+    CAP_GATEWAY_ENDPOINT_V1, CAP_HOST_OPS_V1, CAP_RX_ASSURANCE_V1, SUB_QUERY_DISPATCH,
+    SUB_RETIRE_THROUGH, SUB_SKIP,
 };
 use routeloom_protocol::{Frame, FrameKind};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -60,6 +61,9 @@ pub const HOST_REGISTER_LEASE_REQUEST_MS: u32 = 15_000;
 /// Floor between registration attempts — a Busy/failed answer retries on
 /// this cadence instead of every 40ms tick.
 const REGISTER_RETRY_MS: u64 = 250;
+/// Floor between 0x08 enable attempts after a refusal — same cadence
+/// class: one small frame per refusal window, never a per-tick loop.
+const RX_ASSURANCE_RETRY_MS: u64 = 250;
 
 /// Poll cadence for live positions and the response window after which an
 /// unanswered request is dropped and re-issued via QUERY.
@@ -116,6 +120,10 @@ pub struct LinkSnapshot {
     /// The device serves the Config HostOps family (cap bit 4): challenge /
     /// status queries and permit-object transfer (P5).
     pub config_ops: bool,
+    /// The device serves 0x08 receive assurance (cap bit 12 with
+    /// host_ops_v1): per-delivery origin-verification evidence on
+    /// DataFromMesh once the lane enables it.
+    pub rx_assurance: bool,
     /// Authenticated USB session id — the registration binds this.
     pub session: u64,
     /// The daemon's own incarnation id (minted once per run, bound into
@@ -151,6 +159,9 @@ fn link_snapshot(state: &State) -> LinkSnapshot {
         config_ops: info
             .capability
             .is_some_and(|c| c & CAP_CONFIG_ENDPOINT_V1 != 0),
+        rx_assurance: info
+            .capability
+            .is_some_and(|c| c & CAP_HOST_OPS_V1 != 0 && c & CAP_RX_ASSURANCE_V1 != 0),
         session: info.id.unwrap_or(0),
         host_boot: state.host_boot,
         node: info.node.unwrap_or(0),
@@ -564,6 +575,13 @@ struct TimeSampleInFlight {
     h0: u64,
 }
 
+#[derive(Clone, Copy)]
+struct RxAssuranceInFlight {
+    request: u64,
+    session: u64,
+    emit_mono: u64,
+}
+
 /// The TX-I2 dispatcher: a synchronous state machine driven by `tick`
 /// (emits request bodies) and `handle_reply` (consumes inbox bodies).
 /// All store access goes through `OperationStore` transitions, so the
@@ -585,6 +603,16 @@ pub struct Dispatcher {
     next_nonce: u64,
     pending: HashMap<u64, Pending>,
     sample: Option<TimeSampleInFlight>,
+    /// 0x08 enable in flight, if any — one per session, like the time
+    /// sample (no pending-table slot: the reply only arms a gateway
+    /// behavior, it resolves no store op).
+    rx_assurance: Option<RxAssuranceInFlight>,
+    /// USB session whose 0x08 the device ACKed-Ok (0 = none): the enable
+    /// dies with the session on both ends, so a new session re-enables.
+    rx_assurance_done: u64,
+    /// Monotonic floor for the next 0x08 emit after a refusal — a
+    /// refusing gateway is re-asked on cadence, not every tick.
+    rx_assurance_next_emit: u64,
     /// Last USB attempt per operation seq — throttles query re-polls.
     last_attempt: HashMap<u64, u64>,
     /// A device clock regression was observed on this lease.
@@ -640,6 +668,9 @@ impl Dispatcher {
             next_nonce: 0,
             pending: HashMap::new(),
             sample: None,
+            rx_assurance: None,
+            rx_assurance_done: 0,
+            rx_assurance_next_emit: 0,
             last_attempt: HashMap::new(),
             clock_degraded: false,
             gateway_session: 0,
@@ -1025,6 +1056,7 @@ impl Dispatcher {
             return out;
         };
         self.gateway_pass(link, now, mono, &mut out);
+        self.maybe_rx_assurance(link, mono, &mut out);
         let lease = BootLease(lease_bytes);
         let mut sorted = ops;
         sorted.sort_by_key(|op| op.seq);
@@ -1607,6 +1639,66 @@ impl Dispatcher {
         DispatchRequest { request, body }
     }
 
+    /// Enables receive assurance for this session: one 0x08 per session
+    /// once the link advertises the bit, re-emitted on refusal cadence
+    /// (the device answers Unsupported when unconfigured — legacy
+    /// DataFromMesh keeps flowing either way).
+    fn maybe_rx_assurance(
+        &mut self,
+        link: &LinkSnapshot,
+        mono: u64,
+        out: &mut Vec<DispatchRequest>,
+    ) {
+        if !(link.rx_assurance && link.session != 0) {
+            self.rx_assurance = None;
+            self.rx_assurance_done = 0;
+            return;
+        }
+        if self.rx_assurance_done == link.session {
+            return;
+        }
+        if self
+            .rx_assurance
+            .is_some_and(|in_flight| in_flight.session == link.session)
+            || mono < self.rx_assurance_next_emit
+        {
+            return;
+        }
+        let request = self.alloc_request();
+        out.push(DispatchRequest {
+            request,
+            body: host_ops::encode_rx_assurance_enable(),
+        });
+        self.rx_assurance = Some(RxAssuranceInFlight {
+            request,
+            session: link.session,
+            emit_mono: mono,
+        });
+    }
+
+    fn on_rx_assurance_response(&mut self, inner: &[u8]) {
+        let Some(in_flight) = self.rx_assurance.take() else {
+            return;
+        };
+        match host_ops::decode_rx_assurance_response(inner) {
+            Ok(HostOpsResult::Ok) => {
+                self.rx_assurance_done = in_flight.session;
+            }
+            Ok(other) => {
+                self.rx_assurance_next_emit =
+                    in_flight.emit_mono.saturating_add(RX_ASSURANCE_RETRY_MS);
+                self.note(format!(
+                    "rx assurance refused: {other:?} (legacy ingress keeps flowing)"
+                ));
+            }
+            Err(error) => {
+                self.rx_assurance_next_emit =
+                    in_flight.emit_mono.saturating_add(RX_ASSURANCE_RETRY_MS);
+                self.note(format!("rx assurance reply undecodable: {error}"));
+            }
+        }
+    }
+
     fn maybe_sample(&mut self, lease: BootLease, now: u64, out: &mut Vec<DispatchRequest>) {
         if self.sample.is_some() {
             return;
@@ -1645,6 +1737,13 @@ impl Dispatcher {
         if self.sample.is_some_and(|s| s.request == request) {
             self.sample = None;
         }
+        if self
+            .rx_assurance
+            .is_some_and(|in_flight| in_flight.request == request)
+        {
+            // Never reached the writer: re-issue on the next pass.
+            self.rx_assurance = None;
+        }
     }
 
     /// One host-ops inner body from the inbox.
@@ -1657,6 +1756,13 @@ impl Dispatcher {
     ) {
         if self.sample.is_some_and(|s| s.request == request) {
             self.on_time_sample(inner, now);
+            return;
+        }
+        if self
+            .rx_assurance
+            .is_some_and(|in_flight| in_flight.request == request)
+        {
+            self.on_rx_assurance_response(inner);
             return;
         }
         // Config replies land in the same inbox keyed by the dispatcher's
@@ -2473,6 +2579,9 @@ fn gateway_ingress_ack(state: &State, inner: &[u8], now: u64) -> Option<Vec<u8>>
                 msg_session: ingress.ref_session,
                 msg_seq: ingress.ref_sequence,
                 payload: ingress.payload.clone(),
+                // Scope-2 ingress (0x11) carries no assurance tail —
+                // per-delivery evidence is a DataFromMesh negotiation.
+                assurance: None,
             },
             now,
         )
@@ -2725,6 +2834,7 @@ mod tests {
             host_boot: HOST_BOOT,
             gateway_ops: true,
             config_ops: true,
+            rx_assurance: false,
         }
     }
 
@@ -2739,6 +2849,7 @@ mod tests {
             host_boot: 0,
             gateway_ops: false,
             config_ops: false,
+            rx_assurance: false,
         }
     }
 
@@ -4516,6 +4627,79 @@ mod tests {
             .find(|r| sub_of(r) == host_ops::SUB_HOST_REGISTER)
     }
 
+    fn rx_link() -> LinkSnapshot {
+        let mut link = gw_link();
+        link.rx_assurance = true;
+        link
+    }
+
+    fn rx_assurance_of(requests: &[DispatchRequest]) -> Option<&DispatchRequest> {
+        requests
+            .iter()
+            .find(|r| sub_of(r) == host_ops::SUB_RX_ASSURANCE_ENABLE)
+    }
+
+    #[test]
+    fn rx_assurance_enable_emits_once_per_session() {
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        let mut dispatcher = Dispatcher::new([0x77; 16]);
+        let out = dispatcher.tick_mono(&mut store, &rx_link(), 1_000, 2_000);
+        let enable = rx_assurance_of(&out).expect("0x08 emitted for a capable link");
+        assert_eq!(enable.body, vec![1, 0x08]);
+        // One in flight: an immediate re-tick emits nothing new.
+        let out = dispatcher.tick_mono(&mut store, &rx_link(), 1_010, 2_010);
+        assert!(rx_assurance_of(&out).is_none());
+        // Ok settles the session: no more 0x08 on later ticks.
+        dispatcher.handle_reply(&mut store, enable.request, &[1, 0x08, 0], 1_020);
+        let out = dispatcher.tick_mono(&mut store, &rx_link(), 1_030, 2_030);
+        assert!(rx_assurance_of(&out).is_none());
+        // A new session re-enables (the device cleared its enable too).
+        let mut link2 = rx_link();
+        link2.session = 8;
+        let out = dispatcher.tick_mono(&mut store, &link2, 1_040, 2_040);
+        assert!(rx_assurance_of(&out).is_some());
+    }
+
+    #[test]
+    fn rx_assurance_refusal_retries_on_cadence() {
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        let mut dispatcher = Dispatcher::new([0x77; 16]);
+        let out = dispatcher.tick_mono(&mut store, &rx_link(), 1_000, 2_000);
+        let enable = rx_assurance_of(&out).expect("0x08 emitted");
+        dispatcher.handle_reply(
+            &mut store,
+            enable.request,
+            &[1, 0x08, HostOpsResult::Unsupported as u8],
+            1_010,
+        );
+        assert!(
+            dispatcher
+                .take_notes()
+                .iter()
+                .any(|n| n.contains("rx assurance refused")),
+            "a refusal is a visible note, never silent"
+        );
+        // Inside the refusal window: silent.
+        let out = dispatcher.tick_mono(&mut store, &rx_link(), 1_020, 2_010);
+        assert!(rx_assurance_of(&out).is_none());
+        // On cadence: asked again.
+        let out = dispatcher.tick_mono(
+            &mut store,
+            &rx_link(),
+            1_020 + RX_ASSURANCE_RETRY_MS,
+            2_000 + RX_ASSURANCE_RETRY_MS,
+        );
+        assert!(rx_assurance_of(&out).is_some());
+    }
+
+    #[test]
+    fn rx_assurance_stays_silent_without_the_bit() {
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        let mut dispatcher = Dispatcher::new([0x77; 16]);
+        let out = dispatcher.tick_mono(&mut store, &gw_link(), 1_000, 2_000);
+        assert!(rx_assurance_of(&out).is_none());
+    }
+
     #[test]
     fn register_lane_binds_session_and_publishes_mirror() {
         let mut store = MemoryOperationStore::new([0xab; 16]);
@@ -4968,6 +5152,7 @@ mod tests {
                         msg_session: 1,
                         msg_seq: 1,
                         payload: vec![0xaa],
+                        assurance: None,
                     },
                     4_000,
                 );

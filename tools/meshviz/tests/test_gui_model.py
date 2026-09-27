@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 
 from routeloom_meshviz import views
-from routeloom_meshviz.api1_adapter import LineDecoder, NodesNormalizer, encode_request
+from routeloom_meshviz.api1_adapter import (
+    LineDecoder, NodesNormalizer, encode_health_request, encode_request,
+    encode_topology_request, parse_observation_snapshot)
 from routeloom_meshviz.board_setup import BoardRow, assignment_errors, normalize_node_id, preview
 from routeloom_meshviz.capture import Capture
 from routeloom_meshviz.demo import GATEWAY, DemoMesh, write_demo_capture
@@ -107,6 +109,158 @@ class Api1AdapterTests(unittest.TestCase):
                                        [node(9, role='gateway', hops=0)], 4000):
             reduce(state, event)
         self.assertEqual(set(state.nodes), {f'gw-{9:016x}:{9:016x}'})
+
+
+class ObservationClientTests(unittest.TestCase):
+    GATEWAY = f'{0xabc:016x}'
+
+    def fixture(self):
+        routes = [{'destination': f'{n:016x}', 'next_hop': f'{2:016x}', 'generation': 1,
+                   'sequence': 9, 'metric': 3, 'valid': True, 'remaining_ms': 500}
+                  for n in range(2, 12)]
+        routes.append({'destination': f'{99:016x}', 'next_hop': None, 'generation': 4,
+                       'sequence': 9, 'metric': None, 'valid': False, 'remaining_ms': None})
+        neighbors = [{'peer': f'{2:016x}', 'active': True, 'link_cost': 1,
+                      'phase': {'code': 6, 'name': 'reachable'},
+                      'rssi_last_dbm': -71, 'rssi_ewma_q8_8': -70 * 256,
+                      'last_heard_at_ms': 880, 'lease_remaining_ms': 80000},
+                     {'peer': f'{3:016x}', 'active': False, 'link_cost': 2,
+                      'phase': {'code': 0, 'name': 'unknown'},
+                      'rssi_last_dbm': None, 'rssi_ewma_q8_8': None,
+                      'last_heard_at_ms': None, 'lease_remaining_ms': None}]
+        return {'gateway': self.GATEWAY, 'boot': f'{0xb007:016x}', 'session_id': 0x5e55,
+                'revision': 0x11223344, 'neighbors': neighbors,
+                'sections': {
+                    'system': {'uptime_ms': 400, 'booted_at_ms': 600,
+                               'heap': {'free_bytes': 100, 'min_bytes': 90,
+                                        'largest_bytes': None},
+                               'reset': {'code': 3, 'name': 'watchdog'},
+                               'power': {'code': 1, 'name': 'running'},
+                               'coord': {'code': 3, 'name': 'member'},
+                               'profile': {'code': 1, 'name': 'member_edhoc'}},
+                    'tables': {'neighbor': {'active': 2, 'total': 3}},
+                    'milestones': {'mode': {'code': 3, 'name': 'member'},
+                                   'adopted': True, 'confirmed': False, 'attempts': 1,
+                                   'adopted_node': f'{0xa:016x}',
+                                   'join_started_at_ms': None,
+                                   'adopted_at_ms': 950, 'confirmed_at_ms': None},
+                    'summary': {'neighbor_digest': 1, 'route_digest': 2,
+                                'neighbor': {'active': 2, 'total': 3},
+                                'route': {'reachable': 10, 'total': 11},
+                                'milestone_gen': 7}},
+                'routes': routes}
+
+    def ask(self, fake, line):
+        decoder = LineDecoder()
+        replies = decoder.feed(fake.feed(line)[0])
+        self.assertEqual(len(replies), 1)
+        return replies[0]
+
+    def test_builders_send_only_explicit_options(self):
+        line = encode_health_request('h1', self.GATEWAY)
+        self.assertIn(b'"method":"health.get"', line)
+        self.assertNotIn(b'subscribe', line)
+        line = encode_health_request('h2', self.GATEWAY, 'milestones', max_age_ms=0,
+                                     subscribe=True)
+        self.assertIn(b'"section":"milestones"', line)
+        self.assertIn(b'"max_age_ms":0', line)
+        self.assertIn(b'"subscribe":true', line)
+        line = encode_topology_request('t1', self.GATEWAY, 'routes',
+                                       destination=f'{9:016x}')
+        self.assertIn(b'"destination":"0000000000000009"', line)
+        self.assertNotIn(b'cursor', line)
+        line = encode_topology_request('t2', self.GATEWAY, 'neighbors',
+                                       destination=f'{2:016x}')
+        self.assertIn(b'"section":"neighbors"', line)
+        self.assertIn(b'"destination":"0000000000000002"', line)
+        for bad in (lambda: encode_health_request('h', 'zz'),
+                    lambda: encode_health_request('h', self.GATEWAY, 'routes'),
+                    lambda: encode_health_request('h', self.GATEWAY, max_age_ms=60001),
+                    lambda: encode_topology_request('t', self.GATEWAY, 'bogus'),
+                    lambda: encode_topology_request('t', self.GATEWAY, 'routes',
+                                                    destination='0000000000000000'),
+                    lambda: encode_topology_request('t', self.GATEWAY, 'routes',
+                                                    cursor='ffffffffffffffff'),
+                    lambda: encode_topology_request('t', self.GATEWAY, 'routes',
+                                                    destination=f'{9:016x}',
+                                                    cursor=f'{1:016x}'),
+                    lambda: encode_topology_request('t', self.GATEWAY, 'summary',
+                                                    cursor=f'{1:016x}')):
+            with self.assertRaises(ValueError):
+                bad()
+
+    def test_health_roundtrip_keeps_unknown_null(self):
+        fake = FakeAPI1(observation=self.fixture())
+        reply = self.ask(fake, encode_health_request('h1', self.GATEWAY, 'milestones'))
+        snapshot = parse_observation_snapshot(reply, 'milestones')
+        self.assertEqual(snapshot['source']['observer_boot'], f'{0xb007:016x}')
+        milestones = snapshot['milestones']
+        self.assertTrue(milestones['adopted'])
+        self.assertIsNone(milestones['join_started_at_ms'])
+        self.assertEqual(milestones['adopted_at_ms'], 950)
+        reply = self.ask(fake, encode_health_request('h2', self.GATEWAY))
+        system = parse_observation_snapshot(reply, 'system')['system']
+        self.assertEqual(system['reset']['name'], 'watchdog')
+        self.assertIsNone(system['heap']['largest_bytes'])
+        # A foreign observer is refused, never routed.
+        reply = self.ask(fake, encode_health_request('h3', f'{5:016x}'))
+        self.assertFalse(reply['ok'])
+        self.assertEqual(reply['error']['code'], 'NOT_FOUND')
+        with self.assertRaises(ValueError):
+            parse_observation_snapshot(reply, 'system')
+
+    def test_topology_walks_pages_and_exact(self):
+        fake = FakeAPI1(observation=self.fixture())
+        entries = []
+        cursor = None
+        while True:
+            reply = self.ask(fake, encode_topology_request('t', self.GATEWAY, 'routes',
+                                                            cursor=cursor))
+            snapshot = parse_observation_snapshot(reply, 'routes')
+            entries.extend(snapshot['entries'])
+            if snapshot['complete']:
+                self.assertIsNone(snapshot['next_cursor'])
+                break
+            cursor = snapshot['next_cursor']
+        # 11 entries over two pages; the lost route keeps its retraction identity.
+        self.assertEqual(len(entries), 11)
+        self.assertEqual(entries[-1]['destination'], f'{99:016x}')
+        self.assertFalse(entries[-1]['valid'])
+        self.assertIsNone(entries[-1]['next_hop'])
+        self.assertEqual(entries[-1]['generation'], 4)
+        reply = self.ask(fake, encode_topology_request('t', self.GATEWAY, 'routes',
+                                                        destination=f'{3:016x}'))
+        snapshot = parse_observation_snapshot(reply, 'routes')
+        self.assertTrue(snapshot['present'])
+        self.assertEqual(len(snapshot['entries']), 1)
+        reply = self.ask(fake, encode_topology_request('t', self.GATEWAY, 'routes',
+                                                        destination=f'{77:016x}'))
+        snapshot = parse_observation_snapshot(reply, 'routes')
+        self.assertFalse(snapshot['present'])
+        self.assertEqual(snapshot['entries'], [])
+        reply = self.ask(fake, encode_topology_request('t', self.GATEWAY, 'summary'))
+        summary = parse_observation_snapshot(reply, 'summary')
+        self.assertEqual(summary['summary']['milestone_gen'], 7)
+        self.assertEqual(summary['entries'], [])
+
+    def test_topology_neighbors_roundtrip(self):
+        fake = FakeAPI1(observation=self.fixture())
+        reply = self.ask(fake, encode_topology_request('t', self.GATEWAY, 'neighbors'))
+        snapshot = parse_observation_snapshot(reply, 'neighbors')
+        self.assertTrue(snapshot['complete'])
+        entries = snapshot['entries']
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]['phase']['name'], 'reachable')
+        self.assertEqual(entries[0]['lease_remaining_ms'], 80000)
+        # The bare row carries no evidence: nulls, never zeros.
+        self.assertIsNone(entries[1]['rssi_last_dbm'])
+        self.assertIsNone(entries[1]['last_heard_at_ms'])
+        self.assertIsNone(entries[1]['lease_remaining_ms'])
+        reply = self.ask(fake, encode_topology_request('t', self.GATEWAY, 'neighbors',
+                                                        destination=f'{77:016x}'))
+        snapshot = parse_observation_snapshot(reply, 'neighbors')
+        self.assertFalse(snapshot['present'])
+        self.assertEqual(snapshot['entries'], [])
 
 
 class DemoAndFakeServerTests(unittest.TestCase):

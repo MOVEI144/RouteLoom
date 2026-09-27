@@ -254,6 +254,12 @@ config ROUTELOOM_CAPABILITY
         can actually serve a send (flat profile, e.g. DevRam, answers
         Unsupported at the gate instead of failing every send).
         Cleared answers Unsupported. Also rides the HostOps carrier (bit 2).
+        Bit 11 (0x800) is the EXPERIMENTAL opt-in for observation_v1
+        (meshviz §2.4-§2.5): the bridge answers the 0x70 read-only queries
+        (system health, table occupancy, join milestones, topology summary,
+        paginated selected-route detail) and, once the host subscribes,
+        streams 0x72 topology/milestone change events; cleared answers
+        Unsupported. Also rides the HostOps carrier (bit 2).
         The bitmap is bound into the HelloAck authentication transcript —
         a bit is only advertised when the matching endpoint is actually
         attached (dev profile; not a production identity claim).

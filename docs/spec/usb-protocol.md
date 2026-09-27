@@ -87,4 +87,31 @@ SDK v1ゼロタッチ参加で、member proxyが中継する未割当機器のED
 
 `Ok`は機器への配送を意味しない（配送の結果は次の上り、または`0x62`の`delivery_failed`で分かる）。gatewayは分割されたobjectを2件まで同時に組み立て／送信し、hostが居ない（sessionが無い・queue満杯）間の上りはproxyへ`authority_unreachable`の中止を返して捨てる。形式不正はError frame（ProtocolError）、`0x60`/`0x63`をhostが送ればdirection違反。共有vectorは`protocol/usb-golden/join-relay`（gateway 1・proxy 2の交換をC++ bridgeがbyte一致で再生、Rust `routeloom-protocol::join_relay`が復号）とrelay objectの`protocol/sdkv1-golden/join-transport`。Site Authority側（daemon）はP3-3。
 
+## 10. 観測（observation_v1、EXPERIMENTAL）
+
+USBで直結したnode自身のread-only snapshot：system health、table占有、参加milestone、topology summary、選択経路のpage。経路・lease・広告の状態は一切変えない。HelloAck capability bit 11（`0x800`、`kCapObservationV1`／`CAP_OBSERVATION_V1`）を広告する機器だけがHostOps `0x70`〜`0x72`を扱う（bit 2も必要）。形式は§7と同じ4B head＋payload（big-endian、長さ完全一致）。
+
+| sub | 向き | payload |
+|---|---|---|
+| `0x70` OBSERVATION_QUERY | H→G | `section:u8`（0 system／1 tables／2 milestones／3 summary／4 routes／5 neighbors）、`flags:u8`（bit0 SUBSCRIBE：pageを取る前にevent streamを(再)arm、bit1 EXACT：routes/neighbors専用で`after`をcursorではなく1宛先/peer指定）、`max_entries:u8`（1〜8、singletonは常に1）、`reserved:u8=0`、`after:u64`（排他cursor。`u64::MAX`不可） |
+| `0x71` OBSERVATION_PAGE | G→H（同request id） | `result:u16`（ConfigOpsResult空間）、`section:u8`、`flags:u8`（bit0 MORE、bit1 ARMED）、`count:u8`、`reserved:u8=0`、`boot_id:u64`、`revision:u32`、`next_after:u64`、`body` |
+| `0x72` OBSERVATION_EVENT | G→H（非要求、request id 0） | `sequence:u32`（arm毎に1から連続）、`kind:u8`（1 topology／2 milestone）、`mask:u8`（topologyのみ：bit0 neighbors／bit1 routes変化、milestoneは0）、`reserved:u16=0`、`boot_id:u64`、`revision:u32`（topology＝route digest、milestone＝milestone世代）、`extra:u32`（topology＝neighbor digest、milestone＝0） |
+
+section bodyは固定長（system 28B：`uptime_ms:u64`・heap free/min/largest:u32・reset/power/coord/profile:u8・予約u32／tables 36B：neighbor・route・link/end session・dedup resident/terminal/cap・tx used/cap・group trees/origins・dedup refused/evicted・予約u16／milestones 44B：mode/membership/joiner/flags:u8・attempts:u32・join_started/adopted/confirmedのage:u64・adopted_node:u64・予約u32／summary 24B：neighbor/route digest:u32・各active/total:u16・milestone_gen:u32・予約u32）とroutes可変長（30B entry×count：`destination:u64、next_hop:u64、generation:u32、sequence:u16、metric:u16、valid:u8(0/1)、reserved:u8=0、remaining_ms:u32`）・neighbors可変長（24B entry×count：`peer:u64、heard_age_ms:u32、lease_remaining_ms:u32、link_cost:u16、rssi_ewma_q8_8:i16、phase:u8（discovery phase＋1、0＝不明）、flags:u8（bit0 active／bit1 rssi有効／bit2 heard有効）、rssi_last_dbm:i8、reserved:u8=0`）。milestoneのageはboot内のミリ秒精度で保持し、49日を超えても周回・飽和しない。reset_codeはmask-ROMのreset reason直読（IDFのhint精製を使わないためpanic起因のSW resetはsoftwareと読む）。pageの`revision`はmilestones＝milestone世代、summary/routes＝route digest、neighbors＝neighbor digest、system/tables＝0。非Ok pageはcount 0・空body。routes/neighbors pageのentryは宛先/peer昇順で、`next_after`は末尾entryの宛先/peer（空pageはqueryの`after`）。機器は絶対時刻を送らずuptime・age（milestoneは`u64::MAX`、neighborは`u32::MAX`が不明）だけを送り、hostが受信時刻から逆算する。
+
+(再)armはevent sequenceを1に戻す。hostはSUBSCRIBE付きqueryの送信時に自前のwatermarkを再同期し、sequenceの飛びを欠落（再pull）として扱う。page/eventはowner loop内で組み立て、無線callbackで表走査やJSON化をしない。共有vectorはC++／Rustの固定byte試験（`tests/cpp/test_observation.cpp`の`test_fixed_vectors`と`routeloom-protocol::observation`の`fixed_vectors_match_device_encoder`が同一byteを検証）。host側の扱いは[Host §12](host.md)。
+
+**遠隔路（M2）**：gateway以外のnodeのsectionはDiagnostic `0x30`/`0x31`のsubtype 7（query）／8（snapshot）で取る。gatewayがHelloAck bit 5（m1 diagnostics）とbit 2を広告する時のみ。query 24B＝`ver:u8=1、sub:u8=7、予約u16=0、request_id:u32≠0、section:u8、max_entries:u8、flags:u8（bit0 EXACT：routes/neighbors専用・`after`はcursorでなく1宛先/peer）、予約u8=0、after:u64（`u64::MAX`不可）、予約u32=0`。snapshot 40B head＋section body（全体128B以下）＝`ver:u8=1、sub:u8=8、予約u16=0、request_id:u32、observer:u64、observer_boot:u64、section:u8、flags:u8（bit0 MORE）、count:u8、予約u8=0、revision:u32、sampled_ms:u64（応答nodeのboot内単調時計）`＋0x71と同一byteのsection body。section bodyは0x71と同一encoder（hostは両路を同一codecで読む）。128B boundのpageはroutes 2件・neighbors 3件まで、singletonはcount 1。gateway宛のqueryは自sectionで即応答し、他node宛はmesh転送する（内側相関idはgatewayが振り直してverbatim中継するため、hostはUSB request id＋observer/section一致で照合し、内側idでは照合しない）。応答nodeはopt-in＋所属時のみ応答し、それ以外・経路なし・不明sectionは診断拒否（subtype 6）で返す。pull専用（change通知は無線を越えない）。
+
+## 11. 受信保証（rx_assurance_v1、EXPERIMENTAL）
+
+DataFromMeshごとのorigin検証証拠：gatewayの実効security profile・open_end判定・site epoch。HelloAck capability bit 12（`0x1000`、`kCapRxAssuranceV1`／`CAP_RX_ASSURANCE_V1`）を広告するbridgeだけがHostOps `0x08`を扱う（bit 2も必要）。bitはbridge ownerが`set_rx_assurance_profile`で実効profile（observation `kProfile*`）を渡した時だけ立つ。
+
+| sub | 向き | payload |
+|---|---|---|
+| `0x08` RX_ASSURANCE_ENABLE | H→G | 空（head 2Bのみ。存在がenable） |
+| `0x08` | G→H（同request id） | `result:u8`（HostOpsResult。`Ok`で当該sessionの拡張ingressをarm、`Unsupported`でlegacy継続） |
+
+enableはsession scoped（再接続で解除、再enableが必要。profile idはboot scopedで残る）。arm済みsessionの証拠付き配送はDataFromMeshのframe flags bit `0x0002`（`kFlagIngressAssurance`）を立て、payloadの後に8B tail（`flags:u16`＝bit0 VERIFIED、残り予約0／`profile:u8`＝実効profile id 0〜3／`reserved:u8=0`／`site_epoch:u32`＝配送headerのend_epoch）を付ける。20B headのoffsetは両形で同一。group配送（3引数`on_message`経路）はgroup鍵検証であってorigin END証明ではないため、arm済みでもlegacy形のまま送る。hostはflag付きでtail長に満たない・tail異常のframeをmalformedとして落とす（証拠なしへの格下げはしない）。host側の扱いは[Host §3](host.md)。
+
 [Host](host.md)／[Wire](wire-protocol.md)／[電源断](crash-time-resources.md)

@@ -1015,7 +1015,7 @@ void MeshNode::flush_pull_answers(const MonotonicMs now_ms) noexcept {
 
 void MeshNode::request_route_discovery(const NodeId destination,
                                        const MonotonicMs now_ms) noexcept {
-  if (!gateway_scoped() || reserved_node(destination) || destination == config_.node ||
+  if (reserved_node(destination) || destination == config_.node ||
       is_route_gateway(destination) || routes_.best(destination).valid) {
     return;
   }
@@ -1044,13 +1044,39 @@ void MeshNode::schedule_route_discovery(const MonotonicMs now_ms) noexcept {
   }
   discoveries_.for_each([&](DiscoveryState& state) {
     if (now_ms < state.next_request_ms || scheduler_.full()) return;
-    if (state.attempts != UINT8_MAX) ++state.attempts;
-    state.next_request_ms =
-        now_ms + std::min<std::uint32_t>(kDiscoveryMaxMs, kDiscoveryBaseMs * state.attempts);
     // Toward the gateway: the tree root (or the first ancestor that holds
     // the target in its subtree) turns the request down toward the target.
     // A node without an uplink (the gateway itself) cannot discover — its
     // table already holds every subtree route.
+    if (!gateway_scoped()) {
+      // Flat repairs are one-hop pulls, never flooded. The existing four
+      // discovery slots and per-target backoff bound repeated NO_ROUTE work.
+      const RouteRequestPayload pull{
+          RouteRequestKind::Neighbor, 1, config_.node, state.target,
+          next_route_request_id_++,
+          RouteAdvertisement{config_.node, config_.route_generation,
+                             self_route_sequence_, 0}};
+      bool sent = false;
+      bool has_neighbor = false;
+      neighbors_.for_each([&](const Neighbor& neighbor) {
+        if (!neighbor.active) return;
+        has_neighbor = true;
+        if (!scheduler_.full() && queue_route_request(neighbor.node, pull, now_ms)) {
+          sent = true;
+          saturating_inc(route_scale_stats_.pulls_sent);
+        }
+      });
+      // No radio request was accepted: do not consume an RF retry or grow
+      // the backoff while the last neighbor is absent (or the queue is busy).
+      if (sent && state.attempts != UINT8_MAX) ++state.attempts;
+      state.next_request_ms = now_ms + (sent
+          ? std::min<std::uint32_t>(kDiscoveryMaxMs, kDiscoveryBaseMs * state.attempts)
+          : (has_neighbor ? 50 : kDiscoveryBaseMs));
+      return;
+    }
+    if (state.attempts != UINT8_MAX) ++state.attempts;
+    state.next_request_ms =
+        now_ms + std::min<std::uint32_t>(kDiscoveryMaxMs, kDiscoveryBaseMs * state.attempts);
     const NodeId next = scoped_uplink(kInvalidNodeId);
     if (next == kInvalidNodeId) return;
     const std::uint32_t request_id = next_route_request_id_++;
@@ -1103,15 +1129,33 @@ void MeshNode::handle_route_request(const wire::PlainFrame& frame, const NodeId 
                                     const MonotonicMs now_ms) noexcept {
   auto* neighbor = find_neighbor(peer);
   if (neighbor == nullptr || !neighbor->active) return;
-  if (!gateway_scoped()) {
-    // The flat profile never emits ROUTE_REQUEST; a stray one is ignored.
-    observer_.on_diagnostic("ROUTE_REQUEST_UNSUPPORTED", peer, &frame.header.message);
-    return;
-  }
   RouteRequestPayload request{};
   if (!decode_route_request(ByteView{frame.payload.data(), frame.payload_size}, request)) {
     saturating_inc(route_scale_stats_.route_requests_dropped);
     observer_.on_diagnostic("INVALID_ROUTE_REQUEST", peer, &frame.header.message);
+    return;
+  }
+  if (!gateway_scoped()) {
+    if (request.kind != RouteRequestKind::Neighbor || request.requester != peer ||
+        request.ttl != 1) {
+      observer_.on_diagnostic("ROUTE_REQUEST_UNSUPPORTED", peer, &frame.header.message);
+      return;
+    }
+    // Return only an ordinary feasible advertisement, with split horizon.
+    // A missing target cannot be invented by a pull.
+    std::array<RouteAdvertisement, 2> records{};
+    records[0] = RouteAdvertisement{config_.node, config_.route_generation,
+                                    self_route_sequence_, 0};
+    std::size_t count = 1;
+    const auto route = routes_.best(request.target);
+    if (route.valid && request.target != config_.node &&
+        route.next_hop != peer && relay_enabled_) {
+      records[count++] = RouteAdvertisement{request.target, route.generation,
+                                             route.sequence, route.metric};
+    }
+    if (enqueue_route_records(peer, records.data(), count, now_ms)) {
+      saturating_inc(route_scale_stats_.pull_answers);
+    }
     return;
   }
   // The embedded record is an ordinary advertisement from `peer`: the same

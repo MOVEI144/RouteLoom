@@ -2421,6 +2421,186 @@ void test_end_chunks_wait_for_receipts() {
   }
 }
 
+// --- Join milestones (observation_v1) --------------------------------------------
+
+void test_milestones_fresh_is_unknown() {
+  current = "milestones_fresh_is_unknown";
+  Fixture f{};
+  CHECK(f.init_stores());
+  SecurityCoordinator coordinator(f.deps());
+  const JoinMilestones m = coordinator.milestones(kT0);
+  CHECK(m.mode == kCoordModeFresh);
+  CHECK(m.flags == 0);
+  CHECK(m.attempts == 0);
+  CHECK(m.join_started_age_ms == kMilestoneAgeUnknown);
+  CHECK(m.adopted_age_ms == kMilestoneAgeUnknown);
+  CHECK(m.confirmed_age_ms == kMilestoneAgeUnknown);
+  CHECK(m.adopted_node == kInvalidNodeId);
+  CHECK(m.joiner_state == kJoinerUnknown);
+}
+
+void test_milestones_dev_adopt_and_stop() {
+  current = "milestones_dev_adopt_and_stop";
+  Fixture f{};
+  CHECK(f.init_stores());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.adopt_dev(dev_config(), kT0).ok());
+  JoinMilestones m = coordinator.milestones(kT0 + 500);
+  CHECK(m.mode == kCoordModeDev);
+  CHECK((m.flags & kMilestoneAdopted) != 0);
+  CHECK((m.flags & kMilestoneConfirmed) == 0);
+  CHECK(m.attempts == 0);
+  // The dev route runs no join leg: adopted stamps, the rest stays unknown.
+  CHECK(m.join_started_age_ms == kMilestoneAgeUnknown);
+  CHECK(m.adopted_age_ms == 500);
+  CHECK(m.confirmed_age_ms == kMilestoneAgeUnknown);
+  CHECK(m.adopted_node == kNode);
+  CHECK(m.joiner_state == kJoinerStopped);
+  // A stop retires the whole run: no stale stamp may survive it.
+  CoordinatorEvent stop{};
+  stop.kind = CoordinatorEventKind::Stop;
+  stop.now = kT0 + 600;
+  CHECK(coordinator.step(stop).ok());
+  m = coordinator.milestones(kT0 + 600);
+  CHECK(m.mode == kCoordModeFresh);
+  CHECK(m.flags == 0);
+  CHECK(m.join_started_age_ms == kMilestoneAgeUnknown);
+  CHECK(m.adopted_age_ms == kMilestoneAgeUnknown);
+  CHECK(m.confirmed_age_ms == kMilestoneAgeUnknown);
+  CHECK(m.adopted_node == kInvalidNodeId);
+}
+
+void test_milestones_join_leg_adopt_confirm() {
+  current = "milestones_join_leg_adopt_confirm";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  // Identity without a site: Boot enters a real join leg (no silent adopt).
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  MonotonicMs now = kT0;
+  for (int i = 0; i < 3; ++i) {
+    now += 100;
+    CHECK(coordinator.step(poll_at(now)).ok());
+  }
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  JoinMilestones m = coordinator.milestones(now);
+  CHECK(m.mode == kCoordModeZeroTouch);
+  CHECK(m.join_started_age_ms == now - kT0);
+  CHECK(m.adopted_age_ms == kMilestoneAgeUnknown);
+  CHECK((m.flags & kMilestoneAdopted) == 0);
+  CHECK(m.attempts == 0);  // live leg, no handshake attempt yet
+  CHECK(m.joiner_state == kJoinerActive);
+  // The ready action adopts; attempts latch at adoption (the Joiner dies).
+  CHECK(f.site.commit(site_record()).ok());
+  JoinAction ready{};
+  ready.kind = JoinActionKind::MemberReady;
+  ready.rs_epoch_to_fetch = 345;
+  CHECK(SecurityCoordinatorTestAccess::adopt(coordinator, ready, now + 100).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+  m = coordinator.milestones(now + 200);
+  CHECK(m.mode == kCoordModeMember);
+  CHECK((m.flags & kMilestoneAdopted) != 0);
+  CHECK((m.flags & kMilestoneConfirmed) == 0);
+  CHECK(m.adopted_age_ms == 100);
+  CHECK(m.join_started_age_ms == now + 200 - kT0);
+  CHECK(m.attempts == 0);
+  CHECK(m.adopted_node == kNode);
+  // The verified JoinConfirm ACK stamps the step's monotonic time.
+  CHECK(coordinator.step(poll_at(now + 1300)).ok());
+  AuthorityEvent ack{};
+  ack.kind = AuthorityEvent::Kind::JoinConfirmAck;
+  coordinator.on_event(ack);
+  CHECK(coordinator.snapshot().join_confirmed);
+  m = coordinator.milestones(now + 1500);
+  CHECK((m.flags & kMilestoneConfirmed) != 0);
+  CHECK(m.adopted_age_ms == 1400);
+  CHECK(m.confirmed_age_ms == 200);
+}
+
+void test_milestones_leg_start_survives_u32_wrap() {
+  current = "milestones_leg_start_survives_u32_wrap";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  // Boot a leg just below the 32-bit ms wrap, at a fractional second.
+  constexpr MonotonicMs kT1 = 4294967123;
+  CHECK(coordinator.step(boot_event(kT1, kBoot)).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  const JoinMilestones m = coordinator.milestones(kT1 + 500);
+  CHECK(kT1 + 500 > std::uint64_t{0xFFFFFFFFu});
+  CHECK(m.join_started_age_ms == 500);
+  CHECK(m.adopted_age_ms == kMilestoneAgeUnknown);
+}
+
+void test_milestones_silent_adopt_has_no_leg() {
+  current = "milestones_silent_adopt_has_no_leg";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  const JoinMilestones m = coordinator.milestones(now);
+  // Silent adoption still opens a (verify-only) leg at Boot: join_started
+  // stamps, adopted follows, but no handshake attempt ever runs.
+  CHECK(m.mode == kCoordModeMember);
+  CHECK((m.flags & kMilestoneAdopted) != 0);
+  CHECK(m.adopted_age_ms != kMilestoneAgeUnknown);
+  CHECK(m.adopted_age_ms <= now - kT0);
+  CHECK(m.join_started_age_ms == now - kT0);
+  CHECK(m.attempts == 0);
+  CHECK(m.adopted_node == kNode);
+}
+
+void test_milestones_join_started_survives_one_year() {
+  current = "milestones_join_started_survives_one_year";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  // A leg that stays open for a year retains its actual age for host
+  // clock mapping across multiple 32-bit millisecond wraps.
+  constexpr MonotonicMs kOneYear = MonotonicMs{365} * 24 * 3600 * 1000;
+  const JoinMilestones m = coordinator.milestones(kT0 + kOneYear);
+  CHECK(m.join_started_age_ms == kOneYear);
+  CHECK(m.adopted_age_ms == kMilestoneAgeUnknown);
+}
+
+void test_milestones_confirmed_gap_past_18h() {
+  current = "milestones_confirmed_gap_past_18h";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  JoinAction ready{};
+  ready.kind = JoinActionKind::MemberReady;
+  ready.rs_epoch_to_fetch = 345;
+  const MonotonicMs adopted_at = kT0 + 500;
+  CHECK(SecurityCoordinatorTestAccess::adopt(coordinator, ready, adopted_at).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+  // The JoinConfirm ACK lands 20 h after adoption: the latched gap must
+  // not saturate at the old u16-seconds range (18.2 h).
+  constexpr MonotonicMs kTwentyHours = MonotonicMs{20} * 3600 * 1000;
+  CHECK(coordinator.step(poll_at(adopted_at + kTwentyHours)).ok());
+  AuthorityEvent ack{};
+  ack.kind = AuthorityEvent::Kind::JoinConfirmAck;
+  coordinator.on_event(ack);
+  CHECK(coordinator.snapshot().join_confirmed);
+  const JoinMilestones m = coordinator.milestones(adopted_at + kTwentyHours + 1000);
+  CHECK((m.flags & kMilestoneConfirmed) != 0);
+  CHECK(m.adopted_age_ms == kTwentyHours + 1000);
+  CHECK(m.confirmed_age_ms == 1000);
+}
+
 int main() {
   test_boot_silent_adoption();
   test_member_apply_failure_is_closed();
@@ -2466,6 +2646,13 @@ int main() {
   test_direct_join_aead_and_usb_attach_retry();
   test_link_chunks_wait_for_receipts();
   test_end_chunks_wait_for_receipts();
+  test_milestones_fresh_is_unknown();
+  test_milestones_dev_adopt_and_stop();
+  test_milestones_join_leg_adopt_confirm();
+  test_milestones_leg_start_survives_u32_wrap();
+  test_milestones_silent_adopt_has_no_leg();
+  test_milestones_join_started_survives_one_year();
+  test_milestones_confirmed_gap_past_18h();
   if (failures != 0) {
     std::fprintf(stderr, "FAILURES: %d\n", failures);
     return 1;

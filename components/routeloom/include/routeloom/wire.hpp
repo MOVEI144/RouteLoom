@@ -126,7 +126,12 @@ Status stamp_link_epoch(Header& header, SecurityProvider& security) noexcept;
 Status stamp_end_epoch(Header& header, SecurityProvider& security) noexcept;
 Status encode_new(const PlainFrame& frame,
                   SecurityProvider& security,
-                  EncodedFrame& output) noexcept;
+                  EncodedFrame& output,
+                  LinkOpenedFrame* sealed_end = nullptr) noexcept;
+// Re-wrap an origin's cached End envelope with a fresh Link counter.
+Status retry_local(const LinkOpenedFrame& sealed, NodeId next_hop,
+                   std::uint32_t remaining_deadline_ms, SecurityProvider& security,
+                   EncodedFrame& output) noexcept;
 // open_link authenticates a unicast immediate peer under Link. The explicit
 // broadcast-route path uses GroupLink instead: it does not prove sender
 // identity and must never enter the ordinary pairwise receive/telemetry path.

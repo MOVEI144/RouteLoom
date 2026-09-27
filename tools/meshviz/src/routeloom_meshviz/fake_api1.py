@@ -8,12 +8,16 @@ from .demo import FakeMethodError
 
 
 class FakeAPI1:
-    def __init__(self, nodes=(), *, mesh=None):
+    def __init__(self, nodes=(), *, mesh=None, observation=None):
         self.buffer = bytearray()
         self.static_nodes = sorted(nodes, key=lambda node: node['node'])
         # Optional live scenario (demo.DemoMesh): changing node table plus a bounded
         # send subset. Without it the server answers only the read-only methods.
         self.mesh = mesh
+        # Optional observation fixture: {'gateway', 'boot', 'session_id', 'sections',
+        # 'routes'}. Serves health.get/topology.get with the daemon's param
+        # contract (local-only observer, routes paging, exact present flag).
+        self.observation = observation
 
     @property
     def nodes(self):
@@ -59,11 +63,14 @@ class FakeAPI1:
         if request['method'] == 'capabilities.get':
             if params:
                 return self._error(request_id, 'INVALID_ARGUMENT')
+            methods = {'capabilities.get': True, 'nodes.list': True}
+            if self.observation is not None:
+                methods.update({'health.get': True, 'topology.get': True})
+            methods.update({method: True for method in
+                            (self.mesh.METHODS if self.mesh is not None else ())})
             result = {'api': {'version': 1, 'request_max_bytes': 8192,
                               'response_max_bytes': 65536, 'max_depth': 8},
-                      'methods': {'capabilities.get': True, 'nodes.list': True,
-                                  **{method: True for method in
-                                     (self.mesh.METHODS if self.mesh is not None else ())}},
+                      'methods': methods,
                       'nodes': {'page_max': 128, 'clock': 'host_unix_ms'},
                       'caps_version': 1}
         elif request['method'] == 'nodes.list':
@@ -91,6 +98,13 @@ class FakeAPI1:
                                  'clock': 'host_unix_ms'},
                       'nodes': page,
                       'next_after': page[-1]['node'] if len(selected) > limit else None}
+        elif request['method'] in ('health.get', 'topology.get'):
+            if self.observation is None:
+                return self._error(request_id, 'UNKNOWN_METHOD')
+            outcome = self._observation(request_id, request['method'], params)
+            if isinstance(outcome, bytes):
+                return outcome
+            result = outcome
         elif self.mesh is not None and request['method'] in self.mesh.METHODS:
             try:
                 result = self.mesh.handle(request['method'], params)
@@ -99,6 +113,104 @@ class FakeAPI1:
         else:
             return self._error(request_id, 'UNKNOWN_METHOD')
         return self._encode({'v': 1, 'request_id': request_id, 'ok': True, 'result': result})
+
+    @staticmethod
+    def _is_hex16(value):
+        return (isinstance(value, str) and len(value) == 16 and
+                all(char in '0123456789abcdefABCDEF' for char in value))
+
+    def _observation(self, request_id, method, params):
+        """Static observation fixture with the daemon's param contract."""
+        fix = self.observation
+        gateway = fix['gateway']
+        known = {'observer', 'section', 'network', 'max_age_ms', 'subscribe'}
+        if method == 'topology.get':
+            known |= {'destination', 'cursor'}
+        if set(params) - known:
+            return self._error(request_id, 'INVALID_ARGUMENT')
+        observer = params.get('observer')
+        if not self._is_hex16(observer):
+            return self._error(request_id, 'INVALID_ARGUMENT')
+        if observer.lower() != gateway:
+            return self._error(request_id, 'NOT_FOUND', {'reason': 'remote_not_served'})
+        max_age_ms = params.get('max_age_ms')
+        if max_age_ms is not None and (type(max_age_ms) is not int or
+                                       not 0 <= max_age_ms <= 60_000):
+            return self._error(request_id, 'INVALID_ARGUMENT')
+        if params.get('subscribe') is not None and type(params['subscribe']) is not bool:
+            return self._error(request_id, 'INVALID_ARGUMENT')
+        network = params.get('network')
+        if network is not None and not self._is_hex16(network):
+            return self._error(request_id, 'INVALID_ARGUMENT')
+        source = {'gateway': gateway, 'usb_session': fix['session_id'], 'observer': gateway,
+                  'observer_boot': fix['boot'], 'transport': 'usb_local'}
+        if method == 'health.get':
+            section = params.get('section', 'system')
+            if section not in ('system', 'tables', 'milestones'):
+                return self._error(request_id, 'INVALID_ARGUMENT')
+            return {'outcome': 'snapshot', 'scope': {'observer': gateway},
+                    'snapshot': {'schema': 1, 'section': section, 'source': source,
+                                 'revision': 0, 'received_unix_ms': 1000, 'age_ms': 0,
+                                 'stale': False, 'complete': True, 'armed': False,
+                                 section: fix['sections'][section]}}
+        section = params.get('section')
+        if section not in ('routes', 'neighbors', 'summary'):
+            return self._error(request_id, 'INVALID_ARGUMENT')
+        destination = params.get('destination')
+        cursor = params.get('cursor')
+        if destination is not None and cursor is not None:
+            return self._error(request_id, 'INVALID_ARGUMENT')
+        if destination is not None and (
+                not self._is_hex16(destination) or
+                destination.lower() in ('0000000000000000', 'ffffffffffffffff')):
+            return self._error(request_id, 'INVALID_ARGUMENT')
+        after = None
+        if cursor is not None:
+            parts = cursor.split('.') if isinstance(cursor, str) else []
+            if (len(parts) != 7 or not self._is_hex16(parts[0]) or
+                    parts[0].lower() == 'ffffffffffffffff' or
+                    len(parts[1]) != 8 or
+                    any(char not in '0123456789abcdefABCDEF' for char in parts[1]) or
+                    any(not self._is_hex16(part) for part in parts[2:6]) or
+                    len(parts[6]) != 2 or
+                    any(char not in '0123456789abcdefABCDEF' for char in parts[6])):
+                return self._error(request_id, 'INVALID_ARGUMENT')
+            after = parts[0].lower()
+        if section not in ('routes', 'neighbors') and (
+                destination is not None or cursor is not None):
+            return self._error(request_id, 'INVALID_ARGUMENT')
+        snapshot = {'schema': 1, 'section': section, 'source': source,
+                    'revision': fix.get('revision', 0), 'received_unix_ms': 1000,
+                    'age_ms': 0, 'stale': False, 'armed': False}
+        section_id = 4 if section == 'routes' else 5
+        if cursor is not None and (
+                parts[1].lower() != f"{snapshot['revision']:08x}" or
+                parts[2].lower() != fix['boot'] or
+                parts[3].lower() != fix['boot'] or
+                parts[4].lower() != f"{fix['session_id']:016x}" or
+                parts[5].lower() != gateway or
+                parts[6].lower() != f"{section_id:02x}"):
+            return self._error(request_id, 'SNAPSHOT_CHANGED', retryable=True)
+        if section == 'summary':
+            snapshot.update({'complete': True, 'summary': fix['sections']['summary'],
+                             'entries': [], 'next_cursor': None})
+            return {'outcome': 'snapshot', 'scope': {'observer': gateway}, 'snapshot': snapshot}
+        key = 'destination' if section == 'routes' else 'peer'
+        rows = sorted(fix['routes'] if section == 'routes' else fix.get('neighbors', []),
+                      key=lambda entry: entry[key])
+        if destination is not None:
+            entries = [entry for entry in rows if entry[key] == destination.lower()]
+            snapshot.update({'complete': True, 'present': bool(entries),
+                             'entries': entries, 'next_cursor': None})
+            return {'outcome': 'snapshot', 'scope': {'observer': gateway}, 'snapshot': snapshot}
+        rest = [entry for entry in rows if after is None or entry[key] > after]
+        page, more = rest[:8], len(rest) > 8
+        next_cursor = (f"{page[-1][key]}.{snapshot['revision']:08x}.{fix['boot']}."
+                       f"{fix['boot']}.{fix['session_id']:016x}.{gateway}.{section_id:02x}"
+                       if more else None)
+        snapshot.update({'complete': not more, 'entries': page,
+                         'next_cursor': next_cursor})
+        return {'outcome': 'snapshot', 'scope': {'observer': gateway}, 'snapshot': snapshot}
 
     def _error(self, request_id, code, detail=None, retryable=False):
         return self._encode({'v': 1, 'request_id': request_id if isinstance(request_id, str) else None,

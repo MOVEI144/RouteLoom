@@ -167,7 +167,7 @@ void MeshNode::TxScheduler::charge_cost(TxJob& job) noexcept {
   // for the MAC header + preamble + MAC ACK every frame occupies (radio.md
   // §9 — body bytes alone undercharge a frame by ~70-105B of air time).
   std::uint64_t cost = wire::kHeaderSize + kAeadTagSize + kTxFrameFixedCostBytes;
-  if (job.form == JobForm::Forwarded) {
+  if (job.form != JobForm::Plain) {
     cost += job.forwarded.protected_payload_size;
   } else {
     cost += job.plain.payload_size;
@@ -181,6 +181,10 @@ void MeshNode::TxScheduler::charge_cost(TxJob& job) noexcept {
 std::size_t MeshNode::TxScheduler::origin_count(const NodeId origin) const noexcept {
   std::size_t count = 0;
   pool_.for_each([&](const TxJob& job) {
+    if (job.form == JobForm::Plain &&
+        (job.plain.header.type == FrameType::RouteUpdate ||
+         job.plain.header.type == FrameType::SeqnoRequest ||
+         job.plain.header.type == FrameType::RouteRequest)) return;
     const NodeId value = job.form == JobForm::Forwarded
                              ? job.forwarded.header.origin
                              : job.plain.header.origin;
@@ -203,9 +207,9 @@ std::size_t MeshNode::TxScheduler::scope_count(const NodeId scope) const noexcep
 AdmitVerdict MeshNode::TxScheduler::check(const NodeId self, const NodeId scope,
                                           const NodeId origin,
                                           const std::size_t slots_needed) const noexcept {
-  // Non-control admission leaves kControlReserveSlots for the responses
-  // (BUSY / HOP_ACCEPT) a saturated node still owes its peers.
-  if (free_slots() < slots_needed + kControlReserveSlots) {
+  // New received work must leave room for its responses and two route
+  // maintenance jobs; otherwise a DATA flood can prevent route repair.
+  if (free_slots() < slots_needed + kControlReserveSlots + kRouteReserveSlots) {
     return AdmitVerdict::PoolFull;
   }
   if (origin_count(origin) >= kMaxJobsPerOrigin) return AdmitVerdict::OriginLimited;
@@ -245,6 +249,19 @@ Status MeshNode::TxScheduler::enqueue(TxJob&& job, const NodeId self,
   NodeId destination = kInvalidNodeId;
   flow_key(job, self, scope, origin, destination);
   const SchedClass cls = classify(job);
+  const FrameType type = job.form == JobForm::Forwarded
+                             ? job.forwarded.header.type : job.plain.header.type;
+  const bool route_maintenance = job.form == JobForm::Plain &&
+      (type == FrameType::RouteUpdate || type == FrameType::SeqnoRequest ||
+       type == FrameType::RouteRequest);
+  // Required work already accepted under check() keeps its slot; only new
+  // unreserved jobs may be refused to preserve route and ACK capacity.
+  if (job.txn == kInvalidTxnHandle && job.attempts == 0 &&
+      job.physical_attempts == 0 &&
+      free_slots() <= kControlReserveSlots + (route_maintenance ? 0 : kRouteReserveSlots)) {
+    ++stats_.admissions_rejected;
+    return Status::error(StatusCode::WouldBlock, "TX_QUEUE_RESERVED");
+  }
   // >=80% watermark: new bulk admission is explicitly rejected/delayed —
   // already-accepted work is never evicted to make room (03 §4).
   if (cls == SchedClass::Bulk && bulk_suspended()) {
@@ -253,7 +270,7 @@ Status MeshNode::TxScheduler::enqueue(TxJob&& job, const NodeId self,
     return Status::error(StatusCode::Congested, "BULK_SUSPENDED_AT_WATERMARK");
   }
   // Global pool bound + per-origin/per-neighbor caps resist spoofed floods.
-  if (data_class(cls)) {
+  if (data_class(cls) && job.attempts == 0 && job.physical_attempts == 0) {
     if (origin_count(origin) >= kMaxJobsPerOrigin) {
       ++stats_.admissions_rejected;
       return Status::error(StatusCode::Congested, "ORIGIN_QUEUE_CAP");
@@ -1642,6 +1659,8 @@ Status MeshNode::queue_route_update(const NodeId neighbor,
       neighbor_record != nullptr ? neighbor_record->route_cursor : 0;
   std::size_t index = 0;
   std::size_t advertised_count = 0;
+  std::array<NodeId, kMaxRouteRecordsPerFrame> finite_records{};
+  std::size_t finite_count = 0;
   bool writer_full = false;
   routes_.for_each_selected([&](const RouteSelection& selection) {
     if (selection.destination == config_.node) return;
@@ -1661,13 +1680,10 @@ Status MeshNode::queue_route_update(const NodeId neighbor,
     ++advertised_count;
     // FD is refreshed only when a finite advertisement actually leaves; a
     // split-horizon retraction (infinity) must not touch feasibility state.
-    if (advertised != kInfiniteRouteMetric) routes_.mark_advertised(selection.destination);
+    if (advertised != kInfiniteRouteMetric) finite_records[finite_count++] = selection.destination;
   });
-  if (neighbor_record != nullptr) {
-    const std::size_t next = skip + advertised_count;
-    neighbor_record->route_cursor =
-        static_cast<std::uint8_t>(next >= index ? 0 : next);
-  }
+  const std::size_t next = skip + advertised_count;
+  const std::uint8_t next_cursor = static_cast<std::uint8_t>(next >= index ? 0 : next);
   // Retractions: destinations that lost their last feasible route are
   // advertised as infinity so neighbors withdraw promptly instead of waiting
   // out the lease (RFC 8966 §3.7.2). The record budget bounds the burst.
@@ -1680,7 +1696,16 @@ Status MeshNode::queue_route_update(const NodeId neighbor,
   });
   job.plain.payload[0] = count;
   job.plain.payload_size = writer.size();
-  return scheduler_.enqueue(std::move(job), config_.node, now_ms);
+  status = scheduler_.enqueue(std::move(job), config_.node, now_ms);
+  // Failed admission cannot advance the advertisement cursor or FD: the
+  // route was never queued and the next update must retry the same page.
+  if (status) {
+    if (neighbor_record != nullptr) neighbor_record->route_cursor = next_cursor;
+    for (std::size_t i = 0; i < finite_count; ++i) {
+      routes_.mark_advertised(finite_records[i]);
+    }
+  }
+  return status;
 }
 
 Status MeshNode::queue_seqno_request(const NodeId peer, const NodeId requester,
@@ -2046,7 +2071,20 @@ Status MeshNode::encode_job(TxJob& job, const MonotonicMs now_ms) noexcept {
     job.plain.header.next_hop = job.peer;
     job.plain.header.remaining_deadline_ms = std::min(job.plain.header.remaining_deadline_ms,
                                                       remaining);
-    status = wire::encode_new(job.plain, security_, tx_encoded_);
+    if ((job.plain.header.flags & wire::kFlagEndProtected) != 0) {
+      wire::LinkOpenedFrame sealed{};
+      status = wire::encode_new(job.plain, security_, tx_encoded_, &sealed);
+      if (status) {
+        // Preserve the End counter/ciphertext across hop retries. Only the
+        // Link wrapper and its deadline are re-created on retransmission.
+        job.set_forwarded(sealed);
+        job.form = JobForm::Sealed;
+      }
+    } else {
+      status = wire::encode_new(job.plain, security_, tx_encoded_);
+    }
+  } else if (job.form == JobForm::Sealed) {
+    status = wire::retry_local(job.forwarded, job.peer, remaining, security_, tx_encoded_);
   } else {
     status = wire::forward(job.forwarded, config_.node, job.peer, config_.link_epoch,
                            remaining, security_, tx_encoded_);
@@ -2126,6 +2164,7 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
   if (physical_.active) {
     if (now_ms - physical_.submitted_at_ms >= config_.callback_watchdog_ms) {
       TxJob job = physical_.job;
+      const bool early_hop_accept = physical_.early_hop_accept;
       physical_ = PhysicalInflight{};
       observer_.on_diagnostic("DRIVER_RESULT_UNKNOWN", job.peer, &job.ack.key.id);
       // Callback-uncertain results are accounted separately from RF loss
@@ -2143,7 +2182,12 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
         --bucket->pending_completions;
       }
       (void)radio_.recover();
-      retry_or_fail(job, "DRIVER_RESULT_UNKNOWN", now_ms);
+      if (early_hop_accept) {
+        if (auto* neighbor = find_neighbor(job.peer)) neighbor->consecutive_failures = 0;
+        finish_hop_accept(job, false, 0, now_ms);
+      } else {
+        retry_or_fail(job, "DRIVER_RESULT_UNKNOWN", now_ms);
+      }
     }
     return;
   }
@@ -2191,22 +2235,25 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
     // launching it on a next hop the table no longer selects — a frame
     // sent down an infeasible route can close a forwarding loop (D4-02).
     NodeId routed = kInvalidNodeId;
+    const wire::Header& route_header = queued->form == JobForm::Plain
+                                           ? queued->plain.header
+                                           : queued->forwarded.header;
     if (queued->form == JobForm::Forwarded &&
-        queued->forwarded.header.type != FrameType::GroupData) {
+        route_header.type != FrameType::GroupData) {
       // Group copies target a tree child chosen at round start; their
       // destination is a group address, never a unicast route.
-      routed = queued->forwarded.header.destination;
-    } else if (queued->form == JobForm::Plain &&
-               (queued->plain.header.type == FrameType::Data ||
-                queued->plain.header.type == FrameType::Service ||
-                queued->plain.header.type == FrameType::EndReceipt)) {
-      routed = queued->plain.header.destination;
+      routed = route_header.destination;
+    } else if (queued->form != JobForm::Forwarded &&
+               (route_header.type == FrameType::Data ||
+                route_header.type == FrameType::Service ||
+                route_header.type == FrameType::EndReceipt)) {
+      routed = route_header.destination;
     }
     if (routed != kInvalidNodeId) {
       const auto live = routes_.best(routed);
       if (!live.valid || find_neighbor(live.next_hop) == nullptr) {
-        if (queued->form == JobForm::Plain &&
-            queued->plain.header.type == FrameType::EndReceipt &&
+        if (queued->form != JobForm::Forwarded &&
+            route_header.type == FrameType::EndReceipt &&
             queued->peer == kInvalidNodeId) {
           TxJob failed{};
           scheduler_.take_selected(failed);
@@ -2390,6 +2437,7 @@ Status MeshNode::on_radio_tx_result(const std::uint64_t token, const bool succes
   TxJob job = physical_.job;
   const bool busy_deferred = physical_.busy_deferred;
   const std::uint32_t busy_retry_ms = physical_.busy_retry_ms;
+  const bool early_hop_accept = physical_.early_hop_accept;
   // Driver service time is recorded ONLY by note_radio_tx from the
   // runtime's own submitted/completed timestamps — a second measurement
   // here would double-record and inflate it with Owner/RX backlog (03 §3).
@@ -2409,6 +2457,14 @@ Status MeshNode::on_radio_tx_result(const std::uint64_t token, const bool succes
     return Status::success();
   }
   auto* neighbor = find_neighbor(job.peer);
+  if (early_hop_accept) {
+    // A binding-matched accept is stronger evidence than the MAC callback;
+    // keep the physical fence until now even if the callback reports loss.
+    // The accept preceded MAC completion, so there is no MAC-to-ACK RTT.
+    if (neighbor != nullptr) neighbor->consecutive_failures = 0;
+    finish_hop_accept(job, false, 0, now_ms);
+    return Status::success();
+  }
   if (!success) {
     if (neighbor != nullptr && neighbor->consecutive_failures < UINT8_MAX) {
       ++neighbor->consecutive_failures;
@@ -2542,6 +2598,13 @@ void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
 
 void MeshNode::fail_job(TxJob& job, const char* reason,
                         const MonotonicMs now_ms, const bool terminal) noexcept {
+  // A route update that failed after enqueue never refreshed its peer's
+  // lease. Re-arm a bounded burst instead of waiting for the next period.
+  if (job.form == JobForm::Plain && job.plain.header.type == FrameType::RouteUpdate &&
+      job.peer != kBroadcastNodeId) {
+    const auto* neighbor = find_neighbor(job.peer);
+    if (neighbor != nullptr && neighbor->active) trigger_route_advertisement(now_ms + 50);
+  }
   // Terminate the transaction work item first: the failure report below
   // reserves a fresh short transaction, which must see the freed capacity.
   finish_txn_work(job.txn);
@@ -3228,6 +3291,46 @@ bool MeshNode::tx_admitted_now(const TxJob& job) const noexcept {
   return peer_inflight(job.peer) < peer_window(job.peer);
 }
 
+void MeshNode::finish_hop_accept(TxJob& job, const bool rtt_sampled,
+                                 const std::uint32_t rtt_ms,
+                                 const MonotonicMs now_ms) noexcept {
+  obs_hop_result(job, true, now_ms);
+  if (auto* bucket = job_bucket(job, now_ms)) {
+    ++bucket->current.hop_accepts;
+    if (rtt_sampled) {
+      ++bucket->current.hop_rtt_samples;
+      ewma_add(bucket->current.hop_rtt_us_ewma, rtt_ms * 1000u,
+               bucket->current.hop_rtt_samples);
+    }
+    bucket->current.present = true;
+    if (bucket->current.first_sample_ms == 0) {
+      bucket->current.first_sample_ms = now_ms;
+    }
+    bucket->current.last_sample_ms = now_ms;
+  }
+  if (auto* neighbor = find_neighbor(job.peer)) {
+    if (rtt_sampled) {
+      ++neighbor->hop_rtt_samples;
+      ewma_add(neighbor->hop_rtt_ewma_ms, rtt_ms,
+               neighbor->hop_rtt_samples);
+    }
+    // An authenticated accept clears sustained busy and advances the
+    // peer window, regardless of whether it precedes MAC completion.
+    neighbor->busy_active = false;
+    neighbor->busy_since_ms = 0;
+    neighbor->last_busy_feedback_ms = 0;
+    if (neighbor->window_accepts < kWindowGrowAccepts) {
+      ++neighbor->window_accepts;
+    }
+    if (neighbor->window_accepts >= kWindowGrowAccepts &&
+        neighbor->tx_window < kPeerWindowMax) {
+      ++neighbor->tx_window;
+      neighbor->window_accepts = 0;
+    }
+  }
+  complete_job(job, true, now_ms);
+}
+
 void MeshNode::handle_hop_accept(const wire::PlainFrame& frame, const NodeId peer,
                                  const RxBinding& rx,
                                  const MonotonicMs now_ms) noexcept {
@@ -3254,6 +3357,17 @@ void MeshNode::handle_hop_accept(const wire::PlainFrame& frame, const NodeId pee
            value.job.submitted_rx_context == rx.binding.rx_context_id;
   });
   if (awaiting == nullptr) {
+    auto& in_flight = physical_;
+    const auto& job = in_flight.job;
+    if (in_flight.active && job.requires_hop_accept && job.peer == peer &&
+        job.ack.accepted_type == key.accepted_type && job.ack.key == key.key &&
+        job.ack.round == key.round && job.submitted_binding_set && rx.valid &&
+        job.submitted_binding == rx.binding.id &&
+        job.submitted_generation == rx.binding.generation &&
+        job.submitted_rx_context == rx.binding.rx_context_id) {
+      in_flight.early_hop_accept = true;
+      return;
+    }
     observer_.on_diagnostic("UNMATCHED_HOP_ACCEPT", peer, &key.key.id);
     return;
   }
@@ -3261,7 +3375,6 @@ void MeshNode::handle_hop_accept(const wire::PlainFrame& frame, const NodeId pee
   const bool was_deferred = awaiting->busy_deferred;
   const MonotonicMs sent_at_ms = awaiting->sent_at_ms;
   awaiting_hop_.release(awaiting);
-  obs_hop_result(job, true, now_ms);
   // HOP_ACCEPT round trip, MAC-accept -> authenticated accept. Only a live
   // exchange measures the path — a BUSY deferral's wait is peer-directed
   // and must never enter the adaptive RTO average (radio.md §8). The match
@@ -3273,44 +3386,7 @@ void MeshNode::handle_hop_accept(const wire::PlainFrame& frame, const NodeId pee
                            now_ms >= sent_at_ms;
   const std::uint32_t rtt_ms =
       rtt_sampled ? static_cast<std::uint32_t>(now_ms - sent_at_ms) : 0;
-  if (auto* bucket = job_bucket(job, now_ms)) {
-    ++bucket->current.hop_accepts;
-    if (rtt_sampled) {
-      ++bucket->current.hop_rtt_samples;
-      ewma_add(bucket->current.hop_rtt_us_ewma, rtt_ms * 1000u,
-               bucket->current.hop_rtt_samples);
-    }
-    bucket->current.present = true;
-    if (bucket->current.first_sample_ms == 0) {
-      bucket->current.first_sample_ms = now_ms;
-    }
-    bucket->current.last_sample_ms = now_ms;
-  }
-  if (auto* neighbor = find_neighbor(peer)) {
-    if (rtt_sampled) {
-      ++neighbor->hop_rtt_samples;
-      ewma_add(neighbor->hop_rtt_ewma_ms, rtt_ms,
-               neighbor->hop_rtt_samples);
-    }
-    // An authenticated accept proves work gets through: it releases the
-    // sustained-busy state that feeds the severe-busy repair path (03 §7).
-    // A BUSY-deferred exchange that still completes does not break the
-    // authenticated-accept streak — the accept is authoritative.
-    neighbor->busy_active = false;
-    neighbor->busy_since_ms = 0;
-    neighbor->last_busy_feedback_ms = 0;
-    if (neighbor->window_accepts < kWindowGrowAccepts) {
-      ++neighbor->window_accepts;
-    }
-    // 8 consecutive authenticated accepts grow the window by one (03 §5).
-    // Window growth is decoupled from memory-slot release on purpose.
-    if (neighbor->window_accepts >= kWindowGrowAccepts &&
-        neighbor->tx_window < kPeerWindowMax) {
-      ++neighbor->tx_window;
-      neighbor->window_accepts = 0;
-    }
-  }
-  complete_job(job, true, now_ms);
+  finish_hop_accept(job, rtt_sampled, rtt_ms, now_ms);
 }
 
 void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer,
@@ -3585,8 +3661,16 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       dispatch_applied(frame.header, ByteView{plain.payload.data(), plain.payload_size},
                        *applied, applied_new, now_ms);
     } else {
+      // open_end above is the origin proof (wire.hpp): this delivery is
+      // origin-verified under the header's end_epoch. The evidence rides
+      // the callback — group deliveries take the default forward instead
+      // (group-key verification is not an origin END proof).
+      DeliveryAssurance assurance{};
+      assurance.origin_verified = true;
+      assurance.site_epoch = frame.header.end_epoch;
       observer_.on_message(key, frame.header.origin,
-                           ByteView{plain.payload.data(), plain.payload_size});
+                           ByteView{plain.payload.data(), plain.payload_size},
+                           assurance);
     }
     return;
   }
@@ -5917,11 +6001,18 @@ void MeshNode::schedule_route_advertisements(const MonotonicMs now_ms) noexcept 
   }
   const NodeId peer = active[route_neighbor_cursor_ % count];
   route_neighbor_cursor_ = (route_neighbor_cursor_ + 1) % count;
-  (void)queue_route_update(peer, now_ms);
-  auto interval = std::max<std::uint32_t>(
+  const auto status = queue_route_update(peer, now_ms);
+  if (!status) {
+    // Retry the same neighbor and page; an admission refusal is not a
+    // route refresh and must not consume a full lease interval.
+    route_neighbor_cursor_ = (route_neighbor_cursor_ + count - 1) % count;
+    next_route_advertisement_ms_ = now_ms + 50;
+    return;
+  }
+  const auto interval = std::max<std::uint32_t>(
       50, config_.route_advertisement_period_ms / static_cast<std::uint32_t>(count));
-  // >=50% queue watermark: background work shrinks to half rate (03 §4).
-  if (scheduler_.background_reduced()) interval *= 2;
+  // Lease renewal cannot be halved at the DATA watermark: with a 15s
+  // flat lease, one lost update after a 10s interval expires the route.
   next_route_advertisement_ms_ = now_ms + interval;
 }
 
@@ -6075,10 +6166,17 @@ void MeshNode::run_triggered_advertisement(const MonotonicMs now_ms) noexcept {
     run_scoped_triggered(now_ms);
     return;
   }
+  bool retry = false;
   neighbors_.for_each([&](const Neighbor& neighbor) {
-    if (!neighbor.active || scheduler_.full()) return;
-    (void)queue_route_update(neighbor.node, now_ms);
+    if (!neighbor.active) return;
+    if (scheduler_.full() || !queue_route_update(neighbor.node, now_ms)) retry = true;
   });
+  if (retry) {
+    // The triggered update is still owed to at least one neighbor.
+    // Duplicate refreshes are harmless; losing a withdrawal is not.
+    triggered_advertisement_ = true;
+    triggered_at_ms_ = std::max(now_ms + 50, next_triggered_ms_);
+  }
 }
 
 void MeshNode::scan_selection_changes(const MonotonicMs now_ms) noexcept {
@@ -6126,6 +6224,7 @@ Status MeshNode::poll(const MonotonicMs now_ms) noexcept {
     run_triggered_advertisement(now_ms);
     schedule_sequence_requests(now_ms);
     schedule_route_advertisements(now_ms);
+    if (!gateway_scoped()) schedule_route_discovery(now_ms);
     if (gateway_scoped()) {
       // Scoped profile repair/bootstrap and on-demand paths (routing-scale
       // §3.3/§4): answers to pulls, pulls for a lost gateway route and
@@ -6513,6 +6612,30 @@ Status MeshNode::send_telemetry_query(const NodeId observer,
                          kTelemetryQueryLifetimeMs, Priority::Normal, now_ms);
 }
 
+Status MeshNode::send_observation_query(const NodeId observer,
+                                        const RemoteObservationQuery& query,
+                                        const MonotonicMs now_ms) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+  NodeGuard guard(in_call_);
+  if (!started_) {
+    return Status::error(StatusCode::InvalidState, "node not started");
+  }
+  if (observer == kInvalidNodeId || observer == kBroadcastNodeId ||
+      observer == config_.node) {
+    return Status::error(StatusCode::InvalidArgument, "invalid observer");
+  }
+  std::array<std::uint8_t, kRemoteObservationQueryBodySize> body{};
+  const Status status =
+      remote_observation_query_encode(query, MutableByteView{body.data(), body.size()});
+  if (!status) return status;
+  // Same 5 s routed-lane bound as the telemetry query: the reply borrows
+  // the query's own remaining deadline and never extends it.
+  const MessageId id{config_.message_session, next_control_sequence_++};
+  return queue_typed_job(FrameType::Diagnostic, JobOwner::Diagnostic, id,
+                         observer, ByteView{body.data(), body.size()}, 0,
+                         kTelemetryQueryLifetimeMs, Priority::Normal, now_ms);
+}
+
 Status MeshNode::send_capabilities_query(
     const NodeId peer,
     const std::array<std::uint8_t, kCapabilitiesNonceSize>& nonce,
@@ -6891,11 +7014,12 @@ void MeshNode::handle_diagnostic(const wire::PlainFrame& frame,
                                 &frame.header.message);
         return;
       }
-      // Bounded intake: at most one telemetry query per origin per
+      // Bounded intake: at most one diagnostic query per origin per
       // interval — a requester cannot convert authenticated queries into
       // airtime floods (telemetry §2.7; queries are costly: 644 B/edge).
-      // Budget-table exhaustion refuses rather than admitting untracked
-      // work.
+      // The telemetry and observation subtypes share the one pacing
+      // stamp per origin. Budget-table exhaustion refuses rather than
+      // admitting untracked work.
       DiagBudget* const qbudget = diag_budget(origin, now_ms);
       if (qbudget == nullptr ||
           (qbudget->last_query_ms != 0 &&
@@ -6926,7 +7050,48 @@ void MeshNode::handle_diagnostic(const wire::PlainFrame& frame,
       }
       return;
     }
+    case DiagnosticSubtype::RemoteObservationQuery: {
+      RemoteObservationQuery query{};
+      if (!remote_observation_query_decode(body, query).ok()) {
+        observer_.on_diagnostic("DIAGNOSTIC_QUERY_REJECTED", peer,
+                                &frame.header.message);
+        return;
+      }
+      // Same shared pacing stamp as the telemetry query above: one
+      // diagnostic query per origin per interval, whatever the subtype.
+      DiagBudget* const qbudget = diag_budget(origin, now_ms);
+      if (qbudget == nullptr ||
+          (qbudget->last_query_ms != 0 &&
+           now_ms - qbudget->last_query_ms < kDiagQueryMinIntervalMs)) {
+        ++telemetry_event_drops_;
+        return;
+      }
+      qbudget->last_query_ms = now_ms;
+      if (!observation_remote_) {
+        reply_reject(DiagnosticRejectReason::Denied, query.request_id);
+        return;
+      }
+      RemoteObservationSnapshot snapshot{};
+      DiagnosticRejectReason reason{};
+      if (!build_observation_snapshot_impl(query, now_ms, snapshot, reason)) {
+        reply_reject(reason, query.request_id);
+        return;
+      }
+      std::array<std::uint8_t, kRemoteObservationSnapshotBodyMax> out{};
+      if (!remote_observation_snapshot_encode(snapshot,
+                                       MutableByteView{out.data(), out.size()})) {
+        ++telemetry_event_drops_;
+        return;
+      }
+      const std::size_t total = kRemoteObservationSnapshotHeadSize + snapshot.body_size;
+      if (!queue_diagnostic_reply(origin, ByteView{out.data(), total},
+                                  lifetime_ms, now_ms)) {
+        ++telemetry_event_drops_;
+      }
+      return;
+    }
     case DiagnosticSubtype::TelemetrySnapshot:
+    case DiagnosticSubtype::RemoteObservationSnapshot:
     case DiagnosticSubtype::DiagnosticReject:
       if (diagnostic_sink_ != nullptr) {
         ExternalCallbackScope scope(in_external_callback_);
@@ -7616,6 +7781,18 @@ Status MeshNode::set_applied_sink(AppliedEndpointSink* sink) noexcept {
 Status MeshNode::set_telemetry_remote(const bool enabled) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
   telemetry_remote_ = enabled;
+  return Status::success();
+}
+
+Status MeshNode::set_observation_remote(const bool enabled) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+  observation_remote_ = enabled;
+  return Status::success();
+}
+
+Status MeshNode::set_observation_source(const ObservationSource* source) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+  observation_source_ = source;
   return Status::success();
 }
 
