@@ -5,6 +5,7 @@
 #include <new>
 
 #include "routeloom/discovery_scope.hpp"  // hmac_sha256
+#include "routeloom/group.hpp"            // reserved_node_id
 #include "routeloom/rlcw1.hpp"
 #include "routeloom/sdkv1_ead.hpp"  // join_org_hint/join_site_hint
 #include "routeloom/sdkv1_session_wire.hpp"  // own RLD1 capability word
@@ -2874,6 +2875,28 @@ Status SecurityCoordinator::install_dev_config(const CoordinatorDevConfig& confi
   if (mode_ == CoordinatorMode::Dev) {
     return Status::error(StatusCode::InvalidState, "dev already adopted");
   }
+  // The board config picks at most one routing policy for the dev profile:
+  // scoped gateways or flat group roots — both set is refused (ambiguous),
+  // like the node-side validate_config rule. The lists are positional like
+  // the node's own arrays: kInvalidNodeId slots are padding (an optional
+  // second gateway may be absent), reserved ids are refused.
+  if (config.route_gateway_count > kSiteGatewayMax ||
+      config.group_root_count > kSiteGatewayMax ||
+      (config.route_gateway_count != 0 && config.group_root_count != 0)) {
+    return Status::error(StatusCode::InvalidArgument, "dev roots");
+  }
+  for (std::size_t i = 0; i < config.route_gateway_count; ++i) {
+    if (config.route_gateways[i] != kInvalidNodeId &&
+        routeloom::reserved_node_id(config.route_gateways[i])) {
+      return Status::error(StatusCode::InvalidArgument, "dev gateway");
+    }
+  }
+  for (std::size_t i = 0; i < config.group_root_count; ++i) {
+    if (config.group_roots[i] != kInvalidNodeId &&
+        routeloom::reserved_node_id(config.group_roots[i])) {
+      return Status::error(StatusCode::InvalidArgument, "dev group root");
+    }
+  }
   CoordinatorMemberConfig cfg{};
   cfg.network = config.network;
   cfg.node = config.node;
@@ -2886,6 +2909,14 @@ Status SecurityCoordinator::install_dev_config(const CoordinatorDevConfig& confi
   cfg.end_epoch = 1;
   cfg.boot_incarnation = 0;  // unknown on the dev route (telemetry only)
   cfg.role = config.role;
+  cfg.route_gateway_count = config.route_gateway_count;
+  cfg.group_root_count = config.group_root_count;
+  for (std::size_t i = 0; i < cfg.route_gateway_count; ++i) {
+    cfg.route_gateways[i] = config.route_gateways[i];
+  }
+  for (std::size_t i = 0; i < cfg.group_root_count; ++i) {
+    cfg.group_roots[i] = config.group_roots[i];
+  }
   adopted_ = cfg;
   member_valid_ = true;
   note_milestone_dev_adopted(now);
@@ -3069,6 +3100,7 @@ Status SecurityCoordinator::land_removal(const RemovalNotice& notice,
   sat_inc(counters_.removals);
   CoordinatorAction report{};
   report.kind = CoordinatorActionKind::ReportRemoval;
+  report.removal = CoordinatorRemoval{};  // activates the removal arm
   report.removal.site_id = site.site_id;
   report.removal.generation = notice.generation;
   report.removal.notice = notice;

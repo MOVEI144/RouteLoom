@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <new>
 #include <sstream>
 #include <string>
 #include <set>
@@ -1086,6 +1087,7 @@ struct HostDriver {
   SessionProof proof{};
   std::uint64_t h2d_counter{0};
   std::uint64_t session{0};
+  std::uint32_t capability{0};  // HelloAck bitmap from the last handshake
 
   std::vector<std::uint8_t> plain(FrameKind kind, std::uint16_t flags,
                                   std::uint64_t request, ByteView body) {
@@ -1216,6 +1218,7 @@ std::uint64_t host_handshake(World& world, HostDriver& host, MonotonicMs& now,
   }
   host.proof = derive_session_proof(secret_view(), ByteView{encoded.data(), size});
   host.session = host.proof.session_id;
+  host.capability = transcript.capability;
   world.feed(host.plain(FrameKind::Hello, kFlagAuth, request_base + 1,
                         ByteView{host.proof.auth_tag.data(), kDevTagSize}), now);
   world.drain(now);
@@ -3449,6 +3452,83 @@ void test_bridge_group_capability_masked_when_unservable() {
   }
 }
 
+void test_bridge_group_capability_refresh_renegotiates() {
+  // Member-bridge order (D07/D09): firmware runs attach_group() before
+  // membership adoption, when the flat pre-join node cannot serve group
+  // delivery — the bit is masked in the first session's HelloAck and
+  // GROUP_SEND answers Unsupported. Adoption then rebuilds the node with
+  // the site's scoped config where this node IS a route gateway;
+  // refresh_group_capability() drains the live session behind a sealed
+  // StaleSession, and the host's re-hello observes the restored bit.
+  World world(0x7 | kCapGroupDeliveryV1, /*scoped=*/false);
+  CHECK(world.bridge.attach_group().ok());
+  CHECK((world.bridge.capability() & kCapGroupDeliveryV1) == 0);
+  MonotonicMs now = 1000;
+  HostDriver host;
+  CHECK(host_handshake(world, host, now, 0x6161, 10) != 0);
+  CHECK(world.bridge.state() == SessionState::Active);
+  CHECK((host.capability & kCapGroupDeliveryV1) == 0);
+  GroupSendRequest early{};
+  early.group = kGroupAll;
+  early.lifetime_ms = 3000;
+  const auto early_body = group_send_bytes(early);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  const auto refused = transact(world, host, now, 60,
+                                ByteView{early_body.data(), early_body.size()},
+                                got_error, error_code);
+  GroupStatusReply refusal{};
+  CHECK(decode_group_status_bytes(refused, refusal));
+  CHECK(refusal.result == static_cast<std::uint16_t>(ConfigOpsResult::Unsupported));
+
+  // Adoption rebuilds the node in place with the site's scoped config
+  // (EspNowRuntime::adopt_member_node does the same placement-new), with
+  // this node listed as a route gateway, then the owner refreshes.
+  const NodeConfig adopted = World::node_config(1, 7001, /*scoped=*/true);
+  world.n1.~MeshNode();
+  new (&world.n1) MeshNode(adopted, world.r1, world.sec1, world.bridge);
+  CHECK(world.n1.set_reply_peer_port(&world.p1).ok());
+  CHECK(world.n1.start(now).ok());
+  CHECK(world.n1.add_neighbor(2, 1, now).ok());
+  CHECK(world.bridge.refresh_group_capability(now).ok());
+  CHECK((world.bridge.capability() & kCapGroupDeliveryV1) != 0);
+  CHECK(world.bridge.state() == SessionState::Draining);
+  // The drain flushes one sealed session-fatal error under the OLD
+  // session, then the bridge resets.
+  world.drain(now);
+  now += 200;
+  bool saw_stale = false;
+  for (const auto& record : world.device_sink.frames) {
+    if (record.frame.kind != FrameKind::Error) continue;
+    std::uint64_t counter = 0;
+    ByteView opened{};
+    if (open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+                  opened) &&
+        opened.size >= 2 &&
+        static_cast<std::uint16_t>((opened.data[0] << 8U) | opened.data[1]) ==
+            static_cast<std::uint16_t>(UsbErrorCode::StaleSession)) {
+      saw_stale = true;
+    }
+  }
+  CHECK(saw_stale);
+  world.device_sink.frames.clear();
+  CHECK(world.bridge.state() == SessionState::Disconnected);
+
+  // The host re-hellos (its session-fatal path): the fresh HelloAck
+  // advertises group delivery and 0x50 is now admitted.
+  HostDriver host2;
+  CHECK(host_handshake(world, host2, now, 0x6262, 40) != 0);
+  CHECK(world.bridge.state() == SessionState::Active);
+  CHECK((host2.capability & kCapGroupDeliveryV1) != 0);
+  const auto admitted = transact(world, host2, now, 90,
+                                 ByteView{early_body.data(), early_body.size()},
+                                 got_error, error_code);
+  GroupStatusReply ok{};
+  CHECK(decode_group_status_bytes(admitted, ok));
+  CHECK(ok.result == static_cast<std::uint16_t>(ConfigOpsResult::Ok));
+  CHECK(world.n1.group_stats().sent == 1);
+}
+
 void test_bridge_group_refusals() {
   // Without attach_group the family answers Unsupported and sends nothing.
   {
@@ -4487,6 +4567,7 @@ int main() {
   test_group_ops_codecs();
   test_bridge_group_send_and_final();
   test_bridge_group_capability_masked_when_unservable();
+  test_bridge_group_capability_refresh_renegotiates();
   test_bridge_group_refusals();
   test_config_trust_codecs();
   test_host_ops_sub_registry();

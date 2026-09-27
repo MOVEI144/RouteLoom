@@ -193,6 +193,19 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // CAP_GROUP_DELIVERY_V1 in HelloAck. Requires config_.mesh.
   Status attach_group() noexcept;
 
+  // Re-evaluate group serving after the mesh's config changed under the
+  // bridge (a Member bridge only learns it is a group root when adoption
+  // installs the site package's gateway/root list — attach_group ran before
+  // that existed). The bitmap is bound into the authenticated Hello
+  // transcript, so there is no mid-session capability update: when the
+  // advertisement actually changes, a live session is drained behind a
+  // sealed StaleSession notice (or a half-finished handshake dropped) and
+  // the host's re-hello reads the corrected HelloAck.
+  Status refresh_group_capability(MonotonicMs now_ms) noexcept;
+  // The capability bitmap the next HelloAck advertises (test/diagnostic
+  // surface; also what config_.capability currently holds).
+  std::uint32_t capability() const noexcept { return config_.capability; }
+
   // Late join-relay binding (join_relay_v2, docs/design/sdk-v1/02 §7.2/§7.4,
   // #116): serves HostOps 0x61 JOIN_RELAY_DOWN / 0x62 JOIN_RELAY_ABORT
   // through the gateway's JoinRelayGateway (answered by 0x63) and becomes
@@ -802,6 +815,10 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
     bool used{false};
   };
   std::array<PendingGroup, kGroupOriginCapacity> pending_group_{};
+  // attach_group() ran: the group lane is bound and the capability bit is
+  // whatever the mesh can currently serve (refresh_group_capability keeps
+  // it truthful across later config changes).
+  bool group_attached_{false};
   // join_relay_v2: the attached gateway engine (owner-provided storage;
   // nullptr -> 0x61/0x62 answer Unsupported). 0x60 bodies are staged in
   // tx_body_ like the node-status page (copied into a TxItem at once).

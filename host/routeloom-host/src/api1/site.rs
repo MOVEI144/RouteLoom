@@ -319,7 +319,7 @@ fn policy_set<S: OperationStore>(
                 .ok_or_else(|| invalid("pending_retry_after_s must be 30..=3600"))?,
         );
     }
-    let (result, events) = service.with(|a| a.update_policy_at(&patch, ctx.now_mono));
+    let (result, events) = service.with(|a| a.update_policy_at(&patch, crate::mono_ms()));
     push_events(ctx, events);
     Ok(result?)
 }
@@ -653,10 +653,6 @@ fn group_keys_rotate<S: OperationStore>(
             ApiError::simple("INVALID_ARGUMENT", "expected_active_epoch must be >= 1")
         })?;
     let key = idempotency_key(params)?;
-    let time = HostTime {
-        mono_ms: ctx.now_mono,
-        unix_ms: ctx.now_ms,
-    };
     let (result, events) = service.with(|a| {
         a.rotate(
             principal,
@@ -664,7 +660,10 @@ fn group_keys_rotate<S: OperationStore>(
                 expected_active_epoch,
                 key,
             },
-            time,
+            HostTime {
+                mono_ms: crate::mono_ms(),
+                unix_ms: ctx.now_ms,
+            },
         )
     });
     push_events(ctx, events);

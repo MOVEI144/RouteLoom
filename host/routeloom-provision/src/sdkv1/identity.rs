@@ -93,10 +93,8 @@ pub fn identity_validate(r: &IdentityRecord) -> Result<()> {
                 return err(Code::InvalidArgument, "rli1 key residue");
             }
         }
-        KeyLocation::NvsPlaintext => {
-            if pubkey_from_secret(&r.key_material) != Some(r.pubkey) {
-                return err(Code::IntegrityError, "rli1 keypair mismatch");
-            }
+        KeyLocation::NvsPlaintext if pubkey_from_secret(&r.key_material) != Some(r.pubkey) => {
+            return err(Code::IntegrityError, "rli1 keypair mismatch");
         }
         _ => {}
     }

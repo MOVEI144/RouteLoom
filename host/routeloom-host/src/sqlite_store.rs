@@ -351,9 +351,14 @@ fn read_operation_row(row: &rusqlite::Row<'_>) -> Result<StoredOperation, rusqli
         ttl_ms: int_u32(9, "ttl_ms")?,
         storage: int_u8(10, "storage")?,
         hop_limit: int_u8(11, "hop_limit")?,
+        // Control-profile queueing is RAM-only by admission rule, so a
+        // durable row is always plain FIFO and can never have been
+        // superseded — no column needed.
+        queue_mode: crate::canonical::QUEUE_FIFO,
         payload: row.get(12)?,
         canonical: row.get(13)?,
         hash,
+        superseded_by: None,
         accepted_ms: db_to_ms(row.get::<_, i64>(15)?).ok_or_else(|| corrupt("accepted_ms"))?,
         // Filled by the caller from `mono_anchor`: the stamp is volatile
         // by design, never persisted.
@@ -791,9 +796,11 @@ impl SqliteOperationStore {
                                 ttl_ms: 0,
                                 storage: crate::canonical::STORAGE_RAM,
                                 hop_limit: 0,
+                                queue_mode: crate::canonical::QUEUE_FIFO,
                                 payload: Vec::new(),
                                 canonical: Vec::new(),
                                 hash: [0; 32],
+                                superseded_by: None,
                                 accepted_ms: 0,
                                 accepted_mono_ms: 0,
                                 dispatch_state: DispatchState::Indeterminate,
@@ -1017,13 +1024,15 @@ impl SqliteOperationStore {
             key: req.key,
         };
         if let Some(stored) = ram_by_identity.get(&identity) {
-            return Ok(if stored.canonical == req.canonical {
-                SubmitOutcome::Replay { seq: stored.seq }
-            } else {
-                SubmitOutcome::Conflict {
-                    existing_seq: stored.seq,
-                }
-            });
+            return Ok(
+                if stored.canonical == req.canonical && stored.queue_mode == req.queue_mode {
+                    SubmitOutcome::Replay { seq: stored.seq }
+                } else {
+                    SubmitOutcome::Conflict {
+                        existing_seq: stored.seq,
+                    }
+                },
+            );
         }
         let durable_hit: Option<(i64, Vec<u8>)> = tx
             .query_row(
@@ -1038,13 +1047,18 @@ impl SqliteOperationStore {
             )
             .optional()?;
         if let Some((seq, canonical)) = durable_hit {
-            return Ok(if canonical == req.canonical {
-                SubmitOutcome::Replay { seq: seq as u64 }
-            } else {
-                SubmitOutcome::Conflict {
-                    existing_seq: seq as u64,
-                }
-            });
+            // A durable row is always QUEUE_FIFO (control-mode submits are
+            // rejected unless RAM_ONLY), so a non-FIFO request can never
+            // replay against it — same key, different queue contract.
+            return Ok(
+                if canonical == req.canonical && req.queue_mode == crate::canonical::QUEUE_FIFO {
+                    SubmitOutcome::Replay { seq: seq as u64 }
+                } else {
+                    SubmitOutcome::Conflict {
+                        existing_seq: seq as u64,
+                    }
+                },
+            );
         }
         let scope = (principal.clone(), req.network);
         Self::retire_tx(ram_by_identity, delta, tx, &scope, now_ms)?;
@@ -1135,9 +1149,11 @@ impl SqliteOperationStore {
             ttl_ms: req.ttl_ms,
             storage: req.storage,
             hop_limit: req.hop_limit,
+            queue_mode: req.queue_mode,
             payload: req.payload.clone(),
             canonical: req.canonical.clone(),
             hash: req.hash,
+            superseded_by: None,
             accepted_ms: now_ms,
             accepted_mono_ms: mono_ms,
             dispatch_state: DispatchState::HostQueued,

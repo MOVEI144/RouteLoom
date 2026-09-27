@@ -46,6 +46,13 @@ pub const PRIORITY_URGENT: u8 = 3;
 pub const POLICY_WALL_ELAPSED: u8 = 0;
 pub const STORAGE_RAM: u8 = 0;
 pub const STORAGE_DURABLE: u8 = 1;
+/// Host queue discipline (`options.queue_mode`, design-devflow D10):
+/// FIFO keeps every admitted record; LATEST_PER_DESTINATION is the
+/// KG-style control profile — a newer submit to the same destination
+/// retires the still-queued older one. Host-side semantics only: the
+/// wire canonical is unchanged, and dedup compares the mode field-wise.
+pub const QUEUE_FIFO: u8 = 0;
+pub const QUEUE_LATEST_PER_DESTINATION: u8 = 1;
 
 /// Gateway scope classes (endpoint_wire Service payloads, 05 §5.3).
 pub const GATEWAY_SCOPE_SDK_RAM: u8 = 1;
@@ -93,6 +100,10 @@ pub struct SendRequest {
     pub ttl_ms: u32,
     pub storage: u8,
     pub hop_limit: u8,
+    /// QUEUE_FIFO or QUEUE_LATEST_PER_DESTINATION — host queue discipline,
+    /// never a wire field. Dedup still keys on `canonical`; a same-key
+    /// submit with a different mode conflicts rather than replaying.
+    pub queue_mode: u8,
     /// Schema-2 endpoint binding — Some iff dest_kind == DEST_GATEWAY.
     /// Runtime consumers read the bytes already folded into `canonical`;
     /// the parsed extension stays available for verification/tests.
@@ -136,6 +147,13 @@ impl SubmitReject {
             message: message.into(),
             retryable: true,
         }
+    }
+}
+
+pub fn queue_mode_name(value: u8) -> &'static str {
+    match value {
+        QUEUE_LATEST_PER_DESTINATION => "LATEST_PER_DESTINATION",
+        _ => "FIFO",
     }
 }
 
@@ -272,7 +290,8 @@ pub fn parse_submit(
             retryable: false,
         });
     }
-    let (delivery, priority, ttl_ms, storage, hop_limit) = parse_options(params.get("options"))?;
+    let (delivery, priority, ttl_ms, storage, hop_limit, queue_mode) =
+        parse_options(params.get("options"))?;
     let (canonical, gateway) = if dest_kind == DEST_GATEWAY {
         let scope = scope.expect("gateway destination carries a scope");
         let Some(binding) = binding else {
@@ -330,6 +349,7 @@ pub fn parse_submit(
         ttl_ms,
         storage,
         hop_limit,
+        queue_mode,
         gateway,
         payload,
         canonical,
@@ -424,7 +444,7 @@ fn parse_payload(hex: Option<&Json>, len: Option<&Json>) -> Result<Vec<u8>, Subm
 /// Options with contract defaults filled. Unknown keys and wrong types
 /// reject here; known-but-unimplemented values reject in `admission_check`.
 #[allow(clippy::type_complexity)]
-fn parse_options(value: Option<&Json>) -> Result<(u8, u8, u32, u8, u8), SubmitReject> {
+fn parse_options(value: Option<&Json>) -> Result<(u8, u8, u32, u8, u8, u8), SubmitReject> {
     let value = match value {
         None | Some(Json::Null) => return Ok(default_options()),
         Some(value @ Json::Object(_)) => value,
@@ -440,6 +460,7 @@ fn parse_options(value: Option<&Json>) -> Result<(u8, u8, u32, u8, u8), SubmitRe
                 | "storage"
                 | "hop_limit"
                 | "persist_across_sleep"
+                | "queue_mode"
         ) {
             return Err(SubmitReject::invalid(format!("unknown option \"{key}\"")));
         }
@@ -515,17 +536,37 @@ fn parse_options(value: Option<&Json>) -> Result<(u8, u8, u32, u8, u8), SubmitRe
             ))
         }
     }
-    Ok((delivery, priority, ttl_ms, storage, hop_limit))
+    let queue_mode = match value.get("queue_mode") {
+        None => QUEUE_FIFO,
+        Some(Json::String(name)) => match name.as_str() {
+            "FIFO" => QUEUE_FIFO,
+            "LATEST_PER_DESTINATION" => QUEUE_LATEST_PER_DESTINATION,
+            _ => return Err(SubmitReject::invalid("unknown queue_mode value")),
+        },
+        Some(_) => return Err(SubmitReject::invalid("queue_mode must be a string")),
+    };
+    // A supersedeable record must be provably non-durable and fire-and-
+    // forget: a control value that survives a restart or demands reliable
+    // delivery would outlive the newest-value contract.
+    if queue_mode == QUEUE_LATEST_PER_DESTINATION
+        && (delivery != DELIVERY_BEST_EFFORT || storage != STORAGE_RAM)
+    {
+        return Err(SubmitReject::invalid(
+            "queue_mode LATEST_PER_DESTINATION requires delivery BEST_EFFORT and storage RAM_ONLY",
+        ));
+    }
+    Ok((delivery, priority, ttl_ms, storage, hop_limit, queue_mode))
 }
 
 #[allow(clippy::type_complexity)]
-fn default_options() -> (u8, u8, u32, u8, u8) {
+fn default_options() -> (u8, u8, u32, u8, u8, u8) {
     (
         DELIVERY_RELIABLE,
         PRIORITY_NORMAL,
         TTL_DEFAULT_MS,
         STORAGE_DURABLE,
         HOP_DEFAULT,
+        QUEUE_FIFO,
     )
 }
 
@@ -865,6 +906,51 @@ mod tests {
         );
         let err = parse_submit(&submit_params(&json), None).unwrap_err();
         assert_eq!(err.code, "PAYLOAD_TOO_LARGE");
+    }
+
+    /// `queue_mode` (D10 control profile): LATEST_PER_DESTINATION is a
+    /// host-side discipline — parsed, constraint-checked, and kept out
+    /// of the wire canonical.
+    #[test]
+    fn queue_mode_parses_and_constrains() {
+        let submit = |options: &str| {
+            let json = format!(
+                "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000012\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"00\",\"payload_len\":1,\"options\":{{{options}}}}}"
+            );
+            parse_submit(&submit_params(&json), None)
+        };
+        // Default is FIFO; explicit FIFO parses identically.
+        let plain = submit("\"storage\":\"RAM_ONLY\",\"delivery\":\"BEST_EFFORT\"").unwrap();
+        assert_eq!(plain.queue_mode, QUEUE_FIFO);
+        let explicit =
+            submit("\"storage\":\"RAM_ONLY\",\"delivery\":\"BEST_EFFORT\",\"queue_mode\":\"FIFO\"")
+                .unwrap();
+        assert_eq!(explicit.queue_mode, QUEUE_FIFO);
+        // LATEST_PER_DESTINATION requires BEST_EFFORT + RAM_ONLY — and
+        // never alters the wire bytes (same canonical, same hash).
+        let control = submit(
+            "\"storage\":\"RAM_ONLY\",\"delivery\":\"BEST_EFFORT\",\"queue_mode\":\"LATEST_PER_DESTINATION\"",
+        )
+        .unwrap();
+        assert_eq!(control.queue_mode, QUEUE_LATEST_PER_DESTINATION);
+        assert_eq!(control.canonical, plain.canonical);
+        assert_eq!(control.hash, plain.hash);
+        for bad in [
+            // Unknown value and wrong type.
+            "\"queue_mode\":\"RING\"".to_string(),
+            "\"queue_mode\":1".to_string(),
+            // Contract violations: reliable delivery or durable storage
+            // cannot be superseded without lying about durability.
+            "\"queue_mode\":\"LATEST_PER_DESTINATION\"".to_string(),
+            "\"delivery\":\"BEST_EFFORT\",\"queue_mode\":\"LATEST_PER_DESTINATION\"".to_string(),
+            "\"delivery\":\"RELIABLE\",\"storage\":\"RAM_ONLY\",\"queue_mode\":\"LATEST_PER_DESTINATION\""
+                .to_string(),
+            "\"delivery\":\"BEST_EFFORT\",\"storage\":\"HOST_DURABLE\",\"queue_mode\":\"LATEST_PER_DESTINATION\""
+                .to_string(),
+        ] {
+            let err = submit(&bad).expect_err(&bad);
+            assert_eq!(err.code, "INVALID_ARGUMENT", "{bad}");
+        }
     }
 
     /// Known-but-unimplemented values pass the schema and fail admission.

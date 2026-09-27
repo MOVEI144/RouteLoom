@@ -47,9 +47,74 @@ pub const SCOPE_CAP: usize = 64;
 pub const HOST_RATE_PER_MINUTE: u64 = 2;
 pub const HOST_RATE_BURST: u64 = 16;
 pub const RATE_TOKEN_INTERVAL_MS: u64 = 60_000 / HOST_RATE_PER_MINUTE;
+/// Explicit bench admission profile (design-devflow D10, contracts.json
+/// `capacity.bench`): raised HOST submission budget for development
+/// sites, enabled only by the daemon's `--admission-profile bench-v1`
+/// flag. These are admission-call rates against `messages.submit` /
+/// `operations.open_epoch` — never RF packet rates: the store, dedup and
+/// firmware-side limits below are unchanged for both profiles.
+pub const BENCH_RATE_PER_MINUTE: u64 = 600;
+pub const BENCH_RATE_BURST: u64 = 8;
+/// Client-side discipline the bench profile publishes for the submitting
+/// tool (meshviz scenario/trial): at most this many inflight operations
+/// per run, and an initial-run window of 64 admission calls per 60 s.
+/// The daemon's `ACTIVE_PER_PRINCIPAL_CAP`/`ACTIVE_CAP` store quotas stay
+/// the hard bound; these numbers pace the caller below them.
+pub const BENCH_INFLIGHT_MAX: u64 = 4;
+pub const BENCH_RUN_WINDOW_CALLS: u64 = 64;
+pub const BENCH_RUN_WINDOW_MS: u64 = 60_000;
 /// Bound on principals with tracked buckets. A bucket refilled to full
 /// holds no state a fresh one would not, so those are pruned first.
 const MAX_TRACKED_PRINCIPALS: usize = 1024;
+
+/// Which admission budget `AdmissionLimiter` applies. `Normal` is the
+/// contract default; `BenchV1` is the development-site bench profile —
+/// it engages only through the explicit daemon flag and is always
+/// reported by name through `capacity.get`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AdmissionProfile {
+    #[default]
+    Normal,
+    BenchV1,
+}
+
+impl AdmissionProfile {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::BenchV1 => "bench-v1",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "normal" => Some(Self::Normal),
+            "bench-v1" => Some(Self::BenchV1),
+            _ => None,
+        }
+    }
+
+    pub fn rate_per_minute(self) -> u64 {
+        match self {
+            Self::Normal => HOST_RATE_PER_MINUTE,
+            Self::BenchV1 => BENCH_RATE_PER_MINUTE,
+        }
+    }
+
+    pub fn burst(self) -> u64 {
+        match self {
+            Self::Normal => HOST_RATE_BURST,
+            Self::BenchV1 => BENCH_RATE_BURST,
+        }
+    }
+
+    fn token_interval_ms(self) -> u64 {
+        match self {
+            Self::Normal => RATE_TOKEN_INTERVAL_MS,
+            _ => 60_000 / self.rate_per_minute(),
+        }
+    }
+}
 
 /// Dispatch states (03-send-api.md §5). The TX-I2 dispatcher in
 /// `dispatch.rs` drives records through them via the store-level
@@ -145,11 +210,22 @@ pub struct StoredOperation {
     pub ttl_ms: u32,
     pub storage: u8,
     pub hop_limit: u8,
+    /// Queue discipline requested at submit (canonical.rs `queue_mode`):
+    /// QUEUE_FIFO or QUEUE_LATEST_PER_DESTINATION. The latter marks the
+    /// record a KG-style control value — a newer submit to the same
+    /// destination retires it before dispatch (`superseded_by`).
+    pub queue_mode: u8,
     /// Payload bytes are retained for the TX-I2 dispatcher handoff: the
     /// dispatcher rebuilds the SUBMIT body (canonical bytes) from them.
     pub payload: Vec<u8>,
     pub canonical: Vec<u8>,
     pub hash: [u8; 32],
+    /// Set when a newer LATEST_PER_DESTINATION record for the same
+    /// destination retired this one before dispatch — the record shows
+    /// CANCELLED_BEFORE_DISPATCH plus the replacing seq, so provenance
+    /// never reads as an operator cancel. RAM-only records only, so no
+    /// durable column is needed (the SQLite row reports None).
+    pub superseded_by: Option<u64>,
     pub accepted_ms: u64,
     /// Process-monotonic admit stamp on the dispatcher's monotonic axis —
     /// the rewind-proof counterpart of `accepted_ms` (TX-I2 deadline
@@ -228,6 +304,32 @@ fn cancel_transition(op: &mut StoredOperation, now_ms: u64) -> CancelOutcome {
         d.skip_pending = true;
     }
     CancelOutcome::Cancelled
+}
+
+/// Retire `op` because `new_seq` — a newer QUEUE_LATEST_PER_DESTINATION
+/// record for the same destination — was committed. Same boundary as an
+/// operator cancel: only a record provably not yet written outside may
+/// be superseded (HOST_QUEUED or DISPATCH_PREPARED without `submitted`);
+/// anything past that returns false and must be left to dispatch. The
+/// outcome reads CANCELLED_BEFORE_DISPATCH but `superseded_by` records
+/// the replacing seq rather than the operator's `cancel_requested`.
+fn supersede_transition(op: &mut StoredOperation, new_seq: u64, now_ms: u64) -> bool {
+    let supersedeable = match op.dispatch_state {
+        DispatchState::HostQueued => true,
+        DispatchState::DispatchPrepared => op.dispatch.as_ref().is_some_and(|d| !d.submitted),
+        DispatchState::TimeUncertain => !op.dispatch.as_ref().is_some_and(|d| d.submitted),
+        _ => false,
+    };
+    if !supersedeable {
+        return false;
+    }
+    op.dispatch_state = DispatchState::CancelledBeforeDispatch;
+    op.terminal_ms = Some(now_ms);
+    op.superseded_by = Some(new_seq);
+    if let Some(d) = op.dispatch.as_mut() {
+        d.skip_pending = true;
+    }
+    true
 }
 
 /// TX-I2 dispatch bookkeeping persisted alongside a prepared record
@@ -641,6 +743,43 @@ pub trait OperationStore {
             CancelOutcome::NotFound
         })
     }
+    /// Retire every still-supersedeable QUEUE_LATEST_PER_DESTINATION
+    /// record this principal queued for the same (network, destination)
+    /// — the KG control profile keeps only the latest value per
+    /// destination (D10). Called after `keep_seq` was committed, so a
+    /// lost replacement can never take an older value down with it.
+    /// Returns the seqs actually retired; records that already crossed
+    /// the external-write boundary are left to dispatch.
+    fn supersede_latest_for_dest(
+        &mut self,
+        principal: &Principal,
+        req: &SendRequest,
+        keep_seq: u64,
+        now_ms: u64,
+    ) -> Result<Vec<u64>, ()> {
+        let mut superseded = Vec::new();
+        for op in self.dispatch_view()? {
+            if op.seq == keep_seq
+                || op.principal != *principal
+                || op.network != req.network
+                || op.dest_kind != req.dest_kind
+                || op.dest != req.dest
+                || op.queue_mode != crate::canonical::QUEUE_LATEST_PER_DESTINATION
+                || op.concluded()
+            {
+                continue;
+            }
+            let mut retired = false;
+            self.update_operation(op.seq, &mut |stored| {
+                retired = supersede_transition(stored, keep_seq, now_ms);
+                retired
+            })?;
+            if retired {
+                superseded.push(op.seq);
+            }
+        }
+        Ok(superseded)
+    }
     /// Records a device-attested terminal detail on the exact dispatch
     /// operation named by the device's 24-byte operation id. The message
     /// key is checked as well: mesh sessions can reuse (session, sequence)
@@ -827,13 +966,17 @@ impl ScopeEpochs {
 struct RateBucket {
     tokens: u64,
     last_ms: u64,
+    interval_ms: u64,
+    burst: u64,
 }
 
 impl RateBucket {
-    fn full(now_ms: u64) -> Self {
+    fn full(now_ms: u64, profile: AdmissionProfile) -> Self {
         Self {
-            tokens: HOST_RATE_BURST,
+            tokens: profile.burst(),
             last_ms: now_ms,
+            interval_ms: profile.token_interval_ms(),
+            burst: profile.burst(),
         }
     }
 
@@ -842,17 +985,17 @@ impl RateBucket {
         if now_ms <= self.last_ms {
             return;
         }
-        let gained = (now_ms - self.last_ms) / RATE_TOKEN_INTERVAL_MS;
+        let gained = (now_ms - self.last_ms) / self.interval_ms;
         if gained == 0 {
             return;
         }
-        self.tokens = self.tokens.saturating_add(gained).min(HOST_RATE_BURST);
-        self.last_ms += gained * RATE_TOKEN_INTERVAL_MS;
+        self.tokens = self.tokens.saturating_add(gained).min(self.burst);
+        self.last_ms += gained * self.interval_ms;
     }
 
     /// Milliseconds until the next token lands (empty bucket only).
     fn retry_after_ms(&self, now_ms: u64) -> u64 {
-        RATE_TOKEN_INTERVAL_MS - now_ms.saturating_sub(self.last_ms) % RATE_TOKEN_INTERVAL_MS
+        self.interval_ms - now_ms.saturating_sub(self.last_ms) % self.interval_ms
     }
 }
 
@@ -870,16 +1013,29 @@ pub struct RateDeny {
 /// admission work, so replays and CONFLICTs count too. RAM state only —
 /// a restart simply reopens full buckets.
 pub struct AdmissionLimiter {
+    profile: AdmissionProfile,
     global: RateBucket,
     per_principal: HashMap<Principal, RateBucket>,
 }
 
 impl AdmissionLimiter {
     pub fn new(now_ms: u64) -> Self {
+        Self::with_profile(AdmissionProfile::Normal, now_ms)
+    }
+
+    /// A limiter running the named budget. `BenchV1` is wired here from
+    /// the daemon flag only — nothing in the store or API layers can
+    /// raise the budget on its own.
+    pub fn with_profile(profile: AdmissionProfile, now_ms: u64) -> Self {
         Self {
-            global: RateBucket::full(now_ms),
+            profile,
+            global: RateBucket::full(now_ms, profile),
             per_principal: HashMap::new(),
         }
+    }
+
+    pub fn profile(&self) -> AdmissionProfile {
+        self.profile
     }
 
     /// Charge one admission call at both scopes. The principal bucket is
@@ -896,7 +1052,7 @@ impl AdmissionLimiter {
             && !self.per_principal.contains_key(principal)
         {
             self.per_principal
-                .retain(|_, bucket| bucket.tokens < HOST_RATE_BURST);
+                .retain(|_, bucket| bucket.tokens < bucket.burst);
         }
         let trackable = self.per_principal.len() < MAX_TRACKED_PRINCIPALS
             || self.per_principal.contains_key(principal);
@@ -904,7 +1060,7 @@ impl AdmissionLimiter {
             let bucket = self
                 .per_principal
                 .entry(principal.clone())
-                .or_insert_with(|| RateBucket::full(now_ms));
+                .or_insert_with(|| RateBucket::full(now_ms, self.profile));
             bucket.refill(now_ms);
             if bucket.tokens == 0 {
                 return Err(RateDeny {
@@ -1168,7 +1324,7 @@ impl OperationStore for MemoryOperationStore {
         // ahead of epoch/capacity checks so a lost response stays recoverable.
         if let Some(seq) = self.by_identity.get(&identity) {
             let stored = self.by_seq.get(seq).expect("identity without record");
-            return if stored.canonical == req.canonical {
+            return if stored.canonical == req.canonical && stored.queue_mode == req.queue_mode {
                 SubmitOutcome::Replay { seq: *seq }
             } else {
                 SubmitOutcome::Conflict { existing_seq: *seq }
@@ -1206,9 +1362,11 @@ impl OperationStore for MemoryOperationStore {
                 ttl_ms: req.ttl_ms,
                 storage: req.storage,
                 hop_limit: req.hop_limit,
+                queue_mode: req.queue_mode,
                 payload: req.payload.clone(),
                 canonical: req.canonical.clone(),
                 hash: req.hash,
+                superseded_by: None,
                 accepted_ms: now_ms,
                 accepted_mono_ms: mono_ms,
                 dispatch_state: DispatchState::HostQueued,
@@ -2269,5 +2427,188 @@ mod tests {
         assert_eq!(store.issue_complete(&[1; 16]), Ok(()));
         assert_eq!(store.issue_reserve(&issue(200, ISSUE_KIND_PERMIT)), Ok(65));
         assert_eq!(store.issue_original(&[1; 16]), None);
+    }
+
+    fn control(key: &str, dest: u64) -> SendRequest {
+        let json = format!(
+            "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000001\",\"key\":\"{key}\",\"destination\":{{\"kind\":\"node\",\"id\":\"{dest:016x}\"}},\"payload_hex\":\"00ff\",\"payload_len\":2,\"options\":{{\"storage\":\"RAM_ONLY\",\"delivery\":\"BEST_EFFORT\",\"queue_mode\":\"LATEST_PER_DESTINATION\"}}}}"
+        );
+        let mut req = parse_submit(&routeloom_json::parse(&json).unwrap(), None).unwrap();
+        assert_eq!(
+            req.queue_mode,
+            crate::canonical::QUEUE_LATEST_PER_DESTINATION
+        );
+        req.epoch = 1;
+        req
+    }
+
+    #[test]
+    fn latest_per_destination_supersedes_queued_predecessors() {
+        let mut store = MemoryOperationStore::test_store();
+        store.open_epoch((501, 1), 0).unwrap();
+        let first = submit(&mut store, &control("00112233445566778899aabbccddeeff", 3));
+        let other_dest = submit(&mut store, &control("11112233445566778899aabbccddeeff", 4));
+        // A FIFO record to the same destination is not a control value —
+        // it survives the supersede.
+        let plain = submit(
+            &mut store,
+            &request("22112233445566778899aabbccddeeff", 1, "00ff", 2),
+        );
+        let second = submit(&mut store, &control("33112233445566778899aabbccddeeff", 3));
+        let superseded = store
+            .supersede_latest_for_dest(
+                &Principal::UnixUid(501),
+                &control("33112233445566778899aabbccddeeff", 3),
+                second,
+                1500,
+            )
+            .unwrap();
+        assert_eq!(superseded, vec![first]);
+        let op = store.get_by_seq(first).unwrap().unwrap();
+        assert_eq!(op.dispatch_state, DispatchState::CancelledBeforeDispatch);
+        assert_eq!(op.superseded_by, Some(second));
+        // Provenance distinct from an operator cancel: the attachment
+        // flag is never set.
+        assert!(op.dispatch.is_none() || !op.dispatch.as_ref().unwrap().cancel_requested);
+        for seq in [other_dest, plain, second] {
+            let op = store.get_by_seq(seq).unwrap().unwrap();
+            assert_eq!(op.dispatch_state, DispatchState::HostQueued);
+            assert_eq!(op.superseded_by, None);
+        }
+        // A second supersede run retires nothing already concluded.
+        let again = store
+            .supersede_latest_for_dest(
+                &Principal::UnixUid(501),
+                &control("33112233445566778899aabbccddeeff", 3),
+                second,
+                1600,
+            )
+            .unwrap();
+        assert!(again.is_empty());
+    }
+
+    #[test]
+    fn supersede_respects_the_external_write_boundary() {
+        let mut store = MemoryOperationStore::test_store();
+        store.open_epoch((501, 1), 0).unwrap();
+        let first = submit(&mut store, &control("00112233445566778899aabbccddeeff", 3));
+        // Prepared-but-not-yet-written is still supersedeable — the
+        // position becomes a skip-pending hole, same as a cancel.
+        match store.prepare_dispatch(first, [7; 16], [8; 16]) {
+            Ok(PrepareOutcome::Prepared(_)) => {}
+            _ => panic!("expected prepare"),
+        }
+        let second = submit(&mut store, &control("33112233445566778899aabbccddeeff", 3));
+        let superseded = store
+            .supersede_latest_for_dest(
+                &Principal::UnixUid(501),
+                &control("33112233445566778899aabbccddeeff", 3),
+                second,
+                1500,
+            )
+            .unwrap();
+        assert_eq!(superseded, vec![first]);
+        let op = store.get_by_seq(first).unwrap().unwrap();
+        assert_eq!(op.dispatch_state, DispatchState::CancelledBeforeDispatch);
+        assert!(op.dispatch.as_ref().unwrap().skip_pending);
+        assert!(!op.dispatch.as_ref().unwrap().cancel_requested);
+        // Once the SUBMIT may have left the host the record can no longer
+        // be superseded — the older value legitimately went out.
+        let third = submit(&mut store, &control("44112233445566778899aabbccddeeff", 3));
+        let fourth = submit(&mut store, &control("55112233445566778899aabbccddeeff", 3));
+        match store.prepare_dispatch(third, [7; 16], [8; 16]) {
+            Ok(PrepareOutcome::Prepared(_)) => {}
+            _ => panic!("expected prepare"),
+        }
+        store
+            .update_operation(third, &mut |op| {
+                op.dispatch.as_mut().unwrap().submitted = true;
+                true
+            })
+            .unwrap();
+        // second is still queued → superseded; third already crossed the
+        // external-write boundary → must dispatch as the last value that
+        // provably went out.
+        let superseded = store
+            .supersede_latest_for_dest(
+                &Principal::UnixUid(501),
+                &control("55112233445566778899aabbccddeeff", 3),
+                fourth,
+                1600,
+            )
+            .unwrap();
+        assert_eq!(superseded, vec![second]);
+        let op = store.get_by_seq(third).unwrap().unwrap();
+        assert_eq!(op.dispatch_state, DispatchState::DispatchPrepared);
+        assert_eq!(op.superseded_by, None);
+    }
+
+    #[test]
+    fn queue_mode_distinguishes_dedup_conflict() {
+        let mut store = MemoryOperationStore::test_store();
+        store.open_epoch((501, 1), 0).unwrap();
+        // Same key + same wire bytes but different queue_mode is a
+        // conflict — replay would silently apply the wrong discipline.
+        // The FIFO record must carry BEST_EFFORT too so the canonical
+        // bytes are byte-identical and only the mode differs.
+        let fifo = parse_submit(
+            &routeloom_json::parse(
+                "{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000001\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"00ff\",\"payload_len\":2,\"options\":{\"storage\":\"RAM_ONLY\",\"delivery\":\"BEST_EFFORT\"}}",
+            )
+            .unwrap(),
+            None,
+        )
+        .unwrap();
+        let first = submit(&mut store, &fifo);
+        let control_same_key = control("00112233445566778899aabbccddeeff", 3);
+        assert_eq!(fifo.canonical, control_same_key.canonical);
+        match store.submit(501, &control_same_key, 1000) {
+            SubmitOutcome::Conflict { existing_seq } => assert_eq!(existing_seq, first),
+            _other => panic!("expected CONFLICT"),
+        }
+        // The same key under its committed mode replays; under a new key
+        // the control record admits, then replays for itself.
+        match store.submit(501, &control("11112233445566778899aabbccddeeff", 3), 1001) {
+            SubmitOutcome::Accepted { seq } => {
+                match store.submit(501, &control("11112233445566778899aabbccddeeff", 3), 1002) {
+                    SubmitOutcome::Replay { seq: replayed } => assert_eq!(replayed, seq),
+                    _other => panic!("expected replay of the control record"),
+                }
+            }
+            _other => panic!("expected the control submit to accept"),
+        }
+    }
+
+    #[test]
+    fn bench_v1_profile_uses_its_own_budget() {
+        let now = 10_000;
+        let mut limiter = AdmissionLimiter::with_profile(AdmissionProfile::BenchV1, now);
+        // Burst 8: the ninth call is denied, and the retry interval is
+        // the 100ms token cadence (600/minute), not the normal 30s.
+        for _ in 0..8 {
+            limiter.admit(7, now).unwrap();
+        }
+        let deny = limiter.admit(7, now).unwrap_err();
+        assert_eq!(deny.scope, "principal");
+        assert!(deny.retry_after_ms <= 100);
+        // Refill: 600/minute = one token per 100ms.
+        limiter.admit(7, now + 100).unwrap();
+        // Normal profile keeps the contract budget unchanged.
+        let mut normal = AdmissionLimiter::new(now);
+        for _ in 0..16 {
+            normal.admit(7, now).unwrap();
+        }
+        assert_eq!(normal.admit(7, now).unwrap_err().scope, "principal");
+        assert!(normal.admit(7, now + 100).is_err());
+        assert_eq!(
+            AdmissionProfile::parse("bench-v1"),
+            Some(AdmissionProfile::BenchV1)
+        );
+        assert_eq!(
+            AdmissionProfile::parse("normal"),
+            Some(AdmissionProfile::Normal)
+        );
+        assert_eq!(AdmissionProfile::parse("bogus"), None);
+        assert_eq!(AdmissionProfile::BenchV1.name(), "bench-v1");
     }
 }

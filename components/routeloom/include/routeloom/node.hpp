@@ -64,6 +64,15 @@ struct NodeConfig {
   // learned upward along the gateway tree or on demand (ROUTE_REQUEST).
   // Every node of a site must carry the same list; a gateway lists itself.
   std::array<NodeId, kMaxRouteGateways> route_gateways{};
+  // Flat-profile group tree roots (group-delivery.md, dev-flow §6): with no
+  // route gateway configured these node ids are the only permitted
+  // GROUP_DATA origins. The tree is derived from the committed flat routes:
+  // a node's group parent toward a root is its selected next hop, and child
+  // evidence is the root's poisoned record in the peer's pairwise
+  // RouteUpdate — bounded, authenticated, and never the whole route table.
+  // Mutually exclusive with route_gateways: both non-empty is rejected by
+  // validate_config() so routing policy never silently flips.
+  std::array<NodeId, kMaxRouteGateways> group_roots{};
   // Scoped profile only: every gateway-tree link is refreshed once per this
   // many advertisement periods. validate_config() enforces
   // route_lifetime_ms >= (2 * ticks + kScopedLeaseMarginTicks) * period.
@@ -1038,6 +1047,10 @@ class MeshNode {
   // currently routes to a gateway through this node (test/diagnostic view).
   bool gateway_scoped() const noexcept;
   bool scoped_child(NodeId neighbor) const noexcept;
+  // Flat-profile group tree (dev-flow §6.3): whether `neighbor` currently
+  // holds the child lease for `root` — it poisons the root's route record
+  // toward us, i.e. its committed next hop to the root is this node.
+  bool flat_group_child(NodeId neighbor, NodeId root) const noexcept;
   const RouteScaleStats& route_scale_stats() const noexcept { return route_scale_stats_; }
 
   // --- Group delivery (group.cpp, docs/design/sdk-v1/group-delivery.md) ------
@@ -1428,16 +1441,33 @@ class MeshNode {
     // busy_active below.
     MonotonicMs busy_since_ms{0};
     MonotonicMs last_busy_feedback_ms{0};
-    // Gateway-scoped profile (routing-scale.md §3). child_until_ms: the peer
-    // routes to a gateway through us (it poisoned our gateway record) — it
-    // gets the periodic downward refresh and its routes travel upward.
-    // interest_until_ms: the peer pulled a route or asked for a sequence —
-    // triggered changes are pushed to it. A pending pull answer is emitted
-    // from poll() after the selection-change scan.
-    MonotonicMs child_until_ms{0};
-    MonotonicMs interest_until_ms{0};
-    MonotonicMs last_pull_answer_ms{0};
-    NodeId pull_target{kInvalidNodeId};
+    // Tree-role inference state. The scoped profile and the flat group tree
+    // never run together (validate_config refuses a config carrying both
+    // route_gateways and group_roots), so their per-neighbor evidence shares
+    // one storage block; which arm is live follows gateway_scoped(), not
+    // runtime inspection of the union.
+    union TreeRoles {
+      // Gateway-scoped profile (routing-scale.md §3). child_until_ms: the
+      // peer routes to a gateway through us (it poisoned our gateway
+      // record) — it gets the periodic downward refresh and its routes
+      // travel upward. interest_until_ms: the peer pulled a route or asked
+      // for a sequence — triggered changes are pushed to it. A pending
+      // pull answer is emitted from poll() after the selection-change scan.
+      struct {
+        MonotonicMs child_until_ms{0};
+        MonotonicMs interest_until_ms{0};
+        MonotonicMs last_pull_answer_ms{0};
+        NodeId pull_target{kInvalidNodeId};
+      } scoped;
+      // Flat-profile group tree (dev-flow §6.3): per-root child lease,
+      // indexed by the root's position in config_.group_roots. Set when the
+      // peer poisons that root's route record toward us (its committed next
+      // hop to the root is this node), cleared by a finite record; bounded
+      // by route_lifetime_ms.
+      std::array<MonotonicMs, kMaxRouteGateways> group_child_until_ms;
+      TreeRoles() noexcept : scoped() {}
+    };
+    TreeRoles tree{};
     // --- 4-byte members ---
     // Granted feature bits from the peer's latest nonce-bound
     // CapabilitiesReply (telemetry.hpp CapabilityFeature), live only while
@@ -2430,6 +2460,20 @@ class MeshNode {
 
   bool is_route_gateway(NodeId destination) const noexcept;
   bool neighbor_is_child(NodeId neighbor, MonotonicMs now_ms) const noexcept;
+  // Flat-profile group tree (dev-flow §6.3): `group_supported` reports a
+  // configured tree (scoped gateways or flat group_roots); `is_group_root`
+  // resolves a source against the active root set; `group_root_index` is the
+  // root's slot in config_.group_roots (kMaxRouteGateways when absent);
+  // `group_child_of` is the child evidence of this tree's root (scoped lease
+  // or the flat poisoned-root lease); `flat_group_parent` is our committed
+  // next hop toward the root.
+  bool group_supported() const noexcept;
+  bool is_group_root(NodeId node) const noexcept;
+  std::size_t group_root_index(NodeId root) const noexcept;
+  bool group_child_of(NodeId neighbor, NodeId root, MonotonicMs now_ms) const noexcept;
+  NodeId flat_group_parent(NodeId root) const noexcept;
+  void note_flat_group_update(Neighbor& neighbor, const RouteAdvertisement* records,
+                              std::size_t count, MonotonicMs now_ms) noexcept;
   NodeId scoped_uplink(NodeId exclude) const noexcept;
   std::uint32_t scoped_link_phase(NodeId neighbor) const noexcept;
   bool upward_eligible(const RouteSelection& selection, NodeId parent,
