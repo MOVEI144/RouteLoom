@@ -313,8 +313,7 @@ jobs:
             echo ''
             echo 'Firmware images ship with the development PSK — a public test'
             echo 'fixture, not a credential. See `SECURITY.md` before any deployment.'
-            echo 'Only the default per-app sdkconfig is shipped and RAM-gated;'
-            echo 'the extra CI build profiles are not release targets.'
+            echo 'Only the default per-app sdkconfig is shipped and RAM-gated; extra CI build profiles are not release targets.'
           } > release-notes.md
       - name: Create draft release
         shell: bash
