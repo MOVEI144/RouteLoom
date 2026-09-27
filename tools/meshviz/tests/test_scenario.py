@@ -8,7 +8,8 @@ from pathlib import Path
 from routeloom_meshviz import scenario as sc
 from routeloom_meshviz.demo import DemoMesh
 from routeloom_meshviz.fake_api1 import serve_fake_api1
-from routeloom_meshviz.scenario_driver import run as driver_run
+from routeloom_meshviz.scenario_driver import LocalOps, run as driver_run
+from routeloom_meshviz.model import FakeClock
 
 NODE = 'aaaabbbbccccdddd'
 BENCH = {'admission': {'profile': 'bench-v1', 'calls_per_minute': 600, 'burst': 8,
@@ -132,6 +133,26 @@ def _ok(result=None):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_provision_evidence_survives_multi_target_resume(self):
+        second = '1111222233334444'
+        d = doc(nodes={NODE: {}, second: {}}, steps=[
+            {'id': 'flash', 'kind': 'flash_provision',
+             'targets': [NODE, second],
+             'bundle': {'digest': 'sha256:' + 'a' * 64, 'signature': 'b' * 128}},
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            runner = sc.ScenarioRunner.arm(d, td, now_ms=0)
+            first = runner.due(0)[0]
+            evidence = {'node': NODE,
+                        'readback': {'node': NODE, 'kid': 'a' * 64},
+                        'inventory': {'node': NODE}}
+            runner.on_reply(first.tag, _ok(evidence), 1)
+            resumed = sc.ScenarioRunner.resume(
+                sc.ScenarioJournal.load(runner.journal.path), now_ms=2,
+                capacity={})
+            self.assertEqual(resumed.steps[0].detail['provisioned'], [evidence])
+            self.assertEqual(resumed.steps[0].detail['targets_left'], [second])
+
     def test_happy_path(self):
         d = doc(steps=[
             {'id': 'pol', 'kind': 'join_policy',
@@ -519,6 +540,52 @@ class RunnerTests(unittest.TestCase):
 
 
 class DriverTests(unittest.TestCase):
+    def test_capture_write_loss_stops_run_with_gap(self):
+        with tempfile.TemporaryDirectory() as td:
+            runner = sc.ScenarioRunner.arm(doc(steps=[
+                {'id': 'record', 'kind': 'record_start', 'path': str(Path(td) / 'capture')},
+            ]), td, now_ms=0)
+            start = runner.due(0)[0]
+            runner.on_reply(start.tag, _ok({'path': str(Path(td) / 'capture')}), 1)
+            local = LocalOps()
+            clock = FakeClock()
+            clock.mono_ns = 1_000_000_000
+            clock.unix_ms = 1_000
+
+            class BrokenCapture:
+                failed = False
+
+                def add(self, event, at):
+                    raise OSError('disk full')
+
+            local.capture = BrokenCapture()
+            local.observe('nodes.list', {'source': {'id': 'usb'},
+                                         'nodes': []}, runner, clock)
+            runner.due(1_001)
+            self.assertTrue(runner.gaps)
+            self.assertEqual(runner.state, 'Incomplete')
+
+    def test_resume_does_not_claim_unrecorded_tail(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            plan = doc(steps=[
+                {'id': 'record', 'kind': 'record_start', 'path': str(root / 'capture')},
+                {'id': 'wait', 'kind': 'formation_wait', 'count': 1},
+            ])
+            runner = sc.ScenarioRunner.arm(plan, root / 'journal', now_ms=0)
+            call = runner.due(0)[0]
+            runner.on_reply(call.tag, _ok({'path': str(root / 'capture')}), 1)
+            journal_path = runner.journal.path
+            mesh = DemoMesh(4)
+            sock_path = root / 'api.sock'
+            with serve_fake_api1(sock_path, mesh=mesh):
+                resumed, _ = driver_run(None, journal_dir=None,
+                                        api1_path=sock_path,
+                                        resume_journal=journal_path,
+                                        tick_ms=20)
+            self.assertEqual(resumed.state, 'Incomplete')
+            self.assertTrue(resumed.gaps)
+
     def test_headless_run_over_socket(self):
         """The runner drives the real API1 line codec against the fake
         server — the same code path the lab uses against the daemon."""

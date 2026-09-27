@@ -347,6 +347,12 @@ impl RollcallService {
         let mut inner = self.lock();
         if let Some(run) = inner.run.as_mut() {
             if run.group == group && run.network == network {
+                if run.owner != owner {
+                    if run.desired_ms != desired_ms.max(MIN_INTERVAL_MS) {
+                        return Err("rollcall owned by another principal");
+                    }
+                    return Ok(run.run_uuid);
+                }
                 // Same target: refresh the desired floor only — the run,
                 // its history and its per-node evidence carry on.
                 run.desired_ms = desired_ms.max(MIN_INTERVAL_MS);
@@ -385,18 +391,24 @@ impl RollcallService {
 
     /// `lab.rollcall.stop`: end the run. An in-flight poll is left to the
     /// group lane — its record stays final-visible, no cancel is faked.
-    pub fn stop(&self) -> bool {
-        self.lock().run.take().is_some()
+    pub fn stop(&self, owner: &Principal) -> bool {
+        let mut inner = self.lock();
+        if inner.run.as_ref().is_some_and(|run| &run.owner == owner) {
+            inner.run = None;
+            true
+        } else {
+            false
+        }
     }
 
     /// `stop` guarded by the run id: a stale client's stop cannot end a run
     /// minted after that client last observed the service.
-    pub fn stop_if(&self, run_uuid: &[u8; 16]) -> bool {
+    pub fn stop_if(&self, owner: &Principal, run_uuid: &[u8; 16]) -> bool {
         let mut inner = self.lock();
         if inner
             .run
             .as_ref()
-            .is_some_and(|run| &run.run_uuid == run_uuid)
+            .is_some_and(|run| &run.owner == owner && &run.run_uuid == run_uuid)
         {
             inner.run = None;
             true
@@ -783,9 +795,12 @@ pub fn service_step(
                 let status = record.status;
                 let (outcome, stable) = match record.phase {
                     group::Phase::Settled => {
-                        let complete = status
-                            .as_ref()
-                            .is_some_and(|s| s.missing_total == 0 && s.unaccounted == 0);
+                        let complete = status.as_ref().is_some_and(|s| {
+                            s.missing_total == 0
+                                && s.unaccounted == 0
+                                && u64::from(s.delivered) + u64::from(s.nonmember)
+                                    >= roster.saturating_sub(1)
+                        });
                         (if complete { "complete" } else { "incomplete" }, complete)
                     }
                     group::Phase::Refused => ("refused", false),
@@ -1110,6 +1125,10 @@ mod tests {
             a,
             "the single owned run answers every matching start"
         );
+        assert!(service
+            .start(Principal::UnixUid(502), NET, DEFAULT_GROUP, 60_000, 3_500)
+            .is_err());
+        assert_eq!(service.interval_ms(), Some(MIN_INTERVAL_MS));
         // A different group is a conflict, not a second loop.
         assert!(service
             .start(Principal::UnixUid(501), NET, 7, MIN_INTERVAL_MS, 4_000)
@@ -1124,9 +1143,14 @@ mod tests {
         service
             .update(&Principal::UnixUid(501), &a, Some(9), None)
             .unwrap();
-        assert!(!service.stop_if(&[0xde; 16]), "stale id cannot stop");
-        assert!(service.stop_if(&a));
-        assert!(!service.stop(), "already stopped");
+        assert!(!service.stop_if(&Principal::UnixUid(502), &a));
+        assert!(!service.stop(&Principal::UnixUid(502)));
+        assert!(
+            !service.stop_if(&Principal::UnixUid(501), &[0xde; 16]),
+            "stale id cannot stop"
+        );
+        assert!(service.stop_if(&Principal::UnixUid(501), &a));
+        assert!(!service.stop(&Principal::UnixUid(501)), "already stopped");
     }
 
     #[test]
@@ -1278,6 +1302,34 @@ mod tests {
             last.get("outcome").and_then(Json::as_str),
             Some("incomplete")
         );
+    }
+
+    #[test]
+    fn zero_tree_report_cannot_complete_a_known_roster() {
+        let service = RollcallService::default();
+        let ops = GroupOps::default();
+        let mut lane = GroupLane::default();
+        service
+            .start(
+                Principal::UnixUid(501),
+                NET,
+                DEFAULT_GROUP,
+                MIN_INTERVAL_MS,
+                1_000,
+            )
+            .unwrap();
+        service_step(&service, &ops, 10, false, 1_000);
+        settle_poll(
+            &service,
+            &ops,
+            &mut lane,
+            10,
+            1_500,
+            report(STATE_DELIVERED, 0, 0, 0),
+        );
+        let status = routeloom_json::parse(&service.status_json(&StatusView::default())).unwrap();
+        assert_eq!(status.get("complete").and_then(Json::as_u64), Some(0));
+        assert_eq!(status.get("incomplete").and_then(Json::as_u64), Some(1));
     }
 
     #[test]

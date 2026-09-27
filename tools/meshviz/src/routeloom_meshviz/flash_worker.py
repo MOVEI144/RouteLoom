@@ -22,9 +22,13 @@ def flash(port: str, plan: FlashPlan, api=None):
         raise ValueError('assigned NodeId differs from signed image configuration')
     if manifest['chip'] == 'esp32c6':
         raise ValueError('C6 is experimental HIL only')
+    manifest_files = manifest['files']
+    if plan.app_only:
+        manifest_files = [entry for entry in manifest_files
+                          if entry['offset'] == 0x10000]
     if manifest['chip'] != plan.chip or tuple(
             (e['offset'], Path(plan.bundle) / e['path'], e['size'], e['sha256'])
-            for e in manifest['files']) != tuple(
+            for e in manifest_files) != tuple(
             (i.offset, i.path, i.size, i.sha256) for i in plan.images):
         raise ValueError('flash plan differs from signed bundle')
     api = _api(api)
@@ -95,11 +99,15 @@ def main():
         root = Path(request['bundle'])
         manifest = verify_bundle(root, PUBLIC_KEY)
         identity = Identity(**request['expected'])
+        if type(request.get('app_only', False)) is not bool:
+            raise ValueError('app_only must be boolean')
+        app_only = request.get('app_only', False)
         images = tuple(Image(e['offset'], root / e['path'], e['size'], e['sha256'])
-                       for e in manifest['files'])
+                       for e in manifest['files']
+                       if not app_only or e['offset'] == 0x10000)
         plan = FlashPlan(identity, manifest['chip'], images, True,
                          request['expected_mac'], request['quiesced'], root,
-                         request.get('assigned_node_id'))
+                         request.get('assigned_node_id'), app_only)
         flash(request['port'], plan)
         print(json.dumps({'ok': True}))
         return 0

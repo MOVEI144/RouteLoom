@@ -16,7 +16,9 @@ def _scenario_main(argv):
     p.add_argument('--journal-dir', required=True)
     p.add_argument('--api1-sock', required=True)
     p.add_argument('--device-cmd',
-                   help='shell template for device ops: {op} {node} {bundle_digest}')
+                   help='shell template for power/reset: {op} {node} {bundle_digest}')
+    p.add_argument('--site-dir', help='D03 provisioning site directory')
+    p.add_argument('--bundles-dir', help='signed provisioning bundles directory')
     p.add_argument('--report-dir')
     p.add_argument('--tick-ms', type=int, default=100)
 
@@ -24,6 +26,8 @@ def _scenario_main(argv):
     p.add_argument('journal')
     p.add_argument('--api1-sock', required=True)
     p.add_argument('--device-cmd')
+    p.add_argument('--site-dir')
+    p.add_argument('--bundles-dir')
     p.add_argument('--report-dir')
     p.add_argument('--tick-ms', type=int, default=100)
 
@@ -52,12 +56,16 @@ def _scenario_main(argv):
             runner, summary = run(args.plan, journal_dir=args.journal_dir,
                                   api1_path=args.api1_sock,
                                   device_cmd=args.device_cmd,
+                                  site_dir=args.site_dir,
+                                  bundles_dir=args.bundles_dir,
                                   report_dir=args.report_dir,
                                   tick_ms=args.tick_ms)
         else:
             runner, summary = run(None, journal_dir=None,
                                   api1_path=args.api1_sock,
                                   device_cmd=args.device_cmd,
+                                  site_dir=args.site_dir,
+                                  bundles_dir=args.bundles_dir,
                                   report_dir=args.report_dir,
                                   resume_journal=args.journal,
                                   tick_ms=args.tick_ms)

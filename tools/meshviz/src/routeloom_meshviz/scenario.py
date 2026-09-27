@@ -861,13 +861,18 @@ class ScenarioRunner:
         elif kind in ('sequential_power_on', 'flash_provision'):
             targets = [self._target_id(t) for t in spec['targets']]
             done = set()
+            provisioned = []
             for o in self.ops:
                 if o.step != step.index or o.channel != 'device':
                     continue
                 node = (o.params or {}).get('node')
                 if o.status == 'replied' and o.ok is True and node:
                     done.add(node)
+                    if kind == 'flash_provision' and isinstance(o.result, dict):
+                        provisioned.append(o.result)
             step.detail['targets_left'] = [t for t in targets if t not in done]
+            if kind == 'flash_provision':
+                step.detail['provisioned'] = provisioned
             if kind == 'sequential_power_on':
                 step.detail.setdefault('settle_ms', spec.get('settle_ms', 0))
                 step.next_at_ms = 0
@@ -1080,6 +1085,14 @@ class ScenarioRunner:
         self.gaps.append(entry)
         self.journal.record(entry)
 
+    def recording_loss(self, now_ms: int, reason: str):
+        self.gap(now_ms, reason, now_ms)
+        step = self._current()
+        if step is not None:
+            self._step_done(step, now_ms, 'incomplete', reason=reason)
+        else:
+            self.abort(reason)
+
     def _step_done(self, step: StepState, now_ms: int, status='done', **detail):
         # A late reply for an already-settled step is recorded as an op row
         # but may NOT rewrite the step's verdict — evidence only accrues.
@@ -1206,6 +1219,8 @@ class ScenarioRunner:
             return
         # Order matters: evidence loss beats a plain failure beats a stop.
         if any(s.status == 'incomplete' for s in self.steps):
+            self._finish('Incomplete')
+        elif self.stop_reason and self.stop_reason.startswith('recording lost:'):
             self._finish('Incomplete')
         elif any(s.status == 'failed' for s in self.steps):
             self._finish('Failed')
@@ -1900,7 +1915,7 @@ class ScenarioRunner:
         record = {'type': 'op', 'tag': tag, 'step': op.step,
                   'status': 'replied', 'reply_ms': now_ms, 'ok': ok,
                   'code': code}
-        if ok and (op.method == 'members.get' or op.channel == 'bench'):
+        if ok and (op.method in ('members.get', 'provision') or op.channel == 'bench'):
             # The reset_rejoin baseline survives on the result — journal it so
             # a resume still compares against the pre-reset snapshot. Bench
             # replies carry the device counters the resume re-folds.
@@ -2067,6 +2082,20 @@ class ScenarioRunner:
         elif kind in ('exclusion', 'gk_rotate', 'cutover'):
             self._step_done(step, now_ms, outcome=result)
         elif kind == 'flash_provision':
+            readback = (result or {}).get('readback')
+            inventory = (result or {}).get('inventory')
+            if (not isinstance(readback, dict) or
+                    not isinstance(inventory, dict) or
+                    readback.get('node') != op.params.get('node') or
+                    inventory.get('node') != op.params.get('node') or
+                    not readback.get('kid')):
+                self._step_done(step, now_ms, 'incomplete',
+                                reason='provision evidence missing')
+                return
+            step.detail.setdefault('provisioned', []).append(result)
+            node = op.params.get('node')
+            if node in step.detail['targets_left']:
+                step.detail['targets_left'].remove(node)
             self._next_provision(step, now_ms)
 
     @staticmethod

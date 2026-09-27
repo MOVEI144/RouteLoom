@@ -2948,6 +2948,14 @@ impl Drop for ClientGuard {
     }
 }
 
+fn bench_profile_allowed(
+    profile: send_store::AdmissionProfile,
+    purpose: Option<site::SitePurpose>,
+) -> bool {
+    profile != send_store::AdmissionProfile::BenchV1
+        || purpose == Some(site::SitePurpose::Development)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Anchor the monotonic base at process start — `mono_ms` is the
     // rewind-proof deadline axis, so it should measure daemon uptime rather
@@ -3014,6 +3022,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             StoreBackend::Memory(Box::new(MemoryOperationStore::new(mint_id128())))
         }
     };
+    // A raised admission budget belongs only to a verified development site.
+    // Check this before touching the socket or starting any transport.
+    let site = match &args.site_authority {
+        Some(dir) => {
+            let authority = site::config::open_dir(dir, now_ms())
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            if !bench_profile_allowed(args.admission_profile, Some(authority.purpose())) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "bench-v1 requires a development site",
+                )
+                .into());
+            }
+            eprintln!(
+                "site authority: site {:016x} network {:016x} (EXPERIMENTAL; USB join relay 0x60-0x63 serves capable sessions)",
+                authority.site_id(),
+                authority.network()
+            );
+            Some(site::SiteService::new_live(authority))
+        }
+        None => {
+            if !bench_profile_allowed(args.admission_profile, None) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "bench-v1 requires a development site",
+                )
+                .into());
+            }
+            None
+        }
+    };
     // Only remove a leftover unix socket — never unlink a regular file or a
     // path a second instance happens to point at.
     #[cfg(unix)]
@@ -3037,21 +3076,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if host_boot == 0 || host_boot == u64::MAX {
         host_boot ^= 0x5A;
     }
-    // SDK v1 Site Authority: a directory that does not open (wrong SAK,
-    // store of another site, broken ledger) is a hard start error.
-    let site = match &args.site_authority {
-        Some(dir) => {
-            let authority = site::config::open_dir(dir, now_ms())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-            eprintln!(
-                "site authority: site {:016x} network {:016x} (EXPERIMENTAL; USB join relay 0x60-0x63 serves capable sessions)",
-                authority.site_id(),
-                authority.network()
-            );
-            Some(site::SiteService::new_live(authority))
-        }
-        None => None,
-    };
     let state = Arc::new(State {
         device: device.clone(),
         site,
@@ -3305,6 +3329,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bench_admission_requires_a_development_site() {
+        use send_store::AdmissionProfile::{BenchV1, Normal};
+        assert!(bench_profile_allowed(Normal, None));
+        assert!(!bench_profile_allowed(BenchV1, None));
+        assert!(!bench_profile_allowed(
+            BenchV1,
+            Some(site::SitePurpose::Production)
+        ));
+        assert!(!bench_profile_allowed(
+            BenchV1,
+            Some(site::SitePurpose::Import)
+        ));
+        assert!(bench_profile_allowed(
+            BenchV1,
+            Some(site::SitePurpose::Development)
+        ));
+    }
 
     #[test]
     fn queued_remote_query_is_dropped_after_settlement_or_session_change() {

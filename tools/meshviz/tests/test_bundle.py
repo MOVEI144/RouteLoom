@@ -152,6 +152,11 @@ class BundleTests(unittest.TestCase):
                                    identity.base_mac, True, bundle), api)
             self.assertEqual(api.written, api.verified)
             self.assertEqual(len(api.written), 3)
+            app_image = next(image for image in images if image.offset == 0x10000)
+            api = API()
+            flash('COM1', FlashPlan(identity, 'esp32c3', (app_image,), True,
+                                   identity.base_mac, True, bundle, None, True), api)
+            self.assertEqual([offset for offset, _ in api.written], [0x10000])
             # A signed app exceeding the factory partition must not overwrite rlsec.
             oversized = bytes(header) + b'\0' * (0x180001 - len(header))
             app_image = bundle / 'images/application.bin'

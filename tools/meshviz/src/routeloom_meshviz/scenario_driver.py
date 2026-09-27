@@ -7,19 +7,20 @@ Channel mapping:
            over messages.submit, then poll messages.read for the matching
            reply; foreign replies seen while polling are fed back to the
            runner so a device poll never eats another op's answer
-  device → a `--device-cmd` template executed per op, rc==0 means ok; without
-           a driver every device op answers NO_DRIVER so dangerous steps
-           degrade to `incomplete` instead of silently passing
+  device → D03 ProvisionRunner for provision; `--device-cmd` controls power
+           and reset. Missing drivers answer NO_DRIVER.
   local  → record_start opens a capture.Capture boundary; report writes the
            runner's report set
 
 The loop never invents evidence: a dropped reply is a timeout the runner
 reconciles, and a failed device driver is an honest step failure.
 """
+import hashlib
 import json
 import select
 import shlex
 import socket
+import sqlite3
 import subprocess
 import time
 from pathlib import Path
@@ -87,13 +88,102 @@ class Api1Socket:
 
 
 class DeviceDriver:
-    """`--device-cmd 'tpl {op} {node} {bundle_digest}'` — one subprocess per
-    device op. Exit 0 = ok. No driver = an explicit NO_DRIVER failure."""
+    """D03 provision with readback evidence; external power/reset control."""
 
-    def __init__(self, template: str | None):
+    def __init__(self, template: str | None, *, provision_backend=None, nodes=None):
         self.template = template
+        self.provision_backend = provision_backend
+        self.nodes = {node.lower(): meta for node, meta in (nodes or {}).items()}
+
+    def _pinned_field(self, job, pinned):
+        field = self.provision_backend._bundle('field', job, job.chip)
+        path = field['path']
+        digest = 'sha256:' + hashlib.sha256(
+            (path / 'manifest.json').read_bytes()).hexdigest()
+        signature = json.loads((path / 'signature.json').read_text(
+            encoding='utf-8'))['signature']
+        if not isinstance(pinned, dict) or \
+                pinned.get('digest') != digest or pinned.get('signature') != signature:
+            raise ValueError('field bundle differs from pinned digest/signature')
+        return field
+
+    def _provision(self, call):
+        from .provision_plan import ProvisionJob, ProvisionRunner
+        from .provisioning import ProvisionError, ProvisionJournal
+
+        node = call.params.get('node')
+        meta = self.nodes.get(node)
+        if self.provision_backend is None:
+            return {'ok': False, 'error': {'code': 'NO_DRIVER',
+                                           'detail': {'message': 'site/bundles not configured'}}}
+        if not isinstance(meta, dict) or not all(
+                isinstance(meta.get(key), str) and meta[key]
+                for key in ('port', 'chip', 'base_mac', 'role')) or \
+                meta['role'] not in ('bridge', 'bench'):
+            return {'ok': False, 'error': {'code': 'BAD_TARGET',
+                                           'detail': {'message': f'{node}: board metadata missing'}}}
+        job = ProvisionJob(meta['port'], meta['chip'], meta['base_mac'],
+                           meta['role'], node, steps={'plan': 'done'})
+        try:
+            self._pinned_field(job, call.params.get('bundle'))
+            ProvisionRunner(self.provision_backend, [job]).run_job(job)
+            journal = ProvisionJournal.load(
+                self.provision_backend._journals() / f'node-{node}.journal.json')
+            inventory = journal.latest('inventory')
+            if (not job.ready or job.steps.get('inventory') != 'done' or
+                    not journal.has('written') or inventory is None or
+                    inventory.get('node') != node):
+                raise ValueError(f'provision stopped at {job.resume_from or job.next_step()}')
+        except (OSError, ValueError, KeyError, RuntimeError, ProvisionError) as exc:
+            return {'ok': False, 'error': {'code': 'PROVISION_INCOMPLETE',
+                                           'detail': {'message': str(exc)}}}
+        return {'ok': True, 'result': {'node': node, 'readback': job.readback,
+                                       'inventory': inventory,
+                                       'journal': str(journal.path)}}
+
+    def reconcile_provision(self, op):
+        """Recover only a completed D03 receipt; never issue another write."""
+        from .provision_plan import ProvisionJob
+        from .provisioning import ProvisionError, ProvisionJournal
+
+        if self.provision_backend is None or op.method != 'provision':
+            return None
+        node = op.params.get('node')
+        meta = self.nodes.get(node)
+        if not isinstance(meta, dict):
+            return None
+        try:
+            job = ProvisionJob(meta['port'], meta['chip'], meta['base_mac'],
+                               meta['role'], node)
+            field = self._pinned_field(job, op.params.get('bundle'))
+            journal = ProvisionJournal.load(
+                self.provision_backend._journals() / f'node-{node}.journal.json')
+            plan = journal.plan
+            readback = journal.latest('readback')
+            issued = journal.latest('issued')
+            written = journal.latest('written')
+            inventory = journal.latest('inventory')
+            app = next(entry for entry in field['manifest']['files']
+                       if entry['offset'] == 0x10000)
+            if (not journal.done or not all((readback, issued, written, inventory)) or
+                    plan.get('site_id') != self.provision_backend._load_spec()['site_id'] or
+                    plan.get('node_id') != node or
+                    plan.get('base_mac', '').lower() != job.base_mac.lower() or
+                    plan.get('role') != job.role or
+                    plan.get('field_digest') != app['sha256'] or
+                    readback.get('node') != node or
+                    readback.get('kid') != issued.get('kid') or
+                    written.get('node') != node or inventory.get('node') != node):
+                return None
+        except (OSError, ValueError, KeyError, RuntimeError, ProvisionError):
+            return None
+        return {'ok': True, 'result': {'node': node, 'readback': readback,
+                                       'inventory': inventory,
+                                       'journal': str(journal.path)}}
 
     def execute(self, call) -> dict:
+        if call.method == 'provision':
+            return self._provision(call)
         if self.template is None:
             return {'ok': False, 'error': {'code': 'NO_DRIVER',
                                          'detail': {'message': 'no --device-cmd given'}}}
@@ -144,7 +234,7 @@ class LocalOps:
                             'INSERT OR REPLACE INTO metadata VALUES (?,?)',
                             (k, json.dumps(v)))
                 self.capture.db.commit()
-            except (OSError, ValueError) as exc:
+            except (OSError, ValueError, sqlite3.Error) as exc:
                 return {'ok': False, 'error': {'code': 'CAPTURE_FAILED',
                                                'detail': {'message': str(exc)}}}
             return {'ok': True, 'result': {'path': str(path)}}
@@ -157,7 +247,8 @@ class LocalOps:
         return {'ok': False, 'error': {'code': 'UNKNOWN_LOCAL',
                                        'detail': {'message': call.method}}}
 
-    def observe(self, method: str, result: dict, clock: FakeClock):
+    def observe(self, method: str, result: dict, runner: ScenarioRunner,
+                clock: FakeClock):
         """Feed api1 observations into an open capture — nodes.list snapshots
         become the replayable record."""
         if self.capture is None or not isinstance(result, dict):
@@ -169,8 +260,13 @@ class LocalOps:
                                                 clock.unix_ms)
                 for event in events:
                     self.capture.add(event, clock)
-            except (ValueError, RuntimeError):
-                pass                    # capture failures never block the run
+            except (ValueError, RuntimeError, OSError, sqlite3.Error) as exc:
+                self.recording_loss(runner, clock, exc)
+
+    def recording_loss(self, runner: ScenarioRunner, clock: FakeClock, error):
+        reason = f'recording lost: {error}'
+        tick = clock.mono_ns // 1_000_000
+        runner.recording_loss(tick, reason)
 
     def close(self):
         if self.capture is not None:
@@ -186,6 +282,7 @@ def _fetch_capacity(api1: Api1Socket) -> dict:
 
 
 def run(plan_path, *, journal_dir, api1_path, device_cmd=None,
+        site_dir=None, bundles_dir=None, provision_backend=None,
         report_dir=None, resume_journal=None, tick_ms=100):
     """Drive a scenario to terminal state. Returns (runner, summary)."""
     try:
@@ -206,9 +303,28 @@ def run(plan_path, *, journal_dir, api1_path, device_cmd=None,
                 raise ScenarioError('invalid_plan', '; '.join(errors))
             runner = ScenarioRunner.arm(doc, journal_dir, now_ms=now_ms(),
                                         capacity=capacity)
-        device = DeviceDriver(device_cmd)
+        if provision_backend is None and site_dir and bundles_dir:
+            from .device import RealBoards
+            from .provisioning import LabProvisionBackend
+            provision_backend = LabProvisionBackend(
+                site_dir=site_dir, bundles_dir=bundles_dir, boards=RealBoards())
+        device = DeviceDriver(device_cmd, provision_backend=provision_backend,
+                              nodes=runner.doc.get('nodes'))
         local = LocalOps(report_dir)
         clock = FakeClock()
+        if resume_journal and any(
+                step.kind == 'record_start' and step.status == 'done'
+                for step in runner.steps) and not runner.finished:
+            clock.mono_ns = time.monotonic_ns()
+            clock.unix_ms = int(time.time() * 1000)
+            local.recording_loss(runner, clock,
+                                 'capture cannot continue after process restart')
+        if resume_journal:
+            for op in list(runner.outstanding.values()):
+                if op.channel == 'device' and op.method == 'provision':
+                    receipt = device.reconcile_provision(op)
+                    if receipt is not None:
+                        runner.on_reply(op.tag, receipt, now_ms())
         # The bench channel shares the API1 socket; replies it sees that
         # belong to other in-flight ops are fed back into the runner.
         bench = BenchChannel(api1, runner.network)
@@ -220,6 +336,9 @@ def run(plan_path, *, journal_dir, api1_path, device_cmd=None,
                 clock.mono_ns = time.monotonic_ns()
                 clock.unix_ms = int(time.time() * 1000)
                 tick_now = clock.mono_ns // 1_000_000
+                if local.capture is not None and local.capture.failed \
+                        and not runner.stop_reason:
+                    local.recording_loss(runner, clock, 'capture writer failed')
                 try:
                     calls = runner.due(tick_now)
                 except ScenarioError:
@@ -246,10 +365,10 @@ def run(plan_path, *, journal_dir, api1_path, device_cmd=None,
                                         local.execute(call, runner, clock), tick_now)
                 try:
                     for tag, reply in api1.poll(tick_ms):
-                        runner.on_reply(tag, reply, tick_now)
                         if reply.get('ok'):
                             local.observe(_method_of(runner, tag),
-                                          reply.get('result'), clock)
+                                          reply.get('result'), runner, clock)
+                        runner.on_reply(tag, reply, tick_now)
                 except (ConnectionError, OSError):
                     for tag in list(runner.outstanding):
                         op = runner.outstanding[tag]

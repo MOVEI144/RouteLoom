@@ -4231,26 +4231,26 @@ fn rollcall_stop<S: OperationStore>(
             "no authenticated gateway session",
         ));
     };
-    if !ctx
+    let Some(owner) = ctx
         .principal
         .as_ref()
-        .is_some_and(|p| ctx.acl.permit_principal(p, network, acl::PERM_SEND))
-    {
+        .filter(|p| ctx.acl.permit_principal(p, network, acl::PERM_SEND))
+    else {
         return Err(ApiError::simple(
             "AuthorizationFailed",
             "principal lacks SEND on this network",
         ));
-    }
+    };
     let run_id = params
         .get("run_uuid")
         .or_else(|| params.get("run_id"))
         .and_then(Json::as_str)
         .and_then(crate::rollcall::parse_run_uuid);
     let stopped = if params.get("run_uuid").is_none() && params.get("run_id").is_none() {
-        ctx.rollcall.stop()
+        ctx.rollcall.stop(owner)
     } else {
         match run_id {
-            Some(uuid) => ctx.rollcall.stop_if(&uuid),
+            Some(uuid) => ctx.rollcall.stop_if(owner, &uuid),
             None => {
                 return Err(ApiError::simple(
                     "INVALID_ARGUMENT",

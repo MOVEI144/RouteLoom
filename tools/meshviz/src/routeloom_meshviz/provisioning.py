@@ -1250,14 +1250,15 @@ class LabProvisionBackend(ContractBackend):
                 '個体別設定（BoardConfig）対応の bundle が必要')
         return found
 
-    def _flash(self, port, bundle, identity):
+    def _flash(self, port, bundle, identity, *, app_only=False):
         """One leased ROM session: measure + verify + write through the worker."""
         from .device import FlashPlan, Image
         manifest = bundle['manifest']
         images = tuple(Image(e['offset'], bundle['path'] / e['path'],
-                             e['size'], e['sha256']) for e in manifest['files'])
+                             e['size'], e['sha256']) for e in manifest['files']
+                       if not app_only or e['offset'] == APP_IMAGE_OFFSET)
         plan = FlashPlan(identity, manifest['chip'], images, True,
-                         identity.base_mac, True, bundle['path'], None)
+                         identity.base_mac, True, bundle['path'], None, app_only)
         with self.leases.acquire(identity.base_mac.lower(), port):
             self.boards.flash(port, plan)
 
@@ -1507,7 +1508,7 @@ class LabProvisionBackend(ContractBackend):
         manifest = ctx['field_bundle']['manifest']
         if journal.has('field'):
             return StepResult('done', 'field image written（resume）')
-        self._flash(job.board, ctx['field_bundle'], ctx['identity'])
+        self._flash(job.board, ctx['field_bundle'], ctx['identity'], app_only=True)
         # Journal the write itself, not just the eventual readback: after a
         # restart the field image owns the board and its maintenance console
         # is gone — resume decisions (status/identity steps) key off this.

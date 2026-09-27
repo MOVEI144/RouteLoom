@@ -123,6 +123,7 @@ class FlashPlan:
     quiesced: bool = False
     bundle: Path | None = None
     assigned_node_id: str | None = None
+    app_only: bool = False
 
     def verified_images(self, port: str, measured: Identity) -> list[tuple[int, bytes]]:
         if (not port or not self.quiesced or not self.verified_signature or measured != self.expected or
@@ -251,5 +252,6 @@ class RealBoards:
         self._run({'port': port, 'bundle': str(plan.bundle),
                    'expected': asdict(plan.expected),
                    'expected_mac': plan.expected_mac, 'quiesced': plan.quiesced,
-                   'assigned_node_id': plan.assigned_node_id}, 180)
+                   'assigned_node_id': plan.assigned_node_id,
+                   'app_only': plan.app_only}, 180)
         return True

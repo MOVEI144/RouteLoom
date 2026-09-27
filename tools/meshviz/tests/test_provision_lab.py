@@ -19,6 +19,9 @@ from routeloom_meshviz import firmware_catalog as catalog
 from routeloom_meshviz import provisioning as prov
 from routeloom_meshviz.device import Identity, PortLeases
 from routeloom_meshviz.provision_plan import ProvisionJob, ProvisionRunner
+from routeloom_meshviz.scenario_driver import DeviceDriver
+from routeloom_meshviz import scenario as sc
+from types import SimpleNamespace
 
 from test_provisioning import FakeConsole, FakeOffice
 
@@ -456,6 +459,9 @@ class LabBackendTests(unittest.TestCase):
                          [(str(self.backend.site_dir), job.node_id, 'endpoint')])
         # The write happened twice: setup image, then the field image.
         self.assertEqual(len(self.boards.flashed), 2)
+        self.assertEqual(len(self.boards.flashed[0][1].images), 3)
+        self.assertEqual([image.offset for image in self.boards.flashed[1][1].images],
+                         [prov.APP_IMAGE_OFFSET])
         journal = prov.ProvisionJournal.load(
             self.backend._journals() / f'node-{job.node_id}.journal.json')
         self.assertTrue(journal.done)
@@ -463,6 +469,65 @@ class LabBackendTests(unittest.TestCase):
         self.assertTrue(journal.has('field'))
         self.assertTrue(journal.has('written'))
         self.assertTrue(journal.has('inventory'))
+
+    def test_scenario_provision_uses_readback_and_inventory(self):
+        node = '0000000000000007'
+        job = self._job(node=node)
+        self.backend._boot_capture = lambda port: self._expected_boot(job)
+        field = self.backend._bundle('field', job, IDENTITY.chip)['path']
+        bundle = {
+            'digest': 'sha256:' + hashlib.sha256(
+                (field / 'manifest.json').read_bytes()).hexdigest(),
+            'signature': json.loads((field / 'signature.json').read_text())['signature'],
+        }
+        nodes = {node: {'port': job.board, 'role': job.role,
+                        'chip': job.chip, 'base_mac': job.base_mac}}
+        driver = DeviceDriver(None, provision_backend=self.backend, nodes=nodes)
+        scenario = sc.ScenarioRunner.arm({
+            'schema': sc.SCHEMA, 'network': '0000000000000001',
+            'nodes': nodes, 'steps': [
+                {'kind': 'flash_provision', 'targets': [node], 'bundle': bundle}],
+        }, self.tmp / 'scenario-journal', now_ms=0)
+        call = scenario.due(0)[0]
+        reply = driver.execute(call)
+        self.assertTrue(reply['ok'], reply)
+        self.assertEqual(reply['result']['readback']['node'], node)
+        self.assertEqual(reply['result']['inventory']['node'], node)
+        self.assertEqual(len(self.office.imported), 1)
+        self.assertEqual(len(self.boards.flashed), 2)
+        scenario.on_reply(call.tag, reply, 1)
+        scenario.due(2)
+        self.assertEqual(scenario.state, 'Completed')
+        self.assertEqual(scenario.steps[0].detail['provisioned'][0]['readback']['node'], node)
+        self.assertTrue(any(entry.get('result', {}).get('readback', {}).get('node') == node
+                            for entry in scenario.journal.entries))
+
+        interrupted = sc.ScenarioRunner.arm(scenario.doc,
+                                             self.tmp / 'interrupted', now_ms=0)
+        pending = interrupted.due(0)[0]
+        self.assertTrue(driver.execute(pending)['ok'])
+        resumed = sc.ScenarioRunner.resume(
+            sc.ScenarioJournal.load(interrupted.journal.path), now_ms=20_000,
+            capacity={})
+        receipt = driver.reconcile_provision(resumed.outstanding[pending.tag])
+        self.assertTrue(receipt['ok'])
+        resumed.on_reply(pending.tag, receipt, 20_001)
+        resumed.due(20_002)
+        self.assertEqual(resumed.state, 'Completed')
+        self.assertEqual(len(self.boards.flashed), 2)
+
+        other = dict(bundle, digest='sha256:' + '0' * 64)
+        refused = driver.execute(SimpleNamespace(
+            method='provision', params={'node': node, 'bundle': other}))
+        self.assertFalse(refused['ok'])
+        self.assertEqual(len(self.boards.flashed), 2)
+
+        upper = 'ABCDEF0000000007'
+        upper_driver = DeviceDriver(None, provision_backend=self.backend,
+                                    nodes={upper: nodes[node]})
+        refused = upper_driver.execute(SimpleNamespace(
+            method='provision', params={'node': upper.lower(), 'bundle': other}))
+        self.assertEqual(refused['error']['code'], 'PROVISION_INCOMPLETE')
 
     def test_readback_mismatch_never_reaches_inventory(self):
         job = self._job()

@@ -1563,6 +1563,10 @@ impl SiteAuthority {
         self.id.site_id
     }
 
+    pub fn purpose(&self) -> SitePurpose {
+        self.purpose
+    }
+
     pub fn network(&self) -> u64 {
         self.id.network
     }
