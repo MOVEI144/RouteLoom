@@ -274,9 +274,16 @@ extern "C" void app_main(void) {
 #endif
   // 07 §6 shipping marker: this line only runs in the field build (the
   // console path above never returns). The office matches fw= against the
-  // flashed image's project_description.json and the `sdkv1 identity`
-  // node= above against the inventory row.
-  ESP_LOGI(kTag, "routeloom field boot: fw=%s", esp_app_get_description()->version);
+  // flashed image's project_description.json, app_sha256= against the
+  // signed bundle's application image, and the `sdkv1 identity` node=
+  // above against the inventory row.
+  const esp_app_desc_t* app_desc = esp_app_get_description();
+  char app_sha256_hex[sizeof(app_desc->app_elf_sha256) * 2 + 1];
+  routeloom::espnow::hex_encode(app_desc->app_elf_sha256,
+                                sizeof(app_desc->app_elf_sha256),
+                                app_sha256_hex);
+  ESP_LOGI(kTag, "routeloom field boot: fw=%s app_sha256=%s",
+           app_desc->version, app_sha256_hex);
 
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   // Generic field image (design-devflow §4.1, meshviz §0.4): this one
@@ -321,10 +328,12 @@ extern "C" void app_main(void) {
   }
   const routeloom::BoardConfig& board = board_stores.config().config();
   ESP_LOGI(kTag, "board config: gen=%lu node=0x%llx role=bridge "
-                 "secrets_gen=%lu",
+                 "secrets_gen=%lu mac=%02x%02x%02x%02x%02x%02x",
            static_cast<unsigned long>(board.generation),
            static_cast<unsigned long long>(board.node),
-           static_cast<unsigned long>(board.secrets_generation));
+           static_cast<unsigned long>(board.secrets_generation),
+           board.sta_mac[0], board.sta_mac[1], board.sta_mac[2],
+           board.sta_mac[3], board.sta_mac[4], board.sta_mac[5]);
 #endif
 
   if (routeloom::espnow::nvs_namespace_in_use(NVS_DEFAULT_PART_NAME,

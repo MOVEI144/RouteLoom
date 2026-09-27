@@ -424,6 +424,10 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
         },
     )?;
     // Both the raw secret and its encoded copy must be wiped on errors too.
+    // The file content IS the device credential: the firmware's development
+    // USB secret and the daemon's --usb-dev-secret-file loader both require
+    // 1..=63 printable ASCII bytes, so it is stored as 31 random bytes in hex
+    // (62 chars) — printable on both sides, no decoding step.
     let usb_path = out.join("usb-dev-secret.key");
     let usb_hex = if file_exists(&usb_path)? {
         Zeroizing::new(fs::read_to_string(&usb_path)?)
@@ -431,13 +435,16 @@ pub fn command(args: &[String]) -> Result<(), DynError> {
         if journal.contains("usb-secret:") {
             return Err("recorded USB secret is missing".into());
         }
-        let mut usb_secret = Zeroizing::new([0u8; 32]);
+        let mut usb_secret = Zeroizing::new([0u8; 31]);
         fill_random(&mut usb_secret[..])?;
         let hex = Zeroizing::new(hex_encode(&usb_secret[..]));
         write_private_file(&usb_path, hex.as_bytes())?;
         hex
     };
-    if usb_hex.len() != 64 || !usb_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if usb_hex.is_empty()
+        || usb_hex.len() > 63
+        || !usb_hex.bytes().all(|b| (0x21..=0x7e).contains(&b))
+    {
         return Err("USB secret corrupt".into());
     }
     fs::File::open(&usb_path)?.sync_all()?;

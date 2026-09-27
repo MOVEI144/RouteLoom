@@ -23,16 +23,20 @@ Boundaries this module keeps:
 from __future__ import annotations
 
 from .provision_plan import (LAB_ROLES, STEP_NAMES, ContractBackend, FakeProvisionBackend,
-                             ProvisionRunner, auto_approval_text, inventory_rows,
-                             job_status_text, plan_jobs, valid_lab_node_id)
+                             ProvisionRunner, StepResult, auto_approval_text,
+                             inventory_rows, job_status_text, plan_jobs,
+                             valid_lab_node_id)
 
+import hashlib
 import json
 import os
 import re
 import shlex
+import struct
 import subprocess
 import tempfile
 import time
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol
@@ -179,6 +183,19 @@ class SerialMaintenanceLink:
     def close(self):
         self._ser.close()
 
+    def reset(self, settle_s: float = 1.0):
+        """Hard-reset the board (EN via RTS) and drop the boot banner bytes.
+
+        The ROM writer leaves the chip in the download stub; every image the
+        flash worker wrote only boots after this reset.
+        """
+        self._ser.dtr = False
+        self._ser.rts = True
+        time.sleep(0.1)
+        self._ser.rts = False
+        time.sleep(settle_s)
+        self._ser.reset_input_buffer()
+
     def exchange(self, line: str) -> str:
         self._ser.reset_input_buffer()
         self._ser.write(line.encode('ascii') + b'\n')
@@ -261,6 +278,8 @@ class OfficeDriver(Protocol):
 
     def confirm_written(self, node_id: str, devcert_sha256: str, out_dir: str) -> None: ...
 
+    def import_inventory(self, site_dir: str, node_id: str, role: str) -> str: ...
+
 
 def _run_ctl(ctl: str, args: list) -> str:
     proc = subprocess.run(
@@ -334,9 +353,23 @@ class CtlOffice:
             self._ctl,
             [
                 'provision-confirm-written',
+                '--ledger', self._ledger,
                 '--node', node_id,
                 '--devcert-sha256', devcert_sha256,
                 '--out-dir', out_dir,
+            ],
+        )
+
+    def import_inventory(self, site_dir: str, node_id: str, role: str) -> str:
+        """`lab-inventory-import` — the inventory step; requires a Written ledger entry."""
+        return _run_ctl(
+            self._ctl,
+            [
+                'lab-inventory-import',
+                '--site', site_dir,
+                '--ledger', self._ledger,
+                '--node', node_id,
+                '--role', role,
             ],
         )
 
@@ -469,6 +502,201 @@ def _normalize_mac(mac: str) -> str:
     return mac.strip().lower().replace(':', '').replace('-', '')
 
 
+# --- BoardConfig (RLC1) over the setup console -------------------------------
+#
+# sdkv1_board_setup.hpp: the staged document is a fixed 42-byte big-endian
+# record — magic "RLC1", version 1, len, node, sta_mac, chip, role, security,
+# channel, network, 8 reserved bytes, crc32 over [0,38). The generation is the
+# commit argument, never part of the document.
+RLC1_DOC_BYTES = 42
+RLC1_MAGIC = 0x524C4331  # "RLC1"
+BOARD_CHIP = {'esp32c3': 1, 'esp32s3': 2, 'esp32c5': 3, 'esp32c6': 4}
+BOARD_ROLE = {'bridge': 1, 'bench': 2}  # BoardRole::Bridge / ::Reference
+BOARD_SECURITY = {'dev-ram': 1, 'member-edhoc': 2}  # BoardSecurity
+# Field bundles whose app descriptor sits at the image offset of the factory
+# partition (firmware_catalog::_flash_files).
+APP_IMAGE_OFFSET = 0x10000
+
+
+def rlc1_document(*, node_id: str, sta_mac: str, chip: str, role: str,
+                  security: str, channel: int, network: str) -> bytes:
+    """Encode the RLC1 board document for `benchcfg stage <hex>`."""
+    node = int(node_id, 16)
+    mac = bytes.fromhex(_normalize_mac(sta_mac))
+    if len(mac) != 6:
+        raise ProvisionError('bad_plan', f'sta_mac {sta_mac!r} is not 6 bytes')
+    if chip not in BOARD_CHIP or role not in BOARD_ROLE or security not in BOARD_SECURITY:
+        raise ProvisionError('bad_plan', 'unknown chip/role/security')
+    if not 1 <= channel <= 14:
+        raise ProvisionError('bad_plan', 'channel must be 1..14')
+    net = int(network, 16)
+    body = struct.pack('>IBBH', RLC1_MAGIC, 1, 0, RLC1_DOC_BYTES)
+    body += node.to_bytes(8, 'big') + mac
+    body += bytes((BOARD_CHIP[chip], BOARD_ROLE[role], BOARD_SECURITY[security],
+                   channel))
+    body += net.to_bytes(4, 'big') + b'\0' * 8
+    return body + (zlib.crc32(body) & 0xFFFFFFFF).to_bytes(4, 'big')
+
+
+def board_config_commit(link: MaintenanceLink, document: bytes, *,
+                        generation: int = 1,
+                        psk_hex: str | None = None,
+                        usb_secret: str | None = None) -> dict:
+    """Stage secrets, stage+validate+commit the RLC1 document, then read back.
+
+    Returns the evidence dict the caller journals; raises ProvisionError on
+    any refusal. A benchcfg status mismatch after commit is a hard failure —
+    never silently retried (the store re-read happens on the device).
+    """
+    if len(document) != RLC1_DOC_BYTES:
+        raise ProvisionError('bad_plan', 'RLC1 document must be 42 bytes')
+    if not 0 < generation <= 0xFFFFFFFF:
+        raise ProvisionError('bad_plan', 'generation must be a nonzero u32')
+    staged_secret = False
+    if psk_hex is not None:
+        if len(bytes.fromhex(psk_hex)) != 32:
+            raise ProvisionError('bad_plan', 'psk must be 32 bytes (64 hex)')
+        _console(link, f'benchsecret stage psk {generation} {psk_hex}')
+        staged_secret = True
+    if usb_secret is not None:
+        if not usb_secret or len(usb_secret) > 63 or \
+                any(c < '!' or c > '~' for c in usb_secret):
+            raise ProvisionError('bad_plan', 'usb secret must be 1..63 printable ASCII')
+        usb_hex = usb_secret.encode('ascii').hex()
+        _console(link, f'benchsecret stage usb {generation} {usb_hex}')
+        staged_secret = True
+    reply = _console(link, f'benchcfg stage {document.hex()}')
+    if _reply_kv(reply).get('bytes') != str(len(document)):
+        raise ProvisionError('bad_reply', reply[:64])
+    want_node = f'{int.from_bytes(document[8:16], "big"):016x}'
+    valid = _console(link, 'benchcfg validate')
+    if _reply_kv(valid).get('node') != want_node:
+        raise ProvisionError('bad_reply', valid[:64])
+    committed = _console(link, f'benchcfg commit {generation}')
+    fields = _reply_kv(committed)
+    if (fields.get('generation') != str(generation) or
+            fields.get('node') != want_node):
+        raise ProvisionError('commit_failed', committed[:64])
+    # Read-only readback: the durable record, not the staged RAM copy.
+    status = _reply_kv(_console(link, 'benchcfg status'))
+    want_role = 'bridge' if document[23] == 1 else 'reference'
+    want_security = 'devram' if document[24] == 1 else 'member'
+    if status.get('board') != 'committed' or \
+            status.get('node') != want_node or \
+            status.get('generation') != str(generation) or \
+            status.get('role') != want_role or \
+            status.get('security') != want_security:
+        raise ProvisionError('commit_failed', f'benchcfg status readback failed: '
+                                              f'{status.get("board")}')
+    secrets = _reply_kv(_console(link, 'benchsecret status'))
+    if staged_secret:
+        if secrets.get('secrets') != 'committed' or \
+                secrets.get('generation') != str(generation):
+            raise ProvisionError('commit_failed', 'benchsecret status readback failed')
+        if psk_hex is not None and secrets.get('psk') != '1':
+            raise ProvisionError('commit_failed', 'psk not committed')
+        if usb_secret is not None and secrets.get('usb') != '1':
+            raise ProvisionError('commit_failed', 'usb secret not committed')
+        if secrets.get('fingerprint', '') != status.get('fingerprint', '') or \
+                status.get('secrets_generation') != str(generation):
+            raise ProvisionError(
+                'commit_failed', 'config/secrets binding readback failed')
+    return {'generation': generation, 'node': status.get('node', ''),
+            'role': status.get('role', ''), 'security': status.get('security', ''),
+            'secrets_generation': status.get('secrets_generation', '0'),
+            'fingerprint': status.get('fingerprint', ''),
+            'secrets_fingerprint': secrets.get('fingerprint', '')}
+
+
+# --- Field-boot readback ------------------------------------------------------
+#
+# A field build has no console, so the boot log lines are the evidence the
+# office matches against the plan (07 §6 shipping markers):
+#   "sdkv1 identity: node=<dec> kid=<64hex> devcert_sha256=<64hex> ..."
+#   "routeloom field boot: fw=<version> app_sha256=<64hex>"
+#   "board config: gen=<n> node=0x<hex> ... secrets_gen=<n> mac=<12hex>"
+
+@dataclass(frozen=True)
+class FieldBoot:
+    """Parsed field-boot log evidence; absent markers stay None/False."""
+
+    identity: str | None = None       # 'sealed' | 'none'
+    node: str | None = None           # 16-hex, from the identity line
+    kid: str | None = None
+    devcert_sha256: str | None = None
+    fw: str | None = None
+    app_sha256: str | None = None
+    config_node: str | None = None    # 16-hex, from the board config line
+    config_generation: int | None = None
+    secrets_generation: int | None = None
+    config_mac: str | None = None
+    config_required: bool = False
+
+
+_BOOT_IDENTITY = re.compile(
+    r'sdkv1 identity: (?:node=(\d+) kid=([0-9a-f]{64}) '
+    r'devcert_sha256=([0-9a-f]{64})|(none) provisioned)')
+_BOOT_FIELD = re.compile(r'routeloom field boot: fw=(\S+)(?: app_sha256=([0-9a-f]{64}))?')
+_BOOT_CONFIG = re.compile(
+    r'board config: gen=(\d+) node=0x([0-9a-f]+)(?: \w+=\w+)* '
+    r'secrets_gen=(\d+) mac=([0-9a-f]{12})')
+
+
+def parse_field_boot(lines) -> FieldBoot:
+    """Extract the D03 readback fields from captured boot-log lines."""
+    identity = node = kid = devcert = fw = app_sha = None
+    config_node = config_mac = None
+    config_gen = secrets_gen = None
+    required = False
+    for line in lines:
+        match = _BOOT_IDENTITY.search(line)
+        if match:
+            if match.group(4):
+                identity = 'none'
+            else:
+                identity = 'sealed'
+                node = f'{int(match.group(1)):016x}'
+                kid, devcert = match.group(2), match.group(3)
+            continue
+        match = _BOOT_FIELD.search(line)
+        if match:
+            fw, app_sha = match.group(1), match.group(2)
+            continue
+        match = _BOOT_CONFIG.search(line)
+        if match:
+            config_gen = int(match.group(1))
+            config_node = f'{int(match.group(2), 16):016x}'
+            secrets_gen = int(match.group(3))
+            config_mac = match.group(4)
+            continue
+        if 'CONFIG_REQUIRED' in line:
+            required = True
+    return FieldBoot(identity=identity, node=node, kid=kid,
+                     devcert_sha256=devcert, fw=fw, app_sha256=app_sha,
+                     config_node=config_node, config_generation=config_gen,
+                     secrets_generation=secrets_gen, config_mac=config_mac,
+                     config_required=required)
+
+
+# esp_app_desc_t inside the application image: magic at offset 32, then
+# version[48:80), project_name[80:112), app_elf_sha256[176:208) (v6.0.3).
+_APP_DESC_MAGIC = b'\x32\x54\xcd\xab'
+_APP_DESC_OFFSET = 32
+
+
+def app_image_descriptor(path) -> dict:
+    """version/project_name/app_elf_sha256 read from a signed app .bin."""
+    data = Path(path).read_bytes()
+    if (len(data) < _APP_DESC_OFFSET + 208 or
+            data[_APP_DESC_OFFSET:_APP_DESC_OFFSET + 4] != _APP_DESC_MAGIC):
+        raise ProvisionError('bad_plan', f'{path}: no ESP app descriptor')
+    desc = data[_APP_DESC_OFFSET:]
+    version = desc[16:48].split(b'\0', 1)[0].decode('ascii', 'replace')
+    project = desc[48:80].split(b'\0', 1)[0].decode('ascii', 'replace')
+    return {'version': version, 'project_name': project,
+            'app_elf_sha256': desc[144:176].hex()}
+
+
 class Provisioner:
     """Drives one board through status → keygen → issue → seal → lock.
 
@@ -513,9 +741,11 @@ class Provisioner:
     def finalize(
         self,
         plan: BoardProvisionPlan,
-        link: MaintenanceLink,
+        link: MaintenanceLink | None = None,
         *,
         field_writer: Callable[[], str] | None = None,
+        boot_log=None,
+        expected_app_sha256: str = '',
     ) -> ProvisionJournal:
         """Post-field readback + office `written` commit — the only Ready gate.
 
@@ -523,6 +753,12 @@ class Provisioner:
         worker); it must return the written image digest. When None the field
         image is managed outside this session and `field_digest` comes from the
         plan.
+
+        The readback evidence is the booted field image's own report, parsed
+        from `boot_log` lines (`routeloom field boot`/`sdkv1 identity`/
+        `board config`); a maintenance-console `status` link is accepted as a
+        fallback for flows that stay on the setup image. With neither, the
+        call fails `readback_missing` — a write receipt alone is not Ready.
         """
         plan.validate()
         journal_path = self._journal_dir / f'{plan.work_id}.journal.json'
@@ -537,10 +773,28 @@ class Provisioner:
             _require_hex64(digest, 'field digest')
         if not journal.has('field'):
             journal.record('field', digest=digest or 'external')
-        status = DeviceStatus.parse(link.exchange('status'))
         issued = journal.latest('issued')
         if issued is None:
             raise ProvisionError('bad_journal', 'seal evidence missing')
+        if boot_log is not None:
+            evidence = self._readback_boot(boot_log, plan, issued,
+                                           expected_app_sha256)
+        elif link is not None:
+            evidence = self._readback_console(plan, link, issued)
+        else:
+            raise ProvisionError(
+                'readback_missing', 'no field boot log or console link supplied')
+        journal.record('readback', **evidence)
+        self._office.confirm_written(
+            plan.node_id, issued.get('devcert_sha256', ''), plan.out_dir
+        )
+        journal.record('written', node=plan.node_id)
+        journal.mark_done()
+        return journal
+
+    @staticmethod
+    def _readback_console(plan, link, issued) -> dict:
+        status = DeviceStatus.parse(link.exchange('status'))
         if status.identity != 'sealed' or status.node != plan.node_id:
             raise ProvisionError('readback_mismatch', 'device does not hold the issued identity')
         if status.kid != issued['kid']:
@@ -553,13 +807,41 @@ class Provisioner:
             raise ProvisionError('readback_mismatch', f'firmware {status.fw} != plan {plan.fw}')
         if not status.locked:
             raise ProvisionError('readback_mismatch', 'console lock did not persist')
-        journal.record('readback', receipt=journal.latest('issued')['kid'])
-        self._office.confirm_written(
-            plan.node_id, issued.get('devcert_sha256', ''), plan.out_dir
-        )
-        journal.record('written', node=plan.node_id)
-        journal.mark_done()
-        return journal
+        return {'source': 'console', 'receipt': issued['kid'], 'node': status.node,
+                'kid': status.kid, 'fw': status.fw}
+
+    @staticmethod
+    def _readback_boot(boot_log, plan, issued, expected_app_sha256) -> dict:
+        """Match the field boot log against the plan + issued evidence."""
+        boot = parse_field_boot(boot_log)
+        if boot.config_required:
+            raise ProvisionError('readback_mismatch', 'field boot reported CONFIG_REQUIRED')
+        if boot.identity != 'sealed' or boot.node != plan.node_id:
+            raise ProvisionError(
+                'readback_mismatch', 'field boot does not hold the issued identity')
+        if boot.kid != issued['kid']:
+            raise ProvisionError('readback_mismatch', 'boot kid differs from issued record')
+        if issued.get('devcert_sha256') and \
+                boot.devcert_sha256 != issued['devcert_sha256']:
+            raise ProvisionError(
+                'readback_mismatch', 'boot devcert digest differs from issued record')
+        if boot.config_node != plan.node_id or boot.config_generation is None:
+            raise ProvisionError(
+                'readback_mismatch', 'board config readback missing or wrong node')
+        if _normalize_mac(plan.base_mac) != (boot.config_mac or ''):
+            raise ProvisionError(
+                'readback_mismatch', 'board config MAC differs from the probed board')
+        if plan.fw and boot.fw != plan.fw:
+            raise ProvisionError(
+                'readback_mismatch', f'firmware {boot.fw} != plan {plan.fw}')
+        if expected_app_sha256 and boot.app_sha256 != expected_app_sha256:
+            raise ProvisionError(
+                'readback_mismatch', 'booted image digest differs from the signed bundle')
+        return {'source': 'boot', 'node': boot.node, 'kid': boot.kid,
+                'devcert_sha256': boot.devcert_sha256, 'fw': boot.fw,
+                'app_sha256': boot.app_sha256,
+                'config_generation': boot.config_generation,
+                'secrets_generation': boot.secrets_generation}
 
     # --- stages -----------------------------------------------------------
 
@@ -777,6 +1059,460 @@ class Deprovisioner:
             )
         if plan.expected_kid and kid != 'none' and kid != plan.expected_kid:
             raise ProvisionError('target_mismatch', 'device kid differs from plan')
+
+
+BOOT_LOG_TIMEOUT_S = 15.0
+
+
+def capture_field_boot(port: str, *, timeout_s: float = BOOT_LOG_TIMEOUT_S,
+                       serial_factory=None) -> list:
+    """Reset the board and collect its field-boot log lines.
+
+    The ROM writer leaves the chip in the download stub, so a hard reset is
+    always required. Captures until the identity+field+config markers have all
+    been seen or the deadline expires — a silent board yields whatever lines
+    arrived and the caller's readback check fails on the missing evidence.
+    """
+    if serial_factory is None:
+        def serial_factory(path):
+            import serial  # pyserial
+            return serial.Serial(path, baudrate=115200, timeout=0.1)
+    ser = serial_factory(port)
+    try:
+        # EN reset through the usual DTR/RTS auto-reset wiring; boards on
+        # USB-Serial/JTAG ignore it harmlessly (their boot output arrives on
+        # the same lines the port was opened for).
+        for setter, value in (('dtr', False), ('rts', True)):
+            try:
+                setattr(ser, setter, value)
+            except (OSError, AttributeError):
+                pass
+        time.sleep(0.1)
+        for setter, value in (('rts', False), ('dtr', False)):
+            try:
+                setattr(ser, setter, value)
+            except (OSError, AttributeError):
+                pass
+        try:
+            ser.reset_input_buffer()
+        except (OSError, AttributeError):
+            pass
+        deadline = time.monotonic() + timeout_s
+        lines = []
+        buf = b''
+        seen_identity = seen_field = seen_config = False
+        while time.monotonic() < deadline:
+            chunk = ser.read(1024) if hasattr(ser, 'read') else b''
+            if not chunk:
+                if seen_identity and seen_field and seen_config:
+                    break
+                continue
+            buf += chunk
+            while b'\n' in buf:
+                raw, buf = buf.split(b'\n', 1)
+                text = raw.decode('ascii', 'replace').rstrip('\r')
+                lines.append(text)
+                seen_identity = seen_identity or 'sdkv1 identity:' in text
+                seen_field = seen_field or 'routeloom field boot:' in text
+                seen_config = seen_config or 'board config:' in text
+            if seen_identity and seen_field and seen_config:
+                # Drain one short beat for a trailing CONFIG_REQUIRED hint.
+                time.sleep(0.15)
+                tail = ser.read(4096) if hasattr(ser, 'read') else b''
+                if tail:
+                    buf += tail
+                    while b'\n' in buf:
+                        raw, buf = buf.split(b'\n', 1)
+                        lines.append(raw.decode('ascii', 'replace').rstrip('\r'))
+                break
+        if buf:
+            lines.append(buf.decode('ascii', 'replace').rstrip('\r'))
+        return lines
+    finally:
+        try:
+            ser.close()
+        except (OSError, AttributeError):
+            pass
+
+
+class LabProvisionBackend(ContractBackend):
+    """The real D02/D03a/D03b step implementation for development sites.
+
+    Unlike ContractBackend this drives actual hardware: ROM probe + signed
+    bundle writes through the isolated flash worker, the D02 `benchcfg`/
+    `benchsecret` setup console, the D03a identity console (Provisioner), a
+    field-boot log readback, and `lab-inventory-import`. Every external hook
+    (boards, link, boot capture, ctl) is injectable so tests exercise the same
+    orchestration without touching a device.
+
+    Bundles are resolved per (role, chip) from `bundles_dir`: each entry must
+    be an already-verified bundle directory. The setup image is the same chip
+    and role built with the maintenance console enabled — its sdkconfig carries
+    `CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y`.
+    """
+
+    name = 'lab'
+    implemented = frozenset(STEP_NAMES[1:-1])  # plan + join stay external
+
+    def __init__(self, *, site_dir=None, boards, bundles_dir=None,
+                 ctl='routeloomctl', journal_dir=None, leases=None,
+                 link_factory=None, boot_capture=None, office=None):
+        from .device import PortLeases
+        self.site_dir = Path(site_dir) if site_dir else None
+        self.bundles_dir = Path(bundles_dir) if bundles_dir else None
+        self.boards = boards
+        self.ctl = ctl
+        self._journal_dir = Path(journal_dir) if journal_dir else None
+        # Shared with the boards screen and the supervisor when available, so
+        # a daemon bridge port or a ROM probe cannot collide with a write.
+        self.leases = leases if leases is not None else \
+            getattr(boards, 'leases', None) or PortLeases()
+        self._link_factory = link_factory or (
+            lambda port: SerialMaintenanceLink(port))
+        self._boot_capture = boot_capture or capture_field_boot
+        self._office_override = office
+        self._ctx = {}  # job.board -> per-board session state
+        self._bundles = None  # lazy: {(kind, role, chip): Path}
+        self._spec = None
+
+    def configure(self, *, site_dir, bundles_dir):
+        """Bind the site/bundle locations chosen in the GUI before a run."""
+        self.site_dir = Path(site_dir) if site_dir else None
+        self.bundles_dir = Path(bundles_dir) if bundles_dir else None
+        self._bundles = None
+        self._spec = None
+        self._ctx.clear()
+
+    def _journals(self):
+        if self._journal_dir is not None:
+            return self._journal_dir
+        if self.site_dir is None:
+            raise ProvisionError('no_site', 'site directory 未設定')
+        return self.site_dir / 'provision-journal'
+
+    # --- helpers --------------------------------------------------------------
+
+    def _ctx_for(self, job):
+        return self._ctx.setdefault(job.board, {})
+
+    def _load_spec(self):
+        if self.site_dir is None:
+            raise ProvisionError('no_site', 'site directory 未設定')
+        if self._spec is None:
+            spec_path = self._spec_path()
+            if not spec_path.is_file():
+                raise ProvisionError(
+                    'no_site', f'lab spec {spec_path} missing — run lab-site-init first')
+            spec = json.loads(spec_path.read_text(encoding='utf-8'))
+            if spec.get('format') != 'routeloom-lab-site-spec-v1':
+                raise ProvisionError('no_site', f'{spec_path} is not a lab spec')
+            self._spec = spec
+        return self._spec
+
+    def _scan_bundles(self):
+        """Verify every bundle dir once; index by (console?, role, chip)."""
+        if self._bundles is not None:
+            return self._bundles
+        from .firmware_catalog import DEV_PUBLIC_KEY, verify_bundle
+        bundles = {}
+        if not self.bundles_dir.is_dir():
+            raise ProvisionError(
+                'no_bundles', f'bundle directory {self.bundles_dir} does not exist')
+        for entry in sorted(self.bundles_dir.iterdir()):
+            if not entry.is_dir() or not (entry / 'manifest.json').is_file():
+                continue
+            try:
+                manifest = verify_bundle(entry, DEV_PUBLIC_KEY)
+            except ValueError:
+                continue  # unsigned/invalid bundles are skipped, never half-trusted
+            sdkconfig = (entry / 'sdkconfig').read_text(encoding='utf-8')
+            console = 'CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y' in sdkconfig
+            key = ('setup' if console else 'field',
+                   manifest['role'], manifest['chip'])
+            bundles[key] = {'path': entry, 'manifest': manifest}
+        self._bundles = bundles
+        return bundles
+
+    def _bundle(self, kind, job, chip):
+        role = 'bridge_node' if job.role == 'bridge' else 'bench_node'
+        found = self._scan_bundles().get((kind, role, chip))
+        if found is None:
+            raise ProvisionError(
+                'no_bundles',
+                f'no signed {kind} bundle for {role}/{chip} in {self.bundles_dir}')
+        if found['manifest'].get('generic_config') is not True:
+            # Per-board NodeId comes from rlcfg; a legacy image embeds it in the
+            # signed sdkconfig and would bypass the whole BoardConfig path.
+            raise ProvisionError(
+                'no_bundles',
+                f'{role}/{chip} {kind} bundle lacks generic_config — '
+                '個体別設定（BoardConfig）対応の bundle が必要')
+        return found
+
+    def _flash(self, port, bundle, identity):
+        """One leased ROM session: measure + verify + write through the worker."""
+        from .device import FlashPlan, Image
+        manifest = bundle['manifest']
+        images = tuple(Image(e['offset'], bundle['path'] / e['path'],
+                             e['size'], e['sha256']) for e in manifest['files'])
+        plan = FlashPlan(identity, manifest['chip'], images, True,
+                         identity.base_mac, True, bundle['path'], None)
+        with self.leases.acquire(identity.base_mac.lower(), port):
+            self.boards.flash(port, plan)
+
+    def _link(self, job, fresh=False):
+        ctx = self._ctx_for(job)
+        if fresh:
+            self._close_link(job)
+        if ctx.get('link') is None:
+            ctx['link'] = self._link_factory(job.board)
+        return ctx['link']
+
+    def _close_link(self, job):
+        link = self._ctx_for(job).pop('link', None)
+        if link is not None:
+            try:
+                link.close()
+            except (OSError, AttributeError):
+                pass
+
+    def _office(self, ctx):
+        if self._office_override is not None:
+            return self._office_override
+        if ctx.get('office') is None:
+            # The conventional ledger lives next to the CA key (provision_office
+            # IssuanceInputs default: <ca_key>/../office-ledger.jsonl).
+            ctx['office'] = CtlOffice(
+                self.ctl, str(self.site_dir / 'keys' / 'device-ca.key'),
+                str(self._spec_path()),
+                str(self.site_dir / 'keys' / 'office-ledger.jsonl'))
+        return ctx['office']
+
+    def _spec_path(self):
+        return self.site_dir.parent / f'{self.site_dir.name}.lab-spec.json'
+
+    def _site_psk(self):
+        """Per-site DevRam mesh PSK, generated once and reused on retry."""
+        path = self.site_dir / 'mesh-psk.key'
+        if path.is_file():
+            return path.read_text(encoding='utf-8').strip()
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            secret = os.urandom(32).hex()
+            os.write(fd, secret.encode('ascii'))
+        finally:
+            os.close(fd)
+        return secret
+
+    def _usb_secret(self):
+        path = self.site_dir / 'usb-dev-secret.key'
+        if not path.is_file():
+            raise ProvisionError('no_site', f'{path} missing — run lab-site-init first')
+        secret = path.read_text(encoding='utf-8').strip()
+        if not secret or len(secret) > 63 or \
+                any(c < '!' or c > '~' for c in secret):
+            raise ProvisionError('no_site', f'{path} is not a valid USB secret')
+        return secret
+
+    def _provisioner(self, ctx):
+        if ctx.get('provisioner') is None:
+            ctx['provisioner'] = Provisioner(self._journals(), self._office(ctx))
+        return ctx['provisioner']
+
+    def _plan_for(self, job, ctx, desc):
+        spec = self._load_spec()
+        app_entry = next(
+            e for e in ctx['field_bundle']['manifest']['files']
+            if e['offset'] == APP_IMAGE_OFFSET)
+        serial = int.from_bytes(
+            hashlib.sha256(
+                f'{spec["site_id"]}:{job.node_id}'.encode()).digest()[:4], 'big')
+        plan = BoardProvisionPlan(
+            site_id=spec['site_id'], work_id=f'node-{job.node_id}',
+            board_uuid=ctx['identity'].base_mac.lower(),
+            base_mac=ctx['identity'].base_mac, node_id=job.node_id,
+            serial=serial, role=job.role,
+            out_dir=str(self.site_dir / 'provisioned' / job.node_id),
+            fw=desc['version'],
+            field_digest=app_entry['sha256'])
+        return plan.validate()
+
+    # --- ContractBackend -------------------------------------------------------
+
+    def run(self, step, job):
+        handler = getattr(self, f'_step_{step}', None)
+        if handler is None:
+            return StepResult('unsupported',
+                              f'{STEP_OWNERS[step]} 未実装のため 未対応')
+        if self.site_dir is None or self.bundles_dir is None:
+            return StepResult('failed', 'site directory／bundle directory 未設定')
+        try:
+            return handler(job)
+        except ProvisionError as exc:
+            return StepResult('failed', str(exc))
+        except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            return StepResult('failed', f'{exc}')
+
+    def _require_ctx(self, job):
+        """Step context from preflight; absent only if steps skipped a stage."""
+        ctx = self._ctx_for(job)
+        if 'plan' not in ctx:
+            raise ProvisionError(
+                'bad_plan', 'preflight evidence missing — re-run the provision job')
+        return ctx
+
+    def _step_preflight(self, job):
+        from .device import Identity
+        port = job.board
+        with self.leases.acquire(f'preflight:{port}', port):
+            identity = self.boards.probe(port)
+        if not isinstance(identity, Identity):
+            raise ProvisionError('probe_failed', 'no ROM identity')
+        if job.chip and identity.chip != job.chip:
+            raise ProvisionError(
+                'board_mismatch', f'chip {identity.chip} != plan {job.chip}')
+        if job.base_mac and \
+                _normalize_mac(identity.base_mac) != _normalize_mac(job.base_mac):
+            raise ProvisionError(
+                'board_mismatch',
+                f'base MAC {identity.base_mac} != plan {job.base_mac}')
+        ctx = self._ctx_for(job)
+        ctx['identity'] = identity
+        field_bundle = self._bundle('field', job, identity.chip)
+        setup_bundle = self._bundle('setup', job, identity.chip)
+        ctx['field_bundle'] = field_bundle
+        ctx['setup_bundle'] = setup_bundle
+        ctx['desc'] = app_image_descriptor(
+            field_bundle['path'] / 'images' / 'application.bin')
+        ctx['plan'] = self._plan_for(job, ctx, ctx['desc'])
+        manifest = field_bundle['manifest']
+        return StepResult(
+            'done',
+            f'chip={identity.chip} mac={identity.base_mac} '
+            f'field={manifest["role"]} {manifest["firmware_version"]} '
+            f'({manifest["security_profile"]})',
+            {'chip': identity.chip, 'base_mac': identity.base_mac})
+
+    def _step_setup(self, job):
+        ctx = self._require_ctx(job)
+        plan = ctx['plan']
+        journal = ProvisionJournal.create(
+            self._journals(), plan.work_id, plan.as_dict())
+        # Same ROM session the D03a design requires: revalidation then write.
+        if not journal.has('setup_image'):
+            self._close_link(job)  # the ROM writer needs exclusive port access
+            self._flash(job.board, ctx['setup_bundle'], ctx['identity'])
+            journal.record('setup_image', bundle=ctx['setup_bundle']['manifest']
+                           ['bundle_id'])
+            # The writer leaves the chip in the download stub; reset boots the
+            # setup image so its maintenance console comes up.
+            self._link(job, fresh=True)
+        if journal.has('board_config'):
+            return StepResult('done', 'board config committed（resume）',
+                              dict(journal.latest('board_config')))
+        manifest = ctx['field_bundle']['manifest']
+        security = manifest['security_profile']
+        doc = rlc1_document(
+            node_id=plan.node_id, sta_mac=ctx['identity'].base_mac,
+            chip=ctx['identity'].chip, role=job.role, security=security,
+            channel=self._load_spec()['channel'],
+            network=self._load_spec()['network_low32'])
+        link = self._link(job)
+        reset = getattr(link, 'reset', None)
+        if reset is not None and journal.latest('setup_image'):
+            reset()
+        evidence = board_config_commit(
+            link, doc, generation=1,
+            psk_hex=self._site_psk() if security == 'dev-ram' else None,
+            usb_secret=self._usb_secret() if job.role == 'bridge' else None)
+        journal.record('board_config', **evidence)
+        return StepResult(
+            'done',
+            f'board config committed generation={evidence["generation"]} '
+            f'node={evidence["node"]}', evidence)
+
+    def _step_status(self, job):
+        ctx = self._require_ctx(job)
+        journal = ProvisionJournal.load(
+            self._journals() / f'{ctx["plan"].work_id}.journal.json')
+        status = DeviceStatus.parse(self._link(job).exchange('status'))
+        mine = False
+        if status.identity == 'sealed':
+            issued = journal.latest('issued')
+            mine = bool(issued and issued.get('kid') == status.kid)
+        return StepResult('done', f'identity={status.identity}',
+                          {'identity': status.identity, 'identity_mine': mine,
+                           'node': status.node, 'kid': status.kid})
+
+    def _ensure_provisioned(self, job):
+        """The journaled status→lock run; idempotent across step re-entry."""
+        ctx = self._require_ctx(job)
+        self._provisioner(ctx).run(ctx['plan'], self._link(job))
+
+    def _step_keygen(self, job):
+        self._ensure_provisioned(job)
+        journal = ProvisionJournal.load(
+            self._journals() / f'{self._ctx_for(job)["plan"].work_id}.journal.json')
+        issued = journal.latest('issued')
+        return StepResult('done', f'kid={issued["kid"][:16]}…',
+                          {'kid': issued['kid']})
+
+    def _step_issue(self, job):
+        self._ensure_provisioned(job)
+        journal = ProvisionJournal.load(
+            self._journals() / f'{self._ctx_for(job)["plan"].work_id}.journal.json')
+        issued = journal.latest('issued')
+        return StepResult('done', f'devcert {issued.get("devcert_sha256", "")[:16]}…',
+                          dict(issued))
+
+    def _step_identity(self, job):
+        self._ensure_provisioned(job)
+        journal = ProvisionJournal.load(
+            self._journals() / f'{self._ctx_for(job)["plan"].work_id}.journal.json')
+        sealed = journal.latest('sealed')
+        locked = journal.latest('locked')
+        if not (sealed and locked):
+            raise ProvisionError('seal_failed', 'journal lacks sealed/locked evidence')
+        return StepResult('done', f'OK sealed kid={sealed["kid"][:16]}…',
+                          {'kid': sealed['kid']})
+
+    def _step_field(self, job):
+        ctx = self._require_ctx(job)
+        journal = ProvisionJournal.load(
+            self._journals() / f'{ctx["plan"].work_id}.journal.json')
+        if not journal.has('locked'):
+            raise ProvisionError('not_locked', 'identity must seal before the field image')
+        self._close_link(job)
+        manifest = ctx['field_bundle']['manifest']
+        if journal.has('field'):
+            return StepResult('done', 'field image written（resume）')
+        self._flash(job.board, ctx['field_bundle'], ctx['identity'])
+        return StepResult('done', f'field {manifest["bundle_id"]} written')
+
+    def _step_readback(self, job):
+        ctx = self._require_ctx(job)
+        lines = self._boot_capture(job.board)
+        journal = self._provisioner(ctx).finalize(
+            ctx['plan'], boot_log=lines,
+            expected_app_sha256=ctx['desc']['app_elf_sha256'])
+        entry = journal.latest('readback')
+        # node_id/kid keys are the runner's Ready gate (provision_plan.run_job).
+        return StepResult('done', f'boot readback node={entry["node"]} '
+                          f'kid={entry["kid"][:16]}… gen={entry["config_generation"]}',
+                          {**entry, 'node_id': entry['node']})
+
+    def _step_inventory(self, job):
+        ctx = self._require_ctx(job)
+        role = 'gateway' if job.role == 'bridge' else 'endpoint'
+        journal = ProvisionJournal.load(
+            self._journals() / f'{ctx["plan"].work_id}.journal.json')
+        if not journal.has('written'):
+            raise ProvisionError('readback_missing', 'written receipt missing')
+        if not journal.has('inventory'):
+            self._office(ctx).import_inventory(
+                str(self.site_dir), job.node_id, role)
+            journal.record('inventory', node=job.node_id, role=role)
+        return StepResult('done', 'inventory import 済み')
 
 
 def main(argv=None):

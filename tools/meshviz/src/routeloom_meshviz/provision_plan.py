@@ -198,7 +198,10 @@ class ProvisionRunner:
                 job.details['kid'] = result.data.get('kid')
             if step == 'status' and result.state == 'done':
                 identity = result.data.get('identity')
-                if identity != 'none':
+                # A board this journal already sealed keeps going — that is
+                # resume, not a foreign identity. Anything else non-'none'
+                # needs operator action; never auto-deprovisioned here.
+                if identity != 'none' and not result.data.get('identity_mine'):
                     job.steps[step] = 'attention'
                     job.details[step] = (f'identity={identity}: 初回 provision の対象外'
                                          '（自動 deprovision しない。専用の再設定手順へ）')

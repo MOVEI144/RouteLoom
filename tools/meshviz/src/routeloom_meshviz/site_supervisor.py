@@ -42,6 +42,11 @@ class SiteConfig:
     device: str | None = None
     acl_file: Path | None = None
     expected_site_id: str | None = None
+    # Lab-site material routeloom-host needs for bridge USB sessions and the
+    # bench admission profile; the daemon reads the file itself — the secret
+    # never enters argv or this process.
+    usb_dev_secret_file: Path | None = None
+    admission_profile: str | None = None
 
 
 def probe_api1(path, *, timeout=PROBE_TIMEOUT_S):
@@ -306,6 +311,10 @@ class SiteSupervisor:
             argv += ['--device', config.device]
         if config.acl_file:
             argv += ['--api-acl-file', str(config.acl_file)]
+        if config.admission_profile:
+            argv += ['--admission-profile', config.admission_profile]
+        if config.usb_dev_secret_file:
+            argv += ['--usb-dev-secret-file', str(config.usb_dev_secret_file)]
         return argv
 
     def _spawn(self, now_ms):
