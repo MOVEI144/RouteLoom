@@ -2811,12 +2811,33 @@ fn rollcall_network<S: OperationStore>(
     }
 }
 
+/// `desired_interval_ms` (meshviz §10.2): the operator's interval floor —
+/// validated here, clamped to MIN_INTERVAL_MS at the service. The effective
+/// interval is `max(desired, airtime budget)`, never the bare request.
+fn desired_interval_ms(params: &Json) -> Result<Option<u64>, ApiError> {
+    match params.get("desired_interval_ms") {
+        None => Ok(None),
+        Some(value) => {
+            let ms = value.as_u64().ok_or_else(|| {
+                ApiError::simple("INVALID_ARGUMENT", "desired_interval_ms must be an integer")
+            })?;
+            if !(crate::rollcall::MIN_INTERVAL_MS..=600_000).contains(&ms) {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    "desired_interval_ms must be 2000..=600000",
+                ));
+            }
+            Ok(Some(ms))
+        }
+    }
+}
+
 fn rollcall_start<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
 ) -> Result<String, ApiError> {
     for (key, _) in params.object_entries() {
-        if !matches!(key.as_str(), "network" | "group") {
+        if !matches!(key.as_str(), "network" | "group" | "desired_interval_ms") {
             return Err(ApiError::simple(
                 "INVALID_ARGUMENT",
                 &format!("unknown param \"{key}\""),
@@ -2824,6 +2845,7 @@ fn rollcall_start<S: OperationStore>(
         }
     }
     let network = rollcall_network(params, ctx)?;
+    let desired = desired_interval_ms(params)?.unwrap_or(crate::rollcall::MIN_INTERVAL_MS);
     let Some(uid) = ctx
         .uid
         .filter(|uid| ctx.acl.permit(*uid, network, acl::PERM_SEND))
@@ -2842,9 +2864,10 @@ fn rollcall_start<S: OperationStore>(
     if let Some(error) = group_gate(ctx, network) {
         return Err(error);
     }
-    match ctx.rollcall.start(uid, network, group, ctx.now_ms) {
+    match ctx.rollcall.start(uid, network, group, desired, ctx.now_ms) {
         Ok(run_uuid) => Ok(format!(
-            "{{\"running\":true,\"run_uuid\":\"{}\",\"group\":{},\"network\":\"{network:016x}\"}}",
+            "{{\"running\":true,\"state\":\"running\",\"run_id\":\"{}\",\"run_uuid\":\"{}\",\"group\":{},\"network\":\"{network:016x}\",\"desired_interval_ms\":{desired}}}",
+            crate::rollcall::RunUuid(run_uuid),
             crate::rollcall::RunUuid(run_uuid),
             group,
         )),
@@ -2862,24 +2885,33 @@ fn rollcall_update<S: OperationStore>(
     ctx: &ApiContext<'_, S>,
 ) -> Result<String, ApiError> {
     for (key, _) in params.object_entries() {
-        if !matches!(key.as_str(), "run_uuid" | "group") {
+        if !matches!(
+            key.as_str(),
+            "run_uuid" | "run_id" | "group" | "desired_interval_ms"
+        ) {
             return Err(ApiError::simple(
                 "INVALID_ARGUMENT",
                 &format!("unknown param \"{key}\""),
             ));
         }
     }
-    let Some(run_uuid) = params
+    // `run_id` is the contract alias for the service's `run_uuid`.
+    let run_id = params
         .get("run_uuid")
+        .or_else(|| params.get("run_id"))
         .and_then(Json::as_str)
-        .and_then(crate::rollcall::parse_run_uuid)
-    else {
+        .and_then(crate::rollcall::parse_run_uuid);
+    let Some(run_uuid) = run_id else {
         return Err(ApiError::simple(
             "INVALID_ARGUMENT",
             "run_uuid must be the 32-hex id lab.rollcall.start returned",
         ));
     };
-    let group = group_id_field(params.get("group"))?;
+    let group = match params.get("group") {
+        None => None,
+        Some(value) => Some(group_id_field(Some(value))?),
+    };
+    let desired = desired_interval_ms(params)?;
     let network = ctx.session.lock().expect("session poisoned").network;
     let Some(network) = network else {
         return Err(ApiError::simple(
@@ -2897,7 +2929,7 @@ fn rollcall_update<S: OperationStore>(
         ));
     };
     ctx.rollcall
-        .update(uid, &run_uuid, group)
+        .update(uid, &run_uuid, group, desired)
         .map_err(|message| ApiError {
             code: "CONFLICT",
             message: message.to_string(),
@@ -2905,7 +2937,8 @@ fn rollcall_update<S: OperationStore>(
             retryable: false,
         })?;
     Ok(format!(
-        "{{\"running\":true,\"run_uuid\":\"{}\",\"group\":{group}}}",
+        "{{\"running\":true,\"state\":\"running\",\"run_id\":\"{}\",\"run_uuid\":\"{}\"}}",
+        crate::rollcall::RunUuid(run_uuid),
         crate::rollcall::RunUuid(run_uuid),
     ))
 }
@@ -2915,7 +2948,7 @@ fn rollcall_stop<S: OperationStore>(
     ctx: &ApiContext<'_, S>,
 ) -> Result<String, ApiError> {
     for (key, _) in params.object_entries() {
-        if !matches!(key.as_str(), "run_uuid") {
+        if !matches!(key.as_str(), "run_uuid" | "run_id") {
             return Err(ApiError::simple(
                 "INVALID_ARGUMENT",
                 &format!("unknown param \"{key}\""),
@@ -2938,9 +2971,15 @@ fn rollcall_stop<S: OperationStore>(
             "principal lacks SEND on this network",
         ));
     }
-    let stopped = match params.get("run_uuid") {
-        None => ctx.rollcall.stop(),
-        Some(Json::String(text)) => match crate::rollcall::parse_run_uuid(text) {
+    let run_id = params
+        .get("run_uuid")
+        .or_else(|| params.get("run_id"))
+        .and_then(Json::as_str)
+        .and_then(crate::rollcall::parse_run_uuid);
+    let stopped = if params.get("run_uuid").is_none() && params.get("run_id").is_none() {
+        ctx.rollcall.stop()
+    } else {
+        match run_id {
             Some(uuid) => ctx.rollcall.stop_if(&uuid),
             None => {
                 return Err(ApiError::simple(
@@ -2948,12 +2987,6 @@ fn rollcall_stop<S: OperationStore>(
                     "run_uuid must be the 32-hex id lab.rollcall.start returned",
                 ))
             }
-        },
-        Some(_) => {
-            return Err(ApiError::simple(
-                "INVALID_ARGUMENT",
-                "run_uuid must be the 32-hex id lab.rollcall.start returned",
-            ))
         }
     };
     Ok(format!("{{\"stopped\":{stopped}}}"))
@@ -2982,7 +3015,43 @@ fn rollcall_status<S: OperationStore>(
             "no rollcall run visible to this principal",
         ));
     }
-    Ok(ctx.rollcall.status_json())
+    // The contract view (meshviz §10.2) composes what the run cannot own:
+    // live roster, site member kid/milestones, lab inventory size. A status
+    // read may outlive the site authority — absent pieces stay honest nulls
+    // rather than failing the whole read.
+    let roster_now = {
+        let table = ctx.node_table.lock().expect("node table poisoned");
+        let (records, _) = table.list(0, usize::MAX, Some(true));
+        records.len() as u64
+    };
+    let (members, inventory_planned) = ctx.site.map_or_else(
+        || (Vec::new(), None),
+        |service| {
+            service
+                .with(|authority| {
+                    let members = authority
+                        .member_briefs()
+                        .into_iter()
+                        .map(|(node, kid, approved_ms, confirmed_ms)| {
+                            crate::rollcall::MemberBrief {
+                                node,
+                                kid,
+                                approved_ms,
+                                confirmed_ms,
+                            }
+                        })
+                        .collect();
+                    (members, authority.lab_inventory_planned())
+                })
+                .0
+        },
+    );
+    Ok(ctx.rollcall.status_json(&crate::rollcall::StatusView {
+        now_ms: ctx.now_ms,
+        roster_now,
+        inventory_planned,
+        members,
+    }))
 }
 
 fn parse_hex_u64(text: &str) -> Option<u64> {
@@ -8285,7 +8354,9 @@ mod tests {
         // A poll actually schedules through the shared GroupOps lane once
         // the service ticks with a nonempty roster.
         crate::rollcall::service_step(rollcall, ops, 5, false, 1_100);
-        let status = routeloom_json::parse(&rollcall.status_json()).unwrap();
+        let status =
+            routeloom_json::parse(&rollcall.status_json(&crate::rollcall::StatusView::default()))
+                .unwrap();
         assert_eq!(status.get("poll_seq").and_then(Json::as_u64), Some(1));
         assert!(status.get("in_flight").and_then(Json::as_str).is_some());
 

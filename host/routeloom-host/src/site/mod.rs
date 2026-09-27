@@ -5711,6 +5711,23 @@ impl SiteAuthority {
             .map(|row| format!("{{\"member\":{}}}", Self::member_json(row)))
     }
 
+    /// Structured member rows for the rollcall status view — the JSON
+    /// surface (`members_json`) cannot be recomposed into another
+    /// method's response. Returns (node, kid, approved_ms, confirmed_ms).
+    pub fn member_briefs(&self) -> Vec<(u64, [u8; 32], u64, Option<u64>)> {
+        self.devices
+            .values()
+            .filter(|row| row.member)
+            .map(|row| (row.node, row.kid, row.approved_ms, row.confirmed_ms))
+            .collect()
+    }
+
+    /// Planned device count when this site is bound to a lab inventory —
+    /// `counts.inventory_planned` on the rollcall status. None otherwise.
+    pub fn lab_inventory_planned(&self) -> Option<u64> {
+        self.lab.as_ref().map(|lab| lab.inventory.len() as u64)
+    }
+
     /// The GK lifecycle state of a rotate/revoke operation (§6.4):
     /// committed → distributing → activated → converged, or
     /// activated_with_unknown; a superseded rotation keeps saying so.

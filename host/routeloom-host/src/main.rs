@@ -1510,6 +1510,9 @@ fn receive_ingest(
     // Wake subscription pumps and parked messages.read waiters — the log
     // lock is already released before the hub is notified (lock order).
     state.subscriptions.notify();
+    // A device STATUS reply to a live rollcall poll is folded into the
+    // run's evidence (D09); anything else is ignored by the correlation.
+    state.rollcall.on_reply(origin, payload, ms);
     if let Some(fields) = api1::ingest_diagnostic(&outcome) {
         push_event(state, ms, fields);
     }

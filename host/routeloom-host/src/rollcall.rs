@@ -12,9 +12,11 @@
 //! disconnected client can never leave a second loop running, and a second
 //! `lab.rollcall.start` for a live run is answered, not duplicated.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
+
+use routeloom_protocol::bench::{self, Opcode};
 
 use crate::group::{self, GroupOps, GroupRequest};
 use crate::nodes::NodeTable;
@@ -41,10 +43,18 @@ pub const SHRINK_AFTER_ROUNDS: u32 = 10;
 const HISTORY_CAP: usize = 64;
 /// Lane tick cadence (same as the group lane it drives).
 const TICK_MS: u64 = 50;
-/// The rollcall application header is 32 B, no body (§6.5):
-/// "RLRC" | v1 | flags(0) | reserved | run_uuid(8) | poll_seq(8) | reserved.
-pub const ROLLCALL_PAYLOAD_BYTES: usize = 32;
-const ROLLCALL_MAGIC: [u8; 4] = *b"RLRC";
+/// The on-air poll is an RLB1 ROLLCALL frame (bench protocol, design §5.2):
+/// 32 B header + 1 B page request. RLB1 — not a rollcall-private format —
+/// so bench nodes decode it through the same path as every other command.
+pub const ROLLCALL_PAYLOAD_BYTES: usize = bench::HEADER_SIZE + 1;
+/// STATUS slice cadence: every SLICE_EVERY-th poll asks one rotating page
+/// instead of staying quiet (§6.3 "hash で割り当てた定期 slice" — the slice
+/// is assigned deterministically by poll number, never a per-poll burst).
+const SLICE_EVERY: u64 = 8;
+/// Recent polls whose device STATUS replies are still kept for correlation.
+const REPLY_WINDOW_POLLS: u64 = 16;
+/// Bounded per-poll reply list — a full roster never grows it unboundedly.
+const REPLY_CAP_PER_POLL: usize = 128;
 /// Default rollcall target: the ALL group (0xFFFF).
 pub const DEFAULT_GROUP: u16 = 0xFFFF;
 /// A daemon-internal principal for GroupOps submissions — never an IPC uid.
@@ -121,6 +131,38 @@ pub struct PollSnapshot {
     pub missing_truncated: bool,
 }
 
+/// One device STATUS reply folded into a poll's evidence — the
+/// application-level counterpart to the transport GROUP_REPORT summary.
+/// `late` is rendered by comparing `rx_ms` against the poll's settle time;
+/// a late reply is kept as evidence, never retroactively changes a verdict.
+#[derive(Clone, Debug)]
+pub struct StatusReply {
+    /// Replying node's id — attribution comes from the authenticated
+    /// mesh origin, not from inside the payload.
+    pub origin: u64,
+    /// The STATUS page the device sent (`bench::status_page::*`).
+    pub page: u8,
+    /// The device's status snapshot generation this page belongs to.
+    pub sample_seq: u16,
+    /// The replying boot incarnation — a reset between polls shows here.
+    pub boot_incarnation: u64,
+    pub rx_ms: u64,
+}
+
+/// Per-node STATUS evidence for the live run — survives poll pruning, so a
+/// node's first reply time is never lost by history eviction.
+#[derive(Clone, Debug)]
+struct NodeStatus {
+    /// Host unix ms of the node's first STATUS reply this run.
+    first_ms: u64,
+    /// Host unix ms of its most recent one.
+    last_ms: u64,
+    /// Boot incarnation of the latest reply — a reset shows as a change.
+    boot_incarnation: u64,
+    /// Bitmask of STATUS pages this node has sent this run (7 pages).
+    pages: u8,
+}
+
 /// The owning run — its presence is the service's lease.
 struct Run {
     /// Minted at start; bound into every poll key and the status surface.
@@ -130,6 +172,8 @@ struct Run {
     network: u64,
     group: u16,
     started_ms: u64,
+    /// The operator's requested interval floor (lab.rollcall.start/update).
+    desired_ms: u64,
     /// Current effective interval (the adaptive value, never < 2 s).
     interval_ms: u64,
     /// Next scheduled submit time (host unix ms).
@@ -151,6 +195,11 @@ struct Run {
     /// Rounds the last settled poll's GROUP_REPORT carried (≥1) — repair
     /// pressure feeds the budget immediately.
     rounds: u8,
+    /// Per-node STATUS reply summary for `statuses[]` (bounded like the
+    /// reply window: an unknown fleet stays a fleet, never a growth hole).
+    node_status: BTreeMap<u64, NodeStatus>,
+    /// Why the effective interval exceeds the desired floor, if it does.
+    extension_reason: Option<&'static str>,
 }
 
 #[derive(Default)]
@@ -179,6 +228,11 @@ struct Inner {
     skipped_prior_unsettled: u64,
     waiting_members_ticks: u64,
     counters: Counters,
+    /// Device STATUS replies keyed by the poll_seq the reply echoes
+    /// (RLB1 message sequence). Bounded to the last REPLY_WINDOW_POLLS
+    /// polls, REPLY_CAP_PER_POLL entries each; rendered into each
+    /// snapshot's `status_replies` at status time.
+    replies: BTreeMap<u64, Vec<StatusReply>>,
 }
 
 impl Default for RollcallService {
@@ -239,15 +293,33 @@ fn step_interval(
     }
 }
 
-fn rollcall_payload(run_uuid: [u8; 16], poll_seq: u64) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(ROLLCALL_PAYLOAD_BYTES);
-    payload.extend_from_slice(&ROLLCALL_MAGIC);
-    payload.push(1); // ROLLCALL v1
-    payload.extend_from_slice(&[0, 0, 0]); // flags + reserved
-    payload.extend_from_slice(&run_uuid[..8]);
-    payload.extend_from_slice(&poll_seq.to_be_bytes());
-    payload.extend_from_slice(&[0; 8]);
-    payload
+/// The page a poll asks for: 0xFF keeps the round quiet (a node answers
+/// only its first valid poll or a state change, §6.3); every SLICE_EVERY-th
+/// poll rotates one STATUS page so the full page set is collected slowly.
+fn slice_page(poll_seq: u64) -> u8 {
+    if poll_seq % SLICE_EVERY == 0 {
+        ((poll_seq / SLICE_EVERY - 1) % u64::from(bench::status_page::COUNT)) as u8
+    } else {
+        bench::ROLLCALL_NO_PAGE
+    }
+}
+
+/// The group payload for one poll: an RLB1 `Rollcall` frame whose message
+/// sequence is the poll counter — device STATUS replies echo (run, seq),
+/// which is what `on_reply` correlates against.
+fn rollcall_payload(run_uuid: [u8; 16], poll_seq: u64) -> Option<Vec<u8>> {
+    // poll_seq as u32 wraps after ~272 years of 2 s polls; the run_uuid is
+    // minted per run so a wrapped sequence can never alias another run.
+    let frame = bench::encode(
+        Opcode::Rollcall,
+        0,
+        &run_uuid,
+        poll_seq as u32,
+        &bench::encode_page_body(slice_page(poll_seq)),
+    )
+    .ok()?;
+    debug_assert_eq!(frame.len(), ROLLCALL_PAYLOAD_BYTES);
+    Some(frame)
 }
 
 /// The roster the interval is budgeted on: the larger of the gateway's
@@ -268,11 +340,15 @@ impl RollcallService {
         uid: u32,
         network: u64,
         group: u16,
+        desired_ms: u64,
         now_ms: u64,
     ) -> Result<[u8; 16], &'static str> {
         let mut inner = self.lock();
         if let Some(run) = inner.run.as_mut() {
             if run.group == group && run.network == network {
+                // Same target: refresh the desired floor only — the run,
+                // its history and its per-node evidence carry on.
+                run.desired_ms = desired_ms.max(MIN_INTERVAL_MS);
                 return Ok(run.run_uuid);
             }
             return Err("rollcall already runs with a different group/network");
@@ -281,13 +357,16 @@ impl RollcallService {
         // Collision-free across restarts, so a restarted run's poll keys
         // can never alias a predecessor's records.
         let run_uuid = crate::send_store::mint_id128();
+        let desired_ms = desired_ms.max(MIN_INTERVAL_MS);
+        inner.replies.clear();
         inner.run = Some(Run {
             run_uuid,
             owner: uid,
             network,
             group,
             started_ms: now_ms,
-            interval_ms: MIN_INTERVAL_MS,
+            desired_ms,
+            interval_ms: desired_ms,
             next_ms: now_ms,
             poll_seq: 0,
             in_flight: None,
@@ -297,6 +376,8 @@ impl RollcallService {
             roster: 0,
             tree_n: 0,
             rounds: 1,
+            node_status: BTreeMap::new(),
+            extension_reason: None,
         });
         Ok(run_uuid)
     }
@@ -329,10 +410,18 @@ impl RollcallService {
         self.lock().run.as_ref().map(|run| run.network)
     }
 
-    /// `lab.rollcall.update`: retarget the run's group. Only the owner may
-    /// move the lease; a mismatching run_uuid is refused rather than
-    /// silently steering someone else's loop.
-    pub fn update(&self, uid: u32, run_uuid: &[u8; 16], group: u16) -> Result<(), &'static str> {
+    /// `lab.rollcall.update`: retarget the run's group and/or its desired
+    /// interval floor. Only the owner may move the lease; a mismatching
+    /// run_uuid is refused rather than silently steering someone's loop.
+    /// The interval floor never lowers the budget-driven effective value —
+    /// it is applied by the next step's `max(desired, budget)`.
+    pub fn update(
+        &self,
+        uid: u32,
+        run_uuid: &[u8; 16],
+        group: Option<u16>,
+        desired_ms: Option<u64>,
+    ) -> Result<(), &'static str> {
         let mut inner = self.lock();
         let Some(run) = inner.run.as_mut() else {
             return Err("no rollcall run");
@@ -340,33 +429,194 @@ impl RollcallService {
         if run.owner != uid || &run.run_uuid != run_uuid {
             return Err("run_uuid/owner mismatch");
         }
-        run.group = group;
+        if let Some(group) = group {
+            run.group = group;
+        }
+        if let Some(desired) = desired_ms {
+            run.desired_ms = desired.max(MIN_INTERVAL_MS);
+            run.interval_ms = run.interval_ms.max(run.desired_ms);
+        }
         Ok(())
+    }
+
+    /// Fold one gateway-reported device payload into the live run's
+    /// evidence when it is an RLB1 STATUS reply to a poll of that run. The
+    /// daemon's receive path calls this after the record lands in the
+    /// receive log — the log stays authoritative; this is only
+    /// correlation. Anything else (not RLB1, not STATUS, a foreign run, a
+    /// poll_seq the run never sent) is ignored.
+    pub fn on_reply(&self, origin: u64, payload: &[u8], now_ms: u64) {
+        let Ok(msg) = bench::decode(payload) else {
+            return;
+        };
+        if msg.opcode != Opcode::Status as u8 || msg.flags & bench::FLAG_RESPONSE == 0 {
+            return;
+        }
+        let Ok((head, _fields)) = bench::decode_status_head(msg.body) else {
+            return;
+        };
+        let mut inner = self.lock();
+        let Inner { run, replies, .. } = &mut *inner;
+        let Some(run) = run.as_mut() else {
+            return;
+        };
+        if msg.run != run.run_uuid {
+            return;
+        }
+        let poll_seq = u64::from(msg.sequence);
+        // seq 0 was never a poll, and a reply cannot name a poll the run
+        // has not sent yet; replies past the evidence window are stale.
+        if poll_seq == 0 || poll_seq > run.poll_seq || poll_seq + REPLY_WINDOW_POLLS < run.poll_seq
+        {
+            return;
+        }
+        let list = replies.entry(poll_seq).or_default();
+        // A second (node, page) frame is a reply retry, not new evidence.
+        if !list
+            .iter()
+            .any(|r| r.origin == origin && r.page == head.page)
+            && list.len() < REPLY_CAP_PER_POLL
+        {
+            list.push(StatusReply {
+                origin,
+                page: head.page,
+                sample_seq: head.sample_seq,
+                boot_incarnation: head.boot_incarnation,
+                rx_ms: now_ms,
+            });
+        }
+        // Per-node summary survives the reply window: the timetable's
+        // first-response milestone must not move when old polls prune.
+        match run.node_status.get_mut(&origin) {
+            Some(status) => {
+                status.last_ms = now_ms.max(status.last_ms);
+                status.boot_incarnation = head.boot_incarnation;
+                status.pages |= 1 << head.page.min(6);
+            }
+            None => {
+                if run.node_status.len() < REPLY_CAP_PER_POLL {
+                    run.node_status.insert(
+                        origin,
+                        NodeStatus {
+                            first_ms: now_ms,
+                            last_ms: now_ms,
+                            boot_incarnation: head.boot_incarnation,
+                            pages: 1 << head.page.min(6),
+                        },
+                    );
+                }
+            }
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().expect("rollcall poisoned")
     }
 
-    /// The API `status` snapshot: run fields plus bounded history.
-    pub fn status_json(&self) -> String {
+    /// The API `status` snapshot: the meshviz-design contract shape
+    /// (`state`/`run_id`/`statuses`/`counts` — what the live monitor and
+    /// scenario steps consume) plus the service's internal detail fields.
+    /// `view` carries what the service cannot own: the live roster, the
+    /// site member rows (kid + milestones) and the lab inventory size.
+    pub fn status_json(&self, view: &StatusView) -> String {
         let inner = self.lock();
         let Some(run) = inner.run.as_ref() else {
             return format!(
-                "{{\"running\":false,\"polls\":{},\"skipped\":{}}}",
+                "{{\"state\":\"stopped\",\"running\":false,\"polls\":{},\"skipped\":{},\"statuses\":[]}}",
                 inner.counters.polls, inner.counters.skipped
             );
         };
         let last = inner.history.back();
-        let history_json: Vec<String> = inner.history.iter().rev().map(snapshot_json).collect();
+        let history_json: Vec<String> = inner
+            .history
+            .iter()
+            .rev()
+            .map(|s| snapshot_json(s, inner.replies.get(&s.poll_seq)))
+            .collect();
+        let state = if run.budget_exceeded {
+            "budget_exceeded"
+        } else if run.roster <= 1 {
+            "waiting_members"
+        } else {
+            "running"
+        };
+        let settle_ms = last.and_then(|s| {
+            s.settled_ms
+                .map(|settled| settled.saturating_sub(s.submitted_ms))
+        });
+        // Latest STATUS receipt across nodes — the "STATUS更新age" header.
+        let status_age_ms = run
+            .node_status
+            .values()
+            .map(|s| s.last_ms)
+            .max()
+            .map(|rx| view.now_ms.saturating_sub(rx));
+        let mut statuses = String::new();
+        for (node, status) in &run.node_status {
+            let member = view.members.iter().find(|m| m.node == *node);
+            // §7.2: the authority-side milestones a member row can honestly
+            // carry. Device-side milestones (boot/adopt/first-rollcall) are
+            // device-monotonic times and need a D05 clock mapping — absent
+            // evidence stays null rather than borrowing the host clock.
+            let approved = member.map_or_else(
+                || "null".to_string(),
+                |m| format!("{{\"at_unix_ms\":{},\"estimated\":false}}", m.approved_ms),
+            );
+            let confirmed = member.and_then(|m| m.confirmed_ms).map_or_else(
+                || "null".to_string(),
+                |ms| format!("{{\"at_unix_ms\":{ms},\"estimated\":false}}"),
+            );
+            if !statuses.is_empty() {
+                statuses.push(',');
+            }
+            statuses.push_str(&format!(
+                "{{\"node\":\"{node:016x}\",\"kid\":{},\"first_status_received_ms\":{},\"last_status_received_ms\":{},\"boot_incarnation\":\"{:016x}\",\"pages\":{},\"milestones\":{{\"approval_committed_at\":{},\"confirmed_at\":{}}}}}",
+                member.map_or_else(
+                    || "null".to_string(),
+                    |m| format!("\"{}\"", crate::receive_log::hex_lower(&m.kid)),
+                ),
+                status.first_ms,
+                status.last_ms,
+                status.boot_incarnation,
+                status.pages,
+                approved,
+                confirmed,
+            ));
+        }
         format!(
-            "{{\"running\":true,\"run_uuid\":\"{}\",\"owner_uid\":{},\"network\":\"{:016x}\",\"group\":{},\"started_ms\":{},\"poll_seq\":{},\"in_flight\":{},\"interval_ms\":{},\"budget_exceeded\":{},\"roster\":{},\"tree_n\":{},\"rounds\":{},\"stable_rounds\":{},\"waiting_members_ticks\":{},\"skipped_prior_unsettled\":{},\"note\":{},\"polls\":{},\"skipped\":{},\"complete\":{},\"incomplete\":{},\"refused\":{},\"not_sent\":{},\"indeterminate\":{},\"last\":{},\"history\":[{}]}}",
+            "{{\"state\":\"{state}\",\"run_id\":\"{}\",\"poll_seq\":{},\"roster_revision\":{},\"desired_interval_ms\":{},\"effective_interval_ms\":{},\"extension_reason\":{},\"settle_ms\":{},\"airtime_estimate_us_per_s\":{},\"airtime_observed_us_per_s\":null,\"status_age_ms\":{},\"lease_remaining_ms\":null,\"skipped\":{},\"counts\":{{\"inventory_planned\":{},\"active_members\":{},\"tree_explained\":{},\"delivered\":{},\"nonmember\":{},\"missing\":{},\"unaccounted\":{}}},\"statuses\":[{}],\"running\":true,\"run_uuid\":\"{}\",\"owner_uid\":{},\"network\":\"{:016x}\",\"group\":{},\"started_ms\":{},\"in_flight\":{},\"interval_ms\":{},\"budget_exceeded\":{},\"roster\":{},\"tree_n\":{},\"rounds\":{},\"stable_rounds\":{},\"waiting_members_ticks\":{},\"skipped_prior_unsettled\":{},\"note\":{},\"polls\":{},\"complete\":{},\"incomplete\":{},\"refused\":{},\"not_sent\":{},\"indeterminate\":{},\"last\":{},\"history\":[{}]}}",
+            run_uuid_hex(run.run_uuid),
+            run.poll_seq,
+            run.roster,
+            run.desired_ms,
+            run.interval_ms,
+            run.extension_reason
+                .map_or_else(|| "null".to_string(), |r| format!("\"{r}\"")),
+            settle_ms.map_or_else(|| "null".to_string(), |v| v.to_string()),
+            // §6.5 estimate: 1.5 × C_round(N) × 1 s / effective interval.
+            if run.roster > 1 {
+                ((run.roster - 1) * ROUND_COST_PER_MEMBER_US * 1500
+                    / run.interval_ms.max(1))
+                .to_string()
+            } else {
+                "0".to_string()
+            },
+            status_age_ms.map_or_else(|| "null".to_string(), |v| v.to_string()),
+            inner.counters.skipped,
+            view.inventory_planned
+                .map_or_else(|| "null".to_string(), |v| v.to_string()),
+            view.roster_now.saturating_sub(1),
+            run.tree_n.saturating_sub(1),
+            opt_u16_json(last.and_then(|s| s.delivered)),
+            opt_u16_json(last.and_then(|s| s.nonmember)),
+            opt_u16_json(last.and_then(|s| s.missing_total)),
+            opt_u16_json(last.and_then(|s| s.unaccounted)),
+            statuses,
             run_uuid_hex(run.run_uuid),
             run.owner,
             run.network,
             run.group,
             run.started_ms,
-            run.poll_seq,
             run.in_flight
                 .map_or_else(|| "null".to_string(), |id| format!("\"grp{id:016x}\"")),
             run.interval_ms,
@@ -381,31 +631,78 @@ impl RollcallService {
                 .note
                 .map_or_else(|| "null".to_string(), |n| format!("\"{n}\"")),
             inner.counters.polls,
-            inner.counters.skipped,
             inner.counters.complete,
             inner.counters.incomplete,
             inner.counters.refused,
             inner.counters.not_sent,
             inner.counters.indeterminate,
-            last.map_or_else(|| "null".to_string(), snapshot_json),
+            last.map_or_else(|| "null".to_string(), |s| {
+                snapshot_json(s, inner.replies.get(&s.poll_seq))
+            }),
             history_json.join(","),
         )
     }
+}
+
+/// One member row the site authority contributes to `statuses[]` — kid and
+/// the authority-recorded milestone times (host unix ms).
+pub struct MemberBrief {
+    pub node: u64,
+    pub kid: [u8; 32],
+    pub approved_ms: u64,
+    pub confirmed_ms: Option<u64>,
+}
+
+/// Inputs `lab.rollcall.status` needs beyond the run itself: everything
+/// the service cannot own stays outside the lock and is passed in.
+#[derive(Default)]
+pub struct StatusView {
+    pub now_ms: u64,
+    /// Live connected roster from the node table (root included) — the
+    /// "active_members" count, distinct from the budgeted `roster` N.
+    pub roster_now: u64,
+    /// Lab inventory size when the site carries one (planned count).
+    pub inventory_planned: Option<u64>,
+    /// Site member rows for kid/milestone enrichment (empty when none).
+    pub members: Vec<MemberBrief>,
+}
+
+fn opt_u16_json(v: Option<u16>) -> String {
+    v.map_or_else(|| "null".to_string(), |v| v.to_string())
 }
 
 fn run_uuid_hex(uuid: [u8; 16]) -> String {
     RunUuid(uuid).to_string()
 }
 
-fn snapshot_json(s: &PollSnapshot) -> String {
+fn snapshot_json(s: &PollSnapshot, replies: Option<&Vec<StatusReply>>) -> String {
     let missing: Vec<String> = s
         .missing
         .iter()
         .map(|id| format!("\"{id:016x}\""))
         .collect();
     let opt_u16 = |v: Option<u16>| v.map_or_else(|| "null".to_string(), |v| v.to_string());
+    // Device STATUS evidence for this poll: `late` marks arrivals after the
+    // group report settled — kept as evidence, never verdict-rewriting.
+    let replies_json = replies.map_or_else(String::new, |list| {
+        list.iter()
+            .take(REPLY_CAP_PER_POLL)
+            .map(|r| {
+                format!(
+                    "{{\"origin\":\"{:016x}\",\"page\":{},\"sample_seq\":{},\"boot_incarnation\":\"{:016x}\",\"rx_ms\":{},\"late\":{}}}",
+                    r.origin,
+                    r.page,
+                    r.sample_seq,
+                    r.boot_incarnation,
+                    r.rx_ms,
+                    s.settled_ms.is_some_and(|settled| r.rx_ms > settled),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    });
     format!(
-        "{{\"poll_seq\":{},\"group_op\":\"grp{:016x}\",\"key\":\"{}\",\"group\":{},\"roster\":{},\"interval_ms\":{},\"submitted_ms\":{},\"settled_ms\":{},\"outcome\":\"{}\",\"delivered\":{},\"nonmember\":{},\"missing_total\":{},\"unaccounted\":{},\"missing\":[{}],\"missing_truncated\":{}}}",
+        "{{\"poll_seq\":{},\"group_op\":\"grp{:016x}\",\"key\":\"{}\",\"group\":{},\"roster\":{},\"interval_ms\":{},\"submitted_ms\":{},\"settled_ms\":{},\"outcome\":\"{}\",\"delivered\":{},\"nonmember\":{},\"missing_total\":{},\"unaccounted\":{},\"missing\":[{}],\"missing_truncated\":{},\"status_replies\":[{}]}}",
         s.poll_seq,
         s.op_id,
         run_uuid_hex(s.key),
@@ -421,6 +718,7 @@ fn snapshot_json(s: &PollSnapshot) -> String {
         opt_u16(s.unaccounted),
         missing.join(","),
         s.missing_truncated,
+        replies_json,
     )
 }
 
@@ -462,6 +760,7 @@ pub fn service_step(
         skipped_prior_unsettled,
         waiting_members_ticks,
         counters,
+        replies,
     } = &mut *guard;
     let Some(run) = maybe_run.as_mut() else {
         return;
@@ -549,8 +848,15 @@ pub fn service_step(
                 let n = n.max(run.tree_n);
                 let decision =
                     step_interval(run.interval_ms, n, run.rounds, run.stable_rounds, pressure);
-                run.interval_ms = decision.interval_ms;
+                // The operator's floor can only ever raise the effective
+                // interval; the airtime budget still wins when it is larger.
+                run.interval_ms = decision.interval_ms.max(run.desired_ms);
                 run.budget_exceeded = decision.budget_exceeded;
+                run.extension_reason = if run.interval_ms > run.desired_ms {
+                    Some("airtime_budget")
+                } else {
+                    None
+                };
                 run.next_ms = now + run.interval_ms;
             }
         } else {
@@ -595,6 +901,17 @@ pub fn service_step(
     // uses: BULK priority, unordered, one in flight, ttl bounded by the
     // interval so a stale round never drags the run.
     run.poll_seq += 1;
+    // Replies outside the evidence window stop being per-poll evidence —
+    // the per-node summary still keeps their first/last times.
+    replies.retain(|seq, _| *seq + REPLY_WINDOW_POLLS > run.poll_seq);
+    let Some(payload) = rollcall_payload(run.run_uuid, run.poll_seq) else {
+        // Encoding a 1-byte body cannot fail — if it ever does, skip the
+        // poll honestly rather than emitting a malformed frame.
+        *note = Some("encode_failed");
+        counters.skipped += 1;
+        run.next_ms = now + run.interval_ms;
+        return;
+    };
     let mut key = [0u8; 16];
     key[..8].copy_from_slice(&run.run_uuid[..8]);
     key[8..].copy_from_slice(&run.poll_seq.to_be_bytes());
@@ -605,7 +922,7 @@ pub fn service_step(
         ordered: false,
         ttl_ms: (run.interval_ms.clamp(2_000, 30_000)) as u32,
         hop_limit: 254,
-        payload: rollcall_payload(run.run_uuid, run.poll_seq),
+        payload,
     };
     match ops.submit(ROLLCALL_UID, key, request, now) {
         Ok(group::SubmitOutcome::Accepted(op_id)) | Ok(group::SubmitOutcome::Replay(op_id)) => {
@@ -754,21 +1071,30 @@ mod tests {
     #[test]
     fn start_is_idempotent_and_single_owner() {
         let service = RollcallService::default();
-        let a = service.start(501, NET, DEFAULT_GROUP, 1_000).unwrap();
+        let a = service
+            .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
+            .unwrap();
         // A reconnecting GUI asking the same thing gets the same run —
         // never a second loop.
-        assert_eq!(service.start(501, NET, DEFAULT_GROUP, 2_000).unwrap(), a);
         assert_eq!(
-            service.start(502, NET, DEFAULT_GROUP, 3_000).unwrap(),
+            service
+                .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 2_000)
+                .unwrap(),
+            a
+        );
+        assert_eq!(
+            service
+                .start(502, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 3_000)
+                .unwrap(),
             a,
             "the single owned run answers every matching start"
         );
         // A different group is a conflict, not a second loop.
-        assert!(service.start(501, NET, 7, 4_000).is_err());
+        assert!(service.start(501, NET, 7, MIN_INTERVAL_MS, 4_000).is_err());
         // update is owner-only and run-bound.
-        assert!(service.update(502, &a, 9).is_err());
-        assert!(service.update(501, &[0xde; 16], 9).is_err());
-        service.update(501, &a, 9).unwrap();
+        assert!(service.update(502, &a, Some(9), None).is_err());
+        assert!(service.update(501, &[0xde; 16], Some(9), None).is_err());
+        service.update(501, &a, Some(9), None).unwrap();
         assert!(!service.stop_if(&[0xde; 16]), "stale id cannot stop");
         assert!(service.stop_if(&a));
         assert!(!service.stop(), "already stopped");
@@ -778,12 +1104,14 @@ mod tests {
     fn empty_roster_waits_without_transmitting() {
         let service = RollcallService::default();
         let ops = GroupOps::default();
-        service.start(501, NET, DEFAULT_GROUP, 1_000).unwrap();
+        service
+            .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
+            .unwrap();
         for tick in 0..10 {
             service_step(&service, &ops, 0, false, 1_000 + tick * TICK_MS);
         }
         assert!(service.in_flight_op().is_none());
-        let status = routeloom_json::parse(&service.status_json()).unwrap();
+        let status = routeloom_json::parse(&service.status_json(&StatusView::default())).unwrap();
         assert_eq!(
             status.get("note").and_then(Json::as_str),
             Some("waiting_members")
@@ -799,7 +1127,9 @@ mod tests {
         let service = RollcallService::default();
         let ops = GroupOps::default();
         let mut lane = GroupLane::default();
-        service.start(501, NET, DEFAULT_GROUP, 1_000).unwrap();
+        service
+            .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
+            .unwrap();
         // Roster 10 → still at the 2 s floor.
         service_step(&service, &ops, 10, false, 1_000);
         let op = service.in_flight_op().expect("first poll submitted");
@@ -813,7 +1143,7 @@ mod tests {
             1_500,
             report(STATE_DELIVERED, 9, 0, 0),
         );
-        let status = routeloom_json::parse(&service.status_json()).unwrap();
+        let status = routeloom_json::parse(&service.status_json(&StatusView::default())).unwrap();
         assert_eq!(status.get("polls").and_then(Json::as_u64), Some(1));
         assert_eq!(status.get("complete").and_then(Json::as_u64), Some(1));
         let last = status.get("last").unwrap();
@@ -840,7 +1170,7 @@ mod tests {
             3_650,
             report(STATE_DELIVERED, 99, 0, 0),
         );
-        let status = routeloom_json::parse(&service.status_json()).unwrap();
+        let status = routeloom_json::parse(&service.status_json(&StatusView::default())).unwrap();
         assert_eq!(
             status.get("interval_ms").and_then(Json::as_u64),
             Some(22_715)
@@ -851,7 +1181,9 @@ mod tests {
     fn unsettled_prior_is_skipped_not_retried() {
         let service = RollcallService::default();
         let ops = GroupOps::default();
-        service.start(501, NET, DEFAULT_GROUP, 1_000).unwrap();
+        service
+            .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
+            .unwrap();
         service_step(&service, &ops, 10, false, 1_000);
         let first = service.in_flight_op().unwrap();
         // Six due ticks pass with the poll still unsettled: each records a
@@ -859,7 +1191,7 @@ mod tests {
         for tick in 1..=6u64 {
             service_step(&service, &ops, 10, false, 1_000 + tick * 2_000);
         }
-        let status = routeloom_json::parse(&service.status_json()).unwrap();
+        let status = routeloom_json::parse(&service.status_json(&StatusView::default())).unwrap();
         assert_eq!(
             status.get("skipped_prior_unsettled").and_then(Json::as_u64),
             Some(6)
@@ -873,7 +1205,9 @@ mod tests {
         let service = RollcallService::default();
         let ops = GroupOps::default();
         let mut lane = GroupLane::default();
-        service.start(501, NET, DEFAULT_GROUP, 1_000).unwrap();
+        service
+            .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
+            .unwrap();
         service_step(&service, &ops, 10, false, 1_000);
         settle_poll(
             &service,
@@ -883,7 +1217,7 @@ mod tests {
             1_500,
             report(STATE_FAILED, 8, 1, 0),
         );
-        let status = routeloom_json::parse(&service.status_json()).unwrap();
+        let status = routeloom_json::parse(&service.status_json(&StatusView::default())).unwrap();
         assert_eq!(status.get("incomplete").and_then(Json::as_u64), Some(1));
         let last = status.get("last").unwrap();
         assert_eq!(last.get("missing_total").and_then(Json::as_u64), Some(1));
@@ -898,7 +1232,9 @@ mod tests {
         let service = RollcallService::default();
         let ops = GroupOps::default();
         let mut lane = GroupLane::default();
-        service.start(501, NET, DEFAULT_GROUP, 1_000).unwrap();
+        service
+            .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
+            .unwrap();
         // Force the interval up on a big roster, then shrink the roster and
         // run SHRINK_AFTER_ROUNDS clean polls — the interval steps down in
         // quarters, never snapping.
@@ -919,7 +1255,10 @@ mod tests {
             now += last_interval + 100;
             service_step(&service, &ops, 10, false, now);
             if service.in_flight_op().is_none() {
-                panic!("iter {i}: no submit; {}", service.status_json());
+                panic!(
+                    "iter {i}: no submit; {}",
+                    service.status_json(&StatusView::default())
+                );
             }
             settle_poll(
                 &service,
@@ -961,7 +1300,9 @@ mod tests {
     fn evicted_record_is_indeterminate_not_success() {
         let service = RollcallService::default();
         let ops = GroupOps::default();
-        service.start(501, NET, DEFAULT_GROUP, 1_000).unwrap();
+        service
+            .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
+            .unwrap();
         service_step(&service, &ops, 10, false, 1_000);
         let op = service.in_flight_op().unwrap();
         // Evict the record out from under the service (fill the bounded
@@ -989,12 +1330,157 @@ mod tests {
         // success either way.
         if ops.get(op).is_none() {
             service_step(&service, &ops, 10, false, 3_000);
-            let status = routeloom_json::parse(&service.status_json()).unwrap();
+            let status =
+                routeloom_json::parse(&service.status_json(&StatusView::default())).unwrap();
             assert_eq!(status.get("indeterminate").and_then(Json::as_u64), Some(1));
             assert_eq!(
                 status.get("note").and_then(Json::as_str),
                 Some("record_evicted")
             );
         }
+    }
+
+    /// The poll's group payload is an RLB1 Rollcall frame — protocol/
+    /// bench-golden/09_rollcall.json pins these exact bytes (run/seq/page),
+    /// so a regression in framing fails here, not on the mesh.
+    #[test]
+    fn poll_payload_is_the_golden_rlb1_rollcall() {
+        let run = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        // seq 10 % SLICE_EVERY != 0 → quiet page request (0xFF).
+        let payload = rollcall_payload(run, 10).unwrap();
+        assert_eq!(
+            payload,
+            bench_decode_hex("524c42310130000000112233445566778899aabbccddeeff0000000aff000000ff")
+        );
+        assert_eq!(payload.len(), ROLLCALL_PAYLOAD_BYTES);
+        // A slice poll requests one rotating page; the rest stay quiet.
+        let sliced = rollcall_payload(run, SLICE_EVERY).unwrap();
+        let msg = bench::decode(&sliced).unwrap();
+        assert_eq!(msg.opcode, Opcode::Rollcall as u8);
+        assert_eq!(bench::decode_page_body(msg.body).unwrap(), 0);
+        assert_eq!(msg.sequence, SLICE_EVERY as u32);
+        assert_eq!(msg.run, run);
+    }
+
+    /// A STATUS reply echoes (run, poll_seq); it lands in the poll's
+    /// evidence and the per-node summary — a foreign run or seq 0 is noise.
+    #[test]
+    fn status_replies_correlate_to_their_poll() {
+        let service = RollcallService::default();
+        let ops = GroupOps::default();
+        service
+            .start(501, NET, DEFAULT_GROUP, MIN_INTERVAL_MS, 1_000)
+            .unwrap();
+        service_step(&service, &ops, 10, false, 1_000);
+        let run_uuid = service.lock().run.as_ref().map(|r| r.run_uuid).unwrap();
+
+        let status_reply = |page: u8| {
+            let mut body = Vec::new();
+            body.extend_from_slice(&7u16.to_be_bytes()); // sample_seq
+            body.extend_from_slice(&0x5eedu64.to_be_bytes()); // boot
+            body.push(page);
+            body.push(bench::status_page::COUNT);
+            bench::encode(Opcode::Status, bench::FLAG_RESPONSE, &run_uuid, 1, &body).unwrap()
+        };
+        // Noise first: foreign run, non-STATUS opcode, seq 0 — all ignored.
+        let mut foreign = [0xee; 16];
+        foreign[0] = 0x42;
+        let noise =
+            bench::encode(Opcode::Status, bench::FLAG_RESPONSE, &foreign, 1, &[0; 12]).unwrap();
+        service.on_reply(5, &noise, 1_100);
+        service.on_reply(5, &status_reply(bench::status_page::IDENTITY), 1_100);
+        service.on_reply(9, &status_reply(bench::status_page::IDENTITY), 1_120);
+
+        let status = routeloom_json::parse(&service.status_json(&StatusView {
+            now_ms: 1_200,
+            roster_now: 10,
+            ..StatusView::default()
+        }))
+        .unwrap();
+        assert_eq!(status.get("state").and_then(Json::as_str), Some("running"));
+        assert_eq!(status.get("status_age_ms").and_then(Json::as_u64), Some(80));
+        let statuses = status.get("statuses").and_then(Json::as_array).unwrap();
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(
+            statuses[0].get("node").and_then(Json::as_str),
+            Some("0000000000000005")
+        );
+        assert_eq!(
+            statuses[0]
+                .get("first_status_received_ms")
+                .and_then(Json::as_u64),
+            Some(1_100)
+        );
+        assert_eq!(
+            statuses[0]
+                .get("last_status_received_ms")
+                .and_then(Json::as_u64),
+            Some(1_100)
+        );
+        // A duplicate (node, page) retry adds no evidence row.
+        service.on_reply(5, &status_reply(bench::status_page::IDENTITY), 1_300);
+        // But a different page from the same node does.
+        service.on_reply(5, &status_reply(bench::status_page::COUNTERS), 1_310);
+        let status = routeloom_json::parse(&service.status_json(&StatusView {
+            now_ms: 1_400,
+            roster_now: 10,
+            ..StatusView::default()
+        }))
+        .unwrap();
+        let statuses = status.get("statuses").and_then(Json::as_array).unwrap();
+        let node5 = statuses
+            .iter()
+            .find(|s| s.get("node").and_then(Json::as_str) == Some("0000000000000005"))
+            .unwrap();
+        assert_eq!(
+            node5.get("last_status_received_ms").and_then(Json::as_u64),
+            Some(1_310)
+        );
+        assert_eq!(node5.get("pages").and_then(Json::as_u64), Some(0b101));
+    }
+
+    /// An operator's desired floor raises the effective interval but never
+    /// lowers the airtime budget below what the roster needs.
+    #[test]
+    fn desired_interval_is_a_floor_the_budget_can_exceed() {
+        let service = RollcallService::default();
+        let ops = GroupOps::default();
+        service
+            .start(501, NET, DEFAULT_GROUP, 60_000, 1_000)
+            .unwrap();
+        service_step(&service, &ops, 10, false, 1_000);
+        assert_eq!(service.interval_ms(), Some(60_000));
+        let status = routeloom_json::parse(&service.status_json(&StatusView::default())).unwrap();
+        assert_eq!(
+            status.get("effective_interval_ms").and_then(Json::as_u64),
+            Some(60_000)
+        );
+        assert_eq!(
+            status.get("desired_interval_ms").and_then(Json::as_u64),
+            Some(60_000)
+        );
+        // update lowers the floor; the budgeted effective stays larger.
+        let run = service.lock().run.as_ref().map(|r| r.run_uuid).unwrap();
+        service.update(501, &run, None, Some(2_000)).unwrap();
+        let status = routeloom_json::parse(&service.status_json(&StatusView::default())).unwrap();
+        assert_eq!(
+            status.get("desired_interval_ms").and_then(Json::as_u64),
+            Some(2_000)
+        );
+        assert_eq!(
+            status.get("effective_interval_ms").and_then(Json::as_u64),
+            Some(60_000),
+            "the in-flight interval does not snap down mid-flight"
+        );
+    }
+
+    fn bench_decode_hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+            .collect()
     }
 }
