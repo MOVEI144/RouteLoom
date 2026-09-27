@@ -40,6 +40,7 @@
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/espnow_sdkv1.hpp"
 #include "routeloom/fail_policy.hpp"
+#include "routeloom/hex.hpp"
 #include "routeloom/rlcw1.hpp"
 #include "routeloom/nvs_counter_store.hpp"
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
@@ -279,9 +280,9 @@ extern "C" void app_main(void) {
   // above against the inventory row.
   const esp_app_desc_t* app_desc = esp_app_get_description();
   char app_sha256_hex[sizeof(app_desc->app_elf_sha256) * 2 + 1];
-  routeloom::espnow::hex_encode(app_desc->app_elf_sha256,
-                                sizeof(app_desc->app_elf_sha256),
-                                app_sha256_hex);
+  routeloom::hex_encode(app_desc->app_elf_sha256,
+                        sizeof(app_desc->app_elf_sha256),
+                        app_sha256_hex);
   ESP_LOGI(kTag, "routeloom field boot: fw=%s app_sha256=%s",
            app_desc->version, app_sha256_hex);
 

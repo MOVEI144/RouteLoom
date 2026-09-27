@@ -9,11 +9,11 @@
 // radio setup, and the setup console (benchcfg/benchsecret verbs) uses
 // the same stores read-write.
 
-#include <cstddef>
 #include <cstdint>
 
 #include "routeloom/board_config.hpp"
 #include "routeloom/board_secrets.hpp"
+#include "routeloom/hex.hpp"
 #include "routeloom/nvs_sdkv1_store.hpp"
 #include "routeloom/status.hpp"
 
@@ -46,16 +46,5 @@ class BoardStores {
 // constants); 0 on an unknown target — the committed record then can
 // never match, which fails closed.
 std::uint8_t board_chip() noexcept;
-
-// D03 readback renders digests as text in the boot log: a field build has
-// no console, so the serial boot lines are the evidence channel.
-inline void hex_encode(const std::uint8_t* data, std::size_t size, char* out) noexcept {
-  static constexpr char kHex[] = "0123456789abcdef";
-  for (std::size_t i = 0; i < size; ++i) {
-    out[i * 2] = kHex[data[i] >> 4];
-    out[i * 2 + 1] = kHex[data[i] & 0xf];
-  }
-  out[size * 2] = '\0';
-}
 
 }  // namespace routeloom::espnow

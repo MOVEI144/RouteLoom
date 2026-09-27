@@ -13,6 +13,7 @@
 #include "nvs_flash.h"
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/espnow_board_config.hpp"
+#include "routeloom/hex.hpp"
 #include "routeloom/espnow_sdkv1_entropy.hpp"
 #include "routeloom/nvs_legacy_purge.hpp"
 #include "routeloom/sdkv1_board_setup.hpp"
