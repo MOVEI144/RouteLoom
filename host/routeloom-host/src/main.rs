@@ -2643,26 +2643,32 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
 /// Legacy firmware still uses the fixed secret when no file is supplied.
 fn load_usb_dev_secret(path: &Path) -> io::Result<Vec<u8>> {
     use std::io::Read;
-    let before = std::fs::symlink_metadata(path)?;
-    if !before.file_type().is_file() || before.permissions().mode() & 0o077 != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "USB secret must be a private regular file",
-        ));
-    }
-    let file = std::fs::File::open(path)?;
-    let after = file.metadata()?;
-    use std::os::unix::fs::MetadataExt;
-    if !after.is_file()
-        || before.dev() != after.dev()
-        || before.ino() != after.ino()
-        || after.permissions().mode() & 0o077 != 0
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "USB secret file changed or is not private",
-        ));
-    }
+    #[cfg(unix)]
+    let file = {
+        let before = std::fs::symlink_metadata(path)?;
+        if !before.file_type().is_file() || before.permissions().mode() & 0o077 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "USB secret must be a private regular file",
+            ));
+        }
+        let file = std::fs::File::open(path)?;
+        let after = file.metadata()?;
+        use std::os::unix::fs::MetadataExt;
+        if !after.is_file()
+            || before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || after.permissions().mode() & 0o077 != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "USB secret file changed or is not private",
+            ));
+        }
+        file
+    };
+    #[cfg(windows)]
+    let file = routeloom_peercred::open_private_file_for_read(path)?;
     // The firmware's development USB credential is a printable ASCII string
     // of at most 63 bytes. Read one extra byte to reject oversized files.
     let mut secret = Vec::new();
@@ -4531,6 +4537,7 @@ mod tests {
         assert!(parse_args_from(["--usb-dev-secret-file".to_string()].into_iter()).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn usb_secret_file_is_private_exact_and_survives_reconnect() {
         use std::os::unix::fs::symlink;
@@ -4586,6 +4593,24 @@ mod tests {
         std::fs::write(&path, [b'a'; 64]).unwrap();
         assert!(load_usb_dev_secret(&path).is_err());
         std::fs::remove_file(link).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn usb_secret_file_requires_owner_only_dacl() {
+        let dir = env::temp_dir().join(format!("routeloom-usb-secret-{}", process::id()));
+        routeloom_peercred::create_private_dir_all(&dir).unwrap();
+        let path = dir.join("usb.key");
+        let mut file = routeloom_peercred::open_private_file_for_write(&path).unwrap();
+        file.write_all(b"private-usb-secret").unwrap();
+        drop(file);
+        assert_eq!(load_usb_dev_secret(&path).unwrap(), b"private-usb-secret");
+        let public = dir.join("public.key");
+        std::fs::write(&public, b"public-usb-secret").unwrap();
+        assert!(load_usb_dev_secret(&public).is_err());
+        std::fs::remove_file(public).unwrap();
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(dir).unwrap();
     }

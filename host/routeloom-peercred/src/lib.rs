@@ -285,6 +285,13 @@ pub fn open_private_file_for_write(path: &Path) -> io::Result<std::fs::File> {
     }
 }
 
+/// Opens a Windows private regular file without following a reparse point,
+/// then checks its owner and DACL on the opened handle.
+#[cfg(windows)]
+pub fn open_private_file_for_read(path: &Path) -> io::Result<std::fs::File> {
+    win_acl::open_private_file_for_read(path)
+}
+
 /// Opens the bridge serial port with exclusive access and raw 8N1 settings.
 pub fn open_serial(path: &Path) -> io::Result<std::fs::File> {
     #[cfg(windows)]
@@ -987,6 +994,7 @@ mod win_acl {
     use std::ffi::c_void;
     use std::io;
     use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
     use std::os::windows::io::FromRawHandle;
     use std::path::Path;
 
@@ -998,8 +1006,12 @@ mod win_acl {
     const SE_FILE_OBJECT: u32 = 1;
     const SE_DACL_PROTECTED: u16 = 0x1000;
     const GENERIC_WRITE: u32 = 0x4000_0000;
+    const GENERIC_READ: u32 = 0x8000_0000;
     const CREATE_NEW: u32 = 1;
+    const OPEN_EXISTING: u32 = 3;
     const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     const INVALID_HANDLE_VALUE: *mut c_void = -1isize as *mut c_void;
 
     #[repr(C)]
@@ -1048,6 +1060,16 @@ mod win_acl {
         ) -> i32;
         fn GetNamedSecurityInfoW(
             name: *const u16,
+            object_type: u32,
+            info: u32,
+            owner: *mut *mut c_void,
+            group: *mut *mut c_void,
+            dacl: *mut *mut c_void,
+            sacl: *mut *mut c_void,
+            descriptor: *mut *mut c_void,
+        ) -> u32;
+        fn GetSecurityInfo(
+            handle: *mut c_void,
             object_type: u32,
             info: u32,
             owner: *mut *mut c_void,
@@ -1195,50 +1217,106 @@ mod win_acl {
             if status != 0 {
                 return Err(io::Error::from_raw_os_error(status as i32));
             }
-            let result = (|| {
-                if owner.is_null() || dacl.is_null() || EqualSid(owner, current) == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "private path owner or DACL missing",
-                    ));
-                }
-                let mut control = 0;
-                let mut revision = 0;
-                if GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) == 0
-                    || control & SE_DACL_PROTECTED == 0
-                {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "private path DACL inherits grants",
-                    ));
-                }
-                let acl = &*(dacl.cast::<Acl>());
-                if acl.ace_count == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "private path DACL has no owner grant",
-                    ));
-                }
-                for index in 0..u32::from(acl.ace_count) {
-                    let mut ace = std::ptr::null_mut();
-                    if GetAce(dacl, index, &mut ace) == 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    // ACCESS_ALLOWED_ACE: header(4), mask(4), SID starts at byte 8.
-                    if *(ace.cast::<u8>()) != 0
-                        || EqualSid(ace.cast::<u8>().add(8).cast(), current) == 0
-                    {
-                        return Err(io::Error::new(
-                            io::ErrorKind::PermissionDenied,
-                            "private path grants another principal",
-                        ));
-                    }
-                }
-                Ok(())
-            })();
+            let result = verify_owner_descriptor(owner, dacl, descriptor, current);
             LocalFree(descriptor);
             result
         })
+    }
+
+    unsafe fn verify_owner_descriptor(
+        owner: *mut c_void,
+        dacl: *mut c_void,
+        descriptor: *mut c_void,
+        current: *mut c_void,
+    ) -> io::Result<()> {
+        if owner.is_null() || dacl.is_null() || EqualSid(owner, current) == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private path owner or DACL missing",
+            ));
+        }
+        let mut control = 0;
+        let mut revision = 0;
+        if GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) == 0
+            || control & SE_DACL_PROTECTED == 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private path DACL inherits grants",
+            ));
+        }
+        let acl = &*(dacl.cast::<Acl>());
+        if acl.ace_count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private path DACL has no owner grant",
+            ));
+        }
+        for index in 0..u32::from(acl.ace_count) {
+            let mut ace = std::ptr::null_mut();
+            if GetAce(dacl, index, &mut ace) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // ACCESS_ALLOWED_ACE: header(4), mask(4), SID starts at byte 8.
+            if *(ace.cast::<u8>()) != 0 || EqualSid(ace.cast::<u8>().add(8).cast(), current) == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "private path grants another principal",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_owner_handle(handle: *mut c_void) -> io::Result<()> {
+        current_sid(|current| unsafe {
+            let mut owner = std::ptr::null_mut();
+            let mut dacl = std::ptr::null_mut();
+            let mut descriptor = std::ptr::null_mut();
+            let status = GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut descriptor,
+            );
+            if status != 0 {
+                return Err(io::Error::from_raw_os_error(status as i32));
+            }
+            let result = verify_owner_descriptor(owner, dacl, descriptor, current);
+            LocalFree(descriptor);
+            result
+        })
+    }
+
+    pub fn open_private_file_for_read(path: &Path) -> io::Result<std::fs::File> {
+        unsafe {
+            let handle = CreateFileW(
+                wide(path.as_os_str()).as_ptr(),
+                GENERIC_READ,
+                0,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            );
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            let file = std::fs::File::from_raw_handle(handle);
+            let meta = file.metadata()?;
+            if !meta.is_file() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "private path is not a regular file",
+                ));
+            }
+            verify_owner_handle(handle)?;
+            Ok(file)
+        }
     }
 
     pub fn open_private_file_for_write(path: &Path) -> io::Result<std::fs::File> {
