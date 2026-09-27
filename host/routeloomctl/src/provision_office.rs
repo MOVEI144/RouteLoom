@@ -46,7 +46,7 @@ use routeloom_provision::sdkv1::devca::{
 };
 use routeloom_provision::sdkv1::identity::{
     identity_record_decode, identity_record_encode, AnchorKind, AnchorStatus, IdentityAnchor,
-    IDENTITY_SEAL_COMMITTED,
+    IDENTITY_RECORD_MAX, IDENTITY_SEAL_COMMITTED,
 };
 use routeloom_provision::sdkv1::office::{
     identity_build_injected, identity_bundle_json, inventory_file_json, inventory_json,
@@ -392,17 +392,15 @@ fn reuse_staged_key(inputs: &IssuanceInputs) -> Result<Option<StagedKey>, DynErr
     let staging = staging_dir(&inputs.out_dir, &inputs.work_id);
     let escrow = staging_key_file(&staging);
     let staged = staging.join("identity.rli1");
-    let saved = match std::fs::read(&escrow) {
+    match std::fs::symlink_metadata(&staging) {
+        Ok(_) => routeloom_peercred::verify_private_dir_perms(&staging)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    let saved = match read_staged_private(&escrow, 32) {
         Ok(bytes) => {
             if bytes.len() != 32 {
                 return Err(format!("{}: invalid staged key length", escrow.display()).into());
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if std::fs::metadata(&escrow)?.permissions().mode() & 0o077 != 0 {
-                    return Err(format!("{}: staged key is not private", escrow.display()).into());
-                }
             }
             let secret: [u8; 32] = bytes.try_into().expect("32 bytes");
             let pubkey = pubkey_from_secret(&secret).ok_or("staged key is invalid")?;
@@ -411,7 +409,7 @@ fn reuse_staged_key(inputs: &IssuanceInputs) -> Result<Option<StagedKey>, DynErr
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(format!("{}: {e}", escrow.display()).into()),
     };
-    let bytes = match std::fs::read(&staged) {
+    let bytes = match read_staged_private(&staged, IDENTITY_RECORD_MAX) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if saved.is_none() && staging.exists() && std::fs::read_dir(&staging)?.next().is_some()
@@ -441,6 +439,26 @@ fn reuse_staged_key(inputs: &IssuanceInputs) -> Result<Option<StagedKey>, DynErr
     sync_path(&escrow)?;
     sync_path(escrow.parent().unwrap_or(Path::new(".")))?;
     Ok(Some((record.key_material, record.kid)))
+}
+
+fn read_staged_private(path: &Path, max: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    #[cfg(windows)]
+    let file = routeloom_peercred::open_private_file_for_read(path)?;
+    #[cfg(not(windows))]
+    let file = {
+        routeloom_peercred::verify_private_file_perms(path)?;
+        std::fs::File::open(path)?
+    };
+    let mut bytes = Vec::new();
+    file.take(max as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > max {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "staged private file exceeds its bound",
+        ));
+    }
+    Ok(bytes)
 }
 
 /// Stage (fresh temp dir), verify, publish with one atomic rename.
@@ -1564,6 +1582,57 @@ mod tests {
     }
 
     #[test]
+    fn weak_staged_private_material_is_rejected() {
+        let (dir, key, spec) = office_setup("weak-staging");
+        let parent =
+            std::env::temp_dir().join(format!("rl-ctl-weak-staging-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir(&parent).unwrap();
+        let out = parent.join("out");
+        let opts = OfficeOptions::parse(
+            "provision-identity",
+            &identity_args(&key, &spec, "00a1000000001234", "90211", &out),
+            &[],
+        )
+        .unwrap();
+        let inputs = IssuanceInputs::from_options(&opts).unwrap();
+        let staging = staging_dir(&out, &inputs.work_id);
+        let escrow = staging_key_file(&staging);
+        let (secret, _) = test_keypair(0x54);
+        std::fs::write(&escrow, secret).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&escrow, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        assert!(routeloom_peercred::verify_private_file_perms(&escrow).is_err());
+        assert!(reuse_staged_key(&inputs).is_err());
+        std::fs::remove_file(&escrow).unwrap();
+
+        let signer = FileDeviceCaSigner::load(&key).unwrap();
+        let challenge = pop_challenge().unwrap();
+        let pop = pop_sign(&secret, inputs.node, KeyLocation::NvsPlaintext, &challenge).unwrap();
+        let verified = pop_verify(&pop, inputs.node, &challenge).unwrap();
+        let devcert = devcert_issue(&signer, &verified, &inputs.profile).unwrap();
+        let record = identity_build_injected(&inputs.plan, &secret, &devcert).unwrap();
+        std::fs::create_dir(&staging).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        write_private_file(
+            &staging.join("identity.rli1"),
+            &identity_record_encode(&record, IDENTITY_SEAL_COMMITTED).unwrap(),
+        )
+        .unwrap();
+        assert!(routeloom_peercred::verify_private_dir_perms(&staging).is_err());
+        assert!(reuse_staged_key(&inputs).is_err());
+        std::fs::remove_dir_all(parent).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn spec_parsing() {
         let doc = routeloom_json::parse(&spec_text()).unwrap();
         let (profile, plan) = identity_spec(&doc, 0x1234, 9).unwrap();
@@ -2110,10 +2179,10 @@ mod tests {
         let devcert = devcert_issue(&signer, &verified, &profile).unwrap();
         let record = identity_build_injected(&plan, &secret, &devcert).unwrap();
         let staging = staging_dir(&out, &work);
-        std::fs::create_dir_all(&staging).unwrap();
-        std::fs::write(
-            staging.join("identity.rli1"),
-            identity_record_encode(&record, IDENTITY_SEAL_COMMITTED).unwrap(),
+        routeloom_peercred::create_private_dir_all(&staging).unwrap();
+        write_private_file(
+            &staging.join("identity.rli1"),
+            &identity_record_encode(&record, IDENTITY_SEAL_COMMITTED).unwrap(),
         )
         .unwrap();
         let staged_kid = record.kid;
@@ -2152,7 +2221,7 @@ mod tests {
             )
             .unwrap();
         let staging = staging_dir(&out, &work);
-        std::fs::create_dir(&staging).unwrap();
+        routeloom_peercred::create_private_dir_all(&staging).unwrap();
         std::fs::write(staging.join("devcert.cwt"), b"signed but key lost").unwrap();
         assert!(provision_identity_command(&identity_args(
             &key,
@@ -2184,7 +2253,7 @@ mod tests {
             )
             .unwrap();
         let staging = staging_dir(&out, &work);
-        std::fs::create_dir(&staging).unwrap();
+        routeloom_peercred::create_private_dir_all(&staging).unwrap();
         std::fs::write(staging.join("devcert.cwt"), b"prior signed attempt").unwrap();
         let escrow = PathBuf::from(format!("{}.key", staging.display()));
         let (secret, pubkey) = test_keypair(0x54);
