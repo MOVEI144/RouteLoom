@@ -39,8 +39,9 @@ bool inject_rx(const std::uint8_t source[6], const std::uint8_t dest[6],
 bool complete_send(bool success) noexcept;
 // One captured esp_now_send payload (ESP_NOW_MAX_DATA_LEN body max).
 struct TxFrame {
+  static constexpr std::size_t kMaxBytes = 280;
   std::uint8_t dest[6]{};
-  std::uint8_t data[250]{};
+  std::uint8_t bytes[kMaxBytes]{};
   std::size_t length{0};
 };
 // Pops the oldest captured TX frame; false when the capture queue is
@@ -49,5 +50,10 @@ struct TxFrame {
 bool take_tx(TxFrame& out) noexcept;
 std::size_t tx_pending() noexcept;
 unsigned tx_overruns() noexcept;
+
+// Pop the oldest captured TX frame; false when the capture ring is empty.
+bool pop_tx(TxFrame& out) noexcept;
+// TX frames dropped because the capture ring was full or oversized.
+unsigned tx_drops() noexcept;
 
 }  // namespace idf_stub

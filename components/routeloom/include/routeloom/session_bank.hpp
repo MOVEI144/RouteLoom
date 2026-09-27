@@ -272,6 +272,9 @@ class SessionBank {
               MutableByteView plaintext) noexcept;
 
   // Inspection for the Owner/tests (side-effect-free, guard-transparent).
+  // The health surface reports live_count beside these fixed bounds.
+  static constexpr std::size_t link_capacity() noexcept { return kLinkCapacity; }
+  static constexpr std::size_t end_capacity() noexcept { return kEndCapacity; }
   std::size_t live_count(SecurityScope scope) const noexcept;
   bool has_usable(SecurityScope scope, NodeId peer) const noexcept;
   // Verified peer summary for the Owner's AuthenticatedPeerView: true

@@ -1,0 +1,204 @@
+{
+  "c3-node2": {
+    "primitive": {
+      "ECDH": {
+        "count": 1,
+        "min_us": 129911,
+        "median_us": 129911,
+        "p95_us": 129911.0,
+        "max_us": 129911,
+        "failed": 0
+      },
+      "SIGN": {
+        "count": 1,
+        "min_us": 137702,
+        "median_us": 137702,
+        "p95_us": 137702.0,
+        "max_us": 137702,
+        "failed": 0
+      },
+      "VERIFY": {
+        "count": 1,
+        "min_us": 155846,
+        "median_us": 155846,
+        "p95_us": 155846.0,
+        "max_us": 155846,
+        "failed": 0
+      }
+    },
+    "handshake": {
+      "count": 1,
+      "min_us": 2119772,
+      "median_us": 2119772,
+      "p95_us": 2119772.0,
+      "max_us": 2119772
+    },
+    "handshake_by_scope": {
+      "0": {
+        "count": 1,
+        "min_us": 2119772,
+        "median_us": 2119772,
+        "p95_us": 2119772.0,
+        "max_us": 2119772
+      }
+    },
+    "lowest_handshake_heap_free_b": 22276,
+    "lowest_handshake_heap_min_b": 22008,
+    "stack_min_remaining_b": {
+      "main": 10136
+    }
+  },
+  "c3-node3": {
+    "primitive": {
+      "ECDH": {
+        "count": 6,
+        "min_us": 130606,
+        "median_us": 130773.0,
+        "p95_us": 131231.25,
+        "max_us": 131239,
+        "failed": 0
+      },
+      "SIGN": {
+        "count": 6,
+        "min_us": 138331,
+        "median_us": 138375.0,
+        "p95_us": 138665.75,
+        "max_us": 138675,
+        "failed": 0
+      },
+      "VERIFY": {
+        "count": 6,
+        "min_us": 150347,
+        "median_us": 153869.5,
+        "p95_us": 157381.25,
+        "max_us": 158080,
+        "failed": 0
+      }
+    },
+    "handshake": {
+      "count": 3,
+      "min_us": 1965924,
+      "median_us": 2109021,
+      "p95_us": 2234895.0,
+      "max_us": 2248881
+    },
+    "handshake_by_scope": {
+      "0": {
+        "count": 2,
+        "min_us": 1965924,
+        "median_us": 2037472.5,
+        "p95_us": 2101866.15,
+        "max_us": 2109021
+      },
+      "1": {
+        "count": 1,
+        "min_us": 2248881,
+        "median_us": 2248881,
+        "p95_us": 2248881.0,
+        "max_us": 2248881
+      }
+    },
+    "lowest_handshake_heap_free_b": 22084,
+    "lowest_handshake_heap_min_b": 21428,
+    "stack_min_remaining_b": {
+      "main": 8392
+    }
+  },
+  "c6-node4": {
+    "primitive": {
+      "ECDH": {
+        "count": 3,
+        "min_us": 126782,
+        "median_us": 126828,
+        "p95_us": 127216.8,
+        "max_us": 127260,
+        "failed": 0
+      },
+      "SIGN": {
+        "count": 3,
+        "min_us": 133980,
+        "median_us": 134132,
+        "p95_us": 134404.7,
+        "max_us": 134435,
+        "failed": 0
+      },
+      "VERIFY": {
+        "count": 3,
+        "min_us": 146393,
+        "median_us": 148887,
+        "p95_us": 153378.0,
+        "max_us": 153877,
+        "failed": 0
+      }
+    },
+    "handshake": {
+      "count": 2,
+      "min_us": 1830966,
+      "median_us": 2086357.5,
+      "p95_us": 2316209.85,
+      "max_us": 2341749
+    },
+    "handshake_by_scope": {
+      "0": {
+        "count": 1,
+        "min_us": 1830966,
+        "median_us": 1830966,
+        "p95_us": 1830966.0,
+        "max_us": 1830966
+      },
+      "1": {
+        "count": 1,
+        "min_us": 2341749,
+        "median_us": 2341749,
+        "p95_us": 2341749.0,
+        "max_us": 2341749
+      }
+    },
+    "lowest_handshake_heap_free_b": 106324,
+    "lowest_handshake_heap_min_b": 105828,
+    "stack_min_remaining_b": {
+      "main": 9424
+    }
+  },
+  "c6-node5": {
+    "primitive": {
+      "ECDH": {
+        "count": 0,
+        "min_us": null,
+        "median_us": null,
+        "p95_us": null,
+        "max_us": null,
+        "failed": 0
+      },
+      "SIGN": {
+        "count": 0,
+        "min_us": null,
+        "median_us": null,
+        "p95_us": null,
+        "max_us": null,
+        "failed": 0
+      },
+      "VERIFY": {
+        "count": 0,
+        "min_us": null,
+        "median_us": null,
+        "p95_us": null,
+        "max_us": null,
+        "failed": 0
+      }
+    },
+    "handshake": {
+      "count": 0,
+      "min_us": null,
+      "median_us": null,
+      "p95_us": null,
+      "max_us": null
+    },
+    "handshake_by_scope": {},
+    "lowest_handshake_heap_free_b": null,
+    "lowest_handshake_heap_min_b": null,
+    "stack_min_remaining_b": {
+      "main": 7664
+    }
+  }
+}

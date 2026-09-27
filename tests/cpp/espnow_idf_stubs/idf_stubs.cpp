@@ -147,6 +147,10 @@ std::size_t tx_pending() noexcept { return g_tx_count; }
 
 unsigned tx_overruns() noexcept { return g_tx_overruns; }
 
+bool pop_tx(TxFrame& out) noexcept { return take_tx(out); }
+
+unsigned tx_drops() noexcept { return tx_overruns(); }
+
 }  // namespace idf_stub
 
 int64_t esp_timer_get_time(void) { return g_now_us; }
@@ -322,7 +326,7 @@ esp_err_t esp_now_send(const uint8_t* peer_addr, const uint8_t* data,
   if (g_tx_count < kTxCaptureCapacity) {
     idf_stub::TxFrame& slot = g_tx_queue[(g_tx_head + g_tx_count) % kTxCaptureCapacity];
     std::memcpy(slot.dest, g_last_dest, sizeof(slot.dest));
-    if (len != 0) std::memcpy(slot.data, data, len);
+    if (len != 0) std::memcpy(slot.bytes, data, len);
     slot.length = len;
     ++g_tx_count;
   } else {

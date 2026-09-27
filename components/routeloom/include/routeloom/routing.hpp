@@ -228,6 +228,12 @@ class RouteTable {
   // selection toward `destination` (0 = no selection). Read-only:
   // selection, feasibility and leases never read it.
   MonotonicMs selection_expires_at(NodeId destination) const noexcept;
+  // Remaining lease of the CURRENTLY selected candidate for `destination`
+  // (now_ms on the device monotonic clock; saturates at UINT32_MAX). Pure
+  // read: selection, leases and advertisement baselines are untouched.
+  // False when the destination is unknown or has no valid selection.
+  bool selection_remaining(NodeId destination, MonotonicMs now_ms,
+                           MonotonicMs& remaining_ms) const noexcept;
   bool mark_advertised(NodeId destination) noexcept;
   // Scoped-profile scheduling flag (see Entry::announced_up). Pure
   // bookkeeping: selection, feasibility and leases never read it.
@@ -241,6 +247,13 @@ class RouteTable {
   NodeId request_next_hop(NodeId destination, std::size_t attempt,
                           NodeId exclude_a = kInvalidNodeId,
                           NodeId exclude_b = kInvalidNodeId) const noexcept;
+
+  // The next hop this entry last lost to link evidence (an
+  // invalidate_next_hop hold-down): the peer whose repair most likely
+  // restores the route. kInvalidNodeId when no hold was applied, the entry
+  // was withdrawn/retargeted, or the destination is unknown. Pure read —
+  // hold bookkeeping is untouched.
+  NodeId repair_hint(NodeId destination) const noexcept;
 
   template <typename Fn>
   void for_each_sequence_request(Fn fn) const noexcept {

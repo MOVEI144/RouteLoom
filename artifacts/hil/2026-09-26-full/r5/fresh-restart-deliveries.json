@@ -1,0 +1,1 @@
+{"deliveries":[{"request":1,"destination":0,"state":"expired","reason":"DEADLINE_EXPIRED","msg_session":3641353823,"msg_seq":1,"updated_ms":1790452631873},{"request":2,"destination":6,"state":"expired","reason":"DEADLINE_EXPIRED","msg_session":3641353823,"msg_seq":2,"updated_ms":1790452631882}]}

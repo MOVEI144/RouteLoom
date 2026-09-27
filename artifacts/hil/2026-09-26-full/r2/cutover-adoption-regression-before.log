@@ -1,0 +1,5 @@
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_sdkv1_revocation.cpp:2654: static_cast<std::uint8_t>(action.reason) == 3
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_sdkv1_revocation.cpp:2679: static_cast<std::uint8_t>(action.reason) == 3
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/cpp/test_sdkv1_revocation.cpp:2702: static_cast<std::uint8_t>(action.reason) == 3
+3 p6 revocation check(s) failed
+sizeof MembershipLifecycle=5904 RrsExchange=1488 RevocationSet=544

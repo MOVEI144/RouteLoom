@@ -5,8 +5,12 @@ use routeloom_provision::signer::{hex_encode, test_keypair};
 
 #[test]
 fn site_cert_receipt_escapes_output_path() {
+    #[cfg(windows)]
+    let name = "routeloom-site receipt";
+    #[cfg(not(windows))]
+    let name = "routeloom-site-\"receipt";
     let dir = std::env::temp_dir().join(format!(
-        "routeloom-site-\"receipt-{}-{}",
+        "{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -48,6 +52,8 @@ fn site_cert_receipt_escapes_output_path() {
     );
     let stdout = String::from_utf8(result.stdout).unwrap();
     assert_eq!(stdout.lines().count(), 1);
+    #[cfg(windows)]
+    assert!(out.to_str().unwrap().contains('\\'));
     let receipt = routeloom_json::parse(stdout.trim()).unwrap();
     assert_eq!(
         receipt.get("cert_file").and_then(|value| value.as_str()),
@@ -59,8 +65,12 @@ fn site_cert_receipt_escapes_output_path() {
 
 #[test]
 fn site_ca_keygen_receipt_escapes_output_path() {
+    #[cfg(windows)]
+    let name = "routeloom-ca receipt";
+    #[cfg(not(windows))]
+    let name = "routeloom-ca-\"receipt";
     let dir = std::env::temp_dir().join(format!(
-        "routeloom-ca-\"receipt-{}-{}",
+        "{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -86,6 +96,8 @@ fn site_ca_keygen_receipt_escapes_output_path() {
     );
     let stdout = String::from_utf8(result.stdout).unwrap();
     assert_eq!(stdout.lines().count(), 1);
+    #[cfg(windows)]
+    assert!(out.to_str().unwrap().contains('\\'));
     let receipt = routeloom_json::parse(stdout.trim()).unwrap();
     assert_eq!(
         receipt.get("key_file").and_then(|value| value.as_str()),

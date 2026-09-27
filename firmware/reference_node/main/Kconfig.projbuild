@@ -13,6 +13,20 @@ config ROUTELOOM_CHANNEL
     range 1 13
     default 6
 
+config ROUTELOOM_HIL_SEND_DESTINATION
+    hex "HIL-only device-originated unicast destination (0 disables)"
+    default 0x0
+    help
+        Bench-only application traffic emitted by this reference node after
+        boot. Keep at zero for normal images. The receiver console records
+        the origin, so a device-to-device path can be tested without USB.
+
+config ROUTELOOM_HIL_SEND_COUNT
+    int "HIL-only device-originated unicast attempts"
+    range 0 100
+    default 0
+    depends on ROUTELOOM_HIL_SEND_DESTINATION != 0
+
 config ROUTELOOM_TX_POWER_QDBM
     int "Approved test profile TX power, quarter-dBm"
     range 8 80
@@ -252,6 +266,19 @@ config ROUTELOOM_TELEMETRY_REMOTE
         TelemetryQuery frames with bounded 128-byte snapshots of its
         measured link state. Collection is always on; this only controls
         remote answering (02-telemetry §4.2 opt-in).
+
+config ROUTELOOM_OBSERVATION_REMOTE
+    bool "Answer remote Diagnostic (48) observation queries over the mesh"
+    default n
+    help
+        The node serves its read-only observation sections to
+        end-protected RemoteObservationQuery frames (subtype 7). This
+        only compiles the responder in; answering is a runtime
+        decision: adopted coordinator modes (Member, Dev) answer and
+        every other mode refuses, re-evaluated each pump. The legacy
+        fixture profile has no enrollment, so there the build opt-in
+        itself is the membership claim (same DEV standing as
+        ROUTELOOM_DISCOVERY_MEMBER).
 
 config ROUTELOOM_MIGRATION
     int "Channel migration mode (0=Disabled, 1=Observe, 2=Manual)"

@@ -129,13 +129,8 @@ pub fn open_dir(dir: &Path, now_ms: u64) -> Result<SiteAuthority, String> {
         if !metadata.file_type().is_file() {
             return Err("lab manifest must be a regular file, not a symlink".into());
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if metadata.permissions().mode() & 0o077 != 0 {
-                return Err("lab manifest must be private (0600)".into());
-            }
-        }
+        routeloom_peercred::verify_private_file_perms(&dir.join("lab-manifest.json"))
+            .map_err(|e| format!("lab manifest must be private: {e}"))?;
         let text = std::fs::read_to_string(dir.join("lab-manifest.json"))
             .map_err(|e| format!("lab manifest: {e}"))?;
         let manifest =
@@ -176,13 +171,8 @@ pub fn open_dir(dir: &Path, now_ms: u64) -> Result<SiteAuthority, String> {
             if !journal_meta.file_type().is_file() {
                 return Err("lab initialization journal is not a regular file".into());
             }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if journal_meta.permissions().mode() & 0o077 != 0 {
-                    return Err("lab initialization journal must be private (0600)".into());
-                }
-            }
+            routeloom_peercred::verify_private_file_perms(&journal_path)
+                .map_err(|e| format!("lab initialization journal must be private: {e}"))?;
             let journal = std::fs::read_to_string(&journal_path)
                 .map_err(|e| format!("lab initialization journal: {e}"))?;
             let lines: Vec<_> = journal.lines().collect();
@@ -227,13 +217,8 @@ pub fn open_dir(dir: &Path, now_ms: u64) -> Result<SiteAuthority, String> {
             if !inventory_meta.file_type().is_file() {
                 return Err("lab inventory database is not a regular file".into());
             }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if inventory_meta.permissions().mode() & 0o077 != 0 {
-                    return Err("lab inventory database must be private (0600)".into());
-                }
-            }
+            routeloom_peercred::verify_private_file_perms(&path)
+                .map_err(|e| format!("lab inventory database must be private: {e}"))?;
             let db = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .map_err(|e| format!("lab inventory: {e}"))?;
             // Rows and revision must come from one snapshot; an import
@@ -325,7 +310,7 @@ mod tests {
             std::process::id(),
             crate::now_ms()
         ));
-        std::fs::create_dir(&dir).unwrap();
+        routeloom_peercred::create_private_dir_all(&dir).unwrap();
         let setup = testkit::setup();
         std::fs::write(dir.join(CONFIG_FILE), config_json(&setup)).unwrap();
         testkit::sak().save(&dir.join(SAK_FILE)).unwrap();
@@ -387,7 +372,7 @@ mod tests {
             std::process::id(),
             crate::now_ms()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
+        routeloom_peercred::create_private_dir_all(&dir).unwrap();
         let setup = testkit::setup();
         std::fs::write(dir.join(CONFIG_FILE), config_json(&setup)).unwrap();
         testkit::sak().save(&dir.join(SAK_FILE)).unwrap();

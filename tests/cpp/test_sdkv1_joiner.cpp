@@ -2867,6 +2867,29 @@ void test_direct_deny_parks_stopped() {
   current.clear();
 }
 
+void test_direct_pending_retries_without_usb_reconnect() {
+  current = "direct-pending-retries";
+  AuthorityPolicy policy;
+  policy.verdict = JoinVerdict::PendingAssignment;
+  policy.retry_after_s = 60;
+  DirectRig rig(policy);
+  DeviceEnds& dev = rig.device();
+  CHECK(dev.joiner.start_direct(boot_input(), rig.port(), 0).ok());
+  CHECK(rig.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::Backoff; }, 30000));
+  const std::uint64_t pending_at = rig.now();
+  CHECK(dev.joiner.snapshot().counters.attempts == 1);
+  rig.authority().policy.verdict = JoinVerdict::Allow;
+  rig.authority().policy.retry_after_s = 0;
+  CHECK(rig.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::Ready; }, 65000));
+  CHECK(rig.now() >= pending_at + 60000);
+  CHECK(dev.joiner.snapshot().counters.attempts == 2);
+  CHECK(rig.port().ups.size() == 4);
+  CHECK(dev.air.empty());
+  current.clear();
+}
+
 void test_direct_edges() {
   current = "direct edges";
   DirectRig rig;
@@ -3003,6 +3026,7 @@ int main() {
   test_direct_refresh_rechecks_after_transient_read_error();
   test_direct_initial_join_retries_after_transient_read_error();
   test_direct_deny_parks_stopped();
+  test_direct_pending_retries_without_usb_reconnect();
   test_direct_edges();
   test_commit_policy_deny_no_write();
   if (failures == 0) {

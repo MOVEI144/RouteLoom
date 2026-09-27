@@ -1,0 +1,120 @@
+{
+  "traffic": {
+    "all": {
+      "accepted": 100,
+      "delivered": 100,
+      "success_rate": 1.0,
+      "latency_ms_median": 104.18,
+      "latency_ms_p95": 155.55,
+      "latency_ms_max": 335.65,
+      "outcomes": {
+        "delivered:END_RECEIVED": 100
+      }
+    },
+    "by_destination": {
+      "2": {
+        "accepted": 50,
+        "delivered": 50,
+        "success_rate": 1.0,
+        "latency_ms_median": 58.16,
+        "latency_ms_p95": 104.52,
+        "latency_ms_max": 115.15,
+        "outcomes": {
+          "delivered:END_RECEIVED": 50
+        }
+      },
+      "3": {
+        "accepted": 50,
+        "delivered": 50,
+        "success_rate": 1.0,
+        "latency_ms_median": 113.82,
+        "latency_ms_p95": 162.9,
+        "latency_ms_max": 335.65,
+        "outcomes": {
+          "delivered:END_RECEIVED": 50
+        }
+      }
+    },
+    "admission_retries": 0,
+    "first_admitted_unix": 1790429578.8333426,
+    "last_admitted_unix": 1790433241.830727,
+    "admission_span_s": 3663.0
+  },
+  "health": {
+    "samples": 127,
+    "authenticated_samples": 127,
+    "bridge_sessions": 1,
+    "bridge_boots_seen": [
+      307
+    ],
+    "max_protocol_errors": 0,
+    "route_samples_by_destination": {
+      "0000000000000003": 127,
+      "0000000000000002": 127
+    },
+    "rssi_dbm_by_destination": {
+      "0000000000000002": {
+        "samples": 127,
+        "min": -41,
+        "median": -29,
+        "max": -28
+      }
+    },
+    "event_kinds": {
+      "adapter": 1,
+      "hello_ack": 1,
+      "auth_ok": 1,
+      "credit_grant": 486,
+      "dispatch": 1,
+      "host_ops_rx": 1,
+      "node_joined": 3,
+      "link_changed": 1,
+      "delivery_event": 638,
+      "diagnostic": 100,
+      "credit_query": 69
+    },
+    "observation_span_s": 3780.0
+  },
+  "console": {
+    "2": {
+      "heap_samples": 64,
+      "boot_ids_seen": [],
+      "stack_min_remaining_b": {
+        "main": 11096
+      },
+      "stale_events": 0,
+      "boot_heap_below_floor": 0,
+      "usb_connects": 0,
+      "usb_disconnects": 0,
+      "first_free_b": 21708,
+      "last_free_b": 21708,
+      "free_delta_b": 0,
+      "minimum_free_b": 21708,
+      "first_largest_b": 18432,
+      "last_largest_b": 18432,
+      "largest_delta_b": 0,
+      "minimum_largest_b": 18432,
+      "minimum_ever_free_b": 20932
+    },
+    "3": {
+      "heap_samples": 64,
+      "boot_ids_seen": [],
+      "stack_min_remaining_b": {
+        "main": 11096
+      },
+      "stale_events": 0,
+      "boot_heap_below_floor": 0,
+      "usb_connects": 0,
+      "usb_disconnects": 0,
+      "first_free_b": 22040,
+      "last_free_b": 22040,
+      "free_delta_b": 0,
+      "minimum_free_b": 22040,
+      "first_largest_b": 19456,
+      "last_largest_b": 19456,
+      "largest_delta_b": 0,
+      "minimum_largest_b": 19456,
+      "minimum_ever_free_b": 21292
+    }
+  }
+}

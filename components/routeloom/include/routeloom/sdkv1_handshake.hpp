@@ -423,6 +423,9 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   // Single EDHOC flight state (the engine runs at most one).
   struct EdhocFlight {
     bool active{false};
+#if defined(ESP_PLATFORM) && CONFIG_ROUTELOOM_HIL_EDHOC_TIMING
+    std::int64_t hil_started_us{0};
+#endif
     std::uint32_t owner_token{0};
     HandshakeRole role{HandshakeRole::Initiator};
     std::uint32_t cid_own{0};   // our C_x (nonzero u32)

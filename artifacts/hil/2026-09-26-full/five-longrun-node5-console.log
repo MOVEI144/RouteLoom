@@ -1,0 +1,266 @@
+[2026-09-26T08:56:07.328+00:00] !! connected /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00
+[2026-09-26T08:56:57.604+00:00] I (338) esp_image: segment 3: paddr=00150fc4 vaddr=408027a4 sizeI (60469) RouteLoom: stack hwm main 11096 B
+[2026-09-26T08:56:57.605+00:00] I (60469) RouteLoom: HIL HEAP free=106572 largest=90112 min=105792 B
+[2026-09-26T08:57:57.493+00:00] I (120469) RouteLoom: stack hwm main 11096 B
+[2026-09-26T08:57:57.493+00:00] I (120469) RouteLoom: HIL HEAP free=106572 largest=90112 min=105792 B
+[2026-09-26T08:58:57.570+00:00] I (180469) RouteLoom: stack hwm main 11096 B
+[2026-09-26T08:58:57.570+00:00] I (180469) RouteLoom: HIL HEAP free=106572 largest=90112 min=105792 B
+[2026-09-26T08:59:57.453+00:00] I (240470) RouteLoom: stack hwm main 11096 B
+[2026-09-26T08:59:57.453+00:00] I (240470) RouteLoom: HIL HEAP free=106516 largest=90112 min=105728 B
+[2026-09-26T09:00:38.525+00:00] W (281384) RouteLoomRef: diagnostic reason=session unknown context peer=2 message=present
+[2026-09-26T09:00:38.525+00:00] I (281422) RouteLoomRef: message origin=1 session=242 sequence=10 bytes=9
+[2026-09-26T09:00:57.550+00:00] I (300470) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:00:57.550+00:00] I (300470) RouteLoom: HIL HEAP free=106516 largest=90112 min=105728 B
+[2026-09-26T09:01:57.444+00:00] I (360470) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:01:57.444+00:00] I (360470) RouteLoom: HIL HEAP free=106572 largest=90112 min=105728 B
+[2026-09-26T09:02:57.535+00:00] I (420470) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:02:57.535+00:00] I (420470) RouteLoom: HIL HEAP free=106572 largest=90112 min=105728 B
+[2026-09-26T09:03:06.346+00:00] I (429209) RouteLoomRef: message origin=1 session=242 sequence=19 bytes=9
+[2026-09-26T09:03:57.422+00:00] I (480471) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:03:57.422+00:00] I (480471) RouteLoom: HIL HEAP free=106516 largest=90112 min=105728 B
+[2026-09-26T09:04:57.515+00:00] I (540472) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:04:57.515+00:00] I (540472) RouteLoom: HIL HEAP free=106572 largest=90112 min=105728 B
+[2026-09-26T09:05:34.170+00:00] I (577209) RouteLoomRef: message origin=1 session=242 sequence=23 bytes=9
+[2026-09-26T09:05:57.429+00:00] I (600472) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:05:57.429+00:00] I (600472) RouteLoom: HIL HEAP free=106572 largest=90112 min=105728 B
+[2026-09-26T09:06:57.515+00:00] I (660472) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:06:57.515+00:00] I (660472) RouteLoom: HIL HEAP free=106572 largest=90112 min=105728 B
+[2026-09-26T09:07:57.611+00:00] I (720473) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:07:57.611+00:00] I (720473) RouteLoom: HIL HEAP free=106572 largest=90112 min=105728 B
+[2026-09-26T09:08:02.220+00:00] I (725218) RouteLoomRef: message origin=1 session=242 sequence=27 bytes=9
+[2026-09-26T09:08:52.700+00:00] I (775601) RouteLoomRef: discovery event=STALE peer=2
+[2026-09-26T09:08:52.700+00:00] W (775601) RouteLoomRef: diagnostic reason=STALE peer=2 message=none
+[2026-09-26T09:08:54.702+00:00] I (777601) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:08:54.702+00:00] W (777602) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:08:57.508+00:00] I (780473) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:08:57.508+00:00] I (780473) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:09:15.935+00:00] I (798797) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-26T09:09:15.935+00:00] W (798797) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-26T09:09:15.935+00:00] I (798799) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:09:15.935+00:00] W (798804) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:09:27.151+00:00] I (810022) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:09:27.151+00:00] W (810023) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:09:57.395+00:00] I (840388) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:09:57.395+00:00] W (840389) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:09:57.596+00:00] I (840474) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:09:57.596+00:00] I (840474) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:10:25.032+00:00] I (867956) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:10:25.032+00:00] W (867957) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:10:52.670+00:00] W (895604) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=2 message=present
+[2026-09-26T09:10:57.477+00:00] I (900474) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:10:57.477+00:00] I (900474) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:11:20.106+00:00] I (923093) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:11:20.106+00:00] W (923093) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:11:57.573+00:00] I (960474) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:11:57.573+00:00] I (960474) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:12:20.207+00:00] I (983093) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:12:20.207+00:00] W (983093) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:12:57.492+00:00] I (1020475) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:12:57.493+00:00] I (1020475) RouteLoom: HIL HEAP free=106564 largest=90112 min=105728 B
+[2026-09-26T09:13:20.135+00:00] I (1043094) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:13:20.135+00:00] W (1043094) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:13:22.743+00:00] W (1045608) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=2 message=present
+[2026-09-26T09:13:57.602+00:00] I (1080476) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:13:57.603+00:00] I (1080476) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:14:20.040+00:00] I (1103095) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:14:20.040+00:00] W (1103095) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:14:44.084+00:00] I (1127053) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-26T09:14:44.084+00:00] W (1127053) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-26T09:14:57.522+00:00] I (1140476) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:14:57.522+00:00] I (1140476) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:15:20.049+00:00] I (1163095) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:15:20.050+00:00] W (1163095) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:15:52.624+00:00] W (1195613) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=2 message=present
+[2026-09-26T09:15:57.433+00:00] I (1200476) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:15:57.433+00:00] I (1200476) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:16:20.065+00:00] I (1223095) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:16:20.065+00:00] W (1223095) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:16:57.519+00:00] I (1260477) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:16:57.519+00:00] I (1260477) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:17:20.167+00:00] I (1283096) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:17:20.167+00:00] W (1283096) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:17:57.431+00:00] I (1320477) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:17:57.431+00:00] I (1320477) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:18:20.064+00:00] I (1343096) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:18:20.064+00:00] W (1343096) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:18:57.529+00:00] I (1380478) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:18:57.529+00:00] I (1380478) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:19:20.171+00:00] I (1403097) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:19:20.171+00:00] W (1403097) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:19:57.431+00:00] I (1440479) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:19:57.431+00:00] I (1440479) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:20:20.058+00:00] I (1463098) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:20:20.058+00:00] W (1463098) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:20:57.507+00:00] I (1500479) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:20:57.507+00:00] I (1500479) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:21:20.137+00:00] I (1523098) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:21:20.137+00:00] W (1523098) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:21:57.595+00:00] I (1560480) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:21:57.595+00:00] I (1560480) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:22:20.229+00:00] I (1583099) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:22:20.229+00:00] W (1583099) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:22:30.643+00:00] I (1593546) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-26T09:22:30.643+00:00] W (1593546) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-26T09:22:57.485+00:00] I (1620481) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:22:57.485+00:00] I (1620481) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:23:20.115+00:00] I (1643100) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:23:20.115+00:00] W (1643100) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:23:57.567+00:00] I (1680482) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:23:57.567+00:00] I (1680482) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:24:20.203+00:00] I (1703101) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:24:20.203+00:00] W (1703101) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:24:57.453+00:00] I (1740482) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:24:57.453+00:00] I (1740482) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:25:20.088+00:00] I (1763101) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:25:20.088+00:00] W (1763101) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:25:57.540+00:00] I (1800483) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:25:57.540+00:00] I (1800483) RouteLoom: HIL HEAP free=106564 largest=90112 min=105728 B
+[2026-09-26T09:26:20.171+00:00] I (1823102) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:26:20.171+00:00] W (1823102) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:26:57.422+00:00] I (1860484) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:26:57.422+00:00] I (1860484) RouteLoom: HIL HEAP free=106564 largest=90112 min=105728 B
+[2026-09-26T09:27:20.051+00:00] I (1883103) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:27:20.051+00:00] W (1883103) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:27:57.508+00:00] I (1920485) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:27:57.508+00:00] I (1920485) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:28:20.137+00:00] I (1943104) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:28:20.137+00:00] W (1943104) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:28:57.588+00:00] I (1980486) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:28:57.589+00:00] I (1980486) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:29:20.218+00:00] I (2003105) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:29:20.218+00:00] W (2003106) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:29:57.471+00:00] I (2040487) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:29:57.471+00:00] I (2040487) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:30:20.105+00:00] I (2063106) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:30:20.105+00:00] W (2063106) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:30:44.946+00:00] I (2087965) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-26T09:30:44.946+00:00] W (2087965) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-26T09:30:57.564+00:00] I (2100488) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:30:57.565+00:00] I (2100488) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:31:20.198+00:00] I (2123107) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:31:20.198+00:00] W (2123107) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:31:57.452+00:00] I (2160489) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:31:57.452+00:00] I (2160489) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:32:20.083+00:00] I (2183108) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:32:20.083+00:00] W (2183108) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:32:57.536+00:00] I (2220490) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:32:57.536+00:00] I (2220490) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:33:20.178+00:00] I (2243109) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:33:20.178+00:00] W (2243109) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:33:57.434+00:00] I (2280491) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:33:57.434+00:00] I (2280491) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:34:20.065+00:00] I (2303110) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:34:20.065+00:00] W (2303110) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:34:57.516+00:00] I (2340491) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:34:57.516+00:00] I (2340491) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:35:20.150+00:00] I (2363110) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:35:20.150+00:00] W (2363110) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:35:57.616+00:00] I (2400492) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:35:57.616+00:00] I (2400492) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:36:20.046+00:00] I (2423111) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:36:20.247+00:00] W (2423111) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:36:57.495+00:00] I (2460493) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:36:57.495+00:00] I (2460493) RouteLoom: HIL HEAP free=106564 largest=90112 min=105728 B
+[2026-09-26T09:37:20.131+00:00] I (2483112) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:37:20.131+00:00] W (2483112) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:37:57.583+00:00] I (2520494) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:37:57.583+00:00] I (2520494) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:38:20.220+00:00] I (2543113) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:38:20.220+00:00] W (2543113) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:38:49.664+00:00] I (2572628) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-26T09:38:49.664+00:00] W (2572628) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-26T09:38:57.474+00:00] I (2580495) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:38:57.474+00:00] I (2580495) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:39:20.108+00:00] I (2603114) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:39:20.108+00:00] W (2603114) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:39:57.560+00:00] I (2640496) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:39:57.560+00:00] I (2640496) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:40:20.192+00:00] I (2663115) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:40:20.192+00:00] W (2663115) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:40:57.454+00:00] I (2700496) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:40:57.454+00:00] I (2700496) RouteLoom: HIL HEAP free=106564 largest=90112 min=105728 B
+[2026-09-26T09:41:20.086+00:00] I (2723115) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:41:20.086+00:00] W (2723115) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:41:57.536+00:00] I (2760496) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:41:57.536+00:00] I (2760496) RouteLoom: HIL HEAP free=106564 largest=90112 min=105728 B
+[2026-09-26T09:42:20.172+00:00] I (2783115) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:42:20.172+00:00] W (2783115) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:42:57.441+00:00] I (2820496) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:42:57.441+00:00] I (2820496) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:43:20.157+00:00] I (2843115) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:43:20.157+00:00] W (2843115) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:43:57.611+00:00] I (2880497) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:43:57.611+00:00] I (2880497) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:44:20.244+00:00] I (2903116) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:44:20.245+00:00] W (2903116) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:44:57.502+00:00] I (2940497) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:44:57.502+00:00] I (2940497) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:45:20.135+00:00] I (2963116) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:45:20.135+00:00] W (2963116) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:45:57.442+00:00] I (3000497) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:45:57.442+00:00] I (3000497) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:46:20.074+00:00] I (3023116) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:46:20.074+00:00] W (3023116) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:46:32.689+00:00] I (3035733) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-26T09:46:32.689+00:00] W (3035733) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-26T09:46:57.535+00:00] I (3060498) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:46:57.535+00:00] I (3060498) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:47:20.166+00:00] I (3083117) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:47:20.166+00:00] W (3083118) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:47:57.626+00:00] I (3120499) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:47:57.626+00:00] I (3120499) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:48:20.063+00:00] I (3143118) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:48:20.063+00:00] W (3143118) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:48:57.529+00:00] I (3180500) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:48:57.529+00:00] I (3180500) RouteLoom: HIL HEAP free=106564 largest=90112 min=105728 B
+[2026-09-26T09:49:20.185+00:00] I (3203119) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:49:20.185+00:00] W (3203119) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:49:57.555+00:00] I (3240501) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:49:57.555+00:00] I (3240501) RouteLoom: HIL HEAP free=106564 largest=90112 min=105728 B
+[2026-09-26T09:50:20.056+00:00] I (3263120) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:50:20.056+00:00] W (3263120) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:50:57.520+00:00] I (3300503) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:50:57.520+00:00] I (3300503) RouteLoom: HIL HEAP free=106224 largest=90112 min=105728 B
+[2026-09-26T09:51:20.162+00:00] I (3323121) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:51:20.162+00:00] W (3323122) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:51:57.628+00:00] I (3360504) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:51:57.628+00:00] I (3360504) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:52:20.065+00:00] I (3383121) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:52:20.065+00:00] W (3383121) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:52:57.516+00:00] I (3420504) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:52:57.516+00:00] I (3420504) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:53:20.204+00:00] I (3443121) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:53:20.206+00:00] W (3443121) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:53:57.464+00:00] I (3480505) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:53:57.464+00:00] I (3480505) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:54:20.103+00:00] I (3503122) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:54:20.103+00:00] W (3503122) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:54:29.924+00:00] I (3512954) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-26T09:54:29.924+00:00] W (3512954) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-26T09:54:57.566+00:00] I (3540505) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:54:57.566+00:00] I (3540505) RouteLoom: HIL HEAP free=106564 largest=90112 min=105728 B
+[2026-09-26T09:55:20.198+00:00] I (3563122) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:55:20.198+00:00] W (3563122) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:55:57.456+00:00] I (3600505) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:55:57.456+00:00] I (3600505) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:56:20.086+00:00] I (3623122) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:56:20.086+00:00] W (3623122) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:56:57.630+00:00] I (3660506) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:56:57.631+00:00] I (3660506) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:57:20.096+00:00] I (3683123) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:57:20.096+00:00] W (3683123) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:57:57.546+00:00] I (3720507) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:57:57.546+00:00] I (3720507) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:58:20.183+00:00] I (3743124) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:58:20.183+00:00] W (3743124) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:58:57.508+00:00] I (3780508) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:58:57.512+00:00] I (3780508) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T09:59:20.151+00:00] I (3803125) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T09:59:20.151+00:00] W (3803125) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T09:59:57.555+00:00] I (3840509) RouteLoom: stack hwm main 11096 B
+[2026-09-26T09:59:57.556+00:00] I (3840509) RouteLoom: HIL HEAP free=106620 largest=90112 min=105728 B
+[2026-09-26T10:00:20.177+00:00] I (3863126) RouteLoomRef: discovery event=REDISCOVERY peer=2
+[2026-09-26T10:00:20.177+00:00] W (3863126) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-26T10:00:57.613+00:00] I (3900510) RouteLoom: stack hwm main 11096 B
+[2026-09-26T10:00:57.613+00:00] I (3900510) RouteLoom: HIL HEAP free=106564 largest=90112 min=105728 B
+[2026-09-26T10:01:07.433+00:00] !! capture finished

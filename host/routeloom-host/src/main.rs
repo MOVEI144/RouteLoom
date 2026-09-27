@@ -1,6 +1,3 @@
-#[cfg(not(unix))]
-compile_error!("routeloom-host v0.1 currently requires a Unix platform");
-
 mod acl;
 mod api1;
 mod canonical;
@@ -8,7 +5,10 @@ mod config;
 mod dispatch;
 mod group;
 mod nodes;
+mod observation;
+mod radio_budget;
 mod receive_log;
+mod remote_observation;
 mod send_store;
 mod site;
 mod sqlite_store;
@@ -16,19 +16,21 @@ mod subscribe;
 mod telemetry;
 
 use acl::Acl;
-use receive_log::{Ingress, ReceiveLog};
+use receive_log::{Ingress, ReceiveLog, RxAssurance};
+use routeloom_peercred::{IpcListener, IpcStream, Principal};
 use routeloom_protocol::dev_session::{
     derive_session_proof, open_body, seal_body, SessionProof, Transcript, DIRECTION_DEVICE_TO_HOST,
-    DIRECTION_HOST_TO_DEVICE, FLAG_AUTH, PROTECTED_BODY_OVERHEAD,
+    DIRECTION_HOST_TO_DEVICE, FLAG_AUTH, FLAG_INGRESS_ASSURANCE, PROTECTED_BODY_OVERHEAD,
 };
+use routeloom_protocol::host_ops::{decode_ingress_assurance_tail, INGRESS_ASSURANCE_TAIL_SIZE};
 use routeloom_protocol::{encode_frame, CumulativeCredit, Frame, FrameKind, StreamDecoder};
 use send_store::{mint_id128, MemoryOperationStore, OperationStore, StoreBackend};
 use std::collections::{HashMap, VecDeque};
 use std::env;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -73,11 +75,11 @@ const DEFAULT_CONFIG_DEV_KEY_HEX: &str =
     "524f5554454c4f4f4d2d444556454c4f504d454e542d4b45592d4f4e4c592121";
 /// Idle interval between session keepalives.
 const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-/// Re-Hello cadence while the handshake is unfinished: a Hello sent while
-/// the device is still booting is lost forever, so without a retry the
-/// session would sit in AwaitHelloAck until the next cable reconnect
-/// (observed on real hardware after a device reset).
-const HELLO_RETRY_MS: u64 = 1_000;
+/// Re-Hello cadence while the handshake is unfinished. The C3 can take
+/// over 1.25 s to answer each step under cutover load; a shorter retry
+/// replaces the transcript nonce before the answer arrives. Stay within
+/// the device's 5 s handshake timeout.
+const HELLO_RETRY_MS: u64 = 4_000;
 /// An Active session that has seen no inbound frame for this long is dead
 /// at the far end even when the adapter fd stays healthy — the silent
 /// reboot/half-open case no wire error can signal. A live session always
@@ -404,6 +406,9 @@ impl DeviceSession {
                 };
                 self.proof = Some(proof);
                 self.phase = SessionPhase::AwaitAuthOk;
+                // AUTH has its own response window. Measuring it from the
+                // original HELLO can expire immediately after a slow Ack.
+                self.last_begin_ms = now_ms();
                 result.outbound.push(Outbound::Raw(auth));
             }
             SessionPhase::AwaitAuthOk => {
@@ -831,6 +836,18 @@ struct State {
     /// `diagnostics.snapshot` submits and waits here, the telemetry lane
     /// thread drives the device exchange.
     telemetry_ops: telemetry::TelemetryOps,
+    /// One RF diagnostic at a time, spaced by two seconds across both lanes.
+    radio_budget: radio_budget::RadioBudget,
+    /// observation_v1 query table + singleton cache (HostOps 0x70-0x72):
+    /// api1 `health.get` / `topology.get` submit and wait here, the
+    /// observation lane thread drives the device exchange, and the read
+    /// thread folds 0x72 change events into the cache.
+    observation_ops: observation::ObservationOps,
+    /// remote observation query table + negative cache (Diagnostic
+    /// 0x30/0x31 subtypes 7/8): api1 `health.get` / `topology.get` with
+    /// a foreign observer submit and wait here, the remote lane thread
+    /// drives the gateway-forwarded exchange.
+    remote_observation_ops: remote_observation::RemoteObservationOps,
     /// SDK v1 Site Authority (--site-authority DIR): EDHOC Responder, member
     /// ledger and the KGuard decision surface. None when not configured.
     site: Option<Arc<site::SiteService>>,
@@ -840,6 +857,47 @@ struct State {
     /// session-verified bodies; the lane additionally gates on the
     /// gateway's CAP_JOIN_RELAY_V2 bit before touching the authority.
     site_inbox: site::usb::SiteInbox,
+}
+
+impl State {
+    fn refresh_radio_budget(&self) {
+        if let Some(request) = self.radio_budget.active() {
+            let pending = if telemetry::owns_request(request) {
+                self.telemetry_ops.request_pending(request)
+            } else {
+                self.remote_observation_ops.request_pending(request)
+            };
+            if !pending {
+                self.radio_budget.release(request);
+            }
+        }
+    }
+}
+
+// The shared RF budget reserves a writer-queue slot before the serial
+// writer can seal it. A query that expired or lost its USB session while
+// waiting in that queue must never become a later radio transaction.
+fn queued_diagnostic_is_live(state: &State, request: u64) -> bool {
+    let telemetry = telemetry::owns_request(request);
+    let observation = remote_observation::owns_request(request);
+    if !telemetry && !observation {
+        return true;
+    }
+    let session = state.session.lock().expect("session poisoned");
+    let id = if session.authenticated {
+        session.id
+    } else {
+        None
+    };
+    let Some(id) = id else { return false };
+    drop(session);
+    if telemetry {
+        state.telemetry_ops.request_pending_in_session(request, id)
+    } else {
+        state
+            .remote_observation_ops
+            .request_pending_in_session(request, id)
+    }
 }
 
 fn now_ms() -> u64 {
@@ -1108,6 +1166,35 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
             );
         }
         FrameKind::DataFromMesh => {
+            // Extended shape (flagged): the 8 B assurance tail follows the
+            // payload. A flagged frame too short to hold the tail, or with
+            // an undecodable tail, is malformed — degraded to nothing, so
+            // a gateway bug can never ride in as a forged verdict.
+            let extended = frame.flags & FLAG_INGRESS_ASSURANCE != 0;
+            let tail = if extended {
+                if body.len() < 28 {
+                    push_event(
+                        state,
+                        ms,
+                        "\"kind\":\"data_from_mesh\",\"malformed\":true".to_string(),
+                    );
+                    return;
+                }
+                match decode_ingress_assurance_tail(&body[body.len() - 8..]) {
+                    Ok(assurance) => Some(assurance),
+                    Err(_) => {
+                        push_event(
+                            state,
+                            ms,
+                            "\"kind\":\"data_from_mesh\",\"malformed\":true".to_string(),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            let payload_end = body.len() - tail.map_or(0, |_| INGRESS_ASSURANCE_TAIL_SIZE);
             if body.len() >= 20 {
                 let (origin, msg_session, msg_seq) =
                     (u64_at(body, 0), u32_at(body, 8), u64_at(body, 12));
@@ -1118,7 +1205,19 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                 // here after the session layer verified the body, and the
                 // network/gateway attribution comes from the authenticated
                 // session — never from the payload itself.
-                receive_ingest(state, origin, msg_session, msg_seq, &body[20..], ms);
+                receive_ingest(
+                    state,
+                    origin,
+                    msg_session,
+                    msg_seq,
+                    &body[20..payload_end],
+                    tail.map(|assurance| RxAssurance {
+                        verified: assurance.verified,
+                        profile: assurance.profile,
+                        site_epoch: assurance.site_epoch,
+                    }),
+                    ms,
+                );
                 push_event(
                     state,
                     ms,
@@ -1127,7 +1226,7 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                         json_opt_u64(origin),
                         msg_session.map_or_else(|| "null".to_string(), |v| v.to_string()),
                         json_opt_u64(msg_seq),
-                        body.len() - 20,
+                        payload_end - 20,
                     ),
                 );
             } else {
@@ -1281,6 +1380,20 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                     .telemetry_ops
                     .post_error(request, frame.session, code.unwrap_or(0));
             }
+            if let Some(request) = request.filter(|r| remote_observation::owns_request(*r)) {
+                // A remote-observation 0x30 the device refused at the
+                // frame level: same honest error, different lane range.
+                state
+                    .remote_observation_ops
+                    .post_error(request, frame.session, code.unwrap_or(0));
+            }
+            if let Some(request) = request.filter(|r| observation::owns_request(*r)) {
+                // A 0x70 the device refused at the frame level: the query
+                // resolves as an error, never a silent timeout.
+                state
+                    .observation_ops
+                    .post_error(request, frame.session, code.unwrap_or(0));
+            }
             if let Some(request) = request {
                 // Error requests share the session request space (credit,
                 // auth, data): only transition a delivery we actually track —
@@ -1385,13 +1498,61 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                 );
             }
         }
-        // m1 diagnostics 0x31 replies belong to the telemetry lane. A
-        // refused post is a stale answer past our timeout — expected and
-        // silent, never ring spam.
+        // m1 diagnostics 0x31 replies belong to the telemetry lane —
+        // unless the request id is the remote observation lane's (both
+        // legs share the 0x31 sub, so the range demuxes). A refused post
+        // is a stale answer past our timeout — expected and silent,
+        // never ring spam.
         FrameKind::HostOps if telemetry::owns(body) => {
-            state
-                .telemetry_ops
-                .post_reply(frame.request, frame.session, body.to_vec());
+            if remote_observation::owns_request(frame.request) {
+                state.remote_observation_ops.post_reply(
+                    frame.request,
+                    frame.session,
+                    body.to_vec(),
+                    ms,
+                    mono_ms(),
+                );
+            } else {
+                state
+                    .telemetry_ops
+                    .post_reply(frame.request, frame.session, body.to_vec());
+            }
+        }
+        // observation_v1 0x71 replies resolve a lane query; 0x72 change
+        // events fold into the cache and surface as one ring event each
+        // (plus an observation.gap when the sequence skips).
+        FrameKind::HostOps if observation::owns_page(body) => {
+            state.observation_ops.post_reply(
+                frame.request,
+                frame.session,
+                body.to_vec(),
+                ms,
+                mono_ms(),
+            );
+        }
+        FrameKind::HostOps if observation::owns_event(body) => {
+            for notice in state.observation_ops.on_event(frame.session, body) {
+                let fields = match notice {
+                    observation::ObservationNotice::TopologyChanged {
+                        mask,
+                        route_digest,
+                        neighbor_digest,
+                    } => format!(
+                        "\"kind\":\"topology.changed\",\"mask\":{mask},\"route_digest\":{route_digest},\"neighbor_digest\":{neighbor_digest}"
+                    ),
+                    observation::ObservationNotice::MilestoneAdvanced { generation } => format!(
+                        "\"kind\":\"milestone.advanced\",\"generation\":{generation}"
+                    ),
+                    observation::ObservationNotice::Gap {
+                        expected,
+                        received,
+                        lost,
+                    } => format!(
+                        "\"kind\":\"observation.gap\",\"expected\":{expected},\"received\":{received},\"lost\":{lost}"
+                    ),
+                };
+                push_event(state, ms, fields);
+            }
         }
         FrameKind::HostOps if site::owns(body) => {
             if !state.site_inbox.post(frame.request, body.to_vec()) {
@@ -1443,6 +1604,7 @@ fn receive_ingest(
     msg_session: Option<u32>,
     msg_seq: Option<u64>,
     payload: &[u8],
+    assurance: Option<RxAssurance>,
     ms: u64,
 ) {
     let (Some(origin), Some(msg_session), Some(msg_seq)) = (origin, msg_session, msg_seq) else {
@@ -1494,6 +1656,7 @@ fn receive_ingest(
                     msg_session,
                     msg_seq,
                     payload: payload.to_vec(),
+                    assurance,
                 },
                 ms,
             );
@@ -1754,6 +1917,13 @@ fn adapter_read_loop(
     let mut buffer = [0_u8; 512];
     loop {
         match reader.read(&mut buffer) {
+            #[cfg(windows)]
+            Ok(0) => {
+                // A timeout is idle; a removed COM device must enter reconnect.
+                routeloom_peercred::serial_idle_check(&reader)?;
+                continue;
+            }
+            #[cfg(not(windows))]
             Ok(0) => {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -1958,6 +2128,9 @@ fn adapter_writer_loop(
             }
             Outbound::Seal(frame) => frame,
         };
+        if !queued_diagnostic_is_live(&state, frame.request) {
+            continue;
+        }
         // Seal the queued inner body under the session key. Sealing happens
         // here — on the ONLY thread that writes — so direction counters are
         // strictly sequential with wire order even when a send is rejected
@@ -1966,9 +2139,12 @@ fn adapter_writer_loop(
             let mut guard = session.lock().expect("device session poisoned");
             guard.protect(&mut frame)
         };
-        let sent = protected
-            .map_err(str::to_string)
-            .and_then(|()| transmit(&writer_slot, &state, &frame).map_err(|e| e.to_string()));
+        let sent = protected.map_err(str::to_string).and_then(|()| {
+            state
+                .radio_budget
+                .note_transmit_attempt(frame.request, mono_ms());
+            transmit(&writer_slot, &state, &frame).map_err(|e| e.to_string())
+        });
         match sent {
             Ok(_) => {
                 last_tx_ms = now_ms();
@@ -2002,21 +2178,27 @@ fn adapter_writer_loop(
     }
 }
 
-/// A serial TTY left in canonical mode corrupts the binary framing (echo,
-/// line buffering, ICRNL/ONLCR/XON translation both ways). Configure raw
-/// mode via stty — this workspace carries no termios crate — and continue on
-/// failure: plain files and PTYs used by tests need nothing.
+/// A Unix TTY left in canonical mode corrupts the binary framing (echo,
+/// line buffering, ICRNL/ONLCR/XON translation). Use stty here; Windows COM
+/// settings are applied by open_serial. Plain files and test PTYs need none.
 fn configure_raw_tty(path: &Path) {
-    let flag = if cfg!(target_os = "macos") {
-        "-f"
-    } else {
-        "-F"
-    };
-    let _ = std::process::Command::new("stty")
-        .arg(flag)
-        .arg(path)
-        .args(["raw", "-echo"])
-        .status();
+    #[cfg(unix)]
+    {
+        let flag = if cfg!(target_os = "macos") {
+            "-f"
+        } else {
+            "-F"
+        };
+        let _ = std::process::Command::new("stty")
+            .arg(flag)
+            .arg(path)
+            .args(["raw", "-echo"])
+            .status();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 }
 
 /// Bounded exponential backoff for adapter (re)open attempts: an unplugged
@@ -2079,10 +2261,7 @@ fn adapter_supervisor(
     let mut open_failed = false;
     loop {
         configure_raw_tty(&device);
-        match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&device)
+        match routeloom_peercred::open_serial(&device)
             .and_then(|reader| reader.try_clone().map(|writer| (reader, writer)))
         {
             Ok((reader, writer)) => {
@@ -2160,14 +2339,14 @@ fn adapter_supervisor(
 // boxing it into a struct would only rename the same state.
 #[allow(clippy::too_many_arguments)]
 fn serve_client(
-    stream: UnixStream,
+    stream: IpcStream,
     state: Arc<State>,
     outbound: mpsc::SyncSender<Outbound>,
     _process_session: u64,
     next_request: Arc<AtomicU64>,
     next_idem_key: Arc<AtomicU64>,
     device_session: Arc<Mutex<DeviceSession>>,
-    peer_uid: Option<u32>,
+    peer_principal: Option<Principal>,
 ) -> io::Result<()> {
     // A slow socket must never pin the shared log or hang this thread.
     let _ = stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
@@ -2246,7 +2425,7 @@ fn serve_client(
         }
         let (response, effect) = if raw.starts_with(b"API1 ") {
             let ctx = api1::ApiContext {
-                uid: peer_uid,
+                principal: peer_principal.clone(),
                 acl: &state.acl,
                 receive_log: &state.receive_log,
                 operation_store: &state.operation_store,
@@ -2257,6 +2436,8 @@ fn serve_client(
                 config_ops: &state.config_ops,
                 group_ops: &state.group_ops,
                 telemetry_ops: &state.telemetry_ops,
+                observation_ops: &state.observation_ops,
+                remote_observation_ops: &state.remote_observation_ops,
                 site: state.site.as_deref(),
                 config_authority: state.config_authority,
                 config_profile: state.config_profile,
@@ -2307,10 +2488,9 @@ fn serve_client(
                     let guard = device_session.lock().expect("device session poisoned");
                     (guard.phase == SessionPhase::Active).then_some(guard.session_id)
                 };
-                // Legacy mode is still gated by the same contract as
-                // messages.submit: the USB host authority is never granted
-                // unconditionally to every local client
-                // (05-production-security.md). The peer's OS uid must hold
+                // Legacy mode is still gated by the SEND grant: the USB
+                // host authority is never granted to every local client
+                // (05-production-security.md). The peer's OS principal must hold
                 // SEND on the session's own network — an unknown
                 // credential or an absent session network denies.
                 let session_network = state
@@ -2318,16 +2498,16 @@ fn serve_client(
                     .lock()
                     .expect("session poisoned")
                     .network;
-                let send_uid = match (peer_uid, session_network) {
-                    (Some(uid), Some(network))
-                        if state.acl.permit(uid, network, acl::PERM_SEND) =>
+                let send_principal = match (peer_principal.as_ref(), session_network) {
+                    (Some(principal), Some(network))
+                        if state.acl.permit_principal(principal, network, acl::PERM_SEND) =>
                     {
-                        Some(uid)
+                        Some(principal)
                     }
                     _ => None,
                 };
                 match (destination, payload) {
-                    _ if send_uid.is_none() => {
+                    _ if send_principal.is_none() => {
                         "{\"accepted\":false,\"error\":\"authorization failed\"}".into()
                     }
                     _ if active_session.is_none() => {
@@ -2340,7 +2520,7 @@ fn serve_client(
                             .rate_limiter
                             .lock()
                             .expect("rate limiter poisoned")
-                            .admit(send_uid.expect("authorized above"), now_ms())
+                            .admit_principal(send_principal.expect("authorized above"), now_ms())
                         {
                             format!(
                                 "{{\"accepted\":false,\"error\":\"rate limited ({} scope, retry in {} ms)\"}}",
@@ -2451,6 +2631,7 @@ struct DaemonArgs {
     config_profile: u8,
     config_authority_key: Option<PathBuf>,
     site_authority: Option<PathBuf>,
+    usb_dev_secret_file: Option<PathBuf>,
 }
 
 /// Parse a node/authority id argument as hexadecimal — the codebase's node
@@ -2481,8 +2662,19 @@ fn parse_args() -> Result<DaemonArgs, String> {
     parse_args_from(env::args().skip(1))
 }
 
+fn default_socket_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(r"\\.\pipe\routeloom.sock")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/tmp/routeloom.sock")
+    }
+}
+
 fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, String> {
-    let mut socket = PathBuf::from("/tmp/routeloom.sock");
+    let mut socket = default_socket_path();
     let mut device = None;
     let mut acl_file = None;
     let mut op_store = None;
@@ -2492,6 +2684,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
     let mut config_profile = config::ISSUE_PROFILE_DEV;
     let mut config_authority_key = None;
     let mut site_authority = None;
+    let mut usb_dev_secret_file = None;
     let mut args = args;
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -2570,9 +2763,14 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
                     args.next().ok_or("--site-authority requires a directory")?,
                 ))
             }
+            "--usb-dev-secret-file" => {
+                usb_dev_secret_file = Some(PathBuf::from(
+                    args.next().ok_or("--usb-dev-secret-file requires a path")?,
+                ))
+            }
             "--help" | "-h" => {
                 println!(
-                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N] [--config-dev-key-hex HEX] [--config-profile dev|cose] [--config-authority-key PATH] [--site-authority DIR]"
+                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N] [--config-dev-key-hex HEX] [--config-profile dev|cose] [--config-authority-key PATH] [--site-authority DIR] [--usb-dev-secret-file PATH]"
                 );
                 process::exit(0);
             }
@@ -2608,7 +2806,51 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
         config_profile,
         config_authority_key,
         site_authority,
+        usb_dev_secret_file,
     })
+}
+
+/// Read the exact development USB secret; do not trim or print key material.
+/// Legacy firmware still uses the fixed secret when no file is supplied.
+fn load_usb_dev_secret(path: &Path) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    #[cfg(unix)]
+    let file = {
+        let before = std::fs::symlink_metadata(path)?;
+        if !before.file_type().is_file() || before.permissions().mode() & 0o077 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "USB secret must be a private regular file",
+            ));
+        }
+        let file = std::fs::File::open(path)?;
+        let after = file.metadata()?;
+        use std::os::unix::fs::MetadataExt;
+        if !after.is_file()
+            || before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || after.permissions().mode() & 0o077 != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "USB secret file changed or is not private",
+            ));
+        }
+        file
+    };
+    #[cfg(windows)]
+    let file = routeloom_peercred::open_private_file_for_read(path)?;
+    // The firmware's development USB credential is a printable ASCII string
+    // of at most 63 bytes. Read one extra byte to reject oversized files.
+    let mut secret = Vec::new();
+    file.take(64).read_to_end(&mut secret)?;
+    if secret.is_empty() || secret.len() > 63 || !secret.iter().all(|b| (0x21..=0x7e).contains(b)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid USB secret length or encoding",
+        ));
+    }
+    Ok(secret)
 }
 
 /// Bind the control socket and tighten its file mode before any client
@@ -2616,31 +2858,34 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
 /// ignores unix-socket file perms on connect() — the mode still
 /// documents intent). A world-writable parent outside the system temp
 /// dir warns but does not fail: dev environments bind there legitimately.
-fn bind_api_listener(socket_path: &Path) -> io::Result<UnixListener> {
-    let listener = UnixListener::bind(socket_path)?;
-    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
-    if let Some(parent) = socket_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        let world_writable = std::fs::metadata(parent)
-            .map(|m| m.permissions().mode() & 0o002 != 0)
-            .unwrap_or(false);
-        if world_writable {
-            let canonical_parent = parent.canonicalize().ok();
-            let is_temp = [
-                env::temp_dir(),
-                PathBuf::from("/tmp"),
-                PathBuf::from("/var/tmp"),
-            ]
-            .iter()
-            .any(|d| {
-                d == parent
-                    || (canonical_parent.is_some()
-                        && d.canonicalize().ok().as_ref() == canonical_parent.as_ref())
-            });
-            if !is_temp {
-                eprintln!(
-                    "warning: socket directory {} is world-writable; another local user could replace the socket file — prefer a private directory",
-                    parent.display()
-                );
+fn bind_api_listener(socket_path: &Path) -> io::Result<IpcListener> {
+    let listener = IpcListener::bind(socket_path)?;
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+        if let Some(parent) = socket_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            let world_writable = std::fs::metadata(parent)
+                .map(|m| m.permissions().mode() & 0o002 != 0)
+                .unwrap_or(false);
+            if world_writable {
+                let canonical_parent = parent.canonicalize().ok();
+                let is_temp = [
+                    env::temp_dir(),
+                    PathBuf::from("/tmp"),
+                    PathBuf::from("/var/tmp"),
+                ]
+                .iter()
+                .any(|d| {
+                    d == parent
+                        || (canonical_parent.is_some()
+                            && d.canonicalize().ok().as_ref() == canonical_parent.as_ref())
+                });
+                if !is_temp {
+                    eprintln!(
+                        "warning: socket directory {} is world-writable; another local user could replace the socket file — prefer a private directory",
+                        parent.display()
+                    );
+                }
             }
         }
     }
@@ -2654,8 +2899,8 @@ fn bind_api_listener(socket_path: &Path) -> io::Result<UnixListener> {
 /// entries are removed so the map cannot accumulate dead principals.
 struct ClientGuard {
     active: Arc<AtomicUsize>,
-    principals: Arc<Mutex<HashMap<Option<u32>, usize>>>,
-    uid: Option<u32>,
+    principals: Arc<Mutex<HashMap<Option<Principal>, usize>>>,
+    principal: Option<Principal>,
 }
 
 impl Drop for ClientGuard {
@@ -2667,7 +2912,7 @@ impl Drop for ClientGuard {
             .principals
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let emptied = match counts.get_mut(&self.uid) {
+        let emptied = match counts.get_mut(&self.principal) {
             Some(entry) => {
                 *entry = entry.saturating_sub(1);
                 *entry == 0
@@ -2675,7 +2920,7 @@ impl Drop for ClientGuard {
             None => false,
         };
         if emptied {
-            counts.remove(&self.uid);
+            counts.remove(&self.principal);
         }
     }
 }
@@ -2686,6 +2931,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // than time-since-first-admitted-operation.
     let _ = mono_ms();
     let args = parse_args().map_err(io::Error::other)?;
+    // Refuse an unreadable/misconfigured credential before opening any USB
+    // session; never fall back to the public legacy secret on file errors.
+    let usb_dev_secret = match &args.usb_dev_secret_file {
+        Some(path) => load_usb_dev_secret(path)?,
+        None => DEV_SECRET.to_vec(),
+    };
     let socket_path = args.socket;
     let device = args.device;
     let acl_path = args.acl_file;
@@ -2742,6 +2993,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     // Only remove a leftover unix socket — never unlink a regular file or a
     // path a second instance happens to point at.
+    #[cfg(unix)]
     if let Ok(meta) = std::fs::metadata(&socket_path) {
         use std::os::unix::fs::FileTypeExt;
         if meta.file_type().is_socket() {
@@ -2773,7 +3025,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 authority.site_id(),
                 authority.network()
             );
-            Some(Arc::new(site::SiteService::new(authority)))
+            Some(site::SiteService::new_live(authority))
         }
         None => None,
     };
@@ -2855,7 +3107,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // frames instead of growing memory without limit while the adapter is
     // down.
     let (outbound_tx, outbound_rx) = mpsc::sync_channel(MAX_OUTBOUND);
-    let device_session = Arc::new(Mutex::new(DeviceSession::new()));
+    let mut session = DeviceSession::new();
+    session.secret = usb_dev_secret;
+    let device_session = Arc::new(Mutex::new(session));
     // The TX-I2 dispatch thread runs whether or not a device is attached:
     // it performs the host-side expiry/cancel sweeps while USB is absent
     // and starts driving SUBMIT/QUERY/SKIP/RETIRE/TIME_SAMPLE the moment
@@ -2899,6 +3153,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let telemetry_outbound = outbound_tx.clone();
         thread::spawn(move || telemetry::telemetry_loop(telemetry_state, telemetry_outbound));
     }
+    // observation_v1 lane: issues 0x70 queries for `health.get` /
+    // `topology.get` and resolves them from the 0x71 answers. Idle while
+    // nothing is submitted; same writer queue.
+    {
+        let observation_state = Arc::clone(&state);
+        let observation_outbound = outbound_tx.clone();
+        thread::spawn(move || {
+            observation::observation_loop(observation_state, observation_outbound)
+        });
+    }
+    // remote observation lane: issues 0x30 subtype-7 queries for
+    // `health.get` / `topology.get` with a foreign observer and resolves
+    // them from the 0x31 subtype-8 answers. Idle while nothing is
+    // submitted; same writer queue.
+    {
+        let remote_state = Arc::clone(&state);
+        let remote_outbound = outbound_tx.clone();
+        thread::spawn(move || {
+            remote_observation::remote_observation_loop(remote_state, remote_outbound)
+        });
+    }
     if let Some(device_path) = device {
         let writer_slot: Arc<Mutex<Option<File>>> = Arc::new(Mutex::new(None));
         {
@@ -2933,11 +3208,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // principal is the socket peer's OS uid — `None` (credential lookup
     // unsupported/failed) shares one bucket, so unidentified principals are
     // bounded rather than trusted.
-    let principal_clients: Arc<Mutex<HashMap<Option<u32>, usize>>> =
+    let principal_clients: Arc<Mutex<HashMap<Option<Principal>, usize>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    for incoming in listener.incoming() {
-        match incoming {
-            Ok(stream) => {
+    loop {
+        match listener.accept() {
+            Ok((stream, peer_principal)) => {
                 let count = active_clients.fetch_add(1, Ordering::Relaxed);
                 if count >= MAX_CLIENTS {
                     active_clients.fetch_sub(1, Ordering::Relaxed);
@@ -2946,10 +3221,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     drop(stream);
                     continue;
                 }
-                let peer_uid = routeloom_peercred::peer_uid(&stream).ok();
+                let principal_opt = Some(peer_principal.clone());
                 {
                     let mut counts = principal_clients.lock().expect("client counts poisoned");
-                    let entry = counts.entry(peer_uid).or_insert(0);
+                    let entry = counts.entry(principal_opt.clone()).or_insert(0);
                     if *entry >= MAX_CLIENTS_PER_PRINCIPAL {
                         drop(counts);
                         active_clients.fetch_sub(1, Ordering::Relaxed);
@@ -2971,7 +3246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _guard = ClientGuard {
                         active: clients,
                         principals: client_counts,
-                        uid: peer_uid,
+                        principal: principal_opt,
                     };
                     let _ = serve_client(
                         stream,
@@ -2981,19 +3256,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         client_requests,
                         client_idem_keys,
                         client_session,
-                        peer_uid,
+                        Some(peer_principal),
                     );
                 });
             }
             Err(error) => eprintln!("accept failed: {error}"),
         }
     }
+    #[allow(unreachable_code)]
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_remote_query_is_dropped_after_settlement_or_session_change() {
+        let state = State::default();
+        {
+            let mut session = state.session.lock().unwrap();
+            session.authenticated = true;
+            session.id = Some(7);
+        }
+        let params = remote_observation::RemoteObservationParams {
+            observer: 2,
+            section: routeloom_protocol::observation::SECTION_SYSTEM,
+            max_entries: 1,
+            exact: false,
+            after: 0,
+        };
+        let token = match state.remote_observation_ops.submit(params, 7, 100).unwrap() {
+            remote_observation::SubmitOutcome::Live { token, .. } => token,
+            _ => panic!("expected a fresh query"),
+        };
+        let request = state.remote_observation_ops.request_for(token).unwrap();
+        assert!(queued_diagnostic_is_live(&state, request));
+        assert!(state.remote_observation_ops.post_error(request, 7, 1));
+        assert!(!queued_diagnostic_is_live(&state, request));
+
+        let token = match state.remote_observation_ops.submit(params, 7, 200).unwrap() {
+            remote_observation::SubmitOutcome::Live { token, .. } => token,
+            _ => panic!("expected a fresh query"),
+        };
+        let request = state.remote_observation_ops.request_for(token).unwrap();
+        state.session.lock().unwrap().id = Some(8);
+        assert!(!queued_diagnostic_is_live(&state, request));
+    }
 
     fn frame(kind: FrameKind, flags: u16, request: u64, body: Vec<u8>) -> Frame {
         Frame {
@@ -3403,6 +3712,23 @@ mod tests {
     }
 
     #[test]
+    fn slow_device_handshake_keeps_each_response_window() {
+        // On the C3 under cutover load, successive HelloAck frames arrived
+        // about 1.26 s apart. Retrying Hello before either response lands
+        // changes the transcript nonce and can prevent AUTH_OK forever.
+        let mut session = DeviceSession::new();
+        let hello = session.begin();
+        assert!(!session.handshake_retry_due(session.last_begin_ms + 1_250));
+        let nonce = u64::from_be_bytes(hello.body[0..8].try_into().unwrap());
+        let (ack, _) = device_hello_ack(nonce);
+        session.last_begin_ms -= 3_200;
+        let inbound = session.handle(&frame(FrameKind::HelloAck, 0, 100, ack));
+        assert_eq!(inbound.outbound.len(), 1);
+        assert_eq!(session.phase, SessionPhase::AwaitAuthOk);
+        assert!(!session.handshake_retry_due(now_ms() + 1_250));
+    }
+
+    #[test]
     fn data_from_mesh_records_origin_node() {
         let state = State::default();
         let mut body = Vec::new();
@@ -3789,8 +4115,8 @@ mod tests {
         state: Arc<State>,
         peer_uid: Option<u32>,
         session: Arc<Mutex<DeviceSession>>,
-    ) -> (BufReader<UnixStream>, UnixStream, mpsc::Receiver<Outbound>) {
-        let (client, server) = UnixStream::pair().expect("socketpair");
+    ) -> (BufReader<IpcStream>, IpcStream, mpsc::Receiver<Outbound>) {
+        let (client, server) = IpcStream::pair().expect("ipc pair");
         let (tx, rx) = mpsc::sync_channel(4);
         thread::spawn(move || {
             let _ = serve_client(
@@ -3801,23 +4127,20 @@ mod tests {
                 Arc::new(AtomicU64::new(1)),
                 Arc::new(AtomicU64::new(1)),
                 session,
-                peer_uid,
+                peer_uid.map(Principal::UnixUid),
             );
         });
         let reader = BufReader::new(client.try_clone().expect("clone"));
         (reader, client, rx)
     }
 
-    fn spawn_client(
-        state: Arc<State>,
-        peer_uid: Option<u32>,
-    ) -> (BufReader<UnixStream>, UnixStream) {
+    fn spawn_client(state: Arc<State>, peer_uid: Option<u32>) -> (BufReader<IpcStream>, IpcStream) {
         let (reader, client, _rx) =
             spawn_client_with(state, peer_uid, Arc::new(Mutex::new(DeviceSession::new())));
         (reader, client)
     }
 
-    fn exchange(reader: &mut BufReader<UnixStream>, writer: &mut UnixStream, line: &str) -> String {
+    fn exchange(reader: &mut BufReader<IpcStream>, writer: &mut IpcStream, line: &str) -> String {
         writer.write_all(line.as_bytes()).expect("write");
         writer.write_all(b"\n").expect("write");
         let mut response = String::new();
@@ -3979,7 +4302,15 @@ mod tests {
         // Enrollment records do not prove which security profile protected
         // either received frame.
         for (origin, seq) in [(node, 11u64), (0x99, 12)] {
-            receive_ingest(&state, Some(origin), Some(5), Some(seq), &[0xaa], now + 20);
+            receive_ingest(
+                &state,
+                Some(origin),
+                Some(5),
+                Some(seq),
+                &[0xaa],
+                None,
+                now + 20,
+            );
         }
         let mut log = state.receive_log.lock().expect("receive log");
         let crate::receive_log::ReadOutcome::Batch(batch) =
@@ -4002,7 +4333,15 @@ mod tests {
             session.network = Some(network);
             session.node = Some(1);
         }
-        receive_ingest(&bare, Some(node), Some(5), Some(13), &[0xbb], now + 20);
+        receive_ingest(
+            &bare,
+            Some(node),
+            Some(5),
+            Some(13),
+            &[0xbb],
+            None,
+            now + 20,
+        );
         let mut log = bare.receive_log.lock().expect("receive log");
         let crate::receive_log::ReadOutcome::Batch(batch) =
             log.read(network, 0, 8, now + 20, false)
@@ -4015,6 +4354,93 @@ mod tests {
             json.contains("\"assurance\":{\"profile\":\"UNKNOWN\",\"origin\":\"unverified\"}"),
             "{json}"
         );
+    }
+
+    #[test]
+    fn data_from_mesh_flagged_tail_lands_on_the_record() {
+        let state = State::default();
+        {
+            let mut session = state.session.lock().expect("session");
+            session.network = Some(7);
+            session.node = Some(1);
+        }
+        // origin(8) || session(4) || seq(8) || payload(2) || tail(8):
+        // verified member_edhoc under site epoch 0xA5A5A5A5.
+        let mut inner = vec![0u8; 20];
+        inner[0..8].copy_from_slice(&9_u64.to_be_bytes());
+        inner[8..12].copy_from_slice(&5_u32.to_be_bytes());
+        inner[12..20].copy_from_slice(&13_u64.to_be_bytes());
+        inner.extend_from_slice(&[0xaa, 0xbb]);
+        inner.extend_from_slice(&[0x00, 0x01, 0x01, 0x00, 0xa5, 0xa5, 0xa5, 0xa5]);
+        let frame = frame(
+            FrameKind::DataFromMesh,
+            FLAG_INGRESS_ASSURANCE,
+            0,
+            inner.clone(),
+        );
+        record_frame(&state, &frame, &inner, 1_000);
+        let mut log = state.receive_log.lock().expect("receive log");
+        let crate::receive_log::ReadOutcome::Batch(batch) = log.read(7, 0, 8, 1_000, false) else {
+            panic!("evidenced record must be readable");
+        };
+        assert_eq!(batch.records.len(), 1);
+        let record = &batch.records[0];
+        // The tail is evidence, never payload bytes.
+        assert_eq!(record.payload, vec![0xaa, 0xbb]);
+        assert_eq!(
+            record.assurance,
+            Some(RxAssurance {
+                verified: true,
+                profile: 1,
+                site_epoch: 0xA5A5_A5A5,
+            })
+        );
+        let json = api1::record_json(record, "cursor");
+        assert!(
+            json.contains("\"assurance\":{\"profile\":\"member_edhoc\",\"origin\":\"verified\",\"site_epoch\":2779096485}"),
+            "{json}"
+        );
+        let meta = api1::record_meta_json(record, "cursor");
+        assert!(
+            meta.contains("\"assurance\":{\"profile\":\"member_edhoc\",\"origin\":\"verified\",\"site_epoch\":2779096485}"),
+            "{meta}"
+        );
+    }
+
+    #[test]
+    fn data_from_mesh_bad_tail_is_malformed_never_degraded() {
+        let state = State::default();
+        {
+            let mut session = state.session.lock().expect("session");
+            session.network = Some(7);
+            session.node = Some(1);
+        }
+        // Flagged but too short for the tail.
+        let mut inner = vec![0u8; 20];
+        inner.extend_from_slice(&[0xaa, 0xbb, 0xcc]);
+        let frame1 = frame(
+            FrameKind::DataFromMesh,
+            FLAG_INGRESS_ASSURANCE,
+            0,
+            inner.clone(),
+        );
+        record_frame(&state, &frame1, &inner, 1_000);
+        // Flagged with an undecodable tail (unknown profile id).
+        let mut inner2 = vec![0u8; 20];
+        inner2.extend_from_slice(&[0xaa, 0xbb]);
+        inner2.extend_from_slice(&[0x00, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let frame2 = frame(
+            FrameKind::DataFromMesh,
+            FLAG_INGRESS_ASSURANCE,
+            0,
+            inner2.clone(),
+        );
+        record_frame(&state, &frame2, &inner2, 1_000);
+        let mut log = state.receive_log.lock().expect("receive log");
+        let crate::receive_log::ReadOutcome::Batch(batch) = log.read(7, 0, 8, 1_000, false) else {
+            panic!("log must be readable");
+        };
+        assert!(batch.records.is_empty(), "malformed tails store nothing");
     }
 
     #[test]
@@ -4220,6 +4646,71 @@ mod tests {
         assert!(response.contains("authorization failed"), "{response}");
     }
 
+    #[test]
+    fn legacy_send_uses_authenticated_sid_grant() {
+        let sid = Principal::WindowsSid("S-1-5-21-100-200-300-1001".into());
+        let acl = Acl::parse("{\"principals\":{\"S-1-5-21-100-200-300-1001\":{\"networks\":{\"0000000000000001\":[\"SEND\"]}}}}")
+            .unwrap();
+        let state = Arc::new(State {
+            acl,
+            ..State::default()
+        });
+        state.session.lock().unwrap().network = Some(1);
+        let (client, server) = IpcStream::pair().unwrap();
+        let (tx, _rx) = mpsc::sync_channel(4);
+        let server_state = Arc::clone(&state);
+        thread::spawn(move || {
+            let _ = serve_client(
+                server,
+                server_state,
+                tx,
+                0,
+                Arc::new(AtomicU64::new(1)),
+                Arc::new(AtomicU64::new(1)),
+                Arc::new(Mutex::new(DeviceSession::new())),
+                Some(sid),
+            );
+        });
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        let mut writer = client;
+        let response = exchange(&mut reader, &mut writer, "SEND 3 00ff");
+        assert!(response.contains("session not authenticated"), "{response}");
+        assert!(!response.contains("authorization failed"), "{response}");
+    }
+
+    #[test]
+    fn api1_uses_authenticated_sid_for_epoch_and_submit() {
+        let sid = Principal::WindowsSid("S-1-5-21-100-200-300-1001".into());
+        let acl = Acl::parse("{\"principals\":{\"S-1-5-21-100-200-300-1001\":{\"networks\":{\"0000000000000001\":[\"SEND\",\"READ_OPERATION\"]}}}}")
+            .unwrap();
+        let state = Arc::new(State {
+            acl,
+            ..State::default()
+        });
+        let (client, server) = IpcStream::pair().unwrap();
+        let (tx, _rx) = mpsc::sync_channel(4);
+        thread::spawn(move || {
+            let _ = serve_client(
+                server,
+                state,
+                tx,
+                0,
+                Arc::new(AtomicU64::new(1)),
+                Arc::new(AtomicU64::new(1)),
+                Arc::new(Mutex::new(DeviceSession::new())),
+                Some(sid),
+            );
+        });
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        let mut writer = client;
+        let response = exchange(&mut reader, &mut writer, "API1 {\"v\":1,\"request_id\":\"sid\",\"method\":\"operations.open_epoch\",\"params\":{\"network\":\"0000000000000001\"}}");
+        assert!(response.contains("\"ok\":true"), "{response}");
+        let response = exchange(&mut reader, &mut writer, "API1 {\"v\":1,\"request_id\":\"send\",\"method\":\"messages.submit\",\"params\":{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000001\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"00ff\",\"payload_len\":2,\"options\":{\"storage\":\"RAM_ONLY\"}}}");
+        assert!(response.contains("\"ok\":true"), "{response}");
+        let response = exchange(&mut reader, &mut writer, "API1 {\"v\":1,\"request_id\":\"read\",\"method\":\"operations.get_by_key\",\"params\":{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000001\",\"key\":\"00112233445566778899aabbccddeeff\"}}");
+        assert!(response.contains("\"ok\":true"), "{response}");
+    }
+
     /// With a grant and an authenticated device session the verb queues —
     /// but reserved destinations (0/u64::MAX, the canonical.rs rule) and
     /// an exhausted admission budget still refuse, in the same shape.
@@ -4268,6 +4759,7 @@ mod tests {
     /// The control socket file mode is tightened to 0600 before any
     /// accept — restricting IPC to the owning uid where the OS honors
     /// socket perms (Linux), and documenting intent elsewhere.
+    #[cfg(unix)]
     #[test]
     fn api_listener_mode_is_owner_only() {
         let dir = env::temp_dir().join(format!("routeloom-sock-test-{}", process::id()));
@@ -4288,23 +4780,25 @@ mod tests {
     #[test]
     fn client_guard_restores_counts_on_panic() {
         let active = Arc::new(AtomicUsize::new(1));
-        let principals: Arc<Mutex<HashMap<Option<u32>, usize>>> =
-            Arc::new(Mutex::new(HashMap::from([(Some(501_u32), 1)])));
+        let test_principal = Some(Principal::UnixUid(501));
+        let principals: Arc<Mutex<HashMap<Option<Principal>, usize>>> =
+            Arc::new(Mutex::new(HashMap::from([(test_principal.clone(), 1)])));
         let outcome = std::panic::catch_unwind({
             let active = Arc::clone(&active);
             let principals = Arc::clone(&principals);
+            let principal = test_principal.clone();
             move || {
                 let _guard = ClientGuard {
                     active,
                     principals,
-                    uid: Some(501),
+                    principal,
                 };
                 panic!("simulated client handler panic");
             }
         });
         assert!(outcome.is_err());
         assert_eq!(active.load(Ordering::Relaxed), 0);
-        assert!(!principals.lock().unwrap().contains_key(&Some(501)));
+        assert!(!principals.lock().unwrap().contains_key(&test_principal));
     }
 
     /// Reserved origins (0/u64::MAX) can never appear on the wire: the
@@ -4389,7 +4883,7 @@ mod tests {
         let args =
             |words: &[&str]| parse_args_from(words.iter().map(|w| w.to_string())).expect("parse");
         let defaults = args(&[]);
-        assert_eq!(defaults.socket, PathBuf::from("/tmp/routeloom.sock"));
+        assert_eq!(defaults.socket, default_socket_path());
         assert!(defaults.device.is_none());
         assert!(defaults.acl_file.is_none());
         assert!(defaults.op_store.is_none());
@@ -4400,6 +4894,99 @@ mod tests {
         );
         assert!(parse_args_from(["--op-store".to_string()].into_iter()).is_err());
         assert!(parse_args_from(["--bogus".to_string()].into_iter()).is_err());
+    }
+
+    #[test]
+    fn usb_secret_file_flag_requires_a_path() {
+        let args = parse_args_from(
+            ["--usb-dev-secret-file", "/private/usb.key"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("private USB secret file");
+        assert_eq!(
+            args.usb_dev_secret_file,
+            Some(PathBuf::from("/private/usb.key"))
+        );
+        assert!(parse_args_from(["--usb-dev-secret-file".to_string()].into_iter()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn usb_secret_file_is_private_exact_and_survives_reconnect() {
+        use std::os::unix::fs::symlink;
+        let dir = env::temp_dir().join(format!("routeloom-usb-secret-{}", process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("usb.key");
+        std::fs::write(&path, b"not-the-legacy-usb-secret").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let secret = load_usb_dev_secret(&path).unwrap();
+        assert_eq!(secret, b"not-the-legacy-usb-secret");
+        let mut session = DeviceSession::new();
+        session.secret = secret.clone();
+        let hello = session.begin();
+        assert_eq!(session.secret, secret);
+        let host_nonce = u64::from_be_bytes(hello.body[0..8].try_into().unwrap());
+        let (legacy_ack, _) = device_hello_ack(host_nonce);
+        let rejected = session.handle(&frame(FrameKind::HelloAck, 0, 100, legacy_ack));
+        assert!(rejected
+            .notes
+            .iter()
+            .any(|note| note.contains("HELLO_TAG_INVALID")));
+        assert_eq!(session.phase, SessionPhase::AwaitHelloAck);
+        let hello = session.begin();
+        let host_nonce = u64::from_be_bytes(hello.body[0..8].try_into().unwrap());
+        let transcript = Transcript {
+            host_nonce,
+            device_nonce: 0xAABB,
+            version: 1,
+            node: 42,
+            boot: 7,
+            network: 9,
+            capability: 3,
+            principal: DEV_PRINCIPAL.to_vec(),
+        };
+        let proof = derive_session_proof(&secret, &transcript.encode().unwrap());
+        let (mut ack, _) = device_hello_ack(host_nonce);
+        ack[37..].copy_from_slice(&proof.hello_tag);
+        assert_eq!(
+            session
+                .handle(&frame(FrameKind::HelloAck, 0, 100, ack))
+                .outbound
+                .len(),
+            1
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(load_usb_dev_secret(&path).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.join("alias.key");
+        symlink(&path, &link).unwrap();
+        assert!(load_usb_dev_secret(&link).is_err());
+        std::fs::write(&path, b"trailing-newline\n").unwrap();
+        assert!(load_usb_dev_secret(&path).is_err());
+        std::fs::write(&path, [b'a'; 64]).unwrap();
+        assert!(load_usb_dev_secret(&path).is_err());
+        std::fs::remove_file(link).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn usb_secret_file_requires_owner_only_dacl() {
+        let dir = env::temp_dir().join(format!("routeloom-usb-secret-{}", process::id()));
+        routeloom_peercred::create_private_dir_all(&dir).unwrap();
+        let path = dir.join("usb.key");
+        let mut file = routeloom_peercred::open_private_file_for_write(&path).unwrap();
+        file.write_all(b"private-usb-secret").unwrap();
+        drop(file);
+        assert_eq!(load_usb_dev_secret(&path).unwrap(), b"private-usb-secret");
+        let public = dir.join("public.key");
+        std::fs::write(&public, b"public-usb-secret").unwrap();
+        assert!(load_usb_dev_secret(&public).is_err());
+        std::fs::remove_file(public).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]

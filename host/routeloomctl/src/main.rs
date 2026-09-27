@@ -1,9 +1,6 @@
-#[cfg(not(unix))]
-compile_error!("routeloomctl v0.1 currently requires a Unix platform");
-
+use routeloom_peercred::IpcStream;
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -77,8 +74,8 @@ fn exchange_first(
     command: &str,
     read_timeout: Duration,
     write_timeout: Duration,
-) -> Result<(String, BufReader<UnixStream>), Box<dyn std::error::Error>> {
-    let mut stream = UnixStream::connect(socket)?;
+) -> Result<(String, BufReader<IpcStream>), Box<dyn std::error::Error>> {
+    let mut stream = IpcStream::connect(socket)?;
     stream.set_write_timeout(Some(write_timeout))?;
     stream.set_read_timeout(Some(read_timeout))?;
     stream.write_all(command.as_bytes())?;
@@ -100,7 +97,7 @@ fn usage() {
         "Read-only daemon diagnostics: adapter | events [--follow [--kinds k1,k2]] | deliveries"
     );
     eprintln!(
-        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-retry --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-recover --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --mode adopt-known|reprovision --new-store-generation <u32> --new-revision <u64> [--snapshot-hash <64hex>] [--baseline <hex>]|config-recovery-info --network <16hex> --target <16hex> --config-namespace <u16>|trust-install --network <16hex> --target <16hex> --manifest <file>|trust-status --network <16hex> --target <16hex>|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)|telemetry --observer <16hex> --peer <16hex> [--direction egress|ingress] [--length-class 0|1|2|255] [--max-age-ms 0-3000]|group-send --network <16hex> --group <1-65535|ALL> --payload <hex> [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered] [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]|group-get --id <grp-opid> [--wait-ms 0-15000]"
+        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-retry --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-recover --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --mode adopt-known|reprovision --new-store-generation <u32> --new-revision <u64> [--snapshot-hash <64hex>] [--baseline <hex>]|config-recovery-info --network <16hex> --target <16hex> --config-namespace <u16>|trust-install --network <16hex> --target <16hex> --manifest <file>|trust-status --network <16hex> --target <16hex>|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)|telemetry --observer <16hex> --peer <16hex> [--direction egress|ingress] [--length-class 0|1|2|255] [--max-age-ms 0-3000]|health --observer <16hex> [--section system|tables|milestones] [--network <16hex>] [--max-age-ms 0-60000] [--subscribe]|topology --observer <16hex> --section routes|neighbors|summary [--destination <16hex>|--cursor <page-token>] [--network <16hex>] [--max-age-ms 0-60000] [--subscribe]|group-send --network <16hex> --group <1-65535|ALL> --payload <hex> [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered] [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]|group-get --id <grp-opid> [--wait-ms 0-15000]"
     );
     eprintln!(
         "routeloomctl provision-keygen --root-id <16hex> --out <key.json>|provision-authority-keygen --authority-id <16hex> --out <key.json>|provision-image --spec <image-spec.json> --out <image.rlt1> [--nvs-dir <dir> [--credential <cred-spec.json>]]|provision-manifest --image <spec.json|image.rlt1> --key <root.key> --out <manifest.rtm1>|provision-verify --manifest <file> --current <spec.json|image.rlt1>  (local provisioning — no daemon socket)"
@@ -371,9 +368,20 @@ fn receive_request(network: &str, from: &str, cursor: Option<&str>, limit: u64) 
     )
 }
 
+fn default_socket_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(r"\\.\pipe\routeloom.sock")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/tmp/routeloom.sock")
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
-    let mut socket = PathBuf::from("/tmp/routeloom.sock");
+    let mut socket = default_socket_path();
     let mut remaining = Vec::new();
     // --socket is accepted in any position, not only before the command.
     while let Some(argument) = args.next() {
@@ -464,6 +472,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [name, rest @ ..] if name == "node-get" => node_get_command(rest)?,
         [name] if name == "node-events" => node_events_request(),
         [name, rest @ ..] if name == "telemetry" => telemetry_command(rest)?,
+        [name, rest @ ..] if name == "health" => health_command(rest)?,
+        [name, rest @ ..] if name == "topology" => topology_command(rest)?,
         [name, rest @ ..] if name == "group-send" => group_send_command(rest)?,
         [name, rest @ ..] if name == "group-get" => group_get_command(rest)?,
         [name, rest @ ..] if name == "site" => site_command(rest)?,
@@ -626,6 +636,166 @@ fn telemetry_command(args: &[String]) -> Result<String, Box<dyn std::error::Erro
     }
     Ok(format!(
         "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"diagnostics.snapshot\",\"params\":{{{params}}}}}",
+        request_id(),
+    ))
+}
+
+/// Shared `--max-age-ms 0-60000` parse for the observation verbs.
+fn observation_max_age_ms(value: &str, verb: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let ms: u32 = value
+        .parse()
+        .ok()
+        .filter(|ms| *ms <= 60_000)
+        .ok_or(format!("{verb} --max-age-ms must be 0-60000"))?;
+    Ok(ms.to_string())
+}
+
+/// `health --observer <16hex> [--section system|tables|milestones]
+/// [--network <16hex>] [--max-age-ms 0-60000] [--subscribe]`: one
+/// read-only device-health singleton of the attached gateway. Only
+/// explicit options are sent — the daemon owns the defaults (system,
+/// 10 s cache window, no subscribe).
+fn health_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut observer = None;
+    let mut section = None;
+    let mut network = None;
+    let mut max_age_ms = None;
+    let mut subscribe = false;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--observer" => {
+                observer = Some(want_hex16(
+                    "--observer",
+                    opt_value(&mut args, "--observer")?,
+                )?)
+            }
+            "--section" => {
+                let value = opt_value(&mut args, "--section")?;
+                if !matches!(value.as_str(), "system" | "tables" | "milestones") {
+                    return Err("health --section must be system, tables or milestones".into());
+                }
+                section = Some(value);
+            }
+            "--network" => {
+                network = Some(want_hex16("--network", opt_value(&mut args, "--network")?)?)
+            }
+            "--max-age-ms" => {
+                max_age_ms = Some(observation_max_age_ms(
+                    &opt_value(&mut args, "--max-age-ms")?,
+                    "health",
+                )?);
+            }
+            "--subscribe" => subscribe = true,
+            other => return Err(format!("unknown health option: {other}").into()),
+        }
+    }
+    let observer: String = observer.ok_or("health requires --observer <16hex>")?;
+    let mut params = format!("\"observer\":\"{observer}\"");
+    if let Some(section) = section {
+        params.push_str(&format!(",\"section\":\"{section}\""));
+    }
+    if let Some(network) = network {
+        params.push_str(&format!(",\"network\":\"{network}\""));
+    }
+    if let Some(max_age_ms) = max_age_ms {
+        params.push_str(&format!(",\"max_age_ms\":{max_age_ms}"));
+    }
+    if subscribe {
+        params.push_str(",\"subscribe\":true");
+    }
+    Ok(format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"health.get\",\"params\":{{{params}}}}}",
+        request_id(),
+    ))
+}
+
+/// `topology --observer <16hex> --section routes|neighbors|summary
+/// [--destination <16hex> | --cursor <page-token>] [--network <16hex>]
+/// [--max-age-ms 0-60000] [--subscribe]`: the attached gateway's
+/// selected-route or neighbor table (one page per call, or one exact
+/// destination/peer) or its topology summary. Only explicit options are
+/// sent.
+fn topology_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut observer = None;
+    let mut section = None;
+    let mut destination = None;
+    let mut cursor = None;
+    let mut network = None;
+    let mut max_age_ms = None;
+    let mut subscribe = false;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--observer" => {
+                observer = Some(want_hex16(
+                    "--observer",
+                    opt_value(&mut args, "--observer")?,
+                )?)
+            }
+            "--section" => {
+                let value = opt_value(&mut args, "--section")?;
+                if !matches!(value.as_str(), "routes" | "neighbors" | "summary") {
+                    return Err("topology --section must be routes, neighbors or summary".into());
+                }
+                section = Some(value);
+            }
+            "--destination" => {
+                destination = Some(want_hex16(
+                    "--destination",
+                    opt_value(&mut args, "--destination")?,
+                )?)
+            }
+            "--cursor" => {
+                let value = opt_value(&mut args, "--cursor")?;
+                if value.is_empty()
+                    || value.len() > 96
+                    || !value.bytes().all(|b| b.is_ascii_hexdigit() || b == b'.')
+                {
+                    return Err("--cursor must be an observation page token".into());
+                }
+                cursor = Some(value.to_string());
+            }
+            "--network" => {
+                network = Some(want_hex16("--network", opt_value(&mut args, "--network")?)?)
+            }
+            "--max-age-ms" => {
+                max_age_ms = Some(observation_max_age_ms(
+                    &opt_value(&mut args, "--max-age-ms")?,
+                    "topology",
+                )?);
+            }
+            "--subscribe" => subscribe = true,
+            other => return Err(format!("unknown topology option: {other}").into()),
+        }
+    }
+    let observer: String = observer.ok_or("topology requires --observer <16hex>")?;
+    let section: String = section.ok_or("topology requires --section routes|neighbors|summary")?;
+    if destination.is_some() && cursor.is_some() {
+        return Err("topology --destination and --cursor are mutually exclusive".into());
+    }
+    if section != "routes" && section != "neighbors" && (destination.is_some() || cursor.is_some())
+    {
+        return Err("topology --destination and --cursor are routes/neighbors-only".into());
+    }
+    let mut params = format!("\"observer\":\"{observer}\",\"section\":\"{section}\"");
+    if let Some(destination) = destination {
+        params.push_str(&format!(",\"destination\":\"{destination}\""));
+    }
+    if let Some(cursor) = cursor {
+        params.push_str(&format!(",\"cursor\":\"{cursor}\""));
+    }
+    if let Some(network) = network {
+        params.push_str(&format!(",\"network\":\"{network}\""));
+    }
+    if let Some(max_age_ms) = max_age_ms {
+        params.push_str(&format!(",\"max_age_ms\":{max_age_ms}"));
+    }
+    if subscribe {
+        params.push_str(",\"subscribe\":true");
+    }
+    Ok(format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"topology.get\",\"params\":{{{params}}}}}",
         request_id(),
     ))
 }
@@ -921,7 +1091,7 @@ fn submit_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>>
             key.to_ascii_lowercase()
         }
         None => {
-            let generated = generate_key();
+            let generated = generate_key()?;
             eprintln!("generated key: {generated}");
             generated
         }
@@ -1075,28 +1245,17 @@ fn gateway_get_command(args: &[String]) -> Result<String, Box<dyn std::error::Er
     Ok(gateway_get_request(&id.to_ascii_lowercase()))
 }
 
-/// Fresh 128-bit caller key from /dev/urandom (time^pid fallback).
-fn generate_key() -> String {
-    use std::io::Read;
+/// Fresh 128-bit caller key from the OS CSPRNG.
+fn generate_key() -> io::Result<String> {
     let mut bytes = [0_u8; 16];
-    let random = std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut bytes))
-        .is_ok();
-    if !random {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-            ^ u128::from(std::process::id());
-        bytes = (seed ^ seed.rotate_left(64)).to_be_bytes();
-    }
+    routeloom_peercred::fill_random(&mut bytes)?;
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(32);
     for byte in bytes {
         out.push(HEX[(byte >> 4) as usize] as char);
         out.push(HEX[(byte & 0xf) as usize] as char);
     }
-    out
+    Ok(out)
 }
 
 /// `operation-get --id <opid>` and `operation-get-by-key --network/--epoch/
@@ -1735,7 +1894,7 @@ fn group_send_command(args: &[String]) -> Result<String, Box<dyn std::error::Err
             key.to_ascii_lowercase()
         }
         None => {
-            let generated = generate_key();
+            let generated = generate_key()?;
             eprintln!("generated key: {generated}");
             generated
         }
@@ -1854,7 +2013,7 @@ fn want_idempotency_key(key: Option<String>) -> Result<String, Box<dyn std::erro
             Ok(key)
         }
         None => {
-            let generated = generate_key();
+            let generated = generate_key()?;
             eprintln!("generated idempotency key: {generated}");
             Ok(generated)
         }
@@ -2161,25 +2320,36 @@ fn site_cutover_command(args: &[String]) -> Result<String, Box<dyn std::error::E
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixListener;
+    use routeloom_peercred::IpcListener;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Unique socket path per test (parallel tests must not share one).
     fn test_socket_path(tag: &str) -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "routeloomctl-test-{}-{}-{tag}.sock",
-            std::process::id(),
-            id
-        ))
+        #[cfg(windows)]
+        {
+            PathBuf::from(format!(
+                r"\\.\pipe\routeloomctl-test-{}-{}-{tag}",
+                std::process::id(),
+                id
+            ))
+        }
+        #[cfg(not(windows))]
+        {
+            std::env::temp_dir().join(format!(
+                "routeloomctl-test-{}-{}-{tag}.sock",
+                std::process::id(),
+                id
+            ))
+        }
     }
 
     /// Serves one connection: reads the command line, then runs `answer`
     /// with the connected stream. Returns the path to query.
-    fn serve_once(tag: &str, answer: impl FnOnce(UnixStream) + Send + 'static) -> PathBuf {
+    fn serve_once(tag: &str, answer: impl FnOnce(IpcStream) + Send + 'static) -> PathBuf {
         let path = test_socket_path(tag);
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = IpcListener::bind(&path).unwrap();
         std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             // Read the command line, then answer.
@@ -2448,6 +2618,123 @@ mod tests {
     }
 
     #[test]
+    fn health_builds_api1_line() {
+        let line = health_command(&args(&["--observer", "0000000000000ABC"])).unwrap();
+        assert!(line.starts_with("API1 {"), "{line}");
+        assert!(line.contains("\"method\":\"health.get\""), "{line}");
+        assert!(line.contains("\"observer\":\"0000000000000abc\""), "{line}");
+        // Defaults stay daemon-side: only explicit options are sent.
+        assert!(!line.contains("section"), "{line}");
+        assert!(!line.contains("subscribe"), "{line}");
+        let line = health_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--section",
+            "milestones",
+            "--network",
+            "0000000000000001",
+            "--max-age-ms",
+            "0",
+            "--subscribe",
+        ]))
+        .unwrap();
+        assert!(line.contains("\"section\":\"milestones\""), "{line}");
+        assert!(line.contains("\"network\":\"0000000000000001\""), "{line}");
+        assert!(line.contains("\"max_age_ms\":0"), "{line}");
+        assert!(line.contains("\"subscribe\":true"), "{line}");
+        assert!(routeloom_json::parse(line.strip_prefix("API1 ").unwrap()).is_ok());
+        assert!(health_command(&args(&[])).is_err());
+        assert!(health_command(&args(&["--observer", "zz"])).is_err());
+        assert!(health_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--section",
+            "routes"
+        ]))
+        .is_err());
+        assert!(health_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--max-age-ms",
+            "60001"
+        ]))
+        .is_err());
+        assert!(health_command(&args(&["--observer", "0000000000000abc", "--bogus"])).is_err());
+    }
+
+    #[test]
+    fn topology_builds_api1_line() {
+        let line = topology_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--section",
+            "routes",
+            "--cursor",
+            "0000000000000003.11223344.0000000000000007.0000000000000007.0000000000000001.0000000000000abc.04",
+        ]))
+        .unwrap();
+        assert!(line.starts_with("API1 {"), "{line}");
+        assert!(line.contains("\"method\":\"topology.get\""), "{line}");
+        assert!(line.contains("\"section\":\"routes\""), "{line}");
+        assert!(
+            line.contains("\"cursor\":\"0000000000000003.11223344."),
+            "{line}"
+        );
+        assert!(!line.contains("destination"), "{line}");
+        let line = topology_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--section",
+            "routes",
+            "--destination",
+            "0000000000000009",
+            "--subscribe",
+        ]))
+        .unwrap();
+        assert!(
+            line.contains("\"destination\":\"0000000000000009\""),
+            "{line}"
+        );
+        assert!(line.contains("\"subscribe\":true"), "{line}");
+        assert!(routeloom_json::parse(line.strip_prefix("API1 ").unwrap()).is_ok());
+        assert!(topology_command(&args(&["--observer", "0000000000000abc"])).is_err());
+        assert!(topology_command(&args(&["--section", "routes"])).is_err());
+        // neighbors is a served section (M2): it builds a line like routes.
+        let line = topology_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--section",
+            "neighbors",
+            "--cursor",
+            "0000000000000003",
+        ]))
+        .unwrap();
+        assert!(line.contains("\"section\":\"neighbors\""), "{line}");
+        assert!(line.contains("\"cursor\":\"0000000000000003\""), "{line}");
+        assert!(routeloom_json::parse(line.strip_prefix("API1 ").unwrap()).is_ok());
+        assert!(topology_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--section",
+            "routes",
+            "--destination",
+            "0000000000000009",
+            "--cursor",
+            "0000000000000001"
+        ]))
+        .is_err());
+        assert!(topology_command(&args(&[
+            "--observer",
+            "0000000000000abc",
+            "--section",
+            "summary",
+            "--cursor",
+            "0000000000000001"
+        ]))
+        .is_err());
+    }
+
+    #[test]
     fn open_epoch_builds_api1_line() {
         let line = open_epoch_command(&args(&["--network", "0000000000000001"])).unwrap();
         assert!(line.starts_with("API1 {"), "{line}");
@@ -2650,7 +2937,14 @@ mod tests {
             .unwrap();
         assert_eq!(key.len(), 32, "{line}");
         assert!(key.bytes().all(|b| b.is_ascii_hexdigit()), "{line}");
-        assert!(is_hex(&generate_key(), 32));
+        assert!(is_hex(&generate_key().unwrap(), 32));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn generated_key_has_no_repeated_clock_halves() {
+        let key = generate_key().unwrap();
+        assert_ne!(&key[..16], &key[16..]);
     }
 
     #[test]

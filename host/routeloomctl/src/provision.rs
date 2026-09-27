@@ -185,6 +185,49 @@ fn write_private_nvs_set(
     write("nvs-set.json", set.descriptor_json().as_bytes())
 }
 
+#[cfg(windows)]
+fn write_private_nvs_set(
+    dir: &Path,
+    set: &routeloom_provision::nvs::ManufacturedNvs,
+) -> Result<(), DynError> {
+    use std::io::Write;
+    routeloom_peercred::create_private_dir_all(dir)?;
+    routeloom_peercred::verify_private_dir_perms(dir)?;
+    let write = |name: &str, bytes: &[u8]| -> Result<(), DynError> {
+        let mut file = routeloom_peercred::open_private_file_for_write(&dir.join(name))?;
+        file.write_all(bytes)?;
+        Ok(())
+    };
+    for entry in &set.entries {
+        write(&entry.file_name(), &entry.bytes())?;
+    }
+    write("nvs-set.json", set.descriptor_json().as_bytes())
+}
+
+#[cfg(all(test, windows))]
+mod windows_private_nvs_tests {
+    use super::*;
+
+    #[test]
+    fn nvs_output_has_owner_only_dacl() {
+        let dir =
+            std::env::temp_dir().join(format!("routeloom-private-nvs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let set = routeloom_provision::nvs::ManufacturedNvs {
+            entries: vec![routeloom_provision::nvs::NvsEntry {
+                namespace: routeloom_provision::nvs::NVS_NAMESPACE_CRED,
+                key: "d0",
+                value: routeloom_provision::nvs::NvsValue::Blob(vec![7; 32]),
+            }],
+        };
+        write_private_nvs_set(&dir, &set).unwrap();
+        routeloom_peercred::verify_private_dir_perms(&dir).unwrap();
+        routeloom_peercred::verify_private_file_perms(&dir.join("nvs-set.json")).unwrap();
+        routeloom_peercred::verify_private_file_perms(&dir.join("rlcred_d0.bin")).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
 /// `provision-manifest --image <spec-or-rlt1> --key <root.key> --out
 /// <manifest>` — sign the image's RLT1 body into an RTM1 object under
 /// the dev root key. The AAD binds the image's own network — the only

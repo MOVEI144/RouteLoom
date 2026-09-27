@@ -20,6 +20,10 @@ pub const TRANSCRIPT_SIZE: usize = 8 + 8 + 8 + 1 + 8 + 8 + 8 + 4 + 1 + MAX_PRINC
 pub const DIRECTION_HOST_TO_DEVICE: u8 = 0;
 pub const DIRECTION_DEVICE_TO_HOST: u8 = 1;
 pub const FLAG_AUTH: u16 = 0x0001;
+/// DataFromMesh flag bit marking the extended shape: the 8 B ingress
+/// assurance tail follows the payload. Set only inside a 0x08-enabled
+/// session, so a legacy host never meets a frame it cannot parse.
+pub const FLAG_INGRESS_ASSURANCE: u16 = 0x0002;
 
 pub const CREDIT_GRANT: u8 = 0;
 pub const CREDIT_QUERY: u8 = 1;

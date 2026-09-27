@@ -277,7 +277,7 @@ fn committed_cutover_reopens_with_old_network_rrs_history() {
         std::process::id(),
         crate::now_ms()
     ));
-    std::fs::create_dir_all(&dir).unwrap();
+    routeloom_peercred::create_private_dir_all(&dir).unwrap();
     let path = dir.join("site.db");
     let store = super::store::SqliteSiteStore::open(&path).unwrap();
     let (service, transport) = service_with(Box::new(store));
@@ -1460,7 +1460,7 @@ fn cutover_survives_restart() {
         std::process::id(),
         crate::now_ms()
     ));
-    std::fs::create_dir_all(&dir).unwrap();
+    routeloom_peercred::create_private_dir_all(&dir).unwrap();
     let path = dir.join("site.db");
     let open = |at: u64| {
         let store = super::store::SqliteSiteStore::open(&path).expect("site store");
@@ -1499,6 +1499,7 @@ fn cutover_survives_restart() {
     // One member: serial 1 (current cert) + 2 (next cert) consumed at
     // allow/prepare time; the restart consumed nothing more.
     assert_eq!(serial_meta, 3);
+    drop(service);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

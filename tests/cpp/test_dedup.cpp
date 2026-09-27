@@ -1019,6 +1019,125 @@ void test_cross_round_terminal_pin() {
   CHECK(h.sights(FrameType::EndReceipt, 11, 10) == 2);  // receipt re-emitted
 }
 
+// Route-loss regression (issue #169, design §E): when a terminal must
+// re-emit its END_RECEIPT for a SAME-ROUND duplicate DATA — the relay's
+// hop ACK was lost, so its forward retry lands the same DATA at the
+// terminal a second time — the re-emitted receipt must replay the FIRST
+// emission's End envelope byte-for-byte. A relay fingerprints transit dedup
+// records on the end-AAD + protected bytes: a re-sealed receipt reads as
+// RECEIPT_DEDUP_CONFLICT, is refused, and never reaches the origin (the
+// HIL "host failed but endpoint received" fault).
+NodeId g_ack_drop_from = kInvalidNodeId;
+NodeId g_ack_drop_to = kInvalidNodeId;
+int g_ack_drops_left = 0;
+bool drop_one_hop_accept(const SimNetwork::Pending& p) {
+  if (g_ack_drops_left <= 0 || p.from != g_ack_drop_from ||
+      p.to != g_ack_drop_to) {
+    return false;
+  }
+  FrameSight s{};
+  if (!routeloom_test::sight_frame(ByteView{p.frame.data(), p.frame.size()}, s) ||
+      s.type != FrameType::HopAccept) {
+    return false;
+  }
+  --g_ack_drops_left;
+  return true;
+}
+
+void test_same_round_receipt_replays_end_envelope() {
+  SimWorld w;
+  w.network_id = kNet;
+  MeshNode* origin = w.add(1);
+  (void)w.add(2);  // relay
+  (void)w.add(3);  // terminal
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.link(2, 3, 1, 1);
+  w.run(4000);  // routes settle in both directions
+
+  std::vector<wire::LinkOpenedFrame> receipts;
+  wire::LinkOpenedFrame sent_data{};
+  bool saw_data = false;
+  TestSecurity cipher;
+  w.net.capture = [&](NodeId from, NodeId to, ByteView frame) {
+    FrameSight s{};
+    if (from == 2 && to == 3 && !saw_data &&
+        routeloom_test::sight_frame(frame, s) && s.type == FrameType::Data) {
+      saw_data = wire::open_link(frame, to, cipher, sent_data).ok();
+    }
+    if (from == 3 && to == 2 &&
+        routeloom_test::sight_frame(frame, s) &&
+        s.type == FrameType::EndReceipt) {
+      // The wire bytes are link ciphertext — a fresh link counter wraps
+      // every emission, so the End envelope must be compared AFTER
+      // open_link, exactly as the relay's dedup fingerprint sees it.
+      wire::LinkOpenedFrame opened{};
+      if (wire::open_link(frame, to, cipher, opened).ok()) {
+        receipts.push_back(opened);
+      }
+    }
+  };
+  // Drop the terminal's first HOP_ACCEPT toward the relay: the relay's
+  // forward retry re-delivers the SAME DATA round at the terminal — the
+  // same-round reissue path under test.
+  g_ack_drop_from = 3;
+  g_ack_drop_to = 2;
+  g_ack_drops_left = 1;
+  w.net.drop_frame = drop_one_hop_accept;
+
+  MessageId id{};
+  CHECK_OK(origin->send(3, payload_view(), SendOptions{}, w.now, id));
+  w.run(3000);
+  w.net.drop_frame = nullptr;
+  g_ack_drops_left = 0;
+
+  CHECK(w.obs(3)->messages.size() == 1);
+  CHECK(origin->delivery(id).state == DeliveryState::Delivered);
+  CHECK(receipts.size() >= 2);
+  if (receipts.size() >= 2) {
+    const auto& a = receipts[0];
+    const auto& b = receipts[1];
+    CHECK(a.header.end_epoch == b.header.end_epoch);
+    CHECK(a.header.end_counter == b.header.end_counter);
+    CHECK(a.protected_payload_size == b.protected_payload_size);
+    CHECK(std::equal(a.protected_payload.data(),
+                     a.protected_payload.data() + a.protected_payload_size,
+                     b.protected_payload.data()));
+  }
+  // The relay's transit dedup must never have read the reissue as a
+  // conflict.
+  CHECK(!w.obs(2)->has_diag("RECEIPT_DEDUP_CONFLICT"));
+
+  // A link-authenticated duplicate can change an untrusted DATA lifetime.
+  // The terminal must still seal the pinned receipt AAD verbatim: reusing
+  // the same End nonce with a different AAD would break AEAD nonce safety.
+  CHECK(saw_data);
+  if (saw_data && !receipts.empty()) {
+    sent_data.header.original_lifetime_ms += 1000;
+    wire::EncodedFrame altered{};
+    CHECK_OK(wire::retry_local(sent_data, 3,
+                               sent_data.header.remaining_deadline_ms,
+                               cipher, altered));
+    const std::size_t before = receipts.size();
+    CHECK_OK(w.at(3)->on_radio_receive(
+        2, ByteView{altered.bytes.data(), altered.size},
+        sim_rx_metadata(w.net.reply_port(3), 2), w.now));
+    w.run(100);
+    CHECK(receipts.size() > before);
+    if (receipts.size() > before) {
+      const auto& pinned = receipts.front();
+      const auto& replay = receipts.back();
+      CHECK(replay.header.original_lifetime_ms ==
+            pinned.header.original_lifetime_ms);
+      CHECK(replay.header.end_counter == pinned.header.end_counter);
+      CHECK(replay.protected_payload_size == pinned.protected_payload_size);
+      CHECK(std::equal(pinned.protected_payload.data(),
+                       pinned.protected_payload.data() + pinned.protected_payload_size,
+                       replay.protected_payload.data()));
+    }
+  }
+}
+
 // §2.3a class-(a): the 8-slot origin delivery table evicts only TERMINAL
 // records — all-live refuses the send; a terminal eviction is counted and
 // diagnosed, and the evicted result is no longer queryable.
@@ -1258,6 +1377,7 @@ int main() {
   test_retention_bounds();
   test_expired_reclaim_beats_eviction();
   test_cross_round_terminal_pin();
+  test_same_round_receipt_replays_end_envelope();
   test_delivery_table_terminal_eviction();
   test_continuous_send_below_capacity();
   test_line_throughput_two_sources();

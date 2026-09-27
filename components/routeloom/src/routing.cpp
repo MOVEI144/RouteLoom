@@ -533,6 +533,26 @@ MonotonicMs RouteTable::selection_expires_at(const NodeId destination) const noe
     if (candidate.valid && candidate.next_hop == selection.next_hop) return candidate.expires_at_ms;
   }
   return 0;
+bool RouteTable::selection_remaining(const NodeId destination, const MonotonicMs now_ms,
+                                     MonotonicMs& remaining_ms) const noexcept {
+  remaining_ms = 0;
+  const auto* entry = find(destination);
+  if (entry == nullptr) return false;
+  const RouteSelection selection = select(*entry);
+  if (!selection.valid) return false;
+  // The selection names its candidate (next hop + sequence); the lease is
+  // the candidate's own expiry. A lapsed-but-unswept lease reads 0 —
+  // honest "expired, sweep pending", never a fabricated lifetime.
+  for (const auto& candidate : entry->candidates) {
+    if (!candidate.valid || candidate.next_hop != selection.next_hop ||
+        candidate.sequence != selection.sequence) {
+      continue;
+    }
+    remaining_ms =
+        candidate.expires_at_ms > now_ms ? candidate.expires_at_ms - now_ms : 0;
+    return true;
+  }
+  return false;
 }
 
 bool RouteTable::mark_advertised(const NodeId destination) noexcept {
@@ -590,6 +610,11 @@ NodeId RouteTable::request_next_hop(const NodeId destination, const std::size_t 
     }
   }
   return count != 0 ? hops[attempt % count] : kInvalidNodeId;
+}
+
+NodeId RouteTable::repair_hint(const NodeId destination) const noexcept {
+  const auto* entry = find(destination);
+  return entry != nullptr ? entry->hold_next_hop : kInvalidNodeId;
 }
 
 std::size_t RouteTable::size() const noexcept { return entries_.size(); }

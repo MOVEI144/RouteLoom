@@ -1093,7 +1093,7 @@ int main(int argc, char** argv) {
           Bytes frame;
           frame.push_back('X');
           frame.insert(frame.end(), tx.dest, tx.dest + 6);
-          frame.insert(frame.end(), tx.data, tx.data + tx.length);
+          frame.insert(frame.end(), tx.bytes, tx.bytes + tx.length);
           write_frame(frame);
         }
         const Bytes usb_tx = usb_stream.take();

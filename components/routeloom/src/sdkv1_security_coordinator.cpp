@@ -363,6 +363,175 @@ Status SecurityCoordinator::take_action(CoordinatorAction& out) noexcept {
   return Status::success();
 }
 
+namespace {
+
+std::uint8_t map_coord_mode(const CoordinatorMode mode) noexcept {
+  switch (mode) {
+    case CoordinatorMode::Fresh:
+      return kCoordModeFresh;
+    case CoordinatorMode::ZeroTouch:
+      return kCoordModeZeroTouch;
+    case CoordinatorMode::Member:
+      return kCoordModeMember;
+    case CoordinatorMode::Dev:
+      return kCoordModeDev;
+    case CoordinatorMode::Removed:
+      return kCoordModeRemoved;
+    case CoordinatorMode::Recovery:
+      return kCoordModeRecovery;
+  }
+  return kCoordModeUnknown;
+}
+
+std::uint8_t map_membership(const MembershipState state) noexcept {
+  switch (state) {
+    case MembershipState::Unprovisioned:
+      return kMembershipUnprovisioned;
+    case MembershipState::Discovering:
+      return kMembershipDiscovering;
+    case MembershipState::Authenticating:
+      return kMembershipAuthenticating;
+    case MembershipState::AuthorizedPendingCommit:
+      return kMembershipAuthorizedPendingCommit;
+    case MembershipState::Member:
+      return kMembershipMember;
+    case MembershipState::Revoked:
+      return kMembershipRevoked;
+  }
+  return kMembershipUnknown;
+}
+
+std::uint8_t map_joiner_state(const JoinState state) noexcept {
+  switch (state) {
+    case JoinState::Stopped:
+      return kJoinerStopped;
+    case JoinState::Ready:
+      return kJoinerReady;
+    case JoinState::Removed:
+      return kJoinerRemoved;
+    case JoinState::RecoveryRequired:
+      return kJoinerRecoveryRequired;
+    default:
+      return kJoinerActive;
+  }
+}
+
+constexpr MonotonicMs kMilestoneStampMax = (MonotonicMs{1} << 48) - 1;
+
+void store_milestone_ms(std::array<std::uint8_t, 6>& out, const MonotonicMs now) noexcept {
+  const MonotonicMs stamp = now > kMilestoneStampMax ? kMilestoneStampMax : now;
+  for (unsigned i = 0; i < out.size(); ++i) {
+    out[i] = static_cast<std::uint8_t>(stamp >> ((out.size() - 1 - i) * 8));
+  }
+}
+
+MonotonicMs load_milestone_ms(const std::array<std::uint8_t, 6>& in) noexcept {
+  MonotonicMs stamp = 0;
+  for (const std::uint8_t byte : in) stamp = (stamp << 8) | byte;
+  return stamp;
+}
+
+std::uint64_t milestone_age(const MonotonicMs now, const MonotonicMs stamp) noexcept {
+  if (now < stamp) return 0;
+  return now - stamp;
+}
+
+std::uint16_t saturate_attempts(const std::uint32_t attempts) noexcept {
+  return attempts > UINT16_MAX ? UINT16_MAX : static_cast<std::uint16_t>(attempts);
+}
+
+}  // namespace
+
+void SecurityCoordinator::note_milestone_leg_started(const MonotonicMs now) noexcept {
+  store_milestone_ms(milestone_join_started_ms_, now);
+  milestone_flags_ |= kMilestoneStarted;
+  milestone_attempts_ = 0;
+  milestone_flags_ = static_cast<std::uint8_t>(milestone_flags_ & ~kMilestoneLatched);
+}
+
+void SecurityCoordinator::note_milestone_adopted(const MonotonicMs now) noexcept {
+  store_milestone_ms(milestone_adopted_ms_, now);
+  milestone_flags_ |= kMilestoneAdoptedBit;
+  // The Joiner is destroyed with the adoption — latch its attempt count
+  // and terminal state now; the getter serves the latch past this point.
+  if (mode_ == CoordinatorMode::ZeroTouch) {
+    const JoinSnapshot join = joiner().snapshot();
+    milestone_attempts_ = saturate_attempts(join.counters.attempts);
+    milestone_joiner_latched_ = map_joiner_state(join.state);
+    milestone_flags_ |= kMilestoneLatched;
+  }
+  milestone_flags_ = static_cast<std::uint8_t>(milestone_flags_ & ~kMilestoneConfirmedBit);
+}
+
+void SecurityCoordinator::note_milestone_dev_adopted(const MonotonicMs now) noexcept {
+  store_milestone_ms(milestone_adopted_ms_, now);
+  milestone_flags_ |= kMilestoneAdoptedBit;
+  milestone_attempts_ = 0;
+  milestone_joiner_latched_ = kJoinerStopped;
+  milestone_flags_ |= kMilestoneLatched;
+  milestone_flags_ = static_cast<std::uint8_t>(milestone_flags_ & ~kMilestoneConfirmedBit);
+}
+
+void SecurityCoordinator::note_milestone_confirmed() noexcept {
+  // First JoinConfirm ACK per adoption wins; the observer callback runs
+  // inside the step whose now last_now_ holds.
+  const bool adopted = (milestone_flags_ & kMilestoneAdoptedBit) != 0;
+  const bool confirmed = (milestone_flags_ & kMilestoneConfirmedBit) != 0;
+  if (adopted && !confirmed) {
+    store_milestone_ms(milestone_confirmed_ms_, last_now_);
+    milestone_flags_ |= kMilestoneConfirmedBit;
+  }
+}
+
+void SecurityCoordinator::clear_milestone_adopted() noexcept {
+  milestone_flags_ = static_cast<std::uint8_t>(
+      milestone_flags_ & ~(kMilestoneAdoptedBit | kMilestoneConfirmedBit));
+}
+
+void SecurityCoordinator::clear_milestone_confirmed() noexcept {
+  milestone_flags_ =
+      static_cast<std::uint8_t>(milestone_flags_ & ~kMilestoneConfirmedBit);
+}
+
+void SecurityCoordinator::clear_milestones() noexcept {
+  milestone_flags_ = 0;
+  milestone_attempts_ = 0;
+  milestone_joiner_latched_ = kJoinerUnknown;
+}
+
+JoinMilestones SecurityCoordinator::milestones(const MonotonicMs now) const noexcept {
+  JoinMilestones out{};
+  out.mode = map_coord_mode(mode_);
+  out.membership = map_membership(deps_.discovery != nullptr ? deps_.discovery->membership().state()
+                                                             : MembershipState::Unprovisioned);
+  const bool started = (milestone_flags_ & kMilestoneStarted) != 0;
+  const bool adopted = (milestone_flags_ & kMilestoneAdoptedBit) != 0;
+  const bool confirmed = (milestone_flags_ & kMilestoneConfirmedBit) != 0;
+  if (mode_ == CoordinatorMode::ZeroTouch) {
+    const JoinSnapshot join = joiner().snapshot();
+    out.joiner_state = map_joiner_state(join.state);
+    out.attempts = join.counters.attempts;
+  } else if ((milestone_flags_ & kMilestoneLatched) != 0) {
+    out.joiner_state = milestone_joiner_latched_;
+    out.attempts = milestone_attempts_;
+  } else if (started) {
+    out.joiner_state = kJoinerStopped;
+  } else {
+    out.joiner_state = kJoinerUnknown;
+  }
+  if (member_valid_) out.flags |= kMilestoneAdopted;
+  if (join_confirmed_) out.flags |= kMilestoneConfirmed;
+  if (started) {
+    out.join_started_age_ms = milestone_age(now, load_milestone_ms(milestone_join_started_ms_));
+  }
+  if (adopted) out.adopted_age_ms = milestone_age(now, load_milestone_ms(milestone_adopted_ms_));
+  if (confirmed && adopted) {
+    out.confirmed_age_ms = milestone_age(now, load_milestone_ms(milestone_confirmed_ms_));
+  }
+  out.adopted_node = member_valid_ ? adopted_.node : kInvalidNodeId;
+  return out;
+}
+
 CoordinatorSnapshot SecurityCoordinator::snapshot() const noexcept {
   CoordinatorSnapshot out{};
   out.mode = mode_;
@@ -556,6 +725,7 @@ Status SecurityCoordinator::on_boot(const CoordinatorEvent& event) noexcept {
     emit_action(action);
     return Status::success();
   }
+  note_milestone_leg_started(event.now);
   return Status::success();
 }
 
@@ -2175,6 +2345,7 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now,
   last_unknown_newer_generation_ = 0;
   adopted_ = CoordinatorMemberConfig{};
   member_valid_ = false;
+  clear_milestones();
   tune_outstanding_ = 0;
   channel_ = 0;
   sleeping_ = false;
@@ -2442,6 +2613,7 @@ void SecurityCoordinator::on_event(const AuthorityEvent& event) noexcept {
     case AuthorityEvent::Kind::JoinConfirmAck:
       sat_inc(counters_.authority_confirmed);
       join_confirmed_ = true;
+      note_milestone_confirmed();
       break;
     case AuthorityEvent::Kind::UpdateReceived:
       sat_inc(counters_.authority_updates);
@@ -2554,6 +2726,7 @@ void SecurityCoordinator::start_refresh(const MonotonicMs now) noexcept {
     (void)adopt_boot_rls1(now);
     return;
   }
+  note_milestone_leg_started(now);
   refresh_active_ = true;
   refresh_start_ = now;
   refresh_strikes_ = 0;
@@ -2673,6 +2846,7 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
   // Recovery instead.
   adopted_ = cfg;
   member_valid_ = true;
+  note_milestone_adopted(now);
   destroy_workspace();
   mode_ = CoordinatorMode::Member;
   create_member();
@@ -2687,6 +2861,7 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
                                      : bank_.configure(local, deps_.bank_aead, random, now);
   if (!banked.ok()) {
     member_valid_ = false;
+    clear_milestone_adopted();
     destroy_workspace();
     mode_ = CoordinatorMode::Recovery;
     CoordinatorAction action{};
@@ -2698,6 +2873,7 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
   if (!member().member_cookie.configured()) {
     if (!member().member_cookie.configure(&entropy_fill, deps_.entropy).ok()) {
       member_valid_ = false;
+      clear_milestone_adopted();
       destroy_workspace();
       mode_ = CoordinatorMode::Recovery;
       CoordinatorAction action{};
@@ -2709,6 +2885,7 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
   }
   if (!member().engine.configure(now).ok()) {
     member_valid_ = false;
+    clear_milestone_adopted();
     destroy_workspace();
     mode_ = CoordinatorMode::Recovery;
     CoordinatorAction action{};
@@ -2731,6 +2908,7 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
     start.generation = site.assignment_generation;
     if (!group_keys_.advance(start, now).ok()) {
       member_valid_ = false;
+      clear_milestone_adopted();
       destroy_workspace();
       mode_ = CoordinatorMode::Recovery;
       CoordinatorAction action{};
@@ -2744,6 +2922,7 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
   // first Ready) and clears the refresh evidence.
   authority_wanted_ = true;
   join_confirmed_ = false;
+  clear_milestone_confirmed();
   refresh_active_ = false;
   refresh_strikes_ = 0;
   // The discovery's controller is initialized by the firmware at
@@ -2824,6 +3003,7 @@ Status SecurityCoordinator::install_dev_config(const CoordinatorDevConfig& confi
   cfg.role = config.role;
   adopted_ = cfg;
   member_valid_ = true;
+  note_milestone_dev_adopted(now);
   destroy_workspace();
   mode_ = CoordinatorMode::Dev;
   create_member();
@@ -3045,6 +3225,7 @@ void SecurityCoordinator::stop_traffic(const bool clear_resume) noexcept {
   suspend_authority();
   authority_wanted_ = false;
   join_confirmed_ = false;
+  clear_milestone_confirmed();
   {
     GroupKeyState::Input stop{};
     stop.op = GroupKeyState::Op::Stop;
@@ -3057,6 +3238,7 @@ void SecurityCoordinator::stop_traffic(const bool clear_resume) noexcept {
   member().gateway.set_membership(state);
   member().gateway_active = false;
   member_valid_ = false;
+  clear_milestone_adopted();
 }
 
 // --- P6 lifecycle connection points --------------------------------------------------------
@@ -3096,6 +3278,8 @@ Status SecurityCoordinator::start_recovery_join(const MonotonicMs now) noexcept 
     action.kind = CoordinatorActionKind::ReportRecovery;
     action.recovery = JoinRecoveryReason::MembershipInvalid;
     emit_action(action);
+  } else {
+    note_milestone_leg_started(now);
   }
   in_port_ = false;
   return Status::success();

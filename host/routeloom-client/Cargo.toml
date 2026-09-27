@@ -8,6 +8,7 @@ description = "Transport-agnostic mesh facade (send / receive / membership / lin
 [dependencies]
 # API1 responses and notifications are JSON — the workspace's one parser.
 routeloom-json = { path = "../routeloom-json" }
+routeloom-peercred = { path = "../routeloom-peercred" }
 
 [lints]
 workspace = true

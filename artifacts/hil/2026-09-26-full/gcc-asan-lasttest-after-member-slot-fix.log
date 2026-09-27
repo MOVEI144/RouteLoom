@@ -1,0 +1,1620 @@
+Start testing: Sep 26 18:13 JST
+----------------------------------------------------------
+1/96 Testing: routeloom_core_tests
+1/96 Test: routeloom_core_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_core_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_core_tests" start time: Sep 26 18:13 JST
+Output:
+----------------------------------------------------------
+SimNetwork::flush: dequeue bound (10000 frames) hit with 1 still queued
+RouteLoom portable core tests passed
+<end of output>
+Test time =   1.66 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_core_tests" end time: Sep 26 18:13 JST
+"routeloom_core_tests" time elapsed: 00:00:01
+----------------------------------------------------------
+
+2/96 Testing: routeloom_routing_tests
+2/96 Test: routeloom_routing_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_routing_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_routing_tests" start time: Sep 26 18:13 JST
+Output:
+----------------------------------------------------------
+RouteLoom routing profile tests passed
+<end of output>
+Test time =  18.51 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_routing_tests" end time: Sep 26 18:14 JST
+"routeloom_routing_tests" time elapsed: 00:00:18
+----------------------------------------------------------
+
+3/96 Testing: routeloom_routing_scale_unit_tests
+3/96 Test: routeloom_routing_scale_unit_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_routing_scale_tests" "unit"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_routing_scale_unit_tests" start time: Sep 26 18:14 JST
+Output:
+----------------------------------------------------------
+RouteLoom routing-scale tests passed
+<end of output>
+Test time =  20.63 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_routing_scale_unit_tests" end time: Sep 26 18:14 JST
+"routeloom_routing_scale_unit_tests" time elapsed: 00:00:20
+----------------------------------------------------------
+
+4/96 Testing: routeloom_routing_scale_100_node_tests
+4/96 Test: routeloom_routing_scale_100_node_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_routing_scale_tests" "scale"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_routing_scale_100_node_tests" start time: Sep 26 18:14 JST
+Output:
+----------------------------------------------------------
+  scale: converged at 9000 ms after 1880 route-control frames (14.4 s air)
+  scale: lapses up=0 down=0 chain=0 loops=0 max_depth=9
+  scale: window 240 s, route-control frames=2277 (up=1243 down=791 other=198 pull=0 answer=1)
+  scale: airtime network=77573 us/s mean=776 us/s max=6441 us/s (node 14) max_leaf=311 us/s leaves=41
+  scale: 10 upstream reports all at the gateway after 50 ms
+  scale: reachability settled 200 ms after the burst
+  scale: board 7 -> board 29 delivered (via discovery)
+  scale: board 3 -> board 19 delivered (via discovery)
+  scale: board 23 -> board 60 delivered (via discovery)
+  bcast-100: legacy  converged=  9000 ms lapses=0/0 chain=0 loops=0 false=0 route=507 frames (  69890 us/s) cap=0 frames (      0 us/s) total=  69890 us/s down_uni=197 bcast=0
+  bcast-100: mixed   converged=  9000 ms lapses=0/0 chain=0 loops=0 false=0 route=496 frames (  68647 us/s) cap=7868 frames ( 973244 us/s) total=1041891 us/s down_uni=175 bcast=11
+  bcast-100: opt-in  converged=  9000 ms lapses=0/0 chain=0 loops=0 false=0 route=492 frames (  68190 us/s) cap=16076 frames (1988847 us/s) total=2057037 us/s down_uni=167 bcast=15
+RouteLoom routing-scale tests passed
+<end of output>
+Test time =  68.49 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_routing_scale_100_node_tests" end time: Sep 26 18:15 JST
+"routeloom_routing_scale_100_node_tests" time elapsed: 00:01:08
+----------------------------------------------------------
+
+5/96 Testing: routeloom_ledger_tests
+5/96 Test: routeloom_ledger_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_ledger_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_ledger_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom authority ledger tests passed
+<end of output>
+Test time =   0.06 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_ledger_tests" end time: Sep 26 18:15 JST
+"routeloom_ledger_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+6/96 Testing: routeloom_golden_tests
+6/96 Test: routeloom_golden_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_golden_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_golden_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+mutation loop: 4 decoded, 3996 rejected of 4000
+RouteLoom wire v2 golden tests passed
+<end of output>
+Test time =   0.12 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_golden_tests" end time: Sep 26 18:15 JST
+"routeloom_golden_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+7/96 Testing: routeloom_host_ops_tests
+7/96 Test: routeloom_host_ops_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_host_ops_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_host_ops_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom host-ops dispatch-window tests passed
+<end of output>
+Test time =   0.53 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_host_ops_tests" end time: Sep 26 18:15 JST
+"routeloom_host_ops_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+8/96 Testing: routeloom_usb_tests
+8/96 Test: routeloom_usb_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_usb_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_usb_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom USB bridge tests passed
+<end of output>
+Test time =   0.23 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_usb_tests" end time: Sep 26 18:15 JST
+"routeloom_usb_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+9/96 Testing: routeloom_power_tests
+9/96 Test: routeloom_power_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_power_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_power_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+power tests passed
+<end of output>
+Test time =   3.03 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_power_tests" end time: Sep 26 18:15 JST
+"routeloom_power_tests" time elapsed: 00:00:03
+----------------------------------------------------------
+
+10/96 Testing: routeloom_hardening_tests
+10/96 Test: routeloom_hardening_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_hardening_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_hardening_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom security hardening tests passed
+<end of output>
+Test time =   0.32 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_hardening_tests" end time: Sep 26 18:15 JST
+"routeloom_hardening_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+11/96 Testing: routeloom_autonomy_tests
+11/96 Test: routeloom_autonomy_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_autonomy_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_autonomy_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom autonomy contract tests passed
+<end of output>
+Test time =   0.08 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_autonomy_tests" end time: Sep 26 18:15 JST
+"routeloom_autonomy_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+12/96 Testing: routeloom_endpoint_tests
+12/96 Test: routeloom_endpoint_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_endpoint_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_endpoint_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom endpoint codec contract tests passed
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_endpoint_tests" end time: Sep 26 18:15 JST
+"routeloom_endpoint_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+13/96 Testing: routeloom_gateway_tests
+13/96 Test: routeloom_gateway_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_gateway_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_gateway_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom gateway tests passed
+<end of output>
+Test time =   2.78 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_gateway_tests" end time: Sep 26 18:15 JST
+"routeloom_gateway_tests" time elapsed: 00:00:02
+----------------------------------------------------------
+
+14/96 Testing: routeloom_discovery_tests
+14/96 Test: routeloom_discovery_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_discovery_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_discovery_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom discovery tests passed
+<end of output>
+Test time =   0.34 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_discovery_tests" end time: Sep 26 18:15 JST
+"routeloom_discovery_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+15/96 Testing: routeloom_scope_tests
+15/96 Test: routeloom_scope_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_scope_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_scope_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom scope tests passed
+<end of output>
+Test time =   0.08 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_scope_tests" end time: Sep 26 18:15 JST
+"routeloom_scope_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+16/96 Testing: routeloom_telemetry_tests
+16/96 Test: routeloom_telemetry_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_telemetry_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_telemetry_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom telemetry tests passed
+<end of output>
+Test time =   0.32 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_telemetry_tests" end time: Sep 26 18:15 JST
+"routeloom_telemetry_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+17/96 Testing: routeloom_congestion_tests
+17/96 Test: routeloom_congestion_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_congestion_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_congestion_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom congestion tests passed
+<end of output>
+Test time =   0.50 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_congestion_tests" end time: Sep 26 18:15 JST
+"routeloom_congestion_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+18/96 Testing: routeloom_load_routing_tests
+18/96 Test: routeloom_load_routing_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_load_routing_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_load_routing_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+W0 cost=3
+W1 cost=2
+W2 cost=1
+RouteLoom load-routing tests passed
+<end of output>
+Test time =   0.62 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_load_routing_tests" end time: Sep 26 18:15 JST
+"routeloom_load_routing_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+19/96 Testing: routeloom_channel_tests
+19/96 Test: routeloom_channel_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_channel_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_channel_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom channel observe/survey tests passed
+<end of output>
+Test time =   0.13 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_channel_tests" end time: Sep 26 18:15 JST
+"routeloom_channel_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+20/96 Testing: routeloom_migration_tests
+20/96 Test: routeloom_migration_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_migration_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_migration_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom channel-migration tests passed
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_migration_tests" end time: Sep 26 18:15 JST
+"routeloom_migration_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+21/96 Testing: routeloom_migration_wire_tests
+21/96 Test: routeloom_migration_wire_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_migration_wire_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_migration_wire_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom migration-wire tests passed
+<end of output>
+Test time =   0.04 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_migration_wire_tests" end time: Sep 26 18:15 JST
+"routeloom_migration_wire_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+22/96 Testing: routeloom_baseline_diff_tests
+22/96 Test: routeloom_baseline_diff_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_baseline_diff_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_baseline_diff_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+[fixed-250 baseline] offered=96 admitted=32 refused=64 delivered=32 failed=0 pending=0 app=32 hist_evicted=0 | data_tx=129 busy_tx=0 accept_tx=141 | relay busy sent=0 failed=39 | senders busy_rx=0 readmit=0 | mean_latency=580ms (n=32)
+[autonomy-enabled  ] offered=96 admitted=32 refused=64 delivered=32 failed=0 pending=0 app=32 hist_evicted=0 | data_tx=129 busy_tx=0 accept_tx=141 | relay busy sent=0 failed=39 | senders busy_rx=0 readmit=0 | mean_latency=580ms (n=32)
+<end of output>
+Test time =   1.22 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_baseline_diff_tests" end time: Sep 26 18:15 JST
+"routeloom_baseline_diff_tests" time elapsed: 00:00:01
+----------------------------------------------------------
+
+23/96 Testing: routeloom_config_tests
+23/96 Test: routeloom_config_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_config_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_config_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom remote-config tests passed
+<end of output>
+Test time =   0.35 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_config_tests" end time: Sep 26 18:15 JST
+"routeloom_config_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+24/96 Testing: routeloom_security_floor_tests
+24/96 Test: routeloom_security_floor_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_security_floor_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_security_floor_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom security-floor tests passed
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_security_floor_tests" end time: Sep 26 18:15 JST
+"routeloom_security_floor_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+25/96 Testing: routeloom_cose_tests
+25/96 Test: routeloom_cose_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_cose_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_cose_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom COSE ESP256 tests passed
+<end of output>
+Test time =   0.09 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_cose_tests" end time: Sep 26 18:15 JST
+"routeloom_cose_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+26/96 Testing: routeloom_config_wire_tests
+26/96 Test: routeloom_config_wire_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_config_wire_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_config_wire_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+config_wire tests OK
+<end of output>
+Test time =   0.13 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_config_wire_tests" end time: Sep 26 18:15 JST
+"routeloom_config_wire_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+27/96 Testing: routeloom_trust_store_tests
+27/96 Test: routeloom_trust_store_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_trust_store_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_trust_store_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom trust store tests passed
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_trust_store_tests" end time: Sep 26 18:15 JST
+"routeloom_trust_store_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+28/96 Testing: routeloom_credential_tests
+28/96 Test: routeloom_credential_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_credential_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_credential_tests" start time: Sep 26 18:15 JST
+Output:
+----------------------------------------------------------
+RouteLoom device credential tests passed
+<end of output>
+Test time =  11.34 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_credential_tests" end time: Sep 26 18:16 JST
+"routeloom_credential_tests" time elapsed: 00:00:11
+----------------------------------------------------------
+
+29/96 Testing: routeloom_trust_manifest_tests
+29/96 Test: routeloom_trust_manifest_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_trust_manifest_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_trust_manifest_tests" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+RouteLoom trust manifest tests passed
+<end of output>
+Test time =   0.40 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_trust_manifest_tests" end time: Sep 26 18:16 JST
+"routeloom_trust_manifest_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+30/96 Testing: routeloom_kdf_tests
+30/96 Test: routeloom_kdf_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_kdf_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_kdf_tests" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+kdf tests passed
+<end of output>
+Test time =   0.05 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_kdf_tests" end time: Sep 26 18:16 JST
+"routeloom_kdf_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+31/96 Testing: routeloom_key_schedule_tests
+31/96 Test: routeloom_key_schedule_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_key_schedule_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_key_schedule_tests" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+key schedule golden vectors: all passed
+<end of output>
+Test time =   0.05 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_key_schedule_tests" end time: Sep 26 18:16 JST
+"routeloom_key_schedule_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+32/96 Testing: routeloom_sdkv1_authority_tests
+32/96 Test: routeloom_sdkv1_authority_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_authority_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_authority_tests" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+sizeof(AuthorityClient) = 4848
+sdkv1_authority: all tests passed
+<end of output>
+Test time =   0.20 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_authority_tests" end time: Sep 26 18:16 JST
+"routeloom_sdkv1_authority_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+33/96 Testing: routeloom_sdkv1_authority_transport_tests
+33/96 Test: routeloom_sdkv1_authority_transport_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_authority_transport_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_authority_transport_tests" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+RouteLoom authority-transport tests passed
+<end of output>
+Test time =   0.05 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_authority_transport_tests" end time: Sep 26 18:16 JST
+"routeloom_sdkv1_authority_transport_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+34/96 Testing: routeloom_rlres1_tests
+34/96 Test: routeloom_rlres1_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_rlres1_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_rlres1_tests" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+sizeof(rlres1::Engine) = 2208, sizeof(Output) = 280
+RLRES1 state machine + attack suite: all passed
+<end of output>
+Test time =   0.15 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_rlres1_tests" end time: Sep 26 18:16 JST
+"routeloom_rlres1_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+35/96 Testing: routeloom_reply_lease_tests
+35/96 Test: routeloom_reply_lease_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_reply_lease_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_reply_lease_tests" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+  reply leases: sizeof(ExpectedReplyLeases) = 288 bytes
+  reply leases: sizeof(RadioRxMetadataV2) = 32 bytes
+RouteLoom reply-lease tests passed
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_reply_lease_tests" end time: Sep 26 18:16 JST
+"routeloom_reply_lease_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+36/96 Testing: routeloom_reply_admission_tests
+36/96 Test: routeloom_reply_admission_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_reply_admission_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_reply_admission_tests" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+PASS: test_reply_admission
+<end of output>
+Test time =   0.55 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_reply_admission_tests" end time: Sep 26 18:16 JST
+"routeloom_reply_admission_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+37/96 Testing: routeloom_espnow_runtime_tests
+37/96 Test: routeloom_espnow_runtime_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_espnow_runtime_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_espnow_runtime_tests" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+test_espnow_runtime: ok
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_espnow_runtime_tests" end time: Sep 26 18:16 JST
+"routeloom_espnow_runtime_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+38/96 Testing: routeloom_espnow_owner_reapply_tests
+38/96 Test: routeloom_espnow_owner_reapply_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_espnow_owner_reapply_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_espnow_owner_reapply_tests" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.49 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_espnow_owner_reapply_tests" end time: Sep 26 18:16 JST
+"routeloom_espnow_owner_reapply_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+39/96 Testing: routeloom_c_header_test
+39/96 Test: routeloom_c_header_test
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_c_header_test"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_c_header_test" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.04 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_c_header_test" end time: Sep 26 18:16 JST
+"routeloom_c_header_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+40/96 Testing: routeloom_trust_view_tests
+40/96 Test: routeloom_trust_view_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_trust_view_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_trust_view_tests" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+RouteLoom trust view tests passed
+<end of output>
+Test time =   0.23 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_trust_view_tests" end time: Sep 26 18:16 JST
+"routeloom_trust_view_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+41/96 Testing: routeloom_property_tests
+41/96 Test: routeloom_property_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_property_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_property_tests" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+  seed=32428033: sends=88 delivered=22 ops{send=111 step=91 drop=22 part=16 rejoin=28 reboot=32}
+  seed=32428034: sends=88 delivered=17 ops{send=111 step=90 drop=22 part=19 rejoin=27 reboot=31}
+  seed=32428035: sends=86 delivered=8 ops{send=103 step=72 drop=26 part=23 rejoin=40 reboot=36}
+  seed=32428036: sends=74 delivered=17 ops{send=94 step=92 drop=25 part=24 rejoin=38 reboot=27}
+  seed=32428037: sends=95 delivered=14 ops{send=107 step=89 drop=21 part=22 rejoin=32 reboot=29}
+  seed=32428038: sends=85 delivered=8 ops{send=106 step=87 drop=25 part=26 rejoin=29 reboot=27}
+  seed=32428039: sends=94 delivered=8 ops{send=111 step=91 drop=20 part=22 rejoin=27 reboot=29}
+  seed=32428040: sends=68 delivered=8 ops{send=84 step=100 drop=25 part=34 rejoin=22 reboot=35}
+RouteLoom property tests passed
+<end of output>
+Test time =  44.24 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_property_tests" end time: Sep 26 18:16 JST
+"routeloom_property_tests" time elapsed: 00:00:44
+----------------------------------------------------------
+
+42/96 Testing: routeloom_applied_tests
+42/96 Test: routeloom_applied_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_applied_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_applied_tests" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+RouteLoom applied-delivery tests passed
+<end of output>
+Test time =   0.49 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_applied_tests" end time: Sep 26 18:16 JST
+"routeloom_applied_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+43/96 Testing: routeloom_fault_tests
+43/96 Test: routeloom_fault_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_fault_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_fault_tests" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+[run] test_counter_torn_commit_fails_closed
+[run] test_counter_midlease_slot_revalidation
+[run] test_counter_exhaustion_never_wraps
+[run] test_counter_load_failure_propagates
+[run] test_replay_accept_load_failure
+[run] test_replay_floor_vanish_mid_session
+[run] test_replay_foreign_floor_record
+[run] test_trust_recover_power_cut_midway
+[run] test_trust_zero_fill_cold_start
+[run] test_clock_faults_decay_windows_bounded
+[run] test_clock_stall_bounded_admission
+[run] test_clock_forward_jump_mass_expiry
+[run] test_clock_backwards_dedup_retention
+[run] test_route_table_saturation
+[run] test_route_table_tombstone_reclaim
+[run] test_neighbor_table_saturation
+[run] test_neighbor_admission_reclaims_tombstone
+[run] test_dedup_terminal_reserve_and_pool_full
+[run] test_dedup_upstream_cap
+[run] test_dedup_eviction_expired_then_resolved
+[run] test_scheduler_pool_saturation
+[run] test_peer_window_bounded
+[run] test_driver_backpressure_reuses_sealed_frame
+RouteLoom fault-injection tests passed
+<end of output>
+Test time =   0.86 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_fault_tests" end time: Sep 26 18:16 JST
+"routeloom_fault_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+44/96 Testing: routeloom_dedup_tests
+44/96 Test: routeloom_dedup_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_dedup_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_dedup_tests" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+line throughput: relay peak residency 60 / 96
+RouteLoom dedup tests passed
+<end of output>
+Test time =   3.11 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_dedup_tests" end time: Sep 26 18:16 JST
+"routeloom_dedup_tests" time elapsed: 00:00:03
+----------------------------------------------------------
+
+45/96 Testing: routeloom_node_status_tests
+45/96 Test: routeloom_node_status_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_node_status_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_node_status_tests" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+RouteLoom node status tests passed
+<end of output>
+Test time =   0.18 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_node_status_tests" end time: Sep 26 18:16 JST
+"routeloom_node_status_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+46/96 Testing: routeloom_peer_state_tests
+46/96 Test: routeloom_peer_state_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_peer_state_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_peer_state_tests" start time: Sep 26 18:16 JST
+Output:
+----------------------------------------------------------
+peer state tests passed
+<end of output>
+Test time =   3.27 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_peer_state_tests" end time: Sep 26 18:17 JST
+"routeloom_peer_state_tests" time elapsed: 00:00:03
+----------------------------------------------------------
+
+47/96 Testing: routeloom_group_unit_tests
+47/96 Test: routeloom_group_unit_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_group_tests" "unit"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_group_unit_tests" start time: Sep 26 18:17 JST
+Output:
+----------------------------------------------------------
+RouteLoom group delivery tests passed
+<end of output>
+Test time =   4.65 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_group_unit_tests" end time: Sep 26 18:17 JST
+"routeloom_group_unit_tests" time elapsed: 00:00:04
+----------------------------------------------------------
+
+48/96 Testing: routeloom_group_100_node_tests
+48/96 Test: routeloom_group_100_node_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_group_tests" "scale"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_group_100_node_tests" start time: Sep 26 18:17 JST
+Output:
+----------------------------------------------------------
+  group: 100-node site converged and settled at 39050 ms
+  group: ALARM to ALL: 99% at 45 ms, all 99 at 45 ms, summary complete at 90 ms; 99 copies + 99 reports = 1.46 s network air time
+  group: ALARM under 10% MAC-level loss: 99/99 by 1 s, all 99 at 430 ms, exact summary after 2 rounds at 1430 ms; 209 copies + 215 reports = 3.12 s air
+  group: ALARM under 5% silent loss: 79/99 by 1 s, all 99 at 3005 ms, exact summary after 4 rounds at 5875 ms; 346 copies + 326 reports = 4.98 s air
+  group: burst of 20 ordered updates (50 members), alone: 86.5 s, 7667 WouldBlock, 1980 copies + 1980 reports; group air 334052 us/s (bucket bound 334686), route control 82338 us/s
+  group: burst + 2 uplinks/s: 130.0 s, 1991 copies + 1991 reports, group air 223482 us/s, route control 234985 us/s (uplinks alone: 234985 us/s); 240 uplinks: p95 180 ms (alone 180), worst 190 ms (alone 190), lost 1 (alone 1)
+  group: sizeof(MeshNode) = 84264 bytes
+RouteLoom group delivery tests passed
+<end of output>
+Test time = 191.50 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_group_100_node_tests" end time: Sep 26 18:20 JST
+"routeloom_group_100_node_tests" time elapsed: 00:03:11
+----------------------------------------------------------
+
+49/96 Testing: routeloom_session_tests
+49/96 Test: routeloom_session_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_session_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_session_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+RouteLoom session provider tests passed
+<end of output>
+Test time =   0.14 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_session_tests" end time: Sep 26 18:20 JST
+"routeloom_session_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+50/96 Testing: routeloom_sdkv1_golden_tests
+50/96 Test: routeloom_sdkv1_golden_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_golden_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_golden_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+sdkv1 golden: 29 valid, 113 invalid vectors
+routeloom_sdkv1_golden_tests: ok
+<end of output>
+Test time =   0.27 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_golden_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_golden_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+51/96 Testing: routeloom_sdkv1_ead_tests
+51/96 Test: routeloom_sdkv1_ead_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_ead_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_ead_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+sdkv1 ead golden: 38 valid, 150 invalid vectors
+routeloom_sdkv1_ead_tests: ok
+<end of output>
+Test time =   0.22 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_ead_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_ead_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+52/96 Testing: routeloom_sdkv1_session_wire_tests
+52/96 Test: routeloom_sdkv1_session_wire_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_session_wire_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_session_wire_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+sdkv1 session wire golden: all vectors agree
+<end of output>
+Test time =   0.11 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_session_wire_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_session_wire_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+53/96 Testing: routeloom_sdkv1_handshake_tests
+53/96 Test: routeloom_sdkv1_handshake_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_handshake_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_handshake_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+edhoc sizes: m1=92 m2=376 m3=390 m4=53
+resume sizes: r1=60 r2=52 r3=16
+sdkv1 handshake: all scenarios pass
+<end of output>
+Test time =   1.98 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_handshake_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_handshake_tests" time elapsed: 00:00:01
+----------------------------------------------------------
+
+54/96 Testing: routeloom_sdkv1_bootstrap_tests
+54/96 Test: routeloom_sdkv1_bootstrap_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_bootstrap_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_bootstrap_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+sdkv1 bootstrap: all tests passed
+<end of output>
+Test time =   0.64 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_bootstrap_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_bootstrap_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+55/96 Testing: routeloom_sdkv1_join_transport_tests
+55/96 Test: routeloom_sdkv1_join_transport_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_join_transport_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_join_transport_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+sdkv1 join transport golden: 35+38 valid, 102+91 invalid, 20 v1-history
+routeloom_sdkv1_join_transport_tests: ok
+<end of output>
+Test time =   0.09 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_join_transport_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_join_transport_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+56/96 Testing: routeloom_sdkv1_join_relay_tests
+56/96 Test: routeloom_sdkv1_join_relay_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_join_relay_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_join_relay_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+q116 sizes: gateway=5856 proxy=1608 slot=1096
+routeloom_sdkv1_join_relay_tests: ok
+<end of output>
+Test time =   0.07 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_join_relay_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_join_relay_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+57/96 Testing: routeloom_sdkv1_join_handshake_tests
+57/96 Test: routeloom_sdkv1_join_handshake_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_join_handshake_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_join_handshake_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+join handshake tests passed
+<end of output>
+Test time =   3.22 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_join_handshake_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_join_handshake_tests" time elapsed: 00:00:03
+----------------------------------------------------------
+
+58/96 Testing: routeloom_sdkv1_join_candidates_tests
+58/96 Test: routeloom_sdkv1_join_candidates_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_join_candidates_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_join_candidates_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+join candidate tests passed
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_join_candidates_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_join_candidates_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+59/96 Testing: routeloom_sdkv1_joiner_tests
+59/96 Test: routeloom_sdkv1_joiner_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_joiner_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_joiner_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+sizeof(Joiner)=10664 (budget 12288)
+joiner tests passed
+<end of output>
+Test time =  22.11 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_joiner_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_joiner_tests" time elapsed: 00:00:22
+----------------------------------------------------------
+
+60/96 Testing: routeloom_sdkv1_dev_keys_tests
+60/96 Test: routeloom_sdkv1_dev_keys_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_dev_keys_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_dev_keys_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_dev_keys_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_dev_keys_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+61/96 Testing: routeloom_sdkv1_legacy_purge_tests
+61/96 Test: routeloom_sdkv1_legacy_purge_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_legacy_purge_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_legacy_purge_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_legacy_purge_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_legacy_purge_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+62/96 Testing: routeloom_nvs_legacy_purge_tests
+62/96 Test: routeloom_nvs_legacy_purge_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_nvs_legacy_purge_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_nvs_legacy_purge_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_nvs_legacy_purge_tests" end time: Sep 26 18:20 JST
+"routeloom_nvs_legacy_purge_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+63/96 Testing: routeloom_sdkv1_dev_session_tests
+63/96 Test: routeloom_sdkv1_dev_session_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_dev_session_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_dev_session_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_dev_session_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_dev_session_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+64/96 Testing: routeloom_sdkv1_session_rtc_tests
+64/96 Test: routeloom_sdkv1_session_rtc_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_session_rtc_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_session_rtc_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.06 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_session_rtc_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_session_rtc_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+65/96 Testing: routeloom_sdkv1_boot_session_tests
+65/96 Test: routeloom_sdkv1_boot_session_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_boot_session_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_boot_session_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_boot_session_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_boot_session_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+66/96 Testing: routeloom_sdkv1_coordinator_tests
+66/96 Test: routeloom_sdkv1_coordinator_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_coordinator_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_coordinator_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+coordinator tests passed
+<end of output>
+Test time =   2.55 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_coordinator_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_coordinator_tests" time elapsed: 00:00:02
+----------------------------------------------------------
+
+67/96 Testing: routeloom_sdkv1_owner_sleep_tests
+67/96 Test: routeloom_sdkv1_owner_sleep_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_owner_sleep_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_owner_sleep_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+test_sdkv1_owner_sleep: ok
+<end of output>
+Test time =   5.63 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_owner_sleep_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_owner_sleep_tests" time elapsed: 00:00:05
+----------------------------------------------------------
+
+68/96 Testing: routeloom_sdkv1_dev_route_tests
+68/96 Test: routeloom_sdkv1_dev_route_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_dev_route_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_dev_route_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+dev route tests passed
+<end of output>
+Test time =   0.17 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_dev_route_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_dev_route_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+69/96 Testing: routeloom_join_stack_gate
+69/96 Test: routeloom_join_stack_gate
+Command: "/home/sahur/.local/bin/python3.11" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tools/check_join_stack.py" "--cxx" "/usr/bin/c++" "--root" "/home/sahur/orca/workspaces/RouteLoom/hil-5node"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_join_stack_gate" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+join stack gate passed: all frames in 2 TUs <= 512 B
+<end of output>
+Test time =   1.34 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_join_stack_gate" end time: Sep 26 18:20 JST
+"routeloom_join_stack_gate" time elapsed: 00:00:01
+----------------------------------------------------------
+
+70/96 Testing: routeloom_sdkv1_records_tests
+70/96 Test: routeloom_sdkv1_records_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_records_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_records_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+routeloom_sdkv1_records_tests: ok
+<end of output>
+Test time =   0.30 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_records_tests" end time: Sep 26 18:20 JST
+"routeloom_sdkv1_records_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+71/96 Testing: routeloom_sdkv1_store_tests
+71/96 Test: routeloom_sdkv1_store_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_store_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_store_tests" start time: Sep 26 18:20 JST
+Output:
+----------------------------------------------------------
+sizeof IdentityStore=1392 SiteStore=1520 RevocationStore=1264 ResumeCache2=256
+sizeof LocalRevocationStore=272
+routeloom_sdkv1_store_tests: ok
+<end of output>
+Test time =  15.60 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_store_tests" end time: Sep 26 18:21 JST
+"routeloom_sdkv1_store_tests" time elapsed: 00:00:15
+----------------------------------------------------------
+
+72/96 Testing: routeloom_sdkv1_session_bank_tests
+72/96 Test: routeloom_sdkv1_session_bank_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_session_bank_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_session_bank_tests" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+sizeof SessionBankEntry=128 SessionOverlapEntry=80
+sizeof NodeSessionBank=6440 GatewaySessionBank=22400
+session bank: openssl pass ran
+routeloom_sdkv1_session_bank_tests: ok
+<end of output>
+Test time =   0.07 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_session_bank_tests" end time: Sep 26 18:21 JST
+"routeloom_sdkv1_session_bank_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+73/96 Testing: routeloom_sdkv1_membership_tests
+73/96 Test: routeloom_sdkv1_membership_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_membership_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_membership_tests" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+routeloom_sdkv1_membership_tests: ok
+<end of output>
+Test time =   0.47 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_membership_tests" end time: Sep 26 18:21 JST
+"routeloom_sdkv1_membership_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+74/96 Testing: routeloom_sdkv1_grant_renew_tests
+74/96 Test: routeloom_sdkv1_grant_renew_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_grant_renew_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_grant_renew_tests" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+grant renew head ok
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_grant_renew_tests" end time: Sep 26 18:21 JST
+"routeloom_sdkv1_grant_renew_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+75/96 Testing: routeloom_sdkv1_revocation_tests
+75/96 Test: routeloom_sdkv1_revocation_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_revocation_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_revocation_tests" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+sizeof MembershipLifecycle=5904 RrsExchange=1488 RevocationSet=544
+routeloom_sdkv1_revocation_tests: ok
+<end of output>
+Test time =  12.02 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_revocation_tests" end time: Sep 26 18:21 JST
+"routeloom_sdkv1_revocation_tests" time elapsed: 00:00:12
+----------------------------------------------------------
+
+76/96 Testing: routeloom_sdkv1_maintenance_tests
+76/96 Test: routeloom_sdkv1_maintenance_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_maintenance_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_maintenance_tests" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+routeloom_sdkv1_maintenance_tests: ok
+<end of output>
+Test time =   0.66 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_maintenance_tests" end time: Sep 26 18:21 JST
+"routeloom_sdkv1_maintenance_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+77/96 Testing: routeloom_espnow_sdkv1_entropy_tests
+77/96 Test: routeloom_espnow_sdkv1_entropy_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_espnow_sdkv1_entropy_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_espnow_sdkv1_entropy_tests" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_espnow_sdkv1_entropy_tests" end time: Sep 26 18:21 JST
+"routeloom_espnow_sdkv1_entropy_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+78/96 Testing: routeloom_sdkv1_blob_storage_tests
+78/96 Test: routeloom_sdkv1_blob_storage_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_sdkv1_blob_storage_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_sdkv1_blob_storage_tests" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+sizeof BlobRecordSlotStorage=40 BlobResumeSlotStorage2=24
+routeloom_sdkv1_blob_storage_tests: ok
+<end of output>
+Test time =   0.56 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_sdkv1_blob_storage_tests" end time: Sep 26 18:21 JST
+"routeloom_sdkv1_blob_storage_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+79/96 Testing: routeloom_edhoc_tests
+79/96 Test: routeloom_edhoc_tests
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_edhoc_tests"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_edhoc_tests" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+method 0 / suite 2 with RLCW1 MemberCerts (198 B, kid 32 B): message_1 37 B, message_2 135 B, message_3 110 B, message_4 9 B
+zero-touch join (method 0, kid + certificate in EAD): message_1 55 B, message_2 362 B, message_3 341 B, message_4 353 B (DevCert 190 B, SiteCert 191 B, MemberCert 198 B)
+zero-touch join (method 0, kid + certificate in EAD, widest certificates): message_1 55 B, message_2 366 B, message_3 344 B, message_4 359 B (DevCert 193 B, SiteCert 195 B, MemberCert 204 B)
+sizeof(edhoc::Session) = 3880 B (libedhoc context 920 B of 928 reserved, arena 2176 B, key store 368 B)
+arena high-water 1456 B of 2048 (max 6 live blocks of 12); key-store high-water 6 of 10 slots
+stack high-water of a full method-0 handshake (both roles, host): 14615 B
+EDHOC tests passed
+<end of output>
+Test time =   0.78 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_edhoc_tests" end time: Sep 26 18:21 JST
+"routeloom_edhoc_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+80/96 Testing: routeloom_edhoc_interop_replay
+80/96 Test: routeloom_edhoc_interop_replay
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_edhoc_interop_peer" "--replay" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/protocol/edhoc-interop/method0_join_kid_only.txt"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_edhoc_interop_replay" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+initiator: arena high water 808 of 2048 B, 6 blocks; key slots high water 4
+responder: arena high water 840 of 2048 B, 4 blocks; key slots high water 4
+direction a_: libedhoc Initiator agrees with the transcript byte for byte
+direction b_: libedhoc Responder agrees with the transcript byte for byte
+<end of output>
+Test time =   0.06 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_edhoc_interop_replay" end time: Sep 26 18:21 JST
+"routeloom_edhoc_interop_replay" time elapsed: 00:00:00
+----------------------------------------------------------
+
+81/96 Testing: routeloom_edhoc_interop_replay_join
+81/96 Test: routeloom_edhoc_interop_replay_join
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_edhoc_interop_peer" "--replay" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/protocol/edhoc-interop/method0_join.txt"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_edhoc_interop_replay_join" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+initiator: arena high water 1408 of 2048 B, 6 blocks; key slots high water 4
+responder: arena high water 1440 of 2048 B, 4 blocks; key slots high water 4
+direction a_: libedhoc Initiator agrees with the transcript byte for byte
+direction b_: libedhoc Responder agrees with the transcript byte for byte
+<end of output>
+Test time =   0.05 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_edhoc_interop_replay_join" end time: Sep 26 18:21 JST
+"routeloom_edhoc_interop_replay_join" time elapsed: 00:00:00
+----------------------------------------------------------
+
+82/96 Testing: routeloom_edhoc_interop_replay_member
+82/96 Test: routeloom_edhoc_interop_replay_member
+Command: "/tmp/routeloom-hil-full-asan/tests/cpp/routeloom_edhoc_interop_peer" "--replay" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/protocol/edhoc-interop/method0_member.txt"
+Directory: /tmp/routeloom-hil-full-asan/tests/cpp
+"routeloom_edhoc_interop_replay_member" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+initiator: arena high water 832 of 2048 B, 6 blocks; key slots high water 4
+responder: arena high water 856 of 2048 B, 4 blocks; key slots high water 4
+direction a_: libedhoc Initiator agrees with the transcript byte for byte
+direction b_: libedhoc Responder agrees with the transcript byte for byte
+<end of output>
+Test time =   0.05 sec
+----------------------------------------------------------
+Test Passed.
+"routeloom_edhoc_interop_replay_member" end time: Sep 26 18:21 JST
+"routeloom_edhoc_interop_replay_member" time elapsed: 00:00:00
+----------------------------------------------------------
+
+83/96 Testing: fuzz_wire_frame_corpus
+83/96 Test: fuzz_wire_frame_corpus
+Command: "/tmp/routeloom-hil-full-asan/tests/fuzz/fuzz_wire_frame" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/fuzz/corpus/wire_frame" "-runs=1" "-seed=7"
+Directory: /tmp/routeloom-hil-full-asan/tests/fuzz
+"fuzz_wire_frame_corpus" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+fuzz replay: 0 corpus + 1 mutated inputs, all clean
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"fuzz_wire_frame_corpus" end time: Sep 26 18:21 JST
+"fuzz_wire_frame_corpus" time elapsed: 00:00:00
+----------------------------------------------------------
+
+84/96 Testing: fuzz_usb_codec_corpus
+84/96 Test: fuzz_usb_codec_corpus
+Command: "/tmp/routeloom-hil-full-asan/tests/fuzz/fuzz_usb_codec" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/fuzz/corpus/usb_codec" "-runs=1" "-seed=7"
+Directory: /tmp/routeloom-hil-full-asan/tests/fuzz
+"fuzz_usb_codec_corpus" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+fuzz replay: 0 corpus + 1 mutated inputs, all clean
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"fuzz_usb_codec_corpus" end time: Sep 26 18:21 JST
+"fuzz_usb_codec_corpus" time elapsed: 00:00:00
+----------------------------------------------------------
+
+85/96 Testing: fuzz_autonomy_corpus
+85/96 Test: fuzz_autonomy_corpus
+Command: "/tmp/routeloom-hil-full-asan/tests/fuzz/fuzz_autonomy" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/fuzz/corpus/autonomy" "-runs=1" "-seed=7"
+Directory: /tmp/routeloom-hil-full-asan/tests/fuzz
+"fuzz_autonomy_corpus" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+fuzz replay: 0 corpus + 1 mutated inputs, all clean
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"fuzz_autonomy_corpus" end time: Sep 26 18:21 JST
+"fuzz_autonomy_corpus" time elapsed: 00:00:00
+----------------------------------------------------------
+
+86/96 Testing: fuzz_endpoint_corpus
+86/96 Test: fuzz_endpoint_corpus
+Command: "/tmp/routeloom-hil-full-asan/tests/fuzz/fuzz_endpoint" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/fuzz/corpus/endpoint" "-runs=1" "-seed=7"
+Directory: /tmp/routeloom-hil-full-asan/tests/fuzz
+"fuzz_endpoint_corpus" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+fuzz replay: 0 corpus + 1 mutated inputs, all clean
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"fuzz_endpoint_corpus" end time: Sep 26 18:21 JST
+"fuzz_endpoint_corpus" time elapsed: 00:00:00
+----------------------------------------------------------
+
+87/96 Testing: fuzz_host_ops_corpus
+87/96 Test: fuzz_host_ops_corpus
+Command: "/tmp/routeloom-hil-full-asan/tests/fuzz/fuzz_host_ops" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/fuzz/corpus/host_ops" "-runs=1" "-seed=7"
+Directory: /tmp/routeloom-hil-full-asan/tests/fuzz
+"fuzz_host_ops_corpus" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+fuzz replay: 0 corpus + 1 mutated inputs, all clean
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"fuzz_host_ops_corpus" end time: Sep 26 18:21 JST
+"fuzz_host_ops_corpus" time elapsed: 00:00:00
+----------------------------------------------------------
+
+88/96 Testing: fuzz_migration_corpus
+88/96 Test: fuzz_migration_corpus
+Command: "/tmp/routeloom-hil-full-asan/tests/fuzz/fuzz_migration" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/fuzz/corpus/migration" "-runs=1" "-seed=7"
+Directory: /tmp/routeloom-hil-full-asan/tests/fuzz
+"fuzz_migration_corpus" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+fuzz replay: 0 corpus + 1 mutated inputs, all clean
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"fuzz_migration_corpus" end time: Sep 26 18:21 JST
+"fuzz_migration_corpus" time elapsed: 00:00:00
+----------------------------------------------------------
+
+89/96 Testing: fuzz_cose_corpus
+89/96 Test: fuzz_cose_corpus
+Command: "/tmp/routeloom-hil-full-asan/tests/fuzz/fuzz_cose" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/fuzz/corpus/cose" "-runs=1" "-seed=7"
+Directory: /tmp/routeloom-hil-full-asan/tests/fuzz
+"fuzz_cose_corpus" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+fuzz replay: 0 corpus + 1 mutated inputs, all clean
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"fuzz_cose_corpus" end time: Sep 26 18:21 JST
+"fuzz_cose_corpus" time elapsed: 00:00:00
+----------------------------------------------------------
+
+90/96 Testing: fuzz_rlres1_corpus
+90/96 Test: fuzz_rlres1_corpus
+Command: "/tmp/routeloom-hil-full-asan/tests/fuzz/fuzz_rlres1" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/fuzz/corpus/rlres1" "-runs=1" "-seed=7"
+Directory: /tmp/routeloom-hil-full-asan/tests/fuzz
+"fuzz_rlres1_corpus" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+fuzz replay: 7 corpus + 1 mutated inputs, all clean
+<end of output>
+Test time =   0.04 sec
+----------------------------------------------------------
+Test Passed.
+"fuzz_rlres1_corpus" end time: Sep 26 18:21 JST
+"fuzz_rlres1_corpus" time elapsed: 00:00:00
+----------------------------------------------------------
+
+91/96 Testing: fuzz_sdkv1_corpus
+91/96 Test: fuzz_sdkv1_corpus
+Command: "/tmp/routeloom-hil-full-asan/tests/fuzz/fuzz_sdkv1" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/fuzz/corpus/sdkv1" "-runs=1" "-seed=7"
+Directory: /tmp/routeloom-hil-full-asan/tests/fuzz
+"fuzz_sdkv1_corpus" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+fuzz replay: 0 corpus + 1 mutated inputs, all clean
+<end of output>
+Test time =   0.04 sec
+----------------------------------------------------------
+Test Passed.
+"fuzz_sdkv1_corpus" end time: Sep 26 18:21 JST
+"fuzz_sdkv1_corpus" time elapsed: 00:00:00
+----------------------------------------------------------
+
+92/96 Testing: fuzz_sdkv1_ead_corpus
+92/96 Test: fuzz_sdkv1_ead_corpus
+Command: "/tmp/routeloom-hil-full-asan/tests/fuzz/fuzz_sdkv1_ead" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/fuzz/corpus/sdkv1_ead" "-runs=1" "-seed=7"
+Directory: /tmp/routeloom-hil-full-asan/tests/fuzz
+"fuzz_sdkv1_ead_corpus" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+fuzz replay: 64 corpus + 1 mutated inputs, all clean
+<end of output>
+Test time =   0.09 sec
+----------------------------------------------------------
+Test Passed.
+"fuzz_sdkv1_ead_corpus" end time: Sep 26 18:21 JST
+"fuzz_sdkv1_ead_corpus" time elapsed: 00:00:00
+----------------------------------------------------------
+
+93/96 Testing: fuzz_sdkv1_join_corpus
+93/96 Test: fuzz_sdkv1_join_corpus
+Command: "/tmp/routeloom-hil-full-asan/tests/fuzz/fuzz_sdkv1_join" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/fuzz/corpus/sdkv1_join" "-runs=1" "-seed=7"
+Directory: /tmp/routeloom-hil-full-asan/tests/fuzz
+"fuzz_sdkv1_join_corpus" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+fuzz replay: 115 corpus + 1 mutated inputs, all clean
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"fuzz_sdkv1_join_corpus" end time: Sep 26 18:21 JST
+"fuzz_sdkv1_join_corpus" time elapsed: 00:00:00
+----------------------------------------------------------
+
+94/96 Testing: fuzz_rlres1_mutation
+94/96 Test: fuzz_rlres1_mutation
+Command: "/tmp/routeloom-hil-full-asan/tests/fuzz/fuzz_rlres1" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/fuzz/corpus/rlres1" "-runs=4000" "-seed=11"
+Directory: /tmp/routeloom-hil-full-asan/tests/fuzz
+"fuzz_rlres1_mutation" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+fuzz replay: 7 corpus + 4000 mutated inputs, all clean
+<end of output>
+Test time =   1.87 sec
+----------------------------------------------------------
+Test Passed.
+"fuzz_rlres1_mutation" end time: Sep 26 18:21 JST
+"fuzz_rlres1_mutation" time elapsed: 00:00:01
+----------------------------------------------------------
+
+95/96 Testing: fuzz_sdkv1_ead_mutation
+95/96 Test: fuzz_sdkv1_ead_mutation
+Command: "/tmp/routeloom-hil-full-asan/tests/fuzz/fuzz_sdkv1_ead" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/fuzz/corpus/sdkv1_ead" "-runs=20000" "-seed=13"
+Directory: /tmp/routeloom-hil-full-asan/tests/fuzz
+"fuzz_sdkv1_ead_mutation" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+fuzz replay: 64 corpus + 20000 mutated inputs, all clean
+<end of output>
+Test time =   0.64 sec
+----------------------------------------------------------
+Test Passed.
+"fuzz_sdkv1_ead_mutation" end time: Sep 26 18:21 JST
+"fuzz_sdkv1_ead_mutation" time elapsed: 00:00:00
+----------------------------------------------------------
+
+96/96 Testing: fuzz_sdkv1_join_mutation
+96/96 Test: fuzz_sdkv1_join_mutation
+Command: "/tmp/routeloom-hil-full-asan/tests/fuzz/fuzz_sdkv1_join" "/home/sahur/orca/workspaces/RouteLoom/hil-5node/tests/fuzz/corpus/sdkv1_join" "-runs=20000" "-seed=17"
+Directory: /tmp/routeloom-hil-full-asan/tests/fuzz
+"fuzz_sdkv1_join_mutation" start time: Sep 26 18:21 JST
+Output:
+----------------------------------------------------------
+fuzz replay: 115 corpus + 20000 mutated inputs, all clean
+<end of output>
+Test time =   0.29 sec
+----------------------------------------------------------
+Test Passed.
+"fuzz_sdkv1_join_mutation" end time: Sep 26 18:21 JST
+"fuzz_sdkv1_join_mutation" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 26 18:21 JST

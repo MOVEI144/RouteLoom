@@ -13,7 +13,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixListener;
 use std::sync::atomic::AtomicU64;
 use std::sync::{mpsc, Arc, Barrier, Mutex};
 use std::thread;
@@ -41,13 +41,8 @@ struct Daemon {
 }
 
 impl Daemon {
-    fn start(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "routeloom-site-e2e-{tag}-{}-{}",
-            std::process::id(),
-            now_ms()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+    fn start(_tag: &str) -> Self {
+        let dir = super::short_socket_test_dir("se");
         // This process's uid is the socket principal; grant it the three
         // membership permissions on the site network only.
         let uid = std::fs::metadata(&dir).unwrap().uid();
@@ -78,16 +73,17 @@ impl Daemon {
                 let uid = routeloom_peercred::peer_uid(&stream).ok();
                 let state = Arc::clone(&accept_state);
                 let outbound = outbound_tx.clone();
+                let ipc_stream = routeloom_peercred::IpcStream::from_unix(stream);
                 thread::spawn(move || {
                     let _ = serve_client(
-                        stream,
+                        ipc_stream,
                         state,
                         outbound,
                         0,
                         Arc::new(AtomicU64::new(1)),
                         Arc::new(AtomicU64::new(1)),
                         Arc::new(Mutex::new(DeviceSession::new())),
-                        uid,
+                        uid.map(routeloom_peercred::Principal::UnixUid),
                     );
                 });
             }
@@ -116,6 +112,13 @@ impl Daemon {
     }
 }
 
+#[test]
+fn api_socket_path_stays_below_macos_limit() {
+    let daemon = Daemon::start(&"long-test-name".repeat(20));
+    use std::os::unix::ffi::OsStrExt;
+    assert!(daemon.socket.as_os_str().as_bytes().len() < 104);
+}
+
 impl Drop for Daemon {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
@@ -123,7 +126,7 @@ impl Drop for Daemon {
 }
 
 fn raw_api1(state: &Arc<State>, uid: u32, line: &str) -> String {
-    let (client, server) = UnixStream::pair().unwrap();
+    let (client, server) = routeloom_peercred::IpcStream::pair().unwrap();
     let (tx, _rx) = mpsc::sync_channel(4);
     let state = Arc::clone(state);
     thread::spawn(move || {
@@ -135,7 +138,7 @@ fn raw_api1(state: &Arc<State>, uid: u32, line: &str) -> String {
             Arc::new(AtomicU64::new(1)),
             Arc::new(AtomicU64::new(1)),
             Arc::new(Mutex::new(DeviceSession::new())),
-            Some(uid),
+            Some(routeloom_peercred::Principal::UnixUid(uid)),
         );
     });
     let mut writer = client.try_clone().unwrap();

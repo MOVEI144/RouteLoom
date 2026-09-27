@@ -126,7 +126,25 @@ Status stamp_link_epoch(Header& header, SecurityProvider& security) noexcept;
 Status stamp_end_epoch(Header& header, SecurityProvider& security) noexcept;
 Status encode_new(const PlainFrame& frame,
                   SecurityProvider& security,
-                  EncodedFrame& output) noexcept;
+                  EncodedFrame& output,
+                  LinkOpenedFrame* sealed_end = nullptr) noexcept;
+// Re-wrap an origin's cached End envelope with a fresh Link counter.
+Status retry_local(const LinkOpenedFrame& sealed, NodeId next_hop,
+                   std::uint32_t remaining_deadline_ms, SecurityProvider& security,
+                   EncodedFrame& output) noexcept;
+// Seal only the end layer of an End-protected frame into `output` (the
+// encode_new end path without the link wrap): the caller wraps each hop
+// with forward()/retry_local(). `end_counter`/`end_epoch` are in-out: with
+// `replay` false the provider's epoch is stamped and a fresh counter drawn
+// (zero is a legitimate minted value — never a sentinel); with `replay`
+// true both inputs are sealed VERBATIM so a re-emitted frame reproduces
+// the EXACT end envelope the first emission used — transit dedup
+// fingerprints on end-AAD + protected payload, so a byte-identical reissue
+// never collides as a conflict.
+Status seal_end(const PlainFrame& input, SecurityProvider& security,
+                LinkOpenedFrame& output,
+                std::uint64_t& end_counter, std::uint32_t& end_epoch,
+                bool replay) noexcept;
 // open_link authenticates a unicast immediate peer under Link. The explicit
 // broadcast-route path uses GroupLink instead: it does not prove sender
 // identity and must never enter the ordinary pairwise receive/telemetry path.

@@ -27,7 +27,7 @@ use super::store::{MemoryStore, SiteStore, SqliteSiteStore};
 use super::testkit::{self, AuthorityNet, FakeDevice, Outcome, SimDevice};
 use super::transport::InProcessTransport;
 use super::usb::{authority_sub, UsbAuthorityAdapter};
-use super::{ChannelGroupKeyTransport, DecideRequest, Events, RevokeRequest, SiteService};
+use super::{DecideRequest, Events, RevokeRequest, SiteService};
 
 const T0: u64 = 1_790_000_000_000;
 const KGUARD: u32 = 501;
@@ -54,10 +54,9 @@ impl Rig {
     }
 
     fn with_store(store: Box<dyn SiteStore>) -> Self {
-        let service = Arc::new(SiteService::new(testkit::authority(store, T0)));
+        let service = SiteService::new_live(testkit::authority(store, T0));
         let relay = InProcessTransport::new();
         service.set_transport(relay.clone());
-        service.set_group_key_transport(ChannelGroupKeyTransport::new(&service));
         let usb = UsbAuthorityAdapter::new(testkit::GATEWAY, 7);
         service.set_authority_transport(Some(usb.clone()));
         Self {
@@ -375,12 +374,14 @@ fn detached_usb_keeps_presealed_notice_for_reconnect() {
 
 #[test]
 fn host_restart_closes_notice_direct_send() {
-    let path = std::env::temp_dir().join(format!(
-        "routeloom-p6-presealed-{}-{}.db",
+    let dir = std::env::temp_dir().join(format!(
+        "routeloom-p6-presealed-{}-{}",
         std::process::id(),
         T0
     ));
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&dir);
+    routeloom_peercred::create_private_dir_all(&dir).unwrap();
+    let path = dir.join("site.db");
     let mut rig = Rig::with_store(Box::new(SqliteSiteStore::open(&path).unwrap()));
     let _ = rig.join(NODE_A, 0xA1, T0);
     let row = rig.service.with(|a| a.devices[&NODE_A].clone()).0;
@@ -453,7 +454,7 @@ fn host_restart_closes_notice_direct_send() {
         "the direct send closes instead of requeueing"
     );
     drop(restarted);
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
