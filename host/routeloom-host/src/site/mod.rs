@@ -6298,6 +6298,13 @@ impl SiteService {
             .acl_network()
     }
 
+    pub fn network(&self) -> u64 {
+        self.authority
+            .lock()
+            .expect("site authority poisoned")
+            .network()
+    }
+
     /// The epochs the lane's bind-time QueryLocal carries (site, RS,
     /// active GK). A plain read — no outbound, no events.
     pub fn authority_epochs(&self) -> (u32, u32, u32) {
