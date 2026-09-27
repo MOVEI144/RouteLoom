@@ -1869,6 +1869,16 @@ void EspNowRuntime::note_link_activity(const NodeId peer,
   migration_->note_link_activity(peer, now_ms);
 }
 
+void EspNowRuntime::note_route_repair(const NodeId peer,
+                                      const MonotonicMs now_ms) noexcept {
+  // The mesh's demand is a hint: the discovery engine decides whether an
+  // early probe/RLD1 repair fits its budgets. Not serialized — this runs on
+  // the Owner task (same thread that polls the engine).
+  if (discovery_ != nullptr) {
+    discovery_->request_repair(peer, now_ms);
+  }
+}
+
 // --- Migration transport (04 §5-§9) ------------------------------------------------
 
 Status EspNowRuntime::attach_migration(MigrationFrameSink& sink) noexcept {

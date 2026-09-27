@@ -152,6 +152,12 @@ class SimNetwork {
   bool (*block_send)(routeloom::NodeId from, routeloom::NodeId to,
                      routeloom::ByteView frame) = nullptr;
 
+  // Byte-level capture of every dequeued submission — including frames the
+  // loss hooks then drop — so a test can compare the exact bytes each
+  // emission carried (e.g. a re-emitted EndReceipt's end envelope).
+  std::function<void(routeloom::NodeId from, routeloom::NodeId to,
+                     routeloom::ByteView frame)> capture;
+
   // Long simulations (issue #59): sightings can be switched off so a
   // multi-minute 100-node run does not grow an unbounded vector; the
   // per-sender route-control tally below stays on regardless.
@@ -399,6 +405,10 @@ inline std::size_t SimNetwork::flush(routeloom::MonotonicMs now) {
         if (nodes.count(pending.from) == 0) {  // sender was removed mid-flight
           ++dropped;
           continue;
+        }
+        if (capture) {
+          capture(pending.from, pending.to,
+                  routeloom::ByteView{pending.frame.data(), pending.frame.size()});
         }
         if (pending.frame.size() > 4) {
           const auto type = static_cast<routeloom::FrameType>(pending.frame[4]);

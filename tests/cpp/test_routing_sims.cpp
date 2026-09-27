@@ -237,6 +237,55 @@ void test_relay_removal() {
   check_no_forward_loops(w.net.sights);
 }
 
+// Route-loss repair demand (issue #169, design §D): on the flat profile a
+// send that meets NO_ROUTE carries the lost route's remembered next hop —
+// kept under hold-down — out to the autonomy sink, so the radio owner can
+// re-confirm exactly that peer ahead of the stale cadence. Demand is
+// node-wide cooldown-bounded.
+class RecordingAutonomySink final : public AutonomyFrameSink {
+ public:
+  void on_autonomy_frame(NodeId, FrameType, ByteView, MonotonicMs,
+                         MonotonicMs) noexcept override {}
+  void note_route_repair(const NodeId peer, const MonotonicMs) noexcept override {
+    demands.push_back(peer);
+  }
+  std::vector<NodeId> demands;
+};
+
+void test_flat_no_route_emits_repair_demand() {
+  SimWorld w;
+  make_line(w, 3);  // 1 - 2 - 3
+  w.run(4000);      // routes settle in both directions
+  CHECK(w.at(1)->routes().best(3).valid &&
+        w.at(1)->routes().best(3).next_hop == 2);
+  send_and_expect(w, 1, 3, 8000, "pre-loss");
+
+  RecordingAutonomySink sink;
+  CHECK_OK(w.at(1)->set_autonomy_sink(&sink));
+
+  w.unlink(1, 2);  // the only path is gone; the failed hop stays held down
+  CHECK(!w.at(1)->routes().best(3).valid);
+
+  const std::array<std::uint8_t, 4> payload{{9, 9, 9, 9}};
+  SendOptions options{};
+  options.lifetime_ms = 5000;
+  MessageId id{};
+  CHECK_OK(w.at(1)->send(3, ByteView{payload.data(), payload.size()}, options,
+                       w.now, id));
+  w.run(100);
+  // The demand names the lost next hop (2), once per cooldown window.
+  CHECK(sink.demands.size() == 1);
+  CHECK(!sink.demands.empty() && sink.demands.front() == 2);
+  CHECK(w.at(1)->route_scale_stats().discoveries_started >= 1);
+
+  // A repeat attempt inside the cooldown does not re-demand.
+  MessageId id2{};
+  CHECK_OK(w.at(1)->send(3, ByteView{payload.data(), payload.size()}, options,
+                         w.now, id2));
+  w.run(100);
+  CHECK(sink.demands.size() == 1);
+}
+
 void test_multi_link_loss() {
   SimWorld w;
   for (NodeId id = 1; id <= 5; ++id) w.add(id);
@@ -749,6 +798,7 @@ int main() {
   test_diamond();
   test_ring();
   test_relay_removal();
+  test_flat_no_route_emits_repair_demand();
   test_multi_link_loss();
   test_stale_advertisement_rejected();
   test_route_generation_past_u16_budget();
