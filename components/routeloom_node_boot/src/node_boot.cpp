@@ -54,6 +54,8 @@
 #include "routeloom/nvs_counter_store.hpp"
 #include "routeloom/power.hpp"
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+#include "routeloom/board_secrets.hpp"
+#include "routeloom/espnow_board_config.hpp"
 #include "routeloom/espnow_sdkv1_entropy.hpp"
 #include "routeloom/espnow_security_owner.hpp"
 #include "routeloom/owner_pump.hpp"
@@ -75,6 +77,13 @@ const char* kTag = "RouteLoomNode";
 #define ROUTELOOM_OWNER_C5_LP RTC_DATA_ATTR
 #else
 #define ROUTELOOM_OWNER_C5_LP
+#endif
+
+#if (CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC || \
+     CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM) && CONFIG_IDF_TARGET_ESP32C3
+#define ROUTELOOM_MEMBER_SMALL_LP RTC_DATA_ATTR
+#else
+#define ROUTELOOM_MEMBER_SMALL_LP
 #endif
 
 using routeloom::ByteView;
@@ -716,6 +725,45 @@ void run_node(const NodeBootHooks& hooks) {
   // node= above against the inventory row.
   ESP_LOGI(kTag, "routeloom field boot: fw=%s", esp_app_get_description()->version);
 
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  // The committed board identity must be verified before RF starts.
+  static ROUTELOOM_OWNER_C5_LP ROUTELOOM_MEMBER_SMALL_LP
+      routeloom::espnow::BoardStores board_stores;
+  status = board_stores.open(/*writable=*/false);
+  if (!status) fail(status.detail);
+  status = board_stores.initialize();
+  if (!status) ESP_LOGE(kTag, "board stores init: %s", status.detail);
+  routeloom::BoardBootIdentity board_identity{};
+  board_identity.chip = routeloom::espnow::board_chip();
+  board_identity.role = routeloom::BoardRole::Reference;
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
+  board_identity.security = routeloom::BoardSecurity::DevRam;
+#else
+  board_identity.security = routeloom::BoardSecurity::Member;
+  if (sdkv1_stores.identity().has_identity() &&
+      !sdkv1_stores.identity().uncertain() &&
+      !sdkv1_stores.identity().quarantined()) {
+    board_identity.rli_node = sdkv1_stores.identity().identity().node_id;
+  }
+#endif
+  if (esp_read_mac(board_identity.sta_mac.data(), ESP_MAC_WIFI_STA) != ESP_OK) {
+    fail("station MAC unreadable");
+  }
+  const routeloom::BoardSecrets* board_secrets = nullptr;
+  status = routeloom::resolve_field_identity(board_stores.config(),
+                                             board_stores.secrets(),
+                                             board_identity, board_secrets);
+  if (!status) {
+    ESP_LOGE(kTag, "CONFIG_REQUIRED: %s", status.detail);
+    fail(status.detail);
+  }
+  const routeloom::BoardConfig& board = board_stores.config().config();
+  ESP_LOGI(kTag, "board config: gen=%lu node=0x%llx secrets_gen=%lu",
+           static_cast<unsigned long>(board.generation),
+           static_cast<unsigned long long>(board.node),
+           static_cast<unsigned long>(board.secrets_generation));
+#endif
+
   if (routeloom::espnow::nvs_namespace_in_use(NVS_DEFAULT_PART_NAME,
                                               "rlcounter") ||
       routeloom::espnow::nvs_namespace_in_use(NVS_DEFAULT_PART_NAME,
@@ -775,7 +823,7 @@ void run_node(const NodeBootHooks& hooks) {
   static EspOwnerEntropy entropy;
   static EspNowSecurityOwner owner;
   EspNowSecurityOwner::Config owner_config{};
-  owner_config.local_node = CONFIG_ROUTELOOM_NODE_ID;
+  owner_config.local_node = board.node;
   // Pre-radio station MAC from eFuse: no custom MAC is ever set, so this
   // is the address the runtime will read back after Wi-Fi init.
   if (esp_read_mac(owner_config.local_mac.data(), ESP_MAC_WIFI_STA) != ESP_OK) {
@@ -910,14 +958,23 @@ void run_node(const NodeBootHooks& hooks) {
   const routeloom::NetworkId provisioned_network =
       trust_store.has_active()
           ? (trust_store.network() & 0xFFFFFFFFULL)
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+          : static_cast<routeloom::NetworkId>(board.network);
+  if (trust_store.has_active() && provisioned_network != board.network) {
+#else
           : static_cast<routeloom::NetworkId>(CONFIG_ROUTELOOM_NETWORK_ID);
   if (trust_store.has_active() &&
       provisioned_network !=
           static_cast<routeloom::NetworkId>(CONFIG_ROUTELOOM_NETWORK_ID)) {
+#endif
     ESP_LOGW(kTag,
-             "trust image network low32 0x%08lx overrides static 0x%08x",
+             "trust image network low32 0x%08lx overrides board 0x%08x",
              static_cast<unsigned long>(provisioned_network),
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+             static_cast<unsigned>(board.network));
+#else
              static_cast<unsigned>(CONFIG_ROUTELOOM_NETWORK_ID));
+#endif
   }
   // §4.9 wear instrumentation: committed-write counters, same WriteStats
   // shape as the config-journal adapter (logged here as the boot
@@ -941,10 +998,16 @@ void run_node(const NodeBootHooks& hooks) {
   // The committed trust image owns the deployment's network identity;
   // only the low 32 bits are wire-visible on Wire v1 (see above).
   config.node.network = provisioned_network;
+#elif !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  config.node.network = board.network;
 #else
   config.node.network = CONFIG_ROUTELOOM_NETWORK_ID;
 #endif
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  config.node.node = board.node;
+#else
   config.node.node = CONFIG_ROUTELOOM_NODE_ID;
+#endif
   config.node.message_session = message_session;
   // Explicit durable boot token (G-SEC P4 §9.1): identical to the compat
   // init for the legacy provider, explicit-nonzero for session providers.
@@ -999,7 +1062,11 @@ void run_node(const NodeBootHooks& hooks) {
            config.node.route_gateways[0], config.node.route_gateways[1],
            config.node.route_advertisement_period_ms, config.node.route_lifetime_ms);
 #endif
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  config.channel = board.channel;
+#else
   config.channel = CONFIG_ROUTELOOM_CHANNEL;
+#endif
 #if CONFIG_ROUTELOOM_MIGRATION
   if (have_boot_channel) {
     ESP_LOGW(kTag, "migration boot channel %u overrides static %u",
@@ -1091,23 +1158,16 @@ void run_node(const NodeBootHooks& hooks) {
   if (!status) fail(status.detail);
   if (hooks.attach != nullptr) hooks.attach(runtime, &owner, &sdkv1_stores, hooks.ctx);
 #if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
-  // Dev route (P4 §10.1): adoption without joining. The reserved dev
-  // boot (message_session) plus the static PSK/network/node/channel
-  // arm the dev-resume engine through the coordinator; pairwise
-  // sessions and group send/receive serve from here on.
-  routeloom::keys::Secret dev_psk{};
-  if (!parse_hex(CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX, dev_psk)) {
-    fail("invalid development key");
-  }
+  // The verified rlkeys PSK and rlcfg identity arm the dev-resume engine.
   EspNowSecurityOwner::DevConfig dev_config{};
-  dev_config.psk = dev_psk;
-  routeloom::secure_clear(dev_psk);
-  dev_config.network = static_cast<routeloom::NetworkId>(CONFIG_ROUTELOOM_NETWORK_ID);
-  dev_config.node = CONFIG_ROUTELOOM_NODE_ID;
-  dev_config.channel = static_cast<std::uint8_t>(CONFIG_ROUTELOOM_CHANNEL);
+  dev_config.psk = board_secrets->psk;
+  dev_config.network = static_cast<routeloom::NetworkId>(board.network);
+  dev_config.node = board.node;
+  dev_config.channel = board.channel;
   dev_config.boot = message_session;
   dev_config.role = routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay;
   status = owner.adopt_dev(dev_config, monotonic_now_ms());
+  routeloom::secure_clear(dev_config.psk);
   if (!status) fail(status.detail);
 #else
   status = owner.boot(message_session, /*rlboot_prepared=*/true,
@@ -1308,16 +1368,26 @@ void run_node(const NodeBootHooks& hooks) {
   // §4.8: the RCC1 network field and the permit AAD bind the FULL u64
   // NetworkId — the provisioned value (deployment-generation upper bits
   // included) when an image is committed. With no active image the
-  // verifier is !ready() regardless, so the Kconfig low32 fallback only
+  // verifier is !ready() regardless, so the verified board fallback only
   // fills the journal's own record fields while intake stays refused.
   journal_config.network =
       trust_store.has_active()
           ? trust_store.network()
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+          : static_cast<routeloom::NetworkId>(board.network);
+#else
           : static_cast<routeloom::NetworkId>(CONFIG_ROUTELOOM_NETWORK_ID);
+#endif
+#elif !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  journal_config.network = board.network;
 #else
   journal_config.network = CONFIG_ROUTELOOM_NETWORK_ID;
 #endif
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  journal_config.target = board.node;
+#else
   journal_config.target = static_cast<NodeId>(CONFIG_ROUTELOOM_NODE_ID);
+#endif
   journal_config.config_namespace = routeloom::endpoint::kConfigNamespaceSdk;
   journal_config.boot_incarnation = message_session;
   journal_config.authorized_issuer =

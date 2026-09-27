@@ -19,6 +19,7 @@ inline constexpr esp_err_t ESP_ERR_NVS_NO_FREE_PAGES = 5;
 inline constexpr int NVS_READONLY = 0;
 inline constexpr int NVS_READWRITE = 1;
 inline constexpr int NVS_TYPE_ANY = 0;
+using nvs_open_mode_t = int;
 
 struct nvs_entry_info_t {
   char namespace_name[16]{};

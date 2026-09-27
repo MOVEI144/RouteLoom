@@ -34,7 +34,8 @@ Status NvsBlobNamespace::note_error(const char* op, const esp_err_t error,
                        IsNoSpace(error) ? nospace_detail : failed_detail);
 }
 
-Status NvsBlobNamespace::open(const char* partition, const char* name_space) noexcept {
+Status NvsBlobNamespace::open(const char* partition, const char* name_space,
+                              const nvs_open_mode_t open_mode) noexcept {
   if (name_space == nullptr || name_space[0] == '\0') {
     return Status::error(StatusCode::InvalidArgument, "NVS sdkv1 namespace missing");
   }
@@ -43,8 +44,8 @@ Status NvsBlobNamespace::open(const char* partition, const char* name_space) noe
   CopyLabel(space_, name_space);
   const esp_err_t error =
       partition == nullptr
-          ? nvs_open(name_space, NVS_READWRITE, &handle_)
-          : nvs_open_from_partition(partition, name_space, NVS_READWRITE, &handle_);
+          ? nvs_open(name_space, open_mode, &handle_)
+          : nvs_open_from_partition(partition, name_space, open_mode, &handle_);
   if (error != ESP_OK) {
     return note_error("open", error, "nvs_open sdkv1 failed",
                       "nvs_open sdkv1 failed (no space)");
