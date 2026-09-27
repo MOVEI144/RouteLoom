@@ -13,6 +13,7 @@
 #include "routeloom/autonomy.hpp"
 #include "routeloom/byte_io.hpp"
 #include "routeloom/congestion.hpp"
+#include "routeloom/observation.hpp"
 #include "routeloom/peer_directory.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
@@ -193,6 +194,11 @@ enum class DiagnosticSubtype : std::uint8_t {
   TelemetrySnapshot = 4,   // link+end, Reliable
   TransitFailure = 5,      // link-only, hop 1 (D2)
   DiagnosticReject = 6,    // link+end, Reliable
+  RemoteObservationQuery = 7,    // link+end, Reliable (remote observation_v1)
+  RemoteObservationSnapshot = 8,  // link+end, Reliable
+  // 9..11 stay reserved (meshviz §2.5B held them for a Table/Health
+  // split): the pull-only pair above carries every observation section,
+  // so the split never shipped.
 };
 
 constexpr std::size_t kDiagnosticPrefixSize = 4;
@@ -291,6 +297,62 @@ static_assert(sizeof(TelemetrySnapshot) <= 176, "snapshot stays bounded");
 Status telemetry_snapshot_encode(const TelemetrySnapshot& snapshot,
                                  MutableByteView out) noexcept;
 Status telemetry_snapshot_decode(ByteView body, TelemetrySnapshot& out) noexcept;
+
+// --- Remote observation (observation_v1 over Diagnostic) ----------------------
+//
+// A gateway forwards one observer's 0x70-shaped question to a mesh peer and
+// relays the answer: the observer serves the SAME section bytes the USB
+// 0x71 page carries (same encoders), so the host decodes both legs with one
+// codec. Pull-only (no change notifications cross the radio); the 128 B
+// reply bound pages routes 3 and neighbors 4 rows at a time.
+//
+// Query flags: bit0 EXACT (routes/neighbors only — `after` names one
+// destination/peer). Snapshot flags: bit0 MORE. Ages inside the body are
+// device-monotonic against sampled_ms. The host reports the transfer
+// uncertainty separately from the sample's boot-local clock reading.
+constexpr std::size_t kRemoteObservationQueryBodySize = 24;       // prefix included
+constexpr std::size_t kRemoteObservationSnapshotHeadSize = 40;    // prefix..sample time
+constexpr std::size_t kRemoteObservationSnapshotSectionMax = 96;  // bounded storage
+constexpr std::size_t kRemoteObservationSnapshotBodyMax = 128;    // prefix included
+constexpr std::uint8_t kObservationRemoteRoutesMax = 2;
+constexpr std::uint8_t kObservationRemoteNeighborsMax = 3;
+constexpr std::uint8_t kObservationRemoteQueryExact = 1u << 0;
+constexpr std::uint8_t kRemoteObservationSnapshotMore = 1u << 0;
+
+struct RemoteObservationQuery {
+  std::uint32_t request_id{0};  // nonzero
+  ObservationSection section{ObservationSection::System};
+  std::uint8_t max_entries{0};  // 1..section remote bound
+  std::uint8_t flags{0};        // kObservationRemoteQueryExact only
+  NodeId after{kInvalidNodeId};  // exclusive cursor, never all-ones
+};
+
+Status remote_observation_query_encode(const RemoteObservationQuery& query,
+                                MutableByteView out) noexcept;
+Status remote_observation_query_decode(ByteView body, RemoteObservationQuery& out) noexcept;
+
+// The answering node's point sample. `revision` carries the section
+// digest for routes/neighbors/summary (change cookie across pulls) and 0
+// for the point-sample singletons (system/tables/milestones — the daemon
+// compares bodies). No next_after field: entries ascend like 0x71 pages,
+// so the cursor is the last entry's id. sampled_ms is the observer's
+// monotonic clock at the fill, before mesh forwarding.
+struct RemoteObservationSnapshot {
+  std::uint32_t request_id{0};
+  NodeId observer{kInvalidNodeId};
+  std::uint64_t observer_boot{0};
+  ObservationSection section{ObservationSection::System};
+  std::uint8_t flags{0};  // kRemoteObservationSnapshotMore only
+  std::uint8_t count{0};
+  std::uint32_t revision{0};
+  MonotonicMs sampled_ms{0};  // observer boot clock at the section fill
+  std::array<std::uint8_t, kRemoteObservationSnapshotSectionMax> body{};
+  std::size_t body_size{0};
+};
+
+Status remote_observation_snapshot_encode(const RemoteObservationSnapshot& snapshot,
+                                   MutableByteView out) noexcept;
+Status remote_observation_snapshot_decode(ByteView body, RemoteObservationSnapshot& out) noexcept;
 
 enum class DiagnosticRejectReason : std::uint16_t {
   Unsupported = 1,

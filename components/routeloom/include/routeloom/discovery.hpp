@@ -481,6 +481,11 @@ class NeighborDiscovery {
   // Lookup across bound records first, then live candidates.
   bool phase_of(const MacAddress& mac, NeighborPhase& out) const noexcept;
   bool phase_of(NodeId peer, NeighborPhase& out) const noexcept;
+  // Remaining neighbor lease for a bound record (0 once expired — the
+  // record lapses to Stale, never silently deletes). Candidates hold no
+  // lease and read false. Read-only observation for the neighbor snapshot.
+  bool lease_remaining_ms(NodeId peer, MonotonicMs now_ms,
+                          MonotonicMs& remaining_ms) const noexcept;
   // True only for a REACHABLE peer with verified membership on a Member
   // local node — the only state where policy-limited DATA may flow.
   bool data_permitted(const MacAddress& mac) const noexcept;

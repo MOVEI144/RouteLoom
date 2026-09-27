@@ -1701,6 +1701,817 @@ void test_bridge_node_status() {
   CHECK(node_events(second, world.device_sink).empty());
 }
 
+// ------------------------------------------------- observation (0x70-0x72)
+
+class TestObservationSource final : public ObservationSource {
+ public:
+  explicit TestObservationSource(const MeshNode& mesh) : mesh_(mesh) {}
+
+  JoinMilestones milestones{};
+  bool fail_fills{false};
+
+  bool fill_system(MonotonicMs now_ms, ObservationSystem& out) const noexcept override {
+    if (fail_fills) return false;
+    fill_observation_system(0xB0071D0001ULL, now_ms, port_, kPowerRunning,
+                            kCoordModeDev, kProfileDevRam, out);
+    return true;
+  }
+  bool fill_tables(MonotonicMs now_ms, ObservationTables& out) const noexcept override {
+    if (fail_fills) return false;
+    fill_observation_tables(mesh_, now_ms, 0, 32, 0, 128, out);
+    return true;
+  }
+  bool fill_milestones(MonotonicMs, JoinMilestones& out) const noexcept override {
+    if (fail_fills) return false;
+    out = milestones;
+    return true;
+  }
+  bool fill_summary(MonotonicMs now_ms, ObservationSummary& out) const noexcept override {
+    if (fail_fills) return false;
+    fill_observation_summary(mesh_, now_ms, 0, out);
+    return true;
+  }
+  std::size_t route_detail_page(NodeId after, RouteDetailEntry* out, std::size_t capacity,
+                                MonotonicMs now_ms, bool& more) const noexcept override {
+    if (fail_fills) {
+      more = false;
+      return 0;
+    }
+    return mesh_.route_detail_page(after, out, capacity, now_ms, more);
+  }
+  bool route_detail_exact(NodeId destination, MonotonicMs now_ms,
+                          RouteDetailEntry& out) const noexcept override {
+    if (fail_fills) return false;
+    return mesh_.route_detail(destination, now_ms, out);
+  }
+  std::size_t neighbor_detail_page(NodeId after, NeighborDetailEntry* out, std::size_t capacity,
+                                   MonotonicMs now_ms, bool& more) const noexcept override {
+    if (fail_fills) {
+      more = false;
+      return 0;
+    }
+    return ::routeloom::neighbor_detail_page(mesh_, discovery_, after, out, capacity, now_ms,
+                                             more);
+  }
+  bool neighbor_detail_exact(NodeId peer, MonotonicMs now_ms,
+                             NeighborDetailEntry& out) const noexcept override {
+    if (fail_fills) return false;
+    return ::routeloom::neighbor_detail_exact(mesh_, discovery_, peer, now_ms, out);
+  }
+
+ private:
+  const MeshNode& mesh_;
+  const NeighborDiscovery* discovery_{nullptr};
+  NullSystemHealthPort port_;
+};
+
+std::vector<std::uint8_t> observation_request(HostDriver& host, std::uint64_t request,
+                                              ObservationSection section, NodeId after,
+                                              std::uint8_t max_entries, std::uint8_t flags) {
+  ObservationQuery query{};
+  query.section = section;
+  query.after = after;
+  query.max_entries = max_entries;
+  query.flags = flags;
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kObservationQueryPayload> inner{};
+  std::size_t n = 0;
+  if (!encode_observation_query(query, MutableByteView{inner.data(), inner.size()}, n)) {
+    return {};
+  }
+  return host.sealed(FrameKind::HostOps, request, ByteView{inner.data(), n});
+}
+
+std::vector<ObservationEvent> observation_events(const HostDriver& host, const CollectSink& sink) {
+  std::vector<ObservationEvent> events;
+  for (const auto& opened : host_ops_inners(host, sink, HostOpsSub::ObservationEvent)) {
+    ObservationEvent event{};
+    CHECK(opened.request == 0);  // unsolicited
+    CHECK_OK(decode_observation_event(ByteView{opened.inner.data(), opened.inner.size()}, event));
+    events.push_back(event);
+  }
+  return events;
+}
+
+void test_bridge_observation() {
+  // 1) Not attached: Unsupported pages, malformed queries are Error frames,
+  //    and 0x71/0x72 from the host are direction violations.
+  {
+    World world;
+    HostDriver host;
+    MonotonicMs now = 0;
+    CHECK(host_handshake(world, host, now, 0x7171, 70) != 0);
+    const auto grant = grant_body(16, 32768);
+    world.feed(host.sealed(FrameKind::Credit, 71, ByteView{grant.data(), grant.size()}), now);
+    world.drain(now);
+    world.device_sink.frames.clear();
+    world.feed(observation_request(host, 72, ObservationSection::System, 0, 8, 0), now);
+    world.drain(now);
+    const auto pages = host_ops_inners(host, world.device_sink, HostOpsSub::ObservationPage);
+    CHECK(pages.size() == 1);
+    if (pages.size() == 1) {
+      ObservationPageHeader header{};
+      ByteView body{};
+      CHECK(pages[0].request == 72);
+      CHECK_OK(decode_observation_page(
+          ByteView{pages[0].inner.data(), pages[0].inner.size()}, header, body));
+      CHECK(header.result == static_cast<std::uint16_t>(ConfigOpsResult::Unsupported));
+      CHECK(header.section == ObservationSection::System);
+      CHECK(header.count == 0 && body.size == 0);
+    }
+    CHECK(!world.bridge.observation_armed());
+    world.device_sink.frames.clear();
+    // Section 9 is malformed.
+    std::array<std::uint8_t, 16> bad{{1, 0x70, 0, 12, 9, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
+    world.feed(host.sealed(FrameKind::HostOps, 73, ByteView{bad.data(), bad.size()}), now);
+    world.drain(now);
+    bool error = false;
+    for (const auto& record : world.device_sink.frames) {
+      error = error || record.frame.kind == FrameKind::Error;
+    }
+    CHECK(error);
+    CHECK(host_ops_inners(host, world.device_sink, HostOpsSub::ObservationPage).empty());
+    std::array<std::uint8_t, 4> wrong{{1, 0x72, 0, 0}};
+    world.device_sink.frames.clear();
+    world.feed(host.sealed(FrameKind::HostOps, 74, ByteView{wrong.data(), wrong.size()}), now);
+    world.drain(now);
+    error = false;
+    for (const auto& record : world.device_sink.frames) {
+      error = error || record.frame.kind == FrameKind::Error;
+    }
+    CHECK(error);
+  }
+
+  // 2) Attached: every section serves, pages walk, events flow on change.
+  World world;
+  TestObservationSource source(world.n1);
+  CHECK_OK(world.bridge.attach_observation(source));
+  HostDriver host;
+  MonotonicMs now = 0;
+  CHECK(host_handshake(world, host, now, 0x7272, 80) != 0);
+  const auto grant = grant_body(256, 1u << 20);
+  world.feed(host.sealed(FrameKind::Credit, 81, ByteView{grant.data(), grant.size()}), now);
+  world.drain(now);
+  world.device_sink.frames.clear();
+  for (NodeId id = 10; id < 13; ++id) CHECK_OK(world.n1.add_neighbor(id, 2, now));
+  std::uint64_t request = 82;
+
+  // The decoded body borrows the opened inners; copy it out before the
+  // inners vector dies with this lambda's scope. Each query advances the
+  // clock one control-refill step: every answer carries an rx-grant control
+  // frame, and the bridge's TX token bucket (burst 4, 1 per 100 ms) would
+  // otherwise head-of-line-block the data queue behind an unemittable
+  // grant — the same pacing the node-status test gets from its now += 1000.
+  const auto query_page = [&](ObservationSection section, NodeId after, std::uint8_t max,
+                              std::uint8_t flags, ObservationPageHeader& header,
+                              std::vector<std::uint8_t>& body_bytes) {
+    now += 100;
+    world.device_sink.frames.clear();
+    world.feed(observation_request(host, request++, section, after, max, flags), now);
+    world.drain(now);
+    const auto pages = host_ops_inners(host, world.device_sink, HostOpsSub::ObservationPage);
+    CHECK(pages.size() == 1);
+    if (pages.size() != 1) return false;
+    ByteView inner_body{};
+    CHECK_OK(decode_observation_page(
+        ByteView{pages[0].inner.data(), pages[0].inner.size()}, header, inner_body));
+    body_bytes.assign(inner_body.data, inner_body.data + inner_body.size);
+    return true;
+  };
+  const auto body_view = [](const std::vector<std::uint8_t>& bytes) {
+    return ByteView{bytes.data(), bytes.size()};
+  };
+
+  // System singleton: boot lease, uptime, unknown heap on the null port.
+  {
+    ObservationPageHeader header{};
+    std::vector<std::uint8_t> body_bytes{};
+    CHECK(query_page(ObservationSection::System, 0, 8, 0, header, body_bytes));
+    CHECK(header.result == static_cast<std::uint16_t>(ConfigOpsResult::Ok));
+    CHECK(header.count == 1 && header.revision == 0);
+    CHECK(header.boot_id == 0xB0071D0001ULL);
+    ObservationSystem system{};
+    CHECK_OK(decode_observation_system(body_view(body_bytes), system));
+    CHECK(system.uptime_ms == now);
+    CHECK(system.heap_free_bytes == kHeapBytesUnknown);
+    CHECK(system.reset_code == kResetUnknown);
+    CHECK(system.power_mode == kPowerRunning);
+    CHECK(system.coord_mode == kCoordModeDev);
+  }
+
+  // Tables singleton: counts agree with the node behind the bridge.
+  {
+    ObservationPageHeader header{};
+    std::vector<std::uint8_t> body_bytes{};
+    CHECK(query_page(ObservationSection::Tables, 0, 8, 0, header, body_bytes));
+    ObservationTables tables{};
+    CHECK_OK(decode_observation_tables(body_view(body_bytes), tables));
+    CHECK(tables.neighbor_active == 4);  // node 2 plus 10..12
+    CHECK(tables.neighbor_total == 4);
+    CHECK(tables.route_total == 4);
+    CHECK(tables.link_cap == 32 && tables.end_cap == 128);
+    CHECK(tables.dedup_cap == kDedupCapacity);
+    CHECK(tables.tx_cap == MeshNode::tx_queue_capacity());
+  }
+
+  // Milestones singleton: the canned record round-trips; the all-unknown
+  // tuple packs to zero, so the generation starts at 0.
+  {
+    ObservationPageHeader header{};
+    std::vector<std::uint8_t> body_bytes{};
+    CHECK(query_page(ObservationSection::Milestones, 0, 8, 0, header, body_bytes));
+    CHECK(header.revision == 0);
+    JoinMilestones milestones{};
+    CHECK_OK(decode_observation_milestones(body_view(body_bytes), milestones));
+    CHECK(milestones.flags == 0);
+    CHECK(milestones.join_started_age_ms == kMilestoneAgeUnknown);
+  }
+
+  // Summary singleton: digests plus counts; revision is the route digest.
+  std::uint32_t route_digest = 0;
+  std::uint32_t neighbor_digest = 0;
+  {
+    ObservationPageHeader header{};
+    std::vector<std::uint8_t> body_bytes{};
+    CHECK(query_page(ObservationSection::Summary, 0, 8, 0, header, body_bytes));
+    ObservationSummary summary{};
+    CHECK_OK(decode_observation_summary(body_view(body_bytes), summary));
+    CHECK(summary.neighbor_active == 4);
+    CHECK(summary.route_total == 4);
+    CHECK(summary.milestone_gen == 0);
+    CHECK(header.revision == summary.route_digest);
+    route_digest = summary.route_digest;
+    neighbor_digest = summary.neighbor_digest;
+  }
+
+  // Routes pages walk the table ascending with MORE; revision matches.
+  {
+    std::vector<NodeId> walked;
+    NodeId cursor = 0;
+    for (int page = 0; page < 4; ++page) {
+      ObservationPageHeader header{};
+      std::vector<std::uint8_t> body_bytes{};
+      CHECK(query_page(ObservationSection::Routes, cursor, 2, 0, header, body_bytes));
+      CHECK(header.revision == route_digest);
+      const ByteView body = body_view(body_bytes);
+      for (std::size_t i = 0; i < header.count; ++i) {
+        RouteDetailEntry entry{};
+        CHECK_OK(decode_observation_route_entry(
+            ByteView{body.data + i * kObservationRouteEntrySize, kObservationRouteEntrySize},
+            entry));
+        CHECK(walked.empty() || entry.destination > walked.back());
+        CHECK(entry.valid && entry.next_hop == entry.destination);
+        CHECK(entry.remaining_ms > 0);
+        walked.push_back(entry.destination);
+      }
+      cursor = header.next_after;
+      if ((header.flags & kObservationPageMore) == 0) break;
+    }
+    CHECK((walked == std::vector<NodeId>{2, 10, 11, 12}));
+  }
+
+  // EXACT: one destination, present or honestly absent.
+  {
+    ObservationPageHeader header{};
+    std::vector<std::uint8_t> body_bytes{};
+    CHECK(query_page(ObservationSection::Routes, 11, 8, kObservationQueryExact, header, body_bytes));
+    CHECK(header.count == 1 && (header.flags & kObservationPageMore) == 0);
+    RouteDetailEntry entry{};
+    CHECK_OK(decode_observation_route_entry(body_view(body_bytes), entry));
+    CHECK(entry.destination == 11 && entry.valid);
+    CHECK(query_page(ObservationSection::Routes, 99, 8, kObservationQueryExact, header, body_bytes));
+    CHECK(header.result == static_cast<std::uint16_t>(ConfigOpsResult::Ok));
+    CHECK(header.count == 0 && (header.flags & kObservationPageMore) == 0);
+  }
+
+  // Neighbors pages walk the neighbor table ascending with MORE; revision
+  // is the neighbor digest; without discovery, phase/lease read unknown.
+  {
+    std::vector<NodeId> walked;
+    NodeId cursor = 0;
+    for (int page = 0; page < 4; ++page) {
+      ObservationPageHeader header{};
+      std::vector<std::uint8_t> body_bytes{};
+      CHECK(query_page(ObservationSection::Neighbors, cursor, 2, 0, header, body_bytes));
+      CHECK(header.revision == neighbor_digest);
+      const ByteView body = body_view(body_bytes);
+      for (std::size_t i = 0; i < header.count; ++i) {
+        NeighborDetailEntry entry{};
+        CHECK_OK(decode_observation_neighbor_entry(
+            ByteView{body.data + i * kObservationNeighborEntrySize, kObservationNeighborEntrySize},
+            entry));
+        CHECK(walked.empty() || entry.peer > walked.back());
+        CHECK((entry.flags & kNeighborActive) != 0);
+        CHECK(entry.link_cost != kInfiniteRouteMetric);
+        CHECK(entry.phase == kNeighborPhaseUnknown);
+        CHECK(entry.lease_remaining_ms == kNeighborAgeUnknown);
+        walked.push_back(entry.peer);
+      }
+      cursor = header.next_after;
+      if ((header.flags & kObservationPageMore) == 0) break;
+    }
+    CHECK((walked == std::vector<NodeId>{2, 10, 11, 12}));
+  }
+
+  // EXACT: one neighbor, present or honestly absent.
+  {
+    ObservationPageHeader header{};
+    std::vector<std::uint8_t> body_bytes{};
+    CHECK(query_page(ObservationSection::Neighbors, 11, 8, kObservationQueryExact, header,
+                     body_bytes));
+    CHECK(header.count == 1 && (header.flags & kObservationPageMore) == 0);
+    NeighborDetailEntry entry{};
+    CHECK_OK(decode_observation_neighbor_entry(body_view(body_bytes), entry));
+    CHECK(entry.peer == 11);
+    CHECK((entry.flags & kNeighborActive) != 0);
+    CHECK(query_page(ObservationSection::Neighbors, 99, 8, kObservationQueryExact, header,
+                     body_bytes));
+    CHECK(header.result == static_cast<std::uint16_t>(ConfigOpsResult::Ok));
+    CHECK(header.count == 0 && (header.flags & kObservationPageMore) == 0);
+  }
+
+  // A failing source answers Indeterminate, never a fabricated page.
+  {
+    source.fail_fills = true;
+    ObservationPageHeader header{};
+    std::vector<std::uint8_t> body_bytes{};
+    CHECK(query_page(ObservationSection::Tables, 0, 8, 0, header, body_bytes));
+    CHECK(header.result == static_cast<std::uint16_t>(ConfigOpsResult::Indeterminate));
+    CHECK(header.count == 0 && body_bytes.empty());
+    source.fail_fills = false;
+  }
+
+  // Subscribe, then change the topology: one 0x72 names both moved halves.
+  CHECK(!world.bridge.observation_armed());
+  {
+    ObservationPageHeader header{};
+    std::vector<std::uint8_t> body_bytes{};
+    CHECK(query_page(ObservationSection::Routes, 0, 8, kObservationQuerySubscribe, header, body_bytes));
+    CHECK((header.flags & kObservationPageArmed) != 0);
+  }
+  CHECK(world.bridge.observation_armed());
+  world.device_sink.frames.clear();
+  CHECK_OK(world.n1.add_neighbor(20, 2, now));
+  now += 300;
+  world.drain(now);
+  {
+    const auto events = observation_events(host, world.device_sink);
+    CHECK(events.size() == 1);
+    if (events.size() == 1) {
+      CHECK(events[0].sequence == 1);
+      CHECK(events[0].kind == kObservationEventTopology);
+      CHECK(events[0].mask ==
+            (kObservationEventMaskNeighbors | kObservationEventMaskRoutes));
+      CHECK(events[0].boot_id == 0xB0071D0001ULL);
+    }
+  }
+
+  // A milestone flip emits kind 2 with the bumped generation (sequence 2:
+  // the topology event above was sequence 1 — the sink is the emission
+  // count now that the bridge keeps no 0x72 counters).
+  world.device_sink.frames.clear();
+  source.milestones.mode = kCoordModeMember;
+  source.milestones.flags = kMilestoneAdopted;
+  source.milestones.attempts = 1;
+  now += 300;
+  world.drain(now);
+  {
+    const auto events = observation_events(host, world.device_sink);
+    CHECK(events.size() == 1);
+    if (events.size() == 1) {
+      CHECK(events[0].sequence == 2);
+      CHECK(events[0].kind == kObservationEventMilestone);
+      CHECK(events[0].revision == 1);
+    }
+  }
+
+  // A new session starts silent: the subscription belonged to the old one.
+  world.device_sink.frames.clear();
+  HostDriver second;
+  CHECK(host_handshake(world, second, now, 0x7373, 100) != 0);
+  CHECK(!world.bridge.observation_armed());
+  world.feed(second.sealed(FrameKind::Credit, 101, ByteView{grant.data(), grant.size()}), now);
+  CHECK_OK(world.n1.remove_neighbor(20, now));
+  now += 1000;
+  world.drain(now);
+  CHECK(observation_events(second, world.device_sink).empty());
+}
+
+// Remote observation over the 0x30 tunnel: the gateway forwards the
+// subtype-7 query to the observer and relays the subtype-8 answer under
+// the SAME usb request id (the mesh correlation id stays bridge-minted
+// and opaque to the host).
+void test_bridge_remote_observation() {
+  World world;
+  CHECK_OK(world.bridge.attach_diagnostics());
+  TestObservationSource source_n2(world.n2);
+  CHECK_OK(world.n2.set_observation_source(&source_n2));
+  CHECK_OK(world.n2.set_observation_remote(true));
+  HostDriver host;
+  MonotonicMs now = 0;
+  CHECK(host_handshake(world, host, now, 0x0B52, 90) != 0);
+  const auto grant = grant_body(256, 1u << 20);
+  world.feed(host.sealed(FrameKind::Credit, 91,
+                         ByteView{grant.data(), grant.size()}),
+             now);
+  world.drain(now);
+  world.device_sink.frames.clear();
+
+  auto pump_mesh = [&](int rounds) {
+    for (int i = 0; i < rounds; ++i) {
+      world.n1.poll(now);
+      world.n2.poll(now);
+      world.net.flush(now);
+      world.drain(now);
+      now += 5;
+    }
+  };
+
+  // 1) Remote summary query: observer=2 answers from its wired source.
+  {
+    RemoteObservationQuery query{};
+    query.request_id = 0xBEEF;
+    query.section = ObservationSection::Summary;
+    query.max_entries = 1;
+    std::array<std::uint8_t, kRemoteObservationQueryBodySize> qbody{};
+    CHECK_OK(remote_observation_query_encode(
+        query, MutableByteView{qbody.data(), qbody.size()}));
+    world.feed(diag_request(host, 92, /*observer=*/2,
+                            ByteView{qbody.data(), qbody.size()}),
+               now);
+    pump_mesh(60);
+    std::array<std::uint8_t, 256> body{};
+    std::uint16_t result = 0xFFFF;
+    const std::size_t n = diag_reply_at(host, world.device_sink, body, result);
+    CHECK(result == static_cast<std::uint16_t>(ConfigOpsResult::Ok));
+    CHECK(n >= kRemoteObservationSnapshotHeadSize);
+    if (n >= kRemoteObservationSnapshotHeadSize) {
+      RemoteObservationSnapshot snap{};
+      CHECK_OK(remote_observation_snapshot_decode(ByteView{body.data(), n}, snap));
+      CHECK(snap.request_id != 0xBEEF && snap.request_id != 0);
+      CHECK(snap.observer == 2);
+      CHECK(snap.section == ObservationSection::Summary && snap.count == 1);
+      ObservationSummary summary{};
+      CHECK_OK(decode_observation_summary(
+          ByteView{snap.body.data(), snap.body_size}, summary));
+      CHECK(snap.revision == summary.route_digest);
+      world.device_sink.frames.clear();
+    }
+  }
+
+  // 2) Opt-in off: n2 without the remote flag answers Denied (policy,
+  // not silence) — the host sees the same reason space end to end.
+  {
+    CHECK_OK(world.n2.set_observation_remote(false));
+    RemoteObservationQuery query{};
+    query.request_id = 0xDEAD;
+    query.section = ObservationSection::System;
+    query.max_entries = 1;
+    std::array<std::uint8_t, kRemoteObservationQueryBodySize> qbody{};
+    CHECK_OK(remote_observation_query_encode(
+        query, MutableByteView{qbody.data(), qbody.size()}));
+    world.feed(diag_request(host, 93, /*observer=*/2,
+                            ByteView{qbody.data(), qbody.size()}),
+               now);
+    pump_mesh(60);
+    std::array<std::uint8_t, 256> body{};
+    std::uint16_t result = 0xFFFF;
+    const std::size_t n = diag_reply_at(host, world.device_sink, body, result);
+    CHECK(result == static_cast<std::uint16_t>(ConfigOpsResult::Ok));
+    CHECK(n == kDiagnosticRejectBodySize);
+    if (n == kDiagnosticRejectBodySize) {
+      DiagnosticReject rej{};
+      CHECK_OK(diagnostic_reject_decode(ByteView{body.data(), n}, rej));
+      CHECK(rej.reason == DiagnosticRejectReason::Denied && rej.observer == 2);
+      world.device_sink.frames.clear();
+    }
+  }
+
+  // 3) A remote observer with no route gets an immediate honest NoRoute.
+  {
+    RemoteObservationQuery query{};
+    query.request_id = 0x77;
+    query.section = ObservationSection::System;
+    query.max_entries = 1;
+    std::array<std::uint8_t, kRemoteObservationQueryBodySize> qbody{};
+    CHECK_OK(remote_observation_query_encode(
+        query, MutableByteView{qbody.data(), qbody.size()}));
+    world.feed(diag_request(host, 94, /*observer=*/99,
+                            ByteView{qbody.data(), qbody.size()}),
+               now);
+    pump_mesh(8);
+    std::array<std::uint8_t, 256> body{};
+    std::uint16_t result = 0xFFFF;
+    diag_reply_at(host, world.device_sink, body, result);
+    CHECK(result == static_cast<std::uint16_t>(ConfigOpsResult::NoRoute));
+    world.device_sink.frames.clear();
+  }
+}
+
+struct EvidenceObserver final : NodeObserver {
+  std::vector<DeliveryAssurance> evidence;
+  void on_message(const MessageKey&, NodeId, ByteView) noexcept override {}
+  void on_message(const MessageKey&, NodeId, ByteView,
+                  const DeliveryAssurance& assurance) noexcept override {
+    evidence.push_back(assurance);
+  }
+  void on_delivery(const DeliveryResult&) noexcept override {}
+  void on_diagnostic(const char*, NodeId, const MessageId*) noexcept override {}
+};
+
+void test_node_delivery_carries_assurance() {
+  // A bound-destination delivery arrives with the open_end verdict: the
+  // origin is verified under the sender's stamped end_epoch.
+  SimNetwork net;
+  TestSecurity sec1, sec2;
+  CapturingObserver obs1;
+  EvidenceObserver obs2;
+  SimRadio r1(net, 1), r2(net, 2);
+  SimReplyPort p1(r1, 1, 1), p2(r2, 2, 1);
+  MeshNode n1(World::node_config(1, 7001), r1, sec1, obs1);
+  MeshNode n2(World::node_config(2, 2002), r2, sec2, obs2);
+  (void)n1.set_reply_peer_port(&p1);
+  (void)n2.set_reply_peer_port(&p2);
+  net.register_node(1, &n1);
+  net.register_node(2, &n2);
+  net.register_reply_port(1, &p1);
+  net.register_reply_port(2, &p2);
+  net.connect(1, 2);
+  MonotonicMs now = 0;
+  n1.start(now);
+  n2.start(now);
+  n1.add_neighbor(2, 1, now);
+  n2.add_neighbor(1, 1, now);
+  auto tick = [&] {
+    n1.poll(now);
+    n2.poll(now);
+    net.flush(now);
+  };
+  for (int i = 0; i < 20; ++i) {
+    now += 5;
+    tick();
+  }
+  const std::array<std::uint8_t, 3> msg{{7, 7, 7}};
+  MessageId id{};
+  CHECK_OK(n1.send(2, ByteView{msg.data(), msg.size()}, SendOptions{}, now, id));
+  for (int step = 0; step < 200 && obs2.evidence.empty(); ++step) {
+    now += 5;
+    tick();
+  }
+  CHECK(obs2.evidence.size() == 1);
+  if (!obs2.evidence.empty()) {
+    CHECK(obs2.evidence[0].origin_verified);
+    CHECK(obs2.evidence[0].site_epoch == 1);  // default stamped end_epoch
+  }
+}
+
+// Unseals the first DataFromMesh in the sink into body/flags; false when
+// none is present.
+bool first_ingress(const HostDriver& host, CollectSink& sink,
+                   std::vector<std::uint8_t>& body, std::uint16_t& flags) {
+  for (const auto& record : sink.frames) {
+    if (record.frame.kind != FrameKind::DataFromMesh) continue;
+    std::uint64_t counter = 0;
+    ByteView inner{};
+    if (!open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+                   inner)) {
+      return false;
+    }
+    flags = record.frame.flags;
+    body.assign(inner.data, inner.data + inner.size);
+    return true;
+  }
+  return false;
+}
+
+void test_bridge_rx_assurance() {
+  // 1) No profile: 0x08 answers Unsupported and evidence deliveries stay
+  // legacy (no flag, no tail).
+  {
+    World world;
+    HostDriver host;
+    MonotonicMs now = 0;
+    CHECK(host_handshake(world, host, now, 0xA881, 100) != 0);
+    const auto grant = grant_body(256, 1u << 20);
+    world.feed(host.sealed(FrameKind::Credit, 101,
+                           ByteView{grant.data(), grant.size()}),
+               now);
+    world.drain(now);
+    world.device_sink.frames.clear();
+    const std::array<std::uint8_t, 2> enable{{1, 0x08}};
+    world.feed(host.sealed(FrameKind::HostOps, 102,
+                           ByteView{enable.data(), enable.size()}),
+               now);
+    world.drain(now);
+    const auto replies =
+        host_ops_inners(host, world.device_sink, HostOpsSub::RxAssuranceEnable);
+    CHECK(replies.size() == 1);
+    if (replies.size() == 1) {
+      RxAssuranceResponse response{};
+      CHECK_OK(decode_rx_assurance_response(
+          ByteView{replies[0].inner.data(), replies[0].inner.size()},
+          response));
+      CHECK(response.result == HostOpsResult::Unsupported);
+    }
+    CHECK(!world.bridge.rx_assurance_enabled());
+    world.device_sink.frames.clear();
+    const std::array<std::uint8_t, 3> msg{{9, 9, 9}};
+    DeliveryAssurance assurance{};
+    assurance.origin_verified = true;
+    assurance.site_epoch = 7;
+    world.bridge.on_message(MessageKey{2, MessageId{2002, 1}}, 2,
+                            ByteView{msg.data(), msg.size()}, assurance);
+    world.drain(now);
+    std::vector<std::uint8_t> body;
+    std::uint16_t flags = 0xFFFF;
+    CHECK(first_ingress(host, world.device_sink, body, flags));
+    CHECK(flags == 0);
+    CHECK(body.size() == 20 + 3);
+  }
+
+  // 2) With a profile: 0x08 enables, evidence deliveries are flagged +
+  // tailed, and the proving-nothing form stays legacy.
+  {
+    World world;
+    HostDriver host;
+    MonotonicMs now = 0;
+    CHECK_OK(world.bridge.set_rx_assurance_profile(kProfileLegacyFixture));
+    CHECK(host_handshake(world, host, now, 0xA882, 110) != 0);
+    const auto grant = grant_body(256, 1u << 20);
+    world.feed(host.sealed(FrameKind::Credit, 111,
+                           ByteView{grant.data(), grant.size()}),
+               now);
+    world.drain(now);
+    world.device_sink.frames.clear();
+    const std::array<std::uint8_t, 2> enable{{1, 0x08}};
+    world.feed(host.sealed(FrameKind::HostOps, 112,
+                           ByteView{enable.data(), enable.size()}),
+               now);
+    world.drain(now);
+    const auto replies =
+        host_ops_inners(host, world.device_sink, HostOpsSub::RxAssuranceEnable);
+    CHECK(replies.size() == 1);
+    if (replies.size() == 1) {
+      RxAssuranceResponse response{};
+      CHECK_OK(decode_rx_assurance_response(
+          ByteView{replies[0].inner.data(), replies[0].inner.size()},
+          response));
+      CHECK(response.result == HostOpsResult::Ok);
+    }
+    CHECK(world.bridge.rx_assurance_enabled());
+    world.device_sink.frames.clear();
+    const std::array<std::uint8_t, 3> msg{{9, 9, 9}};
+    DeliveryAssurance assurance{};
+    assurance.origin_verified = true;
+    assurance.site_epoch = 7;
+    world.bridge.on_message(MessageKey{2, MessageId{2002, 1}}, 2,
+                            ByteView{msg.data(), msg.size()}, assurance);
+    world.drain(now);
+    std::vector<std::uint8_t> body;
+    std::uint16_t flags = 0;
+    CHECK(first_ingress(host, world.device_sink, body, flags));
+    CHECK((flags & kFlagIngressAssurance) != 0);
+    CHECK(body.size() == 20 + 3 + kIngressAssuranceTailSize);
+    if (body.size() == 20 + 3 + kIngressAssuranceTailSize) {
+      IngressAssurance tail{};
+      CHECK_OK(decode_ingress_assurance_tail(
+          ByteView{body.data() + 20 + 3, kIngressAssuranceTailSize}, tail));
+      CHECK(tail.verified);
+      CHECK(tail.profile == kProfileLegacyFixture);
+      CHECK(tail.site_epoch == 7);
+      world.device_sink.frames.clear();
+    }
+    // The 3-arg form (group default-forward path) stays legacy even
+    // inside an enabled session.
+    world.bridge.on_message(MessageKey{2, MessageId{2002, 2}}, 2,
+                            ByteView{msg.data(), msg.size()});
+    world.drain(now);
+    CHECK(first_ingress(host, world.device_sink, body, flags));
+    CHECK(flags == 0);
+    CHECK(body.size() == 20 + 3);
+    world.device_sink.frames.clear();
+    // An unverified verdict is reported honestly, not dropped.
+    DeliveryAssurance denied{};
+    denied.origin_verified = false;
+    denied.site_epoch = 9;
+    world.bridge.on_message(MessageKey{2, MessageId{2002, 3}}, 2,
+                            ByteView{msg.data(), msg.size()}, denied);
+    world.drain(now);
+    CHECK(first_ingress(host, world.device_sink, body, flags));
+    CHECK((flags & kFlagIngressAssurance) != 0);
+    if (body.size() == 20 + 3 + kIngressAssuranceTailSize) {
+      IngressAssurance tail{};
+      CHECK_OK(decode_ingress_assurance_tail(
+          ByteView{body.data() + 20 + 3, kIngressAssuranceTailSize}, tail));
+      CHECK(!tail.verified);
+      CHECK(tail.site_epoch == 9);
+    }
+  }
+
+  // 3) Validation: a bad profile id is refused, a malformed 0x08 is a
+  // ProtocolError (never an enable), and the tail codec fails closed.
+  {
+    World world;
+    CHECK(!world.bridge.set_rx_assurance_profile(4).ok());
+    HostDriver host;
+    MonotonicMs now = 0;
+    CHECK(host_handshake(world, host, now, 0xA883, 120) != 0);
+    const std::array<std::uint8_t, 3> bad{{1, 0x08, 0xFF}};
+    world.feed(host.sealed(FrameKind::HostOps, 121,
+                           ByteView{bad.data(), bad.size()}),
+               now);
+    world.drain(now);
+    bool error = false;
+    for (const auto& record : world.device_sink.frames) {
+      error = error || record.frame.kind == FrameKind::Error;
+    }
+    CHECK(error);
+    CHECK(!world.bridge.rx_assurance_enabled());
+
+    IngressAssurance tail{};
+    tail.verified = true;
+    tail.profile = kProfileMemberEdhoc;
+    tail.site_epoch = 0xA5A5A5A5;
+    std::array<std::uint8_t, kIngressAssuranceTailSize> encoded{};
+    CHECK_OK(encode_ingress_assurance_tail(
+        tail, MutableByteView{encoded.data(), encoded.size()}));
+    IngressAssurance back{};
+    CHECK_OK(decode_ingress_assurance_tail(
+        ByteView{encoded.data(), encoded.size()}, back));
+    CHECK(back.verified && back.profile == kProfileMemberEdhoc &&
+          back.site_epoch == 0xA5A5A5A5);
+    // Stray flag bit, reserved byte, unknown profile, short tail.
+    std::array<std::uint8_t, kIngressAssuranceTailSize> mutated = encoded;
+    mutated[0] = 0x02;
+    CHECK(!decode_ingress_assurance_tail(
+              ByteView{mutated.data(), mutated.size()}, back)
+              .ok());
+    mutated = encoded;
+    mutated[3] = 0x01;
+    CHECK(!decode_ingress_assurance_tail(
+              ByteView{mutated.data(), mutated.size()}, back)
+              .ok());
+    mutated = encoded;
+    mutated[2] = 0x04;
+    CHECK(!decode_ingress_assurance_tail(
+              ByteView{mutated.data(), mutated.size()}, back)
+              .ok());
+    CHECK(!decode_ingress_assurance_tail(
+              ByteView{encoded.data(), encoded.size() - 1}, back)
+              .ok());
+    IngressAssurance over{};
+    over.profile = 4;
+    CHECK(!encode_ingress_assurance_tail(
+              over, MutableByteView{encoded.data(), encoded.size()})
+              .ok());
+  }
+
+  // 4) Reconnect drops the enable (a new session re-enables) but keeps
+  // the boot-scoped profile id.
+  {
+    World world;
+    HostDriver host;
+    MonotonicMs now = 0;
+    CHECK_OK(world.bridge.set_rx_assurance_profile(kProfileDevRam));
+    CHECK(host_handshake(world, host, now, 0xA884, 130) != 0);
+    const auto grant = grant_body(256, 1u << 20);
+    world.feed(host.sealed(FrameKind::Credit, 131,
+                           ByteView{grant.data(), grant.size()}),
+               now);
+    world.drain(now);
+    world.device_sink.frames.clear();
+    const std::array<std::uint8_t, 2> enable{{1, 0x08}};
+    world.feed(host.sealed(FrameKind::HostOps, 132,
+                           ByteView{enable.data(), enable.size()}),
+               now);
+    world.drain(now);
+    CHECK(world.bridge.rx_assurance_enabled());
+    world.device_sink.frames.clear();
+    HostDriver host2;
+    CHECK(host_handshake(world, host2, now, 0xA885, 140) != 0);
+    CHECK(!world.bridge.rx_assurance_enabled());
+    world.feed(host2.sealed(FrameKind::Credit, 141,
+                            ByteView{grant.data(), grant.size()}),
+               now);
+    world.drain(now);
+    world.device_sink.frames.clear();
+    world.feed(host2.sealed(FrameKind::HostOps, 142,
+                            ByteView{enable.data(), enable.size()}),
+               now);
+    world.drain(now);
+    const auto replies = host_ops_inners(host2, world.device_sink,
+                                         HostOpsSub::RxAssuranceEnable);
+    CHECK(replies.size() == 1);
+    if (replies.size() == 1) {
+      RxAssuranceResponse response{};
+      CHECK_OK(decode_rx_assurance_response(
+          ByteView{replies[0].inner.data(), replies[0].inner.size()},
+          response));
+      CHECK(response.result == HostOpsResult::Ok);
+    }
+    CHECK(world.bridge.rx_assurance_enabled());
+  }
+}
+
 // ------------------------------------------------------------- golden files
 
 using Fields = std::map<std::string, std::string>;
@@ -2447,6 +3258,10 @@ int main() {
   test_bridge_diagnostic_loss_accounting();
   test_bridge_diagnostics();
   test_bridge_node_status();
+  test_bridge_observation();
+  test_bridge_remote_observation();
+  test_node_delivery_carries_assurance();
+  test_bridge_rx_assurance();
   test_golden_session();
   test_golden_node_status();
   test_golden_group_ops();

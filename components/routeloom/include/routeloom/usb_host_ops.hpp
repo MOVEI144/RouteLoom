@@ -24,6 +24,7 @@
 
 #include "routeloom/group.hpp"
 #include "routeloom/node.hpp"
+#include "routeloom/observation.hpp"
 #include "routeloom/node_status.hpp"
 #include "routeloom/sdkv1_authority.hpp"
 #include "routeloom/sdkv1_join_relay.hpp"
@@ -95,6 +96,20 @@ constexpr std::uint32_t kCapJoinRelayV2 = 1u << 9;
 // join-relay-v2 on the merged USB transcript; authority uses bit 10.
 constexpr std::uint32_t kCapAuthorityChannelV1 = 1u << 10;
 
+// observation_v1 (meshviz §2.4–§2.5, dev-flow D05): the device serves the
+// Observation HostOps subcommands 0x70-0x72 — read-only system health,
+// table occupancy, join milestones and selected-route detail for the
+// attached node itself, plus bounded change events once a host query
+// subscribes. Advertised only when the bridge owner attaches the surface
+// (attach_observation); bound into the authenticated Hello transcript.
+constexpr std::uint32_t kCapObservationV1 = 1u << 11;
+
+// Receive-assurance HostOps subcommand 0x08 — per-delivery
+// origin-verification evidence on DataFromMesh. Advertised only when the
+// bridge owner sets the effective profile (set_rx_assurance_profile);
+// bound into the authenticated Hello transcript like every other bit.
+constexpr std::uint32_t kCapRxAssuranceV1 = 1u << 12;
+
 constexpr std::uint8_t kHostOpsSchema = 1;
 // The join relay family's own inner schema (#116 §5.2): only 0x60-0x63
 // speak it; every other family stays on schema 1.
@@ -108,6 +123,8 @@ enum class HostOpsSub : std::uint8_t {
   RetireThrough = 0x03,
   Skip = 0x04,
   TimeSample = 0x05,
+  RxAssuranceEnable = 0x08,  // H→G request (empty): enable extended ingress
+                             // -> 0x08 reply (result u8)
   HostRegister = 0x10,      // H→G request: register/renew the host endpoint
   GatewayIngress = 0x11,    // G→H request: scope-2 payload for ReceiveLog
   GatewayIngressAck = 0x12, // H→G response: storage outcome for 0x11
@@ -136,6 +153,9 @@ enum class HostOpsSub : std::uint8_t {
   AuthorityDown = 0x65,     // H→G request: carrier fragment toward a device
   SiteStateSet = 0x66,      // H→G request: WakeLocal/QueryLocal -> 0x67
   SiteStateReport = 0x67,   // G→H reply to 0x65/0x66 (request id echoed)
+  ObservationQuery = 0x70,  // H→G request: section/after/max/flags -> 0x71 page
+  ObservationPage = 0x71,   // G→H reply: result/header || section body
+  ObservationEvent = 0x72,  // G→H unsolicited (request 0): seq/kind || digests
 };
 
 // Typed outcome carried inside every host_ops response. Malformed inner
@@ -225,6 +245,23 @@ constexpr std::size_t kQueryResponseSize = 98;
 constexpr std::size_t kRetireResponseSize = 27;
 // time-sample response: schema, sub, result, lease:16, nonce:u64, time:u64.
 constexpr std::size_t kTimeSampleResponseSize = 35;
+// RX_ASSURANCE_ENABLE request: schema, sub, empty. Response: schema, sub,
+// result:u8 (HostOpsResult — Ok enables extended ingress for the session,
+// Unsupported means legacy frames keep flowing). The 0x01-0x05 family
+// carries no length field (the frame body is the length).
+constexpr std::size_t kRxAssuranceRequestSize = 2;
+constexpr std::size_t kRxAssuranceResponseSize = 3;
+
+// Extended DataFromMesh tail (present iff the frame carries
+// kFlagIngressAssurance): flags:u16 (bit0 VERIFIED — the open_end verdict
+// at this gateway — rest reserved zero) || profile:u8 (observation
+// kProfile* — the gateway's effective security profile) || reserved:u8 ||
+// site_epoch:u32 (the delivered header's end_epoch). Appended after the
+// payload so the 20 B head offsets are stable across both shapes; a host
+// that never enabled 0x08 never sees one (the gateway only emits
+// extended frames into an enabled session).
+constexpr std::size_t kIngressAssuranceTailSize = 8;
+constexpr std::uint16_t kIngressAssuranceVerified = 1u << 0;
 
 // Per-boot gateway identity: NVS-monotonic boot generation bound to the
 // provisioned node id, big-endian halves. The host derives the expected
@@ -274,6 +311,33 @@ struct LaneRequest {
 Status decode_lane_request(ByteView inner, HostOpsSub sub, LaneRequest& out) noexcept;
 Status encode_lane_request(HostOpsSub sub, const LaneRequest& request,
                            MutableByteView out, std::size_t& written) noexcept;
+
+// RX_ASSURANCE_ENABLE (0x08): the request is the bare head (presence is
+// the enable); the reply carries the admission result.
+struct RxAssuranceResponse {
+  HostOpsResult result{HostOpsResult::Ok};
+};
+
+Status decode_rx_assurance_request(ByteView inner) noexcept;
+Status encode_rx_assurance_response(const RxAssuranceResponse& response,
+                                    MutableByteView out,
+                                    std::size_t& written) noexcept;
+Status decode_rx_assurance_response(ByteView inner,
+                                    RxAssuranceResponse& out) noexcept;
+
+// Extended DataFromMesh tail, decoded. `profile` is the observation
+// kProfile* id space (0 unknown .. 3 legacy_fixture); anything above is
+// rejected, never rendered.
+struct IngressAssurance {
+  bool verified{false};
+  std::uint8_t profile{kProfileUnknown};
+  std::uint32_t site_epoch{0};
+};
+
+Status encode_ingress_assurance_tail(const IngressAssurance& assurance,
+                                     MutableByteView out) noexcept;
+Status decode_ingress_assurance_tail(ByteView tail,
+                                     IngressAssurance& out) noexcept;
 
 struct TimeSampleRequest {
   BootLease lease{};
@@ -1202,5 +1266,155 @@ Status decode_site_state_set(ByteView inner, SiteStateSet& out) noexcept;
 Status encode_site_state_report(const SiteStateReport& report, MutableByteView out,
                                 std::size_t& written) noexcept;
 Status decode_site_state_report(ByteView inner, SiteStateReport& out) noexcept;
+
+// ---------------------------------------------------------------------------
+// Observation HostOps family (observation_v1). Same inner common form as the
+// other families: schema:u8=1, sub:u8, payload_len:u16, payload. All
+// integers big-endian. Every page is a point sample taken while serving the
+// query; the host stamps its own receive time (there is no device sample
+// clock on this surface — ages inside the bodies are device-monotonic
+// durations, the node_status idiom).
+//
+// 0x70 OBSERVATION_QUERY (H→G), payload 12B:
+//   section:u8 (ObservationSection 0..5), flags:u8 (bit0 SUBSCRIBE: (re)arm
+//   the 0x72 event stream for THIS session before the page is taken; bit1
+//   EXACT: routes/neighbors only — `after` names one destination/peer;
+//   other bits zero), max_entries:u8 (1..kObservationRoutesPageMax;
+//   singletons always answer count 1), reserved:u8=0, after:u64 (exclusive
+//   NodeId cursor; 0 = from the start, never the all-ones id; with EXACT
+//   the exact destination/peer).
+// 0x71 OBSERVATION_PAGE (G→H reply under the query's request id), payload
+//   26B + body: result:u16 (ConfigOpsResult space: Ok / Unsupported /
+//   Indeterminate — a non-Ok page carries count 0 and an empty body),
+//   section:u8, flags:u8 (bit0 MORE, bit1 EVENTS_ARMED), count:u8,
+//   reserved:u8=0, boot_id:u64 (USB boot lease — a new value retires every
+//   cached claim), revision:u32 (routes/summary: the route digest;
+//   neighbors: the neighbor digest; milestones: the milestone generation;
+//   system/tables: 0 — point samples the host caches by age, not by
+//   revision), next_after:u64 (last listed id, or the query's `after`
+//   when count==0), body.
+//   Singleton bodies (count 1): system 28B (uptime_ms:u64, heap_free:u32,
+//   heap_min:u32, heap_largest:u32, reset:u8, power:u8, coord:u8, profile:u8,
+//   reserved:u32), tables 36B (neighbor_active:u16, neighbor_total:u16,
+//   route_reachable:u16, route_total:u16, link:u16, link_cap:u16, end:u16,
+//   end_cap:u16, dedup_resident:u16, dedup_terminal:u16, dedup_cap:u16,
+//   tx_used:u8, tx_cap:u8, group_trees:u8, group_origins:u8,
+//   dedup_refused:u32, dedup_evicted:u32, reserved:u16), milestones 44B
+//   (mode:u8, membership:u8, joiner:u8, flags:u8, attempts:u32,
+//   started_age:u64, adopted_age:u64, confirmed_age:u64, adopted_node:u64,
+//   reserved:u32), summary 24B (neighbor_digest:u32, route_digest:u32,
+//   neighbor_active:u16, neighbor_total:u16, route_reachable:u16,
+//   route_total:u16, milestone_gen:u32, reserved:u32).
+//   Routes body: count * 30B entries (destination:u64, next_hop:u64,
+//   generation:u32, sequence:u16, metric:u16, flags:u8 (bit0 VALID, other
+//   bits zero), reserved:u8=0, remaining_ms:u32), strictly ascending by
+//   destination; a decoder rejects any page that is not.
+//   Neighbors body: count * 24B entries (peer:u64, heard_age_ms:u32,
+//   lease_remaining_ms:u32 (both u32::MAX = unknown), link_cost:u16,
+//   rssi_ewma_q8_8:i16, phase:u8, flags:u8 (bit0 ACTIVE, bit1 RSSI_VALID,
+//   bit2 HEARD_VALID; other bits zero), rssi_last_dbm:i8, reserved:u8=0),
+//   strictly ascending by peer; a decoder rejects any page that is not.
+// 0x72 OBSERVATION_EVENT (G→H, unsolicited, request id 0), payload 24B:
+//   sequence:u32 (1-based, contiguous per arm — a gap means lost events and
+//   the host re-pulls), kind:u8 (1 = topology digests moved, 2 = milestone
+//   tuple advanced), mask:u8 (kind 1: bit0 neighbors, bit1 routes; kind 2:
+//   reserved 0), reserved:u16=0, boot_id:u64, revision:u32 (kind 1: route
+//   digest; kind 2: milestone generation), extra:u32 (kind 1: neighbor
+//   digest; kind 2: 0).
+constexpr std::uint8_t kObservationQuerySubscribe = 0x01;
+constexpr std::uint8_t kObservationQueryExact = 0x02;
+constexpr std::uint8_t kObservationPageMore = 0x01;
+constexpr std::uint8_t kObservationPageArmed = 0x02;
+constexpr std::uint8_t kObservationEventTopology = 1;
+constexpr std::uint8_t kObservationEventMilestone = 2;
+constexpr std::uint8_t kObservationEventMaskNeighbors = 1u << 0;
+constexpr std::uint8_t kObservationEventMaskRoutes = 1u << 1;
+constexpr std::size_t kObservationQueryPayload = 12;
+constexpr std::size_t kObservationPageFixed = 26;
+constexpr std::size_t kObservationSystemBody = 28;
+constexpr std::size_t kObservationTablesBody = 36;
+constexpr std::size_t kObservationMilestonesBody = 44;
+constexpr std::size_t kObservationSummaryBody = 24;
+constexpr std::size_t kObservationRouteEntrySize = 30;
+constexpr std::size_t kObservationNeighborEntrySize = 24;
+constexpr std::size_t kObservationPageMaxPayload =
+    kObservationPageFixed + kObservationRoutesPageMax * kObservationRouteEntrySize;
+static_assert(kObservationNeighborEntrySize <= kObservationRouteEntrySize,
+              "a neighbors page fits the routes-sized page bound");
+constexpr std::size_t kObservationEventPayload = 24;
+
+struct ObservationQuery {
+  ObservationSection section{ObservationSection::System};
+  std::uint8_t max_entries{kObservationRoutesPageMax};
+  std::uint8_t flags{0};
+  NodeId after{kInvalidNodeId};
+};
+
+struct ObservationPageHeader {
+  std::uint16_t result{0};  // ConfigOpsResult
+  ObservationSection section{ObservationSection::System};
+  std::uint8_t flags{0};
+  std::uint8_t count{0};
+  std::uint64_t boot_id{0};
+  std::uint32_t revision{0};
+  NodeId next_after{kInvalidNodeId};
+};
+
+struct ObservationEvent {
+  std::uint32_t sequence{0};  // 1-based per arm(); a gap means lost events
+  std::uint8_t kind{0};
+  std::uint8_t mask{0};
+  std::uint64_t boot_id{0};
+  std::uint32_t revision{0};
+  std::uint32_t extra{0};
+};
+
+Status encode_observation_query(const ObservationQuery& query, MutableByteView out,
+                                std::size_t& written) noexcept;
+Status decode_observation_query(ByteView inner, ObservationQuery& out) noexcept;
+
+// Fixed singleton-body codecs (plain payload bytes, no inner head — the
+// page encoder wraps them).
+Status encode_observation_system(const ObservationSystem& body, MutableByteView out) noexcept;
+Status decode_observation_system(ByteView body, ObservationSystem& out) noexcept;
+Status encode_observation_tables(const ObservationTables& body, MutableByteView out) noexcept;
+Status decode_observation_tables(ByteView body, ObservationTables& out) noexcept;
+Status encode_observation_milestones(const JoinMilestones& body, MutableByteView out) noexcept;
+Status decode_observation_milestones(ByteView body, JoinMilestones& out) noexcept;
+Status encode_observation_summary(const ObservationSummary& body, MutableByteView out) noexcept;
+Status decode_observation_summary(ByteView body, ObservationSummary& out) noexcept;
+
+// Single 30-byte route entry codec (shared by pages).
+Status encode_observation_route_entry(const RouteDetailEntry& entry,
+                                      MutableByteView out) noexcept;
+Status decode_observation_route_entry(ByteView entry, RouteDetailEntry& out) noexcept;
+
+// Single 24-byte neighbor entry codec (shared by pages).
+Status encode_observation_neighbor_entry(const NeighborDetailEntry& entry,
+                                         MutableByteView out) noexcept;
+Status decode_observation_neighbor_entry(ByteView entry, NeighborDetailEntry& out) noexcept;
+
+// Generic page wrap: `body` is the already-encoded section bytes (count *
+// entry for routes, one fixed body for singletons). `header.count` must
+// equal `count`; routes entries must be strictly ascending.
+Status encode_observation_page(const ObservationPageHeader& header, ByteView body,
+                               std::size_t count, MutableByteView out,
+                               std::size_t& written) noexcept;
+// Head-only page wrap: validates exactly like encode_observation_page but
+// writes only the inner head + fixed header (kGatewayInnerHeadSize +
+// kObservationPageFixed bytes) and never copies `body` — the caller
+// stages the body itself at that offset (the bridge encodes straight
+// into its tx scratch; `written` is the head size on success).
+Status encode_observation_page_head(const ObservationPageHeader& header, ByteView body,
+                                    std::size_t count, MutableByteView out,
+                                    std::size_t& written) noexcept;
+// Validates head, header ranges and exact length; `body` borrows `inner`.
+// Routes pages are additionally order-checked (strictly ascending).
+Status decode_observation_page(ByteView inner, ObservationPageHeader& header,
+                               ByteView& body) noexcept;
+
+Status encode_observation_event(const ObservationEvent& event, MutableByteView out,
+                                std::size_t& written) noexcept;
+Status decode_observation_event(ByteView inner, ObservationEvent& out) noexcept;
 
 }  // namespace routeloom::usb
