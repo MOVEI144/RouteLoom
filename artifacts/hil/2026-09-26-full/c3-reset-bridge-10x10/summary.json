@@ -1,0 +1,48 @@
+{
+  "cycles": 10,
+  "sends_per_cycle": 10,
+  "accepted_total": 100,
+  "delivered_total": 30,
+  "delivered_per_cycle": [
+    0,
+    0,
+    0,
+    10,
+    10,
+    10,
+    0,
+    0,
+    0,
+    0
+  ],
+  "failure_reasons": {
+    "DEADLINE_EXPIRED": 70,
+    "END_RECEIVED": 30
+  },
+  "adapter_auth_s_min": 1.506,
+  "adapter_auth_s_median": 1.517,
+  "adapter_auth_s_max": 1.531,
+  "bridge_message_sessions": [
+    251,
+    253,
+    255,
+    257,
+    258,
+    260,
+    261,
+    263,
+    265,
+    267
+  ],
+  "bridge_boot_ids": [],
+  "preflight_ok_cycles": 10,
+  "probe_to_bridge_result_status_counts": {
+    "0": 2,
+    "3": 46
+  },
+  "node3_gateway_route_snapshots": {
+    "count": 5,
+    "valid": 0,
+    "invalid": 5
+  }
+}

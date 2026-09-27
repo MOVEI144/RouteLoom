@@ -1,0 +1,6 @@
+{
+  "time_unix": 1790452401.9024873,
+  "exit_code": 0,
+  "stdout": "{\"v\":1,\"request_id\":\"ctl-3093562\",\"ok\":true,\"result\":{\"group_op\":\"grpc9575d9d00000002\",\"network\":\"00000000524c0003\",\"group\":65535,\"all\":true,\"state\":\"REFUSED\",\"final\":true,\"result\":\"BUSY\",\"reason\":\"NODE_PAUSED\",\"message\":null,\"gateway\":\"0000000000000001\",\"rounds\":null,\"delivered\":null,\"nonmember\":null,\"missing_total\":null,\"unaccounted\":null,\"missing\":null,\"missing_truncated\":null,\"priority\":\"NORMAL\",\"ordered\":false,\"ttl_ms\":5000,\"hop_limit\":10,\"payload_len\":8,\"submitted_ms\":1790452401790,\"admitted_ms\":null,\"settled_ms\":1790452401902,\"clock\":\"host_unix_ms\"}}",
+  "stderr": "generated idempotency key: [redacted]"
+}

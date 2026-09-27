@@ -1,0 +1,49 @@
+[
+  {
+    "run": "initial",
+    "sender_console": "c3-d2d-node2-flash/flash-ref-a-boot.log",
+    "receiver_console": "c3-d2d-node3-receiver.log",
+    "send_log_attempts": 20,
+    "terminal_messages": 20,
+    "terminal_outcomes": {
+      "DEADLINE_EXPIRED": 20
+    },
+    "receiver_confirmed": 0,
+    "receiver_unique_records": 0
+  },
+  {
+    "run": "after-node3-reset",
+    "sender_console": "c3-d2d-retry-node2-sender.log",
+    "receiver_console": "c3-d2d-retry-node3-receiver.log",
+    "send_log_attempts": 19,
+    "terminal_messages": 20,
+    "terminal_outcomes": {
+      "DEADLINE_EXPIRED": 7,
+      "END_RECEIVED": 13
+    },
+    "receiver_confirmed": 13,
+    "receiver_unique_records": 13
+  },
+  {
+    "run": "stable-retry",
+    "sender_console": "c3-d2d-third-node2-flash/flash-ref-a-boot.log",
+    "receiver_console": "c3-d2d-third-node3-receiver.log",
+    "send_log_attempts": 20,
+    "terminal_messages": 20,
+    "terminal_outcomes": {
+      "DEADLINE_EXPIRED": 3,
+      "END_RECEIVED": 17
+    },
+    "receiver_confirmed": 17,
+    "receiver_unique_records": 17,
+    "sender_accepted_to_receiver_delay_ms": {
+      "count": 17,
+      "median": 17.0,
+      "p95_nearest_rank": 3777.0,
+      "range": [
+        15.0,
+        3777.0
+      ]
+    }
+  }
+]

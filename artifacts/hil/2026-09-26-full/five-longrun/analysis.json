@@ -1,0 +1,189 @@
+{
+  "traffic": {
+    "all": {
+      "accepted": 100,
+      "delivered": 27,
+      "success_rate": 0.27,
+      "latency_ms_median": 59.06,
+      "latency_ms_p95": 204.03,
+      "latency_ms_max": 330.94,
+      "outcomes": {
+        "delivered:END_RECEIVED": 27,
+        "expired:DEADLINE_EXPIRED": 71,
+        "failed:END_RECEIPT_TIMEOUT": 2
+      }
+    },
+    "by_destination": {
+      "2": {
+        "accepted": 25,
+        "delivered": 25,
+        "success_rate": 1.0,
+        "latency_ms_median": 58.8,
+        "latency_ms_p95": 111.1,
+        "latency_ms_max": 219.09,
+        "outcomes": {
+          "delivered:END_RECEIVED": 25
+        }
+      },
+      "3": {
+        "accepted": 25,
+        "delivered": 0,
+        "success_rate": 0.0,
+        "latency_ms_median": null,
+        "latency_ms_p95": null,
+        "latency_ms_max": null,
+        "outcomes": {
+          "expired:DEADLINE_EXPIRED": 25
+        }
+      },
+      "4": {
+        "accepted": 25,
+        "delivered": 0,
+        "success_rate": 0.0,
+        "latency_ms_median": null,
+        "latency_ms_p95": null,
+        "latency_ms_max": null,
+        "outcomes": {
+          "expired:DEADLINE_EXPIRED": 25
+        }
+      },
+      "5": {
+        "accepted": 25,
+        "delivered": 2,
+        "success_rate": 0.08,
+        "latency_ms_median": 249.92,
+        "latency_ms_p95": 322.84,
+        "latency_ms_max": 330.94,
+        "outcomes": {
+          "delivered:END_RECEIVED": 2,
+          "failed:END_RECEIPT_TIMEOUT": 2,
+          "expired:DEADLINE_EXPIRED": 21
+        }
+      }
+    },
+    "admission_retries": 0,
+    "first_admitted_unix": 1790413127.111181,
+    "last_admitted_unix": 1790416790.1210084,
+    "admission_span_s": 3663.01
+  },
+  "health": {
+    "samples": 127,
+    "authenticated_samples": 127,
+    "bridge_sessions": 1,
+    "bridge_boots_seen": [
+      242
+    ],
+    "max_protocol_errors": 0,
+    "route_samples_by_destination": {
+      "0000000000000003": 0,
+      "0000000000000005": 18,
+      "0000000000000004": 0,
+      "0000000000000002": 127
+    },
+    "rssi_dbm_by_destination": {
+      "0000000000000002": {
+        "samples": 127,
+        "min": -47,
+        "median": -40,
+        "max": -36
+      }
+    },
+    "event_kinds": {
+      "adapter": 1,
+      "hello_ack": 1,
+      "auth_ok": 1,
+      "credit_grant": 499,
+      "node_joined": 3,
+      "link_changed": 1,
+      "dispatch": 1,
+      "host_ops_rx": 1,
+      "delivery_event": 408,
+      "credit_query": 56,
+      "diagnostic": 101,
+      "node_left": 1
+    },
+    "observation_span_s": 3780.0
+  },
+  "console": {
+    "2": {
+      "heap_samples": 65,
+      "boot_ids_seen": [],
+      "stack_min_remaining_b": {
+        "main": 11380
+      },
+      "stale_events": 3,
+      "boot_heap_below_floor": 0,
+      "usb_connects": 1,
+      "usb_disconnects": 0,
+      "first_free_b": 21760,
+      "last_free_b": 21768,
+      "free_delta_b": 8,
+      "minimum_free_b": 21708,
+      "first_largest_b": 18432,
+      "last_largest_b": 18432,
+      "largest_delta_b": 0,
+      "minimum_largest_b": 18432,
+      "minimum_ever_free_b": 20908
+    },
+    "3": {
+      "heap_samples": 65,
+      "boot_ids_seen": [],
+      "stack_min_remaining_b": {
+        "main": 11236
+      },
+      "stale_events": 0,
+      "boot_heap_below_floor": 0,
+      "usb_connects": 1,
+      "usb_disconnects": 0,
+      "first_free_b": 22232,
+      "last_free_b": 22232,
+      "free_delta_b": 0,
+      "minimum_free_b": 22232,
+      "first_largest_b": 19456,
+      "last_largest_b": 19456,
+      "largest_delta_b": 0,
+      "minimum_largest_b": 19456,
+      "minimum_ever_free_b": 21440
+    },
+    "4": {
+      "heap_samples": 65,
+      "boot_ids_seen": [],
+      "stack_min_remaining_b": {
+        "main": 10588
+      },
+      "stale_events": 3,
+      "boot_heap_below_floor": 0,
+      "usb_connects": 1,
+      "usb_disconnects": 0,
+      "first_free_b": 106572,
+      "last_free_b": 106620,
+      "free_delta_b": 48,
+      "minimum_free_b": 106564,
+      "first_largest_b": 90112,
+      "last_largest_b": 90112,
+      "largest_delta_b": 0,
+      "minimum_largest_b": 90112,
+      "minimum_ever_free_b": 105728
+    },
+    "5": {
+      "heap_samples": 65,
+      "boot_ids_seen": [],
+      "stack_min_remaining_b": {
+        "main": 11096
+      },
+      "stale_events": 1,
+      "boot_heap_below_floor": 0,
+      "usb_connects": 1,
+      "usb_disconnects": 0,
+      "first_free_b": 106572,
+      "last_free_b": 106564,
+      "free_delta_b": -8,
+      "minimum_free_b": 106224,
+      "first_largest_b": 90112,
+      "last_largest_b": 90112,
+      "largest_delta_b": 0,
+      "minimum_largest_b": 90112,
+      "minimum_ever_free_b": 105728
+    }
+  }
+}

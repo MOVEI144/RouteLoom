@@ -590,6 +590,24 @@ target_include_directories(routeloom_sdkv1_records_tests PRIVATE
 target_compile_options(routeloom_sdkv1_records_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_records_tests COMMAND routeloom_sdkv1_records_tests)
 
+add_executable(routeloom_board_config_tests test_board_config.cpp)
+target_link_libraries(routeloom_board_config_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_board_config_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/components/routeloom/include)
+target_compile_options(routeloom_board_config_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_board_config_tests COMMAND routeloom_board_config_tests)
+
+# Generic field image (design-devflow §4.1, meshviz §0.4): the RLK1 secrets
+# store, the benchcfg/benchsecret provisioning console and the pre-RF
+# resolve_field_identity gate — including the three-boards/one-digest and
+# power-cut readback acceptance cases.
+add_executable(routeloom_board_setup_tests test_board_setup.cpp)
+target_link_libraries(routeloom_board_setup_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_board_setup_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_board_setup_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_board_setup_tests COMMAND routeloom_board_setup_tests)
+
 add_executable(routeloom_sdkv1_store_tests test_sdkv1_store.cpp)
 target_link_libraries(routeloom_sdkv1_store_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_sdkv1_store_tests PRIVATE

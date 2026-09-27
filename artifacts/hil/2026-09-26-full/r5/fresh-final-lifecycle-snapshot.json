@@ -1,0 +1,92 @@
+{
+  "bridge": [
+    {
+      "slot": "x0",
+      "record_len": 120,
+      "magic_ok": true,
+      "format_ok": true,
+      "seal_ok": true,
+      "crc_ok": true,
+      "sequence": 3,
+      "mode": "Idle",
+      "node_id": "0000000000000001",
+      "site_id": "5173000000000048",
+      "old_network": "00000002524c0003",
+      "new_network": "0000000000000000",
+      "generation": 1,
+      "rs_floor": 2,
+      "gk_floor": 2,
+      "boot_witness": 870,
+      "cutover_id": 4,
+      "revision": 1,
+      "payload_len": 32
+    },
+    {
+      "slot": "x1",
+      "record_len": 120,
+      "magic_ok": true,
+      "format_ok": true,
+      "seal_ok": true,
+      "crc_ok": true,
+      "sequence": 3,
+      "mode": "Idle",
+      "node_id": "0000000000000001",
+      "site_id": "5173000000000048",
+      "old_network": "00000002524c0003",
+      "new_network": "0000000000000000",
+      "generation": 1,
+      "rs_floor": 2,
+      "gk_floor": 2,
+      "boot_witness": 870,
+      "cutover_id": 4,
+      "revision": 1,
+      "payload_len": 32
+    }
+  ],
+  "ref-a": [
+    {
+      "slot": "x0",
+      "record_len": 701,
+      "magic_ok": true,
+      "format_ok": true,
+      "seal_ok": true,
+      "crc_ok": true,
+      "sequence": 1,
+      "mode": "Prepared",
+      "node_id": "0000000000000002",
+      "site_id": "5173000000000048",
+      "old_network": "00000001524c0003",
+      "new_network": "00000002524c0003",
+      "generation": 1,
+      "rs_floor": 1,
+      "gk_floor": 2,
+      "boot_witness": 1373,
+      "cutover_id": 4,
+      "revision": 1,
+      "payload_len": 613
+    }
+  ],
+  "ref-b": [
+    {
+      "slot": "x0",
+      "record_len": 701,
+      "magic_ok": true,
+      "format_ok": true,
+      "seal_ok": true,
+      "crc_ok": true,
+      "sequence": 1,
+      "mode": "Prepared",
+      "node_id": "0000000000000006",
+      "site_id": "5173000000000048",
+      "old_network": "00000001524c0003",
+      "new_network": "00000002524c0003",
+      "generation": 1,
+      "rs_floor": 1,
+      "gk_floor": 2,
+      "boot_witness": 252,
+      "cutover_id": 4,
+      "revision": 1,
+      "payload_len": 613
+    }
+  ]
+}

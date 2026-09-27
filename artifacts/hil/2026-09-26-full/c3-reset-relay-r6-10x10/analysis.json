@@ -1,0 +1,63 @@
+{
+  "cycles": 10,
+  "sends_per_cycle": 10,
+  "baseline_delivered": 0,
+  "baseline_sends": 3,
+  "delivered_per_cycle": [
+    8,
+    3,
+    10,
+    10,
+    10,
+    9,
+    10,
+    10,
+    10,
+    9
+  ],
+  "attempted": 100,
+  "delivered": 89,
+  "reasons": {
+    "DEADLINE_EXPIRED": 10,
+    "END_RECEIVED": 89,
+    "HOP_ACCEPT_TIMEOUT": 1
+  },
+  "success_latency_ms": {
+    "median": 114.48,
+    "p95": 318.0,
+    "max": 3772.1
+  },
+  "recovery_s": {
+    "min": 12.092,
+    "median": 26.3805,
+    "max": 107.599
+  },
+  "boot_failures_recorded": 0,
+  "console": {
+    "boot_ids": [
+      273,
+      274,
+      275,
+      276,
+      277,
+      278,
+      279,
+      280,
+      281,
+      282,
+      283
+    ],
+    "boot_strictly_increasing": true,
+    "boot_heap_below_floor": 0,
+    "peer_not_found": 0,
+    "peer_exists": 0,
+    "stale_events": 0
+  },
+  "host_health": {
+    "samples": 529,
+    "authenticated": 529,
+    "protocol_errors_max": 0,
+    "route_up": 468,
+    "route_down": 61
+  }
+}

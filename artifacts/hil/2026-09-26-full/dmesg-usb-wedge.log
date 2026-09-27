@@ -1,0 +1,55 @@
+[Sat Sep 26 13:07:47 2026] usb 1-4.2.3: new full-speed USB device number 63 using xhci_hcd
+[Sat Sep 26 13:07:47 2026] usb 1-4.2.3: New USB device found, idVendor=303a, idProduct=1001, bcdDevice= 1.01
+[Sat Sep 26 13:07:47 2026] usb 1-4.2.3: New USB device strings: Mfr=1, Product=2, SerialNumber=3
+[Sat Sep 26 13:07:47 2026] usb 1-4.2.3: Product: USB JTAG/serial debug unit
+[Sat Sep 26 13:07:47 2026] usb 1-4.2.3: Manufacturer: Espressif
+[Sat Sep 26 13:07:47 2026] usb 1-4.2.3: SerialNumber: 94:A9:90:7A:26:AC
+[Sat Sep 26 13:07:47 2026] cdc_acm 1-4.2.3:1.0: ttyACM4: USB ACM device
+[Sat Sep 26 13:07:47 2026] usb 1-4.2.3: USB disconnect, device number 63
+[Sat Sep 26 13:37:44 2026] usb 1-4.2.3: new full-speed USB device number 64 using xhci_hcd
+[Sat Sep 26 14:07:15 2026] usb 1-4.2: USB disconnect, device number 121
+[Sat Sep 26 14:07:15 2026] usb 1-4.2.1: USB disconnect, device number 52
+[Sat Sep 26 14:07:19 2026] usb 1-4.2: new high-speed USB device number 65 using xhci_hcd
+[Sat Sep 26 14:07:19 2026] usb 1-4.2: New USB device found, idVendor=05e3, idProduct=0610, bcdDevice= 6.56
+[Sat Sep 26 14:07:19 2026] usb 1-4.2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
+[Sat Sep 26 14:07:19 2026] usb 1-4.2: Product: USB2.1 Hub
+[Sat Sep 26 14:07:19 2026] usb 1-4.2: Manufacturer: GenesysLogic
+[Sat Sep 26 14:07:19 2026] usb 1-4.2.1: new full-speed USB device number 66 using xhci_hcd
+[Sat Sep 26 14:07:19 2026] usb 1-4.2.1: New USB device found, idVendor=303a, idProduct=1001, bcdDevice= 1.02
+[Sat Sep 26 14:07:19 2026] usb 1-4.2.1: New USB device strings: Mfr=1, Product=2, SerialNumber=3
+[Sat Sep 26 14:07:19 2026] usb 1-4.2.1: Product: USB JTAG/serial debug unit
+[Sat Sep 26 14:07:19 2026] usb 1-4.2.1: Manufacturer: Espressif
+[Sat Sep 26 14:07:19 2026] usb 1-4.2.1: SerialNumber: 10:BD:A3:B1:47:54
+[Sat Sep 26 14:07:19 2026] cdc_acm 1-4.2.1:1.0: ttyACM2: USB ACM device
+[Sat Sep 26 14:07:42 2026] usb 1-4.2.3: new full-speed USB device number 67 using xhci_hcd
+[Sat Sep 26 14:07:42 2026] usb 1-4.2.3: New USB device found, idVendor=303a, idProduct=1001, bcdDevice= 1.01
+[Sat Sep 26 14:07:42 2026] usb 1-4.2.3: New USB device strings: Mfr=1, Product=2, SerialNumber=3
+[Sat Sep 26 14:07:42 2026] usb 1-4.2.3: Product: USB JTAG/serial debug unit
+[Sat Sep 26 14:07:42 2026] usb 1-4.2.3: Manufacturer: Espressif
+[Sat Sep 26 14:07:42 2026] usb 1-4.2.3: SerialNumber: 94:A9:90:7A:26:AC
+[Sat Sep 26 14:07:42 2026] cdc_acm 1-4.2.3:1.0: ttyACM4: USB ACM device
+[Sat Sep 26 14:07:42 2026] usb 1-4.2.3: USB disconnect, device number 67
+[Sat Sep 26 14:37:40 2026] usb 1-4.2.3: new full-speed USB device number 68 using xhci_hcd
+[Sat Sep 26 14:37:40 2026] usb 1-4.2.3: New USB device found, idVendor=303a, idProduct=1001, bcdDevice= 1.01
+[Sat Sep 26 14:37:40 2026] usb 1-4.2.3: New USB device strings: Mfr=1, Product=2, SerialNumber=3
+[Sat Sep 26 14:37:40 2026] usb 1-4.2.3: Product: USB JTAG/serial debug unit
+[Sat Sep 26 14:37:40 2026] usb 1-4.2.3: Manufacturer: Espressif
+[Sat Sep 26 14:37:40 2026] usb 1-4.2.3: SerialNumber: 94:A9:90:7A:26:AC
+[Sat Sep 26 14:37:40 2026] cdc_acm 1-4.2.3:1.0: ttyACM4: USB ACM device
+[Sat Sep 26 14:37:40 2026] usb 1-4.2.3: USB disconnect, device number 68
+[Sat Sep 26 15:07:37 2026] usb 1-4.2.3: new full-speed USB device number 69 using xhci_hcd
+[Sat Sep 26 15:07:38 2026] usb 1-4.2.3: New USB device found, idVendor=303a, idProduct=1001, bcdDevice= 1.01
+[Sat Sep 26 15:07:38 2026] usb 1-4.2.3: New USB device strings: Mfr=1, Product=2, SerialNumber=3
+[Sat Sep 26 15:07:38 2026] usb 1-4.2.3: Product: USB JTAG/serial debug unit
+[Sat Sep 26 15:07:38 2026] usb 1-4.2.3: Manufacturer: Espressif
+[Sat Sep 26 15:07:38 2026] usb 1-4.2.3: SerialNumber: 94:A9:90:7A:26:AC
+[Sat Sep 26 15:07:38 2026] cdc_acm 1-4.2.3:1.0: ttyACM4: USB ACM device
+[Sat Sep 26 15:07:38 2026] usb 1-4.2.3: USB disconnect, device number 69
+[Sat Sep 26 15:37:35 2026] usb 1-4.2.3: new full-speed USB device number 70 using xhci_hcd
+[Sat Sep 26 15:37:35 2026] usb 1-4.2.3: New USB device found, idVendor=303a, idProduct=1001, bcdDevice= 1.01
+[Sat Sep 26 15:37:35 2026] usb 1-4.2.3: New USB device strings: Mfr=1, Product=2, SerialNumber=3
+[Sat Sep 26 15:37:35 2026] usb 1-4.2.3: Product: USB JTAG/serial debug unit
+[Sat Sep 26 15:37:35 2026] usb 1-4.2.3: Manufacturer: Espressif
+[Sat Sep 26 15:37:35 2026] usb 1-4.2.3: SerialNumber: 94:A9:90:7A:26:AC
+[Sat Sep 26 15:37:35 2026] cdc_acm 1-4.2.3:1.0: ttyACM4: USB ACM device
+[Sat Sep 26 15:37:35 2026] usb 1-4.2.3: USB disconnect, device number 70

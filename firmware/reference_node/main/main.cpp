@@ -2,6 +2,7 @@
 // console live on app_main's frame, so the reference image adds no static
 // observation allocation to the C3 RAM floor.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -286,6 +287,11 @@ struct ReferenceObservationContext {
   std::optional<ReferenceObservationSource> source{};
   ReferenceObsConsole console{};
   routeloom::espnow::EspNowRuntime* runtime{nullptr};
+#if CONFIG_ROUTELOOM_HIL_SEND_DESTINATION != 0 && \
+    !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  routeloom::MonotonicMs hil_next_ms{0};
+  std::uint32_t hil_attempt{0};
+#endif
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   routeloom::espnow::EspNowSecurityOwner* owner{nullptr};
 #if CONFIG_ROUTELOOM_OBSERVATION_REMOTE
@@ -332,6 +338,32 @@ void reference_attach(routeloom::espnow::EspNowRuntime& runtime,
 #endif
 }
 
+#if CONFIG_ROUTELOOM_HIL_SEND_DESTINATION != 0 && \
+    !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+void poll_hil_send(ReferenceObservationContext& ctx,
+                   routeloom::MonotonicMs now_ms) {
+  if (ctx.hil_next_ms == 0) ctx.hil_next_ms = now_ms + 10000;
+  if (ctx.hil_attempt >= CONFIG_ROUTELOOM_HIL_SEND_COUNT ||
+      now_ms < ctx.hil_next_ms) return;
+
+  const std::array<std::uint8_t, 8> payload{
+      'R', 'L', 'H', 'I', 'L', 'D',
+      static_cast<std::uint8_t>(ctx.hil_attempt >> 8),
+      static_cast<std::uint8_t>(ctx.hil_attempt)};
+  routeloom::MessageId id{};
+  const auto sent = ctx.runtime->node().send(
+      CONFIG_ROUTELOOM_HIL_SEND_DESTINATION,
+      routeloom::ByteView{payload.data(), payload.size()},
+      routeloom::SendOptions{}, now_ms, id);
+  ESP_LOGI("RouteLoomRef", "HIL DEVICE SEND attempt=%lu dest=%llu admitted=%u detail=%s",
+           static_cast<unsigned long>(ctx.hil_attempt),
+           static_cast<unsigned long long>(CONFIG_ROUTELOOM_HIL_SEND_DESTINATION),
+           static_cast<unsigned>(static_cast<bool>(sent)), sent.detail);
+  ++ctx.hil_attempt;
+  ctx.hil_next_ms = now_ms + 2000;
+}
+#endif
+
 void reference_poll(routeloom::MonotonicMs now_ms, void* opaque) {
   auto& ctx = *static_cast<ReferenceObservationContext*>(opaque);
   ctx.console.poll(*ctx.source, ctx.runtime->node().node_id(), now_ms);
@@ -342,6 +374,10 @@ void reference_poll(routeloom::MonotonicMs now_ms, void* opaque) {
       ctx.runtime->node().set_observation_remote(allow)) {
     ctx.remote_allowed = allow;
   }
+#endif
+#if CONFIG_ROUTELOOM_HIL_SEND_DESTINATION != 0 && \
+    !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  poll_hil_send(ctx, now_ms);
 #endif
 }
 

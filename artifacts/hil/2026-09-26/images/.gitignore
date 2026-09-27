@@ -1,3 +1,6 @@
 # Reproducible ESP-IDF images remain in the worktree for continuation.
 # Commit build logs, configuration, sizes, flash arguments and SHA-256 sums.
 *.bin
+# This run keeps raw sdkconfig (with development credentials) locally and
+# commits redacted metadata under artifacts/hil/2026-09-26-full/images/.
+full-r*/

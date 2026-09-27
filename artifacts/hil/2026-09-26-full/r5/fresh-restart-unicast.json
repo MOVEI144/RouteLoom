@@ -1,0 +1,16 @@
+[
+  {
+    "node": 2,
+    "time_unix": 1790452626.8691695,
+    "exit_code": 0,
+    "stdout": "{\"accepted\":true,\"request\":1}",
+    "stderr": ""
+  },
+  {
+    "node": 6,
+    "time_unix": 1790452626.8724713,
+    "exit_code": 0,
+    "stdout": "{\"accepted\":true,\"request\":2}",
+    "stderr": ""
+  }
+]

@@ -46,6 +46,8 @@
 #include "routeloom/rlcw1.hpp"
 #include "routeloom/nvs_counter_store.hpp"
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+#include "routeloom/board_secrets.hpp"
+#include "routeloom/espnow_board_config.hpp"
 #include "routeloom/espnow_sdkv1_entropy.hpp"
 #include "routeloom/espnow_security_owner.hpp"
 #include "routeloom/owner_pump.hpp"
@@ -492,6 +494,55 @@ extern "C" void app_main(void) {
   // node= above against the inventory row.
   ESP_LOGI(kTag, "routeloom field boot: fw=%s", esp_app_get_description()->version);
 
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  // Generic field image (design-devflow §4.1, meshviz §0.4): this one
+  // signed image serves every board of this chip x role pair — the
+  // durable BoardConfig in `rlcfg` (and the `rlkeys` secrets it binds)
+  // is the only source of NodeId/network/channel/secret. The gate below
+  // runs before anything that can start the radio: a missing, impaired
+  // or mismatched record is refused, never defaulted.
+  static ROUTELOOM_OWNER_C5_LP ROUTELOOM_MEMBER_SMALL_LP
+      routeloom::espnow::BoardStores board_stores;
+  status = board_stores.open(/*writable=*/false);
+  if (!status) fail(status.detail);
+  status = board_stores.initialize();
+  if (!status) {
+    ESP_LOGE(kTag, "board stores init: %s", status.detail);
+  }
+  routeloom::BoardBootIdentity board_identity{};
+  board_identity.chip = routeloom::espnow::board_chip();
+  board_identity.role = routeloom::BoardRole::Bridge;
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
+  board_identity.security = routeloom::BoardSecurity::DevRam;
+#else
+  board_identity.security = routeloom::BoardSecurity::Member;
+  // The bound RLI1 node is provable only from a healthy sealed store —
+  // an unprovisioned or impaired identity cannot pass the gate.
+  if (sdkv1_stores.identity().has_identity() &&
+      !sdkv1_stores.identity().uncertain() &&
+      !sdkv1_stores.identity().quarantined()) {
+    board_identity.rli_node = sdkv1_stores.identity().identity().node_id;
+  }
+#endif
+  if (esp_read_mac(board_identity.sta_mac.data(), ESP_MAC_WIFI_STA) != ESP_OK) {
+    fail("station MAC unreadable");
+  }
+  const routeloom::BoardSecrets* board_secrets = nullptr;
+  status = routeloom::resolve_field_identity(board_stores.config(),
+                                             board_stores.secrets(),
+                                             board_identity, board_secrets);
+  if (!status) {
+    ESP_LOGE(kTag, "CONFIG_REQUIRED: %s", status.detail);
+    fail(status.detail);
+  }
+  const routeloom::BoardConfig& board = board_stores.config().config();
+  ESP_LOGI(kTag, "board config: gen=%lu node=0x%llx role=bridge "
+                 "secrets_gen=%lu",
+           static_cast<unsigned long>(board.generation),
+           static_cast<unsigned long long>(board.node),
+           static_cast<unsigned long>(board.secrets_generation));
+#endif
+
   if (routeloom::espnow::nvs_namespace_in_use(NVS_DEFAULT_PART_NAME,
                                               "rlcounter") ||
       routeloom::espnow::nvs_namespace_in_use(NVS_DEFAULT_PART_NAME,
@@ -543,9 +594,12 @@ extern "C" void app_main(void) {
   static EspOwnerEntropy entropy;
   static EspNowSecurityOwner owner;
   EspNowSecurityOwner::Config owner_config{};
-  owner_config.local_node = CONFIG_ROUTELOOM_NODE_ID;
+  // The verified BoardConfig owns the local identity (design §4.1) —
+  // equals the sealed RLI1 node for Member.
+  owner_config.local_node = board.node;
   // Pre-radio station MAC from eFuse: no custom MAC is ever set, so this
-  // is the address the runtime will read back after Wi-Fi init.
+  // is the address the runtime will read back after Wi-Fi init — the
+  // gate above already proved it equals the committed BoardConfig MAC.
   if (esp_read_mac(owner_config.local_mac.data(), ESP_MAC_WIFI_STA) != ESP_OK) {
     fail("station MAC unreadable");
   }
@@ -711,14 +765,24 @@ extern "C" void app_main(void) {
 
   static UsbSerialStream stream;
   routeloom::usb::UsbBridge::Config bridge_config;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  // The USB session secret is the committed rlkeys value — the gate
+  // proved it matches the BoardConfig binding (design §4.1).
+  bridge_config.secret =
+      ByteView{board_secrets->usb_secret.data(), board_secrets->usb_len};
+  bridge_config.node = board.node;
+#else
   const char* secret = CONFIG_ROUTELOOM_USB_DEV_SECRET;
   bridge_config.secret =
       ByteView{reinterpret_cast<const std::uint8_t*>(secret),
                std::strlen(secret)};
   bridge_config.node = CONFIG_ROUTELOOM_NODE_ID;
+#endif
 #if CONFIG_ROUTELOOM_TRUST_STORE
   // The bridge reports the same provisioned mesh identity as the radio.
   bridge_config.network = provisioned_network;
+#elif !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  bridge_config.network = board.network;
 #else
   bridge_config.network = CONFIG_ROUTELOOM_NETWORK_ID;
 #endif
@@ -734,10 +798,18 @@ extern "C" void app_main(void) {
   // The committed trust image owns the deployment's network identity;
   // only the low 32 bits are wire-visible on Wire v1 (see above).
   config.node.network = provisioned_network;
+#elif !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  // Verified BoardConfig value; Member rewrites it from the adopted
+  // SitePackage at apply time.
+  config.node.network = board.network;
 #else
   config.node.network = CONFIG_ROUTELOOM_NETWORK_ID;
 #endif
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  config.node.node = board.node;
+#else
   config.node.node = CONFIG_ROUTELOOM_NODE_ID;
+#endif
   config.node.message_session = message_session;
   // Explicit durable boot token (G-SEC P4 §9.1): identical to the compat
   // init for the legacy provider, explicit-nonzero for session providers.
@@ -783,7 +855,11 @@ extern "C" void app_main(void) {
            config.node.route_gateways[0], config.node.route_gateways[1],
            config.node.route_advertisement_period_ms, config.node.route_lifetime_ms);
 #endif
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  config.channel = board.channel;
+#else
   config.channel = CONFIG_ROUTELOOM_CHANNEL;
+#endif
 #if CONFIG_ROUTELOOM_MIGRATION
   if (have_boot_channel) {
     ESP_LOGW(kTag, "migration boot channel %u overrides static %u",
@@ -852,23 +928,20 @@ extern "C" void app_main(void) {
   status = owner.attach_usb(bridge);
   if (!status) fail(status.detail);
 #if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
-  // Dev route (P4 §10.1): adoption without joining — the reserved dev
-  // boot plus the static PSK/network/node/channel arm the dev-resume
-  // engine through the coordinator; pairwise sessions and group
-  // send/receive serve from here on.
-  routeloom::keys::Secret dev_psk{};
-  if (!parse_hex(CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX, dev_psk)) {
-    fail("invalid development key");
-  }
+  // Dev route (P4 §10.1, design-devflow §4.3): adoption without joining.
+  // The PSK is the committed rlkeys secret (never a Kconfig literal) and
+  // the dev-boundary identity (network/node/channel) is the verified
+  // BoardConfig — the dev bindings stay in the build only for pinout
+  // and reserved-boot routes.
   EspNowSecurityOwner::DevConfig dev_config{};
-  dev_config.psk = dev_psk;
-  routeloom::secure_clear(dev_psk);
-  dev_config.network = static_cast<routeloom::NetworkId>(CONFIG_ROUTELOOM_NETWORK_ID);
-  dev_config.node = CONFIG_ROUTELOOM_NODE_ID;
-  dev_config.channel = static_cast<std::uint8_t>(CONFIG_ROUTELOOM_CHANNEL);
+  dev_config.psk = board_secrets->psk;
+  dev_config.network = static_cast<routeloom::NetworkId>(board.network);
+  dev_config.node = board.node;
+  dev_config.channel = board.channel;
   dev_config.boot = message_session;
   dev_config.role = routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay;
   status = owner.adopt_dev(dev_config, monotonic_now_ms());
+  routeloom::secure_clear(dev_config.psk);
   if (!status) fail(status.detail);
 #else
   status = owner.boot(message_session, /*rlboot_prepared=*/true,

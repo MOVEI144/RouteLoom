@@ -25,8 +25,8 @@ def main() -> int:
     args = p.parse_args()
 
     board = rig.load_rigs(args.rig)[args.bench].boards[args.board]
-    if board.chip not in ("esp32c3", "esp32c5") or not board.mac or board.app not in RLSEC_SIZES:
-        p.error("restore requires an audited C3/C5 board with pinned MAC")
+    if board.chip not in ("esp32c3", "esp32c5", "esp32c6") or not board.mac or board.app not in RLSEC_SIZES:
+        p.error("restore requires an audited C3/C5/C6 board with pinned MAC")
     expected_size = RLSEC_SIZES[board.app]
     table = (pathlib.Path(__file__).resolve().parents[2] /
              f"firmware/{board.app}/partitions.csv").read_text()
