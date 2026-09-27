@@ -137,6 +137,14 @@ jobs:
           idf.py set-target '${{ matrix.target }}'
           idf.py build
           idf.py size > build/size-report.txt
+          # Same static-RAM floor guard as CI (sdk.yml firmware job): a
+          # release image below the per-target/app floor fails here, not
+          # on a customer's bench.
+          idf.py size --format json2 --output-file build/size.json
+          python3 "$GITHUB_WORKSPACE/tools/firmware_ram_report.py" build/size.json \
+            --target '${{ matrix.target }}' --app '${{ matrix.app }}' \
+            --cell '${{ matrix.app }}-${{ matrix.target }}' \
+            --json-out build/ram-report.json --summary "$GITHUB_STEP_SUMMARY"
       - name: Package firmware
         shell: bash
         run: |
@@ -148,7 +156,8 @@ jobs:
           cd "firmware/${{ matrix.app }}"
           cp build/*.bin build/*.elf build/*.map "../../dist/$stage/"
           for f in build/bootloader/bootloader.bin build/partition_table/partition-table.bin \
-                   build/flasher_args.json build/flash_args build/size-report.txt sdkconfig; do
+                   build/flasher_args.json build/flash_args build/size-report.txt \
+                   build/size.json build/ram-report.json sdkconfig; do
             if [ -f "$f" ]; then cp "$f" "../../dist/$stage/"; fi
           done
           cd "$GITHUB_WORKSPACE"
@@ -304,6 +313,8 @@ jobs:
             echo ''
             echo 'Firmware images ship with the development PSK — a public test'
             echo 'fixture, not a credential. See `SECURITY.md` before any deployment.'
+            echo 'Only the default per-app sdkconfig is shipped and RAM-gated;'
+            echo 'the extra CI build profiles are not release targets.'
           } > release-notes.md
       - name: Create draft release
         shell: bash
