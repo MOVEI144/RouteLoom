@@ -656,6 +656,12 @@ fn sync_path(path: &Path) -> Result<(), DynError> {
     if path.is_dir() {
         return Ok(());
     }
+    #[cfg(windows)]
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    #[cfg(not(windows))]
     let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     file.sync_all()
         .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -1541,6 +1547,19 @@ mod tests {
         let path = dir.join("pop.hex");
         std::fs::write(&path, b"0001020304").unwrap();
         assert!(read_object(&path, 4).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn generated_file_can_be_flushed_by_path() {
+        let dir = scratch("flush-output");
+        let file = dir.join("devcert.cwt");
+        write_new(&file, b"staged").unwrap();
+        sync_path(&file).unwrap();
+        let private = dir.join("staged.key");
+        write_private_file(&private, b"secret").unwrap();
+        sync_path(&private).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 

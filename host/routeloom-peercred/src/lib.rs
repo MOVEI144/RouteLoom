@@ -297,6 +297,12 @@ pub fn open_private_file_for_read(path: &Path) -> io::Result<std::fs::File> {
     win_acl::open_private_file_for_read(path)
 }
 
+/// Resolves rooted and drive-relative Windows paths without requiring them to exist.
+#[cfg(windows)]
+pub fn windows_absolute_path(path: &Path) -> io::Result<std::path::PathBuf> {
+    win_acl::absolute_path(path)
+}
+
 /// Opens the bridge serial port with exclusive access and raw 8N1 settings.
 pub fn open_serial(path: &Path) -> io::Result<std::fs::File> {
     #[cfg(windows)]
@@ -998,7 +1004,7 @@ pub mod win_pipe {
 mod win_acl {
     use std::ffi::c_void;
     use std::io;
-    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::os::windows::fs::MetadataExt;
     use std::os::windows::io::FromRawHandle;
     use std::path::Path;
@@ -1131,10 +1137,45 @@ mod win_acl {
         ) -> *mut c_void;
         fn CreateDirectoryW(name: *const u16, attrs: *mut SecurityAttributes) -> i32;
         fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
+        fn GetFullPathNameW(
+            name: *const u16,
+            capacity: u32,
+            buffer: *mut u16,
+            file_part: *mut *mut u16,
+        ) -> u32;
     }
 
     fn wide(text: &std::ffi::OsStr) -> Vec<u16> {
         text.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    pub fn absolute_path(path: &Path) -> io::Result<std::path::PathBuf> {
+        let name = wide(path.as_os_str());
+        let capacity = unsafe {
+            GetFullPathNameW(name.as_ptr(), 0, std::ptr::null_mut(), std::ptr::null_mut())
+        };
+        if capacity == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if capacity > 32_768 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "path too long"));
+        }
+        let mut buffer = vec![0u16; capacity as usize];
+        let written = unsafe {
+            GetFullPathNameW(
+                name.as_ptr(),
+                capacity,
+                buffer.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        if written == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if written >= capacity {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "path changed"));
+        }
+        Ok(std::ffi::OsString::from_wide(&buffer[..written as usize]).into())
     }
 
     fn current_sid<R>(f: impl FnOnce(*mut c_void) -> io::Result<R>) -> io::Result<R> {

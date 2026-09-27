@@ -186,7 +186,8 @@ impl OfficeLedger {
             let same_slot = entry.device_ca_id == device_ca_id
                 && entry.node_id == node_id
                 && entry.serial == serial;
-            if !same_slot && (entry.work_id == work_id || entry.out_dir == out_dir) {
+            if !same_slot && (entry.work_id == work_id || same_output_dir(&entry.out_dir, out_dir))
+            {
                 return Err(format!(
                     "work {work_id} or output {out_dir} already belongs to node {:016x} serial {}",
                     entry.node_id, entry.serial
@@ -235,7 +236,7 @@ impl OfficeLedger {
                         .into());
                     }
                 }
-                if entry.out_dir != out_dir {
+                if !same_output_dir(&entry.out_dir, out_dir) {
                     return Err(format!(
                         "work {work_id} reserved node {node_id:016x} serial {serial} for another directory ({})",
                         entry.out_dir
@@ -288,7 +289,7 @@ impl OfficeLedger {
         let entry = folded
             .get(&slot)
             .ok_or_else(|| format!("node {node_id:016x} serial {serial} has no reservation"))?;
-        if entry.work_id != work_id || entry.out_dir != out_dir {
+        if entry.work_id != work_id || !same_output_dir(&entry.out_dir, out_dir) {
             return Err(format!(
                     "node {node_id:016x} serial {serial} belongs to work {} at {}, not {work_id} at {out_dir}",
                     entry.work_id, entry.out_dir
@@ -321,7 +322,7 @@ impl OfficeLedger {
                 kid: Some(kid),
                 devcert_sha256: Some(devcert_sha256),
                 work_id: work_id.to_string(),
-                out_dir: out_dir.to_string(),
+                out_dir: entry.out_dir.clone(),
                 status: LedgerStatus::Issued,
                 ts: unix_secs(),
             },
@@ -452,7 +453,7 @@ impl OfficeLedger {
                 );
                 if !valid_step
                     || previous.work_id != entry.work_id
-                    || previous.out_dir != entry.out_dir
+                    || !same_output_dir(&previous.out_dir, &entry.out_dir)
                     || (previous.kid.is_some() && previous.kid != entry.kid)
                     || (previous.devcert_sha256.is_some()
                         && previous.devcert_sha256 != entry.devcert_sha256)
@@ -701,6 +702,10 @@ fn format_entry(entry: &LedgerEntry) -> String {
 /// lexically-normalized path, so spellings of the same directory
 /// (`dev`, `./dev`) resume the same work.
 pub fn default_work_id(out_dir: &Path) -> String {
+    #[cfg(windows)]
+    let absolute = routeloom_peercred::windows_absolute_path(out_dir)
+        .unwrap_or_else(|_| out_dir.to_path_buf());
+    #[cfg(not(windows))]
     let absolute = if out_dir.is_absolute() {
         out_dir.to_path_buf()
     } else {
@@ -708,29 +713,72 @@ pub fn default_work_id(out_dir: &Path) -> String {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(out_dir)
     };
+    let mut prefix = String::new();
+    let mut rooted = false;
     let mut parts: Vec<String> = Vec::new();
     for part in absolute.components() {
         use std::path::Component;
         match part {
-            Component::RootDir => parts.push(String::new()),
+            Component::RootDir => rooted = true,
             Component::CurDir => {}
             Component::ParentDir => match parts.last().map(String::as_str) {
-                Some("") => {}
-                Some("..") | None => parts.push("..".to_string()),
+                Some("..") | None if !rooted => parts.push("..".to_string()),
+                Some("..") | None => {}
                 Some(_) => {
                     parts.pop();
                 }
             },
-            Component::Normal(text) => parts.push(text.to_string_lossy().into_owned()),
-            Component::Prefix(prefix) => {
-                parts.push(prefix.as_os_str().to_string_lossy().into_owned())
+            Component::Normal(text) => {
+                #[cfg(windows)]
+                parts.push(text.to_string_lossy().to_lowercase());
+                #[cfg(not(windows))]
+                parts.push(text.to_string_lossy().into_owned());
+            }
+            Component::Prefix(component) => {
+                #[cfg(windows)]
+                {
+                    use std::path::Prefix;
+                    prefix = match component.kind() {
+                        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => {
+                            format!("{}:", (drive as char).to_ascii_lowercase())
+                        }
+                        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+                            format!(
+                                "//{}/{}",
+                                server.to_string_lossy().to_lowercase(),
+                                share.to_string_lossy().to_lowercase()
+                            )
+                        }
+                        Prefix::DeviceNS(device) => {
+                            format!("//./{}", device.to_string_lossy().to_lowercase())
+                        }
+                        Prefix::Verbatim(device) => {
+                            format!("//?/{}", device.to_string_lossy().to_lowercase())
+                        }
+                    };
+                }
+                #[cfg(not(windows))]
+                {
+                    prefix = component.as_os_str().to_string_lossy().into_owned();
+                }
             }
         }
     }
-    if parts.first().map(String::as_str) == Some("") {
-        format!("/{}", parts[1..].join("/"))
-    } else {
-        parts.join("/")
+    if rooted {
+        prefix.push('/');
+    }
+    prefix.push_str(&parts.join("/"));
+    prefix
+}
+
+fn same_output_dir(a: &str, b: &str) -> bool {
+    #[cfg(windows)]
+    {
+        default_work_id(Path::new(a)) == default_work_id(Path::new(b))
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
     }
 }
 
@@ -817,7 +865,50 @@ mod tests {
 
     #[test]
     fn output_normalization_stays_under_root() {
+        #[cfg(unix)]
         assert_eq!(default_work_id(Path::new("/../tmp/issued")), "/tmp/issued");
+        #[cfg(windows)]
+        {
+            let rooted = default_work_id(Path::new(r"\..\tmp\issued"));
+            assert!(rooted.ends_with(":/tmp/issued"), "{rooted}");
+            assert!(!rooted.contains("//tmp"), "{rooted}");
+            assert_eq!(
+                default_work_id(Path::new(r"\\?\C:\LOT\sub\..\Device")),
+                "c:/lot/device"
+            );
+            assert_eq!(
+                default_work_id(Path::new(r"\\?\UNC\Server\Share\..\Device")),
+                "//server/share/device"
+            );
+            assert_eq!(
+                default_work_id(Path::new(r"\\SERVER\Share\Device")),
+                "//server/share/device"
+            );
+            let cwd = std::env::current_dir().unwrap();
+            if let Some(std::path::Component::Prefix(prefix)) = cwd.components().next() {
+                use std::path::Prefix;
+                if let Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) = prefix.kind() {
+                    assert_eq!(
+                        default_work_id(Path::new(&format!("{}:drive-relative", drive as char))),
+                        default_work_id(&cwd.join("drive-relative"))
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn equivalent_windows_output_paths_cannot_claim_two_slots() {
+        let dir = scratch("case-output");
+        let ledger = OfficeLedger::open(&dir.join("office-ledger.jsonl")).unwrap();
+        ledger
+            .reserve(slot(1, 2, 3), None, "work-a", r"\\?\C:\LOT\Device")
+            .unwrap();
+        assert!(ledger
+            .reserve(slot(1, 4, 5), None, "work-b", "c:/lot/device")
+            .is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn scratch(tag: &str) -> PathBuf {
