@@ -1320,6 +1320,7 @@ void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
     // A current-generation probe is liveness evidence.
     neighbor.last_confirmed_ms = now_ms;
     neighbor.stale_reprobes = 0;
+    neighbor.repair_probes = 0;
     neighbor.lease_expires_at_ms = now_ms + config_.awake_lease_ms;
   }
 
@@ -1424,6 +1425,7 @@ void NeighborDiscovery::handle_probe_result(Neighbor& neighbor,
   }
   neighbor.probe_outstanding = 0;
   neighbor.stale_reprobes = 0;   // verified RX re-arms the budget
+  neighbor.repair_probes = 0;
   if (result.result != autonomy::NeighborResultCode::Reachable) {
     return;  // NotListening/Leaving: keep current phase, lease still runs
   }
@@ -1432,6 +1434,7 @@ void NeighborDiscovery::handle_probe_result(Neighbor& neighbor,
   if (before == NeighborPhase::Bound || before == NeighborPhase::Stale ||
       before == NeighborPhase::Reachable) {
     neighbor.phase = NeighborPhase::Reachable;
+    neighbor.repair_rediscovery_used = false;
     neighbor.last_confirmed_ms = now_ms;
     const std::uint32_t granted = result.lease_granted_ms == 0
                                       ? config_.awake_lease_ms
@@ -1573,6 +1576,8 @@ void NeighborDiscovery::elevate_confirmed_peer(const MacAddress& peer_mac,
     same->probe_outstanding = 0;
     clear_pending_result(same->binding);
     same->stale_reprobes = 0;
+    same->repair_probes = 0;
+    same->repair_rediscovery_used = false;
     if (membership_.state() == MembershipState::Member && peer_member) {
       same->peer_member_verified = true;
       same->phase = NeighborPhase::Bound;
@@ -1621,6 +1626,8 @@ void NeighborDiscovery::elevate_confirmed_peer(const MacAddress& peer_mac,
   neighbor->last_confirmed_ms = now_ms;
   neighbor->probe_outstanding = 0;
   neighbor->stale_reprobes = 0;
+  neighbor->repair_probes = 0;
+  neighbor->repair_rediscovery_used = false;
   neighbor->next_reprobe_ms = 0;
 
   if (membership_.state() == MembershipState::Member && peer_member) {
@@ -2462,6 +2469,8 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
         if (now_ms >= n.suspended_until_ms) {
           n.phase = NeighborPhase::Stale;
           n.stale_reprobes = 0;
+          n.repair_probes = 0;
+          n.repair_rediscovery_used = false;
           n.next_reprobe_ms = now_ms;
           ++stats_.stale_expirations;
           event("STALE", n.node);
@@ -2484,6 +2493,8 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
         if (now_ms >= n.lease_expires_at_ms) {
           n.phase = NeighborPhase::Stale;
           n.stale_reprobes = 0;
+          n.repair_probes = 0;
+          n.repair_rediscovery_used = false;
           n.next_reprobe_ms = now_ms;
           ++stats_.stale_expirations;
           event("STALE", n.node);
@@ -2550,6 +2561,7 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
     if (first_stale == nullptr || membership_.state() == MembershipState::Revoked) {
       next_rediscovery_ms_ = 0;
       rediscovery_backoff_ms_ = 0;
+      repair_demand_ = kInvalidNodeId;
     } else if (rediscovery_backoff_ms_ == 0) {
       // Newly stranded: arm after one probe window, then ramp from a uniform
       // [backoff_min_ms, backoff_initial_max_ms] draw to backoff_max_ms
@@ -2560,10 +2572,31 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
       }
       next_rediscovery_ms_ = now_ms + config_.probe_timeout_ms;
     } else if (!outbound_.active && now_ms >= next_rediscovery_ms_) {
-      const Neighbor* target = next_stale != nullptr ? next_stale : first_stale;
-      if (begin_discovery(now_ms, target->node).ok()) {
-        last_repair_peer_ = target->node;
-        event("REDISCOVERY", target->node);
+      // A mesh-demanded peer wins over the round-robin cursor while its
+      // record is still stale (route-loss repair: the lost route's last
+      // next hop is the most likely fix).
+      const Neighbor* target = nullptr;
+      if (repair_demand_ != kInvalidNodeId) {
+        neighbors_.for_each([&](const Neighbor& n) {
+          if (n.phase == NeighborPhase::Stale && n.node == repair_demand_) {
+            target = &n;
+          }
+        });
+        if (target == nullptr) repair_demand_ = kInvalidNodeId;
+      }
+      if (target == nullptr) {
+        target = next_stale != nullptr ? next_stale : first_stale;
+      }
+      const NodeId target_node = target->node;  // begin_discovery may mutate
+      if (begin_discovery(now_ms, target_node).ok()) {
+        if (target_node == repair_demand_) {
+          if (Neighbor* attempted = find_neighbor(target_node)) {
+            attempted->repair_rediscovery_used = true;
+          }
+          repair_demand_ = kInvalidNodeId;
+        }
+        last_repair_peer_ = target_node;
+        event("REDISCOVERY", target_node);
       }
       const std::uint64_t step =
           static_cast<std::uint64_t>(rediscovery_backoff_ms_) * 2;
@@ -2770,6 +2803,35 @@ bool NeighborDiscovery::awaiting_probe_result(const NodeId peer) const noexcept 
   const Neighbor* neighbor = find_neighbor(peer);
   return neighbor != nullptr && resolvable_phase(neighbor->phase) &&
          neighbor->probe_outstanding != 0;
+}
+
+void NeighborDiscovery::request_repair(const NodeId peer,
+                                       const MonotonicMs now_ms) noexcept {
+  if (!started_) return;
+  Neighbor* neighbor = find_neighbor(peer);
+  if (neighbor == nullptr || neighbor->phase != NeighborPhase::Stale) return;
+  ++stats_.repair_demands;
+  // Early probe ahead of the stale cadence: a separate bounded budget
+  // (repair_probes) so mesh demand can never spin the steady scheduler.
+  // A transport refusal did not reach the air — it spends no budget; a hard
+  // failure does, so a permanently dead lane cannot be re-asked forever.
+  constexpr std::uint8_t kMaxRepairProbes = 3;
+  if (neighbor->probe_outstanding == 0 &&
+      neighbor->repair_probes < kMaxRepairProbes) {
+    const Status sent = send_probe(*neighbor, now_ms);
+    if (sent.ok() || !transport_refused(sent)) ++neighbor->repair_probes;
+  }
+  // Accelerate the targeted RLD1 repair of this record: the next exchange
+  // starts one probe window out (the early probe gets its Result chance
+  // first) and prefers the demanded peer over the round-robin cursor.
+  // Only one exchange per Stale episode can move ahead of the backoff ramp.
+  if (!neighbor->repair_rediscovery_used) {
+    repair_demand_ = peer;
+    if (!outbound_.active &&
+        next_rediscovery_ms_ > now_ms + config_.probe_timeout_ms) {
+      next_rediscovery_ms_ = now_ms + config_.probe_timeout_ms;
+    }
+  }
 }
 
 bool NeighborDiscovery::node_of(const MacAddress& mac, NodeId& out) const noexcept {

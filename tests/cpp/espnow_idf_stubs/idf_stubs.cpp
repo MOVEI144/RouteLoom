@@ -31,6 +31,12 @@ esp_now_recv_cb_t g_recv_cb = nullptr;
 std::uint8_t g_last_dest[6] = {0};
 bool g_send_outstanding = false;
 
+constexpr std::size_t kTxRingCapacity = 24;
+idf_stub::TxFrame g_tx_ring[kTxRingCapacity];
+std::size_t g_tx_head = 0;
+std::size_t g_tx_count = 0;
+unsigned g_tx_drops = 0;
+
 struct FakeQueue {
   std::size_t item_size{0};
   std::size_t capacity{0};
@@ -53,6 +59,9 @@ void reset() noexcept {
   g_send_cb = nullptr;
   g_recv_cb = nullptr;
   g_send_outstanding = false;
+  g_tx_head = 0;
+  g_tx_count = 0;
+  g_tx_drops = 0;
 }
 
 void set_now_us(const std::int64_t now_us) noexcept { g_now_us = now_us; }
@@ -93,6 +102,16 @@ bool complete_send(const bool success) noexcept {
   g_send_cb(&info, success ? ESP_NOW_SEND_SUCCESS : ESP_NOW_SEND_FAIL);
   return true;
 }
+
+bool pop_tx(TxFrame& out) noexcept {
+  if (g_tx_count == 0) return false;
+  out = g_tx_ring[g_tx_head];
+  g_tx_head = (g_tx_head + 1) % kTxRingCapacity;
+  --g_tx_count;
+  return true;
+}
+
+unsigned tx_drops() noexcept { return g_tx_drops; }
 
 }  // namespace idf_stub
 
@@ -225,10 +244,19 @@ esp_err_t esp_now_del_peer(const uint8_t* peer_addr) {
 
 esp_err_t esp_now_send(const uint8_t* peer_addr, const uint8_t* data,
                        const size_t len) {
-  (void)data;
-  (void)len;
   if (peer_addr != nullptr) {
     std::memcpy(g_last_dest, peer_addr, sizeof(g_last_dest));
+  }
+  if (peer_addr != nullptr && data != nullptr &&
+      len <= idf_stub::TxFrame::kMaxBytes && g_tx_count < kTxRingCapacity) {
+    idf_stub::TxFrame& slot =
+        g_tx_ring[(g_tx_head + g_tx_count) % kTxRingCapacity];
+    std::memcpy(slot.dest, peer_addr, sizeof(slot.dest));
+    slot.length = static_cast<std::uint16_t>(len);
+    std::memcpy(slot.bytes, data, len);
+    ++g_tx_count;
+  } else if (peer_addr != nullptr && data != nullptr) {
+    ++g_tx_drops;
   }
   g_send_outstanding = true;
   ++g_send_count;

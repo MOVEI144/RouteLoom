@@ -221,6 +221,11 @@ class EspNowRuntime final : public RadioPort,
   // observed during a survey/helper visit or mid-cutover drain are
   // old-channel/stale traffic and can never prove new-channel connectivity.
   void note_link_activity(NodeId peer, MonotonicMs now_ms) noexcept override;
+  // Route-loss repair demand: the mesh lost its last route through `peer` —
+  // forward the demand to the attached discovery engine's bounded early
+  // re-probe/rediscovery machinery (request_repair). No engine attached is
+  // a no-op.
+  void note_route_repair(NodeId peer, MonotonicMs now_ms) noexcept override;
 
   // --- Migration transport (04 §5-§9, P5b) ---------------------------------------
   // Attach the migration sink (the EspNowMigration bundle's agent). While
