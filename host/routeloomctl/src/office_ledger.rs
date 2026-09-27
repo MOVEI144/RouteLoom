@@ -99,11 +99,14 @@ pub struct OfficeLedger {
 
 impl OfficeLedger {
     pub fn open(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        #[cfg(unix)]
+        std::fs::create_dir_all(parent)?;
+        #[cfg(windows)]
+        routeloom_peercred::create_private_dir_all(parent)?;
         #[cfg(unix)]
         let mut opts = {
             use std::os::unix::fs::OpenOptionsExt;
@@ -820,8 +823,21 @@ mod tests {
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("rl-ctl-ledger-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        #[cfg(unix)]
         std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(windows)]
+        routeloom_peercred::create_private_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ledger_rejects_shared_parent_directory() {
+        let dir = std::env::temp_dir().join(format!("rl-ctl-ledger-shared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        assert!(OfficeLedger::open(&dir.join("office-ledger.jsonl")).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(windows)]

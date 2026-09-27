@@ -4597,7 +4597,9 @@ mod tests {
                 std::fs::write(&path, &rendered).unwrap();
                 continue;
             }
-            let checked_in = std::fs::read_to_string(&path).expect("golden vector checked in");
+            let checked_in = std::fs::read_to_string(&path)
+                .expect("golden vector checked in")
+                .replace("\r\n", "\n");
             assert_eq!(
                 rendered, checked_in,
                 "golden {} drifted — re-sign mismatch",

@@ -475,6 +475,10 @@ impl SqliteOperationStore {
                 ),
             })?;
         }
+        // On Windows the directory and database ACLs must be verified before
+        // SQLite reads an existing file or creates a journal beside it.
+        #[cfg(windows)]
+        enforce_owner_only(path)?;
         let mut conn = Connection::open(path).map_err(|e| OpenError {
             message: format!(
                 "STORE_RECOVERY_REQUIRED: cannot open operation store {}: {e}",
@@ -526,6 +530,7 @@ impl SqliteOperationStore {
         // of sidecars it creates from the main file, so this is the last
         // point where that inheritance is still controllable. Fresh files
         // were already born 0600 above; chmod failure refuses startup.
+        #[cfg(unix)]
         enforce_owner_only(path)?;
         // WAL where the filesystem allows it, rollback journal otherwise —
         // either is durable with FULL synchronous. Under EXCLUSIVE locking

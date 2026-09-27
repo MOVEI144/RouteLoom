@@ -1078,7 +1078,21 @@ mod win_acl {
             sacl: *mut *mut c_void,
             descriptor: *mut *mut c_void,
         ) -> u32;
-        fn SetFileSecurityW(name: *const u16, info: u32, descriptor: *mut c_void) -> i32;
+        fn GetSecurityDescriptorDacl(
+            descriptor: *mut c_void,
+            present: *mut i32,
+            dacl: *mut *mut c_void,
+            defaulted: *mut i32,
+        ) -> i32;
+        fn SetNamedSecurityInfoW(
+            name: *mut u16,
+            object_type: u32,
+            info: u32,
+            owner: *mut c_void,
+            group: *mut c_void,
+            dacl: *mut c_void,
+            sacl: *mut c_void,
+        ) -> u32;
         fn GetSecurityDescriptorControl(
             descriptor: *mut c_void,
             control: *mut u16,
@@ -1185,16 +1199,37 @@ mod win_acl {
 
     pub fn protect_owner_only(path: &Path) -> io::Result<()> {
         owner_descriptor(false, |attrs| unsafe {
-            if SetFileSecurityW(
-                wide(path.as_os_str()).as_ptr(),
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            let mut present = 0;
+            let mut dacl = std::ptr::null_mut();
+            let mut defaulted = 0;
+            if GetSecurityDescriptorDacl(
                 (*attrs).descriptor,
+                &mut present,
+                &mut dacl,
+                &mut defaulted,
             ) == 0
+                || present == 0
+                || dacl.is_null()
             {
-                Err(io::Error::last_os_error())
-            } else {
-                verify_owner_only(path)
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "owner DACL missing",
+                ));
             }
+            let mut name = wide(path.as_os_str());
+            let status = SetNamedSecurityInfoW(
+                name.as_mut_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null_mut(),
+            );
+            if status != 0 {
+                return Err(io::Error::from_raw_os_error(status as i32));
+            }
+            verify_owner_only(path)
         })
     }
 
@@ -1679,31 +1714,48 @@ pub mod win_ipc {
                 if self.read_closed.load(Ordering::Acquire) {
                     return Ok(0);
                 }
-                match (&self.file).read(buf) {
+                let mut available = 0;
+                if unsafe {
+                    PeekNamedPipe(
+                        self.file.as_raw_handle(),
+                        std::ptr::null_mut(),
+                        0,
+                        std::ptr::null_mut(),
+                        &mut available,
+                        std::ptr::null_mut(),
+                    )
+                } == 0
+                {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() == Some(ERROR_NO_DATA) {
+                        Self::wait_for_space(started, timeout)?;
+                        continue;
+                    }
+                    if !self.accepted.load(Ordering::Acquire)
+                        && started.elapsed() < Duration::from_secs(5)
+                        && matches!(
+                            error.raw_os_error(),
+                            Some(ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED)
+                        )
+                    {
+                        Self::wait_for_space(started, timeout)?;
+                        continue;
+                    }
+                    if matches!(
+                        error.raw_os_error(),
+                        Some(ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED)
+                    ) {
+                        return Ok(0);
+                    }
+                    return Err(error);
+                }
+                if available == 0 {
+                    Self::wait_for_space(started, timeout)?;
+                    continue;
+                }
+                let read_len = buf.len().min(available as usize);
+                match (&self.file).read(&mut buf[..read_len]) {
                     Err(e) if e.raw_os_error() == Some(ERROR_NO_DATA) => {
-                        if self.accepted.load(Ordering::Acquire) {
-                            let mut available = 0;
-                            let peek = unsafe {
-                                PeekNamedPipe(
-                                    self.file.as_raw_handle(),
-                                    std::ptr::null_mut(),
-                                    0,
-                                    std::ptr::null_mut(),
-                                    &mut available,
-                                    std::ptr::null_mut(),
-                                )
-                            };
-                            if peek == 0 {
-                                let error = io::Error::last_os_error();
-                                if matches!(
-                                    error.raw_os_error(),
-                                    Some(ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED)
-                                ) {
-                                    return Ok(0);
-                                }
-                                return Err(error);
-                            }
-                        }
                         Self::wait_for_space(started, timeout)?;
                     }
                     Err(e)
@@ -1991,6 +2043,37 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn named_pipe_short_request_round_trips_with_server_timeout() {
+        use std::io::{Read, Write};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (mut client, mut server) = IpcStream::pair().unwrap();
+        server
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut request = [0; 8192];
+            let n = server.read(&mut request).unwrap();
+            assert_eq!(&request[..n], b"ping");
+            server.write_all(b"pong").unwrap();
+        });
+        client.write_all(b"ping").unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut response = [0; 8192];
+            let result = client.read(&mut response).map(|n| response[..n].to_vec());
+            tx.send(result).unwrap();
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap(),
+            b"pong"
+        );
+        worker.join().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn named_pipe_read_and_write_timeouts_are_enforced() {
         use std::io::{Read, Write};
         use std::time::Duration;
@@ -2046,6 +2129,18 @@ mod tests {
         drop(server);
         let mut byte = [0];
         assert_eq!(client.read(&mut byte).unwrap(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sqlite_sidecar_is_protected_before_use() {
+        let dir = tempfile_dir();
+        let sidecar = dir.join("site.db-wal");
+        std::fs::write(&sidecar, []).unwrap();
+        protect_private_sidecar(&sidecar).unwrap();
+        verify_private_file_perms(&sidecar).unwrap();
+        let _ = std::fs::remove_file(sidecar);
+        let _ = std::fs::remove_dir(dir);
     }
 
     #[cfg(windows)]
