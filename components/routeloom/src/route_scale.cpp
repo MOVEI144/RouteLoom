@@ -53,6 +53,12 @@ constexpr MonotonicMs kScopedReleaseDelayMs = 3000;
 // Unknown-GK broadcast hints surface at most this often: the key pull they
 // trigger is the Owner's bounded work, not per-frame work.
 constexpr MonotonicMs kBroadcastGkHintGapMs = 60000;
+// Stale-next-hop repair demand (route-loss recovery): when a lost route's
+// last next hop is still on hold-down, the mesh asks the discovery owner to
+// re-probe it early. One emission per probe window across destinations
+// keeps a NO_ROUTE burst from becoming its own probe storm — the engine
+// side bounds per-peer probes and RLD1 exchanges separately.
+constexpr MonotonicMs kRouteRepairDemandCooldownMs = 2000;
 
 void saturating_inc(std::uint64_t& counter) noexcept {
   if (counter != UINT64_MAX) ++counter;
@@ -1015,6 +1021,17 @@ void MeshNode::flush_pull_answers(const MonotonicMs now_ms) noexcept {
 
 void MeshNode::request_route_discovery(const NodeId destination,
                                        const MonotonicMs now_ms) noexcept {
+  // Route-loss repair demand, independent of the pull machinery below: when
+  // the lost route's last next hop is still remembered under hold-down, the
+  // discovery owner is told which peer to re-probe ahead of the stale
+  // cadence. The node-wide cooldown bounds demand rate; the engine bounds
+  // the per-peer work it actually emits.
+  const NodeId hint = routes_.repair_hint(destination);
+  if (hint != kInvalidNodeId && hint != config_.node &&
+      autonomy_sink_ != nullptr && now_ms >= route_repair_next_ms_) {
+    route_repair_next_ms_ = now_ms + kRouteRepairDemandCooldownMs;
+    autonomy_sink_->note_route_repair(hint, now_ms);
+  }
   if (reserved_node(destination) || destination == config_.node ||
       is_route_gateway(destination) || routes_.best(destination).valid) {
     return;

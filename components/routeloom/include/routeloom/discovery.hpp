@@ -446,6 +446,8 @@ struct DiscoveryStats {
   // Sends the radio port refused — transport failure is never silent
   // (offers_tx/probes_tx count accepted sends only).
   std::uint32_t send_failures{0};
+  // Route-loss repair demands received from the mesh (request_repair).
+  std::uint32_t repair_demands{0};
 };
 
 // The portable per-peer lifecycle + RLD1 exchange engine. One instance per
@@ -502,6 +504,14 @@ class NeighborDiscovery {
   bool topology_pinned(NodeId peer) const noexcept;
   // A submitted Probe needs its driver peer until its Result or timeout.
   bool awaiting_probe_result(NodeId peer) const noexcept;
+  // Route-loss repair demand (the mesh lost its last route through `peer`):
+  // while the record is Stale, emit a bounded early Probe (repair_probes
+  // budget, separate from the steady stale cadence) and accelerate the next
+  // targeted RLD1 rediscovery once per Stale episode so it starts within
+  // one probe window with `peer` preferred. Later exchanges retain the
+  // ordinary backoff. No-op for a live/absent record. The same probe path
+  // serves member-handshake mode; its RLD1 starts are handed to the Owner.
+  void request_repair(NodeId peer, MonotonicMs now_ms) noexcept;
   // Owner-side lease sync: resolve the verified NodeId recorded for a radio
   // MAC (bound neighbor records only — candidates are unverified and never
   // resolve). False when the MAC has no neighbor record.
@@ -654,6 +664,15 @@ class NeighborDiscovery {
     // only counts emitted probes; verified RX evidence re-arms it.
     MonotonicMs next_reprobe_ms{0};
     std::uint8_t stale_reprobes{0};
+    // Demand-driven early probes (route-loss repair): while the record is
+    // Stale, request_repair() may emit at most this many probes ahead of the
+    // stale cadence — a separate budget from stale_reprobes so the steady
+    // cadence is never accelerated by mesh-side demand. Verified RX re-arms
+    // both budgets.
+    std::uint8_t repair_probes{0};
+    // One RLD1 exchange per Stale episode may be pulled forward by route
+    // demand; later attempts follow the ordinary backoff ramp.
+    bool repair_rediscovery_used{false};
     // P6 (04 §5): last admitted re-auth attempt for this record; a Revoked
     // peer may start a new-credential handshake at most once per minute.
     // UINT64_MAX = never attempted.
@@ -928,6 +947,10 @@ class NeighborDiscovery {
   MonotonicMs next_rediscovery_ms_{0};
   std::uint32_t rediscovery_backoff_ms_{0};
   NodeId last_repair_peer_{kInvalidNodeId};
+  // Mesh-demanded repair target (request_repair): the next targeted
+  // rediscovery prefers this peer while its record stays Stale; cleared
+  // when a rediscovery begins for it.
+  NodeId repair_demand_{kInvalidNodeId};
   std::size_t transient_used_{0};
   std::size_t regular_used_{0};
   std::size_t pins_used_{0};

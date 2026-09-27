@@ -381,6 +381,59 @@ Status retry_local(const LinkOpenedFrame& sealed, const NodeId next_hop,
                    security, output);
 }
 
+Status seal_end(const PlainFrame& input,
+                SecurityProvider& security,
+                LinkOpenedFrame& output,
+                std::uint64_t& end_counter,
+                std::uint32_t& end_epoch,
+                const bool replay) noexcept {
+  if (!security.ready()) {
+    return Status::error(StatusCode::InvalidState, "security provider is not ready");
+  }
+  if (input.payload_size > kMaxApplicationPayload) {
+    return Status::error(StatusCode::InvalidArgument, "application payload too large");
+  }
+  Header header = input.header;
+  header.payload_length = static_cast<std::uint16_t>(input.payload_size);
+  if ((header.flags & kFlagEndProtected) == 0) {
+    return Status::error(StatusCode::InvalidArgument, "frame is not End protected");
+  }
+  // Replay seals the recorded pair verbatim — including a legitimately
+  // minted counter zero — so the reissue is byte-identical at transit
+  // dedup. validate_header still bounds the pin to the 48-bit space.
+  if (replay) {
+    header.end_epoch = end_epoch;
+    header.end_counter = end_counter;
+  }
+  auto status = validate_header(header);
+  if (!status) return status;
+  if (!replay) {
+    status = stamp_end_epoch(header, security);
+    if (!status) return status;
+    status = security.next_counter(end_context(header), header.end_counter);
+    if (!status) return status;
+  }
+  std::array<std::uint8_t, kEndAadMax> aad{};
+  std::size_t aad_size = 0;
+  status = make_end_aad(header, aad, aad_size);
+  if (!status) return status;
+  output = LinkOpenedFrame{};
+  std::array<std::uint8_t, kAeadTagSize> end_tag{};
+  status = security.seal(end_context(header), header.end_counter,
+                         ByteView{aad.data(), aad_size},
+                         ByteView{input.payload.data(), input.payload_size},
+                         MutableByteView{output.protected_payload.data(), input.payload_size},
+                         end_tag);
+  if (!status) return status;
+  std::memcpy(output.protected_payload.data() + input.payload_size, end_tag.data(),
+              end_tag.size());
+  output.protected_payload_size = input.payload_size + kAeadTagSize;
+  output.header = header;
+  end_counter = header.end_counter;
+  end_epoch = header.end_epoch;
+  return Status::success();
+}
+
 Status open_link(const ByteView encoded,
                  const NodeId local_node,
                  SecurityProvider& security,

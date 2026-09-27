@@ -1531,7 +1531,8 @@ Status MeshNode::decode_receipt_payload(const ByteView payload, MessageKey& key,
 
 Status MeshNode::queue_end_receipt(const wire::Header& data,
                                    const TxnHandle txn,
-                                   const MonotonicMs now_ms) noexcept {
+                                   const MonotonicMs now_ms,
+                                   DedupEntry* carrier) noexcept {
   const auto route = routes_.best(data.origin);
   TxJob job{};
   job.form = JobForm::Plain;
@@ -1569,6 +1570,54 @@ Status MeshNode::queue_end_receipt(const wire::Header& data,
                    data.delivery_round};
   auto status = encode_receipt_payload(data, job.plain.payload, job.plain.payload_size);
   if (!status) return status;
+  // Seal the End envelope eagerly so re-emissions can replay it: a
+  // same-round duplicate DATA re-queues a receipt that must be
+  // byte-identical, or a transit relay's dedup fingerprint would read the
+  // reissue as a conflict and the origin would never see it. The pin lives
+  // on the carrier dedup record's evidence block — a terminal record never
+  // carries a transit fingerprint, so the block is free — keyed to the
+  // round it was minted for; a different round is a different receipt and
+  // seals fresh. The has_fingerprint gate keeps an overlaid transit
+  // fingerprint from ever being read as a pin.
+  std::uint64_t end_counter = 0;
+  std::uint32_t end_epoch = 0;
+  bool pinned = false;
+  if (carrier != nullptr && !carrier->has_fingerprint &&
+      carrier->evidence.receipt.sealed &&
+      carrier->evidence.receipt.round == data.delivery_round) {
+    end_counter = carrier->evidence.receipt.end_counter;
+    end_epoch = carrier->evidence.receipt.end_epoch;
+    job.plain.header.original_lifetime_ms =
+        carrier->evidence.receipt.original_lifetime_ms;
+    job.plain.header.remaining_deadline_ms =
+        std::min(job.plain.header.remaining_deadline_ms,
+                 job.plain.header.original_lifetime_ms);
+    pinned = true;
+  }
+  wire::LinkOpenedFrame sealed{};
+  if (wire::seal_end(job.plain, security_, sealed, end_counter, end_epoch,
+                     pinned).ok()) {
+    // Sealed rides dispatch's retry_local path: per-hop retries re-wrap the
+    // same end ciphertext, exactly like an origin DATA job's first seal.
+    job.set_forwarded(sealed);
+    job.form = JobForm::Sealed;
+    if (carrier != nullptr && !pinned) {
+      // Begin the pin member's lifetime over the evidence block — the
+      // transit fingerprint never lives on a terminal record (and a
+      // pathological same-key carrier loses it deliberately here).
+      carrier->has_fingerprint = false;
+      auto* pin = ::new (static_cast<void*>(&carrier->evidence.receipt))
+          DedupEntry::DedupEvidence::ReceiptPin{};
+      pin->end_counter = end_counter;
+      pin->end_epoch = end_epoch;
+      pin->original_lifetime_ms = job.plain.header.original_lifetime_ms;
+      pin->round = data.delivery_round;
+      pin->sealed = true;
+    }
+  }
+  // A failed eager seal (no end context yet, pinned epoch retired) leaves
+  // the job Plain: dispatch's encode_job mints a fresh envelope there,
+  // which is the pre-pin behaviour and stays deadline-bounded.
   // The receipt's own deadline is the terminal frame budget; the
   // transaction deadline bounds local work on top via work_deadline.
   job.txn = txn;
@@ -3436,7 +3485,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
         return;
       }
       reply.committed = true;  // the ACK joined; the receipt stays best-effort
-      if (queue_end_receipt(frame.header, reply.txn, now_ms) &&
+      if (queue_end_receipt(frame.header, reply.txn, now_ms, terminal) &&
           frame.header.delivery == DeliveryClass::Applied) {
         // APPLIED (01 §1.5): a new-round retransmission replays the stored
         // verdict — the endpoint is never invoked twice for one MessageKey.
@@ -3467,7 +3516,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       if (!conflicted && duplicate->has_fingerprint) {
         std::array<std::uint8_t, 32> incoming{};
         conflicted = wire::transit_fingerprint(frame, incoming).ok() &&
-                     incoming != duplicate->fingerprint;
+                     incoming != duplicate->evidence.fingerprint;
         if (conflicted) conflict = TransitFailureReason::MessageConflict;
       }
       if (conflicted) {
@@ -3510,7 +3559,8 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       return;
     }
     reply.committed = true;  // the ACK joined; the receipt stays best-effort
-    if (want_receipt && queue_end_receipt(frame.header, reply.txn, now_ms) &&
+    if (want_receipt &&
+        queue_end_receipt(frame.header, reply.txn, now_ms, duplicate) &&
         frame.header.delivery == DeliveryClass::Applied) {
       if (auto* record = find_applied(key)) {
         emit_applied_result(*record, now_ms);
@@ -3630,7 +3680,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       return;
     }
     res.dedup = entry;
-    if (!queue_end_receipt(frame.header, res.txn, now_ms)) {
+    if (!queue_end_receipt(frame.header, res.txn, now_ms, entry)) {
       res.rollback();
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
@@ -3780,7 +3830,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
   entry->downstream_peer = route.next_hop;
   entry->ref_destination = frame.header.destination;
   entry->has_fingerprint =
-      wire::transit_fingerprint(frame, entry->fingerprint).ok();
+      wire::transit_fingerprint(frame, entry->evidence.fingerprint).ok();
   if (!queue_hop_accept(frame.header, res.txn, now_ms)) {
     // The accepted forward stays committed — accepted work is never silently
     // dropped. The sender's retry hits the dedup and re-ACKs instead of
@@ -3824,7 +3874,7 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
       if (!conflicted && duplicate->has_fingerprint) {
         std::array<std::uint8_t, 32> incoming{};
         conflicted = wire::transit_fingerprint(frame, incoming).ok() &&
-                     incoming != duplicate->fingerprint;
+                     incoming != duplicate->evidence.fingerprint;
         if (conflicted) conflict = TransitFailureReason::MessageConflict;
       }
       if (conflicted) {
@@ -4044,7 +4094,7 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
   entry->downstream_peer = route.next_hop;
   entry->ref_destination = frame.header.destination;
   entry->has_fingerprint =
-      wire::transit_fingerprint(frame, entry->fingerprint).ok();
+      wire::transit_fingerprint(frame, entry->evidence.fingerprint).ok();
   if (!queue_hop_accept(frame.header, res.txn, now_ms)) {
     // The forward stays committed; the sender's retry dedups and re-ACKs.
     res.committed = true;
@@ -4082,7 +4132,7 @@ void MeshNode::handle_bootstrap(const wire::LinkOpenedFrame& frame, const NodeId
       if (!conflicted && duplicate->has_fingerprint) {
         std::array<std::uint8_t, 32> incoming{};
         conflicted = wire::transit_fingerprint(frame, incoming).ok() &&
-                     incoming != duplicate->fingerprint;
+                     incoming != duplicate->evidence.fingerprint;
         if (conflicted) conflict = TransitFailureReason::MessageConflict;
       }
       if (conflicted) {
@@ -4284,7 +4334,7 @@ void MeshNode::handle_bootstrap(const wire::LinkOpenedFrame& frame, const NodeId
   entry->downstream_peer = route.next_hop;
   entry->ref_destination = frame.header.destination;
   entry->has_fingerprint =
-      wire::transit_fingerprint(frame, entry->fingerprint).ok();
+      wire::transit_fingerprint(frame, entry->evidence.fingerprint).ok();
   if (!queue_hop_accept(frame.header, res.txn, now_ms)) {
     // The forward stays committed; the sender's retry dedups and re-ACKs.
     res.committed = true;
@@ -4460,7 +4510,7 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
       if (!conflicted && duplicate->has_fingerprint) {
         std::array<std::uint8_t, 32> incoming{};
         conflicted = wire::transit_fingerprint(frame, incoming).ok() &&
-                     incoming != duplicate->fingerprint;
+                     incoming != duplicate->evidence.fingerprint;
         if (conflicted) conflict = TransitFailureReason::MessageConflict;
       }
       if (conflicted) {
@@ -4581,7 +4631,7 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
     entry->downstream_peer = route.next_hop;
     entry->ref_destination = frame.header.destination;
     entry->has_fingerprint =
-        wire::transit_fingerprint(frame, entry->fingerprint).ok();
+        wire::transit_fingerprint(frame, entry->evidence.fingerprint).ok();
     // Accepted work stays committed when the ACK cannot be queued — the
     // sender's retry hits the dedup and re-ACKs.
     if (!queue_hop_accept(frame.header, res.txn, now_ms)) {
@@ -7476,7 +7526,7 @@ void MeshNode::replay_retained_failure(DedupEntry& duplicate,
   // under our own identity would fabricate provenance.
   reemit.claimed_reporter = duplicate.reported_reporter;
   reemit.report_id = duplicate.reported_id;
-  reemit.fingerprint = duplicate.fingerprint;
+  reemit.fingerprint = duplicate.evidence.fingerprint;
   AdmissionReservation reply{};
   if (!reserve_rx_reply(rx, false, 1, now_ms, reply)) {
     ++telemetry_event_drops_;
@@ -7517,7 +7567,7 @@ void MeshNode::report_transit_failure(const TxJob& job, const char* reason,
     return;
   }
   report.report_id = next_failure_report_id_++;
-  report.fingerprint = entry->fingerprint;
+  report.fingerprint = entry->evidence.fingerprint;
   // Retain the evidence for verbatim re-emission if the sender retries onto
   // the same dedup record — a re-ACK would falsely claim the job is alive.
   entry->failure_reported = true;
@@ -7595,7 +7645,7 @@ void MeshNode::handle_transit_failure_report(const NodeId peer,
     }
   }
   if (entry->has_fingerprint &&
-      entry->fingerprint != report.fingerprint) {
+      entry->evidence.fingerprint != report.fingerprint) {
     // The peer reported bytes we never forwarded — unverified claim,
     // propagate nothing and count the anomaly.
     ++telemetry_event_drops_;
@@ -7634,7 +7684,7 @@ void MeshNode::handle_transit_failure_report(const NodeId peer,
   // current mapping; the retained evidence above keeps the failure
   // provable when the reservation is unaffordable.
   TransitFailure onward = report;
-  onward.fingerprint = entry->fingerprint;
+  onward.fingerprint = entry->evidence.fingerprint;
   AdmissionReservation relay{};
   if (!reserve_short_reply(entry->upstream_peer, /*needs_control_slot=*/false,
                            1, now_ms, relay)) {

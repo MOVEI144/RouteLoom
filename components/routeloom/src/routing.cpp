@@ -603,6 +603,11 @@ NodeId RouteTable::request_next_hop(const NodeId destination, const std::size_t 
   return count != 0 ? hops[attempt % count] : kInvalidNodeId;
 }
 
+NodeId RouteTable::repair_hint(const NodeId destination) const noexcept {
+  const auto* entry = find(destination);
+  return entry != nullptr ? entry->hold_next_hop : kInvalidNodeId;
+}
+
 std::size_t RouteTable::size() const noexcept { return entries_.size(); }
 
 }  // namespace routeloom

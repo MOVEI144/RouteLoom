@@ -244,6 +244,13 @@ class RouteTable {
                           NodeId exclude_a = kInvalidNodeId,
                           NodeId exclude_b = kInvalidNodeId) const noexcept;
 
+  // The next hop this entry last lost to link evidence (an
+  // invalidate_next_hop hold-down): the peer whose repair most likely
+  // restores the route. kInvalidNodeId when no hold was applied, the entry
+  // was withdrawn/retargeted, or the destination is unknown. Pure read —
+  // hold bookkeeping is untouched.
+  NodeId repair_hint(NodeId destination) const noexcept;
+
   template <typename Fn>
   void for_each_sequence_request(Fn fn) const noexcept {
     entries_.for_each([&](const Entry& entry) {
