@@ -507,10 +507,10 @@ class NeighborDiscovery {
   // Route-loss repair demand (the mesh lost its last route through `peer`):
   // while the record is Stale, emit a bounded early Probe (repair_probes
   // budget, separate from the steady stale cadence) and accelerate the next
-  // targeted RLD1 rediscovery so it starts within one probe window with
-  // `peer` preferred — the ordinary backoff value is kept, only the next
-  // fire time moves. No-op for a live/absent record or in member-handshake
-  // mode (the Owner's elevation path owns its own probes).
+  // targeted RLD1 rediscovery once per Stale episode so it starts within
+  // one probe window with `peer` preferred. Later exchanges retain the
+  // ordinary backoff. No-op for a live/absent record. The same probe path
+  // serves member-handshake mode; its RLD1 starts are handed to the Owner.
   void request_repair(NodeId peer, MonotonicMs now_ms) noexcept;
   // Owner-side lease sync: resolve the verified NodeId recorded for a radio
   // MAC (bound neighbor records only — candidates are unverified and never
@@ -670,6 +670,9 @@ class NeighborDiscovery {
     // cadence is never accelerated by mesh-side demand. Verified RX re-arms
     // both budgets.
     std::uint8_t repair_probes{0};
+    // One RLD1 exchange per Stale episode may be pulled forward by route
+    // demand; later attempts follow the ordinary backoff ramp.
+    bool repair_rediscovery_used{false};
     // P6 (04 §5): last admitted re-auth attempt for this record; a Revoked
     // peer may start a new-credential handshake at most once per minute.
     // UINT64_MAX = never attempted.

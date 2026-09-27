@@ -810,6 +810,8 @@ void test_stale_peer_probe_recovery_over_runtime() {
   }
   CHECK(bound);
   CHECK(EspNowRuntimeTestAccess::peer_registered(runtime, kPeer));
+  // Firmware leaves this mode armed while the Owner handles handshakes.
+  engine_a.set_member_handshake_mode(true);
 
   // Partition both directions until the lease lapses Stale on both engines
   // and the runtime releases the physical driver peer (binding kept).

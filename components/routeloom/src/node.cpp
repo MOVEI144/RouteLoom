@@ -1576,6 +1576,11 @@ Status MeshNode::queue_end_receipt(const wire::Header& data,
       carrier->evidence.receipt.round == data.delivery_round) {
     end_counter = carrier->evidence.receipt.end_counter;
     end_epoch = carrier->evidence.receipt.end_epoch;
+    job.plain.header.original_lifetime_ms =
+        carrier->evidence.receipt.original_lifetime_ms;
+    job.plain.header.remaining_deadline_ms =
+        std::min(job.plain.header.remaining_deadline_ms,
+                 job.plain.header.original_lifetime_ms);
     pinned = true;
   }
   wire::LinkOpenedFrame sealed{};
@@ -1594,6 +1599,7 @@ Status MeshNode::queue_end_receipt(const wire::Header& data,
           DedupEntry::DedupEvidence::ReceiptPin{};
       pin->end_counter = end_counter;
       pin->end_epoch = end_epoch;
+      pin->original_lifetime_ms = job.plain.header.original_lifetime_ms;
       pin->round = data.delivery_round;
       pin->sealed = true;
     }

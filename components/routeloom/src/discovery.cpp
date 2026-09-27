@@ -1434,6 +1434,7 @@ void NeighborDiscovery::handle_probe_result(Neighbor& neighbor,
   if (before == NeighborPhase::Bound || before == NeighborPhase::Stale ||
       before == NeighborPhase::Reachable) {
     neighbor.phase = NeighborPhase::Reachable;
+    neighbor.repair_rediscovery_used = false;
     neighbor.last_confirmed_ms = now_ms;
     const std::uint32_t granted = result.lease_granted_ms == 0
                                       ? config_.awake_lease_ms
@@ -1576,6 +1577,7 @@ void NeighborDiscovery::elevate_confirmed_peer(const MacAddress& peer_mac,
     clear_pending_result(same->binding);
     same->stale_reprobes = 0;
     same->repair_probes = 0;
+    same->repair_rediscovery_used = false;
     if (membership_.state() == MembershipState::Member && peer_member) {
       same->peer_member_verified = true;
       same->phase = NeighborPhase::Bound;
@@ -1625,6 +1627,7 @@ void NeighborDiscovery::elevate_confirmed_peer(const MacAddress& peer_mac,
   neighbor->probe_outstanding = 0;
   neighbor->stale_reprobes = 0;
   neighbor->repair_probes = 0;
+  neighbor->repair_rediscovery_used = false;
   neighbor->next_reprobe_ms = 0;
 
   if (membership_.state() == MembershipState::Member && peer_member) {
@@ -2467,6 +2470,7 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
           n.phase = NeighborPhase::Stale;
           n.stale_reprobes = 0;
           n.repair_probes = 0;
+          n.repair_rediscovery_used = false;
           n.next_reprobe_ms = now_ms;
           ++stats_.stale_expirations;
           event("STALE", n.node);
@@ -2490,6 +2494,7 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
           n.phase = NeighborPhase::Stale;
           n.stale_reprobes = 0;
           n.repair_probes = 0;
+          n.repair_rediscovery_used = false;
           n.next_reprobe_ms = now_ms;
           ++stats_.stale_expirations;
           event("STALE", n.node);
@@ -2584,7 +2589,12 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
       }
       const NodeId target_node = target->node;  // begin_discovery may mutate
       if (begin_discovery(now_ms, target_node).ok()) {
-        if (target_node == repair_demand_) repair_demand_ = kInvalidNodeId;
+        if (target_node == repair_demand_) {
+          if (Neighbor* attempted = find_neighbor(target_node)) {
+            attempted->repair_rediscovery_used = true;
+          }
+          repair_demand_ = kInvalidNodeId;
+        }
         last_repair_peer_ = target_node;
         event("REDISCOVERY", target_node);
       }
@@ -2797,7 +2807,7 @@ bool NeighborDiscovery::awaiting_probe_result(const NodeId peer) const noexcept 
 
 void NeighborDiscovery::request_repair(const NodeId peer,
                                        const MonotonicMs now_ms) noexcept {
-  if (!started_ || member_handshake_mode_) return;
+  if (!started_) return;
   Neighbor* neighbor = find_neighbor(peer);
   if (neighbor == nullptr || neighbor->phase != NeighborPhase::Stale) return;
   ++stats_.repair_demands;
@@ -2813,13 +2823,14 @@ void NeighborDiscovery::request_repair(const NodeId peer,
   }
   // Accelerate the targeted RLD1 repair of this record: the next exchange
   // starts one probe window out (the early probe gets its Result chance
-  // first) and prefers the demanded peer over the round-robin cursor. The
-  // drawn backoff itself is kept — demand moves the next fire time, never
-  // the ramp.
-  repair_demand_ = peer;
-  if (!outbound_.active &&
-      next_rediscovery_ms_ > now_ms + config_.probe_timeout_ms) {
-    next_rediscovery_ms_ = now_ms + config_.probe_timeout_ms;
+  // first) and prefers the demanded peer over the round-robin cursor.
+  // Only one exchange per Stale episode can move ahead of the backoff ramp.
+  if (!neighbor->repair_rediscovery_used) {
+    repair_demand_ = peer;
+    if (!outbound_.active &&
+        next_rediscovery_ms_ > now_ms + config_.probe_timeout_ms) {
+      next_rediscovery_ms_ = now_ms + config_.probe_timeout_ms;
+    }
   }
 }
 

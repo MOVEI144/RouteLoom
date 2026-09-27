@@ -190,7 +190,8 @@ struct Unit {
        const std::uint32_t stale_reprobe_ms = 0,
        const std::uint8_t stale_reprobe_attempts = 0,
        const std::uint32_t jitter_max_ms = 0,
-       const std::uint32_t backoff_max_ms = 0)
+       const std::uint32_t backoff_max_ms = 0,
+       const std::uint8_t max_attempts = 5)
       : mac(mac_of(mac_tail)),
         node(id),
         auth(security, 1),
@@ -198,7 +199,7 @@ struct Unit {
         port(medium, mac),
         engine(make_config(id, mac, network, hint, stale_reprobe_ms,
                            stale_reprobe_attempts, jitter_max_ms,
-                           backoff_max_ms),
+                           backoff_max_ms, max_attempts),
                port, auth, hooks, entropy, observer) {
     hooks.is_member = member;
     medium.units.push_back(this);
@@ -209,7 +210,8 @@ struct Unit {
       const std::uint32_t hint, const std::uint32_t stale_reprobe_ms = 0,
       const std::uint8_t stale_reprobe_attempts = 0,
       const std::uint32_t jitter_max_ms = 0,
-      const std::uint32_t backoff_max_ms = 0) {
+      const std::uint32_t backoff_max_ms = 0,
+      const std::uint8_t max_attempts = 5) {
     DiscoveryConfig config{};
     config.node = id;
     config.mac = mac;
@@ -222,6 +224,7 @@ struct Unit {
     // jitter is covered by its own test).
     config.cold_start_jitter_max_ms = jitter_max_ms;
     if (backoff_max_ms != 0) config.backoff_max_ms = backoff_max_ms;
+    config.max_attempts = max_attempts;
     if (stale_reprobe_ms != 0) config.stale_reprobe_ms = stale_reprobe_ms;
     if (stale_reprobe_attempts != 0) {
       config.stale_reprobe_attempts = stale_reprobe_attempts;
@@ -299,10 +302,11 @@ struct DiscWorld {
             const std::uint32_t stale_reprobe_ms = 0,
             const std::uint8_t stale_reprobe_attempts = 0,
             const std::uint32_t jitter_max_ms = 0,
-            const std::uint32_t backoff_max_ms = 0) {
+            const std::uint32_t backoff_max_ms = 0,
+            const std::uint8_t max_attempts = 5) {
     units.push_back(std::make_unique<Unit>(
         medium, id, mac_tail, network, hint, member, stale_reprobe_ms,
-        stale_reprobe_attempts, jitter_max_ms, backoff_max_ms));
+        stale_reprobe_attempts, jitter_max_ms, backoff_max_ms, max_attempts));
     return *units.back();
   }
   void start_all() {
@@ -1217,6 +1221,36 @@ void test_repair_demand_emits_bounded_early_probe() {
   CHECK(a.engine.stats().auths_completed == auths + 1);
 }
 
+void test_repair_demand_keeps_rediscovery_backoff() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, true, 0xC0FFEE, 7, 60000, 60,
+                      0, 0, /*max_attempts=*/1);
+  Unit& b = world.add(2, 0xB2, true, 0xC0FFEE, 7, 60000, 60);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+  a.engine.set_member_handshake_mode(true);
+  world.medium.block(a.mac, b.mac);
+  world.medium.block(b.mac, a.mac);
+  world.run(31000);
+
+  NeighborPhase phase{};
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Stale);
+  const auto rediscoveries = [&] {
+    return std::count_if(a.observer.events.begin(), a.observer.events.end(),
+                         [](const auto& event) { return event.first == "REDISCOVERY"; });
+  };
+  const auto before = rediscoveries();
+  // A sustained NO_ROUTE stream may demand repair each two seconds. It
+  // must not turn the escalating RLD1 backoff into a fixed two-second rate.
+  for (int i = 0; i < 60; ++i) {
+    a.engine.request_repair(2, world.medium.now);
+    world.run(2000);
+  }
+  CHECK(rediscoveries() - before <= 6);
+}
+
 // An authenticated peer may have a lower local binding counter after an
 // independent re-authentication. Its probe still needs a Result carrying our
 // current generation so it can advance rather than losing its route.
@@ -1947,6 +1981,7 @@ int main() {
   test_candidate_ttl();
   test_stale_reprobe_recovers();
   test_repair_demand_emits_bounded_early_probe();
+  test_repair_demand_keeps_rediscovery_backoff();
   test_older_peer_probe_gets_current_generation_result();
   test_stale_reprobe_bounded();
   test_stale_reprobe_never_targets_dead();

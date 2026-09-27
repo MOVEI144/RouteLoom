@@ -1562,7 +1562,7 @@ class MeshNode {
     // size — hence the relay C3 .bss total — stays unchanged. Transit
     // member: fingerprint of the forwarded end-protected bytes (01 §failure
     // evidence). Terminal member: the END_RECEIPT pin — the end
-    // (counter, epoch) this record's receipt sealed under for
+    // (counter, epoch, original lifetime) this record's receipt sealed under for
     // `receipt.round` — so a same-round duplicate reissue replays the pair
     // byte-identically instead of colliding as RECEIPT_DEDUP_CONFLICT at a
     // relay's transit dedup (route-loss repair, design E). `receipt.sealed`
@@ -1576,6 +1576,7 @@ class MeshNode {
       struct ReceiptPin {
         std::uint64_t end_counter;
         std::uint32_t end_epoch;
+        std::uint32_t original_lifetime_ms;
         std::uint8_t round;
         bool sealed;
       } receipt;

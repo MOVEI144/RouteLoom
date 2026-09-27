@@ -1056,9 +1056,15 @@ void test_same_round_receipt_replays_end_envelope() {
   w.run(4000);  // routes settle in both directions
 
   std::vector<wire::LinkOpenedFrame> receipts;
+  wire::LinkOpenedFrame sent_data{};
+  bool saw_data = false;
   TestSecurity cipher;
   w.net.capture = [&](NodeId from, NodeId to, ByteView frame) {
     FrameSight s{};
+    if (from == 2 && to == 3 && !saw_data &&
+        routeloom_test::sight_frame(frame, s) && s.type == FrameType::Data) {
+      saw_data = wire::open_link(frame, to, cipher, sent_data).ok();
+    }
     if (from == 3 && to == 2 &&
         routeloom_test::sight_frame(frame, s) &&
         s.type == FrameType::EndReceipt) {
@@ -1101,6 +1107,35 @@ void test_same_round_receipt_replays_end_envelope() {
   // The relay's transit dedup must never have read the reissue as a
   // conflict.
   CHECK(!w.obs(2)->has_diag("RECEIPT_DEDUP_CONFLICT"));
+
+  // A link-authenticated duplicate can change an untrusted DATA lifetime.
+  // The terminal must still seal the pinned receipt AAD verbatim: reusing
+  // the same End nonce with a different AAD would break AEAD nonce safety.
+  CHECK(saw_data);
+  if (saw_data && !receipts.empty()) {
+    sent_data.header.original_lifetime_ms += 1000;
+    wire::EncodedFrame altered{};
+    CHECK_OK(wire::retry_local(sent_data, 3,
+                               sent_data.header.remaining_deadline_ms,
+                               cipher, altered));
+    const std::size_t before = receipts.size();
+    CHECK_OK(w.at(3)->on_radio_receive(
+        2, ByteView{altered.bytes.data(), altered.size},
+        sim_rx_metadata(w.net.reply_port(3), 2), w.now));
+    w.run(100);
+    CHECK(receipts.size() > before);
+    if (receipts.size() > before) {
+      const auto& pinned = receipts.front();
+      const auto& replay = receipts.back();
+      CHECK(replay.header.original_lifetime_ms ==
+            pinned.header.original_lifetime_ms);
+      CHECK(replay.header.end_counter == pinned.header.end_counter);
+      CHECK(replay.protected_payload_size == pinned.protected_payload_size);
+      CHECK(std::equal(pinned.protected_payload.data(),
+                       pinned.protected_payload.data() + pinned.protected_payload_size,
+                       replay.protected_payload.data()));
+    }
+  }
 }
 
 // §2.3a class-(a): the 8-slot origin delivery table evicts only TERMINAL
