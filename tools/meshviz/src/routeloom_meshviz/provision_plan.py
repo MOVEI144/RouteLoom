@@ -237,10 +237,6 @@ class ProvisionRunner:
 def job_status_text(job):
     if job.steps.get('plan') == 'failed':
         return '計画不可'
-    if job.joined:
-        return '参加済み'
-    if job.ready:
-        return 'Ready（readback 一致）'
     for step in STEP_NAMES:
         state = job.steps.get(step)
         if state == 'unsupported':
@@ -248,6 +244,10 @@ def job_status_text(job):
         if state in ('failed', 'attention'):
             suffix = f'、再開: {STEP_LABELS[job.resume_from]}' if job.resume_from else ''
             return ('要対応' if state == 'attention' else '失敗') + f'（{STEP_LABELS[step]}{suffix}）'
+    if job.joined:
+        return '参加済み'
+    if job.ready:
+        return 'Ready（readback 一致）'
     step = job.next_step()
     return '未着手' if step == 'preflight' else f'途中（次: {STEP_LABELS.get(step, step)}）'
 

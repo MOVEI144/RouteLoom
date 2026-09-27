@@ -543,6 +543,19 @@ class LabBackendTests(unittest.TestCase):
         self.assertFalse(journal.done)
         self.assertFalse(journal.has('written'))
 
+    def test_inventory_failure_is_visible_after_readback(self):
+        job = self._job()
+        self.backend._boot_capture = lambda port: self._expected_boot(job)
+
+        def reject_import(site_dir, node_id, role):
+            raise prov.ProvisionError('inventory_failed', 'inventory import refused')
+
+        self.office.import_inventory = reject_import
+        ProvisionRunner(self.backend, [job]).run_job(job)
+        self.assertTrue(job.ready)
+        self.assertEqual(job.steps.get('inventory'), 'failed')
+        self.assertIn('失敗', prov.job_status_text(job))
+
     def test_config_required_fails_readback(self):
         job = self._job()
 
