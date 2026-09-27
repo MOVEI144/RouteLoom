@@ -46,6 +46,8 @@ API受付のoperation IDと無線Message IDは別に返す。idempotency keyはh
 
 既定はローカルIPC（Unix socket／対応するWindows IPC）で、OS権限を用いる。TCPを使う開発構成もloopback限定で認証する。LAN公開、リモート管理、ブラウザアクセスは既定OFF。明示TLS/認証/認可なしで0.0.0.0へbindしない。
 
+WindowsのNamed Pipeは所有者SIDに接続を限定し、remote接続を拒否する。接続元SIDをOSから取得できなければ受け入れない。認可と永続操作・site判定の主体は、Unix UIDとWindows SIDを区別する版付きの識別子で照合・保存する。
+
 権限はread diagnostics、send application data、approve membership、change config、update firmware等を分離する。CLIだから管理者という扱いにしない。秘密鍵exportは標準APIに設けない。
 
 ## 5. 接続と再起動

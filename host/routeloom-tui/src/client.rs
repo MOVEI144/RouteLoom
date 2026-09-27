@@ -5,8 +5,8 @@
 //! sleeping.
 
 use crate::model::{Conn, State};
+use routeloom_peercred::IpcStream;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -27,8 +27,8 @@ const BACKOFF_MAX_MS: u64 = 5_000;
 const IO_TIMEOUT: Duration = Duration::from_millis(500);
 
 struct Pipe {
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
+    reader: BufReader<IpcStream>,
+    writer: IpcStream,
 }
 
 pub struct DaemonClient {
@@ -138,7 +138,7 @@ impl DaemonClient {
     }
 
     fn connect(&self) -> std::io::Result<Pipe> {
-        let writer = UnixStream::connect(&self.socket)?;
+        let writer = IpcStream::connect(&self.socket)?;
         writer.set_read_timeout(Some(IO_TIMEOUT))?;
         writer.set_write_timeout(Some(IO_TIMEOUT))?;
         let reader = BufReader::new(writer.try_clone()?);

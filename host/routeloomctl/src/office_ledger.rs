@@ -23,7 +23,7 @@
 //! `provision-ledger-release`; `issued`/`written` entries are never
 //! released — they are the no-reissue history.
 
-use rustix::fs::{flock, FlockOperation};
+use routeloom_peercred::{try_lock_file_exclusive, unlock_file};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -99,18 +99,26 @@ pub struct OfficeLedger {
 
 impl OfficeLedger {
     pub fn open(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-        use std::os::unix::fs::OpenOptionsExt;
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-        {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        #[cfg(unix)]
+        std::fs::create_dir_all(parent)?;
+        #[cfg(windows)]
+        routeloom_peercred::create_private_dir_all(parent)?;
+        #[cfg(unix)]
+        let mut opts = {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut o = std::fs::OpenOptions::new();
+            o.mode(0o600);
+            o
+        };
+        #[cfg(unix)]
+        let created = opts.write(true).create_new(true).open(path);
+        #[cfg(windows)]
+        let created = routeloom_peercred::open_private_file_for_write(path);
+        match created {
             Ok(file) => {
                 file.sync_all()?;
                 sync_parent(path)?;
@@ -119,13 +127,18 @@ impl OfficeLedger {
             Err(e) => return Err(e.into()),
         }
         let canonical = std::fs::canonicalize(path)?;
-        use std::os::unix::fs::MetadataExt;
         let metadata = std::fs::metadata(&canonical)?;
         if !metadata.is_file() {
             return Err("office ledger path is not a regular file".into());
         }
-        if metadata.nlink() != 1 {
-            return Err("office ledger must not have hard-link aliases".into());
+        #[cfg(windows)]
+        routeloom_peercred::verify_private_file_perms(&canonical)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.nlink() != 1 {
+                return Err("office ledger must not have hard-link aliases".into());
+            }
         }
         Ok(OfficeLedger { path: canonical })
     }
@@ -173,7 +186,8 @@ impl OfficeLedger {
             let same_slot = entry.device_ca_id == device_ca_id
                 && entry.node_id == node_id
                 && entry.serial == serial;
-            if !same_slot && (entry.work_id == work_id || entry.out_dir == out_dir) {
+            if !same_slot && (entry.work_id == work_id || same_output_dir(&entry.out_dir, out_dir))
+            {
                 return Err(format!(
                     "work {work_id} or output {out_dir} already belongs to node {:016x} serial {}",
                     entry.node_id, entry.serial
@@ -222,7 +236,7 @@ impl OfficeLedger {
                         .into());
                     }
                 }
-                if entry.out_dir != out_dir {
+                if !same_output_dir(&entry.out_dir, out_dir) {
                     return Err(format!(
                         "work {work_id} reserved node {node_id:016x} serial {serial} for another directory ({})",
                         entry.out_dir
@@ -275,7 +289,7 @@ impl OfficeLedger {
         let entry = folded
             .get(&slot)
             .ok_or_else(|| format!("node {node_id:016x} serial {serial} has no reservation"))?;
-        if entry.work_id != work_id || entry.out_dir != out_dir {
+        if entry.work_id != work_id || !same_output_dir(&entry.out_dir, out_dir) {
             return Err(format!(
                     "node {node_id:016x} serial {serial} belongs to work {} at {}, not {work_id} at {out_dir}",
                     entry.work_id, entry.out_dir
@@ -308,7 +322,7 @@ impl OfficeLedger {
                 kid: Some(kid),
                 devcert_sha256: Some(devcert_sha256),
                 work_id: work_id.to_string(),
-                out_dir: out_dir.to_string(),
+                out_dir: entry.out_dir.clone(),
                 status: LedgerStatus::Issued,
                 ts: unix_secs(),
             },
@@ -439,7 +453,7 @@ impl OfficeLedger {
                 );
                 if !valid_step
                     || previous.work_id != entry.work_id
-                    || previous.out_dir != entry.out_dir
+                    || !same_output_dir(&previous.out_dir, &entry.out_dir)
                     || (previous.kid.is_some() && previous.kid != entry.kid)
                     || (previous.devcert_sha256.is_some()
                         && previous.devcert_sha256 != entry.devcert_sha256)
@@ -505,14 +519,20 @@ impl OfficeLedger {
                 kept.push('\n');
             }
         }
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)?;
+        #[cfg(unix)]
+        let mut opts = {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut o = std::fs::OpenOptions::new();
+            o.mode(0o600);
+            o
+        };
+        #[cfg(unix)]
+        let mut file = opts.write(true).create_new(true).open(&tmp)?;
+        #[cfg(windows)]
+        let mut file = routeloom_peercred::open_private_file_for_write(Path::new(&tmp))?;
         file.write_all(kept.as_bytes())?;
         file.sync_all()?;
+        std::mem::drop(file);
         std::fs::rename(&tmp, path)?;
         sync_parent(path)?;
         Ok(())
@@ -532,11 +552,16 @@ fn require_absent(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn sync_parent(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    std::fs::File::open(parent)?.sync_all()?;
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    #[cfg(windows)]
+    let _ = path;
     Ok(())
 }
 
@@ -677,6 +702,10 @@ fn format_entry(entry: &LedgerEntry) -> String {
 /// lexically-normalized path, so spellings of the same directory
 /// (`dev`, `./dev`) resume the same work.
 pub fn default_work_id(out_dir: &Path) -> String {
+    #[cfg(windows)]
+    let absolute = routeloom_peercred::windows_absolute_path(out_dir)
+        .unwrap_or_else(|_| out_dir.to_path_buf());
+    #[cfg(not(windows))]
     let absolute = if out_dir.is_absolute() {
         out_dir.to_path_buf()
     } else {
@@ -684,29 +713,72 @@ pub fn default_work_id(out_dir: &Path) -> String {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(out_dir)
     };
+    let mut prefix = String::new();
+    let mut rooted = false;
     let mut parts: Vec<String> = Vec::new();
     for part in absolute.components() {
         use std::path::Component;
         match part {
-            Component::RootDir => parts.push(String::new()),
+            Component::RootDir => rooted = true,
             Component::CurDir => {}
             Component::ParentDir => match parts.last().map(String::as_str) {
-                Some("") => {}
-                Some("..") | None => parts.push("..".to_string()),
+                Some("..") | None if !rooted => parts.push("..".to_string()),
+                Some("..") | None => {}
                 Some(_) => {
                     parts.pop();
                 }
             },
-            Component::Normal(text) => parts.push(text.to_string_lossy().into_owned()),
-            Component::Prefix(prefix) => {
-                parts.push(prefix.as_os_str().to_string_lossy().into_owned())
+            Component::Normal(text) => {
+                #[cfg(windows)]
+                parts.push(text.to_string_lossy().to_lowercase());
+                #[cfg(not(windows))]
+                parts.push(text.to_string_lossy().into_owned());
+            }
+            Component::Prefix(component) => {
+                #[cfg(windows)]
+                {
+                    use std::path::Prefix;
+                    prefix = match component.kind() {
+                        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => {
+                            format!("{}:", (drive as char).to_ascii_lowercase())
+                        }
+                        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+                            format!(
+                                "//{}/{}",
+                                server.to_string_lossy().to_lowercase(),
+                                share.to_string_lossy().to_lowercase()
+                            )
+                        }
+                        Prefix::DeviceNS(device) => {
+                            format!("//./{}", device.to_string_lossy().to_lowercase())
+                        }
+                        Prefix::Verbatim(device) => {
+                            format!("//?/{}", device.to_string_lossy().to_lowercase())
+                        }
+                    };
+                }
+                #[cfg(not(windows))]
+                {
+                    prefix = component.as_os_str().to_string_lossy().into_owned();
+                }
             }
         }
     }
-    if parts.first().map(String::as_str) == Some("") {
-        format!("/{}", parts[1..].join("/"))
-    } else {
-        parts.join("/")
+    if rooted {
+        prefix.push('/');
+    }
+    prefix.push_str(&parts.join("/"));
+    prefix
+}
+
+fn same_output_dir(a: &str, b: &str) -> bool {
+    #[cfg(windows)]
+    {
+        default_work_id(Path::new(a)) == default_work_id(Path::new(b))
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
     }
 }
 
@@ -746,19 +818,26 @@ impl Lockfile {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        use std::os::unix::fs::OpenOptionsExt;
-        let file = std::fs::OpenOptions::new()
+        #[cfg(unix)]
+        let mut opts = {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut o = std::fs::OpenOptions::new();
+            o.mode(0o600);
+            o
+        };
+        #[cfg(not(unix))]
+        let mut opts = std::fs::OpenOptions::new();
+        let file = opts
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .mode(0o600)
             .open(path)?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
-            match flock(&file, FlockOperation::NonBlockingLockExclusive) {
-                Ok(()) => return Ok(Lockfile { _file: file }),
-                Err(e) if e == rustix::io::Errno::WOULDBLOCK => {
+            match try_lock_file_exclusive(&file) {
+                Ok(true) => return Ok(Lockfile { _file: file }),
+                Ok(false) => {
                     if std::time::Instant::now() >= deadline {
                         return Err(format!(
                             "office ledger is locked by another process ({}); refusing to issue blind",
@@ -774,20 +853,123 @@ impl Lockfile {
     }
 }
 
+impl Drop for Lockfile {
+    fn drop(&mut self) {
+        let _ = unlock_file(&self._file);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn output_normalization_stays_under_root() {
+        #[cfg(unix)]
         assert_eq!(default_work_id(Path::new("/../tmp/issued")), "/tmp/issued");
+        #[cfg(windows)]
+        {
+            let rooted = default_work_id(Path::new(r"\..\tmp\issued"));
+            assert!(rooted.ends_with(":/tmp/issued"), "{rooted}");
+            assert!(!rooted.contains("//tmp"), "{rooted}");
+            assert_eq!(
+                default_work_id(Path::new(r"\\?\C:\LOT\sub\..\Device")),
+                "c:/lot/device"
+            );
+            assert_eq!(
+                default_work_id(Path::new(r"\\?\UNC\Server\Share\..\Device")),
+                "//server/share/device"
+            );
+            assert_eq!(
+                default_work_id(Path::new(r"\\SERVER\Share\Device")),
+                "//server/share/device"
+            );
+            assert_eq!(
+                default_work_id(Path::new(r"\\Server\Share\..\Device")),
+                "//server/share/device"
+            );
+            assert_eq!(
+                default_work_id(Path::new("//Server/Share/../Device")),
+                "//server/share/device"
+            );
+            let cwd = std::env::current_dir().unwrap();
+            if let Some(std::path::Component::Prefix(prefix)) = cwd.components().next() {
+                use std::path::Prefix;
+                if let Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) = prefix.kind() {
+                    assert_eq!(
+                        default_work_id(Path::new(&format!("{}:drive-relative", drive as char))),
+                        default_work_id(&cwd.join("drive-relative"))
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn equivalent_windows_output_paths_cannot_claim_two_slots() {
+        let dir = scratch("case-output");
+        let ledger = OfficeLedger::open(&dir.join("office-ledger.jsonl")).unwrap();
+        ledger
+            .reserve(slot(1, 2, 3), None, "work-a", r"\\?\C:\LOT\Device")
+            .unwrap();
+        assert!(ledger
+            .reserve(slot(1, 4, 5), None, "work-b", "c:/lot/device")
+            .is_err());
+        ledger
+            .reserve(
+                slot(1, 6, 7),
+                None,
+                "work-c",
+                r"\\?\UNC\Server\Share\..\Device",
+            )
+            .unwrap();
+        assert!(ledger
+            .reserve(slot(1, 8, 9), None, "work-d", "//server/share/device")
+            .is_err());
+        ledger
+            .reserve(slot(1, 10, 11), None, "work-e", "//server/other/device")
+            .unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("rl-ctl-ledger-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        #[cfg(unix)]
         std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(windows)]
+        routeloom_peercred::create_private_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ledger_rejects_shared_parent_directory() {
+        let dir = std::env::temp_dir().join(format!("rl-ctl-ledger-shared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        assert!(OfficeLedger::open(&dir.join("office-ledger.jsonl")).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ledger_remains_owner_only_after_rewrite() {
+        let dir = scratch("private-rewrite");
+        let path = dir.join("office-ledger.jsonl");
+        let ledger = OfficeLedger::open(&path).unwrap();
+        routeloom_peercred::verify_private_file_perms(&path).unwrap();
+        let entry = slot(0x0DCA_0000_0000_0001, 0x00A1_0000_0000_1234, 90211);
+        let output = dir.join("issued").display().to_string();
+        ledger
+            .reserve(entry, None, "private-work", &output)
+            .unwrap();
+        ledger
+            .release(entry.node_id, entry.serial, "private-work")
+            .unwrap();
+        routeloom_peercred::verify_private_file_perms(&path).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn slot(device_ca_id: u64, node_id: u64, serial: u32) -> IssueSlot {
@@ -919,7 +1101,7 @@ mod tests {
             .write(true)
             .open(&path)
             .unwrap();
-        rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive).unwrap();
+        assert!(try_lock_file_exclusive(&held).unwrap());
         let (tx, rx) = std::sync::mpsc::channel();
         let contender = std::thread::spawn(move || {
             let guard = Lockfile::acquire(&path).unwrap();
@@ -929,7 +1111,7 @@ mod tests {
         assert!(rx
             .recv_timeout(std::time::Duration::from_millis(200))
             .is_err());
-        rustix::fs::flock(&held, rustix::fs::FlockOperation::Unlock).unwrap();
+        unlock_file(&held).unwrap();
         rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
         contender.join().unwrap();
         std::fs::remove_dir_all(&dir).ok();
@@ -978,6 +1160,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn ledger_aliases_share_one_lock() {
         let dir = scratch("alias-lock");

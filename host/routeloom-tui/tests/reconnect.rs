@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Daemon restart/reconnect test: a fake daemon serves the socket protocol
 //! over a temp Unix socket; the TUI client must survive the daemon going
 //! away, back off, and reconnect when it returns — no panic, no hang.
