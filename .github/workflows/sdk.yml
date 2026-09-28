@@ -160,6 +160,32 @@ jobs:
         run: cargo --version
       - name: Live Owner E2E and multi-node Owner mesh E2E (a skip fails)
         run: python3 tools/check.py interop
+  profiles:
+    # Portable suites per resource profile (tools/check.py PROFILE_BUILDS).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [build-endpoint, build-relay32, build-relay96, build-gateway-small]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: python3 tools/check.py profiles --build ${{ matrix.build }}
+  profile-mesh:
+    # Owner mesh E2E with a gateway_small gateway, an endpoint and a relay
+    # member (join, unicast, multi-hop, GK, cutover, role refusal; a skip fails).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (host/rust-toolchain.toml)
+        working-directory: host
+        run: cargo --version
+      - run: python3 tools/check.py profile-mesh
   fuzz:
     runs-on: ubuntu-latest
     # 11 targets x 60 s plus the build.

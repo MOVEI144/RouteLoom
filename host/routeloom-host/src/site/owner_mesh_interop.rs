@@ -18,7 +18,9 @@
 //! peer's Owner, and every decision out of the production authority.
 //!
 //! Peers come from `ROUTELOOM_MESH_PEER` (new) and `ROUTELOOM_OWNER_PEER`
-//! (legacy, Phase 0) or the CMake build tree next to this workspace.
+//! (legacy, Phase 0) or the CMake build tree next to this workspace;
+//! `ROUTELOOM_MESH_PEER_{GW,A,B}` override one persona's peer to mix
+//! resource profiles in one world.
 //! With either missing, every test below skips (ignore-equivalent, never
 //! a failure); the CI interop job builds both peers and always runs
 //! them live. Time is one virtual clock shared by all peers and the
@@ -323,6 +325,22 @@ fn mesh_peer_path() -> Option<std::path::PathBuf> {
         let candidate = root.join(dir).join("tests/cpp/routeloom_owner_mesh_peer");
         candidate.is_file().then_some(candidate)
     })
+}
+
+/// Per-persona peer (P02 resource-profile mix): `ROUTELOOM_MESH_PEER_GW`,
+/// `ROUTELOOM_MESH_PEER_A` and `ROUTELOOM_MESH_PEER_B` run that node on a
+/// peer built with another `ROUTELOOM_RESOURCE_PROFILE`; unset falls back
+/// to the common peer.
+fn mesh_peer_path_for(node: u64) -> Option<std::path::PathBuf> {
+    let key = match node {
+        testkit::GATEWAY => "ROUTELOOM_MESH_PEER_GW",
+        NODE_A => "ROUTELOOM_MESH_PEER_A",
+        NODE_B => "ROUTELOOM_MESH_PEER_B",
+        _ => return mesh_peer_path(),
+    };
+    std::env::var_os(key)
+        .map(std::path::PathBuf::from)
+        .or_else(mesh_peer_path)
 }
 
 fn peers_present() -> bool {
@@ -1240,8 +1258,8 @@ impl MeshPeer {
         nvs_save: &std::path::Path,
         flat: bool,
     ) -> Child {
-        let path =
-            mesh_peer_path().expect("build routeloom_owner_mesh_peer or set ROUTELOOM_MESH_PEER");
+        let path = mesh_peer_path_for(node)
+            .expect("build routeloom_owner_mesh_peer or set ROUTELOOM_MESH_PEER");
         let mut command = Command::new(&path);
         command
             .arg("--node")
@@ -6250,4 +6268,63 @@ fn mesh_c7_old_epoch_boundary() {
         3,
         "every target resolved past the old-epoch boundary: {progress:?}"
     );
+}
+
+/// P02: a gateway role on a peer built with a non-gateway resource profile
+/// (the relay/endpoint peers of the profile mix, `ROUTELOOM_MESH_PEER_A` /
+/// `_B`) is refused at Owner begin with RESOURCE_PROFILE_ROLE_MISMATCH:
+/// the process ends on its fatal frame before any radio frame. Without a
+/// profile-mix peer there is no profile to refuse the role (the default
+/// `full` peer serves every role), so nothing runs.
+#[test]
+fn mesh_profile_role_above_profile_refused() {
+    let peers: Vec<std::path::PathBuf> = ["ROUTELOOM_MESH_PEER_A", "ROUTELOOM_MESH_PEER_B"]
+        .iter()
+        .filter_map(|key| std::env::var_os(key).map(std::path::PathBuf::from))
+        .collect();
+    for (index, path) in peers.iter().enumerate() {
+        let dir = std::env::temp_dir().join(format!(
+            "routeloom-owner-mesh-role-{}-{index}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = Command::new(path)
+            .args(["--node", &format!("{NODE_B:#x}"), "--mac", &hex(&MAC_B)])
+            .args(["--role", &format!("{ROLE_GW}")])
+            .args(["--t0", "1000", "--seed", "7", "--gateway", "--channel", "6"])
+            .args(["--netlow", &format!("{:#x}", testkit::NETWORK_LOW)])
+            .args(["--gw1", &format!("{:#x}", testkit::GATEWAY)])
+            .args(["--usb-secret", &hex(&[0x11; 32])])
+            .args(["--cap", &format!("{USB_CAP}")])
+            .arg("--nvs-save")
+            .arg(dir.join("nvs.bin"))
+            .stdin(Stdio::null())
+            .stderr(Stdio::inherit())
+            .output()
+            .expect("spawn profile peer");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut frames = Vec::new();
+        let mut rest = output.stdout.as_slice();
+        while rest.len() >= 2 {
+            let length = usize::from(u16::from_le_bytes([rest[0], rest[1]]));
+            assert!(
+                rest.len() >= 2 + length,
+                "{}: truncated frame",
+                path.display()
+            );
+            frames.push(rest[2..2 + length].to_vec());
+            rest = &rest[2 + length..];
+        }
+        assert!(rest.is_empty(), "{}: trailing bytes", path.display());
+        assert_eq!(frames.len(), 1, "{}: only the fatal frame", path.display());
+        assert_eq!(frames[0][0], b'E', "{}: fatal frame", path.display());
+        assert_eq!(
+            String::from_utf8_lossy(&frames[0][1..]),
+            "RESOURCE_PROFILE_ROLE_MISMATCH",
+            "{}",
+            path.display()
+        );
+        assert!(!output.status.success(), "{}: exit status", path.display());
+    }
 }

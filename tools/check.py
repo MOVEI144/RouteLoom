@@ -9,7 +9,8 @@ sdk.yml firmware matrix is generated from.
 
     check.py quick                  docs + portable C/C++ tests
     check.py ci [--dry-run]         every stage CI runs, in order
-    check.py core|docs|golden|rust|interop|fuzz
+    check.py core|docs|golden|rust|interop|profile-mesh|fuzz
+    check.py profiles [--build DIR]  portable suites per resource profile
     check.py firmware --list [--format github]
     check.py firmware (--cell ID ... | --all)   needs an exported ESP-IDF
     check.py size --cell ID [--build-dir DIR]   budget of an existing build
@@ -137,6 +138,82 @@ def interop() -> list[Step]:
         Step(["cargo", "test", "-p", "routeloom-host", "--bins", "site::owner_mesh_interop",
               "--", "--nocapture"], cwd="host", env=mesh_env, forbid=SKIP_MARK),
     ]
+
+
+# Resource profiles besides the default `full` build
+# (components/routeloom/include/routeloom/profile.hpp). Each build runs every
+# portable suite except the ones pinned to a capacity or feature the profile
+# leaves out; the two sanitizer-free relay builds also run the 100-node model
+# (e2e-matrix M07). With 32 dedup records on every node the group 100-node
+# load (burst + 2 uplinks/s) loses most uplinks, so the dedup-32 build runs
+# the routing model only. Then the Owner mesh E2E mixes the
+# profiles in one world: a gateway_small gateway, an endpoint member A and a
+# relay member B.
+USB_FEATURE_SUITES = ("usb", "host_ops")            # node status / gateway endpoint
+DEDUP_96_SUITES = ("reply_admission", "fault")      # fills sized for dedup 96
+GATEWAY_SUITES = USB_FEATURE_SUITES + ("espnow_owner_reapply", "sdkv1_coordinator")
+MODEL_100_SUITES = ("routing_scale_100_node", "group_100_node")
+PROFILE_BUILDS = (
+    # (build dir, profile, dedup override, sanitizers, suites left out)
+    ("build-endpoint", "endpoint", "", "ON",
+     GATEWAY_SUITES + DEDUP_96_SUITES + MODEL_100_SUITES + ("node_status",)),
+    ("build-relay32", "relay", "leaf", "OFF",
+     GATEWAY_SUITES + DEDUP_96_SUITES + ("group_100_node",)),
+    ("build-relay96", "relay", "", "OFF", GATEWAY_SUITES),
+    ("build-gateway-small", "gateway_small", "", "ON",
+     USB_FEATURE_SUITES + DEDUP_96_SUITES + MODEL_100_SUITES),
+)
+# The join -> unicast -> multi-hop -> GK -> cutover rows and the role refusal.
+PROFILE_MESH_TESTS = ("mesh_direct_converges_and_delivers", "mesh_forced_multihop_relays",
+                      "mesh_group_key_rotate_acknowledged",
+                      "mesh_cutover_prepare_commit_applied",
+                      "mesh_profile_role_above_profile_refused")
+
+
+def profile_configure(build: str) -> Step:
+    _, profile, dedup, sanitizers, _ = next(b for b in PROFILE_BUILDS if b[0] == build)
+    return Step(["cmake", "-S", ".", "-B", build, "-DROUTELOOM_BUILD_TESTS=ON",
+                 f"-DROUTELOOM_ENABLE_SANITIZERS={sanitizers}", "-DCMAKE_BUILD_TYPE=Debug",
+                 f"-DROUTELOOM_RESOURCE_PROFILE={profile}", f"-DROUTELOOM_DEDUP_PROFILE={dedup}"])
+
+
+def profiles(only: str | None = None) -> list[Step]:
+    steps = []
+    for build, _, _, _, skip in PROFILE_BUILDS:
+        if only is not None and build != only:
+            continue
+        steps += [
+            profile_configure(build),
+            Step(["cmake", "--build", build, "--parallel", JOBS]),
+            Step(["ctest", "--test-dir", build, "--output-on-failure", "-j", JOBS, "-E",
+                  "^routeloom_(" + "|".join(skip) + ")_tests$"]),
+        ]
+    if not steps:
+        raise SystemExit(f"unknown profile build {only!r}")
+    return steps
+
+
+def profile_mesh() -> list[Step]:
+    peer = "tests/cpp/routeloom_owner_mesh_peer"
+    mix = {"ROUTELOOM_MESH_PEER_GW": "build-gateway-small",
+           "ROUTELOOM_MESH_PEER_A": "build-endpoint", "ROUTELOOM_MESH_PEER_B": "build-relay32"}
+    steps = []
+    for build in mix.values():
+        steps += [profile_configure(build),
+                  Step(["cmake", "--build", build, "--parallel", JOBS, "--target",
+                        "routeloom_owner_mesh_peer"])]
+    env = {"ROUTELOOM_OWNER_PEER": str(ROOT / PEER), "ROUTELOOM_MESH_PEER": str(ROOT / MESH_PEER),
+           **{key: str(ROOT / build / peer) for key, build in mix.items()},
+           "UBSAN_OPTIONS": "halt_on_error=1"}
+    steps += [
+        Step(["cmake", "-S", ".", "-B", "build", "-DROUTELOOM_BUILD_TESTS=ON",
+              "-DROUTELOOM_ENABLE_SANITIZERS=ON", "-DCMAKE_BUILD_TYPE=Debug"]),
+        Step(["cmake", "--build", "build", "--parallel", JOBS, "--target",
+              "routeloom_joiner_interop_peer", "routeloom_owner_mesh_peer"]),
+        Step(["cargo", "test", "-p", "routeloom-host", "--bins", "--", "--nocapture",
+              *PROFILE_MESH_TESTS], cwd="host", env=env, forbid=SKIP_MARK),
+    ]
+    return steps
 
 
 def fuzz() -> list[Step]:
@@ -342,8 +419,12 @@ def stream(step: Step, cwd: Path, env: dict) -> tuple[int, str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="stage", required=True)
-    for name in ("quick", "ci", "docs", "golden", "rust", "interop", "fuzz"):
+    for name in ("quick", "ci", "docs", "golden", "rust", "interop", "profile-mesh", "fuzz"):
         sub.add_parser(name).add_argument("--dry-run", action="store_true")
+    p_profiles = sub.add_parser("profiles")
+    p_profiles.add_argument("--dry-run", action="store_true")
+    p_profiles.add_argument("--build", choices=[b[0] for b in PROFILE_BUILDS],
+                            help="one profile build (default: all)")
     p_core = sub.add_parser("core")
     p_core.add_argument("--dry-run", action="store_true")
     p_core.add_argument("--sanitizers", choices=("ON", "OFF"), default="ON")
@@ -386,10 +467,13 @@ def main(argv: list[str] | None = None) -> int:
         return run(steps, args.dry_run, data)
 
     stages = {"core": lambda: core(getattr(args, "sanitizers", "ON")), "docs": docs,
-              "golden": golden, "rust": rust, "interop": interop, "fuzz": fuzz,
+              "golden": golden, "rust": rust, "interop": interop,
+              "profiles": lambda: profiles(getattr(args, "build", None)),
+              "profile-mesh": profile_mesh, "fuzz": fuzz,
               "firmware": lambda: [s for c in data["cells"] for s in firmware_steps(c)]}
     order = {"quick": ("docs", "core"),
-             "ci": ("docs", "core", "golden", "rust", "interop", "fuzz", "firmware")}
+             "ci": ("docs", "core", "golden", "rust", "interop", "profiles", "profile-mesh",
+                    "fuzz", "firmware")}
     for name in order.get(args.stage, (args.stage,)):
         print(f"=== {name}", flush=True)
         code = run(stages[name](), args.dry_run, data)

@@ -53,8 +53,9 @@ class CellList(unittest.TestCase):
     def test_cells_cover_every_app_and_target_with_a_budget(self):
         data = check.load_cells()
         cells = data["cells"]
-        # 37 cells of the pre-v2 matrix, the 5 C6 cells made required, bench C6.
-        self.assertEqual(len(cells), 43)
+        # 37 cells of the pre-v2 matrix, the 5 C6 cells made required, bench C6,
+        # the C3 gateway-128 cell and the two C3 release (-Os) comparison cells.
+        self.assertEqual(len(cells), 46)
         for cell in cells:
             self.assertTrue((ROOT / "firmware" / cell["app"]).is_dir(), cell["id"])
             if cell["id"].startswith("experimental-c6-"):
@@ -101,13 +102,15 @@ class CellList(unittest.TestCase):
 
     def test_workflow_runs_every_ci_stage(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        for stage in ("core --sanitizers", "docs", "golden", "rust", "interop", "fuzz"):
+        for stage in ("core --sanitizers", "docs", "golden", "rust", "interop",
+                      "profiles --build", "profile-mesh", "fuzz"):
             self.assertIn(f"python3 tools/check.py {stage}", workflow)
 
     def test_ci_dry_run_lists_every_stage_and_cell(self):
         code, out, _ = run_main(["ci", "--dry-run"])
         self.assertEqual(code, 0)
-        for stage in ("docs", "core", "golden", "rust", "interop", "fuzz", "firmware"):
+        for stage in ("docs", "core", "golden", "rust", "interop", "profiles", "profile-mesh",
+                      "fuzz", "firmware"):
             self.assertIn(f"=== {stage}\n", out)
         for cell in check.load_cells()["cells"]:
             self.assertIn(f"check.py size --cell {cell['id']}\n", out)
