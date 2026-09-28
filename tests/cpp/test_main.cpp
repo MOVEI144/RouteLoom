@@ -20,6 +20,7 @@
 #include "routeloom/authority.hpp"
 #include "routeloom/byte_io.hpp"
 #include "routeloom/deadline.hpp"
+#include "routeloom/fixed_containers.hpp"
 #include "routeloom/routeloom.h"
 #include "routeloom/counter_store.hpp"
 #include "routeloom/node.hpp"
@@ -1177,9 +1178,47 @@ void test_sim_flush_truncation_aborts() {
 #endif
 }
 
+// FixedPool::erase_if releases exactly the expired slots (expires <= now)
+// in slot order, like the find()+release() loops it replaces.
+void test_pool_erase_if_boundaries() {
+  struct Entry {
+    MonotonicMs expires{0};
+    int id{0};
+  };
+  struct Case {
+    std::array<MonotonicMs, 4> expires;
+    std::size_t used;
+    std::vector<int> erased;
+  };
+  constexpr MonotonicMs kNow = 1000;
+  const Case cases[] = {
+      {{kNow - 1, kNow, kNow + 1, 0}, 3, {0, 1}},
+      {{kNow + 1, kNow + 2, 0, 0}, 2, {}},
+      {{kNow, kNow, kNow, kNow}, 4, {0, 1, 2, 3}},
+      {{0, 0, 0, 0}, 0, {}},
+  };
+  for (const Case& c : cases) {
+    FixedPool<Entry, 4> pool;
+    for (std::size_t i = 0; i < c.used; ++i) {
+      Entry* entry = pool.allocate();
+      entry->expires = c.expires[i];
+      entry->id = static_cast<int>(i);
+    }
+    std::vector<int> erased;
+    const std::size_t n = pool.erase_if(
+        [&](const Entry& e) { return e.expires <= kNow; },
+        [&](Entry& e) { erased.push_back(e.id); });
+    CHECK(n == c.erased.size());
+    CHECK(erased == c.erased);
+    CHECK(pool.size() == c.used - c.erased.size());
+    CHECK(pool.find([&](const Entry& e) { return e.expires <= kNow; }) == nullptr);
+  }
+}
+
 }  // namespace
 
 int main() {
+  test_pool_erase_if_boundaries();
   test_admission_contract();
   test_deadline_resume();
   test_single_authority();

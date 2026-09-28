@@ -1,4 +1,5 @@
 #include "routeloom/device_credential.hpp"
+#include "routeloom/version.h"
 
 #include <cstring>
 
@@ -30,6 +31,7 @@ namespace {
 //   len-4 u32 crc32_iso_hdlc over [0, used_len-4)
 constexpr std::uint32_t kCredMagic = 0x524C4331U;  // "RLC1"
 constexpr std::uint16_t kCredFormat = 1;
+static_assert(kCredFormat == ROUTELOOM_STORE_CREDENTIAL_FORMAT);
 constexpr std::uint32_t kCredSealPending = 0U;
 // New seal constant for this record family (proposed; pending registry
 // landing like every number in the design document).

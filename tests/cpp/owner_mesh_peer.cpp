@@ -1053,6 +1053,13 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
   put_u32(out, static_cast<std::uint32_t>(congestion.admissions_rejected));
   put_u32(out, counters.member_starts);
   put_u32(out, counters.link_request_failures);
+  // Owner work counters.
+  const EspNowRuntime::OwnerStats& owner_work = runtime.owner_stats();
+  put_u32(out, owner_work.polls);
+  put_u32(out, owner_work.empty_polls);
+  put_u32(out, owner_work.rx_queue_max);
+  put_u64(out, runtime.node().work_stats().expiry_slots_scanned);
+  put_u64(out, runtime.node().work_stats().hop_accept_expired);
   write_frame(out);
 }
 

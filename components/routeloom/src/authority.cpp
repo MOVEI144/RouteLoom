@@ -1,4 +1,5 @@
 #include "routeloom/authority.hpp"
+#include "routeloom/version.h"
 
 #include <cstring>
 
@@ -26,6 +27,7 @@ namespace {
 //   152 u32  crc32_iso_hdlc over bytes [0,152)
 constexpr std::uint32_t kLedgerMagic = 0x524C4131U;
 constexpr std::uint16_t kLedgerFormat = 1;
+static_assert(kLedgerFormat == ROUTELOOM_STORE_AUTHORITY_LEDGER_FORMAT);
 constexpr std::uint32_t kSealPending = 0U;
 constexpr std::uint32_t kSealCommitted = 0x5A3CC3A5U;
 constexpr std::size_t kCrcOffset = kAuthorityLedgerRecordSize - 4;

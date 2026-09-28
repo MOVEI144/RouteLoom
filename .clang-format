@@ -1,0 +1,8 @@
+# Matches the existing C/C++ style. Checked on changed lines only
+# (git clang-format --diff <base>); the tree is not reformatted.
+BasedOnStyle: Google
+Standard: c++17
+ColumnLimit: 100
+DerivePointerAlignment: false
+PointerAlignment: Left
+IncludeBlocks: Preserve

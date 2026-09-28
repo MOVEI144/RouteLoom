@@ -74,6 +74,7 @@ pub const REQUEST_MAX_BYTES: usize = 8192;
 pub const RESPONSE_MAX_BYTES: usize = 65536;
 pub const JSON_MAX_DEPTH: usize = 8;
 pub const REQUEST_ID_MAX: usize = 64;
+pub const API_VERSION: u32 = 1;
 /// Capabilities document version: clients key their parsing off this and
 /// ignore unknown fields/methods — never an exact document match.
 /// Additive-only: a removal or rename bumps this and the spec
@@ -322,11 +323,11 @@ pub fn handle_conn<S: OperationStore>(
             None,
         );
     };
-    if root.get("v").and_then(Json::as_u64) != Some(1) {
+    if root.get("v").and_then(Json::as_u64) != Some(u64::from(API_VERSION)) {
         return (
             error_response(
                 Some(request_id),
-                &ApiError::simple("INVALID_REQUEST", "v must be 1"),
+                &ApiError::simple("INVALID_REQUEST", &format!("v must be {API_VERSION}")),
             ),
             None,
         );
@@ -419,7 +420,7 @@ fn extract_request_id(root: &Json) -> Option<String> {
 
 fn ok_response(request_id: &str, result: &str) -> String {
     let response = format!(
-        "{{\"v\":1,\"request_id\":\"{}\",\"ok\":true,\"result\":{result}}}",
+        "{{\"v\":{API_VERSION},\"request_id\":\"{}\",\"ok\":true,\"result\":{result}}}",
         escape_string(request_id)
     );
     bound_response(response)
@@ -436,7 +437,7 @@ fn error_response(request_id: Option<&str>, error: &ApiError) -> String {
         format!(",{}", error.extra_fields)
     };
     let response = format!(
-        "{{\"v\":1,\"request_id\":{id},\"ok\":false,\"error\":{{\"code\":\"{}\",\"detail\":{{\"message\":\"{}\"{extra}}},\"retryable\":{}}}}}",
+        "{{\"v\":{API_VERSION},\"request_id\":{id},\"ok\":false,\"error\":{{\"code\":\"{}\",\"detail\":{{\"message\":\"{}\"{extra}}},\"retryable\":{}}}}}",
         error.code,
         escape_string(&error.message),
         error.retryable,
@@ -449,7 +450,9 @@ fn error_response(request_id: Option<&str>, error: &ApiError) -> String {
 fn bound_response(response: String) -> String {
     // +1 for the newline the socket layer appends.
     if response.len() + 1 > RESPONSE_MAX_BYTES {
-        return "{\"v\":1,\"request_id\":null,\"ok\":false,\"error\":{\"code\":\"INTERNAL\",\"detail\":{\"message\":\"response exceeded size bound\"},\"retryable\":true}}".to_string();
+        return format!(
+            "{{\"v\":{API_VERSION},\"request_id\":null,\"ok\":false,\"error\":{{\"code\":\"INTERNAL\",\"detail\":{{\"message\":\"response exceeded size bound\"}},\"retryable\":true}}}}"
+        );
     }
     response
 }
@@ -481,7 +484,7 @@ fn capabilities<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"capacity.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.retry\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true,\"lab.rollcall.start\":true,\"lab.rollcall.update\":true,\"lab.rollcall.stop\":true,\"lab.rollcall.status\":true,\"diagnostics.snapshot\":true,\"health.get\":true,\"topology.get\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"queue_mode\":[\"FIFO\",\"LATEST_PER_DESTINATION\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"observation\":{observation_caps},\"site\":{site_caps},\"rollcall\":{{\"dispatch\":\"usb_group_delivery_v1\",\"min_interval_ms\":{rollcall_min},\"max_inflight\":1}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known},\"caps_version\":{CAPS_VERSION}}}",
+        "{{\"api\":{{\"version\":{API_VERSION},\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"capacity.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.retry\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true,\"lab.rollcall.start\":true,\"lab.rollcall.update\":true,\"lab.rollcall.stop\":true,\"lab.rollcall.status\":true,\"diagnostics.snapshot\":true,\"health.get\":true,\"topology.get\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"queue_mode\":[\"FIFO\",\"LATEST_PER_DESTINATION\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"observation\":{observation_caps},\"site\":{site_caps},\"rollcall\":{{\"dispatch\":\"usb_group_delivery_v1\",\"min_interval_ms\":{rollcall_min},\"max_inflight\":1}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known},\"caps_version\":{CAPS_VERSION}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,

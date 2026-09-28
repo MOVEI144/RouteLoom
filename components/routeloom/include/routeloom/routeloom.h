@@ -366,8 +366,10 @@ void rl_on_radio_receive(rl_context_t* context, rl_node_id_t peer,
                          const uint8_t* frame, size_t frame_size, int8_t rssi_dbm,
                          rl_monotonic_ms_t now_ms);
 /* Resolves the in-flight send only — the next submission comes from the
-   following rl_poll, after every staged event (including RX, whose
-   control replies keep lane priority over queued DATA) has drained. */
+   following rl_poll, after the events the Owner staged for that pass
+   (including RX, whose control replies keep lane priority over queued
+   DATA). An Owner drains a bounded number of events per pass (the ESP-NOW
+   runtime: 48); the rest are fed before the pass after. */
 void rl_on_radio_tx_result(rl_context_t* context, uint64_t token, bool success,
                            rl_monotonic_ms_t now_ms);
 /* ExpectedReply port wiring (see the block above rl_reply_peer_vtable_t).

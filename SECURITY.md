@@ -2,7 +2,7 @@
 
 ## Status
 
-RouteLoom is a **pre-1.0 implementation prototype** in the `CORE_FIXED_250`
+RouteLoom is at **SDK 2.0.0-dev** (pre-release) in the `CORE_FIXED_250`
 profile. It has not undergone a security audit, RF/HIL qualification, or
 production-credential review (the `G-SEC` gate is still open — see
 `docs/STATUS.md`). Do not deploy it where compromise of a mesh node or
@@ -31,25 +31,28 @@ of impact.
 
 ## Supported Versions
 
-Only the `main` branch receives fixes. No released version is covered by
-a support commitment yet.
+Only the `main` branch receives fixes until v2.0.0 is released. From then,
+the latest 2.0.x release is supported; the SDK version is recorded in
+`protocol/manifest.json`.
 
 | Version / branch | Supported |
 |---|---|
-| `main`           | Yes — fixes land here first |
-| tagged releases  | Pre-1.0; best-effort only, no backports |
+| `main` (2.0.0-dev) | Yes — fixes land here first |
+| 2.0.x (after release) | Yes |
+| 0.1.0 and untagged snapshots before 2.0.0 | No |
 | forks / profiles | Not supported |
 
 ## Scope
 
 In scope for reports:
 
-- Wire v1 frame decoding/validation (`components/routeloom`,
+- Wire v2 frame decoding/validation (`components/routeloom`,
   `host/routeloom-wire`)
 - USB/serial session authentication, framing and credit accounting
   (`usb_*`, `host/routeloom-protocol`)
 - Replay/counter and authority-ledger persistence
-- The development security provider (`DevelopmentPskSecurityProvider`)
+- The development security providers (`DevelopmentPskSecurityProvider`,
+  DevRam) and the SDK v1 MemberEdhoc stack
 - Host daemon/CLI/TUI input handling
 - CI/release pipeline integrity
 
@@ -84,7 +87,7 @@ production profile **are** in scope.
 
 ## Response
 
-This is a volunteer-maintained pre-release project; we will acknowledge
+This is a volunteer-maintained project; we will acknowledge
 reports as time permits and credit reporters in release notes unless you
 prefer otherwise. Fixes land on `main`; advisories are published via
 GitHub Security Advisories when the fix ships.

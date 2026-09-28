@@ -1,5 +1,14 @@
 menu "RouteLoom"
 
+    config ROUTELOOM_TRACE
+        bool "Periodic Owner trace logs"
+        default n
+        help
+            Logs the periodic diagnostics that otherwise cost console time
+            on every node: the stack high-water mark and Owner counters
+            once a minute, the member/authority counters every 5 s and the
+            bridge USB counters every 2 s. Off in field images.
+
     config ROUTELOOM_HIL_TRACE_LINK_EPOCHS
         bool "HIL trace of link context IDs and RLD1 handshake steps"
         default n

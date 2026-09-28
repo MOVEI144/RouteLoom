@@ -4,6 +4,8 @@ mod canonical;
 mod config;
 mod dispatch;
 mod group;
+#[cfg(test)]
+mod manifest_check;
 mod nodes;
 mod observation;
 mod radio_budget;

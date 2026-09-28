@@ -370,7 +370,7 @@ bool EspNowSecurityOwner::dev_adopted() const noexcept {
   if (!coordinator_live_) return false;
   const auto& coordinator =
       *reinterpret_cast<const sdkv1::SecurityCoordinator*>(coordinator_box_.data());
-  return coordinator.snapshot().mode == sdkv1::CoordinatorMode::Dev;
+  return coordinator.mode() == sdkv1::CoordinatorMode::Dev;
 }
 
 NeighborDiscovery* EspNowSecurityOwner::discovery() noexcept {
@@ -696,7 +696,7 @@ Status EspNowSecurityOwner::adopt_dev(const DevConfig& config,
   if (!status) return status;
   // A parked Recovery (ReportRecovery pending) is a failed adopt, not a
   // running dev node: fail loudly like a refused boot.
-  if (coordinator().snapshot().mode == sdkv1::CoordinatorMode::Recovery) {
+  if (coordinator().mode() == sdkv1::CoordinatorMode::Recovery) {
     return Status::error(StatusCode::RecoveryRequired, "dev adopt failed");
   }
   booted_ = true;  // the pump now drives the dev-armed coordinator
@@ -708,6 +708,14 @@ Status EspNowSecurityOwner::adopt_dev(const DevConfig& config,
 
 void EspNowSecurityOwner::poll(const MonotonicMs now_ms) noexcept {
   if (!booted_) return;
+  const std::uint64_t start_us = EspNowRuntime::now_us();
+  poll_steps(now_ms);
+  if (runtime_ != nullptr) {
+    runtime_->note_security_busy_us(EspNowRuntime::now_us() - start_us);
+  }
+}
+
+void EspNowSecurityOwner::poll_steps(const MonotonicMs now_ms) noexcept {
   poll_lifecycle(now_ms);
   if (removal_pending_) return;  // erasure owns the device until the reboot
   // RRS enforcement changes the handshake's signed local epoch and cancels
@@ -719,7 +727,7 @@ void EspNowSecurityOwner::poll(const MonotonicMs now_ms) noexcept {
   event.kind = sdkv1::CoordinatorEventKind::Poll;
   event.now = now_ms;
   (void)coordinator().step(event);
-  if (coordinator().snapshot().mode == sdkv1::CoordinatorMode::ZeroTouch) {
+  if (coordinator().mode() == sdkv1::CoordinatorMode::ZeroTouch) {
     static unsigned logged_join_state = 255;
     static unsigned logged_mode = 255;
     static unsigned logged_error = 255;
@@ -734,8 +742,8 @@ void EspNowSecurityOwner::poll(const MonotonicMs now_ms) noexcept {
       logged_error = error;
     }
   }
-#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
-  if (coordinator().snapshot().mode == sdkv1::CoordinatorMode::Member) {
+#if CONFIG_ROUTELOOM_TRACE
+  if (coordinator().mode() == sdkv1::CoordinatorMode::Member) {
     static MonotonicMs last_member_trace = 0;
     if (now_ms >= last_member_trace + 5000) {
       last_member_trace = now_ms;
@@ -918,7 +926,22 @@ void EspNowSecurityOwner::poll_lifecycle(const MonotonicMs now_ms) noexcept {
 
 void EspNowSecurityOwner::sync_lifecycle_peers(const MonotonicMs now_ms) noexcept {
   if (runtime_ == nullptr || !coordinator_live_ || adopted_network_ == 0) return;
-  std::array<NodeId, EspNowRuntime::kPeerCapacity> current{};
+  // PeerBound acceptance depends on the stamp and on the lifecycle's
+  // phase, adoption and revocation set; a change in any of them (or in
+  // the radio generation) re-sends every stamp, otherwise only changed
+  // stamps are sent.
+  const sdkv1::LifecycleSnapshot life = lifecycle().snapshot();
+  LifecycleGate gate{};
+  gate.network = adopted_network_;
+  gate.lifecycle_network = life.adopted_network;
+  gate.radio_generation = runtime_->radio_generation().value;
+  gate.site_commit_seq = life.site_commit_seq;
+  gate.own_generation = life.own_generation;
+  gate.rs_epoch = life.applied_rs_epoch;
+  gate.phase = life.phase;
+  const bool gate_changed = !(gate == lifecycle_gate_);
+  lifecycle_gate_ = gate;
+  std::array<LifecyclePeer, EspNowRuntime::kPeerCapacity> current{};
   std::size_t count = 0;
   runtime_->for_each_peer([&](const NodeId peer, const MacAddress&,
                               const RouteMetric, const bool) noexcept {
@@ -928,23 +951,33 @@ void EspNowSecurityOwner::sync_lifecycle_peers(const MonotonicMs now_ms) noexcep
         role == 0 || role > 0xFF) return;
     std::uint32_t binding = 0;
     if (!runtime_->p6_link_binding(peer, binding)) return;
-    sdkv1::PeerCredentialStamp stamp{};
-    stamp.peer = peer;
-    stamp.network = adopted_network_;
-    stamp.assignment_generation = generation;
-    stamp.role = static_cast<std::uint8_t>(role);
-    stamp.binding_incarnation = binding;
-    (void)lifecycle().dispatch(sdkv1::LifecycleInput::PeerBound(stamp), now_ms);
-    current[count++] = peer;
+    LifecyclePeer entry{peer, generation, binding};
+    const LifecyclePeer* prior = nullptr;
+    for (const LifecyclePeer& known : lifecycle_peers_) {
+      if (known.peer == peer) { prior = &known; break; }
+    }
+    if (gate_changed || prior == nullptr || prior->generation != generation ||
+        prior->binding != binding) {
+      sdkv1::PeerCredentialStamp stamp{};
+      stamp.peer = peer;
+      stamp.network = adopted_network_;
+      stamp.assignment_generation = generation;
+      stamp.role = static_cast<std::uint8_t>(role);
+      stamp.binding_incarnation = binding;
+      if (!lifecycle().dispatch(sdkv1::LifecycleInput::PeerBound(stamp), now_ms)) {
+        entry.generation = 0;  // refused (table full): retry on the next sync
+      }
+    }
+    current[count++] = entry;
   });
-  for (const NodeId prior : lifecycle_peers_) {
-    if (prior == kInvalidNodeId) continue;
+  for (const LifecyclePeer& prior : lifecycle_peers_) {
+    if (prior.peer == kInvalidNodeId) continue;
     bool still_bound = false;
     for (std::size_t i = 0; i < count; ++i) {
-      if (current[i] == prior) { still_bound = true; break; }
+      if (current[i].peer == prior.peer) { still_bound = true; break; }
     }
     if (!still_bound) {
-      (void)lifecycle().dispatch(sdkv1::LifecycleInput::PeerGone(prior), now_ms);
+      (void)lifecycle().dispatch(sdkv1::LifecycleInput::PeerGone(prior.peer), now_ms);
     }
   }
   lifecycle_peers_ = current;
@@ -1112,7 +1145,7 @@ void EspNowSecurityOwner::drain_lifecycle_actions(const MonotonicMs now_ms) noex
         switch (sdkv1::adopt_network_disposition(
             action.network, adopted_network_, adopted_role_,
             coordinator_live_ && runtime_ != nullptr && runtime_->node().started() &&
-                coordinator().snapshot().mode == sdkv1::CoordinatorMode::Member,
+                coordinator().mode() == sdkv1::CoordinatorMode::Member,
             runtime_ != nullptr &&
                 runtime_->committed_channel() == stores_->site().site().channel)) {
           case sdkv1::AdoptNetworkDisposition::Complete:
@@ -1741,7 +1774,7 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   node.route_gateways.fill(kInvalidNodeId);
   node.group_roots.fill(kInvalidNodeId);
   const bool dev_mode =
-      coordinator().snapshot().mode == sdkv1::CoordinatorMode::Dev;
+      coordinator().mode() == sdkv1::CoordinatorMode::Dev;
   if (dev_mode) {
     // Dev adoption carries both lists explicitly from the board config;
     // nothing is remapped.
