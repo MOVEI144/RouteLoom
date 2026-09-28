@@ -181,7 +181,8 @@ def _image_bytes(project: bytes) -> bytes:
     return bytes(image)
 
 
-def _build_bundle(root: Path, name: str, *, role: str, console: bool):
+def _build_bundle(root: Path, name: str, *, role: str, console: bool,
+                  security: str = 'DEV_RAM'):
     """Package a signed bundle for `role`; `console` marks the setup image."""
     build = root / f'build-{name}'
     pt4m_fixture.write_build(build, f'{role}.bin', _image_bytes(b'routeloom_boot'),
@@ -202,7 +203,7 @@ def _build_bundle(root: Path, name: str, *, role: str, console: bool):
         'CONFIG_ESPTOOLPY_FLASHFREQ="80m"\n'
         'CONFIG_ESPTOOLPY_FLASHSIZE="4MB"\n'
         'CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y\n'
-        'CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y\n'
+        f'CONFIG_ROUTELOOM_SECURITY_MODE_{security}=y\n'
         + ('CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y\n' if console else ''))
     (app / 'sdkconfig').write_text(sdkconfig)
     (app / 'partitions.csv').write_text(pt4m_fixture.PARTITIONS_CSV)
@@ -365,7 +366,7 @@ class FieldBootTests(unittest.TestCase):
 
     def test_config_required_flagged(self):
         lines = _boot_lines(node=7, kid='ab' * 32, devcert_sha='cd' * 32)
-        lines.append('E (700) boot: CONFIG_REQUIRED: board identity mismatch')
+        lines.append('E (700) boot: CONFIG_REQUIRED: board configuration required')
         self.assertTrue(prov.parse_field_boot(lines).config_required)
 
     def test_unprovisioned_identity(self):
@@ -579,6 +580,28 @@ class LabBackendTests(unittest.TestCase):
         result = backend.run('preflight', self._job())
         self.assertEqual(result.state, 'done', result.detail)
         self.assertIn('reference_node', result.detail)
+
+    def test_setup_security_must_match_field_before_flash(self):
+        site = _site(self.tmp / 'mixed')
+        bundles = self.tmp / 'mixed' / 'bundles'
+        bundles.mkdir()
+        _build_bundle(bundles, 'field-ref', role='reference_node', console=False,
+                      security='MEMBER_EDHOC')
+        _build_bundle(bundles, 'setup-ref', role='reference_node', console=True)
+        backend = prov.LabProvisionBackend(
+            site_dir=site, boards=self.boards, bundles_dir=bundles, office=self.office,
+            link_factory=lambda port: self.console, boot_capture=lambda port: [])
+        result = backend.run('preflight', self._job())
+        self.assertEqual(result.state, 'failed')
+        self.assertIn('security', result.detail)
+        self.assertEqual(self.boards.flashed, [])
+
+    def test_duplicate_bundle_selection_is_refused(self):
+        _build_bundle(self.backend.bundles_dir, 'field-bench-alt',
+                      role='bench_node', console=False)
+        result = self.backend.run('preflight', self._job())
+        self.assertEqual(result.state, 'failed')
+        self.assertIn('multiple', result.detail)
 
     def test_office_gets_identity_spec_with_site_ca_anchor(self):
         site = self.backend.site_dir

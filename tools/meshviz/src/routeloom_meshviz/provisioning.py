@@ -1232,6 +1232,9 @@ class LabProvisionBackend(ContractBackend):
             console = 'CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y' in sdkconfig
             key = ('setup' if console else 'field',
                    manifest['role'], manifest['chip'])
+            if key in bundles:
+                raise ProvisionError('no_bundles',
+                                     f'multiple signed bundles for {"/".join(key)}')
             bundles[key] = {'path': entry, 'manifest': manifest}
         self._bundles = bundles
         return bundles
@@ -1405,6 +1408,9 @@ class LabProvisionBackend(ContractBackend):
         ctx['identity'] = identity
         field_bundle = self._bundle('field', job, identity.chip)
         setup_bundle = self._bundle('setup', job, identity.chip)
+        if (field_bundle['manifest']['security_profile'] !=
+                setup_bundle['manifest']['security_profile']):
+            raise ProvisionError('no_bundles', 'setup and field security profiles differ')
         ctx['field_bundle'] = field_bundle
         ctx['setup_bundle'] = setup_bundle
         ctx['desc'] = app_image_descriptor(
