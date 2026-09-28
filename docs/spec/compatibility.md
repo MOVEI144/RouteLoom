@@ -63,7 +63,7 @@ the Rust workspace and meshviz). Each surface below carries its own number.
 | Host operation store (SQLite) | 4 | `STORE_HOST_OPS` | `host/routeloom-host/src/sqlite_store.rs` | accepts 1..=current and migrates forward |
 | Site Authority store (SQLite) | 2 | `STORE_SITE` | `host/routeloom-host/src/site/store.rs` | migrates 1 to 2 forward; other versions refused |
 
-Toolchain: ESP-IDF v6.0.3 (`76f5dedd9950a3012fee8fb7d5586df21fc67802`), Rust 1.85.1. Partition layout ID: not registered yet.
+Toolchain: ESP-IDF v6.0.3 (`76f5dedd9950a3012fee8fb7d5586df21fc67802`), Rust 1.85.0. Partition layout ID: not registered yet.
 
 Reason codes are u16 and are allocated by area:
 
@@ -192,7 +192,8 @@ changes only in major releases.
 ## 6. Rust host API and daemon protocol
 
 The `host/` workspace (version = SDK version, MSRV = `rust-version` in
-`host/Cargo.toml`) is not published to crates.io; crates are consumed by path. Semver applies from the
+`host/Cargo.toml`, the toolchain pinned in `host/rust-toolchain.toml` and used
+by every CI job) is not published to crates.io; crates are consumed by path. Semver applies from the
 first numbered release. The daemon's JSON protocol over the Unix socket
 (routeloom-json request/response model shared by `routeloomctl` and
 `routeloom-tui`) is likewise pre-stable; clients should treat unknown fields

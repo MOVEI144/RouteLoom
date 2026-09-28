@@ -88,6 +88,7 @@ nav:
     - XIAO ESP32-C3: hardware/xiao-esp32c3.md
     - XIAO ESP32-S3: hardware/xiao-esp32s3.md
     - XIAO ESP32-C5: hardware/xiao-esp32c5.md
+    - XIAO ESP32-C6: hardware/xiao-esp32c6.md
     - XIAO ESP32-S3＋Wio-SX1262 B2B: hardware/xiao-esp32s3-wio-sx1262.md
     - 電源・RF・適合確認: hardware/power-rf-compliance.md
   - 実装ガイド:

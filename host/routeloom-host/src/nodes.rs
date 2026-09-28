@@ -261,7 +261,7 @@ impl NodeTable {
             .records
             .range(after.saturating_add(1)..)
             .map(|(_, record)| record)
-            .filter(|record| connected.map_or(true, |want| record.connected == want));
+            .filter(|record| connected.is_none_or(|want| record.connected == want));
         for record in iter.by_ref() {
             if out.len() == limit {
                 return (out, true);

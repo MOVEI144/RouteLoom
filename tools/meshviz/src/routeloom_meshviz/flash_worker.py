@@ -22,7 +22,7 @@ def flash(port: str, plan: FlashPlan, api=None):
             bundle_image_node_id(plan.bundle) != plan.assigned_node_id):
         raise ValueError('assigned NodeId differs from signed image configuration')
     if manifest['chip'] == 'esp32c6':
-        raise ValueError('C6 is experimental HIL only')
+        raise ValueError('C6 Mesh Lab flashing awaits H0 board checks')
     manifest_files = manifest['files']
     if plan.app_only:
         manifest_files = [entry for entry in manifest_files

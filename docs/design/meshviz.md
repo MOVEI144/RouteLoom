@@ -24,7 +24,7 @@
 | 配送結果 | API1 の受付・証拠は取得可能。しかし通常の HostOps 送信では legacy `delivery_event` を出さず、理由を QUERY_DISPATCH にも保持しない。失敗理由の完全な分布には追加が必要。 |
 | throughput | host の通常 admission は毎分 2 件、burst 16。高頻度試験用の明示的な実験 profile と容量管理が必要。 |
 | MemberEdhoc | 参加・除外・group key・cutover のコードは存在する。「本番相当の手順を試す実験 profile」と位置付ける。USB 認証や鍵保管まで製品認定済みとは表示しない。 |
-| C6 | 現 checkout の対象 manifest／CI／release に含まれない。build と HIL を追加し、他チップと同じ認定状況とは扱わない。 |
+| C6 | v2 で正式対象（CI の必須 cell と release に含む）。HIL の認定は他チップと別に記録する。 |
 
 ## 0. ボード、firmware、構成、provision
 

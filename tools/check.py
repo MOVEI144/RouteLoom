@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""One entry point for the repository checks CI runs.
+
+Each stage is a fixed list of the existing commands (this tool does not
+reimplement any test); `--dry-run` prints them instead of running them.
+The firmware cells, their sdkconfig overlays and assertions, and the
+per-cell size budgets live in tools/ci/cells.json, the single list the
+sdk.yml firmware matrix is generated from.
+
+    check.py quick                  docs + portable C/C++ tests
+    check.py ci [--dry-run]         every stage CI runs, in order
+    check.py core|docs|golden|rust|interop|fuzz
+    check.py firmware --list [--format github]
+    check.py firmware (--cell ID ... | --all)   needs an exported ESP-IDF
+    check.py size --cell ID [--build-dir DIR]   budget of an existing build
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import struct
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+CELLS = ROOT / "tools" / "ci" / "cells.json"
+JOBS = str(min(os.cpu_count() or 2, 8))
+FUZZ_TARGETS = ("wire_frame", "usb_codec", "autonomy", "endpoint", "host_ops", "migration",
+                "cose", "rlres1", "sdkv1", "sdkv1_ead", "sdkv1_join")
+# Generated-vector directories: diff catches changed bytes, porcelain catches
+# a generator that starts emitting an unreviewed (untracked) vector.
+GENERATED_GOLDENS = (
+    "protocol/golden", "protocol/usb-golden", "protocol/autonomy-golden",
+    "protocol/provisioning-golden", "protocol/sdkv1-golden", "protocol/bench-golden",
+    "protocol/endpoint-golden", "protocol/config-signed-golden", "protocol/edhoc-interop",
+    "protocol/edhoc-rfc9529", "tests/fuzz/corpus/sdkv1_ead",
+    "tests/fuzz/corpus/sdkv1_handshake", "tests/fuzz/corpus/sdkv1_join")
+PEER = "build/tests/cpp/routeloom_joiner_interop_peer"
+MESH_PEER = "build/tests/cpp/routeloom_owner_mesh_peer"
+# A live interop suite that finds no C++ peer prints this and passes as a
+# skip; the interop stage treats it as a failure. Not anchored: with
+# --nocapture the harness output of parallel tests can share the line.
+SKIP_MARK = re.compile(r"SKIP site::")
+
+
+class Step:
+    """One command: argv, working directory (relative to ROOT) and extra env."""
+
+    def __init__(self, argv, cwd=".", env=None, forbid=None, stdout=None):
+        self.argv, self.cwd, self.env = list(argv), cwd, dict(env or {})
+        self.forbid, self.stdout = forbid, stdout
+
+    def text(self) -> str:
+        env = " ".join(f"{k}={shlex.quote(v)}" for k, v in self.env.items())
+        cmd = " ".join(shlex.quote(a) for a in self.argv)
+        if self.stdout:
+            cmd += f" > {self.stdout}"
+        where = "" if self.cwd == "." else f"(cd {self.cwd} && "
+        return f"{where}{env + ' ' if env else ''}{cmd}{')' if where else ''}"
+
+
+def core(sanitizers: str = "ON") -> list[Step]:
+    return [
+        Step(["cmake", "-S", ".", "-B", "build", "-DROUTELOOM_BUILD_TESTS=ON",
+              f"-DROUTELOOM_ENABLE_SANITIZERS={sanitizers}", "-DCMAKE_BUILD_TYPE=Debug"]),
+        Step(["cmake", "--build", "build", "--parallel", JOBS]),
+        Step(["ctest", "--test-dir", "build", "--output-on-failure", "-j", JOBS]),
+    ]
+
+
+def docs() -> list[Step]:
+    return [Step(["python3", "tools/check_docs.py"]),
+            Step(["python3", "tools/gen_manifest.py", "--check"]),
+            Step(["python3", "tools/sync_reference_tables.py", "--check"]),
+            Step(["python3", "tools/check_review_contracts.py"]),
+            Step(["python3", "-m", "unittest", "discover", "-s", "tests", "-v"])]
+
+
+def golden() -> list[Step]:
+    targets = ["routeloom_golden_tests", "routeloom_usb_tests", "routeloom_key_schedule_tests",
+               "routeloom_sdkv1_golden_tests", "routeloom_sdkv1_ead_tests",
+               "routeloom_sdkv1_join_transport_tests"]
+    steps = [
+        Step(["cmake", "-S", ".", "-B", "build-golden", "-DROUTELOOM_BUILD_TESTS=ON",
+              "-DCMAKE_BUILD_TYPE=Debug"]),
+        Step(["cmake", "--build", "build-golden", "--parallel", JOBS, "--target", *targets]),
+        Step(["ctest", "--test-dir", "build-golden", "--output-on-failure", "-R",
+              "routeloom_(golden|usb|key_schedule|sdkv1_golden|sdkv1_ead|sdkv1_join_transport)_tests"]),
+        Step(["cargo", "test", "-p", "routeloom-wire", "-p", "routeloom-protocol",
+              "-p", "routeloom-keysched"], cwd="host"),
+        Step(["cargo", "test", "-p", "routeloom-provision", "--test", "sdkv1_golden"], cwd="host"),
+        Step(["cargo", "test", "-p", "routeloom-join"], cwd="host"),
+    ]
+    for crate, example in (("routeloom-wire", "gen_golden"),
+                           ("routeloom-protocol", "gen_usb_golden"),
+                           ("routeloom-provision", "gen_provisioning_golden")):
+        steps.append(Step(["cargo", "run", "-p", crate, "--example", example], cwd="host"))
+    for gen in ("gen_autonomy_vectors", "gen_sdkv1_derivation_vectors",
+                "gen_sdkv1_authority_vectors", "gen_sdkv1_vectors", "gen_sdkv1_ead_vectors",
+                "gen_sdkv1_dams_vectors", "gen_sdkv1_join_transport_vectors",
+                "gen_sdkv1_handshake_vectors", "gen_sdkv1_join_relay_v2_vectors",
+                "gen_sdkv1_revocation_vectors", "gen_bench_vectors", "gen_endpoint_vectors"):
+        steps.append(Step(["python3", f"tools/{gen}.py"]))
+    steps.append(Step(["git", "diff", "--exit-code", "--", *GENERATED_GOLDENS]))
+    # Untracked output: porcelain must be empty (forbid any output line).
+    steps.append(Step(["git", "status", "--porcelain", "--", *GENERATED_GOLDENS],
+                      forbid=re.compile(r".")))
+    return steps
+
+
+def rust() -> list[Step]:
+    return [Step(["cargo", "fmt", "--all", "--check"], cwd="host"),
+            Step(["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
+                 cwd="host"),
+            # The live Owner E2E suites need C++ peers and run in `interop`.
+            Step(["cargo", "test", "--workspace", "--all-targets", "--", "--skip",
+                  "joiner_interop", "--skip", "owner_mesh_interop"], cwd="host"),
+            Step(["cargo", "build", "--workspace", "--release", "--all-targets"], cwd="host")]
+
+
+def interop() -> list[Step]:
+    env = {"ROUTELOOM_OWNER_PEER": str(ROOT / PEER), "UBSAN_OPTIONS": "halt_on_error=1"}
+    mesh_env = {**env, "ROUTELOOM_MESH_PEER": str(ROOT / MESH_PEER)}
+    return [
+        Step(["cmake", "-S", ".", "-B", "build", "-DROUTELOOM_BUILD_TESTS=ON",
+              "-DROUTELOOM_ENABLE_SANITIZERS=ON", "-DCMAKE_BUILD_TYPE=Debug"]),
+        Step(["cmake", "--build", "build", "--parallel", JOBS, "--target",
+              "routeloom_joiner_interop_peer", "routeloom_owner_mesh_peer"]),
+        Step(["test", "-x", PEER]),
+        Step(["test", "-x", MESH_PEER]),
+        Step(["cargo", "test", "-p", "routeloom-host", "--bins", "site::joiner_interop",
+              "--", "--nocapture"], cwd="host", env=env, forbid=SKIP_MARK),
+        Step(["cargo", "test", "-p", "routeloom-host", "--bins", "site::owner_mesh_interop",
+              "--", "--nocapture"], cwd="host", env=mesh_env, forbid=SKIP_MARK),
+    ]
+
+
+def fuzz() -> list[Step]:
+    # Bounded CI-time fuzzing (60 s per target over the seed corpus), not
+    # continuous fuzzing.
+    steps = [
+        Step(["cmake", "-S", ".", "-B", "build-fuzz", "-DROUTELOOM_BUILD_TESTS=ON",
+              "-DROUTELOOM_BUILD_FUZZERS=ON", "-DROUTELOOM_ENABLE_SANITIZERS=ON",
+              "-DCMAKE_BUILD_TYPE=Debug"], env={"CC": "clang", "CXX": "clang++"}),
+        Step(["cmake", "--build", "build-fuzz", "--parallel", JOBS, "--target",
+              *(f"fuzz_{t}" for t in FUZZ_TARGETS)]),
+        Step(["mkdir", "-p", "fuzz-artifacts", *(f"tests/fuzz/corpus/{t}" for t in FUZZ_TARGETS)]),
+    ]
+    for t in FUZZ_TARGETS:
+        steps.append(Step([f"./build-fuzz/tests/fuzz/fuzz_{t}", f"tests/fuzz/corpus/{t}",
+                           "-max_total_time=60", "-rss_limit_mb=2048",
+                           "-artifact_prefix=fuzz-artifacts/", "-print_final_stats=1"]))
+    return steps
+
+
+# --- firmware cells -------------------------------------------------------
+
+def load_cells(path: Path = CELLS) -> dict:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    ids = [c["id"] for c in data["cells"]]
+    if len(ids) != len(set(ids)):
+        raise SystemExit(f"{path}: duplicate cell id")
+    return data
+
+
+def find_cell(data: dict, cell_id: str) -> dict:
+    for cell in data["cells"]:
+        if cell["id"] == cell_id:
+            return cell
+    raise SystemExit(f"unknown cell {cell_id!r} (see check.py firmware --list)")
+
+
+def firmware_steps(cell: dict) -> list[Step]:
+    app_dir = f"firmware/{cell['app']}"
+    size_args = ["python3", str(ROOT / "tools/firmware_ram_report.py"), "build/size.json",
+                 "--target", cell["target"], "--app", cell["app"], "--cell", cell["id"],
+                 "--json-out", "build/ram-report.json"]
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        size_args += ["--summary", os.environ["GITHUB_STEP_SUMMARY"]]
+    steps = [Step(["idf.py", "set-target", cell["target"]], cwd=app_dir)]
+    if cell["overlay"]:
+        steps.append(Step(["append", "sdkconfig", *cell["overlay"]], cwd=app_dir))
+    steps += [
+        Step(["idf.py", "build"], cwd=app_dir),
+        Step(["assert-sdkconfig", cell["id"]], cwd=app_dir),
+        Step(["idf.py", "size"], cwd=app_dir, stdout="build/size-report.txt"),
+        Step(["idf.py", "size", "--format", "json2", "--output-file", "build/size.json"],
+             cwd=app_dir),
+        Step(size_args, cwd=app_dir),
+        Step(["python3", str(ROOT / "tools/check.py"), "size", "--cell", cell["id"]]),
+    ]
+    return steps
+
+
+def sdkconfig_errors(data: dict, cell: dict, text: str) -> list[str]:
+    """Every overlay and `expect` line must appear verbatim; a watched
+    symbol the cell does not name must not resolve to a forbidden value."""
+    lines = set(text.splitlines())
+    wanted = cell["overlay"] + cell.get("expect", [])
+    errors = [f"missing `{line}`" for line in wanted if line not in lines]
+    named = {line.split("=", 1)[0] for line in wanted}
+    for symbol, values in data["forbid_unless_named"].items():
+        if symbol in named:
+            continue
+        errors += [f"unexpected `{symbol}={v}`" for v in values if f"{symbol}={v}" in lines]
+    return errors
+
+
+def elf_symbols(path: Path) -> list[str]:
+    """Names in the ELF .symtab (ELF32/ELF64, either byte order)."""
+    blob = path.read_bytes()
+    if blob[:4] != b"\x7fELF":
+        raise ValueError(f"{path} is not an ELF file")
+    wide, end = blob[4] == 2, "<" if blob[5] == 1 else ">"
+    if wide:
+        shoff, = struct.unpack_from(end + "Q", blob, 0x28)
+        shentsize, shnum = struct.unpack_from(end + "HH", blob, 0x3A)
+        sh_fmt, sym_size, name_at = end + "IIQQQQIIQQ", 24, 0
+    else:
+        shoff, = struct.unpack_from(end + "I", blob, 0x20)
+        shentsize, shnum = struct.unpack_from(end + "HH", blob, 0x2E)
+        sh_fmt, sym_size, name_at = end + "IIIIIIIIII", 16, 0
+    sections = [struct.unpack_from(sh_fmt, blob, shoff + i * shentsize) for i in range(shnum)]
+    names = []
+    found_symtab = False
+    for sec in sections:
+        if sec[1] != 2:  # SHT_SYMTAB
+            continue
+        found_symtab = True
+        offset, size, link = sec[4], sec[5], sec[6]
+        str_off = sections[link][4]
+        for pos in range(offset, offset + size, sym_size):
+            start = str_off + struct.unpack_from(end + "I", blob, pos + name_at)[0]
+            names.append(blob[start:blob.index(b"\0", start)].decode("utf-8", "replace"))
+    if not found_symtab:
+        raise ValueError(f"{path}: missing ELF symbol table")
+    return [n for n in names if n]
+
+
+def size_errors(data: dict, cell: dict, build: Path) -> list[str]:
+    budget = cell.get("budget")
+    if not budget:
+        return ["no budget in tools/ci/cells.json"]
+    stem = f"routeloom_{cell['app']}"
+    files = {kind: build / name for kind, name in (
+        ("bin", f"{stem}.bin"), ("elf", f"{stem}.elf"), ("map", f"{stem}.map"),
+        ("ram", "ram-report.json"))}
+    missing = [str(p) for p in files.values() if not p.is_file()]
+    if missing:
+        return [f"missing {p}" for p in missing]
+    errors = []
+    app_bin = files["bin"].stat().st_size
+    if app_bin > budget["app_bin_max"]:
+        errors.append(f"app.bin {app_bin} B > budget {budget['app_bin_max']} B")
+    report = json.loads(files["ram"].read_text(encoding="utf-8"))
+    for key, expected in (("cell", cell["id"]), ("app", cell["app"]),
+                          ("target", cell["target"])):
+        if report.get(key) != expected:
+            errors.append(f"ram-report {key} {report.get(key)!r} != {expected!r}")
+    free = report["guard"]["free"]
+    if free < budget["static_free_min"]:
+        errors.append(f"static RAM free {free} B < budget {budget['static_free_min']} B")
+    rtc = rtc_used(report)
+    if rtc is None:
+        errors.append("missing RTC/LP RAM measurement in ram-report")
+    elif rtc > budget["rtc_used_max"]:
+        errors.append(f"RTC/LP RAM used {rtc} B > budget {budget['rtc_used_max']} B")
+    patterns = data.get("symbols_absent", []) + cell.get("symbols_absent", [])
+    if patterns:
+        try:
+            symbols = elf_symbols(files["elf"])
+        except ValueError as exc:
+            errors.append(str(exc))
+        else:
+            for pattern in patterns:
+                hits = [s for s in symbols if re.search(pattern, s)]
+                if hits:
+                    errors.append(f"symbols_absent `{pattern}` matches {', '.join(hits[:5])}")
+    print(f"{cell['id']}: app.bin {app_bin}/{budget['app_bin_max']} B, static free "
+          f"{free}/{budget['static_free_min']} B, RTC {rtc}/{budget['rtc_used_max']} B")
+    return errors
+
+
+def rtc_used(report: dict) -> int | None:
+    low_power = [m for m in report["memory"]
+                 if m["name"].lower().startswith(("rtc", "lp "))]
+    return sum(m["used"] for m in low_power) if low_power else None
+
+
+# --- runner ---------------------------------------------------------------
+
+def run(steps: list[Step], dry_run: bool, data: dict | None = None) -> int:
+    for step in steps:
+        print(f"$ {step.text()}", flush=True)
+        if dry_run:
+            continue
+        cwd = ROOT / step.cwd
+        if step.argv[0] == "append":
+            with (cwd / step.argv[1]).open("a", encoding="utf-8") as out:
+                out.write("".join(line + "\n" for line in step.argv[2:]))
+            continue
+        if step.argv[0] == "assert-sdkconfig":
+            errors = sdkconfig_errors(data, find_cell(data, step.argv[1]),
+                                      (cwd / "sdkconfig").read_text(encoding="utf-8"))
+            if errors:
+                print(f"{step.argv[1]}: sdkconfig: " + "; ".join(errors), file=sys.stderr)
+                return 1
+            continue
+        env = {**os.environ, **step.env}
+        if step.stdout:
+            with (cwd / step.stdout).open("w", encoding="utf-8") as out:
+                code = subprocess.run(step.argv, cwd=cwd, env=env, stdout=out).returncode
+        elif step.forbid is None:
+            code = subprocess.run(step.argv, cwd=cwd, env=env).returncode
+        else:
+            code, hit = stream(step, cwd, env)
+            if hit:
+                print(f"check.py: forbidden output from `{step.text()}`: {hit}", file=sys.stderr)
+                code = code or 1
+        if code != 0:
+            print(f"check.py: FAILED ({code}): {step.text()}", file=sys.stderr)
+            return code
+    return 0
+
+
+def stream(step: Step, cwd: Path, env: dict) -> tuple[int, str]:
+    hit = ""
+    with subprocess.Popen(step.argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, text=True) as proc:
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            if not hit and step.forbid.search(line):
+                hit = line.strip()
+    return proc.returncode, hit
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest="stage", required=True)
+    for name in ("quick", "ci", "docs", "golden", "rust", "interop", "fuzz"):
+        sub.add_parser(name).add_argument("--dry-run", action="store_true")
+    p_core = sub.add_parser("core")
+    p_core.add_argument("--dry-run", action="store_true")
+    p_core.add_argument("--sanitizers", choices=("ON", "OFF"), default="ON")
+    p_fw = sub.add_parser("firmware")
+    p_fw.add_argument("--dry-run", action="store_true")
+    group = p_fw.add_mutually_exclusive_group(required=True)
+    group.add_argument("--cell", action="append")
+    group.add_argument("--all", action="store_true")
+    group.add_argument("--list", action="store_true")
+    p_fw.add_argument("--format", choices=("text", "github"), default="text")
+    p_size = sub.add_parser("size")
+    p_size.add_argument("--cell", required=True)
+    p_size.add_argument("--build-dir", type=Path,
+                        help="default firmware/<app>/build of the cell")
+    p_size.add_argument("--cells-file", type=Path, default=CELLS, help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+
+    if args.stage == "size":
+        data = load_cells(args.cells_file)
+        cell = find_cell(data, args.cell)
+        build = args.build_dir or ROOT / "firmware" / cell["app"] / "build"
+        errors = size_errors(data, cell, build)
+        for error in errors:
+            print(f"{cell['id']}: {error}", file=sys.stderr)
+        return 1 if errors else 0
+
+    data = load_cells()
+    if args.stage == "firmware":
+        if args.list:
+            if args.format == "github":
+                include = [{"id": c["id"], "app": c["app"], "target": c["target"],
+                            "artifact": c.get("artifact", f"firmware-{c['id']}")}
+                           for c in data["cells"]]
+                print("matrix=" + json.dumps({"include": include}, separators=(",", ":")))
+            else:
+                print("\n".join(c["id"] for c in data["cells"]))
+            return 0
+        cells = data["cells"] if args.all else [find_cell(data, i) for i in args.cell]
+        steps = [s for c in cells for s in firmware_steps(c)]
+        return run(steps, args.dry_run, data)
+
+    stages = {"core": lambda: core(getattr(args, "sanitizers", "ON")), "docs": docs,
+              "golden": golden, "rust": rust, "interop": interop, "fuzz": fuzz,
+              "firmware": lambda: [s for c in data["cells"] for s in firmware_steps(c)]}
+    order = {"quick": ("docs", "core"),
+             "ci": ("docs", "core", "golden", "rust", "interop", "fuzz", "firmware")}
+    for name in order.get(args.stage, (args.stage,)):
+        print(f"=== {name}", flush=True)
+        code = run(stages[name](), args.dry_run, data)
+        if code:
+            return code
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

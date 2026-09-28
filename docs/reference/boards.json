@@ -105,6 +105,38 @@
       "runtime_generation_allowed": false
     },
     {
+      "id": "seeed_xiao_esp32c6",
+      "chip": "esp32c6",
+      "cpu_max_mhz": 160,
+      "flash_mb_published": 4,
+      "psram_mb_published": 0,
+      "gpio_d0_to_d10": [
+        0,
+        1,
+        2,
+        21,
+        22,
+        23,
+        16,
+        17,
+        19,
+        20,
+        18
+      ],
+      "usb_dm": 12,
+      "usb_dp": 13,
+      "boot_gpio": 9,
+      "user_led_gpio": 15,
+      "rf_switch_enable_gpio": 3,
+      "antenna_select_gpio": 14,
+      "wiki": "https://wiki.seeedstudio.com/xiao_esp32c6_getting_started/",
+      "doc": "docs/hardware/xiao-esp32c6.md",
+      "rf_qualified": false,
+      "published_facts_only": true,
+      "qualified_runtime_profile": null,
+      "runtime_generation_allowed": false
+    },
+    {
       "id": "seeed_xiao_esp32s3_wio_sx1262_b2b",
       "chip": "esp32s3",
       "base_board": "seeed_xiao_esp32s3",

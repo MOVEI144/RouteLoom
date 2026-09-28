@@ -902,7 +902,7 @@ impl World {
                             self.allow_forwards.push((site, forwarded_at, delivered));
                         } else {
                             assert!(
-                                row.as_ref().map_or(true, |r| !r.member),
+                                row.as_ref().is_none_or(|r| !r.member),
                                 "no member row without an Allow"
                             );
                         }

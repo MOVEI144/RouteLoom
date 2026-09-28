@@ -104,7 +104,7 @@ def preview(row: BoardRow, manifest: dict | None, bundle: Path | None, *, quiesc
         reasons.append('この port を使う daemon／console の停止（quiesce）が未確認')
     if manifest is not None:
         if manifest['chip'] == 'esp32c6':
-            reasons.append('C6 は実験的 HIL 対象のため書込み不可')
+            reasons.append('C6 の Mesh Lab 書込みは H0 実機確認まで保留')
         if row.role is not None and manifest['role'] != row.role:
             reasons.append(f'bundle の役割 {manifest["role"]} と割当て {row.role} が不一致')
         if identity is not None:

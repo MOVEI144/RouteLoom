@@ -107,7 +107,7 @@
   "toolchain": {
     "esp_idf_tag": "v6.0.3",
     "esp_idf_commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802",
-    "rust": "1.85.1"
+    "rust": "1.85.0"
   },
   "partition_layout": null,
   "reason_codes": {

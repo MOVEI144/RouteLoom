@@ -6,8 +6,8 @@ require `pyserial`; signed bundle verification requires `cryptography`.
 
 **Hardware status:** the [2026-09-26 bench report](hil/2026-09-26-bench-5node.md)
 records the first hardware run and its continuation. The bench contained
-three C3s and two C6s; C6 is an experimental HIL target outside the SDK v1
-support list. One C3 stopped enumerating, so the continuation exercised four
+three C3s and two C6s; C6 was then an experimental HIL target (v2 makes it
+a supported target built by every CI cell in `tools/ci/cells.json`). One C3 stopped enumerating, so the continuation exercised four
 boards (two C3s, two C6s). A five-node run and C5 hardware comparison remain
 unfinished. A C3 LegacyFixture deep-sleep replay fix passed a wake-and-deliver
 cycle in the R3 continuation; DevRam/MemberEdhoc sleep remains open. The
@@ -122,11 +122,11 @@ python3 tools/hil/analyze_edhoc.py \
     --console 4 artifacts/hil/member-node4-console.log \
     --out artifacts/hil/member-edhoc-times.json
 
-# Build the current sdk.yml firmware matrix (25 C3/S3/C5 cells) in the
-# pinned IDF container. The runner shares the local three-container cap and
-# retains per-cell logs and RAM reports in ignored local image directories.
+# Build every firmware cell of tools/ci/cells.json (the sdk.yml matrix) in
+# the pinned IDF container. The runner shares the local three-container cap;
+# its JSON result records build output and each bundle carries a RAM report.
 python3 tools/hil/build_ci_matrix.py \
-    --out artifacts/hil/ci-matrix-25.json --jobs 3
+    --out artifacts/hil/ci-matrix.json --jobs 3
 
 # During MemberEdhoc joining or cutover, poll the Site Authority ledger,
 # member states, group-key acknowledgements, and any known operation IDs.

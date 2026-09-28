@@ -896,7 +896,7 @@ impl SiteAuthority {
         if self
             .rrs_transport
             .as_ref()
-            .map_or(true, |transport| !transport.carries_notice())
+            .is_none_or(|transport| !transport.carries_notice())
         {
             return;
         }

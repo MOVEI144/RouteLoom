@@ -20,7 +20,8 @@ tags:
   - espnow
   - routeloom
   - wifi-lr
-# C3/S3/C5/C6 are the SDK 2.0 targets.
+# C3/S3/C5/C6 are the SDK 2.0 targets, all compiled by the required CI
+# cells (tools/ci/cells.json).
 targets:
   - esp32c3
   - esp32s3
