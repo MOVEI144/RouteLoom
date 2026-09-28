@@ -40,6 +40,7 @@
 #include "routeloom/nvs_trust_store.hpp"
 #endif
 #include "routeloom/config_wire.hpp"
+#include "routeloom/espnow_flash_layout.hpp"
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/espnow_sdkv1.hpp"
 #include "routeloom/fail_policy.hpp"
@@ -416,6 +417,10 @@ extern "C" void app_main(void) {
   // A matching magic is the only thing that distinguishes a streak that
   // survived esp_restart from power-on garbage in .rtc_noinit.
   routeloom::fail_streak_boot(s_fail);
+  // PT-4M-v2 is checked before NVS: on another table the NVS labels could
+  // point at foreign data.
+  auto status = routeloom::espnow::verify_flash_layout();
+  if (!status) fail(status.detail);
   // Identity, nonce reservations, replay state and message sessions live in
   // NVS. Never erase it automatically after a version/capacity error: that
   // would silently turn a recoverable storage problem into key/counter
@@ -435,7 +440,7 @@ extern "C" void app_main(void) {
   // block this write. Every boot — even one that fails below — consumes a
   // session, which keeps TX epochs strictly fresh.
   std::uint32_t message_session = 0;
-  auto status = routeloom::next_boot_session(message_session);
+  status = routeloom::next_boot_session(message_session);
   if (!status) fail(status.detail);
 
   const esp_err_t sec_nvs_error =

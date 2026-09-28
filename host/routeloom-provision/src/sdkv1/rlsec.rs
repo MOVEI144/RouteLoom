@@ -35,8 +35,8 @@ use super::identity::{
 
 /// The dedicated security NVS partition label (`kSecurityNvsPartition`).
 pub const RLSEC_PARTITION: &str = "rlsec";
-/// Partition sizes in the firmware tables (node 64 KiB, gateway 128 KiB).
-pub const RLSEC_NODE_PARTITION_BYTES: u32 = 0x1_0000;
+/// Partition sizes in the PT-4M-v2 firmware tables (128 KiB for every role).
+pub const RLSEC_NODE_PARTITION_BYTES: u32 = 0x2_0000;
 pub const RLSEC_GATEWAY_PARTITION_BYTES: u32 = 0x2_0000;
 
 pub const NVS_NAMESPACE_IDENTITY: &str = "rlident";
@@ -146,6 +146,12 @@ pub fn rlsec_identity_readback(set: &RlsecNvsSet) -> Result<IdentityRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pt4m_node_partition_matches_gateway_partition() {
+        assert_eq!(RLSEC_NODE_PARTITION_BYTES, 0x2_0000);
+        assert_eq!(RLSEC_NODE_PARTITION_BYTES, RLSEC_GATEWAY_PARTITION_BYTES);
+    }
 
     #[test]
     fn resume_keys_match_the_device_adapter() {

@@ -289,11 +289,11 @@ routeloomctl provision-devca-keygen --device-ca-id 0dca000000000001 --out devca.
 routeloomctl provision-identity --ca-key devca.key --spec identity-spec.json \
     --node 00a1000000001234 --serial 1 --out-dir dev-00a1000000001234
 cd dev-00a1000000001234
-python -m esp_idf_nvs_partition_gen generate rlsec-nvs.csv rlsec.bin 0x10000   # gatewayは0x20000
-esptool.py write_flash 0x190000 rlsec.bin                                      # partitions.csvのrlsec offset
+python -m esp_idf_nvs_partition_gen generate rlsec-nvs.csv rlsec.bin 0x20000   # PT-4M-v2の全role
+esptool.py write_flash 0x20000 rlsec.bin                                       # partitions.csvのrlsec offset
 ```
 
-生成したCSVはPyPIの`esp-idf-nvs-partition-gen`（ESP-IDFの`nvs_partition_gen.py`と同じもの）で64KiB imageにでき、image内の`rlident`/`i0`・`i1`が`identity.rli1`とbyte一致することを手元で確認した（CIには入れていない）。`rlsec`全体を書き換えるので既存の`rlcounter`/`rlreplay`は消える（08 Q13で許容済みのNVS消去）。tier T2のNVS暗号化は生成器の`encrypt`と`nvs_keys` partitionで行うが、flash暗号化・secure bootのeFuse操作は不可逆で別承認のため、この手順にもtoolにも入れていない。
+生成したCSVはPyPIの`esp-idf-nvs-partition-gen`（ESP-IDFの`nvs_partition_gen.py`と同じもの）でimageにでき、image内の`rlident`/`i0`・`i1`が`identity.rli1`とbyte一致することを手元で確認した（CIには入れていない）。`rlsec`全体を書き換えるので既存の`rlcounter`/`rlreplay`は消える（08 Q13で許容済みのNVS消去）。tier T2のNVS暗号化は生成器の`encrypt`と`nvs_keys` partitionで行うが、flash暗号化・secure bootのeFuse操作は不可逆で別承認のため、この手順にもtoolにも入れていない。
 
 機器内生成（既定）：`provision-pop-challenge --node <id>`→機器の保守verbが鍵生成（Entropy READY後）とPoPを返す→`provision-devcert … --challenge <hex> --pop <file>`がPoPを検証してDevCertと`identity-bundle.json`を出す→保守verbがbundleとDevCertのcnf＝自分の公開鍵を確かめてRLI1を`rlident`へ封緘・readback。保守verbとPoPの共通vectorはP7の残り（下の§6.2）で実装した。
 

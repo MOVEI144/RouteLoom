@@ -6,8 +6,10 @@ record sizes and budget constants straight from the C++ headers and the
 partition tables of every firmware app, then checks that the capped
 worst-case peer state fits 80% of the usable entries of the "rlsec" NVS
 partition, that the table fits the flash size the build assumes, and that
-the firmware selects the table. Arithmetic only: it does not measure a
-device (V1-N08 is the HIL counterpart).
+the firmware selects the table. Every table must be the PT-4M-v2 layout the
+boot check expects (routeloom/espnow_flash_layout.hpp), with bootloader
+rollback on. Arithmetic only: it does not measure a device (V1-N08 is the
+HIL counterpart).
 """
 from __future__ import annotations
 
@@ -23,8 +25,8 @@ PAGE_BYTES = 4096
 # ESP-IDF's default CONFIG_ESPTOOLPY_FLASHSIZE (2 MB) applies when an app's
 # sdkconfig.defaults does not choose one; every supported board has >= 4 MB.
 DEFAULT_FLASH_BYTES = 0x200000
-# Factory size of the previous CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE table
-# (1500 KiB): the custom table must not shrink the app partition.
+# App size of the previous CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE table
+# (1500 KiB): an OTA slot must not be smaller.
 PREVIOUS_FACTORY_BYTES = 1500 * 1024
 SECURITY_PARTITION = "rlsec"
 
@@ -51,6 +53,7 @@ HEADERS = {
     "provider": "components/routeloom_espnow/include/routeloom/psk_security.hpp",
     "records": "components/routeloom/include/routeloom/sdkv1_records.hpp",
     "store": "components/routeloom/include/routeloom/sdkv1_store.hpp",
+    "flash_layout": "components/routeloom_espnow/include/routeloom/espnow_flash_layout.hpp",
 }
 
 
@@ -105,6 +108,21 @@ def parse_partitions(text: str) -> list[Partition]:
     return partitions
 
 
+def layout_rows(header: str) -> list[tuple[str, int, int, int, int]]:
+    """Rows of kPt4mV2, the table boot verifies."""
+    block = re.search(r"kPt4mV2\[\]\s*=\s*\{(.*?)\};", header, re.S)
+    if block is None:
+        raise BudgetError("kPt4mV2 table not found")
+    rows = [(name, int(kind, 0), int(subtype, 0), int(offset, 0), int(size, 0))
+            for name, kind, subtype, offset, size in re.findall(
+                r'\{"(\w+)",\s*(0x[0-9A-Fa-f]+|\d+),\s*'
+                r'(0x[0-9A-Fa-f]+|\d+),\s*(0x[0-9A-Fa-f]+),\s*'
+                r'(0x[0-9A-Fa-f]+)\}', block.group(1))]
+    if not rows:
+        raise BudgetError("kPt4mV2 has no rows")
+    return rows
+
+
 def blob_entries(size: int, entry_bytes: int) -> int:
     """NVS v2 blob: index entry + chunk header + 32-byte data spans."""
     return 2 + (size + entry_bytes - 1) // entry_bytes
@@ -136,6 +154,7 @@ def load_constants(sources: dict[str, str]) -> dict[str, int]:
     if match is None:
         raise BudgetError("kPeerStateEntriesPerPeer static_assert not found")
     constants["declared_entries_per_peer"] = int(match.group(1))
+    constants["layout"] = layout_rows(sources["flash_layout"])
     return constants
 
 
@@ -181,10 +200,13 @@ def check_app(app: str, sources: dict[str, str], constants: dict[str, int]) -> d
           and re.search(r'^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"$',
                         defaults, re.M) is not None
           and "CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y" not in defaults)
+    check("rollback_enabled", re.search(r"^CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y$",
+                                        defaults, re.M) is not None)
     flash = DEFAULT_FLASH_BYTES
-    size_match = re.search(r"^CONFIG_ESPTOOLPY_FLASHSIZE_(\d+)MB=y$", defaults, re.M)
-    if size_match:
-        flash = int(size_match.group(1)) * 1024 * 1024
+    sizes = re.findall(r"^CONFIG_ESPTOOLPY_FLASHSIZE_(\d+)MB=y$", defaults, re.M)
+    check("flash_size_4mb", sizes == ["4"])
+    if sizes:
+        flash = int(sizes[0]) * 1024 * 1024
 
     try:
         partitions = parse_partitions(sources[f"{app}/partitions.csv"])
@@ -205,9 +227,17 @@ def check_app(app: str, sources: dict[str, str], constants: dict[str, int]) -> d
     for p in partitions:
         alignment = 0x10000 if p.type == "app" else PAGE_BYTES
         check(f"aligned:{p.name}", p.offset % alignment == 0 and p.size % PAGE_BYTES == 0)
-    factory = by_name.get("factory")
-    check("factory_not_shrunk", factory is not None and factory.type == "app"
-          and factory.size >= PREVIOUS_FACTORY_BYTES)
+    kinds = {"app": 0, "data": 1}
+    subtypes = {("data", "ota"): 0, ("data", "phy"): 1,
+                ("data", "nvs"): 2, ("data", "coredump"): 3,
+                ("app", "ota_0"): 0x10, ("app", "ota_1"): 0x11}
+    rows = [(p.name, kinds.get(p.type), subtypes.get((p.type, p.subtype)),
+             p.offset, p.size) for p in partitions]
+    check("layout_matches_boot_check", rows == constants["layout"])
+    slots = [by_name.get(name) for name in ("ota_0", "ota_1")]
+    check("ota_slots", all(s is not None and s.type == "app" and s.subtype == s.name
+                           and s.size >= PREVIOUS_FACTORY_BYTES for s in slots)
+          and slots[0].size == slots[1].size and "factory" not in by_name)
     system = by_name.get("nvs")
     check("system_nvs_present", system is not None and system.type == "data"
           and system.subtype == "nvs")

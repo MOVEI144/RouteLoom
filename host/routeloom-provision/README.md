@@ -115,8 +115,8 @@ readback. A sealed `console_locked` flag refuses every verb.
 routeloomctl provision-identity --ca-key devca.key --spec identity-spec.json \
     --node 00a1000000001234 --serial 1 --out-dir dev-00a1000000001234
 cd dev-00a1000000001234
-python -m esp_idf_nvs_partition_gen generate rlsec-nvs.csv rlsec.bin 0x10000   # gateway: 0x20000
-esptool.py write_flash 0x190000 rlsec.bin   # the rlsec offset in firmware/*/partitions.csv
+python -m esp_idf_nvs_partition_gen generate rlsec-nvs.csv rlsec.bin 0x20000   # PT-4M-v2, every role
+esptool.py write_flash 0x20000 rlsec.bin   # the rlsec offset in firmware/*/partitions.csv
 ```
 
 The key is generated on this host; the tool proves possession to itself

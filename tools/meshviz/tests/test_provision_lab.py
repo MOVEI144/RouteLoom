@@ -24,6 +24,7 @@ from routeloom_meshviz import scenario as sc
 from types import SimpleNamespace
 
 from test_provisioning import FakeConsole, FakeOffice
+import pt4m_fixture
 
 
 # --- console + board doubles ---------------------------------------------------
@@ -168,7 +169,7 @@ def _image_bytes(project: bytes) -> bytes:
     """ESP image header + esp_app_desc_t as verify_bundle/packaging expect."""
     image = bytearray(512)
     image[0] = 0xe9
-    image[2:4] = b'\x02\x1f'
+    image[2:4] = b'\x02\x2f'
     image[12:14] = (5).to_bytes(2, 'little')
     image[14] = 1
     image[15:17] = (1).to_bytes(2, 'little')
@@ -183,44 +184,8 @@ def _image_bytes(project: bytes) -> bytes:
 def _build_bundle(root: Path, name: str, *, role: str, console: bool):
     """Package a signed bundle for `role`; `console` marks the setup image."""
     build = root / f'build-{name}'
-    (build / 'bootloader').mkdir(parents=True)
-    (build / 'partition_table').mkdir()
-    project = f'routeloom_{role}'.encode()
-    entries = []
-    rlsec = 0x20000 if role == 'bridge_node' else 0x10000
-    for pname, kind, subtype, offset, size in (
-            ('nvs', 1, 2, 0x9000, 0x6000),
-            ('phy_init', 1, 1, 0xf000, 0x1000),
-            ('factory', 0, 0, 0x10000, 0x180000),
-            ('rlsec', 1, 2, 0x190000, rlsec),
-            ('rlcfg', 1, 2, 0x1b0000, 0x6000),
-            ('rlkeys', 1, 2, 0x1b6000, 0x3000)):
-        entry = bytearray(32)
-        entry[:2] = bytes.fromhex('aa50')
-        entry[2:4] = bytes((kind, subtype))
-        entry[4:8] = offset.to_bytes(4, 'little')
-        entry[8:12] = size.to_bytes(4, 'little')
-        entry[12:12 + len(pname)] = pname.encode()
-        entries.append(bytes(entry))
-    partition = b''.join(entries)
-    partition += b'\xeb\xeb' + b'\xff' * 14 + hashlib.md5(partition).digest()
-    partition += b'\xff' * (0xc00 - len(partition))
-    for fname, image in (('bootloader/bootloader.bin', _image_bytes(b'routeloom_boot')),
-                         ('partition_table/partition-table.bin', partition),
-                         (f'{role}.bin', _image_bytes(project))):
-        (build / fname).write_bytes(image)
-    (build / 'flasher_args.json').write_text(json.dumps({
-        'flash_files': {'0x0': 'bootloader/bootloader.bin',
-                        '0x8000': 'partition_table/partition-table.bin',
-                        '0x10000': f'{role}.bin'},
-        'extra_esptool_args': {'chip': 'esp32c3'},
-        'flash_settings': {'flash_mode': 'dio', 'flash_freq': '80m',
-                           'flash_size': '2MB'},
-        'write_flash_args': ['--flash-mode', 'dio', '--flash-size', '2MB',
-                             '--flash-freq', '80m'],
-        'bootloader': {'encrypted': 'false'},
-        'partition-table': {'encrypted': 'false'},
-        'app': {'encrypted': 'false'}}))
+    pt4m_fixture.write_build(build, f'{role}.bin', _image_bytes(b'routeloom_boot'),
+                             _image_bytes(f'routeloom_{role}'.encode()))
     (build / 'ram-report.json').write_text('{}')
     app = root / 'firmware' / name
     app.mkdir(parents=True)
@@ -235,17 +200,12 @@ def _build_bundle(root: Path, name: str, *, role: str, console: bool):
         'CONFIG_BOOTLOADER_OFFSET_IN_FLASH=0x0\n'
         'CONFIG_ESPTOOLPY_FLASHMODE="dio"\n'
         'CONFIG_ESPTOOLPY_FLASHFREQ="80m"\n'
-        'CONFIG_ESPTOOLPY_FLASHSIZE="2MB"\n'
+        'CONFIG_ESPTOOLPY_FLASHSIZE="4MB"\n'
+        'CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y\n'
         'CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y\n'
         + ('CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y\n' if console else ''))
     (app / 'sdkconfig').write_text(sdkconfig)
-    (app / 'partitions.csv').write_text(
-        'nvs,data,nvs,0x9000,0x6000\n'
-        'phy_init,data,phy,0xf000,0x1000\n'
-        'factory,app,factory,0x10000,0x180000\n'
-        f'rlsec,data,nvs,0x190000,{rlsec:#x}\n'
-        'rlcfg,data,nvs,0x1b0000,0x6000\n'
-        'rlkeys,data,nvs,0x1b6000,0x3000\n')
+    (app / 'partitions.csv').write_text(pt4m_fixture.PARTITIONS_CSV)
     key = root / 'private.pem'
     if not key.exists():
         import shutil
@@ -459,9 +419,9 @@ class LabBackendTests(unittest.TestCase):
                          [(str(self.backend.site_dir), job.node_id, 'endpoint')])
         # The write happened twice: setup image, then the field image.
         self.assertEqual(len(self.boards.flashed), 2)
-        self.assertEqual(len(self.boards.flashed[0][1].images), 3)
+        self.assertEqual(len(self.boards.flashed[0][1].images), 4)
         self.assertEqual([image.offset for image in self.boards.flashed[1][1].images],
-                         [prov.APP_IMAGE_OFFSET])
+                         [0x10000, prov.APP_IMAGE_OFFSET])
         journal = prov.ProvisionJournal.load(
             self.backend._journals() / f'node-{job.node_id}.journal.json')
         self.assertTrue(journal.done)

@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import flash  # noqa: E402
 import rig  # noqa: E402
-from reprovision_reset import RLSEC_OFFSET, RLSEC_SIZES  # noqa: E402
+from reprovision_reset import RLSEC_OFFSET, RLSEC_SIZES, rlsec_row_matches  # noqa: E402
 
 
 def main() -> int:
@@ -28,9 +28,9 @@ def main() -> int:
     if board.chip not in ("esp32c3", "esp32c5", "esp32c6") or not board.mac or board.app not in RLSEC_SIZES:
         p.error("restore requires an audited C3/C5/C6 board with pinned MAC")
     expected_size = RLSEC_SIZES[board.app]
-    table = (pathlib.Path(__file__).resolve().parents[2] /
-             f"firmware/{board.app}/partitions.csv").read_text()
-    if f"rlsec,    data, nvs,     {RLSEC_OFFSET}, {expected_size}" not in table:
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    table = (repo / f"firmware/{board.app}/partitions.csv").read_text()
+    if not rlsec_row_matches(table, expected_size):
         p.error("rlsec partition map changed")
     manifest = json.loads(pathlib.Path(args.manifest).read_text())
     if (manifest.get("board") != board.name or
@@ -51,6 +51,9 @@ def main() -> int:
     port, _, state = rig.resolve_board_port(board)
     if state != "ONLINE" or port is None:
         p.error(f"target port unavailable: {state}")
+    flash.preflight_board(board, port, args.esptool, str(out))
+    flash.verify_device_partition_table(args.esptool, board.chip, port,
+                                        board.build_dir(str(repo)))
     identity = flash.preflight_board(board, port, args.esptool, str(out))
     cmd = [args.esptool, "--chip", board.chip, "--port", port,
            "write-flash", RLSEC_OFFSET, str(backup)]

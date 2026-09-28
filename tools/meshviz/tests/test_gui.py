@@ -341,7 +341,7 @@ class GuiSmokeTests(unittest.TestCase):
         boards._flash_selected()
         self.assertTrue(spin(self.app, lambda: not boards.busy))
         self.assertEqual(boards.rows[0].state, 'Written')
-        self.assertEqual(boards.backend.written['fake://A'], [0, 0x8000, 0x10000])
+        self.assertEqual(boards.backend.written['fake://A'], [0, 0x8000, 0x10000, 0x40000])
         # Board C reports unknown flash-encryption state: preview refuses and nothing is written.
         boards.select_ports(['fake://C'])
         self.assertIn('暗号化', boards.preview.toPlainText())

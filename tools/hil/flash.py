@@ -3,9 +3,9 @@
 
 Reads ``firmware/<app>/build/flasher_args.json`` (written by idf.py) for the
 real offsets/files — the same source ``idf.py flash`` uses — and invokes
-``esptool write-flash`` directly. Falls back to the standard single-app
-offsets (bootloader 0x0, partition table 0x8000, app 0x10000) only when the
-JSON is absent, and says so loudly in the log.
+``esptool write-flash`` directly. Falls back to the PT-4M-v2 offsets
+(bootloader 0x0, or 0x2000 on C5; table 0x8000, otadata 0x10000, app 0x40000) only
+when the JSON lists no files, and says so loudly in the log.
 
 After flashing, esptool's ``--after hard-reset`` reboots the board; when the
 board has a readable console (``console != none``) the boot log is captured
@@ -28,6 +28,7 @@ import hashlib
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -64,14 +65,29 @@ def boot_log_failures(text: str) -> list[str]:
     return [line.rstrip() for line in text.splitlines()
             if any(marker in line for marker in BOOT_FAILURE_MARKERS)]
 
-# Standard bootloader/partition-table offsets. Both firmware apps use a
-# custom partitions.csv (single app + the "rlsec" security NVS partition,
-# issue #37); the partition table itself stays at 0x8000, and the app offset
-# comes from flasher_args.json.
+# PT-4M-v2 (firmware/*/partitions.csv): the partition table stays at 0x8000,
+# otadata at 0x10000 and the first OTA slot at 0x40000. The app offset comes
+# from flasher_args.json when present.
+FALLBACK_APP_OFFSET = "0x40000"
 FALLBACK_FLASH_FILES = {
     "0x0": "bootloader/bootloader.bin",
     "0x8000": "partition_table/partition-table.bin",
+    "0x10000": "ota_data_initial.bin",
 }
+PT4M_APP_OFFSET = 0x40000
+PT4M_OTADATA_OFFSET = 0x10000
+PT4M_OTADATA_SIZE = 0x2000
+PT4M_PARTITIONS = (
+    (b"nvs", 1, 2, 0x9000, 0x6000),
+    (b"phy_init", 1, 1, 0xF000, 0x1000),
+    (b"otadata", 1, 0, 0x10000, 0x2000),
+    (b"rlcfg", 1, 2, 0x12000, 0x6000),
+    (b"rlkeys", 1, 2, 0x18000, 0x3000),
+    (b"rlsec", 1, 2, 0x20000, 0x20000),
+    (b"ota_0", 0, 0x10, 0x40000, 0x1D0000),
+    (b"ota_1", 0, 0x11, 0x210000, 0x1D0000),
+    (b"coredump", 1, 3, 0x3E0000, 0x10000),
+)
 
 
 class FlashError(RuntimeError):
@@ -181,15 +197,33 @@ def build_write_flash_cmd(
     flash_files = args.get("flash_files") or {}
     used_fallback = not flash_files
     if app_only:
-        app_entry = args.get("app") or {}
-        offset = app_entry.get("offset")
-        file = app_entry.get("file")
-        if not offset or not file:
-            raise FlashError("app-only requires an explicit app offset and file")
-        flash_files = {offset: file}
+        # The app goes to ota_0 and the blank otadata makes the bootloader
+        # boot ota_0, whichever slot ran before.
+        entries = [args.get("app") or {}, args.get("otadata") or {}]
+        if not all(entry.get("offset") and entry.get("file") for entry in entries):
+            raise FlashError("app-only requires explicit app and otadata offsets and files")
+        try:
+            offsets = [int(entry["offset"], 0) for entry in entries]
+        except (TypeError, ValueError) as exc:
+            raise FlashError("invalid app-only flash offset") from exc
+        if offsets != [PT4M_APP_OFFSET, PT4M_OTADATA_OFFSET]:
+            raise FlashError("app-only requires PT-4M-v2 ota_0 and otadata offsets")
+        flash_files = {entry["offset"]: entry["file"] for entry in entries}
     elif used_fallback:
         flash_files = dict(FALLBACK_FLASH_FILES)
-        flash_files["0x10000"] = _find_app_bin(build_dir)
+        if chip == "esp32c5":
+            flash_files["0x2000"] = flash_files.pop("0x0")
+        flash_files[FALLBACK_APP_OFFSET] = _find_app_bin(build_dir)
+
+    expected_boot = 0x2000 if chip == "esp32c5" else 0
+    try:
+        offsets = {int(offset, 0) for offset in flash_files}
+    except (TypeError, ValueError) as exc:
+        raise FlashError("invalid flash offset") from exc
+    expected = ({PT4M_OTADATA_OFFSET, PT4M_APP_OFFSET} if app_only else
+                {expected_boot, 0x8000, PT4M_OTADATA_OFFSET, PT4M_APP_OFFSET})
+    if len(flash_files) != len(expected) or offsets != expected:
+        raise FlashError("flash files do not match PT-4M-v2 offsets")
 
     cmd = [esptool]
     if chip:
@@ -207,6 +241,10 @@ def build_write_flash_cmd(
         path = rel if os.path.isabs(rel) else os.path.join(build_dir, rel)
         if not os.path.isfile(path):
             raise FlashError(f"flash file missing: {path}")
+        if int(offset, 0) == PT4M_OTADATA_OFFSET and app_only:
+            with open(path, "rb") as fh:
+                if fh.read(PT4M_OTADATA_SIZE + 1) != b"\xff" * PT4M_OTADATA_SIZE:
+                    raise FlashError("app-only requires blank PT-4M-v2 otadata")
         resolved[offset] = path
         cmd += [offset, path]
     return cmd, resolved, used_fallback
@@ -216,7 +254,7 @@ def _find_app_bin(build_dir: str) -> str:
     bins = [
         f for f in os.listdir(build_dir)
         if f.endswith(".bin") and "bootloader" not in f
-        and "partition" not in f
+        and "partition" not in f and f != "ota_data_initial.bin"
     ]
     if not bins:
         raise FlashError(f"no app .bin found in {build_dir}")
@@ -231,6 +269,34 @@ def sha256_file(path: str) -> str:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def verify_device_partition_table(esptool: str, chip: str, port: str,
+                                  build_dir: str) -> None:
+    table = os.path.join(build_dir, "partition_table", "partition-table.bin")
+    if not os.path.isfile(table):
+        raise FlashError("app-only requires the built partition table")
+    with open(table, "rb") as fh:
+        data = fh.read(0x1001)
+    header_size = 32 * len(PT4M_PARTITIONS)
+    if len(data) < header_size + 32 or len(data) > 0x1000:
+        raise FlashError("built partition table is not PT-4M-v2")
+    for index, expected in enumerate(PT4M_PARTITIONS):
+        magic, kind, subtype, offset, size, label, flags = struct.unpack_from(
+            "<HBBII16sI", data, index * 32)
+        if (magic != 0x50AA or
+                (label.split(b"\0", 1)[0], kind, subtype, offset, size) != expected or
+                flags != 0):
+            raise FlashError("built partition table is not PT-4M-v2")
+    checksum = b"\xeb\xeb" + b"\xff" * 14 + hashlib.md5(data[:header_size]).digest()
+    if (data[header_size:header_size + 32] != checksum or
+            data[header_size + 32:] != b"\xff" * (len(data) - header_size - 32)):
+        raise FlashError("built partition table is not PT-4M-v2")
+    result = subprocess.run(
+        [esptool, "--chip", chip, "--port", port, "verify-flash", "0x8000", table],
+        capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise FlashError("device partition table differs from PT-4M-v2; full erase and flash required")
 
 
 def flash_board(
@@ -281,11 +347,16 @@ def _flash_board_from_dir(board, port, out_dir, esptool, app_only, boot_seconds,
                           chip_revision_range=None):
     os.makedirs(out_dir, exist_ok=True)
     preflight = preflight_board(board, port, esptool, out_dir,
-                                minimum_flash_bytes=minimum_flash_bytes,
+                                minimum_flash_bytes=minimum_flash_bytes or 0x400000,
                                 chip_revision_range=chip_revision_range)
     cmd, files, fallback = build_write_flash_cmd(
         build_dir, port, esptool, board.chip or None, board.flash_baud, app_only
     )
+    if app_only:
+        verify_device_partition_table(esptool, board.chip, port, build_dir)
+        preflight = preflight_board(board, port, esptool, out_dir,
+                                    minimum_flash_bytes=minimum_flash_bytes or 0x400000,
+                                    chip_revision_range=chip_revision_range)
     manifest = {
         "board": board.name,
         "app": board.app,
@@ -364,7 +435,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--board", required=True, help="role name in the bench")
     parser.add_argument("--esptool", default=DEFAULT_ESPTOOL)
     parser.add_argument("--app-only", action="store_true",
-                        help="flash only the app partition (0x10000)")
+                        help="flash only ota_0 and reset otadata to boot it")
     parser.add_argument("--boot-seconds", type=float, default=DEFAULT_BOOT_SECONDS,
                         help="post-flash boot capture length (0 disables)")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)

@@ -152,14 +152,9 @@ jobs:
           . "$IDF_PATH/export.sh" >/dev/null 2>&1 || true
           version='${{ github.ref_name }}'
           stage="routeloom-${version}-firmware-${{ matrix.app }}-${{ matrix.target }}"
-          mkdir -p "dist/$stage"
           cd "firmware/${{ matrix.app }}"
-          cp build/*.bin build/*.elf build/*.map "../../dist/$stage/"
-          for f in build/bootloader/bootloader.bin build/partition_table/partition-table.bin \
-                   build/flasher_args.json build/flash_args build/size-report.txt \
-                   build/size.json build/ram-report.json sdkconfig; do
-            if [ -f "$f" ]; then cp "$f" "../../dist/$stage/"; fi
-          done
+          python3 "$GITHUB_WORKSPACE/tools/release_firmware.py" \
+            build sdkconfig "../../dist/$stage"
           cd "$GITHUB_WORKSPACE"
           {
             echo "artifact: ${stage}.tar.gz"
