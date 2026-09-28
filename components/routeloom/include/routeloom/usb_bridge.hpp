@@ -13,6 +13,7 @@
 #include "routeloom/fixed_containers.hpp"
 #include "routeloom/gateway.hpp"
 #include "routeloom/node.hpp"
+#include "routeloom/profile.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 #include "routeloom/usb_codec.hpp"
@@ -161,9 +162,14 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // per-node link/route snapshots and, after a host query sets SUBSCRIBE,
   // streams 0x42 join/leave/route-change events for that session only.
   // Advertises CAP_NODE_STATUS_V1 in HelloAck. Requires config_.mesh.
+  // Unsupported when ROUTELOOM_USB_NODE_STATUS is compiled out.
   Status attach_node_status() noexcept;
-  const NodeStatusMonitor& node_status_monitor() const noexcept {
-    return node_monitor_;
+  bool node_status_armed() const noexcept {
+#if ROUTELOOM_USB_NODE_STATUS
+    return node_monitor_.armed();
+#else
+    return false;
+#endif
   }
 
   // Late observation binding (observation_v1): serves HostOps 0x70
@@ -748,13 +754,18 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   ConfigGateway* config_gateway_{nullptr};
   HostRegistration registration_{};
   // Bounded pending 0x11 ingress slots — shared by wire submits and the
-  // host loopback so the 8-deep pending bound is one honest pool.
-  std::array<PendingIngress, kGatewayPendingMax> pending_ingress_{};
-  std::array<PendingGatewaySend, kGatewayPendingMax> pending_sends_{};
+  // host loopback so the 8-deep pending bound is one honest pool. Zero
+  // slots when ROUTELOOM_USB_GATEWAY_ENDPOINT is compiled out (the
+  // endpoint then never attaches and every gateway op is Unsupported).
+  static constexpr std::size_t kGatewaySlots =
+      ROUTELOOM_USB_GATEWAY_ENDPOINT ? kGatewayPendingMax : 0;
+  std::array<PendingIngress, kGatewaySlots> pending_ingress_{};
+  std::array<PendingGatewaySend, kGatewaySlots> pending_sends_{};
   std::uint64_t next_ingress_request_{1};
   // Bounded remote diagnostic queries (D1d): full -> the 0x30 request is
   // refused with Busy, never silently queued beyond the bound.
   std::array<PendingDiagnostic, kPendingDiagnosticCapacity> pending_diag_{};
+#if ROUTELOOM_USB_NODE_STATUS
   // node_status_v1 state: the per-session event baseline (disarmed on every
   // session teardown) and the .bss page staging for 0x41 replies.
   NodeStatusMonitor node_monitor_{};
@@ -763,6 +774,7 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // The encoded page reply is staged in tx_body_ (see above).
   static_assert(kTxScratchBytes >= kGatewayInnerHeadSize + kNodeStatusPageMaxPayload,
                 "node-status page staging");
+#endif
   // observation_v1 state: the firmware-owned source (nullptr -> 0x70
   // answers Unsupported), the per-session subscription and the last served
   // digests + milestone key (change baselines for 0x72). Disarmed on every
@@ -814,7 +826,7 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
     std::uint64_t usb_request{0};
     bool used{false};
   };
-  std::array<PendingGroup, kGroupOriginCapacity> pending_group_{};
+  std::array<PendingGroup, ROUTELOOM_USB_GROUP ? kGroupOriginCapacity : 0> pending_group_{};
   // attach_group() ran: the group lane is bound and the capability bit is
   // whatever the mesh can currently serve (refresh_group_capability keeps
   // it truthful across later config changes).

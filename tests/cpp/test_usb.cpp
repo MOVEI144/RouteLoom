@@ -1545,7 +1545,7 @@ void test_bridge_node_status() {
       CHECK(header.result == static_cast<std::uint16_t>(ConfigOpsResult::Unsupported));
       CHECK(header.count == 0 && header.flags == 0);
     }
-    CHECK(!world.bridge.node_status_monitor().armed());
+    CHECK(!world.bridge.node_status_armed());
     world.device_sink.frames.clear();
     // max_entries 0 is malformed.
     std::array<std::uint8_t, 14> bad{{1, 0x40, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
@@ -1625,7 +1625,7 @@ void test_bridge_node_status() {
   world.device_sink.frames.clear();
   world.feed(node_status_request(host, request++, 0, 1, kNodeStatusQuerySubscribe), now);
   world.drain(now);
-  CHECK(world.bridge.node_status_monitor().armed());
+  CHECK(world.bridge.node_status_armed());
   {
     const auto pages = host_ops_inners(host, world.device_sink, HostOpsSub::NodeStatusPage);
     CHECK(pages.size() == 1);
@@ -1693,7 +1693,7 @@ void test_bridge_node_status() {
   world.device_sink.frames.clear();
   HostDriver second;
   CHECK(host_handshake(world, second, now, 0x6363, 90) != 0);
-  CHECK(!world.bridge.node_status_monitor().armed());
+  CHECK(!world.bridge.node_status_armed());
   world.feed(second.sealed(FrameKind::Credit, 91, ByteView{grant.data(), grant.size()}), now);
   CHECK_OK(world.n1.remove_neighbor(12, now));
   now += 1000;

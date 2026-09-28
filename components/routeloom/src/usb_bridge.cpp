@@ -72,6 +72,9 @@ UsbBridge::UsbBridge(const Config& config, ByteStream& stream) noexcept
       window_(BootLease::derive(config.boot_id, config.node)) {}
 
 Status UsbBridge::attach_gateway(GatewayDelivery& gateway) noexcept {
+  if (!ROUTELOOM_USB_GATEWAY_ENDPOINT) {
+    return Status::error(StatusCode::Unsupported, "gateway endpoint compiled out");
+  }
   gateway_ = &gateway;
   gateway.attach();
   gateway.set_observer(*this);
@@ -93,6 +96,9 @@ Status UsbBridge::attach_gateway(GatewayDelivery& gateway) noexcept {
 }
 
 Status UsbBridge::attach_config(ConfigGateway& gateway) noexcept {
+  if (!ROUTELOOM_USB_GATEWAY_ENDPOINT) {
+    return Status::error(StatusCode::Unsupported, "config endpoint compiled out");
+  }
   config_gateway_ = &gateway;
   if (config_.mesh != nullptr) {
     config_.mesh->set_config_sink(&gateway);
@@ -111,6 +117,9 @@ Status UsbBridge::attach_diagnostics() noexcept {
 }
 
 Status UsbBridge::attach_node_status() noexcept {
+  if (!ROUTELOOM_USB_NODE_STATUS) {
+    return Status::error(StatusCode::Unsupported, "node status compiled out");
+  }
   if (config_.mesh == nullptr) {
     return Status::error(StatusCode::InvalidState, "node status needs mesh");
   }
@@ -119,6 +128,9 @@ Status UsbBridge::attach_node_status() noexcept {
 }
 
 Status UsbBridge::attach_observation(const ObservationSource& source) noexcept {
+  if (!ROUTELOOM_USB_OBSERVATION) {
+    return Status::error(StatusCode::Unsupported, "observation compiled out");
+  }
   observation_source_ = &source;
   config_.capability |= kCapObservationV1;
   return Status::success();
@@ -139,6 +151,9 @@ Status UsbBridge::set_rx_assurance_profile(const std::uint8_t profile) noexcept 
 }
 
 Status UsbBridge::attach_group() noexcept {
+  if (!ROUTELOOM_USB_GROUP) {
+    return Status::error(StatusCode::Unsupported, "group delivery compiled out");
+  }
   if (config_.mesh == nullptr) {
     return Status::error(StatusCode::InvalidState, "group needs mesh");
   }
@@ -1224,10 +1239,12 @@ void UsbBridge::handle_node_status_query(const std::uint64_t request,
   }
   NodeStatusPageHeader header{};
   std::size_t count = 0;
+  const NodeStatus* page = nullptr;
   if ((config_.capability & kCapNodeStatusV1) == 0 || config_.mesh == nullptr) {
     header.result = static_cast<std::uint16_t>(ConfigOpsResult::Unsupported);
     header.next_after = query.after;
   } else {
+#if ROUTELOOM_USB_NODE_STATUS
     // Arm BEFORE taking the page: the baseline and the first page then
     // describe the same instant, so no transition can fall between them.
     if ((query.flags & kNodeStatusQuerySubscribe) != 0) {
@@ -1243,6 +1260,8 @@ void UsbBridge::handle_node_status_query(const std::uint64_t request,
         (node_monitor_.armed() ? kNodeStatusPageArmed : 0U));
     header.next_after = count > 0 ? node_page_[count - 1].node : query.after;
     header.event_seq = node_monitor_.last_sequence();
+    page = node_page_.data();
+#endif
   }
   header.count = static_cast<std::uint8_t>(count);
   // Page staging lives in .bss (the idle tx_body_), like the TX scratch: a
@@ -1250,9 +1269,8 @@ void UsbBridge::handle_node_status_query(const std::uint64_t request,
   // copies it into the TX queue before any pump can reuse the buffer.
   std::size_t written = 0;
   if (encode_node_status_page(
-          header, node_page_.data(), count,
-          MutableByteView{tx_body_.data(),
-                          kGatewayInnerHeadSize + kNodeStatusPageMaxPayload},
+          header, page, count,
+          MutableByteView{tx_body_.data(), kGatewayInnerHeadSize + kNodeStatusPageMaxPayload},
           written)) {
     enqueue(FrameKind::HostOps, 0, request,
             ByteView{tx_body_.data(), written}, now_ms);
@@ -1801,6 +1819,9 @@ void UsbBridge::on_group_delivery(const GroupDeliveryResult& result) noexcept {
 }
 
 void UsbBridge::pump_node_events(const MonotonicMs now_ms) noexcept {
+#if !ROUTELOOM_USB_NODE_STATUS
+  static_cast<void>(now_ms);
+#else
   if (state_ != SessionState::Active || !node_monitor_.armed() ||
       config_.mesh == nullptr ||
       now_ms - node_monitor_ms_ < kNodeMonitorIntervalMs) {
@@ -1829,6 +1850,7 @@ void UsbBridge::pump_node_events(const MonotonicMs now_ms) noexcept {
         ++stats_.node_events;
         return true;
       });
+#endif
 }
 
 void UsbBridge::refresh_milestone_gen(const JoinMilestones& milestones) noexcept {
@@ -2857,10 +2879,12 @@ void UsbBridge::reset_session_state() noexcept {
   // Pending diagnostic queries are session state: a reconnected session can
   // never observe a late reply under a minted slot (04 §USB correlation).
   for (auto& slot : pending_diag_) slot = PendingDiagnostic{};
+#if ROUTELOOM_USB_NODE_STATUS
   // The node-event baseline belongs to the session that armed it: a new
   // session starts silent until its host queries with SUBSCRIBE.
   node_monitor_.disarm();
   node_monitor_ms_ = 0;
+#endif
   // The observation subscription belongs to the session that armed it.
   observation_armed_ = false;
   observation_topology_mask_ = 0;
