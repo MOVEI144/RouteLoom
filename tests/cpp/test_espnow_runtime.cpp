@@ -13,6 +13,7 @@
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/autonomy_wire.hpp"
 #include "routeloom/node.hpp"
+#include "routeloom/owner_pump.hpp"
 #include "routeloom/types.hpp"
 #include "routeloom/wire.hpp"
 
@@ -494,6 +495,118 @@ void test_owner_drives_config_component() {
     CHECK(runtime.node().component_events_pending() == 0);
   }
   CHECK(!sink.last_hop_accepted);
+  runtime.stop();
+}
+
+// A radio that refills the event queue while the Owner drains it: every
+// dequeue injects the next frame until kRefillTotal frames were offered.
+struct RefillingRadio {
+  static constexpr unsigned kRefillTotal = 200;
+  TestSecurity* security{nullptr};
+  unsigned injected{0};
+  bool inject_next() {
+    if (injected >= kRefillTotal) return false;
+    routeloom::wire::PlainFrame plain{};
+    plain.header.type = routeloom::FrameType::Data;
+    plain.header.flags = routeloom::wire::kFlagEndProtected;
+    plain.header.delivery = routeloom::DeliveryClass::BestEffort;
+    plain.header.hop_remaining = 1;
+    plain.header.network = make_config().node.network;
+    plain.header.origin = kPeer;
+    plain.header.destination = kSelf;
+    plain.header.previous_hop = kPeer;
+    plain.header.next_hop = kSelf;
+    plain.header.message = MessageId{204, injected + 1};
+    plain.header.remaining_deadline_ms = 5000;
+    plain.header.original_lifetime_ms = 5000;
+    plain.header.link_epoch = 1;
+    plain.header.end_epoch = 1;
+    plain.payload[0] = static_cast<std::uint8_t>(injected >> 8);
+    plain.payload[1] = static_cast<std::uint8_t>(injected);
+    plain.payload_size = 2;
+    routeloom::wire::EncodedFrame encoded{};
+    if (!routeloom::wire::encode_new(plain, *security, encoded).ok()) return false;
+    if (!idf_stub::inject_rx(peer_mac().bytes.data(), kSelfMac.data(),
+                             encoded.bytes.data(), encoded.size)) return false;
+    ++injected;
+    return true;
+  }
+  static void on_receive(void* self) { (void)static_cast<RefillingRadio*>(self)->inject_next(); }
+};
+
+// Records which refill frames reached the node, in order: each is either
+// delivered or refused for lack of an ACK slot (the test sends no ACKs).
+struct ArrivalObserver final : routeloom::NodeObserver {
+  std::vector<std::uint64_t> arrivals;
+  void on_message(const routeloom::MessageKey& key, NodeId,
+                  ByteView) noexcept override {
+    note(&key.id);
+  }
+  void on_delivery(const routeloom::DeliveryResult&) noexcept override {}
+  void on_diagnostic(const char*, NodeId, const MessageId* id) noexcept override {
+    note(id);
+  }
+  void note(const MessageId* id) {
+    if (id != nullptr && id->session == 204) arrivals.push_back(id->sequence);
+  }
+};
+
+// One pass drains at most kRxDrainPerPass events; the rest stays queued in
+// FIFO order, none is lost, and the components still run every pass.
+void test_rx_drain_is_bounded_per_pass() {
+  idf_stub::reset();
+  TestSecurity security;
+  ArrivalObserver observer;
+  CountingConfigSink sink;
+  EspNowRuntimeConfig config = make_config();
+  config.node.route_lifetime_ms = 60000;
+  EspNowRuntime runtime(config, security, observer);
+  CHECK(runtime.initialize().ok());
+  CHECK(runtime.node().set_config_sink(&sink).ok());
+  CHECK(runtime.start().ok());
+  CHECK(runtime.register_neighbor(kPeer, peer_mac(), 1).ok());
+
+  RefillingRadio radio{};
+  radio.security = &security;
+  while (radio.injected < EspNowRuntime::kEventQueueCapacity && radio.inject_next()) {}
+  CHECK(radio.injected == EspNowRuntime::kEventQueueCapacity);
+  idf_stub::set_receive_hook(&RefillingRadio::on_receive, &radio);
+  unsigned passes = 0;
+  while (observer.arrivals.size() < RefillingRadio::kRefillTotal && passes < 50) {
+    const std::size_t before = observer.arrivals.size();
+    const unsigned polls_before = sink.polls;
+    runtime.poll_once();
+    ++passes;
+    CHECK(observer.arrivals.size() - before <= EspNowRuntime::kRxDrainPerPass);
+    CHECK(sink.polls == polls_before + 1);
+  }
+  idf_stub::set_receive_hook(nullptr, nullptr);
+  CHECK(passes > 1);
+  CHECK(observer.arrivals.size() == RefillingRadio::kRefillTotal);
+  for (std::size_t i = 0; i < observer.arrivals.size(); ++i) {
+    CHECK(observer.arrivals[i] == i + 1);
+  }
+  CHECK(runtime.owner_stats().polls == passes);
+  CHECK(runtime.owner_stats().rx_queue_max == EspNowRuntime::kEventQueueCapacity);
+  CHECK(runtime.owner_stats().empty_polls == 0);
+  runtime.poll_once();
+  CHECK(runtime.owner_stats().empty_polls == 1);
+  runtime.stop();
+}
+
+// The Owner wait rounds up to whole ticks: a 2 ms wait under the 100 Hz
+// stub tick blocks one tick instead of zero (a busy spin).
+void test_owner_wait_rounds_up_to_a_tick() {
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize().ok());
+  CHECK(runtime.start().ok());
+  runtime.wait_for_event(routeloom::kOwnerPollPeriodMs);
+  CHECK(idf_stub::last_peek_ticks() == 1);
+  runtime.wait_for_event(15);
+  CHECK(idf_stub::last_peek_ticks() == 2);
   runtime.stop();
 }
 
@@ -1209,6 +1322,8 @@ int main() {
   test_boot_installs_lease_port();
   test_prestart_owner_pump();
   test_owner_drives_config_component();
+  test_rx_drain_is_bounded_per_pass();
+  test_owner_wait_rounds_up_to_a_tick();
   test_security_callback_cannot_reenter_owner_lease();
   test_p6_binding_tracks_current_receive_context();
   test_reliable_to_static_peer_uses_binding();

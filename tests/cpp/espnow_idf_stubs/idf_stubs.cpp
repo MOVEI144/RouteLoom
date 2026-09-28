@@ -57,6 +57,10 @@ std::uint8_t g_completion_mac[6] = {0};
 unsigned g_send_outstanding = 0;
 unsigned g_tx_overruns = 0;
 
+void (*g_receive_hook)(void*) = nullptr;
+void* g_receive_hook_context = nullptr;
+unsigned g_last_peek_ticks = 0;
+
 struct FakeQueue {
   std::size_t item_size{0};
   std::size_t capacity{0};
@@ -89,7 +93,17 @@ void reset() noexcept {
   std::memset(g_completion_mac, 0, sizeof(g_completion_mac));
   g_send_outstanding = 0;
   g_tx_overruns = 0;
+  g_receive_hook = nullptr;
+  g_receive_hook_context = nullptr;
+  g_last_peek_ticks = 0;
 }
+
+void set_receive_hook(void (*hook)(void*), void* context) noexcept {
+  g_receive_hook = hook;
+  g_receive_hook_context = context;
+}
+
+unsigned last_peek_ticks() noexcept { return g_last_peek_ticks; }
 
 void set_now_us(const std::int64_t now_us) noexcept { g_now_us = now_us; }
 
@@ -218,18 +232,24 @@ BaseType_t xQueueReceive(const QueueHandle_t handle, void* item,
               queue->item_size);
   queue->head = (queue->head + 1) % queue->capacity;
   --queue->count;
+  if (g_receive_hook != nullptr) g_receive_hook(g_receive_hook_context);
   return pdTRUE;
 }
 
 BaseType_t xQueuePeek(const QueueHandle_t handle, void* item,
                       const TickType_t ticks) {
-  (void)ticks;
+  g_last_peek_ticks = ticks;
   if (handle == nullptr || item == nullptr) return 0;
   const FakeQueue* queue = static_cast<const FakeQueue*>(handle);
   if (queue->count == 0) return 0;
   std::memcpy(item, queue->storage + queue->head * queue->item_size,
               queue->item_size);
   return pdTRUE;
+}
+
+UBaseType_t uxQueueMessagesWaiting(const QueueHandle_t handle) {
+  if (handle == nullptr) return 0;
+  return static_cast<UBaseType_t>(static_cast<const FakeQueue*>(handle)->count);
 }
 
 void vQueueDelete(const QueueHandle_t handle) {

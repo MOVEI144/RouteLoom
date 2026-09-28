@@ -81,6 +81,11 @@ class EspNowRuntime final : public RadioPort,
  public:
   static constexpr std::size_t kPeerCapacity = 19;
   static constexpr std::size_t kEventQueueCapacity = 48;
+  // Queued driver events one poll_once() pass handles at most. A radio
+  // that refills the queue while it drains cannot starve the timers,
+  // node poll and components that run after the drain; the rest stays
+  // queued in FIFO order for the next pass.
+  static constexpr std::size_t kRxDrainPerPass = kEventQueueCapacity;
   static constexpr std::size_t kBootstrapQueueCapacity = 8;
   // contracts.json peer_partition: broadcast 1 + regular 16 + transient 3
   // = driver maximum 20. The regular budget applies only while a discovery
@@ -101,6 +106,20 @@ class EspNowRuntime final : public RadioPort,
   // Unknown completions; a retire and a driver recovery can both land
   // between two drains.
   static constexpr std::size_t kExpiredTxCapacity = 4;
+
+  // Owner pass counters (saturating). Occupancy is the longest single
+  // run, in microseconds, of each part of the Owner: the event drain, the
+  // bootstrap lane, the node poll with its components, and the security
+  // owner's poll (reported through note_security_busy_us).
+  struct OwnerStats {
+    std::uint32_t polls{0};
+    std::uint32_t empty_polls{0};   // passes that drained no queued event
+    std::uint32_t rx_queue_max{0};  // deepest event queue seen at a pass start
+    std::uint32_t max_rx_us{0};
+    std::uint32_t max_bootstrap_us{0};
+    std::uint32_t max_node_us{0};
+    std::uint32_t max_security_us{0};
+  };
 
   EspNowRuntime(const EspNowRuntimeConfig& config, SecurityProvider& security,
                 NodeObserver& observer) noexcept;
@@ -279,6 +298,10 @@ class EspNowRuntime final : public RadioPort,
     return bootstrap_rx_dropped_;
   }
   std::uint32_t rx_dropped() const noexcept { return rx_dropped_; }
+  const OwnerStats& owner_stats() const noexcept { return owner_stats_; }
+  void note_security_busy_us(std::uint64_t us) noexcept {
+    note_max(owner_stats_.max_security_us, us);
+  }
   // Non-RLD1 frames dropped because the source MAC is not in the peer
   // table — neighbouring-mesh interference and peer churn otherwise leave
   // no observable trace in the field.
@@ -306,6 +329,9 @@ class EspNowRuntime final : public RadioPort,
     std::atomic<bool>& active_;
     bool entered_{false};
   };
+  static void note_max(std::uint32_t& slot, const std::uint64_t value) noexcept {
+    if (value > slot) slot = value > UINT32_MAX ? UINT32_MAX : static_cast<std::uint32_t>(value);
+  }
   enum class EventKind : std::uint8_t { Rx, Tx };
   // TX completion provenance (02-telemetry §2.2): which lane a send callback
   // belongs to. Stale/fenced completions are evidence under their ORIGINAL
@@ -666,8 +692,9 @@ class EspNowRuntime final : public RadioPort,
   // Submit ms of the reserved TX — the poll-task callback watchdog so a
   // never-completing send cannot wedge pending_tx_ forever (02 §2.2).
   MonotonicMs pending_sent_ms_{0};
-  // Last stack high-water-mark log tick (poll_once rate limit).
+  // Last periodic trace tick (poll_once rate limit).
   MonotonicMs stack_hwm_log_ms_{0};
+  OwnerStats owner_stats_{};
   bool pending_tx_{false};
   bool broadcast_peer_{false};
   bool wifi_initialized_{false};
