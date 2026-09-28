@@ -114,17 +114,22 @@ D2-bで1ピアあたり約6 entry（両scopeの`c*`）が回収され、約14 en
 | 通常機器（C3/S3） | 24KiB | **64KiB**（16 page） | 15×126＝1890 |
 | gateway（S3推奨） | 24KiB | **128KiB**（32 page） | 31×126＝3906 |
 
-4MB flash（XIAO C3）の例（OTAなし）：
+v2 からは全 role・全 chip が 4MB の `PT-4M-v2` を使い、`rlsec` はどの role でも 128KiB になった（上の表の64KiBは旧配置の値。実際の表は各 app の`partitions.csv`）：
 
 ```text
-# Name,   Type, SubType, Offset,   Size
-nvs,      data, nvs,     0x9000,   0x6000
-phy_init, data, phy,     0xf000,   0x1000
-factory,  app,  factory, 0x10000,  0x180000
-rlsec,    data, nvs,     0x190000, 0x10000
+# Name,   Type, SubType,  Offset,   Size
+nvs,      data, nvs,      0x9000,   0x6000
+phy_init, data, phy,      0xF000,   0x1000
+otadata,  data, ota,      0x10000,  0x2000
+rlcfg,    data, nvs,      0x12000,  0x6000
+rlkeys,   data, nvs,      0x18000,  0x3000
+rlsec,    data, nvs,      0x20000,  0x20000
+ota_0,    app,  ota_0,    0x40000,  0x1D0000
+ota_1,    app,  ota_1,    0x210000, 0x1D0000
+coredump, data, coredump, 0x3E0000, 0x10000
 ```
 
-将来OTA（ota_0/ota_1 各1.5MB）を入れても `0x10000 + 2×0x180000 = 0x310000` の後に`rlsec` 64KiBを置けば4MB内に収まる。tier T2ではNVS暗号化（`nvs_keys` partition）を`rlsec`に適用する（eFuse操作はSDKが黙って行わない）。partition tableの変更は既存機器のNVS配置を変えるため、書換え時は保守手順（[07](07-host-api-tooling.md) §6）で行う。
+NVS をすべて先頭に置くので、app slot の大きさが変わっても NVS の offset は動かない。起動時に firmware がこの表（label・offset・size）と flash 容量 4MB 以上を確かめ、合わなければ RF を始めない（`routeloom/espnow_flash_layout.hpp`）。tier T2ではNVS暗号化（`nvs_keys` partition）を`rlsec`に適用する（eFuse操作はSDKが黙って行わない）。partition tableの変更は既存機器のNVS配置を変えるため、書換え時は保守手順（[07](07-host-api-tooling.md) §6）で行う。
 
 ### 5.3 CIでの予算検査
 
@@ -176,12 +181,12 @@ rlsec,    data, nvs,     0x190000, 0x10000
 
 | 策 | 実装 | 場所 |
 |---|---|---|
-| D2-a 起動の分離 | reference_node・examples/espnow_nodeは`rlsec` 64KiB、bridge_node（gateway）は128KiBを`partitions.csv`で確保（`nvs` 24KiB、factory 1.5MiB、表の終端0x1A0000／0x1B0000でESP-IDF既定の2MB設定にも4MB機にも収まる）。`rlcounter`/`rlreplay`は`nvs_open_from_partition("rlsec", …)`。起動順は「既定`nvs`初期化→`rlboot`前進→`nvs_flash_init_partition("rlsec")`→Provider」で、`rlsec`の状態が`rlboot`の書込みを妨げない。sleep imageはsystem状態として既定`nvs`の`rlsleep`へ移した | [partitions.csv](../../../firmware/reference_node/partitions.csv)、[nvs_counter_store](../../../components/routeloom_espnow/src/nvs_counter_store.cpp)、各firmwareの`main.cpp` |
+| D2-a 起動の分離 | 全firmwareが`PT-4M-v2`の`partitions.csv`で`rlsec` 128KiBを確保（`nvs` 24KiB、OTA slot 各0x1D0000、4MB flash。§5.2）。`rlcounter`/`rlreplay`は`nvs_open_from_partition("rlsec", …)`。起動順は「既定`nvs`初期化→`rlboot`前進→`nvs_flash_init_partition("rlsec")`→Provider」で、`rlsec`の状態が`rlboot`の書込みを妨げない。sleep imageはsystem状態として既定`nvs`の`rlsleep`へ移した | [partitions.csv](../../../firmware/reference_node/partitions.csv)、[nvs_counter_store](../../../components/routeloom_espnow/src/nvs_counter_store.cpp)、各firmwareの`main.cpp` |
 | D2-b 死んだcounterの掃除 | Provider初期化時に`key_epoch < tx_epoch`（`tx_epoch`＝boot session）のTX recordを掃除する。1 passで最大16件を集め、その最大epochを証人`cmax`（u32）として**先に**commitし、成功後にだけ消去する。証人は単調（下げない）。破損・旧layout・大きさ不一致のrecordはepochが信用できないので消さない（そのslotはIntegrityErrorのまま）。`tx_epoch`より新しいrecordは`rlboot`後退の証拠として残し、ログに出す | [peer_state](../../../components/routeloom/src/peer_state.cpp)の`BoundedCounterStore` |
 | 証人の執行 | 起動時に`tx_epoch ≤ cmax`なら初期化を拒否する（`TX_EPOCH_AT_OR_BELOW_SWEEP_WITNESS`）。加えて**すべての**counter record commitで`key_epoch ≤ cmax`を拒否する。leaseは1個目のcounterを出す前に必ず予約blockをcommitする（`CounterLease::reserve_block`）ので、このcommit gate一つで掃除済みepochの鍵は二度と使われない | 同上 |
 | D2-c 永続ピア数の上限 | 上限は通常64ピア／gateway 128ピア（`kNodeMaxPersistedPeers`／`kGatewayMaxPersistedPeers`）。1ピアはLink＋EndToEndの2 scopeなので、TX record・RX floorそれぞれ上限の2倍のslotを持つ。firmwareは`nvs_get_stats("rlsec")`の総entryから計算した収容数で上限をさらに絞る。**新しい**slotだけを拒否し（`NoCapacity`、detail `PEER_STATE_CAPACITY`）、既存ピアのblock予約・window更新・epoch前進は続く。拒否はTX／RX別に計数し、起動時ログに件数・上限・掃除結果・`rlsec`使用entryを出す。件数の調査（census）に失敗した起動では新規ピアを拒否する（fail closed） | `BoundedCounterStore`／`BoundedReplayStore`、[psk_security](../../../components/routeloom_espnow/src/psk_security.cpp)の`log_peer_state` |
 | D2-d floor/windowは消さない | RX側には削除経路を作っていない。windowはそのpeer pairのfloorがあるslotにしか書かせない（ReplayGuardは常にfloorを先に確定するので挙動は変わらない）ため、windowの数もfloorの上限に収まる | `BoundedReplayStore` |
-| 予算の検査（§5.3） | `tools/nvs_budget.py`がheaderの`static_assert`（record長）と定数、各firmwareの`partitions.csv`・`sdkconfig.defaults`を読み、最悪時entry（上限×20＋固定3）が`rlsec`の使えるentryの80%以下、表がflashに収まること、custom表の選択、factory非縮小を検査する。`tests/test_nvs_budget.py`（負の変異を含む）でCIに入る | [nvs_budget.py](../../../tools/nvs_budget.py) |
+| 予算の検査（§5.3） | `tools/nvs_budget.py`がheaderの`static_assert`（record長）と定数、各firmwareの`partitions.csv`・`sdkconfig.defaults`を読み、最悪時entry（上限×20＋固定3）が`rlsec`の使えるentryの80%以下、表がflashに収まること、custom表の選択、表が起動時検査の`PT-4M-v2`と一致すること、2つのOTA slotとbootloader rollbackの有効を検査する。`tests/test_nvs_budget.py`（負の変異を含む）でCIに入る | [nvs_budget.py](../../../tools/nvs_budget.py) |
 
 計算値：64KiB＝16 page、使えるentry 15×126＝1890、80%＝1512、最悪1283（64ピア）。128KiB＝使える3906、80%＝3124、最悪2563（128ピア）。
 
