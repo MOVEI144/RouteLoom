@@ -4,6 +4,7 @@
 
 #include "routeloom/byte_io.hpp"
 #include "routeloom/crc32.hpp"
+#include "routeloom/discovery_scope.hpp"  // sha256
 
 namespace routeloom {
 namespace {
@@ -208,24 +209,10 @@ Status plan_decode(const ByteView encoded, MigrationPlan& out) noexcept {
 }
 
 Digest256 plan_digest(const ByteView encoded_plan) noexcept {
-  // Deterministic domain-separated binding ("RLMP" lanes). Same construction
-  // as bind_operation_payload: content addressing + integrity, NOT a
-  // cryptographic digest — the signature verifier is the authenticity check.
+  // SHA-256: the commit signature covers this hash, not the blob, so it
+  // must be collision resistant for the signature to bind every plan field.
   Digest256 out{};
-  std::uint64_t lanes[4] = {0x524C4D50526F7574ULL, 0xBB67AE8584CAA73BULL,
-                            0x3C6EF372FE94F82BULL, 0x54A9D1E7F5B8C3A2ULL};
-  for (std::size_t i = 0; i < encoded_plan.size; ++i) {
-    std::uint64_t& lane = lanes[i % 4];
-    lane ^= encoded_plan.data[i];
-    lane *= 0x100000001B3ULL;
-    lane ^= lane >> 29U;
-  }
-  for (int lane = 0; lane < 4; ++lane) {
-    for (int byte = 0; byte < 8; ++byte) {
-      out[lane * 8 + byte] =
-          static_cast<std::uint8_t>(lanes[lane] >> (56 - byte * 8));
-    }
-  }
+  sha256(encoded_plan, out);
   return out;
 }
 
