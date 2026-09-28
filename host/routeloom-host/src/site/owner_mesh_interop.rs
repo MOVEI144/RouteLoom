@@ -2942,6 +2942,89 @@ fn mesh_route_loss_peer_capacity_keeps_live_bindings() {
     assert_eq!(world.snaps[1].rx, b"capacity-survivor");
 }
 
+/// Repeated RLD1 handoffs in one boot must return each transient lease
+/// to discovery; the fourth through tenth repairs cannot hit capacity.
+#[test]
+fn mesh_route_loss_ten_handovers_recover() {
+    let Some(mut world) = route_loss_world("route-ten-handovers", Switch::forced_multihop(), true)
+    else {
+        return;
+    };
+    let capacity_before = world.snaps[1].peer_capacity;
+    let starts_before = world.snaps[1].member_starts + world.snaps[2].member_starts;
+    let failed_before = world.snaps[1].link_failed + world.snaps[2].link_failed;
+    for attempt in 0..10 {
+        assert_eq!(world.snaps[1].phases[2], PHASE_REACHABLE);
+        let offers = world.snaps[1].offers_rx + world.snaps[2].offers_rx;
+        let links = world.snaps[1].link_requests + world.snaps[2].link_requests;
+        let established = world.snaps[1].link_established;
+        let failed = world.snaps[1].link_failed;
+        world.switch.isolate(1);
+        world.pump_until(2400, |snaps| {
+            snaps[1].phases[2] == PHASE_STALE && snaps[2].phases[1] == PHASE_STALE
+        });
+        assert_eq!(
+            world.snaps[1].phases[2], PHASE_STALE,
+            "cycle {attempt} stale"
+        );
+        world.switch.drop_wire_kind(1, 2, WIRE_PROBE, 32);
+        world.switch.drop_wire_kind(2, 1, WIRE_PROBE, 32);
+        world.switch.heal(1);
+        world.peers[1].app_send(testkit::GATEWAY, b"renew-binding");
+        world.pump_until(2000, |snaps| {
+            snaps[1].link_requests + snaps[2].link_requests > links
+        });
+        assert!(
+            world.snaps[1].offers_rx + world.snaps[2].offers_rx > offers,
+            "cycle {attempt}: RLD1 offer reached initiator"
+        );
+        assert!(
+            world.snaps[1].link_requests + world.snaps[2].link_requests > links,
+            "cycle {attempt}: coordinator took another handshake; links {links}->{}+{}, offers {offers}->{}, starts {}, request_failures {}, link_failed {}, link_error {}, capacity {}->{}, phase {}",
+            world.snaps[1].link_requests,
+            world.snaps[2].link_requests,
+            world.snaps[1].offers_rx + world.snaps[2].offers_rx,
+            world.snaps[1].member_starts,
+            world.snaps[1].link_request_failures,
+            world.snaps[1].link_failed,
+            world.snaps[1].link_last_error,
+            capacity_before,
+            world.snaps[1].peer_capacity,
+            world.snaps[1].phases[2]
+        );
+        world.switch.drop_wire.clear();
+        world.pump_until(3000, |snaps| {
+            snaps[1].phases[2] == PHASE_REACHABLE
+                && (snaps[1].link_established > established || snaps[1].link_failed > failed)
+        });
+        assert_eq!(
+            world.snaps[1].phases[2], PHASE_REACHABLE,
+            "cycle {attempt} re-BIND"
+        );
+        assert!(
+            world.snaps[1].link_established > established || world.snaps[1].link_failed > failed,
+            "cycle {attempt}: handshake result drained"
+        );
+        assert_eq!(
+            world.snaps[1].peer_capacity, capacity_before,
+            "cycle {attempt}: no leaked transient reservation"
+        );
+    }
+    assert!(
+        world.snaps[1].member_starts + world.snaps[2].member_starts >= starts_before + 10,
+        "ten starts crossed discovery into the coordinators"
+    );
+    assert!(
+        world.snaps[1].link_failed + world.snaps[2].link_failed > failed_before,
+        "lost flights also exercised failed handoff cleanup"
+    );
+    let received = world.snaps[0].rx_count;
+    world.peers[1].app_send(testkit::GATEWAY, b"after-ten");
+    world.pump_until(2000, |snaps| snaps[0].rx == b"after-ten");
+    assert!(world.snaps[0].rx_count > received);
+    assert_eq!(world.snaps[0].rx, b"after-ten");
+}
+
 /// Phase-1 convergence on the direct radio: all three Owners adopt
 /// from their Phase-0 images (member boots, no rejoins), open their
 /// authority channels through the gateway's real USB relay, confirm,
