@@ -191,8 +191,8 @@ else()
       "or full (got '${ROUTELOOM_RESOURCE_PROFILE}')")
   endif()
   math(EXPR ROUTELOOM_RESOURCE_PROFILE_ID "${_routeloom_profile_index} + 1")
-  # Empty keeps the profile's dedup capacity (32 endpoint/gateway_small,
-  # 96 otherwise); leaf/relay/gateway pin 32/96/256.
+  # Empty delegates the default to profile.hpp; leaf/relay/gateway pin
+  # an explicit capacity.
   set(ROUTELOOM_DEDUP_PROFILE "" CACHE STRING
     "Dedup capacity override: empty (profile default), leaf (32), relay (96) or gateway (256)")
   set_property(CACHE ROUTELOOM_DEDUP_PROFILE PROPERTY STRINGS "" leaf relay gateway)
@@ -203,12 +203,7 @@ else()
   elseif(ROUTELOOM_DEDUP_PROFILE STREQUAL "gateway")
     set(ROUTELOOM_DEDUP_CAPACITY 256)
   elseif(ROUTELOOM_DEDUP_PROFILE STREQUAL "")
-    if(ROUTELOOM_RESOURCE_PROFILE STREQUAL "endpoint" OR
-       ROUTELOOM_RESOURCE_PROFILE STREQUAL "gateway_small")
-      set(ROUTELOOM_DEDUP_CAPACITY 32)
-    else()
-      set(ROUTELOOM_DEDUP_CAPACITY 96)
-    endif()
+    set(ROUTELOOM_DEDUP_CAPACITY 0)
   else()
     message(FATAL_ERROR
       "ROUTELOOM_DEDUP_PROFILE must be empty, leaf, relay or gateway "

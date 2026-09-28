@@ -84,15 +84,20 @@ constexpr Role kMaxRole = kResourceProfile == ResourceProfile::Endpoint ? Role::
                                                                         : Role::Gateway;
 #ifdef ROUTELOOM_ROLE
 constexpr Role kRole = static_cast<Role>(ROUTELOOM_ROLE);
+constexpr bool kRoleFixed = true;
 #else
 // Host builds pick the role per process; the non-gateway default is the
 // largest member role the profile serves.
 constexpr Role kRole = kMaxRole == Role::Endpoint ? Role::Endpoint : Role::Relay;
+constexpr bool kRoleFixed = false;
 #endif
 // A role above the profile is refused before RF starts
 // (RESOURCE_PROFILE_ROLE_MISMATCH).
 constexpr bool role_fits(const Role role) noexcept {
   return role >= Role::Endpoint && role <= kMaxRole;
+}
+constexpr std::uint8_t role_mask(const Role role) noexcept {
+  return static_cast<std::uint8_t>((1U << static_cast<unsigned>(role)) - 1U);
 }
 
 constexpr bool kGateway = ROUTELOOM_PROFILE_HAS_GATEWAY != 0;
@@ -105,6 +110,14 @@ constexpr std::size_t kEndSessions = kResourceProfile == ResourceProfile::Gatewa
                                      : kGateway                                        ? 128
                                                                                        : 8;
 constexpr std::size_t kRouteEntries = kResourceProfile == ResourceProfile::Endpoint ? 16 : 128;
+constexpr std::size_t kDedupCapacityLeaf = 32;
+constexpr std::size_t kDedupCapacityRelay = 96;
+constexpr std::size_t kDedupCapacityGateway = 256;
+constexpr std::size_t kDedupCapacityDefault =
+    kResourceProfile == ResourceProfile::Endpoint ||
+            kResourceProfile == ResourceProfile::GatewaySmall
+        ? kDedupCapacityLeaf
+        : kDedupCapacityRelay;
 
 // RLP2 resume purpose quotas (P4 §4.1) are NVS-only: node 12+4 for the
 // endpoint and relay roles, gateway 32+128 for the gateway role on every
