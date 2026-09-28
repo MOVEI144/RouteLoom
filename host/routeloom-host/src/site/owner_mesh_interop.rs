@@ -2641,6 +2641,60 @@ fn mesh_route_loss_retry_has_one_terminal_delivery() {
     assert_eq!(world.snaps[2].receipt_conflicts, 0);
 }
 
+/// A stale binding remains the identity for authenticated Probe/Result
+/// even after the runtime has released its transmit-side driver peer.
+fn stale_a_gateway(world: &mut MeshWorld) {
+    assert_eq!(world.snaps[1].phases[0], PHASE_REACHABLE);
+    let driver_peers = world.snaps[1].driver_peers;
+    let logical_neighbors = world.snaps[1].neighbor_count;
+    world.switch.isolate(1);
+    world.pump_until(2400, |snaps| {
+        snaps[1].phases[0] == PHASE_STALE && snaps[0].phases[1] == PHASE_STALE
+    });
+    assert_eq!(
+        world.snaps[1].phases[0], PHASE_STALE,
+        "A marks gateway stale"
+    );
+    assert_eq!(
+        world.snaps[0].phases[1], PHASE_STALE,
+        "gateway marks A stale"
+    );
+    assert!(world.snaps[1].stale_expirations > 0);
+    assert_eq!(world.snaps[1].neighbor_count, logical_neighbors);
+    world.pump_until(400, |snaps| snaps[1].driver_peers < driver_peers);
+    assert!(
+        world.snaps[1].driver_peers < driver_peers,
+        "STALE released a driver slot: before {driver_peers}, after {}",
+        world.snaps[1].driver_peers
+    );
+}
+
+#[test]
+fn mesh_route_loss_stale_peer_recovers() {
+    let Some(mut world) = route_loss_world("route-stale", Switch::direct(), false) else {
+        return;
+    };
+    stale_a_gateway(&mut world);
+    let before = world.snaps[1].probes_tx;
+    let repair_demands = world.snaps[1].repair_demands;
+    world.switch.heal(1);
+    world.peers[1].app_send(testkit::GATEWAY, b"request-repair");
+    world.pump_until(8000, |snaps| {
+        snaps[1].phases[0] == PHASE_REACHABLE && snaps[0].phases[1] == PHASE_REACHABLE
+    });
+    assert!(world.snaps[1].probes_tx > before, "A sent a repair Probe");
+    assert!(world.snaps[1].repair_demands > repair_demands);
+    assert_eq!(world.snaps[1].phases[0], PHASE_REACHABLE, "A recovered");
+    assert_eq!(
+        world.snaps[0].phases[1], PHASE_REACHABLE,
+        "gateway recovered"
+    );
+    let received = world.snaps[0].rx_count;
+    world.peers[1].app_send(testkit::GATEWAY, b"after-repair");
+    world.pump_until(2000, |snaps| snaps[0].rx_count > received);
+    assert_eq!(world.snaps[0].rx, b"after-repair");
+}
+
 /// Phase-1 convergence on the direct radio: all three Owners adopt
 /// from their Phase-0 images (member boots, no rejoins), open their
 /// authority channels through the gateway's real USB relay, confirm,
