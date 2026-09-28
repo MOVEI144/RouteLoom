@@ -6518,7 +6518,7 @@ fn short_socket_test_dir(prefix: &str) -> std::path::PathBuf {
         }
     }
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod owner_mesh_interop;
 #[cfg(test)]
 mod p6_channel_tests;
