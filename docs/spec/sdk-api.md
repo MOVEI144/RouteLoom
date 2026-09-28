@@ -2,6 +2,8 @@
 
 本書はC APIの設計契約である。以下の関数は現時点でインストールして使えるライブラリではない。最終C ABIのheader配置・型layoutは実装時に互換性試験と共に固定する。
 
+実装済みの core C ABI 3（`routeloom/routeloom.h`）は移植と試験のための面で、規則（struct_size／version、`rl_get_capabilities`、`rl_next_deadline`、APPLIED の非同期 ticket、`reason_id`）と layout の golden は [compatibility §4](compatibility.md) を正本とする。所属・sleep・本番の security は core ではなく Device API に置く。以下の表はその Device API を含む設計の契約である。
+
 ## 1. 利用モデル
 
 ```text
@@ -30,7 +32,7 @@
 | rl_capabilities_t | 実装・受入済み機能と資源上限 |
 | rl_sleep_ticket_t | state整理後に得る一回限りのsleep許可 |
 
-public structにはstruct_size/abi_versionを置く。整数幅、enum値、reservedの規則を明示し、ポインターをwireへ送らない。文字列は長さを持ちUTF-8を明示する。無制限なJSONをC APIの基本表現にしない。
+public structにはstruct_size/versionを置く。整数幅、enum値、reservedの規則を明示し、ポインターをwireへ送らない。文字列は長さを持ちUTF-8を明示する。無制限なJSONをC APIの基本表現にしない。
 
 ## 3. 関数群
 

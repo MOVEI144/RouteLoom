@@ -2,9 +2,9 @@
   "schema": 1,
   "sdk_version": "2.0.0-dev",
   "surfaces": [
-    {"id": "core_c_abi", "label": "Core C ABI", "value": 2, "c": "ROUTELOOM_CORE_C_ABI", "rust": "CORE_C_ABI",
+    {"id": "core_c_abi", "label": "Core C ABI", "value": 3, "c": "ROUTELOOM_CORE_C_ABI", "rust": "CORE_C_ABI",
      "cpp_check": "RL_ABI_VERSION", "cpp_include": "routeloom/routeloom.h",
-     "source": "components/routeloom/include/routeloom/routeloom.h", "rule": "exact match in rl_init; additive tail growth by struct_size"},
+     "source": "components/routeloom/include/routeloom/routeloom.h", "rule": "exact major in every struct header; 3.x adds tail fields and functions only; layouts in protocol/abi-golden"},
     {"id": "device_api", "label": "Device API (C++ and C)", "value": null,
      "source": "reserved", "rule": "reserved for the v2 Device API; no symbol exists yet"},
     {"id": "wire_major", "label": "Mesh wire major", "value": 2, "c": "ROUTELOOM_WIRE_MAJOR", "rust": "WIRE_MAJOR",

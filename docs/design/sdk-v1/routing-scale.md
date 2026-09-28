@@ -105,12 +105,12 @@ flat profileの規則は`lifetime > (ceil(D/6) + 1) × period`（`flat_lifetime_
 | 入口 | gateway | tick／lease | 検査 |
 |---|---|---|---|
 | C++ `NodeConfig` | `route_gateways`（最大4、`kInvalidNodeId`は空き枠。1つでも設定でscoped） | `route_advertisement_period_ms`／`route_lifetime_ms`、`route_refresh_ticks`（既定6） | `start()`の`validate_config()`がlease規則違反を`InvalidArgument`（`ROUTE_LIFETIME_BELOW_REFRESH_BOUND`）で拒否 |
-| C API `rl_node_config_t` | `route_gateway_count`（0＝flat、既定）＋`route_gateways[RL_MAX_ROUTE_GATEWAYS]`（優先順） | 既存の`route_advertisement_period_ms`／`route_lifetime_ms`、`route_refresh_ticks`（0＝SDK既定6） | `rl_init`が個数超過・count内の0・重複を`RL_STATUS_INVALID_ARGUMENT`で拒否（count以降の要素は無視）。旧2-gateway header（`RL_NODE_CONFIG_SIZE_GATEWAY2`）の呼出しは上限2のまま受付け、count 3以上は切捨てず拒否。lease規則違反とbroadcast IDは`rl_start`が`RL_STATUS_INVALID_ARGUMENT`で拒否 |
+| C API `rl_node_config_t` | `route_gateway_count`（0＝flat、既定）＋`route_gateways[RL_MAX_ROUTE_GATEWAYS]`（優先順） | 既存の`route_advertisement_period_ms`／`route_lifetime_ms`、`route_refresh_ticks`（0＝SDK既定6） | `rl_init`が個数超過・count内の0・重複を`RL_STATUS_INVALID_ARGUMENT`で拒否（count以降の要素は無視）。lease規則違反とbroadcast IDは`rl_start`が`RL_STATUS_INVALID_ARGUMENT`で拒否 |
 | firmware Kconfig（reference_node／bridge_node／examples/espnow_node） | `ROUTELOOM_ROUTE_GATEWAY_SCOPED`（既定n）、`ROUTELOOM_ROUTE_GATEWAY_1`（既定0x1）、`ROUTELOOM_ROUTE_GATEWAY_2`（0＝なし）。bridge_nodeはgatewayなので自分の`ROUTELOOM_NODE_ID`を先頭に載せ、`_2`だけを持つ | `ROUTELOOM_ROUTE_PERIOD_MS`（既定5000）／`ROUTELOOM_ROUTE_LIFETIME_MS`（既定90000）。scoped時だけ現れ、flat buildはSDK既定（5s／15s）に触れない | gateway 0・重複・lease規則違反を`static_assert`でbuild失敗にする（起動時拒否より前に止める） |
 
 `rl_node_config_init()`はflat既定（5s／15s、gatewayなし）のままなので、C callerがscopedにするときは5s／90sを明示する（15sのままでは`rl_start`が拒否する）。実効gateway一覧は`rl_route_gateways()`で読める（0件＝flat）。
 
-**C ABIの拡張方針**：新fieldは`rl_node_config_t`の**末尾**に足し、`RL_ABI_VERSION`は2のまま据え置いた。`rl_init`は`struct_size`が構造体全体以上なら新fieldを読み、拡張前の大きさ（`RL_NODE_CONFIG_SIZE_BASE`＝64B）なら末尾を一切読まずflat profileとする。その間の大きさは拒否する。`reserved[3]`の転用を採らなかったのは、gateway ID（u64×2）が3Bに入らないことと、`rl_init`がreservedの0を検査してこなかったため旧callerのreservedを意味ある値として読めないことによる。ABI versionを上げると`abi_version`の完全一致検査で既存callerが全て拒否されるので上げない。`rl_node_config_init()`は旧64Bだけを書くため旧headerでbuildしたbinaryも安全。拡張fieldを使う現行callerは現行サイズの領域に`rl_node_config_init_full()`を呼ぶ（[compatibility §4](../../spec/compatibility.md)）。
+**C ABIの拡張方針**：C ABI 3 で gateway 欄は `rl_node_config_t` の本体になり、旧 64 B／2-gateway header の互換経路は削除した。以後の追加は末尾だけ（[compatibility §4](../../spec/compatibility.md)）。
 
 ## 6. 資源（動的確保なし）
 

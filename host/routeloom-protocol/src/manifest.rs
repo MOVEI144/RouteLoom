@@ -3,7 +3,7 @@
 pub const SDK_VERSION: &str = "2.0.0-dev";
 
 /// Core C ABI.
-pub const CORE_C_ABI: u32 = 2;
+pub const CORE_C_ABI: u32 = 3;
 /// Mesh wire major.
 pub const WIRE_MAJOR: u32 = 2;
 /// Mesh wire minor.

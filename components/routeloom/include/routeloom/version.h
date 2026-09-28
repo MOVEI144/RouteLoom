@@ -8,7 +8,7 @@
 #define ROUTELOOM_SDK_VERSION_MINOR 0
 #define ROUTELOOM_SDK_VERSION_PATCH 0
 
-#define ROUTELOOM_CORE_C_ABI 2  /* Core C ABI */
+#define ROUTELOOM_CORE_C_ABI 3  /* Core C ABI */
 #define ROUTELOOM_WIRE_MAJOR 2  /* Mesh wire major */
 #define ROUTELOOM_WIRE_MINOR 0  /* Mesh wire minor */
 #define ROUTELOOM_RLD1_VERSION 1  /* RLD1 carrier */
