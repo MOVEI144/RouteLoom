@@ -591,7 +591,7 @@ add_test(NAME routeloom_sdkv1_dev_route_tests COMMAND routeloom_sdkv1_dev_route_
 
 # Multi-node mesh peer (D04, issue #168): one real Owner + runtime + USB
 # node per process, driven by the Rust test
-# (host/routeloom-host/src/site/owner_mesh_interop.rs), never by ctest.
+# (host/routeloom-host/src/site/owner_mesh/), never by ctest.
 add_executable(routeloom_owner_mesh_peer owner_mesh_peer.cpp
     espnow_idf_stubs/idf_stubs.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp
