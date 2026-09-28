@@ -533,6 +533,29 @@ void test_first_join_adopts_live() {
   CHECK(fresh.snap().applied_rs_epoch == 15);
 }
 
+void test_removed_site_is_not_first_join() {
+  NodeFixture removed;
+  CHECK(removed.identity.initialize());
+  CHECK_OK(removed.identity.commit(identity_for(kNode)));
+  CHECK(removed.site.initialize());
+  CHECK_OK(removed.site.commit(site_for(kNode, 3)));
+  CHECK_OK(removed.site.clear());
+  CHECK(removed.revocations.initialize());
+  CHECK_OK(removed.dispatch(LifecycleInput::Boot(true), 0));
+  CHECK(removed.snap().phase == LifecyclePhase::StorageBlocked);
+
+  NodeFixture orphaned_rrs;
+  CHECK(orphaned_rrs.identity.initialize());
+  CHECK_OK(orphaned_rrs.identity.commit(identity_for(kNode)));
+  CHECK(orphaned_rrs.site.initialize());
+  CHECK(orphaned_rrs.revocations.initialize());
+  CHECK(orphaned_rrs.revocations.accept(
+      revocation_object(revocation_set(14, 1, 2)).view(),
+      sak().pub, kSiteId, kNetwork));
+  CHECK_OK(orphaned_rrs.dispatch(LifecycleInput::Boot(true), 0));
+  CHECK(orphaned_rrs.snap().phase == LifecyclePhase::StorageBlocked);
+}
+
 void test_boot_self_revoked_and_blocked() {
   // Our own (node, generation) is in the adopted set: SelfRevoked + action.
   NodeFixture node;
@@ -3255,6 +3278,7 @@ int main() {
   test_revocation_wire_vectors();
   test_boot_adoption();
   test_first_join_adopts_live();
+  test_removed_site_is_not_first_join();
   test_enforcement_storage_failure_stays_closed();
   test_boot_self_revoked_and_blocked();
   test_boot_rejects_resume_storage_quota_mismatch();

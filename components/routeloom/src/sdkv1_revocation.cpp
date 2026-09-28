@@ -1840,7 +1840,8 @@ bool MembershipLifecycle::never_assigned() const noexcept {
   const SiteStoreHealth health = site_.health();
   return health.initialized && !health.has_site && !health.quarantined && !health.uncertain &&
          health.unsupported_mask == 0 && health.read_error_mask == 0 &&
-         !health.active_load_failed && (journal_ == nullptr || !journal_->has_record());
+         !health.active_load_failed && health.seq_floor == 0 && revocations_.clean_empty() &&
+         (journal_ == nullptr || !journal_->has_record());
 }
 
 bool MembershipLifecycle::reassigned_after_removal() const noexcept {
