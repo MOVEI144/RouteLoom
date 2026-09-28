@@ -550,7 +550,9 @@ fn capacity_get<S: OperationStore>(
         .expect("operation store poisoned");
     let status = store.capacity_status(ctx.now_ms);
     let client = match profile {
-        send_store::AdmissionProfile::Normal => "null".to_string(),
+        send_store::AdmissionProfile::Normal | send_store::AdmissionProfile::Control => {
+            "null".to_string()
+        }
         send_store::AdmissionProfile::BenchV1 => format!(
             "{{\"inflight_max\":{},\"run_window_calls\":{},\"run_window_ms\":{}}}",
             send_store::BENCH_INFLIGHT_MAX,
@@ -558,12 +560,27 @@ fn capacity_get<S: OperationStore>(
             send_store::BENCH_RUN_WINDOW_MS,
         ),
     };
+    // Control profile: the latest-value lane that LATEST_PER_DESTINATION
+    // submits draw from instead of the budget above.
+    let latest = if profile == send_store::AdmissionProfile::Control {
+        format!(
+            "{{\"charges\":\"messages.submit queue_mode LATEST_PER_DESTINATION\",\"per_destination\":{{\"calls_per_minute\":{},\"burst\":{}}},\"per_principal\":{{\"calls_per_minute\":{},\"burst\":{}}},\"global\":{{\"calls_per_minute\":{},\"burst\":{}}}}}",
+            send_store::CONTROL_DEST_RATE_PER_MINUTE,
+            send_store::CONTROL_DEST_BURST,
+            send_store::CONTROL_PRINCIPAL_RATE_PER_MINUTE,
+            send_store::CONTROL_PRINCIPAL_BURST,
+            send_store::CONTROL_GLOBAL_RATE_PER_MINUTE,
+            send_store::CONTROL_GLOBAL_BURST,
+        )
+    } else {
+        "null".to_string()
+    };
     let reclaimable = match status.reclaimable_at_ms {
         Some(at) => at.to_string(),
         None => "null".to_string(),
     };
     Ok(format!(
-        "{{\"admission\":{{\"profile\":\"{profile}\",\"calls_per_minute\":{rate},\"burst\":{burst},\"charges\":[\"messages.submit\",\"operations.open_epoch\"],\"client\":{client}}},\"store\":{{\"durable\":{durable},\"records_max\":{records},\"bytes_max\":{bytes},\"record_charge_bytes\":{charge},\"retention_ms\":{retention},\"unretired_epochs_max\":{epochs},\"active_max\":{active},\"active_per_principal_max\":{per_principal},\"free_slots\":{free_slots},\"free_bytes\":{free_bytes},\"reclaimable_at_ms\":{reclaimable}}},\"payload\":{{\"node_max_bytes\":{node_max},\"gateway_max_bytes\":{gw_max},\"group_max_bytes\":{group_max}}},\"group\":{{\"records_max\":{group_records},\"queue_max\":{group_queue},\"live_max\":{group_live},\"tombstones_max\":{group_tombstones},\"inbox_max\":{group_inbox}}},\"queue_mode\":{{\"LATEST_PER_DESTINATION\":{{\"requires\":{{\"delivery\":\"BEST_EFFORT\",\"storage\":\"RAM_ONLY\"}},\"supersede\":\"newest committed record retires still-queued older records to the same destination\"}}}}}}",
+        "{{\"admission\":{{\"profile\":\"{profile}\",\"calls_per_minute\":{rate},\"burst\":{burst},\"charges\":[\"messages.submit\",\"operations.open_epoch\"],\"client\":{client},\"latest\":{latest}}},\"store\":{{\"durable\":{durable},\"records_max\":{records},\"bytes_max\":{bytes},\"record_charge_bytes\":{charge},\"retention_ms\":{retention},\"unretired_epochs_max\":{epochs},\"active_max\":{active},\"active_per_principal_max\":{per_principal},\"free_slots\":{free_slots},\"free_bytes\":{free_bytes},\"reclaimable_at_ms\":{reclaimable}}},\"payload\":{{\"node_max_bytes\":{node_max},\"gateway_max_bytes\":{gw_max},\"group_max_bytes\":{group_max}}},\"group\":{{\"records_max\":{group_records},\"queue_max\":{group_queue},\"live_max\":{group_live},\"tombstones_max\":{group_tombstones},\"inbox_max\":{group_inbox}}},\"queue_mode\":{{\"LATEST_PER_DESTINATION\":{{\"requires\":{{\"delivery\":\"BEST_EFFORT\",\"storage\":\"RAM_ONLY\"}},\"supersede\":\"newest committed record retires still-queued older records to the same destination\"}}}}}}",
         profile = profile.name(),
         rate = profile.rate_per_minute(),
         burst = profile.burst(),
@@ -1613,7 +1630,15 @@ fn messages_submit<S: OperationStore>(
         .rate_limiter
         .lock()
         .expect("rate limiter poisoned")
-        .admit_principal(uid, ctx.now_ms)
+        .admit_submit(
+            uid,
+            (req.queue_mode == canonical::QUEUE_LATEST_PER_DESTINATION).then_some((
+                req.network,
+                req.dest_kind,
+                req.dest,
+            )),
+            ctx.now_ms,
+        )
     {
         return Err(rate_limited(deny));
     }
@@ -9948,6 +9973,7 @@ mod tests {
         assert_eq!(admission.get("calls_per_minute").unwrap().as_u64(), Some(2));
         assert_eq!(admission.get("burst").unwrap().as_u64(), Some(16));
         assert!(matches!(admission.get("client"), Some(Json::Null)));
+        assert!(matches!(admission.get("latest"), Some(Json::Null)));
         let store_block = result.get("store").unwrap();
         assert_eq!(store_block.get("records_max").unwrap().as_u64(), Some(4096));
         assert_eq!(store_block.get("free_slots").unwrap().as_u64(), Some(4096));
@@ -9980,6 +10006,57 @@ mod tests {
         let client = admission.get("client").unwrap();
         assert_eq!(client.get("inflight_max").unwrap().as_u64(), Some(4));
         assert_eq!(client.get("run_window_calls").unwrap().as_u64(), Some(64));
+    }
+
+    /// #195 control profile over API1: latest-value submits draw from the
+    /// per-destination lane (12/min, burst 4) with `retry_after_ms`, other
+    /// destinations and FIFO submits are unaffected, and capacity.get
+    /// reports the lane.
+    #[test]
+    fn control_profile_limits_latest_per_destination() {
+        let (acl, log, store, _) = test_env();
+        let limiter = Mutex::new(AdmissionLimiter::with_profile(
+            send_store::AdmissionProfile::Control,
+            0,
+        ));
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let latest = |key: u32, dest: u32| {
+            format!(
+                "{{\"v\":1,\"request_id\":\"s\",\"method\":\"messages.submit\",\"params\":{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{key:032x}\",\"destination\":{{\"kind\":\"node\",\"id\":\"{dest:016x}\"}},\"payload_hex\":\"00ff\",\"payload_len\":2,\"options\":{{\"storage\":\"RAM_ONLY\",\"delivery\":\"BEST_EFFORT\",\"queue_mode\":\"LATEST_PER_DESTINATION\"}}}}}}"
+            )
+        };
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
+        for key in 1..=4 {
+            let response = handle(latest(key, 3).as_bytes(), &c);
+            assert!(response.contains("\"ok\":true"), "{response}");
+        }
+        let response = handle(latest(5, 3).as_bytes(), &c);
+        assert_error_schema(&response, "RATE_LIMITED");
+        assert!(response.contains("\"scope\":\"destination\""), "{response}");
+        assert!(response.contains("\"retry_after_ms\":5000"), "{response}");
+        let response = handle(latest(6, 4).as_bytes(), &c);
+        assert!(response.contains("\"ok\":true"), "{response}");
+        let response = handle(
+            submit_line("77112233445566778899aabbccddeeff", &epoch).as_bytes(),
+            &c,
+        );
+        assert!(response.contains("\"ok\":true"), "{response}");
+        let later = ctx(Some(501), &acl, &log, &store, &limiter, 5_000);
+        let response = handle(latest(7, 3).as_bytes(), &later);
+        assert!(response.contains("\"ok\":true"), "{response}");
+
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"c\",\"method\":\"capacity.get\",\"params\":{}}",
+            &c,
+        );
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let admission = parsed.get("result").unwrap().get("admission").unwrap();
+        assert_eq!(admission.get("profile").unwrap().as_str(), Some("control"));
+        assert_eq!(admission.get("calls_per_minute").unwrap().as_u64(), Some(2));
+        let lane = admission.get("latest").unwrap();
+        let per_dest = lane.get("per_destination").unwrap();
+        assert_eq!(per_dest.get("calls_per_minute").unwrap().as_u64(), Some(12));
+        assert!(lane.get("per_principal").is_some() && lane.get("global").is_some());
     }
 
     /// D10 latest-value control end-to-end: a LATEST_PER_DESTINATION submit
