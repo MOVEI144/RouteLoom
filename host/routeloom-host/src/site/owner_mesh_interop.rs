@@ -3025,6 +3025,90 @@ fn mesh_route_loss_ten_handovers_recover() {
     assert_eq!(world.snaps[0].rx, b"after-ten");
 }
 
+/// The field campaign shape runs on flat, real Owner routing: sixteen
+/// early sends, then one every thirty virtual seconds, with relay traffic
+/// alongside it. No process restarts over the sixty-minute clock span.
+#[test]
+fn mesh_route_loss_hundred_under_flat_load() {
+    let Some(mut world) = route_loss_world("route-hundred", Switch::forced_multihop(), true) else {
+        return;
+    };
+    let started = world.now;
+    let baseline = world.snaps[1].rx_count;
+    let capacity = world.snaps[0].peer_capacity;
+    let no_route = world.snaps[0].no_route;
+    for index in 0u32..16 {
+        let received = world.snaps[1].rx_count;
+        world.peers[0].app_send(NODE_A, &index.to_le_bytes());
+        world.pump_until(200, |snaps| {
+            snaps[1].rx_count > received
+                && snaps[0]
+                    .app_tx
+                    .last()
+                    .is_some_and(|tx| tx.state == DELIVERY_DELIVERED)
+        });
+        assert_eq!(
+            world.snaps[1].rx_count,
+            received + 1,
+            "early message {index}"
+        );
+    }
+    assert_eq!(world.snaps[1].rx_count, baseline + 16, "initial burst");
+    assert!(
+        world.snaps[0]
+            .app_tx
+            .iter()
+            .all(|tx| tx.state == DELIVERY_DELIVERED),
+        "all initial sends delivered: {:?}",
+        world.snaps[0].app_tx
+    );
+    for index in 16u32..100 {
+        for _ in 0..300 {
+            world.step(100);
+        }
+        let received = world.snaps[1].rx_count;
+        let last_sequence = world.snaps[0]
+            .app_tx
+            .iter()
+            .map(|tx| tx.seq)
+            .max()
+            .unwrap_or(0);
+        world.peers[0].app_send(NODE_A, &index.to_le_bytes());
+        world.peers[2].app_send(testkit::GATEWAY, b"relay-load");
+        world.pump_until(200, |snaps| {
+            snaps[1].rx_count > received
+                && snaps[0]
+                    .app_tx
+                    .iter()
+                    .any(|tx| tx.seq > last_sequence && tx.state == DELIVERY_DELIVERED)
+        });
+        assert_eq!(world.snaps[1].rx_count, received + 1, "message {index}");
+        assert_eq!(world.snaps[1].rx, index.to_le_bytes(), "payload {index}");
+        assert!(
+            world.snaps[0]
+                .app_tx
+                .iter()
+                .any(|tx| tx.seq > last_sequence && tx.state == DELIVERY_DELIVERED),
+            "message {index} sender receipt: {:?}",
+            world.snaps[0].app_tx
+        );
+        assert_eq!(world.snaps[0].phases[2], PHASE_REACHABLE);
+        assert_eq!(world.snaps[2].phases[1], PHASE_REACHABLE);
+    }
+    while world.now - started < 3_600_000 {
+        world.step(100);
+    }
+    assert_eq!(
+        world.snaps[1].rx_count,
+        baseline + 100,
+        "100 distinct receives"
+    );
+    assert_eq!(world.snaps[0].peer_capacity, capacity, "no capacity leak");
+    assert_eq!(world.snaps[0].no_route, no_route, "no route diagnostic");
+    assert_eq!(world.snaps[0].phases[2], PHASE_REACHABLE);
+    assert_eq!(world.snaps[2].phases[1], PHASE_REACHABLE);
+}
+
 /// Phase-1 convergence on the direct radio: all three Owners adopt
 /// from their Phase-0 images (member boots, no rejoins), open their
 /// authority channels through the gateway's real USB relay, confirm,
