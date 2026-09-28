@@ -1032,6 +1032,13 @@ bool AuthorityGateway::quiescent() const noexcept {
   return true;
 }
 
+bool AuthorityGateway::down_live_to(const NodeId device) const noexcept {
+  for (const auto& slot : slots_) {
+    if (slot.active && slot.direction == Direction::Down && slot.device == device) return true;
+  }
+  return false;
+}
+
 void AuthorityMeshSink::on_config_job_done(const MessageId& id, const bool hop_accepted,
                                            const char* reason,
                                            const MonotonicMs now_ms) noexcept {

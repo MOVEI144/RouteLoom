@@ -303,6 +303,9 @@ class AuthorityGateway final : public AuthorityMeshDemux {
   // Pump mesh TX (manifest/chunks/retries) and USB egress cursors.
   void poll(MonotonicMs now_ms) noexcept;
   bool quiescent() const noexcept;
+  // Diagnostic view used to verify that revocation cuts a specific
+  // in-flight down transfer without waiting for its terminal result.
+  bool down_live_to(NodeId device) const noexcept;
   // Adoption binds the member NodeId (construction carries the
   // pre-adoption id): self-addressed downs deliver locally from here
   // on. Safe with live slots: delivery branches, never keys, on self.

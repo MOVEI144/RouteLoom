@@ -408,6 +408,13 @@ extern "C" psa_status_t psa_generate_random(std::uint8_t* output, const std::siz
 
 namespace routeloom::espnow {
 
+struct EspNowSecurityOwnerTestAccess {
+  static bool down_live_to(EspNowSecurityOwner& owner, NodeId node) noexcept {
+    return owner.authority_live_ && owner.config_.gateway &&
+           owner.gateway()->down_live_to(node);
+  }
+};
+
 // --- Platform hooks (test process only) --------------------------------------
 // Real builtin crypto backends shared by every peer, and a reboot that
 // hands the NVS image to the harness instead of resetting silicon.
@@ -991,6 +998,9 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
   put_u32(out, joiner.counters.attempts);
   put_u32(out, joiner.counters.m1_sent);
   put_u32(out, joiner.counters.rx_dropped);
+  // One bounded diagnostic for the R1 Notice target: a live gateway
+  // down slot is sampled before the RRS enforcement tick cancels it.
+  out.push_back(EspNowSecurityOwnerTestAccess::down_live_to(owner, 0x00A1000000000101ULL) ? 1 : 0);
   write_frame(out);
 }
 

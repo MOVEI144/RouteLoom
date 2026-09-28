@@ -948,6 +948,7 @@ struct MeshSnap {
     j_attempts: u32,
     j_m1: u32,
     j_dropped: u32,
+    notice_down_live: bool,
 }
 
 #[allow(dead_code)]
@@ -1079,6 +1080,8 @@ fn parse_mesh_snap(payload: &[u8]) -> MeshSnap {
     snap.j_attempts = get_u32(payload, &mut pos);
     snap.j_m1 = get_u32(payload, &mut pos);
     snap.j_dropped = get_u32(payload, &mut pos);
+    snap.notice_down_live = payload[pos] != 0;
+    pos += 1;
     assert_eq!(pos, payload.len(), "G fully consumed");
     snap
 }
@@ -1420,6 +1423,10 @@ struct Switch {
     /// Per-leg evidence: what crossed and what the switch ate.
     leg_delivered: [[u64; 3]; 3],
     leg_dropped: [[u64; 3]; 3],
+    /// R1: lose only gateway-origin authority object chunks for A.
+    drop_notice_chunks: bool,
+    notice_chunks_dropped: u32,
+    notice_manifests_delivered: u32,
 }
 
 impl Switch {
@@ -1434,6 +1441,9 @@ impl Switch {
             delay_ms: [[0; 3]; 3],
             leg_delivered: [[0; 3]; 3],
             leg_dropped: [[0; 3]; 3],
+            drop_notice_chunks: false,
+            notice_chunks_dropped: 0,
+            notice_manifests_delivered: 0,
         }
     }
 
@@ -1468,6 +1478,16 @@ impl Switch {
             self.audible[other][peer] = self.base[other][peer];
         }
     }
+}
+
+fn notice_object_frame(frame: &[u8], kind: u8) -> bool {
+    // The immutable wire header identifies the target and carrier type;
+    // the authority envelope and its encrypted chunks remain opaque.
+    frame.len() >= 32
+        && frame[0..4] == [b'R', b'L', 2, 0]
+        && frame[4] == kind
+        && frame[16..24] == testkit::GATEWAY.to_be_bytes()
+        && frame[24..32] == NODE_A.to_be_bytes()
 }
 
 const BROADCAST_MAC: [u8; 6] = [0xFF; 6];
@@ -2036,7 +2056,13 @@ impl MeshWorld {
                     && booted[to]
                     && self.switch.audible[from][to]
                     && channels[to] == channels[from];
-                if self.switch.drop_next[from][to] > 0 {
+                let notice_chunk = from == 2 && to == 1 && notice_object_frame(&tx.bytes, 50);
+                if self.switch.drop_notice_chunks && notice_chunk {
+                    self.switch.notice_chunks_dropped += 1;
+                    completions[from].push(0);
+                    self.switch.dropped += 1;
+                    self.switch.leg_dropped[from][to] += 1;
+                } else if self.switch.drop_next[from][to] > 0 {
                     self.switch.drop_next[from][to] -= 1;
                     completions[from].push(0);
                     self.switch.dropped += 1;
@@ -2046,6 +2072,9 @@ impl MeshWorld {
                     self.switch.dropped += 1;
                     self.switch.leg_dropped[from][to] += 1;
                 } else {
+                    if from == 2 && to == 1 && notice_object_frame(&tx.bytes, 49) {
+                        self.switch.notice_manifests_delivered += 1;
+                    }
                     // The frame crosses (now or after the leg's hold);
                     // only the MAC ACK is droppable from here.
                     let release_at = self.now + self.switch.delay_ms[from][to];
@@ -2800,18 +2829,28 @@ fn r1_once(tag: &str, stall: bool) {
         .expect("revoke commits");
     assert_eq!(outcome.state, "committed");
     if stall {
-        // Stall the notice mid-chunk on the relay leg (and A's ACKs
-        // back): bounded budgets, armed at the revoke program point —
-        // the host's send intent is known, no ciphertext is sniffed.
-        world.switch.drop_next[2][1] += 50;
-        world.switch.ack_drop_next[1][2] += 10;
+        // The revoke committed a Notice for A. Keep its chunk off the
+        // B→A leg while its manifest and unrelated radio traffic pass.
+        world.switch.drop_notice_chunks = true;
     }
 
     // Enforcement first: both survivors apply the RRS while the
     // notice is still unconfirmed and A still holds its site.
-    world.pump_until(8000, |snaps| {
-        snaps[0].rrs_applied > gw_rrs && snaps[2].rrs_applied > b_rrs
-    });
+    let mut notice_live_at_rrs = false;
+    for _ in 0..8000 {
+        let was_g = world.snaps[0].rrs_applied;
+        let live_before_g = world.snaps[0].notice_down_live;
+        world.step(25);
+        if world.snaps[0].rrs_applied > was_g {
+            notice_live_at_rrs = live_before_g
+                && world.switch.notice_manifests_delivered > 0
+                && world.switch.notice_chunks_dropped > 0
+                && world.snaps[1].phase == PHASE_ACTIVE;
+        }
+        if world.snaps[0].rrs_applied > gw_rrs && world.snaps[2].rrs_applied > b_rrs {
+            break;
+        }
+    }
     assert!(
         world.snaps[0].rrs_applied > gw_rrs,
         "gateway enforced: {:?}",
@@ -2827,20 +2866,23 @@ fn r1_once(tag: &str, stall: bool) {
         matches!(notice, Some((_, false))),
         "enforced with the notice still unconfirmed: {notice:?}"
     );
-    // Enforcement is slow on the loaded harness (RRS queues behind the
-    // flood) while A's §3.5 refresh is fast once the fixes land: A may
-    // legitimately already be removing (or even holding) when the
-    // survivors' RRS lands. The recovery loop below still proves the
-    // end state; here only pin that enforcement itself happened.
-    assert!(
-        [PHASE_ACTIVE, PHASE_REMOVING, PHASE_HOLDOFF].contains(&world.snaps[1].phase),
-        "A active or already removing: {:?}",
-        world.snaps[1]
-    );
     if stall {
         assert!(
-            world.switch.leg_dropped[2][1] > 0,
-            "the stall actually ate notice chunks"
+            notice_live_at_rrs,
+            "gateway had A's Notice down slot when RRS enforced"
+        );
+        assert_eq!(world.snaps[1].phase, PHASE_ACTIVE, "A still active at RRS");
+        assert!(
+            world.snaps[1].has_site,
+            "A holds site during Notice transfer"
+        );
+        assert!(
+            world.switch.notice_manifests_delivered > 0,
+            "the Notice manifest reached A before the stalled chunk"
+        );
+        assert!(
+            world.switch.notice_chunks_dropped > 0,
+            "the stall ate a Notice chunk, not unrelated radio traffic"
         );
     }
     // The enforcement retired A's contexts on the relay that held
@@ -2926,11 +2968,8 @@ fn r1_once(tag: &str, stall: bool) {
         world.snaps[2].app_tx
     );
     // The stall served its purpose (enforcement under a live notice
-    // slot): end the fault here. Leftover budgets would silently eat
-    // the recovery's own legs (e.g. the proxy's ZT offers) hundreds
-    // of seconds later and misattribute the outage.
-    world.switch.drop_next = [[0; 3]; 3];
-    world.switch.ack_drop_next = [[0; 3]; 3];
+    // slot): let the recovery path use the radio again.
+    world.switch.drop_notice_chunks = false;
 
     // Erasure, by whichever road won: the resumed direct send lands
     // Removing in seconds; the ZT road needs A's own retries — a
