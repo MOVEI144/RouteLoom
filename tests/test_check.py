@@ -54,8 +54,8 @@ class CellList(unittest.TestCase):
         data = check.load_cells()
         cells = data["cells"]
         # 37 cells of the pre-v2 matrix, the 5 C6 cells made required, bench C6,
-        # the C3 gateway-128 cell and the two C3 release (-Os) comparison cells.
-        self.assertEqual(len(cells), 46)
+        # the C3 gateway-128 and endpoint cells, and two release (-Os) comparisons.
+        self.assertEqual(len(cells), 47)
         for cell in cells:
             self.assertTrue((ROOT / "firmware" / cell["app"]).is_dir(), cell["id"])
             if cell["id"].startswith("experimental-c6-"):
@@ -340,6 +340,16 @@ class Scenarios(unittest.TestCase):
         # The red three-hop row is ignored by the suite, not required.
         self.assertNotIn("site::owner_mesh::mesh::mesh_line_three_hops_delivers",
                          steps[1].require)
+
+    def test_profile_mesh_requires_every_mixed_case(self):
+        step = check.profile_mesh()[-1]
+        self.assertEqual(set(step.require or ()), {
+            "site::owner_mesh::mesh::mesh_direct_converges_and_delivers",
+            "site::owner_mesh::mesh::mesh_forced_multihop_relays",
+            "site::owner_mesh::join::mesh_group_key_rotate_acknowledged",
+            "site::owner_mesh::cutover::mesh_cutover_prepare_commit_applied",
+            "site::owner_mesh::mesh::mesh_profile_role_above_profile_refused",
+        })
 
     def test_interop_rejects_incompatible_peer_protocol(self):
         checks = [step.argv for step in check.interop()

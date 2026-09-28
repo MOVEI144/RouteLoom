@@ -180,10 +180,13 @@ PROFILE_BUILDS = (
      USB_FEATURE_SUITES + DEDUP_96_SUITES + MODEL_100_SUITES),
 )
 # The join -> unicast -> multi-hop -> GK -> cutover rows and the role refusal.
-PROFILE_MESH_TESTS = ("mesh_direct_converges_and_delivers", "mesh_forced_multihop_relays",
-                      "mesh_group_key_rotate_acknowledged",
-                      "mesh_cutover_prepare_commit_applied",
-                      "mesh_profile_role_above_profile_refused")
+PROFILE_MESH_TESTS = (
+    "site::owner_mesh::mesh::mesh_direct_converges_and_delivers",
+    "site::owner_mesh::mesh::mesh_forced_multihop_relays",
+    "site::owner_mesh::join::mesh_group_key_rotate_acknowledged",
+    "site::owner_mesh::cutover::mesh_cutover_prepare_commit_applied",
+    "site::owner_mesh::mesh::mesh_profile_role_above_profile_refused",
+)
 
 
 def profile_configure(build: str) -> Step:
@@ -230,7 +233,8 @@ def profile_mesh() -> list[Step]:
         Step(["cmake", "--build", "build", "--parallel", JOBS, "--target",
               "routeloom_joiner_interop_peer", "routeloom_owner_mesh_peer"]),
         Step(["cargo", "test", "-p", "routeloom-host", "--bins", "--", "--nocapture",
-              *PROFILE_MESH_TESTS], cwd="host", env=env, forbid=SKIP_MARK),
+              *PROFILE_MESH_TESTS], cwd="host", env=env, forbid=SKIP_MARK,
+             require=PROFILE_MESH_TESTS),
     ]
     return steps
 
