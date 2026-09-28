@@ -714,14 +714,14 @@ impl InteropSite {
 
 // --- Driver --------------------------------------------------------------------
 
-fn down_object(key: &RelayKey, step: u8, status: DownStatus, body: Vec<u8>) -> Vec<u8> {
+fn down_object(key: &RelayKey, phase: u8, step: u8, status: DownStatus, body: Vec<u8>) -> Vec<u8> {
     RelayObject {
         header: RelayHeader {
             dir: RelayDirection::Down,
             relay_id: key.relay_id,
             proxy: key.proxy,
             joiner_mac: key.joiner_mac,
-            phase: PHASE_EDHOC,
+            phase,
             step,
             state: if status == DownStatus::Final {
                 RelayState::Final
@@ -906,7 +906,13 @@ impl World {
                             );
                         }
                     }
-                    let bytes = down_object(&down.key, down.step, down.status, down.body.clone());
+                    let bytes = down_object(
+                        &down.key,
+                        down.phase,
+                        down.step,
+                        down.status,
+                        down.body.clone(),
+                    );
                     self.peer.send_down(site, down.key.proxy, &bytes);
                 }
                 Outbound::Abort { key, reason: _ } => {
@@ -1586,9 +1592,9 @@ fn cpp_joiner_cutover_reissue_over_the_pipe() {
         .encode()
         .unwrap()
         .to_vec();
-        let (moved, _) = world.sites[0]
-            .service
-            .with(|a| a.handle_grant_receipt(node, 1, old_network, &receipt, t0 + 2000));
+        let (moved, _) = world.sites[0].service.with(|a| {
+            a.handle_grant_receipt(node, 1, old_network, &receipt, HostTime::sync(t0 + 2000))
+        });
         assert!(moved);
     }
     let lapse = t0 + 1000 + CUTOVER_PREPARE_WINDOW_MS;
@@ -2398,9 +2404,15 @@ fn live_owner_cutover_prepare_commit() {
         .unwrap()
         .to_vec();
         let now = world.now;
-        let (moved, _) = world.sites[0]
-            .service
-            .with(|a| a.handle_grant_receipt(testkit::GATEWAY, 1, old_network, &receipt, now));
+        let (moved, _) = world.sites[0].service.with(|a| {
+            a.handle_grant_receipt(
+                testkit::GATEWAY,
+                1,
+                old_network,
+                &receipt,
+                HostTime::sync(now),
+            )
+        });
         assert!(moved, "gateway marked prepared");
     }
 

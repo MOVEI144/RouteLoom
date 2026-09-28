@@ -34,6 +34,13 @@ namespace routeloom::endpoint {
 constexpr std::uint8_t kScopeBodyVersion = 2;
 constexpr std::uint8_t kScopeScheme = 1;
 
+// DiscoverV2 flags byte (was reserved-0). Announce marks a one-way frame:
+// receivers may count its generation as staleness evidence but must never
+// answer it, create a candidate, or let it join an in-scope exchange. The
+// bit is inside the MAC-covered body prefix, so it cannot be stripped.
+constexpr std::uint8_t kScopeDiscoverFlagAnnounce = 0x01;
+constexpr std::uint8_t kScopeDiscoverFlagMask = kScopeDiscoverFlagAnnounce;
+
 // 02-discovery-scope.md §2.2: the only registered scope classes.
 enum class ScopeClass : std::uint8_t {
   Member = 1,
@@ -53,10 +60,11 @@ inline constexpr char kScopeOfferDomain[] = "RouteLoom/DSK/v1/offer";
 inline constexpr char kScopeBindingDomain[] = "RouteLoom/DSK/v1/auth-binding";
 inline constexpr char kConfigSnapshotDomain[] = "RouteLoom/config-snapshot/v1";
 
-// DiscoverV2 body (24B): version u8=2 | class u8 | scheme u8=1 | flags u8=0 |
+// DiscoverV2 body (24B): version u8=2 | class u8 | scheme u8=1 | flags u8 |
 // generation u32 | tag 16B.
 struct Rld1DiscoverBodyV2 {
   ScopeClass scope_class{ScopeClass::Member};
+  std::uint8_t flags{0};
   std::uint32_t generation{0};
   std::array<std::uint8_t, 16> tag{};
 };

@@ -341,6 +341,74 @@ fn cutover_grace_serves_commit_then_flips() {
 }
 
 #[test]
+fn gateway_applied_during_cutover_grace_reaches_receipt_queue() {
+    let (mut hub, member) = hub_with(test_dams(0xD0));
+    let mut device = handshake(&mut hub, &member, 1000);
+    let old = testkit::network();
+    let new = (u64::from(testkit::SITE_EPOCH + 1) << 32) | u64::from(testkit::NETWORK_LOW);
+    hub.note_cutover(old, 5000);
+    // A gateway can apply COMMIT before the next authority refresh has
+    // repopulated the live table with new-epoch rows.
+    let mut applied = device.head(member.generation).to_vec();
+    applied.extend_from_slice(&[1, 1, 0, 0, 0, 0, 0, 7]);
+    applied.extend_from_slice(&[0xA5; 32]);
+    let sealed = device.seal(5, &applied);
+    hub.push_carrier(MEMBER_A, CarrierKind::Envelope, &sealed, 5001);
+    let receipts = hub.poll_receipts();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].device, MEMBER_A);
+    assert_eq!(receipts[0].network, old);
+    assert_eq!(
+        decode_type5(&receipts[0].body),
+        Some(P6Type5::Applied {
+            rs_epoch: 7,
+            sha: [0xA5; 32],
+        })
+    );
+
+    let mut staged = member.clone();
+    staged.network = new;
+    hub.refresh(
+        &[(MEMBER_A, staged)],
+        new,
+        7,
+        13,
+        5000 + P6_BINDING_GRACE_MS,
+    );
+    let stale = device.seal(5, &applied);
+    hub.push_carrier(
+        MEMBER_A,
+        CarrierKind::Envelope,
+        &stale,
+        5001 + P6_BINDING_GRACE_MS,
+    );
+    assert!(hub.poll_receipts().is_empty());
+}
+
+#[test]
+fn regressed_clock_cannot_reopen_old_cutover_context() {
+    let (mut hub, member) = hub_with(test_dams(0xD0));
+    let mut device = handshake(&mut hub, &member, 1000);
+    let old = testkit::network();
+    let new = (u64::from(testkit::SITE_EPOCH + 1) << 32) | u64::from(testkit::NETWORK_LOW);
+    hub.note_cutover(old, 5000);
+    let mut staged = member.clone();
+    staged.network = new;
+    hub.refresh(&[(MEMBER_A, staged.clone())], new, 7, 13, 6000);
+    // A clock regression during COMMIT grace must not allow an old
+    // authenticated carrier to extend the window or produce a receipt.
+    let mut applied = device.head(member.generation).to_vec();
+    applied.extend_from_slice(&[1, 1, 0, 0, 0, 0, 0, 7]);
+    applied.extend_from_slice(&[0xA5; 32]);
+    let sealed = device.seal(5, &applied);
+    hub.push_carrier(MEMBER_A, CarrierKind::Envelope, &sealed, 5500);
+    assert!(hub.poll_receipts().is_empty());
+    assert!(!hub.send_grant(MEMBER_A, old, &[0xC0], 5500));
+    hub.refresh(&[(MEMBER_A, staged)], new, 7, 13, 5600);
+    assert_eq!(hub.network(), new);
+}
+
+#[test]
 fn new_handshake_waits_out_the_grace() {
     let (mut hub, member) = hub_with(test_dams(0xD0));
     let _device = handshake(&mut hub, &member, 1000);
@@ -589,7 +657,7 @@ fn applied_over_the_wire_converges() {
     // the wire and stripped before the sink fences it.
     let sha = routeloom_provision::sha256::sha256(&tail);
     let mut report = chan_b.head(row_generation(&service, MEMBER_B)).to_vec();
-    report.extend_from_slice(&applied_body(1, &sha));
+    report.extend_from_slice(&applied_body(2, &sha));
     service.handle_carrier(
         MEMBER_B,
         CarrierKind::Envelope,
@@ -694,7 +762,7 @@ fn malformed_reports_drop_without_state_change() {
     join_member(&service, &transport, &mut device_b, "b", T0);
     let mut chan = handshake_node(&service, &sink, MEMBER_B, T0 + 1000);
     let generation = row_generation(&service, MEMBER_B);
-    // Well-AEAD'd but garbage P6 bodies: dropped, no baseline commit.
+    // Well-AEAD'd but garbage P6 bodies: dropped without changing the baseline.
     for tail in [&[9u8, 9, 9][..], &[1u8, 1, 0, 0, 0][..]] {
         let mut report = chan.head(generation).to_vec();
         report.extend_from_slice(tail);
@@ -706,7 +774,7 @@ fn malformed_reports_drop_without_state_change() {
         );
     }
     assert!(sink.take().is_empty());
-    assert_eq!(service.with(|a| a.rs_epoch).0, 0);
+    assert_eq!(service.with(|a| a.rs_epoch).0, 1);
 }
 
 #[test]

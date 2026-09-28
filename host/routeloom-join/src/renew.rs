@@ -12,6 +12,7 @@ pub const COMMIT_PAYLOAD_SIZE: usize = 80;
 pub const COMMIT_OBJECT_SIZE: usize = 155;
 pub const HEAD_SIZE: usize = 24;
 pub const RECEIPT_SIZE: usize = 76;
+pub const ROUTE_STATE_SIZE: usize = 60;
 pub const PREPARE_MAX: usize = 700;
 pub const COMMIT_MAX: usize = 799;
 
@@ -26,6 +27,8 @@ pub enum Phase {
     Commit = 2,
     Prepared = 3,
     Applied = 4,
+    CommitStored = 5,
+    RouteState = 6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,6 +60,8 @@ impl Head {
             2 => Phase::Commit,
             3 => Phase::Prepared,
             4 => Phase::Applied,
+            5 => Phase::CommitStored,
+            6 => Phase::RouteState,
             _ => return Err(invalid("renew phase")),
         };
         let result = Self {
@@ -148,8 +153,10 @@ pub struct Receipt {
 }
 impl Receipt {
     pub fn encode(&self) -> Result<[u8; RECEIPT_SIZE]> {
-        if !matches!(self.head.phase, Phase::Prepared | Phase::Applied)
-            || self.new_network == 0
+        if !matches!(
+            self.head.phase,
+            Phase::Prepared | Phase::Applied | Phase::CommitStored
+        ) || self.new_network == 0
             || self.status > 4
             || (self.head.phase == Phase::Prepared && self.rs_epoch != 0)
         {
@@ -177,6 +184,86 @@ impl Receipt {
             status: bytes[72],
         };
         result.encode()?;
+        Ok(result)
+    }
+}
+
+/// RouteState (phase 6, 60 B): one target's uplink path for
+/// leaf-first COMMIT dispatch (04 §7). A query (`mode` 0) names only
+/// the cutover binding and a query id; a report (`mode` 1) names the
+/// mesh root, the committed next hop toward it, the boot incarnation,
+/// a local route stamp, the echoed query id and the remaining route
+/// lease. Status 1 (unavailable) carries no parent and no lease.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RouteState {
+    pub head: Head,
+    pub mode: u8,
+    pub status: u8,
+    pub root: u64,
+    pub parent: u64,
+    pub boot: u32,
+    pub route_stamp: u32,
+    pub query_id: u32,
+    pub valid_for_ms: u32,
+}
+impl RouteState {
+    pub fn encode(&self) -> Result<[u8; ROUTE_STATE_SIZE]> {
+        if self.head.phase != Phase::RouteState || self.mode > 1 || self.query_id == 0 {
+            return Err(invalid("renew routestate shape"));
+        }
+        if self.mode == 0 {
+            if self.status != 0
+                || self.root != 0
+                || self.parent != 0
+                || self.boot != 0
+                || self.route_stamp != 0
+                || self.valid_for_ms != 0
+            {
+                return Err(invalid("renew routestate query"));
+            }
+        } else if self.status > 1 {
+            return Err(invalid("renew routestate status"));
+        } else if self.status == 1 {
+            if self.parent != 0 || self.valid_for_ms != 0 {
+                return Err(invalid("renew routestate unavailable"));
+            }
+        } else if self.root == 0 {
+            return Err(invalid("renew routestate root"));
+        }
+        let mut out = [0; ROUTE_STATE_SIZE];
+        out[..24].copy_from_slice(&self.head.encode()?);
+        out[24] = self.mode;
+        out[25] = self.status;
+        out[28..36].copy_from_slice(&self.root.to_be_bytes());
+        out[36..44].copy_from_slice(&self.parent.to_be_bytes());
+        out[44..48].copy_from_slice(&self.boot.to_be_bytes());
+        out[48..52].copy_from_slice(&self.route_stamp.to_be_bytes());
+        out[52..56].copy_from_slice(&self.query_id.to_be_bytes());
+        out[56..60].copy_from_slice(&self.valid_for_ms.to_be_bytes());
+        Ok(out)
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != ROUTE_STATE_SIZE || bytes[26..28] != [0, 0] {
+            return Err(invalid("renew routestate"));
+        }
+        let result = Self {
+            head: Head::decode(bytes)?,
+            mode: bytes[24],
+            status: bytes[25],
+            root: u64::from_be_bytes(bytes[28..36].try_into().unwrap()),
+            parent: u64::from_be_bytes(bytes[36..44].try_into().unwrap()),
+            boot: u32::from_be_bytes(bytes[44..48].try_into().unwrap()),
+            route_stamp: u32::from_be_bytes(bytes[48..52].try_into().unwrap()),
+            query_id: u32::from_be_bytes(bytes[52..56].try_into().unwrap()),
+            valid_for_ms: u32::from_be_bytes(bytes[56..60].try_into().unwrap()),
+        };
+        if result.head.phase != Phase::RouteState {
+            return Err(invalid("renew routestate phase"));
+        }
+        let canonical = result.encode()?;
+        if canonical != bytes {
+            return Err(invalid("renew routestate canonical"));
+        }
         Ok(result)
     }
 }

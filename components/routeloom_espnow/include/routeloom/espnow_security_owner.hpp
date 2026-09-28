@@ -243,6 +243,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
    public:
     explicit LifecycleAuthorityPort(EspNowSecurityOwner& owner) noexcept : owner_(owner) {}
     Status authority_send(std::uint8_t authority_type, ByteView body) noexcept override;
+    bool authority_tx_settled() noexcept override;
 
    private:
     EspNowSecurityOwner& owner_;
@@ -264,6 +265,9 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
     Status erase_site_trust() noexcept override;
     Status retire_network() noexcept override;
     Status install_site_trust(const sdkv1::SiteRecord& next) noexcept override;
+    bool route_state_snapshot(const sdkv1::GrantRouteState& query,
+                              sdkv1::GrantRouteState& report,
+                              MonotonicMs now_ms) noexcept override;
 
    private:
     EspNowSecurityOwner& owner_;
@@ -398,6 +402,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   bool lifecycle_live_{false};
   bool lifecycle_booted_{false};
   bool removal_pending_{false};  // coordinator boot deferred: erasure runs first
+  bool cutover_intent_{false};   // lifecycle Prepared/Switching, mirrored into the coordinator
   std::array<GossipStage, 4> gossip_staged_{};
   std::array<NodeId, EspNowRuntime::kPeerCapacity> lifecycle_peers_{};
   struct PeerTxStage {

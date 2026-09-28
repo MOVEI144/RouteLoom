@@ -7,10 +7,17 @@
 
 typedef void (*TaskFunction_t)(void *);
 
+#define tskIDLE_PRIORITY 0
+#define portMAX_DELAY ((TickType_t)0xFFFFFFFFu)
+
+BaseType_t xTaskCreate(TaskFunction_t fn, const char *name,
+                       uint32_t stack_depth, void *param,
+                       UBaseType_t prio, TaskHandle_t *handle);
 BaseType_t xTaskCreatePinnedToCore(TaskFunction_t fn, const char *name,
                                    uint32_t stack_depth, void *param,
                                    UBaseType_t prio, TaskHandle_t *handle,
                                    BaseType_t core);
+void vTaskSuspend(TaskHandle_t task);
 TaskHandle_t xTaskGetCurrentTaskHandle(void);
 void vTaskDelay(TickType_t ticks);
 void vTaskDelete(TaskHandle_t task);

@@ -1,6 +1,11 @@
 // Test driver surface for the ESP-IDF stand-ins (issue #117 host regression
 // test): fake-clock control plus counters for the driver calls the tests
 // assert on. Single-threaded; plain globals are enough.
+//
+// The multi-node mesh harness (D04) runs one node per process and switches
+// radio frames between processes: each peer sets its own station MAC,
+// captures every esp_now_send payload with take_tx, and the harness
+// re-injects the delivered ones with inject_rx.
 #pragma once
 
 #include <cstdint>
@@ -18,22 +23,36 @@ bool last_send_to(const std::uint8_t mac[6]) noexcept;
 unsigned del_peer_count() noexcept;
 void fail_del_peer(bool fail) noexcept;
 void fail_add_peer(bool fail) noexcept;
+// Per-process station MAC (esp_wifi_get_mac); reset() restores the default.
+void set_mac(const std::uint8_t mac[6]) noexcept;
+// Injects one RX frame with its observed destination (broadcast for
+// broadcast frames): the member-scope destination rule drops frames
+// whose destination is neither this node nor broadcast, so a zeroed
+// destination would silently discard real RLD1 traffic.
+bool inject_rx(const std::uint8_t source[6], const std::uint8_t dest[6],
+               const std::uint8_t* frame, std::size_t length) noexcept;
 bool inject_rx(const std::uint8_t source[6], const std::uint8_t* frame,
                std::size_t length) noexcept;
-// Complete the most recent uncompleted esp_now_send through the
-// registered send callback, as the driver would. No-op when nothing is
-// outstanding or no callback is registered. Returns true when a
+// Complete the oldest uncompleted esp_now_send through the registered
+// send callback, as the driver would. Destinations attribute in send
+// order even after take_tx drained the capture queue. No-op when nothing
+// is outstanding or no callback is registered. Returns true when a
 // completion was delivered.
 bool complete_send(bool success) noexcept;
-
-// One captured esp_now_send payload, for tests that emulate the peer side
-// of the radio (ferry captures into a bound peer's RX path).
+// One captured esp_now_send payload (ESP_NOW_MAX_DATA_LEN body max).
 struct TxFrame {
   static constexpr std::size_t kMaxBytes = 280;
-  std::uint8_t dest[6];
-  std::uint16_t length;
-  std::uint8_t bytes[kMaxBytes];
+  std::uint8_t dest[6]{};
+  std::uint8_t bytes[kMaxBytes]{};
+  std::size_t length{0};
 };
+// Pops the oldest captured TX frame; false when the capture queue is
+// empty. Frames overwritten by queue overflow are counted in
+// tx_overruns() instead of being silently reordered.
+bool take_tx(TxFrame& out) noexcept;
+std::size_t tx_pending() noexcept;
+unsigned tx_overruns() noexcept;
+
 // Pop the oldest captured TX frame; false when the capture ring is empty.
 bool pop_tx(TxFrame& out) noexcept;
 // TX frames dropped because the capture ring was full or oversized.

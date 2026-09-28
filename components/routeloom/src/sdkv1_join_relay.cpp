@@ -1,6 +1,7 @@
 #include "routeloom/sdkv1_join_relay.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 #include "routeloom/discovery.hpp"        // EntropySource
@@ -133,6 +134,20 @@ Status ZtJoinerLink::discover(const ZtDiscoverBody& body, const MonotonicMs now_
 
 Status ZtJoinerLink::discover_impl(const ZtDiscoverBody& body,
                                     const MonotonicMs now_ms) noexcept {
+  return discover_inner(body, now_ms, /*fresh_nonce=*/true);
+}
+
+Status ZtJoinerLink::rediscover(const ZtDiscoverBody& body,
+                                const MonotonicMs now_ms) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "in link callback");
+  in_call_ = true;
+  const Status result = discover_inner(body, now_ms, /*fresh_nonce=*/false);
+  in_call_ = false;
+  return result;
+}
+
+Status ZtJoinerLink::discover_inner(const ZtDiscoverBody& body, const MonotonicMs now_ms,
+                                    const bool fresh_nonce) noexcept {
   (void)now_ms;
   if (!id_valid(config_.node)) return invalid("zt joiner node");
   ByteBuffer<kZtDiscoverBodySize> encoded{};
@@ -142,14 +157,16 @@ Status ZtJoinerLink::discover_impl(const ZtDiscoverBody& body,
   // The nonce's first four bytes are the chunk object id: a zero id
   // collides with "no object", so redraw (at most four draws) instead of
   // patching the bytes.
-  status = Status::error(StatusCode::InternalError, "zt discover entropy");
-  for (int draw = 0; draw < 4; ++draw) {
-    status = entropy_.fill(MutableByteView{nonce_.data(), nonce_.size()});
-    if (!status) return status;
-    if (join_rld1_object_id(nonce_) != 0) break;
-    status = Status::error(StatusCode::InternalError, "zt discover nonce");
+  if (fresh_nonce || join_rld1_object_id(nonce_) == 0) {
+    status = Status::error(StatusCode::InternalError, "zt discover entropy");
+    for (int draw = 0; draw < 4; ++draw) {
+      status = entropy_.fill(MutableByteView{nonce_.data(), nonce_.size()});
+      if (!status) return status;
+      if (join_rld1_object_id(nonce_) != 0) break;
+      status = Status::error(StatusCode::InternalError, "zt discover nonce");
+    }
+    if (!status || join_rld1_object_id(nonce_) == 0) return status;
   }
-  if (!status || join_rld1_object_id(nonce_) == 0) return status;
   discover_org_hint_ = body.org_hint;
   discovering_ = true;
   status = emit(kBroadcastMac, FrameType::Discover, encoded.view());
@@ -242,8 +259,9 @@ Status ZtJoinerLink::send_impl(const JoinAuthPhase phase, const std::uint8_t ste
   return status;
 }
 
-void ZtJoinerLink::send_due_chunks(const MonotonicMs now_ms) noexcept {
+void ZtJoinerLink::send_due_chunks(const MonotonicMs now_ms, const bool bill_round) noexcept {
   const std::uint16_t mask = slot_.pending_mask();
+  bool blocked = false;
   for (std::size_t i = 0; i < slot_.chunk_total(); ++i) {
     if ((mask & (1U << i)) == 0) continue;
     JoinChunk chunk{};
@@ -254,9 +272,15 @@ void ZtJoinerLink::send_due_chunks(const MonotonicMs now_ms) noexcept {
                            written)) {
       continue;
     }
-    (void)emit(proxy_mac_, FrameType::BootstrapChunk, ByteView{body.data(), written});
+    if (!emit(proxy_mac_, FrameType::BootstrapChunk, ByteView{body.data(), written})) {
+      blocked = true;  // the port holds one frame per peer: the rest waits
+    }
   }
-  slot_.note_sent(now_ms);
+  if (bill_round) {
+    slot_.note_sent(now_ms, blocked);
+  } else {
+    slot_.note_advanced(now_ms, blocked);
+  }
 }
 
 void ZtJoinerLink::send_reply(const JoinReply& reply) noexcept {
@@ -326,6 +350,14 @@ void ZtJoinerLink::on_rld1_rx_impl(const MacAddress& source, const MacAddress& d
         observer_.on_relay_status(object.relay_status, object.retry_after_ms);
         return;
       }
+      if (object.phase == JoinAuthPhase::RrsDelivery) {
+        // Out-of-band for the EDHOC sequence (it lands between m3 and m4
+        // without advancing it): past the observer, the slot and the
+        // stage order untouched.
+        ++stats_.messages_rx;
+        observer_.on_message(object.phase, object.step, object.message);
+        return;
+      }
       // A down message answers our last up object only when it advances
       // the exchange: a retransmitted duplicate of an earlier stage is
       // dropped without touching the slot or the observer (single-frame
@@ -380,6 +412,13 @@ void ZtJoinerLink::on_rld1_rx_impl(const MacAddress& source, const MacAddress& d
         return;
       }
       send_reply(accepted.reply);
+      if (object.phase == JoinAuthPhase::RrsDelivery) {
+        // Out-of-band (see the single-frame leg): the stage order stays.
+        ++stats_.messages_rx;
+        observer_.on_message(object.phase, object.step, object.message);
+        slot_.release_assembled();
+        return;
+      }
       const std::uint8_t sub = join_sub(object.phase, object.step);
       if (sub <= last_down_sub_) {
         // A stale object re-assembled (older than the stage delivered
@@ -399,8 +438,21 @@ void ZtJoinerLink::on_rld1_rx_impl(const MacAddress& source, const MacAddress& d
         ++stats_.frames_rejected;
         return;
       }
-      if (slot_.on_reply(reply, now_ms) == JoinObjectSlot::ReplyOutcome::Restart) {
+      // Ack-clocked advance: when the last pump left chunks unemitted
+      // (the port holds one frame per peer), a receipt that retired
+      // chunks pumps the next ones at once — a multi-chunk object
+      // would otherwise cost a full retransmit round per chunk and
+      // blow the joiner's step deadline (a 4-chunk M4 down never
+      // lands). The mask compare keeps a duplicate receipt from
+      // re-emitting in-flight chunks; the retransmit timer stays the
+      // loss path.
+      const std::uint16_t due = slot_.pending_mask();
+      const auto outcome = slot_.on_reply(reply, now_ms);
+      if (outcome == JoinObjectSlot::ReplyOutcome::Restart) {
         send_due_chunks(now_ms);
+      } else if (outcome == JoinObjectSlot::ReplyOutcome::Progress && slot_.send_blocked() &&
+                 slot_.pending_mask() != due) {
+        send_due_chunks(now_ms, false);
       }
       return;
     }
@@ -752,7 +804,8 @@ void JoinProxy::handle_auth(const MacAddress& source, const autonomy::Rld1Envelo
                             const std::int8_t rssi, const MonotonicMs now_ms) noexcept {
   JoinAuthObject object{};
   if (!join_object_decode(ByteView{env.body.data(), env.body_size}, object) ||
-      object.phase == JoinAuthPhase::RelayStatus) {
+      object.phase == JoinAuthPhase::RelayStatus ||
+      object.phase == JoinAuthPhase::RrsDelivery) {
     ++stats_.frames_rejected;
     return;
   }
@@ -902,6 +955,10 @@ void JoinProxy::handle_reply(const MacAddress& source, const autonomy::Rld1Envel
     ++stats_.frames_rejected;
     return;
   }
+  // Ack-clocked advance (same as the joiner link): when the last
+  // pump left chunks unemitted, a Progress receipt that retired
+  // chunks pumps the next ones at once.
+  const std::uint16_t due = slot_.pending_mask();
   switch (slot_.on_reply(reply, now_ms)) {
     case JoinObjectSlot::ReplyOutcome::Done:
       if (relay_.final_pending) {  // 02 §7.3: the final down object arrived
@@ -911,6 +968,9 @@ void JoinProxy::handle_reply(const MacAddress& source, const autonomy::Rld1Envel
       return;
     case JoinObjectSlot::ReplyOutcome::Restart:
       send_due_chunks(now_ms);
+      return;
+    case JoinObjectSlot::ReplyOutcome::Progress:
+      if (slot_.send_blocked() && slot_.pending_mask() != due) send_due_chunks(now_ms, false);
       return;
     default:
       return;
@@ -986,6 +1046,10 @@ bool JoinProxy::down_expected(const RelayHeader& header) const noexcept {
     return relay_.last_step == 3;
   if (header.phase == JoinAuthPhase::EdhocMessage && header.step == kJoinEdhocErrorStep)
     return relay_.last_step != 0 && !relay_.final_pending;
+  // The RRS1 down rides the live EDHOC relay out-of-band, after m3
+  // (deliver_down leaves the EDHOC stage untouched for it).
+  if (header.phase == JoinAuthPhase::RrsDelivery && header.step == 1)
+    return relay_.phase == JoinAuthPhase::EdhocMessage && relay_.last_step == 3;
   return false;
 }
 
@@ -997,16 +1061,22 @@ void JoinProxy::on_relay_rx_impl(const NodeId from, const FrameType type, const 
   }
   // The full token of the live relay: an input from another epoch or for
   // another id never touches it (#116 §3.1).
+  // The RRS1 down rides the live EDHOC relay (bound by the same token);
+  // anything else must match the relay's own phase.
+  const auto phase_ours = [&](const JoinAuthPhase phase) {
+    return phase == relay_.phase ||
+           (phase == JoinAuthPhase::RrsDelivery &&
+            relay_.phase == JoinAuthPhase::EdhocMessage);
+  };
   const auto ours = [&](const RelayHeader& h) {
     return relay_.active && h.dir == RelayDirection::Down && h.relay_id == relay_.relay_id &&
            h.gateway_epoch == relay_.gateway_epoch && h.proxy_epoch == config_.proxy_epoch &&
-           h.proxy == config_.node && h.joiner_mac == relay_.joiner_mac &&
-           h.phase == relay_.phase;
+           h.proxy == config_.node && h.joiner_mac == relay_.joiner_mac && phase_ours(h.phase);
   };
   const auto chunk_ours = [&](const JoinChunk& chunk) {
     return relay_.active && chunk.id == relay_.relay_id &&
            chunk.gateway_epoch == relay_.gateway_epoch &&
-           chunk.proxy_epoch == config_.proxy_epoch && chunk.phase == relay_.phase;
+           chunk.proxy_epoch == config_.proxy_epoch && phase_ours(chunk.phase);
   };
   switch (type) {
     case FrameType::BootstrapAuth: {
@@ -1132,12 +1202,19 @@ void JoinProxy::on_relay_rx_impl(const NodeId from, const FrameType type, const 
         ++stats_.frames_rejected;
         return;
       }
+      // Ack-clocked advance (same as the RLD1 leg): when the last
+      // pump left chunks unemitted, a Progress receipt that retired
+      // chunks pumps the next ones at once.
+      const std::uint16_t due = slot_.pending_mask();
       switch (slot_.on_reply(reply, now_ms)) {
         case JoinObjectSlot::ReplyOutcome::Done:
           relay_.slot_up = false;
           return;
         case JoinObjectSlot::ReplyOutcome::Restart:
           send_due_chunks(now_ms);
+          return;
+        case JoinObjectSlot::ReplyOutcome::Progress:
+          if (slot_.send_blocked() && slot_.pending_mask() != due) send_due_chunks(now_ms, false);
           return;
         default:
           return;
@@ -1180,15 +1257,33 @@ void JoinProxy::deliver_down(const RelayObject& object, const MonotonicMs now_ms
     slot_.release_assembled();
     return;
   }
-  relay_.last_step = h.step;
-  relay_.final_pending = h.state == RelayState::Final;
+  // The RRS1 down is out-of-band: the EDHOC stage, the final flag and
+  // the device silence window stay exactly as the last EDHOC down left
+  // them (the device answers nothing for it).
+  const bool rrs = h.phase == JoinAuthPhase::RrsDelivery;
+  if (!rrs) {
+    relay_.last_step = h.step;
+    relay_.final_pending = h.state == RelayState::Final;
+  }
   relay_.slot_up = false;
   if (written <= autonomy::kRld1MaxBody) {
     const Status sent = emit_rld1(relay_.joiner_mac, relay_.nonce, FrameType::BootstrapAuth,
                                   ByteView{buffer.data, written});
+    if (!sent && rrs && written <= pending_down_.body.size()) {
+      // A refused RRS1 send never ends the exchange: the join stands on
+      // the EDHOC stage. Park the encoded frame for the poll loop's
+      // retry — a silently dropped set wedges the member on
+      // rrs1-floor-lost after a cross-network re-adopt. The copy must
+      // precede release_assembled, which wipes the slot buffer.
+      std::memcpy(pending_down_.body.data(), buffer.data, written);
+      pending_down_.mac = relay_.joiner_mac;
+      pending_down_.nonce = relay_.nonce;
+      pending_down_.size = written;
+      pending_down_.used = true;
+    }
     slot_.release_assembled();
     if (!sent) {
-      abort_relay(RelayStatusCode::Aborted, true);
+      if (!rrs) abort_relay(RelayStatusCode::Aborted, true);
       return;
     }
     if (relay_.final_pending) {
@@ -1197,15 +1292,19 @@ void JoinProxy::deliver_down(const RelayObject& object, const MonotonicMs now_ms
       return;
     }
   } else {
-    if (!slot_.load_in_place(JoinCarrier::Rld1, h.phase, h.step,
-                             join_rld1_object_id(relay_.nonce), 0, 0, written, now_ms)) {
+    const Status loaded = slot_.load_in_place(JoinCarrier::Rld1, h.phase, h.step,
+                                              join_rld1_object_id(relay_.nonce), 0, 0,
+                                              written, now_ms);
+    if (!loaded) {
       slot_.release_assembled();
       return;
     }
     send_due_chunks(now_ms);
   }
-  // Continue: the device must answer within the silence window.
-  if (!relay_.final_pending) relay_.device_deadline_ms = now_ms + config_.device_silence_ms;
+  // Continue: the device must answer within the silence window (never
+  // for the RRS1 down: nothing answers it).
+  if (!rrs && !relay_.final_pending)
+    relay_.device_deadline_ms = now_ms + config_.device_silence_ms;
 }
 
 void JoinProxy::send_relay_status(const MacAddress& mac, const JoinNonce& nonce,
@@ -1244,10 +1343,11 @@ void JoinProxy::send_wire_receipt(const JoinReply& reply) noexcept {
   }
 }
 
-void JoinProxy::send_due_chunks(const MonotonicMs now_ms) noexcept {
+void JoinProxy::send_due_chunks(const MonotonicMs now_ms, const bool bill_round) noexcept {
   if (slot_.mode() != JoinObjectSlot::Mode::Sending) return;
   const JoinCarrier carrier = relay_.slot_up ? JoinCarrier::WireRelay : JoinCarrier::Rld1;
   const std::uint16_t mask = slot_.pending_mask();
+  bool blocked = false;
   for (std::size_t i = 0; i < slot_.chunk_total(); ++i) {
     if ((mask & (1U << i)) == 0) continue;
     JoinChunk chunk{};
@@ -1261,13 +1361,18 @@ void JoinProxy::send_due_chunks(const MonotonicMs now_ms) noexcept {
       if (!relay_port_.send_relay(config_.gateway, FrameType::BootstrapChunk,
                                   ByteView{body.data(), written})) {
         ++stats_.send_failures;
+        blocked = true;
       }
-    } else {
-      (void)emit_rld1(relay_.joiner_mac, relay_.nonce, FrameType::BootstrapChunk,
-                      ByteView{body.data(), written});
+    } else if (!emit_rld1(relay_.joiner_mac, relay_.nonce, FrameType::BootstrapChunk,
+                          ByteView{body.data(), written})) {
+      blocked = true;  // the port holds one frame per peer: the rest waits
     }
   }
-  slot_.note_sent(now_ms);
+  if (bill_round) {
+    slot_.note_sent(now_ms, blocked);
+  } else {
+    slot_.note_advanced(now_ms, blocked);
+  }
 }
 
 void JoinProxy::abort_relay(const RelayStatusCode device_status,
@@ -1302,6 +1407,7 @@ void JoinProxy::abort_relay(const RelayStatusCode device_status,
 void JoinProxy::end_relay() noexcept {
   relay_ = Relay{};
   slot_.reset();
+  pending_down_ = PendingDown{};
 }
 
 bool JoinProxy::epoch_cache_valid(const MonotonicMs now_ms) const noexcept {
@@ -1390,6 +1496,12 @@ Status JoinProxy::poll(const MonotonicMs now_ms) noexcept {
     offers_.release(due);
     send_offer(offer, now_ms);
   }
+  if (pending_down_.used) {
+    const Status retried =
+        emit_rld1(pending_down_.mac, pending_down_.nonce, FrameType::BootstrapAuth,
+                  ByteView{pending_down_.body.data(), pending_down_.size});
+    if (retried) pending_down_ = PendingDown{};
+  }
   if (!relay_.active) {
     in_call_ = false;
     return Status::success();
@@ -1443,14 +1555,14 @@ Status JoinRelayGateway::set_host_sink(JoinRelayHostSink* sink) noexcept {
       RelayHeader up{};
       up.dir = RelayDirection::Up;
       up.relay_id = relay.token.relay_id;
-      up.proxy = floor.proxy;
+      up.proxy = floor.proxy();
       up.joiner_mac = relay.joiner_mac;
       up.phase = relay.phase;
       up.step = 1;
       up.state = RelayState::Continue;
       up.gateway_epoch = relay.token.gateway_epoch;
       up.proxy_epoch = relay.token.proxy_epoch;
-      send_down_abort(floor.proxy, up, RelayStatusCode::AuthorityUnreachable,
+      send_down_abort(floor.proxy(), up, RelayStatusCode::AuthorityUnreachable,
                       config_.unreachable_retry_ms);
       finish_silent(relay);
     }
@@ -1486,7 +1598,7 @@ JoinRelayGateway::KeyOrder JoinRelayGateway::order_key(const NodeId proxy, const
                                                        ProxyFloor*& floor) noexcept {
   floor = nullptr;
   for (ProxyFloor& row : floors_) {
-    if (row.valid && row.proxy == proxy) {
+    if (row.valid && row.proxy() == proxy) {
       floor = &row;
       break;
     }
@@ -1553,7 +1665,7 @@ Status JoinRelayGateway::open_exchange(const NodeId proxy, const std::uint8_t ho
       finish_exchange(*old, RelayAbortReason::Superseded, old->host_up_delivered);
   } else {
     target->valid = true;
-    target->proxy = proxy;
+    target->set_proxy(proxy);
   }
   target->max_proxy_epoch = header.proxy_epoch;
   target->max_relay_id = header.relay_id;
@@ -1612,7 +1724,7 @@ void JoinRelayGateway::finish_exchange(ActiveRelay& relay, const RelayAbortReaso
   if (!relay.active) return;  // a second finish of the same key is a no-op
   // Snapshot the notification before unlinking anything.
   const ProxyFloor& floor = floors_[relay.floor];
-  const NodeId proxy = floor.proxy;
+  const NodeId proxy = floor.proxy();
   const RelayToken token = relay.token;
   // (1) The floor stays terminated at this key: smaller keys remain old and
   // the same key never reopens.
@@ -1658,13 +1770,16 @@ void JoinRelayGateway::finish_silent(ActiveRelay& relay) noexcept {
 void JoinRelayGateway::implicit_down_receipt(ActiveRelay& relay) noexcept {
   // A valid new up stage proves the down object in flight arrived: free it
   // and remember it as done, so a retried down reads as Expired.
+  const Slot* held = slot_for(relay);
+  const bool rrs = relay.down_sending && held != nullptr &&
+                   held->object.phase() == JoinAuthPhase::RrsDelivery;
   if (Slot* slot = slot_for(relay)) {
     if (slot->down) free_slot(*slot);
   }
   if (relay.down_sending) {
-    if (relay.down_step == 2) relay.m2_done = true;
+    if (relay.down_step == 2 && !rrs) relay.m2_done = true;
     relay.down_sending = false;
-    relay.down_done = true;
+    if (!rrs) relay.down_done = true;
   }
 }
 
@@ -1679,7 +1794,7 @@ void JoinRelayGateway::deliver_up(ActiveRelay& relay, const std::uint8_t relay_i
   // the host exactly once: commit the termination first while the source
   // buffer stays readable for the callback, wipe it right after (#116 §4.4).
   if (is_error) {
-    const NodeId proxy = floors_[relay.floor].proxy;
+    const NodeId proxy = floors_[relay.floor].proxy();
     floors_[relay.floor].active = kNoActive;
     relay = ActiveRelay{};
     bool accepted = false;
@@ -1695,12 +1810,12 @@ void JoinRelayGateway::deliver_up(ActiveRelay& relay, const std::uint8_t relay_i
     return;
   }
   bool accepted = false;
-  if (sink_ != nullptr) accepted = sink_->relay_up(floors_[relay.floor].proxy, hops, bytes).ok();
+  if (sink_ != nullptr) accepted = sink_->relay_up(floors_[relay.floor].proxy(), hops, bytes).ok();
   if (!accepted) {
     // 07 §7: no host (or a refusing one) -> the proxy tells the device
     // authority_unreachable. The up is never handed over again for this key.
     ++stats_.host_unavailable;
-    send_down_abort(floors_[relay.floor].proxy, h, RelayStatusCode::AuthorityUnreachable,
+    send_down_abort(floors_[relay.floor].proxy(), h, RelayStatusCode::AuthorityUnreachable,
                     config_.unreachable_retry_ms);
     finish_silent(relay);
     return;
@@ -2166,7 +2281,7 @@ void JoinRelayGateway::handle_proxy_aborted(const NodeId from, const RelayToken&
     for (ProxyFloor& row : floors_) {
       if (!row.valid) {
         row.valid = true;
-        row.proxy = from;
+        row.set_proxy(from);
         row.max_proxy_epoch = token.proxy_epoch;
         row.max_relay_id = token.relay_id;
         return;
@@ -2196,12 +2311,17 @@ void JoinRelayGateway::handle_down_reply(const NodeId from, const JoinReply& rep
   if (relay == nullptr || !relay_token_equal(relay->token, token) || !relay->down_sending) return;
   Slot* slot = slot_for(*relay);
   if (slot == nullptr || !slot->down) return;
+  // Ack-clocked advance (same as the proxy legs): when the last
+  // pump left chunks unemitted, a Progress receipt that retired
+  // chunks pumps the next ones at once.
+  const std::uint16_t due = slot->object.pending_mask();
   switch (slot->object.on_reply(reply, now_ms)) {
     case JoinObjectSlot::ReplyOutcome::Done:
       if (relay->down_final) {
         finish_silent(*relay);  // the Final down arrived; nothing to report
       } else {
-        if (relay->down_step == 2) relay->m2_done = true;
+        const bool rrs = slot->object.phase() == JoinAuthPhase::RrsDelivery;
+        if (relay->down_step == 2 && !rrs) relay->m2_done = true;
         relay->down_sending = false;
         relay->down_done = true;
         free_slot(*slot);
@@ -2210,15 +2330,22 @@ void JoinRelayGateway::handle_down_reply(const NodeId from, const JoinReply& rep
     case JoinObjectSlot::ReplyOutcome::Restart:
       (void)send_due_chunks(*slot, from, now_ms);
       return;
+    case JoinObjectSlot::ReplyOutcome::Progress:
+      if (slot->object.send_blocked() && slot->object.pending_mask() != due) {
+        (void)send_due_chunks(*slot, from, now_ms, false);
+      }
+      return;
     default:
       return;
   }
 }
 
 Status JoinRelayGateway::send_due_chunks(Slot& slot, const NodeId proxy,
-                                            const MonotonicMs now_ms) noexcept {
+                                            const MonotonicMs now_ms,
+                                            const bool bill_round) noexcept {
   Status first_failure = Status::success();
   const std::uint16_t mask = slot.object.pending_mask();
+  bool blocked = false;
   for (std::size_t i = 0; i < slot.object.chunk_total(); ++i) {
     if ((mask & (1U << i)) == 0) continue;
     JoinChunk chunk{};
@@ -2230,10 +2357,15 @@ Status JoinRelayGateway::send_due_chunks(Slot& slot, const NodeId proxy,
     if (status) {
       status = wire_.send_relay(proxy, FrameType::BootstrapChunk,
                                 ByteView{body.data(), written});
+      if (!status) blocked = true;  // the mesh holds one frame per peer
     }
     if (!status && first_failure) first_failure = status;
   }
-  slot.object.note_sent(now_ms);
+  if (bill_round) {
+    slot.object.note_sent(now_ms, blocked);
+  } else {
+    slot.object.note_advanced(now_ms, blocked);
+  }
   return first_failure;
 }
 
@@ -2247,7 +2379,9 @@ Status JoinRelayGateway::host_down(const NodeId to_proxy, const ByteView object,
   }
   RelayObject decoded{};
   Status status = relay_object_decode(object, decoded);
-  if (!status) return status;
+  if (!status) {
+    return status;
+  }
   const RelayHeader& h = decoded.header;
   if (h.dir != RelayDirection::Down || h.proxy != to_proxy ||
       (to_proxy == config_.node && !config_.colocated_proxy)) {
@@ -2284,17 +2418,25 @@ Status JoinRelayGateway::host_down(const NodeId to_proxy, const ByteView object,
     in_call_ = false;
     return Status::error(StatusCode::Expired, "relay deadline");
   }
-  if (h.phase != relay->phase || h.joiner_mac != relay->joiner_mac) {
+  const bool rrs = h.phase == JoinAuthPhase::RrsDelivery;
+  // The out-of-band RRS1 down rides the live EDHOC exchange (same token,
+  // same joiner); anything else must match the relay's own phase.
+  if ((!rrs && h.phase != relay->phase) ||
+      (rrs && relay->phase != JoinAuthPhase::EdhocMessage) ||
+      h.joiner_mac != relay->joiner_mac) {
     return Status::error(StatusCode::Conflict, "relay identity mismatch");
   }
   const bool is_final = h.state == RelayState::Final;
   // The down stage must follow the accepted ups: step 2 wants step 1, an
-  // EDHOC step 4 wants step 3, a step-5 error wants step 1.
+  // EDHOC step 4 wants step 3, a step-5 error wants step 1. The RRS1
+  // object wants step 3 too and is legal only until the terminal down.
   const bool up1 = (relay->accepted_up_mask & 1U) != 0;
   const bool up3 = (relay->accepted_up_mask & (1U << 1)) != 0;
   const bool resume = h.phase == JoinAuthPhase::Resume;
   bool stage_ok = false;
-  if (h.step == 2 && !is_final) {
+  if (rrs) {
+    stage_ok = up3 && !(relay->down_done && relay->down_final);
+  } else if (h.step == 2 && !is_final) {
     stage_ok = up1;
   } else if (h.step == 2 && is_final && resume) {
     stage_ok = up1;
@@ -2304,16 +2446,23 @@ Status JoinRelayGateway::host_down(const NodeId to_proxy, const ByteView object,
     stage_ok = up1;
   }
   if (!stage_ok) return Status::error(StatusCode::Conflict, "unexpected down stage");
-  if (h.step == 2 && relay->m2_done) {
+  if (!rrs && h.step == 2 && relay->m2_done) {
     return Status::error(StatusCode::Expired, "down step 2 already completed");
   }
   if (is_final && relay->down_done && relay->down_final && relay->down_step == h.step) {
     return Status::error(StatusCode::Expired, "down already completed");
   }
   if (relay->down_sending) {
+    Slot* held = slot_for(*relay);
+    // The host retains m4 while the phase-7 object occupies this lane.
+    // A capacity refusal changes no gateway state; the host retries the
+    // same full-token object after the RRS1 Complete receipt.
+    if (!rrs && held != nullptr && held->down &&
+        held->object.phase() == JoinAuthPhase::RrsDelivery) {
+      return Status::error(StatusCode::NoCapacity, "RRS1 down in flight");
+    }
     // A retried down is idempotent only byte-for-byte; anything else while
     // sending contradicts the live exchange.
-    Slot* held = slot_for(*relay);
     const ByteView sending = held != nullptr ? held->object.sending() : ByteView{};
     if (relay->down_step != h.step || relay->down_final != is_final || sending.size != object.size ||
         (object.size != 0 && std::memcmp(sending.data, object.data, object.size) != 0)) {
@@ -2322,9 +2471,11 @@ Status JoinRelayGateway::host_down(const NodeId to_proxy, const ByteView object,
     last_now_ms_ = now_ms;
     return Status::success();  // same bytes: accepted, timers untouched
   }
-  if (relay->down_done) {
+  if (relay->down_done && !rrs) {
     // The previous down finished but this one is for an older step (its
-    // successor was already sent): it must not transmit again.
+    // successor was already sent): it must not transmit again. The RRS1
+    // is out-of-band — it answers to the stage gate above, never this
+    // EDHOC ordering (it always arrives after the m2 down completed).
     if ((h.step == 2 && relay->down_step != 2) || (is_final && relay->down_step == h.step)) {
       return Status::error(StatusCode::Expired, "down already completed");
     }
@@ -2463,7 +2614,7 @@ Status JoinRelayGateway::poll(const MonotonicMs now_ms) noexcept {
       continue;
     }
     ++stats_.retransmissions;
-    const NodeId proxy = floors_[relay.floor].proxy;
+    const NodeId proxy = floors_[relay.floor].proxy();
     (void)send_due_chunks(*slot, proxy, now_ms);
   }
   in_call_ = false;

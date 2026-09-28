@@ -58,6 +58,8 @@
 #include "routeloom/secure_clear.hpp"
 #include "routeloom/usb_bridge.hpp"
 
+#include "bridge_network.hpp"
+
 namespace {
 constexpr char kTag[] = "RouteLoomBr";
 
@@ -800,6 +802,12 @@ extern "C" void app_main(void) {
   bridge_config.network = board.network;
 #else
   bridge_config.network = CONFIG_ROUTELOOM_NETWORK_ID;
+#endif
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+  // Unlike the wire header, USB reauthentication binds the full committed
+  // epoch. After a cutover the legacy trust/static image is still low32.
+  bridge_config.network = routeloom::bridge_node::usb_boot_network(
+      sdkv1_stores.site(), bridge_config.network);
 #endif
   // Boot ID doubles as the persisted boot session: a host can tell a reboot
   // apart from a reconnect and must never see the value regress.

@@ -73,6 +73,13 @@ class ConfigWirePort {
   virtual ~ConfigWirePort() = default;
   virtual Status config_send(NodeId dest, FrameType type, ByteView payload,
                              MonotonicMs now_ms) noexcept = 0;
+  // Callers that must wait for a hop result receive the node job id.
+  // Simple test ports may keep their untracked send implementation.
+  virtual Status config_send_tracked(NodeId dest, FrameType type, ByteView payload,
+                                     MonotonicMs now_ms, MessageId& id) noexcept {
+    id = {};
+    return config_send(dest, type, payload, now_ms);
+  }
 };
 
 // MeshNode adapter for ConfigWirePort.
@@ -82,6 +89,12 @@ class MeshConfigPort final : public ConfigWirePort {
   Status config_send(NodeId dest, FrameType type, ByteView payload,
                      MonotonicMs now_ms) noexcept override {
     MessageId id{};
+    return node_.send_typed(type, dest, payload,
+                            config_wire_const::kControlLifetimeMs, now_ms, id);
+  }
+  Status config_send_tracked(NodeId dest, FrameType type, ByteView payload,
+                             MonotonicMs now_ms, MessageId& id) noexcept override {
+    id = {};
     return node_.send_typed(type, dest, payload,
                             config_wire_const::kControlLifetimeMs, now_ms, id);
   }

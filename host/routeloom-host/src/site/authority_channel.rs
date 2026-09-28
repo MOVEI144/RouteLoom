@@ -311,6 +311,22 @@ impl AuthorityChannels {
         stats
     }
 
+    #[cfg(all(test, unix))]
+    pub(crate) fn is_commit_stored_envelope(&self, device: u64, bytes: &[u8]) -> bool {
+        use routeloom_join::renew::{Phase, Receipt};
+        let Some(channel) = self.channels.get(&device) else {
+            return false;
+        };
+        let Ok((header, plaintext)) = open_envelope(&channel.rx_key, bytes, channel.rx_ctx) else {
+            return false;
+        };
+        let plaintext = Zeroizing::new(plaintext);
+        header.env_type == 7
+            && plaintext.len() >= BODY_HEAD
+            && Receipt::decode(&plaintext[BODY_HEAD..])
+                .is_ok_and(|receipt| receipt.head.phase == Phase::CommitStored)
+    }
+
     /// Refreshes the epochs echoed in R2 (the owner calls this after a
     /// revocation or activation commits). Stale R2 epochs would mislead a
     /// joining device about the live revocation/group state; the fence
@@ -335,6 +351,14 @@ impl AuthorityChannels {
         for outbound in self.take_outbound() {
             transport.deliver(outbound);
         }
+    }
+
+    /// The member a live channel is bound to (`None` without one): the
+    /// same full binding the seal/receive fences compare against.
+    pub fn bound_member(&self, device: u64) -> Option<ChannelMember> {
+        self.channels
+            .get(&device)
+            .map(|channel| channel.member.clone())
     }
 
     /// Forgets every channel and handshake state for `device` (revocation
@@ -410,9 +434,11 @@ impl AuthorityChannels {
         device: u64,
         bound: &ChannelMember,
     ) -> bool {
-        directory.lookup(device).is_some_and(|current| {
-            current.member && current.network == self.config.network && current == *bound
-        })
+        let looked = directory.lookup(device);
+        let ok = looked.as_ref().is_some_and(|current| {
+            current.member && current.network == self.config.network && *current == *bound
+        });
+        ok
     }
 
     fn push_outbound(&mut self, outbound: AuthorityOutbound) -> bool {

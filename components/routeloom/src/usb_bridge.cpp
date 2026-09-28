@@ -1,5 +1,6 @@
 #include "routeloom/usb_bridge.hpp"
 
+#include <cstdio>
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
@@ -2333,11 +2334,10 @@ void UsbBridge::handle_ops_submit(const std::uint64_t request,
     send_receipt(receipt, request, now_ms);
     return;
   }
-  // The canonical network must match the authenticated session network:
-  // a dispatcher confused (or lying) about its network must not send into
-  // another one.
-  if (transcript_.network > 0xFFFFFFFFULL ||
-      fields.network != static_cast<std::uint32_t>(transcript_.network)) {
+  // Canonical HostOps and the mesh header carry low32; the authenticated
+  // USB transcript carries the full Site epoch. Compare the wire identity
+  // here without rejecting a valid new epoch after cutover.
+  if (fields.network != static_cast<std::uint32_t>(transcript_.network)) {
     receipt.result = HostOpsResult::InvalidRequest;
     send_receipt(receipt, request, now_ms);
     return;

@@ -514,6 +514,12 @@ class SecurityCoordinator final : public BootstrapSink,
     removal_watermark_site_id_ = site_id;
     removal_watermark_generation_ = generation;
   }
+  // Lifecycle-driven: true while the journal holds a Prepared/Switching
+  // cutover intent. Such a member EXPECTS newer-generation traffic (the
+  // new network's credentials going live is what its COMMIT installs),
+  // so the unknown-ahead evidence must not accrue refresh strikes —
+  // churning the workspace here is what strands the node mid-cutover.
+  void set_cutover_intent(bool intent) noexcept { cutover_intent_ = intent; }
   // Wipes the member site trust held outside the stores (GK scope,
   // discovery membership) and verifies it is gone. Idempotent: safe to
   // re-assert after traffic already stopped.
@@ -543,6 +549,19 @@ class SecurityCoordinator final : public BootstrapSink,
     // No channel exists in Dev (see snapshot): report the unstarted view.
     if (mode_ == CoordinatorMode::Dev) return AuthoritySnapshot{};
     return small().authority.snapshot();
+  }
+  // Secret-free ZT proxy view for diagnostics and the D04 mesh harness
+  // (zero without a member engine — a refreshing joiner proxies for no
+  // one while it re-verifies).
+  JoinProxyStats proxy_stats() const noexcept {
+    if (!has_member_engine()) return JoinProxyStats{};
+    return member().proxy.stats();
+  }
+  // Secret-free ZT joiner view for diagnostics and the D04 mesh
+  // harness (zero outside ZeroTouch mode).
+  JoinSnapshot joiner_snapshot() const noexcept {
+    if (mode_ != CoordinatorMode::ZeroTouch) return JoinSnapshot{};
+    return joiner().snapshot();
   }
   Status send_authority_typed(std::uint8_t type, ByteView body, MonotonicMs now) noexcept;
   // Adopted GK epochs for the 0x66 QueryLocal answer (0/0 pre-adoption;
@@ -743,11 +762,12 @@ class SecurityCoordinator final : public BootstrapSink,
   Status on_request_pull(const CoordinatorEvent& event) noexcept;
   Status on_usb_session_up(MonotonicMs now) noexcept;
   void drive_authority(MonotonicMs now) noexcept;
+  void probe_quiet_authority(MonotonicMs now) noexcept;
   bool build_authority_start(AuthorityStart& out) const noexcept;
   void suspend_authority() noexcept;
   // --- stale-GK refresh (P5 §7.4) ---
   void note_link_established() noexcept;
-  void note_link_failed() noexcept;
+  void note_link_failed(MonotonicMs now) noexcept;
   void watch_linkless(MonotonicMs now) noexcept;
   void start_refresh(MonotonicMs now) noexcept;
   void maybe_abandon_refresh(MonotonicMs now) noexcept;
@@ -1018,14 +1038,30 @@ class SecurityCoordinator final : public BootstrapSink,
   void clear_milestone_confirmed() noexcept;
   void clear_milestones() noexcept;
   std::uint8_t refresh_strikes_{0};
-  std::uint32_t last_unknown_generation_{0};  // discovery scope_stats sample
+  std::uint32_t last_unknown_newer_generation_{0};  // discovery scope_stats sample
   bool refresh_active_{false};
   MonotonicMs refresh_start_{0};
   MonotonicMs refresh_cooldown_until_{0};
   MonotonicMs last_authority_start_{0};
+  // 04 §3.5: last live-links strike (spacing clock — the live road
+  // strikes once per window at most, so one rotation overlap cannot
+  // refresh a converging member by itself).
+  MonotonicMs last_live_strike_{0};
+  // The last actual strike increment — the refresh herd-spread arms
+  // its start slot from here (the spacing stamp moves every window;
+  // this one only on real evidence, so the due is a fixed point).
+  MonotonicMs last_strike_ms_{0};
+  // 04 §3.5: quiet-channel present-check probe. A Ready channel with
+  // no verified RX for the idle-retire span asks (Pull) instead of
+  // retiring silently; consecutive unanswered probes strike. Poll-
+  // gated (a sleeping member never probes), so the power cost lands
+  // only on awake-but-quiet members, one Pull per interval.
+  MonotonicMs last_probe_ms_{0};
+  MonotonicMs last_rx_ms_{0};    // last verified-RX growth (0 = never)
+  MonotonicMs intent_since_ms_{0};  // first poll the cutover-intent hold was seen
+  std::uint64_t last_rx_value_{0};
   CoordinatorMemberConfig adopted_{};
   bool member_valid_{false};
-  std::uint32_t tune_token_{0};
   std::uint32_t tune_outstanding_{0};
   std::uint8_t channel_{0};
   std::uint32_t radio_generation_{0};
@@ -1040,6 +1076,7 @@ class SecurityCoordinator final : public BootstrapSink,
   MonotonicMs removal_holdoff_at_{0};
   std::uint64_t removal_watermark_site_id_{0};
   std::uint32_t removal_watermark_generation_{0};
+  bool cutover_intent_{false};
   CoordinatorCounters counters_{};
   // Sleep restore one-shot state (P4 §9.3): the consumed image waits in
   // caller-supplied storage while the parent re-binds post-wake. Terminal

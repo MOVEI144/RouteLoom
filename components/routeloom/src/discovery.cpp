@@ -1,6 +1,7 @@
 #include "routeloom/discovery.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
@@ -40,6 +41,20 @@ constexpr std::uint8_t kChunkStatusIncomplete = 1;
 constexpr std::uint64_t kWindowMs = 400;  // density observation = offer window
 // Empty-slot sentinel for the discover ring: 0 is a valid timestamp.
 constexpr MonotonicMs kNoDiscover = ~MonotonicMs{0};
+// Fresh-membership announce (04 §3.5): a member-scope engine that just
+// started (adopt, re-adopt, reboot) broadcasts its current generation
+// for a bounded window. A straggler the site left behind can never
+// pull the evidence — its old-network Discover fails the survivor's
+// hint check by construction — so the survivors' own traffic must
+// carry the ahead-generation observations it strikes on.
+constexpr MonotonicMs kMemberAnnounceFirstMs = 1500;
+constexpr MonotonicMs kMemberAnnounceIntervalMs = 2000;
+constexpr MonotonicMs kMemberAnnounceWindowMs = 90000;
+
+MonotonicMs add_sat(const MonotonicMs base, const std::uint64_t delta) noexcept {
+  const MonotonicMs sum = base + delta;
+  return sum < base ? ~MonotonicMs{0} : sum;
+}
 
 bool mac_equal(const MacAddress& a, const MacAddress& b) noexcept {
   return a == b;
@@ -344,6 +359,16 @@ Status NeighborDiscovery::start(const MonotonicMs now_ms) noexcept {
   // storage) must reach the Owner, never start traffic silently.
   const Status membership = membership_.initialize(hooks_, config_.network);
   if (!membership) return membership;
+  if (scope_mode_scoped(config_.scope_mode) &&
+      config_.scope_class == endpoint::ScopeClass::Member) {
+    announce_next_ms_ = add_sat(now_ms, kMemberAnnounceFirstMs);
+    announce_until_ms_ = add_sat(now_ms, kMemberAnnounceWindowMs);
+    std::uint32_t generation = 0;
+    if (scope_rx_usable() &&
+        config_.scope_provider->current_generation(config_.scope, generation)) {
+      announce_generation_ = generation;
+    }
+  }
   started_ = true;
   return Status::success();
 }
@@ -432,7 +457,9 @@ Status NeighborDiscovery::begin_discovery(const MonotonicMs now_ms,
 void NeighborDiscovery::on_rld1_rx(const DiscoveryRxMetadata& rx,
                                    const ByteView frame,
                                    const MonotonicMs now_ms) noexcept {
-  if (!started_) return;
+  if (!started_) {
+    return;
+  }
   autonomy::Rld1Envelope env{};
   // Carrier is already selected by the caller's rld1_probe; a decode failure
   // here is a REJECT — never a fallback into the Wire parser (06 §3.1).
@@ -497,6 +524,22 @@ void NeighborDiscovery::handle_discover(const DiscoveryRxMetadata& rx,
                                         const MonotonicMs now_ms) noexcept {
   ++stats_.discovers_rx;
   const bool scoped_mode = scope_mode_scoped(config_.scope_mode);
+  // Fresh air evidence (radio.md §7): a DISCOVER through the coarse
+  // gates proves the medium carries traffic again — a requester parked
+  // in a deep post-outage backoff, or a stranded engine holding the
+  // rediscovery ramp, re-probes promptly instead of waiting the full
+  // cap out. The ramp redraws untouched if the emit still goes
+  // unanswered, so this stays bound by the heard peer's cadence and can
+  // never become a self-driven storm.
+  if (outbound_.active && outbound_.stage == OutboundStage::AwaitingOffers &&
+      !outbound_.have_offer &&
+      outbound_.discover_due_ms > now_ms + config_.probe_timeout_ms) {
+    outbound_.discover_due_ms = now_ms;
+  }
+  if (!outbound_.active &&
+      next_rediscovery_ms_ > now_ms + config_.probe_timeout_ms) {
+    next_rediscovery_ms_ = now_ms;
+  }
   if (scoped_mode) {
     ++scope_stats_.raw_rx;
     if (!raw_budget_.consume(now_ms)) {
@@ -583,7 +626,13 @@ void NeighborDiscovery::handle_discover_scoped(
   }
   if (!config_.scope_provider->accepted_generation(config_.scope, body.generation,
                                                    now_ms)) {
-    ++scope_stats_.unknown_generation;
+    note_unknown_generation(current, body.generation);
+    return;
+  }
+  // One-way announce: its generation was already counted (or, for a
+  // current-generation hearer, proves nothing). It is never an exchange
+  // attempt — no hint work, no MAC verify, no candidate, no density.
+  if ((body.flags & endpoint::kScopeDiscoverFlagAnnounce) != 0) {
     return;
   }
   // Cheap hint candidate check against OUR configured class: the hint space
@@ -616,6 +665,15 @@ void NeighborDiscovery::handle_discover_scoped(
   pending->expected_tag = body.tag;
 }
 
+void NeighborDiscovery::note_unknown_generation(const std::uint32_t current,
+                                                   const std::uint32_t observed) noexcept {
+  ++scope_stats_.unknown_generation;
+  // Only an ahead generation evidences our own staleness (P5 §7.4): a
+  // lagging neighbor — a cutover adopter waiting for its peers to
+  // follow — must never strike us into a refresh.
+  if (observed > current) ++scope_stats_.unknown_newer_generation;
+}
+
 void NeighborDiscovery::drain_scope_pending(const MonotonicMs now_ms) noexcept {
   std::size_t spent = 0;
   std::array<PendingVerify*, kScopePendingCapacity> done{};
@@ -628,7 +686,15 @@ void NeighborDiscovery::drain_scope_pending(const MonotonicMs now_ms) noexcept {
     if (!config_.scope_provider->accepted_generation(config_.scope,
                                                      pending.generation,
                                                      now_ms)) {
-      ++scope_stats_.unknown_generation;
+      // The queue-time gate admitted this frame, so our keys were
+      // usable moments ago; if they are gone now the observation
+      // proves nothing about our staleness (not newer).
+      std::uint32_t current = 0;
+      if (config_.scope_provider->current_generation(config_.scope, current)) {
+        note_unknown_generation(current, pending.generation);
+      } else {
+        ++scope_stats_.unknown_generation;
+      }
       done[done_count++] = &pending;
       return;
     }
@@ -883,7 +949,7 @@ void NeighborDiscovery::queue_offer_verify(
   }
   if (!config_.scope_provider->accepted_generation(config_.scope, body.generation,
                                                    now_ms)) {
-    ++scope_stats_.unknown_generation;
+    note_unknown_generation(current, body.generation);
     return;
   }
   // The OFFER must answer OUR scoped DISCOVER: class/generation pin to the
@@ -1679,7 +1745,13 @@ Status NeighborDiscovery::take_member_start(MemberStartRequest& out,
     if (!c.member_start_parked || now_ms >= c.expires_at_ms) return;
     if (oldest == nullptr || c.expires_at_ms < oldest->expires_at_ms) oldest = &c;
   });
-  if (oldest != nullptr) {
+  // When WE are initiating to this same peer (an accepted OFFER is
+  // parked), skip the responder leg: our m1 drives the exchange, and
+  // taking a responder leg now would alias the demux and strand ours.
+  // The responder stays parked for a later take.
+  if (oldest != nullptr &&
+      !(outbound_.active && outbound_.have_offer &&
+        oldest->claimed_node == outbound_.peer_node)) {
     out.initiator = false;
     out.peer = oldest->claimed_node;
     out.peer_mac = oldest->mac;
@@ -2038,10 +2110,23 @@ Status NeighborDiscovery::send_discover(const MonotonicMs now_ms) noexcept {
                      outbound_.our_nonce, config_.node, ByteView{nullptr, 0},
                      now_ms, &outbound_.exchange.discover_digest);
   }
-  return send_scoped_discover(now_ms);
+  return send_scoped_discover(now_ms, outbound_.our_nonce, 0, true);
 }
 
-Status NeighborDiscovery::send_scoped_discover(const MonotonicMs now_ms) noexcept {
+Status NeighborDiscovery::send_scope_announce(const MonotonicMs now_ms) noexcept {
+  std::array<std::uint8_t, 16> nonce{};
+  const Status fill = entropy_.fill(MutableByteView{nonce.data(), nonce.size()});
+  if (!fill) return fill;
+  // Announce carries a fresh nonce and the one-way flag: hearers count its
+  // generation as staleness evidence but drop it before any hint/dedup/
+  // candidate work, so it can never join or disturb a live exchange.
+  return send_scoped_discover(now_ms, nonce, endpoint::kScopeDiscoverFlagAnnounce,
+                            false);
+}
+
+Status NeighborDiscovery::send_scoped_discover(
+    const MonotonicMs now_ms, const std::array<std::uint8_t, 16>& nonce,
+    const std::uint8_t flags, const bool bind_exchange) noexcept {
   DiscoveryScopeProvider& provider = *config_.scope_provider;
   std::uint32_t generation = 0;
   if (!provider.current_generation(config_.scope, generation)) {
@@ -2057,6 +2142,7 @@ Status NeighborDiscovery::send_scoped_discover(const MonotonicMs now_ms) noexcep
   // header44 + body prefix8; then patch the tag in and re-encode (02 §2.4).
   endpoint::Rld1DiscoverBodyV2 body{};
   body.scope_class = config_.scope_class;
+  body.flags = flags;
   body.generation = generation;
   endpoint::EncodedScopeBody encoded_body{};
   status = endpoint::scope_discover_body_encode(body, encoded_body);
@@ -2065,7 +2151,7 @@ Status NeighborDiscovery::send_scoped_discover(const MonotonicMs now_ms) noexcep
   env.kind = FrameType::Discover;
   env.network_hint = hint;
   env.claimed_node = config_.node;
-  env.transaction_nonce = outbound_.our_nonce;
+  env.transaction_nonce = nonce;
   env.capability_bits = config_.capability_bits;
   std::memcpy(env.body.data(), encoded_body.bytes.data(), encoded_body.size);
   env.body_size = encoded_body.size;
@@ -2094,13 +2180,13 @@ Status NeighborDiscovery::send_scoped_discover(const MonotonicMs now_ms) noexcep
     return Status::error(StatusCode::AuthorizationFailed, "TX gated");
   }
   status = port_.send_rld1(discovery_const::kBroadcastMac, encoded.view());
-  if (status.ok()) {
+  if (status.ok() && bind_exchange) {
     outbound_.exchange.scoped = true;
     outbound_.exchange.scope_class = config_.scope_class;
     outbound_.exchange.generation = generation;
     outbound_.exchange.offer_digest = ScopeDigest{};
     sha256(encoded.view(), outbound_.exchange.discover_digest);
-  } else {
+  } else if (!status) {
     ++stats_.send_failures;
   }
   return status;
@@ -2330,6 +2416,34 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
   // so a wrong-scope burst can never starve DATA/ACK work (02 §2.5).
   drain_scope_pending(now_ms);
 
+  // Fresh-membership announce (04 §3.5): while the post-start window is
+  // open, broadcast the member-scope generation so stragglers on the
+  // old group can strike on the ahead-generation evidence. A live
+  // outbound exchange already emits the same frames — never double it.
+  if (scope_mode_scoped(config_.scope_mode) &&
+      config_.scope_class == endpoint::ScopeClass::Member && scope_rx_usable()) {
+    std::uint32_t generation = 0;
+    if (config_.scope_provider->current_generation(config_.scope, generation) &&
+        generation != announce_generation_) {
+      // A promote is fresh ahead-generation evidence: re-open the window
+      // so a straggler returning late still finds the survivors
+      // broadcasting what it missed.
+      announce_generation_ = generation;
+      announce_until_ms_ = add_sat(now_ms, kMemberAnnounceWindowMs);
+      if (announce_next_ms_ == 0) announce_next_ms_ = now_ms;
+    }
+  }
+  if (announce_next_ms_ != 0 && !outbound_.active &&
+      now_ms >= announce_next_ms_) {
+    if (now_ms >= announce_until_ms_ ||
+        membership_.state() != MembershipState::Member) {
+      announce_next_ms_ = 0;
+    } else {
+      announce_next_ms_ = add_sat(now_ms, kMemberAnnounceIntervalMs);
+      (void)send_scope_announce(now_ms);
+    }
+  }
+
   // Due OFFERs and parked candidates retrying for a transient slot.
   std::array<Candidate*, discovery_const::kCandidateCapacity> due{};
   std::size_t due_count = 0;
@@ -2558,7 +2672,17 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
       if (n.node > last_repair_peer_ &&
           (next_stale == nullptr || n.node < next_stale->node)) next_stale = &n;
     });
-    if (first_stale == nullptr || membership_.state() == MembershipState::Revoked) {
+    // Member bootstrap retry: a member-mode engine holding no usable
+    // neighbor at all (fresh adopt, post-cutover rebootstrap) has no stale
+    // record to repair from, yet the adopted site still owes it a peer —
+    // keep the same bounded cadence toward broadcast (no preferred peer).
+    const bool bootstrap_stranded =
+        member_handshake_mode_ && membership_.state() == MembershipState::Member &&
+        first_stale == nullptr &&
+        neighbors_.find([](const Neighbor& n) { return resolvable_phase(n.phase); }) ==
+            nullptr;
+    if ((first_stale == nullptr && !bootstrap_stranded) ||
+        membership_.state() == MembershipState::Revoked) {
       next_rediscovery_ms_ = 0;
       rediscovery_backoff_ms_ = 0;
       repair_demand_ = kInvalidNodeId;
@@ -2584,10 +2708,11 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
         });
         if (target == nullptr) repair_demand_ = kInvalidNodeId;
       }
-      if (target == nullptr) {
+      if (target == nullptr && !bootstrap_stranded) {
         target = next_stale != nullptr ? next_stale : first_stale;
       }
-      const NodeId target_node = target->node;  // begin_discovery may mutate
+      const NodeId target_node =
+          target != nullptr ? target->node : kInvalidNodeId;  // begin_discovery may mutate
       if (begin_discovery(now_ms, target_node).ok()) {
         if (target_node == repair_demand_) {
           if (Neighbor* attempted = find_neighbor(target_node)) {

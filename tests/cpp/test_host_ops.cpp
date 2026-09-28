@@ -1119,8 +1119,9 @@ struct World {
   CollectSink device_sink;
   StreamDecoder device_decoder;
 
-  explicit World(std::uint32_t capability = 0x3 | kCapHostOpsV1, bool scoped = false)
-      : bridge(config(capability), stream),
+  explicit World(std::uint32_t capability = 0x3 | kCapHostOpsV1, bool scoped = false,
+                 NetworkId network = 7)
+      : bridge(config(capability, network), stream),
         r1(net, 1), r2(net, 2),
         p1(r1, 1, node_config(1, 7001, scoped).link_epoch),
         p2(r2, 2, node_config(2, 2002, scoped).link_epoch),
@@ -1141,11 +1142,11 @@ struct World {
     n2.add_neighbor(1, 1, 0);
   }
 
-  UsbBridge::Config config(std::uint32_t capability) {
+  UsbBridge::Config config(std::uint32_t capability, NetworkId network) {
     UsbBridge::Config cfg{};
     cfg.secret = ByteView{secret.data(), secret.size()};
     cfg.node = 1;
-    cfg.network = 7;
+    cfg.network = network;
     cfg.boot_id = 0xB0071D0001ULL;
     cfg.capability = capability;
     cfg.device_nonce = 0xA0B0C0D0E0F00102ULL;
@@ -1291,6 +1292,34 @@ std::vector<std::uint8_t> lane_bytes(HostOpsSub sub, std::uint64_t seq) {
     return {};
   }
   return std::vector<std::uint8_t>(out.begin(), out.begin() + written);
+}
+
+// After a Site epoch switch the USB transcript carries the full identity,
+// while canonical HostOps requests and MeshNode wire headers carry low32.
+void test_bridge_submit_after_site_epoch_switch() {
+  World world(0x3 | kCapHostOpsV1, false, (2ULL << 32U) | 7);
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0x1111, 10) != 0);
+  CHECK(world.bridge.state() == SessionState::Active);
+  const auto canonical = build_canonical(7);
+  const auto submit = submit_bytes(1, ByteView{canonical.data(), canonical.size()});
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  const auto answer = transact(world, host, now, 20,
+                               ByteView{submit.data(), submit.size()},
+                               got_error, error_code);
+  DispatchReceipt receipt{};
+  CHECK(decode_receipt(ByteView{answer.data(), answer.size()}, HostOpsSub::Submit, receipt));
+  CHECK(!got_error && receipt.result == HostOpsResult::Ok);
+
+  const auto wrong = build_canonical(8);
+  const auto refused = submit_bytes(2, ByteView{wrong.data(), wrong.size()});
+  const auto response = transact(world, host, now, 21,
+                                 ByteView{refused.data(), refused.size()},
+                                 got_error, error_code);
+  CHECK(decode_receipt(ByteView{response.data(), response.size()}, HostOpsSub::Submit, receipt));
+  CHECK(receipt.result == HostOpsResult::InvalidRequest);
 }
 
 void test_bridge_submit_lifecycle() {
@@ -4542,6 +4571,7 @@ int main() {
   test_window_submit_onto_skip_is_conflict();
   test_window_lane_binds_on_first_send();
   test_window_record_indeterminate();
+  test_bridge_submit_after_site_epoch_switch();
   test_bridge_submit_lifecycle();
   test_bridge_expiry_and_mesh_outcome();
   test_bridge_reconnect_keeps_window();

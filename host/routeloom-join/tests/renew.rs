@@ -1,4 +1,4 @@
-use routeloom_join::renew::{Commit, CutoverCommit, Head, Phase, Prepare, Receipt};
+use routeloom_join::renew::{Commit, CutoverCommit, Head, Phase, Prepare, Receipt, RouteState};
 use routeloom_provision::sdkv1::revocation::revocation_object_verify;
 use routeloom_provision::sha256::sha256;
 use routeloom_provision::signer::{test_keypair, FileRootSigner};
@@ -145,6 +145,12 @@ fn shared_cutover_vector_matches_all_four_phases() {
             "commit_digest_hex",
             number("rs_epoch") as u32,
         ),
+        (
+            Phase::CommitStored,
+            "commit_stored_hex",
+            "commit_digest_hex",
+            number("rs_epoch") as u32,
+        ),
     ] {
         let receipt = Receipt {
             head: Head { phase, ..head },
@@ -157,4 +163,153 @@ fn shared_cutover_vector_matches_all_four_phases() {
         assert_eq!(receipt.encode().unwrap().to_vec(), bytes(key));
         assert_eq!(Receipt::decode(&bytes(key)).unwrap(), receipt);
     }
+}
+
+#[test]
+fn route_state_query_and_reports_share_the_vector() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../protocol/sdkv1-golden/valid/cutover_signed.json"
+    );
+    let source = std::fs::read_to_string(path).unwrap();
+    let doc = routeloom_json::parse(&source).unwrap();
+    let number = |key: &str| doc.get(key).unwrap().as_u64().unwrap();
+    let bytes = |key: &str| {
+        let value = doc.get(key).unwrap().as_str().unwrap();
+        (0..value.len() / 2)
+            .map(|i| u8::from_str_radix(&value[2 * i..2 * i + 2], 16).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let head = Head {
+        phase: Phase::RouteState,
+        cutover_id: number("cutover_id"),
+        revision: number("revision") as u32,
+        old_network: number("old_network"),
+    };
+    let query = RouteState {
+        head,
+        mode: 0,
+        status: 0,
+        root: 0,
+        parent: 0,
+        boot: 0,
+        route_stamp: 0,
+        query_id: 41,
+        valid_for_ms: 0,
+    };
+    assert_eq!(
+        query.encode().unwrap().to_vec(),
+        bytes("routestate_query_hex")
+    );
+    assert_eq!(
+        RouteState::decode(&bytes("routestate_query_hex")).unwrap(),
+        query
+    );
+    let report = RouteState {
+        head,
+        mode: 1,
+        status: 0,
+        root: number("routestate_root"),
+        parent: number("routestate_parent"),
+        boot: 7,
+        route_stamp: 4242,
+        query_id: 41,
+        valid_for_ms: 30_000,
+    };
+    assert_eq!(
+        report.encode().unwrap().to_vec(),
+        bytes("routestate_report_hex")
+    );
+    assert_eq!(
+        RouteState::decode(&bytes("routestate_report_hex")).unwrap(),
+        report
+    );
+    let unavailable = RouteState {
+        head,
+        mode: 1,
+        status: 1,
+        root: 0,
+        parent: 0,
+        boot: 0,
+        route_stamp: 0,
+        query_id: 41,
+        valid_for_ms: 0,
+    };
+    assert_eq!(
+        unavailable.encode().unwrap().to_vec(),
+        bytes("routestate_unavailable_hex")
+    );
+    assert_eq!(
+        RouteState::decode(&bytes("routestate_unavailable_hex")).unwrap(),
+        unavailable
+    );
+}
+
+#[test]
+fn route_state_rejects_noncanonical_shapes() {
+    let head = Head {
+        phase: Phase::RouteState,
+        cutover_id: 9,
+        revision: 1,
+        old_network: 0x0001_0000_002a,
+    };
+    let query = RouteState {
+        head,
+        mode: 0,
+        status: 0,
+        root: 0,
+        parent: 0,
+        boot: 0,
+        route_stamp: 0,
+        query_id: 41,
+        valid_for_ms: 0,
+    };
+    assert!(query.encode().is_ok());
+    // Shape violations never encode.
+    for mutated in [
+        RouteState { mode: 2, ..query },
+        RouteState { status: 1, ..query },
+        RouteState { root: 1, ..query },
+        RouteState {
+            query_id: 0,
+            ..query
+        },
+        RouteState {
+            mode: 1,
+            status: 2,
+            ..query
+        },
+        RouteState {
+            mode: 1,
+            status: 0,
+            root: 0,
+            query_id: 41,
+            ..query
+        },
+        RouteState {
+            mode: 1,
+            status: 1,
+            parent: 1,
+            ..query
+        },
+        RouteState {
+            mode: 1,
+            status: 1,
+            valid_for_ms: 1,
+            ..query
+        },
+    ] {
+        assert!(mutated.encode().is_err());
+    }
+    // Wire violations never decode.
+    let mut wire = query.encode().unwrap().to_vec();
+    assert!(RouteState::decode(&wire[..59]).is_err());
+    wire.push(0);
+    assert!(RouteState::decode(&wire).is_err());
+    wire.pop();
+    wire[26] = 1;
+    assert!(RouteState::decode(&wire).is_err());
+    wire[26] = 0;
+    wire[1] = Phase::Applied as u8;
+    assert!(RouteState::decode(&wire).is_err());
 }

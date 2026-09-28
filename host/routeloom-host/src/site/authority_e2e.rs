@@ -373,7 +373,7 @@ fn detached_usb_keeps_presealed_notice_for_reconnect() {
 }
 
 #[test]
-fn host_restart_replays_exact_committed_notice_without_channel() {
+fn host_restart_closes_notice_direct_send() {
     let dir = std::env::temp_dir().join(format!(
         "routeloom-p6-presealed-{}-{}",
         std::process::id(),
@@ -418,14 +418,41 @@ fn host_restart_replays_exact_committed_notice_without_channel() {
         })
         .0;
     drop(rig);
+    // The 60 s direct-send window is RAM-fenced: after a restart the
+    // stored ciphertext alone never revives a direct send (04 §7.1).
+    // The notice closes and the removed device learns its removal
+    // over the ZT recovery path instead.
     let mut restarted = Rig::with_store(Box::new(SqliteSiteStore::open(&path).unwrap()));
-    restarted.tick();
-    assert!(restarted
-        .recv_downs()
-        .iter()
-        .any(|(node, kind, bytes)| *node == NODE_A
-            && *kind == CarrierKind::Envelope
-            && *bytes == sealed));
+    for _ in 0..5 {
+        restarted.tick();
+    }
+    assert!(
+        restarted
+            .recv_downs()
+            .iter()
+            .all(|(node, kind, bytes)| *node != NODE_A
+                || *kind != CarrierKind::Envelope
+                || *bytes != sealed),
+        "no post-restart direct replay of the committed ciphertext"
+    );
+    let attempts = restarted
+        .service
+        .with(|a| {
+            a.operations
+                .values()
+                .find(|op| op.kind == "revoke" && op.node == NODE_A)
+                .unwrap()
+                .notice
+                .as_ref()
+                .unwrap()
+                .attempts
+        })
+        .0;
+    assert_eq!(
+        attempts,
+        super::revocation::NOTICE_SEND_MAX,
+        "the direct send closes instead of requeueing"
+    );
     drop(restarted);
     let _ = std::fs::remove_dir_all(&dir);
 }

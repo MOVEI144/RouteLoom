@@ -61,7 +61,8 @@ struct FakeAuthorityPort final : public LifecycleAuthorityPort {
     std::vector<std::uint8_t> body;
   };
   std::vector<Sent> sent;
-  bool refuse{false};  // WouldBlock everything (port backpressure)
+  bool refuse{false};   // WouldBlock everything (port backpressure)
+  bool settled{true};  // transport visibility for the switch drain
   Status authority_send(const std::uint8_t type, const ByteView body) noexcept override {
     if (refuse || body.data == nullptr) {
       return Status::error(StatusCode::WouldBlock, "authority port busy");
@@ -72,6 +73,7 @@ struct FakeAuthorityPort final : public LifecycleAuthorityPort {
     sent.push_back(s);
     return Status::success();
   }
+  bool authority_tx_settled() noexcept override { return settled; }
 };
 
 struct FakePeerPort final : public LifecyclePeerPort {
@@ -138,6 +140,28 @@ struct FakeRuntimePort final : public LifecycleRuntimePort {
   }
   RevocationStore* revocations{nullptr};  // observed stores (order proof)
   SiteStore* site{nullptr};
+  bool route_ok{false};  // canned RouteState answer (unavailable by default)
+  NodeId route_root{kInvalidNodeId};
+  NodeId route_parent{kInvalidNodeId};
+  bool route_state_snapshot(const GrantRouteState& query, GrantRouteState& report,
+                            const MonotonicMs now) noexcept override {
+    (void)now;
+    report = GrantRouteState{};
+    report.head = query.head;
+    report.mode = 1;
+    report.query_id = query.query_id;
+    if (!route_ok) {
+      report.status = 1;
+      return true;
+    }
+    report.status = 0;
+    report.root = route_root;
+    report.parent = route_parent;
+    report.boot = 3;
+    report.route_stamp = 77;
+    report.valid_for_ms = 9000;
+    return true;
+  }
   Status enforce_revocation(const RevocationSet& set, const std::uint32_t site_epoch,
                             const MonotonicMs now) noexcept override {
     (void)now;
@@ -638,6 +662,7 @@ void test_member_ready_fetches_package_epoch_past_old_rrs() {
 void test_apply_does_not_ack_below_a_newer_floor() {
   NodeFixture node;
   CHECK(node.provision(3, 14));
+  node.authority.sent.clear();
   const auto object = revocation_object(revocation_set(15));
   PeerCredentialStamp authority{};
   authority.network = kNetwork;
@@ -1643,6 +1668,7 @@ void test_apply_storage_faults() {
 void test_uncertain_commit_rejects_different_same_epoch_object() {
   NodeFixture node;
   CHECK(node.provision(3, 14));
+  node.authority.sent.clear();
   const auto candidate = revocation_object(revocation_set(15));
   const auto alternate = revocation_object(revocation_set(15, 3));
   ByteBuffer<kRevocationSlotBytes> record{};
@@ -2770,6 +2796,164 @@ void test_signed_prepare_stages_without_switching() {
   CHECK(f.journal.record().mode == LifecycleMode::Removing);
 }
 
+// COMMIT durability proof and its bounded drain (04 §7): the COMMIT
+// acceptance emits COMMIT_STORED over the still-open old context;
+// step 0 retires the network only after the receipt's transport
+// settles or the 15 s budget lapses. RouteState queries bind to the
+// live cutover intent and echo the snapshot the runtime port serves.
+void test_commit_stored_receipt_drain_and_routestate() {
+  NodeFixture f{};
+  CHECK(f.provision(2, 14));
+  CHECK_OK(f.site.commit(f.site.site()));
+  const NetworkId next = kNetwork + (1ULL << 32U);
+  const auto site_cert = issue(sitecert_claims(next), site_ca());
+  const auto member_cert = issue(membercert_claims(2, next), sak());
+  SitePackage package{};
+  package.site_id = kSiteId;
+  package.network = next;
+  package.gk_epoch = f.site.site().gk_epoch_current + 1;
+  package.gk.fill(0x51);
+  package.channel = f.site.site().channel;
+  package.channel_epoch = f.site.site().channel_epoch;
+  package.role = f.site.site().role;
+  package.gateway_count = f.site.site().gateway_count;
+  package.gateways = f.site.site().gateways;
+  ByteBuffer<kSitePackageSize> encoded{};
+  CHECK_OK(site_package_encode(package, encoded));
+  std::array<std::uint8_t, kGrantRenewHeadSize> head{};
+  CHECK_OK(grant_renew_head_encode({GrantRenewPhase::Prepare, 7, 1, kNetwork}, head));
+  std::array<std::uint8_t, kGrantPrepareMax> wire{};
+  std::memcpy(wire.data(), head.data(), head.size());
+  wire[24] = static_cast<std::uint8_t>(next >> 56U); wire[25] = static_cast<std::uint8_t>(next >> 48U);
+  wire[26] = static_cast<std::uint8_t>(next >> 40U); wire[27] = static_cast<std::uint8_t>(next >> 32U);
+  wire[28] = static_cast<std::uint8_t>(next >> 24U); wire[29] = static_cast<std::uint8_t>(next >> 16U);
+  wire[30] = static_cast<std::uint8_t>(next >> 8U); wire[31] = static_cast<std::uint8_t>(next);
+  wire[32] = static_cast<std::uint8_t>(site_cert.size >> 8U);
+  wire[33] = static_cast<std::uint8_t>(site_cert.size);
+  wire[34] = static_cast<std::uint8_t>(member_cert.size >> 8U);
+  wire[35] = static_cast<std::uint8_t>(member_cert.size);
+  std::size_t pos = 36;
+  std::memcpy(wire.data() + pos, site_cert.bytes.data(), site_cert.size); pos += site_cert.size;
+  std::memcpy(wire.data() + pos, member_cert.bytes.data(), member_cert.size); pos += member_cert.size;
+  std::memcpy(wire.data() + pos, encoded.bytes.data(), encoded.size); pos += encoded.size;
+  std::memset(wire.data() + pos, 0x62, 32); pos += 32;
+  CHECK_OK(f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7,
+                                                ByteView{wire.data(), pos}), 200));
+  CHECK(f.snap().phase == LifecyclePhase::Prepared);
+  // A bound query echoes the snapshot; anything else is refused
+  // without a send.
+  GrantRouteState query{};
+  query.head = {GrantRenewPhase::RouteState, 7, 1, kNetwork};
+  query.query_id = 41;
+  std::array<std::uint8_t, kGrantRouteStateSize> query_bytes{};
+  CHECK_OK(grant_route_state_encode(query, query_bytes));
+  const std::size_t sends_before = f.authority.sent.size();
+  CHECK_OK(f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7,
+                                                ByteView{query_bytes.data(),
+                                                         query_bytes.size()}), 201));
+  CHECK(f.authority.sent.size() == sends_before + 1);
+  GrantRouteState answered{};
+  {
+    const auto& body = f.authority.sent.back().body;
+    CHECK(f.authority.sent.back().type == 7);
+    CHECK_OK(grant_route_state_decode(ByteView{body.data(), body.size()}, answered));
+    CHECK(answered.mode == 1 && answered.status == 1 && answered.query_id == 41);
+  }
+  f.runtime.route_ok = true;
+  f.runtime.route_root = 0x00A100000000A101ULL;
+  f.runtime.route_parent = 0x00A100000000A102ULL;
+  CHECK_OK(f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7,
+                                                ByteView{query_bytes.data(),
+                                                         query_bytes.size()}), 201));
+  {
+    const auto& body = f.authority.sent.back().body;
+    CHECK_OK(grant_route_state_decode(ByteView{body.data(), body.size()}, answered));
+    CHECK(answered.mode == 1 && answered.status == 0);
+    CHECK(answered.root == 0x00A100000000A101ULL && answered.parent == 0x00A100000000A102ULL);
+    CHECK(answered.query_id == 41 && answered.valid_for_ms == 9000);
+  }
+  const std::size_t sends_after_ok = f.authority.sent.size();
+  GrantRouteState foreign = query;
+  foreign.head.cutover_id = 8;
+  CHECK_OK(grant_route_state_encode(foreign, query_bytes));
+  CHECK(!f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7,
+                                              ByteView{query_bytes.data(),
+                                                       query_bytes.size()}), 201));
+  GrantRouteState inbound = query;
+  inbound.mode = 1;
+  inbound.status = 1;
+  CHECK_OK(grant_route_state_encode(inbound, query_bytes));
+  CHECK(!f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7,
+                                              ByteView{query_bytes.data(),
+                                                       query_bytes.size()}), 201));
+  CHECK(f.authority.sent.size() == sends_after_ok);
+  // The signed COMMIT carries the next RRS1; acceptance is durable.
+  auto rrs = revocation_object(revocation_set(15, 0, static_cast<std::uint32_t>(next >> 32U), next));
+  Digest256 rrs_hash{};
+  sha256(rrs.view(), rrs_hash);
+  std::array<std::uint8_t, kCutoverPayloadSize> payload{};
+  payload[0] = 1;
+  auto put32 = [&](std::size_t offset, std::uint32_t n) {
+    for (int i = 0; i < 4; ++i) payload[offset + i] = static_cast<std::uint8_t>(n >> (24 - 8 * i));
+  };
+  auto put64 = [&](std::size_t offset, std::uint64_t n) {
+    for (int i = 0; i < 8; ++i) payload[offset + i] = static_cast<std::uint8_t>(n >> (56 - 8 * i));
+  };
+  put64(4, kSiteId); put64(12, kNetwork); put64(20, next); put64(28, 7);
+  put32(36, 1); put32(40, package.gk_epoch); put32(44, 15);
+  std::memcpy(payload.data() + 48, rrs_hash.data(), 32);
+  std::array<std::uint8_t, kCutoverAadSize> aad{};
+  CHECK_OK(cutover_commit_aad(kNetwork, aad));
+  Es256Signature signature{};
+  sign_payload(sak(), ByteView{payload.data(), payload.size()},
+               ByteView{aad.data(), aad.size()}, signature);
+  std::array<std::uint8_t, kCutoverObjectSize> proof{};
+  std::size_t proof_size = 0;
+  CHECK_OK(cose_es256_assemble(ByteView{payload.data(), payload.size()},
+                               ByteView{signature.data(), signature.size()},
+                               MutableByteView{proof.data(), proof.size()}, proof_size));
+  CHECK(proof_size == proof.size());
+  std::array<std::uint8_t, kGrantCommitMax> commit{};
+  CHECK_OK(grant_renew_head_encode({GrantRenewPhase::Commit, 7, 1, kNetwork}, head));
+  std::memcpy(commit.data(), head.data(), head.size());
+  commit[24] = 0; commit[25] = static_cast<std::uint8_t>(proof_size);
+  commit[26] = static_cast<std::uint8_t>(rrs.size >> 8U);
+  commit[27] = static_cast<std::uint8_t>(rrs.size);
+  std::memcpy(commit.data() + 28, proof.data(), proof_size);
+  std::memcpy(commit.data() + 28 + proof_size, rrs.bytes.data(), rrs.size);
+  const ByteView commit_body{commit.data(), 28 + proof_size + rrs.size};
+  CHECK_OK(grant_route_state_encode(query, query_bytes));
+  CHECK_OK(f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7, commit_body), 203));
+  CHECK(f.snap().phase == LifecyclePhase::Switching);
+  {
+    const auto& body = f.authority.sent.back().body;
+    CHECK(f.authority.sent.back().type == 7);
+    CHECK(body[1] == 5);
+    GrantReceipt stored{};
+    CHECK_OK(grant_receipt_decode(ByteView{body.data(), body.size()}, stored));
+    Digest256 proof_hash{};
+    sha256(ByteView{proof.data(), proof.size()}, proof_hash);
+    CHECK(stored.head.cutover_id == 7 && stored.head.revision == 1);
+    CHECK(stored.new_network == next && stored.gk_epoch == package.gk_epoch);
+    CHECK(stored.rs_epoch == 15 && stored.status == 0 && stored.digest == proof_hash);
+  }
+  // A Switching device still on the old network answers re-queries.
+  const std::size_t sends_after_commit = f.authority.sent.size();
+  CHECK_OK(f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7,
+                                                ByteView{query_bytes.data(),
+                                                         query_bytes.size()}), 203));
+  CHECK(f.authority.sent.size() == sends_after_commit + 1);
+  // The drain holds step 0 while the receipt is in flight, then rolls
+  // forward on the settled signal or the 15 s budget.
+  f.authority.settled = false;
+  CHECK_OK(f.dispatch(LifecycleInput::Poll(), 203));
+  CHECK(!f.runtime.network_retired);
+  CHECK_OK(f.dispatch(LifecycleInput::Poll(), 203 + 14999));
+  CHECK(!f.runtime.network_retired);
+  CHECK_OK(f.dispatch(LifecycleInput::Poll(), 203 + 15000));
+  CHECK(f.runtime.network_retired);
+}
+
 void test_switching_intent_reboots_closed() {
   NodeFixture f{};
   CHECK(f.provision(2, 14));
@@ -2915,13 +3099,105 @@ void test_adopt_network_disposition() {
   // A clean boot that has not adopted yet: wait, never reboot again.
   CHECK(adopt_network_disposition(kNew, 0, 0, false, false) ==
         AdoptNetworkDisposition::WaitForAdoption);
+  // The switch's retire step stops the coordinator before the stores
+  // commit, so no binding is live when AdoptNetwork lands — yet the
+  // committed stores still wait for the post-reboot re-adoption (#168
+  // cutover: waiting here strands the device in Switching forever).
   CHECK(adopt_network_disposition(kNew, kOld, 3, false, false) ==
-        AdoptNetworkDisposition::WaitForAdoption);
+        AdoptNetworkDisposition::RebootToAdopt);
+  CHECK(adopt_network_disposition(kNew, kOld, 3, false, true) ==
+        AdoptNetworkDisposition::RebootToAdopt);
   // Incoherent bindings never reboot blind.
   CHECK(adopt_network_disposition(kNew, 0, 0, true, true) ==
         AdoptNetworkDisposition::WaitForAdoption);
   CHECK(adopt_network_disposition(kNew, kOld, 0, true, true) ==
         AdoptNetworkDisposition::WaitForAdoption);
+}
+
+void test_zt_adopt_cuts_prepared_stage() {
+  // Prepared for `next`, then the ZT reissue adopts `next` itself (04 §7,
+  // the C2 straggler): the stage is cut — NVS Idle, no watermark (no
+  // COMMIT was ever held, so no APPLIED may be built) — while the
+  // adopted network settings stay and the RRS fetch proceeds.
+  NodeFixture f{};
+  CHECK(f.provision(2, 14));
+  CHECK_OK(f.site.commit(f.site.site()));
+  const NetworkId next = kNetwork + (1ULL << 32U);
+  const auto site_cert = issue(sitecert_claims(next), site_ca());
+  const auto member_cert = issue(membercert_claims(2, next), sak());
+  const std::uint32_t next_gk = f.site.site().gk_epoch_current + 1;
+  auto send_prepare = [&](NodeFixture& fx) {
+    SitePackage package{};
+    package.site_id = kSiteId;
+    package.network = next;
+    package.gk_epoch = next_gk;
+    package.gk.fill(0x51);
+    package.channel = fx.site.site().channel;
+    package.channel_epoch = fx.site.site().channel_epoch;
+    package.role = fx.site.site().role;
+    package.gateway_count = fx.site.site().gateway_count;
+    package.gateways = fx.site.site().gateways;
+    ByteBuffer<kSitePackageSize> encoded{};
+    if (!site_package_encode(package, encoded)) return false;
+    std::array<std::uint8_t, kGrantRenewHeadSize> head{};
+    if (!grant_renew_head_encode({GrantRenewPhase::Prepare, 7, 1, kNetwork}, head)) return false;
+    std::array<std::uint8_t, kGrantPrepareMax> wire{};
+    std::memcpy(wire.data(), head.data(), head.size());
+    for (int i = 0; i < 8; ++i) wire[24 + i] = static_cast<std::uint8_t>(next >> (56 - 8 * i));
+    wire[32] = static_cast<std::uint8_t>(site_cert.size >> 8U);
+    wire[33] = static_cast<std::uint8_t>(site_cert.size);
+    wire[34] = static_cast<std::uint8_t>(member_cert.size >> 8U);
+    wire[35] = static_cast<std::uint8_t>(member_cert.size);
+    std::size_t pos = 36;
+    std::memcpy(wire.data() + pos, site_cert.bytes.data(), site_cert.size);
+    pos += site_cert.size;
+    std::memcpy(wire.data() + pos, member_cert.bytes.data(), member_cert.size);
+    pos += member_cert.size;
+    std::memcpy(wire.data() + pos, encoded.bytes.data(), encoded.size);
+    pos += encoded.size;
+    std::memset(wire.data() + pos, 0x62, 32);
+    pos += 32;
+    return fx.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7,
+                                                 ByteView{wire.data(), pos}), 200)
+        .ok();
+  };
+  CHECK(send_prepare(f));
+  CHECK(f.journal.record().mode == LifecycleMode::Prepared);
+  CHECK(f.snap().phase == LifecyclePhase::Prepared);
+  // The reissue lands the target: same generation (the cutover keeps
+  // it), the staged certs and key, nothing applied on the new network
+  // yet — so the adoption parks in BootGate behind the RRS fetch.
+  SiteRecord adopted = f.site.site();
+  adopted.network = next;
+  adopted.site_cert = site_cert;
+  adopted.member_cert = member_cert;
+  adopted.gk_epoch_current = next_gk;
+  adopted.gk_current.fill(0x51);
+  adopted.gk_epoch_next = 0;
+  adopted.gk_next.fill(0);
+  adopted.dams.fill(0x63);
+  CHECK_OK(f.site.commit(adopted));
+  CHECK_OK(f.dispatch(LifecycleInput::MemberReady(f.site.commit_seq(), 15), 201));
+  CHECK(f.journal.record().mode == LifecycleMode::Idle);
+  CHECK(f.journal.record().payload.size == 0);
+  CHECK(f.journal.record().old_network == next);
+  CHECK(f.site.site().network == next);
+  CHECK(f.site.site().gk_epoch_current == next_gk);
+  CHECK(f.snap().phase == LifecyclePhase::BootGate);
+  // Already Idle: a second cut refuses, and a reboot stays consistent
+  // instead of wedging on the stale stage.
+  CHECK(!f.journal.cut_prepared());
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 202));
+  CHECK(f.snap().phase != LifecyclePhase::StorageBlocked);
+  // Adopting the OLD site instead keeps the stage live (stay Prepared).
+  NodeFixture g{};
+  CHECK(g.provision(2, 14));
+  CHECK_OK(g.site.commit(g.site.site()));
+  CHECK(send_prepare(g));
+  CHECK_OK(g.site.commit(g.site.site()));  // same RLS1, new commit seq
+  CHECK_OK(g.dispatch(LifecycleInput::MemberReady(g.site.commit_seq(), 14), 201));
+  CHECK(g.journal.record().mode == LifecycleMode::Prepared);
+  CHECK(g.snap().phase == LifecyclePhase::Prepared);
 }
 
 }  // namespace
@@ -2941,6 +3217,8 @@ int main() {
   test_adopt_network_disposition();
   test_removal_journal_powercuts();
   test_signed_prepare_stages_without_switching();
+  test_zt_adopt_cuts_prepared_stage();
+  test_commit_stored_receipt_drain_and_routestate();
   test_switching_intent_reboots_closed();
   test_rrs_wire_codecs();
   test_revocation_wire_vectors();

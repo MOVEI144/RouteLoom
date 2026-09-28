@@ -510,9 +510,15 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   Status responder_begin_m1(CarrierRecord& record, ByteView message,
                             MonotonicMs now) noexcept;
   // Stash an intake m1 for poll(): takes buffer ownership for the
-  // record. Drops the record only when the bytes cannot fit (which
-  // on_message's 960 cap already excludes).
+  // record. Drops the record when the bytes cannot fit (which
+  // on_message's 960 cap already excludes) or when the stash still
+  // holds another live exchange's retry bytes (big_tx_parkable).
   void park_m1(CarrierRecord& record, ByteView message) noexcept;
+  // True when an m1 park may take the shared big-message buffer: it
+  // must not evict another record's unacknowledged m3/m4 retry bytes
+  // or another parked m1 (first park wins; the refused initiator's m1
+  // retransmit re-parks later).
+  bool big_tx_parkable() noexcept;
   Status on_edhoc_message(CarrierRecord* record, const HandshakeRx& rx, ByteView message,
                           MonotonicMs now) noexcept;
   Status on_resume_message(CarrierRecord* record, const HandshakeRx& rx, ByteView message,

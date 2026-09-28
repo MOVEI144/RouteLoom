@@ -419,7 +419,7 @@ void valid_cutover(const Fields& f) {
                                  hex_array<64>(f, "signer_pubkey_hex"), proof.site_id,
                                  proof.new_network, rrs, verified).ok());
   CHECK(verified && rrs.rs_epoch == proof.rs_epoch);
-  for (const char* key : {"prepared_hex", "applied_hex"}) {
+  for (const char* key : {"prepared_hex", "applied_hex", "commit_stored_hex"}) {
     const auto receipt_bytes = hex(f, key);
     GrantReceipt receipt{};
     CHECK(grant_receipt_decode(view(receipt_bytes), receipt).ok());
@@ -432,8 +432,34 @@ void valid_cutover(const Fields& f) {
     CHECK(receipt.new_network == proof.new_network);
     CHECK(receipt.head.cutover_id == proof.cutover_id);
     CHECK(receipt.head.revision == proof.revision);
-    CHECK(receipt.digest == hex_array<32>(f, key[0] == 'a' ? "commit_digest_hex" :
-                                                        "prepare_digest_hex"));
+    CHECK(receipt.digest == hex_array<32>(f, key[0] == 'p' ? "prepare_digest_hex" :
+                                                        "commit_digest_hex"));
+  }
+  for (const char* key :
+       {"routestate_query_hex", "routestate_report_hex", "routestate_unavailable_hex"}) {
+    const auto state_bytes = hex(f, key);
+    GrantRouteState state{};
+    CHECK(grant_route_state_decode(view(state_bytes), state).ok());
+    std::array<std::uint8_t, kGrantRouteStateSize> encoded{};
+    CHECK(grant_route_state_encode(state, encoded).ok());
+    CHECK(state_bytes.size() == encoded.size());
+    if (state_bytes.size() == encoded.size())
+      CHECK(std::equal(encoded.begin(), encoded.end(), state_bytes.begin()));
+    CHECK(state.head.old_network == proof.old_network);
+    CHECK(state.head.cutover_id == proof.cutover_id);
+    CHECK(state.head.revision == proof.revision);
+    CHECK(state.query_id == 41);
+  }
+  {
+    GrantRouteState report{};
+    CHECK(grant_route_state_decode(view(hex(f, "routestate_report_hex")), report).ok());
+    CHECK(report.mode == 1 && report.status == 0);
+    CHECK(report.root == num(f, "routestate_root"));
+    CHECK(report.parent == num(f, "routestate_parent"));
+    CHECK(report.boot == 7 && report.route_stamp == 4242 && report.valid_for_ms == 30000);
+    GrantRouteState unavailable{};
+    CHECK(grant_route_state_decode(view(hex(f, "routestate_unavailable_hex")), unavailable).ok());
+    CHECK(unavailable.mode == 1 && unavailable.status == 1);
   }
 }
 

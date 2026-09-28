@@ -489,6 +489,7 @@ void ConfigTarget::send_ack(const NodeId dest, const autonomy::ObjectHash& hash,
 void ConfigTarget::on_config_job_done(const MessageId& id, const bool hop_accepted,
                                       const char* reason,
                                       const MonotonicMs now_ms) noexcept {
+  if (authority_ != nullptr) authority_->on_config_job_done(id, hop_accepted);
   // A target emits replies and acks fire-and-forget: their hop-level
   // completion is the sender's concern, not evidence the endpoint needs.
   (void)id;
@@ -876,6 +877,7 @@ void ConfigGateway::on_config_frame(const NodeId peer, const wire::PlainFrame& f
 void ConfigGateway::on_config_job_done(const MessageId& id, const bool hop_accepted,
                                        const char* reason,
                                        const MonotonicMs now_ms) noexcept {
+  if (authority_ != nullptr) authority_->on_config_job_done(id, hop_accepted);
   // Per-hop outcomes are the scheduler's retry concern: an ack that never
   // arrives resolves at the operation deadline as Indeterminate, which is
   // the honest terminal state — a failed hop attempt is not itself proof

@@ -443,6 +443,7 @@ enum class LifecycleActionReason : std::uint8_t {
   None = 0,
   SelfRevocation = 1,
   LinkFailure = 2,
+  ResumeSwitch = 3,
 };
 
 // Owner-side AdoptNetwork disposition. The mesh node and discovery cannot
@@ -467,8 +468,14 @@ constexpr AdoptNetworkDisposition adopt_network_disposition(
       adopted_network == action_network) {
     return AdoptNetworkDisposition::Complete;
   }
-  if (live_member_binding && adopted_role != 0 && adopted_network != 0 &&
-      adopted_network != action_network) {
+  if (adopted_role != 0 && adopted_network != 0 && adopted_network != action_network) {
+    // A stale installed binding: live on the old network, or already
+    // retired by the switch's retire step (which stops the coordinator
+    // before the stores commit, so no binding is live when the action
+    // lands). Either way the committed stores wait for the post-reboot
+    // re-adoption: reboot once. Never a second reboot on the same
+    // durable state — post-reboot the adopted binding is the action's
+    // own (Complete) or still zero while adoption is in flight (wait).
     return AdoptNetworkDisposition::RebootToAdopt;
   }
   return AdoptNetworkDisposition::WaitForAdoption;
@@ -592,6 +599,11 @@ class LifecycleAuthorityPort {
   // One message for P5 sealing/sending (PR A: type 5 only). WouldBlock or
   // failure = unsent; the port copies `body` during the call.
   virtual Status authority_send(std::uint8_t authority_type, ByteView body) noexcept = 0;
+  // True when no authority TX is outstanding (every staged transfer
+  // reached a terminal transport result). The cutover switch drain
+  // polls this before retiring the old network; ports without
+  // transport visibility report true and never hold the drain.
+  virtual bool authority_tx_settled() noexcept { return true; }
 };
 
 // The single side-effecting enforcement entry, run on the Owner thread:
@@ -619,6 +631,21 @@ class LifecycleRuntimePort {
   }
   virtual Status install_site_trust(const SiteRecord&) noexcept {
     return Status::error(StatusCode::Unsupported, "site trust install not wired");
+  }
+  // Answers a RouteState query (phase 6, mode 0) with this node's
+  // committed uplink snapshot for the cutover route tree (04 §7).
+  // `query` is the decoded query; on true `report` is the mode-1
+  // report to send (head/query id echoed, root/parent/boot/stamp/
+  // lease filled, status set). Default answers unavailable.
+  virtual bool route_state_snapshot(const GrantRouteState& query, GrantRouteState& report,
+                                    MonotonicMs now_ms) noexcept {
+    (void)now_ms;
+    report = GrantRouteState{};
+    report.head = query.head;
+    report.mode = 1;
+    report.status = 1;
+    report.query_id = query.query_id;
+    return true;
   }
 };
 
@@ -760,12 +787,17 @@ class MembershipLifecycle final {
   Status on_renew(ByteView body, MonotonicMs now_ms) noexcept;
   Status renew_prepare(ByteView body) noexcept;
   Status renew_commit(ByteView body, MonotonicMs now_ms) noexcept;
+  Status renew_routestate(ByteView body, MonotonicMs now_ms) noexcept;
   bool staged_site(const LifecycleRecord& record, SiteRecord& out) noexcept;
+  // True when the adopted site IS the Prepared stage's target (04 §7):
+  // same site, the stage's new network (epoch included) and binding.
+  // The caller verified `staged` through staged_site first.
+  bool adopted_prepared_target(const SiteRecord& staged) const noexcept;
   bool switching_proof(const LifecycleRecord& record, SiteRecord& out,
                        RevocationSet& rrs) noexcept;
   Status switch_poll(MonotonicMs now_ms) noexcept;
   bool restore_applied_receipt() noexcept;
-  void send_renew_receipt(GrantRenewPhase phase, ByteView digest) noexcept;
+  bool send_renew_receipt(GrantRenewPhase phase, ByteView digest) noexcept;
   bool reassigned_after_removal() const noexcept;
 
   LifecycleBlockReason adopt_stores() noexcept;
@@ -864,6 +896,12 @@ class MembershipLifecycle final {
   std::uint8_t switch_step_{0};
   GrantReceipt applied_receipt_{};
   bool applied_receipt_pending_{false};
+  // COMMIT_STORED drain (RAM-only): a live renew_commit arms it;
+  // a boot that resumes Switching skips it — the receipt never
+  // delays a resumed roll-forward. The budget compares elapsed
+  // (regression ends the drain instead of extending it).
+  bool switch_drained_{true};
+  MonotonicMs switch_drain_start_{0};
 
   LifecycleAction action_{};
   bool action_pending_{false};

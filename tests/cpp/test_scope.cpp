@@ -537,6 +537,8 @@ void test_s02_required_drops() {
                       ByteView{wrong_gen.data(), wrong_gen.size()},
                       world.medium.now);
   CHECK(b.engine.scope_stats().unknown_generation == 1);
+  // gen 99 is ahead of our current gen 1: refresh evidence.
+  CHECK(b.engine.scope_stats().unknown_newer_generation == 1);
 
   // Wrong tag: valid hint, corrupted MAC — dropped in the verify drain.
   auto bad_tag = scoped_discover_frame(b.scope_provider, kGen, ScopeClass::Member,
@@ -684,6 +686,8 @@ void test_s05_generation_window() {
   b.engine.on_rld1_rx({peer, discovery_const::kBroadcastMac},
                       ByteView{f2.data(), f2.size()}, world.medium.now);
   CHECK(b.engine.scope_stats().unknown_generation == 1);
+  // ... but gen 1 lags our current gen 2: counted, never a strike.
+  CHECK(b.engine.scope_stats().unknown_newer_generation == 0);
   CHECK(b.engine.candidate_count() == 1);  // only the first was admitted
 }
 
@@ -1083,6 +1087,8 @@ void test_pending_verify_generation_recheck() {
   // Dropped at the drain-time generation re-check — it never reached the
   // MAC verify step, so mac_rejected must stay zero.
   CHECK(b.engine.scope_stats().unknown_generation == 1);
+  // The expired previous generation lags: counted, never a strike.
+  CHECK(b.engine.scope_stats().unknown_newer_generation == 0);
   CHECK(b.engine.scope_stats().mac_rejected == 0);
   CHECK(b.engine.scope_stats().scope_accepted == 0);
   CHECK(b.engine.candidate_count() == 0);

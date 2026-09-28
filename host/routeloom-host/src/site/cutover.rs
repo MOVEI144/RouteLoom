@@ -25,7 +25,9 @@
 //! PREPARE bytes are assembled deterministically from the durable
 //! snapshot so a PREPARED digest is verifiable after any restart.
 
-use routeloom_join::renew::{Commit, CutoverCommit, Head, Phase, Prepare, Receipt};
+use std::collections::{BTreeMap, BTreeSet};
+
+use routeloom_join::renew::{Commit, CutoverCommit, Head, Phase, Prepare, Receipt, RouteState};
 use routeloom_join::SitePackage;
 use routeloom_json::Json;
 use routeloom_peercred::Principal;
@@ -41,7 +43,9 @@ use routeloom_provision::signer::fill_random;
 use super::group_keys::{fresh_group_key, GkSecret, HostTime, META_HIGH_WATER};
 use super::records::{h16, op_token, parse_h16, parse_hex, Operation};
 use super::revocation::{
-    checked_next, OutboundKind, OutboundRrs, DISTRIBUTION_BACKOFF_S, DISTRIBUTION_OUTBOX_MAX,
+    checked_next, DistState, DistributionTarget, OperationDistribution, OutboundKind, OutboundRrs,
+    TargetState as RrsTargetState, DISTRIBUTION_BACKOFF_S, DISTRIBUTION_OUTBOX_MAX,
+    DISTRIBUTION_TARGET_MAX,
 };
 use super::store::{Batch, DeviceRow, DocKind, GroupKeyRow, RotationWrite};
 use super::{store_failure, SiteAuthority, SiteError};
@@ -53,6 +57,15 @@ pub const CUTOVER_PREPARE_WINDOW_MS: u64 = 600_000;
 /// Post-commit old-network delivery grace (RAM-only: a restart ends it
 /// and stragglers fall back to the ZT reissue).
 pub const CUTOVER_GRACE_MS: u64 = 60_000;
+/// Held gateway COMMITs flush once this much grace remains: the
+/// gateway needs ~15 s (a possible re-handshake + COMMIT + adopt +
+/// reboot + re-adopt), and one dead member must not wedge the site.
+pub const CUTOVER_GATEWAY_FLUSH_MS: u64 = 20_000;
+/// RouteState queries go out only in this tail of the prepare window
+/// (04 §7): reports must be fresh at commit, and route leases run
+/// tens of seconds — asking earlier only burns shared transfer slots
+/// for answers that expire before they can steer anything.
+pub const CUTOVER_ROUTE_QUERY_WINDOW_MS: u64 = 60_000;
 /// Grant snapshot cap, the same P6 profile as RRS distribution (~100
 /// boards plus headroom, gateways included). The live-member cap
 /// ([`super::group_keys::MEMBER_CAP`]) already enforces it; a snapshot
@@ -89,12 +102,15 @@ fn reason_from_u8(value: u8) -> Option<RevocationReason> {
 
 /// Per-target grant state. `Pending` never left the Host; `Unknown`
 /// was sent but never proved; both count as `unknown` in the API.
+/// `Recovered` missed the COMMIT and rejoined through the ZT reissue
+/// (04 §7) — converged like `Applied`, never confused with it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GrantState {
     Pending,
     Unknown,
     Prepared,
     Applied,
+    Recovered,
     Retired,
 }
 
@@ -105,6 +121,7 @@ impl GrantState {
             GrantState::Unknown => "unknown",
             GrantState::Prepared => "prepared",
             GrantState::Applied => "applied",
+            GrantState::Recovered => "recovered",
             GrantState::Retired => "retired",
         }
     }
@@ -115,6 +132,7 @@ impl GrantState {
             "unknown" => Some(GrantState::Unknown),
             "prepared" => Some(GrantState::Prepared),
             "applied" => Some(GrantState::Applied),
+            "recovered" => Some(GrantState::Recovered),
             "retired" => Some(GrantState::Retired),
             _ => None,
         }
@@ -193,6 +211,213 @@ impl CutoverTarget {
     }
 }
 
+/// One target's RAM-only route plan for leaf-first COMMIT dispatch
+/// (04 §7). Reports bind the query id the Host sent; `stored` is the
+/// verified COMMIT_STORED receipt (ordering only — never Applied
+/// evidence); `deferred` is the recorded layer-deadline cut. None of
+/// it is durable: a restart ends the grace the plan paces.
+#[derive(Clone, Debug, Default)]
+pub struct CutoverRoutePlan {
+    /// Latest query id sent (0 = none).
+    pub query_id: u32,
+    /// Unanswered-query rounds (shared backoff pacing).
+    pub query_attempts: u32,
+    /// Adopted report, if any, with its receive time and revision.
+    pub report: Option<RouteReport>,
+    /// A child stored COMMIT after this report; only a new answer may
+    /// release an unsent COMMIT through the changed tree.
+    pub recheck_due: bool,
+    /// Verified COMMIT_STORED (same cutover/revision/digest).
+    pub stored: bool,
+    /// Cut by a layer deadline (stays unknown; ZT recovers it).
+    pub deferred: bool,
+}
+
+/// One adopted RouteState report (phase 6, mode 1).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RouteReport {
+    pub root: u64,
+    pub parent: u64,
+    pub boot: u32,
+    pub stamp: u32,
+    pub query_id: u32,
+    pub lease_ms: u32,
+    pub revision: u32,
+    pub recv_mono_ms: u64,
+    pub unavailable: bool,
+}
+
+/// No RouteState query id is ever 0 (the codec rejects it); the
+/// sequence skips it on wrap.
+pub const ROUTE_QUERY_FIRST_ID: u32 = 1;
+
+impl CutoverRoutePlan {
+    /// A report steers dispatch only while it answers the current
+    /// revision and its route lease still covers `now_mono`.
+    fn usable(&self, revision: u32, now_mono: u64) -> Option<RouteReport> {
+        let report = self.report?;
+        if report.unavailable || report.revision != revision {
+            return None;
+        }
+        if report.recv_mono_ms.saturating_add(report.lease_ms as u64) <= now_mono {
+            return None;
+        }
+        Some(report)
+    }
+
+    /// Confirmed for ordering: stored, applied, recovered, or cut
+    /// by a deadline. Revocation confirms separately (the target row,
+    /// not the plan).
+    fn settled(&self, state: GrantState) -> bool {
+        self.stored
+            || self.deferred
+            || state == GrantState::Applied
+            || state == GrantState::Recovered
+    }
+}
+
+/// The uplink forest over the current targets, rebuilt from the
+/// RAM route plans on every use (04 §7): `depths` resolves each
+/// target (gateways are roots at 0; `None` is unresolvable — no
+/// usable report, a parent that is not a live target, a revoked
+/// link, a cycle, a root mismatch — and dispatches in the deepest
+/// layer); `h` is the deepest non-gateway layer (unresolved
+/// non-gateway targets count as layer 1, so H is 0 only when no
+/// non-gateway target can still move); `children` links each parent
+/// to its reporting children for the release gate.
+struct RouteTree {
+    depths: BTreeMap<u64, Option<u32>>,
+    h: u32,
+    children: BTreeMap<u64, Vec<u64>>,
+    parents: BTreeMap<u64, u64>,
+}
+
+fn route_tree(
+    targets: &[CutoverTarget],
+    plans: &BTreeMap<(u64, u64), CutoverRoutePlan>,
+    op: u64,
+    revision: u32,
+    now_mono: u64,
+) -> RouteTree {
+    let live: BTreeSet<u64> = targets.iter().map(|t| t.node).collect();
+    // Unusable transit (04 §7): a revoked — or recovered-new-network —
+    // node relays no old-context COMMIT, so no route resolves through
+    // one and children of one defer to the ZT reissue instead.
+    let retired: BTreeSet<u64> = targets
+        .iter()
+        .filter(|t| matches!(t.state, GrantState::Retired | GrantState::Recovered))
+        .map(|t| t.node)
+        .collect();
+    let gateways: BTreeSet<u64> = targets
+        .iter()
+        .filter(|t| t.gateway)
+        .map(|t| t.node)
+        .collect();
+    let mut links: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
+    for target in targets {
+        if target.gateway {
+            continue;
+        }
+        let Some(report) = plans
+            .get(&(op, target.node))
+            .and_then(|plan| plan.usable(revision, now_mono))
+        else {
+            continue;
+        };
+        if report.parent == 0 || report.parent == target.node {
+            continue;
+        }
+        links.insert(target.node, (report.parent, report.root));
+    }
+    let mut depths: BTreeMap<u64, Option<u32>> = BTreeMap::new();
+    for target in targets {
+        if target.gateway {
+            depths.insert(target.node, Some(0));
+            continue;
+        }
+        let mut depth: u32 = 0;
+        let mut cursor = target.node;
+        let mut seen = BTreeSet::from([cursor]);
+        let mut root = 0;
+        let resolved = loop {
+            let Some((parent, claimed)) = links.get(&cursor) else {
+                break false;
+            };
+            if root == 0 {
+                root = *claimed;
+            }
+            if retired.contains(parent) || !live.contains(parent) || !seen.insert(*parent) {
+                break false;
+            }
+            depth = depth.saturating_add(1);
+            if depth > 128 {
+                break false;
+            }
+            if gateways.contains(parent) {
+                break root == *parent;
+            }
+            cursor = *parent;
+        };
+        depths.insert(target.node, resolved.then_some(depth));
+    }
+    let mut parents: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut children: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for (node, (parent, _)) in &links {
+        if live.contains(parent) && !retired.contains(parent) {
+            parents.insert(*node, *parent);
+            children.entry(*parent).or_default().push(*node);
+        }
+    }
+    let mut h: u32 = 0;
+    for target in targets {
+        if target.gateway || matches!(target.state, GrantState::Retired | GrantState::Recovered) {
+            continue;
+        }
+        let layer = depths.get(&target.node).copied().flatten().unwrap_or(1);
+        h = h.max(layer.max(1));
+    }
+    RouteTree {
+        depths,
+        h,
+        children,
+        parents,
+    }
+}
+
+impl RouteTree {
+    /// Transitive reporting subtree of `node` (cycle-guarded).
+    fn descendants(&self, node: u64) -> BTreeSet<u64> {
+        let mut out = BTreeSet::new();
+        let mut stack: Vec<u64> = self.children.get(&node).cloned().unwrap_or_default();
+        while let Some(next) = stack.pop() {
+            if !out.insert(next) {
+                continue;
+            }
+            if let Some(kids) = self.children.get(&next) {
+                stack.extend(kids.iter().copied());
+            }
+        }
+        out.remove(&node);
+        out
+    }
+
+    /// The uplink chain of `node` over usable links (partial on the
+    /// first gap — a target never waits for the relay it reports
+    /// through, even when the rest of its chain is unknown).
+    fn ancestors(&self, node: u64) -> BTreeSet<u64> {
+        let mut out = BTreeSet::new();
+        let mut cursor = node;
+        while let Some(parent) = self.parents.get(&cursor) {
+            if !out.insert(*parent) {
+                break;
+            }
+            cursor = *parent;
+        }
+        out.remove(&node);
+        out
+    }
+}
+
 /// The durable cutover phase (04 §8.2, folded: Preparing covers the
 /// store-then-distribute pair, Committed covers commit-then-activate —
 /// the tick moves between them without an observable gap).
@@ -228,9 +453,15 @@ impl CutoverPhase {
     }
 
     fn live(self) -> bool {
+        // RecoveryPending still converges — stragglers Recovered through
+        // the reissue, or Retired through an explicit revoke — so it
+        // stays live (and blocks the next cutover) until they settle.
         matches!(
             self,
-            CutoverPhase::Preparing | CutoverPhase::WaitingGateway | CutoverPhase::Committed
+            CutoverPhase::Preparing
+                | CutoverPhase::WaitingGateway
+                | CutoverPhase::Committed
+                | CutoverPhase::RecoveryPending
         )
     }
 }
@@ -270,21 +501,41 @@ pub struct CutoverState {
 }
 
 impl CutoverState {
-    /// (prepared, applied, unknown, total) over non-retired targets;
-    /// retired targets left through a later explicit revoke.
-    pub fn counts(&self) -> (u64, u64, u64, u64) {
+    /// (prepared, applied, recovered, unknown, total) over non-retired
+    /// targets; retired targets left through a later explicit revoke.
+    /// Post-commit a still-Prepared target counts as unknown (04 §7):
+    /// its staging never became adoption, so the ZT reissue owns it.
+    /// `prepared` stays a separate readiness readout, never part of
+    /// the split: post-commit total = applied + recovered + unknown.
+    pub fn counts(&self) -> (u64, u64, u64, u64, u64) {
+        let committed = !matches!(
+            self.phase,
+            CutoverPhase::Preparing | CutoverPhase::WaitingGateway
+        );
         let mut prepared = 0_u64;
         let mut applied = 0_u64;
+        let mut recovered = 0_u64;
         let mut unknown = 0_u64;
         for target in &self.targets {
             match target.state {
-                GrantState::Prepared => prepared += 1,
+                GrantState::Prepared => {
+                    prepared += 1;
+                    if committed {
+                        unknown += 1;
+                    }
+                }
                 GrantState::Applied => applied += 1,
+                GrantState::Recovered => recovered += 1,
                 GrantState::Pending | GrantState::Unknown => unknown += 1,
                 GrantState::Retired => {}
             }
         }
-        (prepared, applied, unknown, prepared + applied + unknown)
+        let total = if committed {
+            applied + recovered + unknown
+        } else {
+            prepared + applied + unknown
+        };
+        (prepared, applied, recovered, unknown, total)
     }
 
     pub fn doc(&self) -> String {
@@ -877,8 +1128,12 @@ impl SiteAuthority {
             self.restart_cutover_window(&pending, time.mono_ms);
         }
         let Some(id) = self.live_cutover() else {
+            self.cutover_routes.clear();
+            self.cutover_gk_proved.clear();
             return;
         };
+        self.cutover_routes.retain(|(op, _), _| *op == id);
+        self.cutover_gk_proved.retain(|(op, _), _| *op == id);
         let phase = self
             .operations
             .get(&id)
@@ -886,7 +1141,11 @@ impl SiteAuthority {
             .map(|state| state.phase);
         match phase {
             Some(CutoverPhase::Preparing | CutoverPhase::WaitingGateway) => {
-                self.queue_grants(id, OutboundKind::Prepare, time.unix_ms);
+                self.queue_grants(id, OutboundKind::Prepare, time);
+                // Late PREPARE learns the tree (04 §7): only Prepared
+                // targets are worth asking, so early ticks queue
+                // nothing and COMMIT dispatch rarely waits a round trip.
+                self.queue_route_queries(id, time);
                 let lapsed = self.operations.get(&id).and_then(|op| {
                     op.cutover.as_ref().map(|state| {
                         time.mono_ms
@@ -909,14 +1168,21 @@ impl SiteAuthority {
                     .cutover_grace()
                     .map_or(true, |(_, until)| time.mono_ms > until);
                 if !grace_over {
-                    self.queue_grants(id, OutboundKind::Commit, time.unix_ms);
+                    self.cutover_apply_layer_deadlines(id, time.mono_ms);
+                    // A stored child may have left the old mesh. Ask
+                    // remaining targets again before releasing their
+                    // COMMITs, even while an older route lease lives.
+                    self.queue_route_queries(id, time);
+                    self.queue_grants(id, OutboundKind::Commit, time);
                 }
                 let terminal = self.operations.get(&id).and_then(|op| {
                     op.cutover.as_ref().map(|state| {
-                        state
-                            .targets
-                            .iter()
-                            .all(|t| matches!(t.state, GrantState::Applied | GrantState::Retired))
+                        state.targets.iter().all(|t| {
+                            matches!(
+                                t.state,
+                                GrantState::Applied | GrantState::Recovered | GrantState::Retired
+                            )
+                        })
                     })
                 });
                 if terminal == Some(true) {
@@ -1012,11 +1278,179 @@ impl SiteAuthority {
         }
     }
 
+    /// The durable COMMIT's monotonic instant, recovered from the
+    /// grace it opened (RAM-only like the grace: 0 means no grace).
+    fn cutover_commit_t0(&self) -> u64 {
+        self.cutover_grace_until_mono
+            .saturating_sub(CUTOVER_GRACE_MS)
+    }
+
+    /// True once the member plan closed (T0 + 40 s): every unconfirmed
+    /// non-gateway target is deferred then, and only the roots still
+    /// move. D and this instant never move (04 §7).
+    fn cutover_plan_closed(&self, now_mono: u64) -> bool {
+        self.cutover_grace_until_mono == 0
+            || now_mono
+                >= self
+                    .cutover_commit_t0()
+                    .saturating_add(CUTOVER_GRACE_MS.saturating_sub(CUTOVER_GATEWAY_FLUSH_MS))
+    }
+
+    /// The leaf-first release gate for one COMMIT (04 §7): a member
+    /// moves once its reporting subtree settled (stored, applied, or
+    /// cut) and no unrelated target without a usable report is still
+    /// unconfirmed — reports the gate cannot see serialize behind
+    /// the report it waits for, never ahead of it. A gateway (root)
+    /// moves once every non-gateway target settled, or once the plan
+    /// closes; with no non-gateway target it moves at once. The
+    /// latest-PREPARED and binding checks stay with the caller.
+    fn commit_releasable(&self, id: u64, node: u64, now_mono: u64) -> bool {
+        let Some(state) = self.operations.get(&id).and_then(|op| op.cutover.as_ref()) else {
+            return false;
+        };
+        let Some(target) = state.targets.iter().find(|t| t.node == node) else {
+            return false;
+        };
+        if matches!(
+            target.state,
+            GrantState::Applied | GrantState::Recovered | GrantState::Retired
+        ) {
+            return false;
+        }
+        // A layer-deadline cut ends the sends: the target fell back to
+        // the ZT reissue, and retries would only burn the grace that
+        // the remaining frontier still needs.
+        if self
+            .cutover_routes
+            .get(&(id, node))
+            .is_some_and(|plan| plan.deferred || plan.stored)
+        {
+            return false;
+        }
+        let settled = |t: &CutoverTarget| {
+            t.state == GrantState::Retired
+                || self
+                    .cutover_routes
+                    .get(&(id, t.node))
+                    .is_some_and(|plan| plan.settled(t.state))
+                || t.state == GrantState::Applied
+                || t.state == GrantState::Recovered
+        };
+        if target.gateway {
+            let out = self.cutover_plan_closed(now_mono)
+                || state
+                    .targets
+                    .iter()
+                    .filter(|t| !t.gateway && t.state != GrantState::Retired)
+                    .all(settled);
+            return out;
+        }
+        if self.cutover_plan_closed(now_mono) {
+            return false;
+        }
+        let tree = route_tree(
+            &state.targets,
+            &self.cutover_routes,
+            id,
+            state.revision,
+            now_mono,
+        );
+        let known = self
+            .cutover_routes
+            .get(&(id, node))
+            .and_then(|plan| plan.usable(state.revision, now_mono))
+            .is_some();
+        // A cached plan invalidated by a child's adoption needs a new
+        // answer before its first dispatch. Already-sent COMMITs may
+        // continue their bounded retries.
+        if self
+            .cutover_routes
+            .get(&(id, node))
+            .is_some_and(|plan| plan.recheck_due)
+            && !known
+            && target.attempts == 0
+        {
+            return false;
+        }
+        let descendants = tree.descendants(node);
+        let ancestors = tree.ancestors(node);
+        !state.targets.iter().any(|t| {
+            t.node != node
+                && !t.gateway
+                && t.state != GrantState::Retired
+                && !settled(t)
+                && (descendants.contains(&t.node)
+                    || (known
+                        && !ancestors.contains(&t.node)
+                        && self
+                            .cutover_routes
+                            .get(&(id, t.node))
+                            .and_then(|plan| plan.usable(state.revision, now_mono))
+                            .is_none()))
+        })
+    }
+
+    /// Cuts the layers whose frame lapsed (04 §7): the first 40 s
+    /// split into H frames from the deepest layer, and every
+    /// unconfirmed non-gateway target in a lapsed layer defers —
+    /// including ones never tried. Settled targets never move back.
+    fn cutover_apply_layer_deadlines(&mut self, id: u64, now_mono: u64) {
+        let until = self.cutover_grace_until_mono;
+        if until == 0 {
+            return;
+        }
+        let t0 = until.saturating_sub(CUTOVER_GRACE_MS);
+        let frames = CUTOVER_GRACE_MS.saturating_sub(CUTOVER_GATEWAY_FLUSH_MS);
+        let state = match self.operations.get(&id).and_then(|op| op.cutover.as_ref()) {
+            Some(state) => state.clone(),
+            None => return,
+        };
+        let tree = route_tree(
+            &state.targets,
+            &self.cutover_routes,
+            id,
+            state.revision,
+            now_mono,
+        );
+        if tree.h == 0 {
+            return;
+        }
+        for target in &state.targets {
+            if target.gateway || matches!(target.state, GrantState::Retired | GrantState::Recovered)
+            {
+                continue;
+            }
+            if self
+                .cutover_routes
+                .get(&(id, target.node))
+                .is_some_and(|plan| plan.settled(target.state))
+                || target.state == GrantState::Applied
+            {
+                continue;
+            }
+            let layer = tree
+                .depths
+                .get(&target.node)
+                .copied()
+                .flatten()
+                .unwrap_or(tree.h)
+                .clamp(1, tree.h);
+            let cutoff = t0
+                .saturating_add(frames.saturating_mul((tree.h - layer + 1) as u64) / tree.h as u64);
+            if now_mono >= cutoff {
+                self.cutover_routes
+                    .entry((id, target.node))
+                    .or_default()
+                    .deferred = true;
+            }
+        }
+    }
+
     /// Queues due grant sends into the shared paced outbox (04 §9.1: at
     /// most 4 live mails, 10 objects/s, newest work first). Pre-commit
     /// only PREPAREs go out; post-commit only COMMITs — never a new
     /// PREPARE on the retired network (04 §8.5).
-    fn queue_grants(&mut self, id: u64, kind: OutboundKind, now_ms: u64) {
+    fn queue_grants(&mut self, id: u64, kind: OutboundKind, time: HostTime) {
         if self
             .rrs_transport
             .as_ref()
@@ -1028,12 +1462,13 @@ impl SiteAuthority {
             Some(state) => state.clone(),
             None => return,
         };
+        let now_ms = time.unix_ms;
         for target in &state.targets {
             if self.rrs_outbox.len() >= DISTRIBUTION_OUTBOX_MAX {
                 break;
             }
             match target.state {
-                GrantState::Applied | GrantState::Retired => continue,
+                GrantState::Applied | GrantState::Recovered | GrantState::Retired => continue,
                 GrantState::Prepared
                     if kind == OutboundKind::Prepare
                         && target.prepared_revision == state.revision =>
@@ -1041,6 +1476,19 @@ impl SiteAuthority {
                     continue;
                 }
                 _ => {}
+            }
+            // A COMMIT needs the latest PREPARED behind it: without a
+            // staged intent the device would reject it, so the
+            // unprepared stay unknown for the ZT reissue instead of
+            // burning airtime. PREPARE needs no ordering: staging
+            // never retires.
+            if kind == OutboundKind::Commit {
+                let releasable = target.state == GrantState::Prepared
+                    && target.prepared_revision == state.revision
+                    && self.commit_releasable(id, target.node, time.mono_ms);
+                if !releasable {
+                    continue;
+                }
             }
             if matches!(target.state, GrantState::Unknown | GrantState::Prepared)
                 && target.next_retry_ms > now_ms
@@ -1078,6 +1526,174 @@ impl SiteAuthority {
         }
     }
 
+    /// Queues RouteState queries for targets lacking a usable report
+    /// (04 §7). PREPARE asks only in its last minute; after a child
+    /// stores COMMIT, pending targets are asked again before dispatch.
+    /// Only Prepared non-gateway targets need an uplink report.
+    fn queue_route_queries(&mut self, id: u64, time: HostTime) {
+        if self
+            .rrs_transport
+            .as_ref()
+            .map_or(true, |transport| !transport.carries_grant())
+        {
+            return;
+        }
+        let state = match self.operations.get(&id).and_then(|op| op.cutover.as_ref()) {
+            Some(state) => state.clone(),
+            None => return,
+        };
+        let late_prepare = state.phase == CutoverPhase::Preparing
+            && time.mono_ms
+                >= state
+                    .started_mono_ms
+                    .saturating_add(CUTOVER_PREPARE_WINDOW_MS)
+                    .saturating_sub(CUTOVER_ROUTE_QUERY_WINDOW_MS);
+        if state.phase != CutoverPhase::WaitingGateway
+            && state.phase != CutoverPhase::Committed
+            && !late_prepare
+        {
+            return;
+        }
+        let now_ms = time.unix_ms;
+        for target in &state.targets {
+            if self.rrs_outbox.len() >= DISTRIBUTION_OUTBOX_MAX {
+                break;
+            }
+            if target.gateway {
+                continue;
+            }
+            if !matches!(target.state, GrantState::Prepared)
+                || target.prepared_revision != state.revision
+            {
+                continue;
+            }
+            if self
+                .cutover_routes
+                .get(&(id, target.node))
+                .is_some_and(|plan| {
+                    plan.deferred
+                        || plan.stored
+                        || plan.usable(state.revision, time.mono_ms).is_some()
+                })
+            {
+                continue;
+            }
+            if self
+                .rrs_outbox
+                .iter()
+                .any(|o| o.op == id && o.node == target.node && o.what == OutboundKind::RouteQuery)
+            {
+                continue;
+            }
+            if self
+                .rrs_refusals
+                .get(&(id, target.node, OutboundKind::RouteQuery))
+                .is_some_and(|(due, _)| *due > now_ms)
+            {
+                continue;
+            }
+            let live = self.devices.get(&target.node).filter(|row| {
+                row.member && row.kid == target.kid && row.generation == target.generation
+            });
+            if live.is_none() {
+                continue;
+            }
+            self.rrs_outbox.push_back(OutboundRrs {
+                op: id,
+                node: target.node,
+                what: OutboundKind::RouteQuery,
+            });
+        }
+    }
+
+    /// Dispatch-time recheck for a queued query: the answer may have
+    /// landed while the mail lingered in the paced outbox.
+    pub(super) fn route_query_still_due(&self, op: u64, node: u64, now_ms: u64) -> bool {
+        let Some(state) = self.operations.get(&op).and_then(|o| o.cutover.as_ref()) else {
+            return false;
+        };
+        if !matches!(
+            state.phase,
+            CutoverPhase::Preparing | CutoverPhase::WaitingGateway | CutoverPhase::Committed
+        ) {
+            return false;
+        }
+        let Some(target) = state.targets.iter().find(|t| t.node == node) else {
+            return false;
+        };
+        if target.state != GrantState::Prepared || target.prepared_revision != state.revision {
+            return false;
+        }
+        if self.cutover_routes.get(&(op, node)).is_some_and(|plan| {
+            plan.deferred
+                || plan.stored
+                || plan
+                    .usable(state.revision, self.last_channel_mono_ms)
+                    .is_some()
+        }) {
+            return false;
+        }
+        if self
+            .rrs_refusals
+            .get(&(op, node, OutboundKind::RouteQuery))
+            .is_some_and(|(due, _)| *due > now_ms)
+        {
+            return false;
+        }
+        self.devices.get(&node).is_some_and(|row| {
+            row.member && row.kid == target.kid && row.generation == target.generation
+        })
+    }
+
+    /// Assembles one RouteState query with a fresh id (never 0):
+    /// the id becomes the outstanding one for this target, so a late
+    /// answer to a superseded query never steers dispatch.
+    pub(super) fn route_query_bytes(&mut self, op: u64, node: u64) -> Option<Vec<u8>> {
+        let state = self.operations.get(&op).and_then(|o| o.cutover.as_ref())?;
+        let head = Head {
+            phase: Phase::RouteState,
+            cutover_id: op,
+            revision: state.revision,
+            old_network: state.old_network,
+        };
+        let mut seq = self.cutover_query_seq.wrapping_add(1);
+        if seq == 0 {
+            seq = ROUTE_QUERY_FIRST_ID;
+        }
+        self.cutover_query_seq = seq;
+        self.cutover_routes.entry((op, node)).or_default().query_id = seq;
+        RouteState {
+            head,
+            mode: 0,
+            status: 0,
+            root: 0,
+            parent: 0,
+            boot: 0,
+            route_stamp: 0,
+            query_id: seq,
+            valid_for_ms: 0,
+        }
+        .encode()
+        .ok()
+        .map(|bytes| bytes.to_vec())
+    }
+
+    /// Records a query send: unanswered rounds back off on the shared
+    /// ladder (an answer resets the round and clears the wait). The
+    /// grant retry of the target never moves. A pending re-query
+    /// holds COMMIT until its own route report arrives.
+    pub(super) fn note_route_query_sent(&mut self, op: u64, node: u64, now_ms: u64) {
+        let plan = self.cutover_routes.entry((op, node)).or_default();
+        plan.query_attempts = plan.query_attempts.saturating_add(1);
+        let wait = DISTRIBUTION_BACKOFF_S
+            [(plan.query_attempts as usize - 1).min(DISTRIBUTION_BACKOFF_S.len() - 1)]
+        .saturating_mul(1000);
+        self.rrs_refusals.insert(
+            (op, node, OutboundKind::RouteQuery),
+            (now_ms.saturating_add(wait), 1),
+        );
+    }
+
     /// Records a grant send: attempts advance with the shared bounded
     /// backoff (5/10/20/40/60 s, capped); a first send moves Pending to
     /// Unknown. Receipts — never sends — move targets to Prepared and
@@ -1093,7 +1709,10 @@ impl SiteAuthority {
             if target.node != node {
                 continue;
             }
-            if matches!(target.state, GrantState::Applied | GrantState::Retired) {
+            if matches!(
+                target.state,
+                GrantState::Applied | GrantState::Recovered | GrantState::Retired
+            ) {
                 continue;
             }
             if target.state == GrantState::Pending {
@@ -1104,6 +1723,52 @@ impl SiteAuthority {
                 [(target.attempts as usize - 1).min(DISTRIBUTION_BACKOFF_S.len() - 1)]
             .saturating_mul(1000);
             target.next_retry_ms = now_ms.saturating_add(wait);
+        }
+    }
+
+    /// Re-arms `device`'s due grants on a (re)opened channel: the
+    /// retry and refusal deadlines drop to now, so the next tick
+    /// queues the grant immediately instead of at a backoff deadline
+    /// the fresh channel may not live to see (a COMMIT cadence that
+    /// keeps missing every Ready window stalls past the 60 s grace
+    /// otherwise). RAM-only like all backoff timers: no persist.
+    pub(super) fn rearm_grants_for_channel(&mut self, device: u64, now_ms: u64) {
+        let ids: Vec<u64> = self.operations.keys().copied().collect();
+        for id in ids {
+            let mut rearmed = false;
+            if let Some(state) = self
+                .operations
+                .get_mut(&id)
+                .and_then(|op| op.cutover.as_mut())
+            {
+                for target in state.targets.iter_mut() {
+                    if target.node != device {
+                        continue;
+                    }
+                    if matches!(
+                        target.state,
+                        GrantState::Applied | GrantState::Recovered | GrantState::Retired
+                    ) {
+                        continue;
+                    }
+                    if target.next_retry_ms > now_ms {
+                        target.next_retry_ms = now_ms;
+                        rearmed = true;
+                    }
+                }
+            }
+            if rearmed {
+                // A pending refusal would gate the re-queue past the
+                // window the fresh channel just opened. The release
+                // gate still applies — the rearm hurries, never
+                // bypasses.
+                self.rrs_refusals
+                    .remove(&(id, device, OutboundKind::Prepare));
+                self.rrs_refusals
+                    .remove(&(id, device, OutboundKind::Commit));
+                self.rrs_refusals
+                    .remove(&(id, device, OutboundKind::RouteQuery));
+            }
         }
     }
 
@@ -1122,7 +1787,7 @@ impl SiteAuthority {
                     return false;
                 }
                 match t.state {
-                    GrantState::Applied | GrantState::Retired => false,
+                    GrantState::Applied | GrantState::Recovered | GrantState::Retired => false,
                     GrantState::Prepared
                         if kind == OutboundKind::Prepare
                             && t.prepared_revision == state.revision =>
@@ -1130,7 +1795,17 @@ impl SiteAuthority {
                         false
                     }
                     GrantState::Unknown | GrantState::Prepared if t.next_retry_ms > now_ms => false,
-                    _ => true,
+                    _ => {
+                        // The frontier re-checks at dispatch: a mail
+                        // that lingered in the paced outbox must not
+                        // jump the queue the tree refined meanwhile.
+                        // `last_channel_mono_ms` is this tick's clock
+                        // (set before both drain paths run).
+                        kind != OutboundKind::Commit
+                            || (t.state == GrantState::Prepared
+                                && t.prepared_revision == state.revision
+                                && self.commit_releasable(op, node, self.last_channel_mono_ms))
+                    }
                 }
             }),
             None => false,
@@ -1158,7 +1833,11 @@ impl SiteAuthority {
                     return None;
                 }
                 if !state.targets.iter().any(|t| {
-                    t.node == node && !matches!(t.state, GrantState::Applied | GrantState::Retired)
+                    t.node == node
+                        && !matches!(
+                            t.state,
+                            GrantState::Applied | GrantState::Recovered | GrantState::Retired
+                        )
                 }) {
                     return None;
                 }
@@ -1364,6 +2043,43 @@ impl SiteAuthority {
             next.commit_rrs = rrs.clone();
             next.commit_unix_ms = now_ms;
         }
+        // The commit RRS distributes like a revoke's set: every grant
+        // target owes an Applied receipt on the new network — the
+        // straggler's reissue ACK is what `rrs_ok` reads to mark its
+        // recovery (04 §7).
+        {
+            let mut targets: Vec<DistributionTarget> = state
+                .targets
+                .iter()
+                .filter(|t| t.state != GrantState::Retired)
+                .take(DISTRIBUTION_TARGET_MAX)
+                .map(|t| DistributionTarget {
+                    node: t.node,
+                    kid: t.kid,
+                    generation: t.generation,
+                    network: state.new_network,
+                    state: RrsTargetState::Pending,
+                    attempts: 0,
+                    next_retry_ms: 0,
+                    ack_rs_epoch: None,
+                })
+                .collect();
+            targets.sort_by_key(|t| t.node);
+            let overflow = state
+                .targets
+                .iter()
+                .filter(|t| t.state != GrantState::Retired)
+                .count()
+                .saturating_sub(DISTRIBUTION_TARGET_MAX) as u32;
+            updated.distribution = Some(OperationDistribution {
+                state: DistState::Pending,
+                rs_epoch: commit_rs,
+                network: state.new_network,
+                object_sha256: sha256(&rrs),
+                targets,
+                overflow,
+            });
+        }
         let active_epoch = self.gks.active_epoch();
         let retired_notices: Vec<Operation> = self
             .operations
@@ -1444,16 +2160,16 @@ impl SiteAuthority {
             transport.note_p6_cutover(state.old_network, time.mono_ms);
         }
         self.prune_rrs_history();
-        let (prepared, applied, unknown, _) = self
+        let (prepared, applied, recovered, unknown, _) = self
             .operations
             .get(&id)
             .and_then(|op| op.cutover.as_ref())
             .map(|s| s.counts())
-            .unwrap_or((0, 0, 0, 0));
+            .unwrap_or((0, 0, 0, 0, 0));
         self.event(
             now_ms,
             format!(
-                "\"kind\":\"cutover.progress\",\"operation_id\":\"{}\",\"phase\":\"committed\",\"new_site_epoch\":{},\"revision\":{},\"rs_epoch\":{commit_rs},\"gk_epoch\":{},\"prepared\":{prepared},\"applied\":{applied},\"unknown\":{unknown}",
+                "\"kind\":\"cutover.progress\",\"operation_id\":\"{}\",\"phase\":\"committed\",\"new_site_epoch\":{},\"revision\":{},\"rs_epoch\":{commit_rs},\"gk_epoch\":{},\"prepared\":{prepared},\"applied\":{applied},\"recovered\":{recovered},\"unknown\":{unknown}",
                 op_token(id),
                 state.new_site_epoch,
                 state.revision,
@@ -1480,25 +2196,31 @@ impl SiteAuthority {
     /// authority channel with the context-bound node/generation/
     /// network). PREPARED counts pre-commit only, at the latest
     /// revision, with the exact PREPARE digest; APPLIED counts
-    /// post-commit only, over the new context, with the exact COMMIT
-    /// digest. Anything else is ignored. Returns true when a target
-    /// moved.
+    /// post-commit only, over the new context — or over the old
+    /// context inside the COMMIT grace (04 §7) — with the exact
+    /// COMMIT digest. Anything else is ignored. Returns true when a
+    /// target moved.
     pub fn handle_grant_receipt(
         &mut self,
         node: u64,
         generation: u32,
         network: u64,
         receipt: &[u8],
-        now_ms: u64,
+        time: HostTime,
     ) -> bool {
+        let now_ms = time.unix_ms;
         let receipt = match Receipt::decode(receipt) {
             Ok(receipt) => receipt,
-            Err(_) => return false,
+            Err(_) => {
+                return false;
+            }
         };
         let id = receipt.head.cutover_id;
         let state = match self.operations.get(&id).and_then(|op| op.cutover.as_ref()) {
             Some(state) => state.clone(),
-            None => return false,
+            None => {
+                return false;
+            }
         };
         if receipt.head.old_network != state.old_network
             || receipt.new_network != state.new_network
@@ -1511,15 +2233,22 @@ impl SiteAuthority {
         // inherits the old target's evidence.
         let live = match self.devices.get(&node) {
             Some(row) if row.member && row.generation == generation => row.clone(),
-            _ => return false,
+            _ => {
+                return false;
+            }
         };
         let target = match state.targets.iter().find(|t| t.node == node) {
             Some(target) if target.generation == generation && target.kid == live.kid => {
                 target.clone()
             }
-            _ => return false,
+            _ => {
+                return false;
+            }
         };
-        if matches!(target.state, GrantState::Applied | GrantState::Retired) {
+        if matches!(
+            target.state,
+            GrantState::Applied | GrantState::Recovered | GrantState::Retired
+        ) {
             return false;
         }
         match receipt.head.phase {
@@ -1547,13 +2276,26 @@ impl SiteAuthority {
                 self.set_grant_state(id, node, GrantState::Prepared, state.revision, now_ms)
             }
             Phase::Applied => {
+                // 04 §7: the device adopts over its old channel and
+                // reports before any new-context channel exists, so an
+                // authenticated old-context APPLIED counts inside the
+                // COMMIT grace. The grace is the receive instant
+                // against the RAM deadline — never the phase alone,
+                // which can lag a tick (or a failed write-back) past
+                // D — and it ends at D sharp, on restart (RAM), and
+                // on clock regression (ended with the table flip).
+                let until = self.cutover_grace_until_mono;
+                let grace_applied = network == state.old_network
+                    && state.phase == CutoverPhase::Committed
+                    && until != 0
+                    && time.mono_ms < until;
                 if !matches!(
                     state.phase,
                     CutoverPhase::Committed
                         | CutoverPhase::RecoveryPending
                         | CutoverPhase::Converged
                 ) || self.id.network != state.new_network
-                    || network != state.new_network
+                    || !(network == state.new_network || grace_applied)
                     || receipt.rs_epoch != state.commit_rs_epoch
                     || receipt.gk_epoch != state.next_gk_epoch
                 {
@@ -1564,8 +2306,166 @@ impl SiteAuthority {
                 }
                 self.set_grant_state(id, node, GrantState::Applied, state.revision, now_ms)
             }
-            Phase::Prepare | Phase::Commit => false,
+            // COMMIT_STORED and RouteState ride their own handlers
+            // (leaf-first dispatch); never PREPARED/APPLIED evidence.
+            Phase::Prepare | Phase::Commit | Phase::CommitStored | Phase::RouteState => false,
         }
+    }
+
+    /// Validates a COMMIT_STORED receipt (04 §7): the same
+    /// cutover/revision the Host committed, the same COMMIT digest,
+    /// epochs and networks, status 0, over the live old binding while
+    /// the grace still covers the receive instant. Ordering only —
+    /// the target's GrantState never moves here. True when the plan
+    /// recorded it (duplicates re-record idempotently).
+    pub(super) fn handle_commit_stored(
+        &mut self,
+        node: u64,
+        generation: u32,
+        network: u64,
+        body: &[u8],
+        mono_ms: u64,
+    ) -> bool {
+        let receipt = match Receipt::decode(body) {
+            Ok(receipt) if receipt.head.phase == Phase::CommitStored => receipt,
+            _ => return false,
+        };
+        let id = receipt.head.cutover_id;
+        let state = match self.operations.get(&id).and_then(|op| op.cutover.as_ref()) {
+            Some(state) => state.clone(),
+            None => return false,
+        };
+        if state.phase != CutoverPhase::Committed
+            || receipt.head.revision != state.revision
+            || receipt.head.old_network != state.old_network
+            || network != state.old_network
+            || receipt.new_network != state.new_network
+            || receipt.status != 0
+        {
+            return false;
+        }
+        let until = self.cutover_grace_until_mono;
+        if until == 0 || mono_ms >= until {
+            return false;
+        }
+        let Some(target) = state.targets.iter().find(|t| t.node == node) else {
+            return false;
+        };
+        let live = self
+            .devices
+            .get(&node)
+            .is_some_and(|row| row.member && row.generation == generation && row.kid == target.kid);
+        if !live || generation != target.generation {
+            return false;
+        }
+        if receipt.rs_epoch != state.commit_rs_epoch
+            || receipt.gk_epoch != state.next_gk_epoch
+            || receipt.digest != sha256(&state.commit_object)
+        {
+            return false;
+        }
+        let plan = self.cutover_routes.entry((id, node)).or_default();
+        if !plan.stored {
+            plan.stored = true;
+            // A child can adopt immediately after this receipt. Cached
+            // parent leases of pending targets cannot authorize the
+            // next COMMIT without a new, bound RouteState answer.
+            for pending in state
+                .targets
+                .iter()
+                .filter(|t| !t.gateway && t.node != node && t.attempts == 0)
+            {
+                let route = self.cutover_routes.entry((id, pending.node)).or_default();
+                if route.stored || route.deferred || route.report.is_none() {
+                    continue;
+                }
+                route.report = None;
+                route.recheck_due = true;
+                route.query_id = 0;
+                route.query_attempts = 0;
+                self.rrs_refusals
+                    .remove(&(id, pending.node, OutboundKind::RouteQuery));
+            }
+        }
+        true
+    }
+
+    /// Adopts a RouteState report (04 §7): the live cutover's binding
+    /// plus the outstanding query id, over the live old binding
+    /// (pre-commit, or post-commit while the grace covers the receive
+    /// instant). Anything else — a superseded query, a foreign
+    /// cutover, a dead binding — never steers dispatch. True when
+    /// the plan adopted it.
+    pub(super) fn handle_route_report(
+        &mut self,
+        node: u64,
+        generation: u32,
+        network: u64,
+        body: &[u8],
+        mono_ms: u64,
+    ) -> bool {
+        let report = match RouteState::decode(body) {
+            Ok(report) if report.mode == 1 => report,
+            _ => return false,
+        };
+        let id = report.head.cutover_id;
+        let state = match self.operations.get(&id).and_then(|op| op.cutover.as_ref()) {
+            Some(state) => state.clone(),
+            None => return false,
+        };
+        if !matches!(
+            state.phase,
+            CutoverPhase::Preparing | CutoverPhase::WaitingGateway | CutoverPhase::Committed
+        ) || report.head.revision != state.revision
+            || report.head.old_network != state.old_network
+            || network != state.old_network
+        {
+            return false;
+        }
+        if state.phase == CutoverPhase::Committed {
+            let until = self.cutover_grace_until_mono;
+            if until == 0 || mono_ms >= until {
+                return false;
+            }
+        }
+        let Some(target) = state.targets.iter().find(|t| t.node == node) else {
+            return false;
+        };
+        if matches!(
+            target.state,
+            GrantState::Applied | GrantState::Recovered | GrantState::Retired
+        ) {
+            return false;
+        }
+        let live = self
+            .devices
+            .get(&node)
+            .is_some_and(|row| row.member && row.generation == generation && row.kid == target.kid);
+        if !live || generation != target.generation {
+            return false;
+        }
+        let plan = self.cutover_routes.entry((id, node)).or_default();
+        if plan.query_id == 0 || report.query_id != plan.query_id {
+            return false;
+        }
+        plan.report = Some(RouteReport {
+            root: report.root,
+            parent: report.parent,
+            boot: report.boot,
+            stamp: report.route_stamp,
+            query_id: report.query_id,
+            lease_ms: report.valid_for_ms,
+            revision: state.revision,
+            recv_mono_ms: mono_ms,
+            unavailable: report.status == 1,
+        });
+        if report.status == 0 {
+            plan.recheck_due = false;
+        }
+        plan.query_attempts = 0;
+        self.rrs_refusals
+            .remove(&(id, node, OutboundKind::RouteQuery));
+        true
     }
 
     /// Moves one grant target, durably: the store commits before the
@@ -1590,7 +2490,10 @@ impl SiteAuthority {
                     if target.node != node {
                         continue;
                     }
-                    if matches!(target.state, GrantState::Applied | GrantState::Retired) {
+                    if matches!(
+                        target.state,
+                        GrantState::Applied | GrantState::Recovered | GrantState::Retired
+                    ) {
                         continue;
                     }
                     target.state = state;
@@ -1600,10 +2503,12 @@ impl SiteAuthority {
                 if !moved {
                     return false;
                 }
-                cutover
-                    .targets
-                    .iter()
-                    .all(|t| matches!(t.state, GrantState::Applied | GrantState::Retired))
+                cutover.targets.iter().all(|t| {
+                    matches!(
+                        t.state,
+                        GrantState::Applied | GrantState::Recovered | GrantState::Retired
+                    )
+                })
             }
             None => return false,
         };
@@ -1635,6 +2540,98 @@ impl SiteAuthority {
                 false
             }
         }
+    }
+
+    /// Records that `node` verifiably holds GK `epoch` (04 §7): the
+    /// caller checked the gk_id (ACK) or the fenced JoinConfirm view.
+    /// RAM-only evidence for the Recovered transition below.
+    pub(super) fn note_cutover_gk_proved(&mut self, node: u64, epoch: u32) {
+        if epoch == 0 {
+            return;
+        }
+        if let Some(id) = self.live_cutover() {
+            self.cutover_gk_proved.insert((id, node), epoch);
+        }
+    }
+
+    /// Marks a cutover target Recovered once its ZT reissue fully
+    /// evidenced (04 §7): a verified JoinConfirm on the live row (the
+    /// generation/cert/DAMS binding the target snapshot shares), the
+    /// committed RRS Applied on the new network, and the current GK
+    /// proven. Only unknown (Pending/Unknown/Prepared) targets of a
+    /// post-commit cutover move; Applied/Retired/Recovered never do.
+    /// The move is durable (store first) like every grant transition.
+    /// True when the target moved.
+    pub(super) fn cutover_maybe_recover(&mut self, node: u64, now_ms: u64) -> bool {
+        let Some(id) = self.live_cutover() else {
+            return false;
+        };
+        let state = match self.operations.get(&id).and_then(|op| op.cutover.as_ref()) {
+            Some(state) => state.clone(),
+            None => return false,
+        };
+        // Converged needs no arm: all its targets are terminal, so no
+        // unknown target can exist to recover.
+        if !matches!(
+            state.phase,
+            CutoverPhase::Committed | CutoverPhase::RecoveryPending
+        ) {
+            return false;
+        }
+        let target = match state.targets.iter().find(|t| t.node == node) {
+            Some(target)
+                if matches!(
+                    target.state,
+                    GrantState::Pending | GrantState::Unknown | GrantState::Prepared
+                ) =>
+            {
+                target.clone()
+            }
+            _ => return false,
+        };
+        if !self.devices.get(&node).is_some_and(|row| {
+            row.member
+                && row.confirmed
+                && row.generation == target.generation
+                && row.kid == target.kid
+        }) {
+            return false;
+        }
+        // The RRS the cutover committed (or a newer set): an Applied
+        // ack on the new network for this binding. Anything older is
+        // not the recovery evidence.
+        let rrs_ok = self.operations.values().any(|op| {
+            op.distribution.as_ref().is_some_and(|dist| {
+                dist.network == state.new_network
+                    && dist.targets.iter().any(|t| {
+                        t.node == node
+                            && t.network == state.new_network
+                            && t.generation == target.generation
+                            && t.kid == target.kid
+                            && t.state == RrsTargetState::Applied
+                            && t.ack_rs_epoch.is_some_and(|e| e >= state.commit_rs_epoch)
+                    })
+            })
+        });
+        if !rrs_ok {
+            return false;
+        }
+        let active = self.gks.active_epoch();
+        if active == 0 || self.cutover_gk_proved.get(&(id, node)) != Some(&active) {
+            return false;
+        }
+        if !self.set_grant_state(id, node, GrantState::Recovered, state.revision, now_ms) {
+            return false;
+        }
+        self.event(
+            now_ms,
+            format!(
+                "\"kind\":\"cutover.recovered\",\"operation_id\":\"{}\",\"device_id\":\"{}\"",
+                op_token(id),
+                h16(node)
+            ),
+        );
+        true
     }
 
     /// Previews an allow folded into a live pre-commit cutover (04
@@ -1876,7 +2873,11 @@ impl SiteAuthority {
         }
         if let Some((id, _)) = restaged {
             self.rrs_refusals.retain(|(op, _, kind), _| {
-                *op != id || !matches!(kind, OutboundKind::Prepare | OutboundKind::Commit)
+                *op != id
+                    || !matches!(
+                        kind,
+                        OutboundKind::Prepare | OutboundKind::Commit | OutboundKind::RouteQuery
+                    )
             });
         }
         if let Some(prior) = effect.superseded_owner {
@@ -1923,7 +2924,7 @@ impl SiteAuthority {
     /// only — the tick decides on the same clock).
     pub(super) fn cutover_view(&self, op: &Operation, now: HostTime) -> Option<String> {
         let state = op.cutover.as_ref()?;
-        let (prepared, applied, unknown, total) = state.counts();
+        let (prepared, applied, recovered, unknown, total) = state.counts();
         let waiting_gateway = state.phase == CutoverPhase::WaitingGateway;
         let recovery_pending = state.phase == CutoverPhase::RecoveryPending;
         let deadline = match state.phase {
@@ -1935,7 +2936,7 @@ impl SiteAuthority {
             _ => "null".to_string(),
         };
         Some(format!(
-            "{{\"operation_id\":\"{}\",\"kind\":\"cutover\",\"phase\":\"{}\",\"expected_site_epoch\":{},\"new_site_epoch\":{},\"revision\":{},\"prepared\":{prepared},\"applied\":{applied},\"unknown\":{unknown},\"total\":{total},\"waiting_gateway\":{waiting_gateway},\"recovery_pending\":{recovery_pending},\"deadline_remaining_ms\":{deadline},\"commit_rs_epoch\":{},\"created_ms\":{}}}",
+            "{{\"operation_id\":\"{}\",\"kind\":\"cutover\",\"phase\":\"{}\",\"expected_site_epoch\":{},\"new_site_epoch\":{},\"revision\":{},\"prepared\":{prepared},\"applied\":{applied},\"recovered\":{recovered},\"unknown\":{unknown},\"total\":{total},\"waiting_gateway\":{waiting_gateway},\"recovery_pending\":{recovery_pending},\"deadline_remaining_ms\":{deadline},\"commit_rs_epoch\":{},\"created_ms\":{}}}",
             op_token(op.id),
             state.phase.name(),
             state.expected_site_epoch,

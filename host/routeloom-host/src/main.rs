@@ -1628,9 +1628,10 @@ fn receive_ingest(
         );
         return;
     };
-    // Wire v1 networks are 1..=0xffffffff; anything else from the adapter
-    // cannot be attributed to a valid network, so it is dropped + noted.
-    if !(1..=0xffff_ffff).contains(&network) {
+    // The USB-authenticated network includes the site epoch; the wire v1
+    // header carries its low word. Reject only an invalid wire network,
+    // retaining the full epoch for receive-log attribution after cutover.
+    if network as u32 == 0 {
         push_event(
             state,
             ms,
@@ -4918,6 +4919,52 @@ mod tests {
         assert!(json.contains("\"reason\":\"origin_reserved\""), "{json}");
         let mut log = state.receive_log.lock().unwrap();
         assert_eq!(log.bounds(1, now_ms()), (1, 0, 0, 0));
+    }
+
+    /// A committed site cutover changes the authenticated USB epoch, not
+    /// the wire header's low word. Inbound mesh data must be attributed to
+    /// the full epoch so it remains readable under the new network only.
+    #[test]
+    fn receive_ingest_after_site_cutover() {
+        let state = State::default();
+        let old_network = 0x0000_0001_524c_0001_u64;
+        let new_network = 0x0000_0002_524c_0001_u64;
+        let mut body = Vec::new();
+        body.extend_from_slice(&3_u64.to_be_bytes());
+        body.extend_from_slice(&5_u32.to_be_bytes());
+        body.extend_from_slice(&900_u64.to_be_bytes());
+        body.extend_from_slice(b"epoch two");
+        {
+            let mut session = state.session.lock().unwrap();
+            session.network = Some(new_network);
+            session.node = Some(1);
+        }
+        let ms = now_ms();
+        record_frame(
+            &state,
+            &frame(FrameKind::DataFromMesh, 0, 0, body.clone()),
+            &body,
+            ms,
+        );
+        let mut log = state.receive_log.lock().unwrap();
+        assert_eq!(log.bounds(new_network, ms), (1, 1, 1, 512));
+        assert_eq!(log.bounds(old_network, ms), (1, 0, 0, 0));
+        drop(log);
+        assert!(!events_json(&state).contains("network_out_of_range"));
+
+        // An epoch alone cannot make a zero wire-network valid.
+        state.session.lock().unwrap().network = Some(1_u64 << 32);
+        record_frame(
+            &state,
+            &frame(FrameKind::DataFromMesh, 0, 0, body.clone()),
+            &body,
+            ms,
+        );
+        assert!(events_json(&state).contains("network_out_of_range"));
+        assert_eq!(
+            state.receive_log.lock().unwrap().bounds(1_u64 << 32, ms),
+            (1, 0, 0, 0)
+        );
     }
 
     #[test]

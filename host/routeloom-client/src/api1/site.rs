@@ -232,6 +232,7 @@ pub fn cutover_operation_from_json(json: &Json) -> Option<CutoverProgress> {
         revision: u32_of(json, "revision")?,
         prepared: opt_u64(json, "prepared").unwrap_or(0),
         applied: opt_u64(json, "applied").unwrap_or(0),
+        recovered: opt_u64(json, "recovered").unwrap_or(0),
         unknown: opt_u64(json, "unknown").unwrap_or(0),
         total: opt_u64(json, "total").unwrap_or(0),
         waiting_gateway: json.get("waiting_gateway").and_then(Json::as_bool)?,

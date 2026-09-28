@@ -354,6 +354,8 @@ bool join_step_valid(const JoinAuthPhase phase, const std::uint8_t step) noexcep
       return step >= 1 && step <= 3;
     case JoinAuthPhase::RelayStatus:
       return step == 1;
+    case JoinAuthPhase::RrsDelivery:
+      return step == 1;
   }
   return false;
 }
@@ -366,6 +368,8 @@ JoinFlow join_step_flow(const JoinAuthPhase phase, const std::uint8_t step) noex
     case JoinAuthPhase::Resume:
       return step == 2 ? JoinFlow::Down : JoinFlow::Up;
     case JoinAuthPhase::RelayStatus:
+      return JoinFlow::Down;
+    case JoinAuthPhase::RrsDelivery:
       return JoinFlow::Down;
   }
   return JoinFlow::Either;
@@ -383,6 +387,8 @@ Status join_object_validate(const JoinAuthObject& object) noexcept {
   const bool first = object.step == 1;
   if (object.phase == JoinAuthPhase::EdhocMessage) {
     if (object.cookie_present != first) return invalid("join cookie echo");
+  } else if (object.phase == JoinAuthPhase::RrsDelivery) {
+    if (object.cookie_present) return invalid("join rrs cookie");
   } else if (object.cookie_present && !first) {
     return invalid("join cookie echo");
   }
@@ -439,7 +445,7 @@ Status join_object_decode(const ByteView encoded, JoinAuthObject& out) noexcept 
   }
   const std::uint8_t phase = encoded.data[1];
   if (phase < static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage) ||
-      phase > static_cast<std::uint8_t>(JoinAuthPhase::RelayStatus)) {
+      phase > static_cast<std::uint8_t>(JoinAuthPhase::RrsDelivery)) {
     return malformed("join object phase");
   }
   JoinAuthObject object{};
@@ -477,7 +483,8 @@ bool join_sub_decode(const std::uint8_t sub, JoinAuthPhase& phase, std::uint8_t&
   const std::uint8_t high = static_cast<std::uint8_t>(sub >> 4U);
   const std::uint8_t low = static_cast<std::uint8_t>(sub & 0x0FU);
   if (high != static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage) &&
-      high != static_cast<std::uint8_t>(JoinAuthPhase::Resume)) {
+      high != static_cast<std::uint8_t>(JoinAuthPhase::Resume) &&
+      high != static_cast<std::uint8_t>(JoinAuthPhase::RrsDelivery)) {
     return false;
   }
   const JoinAuthPhase candidate = static_cast<JoinAuthPhase>(high);
@@ -632,6 +639,7 @@ void JoinObjectSlot::reset() noexcept {
   started_ms_ = 0;
   last_send_ms_ = 0;
   sends_ = 0;
+  send_blocked_ = false;
   completed_valid_ = false;
   completed_carrier_ = JoinCarrier::Rld1;
   completed_sub_ = 0;
@@ -848,6 +856,7 @@ Status JoinObjectSlot::load_in_place(const JoinCarrier carrier, const JoinAuthPh
   started_ms_ = now_ms;
   last_send_ms_ = now_ms;
   sends_ = 0;
+  send_blocked_ = false;
   return Status::success();
 }
 
@@ -910,9 +919,15 @@ JoinObjectSlot::ReplyOutcome JoinObjectSlot::on_reply(const JoinReply& reply,
   return ReplyOutcome::Ignored;
 }
 
-void JoinObjectSlot::note_sent(const MonotonicMs now_ms) noexcept {
+void JoinObjectSlot::note_sent(const MonotonicMs now_ms, const bool blocked) noexcept {
   last_send_ms_ = now_ms;
+  send_blocked_ = blocked;
   if (sends_ != 0xFF) ++sends_;
+}
+
+void JoinObjectSlot::note_advanced(const MonotonicMs now_ms, const bool blocked) noexcept {
+  last_send_ms_ = now_ms;
+  send_blocked_ = blocked;
 }
 
 bool JoinObjectSlot::expire(const MonotonicMs now_ms, const std::uint32_t timeout_ms) noexcept {
@@ -940,11 +955,17 @@ Status relay_object_validate(const RelayObject& object) noexcept {
   const bool up = h.dir == RelayDirection::Up;
   if (up ? h.joiner_rssi_dbm > 0 : h.joiner_rssi_dbm != 0) return invalid("relay rssi");
   const bool edhoc = h.phase == JoinAuthPhase::EdhocMessage;
+  // The out-of-band RRS1 object (02 §5.3 phase 7) rides the live EDHOC
+  // exchange between m3 and m4: down only, never the terminal shape.
+  if (h.phase == JoinAuthPhase::RrsDelivery &&
+      (up || h.step != 1 || h.state != RelayState::Continue)) {
+    return invalid("relay rrs stage");
+  }
   switch (h.state) {
     case RelayState::Continue:
       if (up) {
         if (join_step_flow(h.phase, h.step) == JoinFlow::Down) return invalid("relay up step");
-      } else if (h.step != 2) {
+      } else if (h.step != 2 && h.phase != JoinAuthPhase::RrsDelivery) {
         return invalid("relay down step");
       }
       break;
@@ -1027,7 +1048,8 @@ Status relay_object_decode(const ByteView encoded, RelayObject& out) noexcept {
   h.joiner_rssi_dbm = static_cast<std::int8_t>(p[22]);
   const std::uint8_t phase = p[23];
   if (phase != static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage) &&
-      phase != static_cast<std::uint8_t>(JoinAuthPhase::Resume)) {
+      phase != static_cast<std::uint8_t>(JoinAuthPhase::Resume) &&
+      phase != static_cast<std::uint8_t>(JoinAuthPhase::RrsDelivery)) {
     return malformed("relay phase");
   }
   h.phase = static_cast<JoinAuthPhase>(phase);
@@ -1181,7 +1203,7 @@ bool zt_rld1_frame(const autonomy::Rld1Envelope& env) noexcept {
     case FrameType::BootstrapAuth:
       return env.body_size >= 2 &&
              env.body[1] >= static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage) &&
-             env.body[1] <= static_cast<std::uint8_t>(JoinAuthPhase::RelayStatus);
+             env.body[1] <= static_cast<std::uint8_t>(JoinAuthPhase::RrsDelivery);
     case FrameType::BootstrapChunk:
     case FrameType::BootstrapReply:
       // join_sub_decode (not the lane-aware form): the 0x80 end-session

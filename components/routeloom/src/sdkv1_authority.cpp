@@ -3,6 +3,7 @@
 #include "routeloom/sdkv1_authority.hpp"
 #include "routeloom/sdkv1_group_keys.hpp"
 
+#include <cstdio>
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"

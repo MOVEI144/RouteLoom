@@ -16,6 +16,7 @@
 #include "routeloom/types.hpp"
 #include "routeloom/wire.hpp"
 
+#include "esp_now.h"
 #include "idf_stubs.hpp"
 #include "test_security.hpp"
 #include "test_sim.hpp"
@@ -102,6 +103,9 @@ using routeloom_test::TestSecurity;
 
 constexpr NodeId kSelf = 1;
 constexpr NodeId kPeer = 2;
+// The stub's default station MAC (these tests never call set_mac).
+const std::array<std::uint8_t, 6> kSelfMac{{0x02, 0x11, 0x22, 0x33, 0x44, 0x55}};
+const std::array<std::uint8_t, 6> kBroadcast{{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
 
 EspNowRuntimeConfig make_config() {
   EspNowRuntimeConfig config{};
@@ -392,7 +396,8 @@ void test_prestart_owner_pump() {
   rld1[7] = static_cast<std::uint8_t>(rld1.size());
   rld1[8] = 0;
   rld1[9] = static_cast<std::uint8_t>(rld1.size());
-  CHECK(idf_stub::inject_rx(peer_mac().bytes.data(), rld1.data(), rld1.size()));
+  CHECK(idf_stub::inject_rx(peer_mac().bytes.data(), kBroadcast.data(), rld1.data(),
+                            rld1.size()));
   runtime.poll_once();
   CHECK(bootstrap.received == 1);
 
@@ -464,7 +469,7 @@ void test_owner_drives_config_component() {
   plain.payload_size = 1;
   routeloom::wire::EncodedFrame encoded{};
   CHECK(routeloom::wire::encode_new(plain, security, encoded).ok());
-  CHECK(idf_stub::inject_rx(peer_mac().bytes.data(), encoded.bytes.data(),
+  CHECK(idf_stub::inject_rx(peer_mac().bytes.data(), kSelfMac.data(), encoded.bytes.data(),
                             encoded.size));
   runtime.poll_once();
   CHECK(sink.frames == 1);
@@ -579,7 +584,7 @@ void test_old_rx_epoch_cannot_acquire_current_binding() {
   plain.payload_size = 1;
   routeloom::wire::EncodedFrame encoded{};
   CHECK(routeloom::wire::encode_new(plain, security, encoded).ok());
-  CHECK(idf_stub::inject_rx(peer_mac().bytes.data(), encoded.bytes.data(),
+  CHECK(idf_stub::inject_rx(peer_mac().bytes.data(), kSelfMac.data(), encoded.bytes.data(),
                             encoded.size));
   runtime.poll_once();
   CHECK(observer.messages.size() == 1);
@@ -592,7 +597,7 @@ void test_old_rx_epoch_cannot_acquire_current_binding() {
   plain.header.message.sequence = 2;
   plain.header.link_epoch = 1;
   CHECK(routeloom::wire::encode_new(plain, security, encoded).ok());
-  CHECK(idf_stub::inject_rx(peer_mac().bytes.data(), encoded.bytes.data(),
+  CHECK(idf_stub::inject_rx(peer_mac().bytes.data(), kSelfMac.data(), encoded.bytes.data(),
                             encoded.size));
   runtime.poll_once();
   CHECK(observer.messages.size() == 1);
@@ -630,7 +635,7 @@ void test_distinct_session_tx_and_rx_contexts() {
   TestSecurity peer_cipher;
   routeloom::wire::EncodedFrame encoded{};
   CHECK(routeloom::wire::encode_new(plain, peer_cipher, encoded).ok());
-  CHECK(idf_stub::inject_rx(peer_mac().bytes.data(), encoded.bytes.data(),
+  CHECK(idf_stub::inject_rx(peer_mac().bytes.data(), kSelfMac.data(), encoded.bytes.data(),
                             encoded.size));
   runtime.poll_once();
   CHECK(observer.messages.size() == 1);
@@ -670,7 +675,7 @@ void test_stop_drains_node_reply_uses() {
   plain.payload_size = 1;
   routeloom::wire::EncodedFrame encoded{};
   CHECK(routeloom::wire::encode_new(plain, security, encoded).ok());
-  CHECK(idf_stub::inject_rx(peer_mac().bytes.data(), encoded.bytes.data(),
+  CHECK(idf_stub::inject_rx(peer_mac().bytes.data(), kSelfMac.data(), encoded.bytes.data(),
                             encoded.size));
   runtime.poll_once();
   CHECK(runtime.node().txn_in_flight() == 1);
@@ -1152,9 +1157,55 @@ void test_adopt_member_node_keeps_sufficient_timers() {
   runtime.stop();
 }
 
+std::uint8_t completion_macs[4][6] = {};
+esp_now_send_status_t completion_status[4] = {};
+int completion_count = 0;
+
+void record_completion(const esp_now_send_info_t* info,
+                       const esp_now_send_status_t status) noexcept {
+  if (completion_count < 4 && info != nullptr && info->des_addr != nullptr) {
+    std::memcpy(completion_macs[completion_count], info->des_addr, 6);
+    completion_status[completion_count] = status;
+  }
+  ++completion_count;
+}
+
+// Multi-TX completion attribution (D04 mesh): two esp_now_send calls to
+// different MACs, drained via take_tx like the mesh peer tick, then
+// completed in order. Each completion must report its own destination —
+// reporting the last destination twice leaks the runtime's per-MAC
+// in-flight tracking into the TX callback quarantine and wedges that
+// peer's link handshake (M4 WouldBlock until Expired).
+void test_completions_attribute_in_send_order_after_take_tx() {
+  idf_stub::reset();
+  completion_count = 0;
+  CHECK(esp_now_register_send_cb(&record_completion) == ESP_OK);
+  const std::uint8_t mac_a[6] = {0x02, 0x00, 0x00, 0x00, 0xA1, 0x02};
+  const std::uint8_t mac_b[6] = {0x02, 0x00, 0x00, 0x00, 0xA1, 0x03};
+  const std::uint8_t body[4] = {0x52, 0x4C, 0x44, 0x31};
+  CHECK(esp_now_send(mac_a, body, sizeof(body)) == ESP_OK);
+  CHECK(esp_now_send(mac_b, body, sizeof(body)) == ESP_OK);
+  idf_stub::TxFrame taken{};
+  CHECK(idf_stub::take_tx(taken));
+  CHECK(std::memcmp(taken.dest, mac_a, 6) == 0);
+  CHECK(idf_stub::take_tx(taken));
+  CHECK(std::memcmp(taken.dest, mac_b, 6) == 0);
+  CHECK(!idf_stub::take_tx(taken));
+  CHECK(idf_stub::complete_send(true));
+  CHECK(idf_stub::complete_send(false));
+  CHECK(!idf_stub::complete_send(true));
+  CHECK(completion_count == 2);
+  CHECK(std::memcmp(completion_macs[0], mac_a, 6) == 0);
+  CHECK(completion_status[0] == ESP_NOW_SEND_SUCCESS);
+  CHECK(std::memcmp(completion_macs[1], mac_b, 6) == 0);
+  CHECK(completion_status[1] == ESP_NOW_SEND_FAIL);
+  CHECK(esp_now_unregister_send_cb() == ESP_OK);
+}
+
 }  // namespace
 
 int main() {
+  test_completions_attribute_in_send_order_after_take_tx();
   test_boot_installs_lease_port();
   test_prestart_owner_pump();
   test_owner_drives_config_component();

@@ -2,6 +2,7 @@
 
 #include "routeloom/sdkv1_authority_transport.hpp"
 
+#include <cstdio>
 #include <cstring>
 
 #include "routeloom/discovery_scope.hpp"  // sha256
@@ -384,6 +385,16 @@ void AuthorityEndpoint::complete_tx(const bool delivered) noexcept {
   drop_tx();
 }
 
+void AuthorityEndpoint::on_config_job_done(const MessageId& id,
+                                           const bool hop_accepted) noexcept {
+  if (!tx_.active || tx_.total_len > kAuthorityCarrierBodyMax || tx_.sends != 1) return;
+  MessageId pending{};
+  std::memcpy(&pending.session, tx_.hash.data(), sizeof(pending.session));
+  std::memcpy(&pending.sequence, tx_.hash.data() + sizeof(pending.session),
+              sizeof(pending.sequence));
+  if (id == pending) complete_tx(hop_accepted);
+}
+
 bool AuthorityEndpoint::pump_tx(const MonotonicMs now_ms) noexcept {
   if (!tx_.active) return true;
   if (tx_.started_ms == 0) {
@@ -396,8 +407,9 @@ bool AuthorityEndpoint::pump_tx(const MonotonicMs now_ms) noexcept {
     return true;
   }
   if (tx_.total_len <= kAuthorityCarrierBodyMax) {
-    // Small carriers are fire-and-forget at this layer: the mesh
-    // hop-accepts them and the channel's own ACK/retry recovers loss.
+    // A queued frame is not a hop result. The cutover drain must wait
+    // until the node reports this exact job before retiring its path.
+    if (tx_.sends != 0) return true;
     std::uint32_t exchange = 0;
     if (tx_.kind == AuthorityCarrierKind::R1 || tx_.kind == AuthorityCarrierKind::R2 ||
         tx_.kind == AuthorityCarrierKind::R3) {
@@ -414,15 +426,22 @@ bool AuthorityEndpoint::pump_tx(const MonotonicMs now_ms) noexcept {
       return true;
     }
     in_call_ = true;
-    const Status sent = mesh_.config_send(tx_.gateway, FrameType::Control,
-                                          ByteView{frame.data(), written}, now_ms);
+    MessageId id{};
+    const Status sent = mesh_.config_send_tracked(tx_.gateway, FrameType::Control,
+                                                  ByteView{frame.data(), written}, now_ms, id);
     in_call_ = false;
     if (!sent) {
       sat_inc(counters_.mesh_shed);
       return true;  // mesh shed it: retry on the next poll
     }
     sat_inc(counters_.mesh_queued);
-    complete_tx(true);
+    if (id.sequence == 0) {
+      complete_tx(true);  // fake ports without job tracking
+    } else {
+      std::memcpy(tx_.hash.data(), &id.session, sizeof(id.session));
+      std::memcpy(tx_.hash.data() + sizeof(id.session), &id.sequence, sizeof(id.sequence));
+      tx_.sends = 1;
+    }
     return true;
   }
   if (tx_.acked >= tx_.total_len) return true;  // waiting for the Ok
@@ -544,6 +563,15 @@ void AuthorityGateway::drop_slot(Slot& slot) noexcept {
 
 void AuthorityGateway::drop_all() noexcept {
   for (auto& slot : slots_) drop_slot(slot);
+}
+
+void AuthorityGateway::cancel_down_to(const NodeId device) noexcept {
+  if (device == kInvalidNodeId || device == kBroadcastNodeId) return;
+  for (auto& slot : slots_) {
+    if (slot.active && slot.direction == Direction::Down && slot.device == device) {
+      drop_slot(slot);
+    }
+  }
 }
 
 void AuthorityGateway::send_ack(const NodeId dest, const autonomy::ObjectHash& hash,
@@ -753,7 +781,31 @@ Status AuthorityGateway::authority_down(const NodeId device,
   }
   Slot* slot = find_slot(device, Direction::Down, fragment.transfer_id, fragment.kind);
   if (slot == nullptr) {
+    // A Wake only points at pending work for its device: a transfer
+    // already queued for it (or a fresh object arriving behind this
+    // hint) carries the same signal. The hint therefore never claims
+    // a slot real traffic needs — absorbed while a downlink for the
+    // device is active, evicted when the table is full and the object
+    // it previews has arrived.
+    if (fragment.kind == AuthorityCarrierKind::Wake) {
+      for (const auto& other : slots_) {
+        if (other.active && other.direction == Direction::Down && other.device == device) {
+          complete = true;
+          return Status::success();
+        }
+      }
+    }
     slot = claim_slot();
+    if (slot == nullptr && fragment.kind != AuthorityCarrierKind::Wake) {
+      for (auto& other : slots_) {
+        if (other.active && other.direction == Direction::Down && other.device == device &&
+            other.kind == AuthorityCarrierKind::Wake) {
+          drop_slot(other);
+          break;
+        }
+      }
+      slot = claim_slot();
+    }
     if (slot == nullptr) {
       sat_inc(counters_.denied);
       return Status::error(StatusCode::Busy, "authority gateway full");
@@ -837,7 +889,16 @@ bool AuthorityGateway::pump_down_mesh(Slot& slot, const MonotonicMs now_ms) noex
     const Status sent =
         mesh_.config_send(slot.device, FrameType::Control, ByteView{frame.data(), written}, now_ms);
     in_call_ = false;
-    if (!sent) return true;  // mesh shed it: retry on the next poll
+    if (!sent) {
+      if (slot.send_failures < kAuthoritySendFailMax) ++slot.send_failures;
+      if (slot.send_failures >= kAuthoritySendFailMax) {
+        // Unsendable: a permanently unreachable peer must not starve the
+        // shared slots for later downlinks that CAN be delivered.
+        drop_slot(slot);
+        sat_inc(counters_.timeouts);
+      }
+      return true;
+    }
     drop_slot(slot);
     return true;
   }
@@ -871,7 +932,15 @@ bool AuthorityGateway::pump_down_mesh(Slot& slot, const MonotonicMs now_ms) noex
     const Status sent = mesh_.config_send(slot.device, FrameType::ControlObject,
                                           encoded.view(), now_ms);
     in_call_ = false;
-    if (!sent) return true;
+    if (!sent) {
+      if (slot.send_failures < kAuthoritySendFailMax) ++slot.send_failures;
+      if (slot.send_failures >= kAuthoritySendFailMax) {
+        drop_slot(slot);
+        sat_inc(counters_.timeouts);
+      }
+      return true;
+    }
+    slot.send_failures = 0;
     slot.mesh_manifest_sent = true;
   }
   autonomy::ObjectChunkPayload chunk{};
@@ -890,7 +959,15 @@ bool AuthorityGateway::pump_down_mesh(Slot& slot, const MonotonicMs now_ms) noex
   const Status sent = mesh_.config_send(slot.device, FrameType::ObjectChunk,
                                         encoded.view(), now_ms);
   in_call_ = false;
-  if (!sent) return true;
+  if (!sent) {
+    if (slot.send_failures < kAuthoritySendFailMax) ++slot.send_failures;
+    if (slot.send_failures >= kAuthoritySendFailMax) {
+      drop_slot(slot);
+      sat_inc(counters_.timeouts);
+    }
+    return true;
+  }
+  slot.send_failures = 0;
   slot.last_send_ms = now_ms;
   ++slot.sends;
   return true;
@@ -973,10 +1050,17 @@ bool AuthorityGateway::quiescent() const noexcept {
   return true;
 }
 
+bool AuthorityGateway::down_live_to(const NodeId device) const noexcept {
+  for (const auto& slot : slots_) {
+    if (slot.active && slot.direction == Direction::Down && slot.device == device) return true;
+  }
+  return false;
+}
+
 void AuthorityMeshSink::on_config_job_done(const MessageId& id, const bool hop_accepted,
                                            const char* reason,
                                            const MonotonicMs now_ms) noexcept {
-  (void)id;
+  demux_.on_config_job_done(id, hop_accepted);
   (void)now_ms;
   if (hop_accepted) {
     sat_inc(jobs_accepted_);
@@ -1001,16 +1085,18 @@ void AuthorityMeshSink::on_config_frame(const NodeId peer, const wire::PlainFram
       break;
     case FrameType::ControlObject: {
       autonomy::ControlObjectPayload manifest{};
-      if (autonomy::control_object_decode(payload, manifest) &&
-          demux_.claim_kind(manifest.kind)) {
+      const bool dec = autonomy::control_object_decode(payload, manifest).ok();
+      const bool claimed = dec && demux_.claim_kind(manifest.kind);
+      if (claimed) {
         demux_.on_manifest(frame.header.origin, manifest, now_ms);
       }
       break;
     }
     case FrameType::ObjectChunk: {
       autonomy::ObjectChunkPayload chunk{};
-      if (autonomy::object_chunk_decode(payload, chunk) &&
-          demux_.claim_transfer(frame.header.origin, chunk.object_hash)) {
+      const bool dec = autonomy::object_chunk_decode(payload, chunk).ok();
+      const bool claimed = dec && demux_.claim_transfer(frame.header.origin, chunk.object_hash);
+      if (claimed) {
         demux_.on_chunk(frame.header.origin, chunk, now_ms);
       }
       break;

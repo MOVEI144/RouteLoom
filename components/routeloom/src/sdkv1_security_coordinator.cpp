@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cstring>
+#include <cstdio>
 #include <new>
 
 #include "routeloom/discovery_scope.hpp"  // hmac_sha256
@@ -233,8 +234,8 @@ void SecurityCoordinator::destroy_workspace() noexcept {
 }
 
 void SecurityCoordinator::create_joiner() noexcept {
-  new (&ws_.joiner) Joiner(deps_.joiner_config, *deps_.identity, *deps_.site, *deps_.entropy,
-                           *deps_.rld1, joiner_observer_, deps_.join_aead);
+  new (&ws_.joiner) Joiner(deps_.joiner_config, *deps_.identity, *deps_.site, *deps_.revocations,
+                           *deps_.entropy, *deps_.rld1, joiner_observer_, deps_.join_aead);
   ws_.joiner.set_commit_policy(this);
 }
 
@@ -797,14 +798,35 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
     // duplicates of the old exchange — a new exchange never matches it,
     // so it must not block the re-handshake (sleep wake, rekey).
     bool leg_live = false;
-    for (const auto& slot : member().demux) {
+    DemuxEntry* live = nullptr;
+    for (auto& slot : member().demux) {
       if (slot.used && slot.has_start &&
           slot.mac == start.peer_mac) {
         leg_live = true;
+        live = &slot;
         break;
       }
     }
-    if (leg_live) continue;
+    if (leg_live) {
+      // A fresh responder exchange supersedes a stale parked leg: the OFFER
+      // for this exchange already went out, so the peer answers with its
+      // cookie — rebinding keeps the demux carrier in step with the newest
+      // offer instead of memcmp-failing every re-issued m1. An in-flight
+      // initiator leg still wins the simultaneous open.
+      if (live->initiator || start.initiator) continue;
+      live->peer = start.peer;
+      live->initiator = false;
+      live->carrier = start.carrier;
+      live->carrier.network = adopted_.network;
+      live->carrier.node_i = start.peer;
+      live->carrier.node_r = adopted_.node;
+      live->expires_at = start.expires_at_ms;
+      live->object_id = 0;
+      live->txn = {};
+      live->quiet_retry_token = 0;
+      live->discovery_token = NeighborDiscovery::kMemberHandshakeNone;
+      continue;
+    }
     DemuxEntry* entry = claim_demux(start.peer_mac, 0, now);
     if (entry == nullptr) break;
     entry->peer = start.peer;
@@ -972,6 +994,12 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
     return Status::success();  // Fresh/Removed/Recovery: no RLD1 owner lives
   }
   if (sleeping_) return Status::success();
+  autonomy::Rld1Envelope env{};
+  const bool env_ok = autonomy::rld1_decode(event.rld1_frame, env).ok();
+  const bool to_us = event.rld1_meta.destination == deps_.local_mac;
+  const bool to_broadcast = event.rld1_meta.destination == MacAddress{} ||
+                            event.rld1_meta.destination ==
+                                MacAddress{{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
   if (has_member_engine() && member_apply_pending_) {
     sat_inc(counters_.demux_drops);
     return Status::success();
@@ -986,15 +1014,10 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
     sat_inc(counters_.demux_drops);
     return Status::success();
   }
-  autonomy::Rld1Envelope env{};
-  if (!autonomy::rld1_decode(event.rld1_frame, env).ok()) {
+  if (!env_ok) {
     sat_inc(counters_.demux_drops);
     return Status::success();
   }
-  const bool to_us = event.rld1_meta.destination == deps_.local_mac;
-  const bool to_broadcast = event.rld1_meta.destination == MacAddress{} ||
-                            event.rld1_meta.destination ==
-                                MacAddress{{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
   if (!to_us && !to_broadcast) {
     sat_inc(counters_.demux_drops);
     return Status::success();
@@ -1329,7 +1352,7 @@ void SecurityCoordinator::drain_engine_results(const MonotonicMs now) noexcept {
         }
       }
       // Stale-GK strikes are Member-only: dev has no GK to refresh.
-      if (mode_ == CoordinatorMode::Member) note_link_failed();
+      if (mode_ == CoordinatorMode::Member) note_link_failed(now);
     } else if (result.event == HandshakeEvent::Failed && result.scope == SecurityScope::EndToEnd) {
       sat_inc(counters_.end_failed);
       counters_.end_last_error = result.failure;
@@ -1417,7 +1440,8 @@ Status SecurityCoordinator::emit_link_send(const HandshakeResult& result,
     if (!autonomy::rld1_encode(env, frame).ok()) {
       return Status::error(StatusCode::ProtocolError, "link rld1 encode");
     }
-    return deps_.rld1->send_rld1(leg->mac, frame.view());
+    const Status sent = deps_.rld1->send_rld1(leg->mac, frame.view());
+    return sent;
   }
   // The slot holds the full object encoding (cookie included): the peer
   // assembles these bytes and decodes them as a JoinAuthObject.
@@ -1490,7 +1514,7 @@ Status SecurityCoordinator::pump_link_tx(const MonotonicMs now) noexcept {
       return Status::error(StatusCode::ProtocolError, "link tx rld1 encode");
     }
     const Status sent = deps_.rld1->send_rld1(leg->mac, frame.view());
-    if (sent.ok()) slot.note_sent(now);
+    if (sent.ok()) slot.note_sent(now, false);
     return sent;
   }
   return Status::success();  // all chunks acknowledged; wait for Complete
@@ -1598,7 +1622,7 @@ Status SecurityCoordinator::pump_end_tx(const MonotonicMs now) noexcept {
                                                    ByteView{body.data(), written},
                                                    HandshakeEngine::kLinkTimeoutMs,
                                                    now, id);
-    if (sent.ok()) slot.note_sent(now);
+    if (sent.ok()) slot.note_sent(now, false);
     return sent;
   }
   return Status::success();
@@ -1652,6 +1676,18 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
         sat_inc(counters_.staged_drops);
         return;
       }
+      // Epoch control shares byte-1 values with the end phases
+      // (kEpochReplyKind == EdhocMessage): classify first so replies
+      // reach the proxy instead of the end slot (D04 R1). The size
+      // check keeps end-lane objects on their peek below.
+      if (classify_wire_relay(payload) == WireRelayKind::EpochReply) {
+        if (!member_mode) {
+          sat_inc(counters_.staged_drops);
+          return;
+        }
+        member().proxy.on_relay_rx(frame.meta.origin, frame.type, payload, now);
+        return;
+      }
       if (payload.data[1] == static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage) ||
           payload.data[1] == static_cast<std::uint8_t>(JoinAuthPhase::Resume)) {
         handle_end_single(frame.meta, payload, now);
@@ -1663,10 +1699,13 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
       }
       member().proxy.on_relay_rx(frame.meta.origin, frame.type, payload, now);
       if (member().gateway_active) {
+        // Distance, not consumed hops: a direct neighbor is 1 hop away
+        // (D04 R1); 0 is the local join, a corrupt over-limit stays 0 and
+        // fails the USB check closed.
         const std::uint8_t hops =
             frame.meta.hop_remaining > kDefaultHopLimit
                 ? 0
-                : static_cast<std::uint8_t>(kDefaultHopLimit - frame.meta.hop_remaining);
+                : static_cast<std::uint8_t>(kDefaultHopLimit - frame.meta.hop_remaining + 1);
         member().gateway.on_relay_rx(frame.meta.origin, hops, frame.type, payload, now);
       }
       return;
@@ -1680,10 +1719,13 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
       }
       member().proxy.on_relay_rx(frame.meta.origin, frame.type, payload, now);
       if (member().gateway_active) {
+        // Distance, not consumed hops: a direct neighbor is 1 hop away
+        // (D04 R1); 0 is the local join, a corrupt over-limit stays 0 and
+        // fails the USB check closed.
         const std::uint8_t hops =
             frame.meta.hop_remaining > kDefaultHopLimit
                 ? 0
-                : static_cast<std::uint8_t>(kDefaultHopLimit - frame.meta.hop_remaining);
+                : static_cast<std::uint8_t>(kDefaultHopLimit - frame.meta.hop_remaining + 1);
         member().gateway.on_relay_rx(frame.meta.origin, hops, frame.type, payload, now);
       }
       return;
@@ -1722,10 +1764,13 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
       }
       member().proxy.on_relay_rx(frame.meta.origin, frame.type, payload, now);
       if (member().gateway_active) {
+        // Distance, not consumed hops: a direct neighbor is 1 hop away
+        // (D04 R1); 0 is the local join, a corrupt over-limit stays 0 and
+        // fails the USB check closed.
         const std::uint8_t hops =
             frame.meta.hop_remaining > kDefaultHopLimit
                 ? 0
-                : static_cast<std::uint8_t>(kDefaultHopLimit - frame.meta.hop_remaining);
+                : static_cast<std::uint8_t>(kDefaultHopLimit - frame.meta.hop_remaining + 1);
         member().gateway.on_relay_rx(frame.meta.origin, hops, frame.type, payload, now);
       }
       return;
@@ -1820,7 +1865,8 @@ bool SecurityCoordinator::check(const SiteRecord& prepared, const MonotonicMs no
 
 Status SecurityCoordinator::relay_up(const NodeId proxy, const std::uint8_t hops,
                                      const ByteView object) noexcept {
-  return deps_.usb->send_relay_up_to_host(proxy, hops, object);
+  const Status st = deps_.usb->send_relay_up_to_host(proxy, hops, object);
+  return st;
 }
 
 Status SecurityCoordinator::relay_abort(const NodeId proxy, const RelayToken token,
@@ -2322,7 +2368,7 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now,
   join_confirmed_ = false;
   refresh_active_ = false;
   refresh_strikes_ = 0;
-  last_unknown_generation_ = 0;
+  last_unknown_newer_generation_ = 0;
   adopted_ = CoordinatorMemberConfig{};
   member_valid_ = false;
   clear_milestones();
@@ -2375,12 +2421,59 @@ constexpr std::uint8_t kRefreshStrikesMax = 3;
 constexpr MonotonicMs kRefreshAbandonMs = 300000;   // 5 min without MemberReady
 constexpr MonotonicMs kRefreshCooldownMs = 600000;  // 10 min after an abandoned refresh
 constexpr MonotonicMs kAuthorityStartRetryMs = 1000;
+// 04 §3.5: the live-links road strikes once per window at most —
+// distinct stuck rounds count, a single overlap never refreshes.
+constexpr MonotonicMs kLiveStrikeSpacingMs = 20000;
+// 04 §3.5: present-check probe. A Ready channel quiet for one
+// interval short of the idle-retire span asks every Pull bucket; each
+// unanswered probe strikes (the interval already spaces them past the
+// live clock). The head start matters: the probe (not a silent
+// retire) must own the boundary tick, and its Pull traffic then holds
+// the retire off while the path stays unverified — verified retention
+// while questioned, silent retire only while unpolled (sleep) or
+// unstarted.
+constexpr MonotonicMs kProbeQuietMs = 540000;
+// A pending cutover must not wait out the idle-retire quiet window:
+// present-check Pulls start after 25 s so the link/lease/session stays
+// warm for the COMMIT that follows.
+constexpr MonotonicMs kProbeWantedQuietMs = 25000;
+// 04 §7/§8.2: the site owes a Prepared/Switching member its COMMIT for
+// the whole documented window — the 600 s prepare window plus the 60 s
+// binding grace the commit dispatch can run. Inside that debt a quiet
+// or dead authority road is congestion, never loss: the member must
+// still be reachable whenever the commit lands. Once the debt itself
+// has lapsed, a dead road means the site moved on without it — the
+// binding the commit rode is gone — and the ZT reissue is the only
+// road left.
+constexpr MonotonicMs kIntentDebtMs = 660000;
+// A dead road counts only while it stays dead: a flap inside the
+// dispatch tail still leaves the commit time to arrive.
+constexpr MonotonicMs kProbeIntentDeadMs = 120000;
+constexpr MonotonicMs kProbeIntervalMs = 60000;
+// During a pending cutover the 30 s neighbour lease would still lapse
+// inside the normal 60 s probe interval; wanted-authority probes repeat
+// every 10 s so the channel never goes quiet long enough to retire.
+constexpr MonotonicMs kProbeWantedIntervalMs = 10000;
+// A shared road failure (a dark lane, a missed COMMIT) crosses the
+// same evidence boundary on every member at once — and a ZeroTouch
+// verify still needs a member-mode relay to reach the host at all.
+// Spreading the teardown by node slot keeps the not-yet-due engines
+// member-mode to serve it: the earliest refresher re-verifies through
+// the still-up neighbors and is serving their relays again before the
+// next slot lands. The site gateway anchors everyone else's road, so
+// it always takes the last slot.
+constexpr std::uint8_t kRefreshSpreadSlots = 4;
+constexpr MonotonicMs kRefreshSpreadStepMs = 30000;
 
 }  // namespace
 
 Status SecurityCoordinator::on_authority_rx(const CoordinatorEvent& event) noexcept {
-  if (mode_ != CoordinatorMode::Member || sleeping_) return Status::success();
-  if (!small().authority.snapshot().started) return Status::success();  // stale carrier
+  if (mode_ != CoordinatorMode::Member || sleeping_) {
+    return Status::success();
+  }
+  if (!small().authority.snapshot().started) {
+    return Status::success();  // stale carrier
+  }
   AuthorityInput in{};
   in.kind = AuthorityInputKind::RxCarrier;
   in.rx.kind = event.auth_kind;
@@ -2488,6 +2581,100 @@ void SecurityCoordinator::suspend_authority() noexcept {
   (void)small().authority.advance(in, last_now_);
 }
 
+// 04 §3.5: a quiet revoked/straggler member is cryptographically deaf
+// to its survivors (no shared context post-enforcement) and its idle
+// channel never re-establishes on its own — passive evidence cannot
+// reach it. So a Ready channel with no verified RX for the idle-
+// retire span present-checks: one Pull per interval, answered by any
+// RX (a live member's Update clears the strikes). Consecutive
+// unanswered probes strike into the same refresh. Dormant/Connecting/
+// Backoff channels are left alone (in-flight work or slept keys).
+void SecurityCoordinator::probe_quiet_authority(const MonotonicMs now) noexcept {
+  if (!authority_wanted_) return;
+  const AuthoritySnapshot auth = small().authority.snapshot();
+  // Track the intent debt locally: the stamp starts when the hold is
+  // first seen and clears with it. A boot-restored intent re-waits —
+  // conservative, and the ZT road it eventually opens is the same one
+  // the journal would have taken anyway.
+  if (cutover_intent_) {
+    if (intent_since_ms_ == 0) intent_since_ms_ = now;
+  } else {
+    intent_since_ms_ = 0;
+  }
+  const bool intent_debt_lapsed =
+      cutover_intent_ && intent_since_ms_ != 0 &&
+      now - intent_since_ms_ >= kIntentDebtMs;
+  // A member holding cutover intent (Prepared/Switching) holds the link
+  // and lease open with present-check Pulls far earlier than the
+  // idle-retire probe — it must still be reachable when COMMIT lands.
+  // Other authority-wanted states (GK catch-up, post-refresh restart)
+  // keep the idle-retire cadence: a quiet spell there proves nothing
+  // faster than the documented retire span.
+  const MonotonicMs quiet_ms = cutover_intent_ ? kProbeWantedQuietMs
+                                               : kProbeQuietMs;
+  const MonotonicMs interval_ms = cutover_intent_ ? kProbeWantedIntervalMs
+                                                  : kProbeIntervalMs;
+  if (auth.state != AuthoritySnapshot::State::Ready) {
+    // Only an intent-holder treats a dead channel as evidence, and
+    // only once the debt itself has lapsed: a channel that cannot
+    // come Ready means the binding a straggler would re-handshake on
+    // is gone — nothing can arrive downlink either. The ZT reissue
+    // is the designed continuation; a channel that re-readies resets
+    // the count. A non-intent member's Dormant/Backoff channel is
+    // slept keys, not evidence, and stays untouched.
+    if (!intent_debt_lapsed || !auth.started) return;
+    if (now - last_rx_ms_ < kProbeIntentDeadMs) return;
+    if (now - last_live_strike_ < kLiveStrikeSpacingMs) return;
+    last_live_strike_ = now;
+    if (refresh_strikes_ < kRefreshStrikesMax) {
+      ++refresh_strikes_;
+      last_strike_ms_ = now;
+    }
+    if (refresh_strikes_ >= kRefreshStrikesMax) {
+      last_probe_ms_ = now;
+      start_refresh(now);
+    }
+    return;
+  }
+  if (auth.rx_accepted != last_rx_value_) {
+    // Any verified contact converges: overlap/probe strikes die here.
+    last_rx_value_ = auth.rx_accepted;
+    last_rx_ms_ = now;
+    refresh_strikes_ = 0;
+    return;
+  }
+  if (now - last_rx_ms_ < quiet_ms) return;
+  if (now - last_probe_ms_ < interval_ms) return;
+  // Intent keeps waiting for the COMMIT the site owes it through the
+  // whole debt window — an unanswered presence-check inside it must
+  // not churn the hold. Once the debt lapses the verdict is the same
+  // as a dead channel's: the commit cannot arrive any more, so the
+  // ZT reissue is the designed continuation.
+  if (last_probe_ms_ != 0 &&
+      now - last_live_strike_ >= kLiveStrikeSpacingMs &&
+      (!cutover_intent_ || intent_debt_lapsed)) {
+    // The previous probe went unanswered for a full interval: the
+    // authority path is gone although the radio looks fine.
+    last_live_strike_ = now;
+    if (refresh_strikes_ < kRefreshStrikesMax) {
+      ++refresh_strikes_;
+      last_strike_ms_ = now;
+    }
+    if (refresh_strikes_ >= kRefreshStrikesMax) {
+      last_probe_ms_ = now;
+      start_refresh(now);
+      return;
+    }
+  }
+  // Present-check (existing Pull reason, existing bucket): a live
+  // member's Update answers it; a revoked binding stays silent.
+  AuthorityInput probe{};
+  probe.kind = AuthorityInputKind::RequestPull;
+  probe.pull.reason = PullReason::UnknownNewerEpoch;
+  (void)small().authority.advance(probe, now);
+  last_probe_ms_ = now;
+}
+
 void SecurityCoordinator::drive_authority(const MonotonicMs now) noexcept {
   if (mode_ != CoordinatorMode::Member) return;
   // The GK tick first: a promote the provider armed completes before the
@@ -2496,6 +2683,11 @@ void SecurityCoordinator::drive_authority(const MonotonicMs now) noexcept {
   GroupKeyState::Input tick{};
   tick.op = GroupKeyState::Op::Tick;
   (void)group_keys_.advance(tick, now);
+  // The quiet probe runs before the channel Tick: at the idle
+  // boundary the probe Pull (not a silent retire) wins the tick, and
+  // the Tick below flushes it. The probe may refresh into ZeroTouch.
+  probe_quiet_authority(now);
+  if (mode_ != CoordinatorMode::Member) return;
   AuthorityInput poll{};
   poll.kind = AuthorityInputKind::Tick;
   (void)small().authority.advance(poll, now);
@@ -2519,9 +2711,14 @@ void SecurityCoordinator::drive_authority(const MonotonicMs now) noexcept {
 
 void SecurityCoordinator::on_event(const AuthorityEvent& event) noexcept {
   // Channel context: count, never drive (no advance from the callback).
+  // (The strike resets below write one counter — still no advance.)
   switch (event.kind) {
     case AuthorityEvent::Kind::ChannelReady:
       sat_inc(counters_.authority_ready);
+      // 04 §3.5 converge reset: a member whose host road answers is
+      // moving with the site — overlap strikes from its rotation wait
+      // die here instead of accumulating into a refresh.
+      refresh_strikes_ = 0;
       break;
     case AuthorityEvent::Kind::ChannelLost:
       sat_inc(counters_.authority_lost);
@@ -2533,9 +2730,11 @@ void SecurityCoordinator::on_event(const AuthorityEvent& event) noexcept {
       break;
     case AuthorityEvent::Kind::UpdateReceived:
       sat_inc(counters_.authority_updates);
+      refresh_strikes_ = 0;  // 04 §3.5 converge reset (same as Ready)
       break;
     case AuthorityEvent::Kind::ActivateReceived:
       sat_inc(counters_.authority_activates);
+      refresh_strikes_ = 0;  // 04 §3.5 converge reset (same as Ready)
       break;
     case AuthorityEvent::Kind::Passthrough:
       sat_inc(counters_.authority_passthrough);
@@ -2547,12 +2746,19 @@ void SecurityCoordinator::on_event(const AuthorityEvent& event) noexcept {
   }
 }
 
-// --- Stale-GK refresh (P5 §7.4) -------------------------------------------------------------------
+// --- Stale-GK refresh (P5 §7.4, 04 §3.5) ---------------------------------------------------------------
 // A member whose GK fell behind cannot pass Member discovery at all: the
-// neighbors silently drop its DISCOVERs. Evidence accrues only while no
+// neighbors silently drop its DISCOVERs. Evidence accrues while no
 // usable link exists — a lone node with quiet neighbors never refreshes
-// on linklessness alone. Three strikes (failed re-establishes and
-// discovery rounds that observed unknown generations) tear the member
+// on linklessness alone — or, with live old-group links, from the same
+// unknown-AHEAD-generation rounds (04 §3.5: the site left the member
+// behind although the old group still hears itself). The channel state
+// is never evidence — an idle-retired channel is quiet, not
+// unreachable. Three strikes (failed re-establishes and discovery
+// rounds that observed unknown AHEAD generations — a lagging neighbor
+// proves nothing about our own staleness, so only newer observations
+// strike; the live road spaces them so one rotation overlap cannot
+// refresh alone, and applying updates clears them) tear the member
 // engine down around the retained RLS1 and re-verify the same site over
 // the ZT lane; ordinary DATA admission has no engine to admit through
 // while the refresh runs. A refresh that cannot re-verify abandons back
@@ -2560,18 +2766,33 @@ void SecurityCoordinator::on_event(const AuthorityEvent& event) noexcept {
 
 void SecurityCoordinator::note_link_established() noexcept { refresh_strikes_ = 0; }
 
-void SecurityCoordinator::note_link_failed() noexcept {
+void SecurityCoordinator::note_link_failed(const MonotonicMs now) noexcept {
   if (mode_ != CoordinatorMode::Member || !discovery_started_) return;
+  if (cutover_intent_) return;  // Prepared/Switching: the site owes a COMMIT
   if (bank_.live_count(SecurityScope::Link) != 0) return;  // per-peer flake
-  if (refresh_strikes_ < kRefreshStrikesMax) ++refresh_strikes_;
+  if (refresh_strikes_ < kRefreshStrikesMax) {
+    ++refresh_strikes_;
+    last_strike_ms_ = now;
+  }
 }
 
 void SecurityCoordinator::watch_linkless(const MonotonicMs now) noexcept {
   if (mode_ != CoordinatorMode::Member || !discovery_started_) return;
-  if (bank_.live_count(SecurityScope::Link) != 0) {
+  const bool linkless = bank_.live_count(SecurityScope::Link) == 0;
+  // 04 §3.5: an old-group link must not veto recovery for a member
+  // the site left behind (revoked, cutover-straggler). The live road
+  // counts the same unknown-AHEAD-generation evidence as the linkless
+  // road — never the channel state: an idle-retired channel is quiet,
+  // not unreachable, and striking on it would refresh every healthy
+  // but quiet member. Soundness comes from spacing (one strike per
+  // window — a rotation overlap yields one at most) plus the
+  // converge resets in on_event (a member applying updates clears
+  // its strikes). Switching/Removing/Holdoff retire their links, so
+  // they stay on the linkless road (and removal stops this poll).
+  if (!linkless && !authority_wanted_) {
     refresh_strikes_ = 0;
     if (deps_.discovery != nullptr) {
-      last_unknown_generation_ = deps_.discovery->scope_stats().unknown_generation;
+      last_unknown_newer_generation_ = deps_.discovery->scope_stats().unknown_newer_generation;
     }
     return;
   }
@@ -2582,14 +2803,33 @@ void SecurityCoordinator::watch_linkless(const MonotonicMs now) noexcept {
     return;
   }
   if (deps_.discovery == nullptr) return;
-  const std::uint32_t unknown = deps_.discovery->scope_stats().unknown_generation;
-  if (unknown != last_unknown_generation_) {
-    // Fresh unknown-generation observations while linkless: one strike
-    // per poll at most (a flood still counts once).
-    last_unknown_generation_ = unknown;
-    if (refresh_strikes_ < kRefreshStrikesMax) ++refresh_strikes_;
-    if (refresh_strikes_ >= kRefreshStrikesMax) start_refresh(now);
+  // The site gateway mints every generation the scope can ever carry: a
+  // "newer" observation is foreign evidence, never its own staleness —
+  // mid-cutover it is the members' post-commit traffic reaching a
+  // still-Prepared authority, exactly what the tree order produces.
+  if (member().gateway_active) return;
+  const std::uint32_t unknown = deps_.discovery->scope_stats().unknown_newer_generation;
+  if (unknown == last_unknown_newer_generation_) return;
+  // Fresh unknown-AHEAD-generation observations: one strike per poll
+  // at most linkless (a flood still counts once), one per spacing
+  // window with live links. Lagging neighbors (a cutover
+  // mid-adoption) never strike.
+  last_unknown_newer_generation_ = unknown;
+  // An intent-holding member (Prepared/Switching) only ever sees a
+  // newer generation once the site actually moved on — the signal a
+  // straggler strikes on — but a fresh adopter's announce burst can
+  // reach it while its own COMMIT is still in tree-order transit, so
+  // the same anti-overlap spacing applies. A linkless member has no
+  // such ambiguity: every observation strikes immediately.
+  if (!linkless && now - last_live_strike_ < kLiveStrikeSpacingMs) {
+    return;
   }
+  if (!linkless) last_live_strike_ = now;
+  if (refresh_strikes_ < kRefreshStrikesMax) {
+    ++refresh_strikes_;
+    last_strike_ms_ = now;
+  }
+  if (refresh_strikes_ >= kRefreshStrikesMax) start_refresh(now);
 }
 
 void SecurityCoordinator::start_refresh(const MonotonicMs now) noexcept {
@@ -2598,6 +2838,19 @@ void SecurityCoordinator::start_refresh(const MonotonicMs now) noexcept {
     refresh_strikes_ = 0;  // cooling down: the evidence waits
     return;
   }
+  // Desynchronize the herd: every member that lost the road together
+  // reaches this line together, and a simultaneous start starves every
+  // verify for the whole abandon window. `last_strike_ms_` only moves
+  // on real increments, so the due is a fixed point once the counter
+  // fills — and a cleared counter re-arms it on the next incident.
+  const std::uint64_t slot =
+      member().gateway_active ? std::uint64_t{kRefreshSpreadSlots} - 1
+                              : adopted_.node % (kRefreshSpreadSlots - 1);
+  const MonotonicMs spread = static_cast<MonotonicMs>(slot) * kRefreshSpreadStepMs;
+  const MonotonicMs due = last_strike_ms_ > kJoinNoDeadline - spread
+                              ? kJoinNoDeadline
+                              : last_strike_ms_ + spread;
+  if (now < due) return;
   // The channel suspends (its DAMS copy wipes); the GK state stays live
   // so counters and replay windows survive the engine swap. RLS1 is
   // retained untouched — the refresh only re-verifies it.
@@ -2680,7 +2933,14 @@ Status SecurityCoordinator::adopt_boot_rls1(const MonotonicMs now,
     to_recovery(JoinRecoveryReason::MembershipInvalid);
     return Status::success();
   }
-  return install_member_config(site, identity, site.boot_witness, now, rs_epoch_to_fetch);
+  // The live boot session is this boot's rlboot witness, not the record's
+  // stored one: the record predates the boot (reconcile only advances
+  // rlboot past it), while the mesh lease, the group state, the relay
+  // incarnations and the authority binding all name the running boot.
+  // Adopting the stale record witness would split the wire identity on
+  // every same-boot reissue (D04 R2: the started node could not adopt
+  // the fresh sessions and the refresh wedged in Recovery/RadioFailure).
+  return install_member_config(site, identity, boot_witness_, now, rs_epoch_to_fetch);
 }
 
 Status SecurityCoordinator::install_member_config(const SiteRecord& site,
@@ -3008,13 +3268,13 @@ void SecurityCoordinator::on_joiner_action(const JoinAction& action, const Monot
   switch (action.kind) {
     case JoinActionKind::ChangeChannel: {
       // Retune order for the firmware; the completion comes back as
-      // ChannelReady with the same token. The token never rests at 0.
-      ++tune_token_;
-      if (tune_token_ == 0) ++tune_token_;
-      tune_outstanding_ = tune_token_;
+      // ChannelReady with the same token. The joiner owns the token
+      // namespace: its counter never rests at 0 and resets with each
+      // Joiner instance, so the action token is echoed back verbatim.
+      tune_outstanding_ = action.channel_token;
       CoordinatorAction tune{};
       tune.kind = CoordinatorActionKind::TuneChannel;
-      tune.tune.token = tune_token_;
+      tune.tune.token = action.channel_token;
       tune.tune.channel = action.channel;
       tune.tune.phy = action.phy;
       emit_action(tune);

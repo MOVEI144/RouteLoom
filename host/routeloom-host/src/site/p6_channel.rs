@@ -129,6 +129,9 @@ pub struct P6ChannelHub {
     current_network: u64,
     grace_until_mono_ms: u64,
     last_mono_ms: u64,
+    /// Latest active GK epoch from `refresh` (Wake hint body only; the
+    /// seal path reads epochs from the channel table instead).
+    gk_epoch: u32,
 }
 
 impl P6ChannelHub {
@@ -160,6 +163,7 @@ impl P6ChannelHub {
             current_network: network,
             grace_until_mono_ms: 0,
             last_mono_ms: 0,
+            gk_epoch: 0,
         }
     }
 
@@ -222,6 +226,7 @@ impl P6ChannelHub {
         }
         self.last_mono_ms = mono_ms;
         self.current_network = current_network;
+        self.gk_epoch = gk_epoch;
         self.channels
             .lock()
             .expect("authority channel poisoned")
@@ -346,6 +351,14 @@ impl P6ChannelHub {
     /// Feeds one inbound carrier (USB 0x64 / mesh, reassembled by the
     /// P5 PR4 mapping) into the table.
     pub fn push_carrier(&mut self, device: u64, kind: CarrierKind, bytes: &[u8], mono_ms: u64) {
+        // A regressed clock ends all old-binding grace immediately. Do not
+        // process the carrier or lower the timestamp: the next refresh must
+        // flip to the committed network rather than reopen an old context.
+        if mono_ms < self.last_mono_ms {
+            self.grace_until_mono_ms = 0;
+            self.retained.clear();
+            return;
+        }
         // A removed member may finish the notice exchange on its existing
         // context, but cannot create a new one during the retention window.
         if (kind == CarrierKind::R3 && !self.live.contains_key(&device))
@@ -383,19 +396,29 @@ impl P6ChannelHub {
             | ChannelEvent::Passthrough { device, .. } => *device,
         };
         if !self.live.contains_key(&device) {
+            let retained = self.lookup(device, self.last_mono_ms);
             if let ChannelEvent::Passthrough {
                 env_type: 5, body, ..
             } = &event
             {
-                if body.len() >= BODY_HEAD
+                let notice = body.len() >= BODY_HEAD
                     && matches!(
                         decode_type5(&body[BODY_HEAD..]),
                         Some(P6Type5::NoticeAccepted { .. })
-                    )
-                {
-                    // The common receipt parser below still checks the
-                    // retained binding and authenticated generation.
-                } else {
+                    );
+                // A gateway may acknowledge COMMIT before the next tick
+                // repopulates live rows. Only its authenticated old binding
+                // may report APPLIED inside the bounded COMMIT grace.
+                let applied = body.len() >= BODY_HEAD
+                    && self.grace_active(self.last_mono_ms)
+                    && retained
+                        .as_ref()
+                        .is_some_and(|binding| binding.network == self.network())
+                    && matches!(
+                        decode_type5(&body[BODY_HEAD..]),
+                        Some(P6Type5::Applied { .. })
+                    );
+                if !notice && !applied {
                     return;
                 }
             } else {
@@ -544,7 +567,8 @@ impl P6ChannelHub {
             grace_until_mono_ms: self.grace_until_mono_ms,
             now: mono_ms,
         };
-        self.channels
+        let out = self
+            .channels
             .lock()
             .expect("authority channel poisoned")
             .send_typed(
@@ -554,8 +578,8 @@ impl P6ChannelHub {
                 binding.generation,
                 tail,
                 mono_ms,
-            )
-            .is_ok()
+            );
+        out.is_ok()
     }
 
     /// True when a notice to `node` on `network` could still seal: a
@@ -571,6 +595,23 @@ impl P6ChannelHub {
         }
         self.lookup(node, mono_ms)
             .is_some_and(|binding| binding.network == network)
+    }
+
+    /// Retires a removed member's retained binding once its
+    /// NoticeAccepted verified: the notice exchange is over, so the
+    /// binding must not seal or verify anything further. A live row
+    /// (re-added meanwhile) keeps its channel.
+    pub fn retire_retained(&mut self, node: u64) {
+        if self.live.contains_key(&node) {
+            self.retained.remove(&node);
+            return;
+        }
+        if self.retained.remove(&node).is_some() {
+            self.channels
+                .lock()
+                .expect("authority channel poisoned")
+                .retire_device(node);
+        }
     }
 
     /// Seals an RRS1 object for a live member of the current network.
@@ -631,6 +672,34 @@ impl P6ChannelHub {
     pub fn send_grant(&mut self, node: u64, network: u64, plaintext: &[u8], mono_ms: u64) -> bool {
         let live_only = network == self.current_network;
         self.send_on(node, 7, network, plaintext, live_only, mono_ms)
+    }
+
+    /// Queues a Wake hint so a dormant device re-opens its channel for
+    /// a grant. The 600 s prepare window outlasts the 10-minute idle
+    /// retire on both ends, so a COMMIT target is usually dormant —
+    /// and a half-dormant one (authority channel live, device
+    /// retired) would only reject the sealed envelope. The hint needs
+    /// no channel, is fenced on the same directory the seal uses
+    /// (retained bindings serve it during the COMMIT grace), and a
+    /// Ready device ignores it; the distributor's refusal backoff
+    /// paces repeats.
+    pub fn send_wake(&mut self, device: u64, mono_ms: u64) -> bool {
+        let directory = HubDirectory {
+            live: &self.live,
+            retained: &self.retained,
+            grace_until_mono_ms: self.grace_until_mono_ms,
+            now: mono_ms,
+        };
+        self.channels
+            .lock()
+            .expect("authority channel poisoned")
+            .queue_wake(
+                &directory,
+                device,
+                (self.current_network >> 32) as u32,
+                self.gk_epoch,
+            )
+            .is_ok()
     }
 }
 
@@ -750,6 +819,10 @@ impl RevocationTransport for P6ChannelTransport {
             .send_grant(node, network, plaintext, self.mono_ms)
     }
 
+    fn send_wake(&mut self, node: u64) -> bool {
+        self.lock().send_wake(node, self.mono_ms)
+    }
+
     fn carries_notice(&self) -> bool {
         true
     }
@@ -806,5 +879,9 @@ impl RevocationTransport for P6ChannelTransport {
 
     fn notice_sealable(&self, node: u64, network: u64, mono_ms: u64) -> bool {
         self.lock().notice_sealable(node, network, mono_ms)
+    }
+
+    fn retire_notice_binding(&mut self, node: u64) {
+        self.lock().retire_retained(node);
     }
 }

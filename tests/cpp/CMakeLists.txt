@@ -564,6 +564,31 @@ target_include_directories(routeloom_sdkv1_dev_route_tests PRIVATE
 target_compile_options(routeloom_sdkv1_dev_route_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_dev_route_tests COMMAND routeloom_sdkv1_dev_route_tests)
 
+# Multi-node mesh peer (D04, issue #168): one real Owner + runtime + USB
+# node per process, driven by the Rust test
+# (host/routeloom-host/src/site/owner_mesh_interop.rs), never by ctest.
+add_executable(routeloom_owner_mesh_peer owner_mesh_peer.cpp
+    espnow_idf_stubs/idf_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_security_owner.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1_entropy.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_board_config.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_sdkv1_store.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_boot_session.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_legacy_purge.cpp)
+target_link_libraries(routeloom_owner_mesh_peer PRIVATE routeloom_core)
+target_include_directories(routeloom_owner_mesh_peer PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/espnow_idf_stubs
+    ${CMAKE_CURRENT_SOURCE_DIR}/esp_idf_stub
+    ${CMAKE_CURRENT_SOURCE_DIR}/stubs/maintenance
+    ${ROUTELOOM_UECC_DIR}
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include)
+target_compile_options(routeloom_owner_mesh_peer PRIVATE
+    -Wall -Wextra -Wpedantic -Werror -Wno-unused-variable -Wno-unused-parameter
+    -Wno-unused-function -Wno-unused-private-field)
+
 # Live E2E peer (design P3-4 §10.2): driven by the Rust Site Authority
 # test (host/routeloom-host/src/site/joiner_interop.rs), never by ctest.
 add_executable(routeloom_joiner_interop_peer joiner_interop_peer.cpp)

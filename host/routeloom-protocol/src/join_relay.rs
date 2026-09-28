@@ -77,6 +77,8 @@ pub const HOPS_MAX: u8 = 254;
 /// BootstrapAuth phases a relay object can carry.
 pub const PHASE_EDHOC: u8 = 4;
 pub const PHASE_RESUME: u8 = 5;
+/// The out-of-band RRS1 down on a live EDHOC exchange (02 §5.3 phase 7).
+pub const PHASE_RRS_DELIVERY: u8 = 7;
 /// EDHOC error message step.
 pub const EDHOC_ERROR_STEP: u8 = 5;
 
@@ -226,6 +228,7 @@ fn step_valid(phase: u8, step: u8) -> bool {
     match phase {
         PHASE_EDHOC => (1..=EDHOC_ERROR_STEP).contains(&step),
         PHASE_RESUME => (1..=3).contains(&step),
+        PHASE_RRS_DELIVERY => step == 1,
         _ => false,
     }
 }
@@ -263,13 +266,18 @@ impl RelayObject {
         if (up && h.joiner_rssi_dbm > 0) || (!up && h.joiner_rssi_dbm != 0) {
             return invalid("relay rssi");
         }
+        // The out-of-band RRS1 object (02 §5.3 phase 7) rides the live
+        // EDHOC exchange between m3 and m4: down only, never terminal.
+        if h.phase == PHASE_RRS_DELIVERY && (up || h.step != 1 || h.state != RelayState::Continue) {
+            return invalid("relay rrs stage");
+        }
         let edhoc = h.phase == PHASE_EDHOC;
         match h.state {
             RelayState::Continue => {
                 if up && !step_may_go_up(h.phase, h.step) {
                     return invalid("relay up step");
                 }
-                if !up && h.step != 2 {
+                if !up && h.step != 2 && h.phase != PHASE_RRS_DELIVERY {
                     return invalid("relay down step");
                 }
             }
@@ -359,7 +367,7 @@ impl RelayObject {
             other => return Err(HostOpsError::UnknownEnum("relay state", other)),
         };
         let phase = bytes[23];
-        if phase != PHASE_EDHOC && phase != PHASE_RESUME {
+        if phase != PHASE_EDHOC && phase != PHASE_RESUME && phase != PHASE_RRS_DELIVERY {
             return Err(HostOpsError::UnknownEnum("relay phase", phase));
         }
         let header = RelayHeader {

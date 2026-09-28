@@ -1306,14 +1306,25 @@ class PeerWorld {
     dev.now_ms = now_;
     dev.identity_storage.now_ms = now_;
     dev.site_storage.now_ms = now_;
-    // Queued host traffic first: the gateway is idle here, never inside
-    // a sink callback, so host_down/host_abort cannot report Busy.
-    while (!downs_.empty()) {
+    // A phase-7 transfer holds the gateway's down lane until its proxy
+    // receipt. Keep the following m4 at the host and retry next round.
+    const std::size_t downs_due = downs_.size();
+    for (std::size_t i = 0; i < downs_due; ++i) {
       const QueuedDown down = downs_.front();
       downs_.pop_front();
       if (down.site >= sites_.size()) fatal("down for an unknown site");
       const Status status = sites_[down.site]->apply_down(down.to_proxy, down.object, now_);
-      if (!status.ok()) fatal("gateway host_down rejected a down object");
+      RelayObject decoded{};
+      if (status.code == StatusCode::NoCapacity &&
+          relay_object_decode(view(down.object), decoded).ok() &&
+          decoded.header.phase == JoinAuthPhase::EdhocMessage &&
+          decoded.header.step == 4 && decoded.header.state == RelayState::Final) {
+        downs_.push_back(down);
+        continue;
+      }
+      if (!status.ok()) {
+        fatal("gateway host_down rejected a down object");
+      }
     }
     while (!aborts_.empty()) {
       const QueuedAbort abort = aborts_.front();

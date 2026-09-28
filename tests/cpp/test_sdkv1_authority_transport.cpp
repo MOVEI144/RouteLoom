@@ -684,6 +684,54 @@ void test_gateway_down_path() {
   CHECK(!gateway.authority_down(kDevice, fragment, complete, 3000));
 }
 
+// Revocation enforcement cancels a revoked peer's down transfers
+// instead of waiting for them: only that peer's slots drop, other
+// devices and up slots are untouched.
+void test_gateway_cancel_down_to_revoked_peer() {
+  RecordingPort port;
+  RecordingHostSink host;
+  RecordingLocalSink local;
+  AuthorityGateway gateway(port, host, local, kGateway);
+  CHECK(gateway.quiescent());
+  const auto envelope = pattern(200);
+  usb::AuthorityFragment fragment{};
+  fragment.device = kDevice;
+  fragment.transfer_id = 42;
+  fragment.kind = AuthorityCarrierKind::Envelope;
+  fragment.total = envelope.size();
+  fragment.data = ByteView{envelope.data(), envelope.size()};
+  bool complete = false;
+  CHECK(gateway.authority_down(kDevice, fragment, complete, 1000));
+  CHECK(complete);
+  CHECK(!gateway.quiescent());
+  gateway.poll(1000);  // manifest + first chunk go out; transfer still live
+  CHECK(!gateway.quiescent());
+  const std::size_t sends_before = port.queue.size();
+  CHECK(sends_before > 0);
+  // Invalid ids are a no-op: the live transfer survives.
+  gateway.cancel_down_to(kInvalidNodeId);
+  gateway.cancel_down_to(kBroadcastNodeId);
+  gateway.cancel_down_to(kGateway);
+  CHECK(!gateway.quiescent());
+  // Cancelling the revoked peer drops its slot: no further mesh
+  // sends for it, and the gateway goes quiescent.
+  gateway.cancel_down_to(kDevice);
+  CHECK(gateway.quiescent());
+  gateway.poll(2000);
+  CHECK(port.queue.size() == sends_before);
+  // A late ack for the cancelled transfer is ignored, not resurrected.
+  autonomy::ControlObjectPayload manifest{};
+  CHECK(autonomy::control_object_decode(
+      ByteView{port.queue[0].payload.data(), port.queue[0].payload.size()},
+      manifest));
+  autonomy::ObjectAckPayload ack{};
+  ack.object_hash = manifest.object_hash;
+  ack.status = autonomy::ObjectAckStatus::Ok;
+  ack.received_len = static_cast<std::uint16_t>(envelope.size());
+  gateway.on_ack(kDevice, ack, 2500);
+  CHECK(gateway.quiescent());
+}
+
 void test_gateway_last_chunk_ack_window() {
   RecordingPort port;
   RecordingHostSink host;
@@ -934,6 +982,7 @@ int main() {
   test_small_carrier_does_not_claim_old_object_hash();
   test_gateway_up_path();
   test_gateway_down_path();
+  test_gateway_cancel_down_to_revoked_peer();
   test_gateway_last_chunk_ack_window();
   test_gateway_self_down();
   test_gateway_slot_exhaustion();

@@ -224,6 +224,10 @@ class RouteTable {
   void evaluate(MonotonicMs now_ms) noexcept;
 
   RouteSelection best(NodeId destination) const noexcept;
+  // Cutover RouteState (04 §7): the lease expiry of the current
+  // selection toward `destination` (0 = no selection). Read-only:
+  // selection, feasibility and leases never read it.
+  MonotonicMs selection_expires_at(NodeId destination) const noexcept;
   // Remaining lease of the CURRENTLY selected candidate for `destination`
   // (now_ms on the device monotonic clock; saturates at UINT32_MAX). Pure
   // read: selection, leases and advertisement baselines are untouched.

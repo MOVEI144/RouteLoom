@@ -4,6 +4,7 @@
 
 #include "routeloom/sdkv1_revocation.hpp"
 
+#include <cstdio>
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
@@ -90,6 +91,10 @@ namespace {
 constexpr std::uint8_t kSubApplied = 1;
 constexpr std::uint8_t kSubGet = 2;
 constexpr std::uint8_t kSubNoticeAccepted = 3;
+// COMMIT_STORED drain budget: one authority transfer window (the same
+// 15 s as kAuthorityTransferTimeoutMs), then the switch rolls forward
+// with or without the receipt's terminal result.
+constexpr MonotonicMs kSwitchReceiptDrainMs = 15000;
 
 Status head_read(ByteReader& reader, const std::uint8_t sub) noexcept {
   std::uint8_t ver = 0, got = 0;
@@ -797,6 +802,15 @@ Status MembershipLifecycle::adopt_and_enter(const MonotonicMs now_ms) noexcept {
     notify(LifecycleEventKind::SelfRevoked, config_.self, adopted_.rs_epoch, 0, now_ms);
     return Status::success();
   }
+  // Report the applied set: a ZeroTouch reissue stores it out-of-band
+  // (Joiner::store_staged_rrs) with no apply pass of its own, so the
+  // authority never learns this binding's RRS state otherwise.
+  stored_object_.clear();
+  if (revocations_.load_object(stored_object_)) {
+    autonomy::ObjectHash hash{};
+    hash_object(stored_object_.view(), hash);
+    queue_applied_ack(adopted_.rs_epoch, hash, now_ms);
+  }
   phase_ = LifecyclePhase::Active;
   return Status::success();
 }
@@ -1419,14 +1433,29 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
       if (record.mode == LifecycleMode::Prepared) {
         SiteRecord staged{};
         if (adopt_stores() != LifecycleBlockReason::None ||
-            !staged_site(record, staged) || !site_.has_site() ||
-            site_.site().network != record.old_network ||
-            site_.site().assignment_generation != record.generation) {
+            !staged_site(record, staged) || !site_.has_site()) {
+          enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+          return Status::success();
+        }
+        const bool live_old = site_.site().network == record.old_network &&
+                              site_.site().assignment_generation == record.generation;
+        if (!live_old && !adopted_prepared_target(staged)) {
+          // The site matches neither the old network nor the prepared
+          // target: an unrelated site under a stale stage stays
+          // blocked, never silently adopted.
           enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
           return Status::success();
         }
         const Status status = adopt_and_enter(now_ms);
-        if (phase_ == LifecyclePhase::Active) phase_ = LifecyclePhase::Prepared;
+        if (live_old) {
+          if (phase_ == LifecyclePhase::Active) phase_ = LifecyclePhase::Prepared;
+        } else if (!journal_->cut_prepared()) {
+          // The rebooted ZT reissue (04 §7): the site already adopted
+          // the prepared target itself before the reboot. Cut the
+          // stage and run as the adopted member — the same
+          // reconciliation MemberReady runs live.
+          enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+        }
         return status;
       }
       if (record.mode == LifecycleMode::Removing || record.mode == LifecycleMode::Holdoff) {
@@ -1571,13 +1600,26 @@ Status MembershipLifecycle::on_member_ready(const LifecycleMemberReady& ready,
     const bool was_prepared = phase_ == LifecyclePhase::Prepared;
     phase_ = LifecyclePhase::BootGate;
     const Status status = adopt_and_enter(now_ms);
-    if (was_prepared && phase_ == LifecyclePhase::Active) {
+    if (was_prepared) {
       SiteRecord staged{};
-      if (!journal_ || !staged_site(journal_->record(), staged) ||
-          !site_.has_site() || site_.site().network != journal_->record().old_network ||
-          site_.site().assignment_generation != journal_->record().generation)
-        enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
-      else phase_ = LifecyclePhase::Prepared;
+      const bool have_stage =
+          journal_ && staged_site(journal_->record(), staged) && site_.has_site();
+      const bool live_old =
+          have_stage && site_.site().network == journal_->record().old_network &&
+          site_.site().assignment_generation == journal_->record().generation;
+      if (have_stage && !live_old && adopted_prepared_target(staged)) {
+        // The ZT reissue adopted the cutover target itself (04 §7):
+        // the COMMIT path is over. Cut the stage (NVS, stage only —
+        // the adopted network settings stay); whatever phase the
+        // adoption landed keeps running, RRS fetch included.
+        if (!journal_->cut_prepared())
+          enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+      } else if (phase_ == LifecyclePhase::Active) {
+        if (!have_stage || !live_old)
+          enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+        else
+          phase_ = LifecyclePhase::Prepared;
+      }
     }
     return status;
   }
@@ -1994,7 +2036,9 @@ Status MembershipLifecycle::removal_poll(MonotonicMs now_ms) noexcept {
 bool MembershipLifecycle::staged_site(const LifecycleRecord& record, SiteRecord& out) noexcept {
   if (record.mode != LifecycleMode::Prepared && record.mode != LifecycleMode::Switching) return false;
   if (!identity_.has_identity() || identity_.quarantined() || identity_.uncertain() ||
-      record.self != config_.self || record.generation == 0) return false;
+      record.self != config_.self || record.generation == 0) {
+    return false;
+  }
   const auto* p = record.payload.bytes.data();
   const std::size_t size = (static_cast<std::size_t>(p[0]) << 8U) | p[1];
   const std::size_t offset = record.mode == LifecycleMode::Prepared ? 2 : 6;
@@ -2004,16 +2048,31 @@ bool MembershipLifecycle::staged_site(const LifecycleRecord& record, SiteRecord&
       out.site_id != record.site_id || out.network != record.new_network ||
       out.assignment_generation != record.generation ||
       out.rs_epoch_floor < record.rs_floor || out.gk_epoch_current != record.gk_floor ||
-      out.boot_witness != record.boot_witness || out.gk_epoch_next != 0) return false;
+      out.boot_witness != record.boot_witness || out.gk_epoch_next != 0) {
+    return false;
+  }
   CertClaims next{};
   bool verified = false;
   if (!identity_verify_site_cert(identity_.identity(), out.site_cert.view(), next,
                                  verified, verifier_) || !verified ||
       (sak_valid_ && next.pubkey != sak_) ||
       next.site_epoch != static_cast<std::uint32_t>(record.new_network >> 32U) ||
-      !join_membership_verify(out, identity_.identity(), verified, verifier_) || !verified)
+      !join_membership_verify(out, identity_.identity(), verified, verifier_) || !verified) {
     return false;
+  }
   return true;
+}
+
+bool MembershipLifecycle::adopted_prepared_target(const SiteRecord& staged) const noexcept {
+  if (!journal_ || !journal_->has_record() || !site_.has_site()) return false;
+  if (journal_->record().mode != LifecycleMode::Prepared) return false;
+  // `staged` is this record's verified target (staged_site checked the
+  // certs, the SAK, the epoch against the new network high bits, and
+  // the membership): the adoption matches it when site, network
+  // (epoch included) and binding all agree.
+  const SiteRecord& adopted = site_.site();
+  return adopted.site_id == staged.site_id && adopted.network == staged.network &&
+         adopted.assignment_generation == staged.assignment_generation;
 }
 
 bool MembershipLifecycle::switching_proof(const LifecycleRecord& record, SiteRecord& out,
@@ -2127,18 +2186,21 @@ Status MembershipLifecycle::renew_prepare(ByteView body) noexcept {
   return Status::success();
 }
 
-void MembershipLifecycle::send_renew_receipt(GrantRenewPhase phase, ByteView digest) noexcept {
+bool MembershipLifecycle::send_renew_receipt(GrantRenewPhase phase, ByteView digest) noexcept {
   const LifecycleRecord& record = journal_->record();
   GrantReceipt receipt{};
   receipt.head = {phase, record.cutover_id, record.revision, record.old_network};
   receipt.new_network = record.new_network;
   receipt.gk_epoch = record.gk_floor;
-  receipt.rs_epoch = phase == GrantRenewPhase::Applied ? record.rs_floor : 0;
+  receipt.rs_epoch = (phase == GrantRenewPhase::Applied ||
+                      phase == GrantRenewPhase::CommitStored)
+                         ? record.rs_floor
+                         : 0;
   if (digest.size == receipt.digest.size())
     std::memcpy(receipt.digest.data(), digest.data, digest.size);
   std::array<std::uint8_t, kGrantReceiptSize> bytes{};
-  if (grant_receipt_encode(receipt, bytes))
-    (void)ports_.authority.authority_send(7, ByteView{bytes.data(), bytes.size()});
+  if (!grant_receipt_encode(receipt, bytes)) return false;
+  return ports_.authority.authority_send(7, ByteView{bytes.data(), bytes.size()}).ok();
 }
 
 Status MembershipLifecycle::on_renew(ByteView body, MonotonicMs now_ms) noexcept {
@@ -2148,16 +2210,45 @@ Status MembershipLifecycle::on_renew(ByteView body, MonotonicMs now_ms) noexcept
   if (head.old_network != adopted_.network) return Status::error(StatusCode::Conflict, "renew old binding");
   if (head.phase == GrantRenewPhase::Prepare) return renew_prepare(body);
   if (head.phase == GrantRenewPhase::Commit) return renew_commit(body, now_ms);
+  if (head.phase == GrantRenewPhase::RouteState) return renew_routestate(body, now_ms);
   return Status::error(StatusCode::ProtocolError, "renew response from authority");
+}
+
+Status MembershipLifecycle::renew_routestate(ByteView body, MonotonicMs now_ms) noexcept {
+  GrantRouteState query{};
+  Status st = grant_route_state_decode(body, query);
+  if (!st) return st;
+  if (query.mode != 0) return Status::error(StatusCode::ProtocolError, "renew routestate report inbound");
+  // The query binds to the live cutover intent: Prepared pre-commit,
+  // or Switching while still on the old network (post-commit
+  // re-queries). Anything else has no route tree to report.
+  if (!journal_ || !journal_->has_record())
+    return Status::error(StatusCode::InvalidState, "renew routestate without intent");
+  const LifecycleRecord& record = journal_->record();
+  if ((record.mode != LifecycleMode::Prepared && record.mode != LifecycleMode::Switching) ||
+      query.head.cutover_id != record.cutover_id || query.head.revision != record.revision ||
+      query.head.old_network != record.old_network)
+    return Status::error(StatusCode::Conflict, "renew routestate binding");
+  GrantRouteState report{};
+  if (!ports_.runtime.route_state_snapshot(query, report, now_ms))
+    return Status::error(StatusCode::InternalError, "renew routestate snapshot");
+  std::array<std::uint8_t, kGrantRouteStateSize> bytes{};
+  st = grant_route_state_encode(report, bytes);
+  if (!st) return st;
+  (void)ports_.authority.authority_send(7, ByteView{bytes.data(), bytes.size()});
+  return Status::success();
 }
 
 Status MembershipLifecycle::renew_commit(ByteView body, MonotonicMs now_ms) noexcept {
   if (phase_ != LifecyclePhase::Prepared || !journal_ || !journal_->has_record() ||
-      journal_->record().mode != LifecycleMode::Prepared)
+      journal_->record().mode != LifecycleMode::Prepared) {
     return Status::error(StatusCode::InvalidState, "renew commit without prepare");
+  }
   GrantCommit commit{};
   Status st = grant_commit_decode(body, commit);
-  if (!st) return st;
+  if (!st) {
+    return st;
+  }
   const LifecycleRecord& prepared = journal_->record();
   if (commit.head.cutover_id != prepared.cutover_id ||
       commit.head.revision != prepared.revision ||
@@ -2165,17 +2256,22 @@ Status MembershipLifecycle::renew_commit(ByteView body, MonotonicMs now_ms) noex
     return Status::error(StatusCode::Conflict, "renew revision");
   }
   SiteRecord next{};
-  if (!staged_site(prepared, next))
+  if (!staged_site(prepared, next)) {
     return Status::error(StatusCode::AuthenticationFailed, "renew staged site");
+  }
   CutoverCommit proof{};
   RevocationSet rrs{};
   bool verified = false;
   st = cutover_commit_verify(commit.proof.view(), sak_, prepared.old_network,
                              proof, verified, verifier_);
-  if (!st || !verified) return Status::error(StatusCode::AuthenticationFailed, "renew proof");
+  if (!st || !verified) {
+    return Status::error(StatusCode::AuthenticationFailed, "renew proof");
+  }
   st = revocation_object_verify(commit.revocations.view(), sak_, prepared.site_id,
                                 prepared.new_network, rrs, verified, verifier_);
-  if (!st || !verified) return Status::error(StatusCode::AuthenticationFailed, "renew rrs");
+  if (!st || !verified) {
+    return Status::error(StatusCode::AuthenticationFailed, "renew rrs");
+  }
   Digest256 hash{};
   sha256(commit.revocations.view(), hash);
   if (proof.site_id != prepared.site_id || proof.new_network != prepared.new_network ||
@@ -2227,8 +2323,18 @@ Status MembershipLifecycle::renew_commit(ByteView body, MonotonicMs now_ms) noex
     enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
     return st;
   }
+  // Durable now: prove the irreversible COMMIT acceptance to the Host
+  // over the still-open old context, then drain that single receipt
+  // before step 0 retires the network (04 §7). The drain is best
+  // effort — the switch rolls forward on its budget either way.
+  Digest256 commit_digest{};
+  sha256(commit.proof.view(), commit_digest);
+  const bool queued = send_renew_receipt(GrantRenewPhase::CommitStored,
+                                         ByteView{commit_digest.data(), commit_digest.size()});
+  switch_drained_ = false;
+  switch_drain_start_ = now_ms;
   switch_step_ = 0;
-  switch_cursor_ = 0;
+  switch_cursor_ = queued ? 1 : 0;
   return Status::success();
 }
 
@@ -2236,9 +2342,14 @@ Status MembershipLifecycle::switch_poll(MonotonicMs now_ms) noexcept {
   if (switch_step_ == 7) {
     if (!journal_ || journal_->record().mode != LifecycleMode::Idle)
       return Status::error(StatusCode::InvalidState, "renew incomplete journal");
+    const bool resumed_without_member = adopted_.network == 0;
     adopted_.site_commit_seq = site_.commit_seq();
     adopted_.network = site_.site().network;
-    emit_action(LifecycleActionTag::AdoptNetwork, LifecycleActionReason::None);
+    // A cold Switching replay had no live member binding to retire;
+    // after this durable roll-forward the Owner must boot the new RLS1.
+    emit_action(LifecycleActionTag::AdoptNetwork,
+                resumed_without_member ? LifecycleActionReason::ResumeSwitch
+                                       : LifecycleActionReason::None);
     switch_step_ = 8;
     return Status::success();
   }
@@ -2289,6 +2400,32 @@ Status MembershipLifecycle::switch_poll(MonotonicMs now_ms) noexcept {
   Status st{};
   switch (switch_step_) {
     case 0:
+      // Drain the COMMIT_STORED receipt over the still-open old
+      // context before retiring it: the terminal transport result
+      // ends the drain, else the budget does (roll-forward either
+      // way — a lost receipt only costs the parent its fast path).
+      if (!switch_drained_) {
+        if (now_ms - switch_drain_start_ >= kSwitchReceiptDrainMs) {
+          switch_drained_ = true;
+        } else {
+          // A RouteState report can still occupy the authority lane
+          // when COMMIT arrives. Retry staging this durable receipt
+          // until its own transfer starts; a busy prior report must
+          // not make the switch mistake "nothing queued" for success.
+          if (switch_cursor_ == 0) {
+            const std::size_t proof_len = (static_cast<std::size_t>(p[4]) << 8U) | p[5];
+            Digest256 digest{};
+            sha256(ByteView{p + 6 + site_len + rrs_len, proof_len}, digest);
+            if (!send_renew_receipt(GrantRenewPhase::CommitStored,
+                                    ByteView{digest.data(), digest.size()}))
+              return Status::success();
+            switch_cursor_ = 1;
+          }
+          if (!ports_.authority.authority_tx_settled()) return Status::success();
+          switch_drained_ = true;
+        }
+      }
+      switch_cursor_ = 0;
       st = ports_.runtime.retire_network();
       if (st.code == StatusCode::WouldBlock) return Status::success();
       break;

@@ -1,6 +1,7 @@
 #include "routeloom/espnow_runtime.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <new>
 

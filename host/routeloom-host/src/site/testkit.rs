@@ -26,7 +26,9 @@ use routeloom_provision::signer::{test_keypair, FileRootSigner, RootSigner};
 
 use super::group_keys::{GroupKeyCommand, GroupKeyTransport};
 use super::store::SiteStore;
-use super::transport::{AbortReason, InProcessTransport, Outbound, RelayKey, RelayUp};
+use super::transport::{
+    AbortReason, DownStatus, InProcessTransport, Outbound, RelayKey, RelayUp, PHASE_RRS_DELIVERY,
+};
 use super::{Events, SiteAuthority, SiteService, SiteSetup};
 
 pub const SITE: u64 = 0x5173_0000_0000_0042;
@@ -183,6 +185,13 @@ impl SimDevice {
                     return Outcome::Aborted(reason)
                 }
                 Outbound::Down(down) if down.key == exchange.key => {
+                    // The site may send its signed RRS1 between m3 and m4;
+                    // this membership test device has no RRS store.
+                    if down.phase == PHASE_RRS_DELIVERY {
+                        assert_eq!(down.step, 1);
+                        assert_eq!(down.status, DownStatus::Continue);
+                        continue;
+                    }
                     if down.step == 5 {
                         return Outcome::EdhocError(down.body);
                     }

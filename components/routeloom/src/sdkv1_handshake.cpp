@@ -812,9 +812,32 @@ void HandshakeEngine::end_edhoc_flight() noexcept {
   }
 }
 
+bool HandshakeEngine::big_tx_parkable() noexcept {
+  if (big_tx_size_ == 0) return true;
+  // find_record_by_token only matches live records (token 0 never does).
+  const CarrierRecord* owner = find_record_by_token(big_tx_owner_);
+  if (owner == nullptr) return true;
+  // The owner's retry (m3/m4) or own parked m1 still sources bytes
+  // from the stash: evicting them would strand the live leg (its
+  // retransmit gate keys on big_tx_owner_) while this m1 waits.
+  switch (owner->state) {
+    case RecordState::EdhocWaitM4:
+    case RecordState::EdhocM4Pending:
+    case RecordState::EdhocM1Parked:
+      return false;
+    default:
+      break;
+  }
+  return true;
+}
+
 void HandshakeEngine::park_m1(CarrierRecord& record, const ByteView message) noexcept {
   if (message.data == nullptr || message.size == 0 || message.size > big_tx_.size()) {
     drop_record(record);  // unreachable: on_message caps at 960
+    return;
+  }
+  if (!big_tx_parkable()) {
+    drop_record(record);  // another exchange's retry bytes live here; the m1 retransmit re-parks
     return;
   }
   if (message.data != big_tx_.data()) {
@@ -998,8 +1021,9 @@ Status HandshakeEngine::responder_cookie_ok(const HandshakeRx& rx) noexcept {
   if (std::memcmp(rx.cookie.data, rx.carrier.cookie.data(), rx.cookie.size) != 0) {
     return Status::error(StatusCode::AuthenticationFailed, "handshake cookie mismatch");
   }
-  return cookie_.verify(rx.src_mac, rx.carrier.requester_nonce, rx.carrier.network, rx.cookie,
-                        last_tick_);
+  const Status ver = cookie_.verify(rx.src_mac, rx.carrier.requester_nonce,
+                                  rx.carrier.network, rx.cookie, last_tick_);
+  return ver;
 }
 
 // --- Requests ---
@@ -1549,7 +1573,9 @@ bool HandshakeEngine::step1_may_proceed(const SecurityScope scope, const NodeId 
     if (!candidate.used || candidate.scope != scope || candidate.peer != peer) continue;
     // Routed step-1 has no cookie: its claimed origin cannot evict an
     // authenticated flight before EDHOC or the resume MAC verifies it.
-    if (scope == SecurityScope::EndToEnd) return false;
+    if (scope == SecurityScope::EndToEnd) {
+      return false;
+    }
     if (candidate.state == RecordState::EdhocM4Pending ||
         candidate.state == RecordState::EdhocM4Sent ||
         candidate.state == RecordState::ResumeR3Confirm) {
@@ -1562,8 +1588,12 @@ bool HandshakeEngine::step1_may_proceed(const SecurityScope scope, const NodeId 
     if (candidate.role == HandshakeRole::Responder) return false;  // ours owns this peer
     // Simultaneous open, any protocol: the smaller NodeId stays
     // initiator (P4 §5.5). Larger yields silently and answers as
-    // responder — no livelock, no failure.
-    if (local_.self < peer) return false;  // we proceed; drop theirs
+    // responder — no livelock, no failure. A queued initiator has not
+    // emitted anything: the peer's live flight wins by arrival or an
+    // idle request walls off a real exchange for its whole timeout.
+    if (candidate.state != RecordState::EdhocQueued && local_.self < peer) {
+      return false;  // we proceed; drop theirs
+    }
     drop_record(candidate);
     return true;
   }
@@ -1710,8 +1740,10 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
     if (record != nullptr && record->state == RecordState::EdhocM1Parked) {
       // Still waiting for the flight/budget: refresh a clobbered stash
       // from the retransmit, else the first parking stands. First bytes
-      // win — a differing m1 while parked is dropped, not displaced.
-      if (big_tx_owner_ != record->token && message.size <= big_tx_.size()) {
+      // win — a differing m1 while parked is dropped, not displaced —
+      // and a live exchange's retry bytes are never evicted for it.
+      if (big_tx_owner_ != record->token && message.size <= big_tx_.size() &&
+          big_tx_parkable()) {
         std::memcpy(big_tx_.data(), message.data, message.size);
         big_tx_size_ = message.size;
         big_tx_owner_ = record->token;
@@ -1733,14 +1765,20 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
       return emit_send(*record, 4, step, ByteView{big_tx_.data(), big_tx_size_}, false);
     }
     // Link admission precedes any destructive simultaneous-open decision.
-    if (!responder_cookie_ok(rx) || next_token_ == 0xFFFFFFFFU) return Status::success();
-    if (!step1_may_proceed(rx.scope, rx.claimed_peer)) return Status::success();
+    if (!responder_cookie_ok(rx) || next_token_ == 0xFFFFFFFFU) {
+      return Status::success();
+    }
+    if (!step1_may_proceed(rx.scope, rx.claimed_peer)) {
+      return Status::success();
+    }
     CarrierRecord* fresh = nullptr;
     const Status allocated = verify_cookie_and_allocate(rx, message, fresh, now);
     if (!allocated) return Status::success();  // cookie/budget/table: drop
     return responder_begin_m1(*fresh, message, now);
   }
-  if (record == nullptr) return Status::success();  // no exchange expects this
+  if (record == nullptr) {
+    return Status::success();  // no exchange expects this
+  }
   if (rx.step == 2) {
     if (record->role != HandshakeRole::Initiator ||
         record->state != RecordState::EdhocWaitM2 ||
@@ -1803,13 +1841,17 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
     }
     if (record->state == RecordState::EdhocM4Pending ||
         record->state == RecordState::EdhocM4Sent) {
-      // Duplicate m3: resend the cached m4, never reinstall.
+      // Duplicate m3: resend the cached m4, never reinstall. The stash
+      // may have been re-taken since (a parked m1 yields to the flight
+      // owner, not vice versa): never emit another record's bytes.
       ScopeDigest hash{};
       sha256(message, hash);
       const bool duplicate =
           edhoc_flight_.m3_seen &&
           std::memcmp(hash.data(), edhoc_flight_.m3_hash.data(), hash.size()) == 0;
-      if (!duplicate || big_tx_size_ == 0) return Status::success();
+      if (!duplicate || big_tx_size_ == 0 || big_tx_owner_ != record->token) {
+        return Status::success();
+      }
       return emit_send(*record, 4, 4, ByteView{big_tx_.data(), big_tx_size_}, false);
     }
     if (record->state != RecordState::EdhocWaitM3) return Status::success();

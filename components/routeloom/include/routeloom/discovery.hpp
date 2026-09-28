@@ -768,7 +768,10 @@ class NeighborDiscovery {
 
   // Exchange machinery.
   Status send_discover(MonotonicMs now_ms) noexcept;
-  Status send_scoped_discover(MonotonicMs now_ms) noexcept;
+  Status send_scoped_discover(MonotonicMs now_ms,
+                             const std::array<std::uint8_t, 16>& nonce,
+                             std::uint8_t flags, bool bind_exchange) noexcept;
+  Status send_scope_announce(MonotonicMs now_ms) noexcept;
   Status send_offer(Candidate& candidate, MonotonicMs now_ms) noexcept;
   Status send_scoped_offer(Candidate& candidate, MonotonicMs now_ms) noexcept;
   Status send_prove(MonotonicMs now_ms) noexcept;
@@ -781,6 +784,7 @@ class NeighborDiscovery {
                    ScopeDigest* frame_digest = nullptr) noexcept;
 
   // Scope pipeline (02-discovery-scope §2.4-§2.7).
+  void note_unknown_generation(std::uint32_t current, std::uint32_t observed) noexcept;
   void drain_scope_pending(MonotonicMs now_ms) noexcept;
   void admit_scoped_discover(PendingVerify& pending, MonotonicMs now_ms) noexcept;
   void accept_scoped_offer(PendingVerify& pending, MonotonicMs now_ms) noexcept;
@@ -972,6 +976,19 @@ class NeighborDiscovery {
   std::array<HintEntry, 4> hint_cache_{};
   std::size_t hint_cursor_{0};
   MonotonicMs migration_deadline_ms_{0};
+  // Post-start member-scope generation announce (04 §3.5): a fresh
+  // membership context broadcasts its current generation for a bounded
+  // window — a straggler on the old group can never pull an answer (the
+  // hint binds the network), so the survivors' own traffic must carry
+  // the ahead-generation evidence its refresh strike needs.
+  MonotonicMs announce_next_ms_{0};
+  MonotonicMs announce_until_ms_{0};
+  // Last scope generation the announce carried: a promote is itself
+  // fresh ahead-generation evidence, so a change re-opens the window —
+  // a straggler returning after a long outage still finds the survivors
+  // broadcasting what it missed rather than a window that expired while
+  // it was dark.
+  std::uint32_t announce_generation_{0};
   ScopeStats scope_stats_{};
 };
 

@@ -7,8 +7,11 @@
 #include <cstring>
 #include <new>
 
+#include "driver/usb_serial_jtag.h"
+#include "esp_app_desc.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_now.h"
 #include "esp_timer.h"
@@ -17,6 +20,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "idf_stubs.hpp"
+#include "nvs_flash.h"
 
 namespace {
 
@@ -29,13 +33,25 @@ bool g_fail_add_peer = false;
 esp_now_send_cb_t g_send_cb = nullptr;
 esp_now_recv_cb_t g_recv_cb = nullptr;
 std::uint8_t g_last_dest[6] = {0};
-bool g_send_outstanding = false;
-
-constexpr std::size_t kTxRingCapacity = 24;
-idf_stub::TxFrame g_tx_ring[kTxRingCapacity];
+std::uint8_t g_mac[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
+// Captured TX payloads (FIFO) plus the completion backlog. complete_send
+// reports the oldest entry's destination, like the driver attributing a
+// completion to (des_addr, status).
+constexpr std::size_t kTxCaptureCapacity = 32;
+idf_stub::TxFrame g_tx_queue[kTxCaptureCapacity];
 std::size_t g_tx_head = 0;
 std::size_t g_tx_count = 0;
-unsigned g_tx_drops = 0;
+// Completion destinations in esp_now_send order. take_tx drains the capture
+// queue above while completions arrive later, so the destinations live in
+// their own FIFO: without it every completion of a multi-TX tick would
+// report the last destination and the runtime would leak the older MACs'
+// in-flight tracking into the TX callback quarantine.
+std::uint8_t g_completion_macs[kTxCaptureCapacity][6] = {};
+std::size_t g_completion_head = 0;
+std::size_t g_completion_count = 0;
+std::uint8_t g_completion_mac[6] = {0};
+unsigned g_send_outstanding = 0;
+unsigned g_tx_overruns = 0;
 
 struct FakeQueue {
   std::size_t item_size{0};
@@ -50,6 +66,7 @@ struct FakeQueue {
 namespace idf_stub {
 
 void reset() noexcept {
+  static const std::uint8_t kDefaultMac[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
   g_now_us = 0;
   g_channel = 6;
   g_send_count = 0;
@@ -58,10 +75,14 @@ void reset() noexcept {
   g_fail_add_peer = false;
   g_send_cb = nullptr;
   g_recv_cb = nullptr;
-  g_send_outstanding = false;
+  std::memcpy(g_mac, kDefaultMac, sizeof(g_mac));
   g_tx_head = 0;
   g_tx_count = 0;
-  g_tx_drops = 0;
+  g_completion_head = 0;
+  g_completion_count = 0;
+  std::memset(g_completion_mac, 0, sizeof(g_completion_mac));
+  g_send_outstanding = 0;
+  g_tx_overruns = 0;
 }
 
 void set_now_us(const std::int64_t now_us) noexcept { g_now_us = now_us; }
@@ -79,43 +100,75 @@ unsigned del_peer_count() noexcept { return g_del_peer_count; }
 void fail_del_peer(const bool fail) noexcept { g_fail_del_peer = fail; }
 void fail_add_peer(const bool fail) noexcept { g_fail_add_peer = fail; }
 
-bool inject_rx(const std::uint8_t source[6], const std::uint8_t* frame,
-               const std::size_t length) noexcept {
-  if (g_recv_cb == nullptr || source == nullptr || frame == nullptr) return false;
-  std::uint8_t destination[6]{};
+void set_mac(const std::uint8_t mac[6]) noexcept {
+  if (mac != nullptr) std::memcpy(g_mac, mac, sizeof(g_mac));
+}
+
+bool inject_rx(const std::uint8_t source[6], const std::uint8_t dest[6],
+               const std::uint8_t* frame, const std::size_t length) noexcept {
+  if (g_recv_cb == nullptr || source == nullptr || dest == nullptr || frame == nullptr) {
+    return false;
+  }
   wifi_pkt_rx_ctrl_t ctrl{};
   ctrl.rssi = -45;
-  ctrl.channel = 6;
+  ctrl.channel = g_channel;
   esp_now_recv_info_t info{};
   info.src_addr = const_cast<std::uint8_t*>(source);
-  info.des_addr = destination;
+  info.des_addr = const_cast<std::uint8_t*>(dest);
   info.rx_ctrl = &ctrl;
   g_recv_cb(&info, frame, static_cast<int>(length));
   return true;
 }
 
+bool inject_rx(const std::uint8_t source[6], const std::uint8_t* frame,
+               const std::size_t length) noexcept {
+  return inject_rx(source, g_mac, frame, length);
+}
+
 bool complete_send(const bool success) noexcept {
-  if (!g_send_outstanding || g_send_cb == nullptr) return false;
-  g_send_outstanding = false;
+  if (g_send_outstanding == 0 || g_send_cb == nullptr) return false;
+  --g_send_outstanding;
   esp_now_send_info_t info{};
-  info.des_addr = g_last_dest;
+  if (g_completion_count > 0) {
+    std::memcpy(g_completion_mac, g_completion_macs[g_completion_head],
+                sizeof(g_completion_mac));
+    g_completion_head = (g_completion_head + 1) % kTxCaptureCapacity;
+    --g_completion_count;
+    info.des_addr = g_completion_mac;
+  } else {
+    info.des_addr = g_last_dest;
+  }
   g_send_cb(&info, success ? ESP_NOW_SEND_SUCCESS : ESP_NOW_SEND_FAIL);
   return true;
 }
 
-bool pop_tx(TxFrame& out) noexcept {
+bool take_tx(TxFrame& out) noexcept {
   if (g_tx_count == 0) return false;
-  out = g_tx_ring[g_tx_head];
-  g_tx_head = (g_tx_head + 1) % kTxRingCapacity;
+  out = g_tx_queue[g_tx_head];
+  g_tx_head = (g_tx_head + 1) % kTxCaptureCapacity;
   --g_tx_count;
   return true;
 }
 
-unsigned tx_drops() noexcept { return g_tx_drops; }
+std::size_t tx_pending() noexcept { return g_tx_count; }
+
+unsigned tx_overruns() noexcept { return g_tx_overruns; }
+
+bool pop_tx(TxFrame& out) noexcept { return take_tx(out); }
+
+unsigned tx_drops() noexcept { return tx_overruns(); }
 
 }  // namespace idf_stub
 
 int64_t esp_timer_get_time(void) { return g_now_us; }
+
+esp_err_t nvs_flash_init_partition(const char* partition) {
+  return partition == nullptr ? ESP_FAIL : ESP_OK;
+}
+
+esp_err_t nvs_flash_deinit_partition(const char* partition) {
+  return partition == nullptr ? ESP_FAIL : ESP_OK;
+}
 
 QueueHandle_t xQueueCreate(const UBaseType_t length,
                            const UBaseType_t item_size) {
@@ -193,6 +246,42 @@ BaseType_t xTaskCreatePinnedToCore(const TaskFunction_t fn, const char* name,
   return pdPASS;
 }
 
+BaseType_t xTaskCreate(const TaskFunction_t fn, const char* name,
+                       const uint32_t stack_depth, void* param,
+                       const UBaseType_t prio, TaskHandle_t* handle) {
+  (void)fn;
+  (void)name;
+  (void)stack_depth;
+  (void)param;
+  (void)prio;
+  (void)handle;
+  return pdPASS;
+}
+
+void vTaskSuspend(const TaskHandle_t task) { (void)task; }
+
+const esp_app_desc_t* esp_app_get_description(void) { return nullptr; }
+
+esp_err_t usb_serial_jtag_driver_install(usb_serial_jtag_driver_config_t* config) {
+  (void)config;
+  return ESP_OK;
+}
+
+int usb_serial_jtag_write_bytes(const void* data, const unsigned length,
+                                const unsigned timeout) {
+  (void)data;
+  (void)timeout;
+  return static_cast<int>(length);
+}
+
+int usb_serial_jtag_read_bytes(void* data, const unsigned length,
+                               const unsigned timeout) {
+  (void)data;
+  (void)length;
+  (void)timeout;
+  return 0;
+}
+
 TaskHandle_t xTaskGetCurrentTaskHandle(void) {
   return reinterpret_cast<TaskHandle_t>(0x1);
 }
@@ -244,21 +333,29 @@ esp_err_t esp_now_del_peer(const uint8_t* peer_addr) {
 
 esp_err_t esp_now_send(const uint8_t* peer_addr, const uint8_t* data,
                        const size_t len) {
+  if (len > ESP_NOW_MAX_DATA_LEN) return ESP_FAIL;
   if (peer_addr != nullptr) {
     std::memcpy(g_last_dest, peer_addr, sizeof(g_last_dest));
   }
-  if (peer_addr != nullptr && data != nullptr &&
-      len <= idf_stub::TxFrame::kMaxBytes && g_tx_count < kTxRingCapacity) {
-    idf_stub::TxFrame& slot =
-        g_tx_ring[(g_tx_head + g_tx_count) % kTxRingCapacity];
-    std::memcpy(slot.dest, peer_addr, sizeof(slot.dest));
-    slot.length = static_cast<std::uint16_t>(len);
-    std::memcpy(slot.bytes, data, len);
+  if (data == nullptr && len != 0) return ESP_FAIL;
+  if (g_tx_count < kTxCaptureCapacity) {
+    idf_stub::TxFrame& slot = g_tx_queue[(g_tx_head + g_tx_count) % kTxCaptureCapacity];
+    std::memcpy(slot.dest, g_last_dest, sizeof(slot.dest));
+    if (len != 0) std::memcpy(slot.bytes, data, len);
+    slot.length = len;
     ++g_tx_count;
-  } else if (peer_addr != nullptr && data != nullptr) {
-    ++g_tx_drops;
+  } else {
+    ++g_tx_overruns;
   }
-  g_send_outstanding = true;
+  if (g_completion_count < kTxCaptureCapacity) {
+    std::memcpy(g_completion_macs[(g_completion_head + g_completion_count) %
+                                  kTxCaptureCapacity],
+                g_last_dest, sizeof(g_completion_macs[0]));
+    ++g_completion_count;
+  } else {
+    ++g_tx_overruns;
+  }
+  ++g_send_outstanding;
   ++g_send_count;
   return ESP_OK;
 }
@@ -326,8 +423,13 @@ esp_err_t esp_wifi_get_channel(uint8_t* primary,
 esp_err_t esp_wifi_get_mac(const wifi_interface_t ifx, uint8_t mac[6]) {
   (void)ifx;
   if (mac == nullptr) return ESP_FAIL;
-  static const uint8_t kSelf[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
-  std::memcpy(mac, kSelf, sizeof(kSelf));
+  std::memcpy(mac, g_mac, sizeof(g_mac));
+  return ESP_OK;
+}
+
+esp_err_t esp_read_mac(uint8_t mac[6], const esp_mac_type_t type) {
+  if (mac == nullptr || type != ESP_MAC_WIFI_STA) return ESP_FAIL;
+  std::memcpy(mac, g_mac, sizeof(g_mac));
   return ESP_OK;
 }
 

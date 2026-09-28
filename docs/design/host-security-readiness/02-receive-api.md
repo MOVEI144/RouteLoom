@@ -4,7 +4,7 @@
 
 既存daemonにNetwork単位の有界ReceiveLogを追加し、`messages.read`によるcursor付きpollのみを初期採用する。EVENTSは診断のまま、TUIも観測者のまま。別のメッセージbroker、各利用アプリ用の全件コピー、push購読基盤は作らない。
 
-既存DataFromMeshのorigin(8)+session(4)+sequence(8)+本文を、認証済みUSB sessionのNetwork・Gatewayと結び付ける。受信前の長さ/認証検査は維持する。初期はGatewayを無線の終端とする**gateway_mirror**であり、PCサービス終端を名乗らない。
+既存DataFromMeshのorigin(8)+session(4)+sequence(8)+本文を、認証済みUSB sessionのNetwork・Gatewayと結び付ける。受信前の長さ/認証検査は維持する。Member cutover後のNetworkはUSB認証済みの64bit値をそのまま保持し、wireで有効な下位32bitを検査する。旧epochのlog/cursorと混同しない。初期はGatewayを無線の終端とする**gateway_mirror**であり、PCサービス終端を名乗らない。
 
 ## 2. レコードと具体例
 

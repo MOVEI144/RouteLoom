@@ -57,6 +57,12 @@ class LifecycleStore final {
   // Retain the nonsecret COMMIT digest and operation watermark so APPLIED can
   // be retried after a cold boot without retaining staged credentials.
   Status finish_switch(const Digest256& commit_digest) noexcept;
+  // Cut a Prepared stage the ZT reissue adopted past (04 §7): the
+  // device holds the cutover target without its COMMIT, so the stage
+  // goes Idle with NO watermark — no COMMIT digest was ever held and
+  // no APPLIED may be built from it. NVS only; the adopted site, RRS
+  // and GK settings stay untouched.
+  Status cut_prepared() noexcept;
   // Re-twin an adopted secret-free watermark after a torn twin write.
   Status scrub_idle() noexcept;
   bool stale_sibling() const noexcept { return pair_.stale_sibling(); }

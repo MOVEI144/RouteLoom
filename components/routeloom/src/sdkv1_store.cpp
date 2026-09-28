@@ -1,5 +1,6 @@
 #include "routeloom/sdkv1_store.hpp"
 
+#include <cstdio>
 #include <cstring>
 #include <limits>
 

@@ -843,8 +843,19 @@ def main() -> None:
                         u32(0) + hashlib.sha256(prepare).digest() + u8(0) + b"\x00" * 3)
     applied_receipt = (renew_head(4) + u64(new_network) + u32(new_gk_epoch) +
                        u32(new_rs_epoch) + commit_digest + u8(0) + b"\x00" * 3)
+    commit_stored_receipt = (renew_head(5) + u64(new_network) + u32(new_gk_epoch) +
+                             u32(new_rs_epoch) + commit_digest + u8(0) + b"\x00" * 3)
+    route_root, route_parent = node, peer_node
+    routestate_query = (renew_head(6) + u8(0) + u8(0) + u16(0) + u64(0) + u64(0) +
+                        u32(0) + u32(0) + u32(41) + u32(0))
+    routestate_report = (renew_head(6) + u8(1) + u8(0) + u16(0) + u64(route_root) +
+                         u64(route_parent) + u32(7) + u32(4242) + u32(41) + u32(30000))
+    routestate_unavailable = (renew_head(6) + u8(1) + u8(1) + u16(0) + u64(0) + u64(0) +
+                              u32(0) + u32(0) + u32(41) + u32(0))
     assert len(prepare) <= 700 and len(commit) <= 799
-    assert len(prepared_receipt) == len(applied_receipt) == 76
+    assert len(prepared_receipt) == len(applied_receipt) == len(commit_stored_receipt) == 76
+    assert len(routestate_query) == len(routestate_report) == 60
+    assert len(routestate_unavailable) == 60
     emit("valid", "cutover_signed", dict(
         codec="cutover", expect="ok", site_id=site_id, old_network=network,
         new_network=new_network, cutover_id=cutover_id, revision=revision,
@@ -860,7 +871,11 @@ def main() -> None:
         commit_digest_hex=commit_digest.hex(), prepare_hex=prepare.hex(),
         prepare_digest_hex=hashlib.sha256(prepare).hexdigest(),
         commit_hex=commit.hex(), prepared_hex=prepared_receipt.hex(),
-        applied_hex=applied_receipt.hex()))
+        applied_hex=applied_receipt.hex(), commit_stored_hex=commit_stored_receipt.hex(),
+        routestate_root=route_root, routestate_parent=route_parent,
+        routestate_query_hex=routestate_query.hex(),
+        routestate_report_hex=routestate_report.hex(),
+        routestate_unavailable_hex=routestate_unavailable.hex()))
     idle = dict(removal, mode=0, old_network=new_network, rs_floor=new_rs_epoch,
                 gk_floor=new_gk_epoch, cutover_id=cutover_id, revision=revision,
                 payload_hex=commit_digest.hex(), commit_seq=8)

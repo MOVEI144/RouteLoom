@@ -11,6 +11,7 @@
 #include "routeloom/psa_edhoc_aead.hpp"
 #include "routeloom/psa_session_aead.hpp"
 
+#include "../../firmware/bridge_node/main/bridge_network.hpp"
 #include "idf_stubs.hpp"
 #include "test_sdkv1.hpp"
 #include "test_security.hpp"
@@ -21,8 +22,8 @@ struct SecurityCoordinatorTestAccess {
   static bool apply_pending(const SecurityCoordinator& coordinator) noexcept {
     return coordinator.member_apply_pending_;
   }
-  static void fail_link(SecurityCoordinator& coordinator) noexcept {
-    coordinator.note_link_failed();
+  static void fail_link(SecurityCoordinator& coordinator, MonotonicMs now) noexcept {
+    coordinator.note_link_failed(now);
   }
   static void disable_refresh_scan(SecurityCoordinator& coordinator) noexcept {
     coordinator.deps_.joiner_config.scan_channel_count = 0;
@@ -208,6 +209,24 @@ bool take_apply(SecurityCoordinator& coordinator, MonotonicMs& now,
   return false;
 }
 
+void test_usb_network_after_cutover() {
+  // A restarted gateway has a committed RLS1 for epoch 2, but the mesh
+  // header and the legacy trust/bootstrap network still carry epoch 1.
+  Stores stores{};
+  CHECK(stores.init());
+  const auto next = site_record(3, 204, kNetwork + (1ULL << 32U));
+  CHECK(stores.site.commit(next).ok());
+  const NetworkId bootstrap = static_cast<std::uint32_t>(next.network);
+  CHECK(bridge_node::usb_boot_network(stores.site, bootstrap) == next.network);
+  CHECK(static_cast<std::uint32_t>(bridge_node::usb_boot_network(stores.site, bootstrap)) ==
+        bootstrap);
+
+  FaultyRecordStorage empty_storage{kSiteSlotBytes};
+  SiteStore empty{empty_storage};
+  CHECK(empty.initialize().ok());
+  CHECK(bridge_node::usb_boot_network(empty, bootstrap) == bootstrap);
+}
+
 void test_same_boot_reapply(bool change_site_epoch) {
   idf_stub::reset();
   Stores stores{};
@@ -244,7 +263,7 @@ void test_same_boot_reapply(bool change_site_epoch) {
   CHECK(owner.coordinator().take_action(discovery).ok());
   CHECK(discovery.kind == CoordinatorActionKind::StartMemberDiscovery);
   SecurityCoordinatorTestAccess::disable_refresh_scan(owner.coordinator());
-  for (int i = 0; i < 3; ++i) SecurityCoordinatorTestAccess::fail_link(owner.coordinator());
+  for (int i = 0; i < 3; ++i) SecurityCoordinatorTestAccess::fail_link(owner.coordinator(), now);
   CHECK(owner.coordinator().snapshot().refresh_strikes == 3);
   CHECK(poll(owner.coordinator(), ++now));
   CoordinatorMemberConfig second{};
@@ -368,6 +387,7 @@ void test_member_adoption_restores_group_capability() {
 }  // namespace
 
 int main() {
+  test_usb_network_after_cutover();
   test_same_boot_reapply(false);
   test_same_boot_reapply(true);
   test_member_root_mapping(false);

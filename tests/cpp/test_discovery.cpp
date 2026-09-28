@@ -474,7 +474,12 @@ void test_member_start_releases_transient() {
     CHECK_OK(a.engine.take_member_start(start, world.medium.now));
     CHECK(start.initiator && start.peer == b.node);
     // The responder's parked candidate is allowed to expire naturally.
+    // Disable autonomous member rebootstrap while testing manual starts.
+    a.engine.set_member_handshake_mode(false);
+    b.engine.set_member_handshake_mode(false);
     world.run(10'000);
+    a.engine.set_member_handshake_mode(true);
+    b.engine.set_member_handshake_mode(true);
   }
   CHECK(!a.observer.has("PEER_CAPACITY"));
 }
@@ -809,6 +814,38 @@ void test_simultaneous_open() {
   // Exactly one auth exchange completed per side — no duplicate bindings.
   CHECK(a.engine.stats().auths_completed == 1);
   CHECK(b.engine.stats().auths_completed == 1);
+}
+
+// An accepted OFFER keeps the initiator leg ahead of the same peer's
+// parked responder leg, so the Owner does not consume the wrong leg.
+void test_member_take_prefers_initiator_over_same_peer_responder() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, /*member=*/true);
+  Unit& b = world.add(2, 0xB2, /*member=*/true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  a.engine.set_member_handshake_mode(true);
+  b.engine.set_member_handshake_mode(true);
+  world.start_all();
+
+  // A discovers; B offers; A accepts (A's initiator parks for B).
+  CHECK_OK(a.engine.begin_discovery(world.medium.now));
+  world.run(500);
+  // B discovers; A offers (A parks a responder for B too).
+  const Status b_start = b.engine.begin_discovery(world.medium.now);
+  CHECK(b_start.ok() || b_start.code == StatusCode::WouldBlock);
+  world.run(500);
+
+  // The initiator yields first even though the responder parked.
+  NeighborDiscovery::MemberStartRequest start{};
+  CHECK_OK(a.engine.take_member_start(start, world.medium.now));
+  CHECK(start.initiator);
+  CHECK(start.peer == 2);
+  // The responder leg survives for a later take — deferred, not dropped.
+  NeighborDiscovery::MemberStartRequest second{};
+  CHECK_OK(a.engine.take_member_start(second, world.medium.now));
+  CHECK(!second.initiator);
+  CHECK(second.peer == 2);
 }
 
 // Requester storm control: a second handshake start waits out the 1/s burst-1
@@ -1971,6 +2008,7 @@ int main() {
   test_lease_remaining_ms();
   test_mac_change_conflict();
   test_simultaneous_open();
+  test_member_take_prefers_initiator_over_same_peer_responder();
   test_handshake_rate_limit();
   test_revoked_silent();
   test_production_unavailable();
