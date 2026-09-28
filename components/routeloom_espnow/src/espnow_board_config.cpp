@@ -23,21 +23,21 @@ Status BoardStores::open(const bool writable) noexcept {
   if (error != ESP_OK) {
     return Status::error(StatusCode::StorageFailure, "rlcfg partition init failed");
   }
-  const auto missing = [](const NvsBlobNamespace& ns, const Status& status) {
-    return ns.last_error().native == ESP_ERR_NVS_NOT_FOUND
-               ? Status::error(StatusCode::NotFound, "board configuration required")
-               : status;
-  };
   Status status = config_ns_.open(sdkv1::kBoardConfigPartition,
                                 sdkv1::kBoardConfigNamespace, mode);
-  if (!status) return missing(config_ns_, status);
+  if (!status) {
+    // The setup console creates both namespaces together; an erased
+    // board has neither.
+    return config_ns_.last_error().native == ESP_ERR_NVS_NOT_FOUND
+               ? Status::error(StatusCode::NotFound, "board configuration required")
+               : status;
+  }
   error = nvs_flash_init_partition(sdkv1::kBoardSecretsPartition);
   if (error != ESP_OK) {
     return Status::error(StatusCode::StorageFailure, "rlkeys partition init failed");
   }
-  status = secrets_ns_.open(sdkv1::kBoardSecretsPartition,
-                            sdkv1::kBoardSecretsNamespace, mode);
-  return status ? status : missing(secrets_ns_, status);
+  return secrets_ns_.open(sdkv1::kBoardSecretsPartition,
+                          sdkv1::kBoardSecretsNamespace, mode);
 }
 
 Status BoardStores::initialize() noexcept {
