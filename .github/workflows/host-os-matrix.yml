@@ -33,7 +33,7 @@ jobs:
           persist-credentials: false
 
       - name: Rust toolchain (host/rust-toolchain.toml)
-        run: rustup toolchain install
+        run: cargo --version
 
       - name: Check formatting
         run: cargo fmt --all -- --check

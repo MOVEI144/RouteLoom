@@ -8,13 +8,15 @@ fi
 app=$1 chip=$2 out=$3 key=$4 version=$5
 shift 5
 case "$app/$chip" in
-  reference_node/esp32c3|reference_node/esp32s3|reference_node/esp32c5|reference_node/esp32c6|bridge_node/esp32c3|bridge_node/esp32s3|bridge_node/esp32c5|bridge_node/esp32c6) ;;
+  reference_node/esp32c3|reference_node/esp32s3|reference_node/esp32c5|reference_node/esp32c6|bridge_node/esp32c3|bridge_node/esp32s3|bridge_node/esp32c5|bridge_node/esp32c6|bench_node/esp32c3|bench_node/esp32s3|bench_node/esp32c5|bench_node/esp32c6) ;;
   *) echo 'unsupported app/chip' >&2; exit 2 ;;
 esac
 [[ ! -e $out ]] || { echo 'output already exists' >&2; exit 2; }
 extra=''
+peer_mac_pattern='^CONFIG_ROUTELOOM_PEER_MAC="([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}"$'
 for line in "$@"; do
   [[ $line =~ ^CONFIG_ROUTELOOM_[A-Z0-9_]+=(y|n|[0-9]+|0x[0-9a-fA-F]+)$ ||
+     $line =~ $peer_mac_pattern ||
      $line == 'CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y' ||
      $line == 'CONFIG_ESP_CONSOLE_UART_DEFAULT=n' ]] || {
     echo 'unsupported or unsafe Kconfig override' >&2; exit 2;

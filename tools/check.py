@@ -28,7 +28,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CELLS = ROOT / "tools" / "ci" / "cells.json"
-JOBS = str(os.cpu_count() or 2)
+JOBS = str(min(os.cpu_count() or 2, 8))
 FUZZ_TARGETS = ("wire_frame", "usb_codec", "autonomy", "endpoint", "host_ops", "migration",
                 "cose", "rlres1", "sdkv1", "sdkv1_ead", "sdkv1_join")
 # Generated-vector directories: diff catches changed bytes, porcelain catches
@@ -225,14 +225,18 @@ def elf_symbols(path: Path) -> list[str]:
         sh_fmt, sym_size, name_at = end + "IIIIIIIIII", 16, 0
     sections = [struct.unpack_from(sh_fmt, blob, shoff + i * shentsize) for i in range(shnum)]
     names = []
+    found_symtab = False
     for sec in sections:
         if sec[1] != 2:  # SHT_SYMTAB
             continue
+        found_symtab = True
         offset, size, link = sec[4], sec[5], sec[6]
         str_off = sections[link][4]
         for pos in range(offset, offset + size, sym_size):
             start = str_off + struct.unpack_from(end + "I", blob, pos + name_at)[0]
             names.append(blob[start:blob.index(b"\0", start)].decode("utf-8", "replace"))
+    if not found_symtab:
+        raise ValueError(f"{path}: missing ELF symbol table")
     return [n for n in names if n]
 
 
@@ -252,27 +256,38 @@ def size_errors(data: dict, cell: dict, build: Path) -> list[str]:
     if app_bin > budget["app_bin_max"]:
         errors.append(f"app.bin {app_bin} B > budget {budget['app_bin_max']} B")
     report = json.loads(files["ram"].read_text(encoding="utf-8"))
+    for key, expected in (("cell", cell["id"]), ("app", cell["app"]),
+                          ("target", cell["target"])):
+        if report.get(key) != expected:
+            errors.append(f"ram-report {key} {report.get(key)!r} != {expected!r}")
     free = report["guard"]["free"]
     if free < budget["static_free_min"]:
         errors.append(f"static RAM free {free} B < budget {budget['static_free_min']} B")
     rtc = rtc_used(report)
-    if rtc > budget["rtc_used_max"]:
+    if rtc is None:
+        errors.append("missing RTC/LP RAM measurement in ram-report")
+    elif rtc > budget["rtc_used_max"]:
         errors.append(f"RTC/LP RAM used {rtc} B > budget {budget['rtc_used_max']} B")
     patterns = data.get("symbols_absent", []) + cell.get("symbols_absent", [])
     if patterns:
-        symbols = elf_symbols(files["elf"])
-        for pattern in patterns:
-            hits = [s for s in symbols if re.search(pattern, s)]
-            if hits:
-                errors.append(f"symbols_absent `{pattern}` matches {', '.join(hits[:5])}")
+        try:
+            symbols = elf_symbols(files["elf"])
+        except ValueError as exc:
+            errors.append(str(exc))
+        else:
+            for pattern in patterns:
+                hits = [s for s in symbols if re.search(pattern, s)]
+                if hits:
+                    errors.append(f"symbols_absent `{pattern}` matches {', '.join(hits[:5])}")
     print(f"{cell['id']}: app.bin {app_bin}/{budget['app_bin_max']} B, static free "
           f"{free}/{budget['static_free_min']} B, RTC {rtc}/{budget['rtc_used_max']} B")
     return errors
 
 
-def rtc_used(report: dict) -> int:
-    return sum(m["used"] for m in report["memory"]
-               if m["name"].lower().startswith(("rtc", "lp ")))
+def rtc_used(report: dict) -> int | None:
+    low_power = [m for m in report["memory"]
+                 if m["name"].lower().startswith(("rtc", "lp "))]
+    return sum(m["used"] for m in low_power) if low_power else None
 
 
 # --- runner ---------------------------------------------------------------
@@ -358,7 +373,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.stage == "firmware":
         if args.list:
             if args.format == "github":
-                include = [{"id": c["id"], "app": c["app"], "target": c["target"]}
+                include = [{"id": c["id"], "app": c["app"], "target": c["target"],
+                            "artifact": c.get("artifact", f"firmware-{c['id']}")}
                            for c in data["cells"]]
                 print("matrix=" + json.dumps({"include": include}, separators=(",", ":")))
             else:

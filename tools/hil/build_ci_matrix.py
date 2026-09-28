@@ -2,8 +2,8 @@
 """Build the firmware cells of tools/ci/cells.json (the sdk.yml matrix) for HIL review.
 
 This runner uses the pinned HIL container builder and records each CI cell
-separately, with the cell's sdkconfig overlay. Images stay in the local
-ignored build directory; the JSON result contains no firmware binaries or
+separately, with the cell's sdkconfig overlay. Bundles stay in the local
+ignored images directory; the JSON result contains no firmware binaries or
 development credentials.
 """
 
@@ -51,12 +51,12 @@ def build(index: int, cell: tuple[str, str, str, list[str]], prefix: str) -> dic
             time.sleep(2)
             continue
         break
-    image = ROOT / "artifacts/hil/2026-09-26/images" / label
-    ram = image / "build/ram-report.json"
+    image = ROOT / "artifacts/hil/images" / label
+    ram = image / "ram-report.json"
     return {"index": index, "label": label, "app": app, "target": target,
             "cell": cell_id, "options": options, "exit_code": result.returncode,
             "stdout": result.stdout.strip(), "stderr": result.stderr.strip(),
-            "build_log": str((image / "build.log").relative_to(ROOT)),
+            "build_log": None,
             "ram_report": str(ram.relative_to(ROOT)) if ram.exists() else None}
 
 

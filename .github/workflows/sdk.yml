@@ -69,7 +69,7 @@ jobs:
           persist-credentials: false
       - name: Rust toolchain (host/rust-toolchain.toml)
         working-directory: host
-        run: rustup toolchain install
+        run: cargo --version
       - name: Vector generator dependency
         run: python3 -c "import cryptography" 2>/dev/null || pip install "cryptography==44.0.0"
       - name: C++/Rust golden-vector tests and byte-identical regeneration
@@ -113,7 +113,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: firmware-${{ matrix.id }}
+          name: ${{ matrix.artifact }}
           path: |
             idf-commit.txt
             firmware/${{ matrix.app }}/build/*.bin
@@ -134,7 +134,7 @@ jobs:
           persist-credentials: false
       - name: Rust toolchain (host/rust-toolchain.toml)
         working-directory: host
-        run: rustup toolchain install
+        run: cargo --version
       - run: python3 tools/check.py rust
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -157,7 +157,7 @@ jobs:
           persist-credentials: false
       - name: Rust toolchain (host/rust-toolchain.toml)
         working-directory: host
-        run: rustup toolchain install
+        run: cargo --version
       - name: Live Owner E2E and multi-node Owner mesh E2E (a skip fails)
         run: python3 tools/check.py interop
   fuzz:

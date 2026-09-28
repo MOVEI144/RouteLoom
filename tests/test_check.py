@@ -1,12 +1,16 @@
 """tools/check.py: the cell list, the sdkconfig assertions and the budgets."""
 from pathlib import Path
+import importlib.util
 import io
 import json
+import os
+import subprocess
 import struct
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -42,6 +46,10 @@ def elf32(symbols):
 
 
 class CellList(unittest.TestCase):
+    def test_check_parallelism_is_bounded(self):
+        build = check.core()[1]
+        self.assertLessEqual(int(build.argv[-1]), 8)
+
     def test_cells_cover_every_app_and_target_with_a_budget(self):
         data = check.load_cells()
         cells = data["cells"]
@@ -49,7 +57,11 @@ class CellList(unittest.TestCase):
         self.assertEqual(len(cells), 43)
         for cell in cells:
             self.assertTrue((ROOT / "firmware" / cell["app"]).is_dir(), cell["id"])
-            self.assertTrue(cell["id"].startswith(f"{cell['app']}-{cell['target']}-"), cell["id"])
+            if cell["id"].startswith("experimental-c6-"):
+                self.assertEqual(cell["target"], "esp32c6")
+            else:
+                self.assertTrue(cell["id"].startswith(f"{cell['app']}-{cell['target']}-"),
+                                cell["id"])
             self.assertEqual(set(cell["budget"]), {"app_bin_max", "static_free_min",
                                                    "rtc_used_max"}, cell["id"])
         pairs = {(c["app"], c["target"]) for c in cells}
@@ -62,13 +74,30 @@ class CellList(unittest.TestCase):
         self.assertIn("python3 tools/check.py firmware --list --format github", workflow)
         self.assertIn("fromJSON(needs.firmware-cells.outputs.matrix)", workflow)
         self.assertIn('python3 tools/check.py firmware --cell "${{ matrix.id }}"', workflow)
-        self.assertIn("name: firmware-${{ matrix.id }}", workflow)
+        self.assertIn("name: ${{ matrix.artifact }}", workflow)
         self.assertNotIn("c6-experimental", workflow)
         code, out, _ = run_main(["firmware", "--list", "--format", "github"])
         self.assertEqual(code, 0)
         include = json.loads(out.removeprefix("matrix="))["include"]
         self.assertEqual([c["id"] for c in include],
                          [c["id"] for c in check.load_cells()["cells"]])
+
+    def test_existing_c6_artifact_names_are_preserved(self):
+        ids = {cell["id"] for cell in check.load_cells()["cells"]}
+        old_c6 = {
+            "experimental-c6-bridge_node-devram",
+            "experimental-c6-reference_node-devram",
+            "experimental-c6-bridge_node-member",
+            "experimental-c6-reference_node-member",
+            "experimental-c6-reference_node-member_sleep",
+        }
+        self.assertTrue(old_c6 <= ids)
+        code, out, _ = run_main(["firmware", "--list", "--format", "github"])
+        self.assertEqual(code, 0)
+        include = json.loads(out.removeprefix("matrix="))["include"]
+        for cell in include:
+            expected = cell["id"] if cell["id"] in old_c6 else f"firmware-{cell['id']}"
+            self.assertEqual(cell["artifact"], expected)
 
     def test_workflow_runs_every_ci_stage(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -83,6 +112,16 @@ class CellList(unittest.TestCase):
         for cell in check.load_cells()["cells"]:
             self.assertIn(f"check.py size --cell {cell['id']}\n", out)
 
+    def test_ci_rust_toolchain_setup_uses_the_manifest(self):
+        for name in ("sdk.yml", "host-os-matrix.yml", "release.yml"):
+            lines = (ROOT / ".github" / "workflows" / name).read_text().splitlines()
+            for i, line in enumerate(lines):
+                if "- name: Rust toolchain (host/rust-toolchain.toml)" not in line:
+                    continue
+                command = next(row.strip().removeprefix("run: ") for row in lines[i + 1:i + 4]
+                               if row.strip().startswith("run: "))
+                self.assertEqual(command, "cargo --version", name)
+
 
 class Sdkconfig(unittest.TestCase):
     DATA = {"forbid_unless_named": {"CONFIG_A": ["y"], "CONFIG_M": ["1", "2"]}}
@@ -92,6 +131,51 @@ class Sdkconfig(unittest.TestCase):
         self.assertEqual(check.sdkconfig_errors(self.DATA, cell, "CONFIG_A=y\nCONFIG_P=5000\n"), [])
         self.assertEqual(check.sdkconfig_errors(self.DATA, cell, "CONFIG_P=5000\nCONFIG_M=2\n"),
                          ["missing `CONFIG_A=y`", "unexpected `CONFIG_M=2`"])
+
+
+class HilMatrix(unittest.TestCase):
+    def test_result_points_to_the_packaged_ram_report(self):
+        spec = importlib.util.spec_from_file_location(
+            "build_ci_matrix", ROOT / "tools" / "hil" / "build_ci_matrix.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        cell = ("bench_node", "esp32c6", "bench_node-esp32c6-normal-off-off", [])
+        label = "full-r9-ci-00-bench_node-esp32c6-normal-off-off"
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp) / "artifacts" / "hil" / "images" / label
+            bundle.mkdir(parents=True)
+            (bundle / "ram-report.json").write_text("{}")
+            completed = subprocess.CompletedProcess([], 0, "ok", "")
+            with mock.patch.object(module, "ROOT", Path(tmp)), \
+                 mock.patch.object(module, "BUILD", Path(tmp) / "builder"), \
+                 mock.patch.object(module.fcntl, "flock"), \
+                 mock.patch.object(module.subprocess, "run", return_value=completed):
+                row = module.build(0, cell, "full-r9-ci")
+            self.assertEqual(row["ram_report"],
+                             f"artifacts/hil/images/{label}/ram-report.json")
+            self.assertIsNone(row["build_log"])
+
+    def test_builder_reaches_idf_for_bench_and_paired_cells(self):
+        script = ROOT / "tools" / "meshviz" / "build_bundle.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            docker = work / "docker"
+            docker.write_text("#!/bin/sh\nexit 7\n")
+            docker.chmod(0o755)
+            python = work / "python3"
+            python.write_text(f"#!/bin/sh\nif [ \"$1\" = -c ]; then echo test-image; "
+                              f"else exec {sys.executable} \"$@\"; fi\n")
+            python.chmod(0o755)
+            env = {**os.environ, "PATH": f"{work}:{os.environ['PATH']}"}
+            cases = (("bench_node", "esp32c6", []),
+                     ("reference_node", "esp32c3",
+                      ['CONFIG_ROUTELOOM_PEER_MAC="94:a9:90:6a:ee:c4"']))
+            for app, target, overlay in cases:
+                with self.subTest(app=app, target=target):
+                    result = subprocess.run([str(script), app, target, str(work / "bundle"),
+                                             str(work / "key"), "test", *overlay], env=env,
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 7, result.stderr)
 
 
 class Budget(unittest.TestCase):
@@ -116,8 +200,9 @@ class Budget(unittest.TestCase):
         build.mkdir(exist_ok=True)
         (build / "routeloom_bench_node.bin").write_bytes(bytes(app_bin))
         (build / "routeloom_bench_node.elf").write_bytes(elf32(list(symbols)))
-        (build / "routeloom_bench_node.map").write_text("")
+        (build / "routeloom_bench_node.map").write_text("link map\n")
         (build / "ram-report.json").write_text(json.dumps({
+            "cell": f"bench_node-esp32c3-{name}", "app": "bench_node", "target": "esp32c3",
             "guard": {"free": free},
             "memory": [{"name": "DRAM", "used": 1}, {"name": "RTC SLOW", "used": rtc}]}))
 
@@ -142,6 +227,24 @@ class Budget(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("missing", err)
 
+    def test_report_must_belong_to_the_cell(self):
+        report = self.dir / "a" / "ram-report.json"
+        data = json.loads(report.read_text())
+        data["cell"] = "bench_node-esp32c3-b"
+        report.write_text(json.dumps(data))
+        code, _, err = self.size("a")
+        self.assertEqual(code, 1)
+        self.assertIn("cell", err)
+
+    def test_missing_rtc_measurement_fails(self):
+        report = self.dir / "a" / "ram-report.json"
+        data = json.loads(report.read_text())
+        data["memory"] = [m for m in data["memory"] if m["name"] == "DRAM"]
+        report.write_text(json.dumps(data))
+        code, _, err = self.size("a")
+        self.assertEqual(code, 1)
+        self.assertIn("RTC/LP", err)
+
     def test_symbols_absent(self):
         data = json.loads(self.cells.read_text())
         data["symbols_absent"] = [r"^legacy_psk_"]
@@ -151,6 +254,19 @@ class Budget(unittest.TestCase):
         code, _, err = self.size("a")
         self.assertEqual(code, 1)
         self.assertIn("legacy_psk_load", err)
+
+    def test_symbols_absent_requires_a_symbol_table(self):
+        data = json.loads(self.cells.read_text())
+        data["symbols_absent"] = [r"^legacy_psk_"]
+        self.cells.write_text(json.dumps(data))
+        path = self.dir / "a" / "routeloom_bench_node.elf"
+        blob = bytearray(path.read_bytes())
+        section_offset = struct.unpack_from("<I", blob, 0x20)[0]
+        struct.pack_into("<I", blob, section_offset + 40 + 4, 1)
+        path.write_bytes(blob)
+        code, _, err = self.size("a")
+        self.assertEqual(code, 1)
+        self.assertIn("symbol table", err)
 
 
 if __name__ == "__main__":

@@ -215,13 +215,15 @@
       "budget": {"app_bin_max": 987936, "static_free_min": 42072, "rtc_used_max": 96}
     },
     {
-      "id": "bridge_node-esp32c6-normal-off-off", "app": "bridge_node", "target": "esp32c6",
+      "id": "experimental-c6-bridge_node-devram", "app": "bridge_node", "target": "esp32c6",
+      "artifact": "experimental-c6-bridge_node-devram",
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"],
       "budget": {"app_bin_max": 1501488, "static_free_min": 119473, "rtc_used_max": 164}
     },
     {
-      "id": "reference_node-esp32c6-normal-off-off", "app": "reference_node", "target": "esp32c6",
+      "id": "experimental-c6-reference_node-devram", "app": "reference_node", "target": "esp32c6",
+      "artifact": "experimental-c6-reference_node-devram",
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"],
       "budget": {"app_bin_max": 1416176, "static_free_min": 127075, "rtc_used_max": 164}
@@ -233,17 +235,20 @@
       "budget": {"app_bin_max": 1423472, "static_free_min": 124907, "rtc_used_max": 164}
     },
     {
-      "id": "bridge_node-esp32c6-normal-off-owner_member", "app": "bridge_node", "target": "esp32c6",
+      "id": "experimental-c6-bridge_node-member", "app": "bridge_node", "target": "esp32c6",
+      "artifact": "experimental-c6-bridge_node-member",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
       "budget": {"app_bin_max": 1498976, "static_free_min": 119473, "rtc_used_max": 164}
     },
     {
-      "id": "reference_node-esp32c6-normal-off-owner_member", "app": "reference_node", "target": "esp32c6",
+      "id": "experimental-c6-reference_node-member", "app": "reference_node", "target": "esp32c6",
+      "artifact": "experimental-c6-reference_node-member",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
       "budget": {"app_bin_max": 1413296, "static_free_min": 127075, "rtc_used_max": 164}
     },
     {
-      "id": "reference_node-esp32c6-deep_sleep-off-owner_member", "app": "reference_node", "target": "esp32c6",
+      "id": "experimental-c6-reference_node-member_sleep", "app": "reference_node", "target": "esp32c6",
+      "artifact": "experimental-c6-reference_node-member_sleep",
       "overlay": ["CONFIG_ROUTELOOM_DEEP_SLEEP=y", "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
       "budget": {"app_bin_max": 1430720, "static_free_min": 126867, "rtc_used_max": 856}
     }

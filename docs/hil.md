@@ -120,8 +120,8 @@ python3 tools/hil/analyze_edhoc.py \
     --out artifacts/hil/member-edhoc-times.json
 
 # Build every firmware cell of tools/ci/cells.json (the sdk.yml matrix) in
-# the pinned IDF container. The runner shares the local three-container cap and
-# retains per-cell logs and RAM reports in ignored local image directories.
+# the pinned IDF container. The runner shares the local three-container cap;
+# its JSON result records build output and each bundle carries a RAM report.
 python3 tools/hil/build_ci_matrix.py \
     --out artifacts/hil/ci-matrix.json --jobs 3
 

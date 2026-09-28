@@ -230,7 +230,9 @@ class Documentation(unittest.TestCase):
             (ROOT / "tools/ci/cells.json").read_text(encoding="utf-8"))["cells"]}
         for app in ("reference_node", "bridge_node"):
             for target in ("esp32c3", "esp32s3", "esp32c5", "esp32c6"):
-                self.assertIn(f"{app}-{target}-normal-off-owner_member", ids)
+                cell_id = (f"experimental-c6-{app}-member" if target == "esp32c6"
+                           else f"{app}-{target}-normal-off-owner_member")
+                self.assertIn(cell_id, ids)
 
     def test_owner_main_task_stack_budget(self):
         for app in ("bridge_node", "reference_node", "bench_node"):
