@@ -567,6 +567,29 @@ class LabBackendTests(unittest.TestCase):
         self.assertEqual(result.state, 'failed')
         self.assertIn('bundle', result.detail)
 
+    def test_reference_bundles_serve_non_bridge_boards(self):
+        site = _site(self.tmp / 'ref')
+        bundles = self.tmp / 'ref' / 'bundles'
+        bundles.mkdir()
+        _build_bundle(bundles, 'field-ref', role='reference_node', console=False)
+        _build_bundle(bundles, 'setup-ref', role='reference_node', console=True)
+        backend = prov.LabProvisionBackend(
+            site_dir=site, boards=self.boards, bundles_dir=bundles, office=self.office,
+            link_factory=lambda port: self.console, boot_capture=lambda port: [])
+        result = backend.run('preflight', self._job())
+        self.assertEqual(result.state, 'done', result.detail)
+        self.assertIn('reference_node', result.detail)
+
+    def test_office_gets_identity_spec_with_site_ca_anchor(self):
+        site = self.backend.site_dir
+        (site / 'site-authority.json').write_text(json.dumps(
+            {'format': 'routeloom-site-authority-v1', 'site_ca_pubkey_hex': 'ab' * 64}))
+        spec = json.loads(self.backend._identity_spec_path().read_text())
+        self.assertEqual(spec['format'], 'routeloom-identity-spec-v1')
+        self.assertEqual(spec['anchors'], [{'anchor_id': '00000000000000cc',
+                                            'kind': 'site-ca', 'status': 'active',
+                                            'pubkey_hex': 'ab' * 64}])
+
     def test_restart_after_field_write_never_uses_console(self):
         """D03 resume: a restart after the field image was written must not
         dial the maintenance console — the field image serves none. The

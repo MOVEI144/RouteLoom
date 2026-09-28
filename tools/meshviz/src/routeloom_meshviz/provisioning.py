@@ -1237,12 +1237,17 @@ class LabProvisionBackend(ContractBackend):
         return bundles
 
     def _bundle(self, kind, job, chip):
-        role = 'bridge_node' if job.role == 'bridge' else 'bench_node'
-        found = self._scan_bundles().get((kind, role, chip))
+        # Non-bridge boards take the bench app or the reference app
+        # (build_bundle.sh builds only reference_node and bridge_node).
+        roles = ('bridge_node',) if job.role == 'bridge' else ('bench_node', 'reference_node')
+        bundles = self._scan_bundles()
+        found = next((bundles[(kind, role, chip)] for role in roles
+                      if (kind, role, chip) in bundles), None)
         if found is None:
             raise ProvisionError(
                 'no_bundles',
-                f'no signed {kind} bundle for {role}/{chip} in {self.bundles_dir}')
+                f'no signed {kind} bundle for {"/".join(roles)}/{chip} in {self.bundles_dir}')
+        role = found['manifest']['role']
         if found['manifest'].get('generic_config') is not True:
             # Per-board NodeId comes from rlcfg; a legacy image embeds it in the
             # signed sdkconfig and would bypass the whole BoardConfig path.
@@ -1288,12 +1293,28 @@ class LabProvisionBackend(ContractBackend):
             # IssuanceInputs default: <ca_key>/../office-ledger.jsonl).
             ctx['office'] = CtlOffice(
                 self.ctl, str(self.site_dir / 'keys' / 'device-ca.key'),
-                str(self._spec_path()),
+                str(self._identity_spec_path()),
                 str(self.site_dir / 'keys' / 'office-ledger.jsonl'))
         return ctx['office']
 
     def _spec_path(self):
         return self.site_dir.parent / f'{self.site_dir.name}.lab-spec.json'
+
+    def _identity_spec_path(self):
+        """`provision-devcert --spec` takes a routeloom-identity-spec-v1, not
+        the lab spec: pin the lab Site CA from site-authority.json."""
+        authority = json.loads(
+            (self.site_dir / 'site-authority.json').read_text(encoding='utf-8'))
+        doc = {'format': 'routeloom-identity-spec-v1', 'model': 1, 'hw_rev': 1,
+               'flags': 0,
+               'anchors': [{'anchor_id': self._load_spec()['site_ca_id'],
+                            'kind': 'site-ca', 'status': 'active',
+                            'pubkey_hex': authority['site_ca_pubkey_hex']}]}
+        text = json.dumps(doc, sort_keys=True)
+        path = self.site_dir.parent / f'{self.site_dir.name}.identity-spec.json'
+        if not path.is_file() or path.read_text(encoding='utf-8') != text:
+            path.write_text(text, encoding='utf-8')
+        return path
 
     def _site_psk(self):
         """Per-site DevRam mesh PSK, generated once and reused on retry."""
