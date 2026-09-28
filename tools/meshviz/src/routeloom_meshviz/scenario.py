@@ -79,7 +79,7 @@ POLL_MS = 2_000
 REPLY_TIMEOUT_MS = 10_000
 HEX_ID_LEN = 16
 PAYLOAD_MAX_NODE = 128                         # NORMAL_PAYLOAD_MAX
-# KG display floor (D10): a control display stream must sustain at least
+# Display floor (D10): a control display stream must sustain at least
 # 12 messages/minute per destination — period ≤ 5000ms.
 CONTROL_PERIOD_MAX_MS = 5_000
 BENCH_RUN_WINDOW_CALLS = 64
@@ -447,8 +447,8 @@ def validate(doc: dict, capacity: dict | None = None) -> list[str]:
                         type(policy['zero_touch_open']) is not bool:
                     errors.append(f'{where}: policy.zero_touch_open must be a boolean')
                 if 'decision_mode' in policy and \
-                        policy['decision_mode'] not in ('kguard', 'closed'):
-                    errors.append(f'{where}: policy.decision_mode must be kguard|closed')
+                        policy['decision_mode'] not in ('external', 'closed'):
+                    errors.append(f'{where}: policy.decision_mode must be external|closed')
                 for key, lo, hi in (('decision_timeout_ms', 500, 5000),
                                     ('pending_retry_after_s', 30, 3600)):
                     if key in policy and (type(policy[key]) is not int

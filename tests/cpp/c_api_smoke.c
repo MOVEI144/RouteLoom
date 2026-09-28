@@ -3,6 +3,9 @@
 #include <stdlib.h>
 
 #include "routeloom/routeloom.h"
+#include "routeloom/version.h"
+
+_Static_assert(ROUTELOOM_CORE_C_ABI == RL_ABI_VERSION, "protocol/manifest.json core_c_abi");
 
 int main(void) {
   rl_node_config_t config;

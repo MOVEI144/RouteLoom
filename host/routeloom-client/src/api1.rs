@@ -37,6 +37,7 @@ pub mod site;
 
 /// The daemon's `wait_ms` ceiling for group.send / group.get.
 pub const GROUP_WAIT_MS_MAX: u32 = 15_000;
+pub const API_VERSION: u32 = 1;
 
 /// Event kinds the membership stream subscribes to.
 pub const MEMBERSHIP_EVENT_KINDS: [&str; 3] = ["node_joined", "node_left", "link_changed"];
@@ -286,7 +287,7 @@ impl RouteLoomTransport {
     fn request_line(&self, method: &str, params: &str) -> String {
         let n = self.counter.fetch_add(1, Ordering::Relaxed);
         format!(
-            "API1 {{\"v\":1,\"request_id\":\"rlc-{}-{n}\",\"method\":\"{method}\",\"params\":{params}}}\n",
+            "API1 {{\"v\":{API_VERSION},\"request_id\":\"rlc-{}-{n}\",\"method\":\"{method}\",\"params\":{params}}}\n",
             std::process::id()
         )
     }

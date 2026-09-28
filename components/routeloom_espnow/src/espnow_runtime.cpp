@@ -24,8 +24,26 @@ namespace {
 // Wire-lane autonomy control frames are 1-hop liveness exchanges; a short
 // lifetime keeps a stale probe from circulating.
 constexpr std::uint32_t kAutonomyWireLifetimeMs = 500;
-// poll_once runs every ~2ms: stack headroom is logged once a minute.
-constexpr std::uint64_t kStackHwmLogIntervalMs = 60000;
+// poll_once runs every ~2ms: the periodic trace is logged once a minute.
+[[maybe_unused]] constexpr std::uint64_t kStackHwmLogIntervalMs = 60000;
+
+// ms -> ticks rounded up, at least one tick. pdMS_TO_TICKS truncates: with
+// a 100 Hz tick the 2 ms Owner wait would be 0 ticks, a busy spin.
+TickType_t ms_to_ticks_ceil(const std::uint64_t ms) noexcept {
+  constexpr std::uint64_t kMaxTicks = portMAX_DELAY - 1;  // portMAX_DELAY waits forever
+  constexpr std::uint64_t kTickRate = configTICK_RATE_HZ;
+  const std::uint64_t whole_ms = ms / 1000U;
+  const std::uint64_t fraction = (ms % 1000U * kTickRate + 999U) / 1000U;
+  if (whole_ms > kMaxTicks / kTickRate) return static_cast<TickType_t>(kMaxTicks);
+  const std::uint64_t whole_ticks = whole_ms * kTickRate;
+  if (fraction >= kMaxTicks - whole_ticks) return static_cast<TickType_t>(kMaxTicks);
+  const std::uint64_t ticks = whole_ticks + fraction;
+  return static_cast<TickType_t>(ticks == 0 ? 1 : ticks);
+}
+
+void saturating_inc(std::uint32_t& counter) noexcept {
+  if (counter != UINT32_MAX) ++counter;
+}
 
 #if CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
 void trace_rld1(const char* direction, const ByteView frame) noexcept {
@@ -756,10 +774,10 @@ void EspNowRuntime::stop() noexcept {
   // queues down under the in-flight frame (configASSERT on the next
   // queue touch), the same hazard the pre-join code had.
   if (task_.load() != xTaskGetCurrentTaskHandle()) {
-    constexpr TickType_t kWarnIntervalTicks = pdMS_TO_TICKS(5000);
+    const TickType_t kWarnIntervalTicks = ms_to_ticks_ceil(5000);
     TickType_t waited_ticks = 0;
     while (task_running_.load()) {
-      vTaskDelay(pdMS_TO_TICKS(1));
+      vTaskDelay(1);
       if (++waited_ticks >= kWarnIntervalTicks) {
         waited_ticks = 0;
         ESP_LOGW(kTag, "runtime task still draining");
@@ -822,6 +840,7 @@ void EspNowRuntime::poll_once() noexcept {
     return;
   }
   const MonotonicMs now = now_ms();
+  saturating_inc(owner_stats_.polls);
   if (!started_) {
     // Join RLD1 and channel operations run before the member Node starts.
     // No ordinary Wire frame may enter an unstarted Node; discard that
@@ -833,6 +852,7 @@ void EspNowRuntime::poll_once() noexcept {
     channel_runner_.poll(now);
     return;
   }
+#if CONFIG_ROUTELOOM_TRACE || CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY
   // Stack headroom of the CALLING task: poll_once is driven by the runtime
   // task (start_task) or by the app_main pump loops (bridge_node,
   // reference_node deep-sleep), so this one site covers whichever stack the
@@ -841,6 +861,19 @@ void EspNowRuntime::poll_once() noexcept {
     stack_hwm_log_ms_ = now;
     ESP_LOGI(kTag, "stack hwm %s %lu B", pcTaskGetName(nullptr),
              static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr)));
+    ESP_LOGI(kTag, "owner polls=%lu empty=%lu rxq_max=%lu max_us rx=%lu "
+                   "bootstrap=%lu node=%lu security=%lu",
+             static_cast<unsigned long>(owner_stats_.polls),
+             static_cast<unsigned long>(owner_stats_.empty_polls),
+             static_cast<unsigned long>(owner_stats_.rx_queue_max),
+             static_cast<unsigned long>(owner_stats_.max_rx_us),
+             static_cast<unsigned long>(owner_stats_.max_bootstrap_us),
+             static_cast<unsigned long>(owner_stats_.max_node_us),
+             static_cast<unsigned long>(owner_stats_.max_security_us));
+    const NodeWorkStats& node_work = node_.work_stats();
+    ESP_LOGI(kTag, "owner expiry_slots=%llu hop_accept_expired=%llu",
+             static_cast<unsigned long long>(node_work.expiry_slots_scanned),
+             static_cast<unsigned long long>(node_work.hop_accept_expired));
 #if CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY
     ESP_LOGI(kTag, "HIL HEAP free=%lu largest=%lu min=%lu B",
              static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
@@ -875,6 +908,8 @@ void EspNowRuntime::poll_once() noexcept {
     }
 #endif
   }
+#endif
+  const std::uint64_t rx_start_us = now_us();
   Event event{};
   // The dedicated reserved-completion slot drains FIRST — it resolves the
   // node's outstanding job and is never displaced by raw traffic.
@@ -933,7 +968,14 @@ void EspNowRuntime::poll_once() noexcept {
       node_.on_radio_tx_result(event.token, event.success, now);
     }
   }
-  while (xQueueReceive(event_queue_, &event, 0) == pdTRUE) {
+  // Bounded drain (kRxDrainPerPass): whatever stays queued runs first in
+  // the next pass, after this pass's timers, node poll and components.
+  std::size_t drained = 0;
+  while (drained < kRxDrainPerPass) {
+    const UBaseType_t depth = uxQueueMessagesWaiting(event_queue_);
+    if (depth > owner_stats_.rx_queue_max) owner_stats_.rx_queue_max = depth;
+    if (xQueueReceive(event_queue_, &event, 0) != pdTRUE) break;
+    ++drained;
     if (event.kind == EventKind::Tx) {
       // Telemetry gets every completion lane; the node's job resolution only
       // ever sees the Reserved lane — raw/stale completions resolve nothing
@@ -1011,6 +1053,8 @@ void EspNowRuntime::poll_once() noexcept {
       rx_source_ = {};
     }
   }
+  if (drained == 0) saturating_inc(owner_stats_.empty_polls);
+  note_max(owner_stats_.max_rx_us, now_us() - rx_start_us);
   // Callback watchdog on the reserved send: a driver that never calls back
   // must not wedge pending_tx_ forever. Fencing moves it to the stale lane
   // where a late callback resolves as Unknown evidence, never success.
@@ -1099,7 +1143,10 @@ void EspNowRuntime::poll_once() noexcept {
       (void)recover();
     }
   }
+  const std::uint64_t bootstrap_start_us = now_us();
   poll_bootstrap(now);
+  const std::uint64_t node_start_us = now_us();
+  note_max(owner_stats_.max_bootstrap_us, node_start_us - bootstrap_start_us);
   // Serialized channel operations advance here: drain fence -> verified
   // apply -> bounded visit dwell -> verified return home (04 §3/§8).
   channel_runner_.poll(now);
@@ -1146,6 +1193,7 @@ void EspNowRuntime::poll_once() noexcept {
   }
   if (auto* sink = node_.gateway_sink()) sink->poll(now);
   if (auto* sink = node_.config_sink()) sink->poll(now);
+  note_max(owner_stats_.max_node_us, now_us() - node_start_us);
 }
 
 void EspNowRuntime::poll_bootstrap(const MonotonicMs now) noexcept {
@@ -1183,7 +1231,7 @@ void EspNowRuntime::poll_bootstrap(const MonotonicMs now) noexcept {
 
 void EspNowRuntime::wait_for_event(const MonotonicMs timeout_ms) noexcept {
   if (event_queue_ == nullptr) {
-    vTaskDelay(pdMS_TO_TICKS(timeout_ms));
+    vTaskDelay(ms_to_ticks_ceil(timeout_ms));
     return;
   }
   // Staged completions bypass the queue: a TX callback that lands on a
@@ -1207,7 +1255,7 @@ void EspNowRuntime::wait_for_event(const MonotonicMs timeout_ms) noexcept {
     QueueHandle_t queue;
     void wait_until_posted(const MonotonicMs wait_ms) noexcept {
       Event peek{};
-      (void)xQueuePeek(queue, &peek, pdMS_TO_TICKS(wait_ms));
+      (void)xQueuePeek(queue, &peek, ms_to_ticks_ceil(wait_ms));
     }
   };
   QueueWait wait{event_queue_};

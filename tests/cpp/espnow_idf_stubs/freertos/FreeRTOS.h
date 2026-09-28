@@ -13,7 +13,10 @@ typedef void *QueueHandle_t;
 
 #define pdTRUE 1
 #define pdPASS 1
-#define pdMS_TO_TICKS(ms) ((TickType_t)(ms))
+// A 100 Hz tick (ESP-IDF's minimum) with ESP-IDF's truncating conversion,
+// so waits that round a short ms interval down to 0 ticks are visible.
+#define configTICK_RATE_HZ 100
+#define pdMS_TO_TICKS(ms) ((TickType_t)(((uint64_t)(ms) * configTICK_RATE_HZ) / 1000U))
 #define tskNO_AFFINITY (-1)
 
 typedef struct {

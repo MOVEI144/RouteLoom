@@ -32,8 +32,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
+use super::assignment_table::{Assignment, AssignmentTable};
 use routeloom_client::api1::RouteLoomTransport;
-use routeloom_client::site::{Assignment, KGuardMock, Role, SiteAdmin};
+use routeloom_client::site::{Role, SiteAdmin};
 use routeloom_protocol::authority::CarrierKind;
 use routeloom_protocol::host_ops::{SUB_AUTHORITY_DOWN, SUB_AUTHORITY_UP, SUB_SITE_STATE_SET};
 use routeloom_protocol::join_relay::{
@@ -155,7 +156,7 @@ struct MeshSite {
     service: Arc<SiteService>,
     transport: Arc<InProcessTransport>,
     link: RouteLoomTransport,
-    kguard: KGuardMock,
+    decider: AssignmentTable,
     dir: std::path::PathBuf,
     listener_stop: Arc<AtomicBool>,
     listener_thread: Option<thread::JoinHandle<()>>,
@@ -255,7 +256,7 @@ impl MeshSite {
             service,
             transport,
             link,
-            kguard: KGuardMock::default(),
+            decider: AssignmentTable::default(),
             dir,
             listener_stop,
             listener_thread: Some(listener_thread),
@@ -284,7 +285,7 @@ impl MeshSite {
 // --- Phase 0: provision one persona through the legacy joiner peer ------------
 // The legacy peer speaks the joiner_interop pipe (single site 0 here);
 // the drive below mirrors that module's World for one persona at a time
-// (relay ups/downs, KGuard, the USB-framed authority lane). Each persona
+// (relay ups/downs, the decider, the USB-framed authority lane). Each persona
 // converges to MemberReady + JoinConfirm + active GK before its slot
 // images are dumped for the mesh boot.
 
@@ -668,7 +669,7 @@ impl Provision {
         role: Role,
     ) -> (std::path::PathBuf, std::path::PathBuf) {
         self.site
-            .kguard
+            .decider
             .assign(persona.node, Assignment::Here(role));
         let mut peer = LegacyPeer::spawn(persona, self.now, seed);
         // Join to MemberReady.
@@ -737,7 +738,7 @@ impl Provision {
         self.site.service.tick(HostTime::sync(self.now));
         self.drain(peer);
         self.drain_authority_downs(peer, node);
-        let _ = self.site.kguard.serve_once(&self.site.link).unwrap();
+        let _ = self.site.decider.serve_once(&self.site.link).unwrap();
         self.drain(peer);
         tick
     }
@@ -967,6 +968,11 @@ struct MeshSnap {
     admissions_rejected: u32,
     member_starts: u32,
     link_request_failures: u32,
+    owner_polls: u32,
+    owner_empty_polls: u32,
+    rx_queue_max: u32,
+    expiry_slots_scanned: u64,
+    hop_accept_expired: u64,
 }
 
 #[allow(dead_code)]
@@ -1122,6 +1128,11 @@ fn parse_mesh_snap(payload: &[u8]) -> MeshSnap {
     snap.admissions_rejected = get_u32(payload, &mut pos);
     snap.member_starts = get_u32(payload, &mut pos);
     snap.link_request_failures = get_u32(payload, &mut pos);
+    snap.owner_polls = get_u32(payload, &mut pos);
+    snap.owner_empty_polls = get_u32(payload, &mut pos);
+    snap.rx_queue_max = get_u32(payload, &mut pos);
+    snap.expiry_slots_scanned = get_u64(payload, &mut pos);
+    snap.hop_accept_expired = get_u64(payload, &mut pos);
     assert_eq!(pos, payload.len(), "G fully consumed");
     snap
 }
@@ -2440,7 +2451,7 @@ impl MeshWorld {
         let _ = self
             .provision
             .site
-            .kguard
+            .decider
             .serve_once(&self.provision.site.link);
         for (index, tick) in ticks.iter().enumerate() {
             if let Some(tick) = tick {
@@ -2615,6 +2626,7 @@ fn mesh_route_loss_retry_has_one_terminal_delivery() {
     world.switch.drop_wire_kind(2, 1, WIRE_HOP_ACCEPT, 1);
     world.switch.drop_wire_kind(2, 1, WIRE_END_RECEIPT, 1);
     let before = world.snaps[0].rx_count;
+    let expired_before = world.snaps[1].hop_accept_expired;
     world.peers[1].app_send(testkit::GATEWAY, b"retry-once");
     world.pump_until(3000, |snaps| {
         snaps[0].rx_count > before
@@ -2639,6 +2651,10 @@ fn mesh_route_loss_retry_has_one_terminal_delivery() {
     );
     assert_eq!(world.snaps[2].transit_conflicts, 0);
     assert_eq!(world.snaps[2].receipt_conflicts, 0);
+    assert!(
+        world.snaps[1].hop_accept_expired > expired_before,
+        "the dropped HOP_ACCEPT expired the wait"
+    );
 }
 
 /// A stale binding remains the identity for authenticated Probe/Result
@@ -3211,6 +3227,16 @@ fn mesh_direct_converges_and_delivers() {
         "direct radio drops nothing: {}",
         world.switch.dropped
     );
+    // The Owner counters reach the observer.
+    for (index, snap) in world.snaps.iter().enumerate() {
+        assert!(
+            snap.owner_polls > snap.owner_empty_polls
+                && snap.owner_empty_polls > 0
+                && snap.rx_queue_max > 0
+                && snap.expiry_slots_scanned > 0,
+            "peer {index} owner counters: {snap:?}"
+        );
+    }
     assert_eq!(
         world.usb_host.auth_sessions.len(),
         1,
@@ -4862,10 +4888,10 @@ fn mesh_c1_tree_ordered_adoption() {
     c1_once("c1-rev", reversed, 2, 2, 1);
 }
 
-/// KGuard-visible join requests currently open for one node (C2: the
+/// The decider-visible join requests currently open for one node (C2: the
 /// ZT auto-reissue must not open any — "人手 allow 操作は 0" is the
 /// absence of new requests, not a served decision).
-fn kguard_requests_for(world: &MeshWorld, node: u64) -> usize {
+fn decider_requests_for(world: &MeshWorld, node: u64) -> usize {
     world
         .provision
         .site
@@ -4880,7 +4906,7 @@ fn kguard_requests_for(world: &MeshWorld, node: u64) -> usize {
 /// or G is cut from the B/A island (G adopts alone, the island
 /// keeps old-network mutual comms, both stay unknown). Past the
 /// grace the fault clears and the stragglers must come back through
-/// the ZT auto-reissue — Recovered, never Applied, with no KGuard
+/// the ZT auto-reissue — Recovered, never Applied, with no decider
 /// request opened for them.
 fn c2_once(tag: &str, island: bool) {
     use routeloom_client::site::SiteAdmin;
@@ -4888,8 +4914,8 @@ fn c2_once(tag: &str, island: bool) {
         return; // no C++ peers: skip (ignore-equivalent)
     };
     converge_gated(&mut world, 1, "c2 cutover");
-    let kguard_a_before = kguard_requests_for(&world, NODE_A);
-    let kguard_b_before = kguard_requests_for(&world, NODE_B);
+    let decider_a_before = decider_requests_for(&world, NODE_A);
+    let decider_b_before = decider_requests_for(&world, NODE_B);
 
     let staged_at = world.now;
     let operation_id = stage_cutover(&mut world, tag);
@@ -5125,7 +5151,7 @@ fn c2_once(tag: &str, island: bool) {
     }
 
     // The fault clears; Prepared must not wedge — the stragglers
-    // come back through the ZT auto-reissue (no KGuard round trip).
+    // come back through the ZT auto-reissue (no decider round trip).
     world.switch.drop_next = [[0; 3]; 3];
     world.switch.ack_drop_next = [[0; 3]; 3];
     if island {
@@ -5199,9 +5225,9 @@ fn c2_once(tag: &str, island: bool) {
         "A recovered: {targets:?}"
     );
     assert_eq!(
-        kguard_requests_for(&world, NODE_A),
-        kguard_a_before,
-        "no KGuard request for A (auto-reissue)"
+        decider_requests_for(&world, NODE_A),
+        decider_a_before,
+        "no decider request for A (auto-reissue)"
     );
     if island {
         assert_eq!(
@@ -5210,9 +5236,9 @@ fn c2_once(tag: &str, island: bool) {
             "island B recovered: {targets:?}"
         );
         assert_eq!(
-            kguard_requests_for(&world, NODE_B),
-            kguard_b_before,
-            "no KGuard request for island B (auto-reissue)"
+            decider_requests_for(&world, NODE_B),
+            decider_b_before,
+            "no decider request for island B (auto-reissue)"
         );
     }
     assert_eq!(
@@ -5373,7 +5399,7 @@ fn cutover_progress(
 
 /// Run to the recovery verdict: every peer ACTIVE on the new
 /// network/GK with its authority channel re-open, the ledger's
-/// unknown drained, and no KGuard request for any straggler
+/// unknown drained, and no decider request for any straggler
 /// (auto-reissue, not a manual round trip). `chatter` drives the
 /// survivor evidence a dark straggler strikes on (04 §3.5).
 fn cutover_converged(
@@ -5435,14 +5461,14 @@ fn cutover_converged(
 /// it does not hold, so A's row goes unknown at the grace boundary —
 /// while the member's own receipt is journal-durable and keeps
 /// retrying. When the uplink heals the real receipt lands and the
-/// row resolves applied; the op never wedges and no KGuard round
+/// row resolves applied; the op never wedges and no decider round
 /// trip is needed.
 #[test]
 fn mesh_c3_commit_applied_receipt_loss() {
     let Some(mut world) = MeshWorld::start("c3", Switch::forced_multihop()) else {
         return; // no C++ peers: skip (ignore-equivalent)
     };
-    let kguard_a_before = kguard_requests_for(&world, NODE_A);
+    let decider_a_before = decider_requests_for(&world, NODE_A);
     let (operation_id, next_gk, new_network, _old_network, t0) =
         cutover_through_commit(&mut world, "c3");
     // A's COMMIT comes down B→A while its APPLIED receipt goes back
@@ -5490,9 +5516,9 @@ fn mesh_c3_commit_applied_receipt_loss() {
     let progress = cutover_progress(&world, &operation_id);
     assert_eq!(progress.applied, 3, "A's receipt landed: {progress:?}");
     assert_eq!(
-        kguard_requests_for(&world, NODE_A),
-        kguard_a_before,
-        "no KGuard request for A (auto-recovery)"
+        decider_requests_for(&world, NODE_A),
+        decider_a_before,
+        "no decider request for A (auto-recovery)"
     );
 }
 
@@ -5673,7 +5699,7 @@ fn mesh_c4_daemon_restart_committed() {
 /// recovery_pending opens, and the members stay Prepared on the old
 /// network. Reconnecting re-authenticates the authority session and
 /// the member-driven recovery road converges every straggler — no
-/// KGuard request, no silent applied.
+/// decider request, no silent applied.
 #[test]
 fn mesh_c5_gateway_disconnect_and_resume() {
     let Some(mut world) = MeshWorld::start("c5", Switch::forced_multihop()) else {

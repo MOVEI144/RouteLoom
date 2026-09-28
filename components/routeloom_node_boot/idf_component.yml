@@ -3,7 +3,7 @@
 # sdkv1 stores), plus the IDF builtins nvs_flash, esp_wifi, esp_timer,
 # freertos, esp_driver_usb_serial_jtag and app_update.
 name: routeloom/routeloom_node_boot
-version: 0.1.0
+version: 2.0.0-dev
 description: >-
   Shared RouteLoom node bring-up (design-devflow.md §5.1): NVS, boot
   session, sdkv1 stores, the EspNowSecurityOwner, EspNowRuntime wiring,
@@ -25,4 +25,4 @@ targets:
   - esp32c6
 dependencies:
   idf: ">=6.0"
-  routeloom/routeloom_espnow: "^0.1.0"
+  routeloom/routeloom_espnow: "^2.0.0-dev"

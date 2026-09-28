@@ -614,7 +614,7 @@ class ProvisionTests(unittest.TestCase):
                 'decision_mode': mode, 'lab_enrollment_active': active}})
         self.assertIn('有効', text('development', 'lab_inventory', True))
         self.assertIn('閉鎖中', text('development', 'lab_inventory', False))
-        self.assertIn('無効', text('development', 'kguard', False))
+        self.assertIn('無効', text('development', 'external', False))
         self.assertIn('不可', text('production', 'lab_inventory', True))
         self.assertIn('不明', auto_approval_text(None))
 

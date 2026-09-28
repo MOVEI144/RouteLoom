@@ -48,8 +48,8 @@ pub const STORAGE_RAM: u8 = 0;
 pub const STORAGE_DURABLE: u8 = 1;
 /// Host queue discipline (`options.queue_mode`, design-devflow D10):
 /// FIFO keeps every admitted record; LATEST_PER_DESTINATION is the
-/// KG-style control profile — a newer submit to the same destination
-/// retires the still-queued older one. Host-side semantics only: the
+/// latest-value control mode (e.g. display boards) — a newer submit to
+/// the same destination retires the still-queued older one. Host-side semantics only: the
 /// wire canonical is unchanged, and dedup compares the mode field-wise.
 pub const QUEUE_FIFO: u8 = 0;
 pub const QUEUE_LATEST_PER_DESTINATION: u8 = 1;

@@ -200,6 +200,13 @@ impl FileRootSigner {
         self.signing_key.to_bytes().into()
     }
 
+    /// This key as the config authority under the same id: a Site
+    /// Authority issues remote-config permits with its SAK, kid = site_id
+    /// (V2-08). In-process only; the key documents stay distinct.
+    pub fn config_authority_signer(&self) -> Result<FileAuthoritySigner> {
+        FileAuthoritySigner::from_secret(self.root_id, &self.secret_scalar())
+    }
+
     /// Write the key file with mode 0600, refusing to overwrite an existing
     /// file — clobbering a root key silently is worse than making the
     /// operator delete it deliberately.

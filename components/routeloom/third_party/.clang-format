@@ -1,0 +1,3 @@
+# Vendored upstream code keeps its own style.
+DisableFormat: true
+SortIncludes: Never

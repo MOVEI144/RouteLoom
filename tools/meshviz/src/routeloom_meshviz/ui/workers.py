@@ -343,7 +343,7 @@ class ModelWorker(QObject):
             return
         try:
             self.capture = Capture(Path(path), Path(path).stem,
-                                   versions={'meshviz': '0.1.0'}, scopes=[])
+                                   versions={'meshviz': '2.0.0-dev'}, scopes=[])
             # Seed the capture with the current view so a replay starts complete.
             for key, event in self._baseline():
                 self.capture.add(event, self.clock)

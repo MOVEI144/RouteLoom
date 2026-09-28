@@ -4,7 +4,7 @@
 
 ## 提供するもの
 
-両コンポーネントに `idf_component.yml` manifest を置いた。`name` は `routeloom/routeloom`・`routeloom/routeloom_espnow`（namespace `routeloom` 前置）、`version` は `0.1.0`、`license` は `Apache-2.0`。`routeloom_espnow` は `routeloom/routeloom: ^0.1.0` と `idf >= 6.0` に依存する。`esp_wifi`・`nvs_flash`・`mbedtls` 等の IDF 内蔵コンポーネントは manifest の依存ではなく、従来通り CMake の `REQUIRES` と `idf` バージョン下限で表す。
+両コンポーネントに `idf_component.yml` manifest を置いた。`name` は `routeloom/routeloom`・`routeloom/routeloom_espnow`（namespace `routeloom` 前置）、`version` は `protocol/manifest.json` の SDK 版（現在 `2.0.0-dev`）、`license` は `Apache-2.0`。`routeloom_espnow` は `routeloom/routeloom: ^2.0.0-dev` と `idf >= 6.0` に依存する。`esp_wifi`・`nvs_flash`・`mbedtls` 等の IDF 内蔵コンポーネントは manifest の依存ではなく、従来通り CMake の `REQUIRES` と `idf` バージョン下限で表す。
 
 manifest はレジストリ公開のためではなく、**ローカル path 参照と git 依存の解決**のためにある。現時点で ESP-IDF Component Registry への公開リリースは存在しない。
 
@@ -43,12 +43,12 @@ git `path` 依存は component の subdirectory **だけ**を取り出す。こ�
 ## バージョン固定
 
 - `version` フィールドは git ref（branch / tag / commit SHA）を受ける。実験以外では浮動する `main` ではなく tag か commit SHA を pin すること。
-- manifest の `version: 0.1.0` は依存解決上の識別子であり、公開リリースを意味しない。リポジトリに git tag はまだ存在しないため、現時点では commit SHA pin が最も確実な固定方法。
-- `routeloom_espnow` の `targets` は CI で compile 検証済みの `esp32c3` / `esp32s3` / `esp32c5` に限定している。他の ESP-NOW 対応 chip は未検証であり、manifest が solver 段階で除外する。
+- manifest の `version: 2.0.0-dev` は依存解決上の識別子であり、公開リリースを意味しない。リポジトリに git tag はまだ存在しないため、現時点では commit SHA pin が最も確実な固定方法。
+- `routeloom_espnow` の `targets` は `esp32c3` / `esp32s3` / `esp32c5` / `esp32c6`。必須 CI matrix は前の 3 chip、`esp32c6` は別の `c6-experimental` job で build する。`targets` への記載や build 成功は RF・実機の認定を意味しない。
 
 ## 成熟度の正直な位置づけ
 
 - 検証済み環境は `espressif/idf:v6.0.3`（CI pin）のみ。`idf >= 6.0` の下限はそれより古い系列を明確に拒否するためのもので、6.x 全系統の動作を保証しない。
-- Component Registry への upload・semver release は未実施。`0.1.0` は pre-release 状態を表す。
+- Component Registry への upload・semver release は未実施。`2.0.0-dev` は pre-release 状態を表す。
 - build 成功は compile/link の証拠のみ。実機 RF、到達距離、電池寿命、認証適合は別途 HIL 認定が必要（`docs/STATUS.md` 参照）。
 - `DevelopmentPskSecurityProvider` は EXPERIMENTAL の開発 profile であり、本番 Identity（EDHOC/RPK）を置き換えない。既定 dev key を配備に使用してはいけない。

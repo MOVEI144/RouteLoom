@@ -106,9 +106,8 @@ struct MigrationPlan {
 
 // Canonical plan-blob codec. The byte layout is internal to the plan object
 // (carried as a ControlObject payload); it is deterministic so the blob
-// digest is stable. plan_digest is a deterministic binding like
-// bind_operation_payload — NOT a cryptographic hash; a production security
-// profile replaces it with the negotiated suite hash over the same bytes.
+// digest is stable. plan_digest is SHA-256 over the encoded blob — the
+// commit signature binds the plan only through it.
 constexpr std::uint8_t kMigrationPlanVersion = 1;
 Status plan_encode(const MigrationPlan& plan, MutableByteView target,
                    std::size_t& out_size) noexcept;

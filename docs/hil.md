@@ -97,6 +97,9 @@ python3 tools/hil/route_convergence.py --ctl host/target/debug/routeloomctl \
     --socket /tmp/rl.sock --nodes 2 3 --seconds 90 \
     --out artifacts/hil/routes.jsonl
 
+# The periodic console lines (stack hwm, owner counters, member/authority
+# counters) need CONFIG_ROUTELOOM_TRACE=y; CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY=y
+# also keeps the once-a-minute stack and owner lines.
 # For a long run, pace accepted sends below the gateway's admission limit.
 # Capture each reference console and poll adapter/nodes/events separately;
 # then summarize delivery, routes, boot IDs, and heap trend.

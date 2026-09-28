@@ -569,7 +569,7 @@ void test_v1_j07_invalid_rli1() {
 }
 
 // --- V1-J03: pending, then a late allow ----------------------------------------------------
-// A waits out the KGuard timeout (pending + retry), then allows: the device
+// A waits out the decider timeout (pending + retry), then allows: the device
 // retries with a full fresh EDHOC (no Resume phase anywhere) and joins.
 void test_v1_j03_pending_then_allow() {
   current = "v1-j03";

@@ -46,6 +46,7 @@ pub const SCOPE_CAP: usize = 64;
 // CONFLICT resubmits so epoch-/replay-spam cannot bypass it.
 pub const HOST_RATE_PER_MINUTE: u64 = 2;
 pub const HOST_RATE_BURST: u64 = 16;
+#[cfg(test)]
 pub const RATE_TOKEN_INTERVAL_MS: u64 = 60_000 / HOST_RATE_PER_MINUTE;
 /// Explicit bench admission profile (design-devflow D10, contracts.json
 /// `capacity.bench`): raised HOST submission budget for development
@@ -63,19 +64,34 @@ pub const BENCH_RATE_BURST: u64 = 8;
 pub const BENCH_INFLIGHT_MAX: u64 = 4;
 pub const BENCH_RUN_WINDOW_CALLS: u64 = 64;
 pub const BENCH_RUN_WINDOW_MS: u64 = 60_000;
-/// Bound on principals with tracked buckets. A bucket refilled to full
-/// holds no state a fresh one would not, so those are pruned first.
+/// Control profile (#195): `messages.submit` with `queue_mode`
+/// LATEST_PER_DESTINATION draws from its own lane instead of the normal
+/// budget — per destination, per principal and over the whole site — so
+/// display-style streams get at least 12 values/minute per board while
+/// the normal durable budget and every store quota stay as they are.
+/// Every other admission call keeps the normal budget.
+pub const CONTROL_DEST_RATE_PER_MINUTE: u64 = 12;
+pub const CONTROL_DEST_BURST: u64 = 4;
+pub const CONTROL_PRINCIPAL_RATE_PER_MINUTE: u64 = 300;
+pub const CONTROL_PRINCIPAL_BURST: u64 = 32;
+pub const CONTROL_GLOBAL_RATE_PER_MINUTE: u64 = 600;
+pub const CONTROL_GLOBAL_BURST: u64 = 32;
+/// Bound on principals (and, in the control lane, destinations) with
+/// tracked buckets. A bucket refilled to full holds no state a fresh one
+/// would not, so those are pruned first.
 const MAX_TRACKED_PRINCIPALS: usize = 1024;
 
 /// Which admission budget `AdmissionLimiter` applies. `Normal` is the
 /// contract default; `BenchV1` is the development-site bench profile —
 /// it engages only through the explicit daemon flag and is always
-/// reported by name through `capacity.get`.
+/// reported by name through `capacity.get`. `Control` is `Normal` plus
+/// the latest-value lane (`CONTROL_*`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AdmissionProfile {
     #[default]
     Normal,
     BenchV1,
+    Control,
 }
 
 impl AdmissionProfile {
@@ -83,6 +99,7 @@ impl AdmissionProfile {
         match self {
             Self::Normal => "normal",
             Self::BenchV1 => "bench-v1",
+            Self::Control => "control",
         }
     }
 
@@ -90,28 +107,22 @@ impl AdmissionProfile {
         match name {
             "normal" => Some(Self::Normal),
             "bench-v1" => Some(Self::BenchV1),
+            "control" => Some(Self::Control),
             _ => None,
         }
     }
 
     pub fn rate_per_minute(self) -> u64 {
         match self {
-            Self::Normal => HOST_RATE_PER_MINUTE,
+            Self::Normal | Self::Control => HOST_RATE_PER_MINUTE,
             Self::BenchV1 => BENCH_RATE_PER_MINUTE,
         }
     }
 
     pub fn burst(self) -> u64 {
         match self {
-            Self::Normal => HOST_RATE_BURST,
+            Self::Normal | Self::Control => HOST_RATE_BURST,
             Self::BenchV1 => BENCH_RATE_BURST,
-        }
-    }
-
-    fn token_interval_ms(self) -> u64 {
-        match self {
-            Self::Normal => RATE_TOKEN_INTERVAL_MS,
-            _ => 60_000 / self.rate_per_minute(),
         }
     }
 }
@@ -212,7 +223,7 @@ pub struct StoredOperation {
     pub hop_limit: u8,
     /// Queue discipline requested at submit (canonical.rs `queue_mode`):
     /// QUEUE_FIFO or QUEUE_LATEST_PER_DESTINATION. The latter marks the
-    /// record a KG-style control value — a newer submit to the same
+    /// record a latest-value control — a newer submit to the same
     /// destination retires it before dispatch (`superseded_by`).
     pub queue_mode: u8,
     /// Payload bytes are retained for the TX-I2 dispatcher handoff: the
@@ -745,7 +756,7 @@ pub trait OperationStore {
     }
     /// Retire every still-supersedeable QUEUE_LATEST_PER_DESTINATION
     /// record this principal queued for the same (network, destination)
-    /// — the KG control profile keeps only the latest value per
+    /// — the latest-value discipline keeps only the latest value per
     /// destination (D10). Called after `keep_seq` was committed, so a
     /// lost replacement can never take an older value down with it.
     /// Returns the seqs actually retired; records that already crossed
@@ -971,12 +982,12 @@ struct RateBucket {
 }
 
 impl RateBucket {
-    fn full(now_ms: u64, profile: AdmissionProfile) -> Self {
+    fn full(now_ms: u64, rate_per_minute: u64, burst: u64) -> Self {
         Self {
-            tokens: profile.burst(),
+            tokens: burst,
             last_ms: now_ms,
-            interval_ms: profile.token_interval_ms(),
-            burst: profile.burst(),
+            interval_ms: 60_000 / rate_per_minute,
+            burst,
         }
     }
 
@@ -1001,7 +1012,8 @@ impl RateBucket {
 
 /// Why an admission call was throttled (04 §4). `scope` is `"principal"`
 /// when the caller's own bucket is empty, `"global"` when the shared
-/// all-principals bucket is.
+/// all-principals bucket is, `"destination"` when the control lane's
+/// bucket for that destination is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RateDeny {
     pub scope: &'static str,
@@ -1016,6 +1028,67 @@ pub struct AdmissionLimiter {
     profile: AdmissionProfile,
     global: RateBucket,
     per_principal: HashMap<Principal, RateBucket>,
+    /// Control profile only: the latest-value lane.
+    control: Option<ControlLane>,
+}
+
+/// A latest-value destination: (network, destination kind, destination).
+pub type LatestDestination = (u64, u8, u64);
+
+struct ControlLane {
+    global: RateBucket,
+    per_principal: HashMap<Principal, RateBucket>,
+    per_destination: HashMap<LatestDestination, RateBucket>,
+}
+
+/// The tracked bucket for `key`, created full when absent; `None` when
+/// the table is at its bound and nothing prunable is left (the caller is
+/// then held by the wider scopes alone).
+fn tracked_bucket<'a, K: Clone + Eq + std::hash::Hash>(
+    buckets: &'a mut HashMap<K, RateBucket>,
+    key: &K,
+    now_ms: u64,
+    rate_per_minute: u64,
+    burst: u64,
+) -> Option<&'a mut RateBucket> {
+    if buckets.len() >= MAX_TRACKED_PRINCIPALS && !buckets.contains_key(key) {
+        buckets.retain(|_, bucket| {
+            bucket.refill(now_ms);
+            bucket.tokens < bucket.burst
+        });
+        if buckets.len() >= MAX_TRACKED_PRINCIPALS {
+            return None;
+        }
+    }
+    let bucket = buckets
+        .entry(key.clone())
+        .or_insert_with(|| RateBucket::full(now_ms, rate_per_minute, burst));
+    bucket.refill(now_ms);
+    Some(bucket)
+}
+
+/// Checks every scope first and charges only when all have a token, so a
+/// denial consumes nothing. The narrowest scope is named on a deny.
+fn charge(
+    scopes: &mut [(&'static str, Option<&mut RateBucket>)],
+    now_ms: u64,
+) -> Result<(), RateDeny> {
+    for (scope, bucket) in scopes.iter() {
+        if let Some(bucket) = bucket {
+            if bucket.tokens == 0 {
+                return Err(RateDeny {
+                    scope,
+                    retry_after_ms: bucket.retry_after_ms(now_ms),
+                });
+            }
+        }
+    }
+    for (_, bucket) in scopes.iter_mut() {
+        if let Some(bucket) = bucket {
+            bucket.tokens -= 1;
+        }
+    }
+    Ok(())
 }
 
 impl AdmissionLimiter {
@@ -1023,14 +1096,23 @@ impl AdmissionLimiter {
         Self::with_profile(AdmissionProfile::Normal, now_ms)
     }
 
-    /// A limiter running the named budget. `BenchV1` is wired here from
-    /// the daemon flag only — nothing in the store or API layers can
-    /// raise the budget on its own.
+    /// A limiter running the named budget. `BenchV1` and `Control` are
+    /// wired here from the daemon flag only — nothing in the store or API
+    /// layers can raise the budget on its own.
     pub fn with_profile(profile: AdmissionProfile, now_ms: u64) -> Self {
         Self {
             profile,
-            global: RateBucket::full(now_ms, profile),
+            global: RateBucket::full(now_ms, profile.rate_per_minute(), profile.burst()),
             per_principal: HashMap::new(),
+            control: (profile == AdmissionProfile::Control).then(|| ControlLane {
+                global: RateBucket::full(
+                    now_ms,
+                    CONTROL_GLOBAL_RATE_PER_MINUTE,
+                    CONTROL_GLOBAL_BURST,
+                ),
+                per_principal: HashMap::new(),
+                per_destination: HashMap::new(),
+            }),
         }
     }
 
@@ -1048,41 +1130,50 @@ impl AdmissionLimiter {
 
     pub fn admit_principal(&mut self, principal: &Principal, now_ms: u64) -> Result<(), RateDeny> {
         self.global.refill(now_ms);
-        if self.per_principal.len() >= MAX_TRACKED_PRINCIPALS
-            && !self.per_principal.contains_key(principal)
-        {
-            self.per_principal
-                .retain(|_, bucket| bucket.tokens < bucket.burst);
-        }
-        let trackable = self.per_principal.len() < MAX_TRACKED_PRINCIPALS
-            || self.per_principal.contains_key(principal);
-        if trackable {
-            let bucket = self
-                .per_principal
-                .entry(principal.clone())
-                .or_insert_with(|| RateBucket::full(now_ms, self.profile));
-            bucket.refill(now_ms);
-            if bucket.tokens == 0 {
-                return Err(RateDeny {
-                    scope: "principal",
-                    retry_after_ms: bucket.retry_after_ms(now_ms),
-                });
-            }
-        }
-        if self.global.tokens == 0 {
-            return Err(RateDeny {
-                scope: "global",
-                retry_after_ms: self.global.retry_after_ms(now_ms),
-            });
-        }
-        if trackable {
-            self.per_principal
-                .get_mut(principal)
-                .expect("inserted above")
-                .tokens -= 1;
-        }
-        self.global.tokens -= 1;
-        Ok(())
+        let (rate, burst) = (self.profile.rate_per_minute(), self.profile.burst());
+        let own = tracked_bucket(&mut self.per_principal, principal, now_ms, rate, burst);
+        charge(
+            &mut [("principal", own), ("global", Some(&mut self.global))],
+            now_ms,
+        )
+    }
+
+    /// Charge one `messages.submit`. Under `Control` a latest-value submit
+    /// (`latest` is its destination) draws from the control lane; every
+    /// other call, and every call under the other profiles, from the
+    /// normal budget.
+    pub fn admit_submit(
+        &mut self,
+        principal: &Principal,
+        latest: Option<LatestDestination>,
+        now_ms: u64,
+    ) -> Result<(), RateDeny> {
+        let (Some(lane), Some(destination)) = (self.control.as_mut(), latest) else {
+            return self.admit_principal(principal, now_ms);
+        };
+        lane.global.refill(now_ms);
+        let dest = tracked_bucket(
+            &mut lane.per_destination,
+            &destination,
+            now_ms,
+            CONTROL_DEST_RATE_PER_MINUTE,
+            CONTROL_DEST_BURST,
+        );
+        let own = tracked_bucket(
+            &mut lane.per_principal,
+            principal,
+            now_ms,
+            CONTROL_PRINCIPAL_RATE_PER_MINUTE,
+            CONTROL_PRINCIPAL_BURST,
+        );
+        charge(
+            &mut [
+                ("destination", dest),
+                ("principal", own),
+                ("global", Some(&mut lane.global)),
+            ],
+            now_ms,
+        )
     }
 }
 
@@ -2579,6 +2670,40 @@ mod tests {
         }
     }
 
+    /// #195: the control lane's site-wide bucket holds a second principal
+    /// once the first drained it across many destinations; the normal
+    /// budget is untouched by latest-value submits.
+    #[test]
+    fn control_lane_global_bound_spans_principals() {
+        let mut limiter = AdmissionLimiter::with_profile(AdmissionProfile::Control, 0);
+        let (one, two) = (Principal::UnixUid(1), Principal::UnixUid(2));
+        for dest in 0..CONTROL_GLOBAL_BURST {
+            assert!(limiter.admit_submit(&one, Some((1, 0, dest)), 0).is_ok());
+        }
+        let deny = limiter
+            .admit_submit(&two, Some((1, 0, 999)), 0)
+            .unwrap_err();
+        assert_eq!(deny.scope, "global");
+        assert_eq!(deny.retry_after_ms, 60_000 / CONTROL_GLOBAL_RATE_PER_MINUTE);
+        // The site refills before this principal: its own limit still
+        // rejects, without consuming the site's newly available token.
+        let deny = limiter
+            .admit_submit(&one, Some((1, 0, 999)), 100)
+            .unwrap_err();
+        assert_eq!(deny.scope, "principal");
+        assert_eq!(deny.retry_after_ms, 100);
+        assert!(limiter.admit_submit(&two, Some((1, 0, 998)), 100).is_ok());
+        for _ in 0..HOST_RATE_BURST {
+            assert!(limiter.admit_submit(&two, None, 0).is_ok());
+        }
+        // Normal leaves latest-value submits on the normal budget.
+        let mut normal = AdmissionLimiter::new(0);
+        for dest in 0..HOST_RATE_BURST {
+            assert!(normal.admit_submit(&one, Some((1, 0, dest)), 0).is_ok());
+        }
+        assert!(normal.admit_submit(&one, Some((1, 0, 99)), 0).is_err());
+    }
+
     #[test]
     fn bench_v1_profile_uses_its_own_budget() {
         let now = 10_000;
@@ -2607,6 +2732,10 @@ mod tests {
         assert_eq!(
             AdmissionProfile::parse("normal"),
             Some(AdmissionProfile::Normal)
+        );
+        assert_eq!(
+            AdmissionProfile::parse("control"),
+            Some(AdmissionProfile::Control)
         );
         assert_eq!(AdmissionProfile::parse("bogus"), None);
         assert_eq!(AdmissionProfile::BenchV1.name(), "bench-v1");

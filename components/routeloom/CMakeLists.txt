@@ -65,6 +65,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/sdkv1_group_keys.cpp
   src/sdkv1_group_security.cpp
   src/session_bank.cpp
+  src/site_signed.cpp
   src/status.cpp
   src/telemetry.cpp
   src/trust_manifest.cpp

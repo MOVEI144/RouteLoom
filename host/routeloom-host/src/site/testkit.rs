@@ -120,7 +120,7 @@ pub enum Outcome {
     /// An EDHOC error message came back.
     EdhocError(Vec<u8>),
     Aborted(AbortReason),
-    /// message_3 was accepted; the authority is waiting for KGuard.
+    /// message_3 was accepted; the authority is waiting for the decider.
     Waiting,
 }
 
