@@ -42,12 +42,18 @@ struct EspNowSecurityOwnerTestAccess {
   static void attach_runtime(EspNowSecurityOwner& owner, EspNowRuntime& runtime) noexcept {
     owner.runtime_ = &runtime;
   }
+  static void attach_bridge(EspNowSecurityOwner& owner, usb::UsbBridge& bridge) noexcept {
+    owner.bridge_ = &bridge;
+  }
   static void apply(EspNowSecurityOwner& owner,
                     const sdkv1::CoordinatorMemberConfig& config) noexcept {
     owner.on_member_config(config, owner.runtime_->now_ms());
   }
   static NetworkId adopted_network(const EspNowSecurityOwner& owner) noexcept {
     return owner.adopted_network_;
+  }
+  static void set_flat_group_routing(EspNowSecurityOwner& owner, bool flat) noexcept {
+    owner.config_.flat_group_routing = flat;
   }
 };
 
@@ -281,11 +287,111 @@ void test_same_boot_reapply(bool change_site_epoch) {
   runtime.stop();
 }
 
+// MemberEdhoc root mapping (dev-flow §6.1): the verified SitePackage
+// gateway list lands on route_gateways (scoped) or group_roots (flat
+// profile, Config::flat_group_routing) — the routing policy stays
+// separate from the root set.
+void test_member_root_mapping(bool flat) {
+  idf_stub::reset();
+  Stores stores{};
+  CHECK(stores.init());
+  EspNowSecurityOwner owner{};
+  EspNowSecurityOwnerTestAccess::install_coordinator(owner, stores.deps(owner));
+  EspNowSecurityOwnerTestAccess::set_flat_group_routing(owner, flat);
+  routeloom_test::CapturingObserver observer{};
+  EspNowRuntime runtime(radio_config(), owner.session_provider(), observer);
+  EspNowSecurityOwnerTestAccess::attach_runtime(owner, runtime);
+  CHECK(runtime.initialize().ok());
+
+  CoordinatorEvent boot{};
+  boot.kind = CoordinatorEventKind::Boot;
+  boot.now = kStart;
+  boot.boot_witness = kBoot;
+  boot.boot_prepared = true;
+  CHECK(owner.coordinator().step(boot).ok());
+  MonotonicMs now = kStart;
+  CoordinatorMemberConfig member{};
+  CHECK(take_apply(owner.coordinator(), now, member));
+  EspNowSecurityOwnerTestAccess::apply(owner, member);
+  CHECK(runtime.node().started());
+  const NodeConfig& node = runtime.node().config();
+  if (flat) {
+    CHECK(node.group_roots[0] == site_record().gateways[0] &&
+          node.group_roots[1] == site_record().gateways[1]);
+    CHECK(node.route_gateways[0] == kInvalidNodeId);
+  } else {
+    CHECK(node.route_gateways[0] == site_record().gateways[0] &&
+          node.route_gateways[1] == site_record().gateways[1]);
+    CHECK(node.group_roots[0] == kInvalidNodeId);
+  }
+  runtime.stop();
+}
+
+class NullStream final : public usb::ByteStream {
+ public:
+  Status write(const ByteView data, std::size_t& written) noexcept override {
+    written = data.size;
+    return Status::success();
+  }
+};
+
+// D07/D09: bridge firmware binds the group lane BEFORE the member joins —
+// the pre-adoption node is no group root, so the requested capability bit
+// is masked out of HelloAck. Adoption installs the site gateway list; the
+// owner refreshes the bridge and the next HelloAck advertises group
+// delivery again.
+void test_member_adoption_restores_group_capability() {
+  idf_stub::reset();
+  Stores stores{};
+  CHECK(stores.init());
+  EspNowSecurityOwner owner{};
+  EspNowSecurityOwnerTestAccess::install_coordinator(owner, stores.deps(owner));
+  routeloom_test::CapturingObserver observer{};
+  EspNowRuntime runtime(radio_config(), owner.session_provider(), observer);
+  EspNowSecurityOwnerTestAccess::attach_runtime(owner, runtime);
+  CHECK(runtime.initialize().ok());
+
+  NullStream stream{};
+  const std::array<std::uint8_t, 16> secret{};
+  usb::UsbBridge::Config bridge_cfg{};
+  bridge_cfg.secret = ByteView{secret.data(), secret.size()};
+  bridge_cfg.node = kNode;
+  bridge_cfg.network = kNetwork;
+  bridge_cfg.boot_id = 1;
+  bridge_cfg.capability = usb::kCapGroupDeliveryV1;
+  usb::UsbBridge bridge(bridge_cfg, stream);
+  bridge.set_mesh(&runtime.node());
+  CHECK(bridge.attach_group().ok());
+  CHECK((bridge.capability() & usb::kCapGroupDeliveryV1) == 0);
+  EspNowSecurityOwnerTestAccess::attach_bridge(owner, bridge);
+
+  CoordinatorEvent boot{};
+  boot.kind = CoordinatorEventKind::Boot;
+  boot.now = kStart;
+  boot.boot_witness = kBoot;
+  boot.boot_prepared = true;
+  CHECK(owner.coordinator().step(boot).ok());
+  MonotonicMs now = kStart;
+  CoordinatorMemberConfig member{};
+  CHECK(take_apply(owner.coordinator(), now, member));
+  // A gateway member: the adopted gateway list names this node.
+  member.route_gateways[0] = kNode;
+  member.role = static_cast<std::uint8_t>(kMemberRoleGateway);
+  EspNowSecurityOwnerTestAccess::apply(owner, member);
+  CHECK(runtime.node().started());
+  CHECK(runtime.node().group_origin_servable());
+  CHECK((bridge.capability() & usb::kCapGroupDeliveryV1) != 0);
+  runtime.stop();
+}
+
 }  // namespace
 
 int main() {
   test_usb_network_after_cutover();
   test_same_boot_reapply(false);
   test_same_boot_reapply(true);
+  test_member_root_mapping(false);
+  test_member_root_mapping(true);
+  test_member_adoption_restores_group_capability();
   return failures == 0 ? 0 : 1;
 }

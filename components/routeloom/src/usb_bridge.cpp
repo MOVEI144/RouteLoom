@@ -142,17 +142,43 @@ Status UsbBridge::attach_group() noexcept {
   if (config_.mesh == nullptr) {
     return Status::error(StatusCode::InvalidState, "group needs mesh");
   }
-  // Group delivery rides the gateway tree: a node that cannot source one
-  // (flat profile, or a scoped node that is no route gateway) must not
-  // advertise group_delivery_v1 — the host would accept group.send and
-  // every send would fail. The Kconfig bitmap is a request; servability
-  // decides, so clear the bit (success: the family then answers
-  // Unsupported at the gate) instead of failing the boot.
-  if (!config_.mesh->group_origin_servable()) {
+  group_attached_ = true;
+  return refresh_group_capability(now_ms_);
+}
+
+// Re-advertise the truth: the mesh's servability can change after attach
+// when adoption installs a different profile (a Member bridge becomes a
+// group root only once the site's gateway/root list arrives). Group
+// delivery rides the gateway tree, so a node that cannot source one (flat
+// profile, or a scoped node that is no route gateway) must not advertise
+// group_delivery_v1 — the host would accept group.send and every send
+// would fail. The Kconfig bitmap is a request; servability decides.
+Status UsbBridge::refresh_group_capability(const MonotonicMs now_ms) noexcept {
+  if (!group_attached_ || config_.mesh == nullptr) return Status::success();
+  const std::uint32_t before = config_.capability;
+  if (config_.mesh->group_origin_servable()) {
+    config_.capability |= kCapGroupDeliveryV1;
+  } else {
     config_.capability &= ~kCapGroupDeliveryV1;
-    return Status::success();
   }
-  config_.capability |= kCapGroupDeliveryV1;
+  if (config_.capability == before) return Status::success();
+  // A changed bit cannot ride an existing session — it is part of the
+  // HelloAck the host authenticated — so the session is closed and
+  // rebuilt; the authority lane suspends + resynchronizes across the
+  // bounce and a pending JoinConfirm is retransmitted.
+  now_ms_ = now_ms;
+  if (state_ == SessionState::Active) {
+    // Tell the host first (control frames still flush in Draining) — the
+    // error is session-fatal on its side, so it re-hellos on its own and
+    // the fresh HelloAck carries the corrected bitmap.
+    send_error(UsbErrorCode::StaleSession, 0, "capability refresh", now_ms);
+    state_ = SessionState::Draining;
+  } else if (state_ == SessionState::Hello ||
+             state_ == SessionState::Authenticating) {
+    // Half-finished handshake: drop it rather than answering with the
+    // stale bitmap; the host's retry rebuilds the session.
+    reset_session_state();
+  }
   return Status::success();
 }
 

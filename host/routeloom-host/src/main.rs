@@ -9,6 +9,7 @@ mod observation;
 mod radio_budget;
 mod receive_log;
 mod remote_observation;
+mod rollcall;
 mod send_store;
 mod site;
 mod sqlite_store;
@@ -832,6 +833,11 @@ struct State {
     /// api1 `group.send`/`group.get` submit and read here, the group lane
     /// thread drives the device exchange and emits `group_settled`.
     group_ops: group::GroupOps,
+    /// The single owned rollcall run (design-devflow §6.4, D09): the
+    /// rollcall lane drives it through `group_ops`; api1 `lab.rollcall.*`
+    /// starts, steers and reads it. A State singleton, so a disconnected
+    /// GUI can never leave a second loop running.
+    rollcall: rollcall::RollcallService,
     /// m1 diagnostics query table (HostOps 0x30/0x31): api1
     /// `diagnostics.snapshot` submits and waits here, the telemetry lane
     /// thread drives the device exchange.
@@ -1665,6 +1671,9 @@ fn receive_ingest(
     // Wake subscription pumps and parked messages.read waiters — the log
     // lock is already released before the hub is notified (lock order).
     state.subscriptions.notify();
+    // A device STATUS reply to a live rollcall poll is folded into the
+    // run's evidence (D09); anything else is ignored by the correlation.
+    state.rollcall.on_reply(origin, payload, ms);
     if let Some(fields) = api1::ingest_diagnostic(&outcome) {
         push_event(state, ms, fields);
     }
@@ -2435,6 +2444,7 @@ fn serve_client(
                 node_table: &state.node_table,
                 config_ops: &state.config_ops,
                 group_ops: &state.group_ops,
+                rollcall: &state.rollcall,
                 telemetry_ops: &state.telemetry_ops,
                 observation_ops: &state.observation_ops,
                 remote_observation_ops: &state.remote_observation_ops,
@@ -2631,6 +2641,7 @@ struct DaemonArgs {
     config_profile: u8,
     config_authority_key: Option<PathBuf>,
     site_authority: Option<PathBuf>,
+    admission_profile: send_store::AdmissionProfile,
     usb_dev_secret_file: Option<PathBuf>,
 }
 
@@ -2684,6 +2695,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
     let mut config_profile = config::ISSUE_PROFILE_DEV;
     let mut config_authority_key = None;
     let mut site_authority = None;
+    let mut admission_profile = send_store::AdmissionProfile::Normal;
     let mut usb_dev_secret_file = None;
     let mut args = args;
     while let Some(argument) = args.next() {
@@ -2763,6 +2775,17 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
                     args.next().ok_or("--site-authority requires a directory")?,
                 ))
             }
+            // Admission budget profile (design-devflow D10): `normal` is
+            // the contract default (2 calls/min, burst 16). `bench-v1`
+            // raises host submission throughput for development sites —
+            // opt-in only, always reported by name via capacity.get.
+            "--admission-profile" => {
+                let text = args
+                    .next()
+                    .ok_or("--admission-profile requires normal|bench-v1")?;
+                admission_profile = send_store::AdmissionProfile::parse(&text)
+                    .ok_or_else(|| format!("--admission-profile: unknown profile \"{text}\""))?;
+            }
             "--usb-dev-secret-file" => {
                 usb_dev_secret_file = Some(PathBuf::from(
                     args.next().ok_or("--usb-dev-secret-file requires a path")?,
@@ -2770,7 +2793,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
             }
             "--help" | "-h" => {
                 println!(
-                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N] [--config-dev-key-hex HEX] [--config-profile dev|cose] [--config-authority-key PATH] [--site-authority DIR] [--usb-dev-secret-file PATH]"
+                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N] [--config-dev-key-hex HEX] [--config-profile dev|cose] [--config-authority-key PATH] [--site-authority DIR] [--admission-profile normal|bench-v1] [--usb-dev-secret-file PATH]"
                 );
                 process::exit(0);
             }
@@ -2806,6 +2829,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
         config_profile,
         config_authority_key,
         site_authority,
+        admission_profile,
         usb_dev_secret_file,
     })
 }
@@ -2925,6 +2949,14 @@ impl Drop for ClientGuard {
     }
 }
 
+fn bench_profile_allowed(
+    profile: send_store::AdmissionProfile,
+    purpose: Option<site::SitePurpose>,
+) -> bool {
+    profile != send_store::AdmissionProfile::BenchV1
+        || purpose == Some(site::SitePurpose::Development)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Anchor the monotonic base at process start — `mono_ms` is the
     // rewind-proof deadline axis, so it should measure daemon uptime rather
@@ -2935,7 +2967,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // session; never fall back to the public legacy secret on file errors.
     let usb_dev_secret = match &args.usb_dev_secret_file {
         Some(path) => load_usb_dev_secret(path)?,
-        None => DEV_SECRET.to_vec(),
+        // The development secret is public (it ships in the firmware
+        // Kconfig default): any device flashed with it accepts this
+        // daemon, so the fallback must not be silent.
+        None => {
+            eprintln!(
+                "WARNING: --usb-dev-secret-file not given; using the public \
+                 development USB secret (not a deployment credential)"
+            );
+            DEV_SECRET.to_vec()
+        }
     };
     let socket_path = args.socket;
     let device = args.device;
@@ -2991,6 +3032,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             StoreBackend::Memory(Box::new(MemoryOperationStore::new(mint_id128())))
         }
     };
+    // A raised admission budget belongs only to a verified development site.
+    // Check this before touching the socket or starting any transport.
+    let site = match &args.site_authority {
+        Some(dir) => {
+            let authority = site::config::open_dir(dir, now_ms())
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            if !bench_profile_allowed(args.admission_profile, Some(authority.purpose())) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "bench-v1 requires a development site",
+                )
+                .into());
+            }
+            eprintln!(
+                "site authority: site {:016x} network {:016x} (EXPERIMENTAL; USB join relay 0x60-0x63 serves capable sessions)",
+                authority.site_id(),
+                authority.network()
+            );
+            Some(site::SiteService::new_live(authority))
+        }
+        None => {
+            if !bench_profile_allowed(args.admission_profile, None) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "bench-v1 requires a development site",
+                )
+                .into());
+            }
+            None
+        }
+    };
     // Only remove a leftover unix socket — never unlink a regular file or a
     // path a second instance happens to point at.
     #[cfg(unix)]
@@ -3014,21 +3086,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if host_boot == 0 || host_boot == u64::MAX {
         host_boot ^= 0x5A;
     }
-    // SDK v1 Site Authority: a directory that does not open (wrong SAK,
-    // store of another site, broken ledger) is a hard start error.
-    let site = match &args.site_authority {
-        Some(dir) => {
-            let authority = site::config::open_dir(dir, now_ms())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-            eprintln!(
-                "site authority: site {:016x} network {:016x} (EXPERIMENTAL; USB join relay 0x60-0x63 serves capable sessions)",
-                authority.site_id(),
-                authority.network()
-            );
-            Some(site::SiteService::new_live(authority))
-        }
-        None => None,
-    };
     let state = Arc::new(State {
         device: device.clone(),
         site,
@@ -3047,6 +3104,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_dev_key: args.config_dev_key,
         config_profile: args.config_profile,
         config_authority_key: args.config_authority_key.clone(),
+        rate_limiter: Mutex::new(send_store::AdmissionLimiter::with_profile(
+            args.admission_profile,
+            now_ms(),
+        )),
         ..State::default()
     });
     // The ring opens with the run's own restart boundary — before the
@@ -3152,6 +3213,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let telemetry_state = Arc::clone(&state);
         let telemetry_outbound = outbound_tx.clone();
         thread::spawn(move || telemetry::telemetry_loop(telemetry_state, telemetry_outbound));
+    }
+    // Rollcall lane (design-devflow §6.4): drives the single owned run
+    // through the group op table — parked until lab.rollcall.start, then
+    // ticks on the lane cadence. Shares no writer queue of its own: the
+    // sends it schedules travel the existing group lane.
+    {
+        let rollcall_state = Arc::clone(&state);
+        thread::spawn(move || rollcall::rollcall_loop(rollcall_state));
     }
     // observation_v1 lane: issues 0x70 queries for `health.get` /
     // `topology.get` and resolves them from the 0x71 answers. Idle while
@@ -3270,6 +3339,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bench_admission_requires_a_development_site() {
+        use send_store::AdmissionProfile::{BenchV1, Normal};
+        assert!(bench_profile_allowed(Normal, None));
+        assert!(!bench_profile_allowed(BenchV1, None));
+        assert!(!bench_profile_allowed(
+            BenchV1,
+            Some(site::SitePurpose::Production)
+        ));
+        assert!(!bench_profile_allowed(
+            BenchV1,
+            Some(site::SitePurpose::Import)
+        ));
+        assert!(bench_profile_allowed(
+            BenchV1,
+            Some(site::SitePurpose::Development)
+        ));
+    }
 
     #[test]
     fn queued_remote_query_is_dropped_after_settlement_or_session_change() {
@@ -3562,6 +3650,7 @@ mod tests {
                 ttl_ms: 30_000,
                 storage: canonical::STORAGE_RAM,
                 hop_limit: canonical::HOP_DEFAULT,
+                queue_mode: canonical::QUEUE_FIFO,
                 gateway: None,
                 payload,
                 hash,

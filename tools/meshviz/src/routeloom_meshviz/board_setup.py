@@ -92,7 +92,10 @@ def preview(row: BoardRow, manifest: dict | None, bundle: Path | None, *, quiesc
         reasons.append('役割が未割当て')
     if normalize_node_id(row.node_id) is None:
         reasons.append('NodeId が未割当て')
-    if manifest is not None:
+    generic_config = manifest is not None and manifest.get('generic_config') is True
+    if manifest is not None and not generic_config:
+        # Bundles without generic board-config support embed their resolved
+        # NodeId in the signed sdkconfig; the assignment must match it.
         if image_node_id is None:
             reasons.append('署名付き bundle の Kconfig NodeId を確認できない')
         elif normalize_node_id(row.node_id) != image_node_id:
@@ -119,8 +122,13 @@ def preview(row: BoardRow, manifest: dict | None, bundle: Path | None, *, quiesc
         for entry in manifest['files']:
             notes.append(f'  0x{entry["offset"]:06x} {entry["size"]:>8} B {entry["sha256"][:16]}… '
                          f'{entry["path"]}')
-        # Generic runtime config (PR 03a) is not available: images keep Kconfig NodeIds.
-        notes.append('個体別設定は未対応。bundle の resolved Kconfig NodeId を照合する')
+        if generic_config:
+            # generic-config bundles take NodeId from the per-board config at
+            # boot, not from the signed sdkconfig; the assignment check is the
+            # orchestrator's journal/inventory side.
+            notes.append('個体別設定対応 bundle: NodeId は BoardConfig が boot 時に与える')
+        else:
+            notes.append('個体別設定は未対応。bundle の resolved Kconfig NodeId を照合する')
     if identity is not None:
         if identity.secure_boot is not False or identity.flash_encryption is not False:
             reasons.append('secure boot／flash 暗号化の状態が無効と確認できない')

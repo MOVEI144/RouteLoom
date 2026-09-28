@@ -538,7 +538,7 @@ pub(super) fn decode_rrs_history(
             .iter()
             .filter(|(at, _)| *at <= *epoch)
             .map(|(_, network)| *network)
-            .last()
+            .next_back()
             .unwrap_or(initial_network);
         let boundary = boundaries.iter().any(|(at, _)| at == epoch);
         let (set, verified) = routeloom_provision::sdkv1::revocation::revocation_object_verify(
@@ -817,8 +817,7 @@ impl SiteAuthority {
                         .get(&head.op)
                         .and_then(|op| op.cutover.as_ref())
                         .map(|state| state.old_network);
-                    self.grant_bytes(head.op, head.node, head.what)
-                        .and_then(|bytes| network.map(|network| (bytes, network)))
+                    self.grant_bytes(head.op, head.node, head.what).zip(network)
                 }
                 OutboundKind::RouteQuery => {
                     if !self.route_query_still_due(head.op, head.node, now_ms) {

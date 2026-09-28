@@ -13,6 +13,7 @@
 
 #include "routeloom/board_config.hpp"
 #include "routeloom/board_secrets.hpp"
+#include "routeloom/hex.hpp"
 #include "routeloom/nvs_sdkv1_store.hpp"
 #include "routeloom/status.hpp"
 

@@ -424,9 +424,12 @@ pub struct GroupLink {
     pub session: u64,
     pub gateway: u64,
     pub network: u64,
+    /// Active Site identity for full-64 requests; USB reports its wire half.
+    pub site_network: Option<u64>,
 }
 
 pub fn group_link(state: &State) -> GroupLink {
+    let site_network = state.site.as_ref().map(|site| site.network());
     let info = state.session.lock().expect("session poisoned");
     GroupLink {
         active: info.authenticated && info.id.is_some() && info.node.is_some(),
@@ -434,6 +437,7 @@ pub fn group_link(state: &State) -> GroupLink {
         session: info.id.unwrap_or(0),
         gateway: info.node.unwrap_or(0),
         network: info.network.unwrap_or(0),
+        site_network,
     }
 }
 
@@ -691,6 +695,20 @@ impl GroupOps {
         // Reborrow once so records/queue can be borrowed disjointly.
         let inner: &mut Inner = &mut guard;
         let mut settled: Vec<u64> = Vec::new();
+        for record in inner.records.values_mut() {
+            if record.request.network <= 0xffff_ffff
+                || link.site_network == Some(record.request.network)
+            {
+                continue;
+            }
+            let phase = match record.phase {
+                Phase::HostQueued => Phase::NotSent,
+                Phase::DevicePending { .. } | Phase::InProgress { .. } => Phase::Indeterminate,
+                _ => continue,
+            };
+            record.reason = Some("NETWORK_CHANGED".to_string());
+            settle(record, phase, now, &mut settled);
+        }
         let current = link.active.then_some(link.session);
         if lane.session != current {
             // Session boundary: an unanswered 0x50 may or may not have been
@@ -800,7 +818,7 @@ impl GroupOps {
                 settled.push(op_id);
                 continue;
             }
-            if link.network != record.request.network {
+            if link.network != (record.request.network & 0xffff_ffff) {
                 record.phase = Phase::NotSent;
                 record.reason = Some("NETWORK_CHANGED".to_string());
                 record.settled_ms = Some(now);
@@ -1125,6 +1143,7 @@ mod tests {
             session: SESSION,
             gateway: GW,
             network: NET,
+            site_network: None,
         }
     }
 
@@ -1530,6 +1549,40 @@ mod tests {
             ops.get(op).unwrap().reason.as_deref(),
             Some("NETWORK_CHANGED")
         );
+    }
+
+    #[test]
+    fn full_site_network_send_stops_at_epoch_change() {
+        let ops = GroupOps::default();
+        let mut lane = GroupLane::default();
+        let mut request = alarm();
+        request.network = (2_u64 << 32) | NET;
+        let op = match ops.submit(501, key(1), request, 0).unwrap() {
+            SubmitOutcome::Accepted(op) => op,
+            SubmitOutcome::Replay(_) => unreachable!(),
+        };
+        let current = GroupLink {
+            site_network: Some((2_u64 << 32) | NET),
+            ..link()
+        };
+        assert_eq!(ops.step(&mut lane, &current, 0).frames.len(), 1);
+        let mut other = alarm();
+        other.network = (2_u64 << 32) | NET;
+        let queued = match ops.submit(501, key(2), other, 1).unwrap() {
+            SubmitOutcome::Accepted(op) => op,
+            SubmitOutcome::Replay(_) => unreachable!(),
+        };
+        let cutover = GroupLink {
+            site_network: Some((3_u64 << 32) | NET),
+            ..link()
+        };
+        assert!(ops.step(&mut lane, &cutover, 1).frames.is_empty());
+        assert_eq!(
+            ops.get(queued).unwrap().reason.as_deref(),
+            Some("NETWORK_CHANGED")
+        );
+        assert_eq!(ops.get(op).unwrap().state_name(), "INDETERMINATE");
+        assert_eq!(ops.get(op).unwrap().request.network, (2_u64 << 32) | NET);
     }
 
     #[test]

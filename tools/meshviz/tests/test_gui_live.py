@@ -1,7 +1,9 @@
 """Qt offscreen tests for the live monitor and the development site wizard."""
 import os
+import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -18,6 +20,9 @@ from routeloom_meshviz.fake_api1 import serve_fake_api1
 from routeloom_meshviz.live_monitor import MILESTONES
 
 from test_gui import spin
+from test_provision_lab import (IDENTITY, FakeBoards, RecordingOffice,
+                                SetupConsole, _backend, _boot_lines)
+from routeloom_meshviz.provisioning import ProvisionJournal
 
 COLUMN = {name: 2 + i for i, name in enumerate(MILESTONES)}
 
@@ -165,27 +170,114 @@ class LiveMonitorGuiTests(unittest.TestCase):
             self.assertFalse(live.start_button.isEnabled())
             self.assertFalse(live.marker_button.isEnabled())
 
-    def test_wizard_plan_confirm_and_contract_backend_stay_unsupported(self):
+    def test_wizard_plan_confirm_and_real_backend(self):
         window = self.window(fake_nodes=4, fake_boards=False)
         site = window.site
         window.tabs.setCurrentWidget(site)
         self.assertTrue(spin(self.app, lambda: window.live.poller.connected))
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        boards = FakeBoards(IDENTITY)
+        office = RecordingOffice()
+        console = SetupConsole()
+        backend = _backend(root, console, boards, office, lambda port: [])
+        node = '0000000000000007'
+
+        def boot_lines(port):
+            journal = ProvisionJournal.load(
+                backend._journals() / f'node-{node}.journal.json')
+            issued = journal.latest('issued')
+            return _boot_lines(node=7, kid=issued['kid'],
+                               devcert_sha=issued['devcert_sha256'])
+
+        backend._boot_capture = boot_lines
+        site.backend = site.prov_worker.backend = backend
+        site.site_dir.setText(str(backend.site_dir))
+        window.boards.bundle = backend.bundles_dir / 'field-bench'
         site.board_rows = [
-            {'board': '/dev/ttyACM0', 'chip': 'esp32s3', 'base_mac': 'aa:00', 'role': 'bridge', 'node_id': '1'},
-            {'board': '/dev/ttyACM1', 'chip': 'esp32c3', 'base_mac': 'aa:01', 'role': 'bench', 'node_id': '2'}]
+            {'board': '/dev/ttyUSB0', 'chip': IDENTITY.chip,
+             'base_mac': IDENTITY.base_mac, 'role': 'bench', 'node_id': node}]
         self.assertEqual(site.validate_plan(), {})
         self.assertFalse(site.run_button.isEnabled())  # needs the explicit confirmation
         site.confirm.setChecked(True)
         self.assertTrue(site.run_button.isEnabled())
         site.run_provision()
-        self.assertTrue(spin(self.app, lambda: not site.provisioning))
-        self.assertTrue(all(job.steps.get('preflight') == 'unsupported' for job in site.jobs))
-        self.assertFalse(any(job.ready for job in site.jobs))
-        self.assertIn('未対応', site.board_table.item(0, 5).text())
+        self.assertTrue(spin(self.app, lambda: not site.provisioning and site.jobs[0].ready, 15))
+        job = site.jobs[0]
+        self.assertEqual(job.steps.get('preflight'), 'done')
+        self.assertEqual(job.steps.get('inventory'), 'done')
+        self.assertEqual(job.readback['node_id'], node)
+        self.assertEqual(len(boards.flashed), 2)
+        self.assertEqual(office.imported,
+                         [(str(backend.site_dir), node, 'endpoint')])
+        self.assertIn('Ready', site.board_table.item(0, 5).text())
+        self.assertTrue(spin(self.app, lambda: '自動承認: 有効' in site.approval_label.text()))
+        self.assertIn('decision_mode=lab_inventory', site.approval_label.text())
         site.confirm.setChecked(True)
         # A source switch clears the operator's confirmation.
         window.use_fake()
         self.assertTrue(spin(self.app, lambda: not site.confirm.isChecked()))
+
+    def test_wizard_unavailable_backend_stays_unsupported(self):
+        from routeloom_meshviz.provision_plan import ContractBackend
+        window = self.window(fake_nodes=4, fake_boards=False)
+        site = window.site
+        self.assertTrue(spin(self.app, lambda: window.live.poller.connected))
+        site.backend = site.prov_worker.backend = ContractBackend()
+        site.board_rows = [
+            {'board': '/dev/ttyUSB0', 'chip': IDENTITY.chip,
+             'base_mac': IDENTITY.base_mac, 'role': 'bench', 'node_id': '7'}]
+        self.assertEqual(site.validate_plan(), {})
+        site.confirm.setChecked(True)
+        site.run_provision()
+        self.assertTrue(spin(self.app, lambda: not site.provisioning and
+                             site.jobs[0].steps.get('preflight') == 'unsupported'))
+        self.assertFalse(site.jobs[0].ready)
+        self.assertIn('未対応', site.board_table.item(0, 5).text())
+
+    def test_wizard_rejects_duplicate_node_rom_swap_and_unsigned_bundle(self):
+        window = self.window(fake_nodes=4, fake_boards=False)
+        site = window.site
+        self.assertTrue(spin(self.app, lambda: window.live.poller.connected))
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        boards = FakeBoards(replace(IDENTITY, chip='esp32s3'))
+        office = RecordingOffice()
+        backend = _backend(root, SetupConsole(), boards, office, lambda port: [])
+        site.backend = site.prov_worker.backend = backend
+        site.site_dir.setText(str(backend.site_dir))
+        window.boards.bundle = backend.bundles_dir / 'field-bench'
+        row = {'board': '/dev/ttyUSB0', 'chip': IDENTITY.chip,
+               'base_mac': IDENTITY.base_mac, 'role': 'bench', 'node_id': '7'}
+        site.board_rows = [row, {**row, 'board': '/dev/ttyUSB1',
+                                 'base_mac': 'a0:85:e3:00:00:02'}]
+        self.assertIn('/dev/ttyUSB0', site.validate_plan())
+        site.confirm.setChecked(True)
+        self.assertFalse(site.run_button.isEnabled())
+        site.board_rows = [row]
+        self.assertEqual(site.validate_plan(), {})
+
+        for identity, expected in ((replace(IDENTITY, chip='esp32s3'), 'chip'),
+                                   (replace(IDENTITY, base_mac='a0:85:e3:00:00:02'),
+                                    'MAC')):
+            boards.identity = identity
+            site.confirm.setChecked(True)
+            site.run_provision()
+            self.assertTrue(spin(self.app, lambda: not site.provisioning))
+            self.assertEqual(site.jobs[0].steps.get('preflight'), 'failed')
+            self.assertIn(expected, site.jobs[0].details['preflight'])
+            self.assertEqual(boards.flashed, [])
+
+        boards.identity = IDENTITY
+        manifest = backend.bundles_dir / 'field-bench' / 'manifest.json'
+        document = json.loads(manifest.read_text())
+        document['firmware_version'] = 'tampered'
+        manifest.write_text(json.dumps(document))
+        site.confirm.setChecked(True)
+        site.run_provision()
+        self.assertTrue(spin(self.app, lambda: not site.provisioning))
+        self.assertEqual(site.jobs[0].steps.get('preflight'), 'failed')
+        self.assertIn('bundle', site.jobs[0].details['preflight'])
+        self.assertEqual(boards.flashed, [])
+        self.assertEqual(office.imported, [])
 
     def test_fake_backend_reaches_ready_then_joined_from_ledger_evidence(self):
         window = self.window(fake_nodes=4)

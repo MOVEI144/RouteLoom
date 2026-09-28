@@ -14,7 +14,8 @@
 // message lifetime.
 //
 // The tree is the routing tree: children are the neighbors whose committed
-// route to a gateway goes through this node (Neighbor::child_until_ms, the
+// route to a gateway goes through this node (Neighbor::TreeRoles::scoped
+// child lease, or the flat arm's per-root lease, the
 // poison-reverse evidence of route_scale.cpp), and "a child's subtree" is
 // the set of destinations whose committed next hop is that child. Nothing
 // here feeds the route table: group state is scheduling state only.
@@ -217,9 +218,9 @@ void MeshNode::group_mark_seen(GroupStream& stream, const std::uint32_t seq) noe
 // --- Source API ---------------------------------------------------------------------
 
 bool MeshNode::group_origin_servable() const noexcept {
-  // Same two gates as send_group below (flat profile, non-gateway
-  // source): kept adjacent so they cannot drift apart silently.
-  return gateway_scoped() && is_route_gateway(config_.node);
+  // Same two gates as send_group below (no group tree, non-root source):
+  // kept adjacent so they cannot drift apart silently.
+  return group_supported() && is_group_root(config_.node);
 }
 
 Status MeshNode::send_group(const GroupId group, const ByteView payload,
@@ -234,13 +235,13 @@ Status MeshNode::send_group(const GroupId group, const ByteView payload,
     return Status::error(StatusCode::InvalidState,
                          sleep_draining_ ? "NODE_DRAINING" : "NODE_PAUSED");
   }
-  // Group delivery rides the gateway tree: only a configured route gateway
-  // of the gateway-scoped profile has one (group-delivery.md §4). The flat
-  // profile has no tree and would degrade to a flood — explicitly refused.
-  if (!gateway_scoped()) {
+  // Group delivery rides the configured group tree: a scoped gateway or a
+  // flat group root has one (group-delivery.md §4, dev-flow §6.3). A node
+  // without a tree would degrade to a flood — explicitly refused.
+  if (!group_supported()) {
     return Status::error(StatusCode::Unsupported, "GROUP_REQUIRES_GATEWAY_SCOPED");
   }
-  if (!is_route_gateway(config_.node)) {
+  if (!is_group_root(config_.node)) {
     return Status::error(StatusCode::Unsupported, "GROUP_SOURCE_NOT_GATEWAY");
   }
   if (group == 0 || payload.size > kGroupPayloadMax ||
@@ -380,7 +381,7 @@ std::uint16_t MeshNode::group_expected_nodes() const noexcept {
   std::uint32_t count = 0;
   routes_.for_each_selected([&](const RouteSelection& selection) {
     if (!selection.valid || selection.destination == config_.node ||
-        is_route_gateway(selection.destination) ||
+        is_group_root(selection.destination) ||
         reserved_node_id(selection.destination)) {
       return;
     }
@@ -458,7 +459,7 @@ std::uint16_t MeshNode::group_routed_subtree(const NodeId child, NodeId* ids,
   std::uint32_t total = 0;
   routes_.for_each_selected([&](const RouteSelection& selection) {
     if (!selection.valid || selection.next_hop != child || selection.destination == child ||
-        selection.destination == config_.node || is_route_gateway(selection.destination) ||
+        selection.destination == config_.node || is_group_root(selection.destination) ||
         reserved_node_id(selection.destination)) {
       return;
     }
@@ -506,12 +507,13 @@ void MeshNode::group_begin_round(GroupTree& tree, const wire::LinkOpenedFrame& f
   tree.missing.fill(kInvalidNodeId);
 
   // Refresh the child set from the routing tree: drop entries that are no
-  // longer children (their subtree is someone else's now), add new ones.
+  // longer children of this tree's root (their subtree is someone else's
+  // now), add new ones.
   std::size_t kept = 0;
   for (std::size_t i = 0; i < tree.child_count; ++i) {
     const GroupChild& entry = tree.children[i];
     if (entry.node != parent && entry.node != tree.key.origin &&
-        neighbor_is_child(entry.node, now_ms)) {
+        group_child_of(entry.node, tree.key.origin, now_ms)) {
       tree.children[kept++] = entry;
     }
   }
@@ -519,7 +521,7 @@ void MeshNode::group_begin_round(GroupTree& tree, const wire::LinkOpenedFrame& f
   tree.child_count = static_cast<std::uint8_t>(kept);
   neighbors_.for_each([&](const Neighbor& neighbor) {
     if (!neighbor.active || neighbor.node == parent || neighbor.node == tree.key.origin ||
-        !neighbor_is_child(neighbor.node, now_ms)) {
+        !group_child_of(neighbor.node, tree.key.origin, now_ms)) {
       return;
     }
     for (std::size_t i = 0; i < tree.child_count; ++i) {
@@ -717,15 +719,15 @@ void MeshNode::group_origin_terminal(GroupOrigin& origin, const DeliveryState st
 void MeshNode::handle_group_data(const wire::LinkOpenedFrame& frame, const NodeId peer,
                                  const MonotonicMs now_ms) noexcept {
   const wire::Header& header = frame.header;
-  if (!gateway_scoped()) {
+  if (!group_supported()) {
     saturating_inc(group_stats_.rejected);
     observer_.on_diagnostic("GROUP_REQUIRES_GATEWAY_SCOPED", peer, &header.message);
     return;
   }
-  // Only a configured gateway sources group traffic (the tree is rooted at
-  // it); the group stream number rides the authenticated MessageId.
+  // Only a configured group root sources group traffic (the tree is rooted
+  // at it); the group stream number rides the authenticated MessageId.
   if ((header.flags & wire::kFlagEndProtected) == 0 ||
-      !is_group_address(header.destination) || !is_route_gateway(header.origin) ||
+      !is_group_address(header.destination) || !is_group_root(header.origin) ||
       header.origin == config_.node || !is_group_sequence(header.message.sequence) ||
       header.delivery != DeliveryClass::Reliable) {
     saturating_inc(group_stats_.rejected);
@@ -768,16 +770,30 @@ void MeshNode::handle_group_data(const wire::LinkOpenedFrame& frame, const NodeI
     if (round > tree->round) {
       // A repair round (possibly from a new parent after a tree change):
       // follow its sender and forward into our incomplete subtrees.
+      if (!gateway_scoped() && peer != flat_group_parent(key.origin)) {
+        // Flat profile: only our committed next hop toward the root may be
+        // our parent — an off-path sender is declined, not adopted.
+        GroupReportPayload not_child{};
+        not_child.key = key;
+        not_child.round = round;
+        not_child.flags = kGroupReportNotChild;
+        if (queue_group_report(peer, not_child, tree->priority, now_ms)) {
+          saturating_inc(group_stats_.not_child_sent);
+        }
+        return;
+      }
       tree->expires_at_ms = std::max(
           tree->expires_at_ms, now_ms + header.remaining_deadline_ms + kGroupTreeSlackMs);
       group_begin_round(*tree, frame, peer, refresh, now_ms);
       return;
     }
     GroupReportPayload report{};
-    if (peer != tree->parent) {
+    if (peer != tree->parent ||
+        (!gateway_scoped() && peer != flat_group_parent(key.origin))) {
       // Someone else also treats us as its child: we follow the first
-      // sender of this round, so this one must not count us (no double
-      // counting when child flags lag a parent change).
+      // sender of this round (flat profile: only our committed next hop to
+      // the root is ever our parent), so this one must not count us (no
+      // double counting when child flags lag a parent change).
       report.key = key;
       report.round = round;
       report.flags = kGroupReportNotChild;
@@ -872,6 +888,21 @@ void MeshNode::handle_group_data(const wire::LinkOpenedFrame& frame, const NodeI
     group_accept(*stream, info, app, member, remaining, now_ms, header.end_epoch, peer);
   }
 
+  if (!gateway_scoped() && peer != flat_group_parent(key.origin)) {
+    // Flat profile (dev-flow §6.3): the parent is fixed for the round and
+    // is always the committed next hop toward the root. An off-path sender
+    // is declined with NOT_CHILD so it does not count us — the payload was
+    // still delivered above if we are a member (accounting stays honest:
+    // uncounted deliveries become unaccounted/missing and are repaired).
+    GroupReportPayload not_child{};
+    not_child.key = key;
+    not_child.round = round;
+    not_child.flags = kGroupReportNotChild;
+    if (queue_group_report(peer, not_child, priority, now_ms)) {
+      saturating_inc(group_stats_.not_child_sent);
+    }
+    return;
+  }
   GroupTree* tree = allocate_group_tree(now_ms);
   if (tree == nullptr) {
     // No tree slot (every tracked message is still collecting): confirm
@@ -886,7 +917,7 @@ void MeshNode::handle_group_data(const wire::LinkOpenedFrame& frame, const NodeI
     scratch.self_nonmember = !member;
     neighbors_.for_each([&](const Neighbor& neighbor) {
       if (!neighbor.active || neighbor.node == peer || neighbor.node == key.origin ||
-          !neighbor_is_child(neighbor.node, now_ms)) {
+          !group_child_of(neighbor.node, key.origin, now_ms)) {
         return;
       }
       std::uint8_t count = scratch.missing_count;
@@ -914,7 +945,7 @@ void MeshNode::handle_group_data(const wire::LinkOpenedFrame& frame, const NodeI
 
 void MeshNode::handle_group_report(const wire::PlainFrame& frame, const NodeId peer,
                                    const MonotonicMs now_ms) noexcept {
-  if (!gateway_scoped()) {
+  if (!group_supported()) {
     saturating_inc(group_stats_.rejected);
     observer_.on_diagnostic("GROUP_REQUIRES_GATEWAY_SCOPED", peer, &frame.header.message);
     return;

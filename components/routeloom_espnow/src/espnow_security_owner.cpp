@@ -690,6 +690,16 @@ Status EspNowSecurityOwner::adopt_dev(const DevConfig& config,
   adopted.boot = config.boot;
   adopted.role = config.role;
   adopted.channel = config.channel;
+  adopted.route_gateway_count = config.route_gateway_count;
+  adopted.group_root_count = config.group_root_count;
+  for (std::size_t i = 0; i < config.route_gateway_count &&
+                          i < adopted.route_gateways.size(); ++i) {
+    adopted.route_gateways[i] = config.route_gateways[i];
+  }
+  for (std::size_t i = 0; i < config.group_root_count &&
+                          i < adopted.group_roots.size(); ++i) {
+    adopted.group_roots[i] = config.group_roots[i];
+  }
   const Status status = coordinator().adopt_dev(adopted, now_ms);
   secure_clear(adopted.psk);
   if (!status) return status;
@@ -1799,8 +1809,32 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   node.end_epoch = member.end_epoch;
   node.boot_incarnation = member.boot_incarnation;
   node.route_gateways.fill(kInvalidNodeId);
-  for (std::size_t i = 0; i < member.route_gateway_count && i < node.route_gateways.size(); ++i) {
-    node.route_gateways[i] = member.route_gateways[i];
+  node.group_roots.fill(kInvalidNodeId);
+  const bool dev_mode =
+      coordinator().snapshot().mode == sdkv1::CoordinatorMode::Dev;
+  if (dev_mode) {
+    // Dev adoption carries both lists explicitly from the board config;
+    // nothing is remapped.
+    for (std::size_t i = 0; i < member.route_gateway_count &&
+                            i < node.route_gateways.size(); ++i) {
+      node.route_gateways[i] = member.route_gateways[i];
+    }
+    for (std::size_t i = 0; i < member.group_root_count &&
+                            i < node.group_roots.size(); ++i) {
+      node.group_roots[i] = member.group_roots[i];
+    }
+  } else if (config_.flat_group_routing) {
+    // Member flat group tree (dev-flow §6.1): the verified SitePackage
+    // gateway list is the root set; routing policy stays flat.
+    for (std::size_t i = 0; i < member.route_gateway_count &&
+                            i < node.group_roots.size(); ++i) {
+      node.group_roots[i] = member.route_gateways[i];
+    }
+  } else {
+    for (std::size_t i = 0; i < member.route_gateway_count &&
+                            i < node.route_gateways.size(); ++i) {
+      node.route_gateways[i] = member.route_gateways[i];
+    }
   }
   const std::uint8_t operating = member.channel;
   Status status = runtime_->adopt_member_node(node);
@@ -1820,6 +1854,7 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
            live.boot_session == node.boot_session && live.link_epoch == node.link_epoch &&
            live.end_epoch == node.end_epoch && live.boot_incarnation == node.boot_incarnation &&
            live.route_gateways == node.route_gateways &&
+           live.group_roots == node.group_roots &&
            runtime_->node().local_role() == member.role;
   }
   if (!status && !same) {
@@ -1844,6 +1879,16 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   adopted_node_ = member.node;
   adopted_network_ = member.network;
   adopted_role_ = member.role;
+  // The adopted config may have made this bridge a group root for the
+  // first time — attach_group() ran before membership existed, so the
+  // Hello bitmap never advertised it. The bit is bound into the
+  // authenticated HelloAck: re-evaluate it here, which drains a live
+  // session behind a sealed error so the host's re-hello observes the
+  // restored capability (the authority lane resyncs and a pending
+  // JoinConfirm is retransmitted across the bounce).
+  if (bridge_ != nullptr) {
+    (void)bridge_->refresh_group_capability(now_ms);
+  }
   // The lifecycle needs the verified package RS target at fresh adoption;
   // boot re-adoption carries zero and uses its durable floor.
   if (lifecycle_live_ && lifecycle_booted_ && stores_ != nullptr) {

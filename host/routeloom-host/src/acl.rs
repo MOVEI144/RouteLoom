@@ -24,7 +24,8 @@
 //!   silently grant).
 //! - `principals` maps a *decimal* uid string to `{ "networks": {...} }`.
 //! - `networks` maps a 16-hex network id — or `"*"` for all networks — to a
-//!   non-empty array of permission names.
+//!   non-empty array of permission names. A full 64-bit site network id
+//!   retains its epoch when used as a grant.
 //! - Permission names: `READ_PAYLOAD`, `SEND`, `READ_OPERATION`, `CONFIG`, `OBSERVE`,
 //!   and the Site Authority grants `MEMBERSHIP_READ` / `MEMBERSHIP_DECIDE`
 //!   / `MEMBERSHIP_ADMIN` (scoped to the site's wire network). Unknown
@@ -173,7 +174,7 @@ impl Acl {
                             None
                         } else {
                             Some(
-                                parse_network_hex(network_key)
+                                parse_site_network_hex(network_key)
                                     .map_err(|e| format!("ACL: network \"{network_key}\": {e}"))?,
                             )
                         };
@@ -218,16 +219,24 @@ fn parse_permissions(value: &Json) -> Result<u8, String> {
     Ok(bits)
 }
 
-/// 16-hex network id, normalized to lowercase before parsing (IPC contract).
-/// Wire v1 networks are `1..=0xffffffff` — outside that range the id can
-/// never appear on the wire, so it is rejected rather than stored.
-pub fn parse_network_hex(text: &str) -> Result<u64, String> {
+/// Full SDK v1 site network id. The lower 32 bits are the wire network;
+/// zero is reserved even when the site epoch is nonzero.
+pub fn parse_site_network_hex(text: &str) -> Result<u64, String> {
     let normalized = text.to_ascii_lowercase();
     if normalized.len() != 16 || !normalized.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!("\"{text}\" is not a 16-hex id"));
     }
     let value = u64::from_str_radix(&normalized, 16).map_err(|_| "invalid hex".to_string())?;
-    if !(1..=0xffff_ffff).contains(&value) {
+    if value & 0xffff_ffff == 0 {
+        return Err(format!("\"{text}\" is outside the wire-v1 network range"));
+    }
+    Ok(value)
+}
+
+/// The existing host API methods address the low-32 wire network only.
+pub fn parse_network_hex(text: &str) -> Result<u64, String> {
+    let value = parse_site_network_hex(text)?;
+    if value > 0xffff_ffff {
         return Err(format!("\"{text}\" is outside the wire-v1 network range"));
     }
     Ok(value)
@@ -316,7 +325,12 @@ mod tests {
     fn network_hex_normalizes_and_ranges() {
         assert_eq!(parse_network_hex("00000000000000AB").unwrap(), 0xAB);
         assert_eq!(parse_network_hex("00000000FFFFFFFF").unwrap(), 0xffff_ffff);
-        assert!(parse_network_hex("0000000100000000").is_err()); // > wire v1 range
+        assert_eq!(
+            parse_site_network_hex("00000002524C0003").unwrap(),
+            0x2_524c_0003
+        );
+        assert!(parse_network_hex("00000002524C0003").is_err());
+        assert!(parse_site_network_hex("0000000100000000").is_err());
         assert!(parse_network_hex("0000000000000000").is_err());
         assert!(parse_network_hex("1").is_err());
         assert!(parse_network_hex("00000000000000gg").is_err());

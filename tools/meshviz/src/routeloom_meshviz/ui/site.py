@@ -16,9 +16,9 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFormLayout, Q
 from .. import views
 from ..live_monitor import read_status_text
 from ..site_supervisor import SiteSupervisor
-from ..provisioning import (LAB_ROLES, STEP_NAMES, ContractBackend, FakeProvisionBackend,
-                            ProvisionRunner, auto_approval_text, inventory_rows, job_status_text,
-                            plan_jobs, valid_lab_node_id)
+from ..provisioning import (LAB_ROLES, STEP_NAMES, FakeProvisionBackend,
+                            LabProvisionBackend, ProvisionRunner, auto_approval_text,
+                            inventory_rows, job_status_text, plan_jobs, valid_lab_node_id)
 from .workers import ProvisionWorker, SupervisorWorker
 
 BOARD_COLUMNS = ['board（port）', 'chip', 'MAC 末尾', '役割', 'NodeId', 'provision 状態', '手順']
@@ -161,10 +161,16 @@ class SiteView(QWidget):
         layout.addWidget(self.inventory_table, 1)
         layout.addWidget(self.log)
         # --- workers ------------------------------------------------------------
-        backend = FakeProvisionBackend() if fake else ContractBackend()
-        self.backend_label.setText(
-            'provision backend: ' + ('fake（demo。機器に触れない）' if fake else
-                                     'D02／D03a の契約 interface（未実装の手順は 未対応。Ready にならない）'))
+        if fake:
+            backend = FakeProvisionBackend()
+            backend_text = 'fake（demo。機器に触れない）'
+        else:
+            # site/bundle locations are bound at run time from this screen.
+            backend = LabProvisionBackend(boards=boards_view.backend)
+            backend_text = ('lab（D02 BoardConfig + D03a identity + field boot readback。'
+                            'site directory と署名 bundle を指定してから実行）')
+        self.backend = backend
+        self.backend_label.setText('provision backend: ' + backend_text)
         self.sup_thread = QThread(self)
         # The bridge port is fenced by the same leases as ROM probes and writes.
         self.sup_worker = SupervisorWorker(supervisor or SiteSupervisor(leases=boards_view.backend.leases))
@@ -246,11 +252,18 @@ class SiteView(QWidget):
             return None
         socket = self.socket_path.text().strip() or str(Path(site_dir) / 'ipc' / 'api1.sock')
         expected = self.expected_site.text().strip().lower() or None
+        # A lab-initialized site carries usb-dev-secret.key next to its keys;
+        # the daemon reads it via --usb-dev-secret-file (never through argv
+        # content) and the bench admission profile pairs with it.
+        usb_secret = Path(site_dir) / 'usb-dev-secret.key'
+        lab_site = usb_secret.is_file()
         return {'site_dir': Path(site_dir), 'socket': Path(socket),
                 'daemon': self.daemon_path.text().strip() or 'routeloom-host',
                 'device': self.device.text().strip() or None,
                 'acl_file': Path(self.acl_file.text().strip()) if self.acl_file.text().strip() else None,
-                'expected_site_id': expected}
+                'expected_site_id': expected,
+                'usb_dev_secret_file': usb_secret if lab_site else None,
+                'admission_profile': 'bench-v1' if lab_site else None}
 
     def _site_command(self, signal):
         config = self.site_config()
@@ -347,6 +360,18 @@ class SiteView(QWidget):
     def run_provision(self):
         if not self._can_run():
             return
+        if isinstance(self.backend, LabProvisionBackend):
+            # Bind the site + bundle locations now — the journal, ledger and
+            # inventory all live under the site directory this screen names.
+            site_dir = self.site_dir.text().strip()
+            bundle = self.boards_view.bundle
+            self.backend.configure(
+                site_dir=site_dir or None,
+                bundles_dir=str(Path(bundle).parent) if bundle else None)
+            if self.backend.site_dir is None or self.backend.bundles_dir is None:
+                self.plan_label.setText(
+                    'site directory と bundle（boards 画面で選択）が必要')
+                return
         self.provision_serial += 1
         self.provisioning = True
         # The worker gets its own copies; results come back as new copies.

@@ -51,6 +51,7 @@
 #include "routeloom/rlcw1.hpp"
 #include "routeloom/sdkv1_session_rtc.hpp"
 #include "routeloom/fail_policy.hpp"
+#include "routeloom/hex.hpp"
 #include "routeloom/nvs_counter_store.hpp"
 #include "routeloom/power.hpp"
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
@@ -721,9 +722,16 @@ void run_node(const NodeBootHooks& hooks) {
 #endif
   // 07 §6 shipping marker: this line only runs in the field build (the
   // console path above never returns). The office matches fw= against the
-  // flashed image's project_description.json and the `sdkv1 identity`
-  // node= above against the inventory row.
-  ESP_LOGI(kTag, "routeloom field boot: fw=%s", esp_app_get_description()->version);
+  // flashed image's project_description.json, app_sha256= against the
+  // signed bundle's application image, and the `sdkv1 identity` node=
+  // above against the inventory row.
+  const esp_app_desc_t* app_desc = esp_app_get_description();
+  char app_sha256_hex[sizeof(app_desc->app_elf_sha256) * 2 + 1];
+  routeloom::hex_encode(app_desc->app_elf_sha256,
+                        sizeof(app_desc->app_elf_sha256),
+                        app_sha256_hex);
+  ESP_LOGI(kTag, "routeloom field boot: fw=%s app_sha256=%s",
+           app_desc->version, app_sha256_hex);
 
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   // The committed board identity must be verified before RF starts.
@@ -758,10 +766,13 @@ void run_node(const NodeBootHooks& hooks) {
     fail(status.detail);
   }
   const routeloom::BoardConfig& board = board_stores.config().config();
-  ESP_LOGI(kTag, "board config: gen=%lu node=0x%llx secrets_gen=%lu",
+  ESP_LOGI(kTag, "board config: gen=%lu node=0x%llx secrets_gen=%lu "
+                 "mac=%02x%02x%02x%02x%02x%02x",
            static_cast<unsigned long>(board.generation),
            static_cast<unsigned long long>(board.node),
-           static_cast<unsigned long>(board.secrets_generation));
+           static_cast<unsigned long>(board.secrets_generation),
+           board.sta_mac[0], board.sta_mac[1], board.sta_mac[2],
+           board.sta_mac[3], board.sta_mac[4], board.sta_mac[5]);
 #endif
 
   if (routeloom::espnow::nvs_namespace_in_use(NVS_DEFAULT_PART_NAME,
@@ -836,6 +847,11 @@ void run_node(const NodeBootHooks& hooks) {
   owner_config.joiner.requested_role = static_cast<std::uint8_t>(
       routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay);
   owner_config.log_tag = kTag;
+#if CONFIG_ROUTELOOM_GROUP_TREE_FLAT
+  // Flat group profile (dev-flow §6.3): the adopted SitePackage gateways
+  // become group_roots; the scoped routing policy is not engaged.
+  owner_config.flat_group_routing = true;
+#endif
 #if CONFIG_ROUTELOOM_DEEP_SLEEP && CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
   status = owner.begin(sdkv1_stores, entropy, owner_config, &s_rtc_hold);
 #else
@@ -1166,6 +1182,17 @@ void run_node(const NodeBootHooks& hooks) {
   dev_config.channel = board.channel;
   dev_config.boot = message_session;
   dev_config.role = routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay;
+#if CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED && defined(CONFIG_ROUTELOOM_ROUTE_GATEWAY_1)
+  // The dev route has no BoardConfig carrier yet: propagate the Kconfig
+  // gateway set so adopt_dev keeps the scoped profile (a missing list
+  // would silently fall back to flat on apply). bridge_node has SCOPED
+  // without GATEWAY_1 — its own main pins gateway[0] to NODE_ID.
+  dev_config.route_gateways[0] =
+      static_cast<routeloom::NodeId>(CONFIG_ROUTELOOM_ROUTE_GATEWAY_1);
+  dev_config.route_gateways[1] =
+      static_cast<routeloom::NodeId>(CONFIG_ROUTELOOM_ROUTE_GATEWAY_2);
+  dev_config.route_gateway_count = 2;
+#endif
   status = owner.adopt_dev(dev_config, monotonic_now_ms());
   routeloom::secure_clear(dev_config.psk);
   if (!status) fail(status.detail);
