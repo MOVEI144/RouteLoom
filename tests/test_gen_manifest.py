@@ -46,10 +46,13 @@ class ManifestDriftTest(unittest.TestCase):
         component = (ROOT / "components/routeloom_espnow/idf_component.yml").read_text(encoding="utf-8")
         targets = re.search(r"^targets:\n((?:  - esp32\w+\n)+)", component, re.M)
         self.assertIsNotNone(targets)
+        workflow = (ROOT / ".github/workflows/sdk.yml").read_text(encoding="utf-8")
+        self.assertIn("  c6-experimental:\n", workflow)
         for doc in ("docs/implementation/component-distribution.md", "examples/espnow_node/README.md"):
             text = (ROOT / doc).read_text(encoding="utf-8")
             for target in re.findall(r"^  - (esp32\w+)$", targets.group(1), re.M):
                 self.assertIn(target, text, f"{doc}: {target}")
+            self.assertIn("c6-experimental", text, doc)
 
     def test_persisted_versions_have_distinct_format_entries(self) -> None:
         manifest = gen_manifest.load(ROOT)
