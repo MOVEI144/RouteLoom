@@ -172,8 +172,9 @@ tests: its security vtable holds static keys only, and production security
   foreign-boot (`RL_STATUS_NOT_FOUND`) completion is never applied;
   `rl_get_applied_result()` reads the origin's verified RESULT.
 - Delivery results carry `reason_id`, the u16 id of the reason string in the
-  registry below (`ROUTELOOM_REASON_*`, `ROUTELOOM_REASON_TABLE`); 0 when the
-  reason is not registered.
+  reason-code registry (§1; delivery area of `protocol/manifest.json`,
+  generated as `ROUTELOOM_REASON_*` and `ROUTELOOM_REASON_TABLE` in
+  `version.h`); 0 when the reason is not registered.
 - `rl_context` is opaque; storage is caller-provided via
   `rl_context_size()`/`rl_context_alignment()` + `rl_init`.
 - ABI 2 callers must be rebuilt: an ABI 2 `rl_node_config_t` fails the

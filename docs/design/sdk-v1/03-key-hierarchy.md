@@ -308,7 +308,7 @@ struct SessionStats { std::uint32_t tx_deferred, tx_unavailable, rx_auth_require
 
 - **scope番号**：案の`GroupLink = 2, GroupEnd = 3`は、group配送（[group-delivery](group-delivery.md) §7）が先に`SecurityScope::Group = 2`をGROUP_DATAのend保護として導入していたため採らない。値2はnonceの先頭byte・開発PSKの鍵導出・test cipherのseedに入り、Wire v2 golden vectorに現れる。したがって**案の`GroupEnd`は既存の`Group`（2）がそのまま担い**、**`GroupLink`は3**とした（C ABIは`RL_SECURITY_GROUP_LINK = 3`を追加）。`GroupLink`はまだ誰も発行せず、開発PSK Providerは`Unsupported`で拒否する（PSKから導出しない）。本番のGroup（GK由来の送信者別鍵、§6.1の`K_gend`）はP5-1で同じ値2の意味を引き継ぐ。
 - **`SecurityContext.group_epoch`**：P4-1では追加しない（GKを使うP5-1で要否を決める）。`SecurityContext`の大きさと既存の集成体初期化を変えない。
-- **C ABI**：`rl_security_vtable_t`にはstruct_sizeが無く、callbackを後ろに足すと古い呼出し側の構造体を読み越える。session callbackは追加せず（`RL_ABI_VERSION`は2のまま）、C Providerは常に設定epoch・常にReadyとして扱う。session型ProviderはC++のみで、C向けには独自struct_size付きの拡張を後で足す。
+- **C ABI**：session callbackは追加せず、C Providerは常に設定epoch・常にReadyとして扱う。session型ProviderはC++のみ。core C ABI 3で`rl_security_vtable_t`は`struct_size`／`version`を持つ試験・移植用の静的鍵vtableと明記した（本番のsecurityはDevice API。[compatibility §4](../../spec/compatibility.md)）。session callbackは3.xの間に末尾へ追加できる。
 - **ContextState**：案の4状態をそのまま採り、0を`None`にした（0初期化で「使える」と誤認しない）。期限切れ（§4.3）は`Rekeying`または`tx_epoch`の拒否で表し、別状態は設けない。
 - **handshake要求**：案の「Nodeがrate制限付きで要求」は、P4-1ではProviderが`None`を答えた時点で自ら開始する形にした（Nodeに相手ごとのtimerを持たせない＝RAMを増やさない）。通常の要求と暗号計算のbudgetはengine側が扱う。未知end contextの受信起点だけは、end headerのoriginがlink認証後も未検証なので、session bankが全origin合計で2秒に1件までdemandを記録する。
 
