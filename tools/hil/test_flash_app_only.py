@@ -154,6 +154,30 @@ class FlashAppOnlyTests(unittest.TestCase):
                                                         '/dev/fake', build)
                 run.assert_not_called()
 
+    def test_field_bundle_refuses_blank_rlcfg_before_write(self):
+        board = SimpleNamespace(chip='esp32c6', flash_baud=115200)
+
+        def read_flash(cmd, **_kwargs):
+            with open(cmd[-1], 'wb') as fh:
+                fh.write(b'\xff' * flash.RLCFG_SIZE)
+            return subprocess.CompletedProcess(cmd, 0, '', '')
+        with tempfile.TemporaryDirectory() as out, \
+                patch.object(flash, 'preflight_board', return_value={}), \
+                patch.object(flash.subprocess, 'run', side_effect=read_flash) as run, \
+                patch.object(flash, 'build_write_flash_cmd') as write:
+            with self.assertRaisesRegex(FlashError, 'rlcfg is blank'):
+                flash._flash_board_from_dir(board, '/dev/fake', out, 'esptool',
+                                            False, 0, 1, out, needs_config=True)
+            self.assertIn('read-flash', run.call_args.args[0])
+            write.assert_not_called()
+
+    def test_only_generic_field_bundles_need_config(self):
+        field = 'CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y\n'
+        setup = field + 'CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y\n'
+        self.assertTrue(flash.field_bundle_needs_config({'generic_config': True}, field))
+        self.assertFalse(flash.field_bundle_needs_config({'generic_config': True}, setup))
+        self.assertFalse(flash.field_bundle_needs_config({'generic_config': False}, field))
+
 
 if __name__ == '__main__':
     unittest.main()

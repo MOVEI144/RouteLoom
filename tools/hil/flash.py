@@ -94,6 +94,36 @@ class FlashError(RuntimeError):
     pass
 
 
+RLCFG_OFFSET = 0x12000
+RLCFG_SIZE = 0x6000
+
+
+def field_bundle_needs_config(signed: dict, sdkconfig: str) -> bool:
+    """A generic field image boots only on a board that has BoardConfig."""
+    return (signed.get('generic_config') is True and
+            'CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y' not in sdkconfig.splitlines())
+
+
+def require_board_config(esptool: str, chip: str, port: str) -> None:
+    """Refuse a field image on a blank ``rlcfg``: it would only wait in
+    CONFIG_REQUIRED until the setup image provisions the board."""
+    with tempfile.TemporaryDirectory(prefix='routeloom-hil-rlcfg-') as td:
+        path = os.path.join(td, 'rlcfg.bin')
+        result = subprocess.run(
+            [esptool, '--chip', chip, '--port', port, 'read-flash',
+             hex(RLCFG_OFFSET), hex(RLCFG_SIZE), path],
+            capture_output=True, text=True, timeout=60)
+        if result.returncode != 0 or not os.path.isfile(path):
+            raise FlashError('could not read rlcfg to check the board configuration')
+        with open(path, 'rb') as fh:
+            data = fh.read()
+    if len(data) != RLCFG_SIZE:
+        raise FlashError('could not read rlcfg to check the board configuration')
+    if data == b'\xff' * RLCFG_SIZE:
+        raise FlashError('rlcfg is blank: flash the setup image and commit the '
+                         'BoardConfig first (or pass --allow-unconfigured)')
+
+
 def preflight_board(board: "rig_mod.Board", port: str, esptool: str,
                     out_dir: str, minimum_flash_bytes: Optional[int] = None,
                     chip_revision_range: Optional[tuple[int, int]] = None) -> dict:
@@ -309,6 +339,7 @@ def flash_board(
     timeout_s: float = DEFAULT_TIMEOUT_S,
     repo: str = rig_mod.REPO_ROOT,
     image_dir: Optional[str] = None,
+    allow_unconfigured: bool = False,
 ) -> dict:
     """Flash one board. Returns a manifest dict for the report."""
     if image_dir and os.path.isfile(os.path.join(image_dir, 'manifest.json')):
@@ -332,10 +363,13 @@ def flash_board(
             snapshot_signed = verify_bundle(snapshot, DEV_PUBLIC_KEY)
             if snapshot_signed['chip'] != board.chip or snapshot_signed['role'] != board.app:
                 raise FlashError('signed bundle does not match board')
+            needs_config = not allow_unconfigured and field_bundle_needs_config(
+                snapshot_signed, (snapshot / 'sdkconfig').read_text(encoding='utf-8'))
             return _flash_board_from_dir(board, port, out_dir, esptool, app_only,
                                          boot_seconds, timeout_s, str(snapshot),
                                          snapshot_signed['minimum_flash_bytes'],
-                                         tuple(snapshot_signed['chip_revision_range']))
+                                         tuple(snapshot_signed['chip_revision_range']),
+                                         needs_config=needs_config)
     else:
         build_dir = os.path.join(image_dir, 'build') if image_dir else board.build_dir(repo)
         return _flash_board_from_dir(board, port, out_dir, esptool, app_only,
@@ -344,11 +378,13 @@ def flash_board(
 
 def _flash_board_from_dir(board, port, out_dir, esptool, app_only, boot_seconds,
                           timeout_s, build_dir, minimum_flash_bytes=None,
-                          chip_revision_range=None):
+                          chip_revision_range=None, needs_config=False):
     os.makedirs(out_dir, exist_ok=True)
     preflight = preflight_board(board, port, esptool, out_dir,
                                 minimum_flash_bytes=minimum_flash_bytes or 0x400000,
                                 chip_revision_range=chip_revision_range)
+    if needs_config:
+        require_board_config(esptool, board.chip, port)
     cmd, files, fallback = build_write_flash_cmd(
         build_dir, port, esptool, board.chip or None, board.flash_baud, app_only
     )
@@ -442,6 +478,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--out", default=os.path.join(
         rig_mod.REPO_ROOT, "artifacts", "hil", "flash"))
     parser.add_argument("--image-dir", help="signed bundle or legacy bench build directory")
+    parser.add_argument("--allow-unconfigured", action="store_true",
+                        help="full-flash a field bundle even when rlcfg is blank")
     parser.add_argument("--capture-boot", action="store_true",
                         help="capture USB boot text for a diagnostic image whose console is on USB")
     args = parser.parse_args(argv)
@@ -468,7 +506,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     manifest = flash_board(
         board, port, args.out, esptool=args.esptool, app_only=args.app_only,
         boot_seconds=args.boot_seconds, timeout_s=args.timeout,
-        image_dir=args.image_dir,
+        image_dir=args.image_dir, allow_unconfigured=args.allow_unconfigured,
     )
     manifest_path = os.path.join(args.out, f"flash-{board.name}.json")
     with open(manifest_path, "w", encoding="utf-8") as fh:
