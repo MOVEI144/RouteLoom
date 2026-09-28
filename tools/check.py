@@ -42,8 +42,9 @@ GENERATED_GOLDENS = (
 PEER = "build/tests/cpp/routeloom_joiner_interop_peer"
 MESH_PEER = "build/tests/cpp/routeloom_owner_mesh_peer"
 # A live interop suite that finds no C++ peer prints this and passes as a
-# skip; the interop stage treats it as a failure.
-SKIP_MARK = re.compile(r"^SKIP site::")
+# skip; the interop stage treats it as a failure. Not anchored: with
+# --nocapture the harness output of parallel tests can share the line.
+SKIP_MARK = re.compile(r"SKIP site::")
 
 
 class Step:
@@ -316,6 +317,7 @@ def stream(step: Step, cwd: Path, env: dict) -> tuple[int, str]:
                           stderr=subprocess.STDOUT, text=True) as proc:
         for line in proc.stdout:
             sys.stdout.write(line)
+            sys.stdout.flush()
             if not hit and step.forbid.search(line):
                 hit = line.strip()
     return proc.returncode, hit
