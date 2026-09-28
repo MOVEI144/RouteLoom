@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Build the 25 firmware cells in .github/workflows/sdk.yml for HIL review.
+"""Build the firmware cells of tools/ci/cells.json (the sdk.yml matrix) for HIL review.
 
-The machine-local ``routeloom-idf-build --matrix`` predates the current CI
-matrix and still tries to build the removed bench_node app. This runner uses
-the pinned HIL container builder and records each real CI cell separately.
-Images stay in the local ignored build directory; the JSON result contains no
-firmware binaries or development credentials.
+This runner uses the pinned HIL container builder and records each CI cell
+separately, with the cell's sdkconfig overlay. Images stay in the local
+ignored build directory; the JSON result contains no firmware binaries or
+development credentials.
 """
 
 import argparse
@@ -20,53 +19,18 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BUILD = ROOT / "tools/hil/build_image.sh"
+CELLS = ROOT / "tools/ci/cells.json"
 
 
 def cells() -> list[tuple[str, str, str, list[str]]]:
-    rows = []
-    for target in ("esp32c3", "esp32s3", "esp32c5"):
-        for app in ("reference_node", "bridge_node"):
-            rows.append((app, target, "normal", []))
-        rows.append(("reference_node", target, "legacy-sleep", [
-            "CONFIG_ROUTELOOM_DEEP_SLEEP=y",
-            "CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y",
-        ]))
-    c3 = "esp32c3"
-    legacy = "CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y"
-    member = "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"
-    rows += [
-        ("bridge_node", c3, "observe", [legacy, "CONFIG_ROUTELOOM_DISCOVERY=y",
-                                        "CONFIG_ROUTELOOM_MIGRATION=1"]),
-        ("bridge_node", c3, "endpoints", [legacy, "CONFIG_ROUTELOOM_CAPABILITY=0x1f"]),
-        ("reference_node", c3, "config", [legacy, "CONFIG_ROUTELOOM_CONFIG=y"]),
-        ("reference_node", c3, "maintenance", ["CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y"]),
-        ("bridge_node", c3, "maintenance", [legacy, "CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y"]),
-        ("reference_node", c3, "route-scoped", [legacy,
-            "CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y"]),
-        ("bridge_node", c3, "route-scoped", [legacy,
-            "CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y"]),
-    ]
-    for target in ("esp32c3", "esp32s3", "esp32c5"):
-        for app in ("reference_node", "bridge_node"):
-            rows.append((app, target, "member", [member]))
-    rows += [
-        ("reference_node", c3, "member-sleep", [member, "CONFIG_ROUTELOOM_DEEP_SLEEP=y"]),
-        ("bridge_node", c3, "paired", [legacy, "CONFIG_ROUTELOOM_DISCOVERY=y",
-            "CONFIG_ROUTELOOM_CAPABILITY=0x1f", "CONFIG_ROUTELOOM_NODE_ID=0x1",
-            "CONFIG_ROUTELOOM_PEER_NODE_ID=0x2",
-            'CONFIG_ROUTELOOM_PEER_MAC="94:a9:90:7a:b5:60"']),
-        ("reference_node", c3, "paired", [legacy, "CONFIG_ROUTELOOM_DISCOVERY=y",
-            "CONFIG_ROUTELOOM_CONFIG=y", "CONFIG_ROUTELOOM_NODE_ID=0x2",
-            "CONFIG_ROUTELOOM_PEER_NODE_ID=0x1",
-            'CONFIG_ROUTELOOM_PEER_MAC="94:a9:90:6a:ee:c4"']),
-    ]
-    assert len(rows) == 25
-    return rows
+    """(app, target, cell id, sdkconfig overlay) for every CI cell."""
+    data = json.loads(CELLS.read_text(encoding="utf-8"))
+    return [(c["app"], c["target"], c["id"], list(c["overlay"])) for c in data["cells"]]
 
 
 def build(index: int, cell: tuple[str, str, str, list[str]], prefix: str) -> dict:
-    app, target, profile, options = cell
-    label = f"{prefix}-{index:02d}-{app}-{target}-{profile}"
+    app, target, cell_id, options = cell
+    label = f"{prefix}-{index:02d}-{cell_id}"
     # Share the local wrapper's three-container cap with other worktrees.
     while True:
         for slot in range(3):
@@ -90,7 +54,7 @@ def build(index: int, cell: tuple[str, str, str, list[str]], prefix: str) -> dic
     image = ROOT / "artifacts/hil/2026-09-26/images" / label
     ram = image / "build/ram-report.json"
     return {"index": index, "label": label, "app": app, "target": target,
-            "profile": profile, "options": options, "exit_code": result.returncode,
+            "cell": cell_id, "options": options, "exit_code": result.returncode,
             "stdout": result.stdout.strip(), "stderr": result.stderr.strip(),
             "build_log": str((image / "build.log").relative_to(ROOT)),
             "ram_report": str(ram.relative_to(ROOT)) if ram.exists() else None}
@@ -108,8 +72,8 @@ def main() -> int:
     planned = cells()
     if args.dry_run:
         print(json.dumps([{"index": i, "app": app, "target": target,
-                           "profile": profile, "options": options}
-                          for i, (app, target, profile, options) in enumerate(planned)], indent=2))
+                           "cell": cell_id, "options": options}
+                          for i, (app, target, cell_id, options) in enumerate(planned)], indent=2))
         return 0
     args.out.parent.mkdir(parents=True, exist_ok=True)
     results = []
@@ -119,9 +83,9 @@ def main() -> int:
         for future in as_completed(futures):
             row = future.result()
             results.append(row)
-            print(f"[{len(results)}/25] {row['label']} exit={row['exit_code']}", flush=True)
+            print(f"[{len(results)}/{len(planned)}] {row['label']} exit={row['exit_code']}", flush=True)
             args.out.write_text(json.dumps({"timestamp_utc": datetime.datetime.now(
-                datetime.timezone.utc).isoformat(), "expected": 25,
+                datetime.timezone.utc).isoformat(), "expected": len(planned),
                 "completed": len(results), "passed": sum(r["exit_code"] == 0 for r in results),
                 "results": sorted(results, key=lambda r: r["index"])}, indent=2) + "\n")
     return 0 if all(row["exit_code"] == 0 for row in results) else 1

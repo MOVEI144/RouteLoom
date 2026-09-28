@@ -210,47 +210,27 @@ class Guard(unittest.TestCase):
 
 class Documentation(unittest.TestCase):
     def test_ci_security_checks_match_firmware_profiles(self):
-        workflow = (ROOT / ".github/workflows/sdk.yml").read_text(encoding="utf-8")
-        checks = workflow.split("          idf.py build\n", 1)[1].split(
-            "          idf.py size >", 1)[0]
+        cells = {c["id"]: c for c in json.loads(
+            (ROOT / "tools/ci/cells.json").read_text(encoding="utf-8"))["cells"]}
         cases = (
-            ("bench_node", "normal", "off", "MEMBER_EDHOC", True),
-            ("bench_node", "deep_sleep", "off", "LEGACY_FIXTURE", True),
-            ("bench_node", "deep_sleep", "owner_member", "MEMBER_EDHOC", True),
-            ("reference_node", "normal", "off", "DEV_RAM", True),
-            ("bench_node", "normal", "off", "DEV_RAM", False),
+            ("bench_node-esp32c3-normal-off-off", "MEMBER_EDHOC"),
+            ("bench_node-esp32c3-deep_sleep-off-off", "LEGACY_FIXTURE"),
+            ("bench_node-esp32c3-deep_sleep-off-owner_member", "MEMBER_EDHOC"),
+            ("reference_node-esp32c3-normal-off-off", "DEV_RAM"),
         )
-        with tempfile.TemporaryDirectory() as tmp:
-            for app, profile, features, security, expected in cases:
-                with self.subTest(app=app, profile=profile, features=features,
-                                  security=security):
-                    config = f"CONFIG_ROUTELOOM_SECURITY_MODE_{security}=y\n"
-                    if profile == "deep_sleep":
-                        config += "CONFIG_ROUTELOOM_DEEP_SLEEP=y\n"
-                    (Path(tmp) / "sdkconfig").write_text(config, encoding="utf-8")
-                    script = checks
-                    for key, value in (("app", app), ("profile", profile),
-                                       ("autonomy", "off"), ("features", features)):
-                        script = script.replace("${{ matrix." + key + " }}", value)
-                    result = subprocess.run(["bash", "-euo", "pipefail", "-c", script],
-                                            cwd=tmp, capture_output=True, text=True,
-                                            check=False)
-                    self.assertEqual(result.returncode == 0, expected,
-                                     result.stderr)
+        for cell_id, security in cases:
+            with self.subTest(cell=cell_id):
+                cell = cells[cell_id]
+                wanted = cell["overlay"] + cell.get("expect", [])
+                modes = [line for line in wanted if "_SECURITY_MODE_" in line]
+                self.assertEqual(modes, [f"CONFIG_ROUTELOOM_SECURITY_MODE_{security}=y"])
 
     def test_owner_matrix_covers_targets(self):
-        workflow = (ROOT / ".github/workflows/sdk.yml").read_text(encoding="utf-8")
-        cells = set(re.findall(
-            r"(?m)^          - app: (reference_node|bridge_node)\n"
-            r"            target: (esp32c3|esp32s3|esp32c5)\n"
-            r"            profile: normal\n"
-            r"            autonomy: off\n"
-            r"            features: owner_member$", workflow))
-        self.assertEqual(cells, {
-            (app, target)
-            for app in ("reference_node", "bridge_node")
-            for target in ("esp32c3", "esp32s3", "esp32c5")
-        })
+        ids = {c["id"] for c in json.loads(
+            (ROOT / "tools/ci/cells.json").read_text(encoding="utf-8"))["cells"]}
+        for app in ("reference_node", "bridge_node"):
+            for target in ("esp32c3", "esp32s3", "esp32c5", "esp32c6"):
+                self.assertIn(f"{app}-{target}-normal-off-owner_member", ids)
 
     def test_owner_main_task_stack_budget(self):
         for app in ("bridge_node", "reference_node", "bench_node"):
@@ -267,11 +247,17 @@ class Documentation(unittest.TestCase):
                       for target, app, value in rows}
         self.assertEqual(documented, frr.MIN_FREE_BYTES)
 
-    def test_workflow_runs_the_guard_on_every_cell(self):
+    def test_every_ci_cell_runs_the_guard(self):
+        # sdk.yml builds each tools/ci/cells.json cell through check.py.
         workflow = (ROOT / ".github" / "workflows" / "sdk.yml").read_text(encoding="utf-8")
-        self.assertIn("idf.py size --format json2 --output-file build/size.json", workflow)
-        self.assertIn("tools/firmware_ram_report.py", workflow)
         self.assertIn("firmware/${{ matrix.app }}/build/ram-report.json", workflow)
+        code = subprocess.run([sys.executable, str(ROOT / "tools" / "check.py"), "firmware",
+                               "--all", "--dry-run"], capture_output=True, text=True)
+        self.assertEqual(code.returncode, 0)
+        cells = json.loads((ROOT / "tools" / "ci" / "cells.json").read_text())["cells"]
+        self.assertEqual(code.stdout.count("tools/firmware_ram_report.py build/size.json"),
+                         len(cells))
+        self.assertIn("idf.py size --format json2 --output-file build/size.json", code.stdout)
 
 
 if __name__ == "__main__":
