@@ -1699,16 +1699,17 @@ class MeshNode {
     MessageKey key{};  // {original_origin, original MessageId}
     std::array<std::uint8_t, 32> request_digest{};
     MonotonicMs expires_at_ms{0};
-    MonotonicMs emit_deadline_ms{0};  // request deadline + kAppliedLateResultMs
+    // request deadline + kAppliedLateResultMs; the bare request deadline
+    // while a deferred verdict is pending (ticket != 0).
+    MonotonicMs emit_deadline_ms{0};
     MonotonicMs next_emit_ms{0};
-    MonotonicMs apply_deadline_ms{0};  // request deadline for a deferred verdict
-    std::uint64_t ticket{0};  // nonzero while the endpoint's verdict is pending
     std::uint8_t emits{0};
     bool acked{false};  // a matching RESULT_ACK landed
     std::uint8_t outcome{0};  // endpoint::AppResultOutcome
     std::uint32_t application_code{0};
     std::array<std::uint8_t, endpoint::kAppResultDataMax> result_data{};
     std::uint8_t result_size{0};
+    std::uint32_t ticket{0};  // serial of a pending deferred verdict, 0 = none
   };
 
   // Sealed keeps an origin's End envelope in the frame union for link retries.

@@ -4869,9 +4869,10 @@ void MeshNode::dispatch_applied(const wire::Header& data, const ByteView body,
       ++applied_stats_.requests_dispatched;
       if (reply.deferred) {
         // No verdict yet: nothing is committed or sent until
-        // complete_applied(); a QUERY meanwhile answers Pending.
-        record.ticket = request.ticket;
-        record.apply_deadline_ms = now_ms + data.remaining_deadline_ms;
+        // complete_applied(); a QUERY meanwhile answers Pending, and Expired
+        // once the request deadline passed.
+        record.ticket = next_applied_ticket_;
+        record.emit_deadline_ms = now_ms + data.remaining_deadline_ms;
         return;
       }
       outcome = reply.outcome;
@@ -4904,18 +4905,25 @@ Status MeshNode::complete_applied(const std::uint64_t ticket, const AppliedReply
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
   NodeGuard guard(in_call_);
   last_clock_ms_ = now_ms;
-  if (ticket == 0 || reply.deferred || reply.size > endpoint::kAppResultDataMax ||
+  if (static_cast<std::uint32_t>(ticket) == 0 || reply.deferred ||
+      reply.size > endpoint::kAppResultDataMax ||
       reply.code >= endpoint::kAppResultSdkCodeBase) {
     return Status::error(StatusCode::InvalidArgument, "invalid applied reply");
   }
-  auto* record = applied_records_.find(
-      [&](const AppliedRecord& value) { return value.ticket == ticket; });
+  // The high half binds the ticket to this boot's message session.
+  const auto serial = static_cast<std::uint32_t>(ticket);
+  auto* record = (ticket >> 32) != config_.message_session
+      ? nullptr
+      : applied_records_.find(
+            [&](const AppliedRecord& value) { return value.ticket == serial; });
   if (record == nullptr) return Status::error(StatusCode::NotFound, "APPLIED_TICKET_UNKNOWN");
-  if (now_ms >= record->apply_deadline_ms) {
+  if (now_ms >= record->emit_deadline_ms) {
     return Status::error(StatusCode::Expired, "APPLIED_TICKET_EXPIRED");
   }
   ++work_generation_;
   record->ticket = 0;
+  record->emit_deadline_ms =
+      std::min(record->expires_at_ms, record->emit_deadline_ms + kAppliedLateResultMs);
   record->outcome = static_cast<std::uint8_t>(reply.outcome);
   record->application_code = reply.code;
   record->result_size = reply.size;
@@ -5223,11 +5231,8 @@ void MeshNode::handle_app_result(const wire::PlainFrame& frame, const NodeId pee
       if (record->ticket != 0) {
         if (applied_answer_gate(frame.header.origin, now_ms)) {
           emit_app_status(frame.header.origin, req_key, head.request_digest,
-                          now_ms < record->apply_deadline_ms
-                              ? endpoint::AppResultStatusCode::Pending
-                              : endpoint::AppResultStatusCode::Expired,
-                          query.query_nonce, frame.header.remaining_deadline_ms,
-                          now_ms);
+                          endpoint::AppResultStatusCode::Pending, query.query_nonce,
+                          frame.header.remaining_deadline_ms, now_ms);
         }
         return;
       }
