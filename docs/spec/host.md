@@ -40,7 +40,7 @@ Linux常駐、macOS/Windows開発利用を設計対象にする。USB device pat
 
 API受付のoperation IDと無線Message IDは別に返す。idempotency keyはhost再接続後も指定scope内で有効。操作成功、管理commit、機器へのapplyを別stateで返す。
 
-**capabilities互換方針**。`capabilities.get` の応答文書は版付き（`caps_version`、現在 1）で、field・method は additive-only（追加のみ。改名・削除は版上げと仕様更新を伴う）。client は未知の field・method を ignore unknown（無視）し、文書全体の厳密一致で判定しない。版と方針の正本は [mesh-profiles.json](../reference/mesh-profiles.json) の `capabilities`。
+**capabilities互換方針**。`capabilities.get` の応答文書は版付き（`caps_version`、現在 2。2 は `join.policy` の `decision_mode` の出力値を `"kguard"` から `"external"` に改めた版）で、field・method は additive-only（追加のみ。改名・削除は版上げと仕様更新を伴う）。client は未知の field・method を ignore unknown（無視）し、文書全体の厳密一致で判定しない。版と方針の正本は [mesh-profiles.json](../reference/mesh-profiles.json) の `capabilities`。
 
 **profile 3軸**。security（`DEV_RAM`／`MEMBER_EDHOC`、互換用 `LEGACY_FIXTURE`）、routing（`FLAT`／`GATEWAY_SCOPED`）、resource（`leaf-small`／`relay-c3`／`gateway-s3`）。名前・値・成熟度（main／pr／proposal）の契約と根拠への参照は mesh-profiles.json が正本。これは repository の実装・提案状況を表し、接続中の gateway の構成や本番認定（Production 表示）を示さない。現行 capabilities.get は gateway の実効 security profile を広告しない。
 

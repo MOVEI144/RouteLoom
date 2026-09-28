@@ -78,7 +78,7 @@ pub const REQUEST_ID_MAX: usize = 64;
 /// ignore unknown fields/methods — never an exact document match.
 /// Additive-only: a removal or rename bumps this and the spec
 /// (docs/spec/host.md §3 records the policy).
-pub const CAPS_VERSION: u32 = 1;
+pub const CAPS_VERSION: u32 = 2;
 // Legacy assurance for records without per-delivery evidence: USB receive
 // bodies on an unnegotiated session carry no profile or verdict.
 const RX_ASSURANCE: &str = "\"assurance\":{\"profile\":\"UNKNOWN\",\"origin\":\"unverified\"}";
@@ -5989,7 +5989,7 @@ mod tests {
         let result = parsed.get("result").expect("ok result");
         assert_eq!(
             result.get("caps_version").and_then(Json::as_u64),
-            Some(1),
+            Some(2),
             "{response}"
         );
         let keys: Vec<&str> = result
