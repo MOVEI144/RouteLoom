@@ -2695,6 +2695,25 @@ fn mesh_route_loss_stale_peer_recovers() {
     assert_eq!(world.snaps[0].rx, b"after-repair");
 }
 
+/// The Probe MAC callback may release a driver peer before the Result
+/// reaches RX. The verified Result must still re-establish the binding.
+#[test]
+fn mesh_route_loss_result_after_probe_callback() {
+    let Some(mut world) = route_loss_world("route-result-late", Switch::direct(), false) else {
+        return;
+    };
+    stale_a_gateway(&mut world);
+    let probes_before = world.switch.probes_seen;
+    let results_before = world.switch.results_seen;
+    world.switch.delay_ms[0][1] = 100;
+    world.switch.heal(1);
+    world.peers[1].app_send(testkit::GATEWAY, b"repair-late-result");
+    world.pump_until(8000, |snaps| snaps[1].phases[0] == PHASE_REACHABLE);
+    assert_eq!(world.snaps[1].phases[0], PHASE_REACHABLE);
+    assert!(world.switch.probes_seen > probes_before);
+    assert!(world.switch.results_seen > results_before);
+}
+
 /// Phase-1 convergence on the direct radio: all three Owners adopt
 /// from their Phase-0 images (member boots, no rejoins), open their
 /// authority channels through the gateway's real USB relay, confirm,
