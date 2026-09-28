@@ -413,8 +413,8 @@ def main():
         discover_body_bytes[:2] + u8(2) + discover_body_bytes[3:],
         "unknown auth scheme")
     bad("discover_v2_bad_flags", "scope_discover",
-        discover_body_bytes[:3] + u8(1) + discover_body_bytes[4:],
-        "flags byte is reserved")
+        discover_body_bytes[:3] + u8(2) + discover_body_bytes[4:],
+        "unknown flag bit")
     bad("discover_v2_bad_class", "scope_discover",
         discover_body(3, 7, tag), "unknown scope class")
     bad("discover_v2_wrong_size", "scope_discover",
