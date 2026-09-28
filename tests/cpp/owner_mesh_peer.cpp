@@ -32,6 +32,13 @@
 //                              (unicast succeeds iff delivered)
 //   S <dst u64le><payload>      app-level MeshNode send (reliable, 30 s
 //                              lifetime); at most 16 tracked at once
+//   V <index u8>               register one synthetic regular neighbor through
+//                              the real runtime; reply v <ok u8><peers u8>
+//   I <index u8> / J <index u8> occupy/release one test driver transient;
+//                              reply i/j <ok u8><peers u8>
+//   E <fail u8>                inject driver peer deletion failure (no reply)
+//   H <count u8><dst u64le>    untracked application burst through the
+//                              real runtime; reply h <accepted u8><queued u8>
 //   N                          dump the fake-NVS image (reply: N <image>)
 //   P                          power-cycle: persist the NVS image and take
 //                              the reboot marker (exit 42), like a field
@@ -84,6 +91,13 @@
 // dropped-offer counters — the ZT attempt evidence) |
 // notice_down_live u8 | unknown_peer_rx u32 |
 // proxy_frames_rejected u32 | proxy_cookie_rejects u32
+// | probes_tx u32 | peer_capacity u32 | stale_expirations u32 |
+// repair_demands u32 | neighbor_count u8 | phase[gw,A,B] u8*3 |
+// transit_conflicts u32 | receipt_conflicts u32 | no_route u32 |
+// stale_tx_results u32
+// | driver_peers u8
+// | queued u8 | admissions_rejected u32
+// | member_starts u32 | link_request_failures u32
 //
 // Setup arrives on argv (all integers accept 0x hex; blobs are hex):
 //
@@ -98,6 +112,7 @@
 //   --gw1 <u64> --gw2 <u64>  (scoped route gateways for the pre-adoption
 //                            node config; the adopted config comes from
 //                            the real ApplyMemberConfig path)
+//   --flat                 use the product flat-route timers for route-loss tests
 //   --nvs-load <file>    (optional fake-NVS preload image)
 //   --flash <file>       (optional 4096 B legacy slot image: identity
 //                         slots, site slots — imported into the fake NVS
@@ -121,6 +136,7 @@
 #include <vector>
 
 #include "bootloader_random.h"
+#include "esp_wifi.h"
 #include "nvs.h"
 #include "psa/crypto.h"
 #include "routeloom/aead_gcm.hpp"
@@ -740,6 +756,7 @@ struct Setup {
   std::uint32_t netlow{0};
   NodeId gw1{routeloom::kInvalidNodeId};
   NodeId gw2{routeloom::kInvalidNodeId};
+  bool flat{false};
   std::string nvs_load;
   std::string flash;
   std::string flash_ext;
@@ -793,6 +810,8 @@ Setup parse_argv(int argc, char** argv) {
       setup.gw1 = parse_u64(value);
     } else if (arg == std::string("--gw2") && take_arg(argc, argv, i, value)) {
       setup.gw2 = parse_u64(value);
+    } else if (arg == std::string("--flat")) {
+      setup.flat = true;
     } else if (arg == std::string("--nvs-load") && take_arg(argc, argv, i, value)) {
       setup.nvs_load = value;
     } else if (arg == std::string("--flash") && take_arg(argc, argv, i, value)) {
@@ -855,6 +874,9 @@ class TeeObserver final : public routeloom::NodeObserver {
   }
   void on_diagnostic(const char* reason, NodeId peer,
                      const routeloom::MessageId* id) noexcept override {
+    if (std::strcmp(reason, "TRANSIT_DEDUP_CONFLICT") == 0) ++transit_conflicts_;
+    if (std::strcmp(reason, "RECEIPT_DEDUP_CONFLICT") == 0) ++receipt_conflicts_;
+    if (std::strcmp(reason, "NO_ROUTE") == 0) ++no_route_;
     if (next_ != nullptr) next_->on_diagnostic(reason, peer, id);
   }
 
@@ -863,6 +885,9 @@ class TeeObserver final : public routeloom::NodeObserver {
   std::uint8_t rx_[kAppRxKeep]{};
   std::size_t rx_len_{0};
   std::vector<routeloom::DeliveryResult> delivery_events_;
+  std::uint32_t transit_conflicts_{0};
+  std::uint32_t receipt_conflicts_{0};
+  std::uint32_t no_route_{0};
 
  private:
   routeloom::NodeObserver* next_;
@@ -877,7 +902,7 @@ struct AppTx {
 
 void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
                    routeloom::espnow::Sdkv1Stores& stores,
-                   const routeloom::espnow::EspNowRuntime& runtime,
+                   routeloom::espnow::EspNowRuntime& runtime,
                    const routeloom::usb::UsbBridge* bridge, const TeeObserver& observer,
                    AppTx* app_tx, std::uint32_t send_count_base) {
   using namespace routeloom;
@@ -1006,6 +1031,28 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
   put_u32(out, runtime.unknown_peer_rx());
   put_u32(out, proxy.frames_rejected);
   put_u32(out, proxy.cookie_rejects);
+  put_u32(out, stats.probes_tx);
+  put_u32(out, stats.peer_capacity);
+  put_u32(out, stats.stale_expirations);
+  put_u32(out, stats.repair_demands);
+  out.push_back(discovery != nullptr ? static_cast<std::uint8_t>(discovery->neighbor_count()) : 0);
+  for (const NodeId peer : {0x00A1000000000001ULL, 0x00A1000000000101ULL,
+                            0x00A1000000000102ULL}) {
+    NeighborPhase phase{};
+    out.push_back(discovery != nullptr && discovery->phase_of(peer, phase)
+                      ? static_cast<std::uint8_t>(phase)
+                      : 0xFF);
+  }
+  put_u32(out, observer.transit_conflicts_);
+  put_u32(out, observer.receipt_conflicts_);
+  put_u32(out, observer.no_route_);
+  put_u32(out, runtime.stale_tx_results());
+  out.push_back(static_cast<std::uint8_t>(idf_stub::peer_count()));
+  const CongestionStats congestion = runtime.node().congestion_stats();
+  out.push_back(static_cast<std::uint8_t>(congestion.queued));
+  put_u32(out, static_cast<std::uint32_t>(congestion.admissions_rejected));
+  put_u32(out, counters.member_starts);
+  put_u32(out, counters.link_request_failures);
   write_frame(out);
 }
 
@@ -1026,6 +1073,7 @@ int main(int argc, char** argv) {
   mesh_peer_seed_entropy(setup.seed);
 
   idf_stub::reset();
+  idf_stub::set_peer_limit(20);
   idf_stub::set_mac(setup.mac.data());
   idf_stub::set_now_us(static_cast<std::int64_t>(setup.t0) * 1000);
   MonotonicMs now = setup.t0;
@@ -1054,6 +1102,7 @@ int main(int argc, char** argv) {
   owner_config.joiner.requested_role = setup.role;
   owner_config.log_tag = "mesh_peer";
   owner_config.gateway = setup.gateway;
+  owner_config.flat_group_routing = setup.flat;
 
   EspOwnerEntropy entropy;
   EspNowSecurityOwner owner{};
@@ -1082,10 +1131,12 @@ int main(int argc, char** argv) {
   radio_config.node.route_generation = message_session;
   radio_config.node.link_epoch = message_session;
   radio_config.node.end_epoch = message_session;
-  radio_config.node.route_gateways[0] = setup.gw1;
-  if (setup.gw2 != kInvalidNodeId) radio_config.node.route_gateways[1] = setup.gw2;
+  if (!setup.flat) {
+    radio_config.node.route_gateways[0] = setup.gw1;
+    if (setup.gw2 != kInvalidNodeId) radio_config.node.route_gateways[1] = setup.gw2;
+  }
   radio_config.node.route_advertisement_period_ms = 5000;
-  radio_config.node.route_lifetime_ms = 90000;
+  radio_config.node.route_lifetime_ms = setup.flat ? 15000 : 90000;
   radio_config.channel = setup.channel;
   radio_config.max_tx_power_qdbm = 80;
   EspNowRuntime runtime(radio_config, owner.session_provider(), observer);
@@ -1152,6 +1203,15 @@ int main(int argc, char** argv) {
         }
         for (std::size_t i = 0; i < kAppTxMax; ++i) {
           if (!app_tx[i].used) continue;
+          // The production delivery table is bounded; retain a terminal
+          // observation before its id ages out of that table.
+          if (app_tx[i].state == DeliveryState::Delivered ||
+              app_tx[i].state == DeliveryState::Failed ||
+              app_tx[i].state == DeliveryState::Expired ||
+              app_tx[i].state == DeliveryState::CancelledBeforeTx ||
+              app_tx[i].state == DeliveryState::Indeterminate) {
+            continue;
+          }
           const DeliveryResult result = runtime.node().delivery(app_tx[i].id);
           app_tx[i].state = result.state;
           std::strncpy(app_tx[i].reason, result.reason != nullptr ? result.reason : "?",
@@ -1195,6 +1255,18 @@ int main(int argc, char** argv) {
             break;
           }
         }
+        if (slot == nullptr) {
+          for (auto& entry : app_tx) {
+            if (entry.state == DeliveryState::Delivered || entry.state == DeliveryState::Failed ||
+                entry.state == DeliveryState::Expired ||
+                entry.state == DeliveryState::CancelledBeforeTx ||
+                entry.state == DeliveryState::Indeterminate ||
+                entry.state == DeliveryState::Empty) {
+              slot = &entry;
+              break;
+            }
+          }
+        }
         if (slot == nullptr) fatal("app tx full");
         SendOptions options{};
         options.lifetime_ms = 30000;
@@ -1214,6 +1286,55 @@ int main(int argc, char** argv) {
         slot->reason[sizeof(slot->reason) - 1] = '\0';
         break;
       }
+      case 'V': {
+        if (length != 2) fatal("bad V");
+        const std::uint8_t index = payload[1];
+        const routeloom::espnow::MacAddress mac{{0x02, 0xEE, 0, 0, 0, index}};
+        const Status registered = runtime.register_neighbor(
+            0x00A1000000001000ULL + index, mac, 1);
+        write_frame(Bytes{'v', registered.ok() ? std::uint8_t{1} : std::uint8_t{0},
+                          static_cast<std::uint8_t>(idf_stub::peer_count())});
+        break;
+      }
+      case 'H': {
+        if (length != 10) fatal("bad H");
+        NodeId dst = 0;
+        for (int i = 0; i < 8; ++i) dst |= static_cast<NodeId>(payload[2 + i]) << (8 * i);
+        std::uint8_t accepted = 0;
+        for (std::uint8_t i = 0; i < payload[1]; ++i) {
+          const std::uint8_t byte = i;
+          SendOptions options{};
+          options.lifetime_ms = 30000;
+          MessageId id{};
+          if (runtime.send_application(dst, ByteView{&byte, 1}, options, id)) ++accepted;
+        }
+        write_frame(Bytes{'h', accepted, static_cast<std::uint8_t>(
+                                          runtime.node().congestion_stats().queued)});
+        break;
+      }
+      case 'I':
+      case 'J': {
+        if (length != 2) fatal("bad I/J");
+        const std::uint8_t index = payload[1];
+        const std::uint8_t mac[6] = {0x02, 0xFD, 0, 0, 0, index};
+        esp_err_t result = ESP_FAIL;
+        if (payload[0] == 'I') {
+          esp_now_peer_info_t info{};
+          std::memcpy(info.peer_addr, mac, 6);
+          info.ifidx = WIFI_IF_STA;
+          result = esp_now_add_peer(&info);
+        } else {
+          result = esp_now_del_peer(mac);
+        }
+        write_frame(Bytes{payload[0] == 'I' ? std::uint8_t{'i'} : std::uint8_t{'j'},
+                          result == ESP_OK ? std::uint8_t{1} : std::uint8_t{0},
+                          static_cast<std::uint8_t>(idf_stub::peer_count())});
+        break;
+      }
+      case 'E':
+        if (length != 2) fatal("bad E");
+        idf_stub::fail_del_peer(payload[1] != 0);
+        break;
       case 'N': {
         Bytes reply;
         reply.push_back('N');

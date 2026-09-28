@@ -952,6 +952,21 @@ struct MeshSnap {
     unknown_peer_rx: u32,
     proxy_frames_rejected: u32,
     proxy_cookie_rejects: u32,
+    probes_tx: u32,
+    peer_capacity: u32,
+    stale_expirations: u32,
+    repair_demands: u32,
+    neighbor_count: u8,
+    phases: [u8; 3],
+    transit_conflicts: u32,
+    receipt_conflicts: u32,
+    no_route: u32,
+    stale_tx_results: u32,
+    driver_peers: u8,
+    queued: u8,
+    admissions_rejected: u32,
+    member_starts: u32,
+    link_request_failures: u32,
 }
 
 #[allow(dead_code)]
@@ -1088,6 +1103,25 @@ fn parse_mesh_snap(payload: &[u8]) -> MeshSnap {
     snap.unknown_peer_rx = get_u32(payload, &mut pos);
     snap.proxy_frames_rejected = get_u32(payload, &mut pos);
     snap.proxy_cookie_rejects = get_u32(payload, &mut pos);
+    snap.probes_tx = get_u32(payload, &mut pos);
+    snap.peer_capacity = get_u32(payload, &mut pos);
+    snap.stale_expirations = get_u32(payload, &mut pos);
+    snap.repair_demands = get_u32(payload, &mut pos);
+    snap.neighbor_count = payload[pos];
+    pos += 1;
+    snap.phases.copy_from_slice(&payload[pos..pos + 3]);
+    pos += 3;
+    snap.transit_conflicts = get_u32(payload, &mut pos);
+    snap.receipt_conflicts = get_u32(payload, &mut pos);
+    snap.no_route = get_u32(payload, &mut pos);
+    snap.stale_tx_results = get_u32(payload, &mut pos);
+    snap.driver_peers = payload[pos];
+    pos += 1;
+    snap.queued = payload[pos];
+    pos += 1;
+    snap.admissions_rejected = get_u32(payload, &mut pos);
+    snap.member_starts = get_u32(payload, &mut pos);
+    snap.link_request_failures = get_u32(payload, &mut pos);
     assert_eq!(pos, payload.len(), "G fully consumed");
     snap
 }
@@ -1114,6 +1148,7 @@ struct MeshPeer {
     mac: [u8; 6],
     role: u8,
     gateway: bool,
+    flat: bool,
     seed: u64,
     usb_secret_hex: String,
     nvs_save: std::path::PathBuf,
@@ -1141,6 +1176,7 @@ impl MeshPeer {
         flash_ext: &std::path::Path,
         usb_secret_hex: &str,
         nvs_save: &std::path::Path,
+        flat: bool,
     ) -> Self {
         let mut child = Self::launch(
             persona.node,
@@ -1153,6 +1189,7 @@ impl MeshPeer {
             None,
             Some((flash, flash_ext)),
             nvs_save,
+            flat,
         );
         let stdin = child.stdin.take().expect("peer stdin");
         let stdout = child.stdout.take().expect("peer stdout");
@@ -1164,6 +1201,7 @@ impl MeshPeer {
             mac: persona.mac,
             role: persona.role,
             gateway: persona.gateway,
+            flat,
             seed,
             usb_secret_hex: usb_secret_hex.to_string(),
             nvs_save: nvs_save.to_path_buf(),
@@ -1189,6 +1227,7 @@ impl MeshPeer {
         nvs_load: Option<&std::path::Path>,
         flash: Option<(&std::path::Path, &std::path::Path)>,
         nvs_save: &std::path::Path,
+        flat: bool,
     ) -> Child {
         let path =
             mesh_peer_path().expect("build routeloom_owner_mesh_peer or set ROUTELOOM_MESH_PEER");
@@ -1211,6 +1250,9 @@ impl MeshPeer {
             .arg(format!("{:#x}", testkit::NETWORK_LOW))
             .arg("--gw1")
             .arg(format!("{:#x}", testkit::GATEWAY));
+        if flat {
+            command.arg("--flat");
+        }
         if let Some(nvs) = nvs_load {
             command.arg("--nvs-load").arg(nvs);
         }
@@ -1259,6 +1301,7 @@ impl MeshPeer {
             Some(&nvs_save),
             None,
             &nvs_save,
+            self.flat,
         );
         self.stdin = self.child.stdin.take().expect("peer stdin");
         self.stdout = self.child.stdout.take().expect("peer stdout");
@@ -1388,6 +1431,28 @@ impl MeshPeer {
         self.send(&command);
     }
 
+    fn peer_slot(&mut self, command: u8, index: u8) -> (bool, u8) {
+        self.send(&[command, index]);
+        let reply = self.recv().expect("peer slot reply");
+        assert_eq!(reply.len(), 3);
+        assert_eq!(reply[0], command.to_ascii_lowercase());
+        (reply[1] == 1, reply[2])
+    }
+
+    fn app_burst(&mut self, count: u8, dst: u64) -> (u8, u8) {
+        let mut command = vec![b'H', count];
+        command.extend_from_slice(&dst.to_le_bytes());
+        self.send(&command);
+        let reply = self.recv().expect("app burst reply");
+        assert_eq!(reply.len(), 3);
+        assert_eq!(reply[0], b'h');
+        (reply[1], reply[2])
+    }
+
+    fn fail_driver_release(&mut self, fail: bool) {
+        self.send(&[b'E', u8::from(fail)]);
+    }
+
     /// C4 fault: a field power cut. The peer process takes the same
     /// exit-42 marker as a lifecycle esp_restart, so the next tick
     /// respawns it from the saved NVS image through the production
@@ -1424,6 +1489,15 @@ struct Switch {
     /// Deliver the frame but report failure (a lost MAC ACK: the peer
     /// retries while the far side already holds the frame).
     ack_drop_next: [[u32; 3]; 3],
+    /// MAC callbacks are separate from airtime and RX, as on the driver.
+    callback_delay_ms: [[u64; 3]; 3],
+    callback_delay_kind: Option<u8>,
+    /// Bounded, directed loss of an authenticated Wire frame kind.
+    drop_wire: Vec<(usize, usize, u8, u32)>,
+    wire_dropped: u32,
+    probes_seen: u32,
+    results_seen: u32,
+    route_updates_seen: u32,
     /// Hold frames on the directed leg this long before delivery.
     delay_ms: [[u64; 3]; 3],
     /// Per-leg evidence: what crossed and what the switch ate.
@@ -1450,6 +1524,13 @@ impl Switch {
             dropped: 0,
             drop_next: [[0; 3]; 3],
             ack_drop_next: [[0; 3]; 3],
+            callback_delay_ms: [[0; 3]; 3],
+            callback_delay_kind: None,
+            drop_wire: Vec::new(),
+            wire_dropped: 0,
+            probes_seen: 0,
+            results_seen: 0,
+            route_updates_seen: 0,
             delay_ms: [[0; 3]; 3],
             leg_delivered: [[0; 3]; 3],
             leg_dropped: [[0; 3]; 3],
@@ -1533,6 +1614,26 @@ impl Switch {
         if from == 1 && phase == 4 && (step == 2 || step == 3) && self.c7_old_cert.is_none() {
             self.c7_old_cert = Some(frame.to_vec());
         }
+    }
+
+    fn drop_wire_kind(&mut self, from: usize, to: usize, kind: u8, count: u32) {
+        self.drop_wire.push((from, to, kind, count));
+    }
+
+    fn consume_wire_loss(&mut self, from: usize, to: usize, frame: &[u8]) -> bool {
+        if frame.len() < 5 || frame[..4] != *b"RL\x02\0" {
+            return false;
+        }
+        if let Some(rule) = self
+            .drop_wire
+            .iter_mut()
+            .find(|rule| rule.0 == from && rule.1 == to && rule.2 == frame[4] && rule.3 > 0)
+        {
+            rule.3 -= 1;
+            self.wire_dropped += 1;
+            return true;
+        }
+        false
     }
 }
 
@@ -1891,6 +1992,10 @@ struct MeshWorld {
     usb_auth_total: u64,
     /// Delayed switch deliveries: (release_at, delivery).
     delayed: Vec<(u64, SwitchDelivery)>,
+    /// Per-sender FIFO preserves the ESP-NOW callback attribution order.
+    callbacks: [Vec<(u64, u8)>; 3],
+    early_hop_accepts: u32,
+    probe_while_callback_pending: u32,
     /// C5 fault: the gateway↔host USB lane physically cut. The
     /// gateway's USB output is swallowed and the host's reply stream
     /// never reaches the bridge — buffered carriers queue like a real
@@ -1908,6 +2013,10 @@ impl MeshWorld {
     /// `None` when either peer binary is missing: the test skips
     /// (ignore-equivalent). Provisions all three personas first.
     fn start(tag: &str, switch: Switch) -> Option<Self> {
+        Self::start_with_profile(tag, switch, false)
+    }
+
+    fn start_with_profile(tag: &str, switch: Switch, flat: bool) -> Option<Self> {
         if !peers_present() {
             eprintln!(
                 "SKIP site::owner_mesh_interop: no C++ peers \
@@ -1952,6 +2061,7 @@ impl MeshWorld {
                 &images[index].1,
                 &usb_secret_hex,
                 &nvs_save,
+                flat,
             ));
         }
         // Phase 0's in-process join transport retires here: from the
@@ -1976,6 +2086,9 @@ impl MeshWorld {
             usb_incarnation: 7,
             usb_auth_total: 0,
             delayed: Vec::new(),
+            callbacks: Default::default(),
+            early_hop_accepts: 0,
+            probe_while_callback_pending: 0,
             usb_down: false,
             c6_flip_on_a_stored: None,
             c6_flipped: false,
@@ -2092,6 +2205,9 @@ impl MeshWorld {
             } else {
                 None
             });
+            if ticks[index].as_ref().is_some_and(|tick| tick.rebooted) {
+                self.callbacks[index].clear();
+            }
         }
         // A rebooted gateway answers on a fresh USB session: a full
         // session boundary (fresh host end, fresh adapters, the
@@ -2108,7 +2224,6 @@ impl MeshWorld {
             ticks[2].as_ref().map(|t| t.snap.channel).unwrap_or(0),
         ];
         let mut deliveries: Vec<SwitchDelivery> = Vec::new();
-        let mut completions: [Vec<u8>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         // Frames a delayed leg holds this step (released by the clock,
         // below — a reconnect never replays what a down leg dropped,
         // but a live delayed leg keeps what it held).
@@ -2122,7 +2237,7 @@ impl MeshWorld {
                 self.switch
                     .c7_observe(from, tx.dst_mac, &tx.bytes, self.macs[2]);
                 if tx.dst_mac == BROADCAST_MAC {
-                    completions[from].push(1);
+                    self.callbacks[from].push((self.now, 1));
                     for to in 0..3 {
                         if to != from
                             && booted[to]
@@ -2137,10 +2252,37 @@ impl MeshWorld {
                     continue;
                 }
                 let Some(to) = (0..3).find(|to| self.macs[*to] == tx.dst_mac) else {
-                    completions[from].push(0);
+                    self.callbacks[from].push((self.now, 0));
                     self.switch.dropped += 1;
                     continue;
                 };
+                if tx.bytes.len() > 4 && tx.bytes[..4] == *b"RL\x02\0" {
+                    match tx.bytes[4] {
+                        WIRE_PROBE => self.switch.probes_seen += 1,
+                        WIRE_RESULT => self.switch.results_seen += 1,
+                        WIRE_ROUTE_UPDATE => self.switch.route_updates_seen += 1,
+                        _ => {}
+                    }
+                }
+                if tx.bytes.len() > 4
+                    && tx.bytes[..4] == *b"RL\x02\0"
+                    && tx.bytes[4] == WIRE_HOP_ACCEPT
+                    && self.callbacks[to].iter().any(|(at, _)| *at > self.now)
+                {
+                    self.early_hop_accepts += 1;
+                }
+                let delay_this = match self.switch.callback_delay_kind {
+                    None => true,
+                    Some(kind) => {
+                        tx.bytes.len() > 4 && tx.bytes[..4] == *b"RL\x02\0" && tx.bytes[4] == kind
+                    }
+                };
+                let callback_delay = if delay_this {
+                    self.switch.callback_delay_ms[from][to]
+                } else {
+                    0
+                };
+                let callback_at = self.now + callback_delay;
                 let leg_up = to != from
                     && booted[to]
                     && self.switch.audible[from][to]
@@ -2153,21 +2295,25 @@ impl MeshWorld {
                     && tx.bytes[..4] == *b"RL\x02\0"
                     && tx.bytes[4] == 16;
                 if old_data {
-                    completions[from].push(0);
+                    self.callbacks[from].push((callback_at, 0));
                     self.switch.dropped += 1;
                     self.switch.leg_dropped[from][to] += 1;
                 } else if self.switch.drop_notice_chunks && notice_chunk {
                     self.switch.notice_chunks_dropped += 1;
-                    completions[from].push(0);
+                    self.callbacks[from].push((callback_at, 0));
+                    self.switch.dropped += 1;
+                    self.switch.leg_dropped[from][to] += 1;
+                } else if self.switch.consume_wire_loss(from, to, &tx.bytes) {
+                    self.callbacks[from].push((callback_at, 0));
                     self.switch.dropped += 1;
                     self.switch.leg_dropped[from][to] += 1;
                 } else if self.switch.drop_next[from][to] > 0 {
                     self.switch.drop_next[from][to] -= 1;
-                    completions[from].push(0);
+                    self.callbacks[from].push((callback_at, 0));
                     self.switch.dropped += 1;
                     self.switch.leg_dropped[from][to] += 1;
                 } else if !leg_up {
-                    completions[from].push(0);
+                    self.callbacks[from].push((callback_at, 0));
                     self.switch.dropped += 1;
                     self.switch.leg_dropped[from][to] += 1;
                 } else {
@@ -2185,9 +2331,9 @@ impl MeshWorld {
                     }
                     if self.switch.ack_drop_next[from][to] > 0 {
                         self.switch.ack_drop_next[from][to] -= 1;
-                        completions[from].push(0);
+                        self.callbacks[from].push((callback_at, 0));
                     } else {
-                        completions[from].push(1);
+                        self.callbacks[from].push((callback_at, 1));
                     }
                     self.switch.leg_delivered[from][to] += 1;
                     self.switch.delivered += 1;
@@ -2207,11 +2353,26 @@ impl MeshWorld {
         }
         self.delayed = still;
         for (to, src, dst, bytes) in &deliveries {
+            if bytes.len() > 4
+                && bytes[..4] == *b"RL\x02\0"
+                && bytes[4] == WIRE_PROBE
+                && self.callbacks[*to].iter().any(|(at, _)| *at > self.now)
+            {
+                self.probe_while_callback_pending += 1;
+            }
             self.peers[*to].send_rx(src, dst, bytes);
         }
         for (index, peer) in self.peers.iter_mut().enumerate() {
             if booted[index] {
-                peer.send_complete(&completions[index]);
+                let ready = self.callbacks[index]
+                    .iter()
+                    .take_while(|(at, _)| *at <= self.now)
+                    .count();
+                let completions: Vec<u8> = self.callbacks[index]
+                    .drain(..ready)
+                    .map(|(_, result)| result)
+                    .collect();
+                peer.send_complete(&completions);
             }
         }
         // Gateway USB into the authority (the gateway always boots first).
@@ -2388,6 +2549,616 @@ impl MeshWorld {
 }
 
 // --- Tests ---------------------------------------------------------------------
+
+const PHASE_REACHABLE: u8 = 5;
+const PHASE_STALE: u8 = 7;
+const WIRE_DATA: u8 = 16;
+const WIRE_HOP_ACCEPT: u8 = 17;
+const WIRE_END_RECEIPT: u8 = 18;
+const WIRE_ROUTE_UPDATE: u8 = 32;
+const WIRE_PROBE: u8 = 40;
+const WIRE_RESULT: u8 = 41;
+
+fn route_loss_world(tag: &str, switch: Switch, relay_first: bool) -> Option<MeshWorld> {
+    let mut world = MeshWorld::start_with_profile(tag, switch, true)?;
+    if relay_first {
+        world.gate[1] = true;
+        world.pump_until(9000, |snaps| {
+            snaps[0].authority_ready && snaps[2].authority_ready && snaps[2].join_confirmed
+        });
+        assert!(world.snaps[2].authority_ready, "relay reached gateway");
+        world.gate[1] = false;
+    }
+    world.pump_until(9000, |snaps| {
+        snaps.iter().all(|s| {
+            s.mode == MODE_MEMBER
+                && s.phase == PHASE_ACTIVE
+                && s.authority_ready
+                && s.join_confirmed
+        })
+    });
+    assert!(
+        world
+            .snaps
+            .iter()
+            .all(|s| s.authority_ready && s.join_confirmed),
+        "Owner mesh converged: {:?}",
+        world.snaps
+    );
+    Some(world)
+}
+
+/// The relay binds to the gateway before the leaf boots. The late leaf
+/// reaches the gateway only through the real discovery and coordinator legs.
+#[test]
+fn mesh_route_loss_relay_binds_first() {
+    let Some(mut world) = route_loss_world("route-relay-first", Switch::forced_multihop(), true)
+    else {
+        return;
+    };
+    assert_eq!(world.snaps[1].phases[2], PHASE_REACHABLE, "A-B BIND");
+    assert_eq!(world.snaps[2].phases[0], PHASE_REACHABLE, "B-gateway BIND");
+    let before = world.snaps[0].rx_count;
+    world.peers[1].app_send(testkit::GATEWAY, b"relay-first");
+    world.pump_until(2000, |snaps| snaps[0].rx_count > before);
+    assert_eq!(world.snaps[0].rx_count, before + 1);
+    assert_eq!(world.snaps[0].rx, b"relay-first");
+}
+
+/// A lost hop ACK and a lost routed receipt must preserve the End
+/// envelope, so the relay accepts retries without duplicate delivery.
+#[test]
+fn mesh_route_loss_retry_has_one_terminal_delivery() {
+    let Some(mut world) = route_loss_world("route-retry", Switch::forced_multihop(), true) else {
+        return;
+    };
+    world.switch.drop_wire_kind(2, 1, WIRE_HOP_ACCEPT, 1);
+    world.switch.drop_wire_kind(2, 1, WIRE_END_RECEIPT, 1);
+    let before = world.snaps[0].rx_count;
+    world.peers[1].app_send(testkit::GATEWAY, b"retry-once");
+    world.pump_until(3000, |snaps| {
+        snaps[0].rx_count > before
+            && snaps[1]
+                .app_tx
+                .iter()
+                .any(|tx| tx.state == DELIVERY_DELIVERED)
+    });
+    assert_eq!(world.switch.wire_dropped, 2, "both fault rules fired");
+    assert_eq!(
+        world.snaps[0].rx_count,
+        before + 1,
+        "one application receive"
+    );
+    assert!(
+        world.snaps[1]
+            .app_tx
+            .iter()
+            .any(|tx| tx.state == DELIVERY_DELIVERED),
+        "sender delivered: {:?}",
+        world.snaps[1].app_tx
+    );
+    assert_eq!(world.snaps[2].transit_conflicts, 0);
+    assert_eq!(world.snaps[2].receipt_conflicts, 0);
+}
+
+/// A stale binding remains the identity for authenticated Probe/Result
+/// even after the runtime has released its transmit-side driver peer.
+fn stale_a_gateway(world: &mut MeshWorld) {
+    assert_eq!(world.snaps[1].phases[0], PHASE_REACHABLE);
+    let driver_peers = world.snaps[1].driver_peers;
+    let logical_neighbors = world.snaps[1].neighbor_count;
+    world.switch.isolate(1);
+    world.pump_until(2400, |snaps| {
+        snaps[1].phases[0] == PHASE_STALE && snaps[0].phases[1] == PHASE_STALE
+    });
+    assert_eq!(
+        world.snaps[1].phases[0], PHASE_STALE,
+        "A marks gateway stale"
+    );
+    assert_eq!(
+        world.snaps[0].phases[1], PHASE_STALE,
+        "gateway marks A stale"
+    );
+    assert!(world.snaps[1].stale_expirations > 0);
+    assert_eq!(world.snaps[1].neighbor_count, logical_neighbors);
+    world.pump_until(400, |snaps| snaps[1].driver_peers < driver_peers);
+    assert!(
+        world.snaps[1].driver_peers < driver_peers,
+        "STALE released a driver slot: before {driver_peers}, after {}",
+        world.snaps[1].driver_peers
+    );
+}
+
+#[test]
+fn mesh_route_loss_stale_peer_recovers() {
+    let Some(mut world) = route_loss_world("route-stale", Switch::direct(), false) else {
+        return;
+    };
+    stale_a_gateway(&mut world);
+    let before = world.snaps[1].probes_tx;
+    let repair_demands = world.snaps[1].repair_demands;
+    world.switch.heal(1);
+    world.peers[1].app_send(testkit::GATEWAY, b"request-repair");
+    world.pump_until(8000, |snaps| {
+        snaps[1].phases[0] == PHASE_REACHABLE && snaps[0].phases[1] == PHASE_REACHABLE
+    });
+    assert!(world.snaps[1].probes_tx > before, "A sent a repair Probe");
+    assert!(world.snaps[1].repair_demands > repair_demands);
+    assert_eq!(world.snaps[1].phases[0], PHASE_REACHABLE, "A recovered");
+    assert_eq!(
+        world.snaps[0].phases[1], PHASE_REACHABLE,
+        "gateway recovered"
+    );
+    let received = world.snaps[0].rx_count;
+    world.peers[1].app_send(testkit::GATEWAY, b"after-repair");
+    world.pump_until(2000, |snaps| snaps[0].rx_count > received);
+    assert_eq!(world.snaps[0].rx, b"after-repair");
+}
+
+/// The Probe MAC callback may release a driver peer before the Result
+/// reaches RX. The verified Result must still re-establish the binding.
+#[test]
+fn mesh_route_loss_result_after_probe_callback() {
+    let Some(mut world) = route_loss_world("route-result-late", Switch::direct(), false) else {
+        return;
+    };
+    stale_a_gateway(&mut world);
+    let probes_before = world.switch.probes_seen;
+    let results_before = world.switch.results_seen;
+    world.switch.delay_ms[0][1] = 100;
+    world.switch.heal(1);
+    world.peers[1].app_send(testkit::GATEWAY, b"repair-late-result");
+    world.pump_until(8000, |snaps| snaps[1].phases[0] == PHASE_REACHABLE);
+    assert_eq!(world.snaps[1].phases[0], PHASE_REACHABLE);
+    assert!(world.switch.probes_seen > probes_before);
+    assert!(world.switch.results_seen > results_before);
+}
+
+/// Two directed management losses force a lease expiry; the next valid
+/// Probe/Result restores the route without restarting either Owner.
+#[test]
+fn mesh_route_loss_management_loss_then_repair() {
+    let Some(mut world) = route_loss_world("route-control-loss", Switch::direct(), false) else {
+        return;
+    };
+    world.switch.drop_wire_kind(1, 0, WIRE_RESULT, 1);
+    world.switch.drop_wire_kind(0, 1, WIRE_RESULT, 1);
+    for _ in 0..1000 {
+        if world.switch.wire_dropped == 2 {
+            break;
+        }
+        world.step(25);
+    }
+    assert_eq!(world.switch.wire_dropped, 2, "both Results lost");
+    world.switch.drop_wire_kind(1, 0, WIRE_PROBE, 32);
+    world.switch.drop_wire_kind(0, 1, WIRE_PROBE, 32);
+    world.pump_until(2400, |snaps| snaps[1].phases[0] == PHASE_STALE);
+    assert_eq!(
+        world.snaps[1].phases[0],
+        PHASE_STALE,
+        "lost={} stale={} probes={} results={} phases={:?} rules={:?}",
+        world.switch.wire_dropped,
+        world.snaps[1].stale_expirations,
+        world.switch.probes_seen,
+        world.switch.results_seen,
+        world.snaps[1].phases,
+        world.switch.drop_wire
+    );
+    assert!(world.switch.wire_dropped >= 4, "Probe losses fired");
+    world.switch.drop_wire.clear();
+    world.peers[1].app_send(testkit::GATEWAY, b"route-repair");
+    world.pump_until(8000, |snaps| snaps[1].phases[0] == PHASE_REACHABLE);
+    assert_eq!(world.snaps[1].phases[0], PHASE_REACHABLE);
+    let received = world.snaps[0].rx_count;
+    world.peers[1].app_send(testkit::GATEWAY, b"route-restored");
+    world.pump_until(2000, |snaps| snaps[0].rx == b"route-restored");
+    assert!(world.snaps[0].rx_count > received);
+    assert_eq!(world.snaps[0].rx, b"route-restored");
+}
+
+/// Probe RX while a DATA MAC callback is pending leaves the Result queued
+/// until the physical slot frees, for short and long callback latencies.
+#[test]
+fn mesh_route_loss_probe_result_survives_callback_delay() {
+    let Some(mut world) = route_loss_world("route-callback-delay", Switch::direct(), false) else {
+        return;
+    };
+    for delay in [20, 100, 500] {
+        world.switch.delay_ms[0][1] = 1000;
+        let pending_probe = |world: &MeshWorld| {
+            world.delayed.iter().position(|(_, delivery)| {
+                delivery.0 == 1
+                    && delivery.1 == MAC_GW
+                    && delivery.3.len() > 4
+                    && delivery.3[..4] == *b"RL\x02\0"
+                    && delivery.3[4] == WIRE_PROBE
+            })
+        };
+        for _ in 0..1000 {
+            if pending_probe(&world).is_some() {
+                break;
+            }
+            world.step(25);
+        }
+        let probe_index = pending_probe(&world).expect("real gateway Probe captured in flight");
+        world.delayed[probe_index].0 = world.now + 25;
+        world.switch.delay_ms[0][1] = 0;
+        let probe_pending = world.probe_while_callback_pending;
+        let result_before = world.switch.results_seen;
+        let received = world.snaps[0].rx_count;
+        world.switch.callback_delay_ms[1][0] = delay;
+        world.switch.callback_delay_kind = Some(WIRE_DATA);
+        world.peers[1].app_send(testkit::GATEWAY, b"during-probe");
+        world.step(25);
+        assert!(
+            world.probe_while_callback_pending > probe_pending,
+            "{delay} ms: Probe RX scheduled with DATA callback pending"
+        );
+        for _ in 0..1000 {
+            world.step(25);
+            if world.snaps[0].rx_count > received
+                && world.snaps[1]
+                    .app_tx
+                    .last()
+                    .is_some_and(|tx| tx.state == DELIVERY_DELIVERED)
+                && world.switch.results_seen > result_before
+            {
+                break;
+            }
+        }
+        world.switch.callback_delay_ms[1][0] = 0;
+        assert_eq!(world.snaps[0].rx_count, received + 1, "{delay} ms DATA");
+        assert!(
+            world.switch.results_seen > result_before,
+            "{delay} ms: Result sent after slot freed"
+        );
+        assert_eq!(world.snaps[1].phases[0], PHASE_REACHABLE);
+    }
+}
+
+/// An authenticated HopAccept can arrive before the DATA TX callback.
+#[test]
+fn mesh_route_loss_early_hop_accept() {
+    let Some(mut world) = route_loss_world("route-early-ack", Switch::direct(), false) else {
+        return;
+    };
+    world.switch.callback_delay_ms[1][0] = 100;
+    world.switch.callback_delay_kind = Some(WIRE_DATA);
+    let before = world.snaps[0].rx_count;
+    world.peers[1].app_send(testkit::GATEWAY, b"early-ack");
+    world.pump_until(1000, |snaps| {
+        snaps[0].rx_count > before
+            && snaps[1]
+                .app_tx
+                .last()
+                .is_some_and(|tx| tx.state == DELIVERY_DELIVERED)
+    });
+    assert!(world.early_hop_accepts > 0, "ACK preceded MAC callback");
+    assert_eq!(world.snaps[0].rx_count, before + 1);
+    assert_eq!(
+        world.snaps[1].app_tx.last().unwrap().state,
+        DELIVERY_DELIVERED
+    );
+}
+
+/// A callback arriving after the watchdog belongs to the old physical
+/// send. The next application send must complete on its own evidence.
+#[test]
+fn mesh_route_loss_old_callback_cannot_complete_new_send() {
+    let Some(mut world) = route_loss_world("route-old-callback", Switch::direct(), false) else {
+        return;
+    };
+    let received = world.snaps[0].rx_count;
+    world.switch.callback_delay_ms[1][0] = 1500;
+    world.switch.callback_delay_kind = Some(WIRE_DATA);
+    world.peers[1].app_send(testkit::GATEWAY, b"old-send");
+    for _ in 0..100 {
+        world.step(25);
+        if world.callbacks[1]
+            .iter()
+            .any(|(at, _)| *at > world.now + 1200)
+        {
+            break;
+        }
+    }
+    assert!(
+        world.callbacks[1]
+            .iter()
+            .any(|(at, _)| *at > world.now + 1200),
+        "first DATA callback held"
+    );
+    world.switch.callback_delay_ms[1][0] = 0;
+    for _ in 0..44 {
+        world.step(25);
+    }
+    assert!(!world.callbacks[1].is_empty(), "old callback still pending");
+    world.peers[1].app_send(testkit::GATEWAY, b"new-send");
+    world.pump_until(1000, |snaps| {
+        snaps[0].rx_count >= received + 2
+            && snaps[1]
+                .app_tx
+                .last()
+                .is_some_and(|tx| tx.state == DELIVERY_DELIVERED)
+    });
+    assert!(
+        world.snaps[1].stale_tx_results > 0,
+        "old callback quarantined"
+    );
+    assert_eq!(world.snaps[0].rx_count, received + 2);
+    assert_eq!(world.snaps[0].rx, b"new-send");
+    assert_eq!(
+        world.snaps[1].app_tx.last().unwrap().state,
+        DELIVERY_DELIVERED
+    );
+}
+
+/// The driver models the 20 physical slots while the runtime enforces
+/// sixteen regular mappings. A refused extra peer cannot evict live BINDs.
+#[test]
+fn mesh_route_loss_peer_capacity_keeps_live_bindings() {
+    let Some(mut world) = route_loss_world("route-capacity", Switch::direct(), false) else {
+        return;
+    };
+    world.pump_until(1000, |snaps| {
+        snaps[0].phases[1] == PHASE_REACHABLE && snaps[0].phases[2] == PHASE_REACHABLE
+    });
+    let regular = usize::from(world.snaps[0].driver_peers - 1);
+    assert!(regular <= 16, "broadcast plus regular table");
+    let fill = 16 - regular;
+    for index in 0..fill {
+        let (ok, peers) = world.peers[0].peer_slot(b'V', index as u8);
+        assert!(ok, "regular slot {index}");
+        assert_eq!(usize::from(peers), regular + index + 2);
+    }
+    let (ok, peers) = world.peers[0].peer_slot(b'V', fill as u8);
+    assert!(!ok, "17th regular refused");
+    assert_eq!(peers, 17);
+    if fill > 0 {
+        let (ok, peers) = world.peers[0].peer_slot(b'V', 0);
+        assert!(ok, "same MAC re-registration succeeds");
+        assert_eq!(peers, 17);
+    }
+    for index in 0..3 {
+        let (ok, peers) = world.peers[0].peer_slot(b'I', index);
+        assert!(ok, "transient driver slot {index}");
+        assert_eq!(peers, 18 + index);
+    }
+    let (ok, peers) = world.peers[0].peer_slot(b'I', 3);
+    assert!(!ok, "21st physical peer refused");
+    assert_eq!(peers, 20);
+    world.peers[0].fail_driver_release(true);
+    let (ok, peers) = world.peers[0].peer_slot(b'J', 0);
+    assert!(!ok, "failed driver deletion kept its slot");
+    assert_eq!(peers, 20);
+    world.peers[0].fail_driver_release(false);
+    for index in 0..3 {
+        let (ok, peers) = world.peers[0].peer_slot(b'J', index);
+        assert!(ok, "release transient {index}");
+        assert_eq!(peers, 19 - index);
+    }
+    let received = world.snaps[1].rx_count;
+    world.peers[0].app_send(NODE_A, b"capacity-survivor");
+    world.pump_until(2000, |snaps| snaps[1].rx_count > received);
+    assert_eq!(world.snaps[1].rx, b"capacity-survivor");
+}
+
+/// Repeated RLD1 handoffs in one boot must return each transient lease
+/// to discovery; the fourth through tenth repairs cannot hit capacity.
+#[test]
+fn mesh_route_loss_ten_handovers_recover() {
+    let Some(mut world) = route_loss_world("route-ten-handovers", Switch::forced_multihop(), true)
+    else {
+        return;
+    };
+    let capacity_before = world.snaps[1].peer_capacity;
+    let starts_before = world.snaps[1].member_starts + world.snaps[2].member_starts;
+    let failed_before = world.snaps[1].link_failed + world.snaps[2].link_failed;
+    for attempt in 0..10 {
+        assert_eq!(world.snaps[1].phases[2], PHASE_REACHABLE);
+        let offers = world.snaps[1].offers_rx + world.snaps[2].offers_rx;
+        let links = world.snaps[1].link_requests + world.snaps[2].link_requests;
+        let established = world.snaps[1].link_established;
+        let failed = world.snaps[1].link_failed;
+        world.switch.isolate(1);
+        world.pump_until(2400, |snaps| {
+            snaps[1].phases[2] == PHASE_STALE && snaps[2].phases[1] == PHASE_STALE
+        });
+        assert_eq!(
+            world.snaps[1].phases[2], PHASE_STALE,
+            "cycle {attempt} stale"
+        );
+        world.switch.drop_wire_kind(1, 2, WIRE_PROBE, 32);
+        world.switch.drop_wire_kind(2, 1, WIRE_PROBE, 32);
+        world.switch.heal(1);
+        world.peers[1].app_send(testkit::GATEWAY, b"renew-binding");
+        world.pump_until(2000, |snaps| {
+            snaps[1].link_requests + snaps[2].link_requests > links
+        });
+        assert!(
+            world.snaps[1].offers_rx + world.snaps[2].offers_rx > offers,
+            "cycle {attempt}: RLD1 offer reached initiator"
+        );
+        assert!(
+            world.snaps[1].link_requests + world.snaps[2].link_requests > links,
+            "cycle {attempt}: coordinator took another handshake; links {links}->{}+{}, offers {offers}->{}, starts {}, request_failures {}, link_failed {}, link_error {}, capacity {}->{}, phase {}",
+            world.snaps[1].link_requests,
+            world.snaps[2].link_requests,
+            world.snaps[1].offers_rx + world.snaps[2].offers_rx,
+            world.snaps[1].member_starts,
+            world.snaps[1].link_request_failures,
+            world.snaps[1].link_failed,
+            world.snaps[1].link_last_error,
+            capacity_before,
+            world.snaps[1].peer_capacity,
+            world.snaps[1].phases[2]
+        );
+        world.switch.drop_wire.clear();
+        world.pump_until(3000, |snaps| {
+            snaps[1].phases[2] == PHASE_REACHABLE
+                && (snaps[1].link_established > established || snaps[1].link_failed > failed)
+        });
+        assert_eq!(
+            world.snaps[1].phases[2], PHASE_REACHABLE,
+            "cycle {attempt} re-BIND"
+        );
+        assert!(
+            world.snaps[1].link_established > established || world.snaps[1].link_failed > failed,
+            "cycle {attempt}: handshake result drained"
+        );
+        assert_eq!(
+            world.snaps[1].peer_capacity, capacity_before,
+            "cycle {attempt}: no leaked transient reservation"
+        );
+    }
+    assert!(
+        world.snaps[1].member_starts + world.snaps[2].member_starts >= starts_before + 10,
+        "ten starts crossed discovery into the coordinators"
+    );
+    assert!(
+        world.snaps[1].link_failed + world.snaps[2].link_failed > failed_before,
+        "lost flights also exercised failed handoff cleanup"
+    );
+    let received = world.snaps[0].rx_count;
+    world.peers[1].app_send(testkit::GATEWAY, b"after-ten");
+    world.pump_until(2000, |snaps| snaps[0].rx == b"after-ten");
+    assert!(world.snaps[0].rx_count > received);
+    assert_eq!(world.snaps[0].rx, b"after-ten");
+}
+
+/// The field campaign shape runs on flat, real Owner routing: sixteen
+/// early sends, then one every thirty virtual seconds, with relay traffic
+/// alongside it. No process restarts over the sixty-minute clock span.
+#[test]
+fn mesh_route_loss_hundred_under_flat_load() {
+    let Some(mut world) = route_loss_world("route-hundred", Switch::forced_multihop(), true) else {
+        return;
+    };
+    let started = world.now;
+    let baseline = world.snaps[1].rx_count;
+    let capacity = world.snaps[0].peer_capacity;
+    let no_route = world.snaps[0].no_route;
+    for index in 0u32..16 {
+        let received = world.snaps[1].rx_count;
+        world.peers[0].app_send(NODE_A, &index.to_le_bytes());
+        world.pump_until(200, |snaps| {
+            snaps[1].rx_count > received
+                && snaps[0]
+                    .app_tx
+                    .last()
+                    .is_some_and(|tx| tx.state == DELIVERY_DELIVERED)
+        });
+        assert_eq!(
+            world.snaps[1].rx_count,
+            received + 1,
+            "early message {index}"
+        );
+    }
+    assert_eq!(world.snaps[1].rx_count, baseline + 16, "initial burst");
+    assert!(
+        world.snaps[0]
+            .app_tx
+            .iter()
+            .all(|tx| tx.state == DELIVERY_DELIVERED),
+        "all initial sends delivered: {:?}",
+        world.snaps[0].app_tx
+    );
+    for index in 16u32..100 {
+        for _ in 0..300 {
+            world.step(100);
+        }
+        let received = world.snaps[1].rx_count;
+        let last_sequence = world.snaps[0]
+            .app_tx
+            .iter()
+            .map(|tx| tx.seq)
+            .max()
+            .unwrap_or(0);
+        world.peers[0].app_send(NODE_A, &index.to_le_bytes());
+        world.peers[2].app_send(testkit::GATEWAY, b"relay-load");
+        world.pump_until(200, |snaps| {
+            snaps[1].rx_count > received
+                && snaps[0]
+                    .app_tx
+                    .iter()
+                    .any(|tx| tx.seq > last_sequence && tx.state == DELIVERY_DELIVERED)
+        });
+        assert_eq!(world.snaps[1].rx_count, received + 1, "message {index}");
+        assert_eq!(world.snaps[1].rx, index.to_le_bytes(), "payload {index}");
+        assert!(
+            world.snaps[0]
+                .app_tx
+                .iter()
+                .any(|tx| tx.seq > last_sequence && tx.state == DELIVERY_DELIVERED),
+            "message {index} sender receipt: {:?}",
+            world.snaps[0].app_tx
+        );
+        assert_eq!(world.snaps[0].phases[2], PHASE_REACHABLE);
+        assert_eq!(world.snaps[2].phases[1], PHASE_REACHABLE);
+    }
+    while world.now - started < 3_600_000 {
+        world.step(100);
+    }
+    assert_eq!(
+        world.snaps[1].rx_count,
+        baseline + 100,
+        "100 distinct receives"
+    );
+    assert_eq!(world.snaps[0].peer_capacity, capacity, "no capacity leak");
+    assert_eq!(world.snaps[0].no_route, no_route, "no route diagnostic");
+    assert_eq!(world.snaps[0].phases[2], PHASE_REACHABLE);
+    assert_eq!(world.snaps[2].phases[1], PHASE_REACHABLE);
+}
+
+/// A multi-page flat table keeps its advertisement pending through queue
+/// pressure and one lost RouteUpdate, so the two-hop route stays usable.
+#[test]
+fn mesh_route_loss_advertisement_survives_queue_pressure() {
+    let Some(mut world) = route_loss_world("route-advertisement", Switch::forced_multihop(), true)
+    else {
+        return;
+    };
+    for index in 0..14 {
+        let (ok, _) = world.peers[2].peer_slot(b'V', index);
+        assert!(ok, "extra route record {index}");
+    }
+    world.step(25);
+    assert!(world.snaps[2].queued >= 16, "multi-page queue reached 50%");
+    let (accepted, queued) = world.peers[2].app_burst(16, testkit::GATEWAY);
+    assert_eq!(accepted, 8, "bounded application admission");
+    assert!(queued >= 16);
+    world.step(5000);
+    assert!(world.snaps[2].queued >= 26, "queue reached 80%");
+    assert!(world.snaps[2].admissions_rejected > 0);
+    let (accepted, _) = world.peers[0].app_burst(8, NODE_A);
+    let mut max_queue = world.snaps[2].queued;
+    for _ in 0..200 {
+        world.step(25);
+        max_queue = max_queue.max(world.snaps[2].queued);
+    }
+    assert_eq!(accepted, 8);
+    assert!(max_queue >= 31, "application lane reached full occupancy");
+    let updates = world.switch.route_updates_seen;
+    world.switch.drop_wire_kind(2, 0, WIRE_ROUTE_UPDATE, 1);
+    let start = world.now;
+    let mut delivered = 0;
+    while world.now - start < 20_000 {
+        world.step(25);
+        if world.now - start >= (delivered + 1) * 2000 {
+            let received = world.snaps[1].rx_count;
+            world.peers[0].app_send(NODE_A, b"route-kept");
+            world.pump_until(200, |snaps| snaps[1].rx_count > received);
+            assert_eq!(world.snaps[1].rx_count, received + 1);
+            delivered += 1;
+        }
+    }
+    assert_eq!(world.switch.wire_dropped, 1, "advertisement loss fired");
+    assert!(
+        world.switch.route_updates_seen > updates + 1,
+        "later page retried"
+    );
+    assert_eq!(world.snaps[0].phases[2], PHASE_REACHABLE);
+    assert_eq!(world.snaps[2].phases[1], PHASE_REACHABLE);
+}
 
 /// Phase-1 convergence on the direct radio: all three Owners adopt
 /// from their Phase-0 images (member boots, no rejoins), open their
