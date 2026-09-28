@@ -7,9 +7,12 @@ CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
 CONFIG_ESP_WIFI_ESPNOW_MAX_ENCRYPT_NUM=0
 CONFIG_FREERTOS_HZ=1000
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
-# Custom table: the single-app layout plus the "rlsec" NVS partition for
-# per-peer security state (issue #37). See partitions.csv.
+# PT-4M-v2 (partitions.csv): two OTA slots on every 4 MB board. The
+# bootloader rolls back an unconfirmed OTA image; boot confirms the running
+# image once the owner and runtime are up. eFuse anti-rollback stays off.
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # The owner/crypto pump starts with the P4 §12.2 16 KiB stack budget.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384

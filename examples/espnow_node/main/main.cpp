@@ -15,6 +15,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#include "routeloom/espnow_flash_layout.hpp"
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/nvs_counter_store.hpp"
 #include "routeloom/nvs_boot_session.hpp"
@@ -158,6 +159,10 @@ routeloom::MonotonicMs monotonic_now_ms() noexcept {
 }  // namespace
 
 extern "C" void app_main(void) {
+  // PT-4M-v2 is checked before NVS: on another table the NVS labels could
+  // point at foreign data.
+  auto status = routeloom::espnow::verify_flash_layout();
+  if (!status) fail(status.detail);
   // Identity, nonce reservations, replay state and message sessions live in
   // NVS. Never erase it automatically after a version/capacity error: that
   // would silently turn a recoverable storage problem into key/counter
@@ -177,7 +182,7 @@ extern "C" void app_main(void) {
   // block this write. Every boot — even one that fails below — consumes a
   // session, which keeps TX epochs strictly fresh.
   std::uint32_t message_session = 0;
-  auto status = next_boot_session(message_session);
+  status = next_boot_session(message_session);
   if (!status) fail(status.detail);
 
   const esp_err_t sec_nvs_error =
@@ -341,6 +346,7 @@ extern "C" void app_main(void) {
 
   status = runtime.start_task();
   if (!status) fail(status.detail);
+  routeloom::espnow::mark_app_valid();
 
   // The development PSK profile is pinned to SecurityProfile::Development;
   // this firmware can never report itself as production-secure.
@@ -384,6 +390,7 @@ extern "C" void app_main(void) {
   if (!status) fail(status.detail);
 #endif
   ESP_LOGI(kTag, "security owner started; node start deferred to membership");
+  routeloom::espnow::mark_app_valid();
   for (;;) {
     runtime.poll_once();
     owner.poll(monotonic_now_ms());

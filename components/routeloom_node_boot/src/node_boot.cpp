@@ -46,6 +46,7 @@
 #include "routeloom/trust_view.hpp"
 #endif
 #include "routeloom/espnow_power.hpp"
+#include "routeloom/espnow_flash_layout.hpp"
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/espnow_sdkv1.hpp"
 #include "routeloom/rlcw1.hpp"
@@ -644,6 +645,10 @@ void run_node(const NodeBootHooks& hooks) {
   // A matching magic is the only thing that distinguishes a streak that
   // survived esp_restart from power-on garbage in .rtc_noinit.
   routeloom::fail_streak_boot(s_fail);
+  // PT-4M-v2 is checked before NVS: on another table the NVS labels could
+  // point at foreign data.
+  auto status = routeloom::espnow::verify_flash_layout();
+  if (!status) fail(status.detail);
   // Identity, nonce reservations, replay state and message sessions live in
   // NVS. Never erase it automatically after a version/capacity error: that
   // would silently turn a recoverable storage problem into key/counter
@@ -663,7 +668,7 @@ void run_node(const NodeBootHooks& hooks) {
   // block this write. Every boot — even one that fails below — consumes a
   // session, which keeps TX epochs strictly fresh.
   std::uint32_t message_session = 0;
-  auto status = routeloom::next_boot_session(message_session);
+  status = routeloom::next_boot_session(message_session);
   if (!status) fail(status.detail);
 
   const esp_err_t sec_nvs_error =
@@ -1528,6 +1533,7 @@ void run_node(const NodeBootHooks& hooks) {
 #endif
   // Boot complete — the pump loop below is the node's main loop.
   routeloom::fail_streak_runtime_started(s_fail);
+  routeloom::espnow::mark_app_valid();
   for (;;) {
     runtime.poll_once();
     owner.poll(monotonic_now_ms());
@@ -1654,6 +1660,7 @@ void run_node(const NodeBootHooks& hooks) {
                              monotonic_now_ms());
   if (!status) fail(status.detail);
   runtime.mark_started();
+  routeloom::espnow::mark_app_valid();
   // The streak decision at this event is to hold: the pump loop below
   // still runs fallible work (drain, image commit, wake configuration,
   // sleep_enter) and fail() must see the retained count. This profile's
@@ -1713,6 +1720,7 @@ void run_node(const NodeBootHooks& hooks) {
     // Boot complete — the runtime task is the node's main loop; an app
     // without per-tick work frees the main task exactly as before.
     routeloom::fail_streak_runtime_started(s_fail);
+    routeloom::espnow::mark_app_valid();
     return;
   }
   // An app with per-tick work keeps the node single-threaded (the bridge
@@ -1722,6 +1730,7 @@ void run_node(const NodeBootHooks& hooks) {
   status = runtime.start();
   if (!status) fail(status.detail);
   routeloom::fail_streak_runtime_started(s_fail);
+  routeloom::espnow::mark_app_valid();
   for (;;) {
     runtime.poll_once();
     hooks.poll(monotonic_now_ms(), hooks.ctx);
