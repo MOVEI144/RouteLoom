@@ -151,7 +151,7 @@ def interop() -> list[Step]:
 # relay member B.
 USB_FEATURE_SUITES = ("usb", "host_ops")            # node status / gateway endpoint
 DEDUP_96_SUITES = ("reply_admission", "fault")      # fills sized for dedup 96
-GATEWAY_SUITES = USB_FEATURE_SUITES + ("espnow_owner_reapply", "sdkv1_coordinator")
+GATEWAY_SUITES = USB_FEATURE_SUITES + ("espnow_owner_reapply",)  # the USB bridge itself
 MODEL_100_SUITES = ("routing_scale_100_node", "group_100_node")
 PROFILE_BUILDS = (
     # (build dir, profile, dedup override, sanitizers, suites left out)

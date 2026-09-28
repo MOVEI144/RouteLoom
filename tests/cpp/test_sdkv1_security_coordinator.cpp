@@ -787,9 +787,19 @@ void test_member_proxy_receives_zt_discover() {
   rx.rld1_frame = frame.view();
   const auto before = SecurityCoordinatorTestAccess::proxy_stats(coordinator).discovers_rx;
   CHECK(coordinator.step(rx).ok());
-  CHECK(SecurityCoordinatorTestAccess::proxy_stats(coordinator).discovers_rx == before + 1);
+  if (profile::kGateway) {
+    CHECK(SecurityCoordinatorTestAccess::proxy_stats(coordinator).discovers_rx == before + 1);
+  }
   CHECK(coordinator.step(poll_at(now + 100)).ok());
-  CHECK(SecurityCoordinatorTestAccess::proxy_stats(coordinator).epoch_replies_rx == 1);
+  const auto& stats = SecurityCoordinatorTestAccess::proxy_stats(coordinator);
+  if (profile::kGateway) {
+    CHECK(stats.epoch_replies_rx == 1);
+  } else {
+    // e2e-matrix J06: the site names this node its gateway, but a relay
+    // profile runs no relay gateway and an endpoint never proxies, so the
+    // DISCOVER gets no OFFER.
+    CHECK(stats.epoch_replies_rx == 0 && stats.offers_tx == 0);
+  }
 }
 
 void test_zt_wait_m2_status_after_demux_exhaustion() {
@@ -2907,15 +2917,19 @@ int main() {
   test_zt_wait_m2_status_after_demux_exhaustion();
   test_zt_m2_after_nine_exchanges();
   test_clock_regression_refused();
-  test_gateway_resume_quotas();
   test_staged_bootstrap_rx();
   test_epoch_reply_routes_to_proxy();
+  // Gateway-role suites: the gateway resume geometry, the relay gateway
+  // and its USB downs exist on gateway profiles only.
+  if (profile::kGateway) {
+    test_gateway_resume_quotas();
+    test_usb_queue_admission();
+    test_relay_loopback_and_mesh_send();
+  }
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
   test_relay_hops_direct_is_one();
 #endif
-  test_usb_queue_admission();
   test_usb_refused_without_gateway_role();
-  test_relay_loopback_and_mesh_send();
   test_late_discovery_attach();
   test_sleep_wake_stop();
   test_lifecycle_stop_defers_durable_resume_clear();
