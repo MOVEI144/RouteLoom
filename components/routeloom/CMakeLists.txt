@@ -24,7 +24,20 @@ set(ROUTELOOM_CORE_SOURCES
   src/migration.cpp
   src/migration_wire.cpp
   src/node.cpp
+  src/node_applied.cpp
+  src/node_congestion.cpp
+  src/node_diagnostic.cpp
+  src/node_dispatch.cpp
+  src/node_observation.cpp
+  src/node_poll.cpp
+  src/node_receive.cpp
+  src/node_receive_routed.cpp
+  src/node_route.cpp
+  src/node_scheduler.cpp
+  src/node_send.cpp
   src/node_status.cpp
+  src/node_transit.cpp
+  src/node_txn.cpp
   src/observation.cpp
   src/peer_state.cpp
   src/power.cpp
