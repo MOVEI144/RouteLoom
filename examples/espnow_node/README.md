@@ -106,7 +106,7 @@ own.
   `targets` list excludes them.
 - Only ESP-IDF v6.0.3 is CI-validated; manifests require `idf >= 6.0`.
 - No version is published to the ESP-IDF component registry. `version:
-  0.1.0` in the manifests is the pre-release tag used for git `path`
+  2.0.0-dev` in the manifests (from `protocol/manifest.json`) is the pre-release tag used for git `path`
   dependency solving, not a registry artifact.
 - A successful build proves compile/link only — no RF, range, or battery
   claim (see `docs/STATUS.md`).

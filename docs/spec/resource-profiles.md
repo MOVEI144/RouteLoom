@@ -20,7 +20,7 @@ raw64標本をdirection×rate×length×neighborごとに保持しない。固定
 
 ## 未認証入口の具体的上限
 
-global handshake同時1、preauth総pool1536B、一object最大1024B、組立期限3000ms（活動予算が先なら中断）。新handshakeは全送信者合算1/s burst1、入力2048B/s burst512B、公開鍵等の高価な演算4回/s burst1を初期capとする。memberの管理object2048Bとは別。
+global handshake同時1、一object最大1024B。実装値を正とする（#54）：SDK v1参加搬送（`sdkv1_join_transport`）の組立は同時1件・3000ms、RLD1 discoveryのbootstrap組立（`discovery.hpp` `kReassemblySlots`）は4 slot×1024B（計4096B）で期限は`candidate_ttl_ms`（既定5000ms）。profile表の`preauth_pool` 1536BはSDK v1参加搬送の枠で、RLD1 discoveryの組立4096Bはこれと別に持つ。活動予算が先なら中断する。新handshakeは全送信者合算1/s burst1、入力2048B/s burst512B、公開鍵等の高価な演算4回/s burst1を初期capとする。memberの管理object2048Bとは別。
 
 Crypto worker予算100ms/1000ms、協調yield単位10msを目標、非中断可能演算の最大25msを受入条件にする。対象ライブラリが満たさなければ「強制中断できる」と偽らず、別task/実装・入場rateの改訂・profile不認定で扱う。member ACK用queueとCPU機会を保護するが、偽フレームの実RFやcallback負荷を完全排除する保証ではない。
 
