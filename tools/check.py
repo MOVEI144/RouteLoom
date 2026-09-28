@@ -118,7 +118,7 @@ def rust() -> list[Step]:
                  cwd="host"),
             # The live Owner E2E suites need C++ peers and run in `interop`.
             Step(["cargo", "test", "--workspace", "--all-targets", "--", "--skip",
-                  "joiner_interop", "--skip", "owner_mesh_interop"], cwd="host"),
+                  "joiner_interop", "--skip", "site::owner_mesh::"], cwd="host"),
             Step(["cargo", "build", "--workspace", "--release", "--all-targets"], cwd="host")]
 
 
@@ -134,7 +134,7 @@ def interop() -> list[Step]:
         Step(["test", "-x", MESH_PEER]),
         Step(["cargo", "test", "-p", "routeloom-host", "--bins", "site::joiner_interop",
               "--", "--nocapture"], cwd="host", env=env, forbid=SKIP_MARK),
-        Step(["cargo", "test", "-p", "routeloom-host", "--bins", "site::owner_mesh_interop",
+        Step(["cargo", "test", "-p", "routeloom-host", "--bins", "site::owner_mesh::",
               "--", "--nocapture"], cwd="host", env=mesh_env, forbid=SKIP_MARK),
     ]
 

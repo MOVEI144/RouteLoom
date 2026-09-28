@@ -44,11 +44,11 @@ PYTHONPATH=tools/meshviz/src:tools python3 -m unittest discover -s tools/meshviz
 ```
 
 - firmware を変えたら ESP-IDF v6.0.3 で該当 app を build する（例：`cd firmware/bridge_node && idf.py set-target esp32c3 build`）。flash・静的 RAM を変更前と比べる。
-- C++ と Rust の live E2E（`cargo test -p routeloom-host --bins site::owner_mesh_interop`、peer は `ROUTELOOM_MESH_PEER` で渡す）は、peer が無くて skip したら合格にしない。
+- C++ と Rust の live E2E（`cargo test -p routeloom-host --bins site::owner_mesh::`、peer は `ROUTELOOM_MESH_PEER` で渡す）は、peer が無くて skip したら合格にしない。
 - 環境不足・skip・timeout・未実施の実機試験を合格と書かない。実機の結果が無い変更を「実機確認済み」と書かない。
 
 ## 試験の方針
-- E2E を先に使う：本物の Owner と MeshNode を通す harness（`host/routeloom-host/src/site/owner_mesh_interop.rs` など）と live interop。試験専用の別 engine を作らない。
+- E2E を先に使う：本物の Owner と MeshNode を通す harness（`host/routeloom-host/src/site/owner_mesh/` など）と live interop。試験専用の別 engine を作らない。
 - 単体は境界に絞る。一つの挙動に正常と代表的な失敗の 1〜2 本。security・永続化・時計・満杯・再入・世代の必要な場合は本数で削らない。
 - 1 つの巨大な試験ファイルに足し続けず、scenario は表にする。
 

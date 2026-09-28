@@ -2,7 +2,7 @@
 // firmware node — EspNowSecurityOwner + EspNowRuntime + MeshNode over the
 // host ESP-IDF stubs, NVS-backed Sdkv1Stores over a fake NVS, and (on a
 // gateway) the real UsbBridge. The Rust harness
-// (host/routeloom-host/src/site/owner_mesh_interop.rs) spawns one peer
+// (host/routeloom-host/src/site/owner_mesh/) spawns one peer
 // per node, switches radio frames between them, and relays the gateway's
 // USB bytes to the real Site Authority. No mock ACKs: every lifecycle,
 // GK and cutover receipt the harness observes comes out of this Owner.
