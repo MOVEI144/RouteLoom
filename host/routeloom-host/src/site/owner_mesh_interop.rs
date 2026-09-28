@@ -1944,6 +1944,23 @@ impl MeshWorld {
         self.peers[0].send_usb(&hello);
     }
 
+    fn usb_disconnect(&mut self) {
+        self.usb_down = true;
+        self.join_adapter.close();
+        self.provision.usb.close();
+        let _ = self
+            .provision
+            .site
+            .service
+            .with(|a| a.drop_gateway_relays(testkit::GATEWAY, self.now));
+        self.provision.site.service.set_authority_transport(None);
+    }
+
+    fn usb_reconnect(&mut self) {
+        self.usb_down = false;
+        self.gateway_usb_rebind();
+    }
+
     fn daemon_restart(&mut self) {
         self.join_adapter.close();
         self.provision.usb.close();
@@ -1972,7 +1989,7 @@ impl MeshWorld {
         // A rebooted gateway answers on a fresh USB session: a full
         // session boundary (fresh host end, fresh adapters, the
         // gateway re-authenticates from the new Hello).
-        if ticks[0].as_ref().is_some_and(|t| t.rebooted) {
+        if !self.usb_down && ticks[0].as_ref().is_some_and(|t| t.rebooted) {
             self.gateway_usb_rebind();
         }
         // Switch: deliver per audibility + same channel, then report
@@ -4737,11 +4754,22 @@ fn mesh_c5_gateway_disconnect_and_resume() {
     };
     let (operation_id, next_gk, new_network, _old_network, t0) =
         cutover_through_commit(&mut world, "c5");
+    let old_usb = Arc::clone(&world.provision.usb);
+    let old_join = Arc::clone(&world.join_adapter);
+    let old_incarnation = old_usb.usb_incarnation();
     // The cable pull: nothing crosses the USB seam while it is down.
     // Member probes still cross the radio but the authority can't
     // answer — a Prepared straggler whose probes go unanswered must
     // eventually strike out and take the ZeroTouch reissue road.
-    world.usb_down = true;
+    world.usb_disconnect();
+    assert!(matches!(
+        old_usb.handle_up(&[], world.now),
+        Err(super::usb::AuthorityUpError::Closed)
+    ));
+    assert!(matches!(
+        old_join.handle_up(&[], world.now),
+        Err(super::usb::UpError::Closed)
+    ));
     // Run past the grace on the dead lane — the old bindings the
     // COMMITs rode have expired out of the host's table, so no member
     // can be reached on them at all — then past the stragglers'
@@ -4768,7 +4796,9 @@ fn mesh_c5_gateway_disconnect_and_resume() {
     // resolves honestly — a straggler that re-emits its durable
     // APPLIED receipt is applied, one proven through the recovery
     // road is recovered; only the split is timing.
-    world.usb_down = false;
+    world.usb_reconnect();
+    assert_ne!(world.provision.usb.usb_incarnation(), old_incarnation);
+    assert_ne!(world.join_adapter.usb_incarnation(), old_incarnation);
     cutover_converged(&mut world, &operation_id, new_network, next_gk, None);
     let progress = cutover_progress(&world, &operation_id);
     assert_eq!(
