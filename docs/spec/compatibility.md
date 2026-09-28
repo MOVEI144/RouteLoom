@@ -36,7 +36,7 @@ the Rust workspace and meshviz). Each surface below carries its own number.
 | HostOps join relay schema | 2 | `ROUTELOOM_HOSTOPS_JOIN_RELAY_SCHEMA` / `HOSTOPS_JOIN_RELAY_SCHEMA` | `components/routeloom/include/routeloom/usb_host_ops.hpp` | only subcommands 0x60-0x63 use it |
 | AuthorityEnvelope | 1 | `ROUTELOOM_AUTHORITY_ENVELOPE` / `AUTHORITY_ENVELOPE` | `components/routeloom/include/routeloom/key_schedule.hpp` | types 1-8 registered; new types are additive |
 | API1 envelope | 1 | `API1_ENVELOPE` | `host/routeloom-host/src/api1.rs` | methods, fields and error codes are additive |
-| API1 caps_version | 1 | `API1_CAPS` | `host/routeloom-host/src/api1.rs` | bumped when an existing capability's meaning changes |
+| API1 caps_version | 2 | `API1_CAPS` | `host/routeloom-host/src/api1.rs` | bumped when an existing capability's meaning changes |
 
 | Persisted format | Version | C / Rust name | Defined in | Unknown-version behavior |
 |---|---|---|---|---|

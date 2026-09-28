@@ -34,7 +34,7 @@
     {"id": "api1_envelope", "label": "API1 envelope", "value": 1, "rust": "API1_ENVELOPE",
      "rust_check": ["crate::api1::API_VERSION", "routeloom_client::api1::API_VERSION"],
      "source": "host/routeloom-host/src/api1.rs", "rule": "methods, fields and error codes are additive"},
-    {"id": "api1_caps", "label": "API1 caps_version", "value": 1, "rust": "API1_CAPS",
+    {"id": "api1_caps", "label": "API1 caps_version", "value": 2, "rust": "API1_CAPS",
      "rust_check": "crate::api1::CAPS_VERSION",
      "source": "host/routeloom-host/src/api1.rs", "rule": "bumped when an existing capability's meaning changes"}
   ],

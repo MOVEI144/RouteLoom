@@ -23,7 +23,7 @@ pub const AUTHORITY_ENVELOPE: u32 = 1;
 /// API1 envelope.
 pub const API1_ENVELOPE: u32 = 1;
 /// API1 caps_version.
-pub const API1_CAPS: u32 = 1;
+pub const API1_CAPS: u32 = 2;
 /// Authority ledger format.
 pub const STORE_AUTHORITY_LEDGER_FORMAT: u32 = 1;
 /// Authority ledger (device).
