@@ -5044,10 +5044,10 @@ fn mesh_c7_old_epoch_boundary() {
     // dark past it — 250 ms steps keep G↔B carriers inside their
     // routed TTL while the overlap ages out — then heal. Whatever A
     // still is (Prepared-dark or reverted), the only member-scope
-    // traffic it can emit is the retired generation: B must judge it
-    // unknown-generation, never admit it, and the ledger must still
-    // resolve A through the recovery road — an old-epoch straggler
-    // can never be applied.
+    // traffic it can emit is the retired generation: require an actual
+    // arrival and B's unknown-generation refusal. The ledger must
+    // still resolve A through recovery; an old-epoch straggler cannot
+    // be counted as applied.
     let b_demote = world.now.max(t0);
     let boundary = b_demote + 1_800_000 + 60_000;
     while world.now < boundary {
@@ -5072,11 +5072,8 @@ fn mesh_c7_old_epoch_boundary() {
         }
     }
     assert!(
-        world.snaps[1].adopted_network == new_network
-            || world.snaps[2].scope_unknown_generation > b_unkgen
-            || !stale_seen,
-        "A's stale epoch was refused at B's scope gate or A went \
-         silent into ZeroTouch: B={:?} A={:?} unkgen {} > {}",
+        stale_seen && world.snaps[2].scope_unknown_generation > b_unkgen,
+        "B received A's old-epoch frame and refused its generation: B={:?} A={:?} unkgen {} > {}",
         world.snaps[2],
         world.snaps[1],
         world.snaps[2].scope_unknown_generation,
