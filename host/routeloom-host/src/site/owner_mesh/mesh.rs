@@ -907,3 +907,69 @@ fn mesh_diamond_delivers_under_leg_noise() {
     assert_eq!(world.switch.leg_delivered[0][3], 0, "no G—E leg");
     assert_eq!(world.switch.leg_delivered[1][2], 0, "no R1—R2 leg");
 }
+
+#[test]
+fn mesh_provision_snapshot_reused_without_shared_world_state() {
+    use routeloom_client::site::RemovalReason;
+    use std::os::unix::fs::PermissionsExt;
+    let Some(mut first) = MeshWorld::start("phase0-first", Switch::direct()) else {
+        return;
+    };
+    let dir = &first.provision.site.dir;
+    assert_eq!(
+        std::fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+        0o700,
+        "world directory holds copied credentials"
+    );
+    for name in [
+        "site.db",
+        "phase0-a1000000000101-flash.bin",
+        "phase0-a1000000000101-flash-ext.bin",
+    ] {
+        assert_eq!(
+            std::fs::metadata(dir.join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "{name} holds copied credentials"
+        );
+    }
+    converge(&mut first, "first snapshot world");
+    let initial_epoch = first.active_gk();
+    let row = first.member_row(NODE_A).expect("A is a member");
+    first
+        .provision
+        .site
+        .link
+        .revoke(
+            NODE_A,
+            row.generation,
+            RemovalReason::Removed,
+            "phase0-isolation",
+        )
+        .expect("first world revocation commits");
+    assert!(!first.member_row(NODE_A).expect("revoked row").member);
+    drop(first);
+
+    let Some(mut second) = MeshWorld::start("phase0-second", Switch::direct()) else {
+        return;
+    };
+    assert_eq!(
+        second.phase0_wall_ms, 0,
+        "Phase 0 runs only once per topology size"
+    );
+    assert_eq!(second.active_gk(), initial_epoch);
+    assert!(
+        second
+            .member_row(NODE_A)
+            .expect("independent member row")
+            .member
+    );
+    converge(&mut second, "reused snapshot world");
+    let before = second.snaps[0].rx_count;
+    second.peers[1].app_send(testkit::GATEWAY, b"snapshot-reused");
+    second.pump_until(2000, |snaps| snaps[0].rx_count > before);
+    assert_eq!(second.snaps[0].rx, b"snapshot-reused");
+}

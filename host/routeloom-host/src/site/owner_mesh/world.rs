@@ -74,6 +74,71 @@ pub(super) fn staggered_boot(nodes: usize) -> Vec<u64> {
         .collect()
 }
 
+fn write_private(path: &std::path::Path, bytes: &[u8]) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .expect("create private world file");
+    file.write_all(bytes).expect("write private world file");
+}
+
+/// Phase 0 finishes before any mesh peer starts. A separate database and
+/// flash image copy gives each world the same committed starting state.
+struct Phase0Snapshot {
+    now: u64,
+    db: Vec<u8>,
+    images: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl Phase0Snapshot {
+    fn build(nodes: usize) -> Self {
+        let mut provision = Provision::start(&format!("phase0-{nodes}"), now_ms());
+        let images = personas(nodes)
+            .iter()
+            .enumerate()
+            .map(|(index, persona)| {
+                let role = if persona.gateway {
+                    Role::Gateway
+                } else {
+                    Role::Relay
+                };
+                let (flash, ext) =
+                    provision.provision_persona(persona, 0xA101 + index as u64, role);
+                (
+                    std::fs::read(flash).expect("Phase 0 flash"),
+                    std::fs::read(ext).expect("Phase 0 extended flash"),
+                )
+            })
+            .collect();
+        Self {
+            now: provision.now,
+            db: std::fs::read(provision.site.dir.join("site.db")).expect("Phase 0 site DB"),
+            images,
+        }
+    }
+}
+
+fn phase0_snapshot(nodes: usize) -> (Arc<Phase0Snapshot>, u64) {
+    static SNAPSHOTS: std::sync::OnceLock<
+        Mutex<std::collections::BTreeMap<usize, Arc<Phase0Snapshot>>>,
+    > = std::sync::OnceLock::new();
+    let mut snapshots = SNAPSHOTS
+        .get_or_init(|| Mutex::new(std::collections::BTreeMap::new()))
+        .lock()
+        .expect("Phase 0 snapshots");
+    if let Some(snapshot) = snapshots.get(&nodes) {
+        return (Arc::clone(snapshot), 0);
+    }
+    let started = std::time::Instant::now();
+    let snapshot = Arc::new(Phase0Snapshot::build(nodes));
+    let elapsed = started.elapsed().as_millis() as u64;
+    snapshots.insert(nodes, Arc::clone(&snapshot));
+    (snapshot, elapsed)
+}
+
 // --- Site --------------------------------------------------------------------
 
 pub(super) struct MeshSite {
@@ -166,12 +231,23 @@ impl MeshSite {
     }
 
     pub(super) fn start(tag: &str, now: u64) -> Self {
+        Self::start_with_db(tag, now, None)
+    }
+
+    fn start_with_db(tag: &str, now: u64, db: Option<&[u8]>) -> Self {
+        use std::os::unix::fs::DirBuilderExt;
         let dir = std::env::temp_dir().join(format!(
             "routeloom-owner-mesh-{tag}-{}-{}",
             std::process::id(),
             now_ms()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&dir)
+            .expect("create private world directory");
+        if let Some(db) = db {
+            write_private(&dir.join("site.db"), db);
+        }
         let (service, transport) = Self::open_service(&dir, now);
         let (listener_stop, listener_thread) = Self::listen(&dir, &service);
         let socket = dir.join("api.sock");
@@ -218,6 +294,22 @@ pub(super) struct Provision {
 impl Provision {
     pub(super) fn start(tag: &str, now: u64) -> Self {
         let site = MeshSite::start(tag, now);
+        let usb = UsbAuthorityAdapter::new(testkit::GATEWAY, 7);
+        site.service
+            .set_group_key_transport(ChannelGroupKeyTransport::new(&site.service));
+        site.service.set_authority_transport(Some(usb.clone()));
+        Self {
+            site,
+            usb,
+            now,
+            transfer: 0,
+            rng_state: 0x1234_5678_9ABC_DEF0,
+        }
+    }
+
+    fn from_snapshot(tag: &str, snapshot: &Phase0Snapshot) -> Self {
+        let now = now_ms().max(snapshot.now);
+        let site = MeshSite::start_with_db(tag, now, Some(&snapshot.db));
         let usb = UsbAuthorityAdapter::new(testkit::GATEWAY, 7);
         site.service
             .set_group_key_transport(ChannelGroupKeyTransport::new(&site.service));
@@ -322,8 +414,8 @@ impl Provision {
             .site
             .dir
             .join(format!("phase0-{:x}-flash-ext.bin", persona.node));
-        std::fs::write(&flash_path, peer.dump_flash()).unwrap();
-        std::fs::write(&ext_path, peer.dump_extended()).unwrap();
+        write_private(&flash_path, &peer.dump_flash());
+        write_private(&ext_path, &peer.dump_extended());
         (flash_path, ext_path)
     }
 
@@ -562,24 +654,28 @@ impl MeshWorld {
             return None;
         }
         let started = std::time::Instant::now();
-        let now = now_ms();
-        let mut provision = Provision::start(tag, now);
+        let (snapshot, phase0_wall_ms) = phase0_snapshot(nodes);
+        let provision = Provision::from_snapshot(tag, &snapshot);
         let personas = personas(nodes);
-        // Gateway first: later joins rotate the GK and the gateway's
-        // mesh boot re-opens its channel like a field reboot.
-        let images: Vec<_> = personas
+        let images: Vec<_> = snapshot
+            .images
             .iter()
             .enumerate()
-            .map(|(index, persona)| {
-                let role = if persona.gateway {
-                    Role::Gateway
-                } else {
-                    Role::Relay
-                };
-                provision.provision_persona(persona, 0xA101 + index as u64, role)
+            .map(|(index, (flash, ext))| {
+                let node = personas[index].node;
+                let flash_path = provision
+                    .site
+                    .dir
+                    .join(format!("phase0-{node:x}-flash.bin"));
+                let ext_path = provision
+                    .site
+                    .dir
+                    .join(format!("phase0-{node:x}-flash-ext.bin"));
+                write_private(&flash_path, flash);
+                write_private(&ext_path, ext);
+                (flash_path, ext_path)
             })
             .collect();
-        let phase0_wall_ms = started.elapsed().as_millis() as u64;
         let now = provision.now;
         let usb_secret_hex = hex(b"routeloom-dev-secret");
         // Staggered boots (documented harness technique, same as the HIL
