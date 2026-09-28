@@ -46,6 +46,8 @@ pub enum DownStatus {
 pub const PHASE_EDHOC: u8 = 4;
 /// `phase` of an RLRES1 exchange on the relay.
 pub const PHASE_RESUME: u8 = 5;
+/// `phase` of the out-of-band RRS1 down on a live EDHOC relay (02 §5.3).
+pub const PHASE_RRS_DELIVERY: u8 = 7;
 
 /// `step` of an EDHOC error message on the relay.
 pub const STEP_EDHOC_ERROR: u8 = 5;

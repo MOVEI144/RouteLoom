@@ -1,6 +1,7 @@
 #include "routeloom/espnow_runtime.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <new>
 
@@ -1701,6 +1702,8 @@ Status EspNowRuntime::send_rld1(const routeloom::MacAddress& dest,
   if (channel_runner_.busy()) {
     // A serialized channel operation owns the radio (04 §3/§8): RLD1
     // bootstrap frames hold rather than emit onto the survey/visit channel.
+    fprintf(stderr, "DBG rt: rld1 blocked node=%llx busy\n",
+            static_cast<unsigned long long>(config_.node.node));
     return Status::error(StatusCode::WouldBlock, "RADIO_OP_IN_PROGRESS");
   }
   if (encoded.data == nullptr || encoded.size == 0 ||
@@ -1710,6 +1713,12 @@ Status EspNowRuntime::send_rld1(const routeloom::MacAddress& dest,
   }
   MacAddress mac{};
   mac.bytes = dest;
+  autonomy::Rld1Envelope dbg{};
+  if (autonomy::rld1_decode(encoded, dbg).ok() && dbg.kind == FrameType::Discover) {
+    fprintf(stderr, "DBG rt: rtx node=%llx ch=%u cch=%u dst=%02x%02x\n",
+            static_cast<unsigned long long>(config_.node.node),
+            (unsigned)channel(), (unsigned)committed_channel(), dest[4], dest[5]);
+  }
   Status status = Status::success();
   if (dest == discovery_const::kBroadcastMac) {
     status = register_broadcast_peer();
@@ -1732,9 +1741,14 @@ Status EspNowRuntime::send_wire(const BindingId binding,
                                 const FrameType type,
                                 const ByteView payload) noexcept {
   if (discovery_ == nullptr) {
+    fprintf(stderr, "DBG wire: no engine node=%llx\n",
+            static_cast<unsigned long long>(config_.node.node));
     return Status::error(StatusCode::InvalidState,
                          "autonomy engine not attached");
   }
+  fprintf(stderr, "DBG wire: send node=%llx type=%u\n",
+          static_cast<unsigned long long>(config_.node.node),
+          static_cast<unsigned>(type));
   if (channel_runner_.busy() && !channel_runner_.visiting()) {
     // The authenticated home lane holds while the Owner runs a serialized
     // channel operation (04 §3/§8) — except inside the off-channel dwell,
@@ -1751,11 +1765,16 @@ Status EspNowRuntime::send_wire(const BindingId binding,
   }
   NodeId node = kInvalidNodeId;
   if (!discovery_->node_of(dest, node)) {
+    fprintf(stderr, "DBG wire: node_of failed node=%llx\n",
+            static_cast<unsigned long long>(config_.node.node));
     return Status::error(StatusCode::NotFound,
                          "no bound record for destination");
   }
   BindingId current{};
   if (!discovery_->binding_of(node, current) || current != binding) {
+    fprintf(stderr, "DBG wire: binding_of stale node=%llx dest=%llx\n",
+            static_cast<unsigned long long>(config_.node.node),
+            static_cast<unsigned long long>(node));
     return Status::error(StatusCode::Conflict, "stale binding id");
   }
   MacAddress mac{};
@@ -2660,6 +2679,11 @@ void EspNowRuntime::enqueue_rx(
     // Unknown-MAC non-RLD1 frames are dropped — counted so neighbouring
     // networks and peer churn are observable.
     ++unknown_peer_rx_;
+    fprintf(stderr, "DBG rx: unknown_peer len=%d ftype=%u src=%02x%02x%02x%02x%02x%02x\n",
+            length,
+            length > 5 ? static_cast<unsigned>(data[5]) : 0u,
+            info->src_addr[0], info->src_addr[1], info->src_addr[2],
+            info->src_addr[3], info->src_addr[4], info->src_addr[5]);
   }
   const RadioGeneration radio_gen = channel_runner_.radio_generation();
   const ChannelEpoch channel_epoch = channel_epoch_;
@@ -2981,6 +3005,8 @@ void EspNowRuntime::stage_lost_tx(const Event& event) noexcept {
 void EspNowRuntime::channel_committed(const std::uint8_t channel) noexcept {
   // Only after readback-verified apply + peer re-apply: config_.channel is
   // never assigned alone (04 §8 forbids the bare assignment cutover).
+  std::fprintf(stderr, "DBG rt: channel_committed %u -> %u\n", (unsigned)config_.channel,
+               (unsigned)channel);
   config_.channel = channel;
   // Telemetry attribution epoch: observations before and after this commit
   // must never merge (02-telemetry §2.4).

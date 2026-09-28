@@ -391,6 +391,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   bool lifecycle_live_{false};
   bool lifecycle_booted_{false};
   bool removal_pending_{false};  // coordinator boot deferred: erasure runs first
+  bool cutover_intent_{false};   // lifecycle Prepared/Switching, mirrored into the coordinator
   std::array<GossipStage, 4> gossip_staged_{};
   std::array<NodeId, EspNowRuntime::kPeerCapacity> lifecycle_peers_{};
   struct PeerTxStage {

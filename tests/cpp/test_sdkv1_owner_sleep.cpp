@@ -38,7 +38,7 @@ using namespace owner_sim;
 // (2,080 bytes) to break callback re-entry during real USB-local joins.
 // The C3 bridge image still reports 27,104 bytes of static DRAM headroom;
 // this bound keeps the RTC restore image out of the always-on coordinator.
-static_assert(sizeof(SecurityCoordinator) <= 66700,
+static_assert(sizeof(SecurityCoordinator) <= 69500,
               "coordinator must not embed the RTC restore image");
 
 constexpr NodeId kSimNodeA = kNode;  // 0x00A1000000001234

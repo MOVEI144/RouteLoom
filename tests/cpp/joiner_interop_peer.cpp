@@ -1313,7 +1313,12 @@ class PeerWorld {
       downs_.pop_front();
       if (down.site >= sites_.size()) fatal("down for an unknown site");
       const Status status = sites_[down.site]->apply_down(down.to_proxy, down.object, now_);
-      if (!status.ok()) fatal("gateway host_down rejected a down object");
+      if (!status.ok()) {
+        std::fprintf(stderr, "DBG host_down site=%u proxy=%llu size=%zu code=%d %s\n",
+                     down.site, (unsigned long long)down.to_proxy, down.object.size(),
+                     (int)status.code, status.detail);
+        fatal("gateway host_down rejected a down object");
+      }
     }
     while (!aborts_.empty()) {
       const QueuedAbort abort = aborts_.front();

@@ -1,5 +1,6 @@
 #include "routeloom/usb_bridge.hpp"
 
+#include <cstdio>
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
@@ -207,6 +208,9 @@ Status UsbBridge::send_authority_up(const AuthorityFragment& fragment) noexcept 
 Status UsbBridge::relay_up(const NodeId proxy, const std::uint8_t hops,
                            const ByteView object) noexcept {
   if (state_ != SessionState::Active || (config_.capability & kCapJoinRelayV2) == 0) {
+    fprintf(stderr, "DBG usb: relay_up refused node=%llx state=%u cap=%x\n",
+            (unsigned long long)config_.node, (unsigned)state_,
+            (unsigned)config_.capability);
     return Status::error(StatusCode::InvalidState, "no host session for join relay");
   }
   JoinRelayUp up{};
@@ -1568,6 +1572,10 @@ void UsbBridge::handle_join_relay_down(const std::uint64_t request, const ByteVi
     // attempt, mesh-proxy downs to its gateway engine. Admission returns
     // synchronously for the 0x63.
     const Status status = join_owner_->join_down(down.to_proxy, object, down.object, now_ms);
+    if (!status.ok()) {
+      std::fprintf(stderr, "DBG jdown rej proxy=%llu code=%d %s\n",
+                   (unsigned long long)down.to_proxy, (int)status.code, status.detail);
+    }
     send_join_relay_result(request, join_relay_result_for(status), down.to_proxy, token, now_ms);
     return;
   }
@@ -1576,6 +1584,11 @@ void UsbBridge::handle_join_relay_down(const std::uint64_t request, const ByteVi
     return;
   }
   const Status status = join_relay_->host_down(down.to_proxy, down.object, now_ms);
+  if (!status.ok()) {
+    std::fprintf(stderr, "DBG host_down rej proxy=%llu size=%u code=%d %s\n",
+                 (unsigned long long)down.to_proxy, (unsigned)down.object.size,
+                 (int)status.code, status.detail);
+  }
   send_join_relay_result(request, join_relay_result_for(status), down.to_proxy, token, now_ms);
 }
 

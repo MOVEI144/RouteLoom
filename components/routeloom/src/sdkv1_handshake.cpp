@@ -1016,13 +1016,28 @@ Status HandshakeEngine::responder_cookie_ok(const HandshakeRx& rx) noexcept {
   // any session state exists. The attached bytes must equal the frozen
   // exchange's cookie AND verify under the boot key.
   if (rx.cookie.size != MemberCookie::kCookieBytes) {
+    fprintf(stderr, "DBG eng: ck! self=%llx why=size %u\n",
+            (unsigned long long)local_.self, (unsigned)rx.cookie.size);
     return Status::error(StatusCode::AuthenticationFailed, "handshake cookie missing");
   }
   if (std::memcmp(rx.cookie.data, rx.carrier.cookie.data(), rx.cookie.size) != 0) {
+    fprintf(stderr,
+            "DBG eng: ck! self=%llx why=memcmp att=%02x%02x car=%02x%02x ni=%llx nr=%llx\n",
+            (unsigned long long)local_.self, rx.cookie.data[0], rx.cookie.data[1],
+            rx.carrier.cookie.data()[0], rx.carrier.cookie.data()[1],
+            (unsigned long long)rx.carrier.node_i,
+            (unsigned long long)rx.carrier.node_r);
     return Status::error(StatusCode::AuthenticationFailed, "handshake cookie mismatch");
   }
-  return cookie_.verify(rx.src_mac, rx.carrier.requester_nonce, rx.carrier.network, rx.cookie,
-                        last_tick_);
+  const Status ver = cookie_.verify(rx.src_mac, rx.carrier.requester_nonce,
+                                  rx.carrier.network, rx.cookie, last_tick_);
+  if (!ver.ok()) {
+    fprintf(stderr, "DBG eng: ck! self=%llx why=verify net=%llx tick=%llu\n",
+            (unsigned long long)local_.self,
+            (unsigned long long)rx.carrier.network,
+            (unsigned long long)last_tick_);
+  }
+  return ver;
 }
 
 // --- Requests ---
@@ -1475,6 +1490,12 @@ Status HandshakeEngine::on_message(const HandshakeRx& rx, const ByteView message
                                                 rx.carrier.capability_r)
                             : !caps_resume_pair(rx.carrier.capability_i,
                                                 rx.carrier.capability_r))))) {
+    fprintf(stderr, "DBG eng: s1 drop self=%llx net=%llx/%llx nr=%llx/%llx ni=%llx cp=%llx caps=%x/%x\n",
+            (unsigned long long)local_.self, (unsigned long long)rx.carrier.network,
+            (unsigned long long)local_.network, (unsigned long long)rx.carrier.node_r,
+            (unsigned long long)local_.self, (unsigned long long)rx.carrier.node_i,
+            (unsigned long long)rx.claimed_peer, (unsigned)rx.carrier.capability_i,
+            (unsigned)rx.carrier.capability_r);
     return Status::success();
   }
   const JoinAuthPhase phase =
@@ -1572,7 +1593,26 @@ bool HandshakeEngine::step1_may_proceed(const SecurityScope scope, const NodeId 
     if (!candidate.used || candidate.scope != scope || candidate.peer != peer) continue;
     // Routed step-1 has no cookie: its claimed origin cannot evict an
     // authenticated flight before EDHOC or the resume MAC verifies it.
-    if (scope == SecurityScope::EndToEnd) return false;
+    // Completed records are past that gate: the peer's new step-1 ends
+    // the quiet resend duty (same rule as link scope below), or every
+    // re-handshake would serialize behind the previous corpse.
+    if (scope == SecurityScope::EndToEnd) {
+      // Completed: the peer's new step-1 ends our quiet resend duty
+      // (same-protocol retransmits match by exchange id first, so this
+      // is unambiguously new). A parked m1 stash and a queued initiator
+      // have spent no flight either — a live arrival wins, or an idle
+      // record walls off a real exchange for its whole timeout.
+      const bool yields =
+          candidate.state == RecordState::EdhocM4Pending ||
+          candidate.state == RecordState::EdhocM4Sent ||
+          candidate.state == RecordState::ResumeR3Confirm ||
+          candidate.state == RecordState::EdhocM1Parked ||
+          (candidate.role == HandshakeRole::Initiator &&
+           candidate.state == RecordState::EdhocQueued);
+      if (!yields) return false;
+      drop_record(candidate);
+      return true;
+    }
     if (candidate.state == RecordState::EdhocM4Pending ||
         candidate.state == RecordState::EdhocM4Sent ||
         candidate.state == RecordState::ResumeR3Confirm) {
@@ -1585,8 +1625,12 @@ bool HandshakeEngine::step1_may_proceed(const SecurityScope scope, const NodeId 
     if (candidate.role == HandshakeRole::Responder) return false;  // ours owns this peer
     // Simultaneous open, any protocol: the smaller NodeId stays
     // initiator (P4 §5.5). Larger yields silently and answers as
-    // responder — no livelock, no failure.
-    if (local_.self < peer) return false;  // we proceed; drop theirs
+    // responder — no livelock, no failure. A queued initiator has not
+    // emitted anything: the peer's live flight wins by arrival or an
+    // idle request walls off a real exchange for its whole timeout.
+    if (candidate.state != RecordState::EdhocQueued && local_.self < peer) {
+      return false;  // we proceed; drop theirs
+    }
     drop_record(candidate);
     return true;
   }
@@ -1758,18 +1802,43 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
       return emit_send(*record, 4, step, ByteView{big_tx_.data(), big_tx_size_}, false);
     }
     // Link admission precedes any destructive simultaneous-open decision.
-    if (!responder_cookie_ok(rx) || next_token_ == 0xFFFFFFFFU) return Status::success();
-    if (!step1_may_proceed(rx.scope, rx.claimed_peer)) return Status::success();
+    if (!responder_cookie_ok(rx) || next_token_ == 0xFFFFFFFFU) {
+      fprintf(stderr, "DBG eng: m1 drop self=%llx why=cookie\n",
+              (unsigned long long)local_.self);
+      return Status::success();
+    }
+    if (!step1_may_proceed(rx.scope, rx.claimed_peer)) {
+      fprintf(stderr, "DBG eng: m1 drop self=%llx why=simopen scope=%u cp=%llx\n",
+              (unsigned long long)local_.self, (unsigned)rx.scope,
+              (unsigned long long)rx.claimed_peer);
+      return Status::success();
+    }
     CarrierRecord* fresh = nullptr;
     const Status allocated = verify_cookie_and_allocate(rx, message, fresh, now);
     if (!allocated) return Status::success();  // cookie/budget/table: drop
     return responder_begin_m1(*fresh, message, now);
   }
-  if (record == nullptr) return Status::success();  // no exchange expects this
+  if (record == nullptr) {
+    fprintf(stderr, "DBG eng: msg drop self=%llx scope=%u ph=%u st=%u cp=%llx why=norec\n",
+            (unsigned long long)local_.self, (unsigned)rx.scope, (unsigned)rx.phase,
+            (unsigned)rx.step, (unsigned long long)rx.claimed_peer);
+    for (const auto& c : records_) {
+      if (!c.used) continue;
+      fprintf(stderr, "DBG eng:   rec scope=%u peer=%llx role=%d st=%d ceq=%d\n",
+              (unsigned)c.scope, (unsigned long long)c.peer, (int)c.role, (int)c.state,
+              rx.scope == SecurityScope::Link ? (int)carrier_equal(c.carrier, rx.carrier) : -1);
+    }
+    return Status::success();  // no exchange expects this
+  }
   if (rx.step == 2) {
     if (record->role != HandshakeRole::Initiator ||
         record->state != RecordState::EdhocWaitM2 ||
         !edhoc_flight_.active || edhoc_flight_.owner_token != record->token) {
+      fprintf(stderr, "DBG eng: m2 drop self=%llx peer=%llx role=%d st=%d fact=%d own=%u tok=%u\n",
+              (unsigned long long)local_.self, (unsigned long long)rx.claimed_peer,
+              static_cast<int>(record->role), static_cast<int>(record->state),
+              edhoc_flight_.active ? 1 : 0, (unsigned)edhoc_flight_.owner_token,
+              (unsigned)record->token);
       return Status::success();
     }
     const Status processed = edhoc_.process_message_2(message);

@@ -587,6 +587,12 @@ impl JoinTransport for UsbSiteAdapter {
             return Err(DeliverReject::Closed);
         }
         let key = outbound.key();
+        if let Outbound::Down(down) = &outbound {
+            eprintln!(
+                "DBG deliver down phase={} step={} proxy={:#x} size={}",
+                down.phase, down.step, down.key.proxy, down.body.len()
+            );
+        }
         let encoded: Result<(Vec<u8>, bool), DeliverReject> = match &outbound {
             Outbound::Down(down) => {
                 down_object(down).map(|bytes| (bytes, down.status == DownStatus::Final))

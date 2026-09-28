@@ -55,6 +55,9 @@ constexpr std::size_t kAuthorityObjectMax = 2048;
 // 500 ms up to 4 sends; the whole transfer aborts at 15 s.
 constexpr MonotonicMs kAuthorityChunkResendMs = 500;
 constexpr std::uint8_t kAuthorityChunkSendsMax = 4;
+// Consecutive mesh-send failures before an unsendable downlink drops its
+// slot instead of starving the shared table for later transfers.
+constexpr std::uint8_t kAuthoritySendFailMax = 8;
 constexpr MonotonicMs kAuthorityTransferTimeoutMs = 15000;
 constexpr MonotonicMs kAuthorityReassemblyTimeoutMs = 10000;
 
@@ -329,6 +332,7 @@ class AuthorityGateway final : public AuthorityMeshDemux {
     std::uint16_t received{0};
     std::uint16_t emitted{0};  // USB egress cursor (Up) / mesh ack cursor (Down)
     std::uint8_t sends{0};     // sends of the outstanding mesh chunk (Down)
+    std::uint8_t send_failures{0};  // consecutive mesh-send failures (Down)
     NodeId origin{kInvalidNodeId};  // mesh RX peer (Up, for acks)
     autonomy::ObjectHash hash{};
     MonotonicMs started_ms{0};

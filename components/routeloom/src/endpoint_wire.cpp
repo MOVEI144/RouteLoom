@@ -113,7 +113,7 @@ Status scope_discover_body_encode(const Rld1DiscoverBodyV2& body,
   RL_WRITE(writer.write_u8(kScopeBodyVersion));
   RL_WRITE(writer.write_u8(static_cast<std::uint8_t>(body.scope_class)));
   RL_WRITE(writer.write_u8(kScopeScheme));
-  RL_WRITE(writer.write_u8(0));
+  RL_WRITE(writer.write_u8(body.flags));
   RL_WRITE(writer.write_u32(body.generation));
   RL_WRITE(writer.write_bytes(ByteView{body.tag.data(), body.tag.size()}));
 #undef RL_WRITE
@@ -140,11 +140,13 @@ Status scope_discover_body_decode(const ByteView encoded, Rld1DiscoverBodyV2& ou
   RL_READ(reader.read_u32(out.generation));
   RL_READ(reader.read_bytes(MutableByteView{out.tag.data(), out.tag.size()}));
 #undef RL_READ
-  if (version != kScopeBodyVersion || scheme != kScopeScheme || flags != 0 ||
+  if (version != kScopeBodyVersion || scheme != kScopeScheme ||
+      (flags & ~kScopeDiscoverFlagMask) != 0 ||
       !scope_class_valid(scope_class)) {
     return reject();
   }
   out.scope_class = static_cast<ScopeClass>(scope_class);
+  out.flags = flags;
   return Status::success();
 }
 

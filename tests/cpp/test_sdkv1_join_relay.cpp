@@ -1913,8 +1913,9 @@ void test_q116_epoch_query_rate() {
 
 void test_q116_size_budgets() {
   current = "q116_size_budgets";
-  // #116 §4.1: the RelayBook stays bounded on every target.
-  CHECK(sizeof(JoinRelayGateway) <= 6656);
+  // #116 §4.1: the RelayBook stays bounded on every target — incl. the
+  // two pending_pool entries parked EDHOC downs share (02 §5.3 phase 7).
+  CHECK(sizeof(JoinRelayGateway) <= 8192);
   CHECK(sizeof(JoinProxy) <= 1792);
   CHECK(sizeof(JoinObjectSlot) <= 1120);
   std::printf("q116 sizes: gateway=%zu proxy=%zu slot=%zu\n", sizeof(JoinRelayGateway),

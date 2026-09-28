@@ -337,9 +337,18 @@ impl AuthorityChannels {
         }
     }
 
+    /// The member a live channel is bound to (`None` without one): the
+    /// same full binding the seal/receive fences compare against.
+    pub fn bound_member(&self, device: u64) -> Option<ChannelMember> {
+        self.channels.get(&device).map(|channel| channel.member.clone())
+    }
+
     /// Forgets every channel and handshake state for `device` (revocation
     /// fence). Owner-initiated, so no event: the owner already knows.
     pub fn retire_device(&mut self, device: u64) {
+        if std::env::var_os("D04DBG").is_some() {
+            eprintln!("D04DBG retire_device dev={device:x} net={:x}", self.config.network);
+        }
         self.pending.retain(|p| p.device != device);
         if let Some(channel) = self.channels.remove(&device) {
             self.ctx_to_device.remove(&channel.rx_ctx);
@@ -410,9 +419,23 @@ impl AuthorityChannels {
         device: u64,
         bound: &ChannelMember,
     ) -> bool {
-        directory.lookup(device).is_some_and(|current| {
-            current.member && current.network == self.config.network && current == *bound
-        })
+        let looked = directory.lookup(device);
+        let ok = looked.as_ref().is_some_and(|current| {
+            let eq = current.member && current.network == self.config.network && *current == *bound;
+            if !eq && std::env::var_os("D04DBG").is_some() {
+                eprintln!(
+                    "D04DBG stale dev={device:x} cur(member={} gen={} dams={} net={:x}) bound(member={} gen={} dams={} net={:x}) cfg_net={:x} looked={:?}",
+                    current.member, current.generation, &current.dams[..2].iter().map(|b| format!("{b:02x}")).collect::<String>(), current.network,
+                    bound.member, bound.generation, &bound.dams[..2].iter().map(|b| format!("{b:02x}")).collect::<String>(), bound.network,
+                    self.config.network, looked.as_ref().map(|m| (m.generation, m.network))
+                );
+            }
+            eq
+        });
+        if !ok && looked.is_none() && std::env::var_os("D04DBG").is_some() {
+            eprintln!("D04DBG stale dev={device:x} lookup=None cfg_net={:x}", self.config.network);
+        }
+        ok
     }
 
     fn push_outbound(&mut self, outbound: AuthorityOutbound) -> bool {
@@ -516,12 +539,18 @@ impl AuthorityChannels {
                 member
             }
             _ => {
+                if std::env::var_os("D04DBG").is_some() {
+                    eprintln!("D04DBG r1 dev={device:x} reject: no member (net={:x})", self.config.network);
+                }
                 self.send_hint(device, &r1.rid);
                 self.stats.r1_rejected += 1;
                 return;
             }
         };
         if resume_id(&member.dams, Purpose::Authority) != r1.rid {
+            if std::env::var_os("D04DBG").is_some() {
+                eprintln!("D04DBG r1 dev={device:x} reject: rid mismatch");
+            }
             self.send_hint(device, &r1.rid);
             self.stats.r1_rejected += 1;
             return;
@@ -709,6 +738,9 @@ impl AuthorityChannels {
             },
         );
         self.stats.handshakes_completed += 1;
+        if std::env::var_os("D04DBG").is_some() {
+            eprintln!("D04DBG channel_ready dev={device:x}");
+        }
         self.push_event(ChannelEvent::ChannelReady { device });
     }
 
@@ -751,6 +783,9 @@ impl AuthorityChannels {
             .get(&device)
             .is_some_and(|c| self.binding_current(directory, device, &c.member));
         if stale {
+            if std::env::var_os("D04DBG").is_some() {
+                eprintln!("D04DBG env-in stale dev={device:x} ctx={}", header.ctx_id);
+            }
             self.retire_device(device);
             self.stats.envelopes_rejected += 1;
             self.push_event(ChannelEvent::ChannelLost {
@@ -776,11 +811,20 @@ impl AuthorityChannels {
             Ok(opened) => opened,
             Err(_) => {
                 self.stats.envelopes_rejected += 1;
+                if std::env::var_os("D04DBG").is_some() {
+                    eprintln!("D04DBG env open fail dev={device:x} len={}", bytes.len());
+                }
                 return;
             }
         };
         if !channel.rx_window.accept(header.counter) {
             self.stats.envelopes_rejected += 1;
+            if std::env::var_os("D04DBG").is_some() {
+                eprintln!(
+                    "D04DBG env replay dev={device:x} ctr={}",
+                    header.counter
+                );
+            }
             return;
         }
         channel.last_activity_ms = now_ms;
@@ -856,6 +900,12 @@ impl AuthorityChannels {
                 let head_ok = plaintext.len() >= BODY_HEAD
                     && BodyHead::decode(&plaintext[..BODY_HEAD], plaintext[1])
                         .is_ok_and(|head| head.op == 2 && head.generation == generation);
+                if std::env::var_os("D04DBG").is_some() {
+                    eprintln!(
+                        "D04DBG passthru dev={device:x} env={env_type} head_ok={head_ok} plen={}",
+                        plaintext.len()
+                    );
+                }
                 if head_ok {
                     self.push_event(ChannelEvent::Passthrough {
                         device,
@@ -898,6 +948,9 @@ impl AuthorityChannels {
             .get(&device)
             .is_some_and(|c| self.binding_current(directory, device, &c.member));
         if stale {
+            if std::env::var_os("D04DBG").is_some() {
+                eprintln!("D04DBG seal stale dev={device:x} env_type={env_type} now={now_ms}");
+            }
             self.retire_device(device);
             self.stats.send_errors += 1;
             self.push_event(ChannelEvent::ChannelLost {
@@ -1166,10 +1219,16 @@ impl AuthorityChannels {
     ) -> Result<(), ChannelSendError> {
         let member = directory.lookup(device).filter(|row| row.member);
         if member.is_none() {
+            if std::env::var_os("D04DBG").is_some() {
+                eprintln!("D04DBG wake dev={device:x} reject: no member");
+            }
             self.stats.send_errors += 1;
             return Err(ChannelSendError::StaleMember);
         }
         if self.outbound.len() >= MAX_OUTBOUND {
+            if std::env::var_os("D04DBG").is_some() {
+                eprintln!("D04DBG wake dev={device:x} reject: outbound full");
+            }
             self.stats.send_errors += 1;
             return Err(ChannelSendError::OutboundFull);
         }

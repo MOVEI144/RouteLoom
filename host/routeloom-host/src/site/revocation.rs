@@ -782,11 +782,24 @@ impl SiteAuthority {
         let candidates = self.rrs_outbox.len();
         for _ in 0..candidates {
             if now_ms < self.rrs_next_dispatch_ms {
+                if std::env::var_os("D04DBG").is_some() && !self.rrs_outbox.is_empty() {
+                    eprintln!(
+                        "D04DBG dispatch paced now={now_ms} next={} depth={}",
+                        self.rrs_next_dispatch_ms,
+                        self.rrs_outbox.len()
+                    );
+                }
                 break;
             }
             let Some(head) = self.rrs_outbox.pop_front() else {
                 break;
             };
+            if std::env::var_os("D04DBG").is_some() {
+                eprintln!(
+                    "D04DBG pop op={:x} node={:x} what={:?} now={now_ms}",
+                    head.op, head.node, head.what
+                );
+            }
             let bytes = match head.what {
                 OutboundKind::Rrs => {
                     if !self.target_still_due(head.op, head.node, now_ms) {
@@ -821,6 +834,12 @@ impl SiteAuthority {
                 }
             };
             let Some((bytes, network)) = bytes else {
+                if std::env::var_os("D04DBG").is_some() {
+                    eprintln!(
+                        "D04DBG drop op={:x} node={:x} what={:?} (still_due/bytes)",
+                        head.op, head.node, head.what
+                    );
+                }
                 self.rrs_refusals.remove(&(head.op, head.node, head.what));
                 continue; // stale entry (phase moved, op evicted): drop, no airtime
             };
@@ -851,6 +870,12 @@ impl SiteAuthority {
                 None => false,
             };
             if !delivered {
+                if std::env::var_os("D04DBG").is_some() {
+                    eprintln!(
+                        "D04DBG refused op={:x} node={:x} what={:?} now={now_ms}",
+                        head.op, head.node, head.what
+                    );
+                }
                 // Keep retry metadata outside the four-slot outbox so
                 // offline targets cannot occupy every mail slot.
                 let key = (head.op, head.node, head.what);
@@ -1237,6 +1262,12 @@ impl SiteAuthority {
         object_sha256: &[u8; 32],
         now_ms: u64,
     ) -> bool {
+        eprintln!(
+            "DBG rrs applied node={node:x} gen={generation} net={network:x} rs={rs_epoch} live={:?} hist={} sha_ok={}",
+            self.devices.get(&node).map(|r| (r.member, r.generation, r.kid[0])),
+            self.rrs_history.contains_key(&rs_epoch),
+            self.rrs_history_digests.get(&rs_epoch) == Some(object_sha256)
+        );
         let Some(live) = self.devices.get(&node) else {
             return false;
         };
@@ -1281,6 +1312,13 @@ impl SiteAuthority {
                 Some(dist) => {
                     let mut changed = false;
                     for target in dist.targets.iter_mut() {
+                        if target.node == node {
+                            eprintln!(
+                                "DBG rrs applied tgt node={node:x} tgen={} tnet={:x} tkid0={:02x} st={:?} want_gen={generation} want_net={network:x} livekid0={:02x}",
+                                target.generation, target.network, target.kid[0],
+                                target.state, live_kid[0]
+                            );
+                        }
                         if target.node == node
                             && target.generation == generation
                             && target.kid == live_kid
@@ -1348,7 +1386,7 @@ impl SiteAuthority {
     /// current site floor) on a site that never revoked, in its own
     /// transaction. No operation and no event: the set is served on
     /// demand until the first real revoke publishes it.
-    fn ensure_baseline_rrs(&mut self, now_ms: u64) -> Result<(), SiteError> {
+    pub(crate) fn ensure_baseline_rrs(&mut self, now_ms: u64) -> Result<(), SiteError> {
         if self.rs_epoch != 0 {
             return Ok(());
         }

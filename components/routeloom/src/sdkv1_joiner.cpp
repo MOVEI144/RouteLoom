@@ -3,6 +3,7 @@
 
 #include "routeloom/sdkv1_joiner.hpp"
 
+#include <cstdio>
 #include <cstring>
 #include <limits>
 
@@ -76,11 +77,12 @@ bool boot_valid(const JoinBootInput& boot) noexcept {
 // --- Lifetime -------------------------------------------------------------------------------
 
 Joiner::Joiner(const JoinerConfig& config, IdentityStore& identity, SiteStore& site,
-               RevocationStore&, EntropySource& entropy, ZtRld1Port& port,
+               RevocationStore& revocations, EntropySource& entropy, ZtRld1Port& port,
                JoinObserver& observer, const edhoc::AeadCcm* aead) noexcept
     : config_(config),
       identity_(identity),
       site_(site),
+      revocations_(revocations),
       entropy_(entropy),
       observer_(observer),
       aead_(aead),
@@ -275,6 +277,13 @@ void Joiner::LinkObserver::on_offer(const ZtOfferView& offer) noexcept {
   proxy.proxy_busy = (offer.body.flags & kZtOfferProxyBusy) != 0;
   const JoinObserve observed =
       owner_.candidates_.observe(key, proxy, owner_.last_now_);
+  if (owner_.recovery_only_) {
+    std::fprintf(stderr, "DBG jr: offer obs=%d key net32=%08lx site=%08lx org=%08lx ch=%u hops=%u reach=%d busy=%d\n",
+                 (int)observed, (unsigned long)key.network_low32,
+                 (unsigned long)key.site_hint, (unsigned long)key.org_hint,
+                 (unsigned)proxy.channel, (unsigned)proxy.authority_hops,
+                 proxy.authority_reachable ? 1 : 0, proxy.proxy_busy ? 1 : 0);
+  }
   if (observed == JoinObserve::Rejected) Joiner::sat_inc(owner_.counters_.rx_dropped);
   if (state != JoinState::RefreshWindow || owner_.refresh_phase_ != RefreshPhase::Collect ||
       !(key == owner_.attempt_key_)) {
@@ -304,6 +313,15 @@ void Joiner::LinkObserver::on_offer(const ZtOfferView& offer) noexcept {
 
 void Joiner::LinkObserver::on_message(const JoinAuthPhase phase, const std::uint8_t step,
                                      const ByteView message) noexcept {
+  std::fprintf(stderr, "DBG jmsg phase=%u step=%u size=%u state=%u\n",
+               (unsigned)phase, (unsigned)step, (unsigned)message.size,
+               (unsigned)owner_.state_);
+  // The out-of-band RRS1 down lands between m3 and the commit without
+  // advancing the EDHOC stage: stage it beside the mailbox.
+  if (phase == JoinAuthPhase::RrsDelivery) {
+    owner_.stage_rrs(message);
+    return;
+  }
   if (!Joiner::step_expected(owner_.state_, phase, step)) return;
   if (owner_.mailbox_valid_) return;  // never overwrite a staged message
   if (message.size > owner_.msg_.size()) {
@@ -336,8 +354,11 @@ void Joiner::LinkObserver::on_link_failure(const char* reason) noexcept {
 
 void Joiner::begin_run(const JoinBootInput& boot) noexcept {
   // A new run drops every pending output; the radio stays where it is and
-  // the candidate holds survive a soft restart.
+  // the candidate holds survive a soft restart.  A staged sideband RRS is
+  // attempt-scoped evidence and is re-staged by the next delivery.
   teardown_attempt();
+  secure_clear(rrs_staged_);
+  rrs_staged_len_ = 0;
   clear_mailbox();
   wipe_expectation();
   action_ = JoinAction{};
@@ -403,6 +424,8 @@ Status Joiner::start_direct(const JoinBootInput& boot, JoinDirectPort& port,
 
 Status Joiner::on_direct_message(const JoinAuthPhase phase, const std::uint8_t step,
                                 const ByteView body, const MonotonicMs now) noexcept {
+  std::fprintf(stderr, "DBG jdirect phase=%u step=%u size=%u\n", (unsigned)phase,
+               (unsigned)step, (unsigned)body.size);
   if (in_call_) return Status::error(StatusCode::Busy, "joiner re-entry");
   InCall guard(in_call_);
   if (!clock_ok(now)) return Status::error(StatusCode::ClockUncertain, "joiner clock");
@@ -411,6 +434,10 @@ Status Joiner::on_direct_message(const JoinAuthPhase phase, const std::uint8_t s
   }
   // Same staging rules as the radio mailbox: expected steps only, never
   // overwrite, oversized bodies drop counted.
+  if (phase == JoinAuthPhase::RrsDelivery) {
+    stage_rrs(body);
+    return Status::success();
+  }
   if (!step_expected(state_, phase, step)) {
     sat_inc(counters_.rx_dropped);
     return Status::success();
@@ -505,17 +532,23 @@ Status Joiner::on_rld1_rx(const JoinRxMeta& meta, const ByteView frame,
   // foreign frame never reaches the slot or the observer.
   if (channel_ == 0 || meta.channel != channel_) {
     sat_inc(counters_.rx_dropped);
+    std::fprintf(stderr, "DBG jdrop chan state=%u\n", (unsigned)state_);
     return Status::success();
   }
   if (!(meta.destination == config_.mac)) {
     sat_inc(counters_.rx_dropped);
+    std::fprintf(stderr, "DBG jdrop dest\n");
     return Status::success();
   }
   autonomy::Rld1Envelope env{};
   if (!autonomy::rld1_decode(frame, env) || !zt_rld1_frame(env)) {
     sat_inc(counters_.rx_dropped);
+    std::fprintf(stderr, "DBG jdrop env\n");
     return Status::success();
   }
+  std::fprintf(stderr, "DBG jrx kind=%u ph=%u st=%u state=%u\n", (unsigned)env.kind,
+               env.body_size >= 3 ? (unsigned)env.body[1] : 0,
+               env.body_size >= 3 ? (unsigned)env.body[2] : 0, (unsigned)state_);
   const ByteView body{env.body.data(), env.body_size};
   switch (env.kind) {
     case FrameType::Offer:
@@ -526,27 +559,33 @@ Status Joiner::on_rld1_rx(const JoinRxMeta& meta, const ByteView frame,
       // still apply — only the arrival-state test falls.
       break;
     case FrameType::BootstrapAuth: {
-      if (state_ != JoinState::WaitM2 && state_ != JoinState::WaitM4) {
+      JoinAuthObject object{};
+      if (!join_object_decode(body, object)) {
         sat_inc(counters_.rx_dropped);
         return Status::success();
       }
-      JoinAuthObject object{};
-      if (!join_object_decode(body, object) ||
-          !step_expected(state_, object.phase, object.step)) {
+      // RRS delivery is a sideband object inside the live exchange: it
+      // legitimately lands in SendM3/WaitM4/post-m4 states where the
+      // ordinary EDHOC stage gate would drop it. stage_rrs() applies the
+      // eligible-state check when the object is consumed.
+      if (object.phase != JoinAuthPhase::RrsDelivery &&
+          ((state_ != JoinState::WaitM2 && state_ != JoinState::WaitM4) ||
+           !step_expected(state_, object.phase, object.step))) {
         sat_inc(counters_.rx_dropped);
         return Status::success();
       }
       break;
     }
     case FrameType::BootstrapChunk: {
-      if (state_ != JoinState::WaitM2 && state_ != JoinState::WaitM4) {
+      JoinChunk chunk{};
+      if (!join_chunk_decode(JoinCarrier::Rld1, body, chunk) ||
+          chunk.id != join_rld1_object_id(link_.nonce())) {
         sat_inc(counters_.rx_dropped);
         return Status::success();
       }
-      JoinChunk chunk{};
-      if (!join_chunk_decode(JoinCarrier::Rld1, body, chunk) ||
-          !step_expected(state_, chunk.phase, chunk.step) ||
-          chunk.id != join_rld1_object_id(link_.nonce())) {
+      if (chunk.phase != JoinAuthPhase::RrsDelivery &&
+          ((state_ != JoinState::WaitM2 && state_ != JoinState::WaitM4) ||
+           !step_expected(state_, chunk.phase, chunk.step))) {
         sat_inc(counters_.rx_dropped);
         return Status::success();
       }
@@ -729,6 +768,50 @@ bool Joiner::verify_adopted(const SiteRecord& site, const IdentityRecord& identi
   return true;
 }
 
+void Joiner::stage_rrs(const ByteView object) noexcept {
+  // Useful only while the exchange can still adopt it: once the commit
+  // ran (Ready/Removed/Reconcile-exited) the staged copy is dead weight.
+  if (state_ != JoinState::SendM3 && state_ != JoinState::WaitM4 &&
+      state_ != JoinState::Decided && state_ != JoinState::Commit &&
+      state_ != JoinState::Reconcile) {
+    sat_inc(counters_.rx_dropped);
+    std::fprintf(stderr, "DBG rrs stage rej state=%u\n", (unsigned)state_);
+    return;
+  }
+  if (object.size > rrs_staged_.size() || (object.size != 0 && object.data == nullptr)) {
+    sat_inc(counters_.rx_dropped);
+    std::fprintf(stderr, "DBG rrs stage rej size=%u cap=%u\n", (unsigned)object.size,
+                 (unsigned)rrs_staged_.size());
+    return;
+  }
+  if (object.size != 0) std::memcpy(rrs_staged_.data(), object.data, object.size);
+  rrs_staged_len_ = object.size;
+  std::fprintf(stderr, "DBG rrs staged len=%u state=%u\n", (unsigned)object.size,
+               (unsigned)state_);
+}
+
+void Joiner::store_staged_rrs() noexcept {
+  // Nothing staged, or the delivery lost the race with the commit: the
+  // site still stands and the gossip/authority fetch paths remain.
+  std::fprintf(stderr, "DBG rrs store try len=%u has_site=%u\n", (unsigned)rrs_staged_len_,
+               site_.has_site() ? 1 : 0);
+  if (rrs_staged_len_ == 0 || !site_.has_site()) return;
+  const SiteRecord& site = site_.site();
+  CertClaims claims{};
+  if (!cert_decode(site.site_cert.view(), claims) || claims.type != CertType::Site) return;
+  const ByteView object{rrs_staged_.data(), rrs_staged_len_};
+  std::fprintf(stderr, "DBG rrs store unc=%d quar=%d init=%d has=%d rs=%u\n",
+               revocations_.uncertain() ? 1 : 0, revocations_.quarantined() ? 1 : 0,
+               revocations_.initialized() ? 1 : 0, revocations_.has_set() ? 1 : 0,
+               (unsigned)revocations_.rs_epoch());
+  const Status st =
+      (revocations_.uncertain() || revocations_.quarantined())
+          ? revocations_.recover(object, claims.pubkey, site.site_id, site.network)
+          : revocations_.accept(object, claims.pubkey, site.site_id, site.network);
+  std::fprintf(stderr, "DBG rrs store code=%d %s len=%u\n", (int)st.code,
+               st.detail ? st.detail : "", (unsigned)rrs_staged_len_);
+}
+
 bool Joiner::below_removal_watermark(const SiteRecord& site) const noexcept {
   return removal_watermark_site_id_ != 0 &&
          site.site_id == removal_watermark_site_id_ &&
@@ -781,6 +864,8 @@ void Joiner::reconcile_enter(const bool authorized, const MonotonicMs now) noexc
 }
 
 void Joiner::recovery_required(const JoinRecoveryReason reason) noexcept {
+  std::fprintf(stderr, "DBG recovery_required reason=%u state=%u\n", (unsigned)reason,
+               (unsigned)state_);
   JoinAction action{};
   action.kind = JoinActionKind::RecoveryRequired;
   action.recovery_reason = reason;
@@ -1062,6 +1147,8 @@ bool Joiner::open_scan_window(const MonotonicMs now) noexcept {
       set_state(JoinState::ScanWindow);
       return true;
     }
+    std::fprintf(stderr, "DBG jr: discover send fail code=%d ch=%u\n", (int)sent.code,
+                 (unsigned)channel_);
     if (!candidates_.scan_advance()) {
       set_state(JoinState::Select);
       return false;
@@ -1163,6 +1250,13 @@ Status Joiner::drive_select(const MonotonicMs now) noexcept {
       return Status::success();
     }
     if (recovery_only_ && !recovery_match(selected.candidate->key)) {
+      fprintf(stderr, "DBG jr: skip candidate key net32=%08lx site=%08lx org=%08lx want net32=%08lx site=%08lx org=%08lx\n",
+              (unsigned long)selected.candidate->key.network_low32,
+              (unsigned long)selected.candidate->key.site_hint,
+              (unsigned long)selected.candidate->key.org_hint,
+              (unsigned long)recovery_key_.network_low32,
+              (unsigned long)recovery_key_.site_hint,
+              (unsigned long)recovery_key_.org_hint);
       candidates_.apply_outcome(attempt, JoinAttemptOutcome::Failed, 0, now, entropy_);
       continue;
     }
@@ -1629,6 +1723,7 @@ Status Joiner::drive_commit(const MonotonicMs now) noexcept {
       !below_removal_watermark(site_.site()) && matches_expectation(site_.site()) &&
       verify_adopted(site_.site(), identity_.identity())) {
     // The complete verified record was read back from a healthy pair.
+    store_staged_rrs();  // adopt a delivered RRS1 with it when it verifies
     JoinAction action{};
     action.kind = JoinActionKind::MemberReady;
     action.commit_seq = site_.commit_seq();
@@ -1691,6 +1786,7 @@ Status Joiner::drive_reconcile(const MonotonicMs now) noexcept {
         matches_expectation(site)) {
       // Our write landed (the error was the readback or later): adopt it
       // without consuming another approval or writing again.
+      store_staged_rrs();
       JoinAction action{};
       action.kind = JoinActionKind::MemberReady;
       action.commit_seq = site_.commit_seq();
@@ -1728,6 +1824,7 @@ Status Joiner::drive_reconcile(const MonotonicMs now) noexcept {
         }
         return Status::success();
       }
+      store_staged_rrs();  // a same-network advance adopts; a stale set refuses
       JoinAction action{};
       action.kind = JoinActionKind::MemberReady;
       action.commit_seq = site_.commit_seq();

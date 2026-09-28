@@ -714,14 +714,14 @@ impl InteropSite {
 
 // --- Driver --------------------------------------------------------------------
 
-fn down_object(key: &RelayKey, step: u8, status: DownStatus, body: Vec<u8>) -> Vec<u8> {
+fn down_object(key: &RelayKey, phase: u8, step: u8, status: DownStatus, body: Vec<u8>) -> Vec<u8> {
     RelayObject {
         header: RelayHeader {
             dir: RelayDirection::Down,
             relay_id: key.relay_id,
             proxy: key.proxy,
             joiner_mac: key.joiner_mac,
-            phase: PHASE_EDHOC,
+            phase,
             step,
             state: if status == DownStatus::Final {
                 RelayState::Final
@@ -906,7 +906,8 @@ impl World {
                             );
                         }
                     }
-                    let bytes = down_object(&down.key, down.step, down.status, down.body.clone());
+                    let bytes =
+                        down_object(&down.key, down.phase, down.step, down.status, down.body.clone());
                     self.peer.send_down(site, down.key.proxy, &bytes);
                 }
                 Outbound::Abort { key, reason: _ } => {

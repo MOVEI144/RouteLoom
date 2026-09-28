@@ -358,6 +358,13 @@ class Joiner final {
   void wipe_expectation() noexcept;
   bool matches_expectation(const SiteRecord& site) noexcept;
   bool recovery_match(const JoinCandidateKey& key) const noexcept;
+  // Stages one out-of-band RRS1 object (phase 7) while the exchange is
+  // open; a second delivery replaces it. Drops counted, never mailbox.
+  void stage_rrs(ByteView object) noexcept;
+  // Verifies the staged RRS1 against the adopted site's SAK and stores
+  // it when it is a strict advance for that site/network. A refusal
+  // never fails the join — the site stands and the fetch paths remain.
+  void store_staged_rrs() noexcept;
   // Full re-verification of an adopted RLS1 before it may drive anything.
   bool verify_adopted(const SiteRecord& site, const IdentityRecord& identity) noexcept;
   bool below_removal_watermark(const SiteRecord& site) const noexcept;
@@ -369,6 +376,7 @@ class Joiner final {
   JoinerConfig config_{};
   IdentityStore& identity_;
   SiteStore& site_;
+  RevocationStore& revocations_;
   EntropySource& entropy_;
   JoinObserver& observer_;
   const edhoc::AeadCcm* aead_{nullptr};
@@ -415,6 +423,13 @@ class Joiner final {
   ZtOfferView refresh_offer_{};
   bool refresh_offer_valid_{false};
   std::int16_t refresh_rssi_{0};
+
+  // Out-of-band RRS1 (02 §5.3 phase 7): the authority's current set,
+  // staged while the EDHOC exchange is open (between m3 and the commit)
+  // and verified + stored against the just-adopted site in drive_commit.
+  // Not mailbox state: it never displaces the staged EDHOC message.
+  std::array<std::uint8_t, kJoinMessageMax> rrs_staged_{};
+  std::size_t rrs_staged_len_{0};
 
   // Single 960 B RX/TX workspace (§9): the mailbox or the compose buffer,
   // never both — the session call returns and the staged copy moves on

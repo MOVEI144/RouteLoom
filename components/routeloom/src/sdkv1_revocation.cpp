@@ -4,6 +4,7 @@
 
 #include "routeloom/sdkv1_revocation.hpp"
 
+#include <cstdio>
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
@@ -781,6 +782,9 @@ Status MembershipLifecycle::adopt_and_enter(const MonotonicMs now_ms) noexcept {
     // No set, a set behind the floor, or a set for another network: stay
     // closed in BootGate; the Poll loop fetches a fresh set from the
     // authority (gossip may also supply it).
+    fprintf(stderr, "DBG p6: adopt->bootgate self=%llx has=%u rs=%u floor=%u\n",
+            static_cast<unsigned long long>(config_.self), adopted_.has_rrs ? 1 : 0,
+            adopted_.rs_epoch, adopted_.rs_floor);
     phase_ = LifecyclePhase::BootGate;
     return Status::success();
   }
@@ -800,6 +804,17 @@ Status MembershipLifecycle::adopt_and_enter(const MonotonicMs now_ms) noexcept {
     emit_action(LifecycleActionTag::RecoveryRequired, LifecycleActionReason::SelfRevocation);
     notify(LifecycleEventKind::SelfRevoked, config_.self, adopted_.rs_epoch, 0, now_ms);
     return Status::success();
+  }
+  // Report the applied set: a ZeroTouch reissue stores it out-of-band
+  // (Joiner::store_staged_rrs) with no apply pass of its own, so the
+  // authority never learns this binding's RRS state otherwise.
+  stored_object_.clear();
+  if (revocations_.load_object(stored_object_)) {
+    autonomy::ObjectHash hash{};
+    hash_object(stored_object_.view(), hash);
+    queue_applied_ack(adopted_.rs_epoch, hash, now_ms);
+    fprintf(stderr, "DBG p6: adopt ack queued self=%llx rs=%u\n",
+            static_cast<unsigned long long>(config_.self), adopted_.rs_epoch);
   }
   phase_ = LifecyclePhase::Active;
   return Status::success();
@@ -1119,6 +1134,8 @@ Status MembershipLifecycle::apply_done(const MonotonicMs now_ms) noexcept {
   const LifecyclePhase resume = resume_phase_;
   abort_apply(resume);
   if (self_rejected()) {
+    fprintf(stderr, "DBG p6: self_rejected(apply) self=%llx\n",
+            static_cast<unsigned long long>(config_.self));
     phase_ = LifecyclePhase::SelfRevoked;
     self_revoked_ = true;
     emit_action(LifecycleActionTag::RecoveryRequired, LifecycleActionReason::SelfRevocation);
@@ -1321,6 +1338,8 @@ void MembershipLifecycle::gossip_poll(const MonotonicMs now_ms) noexcept {
 
 void MembershipLifecycle::enter_recovering(const LifecycleActionReason reason,
                                            const MonotonicMs now_ms) noexcept {
+  fprintf(stderr, "DBG p6: enter_recovering self=%llx reason=%d\n",
+          static_cast<unsigned long long>(config_.self), static_cast<int>(reason));
   phase_ = LifecyclePhase::Recovering;
   emit_action(LifecycleActionTag::RecoveryRequired, reason);
   notify(LifecycleEventKind::RecoveryStarted, 0, adopted_.rs_epoch,
@@ -1617,6 +1636,9 @@ Status MembershipLifecycle::on_member_ready(const LifecycleMemberReady& ready,
     // A re-issue (or a completed recovery) may have moved our generation
     // past the revocation: re-check before staying closed.
     if (adopted_.has_rrs && adopted_.rs_epoch >= adopted_.rs_floor && !self_rejected()) {
+      fprintf(stderr, "DBG p6: recover->active self=%llx rs=%u floor=%u\n",
+              static_cast<unsigned long long>(config_.self), adopted_.rs_epoch,
+              adopted_.rs_floor);
       phase_ = LifecyclePhase::Active;
       self_revoked_ = false;
       saturate_inc(counters_.recoveries);
@@ -1641,6 +1663,9 @@ Status MembershipLifecycle::on_authority(const LifecycleAuthorityMessage& messag
     return on_removal(message.body, now_ms);
   }
   if (message.authority_type == 7) {
+    fprintf(stderr, "DBG p6: renew type=7 net_match=%d site_ok=%d phase=%d\n",
+            message.authority.network == adopted_.network ? 1 : 0,
+            adopted_.site_ok ? 1 : 0, static_cast<int>(phase_));
     if (!adopted_.site_ok || message.authority.network != adopted_.network)
       return Status::error(StatusCode::InvalidState, "renew authority binding");
     return on_renew(message.body, now_ms);
@@ -2026,7 +2051,12 @@ Status MembershipLifecycle::removal_poll(MonotonicMs now_ms) noexcept {
 bool MembershipLifecycle::staged_site(const LifecycleRecord& record, SiteRecord& out) noexcept {
   if (record.mode != LifecycleMode::Prepared && record.mode != LifecycleMode::Switching) return false;
   if (!identity_.has_identity() || identity_.quarantined() || identity_.uncertain() ||
-      record.self != config_.self || record.generation == 0) return false;
+      record.self != config_.self || record.generation == 0) {
+    fprintf(stderr, "DBG p6: staged_site gate id=%d self=%d gen=%u\n",
+            identity_.has_identity() ? 1 : 0,
+            record.self == config_.self ? 1 : 0, record.generation);
+    return false;
+  }
   const auto* p = record.payload.bytes.data();
   const std::size_t size = (static_cast<std::size_t>(p[0]) << 8U) | p[1];
   const std::size_t offset = record.mode == LifecycleMode::Prepared ? 2 : 6;
@@ -2036,15 +2066,31 @@ bool MembershipLifecycle::staged_site(const LifecycleRecord& record, SiteRecord&
       out.site_id != record.site_id || out.network != record.new_network ||
       out.assignment_generation != record.generation ||
       out.rs_epoch_floor < record.rs_floor || out.gk_epoch_current != record.gk_floor ||
-      out.boot_witness != record.boot_witness || out.gk_epoch_next != 0) return false;
+      out.boot_witness != record.boot_witness || out.gk_epoch_next != 0) {
+    fprintf(stderr, "DBG p6: staged_site site id=%d net=%d gen=%d floor=%d gk=%d wit=%d next=%d\n",
+            out.site_id == record.site_id ? 1 : 0,
+            out.network == record.new_network ? 1 : 0,
+            out.assignment_generation == record.generation ? 1 : 0,
+            out.rs_epoch_floor >= record.rs_floor ? 1 : 0,
+            out.gk_epoch_current == record.gk_floor ? 1 : 0,
+            out.boot_witness == record.boot_witness ? 1 : 0,
+            out.gk_epoch_next == 0 ? 1 : 0);
+    return false;
+  }
   CertClaims next{};
   bool verified = false;
   if (!identity_verify_site_cert(identity_.identity(), out.site_cert.view(), next,
                                  verified, verifier_) || !verified ||
       (sak_valid_ && next.pubkey != sak_) ||
       next.site_epoch != static_cast<std::uint32_t>(record.new_network >> 32U) ||
-      !join_membership_verify(out, identity_.identity(), verified, verifier_) || !verified)
+      !join_membership_verify(out, identity_.identity(), verified, verifier_) || !verified) {
+    fprintf(stderr, "DBG p6: staged_site cert ver=%d sak=%d epoch=%d memb=%d\n",
+            verified ? 1 : 0,
+            !sak_valid_ || next.pubkey == sak_ ? 1 : 0,
+            next.site_epoch == static_cast<std::uint32_t>(record.new_network >> 32U) ? 1 : 0,
+            verified ? 1 : 0);
     return false;
+  }
   return true;
 }
 
@@ -2184,13 +2230,24 @@ void MembershipLifecycle::send_renew_receipt(GrantRenewPhase phase, ByteView dig
   if (digest.size == receipt.digest.size())
     std::memcpy(receipt.digest.data(), digest.data, digest.size);
   std::array<std::uint8_t, kGrantReceiptSize> bytes{};
-  if (grant_receipt_encode(receipt, bytes))
-    (void)ports_.authority.authority_send(7, ByteView{bytes.data(), bytes.size()});
+  if (grant_receipt_encode(receipt, bytes)) {
+    const Status sent =
+        ports_.authority.authority_send(7, ByteView{bytes.data(), bytes.size()});
+    fprintf(stderr, "DBG p6: renew_receipt self=%llx ph=%d code=%d\n",
+            static_cast<unsigned long long>(config_.self), static_cast<int>(phase),
+            static_cast<int>(sent.code));
+  }
 }
 
 Status MembershipLifecycle::on_renew(ByteView body, MonotonicMs now_ms) noexcept {
   GrantRenewHead head{};
   Status st = grant_renew_head_decode(body, head);
+  fprintf(stderr,
+          "DBG p6: on_renew decode=%d phase=%d oldnet_match=%d cid=%llx rev=%u\n",
+          st.ok() ? 1 : 0, st.ok() ? static_cast<int>(head.phase) : -1,
+          st.ok() && head.old_network == adopted_.network ? 1 : 0,
+          st.ok() ? static_cast<unsigned long long>(head.cutover_id) : 0,
+          st.ok() ? head.revision : 0);
   if (!st) return st;
   if (head.old_network != adopted_.network) return Status::error(StatusCode::Conflict, "renew old binding");
   if (head.phase == GrantRenewPhase::Prepare) return renew_prepare(body);
@@ -2225,30 +2282,52 @@ Status MembershipLifecycle::renew_routestate(ByteView body, MonotonicMs now_ms) 
 }
 
 Status MembershipLifecycle::renew_commit(ByteView body, MonotonicMs now_ms) noexcept {
+  fprintf(stderr, "DBG p6: renew_commit ph=%d jmode=%d\n", static_cast<int>(phase_),
+          journal_ && journal_->has_record() ? static_cast<int>(journal_->record().mode) : -1);
   if (phase_ != LifecyclePhase::Prepared || !journal_ || !journal_->has_record() ||
-      journal_->record().mode != LifecycleMode::Prepared)
+      journal_->record().mode != LifecycleMode::Prepared) {
+    fprintf(stderr, "DBG p6: commit reject state ph=%d jmode=%d\n", static_cast<int>(phase_),
+            journal_ && journal_->has_record() ? static_cast<int>(journal_->record().mode) : -1);
     return Status::error(StatusCode::InvalidState, "renew commit without prepare");
+  }
   GrantCommit commit{};
   Status st = grant_commit_decode(body, commit);
-  if (!st) return st;
+  if (!st) {
+    fprintf(stderr, "DBG p6: commit reject decode %d\n", static_cast<int>(st.code));
+    return st;
+  }
   const LifecycleRecord& prepared = journal_->record();
   if (commit.head.cutover_id != prepared.cutover_id ||
       commit.head.revision != prepared.revision ||
       commit.head.old_network != prepared.old_network) {
+    fprintf(stderr, "DBG p6: commit reject revision cid=%llx/%llx rev=%u/%u\n",
+            static_cast<unsigned long long>(commit.head.cutover_id),
+            static_cast<unsigned long long>(prepared.cutover_id),
+            commit.head.revision, prepared.revision);
     return Status::error(StatusCode::Conflict, "renew revision");
   }
   SiteRecord next{};
-  if (!staged_site(prepared, next))
+  if (!staged_site(prepared, next)) {
+    fprintf(stderr, "DBG p6: commit reject staged site\n");
     return Status::error(StatusCode::AuthenticationFailed, "renew staged site");
+  }
   CutoverCommit proof{};
   RevocationSet rrs{};
   bool verified = false;
   st = cutover_commit_verify(commit.proof.view(), sak_, prepared.old_network,
                              proof, verified, verifier_);
-  if (!st || !verified) return Status::error(StatusCode::AuthenticationFailed, "renew proof");
+  if (!st || !verified) {
+    fprintf(stderr, "DBG p6: commit reject proof st=%d verified=%d\n", static_cast<int>(st.code),
+            verified ? 1 : 0);
+    return Status::error(StatusCode::AuthenticationFailed, "renew proof");
+  }
   st = revocation_object_verify(commit.revocations.view(), sak_, prepared.site_id,
                                 prepared.new_network, rrs, verified, verifier_);
-  if (!st || !verified) return Status::error(StatusCode::AuthenticationFailed, "renew rrs");
+  if (!st || !verified) {
+    fprintf(stderr, "DBG p6: commit reject rrs st=%d verified=%d\n", static_cast<int>(st.code),
+            verified ? 1 : 0);
+    return Status::error(StatusCode::AuthenticationFailed, "renew rrs");
+  }
   Digest256 hash{};
   sha256(commit.revocations.view(), hash);
   if (proof.site_id != prepared.site_id || proof.new_network != prepared.new_network ||
@@ -2260,6 +2339,21 @@ Status MembershipLifecycle::renew_commit(ByteView body, MonotonicMs now_ms) noex
       next.gk_epoch_current <= site_.site().gk_epoch_current ||
       (site_.site().gk_epoch_next && next.gk_epoch_current <= site_.site().gk_epoch_next) ||
       rrs.site_epoch_floor != static_cast<std::uint32_t>(prepared.new_network >> 32U)) {
+    fprintf(stderr,
+            "DBG p6: commit reject binding site=%d net=%d cid=%d rev=%d gk=%d rs=%d hash=%d pfloor=%d sfloor=%d setnew=%d gkup=%d efloor=%d\n",
+            proof.site_id == prepared.site_id ? 1 : 0,
+            proof.new_network == prepared.new_network ? 1 : 0,
+            proof.cutover_id == prepared.cutover_id ? 1 : 0,
+            proof.revision == prepared.revision ? 1 : 0,
+            proof.gk_epoch == next.gk_epoch_current ? 1 : 0,
+            proof.rs_epoch == rrs.rs_epoch ? 1 : 0, proof.rrs_sha256 == hash ? 1 : 0,
+            rrs.rs_epoch >= prepared.rs_floor ? 1 : 0,
+            rrs.rs_epoch >= site_.site().rs_epoch_floor ? 1 : 0,
+            !(revocations_.has_set() && rrs.rs_epoch <= revocations_.rs_epoch()) ? 1 : 0,
+            next.gk_epoch_current > site_.site().gk_epoch_current ? 1 : 0,
+            rrs.site_epoch_floor == static_cast<std::uint32_t>(prepared.new_network >> 32U)
+                ? 1
+                : 0);
     return Status::error(StatusCode::Conflict, "renew commit binding");
   }
   next.rs_epoch_floor = rrs.rs_epoch;
@@ -2296,6 +2390,7 @@ Status MembershipLifecycle::renew_commit(ByteView body, MonotonicMs now_ms) noex
     return Status::error(StatusCode::RecoveryRequired, "policy exhausted");
   }
   st = journal_->switch_network(switching);
+  fprintf(stderr, "DBG p6: switch_network code=%d\n", static_cast<int>(st.code));
   if (!st) {
     enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
     return st;

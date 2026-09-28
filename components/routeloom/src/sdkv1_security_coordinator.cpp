@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cstring>
+#include <cstdio>
 #include <new>
 
 #include "routeloom/discovery_scope.hpp"  // hmac_sha256
@@ -771,6 +772,10 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
     NeighborDiscovery::MemberStartRequest start{};
     if (!deps_.discovery->take_member_start(start, now).ok()) break;
     sat_inc(counters_.member_starts);
+    fprintf(stderr, "DBG coord: mstart node=%llx peer=%llx init=%u\n",
+            static_cast<unsigned long long>(adopted_.node),
+            static_cast<unsigned long long>(start.peer),
+            start.initiator ? 1 : 0);
     if (start.peer == kInvalidNodeId || start.peer == adopted_.node) continue;
     // Sleep re-confirmation (P4 §9.3, V1-F07): while a restore image is
     // held for this initiator peer at the retained radio MAC, the
@@ -796,14 +801,35 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
     // duplicates of the old exchange — a new exchange never matches it,
     // so it must not block the re-handshake (sleep wake, rekey).
     bool leg_live = false;
-    for (const auto& slot : member().demux) {
+    DemuxEntry* live = nullptr;
+    for (auto& slot : member().demux) {
       if (slot.used && slot.has_start &&
           slot.mac == start.peer_mac) {
         leg_live = true;
+        live = &slot;
         break;
       }
     }
-    if (leg_live) continue;
+    if (leg_live) {
+      // A fresh responder exchange supersedes a stale parked leg: the OFFER
+      // for this exchange already went out, so the peer answers with its
+      // cookie — rebinding keeps the demux carrier in step with the newest
+      // offer instead of memcmp-failing every re-issued m1. An in-flight
+      // initiator leg still wins the simultaneous open.
+      if (live->initiator || start.initiator) continue;
+      live->peer = start.peer;
+      live->initiator = false;
+      live->carrier = start.carrier;
+      live->carrier.network = adopted_.network;
+      live->carrier.node_i = start.peer;
+      live->carrier.node_r = adopted_.node;
+      live->expires_at = start.expires_at_ms;
+      live->object_id = 0;
+      live->txn = {};
+      live->quiet_retry_token = 0;
+      live->discovery_token = NeighborDiscovery::kMemberHandshakeNone;
+      continue;
+    }
     DemuxEntry* entry = claim_demux(start.peer_mac, 0, now);
     if (entry == nullptr) break;
     entry->peer = start.peer;
@@ -846,9 +872,17 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
       req.mac_r = start.peer_mac;
       req.carrier = entry->carrier;
       const Status requested = member().engine.request(req, now);
+      fprintf(stderr, "DBG coord: mstart req node=%llx peer=%llx code=%d\n",
+              static_cast<unsigned long long>(adopted_.node),
+              static_cast<unsigned long long>(start.peer),
+              static_cast<int>(requested.code));
       if (!requested.ok()) {
         sat_inc(counters_.link_request_failures);
         counters_.link_last_error = requested.code;
+        fprintf(stderr, "DBG coord: mstart reqfail node=%llx peer=%llx code=%d\n",
+                static_cast<unsigned long long>(adopted_.node),
+                static_cast<unsigned long long>(start.peer),
+                static_cast<int>(requested.code));
         deps_.discovery->cancel_member_handshake(token);
         entry->used = false;
         continue;
@@ -971,31 +1005,57 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
     return Status::success();  // Fresh/Removed/Recovery: no RLD1 owner lives
   }
   if (sleeping_) return Status::success();
+  autonomy::Rld1Envelope env{};
+  const bool env_ok = autonomy::rld1_decode(event.rld1_frame, env).ok();
+  const bool to_us = event.rld1_meta.destination == deps_.local_mac;
+  const bool to_broadcast = event.rld1_meta.destination == MacAddress{} ||
+                            event.rld1_meta.destination ==
+                                MacAddress{{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
   if (has_member_engine() && member_apply_pending_) {
     sat_inc(counters_.demux_drops);
+        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=apply\n",
+                (unsigned long long)adopted_.node, (unsigned)env.kind,
+                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
+                (unsigned)event.radio_generation, (unsigned)radio_generation_,
+                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
   if (event.radio_generation != radio_generation_) {
     sat_inc(counters_.demux_drops);
+        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=gen\n",
+                (unsigned long long)adopted_.node, (unsigned)env.kind,
+                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
+                (unsigned)event.radio_generation, (unsigned)radio_generation_,
+                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
   // Observed channel and destination first: a frame for another MAC or an
   // unexpected channel never reaches an owner.
   if (channel_ != 0 && event.rld1_meta.channel != channel_) {
     sat_inc(counters_.demux_drops);
+        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=ch\n",
+                (unsigned long long)adopted_.node, (unsigned)env.kind,
+                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
+                (unsigned)event.radio_generation, (unsigned)radio_generation_,
+                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
-  autonomy::Rld1Envelope env{};
-  if (!autonomy::rld1_decode(event.rld1_frame, env).ok()) {
+  if (!env_ok) {
     sat_inc(counters_.demux_drops);
+        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=dec\n",
+                (unsigned long long)adopted_.node, (unsigned)env.kind,
+                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
+                (unsigned)event.radio_generation, (unsigned)radio_generation_,
+                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
-  const bool to_us = event.rld1_meta.destination == deps_.local_mac;
-  const bool to_broadcast = event.rld1_meta.destination == MacAddress{} ||
-                            event.rld1_meta.destination ==
-                                MacAddress{{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
   if (!to_us && !to_broadcast) {
     sat_inc(counters_.demux_drops);
+        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=dst\n",
+                (unsigned long long)adopted_.node, (unsigned)env.kind,
+                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
+                (unsigned)event.radio_generation, (unsigned)radio_generation_,
+                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
   // Discover/Offer split by body version: ZT v3 to the Joiner (ZT mode
@@ -1016,10 +1076,20 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
                                           event.rld1_frame, event.now);
       }
       sat_inc(counters_.demux_drops);
+        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=L1\n",
+                (unsigned long long)adopted_.node, (unsigned)env.kind,
+                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
+                (unsigned)event.radio_generation, (unsigned)radio_generation_,
+                to_us ? 1 : (to_broadcast ? 2 : 0));
       return Status::success();
     }
     if (!has_member_engine()) {
       sat_inc(counters_.demux_drops);
+        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=L2\n",
+                (unsigned long long)adopted_.node, (unsigned)env.kind,
+                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
+                (unsigned)event.radio_generation, (unsigned)radio_generation_,
+                to_us ? 1 : (to_broadcast ? 2 : 0));
       return Status::success();
     }
     DiscoveryRxMetadata observed{};
@@ -1027,16 +1097,30 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
     observed.destination = event.rld1_meta.destination;
     if (deps_.discovery != nullptr) {
       deps_.discovery->on_rld1_rx(observed, event.rld1_frame, event.now);
+    } else {
+      fprintf(stderr, "DBG dmx: drop node=%llx kind=%u to=%d why=nodisc\n",
+              (unsigned long long)adopted_.node, (unsigned)env.kind,
+              to_us ? 1 : (to_broadcast ? 2 : 0));
     }
     return Status::success();
   }
   if (env.kind != FrameType::BootstrapAuth && env.kind != FrameType::BootstrapChunk &&
       env.kind != FrameType::BootstrapReply) {
     sat_inc(counters_.demux_drops);
+        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=L3\n",
+                (unsigned long long)adopted_.node, (unsigned)env.kind,
+                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
+                (unsigned)event.radio_generation, (unsigned)radio_generation_,
+                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
   if (!to_us) {  // Auth/Chunks/Replies are unicast-only on RLD1
     sat_inc(counters_.demux_drops);
+        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=L4\n",
+                (unsigned long long)adopted_.node, (unsigned)env.kind,
+                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
+                (unsigned)event.radio_generation, (unsigned)radio_generation_,
+                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
   // Joiner validates its own exchange, including pre-m2 RelayStatus; no
@@ -1053,6 +1137,11 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
     // short body must not claim a demux leg on garbage bytes.
     if (env.body_size < kJoinChunkHeaderSize) {
       sat_inc(counters_.demux_drops);
+        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=L5\n",
+                (unsigned long long)adopted_.node, (unsigned)env.kind,
+                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
+                (unsigned)event.radio_generation, (unsigned)radio_generation_,
+                to_us ? 1 : (to_broadcast ? 2 : 0));
       return Status::success();
     }
     object_id = (static_cast<std::uint32_t>(env.body[2]) << 24U) |
@@ -1076,12 +1165,22 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
   }
   if (mode_ != CoordinatorMode::Member) {
     sat_inc(counters_.demux_drops);
+        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=L6\n",
+                (unsigned long long)adopted_.node, (unsigned)env.kind,
+                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
+                (unsigned)event.radio_generation, (unsigned)radio_generation_,
+                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
   // The proxy verifies the OFFER cookie before admitting an exchange.
   if (env.kind == FrameType::BootstrapReply &&
       member().proxy.state() != JoinProxy::State::Relaying) {
     sat_inc(counters_.demux_drops);
+        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=L7\n",
+                (unsigned long long)adopted_.node, (unsigned)env.kind,
+                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
+                (unsigned)event.radio_generation, (unsigned)radio_generation_,
+                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
   const std::int16_t rssi = event.rld1_meta.rssi;
@@ -1114,6 +1213,9 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
     sat_inc(counters_.demux_drops);
     return Status::success();
   }
+  fprintf(stderr, "DBG dmx: hit node=%llx kind=%u peer=%llx\n",
+          (unsigned long long)adopted_.node, (unsigned)env.kind,
+          (unsigned long long)entry->peer);
   entry->expires_at = now + kDemuxHoldMs;
   const ByteView body{env.body.data(), env.body_size};
   // Replies advance our link TX slot when the exchange matches; anything
@@ -1123,9 +1225,15 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
     if (!join_reply_decode(JoinCarrier::Rld1, body, reply).ok() ||
         reply.lane != ObjectLane::JoinRelay) {
       sat_inc(counters_.demux_drops);
+      fprintf(stderr, "DBG dmx: reply drop node=%llx why=dec\n",
+              (unsigned long long)adopted_.node);
       return Status::success();
     }
-    (void)member().link_tx.on_reply(reply, now);
+    const JoinObjectSlot::ReplyOutcome out = member().link_tx.on_reply(reply, now);
+    fprintf(stderr, "DBG dmx: reply node=%llx out=%d st=%u recv=%u id=%llx\n",
+            (unsigned long long)adopted_.node, static_cast<int>(out),
+            static_cast<unsigned>(reply.status), static_cast<unsigned>(reply.received),
+            (unsigned long long)reply.id);
     return Status::success();
   }
   if (env.kind == FrameType::BootstrapChunk) {
@@ -1195,7 +1303,11 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
     if (object.cookie_present) {
       rx.cookie = ByteView{object.cookie.data(), object.cookie.size()};
     }
-    (void)member().engine.on_message(rx, object.message, now);
+    const Status onmsg = member().engine.on_message(rx, object.message, now);
+    fprintf(stderr, "DBG dmx: ceng<-msg node=%llx ph=%u st=%u peer=%llx code=%d\n",
+            (unsigned long long)adopted_.node, (unsigned)object.phase,
+            (unsigned)object.step, (unsigned long long)entry->peer,
+            static_cast<int>(onmsg.code));
     return Status::success();
   }
   // Single-frame step: the join-lane object codec, then the engine. The
@@ -1204,12 +1316,16 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
   JoinAuthObject object{};
   if (!join_object_decode(body, object).ok() || object.phase == JoinAuthPhase::RelayStatus) {
     sat_inc(counters_.demux_drops);
+    fprintf(stderr, "DBG dmx: hit drop node=%llx why=dec\n",
+            (unsigned long long)adopted_.node);
     return Status::success();
   }
   if ((object.step == 1) && !object.cookie_present) {
     // First messages always echo the OFFER cookie (EDHOC-m1 and RLRES1-R1
     // alike); a missing cookie never reaches the engine.
     sat_inc(counters_.demux_drops);
+    fprintf(stderr, "DBG dmx: hit drop node=%llx ph=%u why=cookie\n",
+            (unsigned long long)adopted_.node, (unsigned)object.phase);
     return Status::success();
   }
   // Link resume starts admit 1/s; EDHOC sits behind the engine's own
@@ -1232,7 +1348,12 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
   if (object.cookie_present) {
     rx.cookie = ByteView{object.cookie.data(), object.cookie.size()};
   }
-  (void)member().engine.on_message(rx, object.message, now);
+  fprintf(stderr, "DBG dmx: hit->eng node=%llx ph=%u st=%u peer=%llx\n",
+          (unsigned long long)adopted_.node, (unsigned)object.phase,
+          (unsigned)object.step, (unsigned long long)entry->peer);
+  const Status onmsg = member().engine.on_message(rx, object.message, now);
+  fprintf(stderr, "DBG dmx: eng<-msg node=%llx code=%d\n",
+          (unsigned long long)adopted_.node, (int)onmsg.code);
   // The assembly is consumed: free the slot for the next exchange's
   // chunks (a second chunked handshake in this boot would otherwise
   // find it Busy). Late duplicates still answer Complete from the
@@ -1303,20 +1424,40 @@ void SecurityCoordinator::drain_engine_results(const MonotonicMs now) noexcept {
       } else if (result.scope == SecurityScope::Link) {
         sat_inc(counters_.link_send_failures);
         counters_.link_last_error = sent.code;
+        fprintf(stderr, "DBG coord: link_sendfail node=%llx peer=%llx code=%d\n",
+                static_cast<unsigned long long>(adopted_.node),
+                static_cast<unsigned long long>(result.peer),
+                static_cast<int>(sent.code));
       } else {
         sat_inc(counters_.end_send_failures);
         counters_.end_last_error = sent.code;
+        fprintf(stderr, "DBG coord: end_sendfail node=%llx peer=%llx code=%d\n",
+                static_cast<unsigned long long>(adopted_.node),
+                static_cast<unsigned long long>(result.peer),
+                static_cast<int>(sent.code));
       }
     } else if (result.event == HandshakeEvent::Established && result.has_proof &&
                result.scope == SecurityScope::Link) {
       sat_inc(counters_.link_established);
+      fprintf(stderr, "DBG coord: link_established node=%llx peer=%llx now=%llu\n",
+              static_cast<unsigned long long>(adopted_.node),
+              static_cast<unsigned long long>(result.peer),
+              static_cast<unsigned long long>(now));
       (void)installed_link(result, now);
       if (mode_ == CoordinatorMode::Member) note_link_established();
     } else if (result.event == HandshakeEvent::Established && result.scope == SecurityScope::EndToEnd) {
       sat_inc(counters_.end_established);
+      fprintf(stderr, "DBG coord: end_established node=%llx peer=%llx now=%llu\n",
+              static_cast<unsigned long long>(adopted_.node),
+              static_cast<unsigned long long>(result.peer),
+              static_cast<unsigned long long>(now));
     } else if (result.event == HandshakeEvent::Failed && result.scope == SecurityScope::Link) {
       sat_inc(counters_.link_failed);
       counters_.link_last_error = result.failure;
+      fprintf(stderr, "DBG coord: link_failed node=%llx peer=%llx err=%u\n",
+              static_cast<unsigned long long>(adopted_.node),
+              static_cast<unsigned long long>(result.peer),
+              static_cast<unsigned>(result.failure));
       // Tear down the leg: the next discovery round or demand re-drives.
       for (auto& entry : member().demux) {
         if (entry.used && entry.peer == result.peer) {
@@ -1328,10 +1469,15 @@ void SecurityCoordinator::drain_engine_results(const MonotonicMs now) noexcept {
         }
       }
       // Stale-GK strikes are Member-only: dev has no GK to refresh.
-      if (mode_ == CoordinatorMode::Member) note_link_failed();
+      if (mode_ == CoordinatorMode::Member) note_link_failed(now);
     } else if (result.event == HandshakeEvent::Failed && result.scope == SecurityScope::EndToEnd) {
       sat_inc(counters_.end_failed);
       counters_.end_last_error = result.failure;
+      fprintf(stderr, "DBG coord: end_failed node=%llx peer=%llx err=%u now=%llu\n",
+              static_cast<unsigned long long>(adopted_.node),
+              static_cast<unsigned long long>(result.peer),
+              static_cast<unsigned>(result.failure),
+              static_cast<unsigned long long>(now));
     }
   }
 }
@@ -1416,7 +1562,12 @@ Status SecurityCoordinator::emit_link_send(const HandshakeResult& result,
     if (!autonomy::rld1_encode(env, frame).ok()) {
       return Status::error(StatusCode::ProtocolError, "link rld1 encode");
     }
-    return deps_.rld1->send_rld1(leg->mac, frame.view());
+    const Status sent = deps_.rld1->send_rld1(leg->mac, frame.view());
+    fprintf(stderr, "DBG coord: ltx node=%llx ph=%u st=%u code=%d\n",
+            static_cast<unsigned long long>(adopted_.node),
+            static_cast<unsigned>(object.phase), static_cast<unsigned>(object.step),
+            static_cast<int>(sent.code));
+    return sent;
   }
   // The slot holds the full object encoding (cookie included): the peer
   // assembles these bytes and decodes them as a JoinAuthObject.
@@ -1489,6 +1640,10 @@ Status SecurityCoordinator::pump_link_tx(const MonotonicMs now) noexcept {
       return Status::error(StatusCode::ProtocolError, "link tx rld1 encode");
     }
     const Status sent = deps_.rld1->send_rld1(leg->mac, frame.view());
+    fprintf(stderr, "DBG coord: ltxc node=%llx ph=%u st=%u code=%d\n",
+            static_cast<unsigned long long>(adopted_.node),
+            static_cast<unsigned>(slot.phase()), static_cast<unsigned>(slot.step()),
+            static_cast<int>(sent.code));
     if (sent.ok()) slot.note_sent(now, false);
     return sent;
   }
@@ -1840,7 +1995,11 @@ bool SecurityCoordinator::check(const SiteRecord& prepared, const MonotonicMs no
 
 Status SecurityCoordinator::relay_up(const NodeId proxy, const std::uint8_t hops,
                                      const ByteView object) noexcept {
-  return deps_.usb->send_relay_up_to_host(proxy, hops, object);
+  const Status st = deps_.usb->send_relay_up_to_host(proxy, hops, object);
+  std::fprintf(stderr, "DBG coord: relay_up node=%llx code=%d %s\n",
+               static_cast<unsigned long long>(adopted_.node), (int)st.code,
+               st.ok() ? "ok" : st.detail);
+  return st;
 }
 
 Status SecurityCoordinator::relay_abort(const NodeId proxy, const RelayToken token,
@@ -1911,7 +2070,18 @@ bool SecurityCoordinator::revoked(const NodeId peer, const std::uint32_t generat
   if (!has_member_engine() || !member_valid_) return false;
   if (!deps_.revocations->has_set()) return false;  // no set: nothing revoked
   const std::uint32_t site_epoch = static_cast<std::uint32_t>(adopted_.network >> 32);
-  return deps_.revocations->rejects(peer, generation, site_epoch);
+  const bool out = deps_.revocations->rejects(peer, generation, site_epoch);
+  const RevocationSet& set = deps_.revocations->set();
+  fprintf(stderr,
+          "DBG coord: revoked node=%llx rptr=%p peer=%llx gen=%u epoch=%u out=%d cnt=%u "
+          "e0=(%llx,%u) rs=%u floor=%u\n",
+          static_cast<unsigned long long>(adopted_.node), (const void*)deps_.revocations,
+          static_cast<unsigned long long>(peer), generation, site_epoch, out ? 1 : 0,
+          static_cast<unsigned>(set.count),
+          set.count ? static_cast<unsigned long long>(set.entries[0].node_id) : 0ULL,
+          set.count ? static_cast<unsigned>(set.entries[0].min_generation) : 0U,
+          static_cast<unsigned>(set.rs_epoch), static_cast<unsigned>(set.site_epoch_floor));
+  return out;
 }
 
 bool SecurityCoordinator::authenticated(const NodeId peer, const NetworkId network,
@@ -2365,6 +2535,7 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now,
   restore_elapsed_ms_ = 0;
   restore_error_ = Status{StatusCode::Ok, "ok"};
   mode_ = CoordinatorMode::Fresh;
+  fprintf(stderr, "DBG coord: on_stop -> Fresh (defer=%d)\n", defer_resume_clear ? 1 : 0);
   return Status::success();
 }
 
@@ -2407,13 +2578,50 @@ constexpr MonotonicMs kLiveStrikeSpacingMs = 20000;
 // while questioned, silent retire only while unpolled (sleep) or
 // unstarted.
 constexpr MonotonicMs kProbeQuietMs = 540000;
+// A pending cutover must not wait out the idle-retire quiet window:
+// present-check Pulls start after 25 s so the link/lease/session stays
+// warm for the COMMIT that follows.
+constexpr MonotonicMs kProbeWantedQuietMs = 25000;
+// 04 §7/§8.2: the site owes a Prepared/Switching member its COMMIT for
+// the whole documented window — the 600 s prepare window plus the 60 s
+// binding grace the commit dispatch can run. Inside that debt a quiet
+// or dead authority road is congestion, never loss: the member must
+// still be reachable whenever the commit lands. Once the debt itself
+// has lapsed, a dead road means the site moved on without it — the
+// binding the commit rode is gone — and the ZT reissue is the only
+// road left.
+constexpr MonotonicMs kIntentDebtMs = 660000;
+// A dead road counts only while it stays dead: a flap inside the
+// dispatch tail still leaves the commit time to arrive.
+constexpr MonotonicMs kProbeIntentDeadMs = 120000;
 constexpr MonotonicMs kProbeIntervalMs = 60000;
+// During a pending cutover the 30 s neighbour lease would still lapse
+// inside the normal 60 s probe interval; wanted-authority probes repeat
+// every 10 s so the channel never goes quiet long enough to retire.
+constexpr MonotonicMs kProbeWantedIntervalMs = 10000;
+// A shared road failure (a dark lane, a missed COMMIT) crosses the
+// same evidence boundary on every member at once — and a ZeroTouch
+// verify still needs a member-mode relay to reach the host at all.
+// Spreading the teardown by node slot keeps the not-yet-due engines
+// member-mode to serve it: the earliest refresher re-verifies through
+// the still-up neighbors and is serving their relays again before the
+// next slot lands. The site gateway anchors everyone else's road, so
+// it always takes the last slot.
+constexpr std::uint8_t kRefreshSpreadSlots = 4;
+constexpr MonotonicMs kRefreshSpreadStepMs = 30000;
 
 }  // namespace
 
 Status SecurityCoordinator::on_authority_rx(const CoordinatorEvent& event) noexcept {
-  if (mode_ != CoordinatorMode::Member || sleeping_) return Status::success();
-  if (!small().authority.snapshot().started) return Status::success();  // stale carrier
+  if (mode_ != CoordinatorMode::Member || sleeping_) {
+    fprintf(stderr, "DBG coord: auth rx drop mode=%d sleep=%d\n", static_cast<int>(mode_),
+            sleeping_ ? 1 : 0);
+    return Status::success();
+  }
+  if (!small().authority.snapshot().started) {
+    fprintf(stderr, "DBG coord: auth rx drop !started mode=%d\n", static_cast<int>(mode_));
+    return Status::success();  // stale carrier
+  }
   AuthorityInput in{};
   in.kind = AuthorityInputKind::RxCarrier;
   in.rx.kind = event.auth_kind;
@@ -2532,7 +2740,53 @@ void SecurityCoordinator::suspend_authority() noexcept {
 void SecurityCoordinator::probe_quiet_authority(const MonotonicMs now) noexcept {
   if (!authority_wanted_) return;
   const AuthoritySnapshot auth = small().authority.snapshot();
-  if (auth.state != AuthoritySnapshot::State::Ready) return;
+  // Track the intent debt locally: the stamp starts when the hold is
+  // first seen and clears with it. A boot-restored intent re-waits —
+  // conservative, and the ZT road it eventually opens is the same one
+  // the journal would have taken anyway.
+  if (cutover_intent_) {
+    if (intent_since_ms_ == 0) intent_since_ms_ = now;
+  } else {
+    intent_since_ms_ = 0;
+  }
+  const bool intent_debt_lapsed =
+      cutover_intent_ && intent_since_ms_ != 0 &&
+      now - intent_since_ms_ >= kIntentDebtMs;
+  // A member holding cutover intent (Prepared/Switching) holds the link
+  // and lease open with present-check Pulls far earlier than the
+  // idle-retire probe — it must still be reachable when COMMIT lands.
+  // Other authority-wanted states (GK catch-up, post-refresh restart)
+  // keep the idle-retire cadence: a quiet spell there proves nothing
+  // faster than the documented retire span.
+  const MonotonicMs quiet_ms = cutover_intent_ ? kProbeWantedQuietMs
+                                               : kProbeQuietMs;
+  const MonotonicMs interval_ms = cutover_intent_ ? kProbeWantedIntervalMs
+                                                  : kProbeIntervalMs;
+  if (auth.state != AuthoritySnapshot::State::Ready) {
+    // Only an intent-holder treats a dead channel as evidence, and
+    // only once the debt itself has lapsed: a channel that cannot
+    // come Ready means the binding a straggler would re-handshake on
+    // is gone — nothing can arrive downlink either. The ZT reissue
+    // is the designed continuation; a channel that re-readies resets
+    // the count. A non-intent member's Dormant/Backoff channel is
+    // slept keys, not evidence, and stays untouched.
+    if (!intent_debt_lapsed || !auth.started) return;
+    if (now - last_rx_ms_ < kProbeIntentDeadMs) return;
+    if (now - last_live_strike_ < kLiveStrikeSpacingMs) return;
+    last_live_strike_ = now;
+    if (refresh_strikes_ < kRefreshStrikesMax) {
+      ++refresh_strikes_;
+      last_strike_ms_ = now;
+    }
+    fprintf(stderr, "DBG coord: strike road=chandead node=%llx strikes=%u\n",
+            static_cast<unsigned long long>(adopted_.node),
+            static_cast<unsigned>(refresh_strikes_));
+    if (refresh_strikes_ >= kRefreshStrikesMax) {
+      last_probe_ms_ = now;
+      start_refresh(now);
+    }
+    return;
+  }
   if (auth.rx_accepted != last_rx_value_) {
     // Any verified contact converges: overlap/probe strikes die here.
     last_rx_value_ = auth.rx_accepted;
@@ -2540,13 +2794,26 @@ void SecurityCoordinator::probe_quiet_authority(const MonotonicMs now) noexcept 
     refresh_strikes_ = 0;
     return;
   }
-  if (now - last_rx_ms_ < kProbeQuietMs) return;
-  if (now - last_probe_ms_ < kProbeIntervalMs) return;
-  if (last_probe_ms_ != 0 && now - last_live_strike_ >= kLiveStrikeSpacingMs) {
+  if (now - last_rx_ms_ < quiet_ms) return;
+  if (now - last_probe_ms_ < interval_ms) return;
+  // Intent keeps waiting for the COMMIT the site owes it through the
+  // whole debt window — an unanswered presence-check inside it must
+  // not churn the hold. Once the debt lapses the verdict is the same
+  // as a dead channel's: the commit cannot arrive any more, so the
+  // ZT reissue is the designed continuation.
+  if (last_probe_ms_ != 0 &&
+      now - last_live_strike_ >= kLiveStrikeSpacingMs &&
+      (!cutover_intent_ || intent_debt_lapsed)) {
     // The previous probe went unanswered for a full interval: the
     // authority path is gone although the radio looks fine.
     last_live_strike_ = now;
-    if (refresh_strikes_ < kRefreshStrikesMax) ++refresh_strikes_;
+    if (refresh_strikes_ < kRefreshStrikesMax) {
+      ++refresh_strikes_;
+      last_strike_ms_ = now;
+    }
+    fprintf(stderr, "DBG coord: strike road=probe node=%llx strikes=%u\n",
+            static_cast<unsigned long long>(adopted_.node),
+            static_cast<unsigned>(refresh_strikes_));
     if (refresh_strikes_ >= kRefreshStrikesMax) {
       last_probe_ms_ = now;
       start_refresh(now);
@@ -2653,15 +2920,31 @@ void SecurityCoordinator::on_event(const AuthorityEvent& event) noexcept {
 
 void SecurityCoordinator::note_link_established() noexcept { refresh_strikes_ = 0; }
 
-void SecurityCoordinator::note_link_failed() noexcept {
+void SecurityCoordinator::note_link_failed(const MonotonicMs now) noexcept {
   if (mode_ != CoordinatorMode::Member || !discovery_started_) return;
+  if (cutover_intent_) return;  // Prepared/Switching: the site owes a COMMIT
   if (bank_.live_count(SecurityScope::Link) != 0) return;  // per-peer flake
-  if (refresh_strikes_ < kRefreshStrikesMax) ++refresh_strikes_;
+  if (refresh_strikes_ < kRefreshStrikesMax) {
+    ++refresh_strikes_;
+    last_strike_ms_ = now;
+  }
+  fprintf(stderr, "DBG coord: strike road=link node=%llx strikes=%u\n",
+          static_cast<unsigned long long>(adopted_.node),
+          static_cast<unsigned>(refresh_strikes_));
 }
 
 void SecurityCoordinator::watch_linkless(const MonotonicMs now) noexcept {
   if (mode_ != CoordinatorMode::Member || !discovery_started_) return;
   const bool linkless = bank_.live_count(SecurityScope::Link) == 0;
+  static bool was_linkless = false;
+  if (linkless != was_linkless) {
+    was_linkless = linkless;
+    fprintf(stderr, "DBG coord: linkless=%d node=%llx now=%llu links=%u ends=%u\n",
+            linkless ? 1 : 0, static_cast<unsigned long long>(adopted_.node),
+            static_cast<unsigned long long>(now),
+            static_cast<unsigned>(bank_.live_count(SecurityScope::Link)),
+            static_cast<unsigned>(bank_.live_count(SecurityScope::EndToEnd)));
+  }
   // 04 §3.5: an old-group link must not veto recovery for a member
   // the site left behind (revoked, cutover-straggler). The live road
   // counts the same unknown-AHEAD-generation evidence as the linkless
@@ -2686,6 +2969,11 @@ void SecurityCoordinator::watch_linkless(const MonotonicMs now) noexcept {
     return;
   }
   if (deps_.discovery == nullptr) return;
+  // The site gateway mints every generation the scope can ever carry: a
+  // "newer" observation is foreign evidence, never its own staleness —
+  // mid-cutover it is the members' post-commit traffic reaching a
+  // still-Prepared authority, exactly what the tree order produces.
+  if (member().gateway_active) return;
   const std::uint32_t unknown = deps_.discovery->scope_stats().unknown_newer_generation;
   if (unknown == last_unknown_newer_generation_) return;
   // Fresh unknown-AHEAD-generation observations: one strike per poll
@@ -2693,9 +2981,23 @@ void SecurityCoordinator::watch_linkless(const MonotonicMs now) noexcept {
   // window with live links. Lagging neighbors (a cutover
   // mid-adoption) never strike.
   last_unknown_newer_generation_ = unknown;
-  if (!linkless && now - last_live_strike_ < kLiveStrikeSpacingMs) return;
+  // An intent-holding member (Prepared/Switching) only ever sees a
+  // newer generation once the site actually moved on — the signal a
+  // straggler strikes on — but a fresh adopter's announce burst can
+  // reach it while its own COMMIT is still in tree-order transit, so
+  // the same anti-overlap spacing applies. A linkless member has no
+  // such ambiguity: every observation strikes immediately.
+  if (!linkless && now - last_live_strike_ < kLiveStrikeSpacingMs) {
+    return;
+  }
   if (!linkless) last_live_strike_ = now;
-  if (refresh_strikes_ < kRefreshStrikesMax) ++refresh_strikes_;
+  if (refresh_strikes_ < kRefreshStrikesMax) {
+    ++refresh_strikes_;
+    last_strike_ms_ = now;
+  }
+  fprintf(stderr, "DBG coord: strike road=newergen node=%llx strikes=%u linkless=%d\n",
+          static_cast<unsigned long long>(adopted_.node),
+          static_cast<unsigned>(refresh_strikes_), linkless ? 1 : 0);
   if (refresh_strikes_ >= kRefreshStrikesMax) start_refresh(now);
 }
 
@@ -2705,6 +3007,23 @@ void SecurityCoordinator::start_refresh(const MonotonicMs now) noexcept {
     refresh_strikes_ = 0;  // cooling down: the evidence waits
     return;
   }
+  // Desynchronize the herd: every member that lost the road together
+  // reaches this line together, and a simultaneous start starves every
+  // verify for the whole abandon window. `last_strike_ms_` only moves
+  // on real increments, so the due is a fixed point once the counter
+  // fills — and a cleared counter re-arms it on the next incident.
+  const std::uint64_t slot =
+      member().gateway_active ? std::uint64_t{kRefreshSpreadSlots} - 1
+                              : adopted_.node % (kRefreshSpreadSlots - 1);
+  const MonotonicMs spread = static_cast<MonotonicMs>(slot) * kRefreshSpreadStepMs;
+  const MonotonicMs due = last_strike_ms_ > kJoinNoDeadline - spread
+                              ? kJoinNoDeadline
+                              : last_strike_ms_ + spread;
+  if (now < due) return;
+  fprintf(stderr, "DBG coord: refresh node=%llx now=%llu strikes=%u\n",
+          static_cast<unsigned long long>(adopted_.node),
+          static_cast<unsigned long long>(now),
+          static_cast<unsigned>(refresh_strikes_));
   // The channel suspends (its DAMS copy wipes); the GK state stays live
   // so counters and replay windows survive the engine swap. RLS1 is
   // retained untouched — the refresh only re-verifies it.
@@ -2749,6 +3068,9 @@ void SecurityCoordinator::maybe_abandon_refresh(const MonotonicMs now) noexcept 
   refresh_cooldown_until_ = now > kJoinNoDeadline - kRefreshCooldownMs
                                 ? kJoinNoDeadline
                                 : now + kRefreshCooldownMs;
+  fprintf(stderr, "DBG coord: refresh abandon node=%llx now=%llu\n",
+          static_cast<unsigned long long>(adopted_.node),
+          static_cast<unsigned long long>(now));
   (void)adopt_boot_rls1(now);
 }
 
@@ -3089,16 +3411,20 @@ void SecurityCoordinator::drain_joiner(const MonotonicMs now) noexcept {
 }
 
 void SecurityCoordinator::on_joiner_action(const JoinAction& action, const MonotonicMs now) noexcept {
+  fprintf(stderr, "DBG coord: join action kind=%d seq=%u joined=%u rs=%u mode=%d\n",
+          static_cast<int>(action.kind), action.commit_seq,
+          action.joined_now ? 1 : 0, action.rs_epoch_to_fetch,
+          static_cast<int>(mode_));
   switch (action.kind) {
     case JoinActionKind::ChangeChannel: {
       // Retune order for the firmware; the completion comes back as
-      // ChannelReady with the same token. The token never rests at 0.
-      ++tune_token_;
-      if (tune_token_ == 0) ++tune_token_;
-      tune_outstanding_ = tune_token_;
+      // ChannelReady with the same token. The joiner owns the token
+      // namespace: its counter never rests at 0 and resets with each
+      // Joiner instance, so the action token is echoed back verbatim.
+      tune_outstanding_ = action.channel_token;
       CoordinatorAction tune{};
       tune.kind = CoordinatorActionKind::TuneChannel;
-      tune.tune.token = tune_token_;
+      tune.tune.token = action.channel_token;
       tune.tune.channel = action.channel;
       tune.tune.phy = action.phy;
       emit_action(tune);
@@ -3130,6 +3456,11 @@ void SecurityCoordinator::on_joiner_action(const JoinAction& action, const Monot
 }
 
 void SecurityCoordinator::emit_action(const CoordinatorAction& action) noexcept {
+  if (action.kind == CoordinatorActionKind::ReportRecovery) {
+    fprintf(stderr, "DBG coord: recovery node=%llx reason=%u mode=%u\n",
+            static_cast<unsigned long long>(adopted_.node),
+            static_cast<unsigned>(action.recovery), static_cast<unsigned>(mode_));
+  }
   action_ = action;
   action_pending_ = true;
 }

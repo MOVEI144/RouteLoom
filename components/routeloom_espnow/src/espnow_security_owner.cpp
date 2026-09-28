@@ -597,6 +597,15 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
   if (!lifecycle_boot) return lifecycle_boot;
   lifecycle_booted_ = true;
   const sdkv1::LifecycleSnapshot boot_snap = lifecycle().snapshot();
+  const sdkv1::LifecycleStore& dbg_journal = stores_->lifecycle();
+  fprintf(stderr, "DBG %s: boot node=%llx phase=%d journal=%u site=%u adopted_net=0x%llx site_net=0x%llx\n",
+          config_.log_tag, static_cast<unsigned long long>(self_node()),
+          static_cast<int>(boot_snap.phase),
+          dbg_journal.has_record() ? static_cast<unsigned>(dbg_journal.record().mode) : 99u,
+          stores_->site().has_site() ? 1u : 0u,
+          static_cast<unsigned long long>(boot_snap.adopted_network),
+          stores_->site().has_site()
+              ? static_cast<unsigned long long>(stores_->site().site().network) : 0ULL);
   // The RLX1 UnassignedReady watermark hands to the Joiner: a
   // post-removal Allow for an older generation of the same site refuses
   // (04 §6.4). Anything else clears the watermark.
@@ -607,6 +616,11 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
   } else {
     coordinator().set_removal_watermark(0, 0);
   }
+  // A member rebooting mid-cutover replays its journal as Prepared:
+  // the strike suppression must be live before the first poll.
+  cutover_intent_ = boot_snap.phase == sdkv1::LifecyclePhase::Prepared ||
+                    boot_snap.phase == sdkv1::LifecyclePhase::Switching;
+  coordinator().set_cutover_intent(cutover_intent_);
   if (boot_snap.phase == sdkv1::LifecyclePhase::Removing ||
       boot_snap.phase == sdkv1::LifecyclePhase::Holdoff) {
     removal_pending_ = true;
@@ -884,6 +898,16 @@ void EspNowSecurityOwner::poll_lifecycle(const MonotonicMs now_ms) noexcept {
   drain_authority_tx(now_ms);
   drain_peer_tx();
   drain_lifecycle_actions(now_ms);
+  // Prepared/Switching members must keep old-group comms through the
+  // commit window — the coordinator suppresses refresh strikes on the
+  // newer-generation evidence that is expected mid-cutover.
+  const auto phase = lifecycle().snapshot().phase;
+  const bool intent = phase == sdkv1::LifecyclePhase::Prepared ||
+                      phase == sdkv1::LifecyclePhase::Switching;
+  if (intent != cutover_intent_) {
+    cutover_intent_ = intent;
+    coordinator().set_cutover_intent(intent);
+  }
 }
 
 void EspNowSecurityOwner::sync_lifecycle_peers(const MonotonicMs now_ms) noexcept {
@@ -922,6 +946,10 @@ void EspNowSecurityOwner::sync_lifecycle_peers(const MonotonicMs now_ms) noexcep
 
 void EspNowSecurityOwner::on_verified_authority(const std::uint8_t type,
                                                 const ByteView plaintext) noexcept {
+  fprintf(stderr, "DBG %s: authority rx node=%llx type=%u size=%u adopted_net=0x%llx\n",
+          config_.log_tag, static_cast<unsigned long long>(adopted_node_), type,
+          static_cast<unsigned>(plaintext.size),
+          static_cast<unsigned long long>(adopted_network_));
   if (type < 5 || type > 7 || plaintext.data == nullptr ||
       plaintext.size <= sdkv1::kAuthorityBodyHeadSize ||
       plaintext.size > authority_rx_staged_[0].body.size()) return;
@@ -941,10 +969,14 @@ void EspNowSecurityOwner::drain_authority_tx(const MonotonicMs now_ms) noexcept 
     const Status sent = coordinator().send_authority_typed(
         slot.type, ByteView{slot.body.data(), slot.size}, now_ms);
     if (!sent) {
-      if (sent.code != StatusCode::Busy) {
-        secure_clear(slot.body);
-        slot = AuthorityTxStage{};
-      }
+      // Transient refusals (mode churn, a channel still coming up) must not
+      // kill the staged send: the lifecycle already counted it as emitted
+      // when it staged, so dropping here loses the receipt forever. Keep
+      // the slot and retry on the next poll — removal clears it regardless.
+      fprintf(stderr, "DBG %s: auth tx held type=%u code=%d %s node=%llx\n",
+              config_.log_tag, static_cast<unsigned>(slot.type),
+              static_cast<int>(sent.code), sent.detail,
+              static_cast<unsigned long long>(adopted_node_));
       break;
     }
     secure_clear(slot.body);
@@ -985,6 +1017,16 @@ void EspNowSecurityOwner::feed_lifecycle_inputs(const MonotonicMs now_ms) noexce
       sdkv1::AuthorityBodyHead head{};
       const bool valid = sdkv1::authority_head_decode(
           ByteView{slot.body.data(), sdkv1::kAuthorityBodyHeadSize}, head).ok();
+      fprintf(stderr,
+              "DBG %s: auth rx staged node=%llx type=%u valid=%d op=%u gen=%u sitegen=%u net_match=%d size=%u\n",
+              config_.log_tag, static_cast<unsigned long long>(adopted_node_),
+              (unsigned)slot.type, valid ? 1 : 0, (unsigned)head.op,
+              (unsigned)head.generation,
+              stores_ && stores_->site().has_site()
+                  ? (unsigned)stores_->site().site().assignment_generation : 0,
+              stores_ && stores_->site().has_site()
+                  ? (stores_->site().site().network == adopted_network_ ? 1 : 0) : -1,
+              (unsigned)slot.size);
       if (valid && stores_ != nullptr && stores_->site().has_site() &&
           head.op == 1 && head.generation == stores_->site().site().assignment_generation &&
           stores_->site().site().network == adopted_network_) {
@@ -1049,6 +1091,10 @@ void EspNowSecurityOwner::drain_lifecycle_actions(const MonotonicMs now_ms) noex
   for (int i = 0; i < 4; ++i) {
     sdkv1::LifecycleAction action{};
     if (!lifecycle().take_action(action)) break;
+    fprintf(stderr, "DBG %s: lifecycle action tag=%d net=0x%llx ph=%d\n",
+            config_.log_tag, static_cast<int>(action.tag),
+            static_cast<unsigned long long>(action.network),
+            static_cast<int>(lifecycle().snapshot().phase));
     switch (action.tag) {
       case sdkv1::LifecycleActionTag::RecoveryRequired:
       case sdkv1::LifecycleActionTag::StartRecoveryJoin:
@@ -1266,6 +1312,14 @@ void EspNowSecurityOwner::on_bootstrap_rld1(const sdkv1::JoinRxMeta& meta,
                                             const std::uint32_t radio_generation,
                                             const ByteView frame,
                                             const MonotonicMs received_ms) noexcept {
+  {
+    autonomy::Rld1Envelope dbg{};
+    const bool ok = autonomy::rld1_decode(frame, dbg).ok();
+    fprintf(stderr, "DBG %s: brx node=%llx kind=%u ok=%d booted=%d src=%02x%02x dst=%02x%02x\n",
+            config_.log_tag, (unsigned long long)adopted_node_, ok ? (unsigned)dbg.kind : 0U,
+            ok ? 1 : 0, booted_ ? 1 : 0, meta.source[4], meta.source[5],
+            meta.destination[4], meta.destination[5]);
+  }
   if (!booted_) return;
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
   autonomy::Rld1Envelope trace{};
@@ -1514,6 +1568,12 @@ Status EspNowSecurityOwner::send_rld1(const routeloom::MacAddress& destination,
              destination[4], destination[5]);
   }
 #endif
+  autonomy::Rld1Envelope dbg{};
+  if (autonomy::rld1_decode(frame, dbg).ok() && dbg.kind == FrameType::Discover) {
+    fprintf(stderr, "DBG %s: rtx node=%llx ch=%u cch=%u dst=%02x%02x\n", config_.log_tag,
+            (unsigned long long)adopted_node_, (unsigned)runtime_->channel(),
+            (unsigned)runtime_->committed_channel(), destination[4], destination[5]);
+  }
   return runtime_->send_rld1(destination, frame);
 }
 
@@ -1722,6 +1782,11 @@ void EspNowSecurityOwner::on_tune_channel(const sdkv1::CoordinatorTune& tune,
 
 void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig& member,
                                            const MonotonicMs now_ms) noexcept {
+  fprintf(stderr, "DBG %s: member config net=0x%llx node=0x%llx ch=%u started=%u adopted_net=0x%llx\n",
+          config_.log_tag, static_cast<unsigned long long>(member.network),
+          static_cast<unsigned long long>(member.node), member.channel,
+          runtime_->node().started() ? 1u : 0u,
+          static_cast<unsigned long long>(adopted_network_));
   NodeConfig node = runtime_->node().config();
   // RLT1's mesh header carries the site's low 32-bit network id. The
   // full 64-bit value (high word = site epoch) remains in adopted_network_
@@ -1739,18 +1804,23 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   }
   const std::uint8_t operating = member.channel;
   Status status = runtime_->adopt_member_node(node);
+  fprintf(stderr, "DBG %s: adopt_member_node code=%d same_pending started=%u\n",
+          config_.log_tag, static_cast<int>(status.code),
+          runtime_->node().started() ? 1u : 0u);
   bool same = false;
   if (!status && status.code == StatusCode::InvalidState && runtime_->node().started()) {
     const NodeConfig& live = runtime_->node().config();
     // The mesh header holds only the low network word. The retained full
-    // site epoch must match too before a running node can be reused.
+    // site epoch must match too before a running node can be reused. The
+    // radio channel is not part of the identity: a joiner scan hop in
+    // flight when the re-adopt lands leaves it off-channel, and the
+    // apply path moves it back below instead of failing the adopt.
     same = adopted_network_ == member.network && live.network == node.network &&
            live.node == node.node && live.message_session == node.message_session &&
            live.boot_session == node.boot_session && live.link_epoch == node.link_epoch &&
            live.end_epoch == node.end_epoch && live.boot_incarnation == node.boot_incarnation &&
            live.route_gateways == node.route_gateways &&
-           runtime_->node().local_role() == member.role &&
-           runtime_->committed_channel() == operating;
+           runtime_->node().local_role() == member.role;
   }
   if (!status && !same) {
     // A re-issued membership for another network (a cutover straggler
@@ -1791,7 +1861,7 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
       endpoint()->set_self(member.node);
     }
   }
-  if (same) {
+  if (same && runtime_->committed_channel() == operating) {
     // Re-proved membership on a running node still owes the coordinator
     // ChannelReady; a second runtime start would incorrectly fail.
     sdkv1::CoordinatorEvent ready{};
@@ -1801,6 +1871,21 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
     ready.channel = operating;
     ready.channel_generation = runtime_->radio_generation().value;
     (void)coordinator().step(ready);
+    return;
+  }
+  if (same) {
+    // The node config is already live but the radio is off the operating
+    // channel (a joiner scan hop was in flight when the re-adopt
+    // landed). Move it back like the apply path; the token-0 completion
+    // skips the runtime start because the node is already running.
+    apply_retries_ = kApplyCutoverRetries;
+    apply_channel_ = operating;
+    status = request_cutover(operating, 0, runtime_->now_ms());
+    if (!status) {
+      ESP_LOGE(config_.log_tag, "member channel move failed: %s", status.detail);
+      report_tune(Tune{0, kInvalidOperationToken, operating, true},
+                  StatusCode::RadioFailure, runtime_->now_ms());
+    }
     return;
   }
   // MeshNode gates bootstrap transit on the adopted Relay/Gateway role.
@@ -1852,26 +1937,40 @@ void EspNowSecurityOwner::on_start_discovery(const MonotonicMs now_ms) noexcept 
   discovery_live_ = true;
   Status status = engine->start(now_ms);
   if (!status) {
-    ESP_LOGE(config_.log_tag, "member discovery start failed: %s", status.detail);
+    fprintf(stderr, "DBG %s: engine->start failed code=%d %s\n", config_.log_tag,
+            static_cast<int>(status.code), status.detail);
+    if (status.code == StatusCode::RecoveryRequired) {
+      // The adopted membership exists but cannot be proven yet (e.g. a
+      // cross-network re-adopt whose RRS1 floor set never landed). A dead
+      // stop here strands the node forever — re-prove over the zero-touch
+      // join, whose reissue re-delivers the floor set out-of-band.
+      engine->~NeighborDiscovery();
+      discovery_live_ = false;
+      secure_clear(discovery_box_);
+      if (coordinator().start_recovery_join(now_ms)) return;
+    }
     abort_discovery_start(now_ms, false);
     return;
   }
   status = coordinator().attach_discovery(*engine);
   if (!status) {
-    ESP_LOGE(config_.log_tag, "discovery attach failed: %s", status.detail);
+    fprintf(stderr, "DBG %s: attach_discovery failed code=%d %s\n", config_.log_tag,
+            static_cast<int>(status.code), status.detail);
     abort_discovery_start(now_ms, false);
     return;
   }
   status = runtime_->attach_autonomy(*engine);
   if (!status) {
-    ESP_LOGE(config_.log_tag, "autonomy attach failed: %s", status.detail);
+    fprintf(stderr, "DBG %s: attach_autonomy failed code=%d %s\n", config_.log_tag,
+            static_cast<int>(status.code), status.detail);
     abort_discovery_start(now_ms, true);
     return;
   }
   engine->set_member_handshake_mode(true);
   status = engine->begin_discovery(now_ms);
   if (!status) {
-    ESP_LOGE(config_.log_tag, "member begin_discovery failed: %s", status.detail);
+    fprintf(stderr, "DBG %s: begin_discovery failed code=%d %s\n", config_.log_tag,
+            static_cast<int>(status.code), status.detail);
     abort_discovery_start(now_ms, true);
     return;
   }
@@ -1943,7 +2042,9 @@ void EspNowSecurityOwner::report_tune(const Tune& tune, const StatusCode result_
     }
     apply_retries_ = 0;
     apply_channel_ = 0;
-    if (reported == StatusCode::Ok) {
+    if (reported == StatusCode::Ok && !runtime_->node().started()) {
+      // A same-config re-apply only moved the radio: the node is already
+      // running and a second start would fail for no gain.
       const Status started = runtime_->start();
       if (!started) {
         ESP_LOGE(config_.log_tag, "member node start failed: %s", started.detail);

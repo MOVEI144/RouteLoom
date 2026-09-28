@@ -490,6 +490,12 @@ class SecurityCoordinator final : public BootstrapSink,
     removal_watermark_site_id_ = site_id;
     removal_watermark_generation_ = generation;
   }
+  // Lifecycle-driven: true while the journal holds a Prepared/Switching
+  // cutover intent. Such a member EXPECTS newer-generation traffic (the
+  // new network's credentials going live is what its COMMIT installs),
+  // so the unknown-ahead evidence must not accrue refresh strikes —
+  // churning the workspace here is what strands the node mid-cutover.
+  void set_cutover_intent(bool intent) noexcept { cutover_intent_ = intent; }
   // Wipes the member site trust held outside the stores (GK scope,
   // discovery membership) and verifies it is gone. Idempotent: safe to
   // re-assert after traffic already stopped.
@@ -737,7 +743,7 @@ class SecurityCoordinator final : public BootstrapSink,
   void suspend_authority() noexcept;
   // --- stale-GK refresh (P5 §7.4) ---
   void note_link_established() noexcept;
-  void note_link_failed() noexcept;
+  void note_link_failed(MonotonicMs now) noexcept;
   void watch_linkless(MonotonicMs now) noexcept;
   void start_refresh(MonotonicMs now) noexcept;
   void maybe_abandon_refresh(MonotonicMs now) noexcept;
@@ -1017,6 +1023,10 @@ class SecurityCoordinator final : public BootstrapSink,
   // strikes once per window at most, so one rotation overlap cannot
   // refresh a converging member by itself).
   MonotonicMs last_live_strike_{0};
+  // The last actual strike increment — the refresh herd-spread arms
+  // its start slot from here (the spacing stamp moves every window;
+  // this one only on real evidence, so the due is a fixed point).
+  MonotonicMs last_strike_ms_{0};
   // 04 §3.5: quiet-channel present-check probe. A Ready channel with
   // no verified RX for the idle-retire span asks (Pull) instead of
   // retiring silently; consecutive unanswered probes strike. Poll-
@@ -1024,10 +1034,10 @@ class SecurityCoordinator final : public BootstrapSink,
   // only on awake-but-quiet members, one Pull per interval.
   MonotonicMs last_probe_ms_{0};
   MonotonicMs last_rx_ms_{0};    // last verified-RX growth (0 = never)
+  MonotonicMs intent_since_ms_{0};  // first poll the cutover-intent hold was seen
   std::uint64_t last_rx_value_{0};
   CoordinatorMemberConfig adopted_{};
   bool member_valid_{false};
-  std::uint32_t tune_token_{0};
   std::uint32_t tune_outstanding_{0};
   std::uint8_t channel_{0};
   std::uint32_t radio_generation_{0};
@@ -1042,6 +1052,7 @@ class SecurityCoordinator final : public BootstrapSink,
   MonotonicMs removal_holdoff_at_{0};
   std::uint64_t removal_watermark_site_id_{0};
   std::uint32_t removal_watermark_generation_{0};
+  bool cutover_intent_{false};
   CoordinatorCounters counters_{};
   // Sleep restore one-shot state (P4 §9.3): the consumed image waits in
   // caller-supplied storage while the parent re-binds post-wake. Terminal

@@ -43,8 +43,9 @@ use routeloom_provision::signer::fill_random;
 use super::group_keys::{fresh_group_key, GkSecret, HostTime, META_HIGH_WATER};
 use super::records::{h16, op_token, parse_h16, parse_hex, Operation};
 use super::revocation::{
-    checked_next, OutboundKind, OutboundRrs, TargetState as RrsTargetState, DISTRIBUTION_BACKOFF_S,
-    DISTRIBUTION_OUTBOX_MAX,
+    checked_next, DistState, DistributionTarget, OperationDistribution, OutboundKind, OutboundRrs,
+    TargetState as RrsTargetState, DISTRIBUTION_BACKOFF_S, DISTRIBUTION_OUTBOX_MAX,
+    DISTRIBUTION_TARGET_MAX,
 };
 use super::store::{Batch, DeviceRow, DocKind, GroupKeyRow, RotationWrite};
 use super::{store_failure, SiteAuthority, SiteError};
@@ -1335,12 +1336,31 @@ impl SiteAuthority {
                 || t.state == GrantState::Recovered
         };
         if target.gateway {
-            return self.cutover_plan_closed(now_mono)
+            let out = self.cutover_plan_closed(now_mono)
                 || state
                     .targets
                     .iter()
                     .filter(|t| !t.gateway && t.state != GrantState::Retired)
                     .all(settled);
+            if std::env::var_os("D04DBG").is_some() {
+                eprintln!(
+                    "D04DBG releasable_gw node={:x} out={out} closed={} targets={:?}",
+                    node,
+                    self.cutover_plan_closed(now_mono),
+                    state
+                        .targets
+                        .iter()
+                        .map(|t| (
+                            t.node,
+                            t.state,
+                            self.cutover_routes
+                                .get(&(id, t.node))
+                                .map(|p| (p.stored, p.deferred))
+                        ))
+                        .collect::<Vec<_>>()
+                );
+            }
+            return out;
         }
         if self.cutover_plan_closed(now_mono) {
             return false;
@@ -1471,6 +1491,12 @@ impl SiteAuthority {
                 let releasable = target.state == GrantState::Prepared
                     && target.prepared_revision == state.revision
                     && self.commit_releasable(id, target.node, time.mono_ms);
+                if std::env::var_os("D04DBG").is_some() {
+                    eprintln!(
+                        "D04DBG queue_commit node={:x} state={:?} releasable={releasable} mono={}",
+                        target.node, target.state, time.mono_ms
+                    );
+                }
                 if !releasable {
                     continue;
                 }
@@ -2027,6 +2053,43 @@ impl SiteAuthority {
             next.commit_rrs = rrs.clone();
             next.commit_unix_ms = now_ms;
         }
+        // The commit RRS distributes like a revoke's set: every grant
+        // target owes an Applied receipt on the new network — the
+        // straggler's reissue ACK is what `rrs_ok` reads to mark its
+        // recovery (04 §7).
+        {
+            let mut targets: Vec<DistributionTarget> = state
+                .targets
+                .iter()
+                .filter(|t| t.state != GrantState::Retired)
+                .take(DISTRIBUTION_TARGET_MAX)
+                .map(|t| DistributionTarget {
+                    node: t.node,
+                    kid: t.kid,
+                    generation: t.generation,
+                    network: state.new_network,
+                    state: RrsTargetState::Pending,
+                    attempts: 0,
+                    next_retry_ms: 0,
+                    ack_rs_epoch: None,
+                })
+                .collect();
+            targets.sort_by_key(|t| t.node);
+            let overflow = state
+                .targets
+                .iter()
+                .filter(|t| t.state != GrantState::Retired)
+                .count()
+                .saturating_sub(DISTRIBUTION_TARGET_MAX) as u32;
+            updated.distribution = Some(OperationDistribution {
+                state: DistState::Pending,
+                rs_epoch: commit_rs,
+                network: state.new_network,
+                object_sha256: sha256(&rrs),
+                targets,
+                overflow,
+            });
+        }
         let active_epoch = self.gks.active_epoch();
         let retired_notices: Vec<Operation> = self
             .operations
@@ -2096,6 +2159,12 @@ impl SiteAuthority {
         self.id.site_claims = next_claims;
         self.cutover_grace_network = state.old_network;
         self.cutover_grace_until_mono = time.mono_ms.saturating_add(CUTOVER_GRACE_MS);
+        if std::env::var_os("D04DBG").is_some() {
+            eprintln!(
+                "D04DBG commit op={id:x} mono={} grace_until={}",
+                time.mono_ms, self.cutover_grace_until_mono
+            );
+        }
         self.operations.insert(id, updated);
         for operation in retired_notices {
             self.operations.insert(operation.id, operation);
@@ -2155,33 +2224,75 @@ impl SiteAuthority {
         receipt: &[u8],
         now_ms: u64,
     ) -> bool {
+        let dbg = std::env::var_os("D04DBG").is_some();
+        if dbg {
+            eprintln!("D04DBG greceipt in dev={node:x} gen={generation} net={network:x} len={}", receipt.len());
+        }
         let receipt = match Receipt::decode(receipt) {
             Ok(receipt) => receipt,
-            Err(_) => return false,
+            Err(_) => {
+                if dbg {
+                    eprintln!("D04DBG greceipt dev={node:x} why=decode");
+                }
+                return false;
+            },
         };
         let id = receipt.head.cutover_id;
         let state = match self.operations.get(&id).and_then(|op| op.cutover.as_ref()) {
             Some(state) => state.clone(),
-            None => return false,
+            None => {
+                if dbg {
+                    eprintln!(
+                        "D04DBG greceipt dev={node:x} ph={:?} why=no_op",
+                        receipt.head.phase
+                    );
+                }
+                return false;
+            },
         };
         if receipt.head.old_network != state.old_network
             || receipt.new_network != state.new_network
             || receipt.head.revision != state.revision
             || receipt.status != 0
         {
+            if dbg {
+                eprintln!(
+                    "D04DBG greceipt dev={node:x} ph={:?} why=binding on={:x}/{:x} nn={:x}/{:x} rev={}/{} st={}",
+                    receipt.head.phase,
+                    receipt.head.old_network, state.old_network,
+                    receipt.new_network, state.new_network,
+                    receipt.head.revision, state.revision, receipt.status
+                );
+            }
             return false;
         }
         // The binding is the live row's — a reassigned key never
         // inherits the old target's evidence.
         let live = match self.devices.get(&node) {
             Some(row) if row.member && row.generation == generation => row.clone(),
-            _ => return false,
+            _ => {
+                if dbg {
+                    eprintln!(
+                        "D04DBG greceipt dev={node:x} ph={:?} why=no_live gen={generation}",
+                        receipt.head.phase
+                    );
+                }
+                return false;
+            },
         };
         let target = match state.targets.iter().find(|t| t.node == node) {
             Some(target) if target.generation == generation && target.kid == live.kid => {
                 target.clone()
             }
-            _ => return false,
+            _ => {
+                if dbg {
+                    eprintln!(
+                        "D04DBG greceipt dev={node:x} ph={:?} why=no_target gen={generation} kid0={:?}",
+                        receipt.head.phase, live.kid
+                    );
+                }
+                return false;
+            },
         };
         if matches!(
             target.state,
@@ -2198,12 +2309,27 @@ impl SiteAuthority {
                     || network != state.old_network
                     || receipt.gk_epoch != state.next_gk_epoch
                 {
+                    if dbg {
+                        eprintln!(
+                            "D04DBG greceipt dev={node:x} ph=Prepared why=phase st={:?} live={:?} net={:x}/{:x} gk={}/{}",
+                            state.phase,
+                            self.live_cutover(),
+                            network, state.old_network,
+                            receipt.gk_epoch, state.next_gk_epoch
+                        );
+                    }
                     return false;
                 }
                 let Some(expect) = self.assemble_prepare(id, &target, &state) else {
+                    if dbg {
+                        eprintln!("D04DBG greceipt dev={node:x} ph=Prepared why=no_assemble");
+                    }
                     return false;
                 };
                 if receipt.digest != sha256(&expect) {
+                    if dbg {
+                        eprintln!("D04DBG greceipt dev={node:x} ph=Prepared why=digest");
+                    }
                     return false;
                 }
                 if target.state == GrantState::Prepared
@@ -2508,6 +2634,11 @@ impl SiteAuthority {
                 && row.generation == target.generation
                 && row.kid == target.kid
         }) {
+            eprintln!(
+                "DBG recover gate row node={node:x} row={:?} target_gen={} target_kid0={:02x}",
+                self.devices.get(&node).map(|r| (r.member, r.confirmed, r.generation, r.kid[0])),
+                target.generation, target.kid[0]
+            );
             return false;
         }
         // The RRS the cutover committed (or a newer set): an Applied
@@ -2527,10 +2658,15 @@ impl SiteAuthority {
             })
         });
         if !rrs_ok {
+            eprintln!("DBG recover gate rrs node={node:x} commit_rs={}", state.commit_rs_epoch);
             return false;
         }
         let active = self.gks.active_epoch();
         if active == 0 || self.cutover_gk_proved.get(&(id, node)) != Some(&active) {
+            eprintln!(
+                "DBG recover gate gk node={node:x} active={active} proved={:?}",
+                self.cutover_gk_proved.get(&(id, node))
+            );
             return false;
         }
         if !self.set_grant_state(id, node, GrantState::Recovered, state.revision, now_ms) {

@@ -955,11 +955,17 @@ Status relay_object_validate(const RelayObject& object) noexcept {
   const bool up = h.dir == RelayDirection::Up;
   if (up ? h.joiner_rssi_dbm > 0 : h.joiner_rssi_dbm != 0) return invalid("relay rssi");
   const bool edhoc = h.phase == JoinAuthPhase::EdhocMessage;
+  // The out-of-band RRS1 object (02 §5.3 phase 7) rides the live EDHOC
+  // exchange between m3 and m4: down only, never the terminal shape.
+  if (h.phase == JoinAuthPhase::RrsDelivery &&
+      (up || h.step != 1 || h.state != RelayState::Continue)) {
+    return invalid("relay rrs stage");
+  }
   switch (h.state) {
     case RelayState::Continue:
       if (up) {
         if (join_step_flow(h.phase, h.step) == JoinFlow::Down) return invalid("relay up step");
-      } else if (h.step != 2) {
+      } else if (h.step != 2 && h.phase != JoinAuthPhase::RrsDelivery) {
         return invalid("relay down step");
       }
       break;
@@ -1042,7 +1048,8 @@ Status relay_object_decode(const ByteView encoded, RelayObject& out) noexcept {
   h.joiner_rssi_dbm = static_cast<std::int8_t>(p[22]);
   const std::uint8_t phase = p[23];
   if (phase != static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage) &&
-      phase != static_cast<std::uint8_t>(JoinAuthPhase::Resume)) {
+      phase != static_cast<std::uint8_t>(JoinAuthPhase::Resume) &&
+      phase != static_cast<std::uint8_t>(JoinAuthPhase::RrsDelivery)) {
     return malformed("relay phase");
   }
   h.phase = static_cast<JoinAuthPhase>(phase);
@@ -1196,7 +1203,7 @@ bool zt_rld1_frame(const autonomy::Rld1Envelope& env) noexcept {
     case FrameType::BootstrapAuth:
       return env.body_size >= 2 &&
              env.body[1] >= static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage) &&
-             env.body[1] <= static_cast<std::uint8_t>(JoinAuthPhase::RelayStatus);
+             env.body[1] <= static_cast<std::uint8_t>(JoinAuthPhase::RrsDelivery);
     case FrameType::BootstrapChunk:
     case FrameType::BootstrapReply:
       // join_sub_decode (not the lane-aware form): the 0x80 end-session

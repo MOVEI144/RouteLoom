@@ -109,6 +109,7 @@ use records::{
 use store::{Batch, DeviceRow, DocKind, GroupKeyRow, LedgerRow, RotationWrite, SiteStore};
 use transport::{
     AbortReason, DownStatus, JoinTransport, Outbound, RelayDown, RelayKey, RelayUp, PHASE_EDHOC,
+    PHASE_RRS_DELIVERY,
     STEP_EDHOC_ERROR,
 };
 
@@ -2441,6 +2442,20 @@ impl SiteAuthority {
         }
         self.devices.insert(updated.node, updated.clone());
         self.set_discovered_verdict(row.node, "allowed", None, now_ms);
+        // The current RRS1 rides the live relay out-of-band ahead of the
+        // m4 (02 §5.3 phase 7): a reissued member then proves its new
+        // revocation floor from durable state rather than recovering into
+        // rrs1-floor-lost on a missed COMMIT. A missing baseline never
+        // blocks the Allow — the member's plain fetch covers it.
+        if self.ensure_baseline_rrs(now_ms).is_ok() {
+            self.down(
+                txn.key,
+                PHASE_RRS_DELIVERY,
+                1,
+                DownStatus::Continue,
+                self.rrs_latest_object.clone(),
+            );
+        }
         let result = JoinResult::Allow {
             member_cert: row.member_cert.clone(),
             site_package: self.site_package(row.role, now_ms),
@@ -5051,6 +5066,13 @@ impl SiteAuthority {
             self.end_cutover_grace();
         }
         self.last_channel_mono_ms = time.mono_ms;
+        if std::env::var_os("D04DBG").is_some() {
+            eprintln!(
+                "D04DBG auth_up dev={device:x} kind={kind:?} len={} mono={}",
+                bytes.len(),
+                time.mono_ms
+            );
+        }
         if self
             .rrs_transport
             .as_ref()
@@ -5248,23 +5270,30 @@ impl SiteAuthority {
                             confirmed_generation: confirm.generation,
                             authority_active: self.gks.active_epoch(),
                         };
-                        let directory = AuthorityDir {
-                            devices: &self.devices,
-                            network: self.id.network,
-                        };
-                        let answer = self
-                            .channels
-                            .lock()
-                            .expect("authority channel poisoned")
-                            .answer_join_confirm(&directory, device, params, time.mono_ms);
-                        if let Err(error) = answer {
-                            self.event(
-                                time.unix_ms,
-                                format!(
-                                    "\"kind\":\"authority.error\",\"reason\":\"gk_confirm_answer\",\"device_id\":\"{}\",\"detail\":\"{error}\"",
-                                    h16(device)
-                                ),
-                            );
+                        // During the COMMIT grace the channel may still
+                        // be bound to the pre-commit member for the
+                        // COMMIT flush; the answer is new-network work
+                        // and the device re-confirms post-flip instead
+                        // of fencing that channel stale (04 §7).
+                        if !self.old_binding_in_grace(device, time.mono_ms) {
+                            let directory = AuthorityDir {
+                                devices: &self.devices,
+                                network: self.id.network,
+                            };
+                            let answer = self
+                                .channels
+                                .lock()
+                                .expect("authority channel poisoned")
+                                .answer_join_confirm(&directory, device, params, time.mono_ms);
+                            if let Err(error) = answer {
+                                self.event(
+                                    time.unix_ms,
+                                    format!(
+                                        "\"kind\":\"authority.error\",\"reason\":\"gk_confirm_answer\",\"device_id\":\"{}\",\"detail\":\"{error}\"",
+                                        h16(device)
+                                    ),
+                                );
+                            }
                         }
                         self.sync_confirmed_member(&row, &confirm, time);
                         // A verified JoinConfirm at the active GK is the
@@ -5403,6 +5432,35 @@ impl SiteAuthority {
         self.queue_update_active(row.node, time);
     }
 
+    /// True while the COMMIT grace keeps `node`'s channel bound to its
+    /// pre-commit member: commit swapped the live row, so new-network
+    /// work (GK envelopes, confirm answers) must wait for the flip or
+    /// the new handshake instead of fencing the channel the pending
+    /// COMMIT still needs (04 §7). A removed member is not protected:
+    /// the revocation fence retires its channel even inside the grace.
+    fn old_binding_in_grace(&self, node: u64, mono_ms: u64) -> bool {
+        if self
+            .cutover_grace()
+            .is_none_or(|(_, until)| mono_ms >= until)
+        {
+            return false;
+        }
+        let Some(bound) = self
+            .channels
+            .lock()
+            .expect("authority channel poisoned")
+            .bound_member(node)
+        else {
+            return false;
+        };
+        AuthorityDir {
+            devices: &self.devices,
+            network: self.id.network,
+        }
+        .lookup(node)
+        .is_some_and(|current| current.member && current != bound)
+    }
+
     /// Seals one queued GK command into the channel outbox (the
     /// channel-backed `GroupKeyTransport::send` funnels here with the
     /// authority lock re-acquired — never from the tick, which holds
@@ -5419,6 +5477,15 @@ impl SiteAuthority {
         let Some(row) = self.devices.get(&node).cloned() else {
             return Err(ChannelSendError::StaleMember);
         };
+        // Update/Activate are new-network work: during the COMMIT grace
+        // they wait for the device's post-flip channel rather than
+        // retiring the old-network channel the COMMIT flush still uses.
+        // Wake carries no channel state and stays allowed (04 §7).
+        if !matches!(command, GroupKeyCommand::Wake { .. })
+            && self.old_binding_in_grace(node, self.last_channel_mono_ms)
+        {
+            return Err(ChannelSendError::StaleMember);
+        }
         let directory = AuthorityDir {
             devices: &self.devices,
             network: self.id.network,
