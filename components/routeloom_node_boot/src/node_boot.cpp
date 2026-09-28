@@ -241,6 +241,19 @@ RTC_NOINIT_ATTR routeloom::FailStreak s_fail;
   esp_restart();
 }
 
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+// CONFIG_REQUIRED is an operator step, not a transient fault: it never
+// feeds the fail streak, whose deep sleep would hide the USB port for
+// 30 minutes. RF has not started; the board stays awake and repeats the
+// line so the setup image and BoardConfig can be written over USB.
+[[noreturn]] void config_required(const char* detail) {
+  for (;;) {
+    ESP_LOGE(kTag, "CONFIG_REQUIRED: %s", detail);
+    vTaskDelay(pdMS_TO_TICKS(10000));
+  }
+}
+#endif
+
 // Used by the CONFIG and DEEP_SLEEP opt-in paths only; in a default build it
 // has no caller, so it is marked maybe_unused rather than deleted.
 [[maybe_unused]] routeloom::MonotonicMs monotonic_now_ms() noexcept {
@@ -743,6 +756,7 @@ void run_node(const NodeBootHooks& hooks) {
   static ROUTELOOM_OWNER_C5_LP ROUTELOOM_MEMBER_SMALL_LP
       routeloom::espnow::BoardStores board_stores;
   status = board_stores.open(/*writable=*/false);
+  if (status.code == routeloom::StatusCode::NotFound) config_required(status.detail);
   if (!status) fail(status.detail);
   status = board_stores.initialize();
   if (!status) ESP_LOGE(kTag, "board stores init: %s", status.detail);
@@ -766,10 +780,7 @@ void run_node(const NodeBootHooks& hooks) {
   status = routeloom::resolve_field_identity(board_stores.config(),
                                              board_stores.secrets(),
                                              board_identity, board_secrets);
-  if (!status) {
-    ESP_LOGE(kTag, "CONFIG_REQUIRED: %s", status.detail);
-    fail(status.detail);
-  }
+  if (!status) config_required(status.detail);
   const routeloom::BoardConfig& board = board_stores.config().config();
   ESP_LOGI(kTag, "board config: gen=%lu node=0x%llx secrets_gen=%lu "
                  "mac=%02x%02x%02x%02x%02x%02x",
