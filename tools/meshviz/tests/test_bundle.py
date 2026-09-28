@@ -815,7 +815,7 @@ class BundleTests(unittest.TestCase):
                                     env=env, capture_output=True)
             self.assertIn(b'symlink input', result.stderr)
 
-    def test_hil_experimental_c6_still_reaches_build_backend(self):
+    def test_hil_c6_reaches_build_backend(self):
         script = Path(__file__).resolve().parents[2] / 'hil' / 'build_image.sh'
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -832,17 +832,17 @@ class BundleTests(unittest.TestCase):
         guide = (root / 'docs/hil.md').read_text()
         self.assertIn('--image-dir artifacts/hil/images/ref-a', guide)
 
-    def test_experimental_c6_bundle_does_not_enter_mesh_lab_worker(self):
+    def test_c6_bundle_does_not_enter_mesh_lab_worker_before_h0(self):
         identity = Identity('esp32c6', '1', 'aa:bb:cc:dd:ee:01', None, '164020',
                             4 * 1024 * 1024, False, False)
         class API:
             __version__ = '5.4.0'
             def detect_chip(self, **kwargs):
-                raise AssertionError('experimental C6 reached ROM')
+                raise AssertionError('C6 reached ROM before H0')
         plan = FlashPlan(identity, 'esp32c6', (), True, identity.base_mac, True,
                          Path('experimental-bundle'))
         with patch.object(flash_worker, 'verify_bundle', return_value={'chip': 'esp32c6'}):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, 'H0'):
                 flash('COM1', plan, API())
 
     def test_c6_rom_capability_does_not_enable_secure_boot(self):
