@@ -486,7 +486,11 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
       config.local_mac == routeloom::MacAddress{}) {
     return Status::error(StatusCode::InvalidArgument, "owner identity");
   }
-  if (!profile::role_fits(config.role)) {
+  if (!profile::role_fits(config.role) ||
+      (profile::kRoleFixed && config.role != profile::kRole) ||
+      (config.joiner.requested_role & ~profile::role_mask(config.role)) != 0 ||
+      (stores.site().has_site() &&
+       (stores.site().site().role & ~profile::role_mask(config.role)) != 0)) {
     return Status::error(StatusCode::Unsupported, "RESOURCE_PROFILE_ROLE_MISMATCH");
   }
   // The sealer is constructed UNKEYED here: begin() runs before the
@@ -519,6 +523,7 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
   deps.local_mac = config_.local_mac;
   deps.local_node = config_.local_node;
   deps.joiner_config = config_.joiner;
+  deps.allowed_role = config_.role;
   new (coordinator_box_.data()) sdkv1::SecurityCoordinator(deps);
   coordinator_live_ = true;
   // The P6 membership lifecycle beside the coordinator: same stores and

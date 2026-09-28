@@ -50,6 +50,7 @@
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/espnow_sdkv1.hpp"
 #include "routeloom/rlcw1.hpp"
+#include "routeloom/profile.hpp"
 #include "routeloom/sdkv1_session_rtc.hpp"
 #include "routeloom/fail_policy.hpp"
 #include "routeloom/hex.hpp"
@@ -690,7 +691,9 @@ void run_node(const NodeBootHooks& hooks) {
   // refuses, the join FSM of P3-4 will treat it as unprovisioned), while
   // the node keeps routing.
   static ROUTELOOM_OWNER_C5_LP routeloom::espnow::Sdkv1Stores sdkv1_stores(
-      routeloom::sdkv1::kResumeNodeSlots);
+      routeloom::profile::kRole == routeloom::profile::Role::Gateway
+          ? routeloom::sdkv1::kResumeGatewaySlots
+          : routeloom::sdkv1::kResumeNodeSlots);
   status = sdkv1_stores.open(routeloom::espnow::kSecurityNvsPartition);
   if (!status) {
 #if CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE || !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
@@ -850,10 +853,7 @@ void run_node(const NodeBootHooks& hooks) {
   // ROUTELOOM_ROLE: an endpoint image asks for and serves the endpoint role
   // only; begin() refuses a role above the resource profile before RF.
   owner_config.role = routeloom::profile::kRole;
-  owner_config.joiner.capability =
-      routeloom::profile::kRole == routeloom::profile::Role::Endpoint
-          ? routeloom::sdkv1::kMemberRoleEndpoint
-          : routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay;
+  owner_config.joiner.capability = routeloom::profile::role_mask(routeloom::profile::kRole);
   owner_config.joiner.requested_role = static_cast<std::uint8_t>(owner_config.joiner.capability);
   owner_config.log_tag = kTag;
 #if CONFIG_ROUTELOOM_GROUP_TREE_FLAT
@@ -1190,7 +1190,7 @@ void run_node(const NodeBootHooks& hooks) {
   dev_config.node = board.node;
   dev_config.channel = board.channel;
   dev_config.boot = message_session;
-  dev_config.role = routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay;
+  dev_config.role = routeloom::profile::role_mask(routeloom::profile::kRole);
 #if CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED && defined(CONFIG_ROUTELOOM_ROUTE_GATEWAY_1)
   // The dev route has no BoardConfig carrier yet: propagate the Kconfig
   // gateway set so adopt_dev keeps the scoped profile (a missing list

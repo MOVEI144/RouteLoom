@@ -355,6 +355,9 @@ Status SecurityCoordinator::adopt_dev(const CoordinatorDevConfig& config,
     return Status::error(StatusCode::InvalidState, "coordinator already running");
   }
   if (!deps_ready(deps_)) return Status::error(StatusCode::InvalidState, "coordinator deps");
+  if ((config.role & ~static_cast<std::uint32_t>(profile::role_mask(deps_.allowed_role))) != 0) {
+    return Status::error(StatusCode::Unsupported, "RESOURCE_PROFILE_ROLE_MISMATCH");
+  }
   last_now_ = now;
   in_port_ = true;
   const Status status = install_dev_config(config, now);
@@ -2938,6 +2941,10 @@ Status SecurityCoordinator::adopt_boot_rls1(const MonotonicMs now,
   }
   const SiteRecord& site = deps_.site->site();
   const IdentityRecord& identity = deps_.identity->identity();
+  if ((site.role & ~profile::role_mask(deps_.allowed_role)) != 0) {
+    to_recovery(JoinRecoveryReason::MembershipInvalid);
+    return Status::success();
+  }
   if (!boot_witness_ok(site.boot_witness)) {
     to_recovery(JoinRecoveryReason::BootWitnessMismatch);
     return Status::success();

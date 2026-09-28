@@ -50,6 +50,7 @@
 #include "routeloom/sdkv1_join_transport.hpp"
 #include "routeloom/sdkv1_joiner.hpp"
 #include "routeloom/observation.hpp"
+#include "routeloom/profile.hpp"
 #include "routeloom/sdkv1_membership.hpp"
 #include "routeloom/sdkv1_records.hpp"
 #include "routeloom/sdkv1_session_rtc.hpp"
@@ -365,6 +366,7 @@ class SecurityCoordinator final : public BootstrapSink,
     JoinCookieSealer* proxy_sealer{nullptr};
     AuthorityVerifiedSink* authority_sink{nullptr};
     MacAddress local_mac{};
+    profile::Role allowed_role{profile::kMaxRole};
     NodeId local_node{kInvalidNodeId};
     JoinerConfig joiner_config{};
   };
