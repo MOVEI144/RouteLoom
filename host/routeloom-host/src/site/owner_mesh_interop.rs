@@ -2816,6 +2816,31 @@ fn mesh_route_loss_probe_result_survives_callback_delay() {
     }
 }
 
+/// An authenticated HopAccept can arrive before the DATA TX callback.
+#[test]
+fn mesh_route_loss_early_hop_accept() {
+    let Some(mut world) = route_loss_world("route-early-ack", Switch::direct(), false) else {
+        return;
+    };
+    world.switch.callback_delay_ms[1][0] = 100;
+    world.switch.callback_delay_kind = Some(WIRE_DATA);
+    let before = world.snaps[0].rx_count;
+    world.peers[1].app_send(testkit::GATEWAY, b"early-ack");
+    world.pump_until(1000, |snaps| {
+        snaps[0].rx_count > before
+            && snaps[1]
+                .app_tx
+                .last()
+                .is_some_and(|tx| tx.state == DELIVERY_DELIVERED)
+    });
+    assert!(world.early_hop_accepts > 0, "ACK preceded MAC callback");
+    assert_eq!(world.snaps[0].rx_count, before + 1);
+    assert_eq!(
+        world.snaps[1].app_tx.last().unwrap().state,
+        DELIVERY_DELIVERED
+    );
+}
+
 /// Phase-1 convergence on the direct radio: all three Owners adopt
 /// from their Phase-0 images (member boots, no rejoins), open their
 /// authority channels through the gateway's real USB relay, confirm,
