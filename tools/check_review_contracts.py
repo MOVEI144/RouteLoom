@@ -214,7 +214,7 @@ def validate(root: Path) -> dict:
             root / "components/routeloom/include/routeloom/types.hpp"
         ).read_text(encoding="utf-8")
         node_cpp = (
-            root / "components/routeloom/src/node.cpp"
+            root / "components/routeloom/src/node_send.cpp"
         ).read_text(encoding="utf-8")
 
         def payload_bytes(function_name):
@@ -234,7 +234,7 @@ def validate(root: Path) -> dict:
         )
         # End-to-end frames carry link + end AAD tags (2); the one-hop
         # HOP_ACCEPT is link-only (1). Plaintext sizes come from the actual
-        # payload encoders in node.cpp.
+        # payload encoders in node_send.cpp.
         expected_wire = {
             "data_64b_payload": header_bytes + 64 + 2 * tag_bytes,
             "hop_accept": header_bytes + payload_bytes("encode_ack_payload")
