@@ -1,0 +1,256 @@
+[2026-09-28T17:41:58.727Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-28T17:41:58.740Z] I (153) esp_image: segment 1: paddr=00065d60 vaddr=40800000 size=0a2b8h ( 41656) load
+[2026-09-28T17:41:58.749Z] I (163) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=117084h (1142916) map
+[2026-09-28T17:41:58.961Z] I (374) esp_image: segment 3: paddr=001870ac vaddr=4080a2b8 size=0fd54h ( 64852) load
+[2026-09-28T17:41:58.975Z] I (389) esp_image: segment 4: paddr=00196e08 vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-28T17:41:58.979Z] I (393) esp_image: segment 5: paddr=0019aa24 vaddr=50000000 size=00060h (    96) load
+[2026-09-28T17:41:58.986Z] I (394) esp_image: segment 6: paddr=0019aa8c vaddr=50000068 size=00024h (    36) load
+[2026-09-28T17:41:58.992Z] I (406) boot: Loaded app from partition at offset 0x40000
+[2026-09-28T17:41:58.997Z] I (411) boot: Set actual ota_seq=1 in otadata[0]
+[2026-09-28T17:41:59.000Z] I (411) boot: Disabling RNG early entropy source...
+[2026-09-28T17:41:59.013Z] I (427) cpu_start: Unicore app
+[2026-09-28T17:41:59.022Z] I (436) cpu_start: GPIO 17 and 16 are used as console UART I/O pins
+[2026-09-28T17:41:59.022Z] I (437) cpu_start: Pro cpu start user code
+[2026-09-28T17:41:59.024Z] I (437) cpu_start: cpu freq: 160000000 Hz
+[2026-09-28T17:41:59.028Z] I (439) app_init: Application information:
+[2026-09-28T17:41:59.033Z] I (442) app_init: Project name:     routeloom_reference_node
+[2026-09-28T17:41:59.037Z] I (448) app_init: App version:      1
+[2026-09-28T17:41:59.042Z] I (451) app_init: Compile time:     Sep 28 2026 17:39:44
+[2026-09-28T17:41:59.046Z] I (456) app_init: ELF file SHA256:  944174e4e...
+[2026-09-28T17:41:59.050Z] I (461) app_init: ESP-IDF:          v6.0.3
+[2026-09-28T17:41:59.054Z] I (464) efuse_init: Min chip rev:     v0.0
+[2026-09-28T17:41:59.058Z] I (468) efuse_init: Max chip rev:     v0.99 
+[2026-09-28T17:41:59.062Z] I (472) efuse_init: Chip rev:         v0.2
+[2026-09-28T17:41:59.068Z] I (476) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-28T17:41:59.073Z] I (482) heap_init: At 4084F6C0 len 0002CF50 (179 KiB): RAM
+[2026-09-28T17:41:59.078Z] I (487) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+[2026-09-28T17:41:59.084Z] I (493) heap_init: At 5000008C len 00003F5C (15 KiB): RTCRAM
+[2026-09-28T17:41:59.087Z] I (499) spi_flash: detected chip: generic
+[2026-09-28T17:41:59.090Z] I (502) spi_flash: flash io: dio
+[2026-09-28T17:41:59.096Z] I (505) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-28T17:41:59.103Z] I (511) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-28T17:41:59.115Z] I (526) main_task: Started on CPU0
+[2026-09-28T17:41:59.118Z] I (528) main_task: Calling app_main()
+[2026-09-28T17:41:59.124Z] I (532) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-28T17:41:59.165Z] I (578) RouteLoomRef: sdkv1 identity: none provisioned
+[2026-09-28T17:41:59.165Z] I (578) RouteLoomRef: sdkv1 site: not a member
+[2026-09-28T17:41:59.169Z] I (579) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+[2026-09-28T17:41:59.173Z] I (583) RouteLoomRef: sdkv1 local_revocation: none
+[2026-09-28T17:41:59.177Z] I (587) RouteLoomRef: sdkv1 lifecycle: none
+[2026-09-28T17:41:59.188Z] I (592) RouteLoomRef: routeloom field boot: fw=1 app_sha256=944174e4e21b7e286659b5b2a4ac5fd7df566ba13e44df4a78be7517962a31dc
+[2026-09-28T17:41:59.194Z] E (608) RouteLoomNVS: open rlcfg/board native=0x1102
+[2026-09-28T17:41:59.200Z] E (608) RouteLoomRef: fatal: nvs_open sdkv1 failed (streak=1, restart in 500 ms)
+[2026-09-28T17:41:59.700Z] ESP-ROM:esp32c6-20220919
+[2026-09-28T17:41:59.701Z] Build:Sep 19 2022
+[2026-09-28T17:41:59.701Z] rst:0xc (SW_CPU),boot:0x1e (SPI_FAST_FLASH_BOOT)
+[2026-09-28T17:41:59.702Z] Saved PC:0x4001975a
+[2026-09-28T17:41:59.702Z] SPIWP:0xee
+[2026-09-28T17:41:59.703Z] mode:DIO, clock div:2
+[2026-09-28T17:41:59.704Z] load:0x40875730,len:0x1738
+[2026-09-28T17:41:59.708Z] load:0x4086b910,len:0xd8c
+[2026-09-28T17:41:59.710Z] load:0x4086e610,len:0x32e0
+[2026-09-28T17:41:59.716Z] entry 0x4086b91a
+[2026-09-28T17:41:59.723Z] I (22) boot: ESP-IDF v6.0.3 2nd stage bootloader
+[2026-09-28T17:41:59.723Z] I (22) boot: compile time Sep 28 2026 17:39:43
+[2026-09-28T17:41:59.724Z] I (24) boot: chip revision: v0.2
+[2026-09-28T17:41:59.726Z] I (24) boot: efuse block revision: v0.3
+[2026-09-28T17:41:59.730Z] I (25) boot.esp32c6: SPI Speed      : 80MHz
+[2026-09-28T17:41:59.733Z] I (29) boot.esp32c6: SPI Mode       : DIO
+[2026-09-28T17:41:59.737Z] I (33) boot.esp32c6: SPI Flash Size : 4MB
+[2026-09-28T17:41:59.742Z] I (37) boot: Enabling RNG early entropy source...
+[2026-09-28T17:41:59.744Z] I (41) boot: Partition Table:
+[2026-09-28T17:41:59.751Z] I (44) boot: ## Label            Usage          Type ST Offset   Length
+[2026-09-28T17:41:59.757Z] I (50) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+[2026-09-28T17:41:59.764Z] I (57) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+[2026-09-28T17:41:59.770Z] I (63) boot:  2 otadata          OTA data         01 00 00010000 00002000
+[2026-09-28T17:41:59.777Z] I (70) boot:  3 rlcfg            WiFi data        01 02 00012000 00006000
+[2026-09-28T17:41:59.783Z] I (76) boot:  4 rlkeys           WiFi data        01 02 00018000 00003000
+[2026-09-28T17:41:59.790Z] I (83) boot:  5 rlsec            WiFi data        01 02 00020000 00020000
+[2026-09-28T17:41:59.796Z] I (89) boot:  6 ota_0            OTA app          00 10 00040000 001d0000
+[2026-09-28T17:41:59.803Z] I (96) boot:  7 ota_1            OTA app          00 11 00210000 001d0000
+[2026-09-28T17:41:59.809Z] I (102) boot:  8 coredump         Unknown data     01 03 003e0000 00010000
+[2026-09-28T17:41:59.813Z] I (109) boot: End of partition table
+[2026-09-28T17:41:59.820Z] I (113) esp_image: segment 0: paddr=00040020 vaddr=42120020 size=25d38h (154936) map
+[2026-09-28T17:41:59.878Z] I (176) esp_image: segment 1: paddr=00065d60 vaddr=40800000 size=0a2b8h ( 41656) load
+[2026-09-28T17:41:59.897Z] I (195) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=117084h (1142916) map
+[2026-09-28T17:42:00.313Z] I (611) esp_image: segment 3: paddr=001870ac vaddr=4080a2b8 size=0fd54h ( 64852) load
+[2026-09-28T17:42:00.341Z] I (639) esp_image: segment 4: paddr=00196e08 vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-28T17:42:00.349Z] I (647) esp_image: segment 5: paddr=0019aa24 vaddr=50000000 size=00060h (    96) load
+[2026-09-28T17:42:00.352Z] I (649) esp_image: segment 6: paddr=0019aa8c vaddr=50000068 size=00024h (    36) load
+[2026-09-28T17:42:00.364Z] I (663) boot: Loaded app from partition at offset 0x40000
+[2026-09-28T17:42:00.365Z] I (664) boot: Disabling RNG early entropy source...
+[2026-09-28T17:42:00.377Z] I (676) cpu_start: Unicore app
+[2026-09-28T17:42:00.386Z] I (686) cpu_start: GPIO 17 and 16 are used as console UART I/O pins
+[2026-09-28T17:42:00.387Z] I (686) cpu_start: Pro cpu start user code
+[2026-09-28T17:42:00.388Z] I (686) cpu_start: cpu freq: 160000000 Hz
+[2026-09-28T17:42:00.392Z] I (688) app_init: Application information:
+[2026-09-28T17:42:00.398Z] I (692) app_init: Project name:     routeloom_reference_node
+[2026-09-28T17:42:00.401Z] I (697) app_init: App version:      1
+[2026-09-28T17:42:00.406Z] I (701) app_init: Compile time:     Sep 28 2026 17:39:44
+[2026-09-28T17:42:00.410Z] I (706) app_init: ELF file SHA256:  944174e4e...
+[2026-09-28T17:42:00.414Z] I (710) app_init: ESP-IDF:          v6.0.3
+[2026-09-28T17:42:00.418Z] I (714) efuse_init: Min chip rev:     v0.0
+[2026-09-28T17:42:00.422Z] I (718) efuse_init: Max chip rev:     v0.99 
+[2026-09-28T17:42:00.426Z] I (722) efuse_init: Chip rev:         v0.2
+[2026-09-28T17:42:00.432Z] I (725) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-28T17:42:00.437Z] I (732) heap_init: At 4084F6C0 len 0002CF50 (179 KiB): RAM
+[2026-09-28T17:42:00.442Z] I (737) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+[2026-09-28T17:42:00.448Z] I (742) heap_init: At 5000008C len 00003F5C (15 KiB): RTCRAM
+[2026-09-28T17:42:00.451Z] I (748) spi_flash: detected chip: generic
+[2026-09-28T17:42:00.454Z] I (751) spi_flash: flash io: dio
+[2026-09-28T17:42:00.461Z] I (755) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-28T17:42:00.467Z] I (760) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-28T17:42:00.479Z] I (776) main_task: Started on CPU0
+[2026-09-28T17:42:00.482Z] I (778) main_task: Calling app_main()
+[2026-09-28T17:42:00.488Z] I (782) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-28T17:42:00.527Z] I (826) RouteLoomRef: sdkv1 identity: none provisioned
+[2026-09-28T17:42:00.527Z] I (827) RouteLoomRef: sdkv1 site: not a member
+[2026-09-28T17:42:00.531Z] I (827) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+[2026-09-28T17:42:00.536Z] I (831) RouteLoomRef: sdkv1 local_revocation: none
+[2026-09-28T17:42:00.540Z] I (835) RouteLoomRef: sdkv1 lifecycle: none
+[2026-09-28T17:42:00.551Z] I (841) RouteLoomRef: routeloom field boot: fw=1 app_sha256=944174e4e21b7e286659b5b2a4ac5fd7df566ba13e44df4a78be7517962a31dc
+[2026-09-28T17:42:00.557Z] E (856) RouteLoomNVS: open rlcfg/board native=0x1102
+[2026-09-28T17:42:00.563Z] E (856) RouteLoomRef: fatal: nvs_open sdkv1 failed (streak=2, restart in 1000 ms)
+[2026-09-28T17:42:01.563Z] ESP-ROM:esp32c6-20220919
+[2026-09-28T17:42:01.563Z] Build:Sep 19 2022
+[2026-09-28T17:42:01.564Z] rst:0xc (SW_CPU),boot:0x1e (SPI_FAST_FLASH_BOOT)
+[2026-09-28T17:42:01.564Z] Saved PC:0x4001975a
+[2026-09-28T17:42:01.565Z] SPIWP:0xee
+[2026-09-28T17:42:01.565Z] mode:DIO, clock div:2
+[2026-09-28T17:42:01.567Z] load:0x40875730,len:0x1738
+[2026-09-28T17:42:01.570Z] load:0x4086b910,len:0xd8c
+[2026-09-28T17:42:01.572Z] load:0x4086e610,len:0x32e0
+[2026-09-28T17:42:01.578Z] entry 0x4086b91a
+[2026-09-28T17:42:01.585Z] I (22) boot: ESP-IDF v6.0.3 2nd stage bootloader
+[2026-09-28T17:42:01.586Z] I (22) boot: compile time Sep 28 2026 17:39:43
+[2026-09-28T17:42:01.587Z] I (24) boot: chip revision: v0.2
+[2026-09-28T17:42:01.588Z] I (24) boot: efuse block revision: v0.3
+[2026-09-28T17:42:01.592Z] I (25) boot.esp32c6: SPI Speed      : 80MHz
+[2026-09-28T17:42:01.596Z] I (29) boot.esp32c6: SPI Mode       : DIO
+[2026-09-28T17:42:01.599Z] I (33) boot.esp32c6: SPI Flash Size : 4MB
+[2026-09-28T17:42:01.604Z] I (37) boot: Enabling RNG early entropy source...
+[2026-09-28T17:42:01.606Z] I (41) boot: Partition Table:
+[2026-09-28T17:42:01.613Z] I (44) boot: ## Label            Usage          Type ST Offset   Length
+[2026-09-28T17:42:01.619Z] I (50) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+[2026-09-28T17:42:01.626Z] I (57) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+[2026-09-28T17:42:01.632Z] I (63) boot:  2 otadata          OTA data         01 00 00010000 00002000
+[2026-09-28T17:42:01.639Z] I (70) boot:  3 rlcfg            WiFi data        01 02 00012000 00006000
+[2026-09-28T17:42:01.645Z] I (76) boot:  4 rlkeys           WiFi data        01 02 00018000 00003000
+[2026-09-28T17:42:01.652Z] I (83) boot:  5 rlsec            WiFi data        01 02 00020000 00020000
+[2026-09-28T17:42:01.658Z] I (89) boot:  6 ota_0            OTA app          00 10 00040000 001d0000
+[2026-09-28T17:42:01.665Z] I (96) boot:  7 ota_1            OTA app          00 11 00210000 001d0000
+[2026-09-28T17:42:01.671Z] I (102) boot:  8 coredump         Unknown data     01 03 003e0000 00010000
+[2026-09-28T17:42:01.675Z] I (109) boot: End of partition table
+[2026-09-28T17:42:01.682Z] I (113) esp_image: segment 0: paddr=00040020 vaddr=42120020 size=25d38h (154936) map
+[2026-09-28T17:42:01.740Z] I (176) esp_image: segment 1: paddr=00065d60 vaddr=40800000 size=0a2b8h ( 41656) load
+[2026-09-28T17:42:01.759Z] I (195) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=117084h (1142916) map
+[2026-09-28T17:42:02.176Z] I (611) esp_image: segment 3: paddr=001870ac vaddr=4080a2b8 size=0fd54h ( 64852) load
+[2026-09-28T17:42:02.203Z] I (639) esp_image: segment 4: paddr=00196e08 vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-28T17:42:02.211Z] I (647) esp_image: segment 5: paddr=0019aa24 vaddr=50000000 size=00060h (    96) load
+[2026-09-28T17:42:02.214Z] I (649) esp_image: segment 6: paddr=0019aa8c vaddr=50000068 size=00024h (    36) load
+[2026-09-28T17:42:02.227Z] I (663) boot: Loaded app from partition at offset 0x40000
+[2026-09-28T17:42:02.228Z] I (664) boot: Disabling RNG early entropy source...
+[2026-09-28T17:42:02.239Z] I (676) cpu_start: Unicore app
+[2026-09-28T17:42:02.249Z] I (686) cpu_start: GPIO 17 and 16 are used as console UART I/O pins
+[2026-09-28T17:42:02.249Z] I (686) cpu_start: Pro cpu start user code
+[2026-09-28T17:42:02.251Z] I (686) cpu_start: cpu freq: 160000000 Hz
+[2026-09-28T17:42:02.255Z] I (688) app_init: Application information:
+[2026-09-28T17:42:02.260Z] I (692) app_init: Project name:     routeloom_reference_node
+[2026-09-28T17:42:02.263Z] I (697) app_init: App version:      1
+[2026-09-28T17:42:02.269Z] I (701) app_init: Compile time:     Sep 28 2026 17:39:44
+[2026-09-28T17:42:02.273Z] I (706) app_init: ELF file SHA256:  944174e4e...
+[2026-09-28T17:42:02.276Z] I (710) app_init: ESP-IDF:          v6.0.3
+[2026-09-28T17:42:02.280Z] I (714) efuse_init: Min chip rev:     v0.0
+[2026-09-28T17:42:02.284Z] I (718) efuse_init: Max chip rev:     v0.99 
+[2026-09-28T17:42:02.288Z] I (722) efuse_init: Chip rev:         v0.2
+[2026-09-28T17:42:02.294Z] I (725) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-28T17:42:02.299Z] I (732) heap_init: At 4084F6C0 len 0002CF50 (179 KiB): RAM
+[2026-09-28T17:42:02.305Z] I (737) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+[2026-09-28T17:42:02.310Z] I (742) heap_init: At 5000008C len 00003F5C (15 KiB): RTCRAM
+[2026-09-28T17:42:02.314Z] I (748) spi_flash: detected chip: generic
+[2026-09-28T17:42:02.317Z] I (751) spi_flash: flash io: dio
+[2026-09-28T17:42:02.323Z] I (755) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-28T17:42:02.329Z] I (760) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-28T17:42:02.341Z] I (776) main_task: Started on CPU0
+[2026-09-28T17:42:02.344Z] I (778) main_task: Calling app_main()
+[2026-09-28T17:42:02.350Z] I (782) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-28T17:42:02.390Z] I (826) RouteLoomRef: sdkv1 identity: none provisioned
+[2026-09-28T17:42:02.390Z] I (827) RouteLoomRef: sdkv1 site: not a member
+[2026-09-28T17:42:02.394Z] I (827) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+[2026-09-28T17:42:02.398Z] I (831) RouteLoomRef: sdkv1 local_revocation: none
+[2026-09-28T17:42:02.402Z] I (835) RouteLoomRef: sdkv1 lifecycle: none
+[2026-09-28T17:42:02.413Z] I (841) RouteLoomRef: routeloom field boot: fw=1 app_sha256=944174e4e21b7e286659b5b2a4ac5fd7df566ba13e44df4a78be7517962a31dc
+[2026-09-28T17:42:02.419Z] E (856) RouteLoomNVS: open rlcfg/board native=0x1102
+[2026-09-28T17:42:02.425Z] E (856) RouteLoomRef: fatal: nvs_open sdkv1 failed (streak=3, restart in 2000 ms)
+[2026-09-28T17:42:04.425Z] ESP-ROM:esp32c6-20220919
+[2026-09-28T17:42:04.425Z] Build:Sep 19 2022
+[2026-09-28T17:42:04.426Z] rst:0xc (SW_CPU),boot:0x1e (SPI_FAST_FLASH_BOOT)
+[2026-09-28T17:42:04.426Z] Saved PC:0x4001975a
+[2026-09-28T17:42:04.427Z] SPIWP:0xee
+[2026-09-28T17:42:04.428Z] mode:DIO, clock div:2
+[2026-09-28T17:42:04.429Z] load:0x40875730,len:0x1738
+[2026-09-28T17:42:04.432Z] load:0x4086b910,len:0xd8c
+[2026-09-28T17:42:04.434Z] load:0x4086e610,len:0x32e0
+[2026-09-28T17:42:04.441Z] entry 0x4086b91a
+[2026-09-28T17:42:04.447Z] I (22) boot: ESP-IDF v6.0.3 2nd stage bootloader
+[2026-09-28T17:42:04.448Z] I (22) boot: compile time Sep 28 2026 17:39:43
+[2026-09-28T17:42:04.449Z] I (24) boot: chip revision: v0.2
+[2026-09-28T17:42:04.450Z] I (24) boot: efuse block revision: v0.3
+[2026-09-28T17:42:04.454Z] I (25) boot.esp32c6: SPI Speed      : 80MHz
+[2026-09-28T17:42:04.458Z] I (29) boot.esp32c6: SPI Mode       : DIO
+[2026-09-28T17:42:04.462Z] I (33) boot.esp32c6: SPI Flash Size : 4MB
+[2026-09-28T17:42:04.466Z] I (37) boot: Enabling RNG early entropy source...
+[2026-09-28T17:42:04.469Z] I (41) boot: Partition Table:
+[2026-09-28T17:42:04.475Z] I (44) boot: ## Label            Usage          Type ST Offset   Length
+[2026-09-28T17:42:04.482Z] I (50) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+[2026-09-28T17:42:04.488Z] I (57) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+[2026-09-28T17:42:04.495Z] I (63) boot:  2 otadata          OTA data         01 00 00010000 00002000
+[2026-09-28T17:42:04.501Z] I (70) boot:  3 rlcfg            WiFi data        01 02 00012000 00006000
+[2026-09-28T17:42:04.508Z] I (76) boot:  4 rlkeys           WiFi data        01 02 00018000 00003000
+[2026-09-28T17:42:04.514Z] I (83) boot:  5 rlsec            WiFi data        01 02 00020000 00020000
+[2026-09-28T17:42:04.521Z] I (89) boot:  6 ota_0            OTA app          00 10 00040000 001d0000
+[2026-09-28T17:42:04.527Z] I (96) boot:  7 ota_1            OTA app          00 11 00210000 001d0000
+[2026-09-28T17:42:04.534Z] I (102) boot:  8 coredump         Unknown data     01 03 003e0000 00010000
+[2026-09-28T17:42:04.537Z] I (109) boot: End of partition table
+[2026-09-28T17:42:04.545Z] I (113) esp_image: segment 0: paddr=00040020 vaddr=42120020 size=25d38h (154936) map
+[2026-09-28T17:42:04.603Z] I (176) esp_image: segment 1: paddr=00065d60 vaddr=40800000 size=0a2b8h ( 41656) load
+[2026-09-28T17:42:04.621Z] I (195) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=117084h (1142916) map
+[2026-09-28T17:42:05.038Z] I (611) esp_image: segment 3: paddr=001870ac vaddr=4080a2b8 size=0fd54h ( 64852) load
+[2026-09-28T17:42:05.066Z] I (639) esp_image: segment 4: paddr=00196e08 vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-28T17:42:05.074Z] I (647) esp_image: segment 5: paddr=0019aa24 vaddr=50000000 size=00060h (    96) load
+[2026-09-28T17:42:05.077Z] I (649) esp_image: segment 6: paddr=0019aa8c vaddr=50000068 size=00024h (    36) load
+[2026-09-28T17:42:05.089Z] I (663) boot: Loaded app from partition at offset 0x40000
+[2026-09-28T17:42:05.090Z] I (664) boot: Disabling RNG early entropy source...
+[2026-09-28T17:42:05.101Z] I (676) cpu_start: Unicore app
+[2026-09-28T17:42:05.111Z] I (686) cpu_start: GPIO 17 and 16 are used as console UART I/O pins
+[2026-09-28T17:42:05.111Z] I (686) cpu_start: Pro cpu start user code
+[2026-09-28T17:42:05.113Z] I (686) cpu_start: cpu freq: 160000000 Hz
+[2026-09-28T17:42:05.117Z] I (688) app_init: Application information:
+[2026-09-28T17:42:05.122Z] I (692) app_init: Project name:     routeloom_reference_node
+[2026-09-28T17:42:05.126Z] I (697) app_init: App version:      1
+[2026-09-28T17:42:05.131Z] I (701) app_init: Compile time:     Sep 28 2026 17:39:44
+[2026-09-28T17:42:05.135Z] I (706) app_init: ELF file SHA256:  944174e4e...
+[2026-09-28T17:42:05.139Z] I (710) app_init: ESP-IDF:          v6.0.3
+[2026-09-28T17:42:05.142Z] I (714) efuse_init: Min chip rev:     v0.0
+[2026-09-28T17:42:05.147Z] I (718) efuse_init: Max chip rev:     v0.99 
+[2026-09-28T17:42:05.150Z] I (722) efuse_init: Chip rev:         v0.2
+[2026-09-28T17:42:05.157Z] I (725) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-28T17:42:05.162Z] I (732) heap_init: At 4084F6C0 len 0002CF50 (179 KiB): RAM
+[2026-09-28T17:42:05.167Z] I (737) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+[2026-09-28T17:42:05.172Z] I (742) heap_init: At 5000008C len 00003F5C (15 KiB): RTCRAM
+[2026-09-28T17:42:05.176Z] I (748) spi_flash: detected chip: generic
+[2026-09-28T17:42:05.179Z] I (751) spi_flash: flash io: dio
+[2026-09-28T17:42:05.185Z] I (755) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-28T17:42:05.192Z] I (760) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-28T17:42:05.203Z] I (776) main_task: Started on CPU0
+[2026-09-28T17:42:05.207Z] I (778) main_task: Calling app_main()
+[2026-09-28T17:42:05.213Z] I (782) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-28T17:42:05.252Z] I (826) RouteLoomRef: sdkv1 identity: none provisioned
+[2026-09-28T17:42:05.252Z] I (827) RouteLoomRef: sdkv1 site: not a member
+[2026-09-28T17:42:05.256Z] I (827) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+[2026-09-28T17:42:05.260Z] I (831) RouteLoomRef: sdkv1 local_revocation: none
+[2026-09-28T17:42:05.264Z] I (835) RouteLoomRef: sdkv1 lifecycle: none
+[2026-09-28T17:42:05.275Z] I (841) RouteLoomRef: routeloom field boot: fw=1 app_sha256=944174e4e21b7e286659b5b2a4ac5fd7df566ba13e44df4a78be7517962a31dc
+[2026-09-28T17:42:05.281Z] E (856) RouteLoomNVS: open rlcfg/board native=0x1102
+[2026-09-28T17:42:05.287Z] E (856) RouteLoomRef: fatal: nvs_open sdkv1 failed (streak=4, restart in 4000 ms)
+[2026-09-28T17:42:06.923Z] !! capture closed

@@ -1,0 +1,61 @@
+{
+  "board": "relay",
+  "node": "0000000000000002",
+  "role": "bench",
+  "setup_bundle": "h0-setup-ref-c6-devram",
+  "field_bundle": "h0-c6-n2-devram-relay",
+  "config": {
+    "generation": 1,
+    "node": "0000000000000002",
+    "role": "reference",
+    "security": "devram",
+    "secrets_generation": "1",
+    "fingerprint": "316320e03823c9cf85ba5b2e6b20104c7fb4aa26cd36e40378d41dbbac8c4347",
+    "secrets_fingerprint": "316320e03823c9cf85ba5b2e6b20104c7fb4aa26cd36e40378d41dbbac8c4347"
+  },
+  "nvs_after_config": {
+    "rlcfg": {
+      "sha256": "2f957f28edd8e87ef7adb9cedae2b6b79a64ad612949ca82abeee9ff874c47e9",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "1c8039eda1e3077d0f8776f4fd38d268aa5af49b01736758d33729127cb688f2",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "089f99619b631099bb1ce44de540b39d6acb58875bfd2928ae4894ed4e1c1ebd",
+      "blank": false
+    }
+  },
+  "app_only": {
+    "identity": {
+      "chip": "esp32c6",
+      "mac": "10:bd:a3:ff:fe:b1:48:a8",
+      "log": "flash-relay-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "3486041f7395665e85053a1175fc0e8acb70ccabc5edb78183cc8e6d6fc782df",
+    "app_bytes": 1420192,
+    "bundle": "hil-h0-c6-n2-devram-relay-reference_node-esp32c6"
+  },
+  "nvs_after_app_write": {
+    "rlcfg": {
+      "sha256": "2f957f28edd8e87ef7adb9cedae2b6b79a64ad612949ca82abeee9ff874c47e9",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "1c8039eda1e3077d0f8776f4fd38d268aa5af49b01736758d33729127cb688f2",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "089f99619b631099bb1ce44de540b39d6acb58875bfd2928ae4894ed4e1c1ebd",
+      "blank": false
+    }
+  },
+  "nvs_preserved": {
+    "rlcfg": true,
+    "rlkeys": true,
+    "rlsec": true
+  },
+  "boot_lines": 122
+}

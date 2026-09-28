@@ -34,6 +34,8 @@ def main() -> int:
     p.add_argument("--socket", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--settle-s", type=float, default=15)
+    p.add_argument("--daemon-arg", action="append", default=[],
+                   help="extra daemon argument (repeatable), e.g. --daemon-arg=--usb-dev-secret-file")
     args = p.parse_args()
     if args.count < 1 or args.count > 100 or args.settle_s < 0:
         p.error("count must be 1..100 and settle-s nonnegative")
@@ -63,7 +65,7 @@ def main() -> int:
             auth_started = time.monotonic()
             daemon = subprocess.Popen(
                 [args.daemon, "--socket", args.socket, "--device", port,
-                 "--api-acl-file", args.acl], stdout=daemon_log,
+                 "--api-acl-file", args.acl, *args.daemon_arg], stdout=daemon_log,
                 stderr=subprocess.STDOUT)
             try:
                 ready = False

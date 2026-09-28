@@ -1,0 +1,11 @@
+{
+ "bad_pt_sha256": "b7514decbe6efc72de731de1267846432158b940b1f46097e840eaf739e040d4",
+ "pt_lines": [
+  "I (529) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2",
+  "E (535) rl_flash: partition coredump: flashed type=1 subtype=3 0x3e0000+0x8000; table is not PT-4M-v2 (erase flash and write full image); RF not started",
+  "E (548) RouteLoomRef: fatal: partition table is not PT-4M-v2 (streak=6, restart in 16000 ms)"
+ ],
+ "rf_started": false,
+ "lines": 65,
+ "restored_rf": true
+}

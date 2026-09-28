@@ -34,6 +34,69 @@
 # socket (routeloomctl) only.
 
 rigs:
+  bench-2026-09-29-h0:
+    description: "v2 H0: C3 gateway + two experimental C6s (relay Node2, endpoint Node3)"
+    host:
+      daemon_bin: host/target/debug/routeloom-host
+      ctl_bin: host/target/debug/routeloomctl
+      socket: /tmp/routeloom-hil-v2-h0.sock
+      poll_interval_s: 0.5
+      command_timeout_s: 10
+    boards:
+      bridge:
+        app: bridge_node
+        chip: esp32c3
+        mac: "94:a9:90:7a:26:ac"
+        role: bridge
+        node_id: 0x1
+        console: none
+        port_globs:
+          - "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00"
+        reset: esptool
+      relay:
+        app: reference_node
+        chip: esp32c6
+        mac: "10:bd:a3:ff:fe:b1:48:a8"
+        role: reference
+        node_id: 0x2
+        port_globs:
+          - "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00"
+        reset: esptool
+      endpoint:
+        app: reference_node
+        chip: esp32c6
+        mac: "10:bd:a3:ff:fe:b1:47:54"
+        role: reference
+        node_id: 0x3
+        port_globs:
+          - "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00"
+        reset: esptool
+  bench-2026-09-29-h0-swap:
+    description: "v2 H0 role swap for C3 EDHOC timing: C6 gateway (Node1) + C3 reference (Node2)"
+    host:
+      daemon_bin: host/target/debug/routeloom-host
+      ctl_bin: host/target/debug/routeloomctl
+      socket: /tmp/routeloom-hil-v2-h0-swap.sock
+    boards:
+      swap-bridge:
+        app: bridge_node
+        chip: esp32c6
+        mac: "10:bd:a3:ff:fe:b1:47:54"
+        role: bridge
+        node_id: 0x1
+        console: none
+        port_globs:
+          - "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00"
+        reset: esptool
+      swap-ref:
+        app: reference_node
+        chip: esp32c3
+        mac: "94:a9:90:7a:26:ac"
+        role: reference
+        node_id: 0x2
+        port_globs:
+          - "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00"
+        reset: esptool
   bench-2026-09-26-c3-direct:
     description: "two C3 references, device-originated traffic without a USB gateway"
     host:

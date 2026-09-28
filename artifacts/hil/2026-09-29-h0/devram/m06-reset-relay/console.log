@@ -1,0 +1,1459 @@
+[2026-09-28T19:19:16.158+00:00] !! preflight {'chip': 'esp32c6', 'mac': '10:bd:a3:ff:fe:b1:48:a8', 'log': 'flash-relay-preflight.log'}
+[2026-09-28T19:19:17.167+00:00] !! send B0 admitted request=1
+[2026-09-28T19:19:22.183+00:00] !! send B0 -> expired DEADLINE_EXPIRED 5016.38 ms
+[2026-09-28T19:19:24.188+00:00] !! send B1 admitted request=2
+[2026-09-28T19:19:29.229+00:00] !! send B1 -> expired DEADLINE_EXPIRED 5041.01 ms
+[2026-09-28T19:19:31.233+00:00] !! send B2 admitted request=3
+[2026-09-28T19:19:36.259+00:00] !! send B2 -> expired DEADLINE_EXPIRED 5026.02 ms
+[2026-09-28T19:19:38.260+00:00] !! cycle 0 reset assert (RTS, DTR low)
+[2026-09-28T19:19:38.350+00:00] I (97) boot:  7 ota_1            OTA app          00 11 00210000ESP-ROM:esp32c6-20220919
+[2026-09-28T19:19:38.350+00:00] Build:Sep 19 2022
+[2026-09-28T19:19:38.350+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x3f (SPI_FAST_FLASH_BOOT)
+[2026-09-28T19:19:38.350+00:00] Saved PC:0x40807866
+[2026-09-28T19:19:38.350+00:00] SPIWP:0xee
+[2026-09-28T19:19:38.350+00:00] mode:DIO, clock div:2
+[2026-09-28T19:19:38.350+00:00] load:0x40875730,len:0x1738
+[2026-09-28T19:19:38.350+00:00] load:0x4086b910,len:0xd8c
+[2026-09-28T19:19:38.350+00:00] load:0x4086e610,len:0x32e0
+[2026-09-28T19:19:38.350+00:00] entry 0x4086b91a
+[2026-09-28T19:19:38.350+00:00] I (23) boot: ESP-IDF v6.0.3 2nd stage bootloader
+[2026-09-28T19:19:38.350+00:00] I (23) boot: compile time Sep 28 2026 17:45:27
+[2026-09-28T19:19:38.350+00:00] I (24) boot: chip revision: v0.2
+[2026-09-28T19:19:38.350+00:00] I (24) boot: efuse block revision: v0.3
+[2026-09-28T19:19:38.350+00:00] I (26) boot.esp32c6: SPI Speed      : 80MHz
+[2026-09-28T19:19:38.350+00:00] I (30) boot.esp32c6: SPI Mode       : DIO
+[2026-09-28T19:19:38.350+00:00] I (34) boot.esp32c6: SPI Flash Size : 4MB
+[2026-09-28T19:19:38.350+00:00] I (38) boot: Enabling RNG early entropy source...
+[2026-09-28T19:19:38.350+00:00] I (42) boot: Partition Table:
+[2026-09-28T19:19:38.350+00:00] I (45) boot: ## Label            Usage          Type ST Offset   Length
+[2026-09-28T19:19:38.350+00:00] I (51) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+[2026-09-28T19:19:38.350+00:00] I (58) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+[2026-09-28T19:19:38.350+00:00] I (64) boot:  2 otadata          OTA data         01 00 00010000 00002000
+[2026-09-28T19:19:38.350+00:00] I (71) boot:  3 rlcfg            WiFi data        01 02 00012000 00006000
+[2026-09-28T19:19:38.351+00:00] I (77) boot:  4 rlkeys           WiFi data        01 02 00018000 00003000
+[2026-09-28T19:19:38.451+00:00] I (84) boot:  5 rlsec            WiFi data        01 02 00020000 00020000
+[2026-09-28T19:19:38.451+00:00] I (90) boot:  6 ota_0            OTA app          00 10 00040000 001d0000
+[2026-09-28T19:19:38.451+00:00] I (97) boot:  7 ota_1            OTA app          00 11 00210000 001d0000
+[2026-09-28T19:19:38.451+00:00] I (103) boot:  8 coredump         Unknown data     01 03 003e0000 00010000
+[2026-09-28T19:19:38.451+00:00] I (110) boot: End of partition table
+[2026-09-28T19:19:38.451+00:00] I (114) esp_image: segment 0: paddr=00040020 vaddr=42120020 size=25d38h (154936) map
+[2026-09-28T19:19:38.451+00:00] I (150) esp_image: segment 1: paddr=00065d60 vaddr=40800000 size=0a2b8h ( 41656) load
+[2026-09-28T19:19:38.451+00:00] I (159) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=11714ch (1143116) map
+[2026-09-28T19:19:38.653+00:00] I (370) esp_image: segment 3: paddr=00187174 vaddr=4080a2b8 size=0fd54h ( 64852) load
+[2026-09-28T19:19:38.653+00:00] I (385) esp_image: segment 4: paddr=00196ed0 vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-28T19:19:38.653+00:00] I (389) esp_image: segment 5: paddr=0019aaec vaddr=50000000 size=00060h (    96) load
+[2026-09-28T19:19:38.753+00:00] I (390) esp_image: segment 6: paddr=0019ab54 vaddr=50000068 size=00024h (    36) load
+[2026-09-28T19:19:38.753+00:00] I (402) boot: Loaded app from partition at offset 0x40000
+[2026-09-28T19:19:38.753+00:00] I (403) boot: Disabling RNG early entropy source...
+[2026-09-28T19:19:38.753+00:00] I (419) cpu_start: Unicore app
+[2026-09-28T19:19:38.753+00:00] I (427) cpu_start: GPIO 17 and 16 are used as console UART I/O pins
+[2026-09-28T19:19:38.753+00:00] I (427) cpu_start: Pro cpu start user code
+[2026-09-28T19:19:38.753+00:00] I (428) cpu_start: cpu freq: 160000000 Hz
+[2026-09-28T19:19:38.753+00:00] I (429) app_init: Application information:
+[2026-09-28T19:19:38.753+00:00] I (433) app_init: Project name:     routeloom_reference_node
+[2026-09-28T19:19:38.753+00:00] I (438) app_init: App version:      1
+[2026-09-28T19:19:38.753+00:00] I (442) app_init: Compile time:     Sep 28 2026 17:39:45
+[2026-09-28T19:19:38.753+00:00] I (447) app_init: ELF file SHA256:  71799c64e...
+[2026-09-28T19:19:38.753+00:00] I (451) app_init: ESP-IDF:          v6.0.3
+[2026-09-28T19:19:38.753+00:00] I (455) efuse_init: Min chip rev:     v0.0
+[2026-09-28T19:19:38.753+00:00] I (459) efuse_init: Max chip rev:     v0.99
+[2026-09-28T19:19:38.753+00:00] I (463) efuse_init: Chip rev:         v0.2
+[2026-09-28T19:19:38.753+00:00] I (467) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-28T19:19:38.753+00:00] I (473) heap_init: At 40851900 len 0002AD10 (171 KiB): RAM
+[2026-09-28T19:19:38.753+00:00] I (478) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+[2026-09-28T19:19:38.753+00:00] I (483) heap_init: At 5000008C len 00003F5C (15 KiB): RTCRAM
+[2026-09-28T19:19:38.753+00:00] I (489) spi_flash: detected chip: generic
+[2026-09-28T19:19:38.760+00:00] !! cycle 0 reset released after 0.500s
+[2026-09-28T19:19:38.766+00:00] !! send C0-0 admitted request=4
+[2026-09-28T19:19:38.854+00:00] I (492) spi_flash: flash io: dio
+[2026-09-28T19:19:38.854+00:00] I (496) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-28T19:19:38.854+00:00] I (502) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-28T19:19:38.854+00:00] I (517) main_task: Started on CPU0
+[2026-09-28T19:19:38.854+00:00] I (519) main_task: Calling app_main()
+[2026-09-28T19:19:38.854+00:00] I (523) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-28T19:19:38.854+00:00] I (569) RouteLoomRef: sdkv1 identity: none provisioned
+[2026-09-28T19:19:38.854+00:00] I (570) RouteLoomRef: sdkv1 site: not a member
+[2026-09-28T19:19:38.854+00:00] I (570) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+[2026-09-28T19:19:38.854+00:00] I (574) RouteLoomRef: sdkv1 local_revocation: none
+[2026-09-28T19:19:38.854+00:00] I (578) RouteLoomRef: sdkv1 lifecycle: none
+[2026-09-28T19:19:38.962+00:00] I (584) RouteLoomRef: routeloom field boot: fw=1 app_sha256=71799c64ead56796ab75a4e7c8c505578cbb7d33a914a759610a284f3678bb19
+[2026-09-28T19:19:38.962+00:00] I (604) RouteLoomRef: board config: gen=1 node=0x2 secrets_gen=1 mac=10bda3b148a8
+[2026-09-28T19:19:38.962+00:00] I (607) RouteLoomRef: security owner ready (node 0x2)
+[2026-09-28T19:19:38.962+00:00] I (608) RouteLoom: Wi-Fi init heap: free=144636 largest=129024 bytes
+[2026-09-28T19:19:38.962+00:00] I (612) pp: pp rom version: 5b8dcfa
+[2026-09-28T19:19:38.962+00:00] I (615) net80211: net80211 rom version: 5b8dcfa
+[2026-09-28T19:19:38.962+00:00] I (620) wifi:wifi driver task: 4087f494, prio:23, stack:6656, core=0
+[2026-09-28T19:19:38.962+00:00] I (626) wifi:wifi firmware version: da143fa
+[2026-09-28T19:19:38.962+00:00] I (629) wifi:wifi certification version: v7.0
+[2026-09-28T19:19:38.962+00:00] I (633) wifi:config NVS flash: disabled
+[2026-09-28T19:19:38.962+00:00] I (636) wifi:config nano formatting: disabled
+[2026-09-28T19:19:38.962+00:00] I (640) wifi:mac_version:HAL_MAC_ESP32AX_761,ut_version:N, band mode:0x1
+[2026-09-28T19:19:38.962+00:00] I (647) wifi:Init data frame dynamic rx buffer num: 8
+[2026-09-28T19:19:38.962+00:00] I (652) wifi:Init static rx mgmt buffer num: 2
+[2026-09-28T19:19:38.962+00:00] I (656) wifi:Init management short buffer num: 8
+[2026-09-28T19:19:38.962+00:00] I (660) wifi:Init dynamic tx buffer num: 8
+[2026-09-28T19:19:38.962+00:00] I (664) wifi:Init static tx FG buffer num: 2
+[2026-09-28T19:19:38.962+00:00] I (668) wifi:Init static rx buffer size: 1700 (rxctrl:92, csi:512)
+[2026-09-28T19:19:38.962+00:00] I (674) wifi:Init static rx buffer num: 4
+[2026-09-28T19:19:38.962+00:00] I (678) wifi:Init dynamic rx buffer num: 8
+[2026-09-28T19:19:38.962+00:00] I (682) wifi_init: accept mbox: 6
+[2026-09-28T19:19:38.962+00:00] I (684) wifi_init: tcpip mbox: 32
+[2026-09-28T19:19:38.962+00:00] I (687) wifi_init: udp mbox: 6
+[2026-09-28T19:19:38.962+00:00] I (690) wifi_init: tcp mbox: 6
+[2026-09-28T19:19:38.962+00:00] I (693) wifi_init: tcp tx win: 5760
+[2026-09-28T19:19:38.962+00:00] I (696) wifi_init: tcp rx win: 5760
+[2026-09-28T19:19:39.062+00:00] I (699) wifi_init: tcp mss: 1440
+[2026-09-28T19:19:39.062+00:00] I (702) wifi_init: WiFi IRAM OP enabled
+[2026-09-28T19:19:39.062+00:00] I (706) wifi_init: WiFi RX IRAM OP enabled
+[2026-09-28T19:19:39.062+00:00] I (710) wifi_init: WiFi SLP IRAM OP enabled
+[2026-09-28T19:19:39.062+00:00] I (714) RouteLoom: Wi-Fi initialized heap: free=118916 largest=102400 min=118888 bytes
+[2026-09-28T19:19:39.062+00:00] I (722) wifi:(2.4G)set country: cc=JP  schan=1 nchan=13 policy=1
+[2026-09-28T19:19:39.062+00:00] I (727) wifi:ifx:0, phymode(new:3, sta nvs: 7 ap nvs: 3)
+[2026-09-28T19:19:39.163+00:00] I (732) phy_init: phy_version 345,552b044,Jul 14 2026,10:37:00
+[2026-09-28T19:19:39.163+00:00] I (820) wifi:11ax coex: WDEVAX_PTI0(0x55777555), WDEVAX_PTI1(0x00003377).
+[2026-09-28T19:19:39.163+00:00] 
+[2026-09-28T19:19:39.163+00:00] I (821) wifi:mode : sta (10:bd:a3:b1:48:a8)
+[2026-09-28T19:19:39.163+00:00] I (822) wifi:enable tsf
+[2026-09-28T19:19:39.163+00:00] I (825) RouteLoom: Wi-Fi started heap: free=116728 largest=100352 min=116464 bytes
+[2026-09-28T19:19:39.163+00:00] I (830) ESPNOW: espnow [version: 2.0] init
+[2026-09-28T19:19:39.163+00:00] I (834) RouteLoom: ESP-NOW ready heap: free=116512 largest=100352 min=116464 bytes
+[2026-09-28T19:19:39.163+00:00] I (846) RouteLoomRef: dev adopted (node 0x2, boot 43)
+[2026-09-28T19:19:39.163+00:00] I (846) RouteLoomRef: security owner started; node start deferred to membership
+[2026-09-28T19:19:39.163+00:00] W (853) RouteLoomRef: diagnostic reason=SECURITY_PROFILE_EXPERIMENTAL peer=0 message=none
+[2026-09-28T19:19:39.163+00:00] W (860) RouteLoomRef: diagnostic reason=ROUTE_REFRESH_BOUND_EXCEEDED peer=0 message=none
+[2026-09-28T19:19:39.163+00:00] I (871) RouteLoomRef: member discovery started
+[2026-09-28T19:19:39.866+00:00] I (1565) RouteLoomRef: discovery event=BOUND peer=3
+[2026-09-28T19:19:39.866+00:00] W (1565) RouteLoomRef: diagnostic reason=BOUND peer=3 message=none
+[2026-09-28T19:19:41.884+00:00] I (3592) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-28T19:19:41.884+00:00] W (3593) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-28T19:19:43.856+00:00] !! send C0-0 -> expired DEADLINE_EXPIRED 5089.57 ms
+[2026-09-28T19:19:45.862+00:00] !! send C0-1 admitted request=5
+[2026-09-28T19:19:50.879+00:00] !! send C0-1 -> expired DEADLINE_EXPIRED 5016.84 ms
+[2026-09-28T19:19:52.883+00:00] !! send C0-2 admitted request=6
+[2026-09-28T19:19:57.926+00:00] !! send C0-2 -> expired DEADLINE_EXPIRED 5043.36 ms
+[2026-09-28T19:19:59.933+00:00] !! send C0-3 admitted request=7
+[2026-09-28T19:20:04.978+00:00] !! send C0-3 -> expired DEADLINE_EXPIRED 5044.99 ms
+[2026-09-28T19:20:06.982+00:00] !! send C0-4 admitted request=8
+[2026-09-28T19:20:07.884+00:00] I (29589) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-28T19:20:07.884+00:00] W (29589) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-28T19:20:07.884+00:00] I (29613) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-28T19:20:07.884+00:00] W (29613) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-28T19:20:09.289+00:00] !! send C0-4 -> delivered END_RECEIVED 2306.79 ms
+[2026-09-28T19:20:11.294+00:00] !! send C0-5 admitted request=9
+[2026-09-28T19:20:11.407+00:00] !! send C0-5 -> delivered END_RECEIVED 112.72 ms
+[2026-09-28T19:20:13.411+00:00] !! send C0-6 admitted request=10
+[2026-09-28T19:20:13.526+00:00] !! send C0-6 -> delivered END_RECEIVED 115.35 ms
+[2026-09-28T19:20:15.530+00:00] !! send C0-7 admitted request=11
+[2026-09-28T19:20:15.647+00:00] !! send C0-7 -> delivered END_RECEIVED 116.72 ms
+[2026-09-28T19:20:17.651+00:00] !! send C0-8 admitted request=12
+[2026-09-28T19:20:17.766+00:00] !! send C0-8 -> delivered END_RECEIVED 115.09 ms
+[2026-09-28T19:20:19.771+00:00] !! send C0-9 admitted request=13
+[2026-09-28T19:20:19.888+00:00] !! send C0-9 -> delivered END_RECEIVED 117.48 ms
+[2026-09-28T19:20:21.893+00:00] !! cycle 0 delivered 6/10 recovery_s=28.223
+[2026-09-28T19:20:23.894+00:00] !! cycle 1 reset assert (RTS, DTR low)
+[2026-09-28T19:20:23.923+00:00] ESP-ROM:esp32c6-20220919
+[2026-09-28T19:20:23.923+00:00] Build:Sep 19 2022
+[2026-09-28T19:20:23.923+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x3f (SPI_FAST_FLASH_BOOT)
+[2026-09-28T19:20:23.923+00:00] Saved PC:0x4206f42c
+[2026-09-28T19:20:23.923+00:00] SPIWP:0xee
+[2026-09-28T19:20:23.923+00:00] mode:DIO, clock div:2
+[2026-09-28T19:20:23.923+00:00] load:0x40875730,len:0x1738
+[2026-09-28T19:20:23.923+00:00] load:0x4086b910,len:0xd8c
+[2026-09-28T19:20:23.923+00:00] load:0x4086e610,len:0x32e0
+[2026-09-28T19:20:23.923+00:00] entry 0x4086b91a
+[2026-09-28T19:20:23.923+00:00] I (23) boot: ESP-IDF v6.0.3 2nd stage bootloader
+[2026-09-28T19:20:23.923+00:00] I (23) boot: compile time Sep 28 2026 17:45:27
+[2026-09-28T19:20:23.923+00:00] I (24) boot: chip revision: v0.2
+[2026-09-28T19:20:23.923+00:00] I (24) boot: efuse block revision: v0.3
+[2026-09-28T19:20:24.024+00:00] I (26) boot.esp32c6: SPI Speed      : 80MHz
+[2026-09-28T19:20:24.024+00:00] I (30) boot.esp32c6: SPI Mode       : DIO
+[2026-09-28T19:20:24.024+00:00] I (34) boot.esp32c6: SPI Flash Size : 4MB
+[2026-09-28T19:20:24.024+00:00] I (38) boot: Enabling RNG early entropy source...
+[2026-09-28T19:20:24.024+00:00] I (42) boot: Partition Table:
+[2026-09-28T19:20:24.024+00:00] I (45) boot: ## Label            Usage          Type ST Offset   Length
+[2026-09-28T19:20:24.024+00:00] I (51) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+[2026-09-28T19:20:24.024+00:00] I (58) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+[2026-09-28T19:20:24.024+00:00] I (64) boot:  2 otadata          OTA data         01 00 00010000 00002000
+[2026-09-28T19:20:24.024+00:00] I (71) boot:  3 rlcfg            WiFi data        01 02 00012000 00006000
+[2026-09-28T19:20:24.024+00:00] I (77) boot:  4 rlkeys           WiFi data        01 02 00018000 00003000
+[2026-09-28T19:20:24.024+00:00] I (84) boot:  5 rlsec            WiFi data        01 02 00020000 00020000
+[2026-09-28T19:20:24.024+00:00] I (90) boot:  6 ota_0            OTA app          00 10 00040000 001d0000
+[2026-09-28T19:20:24.024+00:00] I (97) boot:  7 ota_1            OTA app          00 11 00210000 001d0000
+[2026-09-28T19:20:24.024+00:00] I (103) boot:  8 coredump         Unknown data     01 03 003e0000 00010000
+[2026-09-28T19:20:24.024+00:00] I (110) boot: End of partition table
+[2026-09-28T19:20:24.024+00:00] I (114) esp_image: segment 0: paddr=00040020 vaddr=42120020 size=25d38h (154936) map
+[2026-09-28T19:20:24.124+00:00] I (150) esp_image: segment 1: paddr=00065d60 vaddr=40800000 size=0a2b8h ( 41656) load
+[2026-09-28T19:20:24.124+00:00] I (159) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=11714ch (1143116) map
+[2026-09-28T19:20:24.325+00:00] I (370) esp_image: segment 3: paddr=00187174 vaddr=4080a2b8 size=0fd54h ( 64852) load
+[2026-09-28T19:20:24.325+00:00] I (385) esp_image: segment 4: paddr=00196ed0 vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-28T19:20:24.325+00:00] I (389) esp_image: segment 5: paddr=0019aaec vaddr=50000000 size=00060h (    96) load
+[2026-09-28T19:20:24.325+00:00] I (390) esp_image: segment 6: paddr=0019ab54 vaddr=50000068 size=00024h (    36) load
+[2026-09-28T19:20:24.325+00:00] I (402) boot: Loaded app from partition at offset 0x40000
+[2026-09-28T19:20:24.325+00:00] I (403) boot: Disabling RNG early entropy source...
+[2026-09-28T19:20:24.325+00:00] I (419) cpu_start: Unicore app
+[2026-09-28T19:20:24.325+00:00] I (427) cpu_start: GPIO 17 and 16 are used as console UART I/O pins
+[2026-09-28T19:20:24.325+00:00] I (427) cpu_start: Pro cpu start user code
+[2026-09-28T19:20:24.325+00:00] I (428) cpu_start: cpu freq: 160000000 Hz
+[2026-09-28T19:20:24.394+00:00] !! cycle 1 reset released after 0.500s
+[2026-09-28T19:20:24.401+00:00] !! send C1-0 admitted request=14
+[2026-09-28T19:20:24.425+00:00] I (429) app_init: Application information:
+[2026-09-28T19:20:24.425+00:00] I (433) app_init: Project name:     routeloom_reference_node
+[2026-09-28T19:20:24.425+00:00] I (438) app_init: App version:      1
+[2026-09-28T19:20:24.425+00:00] I (442) app_init: Compile time:     Sep 28 2026 17:39:45
+[2026-09-28T19:20:24.425+00:00] I (447) app_init: ELF file SHA256:  71799c64e...
+[2026-09-28T19:20:24.425+00:00] I (451) app_init: ESP-IDF:          v6.0.3
+[2026-09-28T19:20:24.425+00:00] I (455) efuse_init: Min chip rev:     v0.0
+[2026-09-28T19:20:24.425+00:00] I (459) efuse_init: Max chip rev:     v0.99
+[2026-09-28T19:20:24.425+00:00] I (463) efuse_init: Chip rev:         v0.2
+[2026-09-28T19:20:24.425+00:00] I (467) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-28T19:20:24.425+00:00] I (473) heap_init: At 40851900 len 0002AD10 (171 KiB): RAM
+[2026-09-28T19:20:24.425+00:00] I (478) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+[2026-09-28T19:20:24.425+00:00] I (483) heap_init: At 5000008C len 00003F5C (15 KiB): RTCRAM
+[2026-09-28T19:20:24.425+00:00] I (489) spi_flash: detected chip: generic
+[2026-09-28T19:20:24.425+00:00] I (492) spi_flash: flash io: dio
+[2026-09-28T19:20:24.425+00:00] I (496) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-28T19:20:24.425+00:00] I (502) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-28T19:20:24.425+00:00] I (517) main_task: Started on CPU0
+[2026-09-28T19:20:24.425+00:00] I (519) main_task: Calling app_main()
+[2026-09-28T19:20:24.425+00:00] I (523) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-28T19:20:24.526+00:00] I (569) RouteLoomRef: sdkv1 identity: none provisioned
+[2026-09-28T19:20:24.529+00:00] I (570) RouteLoomRef: sdkv1 site: not a member
+[2026-09-28T19:20:24.529+00:00] I (570) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+[2026-09-28T19:20:24.529+00:00] I (574) RouteLoomRef: sdkv1 local_revocation: none
+[2026-09-28T19:20:24.529+00:00] I (578) RouteLoomRef: sdkv1 lifecycle: none
+[2026-09-28T19:20:24.529+00:00] I (584) RouteLoomRef: routeloom field boot: fw=1 app_sha256=71799c64ead56796ab75a4e7c8c505578cbb7d33a914a759610a284f3678bb19
+[2026-09-28T19:20:24.529+00:00] I (604) RouteLoomRef: board config: gen=1 node=0x2 secrets_gen=1 mac=10bda3b148a8
+[2026-09-28T19:20:24.529+00:00] I (607) RouteLoomRef: security owner ready (node 0x2)
+[2026-09-28T19:20:24.529+00:00] I (608) RouteLoom: Wi-Fi init heap: free=144636 largest=129024 bytes
+[2026-09-28T19:20:24.529+00:00] I (612) pp: pp rom version: 5b8dcfa
+[2026-09-28T19:20:24.529+00:00] I (615) net80211: net80211 rom version: 5b8dcfa
+[2026-09-28T19:20:24.529+00:00] I (620) wifi:wifi driver task: 4087f494, prio:23, stack:6656, core=0
+[2026-09-28T19:20:24.529+00:00] I (626) wifi:wifi firmware version: da143fa
+[2026-09-28T19:20:24.629+00:00] I (629) wifi:wifi certification version: v7.0
+[2026-09-28T19:20:24.629+00:00] I (633) wifi:config NVS flash: disabled
+[2026-09-28T19:20:24.629+00:00] I (636) wifi:config nano formatting: disabled
+[2026-09-28T19:20:24.629+00:00] I (640) wifi:mac_version:HAL_MAC_ESP32AX_761,ut_version:N, band mode:0x1
+[2026-09-28T19:20:24.629+00:00] I (647) wifi:Init data frame dynamic rx buffer num: 8
+[2026-09-28T19:20:24.629+00:00] I (652) wifi:Init static rx mgmt buffer num: 2
+[2026-09-28T19:20:24.629+00:00] I (656) wifi:Init management short buffer num: 8
+[2026-09-28T19:20:24.629+00:00] I (660) wifi:Init dynamic tx buffer num: 8
+[2026-09-28T19:20:24.629+00:00] I (664) wifi:Init static tx FG buffer num: 2
+[2026-09-28T19:20:24.629+00:00] I (668) wifi:Init static rx buffer size: 1700 (rxctrl:92, csi:512)
+[2026-09-28T19:20:24.629+00:00] I (674) wifi:Init static rx buffer num: 4
+[2026-09-28T19:20:24.629+00:00] I (678) wifi:Init dynamic rx buffer num: 8
+[2026-09-28T19:20:24.629+00:00] I (682) wifi_init: accept mbox: 6
+[2026-09-28T19:20:24.629+00:00] I (684) wifi_init: tcpip mbox: 32
+[2026-09-28T19:20:24.629+00:00] I (687) wifi_init: udp mbox: 6
+[2026-09-28T19:20:24.629+00:00] I (690) wifi_init: tcp mbox: 6
+[2026-09-28T19:20:24.629+00:00] I (693) wifi_init: tcp tx win: 5760
+[2026-09-28T19:20:24.629+00:00] I (696) wifi_init: tcp rx win: 5760
+[2026-09-28T19:20:24.629+00:00] I (699) wifi_init: tcp mss: 1440
+[2026-09-28T19:20:24.630+00:00] I (702) wifi_init: WiFi IRAM OP enabled
+[2026-09-28T19:20:24.630+00:00] I (706) wifi_init: WiFi RX IRAM OP enabled
+[2026-09-28T19:20:24.630+00:00] I (710) wifi_init: WiFi SLP IRAM OP enabled
+[2026-09-28T19:20:24.630+00:00] I (714) RouteLoom: Wi-Fi initialized heap: free=118916 largest=102400 min=118888 bytes
+[2026-09-28T19:20:24.630+00:00] I (722) wifi:(2.4G)set country: cc=JP  schan=1 nchan=13 policy=1
+[2026-09-28T19:20:24.630+00:00] I (727) wifi:ifx:0, phymode(new:3, sta nvs: 7 ap nvs: 3)
+[2026-09-28T19:20:24.730+00:00] I (732) phy_init: phy_version 345,552b044,Jul 14 2026,10:37:00
+[2026-09-28T19:20:24.730+00:00] I (832) wifi:11ax coex: WDEVAX_PTI0(0x55777555), WDEVAX_PTI1(0x00003377).
+[2026-09-28T19:20:24.730+00:00] 
+[2026-09-28T19:20:24.730+00:00] I (833) wifi:mode : sta (10:bd:a3:b1:48:a8)
+[2026-09-28T19:20:24.730+00:00] I (833) wifi:enable tsf
+[2026-09-28T19:20:24.831+00:00] I (836) RouteLoom: Wi-Fi started heap: free=116728 largest=100352 min=116464 bytes
+[2026-09-28T19:20:24.831+00:00] I (842) ESPNOW: espnow [version: 2.0] init
+[2026-09-28T19:20:24.831+00:00] I (845) RouteLoom: ESP-NOW ready heap: free=116512 largest=100352 min=116464 bytes
+[2026-09-28T19:20:24.831+00:00] I (857) RouteLoomRef: dev adopted (node 0x2, boot 44)
+[2026-09-28T19:20:24.831+00:00] I (858) RouteLoomRef: security owner started; node start deferred to membership
+[2026-09-28T19:20:24.831+00:00] W (865) RouteLoomRef: diagnostic reason=SECURITY_PROFILE_EXPERIMENTAL peer=0 message=none
+[2026-09-28T19:20:24.831+00:00] W (872) RouteLoomRef: diagnostic reason=ROUTE_REFRESH_BOUND_EXCEEDED peer=0 message=none
+[2026-09-28T19:20:24.831+00:00] I (883) RouteLoomRef: member discovery started
+[2026-09-28T19:20:25.074+00:00] !! send C1-0 -> failed HOP_ACCEPT_TIMEOUT 673.09 ms
+[2026-09-28T19:20:25.933+00:00] I (2028) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-28T19:20:25.933+00:00] W (2028) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-28T19:20:27.080+00:00] !! send C1-1 admitted request=15
+[2026-09-28T19:20:28.039+00:00] I (4055) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-28T19:20:28.039+00:00] W (4055) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-28T19:20:32.115+00:00] !! send C1-1 -> expired DEADLINE_EXPIRED 5035.02 ms
+[2026-09-28T19:20:34.119+00:00] !! send C1-2 admitted request=16
+[2026-09-28T19:20:39.175+00:00] !! send C1-2 -> expired DEADLINE_EXPIRED 5055.32 ms
+[2026-09-28T19:20:41.180+00:00] !! send C1-3 admitted request=17
+[2026-09-28T19:20:46.190+00:00] !! send C1-3 -> expired DEADLINE_EXPIRED 5009.94 ms
+[2026-09-28T19:20:48.195+00:00] !! send C1-4 admitted request=18
+[2026-09-28T19:20:53.203+00:00] !! send C1-4 -> expired DEADLINE_EXPIRED 5008.04 ms
+[2026-09-28T19:20:54.250+00:00] I (30292) RouteLoomRef: discovery event=BOUND peer=3
+[2026-09-28T19:20:54.250+00:00] W (30292) RouteLoomRef: diagnostic reason=BOUND peer=3 message=none
+[2026-09-28T19:20:54.250+00:00] I (30315) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-28T19:20:54.250+00:00] W (30316) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-28T19:20:55.208+00:00] !! send C1-5 admitted request=19
+[2026-09-28T19:20:55.483+00:00] !! send C1-5 -> delivered END_RECEIVED 275.25 ms
+[2026-09-28T19:20:57.489+00:00] !! send C1-6 admitted request=20
+[2026-09-28T19:20:57.605+00:00] !! send C1-6 -> delivered END_RECEIVED 116.52 ms
+[2026-09-28T19:20:59.623+00:00] !! send C1-7 admitted request=21
+[2026-09-28T19:20:59.735+00:00] !! send C1-7 -> delivered END_RECEIVED 112.17 ms
+[2026-09-28T19:21:01.745+00:00] !! send C1-8 admitted request=22
+[2026-09-28T19:21:01.859+00:00] !! send C1-8 -> delivered END_RECEIVED 114.37 ms
+[2026-09-28T19:21:03.864+00:00] !! send C1-9 admitted request=23
+[2026-09-28T19:21:03.976+00:00] !! send C1-9 -> delivered END_RECEIVED 112.03 ms
+[2026-09-28T19:21:05.981+00:00] !! cycle 1 delivered 5/10 recovery_s=30.814
+[2026-09-28T19:21:07.982+00:00] !! cycle 2 reset assert (RTS, DTR low)
+[2026-09-28T19:21:08.022+00:00] ESP-ROM:esp32c6-20220919
+[2026-09-28T19:21:08.022+00:00] Build:Sep 19 2022
+[2026-09-28T19:21:08.022+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x3f (SPI_FAST_FLASH_BOOT)
+[2026-09-28T19:21:08.022+00:00] Saved PC:0x40807866
+[2026-09-28T19:21:08.022+00:00] SPIWP:0xee
+[2026-09-28T19:21:08.022+00:00] mode:DIO, clock div:2
+[2026-09-28T19:21:08.022+00:00] load:0x40875730,len:0x1738
+[2026-09-28T19:21:08.022+00:00] load:0x4086b910,len:0xd8c
+[2026-09-28T19:21:08.022+00:00] load:0x4086e610,len:0x32e0
+[2026-09-28T19:21:08.022+00:00] entry 0x4086b91a
+[2026-09-28T19:21:08.022+00:00] I (23) boot: ESP-IDF v6.0.3 2nd stage bootloader
+[2026-09-28T19:21:08.022+00:00] I (23) boot: compile time Sep 28 2026 17:45:27
+[2026-09-28T19:21:08.022+00:00] I (24) boot: chip revision: v0.2
+[2026-09-28T19:21:08.022+00:00] I (24) boot: efuse block revision: v0.3
+[2026-09-28T19:21:08.022+00:00] I (26) boot.esp32c6: SPI Speed      : 80MHz
+[2026-09-28T19:21:08.022+00:00] I (30) boot.esp32c6: SPI Mode       : DIO
+[2026-09-28T19:21:08.022+00:00] I (34) boot.esp32c6: SPI Flash Size : 4MB
+[2026-09-28T19:21:08.122+00:00] I (38) boot: Enabling RNG early entropy source...
+[2026-09-28T19:21:08.122+00:00] I (42) boot: Partition Table:
+[2026-09-28T19:21:08.122+00:00] I (45) boot: ## Label            Usage          Type ST Offset   Length
+[2026-09-28T19:21:08.122+00:00] I (51) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+[2026-09-28T19:21:08.122+00:00] I (58) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+[2026-09-28T19:21:08.122+00:00] I (64) boot:  2 otadata          OTA data         01 00 00010000 00002000
+[2026-09-28T19:21:08.122+00:00] I (71) boot:  3 rlcfg            WiFi data        01 02 00012000 00006000
+[2026-09-28T19:21:08.122+00:00] I (77) boot:  4 rlkeys           WiFi data        01 02 00018000 00003000
+[2026-09-28T19:21:08.122+00:00] I (84) boot:  5 rlsec            WiFi data        01 02 00020000 00020000
+[2026-09-28T19:21:08.122+00:00] I (90) boot:  6 ota_0            OTA app          00 10 00040000 001d0000
+[2026-09-28T19:21:08.122+00:00] I (97) boot:  7 ota_1            OTA app          00 11 00210000 001d0000
+[2026-09-28T19:21:08.122+00:00] I (103) boot:  8 coredump         Unknown data     01 03 003e0000 00010000
+[2026-09-28T19:21:08.122+00:00] I (110) boot: End of partition table
+[2026-09-28T19:21:08.122+00:00] I (114) esp_image: segment 0: paddr=00040020 vaddr=42120020 size=25d38h (154936) map
+[2026-09-28T19:21:08.223+00:00] I (150) esp_image: segment 1: paddr=00065d60 vaddr=40800000 size=0a2b8h ( 41656) load
+[2026-09-28T19:21:08.223+00:00] I (159) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=11714ch (1143116) map
+[2026-09-28T19:21:08.423+00:00] I (370) esp_image: segment 3: paddr=00187174 vaddr=4080a2b8 size=0fd54h ( 64852) load
+[2026-09-28T19:21:08.423+00:00] I (385) esp_image: segment 4: paddr=00196ed0 vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-28T19:21:08.423+00:00] I (389) esp_image: segment 5: paddr=0019aaec vaddr=50000000 size=00060h (    96) load
+[2026-09-28T19:21:08.423+00:00] I (390) esp_image: segment 6: paddr=0019ab54 vaddr=50000068 size=00024h (    36) load
+[2026-09-28T19:21:08.423+00:00] I (402) boot: Loaded app from partition at offset 0x40000
+[2026-09-28T19:21:08.423+00:00] I (403) boot: Disabling RNG early entropy source...
+[2026-09-28T19:21:08.423+00:00] I (419) cpu_start: Unicore app
+[2026-09-28T19:21:08.423+00:00] I (427) cpu_start: GPIO 17 and 16 are used as console UART I/O pins
+[2026-09-28T19:21:08.423+00:00] I (427) cpu_start: Pro cpu start user code
+[2026-09-28T19:21:08.423+00:00] I (428) cpu_start: cpu freq: 160000000 Hz
+[2026-09-28T19:21:08.423+00:00] I (429) app_init: Application information:
+[2026-09-28T19:21:08.423+00:00] I (433) app_init: Project name:     routeloom_reference_node
+[2026-09-28T19:21:08.482+00:00] !! cycle 2 reset released after 0.500s
+[2026-09-28T19:21:08.487+00:00] !! send C2-0 admitted request=24
+[2026-09-28T19:21:08.523+00:00] I (438) app_init: App version:      1
+[2026-09-28T19:21:08.523+00:00] I (442) app_init: Compile time:     Sep 28 2026 17:39:45
+[2026-09-28T19:21:08.523+00:00] I (447) app_init: ELF file SHA256:  71799c64e...
+[2026-09-28T19:21:08.523+00:00] I (451) app_init: ESP-IDF:          v6.0.3
+[2026-09-28T19:21:08.523+00:00] I (455) efuse_init: Min chip rev:     v0.0
+[2026-09-28T19:21:08.523+00:00] I (459) efuse_init: Max chip rev:     v0.99
+[2026-09-28T19:21:08.523+00:00] I (463) efuse_init: Chip rev:         v0.2
+[2026-09-28T19:21:08.523+00:00] I (467) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-28T19:21:08.523+00:00] I (473) heap_init: At 40851900 len 0002AD10 (171 KiB): RAM
+[2026-09-28T19:21:08.523+00:00] I (478) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+[2026-09-28T19:21:08.523+00:00] I (483) heap_init: At 5000008C len 00003F5C (15 KiB): RTCRAM
+[2026-09-28T19:21:08.523+00:00] I (489) spi_flash: detected chip: generic
+[2026-09-28T19:21:08.523+00:00] I (492) spi_flash: flash io: dio
+[2026-09-28T19:21:08.523+00:00] I (496) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-28T19:21:08.523+00:00] I (502) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-28T19:21:08.523+00:00] I (517) main_task: Started on CPU0
+[2026-09-28T19:21:08.523+00:00] I (519) main_task: Calling app_main()
+[2026-09-28T19:21:08.523+00:00] I (523) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-28T19:21:08.625+00:00] I (569) RouteLoomRef: sdkv1 identity: none provisioned
+[2026-09-28T19:21:08.625+00:00] I (570) RouteLoomRef: sdkv1 site: not a member
+[2026-09-28T19:21:08.625+00:00] I (570) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+[2026-09-28T19:21:08.625+00:00] I (574) RouteLoomRef: sdkv1 local_revocation: none
+[2026-09-28T19:21:08.625+00:00] I (578) RouteLoomRef: sdkv1 lifecycle: none
+[2026-09-28T19:21:08.625+00:00] I (584) RouteLoomRef: routeloom field boot: fw=1 app_sha256=71799c64ead56796ab75a4e7c8c505578cbb7d33a914a759610a284f3678bb19
+[2026-09-28T19:21:08.625+00:00] I (604) RouteLoomRef: board config: gen=1 node=0x2 secrets_gen=1 mac=10bda3b148a8
+[2026-09-28T19:21:08.625+00:00] I (607) RouteLoomRef: security owner ready (node 0x2)
+[2026-09-28T19:21:08.625+00:00] I (608) RouteLoom: Wi-Fi init heap: free=144636 largest=129024 bytes
+[2026-09-28T19:21:08.625+00:00] I (612) pp: pp rom version: 5b8dcfa
+[2026-09-28T19:21:08.625+00:00] I (615) net80211: net80211 rom version: 5b8dcfa
+[2026-09-28T19:21:08.625+00:00] I (620) wifi:wifi driver task: 4087f494, prio:23, stack:6656, core=0
+[2026-09-28T19:21:08.625+00:00] I (626) wifi:wifi firmware version: da143fa
+[2026-09-28T19:21:08.625+00:00] I (629) wifi:wifi certification version: v7.0
+[2026-09-28T19:21:08.625+00:00] I (633) wifi:config NVS flash: disabled
+[2026-09-28T19:21:08.625+00:00] I (636) wifi:config nano formatting: disabled
+[2026-09-28T19:21:08.726+00:00] I (640) wifi:mac_version:HAL_MAC_ESP32AX_761,ut_version:N, band mode:0x1
+[2026-09-28T19:21:08.726+00:00] I (647) wifi:Init data frame dynamic rx buffer num: 8
+[2026-09-28T19:21:08.726+00:00] I (652) wifi:Init static rx mgmt buffer num: 2
+[2026-09-28T19:21:08.726+00:00] I (656) wifi:Init management short buffer num: 8
+[2026-09-28T19:21:08.726+00:00] I (660) wifi:Init dynamic tx buffer num: 8
+[2026-09-28T19:21:08.726+00:00] I (664) wifi:Init static tx FG buffer num: 2
+[2026-09-28T19:21:08.726+00:00] I (668) wifi:Init static rx buffer size: 1700 (rxctrl:92, csi:512)
+[2026-09-28T19:21:08.726+00:00] I (674) wifi:Init static rx buffer num: 4
+[2026-09-28T19:21:08.726+00:00] I (678) wifi:Init dynamic rx buffer num: 8
+[2026-09-28T19:21:08.726+00:00] I (682) wifi_init: accept mbox: 6
+[2026-09-28T19:21:08.726+00:00] I (684) wifi_init: tcpip mbox: 32
+[2026-09-28T19:21:08.726+00:00] I (687) wifi_init: udp mbox: 6
+[2026-09-28T19:21:08.726+00:00] I (690) wifi_init: tcp mbox: 6
+[2026-09-28T19:21:08.726+00:00] I (693) wifi_init: tcp tx win: 5760
+[2026-09-28T19:21:08.726+00:00] I (696) wifi_init: tcp rx win: 5760
+[2026-09-28T19:21:08.726+00:00] I (699) wifi_init: tcp mss: 1440
+[2026-09-28T19:21:08.726+00:00] I (702) wifi_init: WiFi IRAM OP enabled
+[2026-09-28T19:21:08.726+00:00] I (706) wifi_init: WiFi RX IRAM OP enabled
+[2026-09-28T19:21:08.726+00:00] I (710) wifi_init: WiFi SLP IRAM OP enabled
+[2026-09-28T19:21:08.726+00:00] I (714) RouteLoom: Wi-Fi initialized heap: free=118916 largest=102400 min=118888 bytes
+[2026-09-28T19:21:08.726+00:00] I (722) wifi:(2.4G)set country: cc=JP  schan=1 nchan=13 policy=1
+[2026-09-28T19:21:08.726+00:00] I (727) wifi:ifx:0, phymode(new:3, sta nvs: 7 ap nvs: 3)
+[2026-09-28T19:21:08.826+00:00] I (732) phy_init: phy_version 345,552b044,Jul 14 2026,10:37:00
+[2026-09-28T19:21:08.826+00:00] I (836) wifi:11ax coex: WDEVAX_PTI0(0x55777555), WDEVAX_PTI1(0x00003377).
+[2026-09-28T19:21:08.826+00:00] 
+[2026-09-28T19:21:08.826+00:00] I (837) wifi:mode : sta (10:bd:a3:b1:48:a8)
+[2026-09-28T19:21:08.826+00:00] I (837) wifi:enable tsf
+[2026-09-28T19:21:08.926+00:00] I (840) RouteLoom: Wi-Fi started heap: free=116728 largest=100352 min=116464 bytes
+[2026-09-28T19:21:08.926+00:00] I (846) ESPNOW: espnow [version: 2.0] init
+[2026-09-28T19:21:08.926+00:00] I (849) RouteLoom: ESP-NOW ready heap: free=116512 largest=100352 min=116464 bytes
+[2026-09-28T19:21:08.926+00:00] I (861) RouteLoomRef: dev adopted (node 0x2, boot 45)
+[2026-09-28T19:21:08.926+00:00] I (862) RouteLoomRef: security owner started; node start deferred to membership
+[2026-09-28T19:21:08.926+00:00] W (869) RouteLoomRef: diagnostic reason=SECURITY_PROFILE_EXPERIMENTAL peer=0 message=none
+[2026-09-28T19:21:08.926+00:00] W (876) RouteLoomRef: diagnostic reason=ROUTE_REFRESH_BOUND_EXCEEDED peer=0 message=none
+[2026-09-28T19:21:08.926+00:00] I (887) RouteLoomRef: member discovery started
+[2026-09-28T19:21:09.155+00:00] !! send C2-0 -> failed HOP_ACCEPT_TIMEOUT 667.8 ms
+[2026-09-28T19:21:09.828+00:00] I (1804) RouteLoomRef: discovery event=BOUND peer=3
+[2026-09-28T19:21:09.828+00:00] W (1804) RouteLoomRef: diagnostic reason=BOUND peer=3 message=none
+[2026-09-28T19:21:09.828+00:00] I (1842) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-28T19:21:09.828+00:00] W (1842) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-28T19:21:11.159+00:00] !! send C2-1 admitted request=25
+[2026-09-28T19:21:11.553+00:00] !! send C2-1 -> failed HOP_ACCEPT_TIMEOUT 393.47 ms
+[2026-09-28T19:21:13.556+00:00] !! send C2-2 admitted request=26
+[2026-09-28T19:21:13.938+00:00] !! send C2-2 -> failed HOP_ACCEPT_TIMEOUT 382.16 ms
+[2026-09-28T19:21:15.945+00:00] !! send C2-3 admitted request=27
+[2026-09-28T19:21:16.450+00:00] !! send C2-3 -> failed HOP_ACCEPT_TIMEOUT 504.76 ms
+[2026-09-28T19:21:18.455+00:00] !! send C2-4 admitted request=28
+[2026-09-28T19:21:18.841+00:00] !! send C2-4 -> failed HOP_ACCEPT_TIMEOUT 386.66 ms
+[2026-09-28T19:21:20.845+00:00] !! send C2-5 admitted request=29
+[2026-09-28T19:21:25.871+00:00] !! send C2-5 -> expired DEADLINE_EXPIRED 5025.39 ms
+[2026-09-28T19:21:27.877+00:00] !! send C2-6 admitted request=30
+[2026-09-28T19:21:32.898+00:00] !! send C2-6 -> expired DEADLINE_EXPIRED 5021.02 ms
+[2026-09-28T19:21:34.904+00:00] !! send C2-7 admitted request=31
+[2026-09-28T19:21:39.921+00:00] !! send C2-7 -> expired DEADLINE_EXPIRED 5017.19 ms
+[2026-09-28T19:21:41.046+00:00] I (32976) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-28T19:21:41.046+00:00] W (32976) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-28T19:21:41.046+00:00] I (33000) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-28T19:21:41.046+00:00] W (33000) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-28T19:21:41.926+00:00] !! send C2-8 admitted request=32
+[2026-09-28T19:21:42.200+00:00] !! send C2-8 -> delivered END_RECEIVED 274.09 ms
+[2026-09-28T19:21:44.204+00:00] !! send C2-9 admitted request=33
+[2026-09-28T19:21:44.319+00:00] !! send C2-9 -> delivered END_RECEIVED 114.99 ms
+[2026-09-28T19:21:46.324+00:00] !! cycle 2 delivered 2/10 recovery_s=33.444
+[2026-09-28T19:21:48.324+00:00] !! cycle 3 reset assert (RTS, DTR low)
+[2026-09-28T19:21:48.365+00:00] ESP-ROM:esp32c6-20220919
+[2026-09-28T19:21:48.366+00:00] Build:Sep 19 2022
+[2026-09-28T19:21:48.366+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x3f (SPI_FAST_FLASH_BOOT)
+[2026-09-28T19:21:48.366+00:00] Saved PC:0x40807866
+[2026-09-28T19:21:48.366+00:00] SPIWP:0xee
+[2026-09-28T19:21:48.366+00:00] mode:DIO, clock div:2
+[2026-09-28T19:21:48.366+00:00] load:0x40875730,len:0x1738
+[2026-09-28T19:21:48.366+00:00] load:0x4086b910,len:0xd8c
+[2026-09-28T19:21:48.366+00:00] load:0x4086e610,len:0x32e0
+[2026-09-28T19:21:48.366+00:00] entry 0x4086b91a
+[2026-09-28T19:21:48.366+00:00] I (23) boot: ESP-IDF v6.0.3 2nd stage bootloader
+[2026-09-28T19:21:48.366+00:00] I (23) boot: compile time Sep 28 2026 17:45:27
+[2026-09-28T19:21:48.366+00:00] I (24) boot: chip revision: v0.2
+[2026-09-28T19:21:48.366+00:00] I (24) boot: efuse block revision: v0.3
+[2026-09-28T19:21:48.366+00:00] I (26) boot.esp32c6: SPI Speed      : 80MHz
+[2026-09-28T19:21:48.366+00:00] I (30) boot.esp32c6: SPI Mode       : DIO
+[2026-09-28T19:21:48.366+00:00] I (34) boot.esp32c6: SPI Flash Size : 4MB
+[2026-09-28T19:21:48.466+00:00] I (38) boot: Enabling RNG early entropy source...
+[2026-09-28T19:21:48.466+00:00] I (42) boot: Partition Table:
+[2026-09-28T19:21:48.466+00:00] I (45) boot: ## Label            Usage          Type ST Offset   Length
+[2026-09-28T19:21:48.466+00:00] I (51) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+[2026-09-28T19:21:48.466+00:00] I (58) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+[2026-09-28T19:21:48.466+00:00] I (64) boot:  2 otadata          OTA data         01 00 00010000 00002000
+[2026-09-28T19:21:48.466+00:00] I (71) boot:  3 rlcfg            WiFi data        01 02 00012000 00006000
+[2026-09-28T19:21:48.466+00:00] I (77) boot:  4 rlkeys           WiFi data        01 02 00018000 00003000
+[2026-09-28T19:21:48.466+00:00] I (84) boot:  5 rlsec            WiFi data        01 02 00020000 00020000
+[2026-09-28T19:21:48.466+00:00] I (90) boot:  6 ota_0            OTA app          00 10 00040000 001d0000
+[2026-09-28T19:21:48.466+00:00] I (97) boot:  7 ota_1            OTA app          00 11 00210000 001d0000
+[2026-09-28T19:21:48.466+00:00] I (103) boot:  8 coredump         Unknown data     01 03 003e0000 00010000
+[2026-09-28T19:21:48.466+00:00] I (110) boot: End of partition table
+[2026-09-28T19:21:48.466+00:00] I (114) esp_image: segment 0: paddr=00040020 vaddr=42120020 size=25d38h (154936) map
+[2026-09-28T19:21:48.566+00:00] I (150) esp_image: segment 1: paddr=00065d60 vaddr=40800000 size=0a2b8h ( 41656) load
+[2026-09-28T19:21:48.566+00:00] I (159) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=11714ch (1143116) map
+[2026-09-28T19:21:48.766+00:00] I (370) esp_image: segment 3: paddr=00187174 vaddr=4080a2b8 size=0fd54h ( 64852) load
+[2026-09-28T19:21:48.766+00:00] I (385) esp_image: segment 4: paddr=00196ed0 vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-28T19:21:48.766+00:00] I (389) esp_image: segment 5: paddr=0019aaec vaddr=50000000 size=00060h (    96) load
+[2026-09-28T19:21:48.766+00:00] I (390) esp_image: segment 6: paddr=0019ab54 vaddr=50000068 size=00024h (    36) load
+[2026-09-28T19:21:48.766+00:00] I (402) boot: Loaded app from partition at offset 0x40000
+[2026-09-28T19:21:48.766+00:00] I (403) boot: Disabling RNG early entropy source...
+[2026-09-28T19:21:48.766+00:00] I (419) cpu_start: Unicore app
+[2026-09-28T19:21:48.766+00:00] I (427) cpu_start: GPIO 17 and 16 are used as console UART I/O pins
+[2026-09-28T19:21:48.766+00:00] I (427) cpu_start: Pro cpu start user code
+[2026-09-28T19:21:48.766+00:00] I (428) cpu_start: cpu freq: 160000000 Hz
+[2026-09-28T19:21:48.766+00:00] I (429) app_init: Application information:
+[2026-09-28T19:21:48.766+00:00] I (433) app_init: Project name:     routeloom_reference_node
+[2026-09-28T19:21:48.825+00:00] !! cycle 3 reset released after 0.500s
+[2026-09-28T19:21:48.829+00:00] !! send C3-0 admitted request=34
+[2026-09-28T19:21:48.867+00:00] I (438) app_init: App version:      1
+[2026-09-28T19:21:48.867+00:00] I (442) app_init: Compile time:     Sep 28 2026 17:39:45
+[2026-09-28T19:21:48.867+00:00] I (447) app_init: ELF file SHA256:  71799c64e...
+[2026-09-28T19:21:48.867+00:00] I (451) app_init: ESP-IDF:          v6.0.3
+[2026-09-28T19:21:48.867+00:00] I (455) efuse_init: Min chip rev:     v0.0
+[2026-09-28T19:21:48.867+00:00] I (459) efuse_init: Max chip rev:     v0.99
+[2026-09-28T19:21:48.867+00:00] I (463) efuse_init: Chip rev:         v0.2
+[2026-09-28T19:21:48.867+00:00] I (467) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-28T19:21:48.867+00:00] I (473) heap_init: At 40851900 len 0002AD10 (171 KiB): RAM
+[2026-09-28T19:21:48.867+00:00] I (478) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+[2026-09-28T19:21:48.867+00:00] I (483) heap_init: At 5000008C len 00003F5C (15 KiB): RTCRAM
+[2026-09-28T19:21:48.867+00:00] I (489) spi_flash: detected chip: generic
+[2026-09-28T19:21:48.867+00:00] I (492) spi_flash: flash io: dio
+[2026-09-28T19:21:48.867+00:00] I (496) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-28T19:21:48.867+00:00] I (502) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-28T19:21:48.867+00:00] I (517) main_task: Started on CPU0
+[2026-09-28T19:21:48.867+00:00] I (519) main_task: Calling app_main()
+[2026-09-28T19:21:48.867+00:00] I (523) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-28T19:21:48.967+00:00] I (569) RouteLoomRef: sdkv1 identity: none provisioned
+[2026-09-28T19:21:48.967+00:00] I (570) RouteLoomRef: sdkv1 site: not a member
+[2026-09-28T19:21:48.967+00:00] I (570) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+[2026-09-28T19:21:48.967+00:00] I (574) RouteLoomRef: sdkv1 local_revocation: none
+[2026-09-28T19:21:48.967+00:00] I (578) RouteLoomRef: sdkv1 lifecycle: none
+[2026-09-28T19:21:48.967+00:00] I (584) RouteLoomRef: routeloom field boot: fw=1 app_sha256=71799c64ead56796ab75a4e7c8c505578cbb7d33a914a759610a284f3678bb19
+[2026-09-28T19:21:48.967+00:00] I (604) RouteLoomRef: board config: gen=1 node=0x2 secrets_gen=1 mac=10bda3b148a8
+[2026-09-28T19:21:48.967+00:00] I (607) RouteLoomRef: security owner ready (node 0x2)
+[2026-09-28T19:21:48.967+00:00] I (608) RouteLoom: Wi-Fi init heap: free=144636 largest=129024 bytes
+[2026-09-28T19:21:48.967+00:00] I (612) pp: pp rom version: 5b8dcfa
+[2026-09-28T19:21:48.967+00:00] I (615) net80211: net80211 rom version: 5b8dcfa
+[2026-09-28T19:21:48.967+00:00] I (620) wifi:wifi driver task: 4087f494, prio:23, stack:6656, core=0
+[2026-09-28T19:21:48.967+00:00] I (626) wifi:wifi firmware version: da143fa
+[2026-09-28T19:21:48.967+00:00] I (629) wifi:wifi certification version: v7.0
+[2026-09-28T19:21:48.967+00:00] I (633) wifi:config NVS flash: disabled
+[2026-09-28T19:21:48.967+00:00] I (636) wifi:config nano formatting: disabled
+[2026-09-28T19:21:49.067+00:00] I (640) wifi:mac_version:HAL_MAC_ESP32AX_761,ut_version:N, band mode:0x1
+[2026-09-28T19:21:49.067+00:00] I (647) wifi:Init data frame dynamic rx buffer num: 8
+[2026-09-28T19:21:49.067+00:00] I (652) wifi:Init static rx mgmt buffer num: 2
+[2026-09-28T19:21:49.067+00:00] I (656) wifi:Init management short buffer num: 8
+[2026-09-28T19:21:49.067+00:00] I (660) wifi:Init dynamic tx buffer num: 8
+[2026-09-28T19:21:49.067+00:00] I (664) wifi:Init static tx FG buffer num: 2
+[2026-09-28T19:21:49.067+00:00] I (668) wifi:Init static rx buffer size: 1700 (rxctrl:92, csi:512)
+[2026-09-28T19:21:49.067+00:00] I (674) wifi:Init static rx buffer num: 4
+[2026-09-28T19:21:49.067+00:00] I (678) wifi:Init dynamic rx buffer num: 8
+[2026-09-28T19:21:49.067+00:00] I (682) wifi_init: accept mbox: 6
+[2026-09-28T19:21:49.067+00:00] I (684) wifi_init: tcpip mbox: 32
+[2026-09-28T19:21:49.067+00:00] I (687) wifi_init: udp mbox: 6
+[2026-09-28T19:21:49.067+00:00] I (690) wifi_init: tcp mbox: 6
+[2026-09-28T19:21:49.067+00:00] I (693) wifi_init: tcp tx win: 5760
+[2026-09-28T19:21:49.067+00:00] I (696) wifi_init: tcp rx win: 5760
+[2026-09-28T19:21:49.067+00:00] I (699) wifi_init: tcp mss: 1440
+[2026-09-28T19:21:49.067+00:00] I (702) wifi_init: WiFi IRAM OP enabled
+[2026-09-28T19:21:49.067+00:00] I (706) wifi_init: WiFi RX IRAM OP enabled
+[2026-09-28T19:21:49.067+00:00] I (710) wifi_init: WiFi SLP IRAM OP enabled
+[2026-09-28T19:21:49.067+00:00] I (714) RouteLoom: Wi-Fi initialized heap: free=118916 largest=102400 min=118888 bytes
+[2026-09-28T19:21:49.067+00:00] I (722) wifi:(2.4G)set country: cc=JP  schan=1 nchan=13 policy=1
+[2026-09-28T19:21:49.067+00:00] I (727) wifi:ifx:0, phymode(new:3, sta nvs: 7 ap nvs: 3)
+[2026-09-28T19:21:49.168+00:00] I (732) phy_init: phy_version 345,552b044,Jul 14 2026,10:37:00
+[2026-09-28T19:21:49.168+00:00] I (838) wifi:11ax coex: WDEVAX_PTI0(0x55777555), WDEVAX_PTI1(0x00003377).
+[2026-09-28T19:21:49.168+00:00] 
+[2026-09-28T19:21:49.168+00:00] I (839) wifi:mode : sta (10:bd:a3:b1:48:a8)
+[2026-09-28T19:21:49.168+00:00] I (839) wifi:enable tsf
+[2026-09-28T19:21:49.268+00:00] I (842) RouteLoom: Wi-Fi started heap: free=116728 largest=100352 min=116464 bytes
+[2026-09-28T19:21:49.268+00:00] I (848) ESPNOW: espnow [version: 2.0] init
+[2026-09-28T19:21:49.268+00:00] I (851) RouteLoom: ESP-NOW ready heap: free=116512 largest=100352 min=116464 bytes
+[2026-09-28T19:21:49.268+00:00] I (864) RouteLoomRef: dev adopted (node 0x2, boot 46)
+[2026-09-28T19:21:49.268+00:00] I (864) RouteLoomRef: security owner started; node start deferred to membership
+[2026-09-28T19:21:49.268+00:00] W (871) RouteLoomRef: diagnostic reason=SECURITY_PROFILE_EXPERIMENTAL peer=0 message=none
+[2026-09-28T19:21:49.268+00:00] W (878) RouteLoomRef: diagnostic reason=ROUTE_REFRESH_BOUND_EXCEEDED peer=0 message=none
+[2026-09-28T19:21:49.268+00:00] I (889) RouteLoomRef: member discovery started
+[2026-09-28T19:21:49.500+00:00] !! send C3-0 -> failed HOP_ACCEPT_TIMEOUT 670.64 ms
+[2026-09-28T19:21:49.669+00:00] I (1335) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-28T19:21:49.669+00:00] W (1335) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-28T19:21:51.504+00:00] !! send C3-1 admitted request=35
+[2026-09-28T19:21:51.774+00:00] I (3362) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-28T19:21:51.774+00:00] W (3362) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-28T19:21:56.560+00:00] !! send C3-1 -> expired DEADLINE_EXPIRED 5055.97 ms
+[2026-09-28T19:21:58.566+00:00] !! send C3-2 admitted request=36
+[2026-09-28T19:22:03.599+00:00] !! send C3-2 -> expired DEADLINE_EXPIRED 5032.12 ms
+[2026-09-28T19:22:05.604+00:00] !! send C3-3 admitted request=37
+[2026-09-28T19:22:10.633+00:00] !! send C3-3 -> expired DEADLINE_EXPIRED 5029.74 ms
+[2026-09-28T19:22:12.192+00:00] I (23803) RouteLoomRef: discovery event=BOUND peer=3
+[2026-09-28T19:22:12.192+00:00] W (23803) RouteLoomRef: diagnostic reason=BOUND peer=3 message=none
+[2026-09-28T19:22:12.192+00:00] I (23828) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-28T19:22:12.192+00:00] W (23828) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-28T19:22:12.637+00:00] !! send C3-4 admitted request=38
+[2026-09-28T19:22:13.415+00:00] !! send C3-4 -> delivered END_RECEIVED 778.08 ms
+[2026-09-28T19:22:15.420+00:00] !! send C3-5 admitted request=39
+[2026-09-28T19:22:15.533+00:00] !! send C3-5 -> delivered END_RECEIVED 112.92 ms
+[2026-09-28T19:22:17.540+00:00] !! send C3-6 admitted request=40
+[2026-09-28T19:22:17.658+00:00] !! send C3-6 -> delivered END_RECEIVED 117.79 ms
+[2026-09-28T19:22:19.660+00:00] !! send C3-7 admitted request=41
+[2026-09-28T19:22:19.764+00:00] !! send C3-7 -> delivered END_RECEIVED 104.56 ms
+[2026-09-28T19:22:21.766+00:00] !! send C3-8 admitted request=42
+[2026-09-28T19:22:21.872+00:00] !! send C3-8 -> delivered END_RECEIVED 105.51 ms
+[2026-09-28T19:22:23.875+00:00] !! send C3-9 admitted request=43
+[2026-09-28T19:22:23.986+00:00] !! send C3-9 -> delivered END_RECEIVED 110.74 ms
+[2026-09-28T19:22:25.991+00:00] !! cycle 3 delivered 6/10 recovery_s=23.812
+[2026-09-28T19:22:27.992+00:00] !! cycle 4 reset assert (RTS, DTR low)
+[2026-09-28T19:22:28.021+00:00] ESP-ROM:esp32c6-20220919
+[2026-09-28T19:22:28.021+00:00] Build:Sep 19 2022
+[2026-09-28T19:22:28.021+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x3f (SPI_FAST_FLASH_BOOT)
+[2026-09-28T19:22:28.021+00:00] Saved PC:0x4204a3ae
+[2026-09-28T19:22:28.021+00:00] SPIWP:0xee
+[2026-09-28T19:22:28.021+00:00] mode:DIO, clock div:2
+[2026-09-28T19:22:28.021+00:00] load:0x40875730,len:0x1738
+[2026-09-28T19:22:28.021+00:00] load:0x4086b910,len:0xd8c
+[2026-09-28T19:22:28.021+00:00] load:0x4086e610,len:0x32e0
+[2026-09-28T19:22:28.021+00:00] entry 0x4086b91a
+[2026-09-28T19:22:28.021+00:00] I (23) boot: ESP-IDF v6.0.3 2nd stage bootloader
+[2026-09-28T19:22:28.021+00:00] I (23) boot: compile time Sep 28 2026 17:45:27
+[2026-09-28T19:22:28.021+00:00] I (24) boot: chip revision: v0.2
+[2026-09-28T19:22:28.021+00:00] I (24) boot: efuse block revision: v0.3
+[2026-09-28T19:22:28.121+00:00] I (26) boot.esp32c6: SPI Speed      : 80MHz
+[2026-09-28T19:22:28.121+00:00] I (30) boot.esp32c6: SPI Mode       : DIO
+[2026-09-28T19:22:28.121+00:00] I (34) boot.esp32c6: SPI Flash Size : 4MB
+[2026-09-28T19:22:28.121+00:00] I (38) boot: Enabling RNG early entropy source...
+[2026-09-28T19:22:28.121+00:00] I (42) boot: Partition Table:
+[2026-09-28T19:22:28.121+00:00] I (45) boot: ## Label            Usage          Type ST Offset   Length
+[2026-09-28T19:22:28.121+00:00] I (51) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+[2026-09-28T19:22:28.121+00:00] I (58) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+[2026-09-28T19:22:28.121+00:00] I (64) boot:  2 otadata          OTA data         01 00 00010000 00002000
+[2026-09-28T19:22:28.121+00:00] I (71) boot:  3 rlcfg            WiFi data        01 02 00012000 00006000
+[2026-09-28T19:22:28.121+00:00] I (77) boot:  4 rlkeys           WiFi data        01 02 00018000 00003000
+[2026-09-28T19:22:28.121+00:00] I (84) boot:  5 rlsec            WiFi data        01 02 00020000 00020000
+[2026-09-28T19:22:28.121+00:00] I (90) boot:  6 ota_0            OTA app          00 10 00040000 001d0000
+[2026-09-28T19:22:28.121+00:00] I (97) boot:  7 ota_1            OTA app          00 11 00210000 001d0000
+[2026-09-28T19:22:28.121+00:00] I (103) boot:  8 coredump         Unknown data     01 03 003e0000 00010000
+[2026-09-28T19:22:28.121+00:00] I (110) boot: End of partition table
+[2026-09-28T19:22:28.121+00:00] I (114) esp_image: segment 0: paddr=00040020 vaddr=42120020 size=25d38h (154936) map
+[2026-09-28T19:22:28.224+00:00] I (150) esp_image: segment 1: paddr=00065d60 vaddr=40800000 size=0a2b8h ( 41656) load
+[2026-09-28T19:22:28.224+00:00] I (159) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=11714ch (1143116) map
+[2026-09-28T19:22:28.425+00:00] I (370) esp_image: segment 3: paddr=00187174 vaddr=4080a2b8 size=0fd54h ( 64852) load
+[2026-09-28T19:22:28.425+00:00] I (385) esp_image: segment 4: paddr=00196ed0 vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-28T19:22:28.425+00:00] I (389) esp_image: segment 5: paddr=0019aaec vaddr=50000000 size=00060h (    96) load
+[2026-09-28T19:22:28.425+00:00] I (390) esp_image: segment 6: paddr=0019ab54 vaddr=50000068 size=00024h (    36) load
+[2026-09-28T19:22:28.425+00:00] I (402) boot: Loaded app from partition at offset 0x40000
+[2026-09-28T19:22:28.425+00:00] I (403) boot: Disabling RNG early entropy source...
+[2026-09-28T19:22:28.425+00:00] I (419) cpu_start: Unicore app
+[2026-09-28T19:22:28.425+00:00] I (427) cpu_start: GPIO 17 and 16 are used as console UART I/O pins
+[2026-09-28T19:22:28.425+00:00] I (427) cpu_start: Pro cpu start user code
+[2026-09-28T19:22:28.425+00:00] I (428) cpu_start: cpu freq: 160000000 Hz
+[2026-09-28T19:22:28.492+00:00] !! cycle 4 reset released after 0.500s
+[2026-09-28T19:22:28.497+00:00] !! send C4-0 admitted request=44
+[2026-09-28T19:22:28.525+00:00] I (429) app_init: Application information:
+[2026-09-28T19:22:28.525+00:00] I (433) app_init: Project name:     routeloom_reference_node
+[2026-09-28T19:22:28.525+00:00] I (438) app_init: App version:      1
+[2026-09-28T19:22:28.525+00:00] I (442) app_init: Compile time:     Sep 28 2026 17:39:45
+[2026-09-28T19:22:28.525+00:00] I (447) app_init: ELF file SHA256:  71799c64e...
+[2026-09-28T19:22:28.525+00:00] I (451) app_init: ESP-IDF:          v6.0.3
+[2026-09-28T19:22:28.525+00:00] I (455) efuse_init: Min chip rev:     v0.0
+[2026-09-28T19:22:28.525+00:00] I (459) efuse_init: Max chip rev:     v0.99
+[2026-09-28T19:22:28.525+00:00] I (463) efuse_init: Chip rev:         v0.2
+[2026-09-28T19:22:28.525+00:00] I (467) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-28T19:22:28.525+00:00] I (473) heap_init: At 40851900 len 0002AD10 (171 KiB): RAM
+[2026-09-28T19:22:28.525+00:00] I (478) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+[2026-09-28T19:22:28.525+00:00] I (483) heap_init: At 5000008C len 00003F5C (15 KiB): RTCRAM
+[2026-09-28T19:22:28.525+00:00] I (489) spi_flash: detected chip: generic
+[2026-09-28T19:22:28.525+00:00] I (492) spi_flash: flash io: dio
+[2026-09-28T19:22:28.525+00:00] I (496) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-28T19:22:28.525+00:00] I (502) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-28T19:22:28.525+00:00] I (517) main_task: Started on CPU0
+[2026-09-28T19:22:28.525+00:00] I (519) main_task: Calling app_main()
+[2026-09-28T19:22:28.525+00:00] I (523) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-28T19:22:28.626+00:00] I (569) RouteLoomRef: sdkv1 identity: none provisioned
+[2026-09-28T19:22:28.626+00:00] I (570) RouteLoomRef: sdkv1 site: not a member
+[2026-09-28T19:22:28.626+00:00] I (570) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+[2026-09-28T19:22:28.626+00:00] I (574) RouteLoomRef: sdkv1 local_revocation: none
+[2026-09-28T19:22:28.626+00:00] I (578) RouteLoomRef: sdkv1 lifecycle: none
+[2026-09-28T19:22:28.626+00:00] I (584) RouteLoomRef: routeloom field boot: fw=1 app_sha256=71799c64ead56796ab75a4e7c8c505578cbb7d33a914a759610a284f3678bb19
+[2026-09-28T19:22:28.626+00:00] I (604) RouteLoomRef: board config: gen=1 node=0x2 secrets_gen=1 mac=10bda3b148a8
+[2026-09-28T19:22:28.626+00:00] I (607) RouteLoomRef: security owner ready (node 0x2)
+[2026-09-28T19:22:28.626+00:00] I (608) RouteLoom: Wi-Fi init heap: free=144636 largest=129024 bytes
+[2026-09-28T19:22:28.626+00:00] I (612) pp: pp rom version: 5b8dcfa
+[2026-09-28T19:22:28.626+00:00] I (615) net80211: net80211 rom version: 5b8dcfa
+[2026-09-28T19:22:28.626+00:00] I (620) wifi:wifi driver task: 4087f494, prio:23, stack:6656, core=0
+[2026-09-28T19:22:28.626+00:00] I (626) wifi:wifi firmware version: da143fa
+[2026-09-28T19:22:28.726+00:00] I (629) wifi:wifi certification version: v7.0
+[2026-09-28T19:22:28.726+00:00] I (633) wifi:config NVS flash: disabled
+[2026-09-28T19:22:28.726+00:00] I (636) wifi:config nano formatting: disabled
+[2026-09-28T19:22:28.726+00:00] I (640) wifi:mac_version:HAL_MAC_ESP32AX_761,ut_version:N, band mode:0x1
+[2026-09-28T19:22:28.726+00:00] I (647) wifi:Init data frame dynamic rx buffer num: 8
+[2026-09-28T19:22:28.726+00:00] I (652) wifi:Init static rx mgmt buffer num: 2
+[2026-09-28T19:22:28.726+00:00] I (656) wifi:Init management short buffer num: 8
+[2026-09-28T19:22:28.726+00:00] I (660) wifi:Init dynamic tx buffer num: 8
+[2026-09-28T19:22:28.726+00:00] I (664) wifi:Init static tx FG buffer num: 2
+[2026-09-28T19:22:28.726+00:00] I (668) wifi:Init static rx buffer size: 1700 (rxctrl:92, csi:512)
+[2026-09-28T19:22:28.726+00:00] I (674) wifi:Init static rx buffer num: 4
+[2026-09-28T19:22:28.726+00:00] I (678) wifi:Init dynamic rx buffer num: 8
+[2026-09-28T19:22:28.726+00:00] I (682) wifi_init: accept mbox: 6
+[2026-09-28T19:22:28.726+00:00] I (684) wifi_init: tcpip mbox: 32
+[2026-09-28T19:22:28.726+00:00] I (687) wifi_init: udp mbox: 6
+[2026-09-28T19:22:28.726+00:00] I (690) wifi_init: tcp mbox: 6
+[2026-09-28T19:22:28.726+00:00] I (693) wifi_init: tcp tx win: 5760
+[2026-09-28T19:22:28.726+00:00] I (696) wifi_init: tcp rx win: 5760
+[2026-09-28T19:22:28.726+00:00] I (699) wifi_init: tcp mss: 1440
+[2026-09-28T19:22:28.726+00:00] I (702) wifi_init: WiFi IRAM OP enabled
+[2026-09-28T19:22:28.726+00:00] I (706) wifi_init: WiFi RX IRAM OP enabled
+[2026-09-28T19:22:28.726+00:00] I (710) wifi_init: WiFi SLP IRAM OP enabled
+[2026-09-28T19:22:28.726+00:00] I (714) RouteLoom: Wi-Fi initialized heap: free=118916 largest=102400 min=118888 bytes
+[2026-09-28T19:22:28.726+00:00] I (722) wifi:(2.4G)set country: cc=JP  schan=1 nchan=13 policy=1
+[2026-09-28T19:22:28.726+00:00] I (727) wifi:ifx:0, phymode(new:3, sta nvs: 7 ap nvs: 3)
+[2026-09-28T19:22:28.826+00:00] I (732) phy_init: phy_version 345,552b044,Jul 14 2026,10:37:00
+[2026-09-28T19:22:28.826+00:00] I (829) wifi:11ax coex: WDEVAX_PTI0(0x55777555), WDEVAX_PTI1(0x00003377).
+[2026-09-28T19:22:28.826+00:00] 
+[2026-09-28T19:22:28.826+00:00] I (830) wifi:mode : sta (10:bd:a3:b1:48:a8)
+[2026-09-28T19:22:28.826+00:00] I (831) wifi:enable tsf
+[2026-09-28T19:22:28.926+00:00] I (834) RouteLoom: Wi-Fi started heap: free=116728 largest=100352 min=116464 bytes
+[2026-09-28T19:22:28.926+00:00] I (839) ESPNOW: espnow [version: 2.0] init
+[2026-09-28T19:22:28.926+00:00] I (843) RouteLoom: ESP-NOW ready heap: free=116512 largest=100352 min=116464 bytes
+[2026-09-28T19:22:28.926+00:00] I (855) RouteLoomRef: dev adopted (node 0x2, boot 47)
+[2026-09-28T19:22:28.926+00:00] I (856) RouteLoomRef: security owner started; node start deferred to membership
+[2026-09-28T19:22:28.926+00:00] W (863) RouteLoomRef: diagnostic reason=SECURITY_PROFILE_EXPERIMENTAL peer=0 message=none
+[2026-09-28T19:22:28.926+00:00] W (870) RouteLoomRef: diagnostic reason=ROUTE_REFRESH_BOUND_EXCEEDED peer=0 message=none
+[2026-09-28T19:22:28.926+00:00] I (881) RouteLoomRef: member discovery started
+[2026-09-28T19:22:29.161+00:00] !! send C4-0 -> failed HOP_ACCEPT_TIMEOUT 664.16 ms
+[2026-09-28T19:22:29.928+00:00] I (1899) RouteLoomRef: discovery event=BOUND peer=3
+[2026-09-28T19:22:29.928+00:00] W (1899) RouteLoomRef: diagnostic reason=BOUND peer=3 message=none
+[2026-09-28T19:22:31.164+00:00] !! send C4-1 admitted request=45
+[2026-09-28T19:22:31.580+00:00] !! send C4-1 -> failed HOP_ACCEPT_TIMEOUT 415.4 ms
+[2026-09-28T19:22:31.931+00:00] I (3927) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-28T19:22:31.931+00:00] W (3928) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-28T19:22:33.584+00:00] !! send C4-2 admitted request=46
+[2026-09-28T19:22:33.972+00:00] !! send C4-2 -> failed HOP_ACCEPT_TIMEOUT 387.73 ms
+[2026-09-28T19:22:35.976+00:00] !! send C4-3 admitted request=47
+[2026-09-28T19:22:36.368+00:00] !! send C4-3 -> failed HOP_ACCEPT_TIMEOUT 392.42 ms
+[2026-09-28T19:22:38.373+00:00] !! send C4-4 admitted request=48
+[2026-09-28T19:22:38.765+00:00] !! send C4-4 -> failed HOP_ACCEPT_TIMEOUT 392.72 ms
+[2026-09-28T19:22:40.772+00:00] !! send C4-5 admitted request=49
+[2026-09-28T19:22:41.163+00:00] !! send C4-5 -> failed HOP_ACCEPT_TIMEOUT 390.91 ms
+[2026-09-28T19:22:43.166+00:00] !! send C4-6 admitted request=50
+[2026-09-28T19:22:48.200+00:00] !! send C4-6 -> expired DEADLINE_EXPIRED 5034.75 ms
+[2026-09-28T19:22:50.202+00:00] !! send C4-7 admitted request=51
+[2026-09-28T19:22:54.076+00:00] I (25985) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-28T19:22:54.076+00:00] W (25985) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-28T19:22:54.076+00:00] I (26008) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-28T19:22:54.076+00:00] W (26009) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-28T19:22:55.255+00:00] !! send C4-7 -> delivered END_RECEIVED 5053.17 ms
+[2026-09-28T19:22:57.258+00:00] !! send C4-8 admitted request=52
+[2026-09-28T19:22:57.367+00:00] !! send C4-8 -> delivered END_RECEIVED 109.17 ms
+[2026-09-28T19:22:59.369+00:00] !! send C4-9 admitted request=53
+[2026-09-28T19:22:59.477+00:00] !! send C4-9 -> delivered END_RECEIVED 107.48 ms
+[2026-09-28T19:23:01.481+00:00] !! cycle 4 delivered 3/10 recovery_s=21.71
+[2026-09-28T19:23:03.482+00:00] !! cycle 5 reset assert (RTS, DTR low)
+[2026-09-28T19:23:03.496+00:00] ESP-ROM:esp32c6-20220919
+[2026-09-28T19:23:03.496+00:00] Build:Sep 19 2022
+[2026-09-28T19:23:03.496+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x3f (SPI_FAST_FLASH_BOOT)
+[2026-09-28T19:23:03.496+00:00] Saved PC:0x40807866
+[2026-09-28T19:23:03.496+00:00] SPIWP:0xee
+[2026-09-28T19:23:03.496+00:00] mode:DIO, clock div:2
+[2026-09-28T19:23:03.496+00:00] load:0x40875730,len:0x1738
+[2026-09-28T19:23:03.496+00:00] load:0x4086b910,len:0xd8c
+[2026-09-28T19:23:03.496+00:00] load:0x4086e610,len:0x32e0
+[2026-09-28T19:23:03.496+00:00] entry 0x4086b91a
+[2026-09-28T19:23:03.597+00:00] I (23) boot: ESP-IDF v6.0.3 2nd stage bootloader
+[2026-09-28T19:23:03.597+00:00] I (23) boot: compile time Sep 28 2026 17:45:27
+[2026-09-28T19:23:03.597+00:00] I (24) boot: chip revision: v0.2
+[2026-09-28T19:23:03.597+00:00] I (24) boot: efuse block revision: v0.3
+[2026-09-28T19:23:03.597+00:00] I (26) boot.esp32c6: SPI Speed      : 80MHz
+[2026-09-28T19:23:03.597+00:00] I (30) boot.esp32c6: SPI Mode       : DIO
+[2026-09-28T19:23:03.597+00:00] I (34) boot.esp32c6: SPI Flash Size : 4MB
+[2026-09-28T19:23:03.597+00:00] I (38) boot: Enabling RNG early entropy source...
+[2026-09-28T19:23:03.597+00:00] I (42) boot: Partition Table:
+[2026-09-28T19:23:03.597+00:00] I (45) boot: ## Label            Usage          Type ST Offset   Length
+[2026-09-28T19:23:03.597+00:00] I (51) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+[2026-09-28T19:23:03.597+00:00] I (58) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+[2026-09-28T19:23:03.597+00:00] I (64) boot:  2 otadata          OTA data         01 00 00010000 00002000
+[2026-09-28T19:23:03.597+00:00] I (71) boot:  3 rlcfg            WiFi data        01 02 00012000 00006000
+[2026-09-28T19:23:03.597+00:00] I (77) boot:  4 rlkeys           WiFi data        01 02 00018000 00003000
+[2026-09-28T19:23:03.597+00:00] I (84) boot:  5 rlsec            WiFi data        01 02 00020000 00020000
+[2026-09-28T19:23:03.597+00:00] I (90) boot:  6 ota_0            OTA app          00 10 00040000 001d0000
+[2026-09-28T19:23:03.597+00:00] I (97) boot:  7 ota_1            OTA app          00 11 00210000 001d0000
+[2026-09-28T19:23:03.597+00:00] I (103) boot:  8 coredump         Unknown data     01 03 003e0000 00010000
+[2026-09-28T19:23:03.597+00:00] I (110) boot: End of partition table
+[2026-09-28T19:23:03.697+00:00] I (114) esp_image: segment 0: paddr=00040020 vaddr=42120020 size=25d38h (154936) map
+[2026-09-28T19:23:03.697+00:00] I (150) esp_image: segment 1: paddr=00065d60 vaddr=40800000 size=0a2b8h ( 41656) load
+[2026-09-28T19:23:03.697+00:00] I (159) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=11714ch (1143116) map
+[2026-09-28T19:23:03.897+00:00] I (370) esp_image: segment 3: paddr=00187174 vaddr=4080a2b8 size=0fd54h ( 64852) load
+[2026-09-28T19:23:03.897+00:00] I (385) esp_image: segment 4: paddr=00196ed0 vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-28T19:23:03.897+00:00] I (389) esp_image: segment 5: paddr=0019aaec vaddr=50000000 size=00060h (    96) load
+[2026-09-28T19:23:03.897+00:00] I (390) esp_image: segment 6: paddr=0019ab54 vaddr=50000068 size=00024h (    36) load
+[2026-09-28T19:23:03.897+00:00] I (402) boot: Loaded app from partition at offset 0x40000
+[2026-09-28T19:23:03.897+00:00] I (403) boot: Disabling RNG early entropy source...
+[2026-09-28T19:23:03.982+00:00] !! cycle 5 reset released after 0.501s
+[2026-09-28T19:23:03.989+00:00] !! send C5-0 admitted request=54
+[2026-09-28T19:23:03.997+00:00] I (419) cpu_start: Unicore app
+[2026-09-28T19:23:03.997+00:00] I (427) cpu_start: GPIO 17 and 16 are used as console UART I/O pins
+[2026-09-28T19:23:03.997+00:00] I (427) cpu_start: Pro cpu start user code
+[2026-09-28T19:23:03.997+00:00] I (428) cpu_start: cpu freq: 160000000 Hz
+[2026-09-28T19:23:03.998+00:00] I (429) app_init: Application information:
+[2026-09-28T19:23:03.998+00:00] I (433) app_init: Project name:     routeloom_reference_node
+[2026-09-28T19:23:03.998+00:00] I (438) app_init: App version:      1
+[2026-09-28T19:23:03.998+00:00] I (442) app_init: Compile time:     Sep 28 2026 17:39:45
+[2026-09-28T19:23:03.998+00:00] I (447) app_init: ELF file SHA256:  71799c64e...
+[2026-09-28T19:23:03.998+00:00] I (451) app_init: ESP-IDF:          v6.0.3
+[2026-09-28T19:23:03.998+00:00] I (455) efuse_init: Min chip rev:     v0.0
+[2026-09-28T19:23:03.998+00:00] I (459) efuse_init: Max chip rev:     v0.99
+[2026-09-28T19:23:03.998+00:00] I (463) efuse_init: Chip rev:         v0.2
+[2026-09-28T19:23:03.998+00:00] I (467) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-28T19:23:03.998+00:00] I (473) heap_init: At 40851900 len 0002AD10 (171 KiB): RAM
+[2026-09-28T19:23:03.998+00:00] I (478) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+[2026-09-28T19:23:03.998+00:00] I (483) heap_init: At 5000008C len 00003F5C (15 KiB): RTCRAM
+[2026-09-28T19:23:03.998+00:00] I (489) spi_flash: detected chip: generic
+[2026-09-28T19:23:03.998+00:00] I (492) spi_flash: flash io: dio
+[2026-09-28T19:23:03.998+00:00] I (496) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-28T19:23:03.998+00:00] I (502) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-28T19:23:04.098+00:00] I (517) main_task: Started on CPU0
+[2026-09-28T19:23:04.098+00:00] I (519) main_task: Calling app_main()
+[2026-09-28T19:23:04.098+00:00] I (523) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-28T19:23:04.098+00:00] I (569) RouteLoomRef: sdkv1 identity: none provisioned
+[2026-09-28T19:23:04.098+00:00] I (570) RouteLoomRef: sdkv1 site: not a member
+[2026-09-28T19:23:04.098+00:00] I (570) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+[2026-09-28T19:23:04.098+00:00] I (574) RouteLoomRef: sdkv1 local_revocation: none
+[2026-09-28T19:23:04.098+00:00] I (578) RouteLoomRef: sdkv1 lifecycle: none
+[2026-09-28T19:23:04.098+00:00] I (584) RouteLoomRef: routeloom field boot: fw=1 app_sha256=71799c64ead56796ab75a4e7c8c505578cbb7d33a914a759610a284f3678bb19
+[2026-09-28T19:23:04.098+00:00] I (604) RouteLoomRef: board config: gen=1 node=0x2 secrets_gen=1 mac=10bda3b148a8
+[2026-09-28T19:23:04.098+00:00] I (607) RouteLoomRef: security owner ready (node 0x2)
+[2026-09-28T19:23:04.098+00:00] I (608) RouteLoom: Wi-Fi init heap: free=144636 largest=129024 bytes
+[2026-09-28T19:23:04.098+00:00] I (612) pp: pp rom version: 5b8dcfa
+[2026-09-28T19:23:04.198+00:00] I (615) net80211: net80211 rom version: 5b8dcfa
+[2026-09-28T19:23:04.198+00:00] I (620) wifi:wifi driver task: 4087f494, prio:23, stack:6656, core=0
+[2026-09-28T19:23:04.198+00:00] I (626) wifi:wifi firmware version: da143fa
+[2026-09-28T19:23:04.198+00:00] I (629) wifi:wifi certification version: v7.0
+[2026-09-28T19:23:04.198+00:00] I (633) wifi:config NVS flash: disabled
+[2026-09-28T19:23:04.198+00:00] I (636) wifi:config nano formatting: disabled
+[2026-09-28T19:23:04.198+00:00] I (640) wifi:mac_version:HAL_MAC_ESP32AX_761,ut_version:N, band mode:0x1
+[2026-09-28T19:23:04.198+00:00] I (647) wifi:Init data frame dynamic rx buffer num: 8
+[2026-09-28T19:23:04.198+00:00] I (652) wifi:Init static rx mgmt buffer num: 2
+[2026-09-28T19:23:04.198+00:00] I (656) wifi:Init management short buffer num: 8
+[2026-09-28T19:23:04.198+00:00] I (660) wifi:Init dynamic tx buffer num: 8
+[2026-09-28T19:23:04.198+00:00] I (664) wifi:Init static tx FG buffer num: 2
+[2026-09-28T19:23:04.198+00:00] I (668) wifi:Init static rx buffer size: 1700 (rxctrl:92, csi:512)
+[2026-09-28T19:23:04.198+00:00] I (674) wifi:Init static rx buffer num: 4
+[2026-09-28T19:23:04.198+00:00] I (678) wifi:Init dynamic rx buffer num: 8
+[2026-09-28T19:23:04.198+00:00] I (682) wifi_init: accept mbox: 6
+[2026-09-28T19:23:04.198+00:00] I (684) wifi_init: tcpip mbox: 32
+[2026-09-28T19:23:04.198+00:00] I (687) wifi_init: udp mbox: 6
+[2026-09-28T19:23:04.198+00:00] I (690) wifi_init: tcp mbox: 6
+[2026-09-28T19:23:04.198+00:00] I (693) wifi_init: tcp tx win: 5760
+[2026-09-28T19:23:04.198+00:00] I (696) wifi_init: tcp rx win: 5760
+[2026-09-28T19:23:04.198+00:00] I (699) wifi_init: tcp mss: 1440
+[2026-09-28T19:23:04.198+00:00] I (702) wifi_init: WiFi IRAM OP enabled
+[2026-09-28T19:23:04.198+00:00] I (706) wifi_init: WiFi RX IRAM OP enabled
+[2026-09-28T19:23:04.198+00:00] I (710) wifi_init: WiFi SLP IRAM OP enabled
+[2026-09-28T19:23:04.298+00:00] I (714) RouteLoom: Wi-Fi initialized heap: free=118916 largest=102400 min=118888 bytes
+[2026-09-28T19:23:04.299+00:00] I (722) wifi:(2.4G)set country: cc=JP  schan=1 nchan=13 policy=1
+[2026-09-28T19:23:04.299+00:00] I (727) wifi:ifx:0, phymode(new:3, sta nvs: 7 ap nvs: 3)
+[2026-09-28T19:23:04.399+00:00] I (732) phy_init: phy_version 345,552b044,Jul 14 2026,10:37:00
+[2026-09-28T19:23:04.399+00:00] I (834) wifi:11ax coex: WDEVAX_PTI0(0x55777555), WDEVAX_PTI1(0x00003377).
+[2026-09-28T19:23:04.399+00:00] 
+[2026-09-28T19:23:04.399+00:00] I (834) wifi:mode : sta (10:bd:a3:b1:48:a8)
+[2026-09-28T19:23:04.399+00:00] I (835) wifi:enable tsf
+[2026-09-28T19:23:04.399+00:00] I (838) RouteLoom: Wi-Fi started heap: free=116728 largest=100352 min=116464 bytes
+[2026-09-28T19:23:04.399+00:00] I (843) ESPNOW: espnow [version: 2.0] init
+[2026-09-28T19:23:04.399+00:00] I (847) RouteLoom: ESP-NOW ready heap: free=116512 largest=100352 min=116464 bytes
+[2026-09-28T19:23:04.399+00:00] I (860) RouteLoomRef: dev adopted (node 0x2, boot 48)
+[2026-09-28T19:23:04.399+00:00] I (860) RouteLoomRef: security owner started; node start deferred to membership
+[2026-09-28T19:23:04.399+00:00] W (867) RouteLoomRef: diagnostic reason=SECURITY_PROFILE_EXPERIMENTAL peer=0 message=none
+[2026-09-28T19:23:04.399+00:00] W (874) RouteLoomRef: diagnostic reason=ROUTE_REFRESH_BOUND_EXCEEDED peer=0 message=none
+[2026-09-28T19:23:04.399+00:00] I (885) RouteLoomRef: member discovery started
+[2026-09-28T19:23:04.720+00:00] !! send C5-0 -> failed HOP_ACCEPT_TIMEOUT 731.13 ms
+[2026-09-28T19:23:05.001+00:00] I (1511) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-28T19:23:05.001+00:00] W (1511) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-28T19:23:06.725+00:00] !! send C5-1 admitted request=55
+[2026-09-28T19:23:07.107+00:00] I (3538) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-28T19:23:07.107+00:00] W (3538) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-28T19:23:11.765+00:00] !! send C5-1 -> expired DEADLINE_EXPIRED 5040.11 ms
+[2026-09-28T19:23:13.771+00:00] !! send C5-2 admitted request=56
+[2026-09-28T19:23:18.786+00:00] !! send C5-2 -> expired DEADLINE_EXPIRED 5015.0 ms
+[2026-09-28T19:23:20.790+00:00] !! send C5-3 admitted request=57
+[2026-09-28T19:23:25.832+00:00] !! send C5-3 -> expired DEADLINE_EXPIRED 5041.54 ms
+[2026-09-28T19:23:27.837+00:00] !! send C5-4 admitted request=58
+[2026-09-28T19:23:32.853+00:00] !! send C5-4 -> expired DEADLINE_EXPIRED 5015.62 ms
+[2026-09-28T19:23:34.857+00:00] !! send C5-5 admitted request=59
+[2026-09-28T19:23:34.971+00:00] I (31472) RouteLoomRef: discovery event=BOUND peer=3
+[2026-09-28T19:23:34.971+00:00] W (31472) RouteLoomRef: diagnostic reason=BOUND peer=3 message=none
+[2026-09-28T19:23:35.072+00:00] I (31507) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-28T19:23:35.072+00:00] W (31507) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-28T19:23:36.238+00:00] !! send C5-5 -> delivered END_RECEIVED 1380.69 ms
+[2026-09-28T19:23:38.244+00:00] !! send C5-6 admitted request=60
+[2026-09-28T19:23:38.359+00:00] !! send C5-6 -> delivered END_RECEIVED 114.85 ms
+[2026-09-28T19:23:40.366+00:00] !! send C5-7 admitted request=61
+[2026-09-28T19:23:40.497+00:00] !! send C5-7 -> delivered END_RECEIVED 130.65 ms
+[2026-09-28T19:23:42.508+00:00] !! send C5-8 admitted request=62
+[2026-09-28T19:23:42.624+00:00] !! send C5-8 -> delivered END_RECEIVED 116.58 ms
+[2026-09-28T19:23:44.630+00:00] !! send C5-9 admitted request=63
+[2026-09-28T19:23:44.749+00:00] !! send C5-9 -> delivered END_RECEIVED 119.27 ms
+[2026-09-28T19:23:46.755+00:00] !! cycle 5 delivered 5/10 recovery_s=30.875
+[2026-09-28T19:23:48.755+00:00] !! cycle 6 reset assert (RTS, DTR low)
+[2026-09-28T19:23:48.818+00:00] ESP-ROM:esp32c6-20220919
+[2026-09-28T19:23:48.819+00:00] Build:Sep 19 2022
+[2026-09-28T19:23:48.819+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x3f (SPI_FAST_FLASH_BOOT)
+[2026-09-28T19:23:48.819+00:00] Saved PC:0x40807866
+[2026-09-28T19:23:48.819+00:00] SPIWP:0xee
+[2026-09-28T19:23:48.819+00:00] mode:DIO, clock div:2
+[2026-09-28T19:23:48.819+00:00] load:0x40875730,len:0x1738
+[2026-09-28T19:23:48.819+00:00] load:0x4086b910,len:0xd8c
+[2026-09-28T19:23:48.819+00:00] load:0x4086e610,len:0x32e0
+[2026-09-28T19:23:48.819+00:00] entry 0x4086b91a
+[2026-09-28T19:23:48.819+00:00] I (23) boot: ESP-IDF v6.0.3 2nd stage bootloader
+[2026-09-28T19:23:48.819+00:00] I (23) boot: compile time Sep 28 2026 17:45:27
+[2026-09-28T19:23:48.819+00:00] I (24) boot: chip revision: v0.2
+[2026-09-28T19:23:48.819+00:00] I (24) boot: efuse block revision: v0.3
+[2026-09-28T19:23:48.819+00:00] I (26) boot.esp32c6: SPI Speed      : 80MHz
+[2026-09-28T19:23:48.819+00:00] I (30) boot.esp32c6: SPI Mode       : DIO
+[2026-09-28T19:23:48.819+00:00] I (34) boot.esp32c6: SPI Flash Size : 4MB
+[2026-09-28T19:23:48.819+00:00] I (38) boot: Enabling RNG early entropy source...
+[2026-09-28T19:23:48.819+00:00] I (42) boot: Partition Table:
+[2026-09-28T19:23:48.819+00:00] I (45) boot: ## Label            Usage          Type ST Offset   Length
+[2026-09-28T19:23:48.819+00:00] I (51) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+[2026-09-28T19:23:48.919+00:00] I (58) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+[2026-09-28T19:23:48.919+00:00] I (64) boot:  2 otadata          OTA data         01 00 00010000 00002000
+[2026-09-28T19:23:48.919+00:00] I (71) boot:  3 rlcfg            WiFi data        01 02 00012000 00006000
+[2026-09-28T19:23:48.919+00:00] I (77) boot:  4 rlkeys           WiFi data        01 02 00018000 00003000
+[2026-09-28T19:23:48.919+00:00] I (84) boot:  5 rlsec            WiFi data        01 02 00020000 00020000
+[2026-09-28T19:23:48.919+00:00] I (90) boot:  6 ota_0            OTA app          00 10 00040000 001d0000
+[2026-09-28T19:23:48.919+00:00] I (97) boot:  7 ota_1            OTA app          00 11 00210000 001d0000
+[2026-09-28T19:23:48.919+00:00] I (103) boot:  8 coredump         Unknown data     01 03 003e0000 00010000
+[2026-09-28T19:23:48.919+00:00] I (110) boot: End of partition table
+[2026-09-28T19:23:48.919+00:00] I (114) esp_image: segment 0: paddr=00040020 vaddr=42120020 size=25d38h (154936) map
+[2026-09-28T19:23:48.919+00:00] I (150) esp_image: segment 1: paddr=00065d60 vaddr=40800000 size=0a2b8h ( 41656) load
+[2026-09-28T19:23:48.919+00:00] I (159) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=11714ch (1143116) map
+[2026-09-28T19:23:49.219+00:00] I (370) esp_image: segment 3: paddr=00187174 vaddr=4080a2b8 size=0fd54h ( 64852) load
+[2026-09-28T19:23:49.219+00:00] I (385) esp_image: segment 4: paddr=00196ed0 vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-28T19:23:49.219+00:00] I (389) esp_image: segment 5: paddr=0019aaec vaddr=50000000 size=00060h (    96) load
+[2026-09-28T19:23:49.219+00:00] I (390) esp_image: segment 6: paddr=0019ab54 vaddr=50000068 size=00024h (    36) load
+[2026-09-28T19:23:49.219+00:00] I (402) boot: Loaded app from partition at offset 0x40000
+[2026-09-28T19:23:49.219+00:00] I (403) boot: Disabling RNG early entropy source...
+[2026-09-28T19:23:49.219+00:00] I (419) cpu_start: Unicore app
+[2026-09-28T19:23:49.219+00:00] I (427) cpu_start: GPIO 17 and 16 are used as console UART I/O pins
+[2026-09-28T19:23:49.219+00:00] I (427) cpu_start: Pro cpu start user code
+[2026-09-28T19:23:49.219+00:00] I (428) cpu_start: cpu freq: 160000000 Hz
+[2026-09-28T19:23:49.219+00:00] I (429) app_init: Application information:
+[2026-09-28T19:23:49.219+00:00] I (433) app_init: Project name:     routeloom_reference_node
+[2026-09-28T19:23:49.219+00:00] I (438) app_init: App version:      1
+[2026-09-28T19:23:49.219+00:00] I (442) app_init: Compile time:     Sep 28 2026 17:39:45
+[2026-09-28T19:23:49.219+00:00] I (447) app_init: ELF file SHA256:  71799c64e...
+[2026-09-28T19:23:49.219+00:00] I (451) app_init: ESP-IDF:          v6.0.3
+[2026-09-28T19:23:49.219+00:00] I (455) efuse_init: Min chip rev:     v0.0
+[2026-09-28T19:23:49.219+00:00] I (459) efuse_init: Max chip rev:     v0.99
+[2026-09-28T19:23:49.256+00:00] !! cycle 6 reset released after 0.500s
+[2026-09-28T19:23:49.259+00:00] !! send C6-0 admitted request=64
+[2026-09-28T19:23:49.320+00:00] I (463) efuse_init: Chip rev:         v0.2
+[2026-09-28T19:23:49.320+00:00] I (467) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-28T19:23:49.320+00:00] I (473) heap_init: At 40851900 len 0002AD10 (171 KiB): RAM
+[2026-09-28T19:23:49.320+00:00] I (478) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+[2026-09-28T19:23:49.320+00:00] I (483) heap_init: At 5000008C len 00003F5C (15 KiB): RTCRAM
+[2026-09-28T19:23:49.320+00:00] I (489) spi_flash: detected chip: generic
+[2026-09-28T19:23:49.320+00:00] I (492) spi_flash: flash io: dio
+[2026-09-28T19:23:49.320+00:00] I (496) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-28T19:23:49.320+00:00] I (502) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-28T19:23:49.320+00:00] I (517) main_task: Started on CPU0
+[2026-09-28T19:23:49.320+00:00] I (519) main_task: Calling app_main()
+[2026-09-28T19:23:49.320+00:00] I (523) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-28T19:23:49.420+00:00] I (569) RouteLoomRef: sdkv1 identity: none provisioned
+[2026-09-28T19:23:49.420+00:00] I (570) RouteLoomRef: sdkv1 site: not a member
+[2026-09-28T19:23:49.420+00:00] I (570) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+[2026-09-28T19:23:49.420+00:00] I (574) RouteLoomRef: sdkv1 local_revocation: none
+[2026-09-28T19:23:49.420+00:00] I (578) RouteLoomRef: sdkv1 lifecycle: none
+[2026-09-28T19:23:49.420+00:00] I (584) RouteLoomRef: routeloom field boot: fw=1 app_sha256=71799c64ead56796ab75a4e7c8c505578cbb7d33a914a759610a284f3678bb19
+[2026-09-28T19:23:49.420+00:00] I (604) RouteLoomRef: board config: gen=1 node=0x2 secrets_gen=1 mac=10bda3b148a8
+[2026-09-28T19:23:49.420+00:00] I (607) RouteLoomRef: security owner ready (node 0x2)
+[2026-09-28T19:23:49.420+00:00] I (608) RouteLoom: Wi-Fi init heap: free=144636 largest=129024 bytes
+[2026-09-28T19:23:49.420+00:00] I (612) pp: pp rom version: 5b8dcfa
+[2026-09-28T19:23:49.420+00:00] I (615) net80211: net80211 rom version: 5b8dcfa
+[2026-09-28T19:23:49.420+00:00] I (620) wifi:wifi driver task: 4087f494, prio:23, stack:6656, core=0
+[2026-09-28T19:23:49.420+00:00] I (626) wifi:wifi firmware version: da143fa
+[2026-09-28T19:23:49.420+00:00] I (629) wifi:wifi certification version: v7.0
+[2026-09-28T19:23:49.420+00:00] I (633) wifi:config NVS flash: disabled
+[2026-09-28T19:23:49.420+00:00] I (636) wifi:config nano formatting: disabled
+[2026-09-28T19:23:49.420+00:00] I (640) wifi:mac_version:HAL_MAC_ESP32AX_761,ut_version:N, band mode:0x1
+[2026-09-28T19:23:49.420+00:00] I (647) wifi:Init data frame dynamic rx buffer num: 8
+[2026-09-28T19:23:49.420+00:00] I (652) wifi:Init static rx mgmt buffer num: 2
+[2026-09-28T19:23:49.420+00:00] I (656) wifi:Init management short buffer num: 8
+[2026-09-28T19:23:49.521+00:00] I (660) wifi:Init dynamic tx buffer num: 8
+[2026-09-28T19:23:49.521+00:00] I (664) wifi:Init static tx FG buffer num: 2
+[2026-09-28T19:23:49.521+00:00] I (668) wifi:Init static rx buffer size: 1700 (rxctrl:92, csi:512)
+[2026-09-28T19:23:49.521+00:00] I (674) wifi:Init static rx buffer num: 4
+[2026-09-28T19:23:49.521+00:00] I (678) wifi:Init dynamic rx buffer num: 8
+[2026-09-28T19:23:49.521+00:00] I (682) wifi_init: accept mbox: 6
+[2026-09-28T19:23:49.521+00:00] I (684) wifi_init: tcpip mbox: 32
+[2026-09-28T19:23:49.521+00:00] I (688) wifi_init: udp mbox: 6
+[2026-09-28T19:23:49.521+00:00] I (690) wifi_init: tcp mbox: 6
+[2026-09-28T19:23:49.521+00:00] I (693) wifi_init: tcp tx win: 5760
+[2026-09-28T19:23:49.521+00:00] I (696) wifi_init: tcp rx win: 5760
+[2026-09-28T19:23:49.521+00:00] I (699) wifi_init: tcp mss: 1440
+[2026-09-28T19:23:49.521+00:00] I (702) wifi_init: WiFi IRAM OP enabled
+[2026-09-28T19:23:49.521+00:00] I (706) wifi_init: WiFi RX IRAM OP enabled
+[2026-09-28T19:23:49.521+00:00] I (710) wifi_init: WiFi SLP IRAM OP enabled
+[2026-09-28T19:23:49.521+00:00] I (714) RouteLoom: Wi-Fi initialized heap: free=118916 largest=102400 min=118888 bytes
+[2026-09-28T19:23:49.521+00:00] I (722) wifi:(2.4G)set country: cc=JP  schan=1 nchan=13 policy=1
+[2026-09-28T19:23:49.521+00:00] I (727) wifi:ifx:0, phymode(new:3, sta nvs: 7 ap nvs: 3)
+[2026-09-28T19:23:49.621+00:00] I (732) phy_init: phy_version 345,552b044,Jul 14 2026,10:37:00
+[2026-09-28T19:23:49.621+00:00] I (829) wifi:11ax coex: WDEVAX_PTI0(0x55777555), WDEVAX_PTI1(0x00003377).
+[2026-09-28T19:23:49.621+00:00] 
+[2026-09-28T19:23:49.621+00:00] I (830) wifi:mode : sta (10:bd:a3:b1:48:a8)
+[2026-09-28T19:23:49.621+00:00] I (830) wifi:enable tsf
+[2026-09-28T19:23:49.621+00:00] I (833) RouteLoom: Wi-Fi started heap: free=116728 largest=100352 min=116464 bytes
+[2026-09-28T19:23:49.621+00:00] I (839) ESPNOW: espnow [version: 2.0] init
+[2026-09-28T19:23:49.621+00:00] I (842) RouteLoom: ESP-NOW ready heap: free=116512 largest=100352 min=116464 bytes
+[2026-09-28T19:23:49.621+00:00] I (855) RouteLoomRef: dev adopted (node 0x2, boot 49)
+[2026-09-28T19:23:49.621+00:00] I (855) RouteLoomRef: security owner started; node start deferred to membership
+[2026-09-28T19:23:49.721+00:00] W (862) RouteLoomRef: diagnostic reason=SECURITY_PROFILE_EXPERIMENTAL peer=0 message=none
+[2026-09-28T19:23:49.721+00:00] W (869) RouteLoomRef: diagnostic reason=ROUTE_REFRESH_BOUND_EXCEEDED peer=0 message=none
+[2026-09-28T19:23:49.721+00:00] I (880) RouteLoomRef: member discovery started
+[2026-09-28T19:23:49.925+00:00] !! send C6-0 -> failed HOP_ACCEPT_TIMEOUT 665.81 ms
+[2026-09-28T19:23:50.122+00:00] I (1332) RouteLoomRef: discovery event=BOUND peer=3
+[2026-09-28T19:23:50.122+00:00] W (1332) RouteLoomRef: diagnostic reason=BOUND peer=3 message=none
+[2026-09-28T19:23:50.122+00:00] W (1336) RouteLoomRef: diagnostic reason=session unknown context peer=3 message=none
+[2026-09-28T19:23:51.931+00:00] !! send C6-1 admitted request=65
+[2026-09-28T19:23:52.128+00:00] I (3365) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-28T19:23:52.128+00:00] W (3366) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-28T19:23:52.319+00:00] !! send C6-1 -> failed HOP_ACCEPT_TIMEOUT 388.18 ms
+[2026-09-28T19:23:54.323+00:00] !! send C6-2 admitted request=66
+[2026-09-28T19:23:54.711+00:00] !! send C6-2 -> failed HOP_ACCEPT_TIMEOUT 388.36 ms
+[2026-09-28T19:23:56.716+00:00] !! send C6-3 admitted request=67
+[2026-09-28T19:23:57.102+00:00] !! send C6-3 -> failed HOP_ACCEPT_TIMEOUT 385.72 ms
+[2026-09-28T19:23:59.107+00:00] !! send C6-4 admitted request=68
+[2026-09-28T19:23:59.493+00:00] !! send C6-4 -> failed HOP_ACCEPT_TIMEOUT 385.81 ms
+[2026-09-28T19:24:01.498+00:00] !! send C6-5 admitted request=69
+[2026-09-28T19:24:06.546+00:00] !! send C6-5 -> expired DEADLINE_EXPIRED 5048.45 ms
+[2026-09-28T19:24:08.552+00:00] !! send C6-6 admitted request=70
+[2026-09-28T19:24:13.604+00:00] !! send C6-6 -> expired DEADLINE_EXPIRED 5051.89 ms
+[2026-09-28T19:24:15.608+00:00] !! send C6-7 admitted request=71
+[2026-09-28T19:24:20.662+00:00] !! send C6-7 -> expired DEADLINE_EXPIRED 5053.93 ms
+[2026-09-28T19:24:21.089+00:00] I (32249) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-28T19:24:21.089+00:00] W (32249) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-28T19:24:21.089+00:00] I (32273) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-28T19:24:21.089+00:00] W (32273) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-28T19:24:22.667+00:00] !! send C6-8 admitted request=72
+[2026-09-28T19:24:22.779+00:00] !! send C6-8 -> delivered END_RECEIVED 111.96 ms
+[2026-09-28T19:24:24.783+00:00] !! send C6-9 admitted request=73
+[2026-09-28T19:24:24.896+00:00] !! send C6-9 -> delivered END_RECEIVED 113.02 ms
+[2026-09-28T19:24:26.900+00:00] !! cycle 6 delivered 2/10 recovery_s=33.412
+[2026-09-28T19:24:28.902+00:00] !! cycle 7 reset assert (RTS, DTR low)
+[2026-09-28T19:24:28.908+00:00] ESP-ROM:esp32c6-20220919
+[2026-09-28T19:24:28.908+00:00] Build:Sep 19 2022
+[2026-09-28T19:24:28.908+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x3f (SPI_FAST_FLASH_BOOT)
+[2026-09-28T19:24:28.908+00:00] Saved PC:0x40807866
+[2026-09-28T19:24:28.908+00:00] SPIWP:0xee
+[2026-09-28T19:24:28.908+00:00] mode:DIO, clock div:2
+[2026-09-28T19:24:28.908+00:00] load:0x40875730,len:0x1738
+[2026-09-28T19:24:29.008+00:00] load:0x4086b910,len:0xd8c
+[2026-09-28T19:24:29.008+00:00] load:0x4086e610,len:0x32e0
+[2026-09-28T19:24:29.008+00:00] entry 0x4086b91a
+[2026-09-28T19:24:29.008+00:00] I (23) boot: ESP-IDF v6.0.3 2nd stage bootloader
+[2026-09-28T19:24:29.008+00:00] I (23) boot: compile time Sep 28 2026 17:45:27
+[2026-09-28T19:24:29.008+00:00] I (24) boot: chip revision: v0.2
+[2026-09-28T19:24:29.008+00:00] I (24) boot: efuse block revision: v0.3
+[2026-09-28T19:24:29.008+00:00] I (26) boot.esp32c6: SPI Speed      : 80MHz
+[2026-09-28T19:24:29.008+00:00] I (30) boot.esp32c6: SPI Mode       : DIO
+[2026-09-28T19:24:29.008+00:00] I (34) boot.esp32c6: SPI Flash Size : 4MB
+[2026-09-28T19:24:29.008+00:00] I (38) boot: Enabling RNG early entropy source...
+[2026-09-28T19:24:29.008+00:00] I (42) boot: Partition Table:
+[2026-09-28T19:24:29.008+00:00] I (45) boot: ## Label            Usage          Type ST Offset   Length
+[2026-09-28T19:24:29.008+00:00] I (51) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+[2026-09-28T19:24:29.008+00:00] I (58) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+[2026-09-28T19:24:29.008+00:00] I (64) boot:  2 otadata          OTA data         01 00 00010000 00002000
+[2026-09-28T19:24:29.008+00:00] I (71) boot:  3 rlcfg            WiFi data        01 02 00012000 00006000
+[2026-09-28T19:24:29.008+00:00] I (77) boot:  4 rlkeys           WiFi data        01 02 00018000 00003000
+[2026-09-28T19:24:29.008+00:00] I (84) boot:  5 rlsec            WiFi data        01 02 00020000 00020000
+[2026-09-28T19:24:29.008+00:00] I (90) boot:  6 ota_0            OTA app          00 10 00040000 001d0000
+[2026-09-28T19:24:29.008+00:00] I (97) boot:  7 ota_1            OTA app          00 11 00210000 001d0000
+[2026-09-28T19:24:29.108+00:00] I (103) boot:  8 coredump         Unknown data     01 03 003e0000 00010000
+[2026-09-28T19:24:29.108+00:00] I (110) boot: End of partition table
+[2026-09-28T19:24:29.108+00:00] I (114) esp_image: segment 0: paddr=00040020 vaddr=42120020 size=25d38h (154936) map
+[2026-09-28T19:24:29.108+00:00] I (150) esp_image: segment 1: paddr=00065d60 vaddr=40800000 size=0a2b8h ( 41656) load
+[2026-09-28T19:24:29.108+00:00] I (159) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=11714ch (1143116) map
+[2026-09-28T19:24:29.309+00:00] I (370) esp_image: segment 3: paddr=00187174 vaddr=4080a2b8 size=0fd54h ( 64852) load
+[2026-09-28T19:24:29.309+00:00] I (385) esp_image: segment 4: paddr=00196ed0 vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-28T19:24:29.309+00:00] I (389) esp_image: segment 5: paddr=0019aaec vaddr=50000000 size=00060h (    96) load
+[2026-09-28T19:24:29.309+00:00] I (390) esp_image: segment 6: paddr=0019ab54 vaddr=50000068 size=00024h (    36) load
+[2026-09-28T19:24:29.309+00:00] I (402) boot: Loaded app from partition at offset 0x40000
+[2026-09-28T19:24:29.403+00:00] !! cycle 7 reset released after 0.500s
+[2026-09-28T19:24:29.407+00:00] !! send C7-0 admitted request=74
+[2026-09-28T19:24:29.409+00:00] I (403) boot: Disabling RNG early entropy source...
+[2026-09-28T19:24:29.409+00:00] I (419) cpu_start: Unicore app
+[2026-09-28T19:24:29.409+00:00] I (427) cpu_start: GPIO 17 and 16 are used as console UART I/O pins
+[2026-09-28T19:24:29.409+00:00] I (427) cpu_start: Pro cpu start user code
+[2026-09-28T19:24:29.409+00:00] I (428) cpu_start: cpu freq: 160000000 Hz
+[2026-09-28T19:24:29.409+00:00] I (429) app_init: Application information:
+[2026-09-28T19:24:29.409+00:00] I (433) app_init: Project name:     routeloom_reference_node
+[2026-09-28T19:24:29.409+00:00] I (438) app_init: App version:      1
+[2026-09-28T19:24:29.409+00:00] I (442) app_init: Compile time:     Sep 28 2026 17:39:45
+[2026-09-28T19:24:29.409+00:00] I (447) app_init: ELF file SHA256:  71799c64e...
+[2026-09-28T19:24:29.409+00:00] I (451) app_init: ESP-IDF:          v6.0.3
+[2026-09-28T19:24:29.409+00:00] I (455) efuse_init: Min chip rev:     v0.0
+[2026-09-28T19:24:29.409+00:00] I (459) efuse_init: Max chip rev:     v0.99
+[2026-09-28T19:24:29.409+00:00] I (463) efuse_init: Chip rev:         v0.2
+[2026-09-28T19:24:29.409+00:00] I (467) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-28T19:24:29.409+00:00] I (473) heap_init: At 40851900 len 0002AD10 (171 KiB): RAM
+[2026-09-28T19:24:29.409+00:00] I (478) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+[2026-09-28T19:24:29.409+00:00] I (483) heap_init: At 5000008C len 00003F5C (15 KiB): RTCRAM
+[2026-09-28T19:24:29.409+00:00] I (489) spi_flash: detected chip: generic
+[2026-09-28T19:24:29.409+00:00] I (492) spi_flash: flash io: dio
+[2026-09-28T19:24:29.409+00:00] I (496) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-28T19:24:29.509+00:00] I (502) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-28T19:24:29.509+00:00] I (517) main_task: Started on CPU0
+[2026-09-28T19:24:29.509+00:00] I (519) main_task: Calling app_main()
+[2026-09-28T19:24:29.509+00:00] I (523) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-28T19:24:29.509+00:00] I (569) RouteLoomRef: sdkv1 identity: none provisioned
+[2026-09-28T19:24:29.509+00:00] I (570) RouteLoomRef: sdkv1 site: not a member
+[2026-09-28T19:24:29.509+00:00] I (570) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+[2026-09-28T19:24:29.509+00:00] I (574) RouteLoomRef: sdkv1 local_revocation: none
+[2026-09-28T19:24:29.509+00:00] I (578) RouteLoomRef: sdkv1 lifecycle: none
+[2026-09-28T19:24:29.509+00:00] I (584) RouteLoomRef: routeloom field boot: fw=1 app_sha256=71799c64ead56796ab75a4e7c8c505578cbb7d33a914a759610a284f3678bb19
+[2026-09-28T19:24:29.509+00:00] I (604) RouteLoomRef: board config: gen=1 node=0x2 secrets_gen=1 mac=10bda3b148a8
+[2026-09-28T19:24:29.609+00:00] I (607) RouteLoomRef: security owner ready (node 0x2)
+[2026-09-28T19:24:29.609+00:00] I (608) RouteLoom: Wi-Fi init heap: free=144636 largest=129024 bytes
+[2026-09-28T19:24:29.609+00:00] I (612) pp: pp rom version: 5b8dcfa
+[2026-09-28T19:24:29.609+00:00] I (615) net80211: net80211 rom version: 5b8dcfa
+[2026-09-28T19:24:29.610+00:00] I (620) wifi:wifi driver task: 4087f494, prio:23, stack:6656, core=0
+[2026-09-28T19:24:29.610+00:00] I (626) wifi:wifi firmware version: da143fa
+[2026-09-28T19:24:29.610+00:00] I (629) wifi:wifi certification version: v7.0
+[2026-09-28T19:24:29.610+00:00] I (633) wifi:config NVS flash: disabled
+[2026-09-28T19:24:29.610+00:00] I (636) wifi:config nano formatting: disabled
+[2026-09-28T19:24:29.610+00:00] I (640) wifi:mac_version:HAL_MAC_ESP32AX_761,ut_version:N, band mode:0x1
+[2026-09-28T19:24:29.610+00:00] I (647) wifi:Init data frame dynamic rx buffer num: 8
+[2026-09-28T19:24:29.610+00:00] I (652) wifi:Init static rx mgmt buffer num: 2
+[2026-09-28T19:24:29.610+00:00] I (656) wifi:Init management short buffer num: 8
+[2026-09-28T19:24:29.610+00:00] I (660) wifi:Init dynamic tx buffer num: 8
+[2026-09-28T19:24:29.610+00:00] I (664) wifi:Init static tx FG buffer num: 2
+[2026-09-28T19:24:29.610+00:00] I (668) wifi:Init static rx buffer size: 1700 (rxctrl:92, csi:512)
+[2026-09-28T19:24:29.610+00:00] I (674) wifi:Init static rx buffer num: 4
+[2026-09-28T19:24:29.610+00:00] I (678) wifi:Init dynamic rx buffer num: 8
+[2026-09-28T19:24:29.610+00:00] I (682) wifi_init: accept mbox: 6
+[2026-09-28T19:24:29.610+00:00] I (684) wifi_init: tcpip mbox: 32
+[2026-09-28T19:24:29.610+00:00] I (687) wifi_init: udp mbox: 6
+[2026-09-28T19:24:29.610+00:00] I (690) wifi_init: tcp mbox: 6
+[2026-09-28T19:24:29.610+00:00] I (693) wifi_init: tcp tx win: 5760
+[2026-09-28T19:24:29.610+00:00] I (696) wifi_init: tcp rx win: 5760
+[2026-09-28T19:24:29.610+00:00] I (699) wifi_init: tcp mss: 1440
+[2026-09-28T19:24:29.710+00:00] I (702) wifi_init: WiFi IRAM OP enabled
+[2026-09-28T19:24:29.710+00:00] I (706) wifi_init: WiFi RX IRAM OP enabled
+[2026-09-28T19:24:29.710+00:00] I (710) wifi_init: WiFi SLP IRAM OP enabled
+[2026-09-28T19:24:29.710+00:00] I (714) RouteLoom: Wi-Fi initialized heap: free=118916 largest=102400 min=118888 bytes
+[2026-09-28T19:24:29.710+00:00] I (722) wifi:(2.4G)set country: cc=JP  schan=1 nchan=13 policy=1
+[2026-09-28T19:24:29.710+00:00] I (727) wifi:ifx:0, phymode(new:3, sta nvs: 7 ap nvs: 3)
+[2026-09-28T19:24:29.810+00:00] I (732) phy_init: phy_version 345,552b044,Jul 14 2026,10:37:00
+[2026-09-28T19:24:29.810+00:00] I (828) wifi:11ax coex: WDEVAX_PTI0(0x55777555), WDEVAX_PTI1(0x00003377).
+[2026-09-28T19:24:29.810+00:00] 
+[2026-09-28T19:24:29.810+00:00] I (829) wifi:mode : sta (10:bd:a3:b1:48:a8)
+[2026-09-28T19:24:29.810+00:00] I (829) wifi:enable tsf
+[2026-09-28T19:24:29.810+00:00] I (832) RouteLoom: Wi-Fi started heap: free=116728 largest=100352 min=116464 bytes
+[2026-09-28T19:24:29.810+00:00] I (838) ESPNOW: espnow [version: 2.0] init
+[2026-09-28T19:24:29.810+00:00] I (841) RouteLoom: ESP-NOW ready heap: free=116512 largest=100352 min=116464 bytes
+[2026-09-28T19:24:29.810+00:00] I (854) RouteLoomRef: dev adopted (node 0x2, boot 50)
+[2026-09-28T19:24:29.810+00:00] I (855) RouteLoomRef: security owner started; node start deferred to membership
+[2026-09-28T19:24:29.810+00:00] W (861) RouteLoomRef: diagnostic reason=SECURITY_PROFILE_EXPERIMENTAL peer=0 message=none
+[2026-09-28T19:24:29.810+00:00] W (868) RouteLoomRef: diagnostic reason=ROUTE_REFRESH_BOUND_EXCEEDED peer=0 message=none
+[2026-09-28T19:24:29.810+00:00] I (879) RouteLoomRef: member discovery started
+[2026-09-28T19:24:30.076+00:00] !! send C7-0 -> failed HOP_ACCEPT_TIMEOUT 668.67 ms
+[2026-09-28T19:24:30.812+00:00] I (1847) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-28T19:24:30.812+00:00] W (1847) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-28T19:24:32.081+00:00] !! send C7-1 admitted request=75
+[2026-09-28T19:24:32.817+00:00] I (3874) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-28T19:24:32.817+00:00] W (3874) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-28T19:24:37.138+00:00] !! send C7-1 -> expired DEADLINE_EXPIRED 5056.99 ms
+[2026-09-28T19:24:39.142+00:00] !! send C7-2 admitted request=76
+[2026-09-28T19:24:44.196+00:00] !! send C7-2 -> expired DEADLINE_EXPIRED 5054.15 ms
+[2026-09-28T19:24:46.202+00:00] !! send C7-3 admitted request=77
+[2026-09-28T19:24:51.211+00:00] !! send C7-3 -> expired DEADLINE_EXPIRED 5009.16 ms
+[2026-09-28T19:24:53.216+00:00] !! send C7-4 admitted request=78
+[2026-09-28T19:24:55.165+00:00] I (26237) RouteLoomRef: discovery event=BOUND peer=3
+[2026-09-28T19:24:55.165+00:00] W (26237) RouteLoomRef: diagnostic reason=BOUND peer=3 message=none
+[2026-09-28T19:24:55.265+00:00] I (26263) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-28T19:24:55.265+00:00] W (26263) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-28T19:24:56.385+00:00] !! send C7-4 -> delivered END_RECEIVED 3169.0 ms
+[2026-09-28T19:24:58.390+00:00] !! send C7-5 admitted request=79
+[2026-09-28T19:24:58.506+00:00] !! send C7-5 -> delivered END_RECEIVED 116.24 ms
+[2026-09-28T19:25:00.510+00:00] !! send C7-6 admitted request=80
+[2026-09-28T19:25:00.627+00:00] !! send C7-6 -> delivered END_RECEIVED 116.73 ms
+[2026-09-28T19:25:02.632+00:00] !! send C7-7 admitted request=81
+[2026-09-28T19:25:02.745+00:00] !! send C7-7 -> delivered END_RECEIVED 113.3 ms
+[2026-09-28T19:25:04.752+00:00] !! send C7-8 admitted request=82
+[2026-09-28T19:25:04.870+00:00] !! send C7-8 -> delivered END_RECEIVED 118.16 ms
+[2026-09-28T19:25:06.874+00:00] !! send C7-9 admitted request=83
+[2026-09-28T19:25:06.989+00:00] !! send C7-9 -> delivered END_RECEIVED 115.07 ms
+[2026-09-28T19:25:08.996+00:00] !! cycle 7 delivered 6/10 recovery_s=23.813
+[2026-09-28T19:25:10.996+00:00] !! cycle 8 reset assert (RTS, DTR low)
+[2026-09-28T19:25:11.002+00:00] ESP-ROM:esp32c6-20220919
+[2026-09-28T19:25:11.002+00:00] Build:Sep 19 2022
+[2026-09-28T19:25:11.002+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x3f (SPI_FAST_FLASH_BOOT)
+[2026-09-28T19:25:11.002+00:00] Saved PC:0x40807866
+[2026-09-28T19:25:11.002+00:00] SPIWP:0xee
+[2026-09-28T19:25:11.002+00:00] mode:DIO, clock div:2
+[2026-09-28T19:25:11.002+00:00] load:0x40875730,len:0x1738
+[2026-09-28T19:25:11.102+00:00] load:0x4086b910,len:0xd8c
+[2026-09-28T19:25:11.102+00:00] load:0x4086e610,len:0x32e0
+[2026-09-28T19:25:11.102+00:00] entry 0x4086b91a
+[2026-09-28T19:25:11.102+00:00] I (23) boot: ESP-IDF v6.0.3 2nd stage bootloader
+[2026-09-28T19:25:11.102+00:00] I (23) boot: compile time Sep 28 2026 17:45:27
+[2026-09-28T19:25:11.102+00:00] I (24) boot: chip revision: v0.2
+[2026-09-28T19:25:11.102+00:00] I (24) boot: efuse block revision: v0.3
+[2026-09-28T19:25:11.102+00:00] I (26) boot.esp32c6: SPI Speed      : 80MHz
+[2026-09-28T19:25:11.102+00:00] I (30) boot.esp32c6: SPI Mode       : DIO
+[2026-09-28T19:25:11.102+00:00] I (34) boot.esp32c6: SPI Flash Size : 4MB
+[2026-09-28T19:25:11.102+00:00] I (38) boot: Enabling RNG early entropy source...
+[2026-09-28T19:25:11.102+00:00] I (42) boot: Partition Table:
+[2026-09-28T19:25:11.102+00:00] I (45) boot: ## Label            Usage          Type ST Offset   Length
+[2026-09-28T19:25:11.102+00:00] I (51) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+[2026-09-28T19:25:11.102+00:00] I (58) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+[2026-09-28T19:25:11.102+00:00] I (64) boot:  2 otadata          OTA data         01 00 00010000 00002000
+[2026-09-28T19:25:11.102+00:00] I (71) boot:  3 rlcfg            WiFi data        01 02 00012000 00006000
+[2026-09-28T19:25:11.102+00:00] I (77) boot:  4 rlkeys           WiFi data        01 02 00018000 00003000
+[2026-09-28T19:25:11.102+00:00] I (84) boot:  5 rlsec            WiFi data        01 02 00020000 00020000
+[2026-09-28T19:25:11.102+00:00] I (90) boot:  6 ota_0            OTA app          00 10 00040000 001d0000
+[2026-09-28T19:25:11.102+00:00] I (97) boot:  7 ota_1            OTA app          00 11 00210000 001d0000
+[2026-09-28T19:25:11.202+00:00] I (103) boot:  8 coredump         Unknown data     01 03 003e0000 00010000
+[2026-09-28T19:25:11.202+00:00] I (110) boot: End of partition table
+[2026-09-28T19:25:11.202+00:00] I (114) esp_image: segment 0: paddr=00040020 vaddr=42120020 size=25d38h (154936) map
+[2026-09-28T19:25:11.202+00:00] I (150) esp_image: segment 1: paddr=00065d60 vaddr=40800000 size=0a2b8h ( 41656) load
+[2026-09-28T19:25:11.202+00:00] I (159) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=11714ch (1143116) map
+[2026-09-28T19:25:11.402+00:00] I (370) esp_image: segment 3: paddr=00187174 vaddr=4080a2b8 size=0fd54h ( 64852) load
+[2026-09-28T19:25:11.402+00:00] I (385) esp_image: segment 4: paddr=00196ed0 vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-28T19:25:11.402+00:00] I (389) esp_image: segment 5: paddr=0019aaec vaddr=50000000 size=00060h (    96) load
+[2026-09-28T19:25:11.403+00:00] I (390) esp_image: segment 6: paddr=0019ab54 vaddr=50000068 size=00024h (    36) load
+[2026-09-28T19:25:11.403+00:00] I (402) boot: Loaded app from partition at offset 0x40000
+[2026-09-28T19:25:11.403+00:00] I (403) boot: Disabling RNG early entropy source...
+[2026-09-28T19:25:11.496+00:00] !! cycle 8 reset released after 0.500s
+[2026-09-28T19:25:11.498+00:00] !! send C8-0 admitted request=84
+[2026-09-28T19:25:11.503+00:00] I (419) cpu_start: Unicore app
+[2026-09-28T19:25:11.503+00:00] I (427) cpu_start: GPIO 17 and 16 are used as console UART I/O pins
+[2026-09-28T19:25:11.503+00:00] I (427) cpu_start: Pro cpu start user code
+[2026-09-28T19:25:11.503+00:00] I (428) cpu_start: cpu freq: 160000000 Hz
+[2026-09-28T19:25:11.503+00:00] I (429) app_init: Application information:
+[2026-09-28T19:25:11.503+00:00] I (433) app_init: Project name:     routeloom_reference_node
+[2026-09-28T19:25:11.503+00:00] I (438) app_init: App version:      1
+[2026-09-28T19:25:11.503+00:00] I (442) app_init: Compile time:     Sep 28 2026 17:39:45
+[2026-09-28T19:25:11.503+00:00] I (447) app_init: ELF file SHA256:  71799c64e...
+[2026-09-28T19:25:11.503+00:00] I (451) app_init: ESP-IDF:          v6.0.3
+[2026-09-28T19:25:11.503+00:00] I (455) efuse_init: Min chip rev:     v0.0
+[2026-09-28T19:25:11.503+00:00] I (459) efuse_init: Max chip rev:     v0.99
+[2026-09-28T19:25:11.503+00:00] I (463) efuse_init: Chip rev:         v0.2
+[2026-09-28T19:25:11.503+00:00] I (467) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-28T19:25:11.503+00:00] I (473) heap_init: At 40851900 len 0002AD10 (171 KiB): RAM
+[2026-09-28T19:25:11.503+00:00] I (478) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+[2026-09-28T19:25:11.503+00:00] I (483) heap_init: At 5000008C len 00003F5C (15 KiB): RTCRAM
+[2026-09-28T19:25:11.503+00:00] I (489) spi_flash: detected chip: generic
+[2026-09-28T19:25:11.503+00:00] I (492) spi_flash: flash io: dio
+[2026-09-28T19:25:11.503+00:00] I (496) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-28T19:25:11.603+00:00] I (502) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-28T19:25:11.603+00:00] I (517) main_task: Started on CPU0
+[2026-09-28T19:25:11.603+00:00] I (519) main_task: Calling app_main()
+[2026-09-28T19:25:11.603+00:00] I (523) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-28T19:25:11.603+00:00] I (569) RouteLoomRef: sdkv1 identity: none provisioned
+[2026-09-28T19:25:11.603+00:00] I (570) RouteLoomRef: sdkv1 site: not a member
+[2026-09-28T19:25:11.603+00:00] I (570) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+[2026-09-28T19:25:11.603+00:00] I (574) RouteLoomRef: sdkv1 local_revocation: none
+[2026-09-28T19:25:11.603+00:00] I (578) RouteLoomRef: sdkv1 lifecycle: none
+[2026-09-28T19:25:11.603+00:00] I (584) RouteLoomRef: routeloom field boot: fw=1 app_sha256=71799c64ead56796ab75a4e7c8c505578cbb7d33a914a759610a284f3678bb19
+[2026-09-28T19:25:11.603+00:00] I (604) RouteLoomRef: board config: gen=1 node=0x2 secrets_gen=1 mac=10bda3b148a8
+[2026-09-28T19:25:11.703+00:00] I (607) RouteLoomRef: security owner ready (node 0x2)
+[2026-09-28T19:25:11.703+00:00] I (608) RouteLoom: Wi-Fi init heap: free=144636 largest=129024 bytes
+[2026-09-28T19:25:11.703+00:00] I (612) pp: pp rom version: 5b8dcfa
+[2026-09-28T19:25:11.703+00:00] I (615) net80211: net80211 rom version: 5b8dcfa
+[2026-09-28T19:25:11.703+00:00] I (620) wifi:wifi driver task: 4087f494, prio:23, stack:6656, core=0
+[2026-09-28T19:25:11.703+00:00] I (626) wifi:wifi firmware version: da143fa
+[2026-09-28T19:25:11.703+00:00] I (629) wifi:wifi certification version: v7.0
+[2026-09-28T19:25:11.703+00:00] I (633) wifi:config NVS flash: disabled
+[2026-09-28T19:25:11.703+00:00] I (636) wifi:config nano formatting: disabled
+[2026-09-28T19:25:11.703+00:00] I (640) wifi:mac_version:HAL_MAC_ESP32AX_761,ut_version:N, band mode:0x1
+[2026-09-28T19:25:11.703+00:00] I (647) wifi:Init data frame dynamic rx buffer num: 8
+[2026-09-28T19:25:11.703+00:00] I (652) wifi:Init static rx mgmt buffer num: 2
+[2026-09-28T19:25:11.703+00:00] I (656) wifi:Init management short buffer num: 8
+[2026-09-28T19:25:11.703+00:00] I (660) wifi:Init dynamic tx buffer num: 8
+[2026-09-28T19:25:11.703+00:00] I (664) wifi:Init static tx FG buffer num: 2
+[2026-09-28T19:25:11.703+00:00] I (668) wifi:Init static rx buffer size: 1700 (rxctrl:92, csi:512)
+[2026-09-28T19:25:11.703+00:00] I (674) wifi:Init static rx buffer num: 4
+[2026-09-28T19:25:11.703+00:00] I (678) wifi:Init dynamic rx buffer num: 8
+[2026-09-28T19:25:11.703+00:00] I (682) wifi_init: accept mbox: 6
+[2026-09-28T19:25:11.703+00:00] I (684) wifi_init: tcpip mbox: 32
+[2026-09-28T19:25:11.703+00:00] I (687) wifi_init: udp mbox: 6
+[2026-09-28T19:25:11.703+00:00] I (690) wifi_init: tcp mbox: 6
+[2026-09-28T19:25:11.703+00:00] I (693) wifi_init: tcp tx win: 5760
+[2026-09-28T19:25:11.703+00:00] I (696) wifi_init: tcp rx win: 5760
+[2026-09-28T19:25:11.703+00:00] I (699) wifi_init: tcp mss: 1440
+[2026-09-28T19:25:11.703+00:00] I (702) wifi_init: WiFi IRAM OP enabled
+[2026-09-28T19:25:11.803+00:00] I (706) wifi_init: WiFi RX IRAM OP enabled
+[2026-09-28T19:25:11.803+00:00] I (710) wifi_init: WiFi SLP IRAM OP enabled
+[2026-09-28T19:25:11.803+00:00] I (714) RouteLoom: Wi-Fi initialized heap: free=118916 largest=102400 min=118888 bytes
+[2026-09-28T19:25:11.803+00:00] I (722) wifi:(2.4G)set country: cc=JP  schan=1 nchan=13 policy=1
+[2026-09-28T19:25:11.803+00:00] I (727) wifi:ifx:0, phymode(new:3, sta nvs: 7 ap nvs: 3)
+[2026-09-28T19:25:11.904+00:00] I (732) phy_init: phy_version 345,552b044,Jul 14 2026,10:37:00
+[2026-09-28T19:25:11.904+00:00] I (837) wifi:11ax coex: WDEVAX_PTI0(0x55777555), WDEVAX_PTI1(0x00003377).
+[2026-09-28T19:25:11.904+00:00] 
+[2026-09-28T19:25:11.904+00:00] I (838) wifi:mode : sta (10:bd:a3:b1:48:a8)
+[2026-09-28T19:25:11.904+00:00] I (838) wifi:enable tsf
+[2026-09-28T19:25:11.904+00:00] I (841) RouteLoom: Wi-Fi started heap: free=116728 largest=100352 min=116464 bytes
+[2026-09-28T19:25:11.904+00:00] I (847) ESPNOW: espnow [version: 2.0] init
+[2026-09-28T19:25:11.904+00:00] I (850) RouteLoom: ESP-NOW ready heap: free=116512 largest=100352 min=116464 bytes
+[2026-09-28T19:25:11.904+00:00] I (863) RouteLoomRef: dev adopted (node 0x2, boot 51)
+[2026-09-28T19:25:11.904+00:00] I (863) RouteLoomRef: security owner started; node start deferred to membership
+[2026-09-28T19:25:11.904+00:00] W (870) RouteLoomRef: diagnostic reason=SECURITY_PROFILE_EXPERIMENTAL peer=0 message=none
+[2026-09-28T19:25:11.904+00:00] W (877) RouteLoomRef: diagnostic reason=ROUTE_REFRESH_BOUND_EXCEEDED peer=0 message=none
+[2026-09-28T19:25:11.904+00:00] I (888) RouteLoomRef: member discovery started
+[2026-09-28T19:25:12.237+00:00] !! send C8-0 -> failed HOP_ACCEPT_TIMEOUT 739.21 ms
+[2026-09-28T19:25:12.305+00:00] I (1280) RouteLoomRef: discovery event=BOUND peer=3
+[2026-09-28T19:25:12.305+00:00] W (1280) RouteLoomRef: diagnostic reason=BOUND peer=3 message=none
+[2026-09-28T19:25:14.242+00:00] !! send C8-1 admitted request=85
+[2026-09-28T19:25:14.409+00:00] I (3314) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-28T19:25:14.409+00:00] W (3315) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-28T19:25:14.737+00:00] !! send C8-1 -> failed HOP_ACCEPT_TIMEOUT 495.24 ms
+[2026-09-28T19:25:16.742+00:00] !! send C8-2 admitted request=86
+[2026-09-28T19:25:17.237+00:00] !! send C8-2 -> failed HOP_ACCEPT_TIMEOUT 495.38 ms
+[2026-09-28T19:25:19.243+00:00] !! send C8-3 admitted request=87
+[2026-09-28T19:25:19.686+00:00] !! send C8-3 -> failed HOP_ACCEPT_TIMEOUT 442.79 ms
+[2026-09-28T19:25:21.692+00:00] !! send C8-4 admitted request=88
+[2026-09-28T19:25:22.134+00:00] !! send C8-4 -> failed HOP_ACCEPT_TIMEOUT 442.22 ms
+[2026-09-28T19:25:24.141+00:00] !! send C8-5 admitted request=89
+[2026-09-28T19:25:24.591+00:00] !! send C8-5 -> failed HOP_ACCEPT_TIMEOUT 449.69 ms
+[2026-09-28T19:25:26.594+00:00] !! send C8-6 admitted request=90
+[2026-09-28T19:25:31.608+00:00] !! send C8-6 -> expired DEADLINE_EXPIRED 5013.65 ms
+[2026-09-28T19:25:33.612+00:00] !! send C8-7 admitted request=91
+[2026-09-28T19:25:35.750+00:00] I (24653) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-28T19:25:35.750+00:00] W (24653) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-28T19:25:35.750+00:00] I (24677) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-28T19:25:35.750+00:00] W (24677) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-28T19:25:36.946+00:00] !! send C8-7 -> delivered END_RECEIVED 3334.04 ms
+[2026-09-28T19:25:38.950+00:00] !! send C8-8 admitted request=92
+[2026-09-28T19:25:39.122+00:00] !! send C8-8 -> delivered END_RECEIVED 172.5 ms
+[2026-09-28T19:25:41.128+00:00] !! send C8-9 admitted request=93
+[2026-09-28T19:25:41.247+00:00] !! send C8-9 -> delivered END_RECEIVED 118.98 ms
+[2026-09-28T19:25:43.251+00:00] !! cycle 8 delivered 3/10 recovery_s=22.116
+[2026-09-28T19:25:45.251+00:00] !! cycle 9 reset assert (RTS, DTR low)
+[2026-09-28T19:25:45.300+00:00] ESP-ROM:esp32c6-20220919
+[2026-09-28T19:25:45.300+00:00] Build:Sep 19 2022
+[2026-09-28T19:25:45.300+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x3f (SPI_FAST_FLASH_BOOT)
+[2026-09-28T19:25:45.300+00:00] Saved PC:0x40807866
+[2026-09-28T19:25:45.300+00:00] SPIWP:0xee
+[2026-09-28T19:25:45.300+00:00] mode:DIO, clock div:2
+[2026-09-28T19:25:45.300+00:00] load:0x40875730,len:0x1738
+[2026-09-28T19:25:45.300+00:00] load:0x4086b910,len:0xd8c
+[2026-09-28T19:25:45.300+00:00] load:0x4086e610,len:0x32e0
+[2026-09-28T19:25:45.300+00:00] entry 0x4086b91a
+[2026-09-28T19:25:45.300+00:00] I (23) boot: ESP-IDF v6.0.3 2nd stage bootloader
+[2026-09-28T19:25:45.300+00:00] I (23) boot: compile time Sep 28 2026 17:45:27
+[2026-09-28T19:25:45.300+00:00] I (24) boot: chip revision: v0.2
+[2026-09-28T19:25:45.300+00:00] I (24) boot: efuse block revision: v0.3
+[2026-09-28T19:25:45.300+00:00] I (26) boot.esp32c6: SPI Speed      : 80MHz
+[2026-09-28T19:25:45.300+00:00] I (30) boot.esp32c6: SPI Mode       : DIO
+[2026-09-28T19:25:45.300+00:00] I (34) boot.esp32c6: SPI Flash Size : 4MB
+[2026-09-28T19:25:45.300+00:00] I (38) boot: Enabling RNG early entropy source...
+[2026-09-28T19:25:45.300+00:00] I (42) boot: Partition Table:
+[2026-09-28T19:25:45.400+00:00] I (45) boot: ## Label            Usage          Type ST Offset   Length
+[2026-09-28T19:25:45.400+00:00] I (51) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+[2026-09-28T19:25:45.400+00:00] I (58) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+[2026-09-28T19:25:45.400+00:00] I (64) boot:  2 otadata          OTA data         01 00 00010000 00002000
+[2026-09-28T19:25:45.400+00:00] I (71) boot:  3 rlcfg            WiFi data        01 02 00012000 00006000
+[2026-09-28T19:25:45.400+00:00] I (77) boot:  4 rlkeys           WiFi data        01 02 00018000 00003000
+[2026-09-28T19:25:45.400+00:00] I (84) boot:  5 rlsec            WiFi data        01 02 00020000 00020000
+[2026-09-28T19:25:45.400+00:00] I (90) boot:  6 ota_0            OTA app          00 10 00040000 001d0000
+[2026-09-28T19:25:45.400+00:00] I (97) boot:  7 ota_1            OTA app          00 11 00210000 001d0000
+[2026-09-28T19:25:45.400+00:00] I (103) boot:  8 coredump         Unknown data     01 03 003e0000 00010000
+[2026-09-28T19:25:45.400+00:00] I (110) boot: End of partition table
+[2026-09-28T19:25:45.400+00:00] I (114) esp_image: segment 0: paddr=00040020 vaddr=42120020 size=25d38h (154936) map
+[2026-09-28T19:25:45.500+00:00] I (150) esp_image: segment 1: paddr=00065d60 vaddr=40800000 size=0a2b8h ( 41656) load
+[2026-09-28T19:25:45.500+00:00] I (159) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=11714ch (1143116) map
+[2026-09-28T19:25:45.701+00:00] I (370) esp_image: segment 3: paddr=00187174 vaddr=4080a2b8 size=0fd54h ( 64852) load
+[2026-09-28T19:25:45.701+00:00] I (385) esp_image: segment 4: paddr=00196ed0 vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-28T19:25:45.701+00:00] I (389) esp_image: segment 5: paddr=0019aaec vaddr=50000000 size=00060h (    96) load
+[2026-09-28T19:25:45.701+00:00] I (390) esp_image: segment 6: paddr=0019ab54 vaddr=50000068 size=00024h (    36) load
+[2026-09-28T19:25:45.701+00:00] I (402) boot: Loaded app from partition at offset 0x40000
+[2026-09-28T19:25:45.701+00:00] I (403) boot: Disabling RNG early entropy source...
+[2026-09-28T19:25:45.701+00:00] I (419) cpu_start: Unicore app
+[2026-09-28T19:25:45.701+00:00] I (427) cpu_start: GPIO 17 and 16 are used as console UART I/O pins
+[2026-09-28T19:25:45.701+00:00] I (427) cpu_start: Pro cpu start user code
+[2026-09-28T19:25:45.701+00:00] I (428) cpu_start: cpu freq: 160000000 Hz
+[2026-09-28T19:25:45.701+00:00] I (429) app_init: Application information:
+[2026-09-28T19:25:45.701+00:00] I (433) app_init: Project name:     routeloom_reference_node
+[2026-09-28T19:25:45.701+00:00] I (438) app_init: App version:      1
+[2026-09-28T19:25:45.701+00:00] I (442) app_init: Compile time:     Sep 28 2026 17:39:45
+[2026-09-28T19:25:45.752+00:00] !! cycle 9 reset released after 0.500s
+[2026-09-28T19:25:45.756+00:00] !! send C9-0 admitted request=94
+[2026-09-28T19:25:45.801+00:00] I (447) app_init: ELF file SHA256:  71799c64e...
+[2026-09-28T19:25:45.802+00:00] I (451) app_init: ESP-IDF:          v6.0.3
+[2026-09-28T19:25:45.802+00:00] I (455) efuse_init: Min chip rev:     v0.0
+[2026-09-28T19:25:45.802+00:00] I (459) efuse_init: Max chip rev:     v0.99
+[2026-09-28T19:25:45.802+00:00] I (463) efuse_init: Chip rev:         v0.2
+[2026-09-28T19:25:45.802+00:00] I (467) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-28T19:25:45.802+00:00] I (473) heap_init: At 40851900 len 0002AD10 (171 KiB): RAM
+[2026-09-28T19:25:45.802+00:00] I (478) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+[2026-09-28T19:25:45.802+00:00] I (483) heap_init: At 5000008C len 00003F5C (15 KiB): RTCRAM
+[2026-09-28T19:25:45.802+00:00] I (489) spi_flash: detected chip: generic
+[2026-09-28T19:25:45.802+00:00] I (492) spi_flash: flash io: dio
+[2026-09-28T19:25:45.802+00:00] I (496) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-28T19:25:45.802+00:00] I (502) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-28T19:25:45.802+00:00] I (517) main_task: Started on CPU0
+[2026-09-28T19:25:45.802+00:00] I (519) main_task: Calling app_main()
+[2026-09-28T19:25:45.802+00:00] I (523) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-28T19:25:45.902+00:00] I (569) RouteLoomRef: sdkv1 identity: none provisioned
+[2026-09-28T19:25:45.902+00:00] I (570) RouteLoomRef: sdkv1 site: not a member
+[2026-09-28T19:25:45.902+00:00] I (570) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+[2026-09-28T19:25:45.902+00:00] I (574) RouteLoomRef: sdkv1 local_revocation: none
+[2026-09-28T19:25:45.902+00:00] I (578) RouteLoomRef: sdkv1 lifecycle: none
+[2026-09-28T19:25:45.902+00:00] I (584) RouteLoomRef: routeloom field boot: fw=1 app_sha256=71799c64ead56796ab75a4e7c8c505578cbb7d33a914a759610a284f3678bb19
+[2026-09-28T19:25:45.902+00:00] I (604) RouteLoomRef: board config: gen=1 node=0x2 secrets_gen=1 mac=10bda3b148a8
+[2026-09-28T19:25:45.902+00:00] I (607) RouteLoomRef: security owner ready (node 0x2)
+[2026-09-28T19:25:45.902+00:00] I (608) RouteLoom: Wi-Fi init heap: free=144636 largest=129024 bytes
+[2026-09-28T19:25:45.902+00:00] I (612) pp: pp rom version: 5b8dcfa
+[2026-09-28T19:25:45.902+00:00] I (615) net80211: net80211 rom version: 5b8dcfa
+[2026-09-28T19:25:45.902+00:00] I (620) wifi:wifi driver task: 4087f494, prio:23, stack:6656, core=0
+[2026-09-28T19:25:45.902+00:00] I (626) wifi:wifi firmware version: da143fa
+[2026-09-28T19:25:45.902+00:00] I (629) wifi:wifi certification version: v7.0
+[2026-09-28T19:25:45.902+00:00] I (633) wifi:config NVS flash: disabled
+[2026-09-28T19:25:45.902+00:00] I (636) wifi:config nano formatting: disabled
+[2026-09-28T19:25:45.902+00:00] I (640) wifi:mac_version:HAL_MAC_ESP32AX_761,ut_version:N, band mode:0x1
+[2026-09-28T19:25:46.002+00:00] I (647) wifi:Init data frame dynamic rx buffer num: 8
+[2026-09-28T19:25:46.002+00:00] I (652) wifi:Init static rx mgmt buffer num: 2
+[2026-09-28T19:25:46.002+00:00] I (656) wifi:Init management short buffer num: 8
+[2026-09-28T19:25:46.002+00:00] I (660) wifi:Init dynamic tx buffer num: 8
+[2026-09-28T19:25:46.002+00:00] I (664) wifi:Init static tx FG buffer num: 2
+[2026-09-28T19:25:46.002+00:00] I (668) wifi:Init static rx buffer size: 1700 (rxctrl:92, csi:512)
+[2026-09-28T19:25:46.002+00:00] I (674) wifi:Init static rx buffer num: 4
+[2026-09-28T19:25:46.002+00:00] I (678) wifi:Init dynamic rx buffer num: 8
+[2026-09-28T19:25:46.002+00:00] I (682) wifi_init: accept mbox: 6
+[2026-09-28T19:25:46.002+00:00] I (684) wifi_init: tcpip mbox: 32
+[2026-09-28T19:25:46.002+00:00] I (687) wifi_init: udp mbox: 6
+[2026-09-28T19:25:46.002+00:00] I (690) wifi_init: tcp mbox: 6
+[2026-09-28T19:25:46.002+00:00] I (693) wifi_init: tcp tx win: 5760
+[2026-09-28T19:25:46.002+00:00] I (696) wifi_init: tcp rx win: 5760
+[2026-09-28T19:25:46.002+00:00] I (699) wifi_init: tcp mss: 1440
+[2026-09-28T19:25:46.002+00:00] I (702) wifi_init: WiFi IRAM OP enabled
+[2026-09-28T19:25:46.002+00:00] I (706) wifi_init: WiFi RX IRAM OP enabled
+[2026-09-28T19:25:46.002+00:00] I (710) wifi_init: WiFi SLP IRAM OP enabled
+[2026-09-28T19:25:46.002+00:00] I (714) RouteLoom: Wi-Fi initialized heap: free=118916 largest=102400 min=118888 bytes
+[2026-09-28T19:25:46.002+00:00] I (722) wifi:(2.4G)set country: cc=JP  schan=1 nchan=13 policy=1
+[2026-09-28T19:25:46.002+00:00] I (727) wifi:ifx:0, phymode(new:3, sta nvs: 7 ap nvs: 3)
+[2026-09-28T19:25:46.102+00:00] I (732) phy_init: phy_version 345,552b044,Jul 14 2026,10:37:00
+[2026-09-28T19:25:46.103+00:00] I (833) wifi:11ax coex: WDEVAX_PTI0(0x55777555), WDEVAX_PTI1(0x00003377).
+[2026-09-28T19:25:46.103+00:00] 
+[2026-09-28T19:25:46.103+00:00] I (834) wifi:mode : sta (10:bd:a3:b1:48:a8)
+[2026-09-28T19:25:46.103+00:00] I (834) wifi:enable tsf
+[2026-09-28T19:25:46.103+00:00] I (837) RouteLoom: Wi-Fi started heap: free=116728 largest=100352 min=116464 bytes
+[2026-09-28T19:25:46.103+00:00] I (843) ESPNOW: espnow [version: 2.0] init
+[2026-09-28T19:25:46.203+00:00] I (846) RouteLoom: ESP-NOW ready heap: free=116512 largest=100352 min=116464 bytes
+[2026-09-28T19:25:46.203+00:00] I (859) RouteLoomRef: dev adopted (node 0x2, boot 52)
+[2026-09-28T19:25:46.203+00:00] I (859) RouteLoomRef: security owner started; node start deferred to membership
+[2026-09-28T19:25:46.203+00:00] W (866) RouteLoomRef: diagnostic reason=SECURITY_PROFILE_EXPERIMENTAL peer=0 message=none
+[2026-09-28T19:25:46.203+00:00] W (873) RouteLoomRef: diagnostic reason=ROUTE_REFRESH_BOUND_EXCEEDED peer=0 message=none
+[2026-09-28T19:25:46.203+00:00] I (884) RouteLoomRef: member discovery started
+[2026-09-28T19:25:46.480+00:00] !! send C9-0 -> failed HOP_ACCEPT_TIMEOUT 724.34 ms
+[2026-09-28T19:25:47.004+00:00] I (1740) RouteLoomRef: discovery event=BOUND peer=3
+[2026-09-28T19:25:47.004+00:00] W (1740) RouteLoomRef: diagnostic reason=BOUND peer=3 message=none
+[2026-09-28T19:25:47.104+00:00] I (1783) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-28T19:25:47.105+00:00] W (1784) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-28T19:25:48.485+00:00] !! send C9-1 admitted request=95
+[2026-09-28T19:25:48.873+00:00] !! send C9-1 -> failed HOP_ACCEPT_TIMEOUT 388.37 ms
+[2026-09-28T19:25:50.878+00:00] !! send C9-2 admitted request=96
+[2026-09-28T19:25:51.269+00:00] !! send C9-2 -> failed HOP_ACCEPT_TIMEOUT 391.33 ms
+[2026-09-28T19:25:53.273+00:00] !! send C9-3 admitted request=97
+[2026-09-28T19:25:53.667+00:00] !! send C9-3 -> failed HOP_ACCEPT_TIMEOUT 394.23 ms
+[2026-09-28T19:25:55.672+00:00] !! send C9-4 admitted request=98
+[2026-09-28T19:25:56.055+00:00] !! send C9-4 -> failed HOP_ACCEPT_TIMEOUT 383.24 ms
+[2026-09-28T19:25:58.061+00:00] !! send C9-5 admitted request=99
+[2026-09-28T19:26:03.108+00:00] !! send C9-5 -> expired DEADLINE_EXPIRED 5047.26 ms
+[2026-09-28T19:26:05.115+00:00] !! send C9-6 admitted request=100
+[2026-09-28T19:26:08.154+00:00] I (22834) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-28T19:26:08.154+00:00] W (22834) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-28T19:26:08.154+00:00] I (22858) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-28T19:26:08.154+00:00] W (22858) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-28T19:26:09.358+00:00] !! send C9-6 -> delivered END_RECEIVED 4243.45 ms
+[2026-09-28T19:26:11.362+00:00] !! send C9-7 admitted request=101
+[2026-09-28T19:26:11.478+00:00] !! send C9-7 -> delivered END_RECEIVED 115.79 ms
+[2026-09-28T19:26:13.700+00:00] !! send C9-8 admitted request=102
+[2026-09-28T19:26:13.818+00:00] !! send C9-8 -> delivered END_RECEIVED 117.79 ms
+[2026-09-28T19:26:15.824+00:00] !! send C9-9 admitted request=103
+[2026-09-28T19:26:15.940+00:00] !! send C9-9 -> delivered END_RECEIVED 115.73 ms
+[2026-09-28T19:26:17.945+00:00] !! cycle 9 delivered 4/10 recovery_s=19.363
+[2026-09-28T19:26:19.945+00:00] !! run finished

@@ -1,0 +1,101 @@
+$ /home/sahur/.local/bin/esptool --chip esp32c3 --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00 --baud 460800 --before default-reset --after hard-reset write-flash --flash-mode keep --flash-freq keep --flash-size keep 0x0 /tmp/routeloom-hil-flash-f2z83cj1/images/bootloader/bootloader.bin 0x10000 /tmp/routeloom-hil-flash-f2z83cj1/images/ota_data_initial.bin 0x40000 /tmp/routeloom-hil-flash-f2z83cj1/images/application.bin 0x8000 /tmp/routeloom-hil-flash-f2z83cj1/images/partition_table/partition-table.bin
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00:
+Connecting...
+Connected to ESP32-C3 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                94:a9:90:7a:26:ac
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+Changing baud rate to 460800...
+Changed.
+
+Configuring flash size...
+
+Writing '/tmp/routeloom-hil-flash-f2z83cj1/images/bootloader/bootloader.bin' at 0x00000000...
+Flash will be erased from 0x00000000 to 0x00005fff...
+Compressed 21408 bytes to 13557...
+Writing at 0x000053a0 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 13.24kB/13.24kB [0s] 
+Wrote 21408 bytes (13557 compressed) at 0x00000000 in 0.1 seconds (1338.0 kbit/s).
+Verifying written data...
+Hash of data verified.
+
+Writing '/tmp/routeloom-hil-flash-f2z83cj1/images/ota_data_initial.bin' at 0x00010000...
+Flash will be erased from 0x00010000 to 0x00011fff...
+Compressed 8192 bytes to 31...
+Writing at 0x00012000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 31B/31B [0s] 
+Wrote 8192 bytes (31 compressed) at 0x00010000 in 0.0 seconds (4344.7 kbit/s).
+Verifying written data...
+Hash of data verified.
+
+Writing '/tmp/routeloom-hil-flash-f2z83cj1/images/application.bin' at 0x00040000...
+Flash will be erased from 0x00040000 to 0x0018dfff...
+Compressed 1366992 bytes to 807333...
+Writing at 0x0004c405 ╸                                2.0% 16.00kB/788.41kB [0s] 
+Writing at 0x00058299 ━                                4.1% 32.00kB/788.41kB [0s] 
+Writing at 0x0005f2f9 ━╸                               6.1% 48.00kB/788.41kB [0s] 
+Writing at 0x000684aa ━━                               8.1% 64.00kB/788.41kB [0s] 
+Writing at 0x0006eae4 ━━━                             10.1% 80.00kB/788.41kB [0s] 
+Writing at 0x00075858 ━━━╸                            12.2% 96.00kB/788.41kB [0s] 
+Writing at 0x0007c823 ━━━━                            14.2% 112.00kB/788.41kB [0s] 
+Writing at 0x00083376 ━━━━╸                           16.2% 128.00kB/788.41kB [0s] 
+Writing at 0x00089c44 ━━━━━                           18.3% 144.00kB/788.41kB [1s] 
+Writing at 0x00090817 ━━━━━━                          20.3% 160.00kB/788.41kB [1s] 
+Writing at 0x00097532 ━━━━━━╸                         22.3% 176.00kB/788.41kB [1s] 
+Writing at 0x0009e126 ━━━━━━━                         24.4% 192.00kB/788.41kB [1s] 
+Writing at 0x000a474b ━━━━━━━╸                        26.4% 208.00kB/788.41kB [1s] 
+Writing at 0x000ab172 ━━━━━━━━╸                       28.4% 224.00kB/788.41kB [1s] 
+Writing at 0x000b1bf5 ━━━━━━━━━                       30.4% 240.00kB/788.41kB [1s] 
+Writing at 0x000b8419 ━━━━━━━━━╸                      32.5% 256.00kB/788.41kB [1s] 
+Writing at 0x000becde ━━━━━━━━━━                      34.5% 272.00kB/788.41kB [2s] 
+Writing at 0x000c521b ━━━━━━━━━━╸                     36.5% 288.00kB/788.41kB [2s] 
+Writing at 0x000cbb7b ━━━━━━━━━━━╸                    38.6% 304.00kB/788.41kB [2s] 
+Writing at 0x000d2445 ━━━━━━━━━━━━                    40.6% 320.00kB/788.41kB [2s] 
+Writing at 0x000d8bae ━━━━━━━━━━━━╸                   42.6% 336.00kB/788.41kB [2s] 
+Writing at 0x000df388 ━━━━━━━━━━━━━                   44.6% 352.00kB/788.41kB [2s] 
+Writing at 0x000e5d50 ━━━━━━━━━━━━━━                  46.7% 368.00kB/788.41kB [2s] 
+Writing at 0x000ec8c0 ━━━━━━━━━━━━━━╸                 48.7% 384.00kB/788.41kB [2s] 
+Writing at 0x000f3272 ━━━━━━━━━━━━━━━                 50.7% 400.00kB/788.41kB [2s] 
+Writing at 0x000fa2cc ━━━━━━━━━━━━━━━╸                52.8% 416.00kB/788.41kB [2s] 
+Writing at 0x0010099a ━━━━━━━━━━━━━━━━                54.8% 432.00kB/788.41kB [3s] 
+Writing at 0x00107082 ━━━━━━━━━━━━━━━━━               56.8% 448.00kB/788.41kB [3s] 
+Writing at 0x0010df4c ━━━━━━━━━━━━━━━━━╸              58.9% 464.00kB/788.41kB [3s] 
+Writing at 0x001155f5 ━━━━━━━━━━━━━━━━━━              60.9% 480.00kB/788.41kB [3s] 
+Writing at 0x0011c2f2 ━━━━━━━━━━━━━━━━━━╸             62.9% 496.00kB/788.41kB [3s] 
+Writing at 0x00123174 ━━━━━━━━━━━━━━━━━━━             64.9% 512.00kB/788.41kB [3s] 
+Writing at 0x00128e8b ━━━━━━━━━━━━━━━━━━━━            67.0% 528.00kB/788.41kB [3s] 
+Writing at 0x0012ed67 ━━━━━━━━━━━━━━━━━━━━╸           69.0% 544.00kB/788.41kB [3s] 
+Writing at 0x00134901 ━━━━━━━━━━━━━━━━━━━━━           71.0% 560.00kB/788.41kB [3s] 
+Writing at 0x0013a149 ━━━━━━━━━━━━━━━━━━━━━╸          73.1% 576.00kB/788.41kB [4s] 
+Writing at 0x0013fee8 ━━━━━━━━━━━━━━━━━━━━━━╸         75.1% 592.00kB/788.41kB [4s] 
+Writing at 0x00146b06 ━━━━━━━━━━━━━━━━━━━━━━━         77.1% 608.00kB/788.41kB [4s] 
+Writing at 0x0014c965 ━━━━━━━━━━━━━━━━━━━━━━━╸        79.1% 624.00kB/788.41kB [4s] 
+Writing at 0x00152886 ━━━━━━━━━━━━━━━━━━━━━━━━        81.2% 640.00kB/788.41kB [4s] 
+Writing at 0x00158cc3 ━━━━━━━━━━━━━━━━━━━━━━━━╸       83.2% 656.00kB/788.41kB [4s] 
+Writing at 0x0015eeb8 ━━━━━━━━━━━━━━━━━━━━━━━━━╸      85.2% 672.00kB/788.41kB [4s] 
+Writing at 0x00164d3c ━━━━━━━━━━━━━━━━━━━━━━━━━━      87.3% 688.00kB/788.41kB [4s] 
+Writing at 0x0016b32e ━━━━━━━━━━━━━━━━━━━━━━━━━━╸     89.3% 704.00kB/788.41kB [4s] 
+Writing at 0x001716fd ━━━━━━━━━━━━━━━━━━━━━━━━━━━     91.3% 720.00kB/788.41kB [5s] 
+Writing at 0x00177996 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━    93.4% 736.00kB/788.41kB [5s] 
+Writing at 0x0017ceec ━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸   95.4% 752.00kB/788.41kB [5s] 
+Writing at 0x00182c37 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   97.4% 768.00kB/788.41kB [5s] 
+Writing at 0x0018a03c ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸  99.4% 784.00kB/788.41kB [5s] 
+Writing at 0x0018dbd0 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 788.41kB/788.41kB [5s] 
+Wrote 1366992 bytes (807333 compressed) at 0x00040000 in 5.7 seconds (1924.7 kbit/s).
+Verifying written data...
+Hash of data verified.
+
+Writing '/tmp/routeloom-hil-flash-f2z83cj1/images/partition_table/partition-table.bin' at 0x00008000...
+Flash will be erased from 0x00008000 to 0x00008fff...
+Compressed 3072 bytes to 179...
+Writing at 0x00008c00 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 179B/179B [0s] 
+Wrote 3072 bytes (179 compressed) at 0x00008000 in 0.0 seconds (3071.9 kbit/s).
+Verifying written data...
+Hash of data verified.
+
+Hard resetting via RTS pin...

@@ -1,0 +1,935 @@
+[2026-09-28T18:54:17.304+00:00] !! reset pulse
+[2026-09-28T18:54:17.404+00:00] I (16879) RouteLoomRef: delivery session=26 sequence=9 state=1 rESP-ROM:esp32c6-20220919
+[2026-09-28T18:54:17.404+00:00] Build:Sep 19 2022
+[2026-09-28T18:54:17.404+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x1e (SPI_FAST_FLASH_BOOT)
+[2026-09-28T18:54:17.404+00:00] Saved PC:0x42114204
+[2026-09-28T18:54:17.404+00:00] SPIWP:0xee
+[2026-09-28T18:54:17.404+00:00] mode:DIO, clock div:2
+[2026-09-28T18:54:17.404+00:00] load:0x40875730,len:0x1738
+[2026-09-28T18:54:17.404+00:00] load:0x4086b910,len:0xd8c
+[2026-09-28T18:54:17.404+00:00] load:0x4086e610,len:0x32e0
+[2026-09-28T18:54:17.404+00:00] entry 0x4086b91a
+[2026-09-28T18:54:17.404+00:00] I (23) boot: ESP-IDF v6.0.3 2nd stage bootloader
+[2026-09-28T18:54:17.404+00:00] I (23) boot: compile time Sep 28 2026 17:45:27
+[2026-09-28T18:54:17.404+00:00] I (24) boot: chip revision: v0.2
+[2026-09-28T18:54:17.404+00:00] I (24) boot: efuse block revision: v0.3
+[2026-09-28T18:54:17.404+00:00] I (26) boot.esp32c6: SPI Speed      : 80MHz
+[2026-09-28T18:54:17.404+00:00] I (30) boot.esp32c6: SPI Mode       : DIO
+[2026-09-28T18:54:17.404+00:00] I (34) boot.esp32c6: SPI Flash Size : 4MB
+[2026-09-28T18:54:17.404+00:00] I (38) boot: Enabling RNG early entropy source...
+[2026-09-28T18:54:17.404+00:00] I (42) boot: Partition Table:
+[2026-09-28T18:54:17.404+00:00] I (45) boot: ## Label            Usage          Type ST Offset   Length
+[2026-09-28T18:54:17.404+00:00] I (51) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+[2026-09-28T18:54:17.404+00:00] I (58) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+[2026-09-28T18:54:17.404+00:00] I (64) boot:  2 otadata          OTA data         01 00 00010000 00002000
+[2026-09-28T18:54:17.404+00:00] I (71) boot:  3 rlcfg            WiFi data        01 02 00012000 00006000
+[2026-09-28T18:54:17.404+00:00] I (77) boot:  4 rlkeys           WiFi data        01 02 00018000 00003000
+[2026-09-28T18:54:17.404+00:00] I (84) boot:  5 rlsec            WiFi data        01 02 00020000 00020000
+[2026-09-28T18:54:17.404+00:00] I (90) boot:  6 ota_0            OTA app          00 10 00040000 001d0000
+[2026-09-28T18:54:17.404+00:00] I (97) boot:  7 ota_1            OTA app          00 11 00210000 001d0000
+[2026-09-28T18:54:17.404+00:00] I (103) boot:  8 coredump         Unknown data     01 03 003e0000 00010000
+[2026-09-28T18:54:17.404+00:00] I (110) boot: End of partition table
+[2026-09-28T18:54:17.404+00:00] I (114) esp_image: segment 0: paddr=00040020 vaddr=42120020 size=25e40h (155200) map
+[2026-09-28T18:54:17.404+00:00] I (150) esp_image: segment 1: paddr=00065e68 vaddr=40800000 size=0a1b0h ( 41392) load
+[2026-09-28T18:54:17.404+00:00] I (159) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=117a20h (1145376) map
+[2026-09-28T18:54:17.504+00:00] I (371) esp_image: segment 3: paddr=00187a48 vaddr=4080a1b0 size=0fe5ch ( 65116) load
+[2026-09-28T18:54:17.504+00:00] I (385) esp_image: segment 4: paddr=001978ac vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-28T18:54:17.504+00:00] I (389) esp_image: segment 5: paddr=0019b4c8 vaddr=50000000 size=00060h (    96) load
+[2026-09-28T18:54:17.504+00:00] I (390) esp_image: segment 6: paddr=0019b530 vaddr=50000068 size=00024h (    36) load
+[2026-09-28T18:54:17.504+00:00] I (403) boot: Loaded app from partition at offset 0x40000
+[2026-09-28T18:54:17.605+00:00] I (403) boot: Disabling RNG early entropy source...
+[2026-09-28T18:54:17.605+00:00] I (419) cpu_start: Unicore app
+[2026-09-28T18:54:17.605+00:00] I (428) cpu_start: GPIO 17 and 16 are used as console UART I/O pins
+[2026-09-28T18:54:17.605+00:00] I (429) cpu_start: Pro cpu start user code
+[2026-09-28T18:54:17.605+00:00] I (429) cpu_start: cpu freq: 160000000 Hz
+[2026-09-28T18:54:17.605+00:00] I (431) app_init: Application information:
+[2026-09-28T18:54:17.605+00:00] I (435) app_init: Project name:     routeloom_reference_node
+[2026-09-28T18:54:17.605+00:00] I (440) app_init: App version:      1
+[2026-09-28T18:54:17.605+00:00] I (443) app_init: Compile time:     Sep 28 2026 18:20:17
+[2026-09-28T18:54:17.605+00:00] I (448) app_init: ELF file SHA256:  e8d617975...
+[2026-09-28T18:54:17.605+00:00] I (453) app_init: ESP-IDF:          v6.0.3
+[2026-09-28T18:54:17.605+00:00] I (456) efuse_init: Min chip rev:     v0.0
+[2026-09-28T18:54:17.605+00:00] I (460) efuse_init: Max chip rev:     v0.99
+[2026-09-28T18:54:17.605+00:00] I (464) efuse_init: Chip rev:         v0.2
+[2026-09-28T18:54:17.605+00:00] I (468) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-28T18:54:17.605+00:00] I (474) heap_init: At 4084F6C0 len 0002CF50 (179 KiB): RAM
+[2026-09-28T18:54:17.605+00:00] I (480) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+[2026-09-28T18:54:17.605+00:00] I (485) heap_init: At 5000008C len 00003F5C (15 KiB): RTCRAM
+[2026-09-28T18:54:17.605+00:00] I (491) spi_flash: detected chip: generic
+[2026-09-28T18:54:17.605+00:00] I (494) spi_flash: flash io: dio
+[2026-09-28T18:54:17.605+00:00] I (497) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-28T18:54:17.705+00:00] I (503) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-28T18:54:17.705+00:00] I (518) main_task: Started on CPU0
+[2026-09-28T18:54:17.705+00:00] I (520) main_task: Calling app_main()
+[2026-09-28T18:54:17.705+00:00] I (524) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-28T18:54:17.705+00:00] I (569) RouteLoomRef: sdkv1 identity: none provisioned
+[2026-09-28T18:54:17.705+00:00] I (570) RouteLoomRef: sdkv1 site: not a member
+[2026-09-28T18:54:17.705+00:00] I (570) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+[2026-09-28T18:54:17.705+00:00] I (574) RouteLoomRef: sdkv1 local_revocation: none
+[2026-09-28T18:54:17.705+00:00] I (578) RouteLoomRef: sdkv1 lifecycle: none
+[2026-09-28T18:54:17.705+00:00] I (584) RouteLoomRef: routeloom field boot: fw=1 app_sha256=e8d617975332c615dba7b4923af7e6575a0716c51e5e3664061e83a0ab31509a
+[2026-09-28T18:54:17.805+00:00] I (604) RouteLoomRef: board config: gen=1 node=0x3 secrets_gen=1 mac=10bda3b14754
+[2026-09-28T18:54:17.805+00:00] I (607) RouteLoomRef: security owner ready (node 0x3)
+[2026-09-28T18:54:17.805+00:00] I (608) RouteLoom: Wi-Fi init heap: free=153272 largest=135168 bytes
+[2026-09-28T18:54:17.805+00:00] I (612) pp: pp rom version: 5b8dcfa
+[2026-09-28T18:54:17.805+00:00] I (615) net80211: net80211 rom version: 5b8dcfa
+[2026-09-28T18:54:17.805+00:00] I (620) wifi:wifi driver task: 4085cfdc, prio:23, stack:6656, core=0
+[2026-09-28T18:54:17.805+00:00] I (626) wifi:wifi firmware version: da143fa
+[2026-09-28T18:54:17.805+00:00] I (629) wifi:wifi certification version: v7.0
+[2026-09-28T18:54:17.805+00:00] I (633) wifi:config NVS flash: disabled
+[2026-09-28T18:54:17.805+00:00] I (636) wifi:config nano formatting: disabled
+[2026-09-28T18:54:17.805+00:00] I (641) wifi:mac_version:HAL_MAC_ESP32AX_761,ut_version:N, band mode:0x1
+[2026-09-28T18:54:17.805+00:00] I (647) wifi:Init data frame dynamic rx buffer num: 8
+[2026-09-28T18:54:17.805+00:00] I (652) wifi:Init static rx mgmt buffer num: 2
+[2026-09-28T18:54:17.805+00:00] I (656) wifi:Init management short buffer num: 8
+[2026-09-28T18:54:17.805+00:00] I (660) wifi:Init dynamic tx buffer num: 8
+[2026-09-28T18:54:17.805+00:00] I (664) wifi:Init static tx FG buffer num: 2
+[2026-09-28T18:54:17.805+00:00] I (668) wifi:Init static rx buffer size: 1700 (rxctrl:92, csi:512)
+[2026-09-28T18:54:17.805+00:00] I (674) wifi:Init static rx buffer num: 4
+[2026-09-28T18:54:17.805+00:00] I (678) wifi:Init dynamic rx buffer num: 8
+[2026-09-28T18:54:17.805+00:00] I (682) wifi_init: accept mbox: 6
+[2026-09-28T18:54:17.805+00:00] I (685) wifi_init: tcpip mbox: 32
+[2026-09-28T18:54:17.805+00:00] I (688) wifi_init: udp mbox: 6
+[2026-09-28T18:54:17.805+00:00] I (690) wifi_init: tcp mbox: 6
+[2026-09-28T18:54:17.805+00:00] I (693) wifi_init: tcp tx win: 5760
+[2026-09-28T18:54:17.805+00:00] I (696) wifi_init: tcp rx win: 5760
+[2026-09-28T18:54:17.805+00:00] I (700) wifi_init: tcp mss: 1440
+[2026-09-28T18:54:17.905+00:00] I (702) wifi_init: WiFi IRAM OP enabled
+[2026-09-28T18:54:17.906+00:00] I (706) wifi_init: WiFi RX IRAM OP enabled
+[2026-09-28T18:54:17.906+00:00] I (710) wifi_init: WiFi SLP IRAM OP enabled
+[2026-09-28T18:54:17.906+00:00] I (714) RouteLoom: Wi-Fi initialized heap: free=127556 largest=112640 min=127528 bytes
+[2026-09-28T18:54:17.906+00:00] I (722) wifi:(2.4G)set country: cc=JP  schan=1 nchan=13 policy=1
+[2026-09-28T18:54:17.906+00:00] I (727) wifi:ifx:0, phymode(new:3, sta nvs: 7 ap nvs: 3)
+[2026-09-28T18:54:18.006+00:00] I (733) phy_init: phy_version 345,552b044,Jul 14 2026,10:37:00
+[2026-09-28T18:54:18.006+00:00] I (826) wifi:11ax coex: WDEVAX_PTI0(0x55777555), WDEVAX_PTI1(0x00003377).
+[2026-09-28T18:54:18.006+00:00] 
+[2026-09-28T18:54:18.006+00:00] I (827) wifi:mode : sta (10:bd:a3:b1:47:54)
+[2026-09-28T18:54:18.006+00:00] I (827) wifi:enable tsf
+[2026-09-28T18:54:18.006+00:00] I (830) RouteLoom: Wi-Fi started heap: free=125368 largest=108544 min=125112 bytes
+[2026-09-28T18:54:18.006+00:00] I (836) ESPNOW: espnow [version: 2.0] init
+[2026-09-28T18:54:18.006+00:00] I (839) RouteLoom: ESP-NOW ready heap: free=125168 largest=108544 min=125112 bytes
+[2026-09-28T18:54:18.006+00:00] I (852) RouteLoomRef: dev adopted (node 0x3, boot 27)
+[2026-09-28T18:54:18.006+00:00] I (852) RouteLoomRef: security owner started; node start deferred to membership
+[2026-09-28T18:54:18.006+00:00] W (859) RouteLoomRef: diagnostic reason=SECURITY_PROFILE_EXPERIMENTAL peer=0 message=none
+[2026-09-28T18:54:18.006+00:00] W (866) RouteLoomRef: diagnostic reason=ROUTE_REFRESH_BOUND_EXCEEDED peer=0 message=none
+[2026-09-28T18:54:18.006+00:00] I (877) RouteLoomRef: member discovery started
+[2026-09-28T18:54:20.309+00:00] I (3206) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-28T18:54:20.309+00:00] W (3207) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-28T18:54:20.409+00:00] I (3230) RouteLoomRef: discovery event=BOUND peer=2
+[2026-09-28T18:54:20.409+00:00] W (3231) RouteLoomRef: diagnostic reason=BOUND peer=2 message=none
+[2026-09-28T18:54:22.414+00:00] I (5257) RouteLoomRef: discovery event=REACHABLE peer=2
+[2026-09-28T18:54:22.414+00:00] W (5257) RouteLoomRef: diagnostic reason=REACHABLE peer=2 message=none
+[2026-09-28T18:54:28.027+00:00] I (10875) RouteLoomRef: delivery session=27 sequence=1 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:54:28.027+00:00] I (10876) RouteLoomRef: delivery session=27 sequence=1 state=3 reason=QUEUED
+[2026-09-28T18:54:28.027+00:00] I (10878) RouteLoomRef: HIL DEVICE SEND attempt=0 dest=1 admitted=1 detail=ok
+[2026-09-28T18:54:28.027+00:00] W (10888) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-28T18:54:28.227+00:00] I (11044) RouteLoomRef: delivery session=27 sequence=1 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:54:28.227+00:00] I (11051) RouteLoomRef: delivery session=27 sequence=1 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:54:28.227+00:00] I (11071) RouteLoomRef: delivery session=27 sequence=1 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:54:28.328+00:00] I (11204) RouteLoomRef: delivery session=27 sequence=1 state=7 reason=END_RECEIVED
+[2026-09-28T18:54:30.033+00:00] I (12875) RouteLoomRef: delivery session=27 sequence=7 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:54:30.033+00:00] I (12876) RouteLoomRef: delivery session=27 sequence=7 state=3 reason=QUEUED
+[2026-09-28T18:54:30.033+00:00] I (12878) RouteLoomRef: HIL DEVICE SEND attempt=1 dest=1 admitted=1 detail=ok
+[2026-09-28T18:54:30.033+00:00] I (12890) RouteLoomRef: delivery session=27 sequence=7 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:54:30.033+00:00] I (12904) RouteLoomRef: delivery session=27 sequence=7 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:54:30.033+00:00] I (12918) RouteLoomRef: delivery session=27 sequence=7 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:54:30.133+00:00] I (12982) RouteLoomRef: delivery session=27 sequence=7 state=7 reason=END_RECEIVED
+[2026-09-28T18:54:32.036+00:00] I (14875) RouteLoomRef: delivery session=27 sequence=8 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:54:32.036+00:00] I (14876) RouteLoomRef: delivery session=27 sequence=8 state=3 reason=QUEUED
+[2026-09-28T18:54:32.037+00:00] I (14878) RouteLoomRef: HIL DEVICE SEND attempt=2 dest=1 admitted=1 detail=ok
+[2026-09-28T18:54:32.037+00:00] I (14890) RouteLoomRef: delivery session=27 sequence=8 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:54:32.037+00:00] I (14897) RouteLoomRef: delivery session=27 sequence=8 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:54:32.037+00:00] I (14912) RouteLoomRef: delivery session=27 sequence=8 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:54:32.137+00:00] I (14973) RouteLoomRef: delivery session=27 sequence=8 state=7 reason=END_RECEIVED
+[2026-09-28T18:54:34.041+00:00] I (16876) RouteLoomRef: delivery session=27 sequence=9 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:54:34.041+00:00] I (16877) RouteLoomRef: delivery session=27 sequence=9 state=3 reason=QUEUED
+[2026-09-28T18:54:34.041+00:00] I (16879) RouteLoomRef: HIL DEVICE SEND attempt=3 dest=1 admitted=1 detail=ok
+[2026-09-28T18:54:34.041+00:00] I (16891) RouteLoomRef: delivery session=27 sequence=9 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:54:34.041+00:00] I (16898) RouteLoomRef: delivery session=27 sequence=9 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:54:34.041+00:00] I (16912) RouteLoomRef: delivery session=27 sequence=9 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:54:34.141+00:00] I (16976) RouteLoomRef: delivery session=27 sequence=9 state=7 reason=END_RECEIVED
+[2026-09-28T18:54:36.045+00:00] I (18877) RouteLoomRef: delivery session=27 sequence=10 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:54:36.045+00:00] I (18878) RouteLoomRef: delivery session=27 sequence=10 state=3 reason=QUEUED
+[2026-09-28T18:54:36.045+00:00] I (18881) RouteLoomRef: HIL DEVICE SEND attempt=4 dest=1 admitted=1 detail=ok
+[2026-09-28T18:54:36.045+00:00] I (18892) RouteLoomRef: delivery session=27 sequence=10 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:54:36.045+00:00] I (18899) RouteLoomRef: delivery session=27 sequence=10 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:54:36.045+00:00] I (18913) RouteLoomRef: delivery session=27 sequence=10 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:54:36.146+00:00] I (18974) RouteLoomRef: delivery session=27 sequence=10 state=7 reason=END_RECEIVED
+[2026-09-28T18:54:38.052+00:00] I (20878) RouteLoomRef: delivery session=27 sequence=11 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:54:38.052+00:00] I (20879) RouteLoomRef: delivery session=27 sequence=11 state=3 reason=QUEUED
+[2026-09-28T18:54:38.052+00:00] I (20882) RouteLoomRef: HIL DEVICE SEND attempt=5 dest=1 admitted=1 detail=ok
+[2026-09-28T18:54:38.052+00:00] I (20893) RouteLoomRef: delivery session=27 sequence=11 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:54:38.052+00:00] I (20902) RouteLoomRef: delivery session=27 sequence=11 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:54:38.052+00:00] I (20916) RouteLoomRef: delivery session=27 sequence=11 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:54:38.152+00:00] I (20979) RouteLoomRef: delivery session=27 sequence=11 state=7 reason=END_RECEIVED
+[2026-09-28T18:54:40.056+00:00] I (22879) RouteLoomRef: delivery session=27 sequence=12 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:54:40.056+00:00] I (22880) RouteLoomRef: delivery session=27 sequence=12 state=3 reason=QUEUED
+[2026-09-28T18:54:40.056+00:00] I (22883) RouteLoomRef: HIL DEVICE SEND attempt=6 dest=1 admitted=1 detail=ok
+[2026-09-28T18:54:40.056+00:00] I (22894) RouteLoomRef: delivery session=27 sequence=12 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:54:40.056+00:00] I (22901) RouteLoomRef: delivery session=27 sequence=12 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:54:40.056+00:00] I (22916) RouteLoomRef: delivery session=27 sequence=12 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:54:40.156+00:00] I (22977) RouteLoomRef: delivery session=27 sequence=12 state=7 reason=END_RECEIVED
+[2026-09-28T18:54:42.061+00:00] I (24879) RouteLoomRef: delivery session=27 sequence=13 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:54:42.061+00:00] I (24880) RouteLoomRef: delivery session=27 sequence=13 state=3 reason=QUEUED
+[2026-09-28T18:54:42.061+00:00] I (24883) RouteLoomRef: HIL DEVICE SEND attempt=7 dest=1 admitted=1 detail=ok
+[2026-09-28T18:54:42.061+00:00] I (24894) RouteLoomRef: delivery session=27 sequence=13 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:54:42.061+00:00] I (24904) RouteLoomRef: delivery session=27 sequence=13 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:54:42.061+00:00] I (24919) RouteLoomRef: delivery session=27 sequence=13 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:54:42.162+00:00] I (24981) RouteLoomRef: delivery session=27 sequence=13 state=7 reason=END_RECEIVED
+[2026-09-28T18:54:44.066+00:00] W (26879) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:54:44.066+00:00] I (26880) RouteLoomRef: delivery session=27 sequence=14 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:54:44.066+00:00] I (26884) RouteLoomRef: delivery session=27 sequence=14 state=3 reason=QUEUED
+[2026-09-28T18:54:44.066+00:00] I (26890) RouteLoomRef: HIL DEVICE SEND attempt=8 dest=1 admitted=1 detail=ok
+[2026-09-28T18:54:44.066+00:00] I (26902) RouteLoomRef: delivery session=27 sequence=14 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:54:44.066+00:00] I (26909) RouteLoomRef: delivery session=27 sequence=14 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:54:44.066+00:00] I (26923) RouteLoomRef: delivery session=27 sequence=14 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:54:44.166+00:00] I (26984) RouteLoomRef: delivery session=27 sequence=14 state=7 reason=END_RECEIVED
+[2026-09-28T18:54:46.069+00:00] W (28879) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:54:46.069+00:00] I (28880) RouteLoomRef: delivery session=27 sequence=15 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:54:46.069+00:00] I (28884) RouteLoomRef: delivery session=27 sequence=15 state=3 reason=QUEUED
+[2026-09-28T18:54:46.069+00:00] I (28890) RouteLoomRef: HIL DEVICE SEND attempt=9 dest=1 admitted=1 detail=ok
+[2026-09-28T18:54:46.069+00:00] I (28902) RouteLoomRef: delivery session=27 sequence=15 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:54:46.069+00:00] I (28909) RouteLoomRef: delivery session=27 sequence=15 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:54:46.069+00:00] I (28923) RouteLoomRef: delivery session=27 sequence=15 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:54:46.170+00:00] I (28984) RouteLoomRef: delivery session=27 sequence=15 state=7 reason=END_RECEIVED
+[2026-09-28T18:54:48.073+00:00] W (30879) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:54:48.073+00:00] I (30880) RouteLoomRef: delivery session=27 sequence=16 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:54:48.073+00:00] I (30884) RouteLoomRef: delivery session=27 sequence=16 state=3 reason=QUEUED
+[2026-09-28T18:54:48.073+00:00] I (30890) RouteLoomRef: HIL DEVICE SEND attempt=10 dest=1 admitted=1 detail=ok
+[2026-09-28T18:54:48.073+00:00] I (30902) RouteLoomRef: delivery session=27 sequence=16 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:54:48.073+00:00] I (30909) RouteLoomRef: delivery session=27 sequence=16 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:54:48.073+00:00] I (30924) RouteLoomRef: delivery session=27 sequence=16 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:54:48.173+00:00] I (30985) RouteLoomRef: delivery session=27 sequence=16 state=7 reason=END_RECEIVED
+[2026-09-28T18:54:50.076+00:00] W (32879) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:54:50.076+00:00] I (32880) RouteLoomRef: delivery session=27 sequence=17 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:54:50.076+00:00] I (32884) RouteLoomRef: delivery session=27 sequence=17 state=3 reason=QUEUED
+[2026-09-28T18:54:50.076+00:00] I (32890) RouteLoomRef: HIL DEVICE SEND attempt=11 dest=1 admitted=1 detail=ok
+[2026-09-28T18:54:50.076+00:00] I (32902) RouteLoomRef: delivery session=27 sequence=17 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:54:50.076+00:00] I (32909) RouteLoomRef: delivery session=27 sequence=17 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:54:50.076+00:00] I (32923) RouteLoomRef: delivery session=27 sequence=17 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:54:50.177+00:00] I (32986) RouteLoomRef: delivery session=27 sequence=17 state=7 reason=END_RECEIVED
+[2026-09-28T18:54:52.081+00:00] W (34879) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:54:52.082+00:00] I (34880) RouteLoomRef: delivery session=27 sequence=18 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:54:52.082+00:00] I (34884) RouteLoomRef: delivery session=27 sequence=18 state=3 reason=QUEUED
+[2026-09-28T18:54:52.082+00:00] I (34891) RouteLoomRef: HIL DEVICE SEND attempt=12 dest=1 admitted=1 detail=ok
+[2026-09-28T18:54:52.082+00:00] I (34902) RouteLoomRef: delivery session=27 sequence=18 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:54:52.082+00:00] I (34909) RouteLoomRef: delivery session=27 sequence=18 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:54:52.082+00:00] I (34923) RouteLoomRef: delivery session=27 sequence=18 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:54:52.182+00:00] I (34987) RouteLoomRef: delivery session=27 sequence=18 state=7 reason=END_RECEIVED
+[2026-09-28T18:54:53.985+00:00] W (36879) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:54:54.086+00:00] I (36880) RouteLoomRef: delivery session=27 sequence=19 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:54:54.086+00:00] I (36884) RouteLoomRef: delivery session=27 sequence=19 state=3 reason=QUEUED
+[2026-09-28T18:54:54.086+00:00] I (36890) RouteLoomRef: HIL DEVICE SEND attempt=13 dest=1 admitted=1 detail=ok
+[2026-09-28T18:54:54.086+00:00] I (36902) RouteLoomRef: delivery session=27 sequence=19 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:54:54.086+00:00] I (36909) RouteLoomRef: delivery session=27 sequence=19 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:54:54.086+00:00] I (36924) RouteLoomRef: delivery session=27 sequence=19 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:54:54.186+00:00] I (36985) RouteLoomRef: delivery session=27 sequence=19 state=7 reason=END_RECEIVED
+[2026-09-28T18:54:55.989+00:00] W (38879) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:54:55.989+00:00] I (38880) RouteLoomRef: delivery session=27 sequence=20 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:54:56.090+00:00] I (38884) RouteLoomRef: delivery session=27 sequence=20 state=3 reason=QUEUED
+[2026-09-28T18:54:56.090+00:00] I (38891) RouteLoomRef: HIL DEVICE SEND attempt=14 dest=1 admitted=1 detail=ok
+[2026-09-28T18:54:56.090+00:00] I (38902) RouteLoomRef: delivery session=27 sequence=20 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:54:56.090+00:00] I (38909) RouteLoomRef: delivery session=27 sequence=20 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:54:56.090+00:00] I (38923) RouteLoomRef: delivery session=27 sequence=20 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:54:56.090+00:00] I (38985) RouteLoomRef: delivery session=27 sequence=20 state=7 reason=END_RECEIVED
+[2026-09-28T18:54:57.993+00:00] W (40879) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:54:57.993+00:00] I (40880) RouteLoomRef: delivery session=27 sequence=21 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:54:57.993+00:00] I (40884) RouteLoomRef: delivery session=27 sequence=21 state=3 reason=QUEUED
+[2026-09-28T18:54:58.094+00:00] I (40890) RouteLoomRef: HIL DEVICE SEND attempt=15 dest=1 admitted=1 detail=ok
+[2026-09-28T18:54:58.094+00:00] I (40902) RouteLoomRef: delivery session=27 sequence=21 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:54:58.094+00:00] I (40909) RouteLoomRef: delivery session=27 sequence=21 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:54:58.094+00:00] I (40924) RouteLoomRef: delivery session=27 sequence=21 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:54:58.094+00:00] I (40986) RouteLoomRef: delivery session=27 sequence=21 state=7 reason=END_RECEIVED
+[2026-09-28T18:54:59.997+00:00] W (42879) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:54:59.997+00:00] I (42880) RouteLoomRef: delivery session=27 sequence=22 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:54:59.997+00:00] I (42884) RouteLoomRef: delivery session=27 sequence=22 state=3 reason=QUEUED
+[2026-09-28T18:55:00.097+00:00] I (42890) RouteLoomRef: HIL DEVICE SEND attempt=16 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:00.097+00:00] I (42902) RouteLoomRef: delivery session=27 sequence=22 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:00.097+00:00] I (42909) RouteLoomRef: delivery session=27 sequence=22 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:00.097+00:00] I (42924) RouteLoomRef: delivery session=27 sequence=22 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:00.097+00:00] I (42986) RouteLoomRef: delivery session=27 sequence=22 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:02.001+00:00] W (44879) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:02.001+00:00] I (44880) RouteLoomRef: delivery session=27 sequence=23 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:02.001+00:00] I (44884) RouteLoomRef: delivery session=27 sequence=23 state=3 reason=QUEUED
+[2026-09-28T18:55:02.001+00:00] I (44890) RouteLoomRef: HIL DEVICE SEND attempt=17 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:02.101+00:00] I (44902) RouteLoomRef: delivery session=27 sequence=23 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:02.101+00:00] I (44909) RouteLoomRef: delivery session=27 sequence=23 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:02.101+00:00] I (44923) RouteLoomRef: delivery session=27 sequence=23 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:02.101+00:00] I (44985) RouteLoomRef: delivery session=27 sequence=23 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:04.004+00:00] W (46880) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:04.004+00:00] I (46881) RouteLoomRef: delivery session=27 sequence=24 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:04.004+00:00] I (46885) RouteLoomRef: delivery session=27 sequence=24 state=3 reason=QUEUED
+[2026-09-28T18:55:04.004+00:00] I (46891) RouteLoomRef: HIL DEVICE SEND attempt=18 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:04.104+00:00] I (46903) RouteLoomRef: delivery session=27 sequence=24 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:04.104+00:00] I (46910) RouteLoomRef: delivery session=27 sequence=24 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:04.104+00:00] I (46925) RouteLoomRef: delivery session=27 sequence=24 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:04.104+00:00] I (46987) RouteLoomRef: delivery session=27 sequence=24 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:06.007+00:00] W (48881) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:06.007+00:00] I (48882) RouteLoomRef: delivery session=27 sequence=25 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:06.007+00:00] I (48886) RouteLoomRef: delivery session=27 sequence=25 state=3 reason=QUEUED
+[2026-09-28T18:55:06.007+00:00] I (48892) RouteLoomRef: HIL DEVICE SEND attempt=19 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:06.107+00:00] I (48904) RouteLoomRef: delivery session=27 sequence=25 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:06.107+00:00] I (48911) RouteLoomRef: delivery session=27 sequence=25 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:06.107+00:00] I (48925) RouteLoomRef: delivery session=27 sequence=25 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:06.107+00:00] I (48987) RouteLoomRef: delivery session=27 sequence=25 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:08.010+00:00] W (50882) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:08.010+00:00] I (50883) RouteLoomRef: delivery session=27 sequence=26 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:08.010+00:00] I (50887) RouteLoomRef: delivery session=27 sequence=26 state=3 reason=QUEUED
+[2026-09-28T18:55:08.010+00:00] I (50894) RouteLoomRef: HIL DEVICE SEND attempt=20 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:08.110+00:00] I (50905) RouteLoomRef: delivery session=27 sequence=26 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:08.110+00:00] I (50914) RouteLoomRef: delivery session=27 sequence=26 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:08.110+00:00] I (50929) RouteLoomRef: delivery session=27 sequence=26 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:08.110+00:00] I (50991) RouteLoomRef: delivery session=27 sequence=26 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:10.012+00:00] W (52882) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:10.012+00:00] I (52883) RouteLoomRef: delivery session=27 sequence=27 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:10.012+00:00] I (52887) RouteLoomRef: delivery session=27 sequence=27 state=3 reason=QUEUED
+[2026-09-28T18:55:10.012+00:00] I (52893) RouteLoomRef: HIL DEVICE SEND attempt=21 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:10.012+00:00] I (52905) RouteLoomRef: delivery session=27 sequence=27 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:10.113+00:00] I (52913) RouteLoomRef: delivery session=27 sequence=27 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:10.113+00:00] I (52928) RouteLoomRef: delivery session=27 sequence=27 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:10.113+00:00] I (52997) RouteLoomRef: delivery session=27 sequence=27 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:12.015+00:00] W (54882) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:12.015+00:00] I (54883) RouteLoomRef: delivery session=27 sequence=28 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:12.015+00:00] I (54887) RouteLoomRef: delivery session=27 sequence=28 state=3 reason=QUEUED
+[2026-09-28T18:55:12.015+00:00] I (54893) RouteLoomRef: HIL DEVICE SEND attempt=22 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:12.015+00:00] I (54905) RouteLoomRef: delivery session=27 sequence=28 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:12.115+00:00] I (54912) RouteLoomRef: delivery session=27 sequence=28 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:12.115+00:00] I (54926) RouteLoomRef: delivery session=27 sequence=28 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:12.115+00:00] I (54988) RouteLoomRef: delivery session=27 sequence=28 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:14.018+00:00] W (56882) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:14.018+00:00] I (56883) RouteLoomRef: delivery session=27 sequence=29 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:14.018+00:00] I (56887) RouteLoomRef: delivery session=27 sequence=29 state=3 reason=QUEUED
+[2026-09-28T18:55:14.018+00:00] I (56893) RouteLoomRef: HIL DEVICE SEND attempt=23 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:14.018+00:00] I (56905) RouteLoomRef: delivery session=27 sequence=29 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:14.018+00:00] I (56912) RouteLoomRef: delivery session=27 sequence=29 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:14.118+00:00] I (56927) RouteLoomRef: delivery session=27 sequence=29 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:14.118+00:00] I (56988) RouteLoomRef: delivery session=27 sequence=29 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:16.021+00:00] W (58883) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:16.021+00:00] I (58884) RouteLoomRef: delivery session=27 sequence=30 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:16.021+00:00] I (58888) RouteLoomRef: delivery session=27 sequence=30 state=3 reason=QUEUED
+[2026-09-28T18:55:16.021+00:00] I (58895) RouteLoomRef: HIL DEVICE SEND attempt=24 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:16.021+00:00] I (58907) RouteLoomRef: delivery session=27 sequence=30 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:16.021+00:00] I (58914) RouteLoomRef: delivery session=27 sequence=30 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:16.121+00:00] I (58928) RouteLoomRef: delivery session=27 sequence=30 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:16.121+00:00] I (58991) RouteLoomRef: delivery session=27 sequence=30 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:17.623+00:00] I (60490) RouteLoom: stack hwm main 10712 B
+[2026-09-28T18:55:17.623+00:00] I (60490) RouteLoom: owner polls=29227 empty=29027 rxq_max=1 max_us rx=4026 bootstrap=3659 node=7718 security=15717
+[2026-09-28T18:55:17.623+00:00] I (60493) RouteLoom: owner expiry_slots=10521000 hop_accept_expired=0
+[2026-09-28T18:55:17.623+00:00] I (60499) RouteLoom: HIL HEAP free=124192 largest=108544 min=123404 B
+[2026-09-28T18:55:17.623+00:00] I (60506) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=4 send_failures=3 kind_rejects=0
+[2026-09-28T18:55:17.724+00:00] I (60517) RouteLoom: HIL ROUTE peer=1 phase=-1 via=2 metric=2 generation=24 seq=1
+[2026-09-28T18:55:17.724+00:00] I (60524) RouteLoom: HIL ROUTE peer=2 phase=5 via=2 metric=1 generation=20 seq=7
+[2026-09-28T18:55:18.024+00:00] W (60883) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:18.024+00:00] I (60884) RouteLoomRef: delivery session=27 sequence=31 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:18.024+00:00] I (60888) RouteLoomRef: delivery session=27 sequence=31 state=3 reason=QUEUED
+[2026-09-28T18:55:18.024+00:00] I (60894) RouteLoomRef: HIL DEVICE SEND attempt=25 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:18.024+00:00] I (60906) RouteLoomRef: delivery session=27 sequence=31 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:18.024+00:00] I (60913) RouteLoomRef: delivery session=27 sequence=31 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:18.124+00:00] I (60928) RouteLoomRef: delivery session=27 sequence=31 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:18.124+00:00] I (60991) RouteLoomRef: delivery session=27 sequence=31 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:20.027+00:00] W (62884) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:20.027+00:00] I (62885) RouteLoomRef: delivery session=27 sequence=32 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:20.027+00:00] I (62889) RouteLoomRef: delivery session=27 sequence=32 state=3 reason=QUEUED
+[2026-09-28T18:55:20.027+00:00] I (62896) RouteLoomRef: HIL DEVICE SEND attempt=26 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:20.027+00:00] I (62907) RouteLoomRef: delivery session=27 sequence=32 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:20.027+00:00] I (62914) RouteLoomRef: delivery session=27 sequence=32 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:20.127+00:00] I (62929) RouteLoomRef: delivery session=27 sequence=32 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:20.127+00:00] I (62990) RouteLoomRef: delivery session=27 sequence=32 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:22.030+00:00] W (64885) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:22.030+00:00] I (64886) RouteLoomRef: delivery session=27 sequence=33 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:22.030+00:00] I (64890) RouteLoomRef: delivery session=27 sequence=33 state=3 reason=QUEUED
+[2026-09-28T18:55:22.030+00:00] I (64896) RouteLoomRef: HIL DEVICE SEND attempt=27 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:22.030+00:00] I (64908) RouteLoomRef: delivery session=27 sequence=33 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:22.030+00:00] I (64915) RouteLoomRef: delivery session=27 sequence=33 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:22.130+00:00] I (64929) RouteLoomRef: delivery session=27 sequence=33 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:22.130+00:00] I (64994) RouteLoomRef: delivery session=27 sequence=33 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:24.033+00:00] W (66885) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:24.033+00:00] I (66886) RouteLoomRef: delivery session=27 sequence=34 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:24.033+00:00] I (66890) RouteLoomRef: delivery session=27 sequence=34 state=3 reason=QUEUED
+[2026-09-28T18:55:24.033+00:00] I (66896) RouteLoomRef: HIL DEVICE SEND attempt=28 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:24.033+00:00] I (66908) RouteLoomRef: delivery session=27 sequence=34 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:24.033+00:00] I (66915) RouteLoomRef: delivery session=27 sequence=34 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:24.033+00:00] I (66929) RouteLoomRef: delivery session=27 sequence=34 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:24.133+00:00] I (66992) RouteLoomRef: delivery session=27 sequence=34 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:26.036+00:00] W (68885) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:26.036+00:00] I (68886) RouteLoomRef: delivery session=27 sequence=35 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:26.036+00:00] I (68890) RouteLoomRef: delivery session=27 sequence=35 state=3 reason=QUEUED
+[2026-09-28T18:55:26.036+00:00] I (68896) RouteLoomRef: HIL DEVICE SEND attempt=29 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:26.036+00:00] I (68908) RouteLoomRef: delivery session=27 sequence=35 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:26.036+00:00] I (68922) RouteLoomRef: delivery session=27 sequence=35 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:26.136+00:00] I (68936) RouteLoomRef: delivery session=27 sequence=35 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:26.136+00:00] I (68999) RouteLoomRef: delivery session=27 sequence=35 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:28.040+00:00] W (70886) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:28.040+00:00] I (70887) RouteLoomRef: delivery session=27 sequence=36 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:28.040+00:00] I (70891) RouteLoomRef: delivery session=27 sequence=36 state=3 reason=QUEUED
+[2026-09-28T18:55:28.040+00:00] I (70897) RouteLoomRef: HIL DEVICE SEND attempt=30 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:28.040+00:00] I (70909) RouteLoomRef: delivery session=27 sequence=36 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:28.040+00:00] I (70916) RouteLoomRef: delivery session=27 sequence=36 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:28.040+00:00] I (70931) RouteLoomRef: delivery session=27 sequence=36 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:28.140+00:00] I (71001) RouteLoomRef: delivery session=27 sequence=36 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:30.044+00:00] W (72886) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:30.044+00:00] I (72887) RouteLoomRef: delivery session=27 sequence=37 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:30.044+00:00] I (72891) RouteLoomRef: delivery session=27 sequence=37 state=3 reason=QUEUED
+[2026-09-28T18:55:30.044+00:00] I (72897) RouteLoomRef: HIL DEVICE SEND attempt=31 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:30.044+00:00] I (72909) RouteLoomRef: delivery session=27 sequence=37 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:30.044+00:00] I (72916) RouteLoomRef: delivery session=27 sequence=37 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:30.044+00:00] I (72930) RouteLoomRef: delivery session=27 sequence=37 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:30.145+00:00] I (72992) RouteLoomRef: delivery session=27 sequence=37 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:32.048+00:00] W (74887) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:32.048+00:00] I (74888) RouteLoomRef: delivery session=27 sequence=38 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:32.048+00:00] I (74892) RouteLoomRef: delivery session=27 sequence=38 state=3 reason=QUEUED
+[2026-09-28T18:55:32.048+00:00] I (74898) RouteLoomRef: HIL DEVICE SEND attempt=32 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:32.048+00:00] I (74910) RouteLoomRef: delivery session=27 sequence=38 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:32.048+00:00] I (74919) RouteLoomRef: delivery session=27 sequence=38 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:32.048+00:00] I (74933) RouteLoomRef: delivery session=27 sequence=38 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:32.148+00:00] I (74996) RouteLoomRef: delivery session=27 sequence=38 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:34.053+00:00] W (76887) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:34.053+00:00] I (76888) RouteLoomRef: delivery session=27 sequence=39 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:34.053+00:00] I (76892) RouteLoomRef: delivery session=27 sequence=39 state=3 reason=QUEUED
+[2026-09-28T18:55:34.053+00:00] I (76898) RouteLoomRef: HIL DEVICE SEND attempt=33 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:34.053+00:00] I (76910) RouteLoomRef: delivery session=27 sequence=39 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:34.053+00:00] I (76917) RouteLoomRef: delivery session=27 sequence=39 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:34.053+00:00] I (76931) RouteLoomRef: delivery session=27 sequence=39 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:34.153+00:00] I (76994) RouteLoomRef: delivery session=27 sequence=39 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:36.059+00:00] W (78888) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:36.059+00:00] I (78889) RouteLoomRef: delivery session=27 sequence=40 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:36.059+00:00] I (78893) RouteLoomRef: delivery session=27 sequence=40 state=3 reason=QUEUED
+[2026-09-28T18:55:36.059+00:00] I (78899) RouteLoomRef: HIL DEVICE SEND attempt=34 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:36.059+00:00] I (78911) RouteLoomRef: delivery session=27 sequence=40 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:36.059+00:00] I (78918) RouteLoomRef: delivery session=27 sequence=40 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:36.059+00:00] I (78932) RouteLoomRef: delivery session=27 sequence=40 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:36.159+00:00] I (78994) RouteLoomRef: delivery session=27 sequence=40 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:38.066+00:00] W (80889) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:38.066+00:00] I (80890) RouteLoomRef: delivery session=27 sequence=41 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:38.066+00:00] I (80894) RouteLoomRef: delivery session=27 sequence=41 state=3 reason=QUEUED
+[2026-09-28T18:55:38.066+00:00] I (80900) RouteLoomRef: HIL DEVICE SEND attempt=35 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:38.066+00:00] I (80912) RouteLoomRef: delivery session=27 sequence=41 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:38.066+00:00] I (80919) RouteLoomRef: delivery session=27 sequence=41 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:38.066+00:00] I (80934) RouteLoomRef: delivery session=27 sequence=41 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:38.167+00:00] I (80996) RouteLoomRef: delivery session=27 sequence=41 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:40.070+00:00] W (82889) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:40.070+00:00] I (82890) RouteLoomRef: delivery session=27 sequence=42 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:40.070+00:00] I (82894) RouteLoomRef: delivery session=27 sequence=42 state=3 reason=QUEUED
+[2026-09-28T18:55:40.070+00:00] I (82901) RouteLoomRef: HIL DEVICE SEND attempt=36 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:40.070+00:00] I (82912) RouteLoomRef: delivery session=27 sequence=42 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:40.070+00:00] I (82919) RouteLoomRef: delivery session=27 sequence=42 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:40.070+00:00] I (82933) RouteLoomRef: delivery session=27 sequence=42 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:40.170+00:00] I (82997) RouteLoomRef: delivery session=27 sequence=42 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:42.074+00:00] W (84889) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:42.074+00:00] I (84890) RouteLoomRef: delivery session=27 sequence=43 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:42.074+00:00] I (84894) RouteLoomRef: delivery session=27 sequence=43 state=3 reason=QUEUED
+[2026-09-28T18:55:42.074+00:00] I (84900) RouteLoomRef: HIL DEVICE SEND attempt=37 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:42.074+00:00] I (84912) RouteLoomRef: delivery session=27 sequence=43 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:42.074+00:00] I (84919) RouteLoomRef: delivery session=27 sequence=43 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:42.074+00:00] I (84934) RouteLoomRef: delivery session=27 sequence=43 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:42.174+00:00] I (84995) RouteLoomRef: delivery session=27 sequence=43 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:44.078+00:00] W (86889) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:44.078+00:00] I (86890) RouteLoomRef: delivery session=27 sequence=44 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:44.078+00:00] I (86894) RouteLoomRef: delivery session=27 sequence=44 state=3 reason=QUEUED
+[2026-09-28T18:55:44.078+00:00] I (86900) RouteLoomRef: HIL DEVICE SEND attempt=38 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:44.078+00:00] I (86912) RouteLoomRef: delivery session=27 sequence=44 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:44.078+00:00] I (86919) RouteLoomRef: delivery session=27 sequence=44 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:44.078+00:00] I (86933) RouteLoomRef: delivery session=27 sequence=44 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:44.178+00:00] I (86996) RouteLoomRef: delivery session=27 sequence=44 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:46.081+00:00] W (88889) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:46.082+00:00] I (88890) RouteLoomRef: delivery session=27 sequence=45 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:46.082+00:00] I (88894) RouteLoomRef: delivery session=27 sequence=45 state=3 reason=QUEUED
+[2026-09-28T18:55:46.082+00:00] I (88900) RouteLoomRef: HIL DEVICE SEND attempt=39 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:46.082+00:00] I (88912) RouteLoomRef: delivery session=27 sequence=45 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:46.082+00:00] I (88919) RouteLoomRef: delivery session=27 sequence=45 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:46.082+00:00] I (88933) RouteLoomRef: delivery session=27 sequence=45 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:46.182+00:00] I (89002) RouteLoomRef: delivery session=27 sequence=45 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:48.086+00:00] W (90889) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:48.087+00:00] I (90890) RouteLoomRef: delivery session=27 sequence=46 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:48.087+00:00] I (90894) RouteLoomRef: delivery session=27 sequence=46 state=3 reason=QUEUED
+[2026-09-28T18:55:48.087+00:00] I (90900) RouteLoomRef: HIL DEVICE SEND attempt=40 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:48.087+00:00] I (90912) RouteLoomRef: delivery session=27 sequence=46 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:48.087+00:00] I (90919) RouteLoomRef: delivery session=27 sequence=46 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:48.087+00:00] I (90933) RouteLoomRef: delivery session=27 sequence=46 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:48.187+00:00] I (90998) RouteLoomRef: delivery session=27 sequence=46 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:50.090+00:00] W (92890) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:50.090+00:00] I (92891) RouteLoomRef: delivery session=27 sequence=47 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:50.090+00:00] I (92895) RouteLoomRef: delivery session=27 sequence=47 state=3 reason=QUEUED
+[2026-09-28T18:55:50.090+00:00] I (92901) RouteLoomRef: HIL DEVICE SEND attempt=41 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:50.090+00:00] I (92913) RouteLoomRef: delivery session=27 sequence=47 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:50.090+00:00] I (92920) RouteLoomRef: delivery session=27 sequence=47 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:50.090+00:00] I (92934) RouteLoomRef: delivery session=27 sequence=47 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:50.190+00:00] I (92998) RouteLoomRef: delivery session=27 sequence=47 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:51.994+00:00] W (94890) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:52.094+00:00] I (94891) RouteLoomRef: delivery session=27 sequence=48 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:52.094+00:00] I (94895) RouteLoomRef: delivery session=27 sequence=48 state=3 reason=QUEUED
+[2026-09-28T18:55:52.094+00:00] I (94901) RouteLoomRef: HIL DEVICE SEND attempt=42 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:52.094+00:00] I (94913) RouteLoomRef: delivery session=27 sequence=48 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:52.094+00:00] I (94921) RouteLoomRef: delivery session=27 sequence=48 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:52.094+00:00] I (94935) RouteLoomRef: delivery session=27 sequence=48 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:52.195+00:00] I (94997) RouteLoomRef: delivery session=27 sequence=48 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:53.999+00:00] W (96890) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:53.999+00:00] I (96891) RouteLoomRef: delivery session=27 sequence=49 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:54.099+00:00] I (96895) RouteLoomRef: delivery session=27 sequence=49 state=3 reason=QUEUED
+[2026-09-28T18:55:54.099+00:00] I (96901) RouteLoomRef: HIL DEVICE SEND attempt=43 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:54.099+00:00] I (96913) RouteLoomRef: delivery session=27 sequence=49 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:54.099+00:00] I (96920) RouteLoomRef: delivery session=27 sequence=49 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:54.099+00:00] I (96934) RouteLoomRef: delivery session=27 sequence=49 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:54.201+00:00] I (96998) RouteLoomRef: delivery session=27 sequence=49 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:56.005+00:00] W (98890) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:56.005+00:00] I (98891) RouteLoomRef: delivery session=27 sequence=50 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:56.005+00:00] I (98895) RouteLoomRef: delivery session=27 sequence=50 state=3 reason=QUEUED
+[2026-09-28T18:55:56.105+00:00] I (98901) RouteLoomRef: HIL DEVICE SEND attempt=44 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:56.105+00:00] I (98913) RouteLoomRef: delivery session=27 sequence=50 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:56.105+00:00] I (98920) RouteLoomRef: delivery session=27 sequence=50 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:56.105+00:00] I (98934) RouteLoomRef: delivery session=27 sequence=50 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:56.105+00:00] I (98997) RouteLoomRef: delivery session=27 sequence=50 state=7 reason=END_RECEIVED
+[2026-09-28T18:55:58.010+00:00] W (100890) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:55:58.010+00:00] I (100891) RouteLoomRef: delivery session=27 sequence=51 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:55:58.010+00:00] I (100895) RouteLoomRef: delivery session=27 sequence=51 state=3 reason=QUEUED
+[2026-09-28T18:55:58.110+00:00] I (100902) RouteLoomRef: HIL DEVICE SEND attempt=45 dest=1 admitted=1 detail=ok
+[2026-09-28T18:55:58.110+00:00] I (100914) RouteLoomRef: delivery session=27 sequence=51 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:55:58.110+00:00] I (100921) RouteLoomRef: delivery session=27 sequence=51 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:55:58.110+00:00] I (100935) RouteLoomRef: delivery session=27 sequence=51 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:55:58.110+00:00] I (101006) RouteLoomRef: delivery session=27 sequence=51 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:00.014+00:00] W (102891) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:00.015+00:00] I (102892) RouteLoomRef: delivery session=27 sequence=52 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:00.015+00:00] I (102896) RouteLoomRef: delivery session=27 sequence=52 state=3 reason=QUEUED
+[2026-09-28T18:56:00.015+00:00] I (102903) RouteLoomRef: HIL DEVICE SEND attempt=46 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:00.115+00:00] I (102915) RouteLoomRef: delivery session=27 sequence=52 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:00.115+00:00] I (102922) RouteLoomRef: delivery session=27 sequence=52 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:00.115+00:00] I (102936) RouteLoomRef: delivery session=27 sequence=52 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:00.115+00:00] I (103000) RouteLoomRef: delivery session=27 sequence=52 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:02.019+00:00] W (104891) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:02.019+00:00] I (104892) RouteLoomRef: delivery session=27 sequence=53 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:02.019+00:00] I (104896) RouteLoomRef: delivery session=27 sequence=53 state=3 reason=QUEUED
+[2026-09-28T18:56:02.019+00:00] I (104903) RouteLoomRef: HIL DEVICE SEND attempt=47 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:02.119+00:00] I (104915) RouteLoomRef: delivery session=27 sequence=53 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:02.119+00:00] I (104922) RouteLoomRef: delivery session=27 sequence=53 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:02.119+00:00] I (104936) RouteLoomRef: delivery session=27 sequence=53 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:02.119+00:00] I (104999) RouteLoomRef: delivery session=27 sequence=53 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:04.025+00:00] W (106891) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:04.025+00:00] I (106892) RouteLoomRef: delivery session=27 sequence=54 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:04.025+00:00] I (106896) RouteLoomRef: delivery session=27 sequence=54 state=3 reason=QUEUED
+[2026-09-28T18:56:04.025+00:00] I (106903) RouteLoomRef: HIL DEVICE SEND attempt=48 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:04.025+00:00] I (106915) RouteLoomRef: delivery session=27 sequence=54 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:04.125+00:00] I (106922) RouteLoomRef: delivery session=27 sequence=54 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:04.125+00:00] I (106936) RouteLoomRef: delivery session=27 sequence=54 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:04.125+00:00] I (106999) RouteLoomRef: delivery session=27 sequence=54 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:06.028+00:00] W (108892) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:06.028+00:00] I (108893) RouteLoomRef: delivery session=27 sequence=55 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:06.028+00:00] I (108897) RouteLoomRef: delivery session=27 sequence=55 state=3 reason=QUEUED
+[2026-09-28T18:56:06.028+00:00] I (108904) RouteLoomRef: HIL DEVICE SEND attempt=49 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:06.028+00:00] I (108916) RouteLoomRef: delivery session=27 sequence=55 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:06.128+00:00] I (108923) RouteLoomRef: delivery session=27 sequence=55 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:06.128+00:00] I (108937) RouteLoomRef: delivery session=27 sequence=55 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:06.128+00:00] I (109003) RouteLoomRef: delivery session=27 sequence=55 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:08.031+00:00] W (110892) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:08.031+00:00] I (110893) RouteLoomRef: delivery session=27 sequence=56 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:08.031+00:00] I (110897) RouteLoomRef: delivery session=27 sequence=56 state=3 reason=QUEUED
+[2026-09-28T18:56:08.031+00:00] I (110904) RouteLoomRef: HIL DEVICE SEND attempt=50 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:08.031+00:00] I (110916) RouteLoomRef: delivery session=27 sequence=56 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:08.031+00:00] I (110923) RouteLoomRef: delivery session=27 sequence=56 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:08.132+00:00] I (110937) RouteLoomRef: delivery session=27 sequence=56 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:08.132+00:00] I (111001) RouteLoomRef: delivery session=27 sequence=56 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:10.035+00:00] W (112892) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:10.035+00:00] I (112893) RouteLoomRef: delivery session=27 sequence=57 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:10.035+00:00] I (112897) RouteLoomRef: delivery session=27 sequence=57 state=3 reason=QUEUED
+[2026-09-28T18:56:10.035+00:00] I (112904) RouteLoomRef: HIL DEVICE SEND attempt=51 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:10.035+00:00] I (112916) RouteLoomRef: delivery session=27 sequence=57 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:10.035+00:00] I (112923) RouteLoomRef: delivery session=27 sequence=57 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:10.135+00:00] I (112937) RouteLoomRef: delivery session=27 sequence=57 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:10.135+00:00] I (113002) RouteLoomRef: delivery session=27 sequence=57 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:12.038+00:00] W (114892) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:12.039+00:00] I (114893) RouteLoomRef: delivery session=27 sequence=58 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:12.039+00:00] I (114897) RouteLoomRef: delivery session=27 sequence=58 state=3 reason=QUEUED
+[2026-09-28T18:56:12.039+00:00] I (114904) RouteLoomRef: HIL DEVICE SEND attempt=52 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:12.039+00:00] I (114916) RouteLoomRef: delivery session=27 sequence=58 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:12.039+00:00] I (114923) RouteLoomRef: delivery session=27 sequence=58 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:12.139+00:00] I (114944) RouteLoomRef: delivery session=27 sequence=58 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:12.139+00:00] I (115005) RouteLoomRef: delivery session=27 sequence=58 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:14.043+00:00] W (116893) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:14.043+00:00] I (116894) RouteLoomRef: delivery session=27 sequence=59 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:14.043+00:00] I (116898) RouteLoomRef: delivery session=27 sequence=59 state=3 reason=QUEUED
+[2026-09-28T18:56:14.043+00:00] I (116905) RouteLoomRef: HIL DEVICE SEND attempt=53 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:14.043+00:00] I (116917) RouteLoomRef: delivery session=27 sequence=59 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:14.043+00:00] I (116924) RouteLoomRef: delivery session=27 sequence=59 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:14.043+00:00] I (116938) RouteLoomRef: delivery session=27 sequence=59 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:14.144+00:00] I (117004) RouteLoomRef: delivery session=27 sequence=59 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:16.050+00:00] W (118893) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:16.050+00:00] I (118894) RouteLoomRef: delivery session=27 sequence=60 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:16.050+00:00] I (118898) RouteLoomRef: delivery session=27 sequence=60 state=3 reason=QUEUED
+[2026-09-28T18:56:16.050+00:00] I (118905) RouteLoomRef: HIL DEVICE SEND attempt=54 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:16.050+00:00] I (118917) RouteLoomRef: delivery session=27 sequence=60 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:16.050+00:00] I (118924) RouteLoomRef: delivery session=27 sequence=60 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:16.050+00:00] I (118939) RouteLoomRef: delivery session=27 sequence=60 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:16.150+00:00] I (119001) RouteLoomRef: delivery session=27 sequence=60 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:17.653+00:00] I (120490) RouteLoom: stack hwm main 10712 B
+[2026-09-28T18:56:17.653+00:00] I (120490) RouteLoom: owner polls=58585 empty=58214 rxq_max=1 max_us rx=4026 bootstrap=3659 node=7718 security=15717
+[2026-09-28T18:56:17.653+00:00] I (120494) RouteLoom: owner expiry_slots=21089880 hop_accept_expired=0
+[2026-09-28T18:56:17.653+00:00] I (120500) RouteLoom: HIL HEAP free=124192 largest=108544 min=123404 B
+[2026-09-28T18:56:17.653+00:00] I (120506) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=7 send_failures=3 kind_rejects=0
+[2026-09-28T18:56:17.653+00:00] I (120517) RouteLoom: HIL ROUTE peer=1 phase=-1 via=2 metric=2 generation=24 seq=1
+[2026-09-28T18:56:17.653+00:00] I (120524) RouteLoom: HIL ROUTE peer=2 phase=5 via=2 metric=1 generation=20 seq=7
+[2026-09-28T18:56:18.053+00:00] W (120894) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:18.054+00:00] I (120895) RouteLoomRef: delivery session=27 sequence=61 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:18.054+00:00] I (120899) RouteLoomRef: delivery session=27 sequence=61 state=3 reason=QUEUED
+[2026-09-28T18:56:18.054+00:00] I (120906) RouteLoomRef: HIL DEVICE SEND attempt=55 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:18.054+00:00] I (120918) RouteLoomRef: delivery session=27 sequence=61 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:18.054+00:00] I (120925) RouteLoomRef: delivery session=27 sequence=61 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:18.054+00:00] I (120946) RouteLoomRef: delivery session=27 sequence=61 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:18.154+00:00] I (121016) RouteLoomRef: delivery session=27 sequence=61 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:20.057+00:00] W (122895) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:20.057+00:00] I (122896) RouteLoomRef: delivery session=27 sequence=62 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:20.057+00:00] I (122900) RouteLoomRef: delivery session=27 sequence=62 state=3 reason=QUEUED
+[2026-09-28T18:56:20.057+00:00] I (122907) RouteLoomRef: HIL DEVICE SEND attempt=56 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:20.057+00:00] I (122919) RouteLoomRef: delivery session=27 sequence=62 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:20.057+00:00] I (122926) RouteLoomRef: delivery session=27 sequence=62 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:20.057+00:00] I (122940) RouteLoomRef: delivery session=27 sequence=62 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:20.157+00:00] I (123002) RouteLoomRef: delivery session=27 sequence=62 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:22.061+00:00] W (124896) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:22.061+00:00] I (124897) RouteLoomRef: delivery session=27 sequence=63 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:22.061+00:00] I (124901) RouteLoomRef: delivery session=27 sequence=63 state=3 reason=QUEUED
+[2026-09-28T18:56:22.061+00:00] I (124908) RouteLoomRef: HIL DEVICE SEND attempt=57 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:22.061+00:00] I (124920) RouteLoomRef: delivery session=27 sequence=63 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:22.061+00:00] I (124927) RouteLoomRef: delivery session=27 sequence=63 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:22.061+00:00] I (124941) RouteLoomRef: delivery session=27 sequence=63 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:22.161+00:00] I (125004) RouteLoomRef: delivery session=27 sequence=63 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:24.065+00:00] W (126896) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:24.065+00:00] I (126897) RouteLoomRef: delivery session=27 sequence=64 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:24.065+00:00] I (126901) RouteLoomRef: delivery session=27 sequence=64 state=3 reason=QUEUED
+[2026-09-28T18:56:24.065+00:00] I (126908) RouteLoomRef: HIL DEVICE SEND attempt=58 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:24.065+00:00] I (126920) RouteLoomRef: delivery session=27 sequence=64 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:24.065+00:00] I (126927) RouteLoomRef: delivery session=27 sequence=64 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:24.065+00:00] I (126941) RouteLoomRef: delivery session=27 sequence=64 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:24.165+00:00] I (127005) RouteLoomRef: delivery session=27 sequence=64 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:26.068+00:00] W (128896) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:26.068+00:00] I (128897) RouteLoomRef: delivery session=27 sequence=65 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:26.068+00:00] I (128901) RouteLoomRef: delivery session=27 sequence=65 state=3 reason=QUEUED
+[2026-09-28T18:56:26.068+00:00] I (128908) RouteLoomRef: HIL DEVICE SEND attempt=59 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:26.068+00:00] I (128920) RouteLoomRef: delivery session=27 sequence=65 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:26.068+00:00] I (128929) RouteLoomRef: delivery session=27 sequence=65 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:26.068+00:00] I (128943) RouteLoomRef: delivery session=27 sequence=65 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:26.168+00:00] I (129005) RouteLoomRef: delivery session=27 sequence=65 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:28.071+00:00] W (130897) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:28.071+00:00] I (130898) RouteLoomRef: delivery session=27 sequence=66 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:28.071+00:00] I (130902) RouteLoomRef: delivery session=27 sequence=66 state=3 reason=QUEUED
+[2026-09-28T18:56:28.071+00:00] I (130909) RouteLoomRef: HIL DEVICE SEND attempt=60 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:28.071+00:00] I (130921) RouteLoomRef: delivery session=27 sequence=66 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:28.071+00:00] I (130928) RouteLoomRef: delivery session=27 sequence=66 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:28.071+00:00] I (130942) RouteLoomRef: delivery session=27 sequence=66 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:28.171+00:00] I (131005) RouteLoomRef: delivery session=27 sequence=66 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:30.074+00:00] W (132897) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:30.074+00:00] I (132898) RouteLoomRef: delivery session=27 sequence=67 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:30.074+00:00] I (132902) RouteLoomRef: delivery session=27 sequence=67 state=3 reason=QUEUED
+[2026-09-28T18:56:30.074+00:00] I (132909) RouteLoomRef: HIL DEVICE SEND attempt=61 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:30.074+00:00] I (132921) RouteLoomRef: delivery session=27 sequence=67 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:30.074+00:00] I (132928) RouteLoomRef: delivery session=27 sequence=67 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:30.074+00:00] I (132942) RouteLoomRef: delivery session=27 sequence=67 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:30.174+00:00] I (133005) RouteLoomRef: delivery session=27 sequence=67 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:32.077+00:00] W (134897) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:32.077+00:00] I (134898) RouteLoomRef: delivery session=27 sequence=68 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:32.077+00:00] I (134902) RouteLoomRef: delivery session=27 sequence=68 state=3 reason=QUEUED
+[2026-09-28T18:56:32.077+00:00] I (134909) RouteLoomRef: HIL DEVICE SEND attempt=62 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:32.077+00:00] I (134921) RouteLoomRef: delivery session=27 sequence=68 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:32.077+00:00] I (134935) RouteLoomRef: delivery session=27 sequence=68 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:32.077+00:00] I (134949) RouteLoomRef: delivery session=27 sequence=68 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:32.177+00:00] I (135018) RouteLoomRef: delivery session=27 sequence=68 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:34.080+00:00] W (136897) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:34.080+00:00] I (136898) RouteLoomRef: delivery session=27 sequence=69 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:34.080+00:00] I (136902) RouteLoomRef: delivery session=27 sequence=69 state=3 reason=QUEUED
+[2026-09-28T18:56:34.080+00:00] I (136909) RouteLoomRef: HIL DEVICE SEND attempt=63 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:34.080+00:00] I (136921) RouteLoomRef: delivery session=27 sequence=69 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:34.080+00:00] I (136935) RouteLoomRef: delivery session=27 sequence=69 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:34.080+00:00] I (136949) RouteLoomRef: delivery session=27 sequence=69 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:34.180+00:00] I (137030) RouteLoomRef: delivery session=27 sequence=69 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:36.083+00:00] W (138897) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:36.083+00:00] I (138898) RouteLoomRef: delivery session=27 sequence=70 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:36.083+00:00] I (138902) RouteLoomRef: delivery session=27 sequence=70 state=3 reason=QUEUED
+[2026-09-28T18:56:36.083+00:00] I (138909) RouteLoomRef: HIL DEVICE SEND attempt=64 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:36.083+00:00] I (138921) RouteLoomRef: delivery session=27 sequence=70 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:36.083+00:00] I (138928) RouteLoomRef: delivery session=27 sequence=70 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:36.083+00:00] I (138942) RouteLoomRef: delivery session=27 sequence=70 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:36.183+00:00] I (139007) RouteLoomRef: delivery session=27 sequence=70 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:38.085+00:00] W (140898) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:38.085+00:00] I (140899) RouteLoomRef: delivery session=27 sequence=71 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:38.085+00:00] I (140903) RouteLoomRef: delivery session=27 sequence=71 state=3 reason=QUEUED
+[2026-09-28T18:56:38.085+00:00] I (140910) RouteLoomRef: HIL DEVICE SEND attempt=65 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:38.085+00:00] I (140922) RouteLoomRef: delivery session=27 sequence=71 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:38.085+00:00] I (140929) RouteLoomRef: delivery session=27 sequence=71 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:38.085+00:00] I (140943) RouteLoomRef: delivery session=27 sequence=71 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:38.186+00:00] I (141006) RouteLoomRef: delivery session=27 sequence=71 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:40.089+00:00] W (142898) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:40.089+00:00] I (142899) RouteLoomRef: delivery session=27 sequence=72 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:40.089+00:00] I (142903) RouteLoomRef: delivery session=27 sequence=72 state=3 reason=QUEUED
+[2026-09-28T18:56:40.089+00:00] I (142910) RouteLoomRef: HIL DEVICE SEND attempt=66 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:40.089+00:00] I (142922) RouteLoomRef: delivery session=27 sequence=72 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:40.089+00:00] I (142929) RouteLoomRef: delivery session=27 sequence=72 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:40.089+00:00] I (142950) RouteLoomRef: delivery session=27 sequence=72 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:40.189+00:00] I (143013) RouteLoomRef: delivery session=27 sequence=72 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:42.094+00:00] W (144898) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:42.094+00:00] I (144899) RouteLoomRef: delivery session=27 sequence=73 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:42.094+00:00] I (144903) RouteLoomRef: delivery session=27 sequence=73 state=3 reason=QUEUED
+[2026-09-28T18:56:42.094+00:00] I (144910) RouteLoomRef: HIL DEVICE SEND attempt=67 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:42.094+00:00] I (144922) RouteLoomRef: delivery session=27 sequence=73 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:42.094+00:00] I (144929) RouteLoomRef: delivery session=27 sequence=73 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:42.094+00:00] I (144943) RouteLoomRef: delivery session=27 sequence=73 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:42.194+00:00] I (145006) RouteLoomRef: delivery session=27 sequence=73 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:44.100+00:00] W (146899) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:44.100+00:00] I (146900) RouteLoomRef: delivery session=27 sequence=74 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:44.100+00:00] I (146904) RouteLoomRef: delivery session=27 sequence=74 state=3 reason=QUEUED
+[2026-09-28T18:56:44.100+00:00] I (146911) RouteLoomRef: HIL DEVICE SEND attempt=68 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:44.100+00:00] I (146923) RouteLoomRef: delivery session=27 sequence=74 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:44.100+00:00] I (146930) RouteLoomRef: delivery session=27 sequence=74 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:44.100+00:00] I (146944) RouteLoomRef: delivery session=27 sequence=74 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:44.200+00:00] I (147013) RouteLoomRef: delivery session=27 sequence=74 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:46.003+00:00] W (148899) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:46.103+00:00] I (148900) RouteLoomRef: delivery session=27 sequence=75 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:46.103+00:00] I (148904) RouteLoomRef: delivery session=27 sequence=75 state=3 reason=QUEUED
+[2026-09-28T18:56:46.103+00:00] I (148911) RouteLoomRef: HIL DEVICE SEND attempt=69 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:46.103+00:00] I (148923) RouteLoomRef: delivery session=27 sequence=75 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:46.103+00:00] I (148930) RouteLoomRef: delivery session=27 sequence=75 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:46.103+00:00] I (148951) RouteLoomRef: delivery session=27 sequence=75 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:46.204+00:00] I (149012) RouteLoomRef: delivery session=27 sequence=75 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:48.007+00:00] W (150899) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:48.007+00:00] I (150900) RouteLoomRef: delivery session=27 sequence=76 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:48.107+00:00] I (150904) RouteLoomRef: delivery session=27 sequence=76 state=3 reason=QUEUED
+[2026-09-28T18:56:48.107+00:00] I (150911) RouteLoomRef: HIL DEVICE SEND attempt=70 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:48.107+00:00] I (150923) RouteLoomRef: delivery session=27 sequence=76 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:48.107+00:00] I (150930) RouteLoomRef: delivery session=27 sequence=76 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:48.107+00:00] I (150945) RouteLoomRef: delivery session=27 sequence=76 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:48.207+00:00] I (151006) RouteLoomRef: delivery session=27 sequence=76 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:50.011+00:00] W (152900) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:50.011+00:00] I (152901) RouteLoomRef: delivery session=27 sequence=77 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:50.111+00:00] I (152905) RouteLoomRef: delivery session=27 sequence=77 state=3 reason=QUEUED
+[2026-09-28T18:56:50.111+00:00] I (152912) RouteLoomRef: HIL DEVICE SEND attempt=71 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:50.111+00:00] I (152924) RouteLoomRef: delivery session=27 sequence=77 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:50.111+00:00] I (152931) RouteLoomRef: delivery session=27 sequence=77 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:50.111+00:00] I (152945) RouteLoomRef: delivery session=27 sequence=77 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:50.211+00:00] I (153020) RouteLoomRef: delivery session=27 sequence=77 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:52.015+00:00] W (154900) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:52.015+00:00] I (154901) RouteLoomRef: delivery session=27 sequence=78 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:52.015+00:00] I (154905) RouteLoomRef: delivery session=27 sequence=78 state=3 reason=QUEUED
+[2026-09-28T18:56:52.115+00:00] I (154912) RouteLoomRef: HIL DEVICE SEND attempt=72 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:52.116+00:00] I (154924) RouteLoomRef: delivery session=27 sequence=78 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:52.116+00:00] I (154931) RouteLoomRef: delivery session=27 sequence=78 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:52.116+00:00] I (154945) RouteLoomRef: delivery session=27 sequence=78 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:52.116+00:00] I (155008) RouteLoomRef: delivery session=27 sequence=78 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:54.019+00:00] W (156900) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:54.019+00:00] I (156901) RouteLoomRef: delivery session=27 sequence=79 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:54.019+00:00] I (156905) RouteLoomRef: delivery session=27 sequence=79 state=3 reason=QUEUED
+[2026-09-28T18:56:54.120+00:00] I (156912) RouteLoomRef: HIL DEVICE SEND attempt=73 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:54.120+00:00] I (156924) RouteLoomRef: delivery session=27 sequence=79 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:54.120+00:00] I (156938) RouteLoomRef: delivery session=27 sequence=79 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:54.120+00:00] I (156952) RouteLoomRef: delivery session=27 sequence=79 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:54.120+00:00] I (157013) RouteLoomRef: delivery session=27 sequence=79 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:56.023+00:00] W (158901) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:56.023+00:00] I (158902) RouteLoomRef: delivery session=27 sequence=80 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:56.023+00:00] I (158906) RouteLoomRef: delivery session=27 sequence=80 state=3 reason=QUEUED
+[2026-09-28T18:56:56.023+00:00] I (158913) RouteLoomRef: HIL DEVICE SEND attempt=74 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:56.123+00:00] I (158925) RouteLoomRef: delivery session=27 sequence=80 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:56.123+00:00] I (158932) RouteLoomRef: delivery session=27 sequence=80 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:56.123+00:00] I (158946) RouteLoomRef: delivery session=27 sequence=80 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:56.123+00:00] I (159009) RouteLoomRef: delivery session=27 sequence=80 state=7 reason=END_RECEIVED
+[2026-09-28T18:56:58.027+00:00] W (160902) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:56:58.027+00:00] I (160903) RouteLoomRef: delivery session=27 sequence=81 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:56:58.027+00:00] I (160907) RouteLoomRef: delivery session=27 sequence=81 state=3 reason=QUEUED
+[2026-09-28T18:56:58.027+00:00] I (160914) RouteLoomRef: HIL DEVICE SEND attempt=75 dest=1 admitted=1 detail=ok
+[2026-09-28T18:56:58.127+00:00] I (160926) RouteLoomRef: delivery session=27 sequence=81 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:56:58.127+00:00] I (160933) RouteLoomRef: delivery session=27 sequence=81 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:56:58.127+00:00] I (160948) RouteLoomRef: delivery session=27 sequence=81 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:56:58.127+00:00] I (161012) RouteLoomRef: delivery session=27 sequence=81 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:00.031+00:00] W (162902) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:00.031+00:00] I (162903) RouteLoomRef: delivery session=27 sequence=82 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:00.031+00:00] I (162907) RouteLoomRef: delivery session=27 sequence=82 state=3 reason=QUEUED
+[2026-09-28T18:57:00.031+00:00] I (162914) RouteLoomRef: HIL DEVICE SEND attempt=76 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:00.031+00:00] I (162926) RouteLoomRef: delivery session=27 sequence=82 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:00.131+00:00] I (162933) RouteLoomRef: delivery session=27 sequence=82 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:00.131+00:00] I (162947) RouteLoomRef: delivery session=27 sequence=82 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:00.131+00:00] I (163010) RouteLoomRef: delivery session=27 sequence=82 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:02.034+00:00] W (164902) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:02.034+00:00] I (164903) RouteLoomRef: delivery session=27 sequence=83 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:02.034+00:00] I (164907) RouteLoomRef: delivery session=27 sequence=83 state=3 reason=QUEUED
+[2026-09-28T18:57:02.034+00:00] I (164914) RouteLoomRef: HIL DEVICE SEND attempt=77 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:02.034+00:00] I (164926) RouteLoomRef: delivery session=27 sequence=83 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:02.134+00:00] I (164933) RouteLoomRef: delivery session=27 sequence=83 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:02.134+00:00] I (164947) RouteLoomRef: delivery session=27 sequence=83 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:02.134+00:00] I (165010) RouteLoomRef: delivery session=27 sequence=83 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:04.038+00:00] W (166903) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:04.038+00:00] I (166904) RouteLoomRef: delivery session=27 sequence=84 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:04.038+00:00] I (166908) RouteLoomRef: delivery session=27 sequence=84 state=3 reason=QUEUED
+[2026-09-28T18:57:04.038+00:00] I (166915) RouteLoomRef: HIL DEVICE SEND attempt=78 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:04.038+00:00] I (166927) RouteLoomRef: delivery session=27 sequence=84 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:04.138+00:00] I (166936) RouteLoomRef: delivery session=27 sequence=84 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:04.138+00:00] I (166950) RouteLoomRef: delivery session=27 sequence=84 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:04.138+00:00] I (167013) RouteLoomRef: delivery session=27 sequence=84 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:06.041+00:00] W (168903) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:06.041+00:00] I (168904) RouteLoomRef: delivery session=27 sequence=85 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:06.041+00:00] I (168908) RouteLoomRef: delivery session=27 sequence=85 state=3 reason=QUEUED
+[2026-09-28T18:57:06.041+00:00] I (168915) RouteLoomRef: HIL DEVICE SEND attempt=79 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:06.041+00:00] I (168927) RouteLoomRef: delivery session=27 sequence=85 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:06.041+00:00] I (168934) RouteLoomRef: delivery session=27 sequence=85 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:06.141+00:00] I (168948) RouteLoomRef: delivery session=27 sequence=85 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:06.141+00:00] I (169019) RouteLoomRef: delivery session=27 sequence=85 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:08.045+00:00] W (170904) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:08.045+00:00] I (170905) RouteLoomRef: delivery session=27 sequence=86 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:08.045+00:00] I (170909) RouteLoomRef: delivery session=27 sequence=86 state=3 reason=QUEUED
+[2026-09-28T18:57:08.045+00:00] I (170916) RouteLoomRef: HIL DEVICE SEND attempt=80 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:08.045+00:00] I (170928) RouteLoomRef: delivery session=27 sequence=86 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:08.045+00:00] I (170935) RouteLoomRef: delivery session=27 sequence=86 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:08.146+00:00] I (170949) RouteLoomRef: delivery session=27 sequence=86 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:08.146+00:00] I (171012) RouteLoomRef: delivery session=27 sequence=86 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:10.049+00:00] W (172904) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:10.049+00:00] I (172905) RouteLoomRef: delivery session=27 sequence=87 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:10.049+00:00] I (172909) RouteLoomRef: delivery session=27 sequence=87 state=3 reason=QUEUED
+[2026-09-28T18:57:10.049+00:00] I (172916) RouteLoomRef: HIL DEVICE SEND attempt=81 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:10.049+00:00] I (172928) RouteLoomRef: delivery session=27 sequence=87 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:10.049+00:00] I (172935) RouteLoomRef: delivery session=27 sequence=87 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:10.150+00:00] I (172949) RouteLoomRef: delivery session=27 sequence=87 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:10.150+00:00] I (173012) RouteLoomRef: delivery session=27 sequence=87 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:12.054+00:00] W (174904) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:12.054+00:00] I (174905) RouteLoomRef: delivery session=27 sequence=88 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:12.054+00:00] I (174909) RouteLoomRef: delivery session=27 sequence=88 state=3 reason=QUEUED
+[2026-09-28T18:57:12.054+00:00] I (174916) RouteLoomRef: HIL DEVICE SEND attempt=82 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:12.054+00:00] I (174928) RouteLoomRef: delivery session=27 sequence=88 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:12.054+00:00] I (174935) RouteLoomRef: delivery session=27 sequence=88 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:12.054+00:00] I (174949) RouteLoomRef: delivery session=27 sequence=88 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:12.154+00:00] I (175014) RouteLoomRef: delivery session=27 sequence=88 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:14.058+00:00] W (176904) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:14.058+00:00] I (176905) RouteLoomRef: delivery session=27 sequence=89 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:14.058+00:00] I (176909) RouteLoomRef: delivery session=27 sequence=89 state=3 reason=QUEUED
+[2026-09-28T18:57:14.058+00:00] I (176916) RouteLoomRef: HIL DEVICE SEND attempt=83 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:14.058+00:00] I (176928) RouteLoomRef: delivery session=27 sequence=89 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:14.058+00:00] I (176935) RouteLoomRef: delivery session=27 sequence=89 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:14.058+00:00] I (176949) RouteLoomRef: delivery session=27 sequence=89 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:14.158+00:00] I (177012) RouteLoomRef: delivery session=27 sequence=89 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:16.061+00:00] W (178905) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:16.061+00:00] I (178906) RouteLoomRef: delivery session=27 sequence=90 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:16.061+00:00] I (178910) RouteLoomRef: delivery session=27 sequence=90 state=3 reason=QUEUED
+[2026-09-28T18:57:16.061+00:00] I (178917) RouteLoomRef: HIL DEVICE SEND attempt=84 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:16.061+00:00] I (178929) RouteLoomRef: delivery session=27 sequence=90 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:16.061+00:00] I (178936) RouteLoomRef: delivery session=27 sequence=90 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:16.061+00:00] I (178957) RouteLoomRef: delivery session=27 sequence=90 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:16.161+00:00] I (179020) RouteLoomRef: delivery session=27 sequence=90 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:17.665+00:00] I (180490) RouteLoom: stack hwm main 10712 B
+[2026-09-28T18:57:17.665+00:00] I (180490) RouteLoom: owner polls=87969 empty=87442 rxq_max=1 max_us rx=4026 bootstrap=3659 node=7718 security=15717
+[2026-09-28T18:57:17.665+00:00] I (180493) RouteLoom: owner expiry_slots=31668120 hop_accept_expired=0
+[2026-09-28T18:57:17.665+00:00] I (180500) RouteLoom: HIL HEAP free=124192 largest=108544 min=123404 B
+[2026-09-28T18:57:17.665+00:00] I (180506) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=10 send_failures=3 kind_rejects=0
+[2026-09-28T18:57:17.665+00:00] I (180517) RouteLoom: HIL ROUTE peer=1 phase=-1 via=2 metric=2 generation=24 seq=1
+[2026-09-28T18:57:17.665+00:00] I (180524) RouteLoom: HIL ROUTE peer=2 phase=5 via=2 metric=1 generation=20 seq=7
+[2026-09-28T18:57:18.066+00:00] W (180905) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:18.066+00:00] I (180906) RouteLoomRef: delivery session=27 sequence=91 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:18.066+00:00] I (180910) RouteLoomRef: delivery session=27 sequence=91 state=3 reason=QUEUED
+[2026-09-28T18:57:18.066+00:00] I (180917) RouteLoomRef: HIL DEVICE SEND attempt=85 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:18.066+00:00] I (180929) RouteLoomRef: delivery session=27 sequence=91 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:18.066+00:00] I (180936) RouteLoomRef: delivery session=27 sequence=91 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:18.066+00:00] I (180950) RouteLoomRef: delivery session=27 sequence=91 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:18.166+00:00] I (181013) RouteLoomRef: delivery session=27 sequence=91 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:20.074+00:00] W (182905) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:20.074+00:00] I (182906) RouteLoomRef: delivery session=27 sequence=92 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:20.074+00:00] I (182910) RouteLoomRef: delivery session=27 sequence=92 state=3 reason=QUEUED
+[2026-09-28T18:57:20.074+00:00] I (182917) RouteLoomRef: HIL DEVICE SEND attempt=86 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:20.074+00:00] I (182929) RouteLoomRef: delivery session=27 sequence=92 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:20.074+00:00] I (182936) RouteLoomRef: delivery session=27 sequence=92 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:20.074+00:00] I (182950) RouteLoomRef: delivery session=27 sequence=92 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:20.174+00:00] I (183013) RouteLoomRef: delivery session=27 sequence=92 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:22.078+00:00] W (184905) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:22.078+00:00] I (184906) RouteLoomRef: delivery session=27 sequence=93 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:22.078+00:00] I (184910) RouteLoomRef: delivery session=27 sequence=93 state=3 reason=QUEUED
+[2026-09-28T18:57:22.078+00:00] I (184917) RouteLoomRef: HIL DEVICE SEND attempt=87 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:22.078+00:00] I (184929) RouteLoomRef: delivery session=27 sequence=93 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:22.078+00:00] I (184936) RouteLoomRef: delivery session=27 sequence=93 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:22.078+00:00] I (184950) RouteLoomRef: delivery session=27 sequence=93 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:22.178+00:00] I (185012) RouteLoomRef: delivery session=27 sequence=93 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:24.081+00:00] W (186905) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:24.081+00:00] I (186906) RouteLoomRef: delivery session=27 sequence=94 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:24.081+00:00] I (186910) RouteLoomRef: delivery session=27 sequence=94 state=3 reason=QUEUED
+[2026-09-28T18:57:24.081+00:00] I (186917) RouteLoomRef: HIL DEVICE SEND attempt=88 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:24.081+00:00] I (186929) RouteLoomRef: delivery session=27 sequence=94 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:24.081+00:00] I (186936) RouteLoomRef: delivery session=27 sequence=94 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:24.081+00:00] I (186950) RouteLoomRef: delivery session=27 sequence=94 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:24.182+00:00] I (187012) RouteLoomRef: delivery session=27 sequence=94 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:26.085+00:00] W (188905) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:26.085+00:00] I (188906) RouteLoomRef: delivery session=27 sequence=95 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:26.085+00:00] I (188910) RouteLoomRef: delivery session=27 sequence=95 state=3 reason=QUEUED
+[2026-09-28T18:57:26.085+00:00] I (188917) RouteLoomRef: HIL DEVICE SEND attempt=89 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:26.085+00:00] I (188929) RouteLoomRef: delivery session=27 sequence=95 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:26.085+00:00] I (188936) RouteLoomRef: delivery session=27 sequence=95 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:26.085+00:00] I (188950) RouteLoomRef: delivery session=27 sequence=95 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:26.186+00:00] I (189013) RouteLoomRef: delivery session=27 sequence=95 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:28.089+00:00] W (190905) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:28.089+00:00] I (190906) RouteLoomRef: delivery session=27 sequence=96 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:28.089+00:00] I (190910) RouteLoomRef: delivery session=27 sequence=96 state=3 reason=QUEUED
+[2026-09-28T18:57:28.089+00:00] I (190917) RouteLoomRef: HIL DEVICE SEND attempt=90 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:28.089+00:00] I (190929) RouteLoomRef: delivery session=27 sequence=96 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:28.089+00:00] I (190936) RouteLoomRef: delivery session=27 sequence=96 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:28.089+00:00] I (190950) RouteLoomRef: delivery session=27 sequence=96 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:28.189+00:00] I (191013) RouteLoomRef: delivery session=27 sequence=96 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:30.093+00:00] W (192905) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:30.093+00:00] I (192906) RouteLoomRef: delivery session=27 sequence=97 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:30.093+00:00] I (192910) RouteLoomRef: delivery session=27 sequence=97 state=3 reason=QUEUED
+[2026-09-28T18:57:30.093+00:00] I (192917) RouteLoomRef: HIL DEVICE SEND attempt=91 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:30.093+00:00] I (192929) RouteLoomRef: delivery session=27 sequence=97 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:30.093+00:00] I (192936) RouteLoomRef: delivery session=27 sequence=97 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:30.093+00:00] I (192951) RouteLoomRef: delivery session=27 sequence=97 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:30.193+00:00] I (193019) RouteLoomRef: delivery session=27 sequence=97 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:32.097+00:00] W (194906) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:32.097+00:00] I (194907) RouteLoomRef: delivery session=27 sequence=98 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:32.097+00:00] I (194911) RouteLoomRef: delivery session=27 sequence=98 state=3 reason=QUEUED
+[2026-09-28T18:57:32.097+00:00] I (194918) RouteLoomRef: HIL DEVICE SEND attempt=92 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:32.097+00:00] I (194930) RouteLoomRef: delivery session=27 sequence=98 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:32.097+00:00] I (194937) RouteLoomRef: delivery session=27 sequence=98 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:32.097+00:00] I (194951) RouteLoomRef: delivery session=27 sequence=98 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:32.197+00:00] I (195014) RouteLoomRef: delivery session=27 sequence=98 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:34.101+00:00] W (196907) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:34.101+00:00] I (196908) RouteLoomRef: delivery session=27 sequence=99 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:34.101+00:00] I (196912) RouteLoomRef: delivery session=27 sequence=99 state=3 reason=QUEUED
+[2026-09-28T18:57:34.101+00:00] I (196919) RouteLoomRef: HIL DEVICE SEND attempt=93 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:34.101+00:00] I (196931) RouteLoomRef: delivery session=27 sequence=99 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:34.101+00:00] I (196940) RouteLoomRef: delivery session=27 sequence=99 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:34.101+00:00] I (196954) RouteLoomRef: delivery session=27 sequence=99 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:34.201+00:00] I (197025) RouteLoomRef: delivery session=27 sequence=99 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:36.104+00:00] W (198907) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:36.104+00:00] I (198908) RouteLoomRef: delivery session=27 sequence=100 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:36.104+00:00] I (198912) RouteLoomRef: delivery session=27 sequence=100 state=3 reason=QUEUED
+[2026-09-28T18:57:36.104+00:00] I (198919) RouteLoomRef: HIL DEVICE SEND attempt=94 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:36.104+00:00] I (198931) RouteLoomRef: delivery session=27 sequence=100 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:36.104+00:00] I (198938) RouteLoomRef: delivery session=27 sequence=100 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:36.104+00:00] I (198952) RouteLoomRef: delivery session=27 sequence=100 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:36.204+00:00] I (199015) RouteLoomRef: delivery session=27 sequence=100 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:38.108+00:00] W (200908) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:38.108+00:00] I (200909) RouteLoomRef: delivery session=27 sequence=101 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:38.108+00:00] I (200913) RouteLoomRef: delivery session=27 sequence=101 state=3 reason=QUEUED
+[2026-09-28T18:57:38.108+00:00] I (200920) RouteLoomRef: HIL DEVICE SEND attempt=95 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:38.108+00:00] I (200932) RouteLoomRef: delivery session=27 sequence=101 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:38.108+00:00] I (200939) RouteLoomRef: delivery session=27 sequence=101 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:38.108+00:00] I (200953) RouteLoomRef: delivery session=27 sequence=101 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:38.208+00:00] I (201037) RouteLoomRef: delivery session=27 sequence=101 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:40.111+00:00] W (202909) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:40.111+00:00] I (202910) RouteLoomRef: delivery session=27 sequence=102 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:40.111+00:00] I (202914) RouteLoomRef: delivery session=27 sequence=102 state=3 reason=QUEUED
+[2026-09-28T18:57:40.111+00:00] I (202921) RouteLoomRef: HIL DEVICE SEND attempt=96 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:40.111+00:00] I (202933) RouteLoomRef: delivery session=27 sequence=102 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:40.111+00:00] I (202940) RouteLoomRef: delivery session=27 sequence=102 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:40.111+00:00] I (202954) RouteLoomRef: delivery session=27 sequence=102 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:40.211+00:00] I (203018) RouteLoomRef: delivery session=27 sequence=102 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:42.014+00:00] W (204909) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:42.114+00:00] I (204910) RouteLoomRef: delivery session=27 sequence=103 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:42.115+00:00] I (204914) RouteLoomRef: delivery session=27 sequence=103 state=3 reason=QUEUED
+[2026-09-28T18:57:42.115+00:00] I (204921) RouteLoomRef: HIL DEVICE SEND attempt=97 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:42.115+00:00] I (204933) RouteLoomRef: delivery session=27 sequence=103 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:42.115+00:00] I (204940) RouteLoomRef: delivery session=27 sequence=103 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:42.115+00:00] I (204954) RouteLoomRef: delivery session=27 sequence=103 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:42.215+00:00] I (205016) RouteLoomRef: delivery session=27 sequence=103 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:44.018+00:00] W (206909) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:44.018+00:00] I (206910) RouteLoomRef: delivery session=27 sequence=104 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:44.118+00:00] I (206914) RouteLoomRef: delivery session=27 sequence=104 state=3 reason=QUEUED
+[2026-09-28T18:57:44.118+00:00] I (206921) RouteLoomRef: HIL DEVICE SEND attempt=98 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:44.118+00:00] I (206933) RouteLoomRef: delivery session=27 sequence=104 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:44.118+00:00] I (206940) RouteLoomRef: delivery session=27 sequence=104 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:44.118+00:00] I (206954) RouteLoomRef: delivery session=27 sequence=104 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:44.218+00:00] I (207017) RouteLoomRef: delivery session=27 sequence=104 state=7 reason=END_RECEIVED
+[2026-09-28T18:57:46.021+00:00] W (208909) RouteLoomRef: diagnostic reason=DELIVERY_HISTORY_EVICTED peer=0 message=present
+[2026-09-28T18:57:46.021+00:00] I (208910) RouteLoomRef: delivery session=27 sequence=105 state=1 reason=TX_ACCEPTED
+[2026-09-28T18:57:46.121+00:00] I (208914) RouteLoomRef: delivery session=27 sequence=105 state=3 reason=QUEUED
+[2026-09-28T18:57:46.121+00:00] I (208921) RouteLoomRef: HIL DEVICE SEND attempt=99 dest=1 admitted=1 detail=ok
+[2026-09-28T18:57:46.121+00:00] I (208933) RouteLoomRef: delivery session=27 sequence=105 state=4 reason=TX_MAC_PENDING
+[2026-09-28T18:57:46.121+00:00] I (208947) RouteLoomRef: delivery session=27 sequence=105 state=5 reason=HOP_ACCEPT_PENDING
+[2026-09-28T18:57:46.121+00:00] I (208962) RouteLoomRef: delivery session=27 sequence=105 state=6 reason=END_RECEIPT_PENDING
+[2026-09-28T18:57:46.221+00:00] I (209023) RouteLoomRef: delivery session=27 sequence=105 state=7 reason=END_RECEIVED

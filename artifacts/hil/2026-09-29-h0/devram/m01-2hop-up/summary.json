@@ -1,0 +1,23 @@
+{
+  "app_only": {
+    "skipped_flash": true
+  },
+  "device_send_attempts": 100,
+  "device_admitted": 100,
+  "host_records": 100,
+  "host_unique_payloads": 100,
+  "record_keys": [
+    "assurance",
+    "cursor",
+    "endpoint_kind",
+    "evidence",
+    "gateway",
+    "host_seen_unix",
+    "message",
+    "network",
+    "origin",
+    "payload_hex",
+    "payload_len",
+    "v"
+  ]
+}
