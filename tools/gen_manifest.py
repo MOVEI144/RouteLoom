@@ -91,6 +91,7 @@ def render_header(manifest: dict) -> str:
     major, minor, patch = SEMVER.fullmatch(manifest["sdk_version"]).groups()
     lines = [
         f"/* {NOTICE} */",
+        "/* clang-format off */",
         "#ifndef ROUTELOOM_VERSION_H",
         "#define ROUTELOOM_VERSION_H",
         "",
@@ -113,7 +114,8 @@ def render_header(manifest: dict) -> str:
 def render_cpp_check(manifest: dict) -> str:
     checked = [e for e in entries(manifest) if "cpp_check" in e]
     includes = sorted({"routeloom/version.h", *(e["cpp_include"] for e in checked)})
-    lines = [f"// {NOTICE}", "// Fails to compile when a constant used by the code drifts from the manifest.", ""]
+    lines = [f"// {NOTICE}", "// Fails to compile when a constant used by the code drifts from the manifest.",
+             "// clang-format off", ""]
     lines += [f'#include "{name}"' for name in includes]
     lines.append("")
     for entry in checked:
