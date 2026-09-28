@@ -2841,6 +2841,57 @@ fn mesh_route_loss_early_hop_accept() {
     );
 }
 
+/// A callback arriving after the watchdog belongs to the old physical
+/// send. The next application send must complete on its own evidence.
+#[test]
+fn mesh_route_loss_old_callback_cannot_complete_new_send() {
+    let Some(mut world) = route_loss_world("route-old-callback", Switch::direct(), false) else {
+        return;
+    };
+    let received = world.snaps[0].rx_count;
+    world.switch.callback_delay_ms[1][0] = 1500;
+    world.switch.callback_delay_kind = Some(WIRE_DATA);
+    world.peers[1].app_send(testkit::GATEWAY, b"old-send");
+    for _ in 0..100 {
+        world.step(25);
+        if world.callbacks[1]
+            .iter()
+            .any(|(at, _)| *at > world.now + 1200)
+        {
+            break;
+        }
+    }
+    assert!(
+        world.callbacks[1]
+            .iter()
+            .any(|(at, _)| *at > world.now + 1200),
+        "first DATA callback held"
+    );
+    world.switch.callback_delay_ms[1][0] = 0;
+    for _ in 0..44 {
+        world.step(25);
+    }
+    assert!(!world.callbacks[1].is_empty(), "old callback still pending");
+    world.peers[1].app_send(testkit::GATEWAY, b"new-send");
+    world.pump_until(1000, |snaps| {
+        snaps[0].rx_count >= received + 2
+            && snaps[1]
+                .app_tx
+                .last()
+                .is_some_and(|tx| tx.state == DELIVERY_DELIVERED)
+    });
+    assert!(
+        world.snaps[1].stale_tx_results > 0,
+        "old callback quarantined"
+    );
+    assert_eq!(world.snaps[0].rx_count, received + 2);
+    assert_eq!(world.snaps[0].rx, b"new-send");
+    assert_eq!(
+        world.snaps[1].app_tx.last().unwrap().state,
+        DELIVERY_DELIVERED
+    );
+}
+
 /// Phase-1 convergence on the direct radio: all three Owners adopt
 /// from their Phase-0 images (member boots, no rejoins), open their
 /// authority channels through the gateway's real USB relay, confirm,
