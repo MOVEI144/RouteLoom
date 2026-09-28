@@ -26,12 +26,14 @@
 #include "routeloom/crc32.hpp"
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/endpoint_wire.hpp"
+#include "routeloom/site_signed.hpp"
 #include "routeloom/trust_manifest.hpp"
 #include "routeloom/trust_store.hpp"
 #include "routeloom/trust_view.hpp"
 #include "routeloom/wire.hpp"
 #include "test_ledger.hpp"
 #include "test_provisioning.hpp"
+#include "test_sdkv1.hpp"
 
 namespace {
 
@@ -5176,6 +5178,218 @@ void test_t06_double_loss_rtm1_rcr2_rcc1() {
   CHECK(target.journal->decision_revision() == exact_r + 1);
 }
 
+// --- V2-08: remote config rooted at the adopted site ----------------------------
+// A Member binds its journal to the adopted RLS1 (issuer = site_id, key =
+// the SiteCert's SAK, network = the mesh low word) and provisions the floor
+// at adoption. SAK-signed permits apply only once the provider completes
+// (2 s here), read back after a reboot and recover through a SAK-signed
+// RCR2; a foreign key and an unsigned command are denied, and the Rust
+// site lane's permit verifies on the same binding.
+
+constexpr std::uint64_t kSiteId = 0x5173000000000042ULL;  // host testkit::SITE
+constexpr NetworkId kSiteNetwork = (3ULL << 32U) | 0x0A1B2C3DULL;
+const routeloom_test::TestKeyPair kSiteSak = routeloom_test::test_keypair(0x62);
+
+sdkv1::SiteRecord adopted_site() {
+  sdkv1::CertClaims claims{};
+  claims.type = sdkv1::CertType::Site;
+  claims.issuer = 0x05CA000000000001ULL;
+  claims.subject = kSiteId;
+  claims.pubkey = kSiteSak.pub;
+  claims.network_low32 = static_cast<std::uint32_t>(kSiteNetwork);
+  claims.site_epoch = static_cast<std::uint32_t>(kSiteNetwork >> 32U);
+  claims.usage = sdkv1::kSiteUsageAuthority;
+  claims.serial = 7;
+  sdkv1::SiteRecord site{};
+  site.state = sdkv1::SiteState::Member;
+  site.site_id = kSiteId;
+  site.network = kSiteNetwork;
+  site.site_cert = sdkv1_test::issue(claims, routeloom_test::test_keypair(0x61));
+  return site;
+}
+
+struct SiteBoundTarget {
+  sdkv1::SiteRecord site = adopted_site();
+  ConfigJournalConfig config{};
+  FakeJournalStorage storage{};
+  FakeFloorStore floor_storage{};
+  CountingEntropy entropy{};
+  ConfigRateLimiter rate{};
+  FakeProvider provider{};
+  FakeMaintenanceGate gate{};
+  std::unique_ptr<SecurityFloorStore> floor;
+  std::unique_ptr<CoseEsp256AuthorityVerifier> verifier;
+  std::unique_ptr<ConfigJournal> journal;
+  Status boot_status = Status::success();
+
+  // Adoption at every boot: bind, ensure the floor, construct, initialize.
+  void boot(const MonotonicMs now_ms) {
+    journal.reset();
+    floor = std::make_unique<SecurityFloorStore>(floor_storage);
+    verifier = std::make_unique<CoseEsp256AuthorityVerifier>();
+    CHECK_OK(site_config_bind(site, kTarget, kBoot, config, *verifier));
+    CHECK_OK(config_floor_ensure(floor_storage, *floor, config.network, kTarget));
+    journal = std::make_unique<ConfigJournal>(config, storage, *floor, *verifier, entropy,
+                                              rate, &provider, nullptr, &gate);
+    boot_status = journal->initialize(now_ms);
+  }
+  // Challenge -> command bound to it -> `sign` -> submit.
+  Status propose(const ConfigField& field, const std::uint64_t expected_revision,
+                 const std::uint8_t tag, const MonotonicMs now_ms,
+                 const std::array<std::uint8_t, 32>* priv, ConfigVerdict& verdict) {
+    endpoint::ControlChallengeQuery query{};
+    query.config_namespace = config.config_namespace;
+    query.schema = config.schema;
+    query.client_nonce.fill(tag);
+    endpoint::EncodedServicePayload encoded{};
+    Status status = journal->handle_challenge_query(query, now_ms, encoded);
+    if (!status) return status;
+    endpoint::ControlChallenge challenge{};
+    status = endpoint::control_challenge_decode(encoded.view(), challenge);
+    if (!status) return status;
+    const ByteView base = journal->active_snapshot();
+    ByteBuffer<endpoint::kConfigSnapshotMax> next{};
+    bool changed = false;
+    status = config_patch_apply(base, &field, 1, next, changed);
+    if (!status) return status;
+    ConfigCommand command{};
+    command.config_namespace = config.config_namespace;
+    command.schema = config.schema;
+    command.network = config.network;
+    command.target = config.target;
+    command.authority = config.authorized_issuer;
+    command.authority_generation = config.authority_generation;
+    command.authority_sequence = tag;
+    command.operation_id = t06_opid(tag);
+    command.expected_revision = expected_revision;
+    command.next_revision = expected_revision + 1;
+    status = config_snapshot_hash(config.config_namespace, config.schema, base,
+                                  command.base_snapshot_hash);
+    if (status) {
+      status = config_snapshot_hash(config.config_namespace, config.schema, next.view(),
+                                    command.next_snapshot_hash);
+    }
+    if (!status) return status;
+    command.target_boot = config.boot_incarnation;
+    command.challenge_nonce = challenge.challenge_nonce;
+    command.apply_within_ms = challenge.valid_for_ms;
+    command.field_count = 1;
+    command.fields[0] = field;
+    ByteBuffer<kConfigPermitObjectMax> permit{};
+    if (priv != nullptr) {
+      status = t06_make_permit(command, *priv, permit);
+      if (!status) return status;
+    } else {
+      endpoint::EncodedConfigCommand canonical{};
+      status = endpoint::config_command_encode(command, canonical);
+      if (!status) return status;
+      std::memcpy(permit.bytes.data(), canonical.bytes.data(), canonical.size);
+      permit.size = canonical.size;
+    }
+    return journal->submit_permit(permit.view(), now_ms, true, verdict);
+  }
+};
+
+void test_site_bound_config() {
+  SiteBoundTarget target;
+  MonotonicMs now_ms = 1000;
+  target.boot(now_ms);
+  CHECK_OK(target.boot_status);
+  CHECK(target.config.network == 0x0A1B2C3DULL);
+  CHECK(target.config.authorized_issuer == kSiteId);
+  CHECK(target.config.authority_generation == kSiteConfigAuthorityGeneration);
+  CHECK(target.journal->permit_profile_bits() == (1U << 1));
+  // The floor is provisioned once; another identity never reseeds it.
+  CHECK(target.floor_storage.write_calls == 1);
+  CHECK(config_floor_ensure(target.floor_storage, *target.floor, 0x99, kTarget).code ==
+        StatusCode::Conflict);
+
+  // A foreign key and an unsigned command are denied without applying.
+  const auto foreign = routeloom_test::test_keypair(0x63);
+  ConfigVerdict verdict{};
+  (void)target.propose(sdk_u8(1, 2), 0, 1, now_ms, &foreign.priv, verdict);
+  CHECK(verdict.reason == ConfigReason::AuthorityDenied);
+  now_ms += 6000;
+  (void)target.propose(sdk_u8(1, 2), 0, 2, now_ms, nullptr, verdict);
+  CHECK(verdict.reason != ConfigReason::InProgress && verdict.reason != ConfigReason::Ok);
+  CHECK(target.provider.apply_calls == 0);
+
+  // SAK-signed: APPLIED only after the provider's 2 s completion.
+  now_ms += 6000;
+  target.provider.polls_to_complete = 5;
+  CHECK_OK(target.propose(sdk_u8(1, 2), 0, 3, now_ms, &kSiteSak.priv, verdict));
+  CHECK(verdict.reason == ConfigReason::InProgress);
+  for (int i = 0; i < 3; ++i) target.journal->poll(now_ms += 500);
+  CHECK(target.journal->phase() != ConfigPhase::Active);
+  for (int i = 0; i < 4; ++i) target.journal->poll(now_ms += 500);
+  CHECK(target.journal->phase() == ConfigPhase::Active);
+  const std::uint64_t revision = target.journal->decision_revision();
+  const ByteBuffer<endpoint::kConfigSnapshotMax> applied = snapshot_of(
+      std::array<ConfigField, 1>{sdk_u8(1, 2)}.data(), 1);
+  CHECK(target.provider.active_.size == applied.size &&
+        std::memcmp(target.provider.active_.bytes.data(), applied.bytes.data(),
+                    applied.size) == 0);
+
+  // Reboot: the same adoption re-binds and the committed value reads back.
+  target.boot(now_ms += 1000);
+  CHECK_OK(target.boot_status);
+  for (int i = 0; i < 4; ++i) target.journal->poll(now_ms += 10);
+  CHECK(target.journal->phase() == ConfigPhase::Active);
+  CHECK(target.journal->decision_revision() == revision);
+  CHECK(target.journal->active_snapshot().size == applied.size);
+
+  // Recovery: one slot lost -> uncertain -> the site's RCR2 re-proves it.
+  target.storage.corrupt(1, 128);
+  target.boot(now_ms += 1000);
+  CHECK(target.journal->uncertain());
+  SecurityFloorState floor_state{};
+  CHECK_OK(target.floor->read(floor_state));
+  endpoint::ConfigRecoveryIntent intent{};
+  intent.mode = endpoint::kRcr2ModeAdoptKnown;
+  intent.config_namespace = target.config.config_namespace;
+  intent.schema = target.config.schema;
+  intent.network = target.config.network;
+  intent.target = target.config.target;
+  intent.authority = kSiteId;
+  intent.authority_generation = kSiteConfigAuthorityGeneration;
+  intent.authority_sequence = 4;
+  intent.operation_id = t06_opid(4);
+  intent.new_store_generation = floor_state.entries[0].store_floor + 1;
+  intent.new_revision = floor_state.entries[0].decision_floor + 1;
+  CHECK_OK(config_snapshot_hash(intent.config_namespace, intent.schema,
+                                target.journal->active_snapshot(), intent.snapshot_hash));
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  CHECK_OK(t06_make_recovery(intent, kSiteSak.priv, object));
+  now_ms += 6000;
+  CHECK_OK(target.journal->submit_recovery(object.view(), now_ms, verdict));
+  for (int i = 0; i < 8; ++i) target.journal->poll(now_ms += 10);
+  CHECK(!target.journal->uncertain());
+  CHECK(target.journal->phase() == ConfigPhase::Active);
+  CHECK(target.journal->decision_revision() == revision + 1);
+
+  // The Rust Site Authority's permit (config.rs site_signed_permit_golden).
+  const std::map<std::string, std::string> golden = read_flat_json(
+      std::string(ROUTELOOM_SITE_SIGNED_GOLDEN_DIR) + "/site_permit.json");
+  CHECK(std::stoull(golden.at("site_id")) == kSiteId);
+  CHECK(std::stoull(golden.at("network")) == target.config.network);
+  CHECK(std::stoull(golden.at("target")) == kTarget);
+  const std::vector<std::uint8_t> permit = golden_unhex(golden.at("object_hex"));
+  const std::vector<std::uint8_t> canonical = golden_unhex(golden.at("canonical_hex"));
+  ConfigPermitContext context{};
+  context.network = target.config.network;
+  context.target = target.config.target;
+  context.config_namespace = target.config.config_namespace;
+  context.authorized_issuer = target.config.authorized_issuer;
+  context.authority_generation = target.config.authority_generation;
+  endpoint::EncodedConfigCommand payload{};
+  bool verified = false;
+  CHECK_OK(target.verifier->verify_permit(context, ByteView{permit.data(), permit.size()},
+                                          payload, verified));
+  CHECK(verified);
+  CHECK(payload.size == canonical.size() &&
+        std::memcmp(payload.bytes.data(), canonical.data(), canonical.size()) == 0);
+}
+
 int main() {
   // Schema / TLV / hash layer.
   test_tlv_layer();
@@ -5262,6 +5476,7 @@ int main() {
   test_signed_golden_delivery();
   test_t06_disaster_generation_migration();
   test_t06_double_loss_rtm1_rcr2_rcc1();
+  test_site_bound_config();
   if (failures != 0) {
     std::fprintf(stderr, "%d test checks failed\n", failures);
     return 1;
