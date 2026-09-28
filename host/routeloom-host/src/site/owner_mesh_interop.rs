@@ -2756,6 +2756,66 @@ fn mesh_route_loss_management_loss_then_repair() {
     assert_eq!(world.snaps[0].rx, b"route-restored");
 }
 
+/// Probe RX while a DATA MAC callback is pending leaves the Result queued
+/// until the physical slot frees, for short and long callback latencies.
+#[test]
+fn mesh_route_loss_probe_result_survives_callback_delay() {
+    let Some(mut world) = route_loss_world("route-callback-delay", Switch::direct(), false) else {
+        return;
+    };
+    for delay in [20, 100, 500] {
+        world.switch.delay_ms[0][1] = 1000;
+        let pending_probe = |world: &MeshWorld| {
+            world.delayed.iter().position(|(_, delivery)| {
+                delivery.0 == 1
+                    && delivery.1 == MAC_GW
+                    && delivery.3.len() > 4
+                    && delivery.3[..4] == *b"RL\x02\0"
+                    && delivery.3[4] == WIRE_PROBE
+            })
+        };
+        for _ in 0..1000 {
+            if pending_probe(&world).is_some() {
+                break;
+            }
+            world.step(25);
+        }
+        let probe_index = pending_probe(&world).expect("real gateway Probe captured in flight");
+        world.delayed[probe_index].0 = world.now + 25;
+        world.switch.delay_ms[0][1] = 0;
+        let probe_pending = world.probe_while_callback_pending;
+        let result_before = world.switch.results_seen;
+        let received = world.snaps[0].rx_count;
+        world.switch.callback_delay_ms[1][0] = delay;
+        world.switch.callback_delay_kind = Some(WIRE_DATA);
+        world.peers[1].app_send(testkit::GATEWAY, b"during-probe");
+        world.step(25);
+        assert!(
+            world.probe_while_callback_pending > probe_pending,
+            "{delay} ms: Probe RX scheduled with DATA callback pending"
+        );
+        for _ in 0..1000 {
+            world.step(25);
+            if world.snaps[0].rx_count > received
+                && world.snaps[1]
+                    .app_tx
+                    .last()
+                    .is_some_and(|tx| tx.state == DELIVERY_DELIVERED)
+                && world.switch.results_seen > result_before
+            {
+                break;
+            }
+        }
+        world.switch.callback_delay_ms[1][0] = 0;
+        assert_eq!(world.snaps[0].rx_count, received + 1, "{delay} ms DATA");
+        assert!(
+            world.switch.results_seen > result_before,
+            "{delay} ms: Result sent after slot freed"
+        );
+        assert_eq!(world.snaps[1].phases[0], PHASE_REACHABLE);
+    }
+}
+
 /// Phase-1 convergence on the direct radio: all three Owners adopt
 /// from their Phase-0 images (member boots, no rejoins), open their
 /// authority channels through the gateway's real USB relay, confirm,
