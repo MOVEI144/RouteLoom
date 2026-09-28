@@ -44,7 +44,7 @@ git `path` 依存は component の subdirectory **だけ**を取り出す。こ�
 
 - `version` フィールドは git ref（branch / tag / commit SHA）を受ける。実験以外では浮動する `main` ではなく tag か commit SHA を pin すること。
 - manifest の `version: 2.0.0-dev` は依存解決上の識別子であり、公開リリースを意味しない。リポジトリに git tag はまだ存在しないため、現時点では commit SHA pin が最も確実な固定方法。
-- `routeloom_espnow` の `targets` は `esp32c3` / `esp32s3` / `esp32c5` / `esp32c6`。必須 CI matrix は前の 3 chip、`esp32c6` は別の `c6-experimental` job で build する。`targets` への記載や build 成功は RF・実機の認定を意味しない。
+- `routeloom_espnow` の `targets` は `esp32c3` / `esp32s3` / `esp32c5` / `esp32c6`。4 chip とも必須 CI の firmware cell（`tools/ci/cells.json`）で build する。`targets` への記載や build 成功は RF・実機の認定を意味しない。
 
 ## 成熟度の正直な位置づけ
 

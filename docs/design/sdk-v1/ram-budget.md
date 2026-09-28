@@ -66,7 +66,7 @@ C5 bridgeは同じbank容量のMemberEdhoc構成でdefaultのdebug最適化で�
 
 ## 5. CIの可視化とguard
 
-`firmware` jobの各cellは`idf.py build`の後に次を実行する（`.github/workflows/sdk.yml`）：
+`firmware` jobの各cell（`tools/ci/cells.json`）は`python3 tools/check.py firmware --cell <id>`で`idf.py build`の後に次を実行する：
 
 ```sh
 idf.py size > build/size-report.txt
@@ -75,6 +75,7 @@ python3 tools/firmware_ram_report.py build/size.json --target <target> --app <ap
   --cell <cell> --json-out build/ram-report.json --summary "$GITHUB_STEP_SUMMARY"
 ```
 
+- 続く`check.py size --cell <id>`はcellごとの予算（`cells.json`の`budget`：app.binの上限、上のguardと同じ主SRAMの静的空きの下限、RTC／LP SRAM使用量の上限。初期値は2026-09-28の`main`のCI artifactの実測）と、ELFに残ってはいけないsymbolの正規表現（`symbols_absent`）を検査する。bin・ELF・map・`ram-report.json`のどれかが無いcellは失敗する。予算を上げるPRは理由を書く。
 - `size.json`はESP-IDF v6.0が使うesp-idf-size 2.xのjson2要約（`layout[]`の各memory typeに`name/total/used/free/parts`）。toolはraw形式（`memory_types`）も読み、`free`が無ければ`total − used`で求める。**静的データを持つ内部RAMのmemory typeが見つからない報告はエラー**（exit 2）で、入力を読めずにpassすることはない。
 - 内部RAMの各memory type（flash・外部RAMを除く）のused／total／freeと大きいsectionをjob summaryへ書き、`ram-report.json`と`size.json`をfirmware artifactに入れる。
 - guardの対象は`.bss`／`.data`を持つ主SRAM（C3は`DRAM`、S3は`DIRAM`、C5は`HP SRAM`）の`free`。IRAMのcodeも同じ領域に入るので、これはlink時の`dram0_0_seg`超過までの残りそのものである。RTC／LP SRAMはesp-idf-sizeが`.rtc.data`（`RTC_DATA_ATTR`）も`.data`と略すが、表に出すだけでguardの対象にしない（deep-sleep cellのRTC SLOWは8 KB全体でも閾値に届かない）。

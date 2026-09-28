@@ -7,6 +7,7 @@
 | [XIAO ESP32-C3](xiao-esp32c3.md) | RISC-V単核160MHz | 400KB SRAM、4MB Flash | ESP-NOW LR、PSRAM非依存基準 |
 | [XIAO ESP32-S3](xiao-esp32s3.md) | Xtensa LX7二核240MHz | 標準版8MB Flash＋8MB PSRAM | ESP-NOW LR |
 | [XIAO ESP32-C5](xiao-esp32c5.md) | RISC-V単核240MHz | Wikiは8MB Flash＋8MB PSRAMと記載。現物照合が必要 | 2.4GHz ESP-NOW LRのみ |
+| [XIAO ESP32-C6](xiao-esp32c6.md) | RISC-V 160MHz（HP）＋20MHz（LP） | 512KB SRAM、4MB Flash | ESP-NOW LR、PSRAM非依存 |
 | [S3＋Wio-SX1262 B2B](xiao-esp32s3-wio-sx1262.md) | S3に別SX1262を追加 | S3本体に依存 | Wi-Fi側だけ。LoRaは将来 |
 
 値はboardとSoCを分けて扱う。CPUの上限周波数は電池設定で常に使う周波数ではない。最大無線TX出力、最大RF速度、一般的な距離をRouteLoomの性能保証にしない。
@@ -14,19 +15,19 @@
 ## 端子比較
 
 <!-- generated:pins:start -->
-| XIAO端子 | C3 GPIO | S3 GPIO | C5 GPIO |
-|---|---:|---:|---:|
-| D0 | 2 | 1 | 1 |
-| D1 | 3 | 2 | 0 |
-| D2 | 4 | 3 | 25 |
-| D3 | 5 | 4 | 7 |
-| D4 / SDA | 6 | 5 | 23 |
-| D5 / SCL | 7 | 6 | 24 |
-| D6 / TX | 21 | 43 | 11 |
-| D7 / RX | 20 | 44 | 12 |
-| D8 / SCK | 8 | 7 | 8 |
-| D9 / MISO | 9 | 8 | 9 |
-| D10 / MOSI | 10 | 9 | 10 |
+| XIAO端子 | C3 GPIO | S3 GPIO | C5 GPIO | C6 GPIO |
+|---|---:|---:|---:|---:|
+| D0 | 2 | 1 | 1 | 0 |
+| D1 | 3 | 2 | 0 | 1 |
+| D2 | 4 | 3 | 25 | 2 |
+| D3 | 5 | 4 | 7 | 21 |
+| D4 / SDA | 6 | 5 | 23 | 22 |
+| D5 / SCL | 7 | 6 | 24 | 23 |
+| D6 / TX | 21 | 43 | 11 | 16 |
+| D7 / RX | 20 | 44 | 12 | 17 |
+| D8 / SCK | 8 | 7 | 8 | 19 |
+| D9 / MISO | 9 | 8 | 9 | 20 |
+| D10 / MOSI | 10 | 9 | 10 | 18 |
 <!-- generated:pins:end -->
 
 同じD番号でも数値GPIOは違う。GPIO電圧は3.3V系で、5V tolerantとして配線しない。USBデータ、flash/PSRAM、boot strap、B2Bが使うGPIOは自由な端子とは扱わない。

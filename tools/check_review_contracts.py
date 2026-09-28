@@ -820,7 +820,8 @@ def validate(root: Path) -> dict:
                 "run_node(" in firmware and "NodeBootHooks" in firmware,
                 "node-style apps route through components/routeloom_node_boot",
             )
-        workflow = (root / ".github/workflows/sdk.yml").read_text(encoding="utf-8")
+        ci_cells = {cell["id"] for cell in json.loads(
+            (root / "tools/ci/cells.json").read_text(encoding="utf-8"))["cells"]}
         test(
             "maintenance_usb_rx_covers_identity_bundle",
             maintenance_rx_covers_bundle(
@@ -834,11 +835,7 @@ def validate(root: Path) -> dict:
         for app in ("reference_node", "bridge_node"):
             test(
                 f"{app}_maintenance_build_cell",
-                re.search(
-                    rf"- app: {app}\s+target: esp32c3\s+profile: normal"
-                    rf"\s+autonomy: off\s+features: maintenance_on",
-                    workflow,
-                ) is not None,
+                f"{app}-esp32c3-normal-off-maintenance_on" in ci_cells,
                 "each factory console branch must compile in the fixed-IDF matrix",
             )
         for board in boards["boards"]:

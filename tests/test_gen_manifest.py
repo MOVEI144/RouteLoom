@@ -20,6 +20,7 @@ INPUTS = [
     ".github/workflows/sdk.yml",
     "host/Cargo.toml",
     "host/Cargo.lock",
+    "host/rust-toolchain.toml",
     "tools/meshviz/pyproject.toml",
     *(f"components/{name}/idf_component.yml" for name in gen_manifest.IDF_COMPONENTS),
     gen_manifest.HEADER,
@@ -46,13 +47,14 @@ class ManifestDriftTest(unittest.TestCase):
         component = (ROOT / "components/routeloom_espnow/idf_component.yml").read_text(encoding="utf-8")
         targets = re.search(r"^targets:\n((?:  - esp32\w+\n)+)", component, re.M)
         self.assertIsNotNone(targets)
-        workflow = (ROOT / ".github/workflows/sdk.yml").read_text(encoding="utf-8")
-        self.assertIn("  c6-experimental:\n", workflow)
+        cells = json.loads((ROOT / "tools/ci/cells.json").read_text(encoding="utf-8"))["cells"]
+        cell_targets = {cell["target"] for cell in cells}
         for doc in ("docs/implementation/component-distribution.md", "examples/espnow_node/README.md"):
             text = (ROOT / doc).read_text(encoding="utf-8")
             for target in re.findall(r"^  - (esp32\w+)$", targets.group(1), re.M):
                 self.assertIn(target, text, f"{doc}: {target}")
-            self.assertIn("c6-experimental", text, doc)
+                self.assertIn(target, cell_targets, f"tools/ci/cells.json: {target}")
+            self.assertIn("tools/ci/cells.json", text, doc)
 
     def test_persisted_versions_have_distinct_format_entries(self) -> None:
         manifest = gen_manifest.load(ROOT)
@@ -149,9 +151,13 @@ class ManifestDriftTest(unittest.TestCase):
             workflow = root / ".github/workflows/sdk.yml"
             original = workflow.read_text(encoding="utf-8")
             changed = original.replace("espressif/idf:v6.0.3", "espressif/idf:v6.1.0")
-            changed = re.sub(r"^.*rustup toolchain install 1\.85\.1.*\n", "", changed, flags=re.M)
             self.assertNotEqual(changed, original)
             workflow.write_text(changed, encoding="utf-8")
+            toolchain = root / "host/rust-toolchain.toml"
+            pinned = toolchain.read_text(encoding="utf-8")
+            bumped = re.sub(r'^channel = ".*"$', 'channel = "1.99.0"', pinned, flags=re.M)
+            self.assertNotEqual(bumped, pinned)
+            toolchain.write_text(bumped, encoding="utf-8")
             result = run(root, "--check")
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("ESP-IDF", result.stderr)

@@ -7,7 +7,7 @@
 # Each bench maps a role name to:
 #   app        firmware app under firmware/<app> (build dir = firmware/<app>/build)
 #   chip       esp32c3 | esp32s3 | esp32c5 | esp32c6
-#              C6 is an experimental HIL target, outside the SDK v1 support list.
+#              C6 is an SDK build target; Mesh Lab writes await H0 board checks.
 #   mac        expected base MAC; required for this bench's flash preflight
 #   role       bridge | reference (free-form, drives scenario requirements)
 #   node_id    mesh node id as built (ROUTELOOM_NODE_ID) — used in `send` steps
@@ -60,7 +60,7 @@ rigs:
           - "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00"
         reset: esptool
   bench-2026-09-26-mixed5:
-    description: "experimental five-node bench: three C3s and two unsupported C6s"
+    description: "historical five-node bench: three C3s and two C6s"
     host:
       daemon_bin: host/target/debug/routeloom-host
       ctl_bin: host/target/debug/routeloomctl

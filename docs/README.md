@@ -17,7 +17,7 @@ RouteLoomは用途非依存の組み込みMesh SDKである。製品の機器台
 
 ## ハードウェア
 
-[一覧と比較](hardware/README.md)、[C3](hardware/xiao-esp32c3.md)、[S3](hardware/xiao-esp32s3.md)、[C5](hardware/xiao-esp32c5.md)、[S3＋Wio-SX1262 B2B](hardware/xiao-esp32s3-wio-sx1262.md)、[電源・RF・適合確認](hardware/power-rf-compliance.md)。
+[一覧と比較](hardware/README.md)、[C3](hardware/xiao-esp32c3.md)、[S3](hardware/xiao-esp32s3.md)、[C5](hardware/xiao-esp32c5.md)、[C6](hardware/xiao-esp32c6.md)、[S3＋Wio-SX1262 B2B](hardware/xiao-esp32s3-wio-sx1262.md)、[電源・RF・適合確認](hardware/power-rf-compliance.md)。
 
 ## 補助資料
 

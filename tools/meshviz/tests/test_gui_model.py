@@ -481,7 +481,7 @@ class BoardSetupTests(unittest.TestCase):
         self.assertEqual(plan.expected_mac, row.identity.base_mac)
         self.assertTrue(any('個体別設定' in note for note in notes))
         plan, reasons, _ = preview(row, self.manifest(chip='esp32c6'), Path('/b'), quiesced=True)
-        self.assertTrue(any('C6' in r for r in reasons))
+        self.assertTrue(any('C6' in r and 'H0' in r for r in reasons))
 
     def test_preview_rejects_node_id_not_embedded_in_signed_image(self):
         row = BoardRow('A', identity=self.identity(), role='reference_node', node_id='2')

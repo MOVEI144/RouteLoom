@@ -146,7 +146,7 @@ def run(root: Path) -> dict:
 
     try:
         boards = data["boards.json"]["boards"]
-        check("four_board_profiles", len(boards) == 4 and len({b["id"] for b in boards}) == 4)
+        check("five_board_profiles", len(boards) == 5 and len({b["id"] for b in boards}) == 5)
         for board in boards:
             check(f"board_doc:{board['id']}", (root / board["doc"]).is_file())
             check(f"board_not_rf_claim:{board['id']}", board["rf_qualified"] is False)

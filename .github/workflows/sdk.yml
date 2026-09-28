@@ -14,6 +14,8 @@ concurrency:
   group: sdk-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  # Every job runs a stage of tools/check.py; `python3 tools/check.py ci
+  # --dry-run` prints the same commands.
   core:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -31,9 +33,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ '${{ matrix.compiler }}' = clang ]; then export CC=clang CXX=clang++; else export CC=gcc CXX=g++; fi
-          cmake -S . -B build -DROUTELOOM_BUILD_TESTS=ON -DROUTELOOM_ENABLE_SANITIZERS=${{ matrix.sanitizer }} -DCMAKE_BUILD_TYPE=Debug
-          cmake --build build --parallel 2
-          ctest --test-dir build --output-on-failure | tee ctest-report-${{ matrix.compiler }}-san${{ matrix.sanitizer }}.txt
+          python3 tools/check.py core --sanitizers ${{ matrix.sanitizer }} | tee ctest-report-${{ matrix.compiler }}-san${{ matrix.sanitizer }}.txt
       - name: C++ test inventory
         if: always()
         shell: bash
@@ -53,12 +53,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Documentation and contract tests
-        run: |
-          python3 tools/check_docs.py
-          python3 tools/gen_manifest.py --check
-          python3 tools/sync_reference_tables.py --check
-          python3 tools/check_review_contracts.py
-          python3 -m unittest discover -s tests -v
+        run: python3 tools/check.py docs
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -72,243 +67,41 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: C++ wire, USB and SDK v1 golden-vector tests (valid + invalid)
-        shell: bash
-        run: |
-          set -euo pipefail
-          cmake -S . -B build -DROUTELOOM_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
-          cmake --build build --parallel 2 --target routeloom_golden_tests routeloom_usb_tests routeloom_key_schedule_tests routeloom_sdkv1_golden_tests routeloom_sdkv1_ead_tests routeloom_sdkv1_join_transport_tests
-          ctest --test-dir build --output-on-failure -R 'routeloom_(golden|usb|key_schedule|sdkv1_golden|sdkv1_ead|sdkv1_join_transport)_tests'
-      - name: Rust toolchain
-        run: |
-          rustup toolchain install 1.85.1 --profile minimal
-          rustup override set 1.85.1
-      - name: Rust wire and USB golden-vector tests
+      - name: Rust toolchain (host/rust-toolchain.toml)
         working-directory: host
-        run: cargo test -p routeloom-wire -p routeloom-protocol -p routeloom-keysched
-      - name: Rust SDK v1 golden vectors (RFC 6979 re-sign must match)
-        working-directory: host
-        run: cargo test -p routeloom-provision --test sdkv1_golden
-      - name: Rust SDK v1 join EAD vectors (Site Authority re-issue must match)
-        working-directory: host
-        run: cargo test -p routeloom-join
-      - name: Regenerate shared vectors and require byte-identical files
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo run --manifest-path host/Cargo.toml -p routeloom-wire --example gen_golden
-          cargo run --manifest-path host/Cargo.toml -p routeloom-protocol --example gen_usb_golden
-          cargo run --manifest-path host/Cargo.toml -p routeloom-provision --example gen_provisioning_golden
-          python3 tools/gen_autonomy_vectors.py
-          python3 -c "import cryptography" 2>/dev/null || pip install "cryptography==44.0.0"
-          python3 tools/gen_sdkv1_derivation_vectors.py
-          python3 tools/gen_sdkv1_authority_vectors.py
-          python3 tools/gen_sdkv1_vectors.py
-          python3 tools/gen_sdkv1_ead_vectors.py
-          python3 tools/gen_sdkv1_dams_vectors.py
-          python3 tools/gen_sdkv1_join_transport_vectors.py
-          python3 tools/gen_sdkv1_handshake_vectors.py
-          python3 tools/gen_sdkv1_join_relay_v2_vectors.py
-          python3 tools/gen_sdkv1_revocation_vectors.py
-          python3 tools/gen_bench_vectors.py
-          python3 tools/gen_endpoint_vectors.py
-          # Every generated-vector directory must be checked: diff catches
-          # changed bytes, porcelain catches a generator that starts
-          # emitting an unreviewed (untracked) vector. Goldens without a
-          # generator (e.g. the hand-written tests/fuzz/corpus/rlres1
-          # seeds) stay out.
-          GENERATED_GOLDENS="protocol/golden protocol/usb-golden protocol/autonomy-golden protocol/provisioning-golden protocol/sdkv1-golden protocol/bench-golden protocol/endpoint-golden protocol/config-signed-golden protocol/edhoc-interop protocol/edhoc-rfc9529 tests/fuzz/corpus/sdkv1_ead tests/fuzz/corpus/sdkv1_handshake tests/fuzz/corpus/sdkv1_join"
-          git diff --exit-code -- $GENERATED_GOLDENS
-          test -z "$(git status --porcelain -- $GENERATED_GOLDENS)"
+        run: cargo --version
+      - name: Vector generator dependency
+        run: python3 -c "import cryptography" 2>/dev/null || pip install "cryptography==44.0.0"
+      - name: C++/Rust golden-vector tests and byte-identical regeneration
+        run: python3 tools/check.py golden
+  firmware-cells:
+    # The firmware matrix is tools/ci/cells.json (app, target, sdkconfig
+    # overlay and assertions, size budget per cell).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.cells.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - id: cells
+        run: python3 tools/check.py firmware --list --format github >> "$GITHUB_OUTPUT"
   firmware:
+    needs: firmware-cells
+    name: firmware (${{ matrix.id }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      matrix:
-        target: [esp32c3, esp32s3, esp32c5]
-        # deep_sleep compiles the CONFIG_ROUTELOOM_DEEP_SLEEP=y path
-        # (espnow_power hooks + gated code in main.cpp) — compile-time
-        # validation only, not a hardware power claim.
-        profile: [normal, deep_sleep]
-        # bridge_node exposes the portable UsbBridge on USB Serial/JTAG.
-        # It has no deep-sleep variant, so that combination is excluded.
-        # bench_node (design-devflow.md §5) defaults to the member profile
-        # in sdkconfig.defaults, so its base cells already build the main
-        # Member configuration; the deep_sleep cells pin LegacyFixture as
-        # for the other apps.
-        app: [reference_node, bridge_node, bench_node]
-        # autonomy=observe compiles the EXPERIMENTAL autonomy lane:
-        # RLD1 discovery + the migration participant in Observe mode
-        # (CONFIG_ROUTELOOM_DISCOVERY=y, CONFIG_ROUTELOOM_MIGRATION=1).
-        # Compile-time coverage only — not RF validation, and Observe never
-        # moves the radio. AutoGuarded stays opt-in (no kconfig exposes it).
-        autonomy: [off]
-        # features selects the scope-gateway-config opt-ins (P6):
-        #   endpoints_on     — bridge_node with the USB capability bits
-        #                      gateway_endpoint_v1 (bit3) + config_endpoint_v1
-        #                      (bit4) set, so both endpoints attach.
-        #   config_target_on — reference_node with CONFIG_ROUTELOOM_CONFIG=y,
-        #                      the NVS-journal ConfigTarget path.
-        #   route_scoped     — CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y (issue
-        #                      #41 gateway-scoped routing profile, 5 s tick /
-        #                      90 s lease defaults; the bridge lists itself,
-        #                      the reference node names gateway 0x1).
-        #   owner_member     — CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y
-        #                      (G-SEC P4 §8.4): the shared EspNowSecurityOwner
-        #                      boot path with the dev-PSK lane compiled out.
-        # The base matrix keeps every feature OFF (defaults), so both
-        # branches compile. Compile-time coverage only — never a hardware
-        # or qualification claim.
-        features: [off]
-        exclude:
-          - app: bridge_node
-            profile: deep_sleep
-        include:
-          - app: bridge_node
-            target: esp32c3
-            profile: normal
-            autonomy: observe
-            features: off
-          - app: bridge_node
-            target: esp32c3
-            profile: normal
-            autonomy: off
-            features: endpoints_on
-          - app: reference_node
-            target: esp32c3
-            profile: normal
-            autonomy: off
-            features: config_target_on
-          # The reference app compiles observation and the HIL sender into
-          # the same shared-boot poll hook.
-          - app: reference_node
-            target: esp32s3
-            profile: normal
-            autonomy: off
-            features: hil_observation
-          # maintenance_on compiles the factory maintenance-console branch
-          # (CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y, sdk-v1/07 §6 P7):
-          # pre-RF console instead of the mesh. The reference cell rides
-          # the DevRam default, the bridge cell pins LegacyFixture, so
-          # both console pairings compile. Compile-time coverage only —
-          # the console's behavior is host-tested, and enabling it in a
-          # field build is never correct.
-          - app: reference_node
-            target: esp32c3
-            profile: normal
-            autonomy: off
-            features: maintenance_on
-          - app: bridge_node
-            target: esp32c3
-            profile: normal
-            autonomy: off
-            features: maintenance_on
-          - app: reference_node
-            target: esp32c3
-            profile: normal
-            autonomy: off
-            features: route_scoped
-          - app: bridge_node
-            target: esp32c3
-            profile: normal
-            autonomy: off
-            features: route_scoped
-          # dev-flow D07/D08: scoped gateways are also selectable on the
-          # DevRam owner profile (BoardConfig's interim carrier), and the
-          # flat group tree profile is an explicit member opt-in.
-          # Compile-time coverage only.
-          - app: reference_node
-            target: esp32c3
-            profile: normal
-            autonomy: off
-            features: dev_scoped
-          - app: bridge_node
-            target: esp32c3
-            profile: normal
-            autonomy: off
-            features: dev_scoped
-          - app: reference_node
-            target: esp32c3
-            profile: normal
-            autonomy: off
-            features: group_flat
-          - app: bridge_node
-            target: esp32c3
-            profile: normal
-            autonomy: off
-            features: group_flat
-          # Owner-profile cells (G-SEC P4 §8.4): the reference node and
-          # the bridge boot the shared EspNowSecurityOwner with the
-          # legacy dev-PSK lane compiled out. Compile-time coverage
-          # only — membership itself is host-tested.
-          - app: reference_node
-            target: esp32c3
-            profile: normal
-            autonomy: off
-            features: owner_member
-          - app: bridge_node
-            target: esp32c3
-            profile: normal
-            autonomy: off
-            features: owner_member
-          - app: reference_node
-            target: esp32s3
-            profile: normal
-            autonomy: off
-            features: owner_member
-          - app: bridge_node
-            target: esp32s3
-            profile: normal
-            autonomy: off
-            features: owner_member
-          - app: reference_node
-            target: esp32c5
-            profile: normal
-            autonomy: off
-            features: owner_member
-          - app: bridge_node
-            target: esp32c5
-            profile: normal
-            autonomy: off
-            features: owner_member
-          # Owner + deep-sleep cell: the reference member sleep tail
-          # (save/restore around the power coordinator) compiles under
-          # the member profile. Compile-time coverage only.
-          - app: reference_node
-            target: esp32c3
-            profile: deep_sleep
-            autonomy: off
-            features: owner_member
-          # The bench app rides the same shared pump — compile the member
-          # sleep tail with the bench observer attached as well.
-          - app: bench_node
-            target: esp32c3
-            profile: deep_sleep
-            autonomy: off
-            features: owner_member
-          # Paired bench cells: two ESP32-C3 boards flashed as a real
-          # 2-node mesh (static neighbor + RLD1 discovery lane running
-          # alongside). autonomy=discover enables CONFIG_ROUTELOOM_DISCOVERY
-          # without the migration lane. The PEER_MAC values are the bench
-          # boards' hardware MACs — dev fixtures, not secrets.
-          - app: bridge_node
-            target: esp32c3
-            profile: normal
-            autonomy: discover
-            features: paired_bridge
-          - app: reference_node
-            target: esp32c3
-            profile: normal
-            autonomy: discover
-            features: paired_target
+      matrix: ${{ fromJSON(needs.firmware-cells.outputs.matrix) }}
     container:
       image: espressif/idf:v6.0.3
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Build fixed-IDF reference firmware
+      - name: Build the cell, assert its sdkconfig and check its budget
         shell: bash
         run: |
           set -euo pipefail
@@ -316,219 +109,11 @@ jobs:
           . "$IDF_PATH/export.sh"
           git -C "$IDF_PATH" rev-parse HEAD | tee idf-commit.txt
           test "$(cat idf-commit.txt)" = 76f5dedd9950a3012fee8fb7d5586df21fc67802
-          cd firmware/${{ matrix.app }}
-          idf.py set-target '${{ matrix.target }}'
-          if [ '${{ matrix.profile }}' = deep_sleep ]; then
-            printf 'CONFIG_ROUTELOOM_DEEP_SLEEP=y\n' >> sdkconfig
-            if [ '${{ matrix.features }}' != owner_member ]; then
-              # The legacy power-coordinator sleep path (G-SEC P4: explicit
-              # LegacyFixture — DevRam is the default).
-              printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
-            fi
-          fi
-          if [ '${{ matrix.autonomy }}' = observe ]; then
-            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
-            printf 'CONFIG_ROUTELOOM_DISCOVERY=y\nCONFIG_ROUTELOOM_MIGRATION=1\n' >> sdkconfig
-          fi
-          if [ '${{ matrix.autonomy }}' = discover ]; then
-            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
-            printf 'CONFIG_ROUTELOOM_DISCOVERY=y\n' >> sdkconfig
-          fi
-          if [ '${{ matrix.features }}' = paired_bridge ]; then
-            # Bench pair node 1: USB gateway/bridge talking to node 2.
-            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
-            printf 'CONFIG_ROUTELOOM_CAPABILITY=0x1f\n' >> sdkconfig
-            printf 'CONFIG_ROUTELOOM_NODE_ID=0x1\n' >> sdkconfig
-            printf 'CONFIG_ROUTELOOM_PEER_NODE_ID=0x2\n' >> sdkconfig
-            printf 'CONFIG_ROUTELOOM_PEER_MAC="94:a9:90:7a:b5:60"\n' >> sdkconfig
-          fi
-          if [ '${{ matrix.features }}' = paired_target ]; then
-            # Bench pair node 2: reference node carrying the RCC1 journal.
-            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
-            printf 'CONFIG_ROUTELOOM_CONFIG=y\n' >> sdkconfig
-            printf 'CONFIG_ROUTELOOM_NODE_ID=0x2\n' >> sdkconfig
-            printf 'CONFIG_ROUTELOOM_PEER_NODE_ID=0x1\n' >> sdkconfig
-            printf 'CONFIG_ROUTELOOM_PEER_MAC="94:a9:90:6a:ee:c4"\n' >> sdkconfig
-          fi
-          if [ '${{ matrix.features }}' = endpoints_on ]; then
-            # bridge_node opt-in: capability bits 3 (gateway_endpoint_v1)
-            # and 4 (config_endpoint_v1) attach + advertise both endpoints.
-            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
-            printf 'CONFIG_ROUTELOOM_CAPABILITY=0x1f\n' >> sdkconfig
-          fi
-          if [ '${{ matrix.features }}' = config_target_on ]; then
-            # reference_node opt-in: the RCC1 permit journal endpoint.
-            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
-            printf 'CONFIG_ROUTELOOM_CONFIG=y\n' >> sdkconfig
-          fi
-          if [ '${{ matrix.features }}' = hil_observation ]; then
-            printf 'CONFIG_ROUTELOOM_HIL_SEND_DESTINATION=0x2\n' >> sdkconfig
-            printf 'CONFIG_ROUTELOOM_HIL_SEND_COUNT=1\n' >> sdkconfig
-            printf 'CONFIG_ROUTELOOM_OBSERVATION_REMOTE=y\n' >> sdkconfig
-          fi
-          if [ '${{ matrix.features }}' = maintenance_on ]; then
-            # reference_node opt-in: the factory maintenance console
-            # branch instead of the mesh (sdk-v1/07 §6 P7). The bridge
-            # cell pins LegacyFixture (legacy-console pairing); the
-            # reference cell rides the DevRam default.
-            printf 'CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y\n' >> sdkconfig
-            if [ '${{ matrix.app }}' = bridge_node ]; then
-              printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
-            fi
-          fi
-          if [ '${{ matrix.features }}' = route_scoped ]; then
-            # Gateway-scoped routing profile (issue #41); the gateway id,
-            # tick and lease come from the Kconfig defaults.
-            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y\n' >> sdkconfig
-            printf 'CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y\n' >> sdkconfig
-          fi
-          if [ '${{ matrix.features }}' = dev_scoped ]; then
-            # DevRam + scoped (dev-flow D07): the same gateway set, under
-            # the explicit dev profile instead of the legacy fixture.
-            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y\n' >> sdkconfig
-            printf 'CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y\n' >> sdkconfig
-          fi
-          if [ '${{ matrix.features }}' = group_flat ]; then
-            # Member + flat group tree (dev-flow D08): SitePackage
-            # gateways map to group_roots; scoped routing stays off.
-            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y\n' >> sdkconfig
-            printf 'CONFIG_ROUTELOOM_GROUP_TREE_FLAT=y\n' >> sdkconfig
-          fi
-          if [ '${{ matrix.features }}' = owner_member ]; then
-            # Security-owner profile (G-SEC P4 §8.4): the legacy-only
-            # options vanish by `depends on`, so nothing else is set.
-            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y\n' >> sdkconfig
-          fi
-          idf.py build
-          if [ '${{ matrix.profile }}' = deep_sleep ]; then
-            # Prove the kconfig symbol survived re-resolution and the
-            # deep-sleep code path was actually compiled in.
-            grep -q '^CONFIG_ROUTELOOM_DEEP_SLEEP=y' sdkconfig
-          else
-            ! grep -q '^CONFIG_ROUTELOOM_DEEP_SLEEP=y' sdkconfig
-          fi
-          if [ '${{ matrix.autonomy }}' = observe ]; then
-            # Prove the autonomy symbols survived re-resolution and the
-            # Observe-mode lane was actually compiled in.
-            grep -q '^CONFIG_ROUTELOOM_DISCOVERY=y' sdkconfig
-            grep -q '^CONFIG_ROUTELOOM_MIGRATION=1' sdkconfig
-          elif [ '${{ matrix.autonomy }}' = discover ]; then
-            # Paired bench cells run the discovery lane without migration.
-            grep -q '^CONFIG_ROUTELOOM_DISCOVERY=y' sdkconfig
-            ! grep -q '^CONFIG_ROUTELOOM_MIGRATION=[12]' sdkconfig
-          else
-            ! grep -q '^CONFIG_ROUTELOOM_DISCOVERY=y' sdkconfig
-            ! grep -q '^CONFIG_ROUTELOOM_MIGRATION=[12]' sdkconfig
-          fi
-          case '${{ matrix.features }}' in
-            endpoints_on|paired_bridge)
-              # Prove the endpoint opt-in survived re-resolution: bits 3+4
-              # on top of the 0x7 default, so both endpoints attach.
-              grep -q '^CONFIG_ROUTELOOM_CAPABILITY=0x1f' sdkconfig
-              ;;
-            *) ! grep -q '^CONFIG_ROUTELOOM_CAPABILITY=0x1f' sdkconfig ;;
-          esac
-          case '${{ matrix.features }}' in
-            config_target_on|paired_target)
-              grep -q '^CONFIG_ROUTELOOM_CONFIG=y' sdkconfig
-              ;;
-            *) ! grep -q '^CONFIG_ROUTELOOM_CONFIG=y' sdkconfig ;;
-          esac
-          if [ '${{ matrix.features }}' = hil_observation ]; then
-            grep -q '^CONFIG_ROUTELOOM_HIL_SEND_DESTINATION=0x2' sdkconfig
-            grep -q '^CONFIG_ROUTELOOM_HIL_SEND_COUNT=1' sdkconfig
-            grep -q '^CONFIG_ROUTELOOM_OBSERVATION_REMOTE=y' sdkconfig
-          fi
-          case '${{ matrix.features }}' in
-            maintenance_on)
-              grep -q '^CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y' sdkconfig
-              ;;
-            *) ! grep -q '^CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y' sdkconfig ;;
-          esac
-          case '${{ matrix.features }}' in
-            route_scoped|dev_scoped)
-              # Prove the scoped symbols resolved to the product timers.
-              grep -q '^CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y' sdkconfig
-              grep -q '^CONFIG_ROUTELOOM_ROUTE_PERIOD_MS=5000$' sdkconfig
-              grep -q '^CONFIG_ROUTELOOM_ROUTE_LIFETIME_MS=90000$' sdkconfig
-              ;;
-            *) ! grep -q '^CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y' sdkconfig ;;
-          esac
-          # Member cells: owner_member pins the profile, group_flat's flat
-          # tree is a member opt-in (D08), and bench_node defaults to
-          # MemberEdhoc in normal cells — its deep_sleep/off cells
-          # explicitly select LegacyFixture above.
-          member_expected=n
-          if [ '${{ matrix.features }}' = owner_member ] ||
-             [ '${{ matrix.features }}' = group_flat ] ||
-             { [ '${{ matrix.app }}' = bench_node ] &&
-               [ '${{ matrix.profile }}' = normal ] &&
-               [ '${{ matrix.features }}' = off ]; }; then
-            member_expected=y
-          fi
-          if [ "$member_expected" = y ]; then
-            # Prove the owner profile survived re-resolution.
-            grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y' sdkconfig
-          else
-            ! grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y' sdkconfig
-          fi
-          case '${{ matrix.features }}' in
-            group_flat)
-              grep -q '^CONFIG_ROUTELOOM_GROUP_TREE_FLAT=y' sdkconfig
-              ;;
-            *) ! grep -q '^CONFIG_ROUTELOOM_GROUP_TREE_FLAT=y' sdkconfig ;;
-          esac
-          # Other normal/off cells default to DevRam; legacy-only cells
-          # explicitly select LegacyFixture above.
-          legacy_expected=n
-          if [ '${{ matrix.profile }}' = deep_sleep ] &&
-             [ '${{ matrix.features }}' != owner_member ]; then
-            legacy_expected=y
-          fi
-          if [ '${{ matrix.autonomy }}' != off ]; then
-            legacy_expected=y
-          fi
-          case '${{ matrix.features }}' in
-            endpoints_on|config_target_on|route_scoped|paired_bridge|paired_target)
-              legacy_expected=y
-              ;;
-            maintenance_on)
-              if [ '${{ matrix.app }}' = bridge_node ]; then
-                legacy_expected=y
-              fi
-              ;;
-          esac
-          if [ "$legacy_expected" = y ]; then
-            grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y' sdkconfig
-          elif [ "$member_expected" = n ]; then
-            grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y' sdkconfig
-          fi
-          case '${{ matrix.features }}' in
-            paired_bridge)
-              grep -q '^CONFIG_ROUTELOOM_NODE_ID=0x1' sdkconfig
-              grep -q '^CONFIG_ROUTELOOM_PEER_NODE_ID=0x2' sdkconfig
-              grep -q '^CONFIG_ROUTELOOM_PEER_MAC="94:a9:90:7a:b5:60"' sdkconfig
-              ;;
-            paired_target)
-              grep -q '^CONFIG_ROUTELOOM_NODE_ID=0x2' sdkconfig
-              grep -q '^CONFIG_ROUTELOOM_PEER_NODE_ID=0x1' sdkconfig
-              grep -q '^CONFIG_ROUTELOOM_PEER_MAC="94:a9:90:6a:ee:c4"' sdkconfig
-              ;;
-          esac
-          idf.py size > build/size-report.txt
-          # Static RAM report + headroom guard (docs/design/sdk-v1/ram-budget.md):
-          # per-cell DRAM/IRAM use goes to the job summary and the artifact;
-          # the cell fails when the internal RAM holding .bss/.data has less
-          # free space than the per-target/app floor in the tool.
-          idf.py size --format json2 --output-file build/size.json
-          python3 "$GITHUB_WORKSPACE/tools/firmware_ram_report.py" build/size.json \
-            --target '${{ matrix.target }}' --app '${{ matrix.app }}' \
-            --cell '${{ matrix.app }}-${{ matrix.target }}-${{ matrix.profile }}-${{ matrix.autonomy }}-${{ matrix.features }}' \
-            --json-out build/ram-report.json --summary "$GITHUB_STEP_SUMMARY"
+          python3 tools/check.py firmware --cell "${{ matrix.id }}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: firmware-${{ matrix.app }}-${{ matrix.target }}-${{ matrix.profile }}-${{ matrix.autonomy }}-${{ matrix.features }}
+          name: ${{ matrix.artifact }}
           path: |
             idf-commit.txt
             firmware/${{ matrix.app }}/build/*.bin
@@ -540,83 +125,17 @@ jobs:
             firmware/${{ matrix.app }}/build/log/*
             firmware/${{ matrix.app }}/sdkconfig
           retention-days: 30
-  c6-experimental:
-    # C6 is a separate build-only target; these results never qualify C5.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {app: bridge_node, profile: devram}
-          - {app: reference_node, profile: devram}
-          - {app: bridge_node, profile: member}
-          - {app: reference_node, profile: member}
-          - {app: reference_node, profile: member_sleep}
-    container:
-      image: espressif/idf:v6.0.3
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
-      - name: Build experimental C6 firmware and guard RAM
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          . "$IDF_PATH/export.sh"
-          test "$(git -C "$IDF_PATH" rev-parse HEAD)" = 76f5dedd9950a3012fee8fb7d5586df21fc67802
-          cd "firmware/${{ matrix.app }}"
-          idf.py set-target esp32c6
-          if [ '${{ matrix.profile }}' != devram ]; then
-            printf 'CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y\n' >> sdkconfig
-          fi
-          if [ '${{ matrix.profile }}' = member_sleep ]; then
-            printf 'CONFIG_ROUTELOOM_DEEP_SLEEP=y\n' >> sdkconfig
-          fi
-          idf.py build
-          if [ '${{ matrix.profile }}' != devram ]; then
-            grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y' sdkconfig
-          fi
-          if [ '${{ matrix.profile }}' = member_sleep ]; then
-            grep -q '^CONFIG_ROUTELOOM_DEEP_SLEEP=y' sdkconfig
-          fi
-          idf.py size --format json2 --output-file build/size.json
-          python3 "$GITHUB_WORKSPACE/tools/firmware_ram_report.py" build/size.json \
-            --target esp32c6 --app '${{ matrix.app }}' \
-            --cell 'experimental-c6-${{ matrix.app }}-${{ matrix.profile }}' \
-            --json-out build/ram-report.json --summary "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: experimental-c6-${{ matrix.app }}-${{ matrix.profile }}
-          path: |
-            firmware/${{ matrix.app }}/build/*.bin
-            firmware/${{ matrix.app }}/build/*.elf
-            firmware/${{ matrix.app }}/build/*.map
-            firmware/${{ matrix.app }}/build/size.json
-            firmware/${{ matrix.app }}/build/ram-report.json
-            firmware/${{ matrix.app }}/sdkconfig
-          retention-days: 30
   rust:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: host
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Rust toolchain
-        run: |
-          rustup toolchain install 1.85.1 --profile minimal --component rustfmt,clippy
-          rustup override set 1.85.1
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      # The live Owner E2E suites need C++ peers and run in joiner-interop.
-      - run: cargo test --workspace --all-targets -- --skip joiner_interop --skip owner_mesh_interop
-      - run: cargo build --workspace --release --all-targets
+      - name: Rust toolchain (host/rust-toolchain.toml)
+        working-directory: host
+        run: cargo --version
+      - run: python3 tools/check.py rust
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -636,31 +155,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Build C++ Owner interop peers
-        shell: bash
-        run: |
-          set -euo pipefail
-          cmake -S . -B build -DROUTELOOM_BUILD_TESTS=ON -DROUTELOOM_ENABLE_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug
-          cmake --build build --parallel 2 --target routeloom_joiner_interop_peer routeloom_owner_mesh_peer
-          test -x build/tests/cpp/routeloom_joiner_interop_peer
-          test -x build/tests/cpp/routeloom_owner_mesh_peer
-      - name: Rust toolchain
-        run: |
-          rustup toolchain install 1.85.1 --profile minimal
-          rustup override set 1.85.1
-      - name: Live Owner E2E (C++ member stack against the Rust Site Authority)
+      - name: Rust toolchain (host/rust-toolchain.toml)
         working-directory: host
-        env:
-          ROUTELOOM_OWNER_PEER: ${{ github.workspace }}/build/tests/cpp/routeloom_joiner_interop_peer
-          UBSAN_OPTIONS: halt_on_error=1
-        run: cargo test -p routeloom-host --bins site::joiner_interop
-      - name: Multi-node Owner mesh E2E
-        working-directory: host
-        env:
-          ROUTELOOM_OWNER_PEER: ${{ github.workspace }}/build/tests/cpp/routeloom_joiner_interop_peer
-          ROUTELOOM_MESH_PEER: ${{ github.workspace }}/build/tests/cpp/routeloom_owner_mesh_peer
-          UBSAN_OPTIONS: halt_on_error=1
-        run: cargo test -p routeloom-host --bins site::owner_mesh_interop
+        run: cargo --version
+      - name: Live Owner E2E and multi-node Owner mesh E2E (a skip fails)
+        run: python3 tools/check.py interop
   fuzz:
     runs-on: ubuntu-latest
     # 11 targets x 60 s plus the build.
@@ -669,39 +168,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Build coverage-guided fuzzers (Clang + ASan/UBSan)
-        shell: bash
-        run: |
-          set -euo pipefail
-          export CC=clang CXX=clang++
-          cmake -S . -B build-fuzz -DROUTELOOM_BUILD_TESTS=ON \
-            -DROUTELOOM_BUILD_FUZZERS=ON -DROUTELOOM_ENABLE_SANITIZERS=ON \
-            -DCMAKE_BUILD_TYPE=Debug
-          cmake --build build-fuzz --parallel 2 \
-            --target fuzz_wire_frame fuzz_usb_codec fuzz_autonomy \
-                     fuzz_endpoint fuzz_host_ops fuzz_migration fuzz_cose fuzz_rlres1 fuzz_sdkv1 \
-                     fuzz_sdkv1_ead fuzz_sdkv1_join
       # Bounded CI-time fuzzing — NOT continuous fuzzing. Each target gets a
       # 60 s coverage-guided run over its seed corpus on top of the corpus
-      # regression replay that ctest already runs on every platform. This is
-      # a smoke that keeps the libFuzzer harnesses exercised and catches
-      # shallow crashes; long-running fuzzing belongs to dedicated
-      # infrastructure (e.g. OSS-Fuzz).
-      - name: Bounded fuzz run (60 s per target)
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p fuzz-artifacts
-          for target in wire_frame usb_codec autonomy endpoint host_ops migration cose rlres1 sdkv1 sdkv1_ead sdkv1_join; do
-            echo "=== fuzz_${target} ==="
-            # libFuzzer wants the corpus dir to exist; it also accumulates
-            # newly discovered coverage units here for artifact upload.
-            mkdir -p tests/fuzz/corpus/${target}
-            ./build-fuzz/tests/fuzz/fuzz_${target} \
-              tests/fuzz/corpus/${target} \
-              -max_total_time=60 -rss_limit_mb=2048 \
-              -artifact_prefix=fuzz-artifacts/ -print_final_stats=1
-          done
+      # regression replay that ctest already runs on every platform.
+      - name: Build fuzzers (Clang + ASan/UBSan) and run 60 s per target
+        run: python3 tools/check.py fuzz
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: failure()
         with:
