@@ -4,7 +4,8 @@ target_compile_options(routeloom_core_tests PRIVATE -Wall -Wextra -Wpedantic -We
 add_test(NAME routeloom_core_tests COMMAND routeloom_core_tests)
 
 add_executable(routeloom_flash_layout_tests test_espnow_flash_layout.cpp
-    ../../components/routeloom_espnow/src/espnow_flash_layout.cpp)
+    ../../components/routeloom_espnow/src/espnow_flash_layout.cpp
+    espnow_idf_stubs/idf_stubs.cpp)
 target_include_directories(routeloom_flash_layout_tests PRIVATE
     espnow_idf_stubs ../../components/routeloom_espnow/include
     ../../components/routeloom/include)
