@@ -269,10 +269,13 @@ def package_drift(root: Path, manifest: dict) -> list[str]:
     idf_images = re.findall(r"^\s*image:\s*espressif/idf:(\S+)\s*$", sdk_ci, re.M)
     if not idf_images or any(tag != tc["esp_idf_tag"] for tag in idf_images):
         problems.append(f".github/workflows/sdk.yml: ESP-IDF image differs from {tc['esp_idf_tag']}")
-    rust_pins = re.findall(r"rustup toolchain install (\S+)", sdk_ci)
-    if not rust_pins:
-        problems.append(".github/workflows/sdk.yml: rust toolchain pin is missing")
-    for pin in rust_pins:
+    toolchain = (root / "host/rust-toolchain.toml").read_text(encoding="utf-8")
+    channel = re.search(r'^channel\s*=\s*"([^"]+)"', toolchain, re.M)
+    if not channel:
+        problems.append("host/rust-toolchain.toml: rust toolchain pin is missing")
+    elif channel.group(1) != tc["rust"]:
+        problems.append(f"host/rust-toolchain.toml: rust {channel.group(1)} differs from {tc['rust']}")
+    for pin in re.findall(r"rustup toolchain install (\S+)", sdk_ci):
         if pin != tc["rust"]:
             problems.append(f".github/workflows/sdk.yml: rust {pin} differs from {tc['rust']}")
     return problems
