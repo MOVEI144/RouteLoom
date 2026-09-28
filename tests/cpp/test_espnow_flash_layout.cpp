@@ -12,7 +12,6 @@ namespace {
 
 std::array<esp_partition_t, 10> partitions{};
 std::size_t partition_count = 0;
-std::uint32_t flash_size = 0x400000;
 esp_ota_img_states_t ota_state = ESP_OTA_IMG_VALID;
 esp_err_t ota_state_error = ESP_OK;
 int mark_calls = 0;
@@ -43,13 +42,8 @@ void reset_partitions() {
 
 struct PartitionIterator { std::size_t index; };
 PartitionIterator iterator{};
-esp_flash_t flash_chip{};
+esp_flash_t flash_chip{0x400000};
 esp_flash_t* esp_flash_default_chip = &flash_chip;
-
-esp_err_t esp_flash_get_physical_size(esp_flash_t*, std::uint32_t* size) {
-  *size = flash_size;
-  return ESP_OK;
-}
 
 const char* esp_err_to_name(esp_err_t) { return "stub"; }
 
@@ -106,7 +100,7 @@ int main() {
   check(!routeloom::espnow::verify_flash_layout().ok(), "wrong subtype accepted");
 
   reset_partitions();
-  flash_size = 0x200000;
+  flash_chip.size = 0x200000;
   check(!routeloom::espnow::verify_flash_layout().ok(), "small flash accepted");
 
   ota_state = ESP_OTA_IMG_VALID;

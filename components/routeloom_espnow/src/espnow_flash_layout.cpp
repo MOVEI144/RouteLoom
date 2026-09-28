@@ -22,14 +22,15 @@ Status verify_flash_layout() noexcept {
   ESP_LOGI(kTag, "image: sdk=%s layout=%s storage_epoch=%lu",
            kImageInfo.sdk_version, kImageInfo.partition_id,
            static_cast<unsigned long>(kImageInfo.storage_epoch));
-  std::uint32_t physical = 0;
-  const esp_err_t size_error =
-      esp_flash_get_physical_size(esp_flash_default_chip, &physical);
-  if (size_error != ESP_OK || physical < kMinFlashBytes) {
+  // IDF startup already refuses to boot when the detected chip is smaller than
+  // the size in the image header, so the configured size is the physical
+  // guarantee here; reading it avoids linking the IRAM-resident chip probe.
+  const std::uint32_t configured =
+      esp_flash_default_chip != nullptr ? esp_flash_default_chip->size : 0;
+  if (configured < kMinFlashBytes) {
     ESP_LOGE(kTag,
-             "flash size %lu B (%s) is below the %lu B %s needs; RF not "
-             "started",
-             static_cast<unsigned long>(physical), esp_err_to_name(size_error),
+             "flash size %lu B is below the %lu B %s needs; RF not started",
+             static_cast<unsigned long>(configured),
              static_cast<unsigned long>(kMinFlashBytes), kPartitionLayoutId);
     return Status::error(StatusCode::StorageFailure, "flash smaller than PT-4M-v2");
   }
