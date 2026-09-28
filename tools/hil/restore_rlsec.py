@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import flash  # noqa: E402
 import rig  # noqa: E402
-from reprovision_reset import RLSEC_OFFSET, RLSEC_SIZES  # noqa: E402
+from reprovision_reset import RLSEC_OFFSET, RLSEC_SIZES, rlsec_row_matches  # noqa: E402
 
 
 def main() -> int:
@@ -30,7 +30,7 @@ def main() -> int:
     expected_size = RLSEC_SIZES[board.app]
     table = (pathlib.Path(__file__).resolve().parents[2] /
              f"firmware/{board.app}/partitions.csv").read_text()
-    if f"rlsec,    data, nvs,     {RLSEC_OFFSET}, {expected_size}" not in table:
+    if not rlsec_row_matches(table, expected_size):
         p.error("rlsec partition map changed")
     manifest = json.loads(pathlib.Path(args.manifest).read_text())
     if (manifest.get("board") != board.name or
