@@ -159,7 +159,16 @@ jobs:
         working-directory: host
         run: cargo --version
       - name: Live Owner E2E and multi-node Owner mesh E2E (a skip fails)
+        env:
+          ROUTELOOM_E2E_OUT: ${{ github.workspace }}/e2e-out
         run: python3 tools/check.py interop
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: e2e-report
+          path: e2e-out/
+          if-no-files-found: ignore
+          retention-days: 30
   fuzz:
     runs-on: ubuntu-latest
     # 11 targets x 60 s plus the build.
