@@ -817,6 +817,10 @@ struct State {
     /// `routeloom-config-authority-key-v1` document the lane loads when
     /// the COSE profile is selected. Required iff profile is COSE.
     config_authority_key: Option<PathBuf>,
+    /// With `--site-authority` the SAK (`DIR/sak.key`) signs COSE permits
+    /// under kid = site_id, so Member devices verify them against their
+    /// adopted SiteCert (V2-08).
+    config_site_key: Option<PathBuf>,
     /// This daemon run's incarnation id, minted at startup — bound into
     /// every HOST_REGISTER so a restarted daemon is provably a different
     /// host boot to the device (05 §5.6).
@@ -2819,6 +2823,16 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
     if config_profile != config::ISSUE_PROFILE_COSE && config_authority_key.is_some() {
         return Err("--config-authority-key requires --config-profile=cose".to_string());
     }
+    // A Site Authority is its own config authority: a second issuer
+    // identity next to it would sign permits no Member verifies.
+    if site_authority.is_some()
+        && (config_authority.is_some() || config_profile == config::ISSUE_PROFILE_COSE)
+    {
+        return Err(
+            "--site-authority issues config with the SAK; drop --config-authority/--config-profile"
+                .to_string(),
+        );
+    }
     Ok(DaemonArgs {
         socket,
         device,
@@ -2963,7 +2977,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // rewind-proof deadline axis, so it should measure daemon uptime rather
     // than time-since-first-admitted-operation.
     let _ = mono_ms();
-    let args = parse_args().map_err(io::Error::other)?;
+    let mut args = parse_args().map_err(io::Error::other)?;
     // Refuse an unreadable/misconfigured credential before opening any USB
     // session; never fall back to the public legacy secret on file errors.
     let usb_dev_secret = match &args.usb_dev_secret_file {
@@ -3039,6 +3053,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(dir) => {
             let authority = site::config::open_dir(dir, now_ms())
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            args.config_authority = Some(authority.site_id());
+            args.config_authority_generation = config::SITE_CONFIG_AUTHORITY_GENERATION;
+            args.config_profile = config::ISSUE_PROFILE_COSE;
             if !bench_profile_allowed(args.admission_profile, Some(authority.purpose())) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -3105,6 +3122,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_dev_key: args.config_dev_key,
         config_profile: args.config_profile,
         config_authority_key: args.config_authority_key.clone(),
+        config_site_key: args
+            .site_authority
+            .as_ref()
+            .map(|dir| dir.join(site::config::SAK_FILE)),
         rate_limiter: Mutex::new(send_store::AdmissionLimiter::with_profile(
             args.admission_profile,
             now_ms(),
@@ -3129,7 +3150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     // Fail fast on an unloadable COSE key: the lane would otherwise refuse
     // every issuance at runtime with the cause buried in a dispatch log.
-    if args.config_profile == config::ISSUE_PROFILE_COSE {
+    if args.config_profile == config::ISSUE_PROFILE_COSE && args.site_authority.is_none() {
         let path = args.config_authority_key.as_ref().expect("arg-validated");
         match routeloom_provision::signer::FileAuthoritySigner::load(path) {
             Ok(signer) => {
@@ -5141,6 +5162,9 @@ mod tests {
         assert!(args(&["--config-profile", "psk"]).is_err());
         assert!(args(&["--config-profile", "cose"]).is_err());
         assert!(args(&["--config-authority-key", "/tmp/a.key"]).is_err());
+        // A Site Authority is the only config issuer next to it.
+        assert!(args(&["--site-authority", "/tmp/s"]).is_ok());
+        assert!(args(&["--site-authority", "/tmp/s", "--config-authority", "42"]).is_err());
     }
 
     /// node_status_v1 wiring: the lane queues a sealed 0x40 query on the

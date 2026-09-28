@@ -72,6 +72,9 @@ pub const CONFIG_DEV_RECOVERY_OBJECT_MAX: usize =
 // raw low-S R || S. Payloads above the permit ceiling never occur —
 // RCC1 ≤ 688 B, RCR2 ≤ 624 B — so the shared 774 B device cap holds.
 pub const CONFIG_COSE_OBJECT_MAX: usize = 774;
+/// A Site Authority's permits: kid = site_id under this one generation
+/// (mirror of site_signed.hpp kSiteConfigAuthorityGeneration).
+pub const SITE_CONFIG_AUTHORITY_GENERATION: u32 = 1;
 /// Minimum dev-permit envelope (aad || shortest RCC1 header || tag). Only the
 /// host-side self-check verifier consults it — the production path signs, and
 /// the device is the verifier — so it is test-only like `dev_permit_verify`.
@@ -4606,6 +4609,78 @@ mod tests {
                 case.name
             );
         }
+    }
+
+    #[test]
+    fn site_signed_permit_golden() {
+        // A Site Authority's permit (V2-08): the lane's COSE issuer holding
+        // the SAK under kid = site_id, bound to the mesh low network word.
+        // The C++ journal bound to the adopted SiteCert verifies these bytes
+        // (test_config.cpp). Refresh with ROUTELOOM_WRITE_GOLDEN=1.
+        use crate::site::testkit;
+        use routeloom_provision::signer::RootSigner;
+        const TARGET: u64 = 0x1234;
+        let mut issuer = ConfigIssuer::new(
+            Vec::new(),
+            u64::from(testkit::NETWORK_LOW),
+            testkit::SITE,
+            100,
+        );
+        issuer.set_profile(ISSUE_PROFILE_COSE);
+        issuer.set_cose_signer(testkit::sak().config_authority_signer().unwrap());
+        assert!(issuer.ready());
+        let base = config_tlv_encode(&[field(1, ConfigFieldType::U8, &[1])]).unwrap();
+        issuer
+            .note_challenge(&challenge(1, 1, &base, 4), TARGET, 1_000)
+            .unwrap();
+        let ProposeOutcome::Draft(draft) = issuer
+            .prepare_propose(
+                TARGET,
+                1,
+                1,
+                &base,
+                &[field(1, ConfigFieldType::U8, &[2])],
+                0,
+                1_100,
+                SITE_CONFIG_AUTHORITY_GENERATION,
+                9,
+                [0x57; 16],
+            )
+            .unwrap()
+        else {
+            panic!("golden must draft");
+        };
+        let issued = issuer.sign_permit(&draft, 9).unwrap();
+        let parts = manifest_parse(&issued.object).unwrap();
+        assert_eq!(parts.root_id, testkit::SITE);
+        let aad = config_permit_aad(u64::from(testkit::NETWORK_LOW), TARGET, 1).unwrap();
+        let signed = cose_sig_structure(parts.protected_bytes, &aad, parts.payload).unwrap();
+        let signature: [u8; 64] = parts.signature.try_into().unwrap();
+        assert!(ecdsa_p256_verify(
+            &testkit::sak().pubkey(),
+            &sha256(&signed),
+            &signature
+        ));
+        let rendered = format!(
+            "{{\n  \"name\":\"site_permit\",\n  \"network\":{},\n  \"site_id\":{},\n  \"target\":{TARGET},\
+             \n  \"canonical_hex\":\"{}\",\n  \"object_hex\":\"{}\"\n}}\n",
+            testkit::NETWORK_LOW,
+            testkit::SITE,
+            hex_lower(&issued.canonical),
+            hex_lower(&issued.object),
+        );
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../protocol/site-signed-golden/site_permit.json");
+        if std::env::var("ROUTELOOM_WRITE_GOLDEN").as_deref() == Ok("1") {
+            std::fs::write(&path, &rendered).unwrap();
+            return;
+        }
+        let checked_in = std::fs::read_to_string(&path).expect("golden checked in");
+        assert_eq!(
+            rendered,
+            checked_in.replace("\r\n", "\n"),
+            "site_permit drifted"
+        );
     }
 
     /// Structural + cryptographic assertions for one COSE envelope: the

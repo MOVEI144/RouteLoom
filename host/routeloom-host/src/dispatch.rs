@@ -2750,7 +2750,14 @@ fn config_lane_for(state: &State) -> ConfigLane {
         CONFIG_SAFETY_MARGIN_MS,
     );
     issuer.set_profile(state.config_profile);
-    if state.config_profile == ISSUE_PROFILE_COSE {
+    if let Some(path) = state.config_site_key.as_ref() {
+        match routeloom_provision::signer::FileRootSigner::load(path)
+            .and_then(|sak| sak.config_authority_signer())
+        {
+            Ok(signer) if signer.authority_id() == authority => issuer.set_cose_signer(signer),
+            _ => eprintln!("site key unloadable; COSE issuance refuses"),
+        }
+    } else if state.config_profile == ISSUE_PROFILE_COSE {
         match state
             .config_authority_key
             .as_ref()
@@ -2802,6 +2809,28 @@ pub fn dispatch_loop(state: Arc<State>, outbound: mpsc::SyncSender<Outbound>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn site_key_makes_the_config_lane_sign_as_the_site() {
+        // --site-authority (V2-08): the lane loads DIR/sak.key and issues
+        // COSE permits under kid = site_id; any other authority stays keyless.
+        use crate::site::testkit;
+        let dir = std::env::temp_dir().join(format!("rl-site-lane-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sak.key");
+        testkit::sak().save(&path).unwrap();
+        let mut state = State {
+            config_authority: Some(testkit::SITE),
+            config_profile: ISSUE_PROFILE_COSE,
+            config_site_key: Some(path),
+            ..State::default()
+        };
+        assert!(config_lane_for(&state).issuer_ready());
+        state.config_authority = Some(testkit::SITE + 1);
+        assert!(!config_lane_for(&state).issuer_ready());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
     use crate::canonical::{self, SendRequest};
     use crate::send_store::{CancelOutcome, MemoryOperationStore, SubmitOutcome};
     use crate::sqlite_store::SqliteOperationStore;
