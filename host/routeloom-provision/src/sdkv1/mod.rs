@@ -25,6 +25,8 @@
 //! - [`rlsec`] — the manufactured `rlsec` NVS set (`rlident` twin pair) and
 //!   its `nvs_partition_gen` CSV.
 //!
+//! - [`channel_plan`] — the SAK-signed manual channel plan (V2-08).
+//!
 //! Site tooling (P7-2, 07 §6):
 //! - [`siteca`] — `SiteCaSigner` custody seam, dev `FileSiteCaSigner`, and
 //!   SiteCert issue (HQ, when the site PC is set up) and verification.
@@ -33,6 +35,7 @@
 //! byte formats, not the power-cut state machine.
 
 pub mod cert;
+pub mod channel_plan;
 pub mod devca;
 pub mod identity;
 pub mod lifecycle;
