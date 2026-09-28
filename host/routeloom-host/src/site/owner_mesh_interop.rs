@@ -967,6 +967,11 @@ struct MeshSnap {
     admissions_rejected: u32,
     member_starts: u32,
     link_request_failures: u32,
+    owner_polls: u32,
+    owner_empty_polls: u32,
+    rx_queue_max: u32,
+    expiry_slots_scanned: u64,
+    hop_accept_expired: u64,
 }
 
 #[allow(dead_code)]
@@ -1122,6 +1127,11 @@ fn parse_mesh_snap(payload: &[u8]) -> MeshSnap {
     snap.admissions_rejected = get_u32(payload, &mut pos);
     snap.member_starts = get_u32(payload, &mut pos);
     snap.link_request_failures = get_u32(payload, &mut pos);
+    snap.owner_polls = get_u32(payload, &mut pos);
+    snap.owner_empty_polls = get_u32(payload, &mut pos);
+    snap.rx_queue_max = get_u32(payload, &mut pos);
+    snap.expiry_slots_scanned = get_u64(payload, &mut pos);
+    snap.hop_accept_expired = get_u64(payload, &mut pos);
     assert_eq!(pos, payload.len(), "G fully consumed");
     snap
 }
@@ -2615,6 +2625,7 @@ fn mesh_route_loss_retry_has_one_terminal_delivery() {
     world.switch.drop_wire_kind(2, 1, WIRE_HOP_ACCEPT, 1);
     world.switch.drop_wire_kind(2, 1, WIRE_END_RECEIPT, 1);
     let before = world.snaps[0].rx_count;
+    let expired_before = world.snaps[1].hop_accept_expired;
     world.peers[1].app_send(testkit::GATEWAY, b"retry-once");
     world.pump_until(3000, |snaps| {
         snaps[0].rx_count > before
@@ -2639,6 +2650,10 @@ fn mesh_route_loss_retry_has_one_terminal_delivery() {
     );
     assert_eq!(world.snaps[2].transit_conflicts, 0);
     assert_eq!(world.snaps[2].receipt_conflicts, 0);
+    assert!(
+        world.snaps[1].hop_accept_expired > expired_before,
+        "the dropped HOP_ACCEPT expired the wait"
+    );
 }
 
 /// A stale binding remains the identity for authenticated Probe/Result
@@ -3211,6 +3226,16 @@ fn mesh_direct_converges_and_delivers() {
         "direct radio drops nothing: {}",
         world.switch.dropped
     );
+    // The Owner counters reach the observer.
+    for (index, snap) in world.snaps.iter().enumerate() {
+        assert!(
+            snap.owner_polls > snap.owner_empty_polls
+                && snap.owner_empty_polls > 0
+                && snap.rx_queue_max > 0
+                && snap.expiry_slots_scanned > 0,
+            "peer {index} owner counters: {snap:?}"
+        );
+    }
     assert_eq!(
         world.usb_host.auth_sessions.len(),
         1,
