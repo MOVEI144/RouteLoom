@@ -4,6 +4,7 @@
 #include <string>
 
 #include "nvs.h"
+#include "routeloom/espnow_board_config.hpp"
 #include "routeloom/nvs_sdkv1_store.hpp"
 
 static_assert(sizeof(routeloom::espnow::NvsBlobNamespace) <= 128,
@@ -17,6 +18,7 @@ namespace {
 enum class FailOp { kNone, kOpen, kSize, kRead, kWrite, kErase, kCommit };
 FailOp fail_op = FailOp::kNone;
 esp_err_t fail_code = ESP_OK;
+std::string fail_namespace;
 std::string stored;
 bool stored_live = false;
 char last_log[128]{};
@@ -42,12 +44,15 @@ esp_err_t nvs_open(const char*, int, nvs_handle_t* handle) {
   *handle = 1;
   return ESP_OK;
 }
-esp_err_t nvs_open_from_partition(const char*, const char*, int, nvs_handle_t* handle) {
+esp_err_t nvs_open_from_partition(const char*, const char* name_space, int,
+                                  nvs_handle_t* handle) {
   esp_err_t code = ESP_OK;
-  if (ShouldFail(FailOp::kOpen, &code)) return code;
+  if ((fail_namespace.empty() || fail_namespace == name_space) &&
+      ShouldFail(FailOp::kOpen, &code)) return code;
   *handle = 1;
   return ESP_OK;
 }
+esp_err_t nvs_flash_init_partition(const char*) { return ESP_OK; }
 esp_err_t nvs_get_blob(nvs_handle_t, const char*, void* out, std::size_t* length) {
   esp_err_t code = ESP_OK;
   if (out == nullptr) {
@@ -90,6 +95,7 @@ namespace {
 void Reset() {
   fail_op = FailOp::kNone;
   fail_code = ESP_OK;
+  fail_namespace.clear();
   stored.clear();
   stored_live = false;
   last_log[0] = '\0';
@@ -250,6 +256,26 @@ int CheckOpenFailureAttributed() {
   return 0;
 }
 
+int CheckMissingBoardNamespaces() {
+  for (const char* name_space : {"board", "keys"}) {
+    Reset();
+    fail_op = FailOp::kOpen;
+    fail_code = ESP_ERR_NVS_NOT_FOUND;
+    fail_namespace = name_space;
+    routeloom::espnow::BoardStores board;
+    const auto missing = board.open(false);
+    CHECK(missing.code == routeloom::StatusCode::NotFound);
+    CHECK(std::strcmp(missing.detail, "board configuration required") == 0);
+  }
+  Reset();
+  fail_op = FailOp::kOpen;
+  fail_code = ESP_ERR_INVALID_ARG;
+  fail_namespace = "keys";
+  routeloom::espnow::BoardStores broken;
+  CHECK(broken.open(false).code == routeloom::StatusCode::StorageFailure);
+  return 0;
+}
+
 int CheckLastErrorKeepsItsNamespace() {
   Reset();
   routeloom::espnow::NvsBlobNamespace store;
@@ -275,6 +301,7 @@ int main() {
   if (CheckEraseFailuresAndAbsence() != 0) return 1;
   if (CheckLastErrorSticky() != 0) return 1;
   if (CheckOpenFailureAttributed() != 0) return 1;
+  if (CheckMissingBoardNamespaces() != 0) return 1;
   if (CheckLastErrorKeepsItsNamespace() != 0) return 1;
   std::puts("PASS test_nvs_sdkv1_store");
   return 0;

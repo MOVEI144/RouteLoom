@@ -538,11 +538,13 @@ add_test(NAME routeloom_nvs_legacy_purge_tests COMMAND routeloom_nvs_legacy_purg
 
 add_executable(routeloom_nvs_sdkv1_store_tests
     test_nvs_sdkv1_store.cpp
-    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_sdkv1_store.cpp)
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_sdkv1_store.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_board_config.cpp)
 target_link_libraries(routeloom_nvs_sdkv1_store_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_nvs_sdkv1_store_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/esp_idf_stub)
+    ${CMAKE_CURRENT_SOURCE_DIR}/esp_idf_stub
+    ${CMAKE_CURRENT_SOURCE_DIR}/espnow_idf_stubs)
 target_compile_options(routeloom_nvs_sdkv1_store_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_nvs_sdkv1_store_tests COMMAND routeloom_nvs_sdkv1_store_tests)
 

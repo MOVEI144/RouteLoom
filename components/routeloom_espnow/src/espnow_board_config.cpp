@@ -26,9 +26,7 @@ Status BoardStores::open(const bool writable) noexcept {
   Status status = config_ns_.open(sdkv1::kBoardConfigPartition,
                                 sdkv1::kBoardConfigNamespace, mode);
   if (!status) {
-    // The setup console creates both namespaces together; an erased
-    // board has neither.
-    return config_ns_.last_error().native == ESP_ERR_NVS_NOT_FOUND
+    return !writable && config_ns_.last_error().native == ESP_ERR_NVS_NOT_FOUND
                ? Status::error(StatusCode::NotFound, "board configuration required")
                : status;
   }
@@ -36,8 +34,12 @@ Status BoardStores::open(const bool writable) noexcept {
   if (error != ESP_OK) {
     return Status::error(StatusCode::StorageFailure, "rlkeys partition init failed");
   }
-  return secrets_ns_.open(sdkv1::kBoardSecretsPartition,
-                          sdkv1::kBoardSecretsNamespace, mode);
+  status = secrets_ns_.open(sdkv1::kBoardSecretsPartition,
+                            sdkv1::kBoardSecretsNamespace, mode);
+  if (!status && !writable && secrets_ns_.last_error().native == ESP_ERR_NVS_NOT_FOUND) {
+    return Status::error(StatusCode::NotFound, "board configuration required");
+  }
+  return status;
 }
 
 Status BoardStores::initialize() noexcept {

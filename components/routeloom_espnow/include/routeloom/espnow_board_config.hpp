@@ -26,7 +26,7 @@ class BoardStores {
   // `writable=false` is the field-boot mode: the namespaces open
   // NVS_READONLY — nothing is created and the driver refuses writes, so
   // read-only is enforced by NVS itself, not just by convention. A
-  // missing `board` namespace (erased board) is NotFound with the gate's
+  // missing `board` or `keys` namespace is NotFound with the gate's
   // "board configuration required" detail.
   Status open(bool writable) noexcept;
   // Re-reads both slot pairs; faults leave the stores impaired, which the
