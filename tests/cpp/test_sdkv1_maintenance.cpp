@@ -12,6 +12,9 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#if defined(__unix__)
+#include <pthread.h>
+#endif
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -383,6 +386,62 @@ void identity_ok() {
   CHECK(run(console, "identity " + hex_encode(minimal_bundle(office, 0x01))) ==
         "ERR already_provisioned");
 }
+
+#if defined(__unix__)
+struct BoundedStatusRun {
+  MaintenanceConsole* console{nullptr};
+  const char* lock_line{nullptr};
+  std::size_t lock_size{0};
+  bool ok{false};
+};
+
+void* run_bounded_status(void* raw) {
+  auto& run = *static_cast<BoundedStatusRun*>(raw);
+  char response[kMaintenanceResponseMax]{};
+  std::size_t size = 0;
+  const auto send = [&](const char* line, const std::size_t length, const char* prefix) {
+    const Status status = run.console->process_line(
+        ByteView{reinterpret_cast<const std::uint8_t*>(line), length},
+        response, sizeof(response), size);
+    return status.ok() && size >= std::strlen(prefix) &&
+           std::memcmp(response, prefix, std::strlen(prefix)) == 0;
+  };
+  run.ok = send("status", 6, "OK identity=sealed pending=0 locked=0") &&
+           send(run.lock_line, run.lock_size, "OK locked kid=") &&
+           send("status", 6, "OK identity=sealed pending=0 locked=1");
+  return nullptr;
+}
+
+void sealed_status_with_bounded_host_stack() {
+  current = "sealed_status_with_bounded_host_stack";
+  const Office office = load_office();
+  FaultyRecordStorage storage(kIdentitySlotBytes);
+  IdentityStore store(storage);
+  FakeEntropy entropy;
+  MaintenanceConsole console(store, entropy);
+  CHECK(run(console, std::string("keygen 00a1000000001234 ") + kChallenge64)
+            .rfind("OK pop_hex=", 0) == 0);
+  const std::string strict = bundle_json("00a1000000001234", 0x02, office.kid_hex,
+                                         office.device_pubkey_hex, office.strict_anchors,
+                                         office.devcert_hex);
+  CHECK(run(console, "identity " + hex_encode(strict)) == "OK sealed kid=" + office.kid_hex);
+  const std::string lock = "lock " + office.kid_hex;
+  BoundedStatusRun bounded{&console, lock.c_str(), lock.size(), false};
+  pthread_attr_t attr{};
+  CHECK(pthread_attr_init(&attr) == 0);
+  // Host ABI and sanitizer frames differ from ESP32; this bounds the real
+  // sealed readback path while the device high-water log checks its 16 KiB task.
+  CHECK(pthread_attr_setstacksize(&attr, 32 * 1024) == 0);
+  pthread_t thread{};
+  const int started = pthread_create(&thread, &attr, run_bounded_status, &bounded);
+  CHECK(pthread_attr_destroy(&attr) == 0);
+  CHECK(started == 0);
+  if (started == 0) {
+    CHECK(pthread_join(thread, nullptr) == 0);
+    CHECK(bounded.ok);
+  }
+}
+#endif
 
 void identity_reads_back_identical() {
   current = "identity_reads_back_identical";
@@ -1111,6 +1170,9 @@ int main() {
   keygen_entropy_not_ready();
   keygen_rejects_bad_input();
   identity_ok();
+#if defined(__unix__)
+  sealed_status_with_bounded_host_stack();
+#endif
   identity_reads_back_identical();
   identity_requires_pending_key();
   identity_checks_node_and_key();

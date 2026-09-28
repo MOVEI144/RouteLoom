@@ -29,7 +29,7 @@ namespace {
 constexpr char kTag[] = "RouteLoomSdkv1";
 // Worst verb path (deprovision_confirm -> lifecycle re-read -> NVS read)
 // needs ~12.7 KiB on C6 and ~12 KiB on C3 by the -fstack-usage call graph;
-// 8 KiB overflowed on C6 once a sealed identity was re-read (HIL H0 F1).
+// 8 KiB overflows on C6 once a sealed identity is re-read.
 // The maintenance boot never starts RF, so the heap covers 16 KiB.
 constexpr std::uint32_t kConsoleTaskStack = 16384;
 static_assert(sdkv1::kMaintenanceLineMax >= sdkv1::kBoardSetupLineMax);
@@ -323,7 +323,7 @@ void console_task(void* arg) {
         continue;  // caller-side bug only; the line is dropped, console stays
       }
     }
-    // Bench evidence for the stack budget; readers skip non OK/ERR lines.
+    // Expose the minimum free stack after each verb for the task budget.
     ESP_LOGI(kTag, "console stack free=%u",
              static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
     usb_serial_jtag_write_bytes(response, response_size, portMAX_DELAY);

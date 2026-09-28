@@ -708,7 +708,7 @@ add_test(NAME routeloom_sdkv1_revocation_tests COMMAND routeloom_sdkv1_revocatio
 # identity-bundle sealing with readback, lock/store gating — against real
 # office bytes from protocol/sdkv1-golden/.
 add_executable(routeloom_sdkv1_maintenance_tests test_sdkv1_maintenance.cpp)
-target_link_libraries(routeloom_sdkv1_maintenance_tests PRIVATE routeloom_core)
+target_link_libraries(routeloom_sdkv1_maintenance_tests PRIVATE routeloom_core Threads::Threads)
 target_include_directories(routeloom_sdkv1_maintenance_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
 target_compile_options(routeloom_sdkv1_maintenance_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
