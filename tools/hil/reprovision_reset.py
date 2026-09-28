@@ -18,8 +18,16 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import flash  # noqa: E402
 import rig  # noqa: E402
 
-RLSEC_OFFSET = "0x190000"
-RLSEC_SIZES = {"reference_node": "0x10000", "bridge_node": "0x20000"}
+# PT-4M-v2: every role has a 128 KiB rlsec at 0x20000.
+RLSEC_OFFSET = "0x20000"
+RLSEC_SIZES = {"reference_node": "0x20000", "bridge_node": "0x20000"}
+
+
+def rlsec_row_matches(table: str, size: str) -> bool:
+    """True when partitions.csv still has rlsec at RLSEC_OFFSET with size."""
+    rows = [[field.strip().lower() for field in line.split("#", 1)[0].split(",")]
+            for line in table.splitlines()]
+    return ["rlsec", "data", "nvs", RLSEC_OFFSET, size] in rows
 
 
 def private_backup_path(raw_path: str) -> pathlib.Path:
@@ -50,7 +58,7 @@ def main() -> int:
     rlsec_size = RLSEC_SIZES[board.app]
     repo = pathlib.Path(__file__).resolve().parents[2]
     table = (repo / f"firmware/{board.app}/partitions.csv").read_text()
-    if f"rlsec,    data, nvs,     {RLSEC_OFFSET}, {rlsec_size}" not in table:
+    if not rlsec_row_matches(table, rlsec_size):
         raise RuntimeError("rlsec partition map changed; refusing erase")
     backup = private_backup_path(args.backup)
     out = pathlib.Path(args.out)
@@ -58,6 +66,9 @@ def main() -> int:
     port, _, state = rig.resolve_board_port(board)
     if state != "ONLINE" or port is None:
         raise RuntimeError(f"board port unavailable: {state}")
+    flash.preflight_board(board, port, args.esptool, str(out))
+    flash.verify_device_partition_table(args.esptool, board.chip, port,
+                                        board.build_dir(str(repo)))
     identity = flash.preflight_board(board, port, args.esptool, str(out))
     read = [args.esptool, "--chip", board.chip, "--port", port,
             "read-flash", RLSEC_OFFSET, rlsec_size, str(backup)]

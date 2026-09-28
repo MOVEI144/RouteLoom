@@ -28,8 +28,8 @@ class RepositoryBudget(unittest.TestCase):
         apps = {app["app"]: app for app in nvs_budget.run(SOURCES)["apps"]}
         node = apps["firmware/reference_node"]
         gateway = apps["firmware/bridge_node"]
-        # 05 §5.2: 64 KiB -> 15 x 126 usable entries, 128 KiB -> 31 x 126.
-        self.assertEqual((node["partition_bytes"], node["usable_entries"]), (0x10000, 1890))
+        # PT-4M-v2: 128 KiB rlsec for every role -> 31 x 126 usable entries.
+        self.assertEqual((node["partition_bytes"], node["usable_entries"]), (0x20000, 3906))
         self.assertEqual((gateway["partition_bytes"], gateway["usable_entries"]), (0x20000, 3906))
         self.assertEqual(node["max_persisted_peers"], 64)
         self.assertEqual(gateway["max_persisted_peers"], 128)
@@ -67,31 +67,51 @@ class NegativeMutations(unittest.TestCase):
 
     def test_cap_over_budget_fails(self):
         sources = self.mutate("provider", "kNodeMaxPersistedPeers = 64",
-                              "kNodeMaxPersistedPeers = 90")
+                              "kNodeMaxPersistedPeers = 200")
         self.assertIn("firmware/reference_node:worst_case_within_budget",
                       failed_names(sources))
 
     def test_small_partition_fails(self):
         sources = self.mutate("firmware/bridge_node/partitions.csv",
-                              "0x190000, 0x20000", "0x190000, 0x10000")
+                              "0x20000,  0x20000", "0x20000,  0x4000")
         failed = failed_names(sources)
         self.assertIn("firmware/bridge_node:worst_case_within_budget", failed)
         self.assertIn("firmware/bridge_node:cap_not_clamped", failed)
+        self.assertIn("firmware/bridge_node:layout_matches_boot_check", failed)
 
     def test_missing_security_partition_fails(self):
         sources = self.mutate("firmware/reference_node/partitions.csv",
                               "rlsec,", "rlsex,")
         self.assertIn("firmware/reference_node:security_nvs_present", failed_names(sources))
 
-    def test_table_beyond_flash_fails(self):
-        sources = self.mutate("examples/espnow_node/partitions.csv",
-                              "0x190000, 0x10000", "0x1F8000, 0x10000")
+    def test_two_mb_flash_setting_fails(self):
+        sources = self.mutate("examples/espnow_node/sdkconfig.defaults",
+                              "CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y",
+                              "CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y")
         self.assertIn("examples/espnow_node:fits_flash", failed_names(sources))
+
+    def test_eight_mb_flash_setting_fails(self):
+        sources = self.mutate("examples/espnow_node/sdkconfig.defaults",
+                              "CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y",
+                              "CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y")
+        self.assertIn("examples/espnow_node:flash_size_4mb", failed_names(sources))
 
     def test_overlap_fails(self):
         sources = self.mutate("firmware/reference_node/partitions.csv",
-                              "0x190000, 0x10000", "0x180000, 0x10000")
+                              "0x20000,  0x20000", "0x30000,  0x20000")
         self.assertIn("firmware/reference_node:no_overlap", failed_names(sources))
+
+    def test_rollback_disabled_fails(self):
+        sources = self.mutate("firmware/bench_node/sdkconfig.defaults",
+                              "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y", "")
+        self.assertIn("firmware/bench_node:rollback_enabled", failed_names(sources))
+
+    def test_boot_check_table_drift_fails(self):
+        sources = self.mutate("flash_layout", '{"coredump", 1, 3, 0x3E0000, 0x10000}',
+                              '{"coredump", 1, 3, 0x3F0000, 0x10000}')
+        failed = failed_names(sources)
+        for app in nvs_budget.APPS:
+            self.assertIn(f"{app}:layout_matches_boot_check", failed)
 
     def test_default_table_fails(self):
         sources = self.mutate("firmware/bridge_node/sdkconfig.defaults",
@@ -105,10 +125,16 @@ class NegativeMutations(unittest.TestCase):
                               "static_assert(sizeof(ReplayWindowRecord) == 72")
         self.assertIn("entries_per_peer_matches_codecs", failed_names(sources))
 
-    def test_shrunk_factory_fails(self):
+    def test_factory_app_fails(self):
         sources = self.mutate("firmware/reference_node/partitions.csv",
-                              "0x10000,  0x180000", "0x10000,  0x100000")
-        self.assertIn("firmware/reference_node:factory_not_shrunk", failed_names(sources))
+                              "ota_0,    app,  ota_0,", "ota_0,    app,  factory,")
+        self.assertIn("firmware/reference_node:ota_slots", failed_names(sources))
+
+    def test_partition_subtype_drift_fails(self):
+        sources = self.mutate("firmware/reference_node/partitions.csv",
+                              "coredump, data, coredump,", "coredump, data, nvs,")
+        self.assertIn("firmware/reference_node:layout_matches_boot_check",
+                      failed_names(sources))
 
 
 if __name__ == "__main__":

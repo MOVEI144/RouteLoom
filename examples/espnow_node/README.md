@@ -87,8 +87,8 @@ the flat profile and the SDK's 5 s / 15 s route timers.
 
 ## Partition table and NVS
 
-`partitions.csv` (selected in `sdkconfig.defaults`) adds a 64 KiB `rlsec`
-NVS partition next to the default `nvs`. Under the legacy profile the
+`partitions.csv` (selected in `sdkconfig.defaults`) uses PT-4M-v2 with a
+128 KiB `rlsec` NVS partition and two OTA app slots. Under the legacy profile the
 per-peer counter/replay state (`rlcounter`/`rlreplay`) lives there, so it
 can never fill the partition that holds the boot session (issue #37); the
 default DevRam profile keeps all session state in RAM instead. Old TX
@@ -101,12 +101,12 @@ own.
 
 ## Honest limits
 
-- Validated targets: `esp32c3`, `esp32s3`, `esp32c5` — matching CI. Other
-  ESP-NOW-capable chips are not validated and `routeloom_espnow`'s manifest
-  `targets` list excludes them.
+- Required CI build targets: `esp32c3`, `esp32s3`, `esp32c5`. The
+  `routeloom_espnow` manifest also admits `esp32c6`; CI builds it in the
+  separate `c6-experimental` job. None of these builds qualifies RF behavior.
 - Only ESP-IDF v6.0.3 is CI-validated; manifests require `idf >= 6.0`.
 - No version is published to the ESP-IDF component registry. `version:
-  0.1.0` in the manifests is the pre-release tag used for git `path`
-  dependency solving, not a registry artifact.
+  2.0.0-dev` in the manifests (from `protocol/manifest.json`) is the
+  pre-release identifier used for git `path` dependency solving.
 - A successful build proves compile/link only — no RF, range, or battery
   claim (see `docs/STATUS.md`).

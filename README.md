@@ -3,7 +3,7 @@
 **Adaptive mesh networking SDK for embedded devices.**  
 機器の参加、経路修復、配送、省電力、無線調整をアプリケーションから分離する組み込み向け通信SDK。
 
-> **現在は仕様策定段階です。** このリポジトリの文書は実装契約と受入条件を定義します。動作するファームウェア、公開済みC ABI、RF性能や電池寿命の保証を示すものではありません。
+> **SDK 2.0.0-dev（pre-release）です。** portable C++ core・C ABI・ESP-IDF firmware・Rust host は実装済みで、host試験とfirmware buildをCIで継続確認しています。実機試験は進行中で、RF性能・電池寿命・本番security profileはまだ認定していません。最初の正式版はv2.0.0です（[v2の位置付け](docs/STATUS.md)）。
 
 ## 設計の入口
 
@@ -16,20 +16,21 @@
 - [Seeed Studio対応ボード資料](docs/hardware/README.md)
 - [実装状況・リリース条件](docs/STATUS.md)
 
-## 初期対象
+## 対象
 
-ESP32-C3 / ESP32-S3 / ESP32-C5、2.4 GHz ESP-NOW、Wi-Fi LR 250/500 kbps。最初の実装基準は固定channel／LR250です。LR500適応、管理HA、自動channel移行等は設計を維持し、別の機能認定を経て有効化します。LoRaは将来拡張であり、現時点の送受信実装には含めません。
+ESP32-C3 / ESP32-C6 / ESP32-S3 / ESP32-C5、2.4 GHz ESP-NOW、Wi-Fi LR 250/500 kbps。C3・C6・S3は実機の回に合格したものを認定とし、C5は実機確認待ちとして出します。最初の実装基準は固定channel／LR250です。LR500適応、管理HA、自動channel移行等は設計を維持し、別の機能認定を経て有効化します。LoRaは将来拡張であり、現時点の送受信実装には含めません。
 
-組み込み側はESP-IDF / C++とC API、PC側はRustサービスとCLI/TUIを設計対象にします。仕様バージョンとソフトウェアのリリースバージョンは別に管理します。
+組み込み側はESP-IDF v6.0.3 / C++とC API、PC側はRustサービスとCLI/TUIです。SDKの版と各面（C ABI、Wire、HostLink、保存形式）の版は[`protocol/manifest.json`](protocol/manifest.json)で管理します。
 
 [レビュー反映と残るゲート](docs/reviews/2026-09-17-response.md)／[実装プロファイル](docs/spec/release-profiles.md)。
 
 ## 実装状況
 
-`CORE_FIXED_250`の実装を開始しています。portable C++ core、C ABI、ESP-IDF向けLR250 adapter、実験用AES-GCM Provider、reference firmware、Rust host framing/daemon/CLI、CIを含みます。これは**prototype**であり、Wire互換性・本番Identity Security・RF/HILは未認定です。
+`CORE_FIXED_250`を実装済みです：portable C++ core、C ABI、ESP-IDF向けLR250 adapter、DevRamとSDK v1 MemberEdhoc（ゼロタッチ参加・group鍵・失効）、reference／bridge／bench firmware、Rust host daemon・CLI・Site Authority、Mesh Lab（meshviz）、CI。Wire v2のbyte layoutは凍結済みです。本番security profile・RF・長期HILは未認定です。
 
-- [v0.1実装の内容と非保証](docs/implementation/README.md)
+- [実装の内容と非保証](docs/implementation/README.md)
 - [現在の成熟度と残るGate](docs/STATUS.md)
+- [変更履歴](CHANGELOG.md)／[作業規約](AGENTS.md)
 
 ## ライセンス
 

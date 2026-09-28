@@ -1,15 +1,20 @@
-# RouteLoom gateway (bridge) layout (issue #37,
-# docs/design/sdk-v1/05-nvs-state-37.md section 5.2). Per-peer security state
-# (rlcounter/rlreplay) lives in its own "rlsec" NVS partition, sized for the
-# gateway's larger peer set, so exhausting it can never block the boot
-# session (rlboot) or other system NVS writes. Ends at 0x1B0000: fits the
-# ESP-IDF default 2 MB flash-size setting and every 4 MB board. Changing this
-# table moves NVS: erase flash when migrating (already required by Wire v2).
-# Name,   Type, SubType, Offset,   Size
-nvs,      data, nvs,     0x9000,   0x6000
-phy_init, data, phy,     0xf000,   0x1000
-factory,  app,  factory, 0x10000,  0x180000
-rlsec,    data, nvs,     0x190000, 0x20000
-# App-only updates preserve both per-board config and private secrets.
-rlcfg,    data, nvs,     0x1B0000, 0x6000
-rlkeys,   data, nvs,     0x1B6000, 0x3000
+# RouteLoom flash layout PT-4M-v2: one table for every role and chip, 4 MB.
+# NVS partitions come first so their offsets never depend on the app slot
+# size, and two 1.8125 MiB OTA slots start on 64 KiB boundaries. The
+# bootloader and this table cannot change by OTA, so a layout change needs a
+# full erase and reprovision. Boot refuses RF unless the flashed table equals
+# kPt4mV2 (routeloom/espnow_flash_layout.hpp); tools/nvs_budget.py checks
+# that every app's copy of this file matches it.
+# Name,   Type, SubType,  Offset,   Size
+nvs,      data, nvs,      0x9000,   0x6000
+phy_init, data, phy,      0xF000,   0x1000
+otadata,  data, ota,      0x10000,  0x2000
+rlcfg,    data, nvs,      0x12000,  0x6000
+rlkeys,   data, nvs,      0x18000,  0x3000
+# 0x1B000-0x20000 reserved.
+rlsec,    data, nvs,      0x20000,  0x20000
+ota_0,    app,  ota_0,    0x40000,  0x1D0000
+ota_1,    app,  ota_1,    0x210000, 0x1D0000
+# Reserved for flash core dumps; only a field-debug build enables them.
+coredump, data, coredump, 0x3E0000, 0x10000
+# 0x3F0000-0x400000 reserved.

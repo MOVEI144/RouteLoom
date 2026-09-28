@@ -72,7 +72,7 @@ class FakeAPI1:
                               'response_max_bytes': 65536, 'max_depth': 8},
                       'methods': methods,
                       'nodes': {'page_max': 128, 'clock': 'host_unix_ms'},
-                      'caps_version': 1}
+                      'caps_version': 2}
         elif request['method'] == 'nodes.list':
             if set(params) - {'after', 'limit', 'connected'}:
                 return self._error(request_id, 'INVALID_ARGUMENT')

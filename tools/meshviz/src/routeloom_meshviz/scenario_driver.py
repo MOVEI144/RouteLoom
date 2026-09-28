@@ -144,7 +144,7 @@ class DeviceDriver:
     def reconcile_provision(self, op):
         """Recover only a completed D03 receipt; never issue another write."""
         from .provision_plan import ProvisionJob
-        from .provisioning import ProvisionError, ProvisionJournal
+        from .provisioning import APP_IMAGE_OFFSET, ProvisionError, ProvisionJournal
 
         if self.provision_backend is None or op.method != 'provision':
             return None
@@ -164,7 +164,7 @@ class DeviceDriver:
             written = journal.latest('written')
             inventory = journal.latest('inventory')
             app = next(entry for entry in field['manifest']['files']
-                       if entry['offset'] == 0x10000)
+                       if entry['offset'] == APP_IMAGE_OFFSET)
             if (not journal.done or not all((readback, issued, written, inventory)) or
                     plan.get('site_id') != self.provision_backend._load_spec()['site_id'] or
                     plan.get('node_id') != node or

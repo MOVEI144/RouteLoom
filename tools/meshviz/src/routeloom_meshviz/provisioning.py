@@ -514,9 +514,11 @@ RLC1_MAGIC = 0x524C4331  # "RLC1"
 BOARD_CHIP = {'esp32c3': 1, 'esp32s3': 2, 'esp32c5': 3, 'esp32c6': 4}
 BOARD_ROLE = {'bridge': 1, 'bench': 2}  # BoardRole::Bridge / ::Reference
 BOARD_SECURITY = {'dev-ram': 1, 'member-edhoc': 2}  # BoardSecurity
-# Field bundles whose app descriptor sits at the image offset of the factory
-# partition (firmware_catalog::_flash_files).
-APP_IMAGE_OFFSET = 0x10000
+# PT-4M-v2 image offsets of a field bundle (firmware_catalog): the app
+# descriptor sits at ota_0, and an app-only write also blanks otadata so the
+# bootloader boots ota_0.
+APP_IMAGE_OFFSET = 0x40000
+APP_ONLY_OFFSETS = frozenset((0x10000, APP_IMAGE_OFFSET))
 
 
 def rlc1_document(*, node_id: str, sta_mac: str, chip: str, role: str,
@@ -1256,7 +1258,7 @@ class LabProvisionBackend(ContractBackend):
         manifest = bundle['manifest']
         images = tuple(Image(e['offset'], bundle['path'] / e['path'],
                              e['size'], e['sha256']) for e in manifest['files']
-                       if not app_only or e['offset'] == APP_IMAGE_OFFSET)
+                       if not app_only or e['offset'] in APP_ONLY_OFFSETS)
         plan = FlashPlan(identity, manifest['chip'], images, True,
                          identity.base_mac, True, bundle['path'], None, app_only)
         with self.leases.acquire(identity.base_mac.lower(), port):

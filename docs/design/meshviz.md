@@ -151,9 +151,7 @@ Absent → Enumerated → Inspecting → Identified → Assigned
 
 ### 0.6 チップ差・partition・C6 対応
 
-現 partition は両 role とも `factory=0x10000, size=0x180000`。bridge の `rlsec=0x190000, size=0x20000`、reference は同 offset/`0x10000`。終端はそれぞれ `0x1B0000`／`0x1A0000`（両 app の `partitions.csv:8`）。これらは既存 layout の説明であり、新しい board に共通 offset として hardcode しない。
-
-`rlcfg` の初期案は **既存領域を動かさず、両 role とも `0x1B0000` に0x6000 bytes、続いてprivate設定用 `rlkeys` を `0x1B6000` に0x3000 bytes追加**する。終端は `0x1B9000` で2 MiB内。`rlkeys`は論理的な秘密の分離であり、flash暗号化/eFuse操作は使わない。partition table の差分を検査し、既存 flash に別用途領域があれば拒否する。reference↔bridge の `rlsec` サイズ変更は単純な app 更新と区別する。app が 0x180000 に収まらない場合は CI で失敗させ、別 layout 版を設計する。
+partition は全 role・全 chip で `PT-4M-v2`（4 MB）。`rlcfg=0x12000`（0x6000）、`rlkeys=0x18000`（0x3000）、`rlsec=0x20000`（0x20000）を先頭側に置き、app は `ota_0=0x40000`／`ota_1=0x210000`（各 0x1D0000）。bundle は bootloader・partition table・空の otadata（`0x10000`）・app（`0x40000`）の4つで、各 image は自分の領域を超えられない。app だけの書込みは otadata と ota_0 を書き、bootloader が ota_0 から起動するようにする。`rlkeys`は論理的な秘密の分離であり、flash暗号化/eFuse操作は使わない。partition table の差分を検査し、既存 flash に別用途領域があれば拒否する。app が 0x1D0000 に収まらない場合は build が失敗する。
 
 | chip | RAM・USB の特徴 | この SDK／アプリでの扱い |
 |---|---|---|

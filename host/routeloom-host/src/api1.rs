@@ -74,11 +74,12 @@ pub const REQUEST_MAX_BYTES: usize = 8192;
 pub const RESPONSE_MAX_BYTES: usize = 65536;
 pub const JSON_MAX_DEPTH: usize = 8;
 pub const REQUEST_ID_MAX: usize = 64;
+pub const API_VERSION: u32 = 1;
 /// Capabilities document version: clients key their parsing off this and
 /// ignore unknown fields/methods — never an exact document match.
 /// Additive-only: a removal or rename bumps this and the spec
 /// (docs/spec/host.md §3 records the policy).
-pub const CAPS_VERSION: u32 = 1;
+pub const CAPS_VERSION: u32 = 2;
 // Legacy assurance for records without per-delivery evidence: USB receive
 // bodies on an unnegotiated session carry no profile or verdict.
 const RX_ASSURANCE: &str = "\"assurance\":{\"profile\":\"UNKNOWN\",\"origin\":\"unverified\"}";
@@ -322,11 +323,11 @@ pub fn handle_conn<S: OperationStore>(
             None,
         );
     };
-    if root.get("v").and_then(Json::as_u64) != Some(1) {
+    if root.get("v").and_then(Json::as_u64) != Some(u64::from(API_VERSION)) {
         return (
             error_response(
                 Some(request_id),
-                &ApiError::simple("INVALID_REQUEST", "v must be 1"),
+                &ApiError::simple("INVALID_REQUEST", &format!("v must be {API_VERSION}")),
             ),
             None,
         );
@@ -419,7 +420,7 @@ fn extract_request_id(root: &Json) -> Option<String> {
 
 fn ok_response(request_id: &str, result: &str) -> String {
     let response = format!(
-        "{{\"v\":1,\"request_id\":\"{}\",\"ok\":true,\"result\":{result}}}",
+        "{{\"v\":{API_VERSION},\"request_id\":\"{}\",\"ok\":true,\"result\":{result}}}",
         escape_string(request_id)
     );
     bound_response(response)
@@ -436,7 +437,7 @@ fn error_response(request_id: Option<&str>, error: &ApiError) -> String {
         format!(",{}", error.extra_fields)
     };
     let response = format!(
-        "{{\"v\":1,\"request_id\":{id},\"ok\":false,\"error\":{{\"code\":\"{}\",\"detail\":{{\"message\":\"{}\"{extra}}},\"retryable\":{}}}}}",
+        "{{\"v\":{API_VERSION},\"request_id\":{id},\"ok\":false,\"error\":{{\"code\":\"{}\",\"detail\":{{\"message\":\"{}\"{extra}}},\"retryable\":{}}}}}",
         error.code,
         escape_string(&error.message),
         error.retryable,
@@ -449,7 +450,9 @@ fn error_response(request_id: Option<&str>, error: &ApiError) -> String {
 fn bound_response(response: String) -> String {
     // +1 for the newline the socket layer appends.
     if response.len() + 1 > RESPONSE_MAX_BYTES {
-        return "{\"v\":1,\"request_id\":null,\"ok\":false,\"error\":{\"code\":\"INTERNAL\",\"detail\":{\"message\":\"response exceeded size bound\"},\"retryable\":true}}".to_string();
+        return format!(
+            "{{\"v\":{API_VERSION},\"request_id\":null,\"ok\":false,\"error\":{{\"code\":\"INTERNAL\",\"detail\":{{\"message\":\"response exceeded size bound\"}},\"retryable\":true}}}}"
+        );
     }
     response
 }
@@ -481,7 +484,7 @@ fn capabilities<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"capacity.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.retry\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true,\"lab.rollcall.start\":true,\"lab.rollcall.update\":true,\"lab.rollcall.stop\":true,\"lab.rollcall.status\":true,\"diagnostics.snapshot\":true,\"health.get\":true,\"topology.get\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"queue_mode\":[\"FIFO\",\"LATEST_PER_DESTINATION\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"observation\":{observation_caps},\"site\":{site_caps},\"rollcall\":{{\"dispatch\":\"usb_group_delivery_v1\",\"min_interval_ms\":{rollcall_min},\"max_inflight\":1}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known},\"caps_version\":{CAPS_VERSION}}}",
+        "{{\"api\":{{\"version\":{API_VERSION},\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"capacity.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.retry\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true,\"lab.rollcall.start\":true,\"lab.rollcall.update\":true,\"lab.rollcall.stop\":true,\"lab.rollcall.status\":true,\"diagnostics.snapshot\":true,\"health.get\":true,\"topology.get\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"queue_mode\":[\"FIFO\",\"LATEST_PER_DESTINATION\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"observation\":{observation_caps},\"site\":{site_caps},\"rollcall\":{{\"dispatch\":\"usb_group_delivery_v1\",\"min_interval_ms\":{rollcall_min},\"max_inflight\":1}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known},\"caps_version\":{CAPS_VERSION}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -550,7 +553,9 @@ fn capacity_get<S: OperationStore>(
         .expect("operation store poisoned");
     let status = store.capacity_status(ctx.now_ms);
     let client = match profile {
-        send_store::AdmissionProfile::Normal => "null".to_string(),
+        send_store::AdmissionProfile::Normal | send_store::AdmissionProfile::Control => {
+            "null".to_string()
+        }
         send_store::AdmissionProfile::BenchV1 => format!(
             "{{\"inflight_max\":{},\"run_window_calls\":{},\"run_window_ms\":{}}}",
             send_store::BENCH_INFLIGHT_MAX,
@@ -558,12 +563,27 @@ fn capacity_get<S: OperationStore>(
             send_store::BENCH_RUN_WINDOW_MS,
         ),
     };
+    // Control profile: the latest-value lane that LATEST_PER_DESTINATION
+    // submits draw from instead of the budget above.
+    let latest = if profile == send_store::AdmissionProfile::Control {
+        format!(
+            "{{\"charges\":\"messages.submit queue_mode LATEST_PER_DESTINATION\",\"per_destination\":{{\"calls_per_minute\":{},\"burst\":{}}},\"per_principal\":{{\"calls_per_minute\":{},\"burst\":{}}},\"global\":{{\"calls_per_minute\":{},\"burst\":{}}}}}",
+            send_store::CONTROL_DEST_RATE_PER_MINUTE,
+            send_store::CONTROL_DEST_BURST,
+            send_store::CONTROL_PRINCIPAL_RATE_PER_MINUTE,
+            send_store::CONTROL_PRINCIPAL_BURST,
+            send_store::CONTROL_GLOBAL_RATE_PER_MINUTE,
+            send_store::CONTROL_GLOBAL_BURST,
+        )
+    } else {
+        "null".to_string()
+    };
     let reclaimable = match status.reclaimable_at_ms {
         Some(at) => at.to_string(),
         None => "null".to_string(),
     };
     Ok(format!(
-        "{{\"admission\":{{\"profile\":\"{profile}\",\"calls_per_minute\":{rate},\"burst\":{burst},\"charges\":[\"messages.submit\",\"operations.open_epoch\"],\"client\":{client}}},\"store\":{{\"durable\":{durable},\"records_max\":{records},\"bytes_max\":{bytes},\"record_charge_bytes\":{charge},\"retention_ms\":{retention},\"unretired_epochs_max\":{epochs},\"active_max\":{active},\"active_per_principal_max\":{per_principal},\"free_slots\":{free_slots},\"free_bytes\":{free_bytes},\"reclaimable_at_ms\":{reclaimable}}},\"payload\":{{\"node_max_bytes\":{node_max},\"gateway_max_bytes\":{gw_max},\"group_max_bytes\":{group_max}}},\"group\":{{\"records_max\":{group_records},\"queue_max\":{group_queue},\"live_max\":{group_live},\"tombstones_max\":{group_tombstones},\"inbox_max\":{group_inbox}}},\"queue_mode\":{{\"LATEST_PER_DESTINATION\":{{\"requires\":{{\"delivery\":\"BEST_EFFORT\",\"storage\":\"RAM_ONLY\"}},\"supersede\":\"newest committed record retires still-queued older records to the same destination\"}}}}}}",
+        "{{\"admission\":{{\"profile\":\"{profile}\",\"calls_per_minute\":{rate},\"burst\":{burst},\"charges\":[\"messages.submit\",\"operations.open_epoch\"],\"client\":{client},\"latest\":{latest}}},\"store\":{{\"durable\":{durable},\"records_max\":{records},\"bytes_max\":{bytes},\"record_charge_bytes\":{charge},\"retention_ms\":{retention},\"unretired_epochs_max\":{epochs},\"active_max\":{active},\"active_per_principal_max\":{per_principal},\"free_slots\":{free_slots},\"free_bytes\":{free_bytes},\"reclaimable_at_ms\":{reclaimable}}},\"payload\":{{\"node_max_bytes\":{node_max},\"gateway_max_bytes\":{gw_max},\"group_max_bytes\":{group_max}}},\"group\":{{\"records_max\":{group_records},\"queue_max\":{group_queue},\"live_max\":{group_live},\"tombstones_max\":{group_tombstones},\"inbox_max\":{group_inbox}}},\"queue_mode\":{{\"LATEST_PER_DESTINATION\":{{\"requires\":{{\"delivery\":\"BEST_EFFORT\",\"storage\":\"RAM_ONLY\"}},\"supersede\":\"newest committed record retires still-queued older records to the same destination\"}}}}}}",
         profile = profile.name(),
         rate = profile.rate_per_minute(),
         burst = profile.burst(),
@@ -1613,7 +1633,15 @@ fn messages_submit<S: OperationStore>(
         .rate_limiter
         .lock()
         .expect("rate limiter poisoned")
-        .admit_principal(uid, ctx.now_ms)
+        .admit_submit(
+            uid,
+            (req.queue_mode == canonical::QUEUE_LATEST_PER_DESTINATION).then_some((
+                req.network,
+                req.dest_kind,
+                req.dest,
+            )),
+            ctx.now_ms,
+        )
     {
         return Err(rate_limited(deny));
     }
@@ -1625,7 +1653,7 @@ fn messages_submit<S: OperationStore>(
     // wall-clock rewind can never stretch the dispatch deadline.
     match store.submit_at_principal(uid, &req, ctx.now_ms, crate::mono_ms()) {
         SubmitOutcome::Accepted { seq } => {
-            // KG control discipline (D10): once the replacement is
+            // Latest-value discipline (D10): once the replacement is
             // committed, retire still-queued older values to the same
             // destination. The supersede runs after commit so a lost
             // replacement can never take the previous value down with it.
@@ -5989,7 +6017,7 @@ mod tests {
         let result = parsed.get("result").expect("ok result");
         assert_eq!(
             result.get("caps_version").and_then(Json::as_u64),
-            Some(1),
+            Some(2),
             "{response}"
         );
         let keys: Vec<&str> = result
@@ -9308,6 +9336,71 @@ mod tests {
     }
 
     #[test]
+    fn site_channel_plan_signs_for_an_admin_only() {
+        use crate::site::{store::MemoryStore, testkit, SiteService};
+        use routeloom_provision::sdkv1::channel_plan::{issue, plan_encode, ChannelPlan};
+        use routeloom_provision::signer::hex_encode;
+
+        let site = SiteService::new(testkit::authority(Box::new(MemoryStore::default()), 1_000));
+        let plan = ChannelPlan {
+            network: testkit::network(),
+            authority: testkit::SITE,
+            authority_generation: 1,
+            operation_sequence: 1,
+            old_epoch: 0,
+            new_epoch: 1,
+            old_channel: 1,
+            new_channel: 6,
+            authority_session: 42,
+            switch_reference_ms: 31_000,
+            expiry_ms: 40_000,
+            guard_ms: 100,
+            max_outage_ms: 500,
+            ..ChannelPlan::default()
+        };
+        let blob = hex_encode(&plan_encode(&plan).unwrap());
+        let expected = issue(&plan, &testkit::sak()).unwrap();
+        let line = group_line(
+            "site.channel_plan.sign",
+            &format!("{{\"plan_blob_hex\":\"{blob}\"}}"),
+        );
+        let acl = Acl::parse(&format!(
+            "{{\"principals\":{{\"501\":{{\"networks\":{{\"{:016x}\":[\"MEMBERSHIP_ADMIN\"]}}}}}}}}",
+            testkit::NETWORK_LOW
+        ))
+        .unwrap();
+        let (_, log, store, limiter) = test_env();
+        let allowed = ApiContext {
+            site: Some(&site),
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
+        };
+        let response = handle(line.as_bytes(), &allowed);
+        assert_eq!(
+            result_field(&response, "commit_signature_hex"),
+            hex_encode(&expected.commit_signature)
+        );
+        let denied_acl = Acl::empty();
+        let denied = ApiContext {
+            site: Some(&site),
+            ..ctx(Some(501), &denied_acl, &log, &store, &limiter, 1_000)
+        };
+        assert_error_schema(&handle(line.as_bytes(), &denied), "AuthorizationFailed");
+        let mut foreign = plan;
+        foreign.network += 1;
+        let foreign_line = group_line(
+            "site.channel_plan.sign",
+            &format!(
+                "{{\"plan_blob_hex\":\"{}\"}}",
+                hex_encode(&plan_encode(&foreign).unwrap())
+            ),
+        );
+        assert_error_schema(
+            &handle(foreign_line.as_bytes(), &allowed),
+            "INVALID_ARGUMENT",
+        );
+    }
+
+    #[test]
     fn group_send_admits_replays_and_get_follows_the_lane() {
         use crate::group::{GroupLane, GroupLink, GroupOps};
         use routeloom_protocol::group_ops::{encode_group_status, GroupStatus};
@@ -9948,6 +10041,7 @@ mod tests {
         assert_eq!(admission.get("calls_per_minute").unwrap().as_u64(), Some(2));
         assert_eq!(admission.get("burst").unwrap().as_u64(), Some(16));
         assert!(matches!(admission.get("client"), Some(Json::Null)));
+        assert!(matches!(admission.get("latest"), Some(Json::Null)));
         let store_block = result.get("store").unwrap();
         assert_eq!(store_block.get("records_max").unwrap().as_u64(), Some(4096));
         assert_eq!(store_block.get("free_slots").unwrap().as_u64(), Some(4096));
@@ -9982,7 +10076,58 @@ mod tests {
         assert_eq!(client.get("run_window_calls").unwrap().as_u64(), Some(64));
     }
 
-    /// D10 KG control profile end-to-end: a LATEST_PER_DESTINATION submit
+    /// #195 control profile over API1: latest-value submits draw from the
+    /// per-destination lane (12/min, burst 4) with `retry_after_ms`, other
+    /// destinations and FIFO submits are unaffected, and capacity.get
+    /// reports the lane.
+    #[test]
+    fn control_profile_limits_latest_per_destination() {
+        let (acl, log, store, _) = test_env();
+        let limiter = Mutex::new(AdmissionLimiter::with_profile(
+            send_store::AdmissionProfile::Control,
+            0,
+        ));
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let latest = |key: u32, dest: u32| {
+            format!(
+                "{{\"v\":1,\"request_id\":\"s\",\"method\":\"messages.submit\",\"params\":{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{key:032x}\",\"destination\":{{\"kind\":\"node\",\"id\":\"{dest:016x}\"}},\"payload_hex\":\"00ff\",\"payload_len\":2,\"options\":{{\"storage\":\"RAM_ONLY\",\"delivery\":\"BEST_EFFORT\",\"queue_mode\":\"LATEST_PER_DESTINATION\"}}}}}}"
+            )
+        };
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
+        for key in 1..=4 {
+            let response = handle(latest(key, 3).as_bytes(), &c);
+            assert!(response.contains("\"ok\":true"), "{response}");
+        }
+        let response = handle(latest(5, 3).as_bytes(), &c);
+        assert_error_schema(&response, "RATE_LIMITED");
+        assert!(response.contains("\"scope\":\"destination\""), "{response}");
+        assert!(response.contains("\"retry_after_ms\":5000"), "{response}");
+        let response = handle(latest(6, 4).as_bytes(), &c);
+        assert!(response.contains("\"ok\":true"), "{response}");
+        let response = handle(
+            submit_line("77112233445566778899aabbccddeeff", &epoch).as_bytes(),
+            &c,
+        );
+        assert!(response.contains("\"ok\":true"), "{response}");
+        let later = ctx(Some(501), &acl, &log, &store, &limiter, 5_000);
+        let response = handle(latest(7, 3).as_bytes(), &later);
+        assert!(response.contains("\"ok\":true"), "{response}");
+
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"c\",\"method\":\"capacity.get\",\"params\":{}}",
+            &c,
+        );
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let admission = parsed.get("result").unwrap().get("admission").unwrap();
+        assert_eq!(admission.get("profile").unwrap().as_str(), Some("control"));
+        assert_eq!(admission.get("calls_per_minute").unwrap().as_u64(), Some(2));
+        let lane = admission.get("latest").unwrap();
+        let per_dest = lane.get("per_destination").unwrap();
+        assert_eq!(per_dest.get("calls_per_minute").unwrap().as_u64(), Some(12));
+        assert!(lane.get("per_principal").is_some() && lane.get("global").is_some());
+    }
+
+    /// D10 latest-value control end-to-end: a LATEST_PER_DESTINATION submit
     /// retires the still-queued predecessor, names it in the response,
     /// and the retired record reports the replacing operation id.
     #[test]

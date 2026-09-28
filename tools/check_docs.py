@@ -10,6 +10,42 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 
+AGENTS_TOOLS = {"cd", "cmake", "ctest", "cargo", "python3", "idf.py"}
+
+
+def agents_command_problems(root: Path) -> list[str]:
+    """Every command AGENTS.md tells an agent to run must exist in this repo."""
+    text = (root / "AGENTS.md").read_text(encoding="utf-8")
+    problems = []
+    if not 60 <= len(text.splitlines()) <= 90:
+        problems.append("AGENTS.md must stay 60-90 lines")
+    commands = [line for block in re.findall(r"```sh\n(.*?)```", text, re.S) for line in block.splitlines() if line.strip()]
+    commands += re.findall(r"`((?:%s) [^`]+)`" % "|".join(re.escape(t) for t in sorted(AGENTS_TOOLS)), text)
+    for command in commands:
+        cwd = root
+        for segment in command.split("&&"):
+            words = segment.split()
+            while words and re.fullmatch(r"[A-Z_]+=\S*", words[0]):
+                paths = [part for part in words.pop(0).split("=", 1)[1].split(":") if "/" in part]
+                problems += [f"{command}: missing {part}" for part in paths if not (cwd / part).exists()]
+            if not words:
+                continue
+            if words[0] not in AGENTS_TOOLS:
+                problems.append(f"{command}: unknown tool {words[0]}")
+                continue
+            if words[0] == "cd":
+                cwd = cwd / words[1]
+                if not cwd.is_dir():
+                    problems.append(f"{command}: missing {words[1]}")
+                continue
+            for previous, word in zip(words, words[1:]):
+                if previous == "-p" and not (root / "host" / word / "Cargo.toml").is_file():
+                    problems.append(f"{command}: unknown crate {word}")
+                elif ("/" in word or word.endswith(".py")) and not word.startswith("-") and not (cwd / word).exists():
+                    problems.append(f"{command}: missing {word}")
+    return problems
+
+
 def run(root: Path) -> dict:
     checks: list[dict] = []
 
@@ -39,6 +75,12 @@ def run(root: Path) -> dict:
             destination = (file.parent / unquote(parsed.path)).resolve()
             inside = destination.is_relative_to(root.resolve())
             check(f"link:{relative}:{index}", inside and destination.exists(), target)
+
+    try:
+        agents = agents_command_problems(root)
+        check("agents_commands_exist", not agents, "; ".join(agents))
+    except OSError as error:
+        check("agents_commands_exist", False, type(error).__name__)
 
     data = {}
     for file in sorted((root / "docs/reference").glob("*.json")):

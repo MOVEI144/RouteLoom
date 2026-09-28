@@ -83,7 +83,7 @@
     }
   },
   "capabilities": {
-    "caps_version": 1,
+    "caps_version": 2,
     "policy": "additive-only: fields and methods are added, never renamed or removed without a version bump. Clients must ignore unknown fields and methods, never exact-match the document.",
     "spec": "docs/spec/host.md"
   }

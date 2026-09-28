@@ -20,11 +20,13 @@
 #include "routeloom/authority.hpp"
 #include "routeloom/byte_io.hpp"
 #include "routeloom/deadline.hpp"
+#include "routeloom/fixed_containers.hpp"
 #include "routeloom/routeloom.h"
 #include "routeloom/counter_store.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/reply_peer_leases.hpp"
 #include "routeloom/routing.hpp"
+#include "routeloom/version.h"
 #include "routeloom/wire.hpp"
 
 #include "test_autonomy.hpp"
@@ -208,7 +210,7 @@ rl_status_code_t capi_reply_send_bound(void* user, rl_node_id_t peer, uint32_t i
 
 void capi_attach_reply_port(rl_context_t* context, CApiReplyPort* port) {
   rl_reply_peer_vtable_t vtable{};
-  rl_reply_peer_vtable_init(&vtable);
+  rl_struct_init(&vtable, sizeof(vtable));
   vtable.user = port;
   vtable.acquire = &capi_reply_acquire;
   vtable.release = &capi_reply_release;
@@ -267,17 +269,42 @@ rl_status_code_t capi_open(void*, const rl_security_context_t*, uint64_t,
   return RL_STATUS_OK;
 }
 
+rl_radio_vtable_t capi_radio(void* user,
+                             rl_status_code_t (*send)(void*, rl_node_id_t, uint64_t,
+                                                      const uint8_t*, size_t)) {
+  rl_radio_vtable_t radio{};
+  rl_struct_init(&radio, sizeof(radio));
+  radio.user = user;
+  radio.send = send;
+  radio.recover = capi_radio_recover;
+  return radio;
+}
+rl_security_vtable_t capi_security(CApiState* state) {
+  rl_security_vtable_t security{};
+  rl_struct_init(&security, sizeof(security));
+  security.user = state;
+  security.ready = capi_security_ready;
+  security.next_counter = capi_next_counter;
+  security.seal = capi_seal;
+  security.open = capi_open;
+  return security;
+}
+rl_observer_vtable_t capi_observer() {
+  rl_observer_vtable_t observer{};
+  rl_struct_init(&observer, sizeof(observer));
+  return observer;
+}
+
 void test_c_api_lifecycle() {
   rl_node_config_t config{};
-  rl_node_config_init_full(&config);
+  rl_node_config_init(&config);
   config.network = 1;
   config.node = 7;
   config.message_session = 77;
   CApiState state{};
-  const rl_radio_vtable_t radio{nullptr, capi_radio_send, capi_radio_recover};
-  const rl_security_vtable_t security{&state, capi_security_ready, capi_next_counter,
-                                       capi_seal, capi_open};
-  const rl_observer_vtable_t observer{};
+  const rl_radio_vtable_t radio = capi_radio(nullptr, capi_radio_send);
+  const rl_security_vtable_t security = capi_security(&state);
+  const rl_observer_vtable_t observer = capi_observer();
   std::vector<std::max_align_t> storage(
       (rl_context_size() + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t));
   rl_context_t* context = nullptr;
@@ -300,17 +327,15 @@ void test_c_api_lifecycle() {
 
 void test_c_api_reply_port_detach_reentrant_busy() {
   rl_node_config_t config{};
-  rl_node_config_init_full(&config);
+  rl_node_config_init(&config);
   config.network = 1;
   config.node = 7;
   config.message_session = 77;
   CApiState state{};
   CApiDetachAttempt attempt{};
-  const rl_radio_vtable_t radio{&attempt, capi_radio_send_try_detach,
-                                 capi_radio_recover};
-  const rl_security_vtable_t security{&state, capi_security_ready,
-                                       capi_next_counter, capi_seal, capi_open};
-  const rl_observer_vtable_t observer{};
+  const rl_radio_vtable_t radio = capi_radio(&attempt, capi_radio_send_try_detach);
+  const rl_security_vtable_t security = capi_security(&state);
+  const rl_observer_vtable_t observer = capi_observer();
   std::vector<std::max_align_t> storage(
       (rl_context_size() + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t));
   rl_context_t* context = nullptr;
@@ -332,13 +357,12 @@ void test_c_api_reply_port_detach_reentrant_busy() {
   rl_deinit(context);
 }
 
-// Gateway-scoped routing profile over the C ABI (routeloom.h tail extension).
+// Gateway-scoped routing profile over the C ABI (routeloom.h).
 struct CApiNode {
   CApiState state{};
-  rl_radio_vtable_t radio{nullptr, capi_radio_send, capi_radio_recover};
-  rl_security_vtable_t security{&state, capi_security_ready, capi_next_counter,
-                                capi_seal, capi_open};
-  rl_observer_vtable_t observer{};
+  rl_radio_vtable_t radio = capi_radio(nullptr, capi_radio_send);
+  rl_security_vtable_t security = capi_security(&state);
+  rl_observer_vtable_t observer = capi_observer();
   std::vector<std::max_align_t> storage = std::vector<std::max_align_t>(
       (rl_context_size() + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t));
   rl_context_t* context{nullptr};
@@ -359,19 +383,18 @@ struct CApiNode {
 
 rl_node_config_t capi_scoped_base() {
   rl_node_config_t config{};
-  rl_node_config_init_full(&config);
+  rl_node_config_init(&config);
   config.network = 1;
   config.node = 7;
   config.message_session = 77;
   return config;
 }
 
-// Group delivery over the C ABI (routeloom.h, group-delivery.md §8):
-// additive symbols, RL_ABI_VERSION unchanged.
+// Group delivery over the C ABI (routeloom.h, group-delivery.md §8).
 void test_c_api_group() {
   rl_group_send_options_t options{};
   rl_group_send_options_init(&options);
-  CHECK(options.struct_size == sizeof(options) && options.abi_version == RL_ABI_VERSION);
+  CHECK(options.struct_size == sizeof(options) && options.version == RL_ABI_VERSION);
   CHECK(options.priority == RL_PRIORITY_NORMAL && options.lifetime_ms == 5000 &&
         options.hop_limit == 10 && options.ordered == 0);
   rl_send_options_t send_options{};
@@ -402,8 +425,16 @@ void test_c_api_group() {
                         &id) == RL_STATUS_OK);
     CHECK((id.sequence & RL_GROUP_SEQUENCE_FLAG) != 0 && id.session == 77);
     rl_group_result_t result{};
+    rl_struct_init(&result, sizeof(result));
     CHECK(rl_get_group_result(node.context, id, &result) == RL_STATUS_OK);
     CHECK(result.group == RL_GROUP_ALL && result.id.sequence == id.sequence);
+    CHECK(result.struct_size == sizeof(result) &&
+          result.reason_id == ROUTELOOM_REASON_GROUP_NO_TREE);
+    rl_capabilities_t caps{};
+    rl_struct_init(&caps, sizeof(caps));
+    CHECK(rl_get_capabilities(node.context, &caps) == RL_STATUS_OK);
+    CHECK((caps.features & (RL_CAP_SCOPED_ROUTING | RL_CAP_GROUP_SEND)) ==
+          (RL_CAP_SCOPED_ROUTING | RL_CAP_GROUP_SEND));
     CHECK(rl_send_group(node.context, 3, payload, sizeof(payload), &options, 1, &id) ==
           RL_STATUS_OK);
     CHECK(node.state.saw_group);
@@ -414,6 +445,7 @@ void test_c_api_group() {
     rl_poll(node.context, 2);
     CHECK(rl_get_group_result(node.context, id, &result) == RL_STATUS_OK);
     CHECK(result.state == RL_DELIVERY_STATE_FAILED && result.delivered == 0);
+    CHECK(result.reason_id == ROUTELOOM_REASON_GROUP_NO_TREE);
     rl_message_id_t unknown{77, RL_GROUP_SEQUENCE_FLAG | 99};
     CHECK(rl_get_group_result(node.context, unknown, &result) == RL_STATUS_NOT_FOUND);
     // Argument checks.
@@ -455,14 +487,6 @@ void test_c_api_group() {
 }
 
 void test_c_api_route_profile() {
-  // An old binary allocates only the original 64 bytes behind this symbol.
-  {
-    alignas(rl_node_config_t) std::array<std::uint8_t, RL_NODE_CONFIG_SIZE_BASE + 40> bytes{};
-    bytes.fill(0xA5);
-    rl_node_config_init(reinterpret_cast<rl_node_config_t*>(bytes.data()));
-    for (std::size_t i = RL_NODE_CONFIG_SIZE_BASE; i < bytes.size(); ++i)
-      CHECK(bytes[i] == 0xA5);
-  }
   // Defaults: the full struct, flat profile, SDK refresh cadence.
   {
     const rl_node_config_t config = capi_scoped_base();
@@ -531,28 +555,6 @@ void test_c_api_route_profile() {
     CHECK(out[0] == 1 && out[1] == 9 && out[2] == 17 && out[3] == 25);
     CHECK(rl_start(node.context, 0) == RL_STATUS_OK);
   }
-  // Two-gateway callers keep working with their own limit: count 2 at the
-  // old struct size is honored, count 3 is refused — never truncated.
-  {
-    rl_node_config_t config = capi_scoped_base();
-    config.route_advertisement_period_ms = kScopedProductPeriodMs;
-    config.route_lifetime_ms = kScopedProductLifetimeMs;
-    config.route_gateway_count = 2;
-    config.route_gateways[0] = 1;
-    config.route_gateways[1] = 9;
-    config.struct_size = RL_NODE_CONFIG_SIZE_GATEWAY2;
-    CApiNode legacy;
-    CHECK(legacy.init(config) == RL_STATUS_OK);
-    std::array<rl_node_id_t, RL_MAX_ROUTE_GATEWAYS> out{};
-    CHECK(rl_route_gateways(legacy.context, out.data(), out.size()) == 2);
-    CHECK(out[0] == 1 && out[1] == 9);
-    CHECK(rl_start(legacy.context, 0) == RL_STATUS_OK);
-    config.route_gateway_count = 3;
-    config.route_gateways[2] = 17;
-    CApiNode truncated;
-    CHECK(truncated.init(config) == RL_STATUS_INVALID_ARGUMENT);
-    CHECK(truncated.context == nullptr);
-  }
   // Shape errors are refused at rl_init: count over capacity, a zero id
   // inside the count, a duplicate id.
   {
@@ -607,22 +609,13 @@ void test_c_api_route_profile() {
     CHECK(broadcast.init(config) == RL_STATUS_OK);
     CHECK(rl_start(broadcast.context, 0) == RL_STATUS_INVALID_ARGUMENT);
   }
-  // struct_size: the pre-extension size is still accepted and never reads
-  // the tail (flat profile whatever those bytes hold); a size between the
-  // two layouts is refused; a larger (future) size is accepted.
+  // ABI 3 header: a short struct or another version is refused; a larger
+  // (future minor) struct is accepted and read up to this header's size.
   {
     rl_node_config_t config = capi_scoped_base();
     config.route_gateway_count = 1;
     config.route_gateways[0] = 1;
-    config.struct_size = RL_NODE_CONFIG_SIZE_BASE;
-    CApiNode legacy;
-    CHECK(legacy.init(config) == RL_STATUS_OK);
-    CHECK(rl_route_gateways(legacy.context, nullptr, 0) == 0);
-    CHECK(rl_start(legacy.context, 0) == RL_STATUS_OK);
-    config.struct_size = RL_NODE_CONFIG_SIZE_BASE + 8;
-    CApiNode partial;
-    CHECK(partial.init(config) == RL_STATUS_INVALID_ARGUMENT);
-    config.struct_size = RL_NODE_CONFIG_SIZE_BASE - 4;
+    config.struct_size = sizeof(rl_node_config_t) - 8;
     CApiNode truncated;
     CHECK(truncated.init(config) == RL_STATUS_INVALID_ARGUMENT);
     config.struct_size = sizeof(rl_node_config_t) + 8;
@@ -630,7 +623,7 @@ void test_c_api_route_profile() {
     CHECK(larger.init(config) == RL_STATUS_OK);
     CHECK(rl_route_gateways(larger.context, nullptr, 0) == 1);
     config.struct_size = sizeof(rl_node_config_t);
-    config.abi_version = RL_ABI_VERSION + 1;
+    config.version = RL_ABI_VERSION + 1;
     CApiNode future_abi;
     CHECK(future_abi.init(config) == RL_STATUS_INVALID_ARGUMENT);
   }
@@ -1106,14 +1099,13 @@ rl_status_code_t capi_probe_send(void* user, rl_node_id_t, uint64_t token,
 void test_c_api_tx_result_owner_task() {
   CApiTxProbe probe{};
   rl_node_config_t config{};
-  rl_node_config_init_full(&config);
+  rl_node_config_init(&config);
   config.network = 1;
   config.node = 7;
   config.message_session = 77;
-  const rl_radio_vtable_t radio{&probe, capi_probe_send, capi_radio_recover};
-  const rl_security_vtable_t security{&probe.security, capi_security_ready,
-                                      capi_next_counter, capi_seal, capi_open};
-  const rl_observer_vtable_t observer{};
+  const rl_radio_vtable_t radio = capi_radio(&probe, capi_probe_send);
+  const rl_security_vtable_t security = capi_security(&probe.security);
+  const rl_observer_vtable_t observer = capi_observer();
   std::vector<std::max_align_t> storage(
       (rl_context_size() + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t));
   rl_context_t* context = nullptr;
@@ -1177,9 +1169,47 @@ void test_sim_flush_truncation_aborts() {
 #endif
 }
 
+// FixedPool::erase_if releases exactly the expired slots (expires <= now)
+// in slot order, like the find()+release() loops it replaces.
+void test_pool_erase_if_boundaries() {
+  struct Entry {
+    MonotonicMs expires{0};
+    int id{0};
+  };
+  struct Case {
+    std::array<MonotonicMs, 4> expires;
+    std::size_t used;
+    std::vector<int> erased;
+  };
+  constexpr MonotonicMs kNow = 1000;
+  const Case cases[] = {
+      {{kNow - 1, kNow, kNow + 1, 0}, 3, {0, 1}},
+      {{kNow + 1, kNow + 2, 0, 0}, 2, {}},
+      {{kNow, kNow, kNow, kNow}, 4, {0, 1, 2, 3}},
+      {{0, 0, 0, 0}, 0, {}},
+  };
+  for (const Case& c : cases) {
+    FixedPool<Entry, 4> pool;
+    for (std::size_t i = 0; i < c.used; ++i) {
+      Entry* entry = pool.allocate();
+      entry->expires = c.expires[i];
+      entry->id = static_cast<int>(i);
+    }
+    std::vector<int> erased;
+    const std::size_t n = pool.erase_if(
+        [&](const Entry& e) { return e.expires <= kNow; },
+        [&](Entry& e) { erased.push_back(e.id); });
+    CHECK(n == c.erased.size());
+    CHECK(erased == c.erased);
+    CHECK(pool.size() == c.used - c.erased.size());
+    CHECK(pool.find([&](const Entry& e) { return e.expires <= kNow; }) == nullptr);
+  }
+}
+
 }  // namespace
 
 int main() {
+  test_pool_erase_if_boundaries();
   test_admission_contract();
   test_deadline_resume();
   test_single_authority();

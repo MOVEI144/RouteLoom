@@ -2,7 +2,7 @@
 # Deployed to https://movei144.github.io/RouteLoom/ by .github/workflows/pages.yml.
 # docs_dir is docs/: no document file is moved or renamed for the site.
 site_name: RouteLoom 文書
-site_description: 組み込み向け適応Mesh SDK（ESP32-C3/S3/C5、ESP-NOW）の設計・実装文書。実装プロトタイプでありRF・本番認定は未完了。
+site_description: 組み込み向け適応Mesh SDK（ESP32-C3/S3/C5/C6、ESP-NOW）の設計・実装文書。SDK 2.0.0-dev（pre-release）でありRF・本番認定は未完了。
 site_url: https://movei144.github.io/RouteLoom/
 repo_name: MOVEI144/RouteLoom
 repo_url: https://github.com/MOVEI144/RouteLoom
@@ -94,6 +94,8 @@ nav:
   - 実装ガイド:
     - コンポーネント配布と外部プロジェクトからの利用: implementation/component-distribution.md
     - Hardware-in-the-loop (HIL) harness: hil.md
+    - 設計原則: development/design-principles.md
+    - コーディング規約: development/coding-standards.md
   - リファレンス:
     - 公式資料と参照実装: references/official-sources.md
     - radio-defaults.json: reference/radio-defaults.json
@@ -149,7 +151,7 @@ nav:
       - 3. Congestion → route-metric coupling: design/sdk-completion/03-congestion-routing.md
       - 4. Provisioning lifecycle — credential deployment, rotation and revocation: design/sdk-completion/04-provisioning-lifecycle.md
       - 5. Receive API — poll semantics, subscription streams, and multi-consumer delivery: design/sdk-completion/05-receive-api.md
-    - "SDK v1 — ゼロタッチ参加・機器鍵・削除・NVS上限（KGuard要求／Issue #37）":
+    - "SDK v1 — ゼロタッチ参加・機器鍵・削除・NVS上限（Issue #37）":
       - design/sdk-v1/README.md
       - 01 — 要求・信頼構造・脅威モデル: design/sdk-v1/01-overview-threat-model.md
       - 02 — ゼロタッチ参加: design/sdk-v1/02-zero-touch-join.md
@@ -157,9 +159,9 @@ nav:
       - 04 — 削除・失効・世代下限: design/sdk-v1/04-removal-revocation.md
       - "05 — NVS状態の上限（Issue #37）": design/sdk-v1/05-nvs-state-37.md
       - 06 — 停電・再起動・中継器故障からの高速再参加: design/sdk-v1/06-fast-rejoin.md
-      - 07 — Host（KGuard）API・USB HostOps・事務所tooling: design/sdk-v1/07-host-api-tooling.md
+      - 07 — Host API・USB HostOps・事務所tooling: design/sdk-v1/07-host-api-tooling.md
       - 08 — 実装計画・試験計画・未決事項: design/sdk-v1/08-implementation-plan.md
       - "100台・1 gateway向けの経路スケール設計（Issue #41）": design/sdk-v1/routing-scale.md
-      - "group／ALL配送と送信元ごとの順序（KGuard）": design/sdk-v1/group-delivery.md
+      - "group／ALL配送と送信元ごとの順序": design/sdk-v1/group-delivery.md
       - "静的RAMの予算・role別profile・CI guard": design/sdk-v1/ram-budget.md
   - ライセンス（Apache-2.0）: https://github.com/MOVEI144/RouteLoom/blob/main/LICENSE

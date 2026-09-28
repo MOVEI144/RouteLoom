@@ -10,7 +10,7 @@
 //! hand, one transaction signs the next RRS1 and the CutoverCommit and
 //! switches the active epoch; COMMITs then flow over the 60 s
 //! old-network grace, and stragglers recover through the authenticated
-//! reissue path (no KGuard), never through a rollback.
+//! reissue path (no decider), never through a rollback.
 //!
 //! One cutover lives at a time. A revoke during Preparing commits to
 //! the current network first, then retires the target, carries the
@@ -2861,7 +2861,7 @@ impl SiteAuthority {
 
     /// Publishes a committed revoke-cutover effect to RAM (only after
     /// the commit): the cutover snapshot, the superseded owner, the
-    /// re-staged key — and the revision event KGuard watches.
+    /// re-staged key — and the revision event the decider watches.
     pub(super) fn publish_revoke_cutover(&mut self, effect: RevokeCutoverEffect, now_ms: u64) {
         let mut restaged = None;
         if let Some(updated) = effect.updated {

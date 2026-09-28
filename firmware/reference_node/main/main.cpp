@@ -95,7 +95,7 @@ class ReferenceObservationSource final : public routeloom::ObservationSource {
     std::uint8_t mode = routeloom::kCoordModeUnknown;
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
     if (coordinator_ != nullptr) {
-      mode = map_coord_mode(coordinator_->snapshot().mode);
+      mode = map_coord_mode(coordinator_->mode());
     }
 #endif
     // Legacy fixture has no coordinator: unknown, like the bridge.
@@ -332,7 +332,7 @@ void reference_attach(routeloom::espnow::EspNowRuntime& runtime,
 #if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   require_observation(runtime.node().set_observation_remote(true));
 #else
-  ctx.remote_allowed = observation_member_mode(owner->coordinator().snapshot().mode);
+  ctx.remote_allowed = observation_member_mode(owner->coordinator().mode());
   require_observation(runtime.node().set_observation_remote(ctx.remote_allowed));
 #endif
 #endif
@@ -369,7 +369,7 @@ void reference_poll(routeloom::MonotonicMs now_ms, void* opaque) {
   ctx.console.poll(*ctx.source, ctx.runtime->node().node_id(), now_ms);
 #if CONFIG_ROUTELOOM_OBSERVATION_REMOTE && !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   // Adoption and revocation change whether this member may answer over RF.
-  const bool allow = observation_member_mode(ctx.owner->coordinator().snapshot().mode);
+  const bool allow = observation_member_mode(ctx.owner->coordinator().mode());
   if (allow != ctx.remote_allowed &&
       ctx.runtime->node().set_observation_remote(allow)) {
     ctx.remote_allowed = allow;

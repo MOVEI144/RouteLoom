@@ -5,7 +5,7 @@
 # `idf` version floor — they are not registry dependencies and are not
 # repeated in `dependencies` below.
 name: routeloom/routeloom_espnow
-version: 0.1.0
+version: 2.0.0-dev
 description: >-
   RouteLoom ESP-NOW radio owner for the CORE_FIXED_250 profile: fixed-channel
   ESP-NOW transport with Wi-Fi LR250, NVS-backed counter/replay/config/ledger
@@ -20,8 +20,7 @@ tags:
   - espnow
   - routeloom
   - wifi-lr
-# Supported targets, all compiled by the required CI cells
-# (tools/ci/cells.json).
+# C3/S3/C5/C6 are the SDK 2.0 targets.
 targets:
   - esp32c3
   - esp32s3
@@ -33,4 +32,4 @@ dependencies:
   # component search path (EXTRA_COMPONENT_DIRS), or via the git dependency
   # block documented in examples/espnow_node/README.md. Not yet published to
   # the component registry.
-  routeloom/routeloom: "^0.1.0"
+  routeloom/routeloom: "^2.0.0-dev"

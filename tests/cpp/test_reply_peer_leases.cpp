@@ -1098,9 +1098,9 @@ void test_rx_metadata_v2_carries_binding_id() {
 
 void test_c_reply_peer_surface() {
   rl_reply_peer_vtable_t vtable{};
-  rl_reply_peer_vtable_init(&vtable);
+  rl_struct_init(&vtable, sizeof(vtable));
   CHECK(vtable.struct_size == sizeof(vtable));
-  CHECK(vtable.version == RL_REPLY_PEER_VERSION);
+  CHECK(vtable.version == RL_ABI_VERSION);
   CHECK(vtable.user == nullptr);
   CHECK(vtable.acquire == nullptr);
   // Argument validation without a context.

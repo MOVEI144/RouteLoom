@@ -107,7 +107,7 @@ class ValidateTests(unittest.TestCase):
                             for e in sc.validate(bad_range)))
         ok = doc(steps=[{'kind': 'join_policy',
                          'policy': {'zero_touch_open': True,
-                                    'decision_mode': 'kguard',
+                                    'decision_mode': 'external',
                                     'decision_timeout_ms': 2000}}])
         self.assertFalse(sc.validate(ok))
 

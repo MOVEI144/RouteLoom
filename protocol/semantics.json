@@ -2,7 +2,7 @@
   "schema_version": 1,
   "status": "semantic-contract-not-wire-abi",
   "wire_frozen": true,
-  "wire_profile": "WIRE_V1_CORE_FIXED_250",
+  "wire_profile": "WIRE_V2_CORE_FIXED_250",
   "frame_numeric_ids": {
     "DISCOVER": 1,
     "OFFER": 2,

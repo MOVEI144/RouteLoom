@@ -49,7 +49,7 @@ use std::path::{Path, PathBuf};
 /// Schema v2 added the TX-I2 `operations.dispatch` attachment. Schema v3
 /// added the bounded config outbox and its terminal marker. Schema v4
 /// stores versioned principals; v1-v3 files migrate atomically.
-const SCHEMA_VERSION: u32 = 4;
+pub(crate) const SCHEMA_VERSION: u32 = 4;
 
 /// Mirror of the device dispatch window (contracts `DISPATCH_WINDOW`,
 /// kept in `dispatch.rs`): lane positions further than this below the

@@ -109,7 +109,7 @@ fn usage() {
         "routeloomctl lab-site-init --spec FILE --out DIR|lab-inventory-import --site DIR --ledger FILE --node <16hex> --role endpoint|relay|gateway (local only)"
     );
     eprintln!(
-        "routeloomctl site join-list|approve --request <jr-token> --device <16hex> --role endpoint|relay|gateway [--idempotency-key K]|deny --request <jr-token> --device <16hex> --reason not_here|blocked [--idempotency-key K]|policy [--zero-touch-open true|false] [--decision-mode kguard|closed|lab_inventory] [--decision-timeout-ms 500-5000] [--pending-retry-after-s 30-3600]|members [--device <16hex> | [--after <16hex>] [--limit 1-128] [--include-removed]]|revoke --device <16hex> --expected-generation <u32> --reason removed|lost|replaced|blocked [--idempotency-key K]|gk-rotate [--expected-active-epoch <u32> [--idempotency-key K]]|cutover --expected-site-epoch <u32> --next-site-cert <hex> [--idempotency-key K]|status  (site authority over API1; cutover progress via operation-get --id <op-token>)"
+        "routeloomctl site join-list|approve --request <jr-token> --device <16hex> --role endpoint|relay|gateway [--idempotency-key K]|deny --request <jr-token> --device <16hex> --reason not_here|blocked [--idempotency-key K]|policy [--zero-touch-open true|false] [--decision-mode external|closed|lab_inventory] [--decision-timeout-ms 500-5000] [--pending-retry-after-s 30-3600]|members [--device <16hex> | [--after <16hex>] [--limit 1-128] [--include-removed]]|revoke --device <16hex> --expected-generation <u32> --reason removed|lost|replaced|blocked [--idempotency-key K]|gk-rotate [--expected-active-epoch <u32> [--idempotency-key K]]|cutover --expected-site-epoch <u32> --next-site-cert <hex> [--idempotency-key K]|channel-plan --plan-blob-hex <hex> (sign only)|status  (site authority over API1; cutover progress via operation-get --id <op-token>)"
     );
 }
 
@@ -1951,7 +1951,7 @@ fn group_get_command(args: &[String]) -> Result<String, Box<dyn std::error::Erro
 fn site_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
     let (sub, rest) = args
         .split_first()
-        .ok_or("site requires a subcommand: join-list|approve|deny|policy|members|revoke|gk-rotate|cutover|status")?;
+        .ok_or("site requires a subcommand: join-list|approve|deny|policy|members|revoke|gk-rotate|cutover|channel-plan|status")?;
     match sub.as_str() {
         "join-list" => {
             if !rest.is_empty() {
@@ -1966,6 +1966,7 @@ fn site_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
         "revoke" => site_revoke_command(rest),
         "gk-rotate" => site_gk_rotate_command(rest),
         "cutover" => site_cutover_command(rest),
+        "channel-plan" => site_channel_plan_command(rest),
         "status" => {
             if !rest.is_empty() {
                 return Err("unknown site status option".into());
@@ -1974,6 +1975,25 @@ fn site_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
         }
         other => Err(format!("unknown site subcommand: {other}").into()),
     }
+}
+
+fn site_channel_plan_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut blob = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--plan-blob-hex" => blob = Some(opt_value(&mut args, "--plan-blob-hex")?),
+            other => return Err(format!("unknown site channel-plan option: {other}").into()),
+        }
+    }
+    let blob = blob.ok_or("site channel-plan requires --plan-blob-hex")?;
+    if blob.is_empty() || !is_hex_max(&blob, 384) {
+        return Err("--plan-blob-hex must be even-length hex up to 768 chars".into());
+    }
+    Ok(site_request(
+        "site.channel_plan.sign",
+        format!("\"plan_blob_hex\":\"{}\"", blob.to_ascii_lowercase()),
+    ))
 }
 
 /// One `API1 {"v":1,...}` line for a site `method`; `params` is the
@@ -2083,6 +2103,10 @@ fn site_decide_command(
     ))
 }
 
+/// v1 spelling of `--decision-mode external` (vocabulary check allow-list:
+/// tests/test_public_vocabulary.py).
+const DEPRECATED_EXTERNAL_ALIAS: &str = "kguard";
+
 /// `site policy [flags...]`: bare reads (`join.policy.get`), any flag
 /// writes (`join.policy.set`). Ranges are the daemon's (07 §2) and are
 /// enforced there too — the CLI only checks the value shapes.
@@ -2102,9 +2126,16 @@ fn site_policy_command(args: &[String]) -> Result<String, Box<dyn std::error::Er
                 )
             }
             "--decision-mode" => {
-                let mode = opt_value(&mut args, "--decision-mode")?;
-                if !["kguard", "closed", "lab_inventory"].contains(&mode.as_str()) {
-                    return Err("--decision-mode must be kguard, closed or lab_inventory".into());
+                let mut mode = opt_value(&mut args, "--decision-mode")?;
+                // Deprecated v1 spelling of "external"; sent as "external".
+                if mode == DEPRECATED_EXTERNAL_ALIAS {
+                    eprintln!(
+                        "warning: --decision-mode {DEPRECATED_EXTERNAL_ALIAS} is deprecated; use external"
+                    );
+                    mode = "external".to_string();
+                }
+                if !["external", "closed", "lab_inventory"].contains(&mode.as_str()) {
+                    return Err("--decision-mode must be external, closed or lab_inventory".into());
                 }
                 decision_mode = Some(mode);
             }
@@ -3538,6 +3569,13 @@ mod tests {
         assert!(site_command(&args(&["join-list", "--x"])).is_err());
         assert!(site_command(&args(&[])).is_err());
         assert!(site_command(&args(&["bogus"])).is_err());
+        let plan = site_command(&args(&["channel-plan", "--plan-blob-hex", "0102"])).unwrap();
+        assert!(
+            plan.contains("\"method\":\"site.channel_plan.sign\""),
+            "{plan}"
+        );
+        assert!(plan.contains("\"plan_blob_hex\":\"0102\""), "{plan}");
+        assert!(site_command(&args(&["channel-plan", "--plan-blob-hex", "01x"])).is_err());
 
         // approve / deny: verdict owns exactly its parameter.
         let line = site_command(&args(&[
@@ -3674,13 +3712,15 @@ mod tests {
             line.contains("\"method\":\"join.policy.set\",\"params\":{\"zero_touch_open\":true,\"decision_mode\":\"closed\",\"decision_timeout_ms\":800,\"pending_retry_after_s\":120}"),
             "{line}"
         );
-        let line = site_command(&args(&["policy", "--decision-mode", "kguard"])).unwrap();
-        assert!(
-            line.contains(
-                "\"method\":\"join.policy.set\",\"params\":{\"decision_mode\":\"kguard\"}"
-            ),
-            "{line}"
-        );
+        for mode in ["external", DEPRECATED_EXTERNAL_ALIAS] {
+            let line = site_command(&args(&["policy", "--decision-mode", mode])).unwrap();
+            assert!(
+                line.contains(
+                    "\"method\":\"join.policy.set\",\"params\":{\"decision_mode\":\"external\"}"
+                ),
+                "{line}"
+            );
+        }
         assert!(site_command(&args(&["policy", "--zero-touch-open", "yes"])).is_err());
         assert!(site_command(&args(&["policy", "--decision-mode", "open"])).is_err());
         assert!(site_command(&args(&["policy", "--bogus", "1"])).is_err());

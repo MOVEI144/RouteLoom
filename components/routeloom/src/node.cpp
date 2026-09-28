@@ -4854,16 +4854,27 @@ void MeshNode::dispatch_applied(const wire::Header& data, const ByteView body,
       ++applied_stats_.refusals_no_endpoint;
     } else {
       reply = AppliedReply{};
+      if (++next_applied_ticket_ == 0) ++next_applied_ticket_;
       const AppliedRequest request{record.key, data.origin,
                                    ByteView{body.data + endpoint::kAppliedLeaseBytes,
                                             body.size - endpoint::kAppliedLeaseBytes},
-                                   data.remaining_deadline_ms};
+                                   data.remaining_deadline_ms,
+                                   (static_cast<std::uint64_t>(config_.message_session) << 32) |
+                                       next_applied_ticket_};
       {
         ExternalCallbackScope scope(in_external_callback_);
         applied_sink_->on_applied_request(request, reply);
       }
       dispatched = true;
       ++applied_stats_.requests_dispatched;
+      if (reply.deferred) {
+        // No verdict yet: nothing is committed or sent until
+        // complete_applied(); a QUERY meanwhile answers Pending, and Expired
+        // once the request deadline passed.
+        record.ticket = next_applied_ticket_;
+        record.emit_deadline_ms = now_ms + data.remaining_deadline_ms;
+        return;
+      }
       outcome = reply.outcome;
       code = reply.code;
       if (reply.size > endpoint::kAppResultDataMax ||
@@ -4889,8 +4900,45 @@ void MeshNode::dispatch_applied(const wire::Header& data, const ByteView body,
   (void)emit_applied_result(record, now_ms);
 }
 
+Status MeshNode::complete_applied(const std::uint64_t ticket, const AppliedReply& reply,
+                                  const MonotonicMs now_ms) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+  NodeGuard guard(in_call_);
+  last_clock_ms_ = now_ms;
+  if (static_cast<std::uint32_t>(ticket) == 0 || reply.deferred ||
+      reply.size > endpoint::kAppResultDataMax ||
+      reply.code >= endpoint::kAppResultSdkCodeBase) {
+    return Status::error(StatusCode::InvalidArgument, "invalid applied reply");
+  }
+  // The high half binds the ticket to this boot's message session.
+  const auto serial = static_cast<std::uint32_t>(ticket);
+  auto* record = (ticket >> 32) != config_.message_session
+      ? nullptr
+      : applied_records_.find(
+            [&](const AppliedRecord& value) { return value.ticket == serial; });
+  if (record == nullptr) return Status::error(StatusCode::NotFound, "APPLIED_TICKET_UNKNOWN");
+  if (now_ms >= record->emit_deadline_ms) {
+    return Status::error(StatusCode::Expired, "APPLIED_TICKET_EXPIRED");
+  }
+  ++work_generation_;
+  record->ticket = 0;
+  record->emit_deadline_ms =
+      std::min(record->expires_at_ms, record->emit_deadline_ms + kAppliedLateResultMs);
+  record->outcome = static_cast<std::uint8_t>(reply.outcome);
+  record->application_code = reply.code;
+  record->result_size = reply.size;
+  if (reply.size > 0) std::memcpy(record->result_data.data(), reply.data.data(), reply.size);
+  ++applied_stats_.results_committed;
+  (void)emit_applied_result(*record, now_ms);
+  return Status::success();
+}
+
 Status MeshNode::emit_applied_result(AppliedRecord& record,
                                      const MonotonicMs now_ms) noexcept {
+  if (record.ticket != 0) {
+    // A deferred verdict does not exist yet; replays and QUERYs wait for it.
+    return Status::error(StatusCode::WouldBlock, "APPLIED_PENDING");
+  }
   if (record.emits >= kAppliedMaxEmits || now_ms >= record.emit_deadline_ms ||
       now_ms < record.next_emit_ms) {
     ++applied_stats_.result_emits_suppressed;
@@ -5180,6 +5228,14 @@ void MeshNode::handle_app_result(const wire::PlainFrame& frame, const NodeId pee
         }
         return;
       }
+      if (record->ticket != 0) {
+        if (applied_answer_gate(frame.header.origin, now_ms)) {
+          emit_app_status(frame.header.origin, req_key, head.request_digest,
+                          endpoint::AppResultStatusCode::Pending, query.query_nonce,
+                          frame.header.remaining_deadline_ms, now_ms);
+        }
+        return;
+      }
       // The stored verdict answers the query — the endpoint is never rerun.
       (void)emit_applied_result(*record, now_ms);
       return;
@@ -5301,7 +5357,7 @@ void MeshNode::process_applied(const MonotonicMs now_ms) noexcept {
   // Emit retries: an unacked committed result retransmits inside its window
   // and emit budget; dedup/QUERY replays share the same counters.
   applied_records_.for_each([&](AppliedRecord& record) {
-    if (!record.acked && record.emits < kAppliedMaxEmits &&
+    if (record.ticket == 0 && !record.acked && record.emits < kAppliedMaxEmits &&
         now_ms >= record.next_emit_ms && now_ms < record.emit_deadline_ms) {
       (void)emit_applied_result(record, now_ms);
     }
@@ -5791,32 +5847,31 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
 }
 
 void MeshNode::process_awaiting_hop(const MonotonicMs now_ms) noexcept {
-  while (true) {
-    auto* expired = awaiting_hop_.find(
-        [&](const AwaitingHop& value) { return value.expires_at_ms <= now_ms; });
-    if (expired == nullptr) break;
-    TxJob job = expired->job;
-    const bool deferred = expired->busy_deferred;
-    awaiting_hop_.release(expired);
-    if (deferred) {
-      // BUSY deferral expiry re-admits the job under its BUSY readmission
-      // budget — it is not an RF-loss retry (03 §5 separate accounting).
-      readmit_after_busy(job, now_ms);
-    } else {
-      obs_hop_result(job, false, now_ms);
-      // Hop-level timeout is its own counter — folded into rf_failures too,
-      // but never reported under the wrong name (02 §counter identity).
-      // Saturates with its flag set rather than wrapping silently.
-      if (auto* bucket = job_bucket(job, now_ms)) {
-        if (bucket->hop_timeouts != UINT32_MAX) {
-          ++bucket->hop_timeouts;
-        } else {
-          bucket->saturation_mask |= kSatHopTimeouts;
+  saturating_add(work_stats_.expiry_slots_scanned, awaiting_hop_.capacity());
+  awaiting_hop_.erase_if(
+      [&](const AwaitingHop& value) { return value.expires_at_ms <= now_ms; },
+      [&](AwaitingHop& expired) {
+        TxJob& job = expired.job;
+        if (expired.busy_deferred) {
+          // BUSY deferral expiry re-admits the job under its BUSY readmission
+          // budget — it is not an RF-loss retry (03 §5 separate accounting).
+          readmit_after_busy(job, now_ms);
+          return;
         }
-      }
-      retry_or_fail(job, "HOP_ACCEPT_TIMEOUT", now_ms);
-    }
-  }
+        obs_hop_result(job, false, now_ms);
+        // Hop-level timeout is its own counter — folded into rf_failures too,
+        // but never reported under the wrong name (02 §counter identity).
+        // Saturates with its flag set rather than wrapping silently.
+        if (auto* bucket = job_bucket(job, now_ms)) {
+          if (bucket->hop_timeouts != UINT32_MAX) {
+            ++bucket->hop_timeouts;
+          } else {
+            bucket->saturation_mask |= kSatHopTimeouts;
+          }
+        }
+        saturating_inc(work_stats_.hop_accept_expired);
+        retry_or_fail(job, "HOP_ACCEPT_TIMEOUT", now_ms);
+      });
 }
 
 void MeshNode::process_delivery_timeouts(const MonotonicMs now_ms) noexcept {
@@ -5908,13 +5963,10 @@ void MeshNode::process_delivery_timeouts(const MonotonicMs now_ms) noexcept {
 }
 
 void MeshNode::expire_dedup(const MonotonicMs now_ms) noexcept {
-  while (true) {
-    auto* expired = dedup_.find(
-        [&](const DedupEntry& value) { return value.expires_at_ms <= now_ms; });
-    if (expired == nullptr) break;
-    dedup_.release(expired);
-    saturating_inc(dedup_stats_.expired);
-  }
+  saturating_add(work_stats_.expiry_slots_scanned, dedup_.capacity());
+  const std::size_t expired = dedup_.erase_if(
+      [&](const DedupEntry& value) { return value.expires_at_ms <= now_ms; });
+  saturating_add(dedup_stats_.expired, expired);
 }
 
 std::int64_t MeshNode::control_budget_balance(const MonotonicMs now_ms) noexcept {
@@ -6067,18 +6119,12 @@ void MeshNode::schedule_route_advertisements(const MonotonicMs now_ms) noexcept 
 }
 
 void MeshNode::expire_sequence_requests(const MonotonicMs now_ms) noexcept {
-  while (true) {
-    auto* expired = seqno_seen_.find(
-        [&](const SeqnoSeen& value) { return value.expires_at_ms <= now_ms; });
-    if (expired == nullptr) break;
-    seqno_seen_.release(expired);
-  }
-  while (true) {
-    auto* expired = seqno_state_.find(
-        [&](const SeqnoState& value) { return value.expires_at_ms <= now_ms; });
-    if (expired == nullptr) break;
-    seqno_state_.release(expired);
-  }
+  saturating_add(work_stats_.expiry_slots_scanned,
+                 seqno_seen_.capacity() + seqno_state_.capacity());
+  seqno_seen_.erase_if(
+      [&](const SeqnoSeen& value) { return value.expires_at_ms <= now_ms; });
+  seqno_state_.erase_if(
+      [&](const SeqnoState& value) { return value.expires_at_ms <= now_ms; });
 }
 
 void MeshNode::schedule_sequence_requests(const MonotonicMs now_ms) noexcept {
@@ -6251,7 +6297,7 @@ Status MeshNode::poll(const MonotonicMs now_ms) noexcept {
   // Expired/revoked admission transactions close before anything else may
   // transmit: no new TX leaves on a dead transaction (design-q116 §7.2).
   sweep_transactions(now_ms);
-  routes_.expire(now_ms);
+  saturating_add(work_stats_.expiry_slots_scanned, routes_.expire(now_ms));
   // P3 (03 §6/§7): decay the per-peer observation windows, release stale
   // busy feedback at its TTL, refresh effective link costs and advance the
   // route-switch hysteresis before any selection change is advertised.

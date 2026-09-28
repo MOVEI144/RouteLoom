@@ -114,6 +114,38 @@ class FixedPool {
     return false;
   }
 
+  // Releases every live element `predicate` matches in one slot-order pass
+  // (find()+release() per element rescans from slot 0 each time). Returns
+  // the number released.
+  template <typename Predicate>
+  std::size_t erase_if(Predicate predicate) noexcept {
+    std::size_t erased = 0;
+    for (std::size_t i = 0; i < Capacity; ++i) {
+      if (!used_[i] || !predicate(items_[i])) continue;
+      used_[i] = false;
+      reset(items_[i]);
+      ++erased;
+    }
+    return erased;
+  }
+
+  // As above; `on_erase` receives each matched value after its slot is
+  // released, so it may allocate in this pool (a slot at a later index is
+  // visited in the same pass, an earlier one on the next call).
+  template <typename Predicate, typename OnErase>
+  std::size_t erase_if(Predicate predicate, OnErase on_erase) noexcept {
+    std::size_t erased = 0;
+    for (std::size_t i = 0; i < Capacity; ++i) {
+      if (!used_[i] || !predicate(items_[i])) continue;
+      T value = std::move(items_[i]);
+      used_[i] = false;
+      reset(items_[i]);
+      ++erased;
+      on_erase(value);
+    }
+    return erased;
+  }
+
   // Contract: `fn` must not mutate THIS pool — release()/clear() of the
   // iterated element is safe only by statement ordering (nothing may touch
   // it afterwards), and allocate() can make a later index revisit a slot

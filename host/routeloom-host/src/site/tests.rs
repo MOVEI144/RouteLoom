@@ -22,7 +22,7 @@ use super::transport::{
 use super::*;
 
 const T0: u64 = 1_790_000_000_000;
-const KGUARD: u32 = 501;
+const DECIDER: u32 = 501;
 
 #[test]
 fn lab_inventory_only_allows_the_bound_site_and_key() {
@@ -618,7 +618,7 @@ fn lab_revoked_node_is_not_reapproved_from_inventory() {
     service
         .with(|a| {
             a.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device: node,
                     expected_generation: 1,
@@ -856,7 +856,7 @@ fn decide(
     service
         .with(|a| {
             a.decide(
-                KGUARD,
+                DECIDER,
                 DecideRequest {
                     join_request_id: id,
                     device,
@@ -914,7 +914,7 @@ fn revoke(
     service
         .with(|a| {
             a.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device,
                     expected_generation: generation,
@@ -935,7 +935,7 @@ fn archive(
 ) -> (Result<String, SiteError>, Events) {
     service.with(|a| {
         a.archive_removed(
-            KGUARD,
+            DECIDER,
             ArchiveRequest {
                 devices: devices.to_vec(),
                 key: key.into(),
@@ -1018,7 +1018,7 @@ fn rotate(service: &SiteService, expected: u32, key: &str, now: u64) -> Result<S
     service
         .with(|a| {
             a.rotate(
-                KGUARD,
+                DECIDER,
                 RotateRequest {
                     expected_active_epoch: expected,
                     key: key.into(),
@@ -1271,7 +1271,7 @@ fn pending_then_allow_on_the_next_attempt() {
     assert!(matches!(outcome, Outcome::Waiting));
     assert_eq!(kinds(&events), ["device.discovered", "join.request"]);
     let id = request_id(&events).unwrap();
-    // KGuard: unassigned → pending.
+    // The decider: unassigned → pending.
     let answer = decide(
         &service,
         id,
@@ -1303,7 +1303,7 @@ fn pending_then_allow_on_the_next_attempt() {
         Some("00a1000000001234")
     );
 
-    // Next attempt (after retry_after): a new request, KGuard allows.
+    // Next attempt (after retry_after): a new request, the decider allows.
     let later = T0 + 31_000;
     let (mut exchange, outcome, events) = device.start(&service, &transport, later);
     assert!(matches!(outcome, Outcome::Waiting));
@@ -1355,10 +1355,10 @@ fn pending_then_allow_on_the_next_attempt() {
     assert_eq!(kinds(&events), ["member.confirmed"]);
 }
 
-/// V1-J09 / V1-H02: KGuard silent → PendingAssignment at the deadline; a
+/// V1-J09 / V1-H02: the decider silent → PendingAssignment at the deadline; a
 /// later allow applies at the next attempt without a new join.request.
 #[test]
-fn silent_kguard_pends_and_a_late_decision_applies_next_time() {
+fn silent_decider_pends_and_a_late_decision_applies_next_time() {
     let (service, transport) = service();
     let mut device = SimDevice::new(0x00A1_0000_0000_2001, 0x72);
     let (mut exchange, outcome, events) = device.start(&service, &transport, T0);
@@ -1378,7 +1378,7 @@ fn silent_kguard_pends_and_a_late_decision_applies_next_time() {
         panic!("expected PendingAssignment");
     };
     assert_eq!(retry_after_s, JoinPolicy::default().pending_retry_after_s);
-    // The request is still open; KGuard decides late.
+    // The request is still open; the decider decides late.
     let (list, _) = service.with(|a| a.join_requests_json(T0 + 5_000));
     assert_eq!(
         json(&list)
@@ -1413,6 +1413,237 @@ fn silent_kguard_pends_and_a_late_decision_applies_next_time() {
         device.site.as_ref().unwrap().member.role,
         u32::from(ROLE_RELAY)
     );
+}
+
+type BatchFilter = fn(&Batch) -> bool;
+
+/// Fails the first commit the armed filter matches (fault injection).
+struct FailBatchStore {
+    inner: MemoryStore,
+    armed: Arc<Mutex<Option<BatchFilter>>>,
+}
+
+impl SiteStore for FailBatchStore {
+    fn load(&mut self) -> Result<Snapshot, StoreError> {
+        self.inner.load()
+    }
+    fn commit(&mut self, batch: &Batch) -> Result<(), StoreError> {
+        let mut armed = self.armed.lock().unwrap();
+        if armed.is_some_and(|hit| hit(batch)) {
+            *armed = None;
+            return Err(StoreError("injected auxiliary commit failure".into()));
+        }
+        self.inner.commit(batch)
+    }
+    fn durable(&self) -> bool {
+        false
+    }
+}
+
+/// #127: auxiliary records commit before RAM and events. A failed
+/// discovered-table write changes neither the table, the requests nor the
+/// event ring and answers AuthorityBusy; a failed request close keeps the
+/// request open in RAM exactly as the store still has it.
+#[test]
+fn auxiliary_record_failures_leave_ram_unchanged() {
+    let armed: Arc<Mutex<Option<BatchFilter>>> = Arc::new(Mutex::new(Some(|batch| {
+        batch
+            .docs
+            .iter()
+            .any(|(kind, _, _)| *kind == store::DocKind::Discovered)
+    })));
+    let (service, transport) = service_with(Box::new(FailBatchStore {
+        inner: MemoryStore::default(),
+        armed: Arc::clone(&armed),
+    }));
+    let mut device = SimDevice::new(0x00A1_0000_0000_2127, 0x27);
+    let (_, outcome, events) = device.start(&service, &transport, T0);
+    assert!(
+        matches!(outcome, Outcome::Result(JoinResult::AuthorityBusy { .. })),
+        "{outcome:?}"
+    );
+    assert!(armed.lock().unwrap().is_none(), "the failure was injected");
+    assert!(
+        service
+            .with(|a| a.discovered.is_empty() && a.requests.is_empty())
+            .0
+    );
+    assert!(kinds(&events)
+        .iter()
+        .all(|k| k != "device.discovered" && k != "join.request"));
+
+    // Healthy store: the attempt goes through, the decider is silent, and
+    // a late deny applies at the next attempt — whose request close fails.
+    let (mut exchange, outcome, events) = device.start(&service, &transport, T0 + 10_000);
+    assert!(matches!(outcome, Outcome::Waiting), "{outcome:?}");
+    let id = request_id(&events).unwrap();
+    service.tick(HostTime::sync(T0 + 12_000));
+    assert!(matches!(
+        device.finish(&mut exchange, &transport),
+        Outcome::Result(JoinResult::PendingAssignment { .. })
+    ));
+    decide(
+        &service,
+        id,
+        device.node,
+        Verdict::DenyNotHere,
+        "late",
+        T0 + 13_000,
+    )
+    .unwrap();
+    *armed.lock().unwrap() = Some(|batch| {
+        batch
+            .docs
+            .iter()
+            .any(|(kind, _, doc)| *kind == store::DocKind::JoinRequest && doc.is_none())
+    });
+    let (outcome, _) = device.attempt(&service, &transport, T0 + 16_000);
+    assert!(
+        matches!(outcome, Outcome::Result(JoinResult::DenyNotHere)),
+        "{outcome:?}"
+    );
+    assert!(armed.lock().unwrap().is_none(), "the failure was injected");
+    let (in_ram, in_store) = service
+        .with(|a| {
+            let stored = a.store.load().unwrap();
+            (
+                a.requests.contains_key(&id),
+                stored
+                    .docs
+                    .contains_key(&(store::DocKind::JoinRequest, records::h16(id))),
+            )
+        })
+        .0;
+    assert!(in_ram && in_store);
+}
+
+#[test]
+fn failed_discovery_refresh_keeps_existing_record() {
+    let armed: Arc<Mutex<Option<BatchFilter>>> = Arc::new(Mutex::new(None));
+    let (service, transport) = service_with(Box::new(FailBatchStore {
+        inner: MemoryStore::default(),
+        armed: Arc::clone(&armed),
+    }));
+    let mut device = SimDevice::new(0x00A1_0000_0000_2227, 0x28);
+    let (mut exchange, outcome, _) = device.start(&service, &transport, T0);
+    assert!(matches!(outcome, Outcome::Waiting));
+    service.tick(HostTime::sync(T0 + 2_000));
+    assert!(matches!(
+        device.finish(&mut exchange, &transport),
+        Outcome::Result(JoinResult::PendingAssignment { .. })
+    ));
+    let before = service
+        .with(|a| a.discovered.get(&device.node).unwrap().clone())
+        .0;
+    *armed.lock().unwrap() = Some(|batch| {
+        batch
+            .docs
+            .iter()
+            .any(|(kind, _, _)| *kind == store::DocKind::Discovered)
+    });
+    let (outcome, _) = device.attempt(&service, &transport, T0 + 70_000);
+    assert!(matches!(
+        outcome,
+        Outcome::Result(JoinResult::AuthorityBusy { .. })
+    ));
+    assert!(armed.lock().unwrap().is_none());
+    service.with(|a| {
+        let in_ram = a.discovered.get(&device.node).unwrap();
+        let in_store = a.store.load().unwrap().docs
+            [&(store::DocKind::Discovered, records::h16(device.node))]
+            .clone();
+        assert_eq!(in_ram, &before);
+        assert_eq!(in_store, before.doc());
+    });
+}
+
+#[test]
+fn failed_pending_verdict_returns_busy_without_publishing_it() {
+    let armed: Arc<Mutex<Option<BatchFilter>>> = Arc::new(Mutex::new(None));
+    let (service, transport) = service_with(Box::new(FailBatchStore {
+        inner: MemoryStore::default(),
+        armed: Arc::clone(&armed),
+    }));
+    service.with(|a| {
+        a.update_policy_at(
+            &PolicyPatch {
+                decision_mode: Some(DecisionMode::Closed),
+                ..PolicyPatch::default()
+            },
+            T0,
+        )
+        .unwrap();
+    });
+    *armed.lock().unwrap() = Some(|batch| {
+        batch.docs.iter().any(|(kind, _, doc)| {
+            *kind == store::DocKind::Discovered
+                && doc
+                    .as_ref()
+                    .is_some_and(|doc| doc.contains("\"last_verdict\":\"pending\""))
+        })
+    });
+    let mut device = SimDevice::new(0x00A1_0000_0000_2327, 0x29);
+    let (_, outcome, _) = device.start(&service, &transport, T0);
+    assert!(matches!(
+        outcome,
+        Outcome::Result(JoinResult::AuthorityBusy { .. })
+    ));
+    assert!(armed.lock().unwrap().is_none());
+    service.with(|a| {
+        let in_ram = a.discovered.get(&device.node).unwrap();
+        let in_store = a.store.load().unwrap().docs
+            [&(store::DocKind::Discovered, records::h16(device.node))]
+            .clone();
+        assert_eq!(in_ram.last_verdict, "awaiting");
+        assert_eq!(in_store, in_ram.doc());
+    });
+}
+
+#[test]
+fn committed_deny_reaches_current_attempt_after_auxiliary_failure() {
+    let armed: Arc<Mutex<Option<BatchFilter>>> = Arc::new(Mutex::new(None));
+    let (service, transport) = service_with(Box::new(FailBatchStore {
+        inner: MemoryStore::default(),
+        armed: Arc::clone(&armed),
+    }));
+    let mut device = SimDevice::new(0x00A1_0000_0000_2427, 0x2A);
+    let (mut exchange, outcome, events) = device.start(&service, &transport, T0);
+    assert!(matches!(outcome, Outcome::Waiting));
+    let id = request_id(&events).unwrap();
+    *armed.lock().unwrap() = Some(|batch| {
+        batch.docs.iter().any(|(kind, _, doc)| {
+            *kind == store::DocKind::Discovered
+                && doc
+                    .as_ref()
+                    .is_some_and(|doc| doc.contains("\"last_verdict\":\"not_here\""))
+        })
+    });
+    let response = decide(
+        &service,
+        id,
+        device.node,
+        Verdict::DenyNotHere,
+        "deny-aux-fault",
+        T0 + 1,
+    )
+    .unwrap();
+    assert_eq!(
+        json(&response).get("applied").unwrap().as_str(),
+        Some("current_attempt")
+    );
+    assert!(armed.lock().unwrap().is_none());
+    assert!(matches!(
+        device.finish(&mut exchange, &transport),
+        Outcome::Result(JoinResult::DenyNotHere)
+    ));
+    service.with(|a| {
+        let in_ram = a.discovered.get(&device.node).unwrap();
+        let in_store = a.store.load().unwrap().docs
+            [&(store::DocKind::Discovered, records::h16(device.node))]
+            .clone();
+        assert_eq!(in_ram.last_verdict, "awaiting");
+        assert_eq!(in_store, in_ram.doc());
+    });
 }
 
 /// A late pending/deny decision applies at the next attempt; an early
@@ -1572,7 +1803,7 @@ fn decisions_are_idempotent() {
 
 /// V1-H07 / 07 §3 crash rule: approval committed, host dies before
 /// message_4 — the device's retry after restart gets the same MemberCert
-/// (reissued, no KGuard), from the SQLite store.
+/// (reissued, no decider), from the SQLite store.
 #[test]
 fn restart_after_commit_reissues_the_same_member_cert() {
     let dir = std::env::temp_dir().join(format!(
@@ -1701,7 +1932,7 @@ fn removal_end_to_end() {
     let revoke = |generation, key: &str, now: u64| {
         service.with(|a| {
             a.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device: device.node,
                     expected_generation: generation,
@@ -1764,7 +1995,7 @@ fn removal_end_to_end() {
         "{outcome:?}"
     );
     assert!(device.site.is_none());
-    // KGuard sees the removed identity, but its NodeId cannot be re-allowed.
+    // The decider sees the removed identity, but its NodeId cannot be re-allowed.
     let (_, outcome, events) = device.start(&service, &transport, T0 + 660_000);
     assert!(matches!(outcome, Outcome::Waiting));
     let request = events
@@ -1843,7 +2074,7 @@ fn removed_recovery_notice_uses_retained_network() {
     service
         .with(|a| {
             a.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device: device.node,
                     expected_generation: 1,
@@ -2068,7 +2299,7 @@ fn store_failures_never_become_success() {
     assert_eq!(error.code, "STORE_FAILURE");
     assert!(error.retryable);
     assert!(service.with(|a| a.devices.is_empty()).0);
-    // The exchange is still waiting; KGuard retries and it goes through.
+    // The exchange is still waiting; the decider retries and it goes through.
     decide(
         &service,
         id,
@@ -2333,7 +2564,7 @@ fn review_concurrent_different_keys_rechecks_current_membership() {
     // Revocation does not release a NodeId for a waiting request.
     let (revoked, _) = service.with(|auth| {
         auth.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device: a.node,
                 expected_generation: 1,
@@ -2382,7 +2613,7 @@ fn review_revoked_membership_allows_explicit_replacement_key() {
         .0;
     let (revoked, _) = service.with(|auth| {
         auth.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device: a.node,
                 expected_generation: 1,
@@ -2496,7 +2727,7 @@ fn review_replacement_flow_survives_a_restart() {
         a.finish(&mut exchange, &transport);
         let (revoked, _) = service.with(|auth| {
             auth.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device: node,
                     expected_generation: 1,
@@ -2598,7 +2829,7 @@ fn review_late_allow_follows_the_current_membership() {
     .unwrap();
     a.finish(&mut exchange, &transport);
     // B's request while A is a member: kid_conflict is stored and shown
-    // to KGuard, but it is not the final word.
+    // to the decider, but it is not the final word.
     let mut b = SimDevice::new(a.node, 0xC8);
     let (_, outcome, events) = b.start(&service, &transport, T0 + 100);
     assert!(matches!(outcome, Outcome::Waiting));
@@ -2612,7 +2843,7 @@ fn review_late_allow_follows_the_current_membership() {
     // NOT_FOUND, not a resurrection.
     let (revoked, _) = service.with(|auth| {
         auth.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device: a.node,
                 expected_generation: 1,
@@ -2660,7 +2891,7 @@ fn review_late_allow_follows_the_current_membership() {
     let mut c = SimDevice::new(0x00A1_0000_0000_C005, 0xC9);
     let (_, _, events) = c.start(&service, &transport, T0 + 300);
     let id_c = request_id(&events).unwrap();
-    service.tick(HostTime::sync(T0 + 300 + 2_000)); // KGuard silent → pending, request open
+    service.tick(HostTime::sync(T0 + 300 + 2_000)); // the decider silent → pending, request open
     transport.take();
     let first = decide(
         &service,
@@ -2691,7 +2922,7 @@ fn review_late_allow_follows_the_current_membership() {
     assert_eq!(live_replay, first);
     let (revoked, _) = service.with(|auth| {
         auth.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device: c.node,
                 expected_generation: 1,
@@ -4589,7 +4820,7 @@ fn review_revoke_discards_unflushed_group_key_commands() {
         .with(|a| {
             a.tick(HostTime::sync(T0 + 1_000));
             a.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device: victim.node,
                     expected_generation: 1,
@@ -4898,7 +5129,7 @@ fn revoke_rrs(
 ) -> (u64, routeloom_json::Json) {
     let (answer, _) = service.with(|a| {
         a.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device,
                 expected_generation: generation,
@@ -5167,7 +5398,7 @@ fn unfinished_operation_is_not_evicted_at_capacity() {
     let result = service
         .with(|a| {
             a.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device: leaver.node,
                     expected_generation: 1,
@@ -5759,6 +5990,24 @@ fn policy_encoding_roundtrips_generation() {
     let decoded = JoinPolicy::decode(&full[..8]).unwrap();
     assert_eq!(decoded.policy_generation, 0);
     assert!(!decoded.zero_touch_open);
+}
+
+/// #194: the neutral name keeps stored mode byte 0. Rows written before
+/// the rename (8 B pre-generation, 12 B with generation) decode as
+/// `External` and re-encode to the same bytes.
+#[test]
+fn policy_mode_zero_rows_decode_as_external() {
+    let row8 = [1, 0, 0x07, 0xD0, 0, 0, 0, 60];
+    let row12 = [1, 0, 0x07, 0xD0, 0, 0, 0, 60, 0, 0, 0, 7];
+    let old = JoinPolicy::decode(&row8).unwrap();
+    assert_eq!(old.decision_mode, DecisionMode::External);
+    assert_eq!(old.encode()[..8], row8);
+    let current = JoinPolicy::decode(&row12).unwrap();
+    assert_eq!(current.decision_mode, DecisionMode::External);
+    assert_eq!(current.policy_generation, 7);
+    assert_eq!(current.encode(), row12);
+    assert_eq!(JoinPolicy::default().encode()[1], 0);
+    assert!(current.json().contains("\"decision_mode\":\"external\""));
 }
 
 /// dev-flow §6.5 / D09: the rollcall lane's pressure probe is true while

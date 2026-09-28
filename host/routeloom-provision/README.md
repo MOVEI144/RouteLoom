@@ -76,7 +76,7 @@ be signed by the key it carries; otherwise no DevCert is issued. Output:
 `devcert.cwt`, `identity-bundle.json` (`routeloom-identity-bundle-v1`:
 node id, flags, anchors, DevCert — no secret) and `inventory.json`
 (`routeloom-inventory-v1`: the same record as the stdout line, with a
-format marker, for KGuard's assignment pre-registration). The device verb
+format marker, for the application's assignment pre-registration). The device verb
 seals the bundle into `rlsec`/`rlident` after checking the DevCert names
 its own key.
 
@@ -115,8 +115,8 @@ readback. A sealed `console_locked` flag refuses every verb.
 routeloomctl provision-identity --ca-key devca.key --spec identity-spec.json \
     --node 00a1000000001234 --serial 1 --out-dir dev-00a1000000001234
 cd dev-00a1000000001234
-python -m esp_idf_nvs_partition_gen generate rlsec-nvs.csv rlsec.bin 0x10000   # gateway: 0x20000
-esptool.py write_flash 0x190000 rlsec.bin   # the rlsec offset in firmware/*/partitions.csv
+python -m esp_idf_nvs_partition_gen generate rlsec-nvs.csv rlsec.bin 0x20000   # PT-4M-v2, every role
+esptool.py write_flash 0x20000 rlsec.bin   # the rlsec offset in firmware/*/partitions.csv
 ```
 
 The key is generated on this host; the tool proves possession to itself

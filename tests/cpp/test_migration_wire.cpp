@@ -12,6 +12,8 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <string>
 #include <vector>
@@ -20,10 +22,12 @@
 #include "routeloom/autonomy_wire.hpp"
 #include "routeloom/migration.hpp"
 #include "routeloom/migration_wire.hpp"
+#include "routeloom/site_signed.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 
 #include "test_ledger.hpp"
+#include "test_sdkv1.hpp"
 #include "test_security.hpp"
 
 namespace {
@@ -378,16 +382,15 @@ class RecordingOwner final : public MigrationOwnerPort {
 
 
 struct AgentRig {
-  AgentRig(NodeId self, bool authority_role, ChannelCoordinator& coordinator)
+  // `site` swaps the test verifier for a real one (the V2-08 SAK path).
+  AgentRig(NodeId self, bool authority_role, ChannelCoordinator& coordinator,
+           CommitSignatureVerifier* site = nullptr)
       : wire(self),
         runner(port, ops),
-        authority(authority_role
-                      ? MigrationAuthority{MigrationAuthorityConfig{kNet,
-                                                                   kAuthority},
-                                           verifier, &ledger}
-                      : MigrationAuthority{MigrationAuthorityConfig{kNet,
-                                                                   kAuthority},
-                                           verifier, nullptr}),
+        authority(MigrationAuthority{
+            MigrationAuthorityConfig{kNet, kAuthority},
+            site != nullptr ? *site : static_cast<CommitSignatureVerifier&>(verifier),
+            authority_role ? &ledger : nullptr}),
         agent(make_config(self, authority_role), wire, owner, storage,
               authority, runner, &coordinator) {
     (void)ledger.initialize();
@@ -492,7 +495,8 @@ AuthorityOperation make_operation(const MigrationPlan& p,
 // participant (kSelf) on a frame-level bus. pump() advances both agents,
 // their serialized runners and the frame delivery exactly once.
 struct AgentWorld {
-  AgentWorld() {
+  explicit AgentWorld(CommitSignatureVerifier* site = nullptr)
+      : auth{kAuthority, true, coord_auth, site}, part{kSelf, false, coord_part, site} {
     auth.wire.peers = {kSelf};
     part.wire.peers = {kAuthority};
     (void)auth.agent.resume(0);
@@ -501,8 +505,8 @@ struct AgentWorld {
 
   ChannelCoordinator coord_auth{coordinator_config(kAuthority)};
   ChannelCoordinator coord_part{coordinator_config(kSelf)};
-  AgentRig auth{kAuthority, true, coord_auth};
-  AgentRig part{kSelf, false, coord_part};
+  AgentRig auth;
+  AgentRig part;
 
   void pump(MonotonicMs now) {
     auth.agent.poll(now);
@@ -1109,6 +1113,35 @@ void test_agent_release_requires_offer() {
                         ByteView{other.snap_sig.data(), 32}, false, kNow,
                         rejected)
             .code == StatusCode::IntegrityError);
+}
+
+void test_issuer_plan_binding_and_time_overflow() {
+  AgentWorld world;
+  const IssuedPlan issued = issue_plan(1, kNow + 30000, 1);
+  VerifiedAuthorityPlan token{};
+  MigrationPlan mismatched = issued.plan;
+  mismatched.new_channel = 11;
+  CHECK(world.auth.agent.offer_plan(
+      mismatched, ByteView{issued.blob.data(), issued.blob_size}, issued.operation,
+      ByteView{issued.signature.data(), issued.signature.size()}, issued.plan_hash,
+      ByteView{}, ByteView{}, false, kNow, token).code == StatusCode::IntegrityError);
+  CHECK(!token.valid());
+
+  IssuedPlan wrapped = issued;
+  wrapped.plan.switch_reference_ms = std::numeric_limits<MonotonicMs>::max() - 50;
+  wrapped.plan.expiry_ms = std::numeric_limits<MonotonicMs>::max() - 1;
+  CHECK_OK(plan_encode(wrapped.plan,
+                       MutableByteView{wrapped.blob.data(), wrapped.blob.size()},
+                       wrapped.blob_size));
+  wrapped.plan_hash = plan_digest(ByteView{wrapped.blob.data(), wrapped.blob_size});
+  wrapped.operation = make_operation(wrapped.plan, wrapped.plan_hash);
+  wrapped.signature = sign_commit(wrapped.operation, wrapped.plan_hash, wrapped.plan.new_epoch);
+  AgentWorld wrapped_world;
+  CHECK(wrapped_world.auth.agent.offer_plan(
+      wrapped.plan, ByteView{wrapped.blob.data(), wrapped.blob_size}, wrapped.operation,
+      ByteView{wrapped.signature.data(), wrapped.signature.size()}, wrapped.plan_hash,
+      ByteView{}, ByteView{}, false, kNow, token).code == StatusCode::InvalidArgument);
+  CHECK(!token.valid());
 }
 
 // The bounded pending queue drops the NEW send and reports it — never an
@@ -1810,6 +1843,156 @@ void test_exchange_duplicate_delivery() {
 
 }  // namespace
 
+// --- V2-08: SAK-signed manual channel plan --------------------------------------
+// The Rust Site Authority signs two plans (protocol/site-signed-golden: 1 -> 6,
+// then back 6 -> 1). Gateway and member verify them with SiteCommitVerifier
+// over the adopted SiteCert and both switch and return; a forged or empty
+// commit signature never issues.
+
+struct SitePlan {
+  MigrationPlan plan{};
+  std::vector<std::uint8_t> blob;
+  Digest256 plan_hash{};
+  AuthorityOperation operation{};
+  std::vector<std::uint8_t> signature;
+  std::vector<std::uint8_t> snapshot;
+  std::vector<std::uint8_t> snapshot_signature;
+};
+
+std::string golden_value(const std::string& text, const std::string& key) {
+  const std::size_t at = text.find("\"" + key + "\":");
+  CHECK(at != std::string::npos);
+  std::size_t begin = at + key.size() + 3;
+  if (text[begin] == '"') ++begin;
+  return text.substr(begin, text.find_first_of("\",\n", begin) - begin);
+}
+
+std::vector<std::uint8_t> golden_bytes(const std::string& text, const std::string& key) {
+  const std::string hex = golden_value(text, key);
+  std::vector<std::uint8_t> out(hex.size() / 2);
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    out[i] = static_cast<std::uint8_t>(std::stoul(hex.substr(2 * i, 2), nullptr, 16));
+  }
+  return out;
+}
+
+SitePlan load_site_plan(const char* name) {
+  std::ifstream file(std::string(ROUTELOOM_SITE_SIGNED_GOLDEN_DIR) + "/" + name + ".json");
+  const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+  SitePlan out;
+  out.blob = golden_bytes(text, "plan_blob_hex");
+  CHECK_OK(plan_decode(ByteView{out.blob.data(), out.blob.size()}, out.plan));
+  // The device's own digest must match the Rust issuer's.
+  out.plan_hash = plan_digest(ByteView{out.blob.data(), out.blob.size()});
+  const std::vector<std::uint8_t> rust_hash = golden_bytes(text, "plan_hash_hex");
+  CHECK(std::memcmp(rust_hash.data(), out.plan_hash.data(), 32) == 0);
+  out.operation.network = out.plan.network;
+  out.operation.authority = out.plan.authority;
+  out.operation.generation = out.plan.authority_generation;
+  out.operation.sequence = out.plan.operation_sequence;
+  out.operation.kind = AuthorityOperationKind::ChannelMigration;
+  out.operation.previous_state_hash = out.plan.previous_state_hash;
+  out.operation.operation_hash =
+      bind_operation_payload(AuthorityOperationKind::ChannelMigration,
+                             ByteView{out.plan_hash.data(), out.plan_hash.size()});
+  out.signature = golden_bytes(text, "commit_signature_hex");
+  out.snapshot = golden_bytes(text, "snapshot_hex");
+  out.snapshot_signature = golden_bytes(text, "snapshot_signature_hex");
+  return out;
+}
+
+sdkv1::SiteRecord sim_site() {
+  sdkv1::CertClaims claims{};
+  claims.type = sdkv1::CertType::Site;
+  claims.issuer = 0x05CA000000000001ULL;
+  claims.subject = kAuthority;
+  claims.pubkey = routeloom_test::test_keypair(0x62).pub;
+  claims.network_low32 = static_cast<std::uint32_t>(kNet);
+  claims.usage = sdkv1::kSiteUsageAuthority;
+  claims.serial = 7;
+  sdkv1::SiteRecord site{};
+  site.state = sdkv1::SiteState::Member;
+  site.site_id = kAuthority;
+  site.network = kNet;
+  site.site_cert = sdkv1_test::issue(claims, routeloom_test::test_keypair(0x61));
+  return site;
+}
+
+void run_site_plan(AgentWorld& world, const SitePlan& p, MonotonicMs& now) {
+  VerifiedAuthorityPlan token{};
+  CHECK_OK(world.auth.agent.offer_plan(
+      p.plan, ByteView{p.blob.data(), p.blob.size()}, p.operation,
+      ByteView{p.signature.data(), p.signature.size()}, p.plan_hash, ByteView{}, ByteView{},
+      false, now, token));
+  CHECK(token.valid() && !token.experimental());
+  world.pump_n(now, 30);
+  now += 5000;  // the authority's TimeSync arms the member's clock
+  world.pump_n(now, 30);
+  CHECK_OK(world.auth.agent.release_commit(now));
+  world.pump_n(now, 30);
+  CHECK(world.part.agent.participant().phase() == ParticipantPhase::Committed);
+  now = p.plan.switch_reference_ms + 1;
+  world.pump(now);
+  world.pump(now + 1);
+  world.pump_n(now, 10);
+  world.part.agent.note_link_activity(kAuthority, now + 2);
+  world.auth.agent.note_link_activity(kSelf, now + 2);
+  now += 35000;
+  world.pump_n(now, 10);
+}
+
+void test_site_signed_plan_switch_and_back() {
+  SiteCommitVerifier verifier;
+  CHECK(!verifier.ready());
+  CHECK_OK(verifier.provision(sim_site()));
+  AgentWorld world(&verifier);
+  MonotonicMs now = kNow;
+  const SitePlan forward = load_site_plan("channel_plan_forward");
+  const SitePlan back = load_site_plan("channel_plan_back");
+  for (const SitePlan* signed_plan : {&forward, &back}) {
+    RecoverySnapshot snapshot{};
+    CHECK_OK(snapshot_decode(ByteView{signed_plan->snapshot.data(), signed_plan->snapshot.size()},
+                             snapshot));
+    CHECK(snapshot.plan_hash == signed_plan->plan_hash);
+    CHECK(snapshot.plan_blob_size == signed_plan->blob.size());
+    CHECK(std::memcmp(snapshot.plan_blob.data(), signed_plan->blob.data(),
+                      signed_plan->blob.size()) == 0);
+    CHECK_OK(verifier.verify_snapshot(
+        ByteView{signed_plan->snapshot.data(), signed_plan->snapshot.size()},
+        ByteView{signed_plan->snapshot_signature.data(), signed_plan->snapshot_signature.size()}));
+  }
+  std::vector<std::uint8_t> forged_snapshot = forward.snapshot_signature;
+  forged_snapshot[0] ^= 1;
+  CHECK(verifier.verify_snapshot(ByteView{forward.snapshot.data(), forward.snapshot.size()},
+                                 ByteView{forged_snapshot.data(), forged_snapshot.size()})
+            .code == StatusCode::AuthenticationFailed);
+
+  // Forged and unsigned evidence never reach the ledger or the air.
+  std::vector<std::uint8_t> forged = forward.signature;
+  forged[10] ^= 0x01U;
+  VerifiedAuthorityPlan token{};
+  for (const ByteView signature :
+       {ByteView{forged.data(), forged.size()}, ByteView{}}) {
+    CHECK(world.auth.agent
+              .offer_plan(forward.plan, ByteView{forward.blob.data(), forward.blob.size()},
+                          forward.operation, signature, forward.plan_hash, ByteView{},
+                          ByteView{}, false, now, token)
+              .code == StatusCode::AuthenticationFailed);
+    CHECK(!token.valid());
+  }
+  CHECK(world.auth.wire.sent.empty());
+
+  run_site_plan(world, forward, now);
+  CHECK(world.part.port.committed == 6 && world.auth.port.committed == 6);
+  CHECK(world.part.agent.participant().active_epoch().value == 1);
+
+  now = back.plan.switch_reference_ms - 30000;  // past the 10 min cooldown
+  run_site_plan(world, back, now);
+  CHECK(world.part.port.committed == 1 && world.auth.port.committed == 1);
+  CHECK(world.part.agent.participant().active_epoch().value == 2);
+  CHECK(world.auth.agent.participant().active_epoch().value == 2);
+}
+
 int main() {
   test_codecs_roundtrip();
   test_codecs_reject_malformed();
@@ -1834,8 +2017,10 @@ int main() {
   test_agent_live_reconcile();
   test_agent_reconcile_exhaustion_required();
   test_agent_release_requires_offer();
+  test_issuer_plan_binding_and_time_overflow();
   test_agent_pending_bounded();
   test_agent_authority_stopped();
+  test_site_signed_plan_switch_and_back();
   if (failures != 0) {
     std::fprintf(stderr, "%d test checks failed\n", failures);
     return 1;

@@ -1,11 +1,11 @@
 //! End to end through the daemon (plan P3-3 acceptance): the real API1
 //! socket (`serve_client`, peer-credential principal, ACL), the Site
-//! Authority on a SQLite store, KGuard as `routeloom_client::site::
-//! KGuardMock` driving the `SiteAdmin` facade over the socket, and a
+//! Authority on a SQLite store, the assignment-table example driving the
+//! `SiteAdmin` facade over the socket, and a
 //! simulated device (Rust EDHOC Initiator + routeloom-join device checks)
 //! on the in-process join transport.
 //!
-//! discovered → pending → KGuard assigns → Allow verified by
+//! discovered → pending → the decider assigns → Allow verified by
 //! `join_allow_verify`; deny not_here; removal with a verified
 //! RemovalNotice; the event stream; the ACL (V1-H06); idempotency (V1-H03).
 //! G-SEC P5 adds the `group_keys.*` API over the same socket (status,
@@ -19,8 +19,9 @@ use std::sync::{mpsc, Arc, Barrier, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use super::assignment_table::{Assignment, AssignmentTable};
 use routeloom_client::api1::RouteLoomTransport;
-use routeloom_client::site::{Assignment, Decision, KGuardMock, RemovalReason, Role, SiteAdmin};
+use routeloom_client::site::{Decision, RemovalReason, Role, SiteAdmin};
 use routeloom_client::TransportError;
 use routeloom_join::JoinResult;
 
@@ -151,14 +152,14 @@ fn raw_api1(state: &Arc<State>, uid: u32, line: &str) -> String {
 }
 
 #[test]
-fn kguard_drives_the_join_over_the_api_socket() {
-    let daemon = Daemon::start("kguard");
-    let kguard_link = RouteLoomTransport::new(&daemon.socket, u64::from(testkit::NETWORK_LOW));
-    let mut kguard = KGuardMock::default();
-    kguard.pending_retry_s = 30;
+fn decider_drives_the_join_over_the_api_socket() {
+    let daemon = Daemon::start("decider");
+    let decider_link = RouteLoomTransport::new(&daemon.socket, u64::from(testkit::NETWORK_LOW));
+    let mut decider = AssignmentTable::default();
+    decider.pending_retry_s = 30;
 
-    // KGuard watches the site events (join.request etc.) as they happen.
-    let stream = kguard_link.site_events().unwrap();
+    // The decider watches the site events (join.request etc.) as they happen.
+    let stream = decider_link.site_events().unwrap();
     let (event_tx, event_rx) = mpsc::channel();
     thread::spawn(move || {
         for event in stream {
@@ -177,20 +178,20 @@ fn kguard_drives_the_join_over_the_api_socket() {
         }
     };
 
-    let status = kguard_link.site_status().unwrap();
+    let status = decider_link.site_status().unwrap();
     assert_eq!(status.site_id, testkit::SITE);
     assert_eq!(status.network, testkit::network());
     assert!(status.storage_durable);
     assert_eq!(status.members, 0);
 
-    // 1. A new, unassigned device: discovered, KGuard answers pending.
+    // 1. A new, unassigned device: discovered, the decider answers pending.
     let t0 = now_ms();
     let mut device = SimDevice::new(0x00A1_0000_0000_1234, 0x71);
     let (mut exchange, outcome) = daemon.start_join(&mut device, t0);
     assert!(matches!(outcome, Outcome::Waiting));
     let announced = next_event("join.request");
     assert_eq!(announced.device, Some(device.node));
-    let decided = kguard.serve_once(&kguard_link).unwrap();
+    let decided = decider.serve_once(&decider_link).unwrap();
     assert_eq!(decided.len(), 1);
     assert_eq!(decided[0].1, Decision::Pending { retry_after_s: 30 });
     assert_eq!(decided[0].2.applied, "current_attempt");
@@ -200,7 +201,7 @@ fn kguard_drives_the_join_over_the_api_socket() {
     else {
         panic!("expected PendingAssignment");
     };
-    let discovered = kguard_link.discovered().unwrap();
+    let discovered = decider_link.discovered().unwrap();
     assert_eq!(discovered.len(), 1);
     assert_eq!(discovered[0].device, device.node);
     assert_eq!(discovered[0].last_verdict, "pending");
@@ -208,11 +209,11 @@ fn kguard_drives_the_join_over_the_api_socket() {
 
     // 2. The operator assigns it here; the device's next attempt is allowed
     //    and the Allow passes the device-side 02 §10.2 check (in the kit).
-    kguard.assign(device.node, Assignment::Here(Role::Endpoint));
+    decider.assign(device.node, Assignment::Here(Role::Endpoint));
     let (mut exchange, outcome) = daemon.start_join(&mut device, t0 + 31_000);
     assert!(matches!(outcome, Outcome::Waiting));
     next_event("join.request");
-    let decided = kguard.serve_once(&kguard_link).unwrap();
+    let decided = decider.serve_once(&decider_link).unwrap();
     assert_eq!(decided[0].1, Decision::Allow(Role::Endpoint));
     let outcome = &decided[0].2;
     assert_eq!(outcome.state, "committed");
@@ -225,32 +226,32 @@ fn kguard_drives_the_join_over_the_api_socket() {
         device.site.as_ref().unwrap().member.assignment_generation,
         1
     );
-    let member = kguard_link.member(device.node).unwrap().unwrap();
+    let member = decider_link.member(device.node).unwrap().unwrap();
     assert!(member.member && member.delivered);
     assert_eq!(member.generation, 1);
     assert_eq!(member.confirm_state.as_deref(), Some("allowed_unconfirmed"));
-    assert_eq!(kguard_link.members().unwrap().len(), 1);
+    assert_eq!(decider_link.members().unwrap().len(), 1);
     // The same decision replayed with the same key is the same answer
     // (V1-H03) — the request is closed now, so a new key is NOT_FOUND.
-    let replay = kguard_link
+    let replay = decider_link
         .decide(
             &decided[0].0,
             Decision::Allow(Role::Endpoint),
-            &format!("kgmock-{}-{}", decided[0].0.id, decided[0].0.attempt),
+            &format!("table-{}-{}", decided[0].0.id, decided[0].0.attempt),
         )
         .unwrap();
     assert_eq!(replay.generation, Some(1));
     assert!(matches!(
-        kguard_link.decide(&decided[0].0, Decision::DenyBlocked, "another"),
+        decider_link.decide(&decided[0].0, Decision::DenyBlocked, "another"),
         Err(TransportError::Rejected { ref code, .. }) if code == "NOT_FOUND"
     ));
 
     // 3. A device assigned to another site: deny not_here.
     let mut stranger = SimDevice::new(0x00A1_0000_0000_5678, 0x72);
-    kguard.assign(stranger.node, Assignment::Elsewhere);
+    decider.assign(stranger.node, Assignment::Elsewhere);
     let (mut exchange, outcome) = daemon.start_join(&mut stranger, t0 + 32_000);
     assert!(matches!(outcome, Outcome::Waiting));
-    kguard.serve_once(&kguard_link).unwrap();
+    decider.serve_once(&decider_link).unwrap();
     assert!(matches!(
         stranger.finish(&mut exchange, &daemon.transport),
         Outcome::Result(JoinResult::DenyNotHere)
@@ -285,17 +286,17 @@ fn kguard_drives_the_join_over_the_api_socket() {
     // 5. Removal: a stale screen (wrong generation) is refused; the real
     //    removal commits a new revocation set.
     assert!(matches!(
-        kguard_link.revoke(device.node, 2, RemovalReason::Lost, "rm-0"),
+        decider_link.revoke(device.node, 2, RemovalReason::Lost, "rm-0"),
         Err(TransportError::Rejected { ref code, .. }) if code == "CONFLICT"
     ));
-    let removed = kguard_link
+    let removed = decider_link
         .revoke(device.node, 1, RemovalReason::Lost, "rm-1")
         .unwrap();
     assert_eq!(removed.state, "committed");
     assert_eq!(removed.rs_epoch, 2);
     next_event("member.revoked");
     next_event("rrs.published");
-    let op = kguard_link
+    let op = decider_link
         .call(
             "operations.get",
             &format!("{{\"operation_id\":\"{}\"}}", removed.operation_id),
@@ -317,10 +318,10 @@ fn kguard_drives_the_join_over_the_api_socket() {
         "{outcome:?}"
     );
     assert!(device.site.is_none());
-    let member = kguard_link.member(device.node).unwrap().unwrap();
+    let member = decider_link.member(device.node).unwrap().unwrap();
     assert!(!member.member);
     assert_eq!(member.removal_reason.as_deref(), Some("lost"));
-    let status = kguard_link.site_status().unwrap();
+    let status = decider_link.site_status().unwrap();
     assert_eq!((status.members, status.removed, status.rs_epoch), (0, 1, 2));
 }
 
@@ -341,7 +342,7 @@ fn concurrent_partial_policy_updates_keep_both_fields() {
         )
     };
     for round in 0..25 {
-        let base = call("{\"zero_touch_open\":false,\"decision_mode\":\"kguard\"}");
+        let base = call("{\"zero_touch_open\":false,\"decision_mode\":\"external\"}");
         assert!(base.contains("\"ok\":true"), "{base}");
         let barrier = Arc::new(Barrier::new(2));
         let worker = |state: Arc<State>, params: &'static str| {
@@ -403,6 +404,17 @@ fn api_surface_validates_and_advertises() {
     // P2-5: the set minted generation 1, and the read side distinguishes
     // the Host approval state from the undistributed radio intent.
     assert!(policy.contains("\"policy_generation\":1"), "{policy}");
+    // The v1 spelling of "external" is accepted on input only; the answer
+    // and every read name the neutral value.
+    let alias = call(
+        "join.policy.set",
+        &format!(
+            "{{\"decision_mode\":\"{}\"}}",
+            crate::api1::site::DEPRECATED_EXTERNAL_ALIAS
+        ),
+    );
+    assert!(alias.contains("\"decision_mode\":\"external\""), "{alias}");
+    assert!(call("join.policy.set", "{\"decision_mode\":\"closed\"}").contains("\"ok\":true"));
     assert!(
         policy.contains("\"radio_distributed_generation\":null"),
         "{policy}"
@@ -500,7 +512,7 @@ fn join_relay_advertises_only_on_a_capable_session() {
 fn group_keys_api_over_the_socket() {
     let daemon = Daemon::start("gk");
     let link = RouteLoomTransport::new(&daemon.socket, u64::from(testkit::NETWORK_LOW));
-    let kguard = KGuardMock::default();
+    let decider = AssignmentTable::default();
     let stream = link.site_events().unwrap();
     let (event_tx, event_rx) = mpsc::channel();
     thread::spawn(move || {
@@ -523,11 +535,11 @@ fn group_keys_api_over_the_socket() {
     // One member, so the rotation has a target.
     let t0 = now_ms();
     let mut device = SimDevice::new(0x00A1_0000_0000_4321, 0x73);
-    kguard.assign(device.node, Assignment::Here(Role::Endpoint));
+    decider.assign(device.node, Assignment::Here(Role::Endpoint));
     let (mut exchange, outcome) = daemon.start_join(&mut device, t0);
     assert!(matches!(outcome, Outcome::Waiting));
     next_event("join.request");
-    let decided = kguard.serve_once(&link).unwrap();
+    let decided = decider.serve_once(&link).unwrap();
     assert_eq!(decided[0].1, Decision::Allow(Role::Endpoint));
     let Outcome::Result(JoinResult::Allow { .. }) = device.finish(&mut exchange, &daemon.transport)
     else {
@@ -630,13 +642,13 @@ fn group_keys_api_over_the_socket() {
     next_event("gk.staged");
 }
 
-/// P6-2 PR D acceptance over the real API1 socket: KGuard joins a
+/// P6-2 PR D acceptance over the real API1 socket: the decider joins a
 /// gateway and two members, starts `membership.cutover`, the tick paces
 /// PREPAREs to the fake channel, PREPARED receipts flow back, the lapse
 /// commits, COMMITs flow, APPLIEDs converge — every step observed
 /// through the `SiteAdmin` facade — and a member that heard nothing
 /// full-joins back into an authenticated reissue on the new epoch with
-/// no KGuard round-trip.
+/// no decider round-trip.
 #[test]
 fn cutover_flows_end_to_end_over_the_api_socket() {
     use routeloom_join::renew::{Head, Phase, Receipt};
@@ -678,16 +690,16 @@ fn cutover_flows_end_to_end_over_the_api_socket() {
 
     let daemon = Daemon::start("cutover");
     let admin = RouteLoomTransport::new(&daemon.socket, u64::from(testkit::NETWORK_LOW));
-    let mut kguard = KGuardMock::default();
-    kguard.pending_retry_s = 30;
+    let mut decider = AssignmentTable::default();
+    decider.pending_retry_s = 30;
     let t0 = now_ms();
     let mut gateway = SimDevice::new(testkit::GATEWAY, 0x60);
     gateway.capability |= routeloom_join::JOIN_CAPABILITY_GATEWAY;
     let mut member = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
     let mut straggler = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
-    kguard.assign(gateway.node, Assignment::Here(Role::Gateway));
-    kguard.assign(member.node, Assignment::Here(Role::Endpoint));
-    kguard.assign(straggler.node, Assignment::Here(Role::Endpoint));
+    decider.assign(gateway.node, Assignment::Here(Role::Gateway));
+    decider.assign(member.node, Assignment::Here(Role::Endpoint));
+    decider.assign(straggler.node, Assignment::Here(Role::Endpoint));
     for (device, at) in [
         (&mut gateway, t0),
         (&mut member, t0 + 1_000),
@@ -695,7 +707,7 @@ fn cutover_flows_end_to_end_over_the_api_socket() {
     ] {
         let (mut exchange, outcome) = daemon.start_join(device, at);
         assert!(matches!(outcome, Outcome::Waiting), "{outcome:?}");
-        let done = kguard.serve_once(&admin).unwrap();
+        let done = decider.serve_once(&admin).unwrap();
         assert_eq!(done.len(), 1);
         let outcome = device.finish(&mut exchange, &daemon.transport);
         assert!(
@@ -888,7 +900,7 @@ fn cutover_flows_end_to_end_over_the_api_socket() {
     assert_eq!(progress.applied, 2);
     assert_eq!(progress.unknown, 1);
     // The straggler comes back on its old RLS1: an authenticated
-    // reissue on the new epoch, with no join.request for KGuard.
+    // reissue on the new epoch, with no join.request for the decider.
     let open_before = admin.join_requests().unwrap().len();
     straggler.recovery_existing = true;
     let (outcome, _) = straggler.attempt(&daemon.service, &daemon.transport, flush_at + 5_000);
@@ -905,7 +917,7 @@ fn cutover_flows_end_to_end_over_the_api_socket() {
     let open_after = admin.join_requests().unwrap().len();
     assert_eq!(
         open_before, open_after,
-        "no KGuard round-trip for a reissue"
+        "no decider round-trip for a reissue"
     );
     let member_view = admin.member(member.node).unwrap().unwrap();
     assert_eq!(member_view.generation, 1);
@@ -919,11 +931,11 @@ fn cutover_flows_end_to_end_over_the_api_socket() {
 fn membership_archive_over_the_api_socket() {
     let daemon = Daemon::start("archive");
     let uid = std::fs::metadata(&daemon.dir).unwrap().uid();
-    let kguard_link = RouteLoomTransport::new(&daemon.socket, u64::from(testkit::NETWORK_LOW));
-    let kguard = KGuardMock::default();
-    kguard.assign(0x00A1_0000_0000_1234, Assignment::Here(Role::Endpoint));
+    let decider_link = RouteLoomTransport::new(&daemon.socket, u64::from(testkit::NETWORK_LOW));
+    let decider = AssignmentTable::default();
+    decider.assign(0x00A1_0000_0000_1234, Assignment::Here(Role::Endpoint));
 
-    let stream = kguard_link.site_events().unwrap();
+    let stream = decider_link.site_events().unwrap();
     let (event_tx, event_rx) = mpsc::channel();
     thread::spawn(move || {
         for event in stream {
@@ -947,12 +959,12 @@ fn membership_archive_over_the_api_socket() {
     let (mut exchange, outcome) = daemon.start_join(&mut device, t0);
     assert!(matches!(outcome, Outcome::Waiting));
     next_event("join.request");
-    kguard.serve_once(&kguard_link).unwrap();
+    decider.serve_once(&decider_link).unwrap();
     let Outcome::Result(JoinResult::Allow { .. }) = device.finish(&mut exchange, &daemon.transport)
     else {
         panic!("expected Allow");
     };
-    kguard_link
+    decider_link
         .revoke(device.node, 1, RemovalReason::Lost, "rm-1")
         .unwrap();
 
@@ -992,7 +1004,7 @@ fn membership_archive_over_the_api_socket() {
         assert!(refused.contains("INVALID_ARGUMENT"), "{params}: {refused}");
     }
 
-    let answer = kguard_link
+    let answer = decider_link
         .call(
             "membership.archive",
             &format!(
@@ -1021,7 +1033,7 @@ fn membership_archive_over_the_api_socket() {
         ),
     );
     assert!(gone.contains("NOT_FOUND"), "{gone}");
-    assert!(kguard_link.members().unwrap().is_empty());
+    assert!(decider_link.members().unwrap().is_empty());
     let status = raw_api1(
         &daemon.state,
         uid,

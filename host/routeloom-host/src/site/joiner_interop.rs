@@ -2,7 +2,7 @@
 //! member components (`tests/cpp/joiner_interop_peer.cpp`, real Joiner +
 //! AuthorityClient + GroupKeyState + MembershipLifecycle on fake
 //! radio/flash, real Proxy + Gateway per site) against two real Rust
-//! Site Authorities (`SiteService` on SQLite, API1 socket, KGuardMock).
+//! Site Authorities (`SiteService` on SQLite, API1 socket, AssignmentTable).
 //!
 //! This is the process-interop complement of `site::e2e`, which drives the
 //! same authority with a Rust `SimDevice`: here the EDHOC Initiator, the
@@ -30,7 +30,7 @@
 //! so API1's real-time stamps stay near the authority's virtual stamps).
 //! Every step sends `TICK(now)` to the peer, routes the relay ups through
 //! `handle_up`, pumps the authority carriers through the USB adapter,
-//! runs `tick` on both authorities, forwards the downs and serves KGuard
+//! runs `tick` on both authorities, forwards the downs and serves the decider
 //! over the sockets — all within the same virtual millisecond, so no
 //! decision timeout can fire spuriously.
 //!
@@ -54,8 +54,9 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
+use super::assignment_table::{Assignment, AssignmentTable};
 use routeloom_client::api1::RouteLoomTransport;
-use routeloom_client::site::{Assignment, Decision, KGuardMock, Role, SiteAdmin};
+use routeloom_client::site::{Decision, Role, SiteAdmin};
 use routeloom_protocol::authority::CarrierKind;
 use routeloom_protocol::host_ops::{
     decode_authority_down, encode_authority_up, AuthorityFragment, AUTHORITY_FRAGMENT_DATA_MAX,
@@ -617,7 +618,7 @@ struct InteropSite {
     service: Arc<SiteService>,
     transport: Arc<InProcessTransport>,
     link: RouteLoomTransport,
-    kguard: KGuardMock,
+    decider: AssignmentTable,
     gateway: u64,
     dir: std::path::PathBuf,
 }
@@ -683,7 +684,7 @@ impl InteropSite {
             service,
             transport,
             link,
-            kguard: KGuardMock::default(),
+            decider: AssignmentTable::default(),
             gateway,
             dir,
         }
@@ -809,7 +810,7 @@ impl World {
         self.now = t0;
         self.peer = Peer::spawn(t0, seed, Some(flash), flash_ext, verify);
         // A reboot starts a new boot: the m4s after it answer a
-        // re-proof, never the pre-cycle KGuard decision.
+        // re-proof, never the pre-cycle decider decision.
         self.decisions.clear();
     }
 
@@ -854,7 +855,7 @@ impl World {
             match outbound {
                 Outbound::Down(down) => {
                     // The JoinResult rides encrypted inside the m4, so the
-                    // Allow detection keys on the committed row KGuard's
+                    // Allow detection keys on the committed row the decider's
                     // decision produced: an m4 for a decided-Allow device
                     // must find its DAMS + delivered_ms already durable.
                     if down.step == 4 && down.status == DownStatus::Final {
@@ -876,7 +877,7 @@ impl World {
                                 (row, durable)
                             })
                             .0;
-                        // A reissue-allow m4 carries no KGuard decision at
+                        // A reissue-allow m4 carries no decider decision at
                         // all (04 §8.5), so a live member row takes the
                         // strict path too.
                         if allowed_here || row.as_ref().is_some_and(|r| r.member) {
@@ -922,10 +923,10 @@ impl World {
         }
     }
 
-    fn serve_kguard(&mut self) {
+    fn serve_decider(&mut self) {
         for index in 0..2 {
             let served = self.sites[index]
-                .kguard
+                .decider
                 .serve_once(&self.sites[index].link)
                 .unwrap();
             for (request, decision, _) in served {
@@ -1105,7 +1106,7 @@ impl World {
         self.mailbox = kept;
     }
 
-    /// One virtual step: peer pump, up routing, authority ticks, KGuard.
+    /// One virtual step: peer pump, up routing, authority ticks, the decider.
     fn step(&mut self, dt_ms: u64) -> Tick {
         self.now += dt_ms;
         let tick = self.peer.tick(self.now);
@@ -1130,7 +1131,7 @@ impl World {
                 self.drain_authority_downs(index);
             }
         }
-        self.serve_kguard();
+        self.serve_decider();
         for abort in &tick.aborts {
             self.aborts_seen.push(PeerAbort {
                 site: abort.site,
@@ -1220,7 +1221,7 @@ fn check_member_boot(snap: &Snap) {
 
 // --- Tests ---------------------------------------------------------------------
 
-/// V1-J01 shape: full EDHOC through the pipe, KGuard Allow, durable
+/// V1-J01 shape: full EDHOC through the pipe, the decider Allow, durable
 /// commit before the m4, RLS1 + DAMS + certs agreeing, MemberReady, and
 /// radio silence afterwards.
 #[test]
@@ -1229,7 +1230,7 @@ fn cpp_joiner_allows_through_the_rust_authority() {
         return; // no C++ peer: skip (ignore-equivalent)
     };
     world.sites[0]
-        .kguard
+        .decider
         .assign(DEVICE_NODE, Assignment::Here(Role::Endpoint));
     let tick = world.pump_until(6000, |t| t.snap.action_pending);
     check_terminal(&tick.snap, MEMBER_READY);
@@ -1278,10 +1279,10 @@ fn deny_on_a_falls_over_to_allow_on_b() {
         return; // no C++ peer: skip (ignore-equivalent)
     };
     world.sites[0]
-        .kguard
+        .decider
         .assign(DEVICE_NODE, Assignment::Elsewhere);
     world.sites[1]
-        .kguard
+        .decider
         .assign(DEVICE_NODE, Assignment::Here(Role::Endpoint));
     let tick = world.pump_until(8000, |t| t.snap.action_pending);
     check_terminal(&tick.snap, MEMBER_READY);
@@ -1310,14 +1311,14 @@ fn deny_on_a_falls_over_to_allow_on_b() {
 }
 
 /// V1-J05 shape (single site, API path): PendingAssignment first — no
-/// member row, no flash commit — then the KGuard assignment lands and
+/// member row, no flash commit — then the decider assignment lands and
 /// the retry's full EDHOC completes the join.
 #[test]
-fn pending_then_kguard_allow() {
+fn pending_then_decider_allow() {
     let Some(mut world) = World::start("pending", 0x9E17) else {
         return; // no C++ peer: skip (ignore-equivalent)
     };
-    world.sites[0].kguard.pending_retry_s = 30;
+    world.sites[0].decider.pending_retry_s = 30;
     // The first attempt ends in Pending; the device backs off quietly.
     for _ in 0..6000 {
         world.step(25);
@@ -1340,7 +1341,7 @@ fn pending_then_kguard_allow() {
     assert!(world.allow_forwards.is_empty());
     // The assignment lands; the retry joins.
     world.sites[0]
-        .kguard
+        .decider
         .assign(DEVICE_NODE, Assignment::Here(Role::Endpoint));
     let tick = world.pump_until(8000, |t| t.snap.action_pending);
     check_terminal(&tick.snap, MEMBER_READY);
@@ -1361,7 +1362,7 @@ fn power_cut_after_commit_boots_as_member() {
         return; // no C++ peer: skip (ignore-equivalent)
     };
     world.sites[0]
-        .kguard
+        .decider
         .assign(DEVICE_NODE, Assignment::Here(Role::Endpoint));
     let tick = world.pump_until(6000, |t| t.snap.action_pending);
     check_terminal(&tick.snap, MEMBER_READY);
@@ -1398,7 +1399,7 @@ fn cpp_joiner_removed_rediscovers_over_the_pipe() {
         return; // no C++ peer: skip (ignore-equivalent)
     };
     world.sites[0]
-        .kguard
+        .decider
         .assign(DEVICE_NODE, Assignment::Here(Role::Endpoint));
     let tick = world.pump_until(6000, |t| t.snap.action_pending);
     check_terminal(&tick.snap, MEMBER_READY);
@@ -1441,7 +1442,7 @@ fn cpp_joiner_removed_rediscovers_over_the_pipe() {
 /// V1-R08 straggler over the pipe: the member hears no PREPARE/COMMIT
 /// (offline at cutover), then re-proves over ZT and takes the
 /// authenticated reissue on the new epoch — real C++ Joiner, real Rust
-/// authority, no KGuard round-trip.
+/// authority, no decider round-trip.
 #[test]
 fn cpp_joiner_cutover_reissue_over_the_pipe() {
     use super::cutover::CUTOVER_PREPARE_WINDOW_MS;
@@ -1480,10 +1481,10 @@ fn cpp_joiner_cutover_reissue_over_the_pipe() {
         return; // no C++ peer: skip (ignore-equivalent)
     };
     world.sites[0]
-        .kguard
+        .decider
         .assign(DEVICE_NODE, Assignment::Here(Role::Endpoint));
     world.sites[0]
-        .kguard
+        .decider
         .assign(testkit::GATEWAY, Assignment::Here(Role::Gateway));
     // The gateway joins on the Rust side first (the pipe is still idle,
     // so its m4 cannot stray into the peer).
@@ -1496,7 +1497,7 @@ fn cpp_joiner_cutover_reissue_over_the_pipe() {
     );
     assert!(matches!(outcome, Outcome::Waiting), "{outcome:?}");
     let done = world.sites[0]
-        .kguard
+        .decider
         .serve_once(&world.sites[0].link)
         .unwrap();
     assert_eq!(done.len(), 1);
@@ -1609,7 +1610,7 @@ fn cpp_joiner_cutover_reissue_over_the_pipe() {
     assert_eq!(progress.phase, "committed");
 
     // The straggler re-proves on its old RLS1: an authenticated reissue
-    // on the new epoch, with no join.request for KGuard.
+    // on the new epoch, with no join.request for the decider.
     let ups_at_boot = world.ups_seen;
     world.swap_peer(lapse + 1000, 0xBE09, &flash_path, true);
     let decisions_before = world.decisions.len();
@@ -1619,7 +1620,7 @@ fn cpp_joiner_cutover_reissue_over_the_pipe() {
     assert_eq!(
         world.decisions.len(),
         decisions_before,
-        "no KGuard round-trip"
+        "no decider round-trip"
     );
     let row = world.member_row(0).expect("member row on the new epoch");
     assert!(row.member);
@@ -1669,7 +1670,7 @@ const TRUST_INSTALLED: u8 = 8;
 /// Returns the MemberReady tick.
 fn join_and_attach(world: &mut World) -> Tick {
     world.sites[0]
-        .kguard
+        .decider
         .assign(DEVICE_NODE, Assignment::Here(Role::Endpoint));
     world.attach_authority(0);
     let tick = world.pump_until(6000, |t| t.snap.action_pending);
@@ -1880,7 +1881,7 @@ const NODE_B: u64 = 0x00A1_0000_0000_0201;
 fn join_sim_member(world: &mut World, node: u64, seed: u8) -> [u8; 32] {
     use super::testkit::{Outcome, SimDevice};
     world.sites[0]
-        .kguard
+        .decider
         .assign(node, Assignment::Here(Role::Endpoint));
     let mut sim = SimDevice::new(node, seed);
     let (mut exchange, outcome, _) = sim.start(
@@ -1892,7 +1893,7 @@ fn join_sim_member(world: &mut World, node: u64, seed: u8) -> [u8; 32] {
     // Serve only this member's request (the pipe device is already a
     // member by the time these tests run, so no other request exists).
     let done = world.sites[0]
-        .kguard
+        .decider
         .serve_once(&world.sites[0].link)
         .unwrap();
     assert_eq!(done.len(), 1);
@@ -2321,7 +2322,7 @@ fn live_owner_cutover_prepare_commit() {
     {
         use super::testkit::{Outcome, SimDevice};
         world.sites[0]
-            .kguard
+            .decider
             .assign(testkit::GATEWAY, Assignment::Here(Role::Gateway));
         let mut gateway = SimDevice::new(testkit::GATEWAY, 0x60);
         gateway.capability |= routeloom_join::JOIN_CAPABILITY_GATEWAY;
@@ -2332,7 +2333,7 @@ fn live_owner_cutover_prepare_commit() {
         );
         assert!(matches!(outcome, Outcome::Waiting));
         let done = world.sites[0]
-            .kguard
+            .decider
             .serve_once(&world.sites[0].link)
             .unwrap();
         assert_eq!(done.len(), 1);

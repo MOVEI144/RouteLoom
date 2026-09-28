@@ -74,6 +74,7 @@ def core(sanitizers: str = "ON") -> list[Step]:
 
 def docs() -> list[Step]:
     return [Step(["python3", "tools/check_docs.py"]),
+            Step(["python3", "tools/gen_manifest.py", "--check"]),
             Step(["python3", "tools/sync_reference_tables.py", "--check"]),
             Step(["python3", "tools/check_review_contracts.py"]),
             Step(["python3", "-m", "unittest", "discover", "-s", "tests", "-v"])]

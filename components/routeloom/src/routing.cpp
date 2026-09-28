@@ -459,15 +459,11 @@ void RouteTable::invalidate_next_hop(const NodeId next_hop,
   });
 }
 
-void RouteTable::expire(const MonotonicMs now_ms) noexcept {
-  while (true) {
-    auto* dead = entries_.find([&](const Entry& entry) {
-      return entry.tombstone_expires_at_ms != 0 &&
-             entry.tombstone_expires_at_ms <= now_ms;
-    });
-    if (dead == nullptr) break;
-    entries_.release(dead);
-  }
+std::size_t RouteTable::expire(const MonotonicMs now_ms) noexcept {
+  entries_.erase_if([&](const Entry& entry) {
+    return entry.tombstone_expires_at_ms != 0 &&
+           entry.tombstone_expires_at_ms <= now_ms;
+  });
   entries_.for_each([&](Entry& entry) {
     bool removed = false;
     for (auto& candidate : entry.candidates) {
@@ -481,6 +477,7 @@ void RouteTable::expire(const MonotonicMs now_ms) noexcept {
     arm_tombstone(entry, now_ms);
     if (removed) evaluate_entry(entry, now_ms);
   });
+  return 2 * entries_.capacity();  // the tombstone pass plus the lease pass
 }
 
 bool RouteTable::reclaim_tombstone() noexcept {
