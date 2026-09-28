@@ -1066,6 +1066,10 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc == 2 && std::strcmp(argv[1], "--harness-version") == 0) {
+    std::fputs("1\n", stdout);
+    return 0;
+  }
   using namespace routeloom;
   using namespace routeloom::espnow;
   using namespace routeloom::sdkv1;

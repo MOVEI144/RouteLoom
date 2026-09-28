@@ -13,7 +13,7 @@ fn quoted(text: &str) -> String {
 
 fn out_dir(tag: &str) -> Option<std::path::PathBuf> {
     let dir = std::path::PathBuf::from(std::env::var_os("ROUTELOOM_E2E_OUT")?).join(tag);
-    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::create_dir_all(&dir).expect("create E2E report directory");
     Some(dir)
 }
 

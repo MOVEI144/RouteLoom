@@ -46,6 +46,7 @@ GENERATED_GOLDENS = (
     "tests/fuzz/corpus/sdkv1_handshake", "tests/fuzz/corpus/sdkv1_join")
 PEER = "build/tests/cpp/routeloom_joiner_interop_peer"
 MESH_PEER = "build/tests/cpp/routeloom_owner_mesh_peer"
+PEER_VERSION = "1"
 # A live interop suite that finds no C++ peer prints this and passes as a
 # skip; the interop stage treats it as a failure. Not anchored: with
 # --nocapture the harness output of parallel tests can share the line.
@@ -143,6 +144,8 @@ def interop() -> list[Step]:
               "routeloom_joiner_interop_peer", "routeloom_owner_mesh_peer"]),
         Step(["test", "-x", PEER]),
         Step(["test", "-x", MESH_PEER]),
+        Step(["assert-peer-version", PEER]),
+        Step(["assert-peer-version", MESH_PEER]),
         Step(["cargo", "test", "-p", "routeloom-host", "--bins", "site::joiner_interop",
               "--", "--nocapture"], cwd="host", env=env, forbid=SKIP_MARK,
              require=live_cases(rows, "site/joiner_interop.rs")),
@@ -198,6 +201,8 @@ def scenario_errors(data: dict, root: Path = ROOT) -> list[str]:
         errors.append(f"schema_version {data.get('schema_version')!r} != {SCENARIO_SCHEMA}")
     if not (root / str(data.get("supersedes"))).is_file():
         errors.append(f"supersedes {data.get('supersedes')!r} is not a file")
+    if not data.get("rows"):
+        errors.append("no scenario rows")
     seen = set()
     for row in data.get("rows", []):
         rid = row.get("id")
@@ -229,7 +234,10 @@ def scenario_errors(data: dict, root: Path = ROOT) -> list[str]:
             errors.append(f"{rid}: an hil row names its rounds")
         elif hil.get("run") != "manual" and (
                 not isinstance(hil.get("run"), list) or not hil["run"]
-                or any(not (root / script).is_file() for script in hil["run"])):
+                or any(not isinstance(script, str)
+                       or Path(script).parent != Path("tools/hil")
+                       or Path(script).suffix != ".py"
+                       or not (root / script).is_file() for script in hil["run"])):
             errors.append(f"{rid}: hil run {hil.get('run')!r} is neither manual nor HIL scripts")
     return errors
 
@@ -402,6 +410,16 @@ def run(steps: list[Step], dry_run: bool, data: dict | None = None) -> int:
                                       (cwd / "sdkconfig").read_text(encoding="utf-8"))
             if errors:
                 print(f"{step.argv[1]}: sdkconfig: " + "; ".join(errors), file=sys.stderr)
+                return 1
+            continue
+        if step.argv[0] == "assert-peer-version":
+            try:
+                result = subprocess.run([str(ROOT / step.argv[1]), "--harness-version"],
+                                        capture_output=True, text=True, timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                result = None
+            if result is None or result.returncode != 0 or result.stdout != PEER_VERSION + "\n":
+                print(f"check.py: peer RPC version mismatch: {step.argv[1]}", file=sys.stderr)
                 return 1
             continue
         env = {**os.environ, **step.env}

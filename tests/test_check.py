@@ -104,6 +104,11 @@ class CellList(unittest.TestCase):
         for stage in ("core --sanitizers", "docs", "golden", "rust", "interop", "fuzz"):
             self.assertIn(f"python3 tools/check.py {stage}", workflow)
 
+    def test_ci_requires_e2e_report_artifact(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        artifact = workflow.split("name: e2e-report", 1)[1].split("retention-days:", 1)[0]
+        self.assertIn("if-no-files-found: error", artifact)
+
     def test_ci_dry_run_lists_every_stage_and_cell(self):
         code, out, _ = run_main(["ci", "--dry-run"])
         self.assertEqual(code, 0)
@@ -303,6 +308,10 @@ class Scenarios(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("M01: duplicate id", err)
 
+    def test_empty_scenario_table_fails(self):
+        self.data["rows"] = []
+        self.assertIn("no scenario rows", check.scenario_errors(self.data))
+
     def test_planned_and_hil_rows(self):
         self.rows("M02")[0]["test"] = self.rows("M01")[0]["test"]
         self.rows("M05")[0]["hil"]["run"] = ["tools/hil/no_such_script.py"]
@@ -312,6 +321,11 @@ class Scenarios(unittest.TestCase):
         self.assertIn("M05: hil run ['tools/hil/no_such_script.py'] is neither manual nor "
                       "HIL scripts", errors)
         self.assertIn("M03: hil set on a row without the hil tier", errors)
+
+    def test_hil_run_must_be_a_hil_script(self):
+        self.rows("M05")[0]["hil"]["run"] = ["tools/check.py"]
+        self.assertTrue(any("M05: hil run" in error
+                            for error in check.scenario_errors(self.data)))
 
     def test_interop_requires_every_live_pr_case(self):
         steps = [s for s in check.interop() if s.require is not None]
@@ -323,6 +337,20 @@ class Scenarios(unittest.TestCase):
         # The red three-hop row is ignored by the suite, not required.
         self.assertNotIn("site::owner_mesh::mesh::mesh_line_three_hops_delivers",
                          steps[1].require)
+
+    def test_interop_rejects_incompatible_peer_protocol(self):
+        checks = [step.argv for step in check.interop()
+                  if step.argv[0] == "assert-peer-version"]
+        self.assertEqual(checks, [["assert-peer-version", check.PEER],
+                                  ["assert-peer-version", check.MESH_PEER]])
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "peer"
+            for version, expected in (("0", 1), ("1", 0)):
+                peer.write_text(f"#!/bin/sh\nprintf '{version}\\n'\n")
+                peer.chmod(0o700)
+                step = check.Step(["assert-peer-version", str(peer)])
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    self.assertEqual(check.run([step], dry_run=False), expected)
 
     def test_require_live_fails_on_a_missing_or_empty_run(self):
         script = "print('test site::a ... ok'); print('test site::b ... FAILED')"

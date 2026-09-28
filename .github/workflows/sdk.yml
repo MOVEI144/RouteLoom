@@ -167,7 +167,7 @@ jobs:
         with:
           name: e2e-report
           path: e2e-out/
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 30
   fuzz:
     runs-on: ubuntu-latest
