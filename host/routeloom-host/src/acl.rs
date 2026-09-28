@@ -57,7 +57,7 @@ pub const PERM_CONFIG: u8 = 8;
 /// SDK v1 Site Authority (docs/design/sdk-v1/07 §2): reading the member
 /// ledger, discovered devices and join requests; deciding joins and
 /// removals; changing the join policy. Three separate grants — a read-only
-/// KGuard screen must not be able to admit or remove a device.
+/// decider screen must not be able to admit or remove a device.
 pub const PERM_MEMBERSHIP_READ: u8 = 16;
 pub const PERM_MEMBERSHIP_DECIDE: u8 = 32;
 pub const PERM_MEMBERSHIP_ADMIN: u8 = 64;

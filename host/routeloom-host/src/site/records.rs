@@ -72,7 +72,7 @@ pub fn role_name(bits: u8) -> String {
     }
 }
 
-/// The single-role names KGuard sends with `join.decide`.
+/// The single-role names the decider sends with `join.decide`.
 pub fn parse_role(name: &str) -> Option<u8> {
     Some(match name {
         "endpoint" => ROLE_ENDPOINT,
@@ -249,7 +249,7 @@ impl Discovered {
     }
 }
 
-/// A KGuard verdict (07 §2.1).
+/// A decider verdict (07 §2.1).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Verdict {
     Allow { role: u8 },

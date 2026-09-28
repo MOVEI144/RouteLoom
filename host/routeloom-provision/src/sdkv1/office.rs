@@ -1,7 +1,7 @@
 //! Office provisioning (docs/design/sdk-v1/07 §6, 08 P7-1): turning a
 //! possession-proven device key and a DevCert into the site-independent RLI1
 //! identity, plus the two outputs the office hands on — the bundle a device
-//! applies itself (device-generated key) and the inventory line KGuard
+//! applies itself (device-generated key) and the inventory line the decider
 //! pre-registers assignments with.
 //!
 //! Two key paths (07 §6):
@@ -124,7 +124,7 @@ pub fn identity_bundle_json(plan: &IdentityPlan, devcert: &[u8]) -> Result<Strin
 }
 
 /// One inventory line (07 §6 "在庫出力": `(node_id, kid, model,
-/// cert_serial)` for KGuard's assignment pre-registration), as compact
+/// cert_serial)` for the decider's assignment pre-registration), as compact
 /// JSON. Derived from the DevCert, never from operator input.
 pub fn inventory_json(devcert: &[u8]) -> Result<String> {
     let claims = inventory_claims(devcert)?;
@@ -141,7 +141,7 @@ pub fn inventory_json(devcert: &[u8]) -> Result<String> {
 
 /// Formal inventory record format (P7-2): the same DevCert-derived record
 /// as [`inventory_json`], with a format marker, written to the device
-/// output directory as `inventory.json` for KGuard's assignment
+/// output directory as `inventory.json` for the decider's assignment
 /// pre-registration. The stdout line stays byte-identical for scripts.
 pub const INVENTORY_FORMAT: &str = "routeloom-inventory-v1";
 

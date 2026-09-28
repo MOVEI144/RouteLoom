@@ -1,6 +1,6 @@
 //! Site Authority service (docs/design/sdk-v1/02 §8–§9, 04 §3, 07; plan
 //! P3-3): the EDHOC Responder of the zero-touch join, the member ledger and
-//! the KGuard decision surface, running inside routeloom-host (08 §6 Q1:
+//! the external-decider surface, running inside routeloom-host (08 §6 Q1:
 //! the SAK never goes to an ESP32).
 //!
 //! Flow of one join (02 §4/§8), all driven through [`SiteService`]:
@@ -17,10 +17,10 @@
 //!    EDHOC error, counts `rejected_unverified{reason}` and records nothing
 //!    in the discovered table.
 //! 4. DECIDE: an existing approval for (node, kid) re-issues the same
-//!    MemberCert (`member.reissued`, no KGuard); a removed device that still
+//!    MemberCert (`member.reissued`, no decider); a removed device that still
 //!    holds site state gets `Removed` + a SAK-signed RemovalNotice; anything
-//!    else is recorded as discovered and asked of KGuard (`join.request`)
-//!    unless the policy is closed. KGuard silent past `decision_timeout_ms`
+//!    else is recorded as discovered and asked of the decider (`join.request`)
+//!    unless the policy is closed. Decider silent past `decision_timeout_ms`
 //!    → PendingAssignment (08 §6 Q7); a later decision applies at the next
 //!    attempt.
 //! 5. `join.decide allow` commits the ledger entry, the device row and the
@@ -370,8 +370,9 @@ impl Identity {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecisionMode {
-    /// Ask KGuard (`join.request`), default.
-    Kguard,
+    /// Ask the application's external decider (`join.request`), default.
+    /// Stored as 0; API1 names it `"external"`.
+    External,
     /// Never ask: unapproved devices get PendingAssignment.
     Closed,
     /// Lab-only, authenticated and provision-complete inventory matching.
@@ -399,7 +400,7 @@ pub struct JoinPolicy {
     pub zero_touch_open: bool,
     pub decision_mode: DecisionMode,
     pub decision_timeout_ms: u16,
-    /// PendingAssignment retry when KGuard is silent or the policy closed.
+    /// PendingAssignment retry when the decider is silent or the policy closed.
     pub pending_retry_after_s: u32,
     /// Content version, minted by `set_policy` (0 = never set). Two sets
     /// with identical content share a generation; anything else bumps.
@@ -410,7 +411,7 @@ impl Default for JoinPolicy {
     fn default() -> Self {
         Self {
             zero_touch_open: true,
-            decision_mode: DecisionMode::Kguard,
+            decision_mode: DecisionMode::External,
             decision_timeout_ms: 2000,
             pending_retry_after_s: 60,
             policy_generation: 0,
@@ -423,7 +424,7 @@ impl JoinPolicy {
         let mut out = vec![
             u8::from(self.zero_touch_open),
             match self.decision_mode {
-                DecisionMode::Kguard => 0,
+                DecisionMode::External => 0,
                 DecisionMode::Closed => 1,
                 DecisionMode::LabInventory => 2,
             },
@@ -447,7 +448,7 @@ impl JoinPolicy {
         let policy = Self {
             zero_touch_open: bytes[0] == 1,
             decision_mode: match bytes[1] {
-                0 => DecisionMode::Kguard,
+                0 => DecisionMode::External,
                 1 => DecisionMode::Closed,
                 _ => DecisionMode::LabInventory,
             },
@@ -476,7 +477,7 @@ impl JoinPolicy {
             "{{\"zero_touch_open\":{},\"decision_mode\":\"{}\",\"decision_timeout_ms\":{},\"pending_retry_after_s\":{},\"policy_generation\":{}}}",
             self.zero_touch_open,
             match self.decision_mode {
-                DecisionMode::Kguard => "kguard",
+                DecisionMode::External => "external",
                 DecisionMode::Closed => "closed",
                 DecisionMode::LabInventory => "lab_inventory",
             },
@@ -486,7 +487,7 @@ impl JoinPolicy {
         )
     }
 
-    fn asks_kguard(&self) -> bool {
+    fn asks_decider(&self) -> bool {
         self.zero_touch_open && self.decision_mode != DecisionMode::Closed
     }
 }
@@ -544,7 +545,7 @@ struct Verified {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TxnState {
     AwaitMessage3,
-    /// Waiting for KGuard on this join request.
+    /// Waiting for the decider on this join request.
     Deciding(u64),
 }
 
@@ -1866,7 +1867,7 @@ impl SiteAuthority {
         let mut kid_conflict = false;
         match existing {
             Some(row) if row.kid == device.facts.kid && row.member => {
-                // Already approved: re-issue with no KGuard and no
+                // Already approved: re-issue with no decider and no
                 // join.request (04 §8.5). A stale-epoch cert — the
                 // member missed a cutover — is re-minted for the
                 // active epoch first; the DAMS refreshes from this
@@ -1902,7 +1903,7 @@ impl SiteAuthority {
                 }
                 previously_removed = true;
             }
-            // A removed row is not a live-key conflict. KGuard may see
+            // A removed row is not a live-key conflict. The decider may see
             // the request, but allow still checks the revocation history.
             Some(row) if !row.member => previously_removed = true,
             Some(_) if old_kid_removed.is_some() => {
@@ -1918,14 +1919,17 @@ impl SiteAuthority {
             Some(_) => kid_conflict = true,
             None => {}
         }
-        self.note_discovered(
+        if !self.note_discovered(
             &device.facts,
             txn.via,
             previously_removed,
             kid_conflict,
             now_ms,
-        );
-        if !self.policy.asks_kguard()
+        ) {
+            self.send_busy_result(txn, BUSY_RETRY_S);
+            return;
+        }
+        if !self.policy.asks_decider()
             || (self.policy.decision_mode == DecisionMode::LabInventory
                 && !self.lab_enrollment_active())
         {
@@ -1937,6 +1941,7 @@ impl SiteAuthority {
                     retry_after_s: retry,
                 },
                 now_ms,
+                false,
             );
             return;
         }
@@ -1948,7 +1953,7 @@ impl SiteAuthority {
         if let Some((request_id, Some(verdict))) = open {
             // A decision taken after the previous attempt's deadline.
             self.close_request(request_id, now_ms);
-            self.finish_verdict(txn, node, verdict, now_ms);
+            self.finish_verdict(txn, node, verdict, now_ms, true);
             return;
         }
         let holdoff = self
@@ -2011,11 +2016,20 @@ impl SiteAuthority {
                 (request_id, request, next_request_id)
             }
         };
-        let batch = Batch {
+        let awaiting = self.discovered.get(&node).map(|d| Discovered {
+            last_verdict: "awaiting".into(),
+            ..d.clone()
+        });
+        let mut batch = Batch {
             meta: vec![("next_request_id", next_request_id.to_be_bytes().to_vec())],
             docs: vec![(DocKind::JoinRequest, h16(request_id), Some(request.doc()))],
             ..Batch::default()
         };
+        if let Some(d) = &awaiting {
+            batch
+                .docs
+                .push((DocKind::Discovered, h16(node), Some(d.doc())));
+        }
         if let Err(error) = self.store.commit(&batch) {
             self.store_error(now_ms, &error);
             self.finish_busy(txn, BUSY_RETRY_S, now_ms);
@@ -2023,8 +2037,8 @@ impl SiteAuthority {
         }
         self.next_request_id = next_request_id;
         self.requests.insert(request_id, request.clone());
-        if let Some(d) = self.discovered.get_mut(&node) {
-            d.last_verdict = "awaiting".into();
+        if let Some(d) = awaiting {
+            self.discovered.insert(node, d);
         }
         self.event(now_ms, request.event_fields(now_ms));
         txn.state = TxnState::Deciding(request_id);
@@ -2072,15 +2086,21 @@ impl SiteAuthority {
         );
     }
 
+    /// Auxiliary records (#127) follow the join rule: store commit first,
+    /// then RAM and events. On a store failure RAM keeps the committed
+    /// state and the next attempt (or expiry pass) retries.
     fn close_request(&mut self, request_id: u64, now_ms: u64) {
-        if self.requests.remove(&request_id).is_some() {
-            if let Err(error) = self.store.commit(&Batch {
-                docs: vec![(DocKind::JoinRequest, h16(request_id), None)],
-                ..Batch::default()
-            }) {
-                self.store_error(now_ms, &error);
-            }
+        if !self.requests.contains_key(&request_id) {
+            return;
         }
+        if let Err(error) = self.store.commit(&Batch {
+            docs: vec![(DocKind::JoinRequest, h16(request_id), None)],
+            ..Batch::default()
+        }) {
+            self.store_error(now_ms, &error);
+            return;
+        }
+        self.requests.remove(&request_id);
     }
 
     fn expire_requests(&mut self, now_ms: u64) {
@@ -2097,6 +2117,9 @@ impl SiteAuthority {
         }
     }
 
+    /// Records one authenticated attempt in the discovered table (commit
+    /// first, #127). False on a store failure: nothing changed, and the
+    /// caller answers AuthorityBusy.
     fn note_discovered(
         &mut self,
         facts: &DeviceFacts,
@@ -2104,27 +2127,20 @@ impl SiteAuthority {
         previously_removed: bool,
         kid_conflict: bool,
         now_ms: u64,
-    ) {
+    ) -> bool {
         let node = facts.node;
-        let first = !self.discovered.contains_key(&node);
-        if first && self.discovered.len() >= DISCOVERED_CAP {
-            // LRU on last_seen (02 §9).
-            if let Some(oldest) = self
-                .discovered
+        let existing = self.discovered.get(&node).cloned();
+        let first = existing.is_none();
+        // LRU on last_seen (02 §9).
+        let evict = if first && self.discovered.len() >= DISCOVERED_CAP {
+            self.discovered
                 .values()
                 .min_by_key(|d| d.last_seen_ms)
                 .map(|d| d.facts.node)
-            {
-                self.discovered.remove(&oldest);
-                if let Err(error) = self.store.commit(&Batch {
-                    docs: vec![(DocKind::Discovered, h16(oldest), None)],
-                    ..Batch::default()
-                }) {
-                    self.store_error(now_ms, &error);
-                }
-            }
-        }
-        let entry = self.discovered.entry(node).or_insert_with(|| Discovered {
+        } else {
+            None
+        };
+        let mut entry = existing.unwrap_or_else(|| Discovered {
             facts: facts.clone(),
             first_seen_ms: now_ms,
             last_seen_ms: now_ms,
@@ -2147,23 +2163,35 @@ impl SiteAuthority {
         if announce {
             entry.last_event_ms = now_ms;
         }
-        let doc = entry.doc();
-        let fields = format!(
-            "\"kind\":\"device.discovered\",\"device_id\":\"{}\",\"kid\":\"{}\",\"model\":{},\"first\":{first},\"previously_removed\":{previously_removed},\"kid_conflict\":{kid_conflict},\"via\":{}",
-            h16(node),
-            hex_lower(&facts.kid),
-            facts.model,
-            via.json()
-        );
+        let mut docs: Vec<_> = evict
+            .map(|oldest| (DocKind::Discovered, h16(oldest), None))
+            .into_iter()
+            .collect();
+        docs.push((DocKind::Discovered, h16(node), Some(entry.doc())));
         if let Err(error) = self.store.commit(&Batch {
-            docs: vec![(DocKind::Discovered, h16(node), Some(doc))],
+            docs,
             ..Batch::default()
         }) {
             self.store_error(now_ms, &error);
+            return false;
         }
+        if let Some(oldest) = evict {
+            self.discovered.remove(&oldest);
+        }
+        self.discovered.insert(node, entry);
         if announce {
-            self.event(now_ms, fields);
+            self.event(
+                now_ms,
+                format!(
+                    "\"kind\":\"device.discovered\",\"device_id\":\"{}\",\"kid\":\"{}\",\"model\":{},\"first\":{first},\"previously_removed\":{previously_removed},\"kid_conflict\":{kid_conflict},\"via\":{}",
+                    h16(node),
+                    hex_lower(&facts.kid),
+                    facts.model,
+                    via.json()
+                ),
+            );
         }
+        true
     }
 
     fn set_discovered_verdict(
@@ -2172,18 +2200,21 @@ impl SiteAuthority {
         label: &str,
         retry_not_before: Option<u64>,
         now_ms: u64,
-    ) {
-        if let Some(d) = self.discovered.get_mut(&node) {
-            d.last_verdict = label.to_string();
-            d.retry_not_before_ms = retry_not_before;
-            let doc = d.doc();
-            if let Err(error) = self.store.commit(&Batch {
-                docs: vec![(DocKind::Discovered, h16(node), Some(doc))],
-                ..Batch::default()
-            }) {
-                self.store_error(now_ms, &error);
-            }
+    ) -> bool {
+        let Some(mut d) = self.discovered.get(&node).cloned() else {
+            return true;
+        };
+        d.last_verdict = label.to_string();
+        d.retry_not_before_ms = retry_not_before;
+        if let Err(error) = self.store.commit(&Batch {
+            docs: vec![(DocKind::Discovered, h16(node), Some(d.doc()))],
+            ..Batch::default()
+        }) {
+            self.store_error(now_ms, &error);
+            return false;
         }
+        self.discovered.insert(node, d);
+        true
     }
 
     fn send_result(&mut self, mut txn: Txn, result: &JoinResult) -> bool {
@@ -2208,14 +2239,26 @@ impl SiteAuthority {
     }
 
     fn finish_busy(&mut self, txn: Txn, retry_after_s: u32, now_ms: u64) {
-        self.counters.authority_busy += 1;
         if let Some(node) = txn.device.as_ref().map(|d| d.facts.node) {
             self.set_discovered_verdict(node, "busy", None, now_ms);
         }
+        self.send_busy_result(txn, retry_after_s);
+    }
+
+    /// A failed auxiliary commit leaves the discovered record unchanged.
+    fn send_busy_result(&mut self, txn: Txn, retry_after_s: u32) {
+        self.counters.authority_busy += 1;
         self.send_result(txn, &JoinResult::AuthorityBusy { retry_after_s });
     }
 
-    fn finish_verdict(&mut self, txn: Txn, node: u64, verdict: Verdict, now_ms: u64) {
+    fn finish_verdict(
+        &mut self,
+        txn: Txn,
+        node: u64,
+        verdict: Verdict,
+        now_ms: u64,
+        decision_committed: bool,
+    ) {
         match verdict {
             Verdict::Allow { .. } => match self.devices.get(&node).cloned() {
                 // The verdict was recorded for this key: if the row has
@@ -2230,14 +2273,18 @@ impl SiteAuthority {
                 _ => self.finish_busy(txn, BUSY_RETRY_S, now_ms),
             },
             Verdict::Pending { retry_after_s } => {
-                self.counters.pending += 1;
-                let retry_at = now_ms + u64::from(retry_after_s) * 1000;
-                self.set_discovered_verdict(
+                let retry_at = now_ms.saturating_add(u64::from(retry_after_s) * 1000);
+                if !self.set_discovered_verdict(
                     node,
                     "pending",
                     Some(retry_at.saturating_sub(RETRY_SLACK_MS)),
                     now_ms,
-                );
+                ) && !decision_committed
+                {
+                    self.send_busy_result(txn, BUSY_RETRY_S);
+                    return;
+                }
+                self.counters.pending += 1;
                 let mut ticket = [0_u8; 16];
                 let _ = fill_random(&mut ticket);
                 self.send_result(
@@ -2249,8 +2296,13 @@ impl SiteAuthority {
                 );
             }
             Verdict::DenyNotHere | Verdict::DenyBlocked => {
+                if !self.set_discovered_verdict(node, verdict.label(), None, now_ms)
+                    && !decision_committed
+                {
+                    self.send_busy_result(txn, BUSY_RETRY_S);
+                    return;
+                }
                 self.counters.denied += 1;
-                self.set_discovered_verdict(node, verdict.label(), None, now_ms);
                 let result = if verdict == Verdict::DenyNotHere {
                     JoinResult::DenyNotHere
                 } else {
@@ -2372,7 +2424,7 @@ impl SiteAuthority {
     /// synthetic removed row for the old-network notice. Only for
     /// queries that still claim this site with an old network — never
     /// a signature oracle for strangers — and `None` on any store
-    /// failure (the caller falls through to the KGuard path).
+    /// failure (the caller falls through to the decider path).
     fn revoked_binding(
         &mut self,
         node: u64,
@@ -2714,7 +2766,7 @@ impl SiteAuthority {
                     self.abort(txn.key, AbortReason::Timeout);
                 }
                 TxnState::Deciding(_) => {
-                    // KGuard silent (08 §6 Q7): pending, the request stays
+                    // Decider silent (08 §6 Q7): pending, the request stays
                     // open so a late decision applies at the next attempt.
                     let node = txn.device.as_ref().map_or(0, |d| d.facts.node);
                     let retry = self.policy.pending_retry_after_s;
@@ -2725,6 +2777,7 @@ impl SiteAuthority {
                             retry_after_s: retry,
                         },
                         now_ms,
+                        false,
                     );
                 }
             }
@@ -2794,7 +2847,7 @@ impl SiteAuthority {
         dropped.len()
     }
 
-    // --- KGuard decisions --------------------------------------------------------------------
+    // --- decider verdicts -----------------------------------------------------------------------
 
     fn idempotent(
         &self,
@@ -3381,7 +3434,7 @@ impl SiteAuthority {
         if let Some(index) = waiting {
             let txn = self.txns.remove(index);
             self.close_request(open.id, now_ms);
-            self.finish_verdict(txn, open.facts.node, request.verdict, now_ms);
+            self.finish_verdict(txn, open.facts.node, request.verdict, now_ms, true);
         }
         Ok(result)
     }
@@ -6490,6 +6543,11 @@ impl SiteService {
     }
 }
 
+/// The decider the socket tests drive is the published example itself.
+#[cfg(all(test, unix))]
+#[path = "../../../routeloom-client/examples/assignment_table.rs"]
+#[allow(dead_code)]
+mod assignment_table;
 #[cfg(test)]
 mod authority_e2e;
 #[cfg(test)]

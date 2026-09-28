@@ -1,10 +1,10 @@
-//! KGuard's side of the SDK v1 zero-touch join (docs/design/sdk-v1/07 §2,
-//! §5; plan P3-3): the Site Authority's decision surface as a transport-
-//! neutral trait, plus [`KGuardMock`], a minimal assignment-table policy for
-//! tests and demos.
+//! The application's side of the SDK v1 zero-touch join
+//! (docs/design/sdk-v1/07 §2, §5): the Site Authority's decision surface as
+//! a transport-neutral trait. `examples/assignment_table.rs` is a minimal
+//! assignment-table decider built on it.
 //!
-//! KGuard answers "may this device join here?"; RouteLoom enforces the
-//! answer cryptographically. The facade exposes exactly that:
+//! The application (the external decider) answers "may this device join
+//! here?"; RouteLoom enforces the answer cryptographically. The facade exposes exactly that:
 //!
 //! | facade | API1 (RouteLoom backend) |
 //! |---|---|
@@ -21,9 +21,6 @@
 //! Grants (routeloom-host `--api-acl-file`, on the site's wire network):
 //! `MEMBERSHIP_READ` for reads and events, `MEMBERSHIP_DECIDE` for
 //! `decide` / `revoke`, `MEMBERSHIP_ADMIN` for `rotate_group_key`.
-
-use std::collections::HashMap;
-use std::sync::Mutex;
 
 use crate::{NodeId, TransportError};
 
@@ -75,7 +72,7 @@ pub struct JoinRequest {
     /// `jr-…` token to pass back in [`SiteAdmin::decide`].
     pub id: String,
     pub device: NodeId,
-    /// SHA-256 of the device key (hex) — the key identity KGuard can pin.
+    /// SHA-256 of the device key (hex) — the key identity a decider can pin.
     pub kid: String,
     pub model: u16,
     pub hw_rev: u8,
@@ -320,7 +317,7 @@ pub struct SiteEvent {
 
 pub type SiteEventStream = Box<dyn Iterator<Item = Result<SiteEvent, TransportError>> + Send>;
 
-/// The KGuard decision surface of a Site Authority.
+/// The external-decider surface of a Site Authority.
 pub trait SiteAdmin: Send + Sync {
     fn site_status(&self) -> Result<SiteStatus, TransportError>;
     /// Open join requests (awaiting a verdict, or decided but not yet
@@ -378,85 +375,4 @@ pub trait SiteAdmin: Send + Sync {
     ) -> Result<Option<CutoverProgress>, TransportError>;
 
     fn site_events(&self) -> Result<SiteEventStream, TransportError>;
-}
-
-/// Where KGuard's assignment table puts a device.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Assignment {
-    Here(Role),
-    Elsewhere,
-    Blocked,
-}
-
-/// A stand-in for KGuard: an assignment table and the rule
-/// "assigned here → allow, assigned elsewhere → deny not_here, blocked →
-/// deny blocked, unknown → pending" (07 §5). A key conflict is never
-/// allowed automatically.
-pub struct KGuardMock {
-    assignments: Mutex<HashMap<NodeId, Assignment>>,
-    pub pending_retry_s: u32,
-}
-
-impl Default for KGuardMock {
-    fn default() -> Self {
-        Self {
-            assignments: Mutex::new(HashMap::new()),
-            pending_retry_s: 60,
-        }
-    }
-}
-
-impl KGuardMock {
-    pub fn assign(&self, device: NodeId, assignment: Assignment) {
-        self.assignments
-            .lock()
-            .expect("assignments poisoned")
-            .insert(device, assignment);
-    }
-
-    pub fn unassign(&self, device: NodeId) {
-        self.assignments
-            .lock()
-            .expect("assignments poisoned")
-            .remove(&device);
-    }
-
-    pub fn decision_for(&self, request: &JoinRequest) -> Decision {
-        if request.kid_conflict {
-            return Decision::Pending {
-                retry_after_s: self.pending_retry_s,
-            };
-        }
-        match self
-            .assignments
-            .lock()
-            .expect("assignments poisoned")
-            .get(&request.device)
-        {
-            Some(Assignment::Here(role)) => Decision::Allow(*role),
-            Some(Assignment::Elsewhere) => Decision::DenyNotHere,
-            Some(Assignment::Blocked) => Decision::DenyBlocked,
-            None => Decision::Pending {
-                retry_after_s: self.pending_retry_s,
-            },
-        }
-    }
-
-    /// Decides every open, undecided request once. Returns what it did.
-    pub fn serve_once(
-        &self,
-        admin: &dyn SiteAdmin,
-    ) -> Result<Vec<(JoinRequest, Decision, DecisionOutcome)>, TransportError> {
-        let mut done = Vec::new();
-        for request in admin.join_requests()? {
-            if request.decided {
-                continue;
-            }
-            let decision = self.decision_for(&request);
-            let key = format!("kgmock-{}-{}", request.id, request.attempt);
-            let outcome = admin.decide(&request, decision, &key)?;
-            done.push((request, decision, outcome));
-        }
-        Ok(done)
-    }
 }
