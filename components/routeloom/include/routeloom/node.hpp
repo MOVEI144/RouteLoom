@@ -242,6 +242,11 @@ class RadioPort {
 // fills the reply, and the verdict is committed to a result record emitted as
 // APP_RESULT RESULT. Dedup/replays answer from the stored record — the
 // endpoint is never re-invoked for a retransmission.
+// Asynchronous endpoints (core C ABI 3): the sink may set `deferred` instead
+// of a verdict and answer later with complete_applied(request.ticket, ...).
+// Until then a QUERY is answered Pending and no RESULT is sent; a completion
+// after the request deadline, a second one, or one for another boot's ticket
+// is refused and never applied.
 
 using ExecutionLease = std::array<std::uint8_t, endpoint::kAppliedLeaseBytes>;
 constexpr std::size_t kAppliedUserPayloadMax = endpoint::kAppliedUserPayloadMax;
@@ -257,6 +262,7 @@ struct AppliedRequest {
   NodeId source{kInvalidNodeId};     // == key.origin
   ByteView payload{};                // user bytes; the 16B lease is stripped
   std::uint32_t remaining_ms{0};     // request's remaining deadline at dispatch
+  std::uint64_t ticket{0};           // message_session << 32 | serial, never 0
 };
 
 struct AppliedReply {
@@ -264,6 +270,7 @@ struct AppliedReply {
   std::uint32_t code{0};             // app-chosen; the SDK band is rewritten
   std::array<std::uint8_t, endpoint::kAppResultDataMax> data{};
   std::uint8_t size{0};              // 0..48
+  bool deferred{false};              // verdict follows via complete_applied()
 };
 
 class AppliedEndpointSink {
@@ -788,6 +795,12 @@ class MeshNode {
   Status set_applied_sink(AppliedEndpointSink* sink) noexcept;
   // The stored RESULT view for a delivery: false when none was verified.
   bool applied_result(const MessageId& id, AppliedResultView& out) const noexcept;
+  // Commits the verdict of a deferred APPLIED request (see AppliedReply).
+  // NotFound: unknown, already completed or released ticket. Expired: past
+  // the request deadline. InvalidArgument: a reply the synchronous path
+  // would rewrite (oversize data, SDK-band code) — the ticket stays open.
+  Status complete_applied(std::uint64_t ticket, const AppliedReply& reply,
+                          MonotonicMs now_ms) noexcept;
   const AppliedStats& applied_stats() const noexcept { return applied_stats_; }
   Status cancel(const MessageId& id) noexcept;
   DeliveryResult delivery(const MessageId& id) const noexcept;
@@ -1688,6 +1701,8 @@ class MeshNode {
     MonotonicMs expires_at_ms{0};
     MonotonicMs emit_deadline_ms{0};  // request deadline + kAppliedLateResultMs
     MonotonicMs next_emit_ms{0};
+    MonotonicMs apply_deadline_ms{0};  // request deadline for a deferred verdict
+    std::uint64_t ticket{0};  // nonzero while the endpoint's verdict is pending
     std::uint8_t emits{0};
     bool acked{false};  // a matching RESULT_ACK landed
     std::uint8_t outcome{0};  // endpoint::AppResultOutcome
@@ -2847,6 +2862,7 @@ class MeshNode {
   AppliedEndpointSink* applied_sink_{nullptr};
   AppliedStats applied_stats_{};
   std::uint64_t next_app_nonce_{1};
+  std::uint32_t next_applied_ticket_{0};
   FixedPool<SeqnoSeen, kSeqnoSeenCapacity> seqno_seen_{};
   FixedPool<SeqnoState, kSeqnoStateCapacity> seqno_state_{};
   TxScheduler scheduler_{};

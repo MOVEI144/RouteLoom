@@ -4854,16 +4854,26 @@ void MeshNode::dispatch_applied(const wire::Header& data, const ByteView body,
       ++applied_stats_.refusals_no_endpoint;
     } else {
       reply = AppliedReply{};
+      if (++next_applied_ticket_ == 0) ++next_applied_ticket_;
       const AppliedRequest request{record.key, data.origin,
                                    ByteView{body.data + endpoint::kAppliedLeaseBytes,
                                             body.size - endpoint::kAppliedLeaseBytes},
-                                   data.remaining_deadline_ms};
+                                   data.remaining_deadline_ms,
+                                   (static_cast<std::uint64_t>(config_.message_session) << 32) |
+                                       next_applied_ticket_};
       {
         ExternalCallbackScope scope(in_external_callback_);
         applied_sink_->on_applied_request(request, reply);
       }
       dispatched = true;
       ++applied_stats_.requests_dispatched;
+      if (reply.deferred) {
+        // No verdict yet: nothing is committed or sent until
+        // complete_applied(); a QUERY meanwhile answers Pending.
+        record.ticket = request.ticket;
+        record.apply_deadline_ms = now_ms + data.remaining_deadline_ms;
+        return;
+      }
       outcome = reply.outcome;
       code = reply.code;
       if (reply.size > endpoint::kAppResultDataMax ||
@@ -4889,8 +4899,38 @@ void MeshNode::dispatch_applied(const wire::Header& data, const ByteView body,
   (void)emit_applied_result(record, now_ms);
 }
 
+Status MeshNode::complete_applied(const std::uint64_t ticket, const AppliedReply& reply,
+                                  const MonotonicMs now_ms) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+  NodeGuard guard(in_call_);
+  last_clock_ms_ = now_ms;
+  if (ticket == 0 || reply.deferred || reply.size > endpoint::kAppResultDataMax ||
+      reply.code >= endpoint::kAppResultSdkCodeBase) {
+    return Status::error(StatusCode::InvalidArgument, "invalid applied reply");
+  }
+  auto* record = applied_records_.find(
+      [&](const AppliedRecord& value) { return value.ticket == ticket; });
+  if (record == nullptr) return Status::error(StatusCode::NotFound, "APPLIED_TICKET_UNKNOWN");
+  if (now_ms >= record->apply_deadline_ms) {
+    return Status::error(StatusCode::Expired, "APPLIED_TICKET_EXPIRED");
+  }
+  ++work_generation_;
+  record->ticket = 0;
+  record->outcome = static_cast<std::uint8_t>(reply.outcome);
+  record->application_code = reply.code;
+  record->result_size = reply.size;
+  if (reply.size > 0) std::memcpy(record->result_data.data(), reply.data.data(), reply.size);
+  ++applied_stats_.results_committed;
+  (void)emit_applied_result(*record, now_ms);
+  return Status::success();
+}
+
 Status MeshNode::emit_applied_result(AppliedRecord& record,
                                      const MonotonicMs now_ms) noexcept {
+  if (record.ticket != 0) {
+    // A deferred verdict does not exist yet; replays and QUERYs wait for it.
+    return Status::error(StatusCode::WouldBlock, "APPLIED_PENDING");
+  }
   if (record.emits >= kAppliedMaxEmits || now_ms >= record.emit_deadline_ms ||
       now_ms < record.next_emit_ms) {
     ++applied_stats_.result_emits_suppressed;
@@ -5180,6 +5220,17 @@ void MeshNode::handle_app_result(const wire::PlainFrame& frame, const NodeId pee
         }
         return;
       }
+      if (record->ticket != 0) {
+        if (applied_answer_gate(frame.header.origin, now_ms)) {
+          emit_app_status(frame.header.origin, req_key, head.request_digest,
+                          now_ms < record->apply_deadline_ms
+                              ? endpoint::AppResultStatusCode::Pending
+                              : endpoint::AppResultStatusCode::Expired,
+                          query.query_nonce, frame.header.remaining_deadline_ms,
+                          now_ms);
+        }
+        return;
+      }
       // The stored verdict answers the query — the endpoint is never rerun.
       (void)emit_applied_result(*record, now_ms);
       return;
@@ -5301,7 +5352,7 @@ void MeshNode::process_applied(const MonotonicMs now_ms) noexcept {
   // Emit retries: an unacked committed result retransmits inside its window
   // and emit budget; dedup/QUERY replays share the same counters.
   applied_records_.for_each([&](AppliedRecord& record) {
-    if (!record.acked && record.emits < kAppliedMaxEmits &&
+    if (record.ticket == 0 && !record.acked && record.emits < kAppliedMaxEmits &&
         now_ms >= record.next_emit_ms && now_ms < record.emit_deadline_ms) {
       (void)emit_applied_result(record, now_ms);
     }

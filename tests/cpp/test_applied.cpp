@@ -996,6 +996,59 @@ void test_app_rejected_verdict() {
   CHECK(b->applied_stats().result_acks == 1);
 }
 
+// Deferred endpoint (core C ABI 3 async ticket): no RESULT until the
+// completion, QUERYs answered Pending, one verdict per ticket, none after the
+// request deadline.
+void test_deferred_ticket() {
+  World w;
+  MeshNode* a = w.add(1);
+  MeshNode* b = w.add(2);
+  w.start_all();
+  w.link(1, 2);
+  struct DeferringSink final : AppliedEndpointSink {
+    std::uint64_t ticket{0};
+    int calls{0};
+    void on_applied_request(const AppliedRequest& request,
+                            AppliedReply& reply) noexcept override {
+      ++calls;
+      ticket = request.ticket;
+      reply.deferred = true;
+    }
+  } sink;
+  b->set_applied_sink(&sink);
+
+  const MessageId id = applied_exchange(w);
+  w.run(1000);  // past the app window twice: both QUERYs see Pending
+  CHECK(sink.calls == 1 && (sink.ticket >> 32) == 102);
+  CHECK(a->delivery(id).state == DeliveryState::WaitingForEndReceipt);
+  CHECK(b->applied_stats().results_committed == 0 && b->applied_stats().results_emitted == 0);
+  CHECK(b->applied_stats().status_sent == kAppliedMaxQueries);
+  CHECK(a->applied_stats().statuses_received == kAppliedMaxQueries);
+
+  AppliedReply reply{};
+  reply.outcome = ep::AppResultOutcome::Success;
+  reply.code = 5;
+  reply.size = ep::kAppResultDataMax + 1;
+  CHECK(b->complete_applied(sink.ticket, reply, w.now).code == StatusCode::InvalidArgument);
+  reply.size = 0;
+  CHECK(b->complete_applied(sink.ticket ^ (1ull << 32), reply, w.now).code ==
+        StatusCode::NotFound);
+  CHECK_OK(b->complete_applied(sink.ticket, reply, w.now));
+  CHECK(b->complete_applied(sink.ticket, reply, w.now).code == StatusCode::NotFound);
+  CHECK(w.run_until([&] { return a->delivery(id).state == DeliveryState::Delivered; }, 1000));
+  CHECK(std::strcmp(a->delivery(id).reason, "APP_APPLIED") == 0);
+  CHECK(w.obs(1)->applied.size() == 1 && w.obs(1)->applied[0].second.code == 5);
+
+  // A ticket past its request deadline is refused and nothing is sent.
+  const MessageId late = applied_exchange(w, 1000);
+  w.run(1100);
+  const auto emitted = b->applied_stats().results_emitted;
+  CHECK(b->complete_applied(sink.ticket, reply, w.now).code == StatusCode::Expired);
+  w.run(200);
+  CHECK(b->applied_stats().results_emitted == emitted);
+  CHECK(a->delivery(late).state == DeliveryState::Indeterminate);
+}
+
 void test_no_sink_commits_no_endpoint() {
   World w;
   MeshNode* a = w.add(1);
@@ -1676,6 +1729,7 @@ int main() {
   test_late_result_after_timeout();
   test_app_rejected_verdict();
   test_no_sink_commits_no_endpoint();
+  test_deferred_ticket();
   test_stale_lease_refusal_and_bootstrap();
   test_malformed_body_refusal();
   test_query_recovery_resends_result();
