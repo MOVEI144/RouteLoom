@@ -773,6 +773,12 @@ LifecycleBlockReason MembershipLifecycle::adopt_stores() noexcept {
 
 Status MembershipLifecycle::adopt_and_enter(const MonotonicMs now_ms) noexcept {
   const LifecycleBlockReason blocked = adopt_stores();
+  if (blocked == LifecycleBlockReason::Site && never_assigned()) {
+    // A board that never held a site is not a storage fault: wait closed
+    // in BootGate so the first join's MemberReady adopts it live.
+    phase_ = LifecyclePhase::BootGate;
+    return Status::success();
+  }
   if (blocked != LifecycleBlockReason::None) {
     enter_storage_blocked(blocked, now_ms);
     return Status::success();
@@ -1828,6 +1834,13 @@ Status MembershipLifecycle::on_recovery(const LifecycleJoinRecovery& recovery,
     notify(LifecycleEventKind::RecoveryFinished, 0, adopted_.rs_epoch, 0, now_ms);
   }
   return Status::success();
+}
+
+bool MembershipLifecycle::never_assigned() const noexcept {
+  const SiteStoreHealth health = site_.health();
+  return health.initialized && !health.has_site && !health.quarantined && !health.uncertain &&
+         health.unsupported_mask == 0 && health.read_error_mask == 0 &&
+         !health.active_load_failed && (journal_ == nullptr || !journal_->has_record());
 }
 
 bool MembershipLifecycle::reassigned_after_removal() const noexcept {

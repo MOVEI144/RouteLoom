@@ -798,6 +798,7 @@ class MembershipLifecycle final {
   Status switch_poll(MonotonicMs now_ms) noexcept;
   bool restore_applied_receipt() noexcept;
   bool send_renew_receipt(GrantRenewPhase phase, ByteView digest) noexcept;
+  bool never_assigned() const noexcept;
   bool reassigned_after_removal() const noexcept;
 
   LifecycleBlockReason adopt_stores() noexcept;

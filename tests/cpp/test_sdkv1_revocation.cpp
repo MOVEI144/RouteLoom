@@ -502,6 +502,37 @@ void test_boot_adoption() {
   CHECK(acked);
 }
 
+void test_first_join_adopts_live() {
+  // A never-assigned board boots with its identity and an empty site
+  // store. Its first zero-touch join must open the lifecycle live: a
+  // StorageBlocked boot refused MemberReady, so RRS1/notice/grant
+  // envelopes were ignored until a reboot (HIL H0 F5).
+  NodeFixture fresh;
+  CHECK(fresh.journal.initialize());
+  CHECK(fresh.identity.initialize());
+  CHECK_OK(fresh.identity.commit(identity_for(kNode)));
+  CHECK(fresh.site.initialize());
+  CHECK(fresh.revocations.initialize());
+  CHECK_OK(fresh.dispatch(LifecycleInput::Boot(true), 0));
+  CHECK(fresh.snap().phase == LifecyclePhase::BootGate);
+  CHECK_OK(fresh.dispatch(LifecycleInput::Poll(), 0));
+  CHECK(fresh.authority.sent.empty());  // no site: nothing to fetch
+  CHECK(!fresh.lifecycle.permits_recovery_control(stamp_for(kPeer, 3)));
+  // The join commits RLS1 and the package RRS1, then reports MemberReady.
+  CHECK_OK(fresh.site.commit(site_for(kNode, 3)));
+  CHECK(fresh.revocations.accept(revocation_object(revocation_set(14, 1, 2)).view(),
+                                 sak().pub, kSiteId, kNetwork));
+  CHECK_OK(fresh.dispatch(LifecycleInput::MemberReady(fresh.site.commit_seq(), 14), 10));
+  fresh.pump(10);
+  CHECK(fresh.snap().phase == LifecyclePhase::Active);
+  PeerCredentialStamp authority{};
+  authority.network = kNetwork;
+  CHECK_OK(fresh.dispatch(LifecycleInput::Authority(authority, kAuthorityTypeRevocation,
+                          revocation_object(revocation_set(15)).view()), 100));
+  fresh.pump(100);
+  CHECK(fresh.snap().applied_rs_epoch == 15);
+}
+
 void test_boot_self_revoked_and_blocked() {
   // Our own (node, generation) is in the adopted set: SelfRevoked + action.
   NodeFixture node;
@@ -3223,6 +3254,7 @@ int main() {
   test_rrs_wire_codecs();
   test_revocation_wire_vectors();
   test_boot_adoption();
+  test_first_join_adopts_live();
   test_enforcement_storage_failure_stays_closed();
   test_boot_self_revoked_and_blocked();
   test_boot_rejects_resume_storage_quota_mismatch();
