@@ -271,3 +271,67 @@ class Budget(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Scenarios(unittest.TestCase):
+    def setUp(self):
+        self.data = check.load_scenarios()
+
+    def rows(self, rid):
+        return [row for row in self.data["rows"] if row["id"] == rid]
+
+    def test_repository_rows_pass(self):
+        self.assertEqual(check.scenario_errors(self.data), [])
+        code, _, err = run_main(["scenarios"])
+        self.assertEqual((code, err), (0, ""))
+
+    def test_duplicate_id_and_missing_test_fail(self):
+        row = dict(self.rows("M01")[0])
+        self.data["rows"].append(row)
+        self.rows("M03")[0]["test"] = self.rows("M03")[0]["test"] + [
+            "host/routeloom-host/src/site/owner_mesh/mesh.rs::mesh_no_such_test"]
+        self.rows("M07")[0]["test"] = ["ctest:routeloom_no_such_tests"]
+        errors = check.scenario_errors(self.data)
+        self.assertIn("M01: duplicate id", errors)
+        self.assertIn("M03: no test host/routeloom-host/src/site/owner_mesh/mesh.rs::"
+                      "mesh_no_such_test", errors)
+        self.assertIn("M07: no test ctest:routeloom_no_such_tests", errors)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "scenarios.json"
+            path.write_text(json.dumps(self.data), encoding="utf-8")
+            code, _, err = run_main(["scenarios", "--file", path])
+        self.assertEqual(code, 1)
+        self.assertIn("M01: duplicate id", err)
+
+    def test_planned_and_hil_rows(self):
+        self.rows("M02")[0]["test"] = self.rows("M01")[0]["test"]
+        self.rows("M05")[0]["hil"]["run"] = ["tools/hil/no_such_script.py"]
+        self.rows("M03")[0]["hil"] = {"rounds": ["H0"], "run": "manual"}
+        errors = check.scenario_errors(self.data)
+        self.assertIn("M02: a planned row names no test", errors)
+        self.assertIn("M05: hil run ['tools/hil/no_such_script.py'] is neither manual nor "
+                      "HIL scripts", errors)
+        self.assertIn("M03: hil set on a row without the hil tier", errors)
+
+    def test_interop_requires_every_live_pr_case(self):
+        steps = [s for s in check.interop() if s.require is not None]
+        self.assertEqual(len(steps), 2)
+        self.assertIn("site::joiner_interop::live_owner_removal_notice_erase_holdoff",
+                      steps[0].require)
+        self.assertIn("site::owner_mesh::mesh::mesh_direct_converges_and_delivers",
+                      steps[1].require)
+        # The red three-hop row is ignored by the suite, not required.
+        self.assertNotIn("site::owner_mesh::mesh::mesh_line_three_hops_delivers",
+                         steps[1].require)
+
+    def test_require_live_fails_on_a_missing_or_empty_run(self):
+        script = "print('test site::a ... ok'); print('test site::b ... FAILED')"
+        for require, expect in ((["site::a"], 0), (["site::a", "site::b"], 1), ([], 0)):
+            step = check.Step([sys.executable, "-c", script], require=require)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(check.run([step], dry_run=False), expect, require)
+        empty = check.Step([sys.executable, "-c", "print('running 0 tests')"], require=[])
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            self.assertEqual(check.run([empty], dry_run=False), 1)
+        self.assertIn("(no case ran)", err.getvalue())
