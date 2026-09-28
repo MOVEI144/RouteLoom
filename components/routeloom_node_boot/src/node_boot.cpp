@@ -847,10 +847,14 @@ void run_node(const NodeBootHooks& hooks) {
   }
   owner_config.joiner.node = owner_config.local_node;
   owner_config.joiner.mac = owner_config.local_mac;
+  // ROUTELOOM_ROLE: an endpoint image asks for and serves the endpoint role
+  // only; begin() refuses a role above the resource profile before RF.
+  owner_config.role = routeloom::profile::kRole;
   owner_config.joiner.capability =
-      routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay;
-  owner_config.joiner.requested_role = static_cast<std::uint8_t>(
-      routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay);
+      routeloom::profile::kRole == routeloom::profile::Role::Endpoint
+          ? routeloom::sdkv1::kMemberRoleEndpoint
+          : routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay;
+  owner_config.joiner.requested_role = static_cast<std::uint8_t>(owner_config.joiner.capability);
   owner_config.log_tag = kTag;
 #if CONFIG_ROUTELOOM_GROUP_TREE_FLAT
   // Flat group profile (dev-flow §6.3): the adopted SitePackage gateways

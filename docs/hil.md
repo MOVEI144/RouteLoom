@@ -167,7 +167,7 @@ python3 tools/hil/counter_snapshot.py --rig tools/hil/rigs.yaml \
 # These opt-in images discard only the other end's source MAC on reception;
 # Node2 keeps its ordinary image and can BIND to both ends.
 tools/hil/build_image.sh bridge_node esp32c3 c3-chain-bridge \
-    'CONFIG_ROUTELOOM_CAPABILITY=0x47' \
+    'CONFIG_ROUTELOOM_CAPABILITY=0x47' 'CONFIG_ROUTELOOM_USB_NODE_STATUS=y' \
     'CONFIG_ROUTELOOM_HIL_DROP_RX_MAC="94:a9:90:7a:26:ac"'
 tools/hil/build_image.sh reference_node esp32c3 c3-chain-node3 \
     'CONFIG_ROUTELOOM_NODE_ID=0x3' \
