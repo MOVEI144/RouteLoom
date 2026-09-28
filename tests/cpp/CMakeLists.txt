@@ -133,7 +133,10 @@ add_test(NAME routeloom_migration_tests COMMAND routeloom_migration_tests)
 
 add_executable(routeloom_migration_wire_tests test_migration_wire.cpp)
 target_link_libraries(routeloom_migration_wire_tests PRIVATE routeloom_core)
-target_include_directories(routeloom_migration_wire_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(routeloom_migration_wire_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/components/routeloom/third_party/micro-ecc)
+target_compile_definitions(routeloom_migration_wire_tests PRIVATE
+    ROUTELOOM_SITE_SIGNED_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/site-signed-golden")
 target_compile_options(routeloom_migration_wire_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_migration_wire_tests COMMAND routeloom_migration_wire_tests)
 
@@ -153,7 +156,8 @@ target_link_libraries(routeloom_config_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_config_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/components/routeloom/third_party/micro-ecc)
 target_compile_definitions(routeloom_config_tests PRIVATE
-    ROUTELOOM_CONFIG_SIGNED_GOLDEN_DIR="${ROUTELOOM_CONFIG_SIGNED_GOLDEN_DIR}")
+    ROUTELOOM_CONFIG_SIGNED_GOLDEN_DIR="${ROUTELOOM_CONFIG_SIGNED_GOLDEN_DIR}"
+    ROUTELOOM_SITE_SIGNED_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/site-signed-golden")
 target_compile_options(routeloom_config_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_config_tests COMMAND routeloom_config_tests)
 

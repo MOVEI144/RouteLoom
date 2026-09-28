@@ -2,13 +2,13 @@
 //! P3-3, G-SEC P5): `site.status`, `join.policy.get/set`,
 //! `join.requests.list`, `join.decide`, `devices.discovered.list`,
 //! `members.list/get`, `membership.revoke`, `membership.archive`,
-//! `membership.cutover`, `group_keys.status/rotate`, and `operations.get`
-//! for `op-` tokens.
+//! `membership.cutover`, `group_keys.status/rotate`, `site.channel_plan.sign`,
+//! and `operations.get` for `op-` tokens.
 //!
 //! Authorization (07 §2): `MEMBERSHIP_READ` for the read side,
 //! `MEMBERSHIP_DECIDE` for `join.decide` / `membership.revoke`,
 //! `MEMBERSHIP_ADMIN` for the policy, `membership.cutover`,
-//! `membership.archive` and `group_keys.rotate`. The network
+//! `membership.archive`, `group_keys.rotate`, and `site.channel_plan.sign`. The network
 //! the ACL is checked on is the site's wire network (network_low32 of the
 //! SiteCert). The principal comes from the socket peer credential only;
 //! idempotency identity is `(principal, idempotency_key)`.
@@ -28,6 +28,7 @@ use crate::site::{
     parse_reason, ArchiveRequest, CutoverRequest, DecideRequest, DecisionMode, Events, PolicyPatch,
     RevokeRequest, RotateRequest, SiteError, SiteService, ARCHIVE_BATCH_MAX,
 };
+use routeloom_provision::signer::hex_encode;
 
 /// v1 input spelling of `decision_mode:"external"` (vocabulary check
 /// allow-list: tests/test_public_vocabulary.py).
@@ -64,6 +65,7 @@ pub const SITE_EVENT_KINDS: &[&str] = &[
 
 pub const SITE_METHODS: &[&str] = &[
     "site.status",
+    "site.channel_plan.sign",
     "join.policy.get",
     "join.policy.set",
     "join.requests.list",
@@ -214,6 +216,7 @@ pub(super) fn dispatch<S: OperationStore>(
 ) -> Option<Result<String, ApiError>> {
     let handler: fn(&Json, &ApiContext<'_, S>) -> Result<String, ApiError> = match method {
         "site.status" => site_status,
+        "site.channel_plan.sign" => channel_plan_sign,
         "join.policy.get" => policy_get,
         "join.policy.set" => policy_set,
         "join.requests.list" => requests_list,
@@ -229,6 +232,44 @@ pub(super) fn dispatch<S: OperationStore>(
         _ => return None,
     };
     Some(handler(params, ctx))
+}
+
+fn channel_plan_sign<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    only(params, &["plan_blob_hex"])?;
+    let site = service(ctx)?;
+    authorize(ctx, site, acl::PERM_MEMBERSHIP_ADMIN, "MEMBERSHIP_ADMIN")?;
+    let hex = params
+        .get("plan_blob_hex")
+        .and_then(Json::as_str)
+        .filter(|text| {
+            !text.is_empty()
+                && text.len() <= 2 * routeloom_provision::sdkv1::channel_plan::PLAN_BLOB_MAX
+        })
+        .ok_or_else(|| {
+            ApiError::simple(
+                "INVALID_ARGUMENT",
+                "plan_blob_hex must be a bounded hex blob",
+            )
+        })?;
+    let blob = crate::site::records::parse_hex(hex, hex.len() / 2).ok_or_else(|| {
+        ApiError::simple("INVALID_ARGUMENT", "plan_blob_hex must be even-length hex")
+    })?;
+    let signed = site
+        .with(|authority| authority.sign_channel_plan(&blob))
+        .0
+        .map_err(|error| ApiError::simple("INVALID_ARGUMENT", &error))?;
+    Ok(format!(
+        "{{\"plan_blob_hex\":\"{}\",\"plan_hash_hex\":\"{}\",\"operation_hash_hex\":\"{}\",\"commit_signature_hex\":\"{}\",\"snapshot_hex\":\"{}\",\"snapshot_signature_hex\":\"{}\",\"dispatched\":false}}",
+        hex_encode(&signed.blob),
+        hex_encode(&signed.plan_hash),
+        hex_encode(&signed.operation_hash),
+        hex_encode(&signed.commit_signature),
+        hex_encode(&signed.snapshot),
+        hex_encode(&signed.snapshot_signature),
+    ))
 }
 
 fn site_status<S: OperationStore>(

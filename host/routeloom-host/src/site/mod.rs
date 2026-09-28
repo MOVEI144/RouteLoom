@@ -79,6 +79,9 @@ use routeloom_provision::credential::credential_kid;
 use routeloom_provision::sdkv1::cert::{
     cert_decode, cert_issue, cert_verify, CertClaims, CertType, CERT_MAX,
 };
+use routeloom_provision::sdkv1::channel_plan::{
+    issue as sign_plan, plan_decode, SignedChannelPlan,
+};
 use routeloom_provision::sdkv1::devca::devcert_verify;
 use routeloom_provision::sdkv1::revocation::{
     revocation_issue, revocation_object_decode, RevocationEntry, RevocationReason, RevocationSet,
@@ -1589,6 +1592,19 @@ impl SiteAuthority {
 
     pub fn network(&self) -> u64 {
         self.id.network
+    }
+
+    /// Pure SAK issuance for a canonical manual plan. Dispatch and ledger
+    /// admission happen at the gateway's migration agent.
+    pub fn sign_channel_plan(&self, blob: &[u8]) -> Result<SignedChannelPlan, String> {
+        let plan = plan_decode(blob).map_err(|error| error.to_string())?;
+        if plan.network != self.id.network
+            || plan.authority != self.id.site_id
+            || plan.authority_generation != 1
+        {
+            return Err("channel plan is not bound to this site".into());
+        }
+        sign_plan(&plan, self.sak.as_ref()).map_err(|error| error.to_string())
     }
 
     pub fn policy(&self) -> JoinPolicy {

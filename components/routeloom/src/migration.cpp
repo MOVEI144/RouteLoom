@@ -5,6 +5,7 @@
 
 #include "routeloom/byte_io.hpp"
 #include "routeloom/crc32.hpp"
+#include "routeloom/discovery_scope.hpp"  // sha256
 
 namespace routeloom {
 namespace {
@@ -211,24 +212,10 @@ Status plan_decode(const ByteView encoded, MigrationPlan& out) noexcept {
 }
 
 Digest256 plan_digest(const ByteView encoded_plan) noexcept {
-  // Deterministic domain-separated binding ("RLMP" lanes). Same construction
-  // as bind_operation_payload: content addressing + integrity, NOT a
-  // cryptographic digest — the signature verifier is the authenticity check.
+  // SHA-256: the commit signature covers this hash, not the blob, so it
+  // must be collision resistant for the signature to bind every plan field.
   Digest256 out{};
-  std::uint64_t lanes[4] = {0x524C4D50526F7574ULL, 0xBB67AE8584CAA73BULL,
-                            0x3C6EF372FE94F82BULL, 0x54A9D1E7F5B8C3A2ULL};
-  for (std::size_t i = 0; i < encoded_plan.size; ++i) {
-    std::uint64_t& lane = lanes[i % 4];
-    lane ^= encoded_plan.data[i];
-    lane *= 0x100000001B3ULL;
-    lane ^= lane >> 29U;
-  }
-  for (int lane = 0; lane < 4; ++lane) {
-    for (int byte = 0; byte < 8; ++byte) {
-      out[lane * 8 + byte] =
-          static_cast<std::uint8_t>(lanes[lane] >> (56 - byte * 8));
-    }
-  }
+  sha256(encoded_plan, out);
   return out;
 }
 
@@ -277,6 +264,19 @@ Status MigrationAuthority::commit_plan(
   }
   if (ledger_ == nullptr) {
     return reject(StatusCode::InvalidState, "VERIFY_ONLY_AUTHORITY");
+  }
+  if (plan_blob.data == nullptr || plan_blob.size == 0 ||
+      plan_blob.size > migration_const::kPlanBlobMax) {
+    return reject(StatusCode::InvalidArgument, "PLAN_BLOB_BOUND");
+  }
+  std::array<std::uint8_t, migration_const::kPlanBlobMax> canonical{};
+  std::size_t canonical_size = 0;
+  const Status encoded = plan_encode(
+      plan, MutableByteView{canonical.data(), canonical.size()}, canonical_size);
+  if (!encoded) return encoded;
+  if (canonical_size != plan_blob.size ||
+      std::memcmp(canonical.data(), plan_blob.data, canonical_size) != 0) {
+    return reject(StatusCode::IntegrityError, "PLAN_BLOB_MISMATCH");
   }
   const Digest256 hash = plan_digest(plan_blob);
   if (operation.sequence != plan.operation_sequence ||
@@ -728,7 +728,8 @@ Status plan_structure_status(const MigrationPlan& plan) noexcept {
       plan.old_channel == plan.new_channel) {
     return reject(StatusCode::InvalidArgument, "PLAN_CHANNEL_INVALID");
   }
-  if (plan.expiry_ms <= plan.switch_reference_ms + plan.guard_ms) {
+  if (plan.expiry_ms <= plan.switch_reference_ms ||
+      plan.expiry_ms - plan.switch_reference_ms <= plan.guard_ms) {
     return reject(StatusCode::InvalidArgument, "PLAN_EXPIRY_BEFORE_GUARD");
   }
   if (plan.max_outage_ms == 0) {

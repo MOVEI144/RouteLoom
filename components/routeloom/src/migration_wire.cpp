@@ -1463,7 +1463,7 @@ Status MigrationAgent::offer_plan(
   if (!config_.authority_role) {
     return reject(StatusCode::InvalidState, "NOT_AUTHORITY_ROLE");
   }
-  if (plan_blob.size == 0 ||
+  if (plan_blob.data == nullptr || plan_blob.size == 0 ||
       plan_blob.size > migration_const::kPlanBlobMax) {
     return reject(StatusCode::InvalidArgument, "PLAN_BLOB_BOUND");
   }
