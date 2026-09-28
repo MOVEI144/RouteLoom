@@ -2,6 +2,63 @@
 
 use super::*;
 
+/// Radio topology (G1): the node count and the undirected audible
+/// legs. Node 0 is the gateway.
+pub(super) struct Topology {
+    pub(super) nodes: usize,
+    pub(super) edges: Vec<(usize, usize)>,
+}
+
+impl Topology {
+    /// Every node hears every other.
+    pub(super) fn full(nodes: usize) -> Self {
+        let edges = (0..nodes)
+            .flat_map(|a| (a + 1..nodes).map(move |b| (a, b)))
+            .collect();
+        Self { nodes, edges }
+    }
+
+    /// The chain 0—1—…—(n−1): the last node is n−1 hops from the gateway.
+    pub(super) fn line(nodes: usize) -> Self {
+        let edges = (1..nodes).map(|b| (b - 1, b)).collect();
+        Self { nodes, edges }
+    }
+
+    /// G—R1—E and G—R2—E (nodes 0, 1, 2, 3): two disjoint two-hop
+    /// paths, no G—E or R1—R2 leg.
+    pub(super) fn diamond() -> Self {
+        Self {
+            nodes: 4,
+            edges: vec![(0, 1), (0, 2), (1, 3), (2, 3)],
+        }
+    }
+}
+
+/// Seeded random noise on one directed leg (G4). Parts per million
+/// of the frames that cross the leg; jitter adds 0..=`jitter_ms`.
+#[derive(Clone, Copy, Default)]
+pub(super) struct LegNoise {
+    pub(super) loss_ppm: u32,
+    pub(super) dup_ppm: u32,
+    pub(super) reorder_ppm: u32,
+    pub(super) jitter_ms: u64,
+}
+
+/// How often the leg noise fired: a noise row passes only if it hit.
+#[derive(Clone, Copy, Default, Debug)]
+pub(super) struct NoiseHits {
+    pub(super) lost: u64,
+    pub(super) duplicated: u64,
+    pub(super) reordered: u64,
+    pub(super) jittered: u64,
+}
+
+impl NoiseHits {
+    pub(super) fn total(&self) -> u64 {
+        self.lost + self.duplicated + self.reordered + self.jittered
+    }
+}
+
 /// The switched radio: `audible[from][to]` plus same-channel delivery.
 /// Every unicast completion reports whether the switch delivered the
 /// frame; broadcasts always succeed (no MAC ACK on broadcast).
@@ -12,21 +69,21 @@ use super::*;
 /// sniffing ciphertext offsets. Every rule carries a counter so the
 /// test proves the fault actually hit.
 pub(super) struct Switch {
-    pub(super) audible: [[bool; 3]; 3],
+    pub(super) audible: Vec<Vec<bool>>,
     /// The construction-time matrix: `heal` restores legs from here,
     /// so a forced-multihop world heals back to multi-hop, not to a
     /// direct radio the test never had.
-    pub(super) base: [[bool; 3]; 3],
+    pub(super) base: Vec<Vec<bool>>,
     pub(super) delivered: u64,
     pub(super) dropped: u64,
     /// Drop the next N frames on the directed leg (the sender's
     /// completion reports failure, like lost airtime).
-    pub(super) drop_next: [[u32; 3]; 3],
+    pub(super) drop_next: Vec<Vec<u32>>,
     /// Deliver the frame but report failure (a lost MAC ACK: the peer
     /// retries while the far side already holds the frame).
-    pub(super) ack_drop_next: [[u32; 3]; 3],
+    pub(super) ack_drop_next: Vec<Vec<u32>>,
     /// MAC callbacks are separate from airtime and RX, as on the driver.
-    pub(super) callback_delay_ms: [[u64; 3]; 3],
+    pub(super) callback_delay_ms: Vec<Vec<u64>>,
     pub(super) callback_delay_kind: Option<u8>,
     /// Bounded, directed loss of an authenticated Wire frame kind.
     pub(super) drop_wire: Vec<(usize, usize, u8, u32)>,
@@ -35,10 +92,15 @@ pub(super) struct Switch {
     pub(super) results_seen: u32,
     pub(super) route_updates_seen: u32,
     /// Hold frames on the directed leg this long before delivery.
-    pub(super) delay_ms: [[u64; 3]; 3],
+    pub(super) delay_ms: Vec<Vec<u64>>,
     /// Per-leg evidence: what crossed and what the switch ate.
-    pub(super) leg_delivered: [[u64; 3]; 3],
-    pub(super) leg_dropped: [[u64; 3]; 3],
+    pub(super) leg_delivered: Vec<Vec<u64>>,
+    pub(super) leg_dropped: Vec<Vec<u64>>,
+    /// Seeded random noise per directed leg (G4) and what it hit.
+    pub(super) noise: Vec<Vec<LegNoise>>,
+    pub(super) noise_seed: u64,
+    pub(super) noise_rng: u64,
+    pub(super) noise_hits: NoiseHits,
     /// R1: lose only gateway-origin authority object chunks for A.
     pub(super) drop_notice_chunks: bool,
     pub(super) notice_chunks_dropped: u32,
@@ -52,24 +114,34 @@ pub(super) struct Switch {
 }
 
 impl Switch {
-    pub(super) fn direct() -> Self {
+    pub(super) fn new(topology: &Topology) -> Self {
+        let n = topology.nodes;
+        let mut audible = vec![vec![false; n]; n];
+        for &(a, b) in &topology.edges {
+            audible[a][b] = true;
+            audible[b][a] = true;
+        }
         Self {
-            audible: [[true; 3]; 3],
-            base: [[true; 3]; 3],
+            base: audible.clone(),
+            audible,
             delivered: 0,
             dropped: 0,
-            drop_next: [[0; 3]; 3],
-            ack_drop_next: [[0; 3]; 3],
-            callback_delay_ms: [[0; 3]; 3],
+            drop_next: vec![vec![0; n]; n],
+            ack_drop_next: vec![vec![0; n]; n],
+            callback_delay_ms: vec![vec![0; n]; n],
             callback_delay_kind: None,
             drop_wire: Vec::new(),
             wire_dropped: 0,
             probes_seen: 0,
             results_seen: 0,
             route_updates_seen: 0,
-            delay_ms: [[0; 3]; 3],
-            leg_delivered: [[0; 3]; 3],
-            leg_dropped: [[0; 3]; 3],
+            delay_ms: vec![vec![0; n]; n],
+            leg_delivered: vec![vec![0; n]; n],
+            leg_dropped: vec![vec![0; n]; n],
+            noise: vec![vec![LegNoise::default(); n]; n],
+            noise_seed: 0,
+            noise_rng: 0,
+            noise_hits: NoiseHits::default(),
             drop_notice_chunks: false,
             notice_chunks_dropped: 0,
             notice_manifests_delivered: 0,
@@ -82,13 +154,22 @@ impl Switch {
         }
     }
 
+    pub(super) fn direct() -> Self {
+        Self::new(&Topology::full(3))
+    }
+
+    /// Node count of this radio.
+    pub(super) fn nodes(&self) -> usize {
+        self.audible.len()
+    }
+
     /// Forced multi-hop: A (1) and the gateway (0) cannot hear each
     /// other in either direction; everything between them relays via B.
     pub(super) fn forced_multihop() -> Self {
         let mut switch = Self::direct();
         switch.audible[0][1] = false;
         switch.audible[1][0] = false;
-        switch.base = switch.audible;
+        switch.base = switch.audible.clone();
         switch
     }
 
@@ -100,7 +181,7 @@ impl Switch {
 
     /// Cut one peer off the air both ways (isolation).
     pub(super) fn isolate(&mut self, peer: usize) {
-        for other in 0..3 {
+        for other in 0..self.nodes() {
             self.audible[peer][other] = false;
             self.audible[other][peer] = false;
         }
@@ -108,7 +189,7 @@ impl Switch {
 
     /// Reopen one peer's legs to the construction-time matrix.
     pub(super) fn heal(&mut self, peer: usize) {
-        for other in 0..3 {
+        for other in 0..self.nodes() {
             self.audible[peer][other] = self.base[peer][other];
             self.audible[other][peer] = self.base[other][peer];
         }
@@ -156,6 +237,55 @@ impl Switch {
         if from == 1 && phase == 4 && (step == 2 || step == 3) && self.c7_old_cert.is_none() {
             self.c7_old_cert = Some(frame.to_vec());
         }
+    }
+
+    /// Arms the same noise on every leg with one seed; the draws run in
+    /// the switch's fixed delivery order, so a seed replays exactly.
+    pub(super) fn set_noise(&mut self, noise: LegNoise, seed: u64) {
+        for row in &mut self.noise {
+            row.fill(noise);
+        }
+        self.noise_seed = seed;
+        self.noise_rng = seed;
+    }
+
+    fn draw(&mut self, bound: u64) -> u64 {
+        self.noise_rng = self
+            .noise_rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.noise_rng >> 33) % bound
+    }
+
+    fn roll(&mut self, ppm: u32) -> bool {
+        ppm > 0 && self.draw(1_000_000) < u64::from(ppm)
+    }
+
+    /// Whether the leg's noise loses this frame. No draw on a quiet leg,
+    /// so an unarmed switch keeps its seeded behaviour unchanged.
+    pub(super) fn noise_lost(&mut self, from: usize, to: usize) -> bool {
+        let lost = self.roll(self.noise[from][to].loss_ppm);
+        self.noise_hits.lost += u64::from(lost);
+        lost
+    }
+
+    /// Extra hold for a crossing frame (jitter, and a reorder hold of
+    /// two 25 ms steps that lets later frames overtake it) and whether
+    /// it is delivered twice.
+    pub(super) fn noise_cross(&mut self, from: usize, to: usize) -> (u64, bool) {
+        let noise = self.noise[from][to];
+        let mut hold = 0;
+        if noise.jitter_ms > 0 {
+            hold = self.draw(noise.jitter_ms + 1);
+            self.noise_hits.jittered += u64::from(hold > 0);
+        }
+        if self.roll(noise.reorder_ppm) {
+            hold += 50;
+            self.noise_hits.reordered += 1;
+        }
+        let duplicate = self.roll(noise.dup_ppm);
+        self.noise_hits.duplicated += u64::from(duplicate);
+        (hold, duplicate)
     }
 
     pub(super) fn drop_wire_kind(&mut self, from: usize, to: usize, kind: u8, count: u32) {

@@ -62,6 +62,7 @@ mod fault;
 mod join;
 mod mesh;
 mod peer;
+mod report;
 mod switch;
 mod usb_host;
 mod world;

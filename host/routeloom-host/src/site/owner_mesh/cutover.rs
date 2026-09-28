@@ -880,8 +880,8 @@ pub(super) fn c2_once(tag: &str, island: bool) {
 
     // The fault clears; Prepared must not wedge — the stragglers
     // come back through the ZT auto-reissue (no decider round trip).
-    world.switch.drop_next = [[0; 3]; 3];
-    world.switch.ack_drop_next = [[0; 3]; 3];
+    world.switch.drop_next = vec![vec![0; 3]; 3];
+    world.switch.ack_drop_next = vec![vec![0; 3]; 3];
     if island {
         world.switch.heal(0);
     }

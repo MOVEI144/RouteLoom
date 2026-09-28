@@ -684,7 +684,7 @@ fn mesh_direct_converges_and_delivers() {
         "authority carriers crossed the real USB both ways"
     );
     assert_eq!(world.snaps[0].usb_state, USB_ACTIVE);
-    for node in world.nodes {
+    for node in world.nodes.clone() {
         let row = world.member_row(node).expect("member row");
         assert!(row.member && row.confirmed, "node {node:x} confirmed");
     }
@@ -766,4 +766,144 @@ fn mesh_forced_multihop_relays() {
     );
     assert_eq!(world.snaps[0].rx_src, NODE_A);
     assert_eq!(&world.snaps[0].rx[..payload.len()], payload);
+}
+
+/// Boots a world outward from the gateway: nodes 2.. stay off the air
+/// until every node before them converged (`converge_gated` applied
+/// hop by hop, so no contender parks its M1 behind a busy relay).
+fn converge_outward(world: &mut MeshWorld, what: &str) {
+    let nodes = world.peers.len();
+    for gated in 2..nodes {
+        world.gate[gated] = true;
+    }
+    for ready in 2..=nodes {
+        world.pump_until(9000, |snaps| {
+            snaps[..ready].iter().all(|s| {
+                s.mode == MODE_MEMBER
+                    && s.phase == PHASE_ACTIVE
+                    && s.authority_ready
+                    && s.join_confirmed
+            })
+        });
+        assert!(
+            world.snaps[..ready]
+                .iter()
+                .all(|s| s.authority_ready && s.join_confirmed),
+            "{what}: nodes 0..{ready} converged: {:?}",
+            world.snaps
+        );
+        if ready < nodes {
+            world.gate[ready] = false;
+        }
+    }
+}
+
+/// Reliable sends from `from` to `to`, one at a time to its terminal
+/// state within the 30 s send lifetime: each is delivered exactly once
+/// with its payload and source, and the sender holds the receipt.
+fn deliver_each(world: &mut MeshWorld, from: usize, to: usize, count: u32, label: &[u8]) {
+    let dst = world.nodes[to];
+    let base = world.snaps[to].rx_count;
+    for index in 0..count {
+        let received = world.snaps[to].rx_count;
+        let last = world.snaps[from]
+            .app_tx
+            .iter()
+            .map(|tx| tx.seq)
+            .max()
+            .unwrap_or(0);
+        let payload = [label, &index.to_le_bytes()].concat();
+        world.peers[from].app_send(dst, &payload);
+        let done = |snaps: &[MeshSnap]| {
+            snaps[to].rx_count > received
+                && snaps[from]
+                    .app_tx
+                    .iter()
+                    .any(|tx| tx.seq > last && tx.state == DELIVERY_DELIVERED)
+        };
+        world.pump_until(1200, done);
+        assert!(
+            done(&world.snaps),
+            "{from}->{to} message {index}: {:?}",
+            world.snaps[from].app_tx
+        );
+        assert_eq!(
+            world.snaps[to].rx_count,
+            received + 1,
+            "message {index} once"
+        );
+        assert_eq!(world.snaps[to].rx, payload, "message {index} payload");
+        assert_eq!(world.snaps[to].rx_src, world.nodes[from]);
+    }
+    // Late duplicates would land after the receipts: let them.
+    for _ in 0..200 {
+        world.step(25);
+    }
+    assert_eq!(
+        world.snaps[to].rx_count,
+        base + count,
+        "no duplicate delivery"
+    );
+}
+
+/// M01 (T3): G—A—B—C, three hops end to end. Twenty Reliable messages
+/// each way between the gateway and the far leaf arrive exactly once,
+/// and every frame crossed only the chain's legs.
+///
+/// Red today: the three-hop leaf's end-to-end handshake with the
+/// gateway expires (end_last_error Expired) and it never gets its
+/// authority channel, with the flat profile too. V2-09 fixes it and
+/// removes the ignore (tests/e2e/scenarios.json M01-T3).
+#[test]
+#[ignore = "M01-T3 red: three-hop end-to-end handshake expires (V2-09)"]
+fn mesh_line_three_hops_delivers() {
+    let Some(mut world) = MeshWorld::start("line-three-hops", Switch::new(&Topology::line(4)))
+    else {
+        return; // no C++ peers: skip (ignore-equivalent)
+    };
+    converge_outward(&mut world, "three-hop line");
+    let leaf = world.index_of(NODE_B + 1);
+    assert_eq!(leaf, 3);
+    let before = world.switch.leg_delivered.clone();
+    deliver_each(&mut world, leaf, 0, 20, b"up");
+    deliver_each(&mut world, 0, leaf, 20, b"down");
+    for (a, b) in (0..4).flat_map(|a| (0..4).map(move |b| (a, b))) {
+        let crossed = world.switch.leg_delivered[a][b] - before[a][b];
+        if a.abs_diff(b) == 1 {
+            assert!(crossed > 0, "leg {a}->{b} carried the traffic");
+        } else {
+            assert_eq!(crossed + before[a][b], 0, "no shortcut {a}->{b}");
+        }
+    }
+}
+
+/// M01 (TD under noise, G4): G—R1—E and G—R2—E with seeded 2% loss,
+/// 1% duplication, 1% reordering and up to 20 ms jitter on every leg.
+/// Twenty Reliable messages each way still arrive exactly once, and the
+/// noise demonstrably fired.
+#[test]
+fn mesh_diamond_delivers_under_leg_noise() {
+    let Some(mut world) = MeshWorld::start("diamond-noise", Switch::new(&Topology::diamond()))
+    else {
+        return; // no C++ peers: skip (ignore-equivalent)
+    };
+    converge_outward(&mut world, "diamond");
+    world.switch.set_noise(
+        LegNoise {
+            loss_ppm: 20_000,
+            dup_ppm: 10_000,
+            reorder_ppm: 10_000,
+            jitter_ms: 20,
+        },
+        0x6E01_5E00,
+    );
+    deliver_each(&mut world, 3, 0, 20, b"up");
+    deliver_each(&mut world, 0, 3, 20, b"down");
+    let hits = world.switch.noise_hits;
+    assert!(
+        hits.lost > 0 && hits.duplicated > 0 && hits.reordered > 0 && hits.jittered > 0,
+        "every noise kind fired: {hits:?}"
+    );
+    assert_eq!(world.switch.leg_delivered[0][3], 0, "no G—E leg");
+    assert_eq!(world.switch.leg_delivered[1][2], 0, "no R1—R2 leg");
 }

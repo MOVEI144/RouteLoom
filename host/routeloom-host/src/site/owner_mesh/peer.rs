@@ -800,14 +800,21 @@ impl MeshPeer {
         Some(payload)
     }
 
-    pub(super) fn tick(&mut self, now: u64) -> MeshTick {
+    /// Sends the tick command; `finish_tick` reads its reply.
+    pub(super) fn begin_tick(&mut self, now: u64) {
+        let mut command = vec![b'T'];
+        command.extend_from_slice(&now.to_le_bytes());
+        self.send(&command);
+    }
+
+    pub(super) fn finish_tick(&mut self, now: u64) -> MeshTick {
         // A power cut after durable Switching can be followed by the
         // lifecycle's adoption reboot on the first resumed tick.
         // Both boots read saved NVS; a third reboot is a loop.
         for attempt in 0..3 {
-            let mut command = vec![b'T'];
-            command.extend_from_slice(&now.to_le_bytes());
-            self.send(&command);
+            if attempt > 0 {
+                self.begin_tick(now);
+            }
             if let Some(mut tick) = self.recv_tick() {
                 tick.rebooted = attempt > 0;
                 return tick;

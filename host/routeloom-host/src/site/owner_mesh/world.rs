@@ -11,8 +11,19 @@ pub(super) struct Persona {
     pub(super) gateway: bool,
 }
 
-pub(super) fn personas() -> [Persona; 3] {
-    [
+/// World size caps (G1): PR worlds up to 6 nodes, nightly up to 32
+/// (`ROUTELOOM_E2E_NIGHTLY` set).
+pub(super) fn max_nodes() -> usize {
+    if std::env::var_os("ROUTELOOM_E2E_NIGHTLY").is_some() {
+        32
+    } else {
+        6
+    }
+}
+
+/// The gateway, A and B, then members C.. with the same scheme.
+pub(super) fn personas(nodes: usize) -> Vec<Persona> {
+    let mut personas = vec![
         Persona {
             node: testkit::GATEWAY,
             mac: MAC_GW,
@@ -34,7 +45,33 @@ pub(super) fn personas() -> [Persona; 3] {
             role: ROLE_MEMBER,
             gateway: false,
         },
-    ]
+    ];
+    for index in 3..nodes {
+        let step = index as u8 - 2;
+        let mut mac = MAC_B;
+        mac[5] += step;
+        personas.push(Persona {
+            node: NODE_B + u64::from(step),
+            mac,
+            seed: SEED_B + step,
+            role: ROLE_MEMBER,
+            gateway: false,
+        });
+    }
+    personas.truncate(nodes);
+    personas
+}
+
+/// The staggered boot plan of the three-node worlds ([0, 2000, 12000])
+/// extended by 10 s per further node.
+pub(super) fn staggered_boot(nodes: usize) -> Vec<u64> {
+    (0..nodes as u64)
+        .map(|index| match index {
+            0 => 0,
+            1 => 2000,
+            _ => 12000 + (index - 2) * 10_000,
+        })
+        .collect()
 }
 
 // --- Site --------------------------------------------------------------------
@@ -428,23 +465,25 @@ impl Provision {
 /// One switched radio delivery: (to_peer, src_mac, dst_mac, frame).
 pub(super) type SwitchDelivery = (usize, [u8; 6], [u8; 6], Vec<u8>);
 
-/// Phase-1 world: three Owner peers, the switch, the gateway USB host
-/// end, and the provisioned site from Phase 0.
+/// Phase-1 world: one Owner peer per topology node (node 0 is the
+/// gateway), the switch, the gateway USB host end, and the provisioned
+/// site from Phase 0.
 pub(super) struct MeshWorld {
     pub(super) peers: Vec<MeshPeer>,
-    pub(super) macs: [[u8; 6]; 3],
-    pub(super) nodes: [u64; 3],
+    /// Index → MAC and index → NodeId; `index_of` is the reverse table.
+    pub(super) macs: Vec<[u8; 6]>,
+    pub(super) nodes: Vec<u64>,
     pub(super) provision: Provision,
     pub(super) usb_host: UsbHost,
     pub(super) switch: Switch,
     pub(super) now: u64,
     pub(super) rng_state: u64,
-    pub(super) snaps: [MeshSnap; 3],
+    pub(super) snaps: Vec<MeshSnap>,
     /// Test-held boots: a gated peer's process is spawned but never
     /// ticked (off the air) until the test releases it. Used where a
     /// contender must wait for another peer's channel, not just a
     /// wall-clock offset.
-    pub(super) gate: [bool; 3],
+    pub(super) gate: Vec<bool>,
     /// The bound join-relay adapter (ZT recovery road, D04 §5.1):
     /// Phase 0's in-process transport is retired once the mesh boots.
     pub(super) join_adapter: Arc<UsbSiteAdapter>,
@@ -458,7 +497,7 @@ pub(super) struct MeshWorld {
     /// Delayed switch deliveries: (release_at, delivery).
     pub(super) delayed: Vec<(u64, SwitchDelivery)>,
     /// Per-sender FIFO preserves the ESP-NOW callback attribution order.
-    pub(super) callbacks: [Vec<(u64, u8)>; 3],
+    pub(super) callbacks: Vec<Vec<(u64, u8)>>,
     pub(super) early_hop_accepts: u32,
     pub(super) probe_while_callback_pending: u32,
     /// C5 fault: the gateway↔host USB lane physically cut. The
@@ -472,17 +511,49 @@ pub(super) struct MeshWorld {
     pub(super) c6_flipped: bool,
     pub(super) c7_hold_b_receipt: bool,
     pub(super) c7_old_receipt: Option<(CarrierKind, Vec<u8>)>,
+    /// Run evidence (G6): the tag, boot plan and clocks at start.
+    pub(super) tag: String,
+    pub(super) boot_ms: Vec<u64>,
+    pub(super) started_vt: u64,
+    pub(super) started: std::time::Instant,
+    pub(super) phase0_wall_ms: u64,
+}
+
+impl Drop for MeshWorld {
+    fn drop(&mut self) {
+        report::write_world(self, !thread::panicking());
+    }
 }
 
 impl MeshWorld {
     /// `None` when either peer binary is missing: the test skips
-    /// (ignore-equivalent). Provisions all three personas first.
+    /// (ignore-equivalent). Provisions every persona first.
     pub(super) fn start(tag: &str, switch: Switch) -> Option<Self> {
         Self::start_with_profile(tag, switch, false)
     }
 
     pub(super) fn start_with_profile(tag: &str, switch: Switch, flat: bool) -> Option<Self> {
+        let boot_ms = staggered_boot(switch.nodes());
+        Self::start_plan(tag, switch, &boot_ms, flat)
+    }
+
+    /// A world from a scenario's topology (as its switch) and boot plan:
+    /// node i powers on `boot_ms[i]` after the mesh phase starts.
+    pub(super) fn start_plan(
+        tag: &str,
+        switch: Switch,
+        boot_ms: &[u64],
+        flat: bool,
+    ) -> Option<Self> {
+        let nodes = switch.nodes();
+        assert!(
+            (2..=max_nodes()).contains(&nodes),
+            "{nodes} nodes exceed the world cap {}",
+            max_nodes()
+        );
+        assert_eq!(boot_ms.len(), nodes, "one boot time per node");
         if !peers_present() {
+            report::write_not_run(tag);
             eprintln!(
                 "SKIP site::owner_mesh: no C++ peers \
                  (build routeloom_owner_mesh_peer + routeloom_joiner_interop_peer, \
@@ -490,14 +561,25 @@ impl MeshWorld {
             );
             return None;
         }
+        let started = std::time::Instant::now();
         let now = now_ms();
         let mut provision = Provision::start(tag, now);
-        let personas = personas();
+        let personas = personas(nodes);
         // Gateway first: later joins rotate the GK and the gateway's
         // mesh boot re-opens its channel like a field reboot.
-        let gw_images = provision.provision_persona(&personas[0], 0xA101, Role::Gateway);
-        let a_images = provision.provision_persona(&personas[1], 0xA102, Role::Relay);
-        let b_images = provision.provision_persona(&personas[2], 0xA103, Role::Relay);
+        let images: Vec<_> = personas
+            .iter()
+            .enumerate()
+            .map(|(index, persona)| {
+                let role = if persona.gateway {
+                    Role::Gateway
+                } else {
+                    Role::Relay
+                };
+                provision.provision_persona(persona, 0xA101 + index as u64, role)
+            })
+            .collect();
+        let phase0_wall_ms = started.elapsed().as_millis() as u64;
         let now = provision.now;
         let usb_secret_hex = hex(b"routeloom-dev-secret");
         // Staggered boots (documented harness technique, same as the HIL
@@ -506,10 +588,9 @@ impl MeshWorld {
         // first-link re-drive yet (reported residual), so A boots 2 s in
         // and B only after A's exchange retired (~12 s). Tests that need
         // a channel-ready gate rather than a clock offset hold the peer
-        // with `gate` and release it once the relay converged.
-        const BOOT_OFFSETS_MS: [u64; 3] = [0, 2000, 12000];
-        let mut peers = Vec::with_capacity(3);
-        let images = [&gw_images, &a_images, &b_images];
+        // with `gate` and release it once the relay converged
+        // (`staggered_boot`).
+        let mut peers = Vec::with_capacity(nodes);
         for (index, persona) in personas.iter().enumerate() {
             // Lifecycle reboots (cutover AdoptNetwork) persist the NVS
             // image here for the respawn; the site dir is removed with
@@ -520,7 +601,7 @@ impl MeshWorld {
                 .join(format!("mesh-nvs-{:x}.bin", persona.node));
             peers.push(MeshPeer::spawn(
                 persona,
-                now + BOOT_OFFSETS_MS[index],
+                now + boot_ms[index],
                 0xB1E0 + index as u64,
                 &images[index].0,
                 &images[index].1,
@@ -538,20 +619,20 @@ impl MeshWorld {
         provision.site.service.set_transport(join_adapter.clone());
         let mut world = Self {
             peers,
-            macs: [personas[0].mac, personas[1].mac, personas[2].mac],
-            nodes: [personas[0].node, personas[1].node, personas[2].node],
+            macs: personas.iter().map(|p| p.mac).collect(),
+            nodes: personas.iter().map(|p| p.node).collect(),
             provision,
             usb_host: UsbHost::new(),
             switch,
             now,
             rng_state: 0x5EED_1234_5678_9ABC,
-            snaps: Default::default(),
-            gate: [false; 3],
+            snaps: vec![MeshSnap::default(); nodes],
+            gate: vec![false; nodes],
             join_adapter,
             usb_incarnation: 7,
             usb_auth_total: 0,
             delayed: Vec::new(),
-            callbacks: Default::default(),
+            callbacks: vec![Vec::new(); nodes],
             early_hop_accepts: 0,
             probe_while_callback_pending: 0,
             usb_down: false,
@@ -559,6 +640,11 @@ impl MeshWorld {
             c6_flipped: false,
             c7_hold_b_receipt: false,
             c7_old_receipt: None,
+            tag: tag.to_string(),
+            boot_ms: boot_ms.to_vec(),
+            started_vt: now,
+            started,
+            phase0_wall_ms,
         };
         // The USB Hello goes out before the first tick; the gateway
         // answers from its pump.
@@ -665,14 +751,23 @@ impl MeshWorld {
     /// their MACs do not exist yet and frames to them drop.
     pub(super) fn step(&mut self, dt_ms: u64) {
         self.now += dt_ms;
-        let gate = self.gate;
-        let mut ticks = Vec::with_capacity(3);
+        let nodes = self.peers.len();
+        // B1: every booted peer gets its tick command first and runs in
+        // parallel; the replies are then read in index order. A peer's
+        // tick depends only on its own inputs, so this is the serial
+        // result, faster.
         for (index, peer) in self.peers.iter_mut().enumerate() {
-            if !peer.booted && self.now >= peer.t0 && !gate[index] {
+            if !peer.booted && self.now >= peer.t0 && !self.gate[index] {
                 peer.booted = true;
             }
+            if peer.booted {
+                peer.begin_tick(self.now);
+            }
+        }
+        let mut ticks = Vec::with_capacity(nodes);
+        for (index, peer) in self.peers.iter_mut().enumerate() {
             ticks.push(if peer.booted {
-                Some(peer.tick(self.now))
+                Some(peer.finish_tick(self.now))
             } else {
                 None
             });
@@ -688,12 +783,12 @@ impl MeshWorld {
         }
         // Switch: deliver per audibility + same channel, then report
         // MAC ACKs (unicast succeeds iff delivered).
-        let booted = [ticks[0].is_some(), ticks[1].is_some(), ticks[2].is_some()];
-        let channels = [
-            ticks[0].as_ref().map(|t| t.snap.channel).unwrap_or(0),
-            ticks[1].as_ref().map(|t| t.snap.channel).unwrap_or(0),
-            ticks[2].as_ref().map(|t| t.snap.channel).unwrap_or(0),
-        ];
+        let booted: Vec<bool> = ticks.iter().map(Option::is_some).collect();
+        let channels: Vec<u8> = ticks
+            .iter()
+            .map(|t| t.as_ref().map(|t| t.snap.channel).unwrap_or(0))
+            .collect();
+        let b_mac = self.macs.get(2).copied().unwrap_or(BROADCAST_MAC);
         let mut deliveries: Vec<SwitchDelivery> = Vec::new();
         // Frames a delayed leg holds this step (released by the clock,
         // below — a reconnect never replays what a down leg dropped,
@@ -705,24 +800,39 @@ impl MeshWorld {
         for (from, tick) in ticks.iter().enumerate() {
             let Some(tick) = tick else { continue };
             for tx in &tick.tx {
-                self.switch
-                    .c7_observe(from, tx.dst_mac, &tx.bytes, self.macs[2]);
+                self.switch.c7_observe(from, tx.dst_mac, &tx.bytes, b_mac);
                 if tx.dst_mac == BROADCAST_MAC {
                     self.callbacks[from].push((self.now, 1));
-                    for to in 0..3 {
+                    for to in 0..nodes {
                         if to != from
                             && booted[to]
                             && self.switch.audible[from][to]
                             && channels[to] == channels[from]
                         {
-                            deliveries.push((to, self.macs[from], BROADCAST_MAC, tx.bytes.clone()));
+                            if self.switch.noise_lost(from, to) {
+                                self.switch.dropped += 1;
+                                self.switch.leg_dropped[from][to] += 1;
+                                continue;
+                            }
+                            let (extra, twice) = self.switch.noise_cross(from, to);
+                            let delivery = (to, self.macs[from], BROADCAST_MAC, tx.bytes.clone());
+                            for delivery in [Some(delivery.clone()), twice.then_some(delivery)]
+                                .into_iter()
+                                .flatten()
+                            {
+                                if extra == 0 {
+                                    deliveries.push(delivery);
+                                } else {
+                                    hold.push((self.now + extra, delivery));
+                                }
+                            }
                             self.switch.delivered += 1;
                             self.switch.leg_delivered[from][to] += 1;
                         }
                     }
                     continue;
                 }
-                let Some(to) = (0..3).find(|to| self.macs[*to] == tx.dst_mac) else {
+                let Some(to) = self.macs.iter().position(|mac| *mac == tx.dst_mac) else {
                     self.callbacks[from].push((self.now, 0));
                     self.switch.dropped += 1;
                     continue;
@@ -783,7 +893,7 @@ impl MeshWorld {
                     self.callbacks[from].push((callback_at, 0));
                     self.switch.dropped += 1;
                     self.switch.leg_dropped[from][to] += 1;
-                } else if !leg_up {
+                } else if !leg_up || self.switch.noise_lost(from, to) {
                     self.callbacks[from].push((callback_at, 0));
                     self.switch.dropped += 1;
                     self.switch.leg_dropped[from][to] += 1;
@@ -793,12 +903,18 @@ impl MeshWorld {
                     }
                     // The frame crosses (now or after the leg's hold);
                     // only the MAC ACK is droppable from here.
-                    let release_at = self.now + self.switch.delay_ms[from][to];
+                    let (extra, twice) = self.switch.noise_cross(from, to);
+                    let release_at = self.now + self.switch.delay_ms[from][to] + extra;
                     let delivery = (to, self.macs[from], tx.dst_mac, tx.bytes.clone());
-                    if release_at <= self.now {
-                        deliveries.push(delivery);
-                    } else {
-                        hold.push((release_at, delivery));
+                    for delivery in [Some(delivery.clone()), twice.then_some(delivery)]
+                        .into_iter()
+                        .flatten()
+                    {
+                        if release_at <= self.now {
+                            deliveries.push(delivery);
+                        } else {
+                            hold.push((release_at, delivery));
+                        }
                     }
                     if self.switch.ack_drop_next[from][to] > 0 {
                         self.switch.ack_drop_next[from][to] -= 1;
@@ -920,7 +1036,7 @@ impl MeshWorld {
         }
     }
 
-    pub(super) fn pump_until(&mut self, budget_ticks: u32, done: impl Fn(&[MeshSnap; 3]) -> bool) {
+    pub(super) fn pump_until(&mut self, budget_ticks: u32, done: impl Fn(&[MeshSnap]) -> bool) {
         // 25 ms steps: the discovery offer window is 160 ms and the
         // switch adds one step of air latency, so 100 ms steps would
         // expire every offer (a harness artifact, not a device bug).
@@ -930,6 +1046,14 @@ impl MeshWorld {
                 return;
             }
         }
+    }
+
+    /// The NodeId → peer index table.
+    pub(super) fn index_of(&self, node: u64) -> usize {
+        self.nodes
+            .iter()
+            .position(|n| *n == node)
+            .unwrap_or_else(|| panic!("node {node:x} is not in this world"))
     }
 
     pub(super) fn member_row(&self, node: u64) -> Option<crate::site::store::DeviceRow> {
