@@ -2186,7 +2186,7 @@ Status MembershipLifecycle::renew_prepare(ByteView body) noexcept {
   return Status::success();
 }
 
-void MembershipLifecycle::send_renew_receipt(GrantRenewPhase phase, ByteView digest) noexcept {
+bool MembershipLifecycle::send_renew_receipt(GrantRenewPhase phase, ByteView digest) noexcept {
   const LifecycleRecord& record = journal_->record();
   GrantReceipt receipt{};
   receipt.head = {phase, record.cutover_id, record.revision, record.old_network};
@@ -2199,9 +2199,8 @@ void MembershipLifecycle::send_renew_receipt(GrantRenewPhase phase, ByteView dig
   if (digest.size == receipt.digest.size())
     std::memcpy(receipt.digest.data(), digest.data, digest.size);
   std::array<std::uint8_t, kGrantReceiptSize> bytes{};
-  if (grant_receipt_encode(receipt, bytes)) {
-    (void)ports_.authority.authority_send(7, ByteView{bytes.data(), bytes.size()});
-  }
+  if (!grant_receipt_encode(receipt, bytes)) return false;
+  return ports_.authority.authority_send(7, ByteView{bytes.data(), bytes.size()}).ok();
 }
 
 Status MembershipLifecycle::on_renew(ByteView body, MonotonicMs now_ms) noexcept {
@@ -2330,12 +2329,12 @@ Status MembershipLifecycle::renew_commit(ByteView body, MonotonicMs now_ms) noex
   // effort — the switch rolls forward on its budget either way.
   Digest256 commit_digest{};
   sha256(commit.proof.view(), commit_digest);
-  send_renew_receipt(GrantRenewPhase::CommitStored,
-                     ByteView{commit_digest.data(), commit_digest.size()});
+  const bool queued = send_renew_receipt(GrantRenewPhase::CommitStored,
+                                         ByteView{commit_digest.data(), commit_digest.size()});
   switch_drained_ = false;
   switch_drain_start_ = now_ms;
   switch_step_ = 0;
-  switch_cursor_ = 0;
+  switch_cursor_ = queued ? 1 : 0;
   return Status::success();
 }
 
@@ -2406,13 +2405,27 @@ Status MembershipLifecycle::switch_poll(MonotonicMs now_ms) noexcept {
       // ends the drain, else the budget does (roll-forward either
       // way — a lost receipt only costs the parent its fast path).
       if (!switch_drained_) {
-        if (ports_.authority.authority_tx_settled() ||
-            now_ms - switch_drain_start_ >= kSwitchReceiptDrainMs) {
+        if (now_ms - switch_drain_start_ >= kSwitchReceiptDrainMs) {
           switch_drained_ = true;
         } else {
-          return Status::success();
+          // A RouteState report can still occupy the authority lane
+          // when COMMIT arrives. Retry staging this durable receipt
+          // until its own transfer starts; a busy prior report must
+          // not make the switch mistake "nothing queued" for success.
+          if (switch_cursor_ == 0) {
+            const std::size_t proof_len = (static_cast<std::size_t>(p[4]) << 8U) | p[5];
+            Digest256 digest{};
+            sha256(ByteView{p + 6 + site_len + rrs_len, proof_len}, digest);
+            if (!send_renew_receipt(GrantRenewPhase::CommitStored,
+                                    ByteView{digest.data(), digest.size()}))
+              return Status::success();
+            switch_cursor_ = 1;
+          }
+          if (!ports_.authority.authority_tx_settled()) return Status::success();
+          switch_drained_ = true;
         }
       }
+      switch_cursor_ = 0;
       st = ports_.runtime.retire_network();
       if (st.code == StatusCode::WouldBlock) return Status::success();
       break;

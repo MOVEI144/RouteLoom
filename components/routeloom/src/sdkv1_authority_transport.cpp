@@ -385,6 +385,16 @@ void AuthorityEndpoint::complete_tx(const bool delivered) noexcept {
   drop_tx();
 }
 
+void AuthorityEndpoint::on_config_job_done(const MessageId& id,
+                                           const bool hop_accepted) noexcept {
+  if (!tx_.active || tx_.total_len > kAuthorityCarrierBodyMax || tx_.sends != 1) return;
+  MessageId pending{};
+  std::memcpy(&pending.session, tx_.hash.data(), sizeof(pending.session));
+  std::memcpy(&pending.sequence, tx_.hash.data() + sizeof(pending.session),
+              sizeof(pending.sequence));
+  if (id == pending) complete_tx(hop_accepted);
+}
+
 bool AuthorityEndpoint::pump_tx(const MonotonicMs now_ms) noexcept {
   if (!tx_.active) return true;
   if (tx_.started_ms == 0) {
@@ -397,8 +407,9 @@ bool AuthorityEndpoint::pump_tx(const MonotonicMs now_ms) noexcept {
     return true;
   }
   if (tx_.total_len <= kAuthorityCarrierBodyMax) {
-    // Small carriers are fire-and-forget at this layer: the mesh
-    // hop-accepts them and the channel's own ACK/retry recovers loss.
+    // A queued frame is not a hop result. The cutover drain must wait
+    // until the node reports this exact job before retiring its path.
+    if (tx_.sends != 0) return true;
     std::uint32_t exchange = 0;
     if (tx_.kind == AuthorityCarrierKind::R1 || tx_.kind == AuthorityCarrierKind::R2 ||
         tx_.kind == AuthorityCarrierKind::R3) {
@@ -415,15 +426,22 @@ bool AuthorityEndpoint::pump_tx(const MonotonicMs now_ms) noexcept {
       return true;
     }
     in_call_ = true;
-    const Status sent = mesh_.config_send(tx_.gateway, FrameType::Control,
-                                          ByteView{frame.data(), written}, now_ms);
+    MessageId id{};
+    const Status sent = mesh_.config_send_tracked(tx_.gateway, FrameType::Control,
+                                                  ByteView{frame.data(), written}, now_ms, id);
     in_call_ = false;
     if (!sent) {
       sat_inc(counters_.mesh_shed);
       return true;  // mesh shed it: retry on the next poll
     }
     sat_inc(counters_.mesh_queued);
-    complete_tx(true);
+    if (id.sequence == 0) {
+      complete_tx(true);  // fake ports without job tracking
+    } else {
+      std::memcpy(tx_.hash.data(), &id.session, sizeof(id.session));
+      std::memcpy(tx_.hash.data() + sizeof(id.session), &id.sequence, sizeof(id.sequence));
+      tx_.sends = 1;
+    }
     return true;
   }
   if (tx_.acked >= tx_.total_len) return true;  // waiting for the Ok
@@ -1042,7 +1060,7 @@ bool AuthorityGateway::down_live_to(const NodeId device) const noexcept {
 void AuthorityMeshSink::on_config_job_done(const MessageId& id, const bool hop_accepted,
                                            const char* reason,
                                            const MonotonicMs now_ms) noexcept {
-  (void)id;
+  demux_.on_config_job_done(id, hop_accepted);
   (void)now_ms;
   if (hop_accepted) {
     sat_inc(jobs_accepted_);

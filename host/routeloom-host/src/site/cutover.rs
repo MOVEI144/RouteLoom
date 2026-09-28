@@ -224,6 +224,9 @@ pub struct CutoverRoutePlan {
     pub query_attempts: u32,
     /// Adopted report, if any, with its receive time and revision.
     pub report: Option<RouteReport>,
+    /// A child stored COMMIT after this report; only a new answer may
+    /// release an unsent COMMIT through the changed tree.
+    pub recheck_due: bool,
     /// Verified COMMIT_STORED (same cutover/revision/digest).
     pub stored: bool,
     /// Cut by a layer deadline (stays unknown; ZT recovers it).
@@ -1166,12 +1169,10 @@ impl SiteAuthority {
                     .map_or(true, |(_, until)| time.mono_ms > until);
                 if !grace_over {
                     self.cutover_apply_layer_deadlines(id, time.mono_ms);
-                    // No queries past commit: the tree freezes with the
-                    // pre-commit reports (04 §7). A query answered late
-                    // is still adoptable, but no new round trip may
-                    // contend with the COMMIT legs for the gateway's
-                    // shared slots — stale plans age out by lease and
-                    // their targets defer to the ZT reissue instead.
+                    // A stored child may have left the old mesh. Ask
+                    // remaining targets again before releasing their
+                    // COMMITs, even while an older route lease lives.
+                    self.queue_route_queries(id, time);
                     self.queue_grants(id, OutboundKind::Commit, time);
                 }
                 let terminal = self.operations.get(&id).and_then(|op| {
@@ -1322,7 +1323,7 @@ impl SiteAuthority {
         if self
             .cutover_routes
             .get(&(id, node))
-            .is_some_and(|plan| plan.deferred)
+            .is_some_and(|plan| plan.deferred || plan.stored)
         {
             return false;
         }
@@ -1359,6 +1360,18 @@ impl SiteAuthority {
             .get(&(id, node))
             .and_then(|plan| plan.usable(state.revision, now_mono))
             .is_some();
+        // A cached plan invalidated by a child's adoption needs a new
+        // answer before its first dispatch. Already-sent COMMITs may
+        // continue their bounded retries.
+        if self
+            .cutover_routes
+            .get(&(id, node))
+            .is_some_and(|plan| plan.recheck_due)
+            && !known
+            && target.attempts == 0
+        {
+            return false;
+        }
         let descendants = tree.descendants(node);
         let ancestors = tree.ancestors(node);
         !state.targets.iter().any(|t| {
@@ -1513,15 +1526,10 @@ impl SiteAuthority {
         }
     }
 
-    /// Queues RouteState queries for the COMMIT-eligible targets that
-    /// lack a usable report (04 §7). Only the last minute of PREPARE
-    /// asks: earlier reports would expire before the commit anyway
-    /// (route leases run tens of seconds), and steady querying all
-    /// window long only contends with the grants for the gateway's
-    /// shared transfer slots. Past the window the tree freezes —
-    /// see the Committed branch. Only Prepared non-gateway targets
-    /// are worth asking: the unprepared never receive a COMMIT, and
-    /// a root needs no uplink.
+    /// Queues RouteState queries for targets lacking a usable report
+    /// (04 §7). PREPARE asks only in its last minute; after a child
+    /// stores COMMIT, pending targets are asked again before dispatch.
+    /// Only Prepared non-gateway targets need an uplink report.
     fn queue_route_queries(&mut self, id: u64, time: HostTime) {
         if self
             .rrs_transport
@@ -1540,7 +1548,10 @@ impl SiteAuthority {
                     .started_mono_ms
                     .saturating_add(CUTOVER_PREPARE_WINDOW_MS)
                     .saturating_sub(CUTOVER_ROUTE_QUERY_WINDOW_MS);
-        if state.phase != CutoverPhase::WaitingGateway && !late_prepare {
+        if state.phase != CutoverPhase::WaitingGateway
+            && state.phase != CutoverPhase::Committed
+            && !late_prepare
+        {
             return;
         }
         let now_ms = time.unix_ms;
@@ -1560,7 +1571,9 @@ impl SiteAuthority {
                 .cutover_routes
                 .get(&(id, target.node))
                 .is_some_and(|plan| {
-                    plan.deferred || plan.usable(state.revision, time.mono_ms).is_some()
+                    plan.deferred
+                        || plan.stored
+                        || plan.usable(state.revision, time.mono_ms).is_some()
                 })
             {
                 continue;
@@ -1613,6 +1626,7 @@ impl SiteAuthority {
         }
         if self.cutover_routes.get(&(op, node)).is_some_and(|plan| {
             plan.deferred
+                || plan.stored
                 || plan
                     .usable(state.revision, self.last_channel_mono_ms)
                     .is_some()
@@ -1666,8 +1680,8 @@ impl SiteAuthority {
 
     /// Records a query send: unanswered rounds back off on the shared
     /// ladder (an answer resets the round and clears the wait). The
-    /// grant retry of the target never moves — queries pace
-    /// themselves, they never slow the COMMIT they precede.
+    /// grant retry of the target never moves. A pending re-query
+    /// holds COMMIT until its own route report arrives.
     pub(super) fn note_route_query_sent(&mut self, op: u64, node: u64, now_ms: u64) {
         let plan = self.cutover_routes.entry((op, node)).or_default();
         plan.query_attempts = plan.query_attempts.saturating_add(1);
@@ -2350,7 +2364,29 @@ impl SiteAuthority {
         {
             return false;
         }
-        self.cutover_routes.entry((id, node)).or_default().stored = true;
+        let plan = self.cutover_routes.entry((id, node)).or_default();
+        if !plan.stored {
+            plan.stored = true;
+            // A child can adopt immediately after this receipt. Cached
+            // parent leases of pending targets cannot authorize the
+            // next COMMIT without a new, bound RouteState answer.
+            for pending in state
+                .targets
+                .iter()
+                .filter(|t| !t.gateway && t.node != node && t.attempts == 0)
+            {
+                let route = self.cutover_routes.entry((id, pending.node)).or_default();
+                if route.stored || route.deferred || route.report.is_none() {
+                    continue;
+                }
+                route.report = None;
+                route.recheck_due = true;
+                route.query_id = 0;
+                route.query_attempts = 0;
+                self.rrs_refusals
+                    .remove(&(id, pending.node, OutboundKind::RouteQuery));
+            }
+        }
         true
     }
 
@@ -2423,6 +2459,9 @@ impl SiteAuthority {
             recv_mono_ms: mono_ms,
             unavailable: report.status == 1,
         });
+        if report.status == 0 {
+            plan.recheck_due = false;
+        }
         plan.query_attempts = 0;
         self.rrs_refusals
             .remove(&(id, node, OutboundKind::RouteQuery));

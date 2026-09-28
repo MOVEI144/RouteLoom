@@ -2142,9 +2142,11 @@ fn cutover_commits_leaf_first_over_the_route_tree() {
     assert_eq!(commits(), vec![leaf, branch]);
     // Each stored receipt releases exactly its parent, down the chain.
     assert!(inject_commit_stored(&service, op, leaf, at + 50));
+    assert!(adopt_route_report(&service, op, r2, gw, r1, at + 50));
     pump(&sends, &service, &mut at, 3);
     assert_eq!(commits()[2], r2);
     assert!(inject_commit_stored(&service, op, r2, at + 50));
+    assert!(adopt_route_report(&service, op, r1, gw, gw, at + 50));
     pump(&sends, &service, &mut at, 4);
     assert_eq!(commits()[3], r1);
     assert!(inject_commit_stored(&service, op, branch, at + 50));
@@ -2202,6 +2204,9 @@ fn cutover_cycle_defers_early_without_blocking_the_chain() {
     }
     assert_eq!(commits(), vec![leaf]);
     assert!(inject_commit_stored(&service, op, leaf, at + 50));
+    assert!(adopt_route_report(&service, op, r, gw, gw, at + 50));
+    assert!(adopt_route_report(&service, op, m, gw, n, at + 50));
+    assert!(adopt_route_report(&service, op, n, gw, m, at + 50));
     for _ in 0..12 {
         if commits().len() == 2 {
             break;
@@ -2385,6 +2390,7 @@ fn cutover_dispatch_rechecks_the_frontier() {
     assert_eq!(commits(), vec![leaf], "stale relay mail never sends");
     // Once the leaf stores, the relay re-queues honestly and sends.
     assert!(inject_commit_stored(&service, op, leaf, at + 50));
+    assert!(adopt_route_report(&service, op, r, gw, gw, at + 50));
     for _ in 0..12 {
         if commits().len() == 2 {
             break;

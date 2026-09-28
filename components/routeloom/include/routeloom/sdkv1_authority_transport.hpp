@@ -113,7 +113,8 @@ class AuthorityMeshDemux {
   virtual void on_chunk(NodeId origin, const autonomy::ObjectChunkPayload& chunk,
                         MonotonicMs now_ms) noexcept = 0;
   virtual void on_ack(NodeId origin, const autonomy::ObjectAckPayload& ack,
-                      MonotonicMs now_ms) noexcept = 0;
+              MonotonicMs now_ms) noexcept = 0;
+  virtual void on_config_job_done(const MessageId&, bool) noexcept {}
 };
 
 // --- Device endpoint ------------------------------------------------------------
@@ -133,8 +134,8 @@ class AuthorityEndpoint final : public AuthorityMeshDemux, public AuthorityPort 
 
   // AuthorityPort: stage one carrier for TX to `gateway`. False (nothing
   // staged, no token spent) when a transfer is already live or the mesh
-  // port refuses. Small carriers send synchronously; envelopes stage the
-  // kind-7 pump and leave on poll.
+  // port refuses. Small carriers and kind-7 objects both leave on poll;
+  // a tracked small carrier completes on its node job result.
   bool try_send(NodeId gateway, AuthorityCarrierKind kind, ByteView carrier,
                 std::uint64_t& token) noexcept override;
 
@@ -154,6 +155,7 @@ class AuthorityEndpoint final : public AuthorityMeshDemux, public AuthorityPort 
                 MonotonicMs now_ms) noexcept override;
   void on_ack(NodeId origin, const autonomy::ObjectAckPayload& ack,
               MonotonicMs now_ms) noexcept override;
+  void on_config_job_done(const MessageId& id, bool hop_accepted) noexcept override;
 
   // Owner drain, polled (never called back): one completed RX carrier at
   // a time (`out.bytes` borrows this until the next endpoint call — the
@@ -199,6 +201,8 @@ class AuthorityEndpoint final : public AuthorityMeshDemux, public AuthorityPort 
     AuthorityCarrierKind kind{AuthorityCarrierKind::Envelope};
     NodeId gateway{kInvalidNodeId};
     std::uint64_t token{0};
+    // Object hash for chunked transfers; the first 12 bytes hold the
+    // node job id while a small carrier waits for hop completion.
     autonomy::ObjectHash hash{};
     std::uint16_t total_len{0};
     std::uint16_t acked{0};  // contiguously acknowledged bytes

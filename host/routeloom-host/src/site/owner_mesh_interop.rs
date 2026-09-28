@@ -1840,6 +1840,10 @@ struct MeshWorld {
     /// never reaches the bridge — buffered carriers queue like a real
     /// cable pull, and both sides' session timeouts expire naturally.
     usb_down: bool,
+    /// C6: move the physical tree when the real A receipt reaches Host,
+    /// before the next distributor tick may dispatch B's queued COMMIT.
+    c6_flip_on_a_stored: Option<u64>,
+    c6_flipped: bool,
 }
 
 impl MeshWorld {
@@ -1915,6 +1919,8 @@ impl MeshWorld {
             usb_auth_total: 0,
             delayed: Vec::new(),
             usb_down: false,
+            c6_flip_on_a_stored: None,
+            c6_flipped: false,
         };
         // The USB Hello goes out before the first tick; the gateway
         // answers from its pump.
@@ -2152,6 +2158,24 @@ impl MeshWorld {
                 &mut rng,
             );
             self.rng_state = state;
+        }
+        if self.c6_flip_on_a_stored.is_some_and(|op| {
+            self.provision
+                .site
+                .service
+                .with(|a| {
+                    a.cutover_routes
+                        .get(&(op, NODE_A))
+                        .is_some_and(|plan| plan.stored)
+                })
+                .0
+        }) {
+            self.switch.set_audible(0, 2, false);
+            self.switch.set_audible(2, 0, false);
+            self.switch.set_audible(0, 1, true);
+            self.switch.set_audible(1, 0, true);
+            self.c6_flip_on_a_stored = None;
+            self.c6_flipped = true;
         }
         self.provision.now = self.now;
         self.provision.site.service.tick(HostTime::sync(self.now));
@@ -3631,14 +3655,10 @@ fn mesh_k1_gk_double_miss() {
         world.snaps[1]
     );
     assert!(!saw_gk1, "A never staged the dead g+1");
-    // Current-key traffic flows again: flap A so the idle mesh
-    // re-discovers and its g+2 scope is admitted (scope is GK-keyed
-    // RX, so admission is current-key communication).
-    world.switch.isolate(1);
-    for _ in 0..100 {
-        world.step(25);
-    }
-    world.switch.heal(1);
+    // A fresh boot starts a discovery round with the durable g+2 key;
+    // mere radio isolation can leave its existing link idle throughout
+    // this observation window.
+    world.peers[1].power_cut();
     world.pump_until(3000, |snaps| snaps[2].scope_accepted > b_scope_ok);
     assert!(
         world.snaps[2].scope_accepted > b_scope_ok,
@@ -5014,29 +5034,55 @@ fn mesh_c6_adopted_leaf_blocks_old_relay() {
     };
     let (operation_id, next_gk, new_network, old_network, t0) =
         cutover_through_commit(&mut world, "c6-leaf");
-    // A has durably stored COMMIT, releasing B's frontier, but B has
-    // not adopted. Moving B behind A now would need the new-epoch
-    // leaf to relay an old-epoch COMMIT; that dependency must defer.
+    let b_report = world
+        .cutover_route(&operation_id, NODE_B)
+        .and_then(|p| p.report)
+        .expect("B has a pre-COMMIT RouteState");
+    assert_eq!(b_report.parent, testkit::GATEWAY);
+    assert!(b_report.recv_mono_ms + u64::from(b_report.lease_ms) > world.now);
+    let b_attempts = world
+        .cutover_targets(&operation_id)
+        .iter()
+        .find(|t| t.0 == NODE_B)
+        .unwrap()
+        .3;
+    // Flip inside the harness step that accepts A's real STORED receipt,
+    // before the distributor can release B from the old route plan.
+    world.c6_flip_on_a_stored = Some(super::records::parse_op_token(&operation_id).unwrap());
     for _ in 0..4000 {
         world.step(25);
-        if world
-            .cutover_route(&operation_id, NODE_A)
-            .is_some_and(|p| p.stored)
-        {
+        if world.c6_flipped {
             break;
         }
     }
+    assert!(world.c6_flipped, "the receipt triggered the route fault");
     assert!(world
         .cutover_route(&operation_id, NODE_A)
         .is_some_and(|p| p.stored));
     assert_eq!(world.snaps[2].adopted_network, old_network);
-    world.switch.set_audible(0, 2, false);
-    world.switch.set_audible(2, 0, false);
-    world.switch.set_audible(0, 1, true);
-    world.switch.set_audible(1, 0, true);
+    assert_eq!(
+        world
+            .cutover_targets(&operation_id)
+            .iter()
+            .find(|t| t.0 == NODE_B)
+            .unwrap()
+            .3,
+        b_attempts,
+        "no old-tree COMMIT to B was dispatched after A stored"
+    );
     while world.now < t0 + super::cutover::CUTOVER_GRACE_MS + 5_000 {
         world.step(25);
     }
+    assert_eq!(
+        world
+            .cutover_targets(&operation_id)
+            .iter()
+            .find(|t| t.0 == NODE_B)
+            .unwrap()
+            .3,
+        b_attempts,
+        "stale COMMIT never entered the transport during grace"
+    );
     assert_eq!(world.snaps[1].adopted_network, new_network);
     assert_eq!(world.snaps[2].adopted_network, old_network);
     assert!(world
