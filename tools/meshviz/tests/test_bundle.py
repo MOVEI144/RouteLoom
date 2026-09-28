@@ -15,54 +15,23 @@ from routeloom_meshviz import flash_worker
 from routeloom_meshviz.device import FlashPlan, Identity, Image
 from routeloom_meshviz.flash_worker import flash
 
+import pt4m_fixture
+
 
 class BundleTests(unittest.TestCase):
     @staticmethod
     def fixture(root):
         build = root / 'build'
-        (build / 'bootloader').mkdir(parents=True)
-        (build / 'partition_table').mkdir()
         header = bytearray(128)
         header[0] = 0xe9
-        header[2:4] = b'\x02\x1f'
+        header[2:4] = b'\x02\x2f'
         header[12:14] = (5).to_bytes(2, 'little')
         header[14] = 1
         header[15:17] = (1).to_bytes(2, 'little')
         header[17:19] = (199).to_bytes(2, 'little')
         header[32:36] = bytes.fromhex('3254cdab')
         header[80:80 + len(b'routeloom_reference_node')] = b'routeloom_reference_node'
-        entries = []
-        for name, kind, subtype, offset, size in (
-                ('nvs', 1, 2, 0x9000, 0x6000),
-                ('phy_init', 1, 1, 0xf000, 0x1000),
-                ('factory', 0, 0, 0x10000, 0x180000),
-                ('rlsec', 1, 2, 0x190000, 0x10000),
-                ('rlcfg', 1, 2, 0x1b0000, 0x6000),
-                ('rlkeys', 1, 2, 0x1b6000, 0x3000)):
-            entry = bytearray(32)
-            entry[:2] = bytes.fromhex('aa50')
-            entry[2:4] = bytes((kind, subtype))
-            entry[4:8] = offset.to_bytes(4, 'little')
-            entry[8:12] = size.to_bytes(4, 'little')
-            entry[12:12 + len(name)] = name.encode()
-            entries.append(bytes(entry))
-        partition = b''.join(entries)
-        partition += b'\xeb\xeb' + b'\xff' * 14 + hashlib.md5(partition).digest()
-        partition += b'\xff' * (0xc00 - len(partition))
-        for name, image in (('bootloader/bootloader.bin', bytes(header)),
-                            ('partition_table/partition-table.bin', partition),
-                            ('reference_node.bin', bytes(header))):
-            (build / name).write_bytes(image)
-        (build / 'flasher_args.json').write_text(json.dumps({
-            'flash_files': {'0x0': 'bootloader/bootloader.bin',
-                            '0x8000': 'partition_table/partition-table.bin',
-                            '0x10000': 'reference_node.bin'},
-            'extra_esptool_args': {'chip': 'esp32c3'},
-            'flash_settings': {'flash_mode': 'dio', 'flash_freq': '80m', 'flash_size': '2MB'},
-            'write_flash_args': ['--flash-mode', 'dio', '--flash-size', '2MB', '--flash-freq', '80m'],
-            'bootloader': {'encrypted': 'false'},
-            'partition-table': {'encrypted': 'false'},
-            'app': {'encrypted': 'false'}}))
+        pt4m_fixture.write_build(build, 'reference_node.bin', bytes(header), bytes(header))
         (root / 'LICENSE').write_text('test license')
         (root / 'NOTICE').write_text('test notice')
         app = root / 'firmware' / 'reference_node'
@@ -76,15 +45,9 @@ class BundleTests(unittest.TestCase):
             'CONFIG_BOOTLOADER_OFFSET_IN_FLASH=0x0\n'
             'CONFIG_ESPTOOLPY_FLASHMODE="dio"\n'
             'CONFIG_ESPTOOLPY_FLASHFREQ="80m"\n'
-            'CONFIG_ESPTOOLPY_FLASHSIZE="2MB"\n'
+            'CONFIG_ESPTOOLPY_FLASHSIZE="4MB"\n'
             'CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y\n')
-        (app / 'partitions.csv').write_text(
-            'nvs,data,nvs,0x9000,0x6000\n'
-            'phy_init,data,phy,0xf000,0x1000\n'
-            'factory,app,factory,0x10000,0x180000\n'
-            'rlsec,data,nvs,0x190000,0x10000\n'
-            'rlcfg,data,nvs,0x1b0000,0x6000\n'
-            'rlkeys,data,nvs,0x1b6000,0x3000\n')
+        (app / 'partitions.csv').write_text(pt4m_fixture.PARTITIONS_CSV)
         (build / 'ram-report.json').write_text('{}')
         key = root / 'private.pem'
         shutil.copyfile(Path(__file__).resolve().parents[1] /
@@ -151,19 +114,20 @@ class BundleTests(unittest.TestCase):
             flash('COM1', FlashPlan(identity, 'esp32c3', images, True,
                                    identity.base_mac, True, bundle), api)
             self.assertEqual(api.written, api.verified)
-            self.assertEqual(len(api.written), 3)
-            app_image = next(image for image in images if image.offset == 0x10000)
+            self.assertEqual(len(api.written), 4)
+            app_images = tuple(image for image in images
+                               if image.offset in catalog.APP_ONLY_OFFSETS)
             api = API()
-            flash('COM1', FlashPlan(identity, 'esp32c3', (app_image,), True,
+            flash('COM1', FlashPlan(identity, 'esp32c3', app_images, True,
                                    identity.base_mac, True, bundle, None, True), api)
-            self.assertEqual([offset for offset, _ in api.written], [0x10000])
-            # A signed app exceeding the factory partition must not overwrite rlsec.
-            oversized = bytes(header) + b'\0' * (0x180001 - len(header))
+            self.assertEqual([offset for offset, _ in api.written], [0x10000, 0x40000])
+            # A signed app exceeding its OTA slot must not overwrite ota_1.
+            oversized = bytes(header) + b'\0' * (catalog.APP_SLOT_SIZE + 1 - len(header))
             app_image = bundle / 'images/application.bin'
             app_image.write_bytes(oversized)
             oversized_manifest = {**manifest, 'files': [
                 {**e, 'size': len(oversized), 'sha256': catalog._hash(oversized)}
-                if e['offset'] == 0x10000 else e for e in manifest['files']]}
+                if e['offset'] == 0x40000 else e for e in manifest['files']]}
             (bundle / 'manifest.json').write_bytes(catalog._json(oversized_manifest))
             (bundle / 'signature.json').write_bytes(catalog._json(catalog._sign(oversized_manifest, key)))
             (bundle / 'SHA256SUMS').write_text(''.join(
@@ -227,12 +191,12 @@ class BundleTests(unittest.TestCase):
             (bundle / 'SHA256SUMS').write_bytes(original_sums)
             (bundle / 'signature.json').write_bytes(original_sig)
             # Even correctly signed partition bytes must not map persistent data
-            # into the factory image that will be written by this bundle.
+            # into the app slot that will be written by this bundle.
             partition_image = bundle / 'images/partition_table/partition-table.bin'
             original_partition = partition_image.read_bytes()
             overlapping = bytearray(32)
             overlapping[:4] = b'\xaa\x50\x01\x02'
-            overlapping[4:8] = (0x180000).to_bytes(4, 'little')
+            overlapping[4:8] = (0x200000).to_bytes(4, 'little')
             overlapping[8:12] = (0x20000).to_bytes(4, 'little')
             partition_image.write_bytes(original_partition + overlapping)
             overlap_manifest = {**manifest, 'files': [
@@ -270,7 +234,7 @@ class BundleTests(unittest.TestCase):
             cmd, files, fallback = hil_flash.build_write_flash_cmd(
                 str(bundle), 'COM1', 'esptool', 'esp32c3', 460800, False)
             self.assertFalse(fallback)
-            self.assertEqual(len(files), 3)
+            self.assertEqual(len(files), 4)
             self.assertIn('--flash-mode', cmd)
             for file in ('images/application.bin', 'sdkconfig', 'flasher_args.json', 'manifest.json'):
                 path = bundle / file
@@ -323,7 +287,7 @@ class BundleTests(unittest.TestCase):
             catalog.verify_bundle(bundle, public)
             csv_file = bundle / 'partition-table.csv'
             csv_file.write_text(csv_file.read_text().replace(
-                'rlsec,data,nvs,0x190000,0x10000', 'rlsec,data,nvs,0x190000,0x20000'))
+                'rlsec,data,nvs,0x20000,0x20000', 'rlsec,data,nvs,0x20000,0x10000'))
             manifest = json.loads((bundle / 'manifest.json').read_text())
             manifest['partition_layout_id'] = catalog._hash(csv_file.read_bytes())
             manifest['auxiliary']['partition-table.csv'] = manifest['partition_layout_id']
@@ -342,7 +306,8 @@ class BundleTests(unittest.TestCase):
             path = bundle / 'images/partition_table/partition-table.bin'
             table = bytearray(path.read_bytes())
             table[96 + 8:96 + 12] = (0x8000).to_bytes(4, 'little')
-            table[192 + 16:192 + 32] = hashlib.md5(table[:192]).digest()
+            md5 = pt4m_fixture.MD5_ROW
+            table[md5 + 16:md5 + 32] = hashlib.md5(table[:md5]).digest()
             path.write_bytes(table)
             manifest = json.loads((bundle / 'manifest.json').read_text())
             for entry in manifest['files']:
@@ -390,14 +355,6 @@ class BundleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             app, build, key, public = self.fixture(root)
-            csv_file = app / 'partitions.csv'
-            csv_file.write_text(csv_file.read_text().replace(
-                'rlsec,data,nvs,0x190000,0x10000', 'rlsec,data,nvs,0x190000,0x20000'))
-            table_file = build / 'partition_table/partition-table.bin'
-            table = bytearray(table_file.read_bytes())
-            table[96 + 8:96 + 12] = (0x20000).to_bytes(4, 'little')
-            table[128 + 16:128 + 32] = hashlib.md5(table[:128]).digest()
-            table_file.write_bytes(table)
             with self.assertRaises(ValueError):
                 catalog.package(app, build, root / 'wrong-role', key, 'esp32c3',
                                 'bridge_node', 'test-1', 'a' * 40, 'b' * 64)
@@ -454,7 +411,7 @@ class BundleTests(unittest.TestCase):
             image.write_bytes(data)
             manifest = json.loads((bundle / 'manifest.json').read_text())
             for entry in manifest['files']:
-                if entry['offset'] == 0x10000:
+                if entry['offset'] == 0x40000:
                     entry['sha256'] = catalog._hash(data)
             (bundle / 'manifest.json').write_bytes(catalog._json(manifest))
             self.resign(bundle, key)
@@ -487,19 +444,6 @@ class BundleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             app, build, key, public = self.fixture(root)
-            config = app / 'sdkconfig'
-            config.write_text(config.read_text().replace(
-                'CONFIG_ESPTOOLPY_FLASHSIZE="2MB"', 'CONFIG_ESPTOOLPY_FLASHSIZE="4MB"'))
-            args_file = build / 'flasher_args.json'
-            args = json.loads(args_file.read_text())
-            args['flash_settings']['flash_size'] = '4MB'
-            args['write_flash_args'][3] = '4MB'
-            args_file.write_text(json.dumps(args))
-            for name in ('bootloader/bootloader.bin', 'reference_node.bin'):
-                path = build / name
-                header = bytearray(path.read_bytes())
-                header[3] = 0x2f
-                path.write_bytes(header)
             bundle = root / 'bundle'
             manifest = catalog.package(app, build, bundle, key, 'esp32c3',
                                        'reference_node', 'test-1', 'a' * 40, 'b' * 64)
@@ -533,7 +477,7 @@ class BundleTests(unittest.TestCase):
                 (bundle / 'images/application.bin').write_bytes(b'evil')
                 return {'chip': 'esp32c3', 'mac': 'aa:bb:cc:dd:ee:01'}
             def run(cmd, **kwargs):
-                flashed.append(Path(cmd[cmd.index('0x10000') + 1]).read_bytes())
+                flashed.append(Path(cmd[cmd.index('0x40000') + 1]).read_bytes())
                 return subprocess.CompletedProcess(cmd, 0, '', '')
             with patch.object(hil_flash, 'preflight_board', side_effect=preflight), \
                     patch.object(hil_flash.subprocess, 'run', side_effect=run):

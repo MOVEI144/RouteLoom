@@ -18,16 +18,23 @@ CHIPS = ('esp32c3', 'esp32s3', 'esp32c5', 'esp32c6')
 BOOTLOADER_OFFSETS = {'esp32c3': 0, 'esp32s3': 0,
                       'esp32c5': 0x2000, 'esp32c6': 0}
 DEV_PUBLIC_KEY = Path(__file__).with_name('dev-signing-public.pem')
-PARTITIONS = {
-    role: (('nvs', 1, 2, 0x9000, 0x6000),
-           ('phy_init', 1, 1, 0xf000, 0x1000),
-           ('factory', 0, 0, 0x10000, 0x180000),
-           ('rlsec', 1, 2, 0x190000, rlsec_size),
-           ('rlcfg', 1, 2, 0x1B0000, 0x6000),
-           ('rlkeys', 1, 2, 0x1B6000, 0x3000))
-    for role, rlsec_size in (('reference_node', 0x10000), ('bench_node', 0x10000),
-                             ('bridge_node', 0x20000))
-}
+# PT-4M-v2 (firmware/*/partitions.csv), the same table for every role.
+OTADATA_OFFSET = 0x10000
+OTADATA_SIZE = 0x2000
+APP_OFFSET = 0x40000
+APP_SLOT_SIZE = 0x1D0000
+# An app-only write also blanks otadata so the bootloader boots ota_0.
+APP_ONLY_OFFSETS = frozenset((OTADATA_OFFSET, APP_OFFSET))
+PT_4M_V2 = (('nvs', 1, 2, 0x9000, 0x6000),
+            ('phy_init', 1, 1, 0xf000, 0x1000),
+            ('otadata', 1, 0, OTADATA_OFFSET, OTADATA_SIZE),
+            ('rlcfg', 1, 2, 0x12000, 0x6000),
+            ('rlkeys', 1, 2, 0x18000, 0x3000),
+            ('rlsec', 1, 2, 0x20000, 0x20000),
+            ('ota_0', 0, 0x10, APP_OFFSET, APP_SLOT_SIZE),
+            ('ota_1', 0, 0x11, 0x210000, APP_SLOT_SIZE),
+            ('coredump', 1, 3, 0x3e0000, 0x10000))
+PARTITIONS = {role: PT_4M_V2 for role in ('reference_node', 'bench_node', 'bridge_node')}
 AUXILIARY_FILES = frozenset(('flasher_args.json', 'sdkconfig', 'partition-table.csv',
                              'ram-report.json', 'build-info.json', 'LICENSES/LICENSE',
                              'LICENSES/NOTICE'))
@@ -187,7 +194,8 @@ def _check_image_header(data, chip, flash_mode, flash_frequency, flash_size, rol
 
 def _check_partition_csv(data, role):
     names = {'data': 1, 'app': 0}
-    subtypes = {'nvs': 2, 'phy': 1, 'factory': 0}
+    subtypes = {('data', 'nvs'): 2, ('data', 'phy'): 1, ('data', 'ota'): 0,
+                ('data', 'coredump'): 3, ('app', 'ota_0'): 0x10, ('app', 'ota_1'): 0x11}
     lines = (line.split('#', 1)[0] for line in data.decode().splitlines())
     entries = []
     try:
@@ -195,7 +203,7 @@ def _check_partition_csv(data, role):
             if len(row) != 5:
                 raise ValueError('invalid partition CSV')
             name, kind, subtype, offset, size = (field.strip() for field in row)
-            entries.append((name, names[kind], subtypes[subtype],
+            entries.append((name, names[kind], subtypes[kind, subtype],
                             int(offset, 0), int(size, 0)))
     except (KeyError, UnicodeDecodeError) as exc:
         raise ValueError('invalid partition CSV') from exc
@@ -228,10 +236,24 @@ def _check_partition_table(data, role):
     raise ValueError('partition table checksum missing')
 
 
+def _image_names(bootloader_offset):
+    return {bootloader_offset: 'images/bootloader/bootloader.bin',
+            0x8000: 'images/partition_table/partition-table.bin',
+            OTADATA_OFFSET: 'images/ota_data_initial.bin',
+            APP_OFFSET: 'images/application.bin'}
+
+
+def _image_limits(bootloader_offset):
+    # Each image stays inside its own region; an app past its slot would
+    # overwrite ota_1.
+    return {bootloader_offset: 0x8000 - bootloader_offset, 0x8000: 0x1000,
+            OTADATA_OFFSET: OTADATA_SIZE, APP_OFFSET: APP_SLOT_SIZE}
+
+
 def _flash_files(args, build, chip):
     files = args.get('flash_files')
-    if not isinstance(files, dict) or len(files) != 3:
-        raise ValueError('bootloader, partition and app required')
+    if not isinstance(files, dict) or len(files) != 4:
+        raise ValueError('bootloader, partition, otadata and app required')
     settings = args.get('flash_settings', {})
     if (settings.get('flash_mode') not in ('dio', 'dout', 'qio', 'qout') or
             settings.get('flash_freq') not in ('40m', '80m') or
@@ -240,13 +262,11 @@ def _flash_files(args, build, chip):
                                              '--flash-size', settings['flash_size'],
                                              '--flash-freq', settings['flash_freq']] or
             any(args.get(section, {}).get('encrypted') != 'false'
-                for section in ('bootloader', 'partition-table', 'app'))):
+                for section in ('bootloader', 'partition-table', 'otadata', 'app'))):
         raise ValueError('unreviewed flash parameters')
     result = []
     bootloader_offset = BOOTLOADER_OFFSETS[chip]
-    names = {bootloader_offset: 'images/bootloader/bootloader.bin',
-             0x8000: 'images/partition_table/partition-table.bin',
-             0x10000: 'images/application.bin'}
+    names = _image_names(bootloader_offset)
     for raw, src in files.items():
         offset = int(raw, 0)
         if offset not in names or type(src) is not str or not src.endswith('.bin'):
@@ -255,12 +275,11 @@ def _flash_files(args, build, chip):
         result.append((offset, names[offset], data))
     if set(o for o, _, _ in result) != set(names):
         raise ValueError('missing flash image')
-    # Keep bootloader, partition table and factory app inside their own regions;
-    # overflowing the factory image would erase persistent rlsec data.
-    limits = {bootloader_offset: 0x8000 - bootloader_offset,
-              0x8000: 0x1000, 0x10000: 0x180000}
+    limits = _image_limits(bootloader_offset)
     if any(not data or len(data) > limits[offset] for offset, _, data in result):
         raise ValueError('image exceeds flash partition')
+    if next(d for o, _, d in result if o == OTADATA_OFFSET) != b'\xff' * OTADATA_SIZE:
+        raise ValueError('otadata image is not blank')
     return sorted(result)
 
 
@@ -286,10 +305,10 @@ def package(app, build, out, private, chip, role, version, sdk_commit, source_di
     for offset, _, data in images:
         if offset == 0x8000:
             _check_partition_table(data, role)
-        else:
+        elif offset != OTADATA_OFFSET:
             revisions.append(_check_image_header(
                 data, chip, flash_mode, flash_frequency, flash_size,
-                role if offset == 0x10000 else None))
+                role if offset == APP_OFFSET else None))
     revision_low = max(low for low, _ in revisions)
     revision_high = min(high for _, high in revisions)
     if revision_low > revision_high:
@@ -302,7 +321,9 @@ def package(app, build, out, private, chip, role, version, sdk_commit, source_di
         path.write_bytes(data)
         entries.append({'offset': offset, 'path': name, 'size': len(data), 'sha256': _hash(data)})
     normalized = {'flash_files': {hex(o): name for o, name, _ in images},
-                  'app': {'offset': '0x10000', 'file': 'images/application.bin'},
+                  'app': {'offset': hex(APP_OFFSET), 'file': 'images/application.bin'},
+                  'otadata': {'offset': hex(OTADATA_OFFSET),
+                              'file': 'images/ota_data_initial.bin'},
                   'extra_esptool_args': {'chip': chip},
                   'write_flash_args': ['--flash-mode', 'keep', '--flash-freq', 'keep',
                                        '--flash-size', 'keep']}
@@ -387,32 +408,34 @@ def verify_bundle(root, public):
         raise ValueError('partition mismatch')
     entries = manifest['files']
     bootloader_offset = BOOTLOADER_OFFSETS[chip]
-    expected = {bootloader_offset: 'images/bootloader/bootloader.bin',
-                0x8000: 'images/partition_table/partition-table.bin',
-                0x10000: 'images/application.bin'}
-    if (type(entries) is not list or len(entries) != 3 or
+    expected = _image_names(bootloader_offset)
+    if (type(entries) is not list or len(entries) != 4 or
             {e['offset']: e['path'] for e in entries} != expected):
         raise ValueError('unexpected image layout')
     revisions = []
     for entry in entries:
         data = _read(root, entry['path'])
-        limits = {bootloader_offset: 0x8000 - bootloader_offset,
-                  0x8000: 0x1000, 0x10000: 0x180000}
+        limits = _image_limits(bootloader_offset)
         if (type(entry['size']) is not int or not 0 < entry['size'] <= limits[entry['offset']] or
                 len(data) != entry['size'] or _hash(data) != entry['sha256']):
             raise ValueError('image digest or partition size mismatch')
         if entry['offset'] == 0x8000:
             _check_partition_table(data, role)
+        elif entry['offset'] == OTADATA_OFFSET:
+            if data != b'\xff' * OTADATA_SIZE:
+                raise ValueError('otadata image is not blank')
         else:
             revisions.append(_check_image_header(
                 data, chip, flash_mode, flash_frequency, flash_size,
-                role if entry['offset'] == 0x10000 else None))
+                role if entry['offset'] == APP_OFFSET else None))
     if (manifest['chip_revision_range'][0] < max(low for low, _ in revisions) or
             manifest['chip_revision_range'][1] > min(high for _, high in revisions)):
         raise ValueError('signed chip revisions exceed image compatibility')
     args = json.loads(_read(root, 'flasher_args.json'))
     if (args.get('flash_files') != {hex(o): p for o, p in expected.items()} or
-            args.get('app') != {'offset': '0x10000', 'file': 'images/application.bin'} or
+            args.get('app') != {'offset': hex(APP_OFFSET), 'file': 'images/application.bin'} or
+            args.get('otadata') != {'offset': hex(OTADATA_OFFSET),
+                                    'file': 'images/ota_data_initial.bin'} or
             args.get('extra_esptool_args') != {'chip': chip} or
             args.get('write_flash_args') != ['--flash-mode', 'keep', '--flash-freq', 'keep',
                                              '--flash-size', 'keep']):

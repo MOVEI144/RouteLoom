@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .device import FlashPlan, Identity, Image
 from .board_setup import bundle_image_node_id
-from .firmware_catalog import DEV_PUBLIC_KEY, verify_bundle
+from .firmware_catalog import APP_ONLY_OFFSETS, DEV_PUBLIC_KEY, verify_bundle
 
 
 PUBLIC_KEY = DEV_PUBLIC_KEY
@@ -25,7 +25,7 @@ def flash(port: str, plan: FlashPlan, api=None):
     manifest_files = manifest['files']
     if plan.app_only:
         manifest_files = [entry for entry in manifest_files
-                          if entry['offset'] == 0x10000]
+                          if entry['offset'] in APP_ONLY_OFFSETS]
     if manifest['chip'] != plan.chip or tuple(
             (e['offset'], Path(plan.bundle) / e['path'], e['size'], e['sha256'])
             for e in manifest_files) != tuple(
@@ -104,7 +104,7 @@ def main():
         app_only = request.get('app_only', False)
         images = tuple(Image(e['offset'], root / e['path'], e['size'], e['sha256'])
                        for e in manifest['files']
-                       if not app_only or e['offset'] == 0x10000)
+                       if not app_only or e['offset'] in APP_ONLY_OFFSETS)
         plan = FlashPlan(identity, manifest['chip'], images, True,
                          request['expected_mac'], request['quiesced'], root,
                          request.get('assigned_node_id'), app_only)
