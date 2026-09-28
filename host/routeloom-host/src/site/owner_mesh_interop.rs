@@ -2605,6 +2605,42 @@ fn mesh_route_loss_relay_binds_first() {
     assert_eq!(world.snaps[0].rx, b"relay-first");
 }
 
+/// A lost hop ACK and a lost routed receipt must preserve the End
+/// envelope, so the relay accepts retries without duplicate delivery.
+#[test]
+fn mesh_route_loss_retry_has_one_terminal_delivery() {
+    let Some(mut world) = route_loss_world("route-retry", Switch::forced_multihop(), true) else {
+        return;
+    };
+    world.switch.drop_wire_kind(2, 1, WIRE_HOP_ACCEPT, 1);
+    world.switch.drop_wire_kind(2, 1, WIRE_END_RECEIPT, 1);
+    let before = world.snaps[0].rx_count;
+    world.peers[1].app_send(testkit::GATEWAY, b"retry-once");
+    world.pump_until(3000, |snaps| {
+        snaps[0].rx_count > before
+            && snaps[1]
+                .app_tx
+                .iter()
+                .any(|tx| tx.state == DELIVERY_DELIVERED)
+    });
+    assert_eq!(world.switch.wire_dropped, 2, "both fault rules fired");
+    assert_eq!(
+        world.snaps[0].rx_count,
+        before + 1,
+        "one application receive"
+    );
+    assert!(
+        world.snaps[1]
+            .app_tx
+            .iter()
+            .any(|tx| tx.state == DELIVERY_DELIVERED),
+        "sender delivered: {:?}",
+        world.snaps[1].app_tx
+    );
+    assert_eq!(world.snaps[2].transit_conflicts, 0);
+    assert_eq!(world.snaps[2].receipt_conflicts, 0);
+}
+
 /// Phase-1 convergence on the direct radio: all three Owners adopt
 /// from their Phase-0 images (member boots, no rejoins), open their
 /// authority channels through the gateway's real USB relay, confirm,
