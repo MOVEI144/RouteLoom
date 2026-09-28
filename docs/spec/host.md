@@ -208,7 +208,9 @@ routeloomctl group-get --id grp00000001000000a1 --wait-ms 15000
 - `membership.revoke {device_id, expected_generation, reason:"removed|lost|replaced|blocked", idempotency_key}` → `{"operation_id","state":"committed","rs_epoch","gk_rotation":{"from","to","state":"staged"},"distribution":"not_implemented"}`
 - `operations.get {operation_id:"op-…"}` → approve（`committed`→`delivered`→`confirmed`）／revoke（`committed`、配布は`not_implemented`で全memberを`unknown`と数える）
 
-JSONの例は[07 §2.4](../design/sdk-v1/07-host-api-tooling.md)。idempotencyのidentityは`(principal, idempotency_key)`で、同じkey・同じ内容は保存済みの答え、内容違いは`CONFLICT`。決定済みの要求に別のverdict、`expected_generation`の不一致、kid conflictのallowも`CONFLICT`。storeが書けなければ`STORE_FAILURE`（retryable、何も変えていない）で、成功に変換しない。
+JSONの例は[07 §2.4](../design/sdk-v1/07-host-api-tooling.md)。idempotencyのidentityは`(principal, idempotency_key)`で、同じkey・同じ内容は保存済みの答え、内容違いは`CONFLICT`。決定済みの要求に別のverdict、`expected_generation`の不一致、kid conflictのallowも`CONFLICT`。台帳・判断のcommitに失敗すれば`STORE_FAILURE`（retryable、そのcommitの状態は変えない）で、成功に変換しない。
+
+発見・発見済み判定・参加要求の終了は、補助記録のstore commit後にRAMへ反映する。発見記録の保存失敗は機器へ`AuthorityBusy`を返す。pending／denyの判定表示を保存できない場合、判断本体が未commitなら`AuthorityBusy`として次の参加試行で再評価し、判断本体がcommit済みならその判断を機器へ届ける（表示記録のRAM／storeは旧状態のまま）。要求の終了を保存できなければRAMとstoreの両方に残し、次の試行または期限切れ処理で終了を再試行する。
 
 **event**（`stream:"events"`、`filter.kinds`で選択）：`join.request`、`join.decided`、`device.discovered`、`member.reissued`、`member.confirmed`、`member.revoked`、`member.removal_notified`、`rrs.published`、`gk.staged`、`authority.error`、`site.session_drop`、`join_relay_failed`（`source`＋`reason`＋gateway/proxy/relay_id/joiner＋`stage`＋判明分の`device`／`join_request`）。直近の失敗は`site.status`の`recent_relay_failures`（最大16件）でも照会できる。
 

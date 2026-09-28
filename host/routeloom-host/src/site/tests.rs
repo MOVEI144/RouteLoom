@@ -1517,6 +1517,135 @@ fn auxiliary_record_failures_leave_ram_unchanged() {
     assert!(in_ram && in_store);
 }
 
+#[test]
+fn failed_discovery_refresh_keeps_existing_record() {
+    let armed: Arc<Mutex<Option<BatchFilter>>> = Arc::new(Mutex::new(None));
+    let (service, transport) = service_with(Box::new(FailBatchStore {
+        inner: MemoryStore::default(),
+        armed: Arc::clone(&armed),
+    }));
+    let mut device = SimDevice::new(0x00A1_0000_0000_2227, 0x28);
+    let (mut exchange, outcome, _) = device.start(&service, &transport, T0);
+    assert!(matches!(outcome, Outcome::Waiting));
+    service.tick(HostTime::sync(T0 + 2_000));
+    assert!(matches!(
+        device.finish(&mut exchange, &transport),
+        Outcome::Result(JoinResult::PendingAssignment { .. })
+    ));
+    let before = service
+        .with(|a| a.discovered.get(&device.node).unwrap().clone())
+        .0;
+    *armed.lock().unwrap() = Some(|batch| {
+        batch
+            .docs
+            .iter()
+            .any(|(kind, _, _)| *kind == store::DocKind::Discovered)
+    });
+    let (outcome, _) = device.attempt(&service, &transport, T0 + 70_000);
+    assert!(matches!(
+        outcome,
+        Outcome::Result(JoinResult::AuthorityBusy { .. })
+    ));
+    assert!(armed.lock().unwrap().is_none());
+    service.with(|a| {
+        let in_ram = a.discovered.get(&device.node).unwrap();
+        let in_store = a.store.load().unwrap().docs
+            [&(store::DocKind::Discovered, records::h16(device.node))]
+            .clone();
+        assert_eq!(in_ram, &before);
+        assert_eq!(in_store, before.doc());
+    });
+}
+
+#[test]
+fn failed_pending_verdict_returns_busy_without_publishing_it() {
+    let armed: Arc<Mutex<Option<BatchFilter>>> = Arc::new(Mutex::new(None));
+    let (service, transport) = service_with(Box::new(FailBatchStore {
+        inner: MemoryStore::default(),
+        armed: Arc::clone(&armed),
+    }));
+    service.with(|a| {
+        a.update_policy_at(
+            &PolicyPatch {
+                decision_mode: Some(DecisionMode::Closed),
+                ..PolicyPatch::default()
+            },
+            T0,
+        )
+        .unwrap();
+    });
+    *armed.lock().unwrap() = Some(|batch| {
+        batch.docs.iter().any(|(kind, _, doc)| {
+            *kind == store::DocKind::Discovered
+                && doc
+                    .as_ref()
+                    .is_some_and(|doc| doc.contains("\"last_verdict\":\"pending\""))
+        })
+    });
+    let mut device = SimDevice::new(0x00A1_0000_0000_2327, 0x29);
+    let (_, outcome, _) = device.start(&service, &transport, T0);
+    assert!(matches!(
+        outcome,
+        Outcome::Result(JoinResult::AuthorityBusy { .. })
+    ));
+    assert!(armed.lock().unwrap().is_none());
+    service.with(|a| {
+        let in_ram = a.discovered.get(&device.node).unwrap();
+        let in_store = a.store.load().unwrap().docs
+            [&(store::DocKind::Discovered, records::h16(device.node))]
+            .clone();
+        assert_eq!(in_ram.last_verdict, "awaiting");
+        assert_eq!(in_store, in_ram.doc());
+    });
+}
+
+#[test]
+fn committed_deny_reaches_current_attempt_after_auxiliary_failure() {
+    let armed: Arc<Mutex<Option<BatchFilter>>> = Arc::new(Mutex::new(None));
+    let (service, transport) = service_with(Box::new(FailBatchStore {
+        inner: MemoryStore::default(),
+        armed: Arc::clone(&armed),
+    }));
+    let mut device = SimDevice::new(0x00A1_0000_0000_2427, 0x2A);
+    let (mut exchange, outcome, events) = device.start(&service, &transport, T0);
+    assert!(matches!(outcome, Outcome::Waiting));
+    let id = request_id(&events).unwrap();
+    *armed.lock().unwrap() = Some(|batch| {
+        batch.docs.iter().any(|(kind, _, doc)| {
+            *kind == store::DocKind::Discovered
+                && doc
+                    .as_ref()
+                    .is_some_and(|doc| doc.contains("\"last_verdict\":\"not_here\""))
+        })
+    });
+    let response = decide(
+        &service,
+        id,
+        device.node,
+        Verdict::DenyNotHere,
+        "deny-aux-fault",
+        T0 + 1,
+    )
+    .unwrap();
+    assert_eq!(
+        json(&response).get("applied").unwrap().as_str(),
+        Some("current_attempt")
+    );
+    assert!(armed.lock().unwrap().is_none());
+    assert!(matches!(
+        device.finish(&mut exchange, &transport),
+        Outcome::Result(JoinResult::DenyNotHere)
+    ));
+    service.with(|a| {
+        let in_ram = a.discovered.get(&device.node).unwrap();
+        let in_store = a.store.load().unwrap().docs
+            [&(store::DocKind::Discovered, records::h16(device.node))]
+            .clone();
+        assert_eq!(in_ram.last_verdict, "awaiting");
+        assert_eq!(in_store, in_ram.doc());
+    });
+}
+
 /// A late pending/deny decision applies at the next attempt; an early
 /// retry inside a delivered pending window is answered AuthorityBusy.
 #[test]

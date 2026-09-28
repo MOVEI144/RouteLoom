@@ -57,4 +57,4 @@ RouteLoomは用途非依存の組み込みMesh SDKである。製品の機器台
 
 ## 2026-09-23 SDK v1設計Draft（ゼロタッチ参加・機器鍵・削除・#37）
 
-[ゼロタッチ参加とIssue #37の設計](design/sdk-v1/README.md)：事務所では現場非依存のidentityだけを書き、EDHOCでSite Authorityへ参加してアプリ（外部の判断者）が可否を決める手順、機器鍵からのlink/E2E鍵とnetwork group鍵、失効集合と世代、ピアごとの永続counter/replay recordを不要にするRAM context＋固定slot再開cache、高速再参加、API1/USB/事務所toolingの変更、PR単位の計画。**設計Draftであり、このbranchで実装したのはHKDF-SHA-256（RFC 5869 vector付き）だけ**。
+[統合先KGuardの要求とIssue #37の設計](design/sdk-v1/README.md)：事務所では現場非依存のidentityだけを書き、EDHOCでSite Authorityへ参加してKGuardが可否を決める手順、機器鍵からのlink/E2E鍵とnetwork group鍵、失効集合と世代、ピアごとの永続counter/replay recordを不要にするRAM context＋固定slot再開cache、高速再参加、API1/USB/事務所toolingの変更、PR単位の計画。**設計Draftであり、このbranchで実装したのはHKDF-SHA-256（RFC 5869 vector付き）だけ**。

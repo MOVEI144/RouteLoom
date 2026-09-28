@@ -1,7 +1,7 @@
 //! End to end through the daemon (plan P3-3 acceptance): the real API1
 //! socket (`serve_client`, peer-credential principal, ACL), the Site
-//! Authority on a SQLite store, the decider as `routeloom_client::site::
-//! AssignmentTable` driving the `SiteAdmin` facade over the socket, and a
+//! Authority on a SQLite store, the assignment-table example driving the
+//! `SiteAdmin` facade over the socket, and a
 //! simulated device (Rust EDHOC Initiator + routeloom-join device checks)
 //! on the in-process join transport.
 //!

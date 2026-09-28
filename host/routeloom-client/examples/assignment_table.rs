@@ -108,7 +108,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         table.assign(u64::from_str_radix(node, 16)?, assignment);
     }
-    for event in site.site_events()? {
+    // Subscribe before draining existing requests so a join arriving during
+    // startup is covered by either the snapshot or the event stream.
+    let events = site.site_events()?;
+    for (request, decision, _) in table.serve_once(&site)? {
+        println!("{:016x}: {decision:?}", request.device);
+    }
+    for event in events {
         if event?.kind == "join.request" {
             for (request, decision, _) in table.serve_once(&site)? {
                 println!("{:016x}: {decision:?}", request.device);

@@ -2685,6 +2685,14 @@ mod tests {
             .unwrap_err();
         assert_eq!(deny.scope, "global");
         assert_eq!(deny.retry_after_ms, 60_000 / CONTROL_GLOBAL_RATE_PER_MINUTE);
+        // The site refills before this principal: its own limit still
+        // rejects, without consuming the site's newly available token.
+        let deny = limiter
+            .admit_submit(&one, Some((1, 0, 999)), 100)
+            .unwrap_err();
+        assert_eq!(deny.scope, "principal");
+        assert_eq!(deny.retry_after_ms, 100);
+        assert!(limiter.admit_submit(&two, Some((1, 0, 998)), 100).is_ok());
         for _ in 0..HOST_RATE_BURST {
             assert!(limiter.admit_submit(&two, None, 0).is_ok());
         }

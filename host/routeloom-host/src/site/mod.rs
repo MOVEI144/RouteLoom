@@ -1926,7 +1926,7 @@ impl SiteAuthority {
             kid_conflict,
             now_ms,
         ) {
-            self.finish_busy(txn, BUSY_RETRY_S, now_ms);
+            self.send_busy_result(txn, BUSY_RETRY_S);
             return;
         }
         if !self.policy.asks_decider()
@@ -1941,6 +1941,7 @@ impl SiteAuthority {
                     retry_after_s: retry,
                 },
                 now_ms,
+                false,
             );
             return;
         }
@@ -1952,7 +1953,7 @@ impl SiteAuthority {
         if let Some((request_id, Some(verdict))) = open {
             // A decision taken after the previous attempt's deadline.
             self.close_request(request_id, now_ms);
-            self.finish_verdict(txn, node, verdict, now_ms);
+            self.finish_verdict(txn, node, verdict, now_ms, true);
             return;
         }
         let holdoff = self
@@ -2199,9 +2200,9 @@ impl SiteAuthority {
         label: &str,
         retry_not_before: Option<u64>,
         now_ms: u64,
-    ) {
+    ) -> bool {
         let Some(mut d) = self.discovered.get(&node).cloned() else {
-            return;
+            return true;
         };
         d.last_verdict = label.to_string();
         d.retry_not_before_ms = retry_not_before;
@@ -2210,9 +2211,10 @@ impl SiteAuthority {
             ..Batch::default()
         }) {
             self.store_error(now_ms, &error);
-            return;
+            return false;
         }
         self.discovered.insert(node, d);
+        true
     }
 
     fn send_result(&mut self, mut txn: Txn, result: &JoinResult) -> bool {
@@ -2237,14 +2239,26 @@ impl SiteAuthority {
     }
 
     fn finish_busy(&mut self, txn: Txn, retry_after_s: u32, now_ms: u64) {
-        self.counters.authority_busy += 1;
         if let Some(node) = txn.device.as_ref().map(|d| d.facts.node) {
             self.set_discovered_verdict(node, "busy", None, now_ms);
         }
+        self.send_busy_result(txn, retry_after_s);
+    }
+
+    /// A failed auxiliary commit leaves the discovered record unchanged.
+    fn send_busy_result(&mut self, txn: Txn, retry_after_s: u32) {
+        self.counters.authority_busy += 1;
         self.send_result(txn, &JoinResult::AuthorityBusy { retry_after_s });
     }
 
-    fn finish_verdict(&mut self, txn: Txn, node: u64, verdict: Verdict, now_ms: u64) {
+    fn finish_verdict(
+        &mut self,
+        txn: Txn,
+        node: u64,
+        verdict: Verdict,
+        now_ms: u64,
+        decision_committed: bool,
+    ) {
         match verdict {
             Verdict::Allow { .. } => match self.devices.get(&node).cloned() {
                 // The verdict was recorded for this key: if the row has
@@ -2259,14 +2273,18 @@ impl SiteAuthority {
                 _ => self.finish_busy(txn, BUSY_RETRY_S, now_ms),
             },
             Verdict::Pending { retry_after_s } => {
-                self.counters.pending += 1;
-                let retry_at = now_ms + u64::from(retry_after_s) * 1000;
-                self.set_discovered_verdict(
+                let retry_at = now_ms.saturating_add(u64::from(retry_after_s) * 1000);
+                if !self.set_discovered_verdict(
                     node,
                     "pending",
                     Some(retry_at.saturating_sub(RETRY_SLACK_MS)),
                     now_ms,
-                );
+                ) && !decision_committed
+                {
+                    self.send_busy_result(txn, BUSY_RETRY_S);
+                    return;
+                }
+                self.counters.pending += 1;
                 let mut ticket = [0_u8; 16];
                 let _ = fill_random(&mut ticket);
                 self.send_result(
@@ -2278,8 +2296,13 @@ impl SiteAuthority {
                 );
             }
             Verdict::DenyNotHere | Verdict::DenyBlocked => {
+                if !self.set_discovered_verdict(node, verdict.label(), None, now_ms)
+                    && !decision_committed
+                {
+                    self.send_busy_result(txn, BUSY_RETRY_S);
+                    return;
+                }
                 self.counters.denied += 1;
-                self.set_discovered_verdict(node, verdict.label(), None, now_ms);
                 let result = if verdict == Verdict::DenyNotHere {
                     JoinResult::DenyNotHere
                 } else {
@@ -2754,6 +2777,7 @@ impl SiteAuthority {
                             retry_after_s: retry,
                         },
                         now_ms,
+                        false,
                     );
                 }
             }
@@ -3410,7 +3434,7 @@ impl SiteAuthority {
         if let Some(index) = waiting {
             let txn = self.txns.remove(index);
             self.close_request(open.id, now_ms);
-            self.finish_verdict(txn, open.facts.node, request.verdict, now_ms);
+            self.finish_verdict(txn, open.facts.node, request.verdict, now_ms, true);
         }
         Ok(result)
     }
