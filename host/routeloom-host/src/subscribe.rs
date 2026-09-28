@@ -1151,7 +1151,7 @@ fn produce_events(state: &State, snap: &SubSnap, filter: &EvFilter, now: u64) ->
                 let matches = filter
                     .kinds
                     .as_ref()
-                    .map_or(true, |kinds| kinds.iter().any(|k| k == &event.kind));
+                    .is_none_or(|kinds| kinds.iter().any(|k| k == &event.kind));
                 if matches {
                     progressed = true;
                     work.items.push(StagedLine {
@@ -1178,10 +1178,11 @@ fn msg_matches(filter: &MsgFilter, record: &RxRecord) -> bool {
     filter
         .origins
         .as_ref()
-        .map_or(true, |origins| origins.contains(&record.origin))
-        && filter.gateways.as_ref().map_or(true, |gateways| {
-            record.gateway.is_some_and(|g| gateways.contains(&g))
-        })
+        .is_none_or(|origins| origins.contains(&record.origin))
+        && filter
+            .gateways
+            .as_ref()
+            .is_none_or(|gateways| record.gateway.is_some_and(|g| gateways.contains(&g)))
 }
 
 #[cfg(test)]

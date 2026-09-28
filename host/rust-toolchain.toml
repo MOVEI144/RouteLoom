@@ -1,0 +1,6 @@
+# The single Rust toolchain for local builds and every CI job; it is also
+# the workspace MSRV (Cargo.toml rust-version), so CI tests the MSRV.
+[toolchain]
+channel = "1.85.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

@@ -125,7 +125,8 @@ changes only in major releases.
 
 ## 6. Rust host API and daemon protocol
 
-The `host/` workspace (version `0.1.0`, MSRV `rust-version = 1.78`) is not
+The `host/` workspace (version `0.1.0`, MSRV `rust-version = 1.85`, the
+toolchain pinned in `host/rust-toolchain.toml` and used by every CI job) is not
 published to crates.io; crates are consumed by path. Semver applies from the
 first numbered release. The daemon's JSON protocol over the Unix socket
 (routeloom-json request/response model shared by `routeloomctl` and

@@ -76,10 +76,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Rust toolchain
-        run: |
-          rustup toolchain install 1.85.1 --profile minimal
-          rustup override set 1.85.1
+      - name: Rust toolchain (host/rust-toolchain.toml)
+        run: rustup toolchain install
       - name: Build host tools (locked)
         run: cargo build --workspace --release --locked
       - name: Package host tools
@@ -187,10 +185,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Rust toolchain
-        run: |
-          rustup toolchain install 1.85.1 --profile minimal
-          rustup override set 1.85.1
+      - name: Rust toolchain (host/rust-toolchain.toml)
+        working-directory: host
+        run: rustup toolchain install
       - name: Generate dependency inventory
         working-directory: host
         run: |
@@ -306,7 +303,7 @@ jobs:
             echo '| File | Contents |'
             echo '|---|---|'
             echo "| \`routeloom-${version}-src.tar.gz\` | Portable C++ core, tests, vendored third-party code, protocol vectors, docs |"
-            echo "| \`routeloom-${version}-linux-x86_64.tar.gz\` | Host daemon/CLI/TUI (x86_64 glibc; rustc 1.85.1, \`--locked\`) |"
+            echo "| \`routeloom-${version}-linux-x86_64.tar.gz\` | Host daemon/CLI/TUI (x86_64 glibc; rustc 1.85.0, \`--locked\`) |"
             echo '| `routeloom-*-firmware-<app>-<target>.tar.gz` | ESP-IDF v6.0.3 firmware (elf/bin/map/sdkconfig) per app/target |'
             echo "| \`routeloom-${version}-sbom.json\` | CycloneDX 1.5 SBOM + cargo tree/metadata |"
             echo '| `SHA256SUMS.txt` | Checksums for all of the above |'

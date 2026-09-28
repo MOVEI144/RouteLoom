@@ -837,7 +837,7 @@ impl SiteAuthority {
         if self
             .rrs_transport
             .as_ref()
-            .map_or(true, |transport| !transport.carries_grant())
+            .is_none_or(|transport| !transport.carries_grant())
         {
             return Err(SiteError::new(
                 "CUTOVER_UNAVAILABLE",
@@ -1166,7 +1166,7 @@ impl SiteAuthority {
             Some(CutoverPhase::Committed) => {
                 let grace_over = self
                     .cutover_grace()
-                    .map_or(true, |(_, until)| time.mono_ms > until);
+                    .is_none_or(|(_, until)| time.mono_ms > until);
                 if !grace_over {
                     self.cutover_apply_layer_deadlines(id, time.mono_ms);
                     // A stored child may have left the old mesh. Ask
@@ -1454,7 +1454,7 @@ impl SiteAuthority {
         if self
             .rrs_transport
             .as_ref()
-            .map_or(true, |transport| !transport.carries_grant())
+            .is_none_or(|transport| !transport.carries_grant())
         {
             return;
         }
@@ -1534,7 +1534,7 @@ impl SiteAuthority {
         if self
             .rrs_transport
             .as_ref()
-            .map_or(true, |transport| !transport.carries_grant())
+            .is_none_or(|transport| !transport.carries_grant())
         {
             return;
         }

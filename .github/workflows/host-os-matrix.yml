@@ -32,11 +32,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain (1.85.0)
-        run: rustup toolchain install 1.85.0 --profile default
-
-      - name: Select Rust toolchain (1.85.0)
-        run: rustup default 1.85.0
+      - name: Rust toolchain (host/rust-toolchain.toml)
+        run: rustup toolchain install
 
       - name: Check formatting
         run: cargo fmt --all -- --check

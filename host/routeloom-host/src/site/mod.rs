@@ -1038,9 +1038,9 @@ impl SiteAuthority {
         let lab = setup.lab.clone();
         if let Some(lab) = &lab {
             if lab.site_id != id.site_id
-                || !setup
+                || setup
                     .site_ca_pubkey
-                    .is_some_and(|ca| sha256(&ca) == lab.site_ca_fingerprint)
+                    .is_none_or(|ca| sha256(&ca) != lab.site_ca_fingerprint)
                 || sha256(&id.device_ca_pubkey) != lab.device_ca_fingerprint
                 || id.sak_kid != lab.sak_fingerprint
                 || lab.inventory.len() > MEMBER_CAP
@@ -5437,7 +5437,7 @@ impl SiteAuthority {
     fn old_binding_in_grace(&self, node: u64, mono_ms: u64) -> bool {
         if self
             .cutover_grace()
-            .map_or(true, |(_, until)| mono_ms >= until)
+            .is_none_or(|(_, until)| mono_ms >= until)
         {
             return false;
         }
