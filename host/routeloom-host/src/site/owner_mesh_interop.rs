@@ -952,6 +952,21 @@ struct MeshSnap {
     unknown_peer_rx: u32,
     proxy_frames_rejected: u32,
     proxy_cookie_rejects: u32,
+    probes_tx: u32,
+    peer_capacity: u32,
+    stale_expirations: u32,
+    repair_demands: u32,
+    neighbor_count: u8,
+    phases: [u8; 3],
+    transit_conflicts: u32,
+    receipt_conflicts: u32,
+    no_route: u32,
+    stale_tx_results: u32,
+    driver_peers: u8,
+    queued: u8,
+    admissions_rejected: u32,
+    member_starts: u32,
+    link_request_failures: u32,
 }
 
 #[allow(dead_code)]
@@ -1088,6 +1103,25 @@ fn parse_mesh_snap(payload: &[u8]) -> MeshSnap {
     snap.unknown_peer_rx = get_u32(payload, &mut pos);
     snap.proxy_frames_rejected = get_u32(payload, &mut pos);
     snap.proxy_cookie_rejects = get_u32(payload, &mut pos);
+    snap.probes_tx = get_u32(payload, &mut pos);
+    snap.peer_capacity = get_u32(payload, &mut pos);
+    snap.stale_expirations = get_u32(payload, &mut pos);
+    snap.repair_demands = get_u32(payload, &mut pos);
+    snap.neighbor_count = payload[pos];
+    pos += 1;
+    snap.phases.copy_from_slice(&payload[pos..pos + 3]);
+    pos += 3;
+    snap.transit_conflicts = get_u32(payload, &mut pos);
+    snap.receipt_conflicts = get_u32(payload, &mut pos);
+    snap.no_route = get_u32(payload, &mut pos);
+    snap.stale_tx_results = get_u32(payload, &mut pos);
+    snap.driver_peers = payload[pos];
+    pos += 1;
+    snap.queued = payload[pos];
+    pos += 1;
+    snap.admissions_rejected = get_u32(payload, &mut pos);
+    snap.member_starts = get_u32(payload, &mut pos);
+    snap.link_request_failures = get_u32(payload, &mut pos);
     assert_eq!(pos, payload.len(), "G fully consumed");
     snap
 }
@@ -1114,6 +1148,7 @@ struct MeshPeer {
     mac: [u8; 6],
     role: u8,
     gateway: bool,
+    flat: bool,
     seed: u64,
     usb_secret_hex: String,
     nvs_save: std::path::PathBuf,
@@ -1141,6 +1176,7 @@ impl MeshPeer {
         flash_ext: &std::path::Path,
         usb_secret_hex: &str,
         nvs_save: &std::path::Path,
+        flat: bool,
     ) -> Self {
         let mut child = Self::launch(
             persona.node,
@@ -1153,6 +1189,7 @@ impl MeshPeer {
             None,
             Some((flash, flash_ext)),
             nvs_save,
+            flat,
         );
         let stdin = child.stdin.take().expect("peer stdin");
         let stdout = child.stdout.take().expect("peer stdout");
@@ -1164,6 +1201,7 @@ impl MeshPeer {
             mac: persona.mac,
             role: persona.role,
             gateway: persona.gateway,
+            flat,
             seed,
             usb_secret_hex: usb_secret_hex.to_string(),
             nvs_save: nvs_save.to_path_buf(),
@@ -1189,6 +1227,7 @@ impl MeshPeer {
         nvs_load: Option<&std::path::Path>,
         flash: Option<(&std::path::Path, &std::path::Path)>,
         nvs_save: &std::path::Path,
+        flat: bool,
     ) -> Child {
         let path =
             mesh_peer_path().expect("build routeloom_owner_mesh_peer or set ROUTELOOM_MESH_PEER");
@@ -1211,6 +1250,9 @@ impl MeshPeer {
             .arg(format!("{:#x}", testkit::NETWORK_LOW))
             .arg("--gw1")
             .arg(format!("{:#x}", testkit::GATEWAY));
+        if flat {
+            command.arg("--flat");
+        }
         if let Some(nvs) = nvs_load {
             command.arg("--nvs-load").arg(nvs);
         }
@@ -1259,6 +1301,7 @@ impl MeshPeer {
             Some(&nvs_save),
             None,
             &nvs_save,
+            self.flat,
         );
         self.stdin = self.child.stdin.take().expect("peer stdin");
         self.stdout = self.child.stdout.take().expect("peer stdout");
@@ -1388,6 +1431,28 @@ impl MeshPeer {
         self.send(&command);
     }
 
+    fn peer_slot(&mut self, command: u8, index: u8) -> (bool, u8) {
+        self.send(&[command, index]);
+        let reply = self.recv().expect("peer slot reply");
+        assert_eq!(reply.len(), 3);
+        assert_eq!(reply[0], command.to_ascii_lowercase());
+        (reply[1] == 1, reply[2])
+    }
+
+    fn app_burst(&mut self, count: u8, dst: u64) -> (u8, u8) {
+        let mut command = vec![b'H', count];
+        command.extend_from_slice(&dst.to_le_bytes());
+        self.send(&command);
+        let reply = self.recv().expect("app burst reply");
+        assert_eq!(reply.len(), 3);
+        assert_eq!(reply[0], b'h');
+        (reply[1], reply[2])
+    }
+
+    fn fail_driver_release(&mut self, fail: bool) {
+        self.send(&[b'E', u8::from(fail)]);
+    }
+
     /// C4 fault: a field power cut. The peer process takes the same
     /// exit-42 marker as a lifecycle esp_restart, so the next tick
     /// respawns it from the saved NVS image through the production
@@ -1424,6 +1489,15 @@ struct Switch {
     /// Deliver the frame but report failure (a lost MAC ACK: the peer
     /// retries while the far side already holds the frame).
     ack_drop_next: [[u32; 3]; 3],
+    /// MAC callbacks are separate from airtime and RX, as on the driver.
+    callback_delay_ms: [[u64; 3]; 3],
+    callback_delay_kind: Option<u8>,
+    /// Bounded, directed loss of an authenticated Wire frame kind.
+    drop_wire: Vec<(usize, usize, u8, u32)>,
+    wire_dropped: u32,
+    probes_seen: u32,
+    results_seen: u32,
+    route_updates_seen: u32,
     /// Hold frames on the directed leg this long before delivery.
     delay_ms: [[u64; 3]; 3],
     /// Per-leg evidence: what crossed and what the switch ate.
@@ -1450,6 +1524,13 @@ impl Switch {
             dropped: 0,
             drop_next: [[0; 3]; 3],
             ack_drop_next: [[0; 3]; 3],
+            callback_delay_ms: [[0; 3]; 3],
+            callback_delay_kind: None,
+            drop_wire: Vec::new(),
+            wire_dropped: 0,
+            probes_seen: 0,
+            results_seen: 0,
+            route_updates_seen: 0,
             delay_ms: [[0; 3]; 3],
             leg_delivered: [[0; 3]; 3],
             leg_dropped: [[0; 3]; 3],
@@ -1533,6 +1614,26 @@ impl Switch {
         if from == 1 && phase == 4 && (step == 2 || step == 3) && self.c7_old_cert.is_none() {
             self.c7_old_cert = Some(frame.to_vec());
         }
+    }
+
+    fn drop_wire_kind(&mut self, from: usize, to: usize, kind: u8, count: u32) {
+        self.drop_wire.push((from, to, kind, count));
+    }
+
+    fn consume_wire_loss(&mut self, from: usize, to: usize, frame: &[u8]) -> bool {
+        if frame.len() < 5 || frame[..4] != *b"RL\x02\0" {
+            return false;
+        }
+        if let Some(rule) = self
+            .drop_wire
+            .iter_mut()
+            .find(|rule| rule.0 == from && rule.1 == to && rule.2 == frame[4] && rule.3 > 0)
+        {
+            rule.3 -= 1;
+            self.wire_dropped += 1;
+            return true;
+        }
+        false
     }
 }
 
@@ -1891,6 +1992,10 @@ struct MeshWorld {
     usb_auth_total: u64,
     /// Delayed switch deliveries: (release_at, delivery).
     delayed: Vec<(u64, SwitchDelivery)>,
+    /// Per-sender FIFO preserves the ESP-NOW callback attribution order.
+    callbacks: [Vec<(u64, u8)>; 3],
+    early_hop_accepts: u32,
+    probe_while_callback_pending: u32,
     /// C5 fault: the gateway↔host USB lane physically cut. The
     /// gateway's USB output is swallowed and the host's reply stream
     /// never reaches the bridge — buffered carriers queue like a real
@@ -1908,6 +2013,10 @@ impl MeshWorld {
     /// `None` when either peer binary is missing: the test skips
     /// (ignore-equivalent). Provisions all three personas first.
     fn start(tag: &str, switch: Switch) -> Option<Self> {
+        Self::start_with_profile(tag, switch, false)
+    }
+
+    fn start_with_profile(tag: &str, switch: Switch, flat: bool) -> Option<Self> {
         if !peers_present() {
             eprintln!(
                 "SKIP site::owner_mesh_interop: no C++ peers \
@@ -1952,6 +2061,7 @@ impl MeshWorld {
                 &images[index].1,
                 &usb_secret_hex,
                 &nvs_save,
+                flat,
             ));
         }
         // Phase 0's in-process join transport retires here: from the
@@ -1976,6 +2086,9 @@ impl MeshWorld {
             usb_incarnation: 7,
             usb_auth_total: 0,
             delayed: Vec::new(),
+            callbacks: Default::default(),
+            early_hop_accepts: 0,
+            probe_while_callback_pending: 0,
             usb_down: false,
             c6_flip_on_a_stored: None,
             c6_flipped: false,
@@ -2092,6 +2205,9 @@ impl MeshWorld {
             } else {
                 None
             });
+            if ticks[index].as_ref().is_some_and(|tick| tick.rebooted) {
+                self.callbacks[index].clear();
+            }
         }
         // A rebooted gateway answers on a fresh USB session: a full
         // session boundary (fresh host end, fresh adapters, the
@@ -2108,7 +2224,6 @@ impl MeshWorld {
             ticks[2].as_ref().map(|t| t.snap.channel).unwrap_or(0),
         ];
         let mut deliveries: Vec<SwitchDelivery> = Vec::new();
-        let mut completions: [Vec<u8>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         // Frames a delayed leg holds this step (released by the clock,
         // below — a reconnect never replays what a down leg dropped,
         // but a live delayed leg keeps what it held).
@@ -2122,7 +2237,7 @@ impl MeshWorld {
                 self.switch
                     .c7_observe(from, tx.dst_mac, &tx.bytes, self.macs[2]);
                 if tx.dst_mac == BROADCAST_MAC {
-                    completions[from].push(1);
+                    self.callbacks[from].push((self.now, 1));
                     for to in 0..3 {
                         if to != from
                             && booted[to]
@@ -2137,10 +2252,37 @@ impl MeshWorld {
                     continue;
                 }
                 let Some(to) = (0..3).find(|to| self.macs[*to] == tx.dst_mac) else {
-                    completions[from].push(0);
+                    self.callbacks[from].push((self.now, 0));
                     self.switch.dropped += 1;
                     continue;
                 };
+                if tx.bytes.len() > 4 && tx.bytes[..4] == *b"RL\x02\0" {
+                    match tx.bytes[4] {
+                        WIRE_PROBE => self.switch.probes_seen += 1,
+                        WIRE_RESULT => self.switch.results_seen += 1,
+                        WIRE_ROUTE_UPDATE => self.switch.route_updates_seen += 1,
+                        _ => {}
+                    }
+                }
+                if tx.bytes.len() > 4
+                    && tx.bytes[..4] == *b"RL\x02\0"
+                    && tx.bytes[4] == WIRE_HOP_ACCEPT
+                    && self.callbacks[to].iter().any(|(at, _)| *at > self.now)
+                {
+                    self.early_hop_accepts += 1;
+                }
+                let delay_this = match self.switch.callback_delay_kind {
+                    None => true,
+                    Some(kind) => {
+                        tx.bytes.len() > 4 && tx.bytes[..4] == *b"RL\x02\0" && tx.bytes[4] == kind
+                    }
+                };
+                let callback_delay = if delay_this {
+                    self.switch.callback_delay_ms[from][to]
+                } else {
+                    0
+                };
+                let callback_at = self.now + callback_delay;
                 let leg_up = to != from
                     && booted[to]
                     && self.switch.audible[from][to]
@@ -2153,21 +2295,25 @@ impl MeshWorld {
                     && tx.bytes[..4] == *b"RL\x02\0"
                     && tx.bytes[4] == 16;
                 if old_data {
-                    completions[from].push(0);
+                    self.callbacks[from].push((callback_at, 0));
                     self.switch.dropped += 1;
                     self.switch.leg_dropped[from][to] += 1;
                 } else if self.switch.drop_notice_chunks && notice_chunk {
                     self.switch.notice_chunks_dropped += 1;
-                    completions[from].push(0);
+                    self.callbacks[from].push((callback_at, 0));
+                    self.switch.dropped += 1;
+                    self.switch.leg_dropped[from][to] += 1;
+                } else if self.switch.consume_wire_loss(from, to, &tx.bytes) {
+                    self.callbacks[from].push((callback_at, 0));
                     self.switch.dropped += 1;
                     self.switch.leg_dropped[from][to] += 1;
                 } else if self.switch.drop_next[from][to] > 0 {
                     self.switch.drop_next[from][to] -= 1;
-                    completions[from].push(0);
+                    self.callbacks[from].push((callback_at, 0));
                     self.switch.dropped += 1;
                     self.switch.leg_dropped[from][to] += 1;
                 } else if !leg_up {
-                    completions[from].push(0);
+                    self.callbacks[from].push((callback_at, 0));
                     self.switch.dropped += 1;
                     self.switch.leg_dropped[from][to] += 1;
                 } else {
@@ -2185,9 +2331,9 @@ impl MeshWorld {
                     }
                     if self.switch.ack_drop_next[from][to] > 0 {
                         self.switch.ack_drop_next[from][to] -= 1;
-                        completions[from].push(0);
+                        self.callbacks[from].push((callback_at, 0));
                     } else {
-                        completions[from].push(1);
+                        self.callbacks[from].push((callback_at, 1));
                     }
                     self.switch.leg_delivered[from][to] += 1;
                     self.switch.delivered += 1;
@@ -2207,11 +2353,26 @@ impl MeshWorld {
         }
         self.delayed = still;
         for (to, src, dst, bytes) in &deliveries {
+            if bytes.len() > 4
+                && bytes[..4] == *b"RL\x02\0"
+                && bytes[4] == WIRE_PROBE
+                && self.callbacks[*to].iter().any(|(at, _)| *at > self.now)
+            {
+                self.probe_while_callback_pending += 1;
+            }
             self.peers[*to].send_rx(src, dst, bytes);
         }
         for (index, peer) in self.peers.iter_mut().enumerate() {
             if booted[index] {
-                peer.send_complete(&completions[index]);
+                let ready = self.callbacks[index]
+                    .iter()
+                    .take_while(|(at, _)| *at <= self.now)
+                    .count();
+                let completions: Vec<u8> = self.callbacks[index]
+                    .drain(..ready)
+                    .map(|(_, result)| result)
+                    .collect();
+                peer.send_complete(&completions);
             }
         }
         // Gateway USB into the authority (the gateway always boots first).
@@ -2388,6 +2549,61 @@ impl MeshWorld {
 }
 
 // --- Tests ---------------------------------------------------------------------
+
+const PHASE_REACHABLE: u8 = 5;
+const PHASE_STALE: u8 = 7;
+const WIRE_DATA: u8 = 16;
+const WIRE_HOP_ACCEPT: u8 = 17;
+const WIRE_END_RECEIPT: u8 = 18;
+const WIRE_ROUTE_UPDATE: u8 = 32;
+const WIRE_PROBE: u8 = 40;
+const WIRE_RESULT: u8 = 41;
+
+fn route_loss_world(tag: &str, switch: Switch, relay_first: bool) -> Option<MeshWorld> {
+    let mut world = MeshWorld::start_with_profile(tag, switch, true)?;
+    if relay_first {
+        world.gate[1] = true;
+        world.pump_until(9000, |snaps| {
+            snaps[0].authority_ready && snaps[2].authority_ready && snaps[2].join_confirmed
+        });
+        assert!(world.snaps[2].authority_ready, "relay reached gateway");
+        world.gate[1] = false;
+    }
+    world.pump_until(9000, |snaps| {
+        snaps.iter().all(|s| {
+            s.mode == MODE_MEMBER
+                && s.phase == PHASE_ACTIVE
+                && s.authority_ready
+                && s.join_confirmed
+        })
+    });
+    assert!(
+        world
+            .snaps
+            .iter()
+            .all(|s| s.authority_ready && s.join_confirmed),
+        "Owner mesh converged: {:?}",
+        world.snaps
+    );
+    Some(world)
+}
+
+/// The relay binds to the gateway before the leaf boots. The late leaf
+/// reaches the gateway only through the real discovery and coordinator legs.
+#[test]
+fn mesh_route_loss_relay_binds_first() {
+    let Some(mut world) = route_loss_world("route-relay-first", Switch::forced_multihop(), true)
+    else {
+        return;
+    };
+    assert_eq!(world.snaps[1].phases[2], PHASE_REACHABLE, "A-B BIND");
+    assert_eq!(world.snaps[2].phases[0], PHASE_REACHABLE, "B-gateway BIND");
+    let before = world.snaps[0].rx_count;
+    world.peers[1].app_send(testkit::GATEWAY, b"relay-first");
+    world.pump_until(2000, |snaps| snaps[0].rx_count > before);
+    assert_eq!(world.snaps[0].rx_count, before + 1);
+    assert_eq!(world.snaps[0].rx, b"relay-first");
+}
 
 /// Phase-1 convergence on the direct radio: all three Owners adopt
 /// from their Phase-0 images (member boots, no rejoins), open their

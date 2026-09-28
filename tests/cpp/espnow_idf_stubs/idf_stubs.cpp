@@ -30,6 +30,10 @@ unsigned g_send_count = 0;
 unsigned g_del_peer_count = 0;
 bool g_fail_del_peer = false;
 bool g_fail_add_peer = false;
+constexpr std::size_t kPeerTableMax = 32;
+std::uint8_t g_peer_macs[kPeerTableMax][6] = {};
+std::size_t g_peer_count = 0;
+std::size_t g_peer_limit = 0;
 esp_now_send_cb_t g_send_cb = nullptr;
 esp_now_recv_cb_t g_recv_cb = nullptr;
 std::uint8_t g_last_dest[6] = {0};
@@ -73,6 +77,8 @@ void reset() noexcept {
   g_del_peer_count = 0;
   g_fail_del_peer = false;
   g_fail_add_peer = false;
+  g_peer_count = 0;
+  g_peer_limit = 0;
   g_send_cb = nullptr;
   g_recv_cb = nullptr;
   std::memcpy(g_mac, kDefaultMac, sizeof(g_mac));
@@ -99,6 +105,8 @@ bool last_send_to(const std::uint8_t mac[6]) noexcept {
 unsigned del_peer_count() noexcept { return g_del_peer_count; }
 void fail_del_peer(const bool fail) noexcept { g_fail_del_peer = fail; }
 void fail_add_peer(const bool fail) noexcept { g_fail_add_peer = fail; }
+void set_peer_limit(const std::size_t limit) noexcept { g_peer_limit = limit; }
+std::size_t peer_count() noexcept { return g_peer_count; }
 
 void set_mac(const std::uint8_t mac[6]) noexcept {
   if (mac != nullptr) std::memcpy(g_mac, mac, sizeof(g_mac));
@@ -321,19 +329,42 @@ esp_err_t esp_now_unregister_send_cb(void) {
 }
 
 esp_err_t esp_now_add_peer(const esp_now_peer_info_t* peer) {
-  (void)peer;
-  return g_fail_add_peer ? ESP_FAIL : ESP_OK;
+  if (g_fail_add_peer) return ESP_FAIL;
+  if (g_peer_limit == 0) return ESP_OK;
+  if (peer == nullptr) return ESP_FAIL;
+  for (std::size_t i = 0; i < g_peer_count; ++i) {
+    if (std::memcmp(g_peer_macs[i], peer->peer_addr, 6) == 0) return ESP_ERR_ESPNOW_EXIST;
+  }
+  if (g_peer_count >= g_peer_limit || g_peer_count >= kPeerTableMax) return ESP_ERR_ESPNOW_FULL;
+  std::memcpy(g_peer_macs[g_peer_count++], peer->peer_addr, 6);
+  return ESP_OK;
 }
 
 esp_err_t esp_now_del_peer(const uint8_t* peer_addr) {
-  (void)peer_addr;
   ++g_del_peer_count;
-  return g_fail_del_peer ? ESP_FAIL : ESP_OK;
+  if (g_fail_del_peer) return ESP_FAIL;
+  if (g_peer_limit == 0) return ESP_OK;
+  if (peer_addr == nullptr) return ESP_FAIL;
+  for (std::size_t i = 0; i < g_peer_count; ++i) {
+    if (std::memcmp(g_peer_macs[i], peer_addr, 6) == 0) {
+      --g_peer_count;
+      std::memcpy(g_peer_macs[i], g_peer_macs[g_peer_count], 6);
+      return ESP_OK;
+    }
+  }
+  return ESP_ERR_ESPNOW_NOT_FOUND;
 }
 
 esp_err_t esp_now_send(const uint8_t* peer_addr, const uint8_t* data,
                        const size_t len) {
   if (len > ESP_NOW_MAX_DATA_LEN) return ESP_FAIL;
+  if (g_peer_limit != 0 && peer_addr != nullptr) {
+    bool found = false;
+    for (std::size_t i = 0; i < g_peer_count; ++i) {
+      found |= std::memcmp(g_peer_macs[i], peer_addr, 6) == 0;
+    }
+    if (!found) return ESP_ERR_ESPNOW_NOT_FOUND;
+  }
   if (peer_addr != nullptr) {
     std::memcpy(g_last_dest, peer_addr, sizeof(g_last_dest));
   }
