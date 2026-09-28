@@ -7,6 +7,7 @@ typedef int esp_err_t;
 #define ESP_OK 0
 #define ESP_FAIL 0x101
 #define ESP_ERR_INVALID_STATE 0x103
+#define ESP_ERR_NOT_FOUND 0x105
 #define ESP_ERR_ESPNOW_NO_MEM 0x1201
 #define ESP_ERR_ESPNOW_NOT_FOUND 0x1204
 #define ESP_ERR_ESPNOW_FULL 0x1206

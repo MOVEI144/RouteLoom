@@ -66,6 +66,9 @@ def main() -> int:
     port, _, state = rig.resolve_board_port(board)
     if state != "ONLINE" or port is None:
         raise RuntimeError(f"board port unavailable: {state}")
+    flash.preflight_board(board, port, args.esptool, str(out))
+    flash.verify_device_partition_table(args.esptool, board.chip, port,
+                                        board.build_dir(str(repo)))
     identity = flash.preflight_board(board, port, args.esptool, str(out))
     read = [args.esptool, "--chip", board.chip, "--port", port,
             "read-flash", RLSEC_OFFSET, rlsec_size, str(backup)]

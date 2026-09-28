@@ -46,6 +46,7 @@ class BundleTests(unittest.TestCase):
             'CONFIG_ESPTOOLPY_FLASHMODE="dio"\n'
             'CONFIG_ESPTOOLPY_FLASHFREQ="80m"\n'
             'CONFIG_ESPTOOLPY_FLASHSIZE="4MB"\n'
+            'CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y\n'
             'CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y\n')
         (app / 'partitions.csv').write_text(pt4m_fixture.PARTITIONS_CSV)
         (build / 'ram-report.json').write_text('{}')
@@ -83,12 +84,16 @@ class BundleTests(unittest.TestCase):
                 CHIP_NAME = 'ESP32-C3'
                 def __init__(self):
                     self._port = self
+                    self.table = pt4m_fixture.partition_table()
                 def close(self):
                     pass
                 def read_mac(self, kind):
                     return bytes.fromhex('aabbccddee01')
                 def flash_id(self):
                     return 0x164020
+                def read_flash(self, offset, size):
+                    self.check_read = (offset, size)
+                    return self.table[:size]
                 def get_chip_revision(self):
                     return 1
                 def get_security_info(self, cache=False):
@@ -121,6 +126,12 @@ class BundleTests(unittest.TestCase):
             flash('COM1', FlashPlan(identity, 'esp32c3', app_images, True,
                                    identity.base_mac, True, bundle, None, True), api)
             self.assertEqual([offset for offset, _ in api.written], [0x10000, 0x40000])
+            api = API()
+            api.rom.table = b'old' + api.rom.table[3:]
+            with self.assertRaises(ValueError):
+                flash('COM1', FlashPlan(identity, 'esp32c3', app_images, True,
+                                       identity.base_mac, True, bundle, None, True), api)
+            self.assertIsNone(api.written)
             # A signed app exceeding its OTA slot must not overwrite ota_1.
             oversized = bytes(header) + b'\0' * (catalog.APP_SLOT_SIZE + 1 - len(header))
             app_image = bundle / 'images/application.bin'
@@ -397,6 +408,17 @@ class BundleTests(unittest.TestCase):
             self.resign(bundle, key)
             with self.assertRaises(ValueError):
                 catalog.verify_bundle(bundle, public)
+
+    def test_pt4m_requires_four_mb_and_rollback(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            app, _, _, _ = self.fixture(root)
+            config = (app / 'sdkconfig').read_text()
+            with self.assertRaises(ValueError):
+                catalog.check_config(config.replace('4MB', '2MB'), 'esp32c3')
+            with self.assertRaises(ValueError):
+                catalog.check_config(config.replace(
+                    'CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y\n', ''), 'esp32c3')
 
     def test_signed_image_header_flash_mode_must_match_manifest(self):
         with tempfile.TemporaryDirectory() as td:

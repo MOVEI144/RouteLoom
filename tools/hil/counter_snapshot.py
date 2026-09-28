@@ -84,6 +84,10 @@ def main() -> int:
         raise RuntimeError(f"board is {state}")
     preflight_dir = private_dir / f"preflight-{args.board}-{args.label}"
     preflight_dir.mkdir(mode=0o700)
+    flash.preflight_board(board, port, flash.DEFAULT_ESPTOOL,
+                          str(preflight_dir))
+    flash.verify_device_partition_table(flash.DEFAULT_ESPTOOL, board.chip, port,
+                                        board.build_dir(str(repo)))
     identity = flash.preflight_board(board, port, flash.DEFAULT_ESPTOOL,
                                      str(preflight_dir))
     cmd = [flash.DEFAULT_ESPTOOL, "--chip", board.chip, "--port", port,

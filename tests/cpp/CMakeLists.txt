@@ -3,6 +3,15 @@ target_link_libraries(routeloom_core_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_core_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_core_tests COMMAND routeloom_core_tests)
 
+add_executable(routeloom_flash_layout_tests test_espnow_flash_layout.cpp
+    ../../components/routeloom_espnow/src/espnow_flash_layout.cpp)
+target_include_directories(routeloom_flash_layout_tests PRIVATE
+    espnow_idf_stubs ../../components/routeloom_espnow/include
+    ../../components/routeloom/include)
+target_compile_options(routeloom_flash_layout_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_flash_layout_tests COMMAND routeloom_flash_layout_tests)
+
 add_executable(routeloom_routing_tests test_routing_sims.cpp)
 target_link_libraries(routeloom_routing_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_routing_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)

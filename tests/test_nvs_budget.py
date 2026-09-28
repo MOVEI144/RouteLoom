@@ -90,6 +90,12 @@ class NegativeMutations(unittest.TestCase):
                               "CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y")
         self.assertIn("examples/espnow_node:fits_flash", failed_names(sources))
 
+    def test_eight_mb_flash_setting_fails(self):
+        sources = self.mutate("examples/espnow_node/sdkconfig.defaults",
+                              "CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y",
+                              "CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y")
+        self.assertIn("examples/espnow_node:flash_size_4mb", failed_names(sources))
+
     def test_overlap_fails(self):
         sources = self.mutate("firmware/reference_node/partitions.csv",
                               "0x20000,  0x20000", "0x30000,  0x20000")
@@ -101,8 +107,8 @@ class NegativeMutations(unittest.TestCase):
         self.assertIn("firmware/bench_node:rollback_enabled", failed_names(sources))
 
     def test_boot_check_table_drift_fails(self):
-        sources = self.mutate("flash_layout", '{"coredump", 0x3E0000, 0x10000}',
-                              '{"coredump", 0x3F0000, 0x10000}')
+        sources = self.mutate("flash_layout", '{"coredump", 1, 3, 0x3E0000, 0x10000}',
+                              '{"coredump", 1, 3, 0x3F0000, 0x10000}')
         failed = failed_names(sources)
         for app in nvs_budget.APPS:
             self.assertIn(f"{app}:layout_matches_boot_check", failed)
@@ -123,6 +129,12 @@ class NegativeMutations(unittest.TestCase):
         sources = self.mutate("firmware/reference_node/partitions.csv",
                               "ota_0,    app,  ota_0,", "ota_0,    app,  factory,")
         self.assertIn("firmware/reference_node:ota_slots", failed_names(sources))
+
+    def test_partition_subtype_drift_fails(self):
+        sources = self.mutate("firmware/reference_node/partitions.csv",
+                              "coredump, data, coredump,", "coredump, data, nvs,")
+        self.assertIn("firmware/reference_node:layout_matches_boot_check",
+                      failed_names(sources))
 
 
 if __name__ == "__main__":

@@ -176,8 +176,8 @@ python3 tools/hil/scenarios.py --rig tools/hil/rigs.yaml --bench bench-a \
 python3 tools/hil/report.py --run-dir artifacts/hil/run-1
 ```
 
-Signed bundles require a full flash. The HIL flasher cannot establish the
-existing partition layout before an app-only write.
+The HIL flasher requires a full flash for signed bundles. Its app-only path
+uses a local build and verifies the device's partition table first.
 
 ### Flash layout PT-4M-v2
 
@@ -185,10 +185,14 @@ Every image uses one 4 MB table (`firmware/*/partitions.csv`): NVS first
 (`rlcfg` 0x12000, `rlkeys` 0x18000, `rlsec` 0x20000, 128 KiB), `otadata` at
 0x10000 and the app in `ota_0` at 0x40000. A full flash writes bootloader,
 table, `ota_data_initial.bin` and the app; `--app-only` writes `ota_0` and a
-blank `otadata` so the board boots `ota_0`. At boot the firmware checks that
+blank `otadata` so the board boots `ota_0`, after verifying the device already
+has the same partition table. At boot the firmware checks that
 the flash is at least 4 MB and that the table matches PT-4M-v2; otherwise it
 logs `partition table is not PT-4M-v2` (or `flash smaller than PT-4M-v2`) and
 never starts RF.
+The `rlsec` backup, erase, restore and counter tools also compare the device
+table with the current build's `partition_table/partition-table.bin` before
+accessing offset 0x20000; rebuild the firmware first if that file is absent.
 
 A board still on the old factory layout (app at 0x10000, `rlsec` at
 0x190000) cannot be moved by an app write. Migrate it once:

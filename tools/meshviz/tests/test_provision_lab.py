@@ -201,6 +201,7 @@ def _build_bundle(root: Path, name: str, *, role: str, console: bool):
         'CONFIG_ESPTOOLPY_FLASHMODE="dio"\n'
         'CONFIG_ESPTOOLPY_FLASHFREQ="80m"\n'
         'CONFIG_ESPTOOLPY_FLASHSIZE="4MB"\n'
+        'CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y\n'
         'CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y\n'
         + ('CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y\n' if console else ''))
     (app / 'sdkconfig').write_text(sdkconfig)

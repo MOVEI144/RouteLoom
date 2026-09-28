@@ -150,6 +150,7 @@ def check_config(text, chip):
                 'CONFIG_PARTITION_TABLE_FILENAME': '"partitions.csv"',
                 'CONFIG_PARTITION_TABLE_OFFSET': '0x8000',
                 'CONFIG_PARTITION_TABLE_MD5': 'y',
+                'CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE': 'y',
                 'CONFIG_BOOTLOADER_OFFSET_IN_FLASH': hex(BOOTLOADER_OFFSETS[chip])}
     if any(config.get(name) != value for name, value in required.items()):
         raise ValueError('resolved partition-table configuration mismatch')
@@ -166,7 +167,7 @@ def check_config(text, chip):
     flash_frequency = config.get('CONFIG_ESPTOOLPY_FLASHFREQ', '').strip('"')
     flash_size = config.get('CONFIG_ESPTOOLPY_FLASHSIZE', '').strip('"')
     if (flash_mode not in FLASH_MODES or flash_frequency not in FLASH_FREQUENCIES or
-            flash_size not in FLASH_SIZES):
+            flash_size != '4MB'):
         raise ValueError('resolved flash settings unsupported')
     return (selected[0], 'deep-sleep' if deep_sleep else 'always-on',
             flash_mode, flash_frequency, flash_size)
@@ -257,7 +258,7 @@ def _flash_files(args, build, chip):
     settings = args.get('flash_settings', {})
     if (settings.get('flash_mode') not in ('dio', 'dout', 'qio', 'qout') or
             settings.get('flash_freq') not in ('40m', '80m') or
-            settings.get('flash_size') not in ('2MB', '4MB', '8MB', '16MB') or
+            settings.get('flash_size') != '4MB' or
             args.get('write_flash_args') != ['--flash-mode', settings['flash_mode'],
                                              '--flash-size', settings['flash_size'],
                                              '--flash-freq', settings['flash_freq']] or

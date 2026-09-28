@@ -1,12 +1,13 @@
 """Isolated esptool 5.4.0 adapter. No arbitrary command or eFuse write API."""
 from dataclasses import asdict
+import hashlib
 import json
 import sys
 from pathlib import Path
 
 from .device import FlashPlan, Identity, Image
 from .board_setup import bundle_image_node_id
-from .firmware_catalog import APP_ONLY_OFFSETS, DEV_PUBLIC_KEY, verify_bundle
+from .firmware_catalog import APP_ONLY_OFFSETS, DEV_PUBLIC_KEY, _read, verify_bundle
 
 
 PUBLIC_KEY = DEV_PUBLIC_KEY
@@ -44,6 +45,13 @@ def flash(port: str, plan: FlashPlan, api=None):
                 flash_bytes < manifest['minimum_flash_bytes']):
             raise ValueError('bundle incompatible with measured board')
         images = plan.verified_images(port, measured)
+        if plan.app_only:
+            table_entry = next(entry for entry in manifest['files']
+                               if entry['offset'] == 0x8000)
+            table = _read(Path(plan.bundle), table_entry['path'])
+            if (hashlib.sha256(table).hexdigest() != table_entry['sha256'] or
+                    esp.read_flash(0x8000, len(table)) != table):
+                raise ValueError('device partition table differs from signed PT-4M-v2')
         api.write_flash(esp, images, flash_mode='keep', flash_freq='keep', flash_size='keep')
         api.verify_flash(esp, images)
     finally:

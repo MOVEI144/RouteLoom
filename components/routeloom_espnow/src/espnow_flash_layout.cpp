@@ -1,5 +1,8 @@
 #include "routeloom/espnow_flash_layout.hpp"
 
+#include <cstring>
+#include <iterator>
+
 #include "esp_flash.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -30,28 +33,52 @@ Status verify_flash_layout() noexcept {
              static_cast<unsigned long>(kMinFlashBytes), kPartitionLayoutId);
     return Status::error(StatusCode::StorageFailure, "flash smaller than PT-4M-v2");
   }
-  for (const PartitionRow& row : kPt4mV2) {
-    const esp_partition_t* found = esp_partition_find_first(
-        ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, row.label);
-    if (found == nullptr || found->address != row.offset || found->size != row.size) {
-      ESP_LOGE(kTag,
-               "partition %s: expected 0x%lx+0x%lx, flashed %s0x%lx+0x%lx; the "
-               "table is not %s (erase flash, then write bootloader, table "
-               "and app); RF not started",
-               row.label, static_cast<unsigned long>(row.offset),
-               static_cast<unsigned long>(row.size),
-               found == nullptr ? "(missing) " : "",
-               static_cast<unsigned long>(found == nullptr ? 0 : found->address),
-               static_cast<unsigned long>(found == nullptr ? 0 : found->size),
-               kPartitionLayoutId);
-      return Status::error(StatusCode::StorageFailure,
-                           "partition table is not PT-4M-v2");
+  std::uint32_t seen = 0;
+  for (esp_partition_iterator_t it = esp_partition_find(
+           ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, nullptr);
+       it != nullptr;) {
+    const esp_partition_t* found = esp_partition_get(it);
+    std::size_t index = 0;
+    while (index < std::size(kPt4mV2) &&
+           std::strcmp(found->label, kPt4mV2[index].label) != 0) {
+      ++index;
     }
+    const bool known = index < std::size(kPt4mV2);
+    const PartitionRow* expected = known ? &kPt4mV2[index] : nullptr;
+    if (!known || (seen & (1u << index)) != 0 ||
+        found->type != expected->type || found->subtype != expected->subtype ||
+        found->address != expected->offset || found->size != expected->size) {
+      ESP_LOGE(kTag,
+               "partition %s: flashed type=%u subtype=%u 0x%lx+0x%lx; "
+               "table is not %s (erase flash and write full image); RF not started",
+               found->label, static_cast<unsigned>(found->type),
+               static_cast<unsigned>(found->subtype),
+               static_cast<unsigned long>(found->address),
+               static_cast<unsigned long>(found->size), kPartitionLayoutId);
+      esp_partition_iterator_release(it);
+      return Status::error(StatusCode::StorageFailure, "partition table is not PT-4M-v2");
+    }
+    seen |= 1u << index;
+    it = esp_partition_next(it);
+  }
+  if (seen != (1u << std::size(kPt4mV2)) - 1u) {
+    ESP_LOGE(kTag, "partition table is missing PT-4M-v2 rows; RF not started");
+    return Status::error(StatusCode::StorageFailure, "partition table is not PT-4M-v2");
   }
   return Status::success();
 }
 
 void mark_app_valid() noexcept {
+  esp_ota_img_states_t state{};
+  const esp_err_t state_error =
+      esp_ota_get_state_partition(esp_ota_get_running_partition(), &state);
+  if (state_error == ESP_ERR_NOT_FOUND) return;
+  if (state_error != ESP_OK) {
+    ESP_LOGW(kTag, "reading running image state failed: %s",
+             esp_err_to_name(state_error));
+    return;
+  }
+  if (state != ESP_OTA_IMG_PENDING_VERIFY) return;
   const esp_err_t error = esp_ota_mark_app_valid_cancel_rollback();
   if (error != ESP_OK) {
     ESP_LOGW(kTag, "confirming the running image failed: %s",

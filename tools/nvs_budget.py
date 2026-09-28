@@ -108,13 +108,19 @@ def parse_partitions(text: str) -> list[Partition]:
     return partitions
 
 
-def layout_rows(header: str) -> list[tuple[str, int, int]]:
-    """(label, offset, size) rows of kPt4mV2, the table boot verifies."""
+def layout_rows(header: str) -> list[tuple[str, int, int, int, int]]:
+    """Rows of kPt4mV2, the table boot verifies."""
     block = re.search(r"kPt4mV2\[\]\s*=\s*\{(.*?)\};", header, re.S)
     if block is None:
         raise BudgetError("kPt4mV2 table not found")
-    return [(name, int(offset, 0), int(size, 0)) for name, offset, size in re.findall(
-        r'\{"(\w+)",\s*(0x[0-9A-Fa-f]+),\s*(0x[0-9A-Fa-f]+)\}', block.group(1))]
+    rows = [(name, int(kind, 0), int(subtype, 0), int(offset, 0), int(size, 0))
+            for name, kind, subtype, offset, size in re.findall(
+                r'\{"(\w+)",\s*(0x[0-9A-Fa-f]+|\d+),\s*'
+                r'(0x[0-9A-Fa-f]+|\d+),\s*(0x[0-9A-Fa-f]+),\s*'
+                r'(0x[0-9A-Fa-f]+)\}', block.group(1))]
+    if not rows:
+        raise BudgetError("kPt4mV2 has no rows")
+    return rows
 
 
 def blob_entries(size: int, entry_bytes: int) -> int:
@@ -197,9 +203,10 @@ def check_app(app: str, sources: dict[str, str], constants: dict[str, int]) -> d
     check("rollback_enabled", re.search(r"^CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y$",
                                         defaults, re.M) is not None)
     flash = DEFAULT_FLASH_BYTES
-    size_match = re.search(r"^CONFIG_ESPTOOLPY_FLASHSIZE_(\d+)MB=y$", defaults, re.M)
-    if size_match:
-        flash = int(size_match.group(1)) * 1024 * 1024
+    sizes = re.findall(r"^CONFIG_ESPTOOLPY_FLASHSIZE_(\d+)MB=y$", defaults, re.M)
+    check("flash_size_4mb", sizes == ["4"])
+    if sizes:
+        flash = int(sizes[0]) * 1024 * 1024
 
     try:
         partitions = parse_partitions(sources[f"{app}/partitions.csv"])
@@ -220,7 +227,12 @@ def check_app(app: str, sources: dict[str, str], constants: dict[str, int]) -> d
     for p in partitions:
         alignment = 0x10000 if p.type == "app" else PAGE_BYTES
         check(f"aligned:{p.name}", p.offset % alignment == 0 and p.size % PAGE_BYTES == 0)
-    rows = [(p.name, p.offset, p.size) for p in partitions]
+    kinds = {"app": 0, "data": 1}
+    subtypes = {("data", "ota"): 0, ("data", "phy"): 1,
+                ("data", "nvs"): 2, ("data", "coredump"): 3,
+                ("app", "ota_0"): 0x10, ("app", "ota_1"): 0x11}
+    rows = [(p.name, kinds.get(p.type), subtypes.get((p.type, p.subtype)),
+             p.offset, p.size) for p in partitions]
     check("layout_matches_boot_check", rows == constants["layout"])
     slots = [by_name.get(name) for name in ("ota_0", "ota_1")]
     check("ota_slots", all(s is not None and s.type == "app" and s.subtype == s.name
