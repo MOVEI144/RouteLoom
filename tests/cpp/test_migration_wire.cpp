@@ -1115,6 +1115,35 @@ void test_agent_release_requires_offer() {
             .code == StatusCode::IntegrityError);
 }
 
+void test_issuer_plan_binding_and_time_overflow() {
+  AgentWorld world;
+  const IssuedPlan issued = issue_plan(1, kNow + 30000, 1);
+  VerifiedAuthorityPlan token{};
+  MigrationPlan mismatched = issued.plan;
+  mismatched.new_channel = 11;
+  CHECK(world.auth.agent.offer_plan(
+      mismatched, ByteView{issued.blob.data(), issued.blob_size}, issued.operation,
+      ByteView{issued.signature.data(), issued.signature.size()}, issued.plan_hash,
+      ByteView{}, ByteView{}, false, kNow, token).code == StatusCode::IntegrityError);
+  CHECK(!token.valid());
+
+  IssuedPlan wrapped = issued;
+  wrapped.plan.switch_reference_ms = std::numeric_limits<MonotonicMs>::max() - 50;
+  wrapped.plan.expiry_ms = std::numeric_limits<MonotonicMs>::max() - 1;
+  CHECK_OK(plan_encode(wrapped.plan,
+                       MutableByteView{wrapped.blob.data(), wrapped.blob.size()},
+                       wrapped.blob_size));
+  wrapped.plan_hash = plan_digest(ByteView{wrapped.blob.data(), wrapped.blob_size});
+  wrapped.operation = make_operation(wrapped.plan, wrapped.plan_hash);
+  wrapped.signature = sign_commit(wrapped.operation, wrapped.plan_hash, wrapped.plan.new_epoch);
+  AgentWorld wrapped_world;
+  CHECK(wrapped_world.auth.agent.offer_plan(
+      wrapped.plan, ByteView{wrapped.blob.data(), wrapped.blob_size}, wrapped.operation,
+      ByteView{wrapped.signature.data(), wrapped.signature.size()}, wrapped.plan_hash,
+      ByteView{}, ByteView{}, false, kNow, token).code == StatusCode::InvalidArgument);
+  CHECK(!token.valid());
+}
+
 // The bounded pending queue drops the NEW send and reports it — never an
 // unbounded grow, never a silent drop of older work.
 void test_agent_pending_bounded() {
@@ -1826,6 +1855,8 @@ struct SitePlan {
   Digest256 plan_hash{};
   AuthorityOperation operation{};
   std::vector<std::uint8_t> signature;
+  std::vector<std::uint8_t> snapshot;
+  std::vector<std::uint8_t> snapshot_signature;
 };
 
 std::string golden_value(const std::string& text, const std::string& key) {
@@ -1865,6 +1896,8 @@ SitePlan load_site_plan(const char* name) {
       bind_operation_payload(AuthorityOperationKind::ChannelMigration,
                              ByteView{out.plan_hash.data(), out.plan_hash.size()});
   out.signature = golden_bytes(text, "commit_signature_hex");
+  out.snapshot = golden_bytes(text, "snapshot_hex");
+  out.snapshot_signature = golden_bytes(text, "snapshot_signature_hex");
   return out;
 }
 
@@ -1916,6 +1949,23 @@ void test_site_signed_plan_switch_and_back() {
   MonotonicMs now = kNow;
   const SitePlan forward = load_site_plan("channel_plan_forward");
   const SitePlan back = load_site_plan("channel_plan_back");
+  for (const SitePlan* signed_plan : {&forward, &back}) {
+    RecoverySnapshot snapshot{};
+    CHECK_OK(snapshot_decode(ByteView{signed_plan->snapshot.data(), signed_plan->snapshot.size()},
+                             snapshot));
+    CHECK(snapshot.plan_hash == signed_plan->plan_hash);
+    CHECK(snapshot.plan_blob_size == signed_plan->blob.size());
+    CHECK(std::memcmp(snapshot.plan_blob.data(), signed_plan->blob.data(),
+                      signed_plan->blob.size()) == 0);
+    CHECK_OK(verifier.verify_snapshot(
+        ByteView{signed_plan->snapshot.data(), signed_plan->snapshot.size()},
+        ByteView{signed_plan->snapshot_signature.data(), signed_plan->snapshot_signature.size()}));
+  }
+  std::vector<std::uint8_t> forged_snapshot = forward.snapshot_signature;
+  forged_snapshot[0] ^= 1;
+  CHECK(verifier.verify_snapshot(ByteView{forward.snapshot.data(), forward.snapshot.size()},
+                                 ByteView{forged_snapshot.data(), forged_snapshot.size()})
+            .code == StatusCode::AuthenticationFailed);
 
   // Forged and unsigned evidence never reach the ledger or the air.
   std::vector<std::uint8_t> forged = forward.signature;
@@ -1967,6 +2017,7 @@ int main() {
   test_agent_live_reconcile();
   test_agent_reconcile_exhaustion_required();
   test_agent_release_requires_offer();
+  test_issuer_plan_binding_and_time_overflow();
   test_agent_pending_bounded();
   test_agent_authority_stopped();
   test_site_signed_plan_switch_and_back();

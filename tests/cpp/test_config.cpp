@@ -5299,6 +5299,13 @@ void test_site_bound_config() {
   CHECK(target.config.authorized_issuer == kSiteId);
   CHECK(target.config.authority_generation == kSiteConfigAuthorityGeneration);
   CHECK(target.journal->permit_profile_bits() == (1U << 1));
+  sdkv1::SiteRecord mismatched_site = target.site;
+  mismatched_site.network ^= 1;
+  ConfigJournalConfig unused{};
+  CHECK(site_config_bind(mismatched_site, kTarget, kBoot, unused, *target.verifier).code ==
+        StatusCode::IntegrityError);
+  CHECK(!target.verifier->ready());
+  CHECK_OK(site_config_bind(target.site, kTarget, kBoot, target.config, *target.verifier));
   // The floor is provisioned once; another identity never reseeds it.
   CHECK(target.floor_storage.write_calls == 1);
   CHECK(config_floor_ensure(target.floor_storage, *target.floor, 0x99, kTarget).code ==
@@ -5388,6 +5395,23 @@ void test_site_bound_config() {
   CHECK(verified);
   CHECK(payload.size == canonical.size() &&
         std::memcmp(payload.bytes.data(), canonical.data(), canonical.size()) == 0);
+
+  // Rust-issued bytes must pass the journal's live challenge, CAS and apply
+  // path, not only the standalone COSE verifier.
+  SiteBoundTarget rust_target;
+  rust_target.boot(1000);
+  CHECK_OK(rust_target.boot_status);
+  endpoint::ControlChallengeQuery query{};
+  query.config_namespace = rust_target.config.config_namespace;
+  query.schema = rust_target.config.schema;
+  query.client_nonce.fill(0xC1);
+  endpoint::EncodedServicePayload challenge_wire{};
+  CHECK_OK(rust_target.journal->handle_challenge_query(query, 1000, challenge_wire));
+  CHECK_OK(rust_target.journal->submit_permit(ByteView{permit.data(), permit.size()}, 1100,
+                                              true, verdict));
+  for (int i = 0; i < 8; ++i) rust_target.journal->poll(1100 + i * 10);
+  CHECK(rust_target.journal->phase() == ConfigPhase::Active);
+  CHECK(rust_target.provider.apply_calls == 1);
 }
 
 int main() {

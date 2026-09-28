@@ -4629,10 +4629,11 @@ mod tests {
         issuer.set_profile(ISSUE_PROFILE_COSE);
         issuer.set_cose_signer(testkit::sak().config_authority_signer().unwrap());
         assert!(issuer.ready());
-        let base = config_tlv_encode(&[field(1, ConfigFieldType::U8, &[1])]).unwrap();
-        issuer
-            .note_challenge(&challenge(1, 1, &base, 4), TARGET, 1_000)
-            .unwrap();
+        let base = Vec::new();
+        let mut live = challenge(1, 1, &base, 0);
+        live.target_boot = 0xB007;
+        live.challenge_nonce = std::array::from_fn(|i| 0x11 + i as u8);
+        issuer.note_challenge(&live, TARGET, 1_000).unwrap();
         let ProposeOutcome::Draft(draft) = issuer
             .prepare_propose(
                 TARGET,

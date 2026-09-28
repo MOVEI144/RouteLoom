@@ -396,6 +396,8 @@ struct ConfigRuntime {
     authority: u64,
     /// Authority generation bound into each signed command.
     generation: u32,
+    /// A Site Authority may issue only on its SiteCert's wire network.
+    site_network: Option<u64>,
     pending: Option<ConfigPending>,
     /// Emit bodies the lane produced this pass, drained into the wire queue
     /// on the leased path — cleared when the link cannot carry them.
@@ -694,9 +696,16 @@ impl Dispatcher {
             lane,
             authority,
             generation,
+            site_network: None,
             pending: None,
             emits: Vec::new(),
         });
+    }
+
+    pub fn bind_config_site_network(&mut self, network: u64) {
+        if let Some(config) = self.config.as_mut() {
+            config.site_network = Some(network);
+        }
     }
 
     fn alloc_request(&mut self) -> u64 {
@@ -821,7 +830,13 @@ impl Dispatcher {
         {
             // New issuance and saved-original retry both require the live
             // authority identity and selected profile key.
-            if cfg.authority == 0 || link.network == 0 || !cfg.lane.issuer_ready() {
+            if cfg.authority == 0
+                || link.network == 0
+                || cfg
+                    .site_network
+                    .is_some_and(|network| network != link.network)
+                || !cfg.lane.issuer_ready()
+            {
                 self.config_done
                     .push((op_id, ConfigOutcome::Refused(ConfigOpsResult::Denied)));
                 return;
@@ -2794,6 +2809,9 @@ pub fn dispatch_loop(state: Arc<State>, outbound: mpsc::SyncSender<Outbound>) {
         state.config_authority.unwrap_or(0),
         state.config_authority_generation,
     );
+    if let Some(site) = state.site.as_ref() {
+        dispatcher.bind_config_site_network(site.with(|authority| authority.acl_network()).0);
+    }
     loop {
         dispatch_once(
             &state,
@@ -5423,6 +5441,17 @@ mod tests {
         assert_eq!(
             no_auth.take_config_done(),
             vec![(23, ConfigOutcome::Challenged(ch))]
+        );
+
+        let mut site = Dispatcher::new([9; 16]);
+        site.attach_config(test_config_lane(), 0x42, 1);
+        site.bind_config_site_network(NET);
+        let mut foreign = link();
+        foreign.network = NET + 1;
+        site.config_submit(&mut store, &foreign, 24, propose_request(), 1_000);
+        assert_eq!(
+            site.take_config_done(),
+            vec![(24, ConfigOutcome::Refused(ConfigOpsResult::Denied))]
         );
     }
 

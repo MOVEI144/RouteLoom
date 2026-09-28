@@ -262,6 +262,19 @@ Status MigrationAuthority::commit_plan(
   if (ledger_ == nullptr) {
     return reject(StatusCode::InvalidState, "VERIFY_ONLY_AUTHORITY");
   }
+  if (plan_blob.data == nullptr || plan_blob.size == 0 ||
+      plan_blob.size > migration_const::kPlanBlobMax) {
+    return reject(StatusCode::InvalidArgument, "PLAN_BLOB_BOUND");
+  }
+  std::array<std::uint8_t, migration_const::kPlanBlobMax> canonical{};
+  std::size_t canonical_size = 0;
+  const Status encoded = plan_encode(
+      plan, MutableByteView{canonical.data(), canonical.size()}, canonical_size);
+  if (!encoded) return encoded;
+  if (canonical_size != plan_blob.size ||
+      std::memcmp(canonical.data(), plan_blob.data, canonical_size) != 0) {
+    return reject(StatusCode::IntegrityError, "PLAN_BLOB_MISMATCH");
+  }
   const Digest256 hash = plan_digest(plan_blob);
   if (operation.sequence != plan.operation_sequence ||
       operation.generation != plan.authority_generation) {
@@ -712,7 +725,8 @@ Status plan_structure_status(const MigrationPlan& plan) noexcept {
       plan.old_channel == plan.new_channel) {
     return reject(StatusCode::InvalidArgument, "PLAN_CHANNEL_INVALID");
   }
-  if (plan.expiry_ms <= plan.switch_reference_ms + plan.guard_ms) {
+  if (plan.expiry_ms <= plan.switch_reference_ms ||
+      plan.expiry_ms - plan.switch_reference_ms <= plan.guard_ms) {
     return reject(StatusCode::InvalidArgument, "PLAN_EXPIRY_BEFORE_GUARD");
   }
   if (plan.max_outage_ms == 0) {

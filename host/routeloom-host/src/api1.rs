@@ -9333,6 +9333,71 @@ mod tests {
     }
 
     #[test]
+    fn site_channel_plan_signs_for_an_admin_only() {
+        use crate::site::{store::MemoryStore, testkit, SiteService};
+        use routeloom_provision::sdkv1::channel_plan::{issue, plan_encode, ChannelPlan};
+        use routeloom_provision::signer::hex_encode;
+
+        let site = SiteService::new(testkit::authority(Box::new(MemoryStore::default()), 1_000));
+        let plan = ChannelPlan {
+            network: testkit::network(),
+            authority: testkit::SITE,
+            authority_generation: 1,
+            operation_sequence: 1,
+            old_epoch: 0,
+            new_epoch: 1,
+            old_channel: 1,
+            new_channel: 6,
+            authority_session: 42,
+            switch_reference_ms: 31_000,
+            expiry_ms: 40_000,
+            guard_ms: 100,
+            max_outage_ms: 500,
+            ..ChannelPlan::default()
+        };
+        let blob = hex_encode(&plan_encode(&plan).unwrap());
+        let expected = issue(&plan, &testkit::sak()).unwrap();
+        let line = group_line(
+            "site.channel_plan.sign",
+            &format!("{{\"plan_blob_hex\":\"{blob}\"}}"),
+        );
+        let acl = Acl::parse(&format!(
+            "{{\"principals\":{{\"501\":{{\"networks\":{{\"{:016x}\":[\"MEMBERSHIP_ADMIN\"]}}}}}}}}",
+            testkit::NETWORK_LOW
+        ))
+        .unwrap();
+        let (_, log, store, limiter) = test_env();
+        let allowed = ApiContext {
+            site: Some(&site),
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
+        };
+        let response = handle(line.as_bytes(), &allowed);
+        assert_eq!(
+            result_field(&response, "commit_signature_hex"),
+            hex_encode(&expected.commit_signature)
+        );
+        let denied_acl = Acl::empty();
+        let denied = ApiContext {
+            site: Some(&site),
+            ..ctx(Some(501), &denied_acl, &log, &store, &limiter, 1_000)
+        };
+        assert_error_schema(&handle(line.as_bytes(), &denied), "AuthorizationFailed");
+        let mut foreign = plan;
+        foreign.network += 1;
+        let foreign_line = group_line(
+            "site.channel_plan.sign",
+            &format!(
+                "{{\"plan_blob_hex\":\"{}\"}}",
+                hex_encode(&plan_encode(&foreign).unwrap())
+            ),
+        );
+        assert_error_schema(
+            &handle(foreign_line.as_bytes(), &allowed),
+            "INVALID_ARGUMENT",
+        );
+    }
+
+    #[test]
     fn group_send_admits_replays_and_get_follows_the_lane() {
         use crate::group::{GroupLane, GroupLink, GroupOps};
         use routeloom_protocol::group_ops::{encode_group_status, GroupStatus};

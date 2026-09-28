@@ -18,7 +18,10 @@ Status site_sak(const sdkv1::SiteRecord& site, sdkv1::P256PublicKey& out) noexce
   sdkv1::CertClaims claims{};
   const Status status = sdkv1::cert_decode(site.site_cert.view(), claims);
   if (!status) return status;
-  if (claims.type != sdkv1::CertType::Site || claims.subject != site.site_id) {
+  if (claims.type != sdkv1::CertType::Site || claims.subject != site.site_id ||
+      claims.network_low32 != static_cast<std::uint32_t>(site.network) ||
+      claims.site_epoch != static_cast<std::uint32_t>(site.network >> 32U) ||
+      (claims.usage & sdkv1::kSiteUsageAuthority) == 0) {
     return Status::error(StatusCode::IntegrityError, "site cert does not name the site");
   }
   out = claims.pubkey;
@@ -30,6 +33,7 @@ Status site_sak(const sdkv1::SiteRecord& site, sdkv1::P256PublicKey& out) noexce
 Status site_config_bind(const sdkv1::SiteRecord& site, const NodeId self,
                         const std::uint64_t boot_incarnation, ConfigJournalConfig& journal,
                         CoseEsp256AuthorityVerifier& verifier) noexcept {
+  verifier.provision(0, ByteView{});
   sdkv1::P256PublicKey sak{};
   const Status status = site_sak(site, sak);
   if (!status) return status;

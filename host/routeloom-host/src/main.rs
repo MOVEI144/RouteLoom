@@ -2695,8 +2695,11 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
     let mut op_store = None;
     let mut config_authority = None;
     let mut config_authority_generation = 1;
+    let mut config_generation_explicit = false;
     let mut config_dev_key_hex = DEFAULT_CONFIG_DEV_KEY_HEX.to_string();
+    let mut config_dev_key_explicit = false;
     let mut config_profile = config::ISSUE_PROFILE_DEV;
+    let mut config_profile_explicit = false;
     let mut config_authority_key = None;
     let mut site_authority = None;
     let mut admission_profile = send_store::AdmissionProfile::Normal;
@@ -2734,6 +2737,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
             // Authority generation bound into each signed command — must
             // match the generation the target permits.
             "--config-authority-generation" => {
+                config_generation_explicit = true;
                 config_authority_generation = args
                     .next()
                     .ok_or("--config-authority-generation requires a number")?
@@ -2745,6 +2749,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
             // AuthorityDenied on the device. Default = the firmware's own
             // Kconfig placeholder so a default pair agrees end to end.
             "--config-dev-key-hex" => {
+                config_dev_key_explicit = true;
                 config_dev_key_hex = args
                     .next()
                     .ok_or("--config-dev-key-hex requires a hex key")?;
@@ -2753,6 +2758,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
             // `cose` (RLCP1_COSE_ESP256 under --config-authority-key).
             // The COSE key's authority id must equal --config-authority.
             "--config-profile" => {
+                config_profile_explicit = true;
                 let text = args.next().ok_or("--config-profile requires dev|cose")?;
                 config_profile = match text.as_str() {
                     "dev" => config::ISSUE_PROFILE_DEV,
@@ -2826,10 +2832,14 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
     // A Site Authority is its own config authority: a second issuer
     // identity next to it would sign permits no Member verifies.
     if site_authority.is_some()
-        && (config_authority.is_some() || config_profile == config::ISSUE_PROFILE_COSE)
+        && (config_authority.is_some()
+            || config_generation_explicit
+            || config_dev_key_explicit
+            || config_profile_explicit
+            || config_authority_key.is_some())
     {
         return Err(
-            "--site-authority issues config with the SAK; drop --config-authority/--config-profile"
+            "--site-authority issues config with the SAK; drop separate config issuer options"
                 .to_string(),
         );
     }
@@ -5165,6 +5175,21 @@ mod tests {
         // A Site Authority is the only config issuer next to it.
         assert!(args(&["--site-authority", "/tmp/s"]).is_ok());
         assert!(args(&["--site-authority", "/tmp/s", "--config-authority", "42"]).is_err());
+        assert!(args(&["--site-authority", "/tmp/s", "--config-profile", "dev"]).is_err());
+        assert!(args(&[
+            "--site-authority",
+            "/tmp/s",
+            "--config-authority-generation",
+            "2"
+        ])
+        .is_err());
+        assert!(args(&[
+            "--site-authority",
+            "/tmp/s",
+            "--config-dev-key-hex",
+            "deadbeef"
+        ])
+        .is_err());
     }
 
     /// node_status_v1 wiring: the lane queues a sealed 0x40 query on the

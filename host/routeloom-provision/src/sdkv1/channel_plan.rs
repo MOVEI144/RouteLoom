@@ -112,6 +112,112 @@ pub fn plan_encode(plan: &ChannelPlan) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+struct PlanReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> PlanReader<'a> {
+    fn take(&mut self, len: usize) -> Result<&'a [u8]> {
+        let end = self
+            .offset
+            .checked_add(len)
+            .ok_or(crate::Error::new(Code::InvalidArgument, "plan blob bound"))?;
+        let bytes = self.bytes.get(self.offset..end).ok_or(crate::Error::new(
+            Code::InvalidArgument,
+            "plan blob truncated",
+        ))?;
+        self.offset = end;
+        Ok(bytes)
+    }
+
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16> {
+        Ok(u16::from_be_bytes(self.take(2)?.try_into().unwrap()))
+    }
+
+    fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap()))
+    }
+
+    fn u64(&mut self) -> Result<u64> {
+        Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap()))
+    }
+
+    fn hash(&mut self) -> Result<[u8; 32]> {
+        Ok(self.take(32)?.try_into().unwrap())
+    }
+}
+
+/// Decode a canonical device plan blob.
+pub fn plan_decode(blob: &[u8]) -> Result<ChannelPlan> {
+    if blob.is_empty() || blob.len() > PLAN_BLOB_MAX {
+        return err(Code::InvalidArgument, "plan blob bound");
+    }
+    let mut reader = PlanReader {
+        bytes: blob,
+        offset: 0,
+    };
+    if reader.u8()? != PLAN_VERSION {
+        return err(Code::InvalidArgument, "plan version");
+    }
+    let mut plan = ChannelPlan {
+        network: reader.u64()?,
+        authority: reader.u64()?,
+        authority_generation: reader.u32()?,
+        operation_sequence: reader.u64()?,
+        previous_state_hash: reader.hash()?,
+        old_epoch: reader.u32()?,
+        new_epoch: reader.u32()?,
+        old_channel: reader.u8()?,
+        new_channel: reader.u8()?,
+        participant_capability_mask: reader.u32()?,
+        required_participant_digest: reader.hash()?,
+        candidate_evidence_digest: reader.hash()?,
+        authority_session: reader.u64()?,
+        switch_reference_ms: reader.u64()?,
+        peer_offset_ms: reader.u64()? as i64,
+        uncertainty_ms: reader.u32()?,
+        expiry_ms: reader.u64()?,
+        guard_ms: reader.u32()?,
+        ..ChannelPlan::default()
+    };
+    let recovery_present = reader.u8()?;
+    if recovery_present > 1 {
+        return err(Code::InvalidArgument, "plan recovery flag");
+    }
+    let mut recovery = HelperSchedule {
+        visit_period_ms: reader.u32()?,
+        dwell_ms: reader.u32()?,
+        window_begin_ms: reader.u64()?,
+        window_end_ms: reader.u64()?,
+        object_bytes_max: reader.u16()?,
+        ..HelperSchedule::default()
+    };
+    let helpers = usize::from(reader.u8()?);
+    if helpers > HELPERS_MAX {
+        return err(Code::InvalidArgument, "helper count overflow");
+    }
+    for _ in 0..helpers {
+        recovery.helpers.push(reader.u64()?);
+    }
+    plan.protected_services_mask = reader.u32()?;
+    plan.max_outage_ms = reader.u32()?;
+    if reader.offset != blob.len() {
+        return err(Code::InvalidArgument, "plan blob trailing bytes");
+    }
+    if recovery_present != 0 {
+        plan.recovery = Some(recovery);
+    }
+    if plan_encode(&plan)? != blob {
+        return err(Code::InvalidArgument, "plan blob not canonical");
+    }
+    Ok(plan)
+}
+
 /// The device's deterministic operation binding (authority.cpp); the
 /// signature binds the plan through `plan_hash` directly.
 fn bind_operation_payload(kind: u8, payload: &[u8]) -> [u8; 32] {
@@ -159,8 +265,24 @@ pub fn issue(plan: &ChannelPlan, sak: &dyn RootSigner) -> Result<SignedChannelPl
     if plan.authority != sak.root_id() {
         return err(Code::InvalidArgument, "plan authority is not the site");
     }
-    if !(1..=13).contains(&plan.new_channel) || plan.new_epoch <= plan.old_epoch {
-        return err(Code::InvalidArgument, "plan channel or epoch");
+    if !(1..=13).contains(&plan.old_channel)
+        || !(1..=13).contains(&plan.new_channel)
+        || plan.old_channel == plan.new_channel
+        || plan.new_epoch <= plan.old_epoch
+        || plan.max_outage_ms == 0
+        || plan.expiry_ms <= plan.switch_reference_ms
+        || plan.expiry_ms - plan.switch_reference_ms <= u64::from(plan.guard_ms)
+    {
+        return err(Code::InvalidArgument, "plan channel, epoch or timing");
+    }
+    if let Some(recovery) = &plan.recovery {
+        if recovery.visit_period_ms == 0
+            || recovery.dwell_ms == 0
+            || recovery.dwell_ms > recovery.visit_period_ms
+            || recovery.window_end_ms <= recovery.window_begin_ms
+        {
+            return err(Code::InvalidArgument, "plan recovery schedule");
+        }
     }
     let blob = plan_encode(plan)?;
     let plan_hash = sha256(&blob);
@@ -281,6 +403,10 @@ mod tests {
         // ROUTELOOM_WRITE_GOLDEN=1; the C++ sim runs the same bytes.
         let forward = plan(1, [0; 32], 1, 1, 6, 31_000);
         let forward_signed = issue(&forward, &sak()).unwrap();
+        assert_eq!(
+            issue(&plan_decode(&forward_signed.blob).unwrap(), &sak()).unwrap(),
+            forward_signed
+        );
         let back = plan(2, forward_signed.plan_hash, 2, 6, 1, 700_000);
         let back_signed = issue(&back, &sak()).unwrap();
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -324,5 +450,20 @@ mod tests {
         let mut stale = plan(1, [0; 32], 1, 1, 6, 31_000);
         stale.new_epoch = stale.old_epoch;
         assert!(issue(&stale, &sak()).is_err());
+        let mut unusable = plan(1, [0; 32], 1, 1, 6, 31_000);
+        unusable.old_channel = 14;
+        assert!(issue(&unusable, &sak()).is_err());
+        unusable.old_channel = 1;
+        unusable.expiry_ms = unusable.switch_reference_ms + u64::from(unusable.guard_ms);
+        assert!(issue(&unusable, &sak()).is_err());
+        unusable.expiry_ms += 1;
+        unusable.max_outage_ms = 0;
+        assert!(issue(&unusable, &sak()).is_err());
+        unusable.max_outage_ms = 500;
+        unusable.recovery.as_mut().unwrap().dwell_ms = 5_001;
+        assert!(issue(&unusable, &sak()).is_err());
+        let mut trailing = plan_encode(&plan(1, [0; 32], 1, 1, 6, 31_000)).unwrap();
+        trailing.push(0);
+        assert!(plan_decode(&trailing).is_err());
     }
 }
