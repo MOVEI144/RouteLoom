@@ -4624,7 +4624,7 @@ fn cutover_converged(
         });
         if peers_done
             && progress.unknown == 0
-            && want_recovered.is_none_or(|w| progress.recovered == w)
+            && want_recovered.map_or(true, |w| progress.recovered == w)
         {
             break;
         }
