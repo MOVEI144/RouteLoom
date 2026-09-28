@@ -2714,6 +2714,48 @@ fn mesh_route_loss_result_after_probe_callback() {
     assert!(world.switch.results_seen > results_before);
 }
 
+/// Two directed management losses force a lease expiry; the next valid
+/// Probe/Result restores the route without restarting either Owner.
+#[test]
+fn mesh_route_loss_management_loss_then_repair() {
+    let Some(mut world) = route_loss_world("route-control-loss", Switch::direct(), false) else {
+        return;
+    };
+    world.switch.drop_wire_kind(1, 0, WIRE_RESULT, 1);
+    world.switch.drop_wire_kind(0, 1, WIRE_RESULT, 1);
+    for _ in 0..1000 {
+        if world.switch.wire_dropped == 2 {
+            break;
+        }
+        world.step(25);
+    }
+    assert_eq!(world.switch.wire_dropped, 2, "both Results lost");
+    world.switch.drop_wire_kind(1, 0, WIRE_PROBE, 32);
+    world.switch.drop_wire_kind(0, 1, WIRE_PROBE, 32);
+    world.pump_until(2400, |snaps| snaps[1].phases[0] == PHASE_STALE);
+    assert_eq!(
+        world.snaps[1].phases[0],
+        PHASE_STALE,
+        "lost={} stale={} probes={} results={} phases={:?} rules={:?}",
+        world.switch.wire_dropped,
+        world.snaps[1].stale_expirations,
+        world.switch.probes_seen,
+        world.switch.results_seen,
+        world.snaps[1].phases,
+        world.switch.drop_wire
+    );
+    assert!(world.switch.wire_dropped >= 4, "Probe losses fired");
+    world.switch.drop_wire.clear();
+    world.peers[1].app_send(testkit::GATEWAY, b"route-repair");
+    world.pump_until(8000, |snaps| snaps[1].phases[0] == PHASE_REACHABLE);
+    assert_eq!(world.snaps[1].phases[0], PHASE_REACHABLE);
+    let received = world.snaps[0].rx_count;
+    world.peers[1].app_send(testkit::GATEWAY, b"route-restored");
+    world.pump_until(2000, |snaps| snaps[0].rx == b"route-restored");
+    assert!(world.snaps[0].rx_count > received);
+    assert_eq!(world.snaps[0].rx, b"route-restored");
+}
+
 /// Phase-1 convergence on the direct radio: all three Owners adopt
 /// from their Phase-0 images (member boots, no rejoins), open their
 /// authority channels through the gateway's real USB relay, confirm,
