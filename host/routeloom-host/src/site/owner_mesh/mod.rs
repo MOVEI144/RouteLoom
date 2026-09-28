@@ -23,6 +23,10 @@
 //! a failure); the CI interop job builds both peers and always runs
 //! them live. Time is one virtual clock shared by all peers and the
 //! authority (`t0` = wall `now_ms` at start).
+//!
+//! `world`, `peer`, `switch`, `usb_host` and `report` are the harness;
+//! `mesh`, `join`, `cutover` and `fault` hold the scenario tests, each
+//! registered by its row in `tests/e2e/scenarios.json`.
 
 use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
