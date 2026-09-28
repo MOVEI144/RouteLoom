@@ -13,7 +13,8 @@ def sections(root: Path):
     radio = load('docs/reference/radio-defaults.json')
     board_data = load('docs/reference/boards.json')['boards']
     boards = [b for b in board_data if 'gpio_d0_to_d10' in b]
-    pins = ['| XIAO端子 | C3 GPIO | S3 GPIO | C5 GPIO |', '|---|---:|---:|---:|']
+    pins = ['| XIAO端子 | '+' | '.join(b['chip'].removeprefix('esp32').upper()+' GPIO' for b in boards)+' |',
+            '|---|'+'---:|'*len(boards)]
     labels = ['D0','D1','D2','D3','D4 / SDA','D5 / SCL','D6 / TX','D7 / RX','D8 / SCK','D9 / MISO','D10 / MOSI']
     for i,label in enumerate(labels):
         pins.append('| '+label+' | '+' | '.join(str(b['gpio_d0_to_d10'][i]) for b in boards)+' |')

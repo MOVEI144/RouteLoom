@@ -20,8 +20,8 @@ tags:
   - espnow
   - routeloom
   - wifi-lr
-# C3/S3/C5 are SDK v1 targets compiled in CI. C6 is admitted solely for
-# experimental HIL builds; it remains outside the supported SDK target set.
+# Supported targets, all compiled by the required CI cells
+# (tools/ci/cells.json).
 targets:
   - esp32c3
   - esp32s3
