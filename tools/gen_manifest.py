@@ -117,8 +117,12 @@ def render_header(manifest: dict) -> str:
         if "c" in entry:
             lines.append(f"#define {entry['c']} {entry['value']}  /* {entry['label']} */")
     lines.append("")
-    for code in manifest["reason_codes"]["codes"]:
+    codes = manifest["reason_codes"]["codes"]
+    for code in codes:
         lines.append(f"#define ROUTELOOM_REASON_{code['name']} {code['id']}")
+    lines += ["", "/* X(NAME, id) for every registered reason code. */", "#define ROUTELOOM_REASON_TABLE(X) \\"]
+    lines += [f"  X({code['name']}, {code['id']})" + (" \\" if index + 1 < len(codes) else "")
+              for index, code in enumerate(codes)]
     lines += ["", "#endif /* ROUTELOOM_VERSION_H */", ""]
     return "\n".join(lines)
 
