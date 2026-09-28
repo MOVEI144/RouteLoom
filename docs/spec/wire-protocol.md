@@ -41,7 +41,7 @@ C/C++ packed structのmemcpyをwire ABIにしない。固定幅、network byte o
 
 ## 6. 管理object
 
-通常DATAは自動fragmentしない。認証済みcredential/control/configの上限は最大2048B、同時4object、10秒組立timeout。役割別profileはその下位の同時枠を選ぶ。未所属Joinのbootstrapは別枠で最大1024B、同時1、3秒まで。token、owner、total length、offset、chunk length、object digest、期限を検証する。
+通常DATAは自動fragmentしない。認証済みcredential/control/configの上限は最大2048B、同時4object、10秒組立timeout。役割別profileはその下位の同時枠を選ぶ。未所属Joinのbootstrapは別枠で最大1024B、同時1、3秒まで（RLD1 discoveryのbootstrap組立は4件・5秒。[資源profile](resource-profiles.md)）。token、owner、total length、offset、chunk length、object digest、期限を検証する。
 
 範囲外、重複、順不同、異なるpayloadの同offset、古いsessionを拒否または規定通り扱う。2048Bより大きいcertificate/log/OTAは、一つの無制限objectへ拡大せず、認証したmanifest＋bounded chunk streamへ分ける。snapshot/commit証拠もサイズ設計を行う。
 

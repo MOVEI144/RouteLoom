@@ -2,7 +2,7 @@
 # Deployed to https://movei144.github.io/RouteLoom/ by .github/workflows/pages.yml.
 # docs_dir is docs/: no document file is moved or renamed for the site.
 site_name: RouteLoom 文書
-site_description: 組み込み向け適応Mesh SDK（ESP32-C3/S3/C5、ESP-NOW）の設計・実装文書。実装プロトタイプでありRF・本番認定は未完了。
+site_description: 組み込み向け適応Mesh SDK（ESP32-C3/S3/C5/C6、ESP-NOW）の設計・実装文書。SDK 2.0.0-dev（pre-release）でありRF・本番認定は未完了。
 site_url: https://movei144.github.io/RouteLoom/
 repo_name: MOVEI144/RouteLoom
 repo_url: https://github.com/MOVEI144/RouteLoom
@@ -93,6 +93,8 @@ nav:
   - 実装ガイド:
     - コンポーネント配布と外部プロジェクトからの利用: implementation/component-distribution.md
     - Hardware-in-the-loop (HIL) harness: hil.md
+    - 設計原則: development/design-principles.md
+    - コーディング規約: development/coding-standards.md
   - リファレンス:
     - 公式資料と参照実装: references/official-sources.md
     - radio-defaults.json: reference/radio-defaults.json

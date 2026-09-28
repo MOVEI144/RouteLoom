@@ -7,9 +7,9 @@
 # third_party/ inside this directory so a git `path` fetch, which copies only
 # this subtree, still builds. Pins: third_party/VENDORED.json and NOTICE.
 name: routeloom/routeloom
-version: 0.1.0
+version: 2.0.0-dev
 description: >-
-  RouteLoom portable mesh core: Wire v1 codec, routing, delivery/storage,
+  RouteLoom portable mesh core: Wire v2 codec, routing, delivery/storage,
   replay/authority state and the C ABI. C++17, chip-agnostic; the ESP-NOW
   radio owner and NVS stores live in routeloom/routeloom_espnow.
 url: https://github.com/MOVEI144/RouteLoom
@@ -19,7 +19,7 @@ license: Apache-2.0
 tags:
   - mesh
   - routeloom
-  - wire-v1
+  - wire-v2
 dependencies:
   # Only ESP-IDF v6.0.3 is CI-validated today; the portable core itself has
   # no ESP-IDF API dependencies.

@@ -3,7 +3,7 @@
 # itself is portable C++17 with no ESP-IDF API dependencies — the ESP port
 # (heap/stack/reset-cause) lives in firmware/bench_node.
 name: routeloom/routeloom_bench
-version: 0.1.0
+version: 2.0.0-dev
 description: >-
   RouteLoom bench application (design-devflow.md §5): the RLB1 protocol
   codec and the bounded echo/counter/rollcall/STATUS/peer-send state machine
@@ -23,4 +23,4 @@ targets:
 dependencies:
   idf: ">=6.0"
   # Resolved locally via EXTRA_COMPONENT_DIRS, like routeloom_espnow.
-  routeloom/routeloom: "^0.1.0"
+  routeloom/routeloom: "^2.0.0-dev"

@@ -1,0 +1,8 @@
+# Lint for real errors only (syntax errors, undefined names, unused imports
+# and variables). Formatting is not enforced. Checked on changed files only;
+# existing findings are not bulk-fixed.
+target-version = "py312"
+extend-exclude = ["components/routeloom/third_party", "build", "build-*", "host/target"]
+
+[lint]
+select = ["E9", "F"]

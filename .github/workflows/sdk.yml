@@ -55,6 +55,7 @@ jobs:
       - name: Documentation and contract tests
         run: |
           python3 tools/check_docs.py
+          python3 tools/gen_manifest.py --check
           python3 tools/sync_reference_tables.py --check
           python3 tools/check_review_contracts.py
           python3 -m unittest discover -s tests -v

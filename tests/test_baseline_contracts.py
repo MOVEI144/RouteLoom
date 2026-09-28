@@ -12,6 +12,12 @@ MATURITY = {'main', 'pr', 'proposal'}
 
 
 class MeshProfilesTests(unittest.TestCase):
+    def test_discovery_assembly_is_counted_in_each_profile(self):
+        resource = json.loads((ROOT / 'docs/reference/resource-profiles.json').read_text())
+        for name, profile in resource['profiles'].items():
+            self.assertGreaterEqual(profile['budget_bytes'].get('discovery_assembly_pool', 0),
+                                    4 * 1024, name)
+
     def test_axes_and_value_names(self):
         profiles = json.loads((ROOT / 'docs/reference/mesh-profiles.json').read_text())
         self.assertEqual(profiles['schema_version'], 1)
