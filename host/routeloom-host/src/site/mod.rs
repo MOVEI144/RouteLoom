@@ -1,6 +1,6 @@
 //! Site Authority service (docs/design/sdk-v1/02 §8–§9, 04 §3, 07; plan
 //! P3-3): the EDHOC Responder of the zero-touch join, the member ledger and
-//! the KGuard decision surface, running inside routeloom-host (08 §6 Q1:
+//! the external-decider surface, running inside routeloom-host (08 §6 Q1:
 //! the SAK never goes to an ESP32).
 //!
 //! Flow of one join (02 §4/§8), all driven through [`SiteService`]:
@@ -17,10 +17,10 @@
 //!    EDHOC error, counts `rejected_unverified{reason}` and records nothing
 //!    in the discovered table.
 //! 4. DECIDE: an existing approval for (node, kid) re-issues the same
-//!    MemberCert (`member.reissued`, no KGuard); a removed device that still
+//!    MemberCert (`member.reissued`, no decider); a removed device that still
 //!    holds site state gets `Removed` + a SAK-signed RemovalNotice; anything
-//!    else is recorded as discovered and asked of KGuard (`join.request`)
-//!    unless the policy is closed. KGuard silent past `decision_timeout_ms`
+//!    else is recorded as discovered and asked of the decider (`join.request`)
+//!    unless the policy is closed. Decider silent past `decision_timeout_ms`
 //!    → PendingAssignment (08 §6 Q7); a later decision applies at the next
 //!    attempt.
 //! 5. `join.decide allow` commits the ledger entry, the device row and the
@@ -370,8 +370,9 @@ impl Identity {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecisionMode {
-    /// Ask KGuard (`join.request`), default.
-    Kguard,
+    /// Ask the application's external decider (`join.request`), default.
+    /// Stored as 0; API1 names it `"external"`.
+    External,
     /// Never ask: unapproved devices get PendingAssignment.
     Closed,
     /// Lab-only, authenticated and provision-complete inventory matching.
@@ -399,7 +400,7 @@ pub struct JoinPolicy {
     pub zero_touch_open: bool,
     pub decision_mode: DecisionMode,
     pub decision_timeout_ms: u16,
-    /// PendingAssignment retry when KGuard is silent or the policy closed.
+    /// PendingAssignment retry when the decider is silent or the policy closed.
     pub pending_retry_after_s: u32,
     /// Content version, minted by `set_policy` (0 = never set). Two sets
     /// with identical content share a generation; anything else bumps.
@@ -410,7 +411,7 @@ impl Default for JoinPolicy {
     fn default() -> Self {
         Self {
             zero_touch_open: true,
-            decision_mode: DecisionMode::Kguard,
+            decision_mode: DecisionMode::External,
             decision_timeout_ms: 2000,
             pending_retry_after_s: 60,
             policy_generation: 0,
@@ -423,7 +424,7 @@ impl JoinPolicy {
         let mut out = vec![
             u8::from(self.zero_touch_open),
             match self.decision_mode {
-                DecisionMode::Kguard => 0,
+                DecisionMode::External => 0,
                 DecisionMode::Closed => 1,
                 DecisionMode::LabInventory => 2,
             },
@@ -447,7 +448,7 @@ impl JoinPolicy {
         let policy = Self {
             zero_touch_open: bytes[0] == 1,
             decision_mode: match bytes[1] {
-                0 => DecisionMode::Kguard,
+                0 => DecisionMode::External,
                 1 => DecisionMode::Closed,
                 _ => DecisionMode::LabInventory,
             },
@@ -476,7 +477,7 @@ impl JoinPolicy {
             "{{\"zero_touch_open\":{},\"decision_mode\":\"{}\",\"decision_timeout_ms\":{},\"pending_retry_after_s\":{},\"policy_generation\":{}}}",
             self.zero_touch_open,
             match self.decision_mode {
-                DecisionMode::Kguard => "kguard",
+                DecisionMode::External => "external",
                 DecisionMode::Closed => "closed",
                 DecisionMode::LabInventory => "lab_inventory",
             },
@@ -486,7 +487,7 @@ impl JoinPolicy {
         )
     }
 
-    fn asks_kguard(&self) -> bool {
+    fn asks_decider(&self) -> bool {
         self.zero_touch_open && self.decision_mode != DecisionMode::Closed
     }
 }
@@ -544,7 +545,7 @@ struct Verified {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TxnState {
     AwaitMessage3,
-    /// Waiting for KGuard on this join request.
+    /// Waiting for the decider on this join request.
     Deciding(u64),
 }
 
@@ -1866,7 +1867,7 @@ impl SiteAuthority {
         let mut kid_conflict = false;
         match existing {
             Some(row) if row.kid == device.facts.kid && row.member => {
-                // Already approved: re-issue with no KGuard and no
+                // Already approved: re-issue with no decider and no
                 // join.request (04 §8.5). A stale-epoch cert — the
                 // member missed a cutover — is re-minted for the
                 // active epoch first; the DAMS refreshes from this
@@ -1902,7 +1903,7 @@ impl SiteAuthority {
                 }
                 previously_removed = true;
             }
-            // A removed row is not a live-key conflict. KGuard may see
+            // A removed row is not a live-key conflict. The decider may see
             // the request, but allow still checks the revocation history.
             Some(row) if !row.member => previously_removed = true,
             Some(_) if old_kid_removed.is_some() => {
@@ -1925,7 +1926,7 @@ impl SiteAuthority {
             kid_conflict,
             now_ms,
         );
-        if !self.policy.asks_kguard()
+        if !self.policy.asks_decider()
             || (self.policy.decision_mode == DecisionMode::LabInventory
                 && !self.lab_enrollment_active())
         {
@@ -2372,7 +2373,7 @@ impl SiteAuthority {
     /// synthetic removed row for the old-network notice. Only for
     /// queries that still claim this site with an old network — never
     /// a signature oracle for strangers — and `None` on any store
-    /// failure (the caller falls through to the KGuard path).
+    /// failure (the caller falls through to the decider path).
     fn revoked_binding(
         &mut self,
         node: u64,
@@ -2714,7 +2715,7 @@ impl SiteAuthority {
                     self.abort(txn.key, AbortReason::Timeout);
                 }
                 TxnState::Deciding(_) => {
-                    // KGuard silent (08 §6 Q7): pending, the request stays
+                    // Decider silent (08 §6 Q7): pending, the request stays
                     // open so a late decision applies at the next attempt.
                     let node = txn.device.as_ref().map_or(0, |d| d.facts.node);
                     let retry = self.policy.pending_retry_after_s;
@@ -2794,7 +2795,7 @@ impl SiteAuthority {
         dropped.len()
     }
 
-    // --- KGuard decisions --------------------------------------------------------------------
+    // --- decider verdicts -----------------------------------------------------------------------
 
     fn idempotent(
         &self,
@@ -6490,6 +6491,11 @@ impl SiteService {
     }
 }
 
+/// The decider the socket tests drive is the published example itself.
+#[cfg(all(test, unix))]
+#[path = "../../../routeloom-client/examples/assignment_table.rs"]
+#[allow(dead_code)]
+mod assignment_table;
 #[cfg(test)]
 mod authority_e2e;
 #[cfg(test)]

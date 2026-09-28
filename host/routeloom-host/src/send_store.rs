@@ -212,7 +212,7 @@ pub struct StoredOperation {
     pub hop_limit: u8,
     /// Queue discipline requested at submit (canonical.rs `queue_mode`):
     /// QUEUE_FIFO or QUEUE_LATEST_PER_DESTINATION. The latter marks the
-    /// record a KG-style control value — a newer submit to the same
+    /// record a latest-value control — a newer submit to the same
     /// destination retires it before dispatch (`superseded_by`).
     pub queue_mode: u8,
     /// Payload bytes are retained for the TX-I2 dispatcher handoff: the
@@ -745,7 +745,7 @@ pub trait OperationStore {
     }
     /// Retire every still-supersedeable QUEUE_LATEST_PER_DESTINATION
     /// record this principal queued for the same (network, destination)
-    /// — the KG control profile keeps only the latest value per
+    /// — the latest-value discipline keeps only the latest value per
     /// destination (D10). Called after `keep_seq` was committed, so a
     /// lost replacement can never take an older value down with it.
     /// Returns the seqs actually retired; records that already crossed

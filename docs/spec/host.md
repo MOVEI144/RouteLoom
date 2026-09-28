@@ -8,7 +8,7 @@ v0.1実装の状況：daemonは`--socket`（既定`/tmp/routeloom.sock`）の行
 
 admissionは`--admission-profile normal|bench-v1`で起動時に選ぶ。`normal`は`messages.submit`と`operations.open_epoch`を2 calls/分・burst 16に制限する既定契約。`bench-v1`は開発site向けに600 calls/分・burst 8へ上げ、呼出側にinflight4・60秒あたり64送信のclient disciplineを要求する——有効profileは`capacity.get`の`admission.profile`が報告し、API引数では変更できない。profile変更はstore quota・dedup・firmware上限・RF送出rateを変えない。
 
-`messages.submit`の`options.queue_mode`は`FIFO`（既定）または`LATEST_PER_DESTINATION`。後者は`delivery:"BEST_EFFORT"`かつ`storage:"RAM_ONLY"`でのみ受理され、同principal/network/宛先の未送出recordだけを新規recordへ置き換える（supersede）。外部write境界を越えたrecordは対象外で、`superseded_by`が履歴を残す。KG表示制御など「宛先あたり最新値だけが意味を持つ」profile向けで、表示系は12 msg/分/宛先以上を維持する。
+`messages.submit`の`options.queue_mode`は`FIFO`（既定）または`LATEST_PER_DESTINATION`。後者は`delivery:"BEST_EFFORT"`かつ`storage:"RAM_ONLY"`でのみ受理され、同principal/network/宛先の未送出recordだけを新規recordへ置き換える（supersede）。外部write境界を越えたrecordは対象外で、`superseded_by`が履歴を残す。表示板の制御など「宛先あたり最新値だけが意味を持つ」用途向けで、表示系は12 msg/分/宛先以上を維持する。
 
 `NODES`は機器がnode_status_v1（[USB §7](usb-protocol.md)）で報告した接続状態・RSSI・直結hop数を返し、報告の無いnodeだけ`unknown`とする。`routeloomctl`は1コマンド接続、`routeloom-tui`は同一JSONをpollして全画面を描画する観測者で、USB deviceは開かない。これは版管理RPC schema（§3）の前段の開発profileであり、authority・承認済みmembership等daemonに情報源が無いfieldは`unknown`として返す。
 
@@ -89,7 +89,7 @@ HostAuthのtranscript／COMMAND保護は[USB](usb-protocol.md)に従う。DATA�
 
 ## 9. アプリ向け4操作契約とnode status（EXPERIMENTAL）
 
-組込み先アプリ（KGuard等）はtransportを知らずに次の4操作だけを使う（group／ALL配送は4操作を変えずに足した任意の操作で§10）。同じ契約をWi-Fi等の別transportも実装できるよう、Rust crate `routeloom-client`がtrait `MeshTransport`として定義し、RouteLoom実装`api1::RouteLoomTransport`はAPI1の薄いclientに留める。
+組込み先アプリはtransportを知らずに次の4操作だけを使う（group／ALL配送は4操作を変えずに足した任意の操作で§10）。同じ契約をWi-Fi等の別transportも実装できるよう、Rust crate `routeloom-client`がtrait `MeshTransport`として定義し、RouteLoom実装`api1::RouteLoomTransport`はAPI1の薄いclientに留める。
 
 | 操作 | trait | RouteLoom（API1） |
 |---|---|---|
@@ -144,7 +144,7 @@ for event in mesh.membership()? {
 
 ## 10. group／ALL配送（group_delivery_v1、EXPERIMENTAL）
 
-KGuardが1回の呼び出しで全表示板（ALL）や板の群へ同じpayloadを下ろし、何台が受理したかを知るための面。配送そのものはgatewayのportable core（[設計](../design/sdk-v1/group-delivery.md)）が行い、daemonは[USB §8](usb-protocol.md)のHostOps 0x50〜0x52を中継して結果を有界表に保持する。gatewayがHelloAck bit 7（`0x80`）とbit 2（host_ops_v1）の両方を広告し、gateway-scoped profileのroute gatewayである時だけ使える。
+アプリが1回の呼び出しで全機器（ALL）や機器の群へ同じpayloadを下ろし、何台が受理したかを知るための面。配送そのものはgatewayのportable core（[設計](../design/sdk-v1/group-delivery.md)）が行い、daemonは[USB §8](usb-protocol.md)のHostOps 0x50〜0x52を中継して結果を有界表に保持する。gatewayがHelloAck bit 7（`0x80`）とbit 2（host_ops_v1）の両方を広告し、gateway-scoped profileのroute gatewayである時だけ使える。
 
 **権限の選択**。`group.send`はSEND（`messages.submit`と同じ。多数のnodeへアプリdataを送るので、より弱い権限にはしない）、`group.get`はREAD_OPERATION（`operations.get`と同じ。権限の無いprincipalには存在を明かさず`NOT_FOUND`）。principalはsocket peerのOS credentialだけから決まる（§4）。`messages.submit`の受付token bucket（2件/分・burst 16）は**課金しない**：URGENTのALARMが表示更新のburstの後ろで待たされないため。代わりにgroup表の上限（host待ち8件・未決着16件、超過は`NO_CAPACITY` retryable）、gatewayの送信元表（3件、超過は`REFUSED`／`GROUP_QUEUE_FULL`）、gatewayのgroup air-time bucket（設計§7）で有界にする。
 
@@ -189,7 +189,7 @@ routeloomctl group-get --id grp00000001000000a1 --wait-ms 15000
 
 ## 11. Site Authority（SDK v1ゼロタッチ参加、EXPERIMENTAL）
 
-現場PCのdaemonがSDK v1のSite Authority（[設計07](../design/sdk-v1/07-host-api-tooling.md)、[02 §8](../design/sdk-v1/02-zero-touch-join.md)）を兼ねる。SAKはESP32に置かない。参加する機器とEDHOC（RFC 9528 method 0、suite 2）を直接行い、身元（DevCert）を検証してからKGuardに参加可否を聞き、答えをMemberCert・SitePackage・RemovalNoticeとして暗号的に執行する。
+現場PCのdaemonがSDK v1のSite Authority（[設計07](../design/sdk-v1/07-host-api-tooling.md)、[02 §8](../design/sdk-v1/02-zero-touch-join.md)）を兼ねる。SAKはESP32に置かない。参加する機器とEDHOC（RFC 9528 method 0、suite 2）を直接行い、身元（DevCert）を検証してからアプリ（外部の判断者、`decision_mode:"external"`）に参加可否を聞き、答えをMemberCert・SitePackage・RemovalNoticeとして暗号的に執行する。
 
 **開発 site 作成**：`routeloomctl lab-site-init --spec FILE --out DIR`（spec format `routeloom-lab-site-spec-v1`、16桁hex `site_id`/`device_ca_id`/`site_ca_id`、8桁hex `network_low32`、`channel` 1..14、`gateways` 16桁hex 1..4件）。空の DIR のみ許可し、site ごとの CA・SAK・USB secret を別鍵として保存する。鍵・manifest・inventory.db は所有者だけが読み書きできる。既存の完了済み DIR は上書きせず、同じ spec の作成途中 DIR は private journal に記録した鍵を再読込して再開する。manifest 公開直後の中断は同じ内容を検証して完了記録を補う。記録済み鍵の欠損・不一致は拒否する。provision receipt を `provision-confirm-written` で ledger に記録した後、発行済み `devcert.cwt` が ledger の出力先に残り、当該 site の Device CA 署名・NodeId・kid・serial・digest が一致するときだけ `lab-inventory-import --site DIR --ledger FILE --node <16hex> --role endpoint|relay|gateway` で追加する。import site への自動承認は許さない。
 
@@ -200,7 +200,7 @@ routeloomctl group-get --id grp00000001000000a1 --wait-ms 15000
 **API1**：
 
 - `site.status` → 現場の識別（site_id、network、site_epoch、SAK fingerprint）、rs_epoch、gk_epoch／staged、member・removed・未確認・発見済み・参加要求の数、policy、counters、`usb{configured,attached,join_relay:"ready|not_ready"}`
-- `join.policy.get` / `join.policy.set {zero_touch_open?, decision_mode?:"kguard|closed|lab_inventory", decision_timeout_ms?:500..5000, pending_retry_after_s?:30..3600}`。`lab_inventory` は `lab-site-init` 由来の development manifest・DB binding を持つ site だけに設定できる。閉鎖時は新規参加を pending にする。DevCert と JoinRequest の認証後、当該 site の written receipt を `lab-inventory-import` した (NodeId,kid,role,Device CA) だけ通常の `join.decide` で allow する。daemon 再起動で新 revision を読込む。`decision_mode=lab_inventory` を明示設定したときから単調時計で最大1時間だけ enrollment を開き、失効・時計逆行・daemon 再起動時は pending（同じ値を明示再設定して再開）。DB書込み失敗時は再起動して DB を読み直すまで自動 enrollment を閉じる。`join.policy.get` の `lab_enrollment_active` が実効状態を示す。import/production site では設定を拒否する。
+- `join.policy.get` / `join.policy.set {zero_touch_open?, decision_mode?:"external|closed|lab_inventory", decision_timeout_ms?:500..5000, pending_retry_after_s?:30..3600}`。`lab_inventory` は `lab-site-init` 由来の development manifest・DB binding を持つ site だけに設定できる。閉鎖時は新規参加を pending にする。DevCert と JoinRequest の認証後、当該 site の written receipt を `lab-inventory-import` した (NodeId,kid,role,Device CA) だけ通常の `join.decide` で allow する。daemon 再起動で新 revision を読込む。`decision_mode=lab_inventory` を明示設定したときから単調時計で最大1時間だけ enrollment を開き、失効・時計逆行・daemon 再起動時は pending（同じ値を明示再設定して再開）。DB書込み失敗時は再起動して DB を読み直すまで自動 enrollment を閉じる。`join.policy.get` の `lab_enrollment_active` が実効状態を示す。import/production site では設定を拒否する。`external`（既定）は `join.request` を出してアプリの判断を待つ。v1 の入力値 `"kguard"` は `"external"` の非推奨の別名として受け付け（daemon と `routeloomctl` は警告を出す）、応答・読出しは常に `"external"`。SQLite の保存値（0）は変わらない。
 - `join.requests.list` → `requests[]`（`join_request_id`＝`jr-`＋16hex、device・kid・model・hw_rev・cert_serial・fw_version・capability・requested_role・previously_removed・kid_conflict・via・attempt・remaining_ms・`state:"awaiting|decided"`、≤256）
 - `join.decide {join_request_id, device_id, verdict:"allow"|"pending"|"deny", role|retry_after_s|reason, idempotency_key}` → allowは台帳commit後に`{"state":"committed","generation","member_cert_serial","operation_id","applied"}`、pending/denyは`"state":"recorded"`。`applied`は待っている試行へ届いた（`current_attempt`）か次の試行で効く（`next_attempt`）か
 - `devices.discovered.list {after?, limit?:1..128}` → `devices[]`、`next_after`、`total`（≤1024、last_seenのLRU）。検証に失敗した機器は載らない
@@ -214,16 +214,17 @@ JSONの例は[07 §2.4](../design/sdk-v1/07-host-api-tooling.md)。idempotency�
 
 **参加の中継**：機器のEDHOC messageはproxy→gateway→USB HostOps 0x60/0x61/0x62（[02 §7](../design/sdk-v1/02-zero-touch-join.md)、応答は0x63）でsite laneに届く。laneは認証済みsession＋CAP_JOIN_RELAY_V2（bit 9；bit 8はv1 historyで不受理）のgatewayにだけ中継を開き、phase 4だけSite Authorityへ渡す（phase 5はP3-5未対応として0x62で拒否）。Authorityの応答は有界queue（8件・1件≤1005 B・TTL 20 s）経由で送り（downは0x61、中止はfull token付き0x62のみ）、受付失敗は試行を失敗終了する。ただしphase 7 RRS1の下りが同じrelayのlaneを占有中にfinal EDHOC m4へ返る0x63 Busyは、requestとrelay tokenを照合し、元のTTL内に同一bytesを再送する。結線状態は`capabilities.get`の`site.join_relay:"ready|not_ready"`。
 
-**アプリ向け（`routeloom-client`）**：`site::SiteAdmin` trait（`site_status`、`join_requests`、`decide`、`discovered`、`members`／`member`、`revoke`、`site_events`）をRouteLoomTransportが実装する。`site::KGuardMock`は割当表（ここ→allow、他現場→deny not_here、禁止→deny blocked、未知→pending）で未決定の要求に答える試験用の実装。
+**アプリ向け（`routeloom-client`）**：`site::SiteAdmin` trait（`site_status`、`join_requests`、`decide`、`discovered`、`members`／`member`、`revoke`、`site_events`）をRouteLoomTransportが実装する。`examples/assignment_table.rs`（crateの公開APIではない）は割当表（ここ→allow、他現場→deny not_here、禁止→deny blocked、未知→pending）で未決定の要求に答える最小の判断者で、host試験もこれを使う。
 
 ```rust
-use routeloom_client::{api1::RouteLoomTransport, site::{Assignment, KGuardMock, Role, SiteAdmin}};
+use routeloom_client::{api1::RouteLoomTransport, site::{Role, SiteAdmin}};
+// Assignment / AssignmentTable: examples/assignment_table.rs
 
 let site = RouteLoomTransport::new("/tmp/routeloom.sock", 0x0a1b2c3d);
-let kguard = KGuardMock::default();
-kguard.assign(0x00a1_0000_0000_1234, Assignment::Here(Role::Endpoint));
+let table = AssignmentTable::default();
+table.assign(0x00a1_0000_0000_1234, Assignment::Here(Role::Endpoint));
 for event in site.site_events()? {
-    if event?.kind == "join.request" { kguard.serve_once(&site)?; }
+    if event?.kind == "join.request" { table.serve_once(&site)?; }
 }
 ```
 

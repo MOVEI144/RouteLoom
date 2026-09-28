@@ -1,4 +1,4 @@
-//! Transport-agnostic mesh facade for applications (KGuard).
+//! Transport-agnostic mesh facade for applications.
 //!
 //! An application needs exactly four operations from "the network",
 //! whatever carries it:
@@ -24,8 +24,8 @@
 //! surface, and the application's "no communication" / status-bar logic is
 //! written once against [`LinkStatus::connected`].
 //!
-//! Separately from the mesh facade, [`site::SiteAdmin`] is the KGuard side
-//! of the SDK v1 zero-touch join (join requests, verdicts, discovered
+//! Separately from the mesh facade, [`site::SiteAdmin`] is the application's
+//! (external decider's) side of the SDK v1 zero-touch join (join requests, verdicts, discovered
 //! devices, members, removal); the RouteLoom backend implements it too.
 //!
 //! Clock domain: every timestamp this crate returns ([`LinkStatus::
@@ -38,8 +38,8 @@ use std::io;
 
 pub mod api1;
 
-/// KGuard's decision surface of the SDK v1 Site Authority (zero-touch
-/// join): [`site::SiteAdmin`] and the [`site::KGuardMock`] policy.
+/// The external-decider surface of the SDK v1 Site Authority (zero-touch
+/// join): [`site::SiteAdmin`].
 pub mod site;
 
 /// Device identity on the transport (RouteLoom: the 64-bit mesh node id).
@@ -446,7 +446,7 @@ mod tests {
         }
     }
 
-    /// KGuard-style consumer: the display board shows a blue status bar
+    /// Display-board consumer: the board shows a blue status bar
     /// whenever its device is not connected; the admin screen prints "no
     /// communication" with the last-heard time. Written once, generic.
     fn status_bar<T: MeshTransport + ?Sized>(transport: &T, node: NodeId) -> &'static str {

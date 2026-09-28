@@ -855,7 +855,7 @@ struct State {
     /// drives the gateway-forwarded exchange.
     remote_observation_ops: remote_observation::RemoteObservationOps,
     /// SDK v1 Site Authority (--site-authority DIR): EDHOC Responder, member
-    /// ledger and the KGuard decision surface. None when not configured.
+    /// ledger and the external-decider surface. None when not configured.
     site: Option<Arc<site::SiteService>>,
     /// Verified join-relay (HostOps 0x60-0x63) bodies waiting for the site
     /// lane — separate from `dispatch_inbox` so relay traffic never

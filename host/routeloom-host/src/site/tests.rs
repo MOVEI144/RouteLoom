@@ -22,7 +22,7 @@ use super::transport::{
 use super::*;
 
 const T0: u64 = 1_790_000_000_000;
-const KGUARD: u32 = 501;
+const DECIDER: u32 = 501;
 
 #[test]
 fn lab_inventory_only_allows_the_bound_site_and_key() {
@@ -618,7 +618,7 @@ fn lab_revoked_node_is_not_reapproved_from_inventory() {
     service
         .with(|a| {
             a.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device: node,
                     expected_generation: 1,
@@ -856,7 +856,7 @@ fn decide(
     service
         .with(|a| {
             a.decide(
-                KGUARD,
+                DECIDER,
                 DecideRequest {
                     join_request_id: id,
                     device,
@@ -914,7 +914,7 @@ fn revoke(
     service
         .with(|a| {
             a.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device,
                     expected_generation: generation,
@@ -935,7 +935,7 @@ fn archive(
 ) -> (Result<String, SiteError>, Events) {
     service.with(|a| {
         a.archive_removed(
-            KGUARD,
+            DECIDER,
             ArchiveRequest {
                 devices: devices.to_vec(),
                 key: key.into(),
@@ -1018,7 +1018,7 @@ fn rotate(service: &SiteService, expected: u32, key: &str, now: u64) -> Result<S
     service
         .with(|a| {
             a.rotate(
-                KGUARD,
+                DECIDER,
                 RotateRequest {
                     expected_active_epoch: expected,
                     key: key.into(),
@@ -1271,7 +1271,7 @@ fn pending_then_allow_on_the_next_attempt() {
     assert!(matches!(outcome, Outcome::Waiting));
     assert_eq!(kinds(&events), ["device.discovered", "join.request"]);
     let id = request_id(&events).unwrap();
-    // KGuard: unassigned → pending.
+    // The decider: unassigned → pending.
     let answer = decide(
         &service,
         id,
@@ -1303,7 +1303,7 @@ fn pending_then_allow_on_the_next_attempt() {
         Some("00a1000000001234")
     );
 
-    // Next attempt (after retry_after): a new request, KGuard allows.
+    // Next attempt (after retry_after): a new request, the decider allows.
     let later = T0 + 31_000;
     let (mut exchange, outcome, events) = device.start(&service, &transport, later);
     assert!(matches!(outcome, Outcome::Waiting));
@@ -1355,10 +1355,10 @@ fn pending_then_allow_on_the_next_attempt() {
     assert_eq!(kinds(&events), ["member.confirmed"]);
 }
 
-/// V1-J09 / V1-H02: KGuard silent → PendingAssignment at the deadline; a
+/// V1-J09 / V1-H02: the decider silent → PendingAssignment at the deadline; a
 /// later allow applies at the next attempt without a new join.request.
 #[test]
-fn silent_kguard_pends_and_a_late_decision_applies_next_time() {
+fn silent_decider_pends_and_a_late_decision_applies_next_time() {
     let (service, transport) = service();
     let mut device = SimDevice::new(0x00A1_0000_0000_2001, 0x72);
     let (mut exchange, outcome, events) = device.start(&service, &transport, T0);
@@ -1378,7 +1378,7 @@ fn silent_kguard_pends_and_a_late_decision_applies_next_time() {
         panic!("expected PendingAssignment");
     };
     assert_eq!(retry_after_s, JoinPolicy::default().pending_retry_after_s);
-    // The request is still open; KGuard decides late.
+    // The request is still open; the decider decides late.
     let (list, _) = service.with(|a| a.join_requests_json(T0 + 5_000));
     assert_eq!(
         json(&list)
@@ -1572,7 +1572,7 @@ fn decisions_are_idempotent() {
 
 /// V1-H07 / 07 §3 crash rule: approval committed, host dies before
 /// message_4 — the device's retry after restart gets the same MemberCert
-/// (reissued, no KGuard), from the SQLite store.
+/// (reissued, no decider), from the SQLite store.
 #[test]
 fn restart_after_commit_reissues_the_same_member_cert() {
     let dir = std::env::temp_dir().join(format!(
@@ -1701,7 +1701,7 @@ fn removal_end_to_end() {
     let revoke = |generation, key: &str, now: u64| {
         service.with(|a| {
             a.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device: device.node,
                     expected_generation: generation,
@@ -1764,7 +1764,7 @@ fn removal_end_to_end() {
         "{outcome:?}"
     );
     assert!(device.site.is_none());
-    // KGuard sees the removed identity, but its NodeId cannot be re-allowed.
+    // The decider sees the removed identity, but its NodeId cannot be re-allowed.
     let (_, outcome, events) = device.start(&service, &transport, T0 + 660_000);
     assert!(matches!(outcome, Outcome::Waiting));
     let request = events
@@ -1843,7 +1843,7 @@ fn removed_recovery_notice_uses_retained_network() {
     service
         .with(|a| {
             a.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device: device.node,
                     expected_generation: 1,
@@ -2068,7 +2068,7 @@ fn store_failures_never_become_success() {
     assert_eq!(error.code, "STORE_FAILURE");
     assert!(error.retryable);
     assert!(service.with(|a| a.devices.is_empty()).0);
-    // The exchange is still waiting; KGuard retries and it goes through.
+    // The exchange is still waiting; the decider retries and it goes through.
     decide(
         &service,
         id,
@@ -2333,7 +2333,7 @@ fn review_concurrent_different_keys_rechecks_current_membership() {
     // Revocation does not release a NodeId for a waiting request.
     let (revoked, _) = service.with(|auth| {
         auth.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device: a.node,
                 expected_generation: 1,
@@ -2382,7 +2382,7 @@ fn review_revoked_membership_allows_explicit_replacement_key() {
         .0;
     let (revoked, _) = service.with(|auth| {
         auth.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device: a.node,
                 expected_generation: 1,
@@ -2496,7 +2496,7 @@ fn review_replacement_flow_survives_a_restart() {
         a.finish(&mut exchange, &transport);
         let (revoked, _) = service.with(|auth| {
             auth.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device: node,
                     expected_generation: 1,
@@ -2598,7 +2598,7 @@ fn review_late_allow_follows_the_current_membership() {
     .unwrap();
     a.finish(&mut exchange, &transport);
     // B's request while A is a member: kid_conflict is stored and shown
-    // to KGuard, but it is not the final word.
+    // to the decider, but it is not the final word.
     let mut b = SimDevice::new(a.node, 0xC8);
     let (_, outcome, events) = b.start(&service, &transport, T0 + 100);
     assert!(matches!(outcome, Outcome::Waiting));
@@ -2612,7 +2612,7 @@ fn review_late_allow_follows_the_current_membership() {
     // NOT_FOUND, not a resurrection.
     let (revoked, _) = service.with(|auth| {
         auth.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device: a.node,
                 expected_generation: 1,
@@ -2660,7 +2660,7 @@ fn review_late_allow_follows_the_current_membership() {
     let mut c = SimDevice::new(0x00A1_0000_0000_C005, 0xC9);
     let (_, _, events) = c.start(&service, &transport, T0 + 300);
     let id_c = request_id(&events).unwrap();
-    service.tick(HostTime::sync(T0 + 300 + 2_000)); // KGuard silent → pending, request open
+    service.tick(HostTime::sync(T0 + 300 + 2_000)); // the decider silent → pending, request open
     transport.take();
     let first = decide(
         &service,
@@ -2691,7 +2691,7 @@ fn review_late_allow_follows_the_current_membership() {
     assert_eq!(live_replay, first);
     let (revoked, _) = service.with(|auth| {
         auth.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device: c.node,
                 expected_generation: 1,
@@ -4589,7 +4589,7 @@ fn review_revoke_discards_unflushed_group_key_commands() {
         .with(|a| {
             a.tick(HostTime::sync(T0 + 1_000));
             a.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device: victim.node,
                     expected_generation: 1,
@@ -4898,7 +4898,7 @@ fn revoke_rrs(
 ) -> (u64, routeloom_json::Json) {
     let (answer, _) = service.with(|a| {
         a.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device,
                 expected_generation: generation,
@@ -5167,7 +5167,7 @@ fn unfinished_operation_is_not_evicted_at_capacity() {
     let result = service
         .with(|a| {
             a.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device: leaver.node,
                     expected_generation: 1,
@@ -5759,6 +5759,24 @@ fn policy_encoding_roundtrips_generation() {
     let decoded = JoinPolicy::decode(&full[..8]).unwrap();
     assert_eq!(decoded.policy_generation, 0);
     assert!(!decoded.zero_touch_open);
+}
+
+/// #194: the neutral name keeps stored mode byte 0. Rows written before
+/// the rename (8 B pre-generation, 12 B with generation) decode as
+/// `External` and re-encode to the same bytes.
+#[test]
+fn policy_mode_zero_rows_decode_as_external() {
+    let row8 = [1, 0, 0x07, 0xD0, 0, 0, 0, 60];
+    let row12 = [1, 0, 0x07, 0xD0, 0, 0, 0, 60, 0, 0, 0, 7];
+    let old = JoinPolicy::decode(&row8).unwrap();
+    assert_eq!(old.decision_mode, DecisionMode::External);
+    assert_eq!(old.encode()[..8], row8);
+    let current = JoinPolicy::decode(&row12).unwrap();
+    assert_eq!(current.decision_mode, DecisionMode::External);
+    assert_eq!(current.policy_generation, 7);
+    assert_eq!(current.encode(), row12);
+    assert_eq!(JoinPolicy::default().encode()[1], 0);
+    assert!(current.json().contains("\"decision_mode\":\"external\""));
 }
 
 /// dev-flow §6.5 / D09: the rollcall lane's pressure probe is true while

@@ -2,7 +2,7 @@
 //! scenarios as regression tests — commit-before-send, the 600 s window
 //! with the gateway gate, revoke-during-prepare conflicts, restart
 //! resume, the RemovalNotice outbox, old-kid recovery and the
-//! no-KGuard reissue after a missed cutover.
+//! no-decider reissue after a missed cutover.
 
 use std::sync::{Arc, Mutex};
 
@@ -26,7 +26,7 @@ use super::transport::InProcessTransport;
 use super::{RevokeRequest, SiteService};
 
 const T0: u64 = 1_790_000_000_000;
-const KGUARD: u32 = 501;
+const DECIDER: u32 = 501;
 
 fn service_with(store: Box<dyn SiteStore>) -> (SiteService, Arc<InProcessTransport>) {
     let service = SiteService::new(testkit::authority(store, T0));
@@ -46,7 +46,7 @@ fn json(text: &str) -> routeloom_json::Json {
 fn decide(service: &SiteService, request: u64, device: u64, verdict: Verdict, key: &str, at: u64) {
     let (answer, _) = service.with(|a| {
         a.decide(
-            KGUARD,
+            DECIDER,
             super::DecideRequest {
                 join_request_id: request,
                 device,
@@ -168,7 +168,7 @@ fn with_grant_transport(service: &SiteService) -> Arc<Mutex<GrantSends>> {
 fn start_cutover(service: &SiteService, key: &str, at: u64) -> (u64, routeloom_json::Json) {
     let (answer, _) = service.with(|a| {
         a.cutover(
-            KGUARD,
+            DECIDER,
             CutoverRequest {
                 expected_site_epoch: testkit::SITE_EPOCH,
                 next_site_cert: next_site_cert(),
@@ -589,7 +589,7 @@ fn cutover_requires_a_grant_carrier_before_staging() {
     );
     let (answer, _) = service.with(|a| {
         a.cutover(
-            KGUARD,
+            DECIDER,
             CutoverRequest {
                 expected_site_epoch: testkit::SITE_EPOCH,
                 next_site_cert: next_site_cert(),
@@ -667,7 +667,7 @@ fn retired_network_notice_is_not_sent_after_cutover_commit() {
     service
         .with(|a| {
             a.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device: victim.node,
                     expected_generation: 1,
@@ -775,7 +775,7 @@ fn cutover_sends_nothing_before_commit() {
     });
     let (answer, _) = service.with(|a| {
         a.cutover(
-            KGUARD,
+            DECIDER,
             CutoverRequest {
                 expected_site_epoch: testkit::SITE_EPOCH,
                 next_site_cert: next_site_cert(),
@@ -1405,7 +1405,7 @@ fn revoke_during_prepare_restages_and_carries() {
     // Revoke the leaver mid-prepare.
     let (answer, _) = service.with(|a| {
         a.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device: leaver.node,
                 expected_generation: 1,
@@ -1475,7 +1475,7 @@ fn cutover_survives_split_clocks() {
     let sends = with_grant_transport(&service);
     let (answer, _) = service.with(|a| {
         a.cutover(
-            KGUARD,
+            DECIDER,
             CutoverRequest {
                 expected_site_epoch: testkit::SITE_EPOCH,
                 next_site_cert: next_site_cert(),
@@ -1560,10 +1560,10 @@ fn cutover_survives_restart() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// V1-R07/R08: the reissue path needs no KGuard verdict — a member that
+/// V1-R07/R08: the reissue path needs no decider verdict — a member that
 /// missed the cutover full-joins and gets the active-epoch cert back.
 #[test]
-fn missed_cutover_reissues_without_kguard() {
+fn missed_cutover_reissues_without_decider() {
     let (service, transport) = service();
     let mut gateway = SimDevice::new(testkit::GATEWAY, 0x60);
     gateway.capability |= routeloom_join::JOIN_CAPABILITY_GATEWAY;
@@ -1634,7 +1634,7 @@ fn missed_cutover_reissues_without_kguard() {
     let kinds = testkit::kinds(&events);
     assert!(
         !kinds.iter().any(|k| k == "join.request"),
-        "no KGuard round-trip: {kinds:?}"
+        "no decider round-trip: {kinds:?}"
     );
     assert!(
         kinds.iter().any(|k| k == "member.reissued"),
@@ -1660,7 +1660,7 @@ fn old_kid_recovery_gets_removed() {
     join_member(&service, &transport, &mut old, ROLE_ENDPOINT, "m", T0);
     let (answer, _) = service.with(|a| {
         a.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device: old.node,
                 expected_generation: 1,
@@ -1676,7 +1676,7 @@ fn old_kid_recovery_gets_removed() {
     let (_, _, events) = new.start(&service, &transport, T0 + 2_000);
     let (answer, _) = service.with(|a| {
         a.decide(
-            KGUARD,
+            DECIDER,
             super::DecideRequest {
                 join_request_id: request_id(&events).unwrap(),
                 device: new.node,
@@ -1720,7 +1720,7 @@ fn rrs_full_recovers_through_cutover() {
         );
         let (answer, _) = service.with(|a| {
             a.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device: d.node,
                     expected_generation: 1,
@@ -1743,7 +1743,7 @@ fn rrs_full_recovers_through_cutover() {
     );
     let (answer, _) = service.with(|a| {
         a.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device: extra.node,
                 expected_generation: 1,
@@ -1808,7 +1808,7 @@ fn rrs_full_recovers_through_cutover() {
     );
     let (answer, _) = service.with(|a| {
         a.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device: extra.node,
                 expected_generation: 1,
@@ -1842,7 +1842,7 @@ fn removal_notice_outbox_and_accept() {
     let sends = with_grant_transport(&service);
     let (answer, _) = service.with(|a| {
         a.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device: leaver.node,
                 expected_generation: 1,
@@ -1926,7 +1926,7 @@ fn notice_direct_send_closes_after_60s() {
     let commit_at = T0 + 2_000;
     let (answer, _) = service.with(|a| {
         a.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device: leaver.node,
                 expected_generation: 1,
@@ -1986,7 +1986,7 @@ fn cutover_refuses_a_bad_next_cert() {
     // Same epoch (not +1).
     let (answer, _) = service.with(|a| {
         a.cutover(
-            KGUARD,
+            DECIDER,
             CutoverRequest {
                 expected_site_epoch: testkit::SITE_EPOCH,
                 next_site_cert: testkit::site_cert(),
@@ -1999,7 +1999,7 @@ fn cutover_refuses_a_bad_next_cert() {
     // Garbage bytes.
     let (answer, _) = service.with(|a| {
         a.cutover(
-            KGUARD,
+            DECIDER,
             CutoverRequest {
                 expected_site_epoch: testkit::SITE_EPOCH,
                 next_site_cert: vec![0xC0, 0xFF, 0xEE],
@@ -2014,7 +2014,7 @@ fn cutover_refuses_a_bad_next_cert() {
     let (_, _) = start_cutover(&service, "cut-ok", T0 + 2_000);
     let (answer, _) = service.with(|a| {
         a.cutover(
-            KGUARD,
+            DECIDER,
             CutoverRequest {
                 expected_site_epoch: testkit::SITE_EPOCH,
                 next_site_cert: next_site_cert(),
@@ -2528,7 +2528,7 @@ fn cutover_straggler_recovers_through_the_reissue() {
         Some("recovery_pending")
     );
     assert_eq!(view.get("unknown").unwrap().as_u64(), Some(1));
-    // The straggler comes back on its old RLS1: reissued, no KGuard —
+    // The straggler comes back on its old RLS1: reissued, no decider —
     // but the reissue alone is not recovery evidence.
     straggler.recovery_existing = true;
     let (outcome, _) = straggler.attempt(&service, &transport, committed_at + 65_000);
@@ -2594,7 +2594,7 @@ fn cutover_straggler_recovers_through_the_reissue() {
     );
     let (answer, _) = service.with(|a| {
         a.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device: victim.node,
                 expected_generation: 1,

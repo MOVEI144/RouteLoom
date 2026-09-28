@@ -1625,7 +1625,7 @@ fn messages_submit<S: OperationStore>(
     // wall-clock rewind can never stretch the dispatch deadline.
     match store.submit_at_principal(uid, &req, ctx.now_ms, crate::mono_ms()) {
         SubmitOutcome::Accepted { seq } => {
-            // KG control discipline (D10): once the replacement is
+            // Latest-value discipline (D10): once the replacement is
             // committed, retire still-queued older values to the same
             // destination. The supersede runs after commit so a lost
             // replacement can never take the previous value down with it.
@@ -9982,7 +9982,7 @@ mod tests {
         assert_eq!(client.get("run_window_calls").unwrap().as_u64(), Some(64));
     }
 
-    /// D10 KG control profile end-to-end: a LATEST_PER_DESTINATION submit
+    /// D10 latest-value control end-to-end: a LATEST_PER_DESTINATION submit
     /// retires the still-queued predecessor, names it in the response,
     /// and the retired record reports the replacing operation id.
     #[test]
