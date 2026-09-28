@@ -311,6 +311,22 @@ impl AuthorityChannels {
         stats
     }
 
+    #[cfg(test)]
+    pub(crate) fn is_commit_stored_envelope(&self, device: u64, bytes: &[u8]) -> bool {
+        use routeloom_join::renew::{Phase, Receipt};
+        let Some(channel) = self.channels.get(&device) else {
+            return false;
+        };
+        let Ok((header, plaintext)) = open_envelope(&channel.rx_key, bytes, channel.rx_ctx) else {
+            return false;
+        };
+        let plaintext = Zeroizing::new(plaintext);
+        header.env_type == 7
+            && plaintext.len() >= BODY_HEAD
+            && Receipt::decode(&plaintext[BODY_HEAD..])
+                .is_ok_and(|receipt| receipt.head.phase == Phase::CommitStored)
+    }
+
     /// Refreshes the epochs echoed in R2 (the owner calls this after a
     /// revocation or activation commits). Stale R2 epochs would mislead a
     /// joining device about the live revocation/group state; the fence

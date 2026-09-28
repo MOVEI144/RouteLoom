@@ -81,7 +81,9 @@
 // the quiet-channel evidence a present-check probe samples) |
 // strikes u8 (refresh strikes — the recovery evidence ladder) |
 // j_attempts u32 | j_m1 u32 | j_dropped u32 (the joiner's attempt/M1/
-// dropped-offer counters — the ZT attempt evidence)
+// dropped-offer counters — the ZT attempt evidence) |
+// notice_down_live u8 | unknown_peer_rx u32 |
+// proxy_frames_rejected u32 | proxy_cookie_rejects u32
 //
 // Setup arrives on argv (all integers accept 0x hex; blobs are hex):
 //
@@ -1001,6 +1003,9 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
   // One bounded diagnostic for the R1 Notice target: a live gateway
   // down slot is sampled before the RRS enforcement tick cancels it.
   out.push_back(EspNowSecurityOwnerTestAccess::down_live_to(owner, 0x00A1000000000101ULL) ? 1 : 0);
+  put_u32(out, runtime.unknown_peer_rx());
+  put_u32(out, proxy.frames_rejected);
+  put_u32(out, proxy.cookie_rejects);
   write_frame(out);
 }
 

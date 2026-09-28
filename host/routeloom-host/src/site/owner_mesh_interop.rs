@@ -949,6 +949,9 @@ struct MeshSnap {
     j_m1: u32,
     j_dropped: u32,
     notice_down_live: bool,
+    unknown_peer_rx: u32,
+    proxy_frames_rejected: u32,
+    proxy_cookie_rejects: u32,
 }
 
 #[allow(dead_code)]
@@ -1082,6 +1085,9 @@ fn parse_mesh_snap(payload: &[u8]) -> MeshSnap {
     snap.j_dropped = get_u32(payload, &mut pos);
     snap.notice_down_live = payload[pos] != 0;
     pos += 1;
+    snap.unknown_peer_rx = get_u32(payload, &mut pos);
+    snap.proxy_frames_rejected = get_u32(payload, &mut pos);
+    snap.proxy_cookie_rejects = get_u32(payload, &mut pos);
     assert_eq!(pos, payload.len(), "G fully consumed");
     snap
 }
@@ -1427,6 +1433,12 @@ struct Switch {
     drop_notice_chunks: bool,
     notice_chunks_dropped: u32,
     notice_manifests_delivered: u32,
+    c7_capture: bool,
+    c7_hold_data: bool,
+    c7_old_data: Option<Vec<u8>>,
+    c7_old_discover: Option<Vec<u8>>,
+    c7_old_resume: Option<(usize, Vec<u8>)>,
+    c7_old_cert: Option<Vec<u8>>,
 }
 
 impl Switch {
@@ -1444,6 +1456,12 @@ impl Switch {
             drop_notice_chunks: false,
             notice_chunks_dropped: 0,
             notice_manifests_delivered: 0,
+            c7_capture: false,
+            c7_hold_data: false,
+            c7_old_data: None,
+            c7_old_discover: None,
+            c7_old_resume: None,
+            c7_old_cert: None,
         }
     }
 
@@ -1476,6 +1494,44 @@ impl Switch {
         for other in 0..3 {
             self.audible[peer][other] = self.base[peer][other];
             self.audible[other][peer] = self.base[other][peer];
+        }
+    }
+
+    /// Keep actual old-network carriers for C7. A's certificate is in
+    /// an EDHOC step 2/3 object; a large object starts in chunk zero.
+    fn c7_observe(&mut self, from: usize, dst_mac: [u8; 6], frame: &[u8], b_mac: [u8; 6]) {
+        if !self.c7_capture || (from != 1 && from != 0) {
+            return;
+        }
+        if from == 1
+            && dst_mac == b_mac
+            && frame.len() > 5
+            && frame[..4] == *b"RL\x02\0"
+            && frame[4] == 16
+            && self.c7_old_data.is_none()
+        {
+            self.c7_old_data = Some(frame.to_vec());
+        }
+        if frame.len() < 48 || frame[..4] != *b"RLD1" {
+            return;
+        }
+        if from == 1 && dst_mac == BROADCAST_MAC && frame[5] == 1 && self.c7_old_discover.is_none()
+        {
+            self.c7_old_discover = Some(frame.to_vec());
+        }
+        if dst_mac != b_mac {
+            return;
+        }
+        let (phase, step) = match frame[5] {
+            3 => (frame[45], frame[46]),
+            5 if frame.len() > 56 && frame[50..52] == [0, 0] => (frame[55], frame[56]),
+            _ => return,
+        };
+        if phase == 5 && self.c7_old_resume.is_none() {
+            self.c7_old_resume = Some((from, frame.to_vec()));
+        }
+        if from == 1 && phase == 4 && (step == 2 || step == 3) && self.c7_old_cert.is_none() {
+            self.c7_old_cert = Some(frame.to_vec());
         }
     }
 }
@@ -1844,6 +1900,8 @@ struct MeshWorld {
     /// before the next distributor tick may dispatch B's queued COMMIT.
     c6_flip_on_a_stored: Option<u64>,
     c6_flipped: bool,
+    c7_hold_b_receipt: bool,
+    c7_old_receipt: Option<(CarrierKind, Vec<u8>)>,
 }
 
 impl MeshWorld {
@@ -1921,6 +1979,8 @@ impl MeshWorld {
             usb_down: false,
             c6_flip_on_a_stored: None,
             c6_flipped: false,
+            c7_hold_b_receipt: false,
+            c7_old_receipt: None,
         };
         // The USB Hello goes out before the first tick; the gateway
         // answers from its pump.
@@ -1994,6 +2054,27 @@ impl MeshWorld {
         self.gateway_usb_rebind();
     }
 
+    fn deliver_authority_up(&mut self, device: u64, kind: CarrierKind, bytes: &[u8], at: u64) {
+        let mut state = self.rng_state;
+        let mut rng = |out: &mut [u8]| {
+            for b in out.iter_mut() {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                *b = (state >> 33) as u8;
+            }
+            true
+        };
+        self.provision.site.service.handle_authority_up(
+            device,
+            kind,
+            bytes,
+            HostTime::sync(at),
+            &mut rng,
+        );
+        self.rng_state = state;
+    }
+
     /// One virtual step: tick every booted peer, switch the radio
     /// frames, pump the gateway USB into the authority, tick the
     /// authority. Peers whose boot time has not come are off the air:
@@ -2038,6 +2119,8 @@ impl MeshWorld {
         for (from, tick) in ticks.iter().enumerate() {
             let Some(tick) = tick else { continue };
             for tx in &tick.tx {
+                self.switch
+                    .c7_observe(from, tx.dst_mac, &tx.bytes, self.macs[2]);
                 if tx.dst_mac == BROADCAST_MAC {
                     completions[from].push(1);
                     for to in 0..3 {
@@ -2063,7 +2146,17 @@ impl MeshWorld {
                     && self.switch.audible[from][to]
                     && channels[to] == channels[from];
                 let notice_chunk = from == 2 && to == 1 && notice_object_frame(&tx.bytes, 50);
-                if self.switch.drop_notice_chunks && notice_chunk {
+                let old_data = from == 1
+                    && to == 2
+                    && self.switch.c7_hold_data
+                    && tx.bytes.len() > 5
+                    && tx.bytes[..4] == *b"RL\x02\0"
+                    && tx.bytes[4] == 16;
+                if old_data {
+                    completions[from].push(0);
+                    self.switch.dropped += 1;
+                    self.switch.leg_dropped[from][to] += 1;
+                } else if self.switch.drop_notice_chunks && notice_chunk {
                     self.switch.notice_chunks_dropped += 1;
                     completions[from].push(0);
                     self.switch.dropped += 1;
@@ -2140,24 +2233,28 @@ impl MeshWorld {
             self.peers[0].send_usb(&usb_out);
         }
         for (device, kind, bytes) in completed {
-            let mut state = self.rng_state;
-            let mut rng = |out: &mut [u8]| {
-                for b in out.iter_mut() {
-                    state = state
-                        .wrapping_mul(6364136223846793005)
-                        .wrapping_add(1442695040888963407);
-                    *b = (state >> 33) as u8;
+            if self.c7_hold_b_receipt
+                && device == NODE_B
+                && kind == CarrierKind::Envelope
+                && ticks[2].as_ref().is_some_and(|tick| tick.snap.phase == 11)
+                && self
+                    .provision
+                    .site
+                    .service
+                    .with(|a| {
+                        a.channels
+                            .lock()
+                            .unwrap()
+                            .is_commit_stored_envelope(device, &bytes)
+                    })
+                    .0
+            {
+                if self.c7_old_receipt.is_none() {
+                    self.c7_old_receipt = Some((kind, bytes));
                 }
-                true
-            };
-            self.provision.site.service.handle_authority_up(
-                device,
-                kind,
-                &bytes,
-                HostTime::sync(self.now),
-                &mut rng,
-            );
-            self.rng_state = state;
+                continue;
+            }
+            self.deliver_authority_up(device, kind, &bytes, self.now);
         }
         if self.c6_flip_on_a_stored.is_some_and(|op| {
             self.provision
@@ -5101,23 +5198,174 @@ fn mesh_c6_adopted_leaf_blocks_old_relay() {
     );
 }
 
-/// C7: the old-epoch boundary is cryptographic, not bookkeeping. A
-/// straggler island stays on the old Prepared group past the old-key
-/// RX overlap; its stale chatter is judged unknown-generation at the
-/// adopted member's scope gates (never admitted), no new-epoch
-/// traffic leaks to it, and healing still recovers it through the
-/// reissue rather than silent adoption.
+/// C7: old carriers from A's actual Owner are refused after B adopts,
+/// and an old authenticated receipt arriving exactly at D cannot
+/// count merely because Host has not yet run its D tick.
 #[test]
 fn mesh_c7_old_epoch_boundary() {
-    let Some(mut world) = MeshWorld::start("c7", Switch::forced_multihop()) else {
+    let mut switch = Switch::forced_multihop();
+    switch.c7_capture = true;
+    let Some(mut world) = MeshWorld::start("c7", switch) else {
         return; // no C++ peers: skip (ignore-equivalent)
     };
-    let (operation_id, next_gk, new_network, _old_network, t0) =
-        cutover_through_commit(&mut world, "c7");
+    converge_gated(&mut world, 1, "c7 cutover");
+    world.peers[0].power_cut();
+    world.step(25);
+    converge(&mut world, "c7 resume capture");
+    world.switch.c7_hold_data = true;
+    let b_rx_before = world.snaps[2].rx_count;
+    world.peers[1].app_send(NODE_B, b"c7-old-data");
+    for _ in 0..400 {
+        world.step(25);
+        if world.switch.c7_old_data.is_some() {
+            break;
+        }
+    }
+    assert!(
+        world.switch.c7_old_data.is_some(),
+        "old DATA left A on the radio"
+    );
+    assert_eq!(
+        world.snaps[2].rx_count, b_rx_before,
+        "held DATA never reached B"
+    );
+    let staged_at = world.now;
+    let operation_id = stage_cutover(&mut world, "c7");
+    let (operation_id, next_gk, new_network, old_network, t0) =
+        cutover_finish_prepare(&mut world, operation_id, staged_at);
+    assert!(
+        world.switch.c7_old_discover.is_some(),
+        "old GK discover left A"
+    );
+    assert!(
+        world.switch.c7_old_resume.is_some(),
+        "old resume left G or A"
+    );
+    assert!(
+        world.switch.c7_old_cert.is_some(),
+        "old MemberCert handshake left A"
+    );
+    world.c7_hold_b_receipt = true;
     // Strand A fully dark while the COMMIT dispatch is still working
     // its way down the tree (the leaf commits last, so its downlink
     // has not landed yet). A stays Prepared on the old epoch.
     world.switch.isolate(1);
+    world.switch.c7_hold_data = false;
+    // The held B envelope crossed radio and USB, but its business
+    // receipt is not delivered to the authority until D sharp.
+    for _ in 0..4000 {
+        world.step(25);
+        if world.c7_old_receipt.is_some() {
+            break;
+        }
+    }
+    assert!(world.c7_old_receipt.is_some(), "old B type-7 wire was held");
+    assert!(!world
+        .cutover_route(&operation_id, NODE_B)
+        .is_some_and(|p| p.stored));
+    for _ in 0..2000 {
+        world.step(25);
+        if world.snaps[2].adopted_network == new_network {
+            break;
+        }
+    }
+    assert_eq!(
+        world.snaps[2].adopted_network, new_network,
+        "B adopted during grace"
+    );
+    assert!(world.now < t0 + super::cutover::CUTOVER_GRACE_MS);
+    for _ in 0..10 {
+        world.step(25);
+    }
+    // Only these injected carriers may reach B during the refusal
+    // sample; the old gateway's ambient discovery stays off this leg.
+    world.switch.set_audible(0, 2, false);
+    let before = world.snaps[2].clone();
+    let old_data = world.switch.c7_old_data.as_ref().unwrap().clone();
+    let old_discover = world.switch.c7_old_discover.as_ref().unwrap().clone();
+    let (resume_from, old_resume) = world.switch.c7_old_resume.as_ref().unwrap().clone();
+    let old_cert = world.switch.c7_old_cert.as_ref().unwrap().clone();
+    assert_eq!(
+        u32::from_be_bytes(old_data[12..16].try_into().unwrap()),
+        old_network as u32
+    );
+    assert_eq!(
+        u32::from_be_bytes(old_resume[12..16].try_into().unwrap()),
+        old_network as u32
+    );
+    assert_eq!(
+        u32::from_be_bytes(old_cert[12..16].try_into().unwrap()),
+        old_network as u32
+    );
+    world.peers[2].send_rx(&world.macs[1], &world.macs[2], &old_data);
+    world.peers[2].send_rx(&world.macs[1], &BROADCAST_MAC, &old_discover);
+    for _ in 0..4 {
+        world.step(25);
+    }
+    assert_eq!(
+        world.snaps[2].rx_count, before.rx_count,
+        "old DATA not delivered"
+    );
+    assert!(
+        world.snaps[2].unknown_peer_rx > before.unknown_peer_rx,
+        "old DATA has no adopted MAC binding: {:?}",
+        world.snaps[2]
+    );
+    assert!(world.snaps[2].scope_raw_rx > before.scope_raw_rx);
+    assert!(
+        world.snaps[2].scope_unknown_generation > before.scope_unknown_generation,
+        "old GK discovery refused: {:?}",
+        world.snaps[2]
+    );
+    assert_eq!(world.snaps[2].scope_accepted, before.scope_accepted);
+    let proxy_rejects = |snap: &MeshSnap| snap.proxy_frames_rejected + snap.proxy_cookie_rejects;
+    let before_resume = proxy_rejects(&world.snaps[2]);
+    world.peers[2].send_rx(&world.macs[resume_from], &world.macs[2], &old_resume);
+    for _ in 0..4 {
+        world.step(25);
+    }
+    assert!(
+        proxy_rejects(&world.snaps[2]) > before_resume,
+        "old resume was refused by the unbound proxy lane: {:?}",
+        world.snaps[2]
+    );
+    let before_cert = proxy_rejects(&world.snaps[2]);
+    world.peers[2].send_rx(&world.macs[1], &world.macs[2], &old_cert);
+    for _ in 0..4 {
+        world.step(25);
+    }
+    assert!(
+        proxy_rejects(&world.snaps[2]) > before_cert,
+        "old MemberCert handshake was refused: {:?}",
+        world.snaps[2]
+    );
+    assert_eq!(
+        world.snaps[2].link_sessions, before.link_sessions,
+        "old resume/MemberCert must not reestablish a link"
+    );
+    world.switch.set_audible(0, 2, true);
+
+    let deadline = t0 + super::cutover::CUTOVER_GRACE_MS;
+    while world.now + 25 < deadline {
+        world.step(25);
+    }
+    assert!(world.now < deadline);
+    let prior = cutover_progress(&world, &operation_id);
+    assert_eq!(prior.phase, "committed", "Host has not ticked at D");
+    let (kind, bytes) = world.c7_old_receipt.take().unwrap();
+    world.now = deadline;
+    world.deliver_authority_up(NODE_B, kind, &bytes, deadline);
+    assert!(
+        !world
+            .cutover_route(&operation_id, NODE_B)
+            .is_some_and(|p| p.stored),
+        "old COMMIT_STORED is refused at D before the Host tick"
+    );
+    let after = cutover_progress(&world, &operation_id);
+    assert_eq!(
+        (after.applied, after.recovered),
+        (prior.applied, prior.recovered)
+    );
     // B and the gateway adopt inside the grace; A's row stays
     // unknown — never a silent applied. The ledger moves only on
     // durable receipts: the gateway releases at plan close, reboots,
@@ -5149,7 +5397,7 @@ fn mesh_c7_old_epoch_boundary() {
         "the reachable pair applied, not recovered: {progress:?}"
     );
     assert_eq!(
-        world.snaps[1].adopted_network, _old_network,
+        world.snaps[1].adopted_network, old_network,
         "A still on the old epoch: {:?}",
         world.snaps[1]
     );
