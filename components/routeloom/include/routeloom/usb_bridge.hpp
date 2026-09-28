@@ -180,7 +180,13 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // bit the query answers Unsupported and no event is emitted. The source
   // is firmware-owned and must outlive the bridge.
   Status attach_observation(const ObservationSource& source) noexcept;
-  bool observation_armed() const noexcept { return observation_armed_; }
+  bool observation_armed() const noexcept {
+#if ROUTELOOM_USB_OBSERVATION
+    return observation_armed_;
+#else
+    return false;
+#endif
+  }
   // Declares the gateway's effective security profile (observation
   // kProfile* id) for receive assurance and advertises kCapRxAssuranceV1.
   // Requires config_.mesh; without it 0x08 answers Unsupported and every
@@ -752,7 +758,7 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // Routed config endpoint (P5): the bridge-facing ConfigGateway, installed
   // as the mesh node's config_sink_. nullptr -> config ops Unsupported.
   ConfigGateway* config_gateway_{nullptr};
-  HostRegistration registration_{};
+  std::array<HostRegistration, ROUTELOOM_USB_GATEWAY_ENDPOINT ? 1 : 0> registration_{};
   // Bounded pending 0x11 ingress slots — shared by wire submits and the
   // host loopback so the 8-deep pending bound is one honest pool. Zero
   // slots when ROUTELOOM_USB_GATEWAY_ENDPOINT is compiled out (the
@@ -782,16 +788,17 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // straight into tx_body_ (see above) and route entries stage one at a
   // time in a 32 B handler-local — the bridge DRAM floor leaves no room
   // for dedicated .bss staging here.
+#if ROUTELOOM_USB_OBSERVATION
   const ObservationSource* observation_source_{nullptr};
   bool observation_armed_{false};
   // Pending topology mask (0 = nothing pending): OR-ed detections, so a
   // coalesced event names every half that moved since the last emission.
   std::uint8_t observation_topology_mask_{0};
   bool observation_milestone_pending_{false};
-  // Receive-assurance state (see packing above): deliberately placed in
-  // the alignment pad before observation_ms_lo_, so the bridge object —
-  // and bridge static DRAM against the floor — does not grow.
+#endif
+  // Receive-assurance state is independent of the optional observation lane.
   std::uint8_t rx_assurance_{0};
+#if ROUTELOOM_USB_OBSERVATION
   // Low 32 ms bits of the last 0x72 pass (the 250 ms cadence gate is
   // wrap-safe unsigned arithmetic).
   std::uint32_t observation_ms_lo_{0};
@@ -803,6 +810,7 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // joiner, flags, attempts u32): a change bumps
   // observation_milestone_gen_.
   std::uint32_t observation_milestone_key_{kObservationMilestoneKeyZero};
+#endif
   // The encoded page reply is staged in tx_body_ like the node-status page.
   static_assert(kTxScratchBytes >= kGatewayInnerHeadSize + kObservationPageMaxPayload,
                 "observation page staging");

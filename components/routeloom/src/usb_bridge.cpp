@@ -69,7 +69,14 @@ UsbBridge::UsbBridge(const Config& config, ByteStream& stream) noexcept
     : config_(config),
       stream_(stream),
       decoder_(*this),
-      window_(BootLease::derive(config.boot_id, config.node)) {}
+      window_(BootLease::derive(config.boot_id, config.node)) {
+  // These bits describe attached services, including those compiled out of
+  // this image. Only a successful attach may advertise them in HelloAck.
+  config_.capability &= ~(kCapGatewayEndpointV1 | kCapConfigEndpointV1 |
+                          kCapM1DiagnosticsV1 | kCapNodeStatusV1 | kCapGroupDeliveryV1 |
+                          kCapJoinRelayV1 | kCapJoinRelayV2 | kCapAuthorityChannelV1 |
+                          kCapObservationV1 | kCapRxAssuranceV1);
+}
 
 Status UsbBridge::attach_gateway(GatewayDelivery& gateway) noexcept {
   if (!ROUTELOOM_USB_GATEWAY_ENDPOINT) {
@@ -128,12 +135,14 @@ Status UsbBridge::attach_node_status() noexcept {
 }
 
 Status UsbBridge::attach_observation(const ObservationSource& source) noexcept {
-  if (!ROUTELOOM_USB_OBSERVATION) {
-    return Status::error(StatusCode::Unsupported, "observation compiled out");
-  }
+#if ROUTELOOM_USB_OBSERVATION
   observation_source_ = &source;
   config_.capability |= kCapObservationV1;
   return Status::success();
+#else
+  (void)source;
+  return Status::error(StatusCode::Unsupported, "observation compiled out");
+#endif
 }
 
 Status UsbBridge::set_rx_assurance_profile(const std::uint8_t profile) noexcept {
@@ -329,7 +338,9 @@ void UsbBridge::poll(const MonotonicMs now_ms) noexcept {
     }
   }
   pump_node_events(now_ms);
+#if ROUTELOOM_USB_OBSERVATION
   pump_observation_events(now_ms);
+#endif
   pump_tx(now_ms);
   if (state_ == SessionState::Draining && !tx_wire_active_ && control_q_.empty() &&
       data_q_.empty()) {
@@ -1300,6 +1311,7 @@ void UsbBridge::handle_observation_query(const std::uint64_t request,
   constexpr std::size_t kPageBodyOffset = kGatewayInnerHeadSize + kObservationPageFixed;
   const MutableByteView tx{tx_body_.data(), kGatewayInnerHeadSize + kObservationPageMaxPayload};
   const MutableByteView body{tx_body_.data() + kPageBodyOffset, kObservationPageMaxPayload};
+#if ROUTELOOM_USB_OBSERVATION
   const bool servable =
       (config_.capability & kCapObservationV1) != 0 && observation_source_ != nullptr;
   if (!servable) {
@@ -1474,6 +1486,9 @@ void UsbBridge::handle_observation_query(const std::uint64_t request,
     }
     if (observation_armed_) header.flags |= kObservationPageArmed;
   }
+#else
+  header.result = static_cast<std::uint16_t>(ConfigOpsResult::Unsupported);
+#endif
   header.count = static_cast<std::uint8_t>(count);
   // The body is already staged in tx_body_ at the page-body offset; only
   // the head still needs encoding (over the same prefix it validates).
@@ -1853,6 +1868,7 @@ void UsbBridge::pump_node_events(const MonotonicMs now_ms) noexcept {
 #endif
 }
 
+#if ROUTELOOM_USB_OBSERVATION
 void UsbBridge::refresh_milestone_gen(const JoinMilestones& milestones) noexcept {
   const std::uint32_t key = observation_milestones_key(milestones);
   if (key != observation_milestone_key_) {
@@ -1953,6 +1969,7 @@ void UsbBridge::pump_observation_events(const MonotonicMs now_ms) noexcept {
     observation_milestone_pending_ = false;
   }
 }
+#endif
 
 void UsbBridge::handle_config_query(const std::uint64_t request,
                                     const ByteView inner,
@@ -2886,14 +2903,18 @@ void UsbBridge::reset_session_state() noexcept {
   node_monitor_ms_ = 0;
 #endif
   // The observation subscription belongs to the session that armed it.
+#if ROUTELOOM_USB_OBSERVATION
   observation_armed_ = false;
   observation_topology_mask_ = 0;
   observation_milestone_pending_ = false;
+#endif
   // The 0x08 enable dies with the session (a new session re-enables);
   // the boot-scoped profile id in the same byte survives.
   rx_assurance_ &= static_cast<std::uint8_t>(~kRxAssuranceEnabled);
+#if ROUTELOOM_USB_OBSERVATION
   observation_ms_lo_ = 0;
   observation_seq_ = 0;
+#endif
   // FINAL 0x51 correlation is session state too: request ids are
   // session-scoped, so a new session polls 0x52 instead.
   for (auto& slot : pending_group_) slot = PendingGroup{};
@@ -3110,19 +3131,27 @@ bool reserved_id(const std::uint64_t value) noexcept {
 }  // namespace
 
 bool UsbBridge::host_ready(HostBinding& binding) noexcept {
-  if (!registration_.active || now_ms_ >= registration_.lease_deadline_ms) {
+#if !ROUTELOOM_USB_GATEWAY_ENDPOINT
+  (void)binding;
+  return false;
+#else
+  if (!registration_[0].active || now_ms_ >= registration_[0].lease_deadline_ms) {
     return false;
   }
-  binding.principal_digest = registration_.principal_digest;
-  binding.host_boot = registration_.host_boot;
-  binding.usb_session = registration_.usb_session;
+  binding.principal_digest = registration_[0].principal_digest;
+  binding.host_boot = registration_[0].host_boot;
+  binding.usb_session = registration_[0].usb_session;
   return true;
+#endif
 }
 
 Status UsbBridge::host_ingress(const MessageKey& key,
                                const RequestDigest& request_digest,
                                const ByteView submit_prefix, const ByteView payload,
                                const MonotonicMs now_ms) noexcept {
+  if (!ROUTELOOM_USB_GATEWAY_ENDPOINT) {
+    return Status::error(StatusCode::Unsupported, "gateway endpoint compiled out");
+  }
   return queue_ingress(/*loopback=*/false, key, request_digest, submit_prefix,
                        payload, /*dispatch_seq=*/0, now_ms);
 }
@@ -3210,7 +3239,9 @@ void UsbBridge::free_gateway_send(PendingGatewaySend& send) noexcept {
 }
 
 void UsbBridge::clear_gateway_state() noexcept {
-  registration_ = HostRegistration{};
+#if ROUTELOOM_USB_GATEWAY_ENDPOINT
+  registration_[0] = HostRegistration{};
+#endif
   for (PendingIngress& slot : pending_ingress_) {
     if (slot.occupied && slot.loopback) {
       // The loopback position can never complete after session loss:
@@ -3249,8 +3280,8 @@ void UsbBridge::handle_gateway_submit(const SubmitRequest& submit,
   // The schema-2 binding IS the authority check: token == the live
   // registration token, gateway_boot == this adapter's boot, egress ==
   // this node. Anything else is stale or foreign — never rebound (05 §5.4).
-  if (!registration_.active || now_ms >= registration_.lease_deadline_ms ||
-      fields.gateway_token != registration_.token ||
+  if (!registration_[0].active || now_ms >= registration_[0].lease_deadline_ms ||
+      fields.gateway_token != registration_[0].token ||
       fields.gateway_boot != config_.boot_id ||
       fields.egress_gateway != config_.node) {
     refuse(HostOpsResult::InvalidRequest);
@@ -3294,7 +3325,7 @@ void UsbBridge::handle_gateway_submit(const SubmitRequest& submit,
       (void)writer.write_u8(fields.gateway_scope);
       (void)writer.write_u8(0);
       (void)writer.write_bytes(
-          ByteView{registration_.token.data(), registration_.token.size()});
+          ByteView{registration_[0].token.data(), registration_[0].token.size()});
       (void)writer.write_u64(config_.boot_id);
       (void)writer.write_u16(static_cast<std::uint16_t>(fields.payload.size));
       (void)writer.write_u16(0);
@@ -3384,7 +3415,7 @@ void UsbBridge::handle_gateway_submit(const SubmitRequest& submit,
   HostDigest expected{};
   if (fields.gateway_scope ==
       static_cast<std::uint8_t>(endpoint::GatewayScope::HostReceiveRam)) {
-    expected = registration_.principal_digest;
+    expected = registration_[0].principal_digest;
   }
   const endpoint::GatewayScope scope =
       fields.gateway_scope ==
@@ -3457,29 +3488,29 @@ void UsbBridge::handle_host_register(const std::uint64_t request,
     answer();
     return;
   }
-  if (registration_.active && registration_.host_boot == reg.host_boot &&
-      registration_.usb_session == proof_.session_id) {
+  if (registration_[0].active && registration_[0].host_boot == reg.host_boot &&
+      registration_[0].usb_session == proof_.session_id) {
     // Renewal: same session + same host boot extends the CURRENT token —
     // the host cannot rotate its own binding without a new session.
-    registration_.lease_deadline_ms = now_ms + kHostRegisterLeaseMs;
+    registration_[0].lease_deadline_ms = now_ms + kHostRegisterLeaseMs;
   } else {
     HostDigest digest{};
     sha256(ByteView{transcript_.principal.data(), transcript_.principal_len},
            digest);
-    registration_.active = true;
-    registration_.host_boot = reg.host_boot;
-    registration_.usb_session = proof_.session_id;
-    registration_.principal_digest = digest;
-    registration_.lease_deadline_ms = now_ms + kHostRegisterLeaseMs;
-    ++registration_.counter;
+    registration_[0].active = true;
+    registration_[0].host_boot = reg.host_boot;
+    registration_[0].usb_session = proof_.session_id;
+    registration_[0].principal_digest = digest;
+    registration_[0].lease_deadline_ms = now_ms + kHostRegisterLeaseMs;
+    ++registration_[0].counter;
     // Token = session || counter: unique per (session, register), never
     // zero, never carried across sessions — the binding authenticates it.
-    write_u64(registration_.token.data(), proof_.session_id);
-    write_u64(registration_.token.data() + 8, registration_.counter);
+    write_u64(registration_[0].token.data(), proof_.session_id);
+    write_u64(registration_[0].token.data() + 8, registration_[0].counter);
   }
-  response.token = registration_.token;
+  response.token = registration_[0].token;
   response.gateway_boot = config_.boot_id;
-  response.host_digest = registration_.principal_digest;
+  response.host_digest = registration_[0].principal_digest;
   response.lease_ms = kHostRegisterLeaseMs;
   response.result = static_cast<std::uint16_t>(GatewayOpsResult::Ok);
   answer();
@@ -3516,14 +3547,14 @@ void UsbBridge::handle_host_unregister(const std::uint64_t request,
   }
   // Only the CURRENT session's token may release the registration — a
   // stale or foreign token can never revoke the replacement binding.
-  if (!registration_.active ||
-      unreg.token != registration_.token ||
-      registration_.usb_session != proof_.session_id) {
+  if (!registration_[0].active ||
+      unreg.token != registration_[0].token ||
+      registration_[0].usb_session != proof_.session_id) {
     response.result = static_cast<std::uint16_t>(GatewayOpsResult::Stale);
     answer();
     return;
   }
-  registration_ = HostRegistration{};
+  registration_[0] = HostRegistration{};
   response.result = static_cast<std::uint16_t>(GatewayOpsResult::Ok);
   answer();
 }
@@ -3543,8 +3574,8 @@ void UsbBridge::handle_ingress_ack(const std::uint64_t request,
     ++stats_.rx_errors;
     return;
   }
-  const bool bound = registration_.active &&
-                     ack.token == registration_.token &&
+  const bool bound = registration_[0].active &&
+                     ack.token == registration_[0].token &&
                      ack.ref_origin == slot->key.origin &&
                      ack.ref_session == slot->key.id.session &&
                      ack.ref_sequence == slot->key.id.sequence &&
