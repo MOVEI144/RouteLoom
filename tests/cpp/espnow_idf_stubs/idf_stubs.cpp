@@ -2,7 +2,10 @@
 // test): success defaults, a fake clock, heap-backed FIFOs, and counting
 // hooks for the driver calls under test.
 
+#include <algorithm>
+#include <cstdarg>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <new>
@@ -60,6 +63,8 @@ unsigned g_tx_overruns = 0;
 void (*g_receive_hook)(void*) = nullptr;
 void* g_receive_hook_context = nullptr;
 unsigned g_last_peek_ticks = 0;
+char g_logs[8192] = {};
+std::size_t g_logs_size = 0;
 
 struct FakeQueue {
   std::size_t item_size{0};
@@ -96,6 +101,8 @@ void reset() noexcept {
   g_receive_hook = nullptr;
   g_receive_hook_context = nullptr;
   g_last_peek_ticks = 0;
+  g_logs[0] = '\0';
+  g_logs_size = 0;
 }
 
 void set_receive_hook(void (*hook)(void*), void* context) noexcept {
@@ -104,6 +111,25 @@ void set_receive_hook(void (*hook)(void*), void* context) noexcept {
 }
 
 unsigned last_peek_ticks() noexcept { return g_last_peek_ticks; }
+
+void record_log(const char* tag, const char* format, ...) noexcept {
+  (void)tag;
+  if (format == nullptr || g_logs_size >= sizeof(g_logs) - 1) return;
+  va_list args;
+  va_start(args, format);
+  const int written = std::vsnprintf(g_logs + g_logs_size,
+                                     sizeof(g_logs) - g_logs_size, format, args);
+  va_end(args);
+  if (written < 0) return;
+  g_logs_size += std::min(static_cast<std::size_t>(written),
+                          sizeof(g_logs) - g_logs_size - 1);
+  if (g_logs_size < sizeof(g_logs) - 1) g_logs[g_logs_size++] = '\n';
+  g_logs[g_logs_size] = '\0';
+}
+
+bool log_contains(const char* text) noexcept {
+  return text != nullptr && std::strstr(g_logs, text) != nullptr;
+}
 
 void set_now_us(const std::int64_t now_us) noexcept { g_now_us = now_us; }
 
@@ -320,6 +346,11 @@ void vTaskDelete(const TaskHandle_t task) { (void)task; }
 uint32_t uxTaskGetStackHighWaterMark(const TaskHandle_t task) {
   (void)task;
   return 4096;
+}
+
+const char* pcTaskGetName(const TaskHandle_t task) {
+  (void)task;
+  return "stub";
 }
 
 esp_err_t esp_event_loop_create_default(void) { return ESP_OK; }

@@ -62,6 +62,7 @@ unsigned tx_overruns() noexcept;
 void set_receive_hook(void (*hook)(void* context), void* context) noexcept;
 // Ticks passed to the most recent xQueuePeek.
 unsigned last_peek_ticks() noexcept;
+bool log_contains(const char* text) noexcept;
 
 // Pop the oldest captured TX frame; false when the capture ring is empty.
 bool pop_tx(TxFrame& out) noexcept;

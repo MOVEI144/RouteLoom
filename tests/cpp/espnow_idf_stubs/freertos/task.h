@@ -22,3 +22,4 @@ TaskHandle_t xTaskGetCurrentTaskHandle(void);
 void vTaskDelay(TickType_t ticks);
 void vTaskDelete(TaskHandle_t task);
 uint32_t uxTaskGetStackHighWaterMark(TaskHandle_t task);
+const char* pcTaskGetName(TaskHandle_t task);

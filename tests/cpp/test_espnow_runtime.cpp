@@ -594,6 +594,27 @@ void test_rx_drain_is_bounded_per_pass() {
   runtime.stop();
 }
 
+void test_rx_queue_peak_during_drain() {
+  idf_stub::reset();
+  TestSecurity security;
+  ArrivalObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize().ok());
+  CHECK(runtime.start().ok());
+  CHECK(runtime.register_neighbor(kPeer, peer_mac(), 1).ok());
+  RefillingRadio radio{};
+  radio.security = &security;
+  CHECK(radio.inject_next());
+  idf_stub::set_receive_hook(+[](void* context) {
+    idf_stub::set_receive_hook(nullptr, nullptr);
+    auto& source = *static_cast<RefillingRadio*>(context);
+    while (source.injected <= EspNowRuntime::kEventQueueCapacity && source.inject_next()) {}
+  }, &radio);
+  runtime.poll_once();
+  CHECK(runtime.owner_stats().rx_queue_max == EspNowRuntime::kEventQueueCapacity);
+  runtime.stop();
+}
+
 // The Owner wait rounds up to whole ticks: a 2 ms wait under the 100 Hz
 // stub tick blocks one tick instead of zero (a busy spin).
 void test_owner_wait_rounds_up_to_a_tick() {
@@ -607,6 +628,22 @@ void test_owner_wait_rounds_up_to_a_tick() {
   CHECK(idf_stub::last_peek_ticks() == 1);
   runtime.wait_for_event(15);
   CHECK(idf_stub::last_peek_ticks() == 2);
+  runtime.wait_for_event(UINT64_MAX / configTICK_RATE_HZ + 1);
+  CHECK(idf_stub::last_peek_ticks() == UINT32_MAX - 1);
+  runtime.stop();
+}
+
+void test_owner_trace_includes_node_work() {
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize().ok());
+  CHECK(runtime.start().ok());
+  idf_stub::advance_ms(60000);
+  runtime.poll_once();
+  CHECK(idf_stub::log_contains("owner expiry_slots="));
+  CHECK(idf_stub::log_contains("hop_accept_expired="));
   runtime.stop();
 }
 
@@ -1323,7 +1360,9 @@ int main() {
   test_prestart_owner_pump();
   test_owner_drives_config_component();
   test_rx_drain_is_bounded_per_pass();
+  test_rx_queue_peak_during_drain();
   test_owner_wait_rounds_up_to_a_tick();
+  test_owner_trace_includes_node_work();
   test_security_callback_cannot_reenter_owner_lease();
   test_p6_binding_tracks_current_receive_context();
   test_reliable_to_static_peer_uses_binding();

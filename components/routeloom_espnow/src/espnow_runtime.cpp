@@ -31,8 +31,14 @@ constexpr std::uint32_t kAutonomyWireLifetimeMs = 500;
 // a 100 Hz tick the 2 ms Owner wait would be 0 ticks, a busy spin.
 TickType_t ms_to_ticks_ceil(const std::uint64_t ms) noexcept {
   constexpr std::uint64_t kMaxTicks = portMAX_DELAY - 1;  // portMAX_DELAY waits forever
-  const std::uint64_t ticks = (ms * configTICK_RATE_HZ + 999U) / 1000U;
-  return static_cast<TickType_t>(ticks == 0 ? 1 : std::min(ticks, kMaxTicks));
+  constexpr std::uint64_t kTickRate = configTICK_RATE_HZ;
+  const std::uint64_t whole_ms = ms / 1000U;
+  const std::uint64_t fraction = (ms % 1000U * kTickRate + 999U) / 1000U;
+  if (whole_ms > kMaxTicks / kTickRate) return static_cast<TickType_t>(kMaxTicks);
+  const std::uint64_t whole_ticks = whole_ms * kTickRate;
+  if (fraction >= kMaxTicks - whole_ticks) return static_cast<TickType_t>(kMaxTicks);
+  const std::uint64_t ticks = whole_ticks + fraction;
+  return static_cast<TickType_t>(ticks == 0 ? 1 : ticks);
 }
 
 void saturating_inc(std::uint32_t& counter) noexcept {
@@ -864,6 +870,10 @@ void EspNowRuntime::poll_once() noexcept {
              static_cast<unsigned long>(owner_stats_.max_bootstrap_us),
              static_cast<unsigned long>(owner_stats_.max_node_us),
              static_cast<unsigned long>(owner_stats_.max_security_us));
+    const NodeWorkStats& node_work = node_.work_stats();
+    ESP_LOGI(kTag, "owner expiry_slots=%llu hop_accept_expired=%llu",
+             static_cast<unsigned long long>(node_work.expiry_slots_scanned),
+             static_cast<unsigned long long>(node_work.hop_accept_expired));
 #if CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY
     ESP_LOGI(kTag, "HIL HEAP free=%lu largest=%lu min=%lu B",
              static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
@@ -900,10 +910,6 @@ void EspNowRuntime::poll_once() noexcept {
   }
 #endif
   const std::uint64_t rx_start_us = now_us();
-  {
-    const UBaseType_t depth = uxQueueMessagesWaiting(event_queue_);
-    if (depth > owner_stats_.rx_queue_max) owner_stats_.rx_queue_max = depth;
-  }
   Event event{};
   // The dedicated reserved-completion slot drains FIRST — it resolves the
   // node's outstanding job and is never displaced by raw traffic.
@@ -965,8 +971,10 @@ void EspNowRuntime::poll_once() noexcept {
   // Bounded drain (kRxDrainPerPass): whatever stays queued runs first in
   // the next pass, after this pass's timers, node poll and components.
   std::size_t drained = 0;
-  while (drained < kRxDrainPerPass &&
-         xQueueReceive(event_queue_, &event, 0) == pdTRUE) {
+  while (drained < kRxDrainPerPass) {
+    const UBaseType_t depth = uxQueueMessagesWaiting(event_queue_);
+    if (depth > owner_stats_.rx_queue_max) owner_stats_.rx_queue_max = depth;
+    if (xQueueReceive(event_queue_, &event, 0) != pdTRUE) break;
     ++drained;
     if (event.kind == EventKind::Tx) {
       // Telemetry gets every completion lane; the node's job resolution only

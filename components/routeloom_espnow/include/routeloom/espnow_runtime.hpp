@@ -114,7 +114,7 @@ class EspNowRuntime final : public RadioPort,
   struct OwnerStats {
     std::uint32_t polls{0};
     std::uint32_t empty_polls{0};   // passes that drained no queued event
-    std::uint32_t rx_queue_max{0};  // deepest event queue seen at a pass start
+    std::uint32_t rx_queue_max{0};  // deepest event queue seen during a pass
     std::uint32_t max_rx_us{0};
     std::uint32_t max_bootstrap_us{0};
     std::uint32_t max_node_us{0};
