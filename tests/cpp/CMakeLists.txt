@@ -349,12 +349,17 @@ add_test(NAME routeloom_fault_tests COMMAND routeloom_fault_tests)
 # Dedup capacity classes (sdk-completion/02-dedup-capacity.md, issue #9):
 # phase births/eviction order/reserve/upstream cap/evidence cap + replay,
 # retention bounds, class-(a) delivery eviction, and continuous-send
-# below/above capacity with honest saturation.
-add_executable(routeloom_dedup_tests test_dedup.cpp)
-target_link_libraries(routeloom_dedup_tests PRIVATE routeloom_core)
-target_include_directories(routeloom_dedup_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_options(routeloom_dedup_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
-add_test(NAME routeloom_dedup_tests COMMAND routeloom_dedup_tests)
+# below/above capacity with honest saturation. The fills are sized for the
+# relay capacity (96); builds with another dedup capacity cover it through
+# the mesh suites instead (tools/check.py profiles).
+get_target_property(_routeloom_core_defs routeloom_core INTERFACE_COMPILE_DEFINITIONS)
+if("ROUTELOOM_DEDUP_CAPACITY=96" IN_LIST _routeloom_core_defs)
+  add_executable(routeloom_dedup_tests test_dedup.cpp)
+  target_link_libraries(routeloom_dedup_tests PRIVATE routeloom_core)
+  target_include_directories(routeloom_dedup_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_compile_options(routeloom_dedup_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME routeloom_dedup_tests COMMAND routeloom_dedup_tests)
+endif()
 
 add_executable(routeloom_node_status_tests test_node_status.cpp)
 target_link_libraries(routeloom_node_status_tests PRIVATE routeloom_core)

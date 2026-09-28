@@ -271,6 +271,8 @@ struct CoordinatorSnapshot {
   std::uint32_t link_sessions{0};
   std::uint32_t end_sessions{0};
   std::uint32_t demands{0};
+  // Idle end contexts evicted to admit a new peer (profile end capacity).
+  std::uint32_t end_evictions{0};
   std::uint16_t resume_link_slots{0};
   std::uint16_t resume_end_slots{0};
   // Authority channel (G-SEC P5): live once the member config lands and
@@ -817,6 +819,11 @@ class SecurityCoordinator final : public BootstrapSink,
   void drain_staged(MonotonicMs now) noexcept;
   void handle_bootstrap_frame(const StagedFrame& frame, MonotonicMs now) noexcept;
   void handle_end_single(const BootstrapMeta& meta, ByteView payload, MonotonicMs now) noexcept;
+  // Hands a join-relay frame the proxy saw to the gateway engine: gateway
+  // profiles only, and only while the site grants this node the gateway
+  // role.
+  void gateway_relay_rx(const BootstrapMeta& meta, FrameType type, ByteView payload,
+                        MonotonicMs now) noexcept;
   void handle_end_chunk(const BootstrapMeta& meta, ByteView payload, MonotonicMs now) noexcept;
   // --- Joiner legs ---
   void drain_joiner(MonotonicMs now) noexcept;
@@ -848,7 +855,7 @@ class SecurityCoordinator final : public BootstrapSink,
     ResumeCache2 resume_cache;
     MemberCookie member_cookie;
     HandshakeEngine engine;
-    BootstrapDemandDriver<32, 128> demands;
+    BootstrapDemandDriver<profile::kLinkSessions, profile::kEndSessions> demands;
     BootstrapBudgets budgets;
     // One TX + one RX assembly per lane: member link (RLD1, join lane)
     // and member end-session (mesh, end lane) chunk independently — one
@@ -862,10 +869,12 @@ class SecurityCoordinator final : public BootstrapSink,
     NodeId end_tx_peer{kInvalidNodeId};
     MonotonicMs end_tx_last_attempt_ms{0};
     JoinProxy proxy;
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
+    // Join relay (gateway profiles only): the gateway engine and the
+    // colocated proxy use one Owner callback stack. Defer local relay
+    // frames until poll so replies and chunk receipts never re-enter
+    // either engine's guarded port callback.
     JoinRelayGateway gateway;
-    // A colocated gateway and proxy use one Owner callback stack. Defer
-    // local relay frames until poll so replies and chunk receipts never
-    // re-enter either engine's guarded port callback.
     static constexpr std::size_t kLocalRelaySlots = 16;
     struct LocalRelayFrame {
       FrameType type{FrameType::BootstrapAuth};
@@ -875,16 +884,17 @@ class SecurityCoordinator final : public BootstrapSink,
     std::array<LocalRelayFrame, kLocalRelaySlots> local_relay{};
     std::uint8_t local_relay_head{0};
     std::uint8_t local_relay_count{0};
+#endif
     std::array<DemuxEntry, kDemuxEntries> demux{};
+    // Always false outside the gateway profiles.
     bool gateway_active{false};
 
-    MemberEngine(ResumeSlotStorage2& resume, GatewaySessionBank& bank,
-                 BankSessionSink<32, 128>& sink, HandshakeMembershipView& membership,
-                 SessionCredentialVerifier& verifier, EntropySource& entropy, ZtRld1Port& rld1,
-                 ZtRelayPort& relay, JoinCookieSealer& sealer,
-                 const JoinProxyConfig& proxy_config,
-                 const JoinRelayGatewayConfig& gateway_config,
-                 const edhoc::AeadCcm* aead) noexcept;
+    MemberEngine(ResumeSlotStorage2& resume, ProfileSessionBank& bank,
+                 BankSessionSink<profile::kLinkSessions, profile::kEndSessions>& sink,
+                 HandshakeMembershipView& membership, SessionCredentialVerifier& verifier,
+                 EntropySource& entropy, ZtRld1Port& rld1, ZtRelayPort& relay,
+                 JoinCookieSealer& sealer, const JoinProxyConfig& proxy_config,
+                 const JoinRelayGatewayConfig& gateway_config, const edhoc::AeadCcm* aead) noexcept;
   };
 
   // Tagged by mode_: joiner iff ZeroTouch, member iff Member or Dev,
@@ -983,9 +993,9 @@ class SecurityCoordinator final : public BootstrapSink,
   // channel stay outside the union too: a stale-GK refresh destroys the
   // member engine around them without resetting group counters, replay
   // windows or the adopted scope.
-  GatewaySessionBank bank_;
-  BankSessionSink<32, 128> bank_sink_;
-  RamSessionProvider<32, 128> pairwise_provider_;
+  ProfileSessionBank bank_;
+  BankSessionSink<profile::kLinkSessions, profile::kEndSessions> bank_sink_;
+  RamSessionProvider<profile::kLinkSessions, profile::kEndSessions> pairwise_provider_;
   GroupKeyState group_keys_;
   GroupSecurityProvider group_provider_;
   // Mode sides (exactly one live; tagged by mode_): the member small

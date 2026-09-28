@@ -919,12 +919,12 @@ def validate(root: Path) -> dict:
             r"^\s*config ROUTELOOM_DEDUP_CAPACITY\b(.*?)(?=^\s*(?:config|choice|menu|endmenu)\b)",
             kconfig, re.M | re.S,
         )
-        kconfig_caps = sorted(
+        kconfig_caps = sorted({
             int(value)
             for value in re.findall(
                 r"^\s*default (\d+)\b", dedup_block.group(1) if dedup_block else "", re.M
             )
-        )
+        })
         test(
             "dedup_kconfig_capacities",
             kconfig_caps == sorted(profile_entries.values()),

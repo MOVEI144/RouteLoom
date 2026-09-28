@@ -30,6 +30,7 @@
 #include <cstdint>
 
 #include "routeloom/authority.hpp"
+#include "routeloom/profile.hpp"
 #include "routeloom/sdkv1_records.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
@@ -338,6 +339,25 @@ constexpr std::size_t kResume2NodeLinkQuota = 12;
 constexpr std::size_t kResume2NodeEndQuota = 4;
 constexpr std::size_t kResume2GatewayLinkQuota = 32;
 constexpr std::size_t kResume2GatewayEndQuota = 128;
+
+// Purpose quotas of a resume storage with `slots` slots, among the
+// geometries the resource profile allows (profile.hpp: the node geometry
+// everywhere, the gateway geometry on gateway profiles only). Anything else
+// is {0, 0}, which the cache refuses as a geometry mismatch.
+struct ResumeQuota {
+  std::size_t link{0};
+  std::size_t end{0};
+};
+constexpr ResumeQuota resume_quota(const std::size_t slots) noexcept {
+  if (profile::kResumeGatewayGeometry &&
+      slots == kResume2GatewayLinkQuota + kResume2GatewayEndQuota) {
+    return {kResume2GatewayLinkQuota, kResume2GatewayEndQuota};
+  }
+  if (slots == kResume2NodeLinkQuota + kResume2NodeEndQuota) {
+    return {kResume2NodeLinkQuota, kResume2NodeEndQuota};
+  }
+  return {};
+}
 
 class ResumeCache2 {
  public:

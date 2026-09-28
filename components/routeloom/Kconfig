@@ -72,17 +72,74 @@ menu "RouteLoom"
             figure from measured per-target offsets; this is the on-device
             check of the real number (docs/design/sdk-v1/ram-budget.md).
 
+    choice ROUTELOOM_RESOURCE_PROFILE
+        prompt "Resource profile"
+        default ROUTELOOM_RESOURCE_PROFILE_RELAY
+        help
+            Compile-time capacities of the Owner, MeshNode and USB bridge
+            (include/routeloom/profile.hpp). The end-session count is the
+            number of peers holding a live end-to-end key at once, not the
+            mesh size: a full table evicts the oldest idle context and
+            RLRES1 restores it on the next send.
+
+        config ROUTELOOM_RESOURCE_PROFILE_ENDPOINT
+            bool "endpoint (8 end sessions, 16 routes, no join relay or USB)"
+        config ROUTELOOM_RESOURCE_PROFILE_RELAY
+            bool "relay (8 end sessions, no join relay gateway or USB)"
+        config ROUTELOOM_RESOURCE_PROFILE_GATEWAY_SMALL
+            bool "gateway_small (64 end sessions; ESP32-C3 gateway)"
+        config ROUTELOOM_RESOURCE_PROFILE_GATEWAY
+            bool "gateway (128 end sessions)"
+        config ROUTELOOM_RESOURCE_PROFILE_FULL
+            bool "full (every table at its maximum; host tests)"
+    endchoice
+
+    config ROUTELOOM_RESOURCE_PROFILE_ID
+        int
+        default 1 if ROUTELOOM_RESOURCE_PROFILE_ENDPOINT
+        default 3 if ROUTELOOM_RESOURCE_PROFILE_GATEWAY_SMALL
+        default 4 if ROUTELOOM_RESOURCE_PROFILE_GATEWAY
+        default 5 if ROUTELOOM_RESOURCE_PROFILE_FULL
+        default 2
+
+    choice ROUTELOOM_ROLE
+        prompt "Device role"
+        default ROUTELOOM_ROLE_RELAY
+        help
+            The role this image runs. A role above the resource profile
+            (a gateway on a relay or endpoint profile, a relay on an
+            endpoint profile) is refused before RF starts with
+            RESOURCE_PROFILE_ROLE_MISMATCH.
+
+        config ROUTELOOM_ROLE_ENDPOINT
+            bool "endpoint"
+        config ROUTELOOM_ROLE_RELAY
+            bool "relay"
+        config ROUTELOOM_ROLE_GATEWAY
+            bool "gateway (USB-attached)"
+    endchoice
+
+    config ROUTELOOM_ROLE_ID
+        int
+        default 1 if ROUTELOOM_ROLE_ENDPOINT
+        default 3 if ROUTELOOM_ROLE_GATEWAY
+        default 2
+
     choice ROUTELOOM_DEDUP_PROFILE
-        prompt "Dedup capacity profile"
-        default ROUTELOOM_DEDUP_PROFILE_RELAY
+        prompt "Dedup capacity"
+        default ROUTELOOM_DEDUP_PROFILE_DEFAULT
         help
             Compile-time capacity of the node's duplicate-suppression pool
             (docs/reference/resource-profiles.json dedup_entries). Each record
             is 136 bytes of static RAM inside MeshNode (the budget allows 152).
             Terminal pins may use at most 7/8 of the pool; a relay's transit
             records are held only for the frame's own deadline plus a short
-            slack. Static RAM per role: docs/design/sdk-v1/ram-budget.md.
+            slack. The resource profile sets the default (32 for endpoint and
+            gateway_small, 96 otherwise); the other entries pin a size per
+            image. Static RAM per role: docs/design/sdk-v1/ram-budget.md.
 
+        config ROUTELOOM_DEDUP_PROFILE_DEFAULT
+            bool "resource profile default"
         config ROUTELOOM_DEDUP_PROFILE_LEAF
             bool "leaf-small (32 records)"
         config ROUTELOOM_DEDUP_PROFILE_RELAY
@@ -94,8 +151,41 @@ menu "RouteLoom"
     config ROUTELOOM_DEDUP_CAPACITY
         int
         default 32 if ROUTELOOM_DEDUP_PROFILE_LEAF
+        default 96 if ROUTELOOM_DEDUP_PROFILE_RELAY
         default 256 if ROUTELOOM_DEDUP_PROFILE_GATEWAY
+        default 32 if ROUTELOOM_RESOURCE_PROFILE_ENDPOINT || ROUTELOOM_RESOURCE_PROFILE_GATEWAY_SMALL
         default 96
+
+    menu "USB bridge optional features"
+        depends on ROUTELOOM_RESOURCE_PROFILE_GATEWAY_SMALL || ROUTELOOM_RESOURCE_PROFILE_GATEWAY || ROUTELOOM_RESOURCE_PROFILE_FULL
+
+        config ROUTELOOM_USB_NODE_STATUS
+            bool "node_status_v1 (HostOps 0x40-0x42)"
+            default n if ROUTELOOM_RESOURCE_PROFILE_GATEWAY_SMALL
+            default y
+            help
+                Per-node link/route tracking for the 0x40 pages and 0x42
+                events. Off: attach_node_status() answers Unsupported and
+                capability bit 6 is never advertised.
+
+        config ROUTELOOM_USB_GATEWAY_ENDPOINT
+            bool "gateway_endpoint_v1 and config_endpoint_v1 (HostOps 0x10-0x25)"
+            default n if ROUTELOOM_RESOURCE_PROFILE_GATEWAY_SMALL
+            default y
+            help
+                Host registration, ingress and remote-gateway send slots of
+                the explicit gateway endpoint, and the routed config lane.
+                Off: attach_gateway()/attach_config() answer Unsupported and
+                capability bits 3-4 are never advertised.
+
+        config ROUTELOOM_USB_GROUP
+            bool "group_delivery_v1 (HostOps 0x50-0x52)"
+            default y
+
+        config ROUTELOOM_USB_OBSERVATION
+            bool "observation_v1 (HostOps 0x70-0x72)"
+            default y
+    endmenu
 
     choice ROUTELOOM_SECURITY_MODE
         prompt "Security owner profile"

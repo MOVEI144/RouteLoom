@@ -111,9 +111,11 @@ struct SecurityCoordinatorTestAccess {
     reply.received = received;
     return coordinator.member().end_tx.on_reply(reply, now);
   }
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
   static JoinRelayGateway& gateway(SecurityCoordinator& coordinator) noexcept {
     return coordinator.member().gateway;
   }
+#endif
 };
 }  // namespace routeloom::sdkv1
 
@@ -1171,6 +1173,7 @@ void test_epoch_reply_routes_to_proxy() {
   CHECK(SecurityCoordinatorTestAccess::proxy_stats(coordinator).frames_rejected == rej0 + 1);
 }
 
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
 namespace {
 // Captures the hops of the first relay_up handed to the host.
 struct HopsTap final : public JoinRelayHostSink {
@@ -1239,6 +1242,7 @@ void test_relay_hops_direct_is_one() {
   CHECK(tap.seen);
   CHECK(tap.hops == 1);
 }
+#endif
 
 void test_usb_queue_admission() {
   current = "usb_queue_admission";
@@ -2906,7 +2910,9 @@ int main() {
   test_gateway_resume_quotas();
   test_staged_bootstrap_rx();
   test_epoch_reply_routes_to_proxy();
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
   test_relay_hops_direct_is_one();
+#endif
   test_usb_queue_admission();
   test_usb_refused_without_gateway_role();
   test_relay_loopback_and_mesh_send();

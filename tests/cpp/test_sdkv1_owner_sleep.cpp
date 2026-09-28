@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <string>
 
+#include "routeloom/crc32.hpp"
+#include "routeloom/profile.hpp"
 #include "routeloom/sdkv1_session_rtc.hpp"
 
 #include "test_sdkv1_owner_sim.hpp"
@@ -710,13 +712,14 @@ void test_member_sleep_warm_restore() {
 void test_member_sleep_unsafe_restore_refused() {
   // Every unsafe wake shape refuses and resumes cold: cold boot, missing
   // marker, unknown or excessive elapsed, skipped boot, changed parent
-  // (re-bound before restore, or while the image is held). Each variant
+  // (re-bound before restore, or while the image is held), an image
+  // written under another resource profile (a CRC-valid tag). Each variant
   // pins its refusal code, so a refusal for the wrong reason fails. The
   // refused restore installs nothing — the discovery-driven fresh
   // handshake cold-resumes on new keys instead — and the refusal latches
   // for the boot while the port is one-shot consumed.
   current = "member_sleep_unsafe_restore_refused";
-  for (int variant = 0; variant < 7; ++variant) {
+  for (int variant = 0; variant < 8; ++variant) {
     SimPair pair{};
     MonotonicMs now = kSimT0 + static_cast<MonotonicMs>(variant) * 1000000;
     CHECK(boot_member_pair(pair, now));
@@ -736,6 +739,14 @@ void test_member_sleep_unsafe_restore_refused() {
     if (variant == 2) elapsed = 0;
     if (variant == 3) elapsed = 24U * 3600U * 1000U;
     if (variant == 4) wake_boot = boot + 1;  // skipped boot: never source + 1
+    if (variant == 7) {
+      // Header byte 67 tags the writing build's resource profile.
+      backing[67] = static_cast<std::uint8_t>(profile::kResourceProfileId % 5 + 1);
+      const std::uint32_t crc = crc32_iso_hdlc(ByteView{backing.data(), backing.size() - 4});
+      for (std::size_t i = 0; i < 4; ++i) {
+        backing[backing.size() - 4 + i] = static_cast<std::uint8_t>(crc >> (24 - 8 * i));
+      }
+    }
     if (variant == 6) {
       // Held from the first tick after discovery attached (nothing could
       // have bound yet): the image waits while the parent comes back
@@ -743,7 +754,7 @@ void test_member_sleep_unsafe_restore_refused() {
       CHECK(pair.a.coordinator().restore_sleep_image(rtc, wake_boot, elapsed, deep, marker).code ==
             StatusCode::Busy);
     }
-    if (variant >= 5) {
+    if (variant == 5 || variant == 6) {
       // The parent comes back under a new radio MAC (replacement unit):
       // re-bind it fully, then the MAC gate must refuse. Variant 6 holds
       // the image throughout, so the re-confirmation skips on the MAC
@@ -791,7 +802,7 @@ void test_member_sleep_unsafe_restore_refused() {
     // before decoding, and a replaced parent fails the radio MAC gate.
     StatusCode want = StatusCode::IntegrityError;
     if (variant == 4) want = StatusCode::InvalidArgument;
-    if (variant >= 5) want = StatusCode::AuthorizationFailed;
+    if (variant == 5 || variant == 6) want = StatusCode::AuthorizationFailed;
     CHECK(refused.code == want);
     std::uint32_t epoch = 1;
     const Status live =

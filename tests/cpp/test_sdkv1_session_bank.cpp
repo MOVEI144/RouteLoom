@@ -14,6 +14,8 @@
 #include <cstring>
 
 #include "routeloom/key_schedule.hpp"
+#include "routeloom/profile.hpp"
+#include "routeloom/sdkv1_handshake.hpp"
 #include "routeloom/security.hpp"
 #include "routeloom/session_bank.hpp"
 
@@ -975,6 +977,59 @@ void suite_gateway_capacity(const AeadGcm& port) {
   CHECK(fix.bank.context_id_live(0x20001));
 }
 
+ContextKeys end_keys(const std::size_t i) {
+  ContextKeys keys{};
+  keys.scope = SecurityScope::EndToEnd;
+  keys.network = kNet;
+  keys.peer = 5000 + i;
+  keys.tx_context_id = static_cast<std::uint32_t>(0x10000 + i);
+  keys.rx_context_id = static_cast<std::uint32_t>(0x20000 + i);
+  keys.tx_key.fill(static_cast<std::uint8_t>(i + 1));
+  keys.rx_key.fill(static_cast<std::uint8_t>(i + 2));
+  keys.tx_iv.fill(static_cast<std::uint8_t>(i + 3));
+  keys.rx_iv.fill(static_cast<std::uint8_t>(i + 4));
+  return keys;
+}
+
+// The Owner's install path on the profile-sized bank (profile.hpp; 8, 64
+// or 128 end contexts): N end installs fit, the N+1st evicts the oldest
+// idle context and never one with a seal in flight, a table with every
+// context busy stays NoCapacity, and the link table never evicts.
+void suite_profile_end_eviction(const AeadGcm& port) {
+  constexpr std::size_t kEnd = profile::kEndSessions;
+  Fixture<ProfileSessionBank> fix;
+  CHECK_OK(fix.configure(port));
+  BankSessionSink<profile::kLinkSessions, profile::kEndSessions> sink(fix.bank);
+  InstallAttestation att{};
+  att.created_gk_epoch = kGk;
+  for (std::size_t i = 0; i < kEnd; ++i) CHECK_OK(sink.install_verified(end_keys(i), att));
+  CHECK(fix.bank.live_count(SecurityScope::EndToEnd) == kEnd && sink.end_evictions() == 0);
+  // The oldest context (peer 5000) has a seal in flight: 5001 goes.
+  std::uint64_t counter = 0;
+  CHECK_OK(fix.bank.next_counter(seal_context(SecurityScope::EndToEnd, 5000, 0x10000), counter));
+  CHECK_OK(sink.install_verified(end_keys(kEnd), att));
+  CHECK(sink.end_evictions() == 1 && fix.bank.live_count(SecurityScope::EndToEnd) == kEnd);
+  CHECK(fix.bank.has_usable(SecurityScope::EndToEnd, 5000));
+  CHECK(!fix.bank.has_usable(SecurityScope::EndToEnd, 5001));
+  CHECK(fix.bank.has_usable(SecurityScope::EndToEnd, 5000 + kEnd));
+  // Every context busy: the next peer is refused and nothing is evicted.
+  for (std::size_t i = 2; i <= kEnd; ++i) {
+    CHECK_OK(fix.bank.next_counter(
+        seal_context(SecurityScope::EndToEnd, 5000 + i, static_cast<std::uint32_t>(0x10000 + i)),
+        counter));
+  }
+  CHECK(sink.install_verified(end_keys(kEnd + 1), att).code == StatusCode::NoCapacity);
+  CHECK(sink.end_evictions() == 1 && fix.bank.live_count(SecurityScope::EndToEnd) == kEnd);
+  for (std::size_t i = 0; i < profile::kLinkSessions; ++i) {
+    install_link(fix.bank, 7000 + i, static_cast<std::uint32_t>(0x50000 + i),
+                 static_cast<std::uint32_t>(0x60000 + i), static_cast<std::uint8_t>(i));
+  }
+  ContextKeys link = end_keys(kEnd + 2);
+  link.scope = SecurityScope::Link;
+  CHECK(sink.install_verified(link, att).code == StatusCode::NoCapacity);
+  CHECK(sink.end_evictions() == 1);
+}
+
 #ifdef ROUTELOOM_HAVE_OPENSSL
 void suite_nist_gcm() {
   // NIST gcmEncryptExtIV128 cases 1-2 through the bank's own port shape,
@@ -1129,6 +1184,7 @@ int main() {
     const AeadGcm port{&TestAead::seal, &TestAead::open, &adapter};
     run_suite<NodeSessionBank>(port, adapter.fail_next);
     suite_gateway_capacity(port);
+    suite_profile_end_eviction(port);
   }
 #ifdef ROUTELOOM_HAVE_OPENSSL
   {
