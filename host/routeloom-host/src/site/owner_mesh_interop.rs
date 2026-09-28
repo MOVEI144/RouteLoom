@@ -2892,6 +2892,56 @@ fn mesh_route_loss_old_callback_cannot_complete_new_send() {
     );
 }
 
+/// The driver models the 20 physical slots while the runtime enforces
+/// sixteen regular mappings. A refused extra peer cannot evict live BINDs.
+#[test]
+fn mesh_route_loss_peer_capacity_keeps_live_bindings() {
+    let Some(mut world) = route_loss_world("route-capacity", Switch::direct(), false) else {
+        return;
+    };
+    world.pump_until(1000, |snaps| {
+        snaps[0].phases[1] == PHASE_REACHABLE && snaps[0].phases[2] == PHASE_REACHABLE
+    });
+    let regular = usize::from(world.snaps[0].driver_peers - 1);
+    assert!(regular <= 16, "broadcast plus regular table");
+    let fill = 16 - regular;
+    for index in 0..fill {
+        let (ok, peers) = world.peers[0].peer_slot(b'V', index as u8);
+        assert!(ok, "regular slot {index}");
+        assert_eq!(usize::from(peers), regular + index + 2);
+    }
+    let (ok, peers) = world.peers[0].peer_slot(b'V', fill as u8);
+    assert!(!ok, "17th regular refused");
+    assert_eq!(peers, 17);
+    if fill > 0 {
+        let (ok, peers) = world.peers[0].peer_slot(b'V', 0);
+        assert!(ok, "same MAC re-registration succeeds");
+        assert_eq!(peers, 17);
+    }
+    for index in 0..3 {
+        let (ok, peers) = world.peers[0].peer_slot(b'I', index);
+        assert!(ok, "transient driver slot {index}");
+        assert_eq!(peers, 18 + index);
+    }
+    let (ok, peers) = world.peers[0].peer_slot(b'I', 3);
+    assert!(!ok, "21st physical peer refused");
+    assert_eq!(peers, 20);
+    world.peers[0].fail_driver_release(true);
+    let (ok, peers) = world.peers[0].peer_slot(b'J', 0);
+    assert!(!ok, "failed driver deletion kept its slot");
+    assert_eq!(peers, 20);
+    world.peers[0].fail_driver_release(false);
+    for index in 0..3 {
+        let (ok, peers) = world.peers[0].peer_slot(b'J', index);
+        assert!(ok, "release transient {index}");
+        assert_eq!(peers, 19 - index);
+    }
+    let received = world.snaps[1].rx_count;
+    world.peers[0].app_send(NODE_A, b"capacity-survivor");
+    world.pump_until(2000, |snaps| snaps[1].rx_count > received);
+    assert_eq!(world.snaps[1].rx, b"capacity-survivor");
+}
+
 /// Phase-1 convergence on the direct radio: all three Owners adopt
 /// from their Phase-0 images (member boots, no rejoins), open their
 /// authority channels through the gateway's real USB relay, confirm,
