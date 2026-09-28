@@ -211,15 +211,18 @@ def profiles(only: str | None = None) -> list[Step]:
 
 def profile_mesh() -> list[Step]:
     peer = "tests/cpp/routeloom_owner_mesh_peer"
+    joiner_peer = "tests/cpp/routeloom_joiner_interop_peer"
     mix = {"ROUTELOOM_MESH_PEER_GW": "build-gateway-small",
            "ROUTELOOM_MESH_PEER_A": "build-endpoint", "ROUTELOOM_MESH_PEER_B": "build-relay32"}
     steps = []
     for build in mix.values():
         steps += [profile_configure(build),
                   Step(["cmake", "--build", build, "--parallel", JOBS, "--target",
-                        "routeloom_owner_mesh_peer"])]
+                        "routeloom_owner_mesh_peer", "routeloom_joiner_interop_peer"])]
     env = {"ROUTELOOM_OWNER_PEER": str(ROOT / PEER), "ROUTELOOM_MESH_PEER": str(ROOT / MESH_PEER),
            **{key: str(ROOT / build / peer) for key, build in mix.items()},
+           **{key.replace("MESH", "OWNER"): str(ROOT / build / joiner_peer)
+              for key, build in mix.items()},
            "UBSAN_OPTIONS": "halt_on_error=1"}
     steps += [
         Step(["cmake", "-S", ".", "-B", "build", "-DROUTELOOM_BUILD_TESTS=ON",

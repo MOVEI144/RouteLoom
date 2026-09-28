@@ -19,6 +19,8 @@
 //!
 //! Peers come from `ROUTELOOM_MESH_PEER` (new) and `ROUTELOOM_OWNER_PEER`
 //! (legacy, Phase 0) or the CMake build tree next to this workspace.
+//! `ROUTELOOM_{MESH,OWNER}_PEER_{GW,A,B}` select profile-built peers for
+//! each persona in the mixed-profile run.
 //! With either missing, every test skips (ignore-equivalent, never
 //! a failure); the CI interop job builds both peers and always runs
 //! them live. Time is one virtual clock shared by all peers and the
@@ -98,6 +100,7 @@ const SEED_B: u8 = 0xA3;
 // reference firmware.
 const ROLE_GW: u8 = 7;
 const ROLE_MEMBER: u8 = 3;
+const ROLE_ENDPOINT: u8 = 1;
 // Gateway USB HelloAck capability: HostOps + join relay v2 + authority
 // channel (the bits the mesh harness exercises).
 const USB_CAP: u32 = (1 << 2) | (1 << 9) | (1 << 10);
