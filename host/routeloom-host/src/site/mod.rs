@@ -109,8 +109,7 @@ use records::{
 use store::{Batch, DeviceRow, DocKind, GroupKeyRow, LedgerRow, RotationWrite, SiteStore};
 use transport::{
     AbortReason, DownStatus, JoinTransport, Outbound, RelayDown, RelayKey, RelayUp, PHASE_EDHOC,
-    PHASE_RRS_DELIVERY,
-    STEP_EDHOC_ERROR,
+    PHASE_RRS_DELIVERY, STEP_EDHOC_ERROR,
 };
 
 /// Concurrent join exchanges (02 §13 "authority同時参加 4件").
@@ -2635,7 +2634,7 @@ impl SiteAuthority {
                                 receipt.generation,
                                 receipt.network,
                                 &receipt.body,
-                                time.unix_ms,
+                                time,
                             );
                         }
                     }
@@ -5070,13 +5069,6 @@ impl SiteAuthority {
             self.end_cutover_grace();
         }
         self.last_channel_mono_ms = time.mono_ms;
-        if std::env::var_os("D04DBG").is_some() {
-            eprintln!(
-                "D04DBG auth_up dev={device:x} kind={kind:?} len={} mono={}",
-                bytes.len(),
-                time.mono_ms
-            );
-        }
         if self
             .rrs_transport
             .as_ref()
@@ -5445,7 +5437,7 @@ impl SiteAuthority {
     fn old_binding_in_grace(&self, node: u64, mono_ms: u64) -> bool {
         if self
             .cutover_grace()
-            .is_none_or(|(_, until)| mono_ms >= until)
+            .map_or(true, |(_, until)| mono_ms >= until)
         {
             return false;
         }

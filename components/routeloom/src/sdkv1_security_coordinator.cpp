@@ -773,10 +773,6 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
     NeighborDiscovery::MemberStartRequest start{};
     if (!deps_.discovery->take_member_start(start, now).ok()) break;
     sat_inc(counters_.member_starts);
-    fprintf(stderr, "DBG coord: mstart node=%llx peer=%llx init=%u\n",
-            static_cast<unsigned long long>(adopted_.node),
-            static_cast<unsigned long long>(start.peer),
-            start.initiator ? 1 : 0);
     if (start.peer == kInvalidNodeId || start.peer == adopted_.node) continue;
     // Sleep re-confirmation (P4 §9.3, V1-F07): while a restore image is
     // held for this initiator peer at the retained radio MAC, the
@@ -873,17 +869,9 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
       req.mac_r = start.peer_mac;
       req.carrier = entry->carrier;
       const Status requested = member().engine.request(req, now);
-      fprintf(stderr, "DBG coord: mstart req node=%llx peer=%llx code=%d\n",
-              static_cast<unsigned long long>(adopted_.node),
-              static_cast<unsigned long long>(start.peer),
-              static_cast<int>(requested.code));
       if (!requested.ok()) {
         sat_inc(counters_.link_request_failures);
         counters_.link_last_error = requested.code;
-        fprintf(stderr, "DBG coord: mstart reqfail node=%llx peer=%llx code=%d\n",
-                static_cast<unsigned long long>(adopted_.node),
-                static_cast<unsigned long long>(start.peer),
-                static_cast<int>(requested.code));
         deps_.discovery->cancel_member_handshake(token);
         entry->used = false;
         continue;
@@ -1014,49 +1002,24 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
                                 MacAddress{{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
   if (has_member_engine() && member_apply_pending_) {
     sat_inc(counters_.demux_drops);
-        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=apply\n",
-                (unsigned long long)adopted_.node, (unsigned)env.kind,
-                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
-                (unsigned)event.radio_generation, (unsigned)radio_generation_,
-                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
   if (event.radio_generation != radio_generation_) {
     sat_inc(counters_.demux_drops);
-        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=gen\n",
-                (unsigned long long)adopted_.node, (unsigned)env.kind,
-                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
-                (unsigned)event.radio_generation, (unsigned)radio_generation_,
-                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
   // Observed channel and destination first: a frame for another MAC or an
   // unexpected channel never reaches an owner.
   if (channel_ != 0 && event.rld1_meta.channel != channel_) {
     sat_inc(counters_.demux_drops);
-        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=ch\n",
-                (unsigned long long)adopted_.node, (unsigned)env.kind,
-                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
-                (unsigned)event.radio_generation, (unsigned)radio_generation_,
-                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
   if (!env_ok) {
     sat_inc(counters_.demux_drops);
-        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=dec\n",
-                (unsigned long long)adopted_.node, (unsigned)env.kind,
-                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
-                (unsigned)event.radio_generation, (unsigned)radio_generation_,
-                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
   if (!to_us && !to_broadcast) {
     sat_inc(counters_.demux_drops);
-        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=dst\n",
-                (unsigned long long)adopted_.node, (unsigned)env.kind,
-                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
-                (unsigned)event.radio_generation, (unsigned)radio_generation_,
-                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
   // Discover/Offer split by body version: ZT v3 to the Joiner (ZT mode
@@ -1077,20 +1040,10 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
                                           event.rld1_frame, event.now);
       }
       sat_inc(counters_.demux_drops);
-        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=L1\n",
-                (unsigned long long)adopted_.node, (unsigned)env.kind,
-                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
-                (unsigned)event.radio_generation, (unsigned)radio_generation_,
-                to_us ? 1 : (to_broadcast ? 2 : 0));
       return Status::success();
     }
     if (!has_member_engine()) {
       sat_inc(counters_.demux_drops);
-        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=L2\n",
-                (unsigned long long)adopted_.node, (unsigned)env.kind,
-                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
-                (unsigned)event.radio_generation, (unsigned)radio_generation_,
-                to_us ? 1 : (to_broadcast ? 2 : 0));
       return Status::success();
     }
     DiscoveryRxMetadata observed{};
@@ -1098,30 +1051,16 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
     observed.destination = event.rld1_meta.destination;
     if (deps_.discovery != nullptr) {
       deps_.discovery->on_rld1_rx(observed, event.rld1_frame, event.now);
-    } else {
-      fprintf(stderr, "DBG dmx: drop node=%llx kind=%u to=%d why=nodisc\n",
-              (unsigned long long)adopted_.node, (unsigned)env.kind,
-              to_us ? 1 : (to_broadcast ? 2 : 0));
     }
     return Status::success();
   }
   if (env.kind != FrameType::BootstrapAuth && env.kind != FrameType::BootstrapChunk &&
       env.kind != FrameType::BootstrapReply) {
     sat_inc(counters_.demux_drops);
-        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=L3\n",
-                (unsigned long long)adopted_.node, (unsigned)env.kind,
-                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
-                (unsigned)event.radio_generation, (unsigned)radio_generation_,
-                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
   if (!to_us) {  // Auth/Chunks/Replies are unicast-only on RLD1
     sat_inc(counters_.demux_drops);
-        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=L4\n",
-                (unsigned long long)adopted_.node, (unsigned)env.kind,
-                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
-                (unsigned)event.radio_generation, (unsigned)radio_generation_,
-                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
   // Joiner validates its own exchange, including pre-m2 RelayStatus; no
@@ -1138,11 +1077,6 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
     // short body must not claim a demux leg on garbage bytes.
     if (env.body_size < kJoinChunkHeaderSize) {
       sat_inc(counters_.demux_drops);
-        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=L5\n",
-                (unsigned long long)adopted_.node, (unsigned)env.kind,
-                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
-                (unsigned)event.radio_generation, (unsigned)radio_generation_,
-                to_us ? 1 : (to_broadcast ? 2 : 0));
       return Status::success();
     }
     object_id = (static_cast<std::uint32_t>(env.body[2]) << 24U) |
@@ -1166,22 +1100,12 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
   }
   if (mode_ != CoordinatorMode::Member) {
     sat_inc(counters_.demux_drops);
-        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=L6\n",
-                (unsigned long long)adopted_.node, (unsigned)env.kind,
-                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
-                (unsigned)event.radio_generation, (unsigned)radio_generation_,
-                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
   // The proxy verifies the OFFER cookie before admitting an exchange.
   if (env.kind == FrameType::BootstrapReply &&
       member().proxy.state() != JoinProxy::State::Relaying) {
     sat_inc(counters_.demux_drops);
-        fprintf(stderr, "DBG dmx: drop node=%llx kind=%u ch=%u/%u gen=%u/%u to=%d why=L7\n",
-                (unsigned long long)adopted_.node, (unsigned)env.kind,
-                (unsigned)event.rld1_meta.channel, (unsigned)channel_,
-                (unsigned)event.radio_generation, (unsigned)radio_generation_,
-                to_us ? 1 : (to_broadcast ? 2 : 0));
     return Status::success();
   }
   const std::int16_t rssi = event.rld1_meta.rssi;
@@ -1214,9 +1138,6 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
     sat_inc(counters_.demux_drops);
     return Status::success();
   }
-  fprintf(stderr, "DBG dmx: hit node=%llx kind=%u peer=%llx\n",
-          (unsigned long long)adopted_.node, (unsigned)env.kind,
-          (unsigned long long)entry->peer);
   entry->expires_at = now + kDemuxHoldMs;
   const ByteView body{env.body.data(), env.body_size};
   // Replies advance our link TX slot when the exchange matches; anything
@@ -1226,15 +1147,9 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
     if (!join_reply_decode(JoinCarrier::Rld1, body, reply).ok() ||
         reply.lane != ObjectLane::JoinRelay) {
       sat_inc(counters_.demux_drops);
-      fprintf(stderr, "DBG dmx: reply drop node=%llx why=dec\n",
-              (unsigned long long)adopted_.node);
       return Status::success();
     }
-    const JoinObjectSlot::ReplyOutcome out = member().link_tx.on_reply(reply, now);
-    fprintf(stderr, "DBG dmx: reply node=%llx out=%d st=%u recv=%u id=%llx\n",
-            (unsigned long long)adopted_.node, static_cast<int>(out),
-            static_cast<unsigned>(reply.status), static_cast<unsigned>(reply.received),
-            (unsigned long long)reply.id);
+    (void)member().link_tx.on_reply(reply, now);
     return Status::success();
   }
   if (env.kind == FrameType::BootstrapChunk) {
@@ -1304,11 +1219,7 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
     if (object.cookie_present) {
       rx.cookie = ByteView{object.cookie.data(), object.cookie.size()};
     }
-    const Status onmsg = member().engine.on_message(rx, object.message, now);
-    fprintf(stderr, "DBG dmx: ceng<-msg node=%llx ph=%u st=%u peer=%llx code=%d\n",
-            (unsigned long long)adopted_.node, (unsigned)object.phase,
-            (unsigned)object.step, (unsigned long long)entry->peer,
-            static_cast<int>(onmsg.code));
+    (void)member().engine.on_message(rx, object.message, now);
     return Status::success();
   }
   // Single-frame step: the join-lane object codec, then the engine. The
@@ -1317,16 +1228,12 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
   JoinAuthObject object{};
   if (!join_object_decode(body, object).ok() || object.phase == JoinAuthPhase::RelayStatus) {
     sat_inc(counters_.demux_drops);
-    fprintf(stderr, "DBG dmx: hit drop node=%llx why=dec\n",
-            (unsigned long long)adopted_.node);
     return Status::success();
   }
   if ((object.step == 1) && !object.cookie_present) {
     // First messages always echo the OFFER cookie (EDHOC-m1 and RLRES1-R1
     // alike); a missing cookie never reaches the engine.
     sat_inc(counters_.demux_drops);
-    fprintf(stderr, "DBG dmx: hit drop node=%llx ph=%u why=cookie\n",
-            (unsigned long long)adopted_.node, (unsigned)object.phase);
     return Status::success();
   }
   // Link resume starts admit 1/s; EDHOC sits behind the engine's own
@@ -1349,12 +1256,7 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
   if (object.cookie_present) {
     rx.cookie = ByteView{object.cookie.data(), object.cookie.size()};
   }
-  fprintf(stderr, "DBG dmx: hit->eng node=%llx ph=%u st=%u peer=%llx\n",
-          (unsigned long long)adopted_.node, (unsigned)object.phase,
-          (unsigned)object.step, (unsigned long long)entry->peer);
-  const Status onmsg = member().engine.on_message(rx, object.message, now);
-  fprintf(stderr, "DBG dmx: eng<-msg node=%llx code=%d\n",
-          (unsigned long long)adopted_.node, (int)onmsg.code);
+  (void)member().engine.on_message(rx, object.message, now);
   // The assembly is consumed: free the slot for the next exchange's
   // chunks (a second chunked handshake in this boot would otherwise
   // find it Busy). Late duplicates still answer Complete from the
@@ -1425,40 +1327,20 @@ void SecurityCoordinator::drain_engine_results(const MonotonicMs now) noexcept {
       } else if (result.scope == SecurityScope::Link) {
         sat_inc(counters_.link_send_failures);
         counters_.link_last_error = sent.code;
-        fprintf(stderr, "DBG coord: link_sendfail node=%llx peer=%llx code=%d\n",
-                static_cast<unsigned long long>(adopted_.node),
-                static_cast<unsigned long long>(result.peer),
-                static_cast<int>(sent.code));
       } else {
         sat_inc(counters_.end_send_failures);
         counters_.end_last_error = sent.code;
-        fprintf(stderr, "DBG coord: end_sendfail node=%llx peer=%llx code=%d\n",
-                static_cast<unsigned long long>(adopted_.node),
-                static_cast<unsigned long long>(result.peer),
-                static_cast<int>(sent.code));
       }
     } else if (result.event == HandshakeEvent::Established && result.has_proof &&
                result.scope == SecurityScope::Link) {
       sat_inc(counters_.link_established);
-      fprintf(stderr, "DBG coord: link_established node=%llx peer=%llx now=%llu\n",
-              static_cast<unsigned long long>(adopted_.node),
-              static_cast<unsigned long long>(result.peer),
-              static_cast<unsigned long long>(now));
       (void)installed_link(result, now);
       if (mode_ == CoordinatorMode::Member) note_link_established();
     } else if (result.event == HandshakeEvent::Established && result.scope == SecurityScope::EndToEnd) {
       sat_inc(counters_.end_established);
-      fprintf(stderr, "DBG coord: end_established node=%llx peer=%llx now=%llu\n",
-              static_cast<unsigned long long>(adopted_.node),
-              static_cast<unsigned long long>(result.peer),
-              static_cast<unsigned long long>(now));
     } else if (result.event == HandshakeEvent::Failed && result.scope == SecurityScope::Link) {
       sat_inc(counters_.link_failed);
       counters_.link_last_error = result.failure;
-      fprintf(stderr, "DBG coord: link_failed node=%llx peer=%llx err=%u\n",
-              static_cast<unsigned long long>(adopted_.node),
-              static_cast<unsigned long long>(result.peer),
-              static_cast<unsigned>(result.failure));
       // Tear down the leg: the next discovery round or demand re-drives.
       for (auto& entry : member().demux) {
         if (entry.used && entry.peer == result.peer) {
@@ -1474,11 +1356,6 @@ void SecurityCoordinator::drain_engine_results(const MonotonicMs now) noexcept {
     } else if (result.event == HandshakeEvent::Failed && result.scope == SecurityScope::EndToEnd) {
       sat_inc(counters_.end_failed);
       counters_.end_last_error = result.failure;
-      fprintf(stderr, "DBG coord: end_failed node=%llx peer=%llx err=%u now=%llu\n",
-              static_cast<unsigned long long>(adopted_.node),
-              static_cast<unsigned long long>(result.peer),
-              static_cast<unsigned>(result.failure),
-              static_cast<unsigned long long>(now));
     }
   }
 }
@@ -1564,10 +1441,6 @@ Status SecurityCoordinator::emit_link_send(const HandshakeResult& result,
       return Status::error(StatusCode::ProtocolError, "link rld1 encode");
     }
     const Status sent = deps_.rld1->send_rld1(leg->mac, frame.view());
-    fprintf(stderr, "DBG coord: ltx node=%llx ph=%u st=%u code=%d\n",
-            static_cast<unsigned long long>(adopted_.node),
-            static_cast<unsigned>(object.phase), static_cast<unsigned>(object.step),
-            static_cast<int>(sent.code));
     return sent;
   }
   // The slot holds the full object encoding (cookie included): the peer
@@ -1641,10 +1514,6 @@ Status SecurityCoordinator::pump_link_tx(const MonotonicMs now) noexcept {
       return Status::error(StatusCode::ProtocolError, "link tx rld1 encode");
     }
     const Status sent = deps_.rld1->send_rld1(leg->mac, frame.view());
-    fprintf(stderr, "DBG coord: ltxc node=%llx ph=%u st=%u code=%d\n",
-            static_cast<unsigned long long>(adopted_.node),
-            static_cast<unsigned>(slot.phase()), static_cast<unsigned>(slot.step()),
-            static_cast<int>(sent.code));
     if (sent.ok()) slot.note_sent(now, false);
     return sent;
   }
@@ -1997,9 +1866,6 @@ bool SecurityCoordinator::check(const SiteRecord& prepared, const MonotonicMs no
 Status SecurityCoordinator::relay_up(const NodeId proxy, const std::uint8_t hops,
                                      const ByteView object) noexcept {
   const Status st = deps_.usb->send_relay_up_to_host(proxy, hops, object);
-  std::fprintf(stderr, "DBG coord: relay_up node=%llx code=%d %s\n",
-               static_cast<unsigned long long>(adopted_.node), (int)st.code,
-               st.ok() ? "ok" : st.detail);
   return st;
 }
 
@@ -2071,18 +1937,7 @@ bool SecurityCoordinator::revoked(const NodeId peer, const std::uint32_t generat
   if (!has_member_engine() || !member_valid_) return false;
   if (!deps_.revocations->has_set()) return false;  // no set: nothing revoked
   const std::uint32_t site_epoch = static_cast<std::uint32_t>(adopted_.network >> 32);
-  const bool out = deps_.revocations->rejects(peer, generation, site_epoch);
-  const RevocationSet& set = deps_.revocations->set();
-  fprintf(stderr,
-          "DBG coord: revoked node=%llx rptr=%p peer=%llx gen=%u epoch=%u out=%d cnt=%u "
-          "e0=(%llx,%u) rs=%u floor=%u\n",
-          static_cast<unsigned long long>(adopted_.node), (const void*)deps_.revocations,
-          static_cast<unsigned long long>(peer), generation, site_epoch, out ? 1 : 0,
-          static_cast<unsigned>(set.count),
-          set.count ? static_cast<unsigned long long>(set.entries[0].node_id) : 0ULL,
-          set.count ? static_cast<unsigned>(set.entries[0].min_generation) : 0U,
-          static_cast<unsigned>(set.rs_epoch), static_cast<unsigned>(set.site_epoch_floor));
-  return out;
+  return deps_.revocations->rejects(peer, generation, site_epoch);
 }
 
 bool SecurityCoordinator::authenticated(const NodeId peer, const NetworkId network,
@@ -2536,7 +2391,6 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now,
   restore_elapsed_ms_ = 0;
   restore_error_ = Status{StatusCode::Ok, "ok"};
   mode_ = CoordinatorMode::Fresh;
-  fprintf(stderr, "DBG coord: on_stop -> Fresh (defer=%d)\n", defer_resume_clear ? 1 : 0);
   return Status::success();
 }
 
@@ -2615,12 +2469,9 @@ constexpr MonotonicMs kRefreshSpreadStepMs = 30000;
 
 Status SecurityCoordinator::on_authority_rx(const CoordinatorEvent& event) noexcept {
   if (mode_ != CoordinatorMode::Member || sleeping_) {
-    fprintf(stderr, "DBG coord: auth rx drop mode=%d sleep=%d\n", static_cast<int>(mode_),
-            sleeping_ ? 1 : 0);
     return Status::success();
   }
   if (!small().authority.snapshot().started) {
-    fprintf(stderr, "DBG coord: auth rx drop !started mode=%d\n", static_cast<int>(mode_));
     return Status::success();  // stale carrier
   }
   AuthorityInput in{};
@@ -2779,9 +2630,6 @@ void SecurityCoordinator::probe_quiet_authority(const MonotonicMs now) noexcept 
       ++refresh_strikes_;
       last_strike_ms_ = now;
     }
-    fprintf(stderr, "DBG coord: strike road=chandead node=%llx strikes=%u\n",
-            static_cast<unsigned long long>(adopted_.node),
-            static_cast<unsigned>(refresh_strikes_));
     if (refresh_strikes_ >= kRefreshStrikesMax) {
       last_probe_ms_ = now;
       start_refresh(now);
@@ -2812,9 +2660,6 @@ void SecurityCoordinator::probe_quiet_authority(const MonotonicMs now) noexcept 
       ++refresh_strikes_;
       last_strike_ms_ = now;
     }
-    fprintf(stderr, "DBG coord: strike road=probe node=%llx strikes=%u\n",
-            static_cast<unsigned long long>(adopted_.node),
-            static_cast<unsigned>(refresh_strikes_));
     if (refresh_strikes_ >= kRefreshStrikesMax) {
       last_probe_ms_ = now;
       start_refresh(now);
@@ -2929,23 +2774,11 @@ void SecurityCoordinator::note_link_failed(const MonotonicMs now) noexcept {
     ++refresh_strikes_;
     last_strike_ms_ = now;
   }
-  fprintf(stderr, "DBG coord: strike road=link node=%llx strikes=%u\n",
-          static_cast<unsigned long long>(adopted_.node),
-          static_cast<unsigned>(refresh_strikes_));
 }
 
 void SecurityCoordinator::watch_linkless(const MonotonicMs now) noexcept {
   if (mode_ != CoordinatorMode::Member || !discovery_started_) return;
   const bool linkless = bank_.live_count(SecurityScope::Link) == 0;
-  static bool was_linkless = false;
-  if (linkless != was_linkless) {
-    was_linkless = linkless;
-    fprintf(stderr, "DBG coord: linkless=%d node=%llx now=%llu links=%u ends=%u\n",
-            linkless ? 1 : 0, static_cast<unsigned long long>(adopted_.node),
-            static_cast<unsigned long long>(now),
-            static_cast<unsigned>(bank_.live_count(SecurityScope::Link)),
-            static_cast<unsigned>(bank_.live_count(SecurityScope::EndToEnd)));
-  }
   // 04 §3.5: an old-group link must not veto recovery for a member
   // the site left behind (revoked, cutover-straggler). The live road
   // counts the same unknown-AHEAD-generation evidence as the linkless
@@ -2996,9 +2829,6 @@ void SecurityCoordinator::watch_linkless(const MonotonicMs now) noexcept {
     ++refresh_strikes_;
     last_strike_ms_ = now;
   }
-  fprintf(stderr, "DBG coord: strike road=newergen node=%llx strikes=%u linkless=%d\n",
-          static_cast<unsigned long long>(adopted_.node),
-          static_cast<unsigned>(refresh_strikes_), linkless ? 1 : 0);
   if (refresh_strikes_ >= kRefreshStrikesMax) start_refresh(now);
 }
 
@@ -3021,10 +2851,6 @@ void SecurityCoordinator::start_refresh(const MonotonicMs now) noexcept {
                               ? kJoinNoDeadline
                               : last_strike_ms_ + spread;
   if (now < due) return;
-  fprintf(stderr, "DBG coord: refresh node=%llx now=%llu strikes=%u\n",
-          static_cast<unsigned long long>(adopted_.node),
-          static_cast<unsigned long long>(now),
-          static_cast<unsigned>(refresh_strikes_));
   // The channel suspends (its DAMS copy wipes); the GK state stays live
   // so counters and replay windows survive the engine swap. RLS1 is
   // retained untouched — the refresh only re-verifies it.
@@ -3069,9 +2895,6 @@ void SecurityCoordinator::maybe_abandon_refresh(const MonotonicMs now) noexcept 
   refresh_cooldown_until_ = now > kJoinNoDeadline - kRefreshCooldownMs
                                 ? kJoinNoDeadline
                                 : now + kRefreshCooldownMs;
-  fprintf(stderr, "DBG coord: refresh abandon node=%llx now=%llu\n",
-          static_cast<unsigned long long>(adopted_.node),
-          static_cast<unsigned long long>(now));
   (void)adopt_boot_rls1(now);
 }
 
@@ -3442,10 +3265,6 @@ void SecurityCoordinator::drain_joiner(const MonotonicMs now) noexcept {
 }
 
 void SecurityCoordinator::on_joiner_action(const JoinAction& action, const MonotonicMs now) noexcept {
-  fprintf(stderr, "DBG coord: join action kind=%d seq=%u joined=%u rs=%u mode=%d\n",
-          static_cast<int>(action.kind), action.commit_seq,
-          action.joined_now ? 1 : 0, action.rs_epoch_to_fetch,
-          static_cast<int>(mode_));
   switch (action.kind) {
     case JoinActionKind::ChangeChannel: {
       // Retune order for the firmware; the completion comes back as
@@ -3487,11 +3306,6 @@ void SecurityCoordinator::on_joiner_action(const JoinAction& action, const Monot
 }
 
 void SecurityCoordinator::emit_action(const CoordinatorAction& action) noexcept {
-  if (action.kind == CoordinatorActionKind::ReportRecovery) {
-    fprintf(stderr, "DBG coord: recovery node=%llx reason=%u mode=%u\n",
-            static_cast<unsigned long long>(adopted_.node),
-            static_cast<unsigned>(action.recovery), static_cast<unsigned>(mode_));
-  }
   action_ = action;
   action_pending_ = true;
 }

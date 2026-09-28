@@ -37,6 +37,8 @@
 //                              the reboot marker (exit 42), like a field
 //                              power cut mid-RAM — the respawn recovers
 //                              through the production boot path only
+//   F                          arm one power cut after RLX1 Switching commits
+//                              (exit 43); the saved NVS is the real write
 //   Q                          quit (exit 0)
 //
 // C++ -> Rust, emitted after each T in this order:
@@ -154,6 +156,7 @@ using PartitionMap = std::map<std::string, SpaceMap>;
 
 PartitionMap g_nvs;
 std::string g_nvs_save_path;
+bool g_cut_after_switching{false};
 
 struct NvsHandle {
   bool used{false};
@@ -199,6 +202,8 @@ bool nvs_lookup(nvs_handle_t handle, SpaceMap*& spaces, BlobMap*& blobs) {
 }
 
 }  // namespace
+
+[[noreturn]] void switching_power_cut();
 
 esp_err_t nvs_open(const char* name_space, int mode, nvs_handle_t* handle) {
   (void)mode;
@@ -300,6 +305,26 @@ esp_err_t nvs_commit(nvs_handle_t handle) {
   SpaceMap* spaces = nullptr;
   BlobMap* blobs = nullptr;
   if (!nvs_lookup(handle, spaces, blobs)) return ESP_ERR_INVALID_ARG;
+  if (g_cut_after_switching &&
+      g_nvs_handles[handle - 1].space == routeloom::sdkv1::kLifecycleNamespace) {
+    for (const char* key : {routeloom::sdkv1::kLifecycleKey0,
+                            routeloom::sdkv1::kLifecycleKey1}) {
+      const auto found = blobs->find(key);
+      if (found == blobs->end()) continue;
+      const auto& slot = found->second;
+      if (slot.size() < 88 || slot.size() > routeloom::sdkv1::kLifecycleSlotBytes) continue;
+      const std::size_t used = (static_cast<std::size_t>(slot[6]) << 8U) | slot[7];
+      if (used < 88 || used > slot.size()) continue;
+      routeloom::sdkv1::LifecycleRecord record{};
+      const auto decoded = routeloom::sdkv1::lifecycle_record_decode(
+          routeloom::ByteView{slot.data(), used}, record);
+      if (decoded.ok() &&
+          record.mode == routeloom::sdkv1::LifecycleMode::Switching) {
+        g_cut_after_switching = false;
+        switching_power_cut();
+      }
+    }
+  }
   return ESP_OK;
 }
 
@@ -450,9 +475,15 @@ void EspNowDiscoveryObserver::on_discovery_event(const char* reason, NodeId peer
   if (!g_nvs_save_path.empty()) {
     routeloom::espnow::write_nvs_image_file(g_nvs_save_path.c_str());
   }
-  std::fprintf(stderr, "owner_mesh_peer: esp_restart (reboot marker)\n");
   std::fflush(stderr);
   std::_Exit(42);
+}
+
+[[noreturn]] void switching_power_cut() {
+  if (!g_nvs_save_path.empty()) {
+    routeloom::espnow::write_nvs_image_file(g_nvs_save_path.c_str());
+  }
+  std::_Exit(43);
 }
 
 namespace {
@@ -1183,6 +1214,9 @@ int main(int argc, char** argv) {
         // the production boot path, with no test-written state.
         // (noreturn: no break — the marker exits the process.)
         esp_restart();
+      case 'F':
+        g_cut_after_switching = true;
+        break;
       case 'Q':
         return 0;
       default:

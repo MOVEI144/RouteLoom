@@ -1931,11 +1931,6 @@ Status MeshNode::queue_typed_job(const FrameType type, const JobOwner owner,
                                  const MonotonicMs now_ms, const bool end_protected) noexcept {
   const auto route = routes_.best(destination);
   if (!route.valid || find_neighbor(route.next_hop) == nullptr) {
-    fprintf(stderr, "DBG node: NO_ROUTE from=%llx dest=%llx rvalid=%d nhop=%llx neigh=%p\n",
-            static_cast<unsigned long long>(config_.node),
-            static_cast<unsigned long long>(destination), route.valid ? 1 : 0,
-            static_cast<unsigned long long>(route.next_hop),
-            static_cast<void*>(find_neighbor(route.next_hop)));
     request_route_discovery(destination, now_ms);  // scoped profile only
     return Status::error(StatusCode::NoRoute, "NO_ROUTE");
   }
@@ -2070,10 +2065,6 @@ Status MeshNode::queue_busy(const NodeId peer, const wire::Header& rejected,
 void MeshNode::emit_busy_or_drop(const NodeId peer, const wire::Header& rejected,
                                  const std::uint8_t reason, const RxBinding& rx,
                                  const MonotonicMs now_ms) noexcept {
-  fprintf(stderr, "DBG node: busy_drop node=%llx peer=%llx type=%u reason=%u\n",
-          static_cast<unsigned long long>(config_.node),
-          static_cast<unsigned long long>(peer),
-          static_cast<unsigned>(rejected.type), static_cast<unsigned>(reason));
   const auto* neighbor = find_neighbor(peer);
   // Never emit the new payload toward a peer that has not proven or been
   // configured for BUSY (03 §5; the D4-09 legacy fallback is the sender's
@@ -2200,10 +2191,6 @@ void MeshNode::note_rx_refusal(const Status& status, const NodeId peer,
       session_stats_.rx_auth_required != UINT32_MAX) {
     ++session_stats_.rx_auth_required;
   }
-  fprintf(stderr, "DBG node: rx_refusal node=%llx peer=%llx code=%d %s\n",
-          static_cast<unsigned long long>(config_.node),
-          static_cast<unsigned long long>(peer), static_cast<int>(status.code),
-          status.detail != nullptr ? status.detail : "?");
   observer_.on_diagnostic(status.detail, peer, message);
 }
 
@@ -2454,14 +2441,6 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
       continue;
     }
     ++submitted.physical_attempts;
-    fprintf(stderr, "DBG node: tx_sub node=%llx type=%u peer=%llx own=%d att=%u\n",
-            static_cast<unsigned long long>(config_.node),
-            static_cast<unsigned>(submitted.form == JobForm::Plain
-                                      ? submitted.plain.header.type
-                                      : submitted.forwarded.header.type),
-            static_cast<unsigned long long>(submitted.peer),
-            static_cast<int>(submitted.owner),
-            static_cast<unsigned>(submitted.physical_attempts));
     obs_tx_submitted(submitted, token, now_ms);
     physical_.job = std::move(submitted);
     physical_.token = token;
@@ -2700,13 +2679,6 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
   }
   if (job.owner == JobOwner::Config) {
     if (component_jobs_outstanding_ > 0) --component_jobs_outstanding_;
-    fprintf(stderr, "DBG node: cjob_fail node=%llx type=%u peer=%llx reason=%s\n",
-            static_cast<unsigned long long>(config_.node),
-            static_cast<unsigned>(job.form == JobForm::Plain
-                                      ? job.plain.header.type
-                                      : job.forwarded.header.type),
-            static_cast<unsigned long long>(job.peer),
-            reason != nullptr ? reason : "?");
     if (config_sink_ != nullptr) {
       if (component_event_available()) {
         publish_component_event(ComponentEventTarget::ConfigJobDone, job.peer,
@@ -3959,19 +3931,6 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
         (needs_event && !component_payload_event_available()) ||
         !txn_deadline_for(frame.header.remaining_deadline_ms, now_ms,
                           txn_deadline)) {
-      fprintf(stderr,
-              "DBG node: adm_ref node=%llx peer=%llx type=%u free=%d cslot=%d "
-              "txn=%d ev=%d need_ev=%d rdl=%u age=%u\n",
-              static_cast<unsigned long long>(config_.node),
-              static_cast<unsigned long long>(peer),
-              static_cast<unsigned>(type),
-              static_cast<int>(scheduler_.free_slots()),
-              scheduler_.control_slot_available() ? 1 : 0,
-              txn_slot_available() ? 1 : 0,
-              component_payload_event_available() ? 1 : 0,
-              needs_event ? 1 : 0,
-              static_cast<unsigned>(frame.header.remaining_deadline_ms),
-              static_cast<unsigned>(rx_age_ms_));
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                         rx, now_ms);
@@ -5420,16 +5379,6 @@ void MeshNode::apply_route_records(const RouteAdvertisement* records,
     // so new and existing routes are built from one consistent state.
     const auto result = routes_.consider(advertisement, peer, neighbor->link_cost, now_ms,
                                          config_.route_lifetime_ms);
-    if (is_route_gateway(advertisement.destination) || is_route_gateway(peer)) {
-      fprintf(stderr,
-              "DBG rt: consider node=%llx from=%llx dest=%llx gen=%u metric=%u res=%d life=%u\n",
-              static_cast<unsigned long long>(config_.node),
-              static_cast<unsigned long long>(peer),
-              static_cast<unsigned long long>(advertisement.destination),
-              static_cast<unsigned>(advertisement.generation),
-              static_cast<unsigned>(advertisement.metric), static_cast<int>(result),
-              static_cast<unsigned>(config_.route_lifetime_ms));
-    }
     if (result == RouteUpdateResult::Infeasible) {
       observer_.on_diagnostic("ROUTE_INFEASIBLE_SEQNO_NEEDED", peer, nullptr);
     } else if (result == RouteUpdateResult::StaleGeneration) {

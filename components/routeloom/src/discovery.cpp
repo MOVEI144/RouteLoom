@@ -458,8 +458,6 @@ void NeighborDiscovery::on_rld1_rx(const DiscoveryRxMetadata& rx,
                                    const ByteView frame,
                                    const MonotonicMs now_ms) noexcept {
   if (!started_) {
-    fprintf(stderr, "DBG drx: node=%llx why=stopped\n",
-            (unsigned long long)config_.node);
     return;
   }
   autonomy::Rld1Envelope env{};
@@ -489,9 +487,6 @@ void NeighborDiscovery::on_rld1_rx(const DiscoveryRxMetadata& rx,
       } else {
         ++stats_.kind_rejects;
       }
-      fprintf(stderr, "DBG drx: node=%llx kind=%u why=mac dst=%02x%02x exp=%02x%02x\n",
-              (unsigned long long)config_.node, (unsigned)env.kind,
-              rx.destination[4], rx.destination[5], expected[4], expected[5]);
       return;
     }
   }
@@ -529,15 +524,6 @@ void NeighborDiscovery::handle_discover(const DiscoveryRxMetadata& rx,
                                         const MonotonicMs now_ms) noexcept {
   ++stats_.discovers_rx;
   const bool scoped_mode = scope_mode_scoped(config_.scope_mode);
-  fprintf(stderr,
-          "DBG drx: node=%llx hdis scoped=%d body=%u src=%02x%02x t=%llu ob=%d st=%u due=%lld rddue=%lld rdbo=%u\n",
-          (unsigned long long)config_.node, scoped_mode ? 1 : 0,
-          (unsigned)env.body_size, rx.source[4], rx.source[5],
-          (unsigned long long)now_ms, outbound_.active ? 1 : 0,
-          (unsigned)outbound_.stage,
-          (long long)(outbound_.discover_due_ms - now_ms),
-          (long long)(next_rediscovery_ms_ - now_ms),
-          (unsigned)rediscovery_backoff_ms_);
   // Fresh air evidence (radio.md §7): a DISCOVER through the coarse
   // gates proves the medium carries traffic again — a requester parked
   // in a deep post-outage backoff, or a stranded engine holding the
@@ -640,9 +626,6 @@ void NeighborDiscovery::handle_discover_scoped(
   }
   if (!config_.scope_provider->accepted_generation(config_.scope, body.generation,
                                                    now_ms)) {
-    std::fprintf(stderr, "DBG disc rx node=%llx gen=%u flags=%u cur=%u unknown\n",
-                 static_cast<unsigned long long>(config_.node), body.generation,
-                 body.flags, current);
     note_unknown_generation(current, body.generation);
     return;
   }
@@ -782,8 +765,6 @@ void NeighborDiscovery::admit_scoped_discover(PendingVerify& pending,
       return;
   }
   ++scope_stats_.scope_accepted;
-  std::fprintf(stderr, "DBG disc rx node=%llx gen=%u accepted->admit\n",
-               static_cast<unsigned long long>(config_.node), pending.generation);
   const std::uint32_t density = recent_discovers(now_ms);
   record_discover(now_ms);
   ScopeExchangeContext exchange{};
@@ -907,9 +888,6 @@ void NeighborDiscovery::handle_offer(const DiscoveryRxMetadata& rx,
   }
   if (!outbound_.active || outbound_.stage != OutboundStage::AwaitingOffers ||
       outbound_.have_offer || now_ms > outbound_.stage_deadline_ms) {
-    std::fprintf(stderr, "DBG off drop node=%llx act=%u st=%u\n",
-                 static_cast<unsigned long long>(config_.node),
-                 outbound_.active ? 1 : 0, static_cast<unsigned>(outbound_.stage));
     return;
   }
   if (outbound_.preferred_peer != kInvalidNodeId &&
@@ -1023,9 +1001,6 @@ void NeighborDiscovery::accept_scoped_offer(PendingVerify& pending,
     return;
   }
   ++scope_stats_.scope_accepted;
-  std::fprintf(stderr, "DBG off rx node=%llx gen=%u from=%llx accept\n",
-               static_cast<unsigned long long>(config_.node), pending.generation,
-               static_cast<unsigned long long>(pending.env.claimed_node));
   outbound_.have_offer = true;
   outbound_.peer_mac = pending.rx.source;
   outbound_.peer_node = pending.env.claimed_node;
@@ -1771,11 +1746,9 @@ Status NeighborDiscovery::take_member_start(MemberStartRequest& out,
     if (oldest == nullptr || c.expires_at_ms < oldest->expires_at_ms) oldest = &c;
   });
   // When WE are initiating to this same peer (an accepted OFFER is
-  // parked), skip the responder leg: our m1 (initiator) drives the
-  // exchange, and taking a responder leg now would alias the demux and
-  // strand our initiator (the leg_live skip consumes it with no retry —
-  // a rejoining leaf would never come back). The responder stays parked
-  // for a later take; the peer's m1 (if any) re-parks on retry.
+  // parked), skip the responder leg: our m1 drives the exchange, and
+  // taking a responder leg now would alias the demux and strand ours.
+  // The responder stays parked for a later take.
   if (oldest != nullptr &&
       !(outbound_.active && outbound_.have_offer &&
         oldest->claimed_node == outbound_.peer_node)) {
@@ -2207,10 +2180,6 @@ Status NeighborDiscovery::send_scoped_discover(
     return Status::error(StatusCode::AuthorizationFailed, "TX gated");
   }
   status = port_.send_rld1(discovery_const::kBroadcastMac, encoded.view());
-  std::fprintf(stderr, "DBG disc tx node=%llx gen=%u flags=%u code=%d t=%llu\n",
-               static_cast<unsigned long long>(config_.node), generation, flags,
-               static_cast<int>(status.code),
-               static_cast<unsigned long long>(now_ms));
   if (status.ok() && bind_exchange) {
     outbound_.exchange.scoped = true;
     outbound_.exchange.scope_class = config_.scope_class;
@@ -2325,9 +2294,6 @@ Status NeighborDiscovery::send_scoped_offer(Candidate& candidate,
     return Status::error(StatusCode::AuthorizationFailed, "TX gated");
   }
   status = port_.send_rld1(candidate.mac, encoded.view());
-  std::fprintf(stderr, "DBG off tx node=%llx gen=%u code=%d\n",
-               static_cast<unsigned long long>(config_.node), generation,
-               static_cast<int>(status.code));
   if (status.ok()) {
     sha256(encoded.view(), candidate.exchange.offer_digest);
     candidate.offer_pending = false;

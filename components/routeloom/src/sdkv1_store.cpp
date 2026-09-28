@@ -572,8 +572,6 @@ Status SiteStore::commit(const SiteRecord& record) noexcept {
   if (status) status = pair_.commit_prepared(used_len);
   wipe_scratch();
   if (status) site_ = record;
-  std::fprintf(stderr, "DBG site: commit net=0x%llx code=%d\n",
-               static_cast<unsigned long long>(record.network), (int)status.code);
   return status;
 }
 
@@ -756,8 +754,6 @@ Status SiteStore::recover(const SiteRecord& record) noexcept {
   site_ = record;
   scrub_needed_ = false;
   group_write_failed_ = false;
-  std::fprintf(stderr, "DBG site: recover net=0x%llx code=0\n",
-               static_cast<unsigned long long>(record.network));
   return Status::success();
 }
 
@@ -777,8 +773,6 @@ Status RevocationStore::initialize() noexcept {
     if (!loaded) return loaded;
     has_set_ = object.size > 0;
   }
-  fprintf(stderr, "DBG store: rrs init this=%p status=%d rs=%u cnt=%u\n", (const void*)this,
-          (int)status.code, has_set_ ? (unsigned)set_.rs_epoch : 0U, (unsigned)set_.count);
   return status;
 }
 
@@ -805,8 +799,6 @@ Status RevocationStore::store(const ByteView object, const bool twin,
   if (!status) return status;
   set_ = candidate;
   has_set_ = object.size > 0;
-  fprintf(stderr, "DBG store: rrs store this=%p rs=%u cnt=%u obj=%u\n", (const void*)this,
-          (unsigned)candidate.rs_epoch, (unsigned)candidate.count, (unsigned)object.size);
   return Status::success();
 }
 
@@ -837,9 +829,6 @@ Status RevocationStore::accept(const ByteView object, const P256PublicKey& sak_p
       return Status::error(StatusCode::Conflict, "revocation entry omitted or weakened");
     }
   }
-  fprintf(stderr, "DBG store: rrs accept try this=%p cand_rs=%u cnt=%u has=%d cur_rs=%u\n",
-          (const void*)this, (unsigned)candidate.rs_epoch, (unsigned)candidate.count,
-          has_set_ ? 1 : 0, has_set_ ? (unsigned)set_.rs_epoch : 0U);
   return store(object, false, candidate);
 }
 

@@ -301,7 +301,6 @@ bool ZtJoinerLink::from_proxy(const MacAddress& source,
 
 Status ZtJoinerLink::on_rld1_rx(const MacAddress& source, const MacAddress& destination,
                                 const ByteView frame, const MonotonicMs now_ms) noexcept {
-  std::fprintf(stderr, "DBG linkrx entry size=%u\n", (unsigned)frame.size);
   if (in_call_) return Status::error(StatusCode::Busy, "in link callback");
   in_call_ = true;
   on_rld1_rx_impl(source, destination, frame, now_ms);
@@ -318,9 +317,6 @@ void ZtJoinerLink::on_rld1_rx_impl(const MacAddress& source, const MacAddress& d
     return;
   }
   const ByteView body{env.body.data(), env.body_size};
-  if (env.kind == FrameType::BootstrapAuth && env.body_size >= 3)
-    std::fprintf(stderr, "DBG jl rx phase=%u step=%u src=%02x%02x\n",
-                 (unsigned)env.body[1], (unsigned)env.body[2], source[4], source[5]);
   switch (env.kind) {
     case FrameType::Offer: {
       ZtOfferView offer{};
@@ -359,8 +355,6 @@ void ZtJoinerLink::on_rld1_rx_impl(const MacAddress& source, const MacAddress& d
         // without advancing it): past the observer, the slot and the
         // stage order untouched.
         ++stats_.messages_rx;
-        std::fprintf(stderr, "DBG joiner rrs rx size=%u\n",
-                     (unsigned)object.message.size);
         observer_.on_message(object.phase, object.step, object.message);
         return;
       }
@@ -421,8 +415,6 @@ void ZtJoinerLink::on_rld1_rx_impl(const MacAddress& source, const MacAddress& d
       if (object.phase == JoinAuthPhase::RrsDelivery) {
         // Out-of-band (see the single-frame leg): the stage order stays.
         ++stats_.messages_rx;
-        std::fprintf(stderr, "DBG joiner rrs rx chunked size=%u\n",
-                     (unsigned)object.message.size);
         observer_.on_message(object.phase, object.step, object.message);
         slot_.release_assembled();
         return;
@@ -589,9 +581,6 @@ Status JoinProxy::on_rld1_rx(const MacAddress& source, const MacAddress& destina
   }
   if (!zt_admit_rld1(membership_, AdmissionDirection::Rx, env)) {
     ++stats_.frames_rejected;
-    fprintf(stderr, "DBG px: rld1 rx reject node=%llx kind=%u memb=%u\n",
-            (unsigned long long)config_.node, (unsigned)env.kind,
-            (unsigned)membership_);
     in_call_ = false;
     return Status::success();
   }
@@ -630,12 +619,6 @@ void JoinProxy::handle_discover(const MacAddress& source, const MacAddress& dest
   if (!open_ || !reachable_ || relay_.active || body.org_hint != config_.org_hint ||
       zt_discover_avoids(body, config_.site_hint)) {
     ++stats_.offers_suppressed;
-    fprintf(stderr, "DBG px: offer suppressed node=%llx open=%d reach=%d relay=%d org=%08lx want=%08lx avoid=%d/%d site=%08lx\n",
-            (unsigned long long)config_.node, open_ ? 1 : 0, reachable_ ? 1 : 0,
-            relay_.active ? 1 : 0, (unsigned long)body.org_hint,
-            (unsigned long)config_.org_hint,
-            (int)body.avoid_site_hints[0], (int)body.avoid_site_hints[1],
-            (unsigned long)config_.site_hint);
     return;
   }
   const bool pending = offers_.find([&](const PendingOffer& offer) {
@@ -1286,9 +1269,6 @@ void JoinProxy::deliver_down(const RelayObject& object, const MonotonicMs now_ms
   if (written <= autonomy::kRld1MaxBody) {
     const Status sent = emit_rld1(relay_.joiner_mac, relay_.nonce, FrameType::BootstrapAuth,
                                   ByteView{buffer.data, written});
-    std::fprintf(stderr, "DBG pxdown phase=%u step=%u single sent=%d code=%d %s\n",
-                 (unsigned)h.phase, (unsigned)h.step, sent.ok() ? 1 : 0,
-                 (int)sent.code, sent.detail);
     if (!sent && rrs && written <= pending_down_.body.size()) {
       // A refused RRS1 send never ends the exchange: the join stands on
       // the EDHOC stage. Park the encoded frame for the poll loop's
@@ -1315,9 +1295,6 @@ void JoinProxy::deliver_down(const RelayObject& object, const MonotonicMs now_ms
     const Status loaded = slot_.load_in_place(JoinCarrier::Rld1, h.phase, h.step,
                                               join_rld1_object_id(relay_.nonce), 0, 0,
                                               written, now_ms);
-    std::fprintf(stderr, "DBG pxdown phase=%u step=%u chunked load=%d mode=%d\n",
-                 (unsigned)h.phase, (unsigned)h.step, loaded.ok() ? 1 : 0,
-                 (int)slot_.mode());
     if (!loaded) {
       slot_.release_assembled();
       return;
@@ -1523,8 +1500,6 @@ Status JoinProxy::poll(const MonotonicMs now_ms) noexcept {
     const Status retried =
         emit_rld1(pending_down_.mac, pending_down_.nonce, FrameType::BootstrapAuth,
                   ByteView{pending_down_.body.data(), pending_down_.size});
-    std::fprintf(stderr, "DBG pxdown retry sent=%d code=%d %s\n",
-                 retried.ok() ? 1 : 0, (int)retried.code, retried.detail);
     if (retried) pending_down_ = PendingDown{};
   }
   if (!relay_.active) {
@@ -1580,14 +1555,14 @@ Status JoinRelayGateway::set_host_sink(JoinRelayHostSink* sink) noexcept {
       RelayHeader up{};
       up.dir = RelayDirection::Up;
       up.relay_id = relay.token.relay_id;
-      up.proxy = floor.proxy;
+      up.proxy = floor.proxy();
       up.joiner_mac = relay.joiner_mac;
       up.phase = relay.phase;
       up.step = 1;
       up.state = RelayState::Continue;
       up.gateway_epoch = relay.token.gateway_epoch;
       up.proxy_epoch = relay.token.proxy_epoch;
-      send_down_abort(floor.proxy, up, RelayStatusCode::AuthorityUnreachable,
+      send_down_abort(floor.proxy(), up, RelayStatusCode::AuthorityUnreachable,
                       config_.unreachable_retry_ms);
       finish_silent(relay);
     }
@@ -1623,7 +1598,7 @@ JoinRelayGateway::KeyOrder JoinRelayGateway::order_key(const NodeId proxy, const
                                                        ProxyFloor*& floor) noexcept {
   floor = nullptr;
   for (ProxyFloor& row : floors_) {
-    if (row.valid && row.proxy == proxy) {
+    if (row.valid && row.proxy() == proxy) {
       floor = &row;
       break;
     }
@@ -1690,7 +1665,7 @@ Status JoinRelayGateway::open_exchange(const NodeId proxy, const std::uint8_t ho
       finish_exchange(*old, RelayAbortReason::Superseded, old->host_up_delivered);
   } else {
     target->valid = true;
-    target->proxy = proxy;
+    target->set_proxy(proxy);
   }
   target->max_proxy_epoch = header.proxy_epoch;
   target->max_relay_id = header.relay_id;
@@ -1749,14 +1724,13 @@ void JoinRelayGateway::finish_exchange(ActiveRelay& relay, const RelayAbortReaso
   if (!relay.active) return;  // a second finish of the same key is a no-op
   // Snapshot the notification before unlinking anything.
   const ProxyFloor& floor = floors_[relay.floor];
-  const NodeId proxy = floor.proxy;
+  const NodeId proxy = floor.proxy();
   const RelayToken token = relay.token;
   // (1) The floor stays terminated at this key: smaller keys remain old and
   // the same key never reopens.
   floors_[relay.floor].active = kNoActive;
   // (2) Wipe the buffer and unlink the live row.
   if (Slot* slot = slot_for(relay)) free_slot(*slot);
-  release_pending(relay);
   relay = ActiveRelay{};
   // (3) At most one notification goes out, counted once.
   switch (reason) {
@@ -1790,12 +1764,10 @@ void JoinRelayGateway::finish_silent(ActiveRelay& relay) noexcept {
   if (!relay.active) return;
   floors_[relay.floor].active = kNoActive;
   if (Slot* slot = slot_for(relay)) free_slot(*slot);
-  release_pending(relay);
   relay = ActiveRelay{};
 }
 
-void JoinRelayGateway::implicit_down_receipt(ActiveRelay& relay, const NodeId proxy,
-                                             const MonotonicMs now_ms) noexcept {
+void JoinRelayGateway::implicit_down_receipt(ActiveRelay& relay) noexcept {
   // A valid new up stage proves the down object in flight arrived: free it
   // and remember it as done, so a retried down reads as Expired.
   const Slot* held = slot_for(relay);
@@ -1809,10 +1781,6 @@ void JoinRelayGateway::implicit_down_receipt(ActiveRelay& relay, const NodeId pr
     relay.down_sending = false;
     if (!rrs) relay.down_done = true;
   }
-  // An interrupted RRS1 send frees the lane the same way: the parked
-  // terminal down leaves now rather than waiting for a result that
-  // never comes.
-  if (rrs) promote_pending_down(relay, proxy, now_ms);
 }
 
 void JoinRelayGateway::deliver_up(ActiveRelay& relay, const std::uint8_t relay_index,
@@ -1826,9 +1794,8 @@ void JoinRelayGateway::deliver_up(ActiveRelay& relay, const std::uint8_t relay_i
   // the host exactly once: commit the termination first while the source
   // buffer stays readable for the callback, wipe it right after (#116 §4.4).
   if (is_error) {
-    const NodeId proxy = floors_[relay.floor].proxy;
+    const NodeId proxy = floors_[relay.floor].proxy();
     floors_[relay.floor].active = kNoActive;
-    release_pending(relay);
     relay = ActiveRelay{};
     bool accepted = false;
     if (sink_ != nullptr) accepted = sink_->relay_up(proxy, hops, bytes).ok();
@@ -1843,14 +1810,12 @@ void JoinRelayGateway::deliver_up(ActiveRelay& relay, const std::uint8_t relay_i
     return;
   }
   bool accepted = false;
-  if (sink_ != nullptr) accepted = sink_->relay_up(floors_[relay.floor].proxy, hops, bytes).ok();
-  std::fprintf(stderr, "DBG jgw: deliver_up node=%llx accepted=%d size=%zu\n",
-               static_cast<unsigned long long>(config_.node), accepted ? 1 : 0, bytes.size);
+  if (sink_ != nullptr) accepted = sink_->relay_up(floors_[relay.floor].proxy(), hops, bytes).ok();
   if (!accepted) {
     // 07 §7: no host (or a refusing one) -> the proxy tells the device
     // authority_unreachable. The up is never handed over again for this key.
     ++stats_.host_unavailable;
-    send_down_abort(floors_[relay.floor].proxy, h, RelayStatusCode::AuthorityUnreachable,
+    send_down_abort(floors_[relay.floor].proxy(), h, RelayStatusCode::AuthorityUnreachable,
                     config_.unreachable_retry_ms);
     finish_silent(relay);
     return;
@@ -1930,7 +1895,6 @@ void JoinRelayGateway::answer_epoch_query(const NodeId proxy, const EpochQuery& 
   if (!epoch_reply_encode(reply, MutableByteView{body.data(), body.size()}, written)) return;
   if (wire_.send_relay(proxy, FrameType::BootstrapAuth, ByteView{body.data(), written})) {
     ++stats_.epoch_replies_tx;
-  } else {
   }
 }
 
@@ -2052,16 +2016,12 @@ void JoinRelayGateway::handle_up_single(const NodeId from, const std::uint8_t ho
   if (order == KeyOrder::Same) {
     ActiveRelay* relay = live_exchange(*floor);
     if (relay == nullptr) return;  // terminated: never reopened
-    handle_up_same(from, *relay, hops, h, bytes, static_cast<std::uint16_t>(bytes.size),
-                   now_ms);
+    handle_up_same(*relay, hops, h, bytes, static_cast<std::uint16_t>(bytes.size));
     return;
   }
   // A new key opens only on a step-1 single; anything else is dropped
   // without holding any state.
   if (h.step != 1) return;
-  std::fprintf(stderr, "DBG jgw: up single node=%llx from=%llx step=%u\n",
-               static_cast<unsigned long long>(config_.node),
-               static_cast<unsigned long long>(from), (unsigned)h.step);
   ActiveRelay* relay = nullptr;
   if (!open_exchange(from, hops, h, now_ms, relay)) {
     ++stats_.slot_busy;
@@ -2071,10 +2031,9 @@ void JoinRelayGateway::handle_up_single(const NodeId from, const std::uint8_t ho
   deliver_up(*relay, index, hops, object, bytes);
 }
 
-void JoinRelayGateway::handle_up_same(const NodeId from, ActiveRelay& relay,
-                                      const std::uint8_t hops, const RelayHeader& h,
-                                      const ByteView bytes, const std::uint16_t total,
-                                      const MonotonicMs now_ms) noexcept {
+void JoinRelayGateway::handle_up_same(ActiveRelay& relay, const std::uint8_t hops,
+                                      const RelayHeader& h, const ByteView bytes,
+                                      const std::uint16_t total) noexcept {
   // Same live key: the bound phase/MAC/stage decide duplicate, progress or
   // contradiction — before any slot is touched (#116 §4.2).
   if (h.phase != relay.phase || h.joiner_mac != relay.joiner_mac) {
@@ -2111,8 +2070,7 @@ void JoinRelayGateway::handle_up_same(const NodeId from, ActiveRelay& relay,
   }
   // Valid progress implicitly received the down object in flight — and only
   // valid progress ever frees it (a duplicate frees nothing) (#116 Q116-01).
-  implicit_down_receipt(relay, from, now_ms);
-  if (!relay.active) return;  // a promoted terminal down ended the exchange
+  implicit_down_receipt(relay);
   RelayObject object{};
   object.header = h;
   object.message = ByteView{bytes.data + kRelayHeaderSize, bytes.size - kRelayHeaderSize};
@@ -2220,8 +2178,7 @@ void JoinRelayGateway::handle_chunk_same(const NodeId from, ActiveRelay& relay,
     ++stats_.frames_rejected;
     return;
   }
-  if (chunk.step != 1) implicit_down_receipt(relay, from, now_ms);
-  if (!relay.active) return;  // a promoted terminal down ended the exchange
+  if (chunk.step != 1) implicit_down_receipt(relay);
   slot = slot_for(relay);
   if (slot != nullptr && (slot->down || slot->object.mode() != JoinObjectSlot::Mode::Idle)) {
     ++stats_.frames_rejected;  // another object still owns the relay's slot
@@ -2324,7 +2281,7 @@ void JoinRelayGateway::handle_proxy_aborted(const NodeId from, const RelayToken&
     for (ProxyFloor& row : floors_) {
       if (!row.valid) {
         row.valid = true;
-        row.proxy = from;
+        row.set_proxy(from);
         row.max_proxy_epoch = token.proxy_epoch;
         row.max_relay_id = token.relay_id;
         return;
@@ -2368,9 +2325,6 @@ void JoinRelayGateway::handle_down_reply(const NodeId from, const JoinReply& rep
         relay->down_sending = false;
         relay->down_done = true;
         free_slot(*slot);
-        // An RRS1 delivery ends quietly: release the parked terminal
-        // down (usually the m4) onto the freed lane.
-        if (rrs) promote_pending_down(*relay, from, now_ms);
       }
       return;
     case JoinObjectSlot::ReplyOutcome::Restart:
@@ -2426,14 +2380,9 @@ Status JoinRelayGateway::host_down(const NodeId to_proxy, const ByteView object,
   RelayObject decoded{};
   Status status = relay_object_decode(object, decoded);
   if (!status) {
-    std::fprintf(stderr, "DBG host_down decode fail code=%d %s\n", (int)status.code,
-                 status.detail);
     return status;
   }
   const RelayHeader& h = decoded.header;
-  std::fprintf(stderr, "DBG host_down phase=%u step=%u size=%zu proxy=%llu\n",
-               (unsigned)h.phase, (unsigned)h.step, object.size,
-               (unsigned long long)to_proxy);
   if (h.dir != RelayDirection::Down || h.proxy != to_proxy ||
       (to_proxy == config_.node && !config_.colocated_proxy)) {
     return invalid("relay down header");
@@ -2505,34 +2454,12 @@ Status JoinRelayGateway::host_down(const NodeId to_proxy, const ByteView object,
   }
   if (relay->down_sending) {
     Slot* held = slot_for(*relay);
-    // The wire lane is strictly serial: while an RRS1 object holds the
-    // down slot, the terminal EDHOC down parks on the relay and promotes
-    // on the RRS1 slot's terminal result (02 §5.3). One deep only.
-    if (!rrs && !relay->pending_down.pending && held != nullptr && held->down &&
+    // The host retains m4 while the phase-7 object occupies this lane.
+    // A capacity refusal changes no gateway state; the host retries the
+    // same full-token object after the RRS1 Complete receipt.
+    if (!rrs && held != nullptr && held->down &&
         held->object.phase() == JoinAuthPhase::RrsDelivery) {
-      // A park exists only while an RRS1 object holds a down slot, so at
-      // most kSlots parks are ever live; a full pool means the relay's
-      // deadline ends the exchange rather than dropping the terminal down.
-      for (std::uint8_t p = 0; p < pending_pool_.size(); ++p) {
-        PendingObject& entry = pending_pool_[p];
-        if (entry.used) continue;
-        if (object.size > entry.bytes.bytes.size()) return Status::error(
-            StatusCode::NoCapacity, "pending down oversize");
-        entry.relay = static_cast<std::uint8_t>(relay - relays_.data());
-        std::memcpy(entry.bytes.bytes.data(), object.data, object.size);
-        entry.bytes.size = object.size;
-        entry.used = true;
-        relay->pending_down.phase = h.phase;
-        relay->pending_down.step = h.step;
-        relay->pending_down.final = is_final;
-        relay->pending_down.pool = p;
-        relay->pending_down.pending = true;
-        last_now_ms_ = now_ms;
-        std::fprintf(stderr, "DBG park step=%u final=%u size=%zu pool=%u\n",
-                     h.step, is_final ? 1 : 0, object.size, p);
-        return Status::success();
-      }
-      return Status::error(StatusCode::NoCapacity, "pending pool busy");
+      return Status::error(StatusCode::NoCapacity, "RRS1 down in flight");
     }
     // A retried down is idempotent only byte-for-byte; anything else while
     // sending contradicts the live exchange.
@@ -2593,74 +2520,6 @@ Status JoinRelayGateway::host_down(const NodeId to_proxy, const ByteView object,
   }
   in_call_ = false;
   return status;
-}
-
-void JoinRelayGateway::release_pending(ActiveRelay& relay) noexcept {
-  if (relay.pending_down.pool < pending_pool_.size() &&
-      pending_pool_[relay.pending_down.pool].used &&
-      pending_pool_[relay.pending_down.pool].relay ==
-          static_cast<std::uint8_t>(&relay - relays_.data())) {
-    pending_pool_[relay.pending_down.pool].clear();
-  }
-  relay.pending_down.clear();
-}
-
-void JoinRelayGateway::promote_pending_down(ActiveRelay& relay, const NodeId proxy,
-                                            const MonotonicMs now_ms) noexcept {
-  if (!relay.active || !relay.pending_down.pending || relay.down_sending) {
-    std::fprintf(stderr, "DBG promote skip active=%u pend=%u send=%u\n",
-                 relay.active ? 1 : 0, relay.pending_down.pending ? 1 : 0,
-                 relay.down_sending ? 1 : 0);
-    return;
-  }
-  const ActiveRelay::PendingDown pending = relay.pending_down;
-  if (pending.pool >= pending_pool_.size() || !pending_pool_[pending.pool].used) {
-    relay.pending_down.clear();
-    return;
-  }
-  const ByteView object{pending_pool_[pending.pool].bytes.bytes.data(),
-                        pending_pool_[pending.pool].bytes.size};
-  last_now_ms_ = now_ms;
-  RelayHeader h{};
-  h.dir = RelayDirection::Down;
-  h.state = pending.final ? RelayState::Final : RelayState::Continue;
-  if (object.size <= kMaxApplicationPayload) {
-    // A single frame either leaves at once or nothing changes; there is
-    // no host left to answer, so the relay deadline owns the retry.
-    const Status status = wire_.send_relay(proxy, relay_single_frame_type(h), object);
-    release_pending(relay);  // the bytes are consumed either way
-    if (status) {
-      if (pending.step == 2) relay.m2_done = true;
-      relay.down_step = pending.step;
-      relay.down_done = true;
-      relay.down_final = pending.final;
-      ++stats_.down_objects;
-      if (pending.final) finish_silent(relay);
-    }
-    return;
-  }
-  const auto index = static_cast<std::uint8_t>(&relay - relays_.data());
-  Slot* slot = allocate_slot(relay, index, true);
-  if (slot == nullptr) {
-    ++stats_.slot_busy;
-    std::fprintf(stderr, "DBG promote noslot size=%zu\n", object.size);
-    return;  // the park stays; the exchange deadline ends it
-  }
-  const Status status =
-      slot->object.load(JoinCarrier::WireRelay, pending.phase, pending.step,
-                        relay.token.relay_id, relay.token.gateway_epoch,
-                        relay.token.proxy_epoch, object, now_ms);
-  std::fprintf(stderr, "DBG promote load=%d size=%zu\n", status.code == StatusCode::Ok ? 1 : 0, object.size);
-  if (status) {
-    release_pending(relay);  // the slot owns the bytes now
-    (void)send_due_chunks(*slot, proxy, now_ms);
-    relay.down_step = pending.step;
-    relay.down_sending = true;
-    relay.down_final = pending.final;
-    ++stats_.down_objects;
-  } else {
-    free_slot(*slot);
-  }
 }
 
 Status JoinRelayGateway::host_abort(const NodeId proxy, const RelayToken token,
@@ -2755,7 +2614,7 @@ Status JoinRelayGateway::poll(const MonotonicMs now_ms) noexcept {
       continue;
     }
     ++stats_.retransmissions;
-    const NodeId proxy = floors_[relay.floor].proxy;
+    const NodeId proxy = floors_[relay.floor].proxy();
     (void)send_due_chunks(*slot, proxy, now_ms);
   }
   in_call_ = false;

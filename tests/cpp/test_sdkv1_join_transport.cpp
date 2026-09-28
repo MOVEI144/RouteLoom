@@ -744,7 +744,7 @@ void unit_admission() {
   using S = MembershipState;
   const auto tx = AdmissionDirection::Tx;
   const auto rx = AdmissionDirection::Rx;
-  // Classification: only the v3 bodies, phases 4-6 and phase-4/5 chunks.
+  // Classification: only the v3 bodies, phases 4-7 and phase-4/5/7 chunks.
   CHECK(!zt_rld1_frame(env_with(FrameType::Discover, {})));
   CHECK(!zt_rld1_frame(env_with(FrameType::Offer, {1, 0})));
   CHECK(!zt_rld1_frame(env_with(FrameType::Discover, {2, 1})));
@@ -752,9 +752,11 @@ void unit_admission() {
   CHECK(!zt_rld1_frame(env_with(FrameType::BootstrapAuth, {1, 1, 1, 0})));
   CHECK(zt_rld1_frame(env_with(FrameType::BootstrapAuth, {1, 4, 2, 0})));
   CHECK(zt_rld1_frame(env_with(FrameType::BootstrapAuth, {1, 6, 1, 0})));
-  CHECK(!zt_rld1_frame(env_with(FrameType::BootstrapAuth, {1, 7, 1, 0})));
+  CHECK(zt_rld1_frame(env_with(FrameType::BootstrapAuth, {1, 7, 1, 0})));
+  CHECK(!zt_rld1_frame(env_with(FrameType::BootstrapAuth, {1, 8, 1, 0})));
   CHECK(!zt_rld1_frame(env_with(FrameType::BootstrapChunk, {1, 1})));
   CHECK(zt_rld1_frame(env_with(FrameType::BootstrapChunk, {1, 0x42})));
+  CHECK(zt_rld1_frame(env_with(FrameType::BootstrapChunk, {1, 0x71})));
   CHECK(!zt_rld1_frame(env_with(FrameType::BootstrapChunk, {1, 0x46})));
   CHECK(!zt_rld1_frame(env_with(FrameType::BootstrapReply, {1, 0x61})));
   CHECK(zt_rld1_frame(env_with(FrameType::BootstrapReply, {1, 0x53})));

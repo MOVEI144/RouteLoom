@@ -42,7 +42,8 @@
 //! NOT device delivery — usb-protocol.md §9; strictly correlated to our
 //! request id, stray results ignored):
 //!   Ok            → continue (next up / 0x62 / timers decide)
-//!   Busy, NoRoute, Indeterminate, Denied, Unsupported, Invalid → end attempt
+//!   Busy on a final EDHOC down following phase-7 RRS → retry the same down
+//!   Other Busy, NoRoute, Indeterminate, Denied, Unsupported, Invalid → end attempt
 //! ```
 //!
 //! Queue. [`JoinTransport::deliver`][super::transport::JoinTransport]
@@ -53,7 +54,7 @@
 //! by the authority timers — and a writer-full remainder is requeued at
 //! the front WITHOUT refreshing its TTL.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -79,6 +80,7 @@ use super::authority_channel::{AuthorityOutbound, AuthorityTransport};
 use super::group_keys::HostTime;
 use super::transport::{
     AbortReason, DeliverReject, DownStatus, JoinTransport, Outbound, RelayDown, RelayKey, RelayUp,
+    PHASE_EDHOC, PHASE_RRS_DELIVERY,
 };
 use crate::{mono_ms, now_ms, push_event, State};
 
@@ -221,6 +223,8 @@ struct Inner {
     queue: VecDeque<ReadyDown>,
     relays: HashMap<(u64, RelayToken), RelaySlot>,
     requests: VecDeque<(u64, RelayKey, bool)>,
+    rrs_issued: HashSet<RelayKey>,
+    retry_terminal: HashMap<RelayKey, ReadyDown>,
     stats: AdapterStats,
 }
 
@@ -244,6 +248,8 @@ impl UsbSiteAdapter {
                 queue: VecDeque::new(),
                 relays: HashMap::new(),
                 requests: VecDeque::new(),
+                rrs_issued: HashSet::new(),
+                retry_terminal: HashMap::new(),
                 stats: AdapterStats::default(),
             }),
         })
@@ -274,6 +280,8 @@ impl UsbSiteAdapter {
         inner.queue.clear();
         inner.relays.clear();
         inner.requests.clear();
+        inner.rrs_issued.clear();
+        inner.retry_terminal.clear();
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -322,6 +330,10 @@ impl UsbSiteAdapter {
         for expired_slot in expired {
             guard.relays.remove(&expired_slot);
             drop_queued(&mut guard.queue, expired_slot);
+            guard.rrs_issued.retain(|key| slot_of(*key) != expired_slot);
+            guard
+                .retry_terminal
+                .retain(|key, _| slot_of(*key) != expired_slot);
             guard
                 .requests
                 .retain(|(_, key, _)| slot_of(*key) != expired_slot);
@@ -332,6 +344,8 @@ impl UsbSiteAdapter {
             // attempt. Never answer an abort with an abort.
             guard.relays.remove(&slot);
             drop_queued(&mut guard.queue, slot);
+            guard.rrs_issued.remove(&key);
+            guard.retry_terminal.remove(&key);
             return Ok(UpOutcome::ProxyAbort { key });
         }
         if header.phase == PHASE_RESUME {
@@ -395,10 +409,17 @@ impl UsbSiteAdapter {
         // another incarnation (or another proxy) retires nothing.
         let slot = (abort.proxy, abort.token());
         let Some(entry) = guard.relays.remove(&slot) else {
+            // A final down leaves the live directory at queue admission.
+            // Its retry copy must still die with the same full-token abort.
+            drop_queued(&mut guard.queue, slot);
+            guard.rrs_issued.retain(|key| slot_of(*key) != slot);
+            guard.retry_terminal.retain(|key, _| slot_of(*key) != slot);
             guard.stats.stray_aborts += 1;
             return Ok(AbortOutcome::Unknown);
         };
         drop_queued(&mut guard.queue, slot);
+        guard.rrs_issued.remove(&entry.key);
+        guard.retry_terminal.remove(&entry.key);
         Ok(AbortOutcome::RelayOver {
             key: entry.key,
             reason: abort.reason,
@@ -433,14 +454,31 @@ impl UsbSiteAdapter {
             guard.stats.stray_results += 1;
             return Ok(ResultOutcome::Stray);
         }
+        if terminal && result.result == ConfigOpsResult::Busy {
+            if let Some(down) = guard.retry_terminal.get(&key).cloned() {
+                // The gateway still owns the phase-7 chunk lane. Its Busy
+                // result accepted no m4 bytes, so retry the exact frame
+                // from the host's bounded queue until its original TTL.
+                if guard.queue.len() < DOWN_QUEUE_CAP
+                    && mono_ms().saturating_sub(down.admitted_ms) <= DOWN_TTL_MS
+                {
+                    guard.queue.push_front(down);
+                    return Ok(ResultOutcome::Retrying { key });
+                }
+            }
+        }
         if !result_continues(result.result) {
             let slot = slot_of(key);
             guard.relays.remove(&slot);
             drop_queued(&mut guard.queue, slot);
+            guard.rrs_issued.remove(&key);
+            guard.retry_terminal.remove(&key);
             return Ok(ResultOutcome::Failed { key });
         }
         if terminal {
             guard.relays.remove(&slot_of(key));
+            guard.rrs_issued.remove(&key);
+            guard.retry_terminal.remove(&key);
         }
         Ok(ResultOutcome::Acked { key })
     }
@@ -454,9 +492,20 @@ impl UsbSiteAdapter {
             return Vec::new();
         }
         let before = guard.queue.len();
+        let expired: Vec<_> = guard
+            .queue
+            .iter()
+            .filter(|q| now_ms.saturating_sub(q.admitted_ms) > DOWN_TTL_MS)
+            .map(|q| q.key)
+            .collect();
         guard
             .queue
             .retain(|q| now_ms.saturating_sub(q.admitted_ms) <= DOWN_TTL_MS);
+        for key in expired {
+            drop_queued(&mut guard.queue, slot_of(key));
+            guard.rrs_issued.remove(&key);
+            guard.retry_terminal.remove(&key);
+        }
         guard.stats.expired += (before - guard.queue.len()) as u64;
         guard.queue.drain(..).collect()
     }
@@ -493,7 +542,12 @@ impl UsbSiteAdapter {
         }
         guard.requests.push_back((request, key, terminal));
         while guard.requests.len() > REQUEST_MAP_CAP {
-            guard.requests.pop_front();
+            if let Some((_, key, terminal)) = guard.requests.pop_front() {
+                if terminal {
+                    guard.rrs_issued.remove(&key);
+                    guard.retry_terminal.remove(&key);
+                }
+            }
             guard.stats.requests_evicted += 1;
         }
     }
@@ -587,12 +641,6 @@ impl JoinTransport for UsbSiteAdapter {
             return Err(DeliverReject::Closed);
         }
         let key = outbound.key();
-        if let Outbound::Down(down) = &outbound {
-            eprintln!(
-                "DBG deliver down phase={} step={} proxy={:#x} size={}",
-                down.phase, down.step, down.key.proxy, down.body.len()
-            );
-        }
         let encoded: Result<(Vec<u8>, bool), DeliverReject> = match &outbound {
             Outbound::Down(down) => {
                 down_object(down).map(|bytes| (bytes, down.status == DownStatus::Final))
@@ -607,7 +655,33 @@ impl JoinTransport for UsbSiteAdapter {
         // down_object), so a failure counts as a large rejection, like
         // the explicit item bound below.
         let (bytes, terminal) = encoded.inspect_err(|_| guard.stats.rejected_large += 1)?;
-        admit_bytes_locked(&mut guard, bytes, key, terminal, mono_ms())
+        let rrs = matches!(&outbound, Outbound::Down(down) if down.phase == PHASE_RRS_DELIVERY);
+        let retryable = matches!(&outbound, Outbound::Down(down)
+            if down.phase == PHASE_EDHOC && down.step == 4 &&
+                down.status == DownStatus::Final && guard.rrs_issued.contains(&key));
+        if (rrs && !guard.rrs_issued.contains(&key) && guard.rrs_issued.len() >= RELAY_SLOTS_CAP)
+            || (retryable
+                && !guard.retry_terminal.contains_key(&key)
+                && guard.retry_terminal.len() >= REQUEST_MAP_CAP)
+        {
+            guard.stats.rejected_full += 1;
+            return Err(DeliverReject::QueueFull);
+        }
+        if let Err(error) = admit_bytes_locked(&mut guard, bytes, key, terminal, mono_ms()) {
+            if terminal {
+                guard.rrs_issued.remove(&key);
+                guard.retry_terminal.remove(&key);
+            }
+            return Err(error);
+        }
+        if rrs && guard.relays.contains_key(&slot_of(key)) {
+            guard.rrs_issued.insert(key);
+        } else if retryable {
+            if let Some(down) = guard.queue.back().cloned() {
+                guard.retry_terminal.insert(key, down);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -661,6 +735,9 @@ pub enum ResultOutcome {
     Acked { key: RelayKey },
     /// Queue admission failed at the gateway: the lane ends the attempt.
     Failed { key: RelayKey },
+    /// A phase-7 down still occupies the gateway lane; the exact final
+    /// down is back in the bounded host queue with its original TTL.
+    Retrying { key: RelayKey },
     /// No matching request, or a relay mismatch: consumed and ignored.
     Stray,
 }
@@ -2033,6 +2110,75 @@ mod tests {
             adapter.handle_result(44, &foreign_epoch).unwrap(),
             ResultOutcome::Stray
         );
+    }
+
+    #[test]
+    fn final_down_retries_while_rrs_occupies_gateway_lane() {
+        let adapter = live_relay();
+        let transport: &dyn JoinTransport = adapter.as_ref();
+        transport
+            .deliver(Outbound::Down(RelayDown {
+                key: key(),
+                phase: crate::site::transport::PHASE_RRS_DELIVERY,
+                step: 1,
+                status: DownStatus::Continue,
+                body: vec![1; 200],
+            }))
+            .unwrap();
+        transport
+            .deliver(down(key(), 4, DownStatus::Final, vec![2; 353]))
+            .unwrap();
+        let ready = adapter.take_ready(crate::mono_ms());
+        assert_eq!(ready.len(), 2);
+        let final_bytes = ready[1].bytes.clone();
+        let admitted = ready[1].admitted_ms;
+        adapter.note_sent(51, key(), false);
+        adapter.note_sent(52, key(), true);
+        assert_eq!(
+            adapter.handle_result(51, &result_inner(51, ConfigOpsResult::Ok).1),
+            Ok(ResultOutcome::Acked { key: key() })
+        );
+        assert_ne!(
+            adapter.handle_result(52, &result_inner(52, ConfigOpsResult::Busy).1),
+            Ok(ResultOutcome::Failed { key: key() })
+        );
+        let retry = adapter.take_ready(crate::mono_ms());
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].bytes, final_bytes);
+        assert_eq!(retry[0].admitted_ms, admitted);
+        adapter.note_sent(53, key(), true);
+        assert_eq!(
+            adapter.handle_result(53, &result_inner(53, ConfigOpsResult::Ok).1),
+            Ok(ResultOutcome::Acked { key: key() })
+        );
+        assert!(adapter.take_ready(crate::mono_ms()).is_empty());
+
+        let refused = live_relay();
+        let transport: &dyn JoinTransport = refused.as_ref();
+        transport
+            .deliver(Outbound::Down(RelayDown {
+                key: key(),
+                phase: PHASE_RRS_DELIVERY,
+                step: 1,
+                status: DownStatus::Continue,
+                body: vec![1; 200],
+            }))
+            .unwrap();
+        transport
+            .deliver(down(key(), 4, DownStatus::Final, vec![2; 353]))
+            .unwrap();
+        assert_eq!(refused.take_ready(crate::mono_ms()).len(), 2);
+        refused.note_sent(61, key(), false);
+        refused.note_sent(62, key(), true);
+        assert_eq!(
+            refused.handle_result(61, &result_inner(61, ConfigOpsResult::Busy).1),
+            Ok(ResultOutcome::Failed { key: key() })
+        );
+        assert_eq!(
+            refused.handle_result(62, &result_inner(62, ConfigOpsResult::Busy).1),
+            Ok(ResultOutcome::Failed { key: key() })
+        );
+        assert!(refused.take_ready(crate::mono_ms()).is_empty());
     }
 
     #[test]

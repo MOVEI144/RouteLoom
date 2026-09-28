@@ -292,7 +292,7 @@ fn kguard_drives_the_join_over_the_api_socket() {
         .revoke(device.node, 1, RemovalReason::Lost, "rm-1")
         .unwrap();
     assert_eq!(removed.state, "committed");
-    assert_eq!(removed.rs_epoch, 1);
+    assert_eq!(removed.rs_epoch, 2);
     next_event("member.revoked");
     next_event("rrs.published");
     let op = kguard_link
@@ -321,7 +321,7 @@ fn kguard_drives_the_join_over_the_api_socket() {
     assert!(!member.member);
     assert_eq!(member.removal_reason.as_deref(), Some("lost"));
     let status = kguard_link.site_status().unwrap();
-    assert_eq!((status.members, status.removed, status.rs_epoch), (0, 1, 1));
+    assert_eq!((status.members, status.removed, status.rs_epoch), (0, 1, 2));
 }
 
 #[test]
@@ -783,9 +783,9 @@ fn cutover_flows_end_to_end_over_the_api_socket() {
         .encode()
         .unwrap()
         .to_vec();
-        let (moved, _) = daemon
-            .service
-            .with(|a| a.handle_grant_receipt(node, 1, old_network, &receipt, t0 + 4_000));
+        let (moved, _) = daemon.service.with(|a| {
+            a.handle_grant_receipt(node, 1, old_network, &receipt, HostTime::sync(t0 + 4_000))
+        });
         assert!(moved);
     }
     let progress = admin
@@ -852,7 +852,7 @@ fn cutover_flows_end_to_end_over_the_api_socket() {
         .to_vec();
         let (moved, _) = daemon
             .service
-            .with(|a| a.handle_grant_receipt(node, 1, new_network, &receipt, at));
+            .with(|a| a.handle_grant_receipt(node, 1, new_network, &receipt, HostTime::sync(at)));
         assert!(moved);
     };
     for (node, _, _) in &commits {

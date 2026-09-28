@@ -247,7 +247,7 @@ fn prepare_gateway(
                 1,
                 testkit::network(),
                 &receipt,
-                at + 11_000
+                HostTime::sync(at + 11_000)
             ))
             .0
     );
@@ -388,7 +388,7 @@ fn inject_applied(service: &SiteService, op: u64, node: u64, at: u64) -> bool {
     .unwrap()
     .to_vec();
     service
-        .with(|a| a.handle_grant_receipt(node, 1, new_network, &receipt, at))
+        .with(|a| a.handle_grant_receipt(node, 1, new_network, &receipt, HostTime::sync(at)))
         .0
 }
 
@@ -512,7 +512,7 @@ fn applied_after_delivery_grace_converges_the_cutover() {
                 1,
                 state.new_network,
                 &receipt,
-                committed_at + 60_002
+                HostTime::sync(committed_at + 60_002)
             ))
             .0
     );
@@ -712,7 +712,7 @@ fn retired_network_notice_is_not_sent_after_cutover_commit() {
                 1,
                 testkit::network(),
                 &receipt,
-                T0 + 11_000
+                HostTime::sync(T0 + 11_000)
             ))
             .0
     );
@@ -849,8 +849,15 @@ fn cutover_holds_the_window_and_the_gateway_gate() {
             status: 0,
         };
         let bytes = receipt.encode().unwrap().to_vec();
-        let (moved, _) = service
-            .with(|a| a.handle_grant_receipt(node, 1, testkit::network(), &bytes, T0 + 20_000));
+        let (moved, _) = service.with(|a| {
+            a.handle_grant_receipt(
+                node,
+                1,
+                testkit::network(),
+                &bytes,
+                HostTime::sync(T0 + 20_000),
+            )
+        });
         assert!(moved, "PREPARED counts for {node:016x}");
     }
     // A stale revision and a wrong digest never count.
@@ -868,8 +875,15 @@ fn cutover_holds_the_window_and_the_gateway_gate() {
         status: 0,
     };
     let stale = stale.encode().unwrap().to_vec();
-    let (moved, _) = service
-        .with(|a| a.handle_grant_receipt(member.node, 1, testkit::network(), &stale, T0 + 20_000));
+    let (moved, _) = service.with(|a| {
+        a.handle_grant_receipt(
+            member.node,
+            1,
+            testkit::network(),
+            &stale,
+            HostTime::sync(T0 + 20_000),
+        )
+    });
     assert!(!moved);
     tick(&service, T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS - 1);
     assert_eq!(
@@ -944,7 +958,8 @@ fn cutover_holds_the_window_and_the_gateway_gate() {
             status: 0,
         };
         let bytes = receipt.encode().unwrap().to_vec();
-        let (moved, _) = service.with(|a| a.handle_grant_receipt(node, 1, new_network, &bytes, at));
+        let (moved, _) = service
+            .with(|a| a.handle_grant_receipt(node, 1, new_network, &bytes, HostTime::sync(at)));
         assert!(moved);
     };
     // The member APPLIEDs; the held gateway COMMIT follows on the tick.
@@ -1004,8 +1019,15 @@ fn cutover_flushes_the_held_gateway_commit() {
             status: 0,
         };
         let bytes = receipt.encode().unwrap().to_vec();
-        let (moved, _) = service
-            .with(|a| a.handle_grant_receipt(node, 1, testkit::network(), &bytes, T0 + 20_000));
+        let (moved, _) = service.with(|a| {
+            a.handle_grant_receipt(
+                node,
+                1,
+                testkit::network(),
+                &bytes,
+                HostTime::sync(T0 + 20_000),
+            )
+        });
         assert!(moved);
     }
     let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
@@ -1091,8 +1113,15 @@ fn cutover_accepts_grace_applied_only_in_grace() {
             status: 0,
         };
         let bytes = receipt.encode().unwrap().to_vec();
-        let (moved, _) = service
-            .with(|a| a.handle_grant_receipt(node, 1, testkit::network(), &bytes, T0 + 20_000));
+        let (moved, _) = service.with(|a| {
+            a.handle_grant_receipt(
+                node,
+                1,
+                testkit::network(),
+                &bytes,
+                HostTime::sync(T0 + 20_000),
+            )
+        });
         assert!(moved);
     }
     let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
@@ -1122,15 +1151,36 @@ fn cutover_accepts_grace_applied_only_in_grace() {
         .unwrap()
         .to_vec()
     };
-    // Old-context APPLIED while Committed (inside the grace): counts.
+    // The last true in-grace instant counts; D and D+1 are rejected
+    // at receive time even before a tick advances the operation phase.
     // (The bytes are built outside `with`: the builder locks too.)
     let bytes = applied_bytes();
-    let (moved, _) = service
-        .with(|a| a.handle_grant_receipt(member.node, 1, testkit::network(), &bytes, committed_at));
+    let deadline = committed_at + CUTOVER_GRACE_MS;
+    let (moved, _) = service.with(|a| {
+        a.handle_grant_receipt(
+            member.node,
+            1,
+            testkit::network(),
+            &bytes,
+            HostTime::sync(deadline - 1),
+        )
+    });
     assert!(moved);
+    for at in [deadline, deadline + 1] {
+        let (moved, _) = service.with(|a| {
+            a.handle_grant_receipt(
+                gateway.node,
+                1,
+                testkit::network(),
+                &bytes,
+                HostTime::sync(at),
+            )
+        });
+        assert!(!moved, "old-context APPLIED at {at} is outside grace");
+    }
     // The grace lapses with the gateway unsettled: recovery_pending.
-    tick(&service, committed_at + CUTOVER_GRACE_MS + 100);
-    let view = operation(&service, op, committed_at + CUTOVER_GRACE_MS + 100);
+    tick(&service, deadline + 100);
+    let view = operation(&service, op, deadline + 100);
     assert_eq!(
         view.get("phase").unwrap().as_str(),
         Some("recovery_pending")
@@ -1143,7 +1193,7 @@ fn cutover_accepts_grace_applied_only_in_grace() {
             1,
             testkit::network(),
             &bytes,
-            committed_at + CUTOVER_GRACE_MS + 200,
+            HostTime::sync(committed_at + CUTOVER_GRACE_MS + 200),
         )
     });
     assert!(!moved);
@@ -1153,7 +1203,7 @@ fn cutover_accepts_grace_applied_only_in_grace() {
             1,
             new_network,
             &bytes,
-            committed_at + CUTOVER_GRACE_MS + 200,
+            HostTime::sync(committed_at + CUTOVER_GRACE_MS + 200),
         )
     });
     assert!(moved);
@@ -1193,7 +1243,13 @@ fn cutover_waits_for_a_gateway() {
         .to_vec()
     };
     let (moved, _) = service.with(|a| {
-        a.handle_grant_receipt(member.node, 1, testkit::network(), &prepared, T0 + 20_000)
+        a.handle_grant_receipt(
+            member.node,
+            1,
+            testkit::network(),
+            &prepared,
+            HostTime::sync(T0 + 20_000),
+        )
     });
     assert!(moved);
     let lapse = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
@@ -1250,7 +1306,7 @@ fn cutover_waits_for_a_gateway() {
             1,
             testkit::network(),
             &prepared,
-            lapse + 1_300,
+            HostTime::sync(lapse + 1_300),
         )
     });
     assert!(moved);
@@ -1328,8 +1384,15 @@ fn revoke_during_prepare_restages_and_carries() {
         .to_vec()
     };
     let bytes = prepared(&keeper_prepare);
-    let (moved, _) = service
-        .with(|a| a.handle_grant_receipt(keeper.node, 1, testkit::network(), &bytes, T0 + 11_000));
+    let (moved, _) = service.with(|a| {
+        a.handle_grant_receipt(
+            keeper.node,
+            1,
+            testkit::network(),
+            &bytes,
+            HostTime::sync(T0 + 11_000),
+        )
+    });
     assert!(moved);
     // A transport refusal from revision 1 must not delay the freshly
     // restaged PREPARE for this same member and operation.
@@ -1353,14 +1416,21 @@ fn revoke_during_prepare_restages_and_carries() {
         )
     });
     let answer = json(&answer.unwrap());
-    assert_eq!(answer.get("rs_epoch").unwrap().as_u64(), Some(1));
+    assert_eq!(answer.get("rs_epoch").unwrap().as_u64(), Some(2));
     let view = operation(&service, op, T0 + 12_000);
     assert_eq!(view.get("revision").unwrap().as_u64(), Some(2));
     assert_eq!(view.get("prepared").unwrap().as_u64(), Some(0));
     // The revision-1 PREPARED no longer counts; the keeper re-PREPAREs
     // at revision 2 with the re-staged key.
-    let (moved, _) = service
-        .with(|a| a.handle_grant_receipt(keeper.node, 1, testkit::network(), &bytes, T0 + 12_100));
+    let (moved, _) = service.with(|a| {
+        a.handle_grant_receipt(
+            keeper.node,
+            1,
+            testkit::network(),
+            &bytes,
+            HostTime::sync(T0 + 12_100),
+        )
+    });
     assert!(!moved, "stale-revision PREPARED is ignored");
     for t in 0..4 {
         tick(&service, T0 + 12_100 + t * 100);
@@ -1539,7 +1609,13 @@ fn missed_cutover_reissues_without_kguard() {
     .unwrap()
     .to_vec();
     let (moved, _) = service.with(|a| {
-        a.handle_grant_receipt(gateway.node, 1, testkit::network(), &prepared, T0 + 11_000)
+        a.handle_grant_receipt(
+            gateway.node,
+            1,
+            testkit::network(),
+            &prepared,
+            HostTime::sync(T0 + 11_000),
+        )
     });
     assert!(moved);
     let lapse = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
@@ -1710,8 +1786,15 @@ fn rrs_full_recovers_through_cutover() {
             status: 0,
         };
         let bytes = receipt.encode().unwrap().to_vec();
-        let (moved, _) = service
-            .with(|a| a.handle_grant_receipt(node, 1, testkit::network(), &bytes, T0 + 11_000));
+        let (moved, _) = service.with(|a| {
+            a.handle_grant_receipt(
+                node,
+                1,
+                testkit::network(),
+                &bytes,
+                HostTime::sync(T0 + 11_000),
+            )
+        });
         assert!(moved);
     }
     let lapse = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
@@ -1736,7 +1819,7 @@ fn rrs_full_recovers_through_cutover() {
         )
     });
     let answer = json(&answer.unwrap());
-    assert_eq!(answer.get("rs_epoch").unwrap().as_u64(), Some(34));
+    assert_eq!(answer.get("rs_epoch").unwrap().as_u64(), Some(35));
 }
 
 /// The RemovalNotice outbox: the revoke commits the notice, the tick
@@ -1991,8 +2074,15 @@ fn start_tree(
             status: 0,
         };
         let bytes = receipt.encode().unwrap().to_vec();
-        let (moved, _) = service
-            .with(|a| a.handle_grant_receipt(node, 1, testkit::network(), &bytes, T0 + 20_000));
+        let (moved, _) = service.with(|a| {
+            a.handle_grant_receipt(
+                node,
+                1,
+                testkit::network(),
+                &bytes,
+                HostTime::sync(T0 + 20_000),
+            )
+        });
         assert!(moved, "PREPARED counts for {node:016x}");
     }
     (op, sends)
@@ -2403,7 +2493,13 @@ fn cutover_straggler_recovers_through_the_reissue() {
     .unwrap()
     .to_vec();
     let (moved, _) = service.with(|a| {
-        a.handle_grant_receipt(gateway.node, 1, testkit::network(), &prepared, T0 + 11_000)
+        a.handle_grant_receipt(
+            gateway.node,
+            1,
+            testkit::network(),
+            &prepared,
+            HostTime::sync(T0 + 11_000),
+        )
     });
     assert!(moved);
     let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;

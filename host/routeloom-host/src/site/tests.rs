@@ -1716,7 +1716,7 @@ fn removal_end_to_end() {
     let (answer, events) = revoke(1, "r1", T0 + 30);
     let answer = json(&answer.unwrap());
     assert_eq!(answer.get("state").unwrap().as_str(), Some("committed"));
-    assert_eq!(answer.get("rs_epoch").unwrap().as_u64(), Some(1));
+    assert_eq!(answer.get("rs_epoch").unwrap().as_u64(), Some(2));
     assert_eq!(
         kinds(&events),
         ["member.revoked", "rrs.published", "gk.staged"]
@@ -4977,12 +4977,12 @@ fn revocation_distribution_converges_on_applied() {
     // Wrong generation, wrong node, unknown epoch, wrong bytes: ignored.
     assert!(
         !service
-            .with(|a| a.handle_rrs_applied(keeper.node, 9, network, 1, &digest, T0 + 10_200))
+            .with(|a| a.handle_rrs_applied(keeper.node, 9, network, 2, &digest, T0 + 10_200))
             .0
     );
     assert!(
         !service
-            .with(|a| a.handle_rrs_applied(leaver.node, 1, network, 1, &digest, T0 + 10_200))
+            .with(|a| a.handle_rrs_applied(leaver.node, 1, network, 2, &digest, T0 + 10_200))
             .0
     );
     assert!(
@@ -4993,7 +4993,7 @@ fn revocation_distribution_converges_on_applied() {
     assert!(
         !service
             .with(|a| {
-                a.handle_rrs_applied(keeper.node, 1, network, 1, &[0xEE; 32], T0 + 10_200)
+                a.handle_rrs_applied(keeper.node, 1, network, 2, &[0xEE; 32], T0 + 10_200)
             })
             .0
     );
@@ -5007,7 +5007,7 @@ fn revocation_distribution_converges_on_applied() {
     // The genuine ACK converges the operation.
     assert!(
         service
-            .with(|a| a.handle_rrs_applied(keeper.node, 1, network, 1, &digest, T0 + 10_300))
+            .with(|a| a.handle_rrs_applied(keeper.node, 1, network, 2, &digest, T0 + 10_300))
             .0
     );
     let distribution = distribution_of(&service, op);
@@ -5032,7 +5032,7 @@ fn applied_ack_requires_the_snapshot_credential() {
     service.with(|a| a.devices.get_mut(&keeper.node).unwrap().generation = 2);
     assert!(
         !service
-            .with(|a| a.handle_rrs_applied(keeper.node, 2, network, 1, &digest, T0 + 10_100))
+            .with(|a| a.handle_rrs_applied(keeper.node, 2, network, 2, &digest, T0 + 10_100))
             .0
     );
     service.with(|a| {
@@ -5042,7 +5042,7 @@ fn applied_ack_requires_the_snapshot_credential() {
     });
     assert!(
         !service
-            .with(|a| a.handle_rrs_applied(keeper.node, 1, network, 1, &digest, T0 + 10_200))
+            .with(|a| a.handle_rrs_applied(keeper.node, 1, network, 2, &digest, T0 + 10_200))
             .0
     );
     assert_eq!(
@@ -5097,7 +5097,7 @@ fn applied_ack_is_not_reported_before_commit() {
                 keeper.node,
                 1,
                 testkit::network(),
-                1,
+                2,
                 &digest,
                 T0 + 10_100
             ))
@@ -5116,7 +5116,7 @@ fn applied_ack_is_not_reported_before_commit() {
                 keeper.node,
                 1,
                 testkit::network(),
-                1,
+                2,
                 &digest,
                 T0 + 10_200
             ))
@@ -5182,7 +5182,7 @@ fn unfinished_operation_is_not_evicted_at_capacity() {
     service.with(|a| {
         assert_eq!(a.operations.len(), OPERATIONS_CAP);
         assert!(a.operations.contains_key(&1));
-        assert_eq!(a.rs_epoch, 0);
+        assert_eq!(a.rs_epoch, 1);
         assert!(a.devices.get(&leaver.node).unwrap().member);
     });
 }
@@ -5263,7 +5263,7 @@ fn operations_get_round_trips_through_the_client_parser() {
     assert!(
         service
             .with(|a| {
-                a.handle_rrs_applied(keeper.node, 1, testkit::network(), 1, &digest, T0 + 10_200)
+                a.handle_rrs_applied(keeper.node, 1, testkit::network(), 2, &digest, T0 + 10_200)
             })
             .0
     );
@@ -5382,7 +5382,7 @@ fn revocation_distribution_survives_restart() {
     assert!(
         service
             .with(|a| {
-                a.handle_rrs_applied(keeper_node, 1, testkit::network(), 1, &digest, T0 + 20_100)
+                a.handle_rrs_applied(keeper_node, 1, testkit::network(), 2, &digest, T0 + 20_100)
             })
             .0
     );
@@ -5424,7 +5424,7 @@ fn revocation_retires_and_coalesces_across_operations() {
             .as_u64(),
         Some(1)
     );
-    // C ACKs the newest set (epoch 2): it covers both operations.
+    // C ACKs the newest set (epoch 3): it covers both operations.
     service.tick(HostTime::sync(T0 + 30_100));
     let object = sends
         .lock()
@@ -5439,7 +5439,7 @@ fn revocation_retires_and_coalesces_across_operations() {
     assert!(
         service
             .with(|a| {
-                a.handle_rrs_applied(c.node, 1, testkit::network(), 2, &digest, T0 + 30_200)
+                a.handle_rrs_applied(c.node, 1, testkit::network(), 3, &digest, T0 + 30_200)
             })
             .0
     );

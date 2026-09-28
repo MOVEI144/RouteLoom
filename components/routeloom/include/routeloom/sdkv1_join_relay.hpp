@@ -36,7 +36,6 @@
 #include "routeloom/admission.hpp"
 #include "routeloom/fixed_containers.hpp"
 #include "routeloom/sdkv1_join_transport.hpp"
-#include "routeloom/secure_clear.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 
@@ -580,12 +579,23 @@ class JoinRelayGateway {
   // key seen, and the live exchange for it if any (kNoActive = terminated:
   // smaller keys stay old forever, the same key never reopens).
   struct ProxyFloor {
-    NodeId proxy{kInvalidNodeId};
+    // Split the 64-bit id into 32-bit words: the 128-row floor table
+    // otherwise pays six alignment bytes per row where NodeId aligns to 8.
+    std::uint32_t proxy_hi{0};
+    std::uint32_t proxy_lo{0};
     std::uint32_t max_proxy_epoch{0};
     std::uint32_t max_relay_id{0};
     std::uint8_t active{kNoActive};
     bool valid{false};
+    NodeId proxy() const noexcept {
+      return (static_cast<NodeId>(proxy_hi) << 32U) | proxy_lo;
+    }
+    void set_proxy(NodeId id) noexcept {
+      proxy_hi = static_cast<std::uint32_t>(id >> 32U);
+      proxy_lo = static_cast<std::uint32_t>(id);
+    }
   };
+  static_assert(sizeof(ProxyFloor) <= 20, "gateway floor row RAM bound");
   // One live exchange. The only stage floor: it never moves with a slot,
   // so losing a buffer can never resurrect an old stage (#116 R-I2/R-I3).
   struct ActiveRelay {
@@ -608,19 +618,6 @@ class JoinRelayGateway {
     bool down_done{false};
     bool down_final{false};
     bool m2_done{false};  // a step-2 down completed (a duplicate is Expired)
-    // The terminal EDHOC down parked behind an out-of-band RRS1 send
-    // (02 §5.3 phase 7): the wire lane is strictly serial, so the m4
-    // waits in the shared `pending_pool_` for the RRS1 slot's terminal
-    // result, never beside it. `pool` indexes that array (kNoSlot = none).
-    struct PendingDown {
-      bool pending{false};
-      JoinAuthPhase phase{JoinAuthPhase::EdhocMessage};
-      std::uint8_t step{0};
-      bool final{false};
-      std::uint8_t pool{kNoSlot};
-      void clear() noexcept { *this = PendingDown{}; }
-    };
-    PendingDown pending_down{};
     std::uint8_t slot{kNoSlot};
   };
   struct Slot {
@@ -655,17 +652,11 @@ class JoinRelayGateway {
   void deliver_up(ActiveRelay& relay, std::uint8_t relay_index, std::uint8_t hops,
                   const RelayObject& object, ByteView bytes) noexcept;
   // A valid new up stage implicitly received the down object in flight.
-  void implicit_down_receipt(ActiveRelay& relay, NodeId proxy, MonotonicMs now_ms) noexcept;
+  void implicit_down_receipt(ActiveRelay& relay) noexcept;
   // `bill_round=false` runs an ack-clocked pump: the send time advances
   // but the retry budget is not billed (see note_advanced).
   Status send_due_chunks(Slot& slot, NodeId proxy, MonotonicMs now_ms,
                          bool bill_round = true) noexcept;
-  // Releases the relay's `pending_pool_` entry, if it holds one.
-  void release_pending(ActiveRelay& relay) noexcept;
-  // Moves the parked EDHOC down onto a fresh slot after an RRS1 send
-  // freed the lane; a refusal to allocate leaves the relay's deadline
-  // to end the exchange rather than fake progress.
-  void promote_pending_down(ActiveRelay& relay, NodeId proxy, MonotonicMs now_ms) noexcept;
   void send_down_abort(NodeId proxy, const RelayHeader& up, RelayStatusCode status,
                        std::uint32_t retry_after_ms) noexcept;
   void send_up_complete(NodeId proxy, const RelayToken& token, JoinAuthPhase phase,
@@ -676,9 +667,8 @@ class JoinRelayGateway {
                         MonotonicMs now_ms) noexcept;
   void handle_up_single(NodeId from, std::uint8_t hops, const RelayObject& object, ByteView bytes,
                         MonotonicMs now_ms) noexcept;
-  void handle_up_same(NodeId from, ActiveRelay& relay, std::uint8_t hops,
-                      const RelayHeader& header, ByteView bytes, std::uint16_t total,
-                      MonotonicMs now_ms) noexcept;
+  void handle_up_same(ActiveRelay& relay, std::uint8_t hops, const RelayHeader& header,
+                      ByteView bytes, std::uint16_t total) noexcept;
   void handle_up_chunk(NodeId from, std::uint8_t hops, const JoinChunk& chunk,
                        MonotonicMs now_ms) noexcept;
   void handle_chunk_same(NodeId from, ActiveRelay& relay, const JoinChunk& chunk,
@@ -701,19 +691,7 @@ class JoinRelayGateway {
   bool in_call_{false};
   bool config_valid_{false};
   MonotonicMs last_now_ms_{0};
-  // Parked terminal-down object bytes, one entry per live RRS1 send at
-  // most (a park exists only while an RRS1 object holds a down slot).
-  struct PendingObject {
-    bool used{false};
-    std::uint8_t relay{kNoActive};
-    ByteBuffer<kRelayObjectMax> bytes{};
-    void clear() noexcept {
-      secure_clear(bytes.bytes.data(), bytes.bytes.size());
-      *this = PendingObject{};
-    }
-  };
   std::array<Slot, kSlots> slots_{};
-  std::array<PendingObject, kSlots> pending_pool_{};
   std::array<ProxyFloor, kProxyFloors> floors_{};
   std::array<ActiveRelay, kActiveRelays> relays_{};
   // Epoch-answer bucket in tenths of a token (burst 40 = 4 tokens).

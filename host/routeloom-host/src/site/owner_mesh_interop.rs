@@ -26,9 +26,9 @@
 
 use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
@@ -46,7 +46,7 @@ use routeloom_provision::sdkv1::cert::{cert_issue, CertClaims, CertType};
 use routeloom_provision::signer::{test_keypair, RootSigner};
 
 use super::group_keys::HostTime;
-use super::store::SqliteSiteStore;
+use super::store::{MemoryStore, SqliteSiteStore};
 use super::testkit;
 use super::transport::{DownStatus, InProcessTransport, Outbound, RelayKey, RelayUp};
 use super::usb::{
@@ -157,50 +157,61 @@ struct MeshSite {
     link: RouteLoomTransport,
     kguard: KGuardMock,
     dir: std::path::PathBuf,
+    listener_stop: Arc<AtomicBool>,
+    listener_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Drop for MeshSite {
     fn drop(&mut self) {
+        self.stop_listener();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
 impl MeshSite {
-    fn start(tag: &str, now: u64) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "routeloom-owner-mesh-{tag}-{}-{}",
-            std::process::id(),
-            now_ms()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+    fn open_service(
+        dir: &std::path::Path,
+        now: u64,
+    ) -> (Arc<SiteService>, Arc<InProcessTransport>) {
         let mut setup = testkit::setup();
         setup.channel = 6;
         let store = SqliteSiteStore::open(&dir.join("site.db")).unwrap();
         let authority =
             SiteAuthority::open(&setup, Box::new(testkit::sak()), Box::new(store), now).unwrap();
-        let uid = std::fs::metadata(&dir).unwrap().uid();
+        let service = Arc::new(SiteService::new(authority));
+        let transport = InProcessTransport::new();
+        service.set_transport(transport.clone());
+        (service, transport)
+    }
+
+    fn listen(
+        dir: &std::path::Path,
+        service: &Arc<SiteService>,
+    ) -> (Arc<AtomicBool>, thread::JoinHandle<()>) {
+        let uid = std::fs::metadata(dir).unwrap().uid();
         let acl = Acl::parse(&format!(
             "{{\"principals\":{{\"{uid}\":{{\"networks\":{{\"{:016x}\":[\"MEMBERSHIP_READ\",\"MEMBERSHIP_DECIDE\",\"MEMBERSHIP_ADMIN\"]}}}},\"7\":{{\"networks\":{{\"*\":[\"MEMBERSHIP_READ\"]}}}}}}}}",
             testkit::NETWORK_LOW
         ))
         .unwrap();
-        let service = Arc::new(SiteService::new(authority));
-        let transport = InProcessTransport::new();
-        service.set_transport(transport.clone());
         let state = Arc::new(State {
             acl,
-            site: Some(Arc::clone(&service)),
+            site: Some(Arc::clone(service)),
             ..State::default()
         });
         let socket = dir.join("api.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let (outbound_tx, _outbound_rx) = mpsc::sync_channel(64);
-        let accept_state = Arc::clone(&state);
-        thread::spawn(move || {
+        let stop = Arc::new(AtomicBool::new(false));
+        let accept_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { return };
+                if accept_stop.load(Ordering::Acquire) {
+                    return;
+                }
                 let uid = routeloom_peercred::peer_uid(&stream).ok();
-                let state = Arc::clone(&accept_state);
+                let state = Arc::clone(&state);
                 let outbound = outbound_tx.clone();
                 thread::spawn(move || {
                     let _ = serve_client(
@@ -216,6 +227,29 @@ impl MeshSite {
                 });
             }
         });
+        (stop, handle)
+    }
+
+    fn stop_listener(&mut self) {
+        self.listener_stop.store(true, Ordering::Release);
+        if let Some(handle) = self.listener_thread.take() {
+            let socket = self.dir.join("api.sock");
+            let _ = UnixStream::connect(&socket);
+            handle.join().expect("api listener stopped");
+            std::fs::remove_file(socket).unwrap();
+        }
+    }
+
+    fn start(tag: &str, now: u64) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "routeloom-owner-mesh-{tag}-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (service, transport) = Self::open_service(&dir, now);
+        let (listener_stop, listener_thread) = Self::listen(&dir, &service);
+        let socket = dir.join("api.sock");
         let link = RouteLoomTransport::new(&socket, u64::from(testkit::NETWORK_LOW));
         Self {
             service,
@@ -223,7 +257,27 @@ impl MeshSite {
             link,
             kguard: KGuardMock::default(),
             dir,
+            listener_stop,
+            listener_thread: Some(listener_thread),
         }
+    }
+
+    fn restart(&mut self, now: u64) {
+        self.stop_listener();
+        let placeholder = Arc::new(SiteService::new(testkit::authority(
+            Box::new(MemoryStore::default()),
+            now,
+        )));
+        drop(std::mem::replace(&mut self.service, placeholder));
+        let (service, transport) = Self::open_service(&self.dir, now);
+        service.set_group_key_transport(ChannelGroupKeyTransport::new(&service));
+        let (listener_stop, listener_thread) = Self::listen(&self.dir, &service);
+        self.service = service;
+        self.transport = transport;
+        self.link =
+            RouteLoomTransport::new(self.dir.join("api.sock"), u64::from(testkit::NETWORK_LOW));
+        self.listener_stop = listener_stop;
+        self.listener_thread = Some(listener_thread);
     }
 }
 
@@ -575,7 +629,13 @@ impl Provision {
         }
     }
 
-    fn down_object(key: &RelayKey, phase: u8, step: u8, status: DownStatus, body: Vec<u8>) -> Vec<u8> {
+    fn down_object(
+        key: &RelayKey,
+        phase: u8,
+        step: u8,
+        status: DownStatus,
+        body: Vec<u8>,
+    ) -> Vec<u8> {
         RelayObject {
             header: RelayHeader {
                 dir: RelayDirection::Down,
@@ -1052,6 +1112,7 @@ struct MeshPeer {
     booted: bool,
     /// Clean lifecycle reboots (exit 42) respawned so far.
     reboots: u32,
+    switching_cuts: u32,
 }
 
 impl Drop for MeshPeer {
@@ -1100,6 +1161,7 @@ impl MeshPeer {
             t0,
             booted: false,
             reboots: 0,
+            switching_cuts: 0,
         }
     }
 
@@ -1165,12 +1227,14 @@ impl MeshPeer {
     /// moves on (a reboot reseeds). Any other exit is a crash.
     fn respawn(&mut self, now: u64) {
         let status = self.child.wait().expect("peer reaped");
-        assert_eq!(
-            status.code(),
-            Some(42),
+        assert!(
+            matches!(status.code(), Some(42 | 43)),
             "mesh peer {:x} crashed (not a lifecycle reboot): {status:?}",
             self.node
         );
+        if status.code() == Some(43) {
+            self.switching_cuts += 1;
+        }
         self.reboots += 1;
         self.t0 = now;
         let nvs_save = self.nvs_save.clone();
@@ -1220,10 +1284,10 @@ impl MeshPeer {
     }
 
     fn tick(&mut self, now: u64) -> MeshTick {
-        // A lifecycle AdoptNetwork reboots the peer mid-tick; the
-        // respawned process answers the same tick from its saved NVS
-        // image. More than one reboot per tick is a reboot loop.
-        for attempt in 0..2 {
+        // A power cut after durable Switching can be followed by the
+        // lifecycle's adoption reboot on the first resumed tick.
+        // Both boots read saved NVS; a third reboot is a loop.
+        for attempt in 0..3 {
             let mut command = vec![b'T'];
             command.extend_from_slice(&now.to_le_bytes());
             self.send(&command);
@@ -1233,7 +1297,7 @@ impl MeshPeer {
             }
             self.respawn(now);
         }
-        panic!("peer {:x} rebooted twice in one tick", self.node);
+        panic!("peer {:x} rebooted three times in one tick", self.node);
     }
 
     /// Drains one tick's frames; `None` when the peer exited mid-tick
@@ -1320,7 +1384,11 @@ impl MeshPeer {
     /// respawns it from the saved NVS image through the production
     /// boot path — RAM state is genuinely gone.
     fn power_cut(&mut self) {
-        self.send(&[b'P']);
+        self.send(b"P");
+    }
+
+    fn cut_after_switching(&mut self) {
+        self.send(b"F");
     }
 }
 
@@ -1601,8 +1669,7 @@ impl UsbHost {
             SessionPhase::AwaitHelloAck | SessionPhase::AwaitAuthOk
         );
         if (active && now.saturating_sub(self.last_rx_ms) >= SESSION_LIVENESS_MS)
-            || (handshaking
-                && now.saturating_sub(self.last_begin_ms) >= HELLO_RETRY_MS)
+            || (handshaking && now.saturating_sub(self.last_begin_ms) >= HELLO_RETRY_MS)
         {
             if active {
                 self.session_losses += 1;
@@ -1731,8 +1798,6 @@ struct MeshWorld {
     now: u64,
     rng_state: u64,
     snaps: [MeshSnap; 3],
-    step_count: u64,
-    trace: bool,
     /// Test-held boots: a gated peer's process is spawned but never
     /// ticked (off the air) until the test releases it. Used where a
     /// contender must wait for another peer's channel, not just a
@@ -1824,8 +1889,6 @@ impl MeshWorld {
             now,
             rng_state: 0x5EED_1234_5678_9ABC,
             snaps: Default::default(),
-            step_count: 0,
-            trace: std::env::var_os("ROUTELOOM_MESH_TRACE").is_some(),
             gate: [false; 3],
             join_adapter,
             usb_incarnation: 7,
@@ -1881,13 +1944,19 @@ impl MeshWorld {
         self.peers[0].send_usb(&hello);
     }
 
+    fn daemon_restart(&mut self) {
+        self.join_adapter.close();
+        self.provision.usb.close();
+        self.provision.site.restart(self.now);
+        self.gateway_usb_rebind();
+    }
+
     /// One virtual step: tick every booted peer, switch the radio
     /// frames, pump the gateway USB into the authority, tick the
     /// authority. Peers whose boot time has not come are off the air:
     /// their MACs do not exist yet and frames to them drop.
     fn step(&mut self, dt_ms: u64) {
         self.now += dt_ms;
-        self.step_count += 1;
         let gate = self.gate;
         let mut ticks = Vec::with_capacity(3);
         for (index, peer) in self.peers.iter_mut().enumerate() {
@@ -1928,13 +1997,6 @@ impl MeshWorld {
             for tx in &tick.tx {
                 if tx.dst_mac == BROADCAST_MAC {
                     completions[from].push(1);
-                    if from == 1 {
-                        eprintln!(
-                            "sw: A bcast kind={} len={} audible[1][2]={} ch[{}vs{}] booted2={}",
-                            tx.bytes[5], tx.bytes.len(), self.switch.audible[1][2],
-                            channels[1], channels[2], booted[2]
-                        );
-                    }
                     for to in 0..3 {
                         if to != from
                             && booted[to]
@@ -2055,89 +2117,6 @@ impl MeshWorld {
         for (index, tick) in ticks.iter().enumerate() {
             if let Some(tick) = tick {
                 self.snaps[index] = tick.snap.clone();
-            }
-        }
-        let tx_total: usize = ticks.iter().flatten().map(|t| t.tx.len()).sum();
-        if self.trace && (tx_total > 0 || self.step_count % 20 == 0) {
-            let tx_len = |index: usize| ticks[index].as_ref().map(|t| t.tx.len()).unwrap_or(0);
-            let usb_len = ticks[0].as_ref().map(|t| t.usb.len()).unwrap_or(0);
-            eprintln!(
-                "mesh t={} step={} tx=[{},{},{}] usb_out={} usb_in(auth={} ups={} downs={} lost={}) sw(deliv={} drop={})",
-                self.now,
-                self.step_count,
-                tx_len(0),
-                tx_len(1),
-                tx_len(2),
-                usb_len,
-                self.usb_host.auth_sessions.len(),
-                self.usb_host.ups_seen,
-                self.usb_host.downs_sent,
-                self.usb_host.session_losses,
-                self.switch.delivered,
-                self.switch.dropped,
-            );
-            for (from, tick) in ticks.iter().enumerate() {
-                let Some(tick) = tick else { continue };
-                for tx in &tick.tx {
-                    let head = tx.bytes.iter().take(8).fold(String::new(), |mut o, b| {
-                        use std::fmt::Write as _;
-                        let _ = write!(o, "{b:02x}");
-                        o
-                    });
-                    eprintln!(
-                        "  tx from={from} dst={} len={} head={head}",
-                        hex(&tx.dst_mac),
-                        tx.bytes.len()
-                    );
-                }
-            }
-            for (index, snap) in self.snaps.iter().enumerate() {
-                eprintln!(
-                    "  peer{index}: mode={} ph={} a_start={} a_ready={} conf={} \
-                     link={} end={} net={:#x} gk={}/{} site={} usb={} ch={} sends={} \
-                     demux={} le={} lf={} leerr={} lreq={} lsf={} ee={} ef={} eeerr={} \
-                     disc={} orx={} otx={} prx={} authc={} krej={} crej={} trej={} sfail={} \
-                     sraw={} shint={} smac={} sgen={} sacc={} skey={} sbud={}",
-                    snap.mode,
-                    snap.phase,
-                    snap.authority_started as u8,
-                    snap.authority_ready as u8,
-                    snap.join_confirmed as u8,
-                    snap.link_sessions,
-                    snap.end_sessions,
-                    snap.adopted_network,
-                    snap.gk_current,
-                    snap.gk_next,
-                    snap.has_site as u8,
-                    snap.usb_state,
-                    snap.channel,
-                    snap.sends,
-                    snap.demux_drops,
-                    snap.link_established,
-                    snap.link_failed,
-                    snap.link_last_error,
-                    snap.link_requests,
-                    snap.link_send_failures,
-                    snap.end_established,
-                    snap.end_failed,
-                    snap.end_last_error,
-                    snap.has_discovery as u8,
-                    snap.offers_rx,
-                    snap.offers_tx,
-                    snap.proves_rx,
-                    snap.auths_completed,
-                    snap.kind_rejects,
-                    snap.cookie_rejects,
-                    snap.auth_tag_rejects,
-                    snap.send_failures,
-                    snap.scope_raw_rx,
-                    snap.scope_hint_mismatch,
-                    snap.scope_mac_rejected,
-                    snap.scope_unknown_generation,
-                    snap.scope_accepted,
-                    snap.scope_key_unavailable,
-                    snap.scope_budget_dropped,
-                );
             }
         }
     }
@@ -2561,9 +2540,7 @@ fn mesh_cutover_prepare_commit_applied() {
     // the commit legs below.
     for _ in 0..4000 {
         let targets = world.cutover_targets(&operation_id);
-        if !targets.is_empty()
-            && targets.iter().all(|(_, state, _, _)| state == "prepared")
-        {
+        if !targets.is_empty() && targets.iter().all(|(_, state, _, _)| state == "prepared") {
             break;
         }
         world.step(25);
@@ -2656,7 +2633,10 @@ fn mesh_cutover_prepare_commit_applied() {
             snap.gk_current, next_gk,
             "peer {index} on the new GK: {snap:?}"
         );
-        assert!(snap.authority_ready, "peer {index} channel re-open");
+        assert!(
+            snap.authority_ready,
+            "peer {index} channel re-open: {snap:?}"
+        );
     }
     // No straggler: every target applied, no recovery parking.
     let progress = world
@@ -2941,11 +2921,9 @@ fn r1_once(tag: &str, stall: bool) {
     // survivors' newer-generation offers, strikes out and re-verifies
     // (04 §3.5). The loop keeps both legs honest: A's retries must
     // never deliver, the survivors' traffic must.
-    let mut saw_removing = world.snaps[1].phase == PHASE_REMOVING;
     let mut chatter_rounds = 0_u32;
     for i in 0..48000 {
         world.step(25);
-        saw_removing |= world.snaps[1].phase == PHASE_REMOVING;
         if world.snaps[1].phase == PHASE_HOLDOFF {
             break;
         }
@@ -2982,45 +2960,6 @@ fn r1_once(tag: &str, stall: bool) {
         a.id_fp, id_fp_before,
         "revocation leaves the RLI1 fingerprint untouched"
     );
-    eprintln!(
-        "r1(tag={tag} stall={stall}): removing_seen={saw_removing} join_ups={} join_downs={}",
-        world.usb_host.join_ups_seen, world.usb_host.join_downs_sent,
-    );
-}
-
-/// SPIKE (temporary): does partition+traffic kill links and trigger
-/// repair broadcasts (the §3.5 evidence road)?
-#[test]
-fn mesh_zt_spike_flap_repair() {
-    let Some(mut world) = MeshWorld::start("flapspike", Switch::direct()) else {
-        return;
-    };
-    converge(&mut world, "flap spike");
-    for round in 0..3 {
-        world.switch.isolate(0);
-        world.peers[1].app_send(testkit::GATEWAY, b"flap-a");
-        world.peers[2].app_send(testkit::GATEWAY, b"flap-b");
-        for _ in 0..80 {
-            world.step(25);
-        }
-        let (a, b) = (world.snaps[1].clone(), world.snaps[2].clone());
-        eprintln!(
-            "flap r{round} isolated: a_link={} b_link={} a_drx={} b_drx={} a_orx={} b_orx={} a_sgen={} b_sgen={}",
-            a.link_sessions, b.link_sessions, a.discovers_rx, b.discovers_rx,
-            a.offers_rx, b.offers_rx, a.scope_unknown_generation, b.scope_unknown_generation,
-        );
-        world.switch.heal(0);
-        for _ in 0..160 {
-            world.step(25);
-        }
-        let (a, b) = (world.snaps[1].clone(), world.snaps[2].clone());
-        eprintln!(
-            "flap r{round} healed:   a_link={} b_link={} a_drx={} b_drx={} a_orx={} b_orx={} a_sgen={} b_sgen={} a_js={} b_js={}",
-            a.link_sessions, b.link_sessions, a.discovers_rx, b.discovers_rx,
-            a.offers_rx, b.offers_rx, a.scope_unknown_generation, b.scope_unknown_generation,
-            a.join_state, b.join_state,
-        );
-    }
 }
 
 #[test]
@@ -3367,10 +3306,6 @@ fn r2_once(tag: &str, group: bool) {
     );
 
     revoked_a_to_holdoff(&mut world, tag, id_fp_before);
-    eprintln!(
-        "r2(tag={tag} group={group}): join_ups={} join_downs={}",
-        world.usb_host.join_ups_seen, world.usb_host.join_downs_sent,
-    );
 }
 
 #[test]
@@ -3595,7 +3530,6 @@ fn mesh_k1_gk_double_miss() {
     // not replay. The trailing gk check voids the window loudly if A
     // ever converges too fast to judge.
     world.switch.heal(1);
-    eprintln!("k1: heal(1) at world.now={}", world.now);
     let b_raw = world.snaps[2].scope_raw_rx;
     let b_unkgen = world.snaps[2].scope_unknown_generation;
     let b_scope_ok = world.snaps[2].scope_accepted;
@@ -4032,9 +3966,7 @@ fn c2_once(tag: &str, island: bool) {
     // the commit legs below.
     for _ in 0..4000 {
         let targets = world.cutover_targets(&operation_id);
-        if !targets.is_empty()
-            && targets.iter().all(|(_, state, _, _)| state == "prepared")
-        {
+        if !targets.is_empty() && targets.iter().all(|(_, state, _, _)| state == "prepared") {
             break;
         }
         world.step(25);
@@ -4392,6 +4324,14 @@ fn cutover_through_commit(world: &mut MeshWorld, tag: &str) -> (String, u32, u64
     converge_gated(world, 1, "c3-c7 cutover");
     let staged_at = world.now;
     let operation_id = stage_cutover(world, tag);
+    cutover_finish_prepare(world, operation_id, staged_at)
+}
+
+fn cutover_finish_prepare(
+    world: &mut MeshWorld,
+    operation_id: String,
+    staged_at: u64,
+) -> (String, u32, u64, u64, u64) {
     world.pump_until(8000, |snaps| {
         snaps.iter().all(|s| s.phase == PHASE_PREPARED)
     });
@@ -4406,9 +4346,7 @@ fn cutover_through_commit(world: &mut MeshWorld, tag: &str) -> (String, u32, u64
     // debits its routed TTL in a 1 s step and dies dead-on-arrival.
     for _ in 0..4000 {
         let targets = world.cutover_targets(&operation_id);
-        if !targets.is_empty()
-            && targets.iter().all(|(_, state, _, _)| state == "prepared")
-        {
+        if !targets.is_empty() && targets.iter().all(|(_, state, _, _)| state == "prepared") {
             break;
         }
         world.step(25);
@@ -4434,7 +4372,10 @@ fn cutover_through_commit(world: &mut MeshWorld, tag: &str) -> (String, u32, u64
     let mut quiet_ms = 0u64;
     while world.now + 10_000 < window_end {
         let delivered_before = world.switch.delivered;
-        let jump = quiet_ms >= 3_000;
+        // RouteState queries start in the last minute. Keep their
+        // carrier hops at the normal 25 ms radio cadence.
+        let jump = quiet_ms >= 3_000
+            && world.now < window_end.saturating_sub(super::cutover::CUTOVER_ROUTE_QUERY_WINDOW_MS);
         world.step(if jump { 1_000 } else { 25 });
         quiet_ms = if world.switch.delivered == delivered_before {
             quiet_ms.saturating_add(if jump { 1_000 } else { 25 })
@@ -4521,12 +4462,6 @@ fn cutover_converged(
         }
     }
     let progress = cutover_progress(world, operation_id);
-    if world.snaps.iter().any(|s| s.phase != PHASE_ACTIVE) {
-        eprintln!("D04DBG c3-c7 snaps: progress={progress:?}");
-        for (index, snap) in world.snaps.iter().enumerate() {
-            eprintln!("D04DBG peer {index}: {snap:?}");
-        }
-    }
     for (index, snap) in world.snaps.iter().enumerate() {
         assert_eq!(snap.phase, PHASE_ACTIVE, "peer {index} active: {snap:?}");
         assert_eq!(
@@ -4537,7 +4472,11 @@ fn cutover_converged(
             snap.gk_current, next_gk,
             "peer {index} on the new GK: {snap:?}"
         );
-        assert!(snap.authority_ready, "peer {index} channel re-open");
+        assert!(
+            snap.authority_ready,
+            "peer {index} channel re-open: {:?}",
+            world.snaps
+        );
     }
     assert_eq!(progress.unknown, 0, "unknown drained: {progress:?}");
     if let Some(want) = want_recovered {
@@ -4613,42 +4552,175 @@ fn mesh_c3_commit_applied_receipt_loss() {
     );
 }
 
-/// C4: a member takes a field power cut mid-cutover — after it is
-/// Prepared but before its COMMIT lands. The NVS image persists the
-/// Prepared journal, RAM is genuinely gone, and the rebooted member
-/// still receives the COMMIT and converges like the healthy case.
 #[test]
-fn mesh_c4_member_restart_mid_cutover() {
-    let Some(mut world) = MeshWorld::start("c4", Switch::forced_multihop()) else {
-        return; // no C++ peers: skip (ignore-equivalent)
+fn mesh_c3_stored_receipt_loss_and_power_cut() {
+    let Some(mut world) = MeshWorld::start("c3-stored", Switch::forced_multihop()) else {
+        return;
     };
-    let (operation_id, next_gk, new_network, _old_network, _t0) =
-        cutover_through_commit(&mut world, "c4");
-    let reboots_before = world.peers[1].reboots;
-    world.peers[1].power_cut();
-    // Let the cut land: the next tick respawns A from its saved NVS
-    // image through the production boot path.
-    for _ in 0..200 {
+    let (operation_id, next_gk, new_network, old_network, t0) =
+        cutover_through_commit(&mut world, "c3-stored");
+    assert_eq!(
+        world.snaps[1].adopted_network, old_network,
+        "arm before A switches"
+    );
+    // A's COMMIT travels B→A. Cut power immediately after Switching
+    // becomes durable, before the stored receipt can leave A.
+    world.peers[1].cut_after_switching();
+    for _ in 0..4000 {
         world.step(25);
-        if world.peers[1].reboots > reboots_before {
+        if world.peers[1].switching_cuts != 0 {
             break;
         }
     }
-    assert!(
-        world.peers[1].reboots > reboots_before,
-        "A respawned after the power cut"
-    );
-    // The committed cutover still converges: A comes back Prepared
-    // (durable), takes the re-dispatched COMMIT, adopts and reports
-    // inside the remaining grace — a real APPLIED receipt in-window
-    // is still honest applied evidence.
-    cutover_converged(&mut world, &operation_id, new_network, next_gk, Some(0));
-    let progress = cutover_progress(&world, &operation_id);
     assert_eq!(
-        progress.applied + progress.recovered,
-        3,
-        "every target resolved after the member restart: {progress:?}"
+        world.peers[1].switching_cuts, 1,
+        "power cut after RLX1 Switching"
     );
+    world.switch.drop_next[1][2] = 100_000;
+    world.pump_until(4000, |snaps| snaps[1].adopted_network == new_network);
+    assert!(
+        !world
+            .cutover_route(&operation_id, NODE_A)
+            .is_some_and(|plan| plan.stored),
+        "lost receipt is not stored evidence"
+    );
+    assert_eq!(
+        world.snaps[1].adopted_network,
+        new_network,
+        "A resumed Switching: {:?}; targets={:?}",
+        world.snaps[1],
+        world.cutover_targets(&operation_id)
+    );
+    assert_ne!(world.snaps[1].adopted_network, old_network);
+    while world.now < t0 + super::cutover::CUTOVER_GRACE_MS + 5_000 {
+        world.step(25);
+    }
+    assert!(world.switch.leg_dropped[1][2] > 0, "receipt leg was cut");
+    let progress = cutover_progress(&world, &operation_id);
+    assert!(
+        progress.applied < 3,
+        "lost receipt is not applied: {progress:?}"
+    );
+    assert!(progress.unknown > 0, "A remains unknown: {progress:?}");
+    world.switch.drop_next[1][2] = 0;
+    cutover_converged(&mut world, &operation_id, new_network, next_gk, Some(0));
+    assert_eq!(cutover_progress(&world, &operation_id).applied, 3);
+}
+
+/// C4(a): reopen the whole daemon from SQLite while every member is
+/// Prepared. The signed PREPARE and epoch allocation survive, while
+/// the monotonic prepare window starts again in the new process.
+#[test]
+fn mesh_c4_daemon_restart_preparing() {
+    let Some(mut world) = MeshWorld::start("c4-pre", Switch::forced_multihop()) else {
+        return;
+    };
+    converge_gated(&mut world, 1, "c4 preparing");
+    let operation_id = stage_cutover(&mut world, "c4-pre");
+    world.pump_until(8000, |snaps| {
+        snaps.iter().all(|s| s.phase == PHASE_PREPARED)
+    });
+    for _ in 0..4000 {
+        if world
+            .cutover_targets(&operation_id)
+            .iter()
+            .all(|(_, s, _, _)| s == "prepared")
+        {
+            break;
+        }
+        world.step(25);
+    }
+    let op = super::records::parse_op_token(&operation_id).unwrap();
+    let before = world
+        .provision
+        .site
+        .service
+        .with(|a| {
+            let state = a.operations.get(&op).unwrap().cutover.as_ref().unwrap();
+            (
+                state.revision,
+                state.next_gk_epoch,
+                a.grant_bytes(op, NODE_A, super::revocation::OutboundKind::Prepare),
+                a.store.load().unwrap().meta.get("next_serial").cloned(),
+            )
+        })
+        .0;
+    let restart_at = world.now;
+    world.daemon_restart();
+    world.step(25);
+    let after = world
+        .provision
+        .site
+        .service
+        .with(|a| {
+            let state = a.operations.get(&op).unwrap().cutover.as_ref().unwrap();
+            (
+                state.revision,
+                state.next_gk_epoch,
+                a.grant_bytes(op, NODE_A, super::revocation::OutboundKind::Prepare),
+                a.store.load().unwrap().meta.get("next_serial").cloned(),
+                state.started_mono_ms,
+            )
+        })
+        .0;
+    assert_eq!(before, (after.0, after.1, after.2, after.3));
+    assert!(
+        after.4 >= restart_at,
+        "the prepare clock restarted: {} < {restart_at}",
+        after.4
+    );
+    let (operation_id, next_gk, new_network, _old_network, t0) =
+        cutover_finish_prepare(&mut world, operation_id, restart_at);
+    assert!(t0 >= restart_at + super::cutover::CUTOVER_PREPARE_WINDOW_MS);
+    cutover_converged(&mut world, &operation_id, new_network, next_gk, None);
+    let progress = cutover_progress(&world, &operation_id);
+    assert_eq!(progress.applied + progress.recovered, 3);
+}
+
+/// C4(b): reopen after the COMMIT is durable with A still Prepared.
+/// The new daemon has no old-context grace or queued sealed payloads;
+/// the straggler recovers by reissue while committed peers stay new.
+#[test]
+fn mesh_c4_daemon_restart_committed() {
+    let Some(mut world) = MeshWorld::start("c4-post", Switch::forced_multihop()) else {
+        return;
+    };
+    let (operation_id, next_gk, new_network, old_network, _t0) =
+        cutover_through_commit(&mut world, "c4-post");
+    assert_eq!(world.snaps[1].adopted_network, old_network);
+    world.switch.drop_next[2][1] = 500;
+    let old_usb = Arc::clone(&world.provision.usb);
+    let old_join = Arc::clone(&world.join_adapter);
+    world.daemon_restart();
+    assert_ne!(
+        old_usb.usb_incarnation(),
+        world.provision.usb.usb_incarnation()
+    );
+    assert!(matches!(
+        old_usb.handle_up(&[], world.now),
+        Err(super::usb::AuthorityUpError::Closed)
+    ));
+    assert!(matches!(
+        old_join.handle_up(&[], world.now),
+        Err(super::usb::UpError::Closed)
+    ));
+    let (network, grace) = world
+        .provision
+        .site
+        .service
+        .with(|a| (a.network(), a.cutover_grace_until_mono))
+        .0;
+    assert_eq!(network, new_network);
+    assert_eq!(grace, 0);
+    let progress = cutover_progress(&world, &operation_id);
+    assert!(
+        progress.unknown > 0,
+        "undelivered A stays unknown: {progress:?}"
+    );
+    world.switch.drop_next[2][1] = 0;
+    cutover_converged(&mut world, &operation_id, new_network, next_gk, None);
+    let progress = cutover_progress(&world, &operation_id);
+    assert_eq!(progress.applied + progress.recovered, 3);
 }
 
 /// C5: the gateway↔host USB lane dies right after the durable
@@ -4670,7 +4742,6 @@ fn mesh_c5_gateway_disconnect_and_resume() {
     // answer — a Prepared straggler whose probes go unanswered must
     // eventually strike out and take the ZeroTouch reissue road.
     world.usb_down = true;
-    eprintln!("D04DBG c5 usb_down armed at now={}", world.now);
     // Run past the grace on the dead lane — the old bindings the
     // COMMITs rode have expired out of the host's table, so no member
     // can be reached on them at all — then past the stragglers'
@@ -4698,7 +4769,6 @@ fn mesh_c5_gateway_disconnect_and_resume() {
     // APPLIED receipt is applied, one proven through the recovery
     // road is recovered; only the split is timing.
     world.usb_down = false;
-    eprintln!("D04DBG c5 usb healed at now={}", world.now);
     cutover_converged(&mut world, &operation_id, new_network, next_gk, None);
     let progress = cutover_progress(&world, &operation_id);
     assert_eq!(
@@ -4708,64 +4778,211 @@ fn mesh_c5_gateway_disconnect_and_resume() {
     );
 }
 
-/// C6: the route tree changes mid-cutover — A's relay leg dies while
-/// its direct gateway leg opens, between the durable COMMIT and the
-/// grace. The tree-order dispatch re-plans against the fresh route
-/// state and still converges every target; no commit is ever sent
-/// down a dead leg and no receipt is counted that never arrived.
+#[test]
+fn mesh_c5_radio_partition_and_stale_usb_adapter() {
+    use routeloom_protocol::host_ops::{
+        encode_authority_down, encode_authority_up, AuthorityFragment,
+    };
+    let Some(mut world) = MeshWorld::start("c5-radio", Switch::forced_multihop()) else {
+        return;
+    };
+    let (operation_id, next_gk, new_network, old_network, t0) =
+        cutover_through_commit(&mut world, "c5-radio");
+    // The G—B leg fails while B/A still hold the old Prepared group.
+    world.switch.isolate(0);
+    let old_usb = Arc::clone(&world.provision.usb);
+    let old_join = Arc::clone(&world.join_adapter);
+    let delayed = AuthorityFragment {
+        device: testkit::GATEWAY,
+        transfer_id: 1,
+        kind: CarrierKind::Envelope,
+        hops: 0,
+        total: 28,
+        offset: 0,
+        data: vec![0xA5; 28],
+    };
+    let delayed_up = encode_authority_up(&delayed).unwrap();
+    let delayed_down = encode_authority_down(&delayed).unwrap();
+    let sessions_before = world.usb_auth_total();
+    // A gateway field reboot ends the old bridge session and binds
+    // both host adapters to the fresh USB incarnation.
+    let reboots_before = world.peers[0].reboots;
+    world.peers[0].power_cut();
+    world.step(25);
+    assert!(world.peers[0].reboots > reboots_before);
+    assert!(matches!(
+        old_usb.handle_up(&delayed_up, world.now),
+        Err(super::usb::AuthorityUpError::Closed)
+    ));
+    old_usb.requeue_front(vec![super::usb::AuthorityDown {
+        bytes: delayed_down,
+        device: testkit::GATEWAY,
+        transfer_id: 1,
+        admitted_ms: world.now,
+    }]);
+    assert!(old_usb.take_ready(world.now).is_empty());
+    assert!(matches!(
+        old_join.handle_up(&[], world.now),
+        Err(super::usb::UpError::Closed)
+    ));
+    while world.now < t0 + super::cutover::CUTOVER_GRACE_MS + 5_000 {
+        world.step(25);
+    }
+    assert!(
+        world.usb_auth_total() > sessions_before,
+        "USB reauthenticated"
+    );
+    assert_eq!(world.snaps[0].adopted_network, new_network);
+    assert_eq!(world.snaps[1].adopted_network, old_network);
+    assert_eq!(world.snaps[2].adopted_network, old_network);
+    let progress = cutover_progress(&world, &operation_id);
+    assert!(
+        progress.unknown >= 2,
+        "partitioned island stays unknown: {progress:?}"
+    );
+    world.switch.heal(0);
+    cutover_converged(&mut world, &operation_id, new_network, next_gk, None);
+    let progress = cutover_progress(&world, &operation_id);
+    assert_eq!(progress.applied + progress.recovered, 3);
+    let leaf_rx = world.snaps[1].rx_count;
+    world.peers[0].app_send(NODE_A, b"c5-down");
+    world.pump_until(3000, |snaps| snaps[1].rx_count > leaf_rx);
+    assert!(world.snaps[1].rx_count > leaf_rx, "new-epoch downlink");
+    world.peers[1].app_send(testkit::GATEWAY, b"c5-upxxx");
+    world.pump_until(3000, |snaps| {
+        snaps[1]
+            .app_tx
+            .iter()
+            .any(|tx| tx.state == DELIVERY_DELIVERED)
+    });
+    assert!(
+        world.snaps[1]
+            .app_tx
+            .iter()
+            .any(|tx| tx.state == DELIVERY_DELIVERED),
+        "new-epoch uplink"
+    );
+}
+
+/// C6: after PREPARE, move the tree from G—B—A to G—A—B. The
+/// COMMIT frontier must use the new parent reports, then every
+/// target adopts without a direct G—B radio leg.
 #[test]
 fn mesh_c6_route_change_mid_cutover() {
     let Some(mut world) = MeshWorld::start("c6", Switch::forced_multihop()) else {
         return; // no C++ peers: skip (ignore-equivalent)
     };
-    let (operation_id, next_gk, new_network, _old_network, _t0) =
-        cutover_through_commit(&mut world, "c6");
-    // Tree flip: A—G opens direct while A—B dies; B keeps its G leg.
-    // The commit dispatch and the receipts must converge over the
-    // new tree, whatever order it implies.
+    converge_gated(&mut world, 1, "c6 cutover");
+    let staged_at = world.now;
+    let operation_id = stage_cutover(&mut world, "c6");
+    world.pump_until(8000, |snaps| {
+        snaps.iter().all(|s| s.phase == PHASE_PREPARED)
+    });
+    for _ in 0..4000 {
+        let targets = world.cutover_targets(&operation_id);
+        if !targets.is_empty() && targets.iter().all(|(_, state, _, _)| state == "prepared") {
+            break;
+        }
+        world.step(25);
+    }
+    assert!(
+        world
+            .cutover_targets(&operation_id)
+            .iter()
+            .all(|(_, state, _, _)| state == "prepared"),
+        "Host has every PREPARED before the route flips"
+    );
+    let direct_before = world.switch.leg_delivered[2][0];
+    world.switch.set_audible(0, 2, false);
+    world.switch.set_audible(2, 0, false);
     world.switch.set_audible(0, 1, true);
     world.switch.set_audible(1, 0, true);
-    world.switch.set_audible(1, 2, false);
-    world.switch.set_audible(2, 1, false);
-    for _ in 0..12000 {
+    // Field power cycling clears the old link contexts while NVS keeps
+    // PREPARE. Each peer then forms its next hop over the changed air.
+    for index in [0, 1, 2] {
+        let before = world.peers[index].reboots;
+        world.peers[index].power_cut();
         world.step(25);
-        let progress = cutover_progress(&world, &operation_id);
-        if progress.applied + progress.recovered == 3
-            && progress.unknown == 0
-            && world
-                .snaps
-                .iter()
-                .all(|s| s.adopted_network == new_network)
+        assert!(world.peers[index].reboots > before);
+        for _ in 0..200 {
+            world.step(25);
+        }
+    }
+    for _ in 0..1200 {
+        world.step(25);
+    }
+    let (operation_id, next_gk, new_network, _old_network, _t0) =
+        cutover_finish_prepare(&mut world, operation_id, staged_at);
+    assert_eq!(
+        world
+            .cutover_route(&operation_id, NODE_A)
+            .and_then(|p| p.report)
+            .map(|r| r.parent),
+        Some(testkit::GATEWAY),
+        "A reported the new parent: route={:?} targets={:?} snaps={:?}",
+        world.cutover_route(&operation_id, NODE_A),
+        world.cutover_targets(&operation_id),
+        world.snaps
+    );
+    assert_eq!(
+        world
+            .cutover_route(&operation_id, NODE_B)
+            .and_then(|p| p.report)
+            .map(|r| r.parent),
+        Some(NODE_A),
+        "B reported the new parent"
+    );
+    cutover_converged(&mut world, &operation_id, new_network, next_gk, Some(0));
+    let progress = cutover_progress(&world, &operation_id);
+    assert_eq!(progress.applied, 3, "new tree applied: {progress:?}");
+    assert_eq!(world.switch.leg_delivered[2][0], direct_before);
+}
+
+#[test]
+fn mesh_c6_adopted_leaf_blocks_old_relay() {
+    let Some(mut world) = MeshWorld::start("c6-leaf", Switch::forced_multihop()) else {
+        return;
+    };
+    let (operation_id, next_gk, new_network, old_network, t0) =
+        cutover_through_commit(&mut world, "c6-leaf");
+    // A has durably stored COMMIT, releasing B's frontier, but B has
+    // not adopted. Moving B behind A now would need the new-epoch
+    // leaf to relay an old-epoch COMMIT; that dependency must defer.
+    for _ in 0..4000 {
+        world.step(25);
+        if world
+            .cutover_route(&operation_id, NODE_A)
+            .is_some_and(|p| p.stored)
         {
             break;
         }
     }
-    let progress = cutover_progress(&world, &operation_id);
-    // Either everyone applied inside the grace, or stragglers come
-    // back recovered — never wedged, never silently dropped.
-    assert_eq!(
-        progress.applied + progress.recovered,
-        3,
-        "every target resolved after the route change: {progress:?}"
-    );
-    for (index, snap) in world.snaps.iter().enumerate() {
-        assert_eq!(
-            snap.adopted_network, new_network,
-            "peer {index} on the new network: {snap:?}"
-        );
-        assert_eq!(
-            snap.gk_current, next_gk,
-            "peer {index} on the new GK: {snap:?}"
-        );
+    assert!(world
+        .cutover_route(&operation_id, NODE_A)
+        .is_some_and(|p| p.stored));
+    assert_eq!(world.snaps[2].adopted_network, old_network);
+    world.switch.set_audible(0, 2, false);
+    world.switch.set_audible(2, 0, false);
+    world.switch.set_audible(0, 1, true);
+    world.switch.set_audible(1, 0, true);
+    while world.now < t0 + super::cutover::CUTOVER_GRACE_MS + 5_000 {
+        world.step(25);
     }
-    // The receipts that did land are honest: applied never counts a
-    // member that did not actually adopt.
-    let targets = world.cutover_targets(&operation_id);
+    assert_eq!(world.snaps[1].adopted_network, new_network);
+    assert_eq!(world.snaps[2].adopted_network, old_network);
+    assert!(world
+        .cutover_route(&operation_id, NODE_B)
+        .is_some_and(|p| p.deferred));
+    let progress = cutover_progress(&world, &operation_id);
+    assert!(progress.unknown > 0, "B remains unknown: {progress:?}");
+    world.switch.set_audible(0, 2, true);
+    world.switch.set_audible(2, 0, true);
+    cutover_converged(&mut world, &operation_id, new_network, next_gk, None);
+    let progress = cutover_progress(&world, &operation_id);
+    assert_eq!(progress.applied + progress.recovered, 3);
     assert!(
-        targets
-            .iter()
-            .all(|(_, state, _, _)| state == "applied" || state == "recovered"),
-        "rows resolved honestly: {targets:?}"
+        progress.recovered >= 1,
+        "uncommitted B recovered: {progress:?}"
     );
 }
 
@@ -4860,8 +5077,10 @@ fn mesh_c7_old_epoch_boundary() {
             || !stale_seen,
         "A's stale epoch was refused at B's scope gate or A went \
          silent into ZeroTouch: B={:?} A={:?} unkgen {} > {}",
-        world.snaps[2], world.snaps[1],
-        world.snaps[2].scope_unknown_generation, b_unkgen
+        world.snaps[2],
+        world.snaps[1],
+        world.snaps[2].scope_unknown_generation,
+        b_unkgen
     );
     cutover_converged(&mut world, &operation_id, new_network, next_gk, None);
     let progress = cutover_progress(&world, &operation_id);
@@ -4875,4 +5094,3 @@ fn mesh_c7_old_epoch_boundary() {
         "every target resolved past the old-epoch boundary: {progress:?}"
     );
 }
-

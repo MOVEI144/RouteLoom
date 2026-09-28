@@ -221,12 +221,6 @@ impl P6ChannelHub {
         // A regressed clock cannot extend any grace: end every retention
         // rather than serve stale contexts past their window.
         if mono_ms < self.last_mono_ms {
-            if std::env::var_os("D04DBG").is_some() {
-                eprintln!(
-                    "D04DBG refresh regression mono={mono_ms} last={} -> clear grace/retained",
-                    self.last_mono_ms
-                );
-            }
             self.grace_until_mono_ms = 0;
             self.retained.clear();
         }
@@ -291,14 +285,6 @@ impl P6ChannelHub {
     }
 
     fn retain(&mut self, node: u64, member: ChannelMember, until_mono_ms: u64) {
-        if std::env::var_os("D04DBG").is_some() {
-            eprintln!(
-                "D04DBG retain node={node:x} gen={} net={:x} dams={} until={until_mono_ms}",
-                member.generation,
-                member.network,
-                &member.dams[..2].iter().map(|b| format!("{b:02x}")).collect::<String>()
-            );
-        }
         if self.retained.len() >= RETAINED_MAX {
             // Bounded and fail-closed: drop the earliest-expiring
             // entry, never a live row or an unexpired grace.
@@ -326,15 +312,6 @@ impl P6ChannelHub {
     pub fn note_cutover(&mut self, old_network: u64, mono_ms: u64) {
         if old_network == 0 || old_network != self.network() {
             return;
-        }
-        if std::env::var_os("D04DBG").is_some() {
-            eprintln!(
-                "D04DBG note_cutover old={old_network:x} mono={mono_ms} live={:?}",
-                self.live
-                    .iter()
-                    .map(|(n, m)| (*n, m.generation, m.network))
-                    .collect::<Vec<_>>()
-            );
         }
         let grace: Vec<(u64, ChannelMember)> = self
             .live
@@ -378,12 +355,6 @@ impl P6ChannelHub {
         // process the carrier or lower the timestamp: the next refresh must
         // flip to the committed network rather than reopen an old context.
         if mono_ms < self.last_mono_ms {
-            if std::env::var_os("D04DBG").is_some() {
-                eprintln!(
-                    "D04DBG push_carrier regression mono={mono_ms} last={} -> clear grace/retained",
-                    self.last_mono_ms
-                );
-            }
             self.grace_until_mono_ms = 0;
             self.retained.clear();
             return;
@@ -426,14 +397,6 @@ impl P6ChannelHub {
         };
         if !self.live.contains_key(&device) {
             let retained = self.lookup(device, self.last_mono_ms);
-            if std::env::var_os("D04DBG").is_some() {
-                if let ChannelEvent::Passthrough { env_type, .. } = &event {
-                    eprintln!(
-                        "D04DBG sort_event !live dev={device:x} env={env_type} retained={}",
-                        retained.is_some()
-                    );
-                }
-            }
             if let ChannelEvent::Passthrough {
                 env_type: 5, body, ..
             } = &event
@@ -485,13 +448,6 @@ impl P6ChannelHub {
                 || head.op != 2
                 || head.generation != binding.generation
             {
-                if std::env::var_os("D04DBG").is_some() {
-                    eprintln!(
-                        "D04DBG receipt reject dev={device:x} env={env_type} op={} gen={} bgen={} bnet={:x} snet={:x}",
-                        head.op, head.generation, binding.generation,
-                        binding.network, self.network()
-                    );
-                }
                 return None;
             }
             Some(P6Receipt {
@@ -611,7 +567,8 @@ impl P6ChannelHub {
             grace_until_mono_ms: self.grace_until_mono_ms,
             now: mono_ms,
         };
-        let out = self.channels
+        let out = self
+            .channels
             .lock()
             .expect("authority channel poisoned")
             .send_typed(
@@ -622,12 +579,6 @@ impl P6ChannelHub {
                 tail,
                 mono_ms,
             );
-        if std::env::var_os("D04DBG").is_some() {
-            eprintln!(
-                "D04DBG send_on dev={:x} type={env_type} mono={mono_ms} out={out:?}",
-                device
-            );
-        }
         out.is_ok()
     }
 
@@ -778,13 +729,6 @@ fn lookup_binding(
         .get(&device)
         .filter(|entry| mono_ms < entry.until_mono_ms)
         .map(|entry| entry.member.clone());
-    if std::env::var_os("D04DBG").is_some() {
-        eprintln!(
-            "D04DBG lookup dev={device:x} mono={mono_ms} grace_until={grace_until_mono_ms} retained_hit={:?} live_hit={:?}",
-            retained_hit.as_ref().map(|m| (m.generation, m.network)),
-            live.get(&device).map(|m| (m.generation, m.network))
-        );
-    }
     if grace_until_mono_ms != 0 && mono_ms < grace_until_mono_ms {
         return retained_hit;
     }

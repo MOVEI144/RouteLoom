@@ -1241,15 +1241,10 @@ void AuthorityClient::on_envelope_ready(const AuthorityRxCarrier& rx,
                                        MutableByteView{workspace, capacity},
                                        plain_size, header);
   if (!opened) {
-    std::fprintf(stderr, "DBG ac: open fail code=%d %s size=%u\n", (int)opened.code,
-                 opened.detail ? opened.detail : "", (unsigned)bytes.size);
     secure_clear(workspace, wipe_size);
     ++rx_rejected_;
     return;
   }
-  std::fprintf(stderr, "DBG ac: open ok type=%u ctr=%llu plain=%u\n",
-               (unsigned)header.type, (unsigned long long)header.counter,
-               (unsigned)plain_size);
   if (ack_pending_ && (header.type == keys::AuthorityEnvelopeType::GroupKeyUpdate ||
                        header.type == keys::AuthorityEnvelopeType::GroupKeyActivate)) {
     secure_clear(workspace, wipe_size);
@@ -1258,8 +1253,6 @@ void AuthorityClient::on_envelope_ready(const AuthorityRxCarrier& rx,
   }
   // The AEAD tag verified: commit the replay window before any meaning check.
   if (!rx_window_.accept(header.counter)) {
-    std::fprintf(stderr, "DBG ac: window reject ctr=%llu\n",
-                 (unsigned long long)header.counter);
     secure_clear(workspace, wipe_size);
     ++rx_rejected_;
     return;
@@ -1367,9 +1360,6 @@ void AuthorityClient::on_envelope_ready(const AuthorityRxCarrier& rx,
       if (plain_size < kAuthorityBodyHeadSize ||
           !authority_head_decode(ByteView{workspace, kAuthorityBodyHeadSize}, head) ||
           head.op != 1 || head.generation != local_.generation) {
-        std::fprintf(stderr, "DBG ac: head reject op=%u gen=%u localgen=%u plain=%u\n",
-                     (unsigned)head.op, (unsigned)head.generation,
-                     (unsigned)local_.generation, (unsigned)plain_size);
         fail();
         return;
       }

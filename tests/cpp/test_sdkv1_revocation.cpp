@@ -662,6 +662,7 @@ void test_member_ready_fetches_package_epoch_past_old_rrs() {
 void test_apply_does_not_ack_below_a_newer_floor() {
   NodeFixture node;
   CHECK(node.provision(3, 14));
+  node.authority.sent.clear();
   const auto object = revocation_object(revocation_set(15));
   PeerCredentialStamp authority{};
   authority.network = kNetwork;
@@ -1667,6 +1668,7 @@ void test_apply_storage_faults() {
 void test_uncertain_commit_rejects_different_same_epoch_object() {
   NodeFixture node;
   CHECK(node.provision(3, 14));
+  node.authority.sent.clear();
   const auto candidate = revocation_object(revocation_set(15));
   const auto alternate = revocation_object(revocation_set(15, 3));
   ByteBuffer<kRevocationSlotBytes> record{};

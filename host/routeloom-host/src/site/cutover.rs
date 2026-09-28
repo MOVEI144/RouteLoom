@@ -1342,24 +1342,6 @@ impl SiteAuthority {
                     .iter()
                     .filter(|t| !t.gateway && t.state != GrantState::Retired)
                     .all(settled);
-            if std::env::var_os("D04DBG").is_some() {
-                eprintln!(
-                    "D04DBG releasable_gw node={:x} out={out} closed={} targets={:?}",
-                    node,
-                    self.cutover_plan_closed(now_mono),
-                    state
-                        .targets
-                        .iter()
-                        .map(|t| (
-                            t.node,
-                            t.state,
-                            self.cutover_routes
-                                .get(&(id, t.node))
-                                .map(|p| (p.stored, p.deferred))
-                        ))
-                        .collect::<Vec<_>>()
-                );
-            }
             return out;
         }
         if self.cutover_plan_closed(now_mono) {
@@ -1491,12 +1473,6 @@ impl SiteAuthority {
                 let releasable = target.state == GrantState::Prepared
                     && target.prepared_revision == state.revision
                     && self.commit_releasable(id, target.node, time.mono_ms);
-                if std::env::var_os("D04DBG").is_some() {
-                    eprintln!(
-                        "D04DBG queue_commit node={:x} state={:?} releasable={releasable} mono={}",
-                        target.node, target.state, time.mono_ms
-                    );
-                }
                 if !releasable {
                     continue;
                 }
@@ -2159,12 +2135,6 @@ impl SiteAuthority {
         self.id.site_claims = next_claims;
         self.cutover_grace_network = state.old_network;
         self.cutover_grace_until_mono = time.mono_ms.saturating_add(CUTOVER_GRACE_MS);
-        if std::env::var_os("D04DBG").is_some() {
-            eprintln!(
-                "D04DBG commit op={id:x} mono={} grace_until={}",
-                time.mono_ms, self.cutover_grace_until_mono
-            );
-        }
         self.operations.insert(id, updated);
         for operation in retired_notices {
             self.operations.insert(operation.id, operation);
@@ -2222,48 +2192,27 @@ impl SiteAuthority {
         generation: u32,
         network: u64,
         receipt: &[u8],
-        now_ms: u64,
+        time: HostTime,
     ) -> bool {
-        let dbg = std::env::var_os("D04DBG").is_some();
-        if dbg {
-            eprintln!("D04DBG greceipt in dev={node:x} gen={generation} net={network:x} len={}", receipt.len());
-        }
+        let now_ms = time.unix_ms;
         let receipt = match Receipt::decode(receipt) {
             Ok(receipt) => receipt,
             Err(_) => {
-                if dbg {
-                    eprintln!("D04DBG greceipt dev={node:x} why=decode");
-                }
                 return false;
-            },
+            }
         };
         let id = receipt.head.cutover_id;
         let state = match self.operations.get(&id).and_then(|op| op.cutover.as_ref()) {
             Some(state) => state.clone(),
             None => {
-                if dbg {
-                    eprintln!(
-                        "D04DBG greceipt dev={node:x} ph={:?} why=no_op",
-                        receipt.head.phase
-                    );
-                }
                 return false;
-            },
+            }
         };
         if receipt.head.old_network != state.old_network
             || receipt.new_network != state.new_network
             || receipt.head.revision != state.revision
             || receipt.status != 0
         {
-            if dbg {
-                eprintln!(
-                    "D04DBG greceipt dev={node:x} ph={:?} why=binding on={:x}/{:x} nn={:x}/{:x} rev={}/{} st={}",
-                    receipt.head.phase,
-                    receipt.head.old_network, state.old_network,
-                    receipt.new_network, state.new_network,
-                    receipt.head.revision, state.revision, receipt.status
-                );
-            }
             return false;
         }
         // The binding is the live row's — a reassigned key never
@@ -2271,28 +2220,16 @@ impl SiteAuthority {
         let live = match self.devices.get(&node) {
             Some(row) if row.member && row.generation == generation => row.clone(),
             _ => {
-                if dbg {
-                    eprintln!(
-                        "D04DBG greceipt dev={node:x} ph={:?} why=no_live gen={generation}",
-                        receipt.head.phase
-                    );
-                }
                 return false;
-            },
+            }
         };
         let target = match state.targets.iter().find(|t| t.node == node) {
             Some(target) if target.generation == generation && target.kid == live.kid => {
                 target.clone()
             }
             _ => {
-                if dbg {
-                    eprintln!(
-                        "D04DBG greceipt dev={node:x} ph={:?} why=no_target gen={generation} kid0={:?}",
-                        receipt.head.phase, live.kid
-                    );
-                }
                 return false;
-            },
+            }
         };
         if matches!(
             target.state,
@@ -2309,27 +2246,12 @@ impl SiteAuthority {
                     || network != state.old_network
                     || receipt.gk_epoch != state.next_gk_epoch
                 {
-                    if dbg {
-                        eprintln!(
-                            "D04DBG greceipt dev={node:x} ph=Prepared why=phase st={:?} live={:?} net={:x}/{:x} gk={}/{}",
-                            state.phase,
-                            self.live_cutover(),
-                            network, state.old_network,
-                            receipt.gk_epoch, state.next_gk_epoch
-                        );
-                    }
                     return false;
                 }
                 let Some(expect) = self.assemble_prepare(id, &target, &state) else {
-                    if dbg {
-                        eprintln!("D04DBG greceipt dev={node:x} ph=Prepared why=no_assemble");
-                    }
                     return false;
                 };
                 if receipt.digest != sha256(&expect) {
-                    if dbg {
-                        eprintln!("D04DBG greceipt dev={node:x} ph=Prepared why=digest");
-                    }
                     return false;
                 }
                 if target.state == GrantState::Prepared
@@ -2352,7 +2274,7 @@ impl SiteAuthority {
                 let grace_applied = network == state.old_network
                     && state.phase == CutoverPhase::Committed
                     && until != 0
-                    && self.last_channel_mono_ms < until;
+                    && time.mono_ms < until;
                 if !matches!(
                     state.phase,
                     CutoverPhase::Committed
@@ -2634,11 +2556,6 @@ impl SiteAuthority {
                 && row.generation == target.generation
                 && row.kid == target.kid
         }) {
-            eprintln!(
-                "DBG recover gate row node={node:x} row={:?} target_gen={} target_kid0={:02x}",
-                self.devices.get(&node).map(|r| (r.member, r.confirmed, r.generation, r.kid[0])),
-                target.generation, target.kid[0]
-            );
             return false;
         }
         // The RRS the cutover committed (or a newer set): an Applied
@@ -2658,15 +2575,10 @@ impl SiteAuthority {
             })
         });
         if !rrs_ok {
-            eprintln!("DBG recover gate rrs node={node:x} commit_rs={}", state.commit_rs_epoch);
             return false;
         }
         let active = self.gks.active_epoch();
         if active == 0 || self.cutover_gk_proved.get(&(id, node)) != Some(&active) {
-            eprintln!(
-                "DBG recover gate gk node={node:x} active={active} proved={:?}",
-                self.cutover_gk_proved.get(&(id, node))
-            );
             return false;
         }
         if !self.set_grant_state(id, node, GrantState::Recovered, state.revision, now_ms) {

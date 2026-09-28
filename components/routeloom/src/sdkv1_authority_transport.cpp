@@ -229,17 +229,10 @@ void AuthorityEndpoint::on_manifest(
   if (origin == kInvalidNodeId || origin == self_ || rx_.active || object_ready_ ||
       manifest.total_len < keys::kAuthorityEnvelopeMin ||
       manifest.total_len > kAuthorityObjectMax) {
-    fprintf(stderr, "DBG ep: manifest reject self=%llx orig=%llx busy=%d ready=%d len=%u\n",
-            static_cast<unsigned long long>(self_), static_cast<unsigned long long>(origin),
-            rx_.active ? 1 : 0, object_ready_ ? 1 : 0,
-            static_cast<unsigned>(manifest.total_len));
     send_ack(origin, manifest.object_hash, 0, autonomy::ObjectAckStatus::Failed, now_ms);
     sat_inc(counters_.rx_denied);
     return;
   }
-  fprintf(stderr, "DBG ep: manifest accept self=%llx orig=%llx len=%u\n",
-          static_cast<unsigned long long>(self_), static_cast<unsigned long long>(origin),
-          static_cast<unsigned>(manifest.total_len));
   rx_.active = true;
   rx_.origin = origin;
   rx_.hash = manifest.object_hash;
@@ -309,8 +302,6 @@ void AuthorityEndpoint::on_chunk(const NodeId origin,
     }
     rx_.active = false;
     object_ready_ = true;
-    fprintf(stderr, "DBG ep: object ready self=%llx len=%u\n",
-            static_cast<unsigned long long>(self_), static_cast<unsigned>(rx_.total_len));
     send_ack(origin, rx_.hash, rx_.total_len, autonomy::ObjectAckStatus::Ok, now_ms);
     sat_inc(counters_.rx_objects);
     return;
@@ -427,10 +418,6 @@ bool AuthorityEndpoint::pump_tx(const MonotonicMs now_ms) noexcept {
     const Status sent = mesh_.config_send(tx_.gateway, FrameType::Control,
                                           ByteView{frame.data(), written}, now_ms);
     in_call_ = false;
-    fprintf(stderr, "DBG ep: uptx self=%llx gw=%llx len=%u code=%d\n",
-            static_cast<unsigned long long>(self_),
-            static_cast<unsigned long long>(tx_.gateway),
-            static_cast<unsigned>(tx_.total_len), static_cast<int>(sent.code));
     if (!sent) {
       sat_inc(counters_.mesh_shed);
       return true;  // mesh shed it: retry on the next poll
@@ -548,15 +535,6 @@ AuthorityGateway::Slot* AuthorityGateway::claim_slot() noexcept {
   for (auto& slot : slots_) {
     if (!slot.active) return &slot;
   }
-  fprintf(stderr, "DBG gw: claim_slot FULL: [0]=%s dev=%llx rx=%u/%u [1]=%s dev=%llx rx=%u/%u\n",
-          slots_[0].direction == Direction::Up ? "Up" : "Down",
-          static_cast<unsigned long long>(
-              slots_[0].direction == Direction::Up ? slots_[0].origin : slots_[0].device),
-          static_cast<unsigned>(slots_[0].received), static_cast<unsigned>(slots_[0].total_len),
-          slots_[1].direction == Direction::Up ? "Up" : "Down",
-          static_cast<unsigned long long>(
-              slots_[1].direction == Direction::Up ? slots_[1].origin : slots_[1].device),
-          static_cast<unsigned>(slots_[1].received), static_cast<unsigned>(slots_[1].total_len));
   return nullptr;
 }
 
@@ -608,10 +586,6 @@ void AuthorityGateway::on_control(const NodeId origin, const ByteView payload,
   }
   (void)exchange;
   Slot* slot = claim_slot();
-  fprintf(stderr, "DBG gw: upctrl self=%llx orig=%llx len=%u slot=%d\n",
-          static_cast<unsigned long long>(self_),
-          static_cast<unsigned long long>(origin), static_cast<unsigned>(body.size),
-          slot == nullptr ? -1 : 1);
   if (slot == nullptr) {
     sat_inc(counters_.denied);  // both slots live: the endpoints retry
     return;
@@ -773,10 +747,6 @@ Status AuthorityGateway::authority_down(const NodeId device,
                                         bool& complete,
                                         const MonotonicMs now_ms) noexcept {
   complete = false;
-  fprintf(stderr, "DBG gw: authority_down dev=%llx kind=%d off=%u total=%u tid=%u\n",
-          static_cast<unsigned long long>(device), static_cast<int>(fragment.kind),
-          static_cast<unsigned>(fragment.offset), static_cast<unsigned>(fragment.total),
-          static_cast<unsigned>(fragment.transfer_id));
   if (in_call_) return Status::error(StatusCode::Busy, "authority gateway re-entry");
   if (device == kInvalidNodeId || device == kBroadcastNodeId ||
       fragment.device != device ||
@@ -789,17 +759,6 @@ Status AuthorityGateway::authority_down(const NodeId device,
       static_cast<std::uint32_t>(fragment.offset) + fragment.data.size > fragment.total ||
       (static_cast<std::uint32_t>(fragment.offset) + fragment.data.size < fragment.total &&
        fragment.data.size != usb::kAuthorityFragmentDataMax)) {
-    fprintf(stderr,
-            "DBG gw: authority_down dev=%llx REJECT fdev=%llx tid=%u hops=%u lenok=%d "
-            "off=%u dsz=%u total=%u\n",
-            static_cast<unsigned long long>(device),
-            static_cast<unsigned long long>(fragment.device),
-            static_cast<unsigned>(fragment.transfer_id),
-            static_cast<unsigned>(fragment.hops),
-            authority_carrier_length_valid(fragment.kind, fragment.total) ? 1 : 0,
-            static_cast<unsigned>(fragment.offset),
-            static_cast<unsigned>(fragment.data.size),
-            static_cast<unsigned>(fragment.total));
     return Status::error(StatusCode::InvalidArgument, "authority down binding");
   }
   Slot* slot = find_slot(device, Direction::Down, fragment.transfer_id, fragment.kind);
@@ -831,8 +790,6 @@ Status AuthorityGateway::authority_down(const NodeId device,
     }
     if (slot == nullptr) {
       sat_inc(counters_.denied);
-      fprintf(stderr, "DBG gw: authority_down dev=%llx BUSY\n",
-              static_cast<unsigned long long>(device));
       return Status::error(StatusCode::Busy, "authority gateway full");
     }
     slot->active = true;
@@ -875,9 +832,6 @@ Status AuthorityGateway::authority_down(const NodeId device,
   }
   complete = true;
   sat_inc(counters_.down_objects);
-  fprintf(stderr, "DBG gw: authority_down dev=%llx COMPLETE len=%u\n",
-          static_cast<unsigned long long>(device),
-          static_cast<unsigned>(slot->total_len));
   return Status::success();
 }
 
@@ -919,16 +873,9 @@ bool AuthorityGateway::pump_down_mesh(Slot& slot, const MonotonicMs now_ms) noex
     in_call_ = false;
     if (!sent) {
       if (slot.send_failures < kAuthoritySendFailMax) ++slot.send_failures;
-      fprintf(stderr, "DBG gw: carrier dev=%llx len=%u shed=%u: %s\n",
-              static_cast<unsigned long long>(slot.device),
-              static_cast<unsigned>(slot.total_len),
-              static_cast<unsigned>(slot.send_failures), sent.detail);
       if (slot.send_failures >= kAuthoritySendFailMax) {
         // Unsendable: a permanently unreachable peer must not starve the
         // shared slots for later downlinks that CAN be delivered.
-        fprintf(stderr, "DBG gw: carrier drop dev=%llx len=%u: unreachable\n",
-                static_cast<unsigned long long>(slot.device),
-                static_cast<unsigned>(slot.total_len));
         drop_slot(slot);
         sat_inc(counters_.timeouts);
       }
@@ -946,9 +893,6 @@ bool AuthorityGateway::pump_down_mesh(Slot& slot, const MonotonicMs now_ms) noex
   // Keep the last downlink attempt alive for its full ACK window too.
   if (slot.sends != 0 && now_ms - slot.last_send_ms < kAuthorityChunkResendMs) return true;
   if (slot.sends >= kAuthorityChunkSendsMax) {
-    fprintf(stderr, "DBG gw: down slot drop dev=%llx len=%u sends=%u timeout\n",
-            static_cast<unsigned long long>(slot.device),
-            static_cast<unsigned>(slot.total_len), static_cast<unsigned>(slot.sends));
     drop_slot(slot);
     sat_inc(counters_.timeouts);
     return true;
@@ -970,16 +914,9 @@ bool AuthorityGateway::pump_down_mesh(Slot& slot, const MonotonicMs now_ms) noex
     const Status sent = mesh_.config_send(slot.device, FrameType::ControlObject,
                                           encoded.view(), now_ms);
     in_call_ = false;
-    fprintf(stderr, "DBG gw: manifest dev=%llx len=%u sent=%d sends=%u why=%s\n",
-            static_cast<unsigned long long>(slot.device),
-            static_cast<unsigned>(slot.total_len), sent.ok() ? 1 : 0,
-            static_cast<unsigned>(slot.sends), sent.detail);
     if (!sent) {
       if (slot.send_failures < kAuthoritySendFailMax) ++slot.send_failures;
       if (slot.send_failures >= kAuthoritySendFailMax) {
-        fprintf(stderr, "DBG gw: manifest drop dev=%llx len=%u: unreachable\n",
-                static_cast<unsigned long long>(slot.device),
-                static_cast<unsigned>(slot.total_len));
         drop_slot(slot);
         sat_inc(counters_.timeouts);
       }
@@ -1007,9 +944,6 @@ bool AuthorityGateway::pump_down_mesh(Slot& slot, const MonotonicMs now_ms) noex
   if (!sent) {
     if (slot.send_failures < kAuthoritySendFailMax) ++slot.send_failures;
     if (slot.send_failures >= kAuthoritySendFailMax) {
-      fprintf(stderr, "DBG gw: chunk drop dev=%llx len=%u: unreachable\n",
-              static_cast<unsigned long long>(slot.device),
-              static_cast<unsigned>(slot.total_len));
       drop_slot(slot);
       sat_inc(counters_.timeouts);
     }
@@ -1103,10 +1037,6 @@ void AuthorityMeshSink::on_config_job_done(const MessageId& id, const bool hop_a
                                            const MonotonicMs now_ms) noexcept {
   (void)id;
   (void)now_ms;
-  if (!hop_accepted) {
-    fprintf(stderr, "DBG sink: job_done hop=0 reason=%s\n",
-            reason != nullptr ? reason : "?");
-  }
   if (hop_accepted) {
     sat_inc(jobs_accepted_);
     return;
@@ -1124,10 +1054,6 @@ void AuthorityMeshSink::on_config_frame(const NodeId peer, const wire::PlainFram
   const ByteView payload{frame.payload.data(), frame.payload_size};
   switch (frame.header.type) {
     case FrameType::Control:
-      fprintf(stderr, "DBG sink: ctrl from=%llx len=%u sub=%d\n",
-              static_cast<unsigned long long>(frame.header.origin),
-              static_cast<unsigned>(frame.payload_size),
-              frame.payload_size >= 2 ? static_cast<int>(frame.payload[1]) : -1);
       if (frame.payload_size >= 2 && demux_.claim_control(frame.payload[1])) {
         demux_.on_control(frame.header.origin, payload, now_ms);
       }
@@ -1136,11 +1062,6 @@ void AuthorityMeshSink::on_config_frame(const NodeId peer, const wire::PlainFram
       autonomy::ControlObjectPayload manifest{};
       const bool dec = autonomy::control_object_decode(payload, manifest).ok();
       const bool claimed = dec && demux_.claim_kind(manifest.kind);
-      fprintf(stderr, "DBG sink: manifest to=%llx from=%llx dec=%d kind=%d len=%u claimed=%d\n",
-              static_cast<unsigned long long>(frame.header.destination),
-              static_cast<unsigned long long>(frame.header.origin), dec ? 1 : 0,
-              dec ? static_cast<int>(manifest.kind) : -1,
-              dec ? static_cast<unsigned>(manifest.total_len) : 0, claimed ? 1 : 0);
       if (claimed) {
         demux_.on_manifest(frame.header.origin, manifest, now_ms);
       }
@@ -1150,10 +1071,6 @@ void AuthorityMeshSink::on_config_frame(const NodeId peer, const wire::PlainFram
       autonomy::ObjectChunkPayload chunk{};
       const bool dec = autonomy::object_chunk_decode(payload, chunk).ok();
       const bool claimed = dec && demux_.claim_transfer(frame.header.origin, chunk.object_hash);
-      fprintf(stderr, "DBG sink: chunk to=%llx from=%llx dec=%d off=%u claimed=%d\n",
-              static_cast<unsigned long long>(frame.header.destination),
-              static_cast<unsigned long long>(frame.header.origin), dec ? 1 : 0,
-              dec ? static_cast<unsigned>(chunk.offset) : 0, claimed ? 1 : 0);
       if (claimed) {
         demux_.on_chunk(frame.header.origin, chunk, now_ms);
       }

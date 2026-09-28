@@ -268,8 +268,7 @@ impl RelayObject {
         }
         // The out-of-band RRS1 object (02 §5.3 phase 7) rides the live
         // EDHOC exchange between m3 and m4: down only, never terminal.
-        if h.phase == PHASE_RRS_DELIVERY && (up || h.step != 1 || h.state != RelayState::Continue)
-        {
+        if h.phase == PHASE_RRS_DELIVERY && (up || h.step != 1 || h.state != RelayState::Continue) {
             return invalid("relay rrs stage");
         }
         let edhoc = h.phase == PHASE_EDHOC;

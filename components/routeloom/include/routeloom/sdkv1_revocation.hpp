@@ -443,6 +443,7 @@ enum class LifecycleActionReason : std::uint8_t {
   None = 0,
   SelfRevocation = 1,
   LinkFailure = 2,
+  ResumeSwitch = 3,
 };
 
 // Owner-side AdoptNetwork disposition. The mesh node and discovery cannot

@@ -22,8 +22,8 @@ struct SecurityCoordinatorTestAccess {
   static bool apply_pending(const SecurityCoordinator& coordinator) noexcept {
     return coordinator.member_apply_pending_;
   }
-  static void fail_link(SecurityCoordinator& coordinator) noexcept {
-    coordinator.note_link_failed();
+  static void fail_link(SecurityCoordinator& coordinator, MonotonicMs now) noexcept {
+    coordinator.note_link_failed(now);
   }
   static void disable_refresh_scan(SecurityCoordinator& coordinator) noexcept {
     coordinator.deps_.joiner_config.scan_channel_count = 0;
@@ -263,7 +263,7 @@ void test_same_boot_reapply(bool change_site_epoch) {
   CHECK(owner.coordinator().take_action(discovery).ok());
   CHECK(discovery.kind == CoordinatorActionKind::StartMemberDiscovery);
   SecurityCoordinatorTestAccess::disable_refresh_scan(owner.coordinator());
-  for (int i = 0; i < 3; ++i) SecurityCoordinatorTestAccess::fail_link(owner.coordinator());
+  for (int i = 0; i < 3; ++i) SecurityCoordinatorTestAccess::fail_link(owner.coordinator(), now);
   CHECK(owner.coordinator().snapshot().refresh_strikes == 3);
   CHECK(poll(owner.coordinator(), ++now));
   CoordinatorMemberConfig second{};

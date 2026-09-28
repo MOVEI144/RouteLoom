@@ -36,8 +36,8 @@ struct SecurityCoordinatorTestAccess {
   static CoordinatorMemberConfig adopted(const SecurityCoordinator& coordinator) noexcept {
     return coordinator.adopted_;
   }
-  static void link_failed(SecurityCoordinator& coordinator) noexcept {
-    coordinator.note_link_failed();
+  static void link_failed(SecurityCoordinator& coordinator, MonotonicMs now) noexcept {
+    coordinator.note_link_failed(now);
   }
   // Plants one live old-group link session (04 §3.5): a restored Link
   // entry with a full lifetime, like a neighbor the member still
@@ -2211,7 +2211,7 @@ void test_link_failure_refresh_waits_for_poll_boundary() {
   CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
   CHECK(poll_drain(coordinator, now));  // discovery has started
   for (int i = 0; i < 3; ++i) {
-    SecurityCoordinatorTestAccess::link_failed(coordinator);
+    SecurityCoordinatorTestAccess::link_failed(coordinator, now);
   }
   // Engine results are drained in a loop. The member workspace must
   // remain alive until that loop and the member poll have finished.

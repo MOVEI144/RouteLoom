@@ -1913,13 +1913,41 @@ void test_q116_epoch_query_rate() {
 
 void test_q116_size_budgets() {
   current = "q116_size_budgets";
-  // #116 §4.1: the RelayBook stays bounded on every target — incl. the
-  // two pending_pool entries parked EDHOC downs share (02 §5.3 phase 7).
+  // #116 §4.1: the RelayBook stays bounded on every target.
   CHECK(sizeof(JoinRelayGateway) <= 8192);
   CHECK(sizeof(JoinProxy) <= 1792);
   CHECK(sizeof(JoinObjectSlot) <= 1120);
   std::printf("q116 sizes: gateway=%zu proxy=%zu slot=%zu\n", sizeof(JoinRelayGateway),
               sizeof(JoinProxy), sizeof(JoinObjectSlot));
+}
+
+void test_rrs_lane_refuses_m4_until_complete() {
+  current = "rrs_lane_refuses_m4_until_complete";
+  World world;
+  CHECK(world.connect());
+  CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now)
+            .ok());
+  world.pump();
+  answer(world, 2, RelayState::Continue, filler(372, 2));
+  world.pump();
+  CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(filler(404, 3)), world.now)
+            .ok());
+  world.pump();
+  CHECK(world.authority.ups.size() == 2);
+  const RelayHeader up = parse_up(world.authority.ups.back().object).header;
+  RelayHeader rrs_header = up;
+  rrs_header.phase = JoinAuthPhase::RrsDelivery;
+  const Bytes rrs = down_object(rrs_header, 1, RelayState::Continue, filler(200, 7));
+  const Bytes m4 = down_object(up, 4, RelayState::Final, filler(353, 4));
+  CHECK(world.gateway.host_down(kProxy, view(rrs), world.now).ok());
+  CHECK(world.gateway.host_down(kProxy, view(m4), world.now).code == StatusCode::NoCapacity);
+  world.pump();
+  CHECK(world.gateway.host_down(kProxy, view(m4), world.now).ok());
+  world.pump();
+  CHECK(world.observers[0]->messages.size() == 3);
+  if (world.observers[0]->messages.size() == 3) {
+    CHECK(message_is(world.observers[0]->messages.back(), 4, filler(353, 4)));
+  }
 }
 
 void test_progress_receipt_pumps_the_window() {
@@ -2025,6 +2053,7 @@ void test_progress_receipt_pumps_the_window() {
 int main() {
   test_happy_path();
   test_progress_receipt_pumps_the_window();
+  test_rrs_lane_refuses_m4_until_complete();
   test_loss_and_reorder();
   test_resume_chunked_opening();
   test_unreachable_and_busy();

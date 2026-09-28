@@ -657,7 +657,7 @@ fn applied_over_the_wire_converges() {
     // the wire and stripped before the sink fences it.
     let sha = routeloom_provision::sha256::sha256(&tail);
     let mut report = chan_b.head(row_generation(&service, MEMBER_B)).to_vec();
-    report.extend_from_slice(&applied_body(1, &sha));
+    report.extend_from_slice(&applied_body(2, &sha));
     service.handle_carrier(
         MEMBER_B,
         CarrierKind::Envelope,
@@ -762,7 +762,7 @@ fn malformed_reports_drop_without_state_change() {
     join_member(&service, &transport, &mut device_b, "b", T0);
     let mut chan = handshake_node(&service, &sink, MEMBER_B, T0 + 1000);
     let generation = row_generation(&service, MEMBER_B);
-    // Well-AEAD'd but garbage P6 bodies: dropped, no baseline commit.
+    // Well-AEAD'd but garbage P6 bodies: dropped without changing the baseline.
     for tail in [&[9u8, 9, 9][..], &[1u8, 1, 0, 0, 0][..]] {
         let mut report = chan.head(generation).to_vec();
         report.extend_from_slice(tail);
@@ -774,7 +774,7 @@ fn malformed_reports_drop_without_state_change() {
         );
     }
     assert!(sink.take().is_empty());
-    assert_eq!(service.with(|a| a.rs_epoch).0, 0);
+    assert_eq!(service.with(|a| a.rs_epoch).0, 1);
 }
 
 #[test]
