@@ -40,13 +40,26 @@ the Rust workspace and meshviz). Each surface below carries its own number.
 
 | Persisted format | Version | C / Rust name | Defined in | Unknown-version behavior |
 |---|---|---|---|---|
+| Authority ledger format | 1 | `ROUTELOOM_STORE_AUTHORITY_LEDGER_FORMAT` / `STORE_AUTHORITY_LEDGER_FORMAT` | `components/routeloom/src/authority.cpp` | unknown format rejected |
 | Authority ledger (device) | 1 | `ROUTELOOM_STORE_AUTHORITY_LEDGER` / `STORE_AUTHORITY_LEDGER` | `components/routeloom/include/routeloom/authority.hpp` | unknown version reported Unsupported, never applied |
-| Config journal (device) | 1 | `ROUTELOOM_STORE_CONFIG_JOURNAL` / `STORE_CONFIG_JOURNAL` | `components/routeloom/src/config.cpp` | unknown slot rejected |
+| Config journal format (device) | 2 | `ROUTELOOM_STORE_CONFIG_JOURNAL_FORMAT` / `STORE_CONFIG_JOURNAL_FORMAT` | `components/routeloom/src/config.cpp` | format 1 is readable; writes use format 2 |
+| Config journal schema (device) | 1 | `ROUTELOOM_STORE_CONFIG_JOURNAL_SCHEMA` / `STORE_CONFIG_JOURNAL_SCHEMA` | `components/routeloom/src/config.cpp` | unknown schema quarantines the store |
 | Power image (device) | 1 | `ROUTELOOM_STORE_POWER_IMAGE` / `STORE_POWER_IMAGE` | `components/routeloom/include/routeloom/power.hpp` | unknown schema diagnosed; writes blocked until migration or discard |
+| Security floor format (device) | 1 | `ROUTELOOM_STORE_SECURITY_FLOOR_FORMAT` / `STORE_SECURITY_FLOOR_FORMAT` | `components/routeloom/include/routeloom/security_floor.hpp` | unknown format rejected |
+| RLT1 trust store format | 1 | `ROUTELOOM_STORE_TRUST_FORMAT` / `STORE_TRUST_FORMAT` | `components/routeloom/src/trust_store.cpp` | unknown format rejected |
 | RLT1 trust store (device) | 1 | `ROUTELOOM_STORE_TRUST` / `STORE_TRUST` | `components/routeloom/include/routeloom/trust_store.hpp` | unknown version quarantines the store |
+| RLC1 device credential format | 1 | `ROUTELOOM_STORE_CREDENTIAL_FORMAT` / `STORE_CREDENTIAL_FORMAT` | `components/routeloom/src/device_credential.cpp` | unknown format rejected |
 | RLC1 device credential (device) | 1 | `ROUTELOOM_STORE_CREDENTIAL` / `STORE_CREDENTIAL` | `components/routeloom/include/routeloom/device_credential.hpp` | unknown version rejected |
-| SDK v1 records RLI1/RLS1/RRS1/RLP1 format | 1 | `ROUTELOOM_STORE_SDKV1_FORMAT` / `STORE_SDKV1_FORMAT` | `components/routeloom/include/routeloom/sdkv1_records.hpp` | unknown format or schema rejected |
-| SDK v1 records schema | 1 | `ROUTELOOM_STORE_SDKV1_SCHEMA` / `STORE_SDKV1_SCHEMA` | `components/routeloom/include/routeloom/sdkv1_records.hpp` | unknown format or schema rejected |
+| SDK v1 sealed records RLI1/RLS1/RRS1/RLV1 format | 1 | `ROUTELOOM_STORE_SDKV1_FORMAT` / `STORE_SDKV1_FORMAT` | `components/routeloom/include/routeloom/sdkv1_records.hpp` | unknown format or schema rejected |
+| SDK v1 sealed records schema | 1 | `ROUTELOOM_STORE_SDKV1_SCHEMA` / `STORE_SDKV1_SCHEMA` | `components/routeloom/include/routeloom/sdkv1_records.hpp` | unknown format or schema rejected |
+| RRS1 signed revocation object | 1 | `ROUTELOOM_RRS1_OBJECT_VERSION` / `RRS1_OBJECT_VERSION` | `components/routeloom/include/routeloom/sdkv1_records.hpp` | unknown object version rejected |
+| RLP1 resume slot | 1 | `ROUTELOOM_STORE_RLP1_FORMAT` / `STORE_RLP1_FORMAT` | `components/routeloom/include/routeloom/sdkv1_records.hpp` | legacy cache slot may be discarded |
+| RLP2 resume slot | 1 | `ROUTELOOM_STORE_RLP2_FORMAT` / `STORE_RLP2_FORMAT` | `components/routeloom/include/routeloom/sdkv1_records.hpp` | unknown slot rejected; RLP1 is a cache miss |
+| Migration active record | 1 | `ROUTELOOM_STORE_MIGRATION_ACTIVE` / `STORE_MIGRATION_ACTIVE` | `components/routeloom/src/migration.cpp` | unknown version rejected |
+| Migration commit record | 2 | `ROUTELOOM_STORE_MIGRATION_COMMIT` / `STORE_MIGRATION_COMMIT` | `components/routeloom/src/migration.cpp` | version 1 is readable; writes use version 2 |
+| Migration recovery snapshot | 1 | `ROUTELOOM_STORE_MIGRATION_RECOVERY` / `STORE_MIGRATION_RECOVERY` | `components/routeloom/include/routeloom/migration.hpp` | unknown version rejected |
+| Host canonical node request | 1 | `STORE_CANONICAL_NODE` | `host/routeloom-host/src/canonical.rs` | schema byte identifies the immutable request |
+| Host canonical gateway request | 2 | `STORE_CANONICAL_GATEWAY` | `host/routeloom-host/src/canonical.rs` | schema byte identifies the immutable request |
 | Host operation store (SQLite) | 4 | `STORE_HOST_OPS` | `host/routeloom-host/src/sqlite_store.rs` | accepts 1..=current and migrates forward |
 | Site Authority store (SQLite) | 2 | `STORE_SITE` | `host/routeloom-host/src/site/store.rs` | migrates 1 to 2 forward; other versions refused |
 

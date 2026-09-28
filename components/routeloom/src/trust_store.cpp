@@ -1,4 +1,5 @@
 #include "routeloom/trust_store.hpp"
+#include "routeloom/version.h"
 
 #include <cstring>
 
@@ -39,6 +40,7 @@ namespace {
 // what a variable-count image consumes.
 constexpr std::uint32_t kTrustMagic = 0x524C5431U;  // "RLT1"
 constexpr std::uint16_t kTrustFormat = 1;
+static_assert(kTrustFormat == ROUTELOOM_STORE_TRUST_FORMAT);
 constexpr std::uint32_t kTrustSealPending = 0U;
 constexpr std::uint32_t kTrustSealCommitted = 0x7A51C9E2U;  // §4.3.1
 

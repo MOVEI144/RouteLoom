@@ -6,10 +6,12 @@
 #include "routeloom/autonomy_wire.hpp"
 #include "routeloom/device_credential.hpp"
 #include "routeloom/key_schedule.hpp"
+#include "routeloom/migration.hpp"
 #include "routeloom/power.hpp"
 #include "routeloom/routeloom.h"
 #include "routeloom/sdkv1_join_transport.hpp"
 #include "routeloom/sdkv1_records.hpp"
+#include "routeloom/security_floor.hpp"
 #include "routeloom/trust_store.hpp"
 #include "routeloom/usb_codec.hpp"
 #include "routeloom/usb_host_ops.hpp"
@@ -27,7 +29,12 @@ static_assert(routeloom::usb::kJoinRelaySchema == ROUTELOOM_HOSTOPS_JOIN_RELAY_S
 static_assert(routeloom::keys::kAuthorityEnvelopeVersion == ROUTELOOM_AUTHORITY_ENVELOPE, "protocol/manifest.json authority_envelope");
 static_assert(routeloom::kAuthorityLedgerSchemaVersion == ROUTELOOM_STORE_AUTHORITY_LEDGER, "protocol/manifest.json authority_ledger");
 static_assert(routeloom::kPowerImageSchemaVersion == ROUTELOOM_STORE_POWER_IMAGE, "protocol/manifest.json power_image");
+static_assert(routeloom::kSecurityFloorFormat == ROUTELOOM_STORE_SECURITY_FLOOR_FORMAT, "protocol/manifest.json security_floor_format");
 static_assert(routeloom::kTrustStoreSchemaVersion == ROUTELOOM_STORE_TRUST, "protocol/manifest.json trust_store");
 static_assert(routeloom::kCredentialSchemaVersion == ROUTELOOM_STORE_CREDENTIAL, "protocol/manifest.json device_credential");
 static_assert(routeloom::sdkv1::kRecordFormat == ROUTELOOM_STORE_SDKV1_FORMAT, "protocol/manifest.json sdkv1_record_format");
 static_assert(routeloom::sdkv1::kRecordSchema == ROUTELOOM_STORE_SDKV1_SCHEMA, "protocol/manifest.json sdkv1_record_schema");
+static_assert(routeloom::sdkv1::kRevocationVersion == ROUTELOOM_RRS1_OBJECT_VERSION, "protocol/manifest.json revocation_object");
+static_assert(routeloom::sdkv1::kResumeFormat == ROUTELOOM_STORE_RLP1_FORMAT, "protocol/manifest.json resume_slot_rlp1");
+static_assert(routeloom::sdkv1::kResume2Format == ROUTELOOM_STORE_RLP2_FORMAT, "protocol/manifest.json resume_slot_rlp2");
+static_assert(routeloom::kRecoverySnapshotVersion == ROUTELOOM_STORE_MIGRATION_RECOVERY, "protocol/manifest.json migration_recovery_snapshot");

@@ -101,12 +101,12 @@ own.
 
 ## Honest limits
 
-- Validated targets: `esp32c3`, `esp32s3`, `esp32c5` — matching CI. Other
-  ESP-NOW-capable chips are not validated and `routeloom_espnow`'s manifest
-  `targets` list excludes them.
+- CI build targets: `esp32c3`, `esp32s3`, `esp32c5`. The
+  `routeloom_espnow` manifest also admits `esp32c6` for individual builds;
+  it is not yet in the CI matrix. None of these builds qualifies RF behavior.
 - Only ESP-IDF v6.0.3 is CI-validated; manifests require `idf >= 6.0`.
 - No version is published to the ESP-IDF component registry. `version:
-  2.0.0-dev` in the manifests (from `protocol/manifest.json`) is the pre-release tag used for git `path`
-  dependency solving, not a registry artifact.
+  2.0.0-dev` in the manifests (from `protocol/manifest.json`) is the
+  pre-release identifier used for git `path` dependency solving.
 - A successful build proves compile/link only — no RF, range, or battery
   claim (see `docs/STATUS.md`).

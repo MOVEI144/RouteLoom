@@ -3,6 +3,7 @@
 // 06-acceptance.md §6.3).
 
 #include "routeloom/config.hpp"
+#include "routeloom/version.h"
 
 #include <cstring>
 
@@ -21,7 +22,7 @@ using endpoint::ConfigReason;
 // --- Journal record layout ------------------------------------------------------
 // Fixed 148-byte header + variable prev/next snapshots + permit + CRC32.
 //   0   u32  magic "RCJ1"
-//   4   u16  format version (1)
+//   4   u16  format version (2; format 1 is readable)
 //   6   u16  record length (used bytes incl. CRC)
 //   8   u32  schema_version (1)
 //   12  u32  store generation (monotonic per namespace; never reused)
@@ -41,6 +42,8 @@ constexpr std::uint32_t kJournalMagic = 0x52434A31U;  // "RCJ1"
 constexpr std::uint16_t kJournalFormat = 2;
 constexpr std::uint16_t kJournalFormatLegacy = 1;
 constexpr std::uint32_t kJournalSchemaVersion = 1;
+static_assert(kJournalFormat == ROUTELOOM_STORE_CONFIG_JOURNAL_FORMAT);
+static_assert(kJournalSchemaVersion == ROUTELOOM_STORE_CONFIG_JOURNAL_SCHEMA);
 constexpr std::uint32_t kJournalSealCommitted = 0xC0A61E5EU;
 constexpr std::size_t kJournalHeaderSize = 148;
 constexpr std::size_t kJournalRecordMax =

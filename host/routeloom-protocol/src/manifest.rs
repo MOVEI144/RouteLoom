@@ -24,20 +24,46 @@ pub const AUTHORITY_ENVELOPE: u32 = 1;
 pub const API1_ENVELOPE: u32 = 1;
 /// API1 caps_version.
 pub const API1_CAPS: u32 = 1;
+/// Authority ledger format.
+pub const STORE_AUTHORITY_LEDGER_FORMAT: u32 = 1;
 /// Authority ledger (device).
 pub const STORE_AUTHORITY_LEDGER: u32 = 1;
-/// Config journal (device).
-pub const STORE_CONFIG_JOURNAL: u32 = 1;
+/// Config journal format (device).
+pub const STORE_CONFIG_JOURNAL_FORMAT: u32 = 2;
+/// Config journal schema (device).
+pub const STORE_CONFIG_JOURNAL_SCHEMA: u32 = 1;
 /// Power image (device).
 pub const STORE_POWER_IMAGE: u32 = 1;
+/// Security floor format (device).
+pub const STORE_SECURITY_FLOOR_FORMAT: u32 = 1;
+/// RLT1 trust store format.
+pub const STORE_TRUST_FORMAT: u32 = 1;
 /// RLT1 trust store (device).
 pub const STORE_TRUST: u32 = 1;
+/// RLC1 device credential format.
+pub const STORE_CREDENTIAL_FORMAT: u32 = 1;
 /// RLC1 device credential (device).
 pub const STORE_CREDENTIAL: u32 = 1;
-/// SDK v1 records RLI1/RLS1/RRS1/RLP1 format.
+/// SDK v1 sealed records RLI1/RLS1/RRS1/RLV1 format.
 pub const STORE_SDKV1_FORMAT: u32 = 1;
-/// SDK v1 records schema.
+/// SDK v1 sealed records schema.
 pub const STORE_SDKV1_SCHEMA: u32 = 1;
+/// RRS1 signed revocation object.
+pub const RRS1_OBJECT_VERSION: u32 = 1;
+/// RLP1 resume slot.
+pub const STORE_RLP1_FORMAT: u32 = 1;
+/// RLP2 resume slot.
+pub const STORE_RLP2_FORMAT: u32 = 1;
+/// Migration active record.
+pub const STORE_MIGRATION_ACTIVE: u32 = 1;
+/// Migration commit record.
+pub const STORE_MIGRATION_COMMIT: u32 = 2;
+/// Migration recovery snapshot.
+pub const STORE_MIGRATION_RECOVERY: u32 = 1;
+/// Host canonical node request.
+pub const STORE_CANONICAL_NODE: u32 = 1;
+/// Host canonical gateway request.
+pub const STORE_CANONICAL_GATEWAY: u32 = 2;
 /// Host operation store (SQLite).
 pub const STORE_HOST_OPS: u32 = 4;
 /// Site Authority store (SQLite).

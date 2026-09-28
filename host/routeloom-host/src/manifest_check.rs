@@ -12,11 +12,20 @@ fn manifest_matches_host_constants() {
     assert_eq!(u64::from(routeloom_protocol::host_ops::HOST_OPS_SCHEMA), u64::from(m::HOSTOPS_SCHEMA));
     assert_eq!(u64::from(routeloom_protocol::join_relay::JOIN_RELAY_SCHEMA), u64::from(m::HOSTOPS_JOIN_RELAY_SCHEMA));
     assert_eq!(u64::from(routeloom_keysched::AUTHORITY_ENVELOPE_VERSION), u64::from(m::AUTHORITY_ENVELOPE));
+    assert_eq!(u64::from(crate::api1::API_VERSION), u64::from(m::API1_ENVELOPE));
+    assert_eq!(u64::from(routeloom_client::api1::API_VERSION), u64::from(m::API1_ENVELOPE));
     assert_eq!(u64::from(crate::api1::CAPS_VERSION), u64::from(m::API1_CAPS));
+    assert_eq!(u64::from(routeloom_provision::image::TRUST_FORMAT), u64::from(m::STORE_TRUST_FORMAT));
     assert_eq!(u64::from(routeloom_provision::image::TRUST_STORE_SCHEMA_VERSION), u64::from(m::STORE_TRUST));
+    assert_eq!(u64::from(routeloom_provision::credential::CRED_FORMAT), u64::from(m::STORE_CREDENTIAL_FORMAT));
     assert_eq!(u64::from(routeloom_provision::credential::CREDENTIAL_SCHEMA_VERSION), u64::from(m::STORE_CREDENTIAL));
     assert_eq!(u64::from(routeloom_provision::sdkv1::RECORD_FORMAT), u64::from(m::STORE_SDKV1_FORMAT));
     assert_eq!(u64::from(routeloom_provision::sdkv1::RECORD_SCHEMA), u64::from(m::STORE_SDKV1_SCHEMA));
+    assert_eq!(u64::from(routeloom_provision::sdkv1::revocation::REVOCATION_VERSION), u64::from(m::RRS1_OBJECT_VERSION));
+    assert_eq!(u64::from(routeloom_provision::sdkv1::resume::RESUME_FORMAT), u64::from(m::STORE_RLP1_FORMAT));
+    assert_eq!(u64::from(routeloom_provision::sdkv1::resume2::RESUME2_FORMAT), u64::from(m::STORE_RLP2_FORMAT));
+    assert_eq!(u64::from(crate::canonical::SCHEMA_VERSION), u64::from(m::STORE_CANONICAL_NODE));
+    assert_eq!(u64::from(crate::canonical::SCHEMA_VERSION_GATEWAY), u64::from(m::STORE_CANONICAL_GATEWAY));
     assert_eq!(u64::from(crate::sqlite_store::SCHEMA_VERSION), u64::from(m::STORE_HOST_OPS));
     assert_eq!(u64::from(crate::site::store::SCHEMA_VERSION), u64::from(m::STORE_SITE));
 }

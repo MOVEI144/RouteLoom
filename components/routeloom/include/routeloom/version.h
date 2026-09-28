@@ -17,13 +17,24 @@
 #define ROUTELOOM_HOSTOPS_SCHEMA 1  /* HostOps schema */
 #define ROUTELOOM_HOSTOPS_JOIN_RELAY_SCHEMA 2  /* HostOps join relay schema */
 #define ROUTELOOM_AUTHORITY_ENVELOPE 1  /* AuthorityEnvelope */
+#define ROUTELOOM_STORE_AUTHORITY_LEDGER_FORMAT 1  /* Authority ledger format */
 #define ROUTELOOM_STORE_AUTHORITY_LEDGER 1  /* Authority ledger (device) */
-#define ROUTELOOM_STORE_CONFIG_JOURNAL 1  /* Config journal (device) */
+#define ROUTELOOM_STORE_CONFIG_JOURNAL_FORMAT 2  /* Config journal format (device) */
+#define ROUTELOOM_STORE_CONFIG_JOURNAL_SCHEMA 1  /* Config journal schema (device) */
 #define ROUTELOOM_STORE_POWER_IMAGE 1  /* Power image (device) */
+#define ROUTELOOM_STORE_SECURITY_FLOOR_FORMAT 1  /* Security floor format (device) */
+#define ROUTELOOM_STORE_TRUST_FORMAT 1  /* RLT1 trust store format */
 #define ROUTELOOM_STORE_TRUST 1  /* RLT1 trust store (device) */
+#define ROUTELOOM_STORE_CREDENTIAL_FORMAT 1  /* RLC1 device credential format */
 #define ROUTELOOM_STORE_CREDENTIAL 1  /* RLC1 device credential (device) */
-#define ROUTELOOM_STORE_SDKV1_FORMAT 1  /* SDK v1 records RLI1/RLS1/RRS1/RLP1 format */
-#define ROUTELOOM_STORE_SDKV1_SCHEMA 1  /* SDK v1 records schema */
+#define ROUTELOOM_STORE_SDKV1_FORMAT 1  /* SDK v1 sealed records RLI1/RLS1/RRS1/RLV1 format */
+#define ROUTELOOM_STORE_SDKV1_SCHEMA 1  /* SDK v1 sealed records schema */
+#define ROUTELOOM_RRS1_OBJECT_VERSION 1  /* RRS1 signed revocation object */
+#define ROUTELOOM_STORE_RLP1_FORMAT 1  /* RLP1 resume slot */
+#define ROUTELOOM_STORE_RLP2_FORMAT 1  /* RLP2 resume slot */
+#define ROUTELOOM_STORE_MIGRATION_ACTIVE 1  /* Migration active record */
+#define ROUTELOOM_STORE_MIGRATION_COMMIT 2  /* Migration commit record */
+#define ROUTELOOM_STORE_MIGRATION_RECOVERY 1  /* Migration recovery snapshot */
 
 #define ROUTELOOM_REASON_NONE 0
 

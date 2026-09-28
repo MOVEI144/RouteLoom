@@ -1,4 +1,5 @@
 #include "routeloom/migration.hpp"
+#include "routeloom/version.h"
 
 #include <cstring>
 
@@ -21,6 +22,8 @@ constexpr std::uint8_t kRecordVersion = 1;
 // encode always writes v2.
 constexpr std::uint8_t kCommitRecordVersion = 2;
 constexpr std::uint8_t kCommitRecordVersionLegacy = 1;
+static_assert(kRecordVersion == ROUTELOOM_STORE_MIGRATION_ACTIVE);
+static_assert(kCommitRecordVersion == ROUTELOOM_STORE_MIGRATION_COMMIT);
 
 // Signed authority->local conversion shared by validation (before the plan
 // is adopted) and runtime paths. peer_offset = authority - local, so
