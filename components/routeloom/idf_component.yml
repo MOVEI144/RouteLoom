@@ -7,7 +7,7 @@
 # third_party/ inside this directory so a git `path` fetch, which copies only
 # this subtree, still builds. Pins: third_party/VENDORED.json and NOTICE.
 name: routeloom/routeloom
-version: 0.1.0
+version: 2.0.0-dev
 description: >-
   RouteLoom portable mesh core: Wire v1 codec, routing, delivery/storage,
   replay/authority state and the C ABI. C++17, chip-agnostic; the ESP-NOW

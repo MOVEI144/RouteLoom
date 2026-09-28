@@ -10,6 +10,7 @@ pub mod dev_session;
 pub mod group_ops;
 pub mod host_ops;
 pub mod join_relay;
+pub mod manifest;
 pub mod node_status;
 pub mod observation;
 pub mod telemetry;
