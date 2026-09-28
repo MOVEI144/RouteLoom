@@ -311,7 +311,7 @@ impl AuthorityChannels {
         stats
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn is_commit_stored_envelope(&self, device: u64, bytes: &[u8]) -> bool {
         use routeloom_join::renew::{Phase, Receipt};
         let Some(channel) = self.channels.get(&device) else {
