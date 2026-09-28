@@ -386,6 +386,8 @@ class SecurityCoordinator final : public BootstrapSink,
   Status adopt_dev(const CoordinatorDevConfig& config, MonotonicMs now) noexcept;
   Status take_action(CoordinatorAction& out) noexcept;
   CoordinatorSnapshot snapshot() const noexcept;
+  // The mode alone: snapshot() also walks the session bank and joiner.
+  CoordinatorMode mode() const noexcept { return mode_; }
   // Join-lifecycle record for this run (observation_v1, lab timetables).
   // Ages are durations against `now`; unstamped stages read unknown. The
   // flags mirror the live adoption latches (member_valid_, join_confirmed_);

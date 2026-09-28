@@ -319,6 +319,8 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   void report_tune(const Tune& tune, StatusCode result, MonotonicMs now_ms) noexcept;
   Status request_cutover(std::uint8_t channel, std::uint32_t coord_token,
                          MonotonicMs now_ms) noexcept;
+  // poll() body; poll() times it for the runtime's Owner occupancy stats.
+  void poll_steps(MonotonicMs now_ms) noexcept;
   // P6 pump: staged gossip/chunks in, lifecycle Poll, one action drain
   // round. Runs before the coordinator step so a recovery join starts
   // before the coordinator's next Poll.
@@ -404,7 +406,33 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   bool removal_pending_{false};  // coordinator boot deferred: erasure runs first
   bool cutover_intent_{false};   // lifecycle Prepared/Switching, mirrored into the coordinator
   std::array<GossipStage, 4> gossip_staged_{};
-  std::array<NodeId, EspNowRuntime::kPeerCapacity> lifecycle_peers_{};
+  // Last PeerBound stamp handed to the lifecycle per bound peer, and the
+  // lifecycle/radio state it was accepted under: sync_lifecycle_peers()
+  // re-sends only when either changed. The role is fixed per assignment
+  // generation; generation 0 marks a refused send.
+  struct LifecyclePeer {
+    NodeId peer{kInvalidNodeId};
+    std::uint32_t generation{0};
+    std::uint32_t binding{0};
+  };
+  struct LifecycleGate {
+    NetworkId network{0};
+    NetworkId lifecycle_network{0};
+    std::uint32_t radio_generation{0};
+    std::uint32_t site_commit_seq{0};
+    std::uint32_t own_generation{0};
+    std::uint32_t rs_epoch{0};
+    sdkv1::LifecyclePhase phase{sdkv1::LifecyclePhase::BootGate};
+    bool operator==(const LifecycleGate& other) const noexcept {
+      return network == other.network && lifecycle_network == other.lifecycle_network &&
+             radio_generation == other.radio_generation &&
+             site_commit_seq == other.site_commit_seq &&
+             own_generation == other.own_generation && rs_epoch == other.rs_epoch &&
+             phase == other.phase;
+    }
+  };
+  std::array<LifecyclePeer, EspNowRuntime::kPeerCapacity> lifecycle_peers_{};
+  LifecycleGate lifecycle_gate_{};
   struct PeerTxStage {
     bool used{false};
     NodeId peer{kInvalidNodeId};

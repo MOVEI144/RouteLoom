@@ -706,6 +706,13 @@ struct DedupStats {
   std::uint64_t delivery_terminal_evicted{0}; // class (a) result-history loss
 };
 
+// Owner work evidence (saturating): slots visited by the per-poll expiry
+// passes, and reserved exchanges whose HOP_ACCEPT wait expired.
+struct NodeWorkStats {
+  std::uint64_t expiry_slots_scanned{0};
+  std::uint64_t hop_accept_expired{0};
+};
+
 // Gateway-scoped routing counters (routing-scale.md §7). Saturating
 // monotonic totals; frames are counted when the job is admitted to the TX
 // scheduler, not when it reaches the air.
@@ -1172,6 +1179,7 @@ class MeshNode {
   // Dedup capacity surface (sdk-completion/02 §2.4): saturating admission,
   // refusal and eviction counters — every forced reclaim/refusal is visible.
   const DedupStats& dedup_stats() const noexcept { return dedup_stats_; }
+  const NodeWorkStats& work_stats() const noexcept { return work_stats_; }
   // Live dedup residency (records currently occupying the fixed pool).
   // Read-only test/diagnostic surface for the capacity invariants of
   // sdk-completion/02 §2.5 — always <= kDedupCapacity (profile) by construction.
@@ -2932,6 +2940,7 @@ class MeshNode {
   // Dedup capacity counters (sdk-completion/02 §2.4) — admissions, refusals,
   // forced evictions and expiry releases, all saturating u64.
   DedupStats dedup_stats_{};
+  NodeWorkStats work_stats_{};
   // Bounded observation buckets (03 §3 groundwork for P3).
   static constexpr std::size_t kObservationCapacity = 8;
   FixedPool<ObservationBucket, kObservationCapacity> observations_{};

@@ -191,7 +191,8 @@ class RouteTable {
   // withdrawal) applies the hold-down; hold=false is for a peer restart —
   // its previous-incarnation state is stale but fresh ads must not be held.
   void invalidate_next_hop(NodeId next_hop, MonotonicMs now_ms, bool hold = true) noexcept;
-  void expire(MonotonicMs now_ms) noexcept;
+  // Returns the slots the expiry pass visited (Owner work evidence).
+  std::size_t expire(MonotonicMs now_ms) noexcept;
   // Capacity preemption for direct-neighbor admission (issue #50): releases
   // the entry with the smallest armed tombstone_expires_at_ms, dropping its
   // feasibility state early. Returns false when nothing is armed — normal

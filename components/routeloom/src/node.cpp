@@ -5791,32 +5791,31 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
 }
 
 void MeshNode::process_awaiting_hop(const MonotonicMs now_ms) noexcept {
-  while (true) {
-    auto* expired = awaiting_hop_.find(
-        [&](const AwaitingHop& value) { return value.expires_at_ms <= now_ms; });
-    if (expired == nullptr) break;
-    TxJob job = expired->job;
-    const bool deferred = expired->busy_deferred;
-    awaiting_hop_.release(expired);
-    if (deferred) {
-      // BUSY deferral expiry re-admits the job under its BUSY readmission
-      // budget — it is not an RF-loss retry (03 §5 separate accounting).
-      readmit_after_busy(job, now_ms);
-    } else {
-      obs_hop_result(job, false, now_ms);
-      // Hop-level timeout is its own counter — folded into rf_failures too,
-      // but never reported under the wrong name (02 §counter identity).
-      // Saturates with its flag set rather than wrapping silently.
-      if (auto* bucket = job_bucket(job, now_ms)) {
-        if (bucket->hop_timeouts != UINT32_MAX) {
-          ++bucket->hop_timeouts;
-        } else {
-          bucket->saturation_mask |= kSatHopTimeouts;
+  saturating_add(work_stats_.expiry_slots_scanned, awaiting_hop_.capacity());
+  awaiting_hop_.erase_if(
+      [&](const AwaitingHop& value) { return value.expires_at_ms <= now_ms; },
+      [&](AwaitingHop& expired) {
+        TxJob& job = expired.job;
+        if (expired.busy_deferred) {
+          // BUSY deferral expiry re-admits the job under its BUSY readmission
+          // budget — it is not an RF-loss retry (03 §5 separate accounting).
+          readmit_after_busy(job, now_ms);
+          return;
         }
-      }
-      retry_or_fail(job, "HOP_ACCEPT_TIMEOUT", now_ms);
-    }
-  }
+        obs_hop_result(job, false, now_ms);
+        // Hop-level timeout is its own counter — folded into rf_failures too,
+        // but never reported under the wrong name (02 §counter identity).
+        // Saturates with its flag set rather than wrapping silently.
+        if (auto* bucket = job_bucket(job, now_ms)) {
+          if (bucket->hop_timeouts != UINT32_MAX) {
+            ++bucket->hop_timeouts;
+          } else {
+            bucket->saturation_mask |= kSatHopTimeouts;
+          }
+        }
+        saturating_inc(work_stats_.hop_accept_expired);
+        retry_or_fail(job, "HOP_ACCEPT_TIMEOUT", now_ms);
+      });
 }
 
 void MeshNode::process_delivery_timeouts(const MonotonicMs now_ms) noexcept {
@@ -5908,13 +5907,10 @@ void MeshNode::process_delivery_timeouts(const MonotonicMs now_ms) noexcept {
 }
 
 void MeshNode::expire_dedup(const MonotonicMs now_ms) noexcept {
-  while (true) {
-    auto* expired = dedup_.find(
-        [&](const DedupEntry& value) { return value.expires_at_ms <= now_ms; });
-    if (expired == nullptr) break;
-    dedup_.release(expired);
-    saturating_inc(dedup_stats_.expired);
-  }
+  saturating_add(work_stats_.expiry_slots_scanned, dedup_.capacity());
+  const std::size_t expired = dedup_.erase_if(
+      [&](const DedupEntry& value) { return value.expires_at_ms <= now_ms; });
+  saturating_add(dedup_stats_.expired, expired);
 }
 
 std::int64_t MeshNode::control_budget_balance(const MonotonicMs now_ms) noexcept {
@@ -6067,18 +6063,12 @@ void MeshNode::schedule_route_advertisements(const MonotonicMs now_ms) noexcept 
 }
 
 void MeshNode::expire_sequence_requests(const MonotonicMs now_ms) noexcept {
-  while (true) {
-    auto* expired = seqno_seen_.find(
-        [&](const SeqnoSeen& value) { return value.expires_at_ms <= now_ms; });
-    if (expired == nullptr) break;
-    seqno_seen_.release(expired);
-  }
-  while (true) {
-    auto* expired = seqno_state_.find(
-        [&](const SeqnoState& value) { return value.expires_at_ms <= now_ms; });
-    if (expired == nullptr) break;
-    seqno_state_.release(expired);
-  }
+  saturating_add(work_stats_.expiry_slots_scanned,
+                 seqno_seen_.capacity() + seqno_state_.capacity());
+  seqno_seen_.erase_if(
+      [&](const SeqnoSeen& value) { return value.expires_at_ms <= now_ms; });
+  seqno_state_.erase_if(
+      [&](const SeqnoState& value) { return value.expires_at_ms <= now_ms; });
 }
 
 void MeshNode::schedule_sequence_requests(const MonotonicMs now_ms) noexcept {
@@ -6251,7 +6241,7 @@ Status MeshNode::poll(const MonotonicMs now_ms) noexcept {
   // Expired/revoked admission transactions close before anything else may
   // transmit: no new TX leaves on a dead transaction (design-q116 §7.2).
   sweep_transactions(now_ms);
-  routes_.expire(now_ms);
+  saturating_add(work_stats_.expiry_slots_scanned, routes_.expire(now_ms));
   // P3 (03 §6/§7): decay the per-peer observation windows, release stale
   // busy feedback at its TTL, refresh effective link costs and advance the
   // route-switch hysteresis before any selection change is advertised.
