@@ -287,6 +287,22 @@ target_compile_options(routeloom_espnow_runtime_tests PRIVATE -Wall -Wextra -Wpe
 target_compile_definitions(routeloom_espnow_runtime_tests PRIVATE CONFIG_ROUTELOOM_TRACE=1)
 add_test(NAME routeloom_espnow_runtime_tests COMMAND routeloom_espnow_runtime_tests)
 
+if(ROUTELOOM_RESOURCE_PROFILE STREQUAL "endpoint")
+  add_executable(routeloom_espnow_role_mismatch_tests test_espnow_role_mismatch.cpp
+      espnow_idf_stubs/idf_stubs.cpp
+      ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp)
+  target_link_libraries(routeloom_espnow_role_mismatch_tests PRIVATE routeloom_core)
+  target_include_directories(routeloom_espnow_role_mismatch_tests PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${CMAKE_CURRENT_SOURCE_DIR}/espnow_idf_stubs
+      ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include)
+  target_compile_definitions(routeloom_espnow_role_mismatch_tests PRIVATE ROUTELOOM_ROLE=3)
+  target_compile_options(routeloom_espnow_role_mismatch_tests PRIVATE
+      -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME routeloom_espnow_role_mismatch_tests
+      COMMAND routeloom_espnow_role_mismatch_tests)
+endif()
+
 add_executable(routeloom_espnow_owner_reapply_tests test_espnow_owner_reapply.cpp
     espnow_idf_stubs/idf_stubs.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp
@@ -347,13 +363,39 @@ target_compile_options(routeloom_fault_tests PRIVATE -Wall -Wextra -Wpedantic -W
 add_test(NAME routeloom_fault_tests COMMAND routeloom_fault_tests)
 
 # Dedup capacity classes (sdk-completion/02-dedup-capacity.md, issue #9):
+# The standalone header default must agree with the selected profile even
+# without a CMake/IDF dedup override.
+add_executable(routeloom_profile_defaults_tests test_profile_defaults.cpp)
+target_include_directories(routeloom_profile_defaults_tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/components/routeloom/include)
+target_compile_definitions(routeloom_profile_defaults_tests PRIVATE ROUTELOOM_RESOURCE_PROFILE=1)
+target_compile_options(routeloom_profile_defaults_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_profile_defaults_tests COMMAND routeloom_profile_defaults_tests)
+add_executable(routeloom_profile_resume_tests test_profile_defaults.cpp)
+target_include_directories(routeloom_profile_resume_tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/components/routeloom/include)
+target_compile_definitions(routeloom_profile_resume_tests PRIVATE
+  ROUTELOOM_RESOURCE_PROFILE=3 ROUTELOOM_ROLE=3)
+target_compile_options(routeloom_profile_resume_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_profile_resume_tests COMMAND routeloom_profile_resume_tests)
+add_executable(routeloom_usb_state_gate_tests test_usb_state_gate.cpp)
+target_include_directories(routeloom_usb_state_gate_tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/components/routeloom/include)
+target_compile_definitions(routeloom_usb_state_gate_tests PRIVATE
+  ROUTELOOM_RESOURCE_PROFILE=5 ROUTELOOM_USB_GATEWAY_ENDPOINT=0
+  ROUTELOOM_USB_OBSERVATION=0)
+target_compile_options(routeloom_usb_state_gate_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_usb_state_gate_tests COMMAND routeloom_usb_state_gate_tests)
+
 # phase births/eviction order/reserve/upstream cap/evidence cap + replay,
 # retention bounds, class-(a) delivery eviction, and continuous-send
 # below/above capacity with honest saturation. The fills are sized for the
 # relay capacity (96); builds with another dedup capacity cover it through
 # the mesh suites instead (tools/check.py profiles).
-get_target_property(_routeloom_core_defs routeloom_core INTERFACE_COMPILE_DEFINITIONS)
-if("ROUTELOOM_DEDUP_CAPACITY=96" IN_LIST _routeloom_core_defs)
+if(ROUTELOOM_DEDUP_CAPACITY EQUAL 96 OR
+   (ROUTELOOM_DEDUP_CAPACITY EQUAL 0 AND
+    NOT ROUTELOOM_RESOURCE_PROFILE STREQUAL "endpoint" AND
+    NOT ROUTELOOM_RESOURCE_PROFILE STREQUAL "gateway_small"))
   add_executable(routeloom_dedup_tests test_dedup.cpp)
   target_link_libraries(routeloom_dedup_tests PRIVATE routeloom_core)
   target_include_directories(routeloom_dedup_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

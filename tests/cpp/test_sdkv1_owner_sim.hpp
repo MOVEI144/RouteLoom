@@ -463,7 +463,8 @@ class SimNode {
     dev.network = network;
     dev.node = node_;
     dev.boot = boot;
-    dev.role = kMemberRoleEndpoint | kMemberRoleRelay;
+    dev.role = kMemberRoleEndpoint |
+               (profile::kMaxRole >= profile::Role::Relay ? kMemberRoleRelay : 0);
     dev.channel = kSimChannel;
     for (const NodeId gateway : route_gateways) {
       dev.route_gateways[dev.route_gateway_count++] = gateway;
