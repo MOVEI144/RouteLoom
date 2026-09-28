@@ -3,9 +3,7 @@
 #include <cstring>
 #include <iterator>
 
-#include "esp_flash.h"
 #include "esp_log.h"
-#include "esp_ota_ops.h"
 #include "esp_partition.h"
 
 namespace routeloom::espnow {
@@ -13,6 +11,18 @@ namespace routeloom::espnow {
 namespace {
 constexpr char kTag[] = "rl_flash";
 }  // namespace
+
+// The physical size is enforced before this runs: IDF startup refuses to boot
+// when the detected chip is smaller than the size in the image header, so the
+// build-time setting is the guarantee (no IRAM-resident chip probe needed).
+#if defined(ESP_PLATFORM) && !(defined(CONFIG_ESPTOOLPY_FLASHSIZE_4MB) ||     \
+                               defined(CONFIG_ESPTOOLPY_FLASHSIZE_8MB) ||     \
+                               defined(CONFIG_ESPTOOLPY_FLASHSIZE_16MB) ||    \
+                               defined(CONFIG_ESPTOOLPY_FLASHSIZE_32MB) ||    \
+                               defined(CONFIG_ESPTOOLPY_FLASHSIZE_64MB) ||    \
+                               defined(CONFIG_ESPTOOLPY_FLASHSIZE_128MB))
+#error "PT-4M-v2 needs CONFIG_ESPTOOLPY_FLASHSIZE of 4MB or more"
+#endif
 
 // sdk_version follows components/*/idf_component.yml. storage_epoch 2 is
 // PT-4M-v2: crossing from the factory layout needs erase and reprovision.
@@ -22,18 +32,6 @@ Status verify_flash_layout() noexcept {
   ESP_LOGI(kTag, "image: sdk=%s layout=%s storage_epoch=%lu",
            kImageInfo.sdk_version, kImageInfo.partition_id,
            static_cast<unsigned long>(kImageInfo.storage_epoch));
-  // IDF startup already refuses to boot when the detected chip is smaller than
-  // the size in the image header, so the configured size is the physical
-  // guarantee here; reading it avoids linking the IRAM-resident chip probe.
-  const std::uint32_t configured =
-      esp_flash_default_chip != nullptr ? esp_flash_default_chip->size : 0;
-  if (configured < kMinFlashBytes) {
-    ESP_LOGE(kTag,
-             "flash size %lu B is below the %lu B %s needs; RF not started",
-             static_cast<unsigned long>(configured),
-             static_cast<unsigned long>(kMinFlashBytes), kPartitionLayoutId);
-    return Status::error(StatusCode::StorageFailure, "flash smaller than PT-4M-v2");
-  }
   std::uint32_t seen = 0;
   for (esp_partition_iterator_t it = esp_partition_find(
            ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, nullptr);
@@ -67,24 +65,6 @@ Status verify_flash_layout() noexcept {
     return Status::error(StatusCode::StorageFailure, "partition table is not PT-4M-v2");
   }
   return Status::success();
-}
-
-void mark_app_valid() noexcept {
-  esp_ota_img_states_t state{};
-  const esp_err_t state_error =
-      esp_ota_get_state_partition(esp_ota_get_running_partition(), &state);
-  if (state_error == ESP_ERR_NOT_FOUND) return;
-  if (state_error != ESP_OK) {
-    ESP_LOGW(kTag, "reading running image state failed: %s",
-             esp_err_to_name(state_error));
-    return;
-  }
-  if (state != ESP_OTA_IMG_PENDING_VERIFY) return;
-  const esp_err_t error = esp_ota_mark_app_valid_cancel_rollback();
-  if (error != ESP_OK) {
-    ESP_LOGW(kTag, "confirming the running image failed: %s",
-             esp_err_to_name(error));
-  }
 }
 
 }  // namespace routeloom::espnow

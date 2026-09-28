@@ -346,7 +346,6 @@ extern "C" void app_main(void) {
 
   status = runtime.start_task();
   if (!status) fail(status.detail);
-  routeloom::espnow::mark_app_valid();
 
   // The development PSK profile is pinned to SecurityProfile::Development;
   // this firmware can never report itself as production-secure.
@@ -390,7 +389,6 @@ extern "C" void app_main(void) {
   if (!status) fail(status.detail);
 #endif
   ESP_LOGI(kTag, "security owner started; node start deferred to membership");
-  routeloom::espnow::mark_app_valid();
   for (;;) {
     runtime.poll_once();
     owner.poll(monotonic_now_ms());

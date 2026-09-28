@@ -46,13 +46,9 @@ struct ImageInfo {
 };
 extern const ImageInfo kImageInfo;
 
-// Logs the image identity, then checks the physical flash size and every
+// Logs the image identity, then checks every
 // PT-4M-v2 row (label, type, subtype, offset, size). On mismatch it logs the reason and
 // returns an error; the caller must stop before starting RF.
 Status verify_flash_layout() noexcept;
-
-// Confirms the running image to the rollback bootloader. Call once, after
-// the owner and runtime are running. No-op for an image flashed by esptool.
-void mark_app_valid() noexcept;
 
 }  // namespace routeloom::espnow

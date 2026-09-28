@@ -1211,7 +1211,6 @@ extern "C" void app_main(void) {
   // Boot complete — the pump loop below is the node's main loop, so a
   // later fatal is a runtime fault rather than a boot-loop streak.
   routeloom::fail_streak_runtime_started(s_fail);
-  routeloom::espnow::mark_app_valid();
 
 #if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   if (security.security_profile() != routeloom::SecurityProfile::Production) {

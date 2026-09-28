@@ -1533,7 +1533,6 @@ void run_node(const NodeBootHooks& hooks) {
 #endif
   // Boot complete — the pump loop below is the node's main loop.
   routeloom::fail_streak_runtime_started(s_fail);
-  routeloom::espnow::mark_app_valid();
   for (;;) {
     runtime.poll_once();
     owner.poll(monotonic_now_ms());
@@ -1660,7 +1659,6 @@ void run_node(const NodeBootHooks& hooks) {
                              monotonic_now_ms());
   if (!status) fail(status.detail);
   runtime.mark_started();
-  routeloom::espnow::mark_app_valid();
   // The streak decision at this event is to hold: the pump loop below
   // still runs fallible work (drain, image commit, wake configuration,
   // sleep_enter) and fail() must see the retained count. This profile's
@@ -1720,8 +1718,7 @@ void run_node(const NodeBootHooks& hooks) {
     // Boot complete — the runtime task is the node's main loop; an app
     // without per-tick work frees the main task exactly as before.
     routeloom::fail_streak_runtime_started(s_fail);
-    routeloom::espnow::mark_app_valid();
-    return;
+      return;
   }
   // An app with per-tick work keeps the node single-threaded (the bridge
   // pump shape): MeshNode's single-owner-task contract means the app's
@@ -1730,7 +1727,6 @@ void run_node(const NodeBootHooks& hooks) {
   status = runtime.start();
   if (!status) fail(status.detail);
   routeloom::fail_streak_runtime_started(s_fail);
-  routeloom::espnow::mark_app_valid();
   for (;;) {
     runtime.poll_once();
     hooks.poll(monotonic_now_ms(), hooks.ctx);
