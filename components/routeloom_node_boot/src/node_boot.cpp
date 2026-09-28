@@ -1532,7 +1532,7 @@ void run_node(const NodeBootHooks& hooks) {
     runtime.poll_once();
     owner.poll(monotonic_now_ms());
     if (hooks.poll != nullptr) hooks.poll(monotonic_now_ms(), hooks.ctx);
-#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG && CONFIG_ROUTELOOM_CONFIG
+#if CONFIG_ROUTELOOM_TRACE && CONFIG_ROUTELOOM_CONFIG
     static routeloom::MonotonicMs last_config_trace = 0;
     const routeloom::MonotonicMs config_now = monotonic_now_ms();
     if (config_now >= last_config_trace + 5000) {
