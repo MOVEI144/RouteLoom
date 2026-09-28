@@ -3109,6 +3109,57 @@ fn mesh_route_loss_hundred_under_flat_load() {
     assert_eq!(world.snaps[2].phases[1], PHASE_REACHABLE);
 }
 
+/// A multi-page flat table keeps its advertisement pending through queue
+/// pressure and one lost RouteUpdate, so the two-hop route stays usable.
+#[test]
+fn mesh_route_loss_advertisement_survives_queue_pressure() {
+    let Some(mut world) = route_loss_world("route-advertisement", Switch::forced_multihop(), true)
+    else {
+        return;
+    };
+    for index in 0..14 {
+        let (ok, _) = world.peers[2].peer_slot(b'V', index);
+        assert!(ok, "extra route record {index}");
+    }
+    world.step(25);
+    assert!(world.snaps[2].queued >= 16, "multi-page queue reached 50%");
+    let (accepted, queued) = world.peers[2].app_burst(16, testkit::GATEWAY);
+    assert_eq!(accepted, 8, "bounded application admission");
+    assert!(queued >= 16);
+    world.step(5000);
+    assert!(world.snaps[2].queued >= 26, "queue reached 80%");
+    assert!(world.snaps[2].admissions_rejected > 0);
+    let (accepted, _) = world.peers[0].app_burst(8, NODE_A);
+    let mut max_queue = world.snaps[2].queued;
+    for _ in 0..200 {
+        world.step(25);
+        max_queue = max_queue.max(world.snaps[2].queued);
+    }
+    assert_eq!(accepted, 8);
+    assert!(max_queue >= 31, "application lane reached full occupancy");
+    let updates = world.switch.route_updates_seen;
+    world.switch.drop_wire_kind(2, 0, WIRE_ROUTE_UPDATE, 1);
+    let start = world.now;
+    let mut delivered = 0;
+    while world.now - start < 20_000 {
+        world.step(25);
+        if world.now - start >= (delivered + 1) * 2000 {
+            let received = world.snaps[1].rx_count;
+            world.peers[0].app_send(NODE_A, b"route-kept");
+            world.pump_until(200, |snaps| snaps[1].rx_count > received);
+            assert_eq!(world.snaps[1].rx_count, received + 1);
+            delivered += 1;
+        }
+    }
+    assert_eq!(world.switch.wire_dropped, 1, "advertisement loss fired");
+    assert!(
+        world.switch.route_updates_seen > updates + 1,
+        "later page retried"
+    );
+    assert_eq!(world.snaps[0].phases[2], PHASE_REACHABLE);
+    assert_eq!(world.snaps[2].phases[1], PHASE_REACHABLE);
+}
+
 /// Phase-1 convergence on the direct radio: all three Owners adopt
 /// from their Phase-0 images (member boots, no rejoins), open their
 /// authority channels through the gateway's real USB relay, confirm,
