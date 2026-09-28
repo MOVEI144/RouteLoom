@@ -76,7 +76,7 @@ be signed by the key it carries; otherwise no DevCert is issued. Output:
 `devcert.cwt`, `identity-bundle.json` (`routeloom-identity-bundle-v1`:
 node id, flags, anchors, DevCert — no secret) and `inventory.json`
 (`routeloom-inventory-v1`: the same record as the stdout line, with a
-format marker, for KGuard's assignment pre-registration). The device verb
+format marker, for the application's assignment pre-registration). The device verb
 seals the bundle into `rlsec`/`rlident` after checking the DevCert names
 its own key.
 

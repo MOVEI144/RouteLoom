@@ -109,7 +109,7 @@ fn usage() {
         "routeloomctl lab-site-init --spec FILE --out DIR|lab-inventory-import --site DIR --ledger FILE --node <16hex> --role endpoint|relay|gateway (local only)"
     );
     eprintln!(
-        "routeloomctl site join-list|approve --request <jr-token> --device <16hex> --role endpoint|relay|gateway [--idempotency-key K]|deny --request <jr-token> --device <16hex> --reason not_here|blocked [--idempotency-key K]|policy [--zero-touch-open true|false] [--decision-mode kguard|closed|lab_inventory] [--decision-timeout-ms 500-5000] [--pending-retry-after-s 30-3600]|members [--device <16hex> | [--after <16hex>] [--limit 1-128] [--include-removed]]|revoke --device <16hex> --expected-generation <u32> --reason removed|lost|replaced|blocked [--idempotency-key K]|gk-rotate [--expected-active-epoch <u32> [--idempotency-key K]]|cutover --expected-site-epoch <u32> --next-site-cert <hex> [--idempotency-key K]|status  (site authority over API1; cutover progress via operation-get --id <op-token>)"
+        "routeloomctl site join-list|approve --request <jr-token> --device <16hex> --role endpoint|relay|gateway [--idempotency-key K]|deny --request <jr-token> --device <16hex> --reason not_here|blocked [--idempotency-key K]|policy [--zero-touch-open true|false] [--decision-mode external|closed|lab_inventory] [--decision-timeout-ms 500-5000] [--pending-retry-after-s 30-3600]|members [--device <16hex> | [--after <16hex>] [--limit 1-128] [--include-removed]]|revoke --device <16hex> --expected-generation <u32> --reason removed|lost|replaced|blocked [--idempotency-key K]|gk-rotate [--expected-active-epoch <u32> [--idempotency-key K]]|cutover --expected-site-epoch <u32> --next-site-cert <hex> [--idempotency-key K]|status  (site authority over API1; cutover progress via operation-get --id <op-token>)"
     );
 }
 
@@ -2083,6 +2083,10 @@ fn site_decide_command(
     ))
 }
 
+/// v1 spelling of `--decision-mode external` (vocabulary check allow-list:
+/// tests/test_public_vocabulary.py).
+const DEPRECATED_EXTERNAL_ALIAS: &str = "kguard";
+
 /// `site policy [flags...]`: bare reads (`join.policy.get`), any flag
 /// writes (`join.policy.set`). Ranges are the daemon's (07 §2) and are
 /// enforced there too — the CLI only checks the value shapes.
@@ -2102,9 +2106,16 @@ fn site_policy_command(args: &[String]) -> Result<String, Box<dyn std::error::Er
                 )
             }
             "--decision-mode" => {
-                let mode = opt_value(&mut args, "--decision-mode")?;
-                if !["kguard", "closed", "lab_inventory"].contains(&mode.as_str()) {
-                    return Err("--decision-mode must be kguard, closed or lab_inventory".into());
+                let mut mode = opt_value(&mut args, "--decision-mode")?;
+                // Deprecated v1 spelling of "external"; sent as "external".
+                if mode == DEPRECATED_EXTERNAL_ALIAS {
+                    eprintln!(
+                        "warning: --decision-mode {DEPRECATED_EXTERNAL_ALIAS} is deprecated; use external"
+                    );
+                    mode = "external".to_string();
+                }
+                if !["external", "closed", "lab_inventory"].contains(&mode.as_str()) {
+                    return Err("--decision-mode must be external, closed or lab_inventory".into());
                 }
                 decision_mode = Some(mode);
             }
@@ -3674,13 +3685,15 @@ mod tests {
             line.contains("\"method\":\"join.policy.set\",\"params\":{\"zero_touch_open\":true,\"decision_mode\":\"closed\",\"decision_timeout_ms\":800,\"pending_retry_after_s\":120}"),
             "{line}"
         );
-        let line = site_command(&args(&["policy", "--decision-mode", "kguard"])).unwrap();
-        assert!(
-            line.contains(
-                "\"method\":\"join.policy.set\",\"params\":{\"decision_mode\":\"kguard\"}"
-            ),
-            "{line}"
-        );
+        for mode in ["external", DEPRECATED_EXTERNAL_ALIAS] {
+            let line = site_command(&args(&["policy", "--decision-mode", mode])).unwrap();
+            assert!(
+                line.contains(
+                    "\"method\":\"join.policy.set\",\"params\":{\"decision_mode\":\"external\"}"
+                ),
+                "{line}"
+            );
+        }
         assert!(site_command(&args(&["policy", "--zero-touch-open", "yes"])).is_err());
         assert!(site_command(&args(&["policy", "--decision-mode", "open"])).is_err());
         assert!(site_command(&args(&["policy", "--bogus", "1"])).is_err());

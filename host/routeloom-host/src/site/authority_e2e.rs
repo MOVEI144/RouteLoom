@@ -30,7 +30,7 @@ use super::usb::{authority_sub, UsbAuthorityAdapter};
 use super::{DecideRequest, Events, RevokeRequest, SiteService};
 
 const T0: u64 = 1_790_000_000_000;
-const KGUARD: u32 = 501;
+const DECIDER: u32 = 501;
 const NODE_A: u64 = 0x00A1_0000_0000_0101;
 const NODE_B: u64 = 0x00A1_0000_0000_0102;
 
@@ -83,7 +83,7 @@ impl Rig {
         self.service
             .with(|a| {
                 a.decide(
-                    KGUARD,
+                    DECIDER,
                     DecideRequest {
                         join_request_id: testkit::request_id(&events).unwrap(),
                         device: node,
@@ -274,7 +274,7 @@ fn live_revoke_persists_presealed_notice_before_delivery() {
         key: "presealed-notice".into(),
     };
     rig.service
-        .with(|a| a.revoke(KGUARD, request, HostTime::sync(T0)))
+        .with(|a| a.revoke(DECIDER, request, HostTime::sync(T0)))
         .0
         .unwrap();
     let (notice_doc, sealed) = rig
@@ -315,7 +315,7 @@ fn detached_usb_keeps_presealed_notice_for_reconnect() {
     rig.service
         .with(|a| {
             a.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device: NODE_A,
                     expected_generation: row.generation,
@@ -390,7 +390,7 @@ fn host_restart_closes_notice_direct_send() {
     rig.service
         .with(|a| {
             a.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device: NODE_A,
                     expected_generation: row.generation,
@@ -778,7 +778,7 @@ fn live_rotation_excludes_removed_member() {
     rig.service
         .with(|a| {
             a.revoke(
-                KGUARD,
+                DECIDER,
                 RevokeRequest {
                     device: NODE_B,
                     expected_generation: row_b.generation,

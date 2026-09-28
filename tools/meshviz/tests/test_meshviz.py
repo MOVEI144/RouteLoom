@@ -518,7 +518,7 @@ class ModelTests(unittest.TestCase):
         capabilities = ask('c', 'capabilities.get')
         self.assertEqual(capabilities['v'], 1)
         self.assertTrue(capabilities['result']['methods']['nodes.list'])
-        self.assertEqual(capabilities['result']['caps_version'], 1)
+        self.assertEqual(capabilities['result']['caps_version'], 2)
         first = ask('n1', 'nodes.list', {'limit': 2})
         self.assertEqual([n['node'] for n in first['result']['nodes']],
                          ['0000000000000001', '0000000000000002'])

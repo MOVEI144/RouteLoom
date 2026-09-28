@@ -29,6 +29,10 @@ use crate::site::{
     RevokeRequest, RotateRequest, SiteError, SiteService, ARCHIVE_BATCH_MAX,
 };
 
+/// v1 input spelling of `decision_mode:"external"` (vocabulary check
+/// allow-list: tests/test_public_vocabulary.py).
+pub(crate) const DEPRECATED_EXTERNAL_ALIAS: &str = "kguard";
+
 /// `limit` ceiling of the paged site listings.
 pub const SITE_PAGE_MAX: usize = 128;
 
@@ -293,12 +297,19 @@ fn policy_set<S: OperationStore>(
     }
     if let Some(value) = params.get("decision_mode") {
         patch.decision_mode = Some(match value.as_str() {
-            Some("kguard") => DecisionMode::Kguard,
+            Some("external") => DecisionMode::External,
+            // Deprecated v1 spelling of "external"; accepted on input only.
+            Some(DEPRECATED_EXTERNAL_ALIAS) => {
+                eprintln!(
+                    "join.policy.set: decision_mode \"{DEPRECATED_EXTERNAL_ALIAS}\" is deprecated; use \"external\""
+                );
+                DecisionMode::External
+            }
             Some("closed") => DecisionMode::Closed,
             Some("lab_inventory") => DecisionMode::LabInventory,
             _ => {
                 return Err(invalid(
-                    "decision_mode must be \"kguard\", \"closed\" or \"lab_inventory\"",
+                    "decision_mode must be \"external\", \"closed\" or \"lab_inventory\"",
                 ))
             }
         });

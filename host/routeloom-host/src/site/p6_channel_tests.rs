@@ -29,7 +29,7 @@ use super::transport::InProcessTransport;
 use super::{RevokeRequest, SiteService};
 
 const T0: u64 = 1_790_000_000_000;
-const KGUARD: u32 = 501;
+const DECIDER: u32 = 501;
 const MEMBER_A: u64 = 0x00A1_0000_0000_00A1;
 const MEMBER_B: u64 = 0x00A1_0000_0000_00B2;
 
@@ -544,7 +544,7 @@ fn join_member(
     let (mut exchange, _, events) = device.start(service, transport, at);
     let (answer, _) = service.with(|a| {
         a.decide(
-            KGUARD,
+            DECIDER,
             super::DecideRequest {
                 join_request_id: request_id(&events).unwrap(),
                 device: device.node,
@@ -598,7 +598,7 @@ fn revoke(service: &SiteService, node: u64, key: &str, at: u64) -> u64 {
     let generation = service.with(|a| a.devices.get(&node).unwrap().generation).0;
     let (answer, _) = service.with(|a| {
         a.revoke(
-            KGUARD,
+            DECIDER,
             RevokeRequest {
                 device: node,
                 expected_generation: generation,

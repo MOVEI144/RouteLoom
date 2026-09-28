@@ -855,7 +855,7 @@ struct State {
     /// drives the gateway-forwarded exchange.
     remote_observation_ops: remote_observation::RemoteObservationOps,
     /// SDK v1 Site Authority (--site-authority DIR): EDHOC Responder, member
-    /// ledger and the KGuard decision surface. None when not configured.
+    /// ledger and the external-decider surface. None when not configured.
     site: Option<Arc<site::SiteService>>,
     /// Verified join-relay (HostOps 0x60-0x63) bodies waiting for the site
     /// lane — separate from `dispatch_inbox` so relay traffic never
@@ -2777,12 +2777,13 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
             }
             // Admission budget profile (design-devflow D10): `normal` is
             // the contract default (2 calls/min, burst 16). `bench-v1`
-            // raises host submission throughput for development sites —
+            // raises host submission throughput for development sites;
+            // `control` adds the latest-value lane (#195) to `normal` —
             // opt-in only, always reported by name via capacity.get.
             "--admission-profile" => {
                 let text = args
                     .next()
-                    .ok_or("--admission-profile requires normal|bench-v1")?;
+                    .ok_or("--admission-profile requires normal|bench-v1|control")?;
                 admission_profile = send_store::AdmissionProfile::parse(&text)
                     .ok_or_else(|| format!("--admission-profile: unknown profile \"{text}\""))?;
             }
@@ -2793,7 +2794,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
             }
             "--help" | "-h" => {
                 println!(
-                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N] [--config-dev-key-hex HEX] [--config-profile dev|cose] [--config-authority-key PATH] [--site-authority DIR] [--admission-profile normal|bench-v1] [--usb-dev-secret-file PATH]"
+                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N] [--config-dev-key-hex HEX] [--config-profile dev|cose] [--config-authority-key PATH] [--site-authority DIR] [--admission-profile normal|bench-v1|control] [--usb-dev-secret-file PATH]"
                 );
                 process::exit(0);
             }
