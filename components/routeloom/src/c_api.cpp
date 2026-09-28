@@ -3,12 +3,45 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <new>
 
+#include "routeloom/group.hpp"
 #include "routeloom/node.hpp"
+#include "routeloom/version.h"
 
 namespace {
 using namespace routeloom;
+
+// ABI 3 header rule (routeloom.h): exact major, at least this header's size.
+template <typename T>
+bool sized(const T* object) noexcept {
+  return object != nullptr && object->struct_size >= sizeof(T) &&
+         object->version == RL_ABI_VERSION;
+}
+
+template <typename T>
+void set_header(T& object) noexcept {
+  object.struct_size = sizeof(T);
+  object.version = RL_ABI_VERSION;
+}
+
+// Delivery reasons are static strings; the registry id is looked up by name
+// at the boundary (protocol/manifest.json reason_codes). 0 = not registered.
+std::uint16_t reason_id(const char* reason) noexcept {
+  struct Entry {
+    const char* name;
+    std::uint16_t id;
+  };
+#define RL_REASON_ENTRY(name, id) {#name, id},
+  static constexpr Entry kTable[] = {ROUTELOOM_REASON_TABLE(RL_REASON_ENTRY)};
+#undef RL_REASON_ENTRY
+  if (reason == nullptr) return ROUTELOOM_REASON_NONE;
+  for (const Entry& entry : kTable) {
+    if (std::strcmp(entry.name, reason) == 0) return entry.id;
+  }
+  return ROUTELOOM_REASON_NONE;
+}
 
 rl_status_code_t to_c(const StatusCode code) noexcept {
   return static_cast<rl_status_code_t>(code);
@@ -31,11 +64,30 @@ rl_message_id_t to_c(const MessageId& id) noexcept { return {id.session, id.sequ
 MessageId from_c(const rl_message_id_t id) noexcept { return {id.session, id.sequence}; }
 
 rl_security_context_t to_c(const SecurityContext& context) noexcept {
-  return {static_cast<rl_security_scope_t>(context.scope), context.network,
-          context.sender, context.receiver, context.epoch};
+  rl_security_context_t out{};
+  set_header(out);
+  out.scope = static_cast<rl_security_scope_t>(context.scope);
+  out.epoch = context.epoch;
+  out.network = context.network;
+  out.sender = context.sender;
+  out.receiver = context.receiver;
+  return out;
 }
 
-class CBridge final : public RadioPort, public SecurityProvider, public NodeObserver {
+rl_delivery_result_t to_c(const DeliveryResult& result) noexcept {
+  rl_delivery_result_t out{};
+  set_header(out);
+  out.id = to_c(result.id);
+  out.state = static_cast<rl_delivery_state_t>(result.state);
+  out.reason_id = reason_id(result.reason);
+  out.reason = result.reason;
+  return out;
+}
+
+class CBridge final : public RadioPort,
+                      public SecurityProvider,
+                      public NodeObserver,
+                      public AppliedEndpointSink {
  public:
   CBridge(const rl_radio_vtable_t& radio, const rl_security_vtable_t& security,
           const rl_observer_vtable_t& observer) noexcept
@@ -95,12 +147,28 @@ class CBridge final : public RadioPort, public SecurityProvider, public NodeObse
 
   void on_delivery(const DeliveryResult& result) noexcept override {
     if (observer_.on_delivery != nullptr) {
-      const rl_delivery_result_t c{to_c(result.id),
-                                   static_cast<rl_delivery_state_t>(result.state),
-                                   result.reason};
+      const rl_delivery_result_t c = to_c(result);
       observer_.on_delivery(observer_.user, &c);
     }
   }
+
+  // The C endpoint is always asynchronous: it gets the ticket and answers
+  // with rl_complete_applied after the callback returned.
+  void on_applied_request(const AppliedRequest& request,
+                          AppliedReply& reply) noexcept override {
+    rl_applied_request_t c{};
+    set_header(c);
+    c.ticket = request.ticket;
+    c.origin = request.source;
+    c.id = to_c(request.key.id);
+    c.remaining_ms = request.remaining_ms;
+    c.payload = request.payload.data;
+    c.payload_size = request.payload.size;
+    observer_.on_applied_request(observer_.user, &c);
+    reply.deferred = true;
+  }
+
+  bool has_applied_endpoint() const noexcept { return observer_.on_applied_request != nullptr; }
 
   void on_diagnostic(const char* reason, const NodeId peer,
                      const MessageId* message) noexcept override {
@@ -233,42 +301,34 @@ class CReplyPeerBridge final : public ReplyPeerPort {
   bool in_call_{false};
 };
 
-// rl_node_config_t tail extension (routeloom.h): the base layout is frozen
-// at RL_NODE_CONFIG_SIZE_BASE bytes; the scoped-routing fields follow it and
-// are read only when the caller's struct_size covers them. A two-gateway
-// header (RL_NODE_CONFIG_SIZE_GATEWAY2) keeps working with its own limit.
-static_assert(offsetof(rl_node_config_t, route_gateway_count) == RL_NODE_CONFIG_SIZE_BASE,
-              "rl_node_config_t base layout must stay frozen");
-static_assert(offsetof(rl_node_config_t, route_gateways) == RL_NODE_CONFIG_SIZE_BASE + 8,
-              "rl_node_config_t extension layout");
-static_assert(sizeof(rl_node_config_t) ==
-                  RL_NODE_CONFIG_SIZE_BASE + 8 + 8 * RL_MAX_ROUTE_GATEWAYS,
-              "rl_node_config_t size");
-static_assert(RL_NODE_CONFIG_SIZE_GATEWAY2 == RL_NODE_CONFIG_SIZE_BASE + 8 + 2 * 8,
-              "two-gateway header size");
 static_assert(RL_MAX_ROUTE_GATEWAYS == kMaxRouteGateways,
               "C gateway capacity must mirror kMaxRouteGateways");
+static_assert(RL_APPLIED_LEASE_SIZE == endpoint::kAppliedLeaseBytes, "APPLIED lease size");
+static_assert(RL_APPLIED_PAYLOAD_MAX == kAppliedUserPayloadMax, "APPLIED payload limit");
+static_assert(RL_APPLIED_RESULT_DATA_MAX == endpoint::kAppResultDataMax, "APPLIED result data");
+static_assert(RL_APPLIED_SDK_CODE_BASE == endpoint::kAppResultSdkCodeBase &&
+                  RL_APPLIED_CODE_INTERNAL_ERROR ==
+                      static_cast<std::uint32_t>(endpoint::AppResultRefusal::InternalError) &&
+                  RL_APPLIED_CODE_STALE_LEASE ==
+                      static_cast<std::uint32_t>(endpoint::AppResultRefusal::StaleLease) &&
+                  RL_APPLIED_CODE_NO_ENDPOINT ==
+                      static_cast<std::uint32_t>(endpoint::AppResultRefusal::NoEndpoint) &&
+                  RL_APPLIED_CODE_CAPACITY ==
+                      static_cast<std::uint32_t>(endpoint::AppResultRefusal::Capacity) &&
+                  RL_APPLIED_CODE_MALFORMED_REQUEST ==
+                      static_cast<std::uint32_t>(endpoint::AppResultRefusal::MalformedRequest),
+              "APPLIED SDK codes must mirror AppResultRefusal");
+static_assert(RL_APPLIED_SUCCESS == static_cast<int>(endpoint::AppResultOutcome::Success) &&
+                  RL_APPLIED_FAILURE == static_cast<int>(endpoint::AppResultOutcome::Failure),
+              "rl_applied_outcome_t must mirror AppResultOutcome");
 
-bool extended_config(const rl_node_config_t& input) noexcept {
-  return input.struct_size >= sizeof(rl_node_config_t);
-}
-
-bool gateway2_config(const rl_node_config_t& input) noexcept {
-  return input.struct_size == RL_NODE_CONFIG_SIZE_GATEWAY2;
-}
-
-// Shape checks the C boundary owns (routeloom.h): a count within the
-// struct_size-covered capacity, no zero id (it would silently shrink the
-// list) and no duplicate. A two-gateway caller asking for three gateways
-// is refused — never truncated. The lease rule and reserved ids stay with
-// MeshNode::validate_config() at start.
-bool valid_config(const rl_node_config_t& input) noexcept {
-  if (input.abi_version != RL_ABI_VERSION) return false;
-  if (!extended_config(input) && !gateway2_config(input)) {
-    return input.struct_size == RL_NODE_CONFIG_SIZE_BASE;
-  }
-  const std::size_t capacity = extended_config(input) ? RL_MAX_ROUTE_GATEWAYS : 2;
-  if (input.route_gateway_count > capacity) return false;
+// Shape checks the C boundary owns (routeloom.h): a count within capacity,
+// no zero id (it would silently shrink the list) and no duplicate. The lease
+// rule and reserved ids stay with MeshNode::validate_config() at start.
+bool valid_config(const rl_node_config_t* config) noexcept {
+  if (!sized(config)) return false;
+  const rl_node_config_t& input = *config;
+  if (input.route_gateway_count > RL_MAX_ROUTE_GATEWAYS) return false;
   for (std::size_t i = 0; i < input.route_gateway_count; ++i) {
     if (input.route_gateways[i] == kInvalidNodeId) return false;
     for (std::size_t j = 0; j < i; ++j) {
@@ -293,15 +353,10 @@ NodeConfig convert_config(const rl_node_config_t& input) noexcept {
   output.callback_watchdog_ms = input.callback_watchdog_ms;
   output.max_link_attempts = input.max_link_attempts;
   output.max_end_to_end_rounds = input.max_end_to_end_rounds;
-  if (extended_config(input) || gateway2_config(input)) {
-    // valid_config already limited the count to the covered capacity.
-    for (std::size_t i = 0; i < input.route_gateway_count; ++i) {
-      output.route_gateways[i] = input.route_gateways[i];
-    }
-    if (input.route_refresh_ticks != 0) {
-      output.route_refresh_ticks = input.route_refresh_ticks;
-    }
+  for (std::size_t i = 0; i < input.route_gateway_count; ++i) {
+    output.route_gateways[i] = input.route_gateways[i];
   }
+  if (input.route_refresh_ticks != 0) output.route_refresh_ticks = input.route_refresh_ticks;
   return output;
 }
 
@@ -324,18 +379,18 @@ static_assert(RL_GROUP_SEQUENCE_FLAG == kGroupSequenceFlag, "group sequence flag
 static_assert(RL_GROUP_PAYLOAD_MAX == kGroupPayloadMax, "group payload limit");
 static_assert(RL_GROUP_MISSING_MAX == kGroupReportMissingMax, "group missing ids");
 static_assert(RL_GROUP_MEMBERSHIP_MAX == kGroupMembershipMax, "group membership limit");
-// `ordered` took the first byte of the former reserved[7]: the layout (and
-// the zero default of existing callers) is unchanged.
-static_assert(offsetof(rl_send_options_t, ordered) ==
-                      offsetof(rl_send_options_t, hop_limit) + 1 &&
-                  offsetof(rl_send_options_t, reserved) ==
-                      offsetof(rl_send_options_t, hop_limit) + 2 &&
-                  sizeof(rl_send_options_t) == 28,
-              "rl_send_options_t layout unchanged");
 
-bool valid_header(const std::uint32_t struct_size, const std::uint32_t abi_version,
-                  const std::size_t expected) noexcept {
-  return struct_size >= expected && abi_version == RL_ABI_VERSION;
+// Validates a C verdict the way the synchronous endpoint path would accept it.
+bool to_reply(const rl_applied_result_t* result, AppliedReply& reply) noexcept {
+  if (!sized(result) || result->data_size > RL_APPLIED_RESULT_DATA_MAX ||
+      result->outcome > RL_APPLIED_FAILURE) {
+    return false;
+  }
+  reply.outcome = static_cast<endpoint::AppResultOutcome>(result->outcome);
+  reply.code = result->code;
+  reply.size = result->data_size;
+  std::memcpy(reply.data.data(), result->data, result->data_size);
+  return true;
 }
 }  // namespace
 
@@ -352,15 +407,24 @@ struct rl_context {
 
 extern "C" {
 
+void rl_abi_version(uint32_t* out_major, uint32_t* out_minor) {
+  if (out_major != nullptr) *out_major = RL_ABI_VERSION;
+  if (out_minor != nullptr) *out_minor = RL_ABI_VERSION_MINOR;
+}
+
+void rl_struct_init(void* object, const size_t struct_size) {
+  if (object == nullptr || struct_size < 2 * sizeof(std::uint32_t)) return;
+  std::memset(object, 0, struct_size);
+  const std::uint32_t header[2] = {static_cast<std::uint32_t>(struct_size), RL_ABI_VERSION};
+  std::memcpy(object, header, sizeof(header));
+}
+
 size_t rl_context_size(void) { return sizeof(rl_context); }
 size_t rl_context_alignment(void) { return alignof(rl_context); }
 
 void rl_node_config_init(rl_node_config_t* config) {
   if (config == nullptr) return;
-  // The original ABI symbol may receive only the 64-byte pre-routing struct.
-  std::memset(config, 0, RL_NODE_CONFIG_SIZE_BASE);
-  config->struct_size = RL_NODE_CONFIG_SIZE_BASE;
-  config->abi_version = RL_ABI_VERSION;
+  rl_struct_init(config, sizeof(*config));
   config->link_epoch = 1;
   config->end_epoch = 1;
   config->route_generation = 1;
@@ -370,22 +434,12 @@ void rl_node_config_init(rl_node_config_t* config) {
   config->callback_watchdog_ms = 1000;
   config->max_link_attempts = 2;
   config->max_end_to_end_rounds = 3;
-}
-
-void rl_node_config_init_full(rl_node_config_t* config) {
-  if (config == nullptr) return;
-  rl_node_config_init(config);
-  config->struct_size = sizeof(*config);
-  std::memset(reinterpret_cast<std::uint8_t*>(config) + RL_NODE_CONFIG_SIZE_BASE, 0,
-              sizeof(*config) - RL_NODE_CONFIG_SIZE_BASE);
   config->route_refresh_ticks = kScopedDefaultRefreshTicks;
 }
 
 void rl_send_options_init(rl_send_options_t* options) {
   if (options == nullptr) return;
-  *options = {};
-  options->struct_size = sizeof(*options);
-  options->abi_version = RL_ABI_VERSION;
+  rl_struct_init(options, sizeof(*options));
   options->delivery = RL_DELIVERY_RELIABLE;
   options->priority = RL_PRIORITY_NORMAL;
   options->lifetime_ms = 5000;
@@ -398,10 +452,9 @@ rl_status_code_t rl_init(void* storage, const size_t storage_size,
                          const rl_security_vtable_t* security,
                          const rl_observer_vtable_t* observer,
                          rl_context_t** out_context) {
-  if (storage == nullptr || config == nullptr || radio == nullptr || security == nullptr ||
-      observer == nullptr || out_context == nullptr || storage_size < sizeof(rl_context) ||
+  if (storage == nullptr || out_context == nullptr || storage_size < sizeof(rl_context) ||
       reinterpret_cast<std::uintptr_t>(storage) % alignof(rl_context) != 0 ||
-      !valid_config(*config)) {
+      !valid_config(config) || !sized(radio) || !sized(security) || !sized(observer)) {
     return RL_STATUS_INVALID_ARGUMENT;
   }
   if (radio->send == nullptr || security->ready == nullptr || security->next_counter == nullptr ||
@@ -409,6 +462,9 @@ rl_status_code_t rl_init(void* storage, const size_t storage_size,
     return RL_STATUS_INVALID_ARGUMENT;
   }
   auto* context = new (storage) rl_context(convert_config(*config), *radio, *security, *observer);
+  if (context->bridge.has_applied_endpoint()) {
+    (void)context->node.set_applied_sink(&context->bridge);
+  }
   *out_context = context;
   return RL_STATUS_OK;
 }
@@ -439,8 +495,7 @@ rl_status_code_t rl_send(rl_context_t* context, const rl_node_id_t destination,
                          const rl_send_options_t* options,
                          const rl_monotonic_ms_t now_ms, rl_message_id_t* out_id) {
   if (context == nullptr || options == nullptr || out_id == nullptr ||
-      (payload_size != 0 && payload == nullptr) ||
-      !valid_header(options->struct_size, options->abi_version, sizeof(*options))) {
+      (payload_size != 0 && payload == nullptr) || !sized(options)) {
     return RL_STATUS_INVALID_ARGUMENT;
   }
   MessageId id{};
@@ -448,6 +503,75 @@ rl_status_code_t rl_send(rl_context_t* context, const rl_node_id_t destination,
                                          convert_options(*options), now_ms, id);
   if (status) *out_id = to_c(id);
   return to_c(status.code);
+}
+
+rl_status_code_t rl_get_capabilities(const rl_context_t* context,
+                                     rl_capabilities_t* out_capabilities) {
+  if (!sized(out_capabilities)) return RL_STATUS_INVALID_ARGUMENT;
+  rl_capabilities_t caps{};
+  set_header(caps);
+  caps.features = RL_CAP_APPLIED | RL_CAP_ORDERED | RL_CAP_REPLY_PEER;
+  if (context != nullptr) {
+    if (context->node.gateway_scoped()) caps.features |= RL_CAP_SCOPED_ROUTING;
+    if (context->node.group_origin_servable()) caps.features |= RL_CAP_GROUP_SEND;
+  }
+  caps.max_payload = RL_MAX_APPLICATION_PAYLOAD;
+  caps.max_applied_payload = RL_APPLIED_PAYLOAD_MAX;
+  caps.max_group_payload = RL_GROUP_PAYLOAD_MAX;
+  caps.max_route_gateways = RL_MAX_ROUTE_GATEWAYS;
+  caps.max_group_membership = RL_GROUP_MEMBERSHIP_MAX;
+  *out_capabilities = caps;
+  return RL_STATUS_OK;
+}
+
+rl_status_code_t rl_applied_lease(const rl_context_t* context,
+                                  uint8_t out_lease[RL_APPLIED_LEASE_SIZE]) {
+  if (context == nullptr || out_lease == nullptr) return RL_STATUS_INVALID_ARGUMENT;
+  const ExecutionLease lease = context->node.applied_lease();
+  std::memcpy(out_lease, lease.data(), lease.size());
+  return RL_STATUS_OK;
+}
+
+rl_status_code_t rl_send_applied(rl_context_t* context, const rl_node_id_t destination,
+                                 const uint8_t lease[RL_APPLIED_LEASE_SIZE],
+                                 const uint8_t* payload, const size_t payload_size,
+                                 const rl_send_options_t* options,
+                                 const rl_monotonic_ms_t now_ms, rl_message_id_t* out_id) {
+  if (context == nullptr || lease == nullptr || out_id == nullptr ||
+      (payload_size != 0 && payload == nullptr) || !sized(options)) {
+    return RL_STATUS_INVALID_ARGUMENT;
+  }
+  ExecutionLease copy{};
+  std::memcpy(copy.data(), lease, copy.size());
+  MessageId id{};
+  const auto status = context->node.send_applied(destination, ByteView{payload, payload_size},
+                                                 copy, convert_options(*options), now_ms, id);
+  if (status) *out_id = to_c(id);
+  return to_c(status.code);
+}
+
+rl_status_code_t rl_complete_applied(rl_context_t* context, const uint64_t ticket,
+                                     const rl_applied_result_t* result,
+                                     const rl_monotonic_ms_t now_ms) {
+  AppliedReply reply{};
+  if (context == nullptr || !to_reply(result, reply)) return RL_STATUS_INVALID_ARGUMENT;
+  return to_c(context->node.complete_applied(ticket, reply, now_ms).code);
+}
+
+rl_status_code_t rl_get_applied_result(const rl_context_t* context, const rl_message_id_t id,
+                                       rl_applied_result_t* out_result) {
+  if (context == nullptr || !sized(out_result)) return RL_STATUS_INVALID_ARGUMENT;
+  AppliedResultView view{};
+  if (!context->node.applied_result(from_c(id), view)) return RL_STATUS_NOT_FOUND;
+  rl_applied_result_t out{};
+  set_header(out);
+  out.code = view.code;
+  out.outcome = static_cast<std::uint8_t>(view.outcome);
+  out.data_size = view.size;
+  out.late = view.late ? 1U : 0U;
+  std::memcpy(out.data, view.data.data(), view.size);
+  *out_result = out;
+  return RL_STATUS_OK;
 }
 
 size_t rl_route_gateways(const rl_context_t* context, rl_node_id_t* out_gateways,
@@ -464,9 +588,7 @@ size_t rl_route_gateways(const rl_context_t* context, rl_node_id_t* out_gateways
 
 void rl_group_send_options_init(rl_group_send_options_t* options) {
   if (options == nullptr) return;
-  *options = {};
-  options->struct_size = sizeof(*options);
-  options->abi_version = RL_ABI_VERSION;
+  rl_struct_init(options, sizeof(*options));
   options->priority = RL_PRIORITY_NORMAL;
   options->lifetime_ms = 5000;
   options->hop_limit = 10;
@@ -477,8 +599,7 @@ rl_status_code_t rl_send_group(rl_context_t* context, const uint16_t group,
                                const rl_group_send_options_t* options,
                                const rl_monotonic_ms_t now_ms, rl_message_id_t* out_id) {
   if (context == nullptr || options == nullptr || out_id == nullptr ||
-      (payload_size != 0 && payload == nullptr) ||
-      !valid_header(options->struct_size, options->abi_version, sizeof(*options)) ||
+      (payload_size != 0 && payload == nullptr) || !sized(options) ||
       static_cast<std::uint32_t>(options->priority) >
           static_cast<std::uint32_t>(RL_PRIORITY_URGENT)) {
     return RL_STATUS_INVALID_ARGUMENT;
@@ -497,11 +618,13 @@ rl_status_code_t rl_send_group(rl_context_t* context, const uint16_t group,
 
 rl_status_code_t rl_get_group_result(rl_context_t* context, const rl_message_id_t id,
                                      rl_group_result_t* out_result) {
-  if (context == nullptr || out_result == nullptr) return RL_STATUS_INVALID_ARGUMENT;
+  if (context == nullptr || !sized(out_result)) return RL_STATUS_INVALID_ARGUMENT;
   const GroupDeliveryResult result = context->node.group_delivery(from_c(id));
   *out_result = {};
+  set_header(*out_result);
   out_result->id = to_c(result.id);
   out_result->state = static_cast<rl_delivery_state_t>(result.state);
+  out_result->reason_id = reason_id(result.reason);
   out_result->reason = result.reason;
   out_result->group = result.group;
   out_result->rounds = result.rounds;
@@ -533,16 +656,20 @@ rl_status_code_t rl_cancel(rl_context_t* context, const rl_message_id_t id) {
 
 rl_status_code_t rl_get_delivery(rl_context_t* context, const rl_message_id_t id,
                                  rl_delivery_result_t* out_result) {
-  if (context == nullptr || out_result == nullptr) return RL_STATUS_INVALID_ARGUMENT;
+  if (context == nullptr || !sized(out_result)) return RL_STATUS_INVALID_ARGUMENT;
   const auto result = context->node.delivery(from_c(id));
-  out_result->id = to_c(result.id);
-  out_result->state = static_cast<rl_delivery_state_t>(result.state);
-  out_result->reason = result.reason;
+  *out_result = to_c(result);
   return result.state == DeliveryState::Empty ? RL_STATUS_NOT_FOUND : RL_STATUS_OK;
 }
 
 void rl_poll(rl_context_t* context, const rl_monotonic_ms_t now_ms) {
   if (context != nullptr) context->node.poll(now_ms);
+}
+
+rl_monotonic_ms_t rl_next_deadline(const rl_context_t* context,
+                                   const rl_monotonic_ms_t now_ms) {
+  (void)context;
+  return now_ms + RL_POLL_INTERVAL_MAX_MS;
 }
 
 void rl_on_radio_receive(rl_context_t* context, const rl_node_id_t peer,
@@ -558,13 +685,6 @@ void rl_on_radio_tx_result(rl_context_t* context, const uint64_t token,
   if (context != nullptr) context->node.on_radio_tx_result(token, success, now_ms);
 }
 
-void rl_reply_peer_vtable_init(rl_reply_peer_vtable_t* vtable) {
-  if (vtable == nullptr) return;
-  *vtable = {};
-  vtable->struct_size = sizeof(*vtable);
-  vtable->version = RL_REPLY_PEER_VERSION;
-}
-
 rl_status_code_t rl_attach_reply_peer(rl_context_t* context,
                                       const rl_reply_peer_vtable_t* vtable) {
   if (context == nullptr) return RL_STATUS_INVALID_ARGUMENT;
@@ -574,11 +694,7 @@ rl_status_code_t rl_attach_reply_peer(rl_context_t* context,
     context->reply_peer.clear();
     return RL_STATUS_OK;
   }
-  // The struct is versioned precisely so a short/foreign caller is refused
-  // here instead of being read past its size.
-  if (vtable->struct_size < sizeof(*vtable) || vtable->version != RL_REPLY_PEER_VERSION) {
-    return RL_STATUS_INVALID_ARGUMENT;
-  }
+  if (!sized(vtable)) return RL_STATUS_INVALID_ARGUMENT;
   const Status status = context->node.set_reply_peer_port(&context->reply_peer);
   if (!status) return to_c(status.code);
   context->reply_peer.install(*vtable);

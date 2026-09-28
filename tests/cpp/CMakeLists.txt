@@ -304,7 +304,10 @@ add_test(NAME routeloom_espnow_owner_reapply_tests COMMAND routeloom_espnow_owne
 
 add_executable(routeloom_c_header_test c_api_smoke.c)
 target_link_libraries(routeloom_c_header_test PRIVATE routeloom_core)
-set_target_properties(routeloom_c_header_test PROPERTIES LINKER_LANGUAGE CXX)
+# A C-only consumer: C11, public include directory only (routeloom_core's
+# PUBLIC include), no test helpers.
+set_target_properties(routeloom_c_header_test PROPERTIES LINKER_LANGUAGE CXX
+    C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 target_compile_options(routeloom_c_header_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_c_header_test COMMAND routeloom_c_header_test)
 

@@ -25,7 +25,7 @@ the Rust workspace and meshviz). Each surface below carries its own number.
 
 | Surface | Value | C / Rust name | Defined in | Rule |
 |---|---|---|---|---|
-| Core C ABI | 2 | `ROUTELOOM_CORE_C_ABI` / `CORE_C_ABI` | `components/routeloom/include/routeloom/routeloom.h` | exact match in rl_init; additive tail growth by struct_size |
+| Core C ABI | 3 | `ROUTELOOM_CORE_C_ABI` / `CORE_C_ABI` | `components/routeloom/include/routeloom/routeloom.h` | exact major in every struct header; 3.x adds tail fields and functions only; layouts in protocol/abi-golden |
 | Device API (C++ and C) | reserved | - | `reserved` | reserved for the v2 Device API; no symbol exists yet |
 | Mesh wire major | 2 | `ROUTELOOM_WIRE_MAJOR` / `WIRE_MAJOR` | `components/routeloom/include/routeloom/wire.hpp` | never changes within SDK 2.x; other majors are rejected |
 | Mesh wire minor | 0 | `ROUTELOOM_WIRE_MINOR` / `WIRE_MINOR` | `components/routeloom/include/routeloom/wire.hpp` | decode rejects minor > local minor |
@@ -144,36 +144,42 @@ vectors in `protocol/usb-golden`.
 ## 4. C API and ABI
 
 The C boundary is [`routeloom.h`](../../components/routeloom/include/routeloom/routeloom.h)
-(there is no `c_api.h`; `routeloom.h` is the C API). Rules:
+(there is no `c_api.h`; `routeloom.h` is the C API). It is for porting and
+tests: its security vtable holds static keys only, and production security
+(MemberEdhoc, group keys) is reached through the ESP-IDF Device API. Rules
+(core C ABI 3):
 
-- `RL_ABI_VERSION` (currently `2`) identifies the ABI. It is bumped on any
-  change that alters existing field offsets, enum values, or function
-  signatures; `rl_init` requires an exact match.
-- Extensible structs (`rl_node_config_t`, `rl_send_options_t`) carry
-  `struct_size` + `abi_version` and zeroed reserved bytes; callers must use
-  the `rl_*_init` helpers. Growth is additive and source-compatible: new
-  fields are appended at the tail without an ABI bump and are read only when
-  `struct_size` covers them. `rl_node_config_t` grew this way for the
-  gateway-scoped routing profile (`route_gateway_count`,
-  `route_refresh_ticks`, `route_gateways[2]`); `rl_init` still accepts the
-  pre-extension size `RL_NODE_CONFIG_SIZE_BASE` (64 bytes) as the flat
-  profile and refuses sizes between the two layouts. `rl_node_config_init()`
-  writes only the original 64 bytes so binaries built with the old header
-  remain safe. Call `rl_node_config_init_full()` with a current-size buffer
-  to initialize the appended gateway-scoped fields.
-- Group delivery was added the same additive way, without an ABI bump:
-  `rl_send_options_t.ordered` takes the first former reserved byte (zero
-  keeps the old unordered behaviour; the struct stays 28 bytes), and the new
-  `rl_group_send_options_t` / `rl_group_result_t` / `rl_send_group` /
-  `rl_get_group_result` / `rl_set_group_membership` symbols and
-  `RL_SECURITY_GROUP` scope value are new names only. `rl_context_size()`
-  grew with the group state, which is why storage is always sized at run
-  time ([design](../design/sdk-v1/group-delivery.md)).
+- `RL_ABI_VERSION` (`3`) is the major; `rl_abi_version()` reports the
+  library's major and minor. Every public struct and vtable starts with
+  `uint32_t struct_size, version`. Each call refuses
+  (`RL_STATUS_INVALID_ARGUMENT`) a `version` other than `RL_ABI_VERSION` and
+  a `struct_size` below the size this header declares; a larger
+  `struct_size` is accepted and its tail ignored. `rl_struct_init()` zeroes a
+  struct and fills the header; `rl_node_config_init()`,
+  `rl_send_options_init()` and `rl_group_send_options_init()` add the
+  defaults. `rl_message_id_t` is the one headerless value type.
+- Within 3.x the ABI only grows: new fields at a struct's tail, new
+  functions and new enum values. Layouts are pinned for ILP32 (the ESP32
+  targets) and LP64 by [`protocol/abi-golden`](../../protocol/abi-golden/core-abi3.json),
+  checked by `tools/abi_golden.py` (`tests/test_abi_golden.py`).
+- `rl_get_capabilities()` reports what the library (NULL context) or a
+  context implements (`RL_CAP_*`); a bit is never set for a feature the
+  context cannot serve. `rl_next_deadline()` tells the owner task when to
+  poll next (today at most `RL_POLL_INTERVAL_MAX_MS` ahead).
+- APPLIED: `rl_send_applied()` with the destination's lease;
+  the destination's `on_applied_request` receives a ticket and answers later
+  with `rl_complete_applied()`. A late (`RL_STATUS_EXPIRED`), repeated or
+  foreign-boot (`RL_STATUS_NOT_FOUND`) completion is never applied;
+  `rl_get_applied_result()` reads the origin's verified RESULT.
+- Delivery results carry `reason_id`, the u16 id of the reason string in the
+  reason-code registry (§1; delivery area of `protocol/manifest.json`,
+  generated as `ROUTELOOM_REASON_*` and `ROUTELOOM_REASON_TABLE` in
+  `version.h`); 0 when the reason is not registered.
 - `rl_context` is opaque; storage is caller-provided via
   `rl_context_size()`/`rl_context_alignment()` + `rl_init`.
-- Until v2.0.0 the header may still change; consumers should build from the
-  same source drop. From v2.0.0, `RL_ABI_VERSION` bumps follow the deprecation
-  policy in §9.
+- ABI 2 callers must be rebuilt: an ABI 2 `rl_node_config_t` fails the
+  version check in `rl_init`. From v2.0.0, major bumps follow the
+  deprecation policy in §9.
 
 ## 5. C++ API
 
