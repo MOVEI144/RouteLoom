@@ -1415,6 +1415,108 @@ fn silent_decider_pends_and_a_late_decision_applies_next_time() {
     );
 }
 
+type BatchFilter = fn(&Batch) -> bool;
+
+/// Fails the first commit the armed filter matches (fault injection).
+struct FailBatchStore {
+    inner: MemoryStore,
+    armed: Arc<Mutex<Option<BatchFilter>>>,
+}
+
+impl SiteStore for FailBatchStore {
+    fn load(&mut self) -> Result<Snapshot, StoreError> {
+        self.inner.load()
+    }
+    fn commit(&mut self, batch: &Batch) -> Result<(), StoreError> {
+        let mut armed = self.armed.lock().unwrap();
+        if armed.is_some_and(|hit| hit(batch)) {
+            *armed = None;
+            return Err(StoreError("injected auxiliary commit failure".into()));
+        }
+        self.inner.commit(batch)
+    }
+    fn durable(&self) -> bool {
+        false
+    }
+}
+
+/// #127: auxiliary records commit before RAM and events. A failed
+/// discovered-table write changes neither the table, the requests nor the
+/// event ring and answers AuthorityBusy; a failed request close keeps the
+/// request open in RAM exactly as the store still has it.
+#[test]
+fn auxiliary_record_failures_leave_ram_unchanged() {
+    let armed: Arc<Mutex<Option<BatchFilter>>> = Arc::new(Mutex::new(Some(|batch| {
+        batch
+            .docs
+            .iter()
+            .any(|(kind, _, _)| *kind == store::DocKind::Discovered)
+    })));
+    let (service, transport) = service_with(Box::new(FailBatchStore {
+        inner: MemoryStore::default(),
+        armed: Arc::clone(&armed),
+    }));
+    let mut device = SimDevice::new(0x00A1_0000_0000_2127, 0x27);
+    let (_, outcome, events) = device.start(&service, &transport, T0);
+    assert!(
+        matches!(outcome, Outcome::Result(JoinResult::AuthorityBusy { .. })),
+        "{outcome:?}"
+    );
+    assert!(armed.lock().unwrap().is_none(), "the failure was injected");
+    assert!(
+        service
+            .with(|a| a.discovered.is_empty() && a.requests.is_empty())
+            .0
+    );
+    assert!(kinds(&events)
+        .iter()
+        .all(|k| k != "device.discovered" && k != "join.request"));
+
+    // Healthy store: the attempt goes through, the decider is silent, and
+    // a late deny applies at the next attempt — whose request close fails.
+    let (mut exchange, outcome, events) = device.start(&service, &transport, T0 + 10_000);
+    assert!(matches!(outcome, Outcome::Waiting), "{outcome:?}");
+    let id = request_id(&events).unwrap();
+    service.tick(HostTime::sync(T0 + 12_000));
+    assert!(matches!(
+        device.finish(&mut exchange, &transport),
+        Outcome::Result(JoinResult::PendingAssignment { .. })
+    ));
+    decide(
+        &service,
+        id,
+        device.node,
+        Verdict::DenyNotHere,
+        "late",
+        T0 + 13_000,
+    )
+    .unwrap();
+    *armed.lock().unwrap() = Some(|batch| {
+        batch
+            .docs
+            .iter()
+            .any(|(kind, _, doc)| *kind == store::DocKind::JoinRequest && doc.is_none())
+    });
+    let (outcome, _) = device.attempt(&service, &transport, T0 + 16_000);
+    assert!(
+        matches!(outcome, Outcome::Result(JoinResult::DenyNotHere)),
+        "{outcome:?}"
+    );
+    assert!(armed.lock().unwrap().is_none(), "the failure was injected");
+    let (in_ram, in_store) = service
+        .with(|a| {
+            let stored = a.store.load().unwrap();
+            (
+                a.requests.contains_key(&id),
+                stored
+                    .docs
+                    .contains_key(&(store::DocKind::JoinRequest, records::h16(id))),
+            )
+        })
+        .0;
+    assert!(in_ram && in_store);
+}
+
 /// A late pending/deny decision applies at the next attempt; an early
 /// retry inside a delivered pending window is answered AuthorityBusy.
 #[test]

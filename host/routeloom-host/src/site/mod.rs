@@ -1919,13 +1919,16 @@ impl SiteAuthority {
             Some(_) => kid_conflict = true,
             None => {}
         }
-        self.note_discovered(
+        if !self.note_discovered(
             &device.facts,
             txn.via,
             previously_removed,
             kid_conflict,
             now_ms,
-        );
+        ) {
+            self.finish_busy(txn, BUSY_RETRY_S, now_ms);
+            return;
+        }
         if !self.policy.asks_decider()
             || (self.policy.decision_mode == DecisionMode::LabInventory
                 && !self.lab_enrollment_active())
@@ -2012,11 +2015,20 @@ impl SiteAuthority {
                 (request_id, request, next_request_id)
             }
         };
-        let batch = Batch {
+        let awaiting = self.discovered.get(&node).map(|d| Discovered {
+            last_verdict: "awaiting".into(),
+            ..d.clone()
+        });
+        let mut batch = Batch {
             meta: vec![("next_request_id", next_request_id.to_be_bytes().to_vec())],
             docs: vec![(DocKind::JoinRequest, h16(request_id), Some(request.doc()))],
             ..Batch::default()
         };
+        if let Some(d) = &awaiting {
+            batch
+                .docs
+                .push((DocKind::Discovered, h16(node), Some(d.doc())));
+        }
         if let Err(error) = self.store.commit(&batch) {
             self.store_error(now_ms, &error);
             self.finish_busy(txn, BUSY_RETRY_S, now_ms);
@@ -2024,8 +2036,8 @@ impl SiteAuthority {
         }
         self.next_request_id = next_request_id;
         self.requests.insert(request_id, request.clone());
-        if let Some(d) = self.discovered.get_mut(&node) {
-            d.last_verdict = "awaiting".into();
+        if let Some(d) = awaiting {
+            self.discovered.insert(node, d);
         }
         self.event(now_ms, request.event_fields(now_ms));
         txn.state = TxnState::Deciding(request_id);
@@ -2073,15 +2085,21 @@ impl SiteAuthority {
         );
     }
 
+    /// Auxiliary records (#127) follow the join rule: store commit first,
+    /// then RAM and events. On a store failure RAM keeps the committed
+    /// state and the next attempt (or expiry pass) retries.
     fn close_request(&mut self, request_id: u64, now_ms: u64) {
-        if self.requests.remove(&request_id).is_some() {
-            if let Err(error) = self.store.commit(&Batch {
-                docs: vec![(DocKind::JoinRequest, h16(request_id), None)],
-                ..Batch::default()
-            }) {
-                self.store_error(now_ms, &error);
-            }
+        if !self.requests.contains_key(&request_id) {
+            return;
         }
+        if let Err(error) = self.store.commit(&Batch {
+            docs: vec![(DocKind::JoinRequest, h16(request_id), None)],
+            ..Batch::default()
+        }) {
+            self.store_error(now_ms, &error);
+            return;
+        }
+        self.requests.remove(&request_id);
     }
 
     fn expire_requests(&mut self, now_ms: u64) {
@@ -2098,6 +2116,9 @@ impl SiteAuthority {
         }
     }
 
+    /// Records one authenticated attempt in the discovered table (commit
+    /// first, #127). False on a store failure: nothing changed, and the
+    /// caller answers AuthorityBusy.
     fn note_discovered(
         &mut self,
         facts: &DeviceFacts,
@@ -2105,27 +2126,20 @@ impl SiteAuthority {
         previously_removed: bool,
         kid_conflict: bool,
         now_ms: u64,
-    ) {
+    ) -> bool {
         let node = facts.node;
-        let first = !self.discovered.contains_key(&node);
-        if first && self.discovered.len() >= DISCOVERED_CAP {
-            // LRU on last_seen (02 §9).
-            if let Some(oldest) = self
-                .discovered
+        let existing = self.discovered.get(&node).cloned();
+        let first = existing.is_none();
+        // LRU on last_seen (02 §9).
+        let evict = if first && self.discovered.len() >= DISCOVERED_CAP {
+            self.discovered
                 .values()
                 .min_by_key(|d| d.last_seen_ms)
                 .map(|d| d.facts.node)
-            {
-                self.discovered.remove(&oldest);
-                if let Err(error) = self.store.commit(&Batch {
-                    docs: vec![(DocKind::Discovered, h16(oldest), None)],
-                    ..Batch::default()
-                }) {
-                    self.store_error(now_ms, &error);
-                }
-            }
-        }
-        let entry = self.discovered.entry(node).or_insert_with(|| Discovered {
+        } else {
+            None
+        };
+        let mut entry = existing.unwrap_or_else(|| Discovered {
             facts: facts.clone(),
             first_seen_ms: now_ms,
             last_seen_ms: now_ms,
@@ -2148,23 +2162,35 @@ impl SiteAuthority {
         if announce {
             entry.last_event_ms = now_ms;
         }
-        let doc = entry.doc();
-        let fields = format!(
-            "\"kind\":\"device.discovered\",\"device_id\":\"{}\",\"kid\":\"{}\",\"model\":{},\"first\":{first},\"previously_removed\":{previously_removed},\"kid_conflict\":{kid_conflict},\"via\":{}",
-            h16(node),
-            hex_lower(&facts.kid),
-            facts.model,
-            via.json()
-        );
+        let mut docs: Vec<_> = evict
+            .map(|oldest| (DocKind::Discovered, h16(oldest), None))
+            .into_iter()
+            .collect();
+        docs.push((DocKind::Discovered, h16(node), Some(entry.doc())));
         if let Err(error) = self.store.commit(&Batch {
-            docs: vec![(DocKind::Discovered, h16(node), Some(doc))],
+            docs,
             ..Batch::default()
         }) {
             self.store_error(now_ms, &error);
+            return false;
         }
+        if let Some(oldest) = evict {
+            self.discovered.remove(&oldest);
+        }
+        self.discovered.insert(node, entry);
         if announce {
-            self.event(now_ms, fields);
+            self.event(
+                now_ms,
+                format!(
+                    "\"kind\":\"device.discovered\",\"device_id\":\"{}\",\"kid\":\"{}\",\"model\":{},\"first\":{first},\"previously_removed\":{previously_removed},\"kid_conflict\":{kid_conflict},\"via\":{}",
+                    h16(node),
+                    hex_lower(&facts.kid),
+                    facts.model,
+                    via.json()
+                ),
+            );
         }
+        true
     }
 
     fn set_discovered_verdict(
@@ -2174,17 +2200,19 @@ impl SiteAuthority {
         retry_not_before: Option<u64>,
         now_ms: u64,
     ) {
-        if let Some(d) = self.discovered.get_mut(&node) {
-            d.last_verdict = label.to_string();
-            d.retry_not_before_ms = retry_not_before;
-            let doc = d.doc();
-            if let Err(error) = self.store.commit(&Batch {
-                docs: vec![(DocKind::Discovered, h16(node), Some(doc))],
-                ..Batch::default()
-            }) {
-                self.store_error(now_ms, &error);
-            }
+        let Some(mut d) = self.discovered.get(&node).cloned() else {
+            return;
+        };
+        d.last_verdict = label.to_string();
+        d.retry_not_before_ms = retry_not_before;
+        if let Err(error) = self.store.commit(&Batch {
+            docs: vec![(DocKind::Discovered, h16(node), Some(d.doc()))],
+            ..Batch::default()
+        }) {
+            self.store_error(now_ms, &error);
+            return;
         }
+        self.discovered.insert(node, d);
     }
 
     fn send_result(&mut self, mut txn: Txn, result: &JoinResult) -> bool {
