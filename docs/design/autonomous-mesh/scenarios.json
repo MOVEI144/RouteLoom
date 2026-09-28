@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "status": "planned_all",
+  "superseded_by": "tests/e2e/scenarios.json",
   "runtime_tested": false,
   "scenarios": [
     {"id":"D3-01","issues":[3],"level":"integration","status":"planned_not_run","preconditions":"同じNetworkに事前承認された二台。相互MAC設定なし。LR250固定。","action":"起動、DISCOVER、相互確認、probe、通常DATAを実codecとCoreで通す。","oracles":["MACの手動設定なしでREACHABLEになる","認証完了前のDATAは受理しない","Message IDと最終receiptの意味を維持する"]},
