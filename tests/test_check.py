@@ -53,8 +53,13 @@ class CellList(unittest.TestCase):
     def test_cells_cover_every_app_and_target_with_a_budget(self):
         data = check.load_cells()
         cells = data["cells"]
-        # 37 cells of the pre-v2 matrix, the 5 C6 cells made required, bench C6.
-        self.assertEqual(len(cells), 43)
+        # 43 baseline cells plus C3/C6 Member maintenance images.
+        self.assertEqual(len(cells), 46)
+        self.assertTrue({
+            "bridge_node-esp32c3-normal-off-maintenance_member",
+            "reference_node-esp32c6-normal-off-maintenance_member",
+            "bridge_node-esp32c6-normal-off-maintenance_member",
+        } <= {cell["id"] for cell in cells})
         for cell in cells:
             self.assertTrue((ROOT / "firmware" / cell["app"]).is_dir(), cell["id"])
             if cell["id"].startswith("experimental-c6-"):
