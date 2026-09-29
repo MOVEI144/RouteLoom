@@ -16,7 +16,7 @@
 //   rlident  i0 / i1        RLI1 twin pair        (blob ≤ 664 B, slot 1024 B)
 //   rlsite   s0 / s1        RLS1 A/B pair         (blob ≤ 712 B, slot 1024 B)
 //            p0             RLPP1 proxy policy    (blob = 60 B, single key)
-//   rlrevo   r0 / r1        RRS1 storage record   (blob ≤ 640 B, slot 640 B)
+//   rlrevo   r0 / r1        RRS1 storage record   (blob ≤ 672 B, slot 672 B)
 //   rlres2   s00…s15        RLP2 slots, node      (blob = 96 B)
 //            s000…s159      RLP2 slots, gateway   (3 digits once count > 100)
 // (The pre-P4 `rlres` RLP1 namespace is never opened anymore; stale
@@ -182,15 +182,16 @@ class BlobResumeSlotStorage2 final : public ResumeSlotStorage2 {
 // NVS replaces a blob atomically, so a power cut leaves the old or the new
 // record, and commit() reads the write back before it reports success.
 // Nothing stays in RAM: the record is read when a policy arrives and once
-// at boot. A missing, unreadable or corrupt record, or one of another
-// site, is no record (the proxy's default: open).
+// at boot. Missing or another site's valid record means default open;
+// unreadable or corrupt storage is an error and keeps intake closed.
 class ProxyPolicyStore {
  public:
   explicit ProxyPolicyStore(BlobNamespace& blobs) noexcept : blobs_(blobs) {}
 
-  // True with `out` filled when a valid record of `site_id` is stored.
-  bool load(std::uint64_t site_id, ProxyPolicyRecord& out) noexcept;
+  // `found` is true only for a valid record bound to this site.
+  Status load(std::uint64_t site_id, ProxyPolicyRecord& out, bool& found) noexcept;
   Status commit(const ProxyPolicyRecord& record) noexcept;
+  Status erase() noexcept;
 
  private:
   BlobNamespace& blobs_;

@@ -129,6 +129,9 @@ impl SiteAuthority {
             );
             return;
         }
+        if ack.generation == 0 || ack.generation > self.policy.policy_generation {
+            return;
+        }
         if ack.generation > self.policy_applied.get(&device).copied().unwrap_or(0) {
             if let Err(error) = self.store.commit(&Batch {
                 policy_acks: vec![(device, ack.generation)],

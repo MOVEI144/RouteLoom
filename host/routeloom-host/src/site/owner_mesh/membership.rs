@@ -76,6 +76,15 @@ fn mesh_j06_closed_policy_stops_offers_until_reopened() {
         "both proxies applied generation {closed} within 30 s (took {took} ms): {r:?}"
     );
 
+    // A member proxy can reboot into the closed site using its saved
+    // membership and policy; it remains available to relay recovery.
+    world.peers[2].power_cut();
+    world.pump_until(9_000, |snaps| {
+        snaps[2].mode == MODE_MEMBER && snaps[2].authority_ready && snaps[2].join_confirmed
+    });
+    assert!(world.snaps[2].join_confirmed, "B rejoined while closed");
+    assert_eq!(radio(&world).applied, 2, "saved closed policy restored");
+
     // A powers on while the site is closed.
     world.gate[1] = false;
     let discovers = world.snaps[2].proxy_disc_rx;
@@ -137,9 +146,8 @@ fn mesh_j06_closed_policy_stops_offers_until_reopened() {
 
 /// J05 (b): B is revoked at generation 1, erases, waits out its holdoff
 /// and rejoins with the same NodeId. The site readmits it at generation 2
-/// (no reprovisioning) and marks B's RRS1 entry with the active GK E, which
-/// the revocation's own rotation minted without B; B joins holding E.
-/// B's RLV1 does not block generation 2; once the survivors apply the set,
+/// (no reprovisioning) and stages a fresh GK E for B and the survivors.
+/// B's RLV1 does not block generation 2; once the new key and RRS1 apply,
 /// group delivery reaches both members under E and B's unicast delivers
 /// 20/20.
 #[test]
@@ -193,6 +201,8 @@ fn mesh_j05_revoked_node_returns_with_the_same_node_id() {
         world.peers[2].reboots > reboots,
         "B restarted unassigned after its holdoff"
     );
+    let gk_after_revocation = world.active_gk();
+    assert!(gk_after_revocation > gk_before);
     world.pump_until(6000, |snaps| {
         snaps[2].mode == MODE_MEMBER && snaps[2].authority_ready && snaps[2].join_confirmed
     });
@@ -207,7 +217,7 @@ fn mesh_j05_revoked_node_returns_with_the_same_node_id() {
         row.member && row.generation == 2 && row.kid == kid,
         "same identity, generation 2"
     );
-    let (readmit, active, rs_epoch) = world
+    let (readmit, rs_epoch) = world
         .provision
         .site
         .service
@@ -217,22 +227,22 @@ fn mesh_j05_revoked_node_returns_with_the_same_node_id() {
                     .iter()
                     .find(|e| e.node_id == NODE_B)
                     .map(|e| e.readmit_gk_epoch),
-                a.gks.active_epoch(),
                 a.rs_epoch,
             )
         })
         .0;
+    let readmit = readmit.expect("readmit epoch");
+    assert!(readmit > gk_after_revocation, "readmit rotates a fresh GK");
+    world.pump_until(24_000, |snaps| {
+        snaps.iter().all(|s| s.gk_current == readmit)
+    });
     assert!(
-        readmit == Some(active) && active > gk_before,
-        "RRS1 readmits B from GK {active}"
-    );
-    assert!(
-        world.snaps.iter().all(|s| s.gk_current == active),
+        world.snaps.iter().all(|s| s.gk_current == readmit),
         "B joined with the readmit GK: {:?}",
         world.snaps.iter().map(|s| s.gk_current).collect::<Vec<_>>()
     );
     // The survivors apply the readmit set, then group delivery reaches
-    // both members under GK `active`.
+    // both members under GK `readmit`.
     world.pump_until(4000, |snaps| {
         snaps[0].applied_rs >= rs_epoch && snaps[1].applied_rs >= rs_epoch
     });

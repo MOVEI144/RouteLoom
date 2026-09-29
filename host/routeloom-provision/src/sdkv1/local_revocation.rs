@@ -139,6 +139,11 @@ pub fn local_revocation_record_decode(record: &[u8]) -> Result<(LocalRevocationR
     out.boot_witness = reader.u32()?;
     out.holdoff_ms = reader.u32()?;
     // Head, seal, length and CRC already verified by read_record.
+    if record.get(8..12) == Some(&super::RECORD_SCHEMA.to_be_bytes()[..])
+        && out.holdoff_ms != LOCAL_REVOCATION_HOLDOFF_MS
+    {
+        return err(Code::ProtocolError, "rlv1 schema 1 holdoff");
+    }
     if reserved != 0 {
         return err(Code::ProtocolError, "rlv1 reserved");
     }

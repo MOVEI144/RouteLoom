@@ -73,11 +73,11 @@ def rrs1_payload(site_id: int, network: int, rs_epoch: int, floor: int,
                  entries: list) -> bytes:
     """RRS1 payload: ver=2 | flags=0 | count u16 | site u64 | network u64 |
     rs_epoch u32 | floor u32 | entries × (node u64 | min_gen u32 | reason u8
-    | readmit_gk_epoch u24), ascending node. These objects readmit nobody."""
+    | readmit_gk_epoch u32), ascending node. These objects readmit nobody."""
     out = b"\x02\x00" + u16(len(entries)) + u64(site_id) + u64(network)
     out += u32(rs_epoch) + u32(floor)
     for node, generation, reason in entries:
-        out += u64(node) + u32(generation) + bytes((reason,)) + b"\x00" * 3
+        out += u64(node) + u32(generation) + bytes((reason,)) + b"\x00" * 4
     return out
 
 
@@ -171,7 +171,7 @@ def main() -> None:
                     for i in range(32)]
     full = rrs1_object(SITE_ID, NETWORK, 17, 2, full_entries)
     full_bytes = bytes.fromhex(full["object_hex"])
-    assert len(full_bytes) == 616, len(full_bytes)
+    assert len(full_bytes) == 648, len(full_bytes)
     full_digest = hashlib.sha256(full_bytes).digest()
 
     body = type5(TYPE5_APPLIED, 16, small_digest)
@@ -219,7 +219,7 @@ def main() -> None:
               entry00_min_generation=1, entry00_reason=1,
               entry31_node=full_entries[31][0],
               entry31_min_generation=32, entry31_reason=4,
-              note="32-entry set; the object is exactly 616 B"))
+              note="32-entry set; the object is exactly 648 B"))
 
     # ---- kind-6 envelope ------------------------------------------------
     assert len(small_bytes) <= OBJECT_MAX
@@ -252,7 +252,7 @@ def main() -> None:
               object_hex=full_bytes.hex(),
               signer_pubkey_hex=base.pubkey(SAK).hex(),
               site_id=SITE_ID, network=NETWORK, rs_epoch=17, count=32,
-              note="manifest for the 616 B full set (no chunk plan pinned)"))
+              note="manifest for the 648 B full set (no chunk plan pinned)"))
 
     # ---- invalid --------------------------------------------------------
     good_body = state_epochs(SITE_EPOCH, 14, 7)

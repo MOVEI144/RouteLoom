@@ -23,6 +23,7 @@
 #include "routeloom/sdkv1_join_transport.hpp"
 #include "routeloom/sdkv1_security_coordinator.hpp"
 #include "routeloom/sdkv1_store.hpp"
+#include "routeloom/secure_clear.hpp"
 #include "routeloom/trust_store.hpp"
 #include "routeloom/usb_host_ops.hpp"
 
@@ -42,14 +43,22 @@ struct SecurityCoordinatorTestAccess {
   // Plants one live old-group link session (04 §3.5): a restored Link
   // entry with a full lifetime, like a neighbor the member still
   // hears while its authority road is gone.
-  static Status plant_link(SecurityCoordinator& coordinator, const NodeId peer) noexcept {
+  static Status plant_link(SecurityCoordinator& coordinator, const NodeId peer,
+                           const std::uint32_t generation = 0) noexcept {
     SessionBankEntry entry{};
     entry.peer = peer;
     entry.tx_cid = 0x11111111U;
     entry.rx_cid = 0x22222222U;
     entry.created_gk = 203;  // site_record().gk_epoch_current
+    entry.peer_generation = generation;
     entry.remaining_ms = GatewaySessionBank::kContextLifetimeMs;
     return coordinator.bank_.restore_entry(SecurityScope::Link, peer, entry);
+  }
+  static bool has_link(SecurityCoordinator& coordinator, const NodeId peer) noexcept {
+    SessionBankEntry entry{};
+    const bool present = coordinator.bank_.export_entry(SecurityScope::Link, peer, entry).ok();
+    secure_clear(&entry, sizeof(entry));
+    return present;
   }
   static JoinSnapshot join_snapshot(const SecurityCoordinator& coordinator) noexcept {
     return coordinator.joiner().snapshot();
@@ -1737,6 +1746,22 @@ void test_revoke_member_sessions() {
   auto object = revocation_object(set);
   CHECK(f.revocations.accept(object.view(), sak().pub, kSiteId, kNetwork).ok());
   CHECK(coordinator.revoke_member_sessions(set, 3, now).ok());
+  // A member that missed the deny-all set may still hold the former
+  // holder's session when it sees only the readmission set.
+  constexpr NodeId old_peer = 0x00A1000000000100ULL;
+  CHECK(SecurityCoordinatorTestAccess::plant_link(coordinator, old_peer, 1).ok());
+  RevocationSet readmit = revocation_set(4);
+  readmit.entries[0].readmit_gk_epoch = 203;
+  auto readmit_object = revocation_object(readmit);
+  CHECK(f.revocations.accept(readmit_object.view(), sak().pub, kSiteId, kNetwork).ok());
+  std::uint32_t retired_old = 0;
+  CHECK(coordinator.revoke_member_sessions(readmit, 3, now, &retired_old).ok());
+  CHECK((retired_old & 1U) != 0 &&
+        !SecurityCoordinatorTestAccess::has_link(coordinator, old_peer));
+  CHECK(SecurityCoordinatorTestAccess::plant_link(coordinator, old_peer, 2).ok());
+  CHECK(coordinator.revoke_member_sessions(readmit, 3, now, &retired_old).ok());
+  CHECK((retired_old & 1U) == 0 &&
+        SecurityCoordinatorTestAccess::has_link(coordinator, old_peer));
   // Outside Member mode there is nothing live to retire.
   CoordinatorEvent stop{};
   stop.kind = CoordinatorEventKind::Stop;

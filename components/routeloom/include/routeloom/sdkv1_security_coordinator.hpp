@@ -549,11 +549,12 @@ class SecurityCoordinator final : public BootstrapSink,
   // in-flight handshakes, retires every bank session of a rejected
   // peer, revokes the Discovery binding. RLP1 is swept by the
   // lifecycle itself; RLP2 lookups already fence on the adopted set.
-  // No-op outside Member mode. Over-retires peers that re-authed
-  // under a newer generation since (they re-handshake through the
-  // limited reauth path) — never under-retires.
+  // A readmitted entry retires only sessions below its min_generation;
+  // `retired_old` marks entries whose old live binding also needs a route
+  // withdrawal. No-op outside Member mode.
   Status revoke_member_sessions(const RevocationSet& set, std::uint32_t site_epoch,
-                                MonotonicMs now) noexcept;
+                                MonotonicMs now,
+                                std::uint32_t* retired_old = nullptr) noexcept;
   // Attaches the authority transport port (once): the mesh endpoint on a
   // device, the direct USB port on a gateway. Until attached the channel
   // stages its carriers and retries on Tick; detaching is not supported

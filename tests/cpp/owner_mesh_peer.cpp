@@ -151,7 +151,7 @@
 //                         slots, site slots — imported into the fake NVS
 //                         so a member provisioned by the joiner peer can
 //                         boot here; erased (0xFF) slots stay missing keys)
-//   --flash-ext <file>   (optional 4498 B legacy image: RRS slots, then
+//   --flash-ext <file>   (optional 4562 B legacy image: RRS slots, then
 //                         lifecycle journal slots)
 //   --nvs-save <file>    (esp_restart writes the image here, exits 42)
 //   --nvs-fail <k>       (F02: the k-th NVS write of this boot fails once
@@ -804,16 +804,16 @@ void import_flash_images(const std::string& flash_path, const std::string& flash
   }
   if (!flash_ext_path.empty()) {
     const Bytes image = read_file_bytes(flash_ext_path.c_str());
-    constexpr std::size_t kExtBytes = 2 * 640 + 2 * (88 + 1521);
+    constexpr std::size_t kExtBytes = 2 * kRevocationSlotBytes + 2 * kLifecycleSlotBytes;
     if (image.size() != kExtBytes) fatal("bad flash-ext image size");
-    if (kRevocationSlotBytes != 640 || kLifecycleSlotBytes != 88 + 1521) {
+    if (kLifecycleSlotBytes != 88 + 1521) {
       fatal("ext slot size mismatch");
     }
     const std::uint8_t* base = image.data();
     import_flash_slot(kRevocationNamespace, kRevocationKey0, base, kRevocationSlotBytes);
-    import_flash_slot(kRevocationNamespace, kRevocationKey1, base + 640, kRevocationSlotBytes);
-    import_flash_slot(kLifecycleNamespace, kLifecycleKey0, base + 1280, kLifecycleSlotBytes);
-    import_flash_slot(kLifecycleNamespace, kLifecycleKey1, base + 1280 + kLifecycleSlotBytes,
+    import_flash_slot(kRevocationNamespace, kRevocationKey1, base + kRevocationSlotBytes, kRevocationSlotBytes);
+    import_flash_slot(kLifecycleNamespace, kLifecycleKey0, base + 2 * kRevocationSlotBytes, kLifecycleSlotBytes);
+    import_flash_slot(kLifecycleNamespace, kLifecycleKey1, base + 2 * kRevocationSlotBytes + kLifecycleSlotBytes,
                       kLifecycleSlotBytes);
   }
 }

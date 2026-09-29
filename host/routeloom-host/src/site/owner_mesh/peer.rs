@@ -335,12 +335,12 @@ impl LegacyPeer {
 
     pub(super) fn dump_extended(&mut self) -> Vec<u8> {
         self.send(b"X");
-        let mut image = Vec::with_capacity(4498);
+        let mut image = Vec::with_capacity(4562);
         for i in 0..4 {
             let payload = self.recv();
             assert_eq!(payload[0], b'X', "extended slot reply");
             let expect_store = if i < 2 { 2 } else { 3 };
-            let expect_len = if i < 2 { 640 } else { 1609 };
+            let expect_len = if i < 2 { 672 } else { 1609 };
             assert_eq!(payload[1], expect_store, "extended store id");
             assert_eq!(payload[2], (i % 2) as u8, "extended slot id");
             assert_eq!(payload.len(), 3 + expect_len, "extended slot image");

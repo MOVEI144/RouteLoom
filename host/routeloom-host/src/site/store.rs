@@ -218,6 +218,8 @@ pub struct Batch {
     pub docs: Vec<(DocKind, String, Option<String>)>,
     /// `(node, generation)` ProxyPolicySet acknowledgements (upserts).
     pub policy_acks: Vec<(u64, u32)>,
+    /// Clears an earlier assignment's acknowledgement before a new grant.
+    pub policy_acks_delete: Vec<u64>,
 }
 
 impl Batch {
@@ -236,6 +238,7 @@ impl Batch {
             && self.gk_targets.is_empty()
             && self.docs.is_empty()
             && self.policy_acks.is_empty()
+            && self.policy_acks_delete.is_empty()
     }
 }
 
@@ -255,6 +258,9 @@ pub struct Snapshot {
 
 impl Snapshot {
     fn apply(&mut self, batch: &Batch) {
+        for node in &batch.policy_acks_delete {
+            self.policy_acks.remove(node);
+        }
         for (node, generation) in &batch.policy_acks {
             self.policy_acks.insert(*node, *generation);
         }
@@ -1188,6 +1194,9 @@ impl SiteStore for SqliteSiteStore {
                 }
             }
         }
+        for node in &batch.policy_acks_delete {
+            tx.execute("DELETE FROM policy_acks WHERE node = ?1", params![i(*node)])?;
+        }
         for (node, generation) in &batch.policy_acks {
             tx.execute(
                 "INSERT INTO policy_acks (node, generation) VALUES (?1, ?2)
@@ -1278,6 +1287,7 @@ mod tests {
                 gk_targets: Vec::new(),
                 docs: vec![(DocKind::Discovered, "k".into(), Some("{}".into()))],
                 policy_acks: vec![(device.node, 4)],
+                policy_acks_delete: Vec::new(),
             };
             store.commit(&batch).unwrap();
         }

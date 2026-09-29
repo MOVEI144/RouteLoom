@@ -1945,7 +1945,8 @@ void test_ram_footprint() {
   CHECK(sizeof(ResumeCache2) <= 512);
   CHECK(sizeof(IdentityStore) <= 1408);
   CHECK(sizeof(SiteStore) <= 1536);
-  CHECK(sizeof(RevocationStore) <= 2 * kRevocationSlotBytes);
+  CHECK(sizeof(RevocationStore) <=
+        kRevocationSlotBytes + sizeof(RevocationSet) + 96);
   // The 108 B record is dwarfed by the shared pair machinery; the bound is
   // the record plus one slot buffer plus that fixed overhead.
   CHECK(sizeof(LocalRevocationStore) <=

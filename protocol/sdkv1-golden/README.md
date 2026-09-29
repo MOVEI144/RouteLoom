@@ -71,15 +71,15 @@ iss/network/generation/role), gateway_count 1..4 with a zero tail, channel
 1..14, gk_next present iff gk_epoch_next (> current).
 
 **RRS1** (04 §2): payload `ver | flags | count | site_id | network |
-rs_epoch | site_epoch_floor | entries×16` (≤ 32 entries, strictly ascending
+rs_epoch | site_epoch_floor | entries×17` (≤ 32 entries, strictly ascending
 node_id, reason 1..4, min_generation ≥ 1, rs_epoch ≥ 1, floor ≤
-network>>32). Version 2 (v2.0, #146) puts `readmit_gk_epoch u24` in the last
-three entry bytes (0 = the NodeId's group frames stay refused; E = accepted
-from GK epoch E); version 1 carried zeros there and still reads with
+network>>32). Version 2 (v2.0, #146) carries `readmit_gk_epoch u32`
+(0 = the NodeId's group frames stay refused; E = accepted from GK epoch E);
+version 1 used 16-byte entries with three reserved zeros and still reads with
 readmit 0 (`rrs1_version_1`), version 3 is Unsupported in the same restricted Sign1, external AAD
-`"RouteLoom/revocation-set/v1" 00 || network u64` (36 B). Object ≤ 616 B.
+`"RouteLoom/revocation-set/v1" 00 || network u64` (36 B). Object ≤ 648 B.
 Storage record (seal `0x2E5E7C0D`): sealed head, `commit_seq u32`, the
-signed object as received (so it can be re-gossiped), CRC — exactly 640 B at
+signed object as received (so it can be re-gossiped), CRC — exactly 672 B at
 32 entries; an object-less 24 B record is the cleared tombstone.
 
 **RLX1** (04 §6, seal `0x4C583101`): sequenced 2-slot removal journal,

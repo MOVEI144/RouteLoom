@@ -1034,7 +1034,7 @@ void test_rrs_exchange_roundtrip() {
   FakePeerPort port_a, port_b;
   FakeObjectSink sink_a, sink_b;
   RrsExchange a(port_a, sink_a), b(port_b, sink_b);
-  const auto object = revocation_object(revocation_set(16, 32));  // max-size 616 B
+  const auto object = revocation_object(revocation_set(16, 32));  // max-size 648 B
   CHECK(object.size == kRevocationObjectMax);
   CHECK_OK(a.publish(kNodeB, 7, object.view(), 0));
   CHECK(a.publish(kNodeB, 7, object.view(), 0).code == StatusCode::NoCapacity);  // TX x1

@@ -184,37 +184,36 @@ Status site_matches_identity(const SiteRecord& site, const IdentityRecord& ident
 //   0 u8 ver = 1 | 1 u8 flags = 0 | 2 u16 count (<= 32)
 //   4 u64 site_id | 12 u64 network
 //  20 u32 rs_epoch (>= 1) | 24 u32 site_epoch_floor (<= network>>32)
-//  28 entries x 16: node_id u64 | min_generation u32 (>= 1) |
-//                   reason u8 (1..4) | readmit_gk_epoch u24
+//  28 entries x 17: node_id u64 | min_generation u32 (>= 1) |
+//                   reason u8 (1..4) | readmit_gk_epoch u32
 // Entries strictly ascending by node_id.
-// Version 2 (v2.0, #146) gives the three reserved entry bytes a meaning:
+// Version 2 (v2.0, #146) carries the full 32-bit readmission epoch:
 // readmit_gk_epoch 0 keeps every group frame of that NodeId refused; E > 0
 // accepts its group frames sealed under GK epoch >= E again (the site
 // re-admitted the NodeId at a higher assignment generation and rotated the
-// GK to E, which no earlier holder of the NodeId ever received). A 24-bit
-// field keeps the 16-byte entry and the 616-byte object; the site refuses a
-// readmit whose epoch does not fit. Version 1 sets read with readmit 0.
-// Storage record ("rlrevo", 640 B slot):
+// GK to E, which no earlier holder of the NodeId ever received). Version 1
+// used 16-byte entries with three reserved zero bytes and reads as 0.
+// Storage record ("rlrevo", 672 B slot):
 //   0 sealed head (magic "RRS1") | 16 u32 commit_seq | 20 COSE object | len-4 crc
 // An object-less record (24 B) is the cleared tombstone.
 constexpr std::uint8_t kRevocationVersion = 2;
 constexpr std::uint8_t kRevocationVersionV1 = 1;
-constexpr std::uint32_t kRevocationReadmitMax = 0xFFFFFFU;
 constexpr std::size_t kRevocationEntryMax = 32;
 constexpr std::size_t kRevocationHeadSize = 28;
-constexpr std::size_t kRevocationEntrySize = 16;
+constexpr std::size_t kRevocationEntrySize = 17;
+constexpr std::size_t kRevocationEntrySizeV1 = 16;
 constexpr std::size_t kRevocationPayloadMax =
-    kRevocationHeadSize + kRevocationEntryMax * kRevocationEntrySize;  // 540
+    kRevocationHeadSize + kRevocationEntryMax * kRevocationEntrySize;  // 572
 // d2 84 43 a1 01 26 a0 | 59 hi lo | payload | 58 40 | sig
-constexpr std::size_t kRevocationObjectMax = 7 + 3 + kRevocationPayloadMax + 2 + 64;  // 616
+constexpr std::size_t kRevocationObjectMax = 7 + 3 + kRevocationPayloadMax + 2 + 64;  // 648
 inline constexpr char kRevocationDomain[] = "RouteLoom/revocation-set/v1";
 constexpr std::size_t kRevocationAadSize = sizeof(kRevocationDomain) + 8;  // 36
 constexpr std::uint32_t kRevocationMagic = 0x52525331U;  // "RRS1"
 constexpr std::uint32_t kRevocationSealCommitted = 0x2E5E7C0DU;
-constexpr std::size_t kRevocationSlotBytes = 640;
+constexpr std::size_t kRevocationSlotBytes = 672;
 constexpr std::size_t kRevocationRecordMin = kSequencedHeadSize + 4;
 constexpr std::size_t kRevocationRecordMax = kSequencedHeadSize + kRevocationObjectMax + 4;
-static_assert(kRevocationRecordMax == kRevocationSlotBytes, "04 §2: rlrevo slot <= 640 B");
+static_assert(kRevocationRecordMax == kRevocationSlotBytes, "04 §2: rlrevo slot <= 672 B");
 
 enum class RevocationReason : std::uint8_t { Removed = 1, Lost = 2, Replaced = 3, Blocked = 4 };
 
@@ -222,11 +221,8 @@ struct RevocationEntry {
   NodeId node_id{kInvalidNodeId};
   std::uint32_t min_generation{0};
   RevocationReason reason{RevocationReason::Removed};
-  // Shares the reason's 32-bit unit (no default initializer for a bit-field
-  // in C++17: entries are always value-initialized, e.g. `entries{}`).
-  std::uint32_t readmit_gk_epoch : 24;
+  std::uint32_t readmit_gk_epoch{0};
 };
-static_assert(sizeof(RevocationEntry) == 16, "RRS1 entries stay 16 bytes in RAM");
 
 struct RevocationSet {
   std::uint64_t site_id{0};

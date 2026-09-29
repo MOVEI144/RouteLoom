@@ -243,8 +243,11 @@ Status site_body_read(ByteReader& reader, SiteRecord& record) noexcept {
 
 // --- RRS1 helpers ------------------------------------------------------------
 
-std::size_t revocation_payload_size(const std::uint8_t count) noexcept {
-  return kRevocationHeadSize + static_cast<std::size_t>(count) * kRevocationEntrySize;
+std::size_t revocation_payload_size(const std::uint8_t count,
+                                    const std::uint8_t version) noexcept {
+  return kRevocationHeadSize + static_cast<std::size_t>(count) *
+                                   (version == kRevocationVersionV1 ? kRevocationEntrySizeV1
+                                                                     : kRevocationEntrySize);
 }
 
 }  // namespace
@@ -577,8 +580,7 @@ Status revocation_payload_encode(const RevocationSet& set,
     status = writer.write_u64(entry.node_id);
     if (status) status = writer.write_u32(entry.min_generation);
     if (status) status = writer.write_u8(static_cast<std::uint8_t>(entry.reason));
-    if (status) status = writer.write_u8(static_cast<std::uint8_t>(entry.readmit_gk_epoch >> 16U));
-    if (status) status = writer.write_u16(static_cast<std::uint16_t>(entry.readmit_gk_epoch));
+    if (status) status = writer.write_u32(entry.readmit_gk_epoch);
   }
   if (!status) return status;
   out.size = writer.size();
@@ -606,7 +608,7 @@ Status revocation_payload_decode(const ByteView payload, RevocationSet& out) noe
     return Status::error(StatusCode::Unsupported, "rrs1 version");
   }
   if (flags != 0 || count > kRevocationEntryMax ||
-      payload.size != revocation_payload_size(static_cast<std::uint8_t>(count))) {
+      payload.size != revocation_payload_size(static_cast<std::uint8_t>(count), version)) {
     return Status::error(StatusCode::ProtocolError, "rrs1 payload shape");
   }
   out.count = static_cast<std::uint8_t>(count);
@@ -619,11 +621,7 @@ Status revocation_payload_decode(const ByteView payload, RevocationSet& out) noe
     if (version == kRevocationVersionV1) {
       if (status) status = read_zeros(reader, 3, "rrs1 entry reserved");
     } else {
-      std::uint8_t high = 0;
-      std::uint16_t low = 0;
-      if (status) status = reader.read_u8(high);
-      if (status) status = reader.read_u16(low);
-      entry.readmit_gk_epoch = (static_cast<std::uint32_t>(high) << 16U) | low;
+      if (status) status = reader.read_u32(entry.readmit_gk_epoch);
     }
     entry.reason = static_cast<RevocationReason>(reason);
   }
@@ -1097,6 +1095,9 @@ Status local_revocation_record_decode(const ByteView record, LocalRevocationReco
   if (!status) return status;
   if (crc32_iso_hdlc(ByteView{record.data, kLocalRevocationRecordLen - 4}) != crc) {
     return Status::error(StatusCode::IntegrityError, "rlv1 crc");
+  }
+  if (record.data[11] == kRecordSchema && out.holdoff_ms != kLocalRevocationHoldoffMs) {
+    return Status::error(StatusCode::ProtocolError, "rlv1 schema 1 holdoff");
   }
   if (reserved != 0) {
     return Status::error(StatusCode::ProtocolError, "rlv1 reserved");

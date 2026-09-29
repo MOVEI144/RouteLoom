@@ -14,20 +14,20 @@
 
 「旧割当（世代）の機器の通信を拒否」は、`MemberCert.assignment_generation < min_generation`、または`MemberCert.site_epoch < site_epoch_floor`のMemberCertを、link/E2E確立時と、RRS1を受理した時点の生存contextの両方で拒否することで実現する。
 
-**NodeIdの再参加（v2.0、#146）**：GroupLink／GroupEndには割当世代がないため、group frameの受理はGK epochで判定する。Hostは失効履歴のあるNodeIdを、台帳の失効世代（cutoverでRRS1のentryが消えても履歴台帳を確認する）より大きい割当世代でだけ再発行する。適用中のRRS1がそのNodeIdを名指ししている場合、allowと同じtransactionでRRS1 v2のそのentryの`readmit_gk_epoch`を現在のactive GK epoch Eにして配り、機器はEを持って参加する。失効のたびに対象の機器を除いた新しいepochをstageするので、そのrotationがactiveになった後のEは以前の保持者が持たない鍵である。rotationのstaging中とcutoverの準備中は再発行をBusyで待たせる（新しいepochを追加でstageすると、再参加した機器はそのepochを持つまでgroupとGroupLinkの経路広告を送れず、経路が無いため鍵も受け取れない）。適用した機器は、そのentryの以前の失効によるDiscoveryの記録を消し、再参加した機器のsessionと経路は止めない。受信側は`revoked_group_sender(node, frameのGK epoch)`で、entryがあり`readmit_gk_epoch`が0かframeのepochがそれより小さいときだけ拒否する。frameは変えない。`readmit_gk_epoch`は24 bit（entryの予約3 byte。entryとobjectの大きさは不変）で、Eが収まらないときHostは理由付きCONFLICTで断る（新NodeIdで再provision）。v1のRRS1は`readmit_gk_epoch`=0として読む。再度の失効はentryの`readmit_gk_epoch`を0に戻す。機器のRLV1は`removed_generation`より大きい世代の参加を妨げない。
+**NodeIdの再参加（v2.0、#146）**：GroupLink／GroupEndには割当世代がないため、group frameの受理はGK epochで判定する。Hostは失効履歴のあるNodeIdを、台帳の失効世代（cutoverでRRS1のentryが消えても履歴台帳を確認する）より大きい割当世代でだけ再発行する。適用中のRRS1がそのNodeIdを名指ししている場合、allowと同じtransactionで新しいGKをstageし、RRS1 v2のそのentryの`readmit_gk_epoch`に新しいGK epoch Eを記す。再参加する機器もGK配布の対象に含める。既存のrotationまたはcutoverが進行中なら再発行をBUSYで待たせる。適用した機器は旧世代のsessionとDiscoveryの記録を消し、新世代のsessionは維持する。受信側は`revoked_group_sender(node, frameのGK epoch)`で、entryがあり`readmit_gk_epoch`が0かframeのepochがそれより小さいときだけ拒否する。frameは変えない。`readmit_gk_epoch`はu32（v2 entryは17B）。v1のRRS1は`readmit_gk_epoch`=0として読む。再度の失効はentryの`readmit_gk_epoch`を0に戻す。機器のRLV1は`removed_generation`より大きい世代の参加を妨げない。
 
 ## 2. RRS1 — 失効集合
 
 Site AuthorityのSAKが署名するCOSE_Sign1（ES256）。external AAD＝`"RouteLoom/revocation-set/v1" 0x00 || network u64`（機器自身のRLS1から与え、転送経路の申告を使わない）。payloadは固定長BE：
 
 ```text
- 0 u8  ver = 1 | 1 u8 flags | 2 u16 count (≤32)
+ 0 u8  ver = 2 | 1 u8 flags | 2 u16 count (≤32)
  4 u64 site_id | 12 u64 network
 20 u32 rs_epoch | 24 u32 site_epoch_floor
-28 entries[count] × 16B: node_id u64 | min_generation u32 | reason u8 (1 removed, 2 lost, 3 replaced, 4 blocked) | reserved 3B
+28 entries[count] × 17B: node_id u64 | min_generation u32 | reason u8 (1 removed, 2 lost, 3 replaced, 4 blocked) | readmit_gk_epoch u32
 ```
 
-最大payload 28＋32×16＝540B、COSE枠込みで616B（COSE_Sign1はRLCW1と同じtag 18・`{1:-7}`・low-S）。認証済みobject上限2048B以内。機器は`rlsec`/`rlrevo`の二重slot（各≤640B）に保存する。保存記録は`magic "RRS1" | format | used_len | schema | seal(0x2E5E7C0D) | commit_seq u32 | 受信した署名object | CRC`で、32件時にちょうど640B（object無しの24Bがtombstone）。gossipで再送できるよう署名objectをそのまま保存する（P1-3で実装、[vector README](../../../protocol/sdkv1-golden/README.md)）。受理規則：署名がRLS1のSAKで通る、`site_id`/`network`一致、`rs_epoch`が保存済みより大きい、entry重複なし・node_id昇順、`site_epoch_floor`は後退しない。実装では加えて`flags=0`、`rs_epoch≥1`、`min_generation≥1`、`reason`は1〜4、`site_epoch_floor≤network>>32`を要求する。完全置換なので、途中の版を取り逃しても最新版だけで収束する。
+最大payload 28＋32×17＝572B、COSE枠込みで648B（COSE_Sign1はRLCW1と同じtag 18・`{1:-7}`・low-S）。認証済みobject上限2048B以内。機器は`rlsec`/`rlrevo`の二重slot（各≤672B）に保存する。保存記録は`magic "RRS1" | format | used_len | schema | seal(0x2E5E7C0D) | commit_seq u32 | 受信した署名object | CRC`で、32件時にちょうど672B（object無しの24Bがtombstone）。v1 object は16B entryと予約3Bで読み、readmitを0とする。gossipで再送できるよう署名objectをそのまま保存する（P1-3で実装、[vector README](../../../protocol/sdkv1-golden/README.md)）。受理規則：署名がRLS1のSAKで通る、`site_id`/`network`一致、`rs_epoch`が保存済みより大きい、entry重複なし・node_id昇順、`site_epoch_floor`は後退しない。実装では加えて`flags=0`、`rs_epoch≥1`、`min_generation≥1`、`reason`は1〜4、`site_epoch_floor≤network>>32`を要求する。完全置換なので、途中の版を取り逃しても最新版だけで収束する。
 
 容量32件を超える場合は**site_epoch cutover**（§7）で空にする。古いentryを黙って追い出さない。
 

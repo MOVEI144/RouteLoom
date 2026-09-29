@@ -13,11 +13,11 @@ namespace routeloom::sdkv1 {
 
 constexpr std::size_t kGrantRenewHeadSize = 24;
 constexpr std::size_t kGrantPrepareMax = 700;
-constexpr std::size_t kGrantCommitMax = 799;
 constexpr std::size_t kGrantReceiptSize = 76;
 constexpr std::size_t kGrantRouteStateSize = 60;
 constexpr std::size_t kCutoverPayloadSize = 80;
 constexpr std::size_t kCutoverObjectSize = 155;
+constexpr std::size_t kGrantCommitMax = 28 + kCutoverObjectSize + kRevocationObjectMax;
 constexpr std::size_t kCutoverAadSize = sizeof("RouteLoom/site-cutover/v1") + 8;
 
 enum class GrantRenewPhase : std::uint8_t {

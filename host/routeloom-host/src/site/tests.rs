@@ -1855,9 +1855,9 @@ fn restart_after_commit_reissues_the_same_member_cert() {
 }
 
 /// #146: a revoked NodeId is readmitted only above its revoked generation,
-/// with its RRS1 entry marked with the active GK epoch — never while the
-/// revocation's own rotation (a key the earlier holder may lack) still
-/// stages; a failed revocation lookup never issues an assignment.
+/// with its RRS1 entry marked with a fresh GK epoch — never while the
+/// revocation's own rotation still stages; a failed revocation lookup never
+/// issues an assignment.
 #[test]
 fn allow_readmits_above_the_revoked_generation_and_fails_closed_on_lookup_error() {
     let fail_lookup = Arc::new(AtomicBool::new(false));
@@ -1867,7 +1867,24 @@ fn allow_readmits_above_the_revoked_generation_and_fails_closed_on_lookup_error(
     }));
     let node = 0x00A1_0000_0000_5009;
     join_member(&service, &transport, node, 0x79, T0);
+    service.with(|a| {
+        a.store
+            .commit(&Batch {
+                policy_acks: vec![(node, 1)],
+                ..Batch::default()
+            })
+            .unwrap();
+        a.policy_applied.insert(node, 1);
+    });
     revoke(&service, node, 1, "revoke", T0 + 10_000).unwrap();
+    assert!(service
+        .with(|a| a.policy_applied.get(&node).copied())
+        .0
+        .is_none());
+    assert!(service
+        .with(|a| a.store.load().unwrap().policy_acks.get(&node).copied())
+        .0
+        .is_none());
 
     let mut replacement = SimDevice::new(node, 0x7a);
     let (_, outcome, events) = replacement.start(&service, &transport, T0 + 20_000);
@@ -1915,7 +1932,9 @@ fn allow_readmits_above_the_revoked_generation_and_fails_closed_on_lookup_error(
         "BUSY"
     );
     service.tick(HostTime::sync(T0 + 60_000)); // past the staging deadline
+    service.tick(HostTime::sync(T0 + 120_000)); // past the rotation cleanup
     let rs_before = service.with(|a| a.rs_epoch).0;
+    let active_before = service.with(|a| a.gks.active_epoch()).0;
     let result = decide(
         &service,
         id,
@@ -1924,11 +1943,11 @@ fn allow_readmits_above_the_revoked_generation_and_fails_closed_on_lookup_error(
             role: ROLE_ENDPOINT,
         },
         "retry",
-        T0 + 60_020,
+        T0 + 120_020,
     )
     .unwrap();
     assert!(result.contains("\"generation\":2"), "{result}");
-    let (member, generation, rs_epoch, readmit, active, revoke_epoch) = service
+    let (member, generation, rs_epoch, readmit, active, rotation_to, revoke_epoch) = service
         .with(|a| {
             (
                 a.devices[&node].member,
@@ -1939,6 +1958,7 @@ fn allow_readmits_above_the_revoked_generation_and_fails_closed_on_lookup_error(
                     .find(|e| e.node_id == node)
                     .map(|e| e.readmit_gk_epoch),
                 a.gks.active_epoch(),
+                a.gks.rotation().map(|r| r.row.to_epoch),
                 a.operations
                     .values()
                     .find(|op| op.kind == "revoke")
@@ -1947,11 +1967,20 @@ fn allow_readmits_above_the_revoked_generation_and_fails_closed_on_lookup_error(
         })
         .0;
     assert!(member && generation == 2);
+    assert!(service
+        .with(|a| a.policy_applied.get(&node).copied())
+        .0
+        .is_none());
+    assert!(service
+        .with(|a| a.store.load().unwrap().policy_acks.get(&node).copied())
+        .0
+        .is_none());
     assert_eq!(rs_epoch, rs_before + 1);
-    assert_eq!(
-        readmit,
-        Some(active),
-        "marked with the GK the member joins with"
+    assert_eq!(active, active_before);
+    assert_eq!(readmit, rotation_to);
+    assert!(
+        readmit.is_some_and(|e| e > active),
+        "readmit stages a fresh GK"
     );
     assert!(
         revoke_epoch.is_some_and(|e| active >= e),
@@ -2050,6 +2079,7 @@ fn removal_end_to_end() {
     assert!(device.site.is_none());
     // The decider sees the removed identity; #146 readmits its NodeId at
     // the next generation (the revoke's rotation activated long ago).
+    service.tick(HostTime::sync(T0 + 60_000));
     service.tick(HostTime::sync(T0 + 659_000));
     let (_, outcome, events) = device.start(&service, &transport, T0 + 660_000);
     assert!(matches!(outcome, Outcome::Waiting));
@@ -2630,6 +2660,7 @@ fn review_concurrent_different_keys_rechecks_current_membership() {
     });
     revoked.unwrap();
     service.tick(HostTime::sync(T0 + 40_000)); // the revoke's rotation activates
+    service.tick(HostTime::sync(T0 + 100_000)); // its cleanup window ends
     let readmitted = decide(
         &service,
         request_id(&events_b).unwrap(),
@@ -2638,7 +2669,7 @@ fn review_concurrent_different_keys_rechecks_current_membership() {
             role: ROLE_ENDPOINT,
         },
         "review-b2",
-        T0 + 40_010,
+        T0 + 100_010,
     )
     .unwrap();
     assert!(readmitted.contains("\"generation\":2"), "{readmitted}");
@@ -2704,6 +2735,7 @@ fn review_revoked_membership_allows_explicit_replacement_key() {
         request.1
     );
     service.tick(HostTime::sync(T0 + 31_000)); // the revoke's rotation activates
+    service.tick(HostTime::sync(T0 + 100_000)); // its cleanup window ends
     let readmitted = decide(
         &service,
         request_id(&events).unwrap(),
@@ -2712,12 +2744,12 @@ fn review_revoked_membership_allows_explicit_replacement_key() {
             role: ROLE_ENDPOINT,
         },
         "b",
-        T0 + 31_010,
+        T0 + 100_010,
     )
     .unwrap();
     assert!(readmitted.contains("\"generation\":2"), "{readmitted}");
     let mut fresh = SimDevice::new(a.node + 1, 0xC4);
-    let (mut next, _, next_events) = fresh.start(&service, &transport, T0 + 40_000);
+    let (mut next, _, next_events) = fresh.start(&service, &transport, T0 + 110_000);
     decide(
         &service,
         request_id(&next_events).unwrap(),
@@ -2726,7 +2758,7 @@ fn review_revoked_membership_allows_explicit_replacement_key() {
             role: ROLE_ENDPOINT,
         },
         "fresh",
-        T0 + 40_010,
+        T0 + 110_010,
     )
     .unwrap();
     assert!(matches!(
@@ -2812,6 +2844,7 @@ fn review_replacement_flow_survives_a_restart() {
     // The revoked generation survives the restart: the readmit issues 2
     // once the restored staging activated.
     service.tick(HostTime::sync(T0 + 31_000));
+    service.tick(HostTime::sync(T0 + 100_000));
     let readmitted = decide(
         &service,
         request_id(&events).unwrap(),
@@ -2820,12 +2853,12 @@ fn review_replacement_flow_survives_a_restart() {
             role: ROLE_ENDPOINT,
         },
         "b",
-        T0 + 31_010,
+        T0 + 100_010,
     )
     .unwrap();
     assert!(readmitted.contains("\"generation\":2"), "{readmitted}");
     let mut fresh = SimDevice::new(node + 1, 0xC6);
-    let (mut next, _, next_events) = fresh.start(&service, &transport, T0 + 40_000);
+    let (mut next, _, next_events) = fresh.start(&service, &transport, T0 + 110_000);
     decide(
         &service,
         request_id(&next_events).unwrap(),
@@ -2834,7 +2867,7 @@ fn review_replacement_flow_survives_a_restart() {
             role: ROLE_ENDPOINT,
         },
         "fresh",
-        T0 + 40_010,
+        T0 + 110_010,
     )
     .unwrap();
     assert!(matches!(
@@ -2856,6 +2889,20 @@ fn review_replacement_flow_survives_a_restart() {
         .iter()
         .any(|e| e.node_id == node && e.min_generation == 2));
     drop(service);
+    let (restored, _) = service_with(Box::new(SqliteSiteStore::open(&db).unwrap()));
+    let (rotation_to, readmit_epoch) = restored
+        .with(|auth| {
+            (
+                auth.gks.rotation().map(|r| r.row.to_epoch),
+                auth.rrs_entries
+                    .iter()
+                    .find(|entry| entry.node_id == node)
+                    .map(|entry| entry.readmit_gk_epoch),
+            )
+        })
+        .0;
+    assert_eq!(rotation_to, readmit_epoch);
+    drop(restored);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2928,6 +2975,7 @@ fn review_late_allow_follows_the_current_membership() {
     // With the live kid conflict gone, B is readmitted above the revoked
     // generation (#146), never at it, once the revoke's rotation activated.
     service.tick(HostTime::sync(T0 + 40_000));
+    service.tick(HostTime::sync(T0 + 100_000));
     let readmitted = decide(
         &service,
         id_b,
@@ -2936,7 +2984,7 @@ fn review_late_allow_follows_the_current_membership() {
             role: ROLE_ENDPOINT,
         },
         "b",
-        T0 + 40_010,
+        T0 + 100_010,
     )
     .unwrap();
     assert!(readmitted.contains("\"generation\":2"), "{readmitted}");
@@ -5470,6 +5518,15 @@ fn unfinished_operation_is_not_evicted_at_capacity() {
         assert!(a.operations.contains_key(&1));
         assert_eq!(a.rs_epoch, 1);
         assert!(a.devices.get(&leaver.node).unwrap().member);
+        // A readmit allow owns both a rotation and an RRS1 distribution.
+        // Confirming the member cannot evict its unfinished RRS1 work.
+        a.devices.get_mut(&leaver.node).unwrap().confirmed = true;
+        for op in a.operations.values_mut() {
+            op.kind = "approve".into();
+            op.gk_from = 1;
+            op.gk_to = 2;
+        }
+        assert!(a.evictable_op().is_none());
     });
 }
 
@@ -5829,8 +5886,9 @@ fn archive_removed_reclaims_capacity_without_losing_no_reissue_history() {
 
     // ... but the NodeId never returns at the revoked generation.
     service.tick(HostTime::sync(T0 + 39_000));
+    service.tick(HostTime::sync(T0 + 100_000));
     let mut fresh_key = SimDevice::new(device.node, 0xC4);
-    let (_, outcome, events) = fresh_key.start(&service, &transport, T0 + 40_000);
+    let (_, outcome, events) = fresh_key.start(&service, &transport, T0 + 101_000);
     assert!(matches!(outcome, Outcome::Waiting));
     let readmitted = decide(
         &service,
@@ -5840,7 +5898,7 @@ fn archive_removed_reclaims_capacity_without_losing_no_reissue_history() {
             role: ROLE_ENDPOINT,
         },
         "b",
-        T0 + 40_010,
+        T0 + 101_010,
     )
     .unwrap();
     assert!(readmitted.contains("\"generation\":2"), "{readmitted}");
@@ -5848,7 +5906,7 @@ fn archive_removed_reclaims_capacity_without_losing_no_reissue_history() {
     assert!(rows.iter().any(|r| r.kind == "revoke"));
     assert!(rows.iter().any(|r| r.kind == "archive"));
     let status = service
-        .with(|a| a.status_json(HostTime::sync(T0 + 40_010)))
+        .with(|a| a.status_json(HostTime::sync(T0 + 101_010)))
         .0;
     assert!(status.contains("\"archived_total\":1"), "{status}");
 }
@@ -6184,6 +6242,13 @@ fn proxy_policy_distribution_counts_durable_acks() {
             (unacked.proxies, unacked.applied, unacked.distributed),
             (1, 0, None)
         );
+        let future = ProxyPolicyAck {
+            status: 1,
+            generation: 2,
+        }
+        .encode();
+        service.with(|a| a.handle_policy_ack(relay_node, 1, &future, T0 + 2_100));
+        assert_eq!(service.with(|a| a.policy_distribution()).0.applied, 0);
         // Unanswered: resent after the spacing, not before.
         service.tick(HostTime::sync(T0 + 3_000));
         assert_eq!(sent.lock().unwrap().len(), 1);

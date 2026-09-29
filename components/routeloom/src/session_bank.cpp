@@ -688,6 +688,31 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::retire_all(const NodeId peer) n
 }
 
 template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
+Status SessionBank<kLinkCapacity, kEndCapacity>::retire_below_generation(
+    const NodeId peer, const std::uint32_t min_generation, bool& retired) noexcept {
+  retired = false;
+  if (reentered()) return Status::error(StatusCode::Busy, "session bank re-entered");
+  if (!configured_) return Status::error(StatusCode::InvalidState, "session bank not configured");
+  if (!id_valid(peer) || min_generation == 0) {
+    return Status::error(StatusCode::InvalidArgument, "readmit generation");
+  }
+  for (const SecurityScope scope : {SecurityScope::Link, SecurityScope::EndToEnd}) {
+    const SessionBankEntry* entry = find_current(scope, peer);
+    if (entry != nullptr && entry->peer_generation < min_generation) {
+      const Status status = retire(scope, peer);
+      if (!status) return status;
+      retired = true;
+    }
+  }
+  for (std::size_t i = 0; i < kOverlapCapacity; ++i) {
+    if (overlap_used_[i] && overlap_[i].peer == peer) {
+      wipe_overlap(overlap_[i], overlap_used_[i]);
+    }
+  }
+  return Status::success();
+}
+
+template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
 Status SessionBank<kLinkCapacity, kEndCapacity>::evict_idle_end(NodeId& evicted) noexcept {
   evicted = kInvalidNodeId;
   if (reentered()) return Status::error(StatusCode::Busy, "session bank re-entered");

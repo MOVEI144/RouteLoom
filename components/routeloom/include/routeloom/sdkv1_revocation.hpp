@@ -65,7 +65,7 @@ Status rrs_request_encode(const RrsRequest& request,
 Status rrs_request_decode(ByteView body, RrsRequest& out) noexcept;
 
 // --- Authority type-5 bodies (04 §3) --------------------------------------------
-// Host->device is the RRS1 COSE object itself (<= 616 B, no wrapper).
+// Host->device is the RRS1 COSE object itself (<= 648 B, no wrapper).
 // Device->host reports (carried by the P5 authority envelope):
 //   Applied (40 B): ver=1 u8 | sub=1 u8 | reserved u16 | rs_epoch u32 |
 //     object_sha256[32] — "this device applied that set".
@@ -188,7 +188,7 @@ class RrsExchange {
     MonotonicMs ack_deadline_ms{0};
     std::array<std::uint8_t, kRevocationObjectMax> data{};
   };
-  // Metadata beside the 616 B buffers stays small (04 §4: <= 96 B each).
+  // Metadata beside the 648 B buffers stays small (04 §4: <= 96 B each).
   static_assert(sizeof(Rx) - kRevocationObjectMax <= 96, "RX metadata bound");
   static_assert(sizeof(Tx) - kRevocationObjectMax <= 96, "TX metadata bound");
 

@@ -149,23 +149,25 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::enforce_revocation(
   // authority down transfers cancel with them (no notice may extend a
   // revoked peer's mesh lifetime). The revoked device still learns
   // its removal over the ZT recovery path (04 §6.3).
-  // A readmitted entry (#146) names a live member again: nothing of its
-  // new binding is cancelled or withdrawn.
-  if (owner.gateway_role() && owner.authority_live_) {
-    for (std::size_t i = 0; i < set.count; ++i) {
-      if (set.entries[i].readmit_gk_epoch != 0) continue;
-      owner.gateway()->cancel_down_to(set.entries[i].node_id);
-    }
-  }
   // The P4 bank, pending handshakes and Discovery bindings retire before
   // any durable resume sweep. The route withdrawal also closes queued
   // sends to revoked peers. The RLP2 resume sweep itself belongs to the
   // lifecycle's Sweep step (the single sweep path) and runs next.
-  const Status sessions = owner.coordinator().revoke_member_sessions(set, site_epoch, now_ms);
+  std::uint32_t retired_old = 0;
+  const Status sessions = owner.coordinator().revoke_member_sessions(
+      set, site_epoch, now_ms, &retired_old);
   if (!sessions) return sessions;
+  if (owner.gateway_role() && owner.authority_live_) {
+    for (std::size_t i = 0; i < set.count; ++i) {
+      if (set.entries[i].readmit_gk_epoch != 0 &&
+          (retired_old & (std::uint32_t{1} << i)) == 0) continue;
+      owner.gateway()->cancel_down_to(set.entries[i].node_id);
+    }
+  }
   if (owner.runtime_ != nullptr) {
     for (std::size_t i = 0; i < set.count; ++i) {
-      if (set.entries[i].readmit_gk_epoch != 0) continue;
+      if (set.entries[i].readmit_gk_epoch != 0 &&
+          (retired_old & (std::uint32_t{1} << i)) == 0) continue;
       owner.runtime_->node().revoke_routes(set.entries[i].node_id, now_ms);
     }
   }
@@ -211,14 +213,14 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::remove_member_runtime() noexce
 
 Status EspNowSecurityOwner::LifecycleRuntimePort::erase_site_trust() noexcept {
   EspNowSecurityOwner& owner = owner_;
-  if (!owner.coordinator_live_) {
+  if (!owner.coordinator_live_ || owner.stores_ == nullptr) {
     return Status::error(StatusCode::InvalidState, "trust erasure before wiring");
   }
-  // The site trust on this path is the RLS1 SiteCert verified against
-  // the RLI1 anchors (no separate derived blobs exist in production):
-  // RLS1 itself is erased by the lifecycle's Site step next, RLI1 stays
-  // (device-level per 04 §6.4), and this step wipes the RAM view (GK
-  // scope + discovery membership) and verifies it is gone.
+  const Status policy = owner.stores_->proxy_policy().erase();
+  if (!policy) return policy;
+  // RLS1 is erased by the lifecycle's Site step next, RLI1 stays
+  // (device-level per 04 §6.4), and this step wipes the site-bound
+  // intake policy and the RAM view (GK scope + discovery membership).
   return owner.coordinator().wipe_site_trust();
 }
 
@@ -682,9 +684,9 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
   if (stores_->site().has_site()) {
     const std::uint64_t site_id = stores_->site().site().site_id;
     sdkv1::ProxyPolicyRecord policy{};
-    if (stores_->proxy_policy().load(site_id, policy)) {
-      coordinator().set_proxy_policy(site_id, policy.zero_touch_open);
-    }
+    bool found = false;
+    const Status loaded = stores_->proxy_policy().load(site_id, policy, found);
+    coordinator().set_proxy_policy(site_id, loaded && (!found || policy.zero_touch_open));
   }
   sdkv1::CoordinatorEvent event{};
   event.kind = sdkv1::CoordinatorEventKind::Boot;
@@ -1076,18 +1078,23 @@ void EspNowSecurityOwner::apply_proxy_policy(const ByteView tail) noexcept {
   const std::uint64_t site_id = stores_->site().site().site_id;
   sdkv1::ProxyPolicyStore store = stores_->proxy_policy();
   sdkv1::ProxyPolicyRecord stored{};
-  bool has = store.load(site_id, stored);
+  bool has = false;
+  const Status loaded = store.load(site_id, stored, has);
   bool write = false;
   sdkv1::ProxyPolicyStatus status =
-      sdkv1::proxy_policy_decide(has ? &stored : nullptr, set, write);
+      loaded ? sdkv1::proxy_policy_decide(has ? &stored : nullptr, set, write)
+             : sdkv1::ProxyPolicyStatus::StorageFailed;
+  if (!loaded) coordinator().set_proxy_policy(site_id, false);
   if (write) {
     sdkv1::ProxyPolicyRecord record{};
     record.site_id = site_id;
     record.generation = set.generation;
     record.zero_touch_open = set.zero_touch_open;
     record.content = set.content;
-    if (!store.commit(record)) status = sdkv1::ProxyPolicyStatus::StorageFailed;
-    has = store.load(site_id, stored);  // what a power cut would keep
+    const Status committed = store.commit(record);
+    const Status readback = store.load(site_id, stored, has);
+    if (!readback) coordinator().set_proxy_policy(site_id, false);
+    if (!committed || !readback) status = sdkv1::ProxyPolicyStatus::StorageFailed;
   }
   if (status == sdkv1::ProxyPolicyStatus::Applied && has) {
     coordinator().set_proxy_policy(site_id, stored.zero_touch_open);

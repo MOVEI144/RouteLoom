@@ -1,6 +1,6 @@
 {
   "codec": "rrs_kind6_manifest",
-  "encoded_hex": "0201060000872f6153904b3fbd5dd4275af139cfedefa2b55a8a36e77550bf292b570b2a954c",
+  "encoded_hex": "020106000089fd6b8a1f16b6223bb136f66ef9104d3d377420d218ec3629f2dd539fb4419f87",
   "expect": "error",
   "format": "routeloom-sdkv1-revocation-golden-v1",
   "name": "kind6_manifest_bad_version",

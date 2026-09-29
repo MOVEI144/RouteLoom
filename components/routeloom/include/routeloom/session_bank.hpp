@@ -215,6 +215,12 @@ class SessionBank {
                             SessionBankEntry& out) const noexcept;
   Status retire(SecurityScope scope, NodeId peer) noexcept;
   Status retire_all(NodeId peer) noexcept;
+  // A readmitted NodeId may still have a context from its revoked
+  // assignment. Retire only current contexts below the new generation;
+  // discard every RX overlap for that peer because an overlap has no
+  // separate generation attestation. `retired` reports a current context.
+  Status retire_below_generation(NodeId peer, std::uint32_t min_generation,
+                                 bool& retired) noexcept;
   // Drops the oldest idle (no live seal reservation), unpinned end context
   // and reports it; NotFound when everything is busy or pinned.
   Status evict_idle_end(NodeId& evicted) noexcept;
