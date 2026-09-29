@@ -740,19 +740,19 @@ LifecycleBlockReason MembershipLifecycle::adopt_stores() noexcept {
   if (revocations_.has_set()) {
     stored_object_.clear();
     if (!revocations_.load_object(stored_object_)) return LifecycleBlockReason::RevocationStore;
-    verified_store_set_ = RevocationSet{};
+    candidate_set_ = RevocationSet{};
     bool verified = false;
     const Status checked = revocation_object_verify(stored_object_.view(), sak_, adopted_.site_id,
-                                                     revocations_.set().network, verified_store_set_,
+                                                     revocations_.set().network, candidate_set_,
                                                      verified, verifier_);
     if (!checked || !verified ||
-        verified_store_set_.rs_epoch != revocations_.rs_epoch() ||
-        verified_store_set_.site_epoch_floor != revocations_.set().site_epoch_floor ||
-        verified_store_set_.count != revocations_.set().count) {
+        candidate_set_.rs_epoch != revocations_.rs_epoch() ||
+        candidate_set_.site_epoch_floor != revocations_.set().site_epoch_floor ||
+        candidate_set_.count != revocations_.set().count) {
       return LifecycleBlockReason::RevocationStore;
     }
-    for (std::uint8_t i = 0; i < verified_store_set_.count; ++i) {
-      const RevocationEntry& verified_entry = verified_store_set_.entries[i];
+    for (std::uint8_t i = 0; i < candidate_set_.count; ++i) {
+      const RevocationEntry& verified_entry = candidate_set_.entries[i];
       const RevocationEntry& stored_entry = revocations_.set().entries[i];
       if (verified_entry.node_id != stored_entry.node_id ||
           verified_entry.min_generation != stored_entry.min_generation ||

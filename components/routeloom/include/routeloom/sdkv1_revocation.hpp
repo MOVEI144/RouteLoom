@@ -913,7 +913,6 @@ class MembershipLifecycle final {
   // Re-read scratch for the stored set bytes (duplicate compare, serving).
   ByteBuffer<kRevocationObjectMax> stored_object_{};
   RevocationSet candidate_set_{};
-  RevocationSet verified_store_set_{};
   CandidateSource candidate_source_{CandidateSource::None};
   NodeId candidate_peer_{kInvalidNodeId};
   ApplyStep apply_step_{ApplyStep::Verify};
@@ -940,8 +939,8 @@ class MembershipLifecycle final {
   LifecycleSnapshot snapshot_{};
 };
 
-// P6 coordinator RAM ceiling (04 §4): exchange + gossip + workspaces, the
-// caller-owned stores excluded.
-static_assert(sizeof(MembershipLifecycle) <= 8192, "P6 coordinator RAM bound");
+// P6 coordinator RAM ceiling: the C5 relay keeps this state in LP RAM;
+// caller-owned stores are excluded.
+static_assert(sizeof(MembershipLifecycle) <= 6144, "P6 coordinator RAM bound");
 
 }  // namespace routeloom::sdkv1
