@@ -366,8 +366,11 @@ Status Device::post(const Job job, void* ctx) noexcept {
 }
 
 void Device::run_posted() noexcept {
-  // Bounded drain: jobs posted by a running job wait for the next pass.
-  std::uint8_t budget = kPostCapacity;
+  // A pass takes only the jobs that were waiting at its start. New jobs
+  // wait for the next pass, even if the queue was not full.
+  portENTER_CRITICAL(&posted_lock_);
+  std::uint8_t budget = posted_count_;
+  portEXIT_CRITICAL(&posted_lock_);
   while (budget-- > 0) {
     Posted next{};
     portENTER_CRITICAL(&posted_lock_);

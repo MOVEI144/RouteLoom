@@ -443,6 +443,14 @@ void test_device_post_bound() {
   device.step(kStart + 1);
   CHECK(log.count == Device::kPostCapacity + 1);
   CHECK(log.order[Device::kPostCapacity] == 0);
+
+  // A short queue has the same pass boundary as a full queue.
+  jobs[Device::kPostCapacity].repost = true;
+  CHECK(device.post(&record_job, &jobs[Device::kPostCapacity]).ok());
+  device.step(kStart + 2);
+  CHECK(log.count == Device::kPostCapacity + 2);
+  device.step(kStart + 3);
+  CHECK(log.count == Device::kPostCapacity + 3);
   runtime.stop();
 }
 
