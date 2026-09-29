@@ -873,6 +873,31 @@ void EspNowSecurityOwner::poll_steps(const MonotonicMs now_ms) noexcept {
   drive_authority(now_ms);
   poll_tune(now_ms);
   drain_actions(now_ms);
+  if (discovery_live_ && runtime_ != nullptr && stores_ != nullptr &&
+      stores_->site().has_site() &&
+      coordinator().mode() == sdkv1::CoordinatorMode::Member) {
+    const sdkv1::SiteRecord& site = stores_->site().site();
+    bool routed = false;
+    for (std::uint8_t i = 0; i < site.gateway_count; ++i) {
+      const NodeId gateway = site.gateways[i];
+      if (gateway == kInvalidNodeId) continue;
+      if (gateway == self_node()) {
+        routed = true;
+        break;
+      }
+      const RouteSelection selection = runtime_->node().routes().best(gateway);
+      std::uint32_t generation = 0, role = 0;
+      if (selection.valid && selection.next_hop != kInvalidNodeId &&
+          coordinator().authenticated_link(selection.next_hop, adopted_network_,
+                                            generation, role)) {
+        routed = true;
+        break;
+      }
+    }
+    discovery()->set_gateway_route_missing(site.gateway_count != 0 && !routed, now_ms);
+  } else if (discovery_live_) {
+    discovery()->set_gateway_route_missing(false, now_ms);
+  }
 }
 
 // --- P6 lifecycle pump --------------------------------------------------------
@@ -1962,7 +1987,10 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
 }
 
 void EspNowSecurityOwner::on_start_discovery(const MonotonicMs now_ms) noexcept {
-  if (discovery_live_) return;
+  if (discovery_live_) {
+    discovery()->rearm_repair();
+    return;
+  }
   // The dev route adopts static config, never an RLS1: the discovery
   // config gate below (engine mode + valid adoption) is the check there.
   if (!dev_adopted() && !stores_->site().has_site()) {

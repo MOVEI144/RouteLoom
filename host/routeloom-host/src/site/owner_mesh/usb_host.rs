@@ -52,6 +52,11 @@ pub(super) struct UsbHost {
     pub(super) last_begin_ms: u64,
     /// Sim-time of the last emitted frame — paces the idle keepalive.
     pub(super) last_tx_ms: u64,
+    /// Fault: authority envelopes (GK Updates/Activates, pull answers)
+    /// down to this device are dropped before the wire; channel frames
+    /// still pass, so its route and channel stay up.
+    pub(super) drop_envelopes_to: Option<u64>,
+    pub(super) envelopes_dropped: u64,
 }
 
 impl UsbHost {
@@ -84,6 +89,8 @@ impl UsbHost {
             last_rx_ms: 0,
             last_begin_ms: 0,
             last_tx_ms: 0,
+            drop_envelopes_to: None,
+            envelopes_dropped: 0,
         }
     }
 
@@ -298,6 +305,16 @@ impl UsbHost {
             let sub = authority_sub(&down.bytes);
             if sub != Some(SUB_AUTHORITY_DOWN) && sub != Some(SUB_SITE_STATE_SET) {
                 continue;
+            }
+            if sub == Some(SUB_AUTHORITY_DOWN) && self.drop_envelopes_to.is_some() {
+                let fragment = routeloom_protocol::host_ops::decode_authority_down(&down.bytes)
+                    .expect("down fragment decodes");
+                if Some(fragment.device) == self.drop_envelopes_to
+                    && fragment.kind == CarrierKind::Envelope
+                {
+                    self.envelopes_dropped += 1;
+                    continue;
+                }
             }
             self.queue_data(FrameKind::HostOps, down.bytes);
             self.downs_sent += 1;

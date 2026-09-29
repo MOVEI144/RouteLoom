@@ -2960,6 +2960,23 @@ bool HandshakeEngine::has_quiet_link_retry(const std::uint32_t token) const noex
   return false;
 }
 
+bool HandshakeEngine::past_first_message(const SecurityScope scope,
+                                         const NodeId peer) const noexcept {
+  for (const auto& record : records_) {
+    if (!record.used || record.scope != scope || record.peer != peer) continue;
+    switch (record.state) {
+      case RecordState::EdhocQueued:
+      case RecordState::EdhocM1Parked:
+      case RecordState::EdhocWaitM2:
+      case RecordState::ResumeWaitR2:
+        break;
+      default:
+        return true;
+    }
+  }
+  return false;
+}
+
 Status HandshakeEngine::cancel(const NodeId peer, const HandshakeCancelReason reason) noexcept {
   (void)reason;
   if (entered_) return Status::error(StatusCode::Busy, "handshake re-entered");

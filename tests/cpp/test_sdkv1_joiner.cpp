@@ -2311,6 +2311,42 @@ void test_healthy_member_recovery_queries() {
   current.clear();
 }
 
+// A member re-verifying its retained site rescans at least every 15 s while
+// its site is out of range: the lost site may come back at any moment. A
+// fresh join keeps the long exponential backoff.
+void test_recovery_rescan_is_capped() {
+  current = "recovery-rescan-cap";
+  const auto longest_backoff = [](JoinSimNetwork& net, std::uint64_t span_ms) {
+    std::uint64_t longest = 0;
+    (void)net.pump_until(
+        [&] {
+          if (net.device().joiner.snapshot().state == JoinState::Backoff) {
+            const MonotonicMs wake = net.device().joiner.next_deadline();
+            if (wake > net.now() && wake - net.now() > longest) longest = wake - net.now();
+          }
+          return false;
+        },
+        span_ms);
+    return longest;
+  };
+  JoinSimNetwork net(device_config(), device_identity());
+  net.add_site(site_a_params());
+  CHECK(net.device().joiner.start(boot_input(), 0).ok());
+  CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 30000));
+  net.clear_terminal();
+  net.site(0).set_proxy_muted(0, true);  // the site is out of range
+  net.restart_device(device_config(), 0xCA95);
+  JoinBootInput boot = boot_input();
+  boot.mode = JoinBootMode::VerifyExistingMembership;
+  CHECK(net.device().joiner.start(boot, net.now()).ok());
+  CHECK(longest_backoff(net, 240000) <= 15000);
+
+  JoinSimNetwork fresh(device_config(), device_identity());
+  CHECK(fresh.device().joiner.start(boot_input(), 0).ok());
+  CHECK(longest_backoff(fresh, 240000) > 15000);
+  current.clear();
+}
+
 // A full same-site refresh may reissue the Host's active GK while this
 // device already holds a newer durable staged GK. The refresh must retain
 // that high-water rather than erase it or strand the Joiner in Reconcile.
@@ -3008,6 +3044,7 @@ int main() {
   test_cross_site_recover_forbidden();
   test_healthy_member_boot_adopts();
   test_healthy_member_recovery_queries();
+  test_recovery_rescan_is_capped();
   test_refresh_preserves_staged_gk();
   test_impaired_refresh_rejects_same_epoch_different_key();
   test_refresh_waits_when_host_active_is_behind();

@@ -343,6 +343,7 @@ class Joiner final {
   void teardown_attempt() noexcept;
   void clear_mailbox() noexcept;
   void start_scan() noexcept;
+  void schedule_rescan(MonotonicMs now) noexcept;
   // Shared run reset of start()/start_direct().
   void begin_run(const JoinBootInput& boot) noexcept;
   // Direct attempt without scan/select/refresh: the handshake opens with

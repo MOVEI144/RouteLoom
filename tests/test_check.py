@@ -361,11 +361,11 @@ class Scenarios(unittest.TestCase):
                       check.scenario_errors(self.data))
 
     def test_planned_and_hil_rows(self):
-        self.rows("M02")[0]["test"] = self.rows("M01")[0]["test"]
+        self.rows("M08")[0]["test"] = self.rows("M01")[0]["test"]
         self.rows("M05")[0]["hil"]["run"] = ["tools/hil/no_such_script.py"]
         self.rows("M03")[0]["hil"] = {"rounds": ["H0"], "run": "manual"}
         errors = check.scenario_errors(self.data)
-        self.assertIn("M02: a planned row names no test", errors)
+        self.assertIn("M08: a planned row names no test", errors)
         self.assertIn("M05: hil run ['tools/hil/no_such_script.py'] is neither manual nor "
                       "HIL scripts", errors)
         self.assertIn("M03: hil set on a row without the hil tier", errors)

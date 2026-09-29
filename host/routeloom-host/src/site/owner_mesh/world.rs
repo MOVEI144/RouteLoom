@@ -66,8 +66,9 @@ pub(super) fn personas(nodes: usize) -> Vec<Persona> {
     personas
 }
 
-/// The staggered boot plan of the three-node worlds ([0, 2000, 12000])
-/// extended by 10 s per further node.
+/// The compatibility boot plan ([0, 2000, 12000], then +10 s per further
+/// node): the clock offsets the three-node worlds booted with before
+/// simultaneous opens resolved in the Owners.
 pub(super) fn staggered_boot(nodes: usize) -> Vec<u64> {
     (0..nodes as u64)
         .map(|index| match index {
@@ -101,7 +102,8 @@ impl Phase0Snapshot {
     /// `identity_only` personas get their sealed RLI1 identity and nothing
     /// else (J01 boot mode `identity_only`): no join, no site record.
     fn build(nodes: usize, identity_only: &[usize]) -> Self {
-        let mut provision = Provision::start(&format!("phase0-{nodes}"), now_ms());
+        let mut provision =
+            Provision::start(&format!("phase0-{nodes}"), clock_at_phase(now_ms(), 0));
         let images = personas(nodes)
             .iter()
             .enumerate()
@@ -134,6 +136,23 @@ impl Phase0Snapshot {
             images,
         }
     }
+}
+
+/// Worlds start their clock at a fixed phase within this period.
+const CLOCK_PERIOD_MS: u64 = 3_600_000;
+
+/// The first instant at or after `wall` with the phase of `anchor`.
+///
+/// World clocks follow the host's wall clock (the site keeps wall-time
+/// records), but the schedule a world replays depends on the start's
+/// phase: with a free wall-clock phase, J01's JoinConfirm landed past its
+/// 30 s budget in about a third of the runs. A fixed phase keeps each
+/// world's vt schedule the same from run to run.
+fn clock_at_phase(wall: u64, anchor: u64) -> u64 {
+    if anchor >= wall {
+        return anchor;
+    }
+    anchor + (wall - anchor).div_ceil(CLOCK_PERIOD_MS) * CLOCK_PERIOD_MS
 }
 
 type Phase0Key = (usize, Vec<usize>);
@@ -326,7 +345,7 @@ impl Provision {
     }
 
     fn from_snapshot(tag: &str, snapshot: &Phase0Snapshot) -> Self {
-        let now = now_ms().max(snapshot.now);
+        let now = clock_at_phase(now_ms(), snapshot.now);
         let site = MeshSite::start_with_db(tag, now, Some(&snapshot.db));
         let usb = UsbAuthorityAdapter::new(testkit::GATEWAY, 7);
         site.service
@@ -645,7 +664,9 @@ impl MeshWorld {
     }
 
     pub(super) fn start_with_profile(tag: &str, switch: Switch, flat: bool) -> Option<Self> {
-        let boot_ms = staggered_boot(switch.nodes());
+        // Every node powers on at the same tick (M05's all-at-once boot):
+        // simultaneous opens resolve in the Owners, not by clock offsets.
+        let boot_ms = vec![0; switch.nodes()];
         Self::start_plan(tag, switch, &boot_ms, flat)
     }
 
@@ -734,14 +755,9 @@ impl MeshWorld {
             hostlink_secret.as_bytes(),
         );
         let usb_secret_hex = hex(hostlink_secret.as_bytes());
-        // Staggered boots (documented harness technique, same as the HIL
-        // rounds): the gateway's responder flight serializes links and a
-        // contender whose M1 budget expires mid-contention has no
-        // first-link re-drive yet (reported residual), so A boots 2 s in
-        // and B only after A's exchange retired (~12 s). Tests that need
-        // a channel-ready gate rather than a clock offset hold the peer
-        // with `gate` and release it once the relay converged
-        // (`staggered_boot`).
+        // Tests that need a channel-ready gate rather than a clock offset
+        // hold the peer with `gate` and release it once the relay
+        // converged; `staggered_boot` is the compatibility boot plan.
         let mut peers = Vec::with_capacity(nodes);
         for (index, persona) in personas.iter().enumerate() {
             // Lifecycle reboots (cutover AdoptNetwork) persist the NVS
@@ -1315,8 +1331,8 @@ pub(super) fn converge(world: &mut MeshWorld, what: &str) {
 }
 
 /// Forced-multihop convergence with one peer held off the air until
-/// the relay converged (the M1-budget technique from
-/// `mesh_forced_multihop_relays`): `gated` boots into a free flight.
+/// the relay converged: `gated` boots into a free flight, so a scenario
+/// starts from a known attach order.
 pub(super) fn converge_gated(world: &mut MeshWorld, gated: usize, what: &str) {
     world.gate[gated] = true;
     world.pump_until(9000, |snaps| {

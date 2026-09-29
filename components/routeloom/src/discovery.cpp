@@ -50,6 +50,9 @@ constexpr MonotonicMs kNoDiscover = ~MonotonicMs{0};
 constexpr MonotonicMs kMemberAnnounceFirstMs = 1500;
 constexpr MonotonicMs kMemberAnnounceIntervalMs = 2000;
 constexpr MonotonicMs kMemberAnnounceWindowMs = 90000;
+// A rebooted relay can have a live link while its route advert is still
+// converging. Wait for that short repair window before seeking a new peer.
+constexpr MonotonicMs kGatewayRouteRetryDelayMs = 20000;
 
 MonotonicMs add_sat(const MonotonicMs base, const std::uint64_t delta) noexcept {
   const MonotonicMs sum = base + delta;
@@ -375,6 +378,12 @@ Status NeighborDiscovery::start(const MonotonicMs now_ms) noexcept {
 
 Status NeighborDiscovery::begin_discovery(const MonotonicMs now_ms,
                                           const NodeId preferred_peer) noexcept {
+  return begin_discovery_filtered(now_ms, preferred_peer, false);
+}
+
+Status NeighborDiscovery::begin_discovery_filtered(const MonotonicMs now_ms,
+                                                   const NodeId preferred_peer,
+                                                   const bool unbound_only) noexcept {
   if (!started_) {
     return Status::error(StatusCode::InvalidState, "discovery not started");
   }
@@ -414,6 +423,7 @@ Status NeighborDiscovery::begin_discovery(const MonotonicMs now_ms,
   }
   outbound_ = Outbound{};
   outbound_.active = true;
+  outbound_.unbound_only = unbound_only;
   outbound_.transient_held = true;
   if (preferred != nullptr) {
     outbound_.preferred_peer = preferred_peer;
@@ -897,6 +907,10 @@ void NeighborDiscovery::handle_offer(const DiscoveryRxMetadata& rx,
   }
   // The OFFER echoes our transaction nonce; anything else is not ours.
   if (!nonce_equal(env.transaction_nonce, outbound_.our_nonce)) return;
+  if (outbound_.unbound_only) {
+    const Neighbor* known = find_neighbor(env.claimed_node);
+    if (known != nullptr && resolvable_phase(known->phase)) return;
+  }
 
   if (env.body_size >= 1 && env.body[0] == endpoint::kScopeBodyVersion) {
     if (!scoped_mode) {
@@ -2666,21 +2680,26 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
   {
     const Neighbor* first_stale = nullptr;
     const Neighbor* next_stale = nullptr;
+    bool any_resolvable = false;
+    bool any_reachable = false;
     neighbors_.for_each([&](const Neighbor& n) {
+      any_resolvable |= resolvable_phase(n.phase);
+      any_reachable |= n.phase == NeighborPhase::Reachable;
       if (n.phase != NeighborPhase::Stale) return;
       if (first_stale == nullptr || n.node < first_stale->node) first_stale = &n;
       if (n.node > last_repair_peer_ &&
           (next_stale == nullptr || n.node < next_stale->node)) next_stale = &n;
     });
-    // Member bootstrap retry: a member-mode engine holding no usable
-    // neighbor at all (fresh adopt, post-cutover rebootstrap) has no stale
-    // record to repair from, yet the adopted site still owes it a peer —
-    // keep the same bounded cadence toward broadcast (no preferred peer).
+    // A member with no usable neighbor, or with neighbors but no route to
+    // its gateway, still needs a new peer. Keep the bounded cadence toward
+    // broadcast; route recovery ignores OFFERs from already-bound peers.
+    const bool route_stranded =
+        gateway_route_missing_since_ms_ != kNoDiscover && any_reachable &&
+        now_ms >= gateway_route_missing_since_ms_ &&
+        now_ms - gateway_route_missing_since_ms_ >= kGatewayRouteRetryDelayMs;
     const bool bootstrap_stranded =
         member_handshake_mode_ && membership_.state() == MembershipState::Member &&
-        first_stale == nullptr &&
-        neighbors_.find([](const Neighbor& n) { return resolvable_phase(n.phase); }) ==
-            nullptr;
+        first_stale == nullptr && (!any_resolvable || route_stranded);
     if ((first_stale == nullptr && !bootstrap_stranded) ||
         membership_.state() == MembershipState::Revoked) {
       next_rediscovery_ms_ = 0;
@@ -2713,7 +2732,8 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
       }
       const NodeId target_node =
           target != nullptr ? target->node : kInvalidNodeId;  // begin_discovery may mutate
-      if (begin_discovery(now_ms, target_node).ok()) {
+      if (begin_discovery_filtered(now_ms, target_node,
+                                   bootstrap_stranded && route_stranded).ok()) {
         if (target_node == repair_demand_) {
           if (Neighbor* attempted = find_neighbor(target_node)) {
             attempted->repair_rediscovery_used = true;
