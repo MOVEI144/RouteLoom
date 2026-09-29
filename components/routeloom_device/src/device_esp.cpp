@@ -878,6 +878,9 @@ struct OwnerHandoff {
 }  // namespace
 
 void Device::start(const DeviceConfig& config) noexcept {
+  // Task creation can fail before the Owner reaches its boot path; fail()
+  // must always consume an initialized RTC streak.
+  fail_streak_boot(s_fail);
   OwnerHandoff handoff{this, &config};
   if (xTaskCreate(&Device::task_entry, "rl_owner", CONFIG_ROUTELOOM_OWNER_TASK_STACK_SIZE,
                   &handoff, CONFIG_ROUTELOOM_OWNER_TASK_PRIORITY, nullptr) != pdPASS) {
@@ -902,9 +905,6 @@ void Device::task_entry(void* argument) noexcept {
 void Device::boot_and_run(DeviceConfig& config) noexcept {
   kTag = config.log_tag;
   tag_ = config.log_tag;
-  // A matching magic is the only thing that distinguishes a streak that
-  // survived esp_restart from power-on garbage in .rtc_noinit.
-  fail_streak_boot(s_fail);
   // PT-4M-v2 is checked before NVS: on another table the NVS labels could
   // point at foreign data.
   Status status = espnow::verify_flash_layout();
