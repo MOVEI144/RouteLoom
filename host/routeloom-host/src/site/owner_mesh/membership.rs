@@ -291,7 +291,10 @@ fn mesh_f01_f02_policy_record_faults() {
         assert!(fired, "mode {mode}: the armed fault fired");
         let r = radio(&world);
         if mode == 0 {
-            assert!(r.applied < r.proxies, "a failed write is never counted applied: {r:?}");
+            assert!(
+                r.applied < r.proxies,
+                "a failed write is never counted applied: {r:?}"
+            );
         }
         assert!(
             r.distributed.unwrap_or(0) >= before,
