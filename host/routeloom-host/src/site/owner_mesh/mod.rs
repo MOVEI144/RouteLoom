@@ -68,6 +68,7 @@ mod fault;
 mod join;
 mod mesh;
 mod peer;
+mod recovery;
 mod report;
 mod switch;
 mod usb_host;
@@ -143,6 +144,7 @@ const DELIVERY_DELIVERED: u8 = 7;
 // C++ `SessionState` (usb_bridge.hpp): the gateway USB is usable in Active.
 const USB_ACTIVE: u8 = 3;
 // C++ `CoordinatorMode` (sdkv1_security_coordinator.hpp).
+const MODE_ZERO_TOUCH: u8 = 1;
 const MODE_MEMBER: u8 = 2;
 // C++ `LifecyclePhase` (sdkv1_revocation.hpp).
 const PHASE_REMOVING: u8 = 7;

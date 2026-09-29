@@ -3,8 +3,12 @@
 
 use super::*;
 
+/// The route-loss rows exercise one known A—gateway (or A—B—gateway)
+/// binding, so they boot on the staggered compatibility plan: which
+/// neighbor a node binds first is up to the radio at a simultaneous boot.
 pub(super) fn route_loss_world(tag: &str, switch: Switch, relay_first: bool) -> Option<MeshWorld> {
-    let mut world = MeshWorld::start_with_profile(tag, switch, true)?;
+    let boot = staggered_boot(switch.nodes());
+    let mut world = MeshWorld::start_plan(tag, switch, &boot, true)?;
     if relay_first {
         world.gate[1] = true;
         world.pump_until(9000, |snaps| {
@@ -138,9 +142,12 @@ fn mesh_route_loss_stale_peer_recovers() {
         world.snaps[0].phases[1], PHASE_REACHABLE,
         "gateway recovered"
     );
+    // The held request may still land after the route is back: wait for
+    // the new message itself.
     let received = world.snaps[0].rx_count;
     world.peers[1].app_send(testkit::GATEWAY, b"after-repair");
-    world.pump_until(2000, |snaps| snaps[0].rx_count > received);
+    world.pump_until(2000, |snaps| snaps[0].rx == b"after-repair");
+    assert!(world.snaps[0].rx_count > received);
     assert_eq!(world.snaps[0].rx, b"after-repair");
 }
 
@@ -726,21 +733,7 @@ fn mesh_forced_multihop_relays() {
     let Some(mut world) = MeshWorld::start("multihop", Switch::forced_multihop()) else {
         return; // no C++ peers: skip (ignore-equivalent)
     };
-    // A hears only B, and B's responder flight is held by its own
-    // gateway link/end exchanges until its channel is ready; an M1
-    // parked that long exhausts the initiator budget with no
-    // first-link re-drive yet (reported residual). Hold A off the air
-    // until the relay converged, then boot it into a free flight.
-    world.gate[1] = true;
-    world.pump_until(9000, |snaps| {
-        snaps[0].authority_ready && snaps[2].authority_ready && snaps[2].join_confirmed
-    });
-    assert!(
-        world.snaps[2].authority_ready && world.snaps[2].join_confirmed,
-        "relay B ready before A boots: {:?}",
-        world.snaps[2]
-    );
-    world.gate[1] = false;
+    // All three boot together; A reaches the gateway only through B.
     world.pump_until(9000, |snaps| {
         snaps.iter().all(|s| {
             s.mode == MODE_MEMBER
@@ -779,7 +772,7 @@ fn mesh_forced_multihop_relays() {
 /// Boots a world outward from the gateway: nodes 2.. stay off the air
 /// until every node before them converged (`converge_gated` applied
 /// hop by hop, so no contender parks its M1 behind a busy relay).
-fn converge_outward(world: &mut MeshWorld, what: &str) {
+pub(super) fn converge_outward(world: &mut MeshWorld, what: &str) {
     let nodes = world.peers.len();
     for gated in 2..nodes {
         world.gate[gated] = true;
@@ -809,7 +802,13 @@ fn converge_outward(world: &mut MeshWorld, what: &str) {
 /// Reliable sends from `from` to `to`, one at a time to its terminal
 /// state within the 30 s send lifetime: each is delivered exactly once
 /// with its payload and source, and the sender holds the receipt.
-fn deliver_each(world: &mut MeshWorld, from: usize, to: usize, count: u32, label: &[u8]) {
+pub(super) fn deliver_each(
+    world: &mut MeshWorld,
+    from: usize,
+    to: usize,
+    count: u32,
+    label: &[u8],
+) {
     let dst = world.nodes[to];
     let base = world.snaps[to].rx_count;
     for index in 0..count {
@@ -859,11 +858,11 @@ fn deliver_each(world: &mut MeshWorld, from: usize, to: usize, count: u32, label
 /// and every frame crossed only the chain's legs.
 ///
 /// Red today: the three-hop leaf's end-to-end handshake with the
-/// gateway expires (end_last_error Expired) and it never gets its
-/// authority channel, with the flat profile too. V2-09 fixes it and
-/// removes the ignore (tests/e2e/scenarios.json M01-T3).
+/// gateway expires (end_last_error Expired) — the chunked m2 needs longer
+/// over three hops than the initiator's resends last — and it never gets
+/// its authority channel (tests/e2e/scenarios.json M01-T3).
 #[test]
-#[ignore = "M01-T3 red: three-hop end-to-end handshake expires (V2-09)"]
+#[ignore = "M01-T3 red: three-hop end-to-end handshake expires"]
 fn mesh_line_three_hops_delivers() {
     let Some(mut world) = MeshWorld::start("line-three-hops", Switch::new(&Topology::line(4)))
     else {

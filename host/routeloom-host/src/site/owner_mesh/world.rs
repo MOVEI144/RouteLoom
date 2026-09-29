@@ -66,8 +66,9 @@ pub(super) fn personas(nodes: usize) -> Vec<Persona> {
     personas
 }
 
-/// The staggered boot plan of the three-node worlds ([0, 2000, 12000])
-/// extended by 10 s per further node.
+/// The compatibility boot plan ([0, 2000, 12000], then +10 s per further
+/// node): the clock offsets the three-node worlds booted with before
+/// simultaneous opens resolved in the Owners.
 pub(super) fn staggered_boot(nodes: usize) -> Vec<u64> {
     (0..nodes as u64)
         .map(|index| match index {
@@ -631,7 +632,9 @@ impl MeshWorld {
     }
 
     pub(super) fn start_with_profile(tag: &str, switch: Switch, flat: bool) -> Option<Self> {
-        let boot_ms = staggered_boot(switch.nodes());
+        // Every node powers on at the same tick (M05's all-at-once boot):
+        // simultaneous opens resolve in the Owners, not by clock offsets.
+        let boot_ms = vec![0; switch.nodes()];
         Self::start_plan(tag, switch, &boot_ms, flat)
     }
 
@@ -684,14 +687,9 @@ impl MeshWorld {
             .collect();
         let now = provision.now;
         let usb_secret_hex = hex(b"routeloom-dev-secret");
-        // Staggered boots (documented harness technique, same as the HIL
-        // rounds): the gateway's responder flight serializes links and a
-        // contender whose M1 budget expires mid-contention has no
-        // first-link re-drive yet (reported residual), so A boots 2 s in
-        // and B only after A's exchange retired (~12 s). Tests that need
-        // a channel-ready gate rather than a clock offset hold the peer
-        // with `gate` and release it once the relay converged
-        // (`staggered_boot`).
+        // Tests that need a channel-ready gate rather than a clock offset
+        // hold the peer with `gate` and release it once the relay
+        // converged; `staggered_boot` is the compatibility boot plan.
         let mut peers = Vec::with_capacity(nodes);
         for (index, persona) in personas.iter().enumerate() {
             // Lifecycle reboots (cutover AdoptNetwork) persist the NVS
@@ -1264,8 +1262,8 @@ pub(super) fn converge(world: &mut MeshWorld, what: &str) {
 }
 
 /// Forced-multihop convergence with one peer held off the air until
-/// the relay converged (the M1-budget technique from
-/// `mesh_forced_multihop_relays`): `gated` boots into a free flight.
+/// the relay converged: `gated` boots into a free flight, so a scenario
+/// starts from a known attach order.
 pub(super) fn converge_gated(world: &mut MeshWorld, gated: usize, what: &str) {
     world.gate[gated] = true;
     world.pump_until(9000, |snaps| {
