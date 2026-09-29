@@ -120,12 +120,12 @@
     {
       "id": "bridge_node-esp32c3-normal-observe-off", "app": "bridge_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y", "CONFIG_ROUTELOOM_DISCOVERY=y", "CONFIG_ROUTELOOM_MIGRATION=1"],
-      "budget": {"app_bin_max": 1048592, "static_free_min": 76512, "rtc_used_max": 96}
+      "budget": {"app_bin_max": 1051376, "static_free_min": 76512, "rtc_used_max": 96}
     },
     {
       "id": "bridge_node-esp32c3-normal-off-endpoints_on", "app": "bridge_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y", "CONFIG_ROUTELOOM_CAPABILITY=0x1f", "CONFIG_ROUTELOOM_USB_GATEWAY_ENDPOINT=y"],
-      "budget": {"app_bin_max": 1025792, "static_free_min": 94592, "rtc_used_max": 96}
+      "budget": {"app_bin_max": 1028688, "static_free_min": 94592, "rtc_used_max": 96}
     },
     {
       "id": "reference_node-esp32c3-normal-off-config_target_on", "app": "reference_node", "target": "esp32c3",
@@ -179,7 +179,7 @@
       "id": "bridge_node-esp32c3-normal-off-route_scoped", "app": "bridge_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y", "CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y"],
       "expect": ["CONFIG_ROUTELOOM_ROUTE_PERIOD_MS=5000", "CONFIG_ROUTELOOM_ROUTE_LIFETIME_MS=90000"],
-      "budget": {"app_bin_max": 998528, "static_free_min": 108560, "rtc_used_max": 96}
+      "budget": {"app_bin_max": 1001472, "static_free_min": 108560, "rtc_used_max": 96}
     },
     {
       "id": "reference_node-esp32c3-normal-off-dev_scoped", "app": "reference_node", "target": "esp32c3",
@@ -215,7 +215,7 @@
       "id": "bridge_node-esp32c3-normal-off-release_os", "app": "bridge_node", "target": "esp32c3",
       "overlay": ["CONFIG_COMPILER_OPTIMIZATION_SIZE=y", "CONFIG_LOG_DEFAULT_LEVEL_WARN=y", "CONFIG_LOG_MAXIMUM_EQUALS_DEFAULT=y"],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"],
-      "budget": {"app_bin_max": 1193536, "static_free_min": 51824, "rtc_used_max": 6632}
+      "budget": {"app_bin_max": 1195808, "static_free_min": 51824, "rtc_used_max": 6632}
     },
     {
       "id": "reference_node-esp32c3-normal-off-release_os", "app": "reference_node", "target": "esp32c3",
@@ -272,7 +272,7 @@
     {
       "id": "bridge_node-esp32c3-normal-discover-paired_bridge", "app": "bridge_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y", "CONFIG_ROUTELOOM_DISCOVERY=y", "CONFIG_ROUTELOOM_CAPABILITY=0x1f", "CONFIG_ROUTELOOM_USB_GATEWAY_ENDPOINT=y", "CONFIG_ROUTELOOM_NODE_ID=0x1", "CONFIG_ROUTELOOM_PEER_NODE_ID=0x2", "CONFIG_ROUTELOOM_PEER_MAC=\"94:a9:90:7a:b5:60\""],
-      "budget": {"app_bin_max": 1036624, "static_free_min": 77592, "rtc_used_max": 96}
+      "budget": {"app_bin_max": 1039440, "static_free_min": 77592, "rtc_used_max": 96}
     },
     {
       "id": "reference_node-esp32c3-normal-discover-paired_target", "app": "reference_node", "target": "esp32c3",
