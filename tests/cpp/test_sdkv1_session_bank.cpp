@@ -665,12 +665,27 @@ void suite_readmit_generation(const AeadGcm& port) {
   install_link(fix.bank, kPeer, 0x1111, 0x2222, 0x10, 1);
   install_link(fix.bank, kPeer, 0x3333, 0x4444, 0x20, 2);
   CHECK(fix.bank.context_id_live(0x2222));  // old RX overlap
-  bool retired = true;
-  CHECK_OK(fix.bank.retire_below_generation(kPeer, 2, retired));
-  CHECK(!retired && fix.bank.has_usable(SecurityScope::Link, kPeer));
+  bool retired_link = true;
+  bool retired_end = true;
+  CHECK_OK(fix.bank.retire_below_generation(kPeer, 2, retired_link, retired_end));
+  CHECK(!retired_link && !retired_end && fix.bank.has_usable(SecurityScope::Link, kPeer));
   CHECK(!fix.bank.context_id_live(0x2222));
-  CHECK_OK(fix.bank.retire_below_generation(kPeer, 3, retired));
-  CHECK(retired && !fix.bank.has_usable(SecurityScope::Link, kPeer));
+  CHECK_OK(fix.bank.retire_below_generation(kPeer, 3, retired_link, retired_end));
+  CHECK(retired_link && !retired_end && !fix.bank.has_usable(SecurityScope::Link, kPeer));
+  Fixture<Bank> mixed;
+  CHECK_OK(mixed.configure(port));
+  install_link(mixed.bank, kPeer, 0x7777, 0x8888, 0x30, 2);
+  SessionBankEntry old_end{};
+  old_end.peer = kPeer;
+  old_end.tx_cid = 0x9999;
+  old_end.rx_cid = 0xAAAA;
+  old_end.created_gk = kGk;
+  old_end.peer_generation = 1;
+  old_end.remaining_ms = Bank::kContextLifetimeMs;
+  CHECK_OK(mixed.bank.restore_entry(SecurityScope::EndToEnd, kPeer, old_end));
+  CHECK_OK(mixed.bank.retire_below_generation(kPeer, 2, retired_link, retired_end));
+  CHECK(!retired_link && retired_end && mixed.bank.has_usable(SecurityScope::Link, kPeer));
+  CHECK(!mixed.bank.has_usable(SecurityScope::EndToEnd, kPeer));
 }
 
 template <typename Bank>

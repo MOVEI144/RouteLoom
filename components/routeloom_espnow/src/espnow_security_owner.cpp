@@ -154,8 +154,9 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::enforce_revocation(
   // sends to revoked peers. The RLP2 resume sweep itself belongs to the
   // lifecycle's Sweep step (the single sweep path) and runs next.
   std::uint32_t retired_old = 0;
+  std::uint32_t retired_links = 0;
   const Status sessions = owner.coordinator().revoke_member_sessions(
-      set, site_epoch, now_ms, &retired_old);
+      set, site_epoch, now_ms, &retired_old, &retired_links);
   if (!sessions) return sessions;
   if (owner.gateway_role() && owner.authority_live_) {
     for (std::size_t i = 0; i < set.count; ++i) {
@@ -167,7 +168,7 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::enforce_revocation(
   if (owner.runtime_ != nullptr) {
     for (std::size_t i = 0; i < set.count; ++i) {
       if (set.entries[i].readmit_gk_epoch != 0 &&
-          (retired_old & (std::uint32_t{1} << i)) == 0) continue;
+          (retired_links & (std::uint32_t{1} << i)) == 0) continue;
       owner.runtime_->node().revoke_routes(set.entries[i].node_id, now_ms);
     }
   }

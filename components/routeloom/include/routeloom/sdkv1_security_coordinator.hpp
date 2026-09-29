@@ -550,11 +550,13 @@ class SecurityCoordinator final : public BootstrapSink,
   // peer, revokes the Discovery binding. RLP1 is swept by the
   // lifecycle itself; RLP2 lookups already fence on the adopted set.
   // A readmitted entry retires only sessions below its min_generation;
-  // `retired_old` marks entries whose old live binding also needs a route
-  // withdrawal. No-op outside Member mode.
+  // `retired_old` marks entries whose old context needs queued sends
+  // cancelled; `retired_links` marks those needing route withdrawal.
+  // No-op outside Member mode.
   Status revoke_member_sessions(const RevocationSet& set, std::uint32_t site_epoch,
                                 MonotonicMs now,
-                                std::uint32_t* retired_old = nullptr) noexcept;
+                                std::uint32_t* retired_old = nullptr,
+                                std::uint32_t* retired_links = nullptr) noexcept;
   // Attaches the authority transport port (once): the mesh endpoint on a
   // device, the direct USB port on a gateway. Until attached the channel
   // stages its carriers and retries on Tick; detaching is not supported

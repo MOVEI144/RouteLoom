@@ -1755,12 +1755,13 @@ void test_revoke_member_sessions() {
   auto readmit_object = revocation_object(readmit);
   CHECK(f.revocations.accept(readmit_object.view(), sak().pub, kSiteId, kNetwork).ok());
   std::uint32_t retired_old = 0;
-  CHECK(coordinator.revoke_member_sessions(readmit, 3, now, &retired_old).ok());
-  CHECK((retired_old & 1U) != 0 &&
+  std::uint32_t retired_links = 0;
+  CHECK(coordinator.revoke_member_sessions(readmit, 3, now, &retired_old, &retired_links).ok());
+  CHECK((retired_old & 1U) != 0 && (retired_links & 1U) != 0 &&
         !SecurityCoordinatorTestAccess::has_link(coordinator, old_peer));
   CHECK(SecurityCoordinatorTestAccess::plant_link(coordinator, old_peer, 2).ok());
-  CHECK(coordinator.revoke_member_sessions(readmit, 3, now, &retired_old).ok());
-  CHECK((retired_old & 1U) == 0 &&
+  CHECK(coordinator.revoke_member_sessions(readmit, 3, now, &retired_old, &retired_links).ok());
+  CHECK((retired_old & 1U) == 0 && (retired_links & 1U) == 0 &&
         SecurityCoordinatorTestAccess::has_link(coordinator, old_peer));
   // Outside Member mode there is nothing live to retire.
   CoordinatorEvent stop{};

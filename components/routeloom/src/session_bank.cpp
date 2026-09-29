@@ -689,8 +689,10 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::retire_all(const NodeId peer) n
 
 template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
 Status SessionBank<kLinkCapacity, kEndCapacity>::retire_below_generation(
-    const NodeId peer, const std::uint32_t min_generation, bool& retired) noexcept {
-  retired = false;
+    const NodeId peer, const std::uint32_t min_generation, bool& retired_link,
+    bool& retired_end) noexcept {
+  retired_link = false;
+  retired_end = false;
   if (reentered()) return Status::error(StatusCode::Busy, "session bank re-entered");
   if (!configured_) return Status::error(StatusCode::InvalidState, "session bank not configured");
   if (!id_valid(peer) || min_generation == 0) {
@@ -701,7 +703,11 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::retire_below_generation(
     if (entry != nullptr && entry->peer_generation < min_generation) {
       const Status status = retire(scope, peer);
       if (!status) return status;
-      retired = true;
+      if (scope == SecurityScope::Link) {
+        retired_link = true;
+      } else {
+        retired_end = true;
+      }
     }
   }
   for (std::size_t i = 0; i < kOverlapCapacity; ++i) {

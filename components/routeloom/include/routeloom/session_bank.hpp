@@ -218,9 +218,10 @@ class SessionBank {
   // A readmitted NodeId may still have a context from its revoked
   // assignment. Retire only current contexts below the new generation;
   // discard every RX overlap for that peer because an overlap has no
-  // separate generation attestation. `retired` reports a current context.
+  // separate generation attestation. Report retired Link and End contexts
+  // separately so a new Link route survives an old End context's removal.
   Status retire_below_generation(NodeId peer, std::uint32_t min_generation,
-                                 bool& retired) noexcept;
+                                 bool& retired_link, bool& retired_end) noexcept;
   // Drops the oldest idle (no live seal reservation), unpinned end context
   // and reports it; NotFound when everything is busy or pinned.
   Status evict_idle_end(NodeId& evicted) noexcept;

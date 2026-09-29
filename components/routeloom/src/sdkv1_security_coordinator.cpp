@@ -3563,10 +3563,12 @@ Status SecurityCoordinator::wipe_site_trust() noexcept {
 Status SecurityCoordinator::revoke_member_sessions(const RevocationSet& set,
                                                    const std::uint32_t site_epoch,
                                                    const MonotonicMs now,
-                                                   std::uint32_t* retired_old) noexcept {
+                                                   std::uint32_t* retired_old,
+                                                   std::uint32_t* retired_links) noexcept {
   (void)site_epoch;
   (void)now;
   if (retired_old != nullptr) *retired_old = 0;
+  if (retired_links != nullptr) *retired_links = 0;
   if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
   if (mode_ != CoordinatorMode::Member) return Status::success();
   // The set must be the adopted one: the lifecycle commits before
@@ -3583,13 +3585,17 @@ Status SecurityCoordinator::revoke_member_sessions(const RevocationSet& set,
     const NodeId peer = set.entries[i].node_id;
     if (peer == kInvalidNodeId || peer == kBroadcastNodeId) continue;
     if (set.entries[i].readmit_gk_epoch != 0) {
-      bool retired = false;
+      bool retired_link = false;
+      bool retired_end = false;
       const Status status = bank_.retire_below_generation(
-          peer, set.entries[i].min_generation, retired);
+          peer, set.entries[i].min_generation, retired_link, retired_end);
       if (!status) return status;
-      if (retired_old != nullptr && retired) *retired_old |= std::uint32_t{1} << i;
+      if (retired_old != nullptr && (retired_link || retired_end)) {
+        *retired_old |= std::uint32_t{1} << i;
+      }
+      if (retired_links != nullptr && retired_link) *retired_links |= std::uint32_t{1} << i;
       if (deps_.discovery != nullptr) {
-        if (retired) (void)deps_.discovery->revoke_peer(peer);
+        if (retired_link) (void)deps_.discovery->revoke_peer(peer);
         (void)deps_.discovery->forget_peer(peer);
       }
       continue;
