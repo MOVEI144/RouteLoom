@@ -1051,5 +1051,8 @@ std::size_t SessionBank<kLinkCapacity, kEndCapacity>::demand_count() const noexc
 
 template class SessionBank<32, 8>;
 template class SessionBank<32, 128>;
+#if ROUTELOOM_RESOURCE_PROFILE == ROUTELOOM_PROFILE_GATEWAY_SMALL
+template class SessionBank<profile::kLinkSessions, profile::kEndSessions>;
+#endif
 
 }  // namespace routeloom::sdkv1

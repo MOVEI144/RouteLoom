@@ -111,9 +111,11 @@ struct SecurityCoordinatorTestAccess {
     reply.received = received;
     return coordinator.member().end_tx.on_reply(reply, now);
   }
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
   static JoinRelayGateway& gateway(SecurityCoordinator& coordinator) noexcept {
     return coordinator.member().gateway;
   }
+#endif
 };
 }  // namespace routeloom::sdkv1
 
@@ -421,6 +423,15 @@ SiteRecord gateway_site() {
   return r;
 }
 
+SiteRecord relay_site() {
+  SiteRecord r = site_record();
+  r.role = static_cast<std::uint8_t>(kMemberRoleEndpoint | kMemberRoleRelay);
+  CertClaims claims = membercert_claims(r.assignment_generation, r.network);
+  claims.role = r.role;
+  r.member_cert = issue(claims, sak());
+  return r;
+}
+
 // --- Tests ----------------------------------------------------------------------
 
 void test_boot_silent_adoption() {
@@ -533,6 +544,26 @@ void test_boot_silent_adoption() {
   CHECK(coordinator.session_provider().tx_epoch(SecurityScope::Link, kNode + 1, epoch).code ==
         StatusCode::AuthRequired);
   CHECK(coordinator.snapshot().demands == 1);
+}
+
+void test_site_role_above_profile_is_not_adopted() {
+  if (profile::kGateway) return;
+  current = "site_role_above_profile_is_not_adopted";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(profile::kMaxRole == profile::Role::Endpoint ? relay_site()
+                                                                 : gateway_site()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  for (int i = 0; i < 10; ++i) {
+    CHECK(coordinator.step(poll_at(kT0 + static_cast<MonotonicMs>(i + 1) * 100)).ok());
+    CoordinatorAction action{};
+    while (coordinator.take_action(action).ok()) {
+      CHECK(action.kind != CoordinatorActionKind::ApplyMemberConfig);
+    }
+  }
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Recovery);
 }
 
 void test_member_apply_failure_is_closed() {
@@ -754,11 +785,12 @@ void test_zt_unicast_does_not_claim_member_demux() {
 }
 
 void test_member_proxy_receives_zt_discover() {
+  if (profile::kResourceProfile == profile::ResourceProfile::Relay) return;
   current = "member_proxy_receives_zt_discover";
   Fixture f{};
   CHECK(f.init_stores());
   CHECK(f.identity.commit(identity_record()).ok());
-  SiteRecord site = gateway_site();
+  SiteRecord site = profile::kGateway ? gateway_site() : site_record();
   site.gateway_count = 1;
   site.gateways[0] = kNode;
   site.gateways[1] = kInvalidNodeId;
@@ -785,9 +817,18 @@ void test_member_proxy_receives_zt_discover() {
   rx.rld1_frame = frame.view();
   const auto before = SecurityCoordinatorTestAccess::proxy_stats(coordinator).discovers_rx;
   CHECK(coordinator.step(rx).ok());
-  CHECK(SecurityCoordinatorTestAccess::proxy_stats(coordinator).discovers_rx == before + 1);
+  if (profile::kGateway) {
+    CHECK(SecurityCoordinatorTestAccess::proxy_stats(coordinator).discovers_rx == before + 1);
+  }
   CHECK(coordinator.step(poll_at(now + 100)).ok());
-  CHECK(SecurityCoordinatorTestAccess::proxy_stats(coordinator).epoch_replies_rx == 1);
+  const auto& stats = SecurityCoordinatorTestAccess::proxy_stats(coordinator);
+  if (profile::kGateway) {
+    CHECK(stats.epoch_replies_rx == 1);
+  } else {
+    // e2e-matrix J06: the site names this endpoint its gateway, but an
+    // endpoint profile never proxies, so the DISCOVER gets no OFFER.
+    CHECK(stats.epoch_replies_rx == 0 && stats.offers_tx == 0);
+  }
 }
 
 void test_zt_wait_m2_status_after_demux_exhaustion() {
@@ -1171,6 +1212,7 @@ void test_epoch_reply_routes_to_proxy() {
   CHECK(SecurityCoordinatorTestAccess::proxy_stats(coordinator).frames_rejected == rej0 + 1);
 }
 
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
 namespace {
 // Captures the hops of the first relay_up handed to the host.
 struct HopsTap final : public JoinRelayHostSink {
@@ -1239,6 +1281,7 @@ void test_relay_hops_direct_is_one() {
   CHECK(tap.seen);
   CHECK(tap.hops == 1);
 }
+#endif
 
 void test_usb_queue_admission() {
   current = "usb_queue_admission";
@@ -2303,9 +2346,23 @@ CoordinatorDevConfig dev_config() {
   config.network = kNetwork;
   config.node = kNode;
   config.boot = 77;
-  config.role = static_cast<std::uint32_t>(kMemberRoleEndpoint | kMemberRoleRelay);
+  config.role = static_cast<std::uint32_t>(kMemberRoleEndpoint) |
+                (profile::kMaxRole >= profile::Role::Relay ? kMemberRoleRelay : 0);
   config.channel = 6;
   return config;
+}
+
+void test_dev_role_above_allowed_refused() {
+  current = "dev_role_above_allowed_refused";
+  Fixture f{};
+  CHECK(f.init_stores());
+  SecurityCoordinator::Deps deps = f.deps();
+  deps.allowed_role = profile::Role::Endpoint;
+  SecurityCoordinator coordinator(deps);
+  CoordinatorDevConfig config = dev_config();
+  config.role = kMemberRoleEndpoint | kMemberRoleRelay;
+  CHECK(coordinator.adopt_dev(config, kT0).code == StatusCode::Unsupported);
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Fresh);
 }
 
 void test_dev_adopt_validation() {
@@ -2359,7 +2416,7 @@ void test_dev_adopt_validation() {
   CHECK(action.member.network == kNetwork && action.member.node == kNode);
   CHECK(action.member.message_session == 77 && action.member.boot_session == 77);
   CHECK(action.member.link_epoch == 1 && action.member.end_epoch == 1);
-  CHECK(action.member.role == (kMemberRoleEndpoint | kMemberRoleRelay));
+  CHECK(action.member.role == dev_config().role);
   for (const NodeId gateway : action.member.route_gateways) CHECK(gateway == kInvalidNodeId);
   DiscoveryConfig discovery{};
   CHECK(coordinator.member_discovery_config(discovery).ok());
@@ -2894,6 +2951,7 @@ void test_milestones_confirmed_gap_past_18h() {
 
 int main() {
   test_boot_silent_adoption();
+  test_site_role_above_profile_is_not_adopted();
   test_member_apply_failure_is_closed();
   test_rld1_demux_gates();
   test_invalid_proxy_auth_does_not_hold_demux();
@@ -2903,13 +2961,19 @@ int main() {
   test_zt_wait_m2_status_after_demux_exhaustion();
   test_zt_m2_after_nine_exchanges();
   test_clock_regression_refused();
-  test_gateway_resume_quotas();
   test_staged_bootstrap_rx();
   test_epoch_reply_routes_to_proxy();
+  // Gateway-role suites: the gateway resume geometry, the relay gateway
+  // and its USB downs exist on gateway profiles only.
+  if (profile::kGateway) {
+    test_gateway_resume_quotas();
+    test_usb_queue_admission();
+    test_relay_loopback_and_mesh_send();
+  }
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
   test_relay_hops_direct_is_one();
-  test_usb_queue_admission();
+#endif
   test_usb_refused_without_gateway_role();
-  test_relay_loopback_and_mesh_send();
   test_late_discovery_attach();
   test_sleep_wake_stop();
   test_lifecycle_stop_defers_durable_resume_clear();
@@ -2933,6 +2997,7 @@ int main() {
   test_wipe_site_trust();
   test_revoke_member_sessions();
   test_dev_adopt_validation();
+  test_dev_role_above_allowed_refused();
   test_dev_scope_agrees_across_nodes();
   test_dev_mux_routing();
   test_dev_stop_readopt();

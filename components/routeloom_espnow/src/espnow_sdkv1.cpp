@@ -13,9 +13,10 @@
 #include "nvs_flash.h"
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/espnow_board_config.hpp"
-#include "routeloom/hex.hpp"
 #include "routeloom/espnow_sdkv1_entropy.hpp"
+#include "routeloom/hex.hpp"
 #include "routeloom/nvs_legacy_purge.hpp"
+#include "routeloom/profile.hpp"
 #include "routeloom/sdkv1_board_setup.hpp"
 #include "routeloom/sdkv1_dev_session.hpp"
 #include "routeloom/sdkv1_legacy_purge.hpp"
@@ -209,11 +210,9 @@ void console_task(void* arg) {
   routeloom::BoardBootIdentity* expected = nullptr;
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   setup_identity.chip = board_chip();
-#ifdef ROUTELOOM_REFERENCE_IMAGE
-  setup_identity.role = routeloom::BoardRole::Reference;
-#else
-  setup_identity.role = routeloom::BoardRole::Bridge;
-#endif
+  setup_identity.role = routeloom::profile::kRole == routeloom::profile::Role::Gateway
+                            ? routeloom::BoardRole::Bridge
+                            : routeloom::BoardRole::Reference;
 #if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
   setup_identity.security = routeloom::BoardSecurity::DevRam;
 #else
@@ -332,8 +331,7 @@ Sdkv1Stores::Sdkv1Stores(const std::size_t resume_slots) noexcept
     : resume_slots_(resume_slots),
       ident_storage_(ident_ns_, sdkv1::kIdentityKey0, sdkv1::kIdentityKey1,
                      sdkv1::kIdentitySlotBytes),
-      site_storage_(site_ns_, sdkv1::kSiteKey0, sdkv1::kSiteKey1,
-                    sdkv1::kSiteSlotBytes),
+      site_storage_(site_ns_, sdkv1::kSiteKey0, sdkv1::kSiteKey1, sdkv1::kSiteSlotBytes),
       revo_storage_(revo_ns_, sdkv1::kRevocationKey0, sdkv1::kRevocationKey1,
                     sdkv1::kRevocationSlotBytes),
       local_revocation_storage_(local_revocation_ns_, sdkv1::kLocalRevocationKey0,
@@ -344,15 +342,8 @@ Sdkv1Stores::Sdkv1Stores(const std::size_t resume_slots) noexcept
       identity_(ident_storage_),
       site_(site_storage_),
       revocation_(revo_storage_),
-      resume_cache_(resume2_storage_,
-                    resume_slots ==
-                            sdkv1::kResume2GatewayLinkQuota + sdkv1::kResume2GatewayEndQuota
-                        ? sdkv1::kResume2GatewayLinkQuota
-                        : sdkv1::kResume2NodeLinkQuota,
-                    resume_slots ==
-                            sdkv1::kResume2GatewayLinkQuota + sdkv1::kResume2GatewayEndQuota
-                        ? sdkv1::kResume2GatewayEndQuota
-                        : sdkv1::kResume2NodeEndQuota),
+      resume_cache_(resume2_storage_, sdkv1::resume_quota(resume_slots).link,
+                    sdkv1::resume_quota(resume_slots).end),
       local_revocation_(local_revocation_storage_),
       lifecycle_(lifecycle_storage_) {}
 

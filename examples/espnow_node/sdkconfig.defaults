@@ -18,3 +18,7 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# Endpoint role and profile (components/routeloom/Kconfig): a node that
+# does not relay keeps 8 end sessions and a 16-entry route table.
+CONFIG_ROUTELOOM_ROLE_ENDPOINT=y
+CONFIG_ROUTELOOM_RESOURCE_PROFILE_ENDPOINT=y

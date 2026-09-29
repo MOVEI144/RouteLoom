@@ -428,8 +428,7 @@ namespace routeloom::espnow {
 
 struct EspNowSecurityOwnerTestAccess {
   static bool down_live_to(EspNowSecurityOwner& owner, NodeId node) noexcept {
-    return owner.authority_live_ && owner.config_.gateway &&
-           owner.gateway()->down_live_to(node);
+    return owner.authority_live_ && owner.gateway_role() && owner.gateway()->down_live_to(node);
   }
 };
 
@@ -1112,7 +1111,7 @@ int main(int argc, char** argv) {
       kMemberRoleEndpoint | kMemberRoleRelay | (setup.gateway ? kMemberRoleGateway : 0);
   owner_config.joiner.requested_role = setup.role;
   owner_config.log_tag = "mesh_peer";
-  owner_config.gateway = setup.gateway;
+  owner_config.role = setup.gateway ? profile::Role::Gateway : profile::kRole;
   owner_config.flat_group_routing = setup.flat;
 
   EspOwnerEntropy entropy;

@@ -6,6 +6,7 @@
 #include <type_traits>
 
 #include "routeloom/fixed_containers.hpp"
+#include "routeloom/profile.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 
@@ -16,7 +17,7 @@ using RouteSequence = std::uint16_t;
 using RouteGeneration = std::uint32_t;
 
 constexpr RouteMetric kInfiniteRouteMetric = UINT16_MAX;
-constexpr std::size_t kMaxRouteEntries = 128;
+constexpr std::size_t kMaxRouteEntries = profile::kRouteEntries;
 constexpr std::size_t kRouteCandidatesPerDestination = 3;
 // Feasibility state (FD + last seen origin generation) is kept in the entry as
 // a tombstone after the last candidate is gone, so a re-advertised stale route

@@ -883,33 +883,37 @@ def validate(root: Path) -> dict:
                 and profile["measured_peak_bytes"] is None
                 and profile["voter_enabled"] is False,
             )
-        # The compile-time dedup profiles (node.hpp, issue #39) are the
-        # resource-profile values, and the ESP-IDF Kconfig / host CMake
-        # selectors offer exactly those capacities.
+        # The compile-time dedup values (profile.hpp, issue #39) are the
+        # resource-profile values. Zero asks the header to select its
+        # profile default; explicit Kconfig choices retain the old sizes.
         profile_entries = {
             "Leaf": resources["profiles"]["leaf-small"]["dedup_entries"],
             "Relay": resources["profiles"]["relay-c3"]["dedup_entries"],
             "Gateway": resources["profiles"]["gateway-s3"]["dedup_entries"],
         }
-        node_hpp = (
-            root / "components/routeloom/include/routeloom/node.hpp"
+        profile_hpp = (
+            root / "components/routeloom/include/routeloom/profile.hpp"
         ).read_text(encoding="utf-8")
+        node_hpp = (root / "components/routeloom/include/routeloom/node.hpp").read_text(
+            encoding="utf-8"
+        )
         header_caps = {
             name: int(value)
             for name, value in re.findall(
                 r"constexpr std::size_t kDedupCapacity(Leaf|Relay|Gateway) = (\d+);",
-                node_hpp,
+                profile_hpp,
             )
         }
         test("dedup_profile_capacities", header_caps == profile_entries,
-             "node.hpp kDedupCapacity{Leaf,Relay,Gateway} vs dedup_entries")
+             "profile.hpp kDedupCapacity{Leaf,Relay,Gateway} vs dedup_entries")
         default_cap = re.search(
             r"#define ROUTELOOM_DEDUP_CAPACITY (\d+)", node_hpp
         )
         test(
-            "dedup_default_relay",
+            "dedup_default_profile",
             default_cap is not None
-            and int(default_cap.group(1)) == profile_entries["Relay"],
+            and int(default_cap.group(1)) == 0
+            and "profile::kDedupCapacityDefault" in node_hpp,
         )
         kconfig = (root / "components/routeloom/Kconfig").read_text(encoding="utf-8")
         # Only the ROUTELOOM_DEDUP_CAPACITY block carries dedup capacities;
@@ -919,16 +923,16 @@ def validate(root: Path) -> dict:
             r"^\s*config ROUTELOOM_DEDUP_CAPACITY\b(.*?)(?=^\s*(?:config|choice|menu|endmenu)\b)",
             kconfig, re.M | re.S,
         )
-        kconfig_caps = sorted(
+        kconfig_caps = sorted({
             int(value)
             for value in re.findall(
                 r"^\s*default (\d+)\b", dedup_block.group(1) if dedup_block else "", re.M
             )
-        )
+        })
         test(
             "dedup_kconfig_capacities",
-            kconfig_caps == sorted(profile_entries.values()),
-            "components/routeloom/Kconfig ROUTELOOM_DEDUP_CAPACITY defaults vs dedup_entries",
+            kconfig_caps == sorted([0, *profile_entries.values()]),
+            "components/routeloom/Kconfig dedup overrides and profile default",
         )
         preauth = resources["preauth"]
         test(

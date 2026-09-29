@@ -53,8 +53,9 @@ class CellList(unittest.TestCase):
     def test_cells_cover_every_app_and_target_with_a_budget(self):
         data = check.load_cells()
         cells = data["cells"]
-        # 37 cells of the pre-v2 matrix, the 5 C6 cells made required, bench C6.
-        self.assertEqual(len(cells), 43)
+        # 37 cells of the pre-v2 matrix, the 5 C6 cells made required, bench C6,
+        # the C3 gateway-128 and endpoint cells, and two release (-Os) comparisons.
+        self.assertEqual(len(cells), 47)
         for cell in cells:
             self.assertTrue((ROOT / "firmware" / cell["app"]).is_dir(), cell["id"])
             if cell["id"].startswith("experimental-c6-"):
@@ -101,7 +102,8 @@ class CellList(unittest.TestCase):
 
     def test_workflow_runs_every_ci_stage(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        for stage in ("core --sanitizers", "docs", "golden", "rust", "interop", "fuzz"):
+        for stage in ("core --sanitizers", "docs", "golden", "rust", "interop",
+                      "profiles --build", "profile-mesh", "fuzz"):
             self.assertIn(f"python3 tools/check.py {stage}", workflow)
 
     def test_ci_requires_e2e_report_artifact(self):
@@ -112,7 +114,8 @@ class CellList(unittest.TestCase):
     def test_ci_dry_run_lists_every_stage_and_cell(self):
         code, out, _ = run_main(["ci", "--dry-run"])
         self.assertEqual(code, 0)
-        for stage in ("docs", "core", "golden", "rust", "interop", "fuzz", "firmware"):
+        for stage in ("docs", "core", "golden", "rust", "interop", "profiles", "profile-mesh",
+                      "fuzz", "firmware"):
             self.assertIn(f"=== {stage}\n", out)
         for cell in check.load_cells()["cells"]:
             self.assertIn(f"check.py size --cell {cell['id']}\n", out)
@@ -337,6 +340,16 @@ class Scenarios(unittest.TestCase):
         # The red three-hop row is ignored by the suite, not required.
         self.assertNotIn("site::owner_mesh::mesh::mesh_line_three_hops_delivers",
                          steps[1].require)
+
+    def test_profile_mesh_requires_every_mixed_case(self):
+        step = check.profile_mesh()[-1]
+        self.assertEqual(set(step.require or ()), {
+            "site::owner_mesh::mesh::mesh_direct_converges_and_delivers",
+            "site::owner_mesh::mesh::mesh_forced_multihop_relays",
+            "site::owner_mesh::join::mesh_group_key_rotate_acknowledged",
+            "site::owner_mesh::cutover::mesh_cutover_prepare_commit_applied",
+            "site::owner_mesh::mesh::mesh_profile_role_above_profile_refused",
+        })
 
     def test_interop_rejects_incompatible_peer_protocol(self):
         checks = [step.argv for step in check.interop()

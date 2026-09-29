@@ -35,7 +35,11 @@ pub(super) fn personas(nodes: usize) -> Vec<Persona> {
             node: NODE_A,
             mac: MAC_A,
             seed: SEED_A,
-            role: ROLE_MEMBER,
+            role: if std::env::var_os("ROUTELOOM_MESH_PEER_A").is_some() {
+                ROLE_ENDPOINT
+            } else {
+                ROLE_MEMBER
+            },
             gateway: false,
         },
         Persona {
@@ -102,6 +106,8 @@ impl Phase0Snapshot {
             .map(|(index, persona)| {
                 let role = if persona.gateway {
                     Role::Gateway
+                } else if persona.role == ROLE_ENDPOINT {
+                    Role::Endpoint
                 } else {
                     Role::Relay
                 };

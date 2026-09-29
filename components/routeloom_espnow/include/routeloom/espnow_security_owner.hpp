@@ -35,6 +35,7 @@
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/espnow_sdkv1.hpp"
 #include "routeloom/espnow_sdkv1_entropy.hpp"
+#include "routeloom/profile.hpp"
 #include "routeloom/psa_aead_gcm.hpp"
 #include "routeloom/psa_session_aead.hpp"
 #include "routeloom/sdkv1_authority_transport.hpp"
@@ -65,8 +66,10 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
     const char* log_tag{"sec_owner"};
     // Gateway builds (USB-attached) relay authority carriers between
     // the mesh and USB 0x64/0x65 and run their own channel over direct
-    // USB; devices run one mesh endpoint for the local channel only.
-    bool gateway{false};
+    // USB; devices run one mesh endpoint for the local channel only. A
+    // role above the resource profile refuses begin() before RF starts
+    // (RESOURCE_PROFILE_ROLE_MISMATCH).
+    profile::Role role{profile::kRole};
     // Member joins run the flat-profile group tree (dev-flow §6.1): the
     // verified SitePackage gateway list is adopted as group roots, not as
     // gateway-scoped anchors. Board config (D02) or a Kconfig opt-in sets
@@ -346,6 +349,11 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // via ActionDone once it re-adopts (adopt_network_disposition). Never
   // returns.
   [[noreturn]] void reboot_for_lifecycle(const char* reason) noexcept;
+
+  bool gateway_role() const noexcept { return config_.role == profile::Role::Gateway; }
+  // The USB bridge exists on gateway profiles only; elsewhere this is a
+  // constant nullptr, so no UsbBridge code links into the image.
+  usb::UsbBridge* bridge() const noexcept { return profile::kGateway ? bridge_ : nullptr; }
 
   Config config_{};
   Sdkv1Stores* stores_{nullptr};

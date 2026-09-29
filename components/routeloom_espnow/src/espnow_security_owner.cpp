@@ -13,9 +13,10 @@
 namespace routeloom::espnow {
 
 // The P6 lifecycle is CPU-only state. Member builds with RTC capacity keep
-// it outside the main radio/USB SRAM bank.
+// it outside the main radio/USB SRAM bank (on C5 only outside the gateway
+// role, whose LP RAM already holds the Owner).
 #if CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32S3 || \
-    (CONFIG_IDF_TARGET_ESP32C5 && defined(ROUTELOOM_REFERENCE_IMAGE))
+    (CONFIG_IDF_TARGET_ESP32C5 && !CONFIG_ROUTELOOM_ROLE_GATEWAY)
 RTC_DATA_ATTR
 #endif
 alignas(sdkv1::MembershipLifecycle)
@@ -36,7 +37,7 @@ constexpr MonotonicMs kRetiredPullWindowMs = 10000;
 EspNowSecurityOwner::~EspNowSecurityOwner() noexcept {
   if (authority_live_) {
     mesh_sink()->~AuthorityMeshSink();
-    if (config_.gateway) {
+    if (gateway_role()) {
       gateway()->~AuthorityGateway();
     } else {
       endpoint()->~AuthorityEndpoint();
@@ -104,7 +105,7 @@ bool EspNowSecurityOwner::LifecycleAuthorityPort::authority_tx_settled() noexcep
   const sdkv1::AuthoritySnapshot snap = owner.coordinator().authority_snapshot();
   if (snap.state != sdkv1::AuthoritySnapshot::State::Ready) return true;
   if (snap.busy) return false;
-  if (owner.config_.gateway) return !owner.usb_tx_pending_;
+  if (owner.gateway_role()) return !owner.usb_tx_pending_;
   return owner.endpoint()->quiescent();
 }
 
@@ -148,7 +149,7 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::enforce_revocation(
   // authority down transfers cancel with them (no notice may extend a
   // revoked peer's mesh lifetime). The revoked device still learns
   // its removal over the ZT recovery path (04 §6.3).
-  if (owner.config_.gateway && owner.authority_live_) {
+  if (owner.gateway_role() && owner.authority_live_) {
     for (std::size_t i = 0; i < set.count; ++i) {
       owner.gateway()->cancel_down_to(set.entries[i].node_id);
     }
@@ -384,12 +385,12 @@ MeshConfigPort* EspNowSecurityOwner::mesh_port() noexcept {
 }
 
 sdkv1::AuthorityEndpoint* EspNowSecurityOwner::endpoint() noexcept {
-  if (!authority_live_ || config_.gateway) return nullptr;
+  if (!authority_live_ || gateway_role()) return nullptr;
   return reinterpret_cast<sdkv1::AuthorityEndpoint*>(transport_box_.endpoint.data());
 }
 
 sdkv1::AuthorityGateway* EspNowSecurityOwner::gateway() noexcept {
-  if (!authority_live_ || !config_.gateway) return nullptr;
+  if (!authority_live_ || !gateway_role()) return nullptr;
   return reinterpret_cast<sdkv1::AuthorityGateway*>(transport_box_.gateway.data());
 }
 
@@ -404,8 +405,8 @@ NodeId EspNowSecurityOwner::self_node() const noexcept {
 
 sdkv1::AuthorityMeshDemux* EspNowSecurityOwner::authority_demux() noexcept {
   if (!authority_live_) return nullptr;
-  return config_.gateway ? static_cast<sdkv1::AuthorityMeshDemux*>(gateway())
-                         : static_cast<sdkv1::AuthorityMeshDemux*>(endpoint());
+  return gateway_role() ? static_cast<sdkv1::AuthorityMeshDemux*>(gateway())
+                        : static_cast<sdkv1::AuthorityMeshDemux*>(endpoint());
 }
 
 ConfigEndpointSink* EspNowSecurityOwner::authority_mesh_sink() noexcept {
@@ -418,7 +419,7 @@ const sdkv1::LifecycleJournal& EspNowSecurityOwner::lifecycle_journal() const no
 
 void EspNowSecurityOwner::emit_lifecycle_diagnostic(
     const sdkv1::LifecycleEvent& event) noexcept {
-  if (bridge_ == nullptr) return;
+  if (bridge() == nullptr) return;
   // Stable vocabulary, numeric fields only — the PC greps these from its
   // event ring. Self-scoped events carry kInvalidNodeId like the mesh's
   // own self diagnostics; peer-scoped ones name the peer.
@@ -464,16 +465,15 @@ void EspNowSecurityOwner::emit_lifecycle_diagnostic(
   const bool peer_scoped =
       event.kind == sdkv1::LifecycleEventKind::GossipStalled ||
       event.kind == sdkv1::LifecycleEventKind::SelfRevoked;
-  bridge_->on_diagnostic(text, peer_scoped ? event.peer : kInvalidNodeId,
-                         nullptr);
+  bridge()->on_diagnostic(text, peer_scoped ? event.peer : kInvalidNodeId, nullptr);
 }
 
 void EspNowSecurityOwner::emit_recovery_diagnostic(const std::uint8_t reason) noexcept {
-  if (bridge_ == nullptr) return;
+  if (bridge() == nullptr) return;
   char text[64]{};
   std::snprintf(text, sizeof(text), "RECOVERY_REQUIRED:reason=%u",
                 static_cast<unsigned>(reason));
-  bridge_->on_diagnostic(text, kInvalidNodeId, nullptr);
+  bridge()->on_diagnostic(text, kInvalidNodeId, nullptr);
 }
 
 Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
@@ -485,6 +485,13 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
   if (config.local_node == kInvalidNodeId || config.local_node == kBroadcastNodeId ||
       config.local_mac == routeloom::MacAddress{}) {
     return Status::error(StatusCode::InvalidArgument, "owner identity");
+  }
+  if (!profile::role_fits(config.role) ||
+      (profile::kRoleFixed && config.role != profile::kRole) ||
+      (config.joiner.requested_role & ~profile::role_mask(config.role)) != 0 ||
+      (stores.site().has_site() &&
+       (stores.site().site().role & ~profile::role_mask(config.role)) != 0)) {
+    return Status::error(StatusCode::Unsupported, "RESOURCE_PROFILE_ROLE_MISMATCH");
   }
   // The sealer is constructed UNKEYED here: begin() runs before the
   // radio is up (the runtime constructor needs the provider view first),
@@ -516,6 +523,7 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
   deps.local_mac = config_.local_mac;
   deps.local_node = config_.local_node;
   deps.joiner_config = config_.joiner;
+  deps.allowed_role = config_.role;
   new (coordinator_box_.data()) sdkv1::SecurityCoordinator(deps);
   coordinator_live_ = true;
   // The P6 membership lifecycle beside the coordinator: same stores and
@@ -526,8 +534,8 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
   lifecycle_config.self = stores_->identity().has_identity()
                               ? stores_->identity().identity().node_id
                               : config_.local_node;
-  lifecycle_config.profile = config_.gateway ? sdkv1::LifecycleProfile::Gateway
-                                                       : sdkv1::LifecycleProfile::Node;
+  lifecycle_config.profile =
+      gateway_role() ? sdkv1::LifecycleProfile::Gateway : sdkv1::LifecycleProfile::Node;
   lifecycle_config.enabled_features = kCapRrsGossipV1;
   sdkv1::LifecyclePorts lifecycle_ports{lifecycle_authority_, lifecycle_peer_, lifecycle_runtime_,
                                         *entropy_, lifecycle_sink_, &lifecycle_observer_};
@@ -558,6 +566,9 @@ Status EspNowSecurityOwner::attach_runtime(EspNowRuntime& runtime) noexcept {
 }
 
 Status EspNowSecurityOwner::attach_usb(usb::UsbBridge& bridge) noexcept {
+  if (!profile::kGateway) {
+    return Status::error(StatusCode::Unsupported, "USB bridge needs a gateway profile");
+  }
   if (!begun_) return Status::error(StatusCode::InvalidState, "owner not begun");
   if (bridge_ != nullptr) {
     return Status::error(StatusCode::AlreadyExists, "usb already attached");
@@ -624,19 +635,19 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
   // and, on gateways, the bridge (USB lane + local direct port): both
   // attach before boot. Port attach precedes the Boot step so the first
   // adoption can start its channel immediately.
-  if (config_.gateway && bridge_ == nullptr) {
+  if (gateway_role() && bridge() == nullptr) {
     return Status::error(StatusCode::InvalidState, "gateway without usb bridge");
   }
   new (mesh_port_box_.data()) MeshConfigPort(runtime_->node());
   authority_live_ = true;  // the accessors below (and the dtor) go live here
-  if (config_.gateway) {
+  if (gateway_role()) {
     new (transport_box_.gateway.data())
         sdkv1::AuthorityGateway(*mesh_port(), *this, *this, config_.local_node);
     new (mesh_sink_box_.data()) sdkv1::AuthorityMeshSink(*gateway());
     direct_port_.bind(this);
     Status authority_status = coordinator().attach_authority_port(direct_port_);
     if (!authority_status) return authority_status;
-    authority_status = bridge_->attach_authority(*this);
+    authority_status = bridge()->attach_authority(*this);
     if (!authority_status) return authority_status;
   } else {
     new (transport_box_.endpoint.data())
@@ -751,10 +762,12 @@ void EspNowSecurityOwner::poll_steps(const MonotonicMs now_ms) noexcept {
       const auto counts = coordinator().counters();
       const auto* disc = discovery();
       ESP_LOGI(config_.log_tag,
-               "member state=%u links=%lu ends=%lu authority=%u/%u confirm=%u demux_drop=%lu",
+               "member state=%u links=%lu ends=%lu end_evict=%lu authority=%u/%u confirm=%u "
+               "demux_drop=%lu",
                static_cast<unsigned>(snap.membership),
                static_cast<unsigned long>(snap.link_sessions),
                static_cast<unsigned long>(snap.end_sessions),
+               static_cast<unsigned long>(snap.end_evictions),
                static_cast<unsigned>(snap.authority_started),
                static_cast<unsigned>(snap.authority_ready),
                static_cast<unsigned>(snap.join_confirmed),
@@ -786,7 +799,7 @@ void EspNowSecurityOwner::poll_steps(const MonotonicMs now_ms) noexcept {
                static_cast<unsigned>(authority.pull_pending),
                static_cast<unsigned>(authority.busy),
                static_cast<unsigned long>(authority.backoff_s));
-      if (config_.gateway && gateway() != nullptr) {
+      if (gateway_role() && gateway() != nullptr) {
         const auto& relay = gateway()->counters();
         ESP_LOGI(config_.log_tag,
                  "authority relay rx_carrier=%lu rx_manifest=%lu rx_chunk=%lu up=%lu blocked=%lu denied=%lu timeout=%lu",
@@ -1212,7 +1225,7 @@ void EspNowSecurityOwner::complete_lifecycle_recovery(const bool reprovisioned,
 
 void EspNowSecurityOwner::drive_authority(const MonotonicMs now_ms) noexcept {
   if (!authority_live_) return;
-  if (config_.gateway) {
+  if (gateway_role()) {
     gateway()->poll(now_ms);  // local downs deliver via on_local_down
     // The direct port stages exactly one completion per accepted send
     // (the port contract); it cannot feed the coordinator from inside
@@ -1251,8 +1264,8 @@ void EspNowSecurityOwner::drive_authority(const MonotonicMs now_ms) noexcept {
   // USB session edges drive the USB-bound channel: down arrives through
   // the bridge sinks; up is an edge the bridge never announces, so the
   // poll watches for it.
-  if (bridge_ != nullptr) {
-    const bool active = bridge_->state() == usb::SessionState::Active;
+  if (bridge() != nullptr) {
+    const bool active = bridge()->state() == usb::SessionState::Active;
     if (active && !usb_session_active_) {
       sdkv1::CoordinatorEvent up{};
       up.kind = sdkv1::CoordinatorEventKind::UsbSessionUp;
@@ -1433,7 +1446,7 @@ Status EspNowSecurityOwner::authority_down(const NodeId device,
                                            bool& complete,
                                            const MonotonicMs now_ms) noexcept {
   complete = false;
-  if (!booted_ || !authority_live_ || !config_.gateway) {
+  if (!booted_ || !authority_live_ || !gateway_role()) {
     return Status::error(StatusCode::InvalidState, "authority lane not live");
   }
   // Self-addressed downs reassemble in the relay slots like any device;
@@ -1445,7 +1458,7 @@ Status EspNowSecurityOwner::authority_down(const NodeId device,
 Status EspNowSecurityOwner::site_state_set(const usb::SiteStateSet& set,
                                            usb::SiteStateReport& report,
                                            const MonotonicMs now_ms) noexcept {
-  if (!booted_ || !authority_live_ || !config_.gateway) {
+  if (!booted_ || !authority_live_ || !gateway_role()) {
     return Status::error(StatusCode::InvalidState, "authority lane not live");
   }
   std::uint32_t current = 0;
@@ -1482,7 +1495,7 @@ Status EspNowSecurityOwner::site_state_set(const usb::SiteStateSet& set,
 
 void EspNowSecurityOwner::authority_session_down(const MonotonicMs now_ms) noexcept {
   usb_tx_pending_ = false;
-  if (authority_live_ && config_.gateway) gateway()->drop_all();
+  if (authority_live_ && gateway_role()) gateway()->drop_all();
   if (!booted_) return;
   sdkv1::CoordinatorEvent event{};
   event.kind = sdkv1::CoordinatorEventKind::UsbSessionDown;
@@ -1491,8 +1504,8 @@ void EspNowSecurityOwner::authority_session_down(const MonotonicMs now_ms) noexc
 }
 
 bool EspNowSecurityOwner::send_up(const usb::AuthorityFragment& fragment) noexcept {
-  if (bridge_ == nullptr) return false;
-  return bridge_->send_authority_up(fragment).ok();
+  if (bridge() == nullptr) return false;
+  return bridge()->send_authority_up(fragment).ok();
 }
 
 void EspNowSecurityOwner::on_local_down(const sdkv1::AuthorityCarrierKind kind,
@@ -1511,8 +1524,8 @@ bool EspNowSecurityOwner::DirectUsbAuthorityPort::try_send(
     const NodeId gateway, const sdkv1::AuthorityCarrierKind kind, const ByteView carrier,
     std::uint64_t& token) noexcept {
   token = 0;
-  if (owner_ == nullptr || owner_->bridge_ == nullptr) return false;
-  if (owner_->bridge_->state() != usb::SessionState::Active) return false;
+  if (owner_ == nullptr || owner_->bridge() == nullptr) return false;
+  if (owner_->bridge()->state() != usb::SessionState::Active) return false;
   if (owner_->usb_tx_pending_) return false;  // one completion at a time
   if (!sdkv1::authority_carrier_kind_valid(static_cast<std::uint8_t>(kind)) ||
       !sdkv1::authority_carrier_length_valid(kind, carrier.size) ||
@@ -1538,7 +1551,7 @@ bool EspNowSecurityOwner::DirectUsbAuthorityPort::try_send(
     fragment.offset = static_cast<std::uint16_t>(offset);
     fragment.data = ByteView{carrier.data + offset, length};
     (void)gateway;  // the USB leg needs no route address
-    if (!owner_->bridge_->send_authority_up(fragment)) return false;
+    if (!owner_->bridge()->send_authority_up(fragment)) return false;
     offset += length;
   }
   token = owner_->usb_transfer_;
@@ -1576,7 +1589,7 @@ Status EspNowSecurityOwner::send_bootstrap(const NodeId destination, const Frame
 Status EspNowSecurityOwner::send_local_join_up(const sdkv1::JoinAuthPhase phase,
                                                const std::uint8_t step,
                                                const ByteView message) noexcept {
-  if (bridge_ == nullptr) {
+  if (bridge() == nullptr) {
     return Status::error(StatusCode::InvalidState, "usb not attached");
   }
   if (local_join_relay_id_ == 0) {
@@ -1606,7 +1619,7 @@ Status EspNowSecurityOwner::send_local_join_up(const sdkv1::JoinAuthPhase phase,
   const Status status = sdkv1::relay_object_encode(
       up, MutableByteView{encoded.data(), encoded.size()}, written);
   if (!status) return status;
-  const Status sent = bridge_->relay_up(self, 0, ByteView{encoded.data(), written});
+  const Status sent = bridge()->relay_up(self, 0, ByteView{encoded.data(), written});
   if (!sent) {
     ESP_LOGW(config_.log_tag, "local join up step=%u failed: %s",
              static_cast<unsigned>(step), sent.detail);
@@ -1619,20 +1632,20 @@ Status EspNowSecurityOwner::send_local_join_up(const sdkv1::JoinAuthPhase phase,
 
 Status EspNowSecurityOwner::send_relay_up_to_host(const NodeId proxy, const std::uint8_t hops,
                                                   const ByteView object) noexcept {
-  if (bridge_ == nullptr) {
+  if (bridge() == nullptr) {
     // No host: the gateway engine sheds with authority_unreachable.
     return Status::error(StatusCode::InvalidState, "usb not attached");
   }
-  return bridge_->relay_up(proxy, hops, object);
+  return bridge()->relay_up(proxy, hops, object);
 }
 
 Status EspNowSecurityOwner::send_relay_abort_to_host(
     const NodeId proxy, const sdkv1::RelayToken token,
     const sdkv1::RelayAbortReason reason) noexcept {
-  if (bridge_ == nullptr) {
+  if (bridge() == nullptr) {
     return Status::error(StatusCode::InvalidState, "usb not attached");
   }
-  return bridge_->relay_abort(proxy, token, reason);
+  return bridge()->relay_abort(proxy, token, reason);
 }
 
 SecurityProfile EspNowSecurityOwner::security_profile() const noexcept {
@@ -1846,8 +1859,8 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   // session behind a sealed error so the host's re-hello observes the
   // restored capability (the authority lane resyncs and a pending
   // JoinConfirm is retransmitted across the bounce).
-  if (bridge_ != nullptr) {
-    (void)bridge_->refresh_group_capability(now_ms);
+  if (bridge() != nullptr) {
+    (void)bridge()->refresh_group_capability(now_ms);
   }
   // The lifecycle needs the verified package RS target at fresh adoption;
   // boot re-adoption carries zero and uses its durable floor.
@@ -1860,7 +1873,7 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   // Adoption binds the authority transport's self id (self-downs deliver
   // locally and self-addressed mesh sends refuse from here on).
   if (authority_live_) {
-    if (config_.gateway) {
+    if (gateway_role()) {
       gateway()->set_self(member.node);
     } else {
       endpoint()->set_self(member.node);
