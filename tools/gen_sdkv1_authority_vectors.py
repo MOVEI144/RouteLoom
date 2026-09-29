@@ -74,6 +74,19 @@ PURPOSE_AUTHORITY = 4
 DIR_IR, DIR_RI = 1, 2  # initiator->responder, responder->initiator
 
 TYPE_JOIN_CONFIRM, TYPE_UPDATE, TYPE_ACTIVATE, TYPE_PULL = 1, 2, 3, 4
+TYPE_PROXY_POLICY = 9
+
+
+def proxy_policy_set(generation: int, zero_touch_open: bool, tlv: bytes = b"") -> bytes:
+    """ProxyPolicySet tail (#176): ver=1 | sub=1 | flags (bit0 zero_touch_open)
+    | reserved 0 | generation u32 | tlv_len u16 | tlv (<= 64, reserved)."""
+    return (u8(1) + u8(1) + u8(1 if zero_touch_open else 0) + u8(0) + u32(generation) +
+            u16(len(tlv)) + tlv)
+
+
+def proxy_policy_ack(status: int, generation: int) -> bytes:
+    """ProxyPolicyAck tail: ver=1 | sub=2 | status | reserved 0 | generation u32."""
+    return u8(1) + u8(2) + u8(status) + u8(0) + u32(generation)
 
 MAX_COUNTER = (1 << 48) - 1
 
@@ -306,6 +319,27 @@ def bodies(gkid: bytes) -> list:
             head(1) + u32(10) + u32(0) + u8(2) + b"\x00\x00\x00",
             {"current": 10, "next": 0, "reason": 2},
         ),
+        (
+            "proxy_policy_set",
+            TYPE_PROXY_POLICY,
+            1,
+            head(1) + proxy_policy_set(3, False),
+            {"policy_generation": 3, "zero_touch_open": 0, "tlv_len": 0},
+        ),
+        (
+            "proxy_policy_set_tlv",
+            TYPE_PROXY_POLICY,
+            1,
+            head(1) + proxy_policy_set(4, True, bytes(range(64))),
+            {"policy_generation": 4, "zero_touch_open": 1, "tlv_len": 64},
+        ),
+        (
+            "proxy_policy_ack",
+            TYPE_PROXY_POLICY,
+            2,
+            head(2) + proxy_policy_ack(0, 3),
+            {"status": 0, "policy_generation": 3},
+        ),
     ]
 
 
@@ -318,6 +352,7 @@ D_TO_A = {
     "group_key_update_ack",
     "group_key_activate_ack",
     "group_key_pull",
+    "proxy_policy_ack",
 }
 
 
@@ -490,6 +525,22 @@ def main() -> None:
         emit(name, "invalid", {
             "codec": "authority_body", "expect": "error", "reason": reason,
             "note": note, "encoded_hex": encoded.hex(),
+        })
+
+    # ProxyPolicySet tails (after the body head) every proxy must refuse.
+    good = proxy_policy_set(3, False)
+    for name, encoded, note in [
+        ("policy_set_zero_generation", proxy_policy_set(0, True), "generation 0"),
+        ("policy_set_unknown_flag", good[:2] + b"\x02" + good[3:], "flag bit 1 is reserved"),
+        ("policy_set_reserved", good[:3] + b"\x01" + good[4:], "reserved byte set"),
+        ("policy_set_bad_version", b"\x02" + good[1:], "version 2"),
+        ("policy_set_ack_sub", good[:1] + b"\x02" + good[2:], "sub 2 is the ACK"),
+        ("policy_set_tlv_overlong", proxy_policy_set(3, False, bytes(65)), "65 TLV bytes"),
+        ("policy_set_length_mismatch", good + b"\x00", "tlv_len disagrees with the body"),
+    ]:
+        emit(name, "invalid", {
+            "codec": "proxy_policy_set", "expect": "error", "note": note,
+            "encoded_hex": encoded.hex(),
         })
 
     # USB fragments: 960/961/1920/2048-byte objects over 0x64/0x65.

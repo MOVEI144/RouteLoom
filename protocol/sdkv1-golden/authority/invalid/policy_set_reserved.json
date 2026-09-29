@@ -1,0 +1,8 @@
+{
+  "codec": "proxy_policy_set",
+  "encoded_hex": "01010001000000030000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "name": "policy_set_reserved",
+  "note": "reserved byte set"
+}

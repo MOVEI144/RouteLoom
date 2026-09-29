@@ -163,4 +163,30 @@ Status BlobResumeSlotStorage2::write(const std::size_t index, const ByteView dat
   return blobs_.blob_write(key, data);
 }
 
+Status ProxyPolicyStore::load() noexcept {
+  valid_ = false;
+  std::array<std::uint8_t, kProxyPolicyRecordLen> bytes{};
+  const Status read = read_blob_slot(blobs_, kProxyPolicyKey,
+                                     MutableByteView{bytes.data(), bytes.size()});
+  if (!read) return read;
+  valid_ = proxy_policy_record_decode(ByteView{bytes.data(), bytes.size()}, record_).ok();
+  return Status::success();
+}
+
+Status ProxyPolicyStore::commit(const ProxyPolicyRecord& record) noexcept {
+  std::array<std::uint8_t, kProxyPolicyRecordLen> bytes{};
+  Status status = proxy_policy_record_encode(record, bytes);
+  if (!status) return status;
+  status = blobs_.blob_write(kProxyPolicyKey, ByteView{bytes.data(), bytes.size()});
+  // Whatever landed is re-observed: success only once the readback matches.
+  const Status reloaded = load();
+  if (!status) return status;
+  if (!reloaded) return reloaded;
+  if (!valid_ || record_.site_id != record.site_id || record_.generation != record.generation ||
+      record_.zero_touch_open != record.zero_touch_open || record_.content != record.content) {
+    return Status::error(StatusCode::StorageFailure, "rlpp1 readback");
+  }
+  return Status::success();
+}
+
 }  // namespace routeloom::sdkv1

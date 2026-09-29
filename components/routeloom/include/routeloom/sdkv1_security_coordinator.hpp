@@ -526,6 +526,10 @@ class SecurityCoordinator final : public BootstrapSink,
   // so the unknown-ahead evidence must not accrue refresh strikes —
   // churning the workspace here is what strands the node mid-cutover.
   void set_cutover_intent(bool intent) noexcept { cutover_intent_ = intent; }
+  // The site's durable ProxyPolicySet (RLPP1, #176): applied to the member
+  // proxy now when it serves `site_id`, and at every adoption of that
+  // site before the proxy starts. Another site's proxy stays open.
+  void set_proxy_policy(std::uint64_t site_id, bool zero_touch_open) noexcept;
   // Wipes the member site trust held outside the stores (GK scope,
   // discovery membership) and verifies it is gone. Idempotent: safe to
   // re-assert after traffic already stopped.
@@ -1089,6 +1093,8 @@ class SecurityCoordinator final : public BootstrapSink,
   bool removal_holdoff_armed_{false};
   MonotonicMs removal_holdoff_at_{0};
   std::uint64_t removal_watermark_site_id_{0};
+  std::uint64_t proxy_policy_site_id_{0};
+  bool proxy_policy_open_{true};
   std::uint32_t removal_watermark_generation_{0};
   bool cutover_intent_{false};
   CoordinatorCounters counters_{};

@@ -159,6 +159,23 @@ fn check_body(f: &Fields) {
             assert_eq!(msg.reason as u8, int(f, "reason") as u8);
             assert_eq!(msg.encode().expect("encode").to_vec(), plaintext);
         }
+        (9, 1) => {
+            let head = BodyHead::decode(&plaintext, 1).expect("head");
+            assert_eq!(head.generation, int32(f, "generation"));
+            let set = ProxyPolicySet::decode(&plaintext[BODY_HEAD..]).expect("decode");
+            assert_eq!(set.generation, int32(f, "policy_generation"));
+            assert_eq!(u64::from(set.zero_touch_open), int(f, "zero_touch_open"));
+            assert_eq!(set.tlv.len() as u64, int(f, "tlv_len"));
+            assert_eq!(set.encode().expect("encode"), plaintext[BODY_HEAD..]);
+        }
+        (9, 2) => {
+            let head = BodyHead::decode(&plaintext, 2).expect("head");
+            assert_eq!(head.generation, int32(f, "generation"));
+            let ack = ProxyPolicyAck::decode(&plaintext[BODY_HEAD..]).expect("decode");
+            assert_eq!(u64::from(ack.status), int(f, "status"));
+            assert_eq!(ack.generation, int32(f, "policy_generation"));
+            assert_eq!(ack.encode().to_vec(), plaintext[BODY_HEAD..]);
+        }
         _ => panic!("unknown valid body {body_type}/{op}"),
     }
 }
@@ -225,8 +242,26 @@ fn authority_bodies_match() {
         check_body_invalid(&path, &f);
         invalid += 1;
     }
-    assert_eq!(valid, 7);
+    assert_eq!(valid, 10);
     assert_eq!(invalid, 15);
+}
+
+#[test]
+fn proxy_policy_tails_refused() {
+    let mut seen = 0;
+    for path in list("invalid") {
+        let f = load(&path);
+        if f["codec"] != "proxy_policy_set" {
+            continue;
+        }
+        assert!(
+            ProxyPolicySet::decode(&hex(&f, "encoded_hex")).is_err(),
+            "{}",
+            path.display()
+        );
+        seen += 1;
+    }
+    assert_eq!(seen, 7);
 }
 
 #[test]
@@ -264,6 +299,6 @@ fn authority_envelopes_match() {
         check_envelope_invalid(&f);
         invalid += 1;
     }
-    assert_eq!(valid, 11);
+    assert_eq!(valid, 14);
     assert_eq!(invalid, 2);
 }

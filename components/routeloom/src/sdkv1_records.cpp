@@ -1119,4 +1119,103 @@ Status local_revocation_record_structure(const ByteView record) noexcept {
   return Status::success();
 }
 
+// === ProxyPolicySet / RLPP1 =================================================
+
+Status proxy_policy_set_decode(const ByteView body, ProxyPolicySet& out) noexcept {
+  out = ProxyPolicySet{};
+  if (body.data == nullptr || body.size < kProxyPolicySetFixedSize ||
+      body.size > kProxyPolicySetFixedSize + kProxyPolicyTlvMax) {
+    return Status::error(StatusCode::ProtocolError, "policy set bounds");
+  }
+  ByteReader reader(body);
+  std::uint8_t version = 0, sub = 0, flags = 0, reserved = 0;
+  std::uint16_t tlv_len = 0;
+  Status status = reader.read_u8(version);
+  if (status) status = reader.read_u8(sub);
+  if (status) status = reader.read_u8(flags);
+  if (status) status = reader.read_u8(reserved);
+  if (status) status = reader.read_u32(out.generation);
+  if (status) status = reader.read_u16(tlv_len);
+  if (!status) return status;
+  if (version != kProxyPolicyVersion || sub != kProxyPolicySubSet ||
+      (flags & ~kProxyPolicyFlagZeroTouchOpen) != 0 || reserved != 0 || out.generation == 0 ||
+      body.size != kProxyPolicySetFixedSize + tlv_len) {
+    return Status::error(StatusCode::ProtocolError, "policy set fields");
+  }
+  out.zero_touch_open = (flags & kProxyPolicyFlagZeroTouchOpen) != 0;
+  sha256(body, out.content);
+  return Status::success();
+}
+
+Status proxy_policy_ack_encode(const ProxyPolicyStatus status, const std::uint32_t generation,
+                               std::array<std::uint8_t, kProxyPolicyAckSize>& out) noexcept {
+  ByteWriter writer(MutableByteView{out.data(), out.size()});
+  Status written = writer.write_u8(kProxyPolicyVersion);
+  if (written) written = writer.write_u8(kProxyPolicySubAck);
+  if (written) written = writer.write_u8(static_cast<std::uint8_t>(status));
+  if (written) written = writer.write_u8(0);
+  if (written) written = writer.write_u32(generation);
+  return written;
+}
+
+Status proxy_policy_record_encode(const ProxyPolicyRecord& record,
+                                  std::array<std::uint8_t, kProxyPolicyRecordLen>& out) noexcept {
+  if (!id_valid(record.site_id) || record.generation == 0) {
+    return Status::error(StatusCode::InvalidArgument, "rlpp1 fields");
+  }
+  ByteWriter writer(MutableByteView{out.data(), out.size()});
+  Status status = writer.write_u32(kProxyPolicyMagic);
+  if (status) status = writer.write_u16(kRecordFormat);
+  if (status) status = writer.write_u16(static_cast<std::uint16_t>(kProxyPolicyRecordLen));
+  if (status) status = writer.write_u64(record.site_id);
+  if (status) status = writer.write_u32(record.generation);
+  if (status) status = writer.write_u8(record.zero_touch_open ? kProxyPolicyFlagZeroTouchOpen : 0);
+  if (status) status = write_zeros(writer, 3);
+  if (status) status = write_array(writer, record.content);
+  if (status) status = writer.write_u32(crc32_iso_hdlc(ByteView{out.data(), writer.size()}));
+  return status;
+}
+
+Status proxy_policy_record_decode(const ByteView bytes, ProxyPolicyRecord& out) noexcept {
+  out = ProxyPolicyRecord{};
+  if (bytes.data == nullptr || bytes.size != kProxyPolicyRecordLen) {
+    return Status::error(StatusCode::ProtocolError, "rlpp1 size");
+  }
+  ByteReader reader(bytes);
+  std::uint32_t magic = 0, crc = 0;
+  std::uint16_t format = 0, used_len = 0;
+  std::uint8_t flags = 0;
+  Status status = reader.read_u32(magic);
+  if (status) status = reader.read_u16(format);
+  if (status) status = reader.read_u16(used_len);
+  if (status) status = reader.read_u64(out.site_id);
+  if (status) status = reader.read_u32(out.generation);
+  if (status) status = reader.read_u8(flags);
+  if (status) status = read_zeros(reader, 3, "rlpp1 reserved");
+  if (status) status = read_array(reader, out.content);
+  if (status) status = reader.read_u32(crc);
+  if (!status) return status;
+  if (magic != kProxyPolicyMagic || format != kRecordFormat || used_len != kProxyPolicyRecordLen ||
+      crc32_iso_hdlc(ByteView{bytes.data, kProxyPolicyRecordLen - 4}) != crc ||
+      (flags & ~kProxyPolicyFlagZeroTouchOpen) != 0 || !id_valid(out.site_id) ||
+      out.generation == 0) {
+    out = ProxyPolicyRecord{};
+    return Status::error(StatusCode::IntegrityError, "rlpp1 record");
+  }
+  out.zero_touch_open = (flags & kProxyPolicyFlagZeroTouchOpen) != 0;
+  return Status::success();
+}
+
+ProxyPolicyStatus proxy_policy_decide(const ProxyPolicyRecord* stored, const ProxyPolicySet& set,
+                                      bool& write) noexcept {
+  write = false;
+  if (stored != nullptr && set.generation < stored->generation) return ProxyPolicyStatus::Stale;
+  if (stored != nullptr && set.generation == stored->generation) {
+    return set.content == stored->content ? ProxyPolicyStatus::Applied
+                                          : ProxyPolicyStatus::Conflict;
+  }
+  write = true;
+  return ProxyPolicyStatus::Applied;
+}
+
 }  // namespace routeloom::sdkv1

@@ -350,7 +350,8 @@ Sdkv1Stores::Sdkv1Stores(const std::size_t resume_slots) noexcept
       resume_cache_(resume2_storage_, sdkv1::resume_quota(resume_slots).link,
                     sdkv1::resume_quota(resume_slots).end),
       local_revocation_(local_revocation_storage_),
-      lifecycle_(lifecycle_storage_) {}
+      lifecycle_(lifecycle_storage_),
+      proxy_policy_(site_ns_) {}
 
 Status Sdkv1Stores::open(const char* partition) noexcept {
   purge_legacy_rlres(partition);
@@ -377,6 +378,9 @@ Status Sdkv1Stores::initialize() noexcept {
   const Status revocation = revocation_.initialize();
   const Status local_revocation = local_revocation_.initialize();
   const Status lifecycle = lifecycle_.initialize();
+  // An unreadable RLPP1 only leaves the proxy at its default (open) until
+  // the site distributes the policy again: never a boot failure.
+  (void)proxy_policy_.load();
   if (!identity.ok()) return identity;
   if (!site.ok()) return site;
   if (!revocation.ok()) return revocation;

@@ -424,4 +424,69 @@ Status local_revocation_record_decode(ByteView record, LocalRevocationRecord& ou
 // Structure-only gate for the dual-slot classifier (see above).
 Status local_revocation_record_structure(ByteView record) noexcept;
 
+// --- ProxyPolicySet: authority envelope type 9 (#176) --------------------------
+// The site's radio intake policy for member proxies, behind the authority
+// body head (host op 1, device op 2):
+//   Set (host->device): ver=1 u8 | sub=1 u8 | flags u8 (bit0 zero_touch_open,
+//     others zero) | reserved u8 = 0 | generation u32 (>= 1) | tlv_len u16 |
+//     tlv[tlv_len <= 64]. The TLV area is reserved for the power-on join
+//     schedule (V2-18): carried and digested, never interpreted here.
+//   Ack (device->host): ver=1 | sub=2 | status u8 | reserved u8 = 0 |
+//     generation u32 — the generation durable and applied after this Set.
+// A proxy keeps generations monotonic: an older Set is Stale, the same
+// generation with other content is a Conflict, a newer one is stored
+// (RLPP1) and read back before it is applied or acknowledged.
+constexpr std::uint8_t kAuthorityTypeProxyPolicy = 9;
+constexpr std::uint8_t kProxyPolicyVersion = 1;
+constexpr std::uint8_t kProxyPolicySubSet = 1;
+constexpr std::uint8_t kProxyPolicySubAck = 2;
+constexpr std::uint8_t kProxyPolicyFlagZeroTouchOpen = 0x01;
+constexpr std::size_t kProxyPolicySetFixedSize = 10;
+constexpr std::size_t kProxyPolicyTlvMax = 64;
+constexpr std::size_t kProxyPolicyAckSize = 8;
+
+enum class ProxyPolicyStatus : std::uint8_t {
+  Applied = 0,
+  Stale = 1,
+  Conflict = 2,
+  StorageFailed = 3,
+};
+
+struct ProxyPolicySet {
+  std::uint32_t generation{0};
+  bool zero_touch_open{true};
+  Digest256 content{};  // SHA-256 of the whole Set body
+};
+
+Status proxy_policy_set_decode(ByteView body, ProxyPolicySet& out) noexcept;
+Status proxy_policy_ack_encode(ProxyPolicyStatus status, std::uint32_t generation,
+                               std::array<std::uint8_t, kProxyPolicyAckSize>& out) noexcept;
+
+// RLPP1: the applied ProxyPolicySet (namespace rlsite, key "p0"), bound to
+// its site so another site's record reads as absent. One blob write (NVS
+// replaces a blob atomically); a record failing its CRC reads as absent.
+//  0 u32 magic "RLPP" | 4 u16 format=1 | 6 u16 used_len=60 | 8 u64 site_id |
+// 16 u32 generation | 20 u8 flags (bit0 zero_touch_open) | 21 3 reserved |
+// 24 32B content_sha256 | 56 u32 crc32
+constexpr std::uint32_t kProxyPolicyMagic = 0x524C5050U;  // "RLPP"
+constexpr std::size_t kProxyPolicyRecordLen = 60;
+
+struct ProxyPolicyRecord {
+  std::uint64_t site_id{0};
+  std::uint32_t generation{0};
+  bool zero_touch_open{true};
+  Digest256 content{};
+};
+
+Status proxy_policy_record_encode(const ProxyPolicyRecord& record,
+                                  std::array<std::uint8_t, kProxyPolicyRecordLen>& out) noexcept;
+Status proxy_policy_record_decode(ByteView bytes, ProxyPolicyRecord& out) noexcept;
+
+// What a proxy does with a verified Set given its stored record (`stored`
+// null when none for this site): Applied = store and apply, or Stale /
+// Conflict = keep the stored one. An identical Set is Applied with no
+// write (`write` false).
+ProxyPolicyStatus proxy_policy_decide(const ProxyPolicyRecord* stored, const ProxyPolicySet& set,
+                                      bool& write) noexcept;
+
 }  // namespace routeloom::sdkv1

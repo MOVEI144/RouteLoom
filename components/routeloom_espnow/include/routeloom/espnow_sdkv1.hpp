@@ -58,6 +58,7 @@ class Sdkv1Stores {
   sdkv1::LocalRevocationStore& local_revocation() noexcept { return local_revocation_; }
   sdkv1::ResumeSlotStorage2& resume2() noexcept { return resume2_storage_; }
   sdkv1::LifecycleStore& lifecycle() noexcept { return lifecycle_; }
+  sdkv1::ProxyPolicyStore& proxy_policy() noexcept { return proxy_policy_; }
 
  private:
   std::size_t resume_slots_;
@@ -79,6 +80,7 @@ class Sdkv1Stores {
   sdkv1::ResumeCache2 resume_cache_;
   sdkv1::LocalRevocationStore local_revocation_;
   sdkv1::LifecycleStore lifecycle_;
+  sdkv1::ProxyPolicyStore proxy_policy_;
 };
 
 // Factory maintenance console (07 §6 steps 1-5): installs the USB
