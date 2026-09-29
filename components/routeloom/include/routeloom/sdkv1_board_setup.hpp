@@ -64,12 +64,11 @@ class BoardSetupConsole {
   // role, security, eFuse station MAC — the app passes its own boot
   // identity): a staged document naming anything else cannot commit, so
   // a C6 bridge record can never land on a C3 reference board (design
-  // §4.2 setup row). nullptr skips the check — a setup image not tied
-  // to one field profile (e.g. a legacy console build) accepts any
-  // valid document.
+  // §4.2 setup row). Every setup image is bound to one field profile;
+  // `expected` must outlive the console.
   BoardSetupConsole(BoardConfigStore& config, BoardSecretsStore& secrets,
                     IdentityStore& identity,
-                    const BoardBootIdentity* expected) noexcept;
+                    const BoardBootIdentity& expected) noexcept;
   ~BoardSetupConsole() noexcept;
 
   // One full console line ("benchcfg ..." / "benchsecret ..."). The
@@ -81,7 +80,7 @@ class BoardSetupConsole {
   BoardConfigStore& config_;
   BoardSecretsStore& secrets_;
   IdentityStore& identity_;
-  const BoardBootIdentity* expected_{nullptr};
+  const BoardBootIdentity& expected_;
   // RAM staging: the staged document and the staged secret kinds are the
   // commit call's inputs; nothing here is durable until benchcfg commit.
   std::array<std::uint8_t, kBoardSetupDocMax> staged_doc_{};

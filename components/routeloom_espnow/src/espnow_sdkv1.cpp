@@ -204,13 +204,10 @@ void console_task(void* arg) {
   if (!board_open) {
     ESP_LOGE(kTag, "board stores open failed: %s", board_open.detail);
   }
-  // The setup image's own field profile (§4.2): a Member/DevRam console
-  // build only commits documents that this very chip/role/security/MAC
-  // could boot. Legacy-fixture consoles stay unbound (nullptr) — they
-  // provision boards for any later field image.
+  // The setup image's own field profile (§4.2): the console only commits
+  // documents that this very chip/role/security/MAC could boot. An
+  // unreadable MAC leaves it zero, so every document is refused.
   routeloom::BoardBootIdentity setup_identity{};
-  routeloom::BoardBootIdentity* expected = nullptr;
-#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   setup_identity.chip = board_chip();
   setup_identity.role = routeloom::profile::kRole == routeloom::profile::Role::Gateway
                             ? routeloom::BoardRole::Bridge
@@ -221,14 +218,12 @@ void console_task(void* arg) {
   setup_identity.security = routeloom::BoardSecurity::Member;
 #endif
   if (esp_read_mac(setup_identity.sta_mac.data(), ESP_MAC_WIFI_STA) != ESP_OK) {
+    setup_identity.sta_mac = {};
     ESP_LOGE(kTag, "setup identity: station MAC unreadable");
-  } else {
-    expected = &setup_identity;
   }
-#endif
   sdkv1::BoardSetupConsole board_console(board_stores.config(),
                                          board_stores.secrets(),
-                                         stores->identity(), expected);
+                                         stores->identity(), setup_identity);
   // The status receipt identifies the running image: the office verifies
   // the maintenance build before the field switch (07 §6, V1-H10).
   if (const esp_app_desc_t* app = esp_app_get_description()) {
@@ -290,14 +285,7 @@ void console_task(void* arg) {
           std::memcpy(response, refused, sizeof(refused));
           response_size = sizeof(refused) - 1;
         } else {
-          sdkv1::LegacyStateConsole legacy(
-              purge_port, legacy_domain,
-#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
-              false
-#else
-              true
-#endif
-          );
+          sdkv1::LegacyStateConsole legacy(purge_port, legacy_domain, /*ram_only_build=*/true);
           const Status status = legacy.process_line(legacy_rest, /*stopped=*/true,
                                                      response, sizeof(response),
                                                      response_size);

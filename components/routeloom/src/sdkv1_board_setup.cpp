@@ -207,7 +207,7 @@ Status parse_doc(const ByteView doc, BoardConfig& out) noexcept {
 BoardSetupConsole::BoardSetupConsole(BoardConfigStore& config,
                                      BoardSecretsStore& secrets,
                                      IdentityStore& identity,
-                                     const BoardBootIdentity* expected) noexcept
+                                     const BoardBootIdentity& expected) noexcept
     : config_(config),
       secrets_(secrets),
       identity_(identity),
@@ -431,15 +431,11 @@ Status BoardSetupConsole::process_line(const ByteView line, char* response,
     if (!parse_doc(ByteView{staged_doc_.data(), staged_doc_len_}, candidate).ok()) {
       return fail("invalid_argument");
     }
-    // The document must name this image's own profile when the build
-    // carries one: a record for a different chip/role/security/MAC could
-    // commit here but would only ever fail the field gate — refuse it at
-    // the bench instead (§4.2).
-    if (expected_ != nullptr &&
-        (candidate.chip != expected_->chip ||
-         candidate.role != expected_->role ||
-         candidate.security != expected_->security ||
-         candidate.sta_mac != expected_->sta_mac)) {
+    // The document must name this image's own profile: a record for a
+    // different chip/role/security/MAC could commit here but would only
+    // ever fail the field gate — refuse it at the bench instead (§4.2).
+    if (candidate.chip != expected_.chip || candidate.role != expected_.role ||
+        candidate.security != expected_.security || candidate.sta_mac != expected_.sta_mac) {
       return fail("profile_mismatch");
     }
     const BoardSecretsNeed need =
