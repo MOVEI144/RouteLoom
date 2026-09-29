@@ -486,8 +486,11 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
       config.local_mac == routeloom::MacAddress{}) {
     return Status::error(StatusCode::InvalidArgument, "owner identity");
   }
+  constexpr std::uint32_t kRoleBits =
+      sdkv1::kMemberRoleEndpoint | sdkv1::kMemberRoleRelay | sdkv1::kMemberRoleGateway;
   if (!profile::role_fits(config.role) ||
       (profile::kRoleFixed && config.role != profile::kRole) ||
+      (config.joiner.capability & kRoleBits & ~profile::role_mask(config.role)) != 0 ||
       (config.joiner.requested_role & ~profile::role_mask(config.role)) != 0 ||
       (stores.site().has_site() &&
        (stores.site().site().role & ~profile::role_mask(config.role)) != 0)) {
