@@ -1093,8 +1093,8 @@ class SecurityCoordinator final : public BootstrapSink,
   bool removal_holdoff_armed_{false};
   MonotonicMs removal_holdoff_at_{0};
   std::uint64_t removal_watermark_site_id_{0};
-  std::uint64_t proxy_policy_site_id_{0};
-  bool proxy_policy_open_{true};
+  // The site whose stored ProxyPolicySet is closed (0: every proxy open).
+  std::uint64_t proxy_closed_site_id_{0};
   std::uint32_t removal_watermark_generation_{0};
   bool cutover_intent_{false};
   CoordinatorCounters counters_{};

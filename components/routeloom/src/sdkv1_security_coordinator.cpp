@@ -2449,8 +2449,7 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now,
 
 void SecurityCoordinator::set_proxy_policy(const std::uint64_t site_id,
                                            const bool zero_touch_open) noexcept {
-  proxy_policy_site_id_ = site_id;
-  proxy_policy_open_ = zero_touch_open;
+  proxy_closed_site_id_ = zero_touch_open ? 0 : site_id;
   if (mode_ == CoordinatorMode::Member && member_valid_ && deps_.site != nullptr &&
       deps_.site->has_site() && deps_.site->site().site_id == site_id) {
     (void)member().proxy.set_zero_touch_open(zero_touch_open);
@@ -3153,8 +3152,7 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
   member().proxy.set_membership(MembershipState::Member, now);
   member().proxy.set_policy(profile::kJoinProxy &&
                             (site.role & (kMemberRoleRelay | kMemberRoleGateway)) != 0);
-  member().proxy.set_zero_touch_open(proxy_policy_site_id_ != site.site_id ||
-                                     proxy_policy_open_);
+  member().proxy.set_zero_touch_open(proxy_closed_site_id_ != site.site_id);
   member().gateway_active = profile::kGateway && (site.role & kMemberRoleGateway) != 0;
   if (member().gateway_active) {
     member().proxy.set_authority(true, 0, now);

@@ -181,23 +181,19 @@ class BlobResumeSlotStorage2 final : public ResumeSlotStorage2 {
 // The applied ProxyPolicySet (RLPP1, #176) in the site namespace. One key:
 // NVS replaces a blob atomically, so a power cut leaves the old or the new
 // record, and commit() reads the write back before it reports success.
-// A missing, unreadable or corrupt record, or one of another site, is no
-// record (the proxy's default: open).
+// Nothing stays in RAM: the record is read when a policy arrives and once
+// at boot. A missing, unreadable or corrupt record, or one of another
+// site, is no record (the proxy's default: open).
 class ProxyPolicyStore {
  public:
   explicit ProxyPolicyStore(BlobNamespace& blobs) noexcept : blobs_(blobs) {}
 
-  Status load() noexcept;
+  // True with `out` filled when a valid record of `site_id` is stored.
+  bool load(std::uint64_t site_id, ProxyPolicyRecord& out) noexcept;
   Status commit(const ProxyPolicyRecord& record) noexcept;
-  // The stored record for `site_id`, or null.
-  const ProxyPolicyRecord* record_for(std::uint64_t site_id) const noexcept {
-    return valid_ && record_.site_id == site_id ? &record_ : nullptr;
-  }
 
  private:
   BlobNamespace& blobs_;
-  ProxyPolicyRecord record_{};
-  bool valid_{false};
 };
 
 }  // namespace routeloom::sdkv1

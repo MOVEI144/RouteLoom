@@ -681,8 +681,9 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
   // The stored intake policy of this site applies before the proxy starts.
   if (stores_->site().has_site()) {
     const std::uint64_t site_id = stores_->site().site().site_id;
-    if (const sdkv1::ProxyPolicyRecord* policy = stores_->proxy_policy().record_for(site_id)) {
-      coordinator().set_proxy_policy(site_id, policy->zero_touch_open);
+    sdkv1::ProxyPolicyRecord policy{};
+    if (stores_->proxy_policy().load(site_id, policy)) {
+      coordinator().set_proxy_policy(site_id, policy.zero_touch_open);
     }
   }
   sdkv1::CoordinatorEvent event{};
@@ -1073,10 +1074,12 @@ void EspNowSecurityOwner::apply_proxy_policy(const ByteView tail) noexcept {
   sdkv1::ProxyPolicySet set{};
   if (!sdkv1::proxy_policy_set_decode(tail, set)) return;  // malformed: no ACK
   const std::uint64_t site_id = stores_->site().site().site_id;
-  sdkv1::ProxyPolicyStore& store = stores_->proxy_policy();
+  sdkv1::ProxyPolicyStore store = stores_->proxy_policy();
+  sdkv1::ProxyPolicyRecord stored{};
+  bool has = store.load(site_id, stored);
   bool write = false;
   sdkv1::ProxyPolicyStatus status =
-      sdkv1::proxy_policy_decide(store.record_for(site_id), set, write);
+      sdkv1::proxy_policy_decide(has ? &stored : nullptr, set, write);
   if (write) {
     sdkv1::ProxyPolicyRecord record{};
     record.site_id = site_id;
@@ -1084,15 +1087,13 @@ void EspNowSecurityOwner::apply_proxy_policy(const ByteView tail) noexcept {
     record.zero_touch_open = set.zero_touch_open;
     record.content = set.content;
     if (!store.commit(record)) status = sdkv1::ProxyPolicyStatus::StorageFailed;
+    has = store.load(site_id, stored);  // what a power cut would keep
   }
-  const sdkv1::ProxyPolicyRecord* stored = store.record_for(site_id);
-  if (status == sdkv1::ProxyPolicyStatus::Applied && stored != nullptr) {
-    coordinator().set_proxy_policy(site_id, stored->zero_touch_open);
+  if (status == sdkv1::ProxyPolicyStatus::Applied && has) {
+    coordinator().set_proxy_policy(site_id, stored.zero_touch_open);
   }
   std::array<std::uint8_t, sdkv1::kProxyPolicyAckSize> ack{};
-  if (!sdkv1::proxy_policy_ack_encode(status, stored != nullptr ? stored->generation : 0, ack)) {
-    return;
-  }
+  if (!sdkv1::proxy_policy_ack_encode(status, has ? stored.generation : 0, ack)) return;
   for (AuthorityTxStage& slot : authority_tx_staged_) {
     if (slot.used) continue;
     std::memcpy(slot.body.data(), ack.data(), ack.size());
