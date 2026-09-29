@@ -172,7 +172,10 @@ class Device {
   friend struct DeviceTestAccess;
   class Observer final : public NodeObserver {
    public:
-    constexpr explicit Observer(Device& device) noexcept : device_(device) {}
+    // Constant-initialized, so begin() holds it without a guard and an
+    // image that never begins (maintenance console) links none of it.
+    constexpr Observer() noexcept = default;
+    void bind(Device& device) noexcept { device_ = &device; }
     void on_message(const MessageKey& key, NodeId source, ByteView payload) noexcept override;
     void on_message(const MessageKey& key, NodeId source, ByteView payload,
                     const DeliveryAssurance& assurance) noexcept override;
@@ -185,7 +188,7 @@ class Device {
                        const MessageId* message) noexcept override;
 
    private:
-    Device& device_;
+    Device* device_{nullptr};
   };
   struct Posted {
     Job job{nullptr};
@@ -203,7 +206,6 @@ class Device {
   NodeObserver* app_{nullptr};
   PollHook poll_hook_{nullptr};
   void* poll_ctx_{nullptr};
-  Observer observer_{*this};
   espnow::Sdkv1Stores* stores_{nullptr};
   espnow::EspNowRuntime* runtime_{nullptr};
   espnow::EspNowSecurityOwner* owner_{nullptr};

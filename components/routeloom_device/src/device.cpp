@@ -50,73 +50,73 @@ void Device::Observer::on_message(const MessageKey& key, const NodeId source,
 void Device::Observer::on_message(const MessageKey& key, const NodeId source,
                                   const ByteView payload,
                                   const DeliveryAssurance& assurance) noexcept {
-  if (device_.bridge_ == nullptr) {
-    ESP_LOGI(device_.tag_, "message origin=%llu session=%lu sequence=%llu bytes=%u",
+  if (device_->bridge_ == nullptr) {
+    ESP_LOGI(device_->tag_, "message origin=%llu session=%lu sequence=%llu bytes=%u",
              static_cast<unsigned long long>(source),
              static_cast<unsigned long>(key.id.session),
              static_cast<unsigned long long>(key.id.sequence),
              static_cast<unsigned>(payload.size));
   }
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
-  if (device_.bridge_ != nullptr) device_.bridge_->on_message(key, source, payload, assurance);
+  if (device_->bridge_ != nullptr) device_->bridge_->on_message(key, source, payload, assurance);
 #endif
-  if (device_.app_ != nullptr) device_.app_->on_message(key, source, payload, assurance);
+  if (device_->app_ != nullptr) device_->app_->on_message(key, source, payload, assurance);
 }
 
 void Device::Observer::on_group_message(const GroupMessageInfo& info,
                                         const ByteView payload) noexcept {
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
-  if (device_.bridge_ != nullptr) device_.bridge_->on_group_message(info, payload);
+  if (device_->bridge_ != nullptr) device_->bridge_->on_group_message(info, payload);
 #endif
-  if (device_.app_ != nullptr) device_.app_->on_group_message(info, payload);
+  if (device_->app_ != nullptr) device_->app_->on_group_message(info, payload);
 }
 
 void Device::Observer::on_delivery(const DeliveryResult& result) noexcept {
-  if (device_.bridge_ == nullptr) {
-    ESP_LOGI(device_.tag_, "delivery session=%lu sequence=%llu state=%u reason=%s",
+  if (device_->bridge_ == nullptr) {
+    ESP_LOGI(device_->tag_, "delivery session=%lu sequence=%llu state=%u reason=%s",
              static_cast<unsigned long>(result.id.session),
              static_cast<unsigned long long>(result.id.sequence),
              static_cast<unsigned>(result.state), result.reason);
   }
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
-  if (device_.bridge_ != nullptr) device_.bridge_->on_delivery(result);
+  if (device_->bridge_ != nullptr) device_->bridge_->on_delivery(result);
 #endif
-  if (device_.app_ != nullptr) device_.app_->on_delivery(result);
+  if (device_->app_ != nullptr) device_->app_->on_delivery(result);
 }
 
 void Device::Observer::on_group_delivery(const GroupDeliveryResult& result) noexcept {
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
-  if (device_.bridge_ != nullptr) device_.bridge_->on_group_delivery(result);
+  if (device_->bridge_ != nullptr) device_->bridge_->on_group_delivery(result);
 #endif
-  if (device_.app_ != nullptr) device_.app_->on_group_delivery(result);
+  if (device_->app_ != nullptr) device_->app_->on_group_delivery(result);
 }
 
 void Device::Observer::on_applied_result(const MessageKey& key,
                                          const AppliedResultView& result) noexcept {
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
-  if (device_.bridge_ != nullptr) device_.bridge_->on_applied_result(key, result);
+  if (device_->bridge_ != nullptr) device_->bridge_->on_applied_result(key, result);
 #endif
-  if (device_.app_ != nullptr) device_.app_->on_applied_result(key, result);
+  if (device_->app_ != nullptr) device_->app_->on_applied_result(key, result);
 }
 
 void Device::Observer::on_diagnostic(const char* reason, const NodeId peer,
                                      const MessageId* message) noexcept {
-  if (device_.bridge_ == nullptr) {
-    ESP_LOGW(device_.tag_, "diagnostic reason=%s peer=%llu message=%s", reason,
+  if (device_->bridge_ == nullptr) {
+    ESP_LOGW(device_->tag_, "diagnostic reason=%s peer=%llu message=%s", reason,
              static_cast<unsigned long long>(peer), message == nullptr ? "none" : "present");
   }
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   // Unknown-epoch group traffic is the backstop pull trigger for a missed
   // rotation Wake (records only; the owner polls the flag).
-  if (device_.owner_ != nullptr && reason != nullptr &&
+  if (device_->owner_ != nullptr && reason != nullptr &&
       std::strcmp(reason, "GROUP_KEY_RETIRED") == 0) {
-    device_.owner_->note_group_key_retired();
+    device_->owner_->note_group_key_retired();
   }
 #endif
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
-  if (device_.bridge_ != nullptr) device_.bridge_->on_diagnostic(reason, peer, message);
+  if (device_->bridge_ != nullptr) device_->bridge_->on_diagnostic(reason, peer, message);
 #endif
-  if (device_.app_ != nullptr) device_.app_->on_diagnostic(reason, peer, message);
+  if (device_->app_ != nullptr) device_->app_->on_diagnostic(reason, peer, message);
 }
 
 // --- Boot -----------------------------------------------------------------------
@@ -248,7 +248,9 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
   }
 #endif
 
-  static espnow::EspNowRuntime runtime(config.radio, provider, observer_);
+  static Observer observer;
+  observer.bind(*this);
+  static espnow::EspNowRuntime runtime(config.radio, provider, observer);
   status = runtime.initialize();
   if (!status) return status;
   runtime_ = &runtime;
