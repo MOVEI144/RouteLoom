@@ -137,7 +137,7 @@ class ManifestDriftTest(unittest.TestCase):
             copy_inputs(root)
             component = root / "components/routeloom_espnow/idf_component.yml"
             original = component.read_text(encoding="utf-8")
-            changed = original.replace('  routeloom/routeloom: "^2.0.0-dev"\n', "", 1)
+            changed = original.replace('  routeloom/routeloom:\n    path: ../routeloom\n', "", 1)
             self.assertNotEqual(changed, original)
             component.write_text(changed, encoding="utf-8")
             result = run(root, "--check")

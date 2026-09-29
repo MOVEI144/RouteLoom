@@ -4,6 +4,8 @@ import importlib.util
 import io
 import json
 import os
+import re
+import shutil
 import subprocess
 import struct
 import sys
@@ -76,6 +78,19 @@ class CellList(unittest.TestCase):
         for app in ("reference_node", "bridge_node", "bench_node"):
             for target in ("esp32c3", "esp32s3", "esp32c5", "esp32c6"):
                 self.assertIn((app, target), pairs)
+
+    def test_consumer_dependencies_survive_isolation_from_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "consumer"
+            shutil.copytree(ROOT / "tests/idf_consumer", project)
+            defaults = (project / "sdkconfig.defaults").read_text()
+            table = re.search(r'^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="([^"]+)"$',
+                              defaults, re.M)
+            self.assertIsNotNone(table)
+            self.assertTrue((project / table.group(1)).is_file())
+            manifest = (project / "main/idf_component.yml").read_text()
+            self.assertNotIn("override_path:", manifest)
+            self.assertRegex(manifest, r"routeloom/routeloom_device:\n\s+git:")
 
     def test_workflow_matrix_comes_from_the_list(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")

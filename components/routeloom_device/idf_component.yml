@@ -24,4 +24,5 @@ targets:
   - esp32c6
 dependencies:
   idf: ">=6.0"
-  routeloom/routeloom_espnow: "^2.0.0-dev"
+  routeloom/routeloom_espnow:
+    path: ../routeloom_espnow

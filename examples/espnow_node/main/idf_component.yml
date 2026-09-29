@@ -5,23 +5,18 @@
 ## are needed and the block below stays commented out.
 ##
 ## When the example is copied into an external project (no ../../components),
-## uncomment the two git dependencies so the component manager fetches both
-## RouteLoom components from this repository. `version` is the git ref to
+## uncomment the Device git dependency so the component manager fetches it
+## and its sibling components from this repository. `version` is the git ref to
 ## check out — pin a tag or commit SHA for anything beyond experimentation.
 ##
 ## dependencies:
-##   routeloom/routeloom:
+##   routeloom/routeloom_device:
 ##     git: https://github.com/MOVEI144/RouteLoom.git
-##     path: components/routeloom
-##     version: main
-##   routeloom/routeloom_espnow:
-##     git: https://github.com/MOVEI144/RouteLoom.git
-##     path: components/routeloom_espnow
+##     path: components/routeloom_device
 ##     version: main
 ##
-## The routeloom/routeloom entry must stay declared alongside
-## routeloom/routeloom_espnow: the bindings' manifest depends on the core, and
-## no registry release exists for the solver to fall back to.
+## The Device and ESP-NOW manifests resolve their siblings from the same Git
+## revision; none of the RouteLoom components need a registry release here.
 
 dependencies:
   idf: ">=6.0"

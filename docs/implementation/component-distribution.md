@@ -1,10 +1,10 @@
 # コンポーネント配布と外部プロジェクトからの利用
 
-更新：2026-09-22。対象：ESP-IDF Component Manager による `components/routeloom`（portable C++ core）と `components/routeloom_espnow`（ESP-NOW binding）の外部消費。
+更新：2026-09-29。対象：ESP-IDF Component Manager による `components/routeloom_device`（Device 起動と facade）、`components/routeloom_espnow`（ESP-NOW binding）、`components/routeloom`（portable C++ core）の外部消費。
 
 ## 提供するもの
 
-両コンポーネントに `idf_component.yml` manifest を置いた。`name` は `routeloom/routeloom`・`routeloom/routeloom_espnow`（namespace `routeloom` 前置）、`version` は `protocol/manifest.json` の SDK 版（現在 `2.0.0-dev`）、`license` は `Apache-2.0`。`routeloom_espnow` は `routeloom/routeloom: ^2.0.0-dev` と `idf >= 6.0` に依存する。`esp_wifi`・`nvs_flash`・`mbedtls` 等の IDF 内蔵コンポーネントは manifest の依存ではなく、従来通り CMake の `REQUIRES` と `idf` バージョン下限で表す。
+3 コンポーネントに `idf_component.yml` manifest を置いた。`version` は `protocol/manifest.json` の SDK 版（現在 `2.0.0-dev`）、`license` は `Apache-2.0`。Device→ESP-NOW→core の依存は同じ Git revision の sibling path で解決する。`esp_wifi`・`nvs_flash`・`mbedtls` 等の IDF 内蔵コンポーネントは CMake の `REQUIRES` と `idf` バージョン下限で表す。
 
 manifest はレジストリ公開のためではなく、**ローカル path 参照と git 依存の解決**のためにある。現時点で ESP-IDF Component Registry への公開リリースは存在しない。
 
@@ -18,7 +18,7 @@ manifest はレジストリ公開のためではなく、**ローカル path 参
 list(APPEND EXTRA_COMPONENT_DIRS "/path/to/RouteLoom/components")
 ```
 
-両コンポーネントが manifest を持つため、component manager はこれらを local component として認識し、`routeloom_espnow` の `routeloom/routeloom` 依存を同一 checkout から解決する。ネットワーク取得は発生しない。`examples/espnow_node` はリポジトリ内でこの方式で build される。
+component manager は sibling 依存を同一 checkout から解決する。ネットワーク取得は発生しない。`examples/espnow_node` はリポジトリ内でこの方式で build される。
 
 ### (b) component manager の git 依存
 
@@ -26,17 +26,13 @@ list(APPEND EXTRA_COMPONENT_DIRS "/path/to/RouteLoom/components")
 
 ```yaml
 dependencies:
-  routeloom/routeloom:
+  routeloom/routeloom_device:
     git: https://github.com/MOVEI144/RouteLoom.git
-    path: components/routeloom
-    version: <tag または commit SHA>
-  routeloom/routeloom_espnow:
-    git: https://github.com/MOVEI144/RouteLoom.git
-    path: components/routeloom_espnow
+    path: components/routeloom_device
     version: <tag または commit SHA>
 ```
 
-component manager はリポジトリを clone し、`path` で示した subdirectory を `managed_components/` に配置する。**2 つの entry がともに必要**：`routeloom_espnow` の manifest が `routeloom/routeloom` を要求するが、registry には存在しないため、取得先を project manifest が教える必要がある。
+component manager は Device と、その manifest が指定する ESP-NOW binding・core を同じ commit から `managed_components/` に配置する。
 
 git `path` 依存は component の subdirectory **だけ**を取り出す。このため vendored micro-ecc（RLCP1_COSE_ESP256 verifier の P-256 backend、BSD-2）は `components/routeloom/third_party/micro-ecc` に component 内蔵とし、component が自己完結するようにした。SDK v1 の EDHOC（P2-1）で追加した libedhoc（MIT）と zcbor（Apache-2.0）も同じ理由で `components/routeloom/third_party/` に置く（pin は `third_party/VENDORED.json` と NOTICE）。host 用 AES-CCM の TF-PSA-Crypto 部分集合も同じ場所にあるが、ESP-IDF build では compile しない（firmware は ESP-IDF 自身の Mbed TLS を PSA 経由で使う）。
 
