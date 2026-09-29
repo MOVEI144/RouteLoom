@@ -601,7 +601,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.stage == "size":
         data = load_cells(args.cells_file)
         cell = find_cell(data, args.cell)
-        build = args.build_dir or ROOT / "firmware" / cell["app"] / "build"
+        build = args.build_dir or ROOT / cell_dir(cell) / "build"
         errors = size_errors(data, cell, build)
         for error in errors:
             print(f"{cell['id']}: {error}", file=sys.stderr)
