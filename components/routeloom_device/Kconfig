@@ -166,8 +166,10 @@ menu "RouteLoom device"
             the membership is adopted. DevRam verifies the dev-HMAC permit
             key derived from its PSK (SecurityProfile::Development, never a
             production identity claim). The journal takes about 42 KB of
-            static RAM: on ESP32-C3 it fits the endpoint resource profile,
-            not the relay profile's static RAM floor.
+            static RAM: on ESP32-C3 it fits the endpoint resource profile
+            only, and the build stops with an error for any other profile
+            (the relay and gateway profiles would fall below the static RAM
+            floor that radio start needs).
 
     config ROUTELOOM_CONFIG_AUTHORITY
         hex "Config authority Node ID permitted to issue permits"

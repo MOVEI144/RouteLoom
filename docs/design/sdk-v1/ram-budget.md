@@ -117,7 +117,7 @@ python3 tools/firmware_ram_report.py build/size.json --target <target> --app <ap
 | dedup容量 | ESP-IDF Kconfig *RouteLoom → Dedup capacity*（profile既定、または`CONFIG_ROUTELOOM_DEDUP_PROFILE_{LEAF,RELAY,GATEWAY}`で固定）、host CMake `-DROUTELOOM_DEDUP_PROFILE=leaf/relay/gateway` | profile既定はendpoint・gateway_smallが32、ほかは96／固定は32・96・256件 | 1件136 B（leaf 4.4 KB、relay 13.1 KB、gateway 34.8 KB） |
 | 経路profile | `CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED` | flat（既定）／gateway-scoped | 容量は同じ（経路表128件） |
 | USB bridge | `bridge_node`だけがlinkする。任意機能は`CONFIG_ROUTELOOM_USB_{NODE_STATUS,GATEWAY_ENDPOINT,GROUP,OBSERVATION}`（gateway_smallはNODE_STATUSとGATEWAY_ENDPOINTが既定off） | — | 33.8 KB（全機能） |
-| migration／config journal | `CONFIG_ROUTELOOM_MIGRATION`／`CONFIG_ROUTELOOM_CONFIG` | 既定off | 15.0 KB／約43.7 KB |
+| migration／config journal | `CONFIG_ROUTELOOM_MIGRATION`／`CONFIG_ROUTELOOM_CONFIG` | 既定off。C3の`CONFIG_ROUTELOOM_CONFIG`はendpoint profileだけ（relay・gatewayではreference床を割るのでbuildを止める） | 15.0 KB／約43.7 KB |
 
 firmwareの既定：reference_node・bench_nodeはrelay、exampleはendpoint、bridge_nodeはC3がgateway_small、S3・C5・C6がgateway（dedupはC6 256、S3 96、C5 32）。E2E sessionが満杯のときは一番古いidle context（seal中でないもの）を追い出してRLRES1で戻し、回数は`CoordinatorSnapshot::end_evictions`に出る。Live／Terminalのdedup recordは容量不足でも追い出されず、受付を拒否する。
 
