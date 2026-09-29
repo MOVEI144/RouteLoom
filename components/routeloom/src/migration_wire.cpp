@@ -304,16 +304,16 @@ PlanExchange::Outbound* PlanExchange::find_outbound(
 }
 
 bool PlanExchange::delivered_before(
-    const autonomy::ObjectHash& hash) const noexcept {
+    const NodeId peer, const autonomy::ObjectHash& hash) const noexcept {
   for (const auto& entry : delivered_) {
-    if (entry == hash) return true;
+    if (entry.peer == peer && entry.hash == hash) return true;
   }
   return false;
 }
 
 void PlanExchange::note_delivered(
-    const autonomy::ObjectHash& hash) noexcept {
-  delivered_[delivered_next_] = hash;
+    const NodeId peer, const autonomy::ObjectHash& hash) noexcept {
+  delivered_[delivered_next_] = Delivered{peer, hash};
   delivered_next_ = (delivered_next_ + 1) % delivered_.size();
 }
 
@@ -340,7 +340,7 @@ void PlanExchange::on_manifest(
     send_ack(peer, manifest.object_hash, 0, autonomy::ObjectAckStatus::Failed);
     return;
   }
-  if (delivered_before(manifest.object_hash)) {
+  if (delivered_before(peer, manifest.object_hash)) {
     // Duplicate transfer of an object already dispatched: re-ack, never
     // re-run the semantic layer.
     send_ack(peer, manifest.object_hash, manifest.total_len,
@@ -427,7 +427,7 @@ void PlanExchange::complete_inbound(Inbound& slot,
     slot.used = false;
     return;
   }
-  note_delivered(slot.hash);
+  note_delivered(slot.peer, slot.hash);
   ++delivered_count_;
   send_ack(slot.peer, slot.hash, slot.total_len,
            autonomy::ObjectAckStatus::Ok);
@@ -751,7 +751,7 @@ void MigrationAgent::emit_ready_report(const Digest256& plan_hash,
   MutableByteView body{content.data() + 1, content.size() - 1};
   if (!ready_report_encode(report, body, size).ok()) return;
   content[0] = static_cast<std::uint8_t>(PlanMessage::ReadyReport);
-  queue_inline(config_.participant.authority,
+  queue_inline(authority_peer(),
                autonomy::ControlObjectKind::ChannelPlan,
                ByteView{content.data(), size + 1},
                now_ms + migration_wire_const::kPendingTtlMs, false);
@@ -769,7 +769,7 @@ void MigrationAgent::emit_result_report(const ResultOutcome outcome,
   MutableByteView body{content.data() + 1, content.size() - 1};
   if (!result_report_encode(report, body, size).ok()) return;
   content[0] = static_cast<std::uint8_t>(PlanMessage::ResultReport);
-  queue_inline(config_.participant.authority,
+  queue_inline(authority_peer(),
                autonomy::ControlObjectKind::ChannelPlan,
                ByteView{content.data(), size + 1},
                now_ms + migration_wire_const::kPendingTtlMs, false);
@@ -912,6 +912,14 @@ void MigrationAgent::check_terminal(const MonotonicMs now_ms) noexcept {
   owner_.on_migration_event("PLAN_TERMINAL", kInvalidNodeId);
 }
 
+std::size_t MigrationAgent::ready_count() const noexcept {
+  std::size_t count = 0;
+  readiness_.for_each([&](const ParticipantReadiness& value) {
+    if (value.ready && value.plan_hash == issued_plan_hash_) ++count;
+  });
+  return count;
+}
+
 RequiredSetVerdict MigrationAgent::readiness_verdict() const noexcept {
   std::array<ParticipantReadiness, migration_wire_const::kRequiredCapacity>
       set{};
@@ -961,7 +969,7 @@ bool MigrationAgent::readiness_of(const NodeId node,
 
 void MigrationAgent::compose_autoguarded(
     AutoGuardedEvidence& evidence, const MonotonicMs now_ms) const noexcept {
-  const NodeId authority_id = config_.participant.authority;
+  const NodeId authority_id = authority_peer();
   const bool self_authority = authority_id == config_.participant.node;
   // Explicit configured Authority: unset/broadcast ids are not authorities.
   evidence.authority_configured =
@@ -1081,7 +1089,7 @@ void MigrationAgent::auto_survey(const ChannelAssessment& assessment,
     note("AUTOSURVEY_CLOCK_UNARMED", kInvalidNodeId);
     return;
   }
-  const NodeId peer = config_.participant.authority;
+  const NodeId peer = authority_peer();
   if (peer == kInvalidNodeId || peer == kBroadcastNodeId ||
       peer == config_.participant.node) {
     note("AUTOSURVEY_NO_PEER", kInvalidNodeId);
@@ -1297,7 +1305,7 @@ void MigrationAgent::on_migration_frame(const NodeId peer,
         owner_.on_migration_event("TIME_SYNC_DECODE", peer);
         return;
       }
-      if (sample.source != config_.participant.authority) {
+      if (sample.source != authority_peer()) {
         // Only the configured authority re-arms the migration clock
         // (D5-03). Other samples are valid wire traffic, not clock evidence.
         return;
@@ -1712,7 +1720,7 @@ void MigrationAgent::poll(const MonotonicMs now_ms) noexcept {
     }
   }
   if (channel_diverged && !reconcile_pending_op_ && !reconcile_exhausted_ &&
-      !participant_.in_progress() && !runner_.busy()) {
+      !reconcile_held_ && !participant_.in_progress() && !runner_.busy()) {
     RadioOperation op{};
     op.kind = RadioOperationKind::ChannelCutover;
     op.deadline_ms = now_ms + migration_const::kGuardFloorMs * 20U;
@@ -1764,24 +1772,36 @@ void MigrationAgent::poll(const MonotonicMs now_ms) noexcept {
     if (config_.timesync_period_ms != 0 &&
         now_ms >= next_timesync_ms_) {
       // Fresh authenticated clock samples keep participant clocks armed
-      // after a restart (D5-03): a stored mapping is never reused.
+      // after a restart (D5-03): a stored mapping is never reused. The
+      // radio carries one frame at a time, so a peer that would block
+      // gets its sample on a later poll, and the round ends only when
+      // every peer had one.
       autonomy::TimeSyncPayload sample{};
       sample.source = config_.participant.node;
-      sample.sequence = ++timesync_sequence_;
+      if (timesync_cursor_ == 0) ++timesync_sequence_;
+      sample.sequence = timesync_sequence_;
       sample.reference_ms = now_ms;
       sample.uncertainty_ms = config_.timesync_uncertainty_ms;
       autonomy::EncodedPayload payload{};
+      std::size_t next = 0;
+      std::size_t count = 0;
       if (time_sync_encode(sample, payload).ok() &&
           channel_context() == ExchangeChannel::Home) {
         std::array<NodeId, 24> peers{};
-        const std::size_t count =
-            wire_.migration_peers(peers.data(), peers.size());
-        for (std::size_t i = 0; i < count; ++i) {
-          (void)wire_.migration_send(peers[i], FrameType::TimeSync,
-                                     payload.view());
+        count = wire_.migration_peers(peers.data(), peers.size());
+        for (next = timesync_cursor_; next < count; ++next) {
+          if (wire_.migration_send(peers[next], FrameType::TimeSync, payload.view()).code ==
+              StatusCode::WouldBlock) {
+            break;
+          }
         }
       }
-      next_timesync_ms_ = now_ms + config_.timesync_period_ms;
+      if (next < count) {
+        timesync_cursor_ = next;
+      } else {
+        timesync_cursor_ = 0;
+        next_timesync_ms_ = now_ms + config_.timesync_period_ms;
+      }
     }
     check_terminal(now_ms);
   }

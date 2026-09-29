@@ -1839,6 +1839,17 @@ void test_exchange_duplicate_delivery() {
   autonomy::ObjectAckPayload ack{};
   CHECK_OK(object_ack_decode(payload.view(), ack));
   CHECK(ack.status == autonomy::ObjectAckStatus::Ok);
+  // The same bytes from another sender (two members' READY reports for one
+  // plan) are a delivery of their own.
+  constexpr NodeId kOtherPeer = 0x77;
+  pair.b.on_manifest(kOtherPeer, manifest, now);
+  autonomy::ObjectChunkPayload chunk{};
+  chunk.object_hash = hash;
+  chunk.offset = 0;
+  chunk.data_size = static_cast<std::uint16_t>(content.size());
+  std::memcpy(chunk.data.data(), content.data(), content.size());
+  pair.b.on_chunk(kOtherPeer, chunk, now);
+  CHECK(pair.sink_b.objects.size() == 2);
 }
 
 }  // namespace
