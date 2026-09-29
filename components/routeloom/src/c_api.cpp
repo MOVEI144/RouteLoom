@@ -26,23 +26,6 @@ void set_header(T& object) noexcept {
   object.version = RL_ABI_VERSION;
 }
 
-// Delivery reasons are static strings; the registry id is looked up by name
-// at the boundary (protocol/manifest.json reason_codes). 0 = not registered.
-std::uint16_t reason_id(const char* reason) noexcept {
-  struct Entry {
-    const char* name;
-    std::uint16_t id;
-  };
-#define RL_REASON_ENTRY(name, id) {#name, id},
-  static constexpr Entry kTable[] = {ROUTELOOM_REASON_TABLE(RL_REASON_ENTRY)};
-#undef RL_REASON_ENTRY
-  if (reason == nullptr) return ROUTELOOM_REASON_NONE;
-  for (const Entry& entry : kTable) {
-    if (std::strcmp(entry.name, reason) == 0) return entry.id;
-  }
-  return ROUTELOOM_REASON_NONE;
-}
-
 rl_status_code_t to_c(const StatusCode code) noexcept {
   return static_cast<rl_status_code_t>(code);
 }
@@ -79,7 +62,7 @@ rl_delivery_result_t to_c(const DeliveryResult& result) noexcept {
   set_header(out);
   out.id = to_c(result.id);
   out.state = static_cast<rl_delivery_state_t>(result.state);
-  out.reason_id = reason_id(result.reason);
+  out.reason_id = reason_code(result.reason);
   out.reason = result.reason;
   return out;
 }
@@ -624,7 +607,7 @@ rl_status_code_t rl_get_group_result(rl_context_t* context, const rl_message_id_
   set_header(*out_result);
   out_result->id = to_c(result.id);
   out_result->state = static_cast<rl_delivery_state_t>(result.state);
-  out_result->reason_id = reason_id(result.reason);
+  out_result->reason_id = reason_code(result.reason);
   out_result->reason = result.reason;
   out_result->group = result.group;
   out_result->rounds = result.rounds;

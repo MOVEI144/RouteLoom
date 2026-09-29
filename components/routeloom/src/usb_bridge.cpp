@@ -6,14 +6,16 @@
 #include "routeloom/byte_io.hpp"
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/endpoint_wire.hpp"
+#include "routeloom/secure_clear.hpp"
 #include "routeloom/telemetry.hpp"
+#include "routeloom/version.h"
 
 namespace routeloom::usb {
 namespace {
 
 constexpr std::size_t kHelloBodyMin = 8 + 1 + 1 + 1;
-constexpr std::size_t kHelloAckBodySize = 8 + 1 + 8 + 8 + 8 + 4 + kDevTagSize;
-constexpr std::size_t kAuthOkBodySize = kDevTagSize + 8;
+constexpr std::size_t kHelloAckBodySize = 8 + 1 + 8 + 8 + 8 + 4 + kTagSize;
+constexpr std::size_t kAuthOkBodySize = kTagSize + 8;
 constexpr std::size_t kCreditGrantInnerSize = 1 + 8 + 8;
 // Local diagnostic replies carry the query's 5 s bound as their own TX
 // deadline — a credit-starved reply expires instead of reporting stale data.
@@ -42,6 +44,22 @@ void write_u32(std::uint8_t* p, std::uint32_t v) noexcept {
 void write_u16(std::uint8_t* p, std::uint16_t v) noexcept {
   p[0] = static_cast<std::uint8_t>(v >> 8U);
   p[1] = static_cast<std::uint8_t>(v & 0xFFU);
+}
+
+// Reason field of Error and DeliveryEvent (usb-protocol.md §2.1):
+// reason_id u16 || detail_len u8 || detail. A registered reason travels as
+// its id alone; an unregistered one as id 0 plus its ASCII text, bounded by
+// `max_detail`. Returns the bytes written.
+std::size_t write_reason(std::uint8_t* p, const std::uint16_t reason_id,
+                         const char* detail, const std::size_t max_detail) noexcept {
+  write_u16(p, reason_id);
+  std::size_t len = 0;
+  if (reason_id == ROUTELOOM_REASON_NONE && detail != nullptr) {
+    while (detail[len] != '\0' && len < max_detail) ++len;
+    if (len > 0) std::memcpy(p + 3, detail, len);
+  }
+  p[2] = static_cast<std::uint8_t>(len);
+  return 3 + len;
 }
 
 // A MeshRejected SUBMIT has no stored slot, so the receipt's 32-byte hash
@@ -195,7 +213,7 @@ Status UsbBridge::refresh_group_capability(const MonotonicMs now_ms) noexcept {
     // Tell the host first (control frames still flush in Draining) — the
     // error is session-fatal on its side, so it re-hellos on its own and
     // the fresh HelloAck carries the corrected bitmap.
-    send_error(UsbErrorCode::StaleSession, 0, "capability refresh", now_ms);
+    send_error(UsbErrorCode::StaleSession, 0, ROUTELOOM_REASON_CAPABILITY_REFRESH, now_ms);
     state_ = SessionState::Draining;
   } else if (state_ == SessionState::Hello ||
              state_ == SessionState::Authenticating) {
@@ -381,7 +399,8 @@ void UsbBridge::on_frame(const UsbFrame& frame) noexcept {
   ++stats_.rx_errors;
   if (preauth_budget_ > 0) {
     --preauth_budget_;
-    send_error(UsbErrorCode::NotAuthenticated, frame.request, "NOT_AUTHENTICATED", now);
+    send_error(UsbErrorCode::NotAuthenticated, frame.request,
+               ROUTELOOM_REASON_NOT_AUTHENTICATED, now);
   }
 }
 
@@ -391,7 +410,8 @@ void UsbBridge::handle_hello(const UsbFrame& frame, const MonotonicMs now_ms) no
     ++stats_.rx_errors;
     if (preauth_budget_ > 0) {
       --preauth_budget_;
-      send_error(UsbErrorCode::ProtocolError, frame.request, "HELLO_MALFORMED", now_ms);
+      send_error(UsbErrorCode::ProtocolError, frame.request,
+                 ROUTELOOM_REASON_HELLO_MALFORMED, now_ms);
     }
     return;
   }
@@ -407,7 +427,8 @@ void UsbBridge::handle_hello(const UsbFrame& frame, const MonotonicMs now_ms) no
     ++stats_.rx_errors;
     if (preauth_budget_ > 0) {
       --preauth_budget_;
-      send_error(UsbErrorCode::ProtocolError, frame.request, "HELLO_MALFORMED", now_ms);
+      send_error(UsbErrorCode::ProtocolError, frame.request,
+                 ROUTELOOM_REASON_HELLO_MALFORMED, now_ms);
     }
     return;
   }
@@ -419,14 +440,16 @@ void UsbBridge::handle_hello(const UsbFrame& frame, const MonotonicMs now_ms) no
   }
 
   // Valid HELLO: any previous session attempt is torn down. Grants, counters,
-  // consumed values and partial TX are never carried over.
+  // consumed values and partial TX are never carried over. There is no
+  // fallback to protocol 1: a range without 2 is refused, and the offered
+  // range is bound into the transcript so a rewritten range fails AUTH.
   reset_session_state();
   if (min_version > kProtocolVersion || max_version < kProtocolVersion) {
     // Same bounded pre-auth budget as the other HELLO failure paths: a flood
     // of parseable-but-unsupported HELLOs must not get free error replies.
     if (preauth_budget_ > 0) {
       --preauth_budget_;
-      send_error(UsbErrorCode::Unsupported, frame.request, "VERSION_UNSUPPORTED",
+      send_error(UsbErrorCode::Unsupported, frame.request, ROUTELOOM_REASON_VERSION_UNSUPPORTED,
                  now_ms);
     }
     return;
@@ -436,7 +459,10 @@ void UsbBridge::handle_hello(const UsbFrame& frame, const MonotonicMs now_ms) no
   transcript_.host_nonce = host_nonce;
   transcript_.device_nonce = config_.device_nonce + session_attempt_;
   ++session_attempt_;
+  transcript_.min_version = min_version;
+  transcript_.max_version = max_version;
   transcript_.version = kProtocolVersion;
+  transcript_.carrier = kCarrierUsbSerial;
   transcript_.node = config_.node;
   transcript_.boot_id = config_.boot_id;
   transcript_.network = config_.network;
@@ -444,14 +470,11 @@ void UsbBridge::handle_hello(const UsbFrame& frame, const MonotonicMs now_ms) no
   transcript_.principal_len = principal_len;
   transcript_.principal = principal;
 
-  std::array<std::uint8_t, kTranscriptSize> encoded{};
-  std::size_t transcript_size = 0;
-  status = encode_transcript(
-      transcript_, MutableByteView{encoded.data(), encoded.size()}, transcript_size);
-  if (!status) return;
-  proof_ = derive_session_proof(
-      config_.secret, ByteView{encoded.data(), transcript_size});
-  proof_valid_ = true;
+  SessionProof proof = derive_proof();
+  keys_.session_id = proof.session_id;
+  keys_.key_h2d = proof.key_h2d;
+  keys_.key_d2h = proof.key_d2h;
+  keys_valid_ = true;
 
   // HelloAck body: device_nonce || version || node || boot || network ||
   // capability || hello_tag. The tag lets the host verify we hold the secret.
@@ -462,7 +485,8 @@ void UsbBridge::handle_hello(const UsbFrame& frame, const MonotonicMs now_ms) no
   write_u64(body.data() + 17, transcript_.boot_id);
   write_u64(body.data() + 25, transcript_.network);
   write_u32(body.data() + 33, transcript_.capability);
-  std::memcpy(body.data() + 37, proof_.hello_tag.data(), kDevTagSize);
+  std::memcpy(body.data() + 37, proof.hello_tag.data(), kTagSize);
+  clear_session_proof(proof);
   enqueue(FrameKind::HelloAck, 0, frame.request,
           ByteView{body.data(), body.size()}, now_ms);
   state_ = SessionState::Hello;
@@ -470,44 +494,55 @@ void UsbBridge::handle_hello(const UsbFrame& frame, const MonotonicMs now_ms) no
 }
 
 void UsbBridge::handle_auth(const UsbFrame& frame, const MonotonicMs now_ms) noexcept {
-  if (frame.session != 0 || frame.body.size != kDevTagSize || !proof_valid_) {
+  if (frame.session != 0 || frame.body.size != kTagSize || !keys_valid_) {
     ++stats_.auth_failures;
-    send_error(UsbErrorCode::AuthFailed, frame.request, "AUTH_MALFORMED", now_ms);
+    send_error(UsbErrorCode::AuthFailed, frame.request, ROUTELOOM_REASON_AUTH_MALFORMED, now_ms);
     return;
   }
-  std::uint8_t diff = 0;
-  for (std::size_t i = 0; i < kDevTagSize; ++i) {
-    diff |= static_cast<std::uint8_t>(frame.body.data[i] ^ proof_.auth_tag[i]);
-  }
-  if (diff != 0) {
+  SessionProof proof = derive_proof();
+  if (!constant_time_equal(frame.body, ByteView{proof.auth_tag.data(), kTagSize})) {
+    clear_session_proof(proof);
     ++stats_.auth_failures;
     ++auth_attempts_;
-    send_error(UsbErrorCode::AuthFailed, frame.request, "AUTH_TAG_INVALID", now_ms);
+    send_error(UsbErrorCode::AuthFailed, frame.request, ROUTELOOM_REASON_AUTH_TAG_INVALID, now_ms);
     if (auth_attempts_ >= kAuthAttemptsMax) reset_session_state();
     return;
   }
-  begin_auth_session(now_ms);
+  begin_auth_session(proof.auth_ok_tag, now_ms);
+  clear_session_proof(proof);
 }
 
-void UsbBridge::begin_auth_session(const MonotonicMs now_ms) noexcept {
+SessionProof UsbBridge::derive_proof() const noexcept {
+  std::array<std::uint8_t, kTranscriptSize> encoded{};
+  std::size_t size = 0;
+  // Cannot fail: the buffer is kTranscriptSize and principal_len was
+  // bounded when the HELLO was parsed.
+  (void)encode_transcript(transcript_, MutableByteView{encoded.data(), encoded.size()}, size);
+  const SessionProof proof = derive_session_proof(config_.secret, ByteView{encoded.data(), size});
+  secure_clear(encoded);
+  return proof;
+}
+
+void UsbBridge::begin_auth_session(const SessionTag& auth_ok_tag,
+                                   const MonotonicMs now_ms) noexcept {
   state_ = SessionState::Authenticating;
   state_entered_ms_ = now_ms;
   rx_counter_ = 0;
   tx_counter_ = 0;
-  tx_credit_.reset(proof_.session_id);
-  rx_credit_.reset(proof_.session_id);
+  tx_credit_.reset(keys_.session_id);
+  rx_credit_.reset(keys_.session_id);
   connection_stalled_ = false;
   stall_reported_ = false;
   credit_queries_ = 0;
 
   // AUTH_OK (HelloAck + kFlagAuth): auth_ok_tag || session_id.
   std::array<std::uint8_t, kAuthOkBodySize> ack{};
-  std::memcpy(ack.data(), proof_.auth_ok_tag.data(), kDevTagSize);
-  write_u64(ack.data() + kDevTagSize, proof_.session_id);
+  std::memcpy(ack.data(), auth_ok_tag.data(), kTagSize);
+  write_u64(ack.data() + kTagSize, keys_.session_id);
   enqueue(FrameKind::HelloAck, kFlagAuth, 0, ByteView{ack.data(), ack.size()}, now_ms);
 
   // Initial grant for host→device traffic, bounded by the dedicated buffer.
-  (void)rx_credit_.update(proof_.session_id, kRxGrantFrames, kRxGrantBytes);
+  (void)rx_credit_.update(keys_.session_id, kRxGrantFrames, kRxGrantBytes);
   std::array<std::uint8_t, kCreditGrantInnerSize> grant{};
   grant[0] = kCreditGrant;
   write_u64(grant.data() + 1, rx_credit_.grant_frames());
@@ -524,21 +559,23 @@ void UsbBridge::begin_auth_session(const MonotonicMs now_ms) noexcept {
 
 void UsbBridge::handle_authenticated(const UsbFrame& frame,
                                      const MonotonicMs now_ms) noexcept {
-  if (frame.session != proof_.session_id) {
+  if (frame.session != keys_.session_id) {
     ++stats_.stale_session;  // stale-session traffic is dropped, not answered
     return;
   }
   std::uint64_t counter = 0;
   ByteView inner{};
-  Status status = open_body(proof_.key, kDirHostToDevice, frame, counter, inner);
+  Status status = open_body(keys_.key_h2d, kDirHostToDevice, frame, counter, inner);
   if (!status) {
     ++stats_.auth_failures;
-    send_error(UsbErrorCode::AuthFailed, frame.request, "SESSION_TAG_INVALID", now_ms);
+    send_error(UsbErrorCode::AuthFailed, frame.request,
+               ROUTELOOM_REASON_SESSION_TAG_INVALID, now_ms);
     return;
   }
   if (counter != rx_counter_) {
     ++stats_.replay_rejected;
-    send_error(UsbErrorCode::ReplayRejected, frame.request, "REPLAY_REJECTED", now_ms);
+    send_error(UsbErrorCode::ReplayRejected, frame.request,
+               ROUTELOOM_REASON_REPLAY_REJECTED, now_ms);
     return;
   }
   ++rx_counter_;
@@ -552,7 +589,7 @@ void UsbBridge::handle_authenticated(const UsbFrame& frame,
     return;
   }
   if (state_ == SessionState::Draining && !is_control_kind(frame.kind)) {
-    send_error(UsbErrorCode::Draining, frame.request, "SESSION_DRAINING", now_ms);
+    send_error(UsbErrorCode::Draining, frame.request, ROUTELOOM_REASON_SESSION_DRAINING, now_ms);
     return;
   }
   if (!is_control_kind(frame.kind)) {
@@ -561,7 +598,7 @@ void UsbBridge::handle_authenticated(const UsbFrame& frame,
     status = rx_credit_.consume(decoded_len);
     if (!status) {
       ++stats_.credit_denied;
-      send_error(UsbErrorCode::CreditExhausted, frame.request, "CREDIT_EXCEEDED",
+      send_error(UsbErrorCode::CreditExhausted, frame.request, ROUTELOOM_REASON_CREDIT_EXCEEDED,
                  now_ms);
       return;
     }
@@ -591,7 +628,7 @@ void UsbBridge::dispatch_inner(const FrameKind kind, const std::uint16_t flags,
     case FrameKind::Diagnostic:
       break;  // host-reported status; accounted in stats only
     default:
-      send_error(UsbErrorCode::ProtocolError, request, "KIND_UNEXPECTED", now_ms);
+      send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_KIND_UNEXPECTED, now_ms);
       break;
   }
 }
@@ -600,18 +637,18 @@ void UsbBridge::handle_credit(const std::uint64_t request, const ByteView inner,
                               const MonotonicMs now_ms) noexcept {
   (void)request;
   if (inner.size == 0) {
-    send_error(UsbErrorCode::ProtocolError, request, "CREDIT_MALFORMED", now_ms);
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_CREDIT_MALFORMED, now_ms);
     return;
   }
   switch (inner.data[0]) {
     case kCreditGrant: {
       if (inner.size != kCreditGrantInnerSize) {
-        send_error(UsbErrorCode::ProtocolError, request, "CREDIT_MALFORMED", now_ms);
+        send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_CREDIT_MALFORMED, now_ms);
         return;
       }
       const std::uint64_t frames = read_u64(inner.data + 1);
       const std::uint64_t bytes = read_u64(inner.data + 9);
-      const Status status = tx_credit_.update(proof_.session_id, frames, bytes);
+      const Status status = tx_credit_.update(keys_.session_id, frames, bytes);
       if (!status) {
         ++stats_.credit_denied;
         send_error(UsbErrorCode::ProtocolError, request, status.detail, now_ms);
@@ -636,7 +673,7 @@ void UsbBridge::handle_credit(const std::uint64_t request, const ByteView inner,
       state_entered_ms_ = now_ms;
       break;
     default:
-      send_error(UsbErrorCode::ProtocolError, request, "CREDIT_MALFORMED", now_ms);
+      send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_CREDIT_MALFORMED, now_ms);
       break;
   }
 }
@@ -645,7 +682,7 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
                                     const ByteView inner,
                                     const MonotonicMs now_ms) noexcept {
   if (inner.size < 16) {
-    send_error(UsbErrorCode::ProtocolError, request, "DATA_MALFORMED", now_ms);
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_DATA_MALFORMED, now_ms);
     return;
   }
   const std::uint64_t idempotency_key = read_u64(inner.data);
@@ -657,13 +694,13 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
   // records may legitimately persist past a reconnect. The canonical hash
   // binds kind+body (key, destination and payload together).
   if (inner.size > kMaxTxInner) {
-    send_error(UsbErrorCode::PayloadTooLarge, request, "PAYLOAD_TOO_LARGE", now_ms);
+    send_error(UsbErrorCode::PayloadTooLarge, request, ROUTELOOM_REASON_PAYLOAD_TOO_LARGE, now_ms);
     return;
   }
   // Canonical staging in the idle TX body buffer (hashed right here).
   tx_body_[0] = static_cast<std::uint8_t>(FrameKind::DataToMesh);
   std::memcpy(tx_body_.data() + 1, inner.data, inner.size);
-  const DevTag hash =
+  const SessionTag hash =
       payload_hash(ByteView{tx_body_.data(), inner.size + 1});
   IdempotencyRecord* record = nullptr;
   const IdempotencyResult result = idempotency_.submit(
@@ -671,33 +708,31 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
       transcript_.network, static_cast<std::uint8_t>(FrameKind::DataToMesh),
       idempotency_key, hash, now_ms, record);
   if (result == IdempotencyResult::Conflict) {
-    send_error(UsbErrorCode::Conflict, request, "IDEMPOTENCY_CONFLICT", now_ms);
+    send_error(UsbErrorCode::Conflict, request, ROUTELOOM_REASON_IDEMPOTENCY_CONFLICT, now_ms);
     return;
   }
   if (result == IdempotencyResult::WindowExpired) {
-    send_error(UsbErrorCode::Conflict, request, "IDEMPOTENCY_WINDOW_EXPIRED", now_ms);
+    send_error(UsbErrorCode::Conflict, request,
+               ROUTELOOM_REASON_IDEMPOTENCY_WINDOW_EXPIRED, now_ms);
     return;
   }
   if (result == IdempotencyResult::NoCapacity || record == nullptr) {
-    send_error(UsbErrorCode::NoCapacity, request, "IDEMPOTENCY_FULL", now_ms);
+    send_error(UsbErrorCode::NoCapacity, request, ROUTELOOM_REASON_IDEMPOTENCY_FULL, now_ms);
     return;
   }
   if (result == IdempotencyResult::Existing) {
     if (record->accepted) {
-      std::array<std::uint8_t, 8 + 4 + 8 + 1 + 1 + kMaxReasonLen> body{};
+      std::array<std::uint8_t, 8 + 4 + 8 + 1 + 3> body{};
       write_u64(body.data(), request);
       write_u32(body.data() + 8, record->message_session);
       write_u64(body.data() + 12, record->message_sequence);
       body[20] = static_cast<std::uint8_t>(DeliveryState::Accepted);
-      const char* reason = "IDEMPOTENT_REPLAY";
-      const std::size_t reason_len = std::strlen(reason);
-      body[21] = static_cast<std::uint8_t>(reason_len);
-      std::memcpy(body.data() + 22, reason, reason_len);
-      enqueue(FrameKind::DeliveryEvent, 0, request,
-              ByteView{body.data(), 22 + reason_len}, now_ms);
+      const std::size_t size =
+          21 + write_reason(body.data() + 21, ROUTELOOM_REASON_IDEMPOTENT_REPLAY, nullptr, 0);
+      enqueue(FrameKind::DeliveryEvent, 0, request, ByteView{body.data(), size}, now_ms);
     } else {
       send_error(static_cast<UsbErrorCode>(record->error_code), request,
-                 "IDEMPOTENT_REPLAY", now_ms);
+                 ROUTELOOM_REASON_IDEMPOTENT_REPLAY, now_ms);
     }
     return;
   }
@@ -707,14 +742,14 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
     record->accepted = false;
     record->settled = true;
     record->error_code = static_cast<std::uint16_t>(UsbErrorCode::Unsupported);
-    send_error(UsbErrorCode::Unsupported, request, "NO_MESH", now_ms);
+    send_error(UsbErrorCode::Unsupported, request, ROUTELOOM_REASON_NO_MESH, now_ms);
     return;
   }
   if (payload.size > kMaxApplicationPayload) {
     record->accepted = false;
     record->settled = true;
     record->error_code = static_cast<std::uint16_t>(UsbErrorCode::PayloadTooLarge);
-    send_error(UsbErrorCode::PayloadTooLarge, request, "PAYLOAD_TOO_LARGE", now_ms);
+    send_error(UsbErrorCode::PayloadTooLarge, request, ROUTELOOM_REASON_PAYLOAD_TOO_LARGE, now_ms);
     return;
   }
   pending_request_ = request;
@@ -742,11 +777,11 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
   // only when this build is configured to speak host_ops_v1 (advertised in
   // HelloAck). The host side — send only when advertised — is TX-I2's duty.
   if ((config_.capability & kCapHostOpsV1) == 0) {
-    send_error(UsbErrorCode::Unsupported, request, "HOST_OPS_UNSUPPORTED", now_ms);
+    send_error(UsbErrorCode::Unsupported, request, ROUTELOOM_REASON_HOST_OPS_UNSUPPORTED, now_ms);
     return;
   }
   if (inner.size < 2) {
-    send_error(UsbErrorCode::ProtocolError, request, "HOST_OPS_MALFORMED", now_ms);
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_HOST_OPS_MALFORMED, now_ms);
     return;
   }
   // The join relay family speaks its own inner schema 2; every other
@@ -756,7 +791,7 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
                            sub == HostOpsSub::JoinRelayAbort || sub == HostOpsSub::JoinRelayResult;
   const std::uint8_t want_schema = join_family ? kJoinRelaySchema : kHostOpsSchema;
   if (inner.data[0] != want_schema) {
-    send_error(UsbErrorCode::ProtocolError, request, "HOST_OPS_SCHEMA", now_ms);
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_HOST_OPS_SCHEMA, now_ms);
     return;
   }
   switch (sub) {
@@ -790,7 +825,7 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
     case HostOpsSub::GatewayIngress:
       // 0x11 is device→host only: the host issuing one is a protocol
       // violation, never a request to answer.
-      send_error(UsbErrorCode::ProtocolError, request, "INGRESS_DIRECTION",
+      send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_INGRESS_DIRECTION,
                  now_ms);
       break;
     case HostOpsSub::ConfigQuery:
@@ -817,7 +852,7 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
     case HostOpsSub::ConfigStatus:
       // 0x22 is device→host only (the async reply to a 0x20 query): a host
       // issuing one is a protocol violation, never a request to answer.
-      send_error(UsbErrorCode::ProtocolError, request, "STATUS_DIRECTION",
+      send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_STATUS_DIRECTION,
                  now_ms);
       break;
     case HostOpsSub::DiagnosticRequest:
@@ -826,7 +861,7 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
     case HostOpsSub::DiagnosticResponse:
       // 0x31 is device→host only — a host issuing one is a protocol
       // violation, never a request to answer.
-      send_error(UsbErrorCode::ProtocolError, request, "DIAG_DIRECTION",
+      send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_DIAG_DIRECTION,
                  now_ms);
       break;
     case HostOpsSub::NodeStatusQuery:
@@ -835,7 +870,7 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
     case HostOpsSub::NodeStatusPage:
     case HostOpsSub::NodeEvent:
       // 0x41/0x42 are device→host only.
-      send_error(UsbErrorCode::ProtocolError, request, "NODE_STATUS_DIRECTION",
+      send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_NODE_STATUS_DIRECTION,
                  now_ms);
       break;
     case HostOpsSub::ObservationQuery:
@@ -844,7 +879,7 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
     case HostOpsSub::ObservationPage:
     case HostOpsSub::ObservationEvent:
       // 0x71/0x72 are device→host only.
-      send_error(UsbErrorCode::ProtocolError, request, "OBSERVATION_DIRECTION",
+      send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_OBSERVATION_DIRECTION,
                  now_ms);
       break;
     case HostOpsSub::GroupSend:
@@ -855,7 +890,7 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
       break;
     case HostOpsSub::GroupStatus:
       // 0x51 is device→host only.
-      send_error(UsbErrorCode::ProtocolError, request, "GROUP_DIRECTION", now_ms);
+      send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_GROUP_DIRECTION, now_ms);
       break;
     case HostOpsSub::JoinRelayDown:
       handle_join_relay_down(request, inner, now_ms);
@@ -866,7 +901,8 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
     case HostOpsSub::JoinRelayUp:
     case HostOpsSub::JoinRelayResult:
       // 0x60/0x63 are device→host only.
-      send_error(UsbErrorCode::ProtocolError, request, "JOIN_RELAY_DIRECTION", now_ms);
+      send_error(UsbErrorCode::ProtocolError, request,
+                 ROUTELOOM_REASON_JOIN_RELAY_DIRECTION, now_ms);
       break;
     case HostOpsSub::AuthorityDown:
       handle_authority_down(request, inner, now_ms);
@@ -877,10 +913,11 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
     case HostOpsSub::AuthorityUp:
     case HostOpsSub::SiteStateReport:
       // 0x64/0x67 are device→host only.
-      send_error(UsbErrorCode::ProtocolError, request, "AUTHORITY_DIRECTION", now_ms);
+      send_error(UsbErrorCode::ProtocolError, request,
+                 ROUTELOOM_REASON_AUTHORITY_DIRECTION, now_ms);
       break;
     default:
-      send_error(UsbErrorCode::Unsupported, request, "SUBCOMMAND_UNKNOWN", now_ms);
+      send_error(UsbErrorCode::Unsupported, request, ROUTELOOM_REASON_SUBCOMMAND_UNKNOWN, now_ms);
       break;
   }
 }
@@ -997,7 +1034,7 @@ void UsbBridge::handle_diagnostic_request(const std::uint64_t request,
                                           const MonotonicMs now_ms) noexcept {
   DiagnosticRequestView req{};
   if (!decode_diagnostic_request(inner, req).ok()) {
-    send_error(UsbErrorCode::ProtocolError, request, "DIAG_REQ_MALFORMED",
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_DIAG_REQ_MALFORMED,
                now_ms);
     return;
   }
@@ -1244,7 +1281,7 @@ void UsbBridge::handle_node_status_query(const std::uint64_t request,
                                          const MonotonicMs now_ms) noexcept {
   NodeStatusQuery query{};
   if (!decode_node_status_query(inner, query).ok()) {
-    send_error(UsbErrorCode::ProtocolError, request, "NODE_STATUS_MALFORMED",
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_NODE_STATUS_MALFORMED,
                now_ms);
     return;
   }
@@ -1295,7 +1332,7 @@ void UsbBridge::handle_observation_query(const std::uint64_t request,
                                          const MonotonicMs now_ms) noexcept {
   ObservationQuery query{};
   if (!decode_observation_query(inner, query).ok()) {
-    send_error(UsbErrorCode::ProtocolError, request, "OBSERVATION_MALFORMED",
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_OBSERVATION_MALFORMED,
                now_ms);
     return;
   }
@@ -1603,7 +1640,7 @@ void UsbBridge::send_join_relay_result(const std::uint64_t request, const Config
   std::array<std::uint8_t, kGatewayInnerHeadSize + kJoinRelayResultPayload> body{};
   std::size_t written = 0;
   if (!encode_join_relay_result(reply, MutableByteView{body.data(), body.size()}, written)) {
-    send_error(UsbErrorCode::ProtocolError, request, "JOIN_RELAY_RESULT", now_ms);
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_JOIN_RELAY_RESULT, now_ms);
     return;
   }
   (void)enqueue(FrameKind::HostOps, 0, request, ByteView{body.data(), written}, now_ms);
@@ -1615,7 +1652,7 @@ void UsbBridge::handle_join_relay_down(const std::uint64_t request, const ByteVi
   sdkv1::RelayObject object{};
   if (!decode_join_relay_down(inner, down).ok() ||
       !sdkv1::relay_object_decode(down.object, object).ok()) {
-    send_error(UsbErrorCode::ProtocolError, request, "JOIN_RELAY_MALFORMED", now_ms);
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_JOIN_RELAY_MALFORMED, now_ms);
     return;
   }
   const sdkv1::RelayToken token = sdkv1::relay_token_of(object.header);
@@ -1643,7 +1680,7 @@ void UsbBridge::handle_join_relay_abort(const std::uint64_t request, const ByteV
                                         const MonotonicMs now_ms) noexcept {
   JoinRelayAbort abort{};
   if (!decode_join_relay_abort(inner, abort).ok()) {
-    send_error(UsbErrorCode::ProtocolError, request, "JOIN_RELAY_MALFORMED", now_ms);
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_JOIN_RELAY_MALFORMED, now_ms);
     return;
   }
   sdkv1::RelayToken token{};
@@ -1678,7 +1715,7 @@ void UsbBridge::send_site_state_report(const std::uint64_t request,
   std::size_t written = 0;
   if (!encode_site_state_report(report, MutableByteView{body.data(), body.size()},
                                 written)) {
-    send_error(UsbErrorCode::ProtocolError, request, "AUTHORITY_REPORT", now_ms);
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_AUTHORITY_REPORT, now_ms);
     return;
   }
   (void)enqueue(FrameKind::HostOps, 0, request, ByteView{body.data(), written}, now_ms);
@@ -1688,7 +1725,7 @@ void UsbBridge::handle_authority_down(const std::uint64_t request, const ByteVie
                                       const MonotonicMs now_ms) noexcept {
   AuthorityFragment fragment{};
   if (!decode_authority_down(inner, fragment).ok()) {
-    send_error(UsbErrorCode::ProtocolError, request, "AUTHORITY_MALFORMED", now_ms);
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_AUTHORITY_MALFORMED, now_ms);
     return;
   }
   SiteStateReport report{};
@@ -1715,7 +1752,7 @@ void UsbBridge::handle_site_state_set(const std::uint64_t request, const ByteVie
                                       const MonotonicMs now_ms) noexcept {
   SiteStateSet set{};
   if (!decode_site_state_set(inner, set).ok()) {
-    send_error(UsbErrorCode::ProtocolError, request, "AUTHORITY_MALFORMED", now_ms);
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_AUTHORITY_MALFORMED, now_ms);
     return;
   }
   SiteStateReport report{};
@@ -1737,7 +1774,7 @@ void UsbBridge::handle_group_send(const std::uint64_t request, const ByteView in
                                   const MonotonicMs now_ms) noexcept {
   GroupSendRequest send{};
   if (!decode_group_send(inner, send).ok()) {
-    send_error(UsbErrorCode::ProtocolError, request, "GROUP_MALFORMED", now_ms);
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_GROUP_MALFORMED, now_ms);
     return;
   }
   GroupDeliveryResult refused{};
@@ -1799,7 +1836,7 @@ void UsbBridge::handle_group_query(const std::uint64_t request, const ByteView i
                                    const MonotonicMs now_ms) noexcept {
   GroupQueryRequest query{};
   if (!decode_group_query(inner, query).ok()) {
-    send_error(UsbErrorCode::ProtocolError, request, "GROUP_MALFORMED", now_ms);
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_GROUP_MALFORMED, now_ms);
     return;
   }
   if ((config_.capability & kCapGroupDeliveryV1) == 0 || config_.mesh == nullptr) {
@@ -1976,7 +2013,7 @@ void UsbBridge::handle_config_query(const std::uint64_t request,
                                     const MonotonicMs now_ms) noexcept {
   ConfigQueryRequest query{};
   if (!decode_config_query(inner, query)) {
-    send_error(UsbErrorCode::ProtocolError, request, "CONFIG_QUERY_MALFORMED",
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_CONFIG_QUERY_MALFORMED,
                now_ms);
     return;
   }
@@ -2004,7 +2041,7 @@ void UsbBridge::handle_config_challenge(const std::uint64_t request,
   ConfigChallengeRequest challenge{};
   if (!decode_config_challenge(inner, challenge)) {
     send_error(UsbErrorCode::ProtocolError, request,
-               "CONFIG_CHALLENGE_MALFORMED", now_ms);
+               ROUTELOOM_REASON_CONFIG_CHALLENGE_MALFORMED, now_ms);
     return;
   }
   if ((config_.capability & kCapConfigEndpointV1) == 0 ||
@@ -2032,7 +2069,7 @@ void UsbBridge::handle_config_permit(const std::uint64_t request,
                                      const MonotonicMs now_ms) noexcept {
   ConfigPermitRequest permit{};
   if (!decode_config_permit(inner, permit)) {
-    send_error(UsbErrorCode::ProtocolError, request, "CONFIG_PERMIT_MALFORMED",
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_CONFIG_PERMIT_MALFORMED,
                now_ms);
     return;
   }
@@ -2058,7 +2095,7 @@ void UsbBridge::handle_config_recover(const std::uint64_t request,
                                       const MonotonicMs now_ms) noexcept {
   ConfigRecoverRequest recover{};
   if (!decode_config_recover(inner, recover)) {
-    send_error(UsbErrorCode::ProtocolError, request, "CONFIG_RECOVER_MALFORMED",
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_CONFIG_RECOVER_MALFORMED,
                now_ms);
     return;
   }
@@ -2085,7 +2122,7 @@ void UsbBridge::handle_config_trust(const std::uint64_t request,
                                     const MonotonicMs now_ms) noexcept {
   ConfigTrustRequest trust{};
   if (!decode_config_trust(inner, trust)) {
-    send_error(UsbErrorCode::ProtocolError, request, "CONFIG_TRUST_MALFORMED",
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_CONFIG_TRUST_MALFORMED,
                now_ms);
     return;
   }
@@ -2112,7 +2149,7 @@ void UsbBridge::handle_trust_status(const std::uint64_t request,
                                     const MonotonicMs now_ms) noexcept {
   TrustStatusRequest query{};
   if (!decode_trust_status(inner, query)) {
-    send_error(UsbErrorCode::ProtocolError, request, "TRUST_STATUS_MALFORMED",
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_TRUST_STATUS_MALFORMED,
                now_ms);
     return;
   }
@@ -2137,7 +2174,7 @@ void UsbBridge::handle_recovery_info(const std::uint64_t request,
                                      const MonotonicMs now_ms) noexcept {
   RecoveryInfoRequest query{};
   if (!decode_recovery_info(inner, query)) {
-    send_error(UsbErrorCode::ProtocolError, request, "RECOVERY_INFO_MALFORMED",
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_RECOVERY_INFO_MALFORMED,
                now_ms);
     return;
   }
@@ -2317,7 +2354,7 @@ void UsbBridge::handle_ops_submit(const std::uint64_t request,
                                   const MonotonicMs now_ms) noexcept {
   SubmitRequest submit{};
   if (!decode_submit(inner, submit)) {
-    send_error(UsbErrorCode::ProtocolError, request, "SUBMIT_MALFORMED", now_ms);
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_SUBMIT_MALFORMED, now_ms);
     return;
   }
   DispatchReceipt receipt{};
@@ -2481,7 +2518,7 @@ void UsbBridge::handle_ops_query(const std::uint64_t request,
                                  const MonotonicMs now_ms) noexcept {
   LaneRequest query{};
   if (!decode_lane_request(inner, HostOpsSub::QueryDispatch, query)) {
-    send_error(UsbErrorCode::ProtocolError, request, "QUERY_MALFORMED", now_ms);
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_QUERY_MALFORMED, now_ms);
     return;
   }
   QueryResponse response{};
@@ -2519,7 +2556,7 @@ void UsbBridge::handle_ops_retire(const std::uint64_t request,
                                   const MonotonicMs now_ms) noexcept {
   LaneRequest retire{};
   if (!decode_lane_request(inner, HostOpsSub::RetireThrough, retire)) {
-    send_error(UsbErrorCode::ProtocolError, request, "RETIRE_MALFORMED", now_ms);
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_RETIRE_MALFORMED, now_ms);
     return;
   }
   RetireResponse response{};
@@ -2553,7 +2590,7 @@ void UsbBridge::handle_ops_skip(const std::uint64_t request,
                                 const MonotonicMs now_ms) noexcept {
   LaneRequest skip{};
   if (!decode_lane_request(inner, HostOpsSub::Skip, skip)) {
-    send_error(UsbErrorCode::ProtocolError, request, "SKIP_MALFORMED", now_ms);
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_SKIP_MALFORMED, now_ms);
     return;
   }
   DispatchReceipt receipt{};
@@ -2601,7 +2638,7 @@ void UsbBridge::handle_ops_time_sample(const std::uint64_t request,
                                        const MonotonicMs now_ms) noexcept {
   TimeSampleRequest sample{};
   if (!decode_time_sample_request(inner, sample)) {
-    send_error(UsbErrorCode::ProtocolError, request, "TIME_SAMPLE_MALFORMED",
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_TIME_SAMPLE_MALFORMED,
                now_ms);
     return;
   }
@@ -2624,7 +2661,7 @@ void UsbBridge::handle_rx_assurance_enable(const std::uint64_t request,
                                            const ByteView inner,
                                            const MonotonicMs now_ms) noexcept {
   if (!decode_rx_assurance_request(inner).ok()) {
-    send_error(UsbErrorCode::ProtocolError, request, "RX_ASSURANCE_MALFORMED",
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_RX_ASSURANCE_MALFORMED,
                now_ms);
     return;
   }
@@ -2661,7 +2698,7 @@ void UsbBridge::issue_rx_grant(const bool initial, const MonotonicMs now_ms) noe
     if (frames <= rx_credit_.grant_frames() && bytes <= rx_credit_.grant_bytes()) {
       return;
     }
-    (void)rx_credit_.update(proof_.session_id, frames, bytes);
+    (void)rx_credit_.update(keys_.session_id, frames, bytes);
   }
   std::array<std::uint8_t, kCreditGrantInnerSize> grant{};
   grant[0] = kCreditGrant;
@@ -2671,16 +2708,25 @@ void UsbBridge::issue_rx_grant(const bool initial, const MonotonicMs now_ms) noe
 }
 
 void UsbBridge::send_error(const UsbErrorCode code, const std::uint64_t request,
-                           const char* reason, const MonotonicMs now_ms) noexcept {
-  std::array<std::uint8_t, 2 + 8 + 1 + kMaxReasonLen> body{};
+                           const std::uint16_t reason_id,
+                           const MonotonicMs now_ms) noexcept {
+  send_error(code, request, reason_id, nullptr, now_ms);
+}
+
+void UsbBridge::send_error(const UsbErrorCode code, const std::uint64_t request,
+                           const char* detail, const MonotonicMs now_ms) noexcept {
+  send_error(code, request, reason_code(detail), detail, now_ms);
+}
+
+void UsbBridge::send_error(const UsbErrorCode code, const std::uint64_t request,
+                           const std::uint16_t reason_id, const char* detail,
+                           const MonotonicMs now_ms) noexcept {
+  // inner: code u16 || request u64 || reason_id u16 || detail_len u8 || detail
+  std::array<std::uint8_t, 2 + 8 + 3 + kMaxReasonLen> body{};
   write_u16(body.data(), static_cast<std::uint16_t>(code));
   write_u64(body.data() + 2, request);
-  std::size_t reason_len = reason != nullptr ? std::strlen(reason) : 0;
-  if (reason_len > kMaxReasonLen) reason_len = kMaxReasonLen;
-  body[10] = static_cast<std::uint8_t>(reason_len);
-  if (reason_len > 0) std::memcpy(body.data() + 11, reason, reason_len);
-  enqueue(FrameKind::Error, 0, request, ByteView{body.data(), 11 + reason_len},
-          now_ms);
+  const std::size_t size = 10 + write_reason(body.data() + 10, reason_id, detail, kMaxReasonLen);
+  enqueue(FrameKind::Error, 0, request, ByteView{body.data(), size}, now_ms);
 }
 
 bool UsbBridge::enqueue(const FrameKind kind, const std::uint16_t flags,
@@ -2761,9 +2807,9 @@ void UsbBridge::pump_tx(const MonotonicMs now_ms) noexcept {
     std::size_t body_size = 0;
     std::uint64_t session = 0;
     if (protect) {
-      session = proof_.session_id;
+      session = keys_.session_id;
       const Status status =
-          seal_body(proof_.key, kDirDeviceToHost, tx_counter_, item.kind,
+          seal_body(keys_.key_d2h, kDirDeviceToHost, tx_counter_, item.kind,
                     item.flags, item.request,
                     ByteView{body, item.body_size},
                     MutableByteView{tx_body_.data(), tx_body_.size()}, body_size);
@@ -2857,7 +2903,7 @@ void UsbBridge::note_credit_stall(const MonotonicMs now_ms) noexcept {
   connection_stalled_ = true;
   if (!stall_reported_) {
     stall_reported_ = true;
-    send_error(UsbErrorCode::ConnectionStalled, 0, "CONNECTION_STALLED", now_ms);
+    send_error(UsbErrorCode::ConnectionStalled, 0, ROUTELOOM_REASON_CONNECTION_STALLED, now_ms);
   }
 }
 
@@ -2871,8 +2917,8 @@ void UsbBridge::reset_session_state() noexcept {
   if (join_relay_ != nullptr) (void)join_relay_->set_host_sink(nullptr);
   state_entered_ms_ = now_ms_;
   transcript_ = SessionTranscript{};
-  proof_ = SessionProof{};
-  proof_valid_ = false;
+  clear_session_keys(keys_);
+  keys_valid_ = false;
   rx_counter_ = 0;
   tx_counter_ = 0;
   auth_attempts_ = 0;
@@ -3045,20 +3091,16 @@ void UsbBridge::emit_delivery_event(const std::uint64_t request,
                                     const std::array<std::uint8_t, kOperationIdSize>*
                                         operation_id) noexcept {
   // inner: request(8) || msg_session(4) || msg_seq(8) || state(1) ||
-  //        reason_len(1) || reason || [operation_id(24)]
-  std::array<std::uint8_t, 8 + 4 + 8 + 1 + 1 + kMaxReasonLen + kOperationIdSize>
+  //        reason_id(2) || detail_len(1) || detail || [operation_id(24)]
+  std::array<std::uint8_t, 8 + 4 + 8 + 1 + 3 + kMaxReasonLen + kOperationIdSize>
       inner{};
   write_u64(inner.data(), request);
   write_u32(inner.data() + 8, result.id.session);
   write_u64(inner.data() + 12, result.id.sequence);
   inner[20] = static_cast<std::uint8_t>(result.state);
-  std::size_t reason_len = result.reason != nullptr ? std::strlen(result.reason) : 0;
-  if (reason_len > kMaxReasonLen) reason_len = kMaxReasonLen;
-  inner[21] = static_cast<std::uint8_t>(reason_len);
-  if (reason_len > 0) {
-    std::memcpy(inner.data() + 22, result.reason, reason_len);
-  }
-  const std::size_t tail = 22 + reason_len;
+  const std::size_t tail =
+      21 + write_reason(inner.data() + 21, reason_code(result.reason), result.reason,
+                        kMaxReasonLen);
   if (operation_id != nullptr) {
     std::memcpy(inner.data() + tail, operation_id->data(), operation_id->size());
   }
@@ -3344,7 +3386,7 @@ void UsbBridge::handle_gateway_submit(const SubmitRequest& submit,
     sha256(ByteView{canonical.data(), prefix.size() + fields.payload.size},
            digest);
     const std::uint32_t synth_session =
-        static_cast<std::uint32_t>(proof_.session_id);
+        static_cast<std::uint32_t>(keys_.session_id);
     const MessageKey key{config_.node,
                          MessageId{synth_session, submit.dispatch_seq}};
     const Status queued =
@@ -3450,7 +3492,7 @@ void UsbBridge::handle_host_register(const std::uint64_t request,
                                      const MonotonicMs now_ms) noexcept {
   HostRegisterRequest reg{};
   if (!decode_host_register(inner, reg)) {
-    send_error(UsbErrorCode::ProtocolError, request, "REGISTER_MALFORMED",
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_REGISTER_MALFORMED,
                now_ms);
     return;
   }
@@ -3489,7 +3531,7 @@ void UsbBridge::handle_host_register(const std::uint64_t request,
     return;
   }
   if (registration_[0].active && registration_[0].host_boot == reg.host_boot &&
-      registration_[0].usb_session == proof_.session_id) {
+      registration_[0].usb_session == keys_.session_id) {
     // Renewal: same session + same host boot extends the CURRENT token —
     // the host cannot rotate its own binding without a new session.
     registration_[0].lease_deadline_ms = now_ms + kHostRegisterLeaseMs;
@@ -3499,13 +3541,13 @@ void UsbBridge::handle_host_register(const std::uint64_t request,
            digest);
     registration_[0].active = true;
     registration_[0].host_boot = reg.host_boot;
-    registration_[0].usb_session = proof_.session_id;
+    registration_[0].usb_session = keys_.session_id;
     registration_[0].principal_digest = digest;
     registration_[0].lease_deadline_ms = now_ms + kHostRegisterLeaseMs;
     ++registration_[0].counter;
     // Token = session || counter: unique per (session, register), never
     // zero, never carried across sessions — the binding authenticates it.
-    write_u64(registration_[0].token.data(), proof_.session_id);
+    write_u64(registration_[0].token.data(), keys_.session_id);
     write_u64(registration_[0].token.data() + 8, registration_[0].counter);
   }
   response.token = registration_[0].token;
@@ -3521,7 +3563,7 @@ void UsbBridge::handle_host_unregister(const std::uint64_t request,
                                        const MonotonicMs now_ms) noexcept {
   HostUnregisterRequest unreg{};
   if (!decode_host_unregister(inner, unreg)) {
-    send_error(UsbErrorCode::ProtocolError, request, "UNREGISTER_MALFORMED",
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_UNREGISTER_MALFORMED,
                now_ms);
     return;
   }
@@ -3549,7 +3591,7 @@ void UsbBridge::handle_host_unregister(const std::uint64_t request,
   // stale or foreign token can never revoke the replacement binding.
   if (!registration_[0].active ||
       unreg.token != registration_[0].token ||
-      registration_[0].usb_session != proof_.session_id) {
+      registration_[0].usb_session != keys_.session_id) {
     response.result = static_cast<std::uint16_t>(GatewayOpsResult::Stale);
     answer();
     return;
@@ -3564,7 +3606,7 @@ void UsbBridge::handle_ingress_ack(const std::uint64_t request,
                                    const MonotonicMs now_ms) noexcept {
   GatewayIngressAck ack{};
   if (!decode_gateway_ingress_ack(inner, ack)) {
-    send_error(UsbErrorCode::ProtocolError, request, "ACK_MALFORMED", now_ms);
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_ACK_MALFORMED, now_ms);
     return;
   }
   PendingIngress* slot = find_ingress(request);

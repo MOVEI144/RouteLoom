@@ -4,19 +4,14 @@
 
 #include "routeloom/byte_io.hpp"
 #include "routeloom/discovery_scope.hpp"
+#include "routeloom/kdf.hpp"
+#include "routeloom/secure_clear.hpp"
 
 namespace routeloom::usb {
 namespace {
 
-constexpr std::uint64_t kLaneLeft = 0x4C454654ULL;   // "LEFT"
-constexpr std::uint64_t kLaneRight = 0x52474854ULL;  // "RGHT"
-constexpr std::uint64_t kTranscriptMagic = 0x524C553154524E31ULL;  // "RLU1TRN1"
-
-void absorb_be(DevMac& mac, const std::uint64_t value, const int bytes) noexcept {
-  for (int i = bytes - 1; i >= 0; --i) {
-    mac.absorb_u8(static_cast<std::uint8_t>(value >> (i * 8)));
-  }
-}
+constexpr std::uint64_t kTranscriptMagic = 0x524C553154524E32ULL;  // "RLU1TRN2"
+constexpr char kHostlinkInfo[] = "RouteLoom/v2/hostlink";
 
 std::uint64_t identity_hash(const ByteView principal, const NetworkId network,
                             const std::uint8_t operation_class,
@@ -35,58 +30,12 @@ std::uint64_t identity_hash(const ByteView principal, const NetworkId network,
   return out;
 }
 
+ByteView label_bytes(const char* label) noexcept {
+  // The trailing NUL is the label/transcript separator.
+  return ByteView{reinterpret_cast<const std::uint8_t*>(label), std::strlen(label) + 1};
+}
+
 }  // namespace
-
-void DevMac::init(const ByteView secret) noexcept {
-  state_ = kDevMacSeed;
-  absorb(secret);
-  absorb_u64(secret.size);
-}
-
-void DevMac::absorb(const ByteView data) noexcept {
-  for (std::size_t i = 0; i < data.size; ++i) {
-    state_ = dev_mix(state_, data.data[i]);
-  }
-}
-
-void DevMac::absorb_u8(const std::uint8_t value) noexcept {
-  state_ = dev_mix(state_, value);
-}
-
-void DevMac::absorb_u16(const std::uint16_t value) noexcept {
-  absorb_be(*this, value, 2);
-}
-
-void DevMac::absorb_u32(const std::uint32_t value) noexcept {
-  absorb_be(*this, value, 4);
-}
-
-void DevMac::absorb_u64(const std::uint64_t value) noexcept {
-  absorb_be(*this, value, 8);
-}
-
-DevTag DevMac::tag() const noexcept {
-  const std::uint64_t left = dev_mix(state_, kLaneLeft);
-  const std::uint64_t right = dev_mix(state_, kLaneRight);
-  DevTag out{};
-  for (int i = 0; i < 8; ++i) {
-    out[static_cast<std::size_t>(i)] =
-        static_cast<std::uint8_t>(left >> (56 - i * 8));
-    out[static_cast<std::size_t>(8 + i)] =
-        static_cast<std::uint8_t>(right >> (56 - i * 8));
-  }
-  return out;
-}
-
-DevTag dev_proof(const ByteView secret, const ByteView label,
-                 const ByteView message) noexcept {
-  DevMac mac;
-  mac.init(secret);
-  mac.absorb(label);
-  mac.absorb(message);
-  mac.absorb_u64(message.size);
-  return mac.tag();
-}
 
 Status encode_transcript(const SessionTranscript& transcript,
                          const MutableByteView out, std::size_t& written) noexcept {
@@ -101,7 +50,11 @@ Status encode_transcript(const SessionTranscript& transcript,
   Status status = writer.write_u64(kTranscriptMagic);
   if (status) status = writer.write_u64(transcript.host_nonce);
   if (status) status = writer.write_u64(transcript.device_nonce);
+  if (status) status = writer.write_u8(transcript.min_version);
+  if (status) status = writer.write_u8(transcript.max_version);
   if (status) status = writer.write_u8(transcript.version);
+  if (status) status = writer.write_u8(transcript.carrier);
+  for (std::size_t i = 0; status && i < kBindingSize; ++i) status = writer.write_u8(0);
   if (status) status = writer.write_u64(transcript.node);
   if (status) status = writer.write_u64(transcript.boot_id);
   if (status) status = writer.write_u64(transcript.network);
@@ -125,40 +78,67 @@ Status encode_transcript(const SessionTranscript& transcript,
 SessionProof derive_session_proof(const ByteView secret,
                                   const ByteView transcript) noexcept {
   SessionProof proof{};
-  const auto labeled = [&](const char* label) {
-    return dev_proof(secret,
-                     ByteView{reinterpret_cast<const std::uint8_t*>(label),
-                              std::strlen(label)},
-                     transcript);
+  ScopeDigest hostlink_key{};
+  (void)hkdf_sha256(ByteView{}, secret,
+                    ByteView{reinterpret_cast<const std::uint8_t*>(kHostlinkInfo),
+                             sizeof(kHostlinkInfo) - 1},
+                    MutableByteView{hostlink_key.data(), hostlink_key.size()});
+  const ByteView key{hostlink_key.data(), hostlink_key.size()};
+  ScopeDigest value{};
+  const auto derive = [&](const char* label) {
+    hmac_sha256(key, label_bytes(label), transcript, ByteView{}, value);
   };
-  const DevTag key = labeled("session-key");
-  proof.key = key;
-  proof.hello_tag = labeled("hello");
-  proof.auth_tag = labeled("auth");
-  proof.auth_ok_tag = labeled("auth-ok");
-  const DevTag id = labeled("session-id");
-  std::uint64_t session_id = 0;
-  for (int i = 0; i < 8; ++i) {
-    session_id = (session_id << 8U) | id[static_cast<std::size_t>(i)];
+  derive("key-h2d");
+  std::memcpy(proof.key_h2d.data(), value.data(), kSessionKeySize);
+  derive("key-d2h");
+  std::memcpy(proof.key_d2h.data(), value.data(), kSessionKeySize);
+  derive("hello");
+  std::memcpy(proof.hello_tag.data(), value.data(), kTagSize);
+  derive("auth");
+  std::memcpy(proof.auth_tag.data(), value.data(), kTagSize);
+  derive("auth-ok");
+  std::memcpy(proof.auth_ok_tag.data(), value.data(), kTagSize);
+  derive("session-id");
+  for (std::size_t i = 0; i < 8; ++i) {
+    proof.session_id = (proof.session_id << 8U) | value[i];
   }
-  proof.session_id = session_id;
+  secure_clear(value);
+  secure_clear(hostlink_key);
   return proof;
 }
 
-DevTag frame_tag(const SessionKey& key, const std::uint8_t direction,
-                 const std::uint64_t counter, const FrameKind kind,
-                 const std::uint16_t flags, const std::uint64_t request,
-                 const ByteView inner) noexcept {
-  DevMac mac;
-  mac.init(ByteView{key.data(), key.size()});
-  mac.absorb_u8(direction);
-  mac.absorb_u64(counter);
-  mac.absorb_u8(static_cast<std::uint8_t>(kind));
-  mac.absorb_u16(flags);
-  mac.absorb_u64(request);
-  mac.absorb(inner);
-  mac.absorb_u64(inner.size);
-  return mac.tag();
+void clear_session_proof(SessionProof& proof) noexcept {
+  secure_clear(proof.key_h2d);
+  secure_clear(proof.key_d2h);
+  secure_clear(proof.hello_tag);
+  secure_clear(proof.auth_tag);
+  secure_clear(proof.auth_ok_tag);
+  proof.session_id = 0;
+}
+
+void clear_session_keys(SessionKeys& keys) noexcept {
+  secure_clear(keys.key_h2d);
+  secure_clear(keys.key_d2h);
+  keys.session_id = 0;
+}
+
+SessionTag frame_tag(const SessionKey& key, const std::uint8_t direction,
+                     const std::uint64_t counter, const FrameKind kind,
+                     const std::uint16_t flags, const std::uint64_t request,
+                     const ByteView inner) noexcept {
+  std::array<std::uint8_t, 1 + 8 + 1 + 2 + 8> header{};
+  ByteWriter writer(MutableByteView{header.data(), header.size()});
+  (void)writer.write_u8(direction);
+  (void)writer.write_u64(counter);
+  (void)writer.write_u8(static_cast<std::uint8_t>(kind));
+  (void)writer.write_u16(flags);
+  (void)writer.write_u64(request);
+  ScopeDigest mac{};
+  hmac_sha256(ByteView{key.data(), key.size()}, ByteView{header.data(), header.size()},
+              inner, ByteView{}, mac);
+  SessionTag tag{};
+  std::memcpy(tag.data(), mac.data(), kTagSize);
+  return tag;
 }
 
 Status seal_body(const SessionKey& key, const std::uint8_t direction,
@@ -173,7 +153,7 @@ Status seal_body(const SessionKey& key, const std::uint8_t direction,
   if (inner.size > 0 && inner.data == nullptr) {
     return Status::error(StatusCode::InvalidArgument, "null inner body");
   }
-  const DevTag tag = frame_tag(key, direction, counter, kind, flags, request, inner);
+  const SessionTag tag = frame_tag(key, direction, counter, kind, flags, request, inner);
   ByteWriter writer(out);
   Status status = writer.write_u64(counter);
   if (status) status = writer.write_bytes(ByteView{tag.data(), tag.size()});
@@ -194,33 +174,30 @@ Status open_body(const SessionKey& key, const std::uint8_t direction,
   ByteReader reader(frame.body);
   Status status = reader.read_u64(counter);
   if (!status) return status;
-  const ByteView tag_bytes{frame.body.data + 8, kDevTagSize};
   inner = ByteView{frame.body.data + kProtectedBodyOverhead,
                    frame.body.size - kProtectedBodyOverhead};
-  const DevTag expected =
+  const SessionTag expected =
       frame_tag(key, direction, counter, frame.kind, frame.flags, frame.request, inner);
-  std::uint8_t diff = 0;
-  for (std::size_t i = 0; i < kDevTagSize; ++i) {
-    diff |= static_cast<std::uint8_t>(expected[i] ^ tag_bytes.data[i]);
-  }
-  if (diff != 0) {
+  if (!constant_time_equal(ByteView{expected.data(), expected.size()},
+                           ByteView{frame.body.data + 8, kTagSize})) {
+    inner = ByteView{};
     return Status::error(StatusCode::AuthenticationFailed, "SESSION_TAG_MISMATCH");
   }
   return Status::success();
 }
 
-DevTag payload_hash(const ByteView canonical_request) noexcept {
-  static const std::uint8_t kEmptySecret = 0;
-  return dev_proof(ByteView{&kEmptySecret, 0},
-                   ByteView{reinterpret_cast<const std::uint8_t*>("payload-hash"),
-                            12},
-                   canonical_request);
+SessionTag payload_hash(const ByteView canonical_request) noexcept {
+  ScopeDigest digest{};
+  sha256(canonical_request, digest);
+  SessionTag out{};
+  std::memcpy(out.data(), digest.data(), kTagSize);
+  return out;
 }
 
 IdempotencyResult IdempotencyTable::submit(
     const ByteView principal, const NetworkId network,
     const std::uint8_t operation_class, const std::uint64_t key,
-    const DevTag& hash, const MonotonicMs now_ms,
+    const SessionTag& hash, const MonotonicMs now_ms,
     IdempotencyRecord*& record) noexcept {
   record = nullptr;
   if (principal.size > kMaxPrincipalSize) {

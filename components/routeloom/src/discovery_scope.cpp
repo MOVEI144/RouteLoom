@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
+#include "routeloom/secure_clear.hpp"
 
 // Portable Discovery Scope Key machinery (02-discovery-scope.md, 05 §5.2).
 // See discovery_scope.hpp for the contract overview.
@@ -161,6 +162,7 @@ void hmac_sha256(const ByteView key, const ByteView part_a,
     ScopeDigest hashed{};
     sha256(key, hashed);
     std::memcpy(pad_key.data(), hashed.data(), hashed.size());
+    secure_clear(hashed);
   } else if (key.size > 0 && key.data != nullptr) {
     std::memcpy(pad_key.data(), key.data, key.size);
   }
@@ -182,9 +184,10 @@ void hmac_sha256(const ByteView key, const ByteView part_a,
     hash.update(ByteView{inner.data(), inner.size()});
     hash.finish(out);
   }
-  pad_key.fill(0);
-  pad.fill(0);
-  inner.fill(0);
+  // Key-derived pads and the inner digest die here, on every call.
+  secure_clear(pad_key);
+  secure_clear(pad);
+  secure_clear(inner);
 }
 
 bool constant_time_equal(const ByteView a, const ByteView b) noexcept {
