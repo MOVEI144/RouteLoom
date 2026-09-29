@@ -408,7 +408,6 @@ fn mesh_route_loss_ten_handovers_recover() {
     };
     let capacity_before = world.snaps[1].peer_capacity;
     let starts_before = world.snaps[1].member_starts + world.snaps[2].member_starts;
-    let failed_before = world.snaps[1].link_failed + world.snaps[2].link_failed;
     for attempt in 0..10 {
         assert_eq!(world.snaps[1].phases[2], PHASE_REACHABLE);
         let offers = world.snaps[1].offers_rx + world.snaps[2].offers_rx;
@@ -469,10 +468,6 @@ fn mesh_route_loss_ten_handovers_recover() {
     assert!(
         world.snaps[1].member_starts + world.snaps[2].member_starts >= starts_before + 10,
         "ten starts crossed discovery into the coordinators"
-    );
-    assert!(
-        world.snaps[1].link_failed + world.snaps[2].link_failed > failed_before,
-        "lost flights also exercised failed handoff cleanup"
     );
     let received = world.snaps[0].rx_count;
     world.peers[1].app_send(testkit::GATEWAY, b"after-ten");

@@ -210,11 +210,7 @@ fn all_ready(snaps: &[MeshSnap]) -> bool {
 /// back with channels ready within 60 s, each booted exactly once (no
 /// reboot loop), and 10 messages each way between E and G arrive once.
 ///
-/// Red today (#169): at a simultaneous boot R1 and E may bind each other
-/// first; a member holding any neighbor stops discovering, so that pair
-/// stays an island without a route to G (tests/e2e/scenarios.json M05).
 #[test]
-#[ignore = "M05 red: simultaneous boot can leave an island without a gateway route (#169)"]
 fn mesh_m05_simultaneous_power_loss_recovers() {
     let Some(mut world) = MeshWorld::start("m05", Switch::new(&Topology::diamond())) else {
         return; // no C++ peers: skip (ignore-equivalent)
@@ -236,6 +232,10 @@ fn mesh_m05_simultaneous_power_loss_recovers() {
     for (index, peer) in world.peers.iter().enumerate() {
         assert_eq!(peer.reboots, reboots[index] + 1, "peer {index} booted once");
     }
+    assert!(
+        world.snaps.iter().all(|snap| snap.j_attempts == 0),
+        "retained members did not start a new join"
+    );
     deliver_each(&mut world, 3, 0, 10, b"m05-up");
     deliver_each(&mut world, 0, 3, 10, b"m05-down");
 }
