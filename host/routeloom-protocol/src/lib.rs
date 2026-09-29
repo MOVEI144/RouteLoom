@@ -6,18 +6,19 @@ use std::fmt;
 pub mod authority;
 pub mod bench;
 pub mod bootstrap;
-pub mod dev_session;
 pub mod group_ops;
 pub mod host_ops;
 pub mod join_relay;
 pub mod manifest;
 pub mod node_status;
 pub mod observation;
+pub mod session;
 pub mod telemetry;
 
 pub const MAX_DECODED_FRAME: usize = 4096;
 pub const MAGIC: [u8; 4] = *b"RLU1";
-pub const VERSION: u8 = 1;
+/// RLU1 protocol 2: HostLink v2 authentication (no protocol 1 fallback).
+pub const VERSION: u8 = 2;
 const HEADER_LEN: usize = 4 + 1 + 1 + 2 + 8 + 8 + 2;
 const CRC_LEN: usize = 4;
 
@@ -81,6 +82,8 @@ pub enum ProtocolError {
     CreditRegression,
     CreditExhausted,
     PrincipalTooLong,
+    /// A protected body's HostLink v2 frame tag did not verify.
+    TagMismatch,
     /// A partial frame stalled past [`PARTIAL_FRAME_TIMEOUT_MS`] and was
     /// discarded before the next input (firmware `PARTIAL_FRAME_TIMEOUT`).
     PartialFrameTimeout,

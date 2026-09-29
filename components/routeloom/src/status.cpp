@@ -1,5 +1,9 @@
 #include "routeloom/status.hpp"
 
+#include <cstring>
+
+#include "routeloom/version.h"
+
 namespace routeloom {
 
 const char* status_code_name(const StatusCode code) noexcept {
@@ -44,6 +48,24 @@ const char* status_code_name(const StatusCode code) noexcept {
     case StatusCode::NetworkRequired: return "NETWORK_REQUIRED";
   }
   return "UNKNOWN";
+}
+
+std::uint16_t reason_code(const char* const name) noexcept {
+  struct Entry {
+    const char* name;
+    std::uint16_t id;
+  };
+#define RL_REASON_ENTRY(entry_name, id) {#entry_name, id},
+  // Names reach this lookup from Status details and delivery reasons only;
+  // transport areas (hostlink, ...) are emitted as ids and never looked up.
+  static constexpr Entry kTable[] = {ROUTELOOM_REASON_COMMON_TABLE(RL_REASON_ENTRY)
+                                         ROUTELOOM_REASON_DELIVERY_TABLE(RL_REASON_ENTRY)};
+#undef RL_REASON_ENTRY
+  if (name == nullptr) return ROUTELOOM_REASON_NONE;
+  for (const Entry& entry : kTable) {
+    if (std::strcmp(entry.name, name) == 0) return entry.id;
+  }
+  return ROUTELOOM_REASON_NONE;
 }
 
 }  // namespace routeloom

@@ -95,6 +95,9 @@ def validate(manifest: dict) -> None:
             raise ManifestError(f"duplicate reason code {code['name']}")
         if not any(s["first"] <= code["id"] <= s["last"] for s in ranges):
             raise ManifestError(f"reason code {code['name']} is outside every range")
+        api1 = code.get("api1")
+        if api1 is not None and (not isinstance(api1, str) or not api1.isprintable() or '"' in api1):
+            raise ManifestError(f"reason code {code['name']}: api1 must be null or a printable string")
         ids.add(code["id"])
         names.add(code["name"])
 
@@ -123,6 +126,12 @@ def render_header(manifest: dict) -> str:
     lines += ["", "/* X(NAME, id) for every registered reason code. */", "#define ROUTELOOM_REASON_TABLE(X) \\"]
     lines += [f"  X({code['name']}, {code['id']})" + (" \\" if index + 1 < len(codes) else "")
               for index, code in enumerate(codes)]
+    for span in manifest["reason_codes"]["ranges"]:
+        area = [c for c in codes if span["first"] <= c["id"] <= span["last"]]
+        lines += ["", f"/* X(NAME, id) for the {span['area']} area only. */",
+                  f"#define ROUTELOOM_REASON_{span['area'].upper()}_TABLE(X)" + (" \\" if area else "")]
+        lines += [f"  X({code['name']}, {code['id']})" + (" \\" if index + 1 < len(area) else "")
+                  for index, code in enumerate(area)]
     lines += ["", "#endif /* ROUTELOOM_VERSION_H */", ""]
     return "\n".join(lines)
 
@@ -147,9 +156,13 @@ def render_rust_module(manifest: dict) -> str:
             lines.append(f"/// {entry['label']}.")
             lines.append(f"pub const {entry['rust']}: u32 = {entry['value']};")
     lines.append("")
-    for code in manifest["reason_codes"]["codes"]:
+    codes = manifest["reason_codes"]["codes"]
+    for code in codes:
         lines.append(f"pub const REASON_{code['name']}: u16 = {code['id']};")
-    lines.append("")
+    lines += ["", "/// (id, API1 string) for every reason code; the string is `api1` when set, else the name.",
+              "pub const REASON_API1: &[(u16, &str)] = &["]
+    lines += [f'    ({code["id"]}, "{code.get("api1") or code["name"]}"),' for code in codes]
+    lines += ["];", ""]
     return "\n".join(lines)
 
 

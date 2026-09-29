@@ -5,8 +5,8 @@
   "flags": 1,
   "session": 0,
   "request": 0,
-  "inner_hex": "aa6373c22ba7d723ae750986bb4e65234c12b9eaaf50df57",
-  "body_hex": "aa6373c22ba7d723ae750986bb4e65234c12b9eaaf50df57",
-  "wire_hex": "07524c553101020201010101010101010101010101010101011e18aa6373c22ba7d723ae750986bb4e65234c12b9eaaf50df5753a1251a00",
+  "inner_hex": "71cf2fbff7830f2e6c6654c7dc3bf2ad21b4e970e3075a34",
+  "body_hex": "71cf2fbff7830f2e6c6654c7dc3bf2ad21b4e970e3075a34",
+  "wire_hex": "07524c553102020201010101010101010101010101010101011e1871cf2fbff7830f2e6c6654c7dc3bf2ad21b4e970e3075a3403d0be8f00",
   "note": "device confirms; session id binds the transcript"
 }

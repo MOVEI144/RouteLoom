@@ -4,5 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[dependencies]
+# HostLink v2 session keys and frame MACs (RFC 5869 / RFC 2104). Already in
+# the lockfile through routeloom-keysched and routeloom-edhoc.
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = { version = "0.10", default-features = false }
+zeroize = { version = "1", default-features = false }
+
 [lints]
 workspace = true

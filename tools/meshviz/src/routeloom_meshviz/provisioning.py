@@ -27,11 +27,13 @@ from .provision_plan import (LAB_ROLES, STEP_NAMES, ContractBackend, FakeProvisi
                              inventory_rows, job_status_text, plan_jobs,
                              valid_lab_node_id)
 
+import base64
 import hashlib
 import json
 import os
 import re
 import shlex
+import stat
 import struct
 import subprocess
 import sys
@@ -1332,15 +1334,58 @@ class LabProvisionBackend(ContractBackend):
             os.close(fd)
         return secret
 
-    def _usb_secret(self):
-        path = self.site_dir / 'usb-dev-secret.key'
-        if not path.is_file():
-            raise ProvisionError('no_site', f'{path} missing — run lab-site-init first')
-        secret = path.read_text(encoding='utf-8').strip()
-        if not secret or len(secret) > 63 or \
-                any(c < '!' or c > '~' for c in secret):
-            raise ProvisionError('no_site', f'{path} is not a valid USB secret')
-        return secret
+    def _hostlink_secret(self, node_id):
+        """Per-gateway HostLink v2 secret, generated once and reused on retry.
+
+        The same bytes go to the gateway's rlkeys and to
+        ``<site>/hostlink/<node>.key`` (0600), the file routeloom-host reads
+        with ``--hostlink-credentials``: 32 random bytes as 43 base64url
+        chars, within the 1..63 printable ASCII both sides accept. A reused
+        file must still be private and well formed.
+        """
+        directory = self.site_dir / 'hostlink'
+        directory.mkdir(mode=0o700, exist_ok=True)
+        dir_info = directory.lstat()
+        if not stat.S_ISDIR(dir_info.st_mode) or dir_info.st_mode & 0o077:
+            raise ProvisionError('bad_hostlink_secret', f'{directory} is not a private directory')
+        path = directory / f'{node_id}.key'
+        if path.exists() or path.is_symlink():
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+                raise ProvisionError('bad_hostlink_secret', f'{path} is not a private regular file')
+            secret = path.read_bytes().decode('ascii', 'replace')
+            legacy_hex = re.fullmatch(r'[0-9a-f]{62}', secret)
+            encoded = re.fullmatch(r'[A-Za-z0-9_-]{43}', secret)
+            canonical = encoded and base64.urlsafe_b64encode(
+                base64.urlsafe_b64decode(secret + '=')).rstrip(b'=').decode('ascii') == secret
+            if not legacy_hex and not canonical:
+                raise ProvisionError('bad_hostlink_secret', f'{path} is invalid')
+            return secret
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            try:
+                secret = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b'=')
+                offset = 0
+                while offset < len(secret):
+                    written = os.write(fd, secret[offset:])
+                    if written == 0:
+                        raise ProvisionError('bad_hostlink_secret', f'{path} short write')
+                    offset += written
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            if path.read_bytes() != secret:
+                raise ProvisionError('bad_hostlink_secret', f'{path} readback mismatch')
+            if os.name == 'posix':
+                dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            return secret.decode('ascii')
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
 
     def _provisioner(self, ctx):
         if ctx.get('provisioner') is None:
@@ -1465,7 +1510,8 @@ class LabProvisionBackend(ContractBackend):
         evidence = board_config_commit(
             link, doc, generation=1,
             psk_hex=self._site_psk() if security == 'dev-ram' else None,
-            usb_secret=self._usb_secret() if job.role == 'bridge' else None)
+            usb_secret=(self._hostlink_secret(plan.node_id)
+                        if job.role == 'bridge' else None))
         journal.record('board_config', **evidence)
         return StepResult(
             'done',

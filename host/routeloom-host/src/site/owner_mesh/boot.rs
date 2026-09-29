@@ -1,4 +1,4 @@
-//! Device boot-path rows (tests/e2e/scenarios.json M06 gateway reset,
+//! Device boot-path rows (tests/e2e/scenarios.json M06-GB gateway reset,
 //! F02 boot-time NVS write failure, J01 identity-only join): every boot
 //! and respawn goes through the production `routeloom::Device` path.
 
@@ -25,7 +25,7 @@ fn step_until_reboots(world: &mut MeshWorld, peer: usize, reboots: u32, budget_m
     assert_eq!(world.peers[peer].reboots, reboots, "peer {peer} respawns");
 }
 
-/// M06, gateway row: A keeps a Reliable stream to the gateway (one send
+/// M06-GB (gateway power cut, Device boot path): A keeps a Reliable stream to the gateway (one send
 /// every 2 s) across a gateway power cut. The respawned gateway boots from
 /// its flash, re-authenticates USB with a newer boot id within 5 s, and
 /// delivery resumes within 15 s (vt); ten further sends all arrive, each

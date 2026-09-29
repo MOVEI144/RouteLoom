@@ -4,9 +4,9 @@
 //! output; the Rust harness (tests/usb_golden.rs) verifies the same files.
 //! Run: cargo run -p routeloom-protocol --example gen_usb_golden
 
-use routeloom_protocol::dev_session::*;
 use routeloom_protocol::host_ops::*;
-use routeloom_protocol::{encode_frame, Frame, FrameKind};
+use routeloom_protocol::session::*;
+use routeloom_protocol::{encode_frame, manifest, Frame, FrameKind, VERSION};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -77,14 +77,11 @@ fn main() -> std::io::Result<()> {
     }
 
     let transcript = Transcript {
-        host_nonce: HOST_NONCE,
-        device_nonce: DEVICE_NONCE,
-        version: 1,
         node: NODE,
         boot: BOOT,
         network: NETWORK,
         capability: CAPABILITY,
-        principal: PRINCIPAL.to_vec(),
+        ..Transcript::usb(HOST_NONCE, DEVICE_NONCE, PRINCIPAL)
     };
     let proof = derive_session_proof(SECRET, &transcript.encode().unwrap());
     let session = proof.session_id;
@@ -101,7 +98,7 @@ fn main() -> std::io::Result<()> {
             session,
             request,
             body: seal_body(
-                &proof.key,
+                &proof.key_d2h,
                 DIRECTION_DEVICE_TO_HOST,
                 {
                     let counter = d2h_counter;
@@ -126,7 +123,7 @@ fn main() -> std::io::Result<()> {
             session,
             request,
             body: seal_body(
-                &proof.key,
+                &proof.key_h2d,
                 DIRECTION_HOST_TO_DEVICE,
                 {
                     let counter = h2d_counter;
@@ -146,8 +143,8 @@ fn main() -> std::io::Result<()> {
     // 1-2: HELLO / HELLO_ACK (unauthenticated, session=0).
     let mut hello_body = Vec::new();
     hello_body.extend_from_slice(&HOST_NONCE.to_be_bytes());
-    hello_body.push(1); // min version
-    hello_body.push(1); // max version
+    hello_body.push(VERSION); // min version
+    hello_body.push(VERSION); // max version
     hello_body.push(PRINCIPAL.len() as u8);
     hello_body.extend_from_slice(PRINCIPAL);
     steps.push(Step {
@@ -166,7 +163,7 @@ fn main() -> std::io::Result<()> {
 
     let mut ack_body = Vec::new();
     ack_body.extend_from_slice(&DEVICE_NONCE.to_be_bytes());
-    ack_body.push(1);
+    ack_body.push(VERSION);
     ack_body.extend_from_slice(&NODE.to_be_bytes());
     ack_body.extend_from_slice(&BOOT.to_be_bytes());
     ack_body.extend_from_slice(&NETWORK.to_be_bytes());
@@ -324,14 +321,15 @@ fn main() -> std::io::Result<()> {
     ));
 
     // 9-10: delivery events for the accepted mesh send.
-    let delivery = |state: u8, reason: &[u8]| {
+    // Registered reasons travel as their u16 id with an empty detail.
+    let delivery = |state: u8, reason: u16| {
         let mut inner = Vec::new();
         inner.extend_from_slice(&103_u64.to_be_bytes());
         inner.extend_from_slice(&MESH_SESSION.to_be_bytes());
         inner.extend_from_slice(&1_u64.to_be_bytes());
         inner.push(state);
-        inner.push(reason.len() as u8);
-        inner.extend_from_slice(reason);
+        inner.extend_from_slice(&reason.to_be_bytes());
+        inner.push(0);
         inner
     };
     steps.push(d2h(
@@ -340,7 +338,7 @@ fn main() -> std::io::Result<()> {
         FrameKind::DeliveryEvent,
         0,
         103,
-        delivery(1, b"TX_ACCEPTED"),
+        delivery(1, manifest::REASON_TX_ACCEPTED),
     ));
     steps.push(d2h(
         "delivery_queued",
@@ -348,7 +346,7 @@ fn main() -> std::io::Result<()> {
         FrameKind::DeliveryEvent,
         0,
         103,
-        delivery(3, b"QUEUED"),
+        delivery(3, manifest::REASON_QUEUED),
     ));
 
     // Host-ops scenario (CAP-I2): SKIP two holes, retire the terminal
@@ -710,7 +708,7 @@ fn main() -> std::io::Result<()> {
     }
 
     let session_json = format!(
-        "{{\n  \"name\": \"dev-session-basic\",\n  \"secret_hex\": \"{}\",\n  \"host_nonce\": {},\n  \"device_nonce\": {},\n  \"version\": 1,\n  \"node\": {},\n  \"boot\": {},\n  \"network\": {},\n  \"capability\": {},\n  \"principal\": \"{}\",\n  \"session_id\": {},\n  \"mesh_session\": {},\n  \"peer_node\": {},\n  \"peer_session\": {},\n  \"rx_grant_frames\": {},\n  \"rx_grant_bytes\": {},\n  \"tx_grant_frames\": {},\n  \"tx_grant_bytes\": {},\n  \"hello_tag_hex\": \"{}\",\n  \"auth_tag_hex\": \"{}\",\n  \"auth_ok_tag_hex\": \"{}\",\n  \"session_key_hex\": \"{}\"\n}}\n",
+        "{{\n  \"name\": \"dev-session-basic\",\n  \"secret_hex\": \"{}\",\n  \"host_nonce\": {},\n  \"device_nonce\": {},\n  \"version\": 2,\n  \"node\": {},\n  \"boot\": {},\n  \"network\": {},\n  \"capability\": {},\n  \"principal\": \"{}\",\n  \"session_id\": {},\n  \"mesh_session\": {},\n  \"peer_node\": {},\n  \"peer_session\": {},\n  \"rx_grant_frames\": {},\n  \"rx_grant_bytes\": {},\n  \"tx_grant_frames\": {},\n  \"tx_grant_bytes\": {},\n  \"hello_tag_hex\": \"{}\",\n  \"auth_tag_hex\": \"{}\",\n  \"auth_ok_tag_hex\": \"{}\",\n  \"key_h2d_hex\": \"{}\",\n  \"key_d2h_hex\": \"{}\"\n}}\n",
         hex(SECRET),
         HOST_NONCE,
         DEVICE_NONCE,
@@ -730,7 +728,8 @@ fn main() -> std::io::Result<()> {
         hex(&proof.hello_tag),
         hex(&proof.auth_tag),
         hex(&proof.auth_ok_tag),
-        hex(&proof.key),
+        hex(&proof.key_h2d),
+        hex(&proof.key_d2h),
     );
     fs::write(root.join("session.json"), session_json)?;
     println!("wrote {} steps to {}", steps.len(), frames_dir.display());
@@ -744,7 +743,8 @@ fn main() -> std::io::Result<()> {
 /// direction counters so steps can be appended in wire order.
 struct SessionSteps {
     session: u64,
-    key: [u8; 16],
+    key_h2d: [u8; SESSION_KEY_SIZE],
+    key_d2h: [u8; SESSION_KEY_SIZE],
     d2h_counter: u64,
     h2d_counter: u64,
     steps: Vec<Step>,
@@ -760,14 +760,14 @@ impl SessionSteps {
         request: u64,
         inner: Vec<u8>,
     ) {
-        let (dir, counter) = if direction == "h2d" {
+        let (dir, counter, key) = if direction == "h2d" {
             let counter = self.h2d_counter;
             self.h2d_counter += 1;
-            (DIRECTION_HOST_TO_DEVICE, counter)
+            (DIRECTION_HOST_TO_DEVICE, counter, self.key_h2d)
         } else {
             let counter = self.d2h_counter;
             self.d2h_counter += 1;
-            (DIRECTION_DEVICE_TO_HOST, counter)
+            (DIRECTION_DEVICE_TO_HOST, counter, self.key_d2h)
         };
         self.steps.push(Step {
             name,
@@ -777,7 +777,7 @@ impl SessionSteps {
                 flags: 0,
                 session: self.session,
                 request,
-                body: seal_body(&self.key, dir, counter, kind, 0, request, &inner),
+                body: seal_body(&key, dir, counter, kind, 0, request, &inner),
             },
             inner,
             note,
@@ -979,19 +979,17 @@ fn rx_topup() -> impl FnMut(usize) -> Vec<u8> {
 /// advertising `capability` — the common opening of every scenario session.
 fn begin_session(capability: u32, ack_note: &'static str) -> (SessionSteps, SessionProof) {
     let transcript = Transcript {
-        host_nonce: HOST_NONCE,
-        device_nonce: DEVICE_NONCE,
-        version: 1,
         node: NODE,
         boot: BOOT,
         network: NETWORK,
         capability,
-        principal: PRINCIPAL.to_vec(),
+        ..Transcript::usb(HOST_NONCE, DEVICE_NONCE, PRINCIPAL)
     };
     let proof = derive_session_proof(SECRET, &transcript.encode().unwrap());
     let mut w = SessionSteps {
         session: proof.session_id,
-        key: proof.key,
+        key_h2d: proof.key_h2d,
+        key_d2h: proof.key_d2h,
         d2h_counter: 0,
         h2d_counter: 0,
         steps: Vec::new(),
@@ -999,7 +997,7 @@ fn begin_session(capability: u32, ack_note: &'static str) -> (SessionSteps, Sess
 
     let mut hello_body = Vec::new();
     hello_body.extend_from_slice(&HOST_NONCE.to_be_bytes());
-    hello_body.extend_from_slice(&[1, 1, PRINCIPAL.len() as u8]);
+    hello_body.extend_from_slice(&[VERSION, VERSION, PRINCIPAL.len() as u8]);
     hello_body.extend_from_slice(PRINCIPAL);
     w.steps.push(Step {
         name: "hello",
@@ -1016,7 +1014,7 @@ fn begin_session(capability: u32, ack_note: &'static str) -> (SessionSteps, Sess
     });
     let mut ack_body = Vec::new();
     ack_body.extend_from_slice(&DEVICE_NONCE.to_be_bytes());
-    ack_body.push(1);
+    ack_body.push(VERSION);
     ack_body.extend_from_slice(&NODE.to_be_bytes());
     ack_body.extend_from_slice(&BOOT.to_be_bytes());
     ack_body.extend_from_slice(&NETWORK.to_be_bytes());
@@ -1095,7 +1093,7 @@ fn finish_session(
         write_step(frames_dir, index + 1, step)?;
     }
     let session_json = format!(
-        "{{\n  \"name\": \"{}\",\n  \"secret_hex\": \"{}\",\n  \"host_nonce\": {},\n  \"device_nonce\": {},\n  \"version\": 1,\n  \"node\": {},\n  \"boot\": {},\n  \"network\": {},\n  \"capability\": {},\n  \"principal\": \"{}\",\n  \"session_id\": {},\n  \"peer_node\": {},\n  \"hello_tag_hex\": \"{}\",\n  \"auth_tag_hex\": \"{}\",\n  \"auth_ok_tag_hex\": \"{}\",\n  \"session_key_hex\": \"{}\"\n}}\n",
+        "{{\n  \"name\": \"{}\",\n  \"secret_hex\": \"{}\",\n  \"host_nonce\": {},\n  \"device_nonce\": {},\n  \"version\": 2,\n  \"node\": {},\n  \"boot\": {},\n  \"network\": {},\n  \"capability\": {},\n  \"principal\": \"{}\",\n  \"session_id\": {},\n  \"peer_node\": {},\n  \"hello_tag_hex\": \"{}\",\n  \"auth_tag_hex\": \"{}\",\n  \"auth_ok_tag_hex\": \"{}\",\n  \"key_h2d_hex\": \"{}\",\n  \"key_d2h_hex\": \"{}\"\n}}\n",
         name,
         hex(SECRET),
         HOST_NONCE,
@@ -1110,7 +1108,8 @@ fn finish_session(
         hex(&proof.hello_tag),
         hex(&proof.auth_tag),
         hex(&proof.auth_ok_tag),
-        hex(&proof.key),
+        hex(&proof.key_h2d),
+        hex(&proof.key_d2h),
     );
     fs::write(root.join("session.json"), session_json)?;
     println!("wrote {} steps to {}", w.steps.len(), frames_dir.display());
