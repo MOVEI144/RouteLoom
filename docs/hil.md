@@ -6,8 +6,8 @@ require `pyserial`; signed bundle verification requires `cryptography`.
 
 **Hardware status:** the [2026-09-26 bench report](hil/2026-09-26-bench-5node.md)
 records the first hardware run and its continuation. The bench contained
-three C3s and two C6s; C6 is an experimental HIL target outside the SDK v1
-support list. One C3 stopped enumerating, so the continuation exercised four
+three C3s and two C6s; C6 was then an experimental HIL target (v2 makes it
+a supported target built by every CI cell in `tools/ci/cells.json`). One C3 stopped enumerating, so the continuation exercised four
 boards (two C3s, two C6s). A five-node run and C5 hardware comparison remain
 unfinished. A C3 LegacyFixture deep-sleep replay fix passed a wake-and-deliver
 cycle in the R3 continuation; DevRam/MemberEdhoc sleep remains open. The
@@ -122,11 +122,11 @@ python3 tools/hil/analyze_edhoc.py \
     --console 4 artifacts/hil/member-node4-console.log \
     --out artifacts/hil/member-edhoc-times.json
 
-# Build the current sdk.yml firmware matrix (25 C3/S3/C5 cells) in the
-# pinned IDF container. The runner shares the local three-container cap and
-# retains per-cell logs and RAM reports in ignored local image directories.
+# Build every firmware cell of tools/ci/cells.json (the sdk.yml matrix) in
+# the pinned IDF container. The runner shares the local three-container cap;
+# its JSON result records build output and each bundle carries a RAM report.
 python3 tools/hil/build_ci_matrix.py \
-    --out artifacts/hil/ci-matrix-25.json --jobs 3
+    --out artifacts/hil/ci-matrix.json --jobs 3
 
 # During MemberEdhoc joining or cutover, poll the Site Authority ledger,
 # member states, group-key acknowledgements, and any known operation IDs.
@@ -167,7 +167,7 @@ python3 tools/hil/counter_snapshot.py --rig tools/hil/rigs.yaml \
 # These opt-in images discard only the other end's source MAC on reception;
 # Node2 keeps its ordinary image and can BIND to both ends.
 tools/hil/build_image.sh bridge_node esp32c3 c3-chain-bridge \
-    'CONFIG_ROUTELOOM_CAPABILITY=0x47' \
+    'CONFIG_ROUTELOOM_CAPABILITY=0x47' 'CONFIG_ROUTELOOM_USB_NODE_STATUS=y' \
     'CONFIG_ROUTELOOM_HIL_DROP_RX_MAC="94:a9:90:7a:26:ac"'
 tools/hil/build_image.sh reference_node esp32c3 c3-chain-node3 \
     'CONFIG_ROUTELOOM_NODE_ID=0x3' \
@@ -202,10 +202,20 @@ A board still on the old factory layout (app at 0x10000, `rlsec` at
 
 1. Erase the whole flash: `esptool --chip <chip> --port <port> erase-flash`.
    This deletes the board identity, Site state and `rlcfg`/`rlkeys`.
-2. Full flash of a PT-4M-v2 image (`tools/hil/flash.py` without
-   `--app-only`, or Mesh Lab).
-3. Provision the board again (BoardConfig, then Site join) as for a new
-   board. Old `rlsec` backups do not restore onto the new offset.
+2. Full flash of the PT-4M-v2 **setup image** (same chip, role and
+   security as the field image, `CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y`).
+3. Commit the BoardConfig (`benchcfg`/`benchsecret`, then the identity for
+   MemberEdhoc) on the setup console and read it back.
+4. Write the field image with `--app-only` (or Mesh Lab), then join the
+   Site as for a new board. Old `rlsec` backups do not restore onto the new
+   offset.
+
+A field image on a board without BoardConfig logs `CONFIG_REQUIRED: board
+configuration required` every 10 s and waits awake with RF off, so the
+setup image can still be written over USB; it never enters the fail
+back-off. `flash.py` refuses to full-flash a signed field bundle (generic
+BoardConfig image without the maintenance console) onto a board whose
+`rlcfg` partition is blank; `--allow-unconfigured` overrides.
 
 `rig.py --selftest`, `scenarios.py --selftest` run dependency-free
 self-checks usable in CI without hardware.

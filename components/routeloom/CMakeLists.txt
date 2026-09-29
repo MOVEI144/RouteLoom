@@ -24,7 +24,20 @@ set(ROUTELOOM_CORE_SOURCES
   src/migration.cpp
   src/migration_wire.cpp
   src/node.cpp
+  src/node_applied.cpp
+  src/node_congestion.cpp
+  src/node_diagnostic.cpp
+  src/node_dispatch.cpp
+  src/node_observation.cpp
+  src/node_poll.cpp
+  src/node_receive.cpp
+  src/node_receive_routed.cpp
+  src/node_route.cpp
+  src/node_scheduler.cpp
+  src/node_send.cpp
   src/node_status.cpp
+  src/node_transit.cpp
+  src/node_txn.cpp
   src/observation.cpp
   src/peer_state.cpp
   src/power.cpp
@@ -115,12 +128,15 @@ set(ROUTELOOM_THIRD_PARTY_C_RELAX
   -fno-strict-aliasing -Wno-unused-function -Wno-unused-but-set-variable
 )
 
-# Dedup pool capacity (docs/reference/resource-profiles.json dedup_entries,
-# issue #39) is a compile-time resource-profile constant. It changes
-# sizeof(MeshNode), so it is a PUBLIC definition: every translation unit that
-# includes the headers must see the same value. ESP-IDF selects it through the
-# component Kconfig (RouteLoom -> Dedup capacity profile); host builds through
-# ROUTELOOM_DEDUP_PROFILE. The default is the relay profile.
+# Resource profile (include/routeloom/profile.hpp): session, route and
+# optional-feature capacities, plus the dedup pool capacity
+# (docs/reference/resource-profiles.json dedup_entries, issue #39). They
+# change sizeof(MeshNode) and of the Owner, so they are PUBLIC definitions:
+# every translation unit that includes the headers must see the same value.
+# ESP-IDF selects them through the component Kconfig (RouteLoom -> Resource
+# profile / Device role / Dedup capacity); host builds through
+# ROUTELOOM_RESOURCE_PROFILE (default full) and the optional
+# ROUTELOOM_DEDUP_PROFILE override.
 if(COMMAND idf_component_register)
   # ESP-IDF: libedhoc + zcbor + the glue, without the host-only TF-PSA-Crypto
   # AES/CCM/GCM subset (its mbedtls_* symbols would duplicate ESP-IDF's own
@@ -147,23 +163,50 @@ if(COMMAND idf_component_register)
   target_compile_options(${COMPONENT_LIB} PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-Werror>
     "$<$<COMPILE_LANGUAGE:C>:${ROUTELOOM_THIRD_PARTY_C_RELAX}>")
-  if(CONFIG_ROUTELOOM_DEDUP_CAPACITY)
+  if(CONFIG_ROUTELOOM_RESOURCE_PROFILE_ID)
+    set(_routeloom_features "")
+    foreach(_feature USB_NODE_STATUS USB_GATEWAY_ENDPOINT USB_GROUP USB_OBSERVATION)
+      if(CONFIG_ROUTELOOM_${_feature})
+        list(APPEND _routeloom_features ROUTELOOM_${_feature}=1)
+      else()
+        list(APPEND _routeloom_features ROUTELOOM_${_feature}=0)
+      endif()
+    endforeach()
     target_compile_definitions(${COMPONENT_LIB} PUBLIC
-      ROUTELOOM_DEDUP_CAPACITY=${CONFIG_ROUTELOOM_DEDUP_CAPACITY})
+      ROUTELOOM_RESOURCE_PROFILE=${CONFIG_ROUTELOOM_RESOURCE_PROFILE_ID}
+      ROUTELOOM_ROLE=${CONFIG_ROUTELOOM_ROLE_ID}
+      ROUTELOOM_DEDUP_CAPACITY=${CONFIG_ROUTELOOM_DEDUP_CAPACITY}
+      ${_routeloom_features})
   endif()
 else()
-  set(ROUTELOOM_DEDUP_PROFILE "relay" CACHE STRING
-    "Dedup capacity resource profile: leaf (32), relay (96) or gateway (256)")
-  set_property(CACHE ROUTELOOM_DEDUP_PROFILE PROPERTY STRINGS leaf relay gateway)
+  set(ROUTELOOM_RESOURCE_PROFILE "full" CACHE STRING
+    "Resource profile: endpoint, relay, gateway_small, gateway or full")
+  set_property(CACHE ROUTELOOM_RESOURCE_PROFILE PROPERTY STRINGS
+    endpoint relay gateway_small gateway full)
+  set(_routeloom_profiles endpoint relay gateway_small gateway full)
+  list(FIND _routeloom_profiles "${ROUTELOOM_RESOURCE_PROFILE}" _routeloom_profile_index)
+  if(_routeloom_profile_index EQUAL -1)
+    message(FATAL_ERROR
+      "ROUTELOOM_RESOURCE_PROFILE must be endpoint, relay, gateway_small, gateway "
+      "or full (got '${ROUTELOOM_RESOURCE_PROFILE}')")
+  endif()
+  math(EXPR ROUTELOOM_RESOURCE_PROFILE_ID "${_routeloom_profile_index} + 1")
+  # Empty delegates the default to profile.hpp; leaf/relay/gateway pin
+  # an explicit capacity.
+  set(ROUTELOOM_DEDUP_PROFILE "" CACHE STRING
+    "Dedup capacity override: empty (profile default), leaf (32), relay (96) or gateway (256)")
+  set_property(CACHE ROUTELOOM_DEDUP_PROFILE PROPERTY STRINGS "" leaf relay gateway)
   if(ROUTELOOM_DEDUP_PROFILE STREQUAL "leaf")
     set(ROUTELOOM_DEDUP_CAPACITY 32)
   elseif(ROUTELOOM_DEDUP_PROFILE STREQUAL "relay")
     set(ROUTELOOM_DEDUP_CAPACITY 96)
   elseif(ROUTELOOM_DEDUP_PROFILE STREQUAL "gateway")
     set(ROUTELOOM_DEDUP_CAPACITY 256)
+  elseif(ROUTELOOM_DEDUP_PROFILE STREQUAL "")
+    set(ROUTELOOM_DEDUP_CAPACITY 0)
   else()
     message(FATAL_ERROR
-      "ROUTELOOM_DEDUP_PROFILE must be leaf, relay or gateway "
+      "ROUTELOOM_DEDUP_PROFILE must be empty, leaf, relay or gateway "
       "(got '${ROUTELOOM_DEDUP_PROFILE}')")
   endif()
   # Vendored C for EDHOC in its own target, so its (relaxed) warning set stays
@@ -208,5 +251,6 @@ else()
   set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/src/edhoc/edhoc_port.c
     PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Wpedantic;-Werror")
   target_compile_definitions(routeloom_core PUBLIC
+    ROUTELOOM_RESOURCE_PROFILE=${ROUTELOOM_RESOURCE_PROFILE_ID}
     ROUTELOOM_DEDUP_CAPACITY=${ROUTELOOM_DEDUP_CAPACITY})
 endif()

@@ -2,7 +2,7 @@
 // firmware node — EspNowSecurityOwner + EspNowRuntime + MeshNode over the
 // host ESP-IDF stubs, NVS-backed Sdkv1Stores over a fake NVS, and (on a
 // gateway) the real UsbBridge. The Rust harness
-// (host/routeloom-host/src/site/owner_mesh_interop.rs) spawns one peer
+// (host/routeloom-host/src/site/owner_mesh/) spawns one peer
 // per node, switches radio frames between them, and relays the gateway's
 // USB bytes to the real Site Authority. No mock ACKs: every lifecycle,
 // GK and cutover receipt the harness observes comes out of this Owner.
@@ -428,8 +428,7 @@ namespace routeloom::espnow {
 
 struct EspNowSecurityOwnerTestAccess {
   static bool down_live_to(EspNowSecurityOwner& owner, NodeId node) noexcept {
-    return owner.authority_live_ && owner.config_.gateway &&
-           owner.gateway()->down_live_to(node);
+    return owner.authority_live_ && owner.gateway_role() && owner.gateway()->down_live_to(node);
   }
 };
 
@@ -1066,6 +1065,10 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc == 2 && std::strcmp(argv[1], "--harness-version") == 0) {
+    std::fputs("1\n", stdout);
+    return 0;
+  }
   using namespace routeloom;
   using namespace routeloom::espnow;
   using namespace routeloom::sdkv1;
@@ -1108,7 +1111,7 @@ int main(int argc, char** argv) {
       kMemberRoleEndpoint | kMemberRoleRelay | (setup.gateway ? kMemberRoleGateway : 0);
   owner_config.joiner.requested_role = setup.role;
   owner_config.log_tag = "mesh_peer";
-  owner_config.gateway = setup.gateway;
+  owner_config.role = setup.gateway ? profile::Role::Gateway : profile::kRole;
   owner_config.flat_group_routing = setup.flat;
 
   EspOwnerEntropy entropy;

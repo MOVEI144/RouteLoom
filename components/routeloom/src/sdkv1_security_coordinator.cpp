@@ -202,21 +202,25 @@ void SecurityCoordinator::SessionProviderMux::note_rx_unknown_context(
 }
 
 SecurityCoordinator::MemberEngine::MemberEngine(
-    ResumeSlotStorage2& resume, GatewaySessionBank& bank, BankSessionSink<32, 128>& sink,
+    ResumeSlotStorage2& resume, ProfileSessionBank& bank,
+    BankSessionSink<profile::kLinkSessions, profile::kEndSessions>& sink,
     HandshakeMembershipView& membership, SessionCredentialVerifier& verifier,
     EntropySource& entropy, ZtRld1Port& rld1, ZtRelayPort& relay, JoinCookieSealer& sealer,
-    const JoinProxyConfig& proxy_config, const JoinRelayGatewayConfig& gateway_config,
+    const JoinProxyConfig& proxy_config,
+    [[maybe_unused]] const JoinRelayGatewayConfig& gateway_config,
     const edhoc::AeadCcm* aead) noexcept
-    : resume_cache(resume,
-                   resume.slot_count() == kResume2GatewayLinkQuota + kResume2GatewayEndQuota
-                       ? kResume2GatewayLinkQuota : kResume2NodeLinkQuota,
-                   resume.slot_count() == kResume2GatewayLinkQuota + kResume2GatewayEndQuota
-                       ? kResume2GatewayEndQuota : kResume2NodeEndQuota),
+    : resume_cache(resume, resume_quota(resume.slot_count()).link,
+                   resume_quota(resume.slot_count()).end),
       engine(resume_cache, sink, member_cookie, membership, verifier, &entropy_fill, &entropy,
              aead),
       demands(bank, engine),
-      proxy(proxy_config, rld1, relay, sealer, entropy),
-      gateway(gateway_config, relay) {}
+      proxy(proxy_config, rld1, relay, sealer, entropy)
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
+      ,
+      gateway(gateway_config, relay)
+#endif
+{
+}
 
 void SecurityCoordinator::destroy_workspace() noexcept {
   if (mode_ == CoordinatorMode::ZeroTouch) {
@@ -283,7 +287,9 @@ void SecurityCoordinator::create_member() noexcept {
   new (&ws_.member) MemberEngine(*deps_.resume_storage, bank_, bank_sink_, *this, *deps_.verifier,
                                  *deps_.entropy, *deps_.rld1, *this, *deps_.proxy_sealer,
                                  proxy_config, gateway_config, deps_.join_aead);
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
   ws_.member.gateway.set_host_sink(this);
+#endif
 }
 
 Status SecurityCoordinator::step(const CoordinatorEvent& event) noexcept {
@@ -349,6 +355,9 @@ Status SecurityCoordinator::adopt_dev(const CoordinatorDevConfig& config,
     return Status::error(StatusCode::InvalidState, "coordinator already running");
   }
   if (!deps_ready(deps_)) return Status::error(StatusCode::InvalidState, "coordinator deps");
+  if ((config.role & ~static_cast<std::uint32_t>(profile::role_mask(deps_.allowed_role))) != 0) {
+    return Status::error(StatusCode::Unsupported, "RESOURCE_PROFILE_ROLE_MISMATCH");
+  }
   last_now_ = now;
   in_port_ = true;
   const Status status = install_dev_config(config, now);
@@ -559,6 +568,7 @@ CoordinatorSnapshot SecurityCoordinator::snapshot() const noexcept {
   out.link_sessions = static_cast<std::uint32_t>(bank_.live_count(SecurityScope::Link));
   out.end_sessions = static_cast<std::uint32_t>(bank_.live_count(SecurityScope::EndToEnd));
   out.demands = bank_.demand_count();
+  out.end_evictions = bank_sink_.end_evictions();
   // The dev route has no authority channel (the small side is dead in
   // Dev): report the same unstarted view a fresh channel snapshots.
   if (mode_ == CoordinatorMode::Dev) {
@@ -904,6 +914,7 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
     // Join service, stale-GK watch and authority channel are Member-only:
     // the dev route has no proxy, no GK and no channel to drive.
     member().proxy.poll(now);
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
     if (member().gateway_active) member().gateway.poll(now);
     // A callback may queue its peer's answer (or a chunk receipt). Pop
     // before delivery so the callback can enqueue the next frame. Bound
@@ -922,6 +933,7 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
         (void)member().gateway.on_relay_rx(adopted_.node, 0, frame.type, payload, now);
       }
     }
+#endif
     watch_linkless(now);   // stale-GK evidence accrues toward a refresh
     if (mode_ == CoordinatorMode::Member && !member_apply_pending_) {
       drive_authority(now);  // GK tick/promote, channel tick, deferred start
@@ -1658,6 +1670,26 @@ void SecurityCoordinator::drain_staged(const MonotonicMs now) noexcept {
   }
 }
 
+void SecurityCoordinator::gateway_relay_rx(const BootstrapMeta& meta, const FrameType type,
+                                           const ByteView payload, const MonotonicMs now) noexcept {
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
+  if (!member().gateway_active) return;
+  // Distance, not consumed hops: a direct neighbor is 1 hop away (D04 R1);
+  // 0 is the local join, a corrupt over-limit stays 0 and fails the USB
+  // check closed.
+  const std::uint8_t hops =
+      meta.hop_remaining > kDefaultHopLimit
+          ? 0
+          : static_cast<std::uint8_t>(kDefaultHopLimit - meta.hop_remaining + 1);
+  member().gateway.on_relay_rx(meta.origin, hops, type, payload, now);
+#else
+  static_cast<void>(meta);
+  static_cast<void>(type);
+  static_cast<void>(payload);
+  static_cast<void>(now);
+#endif
+}
+
 void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
                                                  const MonotonicMs now) noexcept {
   if (!has_member_engine()) {
@@ -1698,16 +1730,7 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
         return;
       }
       member().proxy.on_relay_rx(frame.meta.origin, frame.type, payload, now);
-      if (member().gateway_active) {
-        // Distance, not consumed hops: a direct neighbor is 1 hop away
-        // (D04 R1); 0 is the local join, a corrupt over-limit stays 0 and
-        // fails the USB check closed.
-        const std::uint8_t hops =
-            frame.meta.hop_remaining > kDefaultHopLimit
-                ? 0
-                : static_cast<std::uint8_t>(kDefaultHopLimit - frame.meta.hop_remaining + 1);
-        member().gateway.on_relay_rx(frame.meta.origin, hops, frame.type, payload, now);
-      }
+      gateway_relay_rx(frame.meta, frame.type, payload, now);
       return;
     }
     case FrameType::MembershipResult:
@@ -1718,16 +1741,7 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
         return;
       }
       member().proxy.on_relay_rx(frame.meta.origin, frame.type, payload, now);
-      if (member().gateway_active) {
-        // Distance, not consumed hops: a direct neighbor is 1 hop away
-        // (D04 R1); 0 is the local join, a corrupt over-limit stays 0 and
-        // fails the USB check closed.
-        const std::uint8_t hops =
-            frame.meta.hop_remaining > kDefaultHopLimit
-                ? 0
-                : static_cast<std::uint8_t>(kDefaultHopLimit - frame.meta.hop_remaining + 1);
-        member().gateway.on_relay_rx(frame.meta.origin, hops, frame.type, payload, now);
-      }
+      gateway_relay_rx(frame.meta, frame.type, payload, now);
       return;
     case FrameType::BootstrapChunk:
     case FrameType::BootstrapReply: {
@@ -1763,16 +1777,7 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
         return;
       }
       member().proxy.on_relay_rx(frame.meta.origin, frame.type, payload, now);
-      if (member().gateway_active) {
-        // Distance, not consumed hops: a direct neighbor is 1 hop away
-        // (D04 R1); 0 is the local join, a corrupt over-limit stays 0 and
-        // fails the USB check closed.
-        const std::uint8_t hops =
-            frame.meta.hop_remaining > kDefaultHopLimit
-                ? 0
-                : static_cast<std::uint8_t>(kDefaultHopLimit - frame.meta.hop_remaining + 1);
-        member().gateway.on_relay_rx(frame.meta.origin, hops, frame.type, payload, now);
-      }
+      gateway_relay_rx(frame.meta, frame.type, payload, now);
       return;
     }
     default:
@@ -1881,6 +1886,9 @@ Status SecurityCoordinator::send_relay(const NodeId destination, const FrameType
   }
   const NodeId self = member_valid_ ? adopted_.node : deps_.local_node;
   if (destination == self || destination == deps_.local_node) {
+#if !ROUTELOOM_PROFILE_HAS_GATEWAY
+    return Status::error(StatusCode::Unsupported, "no colocated join relay gateway");
+#else
     if (payload.size > kMaxApplicationPayload ||
         (payload.size != 0 && payload.data == nullptr)) {
       return Status::error(StatusCode::InvalidArgument, "local relay payload");
@@ -1896,6 +1904,7 @@ Status SecurityCoordinator::send_relay(const NodeId destination, const FrameType
     if (payload.size != 0) std::memcpy(frame.bytes.data(), payload.data, payload.size);
     ++member().local_relay_count;
     return Status::success();
+#endif
   }
   MessageId id{};
   return deps_.mesh->send_bootstrap(destination, type, payload, HandshakeEngine::kLinkTimeoutMs,
@@ -1998,10 +2007,14 @@ Status SecurityCoordinator::on_usb(const CoordinatorEvent& event) noexcept {
         sat_inc(counters_.usb_drops);
         return Status::error(StatusCode::InvalidState, "no gateway here");
       }
+#if !ROUTELOOM_PROFILE_HAS_GATEWAY
+      return Status::error(StatusCode::Unsupported, "no join relay gateway");
+#else
       const Status admitted =
           member().gateway.host_down(event.usb_proxy, event.usb_object, event.now);
       if (!admitted.ok()) sat_inc(counters_.usb_drops);
       return admitted;
+#endif
     }
     case CoordinatorEventKind::UsbRelayAbort: {
       // USB 0x62 (only HostAborted arrives from the host; anything else
@@ -2014,6 +2027,9 @@ Status SecurityCoordinator::on_usb(const CoordinatorEvent& event) noexcept {
         sat_inc(counters_.usb_drops);
         return Status::error(StatusCode::InvalidArgument, "host abort reason");
       }
+#if !ROUTELOOM_PROFILE_HAS_GATEWAY
+      return Status::error(StatusCode::Unsupported, "no join relay gateway");
+#else
       RelayToken token{};
       token.gateway_epoch = event.usb_gateway_epoch;
       token.proxy_epoch = event.usb_proxy_epoch;
@@ -2021,6 +2037,7 @@ Status SecurityCoordinator::on_usb(const CoordinatorEvent& event) noexcept {
       const Status aborted = member().gateway.host_abort(event.usb_proxy, token, event.now);
       if (!aborted.ok()) sat_inc(counters_.usb_drops);
       return aborted;
+#endif
     }
     case CoordinatorEventKind::UsbSessionDown: {
       // USB disconnect: USB-bound state drops, never reused. A direct
@@ -2924,6 +2941,10 @@ Status SecurityCoordinator::adopt_boot_rls1(const MonotonicMs now,
   }
   const SiteRecord& site = deps_.site->site();
   const IdentityRecord& identity = deps_.identity->identity();
+  if ((site.role & ~profile::role_mask(deps_.allowed_role)) != 0) {
+    to_recovery(JoinRecoveryReason::MembershipInvalid);
+    return Status::success();
+  }
   if (!boot_witness_ok(site.boot_witness)) {
     to_recovery(JoinRecoveryReason::BootWitnessMismatch);
     return Status::success();
@@ -2996,11 +3017,11 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
   destroy_workspace();
   mode_ = CoordinatorMode::Member;
   create_member();
-  GatewaySessionBank::LocalView local{};
+  ProfileSessionBank::LocalView local{};
   local.self = cfg.node;
   local.network = cfg.network;
   local.gk_epoch = site.gk_epoch_current;
-  GatewaySessionBank::RandomSource random{};
+  ProfileSessionBank::RandomSource random{};
   random.fn = &entropy_fill;
   random.ctx = deps_.entropy;
   Status banked = bank_.configured() ? bank_.reset_membership(local, now)
@@ -3074,22 +3095,25 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
   // The discovery's controller is initialized by the firmware at
   // StartMemberDiscovery (discovery attaches after adoption); the
   // proxy/gateway below carry their own membership state.
-  // Relay duties are role-gated: endpoint-only members never OFFER. The
-  // authority path is self when we are the gateway, else the mesh gateway
-  // list (a hint — the proxy's own timeouts enforce reality).
+  // Relay duties are role-gated: endpoint-only members, and every node of
+  // the endpoint profile, never OFFER; only gateway profiles run the relay
+  // gateway. The authority path is self when we are the gateway, else the
+  // mesh gateway list (a hint — the proxy's own timeouts enforce reality).
   member().proxy.set_membership(MembershipState::Member, now);
-  member().proxy.set_policy((site.role & (kMemberRoleRelay | kMemberRoleGateway)) != 0);
-  member().gateway_active = (site.role & kMemberRoleGateway) != 0;
+  member().proxy.set_policy(profile::kJoinProxy &&
+                            (site.role & (kMemberRoleRelay | kMemberRoleGateway)) != 0);
+  member().gateway_active = profile::kGateway && (site.role & kMemberRoleGateway) != 0;
   if (member().gateway_active) {
     member().proxy.set_authority(true, 0, now);
-    member().gateway.set_membership(MembershipState::Member);
   } else if (cfg.route_gateway_count > 0) {
     member().proxy.set_authority(true, 1, now);
-    member().gateway.set_membership(MembershipState::Unprovisioned);
   } else {
     member().proxy.set_authority(false, 0, now);
-    member().gateway.set_membership(MembershipState::Unprovisioned);
   }
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
+  member().gateway.set_membership(member().gateway_active ? MembershipState::Member
+                                                          : MembershipState::Unprovisioned);
+#endif
   channel_ = site.channel;  // the operating channel gates RLD1 RX
   discovery_started_ = false;
   member_apply_pending_ = true;
@@ -3186,12 +3210,12 @@ Status SecurityCoordinator::install_dev_config(const CoordinatorDevConfig& confi
   destroy_small();
   create_dev();
   sat_inc(counters_.boots);
-  GatewaySessionBank::LocalView local{};
+  ProfileSessionBank::LocalView local{};
   local.self = cfg.node;
   local.network = cfg.network;
   local.gk_epoch = 1;  // fixed dev epoch (P4 §10.1): the engine attests
                        // created_gk 1 and the bank enforces created+2
-  GatewaySessionBank::RandomSource random{};
+  ProfileSessionBank::RandomSource random{};
   random.fn = &entropy_fill;
   random.ctx = deps_.entropy;
   const Status banked = bank_.configured() ? bank_.reset_membership(local, now)
@@ -3412,7 +3436,9 @@ void SecurityCoordinator::stop_traffic(const bool clear_resume) noexcept {
                                     ? deps_.discovery->membership().state()
                                     : MembershipState::Revoked;
   member().proxy.set_membership(state, last_now_);
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
   member().gateway.set_membership(state);
+#endif
   member().gateway_active = false;
   member_valid_ = false;
   clear_milestone_adopted();

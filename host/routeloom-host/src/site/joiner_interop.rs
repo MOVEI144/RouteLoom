@@ -902,7 +902,7 @@ impl World {
                             self.allow_forwards.push((site, forwarded_at, delivered));
                         } else {
                             assert!(
-                                row.as_ref().map_or(true, |r| !r.member),
+                                row.as_ref().is_none_or(|r| !r.member),
                                 "no member row without an Allow"
                             );
                         }
@@ -2093,6 +2093,12 @@ fn live_owner_rrs_delivery_and_apply() {
     let Some(mut world) = World::start("owner-rrs", 0x0E05) else {
         return; // no C++ peer: skip (ignore-equivalent)
     };
+    let cold = world.step(25);
+    assert!(
+        cold.owner.lifecycle_booted,
+        "lifecycle boots before the first join"
+    );
+    assert_eq!(cold.owner.lifecycle_phase, 0, "unassigned boot stays gated");
     join_and_attach(&mut world);
     let active = world.sites[0].service.with(|a| a.gks.active_epoch()).0;
     let before = wait_owner_ready(&mut world, active).owner.enforced_count;

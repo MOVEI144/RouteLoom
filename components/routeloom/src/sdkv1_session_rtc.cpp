@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "routeloom/crc32.hpp"
+#include "routeloom/profile.hpp"
 #include "routeloom/secure_clear.hpp"
 
 namespace routeloom::sdkv1 {
@@ -13,6 +14,11 @@ constexpr std::uint32_t kCommitted = 0x52544331;  // RTC1
 constexpr std::uint32_t kLifetime = 24U * 3600U * 1000U;
 constexpr std::uint64_t kUseLimit = 1ULL << 32;
 constexpr std::size_t kHeader = 70;
+// Header byte 67 tags the image with the resource profile that wrote it: a
+// wake under another profile (an OTA across profiles) refuses the image and
+// resumes cold instead of restoring contexts sized for a different bank.
+constexpr std::size_t kProfileOffset = 67;
+static_assert(kProfileOffset == 12 + 4 + 8 + 4 * 4 + 16 + 6 + 4 + 1, "RTC header layout");
 constexpr std::size_t kContext = 136;
 static_assert(kHeader + 2 * kContext + 4 == kRtcSessionRecordSize);
 
@@ -100,7 +106,8 @@ Status encode_rtc_session(const RtcSessionImage& image, MutableByteView out) noe
   c.put(image.local_generation, 4); c.put(image.site_commit, 4);
   c.put(image.gk_epoch, 4); c.put(image.rs_floor, 4);
   c.put_bytes(image.kid_digest); c.put_bytes(image.parent_mac);
-  c.put(image.parent_binding, 4); c.put(image.count, 1); c.put(0, 3);
+  c.put(image.parent_binding, 4); c.put(image.count, 1);
+  c.put(profile::kResourceProfileId, 1); c.put(0, 2);
   for (std::size_t i = 0; i < image.count; ++i) {
     scratch.image.contexts[i] = image.contexts[i];
     context(c, scratch.image.contexts[i], true);
@@ -131,7 +138,10 @@ Status decode_rtc_session(ByteView bytes, const RtcWakeCheck& wake,
   candidate.gk_epoch = c.get(4); candidate.rs_floor = c.get(4);
   c.get_bytes(candidate.kid_digest); c.get_bytes(candidate.parent_mac);
   candidate.parent_binding = c.get(4); candidate.count = c.get(1);
-  if (c.get(3) != 0 || candidate.count == 0 || candidate.count > 2) return invalid();
+  if (c.get(1) != profile::kResourceProfileId || c.get(2) != 0 || candidate.count == 0 ||
+      candidate.count > 2) {
+    return invalid();
+  }
   for (auto& entry : candidate.contexts) context(c, entry, false);
   for (std::size_t i = 0; i < candidate.count; ++i) {
     for (std::size_t j = kHeader + i * kContext + 1; j < kHeader + i * kContext + 8; ++j) {

@@ -12,6 +12,7 @@
 #include "esp_now.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "routeloom/profile.hpp"
 #include "routeloom/wire.hpp"
 #include "routeloom/sdkv1_revocation.hpp"
 #if CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
@@ -409,6 +410,9 @@ Status EspNowRuntime::initialize_espnow() noexcept {
 }
 
 Status EspNowRuntime::initialize() noexcept {
+  if (profile::kRoleFixed && !profile::role_fits(profile::kRole)) {
+    return Status::error(StatusCode::Unsupported, "RESOURCE_PROFILE_ROLE_MISMATCH");
+  }
   if (event_queue_ != nullptr) {
     return Status::error(StatusCode::AlreadyExists,
                          "runtime initialized");

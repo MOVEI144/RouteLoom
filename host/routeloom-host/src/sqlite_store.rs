@@ -713,7 +713,7 @@ impl SqliteOperationStore {
                 let claimed = blob
                     .as_deref()
                     .and_then(DispatchAttachment::decode)
-                    .map_or(true, |att| att.submitted);
+                    .is_none_or(|att| att.submitted);
                 if claimed {
                     conn.execute(
                         "UPDATE operations SET dispatch_state='INDETERMINATE' WHERE seq=?1",

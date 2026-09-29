@@ -24,7 +24,7 @@
 | 配送結果 | API1 の受付・証拠は取得可能。しかし通常の HostOps 送信では legacy `delivery_event` を出さず、理由を QUERY_DISPATCH にも保持しない。失敗理由の完全な分布には追加が必要。 |
 | throughput | host の通常 admission は毎分 2 件、burst 16。高頻度試験用の明示的な実験 profile と容量管理が必要。 |
 | MemberEdhoc | 参加・除外・group key・cutover のコードは存在する。「本番相当の手順を試す実験 profile」と位置付ける。USB 認証や鍵保管まで製品認定済みとは表示しない。 |
-| C6 | 現 checkout の対象 manifest／CI／release に含まれない。build と HIL を追加し、他チップと同じ認定状況とは扱わない。 |
+| C6 | v2 で正式対象（CI の必須 cell と release に含む）。HIL の認定は他チップと別に記録する。 |
 
 ## 0. ボード、firmware、構成、provision
 
@@ -121,7 +121,7 @@ DevRam PSK と USB development secret は `BoardSecretsV1` として別partition
 
 setup image は pre-RF の専用 build とし、通常起動 image に設定変更 console を残さない。Member の console lock を回避しない。seal 後の機器に再設定が必要なら、承認済みの remote config または別途設計する保守手順の対象とし、GUI が自動で unlock/erase しない。
 
-起動コードに共通 `load_board_config()` を設け、radio、security owner、joiner、UsbBridge、telemetry の全てへ同じ検証済み identity を渡す。Member の NodeId を Kconfig 値と NVS 値で混在させない。未設定の汎用 field image は RF を開始せず `CONFIG_REQUIRED` を報告する。NodeId=1 の暗黙採用はしない。
+起動コードに共通 `load_board_config()` を設け、radio、security owner、joiner、UsbBridge、telemetry の全てへ同じ検証済み identity を渡す。Member の NodeId を Kconfig 値と NVS 値で混在させない。未設定の汎用 field image は RF を開始せず `CONFIG_REQUIRED` を報告する。これは一時的な故障ではないので fail back-off（deep sleep）に入れず、起きたまま 10 秒ごとに報告して USB から setup image を書けるようにする。NodeId=1 の暗黙採用はしない。
 
 DevRam の `adopt_dev` は現在 gateway set を渡さず、member adoption 側はその set で経路構成を更新する（`components/routeloom_espnow/src/espnow_security_owner.cpp:503`、`:1399`）。DevRam の group 試験を可能にする PR では、この経路設定の受渡しと scoped timer を追加する。LegacyFixture 専用 Kconfig を GUI から指定しただけで有効になると考えない。
 

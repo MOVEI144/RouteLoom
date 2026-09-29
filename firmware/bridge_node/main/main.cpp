@@ -194,6 +194,19 @@ RTC_NOINIT_ATTR routeloom::FailStreak s_fail;
   esp_restart();
 }
 
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+// CONFIG_REQUIRED is an operator step, not a transient fault: it never
+// feeds the fail streak, whose deep sleep would hide the USB port for
+// 30 minutes. RF has not started; the board stays awake and repeats the
+// line so the setup image and BoardConfig can be written over USB.
+[[noreturn]] void config_required(const char* detail) {
+  for (;;) {
+    ESP_LOGE(kTag, "CONFIG_REQUIRED: %s", detail);
+    vTaskDelay(pdMS_TO_TICKS(10000));
+  }
+}
+#endif
+
 routeloom::MonotonicMs monotonic_now_ms() noexcept {
   return static_cast<routeloom::MonotonicMs>(esp_timer_get_time() / 1000);
 }
@@ -311,10 +324,8 @@ class BridgeObservationSource final : public routeloom::ObservationSource {
       end = snapshot.end_sessions > UINT16_MAX
                 ? UINT16_MAX
                 : static_cast<std::uint16_t>(snapshot.end_sessions);
-      link_cap = static_cast<std::uint16_t>(
-          routeloom::sdkv1::GatewaySessionBank::link_capacity());
-      end_cap = static_cast<std::uint16_t>(
-          routeloom::sdkv1::GatewaySessionBank::end_capacity());
+      link_cap = static_cast<std::uint16_t>(routeloom::sdkv1::ProfileSessionBank::link_capacity());
+      end_cap = static_cast<std::uint16_t>(routeloom::sdkv1::ProfileSessionBank::end_capacity());
     }
 #endif
     routeloom::fill_observation_tables(node_, now_ms, link, link_cap, end,
@@ -519,11 +530,10 @@ extern "C" void app_main(void) {
   static ROUTELOOM_OWNER_C5_LP ROUTELOOM_MEMBER_SMALL_LP
       routeloom::espnow::BoardStores board_stores;
   status = board_stores.open(/*writable=*/false);
+  if (status.code == routeloom::StatusCode::NotFound) config_required(status.detail);
   if (!status) fail(status.detail);
   status = board_stores.initialize();
-  if (!status) {
-    ESP_LOGE(kTag, "board stores init: %s", status.detail);
-  }
+  if (!status) fail(status.detail);
   routeloom::BoardBootIdentity board_identity{};
   board_identity.chip = routeloom::espnow::board_chip();
   board_identity.role = routeloom::BoardRole::Bridge;
@@ -546,10 +556,7 @@ extern "C" void app_main(void) {
   status = routeloom::resolve_field_identity(board_stores.config(),
                                              board_stores.secrets(),
                                              board_identity, board_secrets);
-  if (!status) {
-    ESP_LOGE(kTag, "CONFIG_REQUIRED: %s", status.detail);
-    fail(status.detail);
-  }
+  if (!status) config_required(status.detail);
   const routeloom::BoardConfig& board = board_stores.config().config();
   ESP_LOGI(kTag, "board config: gen=%lu node=0x%llx role=bridge "
                  "secrets_gen=%lu mac=%02x%02x%02x%02x%02x%02x",
@@ -628,7 +635,11 @@ extern "C" void app_main(void) {
   owner_config.joiner.requested_role =
       static_cast<std::uint8_t>(routeloom::sdkv1::kMemberRoleGateway);
   owner_config.log_tag = kTag;
-  owner_config.gateway = true;  // USB-attached: relay + direct local channel
+  // USB-attached: relay + direct local channel. begin() refuses a gateway
+  // role on a non-gateway resource profile before RF starts.
+  static_assert(routeloom::profile::kRole == routeloom::profile::Role::Gateway,
+                "bridge_node needs CONFIG_ROUTELOOM_ROLE_GATEWAY");
+  owner_config.role = routeloom::profile::Role::Gateway;
 #if CONFIG_ROUTELOOM_GROUP_TREE_FLAT
   // Flat group profile (dev-flow §6.3): the adopted SitePackage gateways
   // become group_roots; the scoped routing policy is not engaged.

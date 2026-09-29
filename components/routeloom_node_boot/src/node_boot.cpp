@@ -50,6 +50,7 @@
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/espnow_sdkv1.hpp"
 #include "routeloom/rlcw1.hpp"
+#include "routeloom/profile.hpp"
 #include "routeloom/sdkv1_session_rtc.hpp"
 #include "routeloom/fail_policy.hpp"
 #include "routeloom/hex.hpp"
@@ -240,6 +241,19 @@ RTC_NOINIT_ATTR routeloom::FailStreak s_fail;
   vTaskDelay(pdMS_TO_TICKS(action.delay_ms));
   esp_restart();
 }
+
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+// CONFIG_REQUIRED is an operator step, not a transient fault: it never
+// feeds the fail streak, whose deep sleep would hide the USB port for
+// 30 minutes. RF has not started; the board stays awake and repeats the
+// line so the setup image and BoardConfig can be written over USB.
+[[noreturn]] void config_required(const char* detail) {
+  for (;;) {
+    ESP_LOGE(kTag, "CONFIG_REQUIRED: %s", detail);
+    vTaskDelay(pdMS_TO_TICKS(10000));
+  }
+}
+#endif
 
 // Used by the CONFIG and DEEP_SLEEP opt-in paths only; in a default build it
 // has no caller, so it is marked maybe_unused rather than deleted.
@@ -690,7 +704,9 @@ void run_node(const NodeBootHooks& hooks) {
   // refuses, the join FSM of P3-4 will treat it as unprovisioned), while
   // the node keeps routing.
   static ROUTELOOM_OWNER_C5_LP routeloom::espnow::Sdkv1Stores sdkv1_stores(
-      routeloom::sdkv1::kResumeNodeSlots);
+      routeloom::profile::kRole == routeloom::profile::Role::Gateway
+          ? routeloom::sdkv1::kResumeGatewaySlots
+          : routeloom::sdkv1::kResumeNodeSlots);
   status = sdkv1_stores.open(routeloom::espnow::kSecurityNvsPartition);
   if (!status) {
 #if CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE || !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
@@ -743,9 +759,10 @@ void run_node(const NodeBootHooks& hooks) {
   static ROUTELOOM_OWNER_C5_LP ROUTELOOM_MEMBER_SMALL_LP
       routeloom::espnow::BoardStores board_stores;
   status = board_stores.open(/*writable=*/false);
+  if (status.code == routeloom::StatusCode::NotFound) config_required(status.detail);
   if (!status) fail(status.detail);
   status = board_stores.initialize();
-  if (!status) ESP_LOGE(kTag, "board stores init: %s", status.detail);
+  if (!status) fail(status.detail);
   routeloom::BoardBootIdentity board_identity{};
   board_identity.chip = routeloom::espnow::board_chip();
   board_identity.role = routeloom::BoardRole::Reference;
@@ -766,10 +783,7 @@ void run_node(const NodeBootHooks& hooks) {
   status = routeloom::resolve_field_identity(board_stores.config(),
                                              board_stores.secrets(),
                                              board_identity, board_secrets);
-  if (!status) {
-    ESP_LOGE(kTag, "CONFIG_REQUIRED: %s", status.detail);
-    fail(status.detail);
-  }
+  if (!status) config_required(status.detail);
   const routeloom::BoardConfig& board = board_stores.config().config();
   ESP_LOGI(kTag, "board config: gen=%lu node=0x%llx secrets_gen=%lu "
                  "mac=%02x%02x%02x%02x%02x%02x",
@@ -847,10 +861,11 @@ void run_node(const NodeBootHooks& hooks) {
   }
   owner_config.joiner.node = owner_config.local_node;
   owner_config.joiner.mac = owner_config.local_mac;
-  owner_config.joiner.capability =
-      routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay;
-  owner_config.joiner.requested_role = static_cast<std::uint8_t>(
-      routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay);
+  // ROUTELOOM_ROLE: an endpoint image asks for and serves the endpoint role
+  // only; begin() refuses a role above the resource profile before RF.
+  owner_config.role = routeloom::profile::kRole;
+  owner_config.joiner.capability = routeloom::profile::role_mask(routeloom::profile::kRole);
+  owner_config.joiner.requested_role = static_cast<std::uint8_t>(owner_config.joiner.capability);
   owner_config.log_tag = kTag;
 #if CONFIG_ROUTELOOM_GROUP_TREE_FLAT
   // Flat group profile (dev-flow §6.3): the adopted SitePackage gateways
@@ -1186,7 +1201,7 @@ void run_node(const NodeBootHooks& hooks) {
   dev_config.node = board.node;
   dev_config.channel = board.channel;
   dev_config.boot = message_session;
-  dev_config.role = routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay;
+  dev_config.role = routeloom::profile::role_mask(routeloom::profile::kRole);
 #if CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED && defined(CONFIG_ROUTELOOM_ROUTE_GATEWAY_1)
   // The dev route has no BoardConfig carrier yet: propagate the Kconfig
   // gateway set so adopt_dev keeps the scoped profile (a missing list
