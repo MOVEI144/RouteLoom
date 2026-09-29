@@ -336,7 +336,7 @@ fn channel_plan_release<S: OperationStore>(
     let site = service(ctx)?;
     authorize(ctx, site, acl::PERM_MEMBERSHIP_ADMIN, "MEMBERSHIP_ADMIN")?;
     let plan_hash = site
-        .with(|authority| authority.channel_plan_release())
+        .with(|authority| authority.channel_plan_release(ctx.now_mono))
         .0
         .map_err(|error| ApiError {
             code: "BUSY",

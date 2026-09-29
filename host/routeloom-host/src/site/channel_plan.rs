@@ -56,7 +56,6 @@ pub struct ChannelPlanDesk {
     report: Option<(ChannelPlanReport, u64)>,
     /// (action, result, detail) of the newest answered request.
     last: Option<(&'static str, u16, u8)>,
-    offered: Option<SignedChannelPlan>,
 }
 
 fn action_name(request: &ChannelPlanRequest) -> &'static str {
@@ -79,11 +78,12 @@ impl ChannelPlanDesk {
     /// The next 0x68 inner body for the lane, if one is queued and none is
     /// in flight. A request the gateway never answered times out here.
     pub fn take_request(&mut self, now_mono: u64) -> Option<(Vec<u8>, &'static str)> {
-        if let Some((_, sent, _)) = self.in_flight {
+        if let Some((_, sent, action)) = self.in_flight {
             if now_mono.saturating_sub(sent) < REQUEST_TIMEOUT_MS {
                 return None;
             }
             self.in_flight = None;
+            self.last = Some((action, u16::MAX, 0));
         }
         let request = self.queued.take()?;
         let action = action_name(&request);
@@ -156,7 +156,6 @@ impl SiteAuthority {
             blob: signed.blob.clone(),
             commit_signature: signed.commit_signature,
         })?;
-        self.channel_plan.offered = Some(signed.clone());
         Ok(signed)
     }
 
@@ -176,26 +175,47 @@ impl SiteAuthority {
             .clone()
             .filter(|(_, at)| now_mono.saturating_sub(*at) <= REPORT_MAX_AGE_MS)
             .ok_or("no fresh gateway report: read the channel plan status first")?;
+        if report.result != 0 || !(1..=13).contains(&report.active_channel) {
+            return Err("gateway has no usable channel plan status".into());
+        }
+        if !(1..=13).contains(&new_channel) || new_channel == report.active_channel {
+            return Err("new_channel must differ from the active channel".into());
+        }
         // ParticipantPhase 3..=6: a plan is preparing, committed, switching
         // or verifying.
         if (3..=6).contains(&report.phase) || report.cooldown_ms != 0 {
             return Err("the gateway is not ready for a new plan".into());
         }
-        let switch = report.gateway_now_ms + now_mono.saturating_sub(at) + lead_ms;
+        let switch = report
+            .gateway_now_ms
+            .checked_add(now_mono.saturating_sub(at))
+            .and_then(|value| value.checked_add(lead_ms))
+            .ok_or("gateway plan clock overflow")?;
+        let expiry = switch
+            .checked_add(u64::from(GUARD_MS) + VALIDITY_MS)
+            .ok_or("gateway plan expiry overflow")?;
+        let sequence = report
+            .ledger_sequence
+            .checked_add(1)
+            .ok_or("gateway plan sequence exhausted")?;
+        let epoch = report
+            .active_epoch
+            .checked_add(1)
+            .ok_or("gateway channel epoch exhausted")?;
         let plan = ChannelPlan {
             network: self.id.network,
             authority: self.id.site_id,
             authority_generation: 1,
-            operation_sequence: report.ledger_sequence + 1,
+            operation_sequence: sequence,
             previous_state_hash: report.ledger_state,
             old_epoch: report.active_epoch,
-            new_epoch: report.active_epoch + 1,
+            new_epoch: epoch,
             old_channel: report.active_channel,
             new_channel,
             participant_capability_mask: CAPABILITY_MASK,
             switch_reference_ms: switch,
             uncertainty_ms: UNCERTAINTY_MS,
-            expiry_ms: switch + u64::from(GUARD_MS) + VALIDITY_MS,
+            expiry_ms: expiry,
             guard_ms: GUARD_MS,
             protected_services_mask: 1,
             max_outage_ms: MAX_OUTAGE_MS,
@@ -204,14 +224,17 @@ impl SiteAuthority {
         Ok(plan)
     }
 
-    /// Queues the commit release of the plan this authority offered.
-    pub fn channel_plan_release(&mut self) -> Result<[u8; 32], String> {
-        let plan_hash = self
+    /// Queues release of the plan the gateway currently holds. A fresh
+    /// gateway report also permits release after the daemon restarted.
+    pub fn channel_plan_release(&mut self, now_mono: u64) -> Result<[u8; 32], String> {
+        let report = self
             .channel_plan
-            .offered
-            .as_ref()
-            .map(|signed| signed.plan_hash)
-            .ok_or("no offered channel plan")?;
+            .fresh_report(now_mono)
+            .ok_or("no fresh gateway report: read the channel plan status first")?;
+        if report.result != 0 || report.released || report.offered_plan == [0; 32] {
+            return Err("gateway has no held channel plan".into());
+        }
+        let plan_hash = report.offered_plan;
         self.channel_plan
             .queue(ChannelPlanRequest::Release { plan_hash })?;
         Ok(plan_hash)
@@ -255,5 +278,52 @@ impl SiteAuthority {
         );
         let busy = self.channel_plan.queued.is_some() || self.channel_plan.in_flight.is_some();
         format!("{{\"report\":{report},\"last\":{last},\"busy\":{busy}}}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::site::{store::MemoryStore, testkit};
+
+    #[test]
+    fn report_counter_overflow_refuses_an_offer() {
+        let mut site = testkit::authority(Box::<MemoryStore>::default(), 100);
+        site.channel_plan.report = Some((
+            ChannelPlanReport {
+                active_channel: 1,
+                gateway_now_ms: u64::MAX,
+                ledger_sequence: u64::MAX,
+                active_epoch: u32::MAX,
+                ..ChannelPlanReport::default()
+            },
+            100,
+        ));
+        assert!(site.channel_plan_build(6, DEFAULT_LEAD_MS, 100).is_err());
+    }
+
+    #[test]
+    fn gateway_report_recovers_release_after_daemon_restart() {
+        let mut site = testkit::authority(Box::<MemoryStore>::default(), 100);
+        let plan_hash = [0x47; 32];
+        site.channel_plan.report = Some((
+            ChannelPlanReport {
+                result: 0,
+                offered_plan: plan_hash,
+                ..ChannelPlanReport::default()
+            },
+            100,
+        ));
+        assert_eq!(site.channel_plan_release(100).unwrap(), plan_hash);
+    }
+
+    #[test]
+    fn unanswered_request_reports_timeout() {
+        let mut desk = ChannelPlanDesk::default();
+        desk.queue(ChannelPlanRequest::Status).unwrap();
+        let (_, action) = desk.take_request(100).unwrap();
+        desk.note_sent(7, action, 100);
+        assert!(desk.take_request(100 + REQUEST_TIMEOUT_MS).is_none());
+        assert_eq!(desk.last(), Some(("status", u16::MAX, 0)));
     }
 }
