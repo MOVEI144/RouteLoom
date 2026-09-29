@@ -784,41 +784,37 @@ def validate(root: Path) -> dict:
                 for board in boards["boards"]
             ),
         )
-        # design-devflow.md §5.1: the node-style apps share one boot path in
-        # components/routeloom_node_boot — the ordering contract lives there
-        # for them; bridge_node keeps its own USB bridge main.
-        boot = (
-            root / "components/routeloom_node_boot/src/node_boot.cpp"
-        ).read_text(encoding="utf-8")
+        # V2-07: every image boots through components/routeloom_device — the
+        # ordering contract lives there, and the apps use only the Device.
+        device = (root / "components/routeloom_device/src/device.cpp").read_text(encoding="utf-8")
+        boot = (root / "components/routeloom_device/src/device_esp.cpp").read_text(
+            encoding="utf-8")
         test(
-            "node_boot_session_log_width",
-            "message origin=%llu session=%lu sequence=%llu" in boot
-            and "static_cast<unsigned long>(key.id.session)" in boot,
+            "device_session_log_width",
+            "message origin=%llu session=%lu sequence=%llu" in device
+            and "static_cast<unsigned long>(key.id.session)" in device,
             "ESP32 unsigned long is 32-bit; the session format must match",
         )
-        for app, firmware in (
-            ("bridge_node", (root / "firmware/bridge_node/main/main.cpp")
-             .read_text(encoding="utf-8")),
-            ("reference_node", boot),
-            ("bench_node", boot),
-        ):
-            partition = firmware.index("nvs_flash_init_partition(")
-            console = firmware.index("run_maintenance_console(sdkv1_stores)")
-            peer_capacity = firmware.index("nvs_partition_peer_capacity(")
-            security = firmware.index("security.initialize(")
+        storage = device.index("Status Device::open_storage(")
+        test(
+            "device_maintenance_before_mesh_security",
+            device.index("nvs_flash_init_partition(", storage) < device.index(
+                "Status Device::begin(")
+            and boot.index("open_storage(config.role")
+            < boot.index("run_maintenance_console(*stores_)")
+            < boot.index("nvs_partition_peer_capacity(")
+            < boot.index("security.initialize("),
+            "factory console needs rlsec, not the development mesh security state",
+        )
+        for app in ("firmware/reference_node", "firmware/bench_node", "firmware/bridge_node",
+                    "examples/espnow_node"):
+            firmware = (root / app / "main/main.cpp").read_text(encoding="utf-8")
             test(
-                f"{app}_maintenance_before_mesh_security",
-                partition < console < peer_capacity < security,
-                "factory console needs rlsec, not the development mesh security state",
-            )
-        for app in ("reference_node", "bench_node"):
-            firmware = (
-                root / f"firmware/{app}/main/main.cpp"
-            ).read_text(encoding="utf-8")
-            test(
-                f"{app}_runs_shared_boot",
-                "run_node(" in firmware and "NodeBootHooks" in firmware,
-                "node-style apps route through components/routeloom_node_boot",
+                f"{app.split('/')[-1]}_uses_device_only",
+                "device_config_from_kconfig()" in firmware and ".start(" in firmware
+                and not re.search(r"\bnode\(\)\.|coordinator\(\)\.|EspNowRuntime|"
+                                  r"EspNowSecurityOwner", firmware),
+                "apps boot through routeloom::Device and never reach the runtime or Owner",
             )
         ci_cells = {cell["id"] for cell in json.loads(
             (root / "tools/ci/cells.json").read_text(encoding="utf-8"))["cells"]}

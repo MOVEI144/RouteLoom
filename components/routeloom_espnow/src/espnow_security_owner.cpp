@@ -606,11 +606,26 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
   // The lifecycle boots first (journal before member): a leftover
   // Removing/Holdoff intent from before the reboot runs to completion
   // before the coordinator may adopt anything.
-  const Status lifecycle_boot =
-      lifecycle().dispatch(sdkv1::LifecycleInput::Boot(rlboot_prepared), now_ms);
-  if (!lifecycle_boot) return lifecycle_boot;
-  lifecycle_booted_ = true;
-  const sdkv1::LifecycleSnapshot boot_snap = lifecycle().snapshot();
+  // A factory-fresh device (healthy empty site store, no journal record)
+  // has nothing to adopt: booting the lifecycle now parks it in
+  // StorageBlocked, which refuses the first MemberReady. It boots on that
+  // first adoption instead, the path a reboot would take.
+  const sdkv1::SiteStoreHealth site_health = stores_->site().health();
+  const sdkv1::LifecycleStore& lifecycle_store = stores_->lifecycle();
+  const bool factory_fresh =
+      site_health.initialized && !site_health.has_site && !site_health.quarantined &&
+      !site_health.uncertain && site_health.unsupported_mask == 0 &&
+      site_health.read_error_mask == 0 && !site_health.active_load_failed &&
+      !lifecycle_store.has_record() && !lifecycle_store.quarantined() &&
+      !lifecycle_store.uncertain();
+  sdkv1::LifecycleSnapshot boot_snap{};
+  if (!factory_fresh) {
+    const Status lifecycle_boot =
+        lifecycle().dispatch(sdkv1::LifecycleInput::Boot(rlboot_prepared), now_ms);
+    if (!lifecycle_boot) return lifecycle_boot;
+    lifecycle_booted_ = true;
+    boot_snap = lifecycle().snapshot();
+  }
   // The RLX1 UnassignedReady watermark hands to the Joiner: a
   // post-removal Allow for an older generation of the same site refuses
   // (04 §6.4). Anything else clears the watermark.
@@ -1867,11 +1882,19 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   }
   // The lifecycle needs the verified package RS target at fresh adoption;
   // boot re-adoption carries zero and uses its durable floor.
-  if (lifecycle_live_ && lifecycle_booted_ && stores_ != nullptr) {
-    (void)lifecycle().dispatch(
-        sdkv1::LifecycleInput::MemberReady(stores_->site().commit_seq(),
-                                           member.rs_epoch_to_fetch), now_ms);
-    complete_lifecycle_recovery(true, now_ms);
+  if (lifecycle_live_ && stores_ != nullptr) {
+    // First adoption of a factory-fresh device: the lifecycle boots on the
+    // committed site now, then takes the package RS target like any adoption.
+    if (!lifecycle_booted_ &&
+        lifecycle().dispatch(sdkv1::LifecycleInput::Boot(true), now_ms)) {
+      lifecycle_booted_ = true;
+    }
+    if (lifecycle_booted_) {
+      (void)lifecycle().dispatch(
+          sdkv1::LifecycleInput::MemberReady(stores_->site().commit_seq(),
+                                             member.rs_epoch_to_fetch), now_ms);
+      complete_lifecycle_recovery(true, now_ms);
+    }
   }
   // Adoption binds the authority transport's self id (self-downs deliver
   // locally and self-addressed mesh sends refuse from here on).

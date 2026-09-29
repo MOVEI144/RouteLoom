@@ -11,8 +11,9 @@
 #include "routeloom/psa_edhoc_aead.hpp"
 #include "routeloom/psa_session_aead.hpp"
 
-#include "../../firmware/bridge_node/main/bridge_network.hpp"
+#include "routeloom/device.hpp"
 #include "idf_stubs.hpp"
+#include "nvs.h"
 #include "test_sdkv1.hpp"
 #include "test_security.hpp"
 #include "test_sim.hpp"
@@ -65,6 +66,10 @@ const edhoc::AeadCcm* psa_edhoc_aead_ccm() noexcept { return edhoc::builtin_aead
 Status EspOwnerEntropy::fill(MutableByteView) noexcept {
   return Status::error(StatusCode::InvalidState, "unused entropy");
 }
+Status EspOwnerEntropy::begin() noexcept {
+  state_ = State::Failed;
+  return Status::error(StatusCode::InvalidState, "unused entropy");
+}
 void EspNowDiscoveryObserver::on_discovery_event(const char* reason, NodeId peer) noexcept {
   (void)tag_;
   if (runtime_ != nullptr && reason != nullptr) runtime_->note_diagnostic(reason, peer);
@@ -72,6 +77,26 @@ void EspNowDiscoveryObserver::on_discovery_event(const char* reason, NodeId peer
 }  // namespace routeloom::espnow
 
 [[noreturn]] void esp_restart() { std::abort(); }
+
+// begin() is intentionally stopped before storage opens in the key-erasure
+// case; these link stubs are never reached by that case.
+void nvs_close(nvs_handle_t) {}
+esp_err_t nvs_get_blob(nvs_handle_t, const char*, void*, std::size_t*) {
+  return ESP_ERR_NVS_NOT_FOUND;
+}
+esp_err_t nvs_set_blob(nvs_handle_t, const char*, const void*, std::size_t) {
+  return ESP_ERR_INVALID_STATE;
+}
+esp_err_t nvs_erase_key(nvs_handle_t, const char*) { return ESP_ERR_INVALID_STATE; }
+esp_err_t nvs_commit(nvs_handle_t) { return ESP_ERR_INVALID_STATE; }
+
+namespace routeloom {
+struct DeviceTestAccess {
+  static void attach_runtime(Device& device, espnow::EspNowRuntime& runtime) noexcept {
+    device.runtime_ = &runtime;
+  }
+};
+}  // namespace routeloom
 
 namespace {
 
@@ -217,14 +242,14 @@ void test_usb_network_after_cutover() {
   const auto next = site_record(3, 204, kNetwork + (1ULL << 32U));
   CHECK(stores.site.commit(next).ok());
   const NetworkId bootstrap = static_cast<std::uint32_t>(next.network);
-  CHECK(bridge_node::usb_boot_network(stores.site, bootstrap) == next.network);
-  CHECK(static_cast<std::uint32_t>(bridge_node::usb_boot_network(stores.site, bootstrap)) ==
+  CHECK(routeloom::usb_boot_network(stores.site, bootstrap) == next.network);
+  CHECK(static_cast<std::uint32_t>(routeloom::usb_boot_network(stores.site, bootstrap)) ==
         bootstrap);
 
   FaultyRecordStorage empty_storage{kSiteSlotBytes};
   SiteStore empty{empty_storage};
   CHECK(empty.initialize().ok());
-  CHECK(bridge_node::usb_boot_network(empty, bootstrap) == bootstrap);
+  CHECK(routeloom::usb_boot_network(empty, bootstrap) == bootstrap);
 }
 
 void test_same_boot_reapply(bool change_site_epoch) {
@@ -386,6 +411,75 @@ void test_member_adoption_restores_group_capability() {
 
 }  // namespace
 
+// Device::post, the only call from another task: eight jobs wait, the
+// ninth is Busy. One Owner pass runs them in order; a job posted by a
+// running job waits for the next pass (the drain is bounded).
+struct PostLog {
+  std::uint8_t order[16]{};
+  std::uint8_t count{0};
+};
+struct PostJob {
+  PostLog* log;
+  std::uint8_t id;
+  bool repost;
+};
+
+void record_job(Device& device, void* ctx) {
+  auto& job = *static_cast<PostJob*>(ctx);
+  job.log->order[job.log->count++] = job.id;
+  if (job.repost) {
+    job.repost = false;
+    CHECK(device.post(&record_job, ctx).ok());
+  }
+}
+
+void test_device_post_bound() {
+  idf_stub::reset();
+  Stores stores{};
+  CHECK(stores.init());
+  EspNowSecurityOwner owner{};
+  EspNowSecurityOwnerTestAccess::install_coordinator(owner, stores.deps(owner));
+  routeloom_test::CapturingObserver observer{};
+  EspNowRuntime runtime(radio_config(), owner.session_provider(), observer);
+  CHECK(runtime.initialize().ok());
+  Device device;
+  DeviceTestAccess::attach_runtime(device, runtime);
+
+  CHECK(device.post(nullptr, nullptr).code == StatusCode::InvalidArgument);
+  PostLog log{};
+  PostJob jobs[Device::kPostCapacity + 1]{};
+  for (std::uint8_t i = 0; i <= Device::kPostCapacity; ++i) jobs[i] = PostJob{&log, i, i == 0};
+  for (std::uint8_t i = 0; i < Device::kPostCapacity; ++i) {
+    CHECK(device.post(&record_job, &jobs[i]).ok());
+  }
+  CHECK(device.post(&record_job, &jobs[Device::kPostCapacity]).code == StatusCode::Busy);
+
+  device.step(kStart);
+  CHECK(log.count == Device::kPostCapacity);
+  for (std::uint8_t i = 0; i < Device::kPostCapacity; ++i) CHECK(log.order[i] == i);
+  device.step(kStart + 1);
+  CHECK(log.count == Device::kPostCapacity + 1);
+  CHECK(log.order[Device::kPostCapacity] == 0);
+
+  // A short queue has the same pass boundary as a full queue.
+  jobs[Device::kPostCapacity].repost = true;
+  CHECK(device.post(&record_job, &jobs[Device::kPostCapacity]).ok());
+  device.step(kStart + 2);
+  CHECK(log.count == Device::kPostCapacity + 2);
+  device.step(kStart + 3);
+  CHECK(log.count == Device::kPostCapacity + 3);
+  runtime.stop();
+}
+
+void test_device_begin_clears_key_on_failure() {
+  Device device;
+  DeviceConfig config{};
+  config.security = DeviceSecurity::DevRam;
+  config.dev_psk.fill(0xA5);
+  CHECK(device.begin(config, kStart).code == StatusCode::InvalidState);
+  for (const std::uint8_t byte : config.dev_psk) CHECK(byte == 0);
+}
+
 int main() {
   test_usb_network_after_cutover();
   test_same_boot_reapply(false);
@@ -393,5 +487,7 @@ int main() {
   test_member_root_mapping(false);
   test_member_root_mapping(true);
   test_member_adoption_restores_group_capability();
+  test_device_post_bound();
+  test_device_begin_clears_key_on_failure();
   return failures == 0 ? 0 : 1;
 }

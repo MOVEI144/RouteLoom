@@ -4,6 +4,8 @@ import importlib.util
 import io
 import json
 import os
+import re
+import shutil
 import subprocess
 import struct
 import sys
@@ -55,15 +57,16 @@ class CellList(unittest.TestCase):
         cells = data["cells"]
         # 37 cells of the pre-v2 matrix, the 5 C6 cells made required, bench C6,
         # the C3 gateway-128 and endpoint cells, two release (-Os) comparisons,
-        # and the C3/C6 Member maintenance images.
-        self.assertEqual(len(cells), 50)
+        # the C3/C6 Member maintenance images, the example and the
+        # component-only external consumer.
+        self.assertEqual(len(cells), 52)
         self.assertTrue({
             "bridge_node-esp32c3-normal-off-maintenance_member",
             "reference_node-esp32c6-normal-off-maintenance_member",
             "bridge_node-esp32c6-normal-off-maintenance_member",
         } <= {cell["id"] for cell in cells})
         for cell in cells:
-            self.assertTrue((ROOT / "firmware" / cell["app"]).is_dir(), cell["id"])
+            self.assertTrue((ROOT / check.cell_dir(cell)).is_dir(), cell["id"])
             if cell["id"].startswith("experimental-c6-"):
                 self.assertEqual(cell["target"], "esp32c6")
             else:
@@ -75,6 +78,19 @@ class CellList(unittest.TestCase):
         for app in ("reference_node", "bridge_node", "bench_node"):
             for target in ("esp32c3", "esp32s3", "esp32c5", "esp32c6"):
                 self.assertIn((app, target), pairs)
+
+    def test_consumer_dependencies_survive_isolation_from_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "consumer"
+            shutil.copytree(ROOT / "tests/idf_consumer", project)
+            defaults = (project / "sdkconfig.defaults").read_text()
+            table = re.search(r'^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="([^"]+)"$',
+                              defaults, re.M)
+            self.assertIsNotNone(table)
+            self.assertTrue((project / table.group(1)).is_file())
+            manifest = (project / "main/idf_component.yml").read_text()
+            self.assertNotIn("override_path:", manifest)
+            self.assertRegex(manifest, r"routeloom/routeloom_device:\n\s+git:")
 
     def test_workflow_matrix_comes_from_the_list(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -88,6 +104,11 @@ class CellList(unittest.TestCase):
         include = json.loads(out.removeprefix("matrix="))["include"]
         self.assertEqual([c["id"] for c in include],
                          [c["id"] for c in check.load_cells()["cells"]])
+        # Artifacts come from each cell's own project directory.
+        self.assertIn("${{ matrix.dir }}/build/*.bin", workflow)
+        dirs = {c["id"]: c["dir"] for c in include}
+        self.assertEqual(dirs["espnow_node-esp32c3-example"], "examples/espnow_node")
+        self.assertEqual(dirs["bridge_node-esp32c3-normal-off-off"], "firmware/bridge_node")
 
     def test_existing_c6_artifact_names_are_preserved(self):
         ids = {cell["id"] for cell in check.load_cells()["cells"]}

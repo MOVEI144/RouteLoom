@@ -10,18 +10,17 @@ ROOT = Path(__file__).resolve().parents[3]
 
 class BoardPartitionTest(unittest.TestCase):
     def test_shared_field_boot_uses_verified_identity(self):
-        boot = (ROOT / "components/routeloom_node_boot/src/node_boot.cpp").read_text()
+        boot = (ROOT / "components/routeloom_device/src/device_esp.cpp").read_text()
+        device = (ROOT / "components/routeloom_device/src/device.cpp").read_text()
+        # The gate runs before begin(), which alone starts the Owner and RF.
         gate = boot.index("resolve_field_identity(board_stores.config()")
-        self.assertLess(gate, boot.index("owner.begin(sdkv1_stores"))
-        self.assertLess(gate, boot.index("runtime.initialize("))
+        self.assertLess(gate, boot.index("status = begin(config"))
+        self.assertLess(device.index("Status Device::begin("), device.index("owner.begin("))
         for binding in (
-            "owner_config.local_node = board.node;",
-            "config.node.network = board.network;",
-            "config.node.node = board.node;",
-            "config.channel = board.channel;",
-            "journal_config.network = board.network;",
-            "journal_config.target = board.node;",
-            "dev_config.psk = board_secrets->psk;",
+            "config.radio.node.node = board.node;",
+            "config.radio.node.network = board.network;",
+            "config.radio.channel = board.channel;",
+            "config.dev_psk = board_secrets->psk;",
         ):
             with self.subTest(binding=binding):
                 self.assertIn(binding, boot)

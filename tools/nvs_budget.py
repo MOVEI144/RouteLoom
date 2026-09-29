@@ -38,13 +38,10 @@ APPS = (
     "examples/espnow_node",
 )
 
-# Apps on the shared components/routeloom_node_boot bring-up no longer keep
-# the peer-capacity constant in their own main.cpp — it lives in the shared
-# source, which is what these builds actually compile.
-BOOT_SOURCE = {
-    "firmware/reference_node": "components/routeloom_node_boot/src/node_boot.cpp",
-    "firmware/bench_node": "components/routeloom_node_boot/src/node_boot.cpp",
-}
+# Every app boots through components/routeloom_device, which selects the
+# peer-capacity constant by the image role (CONFIG_ROUTELOOM_ROLE_GATEWAY in
+# the app's sdkconfig.defaults).
+BOOT_SOURCE = "components/routeloom_device/src/device_esp.cpp"
 
 HEADERS = {
     "counter": "components/routeloom/include/routeloom/counter_store.hpp",
@@ -194,7 +191,7 @@ def check_app(app: str, sources: dict[str, str], constants: dict[str, int]) -> d
         checks.append({"name": f"{app}:{name}", "passed": bool(ok), "detail": detail})
 
     defaults = sources[f"{app}/sdkconfig.defaults"]
-    main = sources[BOOT_SOURCE.get(app, f"{app}/main/main.cpp")]
+    boot = sources[BOOT_SOURCE]
     check("custom_table_selected",
           re.search(r"^CONFIG_PARTITION_TABLE_CUSTOM=y$", defaults, re.M) is not None
           and re.search(r'^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"$',
@@ -249,10 +246,9 @@ def check_app(app: str, sources: dict[str, str], constants: dict[str, int]) -> d
 
     pages = security.size // PAGE_BYTES
     check("security_nvs_min_pages", pages >= 3, f"pages={pages}")
-    uses_gateway = "kGatewayMaxPersistedPeers" in main
-    uses_node = "kNodeMaxPersistedPeers" in main
-    check("cap_selected", uses_gateway != uses_node)
+    uses_gateway = re.search(r"^CONFIG_ROUTELOOM_ROLE_GATEWAY=y$", defaults, re.M) is not None
     cap_name = "kGatewayMaxPersistedPeers" if uses_gateway else "kNodeMaxPersistedPeers"
+    check("cap_selected", cap_name in boot)
     cap = constants[cap_name]
     total = pages * constants["entries_per_page"]
     usable = (pages - 1) * constants["entries_per_page"]
@@ -316,11 +312,10 @@ def load_sources(root: Path, apps: tuple[str, ...] = APPS) -> dict[str, str]:
     sources = {key: (root / path).read_text(encoding="utf-8")
                for key, path in HEADERS.items()}
     for app in apps:
-        for name in ("sdkconfig.defaults", "partitions.csv", "main/main.cpp"):
+        for name in ("sdkconfig.defaults", "partitions.csv"):
             path = root / app / name
             sources[f"{app}/{name}"] = path.read_text(encoding="utf-8") if path.exists() else ""
-    for extra in {BOOT_SOURCE[app] for app in apps if app in BOOT_SOURCE}:
-        sources[extra] = (root / extra).read_text(encoding="utf-8")
+    sources[BOOT_SOURCE] = (root / BOOT_SOURCE).read_text(encoding="utf-8")
     return sources
 
 

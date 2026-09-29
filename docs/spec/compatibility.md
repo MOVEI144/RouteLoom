@@ -222,9 +222,9 @@ identity/counter state); the host store performs logged, one-way migrations.
 
 ## 8. kconfig schema
 
-Firmware configuration lives under the `CONFIG_ROUTELOOM_*` namespace, today
-split between `components/*/Kconfig` and `firmware/*/main/Kconfig.projbuild`
-(new SDK symbols go to the component Kconfig). Rules:
+Firmware configuration lives under the `CONFIG_ROUTELOOM_*` namespace in the
+component `Kconfig` files (`components/*/Kconfig`); an app's
+`main/Kconfig.projbuild` holds only that app's own symbols. Rules:
 
 - New symbols are additive and default to the safe/off value (EXPERIMENTAL
   features default off; opt-ins are explicit, e.g. `ROUTELOOM_DISCOVERY`,

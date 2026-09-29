@@ -3,7 +3,7 @@
 RouteLoom は ESP-NOW／Wi-Fi LR の mesh SDK である。目標は「安定して、長距離の mesh が、高速で、たくさんの機器で使える」こと。過剰に作らず、容量（flash・RAM・行数）は削れるだけ削る。どの IoT 製品でも使える汎用 SDK とし、特定製品の語彙を入れない。
 
 - `components/routeloom/`：portable C++17 core と C ABI。heap 無し・noexcept・有界 container。platform 依存を入れない。
-- `components/routeloom_espnow/`、`components/routeloom_node_boot/`、`firmware/`：ESP-IDF adapter と app。
+- `components/routeloom_espnow/`、`components/routeloom_device/`、`firmware/`：ESP-IDF adapter と app。
 - `host/`：Rust の daemon・CLI・client（`unsafe` 禁止）。`tools/`：検査・生成器・meshviz。`tests/`、`docs/hil/`：試験と実機記録。
 - 設計の原則は `docs/development/design-principles.md`、書き方は `docs/development/coding-standards.md`、版と番号は `docs/spec/compatibility.md`。
 
@@ -30,7 +30,7 @@ RouteLoom は ESP-NOW／Wi-Fi LR の mesh SDK である。目標は「安定し�
 - v2.0.0 以降、保証する公開面（`docs/spec/compatibility.md`）は 2.x の間は追加だけにする。
 
 ## 直列に変更するファイル
-次は一度に一つの PR だけが変更する：`routeloom.h`、`node.cpp`、`node.hpp`、`sdkv1_security_coordinator.cpp`、`usb_bridge.cpp`、`node_boot.cpp`、`espnow_security_owner.cpp`、`espnow_runtime.cpp`、`host/routeloom-host/src/{main.rs,api1.rs,site/mod.rs}`、`.github/workflows/sdk.yml`、`protocol/manifest.json`、`protocol/semantics.json`、`docs/reference/*.json`、`firmware/*/partitions.csv`、`docs/STATUS.md`。build directory・serial port・実機は排他で使い、worktree を分ける。
+次は一度に一つの PR だけが変更する：`routeloom.h`、`node.cpp`、`node.hpp`、`sdkv1_security_coordinator.cpp`、`usb_bridge.cpp`、`device_esp.cpp`、`espnow_security_owner.cpp`、`espnow_runtime.cpp`、`host/routeloom-host/src/{main.rs,api1.rs,site/mod.rs}`、`.github/workflows/sdk.yml`、`protocol/manifest.json`、`protocol/semantics.json`、`docs/reference/*.json`、`firmware/*/partitions.csv`、`docs/STATUS.md`。build directory・serial port・実機は排他で使い、worktree を分ける。
 
 ## 検証
 変更に近い試験から始め、完了時に次を通す（CI と同じ command）。

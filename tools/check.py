@@ -23,9 +23,11 @@ import json
 import os
 import re
 import shlex
+import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -371,26 +373,69 @@ def find_cell(data: dict, cell_id: str) -> dict:
     raise SystemExit(f"unknown cell {cell_id!r} (see check.py firmware --list)")
 
 
-def firmware_steps(cell: dict) -> list[Step]:
-    app_dir = f"firmware/{cell['app']}"
+def cell_dir(cell: dict) -> str:
+    """The ESP-IDF project of a cell: firmware/<app> unless the cell names one."""
+    return cell.get("dir", f"firmware/{cell['app']}")
+
+
+def firmware_steps(cell: dict, project_dir: str | Path | None = None,
+                   env: dict[str, str] | None = None) -> list[Step]:
+    app_dir = project_dir or cell_dir(cell)
     size_args = ["python3", str(ROOT / "tools/firmware_ram_report.py"), "build/size.json",
                  "--target", cell["target"], "--app", cell["app"], "--cell", cell["id"],
                  "--json-out", "build/ram-report.json"]
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         size_args += ["--summary", os.environ["GITHUB_STEP_SUMMARY"]]
-    steps = [Step(["idf.py", "set-target", cell["target"]], cwd=app_dir)]
+    budget_args = ["python3", str(ROOT / "tools/check.py"), "size", "--cell", cell["id"]]
+    if project_dir is not None:
+        budget_args += ["--build-dir", str(Path(project_dir) / "build")]
+    steps = [Step(["idf.py", "set-target", cell["target"]], cwd=app_dir, env=env)]
     if cell["overlay"]:
         steps.append(Step(["append", "sdkconfig", *cell["overlay"]], cwd=app_dir))
     steps += [
-        Step(["idf.py", "build"], cwd=app_dir),
+        Step(["idf.py", "build"], cwd=app_dir, env=env),
         Step(["assert-sdkconfig", cell["id"]], cwd=app_dir),
-        Step(["idf.py", "size"], cwd=app_dir, stdout="build/size-report.txt"),
+        Step(["idf.py", "size"], cwd=app_dir, env=env, stdout="build/size-report.txt"),
         Step(["idf.py", "size", "--format", "json2", "--output-file", "build/size.json"],
-             cwd=app_dir),
+             cwd=app_dir, env=env),
         Step(size_args, cwd=app_dir),
-        Step(["python3", str(ROOT / "tools/check.py"), "size", "--cell", cell["id"]]),
+        Step(budget_args),
     ]
     return steps
+
+
+def run_firmware(cells: list[dict], dry_run: bool, data: dict) -> int:
+    if dry_run:
+        return run([step for cell in cells for step in firmware_steps(cell)], True, data)
+    for cell in cells:
+        if cell["app"] != "idf_consumer":
+            code = run(firmware_steps(cell), False, data)
+        else:
+            # Build the consumer outside the checkout. Its only SDK input
+            # is a Git dependency pinned to the checked-out commit.
+            with tempfile.TemporaryDirectory(prefix="routeloom-consumer-") as tmp:
+                project = Path(tmp) / "consumer"
+                shutil.copytree(ROOT / cell_dir(cell), project,
+                                ignore=shutil.ignore_patterns("build", "managed_components",
+                                                              "dependencies.lock", "sdkconfig"))
+                revision = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+                manifest = project / "main/idf_component.yml"
+                manifest.write_text(manifest.read_text(encoding="utf-8").replace(
+                    "__ROUTELOOM_COMPONENT_REF__", revision), encoding="utf-8")
+                env = {"ROUTELOOM_COMPONENT_GIT": str(ROOT)}
+                code = run(firmware_steps(cell, project, env), False, data)
+                if code == 0:
+                    artifacts = ROOT / cell_dir(cell)
+                    shutil.copy2(project / "sdkconfig", artifacts / "sdkconfig")
+                    (artifacts / "build").mkdir(exist_ok=True)
+                    for pattern in ("*.bin", "*.elf", "*.map", "size-report.txt",
+                                    "size.json", "ram-report.json"):
+                        for output in (project / "build").glob(pattern):
+                            shutil.copy2(output, artifacts / "build" / output.name)
+        if code:
+            return code
+    return 0
 
 
 def sdkconfig_errors(data: dict, cell: dict, text: str) -> list[str]:
@@ -596,7 +641,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.stage == "size":
         data = load_cells(args.cells_file)
         cell = find_cell(data, args.cell)
-        build = args.build_dir or ROOT / "firmware" / cell["app"] / "build"
+        build = args.build_dir or ROOT / cell_dir(cell) / "build"
         errors = size_errors(data, cell, build)
         for error in errors:
             print(f"{cell['id']}: {error}", file=sys.stderr)
@@ -612,7 +657,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.stage == "firmware":
         if args.list:
             if args.format == "github":
-                include = [{"id": c["id"], "app": c["app"], "target": c["target"],
+                include = [{"id": c["id"], "app": c["app"], "dir": cell_dir(c),
+                            "target": c["target"],
                             "artifact": c.get("artifact", f"firmware-{c['id']}")}
                            for c in data["cells"]]
                 print("matrix=" + json.dumps({"include": include}, separators=(",", ":")))
@@ -620,8 +666,7 @@ def main(argv: list[str] | None = None) -> int:
                 print("\n".join(c["id"] for c in data["cells"]))
             return 0
         cells = data["cells"] if args.all else [find_cell(data, i) for i in args.cell]
-        steps = [s for c in cells for s in firmware_steps(c)]
-        return run(steps, args.dry_run, data)
+        return run_firmware(cells, args.dry_run, data)
 
     stages = {"core": lambda: core(getattr(args, "sanitizers", "ON")), "docs": docs,
               "golden": golden, "rust": rust, "interop": interop,
@@ -633,7 +678,8 @@ def main(argv: list[str] | None = None) -> int:
                     "fuzz", "firmware")}
     for name in order.get(args.stage, (args.stage,)):
         print(f"=== {name}", flush=True)
-        code = run(stages[name](), args.dry_run, data)
+        code = (run_firmware(data["cells"], args.dry_run, data) if name == "firmware"
+                else run(stages[name](), args.dry_run, data))
         if code:
             return code
     return 0

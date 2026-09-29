@@ -7,13 +7,14 @@
 // USB bytes to the real Site Authority. No mock ACKs: every lifecycle,
 // GK and cutover receipt the harness observes comes out of this Owner.
 //
-// Boot mirrors firmware/{bridge,reference}_node/main/main.cpp: rlboot
-// witness, stores open/initialize + boot-session reconcile, owner.begin,
-// runtime construction/initialize, entropy.begin, attach_runtime (+
-// attach_usb on a gateway), owner.boot, config-sink install, then the
-// same pump order (bridge.poll, runtime.poll_once, owner.poll). Radio
-// frames leave through the stub's esp_now_send capture and re-enter
-// through inject_rx; USB bytes cross the pipe raw.
+// Boot is the firmware's own path: routeloom::Device::open_storage (rlboot
+// witness, rlsec stores, boot-session reconcile) and Device::begin (owner,
+// runtime, entropy, attach_runtime/attach_usb, owner.boot, authority sink),
+// then Device::step per tick (bridge.poll, runtime.poll_once, owner.poll).
+// Only the ESP platform shell (flash layout, board-config gate, USB driver,
+// Owner task) stays in device_esp.cpp. Radio frames leave through the
+// stub's esp_now_send capture and re-enter through inject_rx; USB bytes
+// cross the pipe raw.
 //
 // Framing: u16le length (1..65535) + payload over stdin/stdout; stderr
 // is diagnostics only and never carries key material. First payload byte
@@ -124,6 +125,9 @@
 //   --flash-ext <file>   (optional 4498 B legacy image: RRS slots, then
 //                         lifecycle journal slots)
 //   --nvs-save <file>    (esp_restart writes the image here, exits 42)
+//   --nvs-fail <k>       (F02: the k-th NVS write of this boot fails once
+//                         with NOT_ENOUGH_SPACE; a boot that fails on it
+//                         takes the firmware's restart path, exit 42)
 //
 // Test keys only; every byte on argv is test material. Entropy is a
 // seeded PRNG (deterministic); all session/channel/EDHOC crypto is the
@@ -158,7 +162,7 @@
 #include "routeloom/session_bank.hpp"
 #include "routeloom/usb_bridge.hpp"
 
-#include "../../firmware/bridge_node/main/bridge_network.hpp"
+#include "routeloom/device.hpp"
 #include "idf_stubs.hpp"
 
 namespace {
@@ -178,6 +182,18 @@ using PartitionMap = std::map<std::string, SpaceMap>;
 PartitionMap g_nvs;
 std::string g_nvs_save_path;
 bool g_cut_after_switching{false};
+// F02 fault: the k-th NVS write (set/erase/commit, counted from process
+// start) fails once with ESP_ERR_NVS_NOT_ENOUGH_SPACE (0 = off).
+std::uint32_t g_nvs_fail_at{0};
+std::uint32_t g_nvs_writes{0};
+bool g_nvs_fault_fired{false};
+
+bool nvs_write_fault() {
+  if (g_nvs_fail_at == 0 || g_nvs_fault_fired) return false;
+  if (++g_nvs_writes != g_nvs_fail_at) return false;
+  g_nvs_fault_fired = true;
+  return true;
+}
 
 struct NvsHandle {
   bool used{false};
@@ -273,6 +289,7 @@ esp_err_t nvs_get_u32(nvs_handle_t handle, const char* key, std::uint32_t* out) 
 }
 
 esp_err_t nvs_set_u32(nvs_handle_t handle, const char* key, std::uint32_t value) {
+  if (nvs_write_fault()) return ESP_ERR_NVS_NOT_ENOUGH_SPACE;
   if (key == nullptr) return ESP_ERR_INVALID_ARG;
   SpaceMap* spaces = nullptr;
   BlobMap* blobs = nullptr;
@@ -302,6 +319,7 @@ esp_err_t nvs_get_blob(nvs_handle_t handle, const char* key, void* out, std::siz
 }
 
 esp_err_t nvs_set_blob(nvs_handle_t handle, const char* key, const void* data, std::size_t length) {
+  if (nvs_write_fault()) return ESP_ERR_NVS_NOT_ENOUGH_SPACE;
   if (key == nullptr || (data == nullptr && length != 0)) return ESP_ERR_INVALID_ARG;
   SpaceMap* spaces = nullptr;
   BlobMap* blobs = nullptr;
@@ -312,6 +330,7 @@ esp_err_t nvs_set_blob(nvs_handle_t handle, const char* key, const void* data, s
 }
 
 esp_err_t nvs_erase_key(nvs_handle_t handle, const char* key) {
+  if (nvs_write_fault()) return ESP_ERR_NVS_NOT_ENOUGH_SPACE;
   if (key == nullptr) return ESP_ERR_INVALID_ARG;
   SpaceMap* spaces = nullptr;
   BlobMap* blobs = nullptr;
@@ -323,6 +342,7 @@ esp_err_t nvs_erase_key(nvs_handle_t handle, const char* key) {
 }
 
 esp_err_t nvs_commit(nvs_handle_t handle) {
+  if (nvs_write_fault()) return ESP_ERR_NVS_NOT_ENOUGH_SPACE;
   SpaceMap* spaces = nullptr;
   BlobMap* blobs = nullptr;
   if (!nvs_lookup(handle, spaces, blobs)) return ESP_ERR_INVALID_ARG;
@@ -398,6 +418,7 @@ void nvs_release_iterator(nvs_iterator_t iterator) {
 }
 
 esp_err_t nvs_erase_all(nvs_handle_t handle) {
+  if (nvs_write_fault()) return ESP_ERR_NVS_NOT_ENOUGH_SPACE;
   SpaceMap* spaces = nullptr;
   BlobMap* blobs = nullptr;
   if (!nvs_lookup(handle, spaces, blobs)) return ESP_ERR_INVALID_ARG;
@@ -426,6 +447,19 @@ extern "C" psa_status_t psa_generate_random(std::uint8_t* output, const std::siz
   }
   return PSA_SUCCESS;
 }
+
+namespace routeloom {
+
+// The harness snapshot reads the Owner, stores, runtime and bridge the
+// Device booted — the same objects the firmware runs.
+struct DeviceTestAccess {
+  static espnow::EspNowSecurityOwner& owner(Device& device) noexcept { return *device.owner_; }
+  static espnow::Sdkv1Stores& stores(Device& device) noexcept { return *device.stores_; }
+  static espnow::EspNowRuntime& runtime(Device& device) noexcept { return *device.runtime_; }
+  static usb::UsbBridge* bridge(Device& device) noexcept { return device.bridge_; }
+};
+
+}  // namespace routeloom
 
 namespace routeloom::espnow {
 
@@ -830,6 +864,8 @@ Setup parse_argv(int argc, char** argv) {
       setup.flash_ext = value;
     } else if (arg == std::string("--nvs-save") && take_arg(argc, argv, i, value)) {
       g_nvs_save_path = value;
+    } else if (arg == std::string("--nvs-fail") && take_arg(argc, argv, i, value)) {
+      g_nvs_fail_at = static_cast<std::uint32_t>(parse_u64(value));
     } else {
       fatal("unknown argument");
     }
@@ -1102,82 +1138,57 @@ int main(int argc, char** argv) {
   idf_stub::set_now_us(static_cast<std::int64_t>(setup.t0) * 1000);
   MonotonicMs now = setup.t0;
 
-  // Firmware boot order (bridge_node / reference_node main): rlboot
-  // witness, stores, owner.begin, runtime, entropy.begin, attaches,
-  // owner.boot, config sink, then the pump.
-  std::uint32_t message_session = 0;
-  Status status = next_boot_session(message_session);
-  if (!status) fatal(status.detail);
-  Sdkv1Stores stores(setup.gateway ? kResumeGatewaySlots : kResumeNodeSlots);
-  status = stores.open(kSecurityNvsPartition);
-  if (!status) fatal(status.detail);
-  status = stores.initialize();
-  if (!status) fatal(status.detail);
-  status = reconcile_boot_session(stores.site(), message_session);
-  if (!status) fatal(status.detail);
-
-  EspNowSecurityOwner::Config owner_config{};
-  owner_config.local_node = setup.node;
-  owner_config.local_mac = setup.mac;
-  owner_config.joiner.node = setup.node;
-  owner_config.joiner.mac = setup.mac;
-  owner_config.role = setup.gateway ? profile::Role::Gateway : profile::kRole;
-  owner_config.joiner.capability =
-      setup.join_cap != 0 ? setup.join_cap : profile::role_mask(owner_config.role);
-  owner_config.joiner.requested_role = setup.role;
-  owner_config.log_tag = "mesh_peer";
-  owner_config.flat_group_routing = setup.flat;
-
-  EspOwnerEntropy entropy;
-  EspNowSecurityOwner owner{};
-  status = owner.begin(stores, entropy, owner_config);
-  if (!status) fatal(status.detail);
-
+  // The production boot: Device::open_storage then Device::begin.
   PipeByteStream usb_stream;
-  UsbBridge::Config bridge_config{};
-  bridge_config.secret = ByteView{setup.usb_secret.data(), setup.usb_secret.size()};
-  bridge_config.node = setup.node;
-  bridge_config.network = bridge_node::usb_boot_network(stores.site(), setup.netlow);
-  bridge_config.boot_id = message_session;
-  bridge_config.capability = setup.usb_cap;
-  // Deterministic device nonce from the peer seed (firmware samples
-  // esp_random post-radio; the harness needs repeatability).
-  bridge_config.device_nonce = setup.seed ^ 0xD15EA5ED00B1E5ULL;
-  UsbBridge bridge(bridge_config, usb_stream);
-  TeeObserver observer(setup.gateway ? static_cast<NodeObserver*>(&bridge) : nullptr);
-
-  EspNowRuntimeConfig radio_config{};
-  radio_config.node.network = static_cast<std::uint32_t>(bridge_config.network);
-  radio_config.node.node = setup.node;
-  radio_config.node.message_session = message_session;
-  radio_config.node.boot_session = message_session;
-  radio_config.node.boot_incarnation = message_session;
-  radio_config.node.route_generation = message_session;
-  radio_config.node.link_epoch = message_session;
-  radio_config.node.end_epoch = message_session;
+  TeeObserver observer(nullptr);
+  Device device;
+  device.observe(&observer);
+  // A boot failure restarts like the firmware's fail() when the injected
+  // NVS fault caused it; anything else is a harness error.
+  const auto boot_failed = [](const Status& failed) {
+    if (g_nvs_fault_fired) {
+      std::fprintf(stderr, "mesh_peer: boot failed on the injected NVS fault: %s\n",
+                   failed.detail);
+      esp_restart();
+    }
+    fatal(failed.detail);
+  };
+  Status status = device.open_storage(setup.gateway ? profile::Role::Gateway : profile::kRole,
+                                      DeviceSecurity::Member);
+  if (!status) boot_failed(status);
+  DeviceConfig config{};
+  config.log_tag = "mesh_peer";
+  config.role = setup.gateway ? profile::Role::Gateway : profile::kRole;
+  config.security = DeviceSecurity::Member;
+  config.mac = setup.mac;
+  config.role_capability =
+      setup.join_cap != 0 ? setup.join_cap : profile::role_mask(config.role);
+  config.requested_role = setup.role;
+  config.flat_group_routing = setup.flat;
+  config.radio.node.network = setup.netlow;
+  config.radio.node.node = setup.node;
   if (!setup.flat) {
-    radio_config.node.route_gateways[0] = setup.gw1;
-    if (setup.gw2 != kInvalidNodeId) radio_config.node.route_gateways[1] = setup.gw2;
+    config.radio.node.route_gateways[0] = setup.gw1;
+    if (setup.gw2 != kInvalidNodeId) config.radio.node.route_gateways[1] = setup.gw2;
   }
-  radio_config.node.route_advertisement_period_ms = 5000;
-  radio_config.node.route_lifetime_ms = setup.flat ? 15000 : 90000;
-  radio_config.channel = setup.channel;
-  radio_config.max_tx_power_qdbm = 80;
-  EspNowRuntime runtime(radio_config, owner.session_provider(), observer);
-  status = runtime.initialize();
-  if (!status) fatal(status.detail);
-  status = entropy.begin();
-  if (!status) fatal(status.detail);
-  status = owner.attach_runtime(runtime);
-  if (!status) fatal(status.detail);
+  config.radio.node.route_advertisement_period_ms = 5000;
+  config.radio.node.route_lifetime_ms = setup.flat ? 15000 : 90000;
+  config.radio.channel = setup.channel;
+  config.radio.max_tx_power_qdbm = 80;
   if (setup.gateway) {
-    status = owner.attach_usb(bridge);
-    if (!status) fatal(status.detail);
+    config.usb = &usb_stream;
+    config.usb_secret = ByteView{setup.usb_secret.data(), setup.usb_secret.size()};
+    config.usb_capability = setup.usb_cap;
+    // Deterministic device nonce from the peer seed (firmware draws it from
+    // the post-RF entropy; the harness needs repeatability).
+    config.usb_device_nonce = setup.seed ^ 0xD15EA5ED00B1E5ULL;
   }
-  status = owner.boot(message_session, /*rlboot_prepared=*/true, setup.gateway, now);
-  if (!status) fatal(status.detail);
-  runtime.node().set_config_sink(owner.authority_mesh_sink());
-  if (setup.gateway) bridge.set_mesh(&runtime.node());
+  status = device.begin(config, now);
+  if (!status) boot_failed(status);
+  EspNowSecurityOwner& owner = DeviceTestAccess::owner(device);
+  Sdkv1Stores& stores = DeviceTestAccess::stores(device);
+  EspNowRuntime& runtime = DeviceTestAccess::runtime(device);
+  UsbBridge* bridge = DeviceTestAccess::bridge(device);
 
   const std::uint32_t send_count_base = idf_stub::send_count();
   AppTx app_tx[kAppTxMax]{};
@@ -1203,9 +1214,7 @@ int main(int argc, char** argv) {
         if (next < now) fatal("clock regressed");
         now = next;
         idf_stub::set_now_us(static_cast<std::int64_t>(now) * 1000);
-        if (setup.gateway) bridge.poll(now);
-        runtime.poll_once();
-        owner.poll(now);
+        device.step(now);
         idf_stub::TxFrame tx{};
         while (idf_stub::take_tx(tx)) {
           Bytes frame;
@@ -1236,14 +1245,14 @@ int main(int argc, char** argv) {
               app_tx[i].state == DeliveryState::Indeterminate) {
             continue;
           }
-          const DeliveryResult result = runtime.node().delivery(app_tx[i].id);
+          const DeliveryResult result = device.delivery(app_tx[i].id);
           app_tx[i].state = result.state;
           std::strncpy(app_tx[i].reason, result.reason != nullptr ? result.reason : "?",
                        sizeof(app_tx[i].reason) - 1);
           app_tx[i].reason[sizeof(app_tx[i].reason) - 1] = '\0';
         }
-        emit_snapshot(owner, stores, runtime, setup.gateway ? &bridge : nullptr, observer, app_tx,
-                      send_count_base, setup.world_nodes);
+        emit_snapshot(owner, stores, runtime, bridge, observer, app_tx, send_count_base,
+                      setup.world_nodes);
         write_frame(Bytes{'D'});
         break;
       }
@@ -1258,7 +1267,7 @@ int main(int argc, char** argv) {
       case 'U': {
         if (!setup.gateway) fatal("usb on a member");
         if (length > 1) {
-          bridge.on_bytes(ByteView{payload.data() + 1, length - 1}, now);
+          device.usb_receive(ByteView{payload.data() + 1, length - 1}, now);
         }
         break;
       }
@@ -1295,12 +1304,11 @@ int main(int argc, char** argv) {
         SendOptions options{};
         options.lifetime_ms = 30000;
         MessageId id{};
-        status = runtime.send_application(
-            dst, ByteView{payload.data() + 9, length - 9}, options, id);
+        status = device.send(dst, ByteView{payload.data() + 9, length - 9}, options, id);
         slot->used = true;
         slot->id = id;
         if (status) {
-          slot->state = runtime.node().delivery(id).state;
+          slot->state = device.delivery(id).state;
           std::strncpy(slot->reason, "SENT", sizeof(slot->reason) - 1);
         } else {
           slot->state = DeliveryState::Empty;
@@ -1330,7 +1338,7 @@ int main(int argc, char** argv) {
           SendOptions options{};
           options.lifetime_ms = 30000;
           MessageId id{};
-          if (runtime.send_application(dst, ByteView{&byte, 1}, options, id)) ++accepted;
+          if (device.send(dst, ByteView{&byte, 1}, options, id)) ++accepted;
         }
         write_frame(Bytes{'h', accepted, static_cast<std::uint8_t>(
                                           runtime.node().congestion_stats().queued)});
