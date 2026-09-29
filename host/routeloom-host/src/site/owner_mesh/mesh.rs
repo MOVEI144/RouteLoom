@@ -896,6 +896,13 @@ fn mesh_diamond_delivers_under_leg_noise() {
         return; // no C++ peers: skip (ignore-equivalent)
     };
     converge_outward(&mut world, "diamond");
+    let leaf = world.index_of(world.nodes[3]);
+    assert_eq!(world.snaps[1].phases.len(), world.peers.len());
+    assert!(
+        world.snaps[1].phases[leaf] == PHASE_REACHABLE
+            || world.snaps[2].phases[leaf] == PHASE_REACHABLE,
+        "the leaf binds to a diamond relay"
+    );
     world.switch.set_noise(
         LegNoise {
             loss_ppm: 20_000,
