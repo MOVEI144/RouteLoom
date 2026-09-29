@@ -829,19 +829,21 @@ impl Dispatcher {
         | ConfigRequest::Retry { .. } = request
         {
             // New issuance and saved-original retry both require the live
-            // authority identity and selected profile key.
+            // authority identity and selected profile key. Permits bind the
+            // mesh-header network: a Member gateway's HelloAck names the
+            // full site network (site_epoch << 32 | low word), and the
+            // target's journal keeps the low word across cutovers.
+            let network = link.network & 0xFFFF_FFFF;
             if cfg.authority == 0
-                || link.network == 0
-                || cfg
-                    .site_network
-                    .is_some_and(|network| network != link.network)
+                || network == 0
+                || cfg.site_network.is_some_and(|site| site != network)
                 || !cfg.lane.issuer_ready()
             {
                 self.config_done
                     .push((op_id, ConfigOutcome::Refused(ConfigOpsResult::Denied)));
                 return;
             }
-            cfg.lane.set_issuer_identity(link.network, cfg.authority);
+            cfg.lane.set_issuer_identity(network, cfg.authority);
             cfg.lane.set_authority(cfg.generation);
         }
         let step = cfg.lane.submit(ledger, request, now);
@@ -5453,6 +5455,19 @@ mod tests {
             site.take_config_done(),
             vec![(24, ConfigOutcome::Refused(ConfigOpsResult::Denied))]
         );
+        // A Member gateway reports the full site network; issuance binds
+        // its low word.
+        let mut member = link();
+        member.network = (3 << 32) | NET;
+        site.config_submit(&mut store, &member, 25, propose_request(), 1_000);
+        assert!(site.take_config_done().is_empty());
+        let out = site.tick(&mut store, &member, 1_000);
+        let emit = out
+            .iter()
+            .find(|r| r.body.get(1) == Some(&host_ops::SUB_CONFIG_RECOVERY_INFO))
+            .expect("the propose proceeds");
+        let query = host_ops::decode_config_recovery_info(&emit.body).unwrap();
+        assert_eq!(query.network, NET);
     }
 
     #[test]
