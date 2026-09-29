@@ -1231,21 +1231,18 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
       return Status::success();
     }
     JoinAuthObject object{};
-    if (!join_object_decode(member().link_rx.assembled(), object).ok() ||
-        object.phase == JoinAuthPhase::RelayStatus) {
-      sat_inc(counters_.demux_drops);
-      return Status::success();
-    }
     // Same first-message cookie rule as the single-frame path: a large
     // m1/R1 may legitimately arrive chunked (the cookie rides inside the
-    // object), but it must still echo the OFFER cookie.
-    if (object.step == 1 && !object.cookie_present) {
+    // object), but it must still echo the OFFER cookie. A refused object
+    // frees the slot like a consumed one: the single link slot would
+    // otherwise refuse every later exchange's chunks as Busy.
+    if (!join_object_decode(member().link_rx.assembled(), object).ok() ||
+        object.phase == JoinAuthPhase::RelayStatus ||
+        (object.step == 1 && !object.cookie_present) ||
+        (object.step == 1 && object.phase == JoinAuthPhase::Resume &&
+         !member().budgets.admit_link_resume(now))) {
       sat_inc(counters_.demux_drops);
-      return Status::success();
-    }
-    if (object.step == 1 && object.phase == JoinAuthPhase::Resume &&
-        !member().budgets.admit_link_resume(now)) {
-      sat_inc(counters_.demux_drops);
+      member().link_rx.release_assembled();
       return Status::success();
     }
     ensure_responder_token(*entry, now);
@@ -1262,6 +1259,11 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
       rx.cookie = ByteView{object.cookie.data(), object.cookie.size()};
     }
     (void)member().engine.on_message(rx, object.message, now);
+    // The assembly is consumed: free the slot for the next exchange's
+    // chunks (a second chunked handshake in this boot would otherwise
+    // find it Busy). Late duplicates still answer Complete from the
+    // retained token.
+    member().link_rx.release_assembled();
     return Status::success();
   }
   // Single-frame step: the join-lane object codec, then the engine. The
@@ -1299,11 +1301,6 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
     rx.cookie = ByteView{object.cookie.data(), object.cookie.size()};
   }
   (void)member().engine.on_message(rx, object.message, now);
-  // The assembly is consumed: free the slot for the next exchange's
-  // chunks (a second chunked handshake in this boot would otherwise
-  // find it Busy). Late duplicates still answer Complete from the
-  // retained token.
-  member().link_rx.release_assembled();
   return Status::success();
 }
 
