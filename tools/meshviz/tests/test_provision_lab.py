@@ -6,6 +6,7 @@ field-boot readback, and the LabProvisionBackend step orchestration.
 stands in for the ROM probe/flash worker; `RecordingOffice` for the
 routeloomctl provision-* family plus lab-inventory-import.
 """
+import base64
 import contextlib
 import hashlib
 import io
@@ -14,6 +15,7 @@ import tempfile
 import unittest
 import zlib
 from pathlib import Path
+from unittest.mock import patch
 
 from routeloom_meshviz import firmware_catalog as catalog
 from routeloom_meshviz import provisioning as prov
@@ -559,8 +561,25 @@ class LabBackendTests(unittest.TestCase):
         credential = self.backend.site_dir / 'hostlink' / '0000000000000001.key'
         self.assertEqual(credential.read_text(), secret)
         self.assertEqual(credential.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(len(secret), 62)
+        self.assertEqual(len(base64.urlsafe_b64decode(secret + '=')), 32)
         self.assertEqual(self.office.imported[0][2], 'gateway')
+
+    def test_hostlink_secret_survives_short_file_write(self):
+        node = '0000000000000002'
+        real_write = prov.os.write
+        calls = 0
+
+        def short_write(fd, data):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_write(fd, data[:len(data) // 2])
+            return real_write(fd, data)
+
+        with patch.object(prov.os, 'write', side_effect=short_write):
+            secret = self.backend._hostlink_secret(node)
+        self.assertGreater(calls, 1)
+        self.assertEqual((self.backend.site_dir / 'hostlink' / f'{node}.key').read_text(), secret)
 
     def test_hostlink_retry_refuses_invalid_existing_credential(self):
         directory = self.backend.site_dir / 'hostlink'

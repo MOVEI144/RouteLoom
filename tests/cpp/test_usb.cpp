@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <new>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -487,10 +488,51 @@ void test_session_mac() {
   const SessionProof downgraded =
       derive_session_proof(secret_view(), ByteView{encoded.data(), size});
   CHECK(downgraded.auth_tag != proof.auth_tag && downgraded.key_h2d != proof.key_h2d);
+  SessionTranscript other_network = golden_transcript();
+  other_network.network |= 1ULL << 32U;
+  CHECK_OK(encode_transcript(other_network,
+                             MutableByteView{encoded.data(), encoded.size()}, size));
+  const SessionProof network_bound =
+      derive_session_proof(secret_view(), ByteView{encoded.data(), size});
+  CHECK(network_bound.hello_tag != proof.hello_tag);
   const std::array<std::uint8_t, 3> other{{'b', 'a', 'd'}};
   const SessionProof wrong = derive_session_proof(ByteView{other.data(), other.size()},
                                                   ByteView{encoded.data(), size});
-  CHECK(wrong.hello_tag != downgraded.hello_tag);
+  CHECK(wrong.hello_tag != network_bound.hello_tag);
+  // The last 64-bit counter cannot be sealed: incrementing it would reuse
+  // counter zero in the same session.
+  sealed_size = 99;
+  CHECK(!seal_body(proof.key_h2d, kDirHostToDevice, UINT64_MAX,
+                   FrameKind::KeepAlive, 0, 9, ByteView{},
+                   MutableByteView{sealed.data(), sealed.size()}, sealed_size).ok());
+  CHECK(sealed_size == 0);
+}
+
+void test_session_material_clears_on_destruction() {
+  alignas(SessionProof) std::array<std::uint8_t, sizeof(SessionProof)> proof_storage{};
+  auto* proof = new (proof_storage.data()) SessionProof(golden_proof());
+  CHECK(std::any_of(proof->key_h2d.begin(), proof->key_h2d.end(),
+                    [](std::uint8_t byte) { return byte != 0; }));
+  proof->~SessionProof();
+  const auto proof_key = proof_storage.begin() + offsetof(SessionProof, key_h2d);
+  CHECK(std::all_of(proof_key, proof_key + usb::kSessionKeySize,
+                    [](std::uint8_t byte) { return byte == 0; }));
+
+  alignas(SessionKeys) std::array<std::uint8_t, sizeof(SessionKeys)> keys_storage{};
+  auto* keys = new (keys_storage.data()) SessionKeys{};
+  keys->key_h2d.fill(0xa5);
+  keys->~SessionKeys();
+  const auto session_key = keys_storage.begin() + offsetof(SessionKeys, key_h2d);
+  CHECK(std::all_of(session_key, session_key + usb::kSessionKeySize,
+                    [](std::uint8_t byte) { return byte == 0; }));
+
+  alignas(Sha256) std::array<std::uint8_t, sizeof(Sha256)> hash_storage{};
+  auto* hash = new (hash_storage.data()) Sha256{};
+  const std::array<std::uint8_t, 3> key_material{{'k', 'e', 'y'}};
+  hash->update(ByteView{key_material.data(), key_material.size()});
+  hash->~Sha256();
+  CHECK(std::all_of(hash_storage.begin(), hash_storage.end(),
+                    [](std::uint8_t byte) { return byte == 0; }));
 }
 
 void test_idempotency() {
@@ -3332,6 +3374,7 @@ int main() {
   test_frame_codec();
   test_credit();
   test_session_mac();
+  test_session_material_clears_on_destruction();
   test_idempotency();
   test_bridge_optional_capabilities_need_attachment();
   test_bridge_session_lifecycle();

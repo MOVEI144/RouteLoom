@@ -581,6 +581,10 @@ void UsbBridge::handle_authenticated(const UsbFrame& frame,
                ROUTELOOM_REASON_REPLAY_REJECTED, now_ms);
     return;
   }
+  if (counter == UINT64_MAX) {
+    reset_session_state();
+    return;
+  }
   ++rx_counter_;
   // Incoming CONTROL traffic is rate-limited by the reservation bucket;
   // everything else consumes the granted data credit. The check runs AFTER
@@ -2810,6 +2814,10 @@ void UsbBridge::pump_tx(const MonotonicMs now_ms) noexcept {
     std::size_t body_size = 0;
     std::uint64_t session = 0;
     if (protect) {
+      if (tx_counter_ == UINT64_MAX) {
+        reset_session_state();
+        return;
+      }
       session = keys_.session_id;
       const Status status =
           seal_body(keys_.key_d2h, kDirDeviceToHost, tx_counter_, item.kind,

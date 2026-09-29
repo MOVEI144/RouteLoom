@@ -60,6 +60,10 @@ constexpr std::size_t kTranscriptSize =
 Status encode_transcript(const SessionTranscript& transcript, MutableByteView out,
                          std::size_t& written) noexcept;
 
+struct SessionProof;
+// Overwrites every key and tag (compiler-proof) and resets the id.
+void clear_session_proof(SessionProof& proof) noexcept;
+
 struct SessionProof {
   std::uint64_t session_id{0};
   SessionKey key_h2d{};      // host→device frame MAC key
@@ -67,6 +71,8 @@ struct SessionProof {
   SessionTag hello_tag{};    // device proves the secret inside HelloAck
   SessionTag auth_tag{};     // host proves the secret in the AUTH Hello
   SessionTag auth_ok_tag{};  // device confirms session establishment
+
+  ~SessionProof() noexcept { clear_session_proof(*this); }
 };
 
 // Every value is HMAC-SHA-256(K, label || 0x00 || transcript):
@@ -75,19 +81,19 @@ struct SessionProof {
 //   session_id = u64 BE of "session-id"[0..8].
 SessionProof derive_session_proof(ByteView secret, ByteView transcript) noexcept;
 
-// Overwrites every key and tag (compiler-proof) and resets the id.
-void clear_session_proof(SessionProof& proof) noexcept;
-
 // What a device keeps for the life of a session. The one-shot handshake tags
 // are recomputed from the stored transcript when needed, not held.
+struct SessionKeys;
+// Overwrites both keys (compiler-proof) and resets the id.
+void clear_session_keys(SessionKeys& keys) noexcept;
+
 struct SessionKeys {
   std::uint64_t session_id{0};
   SessionKey key_h2d{};
   SessionKey key_d2h{};
-};
 
-// Overwrites both keys (compiler-proof) and resets the id.
-void clear_session_keys(SessionKeys& keys) noexcept;
+  ~SessionKeys() noexcept { clear_session_keys(*this); }
+};
 
 // Direction byte bound into every protected frame tag.
 constexpr std::uint8_t kDirHostToDevice = 0;

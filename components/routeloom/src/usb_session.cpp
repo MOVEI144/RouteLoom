@@ -1,6 +1,7 @@
 #include "routeloom/usb_session.hpp"
 
 #include <cstring>
+#include <limits>
 
 #include "routeloom/byte_io.hpp"
 #include "routeloom/discovery_scope.hpp"
@@ -138,6 +139,7 @@ SessionTag frame_tag(const SessionKey& key, const std::uint8_t direction,
               inner, ByteView{}, mac);
   SessionTag tag{};
   std::memcpy(tag.data(), mac.data(), kTagSize);
+  secure_clear(mac);
   return tag;
 }
 
@@ -147,6 +149,9 @@ Status seal_body(const SessionKey& key, const std::uint8_t direction,
                  const ByteView inner, const MutableByteView out,
                  std::size_t& written) noexcept {
   written = 0;
+  if (counter == std::numeric_limits<std::uint64_t>::max()) {
+    return Status::error(StatusCode::InvalidState, "session counter exhausted");
+  }
   if (out.data == nullptr || out.size < kProtectedBodyOverhead + inner.size) {
     return Status::error(StatusCode::NoCapacity, "seal output too small");
   }

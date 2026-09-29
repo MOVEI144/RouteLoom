@@ -27,6 +27,7 @@ from .provision_plan import (LAB_ROLES, STEP_NAMES, ContractBackend, FakeProvisi
                              inventory_rows, job_status_text, plan_jobs,
                              valid_lab_node_id)
 
+import base64
 import hashlib
 import json
 import os
@@ -1338,9 +1339,9 @@ class LabProvisionBackend(ContractBackend):
 
         The same bytes go to the gateway's rlkeys and to
         ``<site>/hostlink/<node>.key`` (0600), the file routeloom-host reads
-        with ``--hostlink-credentials``: 31 random bytes as 62 hex chars, the
-        1..63 printable ASCII both sides accept. A reused file must still be
-        private and well formed, or the gateway would get a weak secret.
+        with ``--hostlink-credentials``: 32 random bytes as 43 base64url
+        chars, within the 1..63 printable ASCII both sides accept. A reused
+        file must still be private and well formed.
         """
         directory = self.site_dir / 'hostlink'
         directory.mkdir(mode=0o700, exist_ok=True)
@@ -1353,17 +1354,38 @@ class LabProvisionBackend(ContractBackend):
             if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
                 raise ProvisionError('bad_hostlink_secret', f'{path} is not a private regular file')
             secret = path.read_bytes().decode('ascii', 'replace')
-            if not re.fullmatch(r'[0-9a-f]{62}', secret):
+            legacy_hex = re.fullmatch(r'[0-9a-f]{62}', secret)
+            encoded = re.fullmatch(r'[A-Za-z0-9_-]{43}', secret)
+            canonical = encoded and base64.urlsafe_b64encode(
+                base64.urlsafe_b64decode(secret + '=')).rstrip(b'=').decode('ascii') == secret
+            if not legacy_hex and not canonical:
                 raise ProvisionError('bad_hostlink_secret', f'{path} is invalid')
             return secret
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         try:
-            secret = os.urandom(31).hex()
-            os.write(fd, secret.encode('ascii'))
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        return secret
+            try:
+                secret = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b'=')
+                offset = 0
+                while offset < len(secret):
+                    written = os.write(fd, secret[offset:])
+                    if written == 0:
+                        raise ProvisionError('bad_hostlink_secret', f'{path} short write')
+                    offset += written
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            if path.read_bytes() != secret:
+                raise ProvisionError('bad_hostlink_secret', f'{path} readback mismatch')
+            if os.name == 'posix':
+                dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            return secret.decode('ascii')
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
 
     def _provisioner(self, ctx):
         if ctx.get('provisioner') is None:

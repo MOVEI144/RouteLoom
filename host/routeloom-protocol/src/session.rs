@@ -187,7 +187,7 @@ pub fn frame_tag(
     request: u64,
     inner: &[u8],
 ) -> [u8; TAG_SIZE] {
-    let mac = hmac_sha256(
+    let mut mac = hmac_sha256(
         key,
         &[
             &[direction],
@@ -200,6 +200,7 @@ pub fn frame_tag(
     );
     let mut tag = [0_u8; TAG_SIZE];
     tag.copy_from_slice(&mac[..TAG_SIZE]);
+    mac.zeroize();
     tag
 }
 
@@ -294,6 +295,13 @@ mod tests {
         transcript.max_version = 1;
         let narrowed = derive_session_proof(b"secret", &transcript.encode().unwrap());
         assert_ne!(good.auth_tag, narrowed.auth_tag, "offered range is bound");
+        transcript.max_version = VERSION;
+        transcript.network = 1_u64 << 32;
+        let other_network = derive_session_proof(b"secret", &transcript.encode().unwrap());
+        assert_ne!(
+            good.hello_tag, other_network.hello_tag,
+            "full network is bound"
+        );
         let wrong =
             derive_session_proof(b"other", &Transcript::usb(1, 2, b"host").encode().unwrap());
         assert_ne!(good.hello_tag, wrong.hello_tag, "secret is bound");

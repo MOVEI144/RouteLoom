@@ -336,8 +336,14 @@ impl DeviceSession {
         if frame.session != 0 && frame.session != self.session_id {
             return Err("queued frame session changed");
         }
+        if self.h2d_counter == u64::MAX {
+            self.phase = SessionPhase::AwaitHelloAck;
+            self.proof = None;
+            self.last_begin_ms = 0;
+            return Err("session counter exhausted");
+        }
         let key = match self.proof.as_ref() {
-            Some(proof) => proof.key_h2d,
+            Some(proof) => &proof.key_h2d,
             None => return Err("session proof missing"),
         };
         let sealed_len = PROTECTED_BODY_OVERHEAD + frame.body.len();
@@ -350,7 +356,7 @@ impl DeviceSession {
             return Err("device send credit exhausted");
         }
         frame.body = seal_body(
-            &key,
+            key,
             DIRECTION_HOST_TO_DEVICE,
             self.h2d_counter,
             frame.kind,
@@ -519,7 +525,7 @@ impl DeviceSession {
             }
             SessionPhase::Active => {
                 let key = match self.proof.as_ref() {
-                    Some(proof) => proof.key_d2h,
+                    Some(proof) => &proof.key_d2h,
                     None => {
                         // Defensive: Active without a proof cannot serve
                         // traffic — fall back to a fresh handshake rather
@@ -544,7 +550,7 @@ impl DeviceSession {
                     self.queue_hello(&mut result);
                     return result;
                 }
-                match open_body(&key, DIRECTION_DEVICE_TO_HOST, frame) {
+                match open_body(key, DIRECTION_DEVICE_TO_HOST, frame) {
                     Ok((counter, inner)) => {
                         if counter < self.d2h_counter {
                             result.notes.push(
@@ -552,9 +558,14 @@ impl DeviceSession {
                             );
                             return result;
                         }
+                        if counter == u64::MAX {
+                            result.session_lost = true;
+                            self.queue_hello(&mut result);
+                            return result;
+                        }
                         // Forward gaps are frames the decoder dropped
                         // (CRC); only a reused counter is a replay.
-                        self.d2h_counter = counter.saturating_add(1);
+                        self.d2h_counter = counter + 1;
                         let inner = inner.to_vec();
                         if frame.kind == FrameKind::Credit {
                             match inner.first() {
@@ -2252,10 +2263,16 @@ fn adapter_writer_loop(
         // here — on the ONLY thread that writes — so direction counters are
         // strictly sequential with wire order even when a send is rejected
         // or the queue drops frames.
-        let protected = {
+        let (protected, session_lost) = {
             let mut guard = session.lock().expect("device session poisoned");
-            guard.protect(&mut frame)
+            let was_active = guard.phase == SessionPhase::Active;
+            let result = guard.protect(&mut frame);
+            (result, was_active && guard.phase != SessionPhase::Active)
         };
+        if session_lost {
+            *state.session.lock().expect("session poisoned") = SessionInfo::default();
+            state.gateway_lane.clear();
+        }
         let sent = protected.map_err(str::to_string).and_then(|()| {
             state
                 .radio_budget
@@ -3670,6 +3687,16 @@ mod tests {
         let (reason, wire_len) = reason_field(&body, 0).expect("reason field");
         assert_eq!(reason, "�");
         assert_eq!(wire_len, body.len());
+        let id = routeloom_protocol::manifest::REASON_CAPABILITY_REFRESH.to_be_bytes();
+        assert_eq!(
+            reason_field(&[id[0], id[1], 0], 0),
+            Some(("capability refresh".to_string(), 3))
+        );
+        let id = routeloom_protocol::manifest::REASON_TX_ACCEPTED.to_be_bytes();
+        assert_eq!(
+            reason_field(&[id[0], id[1], 0], 0),
+            Some(("TX_ACCEPTED".to_string(), 3))
+        );
     }
 
     #[test]
@@ -3743,6 +3770,41 @@ mod tests {
         );
         let inbound = session.handle(&frame(FrameKind::DataFromMesh, 0, 0, stale));
         assert!(inbound.inner.is_none());
+    }
+
+    #[test]
+    fn session_rejects_replayed_max_counter() {
+        let mut session = DeviceSession::new();
+        let proof = complete_handshake(&mut session);
+        let mut wire = frame(
+            FrameKind::Diagnostic,
+            0,
+            9,
+            seal_body(
+                &proof.key_d2h,
+                DIRECTION_DEVICE_TO_HOST,
+                u64::MAX,
+                FrameKind::Diagnostic,
+                0,
+                9,
+                b"max-counter",
+            ),
+        );
+        wire.session = proof.session_id;
+        assert!(session.handle(&wire).inner.is_none());
+        assert_ne!(session.phase, SessionPhase::Active);
+        assert!(session.handle(&wire).inner.is_none());
+    }
+
+    #[test]
+    fn session_does_not_wrap_outbound_counter() {
+        let mut session = DeviceSession::new();
+        let proof = complete_handshake(&mut session);
+        session.h2d_counter = u64::MAX;
+        let mut frame = frame(FrameKind::KeepAlive, 0, 9, Vec::new());
+        frame.session = proof.session_id;
+        assert!(session.protect(&mut frame).is_err());
+        assert_eq!(session.phase, SessionPhase::AwaitHelloAck);
     }
 
     #[test]

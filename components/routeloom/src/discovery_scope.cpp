@@ -35,6 +35,11 @@ constexpr std::uint32_t rotr(const std::uint32_t value,
 
 // --- Sha256 ---------------------------------------------------------------------
 
+Sha256::~Sha256() noexcept {
+  // A partial block may hold a keyed inner digest after HMAC finalization.
+  secure_clear(this, sizeof(*this));
+}
+
 void Sha256::reset() noexcept {
   state_[0] = 0x6a09e667U;
   state_[1] = 0xbb67ae85U;
@@ -95,6 +100,8 @@ void Sha256::block(const std::uint8_t* data) noexcept {
   state_[5] += f;
   state_[6] += g;
   state_[7] += h;
+  // The schedule's first words may contain a raw HMAC key or keyed pad.
+  secure_clear(w, sizeof(w));
 }
 
 void Sha256::update(const ByteView data) noexcept {
