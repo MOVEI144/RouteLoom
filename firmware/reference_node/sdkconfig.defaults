@@ -8,8 +8,9 @@ CONFIG_ESP_WIFI_ESPNOW_MAX_ENCRYPT_NUM=0
 CONFIG_FREERTOS_HZ=1000
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # PT-4M-v2 (partitions.csv): two OTA slots on every 4 MB board. The
-# bootloader rolls back an unconfirmed OTA image; boot confirms the running
-# image once the owner and runtime are up. eFuse anti-rollback stays off.
+# bootloader rolls back an unconfirmed OTA image. OTA self-check and boot
+# confirmation are pending, so this image does not mark a candidate valid.
+# eFuse anti-rollback stays off.
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
