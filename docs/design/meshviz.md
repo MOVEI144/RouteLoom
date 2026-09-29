@@ -61,7 +61,7 @@
 
 - chip：C3/S3/C5、C6 は追加検証後。
 - role：bridge/reference。両者は別 image。bridge に deep sleep は提供しない。
-- security：DevRam と MemberEdhoc を別 build にする。runtime 設定で相互に切り替える設計にはしない。LegacyFixture は既存互換試験用として詳細設定にのみ出す。
+- security：DevRam と MemberEdhoc を別 build にする。runtime 設定で相互に切り替える設計にはしない。
 - power：reference の常時稼働／MemberEdhoc sleep。現行 Kconfig は DevRam+deep sleep を許可しないため、初期版でも提供しない（`firmware/reference_node/main/Kconfig.projbuild:306`）。
 - setup：保守 console の image。field image とは明確に区別し、無線を起動しない。
 - 観測用 bridge は node status bit 6 を必須にする。現行既定 capability `0x7` だけでは node status は使えない。telemetry bit 5、group bit 7 は対応する endpoint が実際に attach できる構成で有効化する（`firmware/bridge_node/main/main.cpp:691`）。
@@ -123,7 +123,7 @@ setup image は pre-RF の専用 build とし、通常起動 image に設定変�
 
 起動コードに共通 `load_board_config()` を設け、radio、security owner、joiner、UsbBridge、telemetry の全てへ同じ検証済み identity を渡す。Member の NodeId を Kconfig 値と NVS 値で混在させない。未設定の汎用 field image は RF を開始せず `CONFIG_REQUIRED` を報告する。これは一時的な故障ではないので fail back-off（deep sleep）に入れず、起きたまま 10 秒ごとに報告して USB から setup image を書けるようにする。NodeId=1 の暗黙採用はしない。
 
-DevRam の `adopt_dev` は現在 gateway set を渡さず、member adoption 側はその set で経路構成を更新する（`components/routeloom_espnow/src/espnow_security_owner.cpp:503`、`:1399`）。DevRam の group 試験を可能にする PR では、この経路設定の受渡しと scoped timer を追加する。LegacyFixture 専用 Kconfig を GUI から指定しただけで有効になると考えない。
+DevRam の `adopt_dev` は現在 gateway set を渡さず、member adoption 側はその set で経路構成を更新する（`components/routeloom_espnow/src/espnow_security_owner.cpp:503`、`:1399`）。DevRam の group 試験を可能にする PR では、この経路設定の受渡しと scoped timer を追加する。
 
 ### 0.5 検出・書込みの安全な状態機械
 
@@ -298,7 +298,7 @@ RSSIは **peerからobserverへ受信した信号**の観測である。`directi
 
 根拠：同 `:224`、`:251`、`components/routeloom/src/node.cpp:6550`、`:6665`、`:6682`。telemetry の peer capacity は19（`components/routeloom/include/routeloom/telemetry.hpp:28`）であり、論理 neighbor capacity32や route capacity128とは異なる。
 
-remote query の受理コードは存在するが、reference の現在の Kconfig は remote telemetry を LegacyFixture に依存させている（`firmware/reference_node/main/Kconfig.projbuild:246`、`firmware/reference_node/main/main.cpp:1351`）。DevRam/Member の lab image に明示的 opt-in を追加し、SecurityOwner の Node 再構築後にも設定が適用されるようにする。Member では認証済み site 内の許可された診断に限定し、未知 peer 向け無制限応答を作らない。
+remote observation は `ROUTELOOM_OBSERVATION_REMOTE` の opt-in で、adopted な DevRam/Member だけが応答する（`components/routeloom_device/src/device.cpp` の `update_observation_remote`）。remote telemetry の Kconfig は dev-PSK fixture profile と共に撤去した。Member では認証済み site 内の許可された診断に限定し、未知 peer 向け無制限応答を作らない。
 
 ### 2.3 表示の意味と不足一覧
 
