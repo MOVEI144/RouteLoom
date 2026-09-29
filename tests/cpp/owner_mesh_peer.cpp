@@ -48,6 +48,17 @@
 //   F                          arm one power cut after RLX1 Switching commits
 //                              (exit 43); the saved NVS is the real write
 //   Q                          quit (exit 0)
+//   O <next_hop u64le><dst u64le><type u8><minor u8><traffic u8><payload>
+//                              seal one end-protected frame of any type
+//                              (P04: extension types, newer minors) with
+//                              this node's live sessions, as if routed to
+//                              next_hop; reply o <encoded frame> (the
+//                              harness injects it at next_hop, nothing is
+//                              transmitted here)
+//   M <group u16le><payload>   application group send (Normal, 5 s)
+//   W <mode u8><key>           arm one fault at the next write of `key`:
+//                              0 fails it, 1 cuts power before it lands,
+//                              2 cuts power after its commit (exit 43)
 //
 // C++ -> Rust, emitted after each T in this order:
 //
@@ -100,6 +111,10 @@
 // | driver_peers u8
 // | queued u8 | admissions_rejected u32
 // | member_starts u32 | link_request_failures u32
+// | owner polls u32 | empty polls u32 | rx_queue_max u32 |
+// expiry_slots_scanned u64 | hop_accept_expired u64
+// | ext_unsupported u32 (EXTENSION_UNSUPPORTED refusals) |
+// group_delivered u32 | group_rejected u32 | key_fault_hits u32
 //
 // Setup arrives on argv (all integers accept 0x hex; blobs are hex):
 //
@@ -194,6 +209,14 @@ bool nvs_write_fault() {
   g_nvs_fault_fired = true;
   return true;
 }
+
+// F01/F02 at one record key (the `W` command): the next write of that key
+// fails once with NOT_ENOUGH_SPACE (0), loses power before it lands (1),
+// or loses power after its commit, before anything acknowledges it (2).
+std::string g_key_fault;
+std::uint8_t g_key_fault_mode{0};
+bool g_key_cut_after_commit{false};
+std::uint32_t g_key_fault_hits{0};
 
 struct NvsHandle {
   bool used{false};
@@ -321,6 +344,13 @@ esp_err_t nvs_get_blob(nvs_handle_t handle, const char* key, void* out, std::siz
 esp_err_t nvs_set_blob(nvs_handle_t handle, const char* key, const void* data, std::size_t length) {
   if (nvs_write_fault()) return ESP_ERR_NVS_NOT_ENOUGH_SPACE;
   if (key == nullptr || (data == nullptr && length != 0)) return ESP_ERR_INVALID_ARG;
+  if (!g_key_fault.empty() && g_key_fault == key) {
+    g_key_fault.clear();
+    ++g_key_fault_hits;
+    if (g_key_fault_mode == 0) return ESP_ERR_NVS_NOT_ENOUGH_SPACE;
+    if (g_key_fault_mode == 1) switching_power_cut();
+    g_key_cut_after_commit = true;
+  }
   SpaceMap* spaces = nullptr;
   BlobMap* blobs = nullptr;
   if (!nvs_lookup(handle, spaces, blobs)) return ESP_ERR_INVALID_ARG;
@@ -346,6 +376,7 @@ esp_err_t nvs_commit(nvs_handle_t handle) {
   SpaceMap* spaces = nullptr;
   BlobMap* blobs = nullptr;
   if (!nvs_lookup(handle, spaces, blobs)) return ESP_ERR_INVALID_ARG;
+  if (g_key_cut_after_commit) switching_power_cut();
   if (g_cut_after_switching &&
       g_nvs_handles[handle - 1].space == routeloom::sdkv1::kLifecycleNamespace) {
     for (const char* key : {routeloom::sdkv1::kLifecycleKey0,
@@ -923,6 +954,7 @@ class TeeObserver final : public routeloom::NodeObserver {
     if (std::strcmp(reason, "TRANSIT_DEDUP_CONFLICT") == 0) ++transit_conflicts_;
     if (std::strcmp(reason, "RECEIPT_DEDUP_CONFLICT") == 0) ++receipt_conflicts_;
     if (std::strcmp(reason, "NO_ROUTE") == 0) ++no_route_;
+    if (std::strcmp(reason, "EXTENSION_UNSUPPORTED") == 0) ++ext_unsupported_;
     if (next_ != nullptr) next_->on_diagnostic(reason, peer, id);
   }
 
@@ -934,6 +966,7 @@ class TeeObserver final : public routeloom::NodeObserver {
   std::uint32_t transit_conflicts_{0};
   std::uint32_t receipt_conflicts_{0};
   std::uint32_t no_route_{0};
+  std::uint32_t ext_unsupported_{0};
 
  private:
   routeloom::NodeObserver* next_;
@@ -1109,6 +1142,10 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
   put_u32(out, owner_work.rx_queue_max);
   put_u64(out, runtime.node().work_stats().expiry_slots_scanned);
   put_u64(out, runtime.node().work_stats().hop_accept_expired);
+  put_u32(out, observer.ext_unsupported_);
+  put_u32(out, static_cast<std::uint32_t>(runtime.node().group_stats().delivered));
+  put_u32(out, static_cast<std::uint32_t>(runtime.node().group_stats().rejected));
+  put_u32(out, g_key_fault_hits);
   write_frame(out);
 }
 
@@ -1116,7 +1153,7 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
 
 int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--harness-version") == 0) {
-    std::fputs("2\n", stdout);
+    std::fputs("3\n", stdout);
     return 0;
   }
   using namespace routeloom;
@@ -1385,6 +1422,54 @@ int main(int argc, char** argv) {
       case 'F':
         g_cut_after_switching = true;
         break;
+      case 'O': {
+        if (length < 20 || length - 20 > kMaxApplicationPayload) fatal("bad O");
+        NodeId next_hop = 0, dst = 0;
+        for (int i = 0; i < 8; ++i) {
+          next_hop |= static_cast<NodeId>(payload[1 + i]) << (8 * i);
+          dst |= static_cast<NodeId>(payload[9 + i]) << (8 * i);
+        }
+        wire::PlainFrame plain{};
+        plain.header.type = static_cast<FrameType>(payload[17]);
+        plain.header.minor = payload[18];
+        plain.header.traffic = payload[19];
+        plain.header.flags = wire::kFlagEndProtected;
+        plain.header.network = static_cast<std::uint32_t>(stores.site().site().network);
+        plain.header.origin = setup.node;
+        plain.header.destination = dst;
+        plain.header.previous_hop = setup.node;
+        plain.header.next_hop = next_hop;
+        // A test-only message session keeps these ids apart from the node's.
+        static std::uint64_t crafted = 0;
+        plain.header.message = MessageId{0xC0FFEEU, ++crafted};
+        plain.header.remaining_deadline_ms = 5000;
+        plain.header.original_lifetime_ms = 5000;
+        plain.payload_size = length - 20;
+        std::memcpy(plain.payload.data(), payload.data() + 20, plain.payload_size);
+        wire::EncodedFrame encoded{};
+        status = wire::encode_new(plain, owner.coordinator().session_provider(), encoded);
+        if (!status) fatal(status.detail);
+        Bytes reply{'o'};
+        reply.insert(reply.end(), encoded.bytes.begin(),
+                     encoded.bytes.begin() + static_cast<std::ptrdiff_t>(encoded.size));
+        write_frame(reply);
+        break;
+      }
+      case 'W': {
+        if (length < 3) fatal("bad W");
+        g_key_fault_mode = payload[1];
+        g_key_fault.assign(reinterpret_cast<const char*>(payload.data() + 2), length - 2);
+        break;
+      }
+      case 'M': {
+        if (length < 4 || length - 3 > kGroupPayloadMax) fatal("bad M");
+        const GroupId group = static_cast<GroupId>(payload[1] | (payload[2] << 8));
+        GroupSendOptions options{};
+        MessageId id{};
+        status = device.send_group(group, ByteView{payload.data() + 3, length - 3}, options, id);
+        if (!status) std::fprintf(stderr, "mesh_peer: group send refused: %s\n", status.detail);
+        break;
+      }
       case 'Q':
         return 0;
       default:

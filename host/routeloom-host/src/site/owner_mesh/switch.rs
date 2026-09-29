@@ -111,6 +111,9 @@ pub(super) struct Switch {
     pub(super) c7_old_discover: Option<Vec<u8>>,
     pub(super) c7_old_resume: Option<(usize, Vec<u8>)>,
     pub(super) c7_old_cert: Option<Vec<u8>>,
+    /// Wire frames of this type that crossed a leg: (from, to, header).
+    pub(super) watch_kind: Option<u8>,
+    pub(super) watched: Vec<(usize, usize, Vec<u8>)>,
 }
 
 impl Switch {
@@ -151,6 +154,20 @@ impl Switch {
             c7_old_discover: None,
             c7_old_resume: None,
             c7_old_cert: None,
+            watch_kind: None,
+            watched: Vec::new(),
+        }
+    }
+
+    /// Keeps the 88-byte header of a watched frame kind that crossed
+    /// `from`→`to` (bounded).
+    pub(super) fn note_watched(&mut self, from: usize, to: usize, frame: &[u8]) {
+        if self.watched.len() < 64
+            && frame.len() > 88
+            && frame[..3] == *b"RL\x02"
+            && Some(frame[4]) == self.watch_kind
+        {
+            self.watched.push((from, to, frame[..88].to_vec()));
         }
     }
 

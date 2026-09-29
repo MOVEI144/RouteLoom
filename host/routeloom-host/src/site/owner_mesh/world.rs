@@ -1071,6 +1071,7 @@ impl MeshWorld {
                     if from == 2 && to == 1 && notice_object_frame(&tx.bytes, 49) {
                         self.switch.notice_manifests_delivered += 1;
                     }
+                    self.switch.note_watched(from, to, &tx.bytes);
                     // The frame crosses (now or after the leg's hold);
                     // only the MAC ACK is droppable from here.
                     let (extra, twice) = self.switch.noise_cross(from, to);
