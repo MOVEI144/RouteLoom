@@ -110,6 +110,8 @@
 // state, send state, Service reason; 0 before any) | gw_receipts u32 |
 // gw_sdk_ram_receipts u32 | gw_mailbox_stored u32 | gw_resolves_failed u32
 // (this node's GatewayDelivery counters, 0 without one)
+// | plan_phase u8 (ParticipantPhase, 0xFF without a channel plan) |
+// plan_epoch u32 | plan_channel u8 (the participant's active record)
 //
 // Setup arrives on argv (all integers accept 0x hex; blobs are hex):
 //
@@ -128,6 +130,8 @@
 //                            the real ApplyMemberConfig path)
 //   --flat                 use the product flat-route timers for route-loss tests
 //   --remote-config        (member: Device's remote-config target)
+//   --channel-plan         (Device's manual channel plan, Manual mode;
+//                         the gateway is the site's plan authority)
 //   --nvs-load <file>    (optional fake-NVS preload image)
 //   --flash <file>       (optional 4096 B legacy slot image: identity
 //                         slots, site slots — imported into the fake NVS
@@ -809,6 +813,7 @@ struct Setup {
   NodeId gw2{routeloom::kInvalidNodeId};
   bool flat{false};
   bool remote_config{false};
+  bool channel_plan{false};
   std::string nvs_load;
   std::string flash;
   std::string flash_ext;
@@ -872,6 +877,8 @@ Setup parse_argv(int argc, char** argv) {
       setup.flat = true;
     } else if (arg == std::string("--remote-config")) {
       setup.remote_config = true;
+    } else if (arg == std::string("--channel-plan")) {
+      setup.channel_plan = true;
     } else if (arg == std::string("--nvs-load") && take_arg(argc, argv, i, value)) {
       setup.nvs_load = value;
     } else if (arg == std::string("--flash") && take_arg(argc, argv, i, value)) {
@@ -1174,6 +1181,11 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
   put_u32(out, gw.sdk_ram_receipts);
   put_u32(out, gw.mailbox_stored);
   put_u32(out, gw.resolves_failed);
+  // The runtime's migration sink is the Device's MigrationAgent.
+  const auto* plan = static_cast<const MigrationAgent*>(runtime.migration());
+  out.push_back(plan != nullptr ? static_cast<std::uint8_t>(plan->participant().phase()) : 0xFF);
+  put_u32(out, plan != nullptr ? plan->participant().active_epoch().value : 0);
+  out.push_back(plan != nullptr ? plan->participant().active_channel() : 0);
   write_frame(out);
 }
 
@@ -1181,7 +1193,7 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
 
 int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--harness-version") == 0) {
-    std::fputs("3\n", stdout);
+    std::fputs("4\n", stdout);
     return 0;
   }
   using namespace routeloom;
@@ -1232,6 +1244,7 @@ int main(int argc, char** argv) {
   config.requested_role = setup.role;
   config.flat_group_routing = setup.flat;
   config.remote_config = setup.remote_config;
+  config.channel_plan = setup.channel_plan ? 2 : 0;
   config.radio.node.network = setup.netlow;
   config.radio.node.node = setup.node;
   if (!setup.flat) {

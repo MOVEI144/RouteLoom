@@ -647,6 +647,9 @@ add_executable(routeloom_owner_mesh_peer owner_mesh_peer.cpp
     espnow_idf_stubs/idf_stubs.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device_config.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device_migration.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_migration.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_ledger_store.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_security_owner.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1_entropy.cpp
@@ -658,9 +661,12 @@ add_executable(routeloom_owner_mesh_peer owner_mesh_peer.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_legacy_purge.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_security_floor.cpp)
 target_link_libraries(routeloom_owner_mesh_peer PRIVATE routeloom_core)
-# The peer carries Device's remote-config target (a firmware image selects
-# it with CONFIG_ROUTELOOM_CONFIG); --remote-config enables it per node.
-target_compile_definitions(routeloom_owner_mesh_peer PRIVATE ROUTELOOM_DEVICE_REMOTE_CONFIG=1)
+# The peer carries Device's remote-config target and channel plan (a
+# firmware image selects them with CONFIG_ROUTELOOM_CONFIG and
+# CONFIG_ROUTELOOM_MIGRATION); --remote-config and --channel-plan enable
+# them per node.
+target_compile_definitions(routeloom_owner_mesh_peer PRIVATE ROUTELOOM_DEVICE_REMOTE_CONFIG=1
+                           ROUTELOOM_DEVICE_MIGRATION=1)
 target_include_directories(routeloom_owner_mesh_peer PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/espnow_idf_stubs

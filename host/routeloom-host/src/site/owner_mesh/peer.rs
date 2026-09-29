@@ -472,6 +472,11 @@ pub(super) struct MeshSnap {
     pub(super) gw_sdk_ram_receipts: u32,
     pub(super) gw_mailbox_stored: u32,
     pub(super) gw_resolves_failed: u32,
+    /// The channel-plan participant (ParticipantPhase, 0xFF without one),
+    /// its active epoch and channel.
+    pub(super) plan_phase: u8,
+    pub(super) plan_epoch: u32,
+    pub(super) plan_channel: u8,
 }
 
 #[allow(dead_code)]
@@ -632,6 +637,11 @@ pub(super) fn parse_mesh_snap(payload: &[u8]) -> MeshSnap {
     snap.gw_sdk_ram_receipts = get_u32(payload, &mut pos);
     snap.gw_mailbox_stored = get_u32(payload, &mut pos);
     snap.gw_resolves_failed = get_u32(payload, &mut pos);
+    snap.plan_phase = payload[pos];
+    pos += 1;
+    snap.plan_epoch = get_u32(payload, &mut pos);
+    snap.plan_channel = payload[pos];
+    pos += 1;
     assert_eq!(pos, payload.len(), "G fully consumed");
     snap
 }

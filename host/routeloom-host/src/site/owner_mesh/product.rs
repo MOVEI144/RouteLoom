@@ -9,6 +9,7 @@ use crate::config::{
     SITE_CONFIG_AUTHORITY_GENERATION,
 };
 use crate::send_store::{MemoryOperationStore, ISSUE_PROFILE_COSE};
+use routeloom_protocol::host_ops::{ChannelPlanReport, ChannelPlanRequest};
 use routeloom_provision::signer::FileAuthoritySigner;
 use routeloom_wire::endpoint::{ConfigField, ConfigFieldType, ConfigPhase, ControlStatus};
 
@@ -262,4 +263,258 @@ fn mesh_p03_explicit_gateway_delivers_only_to_named_gateway() {
         "no substitute delivery"
     );
     assert_eq!(world.snaps[1].gw_receipts, 5, "no extra receipt");
+}
+
+// --- Manual channel plan (P03 channel plan, V2-08) ---------------------------
+
+/// C++ `ParticipantPhase::Stable`; `StatusCode::AuthenticationFailed`.
+const PLAN_STABLE: u8 = 0;
+const STATUS_AUTHENTICATION_FAILED: u8 = 11;
+const CONFIG_OPS_DENIED: u16 = 3;
+
+/// Plan waits step 10 ms: a TimeSync sample counts its RX queue residence
+/// as clock uncertainty (bounded at 20 ms, 04 §8). Hardware drains the
+/// queue every 2 ms Owner poll; 25 ms harness steps would refuse every
+/// sample.
+const PLAN_STEP_MS: u64 = 10;
+
+fn plan_pump(world: &mut MeshWorld, ticks: u32, done: impl Fn(&[MeshSnap]) -> bool) {
+    for _ in 0..ticks {
+        world.step(PLAN_STEP_MS);
+        if done(&world.snaps) {
+            return;
+        }
+    }
+}
+
+/// Runs one queued channel-plan request through the real site lane and
+/// the gateway's 0x68 handler; returns (result, detail) and the report.
+fn plan_settle(world: &mut MeshWorld) -> (u16, u8, ChannelPlanReport) {
+    let service = Arc::clone(&world.provision.site.service);
+    for _ in 0..500 {
+        world.step(PLAN_STEP_MS);
+        let (done, _) = service.with(|a| {
+            (!a.channel_plan.busy())
+                .then(|| {
+                    a.channel_plan
+                        .last()
+                        .zip(a.channel_plan.fresh_report(world.now).cloned())
+                })
+                .flatten()
+        });
+        if let Some(((_, result, detail), report)) = done {
+            return (result, detail, report);
+        }
+    }
+    panic!("the gateway answered no channel plan request");
+}
+
+fn plan_status(world: &mut MeshWorld) -> ChannelPlanReport {
+    let service = Arc::clone(&world.provision.site.service);
+    service
+        .with(|a| a.channel_plan_refresh())
+        .0
+        .expect("status queued");
+    let (result, _, report) = plan_settle(world);
+    assert_eq!(result, 0, "status answered");
+    report
+}
+
+/// Offers `new_channel` as the site, waits for every member's READY,
+/// releases the commit and runs the switch until every node settled on
+/// the new channel under `epoch`.
+fn plan_switch(world: &mut MeshWorld, new_channel: u8, epoch: u32) {
+    let service = Arc::clone(&world.provision.site.service);
+    let before = plan_status(world);
+    assert_eq!(before.cooldown_ms, 0, "no cooldown: {before:?}");
+    let now = world.now;
+    let started = now;
+    let signed = service
+        .with(|a| a.channel_plan_offer(new_channel, 30_000, now))
+        .0
+        .expect("plan offered");
+    let (result, detail, report) = plan_settle(world);
+    assert_eq!(
+        (result, detail),
+        (0, 0),
+        "SAK-signed plan admitted: {report:?}"
+    );
+    assert_eq!(report.offered_plan, signed.plan_hash, "the offered plan");
+    let members = (world.peers.len() - 1) as u8;
+    let mut ready = report.ready;
+    for _ in 0..20 {
+        if ready >= members {
+            break;
+        }
+        plan_pump(world, 100, |_| false);
+        ready = plan_status(world).ready;
+    }
+    assert_eq!(ready, members, "every member answered READY");
+    service
+        .with(|a| a.channel_plan_release())
+        .0
+        .expect("release queued");
+    let (result, _, report) = plan_settle(world);
+    assert_eq!(result, 0, "commit released: {report:?}");
+    assert!(report.released, "released: {report:?}");
+    plan_pump(world, 10_000, |snaps| {
+        snaps.iter().all(|s| {
+            s.channel == new_channel
+                && s.plan_epoch == epoch
+                && s.plan_channel == new_channel
+                && s.plan_phase == PLAN_STABLE
+        })
+    });
+    for (index, snap) in world.snaps.iter().enumerate() {
+        assert_eq!(
+            (snap.channel, snap.plan_epoch, snap.plan_phase),
+            (new_channel, epoch, PLAN_STABLE),
+            "peer {index} switched and verified: {snap:?}"
+        );
+    }
+    // Row P03: a switch completes within 60 s of the offer.
+    assert!(
+        world.now - started <= 60_000,
+        "switch took {} ms",
+        world.now - started
+    );
+}
+
+/// A member reaches the gateway on the current channel: 20 of 20 sends
+/// (row P03).
+fn plan_traffic(world: &mut MeshWorld, what: &str) {
+    for round in 1..=20u32 {
+        let before = world.snaps[0].rx_count;
+        world.peers[1].app_send(testkit::GATEWAY, what.as_bytes());
+        world.step(25);
+        world.pump_until(800, |snaps| snaps[0].rx_count > before);
+        assert!(
+            world.snaps[0].rx_count > before,
+            "{what}: send {round} reached the gateway"
+        );
+    }
+}
+
+/// P03 (manual channel plan, issue #5): the gateway admits only plans the
+/// site's SAK signed (a forged and an unsigned commit are refused and
+/// nothing moves); a signed plan moves every node 6 -> 1 after the
+/// members answered READY and the host released the commit. Traffic
+/// flows on the new channel, a power-cut member re-adopts its site on the
+/// plan channel (not the SitePackage one), and after the cooldown a second
+/// plan brings the whole mesh back to 6.
+#[test]
+fn mesh_p03_manual_channel_plan_switches_and_returns() {
+    let cap = format!("{}", USB_CAP | 0x2000);
+    let Some(mut world) = MeshWorld::start_with_args(
+        "p03-channel-plan",
+        Switch::direct(),
+        &["--cap", &cap, "--channel-plan"],
+        &["--channel-plan"],
+    ) else {
+        return; // no C++ peers: skip (ignore-equivalent)
+    };
+    converge(&mut world, "p03 channel plan");
+    assert!(
+        world
+            .usb_host
+            .hello_capability
+            .is_some_and(|c| c & 0x2000 != 0),
+        "gateway advertises channel_plan_v1"
+    );
+    plan_pump(&mut world, 1000, |snaps| {
+        snaps.iter().all(|s| s.plan_phase == PLAN_STABLE)
+    });
+    assert!(
+        world
+            .snaps
+            .iter()
+            .all(|s| s.plan_phase == PLAN_STABLE && s.channel == 6),
+        "every node runs the plan participant on channel 6"
+    );
+    let status = plan_status(&mut world);
+    assert_eq!(
+        (
+            status.active_channel,
+            status.active_epoch,
+            status.ledger_sequence
+        ),
+        (6, 0, 0),
+        "fresh plan authority: {status:?}"
+    );
+
+    // Forged (another key under the site's id) and unsigned commits are
+    // refused at the gateway: nothing is distributed, nobody moves.
+    let service = Arc::clone(&world.provision.site.service);
+    let now = world.now;
+    let plan = service
+        .with(|a| a.channel_plan_build(1, 30_000, now))
+        .0
+        .expect("plan built");
+    let (forger, _) = routeloom_provision::signer::test_keypair(0x5F);
+    let forger =
+        routeloom_provision::signer::FileRootSigner::from_secret(testkit::SITE, &forger).unwrap();
+    let forged = routeloom_provision::sdkv1::channel_plan::issue(&plan, &forger).expect("forged");
+    let unsigned = ChannelPlanRequest::Offer {
+        blob: forged.blob.clone(),
+        commit_signature: [0; 64],
+    };
+    let forged = ChannelPlanRequest::Offer {
+        blob: forged.blob,
+        commit_signature: forged.commit_signature,
+    };
+    for request in [forged, unsigned] {
+        service
+            .with(|a| a.channel_plan.queue(request))
+            .0
+            .expect("queued");
+        let (result, detail, report) = plan_settle(&mut world);
+        assert_eq!(
+            (result, detail),
+            (CONFIG_OPS_DENIED, STATUS_AUTHENTICATION_FAILED),
+            "refused: {report:?}"
+        );
+        assert_eq!(report.offered_plan, [0; 32], "nothing offered");
+    }
+    world.pump_until(200, |_| false);
+    assert!(
+        world
+            .snaps
+            .iter()
+            .all(|s| s.plan_phase == PLAN_STABLE && s.channel == 6 && s.plan_epoch == 0),
+        "no node prepared a refused plan"
+    );
+
+    plan_switch(&mut world, 1, 1);
+    plan_traffic(&mut world, "p03-channel-1");
+    world.pump_until(2400, |_| false);
+    assert!(
+        world
+            .snaps
+            .iter()
+            .all(|s| s.mode == MODE_MEMBER && s.phase == PHASE_ACTIVE && s.channel == 1),
+        "the mesh stays up on channel 1"
+    );
+
+    // The stored plan owns the channel across a power cut.
+    world.peers[1].power_cut();
+    let until = world.now + 1000;
+    while world.peers[1].reboots < 1 && world.now < until {
+        world.step(25);
+    }
+    assert_eq!(world.peers[1].reboots, 1, "member respawned");
+    converge(&mut world, "p03 channel plan after reset");
+    world.pump_until(400, |snaps| snaps[1].plan_phase == PLAN_STABLE);
+    assert_eq!(
+        (world.snaps[1].channel, world.snaps[1].plan_epoch),
+        (1, 1),
+        "the member re-adopted on the plan channel"
+    );
+    plan_traffic(&mut world, "p03-after-reset");
+
+    // Back to 6 once the 10 min inter-plan cooldown has passed.
+    for _ in 0..(600_000 / 250) {
+        world.step(250);
+    }
+    plan_switch(&mut world, 6, 2);
+    plan_traffic(&mut world, "p03-channel-6");
 }

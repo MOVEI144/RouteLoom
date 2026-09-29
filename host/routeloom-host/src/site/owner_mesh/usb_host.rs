@@ -282,6 +282,13 @@ impl UsbHost {
                     if self.watch == Some(request) {
                         self.watch = None;
                         self.watched = Some(inner.to_vec());
+                    } else if crate::site::channel_plan::channel_plan_sub(&inner).is_some() {
+                        if let Ok(report) =
+                            routeloom_protocol::host_ops::decode_channel_plan_report(&inner)
+                        {
+                            let _ =
+                                service.with(|a| a.channel_plan.on_report(request, report, now));
+                        }
                     } else if authority_sub(&inner) == Some(SUB_AUTHORITY_UP) {
                         self.ups_seen += 1;
                         for up in authority.handle_up(&inner, now).expect("up assembles") {
@@ -315,6 +322,19 @@ impl UsbHost {
         // 0x63 correlation attaches at wire time, below.
         for down in join.take_ready(crate::mono_ms()) {
             self.queue_join_down(join, down.key, down.terminal, down.bytes);
+        }
+        // Channel plan requests (0x68) behind them, like the production
+        // site lane: one in flight, on a capable Active session only.
+        if self.session.phase == SessionPhase::Active
+            && self
+                .hello_capability
+                .is_some_and(crate::site::channel_plan::channel_plan_capable)
+        {
+            let (next, _) = service.with(|a| a.channel_plan.take_request(now));
+            if let Some((body, action)) = next {
+                let request = self.queue_data(FrameKind::HostOps, body);
+                let _ = service.with(|a| a.channel_plan.note_sent(request, action, now));
+            }
         }
         let mut kept = Vec::new();
         for mut pending in self.pending.drain(..) {
