@@ -73,6 +73,14 @@ void EspNowDiscoveryObserver::on_discovery_event(const char* reason, NodeId peer
 
 [[noreturn]] void esp_restart() { std::abort(); }
 
+namespace routeloom {
+struct DeviceTestAccess {
+  static void attach_runtime(Device& device, espnow::EspNowRuntime& runtime) noexcept {
+    device.runtime_ = &runtime;
+  }
+};
+}  // namespace routeloom
+
 namespace {
 
 using namespace routeloom;
@@ -386,6 +394,58 @@ void test_member_adoption_restores_group_capability() {
 
 }  // namespace
 
+// Device::post, the only call from another task: eight jobs wait, the
+// ninth is Busy. One Owner pass runs them in order; a job posted by a
+// running job waits for the next pass (the drain is bounded).
+struct PostLog {
+  std::uint8_t order[16]{};
+  std::uint8_t count{0};
+};
+struct PostJob {
+  PostLog* log;
+  std::uint8_t id;
+  bool repost;
+};
+
+void record_job(Device& device, void* ctx) {
+  auto& job = *static_cast<PostJob*>(ctx);
+  job.log->order[job.log->count++] = job.id;
+  if (job.repost) {
+    job.repost = false;
+    CHECK(device.post(&record_job, ctx).ok());
+  }
+}
+
+void test_device_post_bound() {
+  idf_stub::reset();
+  Stores stores{};
+  CHECK(stores.init());
+  EspNowSecurityOwner owner{};
+  EspNowSecurityOwnerTestAccess::install_coordinator(owner, stores.deps(owner));
+  routeloom_test::CapturingObserver observer{};
+  EspNowRuntime runtime(radio_config(), owner.session_provider(), observer);
+  CHECK(runtime.initialize().ok());
+  Device device;
+  DeviceTestAccess::attach_runtime(device, runtime);
+
+  CHECK(device.post(nullptr, nullptr).code == StatusCode::InvalidArgument);
+  PostLog log{};
+  PostJob jobs[Device::kPostCapacity + 1]{};
+  for (std::uint8_t i = 0; i <= Device::kPostCapacity; ++i) jobs[i] = PostJob{&log, i, i == 0};
+  for (std::uint8_t i = 0; i < Device::kPostCapacity; ++i) {
+    CHECK(device.post(&record_job, &jobs[i]).ok());
+  }
+  CHECK(device.post(&record_job, &jobs[Device::kPostCapacity]).code == StatusCode::Busy);
+
+  device.step(kStart);
+  CHECK(log.count == Device::kPostCapacity);
+  for (std::uint8_t i = 0; i < Device::kPostCapacity; ++i) CHECK(log.order[i] == i);
+  device.step(kStart + 1);
+  CHECK(log.count == Device::kPostCapacity + 1);
+  CHECK(log.order[Device::kPostCapacity] == 0);
+  runtime.stop();
+}
+
 int main() {
   test_usb_network_after_cutover();
   test_same_boot_reapply(false);
@@ -393,5 +453,6 @@ int main() {
   test_member_root_mapping(false);
   test_member_root_mapping(true);
   test_member_adoption_restores_group_capability();
+  test_device_post_bound();
   return failures == 0 ? 0 : 1;
 }
