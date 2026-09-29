@@ -411,8 +411,8 @@ def run_firmware(cells: list[dict], dry_run: bool, data: dict) -> int:
         if cell["app"] != "idf_consumer":
             code = run(firmware_steps(cell), False, data)
         else:
-            # Build the consumer outside the checkout. Its only SDK inputs
-            # are three Git dependencies pinned to the checked-out commit.
+            # Build the consumer outside the checkout. Its only SDK input
+            # is a Git dependency pinned to the checked-out commit.
             with tempfile.TemporaryDirectory(prefix="routeloom-consumer-") as tmp:
                 project = Path(tmp) / "consumer"
                 shutil.copytree(ROOT / cell_dir(cell), project,
