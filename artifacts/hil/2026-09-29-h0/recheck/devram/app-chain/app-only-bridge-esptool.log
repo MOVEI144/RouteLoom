@@ -1,0 +1,84 @@
+/home/sahur/.local/bin/esptool --chip esp32c3 --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00 -b 460800 --after no-reset write-flash --flash-mode keep --flash-freq keep --flash-size keep 0x10000 /home/sahur/orca/workspaces/RouteLoom/v2-h0/artifacts/hil/images/h0r-bridge-c3-devram-ns-drop-n3/images/ota_data_initial.bin 0x40000 /home/sahur/orca/workspaces/RouteLoom/v2-h0/artifacts/hil/images/h0r-bridge-c3-devram-ns-drop-n3/images/application.bin
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00:
+Connecting...
+Connected to ESP32-C3 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                94:a9:90:7a:26:ac
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+Changing baud rate to 460800...
+Changed.
+
+Configuring flash size...
+
+Writing '/home/sahur/orca/workspaces/RouteLoom/v2-h0/artifacts/hil/images/h0r-bridge-c3-devram-ns-drop-n3/images/ota_data_initial.bin' at 0x00010000...
+Flash will be erased from 0x00010000 to 0x00011fff...
+Compressed 8192 bytes to 31...
+Writing at 0x00012000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 31B/31B [0s] 
+Wrote 8192 bytes (31 compressed) at 0x00010000 in 0.0 seconds (1312.6 kbit/s).
+Verifying written data...
+Hash of data verified.
+
+Writing '/home/sahur/orca/workspaces/RouteLoom/v2-h0/artifacts/hil/images/h0r-bridge-c3-devram-ns-drop-n3/images/application.bin' at 0x00040000...
+Flash will be erased from 0x00040000 to 0x0018bfff...
+Compressed 1358768 bytes to 802787...
+Writing at 0x0004c37e ╸                                2.0% 16.00kB/783.97kB [0s] 
+Writing at 0x00058209 ━                                4.1% 32.00kB/783.97kB [0s] 
+Writing at 0x0005f1e4 ━╸                               6.1% 48.00kB/783.97kB [1s] 
+Writing at 0x00068318 ━━                               8.2% 64.00kB/783.97kB [1s] 
+Writing at 0x0006e9c1 ━━━                             10.2% 80.00kB/783.97kB [2s] 
+Writing at 0x0007573d ━━━╸                            12.2% 96.00kB/783.97kB [2s] 
+Writing at 0x0007c755 ━━━━                            14.3% 112.00kB/783.97kB [3s] 
+Writing at 0x00083227 ━━━━╸                           16.3% 128.00kB/783.97kB [3s] 
+Writing at 0x00089b3e ━━━━━╸                          18.4% 144.00kB/783.97kB [4s] 
+Writing at 0x000906f2 ━━━━━━                          20.4% 160.00kB/783.97kB [5s] 
+Writing at 0x0009730c ━━━━━━╸                         22.4% 176.00kB/783.97kB [5s] 
+Writing at 0x0009da37 ━━━━━━━                         24.5% 192.00kB/783.97kB [5s] 
+Writing at 0x000a4bf2 ━━━━━━━╸                        26.5% 208.00kB/783.97kB [5s] 
+Writing at 0x000ab02c ━━━━━━━━╸                       28.6% 224.00kB/783.97kB [5s] 
+Writing at 0x000b16e2 ━━━━━━━━━                       30.6% 240.00kB/783.97kB [6s] 
+Writing at 0x000b8132 ━━━━━━━━━╸                      32.7% 256.00kB/783.97kB [6s] 
+Writing at 0x000be75c ━━━━━━━━━━                      34.7% 272.00kB/783.97kB [6s] 
+Writing at 0x000c509b ━━━━━━━━━━━                     36.7% 288.00kB/783.97kB [6s] 
+Writing at 0x000cb7d8 ━━━━━━━━━━━╸                    38.8% 304.00kB/783.97kB [6s] 
+Writing at 0x000d2133 ━━━━━━━━━━━━                    40.8% 320.00kB/783.97kB [6s] 
+Writing at 0x000d88b2 ━━━━━━━━━━━━╸                   42.9% 336.00kB/783.97kB [6s] 
+Writing at 0x000dedbf ━━━━━━━━━━━━━                   44.9% 352.00kB/783.97kB [6s] 
+Writing at 0x000e5d88 ━━━━━━━━━━━━━━                  46.9% 368.00kB/783.97kB [6s] 
+Writing at 0x000ec28c ━━━━━━━━━━━━━━╸                 49.0% 384.00kB/783.97kB [7s] 
+Writing at 0x000f2fa6 ━━━━━━━━━━━━━━━                 51.0% 400.00kB/783.97kB [7s] 
+Writing at 0x000fa048 ━━━━━━━━━━━━━━━╸                53.1% 416.00kB/783.97kB [7s] 
+Writing at 0x0010079e ━━━━━━━━━━━━━━━━╸               55.1% 432.00kB/783.97kB [7s] 
+Writing at 0x00106e2f ━━━━━━━━━━━━━━━━━               57.1% 448.00kB/783.97kB [7s] 
+Writing at 0x0010e0f6 ━━━━━━━━━━━━━━━━━╸              59.2% 464.00kB/783.97kB [7s] 
+Writing at 0x001153f9 ━━━━━━━━━━━━━━━━━━              61.2% 480.00kB/783.97kB [7s] 
+Writing at 0x0011c706 ━━━━━━━━━━━━━━━━━━╸             63.3% 496.00kB/783.97kB [7s] 
+Writing at 0x00122a1a ━━━━━━━━━━━━━━━━━━━╸            65.3% 512.00kB/783.97kB [7s] 
+Writing at 0x0012896a ━━━━━━━━━━━━━━━━━━━━            67.3% 528.00kB/783.97kB [7s] 
+Writing at 0x0012e66b ━━━━━━━━━━━━━━━━━━━━╸           69.4% 544.00kB/783.97kB [8s] 
+Writing at 0x001341ce ━━━━━━━━━━━━━━━━━━━━━           71.4% 560.00kB/783.97kB [8s] 
+Writing at 0x00139ccb ━━━━━━━━━━━━━━━━━━━━━━          73.5% 576.00kB/783.97kB [8s] 
+Writing at 0x0013fb16 ━━━━━━━━━━━━━━━━━━━━━━╸         75.5% 592.00kB/783.97kB [8s] 
+Writing at 0x0014643c ━━━━━━━━━━━━━━━━━━━━━━━         77.6% 608.00kB/783.97kB [8s] 
+Writing at 0x0014c25e ━━━━━━━━━━━━━━━━━━━━━━━╸        79.6% 624.00kB/783.97kB [8s] 
+Writing at 0x00152430 ━━━━━━━━━━━━━━━━━━━━━━━━        81.6% 640.00kB/783.97kB [8s] 
+Writing at 0x00158755 ━━━━━━━━━━━━━━━━━━━━━━━━━       83.7% 656.00kB/783.97kB [8s] 
+Writing at 0x0015e9d2 ━━━━━━━━━━━━━━━━━━━━━━━━━╸      85.7% 672.00kB/783.97kB [8s] 
+Writing at 0x001647a2 ━━━━━━━━━━━━━━━━━━━━━━━━━━      87.8% 688.00kB/783.97kB [8s] 
+Writing at 0x0016b08a ━━━━━━━━━━━━━━━━━━━━━━━━━━╸     89.8% 704.00kB/783.97kB [8s] 
+Writing at 0x0017126a ━━━━━━━━━━━━━━━━━━━━━━━━━━━╸    91.8% 720.00kB/783.97kB [8s] 
+Writing at 0x001771b4 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━    93.9% 736.00kB/783.97kB [9s] 
+Writing at 0x0017c860 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸   95.9% 752.00kB/783.97kB [9s] 
+Writing at 0x00182aee ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   98.0% 768.00kB/783.97kB [9s] 
+Writing at 0x0018bbb0 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 783.97kB/783.97kB [9s] 
+Wrote 1358768 bytes (802787 compressed) at 0x00040000 in 9.4 seconds (1152.4 kbit/s).
+Verifying written data...
+Hash of data verified.
+
+Staying in bootloader.

@@ -1,0 +1,57 @@
+[2026-09-28T18:21:45.218Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-28T18:22:42.138Z] I (360500) RouteLoom: stack hwm main 10252 B
+[2026-09-28T18:22:42.141Z] I (360500) RouteLoom: owner polls=179257 empty=178927 rxq_max=1 max_us rx=3957 bootstrap=5509 node=6810 security=15706
+[2026-09-28T18:22:42.147Z] I (360504) RouteLoom: owner expiry_slots=76004120 hop_accept_expired=0
+[2026-09-28T18:22:42.154Z] I (360510) RouteLoom: HIL HEAP free=115536 largest=100352 min=114752 B
+[2026-09-28T18:22:42.165Z] I (360516) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=20 send_failures=2 kind_rejects=0
+[2026-09-28T18:22:42.172Z] I (360527) RouteLoom: HIL ROUTE peer=1 phase=-1 via=3 metric=2 generation=23 seq=2
+[2026-09-28T18:22:42.180Z] I (360535) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=20 seq=2
+[2026-09-28T18:23:42.138Z] I (420500) RouteLoom: stack hwm main 10252 B
+[2026-09-28T18:23:42.141Z] I (420500) RouteLoom: owner polls=209195 empty=208829 rxq_max=1 max_us rx=3957 bootstrap=5509 node=6810 security=15706
+[2026-09-28T18:23:42.148Z] I (420504) RouteLoom: owner expiry_slots=88697832 hop_accept_expired=0
+[2026-09-28T18:23:42.154Z] I (420510) RouteLoom: HIL HEAP free=115536 largest=100352 min=114752 B
+[2026-09-28T18:23:42.165Z] I (420516) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=23 send_failures=2 kind_rejects=0
+[2026-09-28T18:23:42.172Z] I (420527) RouteLoom: HIL ROUTE peer=1 phase=-1 via=3 metric=2 generation=23 seq=2
+[2026-09-28T18:23:42.179Z] I (420535) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=20 seq=2
+[2026-09-28T18:24:42.139Z] I (480501) RouteLoom: stack hwm main 10252 B
+[2026-09-28T18:24:42.142Z] I (480501) RouteLoom: owner polls=239138 empty=238736 rxq_max=1 max_us rx=3957 bootstrap=5509 node=6810 security=15706
+[2026-09-28T18:24:42.148Z] I (480505) RouteLoom: owner expiry_slots=101393664 hop_accept_expired=0
+[2026-09-28T18:24:42.155Z] I (480511) RouteLoom: HIL HEAP free=115536 largest=100352 min=114752 B
+[2026-09-28T18:24:42.166Z] I (480517) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=26 send_failures=2 kind_rejects=0
+[2026-09-28T18:24:42.173Z] I (480529) RouteLoom: HIL ROUTE peer=1 phase=-1 via=3 metric=2 generation=23 seq=2
+[2026-09-28T18:24:42.180Z] I (480536) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=20 seq=2
+[2026-09-28T18:25:42.139Z] I (540501) RouteLoom: stack hwm main 10252 B
+[2026-09-28T18:25:42.142Z] I (540501) RouteLoom: owner polls=269073 empty=268631 rxq_max=1 max_us rx=3957 bootstrap=5509 node=6810 security=15706
+[2026-09-28T18:25:42.148Z] I (540505) RouteLoom: owner expiry_slots=114086104 hop_accept_expired=0
+[2026-09-28T18:25:42.155Z] I (540511) RouteLoom: HIL HEAP free=115536 largest=100352 min=114752 B
+[2026-09-28T18:25:42.166Z] I (540517) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=30 send_failures=3 kind_rejects=0
+[2026-09-28T18:25:42.173Z] I (540529) RouteLoom: HIL ROUTE peer=1 phase=-1 via=3 metric=2 generation=23 seq=2
+[2026-09-28T18:25:42.180Z] I (540536) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=20 seq=2
+[2026-09-28T18:26:42.138Z] I (600501) RouteLoom: stack hwm main 10252 B
+[2026-09-28T18:26:42.142Z] I (600501) RouteLoom: owner polls=299012 empty=298532 rxq_max=1 max_us rx=3957 bootstrap=5509 node=6810 security=15706
+[2026-09-28T18:26:42.148Z] I (600505) RouteLoom: owner expiry_slots=126780240 hop_accept_expired=0
+[2026-09-28T18:26:42.154Z] I (600511) RouteLoom: HIL HEAP free=115536 largest=100352 min=114752 B
+[2026-09-28T18:26:42.166Z] I (600517) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=33 send_failures=3 kind_rejects=0
+[2026-09-28T18:26:42.173Z] I (600529) RouteLoom: HIL ROUTE peer=1 phase=-1 via=3 metric=2 generation=23 seq=2
+[2026-09-28T18:26:42.180Z] I (600536) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=20 seq=2
+[2026-09-28T18:27:42.139Z] I (660502) RouteLoom: stack hwm main 10252 B
+[2026-09-28T18:27:42.143Z] I (660502) RouteLoom: owner polls=328955 empty=328439 rxq_max=1 max_us rx=3957 bootstrap=5509 node=6810 security=15706
+[2026-09-28T18:27:42.149Z] I (660506) RouteLoom: owner expiry_slots=139476072 hop_accept_expired=0
+[2026-09-28T18:27:42.155Z] I (660512) RouteLoom: HIL HEAP free=115536 largest=100352 min=114752 B
+[2026-09-28T18:27:42.167Z] I (660518) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=36 send_failures=3 kind_rejects=0
+[2026-09-28T18:27:42.174Z] I (660530) RouteLoom: HIL ROUTE peer=1 phase=-1 via=3 metric=2 generation=23 seq=2
+[2026-09-28T18:27:42.181Z] I (660537) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=20 seq=2
+[2026-09-28T18:28:42.140Z] I (720503) RouteLoom: stack hwm main 10252 B
+[2026-09-28T18:28:42.143Z] I (720503) RouteLoom: owner polls=358892 empty=358338 rxq_max=1 max_us rx=3957 bootstrap=5509 node=6810 security=15706
+[2026-09-28T18:28:42.150Z] I (720507) RouteLoom: owner expiry_slots=152169360 hop_accept_expired=0
+[2026-09-28T18:28:42.156Z] I (720513) RouteLoom: HIL HEAP free=115536 largest=100352 min=114752 B
+[2026-09-28T18:28:42.167Z] I (720519) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=39 send_failures=3 kind_rejects=0
+[2026-09-28T18:28:42.174Z] I (720531) RouteLoom: HIL ROUTE peer=1 phase=-1 via=3 metric=2 generation=23 seq=2
+[2026-09-28T18:28:42.182Z] I (720538) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=20 seq=2
+[2026-09-28T18:29:42.140Z] I (780503) RouteLoom: stack hwm main 10252 B
+[2026-09-28T18:29:42.143Z] I (780503) RouteLoom: owner polls=388833 empty=388243 rxq_max=1 max_us rx=3957 bootstrap=5509 node=6810 security=15706
+[2026-09-28T18:29:42.150Z] I (780507) RouteLoom: owner expiry_slots=164864344 hop_accept_expired=0
+[2026-09-28T18:29:42.156Z] I (780513) RouteLoom: HIL HEAP free=115536 largest=100352 min=114752 B
+[2026-09-28T18:29:42.167Z] I (780519) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=42 send_failures=3 kind_rejects=0
+[2026-09-28T18:29:42.174Z] I (780531) RouteLoom: HIL ROUTE peer=1 phase=-1 via=3 metric=2 generation=23 seq=2
+[2026-09-28T18:29:42.182Z] I (780538) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=20 seq=2

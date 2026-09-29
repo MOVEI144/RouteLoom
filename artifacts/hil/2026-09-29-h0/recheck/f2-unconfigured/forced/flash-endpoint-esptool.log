@@ -1,0 +1,104 @@
+$ /home/sahur/.local/bin/esptool --chip esp32c6 --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00 --baud 460800 --before default-reset --after hard-reset write-flash --flash-mode keep --flash-freq keep --flash-size keep 0x0 /tmp/routeloom-hil-flash-t55xwlnd/images/bootloader/bootloader.bin 0x10000 /tmp/routeloom-hil-flash-t55xwlnd/images/ota_data_initial.bin 0x40000 /tmp/routeloom-hil-flash-t55xwlnd/images/application.bin 0x8000 /tmp/routeloom-hil-flash-t55xwlnd/images/partition_table/partition-table.bin
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00:
+Connecting...
+Connected to ESP32-C6 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00:
+Chip type:          ESP32-C6FH4 (QFN32) (revision v0.2)
+Features:           Wi-Fi 6, BT 5 (LE), IEEE802.15.4, Single Core + LP Core, 160MHz, Embedded Flash 4MB
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                10:bd:a3:ff:fe:b1:47:54
+BASE MAC:           10:bd:a3:b1:47:54
+MAC_EXT:            ff:fe
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+Changing baud rate to 460800...
+Changed.
+
+Configuring flash size...
+
+Writing '/tmp/routeloom-hil-flash-t55xwlnd/images/bootloader/bootloader.bin' at 0x00000000...
+Flash will be erased from 0x00000000 to 0x00005fff...
+Compressed 22528 bytes to 14135...
+Writing at 0x00005800 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 13.80kB/13.80kB [0s] 
+Wrote 22528 bytes (14135 compressed) at 0x00000000 in 0.1 seconds (1540.7 kbit/s).
+Verifying written data...
+Hash of data verified.
+
+Writing '/tmp/routeloom-hil-flash-t55xwlnd/images/ota_data_initial.bin' at 0x00010000...
+Flash will be erased from 0x00010000 to 0x00011fff...
+Compressed 8192 bytes to 31...
+Writing at 0x00012000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 31B/31B [0s] 
+Wrote 8192 bytes (31 compressed) at 0x00010000 in 0.0 seconds (4904.2 kbit/s).
+Verifying written data...
+Hash of data verified.
+
+Writing '/tmp/routeloom-hil-flash-t55xwlnd/images/application.bin' at 0x00040000...
+Flash will be erased from 0x00040000 to 0x00196fff...
+Compressed 1401408 bytes to 829363...
+Writing at 0x0004c1e2 ╸                                2.0% 16.00kB/809.92kB [0s] 
+Writing at 0x000580d4 ━                                4.0% 32.00kB/809.92kB [0s] 
+Writing at 0x0005f062 ━╸                               5.9% 48.00kB/809.92kB [0s] 
+Writing at 0x00067d20 ━━                               7.9% 64.00kB/809.92kB [0s] 
+Writing at 0x0006e35b ━━╸                              9.9% 80.00kB/809.92kB [0s] 
+Writing at 0x00074daa ━━━╸                            11.9% 96.00kB/809.92kB [0s] 
+Writing at 0x0007c815 ━━━━                            13.8% 112.00kB/809.92kB [0s] 
+Writing at 0x00083365 ━━━━╸                           15.8% 128.00kB/809.92kB [0s] 
+Writing at 0x0008a186 ━━━━━                           17.8% 144.00kB/809.92kB [0s] 
+Writing at 0x00090f41 ━━━━━╸                          19.8% 160.00kB/809.92kB [0s] 
+Writing at 0x000978e0 ━━━━━━╸                         21.7% 176.00kB/809.92kB [0s] 
+Writing at 0x0009e4de ━━━━━━━                         23.7% 192.00kB/809.92kB [1s] 
+Writing at 0x000a4dcc ━━━━━━━╸                        25.7% 208.00kB/809.92kB [1s] 
+Writing at 0x000ab9d8 ━━━━━━━━                        27.7% 224.00kB/809.92kB [1s] 
+Writing at 0x000b2101 ━━━━━━━━╸                       29.6% 240.00kB/809.92kB [1s] 
+Writing at 0x000b87a2 ━━━━━━━━━                       31.6% 256.00kB/809.92kB [1s] 
+Writing at 0x000bf068 ━━━━━━━━━━                      33.6% 272.00kB/809.92kB [1s] 
+Writing at 0x000c59af ━━━━━━━━━━╸                     35.6% 288.00kB/809.92kB [1s] 
+Writing at 0x000cc130 ━━━━━━━━━━━                     37.5% 304.00kB/809.92kB [1s] 
+Writing at 0x000d2d78 ━━━━━━━━━━━╸                    39.5% 320.00kB/809.92kB [1s] 
+Writing at 0x000d9760 ━━━━━━━━━━━━                    41.5% 336.00kB/809.92kB [1s] 
+Writing at 0x000dfe0f ━━━━━━━━━━━━━                   43.5% 352.00kB/809.92kB [1s] 
+Writing at 0x000e6d10 ━━━━━━━━━━━━━╸                  45.4% 368.00kB/809.92kB [1s] 
+Writing at 0x000edb30 ━━━━━━━━━━━━━━                  47.4% 384.00kB/809.92kB [2s] 
+Writing at 0x000f4bdd ━━━━━━━━━━━━━━╸                 49.4% 400.00kB/809.92kB [2s] 
+Writing at 0x000fb237 ━━━━━━━━━━━━━━━                 51.4% 416.00kB/809.92kB [2s] 
+Writing at 0x00101803 ━━━━━━━━━━━━━━━━                53.3% 432.00kB/809.92kB [2s] 
+Writing at 0x00108c0a ━━━━━━━━━━━━━━━━╸               55.3% 448.00kB/809.92kB [2s] 
+Writing at 0x001101f2 ━━━━━━━━━━━━━━━━━               57.3% 464.00kB/809.92kB [2s] 
+Writing at 0x001173fc ━━━━━━━━━━━━━━━━━╸              59.3% 480.00kB/809.92kB [2s] 
+Writing at 0x0011d3f4 ━━━━━━━━━━━━━━━━━━              61.2% 496.00kB/809.92kB [2s] 
+Writing at 0x0012334b ━━━━━━━━━━━━━━━━━━╸             63.2% 512.00kB/809.92kB [2s] 
+Writing at 0x00129095 ━━━━━━━━━━━━━━━━━━━╸            65.2% 528.00kB/809.92kB [2s] 
+Writing at 0x0012ec1f ━━━━━━━━━━━━━━━━━━━━            67.2% 544.00kB/809.92kB [2s] 
+Writing at 0x00134920 ━━━━━━━━━━━━━━━━━━━━╸           69.1% 560.00kB/809.92kB [2s] 
+Writing at 0x0013a7b5 ━━━━━━━━━━━━━━━━━━━━━           71.1% 576.00kB/809.92kB [3s] 
+Writing at 0x0014151b ━━━━━━━━━━━━━━━━━━━━━╸          73.1% 592.00kB/809.92kB [3s] 
+Writing at 0x0014717a ━━━━━━━━━━━━━━━━━━━━━━╸         75.1% 608.00kB/809.92kB [3s] 
+Writing at 0x0014ce84 ━━━━━━━━━━━━━━━━━━━━━━━         77.0% 624.00kB/809.92kB [3s] 
+Writing at 0x00153479 ━━━━━━━━━━━━━━━━━━━━━━━╸        79.0% 640.00kB/809.92kB [3s] 
+Writing at 0x00159674 ━━━━━━━━━━━━━━━━━━━━━━━━        81.0% 656.00kB/809.92kB [3s] 
+Writing at 0x0015f5f0 ━━━━━━━━━━━━━━━━━━━━━━━━╸       83.0% 672.00kB/809.92kB [3s] 
+Writing at 0x0016521d ━━━━━━━━━━━━━━━━━━━━━━━━━       84.9% 688.00kB/809.92kB [3s] 
+Writing at 0x0016b614 ━━━━━━━━━━━━━━━━━━━━━━━━━━      86.9% 704.00kB/809.92kB [3s] 
+Writing at 0x0017185e ━━━━━━━━━━━━━━━━━━━━━━━━━━╸     88.9% 720.00kB/809.92kB [3s] 
+Writing at 0x00177cd2 ━━━━━━━━━━━━━━━━━━━━━━━━━━━     90.9% 736.00kB/809.92kB [3s] 
+Writing at 0x0017d62a ━━━━━━━━━━━━━━━━━━━━━━━━━━━╸    92.8% 752.00kB/809.92kB [3s] 
+Writing at 0x00184dad ━━━━━━━━━━━━━━━━━━━━━━━━━━━━    94.8% 768.00kB/809.92kB [3s] 
+Writing at 0x0018a4b8 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   96.8% 784.00kB/809.92kB [4s] 
+Writing at 0x001902e5 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸  98.8% 800.00kB/809.92kB [4s] 
+Writing at 0x00196240 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 809.92kB/809.92kB [4s] 
+Wrote 1401408 bytes (829363 compressed) at 0x00040000 in 4.3 seconds (2600.6 kbit/s).
+Verifying written data...
+Hash of data verified.
+
+Writing '/tmp/routeloom-hil-flash-t55xwlnd/images/partition_table/partition-table.bin' at 0x00008000...
+Flash will be erased from 0x00008000 to 0x00008fff...
+Compressed 3072 bytes to 179...
+Writing at 0x00008c00 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 179B/179B [0s] 
+Wrote 3072 bytes (179 compressed) at 0x00008000 in 0.0 seconds (3062.5 kbit/s).
+Verifying written data...
+Hash of data verified.
+
+Hard resetting via RTS pin...

@@ -1,0 +1,9 @@
+[2026-09-29T06:06:52.524Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-29T06:07:51.532Z] I (744257) RouteLoom: stack hwm main 9352 B
+[2026-09-29T06:07:51.535Z] I (744257) RouteLoom: owner polls=226134 empty=155473 rxq_max=1 max_us rx=3047 bootstrap=585222 node=2962 security=828454
+[2026-09-29T06:07:51.541Z] I (744261) RouteLoom: owner expiry_slots=66064712 hop_accept_expired=0
+[2026-09-29T06:07:51.548Z] I (744267) RouteLoom: HIL HEAP free=138680 largest=122880 min=137892 B
+[2026-09-29T06:07:51.559Z] I (744273) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=27 send_failures=6 kind_rejects=0
+[2026-09-29T06:07:51.566Z] I (744285) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-29T06:07:51.573Z] I (744292) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=8 seq=1
+[2026-09-29T06:07:57.583Z] !! capture closed

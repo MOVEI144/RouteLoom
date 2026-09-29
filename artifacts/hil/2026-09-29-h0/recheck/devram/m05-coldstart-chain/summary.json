@@ -1,0 +1,77 @@
+[
+  {
+    "rep": 0,
+    "reset_release_skew_ms": 0.495,
+    "daemon_start_after_release_s": 2.075,
+    "auth_after_release_s": 2.328,
+    "routes_after_release_s": {
+      "0000000000000002": 2.328,
+      "0000000000000003": 2.835
+    },
+    "all_routes_after_release_s": 2.835,
+    "after_sends": {
+      "2": 10,
+      "3": 10
+    }
+  },
+  {
+    "rep": 1,
+    "reset_release_skew_ms": 0.473,
+    "daemon_start_after_release_s": 2.074,
+    "auth_after_release_s": 2.327,
+    "routes_after_release_s": {
+      "0000000000000002": 9.93,
+      "0000000000000003": 10.944
+    },
+    "all_routes_after_release_s": 10.944,
+    "after_sends": {
+      "2": 10,
+      "3": 10
+    }
+  },
+  {
+    "rep": 2,
+    "reset_release_skew_ms": 0.365,
+    "daemon_start_after_release_s": 2.074,
+    "auth_after_release_s": 2.328,
+    "routes_after_release_s": {
+      "0000000000000002": 2.328,
+      "0000000000000003": 2.328
+    },
+    "all_routes_after_release_s": 2.328,
+    "after_sends": {
+      "2": 10,
+      "3": 10
+    }
+  },
+  {
+    "rep": 3,
+    "reset_release_skew_ms": 0.367,
+    "daemon_start_after_release_s": 2.073,
+    "auth_after_release_s": 2.325,
+    "routes_after_release_s": {
+      "0000000000000002": 8.914,
+      "0000000000000003": 9.928
+    },
+    "all_routes_after_release_s": 9.928,
+    "after_sends": {
+      "2": 10,
+      "3": 10
+    }
+  },
+  {
+    "rep": 4,
+    "reset_release_skew_ms": 0.352,
+    "daemon_start_after_release_s": 2.074,
+    "auth_after_release_s": 2.328,
+    "routes_after_release_s": {
+      "0000000000000002": 2.328,
+      "0000000000000003": 6.386
+    },
+    "all_routes_after_release_s": 6.386,
+    "after_sends": {
+      "2": 10,
+      "3": 10
+    }
+  }
+]

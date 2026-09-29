@@ -1,0 +1,114 @@
+{
+  "2": {
+    "primitive": {
+      "ECDH": {
+        "count": 4,
+        "min_us": 124182,
+        "median_us": 124544.5,
+        "p95_us": 124824.75,
+        "max_us": 124848,
+        "failed": 0
+      },
+      "SIGN": {
+        "count": 4,
+        "min_us": 131299,
+        "median_us": 131485.5,
+        "p95_us": 131576.0,
+        "max_us": 131588,
+        "failed": 0
+      },
+      "VERIFY": {
+        "count": 4,
+        "min_us": 145900,
+        "median_us": 147454.0,
+        "p95_us": 149389.7,
+        "max_us": 149696,
+        "failed": 0
+      }
+    },
+    "handshake": {
+      "count": 3,
+      "min_us": 1624324,
+      "median_us": 1871736,
+      "p95_us": 2169224.7,
+      "max_us": 2202279
+    },
+    "handshake_by_scope": {
+      "0": {
+        "count": 2,
+        "min_us": 1624324,
+        "median_us": 1748030.0,
+        "p95_us": 1859365.4,
+        "max_us": 1871736
+      },
+      "1": {
+        "count": 1,
+        "min_us": 2202279,
+        "median_us": 2202279,
+        "p95_us": 2202279.0,
+        "max_us": 2202279
+      }
+    },
+    "lowest_handshake_heap_free_b": 115372,
+    "lowest_handshake_heap_min_b": 114544,
+    "stack_min_remaining_b": {
+      "main": 7580
+    }
+  },
+  "3": {
+    "primitive": {
+      "ECDH": {
+        "count": 5,
+        "min_us": 126806,
+        "median_us": 126972,
+        "p95_us": 127448.4,
+        "max_us": 127547,
+        "failed": 0
+      },
+      "SIGN": {
+        "count": 5,
+        "min_us": 133871,
+        "median_us": 134082,
+        "p95_us": 134559.6,
+        "max_us": 134620,
+        "failed": 0
+      },
+      "VERIFY": {
+        "count": 5,
+        "min_us": 146219,
+        "median_us": 148255,
+        "p95_us": 150329.4,
+        "max_us": 150763,
+        "failed": 0
+      }
+    },
+    "handshake": {
+      "count": 2,
+      "min_us": 1780855,
+      "median_us": 2411025.5,
+      "p95_us": 2978178.95,
+      "max_us": 3041196
+    },
+    "handshake_by_scope": {
+      "0": {
+        "count": 1,
+        "min_us": 1780855,
+        "median_us": 1780855,
+        "p95_us": 1780855.0,
+        "max_us": 1780855
+      },
+      "1": {
+        "count": 1,
+        "min_us": 3041196,
+        "median_us": 3041196,
+        "p95_us": 3041196.0,
+        "max_us": 3041196
+      }
+    },
+    "lowest_handshake_heap_free_b": 124188,
+    "lowest_handshake_heap_min_b": 123296,
+    "stack_min_remaining_b": {
+      "main": 9352
+    }
+  }
+}

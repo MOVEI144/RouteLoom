@@ -1,0 +1,67 @@
+{
+  "app": "reference_node",
+  "app_only": false,
+  "board": "relay",
+  "boot_log": "flash-relay-boot.log",
+  "chip": "esp32c6",
+  "cmd": [
+    "/home/sahur/.local/bin/esptool",
+    "--chip",
+    "esp32c6",
+    "--port",
+    "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00",
+    "--baud",
+    "460800",
+    "--before",
+    "default-reset",
+    "--after",
+    "hard-reset",
+    "write-flash",
+    "--flash-mode",
+    "keep",
+    "--flash-freq",
+    "keep",
+    "--flash-size",
+    "keep",
+    "0x0",
+    "/tmp/routeloom-hil-flash-430hxteu/images/bootloader/bootloader.bin",
+    "0x10000",
+    "/tmp/routeloom-hil-flash-430hxteu/images/ota_data_initial.bin",
+    "0x40000",
+    "/tmp/routeloom-hil-flash-430hxteu/images/application.bin",
+    "0x8000",
+    "/tmp/routeloom-hil-flash-430hxteu/images/partition_table/partition-table.bin"
+  ],
+  "error": null,
+  "esptool_log": "flash-relay-esptool.log",
+  "exit_code": 0,
+  "fallback_offsets": false,
+  "files": {
+    "0x0": {
+      "path": "/tmp/routeloom-hil-flash-430hxteu/images/bootloader/bootloader.bin",
+      "sha256": "a93e71a1e05122fdd3d1438af0c3a163b22109128c45170154214f53bb78011f"
+    },
+    "0x10000": {
+      "path": "/tmp/routeloom-hil-flash-430hxteu/images/ota_data_initial.bin",
+      "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"
+    },
+    "0x40000": {
+      "path": "/tmp/routeloom-hil-flash-430hxteu/images/application.bin",
+      "sha256": "3486041f7395665e85053a1175fc0e8acb70ccabc5edb78183cc8e6d6fc782df"
+    },
+    "0x8000": {
+      "path": "/tmp/routeloom-hil-flash-430hxteu/images/partition_table/partition-table.bin",
+      "sha256": "d75f28068a6e44a2a4075a490c5993c220f24cfc1862cb79e27f64357ee9ec6b"
+    }
+  },
+  "finished_utc": "2026-09-28T17:41:50.909Z",
+  "ok": true,
+  "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00",
+  "preflight": {
+    "chip": "esp32c6",
+    "flash_bytes": 4194304,
+    "log": "flash-relay-preflight.log",
+    "mac": "10:bd:a3:ff:fe:b1:48:a8"
+  },
+  "started_utc": "2026-09-28T17:41:37.168Z"
+}

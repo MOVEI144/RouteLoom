@@ -503,11 +503,17 @@ def main(argv: Optional[list[str]] = None) -> int:
               f"(matches: {matches or 'none'}) — nothing flashed", file=sys.stderr)
         return 3
 
-    manifest = flash_board(
-        board, port, args.out, esptool=args.esptool, app_only=args.app_only,
-        boot_seconds=args.boot_seconds, timeout_s=args.timeout,
-        image_dir=args.image_dir, allow_unconfigured=args.allow_unconfigured,
-    )
+    try:
+        manifest = flash_board(
+            board, port, args.out, esptool=args.esptool, app_only=args.app_only,
+            boot_seconds=args.boot_seconds, timeout_s=args.timeout,
+            image_dir=args.image_dir, allow_unconfigured=args.allow_unconfigured,
+        )
+    except FlashError as exc:
+        # A refusal before any write (blank rlcfg, bundle/board mismatch,
+        # preflight) is an operator answer, not a crash.
+        print(f"flash refused: {exc} — nothing flashed", file=sys.stderr)
+        return 4
     manifest_path = os.path.join(args.out, f"flash-{board.name}.json")
     with open(manifest_path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2, sort_keys=True)

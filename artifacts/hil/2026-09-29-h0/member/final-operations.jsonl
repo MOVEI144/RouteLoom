@@ -1,0 +1,6 @@
+{"v":1,"request_id":"ctl-1456893","ok":true,"result":{"operation_id":"op-0000000000000004","kind":"rotate","from":1,"to":2,"cause":"manual","state":"converged","created_ms":1790624330669}}
+
+{"v":1,"request_id":"ctl-1456900","ok":true,"result":{"operation_id":"op-0000000000000005","kind":"revoke","device_id":"0000000000000003","generation":1,"state":"distributing","rs_epoch":2,"distribution":{"state":"distributing","applied":0,"retired":0,"unknown":2,"total":2,"reached":0,"members":2},"gk_rotation":{"from":2,"to":3,"state":"converged"},"notice":{"delivery":"sent","intent_confirmed":false,"erase_confirmed":null},"created_ms":1790624402583}}
+
+{"v":1,"request_id":"ctl-1456912","ok":true,"result":{"operation_id":"op-0000000000000006","kind":"cutover","phase":"waiting_gateway","expected_site_epoch":1,"new_site_epoch":2,"revision":1,"prepared":0,"applied":0,"recovered":0,"unknown":2,"total":2,"waiting_gateway":true,"recovery_pending":false,"deadline_remaining_ms":0,"commit_rs_epoch":0,"created_ms":1790624471383}}
+
