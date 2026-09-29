@@ -449,6 +449,11 @@ def sdkconfig_errors(data: dict, cell: dict, text: str) -> list[str]:
         if symbol in named:
             continue
         errors += [f"unexpected `{symbol}={v}`" for v in values if f"{symbol}={v}" in lines]
+    supported_modes = {"CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y",
+                       "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"}
+    errors += [f"unsupported security mode `{line}`" for line in lines
+               if line.startswith("CONFIG_ROUTELOOM_SECURITY_MODE_")
+               and line.endswith("=y") and line not in supported_modes]
     return errors
 
 

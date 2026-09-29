@@ -170,6 +170,11 @@ class Sdkconfig(unittest.TestCase):
         self.assertEqual(check.sdkconfig_errors(self.DATA, cell, "CONFIG_P=5000\nCONFIG_M=2\n"),
                          ["missing `CONFIG_A=y`", "unexpected `CONFIG_M=2`"])
 
+    def test_retired_security_mode_is_refused(self):
+        old = "CONFIG_ROUTELOOM_SECURITY_MODE_" + "LEGACY" + "_FIXTURE=y"
+        cell = {"overlay": [], "expect": []}
+        self.assertTrue(check.sdkconfig_errors(self.DATA, cell, old + "\n"))
+
 
 class HilMatrix(unittest.TestCase):
     def test_result_points_to_the_packaged_ram_report(self):
