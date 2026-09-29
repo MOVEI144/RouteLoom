@@ -1,0 +1,237 @@
+[2026-09-29T21:55:30.042+00:00] !! opened
+[2026-09-29T21:55:30.643+00:00] I (24845) RouteLoomRef: HIL GW SEND i=1 state=5 reason=6 detail=I (123339) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:55:35.652+00:00] I (128339) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T21:55:38.656+00:00] I (131339) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:55:43.667+00:00] I (136340) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T21:55:46.673+00:00] I (139342) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:55:51.680+00:00] I (144342) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T21:55:54.685+00:00] I (147344) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:55:59.692+00:00] I (152344) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T21:56:02.698+00:00] I (155345) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:56:07.705+00:00] I (160347) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T21:56:10.710+00:00] I (163349) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:56:15.723+00:00] I (168351) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T21:56:18.727+00:00] I (171354) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:56:23.733+00:00] I (176355) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T21:56:26.738+00:00] I (179358) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:56:27.939+00:00] I (180725) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T21:56:28.140+00:00] I (180725) RouteLoom: owner polls=44193 empty=43828 rxq_max=1 max_us rx=2849 bootstrap=492660 node=3591 security=696565
+[2026-09-29T21:56:28.140+00:00] I (180729) RouteLoom: owner expiry_slots=15908760 hop_accept_expired=4
+[2026-09-29T21:56:28.140+00:00] I (180735) RouteLoom: HIL HEAP free=83592 largest=67584 min=82760 B
+[2026-09-29T21:56:28.140+00:00] I (180741) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=3 stale=1 probes=30 send_failures=59 kind_rejects=0
+[2026-09-29T21:56:28.140+00:00] I (180753) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=1
+[2026-09-29T21:56:28.140+00:00] I (180760) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=29 seq=4
+[2026-09-29T21:56:31.744+00:00] I (184358) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T21:56:34.749+00:00] I (187358) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:56:39.756+00:00] I (192358) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T21:56:42.761+00:00] I (195359) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:56:47.768+00:00] I (200361) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T21:56:50.772+00:00] I (203364) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:56:55.577+00:00] I (208364) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T21:56:58.581+00:00] I (211366) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:57:03.590+00:00] I (216366) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T21:57:06.596+00:00] I (219366) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:57:11.603+00:00] I (224367) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T21:57:14.606+00:00] I (227369) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:57:19.613+00:00] I (232369) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T21:57:22.617+00:00] I (235370) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:57:27.669+00:00] I (240371) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T21:57:28.069+00:00] I (240726) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T21:57:28.069+00:00] I (240726) RouteLoom: owner polls=59158 empty=58737 rxq_max=1 max_us rx=2849 bootstrap=492660 node=3591 security=696565
+[2026-09-29T21:57:28.069+00:00] I (240730) RouteLoom: owner expiry_slots=21296160 hop_accept_expired=4
+[2026-09-29T21:57:28.069+00:00] I (240736) RouteLoom: HIL HEAP free=83592 largest=67584 min=82760 B
+[2026-09-29T21:57:28.069+00:00] I (240742) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=3 stale=1 probes=36 send_failures=59 kind_rejects=0
+[2026-09-29T21:57:28.069+00:00] I (240754) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=1
+[2026-09-29T21:57:28.069+00:00] I (240761) RouteLoom: HIL ROUTE peer=3 phase=5 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:57:30.672+00:00] I (243371) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:57:35.679+00:00] I (248373) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T21:57:38.688+00:00] I (251375) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:57:43.695+00:00] I (256378) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T21:57:46.700+00:00] I (259380) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:57:46.700+00:00] I (259426) RouteLoomRef: message origin=1 session=3727643951 sequence=31 bytes=6
+[2026-09-29T21:57:47.501+00:00] I (260220) RouteLoomRef: message origin=1 session=3727643951 sequence=32 bytes=6
+[2026-09-29T21:57:48.302+00:00] I (261024) RouteLoomRef: message origin=1 session=3727643951 sequence=33 bytes=6
+[2026-09-29T21:57:49.103+00:00] I (261837) RouteLoomRef: message origin=1 session=3727643951 sequence=34 bytes=6
+[2026-09-29T21:57:49.904+00:00] I (262643) RouteLoomRef: message origin=1 session=3727643951 sequence=35 bytes=6
+[2026-09-29T21:57:50.705+00:00] I (263441) RouteLoomRef: message origin=1 session=3727643951 sequence=36 bytes=6
+[2026-09-29T21:57:51.506+00:00] I (264245) RouteLoomRef: message origin=1 session=3727643951 sequence=37 bytes=6
+[2026-09-29T21:57:51.706+00:00] I (264381) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T21:57:52.307+00:00] I (265053) RouteLoomRef: message origin=1 session=3727643951 sequence=38 bytes=6
+[2026-09-29T21:57:53.108+00:00] I (265855) RouteLoomRef: message origin=1 session=3727643951 sequence=39 bytes=6
+[2026-09-29T21:57:53.909+00:00] I (266658) RouteLoomRef: message origin=1 session=3727643951 sequence=40 bytes=6
+[2026-09-29T21:57:54.710+00:00] I (267383) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:57:54.710+00:00] I (267464) RouteLoomRef: message origin=1 session=3727643951 sequence=41 bytes=6
+[2026-09-29T21:57:55.510+00:00] I (268268) RouteLoomRef: message origin=1 session=3727643951 sequence=42 bytes=6
+[2026-09-29T21:57:56.311+00:00] I (269071) RouteLoomRef: message origin=1 session=3727643951 sequence=43 bytes=6
+[2026-09-29T21:57:57.112+00:00] I (269874) RouteLoomRef: message origin=1 session=3727643951 sequence=44 bytes=6
+[2026-09-29T21:57:57.913+00:00] I (270680) RouteLoomRef: message origin=1 session=3727643951 sequence=45 bytes=6
+[2026-09-29T21:57:58.714+00:00] I (271477) RouteLoomRef: message origin=1 session=3727643951 sequence=46 bytes=6
+[2026-09-29T21:57:59.515+00:00] I (272279) RouteLoomRef: message origin=1 session=3727643951 sequence=47 bytes=6
+[2026-09-29T21:57:59.715+00:00] I (272383) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T21:58:00.316+00:00] I (273085) RouteLoomRef: message origin=1 session=3727643951 sequence=48 bytes=6
+[2026-09-29T21:58:01.117+00:00] I (273890) RouteLoomRef: message origin=1 session=3727643951 sequence=49 bytes=6
+[2026-09-29T21:58:01.918+00:00] I (274693) RouteLoomRef: message origin=1 session=3727643951 sequence=50 bytes=6
+[2026-09-29T21:58:02.719+00:00] I (275383) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:58:07.725+00:00] I (280385) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T21:58:10.729+00:00] I (283387) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:58:15.735+00:00] I (288388) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T21:58:18.739+00:00] I (291390) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:58:23.745+00:00] I (296392) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T21:58:26.750+00:00] I (299395) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:58:27.952+00:00] I (300729) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T21:58:27.952+00:00] I (300729) RouteLoom: owner polls=74071 empty=73496 rxq_max=1 max_us rx=4055 bootstrap=492660 node=3591 security=696565
+[2026-09-29T21:58:27.952+00:00] I (300733) RouteLoom: owner expiry_slots=26664840 hop_accept_expired=4
+[2026-09-29T21:58:28.152+00:00] I (300739) RouteLoom: HIL HEAP free=83592 largest=67584 min=82760 B
+[2026-09-29T21:58:28.152+00:00] I (300745) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=3 stale=1 probes=44 send_failures=61 kind_rejects=0
+[2026-09-29T21:58:28.152+00:00] I (300757) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=1
+[2026-09-29T21:58:28.152+00:00] I (300764) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=29 seq=4
+[2026-09-29T21:58:31.756+00:00] I (304395) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T21:58:34.761+00:00] I (307398) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:58:39.768+00:00] I (312399) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T21:58:42.772+00:00] I (315401) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:58:47.778+00:00] I (320403) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T21:58:50.782+00:00] I (323405) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:58:55.788+00:00] I (328408) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T21:58:58.792+00:00] I (331411) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:59:03.798+00:00] I (336414) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T21:59:06.802+00:00] I (339414) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:59:11.808+00:00] I (344414) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T21:59:14.813+00:00] I (347414) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:59:19.823+00:00] I (352415) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T21:59:22.827+00:00] I (355417) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:59:27.633+00:00] I (360418) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T21:59:28.034+00:00] I (360729) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T21:59:28.034+00:00] I (360729) RouteLoom: owner polls=89035 empty=88404 rxq_max=1 max_us rx=4055 bootstrap=492660 node=3730 security=696565
+[2026-09-29T21:59:28.034+00:00] I (360733) RouteLoom: owner expiry_slots=32051880 hop_accept_expired=4
+[2026-09-29T21:59:28.034+00:00] I (360739) RouteLoom: HIL HEAP free=83592 largest=67584 min=82760 B
+[2026-09-29T21:59:28.034+00:00] I (360745) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=3 stale=1 probes=50 send_failures=61 kind_rejects=0
+[2026-09-29T21:59:28.034+00:00] I (360757) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=1
+[2026-09-29T21:59:28.034+00:00] I (360764) RouteLoom: HIL ROUTE peer=3 phase=5 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:59:30.637+00:00] I (363418) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:59:35.643+00:00] I (368418) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T21:59:38.646+00:00] I (371420) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:59:43.653+00:00] I (376422) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T21:59:46.656+00:00] I (379424) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:59:51.663+00:00] I (384426) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T21:59:54.667+00:00] I (387429) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T21:59:59.673+00:00] I (392432) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:00:02.677+00:00] I (395432) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:00:07.683+00:00] I (400435) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:00:10.687+00:00] I (403437) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:00:15.694+00:00] I (408438) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:00:18.697+00:00] I (411440) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:00:23.704+00:00] I (416442) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:00:26.707+00:00] I (419442) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:00:28.110+00:00] I (420732) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:00:28.110+00:00] I (420732) RouteLoom: owner polls=103997 empty=103303 rxq_max=1 max_us rx=4055 bootstrap=492660 node=3730 security=696565
+[2026-09-29T22:00:28.110+00:00] I (420736) RouteLoom: owner expiry_slots=37438200 hop_accept_expired=4
+[2026-09-29T22:00:28.110+00:00] I (420743) RouteLoom: HIL HEAP free=83592 largest=67584 min=82760 B
+[2026-09-29T22:00:28.110+00:00] I (420748) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=3 stale=1 probes=57 send_failures=62 kind_rejects=0
+[2026-09-29T22:00:28.110+00:00] I (420760) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=1
+[2026-09-29T22:00:28.110+00:00] I (420767) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=29 seq=4
+[2026-09-29T22:00:31.715+00:00] I (424442) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:00:34.719+00:00] I (427445) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:00:39.724+00:00] I (432446) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:00:42.727+00:00] I (435449) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:00:47.732+00:00] I (440452) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:00:50.735+00:00] I (443454) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:00:55.742+00:00] I (448457) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:00:58.745+00:00] I (451458) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:01:03.752+00:00] I (456458) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:01:06.756+00:00] I (459460) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:01:11.762+00:00] I (464461) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:01:14.766+00:00] I (467463) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:01:19.772+00:00] I (472463) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:01:22.775+00:00] I (475465) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:01:27.783+00:00] I (480467) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:01:27.983+00:00] I (480734) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:01:27.983+00:00] I (480734) RouteLoom: owner polls=118958 empty=118202 rxq_max=1 max_us rx=4055 bootstrap=492660 node=3730 security=696565
+[2026-09-29T22:01:27.983+00:00] I (480738) RouteLoom: owner expiry_slots=42824160 hop_accept_expired=4
+[2026-09-29T22:01:27.983+00:00] I (480744) RouteLoom: HIL HEAP free=83592 largest=67584 min=82760 B
+[2026-09-29T22:01:27.983+00:00] I (480750) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=3 stale=1 probes=65 send_failures=64 kind_rejects=0
+[2026-09-29T22:01:27.983+00:00] I (480762) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=1
+[2026-09-29T22:01:28.183+00:00] I (480769) RouteLoom: HIL ROUTE peer=3 phase=5 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:01:30.787+00:00] I (483469) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:01:35.794+00:00] I (488472) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:01:38.798+00:00] I (491472) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:01:43.806+00:00] I (496472) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:01:46.810+00:00] I (499474) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:01:51.816+00:00] I (504476) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:01:54.820+00:00] I (507476) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:01:59.826+00:00] I (512479) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:02:02.830+00:00] I (515479) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:02:07.837+00:00] I (520481) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:02:10.840+00:00] I (523483) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:02:15.847+00:00] I (528485) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:02:18.850+00:00] I (531488) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:02:23.857+00:00] I (536490) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:02:26.861+00:00] I (539492) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:02:28.062+00:00] I (540735) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:02:28.062+00:00] I (540735) RouteLoom: owner polls=133920 empty=133103 rxq_max=1 max_us rx=4055 bootstrap=492660 node=3730 security=696565
+[2026-09-29T22:02:28.062+00:00] I (540739) RouteLoom: owner expiry_slots=48210480 hop_accept_expired=4
+[2026-09-29T22:02:28.062+00:00] I (540745) RouteLoom: HIL HEAP free=83592 largest=67584 min=82760 B
+[2026-09-29T22:02:28.062+00:00] I (540751) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=3 stale=1 probes=71 send_failures=64 kind_rejects=0
+[2026-09-29T22:02:28.062+00:00] I (540763) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=1
+[2026-09-29T22:02:28.062+00:00] I (540770) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=29 seq=4
+[2026-09-29T22:02:31.867+00:00] I (544494) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:02:34.871+00:00] I (547496) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:02:39.877+00:00] I (552497) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:02:42.881+00:00] I (555500) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:02:47.888+00:00] I (560502) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:02:50.892+00:00] I (563504) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:02:55.898+00:00] I (568506) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:02:58.902+00:00] I (571506) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:03:03.909+00:00] I (576507) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:03:06.913+00:00] I (579510) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:03:11.921+00:00] I (584511) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:03:14.724+00:00] I (587512) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:03:19.731+00:00] I (592512) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:03:22.734+00:00] I (595512) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:03:27.741+00:00] I (600513) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:03:28.141+00:00] I (600736) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:03:28.141+00:00] I (600736) RouteLoom: owner polls=148881 empty=148002 rxq_max=1 max_us rx=4055 bootstrap=492660 node=3730 security=696565
+[2026-09-29T22:03:28.141+00:00] I (600740) RouteLoom: owner expiry_slots=53596440 hop_accept_expired=4
+[2026-09-29T22:03:28.141+00:00] I (600746) RouteLoom: HIL HEAP free=83592 largest=67584 min=82760 B
+[2026-09-29T22:03:28.141+00:00] I (600752) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=3 stale=1 probes=79 send_failures=66 kind_rejects=0
+[2026-09-29T22:03:28.141+00:00] I (600764) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=1
+[2026-09-29T22:03:28.141+00:00] I (600771) RouteLoom: HIL ROUTE peer=3 phase=5 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:03:30.745+00:00] I (603515) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:03:35.751+00:00] I (608518) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:03:38.755+00:00] I (611521) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:03:43.762+00:00] I (616523) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:03:46.766+00:00] I (619525) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:03:51.772+00:00] I (624526) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:03:54.776+00:00] I (627527) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:03:59.782+00:00] I (632530) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:04:02.786+00:00] I (635533) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:04:07.792+00:00] I (640535) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:04:10.796+00:00] I (643535) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:04:15.802+00:00] I (648535) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:04:17.605+00:00] I (650354) RouteLoomRef: discovery event=STALE peer=3
+[2026-09-29T22:04:17.605+00:00] W (650354) RouteLoomRef: diagnostic reason=STALE peer=3 message=none
+[2026-09-29T22:04:18.806+00:00] I (651537) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:04:19.407+00:00] W (652028) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=3 message=present
+[2026-09-29T22:04:19.407+00:00] I (652050) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-29T22:04:19.407+00:00] W (652050) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-29T22:04:19.407+00:00] W (652052) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=3 seq=5 att=1 peer=3 message=none
+[2026-09-29T22:04:21.410+00:00] W (654053) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=3 seq=5 att=2 peer=3 message=none
+[2026-09-29T22:04:23.813+00:00] I (656539) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:04:26.817+00:00] I (659541) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:04:28.018+00:00] I (660736) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:04:28.018+00:00] I (660736) RouteLoom: owner polls=163814 empty=162839 rxq_max=1 max_us rx=4055 bootstrap=492660 node=10439 security=696565
+[2026-09-29T22:04:28.018+00:00] I (660740) RouteLoom: owner expiry_slots=58972320 hop_accept_expired=4
+[2026-09-29T22:04:28.018+00:00] I (660747) RouteLoom: HIL HEAP free=83592 largest=67584 min=82760 B
+[2026-09-29T22:04:28.018+00:00] I (660753) RouteLoom: HIL DISCOVERY candidates=2 neighbors=2 capacity=0 auth=4 stale=2 probes=96 send_failures=67 kind_rejects=0
+[2026-09-29T22:04:28.018+00:00] I (660764) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=2
+[2026-09-29T22:04:28.018+00:00] I (660771) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=29 seq=6
+[2026-09-29T22:04:31.822+00:00] I (664544) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:04:34.826+00:00] I (667547) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:04:39.833+00:00] I (672547) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:04:42.836+00:00] I (675549) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:04:47.842+00:00] I (680551) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:04:50.846+00:00] I (683552) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:04:55.852+00:00] I (688554) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:04:58.857+00:00] I (691554) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:05:03.865+00:00] I (696557) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:05:06.869+00:00] I (699560) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:05:11.875+00:00] I (704561) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0

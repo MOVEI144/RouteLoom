@@ -1,0 +1,45 @@
+{
+  "daemon_start_after_release_s": 2.08,
+  "reset_release_skew_ms": 0.361,
+  "auth_after_release_s": 2.34,
+  "routes_after_release_s": {},
+  "all_routes_after_release_s": null,
+  "bridge_heap_after_boot": [
+    {
+      "uptime_ms": 152263,
+      "free_bytes": 34152,
+      "min_bytes": 33308,
+      "largest_bytes": 31744
+    },
+    {
+      "uptime_ms": 152263,
+      "free_bytes": 34152,
+      "min_bytes": 33308,
+      "largest_bytes": 31744
+    },
+    {
+      "uptime_ms": 162275,
+      "free_bytes": 34152,
+      "min_bytes": 33308,
+      "largest_bytes": 31744
+    }
+  ],
+  "bridge_heap_after_traffic": {
+    "uptime_ms": 365489,
+    "free_bytes": 34152,
+    "min_bytes": 33308,
+    "largest_bytes": 31744
+  },
+  "traffic": {
+    "accepted": 100,
+    "states": {
+      "delivered": 100
+    },
+    "delivered": 100,
+    "p50_ms": 113.43,
+    "p95_ms": 167.09,
+    "p99_ms": 169.82,
+    "max_ms": 171.0,
+    "mean_ms": 119.3
+  }
+}

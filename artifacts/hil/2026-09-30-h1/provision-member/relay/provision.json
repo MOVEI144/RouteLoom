@@ -1,0 +1,75 @@
+{
+  "board": "relay",
+  "node": "0000000000000002",
+  "role": "bench",
+  "setup_bundle": "h1-setup-ref-c6-member",
+  "field_bundle": "h1-rl-os",
+  "erase": "ok",
+  "config": {
+    "generation": 1,
+    "node": "0000000000000002",
+    "role": "reference",
+    "security": "member",
+    "secrets_generation": "0",
+    "fingerprint": "-",
+    "secrets_fingerprint": ""
+  },
+  "identity_status": "OK identity=sealed pending=0 locked=1 node=0000000000000002 kid=bf689dc8a44cb79bd6872936428a3b1d0fc97aae8cf4c8e0d9aa8c9ea74d4a1b serial=302 devcert_sha256=941fcd918acecafe485af5ebd9f4f39c8f5e2f5c8181c",
+  "nvs_after_identity": {
+    "rlcfg": {
+      "sha256": "5da23dc5d35cc6c4abdf556c10945ac068a614e23a5672c5ac3382ce4ec05065",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "089752daefad776a1c9ddb25fa0dbf33da86094b38013cc2a7622f77833dbf44",
+      "blank": false
+    }
+  },
+  "app_only": {
+    "identity": {
+      "chip": "esp32c6",
+      "mac": "10:bd:a3:ff:fe:b1:48:a8",
+      "log": "flash-relay-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "4d60291c80addfcb4b576a1f3f627a8f1532593d54288ef923b5ac21102e89c1",
+    "app_bytes": 1235056,
+    "bundle": "hil-h1-rl-os-reference_node-esp32c6"
+  },
+  "nvs_after_app_write": {
+    "rlcfg": {
+      "sha256": "5da23dc5d35cc6c4abdf556c10945ac068a614e23a5672c5ac3382ce4ec05065",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "089752daefad776a1c9ddb25fa0dbf33da86094b38013cc2a7622f77833dbf44",
+      "blank": false
+    }
+  },
+  "nvs_preserved": {
+    "rlcfg": true,
+    "rlkeys": true,
+    "rlsec": true
+  },
+  "readback": {
+    "stage": "readback",
+    "mono_ms": 498050433,
+    "wall": "2026-09-29T20:25:20Z",
+    "source": "boot",
+    "node": "0000000000000002",
+    "kid": "bf689dc8a44cb79bd6872936428a3b1d0fc97aae8cf4c8e0d9aa8c9ea74d4a1b",
+    "devcert_sha256": "941fcd918acecafe485af5ebd9f4f39c8f5e2f5c8181ceeaeb40b9ef9dd396ca",
+    "fw": "1",
+    "app_sha256": "7d8ae6b5895759646f02a43d0d208f1a42b49ff0616bffac37c819559f782689",
+    "config_generation": 1,
+    "secrets_generation": 0
+  }
+}

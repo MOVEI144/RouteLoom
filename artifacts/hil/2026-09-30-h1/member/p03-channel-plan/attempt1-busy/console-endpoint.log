@@ -1,0 +1,62 @@
+[2026-09-29T21:55:30.020+00:00] !! opened
+[2026-09-29T21:57:30.781+00:00] W (95513) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=2W (341698) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-29T22:03:57.706+00:00] W (728610) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:03:57.706+00:00] W (728614) RouteLoomRef: diagnostic reason=session unknown context peer=2 message=none
+[2026-09-29T22:03:59.709+00:00] W (730619) RouteLoomRef: diagnostic reason=session unknown context peer=2 message=none
+[2026-09-29T22:04:00.310+00:00] W (731345) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:04:01.712+00:00] W (732621) RouteLoomRef: diagnostic reason=session unknown context peer=2 message=none
+[2026-09-29T22:04:02.513+00:00] W (733485) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:04:03.714+00:00] W (734622) RouteLoomRef: diagnostic reason=session unknown context peer=2 message=none
+[2026-09-29T22:04:03.915+00:00] W (734807) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:04:04.515+00:00] W (735491) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:04:05.517+00:00] W (736361) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:04:05.717+00:00] W (736626) RouteLoomRef: diagnostic reason=session unknown context peer=2 message=none
+[2026-09-29T22:04:06.518+00:00] W (737491) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:04:07.720+00:00] W (738626) RouteLoomRef: diagnostic reason=session unknown context peer=2 message=none
+[2026-09-29T22:04:08.521+00:00] W (739494) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:04:08.721+00:00] W (739624) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:04:09.722+00:00] W (740628) RouteLoomRef: diagnostic reason=session unknown context peer=2 message=none
+[2026-09-29T22:04:09.722+00:00] W (740711) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:04:10.523+00:00] W (741375) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:04:10.523+00:00] W (741495) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:04:10.924+00:00] W (741804) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:04:10.924+00:00] W (741857) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:04:11.725+00:00] W (742632) RouteLoomRef: diagnostic reason=session unknown context peer=2 message=none
+[2026-09-29T22:04:11.925+00:00] W (742904) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:04:12.526+00:00] W (743498) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:04:13.127+00:00] W (744010) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:04:13.728+00:00] W (744634) RouteLoomRef: diagnostic reason=session unknown context peer=2 message=none
+[2026-09-29T22:04:14.128+00:00] W (745126) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:04:14.529+00:00] W (745500) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:04:14.729+00:00] W (745590) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:04:15.330+00:00] W (746183) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:04:15.530+00:00] W (746388) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:04:15.730+00:00] W (746638) RouteLoomRef: diagnostic reason=session unknown context peer=2 message=none
+[2026-09-29T22:04:16.331+00:00] W (747249) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:04:16.531+00:00] W (747503) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:04:17.332+00:00] W (748318) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:04:17.733+00:00] W (748593) RouteLoomRef: diagnostic reason=STALE peer=2 message=none
+[2026-09-29T22:04:17.733+00:00] W (748639) RouteLoomRef: diagnostic reason=session unknown context peer=2 message=none
+[2026-09-29T22:04:18.334+00:00] W (749345) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:04:18.534+00:00] W (749504) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:04:18.934+00:00] W (749931) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:04:19.335+00:00] W (750218) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:04:19.335+00:00] W (750259) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:04:19.335+00:00] W (750322) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SATISFIED peer=2 message=present
+[2026-09-29T22:04:19.535+00:00] W (750385) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:04:19.935+00:00] W (750968) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:04:20.536+00:00] W (751402) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:04:20.536+00:00] W (751494) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:04:20.536+00:00] W (751508) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:04:21.337+00:00] W (752286) RouteLoomRef: diagnostic reason=REACHABLE peer=2 message=none
+[2026-09-29T22:04:21.337+00:00] W (752313) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SATISFIED peer=2 message=present
+[2026-09-29T22:04:21.537+00:00] W (752550) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:04:21.938+00:00] W (752871) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T22:04:22.538+00:00] W (753459) RouteLoomRef: diagnostic reason=STALE peer=1 message=none
+[2026-09-29T22:04:22.538+00:00] W (753508) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:04:25.342+00:00] W (756241) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:04:25.342+00:00] W (756294) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:04:25.342+00:00] W (756324) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-29T22:04:25.342+00:00] W (756345) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-29T22:04:33.353+00:00] W (764196) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:04:42.164+00:00] W (773134) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none

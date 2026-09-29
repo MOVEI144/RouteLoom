@@ -1,0 +1,5 @@
+{"event": "gateway_stopped", "rc": 0, "how": "ROM download mode (esptool --after no-reset), radio off", "t": 1790721719.4251826, "iso": "2026-09-29T22:41:59.425+00:00"}
+{"event": "gateway_restored", "stopped_s": 300.7, "rc": 0, "t": 1790722020.133183, "iso": "2026-09-29T22:47:00.133+00:00"}
+{"event": "converged", "auth_after_restore_s": 4.14, "routes_after_restore_s": {"0000000000000002": 4.14, "0000000000000003": 4.14}, "all_routes_after_restore_s": 4.14, "t": 1790722024.322564, "iso": "2026-09-29T22:47:04.322+00:00"}
+{"event": "sends_after_restore", "delivered": {"3": 9, "2": 10}, "first_send_after_restore_s": 4.5, "t": 1790722052.7249992, "iso": "2026-09-29T22:47:32.725+00:00"}
+{"event": "follow_done", "states": {"delivered": 10}, "accepted": 10, "t": 1790722079.907529, "iso": "2026-09-29T22:47:59.907+00:00"}
