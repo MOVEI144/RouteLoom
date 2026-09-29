@@ -2936,7 +2936,13 @@ void SecurityCoordinator::maybe_abandon_refresh(const MonotonicMs now) noexcept 
                        !health.quarantined && !health.uncertain;
   if (!healthy) return;
   refresh_active_ = false;
-  refresh_cooldown_until_ = now > kJoinNoDeadline - kRefreshCooldownMs
+  // The cooldown answers a site that was heard but could not re-verify us
+  // (host down, attacker). A refresh that never reached a candidate only
+  // shows we were out of range: the next evidence after the radio heals
+  // may refresh at once instead of waiting the cooldown out.
+  const bool heard_site = joiner().snapshot().counters.attempts != 0;
+  refresh_cooldown_until_ = !heard_site ? 0
+                            : now > kJoinNoDeadline - kRefreshCooldownMs
                                 ? kJoinNoDeadline
                                 : now + kRefreshCooldownMs;
   (void)adopt_boot_rls1(now);

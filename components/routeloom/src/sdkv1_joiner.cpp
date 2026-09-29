@@ -22,6 +22,10 @@ constexpr std::uint32_t kDecisionMaxMs = 5000;
 constexpr std::uint32_t kHintRetryMaxMs = 600000;  // unauthenticated hint cap
 constexpr std::uint32_t kDirectRetryFallbackMs = 5000;
 constexpr std::uint32_t kDirectRetryMaxMs = 600000;
+// A member re-verifying its retained site rescans at least this often: the
+// site it lost may come back at any moment (radio healed, relay rebooted),
+// and the scan is three channels of DISCOVER, not a handshake.
+constexpr std::uint64_t kRecoveryRescanMaxMs = 15000;
 
 ZtJoinerConfig make_link_config(const JoinerConfig& config) noexcept {
   ZtJoinerConfig link{};
@@ -820,6 +824,14 @@ bool Joiner::retain_membership(const SiteRecord& site, const IdentityRecord& ide
   return true;
 }
 
+void Joiner::schedule_rescan(const MonotonicMs now) noexcept {
+  // The deadline is set even when entropy fails (the floor holds then).
+  (void)candidates_.next_scan_deadline(now, entropy_, backoff_deadline_);
+  const MonotonicMs cap = sat_add(now, kRecoveryRescanMaxMs);
+  if (recovery_only_ && backoff_deadline_ > cap) backoff_deadline_ = cap;
+  set_state(JoinState::Backoff);
+}
+
 void Joiner::start_scan() noexcept {
   candidates_.scan_begin();
   cycle_fresh_ = true;
@@ -1210,9 +1222,7 @@ Status Joiner::drive_select(const MonotonicMs now) noexcept {
     const Status begun = candidates_.select_and_begin(now, attempt, selected);
     if (!begun.ok() || selected.candidate == nullptr) {
       candidates_.note_scan_cycle_failed();
-      // The deadline is set even when entropy fails (the floor holds then).
-      (void)candidates_.next_scan_deadline(now, entropy_, backoff_deadline_);
-      set_state(JoinState::Backoff);
+      schedule_rescan(now);
       return Status::success();
     }
     if (recovery_only_ && !recovery_match(selected.candidate->key)) {
@@ -1232,8 +1242,7 @@ Status Joiner::drive_select(const MonotonicMs now) noexcept {
     begin_refresh();
     return Status::success();
   }
-  (void)candidates_.next_scan_deadline(now, entropy_, backoff_deadline_);
-  set_state(JoinState::Backoff);
+  schedule_rescan(now);
   return Status::success();
 }
 
@@ -1823,8 +1832,7 @@ Status Joiner::drive_reconcile(const MonotonicMs now) noexcept {
     begin_direct_attempt();
     return Status::success();
   }
-  (void)candidates_.next_scan_deadline(now, entropy_, backoff_deadline_);
-  set_state(JoinState::Backoff);
+  schedule_rescan(now);
   return Status::success();
 }
 

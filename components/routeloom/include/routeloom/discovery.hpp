@@ -460,6 +460,14 @@ class NeighborDiscovery {
 
   Status start(MonotonicMs now_ms) noexcept;
 
+  // A fresh member adoption (refresh, cutover re-bootstrap) restarts the
+  // stale-repair schedule from its first window: the backoff ramped while
+  // the old engine was stranded says nothing about the peers reachable now.
+  void rearm_repair() noexcept {
+    rediscovery_backoff_ms_ = 0;
+    next_rediscovery_ms_ = 0;
+  }
+
   // Requester path: broadcast a DISCOVER and run one bounded exchange.
   // Already-member nodes keep their MembershipState (local re-binding, D3-03).
   // A stale peer may be preferred for repair; unrelated OFFERs are ignored

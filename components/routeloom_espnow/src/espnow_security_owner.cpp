@@ -1939,7 +1939,10 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
 }
 
 void EspNowSecurityOwner::on_start_discovery(const MonotonicMs now_ms) noexcept {
-  if (discovery_live_) return;
+  if (discovery_live_) {
+    discovery()->rearm_repair();
+    return;
+  }
   // The dev route adopts static config, never an RLS1: the discovery
   // config gate below (engine mode + valid adoption) is the check there.
   if (!dev_adopted() && !stores_->site().has_site()) {
