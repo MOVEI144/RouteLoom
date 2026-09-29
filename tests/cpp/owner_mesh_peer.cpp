@@ -47,6 +47,10 @@
 //                              through the production boot path only
 //   F                          arm one power cut after RLX1 Switching commits
 //                              (exit 43); the saved NVS is the real write
+//   Z <gateway u64><payload>   explicit gateway send (Service=21, SDK_RAM
+//                              scope): resolve `gateway` through
+//                              Device::gateway(), then send once Ready;
+//                              the snapshot tail reports both outcomes
 //   Q                          quit (exit 0)
 //
 // C++ -> Rust, emitted after each T in this order:
@@ -100,6 +104,12 @@
 // | driver_peers u8
 // | queued u8 | admissions_rejected u32
 // | member_starts u32 | link_request_failures u32
+// | owner_polls u32 | owner_empty_polls u32 | rx_queue_max u32 |
+// expiry_slots_scanned u64 | hop_accept_expired u64
+// | gw_endpoint u8 | gw_send u8 | gw_reason u8 (the Z send: endpoint
+// state, send state, Service reason; 0 before any) | gw_receipts u32 |
+// gw_sdk_ram_receipts u32 | gw_mailbox_stored u32 | gw_resolves_failed u32
+// (this node's GatewayDelivery counters, 0 without one)
 //
 // Setup arrives on argv (all integers accept 0x hex; blobs are hex):
 //
@@ -117,6 +127,7 @@
 //                            node config; the adopted config comes from
 //                            the real ApplyMemberConfig path)
 //   --flat                 use the product flat-route timers for route-loss tests
+//   --remote-config        (member: Device's remote-config target)
 //   --nvs-load <file>    (optional fake-NVS preload image)
 //   --flash <file>       (optional 4096 B legacy slot image: identity
 //                         slots, site slots — imported into the fake NVS
@@ -163,6 +174,7 @@
 #include "routeloom/usb_bridge.hpp"
 
 #include "routeloom/device.hpp"
+#include "routeloom/gateway.hpp"
 #include "idf_stubs.hpp"
 
 namespace {
@@ -457,6 +469,7 @@ struct DeviceTestAccess {
   static espnow::Sdkv1Stores& stores(Device& device) noexcept { return *device.stores_; }
   static espnow::EspNowRuntime& runtime(Device& device) noexcept { return *device.runtime_; }
   static usb::UsbBridge* bridge(Device& device) noexcept { return device.bridge_; }
+  static const GatewayDelivery* gateway(Device& device) noexcept { return device.gateway_; }
 };
 
 }  // namespace routeloom
@@ -795,6 +808,7 @@ struct Setup {
   NodeId gw1{routeloom::kInvalidNodeId};
   NodeId gw2{routeloom::kInvalidNodeId};
   bool flat{false};
+  bool remote_config{false};
   std::string nvs_load;
   std::string flash;
   std::string flash_ext;
@@ -856,6 +870,8 @@ Setup parse_argv(int argc, char** argv) {
       setup.gw2 = parse_u64(value);
     } else if (arg == std::string("--flat")) {
       setup.flat = true;
+    } else if (arg == std::string("--remote-config")) {
+      setup.remote_config = true;
     } else if (arg == std::string("--nvs-load") && take_arg(argc, argv, i, value)) {
       setup.nvs_load = value;
     } else if (arg == std::string("--flash") && take_arg(argc, argv, i, value)) {
@@ -946,12 +962,45 @@ struct AppTx {
   char reason[13]{};
 };
 
+// The explicit gateway sends Z commands drive: one resolved endpoint,
+// reused while Ready for the same gateway, and the latest send.
+struct GatewayTx {
+  bool endpoint_valid{false};
+  routeloom::NodeId gateway{routeloom::kInvalidNodeId};
+  bool want_send{false};
+  bool sent{false};
+  routeloom::GatewayEndpoint endpoint{};
+  Bytes payload;
+  routeloom::MessageId id{};
+  std::uint8_t endpoint_state{0};
+  std::uint8_t send_state{0};
+  std::uint8_t reason{0};
+};
+
+// The origin's terminal outcome arrives once through the observer; the
+// send record is released right after, so it is kept here.
+class GatewayTxObserver final : public routeloom::GatewayDeliveryObserver {
+ public:
+  explicit GatewayTxObserver(GatewayTx& tx) noexcept : tx_(tx) {}
+  void on_gateway_resolved(const routeloom::GatewayEndpoint&, routeloom::NodeId,
+                           routeloom::Status) noexcept override {}
+  void on_gateway_result(const routeloom::GatewaySendResult& result) noexcept override {
+    if (!tx_.sent || result.id != tx_.id) return;
+    tx_.send_state = static_cast<std::uint8_t>(result.state);
+    tx_.reason = static_cast<std::uint8_t>(result.reason);
+  }
+
+ private:
+  GatewayTx& tx_;
+};
+
 void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
                    routeloom::espnow::Sdkv1Stores& stores,
                    routeloom::espnow::EspNowRuntime& runtime,
                    const routeloom::usb::UsbBridge* bridge, const TeeObserver& observer,
                    AppTx* app_tx, std::uint32_t send_count_base,
-                   std::uint8_t world_nodes) {
+                   std::uint8_t world_nodes, const GatewayTx& gw_tx,
+                   const routeloom::GatewayDelivery* gateway) {
   using namespace routeloom;
   using namespace routeloom::espnow;
   using namespace routeloom::sdkv1;
@@ -1109,6 +1158,15 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
   put_u32(out, owner_work.rx_queue_max);
   put_u64(out, runtime.node().work_stats().expiry_slots_scanned);
   put_u64(out, runtime.node().work_stats().hop_accept_expired);
+  out.push_back(gw_tx.endpoint_state);
+  out.push_back(gw_tx.send_state);
+  out.push_back(gw_tx.reason);
+  const GatewayStats no_gateway{};
+  const GatewayStats& gw = gateway != nullptr ? gateway->stats() : no_gateway;
+  put_u32(out, gw.receipts_verified);
+  put_u32(out, gw.sdk_ram_receipts);
+  put_u32(out, gw.mailbox_stored);
+  put_u32(out, gw.resolves_failed);
   write_frame(out);
 }
 
@@ -1116,7 +1174,7 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
 
 int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--harness-version") == 0) {
-    std::fputs("2\n", stdout);
+    std::fputs("3\n", stdout);
     return 0;
   }
   using namespace routeloom;
@@ -1165,6 +1223,7 @@ int main(int argc, char** argv) {
       setup.join_cap != 0 ? setup.join_cap : profile::role_mask(config.role);
   config.requested_role = setup.role;
   config.flat_group_routing = setup.flat;
+  config.remote_config = setup.remote_config;
   config.radio.node.network = setup.netlow;
   config.radio.node.node = setup.node;
   if (!setup.flat) {
@@ -1192,6 +1251,8 @@ int main(int argc, char** argv) {
 
   const std::uint32_t send_count_base = idf_stub::send_count();
   AppTx app_tx[kAppTxMax]{};
+  GatewayTx gw_tx{};
+  GatewayTxObserver gw_observer(gw_tx);
 
   // Pre-provisioned peers boot with an RLS1 already committed; the first
   // pump turns adopt it like a field reboot. The harness learns the
@@ -1215,6 +1276,28 @@ int main(int argc, char** argv) {
         now = next;
         idf_stub::set_now_us(static_cast<std::int64_t>(now) * 1000);
         device.step(now);
+        if (gw_tx.endpoint_valid) {
+          GatewayDelivery& delivery = *device.gateway();
+          const EndpointState state = delivery.endpoint_state(gw_tx.endpoint);
+          gw_tx.endpoint_state = static_cast<std::uint8_t>(state);
+          if (gw_tx.want_send && state == EndpointState::Ready) {
+            gw_tx.want_send = false;
+            const Status sent =
+                delivery.send(gw_tx.endpoint, ByteView{gw_tx.payload.data(), gw_tx.payload.size()},
+                              /*lifetime_ms=*/5000, now, gw_tx.id);
+            gw_tx.sent = sent.ok();
+            if (!sent) gw_tx.send_state = static_cast<std::uint8_t>(GatewaySendState::Failed);
+          } else if (state == EndpointState::Failed || state == EndpointState::Stale) {
+            gw_tx.want_send = false;
+            gw_tx.endpoint_valid = false;
+            delivery.endpoint_release(gw_tx.endpoint);
+          }
+          // Live states until the observer reports the terminal one.
+          if (gw_tx.sent &&
+              gw_tx.send_state < static_cast<std::uint8_t>(GatewaySendState::EndpointReceived)) {
+            gw_tx.send_state = static_cast<std::uint8_t>(delivery.send_result(gw_tx.id).state);
+          }
+        }
         idf_stub::TxFrame tx{};
         while (idf_stub::take_tx(tx)) {
           Bytes frame;
@@ -1252,7 +1335,7 @@ int main(int argc, char** argv) {
           app_tx[i].reason[sizeof(app_tx[i].reason) - 1] = '\0';
         }
         emit_snapshot(owner, stores, runtime, bridge, observer, app_tx, send_count_base,
-                      setup.world_nodes);
+                      setup.world_nodes, gw_tx, DeviceTestAccess::gateway(device));
         write_frame(Bytes{'D'});
         break;
       }
@@ -1385,6 +1468,31 @@ int main(int argc, char** argv) {
       case 'F':
         g_cut_after_switching = true;
         break;
+      case 'Z': {
+        if (length < 10 || length - 9 > kGatewayPayloadMaxBytes) fatal("bad Z");
+        NodeId gateway_id = 0;
+        for (int i = 0; i < 8; ++i) gateway_id |= static_cast<NodeId>(payload[1 + i]) << (8 * i);
+        GatewayDelivery* delivery = device.gateway();
+        if (delivery == nullptr) fatal("gateway delivery unavailable");
+        // A USB gateway's bridge observes its own endpoint.
+        if (!setup.gateway) delivery->set_observer(gw_observer);
+        gw_tx.payload.assign(payload.begin() + 9, payload.end());
+        gw_tx.want_send = true;
+        gw_tx.sent = false;
+        gw_tx.send_state = 0;
+        gw_tx.reason = 0;
+        if (gw_tx.endpoint_valid && gw_tx.gateway == gateway_id) break;
+        if (gw_tx.endpoint_valid) delivery->endpoint_release(gw_tx.endpoint);
+        gw_tx.gateway = gateway_id;
+        const Status resolved =
+            delivery->resolve(gateway_id, endpoint::GatewayScope::GatewaySdkRam, HostDigest{},
+                              /*resolve_deadline_ms=*/5000, now, gw_tx.endpoint);
+        gw_tx.endpoint_valid = resolved.ok();
+        gw_tx.want_send = resolved.ok();
+        gw_tx.endpoint_state = static_cast<std::uint8_t>(
+            resolved.ok() ? EndpointState::Resolving : EndpointState::Failed);
+        break;
+      }
       case 'Q':
         return 0;
       default:

@@ -657,7 +657,20 @@ impl MeshWorld {
         boot_ms: &[u64],
         flat: bool,
     ) -> Option<Self> {
-        Self::start_booted(tag, switch, boot_ms, flat, &[])
+        Self::start_booted(tag, switch, boot_ms, flat, &[], &[])
+    }
+
+    /// A world whose peers boot with scenario arguments: `gateway` on
+    /// the gateway, `member` on every other peer.
+    pub(super) fn start_with_args(
+        tag: &str,
+        switch: Switch,
+        gateway: &[&str],
+        member: &[&str],
+    ) -> Option<Self> {
+        let boot_ms = staggered_boot(switch.nodes());
+        let args = [gateway, member];
+        Self::start_booted(tag, switch, &boot_ms, false, &[], &args)
     }
 
     /// A world whose `identity_only` personas boot unjoined: they hold
@@ -668,7 +681,7 @@ impl MeshWorld {
         identity_only: &[usize],
     ) -> Option<Self> {
         let boot_ms = staggered_boot(switch.nodes());
-        Self::start_booted(tag, switch, &boot_ms, false, identity_only)
+        Self::start_booted(tag, switch, &boot_ms, false, identity_only, &[])
     }
 
     fn start_booted(
@@ -677,6 +690,7 @@ impl MeshWorld {
         boot_ms: &[u64],
         flat: bool,
         identity_only: &[usize],
+        args: &[&[&str]],
     ) -> Option<Self> {
         let nodes = switch.nodes();
         assert!(
@@ -761,6 +775,10 @@ impl MeshWorld {
                 &usb_secret_hex,
                 &nvs_save,
                 flat,
+                &args
+                    .get(usize::from(!persona.gateway))
+                    .map(|a| a.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                    .unwrap_or_default(),
             ));
         }
         // Phase 0's in-process join transport retires here: from the

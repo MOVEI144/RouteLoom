@@ -210,6 +210,8 @@ unsigned tx_drops() noexcept { return tx_overruns(); }
 
 int64_t esp_timer_get_time(void) { return g_now_us; }
 
+std::uint32_t esp_log_timestamp(void) { return static_cast<std::uint32_t>(g_now_us / 1000); }
+
 esp_err_t nvs_flash_init_partition(const char* partition) {
   return partition == nullptr ? ESP_FAIL : ESP_OK;
 }

@@ -646,6 +646,7 @@ add_test(NAME routeloom_sdkv1_dev_route_tests COMMAND routeloom_sdkv1_dev_route_
 add_executable(routeloom_owner_mesh_peer owner_mesh_peer.cpp
     espnow_idf_stubs/idf_stubs.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device_config.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_security_owner.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1_entropy.cpp
@@ -653,8 +654,13 @@ add_executable(routeloom_owner_mesh_peer owner_mesh_peer.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_board_config.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_sdkv1_store.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_boot_session.cpp
-    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_legacy_purge.cpp)
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_config_store.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_legacy_purge.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_security_floor.cpp)
 target_link_libraries(routeloom_owner_mesh_peer PRIVATE routeloom_core)
+# The peer carries Device's remote-config target (a firmware image selects
+# it with CONFIG_ROUTELOOM_CONFIG); --remote-config enables it per node.
+target_compile_definitions(routeloom_owner_mesh_peer PRIVATE ROUTELOOM_DEVICE_REMOTE_CONFIG=1)
 target_include_directories(routeloom_owner_mesh_peer PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/espnow_idf_stubs

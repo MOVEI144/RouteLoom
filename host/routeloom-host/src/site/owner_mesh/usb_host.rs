@@ -52,6 +52,10 @@ pub(super) struct UsbHost {
     pub(super) last_begin_ms: u64,
     /// Sim-time of the last emitted frame — paces the idle keepalive.
     pub(super) last_tx_ms: u64,
+    /// One HostOps request whose reply a test reads (the config lane's
+    /// wire request), and that reply's verified inner once it arrives.
+    pub(super) watch: Option<u64>,
+    pub(super) watched: Option<Vec<u8>>,
 }
 
 impl UsbHost {
@@ -84,6 +88,8 @@ impl UsbHost {
             last_rx_ms: 0,
             last_begin_ms: 0,
             last_tx_ms: 0,
+            watch: None,
+            watched: None,
         }
     }
 
@@ -273,7 +279,10 @@ impl UsbHost {
             }
             match kind {
                 FrameKind::HostOps => {
-                    if authority_sub(&inner) == Some(SUB_AUTHORITY_UP) {
+                    if self.watch == Some(request) {
+                        self.watch = None;
+                        self.watched = Some(inner.to_vec());
+                    } else if authority_sub(&inner) == Some(SUB_AUTHORITY_UP) {
                         self.ups_seen += 1;
                         for up in authority.handle_up(&inner, now).expect("up assembles") {
                             completed.push((up.device, up.kind, up.bytes));
