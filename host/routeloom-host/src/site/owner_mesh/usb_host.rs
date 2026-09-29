@@ -87,7 +87,7 @@ impl UsbHost {
 
     pub(super) fn hello_bytes(&mut self, now: u64) -> Vec<u8> {
         self.last_begin_ms = now;
-        encode_frame(&self.session.begin()).expect("hello encodes")
+        encode_frame(&self.session.begin().expect("host nonce")).expect("hello encodes")
     }
 
     /// Queues one sealed frame; returns its request id for 0x63
@@ -214,7 +214,7 @@ impl UsbHost {
             if active {
                 self.session_losses += 1;
             }
-            let hello = self.session.begin();
+            let hello = self.session.begin().expect("host nonce");
             self.last_begin_ms = now;
             out.extend_from_slice(&encode_frame(&hello).expect("hello encodes"));
         }

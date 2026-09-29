@@ -688,7 +688,13 @@ impl MeshWorld {
         // Production credential layout (`--hostlink-credentials`): one
         // private file per gateway, holding a world-specific secret.
         let hostlink_dir = provision.site.dir.join("hostlink");
-        std::fs::create_dir(&hostlink_dir).expect("hostlink credentials dir");
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&hostlink_dir)
+                .expect("hostlink credentials dir");
+        }
         let hostlink_secret = format!("hostlink-{:016x}", now ^ 0x5EED_0B11);
         write_private(
             &hostlink_dir.join(format!("{:016x}", testkit::GATEWAY) + ".key"),

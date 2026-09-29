@@ -452,7 +452,7 @@ impl DeviceSession {
                     );
                     // Restart the handshake: the device holding a dead
                     // half-session would otherwise never recover.
-                    result.outbound.push(Outbound::Raw(self.begin()));
+                    self.queue_hello(&mut result);
                     return result;
                 }
                 result.hello_info = Some((
@@ -525,7 +525,7 @@ impl DeviceSession {
                         // traffic — fall back to a fresh handshake rather
                         // than wedging the lane.
                         result.session_lost = true;
-                        result.outbound.push(Outbound::Raw(self.begin()));
+                        self.queue_hello(&mut result);
                         return result;
                     }
                 };
@@ -541,7 +541,7 @@ impl DeviceSession {
                         .notes
                         .push("\"kind\":\"session_drop\",\"reason\":\"stale session\"".to_string());
                     result.session_lost = true;
-                    result.outbound.push(Outbound::Raw(self.begin()));
+                    self.queue_hello(&mut result);
                     return result;
                 }
                 match open_body(&key, DIRECTION_DEVICE_TO_HOST, frame) {
@@ -552,15 +552,9 @@ impl DeviceSession {
                             );
                             return result;
                         }
-                        if counter > self.d2h_counter || counter == u64::MAX {
-                            result.notes.push(
-                                "\"kind\":\"session_drop\",\"reason\":\"counter gap\"".to_string(),
-                            );
-                            result.session_lost = true;
-                            result.outbound.push(Outbound::Raw(self.begin()));
-                            return result;
-                        }
-                        self.d2h_counter = counter + 1;
+                        // Forward gaps are frames the decoder dropped
+                        // (CRC); only a reused counter is a replay.
+                        self.d2h_counter = counter.saturating_add(1);
                         let inner = inner.to_vec();
                         if frame.kind == FrameKind::Credit {
                             match inner.first() {
@@ -600,7 +594,7 @@ impl DeviceSession {
                             if matches!(code, 2 | 3 | 4 | 11) {
                                 result.inner = Some(inner);
                                 result.session_lost = true;
-                                result.outbound.push(Outbound::Raw(self.begin()));
+                                self.queue_hello(&mut result);
                                 return result;
                             }
                         }
@@ -615,7 +609,7 @@ impl DeviceSession {
                                 .to_string(),
                         );
                         result.session_lost = true;
-                        result.outbound.push(Outbound::Raw(self.begin()));
+                        self.queue_hello(&mut result);
                     }
                 }
             }
@@ -2182,6 +2176,13 @@ fn adapter_writer_loop(
                 {
                     let hello = guard.begin();
                     drop(guard);
+                    let hello = match hello {
+                        Ok(hello) => hello,
+                        Err(error) => {
+                            set_error(&state, format!("hello nonce: {error}"));
+                            continue;
+                        }
+                    };
                     // The registration mirror and the authenticated view
                     // belong to the dead session — same teardown as an
                     // adapter drop, minus the fd.
@@ -2208,7 +2209,9 @@ fn adapter_writer_loop(
                     // re-enqueued into our own queue.
                     let hello = guard.begin();
                     drop(guard);
-                    if let Err(error) = transmit(&writer_slot, &state, &hello) {
+                    if let Err(error) =
+                        hello.and_then(|hello| transmit(&writer_slot, &state, &hello))
+                    {
                         set_error(&state, error.to_string());
                     } else {
                         last_tx_ms = now;
@@ -2405,8 +2408,15 @@ fn adapter_supervisor(
                 // Even Hello goes through the writer queue: a stale-session
                 // frame left over from the previous link must not overtake
                 // it on the wire.
-                if outbound.send(Outbound::Raw(hello)).is_err() {
-                    set_error(&state, "hello queue failed: writer gone".to_string());
+                // A nonce failure leaves the session awaiting HelloAck, so
+                // the handshake retry sends the Hello once randomness returns.
+                match hello {
+                    Ok(hello) => {
+                        if outbound.send(Outbound::Raw(hello)).is_err() {
+                            set_error(&state, "hello queue failed: writer gone".to_string());
+                        }
+                    }
+                    Err(error) => set_error(&state, format!("hello nonce: {error}")),
                 }
                 let result = adapter_read_loop(reader, &state, &session, &outbound);
                 state.connected.store(false, Ordering::Relaxed);
@@ -3585,7 +3595,7 @@ mod tests {
     }
 
     fn complete_handshake(session: &mut DeviceSession) -> SessionProof {
-        let hello = session.begin();
+        let hello = session.begin().unwrap();
         assert_eq!(hello.kind, FrameKind::Hello);
         let host_nonce = u64::from_be_bytes(hello.body[0..8].try_into().unwrap());
         let (ack_body, proof) = device_hello_ack(host_nonce);
@@ -3616,7 +3626,7 @@ mod tests {
     #[test]
     fn session_rejects_authenticated_version_downgrade() {
         let mut session = DeviceSession::new();
-        let hello = session.begin();
+        let hello = session.begin().unwrap();
         let host_nonce = u64::from_be_bytes(hello.body[0..8].try_into().unwrap());
         let mut transcript = device_transcript(host_nonce);
         transcript.version = 1;
@@ -3625,14 +3635,17 @@ mod tests {
         ack[8] = 1;
         ack[37..].copy_from_slice(&proof.hello_tag);
         let inbound = session.handle(&frame(FrameKind::HelloAck, 0, 0, ack));
-        assert!(inbound.outbound.is_empty(), "protocol 1 must not receive AUTH");
+        assert!(
+            inbound.outbound.is_empty(),
+            "protocol 1 must not receive AUTH"
+        );
         assert_eq!(session.phase, SessionPhase::AwaitHelloAck);
     }
 
     #[test]
     fn session_rejects_auth_ok_with_foreign_session_id() {
         let mut session = DeviceSession::new();
-        let hello = session.begin();
+        let hello = session.begin().unwrap();
         let host_nonce = u64::from_be_bytes(hello.body[0..8].try_into().unwrap());
         let (ack, proof) = device_hello_ack(host_nonce);
         session.handle(&frame(FrameKind::HelloAck, 0, 0, ack));
@@ -3641,15 +3654,6 @@ mod tests {
         let inbound = session.handle(&frame(FrameKind::HelloAck, FLAG_AUTH, 0, body));
         assert_eq!(session.phase, SessionPhase::AwaitAuthOk);
         assert_eq!(inbound.auth_session, None);
-    }
-
-    #[test]
-    fn session_rejects_forward_counter_gap() {
-        let mut session = DeviceSession::new();
-        let proof = complete_handshake(&mut session);
-        let inbound = session.handle(&device_credit_grant(&proof, 1, 1, 1000));
-        assert!(inbound.inner.is_none());
-        assert_ne!(session.phase, SessionPhase::Active);
     }
 
     #[test]
@@ -3744,7 +3748,7 @@ mod tests {
     #[test]
     fn session_rejects_bad_tags_and_unauthenticated_frames() {
         let mut session = DeviceSession::new();
-        let hello = session.begin();
+        let hello = session.begin().unwrap();
         let host_nonce = u64::from_be_bytes(hello.body[0..8].try_into().unwrap());
         let (mut ack_body, _proof) = device_hello_ack(host_nonce);
         // Wrong hello_tag → no AUTH is emitted, session stays in handshake.
@@ -3759,7 +3763,7 @@ mod tests {
         }
         // Active-session traffic before AUTH_OK cannot be opened.
         let mut session2 = DeviceSession::new();
-        session2.begin();
+        session2.begin().unwrap();
         let inbound = session2.handle(&frame(FrameKind::DataFromMesh, 0, 0, vec![0; 40]));
         assert!(inbound.inner.is_none());
     }
@@ -4005,7 +4009,7 @@ mod tests {
         // reconnect that lands during device startup otherwise stalls in
         // AwaitHelloAck forever.
         let mut session = DeviceSession::new();
-        session.begin();
+        session.begin().unwrap();
         assert!(!session.handshake_retry_due(session.last_begin_ms));
         assert!(session.handshake_retry_due(session.last_begin_ms + HELLO_RETRY_MS));
         complete_handshake(&mut session);
@@ -4018,7 +4022,7 @@ mod tests {
         // about 1.26 s apart. Retrying Hello before either response lands
         // changes the transcript nonce and can prevent AUTH_OK forever.
         let mut session = DeviceSession::new();
-        let hello = session.begin();
+        let hello = session.begin().unwrap();
         assert!(!session.handshake_retry_due(session.last_begin_ms + 1_250));
         let nonce = u64::from_be_bytes(hello.body[0..8].try_into().unwrap());
         let (ack, _) = device_hello_ack(nonce);
@@ -4832,7 +4836,7 @@ mod tests {
     fn emitted_json_is_consumed_by_client_model() {
         let state = State::default();
         let mut session = DeviceSession::new();
-        let hello = session.begin();
+        let hello = session.begin().unwrap();
         let host_nonce = u64::from_be_bytes(hello.body[0..8].try_into().unwrap());
         let (ack_body, proof) = device_hello_ack(host_nonce);
         let ack = frame(FrameKind::HelloAck, 0, 100, ack_body);
@@ -5228,7 +5232,7 @@ mod tests {
         assert_eq!(secret.as_slice(), b"not-the-legacy-usb-secret");
         let mut session = DeviceSession::new();
         session.credentials = HostlinkCredentials::Development(secret.clone());
-        let hello = session.begin();
+        let hello = session.begin().unwrap();
         assert!(matches!(&session.credentials,
             HostlinkCredentials::Development(kept) if kept.as_slice() == secret.as_slice()));
         let host_nonce = u64::from_be_bytes(hello.body[0..8].try_into().unwrap());
@@ -5239,7 +5243,7 @@ mod tests {
             .iter()
             .any(|note| note.contains("HELLO_TAG_INVALID")));
         assert_eq!(session.phase, SessionPhase::AwaitHelloAck);
-        let hello = session.begin();
+        let hello = session.begin().unwrap();
         let host_nonce = u64::from_be_bytes(hello.body[0..8].try_into().unwrap());
         let transcript = device_transcript(host_nonce);
         let proof = derive_session_proof(&secret, &transcript.encode().unwrap());
@@ -5276,9 +5280,13 @@ mod tests {
         std::fs::write(&path, b"private-hostlink-secret").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert!(HostlinkCredentials::Directory(dir.clone()).secret_for(42).is_err());
+        assert!(HostlinkCredentials::Directory(dir.clone())
+            .secret_for(42)
+            .is_err());
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(HostlinkCredentials::Directory(dir.clone()).secret_for(42).is_ok());
+        assert!(HostlinkCredentials::Directory(dir.clone())
+            .secret_for(42)
+            .is_ok());
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(dir).unwrap();
     }
