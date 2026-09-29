@@ -171,6 +171,19 @@ class FlashAppOnlyTests(unittest.TestCase):
             self.assertIn('read-flash', run.call_args.args[0])
             write.assert_not_called()
 
+    def test_app_only_field_write_does_not_probe_rlcfg(self):
+        board = SimpleNamespace(chip='esp32c6', flash_baud=115200)
+        with tempfile.TemporaryDirectory() as out, \
+                patch.object(flash, 'preflight_board', return_value={}), \
+                patch.object(flash, 'require_board_config',
+                             side_effect=FlashError('unexpected rlcfg probe')) as probe, \
+                patch.object(flash, 'build_write_flash_cmd',
+                             side_effect=FlashError('stop before write')):
+            with self.assertRaisesRegex(FlashError, 'stop before write'):
+                flash._flash_board_from_dir(board, '/dev/fake', out, 'esptool',
+                                            True, 0, 1, out, needs_config=True)
+            probe.assert_not_called()
+
     def test_only_generic_field_bundles_need_config(self):
         field = 'CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y\n'
         setup = field + 'CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y\n'

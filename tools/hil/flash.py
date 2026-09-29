@@ -383,7 +383,7 @@ def _flash_board_from_dir(board, port, out_dir, esptool, app_only, boot_seconds,
     preflight = preflight_board(board, port, esptool, out_dir,
                                 minimum_flash_bytes=minimum_flash_bytes or 0x400000,
                                 chip_revision_range=chip_revision_range)
-    if needs_config:
+    if needs_config and not app_only:
         require_board_config(esptool, board.chip, port)
     cmd, files, fallback = build_write_flash_cmd(
         build_dir, port, esptool, board.chip or None, board.flash_baud, app_only

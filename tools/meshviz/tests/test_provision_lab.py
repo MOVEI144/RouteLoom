@@ -596,6 +596,39 @@ class LabBackendTests(unittest.TestCase):
         self.assertIn('security', result.detail)
         self.assertEqual(self.boards.flashed, [])
 
+    def test_reference_setup_may_match_the_selected_field_security(self):
+        site = _site(self.tmp / 'paired')
+        bundles = self.tmp / 'paired' / 'bundles'
+        bundles.mkdir()
+        _build_bundle(bundles, 'field-bench-member', role='bench_node',
+                      console=False, security='MEMBER_EDHOC')
+        _build_bundle(bundles, 'setup-bench-devram', role='bench_node', console=True)
+        _build_bundle(bundles, 'setup-ref-member', role='reference_node',
+                      console=True, security='MEMBER_EDHOC')
+        backend = prov.LabProvisionBackend(
+            site_dir=site, boards=self.boards, bundles_dir=bundles, office=self.office,
+            link_factory=lambda port: self.console, boot_capture=lambda port: [])
+        job = self._job()
+        result = backend.run('preflight', job)
+        self.assertEqual(result.state, 'done', result.detail)
+        self.assertEqual(backend._ctx_for(job)['setup_bundle']['manifest']['role'],
+                         'reference_node')
+
+    def test_reference_pair_does_not_downgrade_selected_field_security(self):
+        site = _site(self.tmp / 'no-downgrade')
+        bundles = self.tmp / 'no-downgrade' / 'bundles'
+        bundles.mkdir()
+        _build_bundle(bundles, 'field-bench-member', role='bench_node',
+                      console=False, security='MEMBER_EDHOC')
+        _build_bundle(bundles, 'field-ref', role='reference_node', console=False)
+        _build_bundle(bundles, 'setup-ref', role='reference_node', console=True)
+        backend = prov.LabProvisionBackend(
+            site_dir=site, boards=self.boards, bundles_dir=bundles, office=self.office,
+            link_factory=lambda port: self.console, boot_capture=lambda port: [])
+        result = backend.run('preflight', self._job())
+        self.assertEqual(result.state, 'failed')
+        self.assertIn('security', result.detail)
+
     def test_duplicate_bundle_selection_is_refused(self):
         _build_bundle(self.backend.bundles_dir, 'field-bench-alt',
                       role='bench_node', console=False)

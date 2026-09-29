@@ -1408,6 +1408,16 @@ class LabProvisionBackend(ContractBackend):
         ctx['identity'] = identity
         field_bundle = self._bundle('field', job, identity.chip)
         setup_bundle = self._bundle('setup', job, identity.chip)
+        if (job.role != 'bridge' and
+                field_bundle['manifest']['security_profile'] !=
+                setup_bundle['manifest']['security_profile']):
+            reference_setup = self._scan_bundles().get(
+                ('setup', 'reference_node', identity.chip))
+            if (reference_setup is not None and
+                    reference_setup['manifest'].get('generic_config') is True and
+                    reference_setup['manifest']['security_profile'] ==
+                    field_bundle['manifest']['security_profile']):
+                setup_bundle = reference_setup
         if (field_bundle['manifest']['security_profile'] !=
                 setup_bundle['manifest']['security_profile']):
             raise ProvisionError('no_bundles', 'setup and field security profiles differ')
