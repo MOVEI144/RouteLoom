@@ -518,10 +518,9 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
   // point at foreign data.
   Status status = espnow::verify_flash_layout();
   if (!status) fail(status.detail);
-  // Identity, nonce reservations, replay state and message sessions live in
-  // NVS. Never erase it automatically after a version/capacity error: that
-  // would silently turn a recoverable storage problem into key/counter
-  // rollback.
+  // Identity, site state, and the boot session live in NVS. Never erase it
+  // automatically after a version/capacity error: that would silently turn
+  // a recoverable storage problem into credential or boot counter rollback.
   const esp_err_t nvs_error = nvs_flash_init();
   if (nvs_error != ESP_OK) {
     ESP_LOGE(kTag, "NVS init failed (%s); automatic erase is disabled, explicit recovery is required",
@@ -530,7 +529,6 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
   }
   status = open_storage(config.role, config.security);
   if (!status) fail(status.detail);
-  const std::uint32_t message_session = boot_session_;
 #if CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
   // Factory maintenance console (sdk-v1/07 §6): runs pre-RF and owns the
   // device and its USB from here — no radio, no mesh. Returns only when the
@@ -689,6 +687,7 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
   // Owner sleep tail (P4 §9.3, V1-F07): one-shot wake evidence for the
   // restore below. The marker/programmed reads clear the RTC cells, so a
   // reset without a new sleep never reuses them.
+  const std::uint32_t message_session = boot_session_;
   bool owner_boot_marked = false;
   const ResetCause owner_boot_cause = classify_boot(owner_boot_marked);
   const std::uint32_t owner_programmed_ms = s_sleep_programmed_ms;
