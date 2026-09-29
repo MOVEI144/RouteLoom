@@ -818,24 +818,42 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
       }
     }
     if (leg_live) {
-      // A fresh responder exchange supersedes a stale parked leg: the OFFER
-      // for this exchange already went out, so the peer answers with its
-      // cookie — rebinding keeps the demux carrier in step with the newest
-      // offer instead of memcmp-failing every re-issued m1. An in-flight
-      // initiator leg still wins the simultaneous open.
-      if (live->initiator || start.initiator) continue;
-      live->peer = start.peer;
-      live->initiator = false;
-      live->carrier = start.carrier;
-      live->carrier.network = adopted_.network;
-      live->carrier.node_i = start.peer;
-      live->carrier.node_r = adopted_.node;
-      live->expires_at = start.expires_at_ms;
-      live->object_id = 0;
-      live->txn = {};
-      live->quiet_retry_token = 0;
-      live->discovery_token = NeighborDiscovery::kMemberHandshakeNone;
-      continue;
+      // Discovery answers every DISCOVER, so starts for a peer keep coming
+      // while an exchange with it runs: once past its first message that
+      // exchange owns the leg and no start displaces it. An in-flight
+      // initiator leg wins as well.
+      if (member().engine.past_first_message(SecurityScope::Link, start.peer) ||
+          live->initiator) {
+        continue;
+      }
+      if (start.initiator) {
+        // Both ends answered each other's DISCOVER and each holds a parked
+        // responder leg: the lower NodeId initiates (02 §3, as in dev
+        // discovery) and the higher keeps its leg for that m1. Dropping
+        // both initiator starts would leave each end waiting for the other.
+        if (adopted_.node > start.peer) continue;
+        if (live->discovery_token != NeighborDiscovery::kMemberHandshakeNone) {
+          deps_.discovery->cancel_member_handshake(live->discovery_token);
+        }
+        *live = DemuxEntry{};
+      } else {
+        // A fresh responder exchange supersedes a stale parked leg: the
+        // OFFER for this exchange already went out, so the peer answers
+        // with its cookie — rebinding keeps the demux carrier in step with
+        // the newest offer instead of memcmp-failing every re-issued m1.
+        live->peer = start.peer;
+        live->initiator = false;
+        live->carrier = start.carrier;
+        live->carrier.network = adopted_.network;
+        live->carrier.node_i = start.peer;
+        live->carrier.node_r = adopted_.node;
+        live->expires_at = start.expires_at_ms;
+        live->object_id = 0;
+        live->txn = {};
+        live->quiet_retry_token = 0;
+        live->discovery_token = NeighborDiscovery::kMemberHandshakeNone;
+        continue;
+      }
     }
     DemuxEntry* entry = claim_demux(start.peer_mac, 0, now);
     if (entry == nullptr) break;
@@ -1101,9 +1119,21 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
   if (hit != nullptr) {
     return demux_member_frame(env, hit, event.now);
   }
-  // A parked responder start binds to the initiator's first object id.
+  // A parked responder start binds to the initiator's first object id —
+  // only an opening message (m1/R1) may bind it: a late frame of an
+  // exchange this node cancelled or superseded must not claim the new
+  // leg and, through it, the single chunk slot.
+  const ByteView opening_body{env.body.data(), env.body_size};
+  std::uint8_t step = 0;
+  if (env.kind == FrameType::BootstrapChunk) {
+    JoinChunk chunk{};
+    if (join_chunk_decode(JoinCarrier::Rld1, opening_body, chunk).ok()) step = chunk.step;
+  } else if (env.kind == FrameType::BootstrapAuth) {
+    JoinAuthObject object{};
+    if (join_object_decode(opening_body, object).ok()) step = object.step;
+  }
   for (auto& entry : member().demux) {
-    if (entry.used && entry.has_start &&
+    if (step == 1 && entry.used && entry.has_start &&
         !entry.initiator && entry.mac == event.rld1_meta.source) {
       entry.object_id = object_id;
       entry.txn = env.transaction_nonce;
