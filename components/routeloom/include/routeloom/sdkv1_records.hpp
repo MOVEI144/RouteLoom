@@ -357,7 +357,7 @@ Status resume2_slot_decode(ByteView bytes, ResumeSlot2& out) noexcept;
 // within holdoff, torn, or unreadable) the node must not return to Member —
 // not even across reboot. Fixed two keys (sequenced A/B like RLS1/RRS1);
 // the RLS1 frozen layout is untouched.
-//  0 u32 magic "RLV1" | 4 u16 format=1 | 6 u16 used_len=108 | 8 u32 schema=1
+//  0 u32 magic "RLV1" | 4 u16 format=1 | 6 u16 used_len=108 | 8 u32 schema=2
 // 12 u32 seal | 16 u32 commit_seq
 // 20 u64 local_node | 28 u64 site_id | 36 u64 network
 // 44 u32 removed_generation | 48 u32 rs_epoch_floor | 52 u32 site_epoch_floor
@@ -365,11 +365,16 @@ Status resume2_slot_decode(ByteView bytes, ResumeSlot2& out) noexcept;
 // 60 32B evidence_digest (SHA-256 of the verified removal object)
 // 92 u32 rls_commit_seq (diagnostic) | 96 u32 boot_witness
 // 100 u32 holdoff_ms | 104 u32 crc32
+// Schema 2 (v2.0) range-checks holdoff_ms (60 s..1 h, JoinPolicy #193)
+// instead of pinning 10 min; a schema-1 record (always 600000) still reads.
 constexpr std::uint32_t kLocalRevocationMagic = 0x524C5631U;  // "RLV1"
 constexpr std::uint32_t kLocalRevocationSealCommitted = 0x72564B31U;
 constexpr std::size_t kLocalRevocationSlotBytes = 108;
 constexpr std::size_t kLocalRevocationRecordLen = 108;
-constexpr std::uint32_t kLocalRevocationHoldoffMs = 600000;  // 10 minutes
+constexpr std::uint32_t kLocalRevocationSchema = 2;
+constexpr std::uint32_t kLocalRevocationHoldoffMs = 600000;  // 10 minutes (default)
+constexpr std::uint32_t kLocalRevocationHoldoffMinMs = 60000;
+constexpr std::uint32_t kLocalRevocationHoldoffMaxMs = 3600000;
 
 enum class LocalRevocationState : std::uint8_t { Blocked = 1, Cleaned = 2 };
 enum class LocalRevocationCause : std::uint8_t {

@@ -323,8 +323,8 @@ def rlp2(r: dict) -> bytes:
     return data + u32(crc32(data))
 
 
-def rlv1(r: dict, seal: int, commit_seq: int) -> bytes:
-    data = (b"RLV1" + u16(1) + u16(108) + u32(1) + u32(seal) + u32(commit_seq) +
+def rlv1(r: dict, seal: int, commit_seq: int, schema: int = 2) -> bytes:
+    data = (b"RLV1" + u16(1) + u16(108) + u32(schema) + u32(seal) + u32(commit_seq) +
             u64(r["local_node"]) + u64(r["site_id"]) + u64(r["network"]) +
             u32(r["removed_generation"]) + u32(r["rs_epoch_floor"]) +
             u32(r["site_epoch_floor"]) + u8(r["state"]) + u8(r["cause"]) + u16(0) +
@@ -961,9 +961,17 @@ def main() -> None:
                    rls_commit_seq=41, boot_witness=9000, holdoff_ms=600000)
     emit("valid", "rlv1_blocked", dict(removal, codec="rlv1", expect="ok", commit_seq=7,
                                        record_hex=rlv1(removal, RLV1_SEAL, 7).hex()))
-    cleaned = dict(removal, state=2, cause=2)
+    cleaned = dict(removal, state=2, cause=2, holdoff_ms=60000)
     emit("valid", "rlv1_cleaned", dict(cleaned, codec="rlv1", expect="ok", commit_seq=8,
                                        record_hex=rlv1(cleaned, RLV1_SEAL, 8).hex()))
+    longest = dict(removal, holdoff_ms=3600000)
+    emit("valid", "rlv1_holdoff_1h", dict(longest, codec="rlv1", expect="ok", commit_seq=9,
+                                          record_hex=rlv1(longest, RLV1_SEAL, 9).hex()))
+    # The previous schema still reads (it always carried 600000 ms); the
+    # device rewrites it as schema 2 on its next commit.
+    emit("valid", "rlv1_schema_1", dict(removal, codec="rlv1", expect="ok", commit_seq=7,
+                                        schema=1,
+                                        record_hex=rlv1(removal, RLV1_SEAL, 7, schema=1).hex()))
     good_rlv = rlv1(removal, RLV1_SEAL, 7)
     bad("rlv1_bad_crc", "rlv1", good_rlv[:-1] + bytes([good_rlv[-1] ^ 1]), "CRC mismatch")
     bad("rlv1_pending_seal", "rlv1", rlv1(removal, 0, 7), "a readable record is committed")
@@ -976,8 +984,12 @@ def main() -> None:
     bad("rlv1_zero_evidence", "rlv1",
         rlv1(dict(removal, evidence_digest_hex="00" * 32), RLV1_SEAL, 7),
         "evidence is the digest of a verified object")
-    bad("rlv1_holdoff_changed", "rlv1", rlv1(dict(removal, holdoff_ms=599999), RLV1_SEAL, 7),
-        "holdoff is the fixed 600000 ms")
+    bad("rlv1_holdoff_below_range", "rlv1", rlv1(dict(removal, holdoff_ms=59999), RLV1_SEAL, 7),
+        "holdoff is 60000..3600000 ms")
+    bad("rlv1_holdoff_above_range", "rlv1",
+        rlv1(dict(removal, holdoff_ms=3600001), RLV1_SEAL, 7), "holdoff is 60000..3600000 ms")
+    bad("rlv1_schema_3", "rlv1", rlv1(removal, RLV1_SEAL, 7, schema=3),
+        "unknown schema is Unsupported")
     bad("rlv1_reserved_nonzero", "rlv1",
         recrc(good_rlv[:58] + b"\x00\x01" + good_rlv[60:]), "reserved bytes must be zero")
     bad("rlv1_truncated", "rlv1", good_rlv[:107], "records are exactly 108 bytes")

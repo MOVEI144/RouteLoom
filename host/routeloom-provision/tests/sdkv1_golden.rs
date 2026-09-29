@@ -508,11 +508,14 @@ fn check_rlv1(name: &str, doc: &Json) {
         num(doc, "holdoff_ms"),
         "{name}"
     );
-    assert_eq!(
-        local_revocation_record_encode(&decoded, LOCAL_REVOCATION_SEAL_COMMITTED, seq).unwrap(),
-        record,
-        "{name}"
-    );
+    // A previous-schema record only reads; the writer emits the current schema.
+    if doc.get("schema").is_none() {
+        assert_eq!(
+            local_revocation_record_encode(&decoded, LOCAL_REVOCATION_SEAL_COMMITTED, seq).unwrap(),
+            record,
+            "{name}"
+        );
+    }
 }
 
 fn check_pop(name: &str, doc: &Json) {

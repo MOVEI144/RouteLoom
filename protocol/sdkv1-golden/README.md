@@ -103,7 +103,9 @@ behind the 64-use ceiling; RLP1 blobs are a safe cache miss.
 
 **RLV1** (P4 §3.3): 108 B sealed sequenced record (seal `0x72564B31`),
 the durable local-removal evidence. State is Blocked(1)/Cleaned(2), cause
-1..3, holdoff fixed at 600000 ms.
+1..3. Schema 2 (v2.0) range-checks holdoff 60000..3600000 ms; a schema-1
+record (always 600000 ms) still reads (`rlv1_schema_1`), schema 3 is
+Unsupported.
 **PoP** (07 §6 steps 2-3, `pop` codec): the device answers the office
 challenge with the same restricted Sign1 over a 108 B payload
 (`version=1 | key_location 1..3 | 0x0000 | node_id u64 | challenge 32 B |

@@ -1788,6 +1788,41 @@ LocalRevocationRecord removal_record() {
   return record;
 }
 
+// RLV1 schema 2 (v2.0): the store reads a schema-1 slot written by the
+// previous image and reports a schema it does not know as Unsupported.
+void test_local_revocation_schema_upgrade() {
+  const auto with_schema = [](std::uint32_t schema) {
+    ByteBuffer<kLocalRevocationSlotBytes> bytes{};
+    CHECK_OK(local_revocation_record_encode(removal_record(), kLocalRevocationSealCommitted, 5,
+                                            bytes));
+    bytes.bytes[11] = static_cast<std::uint8_t>(schema);
+    const std::uint32_t crc = crc32_iso_hdlc(ByteView{bytes.bytes.data(), bytes.size - 4});
+    for (int i = 0; i < 4; ++i) {
+      bytes.bytes[bytes.size - 4 + i] = static_cast<std::uint8_t>(crc >> (24 - 8 * i));
+    }
+    return bytes;
+  };
+  {
+    FaultyRecordStorage storage(kLocalRevocationSlotBytes);
+    const auto old = with_schema(1);
+    CHECK_OK(storage.write(0, old.view()));
+    LocalRevocationStore store(storage);
+    CHECK_OK(store.initialize());
+    CHECK(store.has_record() && store.record().holdoff_ms == kLocalRevocationHoldoffMs);
+    // The next commit rewrites it as schema 2.
+    CHECK_OK(store.commit_cleaned());
+    CHECK(storage.slot(1)[11] == kLocalRevocationSchema);
+  }
+  {
+    FaultyRecordStorage storage(kLocalRevocationSlotBytes);
+    const auto future = with_schema(3);
+    CHECK_OK(storage.write(0, future.view()));
+    LocalRevocationStore store(storage);
+    (void)store.initialize();
+    CHECK(!store.has_record() && store.blocks_membership(true));
+  }
+}
+
 void test_local_revocation_basic() {
   FaultyRecordStorage storage(kLocalRevocationSlotBytes);
   {
@@ -2008,6 +2043,7 @@ int main() {
   test_resume2_power_cuts();
   test_resume2_touch_wear_rule();
   test_local_revocation_basic();
+  test_local_revocation_schema_upgrade();
   test_local_revocation_power_cuts();
   test_ram_footprint();
   test_site_scratch_does_not_retain_uncommitted_keys();

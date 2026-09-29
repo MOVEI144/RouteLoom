@@ -586,6 +586,8 @@ void valid_rlv1(const Fields& f) {
   CHECK(decoded.rls_commit_seq == num(f, "rls_commit_seq"));
   CHECK(decoded.boot_witness == num(f, "boot_witness"));
   CHECK(decoded.holdoff_ms == num(f, "holdoff_ms"));
+  // A previous-schema record only reads; the writer emits the current schema.
+  if (has(f, "schema")) return;
   ByteBuffer<kLocalRevocationSlotBytes> encoded{};
   CHECK(local_revocation_record_encode(decoded, kLocalRevocationSealCommitted, seq, encoded).ok());
   CHECK(record.size() == encoded.size &&

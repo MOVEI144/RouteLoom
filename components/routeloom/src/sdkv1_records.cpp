@@ -51,11 +51,12 @@ Status read_zeros(ByteReader& reader, const std::size_t count, const char* what)
 }
 
 Status write_head(ByteWriter& writer, const std::uint32_t magic, const std::size_t used_len,
-                  const std::uint32_t seal) noexcept {
+                  const std::uint32_t seal,
+                  const std::uint32_t schema = kRecordSchema) noexcept {
   Status status = writer.write_u32(magic);
   if (status) status = writer.write_u16(kRecordFormat);
   if (status) status = writer.write_u16(static_cast<std::uint16_t>(used_len));
-  if (status) status = writer.write_u32(kRecordSchema);
+  if (status) status = writer.write_u32(schema);
   if (status) status = writer.write_u32(seal);
   return status;
 }
@@ -64,7 +65,8 @@ Status write_head(ByteWriter& writer, const std::uint32_t magic, const std::size
 // points (the stores classify slots themselves).
 Status read_head(ByteReader& reader, const ByteView record, const std::uint32_t magic,
                  const std::uint32_t seal_committed, const std::size_t min_len,
-                 const std::size_t max_len, std::uint16_t& used_len) noexcept {
+                 const std::size_t max_len, std::uint16_t& used_len,
+                 const std::uint32_t schema_max = kRecordSchema) noexcept {
   std::uint32_t got_magic = 0, schema = 0, seal = 0;
   std::uint16_t format = 0;
   Status status = reader.read_u32(got_magic);
@@ -86,7 +88,7 @@ Status read_head(ByteReader& reader, const ByteView record, const std::uint32_t 
        static_cast<std::uint32_t>(record.data[record.size - 1]))) {
     return Status::error(StatusCode::IntegrityError, "record crc");
   }
-  if (schema != kRecordSchema) {
+  if (schema < kRecordSchema || schema > schema_max) {
     return Status::error(StatusCode::Unsupported, "record schema");
   }
   return Status::success();
@@ -1004,7 +1006,8 @@ Status local_revocation_validate(const LocalRevocationRecord& record) noexcept {
       cause > static_cast<std::uint8_t>(LocalRevocationCause::LocalMaintenance) ||
       !id_valid(record.local_node) || record.site_id == 0 || record.network == 0 ||
       record.removed_generation == 0 || all_zero(record.evidence_digest) ||
-      record.holdoff_ms != kLocalRevocationHoldoffMs) {
+      record.holdoff_ms < kLocalRevocationHoldoffMinMs ||
+      record.holdoff_ms > kLocalRevocationHoldoffMaxMs) {
     return Status::error(StatusCode::InvalidArgument, "rlv1 fields");
   }
   return Status::success();
@@ -1021,7 +1024,8 @@ Status local_revocation_record_encode(const LocalRevocationRecord& record, const
   }
   const MutableByteView target{out.bytes.data(), out.bytes.size()};
   ByteWriter writer(target);
-  Status status = write_head(writer, kLocalRevocationMagic, kLocalRevocationRecordLen, seal);
+  Status status = write_head(writer, kLocalRevocationMagic, kLocalRevocationRecordLen, seal,
+                             kLocalRevocationSchema);
   if (status) status = writer.write_u32(commit_seq);
   if (status) status = writer.write_u64(record.local_node);
   if (status) status = writer.write_u64(record.site_id);
@@ -1052,7 +1056,7 @@ Status local_revocation_record_decode(const ByteView record, LocalRevocationReco
   std::uint16_t used_len = 0;
   Status status = read_head(reader, record, kLocalRevocationMagic,
                             kLocalRevocationSealCommitted, kLocalRevocationRecordLen,
-                            kLocalRevocationRecordLen, used_len);
+                            kLocalRevocationRecordLen, used_len, kLocalRevocationSchema);
   std::uint32_t seq = 0, crc = 0;
   std::uint8_t state = 0, cause = 0;
   std::uint16_t reserved = 0;
