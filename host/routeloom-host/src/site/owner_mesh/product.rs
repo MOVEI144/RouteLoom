@@ -219,6 +219,12 @@ fn mesh_p03_explicit_gateway_delivers_only_to_named_gateway() {
         return; // no C++ peers: skip (ignore-equivalent)
     };
     converge(&mut world, "p03 gateway");
+    // The application may first request the gateway facade from an inbound
+    // observer callback. Attachment must recover on the next Owner call.
+    world.peers[2].app_send(NODE_A, b"attach-gateway");
+    world.step(25);
+    world.pump_until(400, |snaps| snaps[1].rx_count > 0);
+    assert_eq!(world.snaps[1].rx_count, 1, "callback reached A");
     for round in 1..=5u32 {
         world.peers[1].gateway_send(testkit::GATEWAY, b"p03-gateway");
         world.step(25);

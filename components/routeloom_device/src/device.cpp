@@ -360,7 +360,11 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
     // the bridge advertises only what is attached here.
 #if ROUTELOOM_DEVICE_GATEWAY_ENDPOINT
     if ((config.usb_capability & usb::kCapGatewayEndpointV1) != 0) {
-      status = bridge_->attach_gateway(*gateway());
+      GatewayDelivery* delivery = gateway();
+      if (delivery == nullptr) {
+        return Status::error(StatusCode::Busy, "gateway sink unavailable");
+      }
+      status = bridge_->attach_gateway(*delivery);
       if (!status) return status;
     }
 #endif
@@ -519,14 +523,16 @@ MeshNode* Device::mesh() noexcept {
 }
 
 GatewayDelivery* Device::gateway() noexcept {
-  if (gateway_ == nullptr && runtime_ != nullptr) {
-    // The node object survives membership adoption (it is rebuilt in
-    // place and keeps its Service sink), so one component serves the
-    // node for the whole boot.
-    static ROUTELOOM_OWNER_C5_LP GatewayDelivery delivery(runtime_->node());
+  if (runtime_ == nullptr) return nullptr;
+  // The node object survives membership adoption (it is rebuilt in place
+  // and keeps its Service sink). A callback may call here while the node
+  // rejects sink changes; retry attachment on the next Owner call.
+  static ROUTELOOM_OWNER_C5_LP GatewayDelivery delivery(runtime_->node());
+  if (runtime_->node().gateway_sink() != &delivery) {
     delivery.attach();
-    gateway_ = &delivery;
+    if (runtime_->node().gateway_sink() != &delivery) return nullptr;
   }
+  gateway_ = &delivery;
   return gateway_;
 }
 

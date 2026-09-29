@@ -921,9 +921,15 @@ class PipeByteStream final : public routeloom::usb::ByteStream {
 class TeeObserver final : public routeloom::NodeObserver {
  public:
   explicit TeeObserver(routeloom::NodeObserver* next) noexcept : next_(next) {}
+  void bind_device(routeloom::Device& device) noexcept { device_ = &device; }
 
   void on_message(const routeloom::MessageKey& key, NodeId source,
                   ByteView payload) noexcept override {
+    constexpr char kAttachGateway[] = "attach-gateway";
+    if (device_ != nullptr && payload.size == sizeof(kAttachGateway) - 1 &&
+        std::memcmp(payload.data, kAttachGateway, sizeof(kAttachGateway) - 1) == 0) {
+      (void)device_->gateway();
+    }
     ++rx_count_;
     rx_src_ = source;
     rx_len_ = payload.size > kAppRxKeep ? kAppRxKeep : payload.size;
@@ -953,6 +959,7 @@ class TeeObserver final : public routeloom::NodeObserver {
 
  private:
   routeloom::NodeObserver* next_;
+  routeloom::Device* device_{nullptr};
 };
 
 struct AppTx {
@@ -1200,6 +1207,7 @@ int main(int argc, char** argv) {
   PipeByteStream usb_stream;
   TeeObserver observer(nullptr);
   Device device;
+  observer.bind_device(device);
   device.observe(&observer);
   // A boot failure restarts like the firmware's fail() when the injected
   // NVS fault caused it; anything else is a harness error.

@@ -193,8 +193,9 @@ class Device {
   MeshNode* mesh() noexcept;
   // Explicit gateway delivery (Service=21, 03-explicit-gateway): an origin
   // resolves a named gateway and sends to it; a USB gateway attaches the
-  // responder half. Built on first use (null before begin()); an image
-  // that never calls it links none of it.
+  // responder half. Null before begin() or while sink attachment is busy;
+  // retry on the next Owner call. An image that never calls it links none
+  // of it.
   GatewayDelivery* gateway() noexcept;
 
  private:
