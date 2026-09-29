@@ -27,7 +27,7 @@
 //! authority (`t0` = wall `now_ms` at start).
 //!
 //! `world`, `peer`, `switch`, `usb_host` and `report` are the harness;
-//! `mesh`, `join`, `cutover`, `fault` and `boot` hold the scenario tests, each
+//! `mesh`, `join`, `cutover`, `fault`, `boot` and `product` hold the scenario tests, each
 //! registered by its row in `tests/e2e/scenarios.json`.
 
 use std::io::{Read, Write};
@@ -69,6 +69,7 @@ mod fault;
 mod join;
 mod mesh;
 mod peer;
+mod product;
 mod recovery;
 mod report;
 mod switch;

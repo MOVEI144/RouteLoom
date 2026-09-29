@@ -4017,6 +4017,7 @@ void test_host_ops_sub_registry() {
       HostOpsSub::JoinRelayResult,
       HostOpsSub::AuthorityUp,      HostOpsSub::AuthorityDown,
       HostOpsSub::SiteStateSet,     HostOpsSub::SiteStateReport,
+      HostOpsSub::ChannelPlan,      HostOpsSub::ChannelPlanReport,
   };
   for (std::size_t i = 0; i < sizeof(kSubs) / sizeof(kSubs[0]); ++i) {
     for (std::size_t j = i + 1; j < sizeof(kSubs) / sizeof(kSubs[0]); ++j) {
@@ -4027,6 +4028,54 @@ void test_host_ops_sub_registry() {
   CHECK(static_cast<std::uint8_t>(HostOpsSub::ConfigTrust) == 0x25);
   CHECK(static_cast<std::uint8_t>(HostOpsSub::TrustStatus) == 0x26);
   CHECK(static_cast<std::uint8_t>(HostOpsSub::RecoveryInfo) == 0x27);
+}
+
+// Channel plan codecs (0x68/0x69, V2-08): the report bytes are pinned
+// with routeloom-protocol host_ops::channel_plan_codec_round_trips_*.
+void test_channel_plan_codecs() {
+  ChannelPlanReport report{};
+  report.result = 3;
+  report.detail = 11;
+  report.phase = 2;
+  report.active_channel = 6;
+  report.ready = 1;
+  report.released = true;
+  report.active_epoch = 0x01020304U;
+  report.cooldown_ms = 600000;
+  report.gateway_now_ms = 0x1122334455667788ULL;
+  report.ledger_sequence = 2;
+  report.ledger_state.fill(0xA5);
+  report.offered_plan.fill(0x5A);
+  std::array<std::uint8_t, 4 + kChannelPlanReportPayload> inner{};
+  std::size_t written = 0;
+  CHECK_OK(encode_channel_plan_report(report, MutableByteView{inner.data(), inner.size()},
+                                      written));
+  CHECK(written == inner.size());
+  const std::uint8_t head[] = {1,    0x69, 0,    96,   0,    3,    11,   2,    6,
+                               1,    1,    0,    1,    2,    3,    4,    0,    0x09,
+                               0x27, 0xC0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                               0x88, 0,    0,    0,    0,    0,    0,    0,    2};
+  CHECK(std::memcmp(inner.data(), head, sizeof(head)) == 0);
+  ChannelPlanReport decoded{};
+  CHECK_OK(decode_channel_plan_report(ByteView{inner.data(), written}, decoded));
+  CHECK(decoded.released && decoded.gateway_now_ms == report.gateway_now_ms &&
+        decoded.offered_plan == report.offered_plan);
+
+  std::array<std::uint8_t, 200> blob{};
+  blob.fill(7);
+  std::array<std::uint8_t, 64> commit{};
+  ChannelPlanRequest offer{};
+  offer.action = ChannelPlanAction::Offer;
+  offer.blob = ByteView{blob.data(), blob.size()};
+  offer.commit_signature = ByteView{commit.data(), commit.size()};
+  std::array<std::uint8_t, 4 + kChannelPlanRequestMax> request{};
+  CHECK_OK(encode_channel_plan(offer, MutableByteView{request.data(), request.size()}, written));
+  ChannelPlanRequest back{};
+  CHECK_OK(decode_channel_plan(ByteView{request.data(), written}, back));
+  CHECK(back.action == ChannelPlanAction::Offer && back.blob.size == blob.size());
+  // A truncated offer never reaches the plan authority.
+  request[3] = static_cast<std::uint8_t>(request[3] - 1);
+  CHECK(!decode_channel_plan(ByteView{request.data(), written - 1}, back));
 }
 
 }  // namespace
@@ -4554,6 +4603,24 @@ void test_bridge_authority_unsupported() {
   CHECK(report.device == 0x101);
 }
 
+void test_bridge_channel_plan_unattached() {
+  // Without a plan authority 0x68 is an unknown subcommand: bit 13 stays
+  // unadvertised and no report is fabricated.
+  World world;
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0x1111, 10) != 0);
+  ChannelPlanRequest status{};
+  std::array<std::uint8_t, 8> bytes{};
+  std::size_t written = 0;
+  CHECK_OK(encode_channel_plan(status, MutableByteView{bytes.data(), bytes.size()}, written));
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  (void)transact(world, host, now, 20, ByteView{bytes.data(), written}, got_error, error_code);
+  CHECK(got_error);
+  CHECK(error_code == static_cast<std::uint16_t>(UsbErrorCode::Unsupported));
+}
+
 int main() {
   test_boot_lease();
   test_submit_codec();
@@ -4603,10 +4670,12 @@ int main() {
   test_bridge_group_refusals();
   test_config_trust_codecs();
   test_host_ops_sub_registry();
+  test_channel_plan_codecs();
   test_bridge_config_trust_dispatch();
   test_authority_usb_codecs();
   test_bridge_authority_dispatch();
   test_bridge_authority_unsupported();
+  test_bridge_channel_plan_unattached();
   if (failures != 0) {
     std::fprintf(stderr, "%d host-ops checks failed\n", failures);
     return 1;

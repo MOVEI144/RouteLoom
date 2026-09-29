@@ -126,4 +126,15 @@ DataFromMeshごとのorigin検証証拠：gatewayの実効security profile・ope
 
 enableはsession scoped（再接続で解除、再enableが必要。profile idはboot scopedで残る）。arm済みsessionの証拠付き配送はDataFromMeshのframe flags bit `0x0002`（`kFlagIngressAssurance`）を立て、payloadの後に8B tail（`flags:u16`＝bit0 VERIFIED、残り予約0／`profile:u8`＝実効profile id 0〜3／`reserved:u8=0`／`site_epoch:u32`＝配送headerのend_epoch）を付ける。20B headのoffsetは両形で同一。group配送（3引数`on_message`経路）はgroup鍵検証であってorigin END証明ではないため、arm済みでもlegacy形のまま送る。hostはflag付きでtail長に満たない・tail異常のframeをmalformedとして落とす（証拠なしへの格下げはしない）。host側の扱いは[Host §3](host.md)。
 
+## 12. 手動channel plan（channel_plan_v1、EXPERIMENTAL）
+
+MemberEdhocのsiteで、hostのSite AuthorityがSAKで署名したchannel planをgatewayへ渡し、gatewayがsiteのplan authorityとして各memberへ配る（issue #5の手動移行）。HelloAck capability bit 13（`0x2000`、`kCapChannelPlanV1`／`CAP_CHANNEL_PLAN_V1`）を広告するbridgeだけがHostOps `0x68`／`0x69`を扱う（bit 2も必要）。bitはbridge ownerが`attach_channel_plan`でplan authorityを渡した時だけ立ち、未attachの`0x68`はUnsupportedのError frameで返る。形式は§7と同じ4B head＋payload（big-endian、長さ完全一致）。
+
+| sub | 向き | payload |
+|---|---|---|
+| `0x68` CHANNEL_PLAN | H→G | `action:u8`（1 STATUS／2 OFFER／3 RELEASE）、`reserved:u8=0`。OFFERは続けて`blob_len:u16`（1〜384）、plan blob、`commit_signature[64]`。RELEASEは`plan_hash[32]` |
+| `0x69` CHANNEL_PLAN_REPORT | G→H（同request id） | 96 B：`result:u16`（ConfigOpsResult空間）、`detail:u8`（機器のStatusCode）、`phase:u8`（gateway参加者のParticipantPhase）、`active_channel:u8`、`ready:u8`（提示中のplanにREADYを返したmember数）、`flags:u8`（bit0 commit解放済み）、`reserved:u8=0`、`active_epoch:u32`、`cooldown_ms:u32`（plan間cooldownの残り）、`gateway_now_ms:u64`（planの時刻の領域）、`ledger_sequence:u64`、`ledger_state[32]`、`offered_plan[32]`（無ければ0） |
+
+gatewayは採用済みsiteのSAK（`SiteCommitVerifier`）で署名を検証してから台帳（`rlmauth`）へcommitし、planを配る。USB sessionはhostを認証するだけで、planの正しさは保証しない。偽の署名・署名なしは`Denied`（detail＝AuthenticationFailed）で、何も配らない。commitの証拠はRELEASEまで保持し、gatewayはOFFER時に認証済みの直接peerを固定して、その全員のREADYまでRELEASEを拒否する。解放後もそのpeerの結果を待ち、全員の結果または期限後に成否を確定する。hostはreportの`ready`を確認してから解放する。site全体のrequired集合や切替時に不在だったmemberの復旧は未実装。hostはSTATUSのreport（台帳の先頭、現在のchannelとepoch、gatewayの時計）から次のplanを組み立てるので、5 sより古いreportでは提示しない。回復用のsigned snapshotは配らない（snapshotはcommit証拠そのもので、READYの関門を越えてしまう）。daemon側はAPI1 `site.channel_plan.status/offer/release`（[Host §11](host.md)）。
+
 [Host](host.md)／[Wire](wire-protocol.md)／[電源断](crash-time-resources.md)

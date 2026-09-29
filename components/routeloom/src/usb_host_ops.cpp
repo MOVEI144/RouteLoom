@@ -2621,6 +2621,148 @@ Status decode_site_state_report(const ByteView inner, SiteStateReport& out) noex
   return Status::success();
 }
 
+// ------------------------------------------------------------ channel plan
+
+Status encode_channel_plan(const ChannelPlanRequest& request, const MutableByteView out,
+                           std::size_t& written) noexcept {
+  written = 0;
+  std::size_t payload = 2;
+  switch (request.action) {
+    case ChannelPlanAction::Status:
+      break;
+    case ChannelPlanAction::Offer:
+      if (request.blob.size == 0 || request.blob.size > 384 ||
+          request.commit_signature.size != 64) {
+        return Status::error(StatusCode::InvalidArgument, "channel plan offer");
+      }
+      payload = kChannelPlanOfferFixed + request.blob.size;
+      break;
+    case ChannelPlanAction::Release:
+      payload = 2 + request.plan_hash.size();
+      break;
+    default:
+      return Status::error(StatusCode::InvalidArgument, "channel plan action");
+  }
+  ByteWriter writer(out);
+  Status status =
+      write_gateway_head(writer, HostOpsSub::ChannelPlan, static_cast<std::uint16_t>(payload));
+  if (status) status = writer.write_u8(static_cast<std::uint8_t>(request.action));
+  if (status) status = writer.write_u8(0);
+  if (status && request.action == ChannelPlanAction::Offer) {
+    status = writer.write_u16(static_cast<std::uint16_t>(request.blob.size));
+    if (status) status = writer.write_bytes(request.blob);
+    if (status) status = writer.write_bytes(request.commit_signature);
+  }
+  if (status && request.action == ChannelPlanAction::Release) {
+    status = writer.write_bytes(ByteView{request.plan_hash.data(), request.plan_hash.size()});
+  }
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_channel_plan(const ByteView inner, ChannelPlanRequest& out) noexcept {
+  out = ChannelPlanRequest{};
+  ByteView payload{};
+  Status status = gateway_body(inner, HostOpsSub::ChannelPlan, 2, kChannelPlanRequestMax, payload);
+  if (!status) return status;
+  const std::uint8_t action = payload.data[0];
+  if (payload.data[1] != 0) return Status::error(StatusCode::ProtocolError, "CHANNEL_PLAN");
+  ChannelPlanRequest request{};
+  request.action = static_cast<ChannelPlanAction>(action);
+  switch (request.action) {
+    case ChannelPlanAction::Status:
+      if (payload.size != 2) return Status::error(StatusCode::ProtocolError, "CHANNEL_PLAN");
+      break;
+    case ChannelPlanAction::Offer: {
+      if (payload.size < kChannelPlanOfferFixed + 1) {
+        return Status::error(StatusCode::ProtocolError, "CHANNEL_PLAN");
+      }
+      const std::size_t blob = (static_cast<std::size_t>(payload.data[2]) << 8) | payload.data[3];
+      if (blob == 0 || blob > 384 || payload.size != kChannelPlanOfferFixed + blob) {
+        return Status::error(StatusCode::ProtocolError, "CHANNEL_PLAN");
+      }
+      request.blob = ByteView{payload.data + 4, blob};
+      request.commit_signature = ByteView{payload.data + 4 + blob, 64};
+      break;
+    }
+    case ChannelPlanAction::Release:
+      if (payload.size != 2 + request.plan_hash.size()) {
+        return Status::error(StatusCode::ProtocolError, "CHANNEL_PLAN");
+      }
+      std::memcpy(request.plan_hash.data(), payload.data + 2, request.plan_hash.size());
+      break;
+    default:
+      return Status::error(StatusCode::ProtocolError, "CHANNEL_PLAN");
+  }
+  out = request;
+  return Status::success();
+}
+
+Status encode_channel_plan_report(const ChannelPlanReport& report, const MutableByteView out,
+                                  std::size_t& written) noexcept {
+  written = 0;
+  ByteWriter writer(out);
+  Status status = write_gateway_head(writer, HostOpsSub::ChannelPlanReport,
+                                     static_cast<std::uint16_t>(kChannelPlanReportPayload));
+  if (status) status = writer.write_u16(report.result);
+  if (status) status = writer.write_u8(report.detail);
+  if (status) status = writer.write_u8(report.phase);
+  if (status) status = writer.write_u8(report.active_channel);
+  if (status) status = writer.write_u8(report.ready);
+  if (status) status = writer.write_u8(report.released ? 1 : 0);
+  if (status) status = writer.write_u8(0);
+  if (status) status = writer.write_u32(report.active_epoch);
+  if (status) status = writer.write_u32(report.cooldown_ms);
+  if (status) status = writer.write_u64(report.gateway_now_ms);
+  if (status) status = writer.write_u64(report.ledger_sequence);
+  if (status) {
+    status = writer.write_bytes(ByteView{report.ledger_state.data(), report.ledger_state.size()});
+  }
+  if (status) {
+    status = writer.write_bytes(ByteView{report.offered_plan.data(), report.offered_plan.size()});
+  }
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_channel_plan_report(const ByteView inner, ChannelPlanReport& out) noexcept {
+  out = ChannelPlanReport{};
+  ByteView payload{};
+  Status status = gateway_body(inner, HostOpsSub::ChannelPlanReport, kChannelPlanReportPayload,
+                               kChannelPlanReportPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  ChannelPlanReport report{};
+  std::uint8_t flags = 0;
+  std::uint8_t reserved = 0;
+  status = reader.read_u16(report.result);
+  if (status) status = reader.read_u8(report.detail);
+  if (status) status = reader.read_u8(report.phase);
+  if (status) status = reader.read_u8(report.active_channel);
+  if (status) status = reader.read_u8(report.ready);
+  if (status) status = reader.read_u8(flags);
+  if (status) status = reader.read_u8(reserved);
+  if (status) status = reader.read_u32(report.active_epoch);
+  if (status) status = reader.read_u32(report.cooldown_ms);
+  if (status) status = reader.read_u64(report.gateway_now_ms);
+  if (status) status = reader.read_u64(report.ledger_sequence);
+  if (status) {
+    status = reader.read_bytes(MutableByteView{report.ledger_state.data(), 32});
+  }
+  if (status) {
+    status = reader.read_bytes(MutableByteView{report.offered_plan.data(), 32});
+  }
+  if (!status) return status;
+  if (flags > 1 || reserved != 0) {
+    return Status::error(StatusCode::ProtocolError, "CHANNEL_PLAN_REPORT");
+  }
+  report.released = flags == 1;
+  out = report;
+  return Status::success();
+}
+
 // ------------------------------------------------------------ observation
 
 Status encode_observation_query(const ObservationQuery& query, const MutableByteView out,

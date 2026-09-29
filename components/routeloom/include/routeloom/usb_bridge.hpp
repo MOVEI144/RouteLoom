@@ -284,6 +284,20 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // TX queue is full (the gateway keeps the bytes for the next poll).
   Status send_authority_up(const AuthorityFragment& fragment) noexcept;
 
+  // Channel-plan binding (channel_plan_v1, V2-08): serves HostOps 0x68
+  // CHANNEL_PLAN through the gateway's plan authority, answered by one
+  // 0x69 report. Advertises kCapChannelPlanV1 in HelloAck.
+  class ChannelPlanUsbSink {
+   public:
+    virtual ~ChannelPlanUsbSink() = default;
+    // One 0x68 inner body; writes the whole 0x69 inner into `reply`. A
+    // failure (malformed request) answers a ProtocolError frame. The sink
+    // owns the codec, so an image without it links none.
+    virtual Status channel_plan(ByteView inner, MutableByteView reply, std::size_t& written,
+                                MonotonicMs now_ms) noexcept = 0;
+  };
+  Status attach_channel_plan(ChannelPlanUsbSink& sink) noexcept;
+
   // Serial RX entry point: feed raw bytes read from the wire.
   void on_bytes(ByteView input, MonotonicMs now_ms) noexcept;
   // Periodic work: partial-frame timeout, handshake timeout, TX pump,
@@ -526,6 +540,7 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // an attached sink, hand to AuthorityUsbSink and answer one 0x67.
   void handle_authority_down(std::uint64_t request, ByteView inner,
                              MonotonicMs now_ms) noexcept;
+  void handle_channel_plan(std::uint64_t request, ByteView inner, MonotonicMs now_ms) noexcept;
   void handle_site_state_set(std::uint64_t request, ByteView inner,
                              MonotonicMs now_ms) noexcept;
   void send_site_state_report(std::uint64_t request, const SiteStateReport& report,
@@ -862,6 +877,7 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // authority_channel_v1: the attached sink (nullptr -> 0x65/0x66 answer
   // Unsupported). 0x64 bodies are staged in tx_body_ like 0x60.
   AuthorityUsbSink* authority_sink_{nullptr};
+  ChannelPlanUsbSink* channel_plan_sink_{nullptr};
   static_assert(kTxScratchBytes >= kGatewayInnerHeadSize + kAuthorityFragmentMax,
                 "authority up staging");
   static_assert(kGatewayInnerHeadSize + kAuthorityFragmentMax <= kMaxTxInner,
