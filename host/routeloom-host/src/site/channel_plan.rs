@@ -320,10 +320,14 @@ mod tests {
     #[test]
     fn unanswered_request_reports_timeout() {
         let mut desk = ChannelPlanDesk::default();
+        assert!(!desk.busy());
         desk.queue(ChannelPlanRequest::Status).unwrap();
+        assert!(desk.busy());
         let (_, action) = desk.take_request(100).unwrap();
         desk.note_sent(7, action, 100);
+        assert!(desk.busy());
         assert!(desk.take_request(100 + REQUEST_TIMEOUT_MS).is_none());
+        assert!(!desk.busy());
         assert_eq!(desk.last(), Some(("status", u16::MAX, 0)));
     }
 }
