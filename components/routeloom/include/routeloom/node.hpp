@@ -674,14 +674,15 @@ static_assert(kTransitSlackMs < kTerminalSlackMs,
 // it for the WHOLE build — the value changes sizeof(MeshNode), so every
 // translation unit must agree: the host CMake option ROUTELOOM_DEDUP_PROFILE
 // and the ESP-IDF Kconfig choice both set it as a PUBLIC definition on the
-// core library. The default is the relay profile.
-constexpr std::size_t kDedupCapacityLeaf = 32;      // leaf-small
-constexpr std::size_t kDedupCapacityRelay = 96;     // relay-c3 (default)
-constexpr std::size_t kDedupCapacityGateway = 256;  // gateway-s3
+// core library. Zero selects the resource profile's default.
+constexpr std::size_t kDedupCapacityLeaf = profile::kDedupCapacityLeaf;
+constexpr std::size_t kDedupCapacityRelay = profile::kDedupCapacityRelay;
+constexpr std::size_t kDedupCapacityGateway = profile::kDedupCapacityGateway;
 #ifndef ROUTELOOM_DEDUP_CAPACITY
-#define ROUTELOOM_DEDUP_CAPACITY 96
+#define ROUTELOOM_DEDUP_CAPACITY 0
 #endif
-constexpr std::size_t kDedupCapacity = ROUTELOOM_DEDUP_CAPACITY;
+constexpr std::size_t kDedupCapacity =
+    ROUTELOOM_DEDUP_CAPACITY == 0 ? profile::kDedupCapacityDefault : ROUTELOOM_DEDUP_CAPACITY;
 static_assert(kDedupCapacity == kDedupCapacityLeaf ||
                   kDedupCapacity == kDedupCapacityRelay ||
                   kDedupCapacity == kDedupCapacityGateway,

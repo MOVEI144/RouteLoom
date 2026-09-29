@@ -118,10 +118,8 @@ class ReferenceObservationSource final : public routeloom::ObservationSource {
       end = snapshot.end_sessions > UINT16_MAX
                 ? UINT16_MAX
                 : static_cast<std::uint16_t>(snapshot.end_sessions);
-      link_cap = static_cast<std::uint16_t>(
-          routeloom::sdkv1::GatewaySessionBank::link_capacity());
-      end_cap = static_cast<std::uint16_t>(
-          routeloom::sdkv1::GatewaySessionBank::end_capacity());
+      link_cap = static_cast<std::uint16_t>(routeloom::sdkv1::ProfileSessionBank::link_capacity());
+      end_cap = static_cast<std::uint16_t>(routeloom::sdkv1::ProfileSessionBank::end_capacity());
     }
 #endif
     routeloom::fill_observation_tables(node_, now_ms, link, link_cap, end,

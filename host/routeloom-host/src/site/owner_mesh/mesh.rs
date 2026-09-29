@@ -688,6 +688,14 @@ fn mesh_direct_converges_and_delivers() {
         let row = world.member_row(node).expect("member row");
         assert!(row.member && row.confirmed, "node {node:x} confirmed");
     }
+    assert_eq!(
+        world.member_row(NODE_A).expect("A row").role,
+        if world.peers[1].role == ROLE_ENDPOINT {
+            1
+        } else {
+            2
+        }
+    );
     // App traffic member A -> member B over the real mesh.
     let payload = b"mesh-direct-hello";
     world.peers[1].app_send(NODE_B, payload);
@@ -972,4 +980,57 @@ fn mesh_provision_snapshot_reused_without_shared_world_state() {
     second.peers[1].app_send(testkit::GATEWAY, b"snapshot-reused");
     second.pump_until(2000, |snaps| snaps[0].rx_count > before);
     assert_eq!(second.snaps[0].rx, b"snapshot-reused");
+}
+
+#[test]
+fn mesh_profile_role_above_profile_refused() {
+    let peers: Vec<std::path::PathBuf> = ["ROUTELOOM_MESH_PEER_A", "ROUTELOOM_MESH_PEER_B"]
+        .iter()
+        .filter_map(|key| std::env::var_os(key).map(std::path::PathBuf::from))
+        .collect();
+    for (index, path) in peers.iter().enumerate() {
+        let dir = std::env::temp_dir().join(format!(
+            "routeloom-owner-mesh-role-{}-{index}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = Command::new(path)
+            .args(["--node", &format!("{NODE_B:#x}"), "--mac", &hex(&MAC_B)])
+            .args(["--role", &format!("{ROLE_GW}")])
+            .args(["--t0", "1000", "--seed", "7", "--gateway", "--channel", "6"])
+            .args(["--netlow", &format!("{:#x}", testkit::NETWORK_LOW)])
+            .args(["--gw1", &format!("{:#x}", testkit::GATEWAY)])
+            .args(["--usb-secret", &hex(&[0x11; 32])])
+            .args(["--cap", &format!("{USB_CAP}")])
+            .arg("--nvs-save")
+            .arg(dir.join("nvs.bin"))
+            .stdin(Stdio::null())
+            .stderr(Stdio::inherit())
+            .output()
+            .expect("spawn profile peer");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut frames = Vec::new();
+        let mut rest = output.stdout.as_slice();
+        while rest.len() >= 2 {
+            let length = usize::from(u16::from_le_bytes([rest[0], rest[1]]));
+            assert!(
+                rest.len() >= 2 + length,
+                "{}: truncated frame",
+                path.display()
+            );
+            frames.push(rest[2..2 + length].to_vec());
+            rest = &rest[2 + length..];
+        }
+        assert!(rest.is_empty(), "{}: trailing bytes", path.display());
+        assert_eq!(frames.len(), 1, "{}: only the fatal frame", path.display());
+        assert_eq!(frames[0][0], b'E', "{}: fatal frame", path.display());
+        assert_eq!(
+            String::from_utf8_lossy(&frames[0][1..]),
+            "RESOURCE_PROFILE_ROLE_MISMATCH",
+            "{}",
+            path.display()
+        );
+        assert!(!output.status.success(), "{}: exit status", path.display());
+    }
 }

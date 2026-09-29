@@ -181,7 +181,18 @@ class BankSessionSink final : public HandshakeSessionSink {
  public:
   explicit BankSessionSink(SessionBank<kLinkCapacity, kEndCapacity>& bank) noexcept
       : bank_(bank) {}
+  // A full end table evicts the oldest idle context (never one with a seal
+  // in flight) and retries once; with every context busy the install stays
+  // NoCapacity. The evicted peer's next send re-runs RLRES1 (03 §5.2). The
+  // link table never evicts.
   Status install_verified(const ContextKeys& keys, const InstallAttestation& att) noexcept override {
+    const Status status = bank_.install_verified(keys, att);
+    if (status.code != StatusCode::NoCapacity || keys.scope != SecurityScope::EndToEnd) {
+      return status;
+    }
+    NodeId evicted = kInvalidNodeId;
+    if (!bank_.evict_idle_end(evicted).ok()) return status;
+    if (end_evictions_ != UINT32_MAX) ++end_evictions_;
     return bank_.install_verified(keys, att);
   }
   Status allocate_context_id(std::uint32_t& out) noexcept override {
@@ -190,9 +201,12 @@ class BankSessionSink final : public HandshakeSessionSink {
   bool context_id_live(const std::uint32_t id) const noexcept override {
     return bank_.context_id_live(id);
   }
+  // Idle end contexts evicted to admit a new peer (saturating).
+  std::uint32_t end_evictions() const noexcept { return end_evictions_; }
 
  private:
   SessionBank<kLinkCapacity, kEndCapacity>& bank_;
+  std::uint32_t end_evictions_{0};
 };
 
 // --- Requests, inputs, results ---------------------------------------------------------------

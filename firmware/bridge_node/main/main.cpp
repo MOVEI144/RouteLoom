@@ -324,10 +324,8 @@ class BridgeObservationSource final : public routeloom::ObservationSource {
       end = snapshot.end_sessions > UINT16_MAX
                 ? UINT16_MAX
                 : static_cast<std::uint16_t>(snapshot.end_sessions);
-      link_cap = static_cast<std::uint16_t>(
-          routeloom::sdkv1::GatewaySessionBank::link_capacity());
-      end_cap = static_cast<std::uint16_t>(
-          routeloom::sdkv1::GatewaySessionBank::end_capacity());
+      link_cap = static_cast<std::uint16_t>(routeloom::sdkv1::ProfileSessionBank::link_capacity());
+      end_cap = static_cast<std::uint16_t>(routeloom::sdkv1::ProfileSessionBank::end_capacity());
     }
 #endif
     routeloom::fill_observation_tables(node_, now_ms, link, link_cap, end,
@@ -639,7 +637,11 @@ extern "C" void app_main(void) {
   owner_config.joiner.requested_role =
       static_cast<std::uint8_t>(routeloom::sdkv1::kMemberRoleGateway);
   owner_config.log_tag = kTag;
-  owner_config.gateway = true;  // USB-attached: relay + direct local channel
+  // USB-attached: relay + direct local channel. begin() refuses a gateway
+  // role on a non-gateway resource profile before RF starts.
+  static_assert(routeloom::profile::kRole == routeloom::profile::Role::Gateway,
+                "bridge_node needs CONFIG_ROUTELOOM_ROLE_GATEWAY");
+  owner_config.role = routeloom::profile::Role::Gateway;
 #if CONFIG_ROUTELOOM_GROUP_TREE_FLAT
   // Flat group profile (dev-flow §6.3): the adopted SitePackage gateways
   // become group_roots; the scoped routing policy is not engaged.

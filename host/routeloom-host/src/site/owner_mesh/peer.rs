@@ -33,6 +33,18 @@ pub(super) fn legacy_peer_path() -> Option<std::path::PathBuf> {
     })
 }
 
+fn legacy_peer_path_for(node: u64) -> Option<std::path::PathBuf> {
+    let key = match node {
+        testkit::GATEWAY => "ROUTELOOM_OWNER_PEER_GW",
+        NODE_A => "ROUTELOOM_OWNER_PEER_A",
+        NODE_B => "ROUTELOOM_OWNER_PEER_B",
+        _ => return legacy_peer_path(),
+    };
+    std::env::var_os(key)
+        .map(std::path::PathBuf::from)
+        .or_else(legacy_peer_path)
+}
+
 pub(super) fn mesh_peer_path() -> Option<std::path::PathBuf> {
     if let Some(path) = std::env::var_os("ROUTELOOM_MESH_PEER").map(std::path::PathBuf::from) {
         return Some(path);
@@ -44,6 +56,18 @@ pub(super) fn mesh_peer_path() -> Option<std::path::PathBuf> {
         let candidate = root.join(dir).join("tests/cpp/routeloom_owner_mesh_peer");
         candidate.is_file().then_some(candidate)
     })
+}
+
+fn mesh_peer_path_for(node: u64) -> Option<std::path::PathBuf> {
+    let key = match node {
+        testkit::GATEWAY => "ROUTELOOM_MESH_PEER_GW",
+        NODE_A => "ROUTELOOM_MESH_PEER_A",
+        NODE_B => "ROUTELOOM_MESH_PEER_B",
+        _ => return mesh_peer_path(),
+    };
+    std::env::var_os(key)
+        .map(std::path::PathBuf::from)
+        .or_else(mesh_peer_path)
 }
 
 pub(super) fn peers_present() -> bool {
@@ -133,7 +157,7 @@ impl Drop for LegacyPeer {
 
 impl LegacyPeer {
     pub(super) fn spawn(persona: &Persona, t0: u64, seed: u64) -> Self {
-        let path = legacy_peer_path()
+        let path = legacy_peer_path_for(persona.node)
             .expect("build routeloom_joiner_interop_peer or set ROUTELOOM_OWNER_PEER");
         let keys = persona_keys(persona.node, persona.seed);
         let site_ca_pub = test_keypair(0x61).1;
@@ -694,8 +718,8 @@ impl MeshPeer {
         nvs_save: &std::path::Path,
         flat: bool,
     ) -> Child {
-        let path =
-            mesh_peer_path().expect("build routeloom_owner_mesh_peer or set ROUTELOOM_MESH_PEER");
+        let path = mesh_peer_path_for(node)
+            .expect("build routeloom_owner_mesh_peer or set ROUTELOOM_MESH_PEER");
         let mut command = Command::new(&path);
         command
             .arg("--node")

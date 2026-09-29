@@ -21,6 +21,7 @@
 #include <cstdint>
 
 #include "routeloom/key_schedule.hpp"  // aead_nonce
+#include "routeloom/profile.hpp"
 #include "routeloom/security.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
@@ -355,6 +356,9 @@ class SessionBank {
   std::array<std::uint8_t, kStagingBytes> staging_{};
 };
 
+// The Owner's bank, sized by the resource profile (profile.hpp). The two
+// fixed shapes below are instantiated in every build for the portable tests.
+using ProfileSessionBank = SessionBank<profile::kLinkSessions, profile::kEndSessions>;
 using NodeSessionBank = SessionBank<32, 8>;
 using GatewaySessionBank = SessionBank<32, 128>;
 

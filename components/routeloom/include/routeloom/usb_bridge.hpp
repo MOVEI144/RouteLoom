@@ -13,6 +13,7 @@
 #include "routeloom/fixed_containers.hpp"
 #include "routeloom/gateway.hpp"
 #include "routeloom/node.hpp"
+#include "routeloom/profile.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 #include "routeloom/usb_codec.hpp"
@@ -161,9 +162,14 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // per-node link/route snapshots and, after a host query sets SUBSCRIBE,
   // streams 0x42 join/leave/route-change events for that session only.
   // Advertises CAP_NODE_STATUS_V1 in HelloAck. Requires config_.mesh.
+  // Unsupported when ROUTELOOM_USB_NODE_STATUS is compiled out.
   Status attach_node_status() noexcept;
-  const NodeStatusMonitor& node_status_monitor() const noexcept {
-    return node_monitor_;
+  bool node_status_armed() const noexcept {
+#if ROUTELOOM_USB_NODE_STATUS
+    return node_monitor_.armed();
+#else
+    return false;
+#endif
   }
 
   // Late observation binding (observation_v1): serves HostOps 0x70
@@ -174,7 +180,13 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // bit the query answers Unsupported and no event is emitted. The source
   // is firmware-owned and must outlive the bridge.
   Status attach_observation(const ObservationSource& source) noexcept;
-  bool observation_armed() const noexcept { return observation_armed_; }
+  bool observation_armed() const noexcept {
+#if ROUTELOOM_USB_OBSERVATION
+    return observation_armed_;
+#else
+    return false;
+#endif
+  }
   // Declares the gateway's effective security profile (observation
   // kProfile* id) for receive assurance and advertises kCapRxAssuranceV1.
   // Requires config_.mesh; without it 0x08 answers Unsupported and every
@@ -746,15 +758,20 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // Routed config endpoint (P5): the bridge-facing ConfigGateway, installed
   // as the mesh node's config_sink_. nullptr -> config ops Unsupported.
   ConfigGateway* config_gateway_{nullptr};
-  HostRegistration registration_{};
+  std::array<HostRegistration, ROUTELOOM_USB_GATEWAY_ENDPOINT ? 1 : 0> registration_{};
   // Bounded pending 0x11 ingress slots — shared by wire submits and the
-  // host loopback so the 8-deep pending bound is one honest pool.
-  std::array<PendingIngress, kGatewayPendingMax> pending_ingress_{};
-  std::array<PendingGatewaySend, kGatewayPendingMax> pending_sends_{};
+  // host loopback so the 8-deep pending bound is one honest pool. Zero
+  // slots when ROUTELOOM_USB_GATEWAY_ENDPOINT is compiled out (the
+  // endpoint then never attaches and every gateway op is Unsupported).
+  static constexpr std::size_t kGatewaySlots =
+      ROUTELOOM_USB_GATEWAY_ENDPOINT ? kGatewayPendingMax : 0;
+  std::array<PendingIngress, kGatewaySlots> pending_ingress_{};
+  std::array<PendingGatewaySend, kGatewaySlots> pending_sends_{};
   std::uint64_t next_ingress_request_{1};
   // Bounded remote diagnostic queries (D1d): full -> the 0x30 request is
   // refused with Busy, never silently queued beyond the bound.
   std::array<PendingDiagnostic, kPendingDiagnosticCapacity> pending_diag_{};
+#if ROUTELOOM_USB_NODE_STATUS
   // node_status_v1 state: the per-session event baseline (disarmed on every
   // session teardown) and the .bss page staging for 0x41 replies.
   NodeStatusMonitor node_monitor_{};
@@ -763,6 +780,7 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // The encoded page reply is staged in tx_body_ (see above).
   static_assert(kTxScratchBytes >= kGatewayInnerHeadSize + kNodeStatusPageMaxPayload,
                 "node-status page staging");
+#endif
   // observation_v1 state: the firmware-owned source (nullptr -> 0x70
   // answers Unsupported), the per-session subscription and the last served
   // digests + milestone key (change baselines for 0x72). Disarmed on every
@@ -770,16 +788,17 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // straight into tx_body_ (see above) and route entries stage one at a
   // time in a 32 B handler-local — the bridge DRAM floor leaves no room
   // for dedicated .bss staging here.
+#if ROUTELOOM_USB_OBSERVATION
   const ObservationSource* observation_source_{nullptr};
   bool observation_armed_{false};
   // Pending topology mask (0 = nothing pending): OR-ed detections, so a
   // coalesced event names every half that moved since the last emission.
   std::uint8_t observation_topology_mask_{0};
   bool observation_milestone_pending_{false};
-  // Receive-assurance state (see packing above): deliberately placed in
-  // the alignment pad before observation_ms_lo_, so the bridge object —
-  // and bridge static DRAM against the floor — does not grow.
+#endif
+  // Receive-assurance state is independent of the optional observation lane.
   std::uint8_t rx_assurance_{0};
+#if ROUTELOOM_USB_OBSERVATION
   // Low 32 ms bits of the last 0x72 pass (the 250 ms cadence gate is
   // wrap-safe unsigned arithmetic).
   std::uint32_t observation_ms_lo_{0};
@@ -791,6 +810,7 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // joiner, flags, attempts u32): a change bumps
   // observation_milestone_gen_.
   std::uint32_t observation_milestone_key_{kObservationMilestoneKeyZero};
+#endif
   // The encoded page reply is staged in tx_body_ like the node-status page.
   static_assert(kTxScratchBytes >= kGatewayInnerHeadSize + kObservationPageMaxPayload,
                 "observation page staging");
@@ -814,7 +834,7 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
     std::uint64_t usb_request{0};
     bool used{false};
   };
-  std::array<PendingGroup, kGroupOriginCapacity> pending_group_{};
+  std::array<PendingGroup, ROUTELOOM_USB_GROUP ? kGroupOriginCapacity : 0> pending_group_{};
   // attach_group() ran: the group lane is bound and the capability bit is
   // whatever the mesh can currently serve (refresh_group_capability keeps
   // it truthful across later config changes).
