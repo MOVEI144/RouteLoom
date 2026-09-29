@@ -1,0 +1,14 @@
+{
+  "expected": [
+    "0000000000000002",
+    "0000000000000003"
+  ],
+  "authenticated_at_s": 0.253,
+  "routes_at_s": {
+    "0000000000000002": 0.253,
+    "0000000000000003": 0.253
+  },
+  "all_routes_at_s": 0.253,
+  "elapsed_s": 0.256,
+  "source": "/home/sahur/orca/workspaces/RouteLoom/v2-h0/artifacts/hil/2026-09-29-h0/recheck/devram/m05-coldstart-chain-b/rep-03/routes.jsonl"
+}

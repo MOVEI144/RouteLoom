@@ -1,0 +1,17 @@
+[2026-09-29T06:11:20.633Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-29T06:11:23.635Z] I (193294) RouteLoomRef: message origin=1 session=2262116400 sequence=29 bytes=5
+[2026-09-29T06:11:23.650Z] I (193308) RouteLoomRef: message origin=1 session=2262116400 sequence=30 bytes=5
+[2026-09-29T06:11:23.663Z] I (193322) RouteLoomRef: message origin=1 session=2262116400 sequence=31 bytes=5
+[2026-09-29T06:11:23.677Z] I (193336) RouteLoomRef: message origin=1 session=2262116400 sequence=32 bytes=5
+[2026-09-29T06:11:23.692Z] I (193350) RouteLoomRef: message origin=1 session=2262116400 sequence=33 bytes=5
+[2026-09-29T06:11:23.707Z] I (193365) RouteLoomRef: message origin=1 session=2262116400 sequence=34 bytes=5
+[2026-09-29T06:11:23.721Z] I (193380) RouteLoomRef: message origin=1 session=2262116400 sequence=35 bytes=5
+[2026-09-29T06:11:23.739Z] I (193397) RouteLoomRef: message origin=1 session=2262116400 sequence=36 bytes=5
+[2026-09-29T06:12:10.830Z] I (240489) RouteLoom: stack hwm main 7580 B
+[2026-09-29T06:12:10.833Z] I (240489) RouteLoom: owner polls=58947 empty=58606 rxq_max=7 max_us rx=6562 bootstrap=409028 node=3635 security=833125
+[2026-09-29T06:12:10.840Z] I (240493) RouteLoom: owner expiry_slots=24992680 hop_accept_expired=6
+[2026-09-29T06:12:10.846Z] I (240499) RouteLoom: HIL HEAP free=138496 largest=122880 min=137616 B
+[2026-09-29T06:12:10.857Z] I (240505) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=3 stale=0 probes=24 send_failures=12 kind_rejects=0
+[2026-09-29T06:12:10.864Z] I (240516) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=4 seq=2
+[2026-09-29T06:12:10.871Z] I (240523) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=8 seq=3
+[2026-09-29T06:13:10.759Z] !! capture closed

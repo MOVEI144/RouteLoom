@@ -1,0 +1,15 @@
+Traceback (most recent call last):
+  File "/home/sahur/orca/workspaces/RouteLoom/v2-h0/tools/hil/flash.py", line 524, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/sahur/orca/workspaces/RouteLoom/v2-h0/tools/hil/flash.py", line 506, in main
+    manifest = flash_board(
+               ^^^^^^^^^^^^
+  File "/home/sahur/orca/workspaces/RouteLoom/v2-h0/tools/hil/flash.py", line 368, in flash_board
+    return _flash_board_from_dir(board, port, out_dir, esptool, app_only,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sahur/orca/workspaces/RouteLoom/v2-h0/tools/hil/flash.py", line 387, in _flash_board_from_dir
+    require_board_config(esptool, board.chip, port)
+  File "/home/sahur/orca/workspaces/RouteLoom/v2-h0/tools/hil/flash.py", line 123, in require_board_config
+    raise FlashError('rlcfg is blank: flash the setup image and commit the '
+FlashError: rlcfg is blank: flash the setup image and commit the BoardConfig first (or pass --allow-unconfigured)

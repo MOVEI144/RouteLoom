@@ -184,6 +184,19 @@ class FlashAppOnlyTests(unittest.TestCase):
                                             True, 0, 1, out, needs_config=True)
             probe.assert_not_called()
 
+    def test_cli_reports_refusal_without_traceback(self):
+        board = SimpleNamespace(name='endpoint', app='reference_node', console='usb-serial-jtag')
+        bench = SimpleNamespace(boards={'endpoint': board})
+        with patch.object(flash.rig_mod, 'load_rigs', return_value={'b': bench}), \
+                patch.object(flash.rig_mod, 'resolve_board_port',
+                             return_value=('/dev/x', ['/dev/x'], 'ONLINE')), \
+                patch.object(flash, 'flash_board',
+                             side_effect=FlashError('rlcfg is blank')), \
+                patch('sys.stderr') as err:
+            rc = flash.main(['--rig', 'r.yaml', '--bench', 'b', '--board', 'endpoint'])
+        self.assertEqual(rc, 4)
+        self.assertIn('rlcfg is blank', ''.join(c.args[0] for c in err.write.call_args_list))
+
     def test_only_generic_field_bundles_need_config(self):
         field = 'CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y\n'
         setup = field + 'CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y\n'

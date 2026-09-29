@@ -1,0 +1,11 @@
+{
+  "identity": {
+    "chip": "esp32c6",
+    "mac": "10:bd:a3:ff:fe:b1:48:a8",
+    "log": "flash-relay-preflight.log",
+    "flash_bytes": 4194304
+  },
+  "app_sha256": "6b6c9d4d7e48d36195e46a59b4b8e2d3aab6caaeaf9bc05b9e1d3f9f4894d774",
+  "app_bytes": 1414880,
+  "bundle": "hil-h0r-ref-c6-member-sleep-reference_node-esp32c6"
+}

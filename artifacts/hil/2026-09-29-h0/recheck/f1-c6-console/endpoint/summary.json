@@ -1,0 +1,237 @@
+[
+  {
+    "cycle": 0,
+    "node": "0000000000000013",
+    "config": "-",
+    "post_status": [
+      "OK identity=sealed pending=0 locked=1 node=0000000000000013 kid=b0b9019af3fabda297d157056cb3e81991b798cd7e7f7df61d808126",
+      "OK identity=sealed pending=0 locked=1 node=0000000000000013 kid=b0b9019af3fabda297d157056cb3e81991b798cd7e7f7df61d808126",
+      "OK identity=sealed pending=0 locked=1 node=0000000000000013 kid=b0b9019af3fabda297d157056cb3e81991b798cd7e7f7df61d808126"
+    ],
+    "status_after_reboot": "OK identity=sealed pending=0 locked=1 node=0000000000000013 kid=b0b9019af3fabda297d157056cb3e81991b798cd7e7f7df61d808126f3333751 serial=519 devcert_sha256=a58d3",
+    "ok": true,
+    "stack_free": [
+      [
+        "status",
+        9024
+      ],
+      [
+        "keygen",
+        8308
+      ],
+      [
+        "identity",
+        8164
+      ],
+      [
+        "lock",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8180
+      ]
+    ],
+    "min_stack_free": 8164
+  },
+  {
+    "cycle": 1,
+    "node": "0000000000000014",
+    "config": "-",
+    "post_status": [
+      "OK identity=sealed pending=0 locked=1 node=0000000000000014 kid=4eb2c0c75e21666163c4806717d0b5f4ae9a60de3baf43275ec62d96",
+      "OK identity=sealed pending=0 locked=1 node=0000000000000014 kid=4eb2c0c75e21666163c4806717d0b5f4ae9a60de3baf43275ec62d96",
+      "OK identity=sealed pending=0 locked=1 node=0000000000000014 kid=4eb2c0c75e21666163c4806717d0b5f4ae9a60de3baf43275ec62d96"
+    ],
+    "status_after_reboot": "OK identity=sealed pending=0 locked=1 node=0000000000000014 kid=4eb2c0c75e21666163c4806717d0b5f4ae9a60de3baf43275ec62d96e6890cbb serial=520 devcert_sha256=6fd08",
+    "ok": true,
+    "stack_free": [
+      [
+        "status",
+        9024
+      ],
+      [
+        "keygen",
+        8292
+      ],
+      [
+        "identity",
+        8180
+      ],
+      [
+        "lock",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ]
+    ],
+    "min_stack_free": 8164
+  },
+  {
+    "cycle": 2,
+    "node": "0000000000000015",
+    "config": "-",
+    "post_status": [
+      "OK identity=sealed pending=0 locked=1 node=0000000000000015 kid=4cd078b83a4e7366f7975a573e4ee94b86892aba2a5fbcdae384b9b7",
+      "OK identity=sealed pending=0 locked=1 node=0000000000000015 kid=4cd078b83a4e7366f7975a573e4ee94b86892aba2a5fbcdae384b9b7",
+      "OK identity=sealed pending=0 locked=1 node=0000000000000015 kid=4cd078b83a4e7366f7975a573e4ee94b86892aba2a5fbcdae384b9b7"
+    ],
+    "status_after_reboot": "OK identity=sealed pending=0 locked=1 node=0000000000000015 kid=4cd078b83a4e7366f7975a573e4ee94b86892aba2a5fbcdae384b9b70f4f0270 serial=521 devcert_sha256=6f568",
+    "ok": true,
+    "stack_free": [
+      [
+        "status",
+        9024
+      ],
+      [
+        "keygen",
+        8308
+      ],
+      [
+        "identity",
+        8180
+      ],
+      [
+        "lock",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8180
+      ]
+    ],
+    "min_stack_free": 8164
+  },
+  {
+    "cycle": 3,
+    "node": "0000000000000016",
+    "config": "-",
+    "post_status": [
+      "OK identity=sealed pending=0 locked=1 node=0000000000000016 kid=0e977fe0293d0a86d2e67e4fdd9717021878efe1103627f1c9673e29",
+      "OK identity=sealed pending=0 locked=1 node=0000000000000016 kid=0e977fe0293d0a86d2e67e4fdd9717021878efe1103627f1c9673e29",
+      "OK identity=sealed pending=0 locked=1 node=0000000000000016 kid=0e977fe0293d0a86d2e67e4fdd9717021878efe1103627f1c9673e29"
+    ],
+    "status_after_reboot": "OK identity=sealed pending=0 locked=1 node=0000000000000016 kid=0e977fe0293d0a86d2e67e4fdd9717021878efe1103627f1c9673e291b472a8f serial=522 devcert_sha256=cf417",
+    "ok": true,
+    "stack_free": [
+      [
+        "status",
+        9024
+      ],
+      [
+        "keygen",
+        8308
+      ],
+      [
+        "identity",
+        8180
+      ],
+      [
+        "lock",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8180
+      ]
+    ],
+    "min_stack_free": 8164
+  },
+  {
+    "cycle": 4,
+    "node": "0000000000000017",
+    "config": "-",
+    "post_status": [
+      "OK identity=sealed pending=0 locked=1 node=0000000000000017 kid=682e44b909ce5c5e25f3d85d9f94eb3822c878fc6af72d51398ccf1b",
+      "OK identity=sealed pending=0 locked=1 node=0000000000000017 kid=682e44b909ce5c5e25f3d85d9f94eb3822c878fc6af72d51398ccf1b",
+      "OK identity=sealed pending=0 locked=1 node=0000000000000017 kid=682e44b909ce5c5e25f3d85d9f94eb3822c878fc6af72d51398ccf1b"
+    ],
+    "status_after_reboot": "OK identity=sealed pending=0 locked=1 node=0000000000000017 kid=682e44b909ce5c5e25f3d85d9f94eb3822c878fc6af72d51398ccf1b0b661e07 serial=523 devcert_sha256=7a55e",
+    "ok": true,
+    "stack_free": [
+      [
+        "status",
+        9024
+      ],
+      [
+        "keygen",
+        8308
+      ],
+      [
+        "identity",
+        8164
+      ],
+      [
+        "lock",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8180
+      ]
+    ],
+    "min_stack_free": 8164
+  }
+]

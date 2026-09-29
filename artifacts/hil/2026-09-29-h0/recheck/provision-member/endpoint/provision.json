@@ -1,0 +1,75 @@
+{
+  "board": "endpoint",
+  "node": "0000000000000003",
+  "role": "bench",
+  "setup_bundle": "h0r-setup-ref-c6-member",
+  "field_bundle": "h0r-ref-c6-member",
+  "erase": "ok",
+  "config": {
+    "generation": 1,
+    "node": "0000000000000003",
+    "role": "reference",
+    "security": "member",
+    "secrets_generation": "0",
+    "fingerprint": "-",
+    "secrets_fingerprint": ""
+  },
+  "identity_status": "OK identity=sealed pending=0 locked=1 node=0000000000000003 kid=1aecf50aaaa10846dc12acdce69a177e035ee387cc72342597bb4f9f1f6aef45 serial=103 devcert_sha256=60ff24c0485fc050d596bda3c757a66e97e2b63b1aafe",
+  "nvs_after_identity": {
+    "rlcfg": {
+      "sha256": "1a9d76db2e5a5f02a893e1073cfd05583f2000b1a95e2d78e2c7de26f5b6a139",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "8380bd43e1f7d58db0b369326be152f3cbbf98efdc260f6999314a7585e7c563",
+      "blank": false
+    }
+  },
+  "app_only": {
+    "identity": {
+      "chip": "esp32c6",
+      "mac": "10:bd:a3:ff:fe:b1:47:54",
+      "log": "flash-endpoint-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "0e43a2cc10fefebec2099c6637034925d4c13d01302e24d0faa63986220575a4",
+    "app_bytes": 1398752,
+    "bundle": "hil-h0r-ref-c6-member-reference_node-esp32c6"
+  },
+  "nvs_after_app_write": {
+    "rlcfg": {
+      "sha256": "1a9d76db2e5a5f02a893e1073cfd05583f2000b1a95e2d78e2c7de26f5b6a139",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "8380bd43e1f7d58db0b369326be152f3cbbf98efdc260f6999314a7585e7c563",
+      "blank": false
+    }
+  },
+  "nvs_preserved": {
+    "rlcfg": true,
+    "rlkeys": true,
+    "rlsec": true
+  },
+  "readback": {
+    "stage": "readback",
+    "mono_ms": 445917858,
+    "wall": "2026-09-29T05:56:27Z",
+    "source": "boot",
+    "node": "0000000000000003",
+    "kid": "1aecf50aaaa10846dc12acdce69a177e035ee387cc72342597bb4f9f1f6aef45",
+    "devcert_sha256": "60ff24c0485fc050d596bda3c757a66e97e2b63b1aafe6c6c3a9b51a43ce3858",
+    "fw": "1",
+    "app_sha256": "2d453c688e4e8a7bf0c3a289b8fd2413144e604a7204bfb1b9022393f39df163",
+    "config_generation": 1,
+    "secrets_generation": 0
+  }
+}
