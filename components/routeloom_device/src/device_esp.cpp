@@ -197,7 +197,7 @@ RTC_NOINIT_ATTR routeloom::FailStreak s_fail;
   esp_restart();
 }
 
-#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE && !CONFIG_ROUTELOOM_DEV_KCONFIG_IDENTITY
 // CONFIG_REQUIRED is an operator step, not a transient fault: it never
 // feeds the fail streak, whose deep sleep would hide the USB port for
 // 30 minutes. RF has not started; the board stays awake and repeats the
