@@ -756,7 +756,8 @@ LifecycleBlockReason MembershipLifecycle::adopt_stores() noexcept {
       const RevocationEntry& stored_entry = revocations_.set().entries[i];
       if (verified_entry.node_id != stored_entry.node_id ||
           verified_entry.min_generation != stored_entry.min_generation ||
-          verified_entry.reason != stored_entry.reason) {
+          verified_entry.reason != stored_entry.reason ||
+          verified_entry.readmit_gk_epoch != stored_entry.readmit_gk_epoch) {
         return LifecycleBlockReason::RevocationStore;
       }
     }

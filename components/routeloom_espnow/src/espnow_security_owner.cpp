@@ -149,8 +149,11 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::enforce_revocation(
   // authority down transfers cancel with them (no notice may extend a
   // revoked peer's mesh lifetime). The revoked device still learns
   // its removal over the ZT recovery path (04 §6.3).
+  // A readmitted entry (#146) names a live member again: nothing of its
+  // new binding is cancelled or withdrawn.
   if (owner.gateway_role() && owner.authority_live_) {
     for (std::size_t i = 0; i < set.count; ++i) {
+      if (set.entries[i].readmit_gk_epoch != 0) continue;
       owner.gateway()->cancel_down_to(set.entries[i].node_id);
     }
   }
@@ -162,6 +165,7 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::enforce_revocation(
   if (!sessions) return sessions;
   if (owner.runtime_ != nullptr) {
     for (std::size_t i = 0; i < set.count; ++i) {
+      if (set.entries[i].readmit_gk_epoch != 0) continue;
       owner.runtime_->node().revoke_routes(set.entries[i].node_id, now_ms);
     }
   }

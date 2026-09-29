@@ -3571,6 +3571,14 @@ Status SecurityCoordinator::revoke_member_sessions(const RevocationSet& set,
   for (std::size_t i = 0; i < set.count; ++i) {
     const NodeId peer = set.entries[i].node_id;
     if (peer == kInvalidNodeId || peer == kBroadcastNodeId) continue;
+    if (set.entries[i].readmit_gk_epoch != 0) {
+      // #146: the site readmitted this NodeId above min_generation. Its
+      // live sessions are the new holder's (the P4 handshake refuses a
+      // lower generation); only the dead record of the revoked binding
+      // goes, so the returning radio can bind again.
+      if (deps_.discovery != nullptr) (void)deps_.discovery->forget_peer(peer);
+      continue;
+    }
     (void)bank_.retire_all(peer);
     if (deps_.discovery != nullptr) (void)deps_.discovery->revoke_peer(peer);
   }
