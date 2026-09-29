@@ -532,7 +532,11 @@ fn mesh_hostlink_v2_auth_negatives() {
 /// delivery inside 15 s (vt).
 #[test]
 fn mesh_gateway_reset_reauthenticates_and_delivers() {
-    let Some(mut world) = MeshWorld::start("m06g", Switch::direct()) else {
+    // The compatibility boot plan: the TX_ACCEPTED count below holds for
+    // its attach order. After a simultaneous boot the first sends after
+    // the reset may report QUEUED while the end-to-end session re-forms.
+    let plan = staggered_boot(3);
+    let Some(mut world) = MeshWorld::start_plan("m06g", Switch::direct(), &plan, false) else {
         return; // no C++ peers: skip (ignore-equivalent)
     };
     converge(&mut world, "m06g");
