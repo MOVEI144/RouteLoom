@@ -715,8 +715,8 @@ pub(super) fn rotate_direct(
 /// expires. A is never counted applied; its stale-keyed chatter is
 /// refused on the generation (which never reaches tag verification,
 /// so this is key rejection, not replay); then A converges straight
-/// to g+2 (no g+1 redistribution) and current-key traffic flows. The
-/// durable-ACK→stable tail is covered by citation (see the end).
+/// to g+2 (no g+1 redistribution) without a rescue reset, the host
+/// holds durable ACKs from every member, and unicast flows both ways.
 #[test]
 fn mesh_k1_gk_double_miss() {
     use routeloom_client::site::SiteAdmin;
@@ -883,23 +883,35 @@ fn mesh_k1_gk_double_miss() {
         world.snaps[1]
     );
     assert!(!saw_gk1, "A never staged the dead g+1");
-    // A fresh boot starts a discovery round with the durable g+2 key;
-    // mere radio isolation can leave its existing link idle throughout
-    // this observation window.
-    world.peers[1].power_cut();
-    world.pump_until(3000, |snaps| snaps[2].scope_accepted > b_scope_ok);
-    assert!(
-        world.snaps[2].scope_accepted > b_scope_ok,
-        "same-key scope flows again at g+2: {:?}",
-        world.snaps[2]
+    // No rescue: A keeps its links and reaches the site at g+2 on its
+    // own; the host holds durable active ACKs from every member and
+    // unicast crosses both ways (the 15 min tail: recovery.rs J08).
+    let settled = world.now;
+    while world.now - settled < 120_000 {
+        let status = world
+            .provision
+            .site
+            .link
+            .group_key_status()
+            .expect("gk status");
+        if status.phase == "stable" && status.unknown == 0 {
+            break;
+        }
+        for _ in 0..40 {
+            world.step(25);
+        }
+    }
+    let status = world
+        .provision
+        .site
+        .link
+        .group_key_status()
+        .expect("gk status");
+    assert_eq!(
+        (status.phase.as_str(), status.unknown),
+        ("stable", 0),
+        "every member durably at g+2: {status:?}"
     );
-    // Tail coverage ("durable ACK clears unknown → stable", plus a
-    // post-outage unicast) lives in mesh_group_key_rotate_acknowledged:
-    // after this outage A's transit channel cannot come back (long
-    // clean isolation wedges link/route re-establishment —
-    // out-of-scope routing liveness gap, residual R-D04-K1a — so its
-    // rotation ACKs never flow), and past ~9 min virtual the
-    // gateway's quiet-probe Pull trips a pull-loss resend that
-    // exhausts back to Unknown (residual R-D04-K1b, host GK). Neither
-    // is D04's to fix here.
+    super::mesh::deliver_each(&mut world, 1, 0, 10, b"k1-up");
+    super::mesh::deliver_each(&mut world, 0, 1, 10, b"k1-down");
 }

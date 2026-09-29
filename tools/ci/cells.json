@@ -19,47 +19,47 @@
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_RELAY=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1270816, "static_free_min": 57020, "rtc_used_max": 6640}
+      "budget": {"app_bin_max": 1134032, "static_free_min": 64364, "rtc_used_max": 6632}
     },
     {
       "id": "reference_node-esp32c3-normal-off-endpoint", "app": "reference_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_RESOURCE_PROFILE_ENDPOINT=y", "CONFIG_ROUTELOOM_ROLE_ENDPOINT=y"],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_DEDUP_PROFILE_DEFAULT=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1270608, "static_free_min": 85612, "rtc_used_max": 6640}
+      "budget": {"app_bin_max": 1133968, "static_free_min": 92956, "rtc_used_max": 6632}
     },
     {
       "id": "bridge_node-esp32c3-normal-off-off", "app": "bridge_node", "target": "esp32c3",
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_GATEWAY_SMALL=y"],
-      "budget": {"app_bin_max": 1358224, "static_free_min": 43640, "rtc_used_max": 6640}
+      "budget": {"app_bin_max": 1208272, "static_free_min": 51560, "rtc_used_max": 6632}
     },
     {
       "id": "bench_node-esp32c3-normal-off-off", "app": "bench_node", "target": "esp32c3",
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_RELAY=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1276400, "static_free_min": 63666, "rtc_used_max": 6640}
+      "budget": {"app_bin_max": 1279296, "static_free_min": 63546, "rtc_used_max": 6640}
     },
     {
       "id": "reference_node-esp32s3-normal-off-off", "app": "reference_node", "target": "esp32s3",
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_RELAY=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1283232, "static_free_min": 78107, "rtc_used_max": 6000}
+      "budget": {"app_bin_max": 1122480, "static_free_min": 85428, "rtc_used_max": 5988}
     },
     {
       "id": "bridge_node-esp32s3-normal-off-off", "app": "bridge_node", "target": "esp32s3",
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_GATEWAY=y"],
-      "budget": {"app_bin_max": 1386208, "static_free_min": 21539, "rtc_used_max": 6000}
+      "budget": {"app_bin_max": 1204000, "static_free_min": 29344, "rtc_used_max": 5988}
     },
     {
       "id": "bench_node-esp32s3-normal-off-off", "app": "bench_node", "target": "esp32s3",
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_RELAY=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1289728, "static_free_min": 75935, "rtc_used_max": 6000}
+      "budget": {"app_bin_max": 1292848, "static_free_min": 75823, "rtc_used_max": 6000}
     },
     {
       "id": "reference_node-esp32s3-deep_sleep-off-owner_member", "app": "reference_node", "target": "esp32s3",
@@ -78,20 +78,20 @@
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_RELAY=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1435344, "static_free_min": 43815, "rtc_used_max": 15232}
+      "budget": {"app_bin_max": 1289376, "static_free_min": 53073, "rtc_used_max": 15232}
     },
     {
       "id": "bridge_node-esp32c5-normal-off-off", "app": "bridge_node", "target": "esp32c5",
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_GATEWAY=y"],
-      "budget": {"app_bin_max": 1367984, "static_free_min": 17891, "rtc_used_max": 9408}
+      "budget": {"app_bin_max": 1369600, "static_free_min": 17739, "rtc_used_max": 9408}
     },
     {
       "id": "bench_node-esp32c5-normal-off-off", "app": "bench_node", "target": "esp32c5",
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_RELAY=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1441264, "static_free_min": 41637, "rtc_used_max": 15232}
+      "budget": {"app_bin_max": 1444192, "static_free_min": 41517, "rtc_used_max": 15232}
     },
     {
       "id": "reference_node-esp32c5-deep_sleep-off-owner_member", "app": "reference_node", "target": "esp32c5",
@@ -108,7 +108,7 @@
     {
       "id": "bridge_node-esp32c3-normal-observe-off", "app": "bridge_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y", "CONFIG_ROUTELOOM_DISCOVERY=y", "CONFIG_ROUTELOOM_MIGRATION=1"],
-      "budget": {"app_bin_max": 1051376, "static_free_min": 76512, "rtc_used_max": 96}
+      "budget": {"app_bin_max": 950224, "static_free_min": 84448, "rtc_used_max": 88}
     },
     {
       "id": "bridge_node-esp32c3-normal-off-endpoints_on", "app": "bridge_node", "target": "esp32c3",
@@ -148,14 +148,14 @@
       "overlay": ["CONFIG_ROUTELOOM_HIL_SEND_DESTINATION=0x2", "CONFIG_ROUTELOOM_HIL_SEND_COUNT=1", "CONFIG_ROUTELOOM_OBSERVATION_REMOTE=y"],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1285584, "static_free_min": 78107, "rtc_used_max": 6000}
+      "budget": {"app_bin_max": 1124528, "static_free_min": 85412, "rtc_used_max": 5988}
     },
     {
       "id": "reference_node-esp32c3-normal-off-maintenance_on", "app": "reference_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y"],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 353312, "static_free_min": 234787, "rtc_used_max": 816}
+      "budget": {"app_bin_max": 315280, "static_free_min": 242069, "rtc_used_max": 808}
     },
     {
       "id": "bridge_node-esp32c3-normal-off-maintenance_on", "app": "bridge_node", "target": "esp32c3",
@@ -165,113 +165,113 @@
     {
       "id": "bridge_node-esp32c3-normal-off-maintenance_member", "app": "bridge_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y", "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
-      "budget": {"app_bin_max": 337792, "static_free_min": 237741, "rtc_used_max": 816}
+      "budget": {"app_bin_max": 301776, "static_free_min": 244995, "rtc_used_max": 808}
     },
     {
       "id": "reference_node-esp32c6-normal-off-maintenance_member", "app": "reference_node", "target": "esp32c6",
       "overlay": ["CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y", "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 436336, "static_free_min": 325535, "rtc_used_max": 164}
+      "budget": {"app_bin_max": 390976, "static_free_min": 332839, "rtc_used_max": 136}
     },
     {
       "id": "bridge_node-esp32c6-normal-off-maintenance_member", "app": "bridge_node", "target": "esp32c6",
       "overlay": ["CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y", "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
-      "budget": {"app_bin_max": 419808, "static_free_min": 342787, "rtc_used_max": 164}
+      "budget": {"app_bin_max": 377264, "static_free_min": 350117, "rtc_used_max": 136}
     },
     {
       "id": "reference_node-esp32c3-normal-off-dev_scoped", "app": "reference_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y"],
       "expect": ["CONFIG_ROUTELOOM_ROUTE_PERIOD_MS=5000", "CONFIG_ROUTELOOM_ROUTE_LIFETIME_MS=90000"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1270992, "static_free_min": 57020, "rtc_used_max": 6640}
+      "budget": {"app_bin_max": 1134224, "static_free_min": 64364, "rtc_used_max": 6632}
     },
     {
       "id": "bridge_node-esp32c3-normal-off-dev_scoped", "app": "bridge_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y"],
       "expect": ["CONFIG_ROUTELOOM_ROUTE_PERIOD_MS=5000", "CONFIG_ROUTELOOM_ROUTE_LIFETIME_MS=90000"],
-      "budget": {"app_bin_max": 1358432, "static_free_min": 43640, "rtc_used_max": 6640}
+      "budget": {"app_bin_max": 1208464, "static_free_min": 51560, "rtc_used_max": 6632}
     },
     {
       "id": "reference_node-esp32c3-normal-off-group_flat", "app": "reference_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y", "CONFIG_ROUTELOOM_GROUP_TREE_FLAT=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1267776, "static_free_min": 57020, "rtc_used_max": 6640}
+      "budget": {"app_bin_max": 1131888, "static_free_min": 64364, "rtc_used_max": 6632}
     },
     {
       "id": "bridge_node-esp32c3-normal-off-group_flat", "app": "bridge_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y", "CONFIG_ROUTELOOM_GROUP_TREE_FLAT=y"],
-      "budget": {"app_bin_max": 1355760, "static_free_min": 43640, "rtc_used_max": 6640}
+      "budget": {"app_bin_max": 1206448, "static_free_min": 51560, "rtc_used_max": 6632}
     },
     {
       "id": "bridge_node-esp32c3-normal-off-gateway128", "app": "bridge_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_RESOURCE_PROFILE_GATEWAY=y", "CONFIG_ROUTELOOM_DEDUP_PROFILE_LEAF=y", "# CONFIG_ROUTELOOM_USB_NODE_STATUS is not set", "# CONFIG_ROUTELOOM_USB_GATEWAY_ENDPOINT is not set"],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"],
-      "budget": {"app_bin_max": 1358224, "static_free_min": 35128, "rtc_used_max": 6640}
+      "budget": {"app_bin_max": 1208240, "static_free_min": 43048, "rtc_used_max": 6632}
     },
     {
-      "id": "bridge_node-esp32c3-normal-off-release_os", "app": "bridge_node", "target": "esp32c3",
-      "overlay": ["CONFIG_COMPILER_OPTIMIZATION_SIZE=y", "CONFIG_LOG_DEFAULT_LEVEL_WARN=y", "CONFIG_LOG_MAXIMUM_EQUALS_DEFAULT=y"],
+      "id": "bridge_node-esp32c3-normal-off-debug_og", "app": "bridge_node", "target": "esp32c3",
+      "overlay": ["CONFIG_COMPILER_OPTIMIZATION_DEBUG=y"],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"],
-      "budget": {"app_bin_max": 1195808, "static_free_min": 51824, "rtc_used_max": 6632}
+      "budget": {"app_bin_max": 1359760, "static_free_min": 43480, "rtc_used_max": 6640}
     },
     {
-      "id": "reference_node-esp32c3-normal-off-release_os", "app": "reference_node", "target": "esp32c3",
-      "overlay": ["CONFIG_COMPILER_OPTIMIZATION_SIZE=y", "CONFIG_LOG_DEFAULT_LEVEL_WARN=y", "CONFIG_LOG_MAXIMUM_EQUALS_DEFAULT=y"],
+      "id": "reference_node-esp32c3-normal-off-debug_og", "app": "reference_node", "target": "esp32c3",
+      "overlay": ["CONFIG_COMPILER_OPTIMIZATION_DEBUG=y"],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1120000, "static_free_min": 64660, "rtc_used_max": 6632}
+      "budget": {"app_bin_max": 1273600, "static_free_min": 56836, "rtc_used_max": 6640}
     },
     {
       "id": "reference_node-esp32c3-normal-off-owner_member", "app": "reference_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1267776, "static_free_min": 57020, "rtc_used_max": 6640}
+      "budget": {"app_bin_max": 1131888, "static_free_min": 64364, "rtc_used_max": 6632}
     },
     {
       "id": "bridge_node-esp32c3-normal-off-owner_member", "app": "bridge_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
-      "budget": {"app_bin_max": 1355760, "static_free_min": 43640, "rtc_used_max": 6640}
+      "budget": {"app_bin_max": 1206448, "static_free_min": 51560, "rtc_used_max": 6632}
     },
     {
       "id": "reference_node-esp32s3-normal-off-owner_member", "app": "reference_node", "target": "esp32s3",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1280288, "static_free_min": 78107, "rtc_used_max": 6000}
+      "budget": {"app_bin_max": 1120400, "static_free_min": 85428, "rtc_used_max": 5988}
     },
     {
       "id": "bridge_node-esp32s3-normal-off-owner_member", "app": "bridge_node", "target": "esp32s3",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
-      "budget": {"app_bin_max": 1383760, "static_free_min": 21539, "rtc_used_max": 6000}
+      "budget": {"app_bin_max": 1202128, "static_free_min": 29344, "rtc_used_max": 5988}
     },
     {
       "id": "reference_node-esp32c5-normal-off-owner_member", "app": "reference_node", "target": "esp32c5",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1432288, "static_free_min": 43815, "rtc_used_max": 15232}
+      "budget": {"app_bin_max": 1287232, "static_free_min": 53073, "rtc_used_max": 15232}
     },
     {
       "id": "bridge_node-esp32c5-normal-off-owner_member", "app": "bridge_node", "target": "esp32c5",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
-      "budget": {"app_bin_max": 1366320, "static_free_min": 17891, "rtc_used_max": 9408}
+      "budget": {"app_bin_max": 1367792, "static_free_min": 17739, "rtc_used_max": 9408}
     },
     {
       "id": "reference_node-esp32c3-deep_sleep-off-owner_member", "app": "reference_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_DEEP_SLEEP=y", "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1283216, "static_free_min": 56812, "rtc_used_max": 7336}
+      "budget": {"app_bin_max": 1145024, "static_free_min": 64166, "rtc_used_max": 7328}
     },
     {
       "id": "bench_node-esp32c3-deep_sleep-off-owner_member", "app": "bench_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_DEEP_SLEEP=y", "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1291408, "static_free_min": 63618, "rtc_used_max": 7336}
+      "budget": {"app_bin_max": 1294272, "static_free_min": 63498, "rtc_used_max": 7336}
     },
     {
       "id": "experimental-c6-bridge_node-devram", "app": "bridge_node", "target": "esp32c6",
       "artifact": "experimental-c6-bridge_node-devram",
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_GATEWAY=y"],
-      "budget": {"app_bin_max": 1509040, "static_free_min": 88537, "rtc_used_max": 164}
+      "budget": {"app_bin_max": 1326048, "static_free_min": 96537, "rtc_used_max": 136}
     },
     {
       "id": "experimental-c6-reference_node-devram", "app": "reference_node", "target": "esp32c6",
@@ -279,48 +279,48 @@
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_RELAY=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1400272, "static_free_min": 150211, "rtc_used_max": 164}
+      "budget": {"app_bin_max": 1235424, "static_free_min": 157645, "rtc_used_max": 136}
     },
     {
       "id": "bench_node-esp32c6-normal-off-off", "app": "bench_node", "target": "esp32c6",
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_RELAY=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1407136, "static_free_min": 148043, "rtc_used_max": 164}
+      "budget": {"app_bin_max": 1410176, "static_free_min": 147911, "rtc_used_max": 164}
     },
     {
       "id": "experimental-c6-bridge_node-member", "app": "bridge_node", "target": "esp32c6",
       "artifact": "experimental-c6-bridge_node-member",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
-      "budget": {"app_bin_max": 1506368, "static_free_min": 88537, "rtc_used_max": 164}
+      "budget": {"app_bin_max": 1324128, "static_free_min": 96537, "rtc_used_max": 136}
     },
     {
       "id": "experimental-c6-reference_node-member", "app": "reference_node", "target": "esp32c6",
       "artifact": "experimental-c6-reference_node-member",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1396928, "static_free_min": 150211, "rtc_used_max": 164}
+      "budget": {"app_bin_max": 1233200, "static_free_min": 157645, "rtc_used_max": 136}
     },
     {
       "id": "experimental-c6-reference_node-member_sleep", "app": "reference_node", "target": "esp32c6",
       "artifact": "experimental-c6-reference_node-member_sleep",
       "overlay": ["CONFIG_ROUTELOOM_DEEP_SLEEP=y", "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1414304, "static_free_min": 150003, "rtc_used_max": 856}
+      "budget": {"app_bin_max": 1247008, "static_free_min": 157431, "rtc_used_max": 828}
     },
     {
       "id": "espnow_node-esp32c3-example", "app": "espnow_node", "dir": "examples/espnow_node",
       "target": "esp32c3", "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_DEV_KCONFIG_IDENTITY=y", "CONFIG_ROUTELOOM_ROLE_ENDPOINT=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1312480, "static_free_min": 85360, "rtc_used_max": 5920}
+      "budget": {"app_bin_max": 1314320, "static_free_min": 85352, "rtc_used_max": 5920}
     },
     {
       "id": "idf_consumer-esp32c3-component_only", "app": "idf_consumer", "dir": "tests/idf_consumer",
       "target": "esp32c3", "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_ROLE_RELAY=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1314480, "static_free_min": 56746, "rtc_used_max": 6640}
+      "budget": {"app_bin_max": 1316272, "static_free_min": 56738, "rtc_used_max": 6640}
     }
   ]
 }

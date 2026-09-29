@@ -460,6 +460,26 @@ class NeighborDiscovery {
 
   Status start(MonotonicMs now_ms) noexcept;
 
+  // A fresh member adoption (refresh, cutover re-bootstrap) restarts the
+  // stale-repair schedule from its first window: the backoff ramped while
+  // the old engine was stranded says nothing about the peers reachable now.
+  void rearm_repair() noexcept {
+    rediscovery_backoff_ms_ = 0;
+    next_rediscovery_ms_ = 0;
+  }
+
+  // A bound neighbor is insufficient when none provides a route to the
+  // adopted gateway. The Owner supplies the authenticated route verdict;
+  // discovery uses its existing bounded member retry cadence to seek an
+  // additional neighbor until a gateway route appears.
+  void set_gateway_route_missing(bool missing, MonotonicMs now_ms) noexcept {
+    if (!missing) {
+      gateway_route_missing_since_ms_ = ~MonotonicMs{0};
+    } else if (gateway_route_missing_since_ms_ == ~MonotonicMs{0}) {
+      gateway_route_missing_since_ms_ = now_ms;
+    }
+  }
+
   // Requester path: broadcast a DISCOVER and run one bounded exchange.
   // Already-member nodes keep their MembershipState (local re-binding, D3-03).
   // A stale peer may be preferred for repair; unrelated OFFERs are ignored
@@ -616,6 +636,8 @@ class NeighborDiscovery {
   std::size_t neighbor_count() const noexcept { return neighbors_.size(); }
 
  private:
+  Status begin_discovery_filtered(MonotonicMs now_ms, NodeId preferred_peer,
+                                  bool unbound_only) noexcept;
   enum class OutboundStage : std::uint8_t {
     Idle = 0,
     AwaitingOffers,    // DISCOVER sent, collecting OFFERs in the window
@@ -681,6 +703,7 @@ class NeighborDiscovery {
 
   struct Outbound {
     bool active{false};
+    bool unbound_only{false};
     NodeId preferred_peer{kInvalidNodeId};
     MacAddress preferred_mac{};
     MacAddress peer_mac{};
@@ -929,6 +952,7 @@ class NeighborDiscovery {
   // engine instead of running the dev PROVE/CONFIRM exchange. Armed only
   // with no exchange in flight.
   bool member_handshake_mode_{false};
+  MonotonicMs gateway_route_missing_since_ms_{~MonotonicMs{0}};
   std::uint32_t next_candidate_id_{1};
   // Minted binding ids never wrap to 0: UINT32_MAX is the last mintable id
   // and 0 afterwards means exhausted (P4 §7.2) — a live id is never reused.

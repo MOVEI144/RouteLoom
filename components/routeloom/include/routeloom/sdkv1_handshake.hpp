@@ -331,6 +331,9 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   // An RLRES1 initiator keeps its R3 for quiet retransmission after its
   // local session has installed. The RLD1 owner must retain that send leg.
   bool has_quiet_link_retry(std::uint32_t token) const noexcept;
+  // True while an exchange with `peer` has moved past its opening message
+  // (an answer was sent or received): a new start must not displace it.
+  bool past_first_message(SecurityScope scope, NodeId peer) const noexcept;
   // Side-effect-free and readable any time (false while a call is inside).
   bool quiescent() const noexcept;
 
