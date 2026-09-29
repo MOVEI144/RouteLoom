@@ -360,8 +360,13 @@ def find_cell(data: dict, cell_id: str) -> dict:
     raise SystemExit(f"unknown cell {cell_id!r} (see check.py firmware --list)")
 
 
+def cell_dir(cell: dict) -> str:
+    """The ESP-IDF project of a cell: firmware/<app> unless the cell names one."""
+    return cell.get("dir", f"firmware/{cell['app']}")
+
+
 def firmware_steps(cell: dict) -> list[Step]:
-    app_dir = f"firmware/{cell['app']}"
+    app_dir = cell_dir(cell)
     size_args = ["python3", str(ROOT / "tools/firmware_ram_report.py"), "build/size.json",
                  "--target", cell["target"], "--app", cell["app"], "--cell", cell["id"],
                  "--json-out", "build/ram-report.json"]
@@ -589,7 +594,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.stage == "firmware":
         if args.list:
             if args.format == "github":
-                include = [{"id": c["id"], "app": c["app"], "target": c["target"],
+                include = [{"id": c["id"], "app": c["app"], "dir": cell_dir(c),
+                            "target": c["target"],
                             "artifact": c.get("artifact", f"firmware-{c['id']}")}
                            for c in data["cells"]]
                 print("matrix=" + json.dumps({"include": include}, separators=(",", ":")))

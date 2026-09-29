@@ -50,7 +50,7 @@ BOOT_HEAP_MODEL: Dict[tuple, Dict[str, int]] = {
     # Reserve 8 KiB: a normal device holds far fewer sessions than a gateway.
     ("esp32c3", "reference_node"): {"offset": 16272, "radio_peak": 27428, "reserve": 8192},
     # bench_node esp32c3 (design-devflow.md §5.4): the image runs the same
-    # components/routeloom_node_boot bring-up, so the reference offset/peak
+    # components/routeloom_device bring-up, so the reference offset/peak
     # carry over — the app delta is pure static .bss and already lands in
     # `static_free`. Values stay a link-time model until a bench board is
     # measured; the floor below is reference's, as the design requires.

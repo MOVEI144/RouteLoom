@@ -1,0 +1,14 @@
+# An external project depends on routeloom_device with a git dependency
+# (docs/implementation/component-distribution.md). CI builds this checkout,
+# so override_path points each RouteLoom component at the tree under test.
+dependencies:
+  idf: ">=6.0"
+  routeloom/routeloom_device:
+    version: "*"
+    override_path: "../../../components/routeloom_device"
+  routeloom/routeloom_espnow:
+    version: "*"
+    override_path: "../../../components/routeloom_espnow"
+  routeloom/routeloom:
+    version: "*"
+    override_path: "../../../components/routeloom"

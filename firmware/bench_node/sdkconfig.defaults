@@ -14,8 +14,6 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
-# The owner/crypto pump starts with the P4 §12.2 16 KiB stack budget.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 # The bench image is a normal site member (design-devflow.md §5.4): the
 # dev-PSK lane is compiled out and membership comes from the usual join.
 CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y

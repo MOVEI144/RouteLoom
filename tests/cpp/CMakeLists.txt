@@ -313,7 +313,8 @@ target_include_directories(routeloom_espnow_owner_reapply_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/espnow_idf_stubs
     ${CMAKE_CURRENT_SOURCE_DIR}/esp_idf_stub
     ${ROUTELOOM_UECC_DIR}
-    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include)
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include
+    ${CMAKE_SOURCE_DIR}/components/routeloom_device/include)
 target_compile_options(routeloom_espnow_owner_reapply_tests PRIVATE
     -Wall -Wextra -Wpedantic -Werror -Wno-unused-variable -Wno-unused-parameter)
 add_test(NAME routeloom_espnow_owner_reapply_tests COMMAND routeloom_espnow_owner_reapply_tests)
@@ -636,6 +637,7 @@ add_test(NAME routeloom_sdkv1_dev_route_tests COMMAND routeloom_sdkv1_dev_route_
 # (host/routeloom-host/src/site/owner_mesh/), never by ctest.
 add_executable(routeloom_owner_mesh_peer owner_mesh_peer.cpp
     espnow_idf_stubs/idf_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_security_owner.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1_entropy.cpp
@@ -651,7 +653,8 @@ target_include_directories(routeloom_owner_mesh_peer PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/esp_idf_stub
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs/maintenance
     ${ROUTELOOM_UECC_DIR}
-    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include)
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include
+    ${CMAKE_SOURCE_DIR}/components/routeloom_device/include)
 target_compile_options(routeloom_owner_mesh_peer PRIVATE
     -Wall -Wextra -Wpedantic -Werror -Wno-unused-variable -Wno-unused-parameter
     -Wno-unused-function -Wno-unused-private-field)

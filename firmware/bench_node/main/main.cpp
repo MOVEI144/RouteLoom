@@ -1,10 +1,9 @@
 // firmware/bench_node: the bundled bench application (design-devflow.md §5).
-// All bring-up — NVS, boot session, sdkv1 stores, security owner, runtime,
-// discovery/migration/config opt-ins and the pump loops — is the shared
-// components/routeloom_node_boot, byte-identical to firmware/reference_node.
-// This file only wires the portable routeloom::bench::BenchApp onto the
-// booted node and supplies the small ESP-IDF platform/probe ports the
-// portable module declares (§5.1: no ESP dependencies in the portable half).
+// All bring-up and the Owner loop are the shared routeloom_device path, the
+// same as firmware/reference_node. This file only wires the portable
+// routeloom::bench::BenchApp onto the Device and supplies the small ESP-IDF
+// platform/probe ports the portable module declares (§5.1: no ESP
+// dependencies in the portable half).
 
 #include <cstdint>
 #include <cstring>
@@ -18,11 +17,9 @@
 #include "sdkconfig.h"
 
 #include "routeloom/bench/app.hpp"
-#include "routeloom/espnow_runtime.hpp"
+#include "routeloom/device.hpp"
 #include "routeloom/espnow_sdkv1.hpp"
-#include "routeloom/espnow_security_owner.hpp"
 #include "routeloom/node.hpp"
-#include "routeloom/node_boot.hpp"
 #include "routeloom/sdkv1_records.hpp"
 #include "routeloom/sdkv1_security_coordinator.hpp"
 #include "routeloom/sdkv1_store.hpp"
@@ -50,7 +47,7 @@ class EspNowBenchPlatform final : public routeloom::bench::BenchPlatform {
     return heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
                                             MALLOC_CAP_8BIT);
   }
-  // High-water of the app_main task, whose stack hosts the bench poll step.
+  // High-water of the Owner task, whose stack hosts the bench poll step.
   std::uint32_t stack_high_water_bytes() const noexcept override {
     return static_cast<std::uint32_t>(uxTaskGetStackHighWaterMark(nullptr)) *
            sizeof(StackType_t);
@@ -61,24 +58,19 @@ class EspNowBenchPlatform final : public routeloom::bench::BenchPlatform {
   void restart() noexcept override { esp_restart(); }
 };
 
-// BenchProbe over the public owner/coordinator snapshot plus the opened
-// sdkv1 stores the shared boot already wired — never a private core table
-// (§5.1). Fields whose public contract is still being built (D02 board
-// config digest, D05 NodeHealth/LifecycleSnapshot) keep the zero "unknown"
-// value; this port is where they plug in.
+// BenchProbe over the Device's read-only views (site store and coordinator
+// snapshot) — never a private core table (§5.1). Fields whose public
+// contract is still being built (D02 board config digest, D05
+// NodeHealth/LifecycleSnapshot) keep the zero "unknown" value.
 class EspNowBenchProbe final : public routeloom::bench::BenchProbe {
  public:
-  void bind(routeloom::espnow::EspNowRuntime* runtime,
-            routeloom::espnow::EspNowSecurityOwner* owner,
-            routeloom::espnow::Sdkv1Stores* stores) noexcept {
-    runtime_ = runtime;
-    owner_ = owner;
-    stores_ = stores;
-  }
+  void bind(routeloom::Device* device) noexcept { device_ = device; }
 
   void sample(routeloom::bench::BenchProbeSample& out) noexcept override {
-    if (stores_ != nullptr && stores_->site().has_site()) {
-      const routeloom::sdkv1::SiteRecord& site = stores_->site().site();
+    if (device_ == nullptr) return;
+    const routeloom::espnow::Sdkv1Stores* stores = device_->stores();
+    if (stores != nullptr && stores->site().has_site()) {
+      const routeloom::sdkv1::SiteRecord& site = stores->site().site();
       out.site_valid = true;
       out.site_id = site.site_id;
       out.assignment_generation = site.assignment_generation;
@@ -86,11 +78,9 @@ class EspNowBenchProbe final : public routeloom::bench::BenchProbe {
       out.gk_epoch_current = site.gk_epoch_current;
       out.gk_epoch_next = site.gk_epoch_next;
     }
-    if (owner_ != nullptr) {
-      routeloom::sdkv1::SecurityCoordinator& coordinator =
-          owner_->coordinator();
-      const routeloom::sdkv1::CoordinatorSnapshot snap =
-          coordinator.snapshot();
+    const routeloom::sdkv1::SecurityCoordinator* coordinator = device_->security();
+    if (coordinator != nullptr) {
+      const routeloom::sdkv1::CoordinatorSnapshot snap = coordinator->snapshot();
       out.participation_valid = true;
       out.mode = static_cast<std::uint8_t>(snap.mode);
       out.membership = static_cast<std::uint8_t>(snap.membership);
@@ -100,9 +90,9 @@ class EspNowBenchProbe final : public routeloom::bench::BenchProbe {
       out.radio_generation = snap.radio_generation;
       out.authority_flags =
           static_cast<std::uint8_t>((snap.authority_started ? 1 : 0) |
-                                  (snap.authority_ready ? 2 : 0) |
-                                  (snap.authority_busy ? 4 : 0) |
-                                  (snap.join_confirmed ? 8 : 0));
+                                    (snap.authority_ready ? 2 : 0) |
+                                    (snap.authority_busy ? 4 : 0) |
+                                    (snap.join_confirmed ? 8 : 0));
       out.refresh_strikes = snap.refresh_strikes;
       out.link_sessions = snap.link_sessions > 0xFFFF
                               ? 0xFFFF
@@ -113,23 +103,21 @@ class EspNowBenchProbe final : public routeloom::bench::BenchProbe {
       // The live engine pair supersedes the adopted record's staged epochs.
       std::uint32_t current = 0;
       std::uint32_t next = 0;
-      if (coordinator.group_epochs(current, next)) {
+      if (coordinator->group_epochs(current, next)) {
         out.gk_epoch_current = current;
         out.gk_epoch_next = next;
       }
     }
-    if (runtime_ != nullptr) {
-      const routeloom::NodeConfig& config = runtime_->node().config();
-      out.route_profile =
-          config.route_gateways[0] != routeloom::kInvalidNodeId ? 1 : 0;
+    const routeloom::MeshNode* node = device_->mesh();
+    if (node != nullptr) {
+      const routeloom::NodeConfig& config = node->config();
+      out.route_profile = config.route_gateways[0] != routeloom::kInvalidNodeId ? 1 : 0;
       out.gateway = config.route_gateways[0];
     }
   }
 
  private:
-  routeloom::espnow::EspNowRuntime* runtime_{nullptr};
-  routeloom::espnow::EspNowSecurityOwner* owner_{nullptr};
-  routeloom::espnow::Sdkv1Stores* stores_{nullptr};
+  routeloom::Device* device_{nullptr};
 };
 
 struct BenchContext {
@@ -138,28 +126,29 @@ struct BenchContext {
   routeloom::bench::BenchApp app;
   EspNowBenchPlatform platform;
   EspNowBenchProbe probe;
+  bool attached{false};
 };
 static_assert(sizeof(BenchContext) <= 2048,
               "bench application state exceeds the 2 KiB budget");
 
-void bench_attach(routeloom::espnow::EspNowRuntime& runtime,
-                  routeloom::espnow::EspNowSecurityOwner* owner,
-                  routeloom::espnow::Sdkv1Stores* stores, void* ctx) {
+// The BenchApp binds to the booted node on the first Owner pass.
+void bench_poll(routeloom::Device& device, MonotonicMs now, void* ctx) {
   auto* bench = static_cast<BenchContext*>(ctx);
-  bench->probe.bind(&runtime, owner, stores);
-  bench->app.set_platform(&bench->platform);
-  bench->app.set_probe(&bench->probe);
-  bench->app.attach(runtime.node(), now_ms());
-}
-
-void bench_poll(MonotonicMs now, void* ctx) {
-  static_cast<BenchContext*>(ctx)->app.poll(now);
+  if (!bench->attached) {
+    bench->probe.bind(&device);
+    bench->app.set_platform(&bench->platform);
+    bench->app.set_probe(&bench->probe);
+    bench->app.attach(*device.mesh(), now);
+    bench->attached = true;
+  }
+  bench->app.poll(now);
 }
 
 // Static storage: the app's full state (the 2 KiB increment the design
 // budgets) is .bss, so tools/firmware_ram_report.py accounts it against
 // the bench floor directly.
 BenchContext s_bench{};
+routeloom::Device s_device;
 
 }  // namespace
 
@@ -176,11 +165,9 @@ extern "C" void app_main(void) {
                 sizeof(s_bench.config.firmware_digest));
   }
   s_bench.app.configure(s_bench.config);
-  routeloom::espnow::NodeBootHooks hooks{};
-  hooks.log_tag = "RouteLoomBench";
-  hooks.observer = &s_bench.app;
-  hooks.attach = bench_attach;
-  hooks.poll = bench_poll;
-  hooks.ctx = &s_bench;
-  routeloom::espnow::run_node(hooks);
+  routeloom::DeviceConfig config = routeloom::device_config_from_kconfig();
+  config.log_tag = "RouteLoomBench";
+  s_device.observe(&s_bench.app);
+  s_device.on_poll(bench_poll, &s_bench);
+  s_device.start(config);
 }

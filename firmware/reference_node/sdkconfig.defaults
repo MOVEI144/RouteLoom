@@ -14,8 +14,6 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
-# The owner/crypto pump starts with the P4 §12.2 16 KiB stack budget.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 # Relay role and profile (components/routeloom/Kconfig): 8 end sessions,
 # no join relay gateway, no USB bridge.
 CONFIG_ROUTELOOM_ROLE_RELAY=y

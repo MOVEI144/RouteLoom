@@ -1,0 +1,408 @@
+menu "RouteLoom device"
+
+    config ROUTELOOM_OWNER_TASK_STACK_SIZE
+        int "Owner task stack (bytes)"
+        range 8192 65536
+        default 16384
+        help
+            Stack of the task that boots the node and runs the Owner loop
+            (security owner, crypto, USB bridge, mesh pump). P4 §12.2 budgets
+            16 KiB until the on-device high-water is measured. app_main only
+            starts this task, so the ESP-IDF main task keeps its default stack.
+
+    config ROUTELOOM_OWNER_TASK_PRIORITY
+        int "Owner task priority"
+        range 1 24
+        default 1
+        help
+            FreeRTOS priority of the Owner task. 1 equals the ESP-IDF main
+            task the Owner loop ran on before.
+
+    config ROUTELOOM_NETWORK_ID
+        hex "Network ID (low 32 bits on the wire)"
+        default 0x524c0001
+        help
+            Pre-provisioning identity. Field images take it from the
+            verified BoardConfig; LegacyFixture and the DevRam quick start
+            (ROUTELOOM_DEV_KCONFIG_IDENTITY) use this value.
+
+    config ROUTELOOM_NODE_ID
+        hex "Node ID"
+        default 0x1
+
+    config ROUTELOOM_CHANNEL
+        int "2.4 GHz Wi-Fi channel"
+        range 1 13
+        default 6
+
+    config ROUTELOOM_DEV_KCONFIG_IDENTITY
+        bool "DevRam quick start: Kconfig identity and development key"
+        default n
+        depends on ROUTELOOM_SECURITY_MODE_DEV_RAM
+        help
+            Takes the node, network and channel from this menu and the PSK
+            from ROUTELOOM_DEVELOPMENT_KEY_HEX instead of the provisioned
+            BoardConfig (rlcfg/rlkeys). For a first two-board test without
+            provisioning; field images leave it off.
+
+    config ROUTELOOM_TX_POWER_QDBM
+        int "Approved test profile TX power, quarter-dBm"
+        range 8 80
+        default 40
+        help
+            This value is only a development profile. It is not a regulatory
+            or product approval.
+
+    config ROUTELOOM_PEER_NODE_ID
+        hex "Static peer Node ID; 0 disables peer registration"
+        default 0x0
+        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+
+    config ROUTELOOM_PEER_MAC
+        string "Static peer station MAC (aa:bb:cc:dd:ee:ff)"
+        default "00:00:00:00:00:00"
+        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+
+    config ROUTELOOM_ROUTE_GATEWAY_SCOPED
+        bool "Gateway-scoped routing profile (100-node sites)"
+        default n
+        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE || ROUTELOOM_SECURITY_MODE_DEV_RAM
+        help
+            Switches the node from the flat routing profile to the
+            gateway-scoped profile (docs/design/sdk-v1/routing-scale.md,
+            issue #41): routes to the listed gateways are proactive and
+            refreshed along the gateway tree; other destinations are learned
+            up the tree or on demand (ROUTE_REQUEST). Every node of a site
+            must enable it with the same gateway set. Disabled keeps the flat
+            profile and the SDK route timers (5000 ms / 15000 ms) unchanged.
+            A gateway-role image lists its own Node ID as the first gateway.
+            Under DEV_RAM the set is the dev profile's scoped routing policy.
+
+    config ROUTELOOM_GROUP_TREE_FLAT
+        bool "Flat group tree: site gateways are group roots, not scoped routes"
+        default n
+        depends on ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+        help
+            dev-flow §6.3 separates the group tree root set from the routing
+            policy. Enabled, the verified SitePackage gateway list lands in
+            node.group_roots and routing stays flat; disabled (default), the
+            list keeps engaging the gateway-scoped profile it always has.
+
+    config ROUTELOOM_ROUTE_GATEWAY_1
+        hex "Primary route gateway Node ID"
+        default 0x1
+        depends on ROUTELOOM_ROUTE_GATEWAY_SCOPED && !ROUTELOOM_ROLE_GATEWAY
+        help
+            The site gateway, normally the gateway image's ROUTELOOM_NODE_ID.
+            Preferred uplink when a second gateway is configured. Must be
+            non-zero; the build fails otherwise.
+
+    config ROUTELOOM_ROUTE_GATEWAY_2
+        hex "Secondary route gateway Node ID; 0 = none"
+        default 0x0
+        depends on ROUTELOOM_ROUTE_GATEWAY_SCOPED
+        help
+            Optional second gateway of the site (at most two). Must differ
+            from the first gateway.
+
+    config ROUTELOOM_ROUTE_PERIOD_MS
+        int "Scoped route advertisement period (tick), ms"
+        range 1000 60000
+        default 5000
+        depends on ROUTELOOM_ROUTE_GATEWAY_SCOPED
+        help
+            Scheduling tick of the scoped profile. Each gateway-tree link is
+            refreshed once per 6 ticks (route_refresh_ticks, SDK default).
+
+    config ROUTELOOM_ROUTE_LIFETIME_MS
+        int "Scoped route lifetime (lease), ms"
+        range 14000 3600000
+        default 90000
+        depends on ROUTELOOM_ROUTE_GATEWAY_SCOPED
+        help
+            Lease of every learned route. The lease rule (routing-scale.md
+            section 5) requires lifetime >= (2 x 6 + 2) x period, i.e. at
+            least 70000 ms at the 5000 ms tick; the build fails on a
+            violating pair. Product value: 90000 ms.
+
+    config ROUTELOOM_ROUTE_BROADCAST
+        bool "Broadcast self+gateway route advertisements (GroupLink, opt-in)"
+        default n
+        depends on ROUTELOOM_ROUTE_GATEWAY_SCOPED
+        help
+            P5-2: downward refreshes to two or more grant-holding neighbors
+            share one GroupLink route advertisement instead of one unicast
+            each (routing-scale.md section 8). Every other target keeps
+            unicast, so a mixed site keeps working. Enable on the whole site
+            at once.
+
+    config ROUTELOOM_USB_DEV_SECRET
+        string "DEVELOPMENT ONLY USB session shared secret (ASCII, <=63 chars)"
+        default "routeloom-dev-secret"
+        depends on ROUTELOOM_ROLE_GATEWAY
+        help
+            LegacyFixture gateways only (field images use the rlkeys secret).
+            Must match the host daemon's development secret byte for byte.
+
+    config ROUTELOOM_CAPABILITY
+        hex "Capability bitmap (USB HelloAck on a gateway, discovery otherwise)"
+        default 0x7 if ROUTELOOM_ROLE_GATEWAY
+        default 0x3
+        depends on ROUTELOOM_ROLE_GATEWAY || ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+        help
+            Gateway images: the HelloAck capability bitmap. A bit is only
+            advertised when the matching endpoint is attached. Bit 2 (0x4)
+            host_ops_v1 (SUBMIT/QUERY_DISPATCH/RETIRE_THROUGH/SKIP/
+            TIME_SAMPLE, bound to the NVS-monotonic boot lease); bits 0-1
+            are the legacy default with no per-bit meaning. EXPERIMENTAL
+            opt-ins: bit 3 (0x8) gateway_endpoint_v1 (0x10-0x13), bit 4
+            (0x10) config_endpoint_v1 (0x20-0x23), bit 5 (0x20)
+            m1_diagnostics_v1 (0x30/0x31), bit 6 (0x40) node_status_v1
+            (0x40-0x42), bit 7 (0x80) group_delivery_v1 (0x50-0x52; masked
+            unless the node can source a group send) and bit 11 (0x800)
+            observation_v1 (0x70-0x72). Bits 6, 7 and 11 ride the HostOps
+            carrier, so they need bit 2.
+            LegacyFixture nodes: the capability bits announced in discovery.
+
+    config ROUTELOOM_DISCOVERY
+        bool "Enable autonomous neighbor discovery (RLD1 bootstrap lane)"
+        default n
+        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+        help
+            EXPERIMENTAL: enables the RLD1 bootstrap lane, the portable
+            NeighborDiscovery engine and dev-PSK possession authentication.
+            Static ROUTELOOM_PEER_* registration keeps working alongside.
+
+    config ROUTELOOM_DISCOVERY_MEMBER
+        bool "DEV: treat this node as a provisioned network member"
+        default y
+        depends on ROUTELOOM_DISCOVERY
+        help
+            Development stand-in for durable membership evidence. A
+            production build must source this from real provisioning state.
+
+    config ROUTELOOM_DISCOVERY_AUTO_APPROVE
+        bool "DEV: auto-approve the membership commit (no authority round trip)"
+        default y
+        depends on ROUTELOOM_DISCOVERY
+
+    config ROUTELOOM_DISCOVERY_INITIATE
+        bool "Broadcast DISCOVER at startup instead of only responding"
+        default y
+        depends on ROUTELOOM_DISCOVERY
+
+    config ROUTELOOM_DISCOVERY_SCOPE
+        int "Discovery scope mode (0=Off, 1=OpenLegacy, 2=OptionalMigration, 3=Required)"
+        range 0 3
+        default 0
+        depends on ROUTELOOM_DISCOVERY
+        help
+            EXPERIMENTAL: wires a dev-profile scope-key provider into
+            discovery. Required (3) accepts only scope-tagged discovery
+            traffic and fails closed on key loss; OptionalMigration (2) keeps
+            a bounded legacy fallback lane. The provider derives
+            per-generation keys from ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX — a
+            firmware-config key recoverable by flash readout, never a
+            production credential.
+
+    config ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX
+        string "DEVELOPMENT ONLY 32-byte scope base key in hex"
+        default ""
+        depends on ROUTELOOM_DISCOVERY_SCOPE != 0
+        help
+            Base key for the dev scope provider. Empty fails boot loudly when
+            a scoped mode is selected — never a silent Off downgrade.
+
+    config ROUTELOOM_DISCOVERY_SCOPE_REF
+        hex "Scope reference handle announced to the engine"
+        range 0x1 0xffffffff
+        default 0x524c5343
+        depends on ROUTELOOM_DISCOVERY_SCOPE != 0
+
+    config ROUTELOOM_DISCOVERY_SCOPE_GENERATION
+        int "Initial scope key generation (monotonic, never 0)"
+        range 1 2147483647
+        default 1
+        depends on ROUTELOOM_DISCOVERY_SCOPE != 0
+
+    config ROUTELOOM_DEVELOPMENT_KEY_HEX
+        string "DEVELOPMENT ONLY 32-byte network master key in hex"
+        default "524f5554454c4f4f4d2d444556454c4f504d454e542d4b45592d4f4e4c592121"
+        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE || ROUTELOOM_SECURITY_MODE_DEV_RAM
+        help
+            Shared development key (LegacyFixture, and the DevRam quick
+            start). Never use this default in a deployment.
+
+    config ROUTELOOM_CONFIG
+        bool "Enable the remote-config target endpoint (RCC1 permit journal)"
+        default n
+        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE && !ROUTELOOM_ROLE_GATEWAY
+        help
+            EXPERIMENTAL: installs a ConfigTarget on the routed end-protected
+            lane with a durable NVS-backed ConfigJournal and a dev-profile
+            authority verifier. The permit path is a dev HMAC under
+            SecurityProfile::Development — never a production identity claim.
+            Requires peers (static ROUTELOOM_PEER_* or discovery).
+
+    config ROUTELOOM_CONFIG_AUTHORITY
+        hex "Config authority Node ID permitted to issue permits"
+        default 0x1
+        depends on ROUTELOOM_CONFIG
+
+    config ROUTELOOM_CONFIG_AUTHORITY_GENERATION
+        int "Permitted authority generation for config permits"
+        range 1 2147483647
+        default 1
+        depends on ROUTELOOM_CONFIG
+
+    config ROUTELOOM_CONFIG_PROFILE
+        int "Permit profile (0=dev-HMAC experimental, 1=RLCP1_COSE_ESP256)"
+        range 0 1
+        default 0
+        depends on ROUTELOOM_CONFIG
+        help
+            Profile 0 keeps the dev-HMAC envelope (EXPERIMENTAL). Profile 1
+            installs the COSE_Sign1 ESP256 verifier (P-256/SHA-256, RFC 9864
+            alg -9): the node accepts only the fixed COSE shape signed by the
+            provisioned authority key — dev permits are rejected by profile
+            choice, not fallback order.
+
+    config ROUTELOOM_CONFIG_COSE_KEY_HEX
+        string "COSE authority P-256 public key, X||Y as 128 hex chars"
+        default ""
+        depends on ROUTELOOM_CONFIG_PROFILE = 1 && !ROUTELOOM_TRUST_STORE
+        help
+            The single provisioned authority key for ESP256 permits; its kid
+            is CONFIG_ROUTELOOM_CONFIG_AUTHORITY. Off-curve/short keys fail at
+            boot. Hidden under ROUTELOOM_TRUST_STORE: the trust image is then
+            the only accepted key source.
+
+    config ROUTELOOM_TRUST_STORE
+        bool "Validate the NVS trust/credential stores (rltrust/rlcred) at boot"
+        default n
+        depends on (ROUTELOOM_CONFIG && ROUTELOOM_CONFIG_PROFILE = 1) || (ROUTELOOM_ROLE_GATEWAY && ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE)
+        help
+            EXPERIMENTAL (sdk-completion/04-provisioning-lifecycle.md): opens
+            "rltrust" and "rlcred", validates the RLT1 trust image and RLC1
+            credential at boot, logs epoch/anchor/quarantine diagnostics
+            (REPROVISION_REQUIRED on quarantine or credential epoch-window
+            exhaustion), and sources the network identity from the committed
+            image's low 32 bits. On a config target the permit verifier is a
+            TrustView over the image, which also binds the full u64 NetworkId
+            into the journal. There is no provisioning flow yet: an empty
+            store is a normal pre-provisioning state. NVS budget (§4.9):
+            about 1.5 extra pages.
+
+    config ROUTELOOM_TELEMETRY_REMOTE
+        bool "Answer remote Diagnostic (48) telemetry queries over the mesh"
+        default n
+        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE && !ROUTELOOM_ROLE_GATEWAY
+        help
+            EXPERIMENTAL bench surface: the node answers end-protected
+            TelemetryQuery frames with bounded 128-byte snapshots of its
+            measured link state (02-telemetry §4.2 opt-in).
+
+    config ROUTELOOM_OBSERVATION_REMOTE
+        bool "Answer remote Diagnostic (48) observation queries over the mesh"
+        default n
+        depends on !ROUTELOOM_ROLE_GATEWAY
+        help
+            The node serves its read-only observation sections to
+            end-protected RemoteObservationQuery frames (subtype 7). This only
+            compiles the responder in; adopted coordinator modes (Member,
+            Dev) answer and every other mode refuses, re-evaluated each pass.
+            LegacyFixture has no enrollment, so there the build opt-in itself
+            is the membership claim.
+
+    config ROUTELOOM_MIGRATION
+        int "Channel migration mode (0=Disabled, 1=Observe, 2=Manual)"
+        range 0 2
+        default 0
+        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+        help
+            EXPERIMENTAL: wires the migration participant and control-object
+            transport onto the authenticated Wire lane. Observe runs the
+            coordinator's evidence collection only; Manual additionally
+            permits operator-driven plan issuance/surveys.
+
+    config ROUTELOOM_MIGRATION_AUTHORITY
+        hex "Migration authority Node ID"
+        default 0x1
+        depends on ROUTELOOM_MIGRATION != 0
+
+    config ROUTELOOM_MIGRATION_SELF_AUTHORITY
+        bool "DEV: this node is the migration authority (issuer)"
+        default n
+        depends on ROUTELOOM_MIGRATION = 2
+        help
+            EXPERIMENTAL: the issuer commits plans through a dev-PSK MAC
+            under SecurityProfile::Development.
+
+    config ROUTELOOM_MIGRATION_RTT_P99_MS
+        int "Measured management RTT P99 bound (ms) — deployment input"
+        range 1 60000
+        default 250
+        depends on ROUTELOOM_MIGRATION != 0
+
+    config ROUTELOOM_MIGRATION_DELIVERY_BOUND_MS
+        int "Measured control delivery bound (ms) — deployment input"
+        range 1 60000
+        default 2000
+        depends on ROUTELOOM_MIGRATION != 0
+
+    config ROUTELOOM_MIGRATION_TRANSFER_BOUND_MS
+        int "Measured prepare-phase transfer bound (ms) — deployment input"
+        range 1 30000
+        default 2000
+        depends on ROUTELOOM_MIGRATION != 0
+
+    config ROUTELOOM_MIGRATION_SWITCH_BOUND_MS
+        int "Measured local channel-switch bound (ms) — deployment input"
+        range 1 5000
+        default 50
+        depends on ROUTELOOM_MIGRATION != 0
+
+    config ROUTELOOM_DEEP_SLEEP
+        bool "Drive a deep-sleep prepare/enter cycle"
+        default n
+        depends on (ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE || ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC) && !ROUTELOOM_ROLE_GATEWAY
+        help
+            Experimental path: the Owner prepares sleep after
+            ROUTELOOM_SLEEP_AFTER_MS of uptime and enters deep sleep with a
+            timer wake. Real wake timing and current draw remain HIL work.
+
+    config ROUTELOOM_SLEEP_AFTER_MS
+        int "Uptime before sleep_prepare is requested"
+        range 1000 3600000
+        default 10000
+        depends on ROUTELOOM_DEEP_SLEEP
+        help
+            The defaults (10 s awake / 30 s asleep) are a bench demo duty
+            cycle, not a battery operating point (issue #58). Battery
+            deployments need a long sleep interval with a short warm resume,
+            sized against docs/spec/power.md.
+
+    config ROUTELOOM_SLEEP_DURATION_MS
+        int "Timer wake duration for the deep-sleep cycle"
+        range 100 86400000
+        default 30000
+        depends on ROUTELOOM_DEEP_SLEEP
+        help
+            Bench demo value (see ROUTELOOM_SLEEP_AFTER_MS). Every wake is a
+            full reboot that consumes one boot session and its epochs.
+
+    config ROUTELOOM_MAINTENANCE_CONSOLE
+        bool "Factory maintenance console on USB Serial/JTAG (office provisioning)"
+        default n
+        help
+            Factory provisioning build (docs/design/sdk-v1/07-host-api-tooling.md
+            §6): instead of booting the mesh (and on a gateway the USB bridge
+            protocol), the node serves the maintenance console on USB
+            Serial/JTAG pre-RF — keygen answers the office challenge with a
+            proof of possession, identity seals the office bundle into
+            rlsec/rlident as the committed RLI1 twin pair. Never enable in a
+            field build: a console-enabled device re-provisions whoever holds
+            its USB until RLI1 seals it with console_locked. The sdkv1 stores
+            are wired in every build; this flag only gates the console.
+
+endmenu

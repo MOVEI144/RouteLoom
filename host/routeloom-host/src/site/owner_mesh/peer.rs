@@ -646,6 +646,8 @@ pub(super) struct MeshPeer {
     /// Clean lifecycle reboots (exit 42) respawned so far.
     pub(super) reboots: u32,
     pub(super) switching_cuts: u32,
+    /// F02: the next respawn fails its k-th NVS write once (`--nvs-fail`).
+    pub(super) nvs_fail_next: Option<u32>,
 }
 
 impl Drop for MeshPeer {
@@ -679,6 +681,7 @@ impl MeshPeer {
             Some((flash, flash_ext)),
             nvs_save,
             flat,
+            None,
         );
         let stdin = child.stdin.take().expect("peer stdin");
         let stdout = child.stdout.take().expect("peer stdout");
@@ -698,6 +701,7 @@ impl MeshPeer {
             booted: false,
             reboots: 0,
             switching_cuts: 0,
+            nvs_fail_next: None,
         }
     }
 
@@ -717,6 +721,7 @@ impl MeshPeer {
         flash: Option<(&std::path::Path, &std::path::Path)>,
         nvs_save: &std::path::Path,
         flat: bool,
+        nvs_fail: Option<u32>,
     ) -> Child {
         let path = mesh_peer_path_for(node)
             .expect("build routeloom_owner_mesh_peer or set ROUTELOOM_MESH_PEER");
@@ -750,6 +755,9 @@ impl MeshPeer {
             command.arg("--flash-ext").arg(flash_ext);
         }
         command.arg("--nvs-save").arg(nvs_save);
+        if let Some(k) = nvs_fail {
+            command.arg("--nvs-fail").arg(format!("{k}"));
+        }
         if gateway {
             command.arg("--usb-secret").arg(usb_secret_hex);
             command.arg("--cap").arg(format!("{USB_CAP}"));
@@ -791,6 +799,7 @@ impl MeshPeer {
             None,
             &nvs_save,
             self.flat,
+            self.nvs_fail_next.take(),
         );
         self.stdin = self.child.stdin.take().expect("peer stdin");
         self.stdout = self.child.stdout.take().expect("peer stdout");

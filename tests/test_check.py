@@ -54,10 +54,11 @@ class CellList(unittest.TestCase):
         data = check.load_cells()
         cells = data["cells"]
         # 37 cells of the pre-v2 matrix, the 5 C6 cells made required, bench C6,
-        # the C3 gateway-128 and endpoint cells, and two release (-Os) comparisons.
-        self.assertEqual(len(cells), 47)
+        # the C3 gateway-128 and endpoint cells, two release (-Os) comparisons,
+        # the example and the component-only external consumer.
+        self.assertEqual(len(cells), 49)
         for cell in cells:
-            self.assertTrue((ROOT / "firmware" / cell["app"]).is_dir(), cell["id"])
+            self.assertTrue((ROOT / check.cell_dir(cell)).is_dir(), cell["id"])
             if cell["id"].startswith("experimental-c6-"):
                 self.assertEqual(cell["target"], "esp32c6")
             else:
@@ -82,6 +83,11 @@ class CellList(unittest.TestCase):
         include = json.loads(out.removeprefix("matrix="))["include"]
         self.assertEqual([c["id"] for c in include],
                          [c["id"] for c in check.load_cells()["cells"]])
+        # Artifacts come from each cell's own project directory.
+        self.assertIn("${{ matrix.dir }}/build/*.bin", workflow)
+        dirs = {c["id"]: c["dir"] for c in include}
+        self.assertEqual(dirs["espnow_node-esp32c3-example"], "examples/espnow_node")
+        self.assertEqual(dirs["bridge_node-esp32c3-normal-off-off"], "firmware/bridge_node")
 
     def test_existing_c6_artifact_names_are_preserved(self):
         ids = {cell["id"] for cell in check.load_cells()["cells"]}

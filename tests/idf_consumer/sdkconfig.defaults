@@ -1,0 +1,8 @@
+# The SDK's integration contract: C++ without exceptions/RTTI and the
+# PT-4M-v2 table (4 MB flash, two OTA slots) the boot path verifies.
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+CONFIG_COMPILER_CXX_RTTI=n
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../examples/espnow_node/partitions.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

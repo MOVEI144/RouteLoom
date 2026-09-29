@@ -11,7 +11,7 @@
 #include "routeloom/psa_edhoc_aead.hpp"
 #include "routeloom/psa_session_aead.hpp"
 
-#include "../../firmware/bridge_node/main/bridge_network.hpp"
+#include "routeloom/device.hpp"
 #include "idf_stubs.hpp"
 #include "test_sdkv1.hpp"
 #include "test_security.hpp"
@@ -217,14 +217,14 @@ void test_usb_network_after_cutover() {
   const auto next = site_record(3, 204, kNetwork + (1ULL << 32U));
   CHECK(stores.site.commit(next).ok());
   const NetworkId bootstrap = static_cast<std::uint32_t>(next.network);
-  CHECK(bridge_node::usb_boot_network(stores.site, bootstrap) == next.network);
-  CHECK(static_cast<std::uint32_t>(bridge_node::usb_boot_network(stores.site, bootstrap)) ==
+  CHECK(routeloom::usb_boot_network(stores.site, bootstrap) == next.network);
+  CHECK(static_cast<std::uint32_t>(routeloom::usb_boot_network(stores.site, bootstrap)) ==
         bootstrap);
 
   FaultyRecordStorage empty_storage{kSiteSlotBytes};
   SiteStore empty{empty_storage};
   CHECK(empty.initialize().ok());
-  CHECK(bridge_node::usb_boot_network(empty, bootstrap) == bootstrap);
+  CHECK(routeloom::usb_boot_network(empty, bootstrap) == bootstrap);
 }
 
 void test_same_boot_reapply(bool change_site_epoch) {
