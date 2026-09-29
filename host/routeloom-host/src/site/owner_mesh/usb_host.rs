@@ -52,6 +52,10 @@ pub(super) struct UsbHost {
     pub(super) last_begin_ms: u64,
     /// Sim-time of the last emitted frame — paces the idle keepalive.
     pub(super) last_tx_ms: u64,
+    /// One HostOps request whose reply a test reads (the config lane's
+    /// wire request), and that reply's verified inner once it arrives.
+    pub(super) watch: Option<u64>,
+    pub(super) watched: Option<Vec<u8>>,
     /// Fault: authority envelopes (GK Updates/Activates, pull answers)
     /// down to this device are dropped before the wire; channel frames
     /// still pass, so its route and channel stay up.
@@ -89,6 +93,8 @@ impl UsbHost {
             last_rx_ms: 0,
             last_begin_ms: 0,
             last_tx_ms: 0,
+            watch: None,
+            watched: None,
             drop_envelopes_to: None,
             envelopes_dropped: 0,
         }
@@ -280,7 +286,17 @@ impl UsbHost {
             }
             match kind {
                 FrameKind::HostOps => {
-                    if authority_sub(&inner) == Some(SUB_AUTHORITY_UP) {
+                    if self.watch == Some(request) {
+                        self.watch = None;
+                        self.watched = Some(inner.to_vec());
+                    } else if crate::site::channel_plan::channel_plan_sub(&inner).is_some() {
+                        if let Ok(report) =
+                            routeloom_protocol::host_ops::decode_channel_plan_report(&inner)
+                        {
+                            let _ =
+                                service.with(|a| a.channel_plan.on_report(request, report, now));
+                        }
+                    } else if authority_sub(&inner) == Some(SUB_AUTHORITY_UP) {
                         self.ups_seen += 1;
                         for up in authority.handle_up(&inner, now).expect("up assembles") {
                             completed.push((up.device, up.kind, up.bytes));
@@ -323,6 +339,19 @@ impl UsbHost {
         // 0x63 correlation attaches at wire time, below.
         for down in join.take_ready(crate::mono_ms()) {
             self.queue_join_down(join, down.key, down.terminal, down.bytes);
+        }
+        // Channel plan requests (0x68) behind them, like the production
+        // site lane: one in flight, on a capable Active session only.
+        if self.session.phase == SessionPhase::Active
+            && self
+                .hello_capability
+                .is_some_and(crate::site::channel_plan::channel_plan_capable)
+        {
+            let (next, _) = service.with(|a| a.channel_plan.take_request(now));
+            if let Some((body, action)) = next {
+                let request = self.queue_data(FrameKind::HostOps, body);
+                let _ = service.with(|a| a.channel_plan.note_sent(request, action, now));
+            }
         }
         let mut kept = Vec::new();
         for mut pending in self.pending.drain(..) {

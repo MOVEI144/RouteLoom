@@ -60,10 +60,10 @@ use std::time::Duration;
 
 use routeloom_protocol::authority::CarrierKind;
 use routeloom_protocol::host_ops::{
-    decode_authority_up, decode_site_state_report, encode_authority_down, encode_site_state_set,
-    AuthorityFragment, SiteStateAction, SiteStateSet, AUTHORITY_FRAGMENT_DATA_MAX,
-    AUTHORITY_FRAGMENT_TOTAL_MAX, CAP_AUTHORITY_CHANNEL_V1, HOST_OPS_SCHEMA, SUB_AUTHORITY_UP,
-    SUB_SITE_STATE_REPORT,
+    decode_authority_up, decode_channel_plan_report, decode_site_state_report,
+    encode_authority_down, encode_site_state_set, AuthorityFragment, SiteStateAction, SiteStateSet,
+    AUTHORITY_FRAGMENT_DATA_MAX, AUTHORITY_FRAGMENT_TOTAL_MAX, CAP_AUTHORITY_CHANNEL_V1,
+    HOST_OPS_SCHEMA, SUB_AUTHORITY_UP, SUB_SITE_STATE_REPORT,
 };
 use routeloom_protocol::host_ops::{ConfigOpsResult, CAP_HOST_OPS_V1};
 use routeloom_protocol::join_relay::{
@@ -77,6 +77,7 @@ use routeloom_protocol::{Frame, FrameKind};
 use routeloom_provision::signer::fill_random;
 
 use super::authority_channel::{AuthorityOutbound, AuthorityTransport};
+use super::channel_plan::{channel_plan_capable, channel_plan_sub};
 use super::group_keys::HostTime;
 use super::transport::{
     AbortReason, DeliverReject, DownStatus, JoinTransport, Outbound, RelayDown, RelayKey, RelayUp,
@@ -107,7 +108,9 @@ const REQUEST_MASK: u64 = 0xFFFF_0000_0000_0000;
 /// plus 0x64-0x67 authority; the frame router's test — the bodies only
 /// reach it session-verified).
 pub fn owns(inner: &[u8]) -> bool {
-    join_relay_sub(inner).is_some() || authority_sub(inner).is_some()
+    join_relay_sub(inner).is_some()
+        || authority_sub(inner).is_some()
+        || channel_plan_sub(inner).is_some()
 }
 
 /// The authority subcommand of an inner body, if any (HostOps schema 1,
@@ -1257,6 +1260,7 @@ struct SiteLink {
     active: bool,
     capable: bool,
     authority_capable: bool,
+    plan_capable: bool,
     session: u64,
     gateway: u64,
 }
@@ -1267,6 +1271,7 @@ fn site_link(state: &State) -> SiteLink {
         active: info.authenticated && info.id.is_some() && info.node.is_some(),
         capable: info.capability.is_some_and(site_capable),
         authority_capable: info.capability.is_some_and(authority_capable),
+        plan_capable: info.capability.is_some_and(channel_plan_capable),
         session: info.id.unwrap_or(0),
         gateway: info.node.unwrap_or(0),
     }
@@ -1382,12 +1387,44 @@ pub fn site_once(
     }
     let relay = lane.adapter.clone();
     let authority = lane.authority.clone();
+    // Channel plan (0x68/0x69): reports settle the in-flight request; the
+    // next queued request leaves only on a capable session.
+    let mut inbox = state.site_inbox.drain();
+    inbox.retain(|(request, body)| {
+        if channel_plan_sub(body).is_none() {
+            return true;
+        }
+        if let Ok(report) = decode_channel_plan_report(body) {
+            let _ = service.with(|a| a.channel_plan.on_report(*request, report, mono));
+        }
+        false
+    });
+    if link.active && link.plan_capable {
+        let (next, _) = service.with(|a| a.channel_plan.take_request(mono));
+        if let Some((body, action)) = next {
+            let request = lane.request_id();
+            let frame = Frame {
+                kind: FrameKind::HostOps,
+                flags: 0,
+                session: link.session,
+                request,
+                body,
+            };
+            if outbound.try_send(crate::Outbound::Seal(frame)).is_ok() {
+                let _ = service.with(|a| a.channel_plan.note_sent(request, action, mono));
+            } else {
+                let _ = service.with(|a| a.channel_plan.drop_unattached());
+            }
+        }
+    } else {
+        let _ = service.with(|a| a.channel_plan.drop_unattached());
+    }
     if relay.is_none() && authority.is_none() {
         // No capable session: drop anything posted — a stale up must
         // never be replayed into a future session's adapter. One event
         // per unbound stretch, not per frame: a chatty peer must not
         // flush the ring.
-        if !state.site_inbox.drain().is_empty() && !lane.noted_unbound_drop {
+        if !inbox.is_empty() && !lane.noted_unbound_drop {
             lane.noted_unbound_drop = true;
             push_event(
                 state,
@@ -1398,7 +1435,7 @@ pub fn site_once(
         return;
     }
     let mut rng = |buf: &mut [u8]| fill_random(buf).is_ok();
-    for (request, body) in state.site_inbox.drain() {
+    for (request, body) in inbox {
         if let Some(adapter) = relay.as_ref() {
             match join_relay_sub(&body) {
                 Some(SUB_JOIN_RELAY_UP) => match adapter.handle_up(&body, mono) {
@@ -1804,6 +1841,11 @@ mod tests {
         assert!(!owns(&[1, 0x60, 0, 0]));
         assert!(!owns(&[2, 0x41, 0, 0]));
         assert!(!owns(&[2, 0x6F, 0, 0]));
+        // The channel plan report (0x69) joins the lane; a host-side 0x68
+        // arriving inbound is a confused peer.
+        assert!(owns(&[1, 0x69, 0, 96]));
+        assert!(!owns(&[1, 0x68, 0, 2]));
+        assert!(!owns(&[1]));
     }
 
     #[test]

@@ -304,16 +304,16 @@ PlanExchange::Outbound* PlanExchange::find_outbound(
 }
 
 bool PlanExchange::delivered_before(
-    const autonomy::ObjectHash& hash) const noexcept {
+    const NodeId peer, const autonomy::ObjectHash& hash) const noexcept {
   for (const auto& entry : delivered_) {
-    if (entry == hash) return true;
+    if (entry.peer == peer && entry.hash == hash) return true;
   }
   return false;
 }
 
 void PlanExchange::note_delivered(
-    const autonomy::ObjectHash& hash) noexcept {
-  delivered_[delivered_next_] = hash;
+    const NodeId peer, const autonomy::ObjectHash& hash) noexcept {
+  delivered_[delivered_next_] = Delivered{peer, hash};
   delivered_next_ = (delivered_next_ + 1) % delivered_.size();
 }
 
@@ -340,7 +340,7 @@ void PlanExchange::on_manifest(
     send_ack(peer, manifest.object_hash, 0, autonomy::ObjectAckStatus::Failed);
     return;
   }
-  if (delivered_before(manifest.object_hash)) {
+  if (delivered_before(peer, manifest.object_hash)) {
     // Duplicate transfer of an object already dispatched: re-ack, never
     // re-run the semantic layer.
     send_ack(peer, manifest.object_hash, manifest.total_len,
@@ -427,7 +427,7 @@ void PlanExchange::complete_inbound(Inbound& slot,
     slot.used = false;
     return;
   }
-  note_delivered(slot.hash);
+  note_delivered(slot.peer, slot.hash);
   ++delivered_count_;
   send_ack(slot.peer, slot.hash, slot.total_len,
            autonomy::ObjectAckStatus::Ok);
@@ -751,7 +751,7 @@ void MigrationAgent::emit_ready_report(const Digest256& plan_hash,
   MutableByteView body{content.data() + 1, content.size() - 1};
   if (!ready_report_encode(report, body, size).ok()) return;
   content[0] = static_cast<std::uint8_t>(PlanMessage::ReadyReport);
-  queue_inline(config_.participant.authority,
+  queue_inline(authority_peer(),
                autonomy::ControlObjectKind::ChannelPlan,
                ByteView{content.data(), size + 1},
                now_ms + migration_wire_const::kPendingTtlMs, false);
@@ -769,7 +769,7 @@ void MigrationAgent::emit_result_report(const ResultOutcome outcome,
   MutableByteView body{content.data() + 1, content.size() - 1};
   if (!result_report_encode(report, body, size).ok()) return;
   content[0] = static_cast<std::uint8_t>(PlanMessage::ResultReport);
-  queue_inline(config_.participant.authority,
+  queue_inline(authority_peer(),
                autonomy::ControlObjectKind::ChannelPlan,
                ByteView{content.data(), size + 1},
                now_ms + migration_wire_const::kPendingTtlMs, false);
@@ -829,6 +829,10 @@ void MigrationAgent::on_phase_transition(const ParticipantPhase from,
 
 void MigrationAgent::record_readiness(const NodeId peer,
                                       const ReadyReport& report) noexcept {
+  if (issued_ && (report.plan_hash != issued_plan_hash_ ||
+                  report.new_epoch != issued_epoch_)) {
+    return;
+  }
   ParticipantReadiness* entry = nullptr;
   readiness_.for_each([&](ParticipantReadiness& value) {
     if (value.node == peer) entry = &value;
@@ -839,7 +843,9 @@ void MigrationAgent::record_readiness(const NodeId peer,
     return;
   }
   entry->node = peer;
-  entry->required = false;
+  // A dynamic required peer was reserved at OFFER. Its answer must not
+  // erase that obligation while static required peers use the config list.
+  if (config_.required_count != 0) entry->required = false;
   for (std::size_t i = 0; i < config_.required_count; ++i) {
     if (config_.required[i] == peer) entry->required = true;
   }
@@ -857,6 +863,10 @@ void MigrationAgent::record_readiness(const NodeId peer,
 
 void MigrationAgent::record_result(const NodeId peer,
                                    const ResultReport& report) noexcept {
+  if (issued_ && (report.plan_hash != issued_plan_hash_ ||
+                  report.epoch != issued_epoch_)) {
+    return;
+  }
   ResultEntry* slot = nullptr;
   for (auto& entry : results_) {
     if (entry.used && entry.node == peer) slot = &entry;
@@ -883,27 +893,37 @@ void MigrationAgent::record_result(const NodeId peer,
 void MigrationAgent::check_terminal(const MonotonicMs now_ms) noexcept {
   if (!terminal_armed_) return;
   std::size_t reported = 0;
+  std::size_t required_count = 0;
   bool all_applied = true;
-  for (std::size_t i = 0; i < config_.required_count; ++i) {
-    bool seen = false;
+  const auto count_result = [&](const NodeId peer) noexcept {
+    ++required_count;
     for (const auto& entry : results_) {
-      if (entry.used && entry.node == config_.required[i] &&
-          entry.plan_hash == issued_plan_hash_) {
-        seen = true;
+      if (entry.used && entry.node == peer &&
+          entry.plan_hash == issued_plan_hash_ && entry.epoch == issued_epoch_) {
+        ++reported;
+        break;
       }
     }
-    if (seen) ++reported;
+  };
+  if (config_.required_count != 0) {
+    for (std::size_t i = 0; i < config_.required_count; ++i) {
+      count_result(config_.required[i]);
+    }
+  } else {
+    readiness_.for_each([&](const ParticipantReadiness& value) {
+      if (value.required && value.plan_hash == issued_plan_hash_) count_result(value.node);
+    });
   }
   // Any non-Applied outcome for the issued hash fails the plan regardless
   // of which node reported it.
   for (const auto& entry : results_) {
     if (entry.used && entry.plan_hash == issued_plan_hash_ &&
+        entry.epoch == issued_epoch_ &&
         entry.outcome != ResultOutcome::Applied) {
       all_applied = false;
     }
   }
-  const bool all_reported =
-      config_.required_count == 0 || reported == config_.required_count;
+  const bool all_reported = reported == required_count;
   if (!all_reported && now_ms < terminal_deadline_ms_) return;
   // Every required node reported, or the bounded wait ended: feed the
   // terminal outcome once — the authority latches cooldown/rollback credit.
@@ -912,35 +932,52 @@ void MigrationAgent::check_terminal(const MonotonicMs now_ms) noexcept {
   owner_.on_migration_event("PLAN_TERMINAL", kInvalidNodeId);
 }
 
-RequiredSetVerdict MigrationAgent::readiness_verdict() const noexcept {
-  std::array<ParticipantReadiness, migration_wire_const::kRequiredCapacity>
-      set{};
+std::size_t MigrationAgent::ready_count() const noexcept {
   std::size_t count = 0;
   readiness_.for_each([&](const ParticipantReadiness& value) {
-    for (std::size_t i = 0; i < config_.required_count; ++i) {
-      // Only reports bound to the currently issued plan count — a stale
-      // READY from an earlier offer is not evidence for this gate.
-      if (value.node == config_.required[i] &&
-          value.plan_hash == issued_plan_hash_ && count < set.size()) {
-        set[count] = value;
-        set[count].required = true;
-        ++count;
-      }
-    }
+    if (value.ready && value.plan_hash == issued_plan_hash_) ++count;
   });
-  // Required nodes that never reported appear as unanswered entries —
-  // evaluate_required_set then applies the lease+rediscovery rule (D5-09).
+  return count;
+}
+
+RequiredSetVerdict MigrationAgent::readiness_verdict() const noexcept {
+  if (config_.required_count == 0) {
+    // Evaluate reserved peers in place; the Owner stack need not copy the
+    // whole readiness table. Preserve the collective gate's blocker order.
+    RequiredSetVerdict verdict{};
+    readiness_.for_each([&](const ParticipantReadiness& value) {
+      if (!value.required || value.plan_hash != issued_plan_hash_) return;
+      const RequiredSetVerdict one =
+          evaluate_required_set(&value, 1, issued_recovery_present_);
+      verdict.ready_count += one.ready_count;
+      verdict.deferred_count += one.deferred_count;
+      if (!one.commit_permitted &&
+          (verdict.reason == StatusCode::Ok ||
+           one.reason == StatusCode::LegacyParticipant ||
+           (one.reason == StatusCode::WouldBlock &&
+            verdict.reason == StatusCode::PlanNotCommitted))) {
+        verdict.reason = one.reason;
+        verdict.blocker = one.blocker;
+      }
+    });
+    verdict.commit_permitted = verdict.reason == StatusCode::Ok;
+    return verdict;
+  }
+  std::array<ParticipantReadiness, migration_wire_const::kRequiredCapacity> set{};
+  std::size_t count = 0;
   for (std::size_t i = 0; i < config_.required_count; ++i) {
-    bool present = false;
-    for (std::size_t j = 0; j < count; ++j) {
-      if (set[j].node == config_.required[i]) present = true;
-    }
-    if (!present && count < set.size()) {
-      set[count] = ParticipantReadiness{};
-      set[count].node = config_.required[i];
-      set[count].required = true;
-      ++count;
-    }
+    ParticipantReadiness value{};
+    value.node = config_.required[i];
+    value.required = true;
+    // A peer missing READY has unknown capability, not proof of Legacy.
+    value.migration_capable = true;
+    readiness_.for_each([&](const ParticipantReadiness& reported) {
+      if (reported.node == value.node && reported.plan_hash == issued_plan_hash_) {
+        value = reported;
+      }
+    });
+    value.required = true;
+    if (count < set.size()) set[count++] = value;
   }
   return evaluate_required_set(set.data(), count, issued_recovery_present_);
 }
@@ -961,7 +998,7 @@ bool MigrationAgent::readiness_of(const NodeId node,
 
 void MigrationAgent::compose_autoguarded(
     AutoGuardedEvidence& evidence, const MonotonicMs now_ms) const noexcept {
-  const NodeId authority_id = config_.participant.authority;
+  const NodeId authority_id = authority_peer();
   const bool self_authority = authority_id == config_.participant.node;
   // Explicit configured Authority: unset/broadcast ids are not authorities.
   evidence.authority_configured =
@@ -1081,7 +1118,7 @@ void MigrationAgent::auto_survey(const ChannelAssessment& assessment,
     note("AUTOSURVEY_CLOCK_UNARMED", kInvalidNodeId);
     return;
   }
-  const NodeId peer = config_.participant.authority;
+  const NodeId peer = authority_peer();
   if (peer == kInvalidNodeId || peer == kBroadcastNodeId ||
       peer == config_.participant.node) {
     note("AUTOSURVEY_NO_PEER", kInvalidNodeId);
@@ -1297,7 +1334,7 @@ void MigrationAgent::on_migration_frame(const NodeId peer,
         owner_.on_migration_event("TIME_SYNC_DECODE", peer);
         return;
       }
-      if (sample.source != config_.participant.authority) {
+      if (sample.source != authority_peer()) {
         // Only the configured authority re-arms the migration clock
         // (D5-03). Other samples are valid wire traffic, not clock evidence.
         return;
@@ -1460,6 +1497,7 @@ Status MigrationAgent::offer_plan(
     const Digest256& resulting_state_hash, const ByteView snapshot_body,
     const ByteView snapshot_signature, const bool is_rollback,
     const MonotonicMs now_ms, VerifiedAuthorityPlan& out) noexcept {
+  out = VerifiedAuthorityPlan{};
   if (!config_.authority_role) {
     return reject(StatusCode::InvalidState, "NOT_AUTHORITY_ROLE");
   }
@@ -1467,11 +1505,37 @@ Status MigrationAgent::offer_plan(
       plan_blob.size > migration_const::kPlanBlobMax) {
     return reject(StatusCode::InvalidArgument, "PLAN_BLOB_BOUND");
   }
-  // The real issuer path: signature verify + ledger commit + scope checks.
-  Status status = authority_.commit_plan(plan, plan_blob, operation,
-                                       commit_signature,
-                                       resulting_state_hash, is_rollback,
-                                       now_ms, out);
+  // An authority without a configured required set (Member gateway)
+  // snapshots its currently authenticated peers at OFFER. A lost link
+  // must not make an unanswered peer disappear from the RELEASE gate.
+  std::array<NodeId, migration_wire_const::kReadinessCapacity + 1> live_peers{};
+  std::size_t live_count = 0;
+  if (config_.required_count == 0) {
+    live_count = wire_.migration_peers(live_peers.data(), live_peers.size());
+    if (live_count > migration_wire_const::kReadinessCapacity) {
+      return reject(StatusCode::NoCapacity, "REQUIRED_PEERS_OVER_CAPACITY");
+    }
+  }
+  // Verify the signed operation before the local participant stores its
+  // blob. Its own preparation must succeed before the ledger consumes the
+  // epoch; otherwise a bad local measurement would strand the next offer.
+  if (!authority_.available()) {
+    return reject(StatusCode::ApprovalRequired, "AUTHORITY_STOPPED_NO_NEW_COMMIT");
+  }
+  VerifiedAuthorityPlan verified{};
+  Status status = authority_.verify_commit(operation, plan_digest(plan_blob), plan.new_epoch,
+                                           commit_signature, verified);
+  if (!status) return status;
+  (void)participant_.note_clock(
+      ClockMapping{0, config_.timesync_uncertainty_ms}, now_ms);
+  status = participant_.prepare(plan_blob, config_.measurements, now_ms);
+  if (!status) return status;
+
+  // The real issuer path rechecks scope and signature while committing the
+  // ledger durably. Only its verified token may be released to participants.
+  status = authority_.commit_plan(plan, plan_blob, operation,
+                                  commit_signature, resulting_state_hash,
+                                  is_rollback, now_ms, out);
   if (!status) return status;
 
   // Stage the distribution set. Commit evidence is HELD for release_commit
@@ -1524,13 +1588,8 @@ Status MigrationAgent::offer_plan(
     issued_snapshot_size_ = wrapped;
   }
 
-  // The authority's own node is a plan participant too: it can never hear
-  // its own TimeSync, so it self-arms once here — identity mapping, the
-  // authority's clock IS the authority domain (needed for its own
-  // feasibility check, issued_switch_local_ms_ and its own cutover).
-  (void)participant_.note_clock(
-      ClockMapping{0, config_.timesync_uncertainty_ms}, now_ms);
-  (void)participant_.prepare(plan_blob, config_.measurements, now_ms);
+  // The authority's clock is its own time domain; it self-armed above
+  // because it cannot receive its own TimeSync.
   issued_switch_local_ms_ = participant_.pending_switch_local();
 
   const MonotonicMs deadline =
@@ -1540,6 +1599,15 @@ Status MigrationAgent::offer_plan(
     distribute(PendingTag::DistributeSnapshot, deadline);
   }
   readiness_.clear();
+  // The readiness table already has one bounded slot per peer. Reserve
+  // unanswered entries now so a later disconnect cannot shrink the gate.
+  for (std::size_t i = 0; i < live_count; ++i) {
+    ParticipantReadiness* entry = readiness_.allocate();
+    entry->node = live_peers[i];
+    entry->plan_hash = issued_plan_hash_;
+    entry->required = true;
+    entry->migration_capable = true;
+  }
   for (auto& entry : results_) entry.used = false;
   return Status::success();
 }
@@ -1712,7 +1780,7 @@ void MigrationAgent::poll(const MonotonicMs now_ms) noexcept {
     }
   }
   if (channel_diverged && !reconcile_pending_op_ && !reconcile_exhausted_ &&
-      !participant_.in_progress() && !runner_.busy()) {
+      !reconcile_held_ && !participant_.in_progress() && !runner_.busy()) {
     RadioOperation op{};
     op.kind = RadioOperationKind::ChannelCutover;
     op.deadline_ms = now_ms + migration_const::kGuardFloorMs * 20U;
@@ -1764,24 +1832,36 @@ void MigrationAgent::poll(const MonotonicMs now_ms) noexcept {
     if (config_.timesync_period_ms != 0 &&
         now_ms >= next_timesync_ms_) {
       // Fresh authenticated clock samples keep participant clocks armed
-      // after a restart (D5-03): a stored mapping is never reused.
+      // after a restart (D5-03): a stored mapping is never reused. The
+      // radio carries one frame at a time, so a peer that would block
+      // gets its sample on a later poll, and the round ends only when
+      // every peer had one.
       autonomy::TimeSyncPayload sample{};
       sample.source = config_.participant.node;
-      sample.sequence = ++timesync_sequence_;
+      if (timesync_cursor_ == 0) ++timesync_sequence_;
+      sample.sequence = timesync_sequence_;
       sample.reference_ms = now_ms;
       sample.uncertainty_ms = config_.timesync_uncertainty_ms;
       autonomy::EncodedPayload payload{};
+      std::size_t next = 0;
+      std::size_t count = 0;
       if (time_sync_encode(sample, payload).ok() &&
           channel_context() == ExchangeChannel::Home) {
         std::array<NodeId, 24> peers{};
-        const std::size_t count =
-            wire_.migration_peers(peers.data(), peers.size());
-        for (std::size_t i = 0; i < count; ++i) {
-          (void)wire_.migration_send(peers[i], FrameType::TimeSync,
-                                     payload.view());
+        count = wire_.migration_peers(peers.data(), peers.size());
+        for (next = timesync_cursor_; next < count; ++next) {
+          if (wire_.migration_send(peers[next], FrameType::TimeSync, payload.view()).code ==
+              StatusCode::WouldBlock) {
+            break;
+          }
         }
       }
-      next_timesync_ms_ = now_ms + config_.timesync_period_ms;
+      if (next < count) {
+        timesync_cursor_ = next;
+      } else {
+        timesync_cursor_ = 0;
+        next_timesync_ms_ = now_ms + config_.timesync_period_ms;
+      }
     }
     check_terminal(now_ms);
   }

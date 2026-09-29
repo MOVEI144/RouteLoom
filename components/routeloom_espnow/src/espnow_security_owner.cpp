@@ -1256,7 +1256,8 @@ void EspNowSecurityOwner::drain_lifecycle_actions(const MonotonicMs now_ms) noex
             coordinator_live_ && runtime_ != nullptr && runtime_->node().started() &&
                 coordinator().mode() == sdkv1::CoordinatorMode::Member,
             runtime_ != nullptr &&
-                runtime_->committed_channel() == stores_->site().site().channel)) {
+                runtime_->committed_channel() ==
+                    coordinator().operating_channel(stores_->site().site().channel))) {
           case sdkv1::AdoptNetworkDisposition::Complete:
             ESP_LOGW(config_.log_tag, "p6: network 0x%llx adopted — completing",
                      static_cast<unsigned long long>(action.network));

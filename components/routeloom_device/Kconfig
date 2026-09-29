@@ -159,9 +159,10 @@ menu "RouteLoom device"
             (0x10) config_endpoint_v1 (0x20-0x23), bit 5 (0x20)
             m1_diagnostics_v1 (0x30/0x31), bit 6 (0x40) node_status_v1
             (0x40-0x42), bit 7 (0x80) group_delivery_v1 (0x50-0x52; masked
-            unless the node can source a group send) and bit 11 (0x800)
-            observation_v1 (0x70-0x72). Bits 6, 7 and 11 ride the HostOps
-            carrier, so they need bit 2.
+            unless the node can source a group send), bit 11 (0x800)
+            observation_v1 (0x70-0x72) and bit 13 (0x2000) channel_plan_v1
+            (0x68/0x69, MemberEdhoc with ROUTELOOM_MIGRATION). Bits 6, 7,
+            11 and 13 ride the HostOps carrier, so they need bit 2.
             LegacyFixture nodes: the capability bits announced in discovery.
 
     config ROUTELOOM_DISCOVERY
@@ -236,30 +237,35 @@ menu "RouteLoom device"
     config ROUTELOOM_CONFIG
         bool "Enable the remote-config target endpoint (RCC1 permit journal)"
         default n
-        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE && !ROUTELOOM_ROLE_GATEWAY
+        depends on !ROUTELOOM_ROLE_GATEWAY
         help
-            EXPERIMENTAL: installs a ConfigTarget on the routed end-protected
-            lane with a durable NVS-backed ConfigJournal and a dev-profile
-            authority verifier. The permit path is a dev HMAC under
-            SecurityProfile::Development — never a production identity claim.
-            Requires peers (static ROUTELOOM_PEER_* or discovery).
+            Installs a ConfigTarget on the routed end-protected lane with a
+            durable NVS-backed ConfigJournal (SDK namespace) and its RLF1
+            floor. MemberEdhoc verifies RLCP1_COSE_ESP256 permits signed by
+            the adopted site's authority key (kid = site_id) and binds once
+            the membership is adopted. DevRam verifies the dev-HMAC permit
+            key derived from its PSK (SecurityProfile::Development, never a
+            production identity claim). LegacyFixture keeps its dev-PSK and
+            static-key profiles below. The journal takes about 42 KB of
+            static RAM: on ESP32-C3 it fits the endpoint resource profile,
+            not the relay profile's static RAM floor.
 
     config ROUTELOOM_CONFIG_AUTHORITY
         hex "Config authority Node ID permitted to issue permits"
         default 0x1
-        depends on ROUTELOOM_CONFIG
+        depends on ROUTELOOM_CONFIG && !ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
 
     config ROUTELOOM_CONFIG_AUTHORITY_GENERATION
         int "Permitted authority generation for config permits"
         range 1 2147483647
         default 1
-        depends on ROUTELOOM_CONFIG
+        depends on ROUTELOOM_CONFIG && !ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
 
     config ROUTELOOM_CONFIG_PROFILE
         int "Permit profile (0=dev-HMAC experimental, 1=RLCP1_COSE_ESP256)"
         range 0 1
         default 0
-        depends on ROUTELOOM_CONFIG
+        depends on ROUTELOOM_CONFIG && ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
         help
             Profile 0 keeps the dev-HMAC envelope (EXPERIMENTAL). Profile 1
             installs the COSE_Sign1 ESP256 verifier (P-256/SHA-256, RFC 9864
@@ -318,22 +324,28 @@ menu "RouteLoom device"
         int "Channel migration mode (0=Disabled, 1=Observe, 2=Manual)"
         range 0 2
         default 0
-        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE || ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
         help
             EXPERIMENTAL: wires the migration participant and control-object
             transport onto the authenticated Wire lane. Observe runs the
             coordinator's evidence collection only; Manual additionally
             permits operator-driven plan issuance/surveys.
+            MemberEdhoc: every member verifies plans with the adopted
+            site's key and keeps its committed channel across reboots; the
+            USB gateway is the site's plan authority in Manual mode and
+            admits host plans over channel_plan_v1 (ROUTELOOM_CAPABILITY
+            bit 13). Observe mode does not advertise that capability. The
+            authority settings below are LegacyFixture only.
 
     config ROUTELOOM_MIGRATION_AUTHORITY
         hex "Migration authority Node ID"
         default 0x1
-        depends on ROUTELOOM_MIGRATION != 0
+        depends on ROUTELOOM_MIGRATION != 0 && ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
 
     config ROUTELOOM_MIGRATION_SELF_AUTHORITY
         bool "DEV: this node is the migration authority (issuer)"
         default n
-        depends on ROUTELOOM_MIGRATION = 2
+        depends on ROUTELOOM_MIGRATION = 2 && ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
         help
             EXPERIMENTAL: the issuer commits plans through a dev-PSK MAC
             under SecurityProfile::Development.

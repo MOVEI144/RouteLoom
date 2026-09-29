@@ -392,6 +392,17 @@ class SecurityCoordinator final : public BootstrapSink,
   CoordinatorSnapshot snapshot() const noexcept;
   // The mode alone: snapshot() also walks the session bank and joiner.
   CoordinatorMode mode() const noexcept { return mode_; }
+  // Manual channel plan (V2-08): the channel of the node's durable plan
+  // record replaces the SitePackage channel as the Member operating
+  // channel. set_plan_channel() before Boot takes the stored record;
+  // note_plan_cutover() after a verified plan switch moves the RLD1 demux
+  // to the new channel and radio generation (false while an adoption or a
+  // join tune owns the channel: retry later). 0 = no plan.
+  void set_plan_channel(std::uint8_t channel) noexcept { plan_channel_ = channel; }
+  std::uint8_t operating_channel(std::uint8_t package_channel) const noexcept {
+    return plan_channel_ != 0 ? plan_channel_ : package_channel;
+  }
+  bool note_plan_cutover(std::uint8_t channel, std::uint32_t radio_generation) noexcept;
   // Join-lifecycle record for this run (observation_v1, lab timetables).
   // Ages are durations against `now`; unstamped stages read unknown. The
   // flags mirror the live adoption latches (member_valid_, join_confirmed_);
@@ -1082,6 +1093,7 @@ class SecurityCoordinator final : public BootstrapSink,
   bool member_valid_{false};
   std::uint32_t tune_outstanding_{0};
   std::uint8_t channel_{0};
+  std::uint8_t plan_channel_{0};
   std::uint32_t radio_generation_{0};
   std::uint32_t boot_witness_{0};
   bool sleeping_{false};

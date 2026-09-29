@@ -28,9 +28,40 @@
 #include "routeloom/usb_bridge.hpp"
 #include "sdkconfig.h"
 
+// Remote-config target of a DevRam or Member node (V2-08, issue #17): the
+// SDK-namespace journal on the node's routed config lane. Firmware images
+// compile it with CONFIG_ROUTELOOM_CONFIG; the host mesh harness peer
+// defines it to 1 (LegacyFixture keeps its own wiring until its removal).
+#ifndef ROUTELOOM_DEVICE_REMOTE_CONFIG
+#if defined(ESP_PLATFORM)
+#define ROUTELOOM_DEVICE_REMOTE_CONFIG \
+  (CONFIG_ROUTELOOM_CONFIG && !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE)
+#else
+#define ROUTELOOM_DEVICE_REMOTE_CONFIG 0
+#endif
+#endif
+
+// Manual channel plan of a Member node (V2-08, issue #5 manual): the
+// migration participant on every member and the site's plan authority on
+// the gateway, both verifying under the adopted site's SAK. Firmware
+// images compile it with CONFIG_ROUTELOOM_MIGRATION on MemberEdhoc; the
+// host mesh harness peer defines it to 1.
+#ifndef ROUTELOOM_DEVICE_MIGRATION
+#if defined(ESP_PLATFORM)
+#define ROUTELOOM_DEVICE_MIGRATION \
+  (CONFIG_ROUTELOOM_MIGRATION && CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC)
+#else
+#define ROUTELOOM_DEVICE_MIGRATION 0
+#endif
+#endif
+
 namespace routeloom {
 
+class EntropySource;
+struct DeviceChannelPlan;
+class GatewayDelivery;
 class ObservationSource;
+struct DeviceRemoteConfig;
 
 namespace sdkv1 {
 class SecurityCoordinator;
@@ -70,6 +101,22 @@ struct DeviceConfig {
   ByteView usb_secret{};
   std::uint32_t usb_capability{0};
   std::uint64_t usb_device_nonce{0};
+  // Remote-config target (non-gateway roles, ROUTELOOM_DEVICE_REMOTE_CONFIG
+  // builds). Member binds the journal to the adopted site's SAK; DevRam
+  // verifies the development permit key derived from its PSK, issued by
+  // `config_authority` at `config_authority_generation`.
+  bool remote_config{false};
+  NodeId config_authority{kInvalidNodeId};
+  std::uint32_t config_authority_generation{1};
+  // Manual channel plan (Member, ROUTELOOM_DEVICE_MIGRATION builds): the
+  // MigrationMode (0 off, 1 Observe, 2 Manual) and the deployment's
+  // measured bounds a plan must fit: management RTT P99, control delivery,
+  // prepare transfer and local switch, in ms.
+  std::uint8_t channel_plan{0};
+  std::uint32_t plan_rtt_p99_ms{250};
+  std::uint32_t plan_delivery_bound_ms{2000};
+  std::uint32_t plan_transfer_bound_ms{2000};
+  std::uint32_t plan_switch_bound_ms{50};
 #if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   SecurityProvider* legacy_security{nullptr};
 #else
@@ -168,6 +215,12 @@ class Device {
   const espnow::Sdkv1Stores* stores() const noexcept { return stores_; }
   // Portable modules written against the core MeshNode API (routeloom_bench).
   MeshNode* mesh() noexcept;
+  // Explicit gateway delivery (Service=21, 03-explicit-gateway): an origin
+  // resolves a named gateway and sends to it; a USB gateway attaches the
+  // responder half. Null before begin() or while sink attachment is busy;
+  // retry on the next Owner call. An image that never calls it links none
+  // of it.
+  GatewayDelivery* gateway() noexcept;
 
  private:
   friend struct DeviceTestAccess;
@@ -198,6 +251,15 @@ class Device {
 
   void run_posted() noexcept;
   void update_observation_remote() noexcept;
+#if ROUTELOOM_DEVICE_REMOTE_CONFIG
+  Status begin_remote_config(const DeviceConfig& config, const keys::Secret& dev_psk,
+                             EntropySource& entropy, MonotonicMs now_ms) noexcept;
+  void poll_remote_config(MonotonicMs now_ms) noexcept;
+#endif
+#if ROUTELOOM_DEVICE_MIGRATION
+  Status begin_channel_plan(const DeviceConfig& config) noexcept;
+  void poll_channel_plan(MonotonicMs now_ms) noexcept;
+#endif
 #if defined(ESP_PLATFORM)
   static void task_entry(void* self) noexcept;
   [[noreturn]] void boot_and_run(DeviceConfig& config) noexcept;
@@ -211,6 +273,13 @@ class Device {
   espnow::EspNowRuntime* runtime_{nullptr};
   espnow::EspNowSecurityOwner* owner_{nullptr};
   usb::UsbBridge* bridge_{nullptr};
+  GatewayDelivery* gateway_{nullptr};
+#if ROUTELOOM_DEVICE_REMOTE_CONFIG
+  DeviceRemoteConfig* remote_config_{nullptr};
+#endif
+#if ROUTELOOM_DEVICE_MIGRATION
+  DeviceChannelPlan* channel_plan_{nullptr};
+#endif
   const ObservationSource* observation_{nullptr};
 #if defined(ESP_PLATFORM)
   // Builds the source in the Owner frame's slot; set by enable_observation().

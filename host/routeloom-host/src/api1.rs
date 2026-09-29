@@ -9398,6 +9398,40 @@ mod tests {
             &handle(foreign_line.as_bytes(), &allowed),
             "INVALID_ARGUMENT",
         );
+
+        // Dispatch: an offer needs a fresh gateway report and a release an
+        // offered plan (BUSY until then); status queues the read the next
+        // offer builds on. Admin grants only.
+        let offer = group_line("site.channel_plan.offer", "{\"new_channel\":1}");
+        assert_error_schema(&handle(offer.as_bytes(), &allowed), "BUSY");
+        assert_error_schema(&handle(offer.as_bytes(), &denied), "AuthorizationFailed");
+        assert_error_schema(
+            &handle(
+                group_line("site.channel_plan.offer", "{\"new_channel\":14}").as_bytes(),
+                &allowed,
+            ),
+            "INVALID_ARGUMENT",
+        );
+        let release = group_line("site.channel_plan.release", "{}");
+        assert_error_schema(&handle(release.as_bytes(), &allowed), "BUSY");
+        let read_acl = Acl::parse(&format!(
+            "{{\"principals\":{{\"501\":{{\"networks\":{{\"{:016x}\":[\"MEMBERSHIP_READ\"]}}}}}}}}",
+            testkit::NETWORK_LOW
+        ))
+        .unwrap();
+        let reader = ApiContext {
+            site: Some(&site),
+            ..ctx(Some(501), &read_acl, &log, &store, &limiter, 1_000)
+        };
+        let status = handle(
+            group_line("site.channel_plan.status", "{}").as_bytes(),
+            &reader,
+        );
+        assert!(
+            status.contains("\"report\":null") && status.contains("\"busy\":true"),
+            "{status}"
+        );
+        assert_error_schema(&handle(offer.as_bytes(), &reader), "AuthorizationFailed");
     }
 
     #[test]

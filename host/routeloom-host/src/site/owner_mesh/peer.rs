@@ -469,6 +469,21 @@ pub(super) struct MeshSnap {
     pub(super) group_rejected: u32,
     /// Armed `W` record-key faults that fired (F01/F02).
     pub(super) key_fault_hits: u32,
+    /// The Z send (explicit gateway): endpoint state, send state and
+    /// Service reason; 0 before any.
+    pub(super) gw_endpoint: u8,
+    pub(super) gw_send: u8,
+    pub(super) gw_reason: u8,
+    /// This node's GatewayDelivery counters (0 without one).
+    pub(super) gw_receipts: u32,
+    pub(super) gw_sdk_ram_receipts: u32,
+    pub(super) gw_mailbox_stored: u32,
+    pub(super) gw_resolves_failed: u32,
+    /// The channel-plan participant (ParticipantPhase, 0xFF without one),
+    /// its active epoch and channel.
+    pub(super) plan_phase: u8,
+    pub(super) plan_epoch: u32,
+    pub(super) plan_channel: u8,
 }
 
 #[allow(dead_code)]
@@ -625,6 +640,19 @@ pub(super) fn parse_mesh_snap(payload: &[u8]) -> MeshSnap {
     snap.group_delivered = get_u32(payload, &mut pos);
     snap.group_rejected = get_u32(payload, &mut pos);
     snap.key_fault_hits = get_u32(payload, &mut pos);
+    snap.gw_endpoint = payload[pos];
+    snap.gw_send = payload[pos + 1];
+    snap.gw_reason = payload[pos + 2];
+    pos += 3;
+    snap.gw_receipts = get_u32(payload, &mut pos);
+    snap.gw_sdk_ram_receipts = get_u32(payload, &mut pos);
+    snap.gw_mailbox_stored = get_u32(payload, &mut pos);
+    snap.gw_resolves_failed = get_u32(payload, &mut pos);
+    snap.plan_phase = payload[pos];
+    pos += 1;
+    snap.plan_epoch = get_u32(payload, &mut pos);
+    snap.plan_channel = payload[pos];
+    pos += 1;
     assert_eq!(pos, payload.len(), "G fully consumed");
     snap
 }
@@ -663,6 +691,9 @@ pub(super) struct MeshPeer {
     pub(super) switching_cuts: u32,
     /// F02: the next respawn fails its k-th NVS write once (`--nvs-fail`).
     pub(super) nvs_fail_next: Option<u32>,
+    /// Scenario arguments appended on every launch (a later `--cap`
+    /// overrides the default bitmap).
+    pub(super) extra: Vec<String>,
 }
 
 impl Drop for MeshPeer {
@@ -684,6 +715,7 @@ impl MeshPeer {
         usb_secret_hex: &str,
         nvs_save: &std::path::Path,
         flat: bool,
+        extra: &[String],
     ) -> Self {
         let mut child = Self::launch(
             persona.node,
@@ -699,6 +731,7 @@ impl MeshPeer {
             nvs_save,
             flat,
             None,
+            extra,
         );
         let stdin = child.stdin.take().expect("peer stdin");
         let stdout = child.stdout.take().expect("peer stdout");
@@ -720,6 +753,7 @@ impl MeshPeer {
             reboots: 0,
             switching_cuts: 0,
             nvs_fail_next: None,
+            extra: extra.to_vec(),
         }
     }
 
@@ -741,6 +775,7 @@ impl MeshPeer {
         nvs_save: &std::path::Path,
         flat: bool,
         nvs_fail: Option<u32>,
+        extra: &[String],
     ) -> Child {
         let path = mesh_peer_path_for(node)
             .expect("build routeloom_owner_mesh_peer or set ROUTELOOM_MESH_PEER");
@@ -783,6 +818,7 @@ impl MeshPeer {
             command.arg("--usb-secret").arg(usb_secret_hex);
             command.arg("--cap").arg(format!("{USB_CAP}"));
         }
+        command.args(extra);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -808,6 +844,7 @@ impl MeshPeer {
         self.t0 = now;
         let nvs_save = self.nvs_save.clone();
         let usb_secret_hex = self.usb_secret_hex.clone();
+        let extra = self.extra.clone();
         self.child = Self::launch(
             self.node,
             &self.mac,
@@ -822,6 +859,7 @@ impl MeshPeer {
             &nvs_save,
             self.flat,
             self.nvs_fail_next.take(),
+            &extra,
         );
         self.stdin = self.child.stdin.take().expect("peer stdin");
         self.stdout = self.child.stdout.take().expect("peer stdout");
@@ -1034,5 +1072,15 @@ impl MeshPeer {
 
     pub(super) fn cut_after_switching(&mut self) {
         self.send(b"F");
+    }
+
+    /// Explicit gateway send (Service=21, SDK_RAM scope) through
+    /// `Device::gateway()`: resolve `gateway`, then send once Ready.
+    pub(super) fn gateway_send(&mut self, gateway: u64, payload: &[u8]) {
+        assert!((1..=96).contains(&payload.len()), "gateway payload bound");
+        let mut command = vec![b'Z'];
+        command.extend_from_slice(&gateway.to_le_bytes());
+        command.extend_from_slice(payload);
+        self.send(&command);
     }
 }

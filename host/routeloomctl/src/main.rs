@@ -109,7 +109,7 @@ fn usage() {
         "routeloomctl lab-site-init --spec FILE --out DIR|lab-inventory-import --site DIR --ledger FILE --node <16hex> --role endpoint|relay|gateway (local only)"
     );
     eprintln!(
-        "routeloomctl site join-list|approve --request <jr-token> --device <16hex> --role endpoint|relay|gateway [--idempotency-key K]|deny --request <jr-token> --device <16hex> --reason not_here|blocked [--idempotency-key K]|policy [--zero-touch-open true|false] [--decision-mode external|closed|lab_inventory] [--decision-timeout-ms 500-5000] [--pending-retry-after-s 30-3600]|members [--device <16hex> | [--after <16hex>] [--limit 1-128] [--include-removed]]|revoke --device <16hex> --expected-generation <u32> --reason removed|lost|replaced|blocked [--idempotency-key K]|gk-rotate [--expected-active-epoch <u32> [--idempotency-key K]]|cutover --expected-site-epoch <u32> --next-site-cert <hex> [--idempotency-key K]|channel-plan --plan-blob-hex <hex> (sign only)|status  (site authority over API1; cutover progress via operation-get --id <op-token>)"
+        "routeloomctl site join-list|approve --request <jr-token> --device <16hex> --role endpoint|relay|gateway [--idempotency-key K]|deny --request <jr-token> --device <16hex> --reason not_here|blocked [--idempotency-key K]|policy [--zero-touch-open true|false] [--decision-mode external|closed|lab_inventory] [--decision-timeout-ms 500-5000] [--pending-retry-after-s 30-3600]|members [--device <16hex> | [--after <16hex>] [--limit 1-128] [--include-removed]]|revoke --device <16hex> --expected-generation <u32> --reason removed|lost|replaced|blocked [--idempotency-key K]|gk-rotate [--expected-active-epoch <u32> [--idempotency-key K]]|cutover --expected-site-epoch <u32> --next-site-cert <hex> [--idempotency-key K]|channel-plan --plan-blob-hex <hex> (sign only)|channel-plan status|channel-plan offer --new-channel <1-13> [--lead-ms <ms>]|channel-plan release|status  (site authority over API1; cutover progress via operation-get --id <op-token>)"
     );
 }
 
@@ -1978,6 +1978,37 @@ fn site_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
 }
 
 fn site_channel_plan_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    match args.first().map(String::as_str) {
+        Some("status") if args.len() == 1 => {
+            return Ok(site_request("site.channel_plan.status", String::new()))
+        }
+        Some("release") if args.len() == 1 => {
+            return Ok(site_request("site.channel_plan.release", String::new()))
+        }
+        Some("offer") => {
+            let mut channel = None;
+            let mut lead = None;
+            let mut rest = args[1..].iter();
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--new-channel" => {
+                        channel = Some(opt_value(&mut rest, "--new-channel")?.parse::<u8>()?)
+                    }
+                    "--lead-ms" => lead = Some(opt_value(&mut rest, "--lead-ms")?.parse::<u64>()?),
+                    other => {
+                        return Err(format!("unknown channel-plan offer option: {other}").into())
+                    }
+                }
+            }
+            let channel = channel.ok_or("channel-plan offer requires --new-channel")?;
+            let lead = lead.map_or_else(String::new, |lead| format!(",\"lead_ms\":{lead}"));
+            return Ok(site_request(
+                "site.channel_plan.offer",
+                format!("\"new_channel\":{channel}{lead}"),
+            ));
+        }
+        _ => {}
+    }
     let mut blob = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -3576,6 +3607,17 @@ mod tests {
         );
         assert!(plan.contains("\"plan_blob_hex\":\"0102\""), "{plan}");
         assert!(site_command(&args(&["channel-plan", "--plan-blob-hex", "01x"])).is_err());
+        let offer = site_command(&args(&["channel-plan", "offer", "--new-channel", "1"])).unwrap();
+        assert!(
+            offer.contains("\"method\":\"site.channel_plan.offer\",\"params\":{\"new_channel\":1}"),
+            "{offer}"
+        );
+        let release = site_command(&args(&["channel-plan", "release"])).unwrap();
+        assert!(
+            release.contains("\"method\":\"site.channel_plan.release\""),
+            "{release}"
+        );
+        assert!(site_command(&args(&["channel-plan", "offer"])).is_err());
 
         // approve / deny: verdict owns exactly its parameter.
         let line = site_command(&args(&[

@@ -273,16 +273,21 @@ class PlanExchange {
                 std::uint16_t received_len,
                 autonomy::ObjectAckStatus status) noexcept;
   void complete_inbound(Inbound& slot, MonotonicMs now_ms) noexcept;
-  bool delivered_before(const autonomy::ObjectHash& hash) const noexcept;
-  void note_delivered(const autonomy::ObjectHash& hash) noexcept;
+  // Re-delivery is per sender: equal content from two peers (their READY
+  // reports for one plan) is two deliveries.
+  bool delivered_before(NodeId peer, const autonomy::ObjectHash& hash) const noexcept;
+  void note_delivered(NodeId peer, const autonomy::ObjectHash& hash) noexcept;
 
   PlanExchangeConfig config_{};
   MigrationWirePort& wire_;
   MigrationObjectSink& sink_;
   std::array<Inbound, migration_wire_const::kInboundSlots> inbound_{};
   std::array<Outbound, migration_wire_const::kOutboundSlots> outbound_{};
-  std::array<autonomy::ObjectHash, migration_wire_const::kDeliveredLog>
-      delivered_{};
+  struct Delivered {
+    NodeId peer{kInvalidNodeId};
+    autonomy::ObjectHash hash{};
+  };
+  std::array<Delivered, migration_wire_const::kDeliveredLog> delivered_{};
   std::size_t delivered_next_{0};
   std::uint32_t delivered_count_{0};
   std::uint32_t failed_count_{0};
@@ -328,6 +333,11 @@ struct MigrationAgentConfig {
   MigrationParticipantConfig participant{};
   PlanMeasurements measurements{};
   bool authority_role{false};
+  // The 1-hop node that carries the Authority on the wire: TimeSync source
+  // and READY/RESULT destination. kInvalidNodeId means participant.authority
+  // itself (an Authority that is a node). A Member site signs as its site
+  // id, which is no node, so its gateway carries the Authority.
+  NodeId authority_peer{kInvalidNodeId};
   // Required-set membership this authority gates commits on (04 §7).
   std::array<NodeId, migration_wire_const::kRequiredCapacity> required{};
   std::size_t required_count{0};
@@ -372,6 +382,10 @@ class MigrationAgent final : public MigrationFrameSink,
   // unavailable boot-time read or a mid-run stranded radio — through a
   // real verified ChannelCutover, never a bare assignment.
   Status resume(MonotonicMs now_ms) noexcept;
+  // While the Owner holds the radio channel for membership work (a
+  // zero-touch re-join scans channels), the live reconcile waits instead
+  // of pulling the radio back to the active record.
+  void hold_reconcile(bool held) noexcept { reconcile_held_ = held; }
 
   // --- authority (Manual) issuance -------------------------------------------
   // Ledger-commit the plan through the real MigrationAuthority path, then
@@ -393,6 +407,11 @@ class MigrationAgent final : public MigrationFrameSink,
   Status release_commit(MonotonicMs now_ms) noexcept;
   // Required-set gate over collected READY reports (04 §7/D5-09).
   RequiredSetVerdict readiness_verdict() const noexcept;
+  // Peers whose READY for the issued plan was accepted.
+  std::size_t ready_count() const noexcept;
+  // The issued plan (authority role): zero hash before any offer.
+  const Digest256& issued_plan_hash() const noexcept { return issued_plan_hash_; }
+  bool commit_released() const noexcept { return commit_released_; }
   bool readiness_of(NodeId node, ParticipantReadiness& out) const noexcept;
 
   // --- AutoGuarded gate (P6) ---------------------------------------------------
@@ -486,6 +505,10 @@ class MigrationAgent final : public MigrationFrameSink,
   void materialize_serve(NodeId dest, MonotonicMs now_ms) noexcept;
   void distribute(PendingTag tag, MonotonicMs deadline_ms) noexcept;
   ExchangeChannel channel_context() const noexcept;
+  NodeId authority_peer() const noexcept {
+    return config_.authority_peer != kInvalidNodeId ? config_.authority_peer
+                                                     : config_.participant.authority;
+  }
   void record_readiness(NodeId peer, const ReadyReport& report) noexcept;
   void record_result(NodeId peer, const ResultReport& report) noexcept;
   void check_terminal(MonotonicMs now_ms) noexcept;
@@ -522,6 +545,7 @@ class MigrationAgent final : public MigrationFrameSink,
   // the moment the channels agree again.
   std::uint8_t reconcile_attempts_{0};
   bool reconcile_exhausted_{false};
+  bool reconcile_held_{false};
   bool survey_pending_{false};
   OperationToken survey_token_{kInvalidOperationToken};
   std::uint32_t survey_lease_id_{0};
@@ -531,6 +555,7 @@ class MigrationAgent final : public MigrationFrameSink,
   MonotonicMs next_snapshot_request_ms_{0};
   MonotonicMs next_timesync_ms_{0};
   std::uint32_t timesync_sequence_{0};
+  std::size_t timesync_cursor_{0};  // next peer of an unfinished round
 
   // Authority-side issued plan material (single in-flight plan).
   bool issued_{false};

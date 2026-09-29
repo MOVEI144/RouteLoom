@@ -24,8 +24,9 @@ namespace routeloom {
 constexpr std::uint32_t kSiteConfigAuthorityGeneration = 1;
 
 // Binds the SDK-namespace journal and the COSE verifier to an adopted
-// Member site. network is the mesh-header low word: HostLink reports it and
-// it stays fixed across site_epoch cutovers, so the journal and its floor
+// Member site. network is the mesh-header low word (the host binds the low
+// word of the HostLink network): it stays fixed across site_epoch
+// cutovers, so the journal and its floor
 // keep one identity for the site's life. Call after adoption, before the
 // journal is constructed.
 Status site_config_bind(const sdkv1::SiteRecord& site, NodeId self,

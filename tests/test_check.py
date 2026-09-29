@@ -58,8 +58,10 @@ class CellList(unittest.TestCase):
         # 37 cells of the pre-v2 matrix, the 5 C6 cells made required, bench C6,
         # the C3 gateway-128 and endpoint cells, two release (-Os) comparisons,
         # the C3/C6 Member maintenance images, the example and the
-        # component-only external consumer.
-        self.assertEqual(len(cells), 52)
+        # component-only external consumer (52); V2-08 moved the LegacyFixture
+        # cells onto DevRam and Member, keeping one compatibility cell, and
+        # added the Member channel-plan gateway and participant (50).
+        self.assertEqual(len(cells), 50)
         self.assertTrue({
             "bridge_node-esp32c3-normal-off-maintenance_member",
             "reference_node-esp32c6-normal-off-maintenance_member",
