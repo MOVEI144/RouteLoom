@@ -384,19 +384,21 @@ class RecordingOwner final : public MigrationOwnerPort {
 struct AgentRig {
   // `site` swaps the test verifier for a real one (the V2-08 SAK path).
   AgentRig(NodeId self, bool authority_role, ChannelCoordinator& coordinator,
-           CommitSignatureVerifier* site = nullptr)
+           CommitSignatureVerifier* site = nullptr, bool require_participant = true,
+           std::uint32_t switch_bound_ms = 50)
       : wire(self),
         runner(port, ops),
         authority(MigrationAuthority{
             MigrationAuthorityConfig{kNet, kAuthority},
             site != nullptr ? *site : static_cast<CommitSignatureVerifier&>(verifier),
             authority_role ? &ledger : nullptr}),
-        agent(make_config(self, authority_role), wire, owner, storage,
-              authority, runner, &coordinator) {
+        agent(make_config(self, authority_role, require_participant, switch_bound_ms),
+              wire, owner, storage, authority, runner, &coordinator) {
     (void)ledger.initialize();
   }
 
-  static MigrationAgentConfig make_config(NodeId self, bool authority_role) {
+  static MigrationAgentConfig make_config(NodeId self, bool authority_role, bool require_participant,
+                                          std::uint32_t switch_bound_ms) {
     MigrationAgentConfig config{};
     config.participant.node = self;
     config.participant.network = kNet;
@@ -406,12 +408,12 @@ struct AgentRig {
     config.measurements.management_rtt_p99_ms = 100;
     config.measurements.control_delivery_bound_ms = 0;
     config.measurements.required_transfer_ms = 1000;
-    config.measurements.measured_switch_bound_ms = 50;
+    config.measurements.measured_switch_bound_ms = switch_bound_ms;
     config.self_rediscovery_capable = true;
     config.timesync_period_ms = 5000;
     config.timesync_uncertainty_ms = 4;
     config.snapshot_request_period_ms = 500;
-    if (authority_role) {
+    if (authority_role && require_participant) {
       config.required[0] = kSelf;  // the participant is the required set
       config.required_count = 1;
     }
@@ -495,8 +497,12 @@ AuthorityOperation make_operation(const MigrationPlan& p,
 // participant (kSelf) on a frame-level bus. pump() advances both agents,
 // their serialized runners and the frame delivery exactly once.
 struct AgentWorld {
-  explicit AgentWorld(CommitSignatureVerifier* site = nullptr)
-      : auth{kAuthority, true, coord_auth, site}, part{kSelf, false, coord_part, site} {
+  explicit AgentWorld(CommitSignatureVerifier* site = nullptr,
+                      bool require_participant = true,
+                      std::uint32_t authority_switch_bound_ms = 50)
+      : auth{kAuthority, true, coord_auth, site, require_participant,
+             authority_switch_bound_ms},
+        part{kSelf, false, coord_part, site} {
     auth.wire.peers = {kSelf};
     part.wire.peers = {kAuthority};
     (void)auth.agent.resume(0);
@@ -683,6 +689,95 @@ void test_agent_release_denied_until_clock_armed() {
   CHECK_OK(world.auth.agent.release_commit(now));
   world.pump_n(now, 30);
   CHECK(world.part.agent.participant().phase() == ParticipantPhase::Committed);
+}
+
+// A Member gateway has no statically configured required set. Its current
+// authenticated peers still must answer READY before the host may release.
+void test_agent_release_denied_with_empty_required_set() {
+  AgentWorld world{nullptr, false};
+  const IssuedPlan issued = issue_plan(1, kNow + 30000, 1);
+  VerifiedAuthorityPlan token{};
+  CHECK_OK(world.auth.agent.offer_plan(
+      issued.plan, ByteView{issued.blob.data(), issued.blob_size},
+      issued.operation, ByteView{issued.signature.data(), issued.signature.size()},
+      Digest256{}, ByteView{}, ByteView{}, false, kNow, token));
+  CHECK(world.auth.agent.ready_count() == 0);
+  // An authenticated but stale READY must not remove the peer that OFFER
+  // reserved from the gate.
+  ReadyReport stale{};
+  stale.plan_hash.fill(0xA5U);
+  stale.new_epoch = issued.plan.new_epoch;
+  stale.status = ReadyStatus::Ready;
+  stale.migration_capable = true;
+  stale.clock_ok = true;
+  std::array<std::uint8_t, 128> stale_body{};
+  stale_body[0] = static_cast<std::uint8_t>(PlanMessage::ReadyReport);
+  std::size_t stale_size = 0;
+  CHECK_OK(ready_report_encode(stale,
+                               MutableByteView{stale_body.data() + 1, stale_body.size() - 1},
+                               stale_size));
+  world.auth.wire.block_sends = true;
+  CHECK_OK(world.part.agent.exchange().publish(
+      kAuthority, autonomy::ControlObjectKind::ChannelPlan,
+      ByteView{stale_body.data(), stale_size + 1}, kNow));
+  MonotonicMs stale_now = kNow;
+  world.pump_n(stale_now, 30);
+  CHECK(world.auth.agent.release_commit(stale_now).code == StatusCode::WouldBlock);
+  stale.plan_hash = plan_digest(ByteView{issued.blob.data(), issued.blob_size});
+  stale.new_epoch = ChannelEpoch{issued.plan.new_epoch.value + 1};
+  CHECK_OK(ready_report_encode(stale,
+                               MutableByteView{stale_body.data() + 1, stale_body.size() - 1},
+                               stale_size));
+  CHECK_OK(world.part.agent.exchange().publish(
+      kAuthority, autonomy::ControlObjectKind::ChannelPlan,
+      ByteView{stale_body.data(), stale_size + 1}, stale_now));
+  world.pump_n(stale_now, 30);
+  CHECK(world.auth.agent.release_commit(stale_now).code == StatusCode::WouldBlock);
+  world.auth.wire.block_sends = false;
+  // Losing the link after OFFER must not erase the peer from the READY gate.
+  world.auth.wire.peers.clear();
+  CHECK(world.auth.agent.release_commit(kNow).code == StatusCode::WouldBlock);
+  world.auth.wire.peers = {kSelf};
+  MonotonicMs now = 5000;
+  world.pump_n(now, 30);
+  CHECK(world.auth.agent.ready_count() == 1);
+  CHECK_OK(world.auth.agent.release_commit(now));
+  // READY alone is not a terminal result; the peer still has to switch and
+  // report its outcome before the authority calls the plan successful.
+  world.auth.agent.poll(now + 1);
+  CHECK(!world.auth.owner.has_event("PLAN_TERMINAL"));
+  ResultReport wrong_epoch{};
+  wrong_epoch.plan_hash = stale.plan_hash;
+  wrong_epoch.epoch = ChannelEpoch{issued.plan.new_epoch.value + 1};
+  wrong_epoch.outcome = ResultOutcome::Applied;
+  std::array<std::uint8_t, 128> result_body{};
+  result_body[0] = static_cast<std::uint8_t>(PlanMessage::ResultReport);
+  std::size_t result_size = 0;
+  CHECK_OK(result_report_encode(
+      wrong_epoch, MutableByteView{result_body.data() + 1, result_body.size() - 1},
+      result_size));
+  world.auth.wire.block_sends = true;
+  CHECK_OK(world.part.agent.exchange().publish(
+      kAuthority, autonomy::ControlObjectKind::ChannelPlan,
+      ByteView{result_body.data(), result_size + 1}, now));
+  world.pump_n(now, 30);
+  CHECK(!world.auth.owner.has_event("PLAN_TERMINAL"));
+}
+
+// An authority whose own radio cannot meet the plan's guard must refuse
+// before the signed ledger operation is consumed or the plan is distributed.
+void test_agent_offer_refuses_unprepared_authority() {
+  AgentWorld world{nullptr, true, 500};
+  const IssuedPlan issued = issue_plan(1, kNow + 30000, 1);
+  VerifiedAuthorityPlan token{};
+  CHECK(world.auth.agent.offer_plan(
+      issued.plan, ByteView{issued.blob.data(), issued.blob_size},
+      issued.operation, ByteView{issued.signature.data(), issued.signature.size()},
+      Digest256{}, ByteView{}, ByteView{}, false, kNow, token).code ==
+        StatusCode::InvalidArgument);
+  CHECK(!token.valid());
+  CHECK(world.auth.ledger.state().applied_sequence == 0);
+  CHECK(world.auth.agent.release_commit(kNow).code == StatusCode::InvalidState);
 }
 
 // A CommitEvidence object with a wrong signature must be rejected by the
@@ -2019,6 +2114,8 @@ int main() {
   test_exchange_duplicate_delivery();
   test_agent_full_migration();
   test_agent_release_denied_until_clock_armed();
+  test_agent_release_denied_with_empty_required_set();
+  test_agent_offer_refuses_unprepared_authority();
   test_agent_forged_commit_evidence();
   test_agent_wrong_authority_blob();
   test_agent_stale_epoch_evidence();
