@@ -20,6 +20,8 @@ class DeviceBootOrderTests(unittest.TestCase):
         start = source.split("void Device::start(", 1)[1].split("void Device::task_entry(", 1)[0]
         self.assertIn("void start(DeviceConfig& config) noexcept;", header)
         self.assertEqual(start.count("secure_clear(config.dev_psk);"), 2)
+        self.assertLess(start.index("while (!handoff.copied.load())"),
+                        start.rindex("secure_clear(config.dev_psk);"))
 
 
 if __name__ == "__main__":
