@@ -794,21 +794,15 @@ class OwnerLeg {
   }
 
   void round(std::uint64_t now) {
-    // The lifecycle runs with or without a site once booted: removal,
-    // the holdoff and recovery all happen on a cleared store. But the
-    // boot itself needs a site or a journal record — booting pointlessly
-    // on empty stores parks the lifecycle in StorageBlocked, and only
-    // the channel and the group binding need the committed SiteRecord.
+    // Boot before the first join so MemberReady follows the same lifecycle
+    // path as the firmware Owner.
     if (!lifecycle_ready_) {
       if (!revocations_.initialize()) fatal("lifecycle RRS store init failed");
       if (!journal_.initialize()) fatal("lifecycle journal init failed");
-      const bool has_site = device_.site_store.has_site();
-      if (has_site || journal_.has_record()) {
-        if (!lifecycle_.dispatch(routeloom::sdkv1::LifecycleInput::Boot(true), now))
-          fatal("lifecycle boot failed");
-        lifecycle_ready_ = true;
-        lifecycle_booted_ = true;
-      }
+      if (!lifecycle_.dispatch(routeloom::sdkv1::LifecycleInput::Boot(true), now))
+        fatal("lifecycle boot failed");
+      lifecycle_ready_ = true;
+      lifecycle_booted_ = true;
     }
     maybe_start(now);
     if (started_) track_site(now);
