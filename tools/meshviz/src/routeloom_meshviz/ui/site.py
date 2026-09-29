@@ -254,8 +254,10 @@ class SiteView(QWidget):
         expected = self.expected_site.text().strip().lower() or None
         # A lab-initialized site carries usb-dev-secret.key next to its keys;
         # the daemon reads it via --usb-dev-secret-file (never through argv
-        # content) and the bench admission profile pairs with it.
+        # content) and the bench admission profile pairs with it. Gateways
+        # provisioned by the wizard have per-gateway files under hostlink/.
         usb_secret = Path(site_dir) / 'usb-dev-secret.key'
+        hostlink = Path(site_dir) / 'hostlink'
         lab_site = usb_secret.is_file()
         return {'site_dir': Path(site_dir), 'socket': Path(socket),
                 'daemon': self.daemon_path.text().strip() or 'routeloom-host',
@@ -263,6 +265,7 @@ class SiteView(QWidget):
                 'acl_file': Path(self.acl_file.text().strip()) if self.acl_file.text().strip() else None,
                 'expected_site_id': expected,
                 'usb_dev_secret_file': usb_secret if lab_site else None,
+                'hostlink_credentials': hostlink if hostlink.is_dir() else None,
                 'admission_profile': 'bench-v1' if lab_site else None}
 
     def _site_command(self, signal):

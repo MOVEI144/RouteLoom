@@ -551,8 +551,14 @@ class LabBackendTests(unittest.TestCase):
         staged = [line for line in self.console.setup_lines
                   if line.startswith('benchsecret stage usb')]
         self.assertEqual(len(staged), 1)
-        self.assertEqual(
-            bytes.fromhex(staged[0].split()[4]).decode(), 'a' * 62)
+        # The per-gateway HostLink secret, not the site-wide dev secret, and
+        # the same bytes in the host's 0600 credential file.
+        secret = bytes.fromhex(staged[0].split()[4]).decode()
+        self.assertNotEqual(secret, 'a' * 62)
+        credential = self.backend.site_dir / 'hostlink' / '0000000000000001.key'
+        self.assertEqual(credential.read_text(), secret)
+        self.assertEqual(credential.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(len(secret), 62)
         self.assertEqual(self.office.imported[0][2], 'gateway')
 
     def test_missing_bundles_fail_closed(self):

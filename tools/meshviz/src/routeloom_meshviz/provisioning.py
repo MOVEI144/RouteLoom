@@ -1308,14 +1308,26 @@ class LabProvisionBackend(ContractBackend):
             os.close(fd)
         return secret
 
-    def _usb_secret(self):
-        path = self.site_dir / 'usb-dev-secret.key'
-        if not path.is_file():
-            raise ProvisionError('no_site', f'{path} missing — run lab-site-init first')
-        secret = path.read_text(encoding='utf-8').strip()
-        if not secret or len(secret) > 63 or \
-                any(c < '!' or c > '~' for c in secret):
-            raise ProvisionError('no_site', f'{path} is not a valid USB secret')
+    def _hostlink_secret(self, node_id):
+        """Per-gateway HostLink v2 secret, generated once and reused on retry.
+
+        The same bytes go to the gateway's rlkeys and to
+        ``<site>/hostlink/<node>.key`` (0600), the file routeloom-host reads
+        with ``--hostlink-credentials``: 31 random bytes as 62 hex chars, the
+        1..63 printable ASCII both sides accept.
+        """
+        directory = self.site_dir / 'hostlink'
+        directory.mkdir(mode=0o700, exist_ok=True)
+        path = directory / f'{node_id}.key'
+        if path.is_file():
+            return path.read_text(encoding='ascii')
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            secret = os.urandom(31).hex()
+            os.write(fd, secret.encode('ascii'))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
         return secret
 
     def _provisioner(self, ctx):
@@ -1428,7 +1440,8 @@ class LabProvisionBackend(ContractBackend):
         evidence = board_config_commit(
             link, doc, generation=1,
             psk_hex=self._site_psk() if security == 'dev-ram' else None,
-            usb_secret=self._usb_secret() if job.role == 'bridge' else None)
+            usb_secret=(self._hostlink_secret(plan.node_id)
+                        if job.role == 'bridge' else None))
         journal.record('board_config', **evidence)
         return StepResult(
             'done',
