@@ -12,7 +12,7 @@
      "source": "components/routeloom/include/routeloom/wire.hpp", "rule": "never changes within SDK 2.x; other majors are rejected"},
     {"id": "wire_minor", "label": "Mesh wire minor", "value": 0, "c": "ROUTELOOM_WIRE_MINOR", "rust": "WIRE_MINOR",
      "cpp_check": "routeloom::wire::kMinor", "cpp_include": "routeloom/wire.hpp", "rust_check": "routeloom_wire::MINOR",
-     "source": "components/routeloom/include/routeloom/wire.hpp", "rule": "decode rejects minor > local minor"},
+     "source": "components/routeloom/include/routeloom/wire.hpp", "rule": "emitted by this build; decode accepts any minor of major 2 (forward-compatible additions only)"},
     {"id": "rld1_carrier", "label": "RLD1 carrier", "value": 1, "c": "ROUTELOOM_RLD1_VERSION", "rust": "RLD1_VERSION",
      "cpp_check": "routeloom::autonomy::kRld1Version", "cpp_include": "routeloom/autonomy_wire.hpp",
      "source": "components/routeloom/include/routeloom/autonomy_wire.hpp", "rule": "classified once by magic+version"},

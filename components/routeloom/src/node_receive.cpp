@@ -616,7 +616,8 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
        frame.header.type == FrameType::Service ||
        frame.header.type == FrameType::EndReceipt ||
        frame.header.type == FrameType::AppResult ||
-       frame.header.type == FrameType::GroupData) &&
+       frame.header.type == FrameType::GroupData ||
+       wire::is_extension_type(frame.header.type)) &&
       (frame.header.flags & wire::kFlagEndProtected) == 0) {
     observer_.on_diagnostic("END_PROTECTION_REQUIRED", peer, &frame.header.message);
     return;
@@ -808,8 +809,15 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
       break;
     }
     default:
-      observer_.on_diagnostic("FRAME_TYPE_UNSUPPORTED_IN_CORE_FIXED_250", peer,
-                              &frame.header.message);
+      if (wire::is_extension_type(frame.header.type)) {
+        // End-to-end extension types (64..95, incl. AppObject 64-66):
+        // relays forward the body unread on the routed lane; the terminal
+        // answers UNSUPPORTED (handle_routed).
+        handle_routed(frame, peer, rx, now_ms);
+      } else {
+        observer_.on_diagnostic("FRAME_TYPE_UNSUPPORTED_IN_CORE_FIXED_250", peer,
+                                &frame.header.message);
+      }
       break;
   }
 }

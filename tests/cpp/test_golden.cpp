@@ -69,6 +69,13 @@ Fields parse_flat_json(const std::string& text) {
   return fields;
 }
 
+// Header bytes 3 (minor) and 9 (traffic) are listed only when nonzero.
+std::uint8_t field_u8_or_zero(const Fields& fields, const char* key) {
+  const auto it = fields.find(key);
+  if (it == fields.end() || it->second.empty()) return 0;
+  return static_cast<std::uint8_t>(std::strtoul(it->second.c_str(), nullptr, 10));
+}
+
 std::uint64_t field_u64(const Fields& fields, const char* key, bool& present) {
   const auto it = fields.find(key);
   if (it == fields.end() || it->second.empty()) {
@@ -124,6 +131,8 @@ void check_header(const wire::Header& header, const Fields& fields, const char* 
   CHECK(static_cast<std::uint8_t>(header.delivery) == at("delivery"));
   CHECK(header.delivery_round == at("delivery_round"));
   CHECK(header.hop_remaining == at("hop_remaining"));
+  CHECK(header.minor == field_u8_or_zero(fields, "minor"));
+  CHECK(header.traffic == field_u8_or_zero(fields, "traffic"));
   CHECK(header.network == at("network"));
   CHECK(header.origin == at("origin"));
   CHECK(header.destination == at("destination"));
@@ -158,6 +167,8 @@ void run_valid_vector(const std::filesystem::path& path) {
   plain.header.delivery = static_cast<DeliveryClass>(at("delivery"));
   plain.header.delivery_round = static_cast<std::uint8_t>(at("delivery_round"));
   plain.header.hop_remaining = static_cast<std::uint8_t>(at("hop_remaining"));
+  plain.header.minor = field_u8_or_zero(fields, "minor");
+  plain.header.traffic = field_u8_or_zero(fields, "traffic");
   plain.header.network = at("network");
   plain.header.origin = at("origin");
   plain.header.destination = at("destination");

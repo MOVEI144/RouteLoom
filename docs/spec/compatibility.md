@@ -28,7 +28,7 @@ the Rust workspace and meshviz). Each surface below carries its own number.
 | Core C ABI | 3 | `ROUTELOOM_CORE_C_ABI` / `CORE_C_ABI` | `components/routeloom/include/routeloom/routeloom.h` | exact major in every struct header; 3.x adds tail fields and functions only; layouts in protocol/abi-golden |
 | Device API (C++ and C) | reserved | - | `reserved` | reserved for the v2 Device API; no symbol exists yet |
 | Mesh wire major | 2 | `ROUTELOOM_WIRE_MAJOR` / `WIRE_MAJOR` | `components/routeloom/include/routeloom/wire.hpp` | never changes within SDK 2.x; other majors are rejected |
-| Mesh wire minor | 0 | `ROUTELOOM_WIRE_MINOR` / `WIRE_MINOR` | `components/routeloom/include/routeloom/wire.hpp` | decode rejects minor > local minor |
+| Mesh wire minor | 0 | `ROUTELOOM_WIRE_MINOR` / `WIRE_MINOR` | `components/routeloom/include/routeloom/wire.hpp` | emitted by this build; decode accepts any minor of major 2 (forward-compatible additions only) |
 | RLD1 carrier | 1 | `ROUTELOOM_RLD1_VERSION` / `RLD1_VERSION` | `components/routeloom/include/routeloom/autonomy_wire.hpp` | classified once by magic+version |
 | RLD1 ZeroTouch body | 3 | `ROUTELOOM_RLD1_ZT_BODY` / `RLD1_ZT_BODY` | `components/routeloom/include/routeloom/sdkv1_join_transport.hpp` | unknown body versions are dropped |
 | HostLink (RLU1) protocol | 2 | `ROUTELOOM_HOSTLINK_PROTOCOL` / `HOSTLINK_PROTOCOL` | `components/routeloom/include/routeloom/usb_codec.hpp` | strict equality; bound into the HELLO transcript |
@@ -113,10 +113,11 @@ with shared C++/Rust golden vectors under `protocol/golden`. Normative text:
 
 | Rule | State |
 |---|---|
-| Decode rejects `magic != "RL"`, `major != 2`, `minor > local minor`, or `reserved != 0` | **Implemented** in `components/routeloom/src/wire.cpp` (`decode_header`) and mirrored in `host/routeloom-wire/src/lib.rs`; covered by invalid golden vectors |
+| Decode rejects `magic != "RL"` or `major != 2`; any minor is accepted and carried into the end AAD as received; relays forward minor and the byte-9 traffic hint unchanged | **Implemented** in `components/routeloom/src/wire.cpp` (`read_header`) and mirrored in `host/routeloom-wire/src/lib.rs`; covered by golden vectors (`data_minor_1_traffic`) |
 | Emit `major=2, minor=0` always | **Implemented** (`kMajor`/`kMinor` constants) |
-| Equal major required to participate; unknown frame types rejected | **Implemented** (spec §7: major mismatch means join refusal; unknown types fail decode) |
-| Minor-version feature negotiation between peers | **Specified, not implemented** — Wire v2 has no on-wire capability field; a peer emitting `minor > 0` is rejected by today's code. Any future minor bump must remain decodable by this rule or move to a new major |
+| Equal major required to participate; unknown frame types rejected except the extension range 64..95, which relays forward unread and an unimplementing terminal answers with TransitFailure `UNSUPPORTED` | **Implemented** ([wire-protocol.md §7](wire-protocol.md); golden `extension_type_90`, `unknown_type_96`) |
+| Flags stay strict: unknown flag bits are refused | **Implemented** (end AAD; golden `unknown_flag`) |
+| Minor-version feature negotiation between peers | **Not needed for minor additions** — a minor only adds meaning an older receiver may ignore; anything else moves to a new major |
 | Crypto-suite agility | **Planned** under `G-SEC`; not negotiated today |
 
 ## 3. USB / serial protocol

@@ -20,14 +20,14 @@
 // Header layout (kHeaderSize = 88 bytes):
 //   offset  size  field                        end-immutable / hop-mutable
 //   0       2     magic 0x524C "RL"            immutable
-//   2       1     major version (= 1)          immutable
-//   3       1     minor version (= 0)          immutable
+//   2       1     major version (= 2)          immutable
+//   3       1     minor version (sender's)     immutable
 //   4       1     frame type                   immutable
 //   5       1     flags                        immutable
 //   6       1     delivery class               immutable (delivery contract)
 //   7       1     delivery round               hop-mutable
 //   8       1     hop remaining                hop-mutable
-//   9       1     reserved, must be 0          -
+//   9       1     traffic                      relay-visible, link AAD only
 //   10      2     payload length               immutable (excludes AEAD tags)
 //   12      4     network id (low 32 bits)     immutable
 //   16      8     origin node id               immutable
@@ -55,6 +55,17 @@
 // exact ordered layout is protocol/semantics.json end_aad_fields, checked
 // against make_end_aad() by tools/check_review_contracts.py. Hop-mutable
 // fields must never enter the end AAD, or relays could not update them.
+//
+// Forward compatibility inside major 2 (wire-protocol.md §7):
+//   - a receiver accepts any minor; the end AAD carries the frame's own
+//     minor, and relays forward it unchanged;
+//   - frame types 64..95 are end-to-end extension types: relays forward
+//     them without reading the body, a terminal that does not implement
+//     one answers UNSUPPORTED; every other unknown type is refused;
+//   - byte 9 (traffic): bits 0-1 are the relay DRR priority hint
+//     (kTraffic*), bits 2-7 are reserved and ignored. Relays forward the
+//     whole byte. It is scheduling metadata, never end-authenticated;
+//   - flags stay strict (end AAD, security relevant).
 namespace routeloom::wire {
 
 constexpr std::uint16_t kMagic = 0x524c;  // "RL"
@@ -62,6 +73,23 @@ constexpr std::uint8_t kMajor = 2;
 constexpr std::uint8_t kMinor = 0;
 constexpr std::size_t kHeaderSize = 88;
 constexpr std::uint8_t kFlagEndProtected = 0x01;  // all other flag bits reserved, must be 0
+constexpr std::uint8_t kTrafficPriorityMask = 0x03;
+constexpr std::uint8_t kTrafficNormal = 0;
+constexpr std::uint8_t kTrafficBulk = 1;
+constexpr std::uint8_t kTrafficUrgent = 2;
+constexpr std::uint8_t kExtensionTypeFirst = 64;
+constexpr std::uint8_t kExtensionTypeLast = 95;
+// Origin: the traffic hint an application priority travels with.
+// Management stays local — a relay never grants it from the wire.
+constexpr std::uint8_t traffic_for(const Priority priority) noexcept {
+  return priority == Priority::Bulk     ? kTrafficBulk
+         : priority == Priority::Urgent ? kTrafficUrgent
+                                        : kTrafficNormal;
+}
+constexpr bool is_extension_type(const FrameType type) noexcept {
+  return static_cast<std::uint8_t>(type) >= kExtensionTypeFirst &&
+         static_cast<std::uint8_t>(type) <= kExtensionTypeLast;
+}
 // Crypto counters are u48 on the wire: routeloom::kMaxCryptoCounter.
 using routeloom::kMaxCryptoCounter;
 
@@ -69,6 +97,7 @@ using routeloom::kMaxCryptoCounter;
 // link tag must fit the 250-byte ESP-NOW body (248 bytes total).
 static_assert(kHeaderSize + kMaxApplicationPayload + 2 * kAeadTagSize <= kMaxEspNowBody,
               "wire v2 envelope must fit the 250-byte ESP-NOW body");
+static_assert(kMaxApplicationPayload <= UINT8_MAX, "Header::payload_length is one byte");
 
 struct Header {
   FrameType type{FrameType::Data};
@@ -76,7 +105,12 @@ struct Header {
   DeliveryClass delivery{DeliveryClass::Reliable};
   std::uint8_t delivery_round{0};
   std::uint8_t hop_remaining{kDefaultHopLimit};
-  std::uint16_t payload_length{0};
+  std::uint8_t minor{kMinor};
+  std::uint8_t traffic{kTrafficNormal};
+  // Wire u16; the decoder refuses anything above kMaxApplicationPayload
+  // before storing it, so one byte holds every accepted value and the
+  // header keeps its 8-byte leading group.
+  std::uint8_t payload_length{0};
   NetworkId network{0};  // v1 encodes the low 32 bits; upper bits must be zero.
   NodeId origin{kInvalidNodeId};
   NodeId destination{kInvalidNodeId};

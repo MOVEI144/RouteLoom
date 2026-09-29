@@ -132,7 +132,7 @@ pub fn busy_encode(payload: &BusyPayload, out: &mut EncodedPayload) -> Result<()
     raw.push(PAYLOAD_VERSION);
     raw.push(payload.subtype as u8);
     raw.push(payload.reason as u8);
-    raw.push(payload.referenced_type as u8);
+    raw.push(payload.referenced_type.id());
     raw.extend_from_slice(&payload.referenced_origin.to_be_bytes());
     raw.extend_from_slice(&payload.referenced_session.to_be_bytes());
     raw.extend_from_slice(&payload.referenced_sequence.to_be_bytes());
@@ -706,7 +706,7 @@ pub fn rld1_encode(envelope: &Rld1Envelope, out: &mut Vec<u8>) -> Result<()> {
     out.reserve(RLD1_HEADER_SIZE + envelope.body.len());
     out.extend_from_slice(&RLD1_MAGIC.to_be_bytes());
     out.push(RLD1_VERSION);
-    out.push(envelope.kind as u8);
+    out.push(envelope.kind.id());
     out.extend_from_slice(&(RLD1_HEADER_SIZE as u16).to_be_bytes());
     out.extend_from_slice(&((RLD1_HEADER_SIZE + envelope.body.len()) as u16).to_be_bytes());
     out.extend_from_slice(&envelope.flags.to_be_bytes());

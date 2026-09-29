@@ -31,7 +31,17 @@
     "DIAGNOSTIC": 48,
     "CONTROL_OBJECT": 49,
     "OBJECT_CHUNK": 50,
-    "OBJECT_ACK": 51
+    "OBJECT_ACK": 51,
+    "APP_OBJECT_START": 64,
+    "APP_OBJECT_CHUNK": 65,
+    "APP_OBJECT_ACK": 66
+  },
+  "wire_forward_compat": {
+    "minor": "a receiver accepts any minor of major 2; the end AAD carries the frame's minor and relays forward it unchanged; a minor only adds meaning an older receiver may safely ignore",
+    "extension_frame_types": {"first": 64, "last": 95, "protection": "end-to-end (END_PROTECTED); relays forward the body unread on the routed lane (dedup on message id, delivery class from byte 6)", "terminal_unimplemented": "TransitFailure reason 12 UNSUPPORTED, no acceptance"},
+    "traffic_byte": {"offset": 9, "priority_mask": 3, "priorities": {"NORMAL": 0, "BULK": 1, "URGENT": 2}, "reserved_bits": "2-7, ignored by receivers, forwarded unchanged", "end_aad": false, "relay_class": "forwarded frames other than END_RECEIPT/APP_RESULT schedule by the hint; 3 schedules as NORMAL; MANAGEMENT is never granted from the wire"},
+    "flags": "strict: unknown bits are refused (end AAD)",
+    "unknown_types": "outside 64..95 still refused at decode"
   },
   "crypto_suite": null,
   "membership_allowlist": {
@@ -84,7 +94,10 @@
       "OBJECT_CHUNK",
       "OBJECT_ACK",
       "CHANNEL_NOTICE",
-      "DIAGNOSTIC"
+      "DIAGNOSTIC",
+      "APP_OBJECT_START",
+      "APP_OBJECT_CHUNK",
+      "APP_OBJECT_ACK"
     ],
     "REVOKED": []
   },
@@ -116,7 +129,10 @@
     "OBJECT_CHUNK",
     "OBJECT_ACK",
     "CHANNEL_NOTICE",
-    "DIAGNOSTIC"
+    "DIAGNOSTIC",
+    "APP_OBJECT_START",
+    "APP_OBJECT_CHUNK",
+    "APP_OBJECT_ACK"
   ],
   "member_traffic_requires_roles_and_crypto": true,
   "end_immutable": [

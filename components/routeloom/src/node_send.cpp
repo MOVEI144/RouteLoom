@@ -325,6 +325,7 @@ Status MeshNode::queue_origin_data(Delivery& delivery, const MonotonicMs now_ms)
     std::memcpy(job.plain.payload.data(), delivery.payload.data(), delivery.payload_size);
   }
   job.priority = delivery.options.priority;
+  job.plain.header.traffic = wire::traffic_for(delivery.options.priority);
   const auto queued = scheduler_.enqueue(std::move(job), config_.node, now_ms);
   if (!queued) return queued;
   set_delivery_state(delivery, DeliveryState::Queued, "QUEUED");
