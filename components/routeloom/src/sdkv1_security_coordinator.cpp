@@ -344,6 +344,12 @@ Status SecurityCoordinator::step(const CoordinatorEvent& event) noexcept {
       status = on_stop(event.now, true);
       break;
   }
+  if (mode_ == CoordinatorMode::Member && member_valid_ && deps_.site->has_site()) {
+    // A committed GK activation changes the lifetime of every pairwise
+    // session. Keep the bank on the same durable epoch before the next event.
+    const Status updated = bank_.set_gk_epoch(deps_.site->site().gk_epoch_current);
+    if (!updated) status = updated;
+  }
   in_port_ = false;
   return status;
 }

@@ -112,11 +112,11 @@ fn mesh_m04_long_isolation_recovers_without_reset() {
     steady_tail(&mut world, "m04");
 }
 
-/// J08 (K1a/K1b, isolation variant): A is isolated for 20 min virtual
-/// while G and B rotate to g+1 and the old key's overlap expires. A's
+/// J08 (K1a/K1b, isolation variant): A is isolated for 10 min virtual
+/// while G and B rotate to g+2 and the old key's overlap expires. A's
 /// refresh abandons while it is out of range; after the heal it
 /// re-verifies at once (no cooldown for a refresh that never heard its
-/// site), reaches g+1 and relinks within 120 s, and the host holds
+/// site), reaches g+2 and relinks within 120 s, and the host holds
 /// durable active ACKs from every member (stable) for the 15 min tail.
 #[test]
 fn mesh_j08_k1b_isolated_miss_recovers() {
@@ -127,22 +127,25 @@ fn mesh_j08_k1b_isolated_miss_recovers() {
     let gk0 = world.active_gk();
     world.switch.isolate(1);
     let gk1 = rotate_direct(&mut world, gk0, "j08-gk-1").expect("rotate commits");
-    run_for(&mut world, 20 * 60_000);
+    run_for(&mut world, 3 * 60_000);
     assert_eq!(world.snaps[0].gk_current, gk1, "gateway at g+1");
-    assert_eq!(world.snaps[1].gk_current, gk0, "A missed g+1");
+    let gk2 = rotate_direct(&mut world, gk1, "j08-gk-2").expect("rotate 2 commits");
+    run_for(&mut world, 7 * 60_000);
+    assert_eq!(world.snaps[0].gk_current, gk2, "gateway at g+2");
+    assert_eq!(world.snaps[1].gk_current, gk0, "A missed both rotations");
     assert_eq!(world.snaps[1].mode, MODE_MEMBER, "A's refresh abandoned");
     assert_eq!(gk_phase(&world), ("catching_up".into(), 1));
     world.switch.heal(1);
     let took = wait_until(&mut world, 120_000, |world| {
         let a = &world.snaps[1];
-        a.gk_current == gk1
+        a.gk_current == gk2
             && a.phases[2] == PHASE_REACHABLE
             && world.snaps[2].phases[1] == PHASE_REACHABLE
             && gk_phase(world) == ("stable".into(), 0)
     });
     assert!(
-        world.snaps[1].gk_current == gk1 && world.snaps[1].phases[2] == PHASE_REACHABLE,
-        "A at g+1 and relinked within 120 s (took {took} ms): {:?}",
+        world.snaps[1].gk_current == gk2 && world.snaps[1].phases[2] == PHASE_REACHABLE,
+        "A at g+2 and relinked (took {took} ms): {:?}",
         world.snaps[1]
     );
     assert_eq!(
