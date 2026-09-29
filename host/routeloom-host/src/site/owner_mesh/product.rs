@@ -351,7 +351,7 @@ fn plan_switch(world: &mut MeshWorld, new_channel: u8, epoch: u32) {
     }
     assert_eq!(ready, members, "every member answered READY");
     service
-        .with(|a| a.channel_plan_release())
+        .with(|a| a.channel_plan_release(world.now))
         .0
         .expect("release queued");
     let (result, _, report) = plan_settle(world);
@@ -517,4 +517,23 @@ fn mesh_p03_manual_channel_plan_switches_and_returns() {
     }
     plan_switch(&mut world, 6, 2);
     plan_traffic(&mut world, "p03-channel-6");
+}
+
+#[test]
+fn mesh_p03_observe_does_not_advertise_plan_authority() {
+    let cap = format!("{}", USB_CAP | 0x2000);
+    let Some(mut world) = MeshWorld::start_with_args(
+        "p03-channel-observe",
+        Switch::direct(),
+        &["--cap", &cap, "--channel-plan-observe"],
+        &[],
+    ) else {
+        return;
+    };
+    converge(&mut world, "p03 channel observe");
+    assert_eq!(
+        world.usb_host.hello_capability.unwrap_or(0) & 0x2000,
+        0,
+        "Observe cannot issue a manual plan"
+    );
 }

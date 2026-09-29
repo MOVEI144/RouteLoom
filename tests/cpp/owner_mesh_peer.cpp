@@ -132,6 +132,7 @@
 //   --remote-config        (member: Device's remote-config target)
 //   --channel-plan         (Device's manual channel plan, Manual mode;
 //                         the gateway is the site's plan authority)
+//   --channel-plan-observe (Device's observation-only migration mode)
 //   --nvs-load <file>    (optional fake-NVS preload image)
 //   --flash <file>       (optional 4096 B legacy slot image: identity
 //                         slots, site slots — imported into the fake NVS
@@ -813,7 +814,7 @@ struct Setup {
   NodeId gw2{routeloom::kInvalidNodeId};
   bool flat{false};
   bool remote_config{false};
-  bool channel_plan{false};
+  std::uint8_t channel_plan{0};
   std::string nvs_load;
   std::string flash;
   std::string flash_ext;
@@ -878,7 +879,9 @@ Setup parse_argv(int argc, char** argv) {
     } else if (arg == std::string("--remote-config")) {
       setup.remote_config = true;
     } else if (arg == std::string("--channel-plan")) {
-      setup.channel_plan = true;
+      setup.channel_plan = 2;
+    } else if (arg == std::string("--channel-plan-observe")) {
+      setup.channel_plan = 1;
     } else if (arg == std::string("--nvs-load") && take_arg(argc, argv, i, value)) {
       setup.nvs_load = value;
     } else if (arg == std::string("--flash") && take_arg(argc, argv, i, value)) {
@@ -1244,7 +1247,7 @@ int main(int argc, char** argv) {
   config.requested_role = setup.role;
   config.flat_group_routing = setup.flat;
   config.remote_config = setup.remote_config;
-  config.channel_plan = setup.channel_plan ? 2 : 0;
+  config.channel_plan = setup.channel_plan;
   config.radio.node.network = setup.netlow;
   config.radio.node.node = setup.node;
   if (!setup.flat) {

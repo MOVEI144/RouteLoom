@@ -332,8 +332,9 @@ menu "RouteLoom device"
             permits operator-driven plan issuance/surveys.
             MemberEdhoc: every member verifies plans with the adopted
             site's key and keeps its committed channel across reboots; the
-            USB gateway is the site's plan authority and admits host plans
-            over channel_plan_v1 (ROUTELOOM_CAPABILITY bit 13). The
+            USB gateway is the site's plan authority in Manual mode and
+            admits host plans over channel_plan_v1 (ROUTELOOM_CAPABILITY
+            bit 13). Observe mode does not advertise that capability. The
             authority settings below are LegacyFixture only.
 
     config ROUTELOOM_MIGRATION_AUTHORITY

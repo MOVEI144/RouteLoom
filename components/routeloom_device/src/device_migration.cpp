@@ -41,10 +41,11 @@ struct DeviceChannelPlan final : usb::UsbBridge::ChannelPlanUsbSink {
     Status status = verifier.provision(site);
     if (!status) return status;
     const NodeId self = runtime.node().node_id();
+    const bool authority_role = gateway && mode == MigrationMode::Manual;
     espnow::EspNowMigrationConfig config{};
     config.mode = mode;
-    config.authority_role = gateway;
-    config.agent.authority_role = gateway;
+    config.authority_role = authority_role;
+    config.agent.authority_role = authority_role;
     // The site signs as its site id over the full site network; the first
     // site gateway carries the Authority on the wire (1-hop TimeSync source,
     // READY/RESULT destination).
@@ -57,21 +58,22 @@ struct DeviceChannelPlan final : usb::UsbBridge::ChannelPlanUsbSink {
     config.agent.measurements = measurements;
     config.coordinator.node = self;
     config.coordinator.home_channel = runtime.committed_channel();
-    if (gateway) {
+    if (authority_role) {
       status = ledger_store.open("rlmauth");
       if (!status) return status;
     }
     // Kept apart from the plan state so it stays zero-initialized (.bss):
     // the plan state's vtables would pull all of it into .data.
     static std::optional<espnow::EspNowMigration> storage;
-    storage.emplace(config, runtime, plan_store, verifier, gateway ? &ledger_store : nullptr);
+    storage.emplace(config, runtime, plan_store, verifier,
+                    authority_role ? &ledger_store : nullptr);
     status = storage->start();
     if (!status) {
       storage.reset();
       return status;
     }
     migration = &*storage;
-    authority = gateway;
+    authority = authority_role;
     return Status::success();
   }
 
@@ -188,7 +190,8 @@ Status Device::begin_channel_plan(const DeviceConfig& config) noexcept {
   }
   channel_plan_ = &plan;
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
-  if (bridge_ != nullptr && (config.usb_capability & usb::kCapChannelPlanV1) != 0) {
+  if (bridge_ != nullptr && plan.mode == MigrationMode::Manual &&
+      (config.usb_capability & usb::kCapChannelPlanV1) != 0) {
     status = bridge_->attach_channel_plan(plan);
   }
 #endif
