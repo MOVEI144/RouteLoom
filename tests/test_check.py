@@ -54,8 +54,14 @@ class CellList(unittest.TestCase):
         data = check.load_cells()
         cells = data["cells"]
         # 37 cells of the pre-v2 matrix, the 5 C6 cells made required, bench C6,
-        # the C3 gateway-128 and endpoint cells, and two release (-Os) comparisons.
-        self.assertEqual(len(cells), 47)
+        # the C3 gateway-128 and endpoint cells, two release (-Os) comparisons,
+        # and the C3/C6 Member maintenance images.
+        self.assertEqual(len(cells), 50)
+        self.assertTrue({
+            "bridge_node-esp32c3-normal-off-maintenance_member",
+            "reference_node-esp32c6-normal-off-maintenance_member",
+            "bridge_node-esp32c6-normal-off-maintenance_member",
+        } <= {cell["id"] for cell in cells})
         for cell in cells:
             self.assertTrue((ROOT / "firmware" / cell["app"]).is_dir(), cell["id"])
             if cell["id"].startswith("experimental-c6-"):

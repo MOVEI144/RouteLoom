@@ -121,7 +121,7 @@ DevRam PSK と USB development secret は `BoardSecretsV1` として別partition
 
 setup image は pre-RF の専用 build とし、通常起動 image に設定変更 console を残さない。Member の console lock を回避しない。seal 後の機器に再設定が必要なら、承認済みの remote config または別途設計する保守手順の対象とし、GUI が自動で unlock/erase しない。
 
-起動コードに共通 `load_board_config()` を設け、radio、security owner、joiner、UsbBridge、telemetry の全てへ同じ検証済み identity を渡す。Member の NodeId を Kconfig 値と NVS 値で混在させない。未設定の汎用 field image は RF を開始せず `CONFIG_REQUIRED` を報告する。NodeId=1 の暗黙採用はしない。
+起動コードに共通 `load_board_config()` を設け、radio、security owner、joiner、UsbBridge、telemetry の全てへ同じ検証済み identity を渡す。Member の NodeId を Kconfig 値と NVS 値で混在させない。未設定の汎用 field image は RF を開始せず `CONFIG_REQUIRED` を報告する。これは一時的な故障ではないので fail back-off（deep sleep）に入れず、起きたまま 10 秒ごとに報告して USB から setup image を書けるようにする。NodeId=1 の暗黙採用はしない。
 
 DevRam の `adopt_dev` は現在 gateway set を渡さず、member adoption 側はその set で経路構成を更新する（`components/routeloom_espnow/src/espnow_security_owner.cpp:503`、`:1399`）。DevRam の group 試験を可能にする PR では、この経路設定の受渡しと scoped timer を追加する。LegacyFixture 専用 Kconfig を GUI から指定しただけで有効になると考えない。
 

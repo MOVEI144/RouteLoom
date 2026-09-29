@@ -202,10 +202,20 @@ A board still on the old factory layout (app at 0x10000, `rlsec` at
 
 1. Erase the whole flash: `esptool --chip <chip> --port <port> erase-flash`.
    This deletes the board identity, Site state and `rlcfg`/`rlkeys`.
-2. Full flash of a PT-4M-v2 image (`tools/hil/flash.py` without
-   `--app-only`, or Mesh Lab).
-3. Provision the board again (BoardConfig, then Site join) as for a new
-   board. Old `rlsec` backups do not restore onto the new offset.
+2. Full flash of the PT-4M-v2 **setup image** (same chip, role and
+   security as the field image, `CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y`).
+3. Commit the BoardConfig (`benchcfg`/`benchsecret`, then the identity for
+   MemberEdhoc) on the setup console and read it back.
+4. Write the field image with `--app-only` (or Mesh Lab), then join the
+   Site as for a new board. Old `rlsec` backups do not restore onto the new
+   offset.
+
+A field image on a board without BoardConfig logs `CONFIG_REQUIRED: board
+configuration required` every 10 s and waits awake with RF off, so the
+setup image can still be written over USB; it never enters the fail
+back-off. `flash.py` refuses to full-flash a signed field bundle (generic
+BoardConfig image without the maintenance console) onto a board whose
+`rlcfg` partition is blank; `--allow-unconfigured` overrides.
 
 `rig.py --selftest`, `scenarios.py --selftest` run dependency-free
 self-checks usable in CI without hardware.
