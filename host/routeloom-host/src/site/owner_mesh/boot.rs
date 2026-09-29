@@ -39,10 +39,18 @@ fn mesh_m06_gateway_power_cut_resumes() {
     let mut delivered = BTreeSet::new();
     world.peers[1].app_send(testkit::GATEWAY, b"m06-before");
     world.pump_until(4000, |snaps| {
-        snaps[1].app_tx.iter().any(|tx| tx.state == DELIVERY_DELIVERED)
+        snaps[1]
+            .app_tx
+            .iter()
+            .any(|tx| tx.state == DELIVERY_DELIVERED)
     });
     note_delivered(&world, 1, &mut delivered);
-    assert_eq!(delivered.len(), 1, "A->G before the cut: {:?}", world.snaps[1].app_tx);
+    assert_eq!(
+        delivered.len(),
+        1,
+        "A->G before the cut: {:?}",
+        world.snaps[1].app_tx
+    );
     let boot_before = world.usb_host.hello_boot.expect("gateway hello");
 
     world.peers[0].power_cut();
@@ -72,8 +80,14 @@ fn mesh_m06_gateway_power_cut_resumes() {
         !world.usb_host.auth_sessions.is_empty(),
         "gateway USB re-authenticated after its reboot"
     );
-    let boot_after = world.usb_host.hello_boot.expect("gateway hello after reboot");
-    assert!(boot_after > boot_before, "boot id {boot_after} after {boot_before}");
+    let boot_after = world
+        .usb_host
+        .hello_boot
+        .expect("gateway hello after reboot");
+    assert!(
+        boot_after > boot_before,
+        "boot id {boot_after} after {boot_before}"
+    );
 
     // Ten more sends, one every 2 s: all delivered (sequences rise per
     // send, so they are the ten newest).
@@ -124,15 +138,23 @@ fn mesh_f02_boot_nvs_write_failure_restarts_clean() {
         step_until_reboots(&mut world, 1, 2, 2000);
         let recovered_from = world.now;
         world.pump_until(1200, |snaps| {
-            snaps[1].mode == MODE_MEMBER && snaps[1].phase == PHASE_ACTIVE && snaps[1].authority_ready
+            snaps[1].mode == MODE_MEMBER
+                && snaps[1].phase == PHASE_ACTIVE
+                && snaps[1].authority_ready
         });
         assert!(
             world.now - recovered_from <= 30_000 && world.snaps[1].authority_ready,
             "k={k}: A back within 30 s: {:?}",
             world.snaps[1]
         );
-        assert_eq!(world.snaps[1].mode, MODE_MEMBER, "k={k}: A resumed its membership");
-        assert_eq!(world.snaps[1].site_generation, generation, "k={k}: generation kept");
+        assert_eq!(
+            world.snaps[1].mode, MODE_MEMBER,
+            "k={k}: A resumed its membership"
+        );
+        assert_eq!(
+            world.snaps[1].site_generation, generation,
+            "k={k}: generation kept"
+        );
         let mut delivered = BTreeSet::new();
         for _ in 0..20 {
             world.peers[1].app_send(testkit::GATEWAY, b"f02");
@@ -142,7 +164,12 @@ fn mesh_f02_boot_nvs_write_failure_restarts_clean() {
             }
         }
         world.pump_until(2000, |snaps| {
-            snaps[1].app_tx.iter().filter(|tx| tx.state == DELIVERY_DELIVERED).count() >= 16
+            snaps[1]
+                .app_tx
+                .iter()
+                .filter(|tx| tx.state == DELIVERY_DELIVERED)
+                .count()
+                >= 16
         });
         note_delivered(&world, 1, &mut delivered);
         assert_eq!(delivered.len(), 20, "k={k}: 20/20 after recovery");
@@ -166,7 +193,11 @@ fn mesh_j01_identity_only_joins_through_relay() {
     world.pump_until(9000, |snaps| {
         snaps[0].authority_ready && snaps[2].authority_ready && snaps[2].join_confirmed
     });
-    assert!(world.snaps[2].join_confirmed, "relay B converged: {:?}", world.snaps[2]);
+    assert!(
+        world.snaps[2].join_confirmed,
+        "relay B converged: {:?}",
+        world.snaps[2]
+    );
     assert!(
         world.snaps[1].has_identity && !world.snaps[1].has_site,
         "A booted identity-only: {:?}",
@@ -178,9 +209,16 @@ fn mesh_j01_identity_only_joins_through_relay() {
         world.step(25);
     }
     world.pump_until(400, |snaps| snaps[1].mode == MODE_MEMBER);
-    assert_ne!(world.snaps[1].mode, MODE_MEMBER, "a pending join admits nothing");
+    assert_ne!(
+        world.snaps[1].mode, MODE_MEMBER,
+        "a pending join admits nothing"
+    );
     assert!(!world.snaps[1].has_site, "no site record while pending");
-    assert_eq!(decider_requests_for(&world, NODE_A), 1, "one join request for A");
+    assert_eq!(
+        decider_requests_for(&world, NODE_A),
+        1,
+        "one join request for A"
+    );
     assert!(world.member_row(NODE_A).is_none_or(|row| !row.member));
 
     world
@@ -200,11 +238,20 @@ fn mesh_j01_identity_only_joins_through_relay() {
         "A Member within 30 s of the approval: {:?}",
         world.snaps[1]
     );
-    assert!(world.snaps[1].proxy_relays_completed == 0, "A proxied nothing itself");
-    assert!(world.snaps[2].proxy_relays_completed > 0, "B relayed A's join");
+    assert!(
+        world.snaps[1].proxy_relays_completed == 0,
+        "A proxied nothing itself"
+    );
+    assert!(
+        world.snaps[2].proxy_relays_completed > 0,
+        "B relayed A's join"
+    );
     let row = world.member_row(NODE_A).expect("A row");
     assert!(row.member && row.confirmed, "site ledger: {row:?}");
-    assert_eq!(row.generation, world.snaps[1].site_generation, "ledger generation");
+    assert_eq!(
+        row.generation, world.snaps[1].site_generation,
+        "ledger generation"
+    );
     assert_eq!(decider_requests_for(&world, NODE_A), 1, "still one request");
 
     let mut delivered = BTreeSet::new();
