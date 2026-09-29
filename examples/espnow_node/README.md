@@ -2,17 +2,14 @@
 
 Minimal RouteLoom mesh node built **as an external ESP-IDF project**: the
 RAM-only development provider (PSK-derived sessions, no NVS
-counter/replay writes), the ESP-NOW runtime (fixed channel, Wi-Fi LR250)
-and one optional static peer. It is a trimmed copy of
-`firmware/reference_node` — discovery, migration, remote config, telemetry
-remote answers and the deep-sleep path are deliberately left out.
+counter/replay writes) and the ESP-NOW runtime (fixed channel, Wi-Fi
+LR250). It is a trimmed copy of `firmware/reference_node` — migration,
+remote config and the deep-sleep path are deliberately left out.
 
 > EXPERIMENTAL: the default `CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX` is a shared
 > development key, and the default security profile is DevRam. Both are
 > pinned to `SecurityProfile::Development` — never a production identity.
-> Do not deploy the default key. Select
-> `ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE` explicitly for the pinned
-> host-compatible provider instead.
+> Do not deploy the default key.
 
 There are two supported ways to consume the SDK without copying this
 repository's sources into your project.
@@ -61,10 +58,9 @@ commit SHA — `main` floats.
 ## Configuration
 
 `menuconfig → RouteLoom device` exposes the node identity
-(network ID, node ID, channel, TX power), the static peer
-(`ROUTELOOM_PEER_NODE_ID`/`ROUTELOOM_PEER_MAC`; `0x0` runs peerless) and the
-development master key. Two boards form a mesh by pointing each at the
-other's MAC and node ID, or run one board peerless to see it boot.
+(network ID, node ID, channel, TX power) and the development master key.
+Boards with the same network ID, channel and key and distinct node IDs
+form a mesh; one board alone boots and waits for neighbors.
 
 `ROUTELOOM_ROUTE_GATEWAY_SCOPED` (default `n`) switches the node to the
 gateway-scoped routing profile for large sites
@@ -80,16 +76,12 @@ the flat profile and the SDK's 5 s / 15 s route timers.
 ## Partition table and NVS
 
 `partitions.csv` (selected in `sdkconfig.defaults`) uses PT-4M-v2 with a
-128 KiB `rlsec` NVS partition and two OTA app slots. Under the legacy profile the
-per-peer counter/replay state (`rlcounter`/`rlreplay`) lives there, so it
-can never fill the partition that holds the boot session (issue #37); the
-default DevRam profile keeps all session state in RAM instead. Old TX
-counter records are swept at boot and the number of persisted peers is
-capped (`kNodeMaxPersistedPeers`); a new peer beyond the cap is refused with
-the `PEER_STATE_CAPACITY` diagnostic, never silently. Changing the partition
-table moves NVS: run `idf.py erase-flash` before the first flash of this
-layout (already required by Wire v2). The firmware never erases NVS on its
-own.
+128 KiB `rlsec` NVS partition and two OTA app slots. `rlsec` holds the SDK
+security stores apart from the partition that holds the boot session
+(issue #37); DevRam keeps all session state in RAM and writes no per-peer
+records. Changing the partition table moves NVS: run `idf.py erase-flash`
+before the first flash of this layout (already required by Wire v2). The
+firmware never erases NVS on its own.
 
 ## Honest limits
 

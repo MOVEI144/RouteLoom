@@ -10,11 +10,9 @@ idf_component_register(
     src/espnow_runtime.cpp
     src/nvs_boot_session.cpp
     src/nvs_config_store.cpp
-    src/nvs_counter_store.cpp
     src/nvs_cred_store.cpp
     src/nvs_ledger_store.cpp
     src/nvs_legacy_purge.cpp
-    src/nvs_replay_store.cpp
     src/nvs_sdkv1_store.cpp
     src/nvs_security_floor.cpp
     src/nvs_trust_store.cpp
@@ -22,7 +20,6 @@ idf_component_register(
     src/psa_aead_gcm.cpp
     src/psa_edhoc_aead.cpp
     src/psa_session_aead.cpp
-    src/psk_security.cpp
   INCLUDE_DIRS include
   REQUIRES routeloom esp_wifi esp_event esp_netif esp_timer freertos nvs_flash mbedtls bootloader_support esp_driver_usb_serial_jtag app_update esp_partition spi_flash
 )

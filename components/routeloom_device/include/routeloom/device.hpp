@@ -31,11 +31,10 @@
 // Remote-config target of a DevRam or Member node (V2-08, issue #17): the
 // SDK-namespace journal on the node's routed config lane. Firmware images
 // compile it with CONFIG_ROUTELOOM_CONFIG; the host mesh harness peer
-// defines it to 1 (LegacyFixture keeps its own wiring until its removal).
+// defines it to 1.
 #ifndef ROUTELOOM_DEVICE_REMOTE_CONFIG
 #if defined(ESP_PLATFORM)
-#define ROUTELOOM_DEVICE_REMOTE_CONFIG \
-  (CONFIG_ROUTELOOM_CONFIG && !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE)
+#define ROUTELOOM_DEVICE_REMOTE_CONFIG CONFIG_ROUTELOOM_CONFIG
 #else
 #define ROUTELOOM_DEVICE_REMOTE_CONFIG 0
 #endif
@@ -73,8 +72,7 @@ class EspNowSecurityOwner;
 class Sdkv1Stores;
 }  // namespace espnow
 
-// Session security of a non-legacy image. LegacyFixture is a compile-time
-// profile (CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE) until its removal.
+// Session security of an image.
 enum class DeviceSecurity : std::uint8_t { DevRam = 1, Member = 2 };
 
 struct DeviceConfig {
@@ -117,17 +115,13 @@ struct DeviceConfig {
   std::uint32_t plan_delivery_bound_ms{2000};
   std::uint32_t plan_transfer_bound_ms{2000};
   std::uint32_t plan_switch_bound_ms{50};
-#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
-  SecurityProvider* legacy_security{nullptr};
-#else
   // Member deep sleep: the retained RTC session image the Owner restores.
   sdkv1::RtcSessionImage* sleep_image{nullptr};
-#endif
 };
 
 struct DeviceCapabilities {
   profile::Role role{profile::Role::Endpoint};
-  bool member{false};          // MemberEdhoc (false: DevRam or LegacyFixture)
+  bool member{false};          // MemberEdhoc (false: DevRam)
   bool usb_gateway{false};     // USB bridge attached
   bool scoped_routing{false};  // gateway-scoped route profile in force
   bool group_send{false};      // send_group() admissible on this node now

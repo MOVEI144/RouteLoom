@@ -2,8 +2,7 @@
 
 // Site-Authority-rooted verification for the Owner profiles (V2-08,
 // issues #17 and #5): remote-config permits and manual channel-plan
-// commits verify under the SAK the adopted RLS1 SiteCert names, replacing
-// the LegacyFixture dev-PSK verifiers. The host issues both with the same
+// commits verify under the SAK the adopted RLS1 SiteCert names. The host issues both with the same
 // SAK (routeloom-host `--site-authority`).
 
 #include <cstdint>

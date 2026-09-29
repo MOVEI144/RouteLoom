@@ -1,8 +1,7 @@
 #pragma once
 
 // SDK-namespace config provider and maintenance gate of a remote-config
-// target (04-remote-config). Shared by the Owner-profile target
-// (device_config.cpp) and the LegacyFixture wiring in device_esp.cpp.
+// target (04-remote-config), used by device_config.cpp.
 
 #include <cstdint>
 #include <cstring>
@@ -203,12 +202,11 @@ class DeviceConfigProvider final : public ConfigProvider {
   bool relay_allowed() const noexcept { return relay_allowed_; }
   // Live relay gate (01-forwarding §policy): config commits apply the flag
   // to the running node — disabling stops NEW transit admission only;
-  // accepted work drains on its original deadlines. `role_gated` (Owner
-  // profiles): the adopted role bounds the gate — config may withdraw
-  // relay from a relay member, never grant it to an endpoint.
-  void attach_node(MeshNode* node, const bool role_gated) noexcept {
+  // accepted work drains on its original deadlines. The adopted role
+  // bounds the gate — config may withdraw relay from a relay member, never
+  // grant it to an endpoint.
+  void attach_node(MeshNode* node) noexcept {
     node_ = node;
-    role_gated_ = role_gated;
     if (node_ != nullptr) node_->set_relay_enabled(relay_expected(relay_allowed_));
   }
   // Membership adoption rebuilds the MeshNode and re-enables relay by
@@ -221,7 +219,7 @@ class DeviceConfigProvider final : public ConfigProvider {
 
  private:
   bool relay_expected(const bool allowed) const noexcept {
-    if (!role_gated_ || node_ == nullptr) return allowed;
+    if (node_ == nullptr) return allowed;
     return allowed && (node_->local_role() & (sdkv1::kMemberRoleRelay |
                                               sdkv1::kMemberRoleGateway)) != 0;
   }
@@ -292,7 +290,6 @@ class DeviceConfigProvider final : public ConfigProvider {
   std::uint64_t token_id_{0};
   bool discovery_enabled_{true};
   bool relay_allowed_{true};
-  bool role_gated_{false};
   // Last diagnostics level apply_fields drove (0..2); unknown until the
   // first commit, so a reboot proves nothing until the boot restore
   // re-applies. Written only on the commit path — never staged state.

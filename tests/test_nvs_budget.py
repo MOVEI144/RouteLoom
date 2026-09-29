@@ -22,7 +22,6 @@ class RepositoryBudget(unittest.TestCase):
     def test_repository_passes(self):
         result = nvs_budget.run(SOURCES)
         self.assertEqual(result["failed"], [])
-        self.assertEqual(result["entries_per_peer"], 20)
 
     def test_design_numbers(self):
         apps = {app["app"]: app for app in nvs_budget.run(SOURCES)["apps"]}
@@ -31,12 +30,8 @@ class RepositoryBudget(unittest.TestCase):
         # PT-4M-v2: 128 KiB rlsec for every role -> 31 x 126 usable entries.
         self.assertEqual((node["partition_bytes"], node["usable_entries"]), (0x20000, 3906))
         self.assertEqual((gateway["partition_bytes"], gateway["usable_entries"]), (0x20000, 3906))
-        self.assertEqual(node["max_persisted_peers"], 64)
-        self.assertEqual(gateway["max_persisted_peers"], 128)
-        self.assertEqual(apps["examples/espnow_node"]["max_persisted_peers"], 64)
-        self.assertEqual(apps["firmware/bench_node"]["max_persisted_peers"], 64)
         for app in apps.values():
-            self.assertLessEqual(app["worst_case_entries"], app["budget_entries"])
+            self.assertLessEqual(app["ram_worst_case_entries"], app["budget_entries"])
 
     def test_resume_write_budget_mentions_reservations(self):
         design = (ROOT / 'docs/design/sdk-v1/05-nvs-state-37.md').read_text()
@@ -51,12 +46,6 @@ class RepositoryBudget(unittest.TestCase):
         self.assertEqual(nvs_budget.blob_entries(24, 32), 3)
         self.assertEqual(nvs_budget.blob_entries(40, 32), 4)
 
-    def test_cpp_formula_mirror(self):
-        constants = nvs_budget.load_constants(SOURCES)
-        self.assertEqual(nvs_budget.max_peers_for_entries(16 * 126, constants), 75)
-        self.assertEqual(nvs_budget.max_peers_for_entries(32 * 126, constants), 156)
-        self.assertEqual(nvs_budget.max_peers_for_entries(126, constants), 0)
-
 
 class NegativeMutations(unittest.TestCase):
     def mutate(self, key, old, new):
@@ -65,18 +54,11 @@ class NegativeMutations(unittest.TestCase):
         sources[key] = sources[key].replace(old, new, 1)
         return sources
 
-    def test_cap_over_budget_fails(self):
-        sources = self.mutate("provider", "kNodeMaxPersistedPeers = 64",
-                              "kNodeMaxPersistedPeers = 200")
-        self.assertIn("firmware/reference_node:worst_case_within_budget",
-                      failed_names(sources))
-
     def test_small_partition_fails(self):
         sources = self.mutate("firmware/bridge_node/partitions.csv",
                               "0x20000,  0x20000", "0x20000,  0x4000")
         failed = failed_names(sources)
-        self.assertIn("firmware/bridge_node:worst_case_within_budget", failed)
-        self.assertIn("firmware/bridge_node:cap_not_clamped", failed)
+        self.assertIn("firmware/bridge_node:worst_case_ram_within_budget", failed)
         self.assertIn("firmware/bridge_node:layout_matches_boot_check", failed)
 
     def test_missing_security_partition_fails(self):
@@ -119,11 +101,11 @@ class NegativeMutations(unittest.TestCase):
                               "CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y")
         self.assertIn("firmware/bridge_node:custom_table_selected", failed_names(sources))
 
-    def test_record_growth_fails(self):
-        sources = self.mutate("replay",
-                              "static_assert(sizeof(ReplayWindowRecord) == 40",
-                              "static_assert(sizeof(ReplayWindowRecord) == 72")
-        self.assertIn("entries_per_peer_matches_codecs", failed_names(sources))
+    def test_resume_quota_growth_fails(self):
+        sources = self.mutate("store", "kResume2GatewayLinkQuota = ",
+                              "kResume2GatewayLinkQuota = 9")
+        self.assertIn("firmware/bridge_node:worst_case_ram_within_budget",
+                      failed_names(sources))
 
     def test_factory_app_fails(self):
         sources = self.mutate("firmware/reference_node/partitions.csv",

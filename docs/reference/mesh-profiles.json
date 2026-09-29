@@ -10,7 +10,7 @@
           "note": "Development shared key; origins are group-key claims, not verified identities.",
           "evidence": [
             "components/routeloom/Kconfig",
-            "components/routeloom_espnow/src/psk_security.cpp"
+            "components/routeloom/src/sdkv1_dev_session.cpp"
           ]
         },
         "MEMBER_EDHOC": {
@@ -20,15 +20,6 @@
           "evidence": [
             "components/routeloom/Kconfig",
             "components/routeloom/src/sdkv1_security_coordinator.cpp"
-          ]
-        },
-        "LEGACY_FIXTURE": {
-          "maturity": "main",
-          "display": "compat harness only",
-          "note": "Compatibility fixture, not a deployment profile; never merged with DevRam claims.",
-          "evidence": [
-            "components/routeloom/Kconfig",
-            "firmware/reference_node/main/Kconfig.projbuild"
           ]
         }
       }

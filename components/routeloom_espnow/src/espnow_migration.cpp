@@ -7,19 +7,11 @@
 #include "esp_log.h"
 #include "routeloom/byte_io.hpp"
 #include "routeloom/crc32.hpp"
-#include "routeloom/secure_clear.hpp"
-#include "sdkconfig.h"
-#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
-#include "psa/crypto.h"
-#endif
 
 namespace routeloom::espnow {
 namespace {
 
 constexpr const char* kTag = "rl_migrate";
-#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
-constexpr psa_algorithm_t kMacAlgorithm = PSA_ALG_HMAC(PSA_ALG_SHA_256);
-#endif
 
 Status nvs_status(const esp_err_t error, const char* detail) noexcept {
   if (error == ESP_OK) return Status::success();
@@ -30,133 +22,6 @@ Status nvs_status(const esp_err_t error, const char* detail) noexcept {
 }
 
 }  // namespace
-
-// --- DevPskCommitVerifier ---------------------------------------------------------
-// LegacyFixture only: the Owner profiles verify plans with the site's SAK.
-#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
-
-DevPskCommitVerifier::~DevPskCommitVerifier() {
-  secure_clear(key_);
-  ready_ = false;
-}
-
-Status DevPskCommitVerifier::initialize(
-    const std::array<std::uint8_t, 32>& master_key) noexcept {
-  ready_ = false;
-  // Domain-separated derivation: key = HMAC(master, label). The derived key
-  // is imported transiently per operation — no persistent PSA key slot.
-  psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
-  psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_SIGN_MESSAGE);
-  psa_set_key_algorithm(&attributes, kMacAlgorithm);
-  psa_set_key_type(&attributes, PSA_KEY_TYPE_HMAC);
-  psa_set_key_bits(&attributes, master_key.size() * 8U);
-  psa_key_id_t key_id = 0;
-  psa_status_t result = psa_import_key(&attributes, master_key.data(),
-                                       master_key.size(), &key_id);
-  psa_reset_key_attributes(&attributes);
-  if (result != PSA_SUCCESS) {
-    return Status::error(StatusCode::InternalError,
-                         "PSA HMAC key import failed");
-  }
-  static constexpr char kDerivationLabel[] = "RouteLoom migration commit v1";
-  std::size_t out_length = 0;
-  result =
-      psa_mac_compute(key_id, kMacAlgorithm,
-                      reinterpret_cast<const std::uint8_t*>(kDerivationLabel),
-                      sizeof(kDerivationLabel) - 1, key_.data(), key_.size(),
-                      &out_length);
-  (void)psa_destroy_key(key_id);
-  if (result != PSA_SUCCESS || out_length != key_.size()) {
-    secure_clear(key_);
-    return Status::error(StatusCode::InternalError,
-                         "PSA HMAC derivation failed");
-  }
-  ready_ = true;
-  return Status::success();
-}
-
-Status DevPskCommitVerifier::mac(const ByteView input,
-                                 std::array<std::uint8_t, 32>& out) noexcept {
-  if (!ready_ || input.data == nullptr) {
-    return Status::error(StatusCode::InvalidState, "verifier not ready");
-  }
-  psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
-  psa_set_key_usage_flags(&attributes,
-                          PSA_KEY_USAGE_SIGN_MESSAGE |
-                              PSA_KEY_USAGE_VERIFY_MESSAGE);
-  psa_set_key_algorithm(&attributes, kMacAlgorithm);
-  psa_set_key_type(&attributes, PSA_KEY_TYPE_HMAC);
-  psa_set_key_bits(&attributes, key_.size() * 8U);
-  psa_key_id_t key_id = 0;
-  psa_status_t result =
-      psa_import_key(&attributes, key_.data(), key_.size(), &key_id);
-  psa_reset_key_attributes(&attributes);
-  if (result != PSA_SUCCESS) {
-    return Status::error(StatusCode::InternalError,
-                         "PSA HMAC key import failed");
-  }
-  std::size_t out_length = 0;
-  result = psa_mac_compute(key_id, kMacAlgorithm, input.data, input.size,
-                           out.data(), out.size(), &out_length);
-  (void)psa_destroy_key(key_id);
-  if (result != PSA_SUCCESS || out_length != out.size()) {
-    secure_clear(out);
-    return Status::error(StatusCode::InternalError, "PSA HMAC failed");
-  }
-  return Status::success();
-}
-
-Status DevPskCommitVerifier::check(const ByteView input,
-                                   const ByteView signature) noexcept {
-  std::array<std::uint8_t, 32> expected{};
-  const Status status = mac(input, expected);
-  if (!status) return status;
-  if (signature.size != expected.size() ||
-      signature.data == nullptr ||
-      std::memcmp(expected.data(), signature.data, expected.size()) != 0) {
-    return Status::error(StatusCode::AuthenticationFailed,
-                         "commit evidence MAC mismatch");
-  }
-  return Status::success();
-}
-
-Status DevPskCommitVerifier::verify_commit(
-    const AuthorityOperation& operation, const Digest256& plan_hash,
-    const ChannelEpoch new_epoch, const ByteView signature) noexcept {
-  std::array<std::uint8_t, kCommitSigningInputSize> input{};
-  std::size_t size = 0;
-  const Status status =
-      commit_signing_input(operation, plan_hash, new_epoch,
-                           MutableByteView{input.data(), input.size()}, size);
-  if (!status) return status;
-  return check(ByteView{input.data(), size}, signature);
-}
-
-Status DevPskCommitVerifier::verify_snapshot(
-    const ByteView snapshot, const ByteView signature) noexcept {
-  return check(snapshot, signature);
-}
-
-Status DevPskCommitVerifier::sign_commit(
-    const AuthorityOperation& operation, const Digest256& plan_hash,
-    const ChannelEpoch new_epoch,
-    std::array<std::uint8_t, 32>& out) noexcept {
-  std::array<std::uint8_t, kCommitSigningInputSize> input{};
-  std::size_t size = 0;
-  Status status =
-      commit_signing_input(operation, plan_hash, new_epoch,
-                           MutableByteView{input.data(), input.size()}, size);
-  if (!status) return status;
-  return mac(ByteView{input.data(), size}, out);
-}
-
-Status DevPskCommitVerifier::sign_snapshot(
-    const ByteView snapshot_body,
-    std::array<std::uint8_t, 32>& out) noexcept {
-  return mac(snapshot_body, out);
-}
-
-#endif  // CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
 
 // --- NvsPlanStore ----------------------------------------------------------------
 

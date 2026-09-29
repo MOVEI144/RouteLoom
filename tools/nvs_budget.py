@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""NVS entry budget model for per-peer security state (issue #37).
+"""NVS entry budget model for the security partition (issue #37).
 
 docs/design/sdk-v1/05-nvs-state-37.md §5.3 / plan P0-1 (V1-N07). Reads the
 record sizes and budget constants straight from the C++ headers and the
-partition tables of every firmware app, then checks that the capped
-worst-case peer state fits 80% of the usable entries of the "rlsec" NVS
-partition, that the table fits the flash size the build assumes, and that
-the firmware selects the table. Every table must be the PT-4M-v2 layout the
+partition tables of every firmware app, then checks that the worst-case
+RAM-session state (every resume slot plus the RLV1 pair) fits 80% of the
+usable entries of the "rlsec" NVS partition, that the table fits the flash
+size the build assumes, and that the firmware selects the table. Every table must be the PT-4M-v2 layout the
 boot check expects (routeloom/espnow_flash_layout.hpp), with bootloader
 rollback on. Arithmetic only: it does not measure a device (V1-N08 is the
 HIL counterpart).
@@ -38,16 +38,8 @@ APPS = (
     "examples/espnow_node",
 )
 
-# Every app boots through components/routeloom_device, which selects the
-# peer-capacity constant by the image role (CONFIG_ROUTELOOM_ROLE_GATEWAY in
-# the app's sdkconfig.defaults).
-BOOT_SOURCE = "components/routeloom_device/src/device_esp.cpp"
-
 HEADERS = {
-    "counter": "components/routeloom/include/routeloom/counter_store.hpp",
-    "replay": "components/routeloom/include/routeloom/replay.hpp",
     "peer_state": "components/routeloom/include/routeloom/peer_state.hpp",
-    "provider": "components/routeloom_espnow/include/routeloom/psk_security.hpp",
     "records": "components/routeloom/include/routeloom/sdkv1_records.hpp",
     "store": "components/routeloom/include/routeloom/sdkv1_store.hpp",
     "flash_layout": "components/routeloom_espnow/include/routeloom/espnow_flash_layout.hpp",
@@ -82,13 +74,6 @@ def _constant(text: str, name: str) -> int:
     if match is None:
         raise BudgetError(f"constant {name} not found")
     return int(match.group(1), 0)
-
-
-def _sizeof(text: str, record: str) -> int:
-    match = re.search(rf"static_assert\(sizeof\({record}\)\s*==\s*(\d+)", text)
-    if match is None:
-        raise BudgetError(f"sizeof({record}) static_assert not found")
-    return int(match.group(1))
 
 
 def parse_partitions(text: str) -> list[Partition]:
@@ -126,19 +111,13 @@ def blob_entries(size: int, entry_bytes: int) -> int:
 
 
 def load_constants(sources: dict[str, str]) -> dict[str, int]:
-    counter, replay = sources["counter"], sources["replay"]
-    peer, provider = sources["peer_state"], sources["provider"]
+    peer = sources["peer_state"]
     records, store = sources["records"], sources["store"]
     constants = {
-        "counter_record": _sizeof(counter, "CounterRecord"),
-        "floor_record": _sizeof(replay, "ReplayFloorRecord"),
-        "window_record": _sizeof(replay, "ReplayWindowRecord"),
         "entry_bytes": _constant(peer, "kNvsEntryBytes"),
         "entries_per_page": _constant(peer, "kNvsEntriesPerPage"),
         "fixed_entries": _constant(peer, "kPeerStateFixedEntries"),
         "budget_percent": _constant(peer, "kPeerStateBudgetPercent"),
-        "kNodeMaxPersistedPeers": _constant(provider, "kNodeMaxPersistedPeers"),
-        "kGatewayMaxPersistedPeers": _constant(provider, "kGatewayMaxPersistedPeers"),
         # P4 session/membership stores (RLP2 quotas + RLV1 twin pair).
         "rlp2_slot": _constant(records, "kResume2SlotBytes"),
         "rlv1_slot": _constant(records, "kLocalRevocationSlotBytes"),
@@ -147,28 +126,8 @@ def load_constants(sources: dict[str, str]) -> dict[str, int]:
         "rlp2_gateway_link": _constant(store, "kResume2GatewayLinkQuota"),
         "rlp2_gateway_end": _constant(store, "kResume2GatewayEndQuota"),
     }
-    match = re.search(r"static_assert\(kPeerStateEntriesPerPeer\s*==\s*(\d+)", peer)
-    if match is None:
-        raise BudgetError("kPeerStateEntriesPerPeer static_assert not found")
-    constants["declared_entries_per_peer"] = int(match.group(1))
     constants["layout"] = layout_rows(sources["flash_layout"])
     return constants
-
-
-def entries_per_peer(constants: dict[str, int]) -> int:
-    entry = constants["entry_bytes"]
-    return 2 * (blob_entries(constants["counter_record"], entry)
-                + blob_entries(constants["floor_record"], entry)
-                + blob_entries(constants["window_record"], entry))
-
-
-def max_peers_for_entries(total_entries: int, constants: dict[str, int]) -> int:
-    """Mirror of routeloom::max_persisted_peers_for_entries."""
-    usable = max(total_entries - constants["entries_per_page"], 0)
-    budget = usable * constants["budget_percent"] // 100
-    if budget <= constants["fixed_entries"]:
-        return 0
-    return (budget - constants["fixed_entries"]) // entries_per_peer(constants)
 
 
 def session_fixed_entries(constants: dict[str, int], gateway: bool) -> int:
@@ -191,7 +150,6 @@ def check_app(app: str, sources: dict[str, str], constants: dict[str, int]) -> d
         checks.append({"name": f"{app}:{name}", "passed": bool(ok), "detail": detail})
 
     defaults = sources[f"{app}/sdkconfig.defaults"]
-    boot = sources[BOOT_SOURCE]
     check("custom_table_selected",
           re.search(r"^CONFIG_PARTITION_TABLE_CUSTOM=y$", defaults, re.M) is not None
           and re.search(r'^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"$',
@@ -247,38 +205,20 @@ def check_app(app: str, sources: dict[str, str], constants: dict[str, int]) -> d
     pages = security.size // PAGE_BYTES
     check("security_nvs_min_pages", pages >= 3, f"pages={pages}")
     uses_gateway = re.search(r"^CONFIG_ROUTELOOM_ROLE_GATEWAY=y$", defaults, re.M) is not None
-    cap_name = "kGatewayMaxPersistedPeers" if uses_gateway else "kNodeMaxPersistedPeers"
-    check("cap_selected", cap_name in boot)
-    cap = constants[cap_name]
-    total = pages * constants["entries_per_page"]
     usable = (pages - 1) * constants["entries_per_page"]
     budget = usable * constants["budget_percent"] // 100
-    # Profile-split (P4 §12.2): the legacy per-peer worst case and the RAM
-    # session worst case are gated separately — a RAM-profile firmware
-    # never writes legacy c/f/r records, so their maxima are not added.
-    # Stale legacy records during migration are purge's problem (P6/PR6),
-    # reported below, not gated here.
-    legacy = cap * entries_per_peer(constants) + constants["fixed_entries"]
-    check("worst_case_within_budget", legacy <= budget,
-          f"worst={legacy} budget={budget} usable={usable}")
+    # Only RAM session profiles remain (V2-10): no firmware writes per-peer
+    # counter/replay records, so the worst case is the fixed session state.
     session = session_fixed_entries(constants, uses_gateway)
     ram = constants["fixed_entries"] + session
     check("worst_case_ram_within_budget", ram <= budget,
           f"worst={ram} budget={budget} usable={usable} session_fixed={session}")
-    worst = legacy
-    # The firmware clamps the cap to what the mounted partition holds; the
-    # configured cap must survive that clamp unchanged.
-    fits = max_peers_for_entries(total, constants)
-    check("cap_not_clamped", cap <= fits, f"cap={cap} fits={fits}")
     return {
         "app": app,
         "partition_bytes": security.size,
         "pages": pages,
         "usable_entries": usable,
         "budget_entries": budget,
-        "cap_constant": cap_name,
-        "max_persisted_peers": cap,
-        "worst_case_entries": worst,
         "ram_worst_case_entries": ram,
         "session_fixed_entries": session,
         "table_end": f"0x{end:x}",
@@ -294,17 +234,13 @@ def run(sources: dict[str, str], apps: tuple[str, ...] = APPS) -> dict:
     except BudgetError as error:
         return {"scope": "arithmetic-only", "failed": [{"name": "constants",
                 "passed": False, "detail": str(error)}], "apps": []}
-    per_peer = entries_per_peer(constants)
-    checks.append({"name": "entries_per_peer_matches_codecs",
-                   "passed": per_peer == constants["declared_entries_per_peer"],
-                   "detail": f"model={per_peer} header={constants['declared_entries_per_peer']}"})
     for app in apps:
         result = check_app(app, sources, constants)
         checks.extend(result["checks"])
         results.append(result)
     failed = [item for item in checks if not item["passed"]]
     return {"scope": "arithmetic-only", "hardware_measured": False,
-            "entries_per_peer": per_peer, "checks": len(checks),
+            "checks": len(checks),
             "failed": failed, "apps": results}
 
 
@@ -315,7 +251,6 @@ def load_sources(root: Path, apps: tuple[str, ...] = APPS) -> dict[str, str]:
         for name in ("sdkconfig.defaults", "partitions.csv"):
             path = root / app / name
             sources[f"{app}/{name}"] = path.read_text(encoding="utf-8") if path.exists() else ""
-    sources[BOOT_SOURCE] = (root / BOOT_SOURCE).read_text(encoding="utf-8")
     return sources
 
 

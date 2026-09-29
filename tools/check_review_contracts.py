@@ -306,7 +306,6 @@ def validate(root: Path) -> dict:
             "c_api",
             "espnow_lr250_adapter",
             "reference_firmware_builds",
-            "development_psk_aead",
             "multi_hop_repair",
             "host_cli",
         }
@@ -356,8 +355,6 @@ def validate(root: Path) -> dict:
         build_only_features = {
             "espnow_lr250_adapter",
             "reference_firmware_builds",
-            "development_psk_aead",
-            "nvs_replay_store",
             "nvs_ledger_store",
             "espnow_power_port",
         }
@@ -389,9 +386,7 @@ def validate(root: Path) -> dict:
         )
         test(
             "production_security_not_claimed",
-            feature_map["development_psk_aead"]["implemented"] is True
-            and feature_map["development_psk_aead"]["design_target"] is False
-            and feature_map["secure_unicast"]["implemented"] is False,
+            feature_map["secure_unicast"]["implemented"] is False,
         )
         test(
             "advanced_features_not_claimed",
@@ -802,9 +797,8 @@ def validate(root: Path) -> dict:
                 "Status Device::begin(")
             and boot.index("open_storage(config.role")
             < boot.index("run_maintenance_console(*stores_)")
-            < boot.index("nvs_partition_peer_capacity(")
-            < boot.index("security.initialize("),
-            "factory console needs rlsec, not the development mesh security state",
+            < boot.index("status = begin(config"),
+            "factory console needs rlsec, not the mesh security owner",
         )
         for app in ("firmware/reference_node", "firmware/bench_node", "firmware/bridge_node",
                     "examples/espnow_node"):

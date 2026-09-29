@@ -1,6 +1,6 @@
 // Remote-config target of a DevRam or Member node (V2-08, issue #17): the
 // SDK-namespace ConfigJournal on the node's routed config lane, with the
-// NVS journal, value and RLF1 floor stores the LegacyFixture wiring used.
+// NVS journal, value and RLF1 floor stores.
 // Member verifies permits under the adopted site's SAK and binds once the
 // membership is adopted; DevRam verifies the development permit key derived
 // from its PSK and binds at boot.
@@ -22,7 +22,6 @@
 #include "routeloom/espnow_sdkv1.hpp"
 #include "routeloom/espnow_security_owner.hpp"
 #include "routeloom/nvs_config_store.hpp"
-#include "routeloom/nvs_counter_store.hpp"  // kSecurityNvsPartition
 #include "routeloom/nvs_security_floor.hpp"
 #include "routeloom/sdkv1_security_coordinator.hpp"
 #include "routeloom/secure_clear.hpp"
@@ -93,7 +92,7 @@ Status Device::begin_remote_config(const DeviceConfig& config, const keys::Secre
   rc.target.attach_authority(owner_->authority_demux());
   status = node.set_config_sink(&rc.target);
   if (!status) return status;
-  rc.provider.attach_node(&node, /*role_gated=*/true);
+  rc.provider.attach_node(&node);
   remote_config_ = &rc;
 #if ROUTELOOM_DEVICE_DEV_RAM
   if (config.security == DeviceSecurity::DevRam) {

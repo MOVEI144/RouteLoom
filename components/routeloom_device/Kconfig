@@ -23,8 +23,8 @@ menu "RouteLoom device"
         default 0x524c0001
         help
             Pre-provisioning identity. Field images take it from the
-            verified BoardConfig; LegacyFixture and the DevRam quick start
-            (ROUTELOOM_DEV_KCONFIG_IDENTITY) use this value.
+            verified BoardConfig; the DevRam quick start
+            (ROUTELOOM_DEV_KCONFIG_IDENTITY) uses this value.
 
     config ROUTELOOM_NODE_ID
         hex "Node ID"
@@ -53,20 +53,10 @@ menu "RouteLoom device"
             This value is only a development profile. It is not a regulatory
             or product approval.
 
-    config ROUTELOOM_PEER_NODE_ID
-        hex "Static peer Node ID; 0 disables peer registration"
-        default 0x0
-        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
-
-    config ROUTELOOM_PEER_MAC
-        string "Static peer station MAC (aa:bb:cc:dd:ee:ff)"
-        default "00:00:00:00:00:00"
-        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
-
     config ROUTELOOM_ROUTE_GATEWAY_SCOPED
         bool "Gateway-scoped routing profile (100-node sites)"
         default n
-        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE || ROUTELOOM_SECURITY_MODE_DEV_RAM
+        depends on ROUTELOOM_SECURITY_MODE_DEV_RAM
         help
             Switches the node from the flat routing profile to the
             gateway-scoped profile (docs/design/sdk-v1/routing-scale.md,
@@ -136,19 +126,11 @@ menu "RouteLoom device"
             unicast, so a mixed site keeps working. Enable on the whole site
             at once.
 
-    config ROUTELOOM_USB_DEV_SECRET
-        string "DEVELOPMENT ONLY USB session shared secret (ASCII, <=63 chars)"
-        default "routeloom-dev-secret"
-        depends on ROUTELOOM_ROLE_GATEWAY
-        help
-            LegacyFixture gateways only (field images use the rlkeys secret).
-            Must match the host daemon's development secret byte for byte.
-
     config ROUTELOOM_CAPABILITY
         hex "Capability bitmap (USB HelloAck on a gateway, discovery otherwise)"
         default 0x7 if ROUTELOOM_ROLE_GATEWAY
         default 0x3
-        depends on ROUTELOOM_ROLE_GATEWAY || ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+        depends on ROUTELOOM_ROLE_GATEWAY
         help
             Gateway images: the HelloAck capability bitmap. A bit is only
             advertised when the matching endpoint is attached. Bit 2 (0x4)
@@ -163,76 +145,14 @@ menu "RouteLoom device"
             observation_v1 (0x70-0x72) and bit 13 (0x2000) channel_plan_v1
             (0x68/0x69, MemberEdhoc with ROUTELOOM_MIGRATION). Bits 6, 7,
             11 and 13 ride the HostOps carrier, so they need bit 2.
-            LegacyFixture nodes: the capability bits announced in discovery.
-
-    config ROUTELOOM_DISCOVERY
-        bool "Enable autonomous neighbor discovery (RLD1 bootstrap lane)"
-        default n
-        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
-        help
-            EXPERIMENTAL: enables the RLD1 bootstrap lane, the portable
-            NeighborDiscovery engine and dev-PSK possession authentication.
-            Static ROUTELOOM_PEER_* registration keeps working alongside.
-
-    config ROUTELOOM_DISCOVERY_MEMBER
-        bool "DEV: treat this node as a provisioned network member"
-        default y
-        depends on ROUTELOOM_DISCOVERY
-        help
-            Development stand-in for durable membership evidence. A
-            production build must source this from real provisioning state.
-
-    config ROUTELOOM_DISCOVERY_AUTO_APPROVE
-        bool "DEV: auto-approve the membership commit (no authority round trip)"
-        default y
-        depends on ROUTELOOM_DISCOVERY
-
-    config ROUTELOOM_DISCOVERY_INITIATE
-        bool "Broadcast DISCOVER at startup instead of only responding"
-        default y
-        depends on ROUTELOOM_DISCOVERY
-
-    config ROUTELOOM_DISCOVERY_SCOPE
-        int "Discovery scope mode (0=Off, 1=OpenLegacy, 2=OptionalMigration, 3=Required)"
-        range 0 3
-        default 0
-        depends on ROUTELOOM_DISCOVERY
-        help
-            EXPERIMENTAL: wires a dev-profile scope-key provider into
-            discovery. Required (3) accepts only scope-tagged discovery
-            traffic and fails closed on key loss; OptionalMigration (2) keeps
-            a bounded legacy fallback lane. The provider derives
-            per-generation keys from ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX — a
-            firmware-config key recoverable by flash readout, never a
-            production credential.
-
-    config ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX
-        string "DEVELOPMENT ONLY 32-byte scope base key in hex"
-        default ""
-        depends on ROUTELOOM_DISCOVERY_SCOPE != 0
-        help
-            Base key for the dev scope provider. Empty fails boot loudly when
-            a scoped mode is selected — never a silent Off downgrade.
-
-    config ROUTELOOM_DISCOVERY_SCOPE_REF
-        hex "Scope reference handle announced to the engine"
-        range 0x1 0xffffffff
-        default 0x524c5343
-        depends on ROUTELOOM_DISCOVERY_SCOPE != 0
-
-    config ROUTELOOM_DISCOVERY_SCOPE_GENERATION
-        int "Initial scope key generation (monotonic, never 0)"
-        range 1 2147483647
-        default 1
-        depends on ROUTELOOM_DISCOVERY_SCOPE != 0
 
     config ROUTELOOM_DEVELOPMENT_KEY_HEX
         string "DEVELOPMENT ONLY 32-byte network master key in hex"
         default "524f5554454c4f4f4d2d444556454c4f504d454e542d4b45592d4f4e4c592121"
-        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE || ROUTELOOM_SECURITY_MODE_DEV_RAM
+        depends on ROUTELOOM_SECURITY_MODE_DEV_RAM
         help
-            Shared development key (LegacyFixture, and the DevRam quick
-            start). Never use this default in a deployment.
+            Shared development key of the DevRam quick start. Never use
+            this default in a deployment.
 
     config ROUTELOOM_CONFIG
         bool "Enable the remote-config target endpoint (RCC1 permit journal)"
@@ -245,8 +165,7 @@ menu "RouteLoom device"
             the adopted site's authority key (kid = site_id) and binds once
             the membership is adopted. DevRam verifies the dev-HMAC permit
             key derived from its PSK (SecurityProfile::Development, never a
-            production identity claim). LegacyFixture keeps its dev-PSK and
-            static-key profiles below. The journal takes about 42 KB of
+            production identity claim). The journal takes about 42 KB of
             static RAM: on ESP32-C3 it fits the endpoint resource profile,
             not the relay profile's static RAM floor.
 
@@ -261,53 +180,6 @@ menu "RouteLoom device"
         default 1
         depends on ROUTELOOM_CONFIG && !ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
 
-    config ROUTELOOM_CONFIG_PROFILE
-        int "Permit profile (0=dev-HMAC experimental, 1=RLCP1_COSE_ESP256)"
-        range 0 1
-        default 0
-        depends on ROUTELOOM_CONFIG && ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
-        help
-            Profile 0 keeps the dev-HMAC envelope (EXPERIMENTAL). Profile 1
-            installs the COSE_Sign1 ESP256 verifier (P-256/SHA-256, RFC 9864
-            alg -9): the node accepts only the fixed COSE shape signed by the
-            provisioned authority key — dev permits are rejected by profile
-            choice, not fallback order.
-
-    config ROUTELOOM_CONFIG_COSE_KEY_HEX
-        string "COSE authority P-256 public key, X||Y as 128 hex chars"
-        default ""
-        depends on ROUTELOOM_CONFIG_PROFILE = 1 && !ROUTELOOM_TRUST_STORE
-        help
-            The single provisioned authority key for ESP256 permits; its kid
-            is CONFIG_ROUTELOOM_CONFIG_AUTHORITY. Off-curve/short keys fail at
-            boot. Hidden under ROUTELOOM_TRUST_STORE: the trust image is then
-            the only accepted key source.
-
-    config ROUTELOOM_TRUST_STORE
-        bool "Validate the NVS trust/credential stores (rltrust/rlcred) at boot"
-        default n
-        depends on (ROUTELOOM_CONFIG && ROUTELOOM_CONFIG_PROFILE = 1) || (ROUTELOOM_ROLE_GATEWAY && ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE)
-        help
-            EXPERIMENTAL (sdk-completion/04-provisioning-lifecycle.md): opens
-            "rltrust" and "rlcred", validates the RLT1 trust image and RLC1
-            credential at boot, logs epoch/anchor/quarantine diagnostics
-            (REPROVISION_REQUIRED on quarantine or credential epoch-window
-            exhaustion), and sources the network identity from the committed
-            image's low 32 bits. On a config target the permit verifier is a
-            TrustView over the image, which also binds the full u64 NetworkId
-            into the journal. There is no provisioning flow yet: an empty
-            store is a normal pre-provisioning state. NVS budget (§4.9):
-            about 1.5 extra pages.
-
-    config ROUTELOOM_TELEMETRY_REMOTE
-        bool "Answer remote Diagnostic (48) telemetry queries over the mesh"
-        default n
-        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE && !ROUTELOOM_ROLE_GATEWAY
-        help
-            EXPERIMENTAL bench surface: the node answers end-protected
-            TelemetryQuery frames with bounded 128-byte snapshots of its
-            measured link state (02-telemetry §4.2 opt-in).
-
     config ROUTELOOM_OBSERVATION_REMOTE
         bool "Answer remote Diagnostic (48) observation queries over the mesh"
         default n
@@ -317,38 +189,21 @@ menu "RouteLoom device"
             end-protected RemoteObservationQuery frames (subtype 7). This only
             compiles the responder in; adopted coordinator modes (Member,
             Dev) answer and every other mode refuses, re-evaluated each pass.
-            LegacyFixture has no enrollment, so there the build opt-in itself
-            is the membership claim.
 
     config ROUTELOOM_MIGRATION
         int "Channel migration mode (0=Disabled, 1=Observe, 2=Manual)"
         range 0 2
         default 0
-        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE || ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+        depends on ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
         help
             EXPERIMENTAL: wires the migration participant and control-object
             transport onto the authenticated Wire lane. Observe runs the
             coordinator's evidence collection only; Manual additionally
-            permits operator-driven plan issuance/surveys.
-            MemberEdhoc: every member verifies plans with the adopted
-            site's key and keeps its committed channel across reboots; the
-            USB gateway is the site's plan authority in Manual mode and
+            permits operator-driven plan issuance/surveys. Every member
+            verifies plans with the adopted site's key and keeps its
+            committed channel across reboots; the USB gateway is the site's plan authority in Manual mode and
             admits host plans over channel_plan_v1 (ROUTELOOM_CAPABILITY
-            bit 13). Observe mode does not advertise that capability. The
-            authority settings below are LegacyFixture only.
-
-    config ROUTELOOM_MIGRATION_AUTHORITY
-        hex "Migration authority Node ID"
-        default 0x1
-        depends on ROUTELOOM_MIGRATION != 0 && ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
-
-    config ROUTELOOM_MIGRATION_SELF_AUTHORITY
-        bool "DEV: this node is the migration authority (issuer)"
-        default n
-        depends on ROUTELOOM_MIGRATION = 2 && ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
-        help
-            EXPERIMENTAL: the issuer commits plans through a dev-PSK MAC
-            under SecurityProfile::Development.
+            bit 13). Observe mode does not advertise that capability.
 
     config ROUTELOOM_MIGRATION_RTT_P99_MS
         int "Measured management RTT P99 bound (ms) — deployment input"
@@ -377,7 +232,7 @@ menu "RouteLoom device"
     config ROUTELOOM_DEEP_SLEEP
         bool "Drive a deep-sleep prepare/enter cycle"
         default n
-        depends on (ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE || ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC) && !ROUTELOOM_ROLE_GATEWAY
+        depends on ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC && !ROUTELOOM_ROLE_GATEWAY
         help
             Experimental path: the Owner prepares sleep after
             ROUTELOOM_SLEEP_AFTER_MS of uptime and enters deep sleep with a
@@ -416,5 +271,7 @@ menu "RouteLoom device"
             field build: a console-enabled device re-provisions whoever holds
             its USB until RLI1 seals it with console_locked. The sdkv1 stores
             are wired in every build; this flag only gates the console.
+            The console commits only a BoardConfig this chip could boot:
+            the same chip, role, security mode and station MAC.
 
 endmenu

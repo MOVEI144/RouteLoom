@@ -60,8 +60,9 @@ class CellList(unittest.TestCase):
         # the C3/C6 Member maintenance images, the example and the
         # component-only external consumer (52); V2-08 moved the LegacyFixture
         # cells onto DevRam and Member, keeping one compatibility cell, and
-        # added the Member channel-plan gateway and participant (50).
-        self.assertEqual(len(cells), 50)
+        # added the Member channel-plan gateway and participant (50); V2-10
+        # removed that compatibility cell with LegacyFixture itself (49).
+        self.assertEqual(len(cells), 49)
         self.assertTrue({
             "bridge_node-esp32c3-normal-off-maintenance_member",
             "reference_node-esp32c6-normal-off-maintenance_member",
@@ -206,7 +207,7 @@ class HilMatrix(unittest.TestCase):
             env = {**os.environ, "PATH": f"{work}:{os.environ['PATH']}"}
             cases = (("bench_node", "esp32c6", []),
                      ("reference_node", "esp32c3",
-                      ['CONFIG_ROUTELOOM_PEER_MAC="94:a9:90:6a:ee:c4"']))
+                      ['CONFIG_ROUTELOOM_HIL_DROP_RX_MAC="94:a9:90:6a:ee:c4"']))
             for app, target, overlay in cases:
                 with self.subTest(app=app, target=target):
                     result = subprocess.run([str(script), app, target, str(work / "bundle"),

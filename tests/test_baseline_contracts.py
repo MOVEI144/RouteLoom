@@ -23,8 +23,7 @@ class MeshProfilesTests(unittest.TestCase):
         self.assertEqual(profiles['schema_version'], 1)
         self.assertEqual(set(profiles['axes']), {'security', 'routing', 'resource'})
         security = profiles['axes']['security']['values']
-        self.assertIn('DEV_RAM', security)
-        self.assertIn('MEMBER_EDHOC', security)
+        self.assertEqual(set(security), {'DEV_RAM', 'MEMBER_EDHOC'})
         routing = profiles['axes']['routing']['values']
         self.assertEqual(set(routing), {'FLAT', 'GATEWAY_SCOPED'})
         resource = profiles['axes']['resource']['values']

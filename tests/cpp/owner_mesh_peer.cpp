@@ -171,7 +171,6 @@
 #include "routeloom/espnow_sdkv1_entropy.hpp"
 #include "routeloom/espnow_security_owner.hpp"
 #include "routeloom/nvs_boot_session.hpp"
-#include "routeloom/nvs_counter_store.hpp"
 #include "routeloom/sdkv1_blob_storage.hpp"
 #include "routeloom/sdkv1_group_keys.hpp"
 #include "routeloom/sdkv1_lifecycle_store.hpp"

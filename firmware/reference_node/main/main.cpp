@@ -74,15 +74,13 @@ class ReferenceObsConsole final {
 
 struct ReferenceApp {
   ReferenceObsConsole console{};
-#if CONFIG_ROUTELOOM_HIL_SEND_DESTINATION != 0 && \
-    !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+#if CONFIG_ROUTELOOM_HIL_SEND_DESTINATION != 0
   routeloom::MonotonicMs hil_next_ms{0};
   std::uint32_t hil_attempt{0};
 #endif
 };
 
-#if CONFIG_ROUTELOOM_HIL_SEND_DESTINATION != 0 && \
-    !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+#if CONFIG_ROUTELOOM_HIL_SEND_DESTINATION != 0
 void poll_hil_send(routeloom::Device& device, ReferenceApp& app,
                    routeloom::MonotonicMs now_ms) {
   if (app.hil_next_ms == 0) app.hil_next_ms = now_ms + 10000;
@@ -110,8 +108,7 @@ void reference_poll(routeloom::Device& device, routeloom::MonotonicMs now_ms, vo
   if (device.observation() != nullptr) {
     app.console.poll(*device.observation(), device.node_id(), now_ms);
   }
-#if CONFIG_ROUTELOOM_HIL_SEND_DESTINATION != 0 && \
-    !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+#if CONFIG_ROUTELOOM_HIL_SEND_DESTINATION != 0
   poll_hil_send(device, app, now_ms);
 #endif
 }
