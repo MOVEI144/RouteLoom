@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 from pathlib import Path
 
@@ -119,6 +120,30 @@ END_AAD_SOURCE_NAMES = {
     "header.end_counter": "end_counter",
     "header.payload_length": "payload_length",
 }
+
+
+# V2-10 removed the dev-PSK fixture security mode. Its Kconfig/profile token
+# must not come back; HIL records and captured artifacts are history.
+RETIRED_SECURITY_TOKEN = "LEGACY" + "_FIXTURE"
+RETIRED_TOKEN_SKIP_DIRS = {".git", "artifacts", "target", "third_party", "node_modules",
+                           "__pycache__", "managed_components"}
+
+
+def retired_token_hits(root: Path) -> list[str]:
+    hits = []
+    for directory, dirs, files in os.walk(root):
+        relative = Path(directory).relative_to(root)
+        dirs[:] = [d for d in dirs if d not in RETIRED_TOKEN_SKIP_DIRS
+                   and not d.startswith("build")
+                   and (relative / d).as_posix() != "docs/hil"]
+        for name in files:
+            path = Path(directory) / name
+            try:
+                if RETIRED_SECURITY_TOKEN in path.read_text(encoding="utf-8"):
+                    hits.append(path.relative_to(root).as_posix())
+            except (UnicodeDecodeError, OSError):
+                continue
+    return sorted(hits)
 
 
 def end_aad_layout(wire_source: str) -> list:
@@ -1017,6 +1042,8 @@ def validate(root: Path) -> dict:
                 test(f"acceptance_trace:{i}", False, "no host test tags this ID")
     except (ValueError, KeyError, TypeError, OSError) as error:
         test("schema_read", False, str(error))
+    retired = retired_token_hits(root)
+    test("retired_security_mode_absent", not retired, ",".join(retired[:10]))
     return {
         "scope": "selected-design-contracts-and-document-consistency",
         "checks": len(checks),
