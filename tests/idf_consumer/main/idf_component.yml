@@ -1,0 +1,8 @@
+# The CI cell sets the repository path and exact commit. Component Manager
+# fetches the Device and its sibling dependencies from that Git revision.
+dependencies:
+  idf: ">=6.0"
+  routeloom/routeloom_device:
+    git: ${ROUTELOOM_COMPONENT_GIT}
+    path: components/routeloom_device
+    version: __ROUTELOOM_COMPONENT_REF__

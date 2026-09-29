@@ -234,13 +234,17 @@ class Documentation(unittest.TestCase):
                            else f"{app}-{target}-normal-off-owner_member")
                 self.assertIn(cell_id, ids)
 
-    def test_owner_main_task_stack_budget(self):
-        for app in ("bridge_node", "reference_node", "bench_node"):
-            defaults = (ROOT / "firmware" / app / "sdkconfig.defaults").read_text(
-                encoding="utf-8")
-            matches = re.findall(r"^CONFIG_ESP_MAIN_TASK_STACK_SIZE=(\d+)$", defaults, re.M)
-            self.assertEqual(len(matches), 1, app)
-            self.assertGreaterEqual(int(matches[0]), 16 * 1024, app)
+    def test_owner_task_stack_budget(self):
+        # The Owner (security owner, crypto, bridge, mesh pump) runs on the
+        # Device task: P4 §12.2 budgets 16 KiB, and no image lowers it.
+        kconfig = (ROOT / "components/routeloom_device/Kconfig").read_text(encoding="utf-8")
+        block = kconfig[kconfig.index("config ROUTELOOM_OWNER_TASK_STACK_SIZE"):]
+        default = re.search(r"^\s+default (\d+)$", block, re.M)
+        self.assertGreaterEqual(int(default.group(1)), 16 * 1024)
+        for app in ("firmware/bridge_node", "firmware/reference_node", "firmware/bench_node",
+                    "examples/espnow_node"):
+            defaults = (ROOT / app / "sdkconfig.defaults").read_text(encoding="utf-8")
+            self.assertNotIn("CONFIG_ROUTELOOM_OWNER_TASK_STACK_SIZE", defaults, app)
 
     def test_floor_table_matches_tool(self):
         text = DOC.read_text(encoding="utf-8")
@@ -252,7 +256,7 @@ class Documentation(unittest.TestCase):
     def test_every_ci_cell_runs_the_guard(self):
         # sdk.yml builds each tools/ci/cells.json cell through check.py.
         workflow = (ROOT / ".github" / "workflows" / "sdk.yml").read_text(encoding="utf-8")
-        self.assertIn("firmware/${{ matrix.app }}/build/ram-report.json", workflow)
+        self.assertIn("${{ matrix.dir }}/build/ram-report.json", workflow)
         code = subprocess.run([sys.executable, str(ROOT / "tools" / "check.py"), "firmware",
                                "--all", "--dry-run"], capture_output=True, text=True)
         self.assertEqual(code.returncode, 0)

@@ -48,7 +48,9 @@ class Sdkv1Stores {
   void log_state(const char* tag) const noexcept;
 
   sdkv1::IdentityStore& identity() noexcept { return identity_; }
+  const sdkv1::IdentityStore& identity() const noexcept { return identity_; }
   sdkv1::SiteStore& site() noexcept { return site_; }
+  const sdkv1::SiteStore& site() const noexcept { return site_; }
   sdkv1::RevocationStore& revocation() noexcept { return revocation_; }
   // The engine's RLP2 resume cache: the lifecycle's sweep target (the
   // single resume system on this device).

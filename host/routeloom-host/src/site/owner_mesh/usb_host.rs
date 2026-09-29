@@ -30,6 +30,7 @@ pub(super) struct UsbHost {
     pub(super) hello_node: Option<u64>,
     pub(super) hello_network: Option<u64>,
     pub(super) hello_capability: Option<u32>,
+    pub(super) hello_boot: Option<u64>,
     pub(super) auth_sessions: Vec<u64>,
     pub(super) session_losses: u64,
     pub(super) ups_seen: u64,
@@ -73,6 +74,7 @@ impl UsbHost {
             hello_node: None,
             hello_network: None,
             hello_capability: None,
+            hello_boot: None,
             auth_sessions: Vec::new(),
             session_losses: 0,
             ups_seen: 0,
@@ -253,8 +255,9 @@ impl UsbHost {
                     }
                 }
             }
-            if let Some((_, node, _, network, capability)) = inbound.hello_info {
+            if let Some((_, node, boot, network, capability)) = inbound.hello_info {
                 self.hello_node = Some(node);
+                self.hello_boot = Some(boot);
                 self.hello_network = Some(network);
                 self.hello_capability = Some(capability);
             }

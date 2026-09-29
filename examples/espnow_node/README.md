@@ -36,11 +36,9 @@ In your own project the equivalent is:
 list(APPEND EXTRA_COMPONENT_DIRS "/absolute/path/to/RouteLoom/components")
 ```
 
-Your `main` component keeps `REQUIRES routeloom routeloom_espnow` (see
-`main/CMakeLists.txt`). Because both RouteLoom components carry
-`idf_component.yml` manifests, the component manager sees them as local
-components and resolves the `routeloom/routeloom` dependency of
-`routeloom_espnow` from the same checkout — nothing is downloaded.
+Your `main` component keeps `REQUIRES routeloom_device` (see
+`main/CMakeLists.txt`). The component manager resolves its sibling
+dependencies from the same checkout — nothing is downloaded.
 
 ## Style (b): component-manager git dependency
 
@@ -50,25 +48,19 @@ the git dependency block in `main/idf_component.yml` instead:
 
 ```yaml
 dependencies:
-  routeloom/routeloom:
+  routeloom/routeloom_device:
     git: https://github.com/MOVEI144/RouteLoom.git
-    path: components/routeloom
+    path: components/routeloom_device
     version: main          # pin a tag or commit SHA beyond experimentation
-  routeloom/routeloom_espnow:
-    git: https://github.com/MOVEI144/RouteLoom.git
-    path: components/routeloom_espnow
-    version: main
 ```
 
-The component manager clones the repository and installs the two component
-subdirectories under `managed_components/`. Both entries are required:
-`routeloom_espnow`'s manifest declares `routeloom/routeloom`, and until a
-registry release exists the project manifest is what tells the solver where
-the core comes from. Pin `version` to a tag or commit SHA — `main` floats.
+The component manager installs the Device, ESP-NOW binding and core under
+`managed_components/` from the same Git revision. Pin `version` to a tag or
+commit SHA — `main` floats.
 
 ## Configuration
 
-`menuconfig → RouteLoom ESP-NOW node example` exposes the node identity
+`menuconfig → RouteLoom device` exposes the node identity
 (network ID, node ID, channel, TX power), the static peer
 (`ROUTELOOM_PEER_NODE_ID`/`ROUTELOOM_PEER_MAC`; `0x0` runs peerless) and the
 development master key. Two boards form a mesh by pointing each at the

@@ -99,12 +99,21 @@ struct Phase0Snapshot {
 }
 
 impl Phase0Snapshot {
-    fn build(nodes: usize) -> Self {
+    /// `identity_only` personas get their sealed RLI1 identity and nothing
+    /// else (J01 boot mode `identity_only`): no join, no site record.
+    fn build(nodes: usize, identity_only: &[usize]) -> Self {
         let mut provision = Provision::start(&format!("phase0-{nodes}"), now_ms());
         let images = personas(nodes)
             .iter()
             .enumerate()
             .map(|(index, persona)| {
+                if identity_only.contains(&index) {
+                    // The sealed identity slots; every other slot erased.
+                    let mut peer = LegacyPeer::spawn(persona, provision.now, 0xA101 + index as u64);
+                    let mut flash = peer.dump_flash();
+                    flash[2048..].fill(0xFF);
+                    return (flash, vec![0xFF; peer.dump_extended().len()]);
+                }
                 let role = if persona.gateway {
                     Role::Gateway
                 } else if persona.role == ROLE_ENDPOINT {
@@ -128,21 +137,24 @@ impl Phase0Snapshot {
     }
 }
 
-fn phase0_snapshot(nodes: usize) -> (Arc<Phase0Snapshot>, u64) {
+type Phase0Key = (usize, Vec<usize>);
+
+fn phase0_snapshot(nodes: usize, identity_only: &[usize]) -> (Arc<Phase0Snapshot>, u64) {
     static SNAPSHOTS: std::sync::OnceLock<
-        Mutex<std::collections::BTreeMap<usize, Arc<Phase0Snapshot>>>,
+        Mutex<std::collections::BTreeMap<Phase0Key, Arc<Phase0Snapshot>>>,
     > = std::sync::OnceLock::new();
     let mut snapshots = SNAPSHOTS
         .get_or_init(|| Mutex::new(std::collections::BTreeMap::new()))
         .lock()
         .expect("Phase 0 snapshots");
-    if let Some(snapshot) = snapshots.get(&nodes) {
+    let key = (nodes, identity_only.to_vec());
+    if let Some(snapshot) = snapshots.get(&key) {
         return (Arc::clone(snapshot), 0);
     }
     let started = std::time::Instant::now();
-    let snapshot = Arc::new(Phase0Snapshot::build(nodes));
+    let snapshot = Arc::new(Phase0Snapshot::build(nodes, identity_only));
     let elapsed = started.elapsed().as_millis() as u64;
-    snapshots.insert(nodes, Arc::clone(&snapshot));
+    snapshots.insert(key, Arc::clone(&snapshot));
     (snapshot, elapsed)
 }
 
@@ -648,6 +660,27 @@ impl MeshWorld {
         boot_ms: &[u64],
         flat: bool,
     ) -> Option<Self> {
+        Self::start_booted(tag, switch, boot_ms, flat, &[])
+    }
+
+    /// A world whose `identity_only` personas boot unjoined: they hold
+    /// only their RLI1 identity and must join over the mesh (J01).
+    pub(super) fn start_identity_only(
+        tag: &str,
+        switch: Switch,
+        identity_only: &[usize],
+    ) -> Option<Self> {
+        let boot_ms = staggered_boot(switch.nodes());
+        Self::start_booted(tag, switch, &boot_ms, false, identity_only)
+    }
+
+    fn start_booted(
+        tag: &str,
+        switch: Switch,
+        boot_ms: &[u64],
+        flat: bool,
+        identity_only: &[usize],
+    ) -> Option<Self> {
         let nodes = switch.nodes();
         assert!(
             (2..=max_nodes()).contains(&nodes),
@@ -665,7 +698,7 @@ impl MeshWorld {
             return None;
         }
         let started = std::time::Instant::now();
-        let (snapshot, phase0_wall_ms) = phase0_snapshot(nodes);
+        let (snapshot, phase0_wall_ms) = phase0_snapshot(nodes, identity_only);
         let provision = Provision::from_snapshot(tag, &snapshot);
         let personas = personas(nodes);
         let images: Vec<_> = snapshot

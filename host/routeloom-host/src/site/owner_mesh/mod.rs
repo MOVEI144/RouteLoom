@@ -27,7 +27,7 @@
 //! authority (`t0` = wall `now_ms` at start).
 //!
 //! `world`, `peer`, `switch`, `usb_host` and `report` are the harness;
-//! `mesh`, `join`, `cutover` and `fault` hold the scenario tests, each
+//! `mesh`, `join`, `cutover`, `fault` and `boot` hold the scenario tests, each
 //! registered by its row in `tests/e2e/scenarios.json`.
 
 use std::io::{Read, Write};
@@ -63,6 +63,7 @@ use super::{ChannelGroupKeyTransport, SiteAuthority, SiteService};
 use crate::acl::Acl;
 use crate::{now_ms, serve_client, DeviceSession, SessionPhase, State};
 
+mod boot;
 mod cutover;
 mod fault;
 mod join;

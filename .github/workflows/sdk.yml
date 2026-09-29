@@ -116,14 +116,14 @@ jobs:
           name: ${{ matrix.artifact }}
           path: |
             idf-commit.txt
-            firmware/${{ matrix.app }}/build/*.bin
-            firmware/${{ matrix.app }}/build/*.elf
-            firmware/${{ matrix.app }}/build/*.map
-            firmware/${{ matrix.app }}/build/size-report.txt
-            firmware/${{ matrix.app }}/build/size.json
-            firmware/${{ matrix.app }}/build/ram-report.json
-            firmware/${{ matrix.app }}/build/log/*
-            firmware/${{ matrix.app }}/sdkconfig
+            ${{ matrix.dir }}/build/*.bin
+            ${{ matrix.dir }}/build/*.elf
+            ${{ matrix.dir }}/build/*.map
+            ${{ matrix.dir }}/build/size-report.txt
+            ${{ matrix.dir }}/build/size.json
+            ${{ matrix.dir }}/build/ram-report.json
+            ${{ matrix.dir }}/build/log/*
+            ${{ matrix.dir }}/sdkconfig
           retention-days: 30
   rust:
     runs-on: ubuntu-24.04
