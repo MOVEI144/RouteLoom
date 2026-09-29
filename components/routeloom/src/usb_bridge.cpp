@@ -93,7 +93,7 @@ UsbBridge::UsbBridge(const Config& config, ByteStream& stream) noexcept
   config_.capability &= ~(kCapGatewayEndpointV1 | kCapConfigEndpointV1 |
                           kCapM1DiagnosticsV1 | kCapNodeStatusV1 | kCapGroupDeliveryV1 |
                           kCapJoinRelayV1 | kCapJoinRelayV2 | kCapAuthorityChannelV1 |
-                          kCapObservationV1 | kCapRxAssuranceV1);
+                          kCapObservationV1 | kCapRxAssuranceV1 | kCapChannelPlanV1);
 }
 
 Status UsbBridge::attach_gateway(GatewayDelivery& gateway) noexcept {
@@ -255,6 +255,12 @@ Status UsbBridge::attach_security_owner(SecurityOwnerUsbSink& owner) noexcept {
 Status UsbBridge::attach_authority(AuthorityUsbSink& sink) noexcept {
   authority_sink_ = &sink;
   config_.capability |= kCapAuthorityChannelV1;
+  return Status::success();
+}
+
+Status UsbBridge::attach_channel_plan(ChannelPlanUsbSink& sink) noexcept {
+  channel_plan_sink_ = &sink;
+  config_.capability |= kCapChannelPlanV1;
   return Status::success();
 }
 
@@ -917,9 +923,13 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
     case HostOpsSub::SiteStateSet:
       handle_site_state_set(request, inner, now_ms);
       break;
+    case HostOpsSub::ChannelPlan:
+      handle_channel_plan(request, inner, now_ms);
+      break;
     case HostOpsSub::AuthorityUp:
     case HostOpsSub::SiteStateReport:
-      // 0x64/0x67 are device→host only.
+    case HostOpsSub::ChannelPlanReport:
+      // 0x64/0x67/0x69 are device→host only.
       send_error(UsbErrorCode::ProtocolError, request,
                  ROUTELOOM_REASON_AUTHORITY_DIRECTION, now_ms);
       break;
@@ -1753,6 +1763,22 @@ void UsbBridge::handle_authority_down(const std::uint64_t request, const ByteVie
   report.result = site_state_result_for(status);
   if (status && complete) report.result = SiteStateResult::ObjectQueued;
   send_site_state_report(request, report, now_ms);
+}
+
+void UsbBridge::handle_channel_plan(const std::uint64_t request, const ByteView inner,
+                                    const MonotonicMs now_ms) noexcept {
+  if (channel_plan_sink_ == nullptr) {
+    send_error(UsbErrorCode::Unsupported, request, ROUTELOOM_REASON_SUBCOMMAND_UNKNOWN, now_ms);
+    return;
+  }
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kChannelPlanReportPayload> body{};
+  std::size_t written = 0;
+  if (!channel_plan_sink_->channel_plan(inner, MutableByteView{body.data(), body.size()},
+                                        written, now_ms)) {
+    send_error(UsbErrorCode::ProtocolError, request, ROUTELOOM_REASON_AUTHORITY_MALFORMED, now_ms);
+    return;
+  }
+  (void)enqueue(FrameKind::HostOps, 0, request, ByteView{body.data(), written}, now_ms);
 }
 
 void UsbBridge::handle_site_state_set(const std::uint64_t request, const ByteView inner,

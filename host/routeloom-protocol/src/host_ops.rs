@@ -1664,6 +1664,164 @@ pub fn decode_site_state_report(inner: &[u8]) -> Result<SiteStateReport, HostOps
     })
 }
 
+// --- Channel plan subcommands (channel_plan_v1, V2-08) ----------------------
+//
+// 0x68 CHANNEL_PLAN (H→G): action u8 (1 status, 2 offer, 3 release),
+// reserved u8 = 0, then offer = blob_len u16 (1..=384) | blob |
+// commit_signature[64], release = plan_hash[32].
+// 0x69 CHANNEL_PLAN_REPORT (G→H, same request id), 96 B: result u16
+// (ConfigOpsResult), detail u8 (device StatusCode), phase u8,
+// active_channel u8, ready u8, flags u8 (bit0 commit released),
+// reserved u8 = 0, active_epoch u32, cooldown_ms u32, gateway_now_ms u64,
+// ledger_sequence u64, ledger_state[32], offered_plan[32]. The gateway
+// verifies each plan with the site SAK; the session never vouches for it.
+pub const CAP_CHANNEL_PLAN_V1: u32 = 1 << 13;
+pub const SUB_CHANNEL_PLAN: u8 = 0x68;
+pub const SUB_CHANNEL_PLAN_REPORT: u8 = 0x69;
+pub const CHANNEL_PLAN_BLOB_MAX: usize = 384;
+pub const CHANNEL_PLAN_OFFER_FIXED: usize = 4 + 64;
+pub const CHANNEL_PLAN_REQUEST_MAX: usize = CHANNEL_PLAN_OFFER_FIXED + CHANNEL_PLAN_BLOB_MAX;
+pub const CHANNEL_PLAN_REPORT_PAYLOAD: usize = 96;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ChannelPlanRequest {
+    Status,
+    Offer {
+        blob: Vec<u8>,
+        commit_signature: [u8; 64],
+    },
+    Release {
+        plan_hash: [u8; 32],
+    },
+}
+
+pub fn encode_channel_plan(request: &ChannelPlanRequest) -> Result<Vec<u8>, HostOpsError> {
+    let mut body = Vec::with_capacity(CHANNEL_PLAN_REQUEST_MAX);
+    match request {
+        ChannelPlanRequest::Status => body.extend_from_slice(&[1, 0]),
+        ChannelPlanRequest::Offer {
+            blob,
+            commit_signature,
+        } => {
+            if blob.is_empty() || blob.len() > CHANNEL_PLAN_BLOB_MAX {
+                return Err(HostOpsError::Invalid("plan_blob_length"));
+            }
+            body.extend_from_slice(&[2, 0]);
+            body.extend_from_slice(&(blob.len() as u16).to_be_bytes());
+            body.extend_from_slice(blob);
+            body.extend_from_slice(commit_signature);
+        }
+        ChannelPlanRequest::Release { plan_hash } => {
+            body.extend_from_slice(&[3, 0]);
+            body.extend_from_slice(plan_hash);
+        }
+    }
+    let mut out = Vec::with_capacity(GATEWAY_INNER_HEAD_SIZE + body.len());
+    gateway_head(&mut out, SUB_CHANNEL_PLAN, body.len());
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+pub fn decode_channel_plan(inner: &[u8]) -> Result<ChannelPlanRequest, HostOpsError> {
+    let payload = gateway_body(inner, SUB_CHANNEL_PLAN, 2, CHANNEL_PLAN_REQUEST_MAX)?;
+    if payload[1] != 0 {
+        return Err(HostOpsError::Invalid("reserved_nonzero"));
+    }
+    match payload[0] {
+        1 if payload.len() == 2 => Ok(ChannelPlanRequest::Status),
+        2 => {
+            let blob = usize::from(u16_at(payload, 2)?);
+            if blob == 0
+                || blob > CHANNEL_PLAN_BLOB_MAX
+                || payload.len() != CHANNEL_PLAN_OFFER_FIXED + blob
+            {
+                return Err(HostOpsError::LengthMismatch);
+            }
+            Ok(ChannelPlanRequest::Offer {
+                blob: payload[4..4 + blob].to_vec(),
+                commit_signature: fixed(payload, 4 + blob)?,
+            })
+        }
+        3 if payload.len() == 34 => Ok(ChannelPlanRequest::Release {
+            plan_hash: fixed(payload, 2)?,
+        }),
+        1 | 3 => Err(HostOpsError::LengthMismatch),
+        other => Err(HostOpsError::UnknownEnum("action", other)),
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ChannelPlanReport {
+    /// `ConfigOpsResult` value.
+    pub result: u16,
+    /// The device `StatusCode` of the offer or release (0 = Ok).
+    pub detail: u8,
+    /// The gateway participant's `ParticipantPhase`.
+    pub phase: u8,
+    pub active_channel: u8,
+    /// READY reports accepted for the offered plan.
+    pub ready: u8,
+    pub released: bool,
+    pub active_epoch: u32,
+    pub cooldown_ms: u32,
+    /// The gateway's monotonic clock: the time domain of plan fields.
+    pub gateway_now_ms: u64,
+    pub ledger_sequence: u64,
+    pub ledger_state: [u8; 32],
+    pub offered_plan: [u8; 32],
+}
+
+pub fn encode_channel_plan_report(report: &ChannelPlanReport) -> Vec<u8> {
+    let mut out = Vec::with_capacity(GATEWAY_INNER_HEAD_SIZE + CHANNEL_PLAN_REPORT_PAYLOAD);
+    gateway_head(
+        &mut out,
+        SUB_CHANNEL_PLAN_REPORT,
+        CHANNEL_PLAN_REPORT_PAYLOAD,
+    );
+    out.extend_from_slice(&report.result.to_be_bytes());
+    out.extend_from_slice(&[
+        report.detail,
+        report.phase,
+        report.active_channel,
+        report.ready,
+        u8::from(report.released),
+        0,
+    ]);
+    out.extend_from_slice(&report.active_epoch.to_be_bytes());
+    out.extend_from_slice(&report.cooldown_ms.to_be_bytes());
+    out.extend_from_slice(&report.gateway_now_ms.to_be_bytes());
+    out.extend_from_slice(&report.ledger_sequence.to_be_bytes());
+    out.extend_from_slice(&report.ledger_state);
+    out.extend_from_slice(&report.offered_plan);
+    out
+}
+
+pub fn decode_channel_plan_report(inner: &[u8]) -> Result<ChannelPlanReport, HostOpsError> {
+    let payload = gateway_body(
+        inner,
+        SUB_CHANNEL_PLAN_REPORT,
+        CHANNEL_PLAN_REPORT_PAYLOAD,
+        CHANNEL_PLAN_REPORT_PAYLOAD,
+    )?;
+    if payload[6] > 1 || payload[7] != 0 {
+        return Err(HostOpsError::Invalid("reserved_nonzero"));
+    }
+    Ok(ChannelPlanReport {
+        result: u16_at(payload, 0)?,
+        detail: payload[2],
+        phase: payload[3],
+        active_channel: payload[4],
+        ready: payload[5],
+        released: payload[6] == 1,
+        active_epoch: u32_at(payload, 8)?,
+        cooldown_ms: u32_at(payload, 12)?,
+        gateway_now_ms: u64_at(payload, 16)?,
+        ledger_sequence: u64_at(payload, 24)?,
+        ledger_state: fixed(payload, 32)?,
+        offered_plan: fixed(payload, 64)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2269,5 +2427,56 @@ mod tests {
         let mut bad = tail.clone();
         bad[2] = 0x04;
         assert!(decode_ingress_assurance_tail(&bad).is_err());
+    }
+
+    #[test]
+    fn channel_plan_codec_round_trips_and_refuses_malformed() {
+        let offer = ChannelPlanRequest::Offer {
+            blob: vec![7; 200],
+            commit_signature: [1; 64],
+        };
+        for request in [
+            ChannelPlanRequest::Status,
+            offer,
+            ChannelPlanRequest::Release { plan_hash: [9; 32] },
+        ] {
+            let inner = encode_channel_plan(&request).unwrap();
+            assert_eq!(decode_channel_plan(&inner).unwrap(), request);
+        }
+        assert!(encode_channel_plan(&ChannelPlanRequest::Offer {
+            blob: vec![0; CHANNEL_PLAN_BLOB_MAX + 1],
+            commit_signature: [0; 64],
+        })
+        .is_err());
+        // Pinned bytes shared with test_host_ops.cpp.
+        let report = ChannelPlanReport {
+            result: 3,
+            detail: 11,
+            phase: 2,
+            active_channel: 6,
+            ready: 1,
+            released: true,
+            active_epoch: 0x0102_0304,
+            cooldown_ms: 600_000,
+            gateway_now_ms: 0x1122_3344_5566_7788,
+            ledger_sequence: 2,
+            ledger_state: [0xA5; 32],
+            offered_plan: [0x5A; 32],
+        };
+        let inner = encode_channel_plan_report(&report);
+        assert_eq!(
+            &inner[..36],
+            &[
+                1, 0x69, 0, 96, 0, 3, 11, 2, 6, 1, 1, 0, 1, 2, 3, 4, 0, 0x09, 0x27, 0xC0, 0x11,
+                0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0, 0, 0, 0, 0, 0, 0, 2
+            ]
+        );
+        assert_eq!(decode_channel_plan_report(&inner).unwrap(), report);
+        let mut bad = inner.clone();
+        bad[10] = 2;
+        assert!(decode_channel_plan_report(&bad).is_err());
+        let mut status = encode_channel_plan(&ChannelPlanRequest::Status).unwrap();
+        status[5] = 1;
+        assert!(decode_channel_plan(&status).is_err());
     }
 }

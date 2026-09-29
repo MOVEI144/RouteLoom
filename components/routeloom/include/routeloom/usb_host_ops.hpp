@@ -110,6 +110,13 @@ constexpr std::uint32_t kCapObservationV1 = 1u << 11;
 // bound into the authenticated Hello transcript like every other bit.
 constexpr std::uint32_t kCapRxAssuranceV1 = 1u << 12;
 
+// channel_plan_v1 (V2-08, issue #5 manual): the gateway is the site's
+// channel-plan authority and serves HostOps 0x68/0x69 of the SDK v1
+// site-authority family — status, offer of a SAK-signed plan, release of
+// its commit. Advertised only when the bridge owner attaches the plan
+// authority (attach_channel_plan); bound into the Hello transcript.
+constexpr std::uint32_t kCapChannelPlanV1 = 1u << 13;
+
 constexpr std::uint8_t kHostOpsSchema = 1;
 // The join relay family's own inner schema (#116 §5.2): only 0x60-0x63
 // speak it; every other family stays on schema 1.
@@ -153,6 +160,8 @@ enum class HostOpsSub : std::uint8_t {
   AuthorityDown = 0x65,     // H→G request: carrier fragment toward a device
   SiteStateSet = 0x66,      // H→G request: WakeLocal/QueryLocal -> 0x67
   SiteStateReport = 0x67,   // G→H reply to 0x65/0x66 (request id echoed)
+  ChannelPlan = 0x68,       // H→G request: status/offer/release -> 0x69
+  ChannelPlanReport = 0x69, // G→H reply to 0x68 (request id echoed)
   ObservationQuery = 0x70,  // H→G request: section/after/max/flags -> 0x71 page
   ObservationPage = 0x71,   // G→H reply: result/header || section body
   ObservationEvent = 0x72,  // G→H unsolicited (request 0): seq/kind || digests
@@ -1266,6 +1275,63 @@ Status decode_site_state_set(ByteView inner, SiteStateSet& out) noexcept;
 Status encode_site_state_report(const SiteStateReport& report, MutableByteView out,
                                 std::size_t& written) noexcept;
 Status decode_site_state_report(ByteView inner, SiteStateReport& out) noexcept;
+
+// ---------------------------------------------------------------------------
+// Channel plan HostOps family (channel_plan_v1, V2-08). Same inner common
+// form: schema:u8=1, sub:u8, payload_len:u16, payload; big-endian, exact
+// length. The gateway verifies every plan with the adopted site's SAK
+// (SiteCommitVerifier) — the USB session authenticates the host, never the
+// plan.
+//
+// 0x68 CHANNEL_PLAN (H→G): action:u8, reserved:u8=0, then by action
+//   1 STATUS:  nothing
+//   2 OFFER:   blob_len:u16 (1..384), plan blob, commit_signature[64]
+//   3 RELEASE: plan_hash[32] (the offered plan whose commit to release)
+// 0x69 CHANNEL_PLAN_REPORT (G→H, under the 0x68 request id), payload 96 B:
+//   result:u16 (ConfigOpsResult), detail:u8 (StatusCode of the offer or
+//   release, 0 for status), phase:u8 (ParticipantPhase), active_channel:u8,
+//   ready:u8 (READY reports for the offered plan), flags:u8 (bit0 commit
+//   released), reserved:u8=0, active_epoch:u32, cooldown_ms:u32 (remaining
+//   inter-plan cooldown), gateway_now_ms:u64 (the plan time domain),
+//   ledger_sequence:u64, ledger_state[32], offered_plan[32] (zero if none).
+constexpr std::size_t kChannelPlanOfferFixed = 4 + 64;
+constexpr std::size_t kChannelPlanRequestMax = kChannelPlanOfferFixed + 384;
+constexpr std::size_t kChannelPlanReportPayload = 96;
+
+enum class ChannelPlanAction : std::uint8_t {
+  Status = 1,
+  Offer = 2,
+  Release = 3,
+};
+
+struct ChannelPlanRequest {
+  ChannelPlanAction action{ChannelPlanAction::Status};
+  ByteView blob{};                 // Offer; borrows `inner` on decode
+  ByteView commit_signature{};     // Offer, 64 B
+  std::array<std::uint8_t, 32> plan_hash{};  // Release
+};
+
+struct ChannelPlanReport {
+  std::uint16_t result{0};  // ConfigOpsResult
+  std::uint8_t detail{0};   // StatusCode
+  std::uint8_t phase{0};
+  std::uint8_t active_channel{0};
+  std::uint8_t ready{0};
+  bool released{false};
+  std::uint32_t active_epoch{0};
+  std::uint32_t cooldown_ms{0};
+  std::uint64_t gateway_now_ms{0};
+  std::uint64_t ledger_sequence{0};
+  std::array<std::uint8_t, 32> ledger_state{};
+  std::array<std::uint8_t, 32> offered_plan{};
+};
+
+Status encode_channel_plan(const ChannelPlanRequest& request, MutableByteView out,
+                           std::size_t& written) noexcept;
+Status decode_channel_plan(ByteView inner, ChannelPlanRequest& out) noexcept;
+Status encode_channel_plan_report(const ChannelPlanReport& report, MutableByteView out,
+                                  std::size_t& written) noexcept;
+Status decode_channel_plan_report(ByteView inner, ChannelPlanReport& out) noexcept;
 
 // ---------------------------------------------------------------------------
 // Observation HostOps family (observation_v1). Same inner common form as the
