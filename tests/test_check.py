@@ -326,6 +326,19 @@ class Scenarios(unittest.TestCase):
         self.data["rows"] = []
         self.assertIn("no scenario rows", check.scenario_errors(self.data))
 
+    def test_every_v2_pr_has_a_scenario(self):
+        for row in self.data["rows"]:
+            row["prs"] = [pr for pr in row["prs"] if pr != "V2-21"]
+        self.assertIn("V2-21: no scenario row", check.scenario_errors(self.data))
+
+    def test_owner_mesh_case_cannot_be_left_out_of_the_table(self):
+        ref = ("host/routeloom-host/src/site/owner_mesh/mesh.rs::"
+               "mesh_provision_snapshot_reused_without_shared_world_state")
+        for row in self.data["rows"]:
+            row["test"] = [test for test in row["test"] if test != ref]
+        self.assertIn(f"unregistered Owner mesh test {ref}",
+                      check.scenario_errors(self.data))
+
     def test_planned_and_hil_rows(self):
         self.rows("M02")[0]["test"] = self.rows("M01")[0]["test"]
         self.rows("M05")[0]["hil"]["run"] = ["tools/hil/no_such_script.py"]
@@ -365,14 +378,16 @@ class Scenarios(unittest.TestCase):
     def test_interop_rejects_incompatible_peer_protocol(self):
         checks = [step.argv for step in check.interop()
                   if step.argv[0] == "assert-peer-version"]
-        self.assertEqual(checks, [["assert-peer-version", check.PEER],
-                                  ["assert-peer-version", check.MESH_PEER]])
+        self.assertEqual(checks, [["assert-peer-version", check.PEER, check.PEER_VERSION],
+                                  ["assert-peer-version", check.MESH_PEER,
+                                   check.MESH_PEER_VERSION]])
         with tempfile.TemporaryDirectory() as tmp:
             peer = Path(tmp) / "peer"
-            for version, expected in (("0", 1), ("1", 0)):
+            for version, required, expected in (("0", "1", 1), ("1", "1", 0),
+                                                ("1", "2", 1), ("2", "2", 0)):
                 peer.write_text(f"#!/bin/sh\nprintf '{version}\\n'\n")
                 peer.chmod(0o700)
-                step = check.Step(["assert-peer-version", str(peer)])
+                step = check.Step(["assert-peer-version", str(peer), required])
                 with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                     self.assertEqual(check.run([step], dry_run=False), expected)
 

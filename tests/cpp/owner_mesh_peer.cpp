@@ -52,7 +52,7 @@
 //
 //   X <dst_mac 6><frame>       one captured radio TX frame, FIFO
 //   B <usb bytes>              USB TX bytes (chunked to the frame bound)
-//   G <snapshot>               fixed-shape state snapshot (see emit_g)
+//   G <snapshot>               bounded state snapshot (see emit_snapshot)
 //   D                          end of the TICK response
 //   N <image>                  fake-NVS image (power-cut handover; also
 //                              written to --nvs-save on esp_restart)
@@ -92,7 +92,8 @@
 // notice_down_live u8 | unknown_peer_rx u32 |
 // proxy_frames_rejected u32 | proxy_cookie_rejects u32
 // | probes_tx u32 | peer_capacity u32 | stale_expirations u32 |
-// repair_demands u32 | neighbor_count u8 | phase[gw,A,B] u8*3 |
+// repair_demands u32 | neighbor_count u8 | world_nodes u8 |
+// phase[0..world_nodes] u8*world_nodes |
 // transit_conflicts u32 | receipt_conflicts u32 | no_route u32 |
 // stale_tx_results u32
 // | driver_peers u8
@@ -102,6 +103,7 @@
 // Setup arrives on argv (all integers accept 0x hex; blobs are hex):
 //
 //   --node <u64> --mac <12hex> --role <u8> --t0 <ms> --seed <u64>
+//   --world-nodes <2..32>  nodes in the scenario snapshot (default 3)
 //   --gateway | --member
 //   --usb-secret <hex>   (gateway: the USB dev secret, test material)
 //   --cap <u32>           (gateway: USB HelloAck capability bitmap)
@@ -748,6 +750,7 @@ struct Setup {
   std::uint8_t role{0};
   MonotonicMs t0{0};
   std::uint64_t seed{0};
+  std::uint8_t world_nodes{3};
   bool gateway{false};
   Bytes usb_secret;
   std::uint32_t usb_cap{0};
@@ -791,6 +794,10 @@ Setup parse_argv(int argc, char** argv) {
     } else if (arg == std::string("--seed") && take_arg(argc, argv, i, value)) {
       setup.seed = parse_u64(value);
       have_seed = true;
+    } else if (arg == std::string("--world-nodes") && take_arg(argc, argv, i, value)) {
+      const std::uint64_t nodes = parse_u64(value);
+      if (nodes < 2 || nodes > 32) fatal("--world-nodes must be 2..32");
+      setup.world_nodes = static_cast<std::uint8_t>(nodes);
     } else if (arg == std::string("--gateway")) {
       setup.gateway = true;
       have_mode = true;
@@ -903,7 +910,8 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
                    routeloom::espnow::Sdkv1Stores& stores,
                    routeloom::espnow::EspNowRuntime& runtime,
                    const routeloom::usb::UsbBridge* bridge, const TeeObserver& observer,
-                   AppTx* app_tx, std::uint32_t send_count_base) {
+                   AppTx* app_tx, std::uint32_t send_count_base,
+                   std::uint8_t world_nodes) {
   using namespace routeloom;
   using namespace routeloom::espnow;
   using namespace routeloom::sdkv1;
@@ -1035,8 +1043,10 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
   put_u32(out, stats.stale_expirations);
   put_u32(out, stats.repair_demands);
   out.push_back(discovery != nullptr ? static_cast<std::uint8_t>(discovery->neighbor_count()) : 0);
-  for (const NodeId peer : {0x00A1000000000001ULL, 0x00A1000000000101ULL,
-                            0x00A1000000000102ULL}) {
+  out.push_back(world_nodes);
+  for (std::uint8_t index = 0; index < world_nodes; ++index) {
+    const NodeId peer = index == 0 ? 0x00A1000000000001ULL
+                                   : 0x00A1000000000101ULL + index - 1;
     NeighborPhase phase{};
     out.push_back(discovery != nullptr && discovery->phase_of(peer, phase)
                       ? static_cast<std::uint8_t>(phase)
@@ -1066,7 +1076,7 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
 
 int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--harness-version") == 0) {
-    std::fputs("1\n", stdout);
+    std::fputs("2\n", stdout);
     return 0;
   }
   using namespace routeloom;
@@ -1229,7 +1239,7 @@ int main(int argc, char** argv) {
           app_tx[i].reason[sizeof(app_tx[i].reason) - 1] = '\0';
         }
         emit_snapshot(owner, stores, runtime, setup.gateway ? &bridge : nullptr, observer, app_tx,
-                      send_count_base);
+                      send_count_base, setup.world_nodes);
         write_frame(Bytes{'D'});
         break;
       }
