@@ -7,4 +7,7 @@ namespace {
 routeloom::Device s_device;
 }  // namespace
 
-extern "C" void app_main(void) { s_device.start(routeloom::device_config_from_kconfig()); }
+extern "C" void app_main(void) {
+  routeloom::DeviceConfig config = routeloom::device_config_from_kconfig();
+  s_device.start(config);
+}
