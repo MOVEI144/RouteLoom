@@ -682,14 +682,15 @@ impl MeshWorld {
     }
 
     /// A world whose peers boot with scenario arguments: `gateway` on
-    /// the gateway, `member` on every other peer.
+    /// the gateway, `member` on every other peer. All nodes power on at
+    /// the same tick, like `start`.
     pub(super) fn start_with_args(
         tag: &str,
         switch: Switch,
         gateway: &[&str],
         member: &[&str],
     ) -> Option<Self> {
-        let boot_ms = staggered_boot(switch.nodes());
+        let boot_ms = vec![0; switch.nodes()];
         let args = [gateway, member];
         Self::start_booted(tag, switch, &boot_ms, false, &[], &args)
     }
