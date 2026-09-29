@@ -2456,7 +2456,9 @@ void test_bridge_rx_assurance() {
     World world;
     HostDriver host;
     MonotonicMs now = 0;
-    CHECK_OK(world.bridge.set_rx_assurance_profile(kProfileLegacyFixture));
+    // The retired profile id 3 (the removed dev-PSK fixture) is refused.
+    CHECK(world.bridge.set_rx_assurance_profile(3).code == StatusCode::InvalidArgument);
+    CHECK_OK(world.bridge.set_rx_assurance_profile(kProfileDevRam));
     CHECK(host_handshake(world, host, now, 0xA882, 110) != 0);
     const auto grant = grant_body(256, 1u << 20);
     world.feed(host.sealed(FrameKind::Credit, 111,
@@ -2498,7 +2500,7 @@ void test_bridge_rx_assurance() {
       CHECK_OK(decode_ingress_assurance_tail(
           ByteView{body.data() + 20 + 3, kIngressAssuranceTailSize}, tail));
       CHECK(tail.verified);
-      CHECK(tail.profile == kProfileLegacyFixture);
+      CHECK(tail.profile == kProfileDevRam);
       CHECK(tail.site_epoch == 7);
       world.device_sink.frames.clear();
     }
@@ -2573,7 +2575,7 @@ void test_bridge_rx_assurance() {
               ByteView{mutated.data(), mutated.size()}, back)
               .ok());
     mutated = encoded;
-    mutated[2] = 0x04;
+    mutated[2] = 0x03;  // retired fixture profile
     CHECK(!decode_ingress_assurance_tail(
               ByteView{mutated.data(), mutated.size()}, back)
               .ok());
@@ -2581,7 +2583,7 @@ void test_bridge_rx_assurance() {
               ByteView{encoded.data(), encoded.size() - 1}, back)
               .ok());
     IngressAssurance over{};
-    over.profile = 4;
+    over.profile = 3;
     CHECK(!encode_ingress_assurance_tail(
               over, MutableByteView{encoded.data(), encoded.size()})
               .ok());

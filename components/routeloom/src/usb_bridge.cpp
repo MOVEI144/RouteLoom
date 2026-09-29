@@ -167,7 +167,7 @@ Status UsbBridge::set_rx_assurance_profile(const std::uint8_t profile) noexcept 
   if (config_.mesh == nullptr) {
     return Status::error(StatusCode::InvalidState, "rx assurance needs mesh");
   }
-  if (profile > kProfileLegacyFixture) {
+  if (profile > kProfileMax) {
     return Status::error(StatusCode::InvalidArgument, "rx assurance profile");
   }
   rx_assurance_ = static_cast<std::uint8_t>(

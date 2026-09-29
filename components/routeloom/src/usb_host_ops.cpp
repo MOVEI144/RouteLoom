@@ -242,7 +242,7 @@ Status encode_ingress_assurance_tail(const IngressAssurance& assurance,
   if (out.size < kIngressAssuranceTailSize) {
     return Status::error(StatusCode::NoCapacity, "ingress assurance output");
   }
-  if (assurance.profile > kProfileLegacyFixture) {
+  if (assurance.profile > kProfileMax) {
     return Status::error(StatusCode::InvalidArgument,
                          "ingress assurance profile");
   }
@@ -272,7 +272,7 @@ Status decode_ingress_assurance_tail(const ByteView tail,
   if (status) status = reader.read_u32(site_epoch);
   if (!status) return status;
   if ((flags & ~kIngressAssuranceVerified) != 0 || reserved != 0 ||
-      profile > kProfileLegacyFixture) {
+      profile > kProfileMax) {
     return Status::error(StatusCode::ProtocolError, "INGRESS_ASSURANCE_FIELDS");
   }
   out.verified = (flags & kIngressAssuranceVerified) != 0;
