@@ -896,6 +896,13 @@ fn mesh_diamond_delivers_under_leg_noise() {
         return; // no C++ peers: skip (ignore-equivalent)
     };
     converge_outward(&mut world, "diamond");
+    let leaf = world.index_of(world.nodes[3]);
+    assert_eq!(world.snaps[1].phases.len(), world.peers.len());
+    assert!(
+        world.snaps[1].phases[leaf] == PHASE_REACHABLE
+            || world.snaps[2].phases[leaf] == PHASE_REACHABLE,
+        "the leaf binds to a diamond relay"
+    );
     world.switch.set_noise(
         LegNoise {
             loss_ppm: 20_000,
@@ -1032,5 +1039,26 @@ fn mesh_profile_role_above_profile_refused() {
             path.display()
         );
         assert!(!output.status.success(), "{}: exit status", path.display());
+    }
+    if let Some(path) = std::env::var_os("ROUTELOOM_MESH_PEER_A") {
+        let output = Command::new(&path)
+            .args(["--node", &format!("{NODE_A:#x}"), "--mac", &hex(&MAC_A)])
+            .args(["--role", &format!("{ROLE_ENDPOINT}"), "--join-cap", "3"])
+            .args(["--t0", "1000", "--seed", "7", "--member", "--channel", "6"])
+            .output()
+            .expect("spawn endpoint with relay capability");
+        assert!(
+            !output.status.success(),
+            "over-profile join capability accepted"
+        );
+        assert!(output.stdout.len() >= 3, "missing fatal frame");
+        let length = usize::from(u16::from_le_bytes([output.stdout[0], output.stdout[1]]));
+        assert_eq!(output.stdout.len(), length + 2, "only one fatal frame");
+        assert_eq!(output.stdout[2], b'E', "fatal frame tag");
+        assert_eq!(
+            &output.stdout[3..],
+            b"RESOURCE_PROFILE_ROLE_MISMATCH",
+            "role mismatch reason"
+        );
     }
 }

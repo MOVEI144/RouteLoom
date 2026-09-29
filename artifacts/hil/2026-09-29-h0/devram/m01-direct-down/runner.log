@@ -1,0 +1,13 @@
+accepted=10 delivered=10
+accepted=20 delivered=20
+accepted=30 delivered=30
+accepted=40 delivered=40
+accepted=50 delivered=50
+accepted=60 delivered=60
+accepted=70 delivered=70
+accepted=80 delivered=80
+accepted=90 delivered=90
+accepted=100 delivered=100
+{"requested":100,"host_accepted":100,"delivered":100,"stopped_reason":null,"success_rate":1.0,"rate_limit_retries":0,"pace_s":5.0,"elapsed_s":495.11,"latency_ms_median":53.385000000000005,"latency_ms_p95":105.63,"latency_ms_max":310.49,"by_destination":{"3":{"accepted":100,"delivered":100}},"evidence":"artifacts/hil/2026-09-29-h0/devram/m01-direct-down/traffic.jsonl"}
+runner rc=0
+FLOW_DONE

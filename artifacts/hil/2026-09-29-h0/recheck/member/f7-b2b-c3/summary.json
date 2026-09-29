@@ -1,0 +1,29 @@
+{
+  "sends": 8,
+  "accepted": 8,
+  "send_duration_s": 0.01,
+  "final_states": {
+    "0": "delivered",
+    "1": "delivered",
+    "2": "delivered",
+    "3": "delivered",
+    "4": "delivered",
+    "5": "sent",
+    "6": "sent",
+    "7": "delivered"
+  },
+  "final_reasons": {
+    "0": "END_RECEIVED",
+    "1": "END_RECEIVED",
+    "2": "END_RECEIVED",
+    "3": "END_RECEIVED",
+    "4": "END_RECEIVED",
+    "5": null,
+    "6": null,
+    "7": "END_RECEIVED"
+  },
+  "terminal": 6,
+  "receiver_logged": 8,
+  "observed_s": 94.1,
+  "note": "relay console shows sequences 29-36 (all 8); requests 5 and 6 stayed at host-local state sent with no DeliveryEvent"
+}

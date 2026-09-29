@@ -1,0 +1,11 @@
+{
+  "identity": {
+    "chip": "esp32c6",
+    "mac": "10:bd:a3:ff:fe:b1:47:54",
+    "log": "flash-endpoint-preflight.log",
+    "flash_bytes": 4194304
+  },
+  "app_sha256": "09de53c511c905cf817a7acd11287aa3eee306773ecb98ef156ccfde486d2e26",
+  "app_bytes": 1420208,
+  "bundle": "hil-h0-c6-n3-devram-drop-bridge-reference_node-esp32c6"
+}

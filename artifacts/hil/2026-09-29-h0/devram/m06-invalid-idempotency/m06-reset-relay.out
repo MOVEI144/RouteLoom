@@ -1,0 +1,1 @@
+{"baseline_delivered": 0, "baseline_sends": 3, "cycles": 10, "sends_per_cycle": 10, "delivered_total": 0, "delivered_per_cycle": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "cycles_recovered": 0, "recovery_s_min": null, "recovery_s_max": null, "recovery_s_median": null, "idempotency_full_total": 100, "boot_failures": 0}

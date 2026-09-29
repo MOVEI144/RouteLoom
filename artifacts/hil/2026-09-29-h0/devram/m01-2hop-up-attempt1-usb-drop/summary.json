@@ -1,0 +1,18 @@
+{
+  "app_only": {
+    "identity": {
+      "chip": "esp32c6",
+      "mac": "10:bd:a3:ff:fe:b1:47:54",
+      "log": "flash-endpoint-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "bda9e2470df50d7bef7bbeb86f97cb2892dd0ef48e3b436f920f334c4c732cf2",
+    "app_bytes": 1422720,
+    "bundle": "hil-h0-c6-n3-devram-drop-bridge-up-reference_node-esp32c6"
+  },
+  "device_send_attempts": 0,
+  "device_admitted": 0,
+  "host_records": 0,
+  "host_unique_payloads": 0,
+  "record_keys": []
+}

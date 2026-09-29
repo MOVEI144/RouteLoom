@@ -1,0 +1,11 @@
+{
+  "sends": 150,
+  "accepted": 150,
+  "errors": {},
+  "first_idempotency_full_index": null,
+  "delivery_states": {
+    "delivered/END_RECEIVED": 53,
+    "failed/HOP_ACCEPT_TIMEOUT": 59,
+    "failed/IDEMPOTENCY_FULL": 38
+  }
+}

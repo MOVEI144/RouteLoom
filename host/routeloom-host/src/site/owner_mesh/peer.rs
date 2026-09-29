@@ -447,7 +447,7 @@ pub(super) struct MeshSnap {
     pub(super) stale_expirations: u32,
     pub(super) repair_demands: u32,
     pub(super) neighbor_count: u8,
-    pub(super) phases: [u8; 3],
+    pub(super) phases: Vec<u8>,
     pub(super) transit_conflicts: u32,
     pub(super) receipt_conflicts: u32,
     pub(super) no_route: u32,
@@ -593,8 +593,11 @@ pub(super) fn parse_mesh_snap(payload: &[u8]) -> MeshSnap {
     snap.repair_demands = get_u32(payload, &mut pos);
     snap.neighbor_count = payload[pos];
     pos += 1;
-    snap.phases.copy_from_slice(&payload[pos..pos + 3]);
-    pos += 3;
+    let world_nodes = usize::from(payload[pos]);
+    pos += 1;
+    assert!((2..=32).contains(&world_nodes), "snapshot world size");
+    snap.phases = payload[pos..pos + world_nodes].to_vec();
+    pos += world_nodes;
     snap.transit_conflicts = get_u32(payload, &mut pos);
     snap.receipt_conflicts = get_u32(payload, &mut pos);
     snap.no_route = get_u32(payload, &mut pos);
@@ -639,6 +642,7 @@ pub(super) struct MeshPeer {
     pub(super) gateway: bool,
     pub(super) flat: bool,
     pub(super) seed: u64,
+    pub(super) world_nodes: usize,
     pub(super) usb_secret_hex: String,
     pub(super) nvs_save: std::path::PathBuf,
     pub(super) t0: u64,
@@ -661,6 +665,7 @@ impl MeshPeer {
         persona: &Persona,
         t0: u64,
         seed: u64,
+        world_nodes: usize,
         flash: &std::path::Path,
         flash_ext: &std::path::Path,
         usb_secret_hex: &str,
@@ -674,6 +679,7 @@ impl MeshPeer {
             persona.gateway,
             t0,
             seed,
+            world_nodes,
             usb_secret_hex,
             None,
             Some((flash, flash_ext)),
@@ -692,6 +698,7 @@ impl MeshPeer {
             gateway: persona.gateway,
             flat,
             seed,
+            world_nodes,
             usb_secret_hex: usb_secret_hex.to_string(),
             nvs_save: nvs_save.to_path_buf(),
             t0,
@@ -712,6 +719,7 @@ impl MeshPeer {
         gateway: bool,
         t0: u64,
         seed: u64,
+        world_nodes: usize,
         usb_secret_hex: &str,
         nvs_load: Option<&std::path::Path>,
         flash: Option<(&std::path::Path, &std::path::Path)>,
@@ -732,6 +740,8 @@ impl MeshPeer {
             .arg(format!("{t0}"))
             .arg("--seed")
             .arg(format!("{seed}"))
+            .arg("--world-nodes")
+            .arg(format!("{world_nodes}"))
             .arg(if gateway { "--gateway" } else { "--member" })
             .arg("--channel")
             .arg("6")
@@ -786,6 +796,7 @@ impl MeshPeer {
             self.gateway,
             now,
             self.seed.wrapping_add(u64::from(self.reboots)),
+            self.world_nodes,
             &usb_secret_hex,
             Some(&nvs_save),
             None,
@@ -840,6 +851,11 @@ impl MeshPeer {
                 self.begin_tick(now);
             }
             if let Some(mut tick) = self.recv_tick() {
+                assert_eq!(
+                    tick.snap.phases.len(),
+                    self.world_nodes,
+                    "snapshot world size"
+                );
                 tick.rebooted = attempt > 0;
                 return tick;
             }

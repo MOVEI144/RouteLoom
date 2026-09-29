@@ -1,0 +1,63 @@
+{
+  "board": "relay",
+  "node": "0000000000000002",
+  "role": "bench",
+  "setup_bundle": "h0-setup-ref-c6-member",
+  "field_bundle": "h0-ref-c6-member-relay",
+  "erase": "ok",
+  "config": {
+    "generation": 1,
+    "node": "0000000000000002",
+    "role": "reference",
+    "security": "member",
+    "secrets_generation": "0",
+    "fingerprint": "-",
+    "secrets_fingerprint": ""
+  },
+  "identity_error": "seal_failed: timeout",
+  "nvs_after_identity": {
+    "rlcfg": {
+      "sha256": "c509debd18ef0c8e806a3a3beea3ecae20de886290f1137c7026583411470f2a",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "913963ef7064bdd921b9e2ef8803d0fbf929b81e3503875a6e6575290ff79771",
+      "blank": false
+    }
+  },
+  "app_only": {
+    "identity": {
+      "chip": "esp32c6",
+      "mac": "10:bd:a3:ff:fe:b1:48:a8",
+      "log": "flash-relay-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "3d93b490bb0539f1885ee1daabc2d9b959177786e6ce6cc07bfbeb9b69b1e0fb",
+    "app_bytes": 1418016,
+    "bundle": "hil-h0-ref-c6-member-relay-reference_node-esp32c6"
+  },
+  "nvs_after_app_write": {
+    "rlcfg": {
+      "sha256": "c509debd18ef0c8e806a3a3beea3ecae20de886290f1137c7026583411470f2a",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "913963ef7064bdd921b9e2ef8803d0fbf929b81e3503875a6e6575290ff79771",
+      "blank": false
+    }
+  },
+  "nvs_preserved": {
+    "rlcfg": true,
+    "rlkeys": true,
+    "rlsec": true
+  },
+  "readback_error": "not_locked: run() must complete before finalize"
+}

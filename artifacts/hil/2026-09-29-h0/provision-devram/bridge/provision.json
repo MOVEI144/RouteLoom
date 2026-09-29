@@ -1,0 +1,61 @@
+{
+  "board": "bridge",
+  "node": "0000000000000001",
+  "role": "bridge",
+  "setup_bundle": "h0-setup-bridge-c3-devram",
+  "field_bundle": "h0-bridge-c3-devram",
+  "config": {
+    "generation": 1,
+    "node": "0000000000000001",
+    "role": "bridge",
+    "security": "devram",
+    "secrets_generation": "1",
+    "fingerprint": "5420ba067b0d435fb4f98684a7eccda4fe579c22419f8c8ff5f8715671d65574",
+    "secrets_fingerprint": "5420ba067b0d435fb4f98684a7eccda4fe579c22419f8c8ff5f8715671d65574"
+  },
+  "nvs_after_config": {
+    "rlcfg": {
+      "sha256": "36ec2b9134556cd1cff70388a10f0bdc45a49b180ad5e07f0397f3f7d53ad334",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "853fda180bf1d73d134b06e5e1538a28900b925604002e13f9d6ba861c738391",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "0bbea525b837656cc7132382d4c74b12382fda2824eee5fc6e0f9e2436f5d829",
+      "blank": false
+    }
+  },
+  "app_only": {
+    "identity": {
+      "chip": "esp32c3",
+      "mac": "94:a9:90:7a:26:ac",
+      "log": "flash-bridge-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "1184b055713f6bea353881282d948a4a91302079e9d4b5ad5ad9f1de0223d891",
+    "app_bytes": 1366992,
+    "bundle": "hil-h0-bridge-c3-devram-bridge_node-esp32c3"
+  },
+  "nvs_after_app_write": {
+    "rlcfg": {
+      "sha256": "36ec2b9134556cd1cff70388a10f0bdc45a49b180ad5e07f0397f3f7d53ad334",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "853fda180bf1d73d134b06e5e1538a28900b925604002e13f9d6ba861c738391",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "0bbea525b837656cc7132382d4c74b12382fda2824eee5fc6e0f9e2436f5d829",
+      "blank": false
+    }
+  },
+  "nvs_preserved": {
+    "rlcfg": true,
+    "rlkeys": true,
+    "rlsec": true
+  },
+  "boot_lines": 64
+}

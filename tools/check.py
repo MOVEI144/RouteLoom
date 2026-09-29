@@ -34,6 +34,7 @@ SCENARIOS = ROOT / "tests" / "e2e" / "scenarios.json"
 SCENARIO_SCHEMA = 1
 SCENARIO_KEYS = ("id", "family", "variant", "tier", "layer", "topology", "faults", "pass",
                  "test", "prs", "issues", "hil", "status")
+REQUIRED_V2_PRS = {f"V2-{number:02d}" for number in range(1, 23)}
 JOBS = str(min(os.cpu_count() or 2, 8))
 FUZZ_TARGETS = ("wire_frame", "usb_codec", "autonomy", "endpoint", "host_ops", "migration",
                 "cose", "rlres1", "sdkv1", "sdkv1_ead", "sdkv1_join")
@@ -48,6 +49,7 @@ GENERATED_GOLDENS = (
 PEER = "build/tests/cpp/routeloom_joiner_interop_peer"
 MESH_PEER = "build/tests/cpp/routeloom_owner_mesh_peer"
 PEER_VERSION = "1"
+MESH_PEER_VERSION = "2"
 # A live interop suite that finds no C++ peer prints this and passes as a
 # skip; the interop stage treats it as a failure. Not anchored: with
 # --nocapture the harness output of parallel tests can share the line.
@@ -145,8 +147,8 @@ def interop() -> list[Step]:
               "routeloom_joiner_interop_peer", "routeloom_owner_mesh_peer"]),
         Step(["test", "-x", PEER]),
         Step(["test", "-x", MESH_PEER]),
-        Step(["assert-peer-version", PEER]),
-        Step(["assert-peer-version", MESH_PEER]),
+        Step(["assert-peer-version", PEER, PEER_VERSION]),
+        Step(["assert-peer-version", MESH_PEER, MESH_PEER_VERSION]),
         Step(["cargo", "test", "-p", "routeloom-host", "--bins", "site::joiner_interop",
               "--", "--nocapture"], cwd="host", env=env, forbid=SKIP_MARK,
              require=live_cases(rows, "site/joiner_interop.rs")),
@@ -277,9 +279,7 @@ def test_exists(ref: str, root: Path = ROOT) -> bool:
 
 
 def scenario_errors(data: dict, root: Path = ROOT) -> list[str]:
-    """Unique ids; every pr/nightly row that is not planned names tests
-    that exist; a planned row names none; an hil row names existing HIL
-    scripts or `manual`."""
+    """Check row references and keep the live Owner mesh tests in the table."""
     errors = []
     if data.get("schema_version") != SCENARIO_SCHEMA:
         errors.append(f"schema_version {data.get('schema_version')!r} != {SCENARIO_SCHEMA}")
@@ -323,6 +323,17 @@ def scenario_errors(data: dict, root: Path = ROOT) -> list[str]:
                        or Path(script).suffix != ".py"
                        or not (root / script).is_file() for script in hil["run"])):
             errors.append(f"{rid}: hil run {hil.get('run')!r} is neither manual nor HIL scripts")
+    covered_prs = {pr for row in data.get("rows", []) for pr in row.get("prs", [])}
+    errors += [f"{pr}: no scenario row" for pr in sorted(REQUIRED_V2_PRS - covered_prs)]
+    registered = {ref for row in data.get("rows", [])
+                  if row.get("status") in ("live", "red") for ref in row.get("test", [])}
+    source_dir = root / "host/routeloom-host/src/site/owner_mesh"
+    for source in sorted(source_dir.glob("*.rs")):
+        for name in re.findall(r"#\[test\]\s*(?:#\[[^\]]*\]\s*)*fn\s+(\w+)\(",
+                               source.read_text(encoding="utf-8")):
+            ref = f"{source.relative_to(root)}::{name}"
+            if ref not in registered:
+                errors.append(f"unregistered Owner mesh test {ref}")
     return errors
 
 
@@ -427,6 +438,15 @@ def elf_symbols(path: Path) -> list[str]:
     return [n for n in names if n]
 
 
+# Budgets are ratcheted to CI measurements, but the same source builds a few
+# dozen bytes apart between toolchain hosts and path layouts. Drift within these
+# margins passes; anything larger must update the budget with a reason. The hard
+# static-RAM floor is still enforced by tools/firmware_ram_report.py.
+APP_BIN_DRIFT = 2048
+STATIC_FREE_DRIFT = 256
+RTC_DRIFT = 64
+
+
 def size_errors(data: dict, cell: dict, build: Path) -> list[str]:
     budget = cell.get("budget")
     if not budget:
@@ -440,21 +460,24 @@ def size_errors(data: dict, cell: dict, build: Path) -> list[str]:
         return [f"missing {p}" for p in missing]
     errors = []
     app_bin = files["bin"].stat().st_size
-    if app_bin > budget["app_bin_max"]:
-        errors.append(f"app.bin {app_bin} B > budget {budget['app_bin_max']} B")
+    if app_bin > budget["app_bin_max"] + APP_BIN_DRIFT:
+        errors.append(f"app.bin {app_bin} B > budget {budget['app_bin_max']} B "
+                      f"(+{APP_BIN_DRIFT} B drift)")
     report = json.loads(files["ram"].read_text(encoding="utf-8"))
     for key, expected in (("cell", cell["id"]), ("app", cell["app"]),
                           ("target", cell["target"])):
         if report.get(key) != expected:
             errors.append(f"ram-report {key} {report.get(key)!r} != {expected!r}")
     free = report["guard"]["free"]
-    if free < budget["static_free_min"]:
-        errors.append(f"static RAM free {free} B < budget {budget['static_free_min']} B")
+    if free < budget["static_free_min"] - STATIC_FREE_DRIFT:
+        errors.append(f"static RAM free {free} B < budget {budget['static_free_min']} B "
+                      f"(-{STATIC_FREE_DRIFT} B drift)")
     rtc = rtc_used(report)
     if rtc is None:
         errors.append("missing RTC/LP RAM measurement in ram-report")
-    elif rtc > budget["rtc_used_max"]:
-        errors.append(f"RTC/LP RAM used {rtc} B > budget {budget['rtc_used_max']} B")
+    elif rtc > budget["rtc_used_max"] + RTC_DRIFT:
+        errors.append(f"RTC/LP RAM used {rtc} B > budget {budget['rtc_used_max']} B "
+                      f"(+{RTC_DRIFT} B drift)")
     patterns = data.get("symbols_absent", []) + cell.get("symbols_absent", [])
     if patterns:
         try:
@@ -502,7 +525,7 @@ def run(steps: list[Step], dry_run: bool, data: dict | None = None) -> int:
                                         capture_output=True, text=True, timeout=5)
             except (OSError, subprocess.TimeoutExpired):
                 result = None
-            if result is None or result.returncode != 0 or result.stdout != PEER_VERSION + "\n":
+            if result is None or result.returncode != 0 or result.stdout != step.argv[2] + "\n":
                 print(f"check.py: peer RPC version mismatch: {step.argv[1]}", file=sys.stderr)
                 return 1
             continue

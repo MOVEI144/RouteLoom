@@ -1,0 +1,53 @@
+{
+  "board": "endpoint",
+  "node": "0000000000000003",
+  "role": "bench",
+  "setup_bundle": "h0-setup-ref-c6-member",
+  "field_bundle": "h0-ref-c6-member",
+  "identity_error": "resumed after a console panic; identity sealed per setup boot log",
+  "nvs_after_identity": {
+    "rlcfg": {
+      "sha256": "cba594d240a37450178a76980b4d452bced316c037b1f8a2f6de2c66a8147778",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "d5a36074d4d73de86be1f2eebf9cfd9a198811f50901deadbb2ca3d7dabcd7a0",
+      "blank": false
+    }
+  },
+  "app_only": {
+    "identity": {
+      "chip": "esp32c6",
+      "mac": "10:bd:a3:ff:fe:b1:47:54",
+      "log": "flash-endpoint-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "ed78e14ae8731b018a54519674c578a5106b92ba2cb3a3dc7b3b95648ee82de1",
+    "app_bytes": 1417824,
+    "bundle": "hil-h0-ref-c6-member-reference_node-esp32c6"
+  },
+  "nvs_after_app_write": {
+    "rlcfg": {
+      "sha256": "cba594d240a37450178a76980b4d452bced316c037b1f8a2f6de2c66a8147778",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "d5a36074d4d73de86be1f2eebf9cfd9a198811f50901deadbb2ca3d7dabcd7a0",
+      "blank": false
+    }
+  },
+  "nvs_preserved": {
+    "rlcfg": true,
+    "rlkeys": true,
+    "rlsec": true
+  },
+  "readback_error": "not_locked: run() must complete before finalize"
+}

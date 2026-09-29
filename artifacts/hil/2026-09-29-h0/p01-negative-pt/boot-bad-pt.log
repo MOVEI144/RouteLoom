@@ -1,0 +1,68 @@
+[2026-09-28T19:29:32.220+00:00] !! reset pulse
+[2026-09-28T19:29:32.320+00:00] ESP-ROM:esp32c6-20220919
+[2026-09-28T19:29:32.320+00:00] Build:Sep 19 2022
+[2026-09-28T19:29:32.320+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x1e (SPI_FAST_FLASH_BOOT)
+[2026-09-28T19:29:32.320+00:00] Saved PC:0x40800132
+[2026-09-28T19:29:32.320+00:00] SPIWP:0xee
+[2026-09-28T19:29:32.320+00:00] mode:DIO, clock div:2
+[2026-09-28T19:29:32.320+00:00] load:0x40875730,len:0x1738
+[2026-09-28T19:29:32.320+00:00] load:0x4086b910,len:0xd8c
+[2026-09-28T19:29:32.320+00:00] load:0x4086e610,len:0x32e0
+[2026-09-28T19:29:32.320+00:00] entry 0x4086b91a
+[2026-09-28T19:29:32.320+00:00] I (23) boot: ESP-IDF v6.0.3 2nd stage bootloader
+[2026-09-28T19:29:32.320+00:00] I (23) boot: compile time Sep 28 2026 17:45:27
+[2026-09-28T19:29:32.320+00:00] I (24) boot: chip revision: v0.2
+[2026-09-28T19:29:32.320+00:00] I (24) boot: efuse block revision: v0.3
+[2026-09-28T19:29:32.320+00:00] I (26) boot.esp32c6: SPI Speed      : 80MHz
+[2026-09-28T19:29:32.320+00:00] I (30) boot.esp32c6: SPI Mode       : DIO
+[2026-09-28T19:29:32.320+00:00] I (34) boot.esp32c6: SPI Flash Size : 4MB
+[2026-09-28T19:29:32.320+00:00] I (38) boot: Enabling RNG early entropy source...
+[2026-09-28T19:29:32.320+00:00] I (42) boot: Partition Table:
+[2026-09-28T19:29:32.320+00:00] I (45) boot: ## Label            Usage          Type ST Offset   Length
+[2026-09-28T19:29:32.320+00:00] I (51) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+[2026-09-28T19:29:32.320+00:00] I (58) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+[2026-09-28T19:29:32.320+00:00] I (64) boot:  2 otadata          OTA data         01 00 00010000 00002000
+[2026-09-28T19:29:32.320+00:00] I (71) boot:  3 rlcfg            WiFi data        01 02 00012000 00006000
+[2026-09-28T19:29:32.320+00:00] I (77) boot:  4 rlkeys           WiFi data        01 02 00018000 00003000
+[2026-09-28T19:29:32.320+00:00] I (84) boot:  5 rlsec            WiFi data        01 02 00020000 00020000
+[2026-09-28T19:29:32.320+00:00] I (90) boot:  6 ota_0            OTA app          00 10 00040000 001d0000
+[2026-09-28T19:29:32.320+00:00] I (97) boot:  7 ota_1            OTA app          00 11 00210000 001d0000
+[2026-09-28T19:29:32.320+00:00] I (103) boot:  8 coredump         Unknown data     01 03 003e0000 00008000
+[2026-09-28T19:29:32.320+00:00] I (110) boot: End of partition table
+[2026-09-28T19:29:32.320+00:00] I (114) esp_image: segment 0: paddr=00040020 vaddr=42120020 size=25d50h (154960) map
+[2026-09-28T19:29:32.320+00:00] I (150) esp_image: segment 1: paddr=00065d78 vaddr=40800000 size=0a2a0h ( 41632) load
+[2026-09-28T19:29:32.320+00:00] I (159) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=117148h (1143112) map
+[2026-09-28T19:29:32.420+00:00] I (371) esp_image: segment 3: paddr=00187170 vaddr=4080a2a0 size=0fd6ch ( 64876) load
+[2026-09-28T19:29:32.421+00:00] I (385) esp_image: segment 4: paddr=00196ee4 vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-28T19:29:32.421+00:00] I (389) esp_image: segment 5: paddr=0019ab00 vaddr=50000000 size=00060h (    96) load
+[2026-09-28T19:29:32.421+00:00] I (390) esp_image: segment 6: paddr=0019ab68 vaddr=50000068 size=00024h (    36) load
+[2026-09-28T19:29:32.521+00:00] I (402) boot: Loaded app from partition at offset 0x40000
+[2026-09-28T19:29:32.521+00:00] I (403) boot: Disabling RNG early entropy source...
+[2026-09-28T19:29:32.521+00:00] I (419) cpu_start: Unicore app
+[2026-09-28T19:29:34.335+00:00] !! USB serial error: device reports readiness to read but returned no data (device disconnected or mu
+[2026-09-28T19:29:34.687+00:00] !! reopened after USB drop
+[2026-09-28T19:29:34.787+00:00] I (371) esp_image: segment 3: paddr=00187170 vaddr=4080a2a0 sizeI (433) cpu_start: GPIO 17 and 16 are used as console UART I/O pins
+[2026-09-28T19:29:34.787+00:00] I (434) cpu_start: Pro cpu start user code
+[2026-09-28T19:29:34.787+00:00] I (434) cpu_start: cpu freq: 160000000 Hz
+[2026-09-28T19:29:34.787+00:00] I (436) app_init: Application information:
+[2026-09-28T19:29:34.787+00:00] I (440) app_init: Project name:     routeloom_reference_node
+[2026-09-28T19:29:34.787+00:00] I (445) app_init: App version:      1
+[2026-09-28T19:29:34.787+00:00] I (448) app_init: Compile time:     Sep 28 2026 17:40:57
+[2026-09-28T19:29:34.787+00:00] I (453) app_init: ELF file SHA256:  295074fcc...
+[2026-09-28T19:29:34.787+00:00] I (458) app_init: ESP-IDF:          v6.0.3
+[2026-09-28T19:29:34.787+00:00] I (462) efuse_init: Min chip rev:     v0.0
+[2026-09-28T19:29:34.787+00:00] I (465) efuse_init: Max chip rev:     v0.99
+[2026-09-28T19:29:34.787+00:00] I (469) efuse_init: Chip rev:         v0.2
+[2026-09-28T19:29:34.787+00:00] I (473) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-28T19:29:34.787+00:00] I (479) heap_init: At 4084F6C0 len 0002CF50 (179 KiB): RAM
+[2026-09-28T19:29:34.787+00:00] I (485) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+[2026-09-28T19:29:34.787+00:00] I (490) heap_init: At 5000008C len 00003F5C (15 KiB): RTCRAM
+[2026-09-28T19:29:34.787+00:00] I (496) spi_flash: detected chip: generic
+[2026-09-28T19:29:34.787+00:00] I (499) spi_flash: flash io: dio
+[2026-09-28T19:29:34.787+00:00] I (502) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-28T19:29:34.787+00:00] I (508) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-28T19:29:34.787+00:00] I (523) main_task: Started on CPU0
+[2026-09-28T19:29:34.787+00:00] I (525) main_task: Calling app_main()
+[2026-09-28T19:29:34.887+00:00] I (529) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-28T19:29:34.887+00:00] E (535) rl_flash: partition coredump: flashed type=1 subtype=3 0x3e0000+0x8000; table is not PT-4M-v2 (erase flash and write full image); RF not started
+[2026-09-28T19:29:34.887+00:00] E (548) RouteLoomRef: fatal: partition table is not PT-4M-v2 (streak=6, restart in 16000 ms)
