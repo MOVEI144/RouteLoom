@@ -2,13 +2,15 @@
 //! P3-3, G-SEC P5): `site.status`, `join.policy.get/set`,
 //! `join.requests.list`, `join.decide`, `devices.discovered.list`,
 //! `members.list/get`, `membership.revoke`, `membership.archive`,
-//! `membership.cutover`, `group_keys.status/rotate`, `site.channel_plan.sign`,
-//! and `operations.get` for `op-` tokens.
+//! `membership.cutover`, `group_keys.status/rotate`,
+//! `site.channel_plan.sign/offer/release/status`, and `operations.get` for
+//! `op-` tokens.
 //!
 //! Authorization (07 §2): `MEMBERSHIP_READ` for the read side,
 //! `MEMBERSHIP_DECIDE` for `join.decide` / `membership.revoke`,
 //! `MEMBERSHIP_ADMIN` for the policy, `membership.cutover`,
-//! `membership.archive`, `group_keys.rotate`, and `site.channel_plan.sign`. The network
+//! `membership.archive`, `group_keys.rotate`, and `site.channel_plan.sign/
+//! offer/release` (`site.channel_plan.status` is read-side). The network
 //! the ACL is checked on is the site's wire network (network_low32 of the
 //! SiteCert). The principal comes from the socket peer credential only;
 //! idempotency identity is `(principal, idempotency_key)`.
@@ -66,6 +68,9 @@ pub const SITE_EVENT_KINDS: &[&str] = &[
 pub const SITE_METHODS: &[&str] = &[
     "site.status",
     "site.channel_plan.sign",
+    "site.channel_plan.offer",
+    "site.channel_plan.release",
+    "site.channel_plan.status",
     "join.policy.get",
     "join.policy.set",
     "join.requests.list",
@@ -217,6 +222,9 @@ pub(super) fn dispatch<S: OperationStore>(
     let handler: fn(&Json, &ApiContext<'_, S>) -> Result<String, ApiError> = match method {
         "site.status" => site_status,
         "site.channel_plan.sign" => channel_plan_sign,
+        "site.channel_plan.offer" => channel_plan_offer,
+        "site.channel_plan.release" => channel_plan_release,
+        "site.channel_plan.status" => channel_plan_status,
         "join.policy.get" => policy_get,
         "join.policy.set" => policy_set,
         "join.requests.list" => requests_list,
@@ -270,6 +278,94 @@ fn channel_plan_sign<S: OperationStore>(
         hex_encode(&signed.snapshot),
         hex_encode(&signed.snapshot_signature),
     ))
+}
+
+/// `site.channel_plan.offer {new_channel, lead_ms?}`: builds the next plan
+/// against the gateway's fresh report (read `site.channel_plan.status`
+/// first), signs it with the SAK and queues it for the gateway, which
+/// verifies and distributes it. The commit stays held until
+/// `site.channel_plan.release`.
+fn channel_plan_offer<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    use crate::site::channel_plan::{DEFAULT_LEAD_MS, LEAD_MAX_MS, LEAD_MIN_MS};
+    only(params, &["new_channel", "lead_ms"])?;
+    let site = service(ctx)?;
+    authorize(ctx, site, acl::PERM_MEMBERSHIP_ADMIN, "MEMBERSHIP_ADMIN")?;
+    let new_channel = params
+        .get("new_channel")
+        .and_then(Json::as_u64)
+        .filter(|channel| (1..=13).contains(channel))
+        .ok_or_else(|| ApiError::simple("INVALID_ARGUMENT", "new_channel must be 1..=13"))?
+        as u8;
+    let lead_ms = match params.get("lead_ms") {
+        None => DEFAULT_LEAD_MS,
+        Some(value) => value
+            .as_u64()
+            .filter(|lead| (LEAD_MIN_MS..=LEAD_MAX_MS).contains(lead))
+            .ok_or_else(|| {
+                ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    &format!("lead_ms must be {LEAD_MIN_MS}..={LEAD_MAX_MS}"),
+                )
+            })?,
+    };
+    let signed = site
+        .with(|authority| authority.channel_plan_offer(new_channel, lead_ms, ctx.now_mono))
+        .0
+        .map_err(|error| ApiError {
+            code: "BUSY",
+            message: error,
+            extra_fields: String::new(),
+            retryable: true,
+        })?;
+    Ok(format!(
+        "{{\"plan_hash_hex\":\"{}\",\"new_channel\":{new_channel},\"dispatched\":true}}",
+        hex_encode(&signed.plan_hash)
+    ))
+}
+
+/// `site.channel_plan.release`: queues the commit release of the offered
+/// plan; the gateway refuses it until the required members answered READY.
+fn channel_plan_release<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    only(params, &[])?;
+    let site = service(ctx)?;
+    authorize(ctx, site, acl::PERM_MEMBERSHIP_ADMIN, "MEMBERSHIP_ADMIN")?;
+    let plan_hash = site
+        .with(|authority| authority.channel_plan_release())
+        .0
+        .map_err(|error| ApiError {
+            code: "BUSY",
+            message: error,
+            extra_fields: String::new(),
+            retryable: true,
+        })?;
+    Ok(format!(
+        "{{\"plan_hash_hex\":\"{}\",\"dispatched\":true}}",
+        hex_encode(&plan_hash)
+    ))
+}
+
+/// `site.channel_plan.status`: the newest gateway report (with its age)
+/// and the newest request outcome; also queues a fresh read.
+fn channel_plan_status<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    only(params, &[])?;
+    let site = service(ctx)?;
+    authorize(ctx, site, acl::PERM_MEMBERSHIP_READ, "MEMBERSHIP_READ")?;
+    Ok(site
+        .with(|authority| {
+            // A request already in flight answers the same question.
+            let _ = authority.channel_plan_refresh();
+            authority.channel_plan_json(ctx.now_mono)
+        })
+        .0)
 }
 
 fn site_status<S: OperationStore>(

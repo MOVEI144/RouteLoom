@@ -48,6 +48,7 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 pub mod authority_channel;
+pub mod channel_plan;
 pub mod config;
 pub mod cutover;
 pub mod group_keys;
@@ -944,6 +945,9 @@ pub struct SiteAuthority {
     // gk_id-checked ACK or a verified JoinConfirm view at the active
     // epoch. RAM-only like the plans; pruned with them.
     cutover_gk_proved: BTreeMap<(u64, u64), u32>,
+    /// Manual channel plan requests toward the gateway (RAM-only: the
+    /// gateway ledger is the durable plan state).
+    channel_plan: channel_plan::ChannelPlanDesk,
 }
 
 /// The channel layer's read-only view of the live rows (P5 §4: every
@@ -1533,6 +1537,7 @@ impl SiteAuthority {
             cutover_routes: BTreeMap::new(),
             cutover_query_seq: 0,
             cutover_gk_proved: BTreeMap::new(),
+            channel_plan: channel_plan::ChannelPlanDesk::default(),
             id,
             sak,
             store,
