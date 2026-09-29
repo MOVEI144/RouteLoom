@@ -177,6 +177,15 @@ Status Device::open_storage(const profile::Role role, const DeviceSecurity secur
 }
 
 Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
+#if ROUTELOOM_DEVICE_DEV_RAM
+  struct SecretGuard {
+    keys::Secret value;
+    ~SecretGuard() noexcept { secure_clear(value); }
+  } dev_psk{config.dev_psk};
+#endif
+  // The caller's temporary must be cleared even if storage, RF or Owner
+  // bring-up fails before the DevRam adoption path.
+  secure_clear(config.dev_psk);
   tag_ = config.log_tag;
   role_ = config.role;
   security_ = config.security;
@@ -281,8 +290,7 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
     // Dev route: adoption without joining, from the verified identity and
     // the committed PSK.
     espnow::EspNowSecurityOwner::DevConfig dev{};
-    dev.psk = config.dev_psk;
-    secure_clear(config.dev_psk);
+    dev.psk = dev_psk.value;
     dev.network = node.network;
     dev.node = node.node;
     dev.channel = config.radio.channel;

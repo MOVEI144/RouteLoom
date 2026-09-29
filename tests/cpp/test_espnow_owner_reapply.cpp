@@ -13,6 +13,7 @@
 
 #include "routeloom/device.hpp"
 #include "idf_stubs.hpp"
+#include "nvs.h"
 #include "test_sdkv1.hpp"
 #include "test_security.hpp"
 #include "test_sim.hpp"
@@ -65,6 +66,10 @@ const edhoc::AeadCcm* psa_edhoc_aead_ccm() noexcept { return edhoc::builtin_aead
 Status EspOwnerEntropy::fill(MutableByteView) noexcept {
   return Status::error(StatusCode::InvalidState, "unused entropy");
 }
+Status EspOwnerEntropy::begin() noexcept {
+  state_ = State::Failed;
+  return Status::error(StatusCode::InvalidState, "unused entropy");
+}
 void EspNowDiscoveryObserver::on_discovery_event(const char* reason, NodeId peer) noexcept {
   (void)tag_;
   if (runtime_ != nullptr && reason != nullptr) runtime_->note_diagnostic(reason, peer);
@@ -72,6 +77,18 @@ void EspNowDiscoveryObserver::on_discovery_event(const char* reason, NodeId peer
 }  // namespace routeloom::espnow
 
 [[noreturn]] void esp_restart() { std::abort(); }
+
+// begin() is intentionally stopped before storage opens in the key-erasure
+// case; these link stubs are never reached by that case.
+void nvs_close(nvs_handle_t) {}
+esp_err_t nvs_get_blob(nvs_handle_t, const char*, void*, std::size_t*) {
+  return ESP_ERR_NVS_NOT_FOUND;
+}
+esp_err_t nvs_set_blob(nvs_handle_t, const char*, const void*, std::size_t) {
+  return ESP_ERR_INVALID_STATE;
+}
+esp_err_t nvs_erase_key(nvs_handle_t, const char*) { return ESP_ERR_INVALID_STATE; }
+esp_err_t nvs_commit(nvs_handle_t) { return ESP_ERR_INVALID_STATE; }
 
 namespace routeloom {
 struct DeviceTestAccess {
@@ -454,6 +471,15 @@ void test_device_post_bound() {
   runtime.stop();
 }
 
+void test_device_begin_clears_key_on_failure() {
+  Device device;
+  DeviceConfig config{};
+  config.security = DeviceSecurity::DevRam;
+  config.dev_psk.fill(0xA5);
+  CHECK(device.begin(config, kStart).code == StatusCode::InvalidState);
+  for (const std::uint8_t byte : config.dev_psk) CHECK(byte == 0);
+}
+
 int main() {
   test_usb_network_after_cutover();
   test_same_boot_reapply(false);
@@ -462,5 +488,6 @@ int main() {
   test_member_root_mapping(true);
   test_member_adoption_restores_group_capability();
   test_device_post_bound();
+  test_device_begin_clears_key_on_failure();
   return failures == 0 ? 0 : 1;
 }

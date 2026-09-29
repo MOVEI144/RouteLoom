@@ -982,16 +982,10 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
   config.radio.node.node = board.node;
   config.radio.node.network = board.network;
   config.radio.channel = board.channel;
-  config.dev_psk = board_secrets->psk;
 #if CONFIG_ROUTELOOM_ROLE_GATEWAY
   // The USB session secret is the committed rlkeys value the gate bound.
   config.usb_secret = ByteView{board_secrets->usb_secret.data(), board_secrets->usb_len};
 #endif
-#elif CONFIG_ROUTELOOM_DEV_KCONFIG_IDENTITY
-  // DevRam quick start: the Kconfig identity and development key.
-  if (!parse_hex(CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX, config.dev_psk)) {
-    fail("invalid development key");
-  }
 #endif
 #if CONFIG_ROUTELOOM_ROLE_GATEWAY && CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED
   config.radio.node.route_gateways[0] = config.radio.node.node;
@@ -1220,6 +1214,17 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
   config.usb = &usb_stream;
 #endif
 
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
+  // Keep no extra copy of the link key across earlier fallible boot steps.
+#if CONFIG_ROUTELOOM_DEV_KCONFIG_IDENTITY
+  if (!parse_hex(CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX, config.dev_psk)) {
+    secure_clear(config.dev_psk);
+    fail("invalid development key");
+  }
+#else
+  config.dev_psk = board_secrets->psk;
+#endif
+#endif
   status = begin(config, monotonic_now_ms());
   if (!status) fail(status.detail);
   EspNowRuntime& runtime = *runtime_;
