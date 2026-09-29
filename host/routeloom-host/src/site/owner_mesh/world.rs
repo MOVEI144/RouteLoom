@@ -102,7 +102,8 @@ impl Phase0Snapshot {
     /// `identity_only` personas get their sealed RLI1 identity and nothing
     /// else (J01 boot mode `identity_only`): no join, no site record.
     fn build(nodes: usize, identity_only: &[usize]) -> Self {
-        let mut provision = Provision::start(&format!("phase0-{nodes}"), now_ms());
+        let mut provision =
+            Provision::start(&format!("phase0-{nodes}"), clock_at_phase(now_ms(), 0));
         let images = personas(nodes)
             .iter()
             .enumerate()
@@ -135,6 +136,23 @@ impl Phase0Snapshot {
             images,
         }
     }
+}
+
+/// Worlds start their clock at a fixed phase within this period.
+const CLOCK_PERIOD_MS: u64 = 3_600_000;
+
+/// The first instant at or after `wall` with the phase of `anchor`.
+///
+/// World clocks follow the host's wall clock (the site keeps wall-time
+/// records), but the schedule a world replays depends on the start's
+/// phase: with a free wall-clock phase, J01's JoinConfirm landed past its
+/// 30 s budget in about a third of the runs. A fixed phase keeps each
+/// world's vt schedule the same from run to run.
+fn clock_at_phase(wall: u64, anchor: u64) -> u64 {
+    if anchor >= wall {
+        return anchor;
+    }
+    anchor + (wall - anchor).div_ceil(CLOCK_PERIOD_MS) * CLOCK_PERIOD_MS
 }
 
 type Phase0Key = (usize, Vec<usize>);
@@ -327,7 +345,7 @@ impl Provision {
     }
 
     fn from_snapshot(tag: &str, snapshot: &Phase0Snapshot) -> Self {
-        let now = now_ms().max(snapshot.now);
+        let now = clock_at_phase(now_ms(), snapshot.now);
         let site = MeshSite::start_with_db(tag, now, Some(&snapshot.db));
         let usb = UsbAuthorityAdapter::new(testkit::GATEWAY, 7);
         site.service
