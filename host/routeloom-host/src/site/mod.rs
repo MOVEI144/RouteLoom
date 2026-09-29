@@ -395,7 +395,7 @@ pub struct PolicyPatch {
 
 /// The readmit half of an allow (#146), planned before the commit.
 struct ReadmitPlan {
-    staging: StagedPlan,
+    readmit_epoch: u32,
     rs_epoch: u32,
     entries: Vec<RevocationEntry>,
     object: Vec<u8>,
@@ -3368,18 +3368,14 @@ impl SiteAuthority {
                     cutover: None,
                     notice: None,
                 };
-                // The readmit half commits with the allow: a fresh GK the
-                // earlier holder never had (the readmitted member is one
-                // of its targets) and an RRS1 marking the entry with it.
+                // The readmit half commits with the allow: the RRS1 marking
+                // the entry with the active GK the member joins with.
                 let readmit = match readmit_entry {
-                    Some(_) => Some(self.plan_readmit(&row, next_revision, now_ms)?),
+                    Some(_) => Some(self.plan_readmit(&row)?),
                     None => None,
                 };
                 if let Some(plan) = readmit.as_ref() {
                     op.rs_epoch = plan.rs_epoch;
-                    op.gk_from = plan.staging.from_epoch;
-                    op.gk_to = plan.staging.to_epoch;
-                    op.gk_cause = RotationCause::Manual.name().into();
                     op.distribution = Some(plan.distribution.clone());
                 }
                 result = format!(
@@ -3405,12 +3401,11 @@ impl SiteAuthority {
                     .push(("revision", next_revision.to_be_bytes().to_vec()));
                 // §6.3: an allow during a rotation joins the new member to
                 // its targets in the same transaction (the deadline never
-                // moves for a newcomer). A readmit supersedes that rotation
-                // with its own, which already targets the member.
-                let joined_target =
-                    self.gks.rotation().filter(|_| readmit.is_none()).map(|r| {
-                        TargetRow::fresh(r.row.operation_id, row.node, row.kid, generation)
-                    });
+                // moves for a newcomer).
+                let joined_target = self
+                    .gks
+                    .rotation()
+                    .map(|r| TargetRow::fresh(r.row.operation_id, row.node, row.kid, generation));
                 if let Some(target) = joined_target.as_ref() {
                     batch.gk_targets.push(target.clone());
                 }
@@ -3425,16 +3420,13 @@ impl SiteAuthority {
                         .docs
                         .push((DocKind::Operation, h16(joined.id), Some(joined.doc())));
                 }
-                let evicted = match readmit.as_ref() {
-                    Some(plan) => {
-                        batch.rrs.push((plan.rs_epoch, plan.object.clone()));
-                        batch
-                            .meta
-                            .push(("rs_epoch", plan.rs_epoch.to_be_bytes().to_vec()));
-                        self.fill_staging_batch(&mut batch, &plan.staging, &op)?
-                    }
-                    None => self.operation_doc(&mut batch, &op)?,
-                };
+                if let Some(plan) = readmit.as_ref() {
+                    batch.rrs.push((plan.rs_epoch, plan.object.clone()));
+                    batch
+                        .meta
+                        .push(("rs_epoch", plan.rs_epoch.to_be_bytes().to_vec()));
+                }
+                let evicted = self.operation_doc(&mut batch, &op)?;
                 batch.approval_audit.push((op.id, format!(
                     "{{\"operation_id\":\"{}\",\"join_request_id\":\"{}\",\"attempt\":{},\"device_id\":\"{}\",\"kid\":\"{}\",\"role\":\"{}\",{actor}}}",
                     op_token(op.id), request_token(open.id), open.attempt,
@@ -3497,10 +3489,10 @@ impl SiteAuthority {
             if let Some(joined) = joined_cutover {
                 self.operations.insert(joined.id, joined);
             }
-            match readmit {
-                Some(plan) => self.publish_readmit(plan, op, evicted, now_ms),
-                None => self.remember_operation(op, evicted),
+            if let Some(plan) = readmit {
+                self.publish_readmit(plan, &op, now_ms);
             }
+            self.remember_operation(op, evicted);
         }
         self.remember_decision(&principal, &request.key, digest, &result, now_ms);
         self.requests.insert(open.id, updated);
@@ -3524,38 +3516,35 @@ impl SiteAuthority {
     }
 
     /// The readmit half of an allow (#146) for a NodeId the applied RRS1
-    /// still names: a fresh GK epoch E (the readmitted `row` is one of its
-    /// targets, the earlier holder never received it) and the RRS1 with
-    /// that entry's readmit_gk_epoch set to E. Fails before anything
-    /// commits.
-    fn plan_readmit(
-        &self,
-        row: &DeviceRow,
-        members_revision: u32,
-        now_ms: u64,
-    ) -> Result<ReadmitPlan, SiteError> {
-        let op_id = self.checked_next_op_id()?;
-        let mut staging = self.plan_staging(
-            op_id,
-            RotationCause::Manual,
-            self.join_mono_ms
-                .saturating_add(RotationCause::Manual.stage_deadline_ms()),
-            None,
-            members_revision,
-            now_ms,
-        )?;
-        if staging.to_epoch > REVOCATION_READMIT_MAX {
+    /// still names: the RRS1 with that entry's readmit_gk_epoch set to the
+    /// active GK epoch E, which the readmitted member receives with its
+    /// join. E is a key the earlier holder never had: every revoke stages
+    /// a fresh epoch without it, so the readmit waits (Busy) while any
+    /// rotation is still staging or a cutover is preparing. Fails before
+    /// anything commits.
+    fn plan_readmit(&self, row: &DeviceRow) -> Result<ReadmitPlan, SiteError> {
+        if self
+            .gks
+            .rotation()
+            .is_some_and(|rotation| rotation.row.phase == RotationPhase::Staging)
+            || self.cutover_blocks_rotate()
+        {
+            return Err(SiteError::new(
+                "BUSY",
+                "a group key rotation is still staging; retry the readmit once it activates",
+            )
+            .retry());
+        }
+        let readmit_epoch = self.gks.active_epoch();
+        if readmit_epoch > REVOCATION_READMIT_MAX {
             return Err(SiteError::new(
                 "CONFLICT",
-                "the readmit GK epoch no longer fits the RRS1 entry; use a new NodeId",
+                "the active GK epoch no longer fits the RRS1 readmit field; use a new NodeId",
             ));
         }
-        staging
-            .targets
-            .push(TargetRow::fresh(op_id, row.node, row.kid, row.generation));
         let mut entries = self.rrs_entries.clone();
         for entry in entries.iter_mut().filter(|e| e.node_id == row.node) {
-            entry.readmit_gk_epoch = staging.to_epoch;
+            entry.readmit_gk_epoch = readmit_epoch;
         }
         let rs_epoch = self
             .rs_epoch
@@ -3574,7 +3563,7 @@ impl SiteAuthority {
         // live yet; it receives the set with its join).
         let distribution = self.snapshot_targets(0, rs_epoch, sha256(&object));
         Ok(ReadmitPlan {
-            staging,
+            readmit_epoch,
             rs_epoch,
             entries,
             object,
@@ -3583,22 +3572,14 @@ impl SiteAuthority {
     }
 
     /// Publishes a committed readmit to RAM (only after the commit).
-    fn publish_readmit(
-        &mut self,
-        plan: ReadmitPlan,
-        op: Operation,
-        evicted: Option<u64>,
-        now_ms: u64,
-    ) {
+    fn publish_readmit(&mut self, plan: ReadmitPlan, op: &Operation, now_ms: u64) {
         let ReadmitPlan {
-            staging,
+            readmit_epoch,
             rs_epoch,
             entries,
             object,
             ..
         } = plan;
-        let (from, to, superseded) = (staging.from_epoch, staging.to_epoch, staging.superseded_op);
-        self.publish_staging_plan(staging, op.clone(), evicted);
         self.rs_epoch = rs_epoch;
         self.rrs_history.insert(rs_epoch, entries.clone());
         self.rrs_entries = entries;
@@ -3609,11 +3590,10 @@ impl SiteAuthority {
             .expect("authority channel poisoned")
             .set_epochs(rs_epoch, self.gks.active_epoch());
         self.prune_rrs_history();
-        self.emit_staged(RotationCause::Manual, from, to, op.id, superseded, now_ms);
         self.event(
             now_ms,
             format!(
-                "\"kind\":\"member.readmitted\",\"device_id\":\"{}\",\"generation\":{},\"readmit_gk_epoch\":{to},\"rs_epoch\":{rs_epoch},\"operation_id\":\"{}\"",
+                "\"kind\":\"member.readmitted\",\"device_id\":\"{}\",\"generation\":{},\"readmit_gk_epoch\":{readmit_epoch},\"rs_epoch\":{rs_epoch},\"operation_id\":\"{}\"",
                 h16(op.node),
                 op.generation,
                 op_token(op.id)

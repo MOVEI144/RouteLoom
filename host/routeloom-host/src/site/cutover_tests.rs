@@ -1672,9 +1672,11 @@ fn old_kid_recovery_gets_removed() {
         )
     });
     answer.unwrap();
-    // A different key reclaims the NodeId above the revoked generation.
+    // Once the revoke's rotation activated, a different key reclaims the
+    // NodeId above the revoked generation.
+    service.tick(HostTime::sync(T0 + 40_000));
     let mut new = SimDevice::new(old.node, 0x72);
-    let (_, _, events) = new.start(&service, &transport, T0 + 2_000);
+    let (_, _, events) = new.start(&service, &transport, T0 + 42_000);
     let (answer, _) = service.with(|a| {
         a.decide(
             DECIDER,
@@ -1686,13 +1688,13 @@ fn old_kid_recovery_gets_removed() {
                 },
                 key: "m2".into(),
             },
-            T0 + 2_010,
+            T0 + 42_010,
         )
     });
     assert!(answer.unwrap().contains("\"generation\":2"));
     // The old key comes back holding generation 1.
     old.recovery_existing = true;
-    let (outcome, _) = old.attempt(&service, &transport, T0 + 3_000);
+    let (outcome, _) = old.attempt(&service, &transport, T0 + 43_000);
     match outcome {
         Outcome::Result(JoinResult::Removed { .. }) => {}
         other => panic!("expected Removed, got {other:?}"),

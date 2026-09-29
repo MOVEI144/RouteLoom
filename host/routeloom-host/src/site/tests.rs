@@ -1855,8 +1855,9 @@ fn restart_after_commit_reissues_the_same_member_cert() {
 }
 
 /// #146: a revoked NodeId is readmitted only above its revoked generation,
-/// with a fresh GK epoch it is a target of and the RRS1 entry marked with
-/// that epoch; a failed revocation lookup never issues an assignment.
+/// with its RRS1 entry marked with the active GK epoch — never while the
+/// revocation's own rotation (a key the earlier holder may lack) still
+/// stages; a failed revocation lookup never issues an assignment.
 #[test]
 fn allow_readmits_above_the_revoked_generation_and_fails_closed_on_lookup_error() {
     let fail_lookup = Arc::new(AtomicBool::new(false));
@@ -1890,6 +1891,30 @@ fn allow_readmits_above_the_revoked_generation_and_fails_closed_on_lookup_error(
     );
     assert!(!service.with(|a| a.devices[&node].member).0);
     fail_lookup.store(false, Ordering::Relaxed);
+    let staging = service
+        .with(|a| {
+            a.gks
+                .rotation()
+                .map(|r| r.row.phase == RotationPhase::Staging)
+        })
+        .0;
+    assert_eq!(staging, Some(true), "the revoke rotation still stages");
+    assert_eq!(
+        decide(
+            &service,
+            id,
+            node,
+            Verdict::Allow {
+                role: ROLE_ENDPOINT
+            },
+            "retry",
+            T0 + 20_015
+        )
+        .unwrap_err()
+        .code,
+        "BUSY"
+    );
+    service.tick(HostTime::sync(T0 + 60_000)); // past the staging deadline
     let rs_before = service.with(|a| a.rs_epoch).0;
     let result = decide(
         &service,
@@ -1899,11 +1924,11 @@ fn allow_readmits_above_the_revoked_generation_and_fails_closed_on_lookup_error(
             role: ROLE_ENDPOINT,
         },
         "retry",
-        T0 + 20_020,
+        T0 + 60_020,
     )
     .unwrap();
     assert!(result.contains("\"generation\":2"), "{result}");
-    let (member, generation, rs_epoch, readmit, staged, targeted) = service
+    let (member, generation, rs_epoch, readmit, active, revoke_epoch) = service
         .with(|a| {
             (
                 a.devices[&node].member,
@@ -1913,18 +1938,25 @@ fn allow_readmits_above_the_revoked_generation_and_fails_closed_on_lookup_error(
                     .iter()
                     .find(|e| e.node_id == node)
                     .map(|e| e.readmit_gk_epoch),
-                a.gks.staged_epoch(),
-                a.gks.targets().contains_key(&node),
+                a.gks.active_epoch(),
+                a.operations
+                    .values()
+                    .find(|op| op.kind == "revoke")
+                    .map(|op| op.gk_to),
             )
         })
         .0;
     assert!(member && generation == 2);
     assert_eq!(rs_epoch, rs_before + 1);
-    assert!(
-        staged.is_some() && readmit == staged,
-        "{readmit:?} vs {staged:?}"
+    assert_eq!(
+        readmit,
+        Some(active),
+        "marked with the GK the member joins with"
     );
-    assert!(targeted, "the readmitted member receives the new GK");
+    assert!(
+        revoke_epoch.is_some_and(|e| active >= e),
+        "one the earlier holder never had"
+    );
 }
 
 /// V1-H04 / V1-R01 (host part) / V1-R05 / V1-R07: revoke commits a
@@ -2017,7 +2049,8 @@ fn removal_end_to_end() {
     );
     assert!(device.site.is_none());
     // The decider sees the removed identity; #146 readmits its NodeId at
-    // the next generation.
+    // the next generation (the revoke's rotation activated long ago).
+    service.tick(HostTime::sync(T0 + 659_000));
     let (_, outcome, events) = device.start(&service, &transport, T0 + 660_000);
     assert!(matches!(outcome, Outcome::Waiting));
     let request = events
@@ -2596,6 +2629,7 @@ fn review_concurrent_different_keys_rechecks_current_membership() {
         )
     });
     revoked.unwrap();
+    service.tick(HostTime::sync(T0 + 40_000)); // the revoke's rotation activates
     let readmitted = decide(
         &service,
         request_id(&events_b).unwrap(),
@@ -2604,7 +2638,7 @@ fn review_concurrent_different_keys_rechecks_current_membership() {
             role: ROLE_ENDPOINT,
         },
         "review-b2",
-        T0 + 60,
+        T0 + 40_010,
     )
     .unwrap();
     assert!(readmitted.contains("\"generation\":2"), "{readmitted}");
@@ -2669,6 +2703,7 @@ fn review_revoked_membership_allows_explicit_replacement_key() {
         "{}",
         request.1
     );
+    service.tick(HostTime::sync(T0 + 31_000)); // the revoke's rotation activates
     let readmitted = decide(
         &service,
         request_id(&events).unwrap(),
@@ -2677,7 +2712,7 @@ fn review_revoked_membership_allows_explicit_replacement_key() {
             role: ROLE_ENDPOINT,
         },
         "b",
-        T0 + 30_010,
+        T0 + 31_010,
     )
     .unwrap();
     assert!(readmitted.contains("\"generation\":2"), "{readmitted}");
@@ -2774,7 +2809,9 @@ fn review_replacement_flow_survives_a_restart() {
         "{}",
         request.1
     );
-    // The revoked generation survives the restart: the readmit issues 2.
+    // The revoked generation survives the restart: the readmit issues 2
+    // once the restored staging activated.
+    service.tick(HostTime::sync(T0 + 31_000));
     let readmitted = decide(
         &service,
         request_id(&events).unwrap(),
@@ -2783,7 +2820,7 @@ fn review_replacement_flow_survives_a_restart() {
             role: ROLE_ENDPOINT,
         },
         "b",
-        T0 + 30_010,
+        T0 + 31_010,
     )
     .unwrap();
     assert!(readmitted.contains("\"generation\":2"), "{readmitted}");
@@ -2889,7 +2926,8 @@ fn review_late_allow_follows_the_current_membership() {
         "NOT_FOUND"
     );
     // With the live kid conflict gone, B is readmitted above the revoked
-    // generation (#146), never at it.
+    // generation (#146), never at it, once the revoke's rotation activated.
+    service.tick(HostTime::sync(T0 + 40_000));
     let readmitted = decide(
         &service,
         id_b,
@@ -2898,7 +2936,7 @@ fn review_late_allow_follows_the_current_membership() {
             role: ROLE_ENDPOINT,
         },
         "b",
-        T0 + 220,
+        T0 + 40_010,
     )
     .unwrap();
     assert!(readmitted.contains("\"generation\":2"), "{readmitted}");
@@ -5790,6 +5828,7 @@ fn archive_removed_reclaims_capacity_without_losing_no_reissue_history() {
     assert_eq!(service.with(|a| a.devices.len()).0, 0);
 
     // ... but the NodeId never returns at the revoked generation.
+    service.tick(HostTime::sync(T0 + 39_000));
     let mut fresh_key = SimDevice::new(device.node, 0xC4);
     let (_, outcome, events) = fresh_key.start(&service, &transport, T0 + 40_000);
     assert!(matches!(outcome, Outcome::Waiting));

@@ -14,7 +14,7 @@
 
 「旧割当（世代）の機器の通信を拒否」は、`MemberCert.assignment_generation < min_generation`、または`MemberCert.site_epoch < site_epoch_floor`のMemberCertを、link/E2E確立時と、RRS1を受理した時点の生存contextの両方で拒否することで実現する。
 
-**NodeIdの再参加（v2.0、#146）**：GroupLink／GroupEndには割当世代がないため、group frameの受理はGK epochで判定する。Hostは失効履歴のあるNodeIdを、台帳の失効世代（cutoverでRRS1のentryが消えても履歴台帳を確認する）より大きい割当世代でだけ再発行する。適用中のRRS1がそのNodeIdを名指ししている場合、allowと同じtransactionで新しいGK epoch E（再参加する機器を対象に含み、以前の保持者は受け取っていない）をstageし、RRS1 v2のそのentryの`readmit_gk_epoch`をEにして配る。受信側は`revoked_group_sender(node, frameのGK epoch)`で、entryがあり`readmit_gk_epoch`が0かframeのepochがそれより小さいときだけ拒否する。frameは変えない。`readmit_gk_epoch`は24 bit（entryの予約3 byte。entryとobjectの大きさは不変）で、Eが収まらないときHostは理由付きCONFLICTで断る（新NodeIdで再provision）。v1のRRS1は`readmit_gk_epoch`=0として読む。再度の失効はentryの`readmit_gk_epoch`を0に戻す。機器のRLV1は`removed_generation`より大きい世代の参加を妨げない。
+**NodeIdの再参加（v2.0、#146）**：GroupLink／GroupEndには割当世代がないため、group frameの受理はGK epochで判定する。Hostは失効履歴のあるNodeIdを、台帳の失効世代（cutoverでRRS1のentryが消えても履歴台帳を確認する）より大きい割当世代でだけ再発行する。適用中のRRS1がそのNodeIdを名指ししている場合、allowと同じtransactionでRRS1 v2のそのentryの`readmit_gk_epoch`を現在のactive GK epoch Eにして配り、機器はEを持って参加する。失効のたびに対象の機器を除いた新しいepochをstageするので、そのrotationがactiveになった後のEは以前の保持者が持たない鍵である。rotationのstaging中とcutoverの準備中は再発行をBusyで待たせる（新しいepochを追加でstageすると、再参加した機器はそのepochを持つまでgroupとGroupLinkの経路広告を送れず、経路が無いため鍵も受け取れない）。適用した機器は、そのentryの以前の失効によるDiscoveryの記録を消し、再参加した機器のsessionと経路は止めない。受信側は`revoked_group_sender(node, frameのGK epoch)`で、entryがあり`readmit_gk_epoch`が0かframeのepochがそれより小さいときだけ拒否する。frameは変えない。`readmit_gk_epoch`は24 bit（entryの予約3 byte。entryとobjectの大きさは不変）で、Eが収まらないときHostは理由付きCONFLICTで断る（新NodeIdで再provision）。v1のRRS1は`readmit_gk_epoch`=0として読む。再度の失効はentryの`readmit_gk_epoch`を0に戻す。機器のRLV1は`removed_generation`より大きい世代の参加を妨げない。
 
 ## 2. RRS1 — 失効集合
 
