@@ -2096,6 +2096,17 @@ Status SecurityCoordinator::on_channel_ready(const CoordinatorEvent& event) noex
   return Status::success();
 }
 
+bool SecurityCoordinator::note_plan_cutover(const std::uint8_t channel,
+                                           const std::uint32_t radio_generation) noexcept {
+  plan_channel_ = channel;
+  // An adoption or join tune in flight reports its own ChannelReady.
+  if (member_apply_pending_ || tune_outstanding_ != 0) return false;
+  if (mode_ != CoordinatorMode::Member && mode_ != CoordinatorMode::Dev) return false;
+  channel_ = channel;
+  radio_generation_ = radio_generation;
+  return true;
+}
+
 Status SecurityCoordinator::on_prepare_sleep(const MonotonicMs now) noexcept {
   (void)now;
   // Busy while the firmware still owes a take_action or the workspace has
@@ -2974,7 +2985,7 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
   cfg.network = site.network;
   cfg.rs_epoch_to_fetch = rs_epoch_to_fetch;
   cfg.node = identity.node_id;
-  cfg.channel = site.channel;
+  cfg.channel = operating_channel(site.channel);
   // The started MeshNode retains its message sequence across a same-boot
   // membership refresh. Keep both wire identities for that same site and
   // boot; changing either while the node runs would split dedup attribution.
@@ -3114,7 +3125,7 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
   member().gateway.set_membership(member().gateway_active ? MembershipState::Member
                                                           : MembershipState::Unprovisioned);
 #endif
-  channel_ = site.channel;  // the operating channel gates RLD1 RX
+  channel_ = cfg.channel;  // the operating channel gates RLD1 RX
   discovery_started_ = false;
   member_apply_pending_ = true;
   sat_inc(counters_.member_adoptions);

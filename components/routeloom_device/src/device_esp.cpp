@@ -32,13 +32,16 @@
 // (V2-10); the Owner profiles use Device's (device_config.cpp).
 #define ROUTELOOM_LEGACY_CONFIG \
   (CONFIG_ROUTELOOM_CONFIG && CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE)
+// The same for channel migration (MemberEdhoc: device_migration.cpp).
+#define ROUTELOOM_LEGACY_MIGRATION \
+  (CONFIG_ROUTELOOM_MIGRATION && CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE)
 #if CONFIG_ROUTELOOM_DISCOVERY || ROUTELOOM_LEGACY_CONFIG
 #include "routeloom/espnow_autonomy.hpp"
 #endif
 #if CONFIG_ROUTELOOM_DISCOVERY
 #include "routeloom/espnow_scope_provider.hpp"
 #endif
-#if CONFIG_ROUTELOOM_MIGRATION
+#if ROUTELOOM_LEGACY_MIGRATION
 #include "routeloom/espnow_migration.hpp"
 #include "routeloom/nvs_ledger_store.hpp"
 #endif
@@ -568,6 +571,13 @@ DeviceConfig device_config_from_kconfig() noexcept {
 #if CONFIG_ROUTELOOM_ROLE_GATEWAY
   config.usb_capability = CONFIG_ROUTELOOM_CAPABILITY;
 #endif
+#if ROUTELOOM_DEVICE_MIGRATION
+  config.channel_plan = CONFIG_ROUTELOOM_MIGRATION;
+  config.plan_rtt_p99_ms = CONFIG_ROUTELOOM_MIGRATION_RTT_P99_MS;
+  config.plan_delivery_bound_ms = CONFIG_ROUTELOOM_MIGRATION_DELIVERY_BOUND_MS;
+  config.plan_transfer_bound_ms = CONFIG_ROUTELOOM_MIGRATION_TRANSFER_BOUND_MS;
+  config.plan_switch_bound_ms = CONFIG_ROUTELOOM_MIGRATION_SWITCH_BOUND_MS;
+#endif
 #if ROUTELOOM_DEVICE_REMOTE_CONFIG
   config.remote_config = true;
 #if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
@@ -761,7 +771,7 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
   config.sleep_image = &s_rtc_hold;
 #endif
 
-#if CONFIG_ROUTELOOM_MIGRATION
+#if ROUTELOOM_LEGACY_MIGRATION
   // Channel migration (issue #5): the plan store opens before the runtime so
   // a committed channel can pick the boot channel — a blob alone never
   // switches the radio, and restart() still runs the participant's resume
@@ -861,7 +871,7 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
            static_cast<unsigned long long>(cred_writes.bytes));
 #endif
 
-#if CONFIG_ROUTELOOM_MIGRATION
+#if ROUTELOOM_LEGACY_MIGRATION
   espnow::EspNowMigrationConfig migration_config{};
 #if CONFIG_ROUTELOOM_MIGRATION_SELF_AUTHORITY
   constexpr bool self_authority = true;
@@ -1046,7 +1056,7 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
                  "identity");
 #endif
 
-#if CONFIG_ROUTELOOM_MIGRATION
+#if ROUTELOOM_LEGACY_MIGRATION
   // Participant + coordinator over the authenticated control-object lane,
   // with durable plan/commit/active records in "rlplan". The authority role
   // needs a durable ledger before it may issue; nothing local mints a plan.

@@ -335,6 +335,14 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
 #endif
 #if ROUTELOOM_DEVICE_MEMBER
   if (config.security == DeviceSecurity::Member) {
+#if ROUTELOOM_DEVICE_MIGRATION
+    // The stored plan channel must reach the coordinator before Boot
+    // adopts the site.
+    if (config.channel_plan != 0) {
+      status = begin_channel_plan(config);
+      if (!status) return status;
+    }
+#endif
     // usb_direct selects the gateway's USB local-join transport.
     status = owner.boot(boot_session_, /*rlboot_prepared=*/true, bridge_ != nullptr, now_ms);
     if (!status) return status;
@@ -408,6 +416,9 @@ void Device::step(const MonotonicMs now_ms) noexcept {
 #endif
 #if ROUTELOOM_DEVICE_REMOTE_CONFIG
   if (remote_config_ != nullptr) poll_remote_config(now_ms);
+#endif
+#if ROUTELOOM_DEVICE_MIGRATION
+  if (channel_plan_ != nullptr) poll_channel_plan(now_ms);
 #endif
   run_posted();
   update_observation_remote();

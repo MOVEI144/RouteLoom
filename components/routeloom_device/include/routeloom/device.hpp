@@ -41,9 +41,24 @@
 #endif
 #endif
 
+// Manual channel plan of a Member node (V2-08, issue #5 manual): the
+// migration participant on every member and the site's plan authority on
+// the gateway, both verifying under the adopted site's SAK. Firmware
+// images compile it with CONFIG_ROUTELOOM_MIGRATION on MemberEdhoc; the
+// host mesh harness peer defines it to 1.
+#ifndef ROUTELOOM_DEVICE_MIGRATION
+#if defined(ESP_PLATFORM)
+#define ROUTELOOM_DEVICE_MIGRATION \
+  (CONFIG_ROUTELOOM_MIGRATION && CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC)
+#else
+#define ROUTELOOM_DEVICE_MIGRATION 0
+#endif
+#endif
+
 namespace routeloom {
 
 class EntropySource;
+struct DeviceChannelPlan;
 class GatewayDelivery;
 class ObservationSource;
 struct DeviceRemoteConfig;
@@ -93,6 +108,15 @@ struct DeviceConfig {
   bool remote_config{false};
   NodeId config_authority{kInvalidNodeId};
   std::uint32_t config_authority_generation{1};
+  // Manual channel plan (Member, ROUTELOOM_DEVICE_MIGRATION builds): the
+  // MigrationMode (0 off, 1 Observe, 2 Manual) and the deployment's
+  // measured bounds a plan must fit: management RTT P99, control delivery,
+  // prepare transfer and local switch, in ms.
+  std::uint8_t channel_plan{0};
+  std::uint32_t plan_rtt_p99_ms{250};
+  std::uint32_t plan_delivery_bound_ms{2000};
+  std::uint32_t plan_transfer_bound_ms{2000};
+  std::uint32_t plan_switch_bound_ms{50};
 #if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   SecurityProvider* legacy_security{nullptr};
 #else
@@ -232,6 +256,10 @@ class Device {
                              EntropySource& entropy, MonotonicMs now_ms) noexcept;
   void poll_remote_config(MonotonicMs now_ms) noexcept;
 #endif
+#if ROUTELOOM_DEVICE_MIGRATION
+  Status begin_channel_plan(const DeviceConfig& config) noexcept;
+  void poll_channel_plan(MonotonicMs now_ms) noexcept;
+#endif
 #if defined(ESP_PLATFORM)
   static void task_entry(void* self) noexcept;
   [[noreturn]] void boot_and_run(DeviceConfig& config) noexcept;
@@ -248,6 +276,9 @@ class Device {
   GatewayDelivery* gateway_{nullptr};
 #if ROUTELOOM_DEVICE_REMOTE_CONFIG
   DeviceRemoteConfig* remote_config_{nullptr};
+#endif
+#if ROUTELOOM_DEVICE_MIGRATION
+  DeviceChannelPlan* channel_plan_{nullptr};
 #endif
   const ObservationSource* observation_{nullptr};
 #if defined(ESP_PLATFORM)

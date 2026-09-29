@@ -1,4 +1,5 @@
 idf_component_register(SRCS "src/device.cpp" "src/device_config.cpp" "src/device_esp.cpp"
+                            "src/device_migration.cpp"
                        INCLUDE_DIRS "include"
   REQUIRES routeloom routeloom_espnow nvs_flash esp_wifi esp_timer freertos
            esp_driver_usb_serial_jtag app_update)

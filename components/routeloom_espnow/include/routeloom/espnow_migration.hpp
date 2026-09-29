@@ -155,6 +155,10 @@ class EspNowMigration final : public MigrationOwnerPort {
   MigrationAgent& agent() noexcept { return agent_; }
   MigrationAuthority& authority() noexcept { return authority_; }
   ChannelCoordinator& coordinator() noexcept { return coordinator_; }
+  // The issuer ledger (authority role), nullptr on a participant.
+  const SingleAuthority* ledger() const noexcept {
+    return ledger_.has_value() ? &*ledger_ : nullptr;
+  }
   bool authority_ready() const noexcept {
     return !config_.authority_role ||
            (ledger_.has_value() && !ledger_->quarantined());

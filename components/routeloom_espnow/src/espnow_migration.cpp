@@ -5,16 +5,21 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
-#include "psa/crypto.h"
 #include "routeloom/byte_io.hpp"
 #include "routeloom/crc32.hpp"
 #include "routeloom/secure_clear.hpp"
+#include "sdkconfig.h"
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+#include "psa/crypto.h"
+#endif
 
 namespace routeloom::espnow {
 namespace {
 
 constexpr const char* kTag = "rl_migrate";
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
 constexpr psa_algorithm_t kMacAlgorithm = PSA_ALG_HMAC(PSA_ALG_SHA_256);
+#endif
 
 Status nvs_status(const esp_err_t error, const char* detail) noexcept {
   if (error == ESP_OK) return Status::success();
@@ -27,6 +32,8 @@ Status nvs_status(const esp_err_t error, const char* detail) noexcept {
 }  // namespace
 
 // --- DevPskCommitVerifier ---------------------------------------------------------
+// LegacyFixture only: the Owner profiles verify plans with the site's SAK.
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
 
 DevPskCommitVerifier::~DevPskCommitVerifier() {
   secure_clear(key_);
@@ -148,6 +155,8 @@ Status DevPskCommitVerifier::sign_snapshot(
     std::array<std::uint8_t, 32>& out) noexcept {
   return mac(snapshot_body, out);
 }
+
+#endif  // CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
 
 // --- NvsPlanStore ----------------------------------------------------------------
 
