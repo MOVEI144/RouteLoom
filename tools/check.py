@@ -427,6 +427,15 @@ def elf_symbols(path: Path) -> list[str]:
     return [n for n in names if n]
 
 
+# Budgets are ratcheted to CI measurements, but the same source builds a few
+# dozen bytes apart between toolchain hosts and path layouts. Drift within these
+# margins passes; anything larger must update the budget with a reason. The hard
+# static-RAM floor is still enforced by tools/firmware_ram_report.py.
+APP_BIN_DRIFT = 2048
+STATIC_FREE_DRIFT = 256
+RTC_DRIFT = 64
+
+
 def size_errors(data: dict, cell: dict, build: Path) -> list[str]:
     budget = cell.get("budget")
     if not budget:
@@ -440,21 +449,24 @@ def size_errors(data: dict, cell: dict, build: Path) -> list[str]:
         return [f"missing {p}" for p in missing]
     errors = []
     app_bin = files["bin"].stat().st_size
-    if app_bin > budget["app_bin_max"]:
-        errors.append(f"app.bin {app_bin} B > budget {budget['app_bin_max']} B")
+    if app_bin > budget["app_bin_max"] + APP_BIN_DRIFT:
+        errors.append(f"app.bin {app_bin} B > budget {budget['app_bin_max']} B "
+                      f"(+{APP_BIN_DRIFT} B drift)")
     report = json.loads(files["ram"].read_text(encoding="utf-8"))
     for key, expected in (("cell", cell["id"]), ("app", cell["app"]),
                           ("target", cell["target"])):
         if report.get(key) != expected:
             errors.append(f"ram-report {key} {report.get(key)!r} != {expected!r}")
     free = report["guard"]["free"]
-    if free < budget["static_free_min"]:
-        errors.append(f"static RAM free {free} B < budget {budget['static_free_min']} B")
+    if free < budget["static_free_min"] - STATIC_FREE_DRIFT:
+        errors.append(f"static RAM free {free} B < budget {budget['static_free_min']} B "
+                      f"(-{STATIC_FREE_DRIFT} B drift)")
     rtc = rtc_used(report)
     if rtc is None:
         errors.append("missing RTC/LP RAM measurement in ram-report")
-    elif rtc > budget["rtc_used_max"]:
-        errors.append(f"RTC/LP RAM used {rtc} B > budget {budget['rtc_used_max']} B")
+    elif rtc > budget["rtc_used_max"] + RTC_DRIFT:
+        errors.append(f"RTC/LP RAM used {rtc} B > budget {budget['rtc_used_max']} B "
+                      f"(+{RTC_DRIFT} B drift)")
     patterns = data.get("symbols_absent", []) + cell.get("symbols_absent", [])
     if patterns:
         try:

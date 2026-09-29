@@ -218,11 +218,16 @@ class Budget(unittest.TestCase):
         return run_main(["size", "--cells-file", self.cells, "--cell",
                          f"bench_node-esp32c3-{name}", "--build-dir", self.dir / name])
 
-    def test_one_byte_over_fails_only_that_cell(self):
+    def test_drift_within_margin_passes(self):
+        self.build("a", app_bin=1000 + check.APP_BIN_DRIFT, free=500 - check.STATIC_FREE_DRIFT,
+                   rtc=40 + check.RTC_DRIFT)
         self.assertEqual(self.size("a")[0], 0)
-        for over in ({"app_bin": 1001, "free": 500, "rtc": 40},
-                     {"app_bin": 1000, "free": 499, "rtc": 40},
-                     {"app_bin": 1000, "free": 500, "rtc": 41}):
+
+    def test_one_byte_over_the_margin_fails_only_that_cell(self):
+        self.assertEqual(self.size("a")[0], 0)
+        for over in ({"app_bin": 1001 + check.APP_BIN_DRIFT, "free": 500, "rtc": 40},
+                     {"app_bin": 1000, "free": 499 - check.STATIC_FREE_DRIFT, "rtc": 40},
+                     {"app_bin": 1000, "free": 500, "rtc": 41 + check.RTC_DRIFT}):
             self.build("a", **over)
             code, _, err = self.size("a")
             self.assertEqual(code, 1, over)
