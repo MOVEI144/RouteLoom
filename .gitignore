@@ -22,3 +22,8 @@ __pycache__/
 *.gcno
 /firmware/**/sdkconfig.local
 /examples/**/sdkconfig.old
+/tests/idf_consumer/build/
+/tests/idf_consumer/sdkconfig
+/tests/idf_consumer/sdkconfig.old
+/tests/idf_consumer/dependencies.lock
+/tests/idf_consumer/managed_components/
