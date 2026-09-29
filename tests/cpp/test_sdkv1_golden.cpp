@@ -272,6 +272,18 @@ void valid_rrs1(const Fields& f) {
     CHECK(set.entries[i].min_generation == num(f, std::string(prefix) + "min_generation"));
     CHECK(static_cast<std::uint64_t>(set.entries[i].reason) ==
           num(f, std::string(prefix) + "reason"));
+    CHECK(set.entries[i].readmit_gk_epoch == num(f, std::string(prefix) + "readmit_gk_epoch"));
+  }
+  if (has(f, "version")) {
+    // A previous object version only reads (still verified); the encoder
+    // emits the current version.
+    RevocationSet verified_set{};
+    bool verified = false;
+    CHECK(revocation_object_verify(view(hex(f, "object_hex")), hex_array<64>(f, "signer_pubkey_hex"),
+                                   set.site_id, set.network, verified_set, verified)
+              .ok());
+    CHECK(verified);
+    return;
   }
   ByteBuffer<kRevocationPayloadMax> encoded{};
   CHECK(revocation_payload_encode(set, encoded).ok());

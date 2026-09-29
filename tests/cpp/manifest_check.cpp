@@ -35,6 +35,7 @@ static_assert(routeloom::kCredentialSchemaVersion == ROUTELOOM_STORE_CREDENTIAL,
 static_assert(routeloom::sdkv1::kRecordFormat == ROUTELOOM_STORE_SDKV1_FORMAT, "protocol/manifest.json sdkv1_record_format");
 static_assert(routeloom::sdkv1::kRecordSchema == ROUTELOOM_STORE_SDKV1_SCHEMA, "protocol/manifest.json sdkv1_record_schema");
 static_assert(routeloom::sdkv1::kRevocationVersion == ROUTELOOM_RRS1_OBJECT_VERSION, "protocol/manifest.json revocation_object");
+static_assert(routeloom::sdkv1::kLocalRevocationSchema == ROUTELOOM_STORE_RLV1_SCHEMA, "protocol/manifest.json local_revocation_rlv1");
 static_assert(routeloom::sdkv1::kResumeFormat == ROUTELOOM_STORE_RLP1_FORMAT, "protocol/manifest.json resume_slot_rlp1");
 static_assert(routeloom::sdkv1::kResume2Format == ROUTELOOM_STORE_RLP2_FORMAT, "protocol/manifest.json resume_slot_rlp2");
 static_assert(routeloom::kRecoverySnapshotVersion == ROUTELOOM_STORE_MIGRATION_RECOVERY, "protocol/manifest.json migration_recovery_snapshot");

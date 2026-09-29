@@ -1326,7 +1326,7 @@ void test_revocation_entry_monotonicity() {
   RevocationSet grown = first;
   grown.rs_epoch = 15;
   grown.entries[1].min_generation = 9;
-  grown.entries[2] = RevocationEntry{0x00A1000000000200ULL, 4U, RevocationReason::Lost};
+  grown.entries[2] = RevocationEntry{0x00A1000000000200ULL, 4U, RevocationReason::Lost, 0};
   grown.count = 3;
   CHECK_OK(store.accept(revocation_object(grown).view(), sak().pub, kSiteId, kNetwork));
   CHECK(store.rs_epoch() == 15 && store.set().count == 3);
@@ -1481,7 +1481,7 @@ void test_resume2_cache_rules() {
   CHECK(cache.find_by_peer(ResumePurpose::Link, 100, other_network, out, index).code ==
         StatusCode::NotFound);
   RevocationSet rrs = revocation_set(1, 0);
-  rrs.entries[0] = RevocationEntry{100, 2, RevocationReason::Lost};
+  rrs.entries[0] = RevocationEntry{100, 2, RevocationReason::Lost, 0};
   rrs.count = 1;
   CHECK(cache.find_by_peer(ResumePurpose::Link, 100, context(203, &rrs), out, index).code ==
         StatusCode::NotFound);
@@ -1584,7 +1584,7 @@ void test_resume2_incremental_revocation_and_clear() {
   CHECK_OK(cache.put(resume2_slot(100), context()));
   CHECK_OK(cache.put(resume2_slot(101), context()));
   RevocationSet rrs = revocation_set(1, 0);
-  rrs.entries[0] = RevocationEntry{100, 2, RevocationReason::Lost};
+  rrs.entries[0] = RevocationEntry{100, 2, RevocationReason::Lost, 0};
   rrs.count = 1;
   std::size_t cursor = 0;
   bool done = false;

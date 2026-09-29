@@ -259,6 +259,24 @@ fn check_rrs1(name: &str, doc: &Json) {
             entry.reason as u64,
             num(doc, &format!("entry{i:02}_reason"))
         );
+        assert_eq!(
+            u64::from(entry.readmit_gk_epoch),
+            num(doc, &format!("entry{i:02}_readmit_gk_epoch"))
+        );
+    }
+    if doc.get("version").is_some() {
+        // A previous object version only reads (still verified); the
+        // encoder emits the current version.
+        let signer_pub = arr::<64>(doc, "signer_pubkey_hex");
+        let (_, verified) = revocation_object_verify(
+            &hex(doc, "object_hex"),
+            &signer_pub,
+            set.site_id,
+            set.network,
+        )
+        .unwrap();
+        assert!(verified, "{name}: verify");
+        return;
     }
     assert_eq!(revocation_payload_encode(&set).unwrap(), payload, "{name}");
     assert_eq!(revocation_aad(set.network), hex(doc, "aad_hex"), "{name}");

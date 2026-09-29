@@ -185,12 +185,21 @@ Status site_matches_identity(const SiteRecord& site, const IdentityRecord& ident
 //   4 u64 site_id | 12 u64 network
 //  20 u32 rs_epoch (>= 1) | 24 u32 site_epoch_floor (<= network>>32)
 //  28 entries x 16: node_id u64 | min_generation u32 (>= 1) |
-//                   reason u8 (1..4) | reserved 3
+//                   reason u8 (1..4) | readmit_gk_epoch u24
 // Entries strictly ascending by node_id.
+// Version 2 (v2.0, #146) gives the three reserved entry bytes a meaning:
+// readmit_gk_epoch 0 keeps every group frame of that NodeId refused; E > 0
+// accepts its group frames sealed under GK epoch >= E again (the site
+// re-admitted the NodeId at a higher assignment generation and rotated the
+// GK to E, which no earlier holder of the NodeId ever received). A 24-bit
+// field keeps the 16-byte entry and the 616-byte object; the site refuses a
+// readmit whose epoch does not fit. Version 1 sets read with readmit 0.
 // Storage record ("rlrevo", 640 B slot):
 //   0 sealed head (magic "RRS1") | 16 u32 commit_seq | 20 COSE object | len-4 crc
 // An object-less record (24 B) is the cleared tombstone.
-constexpr std::uint8_t kRevocationVersion = 1;
+constexpr std::uint8_t kRevocationVersion = 2;
+constexpr std::uint8_t kRevocationVersionV1 = 1;
+constexpr std::uint32_t kRevocationReadmitMax = 0xFFFFFFU;
 constexpr std::size_t kRevocationEntryMax = 32;
 constexpr std::size_t kRevocationHeadSize = 28;
 constexpr std::size_t kRevocationEntrySize = 16;
@@ -213,7 +222,11 @@ struct RevocationEntry {
   NodeId node_id{kInvalidNodeId};
   std::uint32_t min_generation{0};
   RevocationReason reason{RevocationReason::Removed};
+  // Shares the reason's 32-bit unit (no default initializer for a bit-field
+  // in C++17: entries are always value-initialized, e.g. `entries{}`).
+  std::uint32_t readmit_gk_epoch : 24;
 };
+static_assert(sizeof(RevocationEntry) == 16, "RRS1 entries stay 16 bytes in RAM");
 
 struct RevocationSet {
   std::uint64_t site_id{0};
@@ -246,6 +259,10 @@ Status revocation_object_verify(ByteView object, const P256PublicKey& sak_pubkey
 // below the floor).
 bool revocation_rejects(const RevocationSet& set, NodeId node,
                         std::uint32_t generation, std::uint32_t site_epoch) noexcept;
+// Group-sender test (#146): `node` has an entry and the frame's GK epoch is
+// below its readmit_gk_epoch (or the entry has none).
+bool revocation_blocks_group_sender(const RevocationSet& set, NodeId node,
+                                    std::uint32_t gk_epoch) noexcept;
 // Same-network replacement rule (04 §2, P6): every entry of `old_set` is
 // still present in `next` with a min_generation that did not decrease. Past
 // revocations can only be compressed by a verified cutover (PR C), never by

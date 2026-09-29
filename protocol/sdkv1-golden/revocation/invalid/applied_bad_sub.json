@@ -1,6 +1,6 @@
 {
   "codec": "rrs_applied",
-  "encoded_hex": "010900000000001096dc77dd4ac7417cdf9c0b7c9f37b82519fabc4f29e131383358e05f3dae7bdf",
+  "encoded_hex": "01090000000000102f6153904b3fbd5dd4275af139cfedefa2b55a8a36e77550bf292b570b2a954c",
   "expect": "error",
   "format": "routeloom-sdkv1-revocation-golden-v1",
   "name": "applied_bad_sub",

@@ -71,10 +71,10 @@ def u64(value: int) -> bytes:
 
 def rrs1_payload(site_id: int, network: int, rs_epoch: int, floor: int,
                  entries: list) -> bytes:
-    """RRS1 payload: ver=1 | flags=0 | count u16 | site u64 | network u64 |
+    """RRS1 payload: ver=2 | flags=0 | count u16 | site u64 | network u64 |
     rs_epoch u32 | floor u32 | entries × (node u64 | min_gen u32 | reason u8
-    | 3 reserved), ascending node."""
-    out = b"\x01\x00" + u16(len(entries)) + u64(site_id) + u64(network)
+    | readmit_gk_epoch u24), ascending node. These objects readmit nobody."""
+    out = b"\x02\x00" + u16(len(entries)) + u64(site_id) + u64(network)
     out += u32(rs_epoch) + u32(floor)
     for node, generation, reason in entries:
         out += u64(node) + u32(generation) + bytes((reason,)) + b"\x00" * 3

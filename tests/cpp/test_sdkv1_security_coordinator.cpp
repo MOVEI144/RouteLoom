@@ -1902,8 +1902,8 @@ void test_group_provider_routing() {
   CHECK(f.revocations.accept(object.view(), sak().pub, kSiteId, kNetwork).ok());
   // Both wrapper layers must preserve the applied group gate even when an
   // already-opened frame takes a duplicate, repair or held-delivery path.
-  CHECK(coordinator.session_provider().revoked_group_sender(removed));
-  CHECK(!coordinator.session_provider().revoked_group_sender(removed + 1));
+  CHECK(coordinator.session_provider().revoked_group_sender(removed, kCurrentGroupEpoch));
+  CHECK(!coordinator.session_provider().revoked_group_sender(removed + 1, kCurrentGroupEpoch));
   // Pairwise still delegates to the member bank.
   CHECK(coordinator.session_provider().tx_epoch(SecurityScope::Link, kNode + 1, epoch).code ==
         StatusCode::AuthRequired);
@@ -1922,8 +1922,8 @@ class GroupMeshSession final : public SecurityProvider {
   bool accepts_group_epoch(std::uint32_t epoch) const noexcept override {
     return group_.accepts_group_epoch(epoch);
   }
-  bool revoked_group_sender(NodeId sender) const noexcept override {
-    return group_.revoked_group_sender(sender);
+  bool revoked_group_sender(NodeId sender, std::uint32_t gk_epoch) const noexcept override {
+    return group_.revoked_group_sender(sender, gk_epoch);
   }
   bool group_promotion_pending() const noexcept override {
     return group_.group_promotion_pending();

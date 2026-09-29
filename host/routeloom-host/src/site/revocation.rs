@@ -1416,6 +1416,7 @@ mod tests {
             node_id: node,
             min_generation: generation,
             reason: RevocationReason::Lost,
+            readmit_gk_epoch: 0,
         }
     }
 

@@ -161,9 +161,10 @@ bool SecurityCoordinator::SessionProviderMux::accepts_group_epoch(const std::uin
   return group().accepts_group_epoch(g);
 }
 
-bool SecurityCoordinator::SessionProviderMux::revoked_group_sender(const NodeId sender) const
+bool SecurityCoordinator::SessionProviderMux::revoked_group_sender(
+    const NodeId sender, const std::uint32_t gk_epoch) const
     noexcept {
-  return group().revoked_group_sender(sender);
+  return group().revoked_group_sender(sender, gk_epoch);
 }
 
 bool SecurityCoordinator::SessionProviderMux::group_promotion_pending() const noexcept {

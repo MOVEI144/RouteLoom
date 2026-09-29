@@ -176,7 +176,7 @@ void test_revocation_view() {
     World world;
     world.make_member();
     RevocationSet set = revocation_set(14, 1);
-    set.entries[0] = RevocationEntry{kNode, 4, RevocationReason::Removed};
+    set.entries[0] = RevocationEntry{kNode, 4, RevocationReason::Removed, 0};
     set.count = 1;
     const auto object = revocation_object(set);
     CHECK_OK(world.revocations.accept(object.view(), sak().pub, kSiteId, kNetwork));
@@ -235,7 +235,7 @@ void test_known_member() {
   // ...until the latest RRS1 revokes it: the handshake-time summary alone
   // is not enough.
   RevocationSet set = revocation_set(14, 1);
-  set.entries[0] = RevocationEntry{0x00A1000000000777ULL, 2, RevocationReason::Removed};
+  set.entries[0] = RevocationEntry{0x00A1000000000777ULL, 2, RevocationReason::Removed, 0};
   set.count = 1;
   const auto object = revocation_object(set);
   CHECK_OK(world.revocations.accept(object.view(), sak().pub, kSiteId, kNetwork));
@@ -249,7 +249,7 @@ void test_known_member() {
     CHECK(!stale_hooks.known_member(stale.peers.peer_, kNetwork));
     stale.boot.boot_ = 2000;
     RevocationSet self_set = revocation_set(14, 1);
-    self_set.entries[0] = RevocationEntry{kNode, 4, RevocationReason::Removed};
+    self_set.entries[0] = RevocationEntry{kNode, 4, RevocationReason::Removed, 0};
     self_set.count = 1;
     const auto self_object = revocation_object(self_set);
     CHECK_OK(stale.revocations.accept(self_object.view(), sak().pub, kSiteId, kNetwork));

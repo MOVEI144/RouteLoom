@@ -577,7 +577,8 @@ Status revocation_payload_encode(const RevocationSet& set,
     status = writer.write_u64(entry.node_id);
     if (status) status = writer.write_u32(entry.min_generation);
     if (status) status = writer.write_u8(static_cast<std::uint8_t>(entry.reason));
-    if (status) status = write_zeros(writer, 3);
+    if (status) status = writer.write_u8(static_cast<std::uint8_t>(entry.readmit_gk_epoch >> 16U));
+    if (status) status = writer.write_u16(static_cast<std::uint16_t>(entry.readmit_gk_epoch));
   }
   if (!status) return status;
   out.size = writer.size();
@@ -601,7 +602,7 @@ Status revocation_payload_decode(const ByteView payload, RevocationSet& out) noe
   if (status) status = reader.read_u32(out.rs_epoch);
   if (status) status = reader.read_u32(out.site_epoch_floor);
   if (!status) return status;
-  if (version != kRevocationVersion) {
+  if (version != kRevocationVersion && version != kRevocationVersionV1) {
     return Status::error(StatusCode::Unsupported, "rrs1 version");
   }
   if (flags != 0 || count > kRevocationEntryMax ||
@@ -615,7 +616,15 @@ Status revocation_payload_decode(const ByteView payload, RevocationSet& out) noe
     status = reader.read_u64(entry.node_id);
     if (status) status = reader.read_u32(entry.min_generation);
     if (status) status = reader.read_u8(reason);
-    if (status) status = read_zeros(reader, 3, "rrs1 entry reserved");
+    if (version == kRevocationVersionV1) {
+      if (status) status = read_zeros(reader, 3, "rrs1 entry reserved");
+    } else {
+      std::uint8_t high = 0;
+      std::uint16_t low = 0;
+      if (status) status = reader.read_u8(high);
+      if (status) status = reader.read_u16(low);
+      entry.readmit_gk_epoch = (static_cast<std::uint32_t>(high) << 16U) | low;
+    }
     entry.reason = static_cast<RevocationReason>(reason);
   }
   if (!status) return status;
@@ -680,6 +689,16 @@ bool revocation_rejects(const RevocationSet& set, const NodeId node,
   if (site_epoch < set.site_epoch_floor) return true;
   for (std::uint8_t i = 0; i < set.count && i < kRevocationEntryMax; ++i) {
     if (set.entries[i].node_id == node) return generation < set.entries[i].min_generation;
+  }
+  return false;
+}
+
+bool revocation_blocks_group_sender(const RevocationSet& set, const NodeId node,
+                                    const std::uint32_t gk_epoch) noexcept {
+  for (std::uint8_t i = 0; i < set.count && i < kRevocationEntryMax; ++i) {
+    if (set.entries[i].node_id != node) continue;
+    const std::uint32_t readmit = set.entries[i].readmit_gk_epoch;
+    return readmit == 0 || gk_epoch < readmit;
   }
   return false;
 }

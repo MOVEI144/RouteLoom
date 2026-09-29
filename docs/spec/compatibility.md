@@ -52,7 +52,8 @@ the Rust workspace and meshviz). Each surface below carries its own number.
 | RLC1 device credential (device) | 1 | `ROUTELOOM_STORE_CREDENTIAL` / `STORE_CREDENTIAL` | `components/routeloom/include/routeloom/device_credential.hpp` | unknown version rejected |
 | SDK v1 sealed records RLI1/RLS1/RRS1/RLV1 format | 1 | `ROUTELOOM_STORE_SDKV1_FORMAT` / `STORE_SDKV1_FORMAT` | `components/routeloom/include/routeloom/sdkv1_records.hpp` | unknown format or schema rejected |
 | SDK v1 sealed records schema | 1 | `ROUTELOOM_STORE_SDKV1_SCHEMA` / `STORE_SDKV1_SCHEMA` | `components/routeloom/include/routeloom/sdkv1_records.hpp` | unknown format or schema rejected |
-| RRS1 signed revocation object | 1 | `ROUTELOOM_RRS1_OBJECT_VERSION` / `RRS1_OBJECT_VERSION` | `components/routeloom/include/routeloom/sdkv1_records.hpp` | unknown object version rejected |
+| RRS1 signed revocation object | 2 | `ROUTELOOM_RRS1_OBJECT_VERSION` / `RRS1_OBJECT_VERSION` | `components/routeloom/include/routeloom/sdkv1_records.hpp` | version 1 reads with readmit_gk_epoch 0; other versions rejected |
+| RLV1 local removal record schema | 2 | `ROUTELOOM_STORE_RLV1_SCHEMA` / `STORE_RLV1_SCHEMA` | `components/routeloom/include/routeloom/sdkv1_records.hpp` | schema 1 reads; newer schemas are Unsupported |
 | RLP1 resume slot | 1 | `ROUTELOOM_STORE_RLP1_FORMAT` / `STORE_RLP1_FORMAT` | `components/routeloom/include/routeloom/sdkv1_records.hpp` | legacy cache slot may be discarded |
 | RLP2 resume slot | 1 | `ROUTELOOM_STORE_RLP2_FORMAT` / `STORE_RLP2_FORMAT` | `components/routeloom/include/routeloom/sdkv1_records.hpp` | unknown slot rejected; RLP1 is a cache miss |
 | Migration active record | 1 | `ROUTELOOM_STORE_MIGRATION_ACTIVE` / `STORE_MIGRATION_ACTIVE` | `components/routeloom/src/migration.cpp` | unknown version rejected |

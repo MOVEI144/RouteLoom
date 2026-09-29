@@ -452,7 +452,7 @@ void test_resume_cache_over_nvs() {
   // The revocation sweep scrubs the RMS from the stored blob (peer 102
   // is not revoked and survives the same two sweep steps).
   RevocationSet rrs{};
-  rrs.entries[0] = RevocationEntry{101, 2, RevocationReason::Removed};
+  rrs.entries[0] = RevocationEntry{101, 2, RevocationReason::Removed, 0};
   rrs.count = 1;
   const ResumeContext guarded{kNetwork, 203, &rrs};
   std::size_t cursor = 0;

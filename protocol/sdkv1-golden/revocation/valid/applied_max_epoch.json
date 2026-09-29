@@ -1,10 +1,10 @@
 {
-  "body_hex": "01010000ffffffff44f1fd2fd569aa1337e365c2492c80b792d2fe3ec4b8fd8aeb46146d8dacf769",
+  "body_hex": "01010000ffffffffae7017cba7b03c49b535173707df123c9ec6ecbe50b31da023d753d090f64ee0",
   "codec": "rrs_applied",
   "expect": "ok",
   "format": "routeloom-sdkv1-revocation-golden-v1",
   "name": "applied_max_epoch",
   "note": "epoch bound, full-set digest",
-  "object_sha256_hex": "44f1fd2fd569aa1337e365c2492c80b792d2fe3ec4b8fd8aeb46146d8dacf769",
+  "object_sha256_hex": "ae7017cba7b03c49b535173707df123c9ec6ecbe50b31da023d753d090f64ee0",
   "rs_epoch": 4294967295
 }

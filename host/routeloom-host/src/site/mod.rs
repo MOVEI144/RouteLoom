@@ -3498,11 +3498,12 @@ impl SiteAuthority {
             .generation
             .checked_add(1)
             .ok_or_else(|| SiteError::new("AUTHORITY_ERROR", "assignment generation exhausted"))?;
+        // A revoke clears any earlier readmit of this NodeId.
         entries.push(RevocationEntry {
             node_id: row.node,
             min_generation,
-
             reason: request.reason,
+            readmit_gk_epoch: 0,
         });
         entries.sort_by_key(|e| e.node_id);
         if entries.len() > REVOCATION_ENTRY_MAX {

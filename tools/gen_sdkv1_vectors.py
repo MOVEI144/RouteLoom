@@ -279,13 +279,17 @@ REVOCATION_DOMAIN = b"RouteLoom/revocation-set/v1\x00"
 POP_DOMAIN = b"RouteLoom/device-key-pop/v1\x00"
 
 
-def rrs1_payload(r: dict, count_override=None, version=1, flags=0) -> bytes:
+def rrs1_payload(r: dict, count_override=None, version=2, flags=0) -> bytes:
+    # Entries are (node, min_generation, reason[, readmit_gk_epoch]); version 2
+    # carries readmit_gk_epoch u24 where version 1 had three zero bytes.
     entries = r["entries"]
     count = len(entries) if count_override is None else count_override
     out = (u8(version) + u8(flags) + u16(count) + u64(r["site_id"]) + u64(r["network"]) +
            u32(r["rs_epoch"]) + u32(r["site_epoch_floor"]))
-    for node, generation, reason in entries:
-        out += u64(node) + u32(generation) + u8(reason) + b"\x00" * 3
+    for entry in entries:
+        node, generation, reason = entry[:3]
+        readmit = entry[3] if len(entry) > 3 else 0
+        out += u64(node) + u32(generation) + u8(reason) + readmit.to_bytes(3, "big")
     return out
 
 
@@ -593,11 +597,11 @@ def main() -> None:
 
     # ---- RRS1 --------------------------------------------------------------
     rrs1 = dict(site_id=site_id, network=network, rs_epoch=14, site_epoch_floor=2,
-                entries=[(0x00A1000000000100, 2, 1), (0x00A1000000000777, 4, 2),
+                entries=[(0x00A1000000000100, 2, 1), (0x00A1000000000777, 4, 2, 0x0123AB),
                          (0x00A10000000009AB, 1, 4)])
 
-    def rrs1_doc(r: dict, object_seq: int, sak_secret: int = sak) -> dict:
-        payload = rrs1_payload(r)
+    def rrs1_doc(r: dict, object_seq: int, sak_secret: int = sak, version: int = 2) -> dict:
+        payload = rrs1_payload(r, version=version)
         aad = rrs1_aad(r["network"])
         structure = sig_structure(payload, aad)
         signature = sign(sak_secret, structure)
@@ -609,13 +613,22 @@ def main() -> None:
                    object_hex=obj.hex(), commit_seq=object_seq, record_hex=record.hex(),
                    signer_secret_hex=sak_secret.to_bytes(32, "big").hex(),
                    signer_pubkey_hex=pubkey(sak_secret).hex())
-        for i, (node_id, generation, reason) in enumerate(r["entries"]):
-            doc[f"entry{i:02d}_node"] = node_id
-            doc[f"entry{i:02d}_min_generation"] = generation
-            doc[f"entry{i:02d}_reason"] = reason
+        for i, entry in enumerate(r["entries"]):
+            doc[f"entry{i:02d}_node"] = entry[0]
+            doc[f"entry{i:02d}_min_generation"] = entry[1]
+            doc[f"entry{i:02d}_reason"] = entry[2]
+            doc[f"entry{i:02d}_readmit_gk_epoch"] = entry[3] if len(entry) > 3 else 0
+        if version != 2:
+            doc["version"] = version
         return doc
 
     emit("valid", "rrs1_three_entries", dict(rrs1_doc(rrs1, 5), codec="rrs1", expect="ok"))
+    # The previous object version still reads, every entry with readmit 0.
+    v1 = dict(rrs1, entries=[e[:3] for e in rrs1["entries"]])
+    emit("valid", "rrs1_version_1", dict(rrs1_doc(v1, 5, version=1), codec="rrs1", expect="ok"))
+    readmit_max = dict(rrs1, rs_epoch=16,
+                       entries=[(0x00A1000000000100, 3, 1, 0xFFFFFF)])
+    emit("valid", "rrs1_readmit_max", dict(rrs1_doc(readmit_max, 6), codec="rrs1", expect="ok"))
     cutover = dict(rrs1, rs_epoch=15, site_epoch_floor=site_epoch, entries=[])
     emit("valid", "rrs1_cutover_empty", dict(rrs1_doc(cutover, 6), codec="rrs1", expect="ok"))
     full = dict(rrs1, rs_epoch=0xFFFFFFFF,
@@ -648,8 +661,11 @@ def main() -> None:
         "count disagrees with the payload length", **verify_ctx)
     bad("rrs1_flags_set", "rrs1", rrs1_signed(rrs1_payload(rrs1, flags=1)),
         "flags are reserved zero", **verify_ctx)
-    bad("rrs1_version_2", "rrs1", rrs1_signed(rrs1_payload(rrs1, version=2)),
+    bad("rrs1_version_3", "rrs1", rrs1_signed(rrs1_payload(rrs1, version=3)),
         "unknown payload version", **verify_ctx)
+    v1_readmit = rrs1_payload(rrs1, version=1)
+    bad("rrs1_v1_reserved_nonzero", "rrs1", rrs1_signed(v1_readmit),
+        "version 1 entries carry three zero bytes", **verify_ctx)
     bad("rrs1_floor_above_network_epoch", "rrs1",
         rrs1_signed(rrs1_payload(dict(rrs1, site_epoch_floor=site_epoch + 1))),
         "site_epoch_floor may not exceed network>>32", **verify_ctx)

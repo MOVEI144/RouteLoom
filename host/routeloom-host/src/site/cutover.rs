@@ -597,6 +597,8 @@ impl CutoverState {
                     node_id: parse_h16(entry.get("node")?.as_str()?)?,
                     min_generation: u32::try_from(entry.get("min_generation")?.as_u64()?).ok()?,
                     reason: reason_from_u8(u8::try_from(entry.get("reason")?.as_u64()?).ok()?)?,
+                    // A cutover carries only the removals made while it ran.
+                    readmit_gk_epoch: 0,
                 })
             })
             .collect::<Option<Vec<_>>>()?;
@@ -2800,6 +2802,7 @@ impl SiteAuthority {
                     node_id: removed_node,
                     min_generation,
                     reason,
+                    readmit_gk_epoch: 0,
                 });
                 state.carry.sort_by_key(|e| e.node_id);
             }
