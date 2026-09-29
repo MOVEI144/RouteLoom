@@ -102,6 +102,7 @@
 // Setup arrives on argv (all integers accept 0x hex; blobs are hex):
 //
 //   --node <u64> --mac <12hex> --role <u8> --t0 <ms> --seed <u64>
+//   --join-cap <u8>    override the joiner's role capability (negative tests)
 //   --gateway | --member
 //   --usb-secret <hex>   (gateway: the USB dev secret, test material)
 //   --cap <u32>           (gateway: USB HelloAck capability bitmap)
@@ -746,6 +747,7 @@ struct Setup {
   NodeId node{routeloom::kInvalidNodeId};
   routeloom::MacAddress mac{};
   std::uint8_t role{0};
+  std::uint8_t join_cap{0};
   MonotonicMs t0{0};
   std::uint64_t seed{0};
   bool gateway{false};
@@ -785,6 +787,8 @@ Setup parse_argv(int argc, char** argv) {
     } else if (arg == std::string("--role") && take_arg(argc, argv, i, value)) {
       setup.role = static_cast<std::uint8_t>(parse_u64(value));
       have_role = true;
+    } else if (arg == std::string("--join-cap") && take_arg(argc, argv, i, value)) {
+      setup.join_cap = static_cast<std::uint8_t>(parse_u64(value));
     } else if (arg == std::string("--t0") && take_arg(argc, argv, i, value)) {
       setup.t0 = parse_u64(value);
       have_t0 = true;
@@ -1107,11 +1111,11 @@ int main(int argc, char** argv) {
   owner_config.local_mac = setup.mac;
   owner_config.joiner.node = setup.node;
   owner_config.joiner.mac = setup.mac;
+  owner_config.role = setup.gateway ? profile::Role::Gateway : profile::kRole;
   owner_config.joiner.capability =
-      kMemberRoleEndpoint | kMemberRoleRelay | (setup.gateway ? kMemberRoleGateway : 0);
+      setup.join_cap != 0 ? setup.join_cap : profile::role_mask(owner_config.role);
   owner_config.joiner.requested_role = setup.role;
   owner_config.log_tag = "mesh_peer";
-  owner_config.role = setup.gateway ? profile::Role::Gateway : profile::kRole;
   owner_config.flat_group_routing = setup.flat;
 
   EspOwnerEntropy entropy;

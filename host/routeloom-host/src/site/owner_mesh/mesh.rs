@@ -1033,4 +1033,25 @@ fn mesh_profile_role_above_profile_refused() {
         );
         assert!(!output.status.success(), "{}: exit status", path.display());
     }
+    if let Some(path) = std::env::var_os("ROUTELOOM_MESH_PEER_A") {
+        let output = Command::new(&path)
+            .args(["--node", &format!("{NODE_A:#x}"), "--mac", &hex(&MAC_A)])
+            .args(["--role", &format!("{ROLE_ENDPOINT}"), "--join-cap", "3"])
+            .args(["--t0", "1000", "--seed", "7", "--member", "--channel", "6"])
+            .output()
+            .expect("spawn endpoint with relay capability");
+        assert!(
+            !output.status.success(),
+            "over-profile join capability accepted"
+        );
+        assert!(output.stdout.len() >= 3, "missing fatal frame");
+        let length = usize::from(u16::from_le_bytes([output.stdout[0], output.stdout[1]]));
+        assert_eq!(output.stdout.len(), length + 2, "only one fatal frame");
+        assert_eq!(output.stdout[2], b'E', "fatal frame tag");
+        assert_eq!(
+            &output.stdout[3..],
+            b"RESOURCE_PROFILE_ROLE_MISMATCH",
+            "role mismatch reason"
+        );
+    }
 }
