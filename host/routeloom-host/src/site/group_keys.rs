@@ -901,7 +901,9 @@ impl GroupRotation {
         }
     }
 
-    /// Books a command send: 2/4/8 s gaps, then unknown + a 1 min round.
+    /// Books a command send: 2/4/8 s gaps, then a 1 min round. Only a
+    /// target with no evidence turns unknown: a staged or active ACK is
+    /// durable, and an unanswered repair send does not undo it.
     pub fn note_sent(&mut self, node: u64, activate: bool, mono_ms: u64) {
         let Some(target) = self.targets.get_mut(&node) else {
             return;
@@ -913,7 +915,7 @@ impl GroupRotation {
         if target.attempts >= GK_MAX_ATTEMPTS {
             target.attempts = 0;
             target.next_due_mono = mono_ms.saturating_add(GK_UNKNOWN_RETRY_MS);
-            if target.row.state != TargetState::StagedAcked {
+            if target.row.state == TargetState::Pending {
                 target.row.state = TargetState::Unknown;
             }
             return;
@@ -1335,6 +1337,30 @@ mod tests {
         let target = gks.target(0xA1).unwrap();
         assert_eq!(target.attempts, 0);
         assert_eq!(target.next_due_mono, 77_000);
+    }
+
+    #[test]
+    fn exhausted_repair_keeps_active_evidence() {
+        let mut gks = GroupRotation::new(1, [1; 32], 2, 100, None);
+        gks.publish_staging(plan_9(
+            RotationCause::Periodic,
+            RotationPhase::Activating,
+            60_000,
+            vec![TargetRow::fresh(9, 0xA1, [3; 32], 1)],
+        ));
+        let target = gks.target_mut(0xA1).unwrap();
+        target.row.state = TargetState::ActiveAcked;
+        target.row.confirmed_epoch = 2;
+        // A pull at or below the active key asks for a repair round.
+        target.active_first = true;
+        for at in [1_000, 3_000, 7_000, 15_000] {
+            assert_eq!(gks.send_kind(0xA1), Some(GkSend::Update { epoch: 1 }));
+            gks.note_sent(0xA1, false, at);
+        }
+        let target = gks.target(0xA1).unwrap();
+        assert_eq!(target.row.state, TargetState::ActiveAcked);
+        assert_eq!(target.next_due_mono, 75_000);
+        assert_eq!(gks.counts(), (1, 1, 1, 0));
     }
 
     #[test]
