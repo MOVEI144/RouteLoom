@@ -52,18 +52,29 @@ fn mesh_m06_gateway_power_cut_resumes() {
         world.snaps[1].app_tx
     );
     let boot_before = world.usb_host.hello_boot.expect("gateway hello");
+    let auth_before = world.usb_auth_total();
 
     world.peers[0].power_cut();
     step_until_reboots(&mut world, 0, 1, 1000);
     let rebooted_at = world.now;
     let mut next_send = world.now;
     let mut resumed_at = None;
+    let mut reauthed_at = None;
     while world.now < rebooted_at + 15_000 && resumed_at.is_none() {
         if world.now >= next_send {
             world.peers[1].app_send(testkit::GATEWAY, b"m06-stream");
             next_send += 2000;
         }
         world.step(25);
+        if reauthed_at.is_none()
+            && world.usb_auth_total() > auth_before
+            && world
+                .usb_host
+                .hello_boot
+                .is_some_and(|boot| boot > boot_before)
+        {
+            reauthed_at = Some(world.now);
+        }
         let before = delivered.len();
         note_delivered(&world, 1, &mut delivered);
         if delivered.len() > before {
@@ -77,8 +88,8 @@ fn mesh_m06_gateway_power_cut_resumes() {
         )
     });
     assert!(
-        !world.usb_host.auth_sessions.is_empty(),
-        "gateway USB re-authenticated after its reboot"
+        reauthed_at.is_some_and(|at| at - rebooted_at <= 5000),
+        "gateway USB re-authenticated within 5 s of reboot: {reauthed_at:?} vs {rebooted_at}"
     );
     let boot_after = world
         .usb_host
