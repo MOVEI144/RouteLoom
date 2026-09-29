@@ -43,9 +43,11 @@ class SiteConfig:
     acl_file: Path | None = None
     expected_site_id: str | None = None
     # Lab-site material routeloom-host needs for bridge USB sessions and the
-    # bench admission profile; the daemon reads the file itself — the secret
-    # never enters argv or this process.
+    # bench admission profile; the daemon reads the files itself — secrets
+    # never enter argv or this process. Per-gateway HostLink credentials win
+    # over the site-wide development secret (the daemon takes one of them).
     usb_dev_secret_file: Path | None = None
+    hostlink_credentials: Path | None = None
     admission_profile: str | None = None
 
 
@@ -313,7 +315,9 @@ class SiteSupervisor:
             argv += ['--api-acl-file', str(config.acl_file)]
         if config.admission_profile:
             argv += ['--admission-profile', config.admission_profile]
-        if config.usb_dev_secret_file:
+        if config.hostlink_credentials:
+            argv += ['--hostlink-credentials', str(config.hostlink_credentials)]
+        elif config.usb_dev_secret_file:
             argv += ['--usb-dev-secret-file', str(config.usb_dev_secret_file)]
         return argv
 

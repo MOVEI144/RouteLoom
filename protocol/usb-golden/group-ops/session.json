@@ -3,16 +3,17 @@
   "secret_hex": "726f7574656c6f6f6d2d6465762d736563726574",
   "host_nonce": 72623859790382856,
   "device_nonce": 11578966645329101058,
-  "version": 1,
+  "version": 2,
   "node": 1,
   "boot": 756033585153,
   "network": 7,
   "capability": 135,
   "principal": "host-operator",
-  "session_id": 5481648114078113623,
+  "session_id": 2428822770114058804,
   "peer_node": 2,
-  "hello_tag_hex": "8d98950c7ee907a70859274f19bd5da7",
-  "auth_tag_hex": "cfcd25db9ebe636b4d4320decf80f16b",
-  "auth_ok_tag_hex": "aa6373c22ba7d723ae750986bb4e6523",
-  "session_key_hex": "c1c1782f356a0932e32dc8b871109732"
+  "hello_tag_hex": "ab0fd2a17eeeed944126442d3abd45bc",
+  "auth_tag_hex": "058209d0070bbf210f49b25f654fe7ab",
+  "auth_ok_tag_hex": "71cf2fbff7830f2e6c6654c7dc3bf2ad",
+  "key_h2d_hex": "2124d04db3121cfcdfbd45faa40801d1fa6708b845f00770c2cd7cc4771232d3",
+  "key_d2h_hex": "52d9c2835aad6b37f1ec39d68ff2a14c746956e88a286802b55969c7fcfb5690"
 }

@@ -4,10 +4,10 @@
 //! decoded and their session tags/counters verified against the dev-session
 //! construction both languages implement.
 
-use routeloom_protocol::dev_session::*;
 use routeloom_protocol::host_ops::*;
+use routeloom_protocol::session::*;
 use routeloom_protocol::{
-    encode_frame, CumulativeCredit, Frame, FrameKind, StreamDecoder, MAX_DECODED_FRAME,
+    encode_frame, CumulativeCredit, Frame, FrameKind, StreamDecoder, MAX_DECODED_FRAME, VERSION,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -98,21 +98,35 @@ fn decode_wire(wire: &[u8]) -> Frame {
     frames.pop().expect("one frame").expect("decodable vector")
 }
 
+/// The session.json transcript: a USB protocol 2 transcript that offered
+/// exactly the version it selected.
+fn golden_transcript(session: &BTreeMap<String, String>) -> Transcript {
+    assert_eq!(u64_field(session, "version"), u64::from(VERSION));
+    Transcript {
+        node: u64_field(session, "node"),
+        boot: u64_field(session, "boot"),
+        network: u64_field(session, "network"),
+        capability: u64_field(session, "capability") as u32,
+        ..Transcript::usb(
+            u64_field(session, "host_nonce"),
+            u64_field(session, "device_nonce"),
+            field(session, "principal").as_bytes(),
+        )
+    }
+}
+
+/// Both direction keys in session.json match the derivation.
+fn assert_keys(proof: &SessionProof, session: &BTreeMap<String, String>) {
+    assert_eq!(proof.key_h2d.to_vec(), unhex(field(session, "key_h2d_hex")));
+    assert_eq!(proof.key_d2h.to_vec(), unhex(field(session, "key_d2h_hex")));
+}
+
 #[test]
 fn usb_session_vectors_are_byte_exact() {
     let root = golden_dir();
     let session = load(&root.join("session.json"));
     let secret = unhex(field(&session, "secret_hex"));
-    let transcript = Transcript {
-        host_nonce: u64_field(&session, "host_nonce"),
-        device_nonce: u64_field(&session, "device_nonce"),
-        version: u64_field(&session, "version") as u8,
-        node: u64_field(&session, "node"),
-        boot: u64_field(&session, "boot"),
-        network: u64_field(&session, "network"),
-        capability: u64_field(&session, "capability") as u32,
-        principal: field(&session, "principal").as_bytes().to_vec(),
-    };
+    let transcript = golden_transcript(&session);
     assert_eq!(transcript.encode().unwrap().len(), TRANSCRIPT_SIZE);
     let proof = derive_session_proof(&secret, &transcript.encode().unwrap());
     assert_eq!(proof.session_id, u64_field(&session, "session_id"));
@@ -128,10 +142,7 @@ fn usb_session_vectors_are_byte_exact() {
         proof.auth_ok_tag.to_vec(),
         unhex(field(&session, "auth_ok_tag_hex"))
     );
-    assert_eq!(
-        proof.key.to_vec(),
-        unhex(field(&session, "session_key_hex"))
-    );
+    assert_keys(&proof, &session);
 
     let mut frame_files: Vec<PathBuf> = fs::read_dir(root.join("frames"))
         .expect("frames dir")
@@ -180,15 +191,15 @@ fn usb_session_vectors_are_byte_exact() {
                 assert_eq!(frame.session, 0);
                 assert_eq!(frame.body, {
                     let mut body = transcript.host_nonce.to_be_bytes().to_vec();
-                    body.extend_from_slice(&[1, 1, transcript.principal.len() as u8]);
+                    body.extend_from_slice(&[VERSION, VERSION, transcript.principal.len() as u8]);
                     body.extend_from_slice(&transcript.principal);
                     body
                 });
             }
             "hello_ack" => {
-                assert_eq!(frame.body.len(), 8 + 1 + 8 + 8 + 8 + 4 + DEV_TAG_SIZE);
+                assert_eq!(frame.body.len(), 8 + 1 + 8 + 8 + 8 + 4 + TAG_SIZE);
                 assert_eq!(&frame.body[..8], &transcript.device_nonce.to_be_bytes());
-                assert_eq!(frame.body[8], 1);
+                assert_eq!(frame.body[8], VERSION);
                 assert_eq!(&frame.body[37..], &proof.hello_tag);
             }
             "auth" => {
@@ -197,8 +208,8 @@ fn usb_session_vectors_are_byte_exact() {
             }
             "auth_ok" => {
                 saw_auth_ok = true;
-                assert_eq!(&frame.body[..DEV_TAG_SIZE], &proof.auth_ok_tag);
-                assert_eq!(&frame.body[DEV_TAG_SIZE..], &proof.session_id.to_be_bytes());
+                assert_eq!(&frame.body[..TAG_SIZE], &proof.auth_ok_tag);
+                assert_eq!(&frame.body[TAG_SIZE..], &proof.session_id.to_be_bytes());
             }
             _ => {
                 // Every post-auth frame carries session id + direction
@@ -209,7 +220,12 @@ fn usb_session_vectors_are_byte_exact() {
                 } else {
                     DIRECTION_DEVICE_TO_HOST
                 };
-                let (counter, inner) = open_body(&proof.key, direction, &frame).expect("valid tag");
+                let key = if direction == DIRECTION_HOST_TO_DEVICE {
+                    &proof.key_h2d
+                } else {
+                    &proof.key_d2h
+                };
+                let (counter, inner) = open_body(key, direction, &frame).expect("valid tag");
                 let expected = if direction == DIRECTION_HOST_TO_DEVICE {
                     &mut h2d_counter
                 } else {
@@ -284,16 +300,7 @@ fn tampered_session_frames_are_rejected() {
     let root = golden_dir();
     let session = load(&root.join("session.json"));
     let secret = unhex(field(&session, "secret_hex"));
-    let transcript = Transcript {
-        host_nonce: u64_field(&session, "host_nonce"),
-        device_nonce: u64_field(&session, "device_nonce"),
-        version: 1,
-        node: u64_field(&session, "node"),
-        boot: u64_field(&session, "boot"),
-        network: u64_field(&session, "network"),
-        capability: u64_field(&session, "capability") as u32,
-        principal: field(&session, "principal").as_bytes().to_vec(),
-    };
+    let transcript = golden_transcript(&session);
     let proof = derive_session_proof(&secret, &transcript.encode().unwrap());
     // Found by step name, not file number, so scenario insertions cannot
     // silently point this tamper check at the wrong frame.
@@ -314,9 +321,11 @@ fn tampered_session_frames_are_rejected() {
     // A flipped tag bit must fail verification.
     let mut forged = frame.clone();
     forged.body[10] ^= 1;
-    assert!(open_body(&proof.key, DIRECTION_HOST_TO_DEVICE, &forged).is_err());
-    // A wrong-direction tag must fail as well.
-    assert!(open_body(&proof.key, DIRECTION_DEVICE_TO_HOST, &frame).is_err());
+    assert!(open_body(&proof.key_h2d, DIRECTION_HOST_TO_DEVICE, &forged).is_err());
+    // The genuine frame opens only under its own direction key and byte.
+    assert!(open_body(&proof.key_h2d, DIRECTION_HOST_TO_DEVICE, &frame).is_ok());
+    assert!(open_body(&proof.key_h2d, DIRECTION_DEVICE_TO_HOST, &frame).is_err());
+    assert!(open_body(&proof.key_d2h, DIRECTION_HOST_TO_DEVICE, &frame).is_err());
     // Re-encoding the decoded frame stays byte-identical.
     assert_eq!(
         encode_frame(&frame).expect("re-encode"),
@@ -337,24 +346,15 @@ fn node_status_vectors_are_byte_exact() {
     let capability = u64_field(&session, "capability") as u32;
     assert_eq!(capability, 0x3 | CAP_HOST_OPS_V1 | CAP_NODE_STATUS_V1);
     let transcript = Transcript {
-        host_nonce: u64_field(&session, "host_nonce"),
-        device_nonce: u64_field(&session, "device_nonce"),
-        version: 1,
-        node: u64_field(&session, "node"),
-        boot: u64_field(&session, "boot"),
-        network: u64_field(&session, "network"),
         capability,
-        principal: field(&session, "principal").as_bytes().to_vec(),
+        ..golden_transcript(&session)
     };
     let proof = derive_session_proof(
         &unhex(field(&session, "secret_hex")),
         &transcript.encode().unwrap(),
     );
     assert_eq!(proof.session_id, u64_field(&session, "session_id"));
-    assert_eq!(
-        proof.key.to_vec(),
-        unhex(field(&session, "session_key_hex"))
-    );
+    assert_keys(&proof, &session);
 
     let mut files: Vec<PathBuf> = fs::read_dir(root.join("frames"))
         .expect("frames dir")
@@ -382,7 +382,12 @@ fn node_status_vectors_are_byte_exact() {
         } else {
             DIRECTION_DEVICE_TO_HOST
         };
-        let (counter, inner) = open_body(&proof.key, dir, &frame).expect("valid tag");
+        let key = if dir == DIRECTION_HOST_TO_DEVICE {
+            &proof.key_h2d
+        } else {
+            &proof.key_d2h
+        };
+        let (counter, inner) = open_body(key, dir, &frame).expect("valid tag");
         let expected = if dir == DIRECTION_HOST_TO_DEVICE {
             &mut h2d
         } else {
@@ -435,14 +440,8 @@ fn group_ops_vectors_are_byte_exact() {
     let capability = u64_field(&session, "capability") as u32;
     assert_eq!(capability, 0x3 | CAP_HOST_OPS_V1 | CAP_GROUP_DELIVERY_V1);
     let transcript = Transcript {
-        host_nonce: u64_field(&session, "host_nonce"),
-        device_nonce: u64_field(&session, "device_nonce"),
-        version: 1,
-        node: u64_field(&session, "node"),
-        boot: u64_field(&session, "boot"),
-        network: u64_field(&session, "network"),
         capability,
-        principal: field(&session, "principal").as_bytes().to_vec(),
+        ..golden_transcript(&session)
     };
     let proof = derive_session_proof(
         &unhex(field(&session, "secret_hex")),
@@ -476,7 +475,12 @@ fn group_ops_vectors_are_byte_exact() {
         } else {
             DIRECTION_DEVICE_TO_HOST
         };
-        let (counter, inner) = open_body(&proof.key, dir, &frame).expect("valid tag");
+        let key = if dir == DIRECTION_HOST_TO_DEVICE {
+            &proof.key_h2d
+        } else {
+            &proof.key_d2h
+        };
+        let (counter, inner) = open_body(key, dir, &frame).expect("valid tag");
         let expected = if dir == DIRECTION_HOST_TO_DEVICE {
             &mut h2d
         } else {
@@ -530,14 +534,8 @@ fn join_relay_vectors_are_byte_exact() {
     let capability = u64_field(&session, "capability") as u32;
     assert_eq!(capability, 0x3 | CAP_HOST_OPS_V1 | CAP_JOIN_RELAY_V2);
     let transcript = Transcript {
-        host_nonce: u64_field(&session, "host_nonce"),
-        device_nonce: u64_field(&session, "device_nonce"),
-        version: 1,
-        node: u64_field(&session, "node"),
-        boot: u64_field(&session, "boot"),
-        network: u64_field(&session, "network"),
         capability,
-        principal: field(&session, "principal").as_bytes().to_vec(),
+        ..golden_transcript(&session)
     };
     let proof = derive_session_proof(
         &unhex(field(&session, "secret_hex")),
@@ -573,7 +571,12 @@ fn join_relay_vectors_are_byte_exact() {
         } else {
             DIRECTION_DEVICE_TO_HOST
         };
-        let (counter, inner) = open_body(&proof.key, dir, &frame).expect("valid tag");
+        let key = if dir == DIRECTION_HOST_TO_DEVICE {
+            &proof.key_h2d
+        } else {
+            &proof.key_d2h
+        };
+        let (counter, inner) = open_body(key, dir, &frame).expect("valid tag");
         let expected = if dir == DIRECTION_HOST_TO_DEVICE {
             &mut h2d
         } else {

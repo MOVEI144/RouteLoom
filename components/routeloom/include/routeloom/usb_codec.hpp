@@ -38,7 +38,7 @@ constexpr std::size_t kMaxPendingEncoded = kMaxDecodedFrame + 64;
 constexpr MonotonicMs kPartialFrameTimeoutMs = 1000;
 
 constexpr std::uint32_t kMagic = 0x524C5531U;  // "RLU1"
-constexpr std::uint8_t kProtocolVersion = 1;
+constexpr std::uint8_t kProtocolVersion = 2;  // HostLink v2 (HKDF + HMAC-SHA-256)
 
 enum class FrameKind : std::uint8_t {
   Hello = 1,
