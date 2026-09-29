@@ -119,6 +119,7 @@
 //   --join-cap <u8>    override the joiner's role capability (negative tests)
 //   --world-nodes <2..32>  nodes in the scenario snapshot (default 3)
 //   --gateway | --member
+//   --devram             adopt the shared development session profile
 //   --usb-secret <hex>   (gateway: the USB dev secret, test material)
 //   --cap <u32>           (gateway: USB HelloAck capability bitmap)
 //   --channel <u8>        (operating channel, default 6)
@@ -805,6 +806,7 @@ struct Setup {
   std::uint64_t seed{0};
   std::uint8_t world_nodes{3};
   bool gateway{false};
+  bool devram{false};
   Bytes usb_secret;
   std::uint32_t usb_cap{0};
   std::uint8_t channel{6};
@@ -861,6 +863,8 @@ Setup parse_argv(int argc, char** argv) {
     } else if (arg == std::string("--member")) {
       setup.gateway = false;
       have_mode = true;
+    } else if (arg == std::string("--devram")) {
+      setup.devram = true;
     } else if (arg == std::string("--usb-secret") && take_arg(argc, argv, i, value)) {
       setup.usb_secret = parse_hex(value);
     } else if (arg == std::string("--cap") && take_arg(argc, argv, i, value)) {
@@ -1208,7 +1212,7 @@ int main(int argc, char** argv) {
     if (!setup.flash.empty() || !setup.flash_ext.empty()) fatal("nvs-load with flash import");
     decode_nvs_image(read_file_bytes(setup.nvs_load.c_str()));
   }
-  import_flash_images(setup.flash, setup.flash_ext);
+  if (!setup.devram) import_flash_images(setup.flash, setup.flash_ext);
   mesh_peer_seed_entropy(setup.seed);
 
   idf_stub::reset();
@@ -1233,13 +1237,18 @@ int main(int argc, char** argv) {
     }
     fatal(failed.detail);
   };
+  const DeviceSecurity security = setup.devram ? DeviceSecurity::DevRam : DeviceSecurity::Member;
   Status status = device.open_storage(setup.gateway ? profile::Role::Gateway : profile::kRole,
-                                      DeviceSecurity::Member);
+                                      security);
   if (!status) boot_failed(status);
   DeviceConfig config{};
   config.log_tag = "mesh_peer";
   config.role = setup.gateway ? profile::Role::Gateway : profile::kRole;
-  config.security = DeviceSecurity::Member;
+  config.security = security;
+  if (setup.devram) {
+    config.dev_psk.fill(0x42);
+    config.config_authority = 1;
+  }
   config.mac = setup.mac;
   config.role_capability =
       setup.join_cap != 0 ? setup.join_cap : profile::role_mask(config.role);
