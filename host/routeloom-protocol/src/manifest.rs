@@ -69,7 +69,7 @@ pub const STORE_CANONICAL_GATEWAY: u32 = 2;
 /// Host operation store (SQLite).
 pub const STORE_HOST_OPS: u32 = 4;
 /// Site Authority store (SQLite).
-pub const STORE_SITE: u32 = 2;
+pub const STORE_SITE: u32 = 3;
 
 pub const REASON_NONE: u16 = 0;
 pub const REASON_QUEUED: u16 = 256;

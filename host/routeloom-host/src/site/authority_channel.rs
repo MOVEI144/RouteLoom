@@ -1099,8 +1099,9 @@ impl AuthorityChannels {
     /// Seals a P6 typed payload for `device` (G-SEC P6 PR D: RRS1 /
     /// RemovalNotice / GrantRenew): the 16-byte generation head the
     /// channel fences on, then the opaque P6 body the revocation /
-    /// cutover sink owns. Only types 5..=7 ride here; anything else is
-    /// a caller bug, refused before any channel state moves.
+    /// cutover sink owns, or (type 9) a ProxyPolicySet. Only types 5..=7
+    /// and 9 ride here; anything else is a caller bug, refused before any
+    /// channel state moves.
     pub fn send_typed(
         &mut self,
         directory: &dyn AuthorityDirectory,
@@ -1110,7 +1111,7 @@ impl AuthorityChannels {
         tail: &[u8],
         now_ms: u64,
     ) -> Result<(), ChannelSendError> {
-        if !matches!(env_type, 5..=7) {
+        if !matches!(env_type, 5..=7 | 9) {
             return Err(ChannelSendError::InvalidParams);
         }
         if tail.len() > AUTHORITY_ENVELOPE_MAX - AUTHORITY_ENVELOPE_MIN - BODY_HEAD {
@@ -1962,7 +1963,7 @@ mod tests {
         let mut channels = AuthorityChannels::new(config());
         let mut device = handshake(&mut channels, &directory);
         // Only P6 types ride; anything else refuses before sealing.
-        for env_type in [0, 1, 2, 3, 4, 8, 9, 255] {
+        for env_type in [0, 1, 2, 3, 4, 8, 10, 255] {
             assert_eq!(
                 channels.send_typed(&directory, DEVICE, env_type, 9, &[1, 2], 1001),
                 Err(ChannelSendError::InvalidParams),

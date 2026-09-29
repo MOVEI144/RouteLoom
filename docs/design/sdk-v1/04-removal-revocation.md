@@ -14,7 +14,7 @@
 
 「旧割当（世代）の機器の通信を拒否」は、`MemberCert.assignment_generation < min_generation`、または`MemberCert.site_epoch < site_epoch_floor`のMemberCertを、link/E2E確立時と、RRS1を受理した時点の生存contextの両方で拒否することで実現する。
 
-**v1のNodeId規則**：GroupLink／GroupEndには割当世代がないため、一度この現場で失効したNodeIdは同じ現場で再発行しない（cutoverでRRS1のentryが消えても履歴台帳を確認する）。機器のNodeIdは事務所のRLI1／DevCertに固定され、Hostは参加時に別の値を割り当てられない。再参加させるには事務所で新NodeIdの機器IDを再発行し、KGuardが新IDをallowする。旧IDでのallowは理由付きCONFLICTとする。誤ったHostが旧IDで新世代を発行しても、RRS1を適用済みの機器はそのIDのgroup frameを拒否する。割当世代とGK epochの結合はv1.1（#146）。
+**NodeIdの再参加（v2.0、#146）**：GroupLink／GroupEndには割当世代がないため、group frameの受理はGK epochで判定する。Hostは失効履歴のあるNodeIdを、台帳の失効世代（cutoverでRRS1のentryが消えても履歴台帳を確認する）より大きい割当世代でだけ再発行する。適用中のRRS1がそのNodeIdを名指ししている場合、allowと同じtransactionで新しいGK epoch E（再参加する機器を対象に含み、以前の保持者は受け取っていない）をstageし、RRS1 v2のそのentryの`readmit_gk_epoch`をEにして配る。受信側は`revoked_group_sender(node, frameのGK epoch)`で、entryがあり`readmit_gk_epoch`が0かframeのepochがそれより小さいときだけ拒否する。frameは変えない。`readmit_gk_epoch`は24 bit（entryの予約3 byte。entryとobjectの大きさは不変）で、Eが収まらないときHostは理由付きCONFLICTで断る（新NodeIdで再provision）。v1のRRS1は`readmit_gk_epoch`=0として読む。再度の失効はentryの`readmit_gk_epoch`を0に戻す。機器のRLV1は`removed_generation`より大きい世代の参加を妨げない。
 
 ## 2. RRS1 — 失効集合
 

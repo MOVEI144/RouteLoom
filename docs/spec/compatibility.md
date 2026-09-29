@@ -62,7 +62,7 @@ the Rust workspace and meshviz). Each surface below carries its own number.
 | Host canonical node request | 1 | `STORE_CANONICAL_NODE` | `host/routeloom-host/src/canonical.rs` | schema byte identifies the immutable request |
 | Host canonical gateway request | 2 | `STORE_CANONICAL_GATEWAY` | `host/routeloom-host/src/canonical.rs` | schema byte identifies the immutable request |
 | Host operation store (SQLite) | 4 | `STORE_HOST_OPS` | `host/routeloom-host/src/sqlite_store.rs` | accepts 1..=current and migrates forward |
-| Site Authority store (SQLite) | 2 | `STORE_SITE` | `host/routeloom-host/src/site/store.rs` | migrates 1 to 2 forward; other versions refused |
+| Site Authority store (SQLite) | 3 | `STORE_SITE` | `host/routeloom-host/src/site/store.rs` | migrates 1 and 2 forward, keeping a copy of the old file; other versions refused |
 
 Toolchain: ESP-IDF v6.0.3 (`76f5dedd9950a3012fee8fb7d5586df21fc67802`), Rust 1.85.0. Partition layout ID: not registered yet.
 

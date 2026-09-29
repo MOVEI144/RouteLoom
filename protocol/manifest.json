@@ -104,9 +104,9 @@
     {"id": "host_op_store", "label": "Host operation store (SQLite)", "value": 4, "rust": "STORE_HOST_OPS",
      "rust_check": "crate::sqlite_store::SCHEMA_VERSION",
      "source": "host/routeloom-host/src/sqlite_store.rs", "rule": "accepts 1..=current and migrates forward"},
-    {"id": "site_store", "label": "Site Authority store (SQLite)", "value": 2, "rust": "STORE_SITE",
+    {"id": "site_store", "label": "Site Authority store (SQLite)", "value": 3, "rust": "STORE_SITE",
      "rust_check": "crate::site::store::SCHEMA_VERSION",
-     "source": "host/routeloom-host/src/site/store.rs", "rule": "migrates 1 to 2 forward; other versions refused"}
+     "source": "host/routeloom-host/src/site/store.rs", "rule": "migrates 1 and 2 forward, keeping a copy of the old file; other versions refused"}
   ],
   "toolchain": {
     "esp_idf_tag": "v6.0.3",

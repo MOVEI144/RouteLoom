@@ -83,6 +83,10 @@ pub fn rrs_covers(older: &[RevocationEntry], newer: &[RevocationEntry]) -> bool 
 /// never be sealed under a new-network context.
 pub trait RevocationTransport {
     fn send_rrs(&mut self, node: u64, object: &[u8]) -> bool;
+    /// Sends a type-9 ProxyPolicySet tail (#176). Default refuses until wired.
+    fn send_policy(&mut self, _node: u64, _tail: &[u8]) -> bool {
+        false
+    }
     /// Sends a type-6 RemovalNotice. Default refuses until wired.
     fn send_notice(&mut self, _node: u64, _network: u64, _notice: &[u8]) -> bool {
         false

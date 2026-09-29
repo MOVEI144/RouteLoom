@@ -52,6 +52,7 @@ pub mod config;
 pub mod cutover;
 pub mod group_keys;
 pub mod p6_channel;
+mod proxy_policy;
 pub mod records;
 pub mod revocation;
 pub mod store;
@@ -85,7 +86,7 @@ use routeloom_provision::sdkv1::channel_plan::{
 use routeloom_provision::sdkv1::devca::devcert_verify;
 use routeloom_provision::sdkv1::revocation::{
     revocation_issue, revocation_object_decode, RevocationEntry, RevocationReason, RevocationSet,
-    REVOCATION_ENTRY_MAX,
+    REVOCATION_ENTRY_MAX, REVOCATION_READMIT_MAX,
 };
 use routeloom_provision::sha256::sha256;
 use routeloom_provision::signer::{fill_random, RootSigner};
@@ -390,6 +391,15 @@ pub struct PolicyPatch {
     pub decision_mode: Option<DecisionMode>,
     pub decision_timeout_ms: Option<u16>,
     pub pending_retry_after_s: Option<u32>,
+}
+
+/// The readmit half of an allow (#146), planned before the commit.
+struct ReadmitPlan {
+    staging: StagedPlan,
+    rs_epoch: u32,
+    entries: Vec<RevocationEntry>,
+    object: Vec<u8>,
+    distribution: revocation::OperationDistribution,
 }
 
 /// `join.policy.*` (07 §2).
@@ -853,11 +863,11 @@ pub struct SiteAuthority {
     lab_enrollment_window: Option<(u64, u64)>,
     /// A failed write can have an uncertain outcome; re-open the DB first.
     lab_write_poisoned: bool,
-    /// Newest policy generation the proxies confirmed applied (`None` =
-    /// never distributed). No distribution vehicle exists yet, so this
-    /// stays `None` and the radio intake follows the adoption-time
-    /// default; the vehicle will drive it and persist it.
-    policy_distributed_generation: Option<u32>,
+    /// ProxyPolicySet generation each proxy acknowledged durable (#176;
+    /// mirrors the `policy_acks` table).
+    policy_applied: BTreeMap<u64, u32>,
+    /// RAM resend schedule per proxy: (next send at, attempts).
+    policy_retry: BTreeMap<u64, (u64, u32)>,
     devices: BTreeMap<u64, DeviceRow>,
     discovered: BTreeMap<u64, Discovered>,
     requests: BTreeMap<u64, JoinRequestRec>,
@@ -1483,7 +1493,8 @@ impl SiteAuthority {
             lab,
             lab_enrollment_window: None,
             lab_write_poisoned: false,
-            policy_distributed_generation: None,
+            policy_applied: snapshot.policy_acks.clone(),
+            policy_retry: BTreeMap::new(),
             devices,
             discovered,
             requests,
@@ -2672,6 +2683,12 @@ impl SiteAuthority {
         for receipt in receipts {
             match receipt.env_type {
                 5 => self.apply_type5_receipt(receipt, time),
+                9 => self.handle_policy_ack(
+                    receipt.device,
+                    receipt.generation,
+                    &receipt.body,
+                    time.unix_ms,
+                ),
                 7 => {
                     // Type 7 phases ride separate handlers:
                     // COMMIT_STORED (5) and RouteState (6) steer
@@ -2799,6 +2816,7 @@ impl SiteAuthority {
             }
         }
         self.tick_distribution(now_ms);
+        self.tick_policy(now_ms);
     }
 
     /// Ends one relayed exchange as failed, keeping the reason, the
@@ -3126,6 +3144,7 @@ impl SiteAuthority {
             Option<TargetRow>,
             Option<Operation>,
             Option<u64>,
+            Option<ReadmitPlan>,
         );
         let mut approved: Option<Approved> = None;
 
@@ -3143,20 +3162,29 @@ impl SiteAuthority {
                         "another key holds this NodeId; use a new NodeId (revocation does not permit reuse)",
                     ));
                 }
-                // Group frames carry a NodeId, not an assignment generation.
-                // Once revoked, that ID cannot safely identify a new group sender.
-                let revoked_before =
+                // #146: a revoked NodeId returns only above every revoked
+                // generation. Group frames carry no generation, so while the
+                // applied RRS1 still names it, the readmit rotates the GK and
+                // marks the entry: only frames under the new epoch pass.
+                let revoked_generation =
                     self.store
-                        .has_revocation(open.facts.node)
+                        .revoked_generation(open.facts.node)
                         .map_err(|error| {
                             self.store_error(now_ms, &error);
                             store_failure(&error)
                         })?;
-                if revoked_before {
+                let readmit_entry = revoked_generation.and_then(|_| {
+                    self.rrs_entries
+                        .iter()
+                        .find(|e| e.node_id == open.facts.node)
+                        .cloned()
+                });
+                if readmit_entry.is_some() && self.cutover_blocks_rotate() {
                     return Err(SiteError::new(
-                        "CONFLICT",
-                        "NodeId was revoked; reprovision with a new NodeId before joining this site",
-                    ));
+                        "BUSY",
+                        "a site_epoch cutover is preparing; retry the readmit after it commits",
+                    )
+                    .retry());
                 }
                 let capability_ok = match role {
                     ROLE_RELAY => {
@@ -3192,12 +3220,17 @@ impl SiteAuthority {
                     )
                     .retry());
                 }
-                let generation = match self.devices.get(&open.facts.node) {
-                    None => 1,
-                    Some(row) => row.generation.checked_add(1).ok_or_else(|| {
+                let generation_floor = self
+                    .devices
+                    .get(&open.facts.node)
+                    .map_or(0, |row| row.generation)
+                    .max(revoked_generation.unwrap_or(0));
+                let generation = generation_floor
+                    .checked_add(1)
+                    .ok_or_else(|| {
                         SiteError::new("AUTHORITY_ERROR", "assignment generation exhausted")
-                    })?,
-                };
+                    })?
+                    .max(readmit_entry.as_ref().map_or(0, |e| e.min_generation));
                 self.checked_next_op_id()?;
                 let serial = self.next_serial;
                 let next_serial = serial.checked_add(1).ok_or_else(|| {
@@ -3311,7 +3344,7 @@ impl SiteAuthority {
                     sha256(&row.member_cert),
                     now_ms,
                 );
-                let op = Operation {
+                let mut op = Operation {
                     id: self.next_op_id,
                     kind: "approve".into(),
                     node: row.node,
@@ -3335,6 +3368,20 @@ impl SiteAuthority {
                     cutover: None,
                     notice: None,
                 };
+                // The readmit half commits with the allow: a fresh GK the
+                // earlier holder never had (the readmitted member is one
+                // of its targets) and an RRS1 marking the entry with it.
+                let readmit = match readmit_entry {
+                    Some(_) => Some(self.plan_readmit(&row, next_revision, now_ms)?),
+                    None => None,
+                };
+                if let Some(plan) = readmit.as_ref() {
+                    op.rs_epoch = plan.rs_epoch;
+                    op.gk_from = plan.staging.from_epoch;
+                    op.gk_to = plan.staging.to_epoch;
+                    op.gk_cause = RotationCause::Manual.name().into();
+                    op.distribution = Some(plan.distribution.clone());
+                }
                 result = format!(
                     "{{\"state\":\"committed\",\"join_request_id\":\"{}\",\"device_id\":\"{}\",\"verdict\":\"allow\",\"role\":\"{}\",\"generation\":{generation},\"member_cert_serial\":{serial},\"operation_id\":\"{}\",\"applied\":\"{applied}\",{actor}}}",
                     request_token(open.id),
@@ -3358,11 +3405,12 @@ impl SiteAuthority {
                     .push(("revision", next_revision.to_be_bytes().to_vec()));
                 // §6.3: an allow during a rotation joins the new member to
                 // its targets in the same transaction (the deadline never
-                // moves for a newcomer).
-                let joined_target = self
-                    .gks
-                    .rotation()
-                    .map(|r| TargetRow::fresh(r.row.operation_id, row.node, row.kid, generation));
+                // moves for a newcomer). A readmit supersedes that rotation
+                // with its own, which already targets the member.
+                let joined_target =
+                    self.gks.rotation().filter(|_| readmit.is_none()).map(|r| {
+                        TargetRow::fresh(r.row.operation_id, row.node, row.kid, generation)
+                    });
                 if let Some(target) = joined_target.as_ref() {
                     batch.gk_targets.push(target.clone());
                 }
@@ -3377,13 +3425,30 @@ impl SiteAuthority {
                         .docs
                         .push((DocKind::Operation, h16(joined.id), Some(joined.doc())));
                 }
-                let evicted = self.operation_doc(&mut batch, &op)?;
+                let evicted = match readmit.as_ref() {
+                    Some(plan) => {
+                        batch.rrs.push((plan.rs_epoch, plan.object.clone()));
+                        batch
+                            .meta
+                            .push(("rs_epoch", plan.rs_epoch.to_be_bytes().to_vec()));
+                        self.fill_staging_batch(&mut batch, &plan.staging, &op)?
+                    }
+                    None => self.operation_doc(&mut batch, &op)?,
+                };
                 batch.approval_audit.push((op.id, format!(
                     "{{\"operation_id\":\"{}\",\"join_request_id\":\"{}\",\"attempt\":{},\"device_id\":\"{}\",\"kid\":\"{}\",\"role\":\"{}\",{actor}}}",
                     op_token(op.id), request_token(open.id), open.attempt,
                     h16(row.node), hex_lower(&row.kid), role_name(role)
                 )));
-                approved = Some((row, ledger, op, joined_target, joined_cutover, evicted));
+                approved = Some((
+                    row,
+                    ledger,
+                    op,
+                    joined_target,
+                    joined_cutover,
+                    evicted,
+                    readmit,
+                ));
             }
             _ => {
                 result = format!(
@@ -3414,7 +3479,7 @@ impl SiteAuthority {
             return Err(store_failure(&error));
         }
         // Committed: now the RAM model follows.
-        if let Some((row, ledger, op, joined_target, joined_cutover, evicted)) = approved {
+        if let Some((row, ledger, op, joined_target, joined_cutover, evicted, readmit)) = approved {
             self.ledger_seq = ledger.seq;
             self.ledger_head = ledger.hash;
             // A staged cutover grant consumed one more serial past the
@@ -3432,7 +3497,10 @@ impl SiteAuthority {
             if let Some(joined) = joined_cutover {
                 self.operations.insert(joined.id, joined);
             }
-            self.remember_operation(op, evicted);
+            match readmit {
+                Some(plan) => self.publish_readmit(plan, op, evicted, now_ms),
+                None => self.remember_operation(op, evicted),
+            }
         }
         self.remember_decision(&principal, &request.key, digest, &result, now_ms);
         self.requests.insert(open.id, updated);
@@ -3453,6 +3521,104 @@ impl SiteAuthority {
             self.finish_verdict(txn, open.facts.node, request.verdict, now_ms, true);
         }
         Ok(result)
+    }
+
+    /// The readmit half of an allow (#146) for a NodeId the applied RRS1
+    /// still names: a fresh GK epoch E (the readmitted `row` is one of its
+    /// targets, the earlier holder never received it) and the RRS1 with
+    /// that entry's readmit_gk_epoch set to E. Fails before anything
+    /// commits.
+    fn plan_readmit(
+        &self,
+        row: &DeviceRow,
+        members_revision: u32,
+        now_ms: u64,
+    ) -> Result<ReadmitPlan, SiteError> {
+        let op_id = self.checked_next_op_id()?;
+        let mut staging = self.plan_staging(
+            op_id,
+            RotationCause::Manual,
+            self.join_mono_ms
+                .saturating_add(RotationCause::Manual.stage_deadline_ms()),
+            None,
+            members_revision,
+            now_ms,
+        )?;
+        if staging.to_epoch > REVOCATION_READMIT_MAX {
+            return Err(SiteError::new(
+                "CONFLICT",
+                "the readmit GK epoch no longer fits the RRS1 entry; use a new NodeId",
+            ));
+        }
+        staging
+            .targets
+            .push(TargetRow::fresh(op_id, row.node, row.kid, row.generation));
+        let mut entries = self.rrs_entries.clone();
+        for entry in entries.iter_mut().filter(|e| e.node_id == row.node) {
+            entry.readmit_gk_epoch = staging.to_epoch;
+        }
+        let rs_epoch = self
+            .rs_epoch
+            .checked_add(1)
+            .ok_or_else(|| SiteError::new("AUTHORITY_ERROR", "revocation epoch exhausted"))?;
+        let set = RevocationSet {
+            site_id: self.id.site_id,
+            network: self.id.network,
+            rs_epoch,
+            site_epoch_floor: self.id.site_claims.site_epoch,
+            entries: entries.clone(),
+        };
+        let object = revocation_issue(&set, self.sak.as_ref())
+            .map_err(|e| SiteError::new("AUTHORITY_ERROR", format!("RRS1 issue failed: {e}")))?;
+        // Every live member takes the new set (the readmitted row is not
+        // live yet; it receives the set with its join).
+        let distribution = self.snapshot_targets(0, rs_epoch, sha256(&object));
+        Ok(ReadmitPlan {
+            staging,
+            rs_epoch,
+            entries,
+            object,
+            distribution,
+        })
+    }
+
+    /// Publishes a committed readmit to RAM (only after the commit).
+    fn publish_readmit(
+        &mut self,
+        plan: ReadmitPlan,
+        op: Operation,
+        evicted: Option<u64>,
+        now_ms: u64,
+    ) {
+        let ReadmitPlan {
+            staging,
+            rs_epoch,
+            entries,
+            object,
+            ..
+        } = plan;
+        let (from, to, superseded) = (staging.from_epoch, staging.to_epoch, staging.superseded_op);
+        self.publish_staging_plan(staging, op.clone(), evicted);
+        self.rs_epoch = rs_epoch;
+        self.rrs_history.insert(rs_epoch, entries.clone());
+        self.rrs_entries = entries;
+        self.rrs_history_digests.insert(rs_epoch, sha256(&object));
+        self.rrs_latest_object = object;
+        self.channels
+            .lock()
+            .expect("authority channel poisoned")
+            .set_epochs(rs_epoch, self.gks.active_epoch());
+        self.prune_rrs_history();
+        self.emit_staged(RotationCause::Manual, from, to, op.id, superseded, now_ms);
+        self.event(
+            now_ms,
+            format!(
+                "\"kind\":\"member.readmitted\",\"device_id\":\"{}\",\"generation\":{},\"readmit_gk_epoch\":{to},\"rs_epoch\":{rs_epoch},\"operation_id\":\"{}\"",
+                h16(op.node),
+                op.generation,
+                op_token(op.id)
+            ),
+        );
     }
 
     /// `membership.revoke` (04 §3, 07 §2.2).
@@ -3818,8 +3984,8 @@ impl SiteAuthority {
 
     /// `membership.archive` (07 §2.2): forgets removed-device rows in one
     /// atomic batch, reclaiming the 1024-row ledger capacity for future
-    /// joins. Ledger rows are never deleted, so the NodeId no-reuse rule
-    /// (`decide` refuses through `has_revocation`) survives the archive;
+    /// joins. Ledger rows are never deleted, so the readmit rule (#146:
+    /// `decide` issues only above `revoked_generation`) survives the archive;
     /// each deletion additionally commits an `archive` ledger row bound
     /// to the forgotten row's last MemberCert.
     ///
@@ -5693,18 +5859,25 @@ impl SiteAuthority {
     /// `join.policy.get` body (07 §2.1): the policy content plus the radio
     /// OFFER convergence state. Host approval (`decision_mode`, and the
     /// `zero_touch_open=false` verdict rule) takes effect at set time;
-    /// the proxies converge on `policy_generation` through the versioned
-    /// radio distribution, whose newest confirmed generation is
-    /// `radio_distributed_generation` (`null` = nothing distributed yet).
+    /// the proxies converge on `policy_generation` through the ProxyPolicySet
+    /// distribution (#176): `radio_distributed_generation` is the lowest
+    /// generation any reached proxy acknowledged (`null` = none yet) and
+    /// `radio_distribution` counts the proxies applied / pending (sent,
+    /// unanswered) / unknown (no channel) for the current generation.
     pub fn policy_json(&self) -> String {
         let content = self.policy.json();
-        let distributed = self
-            .policy_distributed_generation
+        let radio = self.policy_distribution();
+        let distributed = radio
+            .distributed
             .map_or_else(|| "null".to_string(), |g| g.to_string());
         format!(
-            "{},\"radio_distributed_generation\":{},\"lab_enrollment_active\":{}}}",
+            "{},\"radio_distributed_generation\":{},\"radio_distribution\":{{\"proxies\":{},\"applied\":{},\"pending\":{},\"unknown\":{}}},\"lab_enrollment_active\":{}}}",
             &content[..content.len() - 1],
             distributed,
+            radio.proxies,
+            radio.applied,
+            radio.pending,
+            radio.unknown,
             !self.lab_write_poisoned
                 && self
                     .lab_enrollment_window

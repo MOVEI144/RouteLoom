@@ -837,11 +837,11 @@ impl SiteStore for PresenceOnlyStore {
     fn ledger_for(&mut self, _: u64) -> Result<Vec<LedgerRow>, StoreError> {
         Err(StoreError("full ledger lookup unavailable".into()))
     }
-    fn has_revocation(&mut self, node: u64) -> Result<bool, StoreError> {
+    fn revoked_generation(&mut self, node: u64) -> Result<Option<u32>, StoreError> {
         if self.fail_lookup.load(Ordering::Relaxed) {
             return Err(StoreError("revocation lookup failed".into()));
         }
-        self.inner.has_revocation(node)
+        self.inner.revoked_generation(node)
     }
 }
 
@@ -1854,10 +1854,11 @@ fn restart_after_commit_reissues_the_same_member_cert() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// An allow needs only revocation presence; a failed lookup must never
-/// issue an assignment.
+/// #146: a revoked NodeId is readmitted only above its revoked generation,
+/// with a fresh GK epoch it is a target of and the RRS1 entry marked with
+/// that epoch; a failed revocation lookup never issues an assignment.
 #[test]
-fn allow_uses_revocation_presence_and_fails_closed_on_lookup_error() {
+fn allow_readmits_above_the_revoked_generation_and_fails_closed_on_lookup_error() {
     let fail_lookup = Arc::new(AtomicBool::new(false));
     let (service, transport) = service_with(Box::new(PresenceOnlyStore {
         inner: MemoryStore::default(),
@@ -1887,23 +1888,43 @@ fn allow_uses_revocation_presence_and_fails_closed_on_lookup_error() {
         .code,
         "STORE_FAILURE"
     );
-    fail_lookup.store(false, Ordering::Relaxed);
-    assert_eq!(
-        decide(
-            &service,
-            id,
-            node,
-            Verdict::Allow {
-                role: ROLE_ENDPOINT
-            },
-            "retry",
-            T0 + 20_020
-        )
-        .unwrap_err()
-        .code,
-        "CONFLICT"
-    );
     assert!(!service.with(|a| a.devices[&node].member).0);
+    fail_lookup.store(false, Ordering::Relaxed);
+    let rs_before = service.with(|a| a.rs_epoch).0;
+    let result = decide(
+        &service,
+        id,
+        node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "retry",
+        T0 + 20_020,
+    )
+    .unwrap();
+    assert!(result.contains("\"generation\":2"), "{result}");
+    let (member, generation, rs_epoch, readmit, staged, targeted) = service
+        .with(|a| {
+            (
+                a.devices[&node].member,
+                a.devices[&node].generation,
+                a.rs_epoch,
+                a.rrs_entries
+                    .iter()
+                    .find(|e| e.node_id == node)
+                    .map(|e| e.readmit_gk_epoch),
+                a.gks.staged_epoch(),
+                a.gks.targets().contains_key(&node),
+            )
+        })
+        .0;
+    assert!(member && generation == 2);
+    assert_eq!(rs_epoch, rs_before + 1);
+    assert!(
+        staged.is_some() && readmit == staged,
+        "{readmit:?} vs {staged:?}"
+    );
+    assert!(targeted, "the readmitted member receives the new GK");
 }
 
 /// V1-H04 / V1-R01 (host part) / V1-R05 / V1-R07: revoke commits a
@@ -1995,7 +2016,8 @@ fn removal_end_to_end() {
         "{outcome:?}"
     );
     assert!(device.site.is_none());
-    // The decider sees the removed identity, but its NodeId cannot be re-allowed.
+    // The decider sees the removed identity; #146 readmits its NodeId at
+    // the next generation.
     let (_, outcome, events) = device.start(&service, &transport, T0 + 660_000);
     assert!(matches!(outcome, Outcome::Waiting));
     let request = events
@@ -2017,12 +2039,10 @@ fn removal_end_to_end() {
         "a2",
         T0 + 660_010,
     )
-    .unwrap_err();
-    assert_eq!(error.code, "CONFLICT");
-    assert!(error.message.contains("new NodeId"));
+    .unwrap();
+    assert!(error.contains("\"generation\":2"), "{error}");
 
-    // The office reprovisions RLI1/DevCert with a fresh NodeId; only that
-    // identity can join while the old RRS1 entry remains in force.
+    // A device reprovisioned with a fresh NodeId joins as a new member.
     let mut replacement = SimDevice::new(device.node + 1, 0x78);
     let (mut new_exchange, _, new_events) = replacement.start(&service, &transport, T0 + 663_000);
     decide(
@@ -2561,7 +2581,8 @@ fn review_concurrent_different_keys_rechecks_current_membership() {
     let requests = requests.get("requests").unwrap().as_array().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].get("state").unwrap().as_str(), Some("awaiting"));
-    // Revocation does not release a NodeId for a waiting request.
+    // Once A is revoked, the waiting request is readmitted above A's
+    // generation (#146).
     let (revoked, _) = service.with(|auth| {
         auth.revoke(
             DECIDER,
@@ -2575,7 +2596,7 @@ fn review_concurrent_different_keys_rechecks_current_membership() {
         )
     });
     revoked.unwrap();
-    let error = decide(
+    let readmitted = decide(
         &service,
         request_id(&events_b).unwrap(),
         b.node,
@@ -2585,12 +2606,15 @@ fn review_concurrent_different_keys_rechecks_current_membership() {
         "review-b2",
         T0 + 60,
     )
-    .unwrap_err();
-    assert_eq!(error.code, "CONFLICT");
-    assert!(error.message.contains("new NodeId"));
+    .unwrap();
+    assert!(readmitted.contains("\"generation\":2"), "{readmitted}");
+    let (row, _) = service.with(|auth| auth.devices[&b.node].clone());
+    assert!(row.member && row.kid == b.kid && row.generation == 2);
 }
 
-/// A replacement key needs a fresh office-issued NodeId after revocation.
+/// After a revocation the NodeId is readmitted above the revoked
+/// generation (#146), even for a replacement key; a fresh NodeId still
+/// joins as a new member.
 #[test]
 fn review_revoked_membership_allows_explicit_replacement_key() {
     let (service, transport) = service();
@@ -2627,7 +2651,7 @@ fn review_revoked_membership_allows_explicit_replacement_key() {
         json(&revoked.unwrap()).get("state").unwrap().as_str(),
         Some("committed")
     );
-    // Even another key cannot claim the revoked NodeId.
+    // Another key claims the revoked NodeId at the next generation.
     let mut b = SimDevice::new(a.node, 0xC4);
     let (_, outcome, events) = b.start(&service, &transport, T0 + 30_000);
     assert!(matches!(outcome, Outcome::Waiting));
@@ -2645,21 +2669,18 @@ fn review_revoked_membership_allows_explicit_replacement_key() {
         "{}",
         request.1
     );
-    assert_eq!(
-        decide(
-            &service,
-            request_id(&events).unwrap(),
-            b.node,
-            Verdict::Allow {
-                role: ROLE_ENDPOINT
-            },
-            "b",
-            T0 + 30_010
-        )
-        .unwrap_err()
-        .code,
-        "CONFLICT"
-    );
+    let readmitted = decide(
+        &service,
+        request_id(&events).unwrap(),
+        b.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "b",
+        T0 + 30_010,
+    )
+    .unwrap();
+    assert!(readmitted.contains("\"generation\":2"), "{readmitted}");
     let mut fresh = SimDevice::new(a.node + 1, 0xC4);
     let (mut next, _, next_events) = fresh.start(&service, &transport, T0 + 40_000);
     decide(
@@ -2753,21 +2774,19 @@ fn review_replacement_flow_survives_a_restart() {
         "{}",
         request.1
     );
-    assert_eq!(
-        decide(
-            &service,
-            request_id(&events).unwrap(),
-            node,
-            Verdict::Allow {
-                role: ROLE_ENDPOINT
-            },
-            "b",
-            T0 + 30_010
-        )
-        .unwrap_err()
-        .code,
-        "CONFLICT"
-    );
+    // The revoked generation survives the restart: the readmit issues 2.
+    let readmitted = decide(
+        &service,
+        request_id(&events).unwrap(),
+        node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "b",
+        T0 + 30_010,
+    )
+    .unwrap();
+    assert!(readmitted.contains("\"generation\":2"), "{readmitted}");
     let mut fresh = SimDevice::new(node + 1, 0xC6);
     let (mut next, _, next_events) = fresh.start(&service, &transport, T0 + 40_000);
     decide(
@@ -2869,22 +2888,20 @@ fn review_late_allow_follows_the_current_membership() {
         .code,
         "NOT_FOUND"
     );
-    // Clearing the live kid conflict cannot clear the revocation history.
-    assert_eq!(
-        decide(
-            &service,
-            id_b,
-            b.node,
-            Verdict::Allow {
-                role: ROLE_ENDPOINT
-            },
-            "b",
-            T0 + 220
-        )
-        .unwrap_err()
-        .code,
-        "CONFLICT"
-    );
+    // With the live kid conflict gone, B is readmitted above the revoked
+    // generation (#146), never at it.
+    let readmitted = decide(
+        &service,
+        id_b,
+        b.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "b",
+        T0 + 220,
+    )
+    .unwrap();
+    assert!(readmitted.contains("\"generation\":2"), "{readmitted}");
     // A decision recorded for next_attempt stays open. A new idempotency
     // key replays the stored committed answer only while the membership
     // it created is still live…
@@ -5731,8 +5748,8 @@ fn revocation_baseline_bootstrap_on_first_get() {
 
 /// V1-H11 (P2-6): archiving removed rows deletes the device rows
 /// (reclaiming the 1024-row ledger capacity) while the `revoke` ledger
-/// rows keep the no-reissue rule intact: the NodeId still refuses a
-/// fresh key.
+/// rows keep the readmit rule intact (#146): the NodeId returns only
+/// above its revoked generation.
 #[test]
 fn archive_removed_reclaims_capacity_without_losing_no_reissue_history() {
     let (service, transport) = service();
@@ -5772,25 +5789,22 @@ fn archive_removed_reclaims_capacity_without_losing_no_reissue_history() {
     assert!(service.with(|a| a.member_get_json(device.node)).0.is_none());
     assert_eq!(service.with(|a| a.devices.len()).0, 0);
 
-    // ... but the NodeId still refuses a fresh key.
+    // ... but the NodeId never returns at the revoked generation.
     let mut fresh_key = SimDevice::new(device.node, 0xC4);
     let (_, outcome, events) = fresh_key.start(&service, &transport, T0 + 40_000);
     assert!(matches!(outcome, Outcome::Waiting));
-    assert_eq!(
-        decide(
-            &service,
-            request_id(&events).unwrap(),
-            fresh_key.node,
-            Verdict::Allow {
-                role: ROLE_ENDPOINT
-            },
-            "b",
-            T0 + 40_010
-        )
-        .unwrap_err()
-        .code,
-        "CONFLICT"
-    );
+    let readmitted = decide(
+        &service,
+        request_id(&events).unwrap(),
+        fresh_key.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "b",
+        T0 + 40_010,
+    )
+    .unwrap();
+    assert!(readmitted.contains("\"generation\":2"), "{readmitted}");
     let rows = service.with(|a| a.store.ledger_for(device.node).unwrap()).0;
     assert!(rows.iter().any(|r| r.kind == "revoke"));
     assert!(rows.iter().any(|r| r.kind == "archive"));
@@ -5932,7 +5946,12 @@ fn archive_survives_restart() {
     let status = reopened.with(|a| a.status_json(HostTime::sync(T0 + 40))).0;
     assert!(status.contains("\"archived_total\":1"), "{status}");
     assert!(reopened.with(|a| a.member_get_json(node)).0.is_none());
-    assert!(reopened.with(|a| a.store.has_revocation(node).unwrap()).0);
+    assert_eq!(
+        reopened
+            .with(|a| a.store.revoked_generation(node).unwrap())
+            .0,
+        Some(1)
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -6042,4 +6061,114 @@ fn control_pressure_tracks_join_lifecycle() {
     ));
     // The decided request and the settled exchange no longer press.
     assert!(!service.control_pressure(), "joined service is quiet");
+}
+
+/// ProxyPolicySet tails sent, per proxy (#176).
+type PolicySends = Arc<Mutex<Vec<(u64, Vec<u8>)>>>;
+
+/// Captures ProxyPolicySet sends behind a ready P6 port.
+struct FakePolicyTransport {
+    sent: PolicySends,
+}
+
+impl super::revocation::RevocationTransport for FakePolicyTransport {
+    fn send_rrs(&mut self, _node: u64, _object: &[u8]) -> bool {
+        true
+    }
+    fn send_policy(&mut self, node: u64, tail: &[u8]) -> bool {
+        self.sent.lock().unwrap().push((node, tail.to_vec()));
+        true
+    }
+    fn p6_ready(&self) -> bool {
+        true
+    }
+}
+
+/// #176: a closed policy goes to proxy members only and is resent until a
+/// durable ACK; only acknowledged generations count as applied, the
+/// acknowledgements survive a daemon restart, and an ACK over a stale
+/// binding moves nothing.
+#[test]
+fn proxy_policy_distribution_counts_durable_acks() {
+    use routeloom_keysched::authority::{ProxyPolicyAck, ProxyPolicySet};
+    let dir = std::env::temp_dir().join(format!(
+        "routeloom-site-proxy-policy-{}-{T0}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    routeloom_peercred::create_private_dir_all(&dir).unwrap();
+    let db = dir.join("site.db");
+    let relay_node = 0x00A1_0000_0000_9101;
+    {
+        let (service, transport) = service_with(Box::new(SqliteSiteStore::open(&db).unwrap()));
+        let mut relay = SimDevice::new(relay_node, 0x91);
+        let (mut exchange, _, events) = relay.start(&service, &transport, T0);
+        decide(
+            &service,
+            request_id(&events).unwrap(),
+            relay_node,
+            Verdict::Allow { role: ROLE_RELAY },
+            "relay",
+            T0 + 10,
+        )
+        .unwrap();
+        relay.finish(&mut exchange, &transport);
+        join_member(
+            &service,
+            &transport,
+            0x00A1_0000_0000_9102,
+            0x92,
+            T0 + 1_000,
+        );
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        service.with(|a| {
+            a.set_rrs_transport(Some(Box::new(FakePolicyTransport { sent: sent.clone() })))
+        });
+        let closed = service
+            .with(|a| {
+                a.update_policy(&PolicyPatch {
+                    zero_touch_open: Some(false),
+                    ..PolicyPatch::default()
+                })
+            })
+            .0
+            .unwrap();
+        assert!(closed.contains("\"policy_generation\":1"), "{closed}");
+        service.tick(HostTime::sync(T0 + 2_000));
+        let first = sent.lock().unwrap().clone();
+        assert_eq!(first.len(), 1, "one send, to the relay only");
+        assert_eq!(first[0].0, relay_node);
+        let set = ProxyPolicySet::decode(&first[0].1).unwrap();
+        assert!(set.generation == 1 && !set.zero_touch_open);
+        let unacked = service.with(|a| a.policy_distribution()).0;
+        assert_eq!(
+            (unacked.proxies, unacked.applied, unacked.distributed),
+            (1, 0, None)
+        );
+        // Unanswered: resent after the spacing, not before.
+        service.tick(HostTime::sync(T0 + 3_000));
+        assert_eq!(sent.lock().unwrap().len(), 1);
+        service.tick(HostTime::sync(T0 + 7_100));
+        assert_eq!(sent.lock().unwrap().len(), 2);
+        let ack = ProxyPolicyAck {
+            status: 0,
+            generation: 1,
+        }
+        .encode();
+        // A report over another assignment generation is not this member's.
+        service.with(|a| a.handle_policy_ack(relay_node, 7, &ack, T0 + 7_200));
+        assert_eq!(service.with(|a| a.policy_distribution()).0.applied, 0);
+        service.with(|a| a.handle_policy_ack(relay_node, 1, &ack, T0 + 7_300));
+        let done = service.with(|a| a.policy_distribution()).0;
+        assert_eq!((done.applied, done.distributed), (1, Some(1)));
+        service.tick(HostTime::sync(T0 + 20_000));
+        assert_eq!(sent.lock().unwrap().len(), 2, "no send once acknowledged");
+    }
+    let (service, _) = service_with(Box::new(SqliteSiteStore::open(&db).unwrap()));
+    let policy = service.with(|a| a.policy_json()).0;
+    assert!(
+        policy.contains("\"radio_distributed_generation\":1") && policy.contains("\"applied\":1"),
+        "{policy}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
