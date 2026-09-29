@@ -504,7 +504,8 @@ class BundleTests(unittest.TestCase):
             with patch.object(hil_flash, 'preflight_board', side_effect=preflight), \
                     patch.object(hil_flash.subprocess, 'run', side_effect=run):
                 result = hil_flash.flash_board(board, 'COM1', str(root / 'logs'),
-                                               image_dir=str(bundle), boot_seconds=0)
+                                               image_dir=str(bundle), boot_seconds=0,
+                                               allow_unconfigured=True)
             self.assertTrue(result['ok'])
             self.assertEqual(flashed, [original])
 

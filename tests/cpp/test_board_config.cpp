@@ -7,6 +7,7 @@
 #include <vector>
 #include "routeloom/sdkv1_blob_storage.hpp"
 #include "routeloom/board_config.hpp"
+#include "routeloom/board_secrets.hpp"
 #include "routeloom/group.hpp"
 
 using namespace routeloom;
@@ -177,11 +178,21 @@ void test_three_boards_and_boot_gate() {
     boot.rli_node = 99;
     CHECK(!field.authorize_rf(boot).ok());
   }
-  FaultyRecordStorage empty(kBoardConfigSlotBytes);
-  BoardConfigStore field(empty);
+  // An erased board (no rlcfg blobs; the ESP adapter maps a missing
+  // namespace to the same detail) is CONFIG_REQUIRED, never a fault.
+  ConfigNvs erased;
+  auto config_slots = sdkv1::BlobRecordSlotStorage::board_config(erased);
+  auto secret_slots = sdkv1::BlobRecordSlotStorage::board_secrets(erased);
+  BoardConfigStore field(config_slots);
+  BoardSecretsStore secrets(secret_slots);
   CHECK(field.initialize().ok());
-  CHECK(!field.authorize_rf({3, board(10, 1).sta_mac, BoardRole::Reference,
-                              BoardSecurity::Member, 10}).ok());
+  CHECK(secrets.initialize().ok());
+  const BoardSecrets* resolved = nullptr;
+  const Status gate = resolve_field_identity(
+      field, secrets, {3, board(10, 1).sta_mac, BoardRole::Reference,
+                       BoardSecurity::Member, 10}, resolved);
+  CHECK(!gate.ok() && resolved == nullptr);
+  CHECK(std::strcmp(gate.detail, "board configuration required") == 0);
 }
 
 void test_rejected_records() {
