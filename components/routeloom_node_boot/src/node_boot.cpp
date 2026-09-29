@@ -762,7 +762,7 @@ void run_node(const NodeBootHooks& hooks) {
   if (status.code == routeloom::StatusCode::NotFound) config_required(status.detail);
   if (!status) fail(status.detail);
   status = board_stores.initialize();
-  if (!status) ESP_LOGE(kTag, "board stores init: %s", status.detail);
+  if (!status) fail(status.detail);
   routeloom::BoardBootIdentity board_identity{};
   board_identity.chip = routeloom::espnow::board_chip();
   board_identity.role = routeloom::BoardRole::Reference;

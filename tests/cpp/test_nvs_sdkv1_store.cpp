@@ -276,6 +276,16 @@ int CheckMissingBoardNamespaces() {
   return 0;
 }
 
+int CheckBoardStoreReadFailure() {
+  Reset();
+  routeloom::espnow::BoardStores board;
+  CHECK(board.open(false).ok());
+  fail_op = FailOp::kSize;
+  fail_code = ESP_ERR_INVALID_ARG;
+  CHECK(board.initialize().code == routeloom::StatusCode::StorageFailure);
+  return 0;
+}
+
 int CheckLastErrorKeepsItsNamespace() {
   Reset();
   routeloom::espnow::NvsBlobNamespace store;
@@ -302,6 +312,7 @@ int main() {
   if (CheckLastErrorSticky() != 0) return 1;
   if (CheckOpenFailureAttributed() != 0) return 1;
   if (CheckMissingBoardNamespaces() != 0) return 1;
+  if (CheckBoardStoreReadFailure() != 0) return 1;
   if (CheckLastErrorKeepsItsNamespace() != 0) return 1;
   std::puts("PASS test_nvs_sdkv1_store");
   return 0;
