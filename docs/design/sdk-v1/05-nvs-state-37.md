@@ -1,5 +1,7 @@
 # 05 — NVS状態の上限とIssue #37
 
+V2-10で旧開発PSK方式と`rlcounter`／`rlreplay`の書き手を撤去した。この文書の旧方式に関する容量・消去・試験の数値は経緯の記録であり、現行DevRam／Memberには適用しない。現行の資源契約は[電源断契約 §7](../../spec/crash-time-resources.md)を参照。
+
 ## 1. 現状（Wire v2 commit時点の事実）
 
 [Issue #37](https://github.com/MOVEI144/RouteLoom/issues/37)：ピアごとに作られる永続キーに削除経路が無い。

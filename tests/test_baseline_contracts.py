@@ -48,6 +48,15 @@ class MeshProfilesTests(unittest.TestCase):
         self.assertIn('台帳登録から DevRam／Member を推測せず', host)
         self.assertIn('capabilities.get は gateway の実効 security profile を広告しない', host)
 
+    def test_current_docs_do_not_describe_retired_peer_nvs_as_active(self):
+        resources = (ROOT / 'docs/spec/crash-time-resources.md').read_text(encoding='utf-8')
+        radio = (ROOT / 'docs/spec/radio.md').read_text(encoding='utf-8')
+        implementation = (ROOT / 'docs/implementation/README.md').read_text(encoding='utf-8')
+        self.assertIn('`rlcounter`／`rlreplay`は作らない', resources)
+        self.assertNotIn('開発PSK profileで有界化', resources)
+        self.assertNotIn('静的peerの開発PSK構成では', radio)
+        self.assertNotIn('NVS counter store', implementation)
+
 
 if __name__ == '__main__':
     unittest.main()
