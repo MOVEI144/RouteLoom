@@ -122,6 +122,12 @@ class Device {
   }
 
 #if defined(ESP_PLATFORM)
+  // Serves the read-only observation source: observation() and, with
+  // CONFIG_ROUTELOOM_OBSERVATION_REMOTE, remote queries. Call before
+  // start(). Gateway and remote-query images serve it anyway; any other
+  // image that never calls this links none of the observation code.
+  void enable_observation() noexcept;
+
   // Runs the whole node on a dedicated Owner task (never returns into the
   // caller's loop). Boot failures take the fail-streak restart/sleep path.
   void start(const DeviceConfig& config) noexcept;
@@ -166,7 +172,7 @@ class Device {
   friend struct DeviceTestAccess;
   class Observer final : public NodeObserver {
    public:
-    explicit Observer(Device& device) noexcept : device_(device) {}
+    constexpr explicit Observer(Device& device) noexcept : device_(device) {}
     void on_message(const MessageKey& key, NodeId source, ByteView payload) noexcept override;
     void on_message(const MessageKey& key, NodeId source, ByteView payload,
                     const DeliveryAssurance& assurance) noexcept override;
@@ -203,6 +209,11 @@ class Device {
   espnow::EspNowSecurityOwner* owner_{nullptr};
   usb::UsbBridge* bridge_{nullptr};
   const ObservationSource* observation_{nullptr};
+#if defined(ESP_PLATFORM)
+  // Builds the source in the Owner frame's slot; set by enable_observation().
+  const ObservationSource* (*observation_build_)(void* slot, Device& device,
+                                                 std::uint8_t profile) noexcept {nullptr};
+#endif
   std::uint32_t boot_session_{0};
   DeviceSecurity security_{DeviceSecurity::DevRam};
   profile::Role role_{profile::Role::Endpoint};

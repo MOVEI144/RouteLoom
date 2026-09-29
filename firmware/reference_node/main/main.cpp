@@ -124,6 +124,7 @@ ReferenceApp s_app;
 extern "C" void app_main(void) {
   routeloom::DeviceConfig config = routeloom::device_config_from_kconfig();
   config.log_tag = "RouteLoomRef";
+  s_device.enable_observation();  // the "obs1 health" console
   s_device.on_poll(reference_poll, &s_app);
   s_device.start(config);
 }

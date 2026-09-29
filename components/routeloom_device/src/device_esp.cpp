@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 #include "driver/usb_serial_jtag.h"
 #include "esp_app_desc.h"
@@ -668,9 +669,8 @@ class DeviceObservationSource final : public routeloom::ObservationSource {
  public:
   DeviceObservationSource(const routeloom::MeshNode& node,
                           const routeloom::sdkv1::SecurityCoordinator* coordinator,
-                          const routeloom::SystemHealthPort& port, const std::uint64_t boot_id,
-                          const std::uint8_t profile) noexcept
-      : node_(node), coordinator_(coordinator), port_(port), boot_id_(boot_id), profile_(profile) {}
+                          const std::uint64_t boot_id, const std::uint8_t profile) noexcept
+      : node_(node), coordinator_(coordinator), boot_id_(boot_id), profile_(profile) {}
 
   bool fill_system(routeloom::MonotonicMs now_ms,
                    routeloom::ObservationSystem& out) const noexcept override {
@@ -779,10 +779,19 @@ class DeviceObservationSource final : public routeloom::ObservationSource {
 
   const routeloom::MeshNode& node_;
   [[maybe_unused]] const routeloom::sdkv1::SecurityCoordinator* coordinator_;
-  const routeloom::SystemHealthPort& port_;
+  EspSystemHealthPort port_;
   std::uint64_t boot_id_;
   std::uint8_t profile_;
 };
+
+// Reached only through Device::enable_observation(), so an image that serves
+// no observation links none of the code above.
+const routeloom::ObservationSource* build_observation(void* slot, routeloom::Device& device,
+                                                      const std::uint8_t profile) noexcept {
+  const routeloom::MeshNode& node = *device.mesh();
+  return new (slot) DeviceObservationSource(node, device.security(),
+                                            node.config().boot_incarnation, profile);
+}
 
 #if CONFIG_ROUTELOOM_ROLE_GATEWAY
 // The USB bridge frames COBS+CRC32 through this stream. The write never
@@ -857,6 +866,8 @@ DeviceConfig device_config_from_kconfig() noexcept {
 #endif
   return config;
 }
+
+void Device::enable_observation() noexcept { observation_build_ = &build_observation; }
 
 namespace {
 struct OwnerHandoff {
@@ -1232,10 +1243,13 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
 #endif
 
   // Read-only observation on the Owner task frame (no static RAM).
-  EspSystemHealthPort health_port;
-  DeviceObservationSource observation_source(node, security(), health_port,
-                                             node.config().boot_incarnation, observation_profile);
-  observation_ = &observation_source;
+#if CONFIG_ROUTELOOM_ROLE_GATEWAY || CONFIG_ROUTELOOM_OBSERVATION_REMOTE
+  enable_observation();
+#endif
+  alignas(DeviceObservationSource) unsigned char observation_slot[sizeof(DeviceObservationSource)];
+  if (observation_build_ != nullptr) {
+    observation_ = observation_build_(observation_slot, *this, observation_profile);
+  }
 #if CONFIG_ROUTELOOM_ROLE_GATEWAY
   // Gateway endpoint (scope-gateway-config P3) and config endpoint (P5): the
   // Kconfig capability bitmap is fixed per image, so disabled endpoints
@@ -1264,7 +1278,7 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
     if (!status) fail(status.detail);
   }
   if ((config.usb_capability & usb::kCapObservationV1) != 0) {
-    status = bridge_->attach_observation(observation_source);
+    status = bridge_->attach_observation(*observation_);
     if (!status) fail(status.detail);
   }
   // Receive assurance rides the observation profile id.
@@ -1277,8 +1291,10 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
 #else
   // Subtype-7 remote observation answers from the same source; the
   // responder opens per coordinator mode on every pass (update_observation_remote).
-  status = node.set_observation_source(&observation_source);
-  if (!status) fail(status.detail);
+  if (observation_ != nullptr) {
+    status = node.set_observation_source(observation_);
+    if (!status) fail(status.detail);
+  }
 #if CONFIG_ROUTELOOM_OBSERVATION_REMOTE && CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   // LegacyFixture has no enrollment: the build opt-in is the membership claim.
   status = node.set_observation_remote(true);
