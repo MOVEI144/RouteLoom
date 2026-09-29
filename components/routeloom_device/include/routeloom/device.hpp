@@ -28,9 +28,25 @@
 #include "routeloom/usb_bridge.hpp"
 #include "sdkconfig.h"
 
+// Remote-config target of a DevRam or Member node (V2-08, issue #17): the
+// SDK-namespace journal on the node's routed config lane. Firmware images
+// compile it with CONFIG_ROUTELOOM_CONFIG; the host mesh harness peer
+// defines it to 1 (LegacyFixture keeps its own wiring until its removal).
+#ifndef ROUTELOOM_DEVICE_REMOTE_CONFIG
+#if defined(ESP_PLATFORM)
+#define ROUTELOOM_DEVICE_REMOTE_CONFIG \
+  (CONFIG_ROUTELOOM_CONFIG && !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE)
+#else
+#define ROUTELOOM_DEVICE_REMOTE_CONFIG 0
+#endif
+#endif
+
 namespace routeloom {
 
+class EntropySource;
+class GatewayDelivery;
 class ObservationSource;
+struct DeviceRemoteConfig;
 
 namespace sdkv1 {
 class SecurityCoordinator;
@@ -70,6 +86,13 @@ struct DeviceConfig {
   ByteView usb_secret{};
   std::uint32_t usb_capability{0};
   std::uint64_t usb_device_nonce{0};
+  // Remote-config target (non-gateway roles, ROUTELOOM_DEVICE_REMOTE_CONFIG
+  // builds). Member binds the journal to the adopted site's SAK; DevRam
+  // verifies the development permit key derived from its PSK, issued by
+  // `config_authority` at `config_authority_generation`.
+  bool remote_config{false};
+  NodeId config_authority{kInvalidNodeId};
+  std::uint32_t config_authority_generation{1};
 #if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   SecurityProvider* legacy_security{nullptr};
 #else
@@ -168,6 +191,11 @@ class Device {
   const espnow::Sdkv1Stores* stores() const noexcept { return stores_; }
   // Portable modules written against the core MeshNode API (routeloom_bench).
   MeshNode* mesh() noexcept;
+  // Explicit gateway delivery (Service=21, 03-explicit-gateway): an origin
+  // resolves a named gateway and sends to it; a USB gateway attaches the
+  // responder half. Built on first use (null before begin()); an image
+  // that never calls it links none of it.
+  GatewayDelivery* gateway() noexcept;
 
  private:
   friend struct DeviceTestAccess;
@@ -198,6 +226,11 @@ class Device {
 
   void run_posted() noexcept;
   void update_observation_remote() noexcept;
+#if ROUTELOOM_DEVICE_REMOTE_CONFIG
+  Status begin_remote_config(const DeviceConfig& config, const keys::Secret& dev_psk,
+                             EntropySource& entropy, MonotonicMs now_ms) noexcept;
+  void poll_remote_config(MonotonicMs now_ms) noexcept;
+#endif
 #if defined(ESP_PLATFORM)
   static void task_entry(void* self) noexcept;
   [[noreturn]] void boot_and_run(DeviceConfig& config) noexcept;
@@ -211,6 +244,10 @@ class Device {
   espnow::EspNowRuntime* runtime_{nullptr};
   espnow::EspNowSecurityOwner* owner_{nullptr};
   usb::UsbBridge* bridge_{nullptr};
+  GatewayDelivery* gateway_{nullptr};
+#if ROUTELOOM_DEVICE_REMOTE_CONFIG
+  DeviceRemoteConfig* remote_config_{nullptr};
+#endif
   const ObservationSource* observation_{nullptr};
 #if defined(ESP_PLATFORM)
   // Builds the source in the Owner frame's slot; set by enable_observation().

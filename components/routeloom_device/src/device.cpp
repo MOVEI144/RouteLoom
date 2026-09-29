@@ -9,7 +9,9 @@
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "routeloom/config_wire.hpp"
 #include "routeloom/espnow_sdkv1.hpp"
+#include "routeloom/gateway.hpp"
 #include "routeloom/nvs_boot_session.hpp"
 #include "routeloom/nvs_counter_store.hpp"
 #include "routeloom/observation.hpp"
@@ -28,6 +30,19 @@
 #define ROUTELOOM_OWNER_C5_LP RTC_DATA_ATTR
 #else
 #define ROUTELOOM_OWNER_C5_LP
+#endif
+
+// USB gateway endpoints: a firmware image fixes its HelloAck bitmap in
+// Kconfig, so an endpoint it does not name reserves no gateway RAM; the
+// host harness selects them per run with the capability bitmap.
+#if defined(ESP_PLATFORM)
+#define ROUTELOOM_DEVICE_GATEWAY_ENDPOINT \
+  (CONFIG_ROUTELOOM_ROLE_GATEWAY && (CONFIG_ROUTELOOM_CAPABILITY & 0x8))
+#define ROUTELOOM_DEVICE_CONFIG_ENDPOINT \
+  (CONFIG_ROUTELOOM_ROLE_GATEWAY && (CONFIG_ROUTELOOM_CAPABILITY & 0x10))
+#else
+#define ROUTELOOM_DEVICE_GATEWAY_ENDPOINT ROUTELOOM_PROFILE_HAS_GATEWAY
+#define ROUTELOOM_DEVICE_CONFIG_ENDPOINT ROUTELOOM_PROFILE_HAS_GATEWAY
 #endif
 
 namespace routeloom {
@@ -309,6 +324,12 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
     status = owner.adopt_dev(dev, now_ms);
     secure_clear(dev.psk);
     if (!status) return status;
+#if ROUTELOOM_DEVICE_REMOTE_CONFIG
+    if (config.remote_config) {
+      status = begin_remote_config(config, dev_psk.value, entropy, now_ms);
+      if (!status) return status;
+    }
+#endif
     adopted = true;
   }
 #endif
@@ -318,15 +339,45 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
     status = owner.boot(boot_session_, /*rlboot_prepared=*/true, bridge_ != nullptr, now_ms);
     if (!status) return status;
     // Authority lane: R2, JoinConfirm and GK updates arrive on this mesh
-    // sink (subtype-9 carriers and kind-7 objects).
+    // sink (subtype-9 carriers and kind-7 objects). A remote-config target
+    // takes the sink and routes the authority frames to the same demux.
     runtime.node().set_config_sink(owner.authority_mesh_sink());
+#if ROUTELOOM_DEVICE_REMOTE_CONFIG
+    if (config.remote_config) {
+      status = begin_remote_config(config, keys::Secret{}, entropy, now_ms);
+      if (!status) return status;
+    }
+#endif
     adopted = true;
   }
 #endif
   if (!adopted) return Status::error(StatusCode::Unsupported, "security mode not in this image");
 #endif
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
-  if (bridge_ != nullptr) bridge_->set_mesh(&runtime.node());
+  if (bridge_ != nullptr) {
+    bridge_->set_mesh(&runtime.node());
+    // Gateway endpoint (scope-gateway-config P3) and config endpoint (P5):
+    // the bridge advertises only what is attached here.
+#if ROUTELOOM_DEVICE_GATEWAY_ENDPOINT
+    if ((config.usb_capability & usb::kCapGatewayEndpointV1) != 0) {
+      status = bridge_->attach_gateway(*gateway());
+      if (!status) return status;
+    }
+#endif
+#if ROUTELOOM_DEVICE_CONFIG_ENDPOINT
+    if ((config.usb_capability & usb::kCapConfigEndpointV1) != 0) {
+      static MeshConfigPort config_port(runtime.node());
+      static ConfigGateway config_gateway(config_port, *bridge_);
+      status = bridge_->attach_config(config_gateway);
+      if (!status) return status;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+      if (config.security == DeviceSecurity::Member) {
+        config_gateway.attach_authority(owner_->authority_demux());
+      }
+#endif
+    }
+#endif
+  }
 #endif
   return Status::success();
 }
@@ -350,6 +401,9 @@ void Device::step(const MonotonicMs now_ms) noexcept {
   runtime_->poll_once();
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   if (owner_ != nullptr) owner_->poll(now_ms);
+#endif
+#if ROUTELOOM_DEVICE_REMOTE_CONFIG
+  if (remote_config_ != nullptr) poll_remote_config(now_ms);
 #endif
   run_posted();
   update_observation_remote();
@@ -462,6 +516,18 @@ const sdkv1::SecurityCoordinator* Device::security() const noexcept {
 
 MeshNode* Device::mesh() noexcept {
   return runtime_ == nullptr ? nullptr : &runtime_->node();
+}
+
+GatewayDelivery* Device::gateway() noexcept {
+  if (gateway_ == nullptr && runtime_ != nullptr) {
+    // The node object survives membership adoption (it is rebuilt in
+    // place and keeps its Service sink), so one component serves the
+    // node for the whole boot.
+    static ROUTELOOM_OWNER_C5_LP GatewayDelivery delivery(runtime_->node());
+    delivery.attach();
+    gateway_ = &delivery;
+  }
+  return gateway_;
 }
 
 }  // namespace routeloom

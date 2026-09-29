@@ -236,30 +236,35 @@ menu "RouteLoom device"
     config ROUTELOOM_CONFIG
         bool "Enable the remote-config target endpoint (RCC1 permit journal)"
         default n
-        depends on ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE && !ROUTELOOM_ROLE_GATEWAY
+        depends on !ROUTELOOM_ROLE_GATEWAY
         help
-            EXPERIMENTAL: installs a ConfigTarget on the routed end-protected
-            lane with a durable NVS-backed ConfigJournal and a dev-profile
-            authority verifier. The permit path is a dev HMAC under
-            SecurityProfile::Development — never a production identity claim.
-            Requires peers (static ROUTELOOM_PEER_* or discovery).
+            Installs a ConfigTarget on the routed end-protected lane with a
+            durable NVS-backed ConfigJournal (SDK namespace) and its RLF1
+            floor. MemberEdhoc verifies RLCP1_COSE_ESP256 permits signed by
+            the adopted site's authority key (kid = site_id) and binds once
+            the membership is adopted. DevRam verifies the dev-HMAC permit
+            key derived from its PSK (SecurityProfile::Development, never a
+            production identity claim). LegacyFixture keeps its dev-PSK and
+            static-key profiles below. The journal takes about 42 KB of
+            static RAM: on ESP32-C3 it fits the endpoint resource profile,
+            not the relay profile's static RAM floor.
 
     config ROUTELOOM_CONFIG_AUTHORITY
         hex "Config authority Node ID permitted to issue permits"
         default 0x1
-        depends on ROUTELOOM_CONFIG
+        depends on ROUTELOOM_CONFIG && !ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
 
     config ROUTELOOM_CONFIG_AUTHORITY_GENERATION
         int "Permitted authority generation for config permits"
         range 1 2147483647
         default 1
-        depends on ROUTELOOM_CONFIG
+        depends on ROUTELOOM_CONFIG && !ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
 
     config ROUTELOOM_CONFIG_PROFILE
         int "Permit profile (0=dev-HMAC experimental, 1=RLCP1_COSE_ESP256)"
         range 0 1
         default 0
-        depends on ROUTELOOM_CONFIG
+        depends on ROUTELOOM_CONFIG && ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
         help
             Profile 0 keeps the dev-HMAC envelope (EXPERIMENTAL). Profile 1
             installs the COSE_Sign1 ESP256 verifier (P-256/SHA-256, RFC 9864
