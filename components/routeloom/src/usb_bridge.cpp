@@ -508,6 +508,9 @@ void UsbBridge::handle_auth(const UsbFrame& frame, const MonotonicMs now_ms) noe
     if (auth_attempts_ >= kAuthAttemptsMax) reset_session_state();
     return;
   }
+  // A valid AUTH supersedes queued pre-auth errors. Both AUTH_OK and the
+  // initial receive grant must fit before the session becomes active.
+  control_q_.clear();
   begin_auth_session(proof.auth_ok_tag, now_ms);
   clear_session_proof(proof);
 }

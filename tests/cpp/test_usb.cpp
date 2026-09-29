@@ -858,6 +858,54 @@ std::uint64_t host_handshake(World& world, HostDriver& host, MonotonicMs& now,
   return host.session;
 }
 
+void test_bridge_auth_reserves_initial_grant() {
+  World world;
+  HostDriver host;
+  MonotonicMs now = 10;
+  std::array<std::uint8_t, 24> hello{};
+  write_u64(hello.data(), 0x1234);
+  hello[8] = 2;
+  hello[9] = 2;
+  hello[10] = 13;
+  std::memcpy(hello.data() + 11, "host-operator", 13);
+  world.feed(host.plain(FrameKind::Hello, 0, 1, ByteView{hello.data(), hello.size()}), now);
+  world.drain(now);
+  CHECK(world.device_sink.frames.size() == 1);
+  if (world.device_sink.frames.size() != 1) return;
+  const UsbFrame ack = world.device_sink.frames[0].frame;
+  SessionTranscript transcript{};
+  transcript.host_nonce = 0x1234;
+  transcript.device_nonce = read_u64(ack.body.data);
+  transcript.node = read_u64(ack.body.data + 9);
+  transcript.boot_id = read_u64(ack.body.data + 17);
+  transcript.network = read_u64(ack.body.data + 25);
+  transcript.capability = read_u32(ack.body.data + 33);
+  transcript.principal_len = 13;
+  std::memcpy(transcript.principal.data(), "host-operator", 13);
+  std::array<std::uint8_t, kTranscriptSize> encoded{};
+  std::size_t size = 0;
+  CHECK_OK(encode_transcript(transcript, MutableByteView{encoded.data(), encoded.size()}, size));
+  const SessionProof proof = derive_session_proof(secret_view(), ByteView{encoded.data(), size});
+  world.device_sink.frames.clear();
+
+  // Malformed AUTHs can fill the pre-auth control queue before a valid AUTH.
+  for (int i = 0; i < 3; ++i) {
+    world.feed(host.plain(FrameKind::Hello, kFlagAuth, 2 + i,
+                          ByteView{nullptr, 0}), now);
+  }
+  world.feed(host.plain(FrameKind::Hello, kFlagAuth, 5,
+                        ByteView{proof.auth_tag.data(), proof.auth_tag.size()}), now);
+  world.drain(now);
+  bool saw_auth_ok = false;
+  bool saw_grant = false;
+  for (const auto& record : world.device_sink.frames) {
+    saw_auth_ok |= record.frame.kind == FrameKind::HelloAck &&
+                   (record.frame.flags & kFlagAuth) != 0;
+    saw_grant |= record.frame.kind == FrameKind::Credit;
+  }
+  CHECK(saw_auth_ok && saw_grant);
+}
+
 std::vector<std::uint8_t> grant_body(std::uint64_t frames, std::uint64_t bytes) {
   std::vector<std::uint8_t> inner(17, 0);
   inner[0] = kCreditGrant;
@@ -3287,6 +3335,7 @@ int main() {
   test_idempotency();
   test_bridge_optional_capabilities_need_attachment();
   test_bridge_session_lifecycle();
+  test_bridge_auth_reserves_initial_grant();
   test_bridge_stale_grant_keeps_stall_ladder();
   test_bridge_partial_grant_keeps_stall_ladder();
   test_bridge_set_device_nonce();

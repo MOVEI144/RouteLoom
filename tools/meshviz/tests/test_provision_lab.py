@@ -10,10 +10,12 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import tempfile
 import unittest
 import zlib
 from pathlib import Path
+from unittest import mock
 
 from routeloom_meshviz import firmware_catalog as catalog
 from routeloom_meshviz import provisioning as prov
@@ -558,8 +560,33 @@ class LabBackendTests(unittest.TestCase):
         credential = self.backend.site_dir / 'hostlink' / '0000000000000001.key'
         self.assertEqual(credential.read_text(), secret)
         self.assertEqual(credential.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(len(secret), 62)
+        import base64
+        self.assertEqual(len(base64.urlsafe_b64decode(secret + '=' * (-len(secret) % 4))), 32)
         self.assertEqual(self.office.imported[0][2], 'gateway')
+
+    def test_hostlink_retry_refuses_invalid_existing_credential(self):
+        directory = self.backend.site_dir / 'hostlink'
+        directory.mkdir(mode=0o700)
+        credential = directory / '0000000000000001.key'
+        credential.write_text('short', encoding='ascii')
+        credential.chmod(0o600)
+        with self.assertRaises(prov.ProvisionError):
+            self.backend._hostlink_secret('0000000000000001')
+        credential.unlink()
+        directory.chmod(0o755)
+        with self.assertRaises(prov.ProvisionError):
+            self.backend._hostlink_secret('0000000000000001')
+
+    def test_hostlink_file_survives_short_write(self):
+        write = os.write
+
+        def short_write(fd, data):
+            return write(fd, data[:7])
+
+        with mock.patch.object(prov.os, 'write', side_effect=short_write):
+            secret = self.backend._hostlink_secret('0000000000000002')
+        credential = self.backend.site_dir / 'hostlink' / '0000000000000002.key'
+        self.assertEqual(credential.read_text(encoding='ascii'), secret)
 
     def test_missing_bundles_fail_closed(self):
         job = self._job(role='bridge')  # C3 bridge bundles exist; try missing chip

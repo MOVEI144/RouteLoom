@@ -27,11 +27,13 @@ from .provision_plan import (LAB_ROLES, STEP_NAMES, ContractBackend, FakeProvisi
                              inventory_rows, job_status_text, plan_jobs,
                              valid_lab_node_id)
 
+import base64
 import hashlib
 import json
 import os
 import re
 import shlex
+import stat
 import struct
 import subprocess
 import sys
@@ -1313,22 +1315,48 @@ class LabProvisionBackend(ContractBackend):
 
         The same bytes go to the gateway's rlkeys and to
         ``<site>/hostlink/<node>.key`` (0600), the file routeloom-host reads
-        with ``--hostlink-credentials``: 31 random bytes as 62 hex chars, the
-        1..63 printable ASCII both sides accept.
+        with ``--hostlink-credentials``: 32 random bytes as unpadded URL-safe
+        base64, within the 1..63 printable ASCII both sides accept.
         """
         directory = self.site_dir / 'hostlink'
         directory.mkdir(mode=0o700, exist_ok=True)
+        dir_info = directory.lstat()
+        if not stat.S_ISDIR(dir_info.st_mode) or dir_info.st_mode & 0o077:
+            raise ProvisionError('bad_hostlink_secret', f'{directory} is not a private directory')
         path = directory / f'{node_id}.key'
-        if path.is_file():
-            return path.read_text(encoding='ascii')
+        if path.exists() or path.is_symlink():
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+                raise ProvisionError('bad_hostlink_secret', f'{path} is not a private regular file')
+            try:
+                secret = path.read_text(encoding='ascii')
+                decoded = base64.b64decode(
+                    secret + '=' * (-len(secret) % 4), altchars=b'-_', validate=True)
+            except (OSError, UnicodeError, ValueError) as exc:
+                raise ProvisionError('bad_hostlink_secret', f'{path} is invalid') from exc
+            if len(decoded) != 32 or base64.urlsafe_b64encode(decoded).decode('ascii').rstrip('=') != secret:
+                raise ProvisionError('bad_hostlink_secret', f'{path} is invalid')
+            return secret
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         try:
-            secret = os.urandom(31).hex()
-            os.write(fd, secret.encode('ascii'))
+            secret = base64.urlsafe_b64encode(os.urandom(32)).decode('ascii').rstrip('=')
+            raw = secret.encode('ascii')
+            written = 0
+            while written < len(raw):
+                count = os.write(fd, raw[written:])
+                if count == 0:
+                    raise OSError('HostLink credential write made no progress')
+                written += count
             os.fsync(fd)
         finally:
             os.close(fd)
-        return secret
+        if os.name == 'posix':
+            dir_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        return self._hostlink_secret(node_id)
 
     def _provisioner(self, ctx):
         if ctx.get('provisioner') is None:

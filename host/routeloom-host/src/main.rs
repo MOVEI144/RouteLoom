@@ -193,7 +193,10 @@ impl HostlinkCredentials {
     fn secret_for(&self, node: u64) -> io::Result<Zeroizing<Vec<u8>>> {
         match self {
             Self::Development(secret) => Ok(secret.clone()),
-            Self::Directory(dir) => load_usb_dev_secret(&dir.join(format!("{node:016x}.key"))),
+            Self::Directory(dir) => {
+                routeloom_peercred::verify_private_dir_perms(dir)?;
+                load_usb_dev_secret(&dir.join(format!("{node:016x}.key")))
+            }
         }
     }
 }
@@ -277,7 +280,14 @@ impl DeviceSession {
 
     /// Adapter (re)connected: reset all session state and produce the Hello.
     /// Nothing from the old session (counters, grants, requests) is reused.
-    fn begin(&mut self) -> Frame {
+    fn begin(&mut self) -> io::Result<Frame> {
+        self.begin_with_random(routeloom_peercred::fill_random)
+    }
+
+    fn begin_with_random(
+        &mut self,
+        fill: impl FnOnce(&mut [u8]) -> io::Result<()>,
+    ) -> io::Result<Frame> {
         let credentials = std::mem::take(&mut self.credentials);
         let principal = std::mem::take(&mut self.principal);
         *self = Self::new();
@@ -285,13 +295,11 @@ impl DeviceSession {
         self.principal = principal;
         self.phase = SessionPhase::AwaitHelloAck;
         self.last_begin_ms = now_ms();
-        // Session nonce: fresh randomness; if the OS source fails, the
-        // clock/pid mix still keeps transcripts unique (all it must be).
+        // A nonce must be unpredictable: replayed handshake transcripts must
+        // not become valid when the OS randomness source is unavailable.
         let mut nonce = [0_u8; 8];
-        self.host_nonce = match routeloom_peercred::fill_random(&mut nonce) {
-            Ok(()) => u64::from_be_bytes(nonce),
-            Err(_) => now_ms() ^ (u64::from(std::process::id()) << 32),
-        };
+        fill(&mut nonce)?;
+        self.host_nonce = u64::from_be_bytes(nonce);
         let mut body = Vec::with_capacity(12 + self.principal.len());
         body.extend_from_slice(&self.host_nonce.to_be_bytes());
         // Protocol 2 only: no range reaching back to protocol 1.
@@ -299,12 +307,21 @@ impl DeviceSession {
         body.push(routeloom_protocol::VERSION); // max version
         body.push(self.principal.len() as u8);
         body.extend_from_slice(&self.principal);
-        Frame {
+        Ok(Frame {
             kind: FrameKind::Hello,
             flags: 0,
             session: 0,
             request: self.next_request(),
             body,
+        })
+    }
+
+    fn queue_hello(&mut self, result: &mut SessionInbound) {
+        match self.begin() {
+            Ok(hello) => result.outbound.push(Outbound::Raw(hello)),
+            Err(_) => result.notes.push(
+                "\"kind\":\"session_drop\",\"reason\":\"HOST_NONCE_UNAVAILABLE\"".to_string(),
+            ),
         }
     }
 
@@ -382,7 +399,11 @@ impl DeviceSession {
                     return result;
                 }
                 let body = frame.body.as_slice();
-                if body.len() < 8 + 1 + 8 + 8 + 8 + 4 + TAG_SIZE {
+                if frame.session != 0
+                    || frame.flags != 0
+                    || body.len() != 8 + 1 + 8 + 8 + 8 + 4 + TAG_SIZE
+                    || body[8] != routeloom_protocol::VERSION
+                {
                     result.notes.push(
                         "\"kind\":\"session_drop\",\"reason\":\"malformed hello_ack\"".to_string(),
                     );
@@ -473,16 +494,18 @@ impl DeviceSession {
                 let Some(proof) = self.proof.as_ref() else {
                     return result;
                 };
-                if frame.body.len() != TAG_SIZE + 8
+                if frame.session != 0
+                    || frame.flags != FLAG_AUTH
+                    || frame.body.len() != TAG_SIZE + 8
                     || !tags_equal(&frame.body[..TAG_SIZE], &proof.auth_ok_tag)
+                    || !tags_equal(&frame.body[TAG_SIZE..], &proof.session_id.to_be_bytes())
                 {
                     result
                         .notes
                         .push("\"kind\":\"session_drop\",\"reason\":\"AUTH_REJECTED\"".to_string());
                     return result;
                 }
-                self.session_id =
-                    u64::from_be_bytes(frame.body[TAG_SIZE..].try_into().expect("session id"));
+                self.session_id = proof.session_id;
                 self.phase = SessionPhase::Active;
                 self.send_credit = CumulativeCredit::new(self.session_id);
                 self.tx_grant_frames = DEVICE_TX_GRANT_FRAMES;
@@ -527,6 +550,14 @@ impl DeviceSession {
                             result.notes.push(
                                 "\"kind\":\"session_drop\",\"reason\":\"replay\"".to_string(),
                             );
+                            return result;
+                        }
+                        if counter > self.d2h_counter || counter == u64::MAX {
+                            result.notes.push(
+                                "\"kind\":\"session_drop\",\"reason\":\"counter gap\"".to_string(),
+                            );
+                            result.session_lost = true;
+                            result.outbound.push(Outbound::Raw(self.begin()));
                             return result;
                         }
                         self.d2h_counter = counter + 1;
@@ -1170,16 +1201,16 @@ fn u64_at(body: &[u8], offset: usize) -> Option<u64> {
 /// text for a reason with no id. Returns the reason and the field's length.
 fn reason_field(body: &[u8], offset: usize) -> Option<(String, usize)> {
     let id = u16_at(body, offset)?;
+    let wire_len = 3 + usize::from(*body.get(offset + 2)?);
     let detail = reason_at(body, offset + 2)?;
-    let len = 3 + detail.len();
     if id == 0 {
-        return Some((detail, len));
+        return Some((detail, wire_len));
     }
     let name = routeloom_protocol::manifest::REASON_API1
         .iter()
         .find(|(code, _)| *code == id)
         .map_or_else(|| format!("REASON_{id}"), |(_, name)| (*name).to_string());
-    Some((name, len))
+    Some((name, wire_len))
 }
 
 fn reason_at(body: &[u8], len_offset: usize) -> Option<String> {
@@ -3081,13 +3112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Per-gateway files are read at each HelloAck; the directory must
         // exist now so a typo fails at startup, not at first connect.
         (Some(dir), _) => {
-            if !std::fs::metadata(dir)?.is_dir() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "--hostlink-credentials is not a directory",
-                )
-                .into());
-            }
+            routeloom_peercred::verify_private_dir_perms(dir)?;
             HostlinkCredentials::Directory(dir.clone())
         }
         (None, Some(path)) => HostlinkCredentials::Development(load_usb_dev_secret(path)?),
@@ -3586,6 +3611,61 @@ mod tests {
             Outbound::Raw(_) => panic!("TX grant must be sealed at write time"),
         }
         proof
+    }
+
+    #[test]
+    fn session_rejects_authenticated_version_downgrade() {
+        let mut session = DeviceSession::new();
+        let hello = session.begin();
+        let host_nonce = u64::from_be_bytes(hello.body[0..8].try_into().unwrap());
+        let mut transcript = device_transcript(host_nonce);
+        transcript.version = 1;
+        let proof = derive_session_proof(DEV_SECRET, &transcript.encode().unwrap());
+        let (mut ack, _) = device_hello_ack(host_nonce);
+        ack[8] = 1;
+        ack[37..].copy_from_slice(&proof.hello_tag);
+        let inbound = session.handle(&frame(FrameKind::HelloAck, 0, 0, ack));
+        assert!(inbound.outbound.is_empty(), "protocol 1 must not receive AUTH");
+        assert_eq!(session.phase, SessionPhase::AwaitHelloAck);
+    }
+
+    #[test]
+    fn session_rejects_auth_ok_with_foreign_session_id() {
+        let mut session = DeviceSession::new();
+        let hello = session.begin();
+        let host_nonce = u64::from_be_bytes(hello.body[0..8].try_into().unwrap());
+        let (ack, proof) = device_hello_ack(host_nonce);
+        session.handle(&frame(FrameKind::HelloAck, 0, 0, ack));
+        let mut body = proof.auth_ok_tag.to_vec();
+        body.extend_from_slice(&(proof.session_id ^ 1).to_be_bytes());
+        let inbound = session.handle(&frame(FrameKind::HelloAck, FLAG_AUTH, 0, body));
+        assert_eq!(session.phase, SessionPhase::AwaitAuthOk);
+        assert_eq!(inbound.auth_session, None);
+    }
+
+    #[test]
+    fn session_rejects_forward_counter_gap() {
+        let mut session = DeviceSession::new();
+        let proof = complete_handshake(&mut session);
+        let inbound = session.handle(&device_credit_grant(&proof, 1, 1, 1000));
+        assert!(inbound.inner.is_none());
+        assert_ne!(session.phase, SessionPhase::Active);
+    }
+
+    #[test]
+    fn session_refuses_hello_without_os_randomness() {
+        let mut session = DeviceSession::new();
+        let result = session.begin_with_random(|_| Err(io::Error::other("rng unavailable")));
+        assert!(result.is_err());
+        assert_ne!(session.phase, SessionPhase::Active);
+    }
+
+    #[test]
+    fn reason_field_length_uses_wire_bytes() {
+        let body = [0, 0, 1, 0xff];
+        let (reason, wire_len) = reason_field(&body, 0).expect("reason field");
+        assert_eq!(reason, "�");
+        assert_eq!(wire_len, body.len());
     }
 
     #[test]
@@ -5183,6 +5263,22 @@ mod tests {
         std::fs::write(&path, [b'a'; 64]).unwrap();
         assert!(load_usb_dev_secret(&path).is_err());
         std::fs::remove_file(link).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hostlink_directory_must_be_private() {
+        let dir = env::temp_dir().join(format!("routeloom-hostlink-{}", process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("000000000000002a.key");
+        std::fs::write(&path, b"private-hostlink-secret").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(HostlinkCredentials::Directory(dir.clone()).secret_for(42).is_err());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(HostlinkCredentials::Directory(dir.clone()).secret_for(42).is_ok());
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(dir).unwrap();
     }
