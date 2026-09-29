@@ -31,7 +31,7 @@ the Rust workspace and meshviz). Each surface below carries its own number.
 | Mesh wire minor | 0 | `ROUTELOOM_WIRE_MINOR` / `WIRE_MINOR` | `components/routeloom/include/routeloom/wire.hpp` | decode rejects minor > local minor |
 | RLD1 carrier | 1 | `ROUTELOOM_RLD1_VERSION` / `RLD1_VERSION` | `components/routeloom/include/routeloom/autonomy_wire.hpp` | classified once by magic+version |
 | RLD1 ZeroTouch body | 3 | `ROUTELOOM_RLD1_ZT_BODY` / `RLD1_ZT_BODY` | `components/routeloom/include/routeloom/sdkv1_join_transport.hpp` | unknown body versions are dropped |
-| HostLink (RLU1) protocol | 1 | `ROUTELOOM_HOSTLINK_PROTOCOL` / `HOSTLINK_PROTOCOL` | `components/routeloom/include/routeloom/usb_codec.hpp` | strict equality; bound into the HELLO transcript |
+| HostLink (RLU1) protocol | 2 | `ROUTELOOM_HOSTLINK_PROTOCOL` / `HOSTLINK_PROTOCOL` | `components/routeloom/include/routeloom/usb_codec.hpp` | strict equality; bound into the HELLO transcript |
 | HostOps schema | 1 | `ROUTELOOM_HOSTOPS_SCHEMA` / `HOSTOPS_SCHEMA` | `components/routeloom/include/routeloom/usb_host_ops.hpp` | subcommands and capability bits are additive |
 | HostOps join relay schema | 2 | `ROUTELOOM_HOSTOPS_JOIN_RELAY_SCHEMA` / `HOSTOPS_JOIN_RELAY_SCHEMA` | `components/routeloom/include/routeloom/usb_host_ops.hpp` | only subcommands 0x60-0x63 use it |
 | AuthorityEnvelope | 1 | `ROUTELOOM_AUTHORITY_ENVELOPE` / `AUTHORITY_ENVELOPE` | `components/routeloom/include/routeloom/key_schedule.hpp` | types 1-8 registered; new types are additive |
@@ -121,25 +121,30 @@ with shared C++/Rust golden vectors under `protocol/golden`. Normative text:
 
 ## 3. USB / serial protocol
 
-Defined by [usb-protocol.md](usb-protocol.md) (revision 1.2) and implemented in
+Defined by [usb-protocol.md](usb-protocol.md) (revision 1.3) and implemented in
 `usb_codec.hpp`/`usb_session.hpp` plus `host/routeloom-protocol`, with shared
 vectors in `protocol/usb-golden`.
 
 - Framing: COBS with `0x00` delimiter, decoded frame `"RLU1" || version(1) ||
   kind(1) || flags(2) || session || request || body || CRC-32/ISO-HDLC`,
   decoded maximum 4096 bytes.
-- **Implemented:** the frame `version` byte must equal `kProtocolVersion` (1) —
-  strict equality, no range. The HELLO→AUTH session binds the selected
-  version, both nonces, Node/Boot/Network IDs and a capability digest into the
-  authenticated transcript, so a mismatched or downgraded selection fails
-  authentication rather than silently degrading.
+- **Implemented:** RLU1 protocol 2 (HostLink v2). The frame `version` byte must
+  equal `kProtocolVersion` (2) — strict equality. HELLO offers a min/max range;
+  a range without 2 is refused (`VERSION_UNSUPPORTED`) and there is no fallback
+  to protocol 1. The offered range, the selected version, both nonces, the
+  carrier and a reserved channel binding, Node/Boot/full 64-bit Network IDs,
+  the capability bitmap and the host principal are bound into the transcript
+  that every HKDF-SHA-256/HMAC-SHA-256 session value is derived from, so a
+  rewritten range or selection fails authentication.
 - **Implemented:** device capabilities (`CONFIG_ROUTELOOM_CAPABILITY` bits,
   registered in `usb_host_ops.hpp`) are advertised in `HelloAck`; unattached
   endpoints reject operations as `Unsupported`.
-- **Specified, not implemented:** a protocol min/max range handshake (spec §2
-  binds "protocol range, selected version" — current transcript carries one
-  selected version), the production authentication profile, and final field
-  offsets, which revision 1.2 explicitly leaves unfrozen.
+- **Implemented:** Error and DeliveryEvent frames carry a u16 reason id from
+  the manifest registry (hostlink and delivery areas); API1 still reports the
+  same reason strings.
+- **Specified, not implemented:** carriers other than USB/serial (the
+  transcript carrier byte and binding are reserved, zero on USB) and final
+  field offsets.
 
 ## 4. C API and ABI
 

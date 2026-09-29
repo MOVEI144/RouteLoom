@@ -39,6 +39,11 @@ pub(super) struct UsbHost {
     pub(super) other_host_ops: u64,
     pub(super) data_frames: u64,
     pub(super) diagnostics: u64,
+    /// Device Error frames as (code, reason_id): sealed ones once opened,
+    /// pre-auth ones (session 0) straight off the wire.
+    pub(super) errors: Vec<(u16, u16)>,
+    /// DeliveryEvents as (state, reason_id).
+    pub(super) deliveries: Vec<(u8, u16)>,
     /// Sim-time of the last inbound wire bytes — the silent-peer
     /// watchdog clock (mirrors `adapter_writer_loop`'s last_rx).
     pub(super) last_rx_ms: u64,
@@ -49,9 +54,14 @@ pub(super) struct UsbHost {
 }
 
 impl UsbHost {
-    pub(super) fn new() -> Self {
+    /// A host end that reads the gateway's hostlink secret from the
+    /// per-gateway credentials directory, like `--hostlink-credentials`.
+    pub(super) fn new(hostlink_credentials: &std::path::Path) -> Self {
+        let mut session = DeviceSession::new();
+        session.credentials =
+            crate::HostlinkCredentials::Directory(hostlink_credentials.to_path_buf());
         Self {
-            session: DeviceSession::new(),
+            session,
             decoder: StreamDecoder::default(),
             request: 1,
             pending: Vec::new(),
@@ -67,6 +77,8 @@ impl UsbHost {
             other_host_ops: 0,
             data_frames: 0,
             diagnostics: 0,
+            errors: Vec::new(),
+            deliveries: Vec::new(),
             last_rx_ms: 0,
             last_begin_ms: 0,
             last_tx_ms: 0,
@@ -75,7 +87,7 @@ impl UsbHost {
 
     pub(super) fn hello_bytes(&mut self, now: u64) -> Vec<u8> {
         self.last_begin_ms = now;
-        encode_frame(&self.session.begin()).expect("hello encodes")
+        encode_frame(&self.session.begin().expect("host nonce")).expect("hello encodes")
     }
 
     /// Queues one sealed frame; returns its request id for 0x63
@@ -202,7 +214,7 @@ impl UsbHost {
             if active {
                 self.session_losses += 1;
             }
-            let hello = self.session.begin();
+            let hello = self.session.begin().expect("host nonce");
             self.last_begin_ms = now;
             out.extend_from_slice(&encode_frame(&hello).expect("hello encodes"));
         }
@@ -210,6 +222,17 @@ impl UsbHost {
             let frame = decoded.expect("device USB bytes decode");
             let kind = frame.kind;
             let request = frame.request;
+            let reason_id = |body: &[u8], at: usize| {
+                body.get(at..at + 2)
+                    .map(|b| u16::from_be_bytes([b[0], b[1]]))
+            };
+            if kind == FrameKind::Error && frame.session == 0 {
+                if let (Some(code), Some(reason)) =
+                    (reason_id(&frame.body, 0), reason_id(&frame.body, 10))
+                {
+                    self.errors.push((code, reason));
+                }
+            }
             let inbound = self.session.handle(&frame);
             for outbound in inbound.outbound {
                 match outbound {
@@ -235,6 +258,16 @@ impl UsbHost {
                 self.session_losses += 1;
             }
             let Some(inner) = inbound.inner else { continue };
+            if kind == FrameKind::Error {
+                if let (Some(code), Some(reason)) = (reason_id(&inner, 0), reason_id(&inner, 10)) {
+                    self.errors.push((code, reason));
+                }
+            }
+            if let (FrameKind::DeliveryEvent, Some(&state), Some(reason)) =
+                (kind, inner.get(20), reason_id(&inner, 21))
+            {
+                self.deliveries.push((state, reason));
+            }
             match kind {
                 FrameKind::HostOps => {
                     if authority_sub(&inner) == Some(SUB_AUTHORITY_UP) {

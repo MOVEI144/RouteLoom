@@ -5,8 +5,8 @@
   "flags": 1,
   "session": 0,
   "request": 101,
-  "inner_hex": "bade087d110e0bf6200d52b5344b7df6",
-  "body_hex": "bade087d110e0bf6200d52b5344b7df6",
-  "wire_hex": "07524c553101010201010101010101010101010101010102651610bade087d110e0bf6200d52b5344b7df6733820e800",
+  "inner_hex": "6ba5871e8d806b13799811e1e02e5d4b",
+  "body_hex": "6ba5871e8d806b13799811e1e02e5d4b",
+  "wire_hex": "07524c5531020102010101010101010101010101010101026516106ba5871e8d806b13799811e1e02e5d4b23d678a100",
   "note": "host proves the shared secret over the transcript"
 }

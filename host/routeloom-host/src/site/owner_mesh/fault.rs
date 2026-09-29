@@ -1,11 +1,13 @@
 //! Cutover fault rows: receipt loss and power cut, daemon restart and
-//! gateway USB loss (tests/e2e/scenarios.json F01, F06, F07).
+//! gateway USB loss (tests/e2e/scenarios.json F01, F06, F07), and the
+//! HostLink v2 negatives and gateway reset (F07-A, M06-G).
 
 use super::cutover::{
     cutover_converged, cutover_finish_prepare, cutover_progress, cutover_through_commit,
     decider_requests_for, stage_cutover,
 };
 use super::*;
+use routeloom_protocol::manifest as reasons;
 
 /// C3: the member's APPLIED receipt dies in flight while the member
 /// itself commits and adopts on time. A lost receipt copy is not a
@@ -396,5 +398,203 @@ fn mesh_c5_radio_partition_and_stale_usb_adapter() {
             .iter()
             .any(|tx| tx.state == DELIVERY_DELIVERED),
         "new-epoch uplink"
+    );
+}
+
+/// Steps until the host holds a session newer than `before` (counted by
+/// `usb_auth_total`) and returns the virtual time it took.
+fn reauth_ms(world: &mut MeshWorld, before: usize, what: &str) -> u64 {
+    let start = world.now;
+    while world.usb_auth_total() <= before && world.now < start + 20_000 {
+        world.step(25);
+    }
+    assert!(world.usb_auth_total() > before, "{what}: re-authenticated");
+    assert_eq!(world.usb_host.session.phase, SessionPhase::Active, "{what}");
+    world.now - start
+}
+
+/// Steps until the host has recorded `count` device Error frames.
+fn await_errors(world: &mut MeshWorld, count: usize) -> (u16, u16) {
+    for _ in 0..200 {
+        if world.usb_host.errors.len() >= count {
+            break;
+        }
+        world.step(25);
+    }
+    *world
+        .usb_host
+        .errors
+        .get(count - 1)
+        .expect("the gateway answered with an Error frame")
+}
+
+/// One KeepAlive sealed in the host's current session, as wire bytes.
+fn sealed_keepalive(world: &mut MeshWorld) -> Vec<u8> {
+    let mut frame = Frame {
+        kind: FrameKind::KeepAlive,
+        flags: 0,
+        session: 0,
+        request: 0,
+        body: Vec::new(),
+    };
+    world
+        .usb_host
+        .session
+        .protect(&mut frame)
+        .expect("active session");
+    encode_frame(&frame).expect("keepalive encodes")
+}
+
+/// F07-A: through the gateway's real bridge bytes, HostLink v2 refuses a
+/// replayed counter, a forged frame tag and a protocol-1 HELLO, each with
+/// its registered reason id; a wrong hostlink secret never reaches Active.
+/// After every refusal the host is back on a fresh session within 5 s (vt).
+#[test]
+fn mesh_hostlink_v2_auth_negatives() {
+    let Some(mut world) = MeshWorld::start("f07a", Switch::direct()) else {
+        return; // no C++ peers: skip (ignore-equivalent)
+    };
+    converge(&mut world, "f07a");
+    assert_eq!(world.usb_host.session.phase, SessionPhase::Active);
+
+    // Replay: the same sealed frame twice. The copy's counter is spent.
+    let wire = sealed_keepalive(&mut world);
+    world.peers[0].send_usb(&wire);
+    world.step(25);
+    let errors = world.usb_host.errors.len();
+    let sessions = world.usb_auth_total();
+    world.peers[0].send_usb(&wire);
+    assert_eq!(
+        await_errors(&mut world, errors + 1),
+        (3, reasons::REASON_REPLAY_REJECTED)
+    );
+    assert!(reauth_ms(&mut world, sessions, "after replay") <= 5_000);
+
+    // Forged tag: one flipped tag bit.
+    let mut wire = sealed_keepalive(&mut world);
+    let mut decoder = StreamDecoder::default();
+    let mut forged = decoder.push(&wire).pop().unwrap().unwrap();
+    forged.body[10] ^= 1;
+    wire = encode_frame(&forged).unwrap();
+    let errors = world.usb_host.errors.len();
+    let sessions = world.usb_auth_total();
+    world.peers[0].send_usb(&wire);
+    assert_eq!(
+        await_errors(&mut world, errors + 1),
+        (2, reasons::REASON_SESSION_TAG_INVALID)
+    );
+    assert!(reauth_ms(&mut world, sessions, "after forged tag") <= 5_000);
+
+    // Downgrade: a HELLO offering only protocol 1 is refused before any
+    // transcript exists (pre-auth Error, session 0).
+    let mut hello = 0x0DD5_u64.to_be_bytes().to_vec();
+    hello.extend_from_slice(&[1, 1, 0]);
+    let downgrade = Frame {
+        kind: FrameKind::Hello,
+        flags: 0,
+        session: 0,
+        request: 77,
+        body: hello,
+    };
+    let errors = world.usb_host.errors.len();
+    let sessions = world.usb_auth_total();
+    world.peers[0].send_usb(&encode_frame(&downgrade).unwrap());
+    assert_eq!(
+        await_errors(&mut world, errors + 1),
+        (7, reasons::REASON_VERSION_UNSUPPORTED)
+    );
+    assert!(reauth_ms(&mut world, sessions, "after downgrade") <= 5_000);
+
+    // Wrong secret in the gateway's credential file: the HelloAck tag never
+    // verifies, so the host sends no AUTH and nothing becomes Active.
+    let credential = world
+        .hostlink_dir
+        .join(format!("{:016x}.key", testkit::GATEWAY));
+    let secret = std::fs::read(&credential).unwrap();
+    std::fs::write(&credential, b"not-this-gateway-secret").unwrap();
+    world.usb_disconnect();
+    world.usb_reconnect();
+    let sessions = world.usb_auth_total();
+    for _ in 0..400 {
+        world.step(25);
+    }
+    assert_eq!(world.usb_auth_total(), sessions, "wrong secret: no session");
+    assert_ne!(world.usb_host.session.phase, SessionPhase::Active);
+    std::fs::write(&credential, &secret).unwrap();
+    world.usb_disconnect();
+    world.usb_reconnect();
+    assert!(reauth_ms(&mut world, sessions, "after the credential fix") <= 5_000);
+}
+
+/// M06-G: a gateway power cut. The host is back on a new HostLink session
+/// within 5 s (vt), a frame of the old session is dropped without effect,
+/// and host sends through the new session reach A 10/10 with the first
+/// delivery inside 15 s (vt).
+#[test]
+fn mesh_gateway_reset_reauthenticates_and_delivers() {
+    let Some(mut world) = MeshWorld::start("m06g", Switch::direct()) else {
+        return; // no C++ peers: skip (ignore-equivalent)
+    };
+    converge(&mut world, "m06g");
+    let old_session = sealed_keepalive(&mut world);
+    world.peers[0].send_usb(&old_session);
+    world.step(25);
+    let sessions = world.usb_auth_total();
+    let reboots = world.peers[0].reboots;
+    let cut_at = world.now;
+    world.peers[0].power_cut();
+    let reauth = reauth_ms(&mut world, sessions, "after the gateway reset");
+    assert!(world.peers[0].reboots > reboots, "the gateway rebooted");
+    assert!(
+        world.now - cut_at <= 5_000,
+        "re-authenticated in {reauth} ms"
+    );
+
+    // The old session's bytes are silently dropped: no Error, no new session.
+    let errors = world.usb_host.errors.len();
+    let sessions = world.usb_auth_total();
+    world.peers[0].send_usb(&old_session);
+    for _ in 0..40 {
+        world.step(25);
+    }
+    assert_eq!(
+        world.usb_host.errors.len(),
+        errors,
+        "stale session answered"
+    );
+    assert_eq!(
+        world.usb_auth_total(),
+        sessions,
+        "stale session broke the new one"
+    );
+
+    // Host → A through the new session: 10/10, each reported with the
+    // registered TX_ACCEPTED id.
+    let resumed_at = world.now;
+    for index in 0..10_u64 {
+        let rx = world.snaps[1].rx_count;
+        let mut body = (0x0600_u64 + index).to_be_bytes().to_vec();
+        body.extend_from_slice(&NODE_A.to_be_bytes());
+        body.extend_from_slice(b"m06g-down");
+        world.usb_host.queue_data(FrameKind::DataToMesh, body);
+        world.pump_until(1200, |snaps| snaps[1].rx_count > rx);
+        assert!(world.snaps[1].rx_count > rx, "delivery {index} reached A");
+        if index == 0 {
+            assert!(
+                world.now - resumed_at <= 15_000,
+                "first delivery after the reset"
+            );
+        }
+    }
+    let accepted = world
+        .usb_host
+        .deliveries
+        .iter()
+        .filter(|(_, reason)| *reason == reasons::REASON_TX_ACCEPTED)
+        .count();
+    assert!(
+        accepted >= 10,
+        "TX_ACCEPTED ids: {:?}",
+        world.usb_host.deliveries
     );
 }

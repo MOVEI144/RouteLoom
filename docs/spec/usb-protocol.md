@@ -1,6 +1,6 @@
 # USB／Serial transport契約
 
-改訂1.2。フレーミング・認可・creditの意味を定義する。最終field offset／暗号Profile／IDLは未凍結。Rust host codecと携帯可能C++ device bridge（session、credit、MeshNode統合）は実装済みで、`protocol/usb-golden`の共有vectorでbyte相互検証済み。ただし開発profile認証であり、実USB driver・HIL・本番Profileは未認定。
+改訂1.3。フレーミング・認証（RLU1 protocol 2＝HostLink v2）・認可・creditの意味を定義する。最終field offsetは未凍結。Rust host codecと携帯可能C++ device bridge（session、credit、MeshNode統合）は実装済みで、`protocol/usb-golden`の共有vectorでbyte相互検証済み。実USB driverのHIL認定は別。
 
 ## 1. フレームと境界
 
@@ -16,9 +16,21 @@ HELLOは未認証。device/host credential、nonces、protocol範囲、選択版
 
 firmware hashの自己申告はattestationではない。COM番号やUSB serial文字列を機器本人証明にしない。Networkを切り替える場合も認証scopeと再認可を確認する。未認証のCREDITを送信許可として処理しない。
 
-再接続は新sessionで、partial frame、grant、consumed、request tokenを再使用しない。stable Message IDやhost idempotency identityだけを明示的に再照会する。認証方式と最終byte vectorはG-SEC/G-USBに残す。
+再接続は新sessionで、partial frame、grant、consumed、request tokenを再使用しない。stable Message IDやhost idempotency identityだけを明示的に再照会する。
 
-現行実装は**EXPERIMENTALな開発profile**として、共有secretと決定的なtranscript結合MAC（label分離domain、u64 wrap演算）でHELLO/AUTH/session frame tagを検証する。本番Identity・真正暗学suiteではなく、G-SECの責務である。
+**HostLink v2（RLU1 protocol 2）**：親機ごとの hostlink secret（機器は rlkeys の USB secret、host は `--hostlink-credentials` の NodeId ごとの file。ASCII 1〜63 B）を両端が持つ。
+
+- 鍵：`K = HKDF-SHA-256(salt=空, IKM=secret, info="RouteLoom/v2/hostlink", L=32)`。
+- transcript（121 B、big-endian）：`"RLU1TRN2" || host_nonce u64 || device_nonce u64 || min_version u8 || max_version u8 || version u8 || carrier u8 || binding 32B || node u64 || boot u64 || network u64（完全な64 bit） || capability u32 || plen u8 || principal（32 Bまで0埋め）`。carrierはUSB/serialが0、bindingは安全なchannelを結び付けるcarrier用の予約でUSBでは全0。
+- session値はすべて `HMAC-SHA-256(K, label || 0x00 || transcript)`：`key-h2d`・`key-d2h`（各32 B、方向別のframe MAC鍵）、`hello`・`auth`・`auth-ok`（先頭16 Bのtag）、`session-id`（先頭8 BのBE u64）。
+- 手順：HELLO（`host_nonce || min || max || plen || principal`）→ HelloAck（`device_nonce || version || node || boot || network || capability || hello_tag`）→ host が hello_tag を検証し AUTH（Hello＋flag AUTH、`auth_tag`）→ AUTH_OK（HelloAck＋flag AUTH、`auth_ok_tag || session_id`）。tagの比較は定数時間。
+- 版：機器はprotocol 2だけを受ける。範囲に2を含まないHELLOは`VERSION_UNSUPPORTED`で拒否し、protocol 1への自動fallbackはしない。hostが出した範囲はtranscriptに入るため、途中で書き換えた範囲はAUTHで失敗する。
+- frame：`counter u64 || tag 16B || inner`。`tag = HMAC-SHA-256(方向の鍵, dir u8 || counter u64 || kind u8 || flags u16 || request u64 || inner)` の先頭16 B。counterは方向ごとにsession開始時0から始まり、機器は期待値と一致しないframeを`REPLAY_REJECTED`で拒否する（sessionごとに窓を初期化）。最大値（2^64−1）は送受信せず、到達したsessionは作り直す。
+- 暗号化はしない（完全性・相互認証・replay保護のみ）。`payload_hash`（idempotencyの同一性）はSHA-256の先頭16 B。
+
+### 2.1 理由ID
+
+Error（`code u16 || request u64 || reason`）とDeliveryEvent（`… || state u8 || reason || [operation_id 24B]`）の`reason`は `reason_id u16 || detail_len u8 || detail`。`protocol/manifest.json`に登録した理由（hostlink領域0x0400〜・delivery領域0x0100〜）はIDだけを送り（detail_len 0）、未登録の理由はID 0と印字可能ASCIIの文字列（最大64 B）を送る。hostはIDを登録表の文字列（`api1`があればそれ、無ければname）に戻すので、API1のJSONに出る理由の文字列は変わらない。
 
 ## 3. credit：方向・session別の累積許可
 
@@ -85,7 +97,7 @@ SDK v1ゼロタッチ参加で、member proxyが中継する未割当機器のED
 | `0x62` JOIN_RELAY_ABORT | H→G／G→H（非要求、request id 0） | `proxy:u64`、`relay_id:u32`（≠0）、`reason:u8`（1 proxy_aborted、2 gateway_expired、3 delivery_failed、4 host_aborted。H→Gは4だけ） |
 | `0x63` JOIN_RELAY_RESULT | G→H（0x61／0x62と同request id） | `result:u16`（ConfigOpsResult空間：`Ok`＝Wire laneへ渡した、`Unsupported`、`Busy`＝gateway slot無し、`Denied`＝gatewayがMemberでない、`Invalid`＝不整合・知らないrelay、`NoRoute`、`Indeterminate`）、`proxy:u64`、`relay_id:u32` |
 
-`Ok`は機器への配送を意味しない（配送の結果は次の上り、または`0x62`の`delivery_failed`で分かる）。gatewayは分割されたobjectを2件まで同時に組み立て／送信し、hostが居ない（sessionが無い・queue満杯）間の上りはproxyへ`authority_unreachable`の中止を返して捨てる。形式不正はError frame（ProtocolError）、`0x60`/`0x63`をhostが送ればdirection違反。共有vectorは`protocol/usb-golden/join-relay`（gateway 1・proxy 2の交換をC++ bridgeがbyte一致で再生、Rust `routeloom-protocol::join_relay`が復号）とrelay objectの`protocol/sdkv1-golden/join-transport`。Site Authority側（daemon）はP3-3。
+`Ok`は機器への配送を意味しない（配送の結果は次の上り、または`0x62`の`delivery_failed`で分かる）。gatewayは分割されたobjectを2件まで同時に組み立て／送信し、hostが居ない（sessionが無い・queue満杯）間の上りはproxyへ`authority_unreachable`の中止を返して捨てる。形式不正はError frame（ProtocolError）、`0x60`/`0x63`をhostが送ればdirection違反。共有vectorは`protocol/usb-golden/join-relay-v2`（gateway 1・proxy 2の交換をC++ bridgeがbyte一致で再生、Rust `routeloom-protocol::join_relay`が復号）とrelay objectの`protocol/sdkv1-golden/join-transport`。Site Authority側（daemon）はP3-3。
 
 ## 10. 観測（observation_v1、EXPERIMENTAL）
 

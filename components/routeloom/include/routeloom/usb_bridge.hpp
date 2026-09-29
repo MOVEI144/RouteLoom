@@ -2,7 +2,7 @@
 
 // Device-side USB bridge (G-USB, portable level). Connects a byte stream
 // (UART/TTY/loopback) to a MeshNode through the v0.1 COBS+CRC32 profile, the
-// EXPERIMENTAL dev-auth session (see usb_session.hpp) and session-direction
+// HostLink v2 authenticated session (see usb_session.hpp) and session-direction
 // cumulative credit. Not yet qualified on real USB hardware (HIL remains).
 
 #include <array>
@@ -112,7 +112,7 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
                         public sdkv1::JoinRelayHostSink {
  public:
   struct Config {
-    ByteView secret{};  // dev-profile shared secret; caller-owned, must outlive the bridge
+    ByteView secret{};  // hostlink secret (rlkeys); caller-owned, must outlive the bridge
     NodeId node{kInvalidNodeId};
     NetworkId network{0};
     std::uint64_t boot_id{0};
@@ -350,7 +350,7 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
 
   SessionState state() const noexcept { return state_; }
   std::uint64_t session_id() const noexcept {
-    return proof_valid_ ? proof_.session_id : 0;
+    return keys_valid_ ? keys_.session_id : 0;
   }
   const BridgeStats& stats() const noexcept { return stats_; }
   const CumulativeCredit& tx_credit() const noexcept { return tx_credit_; }
@@ -611,8 +611,14 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   void handle_credit(std::uint64_t request, ByteView inner,
                      MonotonicMs now_ms) noexcept;
   void issue_rx_grant(bool initial, MonotonicMs now_ms) noexcept;
-  void send_error(UsbErrorCode code, std::uint64_t request, const char* reason,
+  // Error frame with a registered reason id (manifest hostlink area) or,
+  // from a Status detail, the detail's registered id or its text.
+  void send_error(UsbErrorCode code, std::uint64_t request, std::uint16_t reason_id,
                   MonotonicMs now_ms) noexcept;
+  void send_error(UsbErrorCode code, std::uint64_t request, const char* detail,
+                  MonotonicMs now_ms) noexcept;
+  void send_error(UsbErrorCode code, std::uint64_t request, std::uint16_t reason_id,
+                  const char* detail, MonotonicMs now_ms) noexcept;
   bool enqueue(FrameKind kind, std::uint16_t flags, std::uint64_t request,
                ByteView inner, MonotonicMs now_ms,
                MonotonicMs expires_ms = 0) noexcept;
@@ -621,7 +627,10 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
                           MonotonicMs now_ms) noexcept;
   void note_credit_stall(MonotonicMs now_ms) noexcept;
   void reset_session_state() noexcept;
-  void begin_auth_session(MonotonicMs now_ms) noexcept;
+  // Session values of the stored transcript under config_.secret; the
+  // caller clears the result.
+  SessionProof derive_proof() const noexcept;
+  void begin_auth_session(const SessionTag& auth_ok_tag, MonotonicMs now_ms) noexcept;
   std::uint64_t request_for(const MessageId& id) const noexcept;
 
   // --- Gateway host lane (P3) -------------------------------------------------
@@ -697,8 +706,8 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   MonotonicMs state_entered_ms_{0};
   MonotonicMs now_ms_{0};
   SessionTranscript transcript_{};
-  SessionProof proof_{};
-  bool proof_valid_{false};
+  SessionKeys keys_{};
+  bool keys_valid_{false};
   std::uint64_t session_attempt_{0};
   std::uint8_t auth_attempts_{0};
   std::uint8_t preauth_budget_{kPreAuthBudget};

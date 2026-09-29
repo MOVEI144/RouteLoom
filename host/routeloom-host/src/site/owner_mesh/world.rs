@@ -573,6 +573,8 @@ pub(super) struct MeshWorld {
     pub(super) nodes: Vec<u64>,
     pub(super) provision: Provision,
     pub(super) usb_host: UsbHost,
+    /// The per-gateway hostlink credentials directory the host end reads.
+    pub(super) hostlink_dir: std::path::PathBuf,
     pub(super) switch: Switch,
     pub(super) now: u64,
     pub(super) rng_state: u64,
@@ -683,7 +685,22 @@ impl MeshWorld {
             })
             .collect();
         let now = provision.now;
-        let usb_secret_hex = hex(b"routeloom-dev-secret");
+        // Production credential layout (`--hostlink-credentials`): one
+        // private file per gateway, holding a world-specific secret.
+        let hostlink_dir = provision.site.dir.join("hostlink");
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&hostlink_dir)
+                .expect("hostlink credentials dir");
+        }
+        let hostlink_secret = format!("hostlink-{:016x}", now ^ 0x5EED_0B11);
+        write_private(
+            &hostlink_dir.join(format!("{:016x}", testkit::GATEWAY) + ".key"),
+            hostlink_secret.as_bytes(),
+        );
+        let usb_secret_hex = hex(hostlink_secret.as_bytes());
         // Staggered boots (documented harness technique, same as the HIL
         // rounds): the gateway's responder flight serializes links and a
         // contender whose M1 budget expires mid-contention has no
@@ -725,7 +742,8 @@ impl MeshWorld {
             macs: personas.iter().map(|p| p.mac).collect(),
             nodes: personas.iter().map(|p| p.node).collect(),
             provision,
-            usb_host: UsbHost::new(),
+            usb_host: UsbHost::new(&hostlink_dir),
+            hostlink_dir,
             switch,
             now,
             rng_state: 0x5EED_1234_5678_9ABC,
@@ -776,7 +794,7 @@ impl MeshWorld {
             .service
             .with(|a| a.drop_gateway_relays(testkit::GATEWAY, self.now));
         self.provision.usb.close();
-        self.usb_host = UsbHost::new();
+        self.usb_host = UsbHost::new(&self.hostlink_dir);
         self.usb_incarnation += 1;
         let incarnation = self.usb_incarnation;
         let join = UsbSiteAdapter::new(testkit::GATEWAY, incarnation);

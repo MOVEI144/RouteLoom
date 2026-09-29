@@ -66,4 +66,9 @@ struct Status {
 
 const char* status_code_name(StatusCode code) noexcept;
 
+// Registry id of a common- or delivery-area reason string
+// (protocol/manifest.json reason_codes, looked up by name);
+// ROUTELOOM_REASON_NONE (0) for nullptr or any other name.
+std::uint16_t reason_code(const char* name) noexcept;
+
 }  // namespace routeloom

@@ -86,6 +86,7 @@ constexpr bool scope_mode_scoped(const ScopeMode mode) noexcept {
 class Sha256 {
  public:
   Sha256() noexcept { reset(); }
+  ~Sha256() noexcept;
   void reset() noexcept;
   void update(ByteView data) noexcept;
   void finish(ScopeDigest& out) noexcept;

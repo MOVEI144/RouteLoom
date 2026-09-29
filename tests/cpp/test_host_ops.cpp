@@ -1097,7 +1097,7 @@ struct HostDriver {
                                    ByteView inner) {
     std::array<std::uint8_t, 1200> body{};
     std::size_t body_size = 0;
-    if (!seal_body(proof.key, kDirHostToDevice, h2d_counter, kind, 0, request,
+    if (!seal_body(proof.key_h2d, kDirHostToDevice, h2d_counter, kind, 0, request,
                    inner, MutableByteView{body.data(), body.size()}, body_size)) {
       return {};
     }
@@ -1182,8 +1182,8 @@ std::uint64_t host_handshake(World& world, HostDriver& host, MonotonicMs& now,
                              std::uint64_t host_nonce, std::uint64_t request_base) {
   std::array<std::uint8_t, 64> hello_body{};
   write_u64(hello_body.data(), host_nonce);
-  hello_body[8] = 1;
-  hello_body[9] = 1;
+  hello_body[8] = 2;
+  hello_body[9] = 2;
   const char* principal = "host-operator";
   hello_body[10] = 13;
   std::memcpy(hello_body.data() + 11, principal, 13);
@@ -1221,7 +1221,7 @@ std::uint64_t host_handshake(World& world, HostDriver& host, MonotonicMs& now,
   host.session = host.proof.session_id;
   host.capability = transcript.capability;
   world.feed(host.plain(FrameKind::Hello, kFlagAuth, request_base + 1,
-                        ByteView{host.proof.auth_tag.data(), kDevTagSize}), now);
+                        ByteView{host.proof.auth_tag.data(), kTagSize}), now);
   world.drain(now);
   now += 200;
   if (world.device_sink.frames.size() != 2) return 0;  // auth_ok + rx grant
@@ -1257,7 +1257,7 @@ std::vector<std::uint8_t> transact(World& world, HostDriver& host,
   for (const auto& record : world.device_sink.frames) {
     std::uint64_t counter = 0;
     ByteView opened{};
-    if (!open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+    if (!open_body(host.proof.key_d2h, kDirDeviceToHost, record.frame, counter,
                    opened)) {
       continue;
     }
@@ -1348,7 +1348,7 @@ void test_bridge_submit_lifecycle() {
     if (record.frame.kind != FrameKind::HostOps) continue;
     std::uint64_t counter = 0;
     ByteView opened{};
-    CHECK(open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+    CHECK(open_body(host.proof.key_d2h, kDirDeviceToHost, record.frame, counter,
                     opened));
     answer.assign(opened.data, opened.data + opened.size);
   }
@@ -1989,7 +1989,7 @@ void test_bridge_mesh_rejected() {
   for (const auto& record : world.device_sink.frames) {
     std::uint64_t counter = 0;
     ByteView opened{};
-    CHECK(open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+    CHECK(open_body(host.proof.key_d2h, kDirDeviceToHost, record.frame, counter,
                     opened));
     if (record.frame.kind == FrameKind::HostOps && ninth_answer.empty()) {
       ninth_answer.assign(opened.data, opened.data + opened.size);
@@ -2050,7 +2050,7 @@ void test_bridge_submit_refused_without_mesh() {
   for (const auto& record : world.device_sink.frames) {
     std::uint64_t counter = 0;
     ByteView opened{};
-    CHECK(open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+    CHECK(open_body(host.proof.key_d2h, kDirDeviceToHost, record.frame, counter,
                     opened));
     if (record.frame.kind == FrameKind::HostOps && answer.empty()) {
       answer.assign(opened.data, opened.data + opened.size);
@@ -2103,17 +2103,19 @@ void test_bridge_window_failure_reason_reaches_host() {
     if (record.frame.kind != FrameKind::DeliveryEvent) continue;
     std::uint64_t counter = 0;
     ByteView opened{};
-    CHECK(open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+    CHECK(open_body(host.proof.key_d2h, kDirDeviceToHost, record.frame, counter,
                     opened));
-    CHECK(opened.size >= 22);
+    CHECK(opened.size >= 24);
     CHECK(read_u32(opened.data + 8) == receipt.msg_session);
     CHECK(read_u64(opened.data + 12) == receipt.msg_seq);
     CHECK(opened.data[20] == static_cast<std::uint8_t>(DeliveryState::Failed));
-    const std::size_t reason_len = opened.data[21];
-    CHECK(opened.size == 22 + reason_len + kOperationIdSize);
-    CHECK(std::string(reinterpret_cast<const char*>(opened.data + 22),
+    // An unregistered reason travels as id 0 plus its text.
+    CHECK(opened.data[21] == 0 && opened.data[22] == 0);
+    const std::size_t reason_len = opened.data[23];
+    CHECK(opened.size == 24 + reason_len + kOperationIdSize);
+    CHECK(std::string(reinterpret_cast<const char*>(opened.data + 24),
                       reason_len) == "HOP_TIMEOUT");
-    CHECK(std::memcmp(opened.data + 22 + reason_len,
+    CHECK(std::memcmp(opened.data + 24 + reason_len,
                       submitted.operation_id.data(), kOperationIdSize) == 0);
     reason_event = true;
   }
@@ -2200,7 +2202,7 @@ void test_bridge_stale_delivery_event_after_retire() {
     if (record.frame.kind != FrameKind::DeliveryEvent) continue;
     std::uint64_t counter = 0;
     ByteView opened{};
-    CHECK(open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+    CHECK(open_body(host.proof.key_d2h, kDirDeviceToHost, record.frame, counter,
                     opened));
     CHECK(opened.size >= 21);
     CHECK(read_u64(opened.data) == 0);  // retired records have no request id
@@ -2280,7 +2282,7 @@ std::vector<DeviceFrame> collect_host_ops(World& world, HostDriver& host) {
     if (record.frame.kind != FrameKind::HostOps) continue;
     std::uint64_t counter = 0;
     ByteView opened{};
-    if (!open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+    if (!open_body(host.proof.key_d2h, kDirDeviceToHost, record.frame, counter,
                    opened)) {
       continue;
     }
@@ -3319,7 +3321,7 @@ std::vector<GroupStatusReply> opened_group_status(World& world, const HostDriver
     std::uint64_t counter = 0;
     ByteView opened{};
     if (record.frame.kind != FrameKind::HostOps || record.frame.request != request ||
-        !open_body(host.proof.key, kDirDeviceToHost, record.frame, counter, opened)) {
+        !open_body(host.proof.key_d2h, kDirDeviceToHost, record.frame, counter, opened)) {
       continue;
     }
     GroupStatusReply reply{};
@@ -3431,8 +3433,8 @@ void test_bridge_group_send_and_final() {
 std::uint32_t hello_ack_capability(World& world, HostDriver& host, MonotonicMs now) {
   std::array<std::uint8_t, 64> hello_body{};
   write_u64(hello_body.data(), 0xC0FFEE);
-  hello_body[8] = 1;
-  hello_body[9] = 1;
+  hello_body[8] = 2;
+  hello_body[9] = 2;
   const char* principal = "host-operator";
   hello_body[10] = 13;
   std::memcpy(hello_body.data() + 11, principal, 13);
@@ -3531,7 +3533,7 @@ void test_bridge_group_capability_refresh_renegotiates() {
     if (record.frame.kind != FrameKind::Error) continue;
     std::uint64_t counter = 0;
     ByteView opened{};
-    if (open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+    if (open_body(host.proof.key_d2h, kDirDeviceToHost, record.frame, counter,
                   opened) &&
         opened.size >= 2 &&
         static_cast<std::uint16_t>((opened.data[0] << 8U) | opened.data[1]) ==
@@ -4494,7 +4496,7 @@ void test_bridge_authority_dispatch() {
   for (const auto& record : world.device_sink.frames) {
     std::uint64_t counter = 0;
     ByteView opened{};
-    if (!open_body(host.proof.key, kDirDeviceToHost, record.frame, counter, opened)) {
+    if (!open_body(host.proof.key_d2h, kDirDeviceToHost, record.frame, counter, opened)) {
       continue;
     }
     if (record.frame.kind != FrameKind::HostOps || opened.size < 2 ||
