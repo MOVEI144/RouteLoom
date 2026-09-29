@@ -1,0 +1,116 @@
+[2026-09-29T04:23:03.983+00:00] !! reset pulse
+[2026-09-29T04:23:04.084+00:00] I (153) esp_image: segment 1: paddr=000659b0 vaddr=40800000 sizeESP-ROM:esp32c6-20220919
+[2026-09-29T04:23:04.084+00:00] Build:Sep 19 2022
+[2026-09-29T04:23:04.084+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x1e (SPI_FAST_FLASH_BOOT)
+[2026-09-29T04:23:04.084+00:00] Saved PC:0x4001a36e
+[2026-09-29T04:23:04.084+00:00] SPIWP:0xee
+[2026-09-29T04:23:04.084+00:00] mode:DIO, clock div:2
+[2026-09-29T04:23:04.084+00:00] load:0x40875730,len:0x1738
+[2026-09-29T04:23:04.084+00:00] load:0x4086b910,len:0xd8c
+[2026-09-29T04:23:04.084+00:00] load:0x4086e610,len:0x32e0
+[2026-09-29T04:23:04.084+00:00] entry 0x4086b91a
+[2026-09-29T04:23:04.084+00:00] I (23) boot: ESP-IDF v6.0.3 2nd stage bootloader
+[2026-09-29T04:23:04.084+00:00] I (23) boot: compile time Sep 29 2026 04:13:32
+[2026-09-29T04:23:04.084+00:00] I (24) boot: chip revision: v0.2
+[2026-09-29T04:23:04.084+00:00] I (24) boot: efuse block revision: v0.3
+[2026-09-29T04:23:04.084+00:00] I (26) boot.esp32c6: SPI Speed      : 80MHz
+[2026-09-29T04:23:04.084+00:00] I (30) boot.esp32c6: SPI Mode       : DIO
+[2026-09-29T04:23:04.084+00:00] I (34) boot.esp32c6: SPI Flash Size : 4MB
+[2026-09-29T04:23:04.084+00:00] I (38) boot: Enabling RNG early entropy source...
+[2026-09-29T04:23:04.084+00:00] I (42) boot: Partition Table:
+[2026-09-29T04:23:04.084+00:00] I (45) boot: ## Label            Usage          Type ST Offset   Length
+[2026-09-29T04:23:04.084+00:00] I (51) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+[2026-09-29T04:23:04.084+00:00] I (58) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+[2026-09-29T04:23:04.084+00:00] I (64) boot:  2 otadata          OTA data         01 00 00010000 00002000
+[2026-09-29T04:23:04.084+00:00] I (71) boot:  3 rlcfg            WiFi data        01 02 00012000 00006000
+[2026-09-29T04:23:04.084+00:00] I (77) boot:  4 rlkeys           WiFi data        01 02 00018000 00003000
+[2026-09-29T04:23:04.084+00:00] I (84) boot:  5 rlsec            WiFi data        01 02 00020000 00020000
+[2026-09-29T04:23:04.084+00:00] I (90) boot:  6 ota_0            OTA app          00 10 00040000 001d0000
+[2026-09-29T04:23:04.084+00:00] I (97) boot:  7 ota_1            OTA app          00 11 00210000 001d0000
+[2026-09-29T04:23:04.084+00:00] I (103) boot:  8 coredump         Unknown data     01 03 003e0000 00010000
+[2026-09-29T04:23:04.084+00:00] I (110) boot: End of partition table
+[2026-09-29T04:23:04.084+00:00] I (113) boot: No factory image, trying OTA 0
+[2026-09-29T04:23:04.084+00:00] I (117) esp_image: segment 0: paddr=00040020 vaddr=42120020 size=25988h (153992) map
+[2026-09-29T04:23:04.084+00:00] I (153) esp_image: segment 1: paddr=000659b0 vaddr=40800000 size=0a668h ( 42600) load
+[2026-09-29T04:23:04.084+00:00] I (163) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=112b98h (1125272) map
+[2026-09-29T04:23:04.184+00:00] I (371) esp_image: segment 3: paddr=00182bc0 vaddr=4080a668 size=0f9a4h ( 63908) load
+[2026-09-29T04:23:04.184+00:00] I (385) esp_image: segment 4: paddr=0019256c vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-29T04:23:04.184+00:00] I (389) esp_image: segment 5: paddr=00196188 vaddr=50000000 size=00060h (    96) load
+[2026-09-29T04:23:04.184+00:00] I (390) esp_image: segment 6: paddr=001961f0 vaddr=50000068 size=00024h (    36) load
+[2026-09-29T04:23:04.284+00:00] I (403) boot: Loaded app from partition at offset 0x40000
+[2026-09-29T04:23:04.284+00:00] I (407) boot: Set actual ota_seq=1 in otadata[0]
+[2026-09-29T04:23:04.284+00:00] I (408) boot: Disabling RNG early entropy source...
+[2026-09-29T04:23:04.284+00:00] I (423) cpu_start: Unicore app
+[2026-09-29T04:23:06.216+00:00] !! USB serial error: device reports readiness to read but returned no data (device disconnected or mu
+[2026-09-29T04:23:06.568+00:00] !! reopened after USB drop
+[2026-09-29T04:23:06.668+00:00] I (538) main_task: Calling app_main()
+[2026-09-29T04:23:06.668+00:00] I (538) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-29T04:23:06.668+00:00] I (579) RouteLoomRef: sdkv1 identity: none provisioned
+[2026-09-29T04:23:06.668+00:00] I (579) RouteLoomRef: sdkv1 site: not a member
+[2026-09-29T04:23:06.668+00:00] I (580) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+[2026-09-29T04:23:06.668+00:00] I (584) RouteLoomRef: sdkv1 local_revocation: none
+[2026-09-29T04:23:06.668+00:00] I (588) RouteLoomRef: sdkv1 lifecycle: none
+[2026-09-29T04:23:06.668+00:00] I (593) RouteLoomRef: routeloom field boot: fw=1 app_sha256=6fd419d7f689399a82c48c1945c066ab6c2fe13111bfaff3e4aeff04532ee7ca
+[2026-09-29T04:23:06.668+00:00] E (609) RouteLoomNVS: open rlcfg/board native=0x1102
+[2026-09-29T04:23:06.668+00:00] E (609) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:23:16.688+00:00] E (10614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:23:26.708+00:00] E (20614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:23:36.729+00:00] E (30614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:23:46.644+00:00] E (40614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:23:56.660+00:00] E (50614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:24:16.694+00:00] E (70614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:24:26.713+00:00] E (80614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:24:36.733+00:00] E (90614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:24:46.651+00:00] E (100614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:24:56.671+00:00] E (110614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:25:06.689+00:00] E (120614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:25:16.707+00:00] E (130614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:25:26.726+00:00] E (140614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:25:36.743+00:00] E (150614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:25:46.661+00:00] E (160614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:25:56.680+00:00] E (170614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:26:06.702+00:00] E (180614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:26:16.720+00:00] E (190614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:26:26.737+00:00] E (200614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:26:36.657+00:00] E (210614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:26:46.678+00:00] E (220614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:26:56.696+00:00] E (230614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:27:06.721+00:00] E (240614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:27:16.649+00:00] E (250614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:27:26.672+00:00] E (260614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:27:36.698+00:00] E (270614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:27:46.719+00:00] E (280614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:27:56.701+00:00] E (290614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:28:06.656+00:00] E (300614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:28:16.644+00:00] E (310614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:28:26.709+00:00] E (320614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:28:36.695+00:00] E (330614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:28:46.739+00:00] E (340614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:28:56.666+00:00] E (350614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:29:06.690+00:00] E (360614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:29:16.713+00:00] E (370614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:29:26.734+00:00] E (380614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:29:36.650+00:00] E (390614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:29:46.666+00:00] E (400614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:29:56.685+00:00] E (410614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:30:06.706+00:00] E (420614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:30:16.728+00:00] E (430614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:30:26.646+00:00] E (440614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:30:36.667+00:00] E (450614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:30:46.685+00:00] E (460614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:30:56.703+00:00] E (470614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:31:06.721+00:00] E (480614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:31:16.740+00:00] E (490614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:31:26.661+00:00] E (500614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:31:36.679+00:00] E (510614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:31:46.700+00:00] E (520614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:31:56.719+00:00] E (530614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:32:06.740+00:00] E (540614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:32:16.658+00:00] E (550614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:32:26.677+00:00] E (560614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:32:36.710+00:00] E (570614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:32:46.650+00:00] E (580614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:32:56.697+00:00] E (590614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:33:06.687+00:00] E (600614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:33:16.725+00:00] E (610614) RouteLoomRef: CONFIG_REQUIRED: board configuration required
+[2026-09-29T04:33:26.659+00:00] E (620614) RouteLoomRef: CONFIG_REQUIRED: board configuration required

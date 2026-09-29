@@ -1,0 +1,31 @@
+{
+  "app_only": {
+    "identity": {
+      "chip": "esp32c6",
+      "mac": "10:bd:a3:ff:fe:b1:47:54",
+      "log": "flash-endpoint-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "cc8864a6b778993930a96aa16cf5c25747dbc88b892b3de980ad26eb7d4bbf42",
+    "app_bytes": 1422496,
+    "bundle": "hil-h0-c6-n3-devram-up-reference_node-esp32c6"
+  },
+  "device_send_attempts": 100,
+  "device_admitted": 100,
+  "host_records": 96,
+  "host_unique_payloads": 96,
+  "record_keys": [
+    "assurance",
+    "cursor",
+    "endpoint_kind",
+    "evidence",
+    "gateway",
+    "host_seen_unix",
+    "message",
+    "network",
+    "origin",
+    "payload_hex",
+    "payload_len",
+    "v"
+  ]
+}

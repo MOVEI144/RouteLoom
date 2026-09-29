@@ -1,0 +1,2 @@
+accepted=10 delivered=8
+{"requested":10,"host_accepted":10,"delivered":8,"stopped_reason":null,"success_rate":0.8,"rate_limit_retries":0,"pace_s":0,"elapsed_s":9.89,"latency_ms_median":129.855,"latency_ms_p95":1006.55,"latency_ms_max":1353.54,"by_destination":{"3":{"accepted":10,"delivered":8}},"evidence":"artifacts/hil/2026-09-29-h0/recheck/devram/m06-reset-bridge/cycle-02-node3/traffic.jsonl"}

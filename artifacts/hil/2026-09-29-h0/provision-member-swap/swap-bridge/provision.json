@@ -1,0 +1,62 @@
+{
+  "board": "swap-bridge",
+  "node": "0000000000000001",
+  "role": "bridge",
+  "setup_bundle": "h0-setup-bridge-c6-member",
+  "field_bundle": "h0-bridge-c6-member",
+  "erase": "ok",
+  "config": {
+    "generation": 1,
+    "node": "0000000000000001",
+    "role": "bridge",
+    "security": "member",
+    "secrets_generation": "1",
+    "fingerprint": "7aadeb01b788d7f8a5e2a23332a1c5b976f919381e571d65380d5abe85dd6d14",
+    "secrets_fingerprint": "7aadeb01b788d7f8a5e2a23332a1c5b976f919381e571d65380d5abe85dd6d14"
+  },
+  "identity_error": "seal_failed: timeout",
+  "nvs_after_identity": {
+    "rlcfg": {
+      "sha256": "ff7003243382d850c6ddbe9a60b320e753f9ac2ff710798d75d8d82bcf6021de",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "daaad9603abd1d342038905c7b5539ee28fcb7941af958e9314cb339dda208b5",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "7b95df929af8b82bfb37074bfb40483ccbac07e929e2ccab3a8994f5ae7d0fd6",
+      "blank": false
+    }
+  },
+  "app_only": {
+    "identity": {
+      "chip": "esp32c6",
+      "mac": "10:bd:a3:ff:fe:b1:47:54",
+      "log": "flash-swap-bridge-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "34ebc748ef20bdd2db16bc316b09dbbddb7665b35812d9db9f23bd45426a8b6c",
+    "app_bytes": 1501952,
+    "bundle": "hil-h0-bridge-c6-member-bridge_node-esp32c6"
+  },
+  "nvs_after_app_write": {
+    "rlcfg": {
+      "sha256": "ff7003243382d850c6ddbe9a60b320e753f9ac2ff710798d75d8d82bcf6021de",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "daaad9603abd1d342038905c7b5539ee28fcb7941af958e9314cb339dda208b5",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "7b95df929af8b82bfb37074bfb40483ccbac07e929e2ccab3a8994f5ae7d0fd6",
+      "blank": false
+    }
+  },
+  "nvs_preserved": {
+    "rlcfg": true,
+    "rlkeys": true,
+    "rlsec": true
+  }
+}

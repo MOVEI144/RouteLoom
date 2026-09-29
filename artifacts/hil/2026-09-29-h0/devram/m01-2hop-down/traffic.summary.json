@@ -1,0 +1,20 @@
+{
+  "requested": 100,
+  "host_accepted": 100,
+  "delivered": 100,
+  "stopped_reason": null,
+  "success_rate": 1.0,
+  "rate_limit_retries": 0,
+  "pace_s": 5.0,
+  "elapsed_s": 495.11,
+  "latency_ms_median": 105.205,
+  "latency_ms_p95": 156.53,
+  "latency_ms_max": 363.0,
+  "by_destination": {
+    "3": {
+      "accepted": 100,
+      "delivered": 100
+    }
+  },
+  "evidence": "artifacts/hil/2026-09-29-h0/devram/m01-2hop-down/traffic.jsonl"
+}

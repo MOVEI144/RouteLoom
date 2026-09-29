@@ -738,6 +738,7 @@ impl MeshWorld {
                 persona,
                 now + boot_ms[index],
                 0xB1E0 + index as u64,
+                nodes,
                 &images[index].0,
                 &images[index].1,
                 &usb_secret_hex,

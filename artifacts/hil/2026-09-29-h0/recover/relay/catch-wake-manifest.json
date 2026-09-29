@@ -1,0 +1,57 @@
+{
+  "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00",
+  "chip": "esp32c6",
+  "mac": "10:bd:a3:ff:fe:b1:48:a8",
+  "attempt": 1,
+  "fallback_offsets": false,
+  "security": {
+    "secure_boot": false,
+    "flash_encryption": false
+  },
+  "files": {
+    "0x0": {
+      "path": "/tmp/routeloom-hil-v2/catch/relay-img/build/images/bootloader/bootloader.bin",
+      "sha256": "e3219bbe4dfdf55da744ee4c2a2572b25fa13df05c55ba0709122950d8b06a95"
+    },
+    "0x10000": {
+      "path": "/tmp/routeloom-hil-v2/catch/relay-img/build/images/ota_data_initial.bin",
+      "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"
+    },
+    "0x40000": {
+      "path": "/tmp/routeloom-hil-v2/catch/relay-img/build/images/application.bin",
+      "sha256": "80b9a5f3cc8679f1a824e2c6f61c26c29330a095ebb86e5eb9140cb86d09f150"
+    },
+    "0x8000": {
+      "path": "/tmp/routeloom-hil-v2/catch/relay-img/build/images/partition_table/partition-table.bin",
+      "sha256": "d75f28068a6e44a2a4075a490c5993c220f24cfc1862cb79e27f64357ee9ec6b"
+    }
+  },
+  "command": [
+    "/home/sahur/.local/bin/esptool",
+    "--chip",
+    "esp32c6",
+    "--port",
+    "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00",
+    "--baud",
+    "460800",
+    "--before",
+    "no-reset",
+    "--after",
+    "hard-reset",
+    "write-flash",
+    "--flash-mode",
+    "keep",
+    "--flash-freq",
+    "keep",
+    "--flash-size",
+    "keep",
+    "0x0",
+    "/tmp/routeloom-hil-v2/catch/relay-img/build/images/bootloader/bootloader.bin",
+    "0x10000",
+    "/tmp/routeloom-hil-v2/catch/relay-img/build/images/ota_data_initial.bin",
+    "0x40000",
+    "/tmp/routeloom-hil-v2/catch/relay-img/build/images/application.bin",
+    "0x8000",
+    "/tmp/routeloom-hil-v2/catch/relay-img/build/images/partition_table/partition-table.bin"
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "board": "endpoint",
+  "node": "0000000000000003",
+  "role": "bench",
+  "setup_bundle": "h0-setup-ref-c6-devram",
+  "field_bundle": "h0-c6-n3-devram",
+  "config": {
+    "generation": 1,
+    "node": "0000000000000003",
+    "role": "reference",
+    "security": "devram",
+    "secrets_generation": "1",
+    "fingerprint": "316320e03823c9cf85ba5b2e6b20104c7fb4aa26cd36e40378d41dbbac8c4347",
+    "secrets_fingerprint": "316320e03823c9cf85ba5b2e6b20104c7fb4aa26cd36e40378d41dbbac8c4347"
+  },
+  "nvs_after_config": {
+    "rlcfg": {
+      "sha256": "80ba0ce2c33705b0e4ab8079d3ca169bde63d8cbf6cec461f1cdad05d19e3e3a",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "1c8039eda1e3077d0f8776f4fd38d268aa5af49b01736758d33729127cb688f2",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "089f99619b631099bb1ce44de540b39d6acb58875bfd2928ae4894ed4e1c1ebd",
+      "blank": false
+    }
+  },
+  "app_only": {
+    "identity": {
+      "chip": "esp32c6",
+      "mac": "10:bd:a3:ff:fe:b1:47:54",
+      "log": "flash-endpoint-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "28ccb2c31d220d3e0a0407e0e61ccd0e60f7a540fa84b2761bcc8db68aa756d8",
+    "app_bytes": 1420000,
+    "bundle": "hil-h0-c6-n3-devram-reference_node-esp32c6"
+  },
+  "nvs_after_app_write": {
+    "rlcfg": {
+      "sha256": "80ba0ce2c33705b0e4ab8079d3ca169bde63d8cbf6cec461f1cdad05d19e3e3a",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "1c8039eda1e3077d0f8776f4fd38d268aa5af49b01736758d33729127cb688f2",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "089f99619b631099bb1ce44de540b39d6acb58875bfd2928ae4894ed4e1c1ebd",
+      "blank": false
+    }
+  },
+  "nvs_preserved": {
+    "rlcfg": true,
+    "rlkeys": true,
+    "rlsec": true
+  },
+  "boot_lines": 118
+}

@@ -1,0 +1,57 @@
+{
+  "port": "/dev/ttyACM0",
+  "chip": "esp32c3",
+  "mac": "94:a9:90:7a:26:ac",
+  "attempt": 2,
+  "fallback_offsets": false,
+  "security": {
+    "secure_boot": false,
+    "flash_encryption": false
+  },
+  "files": {
+    "0x0": {
+      "path": "/tmp/routeloom-hil-v2/catch/bridge-img/build/images/bootloader/bootloader.bin",
+      "sha256": "eb6c3e719edfaaf11b18b89c8be971f5a807bf52db6a5f509c1673b29121dc08"
+    },
+    "0x10000": {
+      "path": "/tmp/routeloom-hil-v2/catch/bridge-img/build/images/ota_data_initial.bin",
+      "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"
+    },
+    "0x40000": {
+      "path": "/tmp/routeloom-hil-v2/catch/bridge-img/build/images/application.bin",
+      "sha256": "350ef26db7bd6bc693bc1d0b17d277e8e09a3a7a8cc64fec97ace352aac36c25"
+    },
+    "0x8000": {
+      "path": "/tmp/routeloom-hil-v2/catch/bridge-img/build/images/partition_table/partition-table.bin",
+      "sha256": "d75f28068a6e44a2a4075a490c5993c220f24cfc1862cb79e27f64357ee9ec6b"
+    }
+  },
+  "command": [
+    "/home/sahur/.local/bin/esptool",
+    "--chip",
+    "esp32c3",
+    "--port",
+    "/dev/ttyACM0",
+    "--baud",
+    "460800",
+    "--before",
+    "no-reset",
+    "--after",
+    "hard-reset",
+    "write-flash",
+    "--flash-mode",
+    "keep",
+    "--flash-freq",
+    "keep",
+    "--flash-size",
+    "keep",
+    "0x0",
+    "/tmp/routeloom-hil-v2/catch/bridge-img/build/images/bootloader/bootloader.bin",
+    "0x10000",
+    "/tmp/routeloom-hil-v2/catch/bridge-img/build/images/ota_data_initial.bin",
+    "0x40000",
+    "/tmp/routeloom-hil-v2/catch/bridge-img/build/images/application.bin",
+    "0x8000",
+    "/tmp/routeloom-hil-v2/catch/bridge-img/build/images/partition_table/partition-table.bin"
+  ]
+}

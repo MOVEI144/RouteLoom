@@ -1,0 +1,88 @@
+{
+  "2": {
+    "primitive": {
+      "ECDH": {
+        "count": 0,
+        "min_us": null,
+        "median_us": null,
+        "p95_us": null,
+        "max_us": null,
+        "failed": 0
+      },
+      "SIGN": {
+        "count": 0,
+        "min_us": null,
+        "median_us": null,
+        "p95_us": null,
+        "max_us": null,
+        "failed": 0
+      },
+      "VERIFY": {
+        "count": 0,
+        "min_us": null,
+        "median_us": null,
+        "p95_us": null,
+        "max_us": null,
+        "failed": 0
+      }
+    },
+    "handshake": {
+      "count": 0,
+      "min_us": null,
+      "median_us": null,
+      "p95_us": null,
+      "max_us": null
+    },
+    "handshake_by_scope": {},
+    "lowest_handshake_heap_free_b": null,
+    "lowest_handshake_heap_min_b": null,
+    "stack_min_remaining_b": {}
+  },
+  "3": {
+    "primitive": {
+      "ECDH": {
+        "count": 2,
+        "min_us": 124108,
+        "median_us": 124357.0,
+        "p95_us": 124581.1,
+        "max_us": 124606,
+        "failed": 0
+      },
+      "SIGN": {
+        "count": 2,
+        "min_us": 131504,
+        "median_us": 131575.0,
+        "p95_us": 131638.9,
+        "max_us": 131646,
+        "failed": 0
+      },
+      "VERIFY": {
+        "count": 2,
+        "min_us": 146904,
+        "median_us": 147386.5,
+        "p95_us": 147820.75,
+        "max_us": 147869,
+        "failed": 0
+      }
+    },
+    "handshake": {
+      "count": 2,
+      "min_us": 2143240,
+      "median_us": 2296009.0,
+      "p95_us": 2433501.1,
+      "max_us": 2448778
+    },
+    "handshake_by_scope": {
+      "1": {
+        "count": 2,
+        "min_us": 2143240,
+        "median_us": 2296009.0,
+        "p95_us": 2433501.1,
+        "max_us": 2448778
+      }
+    },
+    "lowest_handshake_heap_free_b": 147184,
+    "lowest_handshake_heap_min_b": 146328,
+    "stack_min_remaining_b": {}
+  }
+}

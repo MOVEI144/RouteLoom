@@ -1,0 +1,12 @@
+{
+  "forced_flash_ok": true,
+  "capture_s": 630,
+  "usb_samples": 630,
+  "usb_absent_samples": 0,
+  "config_required_lines": 62,
+  "first_config_required": "E (609) RouteLoomRef: CONFIG_REQUIRED: board configuration required",
+  "deep_sleep_lines": 0,
+  "restarts": 1,
+  "nvs_open_fatal": 0,
+  "setup_flash_after_10min": "ok"
+}

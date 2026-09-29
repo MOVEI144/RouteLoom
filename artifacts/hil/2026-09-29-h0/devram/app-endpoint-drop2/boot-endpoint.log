@@ -1,0 +1,43 @@
+[2026-09-28T18:58:40.024+00:00] !! reset pulse
+[2026-09-28T18:58:40.124+00:00] ESP-ROM:esp32c6-20220919
+[2026-09-28T18:58:40.124+00:00] Build:Sep 19 2022
+[2026-09-28T18:58:40.124+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x1e (SPI_FAST_FLASH_BOOT)
+[2026-09-28T18:58:40.124+00:00] Saved PC:0x408000fe
+[2026-09-28T18:58:40.124+00:00] SPIWP:0xee
+[2026-09-28T18:58:40.124+00:00] mode:DIO, clock div:2
+[2026-09-28T18:58:40.124+00:00] load:0x40875730,len:0x1738
+[2026-09-28T18:58:40.124+00:00] load:0x4086b910,len:0xd8c
+[2026-09-28T18:58:40.124+00:00] load:0x4086e610,len:0x32e0
+[2026-09-28T18:58:40.124+00:00] entry 0x4086b91a
+[2026-09-28T18:58:40.124+00:00] I (23) boot: ESP-IDF v6.0.3 2nd stage bootloader
+[2026-09-28T18:58:40.124+00:00] I (23) boot: compile time Sep 28 2026 17:45:27
+[2026-09-28T18:58:40.125+00:00] I (24) boot: chip revision: v0.2
+[2026-09-28T18:58:40.125+00:00] I (24) boot: efuse block revision: v0.3
+[2026-09-28T18:58:40.125+00:00] I (26) boot.esp32c6: SPI Speed      : 80MHz
+[2026-09-28T18:58:40.125+00:00] I (30) boot.esp32c6: SPI Mode       : DIO
+[2026-09-28T18:58:40.125+00:00] I (34) boot.esp32c6: SPI Flash Size : 4MB
+[2026-09-28T18:58:40.125+00:00] I (38) boot: Enabling RNG early entropy source...
+[2026-09-28T18:58:40.125+00:00] I (42) boot: Partition Table:
+[2026-09-28T18:58:40.125+00:00] I (45) boot: ## Label            Usage          Type ST Offset   Length
+[2026-09-28T18:58:40.125+00:00] I (51) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+[2026-09-28T18:58:40.125+00:00] I (58) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+[2026-09-28T18:58:40.125+00:00] I (64) boot:  2 otadata          OTA data         01 00 00010000 00002000
+[2026-09-28T18:58:40.125+00:00] I (71) boot:  3 rlcfg            WiFi data        01 02 00012000 00006000
+[2026-09-28T18:58:40.125+00:00] I (77) boot:  4 rlkeys           WiFi data        01 02 00018000 00003000
+[2026-09-28T18:58:40.125+00:00] I (84) boot:  5 rlsec            WiFi data        01 02 00020000 00020000
+[2026-09-28T18:58:40.125+00:00] I (90) boot:  6 ota_0            OTA app          00 10 00040000 001d0000
+[2026-09-28T18:58:40.125+00:00] I (97) boot:  7 ota_1            OTA app          00 11 00210000 001d0000
+[2026-09-28T18:58:40.125+00:00] I (103) boot:  8 coredump         Unknown data     01 03 003e0000 00010000
+[2026-09-28T18:58:40.125+00:00] I (110) boot: End of partition table
+[2026-09-28T18:58:40.125+00:00] I (113) boot: No factory image, trying OTA 0
+[2026-09-28T18:58:40.125+00:00] I (117) esp_image: segment 0: paddr=00040020 vaddr=42120020 size=25d50h (154960) map
+[2026-09-28T18:58:40.125+00:00] I (154) esp_image: segment 1: paddr=00065d78 vaddr=40800000 size=0a2a0h ( 41632) load
+[2026-09-28T18:58:40.125+00:00] I (163) esp_image: segment 2: paddr=00070020 vaddr=42000020 size=117148h (1143112) map
+[2026-09-28T18:58:40.225+00:00] I (375) esp_image: segment 3: paddr=00187170 vaddr=4080a2a0 size=0fd6ch ( 64876) load
+[2026-09-28T18:58:40.225+00:00] I (389) esp_image: segment 4: paddr=00196ee4 vaddr=4081a010 size=03c14h ( 15380) load
+[2026-09-28T18:58:40.225+00:00] I (393) esp_image: segment 5: paddr=0019ab00 vaddr=50000000 size=00060h (    96) load
+[2026-09-28T18:58:40.225+00:00] I (394) esp_image: segment 6: paddr=0019ab68 vaddr=50000068 size=00024h (    36) load
+[2026-09-28T18:58:40.325+00:00] I (406) boot: Loaded app from partition at offset 0x40000
+[2026-09-28T18:58:40.325+00:00] I (411) boot: Set actual ota_seq=1 in otadata[0]
+[2026-09-28T18:58:40.325+00:00] I (411) boot: Disabling RNG early entropy source...
+[2026-09-28T18:58:40.325+00:00] I (427) cpu_start: Unicore app

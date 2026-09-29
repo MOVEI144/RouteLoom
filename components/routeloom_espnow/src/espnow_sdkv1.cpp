@@ -28,9 +28,11 @@ namespace routeloom::espnow {
 namespace {
 
 constexpr char kTag[] = "RouteLoomSdkv1";
-// The console task owns the engine's worst-case ~4 KiB frame plus the USB
-// driver calls; 8 KiB leaves headroom without touching the main task.
-constexpr std::uint32_t kConsoleTaskStack = 8192;
+// Worst verb path (deprovision_confirm -> lifecycle re-read -> NVS read)
+// needs ~12.7 KiB on C6 and ~12 KiB on C3 by the -fstack-usage call graph;
+// 8 KiB overflows on C6 once a sealed identity is re-read.
+// The maintenance boot never starts RF, so the heap covers 16 KiB.
+constexpr std::uint32_t kConsoleTaskStack = 16384;
 static_assert(sdkv1::kMaintenanceLineMax >= sdkv1::kBoardSetupLineMax);
 
 // This translation unit links into field images too, so a plain static
@@ -320,6 +322,9 @@ void console_task(void* arg) {
         continue;  // caller-side bug only; the line is dropped, console stays
       }
     }
+    // Expose the minimum free stack after each verb for the task budget.
+    ESP_LOGI(kTag, "console stack free=%u",
+             static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
     usb_serial_jtag_write_bytes(response, response_size, portMAX_DELAY);
     usb_serial_jtag_write_bytes("\n", 1, portMAX_DELAY);
   }

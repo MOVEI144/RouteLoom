@@ -1,0 +1,55 @@
+{
+  "bridge": {
+    "identity": {
+      "chip": "esp32c3",
+      "mac": "94:a9:90:7a:26:ac",
+      "log": "flash-bridge-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "efuse_rc": 0,
+    "SPI_BOOT_CRYPT_CNT": "Disable R/W (0b000)",
+    "SECURE_BOOT_EN": "False R/W (0b0)",
+    "DIS_DOWNLOAD_MODE": "False R/W (0b0)",
+    "WR_DIS": "0 R/W (0x00000000)",
+    "RD_DIS": "0 R/W (0b0000000)",
+    "KEY_PURPOSE_0": "USER R/W (0x0)",
+    "erase_rc": 0,
+    "erase_s": 14.9
+  },
+  "relay": {
+    "identity": {
+      "chip": "esp32c6",
+      "mac": "10:bd:a3:ff:fe:b1:48:a8",
+      "log": "flash-relay-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "efuse_rc": 0,
+    "SPI_BOOT_CRYPT_CNT": "Disable R/W (0b000)",
+    "SECURE_BOOT_EN": "False R/W (0b0)",
+    "DIS_DOWNLOAD_MODE": "False R/W (0b0)",
+    "JTAG_SEL_ENABLE": "False R/W (0b0)",
+    "WR_DIS": "0 R/W (0x00000000)",
+    "RD_DIS": "0 R/W (0b0000000)",
+    "KEY_PURPOSE_0": "USER R/W (0x0)",
+    "erase_rc": 0,
+    "erase_s": 2.1
+  },
+  "endpoint": {
+    "identity": {
+      "chip": "esp32c6",
+      "mac": "10:bd:a3:ff:fe:b1:47:54",
+      "log": "flash-endpoint-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "efuse_rc": 0,
+    "SPI_BOOT_CRYPT_CNT": "Disable R/W (0b000)",
+    "SECURE_BOOT_EN": "False R/W (0b0)",
+    "DIS_DOWNLOAD_MODE": "False R/W (0b0)",
+    "JTAG_SEL_ENABLE": "False R/W (0b0)",
+    "WR_DIS": "0 R/W (0x00000000)",
+    "RD_DIS": "0 R/W (0b0000000)",
+    "KEY_PURPOSE_0": "USER R/W (0x0)",
+    "erase_rc": 0,
+    "erase_s": 1.9
+  }
+}

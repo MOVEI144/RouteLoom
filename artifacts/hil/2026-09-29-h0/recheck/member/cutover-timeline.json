@@ -1,0 +1,134 @@
+[
+ {
+  "unix": 1790663029.4046748,
+  "op": {
+   "operation_id": "op-0000000000000006",
+   "kind": "cutover",
+   "phase": "preparing",
+   "expected_site_epoch": 1,
+   "new_site_epoch": 2,
+   "revision": 1,
+   "prepared": 2,
+   "applied": 0,
+   "recovered": 0,
+   "unknown": 0,
+   "total": 2,
+   "waiting_gateway": false,
+   "recovery_pending": false,
+   "deadline_remaining_ms": 595840,
+   "commit_rs_epoch": 0,
+   "created_ms": 1790663025245
+  },
+  "site_epoch": 1
+ },
+ {
+  "unix": 1790663582.4425914,
+  "op": {
+   "operation_id": "op-0000000000000006",
+   "kind": "cutover",
+   "phase": "preparing",
+   "expected_site_epoch": 1,
+   "new_site_epoch": 2,
+   "revision": 1,
+   "prepared": 2,
+   "applied": 0,
+   "recovered": 0,
+   "unknown": 0,
+   "total": 2,
+   "waiting_gateway": false,
+   "recovery_pending": false,
+   "deadline_remaining_ms": 42802,
+   "commit_rs_epoch": 0,
+   "created_ms": 1790663025245
+  },
+  "site_epoch": 1
+ },
+ {
+  "unix": 1790663626.5218277,
+  "op": {
+   "operation_id": "op-0000000000000006",
+   "kind": "cutover",
+   "phase": "committed",
+   "expected_site_epoch": 1,
+   "new_site_epoch": 2,
+   "revision": 1,
+   "prepared": 2,
+   "applied": 0,
+   "recovered": 0,
+   "unknown": 2,
+   "total": 2,
+   "waiting_gateway": false,
+   "recovery_pending": false,
+   "deadline_remaining_ms": null,
+   "commit_rs_epoch": 3,
+   "created_ms": 1790663025245
+  },
+  "site_epoch": 2
+ },
+ {
+  "unix": 1790663686.639008,
+  "op": {
+   "operation_id": "op-0000000000000006",
+   "kind": "cutover",
+   "phase": "recovery_pending",
+   "expected_site_epoch": 1,
+   "new_site_epoch": 2,
+   "revision": 1,
+   "prepared": 2,
+   "applied": 0,
+   "recovered": 0,
+   "unknown": 2,
+   "total": 2,
+   "waiting_gateway": false,
+   "recovery_pending": true,
+   "deadline_remaining_ms": null,
+   "commit_rs_epoch": 3,
+   "created_ms": 1790663025245
+  },
+  "site_epoch": 2
+ },
+ {
+  "unix": 1790663879.0104513,
+  "op": {
+   "operation_id": "op-0000000000000006",
+   "kind": "cutover",
+   "phase": "recovery_pending",
+   "expected_site_epoch": 1,
+   "new_site_epoch": 2,
+   "revision": 1,
+   "prepared": 1,
+   "applied": 1,
+   "recovered": 0,
+   "unknown": 1,
+   "total": 2,
+   "waiting_gateway": false,
+   "recovery_pending": true,
+   "deadline_remaining_ms": null,
+   "commit_rs_epoch": 3,
+   "created_ms": 1790663025245
+  },
+  "site_epoch": 2
+ },
+ {
+  "unix": 1790663903.0555263,
+  "op": {
+   "operation_id": "op-0000000000000006",
+   "kind": "cutover",
+   "phase": "converged",
+   "expected_site_epoch": 1,
+   "new_site_epoch": 2,
+   "revision": 1,
+   "prepared": 0,
+   "applied": 2,
+   "recovered": 0,
+   "unknown": 0,
+   "total": 2,
+   "waiting_gateway": false,
+   "recovery_pending": false,
+   "deadline_remaining_ms": null,
+   "commit_rs_epoch": 3,
+   "created_ms": 1790663025245
+  },
+  "site_epoch": 2
+ }
+]

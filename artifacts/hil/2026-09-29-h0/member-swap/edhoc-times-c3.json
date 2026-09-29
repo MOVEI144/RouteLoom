@@ -1,0 +1,58 @@
+{
+  "2": {
+    "primitive": {
+      "ECDH": {
+        "count": 4,
+        "min_us": 130611,
+        "median_us": 131155.0,
+        "p95_us": 131373.9,
+        "max_us": 131403,
+        "failed": 0
+      },
+      "SIGN": {
+        "count": 4,
+        "min_us": 138184,
+        "median_us": 138713.0,
+        "p95_us": 138887.55,
+        "max_us": 138912,
+        "failed": 0
+      },
+      "VERIFY": {
+        "count": 4,
+        "min_us": 151621,
+        "median_us": 153436.0,
+        "p95_us": 155349.05,
+        "max_us": 155651,
+        "failed": 0
+      }
+    },
+    "handshake": {
+      "count": 2,
+      "min_us": 2012684,
+      "median_us": 2159537.0,
+      "p95_us": 2291704.7,
+      "max_us": 2306390
+    },
+    "handshake_by_scope": {
+      "0": {
+        "count": 1,
+        "min_us": 2012684,
+        "median_us": 2012684,
+        "p95_us": 2012684.0,
+        "max_us": 2012684
+      },
+      "1": {
+        "count": 1,
+        "min_us": 2306390,
+        "median_us": 2306390,
+        "p95_us": 2306390.0,
+        "max_us": 2306390
+      }
+    },
+    "lowest_handshake_heap_free_b": 18468,
+    "lowest_handshake_heap_min_b": 17656,
+    "stack_min_remaining_b": {
+      "main": 8308
+    }
+  }
+}

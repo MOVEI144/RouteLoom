@@ -1,0 +1,49 @@
+[
+  {
+    "cycle": 0,
+    "node": "0000000000000018",
+    "config": "-",
+    "post_status": [
+      "OK identity=sealed pending=0 locked=1 node=0000000000000018 kid=8198918786ef2f886b40bde443e83e3be33703bc31aa1d2aa2608e46",
+      "OK identity=sealed pending=0 locked=1 node=0000000000000018 kid=8198918786ef2f886b40bde443e83e3be33703bc31aa1d2aa2608e46",
+      "OK identity=sealed pending=0 locked=1 node=0000000000000018 kid=8198918786ef2f886b40bde443e83e3be33703bc31aa1d2aa2608e46"
+    ],
+    "status_after_reboot": "OK identity=sealed pending=0 locked=1 node=0000000000000018 kid=8198918786ef2f886b40bde443e83e3be33703bc31aa1d2aa2608e4656da7115 serial=524 devcert_sha256=07142",
+    "ok": true,
+    "stack_free": [
+      [
+        "status",
+        9024
+      ],
+      [
+        "keygen",
+        8308
+      ],
+      [
+        "identity",
+        8164
+      ],
+      [
+        "lock",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8164
+      ],
+      [
+        "status",
+        8180
+      ]
+    ],
+    "min_stack_free": 8164
+  }
+]

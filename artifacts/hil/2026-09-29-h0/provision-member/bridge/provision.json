@@ -1,0 +1,62 @@
+{
+  "board": "bridge",
+  "node": "0000000000000001",
+  "role": "bridge",
+  "setup_bundle": "h0-setup-bridge-c3-member",
+  "field_bundle": "h0-bridge-c3-member-obs",
+  "erase": "ok",
+  "config": {
+    "generation": 1,
+    "node": "0000000000000001",
+    "role": "bridge",
+    "security": "member",
+    "secrets_generation": "1",
+    "fingerprint": "ebbe2fb37b708f199444524356d9b13c81280227b1643ecb8e53b7a20765dbe1",
+    "secrets_fingerprint": "ebbe2fb37b708f199444524356d9b13c81280227b1643ecb8e53b7a20765dbe1"
+  },
+  "identity_status": "OK identity=sealed pending=0 locked=1 node=0000000000000001 kid=a61bb6ae486599204236abf770e7712ebaea6378786aea6c571ac500663d5b86 serial=101 devcert_sha256=067b7b2338f1f15b6e4efdc99acce800874620c18fbd4",
+  "nvs_after_identity": {
+    "rlcfg": {
+      "sha256": "0893b766aec406de768be42b61ee4d9fcf2157599dcd6b6fcd71df87ca32029e",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "b9fa85f13869d0ea4b7f9ab69de350474fcf2f5ce3c0beae0bd1f5d82c9af478",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "886c01c9b2004b6b95cf0668ee4e5116f6c81a18154bbeabf9445cac04400408",
+      "blank": false
+    }
+  },
+  "app_only": {
+    "identity": {
+      "chip": "esp32c3",
+      "mac": "94:a9:90:7a:26:ac",
+      "log": "flash-bridge-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "72b7f60abc498b29b69ac4c86c77fc3ecc7c0d2d9682ed99fabdc00867cdefab",
+    "app_bytes": 1365120,
+    "bundle": "hil-h0-bridge-c3-member-obs-bridge_node-esp32c3"
+  },
+  "nvs_after_app_write": {
+    "rlcfg": {
+      "sha256": "0893b766aec406de768be42b61ee4d9fcf2157599dcd6b6fcd71df87ca32029e",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "b9fa85f13869d0ea4b7f9ab69de350474fcf2f5ce3c0beae0bd1f5d82c9af478",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "886c01c9b2004b6b95cf0668ee4e5116f6c81a18154bbeabf9445cac04400408",
+      "blank": false
+    }
+  },
+  "nvs_preserved": {
+    "rlcfg": true,
+    "rlkeys": true,
+    "rlsec": true
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "created_wall": "2026-09-29T05:52:27Z",
+  "done": false,
+  "format": "routeloom-provision-journal-v1",
+  "plan": {
+    "base_mac": "94:a9:90:7a:26:ac",
+    "board_uuid": "94:a9:90:7a:26:ac",
+    "field_digest": "528e913c3348d04754dd53994f5ea427c5d789ea416cec9efd8cdba8585818bf",
+    "fw": "1",
+    "node_id": "0000000000000001",
+    "out_dir": "/tmp/routeloom-hil-v2/site-c/provisioned/0000000000000001",
+    "role": "bridge",
+    "serial": 173038069,
+    "site_id": "63ea984e0fb492cb",
+    "work_id": "node-0000000000000001"
+  },
+  "stages": [
+    {
+      "bundle": "hil-h0r-setup-bridge-c3-member-bridge_node-esp32c3",
+      "mono_ms": 445687756,
+      "stage": "setup_image",
+      "wall": "2026-09-29T05:52:37Z"
+    },
+    {
+      "fingerprint": "844cde235a17878130f15901fb189779c50c189cd46305e52920dc1a7eb088a4",
+      "generation": 1,
+      "mono_ms": 445689461,
+      "node": "0000000000000001",
+      "role": "bridge",
+      "secrets_fingerprint": "844cde235a17878130f15901fb189779c50c189cd46305e52920dc1a7eb088a4",
+      "secrets_generation": "1",
+      "security": "member",
+      "stage": "board_config",
+      "wall": "2026-09-29T05:52:39Z"
+    },
+    {
+      "board_mac": "94a9907a26ac",
+      "mono_ms": 445689563,
+      "stage": "plan",
+      "wall": "2026-09-29T05:52:39Z"
+    },
+    {
+      "mono_ms": 445689665,
+      "receipt": "OK identity=none pending=0 locked=0 fw=1",
+      "stage": "status",
+      "wall": "2026-09-29T05:52:39Z"
+    },
+    {
+      "challenge": "957cfd24fd55a62eb74af15e83307361976d0c68e4410f0242553ce48c563d33",
+      "mono_ms": 445690037,
+      "node": "0000000000000001",
+      "pop_hex": "d28443a10126a0586c010100000000000000000001957cfd24fd55a62eb74af15e83307361976d0c68e4410f0242553ce48c563d33f46444cb55b3e770f10dde8c04ddd3184ab58a8e42a97a01f98dc611ec8a7995e894fa429412b49826e0db4faeba12fb1c0372e9cd7d60eb010abc1c2634ef0a5840430ebe6f10f293377ee4d82275f5e9f4dd682feee0a4db5753fbf85bacd40793346a0d66165310d6fc6296afed57f164fb617295bd4d94a69f97f989304bf50c",
+      "stage": "keygen",
+      "wall": "2026-09-29T05:52:39Z"
+    },
+    {
+      "devcert_sha256": "75feb71ad2c1c5e328688a3ffa6ab74984c9e8d642e2d3068c349e9a04f736b0",
+      "kid": "013ce125915caedff6b2ef66a8b2cd9319ae5ae16b87aa933079866f613ae589",
+      "mono_ms": 445690054,
+      "stage": "issued",
+      "wall": "2026-09-29T05:52:39Z"
+    },
+    {
+      "kid": "013ce125915caedff6b2ef66a8b2cd9319ae5ae16b87aa933079866f613ae589",
+      "mono_ms": 445690758,
+      "stage": "sealed",
+      "wall": "2026-09-29T05:52:40Z"
+    },
+    {
+      "kid": "013ce125915caedff6b2ef66a8b2cd9319ae5ae16b87aa933079866f613ae589",
+      "mono_ms": 445691761,
+      "stage": "locked",
+      "wall": "2026-09-29T05:52:41Z"
+    },
+    {
+      "mono_ms": 445692164,
+      "receipt": "OK identity=sealed pending=0 locked=1 node=0000000000000001 kid=013ce125915caedff6b2ef66a8b2cd9319ae5ae16b87aa933079866f613ae589 serial=173038069 devcert_sha256=75feb71ad2c1c5e328688a3ffa6ab74984c9e8d642e2d3068c349e9a04f736b0 fw=1",
+      "stage": "status",
+      "wall": "2026-09-29T05:52:41Z"
+    },
+    {
+      "mono_ms": 445692566,
+      "receipt": "OK identity=sealed pending=0 locked=1 node=0000000000000001 kid=013ce125915caedff6b2ef66a8b2cd9319ae5ae16b87aa933079866f613ae589 serial=173038069 devcert_sha256=75feb71ad2c1c5e328688a3ffa6ab74984c9e8d642e2d3068c349e9a04f736b0 fw=1",
+      "stage": "status",
+      "wall": "2026-09-29T05:52:42Z"
+    },
+    {
+      "digest": "528e913c3348d04754dd53994f5ea427c5d789ea416cec9efd8cdba8585818bf",
+      "mono_ms": 445727450,
+      "stage": "field",
+      "wall": "2026-09-29T05:53:17Z"
+    }
+  ]
+}

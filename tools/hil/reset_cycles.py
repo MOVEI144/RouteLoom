@@ -139,6 +139,9 @@ def main() -> int:
     parser.add_argument("--send-gap-s", type=float, default=1.0)
     parser.add_argument("--poll-timeout-s", type=float, default=9.0)
     parser.add_argument("--cycle-gap-s", type=float, default=2.0)
+    parser.add_argument("--post-preflight-s", type=float, default=4.0,
+                        help="wait after the esptool preflight reset before opening the console; "
+                             "a C6 can drop its USB Serial/JTAG link while the app starts")
     parser.add_argument("--out", required=True, help="output directory")
     args = parser.parse_args()
     if args.hold_s < 0.1 or args.cycles < 1 or args.sends < 1:
@@ -152,6 +155,7 @@ def main() -> int:
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     identity = flash.preflight_board(board, port, flash.DEFAULT_ESPTOOL, str(out))
+    time.sleep(args.post_preflight_s)
     base = [args.ctl, "--socket", args.socket]
     record = {"board": args.board, "identity": identity, "port": port,
               "destination": args.destination, "cycles": args.cycles, "sends": args.sends,
