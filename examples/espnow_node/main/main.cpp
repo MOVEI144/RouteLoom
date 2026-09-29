@@ -58,6 +58,7 @@ void app_task(void*) {
 
 extern "C" void app_main(void) {
   s_device.observe(&s_app);
-  s_device.start(routeloom::device_config_from_kconfig());
+  routeloom::DeviceConfig config = routeloom::device_config_from_kconfig();
+  s_device.start(config);
   xTaskCreate(app_task, "example", 3072, nullptr, 1, nullptr);
 }

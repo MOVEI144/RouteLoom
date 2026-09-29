@@ -872,23 +872,25 @@ void Device::enable_observation() noexcept { observation_build_ = &build_observa
 namespace {
 struct OwnerHandoff {
   Device* device;
-  const DeviceConfig* config;
+  DeviceConfig* config;
   std::atomic<bool> copied{false};
 };
 }  // namespace
 
-void Device::start(const DeviceConfig& config) noexcept {
+void Device::start(DeviceConfig& config) noexcept {
   // Task creation can fail before the Owner reaches its boot path; fail()
   // must always consume an initialized RTC streak.
   fail_streak_boot(s_fail);
   OwnerHandoff handoff{this, &config};
   if (xTaskCreate(&Device::task_entry, "rl_owner", CONFIG_ROUTELOOM_OWNER_TASK_STACK_SIZE,
                   &handoff, CONFIG_ROUTELOOM_OWNER_TASK_PRIORITY, nullptr) != pdPASS) {
+    secure_clear(config.dev_psk);
     fail("owner task create failed");
   }
   // The Owner task copies the configuration onto its own stack; the
   // caller's frame (normally app_main) may end after that.
   while (!handoff.copied.load()) vTaskDelay(1);
+  secure_clear(config.dev_psk);
 }
 
 void Device::task_entry(void* argument) noexcept {

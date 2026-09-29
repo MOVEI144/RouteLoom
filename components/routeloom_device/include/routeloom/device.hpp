@@ -61,7 +61,7 @@ struct DeviceConfig {
   std::uint8_t requested_role{0};
   // Flat group profile: SitePackage gateways become group roots.
   bool flat_group_routing{false};
-  // DevRam: the committed rlkeys PSK. begin() clears this copy.
+  // DevRam: the committed rlkeys PSK. begin() and start() clear this copy.
   keys::Secret dev_psk{};
   // Gateway role: the USB byte stream, the session secret (outlives the
   // device), the HelloAck capability bitmap and the device nonce (0 draws
@@ -128,9 +128,10 @@ class Device {
   // image that never calls this links none of the observation code.
   void enable_observation() noexcept;
 
-  // Runs the whole node on a dedicated Owner task (never returns into the
-  // caller's loop). Boot failures take the fail-streak restart/sleep path.
-  void start(const DeviceConfig& config) noexcept;
+  // Runs the whole node on a dedicated Owner task. Copies the configuration
+  // and clears the caller's DevRam PSK before returning. Boot failures take
+  // the fail-streak restart/sleep path.
+  void start(DeviceConfig& config) noexcept;
 #endif
 
   // Boot session and rlsec stores (the resume capacity follows the role).
