@@ -374,6 +374,7 @@ Status NeighborDiscovery::start(const MonotonicMs now_ms) noexcept {
   }
   started_ = true;
   sweep_armed_ = true;
+  start_round_begun_ = false;
   sweep_rounds_ = 0;
   return Status::success();
 }
@@ -423,6 +424,13 @@ Status NeighborDiscovery::begin_discovery_filtered(const MonotonicMs now_ms,
     ++stats_.peer_capacity;
     reject_event("PEER_CAPACITY", kInvalidNodeId);
     return Status::error(StatusCode::PeerCapacity, "no transient peer slot");
+  }
+  if (!sweep) {
+    if (start_round_begun_) {
+      sweep_armed_ = false;
+      sweep_due_ms_ = 0;
+    }
+    start_round_begun_ = true;
   }
   outbound_ = Outbound{};
   outbound_.active = true;
@@ -902,7 +910,7 @@ void NeighborDiscovery::handle_offer(const DiscoveryRxMetadata& rx,
       return;
     }
   }
-  note_sweep_offer(env.transaction_nonce, env.claimed_node);
+  note_sweep_offer(env.transaction_nonce, env.claimed_node, rx.source, now_ms);
   if (!outbound_.active || outbound_.stage != OutboundStage::AwaitingOffers ||
       outbound_.have_offer || now_ms > outbound_.stage_deadline_ms) {
     return;
@@ -1035,9 +1043,13 @@ void NeighborDiscovery::accept_scoped_offer(PendingVerify& pending,
 }
 
 void NeighborDiscovery::note_sweep_offer(const std::array<std::uint8_t, 16>& nonce,
-                                         const NodeId peer) noexcept {
+                                         const NodeId peer, const MacAddress& source,
+                                         const MonotonicMs now_ms) noexcept {
   // Unverified evidence: it can only ask for one more bounded round.
-  if (!sweep_armed_ || !member_handshake_mode_ || !nonce_equal(nonce, sweep_nonce_)) return;
+  if (!sweep_armed_ || !member_handshake_mode_ || !nonce_equal(nonce, sweep_nonce_) ||
+      dedup_.heard_recently(source, now_ms)) {
+    return;
+  }
   const Neighbor* known = find_neighbor(peer);
   if (known != nullptr && resolvable_phase(known->phase)) return;
   if (sweep_first_peer_ == kInvalidNodeId) {

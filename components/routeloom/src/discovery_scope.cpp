@@ -328,6 +328,14 @@ bool ScopeKeyRing::accepted(const std::uint32_t generation,
 
 // --- ScopeDedupTable ------------------------------------------------------------------
 
+bool ScopeDedupTable::heard_recently(const MacAddress& source,
+                                     const MonotonicMs now_ms) const noexcept {
+  return records_.find([&](const Record& record) {
+    return record.source == source && record.scope_class != 0 &&
+           now_ms < record.first_seen_ms + kScopeDedupTtlMs;
+  }) != nullptr;
+}
+
 ScopeDedupResult ScopeDedupTable::check(
     const MacAddress& source, const std::array<std::uint8_t, 16>& nonce,
     const std::uint8_t scope_class, const std::uint32_t generation,

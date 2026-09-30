@@ -256,6 +256,8 @@ class ScopeDedupTable {
                          const std::array<std::uint8_t, 16>& content,
                          MonotonicMs now_ms) noexcept;
   std::size_t size() const noexcept { return records_.size(); }
+  // A verified DISCOVER from `source` inside its first-sight window.
+  bool heard_recently(const MacAddress& source, MonotonicMs now_ms) const noexcept;
 
  private:
   struct Record {
