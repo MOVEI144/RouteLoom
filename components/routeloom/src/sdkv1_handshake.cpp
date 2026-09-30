@@ -24,9 +24,10 @@ namespace {
 constexpr char kCookieLabel[] = "RouteLoom/v1/member-cookie";
 constexpr char kProofLabel[] = "RouteLoom/v1/handshake-proof";
 
-// The existing small retry cache can hold m4 and both duplicate hashes.
+// The existing small retry cache holds m4, its RX context and duplicate hashes.
 constexpr std::size_t kM4M1HashOffset = 256 - 2 * sizeof(ScopeDigest);
 constexpr std::size_t kM4M3HashOffset = 256 - sizeof(ScopeDigest);
+constexpr std::size_t kM4RxContextOffset = kM4M1HashOffset - sizeof(std::uint32_t);
 
 constexpr std::int32_t kEadCredential = -65541;  // one MemberCert by value (<= 256 B)
 
@@ -883,15 +884,18 @@ HandshakeEngine::CarrierRecord* HandshakeEngine::alloc_record() noexcept {
   return nullptr;
 }
 
-void HandshakeEngine::finish_confirmed_exchange(const NodeId peer) noexcept {
+void HandshakeEngine::finish_confirmed_exchange(const SecurityScope scope,
+                                                 const NodeId peer) noexcept {
   if (!edhoc_flight_.active) return;
   CarrierRecord* record = find_record_by_token(edhoc_flight_.owner_token);
-  if (record != nullptr && (record->peer == peer || record->scope == SecurityScope::Link) &&
-      record->state == RecordState::EdhocM4Sent &&
-      sink_.has_authenticated_rx(record->scope, record->peer, edhoc_flight_.cid_own)) {
-    // Traffic opened under this exact installed context proves m4
-    // arrived. A bare m1 or an old RX overlap cannot end the quiet duty.
-    // Another neighbour's link exchange can also need this single flight.
+  if (record == nullptr || record->state != RecordState::EdhocM4Sent) return;
+  if (record->scope == SecurityScope::Link && scope == SecurityScope::Link) {
+    // Admitted m4 and its duplicate hashes remain in this record. A second
+    // neighbour's link can use the crypto flight before the first carries data.
+    end_edhoc_flight();
+  } else if ((record->peer == peer || record->scope == SecurityScope::Link) &&
+             sink_.has_authenticated_rx(record->scope, record->peer, edhoc_flight_.cid_own)) {
+    // Only traffic in the exact installed context ends the quiet retry duty.
     drop_record(*record);
   }
 }
@@ -1643,7 +1647,7 @@ Status HandshakeEngine::read_peer_cid(std::uint32_t& out) noexcept {
 Status HandshakeEngine::responder_begin_m1(CarrierRecord& record,
                                                    const ByteView message,
                                                    const MonotonicMs now) noexcept {
-  finish_confirmed_exchange(record.peer);
+  finish_confirmed_exchange(record.scope, record.peer);
   if (edhoc_flight_.active || !ecc_budget_ok(now)) {
     park_m1(record, message);
     return Status::success();
@@ -2832,7 +2836,20 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
     return Status::success();
   }
   for (auto& record : records_) {
-    if (!record.used || now < record.deadline) continue;
+    if (!record.used) continue;
+    if (record.state == RecordState::EdhocM4Sent && record.scope == SecurityScope::Link &&
+        (!edhoc_flight_.active || edhoc_flight_.owner_token != record.token)) {
+      std::uint32_t rx_context = 0;
+      std::memcpy(&rx_context, record.last_tx.data() + kM4RxContextOffset,
+                  sizeof(rx_context));
+      // Proof in the exact installed context ends the retry duty; another
+      // exchange cannot confirm it merely by taking the crypto workspace.
+      if (sink_.has_authenticated_rx(record.scope, record.peer, rx_context)) {
+        drop_record(record);
+        return Status::success();
+      }
+    }
+    if (now < record.deadline) continue;
     if (record.state == RecordState::EdhocM4Sent ||
         record.state == RecordState::ResumeR3Confirm) {
       drop_record(record);  // post-Established quiet done
@@ -2890,7 +2907,7 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
         now < record.retransmit_at || now >= record.deadline) {
       continue;
     }
-    finish_confirmed_exchange(record.peer);
+    finish_confirmed_exchange(record.scope, record.peer);
     if (edhoc_flight_.active || !ecc_budget_ok(now)) return Status::success();  // wait
     if (record.state == RecordState::EdhocQueued) {
       const Status begun = begin_edhoc(record, now);
@@ -2964,15 +2981,17 @@ Status HandshakeEngine::accept_send(const std::uint32_t token, const std::uint8_
   const Status local = refresh_local();
   if (!local) return local;
   CarrierRecord* record = find_record_by_token(token);
-  if (record == nullptr || record->role != HandshakeRole::Responder ||
-      !edhoc_flight_.active || edhoc_flight_.owner_token != token) {
+  if (record == nullptr || record->role != HandshakeRole::Responder) {
     return Status::error(StatusCode::NotFound, "m4 exchange gone");
   }
   if (record->state == RecordState::EdhocM4Sent) return Status::success();
+  if (!edhoc_flight_.active || edhoc_flight_.owner_token != token) {
+    return Status::error(StatusCode::NotFound, "m4 flight gone");
+  }
   if (record->state != RecordState::EdhocM4Pending) {
     return Status::error(StatusCode::InvalidState, "m4 not pending");
   }
-  if (big_tx_owner_ != token || big_tx_size_ == 0 || big_tx_size_ > kM4M1HashOffset) {
+  if (big_tx_owner_ != token || big_tx_size_ == 0 || big_tx_size_ > kM4RxContextOffset) {
     return emit_failed(*record, StatusCode::ProtocolError);
   }
   const Status committed = edhoc_commit(*record);
@@ -2983,6 +3002,8 @@ Status HandshakeEngine::accept_send(const std::uint32_t token, const std::uint8_
   record->last_tx_size = big_tx_size_;
   record->last_phase = 4;
   record->last_step = 4;
+  std::memcpy(record->last_tx.data() + kM4RxContextOffset, &pending_commit_rx_,
+              sizeof(pending_commit_rx_));
   std::memcpy(record->last_tx.data() + kM4M1HashOffset, edhoc_flight_.m1_hash.data(),
               edhoc_flight_.m1_hash.size());
   std::memcpy(record->last_tx.data() + kM4M3HashOffset, edhoc_flight_.m3_hash.data(),

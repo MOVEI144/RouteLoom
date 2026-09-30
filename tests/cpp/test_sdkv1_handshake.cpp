@@ -766,7 +766,7 @@ void test_m1_park_yields_to_live_m4() {
 
 // Admitted m4 may be lost over the air. Its exact m3 retry must still
 // retrieve m4 while another peer uses the single crypto flight.
-void test_authenticated_traffic_releases_quiet_m4(const SecurityScope next_scope) {
+void test_admitted_m4_releases_crypto_flight(const SecurityScope next_scope) {
   Pair pair = Pair::make();
   const FrozenLink ab = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
   CHECK_OK(request_link(*pair.a, *pair.b, ab, kT0));
@@ -799,9 +799,16 @@ void test_authenticated_traffic_releases_quiet_m4(const SecurityScope next_scope
   }
   HandshakeResult next_m1{};
   CHECK_OK(c.engine.take_result(next_m1));
-  // An unverified origin is no confirmation.
+  // The first peer has not received m4 yet. Its retained retry record
+  // must let another peer use the crypto workspace without confirmation.
   CHECK_OK(deliver_to(*pair.b, c, next_m1, cb, kT0 + 2150));
-  CHECK(pair.b->engine.take_result(out).code == StatusCode::NotFound);
+  HandshakeResult m2c{};
+  if (next_scope == SecurityScope::Link) {
+    CHECK_OK(pair.b->engine.take_result(m2c));
+    CHECK(m2c.event == HandshakeEvent::Send && m2c.step == 2);
+  } else {
+    CHECK(pair.b->engine.take_result(out).code == StatusCode::NotFound);
+  }
 
   // Altered retries cannot solicit a cached reply or affect C's flight.
   m3.message[0] ^= 1;
@@ -818,15 +825,19 @@ void test_authenticated_traffic_releases_quiet_m4(const SecurityScope next_scope
   CHECK(out.event == HandshakeEvent::Established);
   CHECK(pair.b->sink.installs == 1);
   // Only a real authenticated frame in the new link proves m4 arrived.
+  // Neither the flight release nor C's m1 counts as that proof.
   CHECK(roundtrip_ok(*pair.a, *pair.b, out, established_b));
   CHECK(pair.b->bank.has_authenticated_rx(SecurityScope::Link, kNodeA,
                                            established_b.rx_context_id));
   CHECK(!pair.b->bank.has_authenticated_rx(SecurityScope::Link, kNodeA,
                                             established_b.rx_context_id + 1));
   CHECK_OK(pair.b->engine.poll(kT0 + 2230));
-  HandshakeResult m2c{};
-  CHECK_OK(pair.b->engine.take_result(m2c));
-  CHECK(m2c.event == HandshakeEvent::Send && m2c.step == 2);
+  if (next_scope == SecurityScope::EndToEnd) {
+    CHECK_OK(pair.b->engine.take_result(m2c));
+    CHECK(m2c.event == HandshakeEvent::Send && m2c.step == 2);
+  }
+  CHECK_OK(deliver_to(*pair.b, *pair.a, m3, ab, kT0 + 2235));
+  CHECK(pair.b->engine.take_result(out).code == StatusCode::NotFound);
   CHECK_OK(deliver_to(c, *pair.b, m2c, cb, kT0 + 2250));
   CHECK_OK(c.engine.take_result(out));
   CHECK_OK(deliver_to(*pair.b, c, out, cb, kT0 + 2300));
@@ -2021,7 +2032,7 @@ int main() {
   test_responder_waits_for_m4_admission();
   test_m1_park_yields_to_live_m4();
   for (const auto scope : {SecurityScope::EndToEnd, SecurityScope::Link}) {
-    test_authenticated_traffic_releases_quiet_m4(scope);
+    test_admitted_m4_releases_crypto_flight(scope);
   }
   test_resume_after_edhoc();
   test_gateway_resume_lookup_budget();

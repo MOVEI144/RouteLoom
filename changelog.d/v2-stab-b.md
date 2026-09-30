@@ -13,11 +13,9 @@
 - A C3 gateway image whose capability bitmap names a feature compiled out of the
   image (for example node status on `gateway_small`) boots without advertising
   that bit instead of entering the fail streak and deep sleep.
-- Gateway reset: a completed EDHOC exchange yields its crypto flight to a
-  waiting exchange after traffic authenticates in the exact
-  installed context. Retries of an unconfirmed m4 remain protected.
+- A committed link EDHOC responder yields its crypto workspace to another
+  link exchange after m4 is admitted, without waiting for data traffic
+  on the first link. The same bounded retry record retains m4 and exact
+  m1/m3 duplicate evidence through its original deadline.
 - HIL reset-cycle recovery time now measures the first observed delivery
   completion after reset, including its send latency.
-- A confirmed link's EDHOC crypto flight now yields to another neighbour's
-  link exchange, so that exchange need not wait for the completed flight's
-  quiet timeout. Unconfirmed m4 retries still retain their evidence.
