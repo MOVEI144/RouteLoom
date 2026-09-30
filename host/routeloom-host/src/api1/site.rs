@@ -327,7 +327,7 @@ fn channel_plan_offer<S: OperationStore>(
 }
 
 /// `site.channel_plan.release`: queues the commit release of the offered
-/// plan; the gateway refuses it until the required members answered READY.
+/// plan once every member answered READY (`NOT_READY` before).
 fn channel_plan_release<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
@@ -339,7 +339,11 @@ fn channel_plan_release<S: OperationStore>(
         .with(|authority| authority.channel_plan_release(ctx.now_mono))
         .0
         .map_err(|error| ApiError {
-            code: "BUSY",
+            code: if error.starts_with("NOT_READY") {
+                "NOT_READY"
+            } else {
+                "BUSY"
+            },
             message: error,
             extra_fields: String::new(),
             retryable: true,

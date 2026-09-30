@@ -333,6 +333,14 @@ fn plan_switch(world: &mut MeshWorld, new_channel: u8, epoch: u32) {
         .with(|a| a.channel_plan_offer(new_channel, 30_000, now))
         .0
         .expect("plan offered");
+    // The previous plan's report never stands in for this one.
+    assert!(
+        service
+            .with(|a| a.channel_plan_release(world.now))
+            .0
+            .is_err(),
+        "no release before the gateway reported this plan"
+    );
     let (result, detail, report) = plan_settle(world);
     assert_eq!(
         (result, detail),
@@ -341,6 +349,12 @@ fn plan_switch(world: &mut MeshWorld, new_channel: u8, epoch: u32) {
     );
     assert_eq!(report.offered_plan, signed.plan_hash, "the offered plan");
     let members = (world.peers.len() - 1) as u8;
+    assert!(report.ready < members, "READY is still partial: {report:?}");
+    let refused = service
+        .with(|a| a.channel_plan_release(world.now))
+        .0
+        .expect_err("a partial READY is not released");
+    assert!(refused.starts_with("NOT_READY"), "{refused}");
     let mut ready = report.ready;
     for _ in 0..20 {
         if ready >= members {
