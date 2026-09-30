@@ -139,7 +139,8 @@ static void on_applied_request(void* user, const rl_applied_request_t* request) 
   try_reentry(app);
   if (app->open_count == MESH_C_APP_OPEN_MAX) return; /* the SDK holds at most four */
   app->open_ticket[app->open_count] = request->ticket;
-  app->open_due[app->open_count] = app->now_ms + app->delay_ms;
+  /* on_poll supplies the current Owner-pass time after this callback. */
+  app->open_due[app->open_count] = 0;
   ++app->open_count;
 }
 
@@ -172,6 +173,7 @@ static void on_poll(void* user, rl_dev_t* device, rl_monotonic_ms_t now_ms) {
   }
   while (i < app->open_count) {
     rl_applied_result_t result;
+    if (app->open_due[i] == 0) app->open_due[i] = now_ms + app->delay_ms;
     if (now_ms < app->open_due[i]) {
       ++i;
       continue;

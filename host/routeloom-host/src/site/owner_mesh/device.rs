@@ -497,6 +497,7 @@ fn mesh_p05_c_device_api() {
     world.peers[a].defer_applied(2_000);
     let lease = world.peers[a].applied_lease();
     for round in 0..20_u32 {
+        let requests = world.snaps[a].applied_requests;
         let completed = world.snaps[a].applied_completed;
         let last = world.snaps[b]
             .app_tx
@@ -505,7 +506,15 @@ fn mesh_p05_c_device_api() {
             .max()
             .unwrap_or(0);
         world.peers[b].applied_send(NODE_A, &lease, &round.to_le_bytes());
-        until(&mut world, 1_900, |_| false);
+        until(&mut world, 3_000, |w| {
+            w.snaps[a].applied_requests > requests
+        });
+        assert_eq!(world.snaps[a].applied_requests, requests + 1);
+        until(&mut world, 1_975, |_| false);
+        assert_eq!(
+            world.snaps[a].applied_completed, completed,
+            "round {round}: C endpoint must wait 2 s from receipt"
+        );
         let pending = world.snaps[b].app_tx.iter().find(|t| t.seq > last).cloned();
         assert!(
             pending
