@@ -766,7 +766,7 @@ void test_m1_park_yields_to_live_m4() {
 
 // Admitted m4 may be lost over the air. Its exact m3 retry must still
 // retrieve m4 while another peer uses the single crypto flight.
-void test_authenticated_traffic_releases_quiet_m4() {
+void test_authenticated_traffic_releases_quiet_m4(const SecurityScope next_scope) {
   Pair pair = Pair::make();
   const FrozenLink ab = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
   CHECK_OK(request_link(*pair.a, *pair.b, ab, kT0));
@@ -789,10 +789,14 @@ void test_authenticated_traffic_releases_quiet_m4() {
          5, kMemberRoleEndpoint, 0xC3, kGk);
   CHECK(c.start());
   const FrozenLink cb = freeze_link(c, *pair.b, kT0 + 2100, kCapsFull, kCapsFull);
-  HandshakeRequest next{};
-  next.scope = SecurityScope::EndToEnd;
-  next.peer = kNodeB;
-  CHECK_OK(c.engine.request(next, kT0 + 2100));
+  if (next_scope == SecurityScope::Link) {
+    CHECK_OK(request_link(c, *pair.b, cb, kT0 + 2100));
+  } else {
+    HandshakeRequest next{};
+    next.scope = next_scope;
+    next.peer = kNodeB;
+    CHECK_OK(c.engine.request(next, kT0 + 2100));
+  }
   HandshakeResult next_m1{};
   CHECK_OK(c.engine.take_result(next_m1));
   // An unverified origin is no confirmation.
@@ -2016,7 +2020,9 @@ int main() {
   test_link_edhoc_full();
   test_responder_waits_for_m4_admission();
   test_m1_park_yields_to_live_m4();
-  test_authenticated_traffic_releases_quiet_m4();
+  for (const auto scope : {SecurityScope::EndToEnd, SecurityScope::Link}) {
+    test_authenticated_traffic_releases_quiet_m4(scope);
+  }
   test_resume_after_edhoc();
   test_gateway_resume_lookup_budget();
   test_routed_end_exchange();

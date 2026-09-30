@@ -18,3 +18,6 @@
   installed context. Retries of an unconfirmed m4 remain protected.
 - HIL reset-cycle recovery time now measures the first observed delivery
   completion after reset, including its send latency.
+- A confirmed link's EDHOC crypto flight now yields to another neighbour's
+  link exchange, so that exchange need not wait for the completed flight's
+  quiet timeout. Unconfirmed m4 retries still retain their evidence.
