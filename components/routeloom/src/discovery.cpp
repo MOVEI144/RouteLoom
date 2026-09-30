@@ -2988,6 +2988,9 @@ Status NeighborDiscovery::confirm_sleep_parent(const MemberStartRequest& start,
       !mac_equal(bound->mac, peer_mac) || !resolvable_phase(bound->phase)) {
     return Status::error(StatusCode::InvalidState, "sleep confirm unbound");
   }
+  // A sleeper wakes back onto its parent: no start sweep for other peers.
+  sweep_armed_ = false;
+  sweep_due_ms_ = 0;
   return Status::success();
 }
 
