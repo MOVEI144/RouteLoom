@@ -16,3 +16,5 @@
 - Gateway reset: a completed EDHOC exchange yields its crypto flight to a
   waiting exchange after traffic authenticates in the exact
   installed context. Retries of an unconfirmed m4 remain protected.
+- HIL reset-cycle recovery time now measures the first observed delivery
+  completion after reset, including its send latency.
