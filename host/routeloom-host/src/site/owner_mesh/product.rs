@@ -625,9 +625,13 @@ fn plan_switch(world: &mut MeshWorld, new_channel: u8, epoch: u32) {
 /// A member reaches the gateway on the current channel: 20 of 20 sends
 /// (row P03).
 fn plan_traffic(world: &mut MeshWorld, what: &str) {
+    plan_traffic_from(world, 1, what);
+}
+
+fn plan_traffic_from(world: &mut MeshWorld, member: usize, what: &str) {
     for round in 1..=20u32 {
         let before = world.snaps[0].rx_count;
-        world.peers[1].app_send(testkit::GATEWAY, what.as_bytes());
+        world.peers[member].app_send(testkit::GATEWAY, what.as_bytes());
         world.step(25);
         world.pump_until(800, |snaps| snaps[0].rx_count > before);
         assert!(
@@ -759,6 +763,121 @@ fn mesh_p03_manual_channel_plan_switches_and_returns() {
     }
     plan_switch(&mut world, 6, 2);
     plan_traffic(&mut world, "p03-channel-6");
+}
+
+/// Offers `new_channel`, waits for every member's READY, then cuts
+/// `missing` off the air before the release: it never hears the commit
+/// while the others switch and verify under `epoch`.
+fn plan_switch_missing(world: &mut MeshWorld, new_channel: u8, epoch: u32, missing: usize) {
+    let service = Arc::clone(&world.provision.site.service);
+    assert_eq!(plan_status(world).cooldown_ms, 0, "no cooldown");
+    let now = world.now;
+    service
+        .with(|a| a.channel_plan_offer(new_channel, 30_000, now))
+        .0
+        .expect("plan offered");
+    let (result, _, _) = plan_settle(world);
+    assert_eq!(result, 0, "plan admitted");
+    let members = (world.peers.len() - 1) as u8;
+    for _ in 0..20 {
+        if plan_status(world).ready >= members {
+            break;
+        }
+        plan_pump(world, 100, |_| false);
+    }
+    world.switch.isolate(missing);
+    service
+        .with(|a| a.channel_plan_release(world.now))
+        .0
+        .expect("release queued");
+    let (result, _, report) = plan_settle(world);
+    assert_eq!(result, 0, "commit released: {report:?}");
+    plan_pump(world, 10_000, |snaps| {
+        snaps.iter().enumerate().all(|(i, s)| {
+            i == missing
+                || (s.channel == new_channel
+                    && s.plan_epoch == epoch
+                    && s.plan_phase == PLAN_STABLE)
+        })
+    });
+    for (index, snap) in world.snaps.iter().enumerate() {
+        if index != missing {
+            assert_eq!(
+                (snap.channel, snap.plan_epoch, snap.plan_phase),
+                (new_channel, epoch, PLAN_STABLE),
+                "peer {index} switched: {snap:?}"
+            );
+        }
+    }
+    assert_ne!(
+        world.snaps[missing].plan_epoch, epoch,
+        "the isolated member missed it"
+    );
+}
+
+/// The member left behind comes back to the site's channel under the
+/// site's plan epoch within 120 s (vt) and reaches the gateway 20/20.
+fn plan_rejoins(world: &mut MeshWorld, member: usize, channel: u8, epoch: u32, what: &str) {
+    let started = world.now;
+    plan_pump(world, 12_000, |snaps| {
+        let s = &snaps[member];
+        s.channel == channel
+            && s.plan_epoch == epoch
+            && s.mode == MODE_MEMBER
+            && s.phase == PHASE_ACTIVE
+            && s.link_sessions > 0
+    });
+    let s = &world.snaps[member];
+    assert!(
+        s.channel == channel && s.plan_epoch == epoch && s.link_sessions > 0,
+        "{what}: member back on channel {channel} under epoch {epoch} after {} ms: {s:?}",
+        world.now - started
+    );
+    assert!(
+        world.now - started <= 120_000,
+        "{what}: took {} ms",
+        world.now - started
+    );
+    plan_traffic_from(world, member, what);
+}
+
+/// P03-C (1 member misses the switch): B is off the air when the host
+/// releases 6 -> 1 and stays on 6; once back on the air it finds the site
+/// on the plan channel and catches up to epoch 1. After the cooldown B
+/// misses 1 -> 6, holding the older plan (channel 1) across a power cut,
+/// and still returns to the site on 6 under epoch 2.
+#[test]
+fn mesh_p03_member_that_missed_a_switch_returns() {
+    let cap = format!("{}", USB_CAP | 0x2000);
+    let Some(mut world) = MeshWorld::start_with_args(
+        "p03-plan-straggler",
+        Switch::direct(),
+        &["--cap", &cap, "--channel-plan"],
+        &["--channel-plan"],
+    ) else {
+        return; // no C++ peers: skip (ignore-equivalent)
+    };
+    converge(&mut world, "p03 straggler");
+    plan_pump(&mut world, 1000, |snaps| {
+        snaps.iter().all(|s| s.plan_phase == PLAN_STABLE)
+    });
+
+    plan_switch_missing(&mut world, 1, 1, 2);
+    world.switch.heal(2);
+    plan_rejoins(&mut world, 2, 1, 1, "missed 6->1");
+
+    for _ in 0..(600_000 / 250) {
+        world.step(250);
+    }
+    plan_switch_missing(&mut world, 6, 2, 2);
+    world.peers[2].power_cut();
+    let until = world.now + 1000;
+    while world.peers[2].reboots < 1 && world.now < until {
+        world.step(25);
+    }
+    assert_eq!(world.peers[2].reboots, 1, "B respawned");
+    world.switch.heal(2);
+    plan_rejoins(&mut world, 2, 6, 2, "missed 1->6, rebooted");
 }
 
 #[test]
