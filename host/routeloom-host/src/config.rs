@@ -34,10 +34,10 @@ use routeloom_provision::signer::{ecdsa_p256_verify, signature_range_check, File
 use routeloom_wire::endpoint::{
     config_command_encode, config_namespace_valid, config_patch_apply, config_recovery_encode,
     config_snapshot_hash_input, config_tlv_decode, control_challenge_decode, control_status_decode,
-    recovery_info_decode, trust_status_decode, ConfigCommand, ConfigField, ConfigPhase,
-    ConfigRecoveryIntent, ControlChallenge, ControlStatus, RecoveryInfo, TrustStatus,
-    RCR2_MAX_TOTAL, RCR2_MODE_REPROVISION, RCR2_VERSION, RECOVERY_INFO_FLAG_IMPAIRED,
-    RECOVERY_INFO_FLAG_SURVIVOR_KNOWN,
+    recovery_info_decode, trust_status_decode, ConfigCommand, ConfigField, ConfigFieldType,
+    ConfigPhase, ConfigRecoveryIntent, ControlChallenge, ControlStatus, RecoveryInfo, TrustStatus,
+    CONFIG_NAMESPACE_SDK, RCR2_MAX_TOTAL, RCR2_MODE_REPROVISION, RCR2_VERSION,
+    RECOVERY_INFO_FLAG_IMPAIRED, RECOVERY_INFO_FLAG_SURVIVOR_KNOWN,
 };
 
 use crate::canonical::sha256;
@@ -616,6 +616,9 @@ impl ConfigIssuer {
         operation_id: [u8; 16],
     ) -> Result<ProposeOutcome, ConfigError> {
         if !config_namespace_valid(config_namespace) || all_zero(&operation_id) {
+            return Err(ConfigError::InvalidArgument);
+        }
+        if config_namespace == CONFIG_NAMESPACE_SDK && !patch.iter().all(sdk_field_valid) {
             return Err(ConfigError::InvalidArgument);
         }
         let challenge = self
@@ -2194,6 +2197,23 @@ fn map_refusal(result: ConfigOpsResult, operation_id: Option<[u8; 16]>) -> Confi
     }
 }
 
+/// The SDK namespace field rules the target enforces
+/// (`config_sdk_field_validate`, 04 §4.2): a field it would refuse is
+/// refused here as Invalid, before any sequence, signature or mesh send.
+fn sdk_field_valid(field: &ConfigField) -> bool {
+    match field.field_id {
+        1 | 4 => {
+            field.field_type == ConfigFieldType::U8 && field.value.len() == 1 && field.value[0] <= 2
+        }
+        2 | 3 => {
+            field.field_type == ConfigFieldType::Bool
+                && field.value.len() == 1
+                && field.value[0] <= 1
+        }
+        _ => false,
+    }
+}
+
 /// Issuer-side faults are client faults, not wire faults: an invalid or
 /// oversize input is the same refusal the endpoint codec would emit
 /// (Invalid), a CAS mismatch names a stale base snapshot distinctly so
@@ -2369,6 +2389,23 @@ mod tests {
         assert_eq!(
             command.next_snapshot_hash,
             snapshot_hash(1, 1, &next).unwrap()
+        );
+    }
+
+    #[test]
+    fn propose_refuses_an_sdk_field_of_the_wrong_type() {
+        let mut issuer = ConfigIssuer::new(DEV_KEY.to_vec(), 0xAAAA, 0x42, 100);
+        let base = config_tlv_encode(&[field(1, ConfigFieldType::U8, &[1])]).unwrap();
+        issuer
+            .note_challenge(&challenge(1, 1, &base, 4), 0x99, 1_000)
+            .unwrap();
+        // diagnostics_level is u8 0..=2 (the H1 wrong-type propose).
+        let patch = vec![field(1, ConfigFieldType::Bytes, &[0, 2])];
+        let refused = issuer.prepare_propose(0x99, 1, 1, &base, &patch, 0, 2_000, 1, 9, [0x5A; 16]);
+        assert!(matches!(refused, Err(ConfigError::InvalidArgument)));
+        assert_eq!(
+            map_issue_error(ConfigError::InvalidArgument),
+            ConfigOutcome::Refused(ConfigOpsResult::Invalid)
         );
     }
 
