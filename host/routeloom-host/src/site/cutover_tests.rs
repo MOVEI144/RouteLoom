@@ -628,7 +628,7 @@ fn cutover_doc_rejects_oversized_commit_artifacts() {
     assert!(CutoverState::from_doc(&json(&oversized_proof)).is_none());
     let oversized_rrs = doc.replace(
         "\"commit_rrs\":\"\"",
-        &format!("\"commit_rrs\":\"{}\"", "00".repeat(617)),
+        &format!("\"commit_rrs\":\"{}\"", "00".repeat(649)),
     );
     assert!(CutoverState::from_doc(&json(&oversized_rrs)).is_none());
 }
@@ -1652,7 +1652,8 @@ fn missed_cutover_reissues_without_decider() {
     );
 }
 
-/// A rejected replacement cannot suppress the old key's recovery notice.
+/// A readmitted replacement key (#146) cannot suppress the old key's
+/// recovery notice.
 #[test]
 fn old_kid_recovery_gets_removed() {
     let (service, transport) = service();
@@ -1671,9 +1672,12 @@ fn old_kid_recovery_gets_removed() {
         )
     });
     answer.unwrap();
-    // A different key cannot reclaim a revoked group sender ID.
+    // Once the revoke's rotation activated, a different key reclaims the
+    // NodeId above the revoked generation.
+    service.tick(HostTime::sync(T0 + 40_000));
+    service.tick(HostTime::sync(T0 + 100_000));
     let mut new = SimDevice::new(old.node, 0x72);
-    let (_, _, events) = new.start(&service, &transport, T0 + 2_000);
+    let (_, _, events) = new.start(&service, &transport, T0 + 101_000);
     let (answer, _) = service.with(|a| {
         a.decide(
             DECIDER,
@@ -1685,13 +1689,13 @@ fn old_kid_recovery_gets_removed() {
                 },
                 key: "m2".into(),
             },
-            T0 + 2_010,
+            T0 + 101_010,
         )
     });
-    assert_eq!(answer.unwrap_err().code, "CONFLICT");
+    assert!(answer.unwrap().contains("\"generation\":2"));
     // The old key comes back holding generation 1.
     old.recovery_existing = true;
-    let (outcome, _) = old.attempt(&service, &transport, T0 + 3_000);
+    let (outcome, _) = old.attempt(&service, &transport, T0 + 102_000);
     match outcome {
         Outcome::Result(JoinResult::Removed { .. }) => {}
         other => panic!("expected Removed, got {other:?}"),

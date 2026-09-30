@@ -146,7 +146,7 @@ fn validate(record: &LifecycleRecord) -> Result<()> {
             if site == 0
                 || site > 712
                 || rrs == 0
-                || rrs > 616
+                || rrs > super::revocation::REVOCATION_OBJECT_MAX
                 || commit != 155
                 || p.len() != 6 + site + rrs + commit + 32
             {

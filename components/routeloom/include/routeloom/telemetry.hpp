@@ -457,6 +457,9 @@ enum class TransitFailureReason : std::uint8_t {
   SecurityUnavailable = 9,
   CallbackUnknown = 10,
   TimeUncertain = 11,
+  // The terminal authenticated the frame but does not implement its
+  // extension type (wire.hpp is_extension_type).
+  Unsupported = 12,
 };
 
 struct TransitFailure {

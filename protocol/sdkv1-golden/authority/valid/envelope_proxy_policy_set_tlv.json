@@ -1,0 +1,14 @@
+{
+  "codec": "authority_envelope",
+  "counter": 1,
+  "ctx_id": 1431655765,
+  "direction": "authority_to_device",
+  "envelope_hex": "0109555555550000000000016fc46b538c19d90af7a1febad36b5abe2e33ee39084f5373bc4ec542aa6acc0818a3ec8e13f57eca375c2d778809099d208da88641bc953b3f7a898c264fb33e22e12aec5a7e99f41e70930349e608c66c088e7b64ba51d14c5d46ac1caf83e23fda17aced6b053e5fff",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "iv_hex": "f4480a89a89bc758b4c073d3",
+  "key_hex": "749550bf0dc87b7b14696ccce39904f7",
+  "name": "envelope_proxy_policy_set_tlv",
+  "plaintext_hex": "0101000000000009010203040506070801010100000000040040000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+  "type": 9
+}

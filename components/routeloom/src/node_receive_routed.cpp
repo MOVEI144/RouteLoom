@@ -78,6 +78,14 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
                              now_ms);
       return;
     }
+    if (wire::is_extension_type(type)) {
+      // No extension type is implemented in this build: an authenticated
+      // refusal with a reason, before any acceptance (no HOP_ACCEPT, no
+      // dedup record), so the origin fails fast instead of timing out.
+      emit_transit_refusal(frame, TransitFailureReason::Unsupported, rx, now_ms);
+      observer_.on_diagnostic("EXTENSION_UNSUPPORTED", peer, &frame.header.message);
+      return;
+    }
     // Terminal routed probes: the ACK pool slot, the control lane, a
     // transaction, the component event slot when a component will take the
     // payload, and the transaction deadline — all read-only, all first.

@@ -49,7 +49,9 @@ pub const STORE_SDKV1_FORMAT: u32 = 1;
 /// SDK v1 sealed records schema.
 pub const STORE_SDKV1_SCHEMA: u32 = 1;
 /// RRS1 signed revocation object.
-pub const RRS1_OBJECT_VERSION: u32 = 1;
+pub const RRS1_OBJECT_VERSION: u32 = 2;
+/// RLV1 local removal record schema.
+pub const STORE_RLV1_SCHEMA: u32 = 2;
 /// RLP1 resume slot.
 pub const STORE_RLP1_FORMAT: u32 = 1;
 /// RLP2 resume slot.
@@ -67,7 +69,7 @@ pub const STORE_CANONICAL_GATEWAY: u32 = 2;
 /// Host operation store (SQLite).
 pub const STORE_HOST_OPS: u32 = 4;
 /// Site Authority store (SQLite).
-pub const STORE_SITE: u32 = 2;
+pub const STORE_SITE: u32 = 3;
 
 pub const REASON_NONE: u16 = 0;
 pub const REASON_QUEUED: u16 = 256;

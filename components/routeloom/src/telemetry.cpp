@@ -468,7 +468,7 @@ Status transit_failure_encode(const TransitFailure& report,
       report.report_id == 0 ||
       static_cast<std::uint8_t>(report.phase) > 2 ||
       static_cast<std::uint8_t>(report.reason) < 1 ||
-      static_cast<std::uint8_t>(report.reason) > 11) {
+      static_cast<std::uint8_t>(report.reason) > 12) {
     return reject();
   }
   ByteWriter writer{out};
@@ -535,7 +535,7 @@ Status transit_failure_decode(const ByteView body,
       out.claimed_reporter == kInvalidNodeId ||
       out.claimed_reporter == kBroadcastNodeId ||
       out.ref_session == 0 || out.ref_sequence == 0 || out.report_id == 0 ||
-      phase > 2 || reason < 1 || reason > 11) {
+      phase > 2 || reason < 1 || reason > 12) {
     return reject();
   }
   out.ref_type = type;

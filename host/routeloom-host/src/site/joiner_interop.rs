@@ -573,7 +573,7 @@ impl Peer {
 
     /// Injects a gossip-completed RRS1 object (see the `J` tag).
     fn inject_gossip(&mut self, object: &[u8]) {
-        assert!(!object.is_empty() && object.len() <= 640, "RRS1 bound");
+        assert!(!object.is_empty() && object.len() <= 648, "RRS1 bound");
         let mut command = vec![b'J'];
         command.extend_from_slice(object);
         self.send(&command);
@@ -594,15 +594,15 @@ impl Peer {
     }
 
     /// The extended image (RRS slots, then journal slots) for the P6
-    /// power-cut handover: 2x640 + 2x1609 bytes.
+    /// power-cut handover: 2x672 + 2x1609 bytes.
     fn dump_extended(&mut self) -> Vec<u8> {
         self.send(b"X");
-        let mut image = Vec::with_capacity(4498);
+        let mut image = Vec::with_capacity(4562);
         for i in 0..4 {
             let payload = self.recv();
             assert_eq!(payload[0], b'X', "extended slot reply");
             let expect_store = if i < 2 { 2 } else { 3 };
-            let expect_len = if i < 2 { 640 } else { 1609 };
+            let expect_len = if i < 2 { 672 } else { 1609 };
             assert_eq!(payload[1], expect_store, "extended store id");
             assert_eq!(payload[2], (i % 2) as u8, "extended slot id");
             assert_eq!(payload.len(), 3 + expect_len, "extended slot image");

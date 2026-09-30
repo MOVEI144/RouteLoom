@@ -305,7 +305,7 @@ const char* decode_error_name(const DecodeError error) noexcept {
 }
 
 namespace {
-bool envelope_type_known(const std::uint8_t type) noexcept { return type >= 1 && type <= 8; }
+bool envelope_type_known(const std::uint8_t type) noexcept { return type >= 1 && type <= 9; }
 }  // namespace
 
 Status authority_envelope_header_encode(

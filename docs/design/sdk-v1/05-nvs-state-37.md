@@ -102,7 +102,7 @@ D2-bで1ピアあたり約6 entry（両scopeの`c*`）が回収され、約14 en
 | `rlident` | RLI1 2 slot（≤664B） | 46 | 46 | `rlsec` |
 | `rlsite` | RLS1 2 slot（≤708B） | 50 | 50 | `rlsec` |
 | `rltrust` | RLT1 2 slot（≤1684B） | 110 | 110 | `rlsec` |
-| `rlrevo` | RRS1 2 slot（≤640B） | 44 | 44 | `rlsec` |
+| `rlrevo` | RRS1 2 slot（≤672B） | 44 | 44 | `rlsec` |
 | `rlmaint` | RLX1 2 slot（≤2048B、PR Bの削除journal） | 最大132＋namespace | 同左 | `rlsec` |
 | `rlres2` | 再開cache RLP2（96B＝5 entry/slot） | 16 slot＝80 | 160 slot＝800 | `rlsec` |
 | 証人 | `cmax`等 | 2 | 2 | `rlsec` |

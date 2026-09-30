@@ -240,6 +240,7 @@ enum class AuthorityEnvelopeType : std::uint8_t {
   RemovalNotice = 6,
   GrantRenew = 7,
   TimeSample = 8,
+  ProxyPolicy = 9,  // ProxyPolicySet down, its ACK up (#176, sdkv1_records.hpp)
 };
 constexpr std::uint8_t kAuthorityEnvelopeVersion = 1;
 constexpr std::size_t kAuthorityEnvelopeHeaderSize = 12;

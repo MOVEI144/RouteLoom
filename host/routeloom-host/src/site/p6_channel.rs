@@ -430,7 +430,7 @@ impl P6ChannelHub {
                 device,
                 env_type,
                 body,
-            } if matches!(env_type, 5 | 7) => (*device, *env_type, body.clone()),
+            } if matches!(env_type, 5 | 7 | 9) => (*device, *env_type, body.clone()),
             _ => {
                 if self.pending_other.len() < 64 {
                     self.pending_other.push_back(event);
@@ -619,6 +619,12 @@ impl P6ChannelHub {
         self.send_on(node, 5, self.current_network, object, true, mono_ms)
     }
 
+    /// Seals a ProxyPolicySet tail (#176) for a live member of the
+    /// current network.
+    pub fn send_policy(&mut self, node: u64, tail: &[u8], mono_ms: u64) -> bool {
+        self.send_on(node, 9, self.current_network, tail, true, mono_ms)
+    }
+
     /// Seals a RemovalNotice, including to a retained removed binding.
     pub fn send_notice(&mut self, node: u64, network: u64, notice: &[u8], mono_ms: u64) -> bool {
         self.send_on(node, 6, network, notice, false, mono_ms)
@@ -790,6 +796,13 @@ impl RevocationTransport for P6ChannelTransport {
             return false;
         }
         self.lock().send_rrs(node, object, self.mono_ms)
+    }
+
+    fn send_policy(&mut self, node: u64, tail: &[u8]) -> bool {
+        if !self.delivery_attached {
+            return false;
+        }
+        self.lock().send_policy(node, tail, self.mono_ms)
     }
 
     fn send_notice(&mut self, node: u64, network: u64, notice: &[u8]) -> bool {
