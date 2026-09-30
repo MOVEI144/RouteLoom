@@ -5,6 +5,10 @@
   offered last. An offer drops the previous plan's report, and
   `site.channel_plan.status` shows the `required` count. The gateway checks
   each required member ID against READY for that plan before releasing.
+  The HostOps 0x68 RELEASE payload now carries the required member IDs
+  (up to 8), so the host and the gateway firmware must be updated together:
+  a mismatched pair fails closed (the gateway refuses the RELEASE with
+  `PROTOCOL_ERROR` and the commit stays held).
 - A USB gateway hands each GATEWAY_SDK_RAM payload to its host and frees the
   mailbox slot after ReceiveLog storage is confirmed. An unacknowledged
   payload remains readable after USB session loss until its 60 s expiry.

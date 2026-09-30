@@ -4160,6 +4160,11 @@ void test_channel_plan_codecs() {
         back.required[0] == 2 && back.required[1] == 3);
   request[4 + 2 + 32] = 3;  // count exceeds the exact payload length
   CHECK(!decode_channel_plan(ByteView{request.data(), written}, back));
+  // A host from before the required set sends plan_hash only (34 B). The
+  // pair must be updated together: the gateway refuses it, never releases
+  // without the required member IDs.
+  request[3] = 34;
+  CHECK(!decode_channel_plan(ByteView{request.data(), 4 + 34}, back));
 }
 
 }  // namespace

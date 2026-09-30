@@ -2477,6 +2477,17 @@ mod tests {
             let inner = encode_channel_plan(&request).unwrap();
             assert_eq!(decode_channel_plan(&inner).unwrap(), request);
         }
+        // A RELEASE from before the required set (plan_hash only, 34 B):
+        // host and gateway firmware must be updated together, and the
+        // mismatch fails closed instead of releasing without member IDs.
+        let mut legacy = encode_channel_plan(&ChannelPlanRequest::Release {
+            plan_hash: [9; 32],
+            required: Vec::new(),
+        })
+        .unwrap();
+        legacy.pop();
+        legacy[3] = 34;
+        assert!(decode_channel_plan(&legacy).is_err());
         assert!(encode_channel_plan(&ChannelPlanRequest::Offer {
             blob: vec![0; CHANNEL_PLAN_BLOB_MAX + 1],
             commit_signature: [0; 64],
