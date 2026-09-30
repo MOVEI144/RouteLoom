@@ -830,7 +830,7 @@ def validate(root: Path) -> dict:
             "factory console needs rlsec, not the mesh security owner",
         )
         for app in ("firmware/reference_node", "firmware/bench_node", "firmware/bridge_node",
-                    "examples/espnow_node"):
+                    "examples/endpoint_cpp", "examples/standalone_gateway"):
             firmware = (root / app / "main/main.cpp").read_text(encoding="utf-8")
             test(
                 f"{app.split('/')[-1]}_uses_device_only",

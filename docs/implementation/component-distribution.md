@@ -18,7 +18,7 @@ manifest はレジストリ公開のためではなく、**ローカル path 参
 list(APPEND EXTRA_COMPONENT_DIRS "/path/to/RouteLoom/components")
 ```
 
-component manager は sibling 依存を同一 checkout から解決する。ネットワーク取得は発生しない。`examples/espnow_node` はリポジトリ内でこの方式で build される。
+component manager は sibling 依存を同一 checkout から解決する。ネットワーク取得は発生しない。`examples/endpoint_cpp`（C++）、`examples/endpoint_c`（C、`routeloom/device.h`）、`examples/standalone_gateway`（host なしの親機）はリポジトリ内でこの方式で build される。
 
 ### (b) component manager の git 依存
 
@@ -32,7 +32,7 @@ dependencies:
     version: <tag または commit SHA>
 ```
 
-component manager は Device と、その manifest が指定する ESP-NOW binding・core を同じ commit から `managed_components/` に配置する。
+component manager は Device と、その manifest が指定する ESP-NOW binding・core を同じ commit から `managed_components/` に配置する。CI は `tests/idf_consumer`（C の `main.c` と C++ の `consumer.cpp`）を checkout の外に写し、この git 依存だけで C3・S3・C5・C6 の 4 chip で build する（cell `idf_consumer-<chip>-component_only`）。
 
 git `path` 依存は component の subdirectory **だけ**を取り出す。このため vendored micro-ecc（RLCP1_COSE_ESP256 verifier の P-256 backend、BSD-2）は `components/routeloom/third_party/micro-ecc` に component 内蔵とし、component が自己完結するようにした。SDK v1 の EDHOC（P2-1）で追加した libedhoc（MIT）と zcbor（Apache-2.0）も同じ理由で `components/routeloom/third_party/` に置く（pin は `third_party/VENDORED.json` と NOTICE）。host 用 AES-CCM の TF-PSA-Crypto 部分集合も同じ場所にあるが、ESP-IDF build では compile しない（firmware は ESP-IDF 自身の Mbed TLS を PSA 経由で使う）。
 

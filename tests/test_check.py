@@ -62,7 +62,9 @@ class CellList(unittest.TestCase):
         # cells onto DevRam and Member, keeping one compatibility cell, and
         # added the Member channel-plan gateway and participant (50); V2-10
         # removed that compatibility cell with LegacyFixture itself (49).
-        self.assertEqual(len(cells), 49)
+        # V2-17 added the C and standalone-gateway examples and the external
+        # consumer on S3, C5 and C6 (54).
+        self.assertEqual(len(cells), 54)
         self.assertTrue({
             "bridge_node-esp32c3-normal-off-maintenance_member",
             "reference_node-esp32c6-normal-off-maintenance_member",
@@ -78,7 +80,7 @@ class CellList(unittest.TestCase):
             self.assertEqual(set(cell["budget"]), {"app_bin_max", "static_free_min",
                                                    "rtc_used_max"}, cell["id"])
         pairs = {(c["app"], c["target"]) for c in cells}
-        for app in ("reference_node", "bridge_node", "bench_node"):
+        for app in ("reference_node", "bridge_node", "bench_node", "idf_consumer"):
             for target in ("esp32c3", "esp32s3", "esp32c5", "esp32c6"):
                 self.assertIn((app, target), pairs)
 
@@ -110,7 +112,7 @@ class CellList(unittest.TestCase):
         # Artifacts come from each cell's own project directory.
         self.assertIn("${{ matrix.dir }}/build/*.bin", workflow)
         dirs = {c["id"]: c["dir"] for c in include}
-        self.assertEqual(dirs["espnow_node-esp32c3-example"], "examples/espnow_node")
+        self.assertEqual(dirs["endpoint_cpp-esp32c3-example"], "examples/endpoint_cpp")
         self.assertEqual(dirs["bridge_node-esp32c3-normal-off-off"], "firmware/bridge_node")
 
     def test_existing_c6_artifact_names_are_preserved(self):
@@ -167,7 +169,8 @@ class Sdkconfig(unittest.TestCase):
     def test_project_rejects_retired_mode_before_idf_rewrites_sdkconfig(self):
         guard = ROOT / "components/routeloom_device/retired_mode_guard.cmake"
         for project in ("firmware/reference_node", "firmware/bridge_node",
-                        "firmware/bench_node", "examples/espnow_node"):
+                        "firmware/bench_node", "examples/endpoint_cpp", "examples/endpoint_c",
+                        "examples/standalone_gateway"):
             lines = (ROOT / project / "CMakeLists.txt").read_text(encoding="utf-8")
             self.assertLess(lines.index("retired_mode_guard.cmake"),
                             lines.index("project.cmake"), project)

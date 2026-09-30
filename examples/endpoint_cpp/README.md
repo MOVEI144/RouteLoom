@@ -1,6 +1,7 @@
-# RouteLoom ESP-NOW node — external-consumption example
+# RouteLoom endpoint — C++ example
 
-Minimal RouteLoom mesh node built **as an external ESP-IDF project**: the
+Minimal RouteLoom endpoint on `routeloom::Device`, built **as an external
+ESP-IDF project** (the same node in C: [`examples/endpoint_c`](../endpoint_c)): the
 RAM-only development provider (PSK-derived sessions, no NVS
 counter/replay writes) and the ESP-NOW runtime (fixed channel, Wi-Fi
 LR250). It is a trimmed copy of `firmware/reference_node` — migration,

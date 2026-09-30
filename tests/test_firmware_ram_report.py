@@ -241,7 +241,7 @@ class Documentation(unittest.TestCase):
         default = re.search(r"^\s+default (\d+)$", block, re.M)
         self.assertGreaterEqual(int(default.group(1)), 16 * 1024)
         for app in ("firmware/bridge_node", "firmware/reference_node", "firmware/bench_node",
-                    "examples/espnow_node"):
+                    "examples/endpoint_cpp", "examples/endpoint_c", "examples/standalone_gateway"):
             defaults = (ROOT / app / "sdkconfig.defaults").read_text(encoding="utf-8")
             self.assertNotIn("CONFIG_ROUTELOOM_OWNER_TASK_STACK_SIZE", defaults, app)
 

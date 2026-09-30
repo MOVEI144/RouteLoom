@@ -1,0 +1,7 @@
+menu "RouteLoom example"
+
+config EXAMPLE_DESTINATION
+    hex "Node ID the example greets once a minute (0 = receive only)"
+    default 0x0
+
+endmenu

@@ -67,16 +67,16 @@ class NegativeMutations(unittest.TestCase):
         self.assertIn("firmware/reference_node:security_nvs_present", failed_names(sources))
 
     def test_two_mb_flash_setting_fails(self):
-        sources = self.mutate("examples/espnow_node/sdkconfig.defaults",
+        sources = self.mutate("examples/endpoint_cpp/sdkconfig.defaults",
                               "CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y",
                               "CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y")
-        self.assertIn("examples/espnow_node:fits_flash", failed_names(sources))
+        self.assertIn("examples/endpoint_cpp:fits_flash", failed_names(sources))
 
     def test_eight_mb_flash_setting_fails(self):
-        sources = self.mutate("examples/espnow_node/sdkconfig.defaults",
+        sources = self.mutate("examples/endpoint_cpp/sdkconfig.defaults",
                               "CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y",
                               "CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y")
-        self.assertIn("examples/espnow_node:flash_size_4mb", failed_names(sources))
+        self.assertIn("examples/endpoint_cpp:flash_size_4mb", failed_names(sources))
 
     def test_overlap_fails(self):
         sources = self.mutate("firmware/reference_node/partitions.csv",

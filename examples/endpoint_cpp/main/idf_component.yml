@@ -1,0 +1,22 @@
+## Consumption style (b): component-manager git dependencies.
+##
+## This example is built in-repo with style (a) — the project CMakeLists.txt
+## adds ../../components to EXTRA_COMPONENT_DIRS, so no managed dependencies
+## are needed and the block below stays commented out.
+##
+## When the example is copied into an external project (no ../../components),
+## uncomment the Device git dependency so the component manager fetches it
+## and its sibling components from this repository. `version` is the git ref to
+## check out — pin a tag or commit SHA for anything beyond experimentation.
+##
+## dependencies:
+##   routeloom/routeloom_device:
+##     git: https://github.com/MOVEI144/RouteLoom.git
+##     path: components/routeloom_device
+##     version: main
+##
+## The Device and ESP-NOW manifests resolve their siblings from the same Git
+## revision; none of the RouteLoom components need a registry release here.
+
+dependencies:
+  idf: ">=6.0"
