@@ -616,6 +616,37 @@ void test_expired_commit_settles_on_its_channel() {
   CHECK(rig.port.set_calls == sets);  // no timed switch of an expired plan
 }
 
+// A member prepared plan 2, missed its commit and restarted: resume loads
+// its applied plan 1. The late commit of plan 2 uses the blob it already
+// stored instead of waiting for a refetch.
+void test_late_commit_uses_the_stored_blob() {
+  Rig rig{};
+  rig.ops.visit_hard_cap_ms = 1000;
+  ChannelOperationRunner runner(rig.port, rig.ops);
+  MigrationAuthority verify = rig.verifier_only();
+  MigrationPlan plan = rig.plan(1, 1, 6, 7500, 1);
+  std::array<std::uint8_t, 512> buf{};
+  std::size_t size = 0;
+  const ByteView blob = rig.encode(plan, buf, size);
+  const Digest256 hash = plan_digest(blob);
+  const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
+  {
+    MigrationParticipant before(rig.participant_config, rig.storage, verify, runner,
+                                &rig.hooks);
+    CHECK_OK(before.note_clock(ClockMapping{0, 10}, kNow));
+    CHECK_OK(before.prepare(blob, rig.measurements(), kNow));
+  }
+  MigrationParticipant after(rig.participant_config, rig.storage, verify, runner,
+                             &rig.hooks);
+  CHECK_OK(after.resume(kNow + 1000));
+  CHECK(after.phase() == ParticipantPhase::Stable);
+  CHECK_OK(after.note_commit_evidence(op, hash, plan.new_epoch,
+                                      ByteView{sig.data(), sig.size()}, kNow + 2000));
+  CHECK(after.phase() == ParticipantPhase::Committed);
+  CHECK(after.stats().blob_refetches == 0);
+}
+
 void test_verified_plan_only() {
   Rig rig{};
   rig.ops.visit_hard_cap_ms = 1000;
@@ -1829,6 +1860,7 @@ int main() {
   test_commit_without_blob_refetches();
   test_refetched_blob_catches_up_after_switch();
   test_expired_commit_settles_on_its_channel();
+  test_late_commit_uses_the_stored_blob();
   test_verified_plan_only();
   test_required_set_gating();
   test_assess_survey_bookkeeping();

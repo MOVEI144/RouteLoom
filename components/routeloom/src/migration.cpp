@@ -1001,6 +1001,24 @@ Status MigrationParticipant::commit(const VerifiedAuthorityPlan& verified,
     enter_committed(now_ms);
     return Status::success();
   }
+  // A blob prepared before a restart is still in storage under the
+  // committed hash (the RAM plan is the older one resume loaded).
+  std::array<std::uint8_t, migration_const::kPlanBlobMax> stored_blob{};
+  std::size_t stored_size = 0;
+  MigrationPlan stored_plan{};
+  if (storage_
+          .read_blob(verified.plan_hash(),
+                     MutableByteView{stored_blob.data(), stored_blob.size()}, stored_size)
+          .ok() &&
+      plan_digest(ByteView{stored_blob.data(), stored_size}) == verified.plan_hash() &&
+      plan_decode(ByteView{stored_blob.data(), stored_size}, stored_plan).ok() &&
+      stored_plan.new_epoch == verified.new_epoch()) {
+    pending_plan_ = stored_plan;
+    pending_hash_ = verified.plan_hash();
+    plan_known_ = true;
+    enter_committed(now_ms);
+    return Status::success();
+  }
   // Commit evidence without the blob: durable record kept, the blob is
   // refetched — never fabricated (04 §6).
   awaiting_blob_ = true;
