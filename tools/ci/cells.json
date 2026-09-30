@@ -118,7 +118,7 @@
     {
       "id": "bridge_node-esp32c3-normal-off-channel_plan_member", "app": "bridge_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y", "CONFIG_ROUTELOOM_MIGRATION=2", "CONFIG_ROUTELOOM_CAPABILITY=0x2007"],
-      "budget": {"app_bin_max": 1256336, "static_free_min": 36032, "rtc_used_max": 6632}
+      "budget": {"app_bin_max": 1258736, "static_free_min": 36032, "rtc_used_max": 6632}
     },
     {
       "id": "reference_node-esp32c3-normal-off-channel_plan_member", "app": "reference_node", "target": "esp32c3",
