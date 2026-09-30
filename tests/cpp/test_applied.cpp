@@ -1049,6 +1049,39 @@ void test_deferred_ticket() {
   CHECK(a->delivery(late).state == DeliveryState::Indeterminate);
 }
 
+// Deferred tickets are bounded: with kAppliedTicketMax open, the next
+// request is refused Capacity without running the endpoint; completing one
+// ticket frees its place for the next request.
+void test_deferred_ticket_cap() {
+  World w;
+  MeshNode* a = w.add(1);
+  MeshNode* b = w.add(2);
+  w.start_all();
+  w.link(1, 2);
+  struct DeferringSink final : AppliedEndpointSink {
+    std::vector<std::uint64_t> tickets;
+    void on_applied_request(const AppliedRequest& request,
+                            AppliedReply& reply) noexcept override {
+      tickets.push_back(request.ticket);
+      reply.deferred = true;
+    }
+  } sink;
+  b->set_applied_sink(&sink);
+  for (std::size_t i = 0; i <= kAppliedTicketMax; ++i) {
+    (void)applied_exchange(w, 8000);
+    w.run(150);
+  }
+  CHECK(sink.tickets.size() == kAppliedTicketMax);
+  CHECK(b->applied_stats().refusals_capacity == 1);
+  AppliedReply reply{};
+  reply.outcome = ep::AppResultOutcome::Success;
+  CHECK_OK(b->complete_applied(sink.tickets.front(), reply, w.now));
+  const MessageId next = applied_exchange(w, 8000);
+  w.run(150);
+  CHECK(sink.tickets.size() == kAppliedTicketMax + 1);
+  CHECK(a->delivery(next).state != DeliveryState::Failed);
+}
+
 void test_no_sink_commits_no_endpoint() {
   World w;
   MeshNode* a = w.add(1);
@@ -1730,6 +1763,7 @@ int main() {
   test_app_rejected_verdict();
   test_no_sink_commits_no_endpoint();
   test_deferred_ticket();
+  test_deferred_ticket_cap();
   test_stale_lease_refusal_and_bootstrap();
   test_malformed_body_refusal();
   test_query_recovery_resends_result();

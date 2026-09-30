@@ -34,9 +34,30 @@ Status MeshNode::send(const NodeId destination, const ByteView payload,
     // the sleep image does not carry the predecessor link.
     return Status::error(StatusCode::InvalidArgument, "ORDERED_REQUIRES_RELIABLE");
   }
-  return enqueue_delivery(
+  // A latest value may replace untransmitted work only where nothing
+  // acknowledges it: RELIABLE and APPLIED keep every send, and a sleep image
+  // keeps no key.
+  if (options.coalesce_key != 0 &&
+      (options.delivery != DeliveryClass::BestEffort || options.persist_across_sleep)) {
+    return Status::error(StatusCode::InvalidArgument, "COALESCE_REQUIRES_BEST_EFFORT");
+  }
+  const Status queued = enqueue_delivery(
       MessageId{config_.message_session, next_message_sequence_}, destination,
       payload, options, now_ms, id);
+  if (!queued || options.coalesce_key == 0) return queued;
+  // Only after the new value is admitted: a refused send leaves the
+  // previous one pending.
+  deliveries_.for_each([&](Delivery& other) {
+    if (other.id == id || other.destination != destination ||
+        other.options.coalesce_key != options.coalesce_key || other.transmitted) {
+      return;
+    }
+    if (other.state == DeliveryState::Accepted || other.state == DeliveryState::WaitingForRoute ||
+        other.state == DeliveryState::Queued) {
+      set_delivery_state(other, DeliveryState::CancelledBeforeTx, "CANCELLED_SUPERSEDED");
+    }
+  });
+  return queued;
 }
 
 Status MeshNode::send_applied(const NodeId destination, const ByteView payload,
@@ -275,6 +296,31 @@ Status MeshNode::cancel(const MessageId& id) noexcept {
     default:
       return Status::error(StatusCode::InvalidState, "delivery is already terminal");
   }
+}
+
+Status MeshNode::cancel_all(const char* untransmitted_reason) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+  NodeGuard guard(in_call_);
+  deliveries_.for_each([&](Delivery& record) {
+    switch (record.state) {
+      case DeliveryState::Accepted:
+      case DeliveryState::WaitingForRoute:
+      case DeliveryState::Queued:
+        if (!record.transmitted) {
+          set_delivery_state(record, DeliveryState::CancelledBeforeTx, untransmitted_reason);
+          break;
+        }
+        [[fallthrough]];
+      case DeliveryState::WaitingForMac:
+      case DeliveryState::WaitingForHopAccept:
+      case DeliveryState::WaitingForEndReceipt:
+        set_delivery_state(record, DeliveryState::Indeterminate, "CANCEL_AFTER_TX_INDETERMINATE");
+        break;
+      default:
+        break;
+    }
+  });
+  return Status::success();
 }
 
 DeliveryResult MeshNode::delivery(const MessageId& id) const noexcept {

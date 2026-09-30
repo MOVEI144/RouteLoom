@@ -489,6 +489,7 @@ void MeshNode::set_delivery_state(Delivery& delivery, const DeliveryState state,
   if (delivery.state == state && delivery.reason == reason) return;
   delivery.state = state;
   delivery.reason = reason;
+  if (state == DeliveryState::WaitingForMac) delivery.transmitted = true;
   // Final-result observation (03 §3): END_RECEIPT/expiry/failure/
   // indeterminate are recorded as separate counters.
   switch (state) {

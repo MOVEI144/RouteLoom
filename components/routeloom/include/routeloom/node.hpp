@@ -251,6 +251,9 @@ class RadioPort {
 using ExecutionLease = std::array<std::uint8_t, endpoint::kAppliedLeaseBytes>;
 constexpr std::size_t kAppliedUserPayloadMax = endpoint::kAppliedUserPayloadMax;
 constexpr std::size_t kAppliedResultCapacity = 8;
+// Deferred verdicts open at once; a request beyond them is refused Capacity
+// without invoking the endpoint.
+constexpr std::size_t kAppliedTicketMax = 4;
 constexpr std::uint32_t kAppliedResultHoldMs = kTerminalRetentionMs;
 constexpr std::uint32_t kAppliedLateResultMs = kLateResultTtlMs;
 constexpr std::uint8_t kAppliedMaxEmits = 3;
@@ -319,8 +322,12 @@ struct AppliedStats {
 // `site_epoch` is the delivered header's end_epoch, the era the origin
 // credential was verified under. Delivered on the stack with the
 // callback — never retained, never stored on the node.
+// `source_role` is the member role bits (rlcw1) the origin's verified
+// credential grants; the core leaves it 0 (unknown) and the Device fills it
+// from the security owner.
 struct DeliveryAssurance {
   bool origin_verified{false};
+  std::uint8_t source_role{0};
   std::uint32_t site_epoch{0};
 };
 
@@ -804,6 +811,9 @@ class MeshNode {
                           MonotonicMs now_ms) noexcept;
   const AppliedStats& applied_stats() const noexcept { return applied_stats_; }
   Status cancel(const MessageId& id) noexcept;
+  // Ends every live delivery (a local leave): untransmitted ones as
+  // CancelledBeforeTx with `untransmitted_reason`, the rest Indeterminate.
+  Status cancel_all(const char* untransmitted_reason) noexcept;
   DeliveryResult delivery(const MessageId& id) const noexcept;
 
   Status poll(MonotonicMs now_ms) noexcept;
@@ -1691,6 +1701,9 @@ class MeshNode {
     MessageId order_after{};
     MonotonicMs order_hold_until_ms{0};
     bool order_wait{false};
+    // Set once the delivery reached the radio: a coalescing send or a
+    // leave may cancel it as untransmitted only while this is false.
+    bool transmitted{false};
   };
 
   // Terminal-side committed verdict record (01 §1.4): one per delivered
@@ -2416,6 +2429,7 @@ class MeshNode {
   void handle_app_result(const wire::PlainFrame& frame, NodeId peer,
                          MonotonicMs now_ms) noexcept;
   Status emit_applied_result(AppliedRecord& record, MonotonicMs now_ms) noexcept;
+  std::size_t open_applied_tickets(MonotonicMs now_ms) const noexcept;
   void emit_app_status(NodeId origin, const MessageKey& key,
                        const std::array<std::uint8_t, 32>& request_digest,
                        endpoint::AppResultStatusCode code, std::uint64_t nonce,
