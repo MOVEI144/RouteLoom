@@ -56,6 +56,13 @@ struct JoinerConfig {
   std::uint8_t scan_channel_count{3};
   // bit n set -> channel n usable on this hardware (1..14).
   std::uint16_t usable_channel_mask{0xFFFE};
+  // JoinPolicy timing: avoid holds after an authenticated deny, the cap on
+  // a relayed or direct retry_after, and the random start spread of an
+  // unassigned boot (0 starts at once).
+  std::uint32_t avoid_not_here_ms{static_cast<std::uint32_t>(kJoinAvoidNotHereMs)};
+  std::uint32_t avoid_blocked_ms{static_cast<std::uint32_t>(kJoinAvoidBlockedMs)};
+  std::uint32_t retry_max_ms{600000};
+  std::uint32_t start_jitter_ms{0};
 };
 
 // --- Boot input ------------------------------------------------------------------------------
@@ -288,6 +295,11 @@ class Joiner final {
   // Drops radio/session/uncommitted state and invalidates the channel
   // generation. Stored RLS1 and the avoid table survive.
   Status stop(MonotonicMs now) noexcept;
+  // Ends a scan backoff now (Device::request_join); avoid holds stay.
+  Status retry_now(MonotonicMs now) noexcept;
+  // JoinPolicy: the requested role and the timing fields of `policy`, from
+  // the next attempt on. The role must pass the same check as start().
+  Status apply_policy(const JoinerConfig& policy) noexcept;
 
   JoinSnapshot snapshot() const noexcept;
   // Earliest time poll() has work; last-seen now when work is immediate,

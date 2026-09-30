@@ -116,8 +116,8 @@ Status JoinCandidates::transient_delay(const std::uint8_t k, EntropySource& entr
                                        std::uint64_t& delay_ms) noexcept {
   const std::uint8_t kk = k > kJoinTransientMaxK ? kJoinTransientMaxK : k;
   const std::uint64_t base =
-      std::min<std::uint64_t>(kJoinBackoffMaxMs, std::uint64_t{kJoinTransientBaseMs} << kk);
-  const std::uint64_t hi = std::min<std::uint64_t>(kJoinBackoffMaxMs, base + base / 4);
+      std::min<std::uint64_t>(retry_max_ms_, std::uint64_t{kJoinTransientBaseMs} << kk);
+  const std::uint64_t hi = std::min<std::uint64_t>(retry_max_ms_, base + base / 4);
   const std::uint64_t spread = hi - base;
   if (spread == 0) {
     delay_ms = base;
@@ -552,14 +552,14 @@ Status JoinCandidates::apply_outcome(const JoinAttempt& attempt,
       break;
     case JoinAttemptOutcome::DenyNotHere:
       record->policy = JoinCandidatePolicy::AvoidNotHere;
-      record->eligible_at_ms = sat_add(now_ms, kJoinAvoidNotHereMs);
+      record->eligible_at_ms = sat_add(now_ms, avoid_not_here_ms_);
       break;
     case JoinAttemptOutcome::DenyBlocked:
     case JoinAttemptOutcome::MalformedResult:
     case JoinAttemptOutcome::AuthenticationFailed:
     case JoinAttemptOutcome::RemovedDenied:
       record->policy = JoinCandidatePolicy::AvoidBlocked;
-      record->eligible_at_ms = sat_add(now_ms, kJoinAvoidBlockedMs);
+      record->eligible_at_ms = sat_add(now_ms, avoid_blocked_ms_);
       break;
     case JoinAttemptOutcome::RemovedVerified:
       *record = JoinCandidate{};
@@ -606,7 +606,7 @@ void JoinCandidates::suppress_proxy(JoinCandidate& record, const MacAddress& pro
   for (auto& p : record.proxies) {
     if (p.present && p.mac == proxy_mac) {
       const MonotonicMs until =
-          sat_add(now_ms, std::min<std::uint64_t>(suppress_ms, kJoinBackoffMaxMs));
+          sat_add(now_ms, std::min<std::uint64_t>(suppress_ms, retry_max_ms_));
       if (until > p.suppressed_until_ms) p.suppressed_until_ms = until;
       ++stats_.proxy_suppressions;
     }
@@ -641,7 +641,7 @@ Status JoinCandidates::next_scan_deadline(const MonotonicMs now_ms, EntropySourc
   MonotonicMs d = sat_add(now_ms, delay_ms);
   const MonotonicMs earliest = next_eligible_ms(now_ms);
   if (earliest < d) d = earliest;
-  const MonotonicMs cap = sat_add(now_ms, kJoinBackoffMaxMs);
+  const MonotonicMs cap = sat_add(now_ms, retry_max_ms_);
   if (cap < d) d = cap;
   deadline = d;
   return st;

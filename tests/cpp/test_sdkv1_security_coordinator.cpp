@@ -1546,6 +1546,34 @@ void test_commit_veto() {
   CHECK(!coordinator.check(candidate, kT0));
 }
 
+void test_local_leave_boot_keeps_revocation_floor_without_holdoff() {
+  current = "local_leave_boot";
+  for (const bool cleaned : {false, true}) {
+    Fixture f{};
+    CHECK(f.init_stores());
+    CHECK(f.identity.commit(identity_record()).ok());
+    LocalRevocationRecord removed{};
+    removed.cause = LocalRevocationCause::Notice;
+    removed.local_node = kNode;
+    removed.site_id = kSiteId;
+    removed.network = kNetwork;
+    removed.removed_generation = 3;
+    removed.evidence_digest.fill(0xE1);
+    CHECK(f.local_revocation.commit_blocked(removed).ok());
+    if (cleaned) CHECK(f.local_revocation.commit_cleaned().ok());
+    SecurityCoordinator coordinator(f.deps());
+    CoordinatorEvent boot = boot_event(kT0, kBoot);
+    boot.local_leave_completed = true;
+    CHECK(coordinator.step(boot).ok());
+    SiteRecord candidate = site_record(3);
+    CHECK(!coordinator.check(candidate, kT0));
+    candidate.assignment_generation = 4;
+    CHECK(coordinator.check(candidate, kT0) == cleaned);
+    candidate.site_id = kSiteId + 1;
+    CHECK(coordinator.check(candidate, kT0) == cleaned);
+  }
+}
+
 void test_store_credential_verifier() {
   current = "store_credential_verifier";
   Fixture f{};
@@ -3015,6 +3043,7 @@ int main() {
   test_refresh_quiet_channel_with_live_links_never_strikes();
   test_refresh_newer_generations_with_live_links();
   test_commit_veto();
+  test_local_leave_boot_keeps_revocation_floor_without_holdoff();
   test_store_credential_verifier();
   test_channel_ready_flow();
   test_recovery_join_reproves_retained_membership();

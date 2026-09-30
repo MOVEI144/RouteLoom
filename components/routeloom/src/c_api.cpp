@@ -344,9 +344,11 @@ NodeConfig convert_config(const rl_node_config_t& input) noexcept {
 }
 
 SendOptions convert_options(const rl_send_options_t& input) noexcept {
-  SendOptions output{static_cast<DeliveryClass>(input.delivery),
-                     static_cast<Priority>(input.priority), input.lifetime_ms,
-                     input.hop_limit};
+  SendOptions output{};
+  output.delivery = static_cast<DeliveryClass>(input.delivery);
+  output.priority = static_cast<Priority>(input.priority);
+  output.lifetime_ms = input.lifetime_ms;
+  output.hop_limit = input.hop_limit;
   output.ordered = input.ordered != 0;
   return output;
 }

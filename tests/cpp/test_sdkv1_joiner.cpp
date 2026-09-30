@@ -2344,6 +2344,12 @@ void test_recovery_rescan_is_capped() {
   JoinSimNetwork fresh(device_config(), device_identity());
   CHECK(fresh.device().joiner.start(boot_input(), 0).ok());
   CHECK(longest_backoff(fresh, 240000) > 15000);
+  JoinerConfig policy = device_config();
+  policy.retry_max_ms = 60000;
+  CHECK(fresh.device().joiner.apply_policy(policy).ok());
+  CHECK(fresh.device().joiner.retry_now(fresh.now()).ok());
+  CHECK(longest_backoff(fresh, 240000) <= policy.retry_max_ms);
+
   current.clear();
 }
 

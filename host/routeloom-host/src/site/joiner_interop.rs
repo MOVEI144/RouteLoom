@@ -564,6 +564,11 @@ impl Peer {
         self.send(&[b'V', reason]);
     }
 
+    /// The device's own leave (LocalLeave into its lifecycle).
+    fn request_leave(&mut self) {
+        self.send(b"L");
+    }
+
     /// Powers site proxies off/on between rounds: (site, proxy, muted).
     fn send_mute(&mut self, mutes: &[(u8, u8, bool)]) {
         for (site, proxy, muted) in mutes {
@@ -2232,6 +2237,79 @@ fn live_owner_removal_notice_erase_holdoff() {
     );
     let _ = std::fs::remove_file(&flash_path);
     let _ = std::fs::remove_file(&ext_path);
+}
+
+/// Leaves the adopted site: the membership is erased, the identity stays,
+/// the lifecycle orders the unassigned restart, and the device restarts
+/// from its flash.
+fn leave_and_restart(world: &mut World, tag: &str, seed: u64) {
+    world.peer.request_leave();
+    let tick = world.pump_until(8000, |t| {
+        t.owner.lifecycle_phase == PHASE_UNASSIGNED_READY
+            && t.owner.lifecycle_action == ACTION_RESTART_UNASSIGNED
+    });
+    assert_eq!(
+        tick.owner.lifecycle_phase, PHASE_UNASSIGNED_READY,
+        "{tag}: left"
+    );
+    assert_eq!(tick.snap.store_site, 0, "{tag}: membership erased");
+    assert_eq!(
+        tick.owner.runtime_flags & (RUNTIME_REMOVED | TRUST_ERASED),
+        RUNTIME_REMOVED | TRUST_ERASED,
+        "{tag}: runtime and site trust erased"
+    );
+    // The whole flash crosses the restart (the journal holds LeftReady);
+    // the site directory goes with the site.
+    let flash_path = world.sites[0].dir.join(format!("{tag}-flash.bin"));
+    let ext_path = world.sites[0].dir.join(format!("{tag}-flash-ext.bin"));
+    std::fs::write(&flash_path, world.peer.dump_flash()).unwrap();
+    std::fs::write(&ext_path, world.peer.dump_extended()).unwrap();
+    world.swap_peer_ext(world.now + 1000, seed, &flash_path, Some(&ext_path), false);
+}
+
+/// J05-A (#196 manual move): the device joins site A, leaves it, joins
+/// site B, leaves B and returns to A with the same NodeId and identity —
+/// no reprovisioning. A leave keeps no holdoff and no watermark, so A
+/// re-issues the membership it still holds at the same generation. (A
+/// return after A removed the device, at generation 2, is J05.)
+#[test]
+fn leave_moves_the_device_a_to_b_and_back() {
+    let Some(mut world) = World::start("j05a", 0x05A1) else {
+        return; // no C++ peer: skip (ignore-equivalent)
+    };
+    join_and_attach(&mut world);
+    let active = world.sites[0].service.with(|a| a.gks.active_epoch()).0;
+    wait_owner_ready(&mut world, active);
+    let first = world.member_row(0).expect("A row");
+    leave_and_restart(&mut world, "j05a-a", 0x05A2);
+
+    // Moved out of A's range: only B's proxy is heard.
+    world.peer.send_mute(&[(0, 0, true)]);
+    world.sites[1]
+        .decider
+        .assign(DEVICE_NODE, Assignment::Here(Role::Endpoint));
+    world.attach_authority(1);
+    let tick = world.pump_until(8000, |t| t.snap.action_pending);
+    check_terminal(&tick.snap, MEMBER_READY);
+    assert_eq!(tick.snap.store_site, SITE_B, "joined B");
+    world.pump_until(4000, |t| t.owner.adopted_network != 0);
+    leave_and_restart(&mut world, "j05a-b", 0x05A3);
+
+    // Back in A's range, out of B's.
+    world.peer.send_mute(&[(0, 0, false), (1, 0, true)]);
+    let tick = world.pump_until(8000, |t| t.snap.action_pending);
+    check_terminal(&tick.snap, MEMBER_READY);
+    assert!(
+        tick.snap.store_site == testkit::SITE && tick.snap.store_gen == first.generation,
+        "back on A: site {:x} generation {}",
+        tick.snap.store_site,
+        tick.snap.store_gen
+    );
+    let back = world.member_row(0).expect("A row");
+    assert!(
+        back.member && back.generation == first.generation && back.kid == first.kid,
+        "same identity, no NodeId reissue"
+    );
 }
 
 /// P6 live (#139): an RRS1 naming the device, heard over gossip

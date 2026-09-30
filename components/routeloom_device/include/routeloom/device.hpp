@@ -10,9 +10,12 @@
 // configuration in one place.
 //
 // The facade holds no mesh state: membership, routes and sessions stay in
-// the Owner and MeshNode, and every call delegates to them. Only post() may
-// be called from another task; every other call belongs to the Owner task
-// (a poll/observer callback or a posted job).
+// the Owner and MeshNode, and every call delegates to them. It keeps only
+// what its own events need (the last reported stage and connectivity with
+// their times, and the one operation in progress). Only post() may be
+// called from another task; every other call belongs to the Owner task (a
+// poll hook or a posted job). A call made from inside a Device callback
+// returns Busy.
 
 #include <array>
 #include <cstddef>
@@ -23,6 +26,7 @@
 #include "routeloom/key_schedule.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/profile.hpp"
+#include "routeloom/sdkv1_records.hpp"
 #include "routeloom/sdkv1_store.hpp"
 #include "routeloom/types.hpp"
 #include "routeloom/usb_bridge.hpp"
@@ -122,11 +126,86 @@ struct DeviceConfig {
 struct DeviceCapabilities {
   profile::Role role{profile::Role::Endpoint};
   bool member{false};          // MemberEdhoc (false: DevRam)
+  // Development (DevRam) or Candidate (MemberEdhoc until certified).
+  SecurityProfile security_profile{SecurityProfile::Development};
   bool usb_gateway{false};     // USB bridge attached
   bool scoped_routing{false};  // gateway-scoped route profile in force
   bool group_send{false};      // send_group() admissible on this node now
   std::uint16_t max_payload{0};
   std::uint16_t max_group_payload{0};
+};
+
+// --- Membership, connectivity and operations (#191, #192, #193) ------------------
+
+using JoinPolicy = sdkv1::JoinPolicy;
+// A request_join/leave, unique within one boot; 0 is none.
+using OperationId = std::uint32_t;
+
+enum class MembershipStage : std::uint8_t {
+  Unprovisioned = 0,  // no device identity: nothing to join with
+  Joining = 1,        // zero-touch or re-verifying a retained membership
+  PendingAuthority = 2,  // the site answered Pending for the last attempt
+  Member = 3,
+  Removed = 4,        // the site removed this device; erasure or holdoff runs
+  Recovery = 5,       // the stores need recovery before any membership
+  Leaving = 6,        // a local leave is erasing the membership
+};
+
+// Read from the security owner and the stores at each call.
+struct MembershipSnapshot {
+  MembershipStage stage{MembershipStage::Unprovisioned};
+  std::uint64_t site_id{0};
+  NetworkId network{0};      // full 64-bit network
+  NodeId node{kInvalidNodeId};
+  std::uint32_t generation{0};  // assignment generation
+  std::uint8_t role{0};         // granted member role bits
+  MonotonicMs since_ms{0};      // this boot's monotonic clock only
+  std::uint32_t boot{0};        // boot incarnation
+  std::uint16_t reason{0};      // reason id of the last stage change
+  OperationId operation{0};     // request_join/leave in progress
+};
+
+// Reachability of this site's gateways from authenticated evidence only: a
+// verified message from a gateway, or a route to a gateway refreshed by the
+// gateway directly (never a relay's route lease). RSSI or a table entry alone never counts.
+// Membership is separate: Isolated never drops the membership.
+enum class Connectivity : std::uint8_t {
+  Unknown = 0,    // no evidence yet this boot, or not a member
+  Reachable = 1,  // gateway evidence within kConnectivityFreshMs and a route
+  Degraded = 2,   // evidence older than fresh, or no route, for < kConnectivityIsolatedMs
+  Isolated = 3,   // no gateway evidence for kConnectivityIsolatedMs
+  Sleeping = 4,   // in deep sleep (set by the sleep path)
+};
+enum class ConnectivityScope : std::uint8_t { SiteGateway = 0 };
+constexpr std::uint32_t kConnectivityFreshMs = 60000;
+constexpr std::uint32_t kConnectivityIsolatedMs = 120000;
+
+struct ConnectivitySnapshot {
+  Connectivity state{Connectivity::Unknown};
+  ConnectivityScope scope{ConnectivityScope::SiteGateway};
+  MonotonicMs since_ms{0};
+  std::uint32_t boot{0};
+  bool contact_valid{false};
+  MonotonicMs last_contact_ms{0};  // last verified gateway evidence
+  std::uint16_t reason{0};
+};
+
+// Device events, on the Owner task after the step that observed them.
+// Each stage or connectivity change is reported once.
+class DeviceObserver {
+ public:
+  virtual ~DeviceObserver() = default;
+  virtual void on_membership(const MembershipSnapshot& snapshot, std::uint16_t cause) noexcept {
+    (void)snapshot;
+    (void)cause;
+  }
+  virtual void on_connectivity(const ConnectivitySnapshot& snapshot) noexcept { (void)snapshot; }
+  // A request_join or leave ended: JOINED, JOIN_DENIED, JOIN_PENDING,
+  // JOIN_TIMEOUT, LEFT or RECOVERY_REQUIRED (reason ids).
+  virtual void on_operation(OperationId operation, std::uint16_t result) noexcept {
+    (void)operation;
+    (void)result;
+  }
 };
 
 // USB authentication binds the committed Member network (full u64) after a
@@ -157,6 +236,7 @@ class Device {
   // NodeObserver callback (on_message, on_delivery, group and diagnostic)
   // after the Device's own handling; the poll hook runs once per Owner pass.
   void observe(NodeObserver* app) noexcept { app_ = app; }
+  void observe_device(DeviceObserver* observer) noexcept { device_observer_ = observer; }
   void on_poll(PollHook hook, void* ctx) noexcept {
     poll_hook_ = hook;
     poll_ctx_ = ctx;
@@ -202,6 +282,32 @@ class Device {
   DeliveryResult delivery(const MessageId& id) const noexcept;
   DeviceCapabilities capabilities() const noexcept;
 
+  // APPLIED: the destination's lease comes from its StaleLease answer. The
+  // sink may defer (AppliedReply::deferred) and complete_applied() later;
+  // at most kAppliedTicketMax tickets are open at once.
+  Status send_applied(NodeId destination, ByteView payload, const ExecutionLease& lease,
+                      const SendOptions& options, MessageId& id) noexcept;
+  Status set_applied_sink(AppliedEndpointSink* sink) noexcept;
+  Status complete_applied(std::uint64_t ticket, const AppliedReply& reply) noexcept;
+
+  MembershipSnapshot membership() const noexcept;
+  ConnectivitySnapshot connectivity() const noexcept;
+  // Unassigned: the zero-touch scan starts now (avoid holds stay). Member:
+  // re-verifies the membership with the site. Ends with on_operation.
+  Status request_join(OperationId& operation) noexcept;
+  // Leaves the site: the intent is durable before anything is erased, and
+  // a power cut resumes it at the next boot. The site membership, resume
+  // state and site trust are erased; the device identity, boot counter,
+  // board config and keys stay. Untransmitted sends end CANCELLED_LEAVE.
+  // The device then restarts unassigned; on_operation(LEFT) comes first.
+  Status leave(OperationId& operation) noexcept;
+  // Range-checked (join_policy_check) and compare-and-set: Conflict unless
+  // `expected_revision` is the stored revision (0 before any). Stored
+  // (RLJP1), read back, then applied from the next decision on.
+  Status set_join_policy(const JoinPolicy& policy, std::uint32_t expected_revision,
+                         std::uint32_t& revision) noexcept;
+  Status join_policy(JoinPolicy& policy, std::uint32_t& revision) noexcept;
+
   // Read-only views for diagnostics apps (bench, observation console).
   NodeId node_id() const noexcept;
   const ObservationSource* observation() const noexcept { return observation_; }
@@ -228,6 +334,7 @@ class Device {
     void on_message(const MessageKey& key, NodeId source, ByteView payload,
                     const DeliveryAssurance& assurance) noexcept override;
     void on_group_message(const GroupMessageInfo& info, ByteView payload) noexcept override;
+    void on_verified_contact(NodeId source, MonotonicMs now_ms) noexcept override;
     void on_delivery(const DeliveryResult& result) noexcept override;
     void on_group_delivery(const GroupDeliveryResult& result) noexcept override;
     void on_applied_result(const MessageKey& key,
@@ -243,8 +350,18 @@ class Device {
     void* ctx{nullptr};
   };
 
+  enum class Operation : std::uint8_t { None = 0, Join, Leave };
+
+  bool callback_active() const noexcept;
   void run_posted() noexcept;
   void update_observation_remote() noexcept;
+  Status apply_join_policy(const JoinPolicy& policy) noexcept;
+  MembershipStage current_stage() const noexcept;
+  void update_membership(MonotonicMs now_ms) noexcept;
+  void update_connectivity(MonotonicMs now_ms) noexcept;
+  void note_gateway_contact(NodeId source, MonotonicMs now_ms) noexcept;
+  void finish_operation(std::uint16_t result) noexcept;
+  static void on_restart(void* self, bool leave) noexcept;
 #if ROUTELOOM_DEVICE_REMOTE_CONFIG
   Status begin_remote_config(const DeviceConfig& config, const keys::Secret& dev_psk,
                              EntropySource& entropy, MonotonicMs now_ms) noexcept;
@@ -285,6 +402,33 @@ class Device {
   DeviceSecurity security_{DeviceSecurity::DevRam};
   profile::Role role_{profile::Role::Endpoint};
   bool observation_remote_{false};
+  // Event bookkeeping (see the header comment), widest fields first.
+  MonotonicMs stage_since_ms_{0};
+  MonotonicMs connectivity_since_ms_{0};
+  MonotonicMs contact_ms_{0};
+  MonotonicMs member_since_ms_{0};
+  MonotonicMs operation_deadline_ms_{0};
+  DeviceObserver* device_observer_{nullptr};
+  std::uint32_t seen_attempts_{0};
+  std::uint32_t pending_base_{0};
+  OperationId operation_id_{0};  // the last one issued; live while operation_ != None
+  std::uint32_t operation_denies_{0};
+  std::uint32_t operation_pendings_{0};
+  std::uint32_t isolation_notice_ms_{0};  // JoinPolicy
+  std::uint16_t stage_reason_{0};
+  std::uint16_t connectivity_reason_{0};
+  bool in_callback_{false};
+  bool stage_known_{false};
+  MembershipStage stage_{MembershipStage::Unprovisioned};
+  bool pending_authority_{false};
+  Connectivity connectivity_{Connectivity::Unknown};
+  bool contact_valid_{false};
+  bool isolation_noticed_{false};
+  Operation operation_{Operation::None};
+  bool operation_left_member_{false};
+  // The image's requested role and the role bits a JoinPolicy may request.
+  std::uint8_t default_role_{0};
+  std::uint8_t allowed_roles_{0};
   std::array<Posted, kPostCapacity> posted_{};
   std::uint8_t posted_head_{0};
   std::uint8_t posted_count_{0};

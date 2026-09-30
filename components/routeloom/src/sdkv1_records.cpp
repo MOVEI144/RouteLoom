@@ -1219,4 +1219,76 @@ ProxyPolicyStatus proxy_policy_decide(const ProxyPolicyRecord* stored, const Pro
   return ProxyPolicyStatus::Applied;
 }
 
+// === JoinPolicy / RLJP1 ======================================================
+
+Status join_policy_check(const JoinPolicy& policy, const std::uint8_t allowed_roles) noexcept {
+  const auto in = [](std::uint32_t value, std::uint32_t low, std::uint32_t high) {
+    return value >= low && value <= high;
+  };
+  if (!in(policy.avoid_not_here_s, 300, 86400) || !in(policy.avoid_blocked_s, 3600, 604800) ||
+      !in(policy.removal_holdoff_s, 60, 3600) || !in(policy.retry_max_s, 60, 3600) ||
+      (policy.isolation_notice_s != 0 && !in(policy.isolation_notice_s, 300, 2592000)) ||
+      policy.start_jitter_ms > 60000 || (policy.role & ~allowed_roles) != 0) {
+    return Status::error(StatusCode::InvalidArgument, "JOIN_POLICY_RANGE");
+  }
+  return Status::success();
+}
+
+Status join_policy_record_encode(const JoinPolicy& policy, const std::uint32_t revision,
+                                 std::array<std::uint8_t, kJoinPolicyRecordLen>& out) noexcept {
+  if (revision == 0) return Status::error(StatusCode::InvalidArgument, "rljp1 revision");
+  ByteWriter writer(MutableByteView{out.data(), out.size()});
+  Status status = writer.write_u32(kJoinPolicyMagic);
+  if (status) status = writer.write_u16(kRecordFormat);
+  if (status) status = writer.write_u16(static_cast<std::uint16_t>(kJoinPolicyRecordLen));
+  if (status) status = writer.write_u32(revision);
+  if (status) status = writer.write_u32(policy.avoid_not_here_s);
+  if (status) status = writer.write_u32(policy.avoid_blocked_s);
+  if (status) status = writer.write_u32(policy.removal_holdoff_s);
+  if (status) status = writer.write_u32(policy.retry_max_s);
+  if (status) status = writer.write_u32(policy.isolation_notice_s);
+  if (status) status = writer.write_u16(policy.start_jitter_ms);
+  if (status) status = writer.write_u8(policy.role);
+  if (status) status = writer.write_u8(0);
+  if (status) status = writer.write_u32(crc32_iso_hdlc(ByteView{out.data(), kJoinPolicyRecordLen - 4}));
+  return status;
+}
+
+Status join_policy_record_decode(const ByteView bytes, JoinPolicy& out,
+                                 std::uint32_t& revision) noexcept {
+  out = JoinPolicy{};
+  revision = 0;
+  if (bytes.data == nullptr || bytes.size != kJoinPolicyRecordLen) {
+    return Status::error(StatusCode::ProtocolError, "rljp1 size");
+  }
+  ByteReader reader(bytes);
+  std::uint32_t magic = 0, crc = 0, stored_revision = 0;
+  std::uint16_t format = 0, used_len = 0;
+  std::uint8_t reserved = 0;
+  JoinPolicy policy{};
+  Status status = reader.read_u32(magic);
+  if (status) status = reader.read_u16(format);
+  if (status) status = reader.read_u16(used_len);
+  if (status) status = reader.read_u32(stored_revision);
+  if (status) status = reader.read_u32(policy.avoid_not_here_s);
+  if (status) status = reader.read_u32(policy.avoid_blocked_s);
+  if (status) status = reader.read_u32(policy.removal_holdoff_s);
+  if (status) status = reader.read_u32(policy.retry_max_s);
+  if (status) status = reader.read_u32(policy.isolation_notice_s);
+  if (status) status = reader.read_u16(policy.start_jitter_ms);
+  if (status) status = reader.read_u8(policy.role);
+  if (status) status = reader.read_u8(reserved);
+  if (status) status = reader.read_u32(crc);
+  if (!status) return status;
+  if (magic != kJoinPolicyMagic || format != kRecordFormat || used_len != kJoinPolicyRecordLen ||
+      reserved != 0 || stored_revision == 0 ||
+      crc32_iso_hdlc(ByteView{bytes.data, kJoinPolicyRecordLen - 4}) != crc ||
+      !join_policy_check(policy, static_cast<std::uint8_t>(kMemberRoleMask))) {
+    return Status::error(StatusCode::IntegrityError, "rljp1 record");
+  }
+  out = policy;
+  revision = stored_revision;
+  return Status::success();
+}
+
 }  // namespace routeloom::sdkv1

@@ -484,6 +484,27 @@ pub(super) struct MeshSnap {
     pub(super) plan_phase: u8,
     pub(super) plan_epoch: u32,
     pub(super) plan_channel: u8,
+    /// Device API (V2-14): the membership stage, the membership events and
+    /// the last cause, the last finished operation and its result, the
+    /// connectivity state with its events and reason — counted across the
+    /// peer's restarts.
+    pub(super) stage: u8,
+    pub(super) membership_events: u32,
+    pub(super) last_cause: u16,
+    pub(super) op_last: u32,
+    pub(super) op_result: u16,
+    pub(super) connectivity: u8,
+    pub(super) connectivity_events: u32,
+    pub(super) connectivity_reason: u16,
+    /// F05: calls made from inside Device callbacks, and the Busy answers.
+    pub(super) reentry_calls: u32,
+    pub(super) reentry_busy: u32,
+    /// P05: deferred APPLIED requests, completions and refused completions.
+    pub(super) applied_requests: u32,
+    pub(super) applied_completed: u32,
+    pub(super) applied_refused: u32,
+    /// The stored JoinPolicy revision (0 before any).
+    pub(super) policy_revision: u32,
 }
 
 #[allow(dead_code)]
@@ -653,6 +674,22 @@ pub(super) fn parse_mesh_snap(payload: &[u8]) -> MeshSnap {
     snap.plan_epoch = get_u32(payload, &mut pos);
     snap.plan_channel = payload[pos];
     pos += 1;
+    snap.stage = payload[pos];
+    pos += 1;
+    snap.membership_events = get_u32(payload, &mut pos);
+    snap.last_cause = get_u16(payload, &mut pos);
+    snap.op_last = get_u32(payload, &mut pos);
+    snap.op_result = get_u16(payload, &mut pos);
+    snap.connectivity = payload[pos];
+    pos += 1;
+    snap.connectivity_events = get_u32(payload, &mut pos);
+    snap.connectivity_reason = get_u16(payload, &mut pos);
+    snap.reentry_calls = get_u32(payload, &mut pos);
+    snap.reentry_busy = get_u32(payload, &mut pos);
+    snap.applied_requests = get_u32(payload, &mut pos);
+    snap.applied_completed = get_u32(payload, &mut pos);
+    snap.applied_refused = get_u32(payload, &mut pos);
+    snap.policy_revision = get_u32(payload, &mut pos);
     assert_eq!(pos, payload.len(), "G fully consumed");
     snap
 }
@@ -1079,6 +1116,96 @@ impl MeshPeer {
 
     pub(super) fn cut_after_switching(&mut self) {
         self.send(b"F");
+    }
+
+    /// Device::leave (`true`) or Device::request_join: the status code
+    /// and the operation id; `None` when the peer lost power inside the
+    /// call (an armed `W` fault): it is respawned from its saved image.
+    pub(super) fn device_op(&mut self, leave: bool, now: u64) -> Option<(u8, u32)> {
+        self.send(if leave { b"L" } else { b"Y" });
+        let Some(reply) = self.recv() else {
+            self.respawn(now);
+            return None;
+        };
+        assert_eq!(reply.len(), 6);
+        assert_eq!(reply[0], if leave { b'l' } else { b'y' });
+        Some((
+            reply[1],
+            u32::from_le_bytes([reply[2], reply[3], reply[4], reply[5]]),
+        ))
+    }
+
+    /// Tracked send with a delivery class (0 best effort, 1 reliable) and a
+    /// coalesce key (0 none).
+    pub(super) fn app_send_with(&mut self, dst: u64, class: u8, key: u16, payload: &[u8]) {
+        assert!((1..=128).contains(&payload.len()), "app payload bound");
+        let mut command = vec![b'A'];
+        command.extend_from_slice(&dst.to_le_bytes());
+        command.push(class);
+        command.extend_from_slice(&key.to_le_bytes());
+        command.extend_from_slice(payload);
+        self.send(&command);
+    }
+
+    /// This node's APPLIED execution lease.
+    pub(super) fn applied_lease(&mut self) -> [u8; 16] {
+        self.send(b"C");
+        let reply = self.recv().expect("lease reply");
+        assert_eq!(reply.len(), 17);
+        assert_eq!(reply[0], b'c');
+        let mut lease = [0u8; 16];
+        lease.copy_from_slice(&reply[1..]);
+        lease
+    }
+
+    /// Tracked APPLIED send under `lease` (the destination's).
+    pub(super) fn applied_send(&mut self, dst: u64, lease: &[u8; 16], payload: &[u8]) {
+        let mut command = vec![b'B'];
+        command.extend_from_slice(&dst.to_le_bytes());
+        command.extend_from_slice(lease);
+        command.extend_from_slice(payload);
+        self.send(&command);
+    }
+
+    /// Defers every APPLIED request here and completes it after `delay_ms`.
+    pub(super) fn defer_applied(&mut self, delay_ms: u32) {
+        let mut command = vec![b'D'];
+        command.extend_from_slice(&delay_ms.to_le_bytes());
+        self.send(&command);
+    }
+
+    /// F05: try send and leave from inside Device callbacks.
+    pub(super) fn probe_reentry(&mut self, on: bool) {
+        self.send(&[b'G', u8::from(on)]);
+    }
+
+    /// Device::set_join_policy with `holdoff_s` as the removal holdoff:
+    /// the status code and the stored revision.
+    pub(super) fn set_join_policy(&mut self, holdoff_s: u32, expected: u32) -> (u8, u32) {
+        self.set_join_policy_with(holdoff_s, expected, None)
+    }
+
+    /// As `set_join_policy`, with an isolation notice (seconds).
+    pub(super) fn set_join_policy_with(
+        &mut self,
+        holdoff_s: u32,
+        expected: u32,
+        isolation_notice_s: Option<u32>,
+    ) -> (u8, u32) {
+        let mut command = vec![b'X'];
+        command.extend_from_slice(&holdoff_s.to_le_bytes());
+        command.extend_from_slice(&expected.to_le_bytes());
+        if let Some(notice) = isolation_notice_s {
+            command.extend_from_slice(&notice.to_le_bytes());
+        }
+        self.send(&command);
+        let reply = self.recv().expect("policy reply");
+        assert_eq!(reply.len(), 6);
+        assert_eq!(reply[0], b'x');
+        (
+            reply[1],
+            u32::from_le_bytes([reply[2], reply[3], reply[4], reply[5]]),
+        )
     }
 
     /// Explicit gateway send (Service=21, SDK_RAM scope) through

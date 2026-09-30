@@ -168,17 +168,16 @@ MonotonicMs MeshNode::work_deadline(const TxJob& job) const noexcept {
 }
 
 bool MeshNode::applied_slot_available(const MonotonicMs now_ms) noexcept {
-  // Strictly the free-slot case: reclaim paths destroy records, so the
-  // probe admits only what the mutating call can take without reclaiming.
-  // Expired records sweep independently in process_applied; a refused
-  // admission retries honestly instead of losing another record's verdict.
+  // Read-only: a free slot, or one allocate_applied() may reclaim — an
+  // expired record or an ACKed one (the origin holds its verdict, 01 §1.7).
+  // An unacked in-window record is never reclaimed, so a full pool of them
+  // refuses and the origin retries.
   if (applied_records_.size() < applied_records_.capacity()) return true;
   bool reclaimable = false;
   applied_records_.for_each([&](const AppliedRecord& value) {
     if (value.expires_at_ms <= now_ms || value.acked) reclaimable = true;
   });
-  (void)reclaimable;
-  return false;
+  return reclaimable;
 }
 
 bool MeshNode::component_event_available() const noexcept {

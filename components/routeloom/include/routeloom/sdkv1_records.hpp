@@ -485,4 +485,46 @@ Status proxy_policy_record_decode(ByteView bytes, ProxyPolicyRecord& out) noexce
 ProxyPolicyStatus proxy_policy_decide(const ProxyPolicyRecord* stored, const ProxyPolicySet& set,
                                       bool& write) noexcept;
 
+// --- JoinPolicy / RLJP1 (#193) -------------------------------------------------
+// The device's join and rejoin timing, set through Device::set_join_policy.
+// Defaults are the fixed values the SDK used before the policy existed;
+// join_policy_check() enforces the ranges, so no application can turn the
+// bounded backoff or the removal holdoff off.
+struct JoinPolicy {
+  std::uint32_t avoid_not_here_s{21600};  // authenticated DenyNotHere hold, 300..86400
+  std::uint32_t avoid_blocked_s{86400};   // DenyBlocked hold, 3600..604800
+  std::uint32_t removal_holdoff_s{600};   // after a site removal, 60..3600
+  std::uint32_t retry_max_s{600};         // retry_after cap, 60..3600
+  // Isolated this long raises one event (never a leave); 0 off, 300..2592000.
+  std::uint32_t isolation_notice_s{0};
+  std::uint16_t start_jitter_ms{0};       // unassigned boot start spread, 0..60000
+  // Requested member role bits (endpoint 1, relay 2, gateway 4); 0 keeps the
+  // image default.
+  std::uint8_t role{0};
+
+  bool operator==(const JoinPolicy& o) const noexcept {
+    return avoid_not_here_s == o.avoid_not_here_s && avoid_blocked_s == o.avoid_blocked_s &&
+           removal_holdoff_s == o.removal_holdoff_s && retry_max_s == o.retry_max_s &&
+           isolation_notice_s == o.isolation_notice_s && start_jitter_ms == o.start_jitter_ms &&
+           role == o.role;
+  }
+};
+
+// `allowed_roles`: the role bits this image may request (gateway only on
+// a gateway image).
+Status join_policy_check(const JoinPolicy& policy, std::uint8_t allowed_roles) noexcept;
+
+// RLJP1 (namespace rlmaint, key "j0"; a leave or removal keeps it):
+//  0 u32 magic "RLJP" | 4 u16 format=1 | 6 u16 used_len=40 | 8 u32 revision |
+// 12 u32 avoid_not_here_s | 16 u32 avoid_blocked_s | 20 u32 removal_holdoff_s |
+// 24 u32 retry_max_s | 28 u32 isolation_notice_s | 32 u16 start_jitter_ms |
+// 34 u8 role | 35 u8 reserved | 36 u32 crc32
+constexpr std::uint32_t kJoinPolicyMagic = 0x524C4A50U;  // "RLJP"
+constexpr std::size_t kJoinPolicyRecordLen = 40;
+
+Status join_policy_record_encode(const JoinPolicy& policy, std::uint32_t revision,
+                                 std::array<std::uint8_t, kJoinPolicyRecordLen>& out) noexcept;
+Status join_policy_record_decode(ByteView bytes, JoinPolicy& out,
+                                 std::uint32_t& revision) noexcept;
+
 }  // namespace routeloom::sdkv1

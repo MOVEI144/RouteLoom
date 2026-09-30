@@ -125,6 +125,9 @@ struct CoordinatorEvent {
   // Boot transport: USB-direct (a gateway attached to its host) vs radio
   // scan. Healthy adopted boots ignore it (the Joiner adopts silently).
   bool usb_direct{false};
+  // Owner verified an RLX1 LeftReady boot: a local leave has no holdoff.
+  // RLV1 cleanup and generation checks still apply.
+  bool local_leave_completed{false};
   // Rld1Rx: the frame bytes are valid during the call only.
   JoinRxMeta rld1_meta{};
   ByteView rld1_frame{};
@@ -522,6 +525,13 @@ class SecurityCoordinator final : public BootstrapSink,
   // lands the removal (RemovalRequired) or reports recovery. The mesh
   // node and discovery stay up: recovery never changes the network.
   Status start_recovery_join(MonotonicMs now) noexcept;
+  // Device::request_join: a member re-verifies its membership (the
+  // recovery join above); a zero-touch joiner ends its scan backoff now.
+  Status request_join(MonotonicMs now) noexcept;
+  // JoinPolicy (range-checked by the caller): the requested role and join
+  // timing for the running and every later Joiner, and the RLV1 removal
+  // holdoff from the next removal on.
+  Status apply_join_policy(const JoinerConfig& policy, std::uint32_t holdoff_ms) noexcept;
   // Names the last removed (site, generation) from the RLX1 journal's
   // UnassignedReady watermark; both zero clears. Consumed at every
   // Joiner start so a post-removal Allow for an older generation of
@@ -632,7 +642,6 @@ class SecurityCoordinator final : public BootstrapSink,
   static constexpr std::size_t kDemuxEntries = 8;
   static constexpr std::size_t kStagedFrames = 4;
   static constexpr std::uint32_t kDemuxHoldMs = 30000;
-  static constexpr std::uint32_t kRemovalHoldoffMs = 600000;
 
   struct DemuxEntry {
     bool used{false};
@@ -1106,6 +1115,7 @@ class SecurityCoordinator final : public BootstrapSink,
   bool member_apply_pending_{false};
   MonotonicMs last_now_{0};
   bool removal_holdoff_armed_{false};
+  std::uint32_t removal_holdoff_ms_{kLocalRevocationHoldoffMs};
   MonotonicMs removal_holdoff_at_{0};
   std::uint64_t removal_watermark_site_id_{0};
   // The site whose stored ProxyPolicySet is closed (0: every proxy open).

@@ -1412,6 +1412,48 @@ void test_bad_payload_session_jump_is_ignored() {
   CHECK(!w.obs(4)->has_diag("GROUP_STALE_SESSION"));
 }
 
+// Latest-value send (SendOptions::coalesce_key): while 3 is unreachable,
+// a newer BEST_EFFORT send with the same key ends the untransmitted older
+// one CANCELLED_SUPERSEDED; another key or another destination is kept,
+// and RELIABLE with a key is refused. Once routed, 3 receives the latest
+// value of each key only.
+void test_coalesce_latest() {
+  SimWorld w;
+  scoped_profile(w, 1, kFastPeriodMs, kFastLifetimeMs);
+  for (NodeId id = 1; id <= 3; ++id) w.add(id);
+  w.start_all();
+  SendOptions options{};
+  options.delivery = DeliveryClass::BestEffort;
+  options.lifetime_ms = 20000;
+  options.coalesce_key = 7;
+  const std::uint8_t values[] = {'1', '2', '3', 'k', 'd'};
+  MessageId first{}, second{}, latest{}, other_key{}, other_destination{};
+  CHECK_OK(w.at(1)->send(3, ByteView{&values[0], 1}, options, w.now, first));
+  CHECK_OK(w.at(1)->send(3, ByteView{&values[1], 1}, options, w.now, second));
+  CHECK(w.at(1)->delivery(first).state == DeliveryState::CancelledBeforeTx);
+  CHECK(std::string(w.at(1)->delivery(first).reason) == "CANCELLED_SUPERSEDED");
+  CHECK_OK(w.at(1)->send(3, ByteView{&values[2], 1}, options, w.now, latest));
+  CHECK(std::string(w.at(1)->delivery(second).reason) == "CANCELLED_SUPERSEDED");
+  CHECK_OK(w.at(1)->send(2, ByteView{&values[4], 1}, options, w.now, other_destination));
+  options.coalesce_key = 8;
+  CHECK_OK(w.at(1)->send(3, ByteView{&values[3], 1}, options, w.now, other_key));
+  CHECK(w.at(1)->delivery(latest).state == DeliveryState::WaitingForRoute);
+  CHECK(w.at(1)->delivery(other_destination).state == DeliveryState::WaitingForRoute);
+  options.delivery = DeliveryClass::Reliable;
+  MessageId refused{};
+  CHECK(w.at(1)->send(3, ByteView{&values[0], 1}, options, w.now, refused).code ==
+        StatusCode::InvalidArgument);
+
+  w.link(1, 2, 1, 1);
+  w.link(2, 3, 1, 1);
+  w.run(8000);
+  std::string received;
+  for (const auto& message : w.obs(3)->messages) received.push_back(static_cast<char>(message.at(0)));
+  std::sort(received.begin(), received.end());
+  CHECK(received == "3k");
+  CHECK(w.obs(2)->messages.size() == 1);
+}
+
 void test_unicast_ordering() {
   // 1 - 2 - 3 line under gateway 1. Three ordered RELIABLE messages to 3:
   // each successor is held (ORDER_WAIT) until its predecessor is Delivered,
@@ -2461,6 +2503,7 @@ int main(int argc, char** argv) {
     test_authenticated_session_switch_commits();
     test_bad_payload_session_jump_is_ignored();
     test_unicast_ordering();
+    test_coalesce_latest();
     test_promote_hold_first_frame();
     test_revoked_group_sender_with_old_key();
     test_readmitted_group_sender_epoch_boundary();

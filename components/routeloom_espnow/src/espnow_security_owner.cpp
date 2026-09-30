@@ -704,6 +704,9 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
   event.boot_witness = rlboot_witness;
   event.boot_prepared = rlboot_prepared;
   event.usb_direct = usb_direct;
+  event.local_leave_completed = boot_snap.phase == sdkv1::LifecyclePhase::UnassignedReady &&
+                               journal.has_record() &&
+                               journal.record().mode == sdkv1::LifecycleMode::LeftReady;
   const Status status = coordinator().step(event);
   if (!status) return status;
   boot_witness_ = rlboot_witness;
@@ -1244,6 +1247,9 @@ void EspNowSecurityOwner::drain_lifecycle_actions(const MonotonicMs now_ms) noex
         on_lifecycle_recovery(action, now_ms);
         break;
       case sdkv1::LifecycleActionTag::RestartUnassigned:
+        if (action.reason == sdkv1::LifecycleActionReason::LocalLeave) {
+          reboot_for_lifecycle("p6 local leave done — rebooting unassigned", true);
+        }
         ESP_LOGW(config_.log_tag, "p6: removal holdoff done — rebooting unassigned");
         reboot_for_lifecycle("p6 restart-unassigned");
         break;
@@ -1329,7 +1335,42 @@ void EspNowSecurityOwner::complete_lifecycle_recovery(const bool reprovisioned,
   (void)lifecycle().dispatch(sdkv1::LifecycleInput::Recovery(reprovisioned), now_ms);
 }
 
-[[noreturn]] void EspNowSecurityOwner::reboot_for_lifecycle(const char* reason) noexcept {
+Status EspNowSecurityOwner::local_leave(const MonotonicMs now_ms) noexcept {
+  if (!booted_ || !lifecycle_live_ || !lifecycle_booted_ || runtime_ == nullptr) {
+    return Status::error(StatusCode::InvalidState, "LEAVE_NOT_MEMBER");
+  }
+  if (runtime_->node().in_external_callback()) {
+    return Status::error(StatusCode::Busy, "owner leave in callback");
+  }
+  const Status status = lifecycle().dispatch(sdkv1::LifecycleInput::LocalLeave(), now_ms);
+  if (!status) return status;
+  // The intent is durable: nothing queued may leave under the old site.
+  (void)runtime_->node().cancel_all("CANCELLED_LEAVE");
+  // Stop admission and dispatch before returning, including the runtime
+  // pass that precedes the lifecycle's next erasure step.
+  (void)lifecycle_runtime_.remove_member_runtime();
+  return Status::success();
+}
+
+Status EspNowSecurityOwner::request_join(const MonotonicMs now_ms) noexcept {
+  if (!booted_ || !coordinator_live_ || removal_pending_) {
+    return Status::error(StatusCode::InvalidState, "JOIN_NOT_AVAILABLE");
+  }
+  return coordinator().request_join(now_ms);
+}
+
+Status EspNowSecurityOwner::apply_join_policy(const sdkv1::JoinerConfig& policy,
+                                              const std::uint32_t holdoff_ms) noexcept {
+  if (!coordinator_live_) return Status::error(StatusCode::InvalidState, "owner not begun");
+  const Status status = coordinator().apply_join_policy(policy, holdoff_ms);
+  if (!status) return status;
+  if (lifecycle_live_) lifecycle().set_holdoff_ms(holdoff_ms);
+  return Status::success();
+}
+
+[[noreturn]] void EspNowSecurityOwner::reboot_for_lifecycle(const char* reason,
+                                                            const bool leave) noexcept {
+  if (restart_hook_ != nullptr) restart_hook_(restart_ctx_, leave);
   ESP_LOGE(config_.log_tag, "p6: %s (clean reboot, not a fault)", reason);
   vTaskDelay(pdMS_TO_TICKS(100));  // let the line reach the UART
   esp_restart();

@@ -123,6 +123,11 @@ void MeshNode::dispatch_applied(const wire::Header& data, const ByteView body,
     } else if (applied_sink_ == nullptr) {
       code = static_cast<std::uint32_t>(endpoint::AppResultRefusal::NoEndpoint);
       ++applied_stats_.refusals_no_endpoint;
+    } else if (open_applied_tickets(now_ms) >= kAppliedTicketMax) {
+      // Every ticket is still open: refuse before the endpoint runs, so it
+      // never holds more than kAppliedTicketMax at once.
+      code = static_cast<std::uint32_t>(endpoint::AppResultRefusal::Capacity);
+      ++applied_stats_.refusals_capacity;
     } else {
       reply = AppliedReply{};
       if (++next_applied_ticket_ == 0) ++next_applied_ticket_;
@@ -169,6 +174,15 @@ void MeshNode::dispatch_applied(const wire::Header& data, const ByteView body,
   }
   ++applied_stats_.results_committed;
   (void)emit_applied_result(record, now_ms);
+}
+
+std::size_t MeshNode::open_applied_tickets(const MonotonicMs now_ms) const noexcept {
+  // A ticket past its request deadline can no longer complete.
+  std::size_t open = 0;
+  applied_records_.for_each([&](const AppliedRecord& record) {
+    if (record.ticket != 0 && now_ms < record.emit_deadline_ms) ++open;
+  });
+  return open;
 }
 
 Status MeshNode::complete_applied(const std::uint64_t ticket, const AppliedReply& reply,

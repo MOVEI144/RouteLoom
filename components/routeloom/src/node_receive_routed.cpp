@@ -78,6 +78,9 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
                              now_ms);
       return;
     }
+    if ((frame.header.flags & wire::kFlagEndProtected) != 0) {
+      observer_.on_verified_contact(frame.header.origin, now_ms);
+    }
     if (wire::is_extension_type(type)) {
       // No extension type is implemented in this build: an authenticated
       // refusal with a reason, before any acceptance (no HOP_ACCEPT, no
@@ -828,6 +831,9 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
     refuse_without_binding(peer, frame.header, "ADMISSION_NO_BINDING",
                            now_ms);
     return;
+  }
+  if ((frame.header.flags & wire::kFlagEndProtected) != 0) {
+    observer_.on_verified_contact(frame.header.origin, now_ms);
   }
   MonotonicMs txn_deadline = 0;
   if (scheduler_.free_slots() < 1 || !scheduler_.control_slot_available() ||

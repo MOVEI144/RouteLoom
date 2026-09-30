@@ -19,9 +19,7 @@ constexpr std::uint64_t kReconcileWaitMs = 5000;    // storage re-read spacing
 constexpr std::uint8_t kReconcileMaxRetries = 3;    // consecutive read failures
 constexpr std::uint32_t kDecisionMinMs = 500;       // m2 decision timeout clamp
 constexpr std::uint32_t kDecisionMaxMs = 5000;
-constexpr std::uint32_t kHintRetryMaxMs = 600000;  // unauthenticated hint cap
 constexpr std::uint32_t kDirectRetryFallbackMs = 5000;
-constexpr std::uint32_t kDirectRetryMaxMs = 600000;
 // A member re-verifying its retained site rescans at least this often: the
 // site it lost may come back at any moment (radio healed, relay rebooted),
 // and the scan is three channels of DISCOVER, not a handshake.
@@ -91,7 +89,10 @@ Joiner::Joiner(const JoinerConfig& config, IdentityStore& identity, SiteStore& s
       observer_(observer),
       aead_(aead),
       link_observer_(*this),
-      link_(make_link_config(config), port, entropy_, link_observer_) {}
+      link_(make_link_config(config), port, entropy_, link_observer_) {
+  candidates_.set_avoid(config_.avoid_not_here_ms, config_.avoid_blocked_ms);
+  candidates_.set_retry_max(config_.retry_max_ms);
+}
 
 Joiner::~Joiner() {
   teardown_attempt();
@@ -334,8 +335,10 @@ void Joiner::LinkObserver::on_relay_status(const RelayStatusCode status,
   if (owner_.state_ != JoinState::WaitM2 && owner_.state_ != JoinState::WaitM4) return;
   owner_.hint_valid_ = true;
   owner_.hint_status_ = status;
-  owner_.hint_retry_ms_ =
-      retry_after_ms > kHintRetryMaxMs ? kHintRetryMaxMs : retry_after_ms;
+  // Unauthenticated hint: capped by the policy's retry maximum.
+  owner_.hint_retry_ms_ = retry_after_ms > owner_.config_.retry_max_ms
+                              ? owner_.config_.retry_max_ms
+                              : retry_after_ms;
 }
 
 void Joiner::LinkObserver::on_link_failure(const char* reason) noexcept {
@@ -447,6 +450,30 @@ Status Joiner::on_direct_message(const JoinAuthPhase phase, const std::uint8_t s
   return Status::success();
 }
 
+Status Joiner::retry_now(const MonotonicMs now) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "joiner re-entry");
+  InCall guard(in_call_);
+  if (state_ == JoinState::Stopped) return Status::error(StatusCode::InvalidState, "joiner stopped");
+  if (state_ == JoinState::Backoff && backoff_deadline_ > now) backoff_deadline_ = now;
+  return Status::success();
+}
+
+Status Joiner::apply_policy(const JoinerConfig& policy) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "joiner re-entry");
+  InCall guard(in_call_);
+  JoinerConfig next = config_;
+  next.requested_role = policy.requested_role;
+  if (!role_valid(next)) return Status::error(StatusCode::InvalidArgument, "joiner role");
+  next.avoid_not_here_ms = policy.avoid_not_here_ms;
+  next.avoid_blocked_ms = policy.avoid_blocked_ms;
+  next.retry_max_ms = policy.retry_max_ms;
+  next.start_jitter_ms = policy.start_jitter_ms;
+  config_ = next;
+  candidates_.set_avoid(config_.avoid_not_here_ms, config_.avoid_blocked_ms);
+  candidates_.set_retry_max(config_.retry_max_ms);
+  return Status::success();
+}
+
 Status Joiner::stop(const MonotonicMs now) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "joiner re-entry");
   InCall guard(in_call_);
@@ -462,6 +489,8 @@ Status Joiner::stop(const MonotonicMs now) noexcept {
     channel_waiting_ = false;
     candidates_.~JoinCandidates();
     new (&candidates_) JoinCandidates();
+    candidates_.set_avoid(config_.avoid_not_here_ms, config_.avoid_blocked_ms);
+    candidates_.set_retry_max(config_.retry_max_ms);
     last_now_ = 0;
     clock_uncertain_ = false;
     last_m1_ms_ = 0;
@@ -912,8 +941,8 @@ void Joiner::finish_attempt(const JoinAttemptOutcome outcome, const std::uint32_
         outcome == JoinAttemptOutcome::AuthorityBusy) {
       const std::uint64_t requested_ms = static_cast<std::uint64_t>(retry_after_s) * 1000;
       const std::uint64_t retry_ms = requested_ms == 0 ? kDirectRetryFallbackMs
-                                      : requested_ms > kDirectRetryMaxMs ? kDirectRetryMaxMs
-                                                                         : requested_ms;
+                                      : requested_ms > config_.retry_max_ms ? config_.retry_max_ms
+                                                                            : requested_ms;
       backoff_deadline_ = sat_add(now, retry_ms);
       set_state(JoinState::Backoff);
     } else {
@@ -1066,6 +1095,13 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
   // the scan: the attachment already selected the site.
   if (direct_) {
     begin_direct_attempt();
+  } else if (config_.start_jitter_ms != 0) {
+    // Unassigned boot spread (JoinPolicy): devices powered on together do
+    // not scan in the same instant. The Backoff poll then scans.
+    std::uint32_t draw = 0;
+    (void)entropy_.fill(MutableByteView{reinterpret_cast<std::uint8_t*>(&draw), sizeof draw});
+    backoff_deadline_ = sat_add(now, draw % (config_.start_jitter_ms + 1U));
+    set_state(JoinState::Backoff);
   } else {
     start_scan();
   }

@@ -268,6 +268,8 @@ enum class LifecycleInputTag : std::uint8_t {
   RemovalRequired = 10,
   AuthenticatedPeerBound = 11,
   AuthenticatedPeerGone = 12,
+  // The device's own leave (Device::leave): refused unless adopted.
+  LocalLeave = 13,
 };
 
 struct LifecycleBootEvidence {
@@ -424,6 +426,11 @@ struct LifecycleInput {
     in.tag = LifecycleInputTag::Stop;
     return in;
   }
+  static LifecycleInput LocalLeave() noexcept {
+    LifecycleInput in{};
+    in.tag = LifecycleInputTag::LocalLeave;
+    return in;
+  }
 };
 
 enum class LifecycleActionTag : std::uint8_t {
@@ -444,6 +451,8 @@ enum class LifecycleActionReason : std::uint8_t {
   SelfRevocation = 1,
   LinkFailure = 2,
   ResumeSwitch = 3,
+  // RestartUnassigned that completes a local leave.
+  LocalLeave = 4,
 };
 
 // Owner-side AdoptNetwork disposition. The mesh node and discovery cannot
@@ -670,6 +679,8 @@ struct LifecycleConfig {
   // transmission requires kCapRrsGossipV1, otherwise the lifecycle still
   // accepts and applies RRS1 but stays silent on the gossip lane.
   std::uint32_t enabled_features{0};
+  // Removal holdoff before the unassigned restart (JoinPolicy, 60 s..1 h).
+  std::uint32_t holdoff_ms{600000};
 };
 
 // Point-in-time view: phase, adopted network, applied epochs, the
@@ -728,6 +739,8 @@ class MembershipLifecycle final {
   // time (including while another call is in flight).
   bool permits_recovery_control(const PeerCredentialStamp& stamp) const noexcept;
   bool quiescent() const noexcept;
+  // JoinPolicy: the removal holdoff, from the next check on.
+  void set_holdoff_ms(std::uint32_t holdoff_ms) noexcept { config_.holdoff_ms = holdoff_ms; }
   // Next gossip/exchange work, or UINT64_MAX when nothing is scheduled.
   MonotonicMs next_deadline() const noexcept;
   // Owner chunk/ack demux (G-SEC P6 PR D): true when the gossip exchange
@@ -782,6 +795,7 @@ class MembershipLifecycle final {
   Status on_action_complete(const LifecycleActionComplete& done, MonotonicMs now_ms) noexcept;
   Status on_stop(MonotonicMs now_ms) noexcept;
   Status on_removal(ByteView notice, MonotonicMs now_ms) noexcept;
+  Status on_local_leave(MonotonicMs now_ms) noexcept;
   Status removal_poll(MonotonicMs now_ms) noexcept;
   bool removal_proof_valid(const LifecycleRecord& record) noexcept;
   Status on_renew(ByteView body, MonotonicMs now_ms) noexcept;

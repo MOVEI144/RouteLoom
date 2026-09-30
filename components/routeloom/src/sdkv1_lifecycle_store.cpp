@@ -38,7 +38,8 @@ void put64(std::uint8_t* p, std::uint64_t n) noexcept {
 Status valid(const LifecycleRecord& r) noexcept {
   if (r.mode != LifecycleMode::Removing && r.mode != LifecycleMode::Holdoff &&
       r.mode != LifecycleMode::UnassignedReady && r.mode != LifecycleMode::Idle &&
-      r.mode != LifecycleMode::Prepared && r.mode != LifecycleMode::Switching) {
+      r.mode != LifecycleMode::Prepared && r.mode != LifecycleMode::Switching &&
+      r.mode != LifecycleMode::LocalLeave && r.mode != LifecycleMode::LeftReady) {
     return Status::error(StatusCode::Unsupported, "rlx mode reserved");
   }
   const bool cutover = r.mode == LifecycleMode::Prepared || r.mode == LifecycleMode::Switching;
@@ -99,6 +100,12 @@ Status valid(const LifecycleRecord& r) noexcept {
   return Status::success();
 }
 
+// Record schema: 2 for the leave modes, 1 for every other mode (older
+// builds read schema 1 only, so they never see a leave).
+std::uint32_t schema_of(LifecycleMode mode) noexcept {
+  return mode == LifecycleMode::LocalLeave || mode == LifecycleMode::LeftReady ? 2 : 1;
+}
+
 Status structure(ByteView bytes) noexcept {
   if (bytes.data == nullptr || bytes.size < 88 || bytes.size > 88 + kLifecyclePayloadMax ||
       get32(bytes.data) != kLifecycleMagic || get16(bytes.data + 4) != 1 ||
@@ -112,7 +119,8 @@ Status semantic(ByteView bytes, void* context) noexcept {
   return lifecycle_record_decode(bytes, *static_cast<LifecycleRecord*>(context));
 }
 const SealedRecordFormat kFormat{kLifecycleMagic, kLifecycleSeal, kLifecycleSlotBytes,
-                                  88, 88 + kLifecyclePayloadMax, true, &structure, &semantic};
+                                  88, 88 + kLifecyclePayloadMax, true, &structure, &semantic,
+                                  2};
 }  // namespace
 
 const SealedRecordFormat& lifecycle_record_format() noexcept { return kFormat; }
@@ -130,7 +138,7 @@ Status lifecycle_record_encode(const LifecycleRecord& r, std::uint32_t seal,
   put32(p, kLifecycleMagic);
   put16(p + 4, 1);
   put16(p + 6, static_cast<std::uint16_t>(len));
-  put32(p + 8, 1);
+  put32(p + 8, schema_of(r.mode));
   put32(p + 12, seal);
   put32(p + 16, seq);
   p[20] = static_cast<std::uint8_t>(r.mode);
@@ -156,7 +164,8 @@ Status lifecycle_record_decode(ByteView bytes, LifecycleRecord& out) noexcept {
   const Status head = structure(bytes);
   if (!head) return head;
   const auto* p = bytes.data;
-  if (get32(p + 8) != 1 || get32(p + 12) != kLifecycleSeal ||
+  if (get32(p + 8) != schema_of(static_cast<LifecycleMode>(p[20])) ||
+      get32(p + 12) != kLifecycleSeal ||
       get32(p + bytes.size - 4) != crc32_iso_hdlc(ByteView{p, bytes.size - 4})) {
     return Status::error(StatusCode::IntegrityError, "rlx seal/schema/crc");
   }
@@ -217,15 +226,35 @@ Status LifecycleStore::begin_removal(const LifecycleRecord& record) noexcept {
         (record.old_network >> 32U) >= (record_.old_network >> 32U)));
   if (record.mode != LifecycleMode::Removing || pair_.uncertain() || pair_.quarantined() ||
       (pair_.has_active() && record_.mode != LifecycleMode::Idle &&
-       record_.mode != LifecycleMode::Prepared && !fresh_after_removal)) {
+       record_.mode != LifecycleMode::Prepared && record_.mode != LifecycleMode::LeftReady &&
+       !fresh_after_removal)) {
     return Status::error(StatusCode::InvalidState, "rlx removal state");
   }
   return commit(record, has_record() && record_.mode == LifecycleMode::Prepared);
 }
+Status LifecycleStore::begin_leave(const LifecycleRecord& record) noexcept {
+  if (record.mode != LifecycleMode::LocalLeave || record.payload.size != 0 ||
+      pair_.uncertain() || pair_.quarantined() ||
+      (pair_.has_active() && record_.mode != LifecycleMode::Idle &&
+       record_.mode != LifecycleMode::UnassignedReady &&
+       record_.mode != LifecycleMode::LeftReady)) {
+    return Status::error(StatusCode::InvalidState, "rlx leave state");
+  }
+  return commit(record, false);
+}
+Status LifecycleStore::left_ready() noexcept {
+  if (!pair_.has_active() || record_.mode != LifecycleMode::LocalLeave || pair_.uncertain() ||
+      pair_.quarantined()) {
+    return Status::error(StatusCode::InvalidState, "rlx left state");
+  }
+  LifecycleRecord next = record_;
+  next.mode = LifecycleMode::LeftReady;
+  return commit(next, false);
+}
 Status LifecycleStore::prepare(const LifecycleRecord& record) noexcept {
   if (record.mode != LifecycleMode::Prepared || pair_.uncertain() || pair_.quarantined() ||
       (has_record() && record_.mode != LifecycleMode::Idle &&
-       record_.mode != LifecycleMode::Prepared)) {
+       record_.mode != LifecycleMode::Prepared && record_.mode != LifecycleMode::LeftReady)) {
     return Status::error(StatusCode::InvalidState, "rlx prepare state");
   }
   if (has_record() && record_.mode == LifecycleMode::Prepared &&

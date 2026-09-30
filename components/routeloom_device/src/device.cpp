@@ -20,6 +20,7 @@
 #include "routeloom/rlcw1.hpp"
 #include "routeloom/sdkv1_security_coordinator.hpp"
 #include "routeloom/secure_clear.hpp"
+#include "routeloom/version.h"
 
 // Long-lived CPU-only state resides in LP SRAM on the C5 Owner profiles and
 // the gateway store set in the C3 RTC bank; radio buffers stay in HP SRAM.
@@ -50,6 +51,38 @@ namespace routeloom {
 #define ROUTELOOM_DEVICE_DEV_RAM !CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
 #define ROUTELOOM_DEVICE_MEMBER !CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
 
+namespace {
+
+// Marks a Device callback: Device calls made inside it return Busy, so no
+// application code re-enters the Owner from its own callbacks.
+class CallbackScope {
+ public:
+  explicit CallbackScope(bool& flag) noexcept : flag_(flag), prior_(flag) { flag_ = true; }
+  ~CallbackScope() { flag_ = prior_; }
+  CallbackScope(const CallbackScope&) = delete;
+  CallbackScope& operator=(const CallbackScope&) = delete;
+
+ private:
+  bool& flag_;
+  bool prior_;
+};
+
+// A request_join ends here at the latest (a join attempt and its retries).
+constexpr std::uint32_t kJoinOperationMs = 60000;
+
+std::uint16_t membership_cause(const MembershipStage stage) noexcept {
+  switch (stage) {
+    case MembershipStage::Member: return ROUTELOOM_REASON_JOINED;
+    case MembershipStage::PendingAuthority: return ROUTELOOM_REASON_JOIN_PENDING;
+    case MembershipStage::Leaving: return ROUTELOOM_REASON_LEAVING;
+    case MembershipStage::Removed: return ROUTELOOM_REASON_REMOVED;
+    case MembershipStage::Recovery: return ROUTELOOM_REASON_RECOVERY_REQUIRED;
+    default: return ROUTELOOM_REASON_MEMBERSHIP_CHANGED;
+  }
+}
+
+}  // namespace
+
 // --- Observer -------------------------------------------------------------------
 // The runtime's single NodeObserver: logs on nodes without a USB host, feeds
 // the Owner's group-key backstop, then forwards to the bridge and the app.
@@ -72,7 +105,23 @@ void Device::Observer::on_message(const MessageKey& key, const NodeId source,
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
   if (device_->bridge_ != nullptr) device_->bridge_->on_message(key, source, payload, assurance);
 #endif
-  if (device_->app_ != nullptr) device_->app_->on_message(key, source, payload, assurance);
+  DeliveryAssurance verified = assurance;
+  if (assurance.origin_verified && device_->runtime_ != nullptr) {
+    device_->note_gateway_contact(source, device_->runtime_->now_ms());
+#if ROUTELOOM_DEVICE_MEMBER
+    // The origin's role comes from its verified member credential.
+    std::uint32_t generation = 0, role = 0;
+    if (device_->security_ == DeviceSecurity::Member && device_->stores_->site().has_site() &&
+        device_->owner_->coordinator().authenticated(
+            source, device_->stores_->site().site().network, generation, role)) {
+      verified.source_role = static_cast<std::uint8_t>(role);
+    }
+#endif
+  }
+  if (device_->app_ != nullptr) {
+    CallbackScope scope(device_->in_callback_);
+    device_->app_->on_message(key, source, payload, verified);
+  }
 }
 
 void Device::Observer::on_group_message(const GroupMessageInfo& info,
@@ -80,7 +129,15 @@ void Device::Observer::on_group_message(const GroupMessageInfo& info,
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
   if (device_->bridge_ != nullptr) device_->bridge_->on_group_message(info, payload);
 #endif
-  if (device_->app_ != nullptr) device_->app_->on_group_message(info, payload);
+  if (device_->app_ != nullptr) {
+    CallbackScope scope(device_->in_callback_);
+    device_->app_->on_group_message(info, payload);
+  }
+}
+
+void Device::Observer::on_verified_contact(const NodeId source,
+                                           const MonotonicMs now_ms) noexcept {
+  device_->note_gateway_contact(source, now_ms);
 }
 
 void Device::Observer::on_delivery(const DeliveryResult& result) noexcept {
@@ -93,14 +150,20 @@ void Device::Observer::on_delivery(const DeliveryResult& result) noexcept {
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
   if (device_->bridge_ != nullptr) device_->bridge_->on_delivery(result);
 #endif
-  if (device_->app_ != nullptr) device_->app_->on_delivery(result);
+  if (device_->app_ != nullptr) {
+    CallbackScope scope(device_->in_callback_);
+    device_->app_->on_delivery(result);
+  }
 }
 
 void Device::Observer::on_group_delivery(const GroupDeliveryResult& result) noexcept {
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
   if (device_->bridge_ != nullptr) device_->bridge_->on_group_delivery(result);
 #endif
-  if (device_->app_ != nullptr) device_->app_->on_group_delivery(result);
+  if (device_->app_ != nullptr) {
+    CallbackScope scope(device_->in_callback_);
+    device_->app_->on_group_delivery(result);
+  }
 }
 
 void Device::Observer::on_applied_result(const MessageKey& key,
@@ -108,7 +171,10 @@ void Device::Observer::on_applied_result(const MessageKey& key,
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
   if (device_->bridge_ != nullptr) device_->bridge_->on_applied_result(key, result);
 #endif
-  if (device_->app_ != nullptr) device_->app_->on_applied_result(key, result);
+  if (device_->app_ != nullptr) {
+    CallbackScope scope(device_->in_callback_);
+    device_->app_->on_applied_result(key, result);
+  }
 }
 
 void Device::Observer::on_diagnostic(const char* reason, const NodeId peer,
@@ -126,7 +192,10 @@ void Device::Observer::on_diagnostic(const char* reason, const NodeId peer,
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
   if (device_->bridge_ != nullptr) device_->bridge_->on_diagnostic(reason, peer, message);
 #endif
-  if (device_->app_ != nullptr) device_->app_->on_diagnostic(reason, peer, message);
+  if (device_->app_ != nullptr) {
+    CallbackScope scope(device_->in_callback_);
+    device_->app_->on_diagnostic(reason, peer, message);
+  }
 }
 
 // --- Boot -----------------------------------------------------------------------
@@ -235,6 +304,24 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
   status = owner.begin(*stores_, entropy, owner_config, config.sleep_image);
   if (!status) return status;
   owner_ = &owner;
+  owner.set_restart_hook(&Device::on_restart, this);
+  default_role_ = owner_config.joiner.requested_role;
+  allowed_roles_ = static_cast<std::uint8_t>(
+      (capability | sdkv1::kMemberRoleEndpoint) & sdkv1::kMemberRoleMask);
+#if ROUTELOOM_DEVICE_MEMBER
+  if (config.security == DeviceSecurity::Member) {
+    // The stored JoinPolicy applies before the owner boots its Joiner. An
+    // unreadable record keeps the defaults; set_join_policy() replaces it.
+    JoinPolicy policy{};
+    std::uint32_t revision = 0;
+    const Status loaded = stores_->join_policy().load(policy, revision);
+    if (!loaded) {
+      ESP_LOGW(tag_, "join policy unreadable (%s): defaults", loaded.detail);
+    } else if (revision != 0 && !apply_join_policy(policy)) {
+      ESP_LOGW(tag_, "stored join policy not applicable: defaults");
+    }
+  }
+#endif
   SecurityProvider& provider = owner.session_provider();
 
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
@@ -400,6 +487,8 @@ void Device::step(const MonotonicMs now_ms) noexcept {
 #if ROUTELOOM_DEVICE_MIGRATION
   if (channel_plan_ != nullptr) poll_channel_plan(now_ms);
 #endif
+  update_membership(now_ms);
+  update_connectivity(now_ms);
   run_posted();
   update_observation_remote();
   if (poll_hook_ != nullptr) poll_hook_(*this, now_ms, poll_ctx_);
@@ -458,19 +547,26 @@ void Device::update_observation_remote() noexcept {
 
 // --- Facade ---------------------------------------------------------------------
 
+bool Device::callback_active() const noexcept {
+  return in_callback_ || (runtime_ != nullptr && runtime_->node().in_external_callback());
+}
+
 Status Device::send(const NodeId destination, const ByteView payload,
                     const SendOptions& options, MessageId& id) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
   if (runtime_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
   return runtime_->send_application(destination, payload, options, id);
 }
 
 Status Device::send_group(const GroupId group, const ByteView payload,
                           const GroupSendOptions& options, MessageId& id) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
   if (runtime_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
   return runtime_->node().send_group(group, payload, options, runtime_->now_ms(), id);
 }
 
 Status Device::cancel(const MessageId& id) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
   if (runtime_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
   return runtime_->node().cancel(id);
 }
@@ -484,6 +580,8 @@ DeviceCapabilities Device::capabilities() const noexcept {
   DeviceCapabilities caps{};
   caps.role = role_;
   caps.member = security_ == DeviceSecurity::Member;
+  caps.security_profile =
+      caps.member ? SecurityProfile::Candidate : SecurityProfile::Development;
   caps.usb_gateway = bridge_ != nullptr;
   caps.max_payload = static_cast<std::uint16_t>(kMaxApplicationPayload);
   caps.max_group_payload = static_cast<std::uint16_t>(kGroupPayloadMax);
@@ -518,6 +616,363 @@ GatewayDelivery* Device::gateway() noexcept {
   }
   gateway_ = &delivery;
   return gateway_;
+}
+
+// --- APPLIED --------------------------------------------------------------------
+
+Status Device::send_applied(const NodeId destination, const ByteView payload,
+                            const ExecutionLease& lease, const SendOptions& options,
+                            MessageId& id) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (runtime_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
+  return runtime_->node().send_applied(destination, payload, lease, options, runtime_->now_ms(),
+                                       id);
+}
+
+Status Device::set_applied_sink(AppliedEndpointSink* sink) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (runtime_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
+  return runtime_->node().set_applied_sink(sink);
+}
+
+Status Device::complete_applied(const std::uint64_t ticket, const AppliedReply& reply) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (runtime_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
+  return runtime_->node().complete_applied(ticket, reply, runtime_->now_ms());
+}
+
+// --- Membership ---------------------------------------------------------------------
+
+MembershipStage Device::current_stage() const noexcept {
+  if (owner_ == nullptr) return MembershipStage::Unprovisioned;
+  const sdkv1::CoordinatorMode mode = owner_->coordinator().mode();
+  if (mode == sdkv1::CoordinatorMode::Dev) return MembershipStage::Member;
+  const sdkv1::LifecyclePhase phase = owner_->lifecycle().snapshot().phase;
+  const sdkv1::LifecycleStore& journal = stores_->lifecycle();
+  if (phase == sdkv1::LifecyclePhase::StorageBlocked) return MembershipStage::Recovery;
+  if (journal.has_record() && journal.record().mode == sdkv1::LifecycleMode::LocalLeave) {
+    return MembershipStage::Leaving;
+  }
+  if (phase == sdkv1::LifecyclePhase::UnassignedReady && journal.has_record() &&
+      journal.record().mode == sdkv1::LifecycleMode::LeftReady) {
+    return MembershipStage::Joining;
+  }
+  if (phase == sdkv1::LifecyclePhase::Removing || phase == sdkv1::LifecyclePhase::Holdoff ||
+      mode == sdkv1::CoordinatorMode::Removed) {
+    return MembershipStage::Removed;
+  }
+  if (mode == sdkv1::CoordinatorMode::Recovery) {
+    return MembershipStage::Recovery;
+  }
+  if (mode == sdkv1::CoordinatorMode::Member) return MembershipStage::Member;
+  if (mode == sdkv1::CoordinatorMode::ZeroTouch && stores_->identity().has_identity()) {
+    return pending_authority_ ? MembershipStage::PendingAuthority : MembershipStage::Joining;
+  }
+  return MembershipStage::Unprovisioned;
+}
+
+MembershipSnapshot Device::membership() const noexcept {
+  MembershipSnapshot out{};
+  out.stage = current_stage();
+  const bool observed = out.stage == stage_;
+  out.since_ms = observed ? stage_since_ms_ : (runtime_ != nullptr ? runtime_->now_ms() : 0);
+  out.reason = observed ? stage_reason_ : membership_cause(out.stage);
+  out.boot = boot_session_;
+  out.operation = operation_ != Operation::None ? operation_id_ : 0;
+  if (runtime_ != nullptr) out.node = runtime_->node().node_id();
+  if (out.stage == MembershipStage::Member && security_ == DeviceSecurity::DevRam &&
+      runtime_ != nullptr) {
+    out.network = runtime_->node().config().network;
+  } else if (stores_ != nullptr && stores_->site().has_site()) {
+    const sdkv1::SiteRecord& site = stores_->site().site();
+    out.site_id = site.site_id;
+    out.network = site.network;
+    out.generation = site.assignment_generation;
+    out.role = site.role;
+  }
+  return out;
+}
+
+void Device::update_membership(const MonotonicMs now_ms) noexcept {
+  if (owner_ == nullptr) return;
+  const sdkv1::JoinSnapshot joiner = owner_->coordinator().joiner_snapshot();
+  if (joiner.counters.attempts != seen_attempts_) {
+    // A new attempt (or a new Joiner) starts from no verdict.
+    seen_attempts_ = joiner.counters.attempts;
+    pending_base_ = joiner.counters.pendings;
+  }
+  pending_authority_ = joiner.counters.pendings > pending_base_;
+  const MembershipStage stage = current_stage();
+  if (!stage_known_) {
+    // The stage this boot starts in is not a change: no event.
+    stage_known_ = true;
+    stage_ = stage;
+    stage_since_ms_ = now_ms;
+    if (stage == MembershipStage::Member) member_since_ms_ = now_ms;
+  } else if (stage != stage_) {
+    const std::uint16_t cause = membership_cause(stage);
+    stage_ = stage;
+    stage_since_ms_ = now_ms;
+    stage_reason_ = cause;
+    if (stage == MembershipStage::Member) member_since_ms_ = now_ms;
+    if (device_observer_ != nullptr) {
+      const MembershipSnapshot snapshot = membership();
+      CallbackScope scope(in_callback_);
+      device_observer_->on_membership(snapshot, cause);
+    }
+  }
+  if (operation_ == Operation::Join) {
+    if (stage != MembershipStage::Member) operation_left_member_ = true;
+    if (stage == MembershipStage::Member && operation_left_member_) {
+      finish_operation(ROUTELOOM_REASON_JOINED);
+    } else if (stage == MembershipStage::Removed || joiner.counters.denies > operation_denies_) {
+      finish_operation(ROUTELOOM_REASON_JOIN_DENIED);
+    } else if (stage == MembershipStage::Recovery) {
+      finish_operation(ROUTELOOM_REASON_RECOVERY_REQUIRED);
+    } else if (joiner.counters.pendings > operation_pendings_) {
+      finish_operation(ROUTELOOM_REASON_JOIN_PENDING);
+    } else if (now_ms >= operation_deadline_ms_) {
+      finish_operation(ROUTELOOM_REASON_JOIN_TIMEOUT);
+    }
+  } else if (operation_ == Operation::Leave && stage == MembershipStage::Recovery) {
+    finish_operation(ROUTELOOM_REASON_RECOVERY_REQUIRED);
+  }
+}
+
+void Device::finish_operation(const std::uint16_t result) noexcept {
+  const OperationId id = operation_id_;
+  operation_ = Operation::None;
+  if (device_observer_ != nullptr) {
+    CallbackScope scope(in_callback_);
+    device_observer_->on_operation(id, result);
+  }
+}
+
+void Device::on_restart(void* self, const bool leave) noexcept {
+  // The Owner restarts the device right after this returns: a finished
+  // local leave is reported here, since the next boot keeps no trace of it.
+  auto& device = *static_cast<Device*>(self);
+  if (!leave) return;
+  device.stage_ = MembershipStage::Joining;
+  device.stage_since_ms_ = device.runtime_ != nullptr ? device.runtime_->now_ms() : 0;
+  device.stage_reason_ = ROUTELOOM_REASON_LEFT;
+  if (device.device_observer_ != nullptr) {
+    const MembershipSnapshot snapshot = device.membership();
+    CallbackScope scope(device.in_callback_);
+    device.device_observer_->on_membership(snapshot, ROUTELOOM_REASON_LEFT);
+  }
+  if (device.operation_ == Operation::Leave) device.finish_operation(ROUTELOOM_REASON_LEFT);
+}
+
+Status Device::request_join(OperationId& operation) noexcept {
+  operation = 0;
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (owner_ == nullptr || runtime_ == nullptr) {
+    return Status::error(StatusCode::InvalidState, "device not started");
+  }
+  if (security_ != DeviceSecurity::Member) {
+    return Status::error(StatusCode::Unsupported, "DevRam has no join");
+  }
+  if (operation_ != Operation::None) return Status::error(StatusCode::Busy, "OPERATION_IN_PROGRESS");
+  const MonotonicMs now_ms = runtime_->now_ms();
+  const Status status = owner_->request_join(now_ms);
+  if (!status) return status;
+  // The baseline is the Joiner that runs now (a member's re-verification
+  // starts a new one).
+  const sdkv1::JoinSnapshot joiner = owner_->coordinator().joiner_snapshot();
+  operation_denies_ = joiner.counters.denies;
+  operation_pendings_ = joiner.counters.pendings;
+  operation_left_member_ = owner_->coordinator().mode() != sdkv1::CoordinatorMode::Member;
+  operation_deadline_ms_ = now_ms + kJoinOperationMs;
+  if (++operation_id_ == 0) ++operation_id_;
+  operation_ = Operation::Join;
+  operation = operation_id_;
+  return Status::success();
+}
+
+Status Device::leave(OperationId& operation) noexcept {
+  operation = 0;
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (owner_ == nullptr || runtime_ == nullptr) {
+    return Status::error(StatusCode::InvalidState, "device not started");
+  }
+  if (security_ != DeviceSecurity::Member) {
+    return Status::error(StatusCode::Unsupported, "DevRam has no membership");
+  }
+  if (operation_ != Operation::None) return Status::error(StatusCode::Busy, "OPERATION_IN_PROGRESS");
+  // Deliveries cancelled by the leave report to the app inside this call.
+  const Status status = owner_->local_leave(runtime_->now_ms());
+  if (!status) return status;
+  if (++operation_id_ == 0) ++operation_id_;
+  operation_ = Operation::Leave;
+  operation = operation_id_;
+  return Status::success();
+}
+
+// --- JoinPolicy -----------------------------------------------------------------------
+
+Status Device::apply_join_policy(const JoinPolicy& policy) noexcept {
+  sdkv1::JoinerConfig timing{};
+  timing.requested_role = policy.role != 0 ? policy.role : default_role_;
+  timing.avoid_not_here_ms = policy.avoid_not_here_s * 1000U;
+  timing.avoid_blocked_ms = policy.avoid_blocked_s * 1000U;
+  timing.retry_max_ms = policy.retry_max_s * 1000U;
+  timing.start_jitter_ms = policy.start_jitter_ms;
+  const Status status = owner_->apply_join_policy(timing, policy.removal_holdoff_s * 1000U);
+  if (status) isolation_notice_ms_ = policy.isolation_notice_s * 1000U;
+  return status;
+}
+
+Status Device::join_policy(JoinPolicy& policy, std::uint32_t& revision) noexcept {
+  policy = JoinPolicy{};
+  revision = 0;
+  if (stores_ == nullptr) return Status::error(StatusCode::InvalidState, "storage not open");
+  return stores_->join_policy().load(policy, revision);
+}
+
+Status Device::set_join_policy(const JoinPolicy& policy, const std::uint32_t expected_revision,
+                               std::uint32_t& revision) noexcept {
+  revision = 0;
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (owner_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
+  if (security_ != DeviceSecurity::Member) {
+    return Status::error(StatusCode::Unsupported, "DevRam has no join");
+  }
+  Status status = sdkv1::join_policy_check(policy, allowed_roles_);
+  if (!status) return status;
+  JoinPolicy stored{};
+  std::uint32_t current = 0;
+  status = stores_->join_policy().load(stored, current);
+  // A corrupt record reads as revision 0: expected 0 replaces it.
+  if (!status && status.code != StatusCode::IntegrityError) return status;
+  if (expected_revision != current) return Status::error(StatusCode::Conflict, "JOIN_POLICY_REVISION");
+  if (current == UINT32_MAX) return Status::error(StatusCode::NoCapacity, "JOIN_POLICY_REVISION");
+  status = stores_->join_policy().commit(policy, current + 1U);
+  if (!status) return status;
+  revision = current + 1U;
+  return apply_join_policy(policy);
+}
+
+// --- Connectivity -----------------------------------------------------------------
+
+void Device::note_gateway_contact(const NodeId source, const MonotonicMs now_ms) noexcept {
+  if (stores_ == nullptr || !stores_->site().has_site()) {
+    if (runtime_ == nullptr) return;
+    for (const NodeId gateway : runtime_->node().config().route_gateways) {
+      if (gateway == source && gateway != kInvalidNodeId) {
+        contact_ms_ = now_ms;
+        contact_valid_ = true;
+      }
+    }
+    return;
+  }
+  const sdkv1::SiteRecord& site = stores_->site().site();
+  for (std::uint8_t i = 0; i < site.gateway_count; ++i) {
+    if (site.gateways[i] == source) {
+      contact_ms_ = now_ms;
+      contact_valid_ = true;
+    }
+  }
+}
+
+ConnectivitySnapshot Device::connectivity() const noexcept {
+  ConnectivitySnapshot out{};
+  out.state = connectivity_;
+  out.since_ms = connectivity_since_ms_;
+  out.boot = boot_session_;
+  out.contact_valid = contact_valid_;
+  out.last_contact_ms = contact_ms_;
+  out.reason = connectivity_reason_;
+  return out;
+}
+
+void Device::update_connectivity(const MonotonicMs now_ms) noexcept {
+  if (runtime_ == nullptr) return;
+  Connectivity state = Connectivity::Unknown;
+  std::uint16_t reason = ROUTELOOM_REASON_NOT_MEMBER;
+  // A member re-verifying its retained site is still a member here.
+  const bool member = stage_ == MembershipStage::Member ||
+                      ((stage_ == MembershipStage::Joining ||
+                        stage_ == MembershipStage::PendingAuthority) &&
+                       stores_->site().has_site());
+  if (!member) {
+    contact_valid_ = false;
+  } else if (security_ == DeviceSecurity::DevRam
+                 ? role_ == profile::Role::Gateway
+                 : stores_->site().has_site() &&
+                       (stores_->site().site().role & sdkv1::kMemberRoleGateway) != 0) {
+    state = Connectivity::Reachable;
+    reason = ROUTELOOM_REASON_SELF_GATEWAY;
+  } else {
+    // This site's gateways: the committed site record, or the DevRam route
+    // profile's gateways.
+    std::array<NodeId, sdkv1::kSiteGatewayMax> gateways{};
+    std::size_t count = 0;
+    const MeshNode& node = runtime_->node();
+    if (stores_->site().has_site() && security_ == DeviceSecurity::Member) {
+      const sdkv1::SiteRecord& site = stores_->site().site();
+      for (std::uint8_t i = 0; i < site.gateway_count && count < gateways.size(); ++i) {
+        gateways[count++] = site.gateways[i];
+      }
+    } else {
+      for (const NodeId gateway : node.config().route_gateways) {
+        if (gateway != kInvalidNodeId && count < gateways.size()) gateways[count++] = gateway;
+      }
+    }
+    bool routed = false;
+    for (std::size_t i = 0; i < count; ++i) {
+      if (!node.routes().best(gateways[i]).valid) continue;
+      routed = true;
+      // Only authenticated frames heard from the gateway itself count.
+      // Relays can renew a route lease after the gateway has stopped.
+      NodeStatus status{};
+      if (node.node_status(gateways[i], now_ms, status) &&
+          (status.flags & kNodeStatusHeardValid) != 0 &&
+          (status.flags & kNodeStatusTelemetryStale) == 0 &&
+          status.heard_age_ms <= now_ms) {
+        const MonotonicMs heard = now_ms - status.heard_age_ms;
+        if (!contact_valid_ || heard > contact_ms_) {
+          contact_ms_ = heard;
+          contact_valid_ = true;
+        }
+      }
+    }
+    if (count == 0) {
+      reason = ROUTELOOM_REASON_NO_EVIDENCE;  // no gateway named: scope unknown
+    } else if (!contact_valid_) {
+      reason = ROUTELOOM_REASON_NO_EVIDENCE;
+      if (now_ms - member_since_ms_ >= kConnectivityIsolatedMs) state = Connectivity::Isolated;
+    } else {
+      const MonotonicMs age = now_ms >= contact_ms_ ? now_ms - contact_ms_ : 0;
+      reason = !routed ? ROUTELOOM_REASON_NO_GATEWAY_ROUTE
+               : age < kConnectivityFreshMs ? ROUTELOOM_REASON_GATEWAY_CONTACT
+                                           : ROUTELOOM_REASON_GATEWAY_STALE;
+      state = age >= kConnectivityIsolatedMs ? Connectivity::Isolated
+              : routed && age < kConnectivityFreshMs ? Connectivity::Reachable
+                                                    : Connectivity::Degraded;
+    }
+  }
+  if (state != connectivity_) {
+    connectivity_ = state;
+    connectivity_since_ms_ = now_ms;
+    connectivity_reason_ = reason;
+    isolation_noticed_ = false;
+    if (device_observer_ != nullptr) {
+      const ConnectivitySnapshot snapshot = connectivity();
+      CallbackScope scope(in_callback_);
+      device_observer_->on_connectivity(snapshot);
+    }
+  } else if (state == Connectivity::Isolated && isolation_notice_ms_ != 0 && !isolation_noticed_ &&
+             now_ms - connectivity_since_ms_ >= isolation_notice_ms_) {
+    // JoinPolicy: a long isolation is reported once; it never leaves.
+    isolation_noticed_ = true;
+    if (device_observer_ != nullptr) {
+      ConnectivitySnapshot snapshot = connectivity();
+      snapshot.reason = ROUTELOOM_REASON_ISOLATION_NOTICE;
+      CallbackScope scope(in_callback_);
+      device_observer_->on_connectivity(snapshot);
+    }
+  }
 }
 
 }  // namespace routeloom

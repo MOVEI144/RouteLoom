@@ -1745,9 +1745,14 @@ fn receive_ingest(
     let (Some(origin), Some(msg_session), Some(msg_seq)) = (origin, msg_session, msg_seq) else {
         return;
     };
-    let (network, gateway) = {
+    let (network, gateway, session_id, authenticated) = {
         let session = state.session.lock().expect("session poisoned");
-        (session.network, session.node)
+        (
+            session.network,
+            session.node,
+            session.id,
+            session.authenticated,
+        )
     };
     let Some(network) = network else {
         push_event(
@@ -1777,6 +1782,15 @@ fn receive_ingest(
             "\"kind\":\"rx_drop\",\"reason\":\"origin_reserved\"".to_string(),
         );
         return;
+    }
+    if authenticated && assurance.is_some_and(|a| a.verified) {
+        if let (Some(gateway), Some(session_id)) = (gateway, session_id) {
+            state
+                .node_table
+                .lock()
+                .expect("node table poisoned")
+                .note_verified_origin(gateway, session_id, origin);
+        }
     }
     let outcome = {
         let outcome = state
@@ -4843,6 +4857,24 @@ mod tests {
             let mut session = state.session.lock().expect("session");
             session.network = Some(7);
             session.node = Some(1);
+            session.id = Some(77);
+            session.authenticated = true;
+        }
+        {
+            let mut table = state.node_table.lock().expect("node table");
+            table.attach(1, 77, true, 1_000);
+            table.apply(
+                &routeloom_protocol::node_status::NodeStatusEntry {
+                    node: 9,
+                    flags: routeloom_protocol::node_status::FLAG_REACHABLE,
+                    next_hop: 2,
+                    ..Default::default()
+                },
+                nodes::Origin::Sync,
+                None,
+                1_000,
+            );
+            assert_eq!(nodes::connectivity(table.get(9).unwrap(), 1_000), "unknown");
         }
         // origin(8) || session(4) || seq(8) || payload(2) || tail(8):
         // verified member_edhoc under site epoch 0xA5A5A5A5.
@@ -4859,6 +4891,14 @@ mod tests {
             inner.clone(),
         );
         record_frame(&state, &frame, &inner, 1_000);
+        {
+            let table = state.node_table.lock().expect("node table");
+            assert_eq!(
+                nodes::connectivity(table.get(9).unwrap(), 1_000),
+                "reachable",
+                "end-verified ingress proves the multi-hop origin is alive"
+            );
+        }
         let mut log = state.receive_log.lock().expect("receive log");
         let crate::receive_log::ReadOutcome::Batch(batch) = log.read(7, 0, 8, 1_000, false) else {
             panic!("evidenced record must be readable");

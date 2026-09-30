@@ -62,7 +62,26 @@
 //   M <group u16le><payload>   application group send (Normal, 5 s)
 //   W <mode u8><key>           arm one fault at the next write of `key`:
 //                              0 fails it, 1 cuts power before it lands,
-//                              2 cuts power after its commit (exit 43)
+//                              2 cuts power after its commit (exit 43),
+//                              3 as 2 on the key's second write
+//   L                          Device::leave; reply l <status u8><op u32>
+//                              (tracked sends cancelled by it are
+//                              refreshed before the reply)
+//   Y                          Device::request_join; reply y <status u8><op u32>
+//   A <dst u64><class u8><key u16le><payload>
+//                              tracked send with a delivery class and a
+//                              coalesce key (the longest lifetime)
+//   C                          reply c <this node's APPLIED lease 16>
+//   B <dst u64><lease 16><payload>
+//                              tracked APPLIED send (10 s lifetime)
+//   D <delay_ms u32le>         defer every APPLIED request and complete it
+//                              (Success) `delay_ms` after it arrived
+//   G <on u8>                  from inside Device callbacks, try send and
+//                              leave and count the Busy answers (F05)
+//   X <holdoff_s u32le><expected u32le>[<isolation_notice_s u32le>]
+//                              Device::set_join_policy with that removal
+//                              holdoff (and isolation notice); reply
+//                              x <status u8><revision u32>
 //
 // C++ -> Rust, emitted after each T in this order:
 //
@@ -125,6 +144,11 @@
 // (this node's GatewayDelivery counters, 0 without one)
 // | plan_phase u8 (ParticipantPhase, 0xFF without a channel plan) |
 // plan_epoch u32 | plan_channel u8 (the participant's active record)
+// | stage u8 | membership_events u32 | last_cause u16 | op_last u32 |
+// op_result u16 | connectivity u8 | connectivity_events u32 |
+// connectivity_reason u16 | reentry_calls u32 | reentry_busy u32 |
+// applied_requests u32 | applied_completed u32 | applied_refused u32 |
+// policy_revision u32 (the Device events and ops count across restarts)
 //
 // Setup arrives on argv (all integers accept 0x hex; blobs are hex):
 //
@@ -210,6 +234,10 @@ using SpaceMap = std::map<std::string, BlobMap>;
 using PartitionMap = std::map<std::string, SpaceMap>;
 
 PartitionMap g_nvs;
+// Harness counters that must survive the peer's restarts (Device events
+// reported right before a lifecycle restart): saved into the fake flash
+// image under a harness-only partition the firmware never opens.
+void (*g_before_restart)() = nullptr;
 std::string g_nvs_save_path;
 bool g_cut_after_switching{false};
 // F02 fault: the k-th NVS write (set/erase/commit, counted from process
@@ -228,6 +256,8 @@ bool nvs_write_fault() {
 // F01/F02 at one record key (the `W` command): the next write of that key
 // fails once with NOT_ENOUGH_SPACE (0), loses power before it lands (1),
 // or loses power after its commit, before anything acknowledges it (2).
+// Mode 3 is mode 2 on the key's second write: a sealed record lands in two
+// writes (pending, then sealed), so this cuts after the sealed one.
 std::string g_key_fault;
 std::uint8_t g_key_fault_mode{0};
 bool g_key_cut_after_commit{false};
@@ -359,7 +389,9 @@ esp_err_t nvs_get_blob(nvs_handle_t handle, const char* key, void* out, std::siz
 esp_err_t nvs_set_blob(nvs_handle_t handle, const char* key, const void* data, std::size_t length) {
   if (nvs_write_fault()) return ESP_ERR_NVS_NOT_ENOUGH_SPACE;
   if (key == nullptr || (data == nullptr && length != 0)) return ESP_ERR_INVALID_ARG;
-  if (!g_key_fault.empty() && g_key_fault == key) {
+  if (!g_key_fault.empty() && g_key_fault == key && g_key_fault_mode == 3) {
+    g_key_fault_mode = 2;  // the next write of the key is the sealed one
+  } else if (!g_key_fault.empty() && g_key_fault == key) {
     g_key_fault.clear();
     ++g_key_fault_hits;
     if (g_key_fault_mode == 0) return ESP_ERR_NVS_NOT_ENOUGH_SPACE;
@@ -576,6 +608,7 @@ void EspNowDiscoveryObserver::on_discovery_event(const char* reason, NodeId peer
 }  // namespace routeloom::espnow
 
 [[noreturn]] void esp_restart() {
+  if (g_before_restart != nullptr) g_before_restart();
   // A lifecycle AdoptNetwork/RestartUnassigned reboot: persist the NVS
   // image for the respawn (like flash surviving the reset) and exit with
   // the reboot marker. The harness respawns with --nvs-load; anything
@@ -588,6 +621,7 @@ void EspNowDiscoveryObserver::on_discovery_event(const char* reason, NodeId peer
 }
 
 [[noreturn]] void switching_power_cut() {
+  if (g_before_restart != nullptr) g_before_restart();
   if (!g_nvs_save_path.empty()) {
     routeloom::espnow::write_nvs_image_file(g_nvs_save_path.c_str());
   }
@@ -972,6 +1006,7 @@ class TeeObserver final : public routeloom::NodeObserver {
         std::memcmp(payload.data, kAttachGateway, sizeof(kAttachGateway) - 1) == 0) {
       (void)device_->gateway();
     }
+    if (on_rx_ != nullptr) on_rx_();
     ++rx_count_;
     rx_src_ = source;
     rx_len_ = payload.size > kAppRxKeep ? kAppRxKeep : payload.size;
@@ -998,6 +1033,7 @@ class TeeObserver final : public routeloom::NodeObserver {
   std::vector<routeloom::DeliveryResult> delivery_events_;
   std::uint32_t transit_conflicts_{0};
   std::uint32_t receipt_conflicts_{0};
+  void (*on_rx_)() = nullptr;
   std::uint32_t no_route_{0};
   std::uint32_t ext_unsupported_{0};
 
@@ -1045,13 +1081,131 @@ class GatewayTxObserver final : public routeloom::GatewayDeliveryObserver {
   GatewayTx& tx_;
 };
 
+// Device events and operation results (the harness asserts one event per
+// change). The counters ride the fake flash image across restarts, since a
+// finished leave is reported right before the unassigned restart.
+struct DeviceEvents final : public routeloom::DeviceObserver {
+  std::uint32_t membership_events{0};
+  std::uint16_t last_cause{0};
+  std::uint32_t op_last{0};
+  std::uint16_t op_result{0};
+  std::uint32_t connectivity_events{0};
+  // F05: calls from inside a callback, and how many answered Busy.
+  bool probe{false};
+  std::uint32_t reentry_calls{0};
+  std::uint32_t reentry_busy{0};
+  routeloom::Device* device{nullptr};
+
+  static constexpr const char* kPartition = "harness";
+  void save() const {
+    Bytes blob;
+    put_u32(blob, membership_events);
+    put_u32(blob, last_cause);
+    put_u32(blob, op_last);
+    put_u32(blob, op_result);
+    put_u32(blob, connectivity_events);
+    put_u32(blob, reentry_calls);
+    put_u32(blob, reentry_busy);
+    g_nvs[kPartition]["ev"]["e"] = blob;
+  }
+  void load() {
+    const auto part = g_nvs.find(kPartition);
+    if (part == g_nvs.end()) return;
+    const Bytes& blob = part->second["ev"]["e"];
+    if (blob.size() != 28) return;
+    const auto get = [&](std::size_t i) {
+      std::uint32_t value = 0;
+      for (int b = 0; b < 4; ++b) value |= static_cast<std::uint32_t>(blob[i * 4 + b]) << (8 * b);
+      return value;
+    };
+    membership_events = get(0);
+    last_cause = static_cast<std::uint16_t>(get(1));
+    op_last = get(2);
+    op_result = static_cast<std::uint16_t>(get(3));
+    connectivity_events = get(4);
+    reentry_calls = get(5);
+    reentry_busy = get(6);
+  }
+  void try_reentry() {
+    if (!probe || device == nullptr) return;
+    const std::uint8_t byte = 0x5A;
+    routeloom::MessageId id{};
+    routeloom::OperationId op = 0;
+    reentry_calls += 2;
+    if (device->send(0x00A1000000000001ULL, ByteView{&byte, 1}, routeloom::SendOptions{}, id)
+            .code == routeloom::StatusCode::Busy) {
+      ++reentry_busy;
+    }
+    if (device->leave(op).code == routeloom::StatusCode::Busy) ++reentry_busy;
+  }
+  void on_membership(const routeloom::MembershipSnapshot& snapshot, std::uint16_t cause) noexcept override {
+    if (device != nullptr && device->membership().stage != snapshot.stage) {
+      fatal("membership callback disagrees with snapshot API");
+    }
+    ++membership_events;
+    last_cause = cause;
+    try_reentry();
+  }
+  void on_connectivity(const routeloom::ConnectivitySnapshot&) noexcept override {
+    ++connectivity_events;
+  }
+  void on_operation(routeloom::OperationId operation, std::uint16_t result) noexcept override {
+    op_last = operation;
+    op_result = result;
+  }
+};
+DeviceEvents* g_device_events = nullptr;
+void save_device_events() {
+  if (g_device_events != nullptr) g_device_events->save();
+}
+
+// P05: an application endpoint that defers every APPLIED request and
+// completes it (Success) `delay_ms` after it arrived, from the Owner task.
+struct DeferredApplied final : public routeloom::AppliedEndpointSink {
+  struct Open {
+    std::uint64_t ticket{0};
+    MonotonicMs due{0};
+  };
+  MonotonicMs delay_ms{0};
+  MonotonicMs now{0};
+  std::vector<Open> open;
+  std::uint32_t requests{0};
+  std::uint32_t completed{0};
+  std::uint32_t refused{0};
+  void on_applied_request(const routeloom::AppliedRequest& request,
+                          routeloom::AppliedReply& reply) noexcept override {
+    ++requests;
+    if (g_device_events != nullptr) g_device_events->try_reentry();
+    reply.deferred = true;
+    open.push_back(Open{request.ticket, now + delay_ms});
+  }
+  void poll(routeloom::Device& device, MonotonicMs at) {
+    now = at;
+    for (auto it = open.begin(); it != open.end();) {
+      if (at < it->due) {
+        ++it;
+        continue;
+      }
+      routeloom::AppliedReply reply{};
+      reply.outcome = routeloom::endpoint::AppResultOutcome::Success;
+      if (device.complete_applied(it->ticket, reply)) {
+        ++completed;
+      } else {
+        ++refused;
+      }
+      it = open.erase(it);
+    }
+  }
+};
+
 void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
                    routeloom::espnow::Sdkv1Stores& stores,
                    routeloom::espnow::EspNowRuntime& runtime,
                    const routeloom::usb::UsbBridge* bridge, const TeeObserver& observer,
                    AppTx* app_tx, std::uint32_t send_count_base,
                    std::uint8_t world_nodes, const GatewayTx& gw_tx,
-                   const routeloom::GatewayDelivery* gateway) {
+                   const routeloom::GatewayDelivery* gateway, routeloom::Device& device,
+                   const DeviceEvents& events, const DeferredApplied& applied) {
   using namespace routeloom;
   using namespace routeloom::espnow;
   using namespace routeloom::sdkv1;
@@ -1227,6 +1381,27 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
   out.push_back(plan != nullptr ? static_cast<std::uint8_t>(plan->participant().phase()) : 0xFF);
   put_u32(out, plan != nullptr ? plan->participant().active_epoch().value : 0);
   out.push_back(plan != nullptr ? plan->participant().active_channel() : 0);
+  out.push_back(static_cast<std::uint8_t>(device.membership().stage));
+  put_u32(out, events.membership_events);
+  out.push_back(static_cast<std::uint8_t>(events.last_cause & 0xFFU));
+  out.push_back(static_cast<std::uint8_t>(events.last_cause >> 8));
+  put_u32(out, events.op_last);
+  out.push_back(static_cast<std::uint8_t>(events.op_result & 0xFFU));
+  out.push_back(static_cast<std::uint8_t>(events.op_result >> 8));
+  const ConnectivitySnapshot connectivity = device.connectivity();
+  out.push_back(static_cast<std::uint8_t>(connectivity.state));
+  put_u32(out, events.connectivity_events);
+  out.push_back(static_cast<std::uint8_t>(connectivity.reason & 0xFFU));
+  out.push_back(static_cast<std::uint8_t>(connectivity.reason >> 8));
+  put_u32(out, events.reentry_calls);
+  put_u32(out, events.reentry_busy);
+  put_u32(out, applied.requests);
+  put_u32(out, applied.completed);
+  put_u32(out, applied.refused);
+  JoinPolicy policy{};
+  std::uint32_t revision = 0;
+  (void)device.join_policy(policy, revision);
+  put_u32(out, revision);
   write_frame(out);
 }
 
@@ -1234,7 +1409,7 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
 
 int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--harness-version") == 0) {
-    std::fputs("5\n", stdout);
+    std::fputs("6\n", stdout);
     return 0;
   }
   using namespace routeloom;
@@ -1262,6 +1437,16 @@ int main(int argc, char** argv) {
   Device device;
   observer.bind_device(device);
   device.observe(&observer);
+  DeviceEvents events;
+  events.device = &device;
+  events.load();
+  g_device_events = &events;
+  g_before_restart = &save_device_events;
+  device.observe_device(&events);
+  observer.on_rx_ = [] {
+    if (g_device_events != nullptr) g_device_events->try_reentry();
+  };
+  DeferredApplied applied;
   // A boot failure restarts like the firmware's fail() when the injected
   // NVS fault caused it; anything else is a harness error.
   const auto boot_failed = [](const Status& failed) {
@@ -1342,7 +1527,9 @@ int main(int argc, char** argv) {
         if (next < now) fatal("clock regressed");
         now = next;
         idf_stub::set_now_us(static_cast<std::int64_t>(now) * 1000);
+        applied.now = now;
         device.step(now);
+        if (!applied.open.empty()) applied.poll(device, now);
         if (gw_tx.endpoint_valid) {
           GatewayDelivery& delivery = *device.gateway();
           const EndpointState state = delivery.endpoint_state(gw_tx.endpoint);
@@ -1385,7 +1572,8 @@ int main(int argc, char** argv) {
           off += chunk;
         }
         for (std::size_t i = 0; i < kAppTxMax; ++i) {
-          if (!app_tx[i].used) continue;
+          // A refused send keeps its refusal (it never had a delivery).
+          if (!app_tx[i].used || app_tx[i].id.sequence == 0) continue;
           // The production delivery table is bounded; retain a terminal
           // observation before its id ages out of that table.
           if (app_tx[i].state == DeliveryState::Delivered ||
@@ -1395,14 +1583,26 @@ int main(int argc, char** argv) {
               app_tx[i].state == DeliveryState::Indeterminate) {
             continue;
           }
-          const DeliveryResult result = device.delivery(app_tx[i].id);
+          DeliveryResult result = device.delivery(app_tx[i].id);
+          if (result.state == DeliveryState::Empty) {
+            // Evicted from the bounded delivery table: its last reported
+            // state is the one the observer saw.
+            for (auto it = observer.delivery_events_.rbegin();
+                 it != observer.delivery_events_.rend(); ++it) {
+              if (it->id == app_tx[i].id) {
+                result = *it;
+                break;
+              }
+            }
+          }
           app_tx[i].state = result.state;
           std::strncpy(app_tx[i].reason, result.reason != nullptr ? result.reason : "?",
                        sizeof(app_tx[i].reason) - 1);
           app_tx[i].reason[sizeof(app_tx[i].reason) - 1] = '\0';
         }
         emit_snapshot(owner, stores, runtime, bridge, observer, app_tx, send_count_base,
-                      setup.world_nodes, gw_tx, DeviceTestAccess::gateway(device));
+                      setup.world_nodes, gw_tx, DeviceTestAccess::gateway(device), device,
+                      events, applied);
         write_frame(Bytes{'D'});
         break;
       }
@@ -1427,8 +1627,13 @@ int main(int argc, char** argv) {
         }
         break;
       }
-      case 'S': {
-        if (length < 10 || length - 9 > kMaxApplicationPayload) fatal("bad S");
+      case 'S':
+      case 'A':
+      case 'B': {
+        // S: reliable, A: class + coalesce key, B: APPLIED with a lease.
+        const std::size_t head = payload[0] == 'S' ? 9 : payload[0] == 'A' ? 12 : 25;
+        const std::size_t max = payload[0] == 'B' ? kAppliedUserPayloadMax : kMaxApplicationPayload;
+        if (length <= head || length - head > max) fatal("bad S/A/B");
         NodeId dst = 0;
         for (int i = 0; i < 8; ++i) dst |= static_cast<NodeId>(payload[1 + i]) << (8 * i);
         AppTx* slot = nullptr;
@@ -1454,7 +1659,21 @@ int main(int argc, char** argv) {
         SendOptions options{};
         options.lifetime_ms = 30000;
         MessageId id{};
-        status = device.send(dst, ByteView{payload.data() + 9, length - 9}, options, id);
+        const ByteView body{payload.data() + head, length - head};
+        if (payload[0] == 'A') {
+          options.lifetime_ms = kMaxMessageLifetimeMs;
+          options.delivery = static_cast<DeliveryClass>(payload[9]);
+          options.coalesce_key = static_cast<std::uint16_t>(payload[10] | (payload[11] << 8));
+          status = device.send(dst, body, options, id);
+        } else if (payload[0] == 'B') {
+          ExecutionLease lease{};
+          std::memcpy(lease.data(), payload.data() + 9, lease.size());
+          options.delivery = DeliveryClass::Applied;
+          options.lifetime_ms = 10000;
+          status = device.send_applied(dst, body, lease, options, id);
+        } else {
+          status = device.send(dst, body, options, id);
+        }
         slot->used = true;
         slot->id = id;
         if (status) {
@@ -1466,6 +1685,65 @@ int main(int argc, char** argv) {
                        sizeof(slot->reason) - 1);
         }
         slot->reason[sizeof(slot->reason) - 1] = '\0';
+        break;
+      }
+      case 'L':
+      case 'Y': {
+        OperationId op = 0;
+        status = payload[0] == 'L' ? device.leave(op) : device.request_join(op);
+        if (status && payload[0] == 'L' && device.membership().stage != MembershipStage::Leaving) {
+          fatal("leave must expose its durable intent immediately");
+        }
+        // Tracked sends a leave cancelled report before the restart.
+        for (auto& entry : app_tx) {
+          if (!entry.used || entry.id.sequence == 0) continue;
+          const DeliveryResult result = device.delivery(entry.id);
+          entry.state = result.state;
+          std::strncpy(entry.reason, result.reason != nullptr ? result.reason : "?",
+                       sizeof(entry.reason) - 1);
+          entry.reason[sizeof(entry.reason) - 1] = '\0';
+        }
+        Bytes reply{payload[0] == 'L' ? std::uint8_t{'l'} : std::uint8_t{'y'},
+                    static_cast<std::uint8_t>(status.code)};
+        put_u32(reply, op);
+        write_frame(reply);
+        break;
+      }
+      case 'C': {
+        const ExecutionLease lease = runtime.node().applied_lease();
+        Bytes reply{'c'};
+        reply.insert(reply.end(), lease.begin(), lease.end());
+        write_frame(reply);
+        break;
+      }
+      case 'D': {
+        if (length != 5) fatal("bad D");
+        applied.delay_ms = static_cast<MonotonicMs>(payload[1] | (payload[2] << 8) |
+                                                    (payload[3] << 16) |
+                                                    (static_cast<std::uint32_t>(payload[4]) << 24));
+        status = device.set_applied_sink(&applied);
+        if (!status) fatal(status.detail);
+        break;
+      }
+      case 'G':
+        if (length != 2) fatal("bad G");
+        events.probe = payload[1] != 0;
+        break;
+      case 'X': {
+        if (length != 9 && length != 13) fatal("bad X");
+        const auto u32_at = [&](std::size_t at) {
+          return static_cast<std::uint32_t>(payload[at] | (payload[at + 1] << 8) |
+                                            (payload[at + 2] << 16) |
+                                            (static_cast<std::uint32_t>(payload[at + 3]) << 24));
+        };
+        JoinPolicy policy{};
+        policy.removal_holdoff_s = u32_at(1);
+        if (length == 13) policy.isolation_notice_s = u32_at(9);
+        std::uint32_t revision = 0;
+        status = device.set_join_policy(policy, u32_at(5), revision);
+        Bytes reply{'x', static_cast<std::uint8_t>(status.code)};
+        put_u32(reply, revision);
+        write_frame(reply);
         break;
       }
       case 'V': {

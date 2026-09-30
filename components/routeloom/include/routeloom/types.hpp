@@ -178,6 +178,11 @@ struct ByteBuffer {
 struct SendOptions {
   DeliveryClass delivery{DeliveryClass::Reliable};
   Priority priority{Priority::Normal};
+  // Latest-value send (BEST_EFFORT only; 0 = none): a new send replaces a
+  // delivery from this node to the same destination with the same key that
+  // has not been transmitted yet, which ends CANCELLED_SUPERSEDED. A
+  // delivery already handed to the radio is never touched.
+  std::uint16_t coalesce_key{0};
   std::uint32_t lifetime_ms{5000};
   std::uint8_t hop_limit{kDefaultHopLimit};
   // Request durability across deep sleep: the power coordinator persists the
