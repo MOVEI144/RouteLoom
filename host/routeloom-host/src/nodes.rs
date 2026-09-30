@@ -31,7 +31,7 @@ use routeloom_protocol::node_status::{
 use routeloom_protocol::{Frame, FrameKind};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::{json_escape, now_ms, push_event, Outbound, State};
 
@@ -139,6 +139,10 @@ pub struct NodeRecord {
     /// Host UNIX ms of the last connected/disconnected transition.
     pub changed_ms: u64,
     sweep: u64,
+    // Connectivity durations use the host monotonic clock; wall time is
+    // reserved for the displayed timestamps above.
+    connectivity_changed_at: Instant,
+    last_heard_at: Option<Instant>,
 }
 
 impl NodeRecord {
@@ -153,6 +157,8 @@ impl NodeRecord {
             updated_ms: now,
             changed_ms: now,
             sweep: 0,
+            connectivity_changed_at: Instant::now(),
+            last_heard_at: None,
         }
     }
 
@@ -299,6 +305,7 @@ impl NodeTable {
             if !record.connected {
                 record.connected = true;
                 record.changed_ms = now;
+                record.connectivity_changed_at = Instant::now();
                 changes.push(Change::Joined {
                     node: gateway,
                     reason: "gateway_attached",
@@ -317,6 +324,7 @@ impl NodeTable {
             if record.connected {
                 record.connected = false;
                 record.changed_ms = now;
+                record.connectivity_changed_at = Instant::now();
                 changes.push(Change::Left {
                     node: record.node,
                     reason: "gateway_lost",
@@ -358,6 +366,10 @@ impl NodeTable {
         record.sweep = sweep.unwrap_or(current_sweep);
         if entry.heard_valid() {
             record.last_heard_ms = Some(now.saturating_sub(u64::from(entry.heard_age_ms)));
+            if !entry.telemetry_stale() {
+                record.last_heard_at = Instant::now()
+                    .checked_sub(Duration::from_millis(u64::from(entry.heard_age_ms)));
+            }
         }
         let was_neighbor = previous.is_some_and(|p| p.neighbor_active());
         if was_neighbor != entry.neighbor_active() {
@@ -373,6 +385,7 @@ impl NodeTable {
         if was_connected != entry.reachable() {
             record.connected = entry.reachable();
             record.changed_ms = now;
+            record.connectivity_changed_at = Instant::now();
             changes.push(if entry.reachable() {
                 Change::Joined {
                     node: entry.node,
@@ -413,6 +426,7 @@ impl NodeTable {
             if record.connected {
                 record.connected = false;
                 record.changed_ms = now;
+                record.connectivity_changed_at = Instant::now();
                 changes.push(Change::Left {
                     node: record.node,
                     reason: "vanished",
@@ -471,13 +485,13 @@ fn metric_opt(value: u16) -> String {
 /// (the Device's T_iso, #192).
 pub const CONNECTIVITY_ISOLATED_MS: u64 = 120_000;
 
-/// The node's connectivity as the attached gateway sees it (#192), in the
-/// Device vocabulary: the gateway itself is `reachable` while its session
-/// is up; a node the gateway routes to is `reachable`, or `degraded` while
-/// its telemetry is stale; a node the gateway lost is `degraded` for
-/// [`CONNECTIVITY_ISOLATED_MS`], then `isolated`; a node never reported is
-/// `unknown`. The host sees no sleep, so it never reports `sleeping`.
-pub fn connectivity(record: &NodeRecord, now: u64) -> &'static str {
+/// Connectivity from authenticated immediate-transmitter evidence, timed
+/// with Instant. A relayed route alone cannot establish node reachability.
+pub fn connectivity(record: &NodeRecord, _now: u64) -> &'static str {
+    connectivity_at(record, Instant::now())
+}
+
+fn connectivity_at(record: &NodeRecord, now: Instant) -> &'static str {
     if record.gateway {
         return if record.connected {
             "reachable"
@@ -485,17 +499,28 @@ pub fn connectivity(record: &NodeRecord, now: u64) -> &'static str {
             "unknown"
         };
     }
-    if record.connected {
-        let stale = record.live_status().is_some_and(|s| s.telemetry_stale());
-        return if stale { "degraded" } else { "reachable" };
-    }
     if record.status.is_none() {
         return "unknown";
     }
-    if now.saturating_sub(record.changed_ms) < CONNECTIVITY_ISOLATED_MS {
-        "degraded"
-    } else {
+    let isolated = Duration::from_millis(CONNECTIVITY_ISOLATED_MS);
+    let since_change = now.saturating_duration_since(record.connectivity_changed_at);
+    let Some(heard) = record.last_heard_at else {
+        return if since_change >= isolated {
+            "isolated"
+        } else {
+            "unknown"
+        };
+    };
+    let age = now.saturating_duration_since(heard);
+    if age >= isolated || (!record.connected && since_change >= isolated) {
         "isolated"
+    } else if record.connected
+        && age < Duration::from_secs(60)
+        && !record.live_status().is_some_and(|s| s.telemetry_stale())
+    {
+        "reachable"
+    } else {
+        "degraded"
     }
 }
 
@@ -1297,6 +1322,36 @@ mod tests {
         );
         let status = event.status.unwrap();
         assert!(!status.connected && status.last_heard_ms == Some(1_750));
+    }
+
+    #[test]
+    fn connectivity_requires_fresh_authenticated_evidence() {
+        let mut table = NodeTable::default();
+        table.attach(GW, SESSION, true, 1_000);
+        let mut entry = direct(2);
+        entry.heard_age_ms = CONNECTIVITY_ISOLATED_MS as u32;
+        table.apply(&entry, Origin::Sync, None, 2_000);
+        assert_eq!(connectivity(table.get(2).unwrap(), 2_000), "isolated");
+        table.apply(&via(9, 2), Origin::Sync, None, 2_000);
+        assert_eq!(connectivity(table.get(9).unwrap(), 2_000), "unknown");
+        let record = table.get(9).unwrap();
+        assert_eq!(
+            connectivity_at(
+                record,
+                record.connectivity_changed_at + Duration::from_millis(CONNECTIVITY_ISOLATED_MS)
+            ),
+            "isolated"
+        );
+        let mut fresh = NodeRecord::new(3, 0);
+        fresh.status = Some(direct(3));
+        fresh.connected = true;
+        fresh.last_heard_at = Some(Instant::now());
+        assert_eq!(
+            connectivity(&fresh, u64::MAX),
+            "reachable",
+            "wall-clock jump"
+        );
+        assert_eq!(connectivity(&fresh, 0), "reachable", "wall-clock rollback");
     }
 
     #[test]

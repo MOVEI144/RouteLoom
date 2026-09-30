@@ -6163,7 +6163,8 @@ mod tests {
         );
         assert!(!response.contains("\"node\":\"0000000000000001\""));
         assert!(response.contains("\"hops\":null"));
-        // Lost by the gateway: degraded, then isolated after T_iso.
+        // A missing route is degraded. Wall-clock jumps do not
+        // advance connectivity timers.
         assert!(
             response.contains("\"connectivity\":\"degraded\""),
             "{response}"
@@ -6185,7 +6186,7 @@ mod tests {
             &later,
         );
         assert!(
-            response.contains("\"connectivity\":\"isolated\""),
+            response.contains("\"connectivity\":\"degraded\""),
             "{response}"
         );
         // nodes.get: found / NOT_FOUND / bad params.
