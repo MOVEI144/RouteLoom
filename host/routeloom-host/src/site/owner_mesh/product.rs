@@ -406,6 +406,33 @@ fn plan_switch(world: &mut MeshWorld, new_channel: u8, epoch: u32) {
         ready = plan_status(world).ready;
     }
     assert_eq!(ready, members, "every member answered READY");
+    // A direct HostOps caller cannot substitute the READY count for the
+    // required member identities, even after every visible peer answered.
+    let mut required = vec![NODE_A, NODE_B, 0xCAFE];
+    required.sort_unstable();
+    let body = routeloom_protocol::host_ops::encode_channel_plan(&ChannelPlanRequest::Release {
+        plan_hash: signed.plan_hash,
+        required,
+    })
+    .expect("direct release");
+    let request = world.usb_host.queue_data(FrameKind::HostOps, body);
+    world.usb_host.watch = Some(request);
+    world.usb_host.watched = None;
+    for _ in 0..500 {
+        world.step(PLAN_STEP_MS);
+        if world.usb_host.watched.is_some() {
+            break;
+        }
+    }
+    let rejected = world
+        .usb_host
+        .watched
+        .take()
+        .expect("gateway answered direct release");
+    let rejected = routeloom_protocol::host_ops::decode_channel_plan_report(&rejected)
+        .expect("channel plan report");
+    assert_eq!(rejected.result, 1, "missing required member is NOT_READY");
+    assert!(!rejected.released, "commit remains held");
     service
         .with(|a| a.channel_plan_release(world.now))
         .0

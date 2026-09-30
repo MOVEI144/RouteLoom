@@ -1682,6 +1682,7 @@ pub const CHANNEL_PLAN_BLOB_MAX: usize = 384;
 pub const CHANNEL_PLAN_OFFER_FIXED: usize = 4 + 64;
 pub const CHANNEL_PLAN_REQUEST_MAX: usize = CHANNEL_PLAN_OFFER_FIXED + CHANNEL_PLAN_BLOB_MAX;
 pub const CHANNEL_PLAN_REPORT_PAYLOAD: usize = 96;
+pub const CHANNEL_PLAN_REQUIRED_MAX: usize = 8;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChannelPlanRequest {
@@ -1692,6 +1693,7 @@ pub enum ChannelPlanRequest {
     },
     Release {
         plan_hash: [u8; 32],
+        required: Vec<u64>,
     },
 }
 
@@ -1711,9 +1713,22 @@ pub fn encode_channel_plan(request: &ChannelPlanRequest) -> Result<Vec<u8>, Host
             body.extend_from_slice(blob);
             body.extend_from_slice(commit_signature);
         }
-        ChannelPlanRequest::Release { plan_hash } => {
+        ChannelPlanRequest::Release {
+            plan_hash,
+            required,
+        } => {
+            if required.len() > CHANNEL_PLAN_REQUIRED_MAX
+                || required.iter().any(|node| *node == 0 || *node == u64::MAX)
+                || required.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return Err(HostOpsError::Invalid("required_set"));
+            }
             body.extend_from_slice(&[3, 0]);
             body.extend_from_slice(plan_hash);
+            body.push(required.len() as u8);
+            for node in required {
+                body.extend_from_slice(&node.to_be_bytes());
+            }
         }
     }
     let mut out = Vec::with_capacity(GATEWAY_INNER_HEAD_SIZE + body.len());
@@ -1742,9 +1757,25 @@ pub fn decode_channel_plan(inner: &[u8]) -> Result<ChannelPlanRequest, HostOpsEr
                 commit_signature: fixed(payload, 4 + blob)?,
             })
         }
-        3 if payload.len() == 34 => Ok(ChannelPlanRequest::Release {
-            plan_hash: fixed(payload, 2)?,
-        }),
+        3 if payload.len() >= 35 => {
+            let count = usize::from(payload[34]);
+            if count > CHANNEL_PLAN_REQUIRED_MAX || payload.len() != 35 + count * 8 {
+                return Err(HostOpsError::LengthMismatch);
+            }
+            let mut required = Vec::with_capacity(count);
+            for index in 0..count {
+                required.push(u64_at(payload, 35 + index * 8)?);
+            }
+            if required.iter().any(|node| *node == 0 || *node == u64::MAX)
+                || required.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return Err(HostOpsError::Invalid("required_set"));
+            }
+            Ok(ChannelPlanRequest::Release {
+                plan_hash: fixed(payload, 2)?,
+                required,
+            })
+        }
         1 | 3 => Err(HostOpsError::LengthMismatch),
         other => Err(HostOpsError::UnknownEnum("action", other)),
     }
@@ -2438,7 +2469,10 @@ mod tests {
         for request in [
             ChannelPlanRequest::Status,
             offer,
-            ChannelPlanRequest::Release { plan_hash: [9; 32] },
+            ChannelPlanRequest::Release {
+                plan_hash: [9; 32],
+                required: vec![2, 3],
+            },
         ] {
             let inner = encode_channel_plan(&request).unwrap();
             assert_eq!(decode_channel_plan(&inner).unwrap(), request);

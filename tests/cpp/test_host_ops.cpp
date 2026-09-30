@@ -4148,6 +4148,18 @@ void test_channel_plan_codecs() {
   // A truncated offer never reaches the plan authority.
   request[3] = static_cast<std::uint8_t>(request[3] - 1);
   CHECK(!decode_channel_plan(ByteView{request.data(), written - 1}, back));
+  ChannelPlanRequest release{};
+  release.action = ChannelPlanAction::Release;
+  release.plan_hash.fill(0x5A);
+  release.required = {2, 3};
+  release.required_count = 2;
+  CHECK_OK(encode_channel_plan(release, MutableByteView{request.data(), request.size()}, written));
+  CHECK(written == 4 + 2 + 32 + 1 + 16);
+  CHECK_OK(decode_channel_plan(ByteView{request.data(), written}, back));
+  CHECK(back.plan_hash == release.plan_hash && back.required_count == 2 &&
+        back.required[0] == 2 && back.required[1] == 3);
+  request[4 + 2 + 32] = 3;  // count exceeds the exact payload length
+  CHECK(!decode_channel_plan(ByteView{request.data(), written}, back));
 }
 
 }  // namespace

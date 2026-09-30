@@ -11,7 +11,7 @@
 
 use routeloom_protocol::host_ops::{
     encode_channel_plan, ChannelPlanReport, ChannelPlanRequest, CAP_CHANNEL_PLAN_V1,
-    CAP_HOST_OPS_V1, HOST_OPS_SCHEMA, SUB_CHANNEL_PLAN_REPORT,
+    CAP_HOST_OPS_V1, CHANNEL_PLAN_REQUIRED_MAX, HOST_OPS_SCHEMA, SUB_CHANNEL_PLAN_REPORT,
 };
 use routeloom_provision::sdkv1::channel_plan::{ChannelPlan, SignedChannelPlan};
 
@@ -244,11 +244,21 @@ impl SiteAuthority {
     /// fresh report shows READY from every required member. A fresh
     /// gateway report also permits release after the daemon restarted.
     pub fn channel_plan_release(&mut self, now_mono: u64) -> Result<[u8; 32], String> {
-        let required = self.channel_plan_required();
+        let authority = self.id.gateways[0];
+        let mut required: Vec<u64> = self
+            .devices
+            .values()
+            .filter(|row| row.member && row.node != authority)
+            .map(|row| row.node)
+            .collect();
+        required.sort_unstable();
+        if required.len() > CHANNEL_PLAN_REQUIRED_MAX {
+            return Err("NOT_READY: required member set exceeds gateway capacity".into());
+        }
         let report = self
             .channel_plan
             .fresh_report(now_mono)
-            .ok_or("no fresh gateway report: read the channel plan status first")?;
+            .ok_or("NOT_READY: read a fresh channel plan status first")?;
         if report.result != 0 || report.released || report.offered_plan == [0; 32] {
             return Err("gateway has no held channel plan".into());
         }
@@ -257,17 +267,20 @@ impl SiteAuthority {
             .offered
             .is_some_and(|offered| offered != report.offered_plan)
         {
-            return Err("the gateway report is for another plan: read the status again".into());
+            return Err("NOT_READY: the gateway report is for another plan".into());
         }
-        if usize::from(report.ready) < required {
+        if usize::from(report.ready) < required.len() {
             return Err(format!(
-                "NOT_READY: {} of {required} members answered READY",
-                report.ready
+                "NOT_READY: {} of {} members answered READY",
+                report.ready,
+                required.len()
             ));
         }
         let plan_hash = report.offered_plan;
-        self.channel_plan
-            .queue(ChannelPlanRequest::Release { plan_hash })?;
+        self.channel_plan.queue(ChannelPlanRequest::Release {
+            plan_hash,
+            required,
+        })?;
         Ok(plan_hash)
     }
 
@@ -375,6 +388,14 @@ mod tests {
         assert!(refused.starts_with("NOT_READY"), "{refused}");
         site.channel_plan.report = Some((report(2, plan_hash), 100));
         assert_eq!(site.channel_plan_release(100).unwrap(), plan_hash);
+        let (body, _) = site.channel_plan.take_request(100).unwrap();
+        assert_eq!(
+            routeloom_protocol::host_ops::decode_channel_plan(&body).unwrap(),
+            ChannelPlanRequest::Release {
+                plan_hash,
+                required: vec![0x0A, 0x0B]
+            }
+        );
     }
 
     #[test]

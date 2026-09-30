@@ -142,9 +142,20 @@ struct DeviceChannelPlan final : usb::UsbBridge::ChannelPlanUsbSink {
     } else if (request.action == usb::ChannelPlanAction::Offer) {
       status = offer(request, now_ms);
     } else if (request.action == usb::ChannelPlanAction::Release) {
-      status = request.plan_hash == migration->agent().issued_plan_hash()
-                   ? migration->agent().release_commit(now_ms)
-                   : Status::error(StatusCode::Conflict, "not the offered plan");
+      MigrationAgent& agent = migration->agent();
+      if (request.plan_hash != agent.issued_plan_hash()) {
+        status = Status::error(StatusCode::Conflict, "not the offered plan");
+      } else {
+        for (std::size_t i = 0; i < request.required_count; ++i) {
+          ParticipantReadiness ready{};
+          if (!agent.readiness_of(request.required[i], ready) || !ready.ready ||
+              ready.plan_hash != request.plan_hash) {
+            status = Status::error(StatusCode::WouldBlock, "REQUIRED_SET_NOT_READY");
+            break;
+          }
+        }
+        if (status) status = agent.release_commit(now_ms);
+      }
     }
     report = usb::ChannelPlanReport{};
     report.result = static_cast<std::uint16_t>(result_for(status));

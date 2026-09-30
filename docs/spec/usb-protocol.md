@@ -132,9 +132,9 @@ MemberEdhocのsiteで、hostのSite AuthorityがSAKで署名したchannel plan�
 
 | sub | 向き | payload |
 |---|---|---|
-| `0x68` CHANNEL_PLAN | H→G | `action:u8`（1 STATUS／2 OFFER／3 RELEASE）、`reserved:u8=0`。OFFERは続けて`blob_len:u16`（1〜384）、plan blob、`commit_signature[64]`。RELEASEは`plan_hash[32]` |
+| `0x68` CHANNEL_PLAN | H→G | `action:u8`（1 STATUS／2 OFFER／3 RELEASE）、`reserved:u8=0`。OFFERは続けて`blob_len:u16`（1〜384）、plan blob、`commit_signature[64]`。RELEASEは`plan_hash[32]`、`required_count:u8`（0〜8）、昇順・重複なしの`required_node:u64`をcount件 |
 | `0x69` CHANNEL_PLAN_REPORT | G→H（同request id） | 96 B：`result:u16`（ConfigOpsResult空間）、`detail:u8`（機器のStatusCode）、`phase:u8`（gateway参加者のParticipantPhase）、`active_channel:u8`、`ready:u8`（提示中のplanにREADYを返したmember数）、`flags:u8`（bit0 commit解放済み）、`reserved:u8=0`、`active_epoch:u32`、`cooldown_ms:u32`（plan間cooldownの残り）、`gateway_now_ms:u64`（planの時刻の領域）、`ledger_sequence:u64`、`ledger_state[32]`、`offered_plan[32]`（無ければ0） |
 
-gatewayは採用済みsiteのSAK（`SiteCommitVerifier`）で署名を検証してから台帳（`rlmauth`）へcommitし、planを配る。USB sessionはhostを認証するだけで、planの正しさは保証しない。偽の署名・署名なしは`Denied`（detail＝AuthenticationFailed）で、何も配らない。commitの証拠はRELEASEまで保持し、gatewayはOFFER時に認証済みの直接peerを固定して、その全員のREADYまでRELEASEを拒否する。解放後もそのpeerの結果を待ち、全員の結果または期限後に成否を確定する。hostはreportの`ready`を確認してから解放する。site全体のrequired集合や切替時に不在だったmemberの復旧は未実装。hostはSTATUSのreport（台帳の先頭、現在のchannelとepoch、gatewayの時計）から次のplanを組み立てるので、5 sより古いreportでは提示しない。回復用のsigned snapshotは配らない（snapshotはcommit証拠そのもので、READYの関門を越えてしまう）。daemon側はAPI1 `site.channel_plan.status/offer/release`（[Host §11](host.md)）。
+gatewayは採用済みsiteのSAK（`SiteCommitVerifier`）で署名を検証してから台帳（`rlmauth`）へcommitし、planを配る。USB sessionはhostを認証するだけで、planの正しさは保証しない。偽の署名・署名なしは`Denied`（detail＝AuthenticationFailed）で、何も配らない。commitの証拠はRELEASEまで保持し、gatewayはOFFER時に認証済みの直接peerを固定して、その全員のREADYまでRELEASEを拒否する。さらにRELEASEの必須member全員について、現plan hashのREADYを確認する。欠けていればBusy（detail＝WouldBlock）で拒否する。解放後もそのpeerの結果を待ち、全員の結果または期限後に成否を確定する。hostはreportの`ready`を確認し、siteのmember ID集合を渡してから解放する。hostはSTATUSのreport（台帳の先頭、現在のchannelとepoch、gatewayの時計）から次のplanを組み立てるので、5 sより古いreportでは提示しない。回復用のsigned snapshotは配らない（snapshotはcommit証拠そのもので、READYの関門を越えてしまう）。daemon側はAPI1 `site.channel_plan.status/offer/release`（[Host §11](host.md)）。
 
 [Host](host.md)／[Wire](wire-protocol.md)／[電源断](crash-time-resources.md)
