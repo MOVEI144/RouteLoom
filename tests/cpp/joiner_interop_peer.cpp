@@ -29,6 +29,8 @@
 //   C <kind u8><carrier bytes>       authority down (queued likewise;
 //                                    kind 1..5, envelope <= 2048 B)
 //   V <reason u8>                    request a GK pull (reason 1..3)
+//   L                                the device's own leave (LocalLeave into
+//                                    the lifecycle on the next round)
 //   J <RRS1 object bytes>            inject a gossip-completed RRS1 object
 //                                    (single-device harness: no mesh peer
 //                                    exists, so the bytes cross the pipe and
@@ -757,6 +759,8 @@ class OwnerLeg {
     pulls_.push_back(reason);
   }
 
+  void request_leave() { leave_requested_ = true; }
+
   void inject_gossip(Bytes object) {
     if (object.empty() || object.size() > routeloom::sdkv1::kRevocationObjectMax || gossip_.size() >= 4) {
       fatal("bad gossip object");
@@ -837,6 +841,10 @@ class OwnerLeg {
       poll.kind = routeloom::sdkv1::AuthorityInputKind::Tick;
       const Status status = client_.advance(poll, now);
       if (!status.ok()) fatal("authority Tick failed");
+    }
+    if (leave_requested_ && lifecycle_ready_) {
+      leave_requested_ = false;
+      (void)lifecycle_.dispatch(routeloom::sdkv1::LifecycleInput::LocalLeave(), now);
     }
     (void)lifecycle_.dispatch(routeloom::sdkv1::LifecycleInput::Poll(), now);
     // Injected gossip objects dispatch as completed reassemblies from a
@@ -1106,6 +1114,7 @@ class OwnerLeg {
   routeloom::sdkv1::LifecyclePorts ports_;
   routeloom::sdkv1::LifecycleConfig config_;
   routeloom::sdkv1::MembershipLifecycle lifecycle_;
+  bool leave_requested_{false};
   std::deque<AuthorityCarrier> downs_;
   std::deque<std::uint8_t> pulls_;
   std::deque<Bytes> gossip_;
@@ -1183,6 +1192,9 @@ class PeerWorld {
   }
   void request_pull(std::uint8_t reason) { owner_->request_pull(reason); }
   void inject_gossip(Bytes object) { owner_->inject_gossip(std::move(object)); }
+  void request_leave() {
+    if (owner_ != nullptr) owner_->request_leave();
+  }
   void emit_extended() { owner_->emit_extended(); }
   void set_proxy_muted(std::uint8_t site, std::uint8_t proxy, bool muted) {
     if (site < sites_.size()) sites_[site]->set_proxy_muted(proxy, muted);
@@ -1456,6 +1468,9 @@ int run(int argc, char** argv) {
       } else if (tag == 'V') {
         if (frame.size() != 2) fatal("bad V");
         world.request_pull(frame[1]);
+      } else if (tag == 'L') {
+        if (frame.size() != 1) fatal("bad L");
+        world.request_leave();
       } else if (tag == 'J') {
         if (frame.size() < 2) fatal("bad J");
         world.inject_gossip(Bytes(frame.begin() + 1, frame.end()));
