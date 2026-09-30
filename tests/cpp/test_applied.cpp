@@ -1017,6 +1017,13 @@ void test_deferred_ticket() {
   } sink;
   b->set_applied_sink(&sink);
 
+  SendOptions coalesced = applied_options(5000, 1);
+  coalesced.coalesce_key = 1;
+  MessageId refused{};
+  CHECK(a->send_applied(2, user_payload(), b->applied_lease(), coalesced, w.now, refused).code ==
+        StatusCode::InvalidArgument);
+  CHECK(sink.calls == 0);
+
   const MessageId id = applied_exchange(w);
   w.run(1000);  // past the app window twice: both QUERYs see Pending
   CHECK(sink.calls == 1 && (sink.ticket >> 32) == 102);
@@ -1094,6 +1101,39 @@ void test_deferred_ticket_cap() {
     CHECK(w.run_until([&] { return a->delivery(id).state == DeliveryState::Delivered; }, 2000));
   }
   CHECK(b->applied_stats().refusals_capacity == 1);
+}
+
+// Pending tickets cannot publish application success after their source
+// is revoked or the local node cancels its work for leave.
+void test_deferred_ticket_invalidation() {
+  for (const bool leave : {false, true}) {
+    World w;
+    w.add(1);
+    MeshNode* b = w.add(2);
+    w.start_all();
+    w.link(1, 2);
+    struct Sink final : AppliedEndpointSink {
+      std::uint64_t ticket{0};
+      void on_applied_request(const AppliedRequest& request, AppliedReply& reply) noexcept override {
+        ticket = request.ticket;
+        reply.deferred = true;
+      }
+    } sink;
+    CHECK_OK(b->set_applied_sink(&sink));
+    (void)applied_exchange(w);
+    w.run(150);
+    CHECK(sink.ticket != 0);
+    if (leave) {
+      CHECK_OK(b->cancel_all("CANCELLED_LEAVE"));
+    } else {
+      b->revoke_routes(1, w.now);
+    }
+    const auto committed = b->applied_stats().results_committed;
+    AppliedReply reply{};
+    reply.outcome = ep::AppResultOutcome::Success;
+    CHECK(b->complete_applied(sink.ticket, reply, w.now).code == StatusCode::NotFound);
+    CHECK(b->applied_stats().results_committed == committed);
+  }
 }
 
 void test_no_sink_commits_no_endpoint() {
@@ -1778,6 +1818,7 @@ int main() {
   test_no_sink_commits_no_endpoint();
   test_deferred_ticket();
   test_deferred_ticket_cap();
+  test_deferred_ticket_invalidation();
   test_stale_lease_refusal_and_bootstrap();
   test_malformed_body_refusal();
   test_query_recovery_resends_result();

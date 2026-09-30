@@ -647,6 +647,12 @@ void MeshNode::revoke_routes(const NodeId peer, const MonotonicMs now_ms) noexce
   } else {
     routes_.invalidate_next_hop(peer, now_ms, true);
   }
+  // A deferred application completion belongs to the revoked source.
+  // Keep terminal dedup, but drop its ticket: late completion cannot publish
+  // a verdict under a later membership binding.
+  while (auto* pending = applied_records_.find([&](const AppliedRecord& value) {
+           return value.ticket != 0 && value.key.origin == peer;
+         })) applied_records_.release(pending);
   const RouteSelection selected = routes_.best(peer);
   if (selected.valid) (void)routes_.withdraw(peer, selected.next_hop, now_ms);
   routes_.evaluate(now_ms);

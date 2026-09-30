@@ -83,6 +83,9 @@ Status MeshNode::send_applied(const NodeId destination, const ByteView payload,
     return Status::error(StatusCode::InvalidArgument,
                          "send_applied requires DeliveryClass::Applied");
   }
+  if (options.coalesce_key != 0) {
+    return Status::error(StatusCode::InvalidArgument, "COALESCE_REQUIRES_BEST_EFFORT");
+  }
   if (options.persist_across_sleep) {
     return Status::error(StatusCode::Unsupported,
                          "APPLIED sleep persistence is not implemented");
@@ -320,6 +323,12 @@ Status MeshNode::cancel_all(const char* untransmitted_reason) noexcept {
         break;
     }
   });
+  // Leave also cancels locally executing requests from the old site.
+  // Their dedup remains, while QUERY can only report NotRetained.
+  while (auto* pending = applied_records_.find(
+             [](const AppliedRecord& value) { return value.ticket != 0; })) {
+    applied_records_.release(pending);
+  }
   return Status::success();
 }
 
