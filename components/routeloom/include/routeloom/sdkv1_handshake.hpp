@@ -509,7 +509,7 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   // under the entry guard only).
   void cancel_all_internal() noexcept;
   void end_edhoc_flight() noexcept;
-  void finish_confirmed_exchange(NodeId peer) noexcept;
+  void finish_confirmed_exchange(SecurityScope scope, NodeId peer) noexcept;
   CarrierRecord* find_record(SecurityScope scope, NodeId peer, HandshakeRole role) noexcept;
   CarrierRecord* find_record_by_token(std::uint32_t token) noexcept;
   CarrierRecord* alloc_record() noexcept;

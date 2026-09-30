@@ -782,7 +782,7 @@ void test_authenticated_traffic_releases_quiet_m4() {
   CHECK_OK(pair.b->engine.take_result(out));
   CHECK(out.event == HandshakeEvent::Established);
   const HandshakeResult established_b = out;
-  constexpr NodeId c_id = kNodeA;
+  constexpr NodeId c_id = kNodeA + 2;
   const auto cert = member_cert_for(c_id, sdkv1_test::verifier_key().pub,
                                     kMemberRoleEndpoint, 5);
   Side c(c_id, kNodeB, mac_of(0x0C), mac_of(0x0B), sdkv1_test::verifier_key(), cert,

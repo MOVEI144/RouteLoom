@@ -14,5 +14,5 @@
   image (for example node status on `gateway_small`) boots without advertising
   that bit instead of entering the fail streak and deep sleep.
 - Gateway reset: a completed EDHOC exchange yields its crypto flight to a
-  waiting exchange with the same peer after traffic authenticates in the exact
+  waiting exchange after traffic authenticates in the exact
   installed context. Retries of an unconfirmed m4 remain protected.
