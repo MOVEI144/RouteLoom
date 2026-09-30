@@ -1,0 +1,26 @@
+{
+  "daemon_start_after_release_s": 2.09,
+  "reset_release_skew_ms": 0.508,
+  "member_active_after_release_s": {
+    "0000000000000001": 4.1,
+    "0000000000000002": 12.11,
+    "0000000000000003": 24.14
+  },
+  "auth_after_release_s": 2.35,
+  "routes_after_release_s": {
+    "0000000000000002": 15.89,
+    "0000000000000003": 32.8
+  },
+  "all_routes_after_release_s": 32.8,
+  "note": "member_active_after_release_s counts state=member (approved+delivered); confirmed is the device confirmation",
+  "approved_after_release_s": {
+    "0000000000000001": 3.53,
+    "0000000000000002": 11.78,
+    "0000000000000003": 23.89
+  },
+  "confirmed_after_release_s": {
+    "0000000000000001": 4.93,
+    "0000000000000002": 35.66,
+    "0000000000000003": 46.09
+  }
+}

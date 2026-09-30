@@ -1,0 +1,591 @@
+[2026-09-29T21:10:11.865+00:00] !! opened
+[2026-09-29T21:10:44.909+00:00] I (864) RouteLoomRef: sdkv1 identity: node=2 kid=bf689dc8a44cb79I (112552) RouteLoomRef: discovery event=STALE peer=1
+[2026-09-29T21:10:44.909+00:00] W (112552) RouteLoomRef: diagnostic reason=STALE peer=1 message=none
+[2026-09-29T21:10:45.109+00:00] W (112810) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=3 message=present
+[2026-09-29T21:10:46.914+00:00] I (114552) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:10:46.914+00:00] W (114553) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:10:47.114+00:00] W (114804) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=3 message=present
+[2026-09-29T21:10:51.125+00:00] W (118806) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=3 message=present
+[2026-09-29T21:10:52.927+00:00] I (120458) RouteLoom: stack hwm rl_owner 10348 B
+[2026-09-29T21:10:52.927+00:00] I (120459) RouteLoom: owner polls=38795 empty=38383 rxq_max=1 max_us rx=3803 bootstrap=14370 node=3100 security=695959
+[2026-09-29T21:10:52.927+00:00] I (120462) RouteLoom: owner expiry_slots=13965480 hop_accept_expired=2
+[2026-09-29T21:10:52.927+00:00] I (120468) RouteLoom: HIL HEAP free=155156 largest=139264 min=154244 B
+[2026-09-29T21:10:52.927+00:00] I (120475) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=2 stale=1 probes=25 send_failures=6 kind_rejects=0
+[2026-09-29T21:10:52.927+00:00] I (120486) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:10:52.927+00:00] I (120493) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=1
+[2026-09-29T21:10:57.132+00:00] W (124808) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=3 message=present
+[2026-09-29T21:11:05.143+00:00] W (132811) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=3 message=present
+[2026-09-29T21:11:08.748+00:00] I (136393) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-29T21:11:08.748+00:00] W (136393) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-29T21:11:08.748+00:00] I (136395) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:11:08.748+00:00] W (136400) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:11:15.156+00:00] W (142811) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=3 message=present
+[2026-09-29T21:11:16.958+00:00] I (144609) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:11:16.958+00:00] W (144609) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:11:27.172+00:00] W (154812) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=3 message=present
+[2026-09-29T21:11:31.578+00:00] I (159216) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:11:31.578+00:00] W (159217) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:11:41.192+00:00] W (168814) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=3 message=present
+[2026-09-29T21:11:52.007+00:00] I (179677) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:11:52.007+00:00] W (179677) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:11:52.808+00:00] I (180459) RouteLoom: stack hwm rl_owner 10348 B
+[2026-09-29T21:11:52.808+00:00] I (180460) RouteLoom: owner polls=58637 empty=58168 rxq_max=1 max_us rx=3803 bootstrap=14370 node=3100 security=695959
+[2026-09-29T21:11:52.808+00:00] I (180463) RouteLoom: owner expiry_slots=21108600 hop_accept_expired=2
+[2026-09-29T21:11:52.808+00:00] I (180469) RouteLoom: HIL HEAP free=155156 largest=139264 min=154244 B
+[2026-09-29T21:11:52.808+00:00] I (180476) RouteLoom: HIL DISCOVERY candidates=1 neighbors=2 capacity=0 auth=2 stale=1 probes=28 send_failures=8 kind_rejects=0
+[2026-09-29T21:11:52.808+00:00] I (180487) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:11:52.808+00:00] I (180494) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=1
+[2026-09-29T21:12:08.628+00:00] I (196300) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:12:08.628+00:00] W (196301) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:12:21.846+00:00] I (209418) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:12:21.846+00:00] W (209418) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:12:32.660+00:00] I (220241) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:12:32.660+00:00] W (220242) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:12:48.483+00:00] I (236049) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:12:48.483+00:00] W (236050) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:12:52.888+00:00] I (240459) RouteLoom: stack hwm rl_owner 10348 B
+[2026-09-29T21:12:52.888+00:00] I (240460) RouteLoom: owner polls=78465 empty=77933 rxq_max=1 max_us rx=3803 bootstrap=14370 node=3100 security=695959
+[2026-09-29T21:12:52.888+00:00] I (240463) RouteLoom: owner expiry_slots=28246680 hop_accept_expired=2
+[2026-09-29T21:12:52.888+00:00] I (240469) RouteLoom: HIL HEAP free=155156 largest=139264 min=154244 B
+[2026-09-29T21:12:52.888+00:00] I (240476) RouteLoom: HIL DISCOVERY candidates=1 neighbors=2 capacity=0 auth=2 stale=1 probes=31 send_failures=8 kind_rejects=0
+[2026-09-29T21:12:52.888+00:00] I (240487) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:12:52.888+00:00] I (240494) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=1
+[2026-09-29T21:13:01.699+00:00] I (249404) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-29T21:13:01.699+00:00] W (249404) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-29T21:13:04.903+00:00] I (252491) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:13:04.903+00:00] W (252491) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:13:52.773+00:00] I (300461) RouteLoom: stack hwm rl_owner 10348 B
+[2026-09-29T21:13:52.773+00:00] I (300462) RouteLoom: owner polls=98321 empty=97751 rxq_max=1 max_us rx=3803 bootstrap=14370 node=3100 security=695959
+[2026-09-29T21:13:52.773+00:00] I (300465) RouteLoom: owner expiry_slots=35394840 hop_accept_expired=2
+[2026-09-29T21:13:52.773+00:00] I (300471) RouteLoom: HIL HEAP free=155156 largest=139264 min=154244 B
+[2026-09-29T21:13:52.973+00:00] I (300478) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=2 stale=1 probes=35 send_failures=41 kind_rejects=0
+[2026-09-29T21:13:52.973+00:00] I (300489) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:13:52.973+00:00] I (300496) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=1
+[2026-09-29T21:14:04.789+00:00] I (312486) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:14:04.789+00:00] W (312487) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:14:25.217+00:00] I (332911) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:14:25.217+00:00] W (332911) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:14:52.854+00:00] I (360461) RouteLoom: stack hwm rl_owner 10348 B
+[2026-09-29T21:14:52.854+00:00] I (360462) RouteLoom: owner polls=118216 empty=117607 rxq_max=1 max_us rx=3803 bootstrap=14370 node=3100 security=695959
+[2026-09-29T21:14:52.854+00:00] I (360465) RouteLoom: owner expiry_slots=42557040 hop_accept_expired=2
+[2026-09-29T21:14:52.854+00:00] I (360472) RouteLoom: HIL HEAP free=155156 largest=139264 min=154244 B
+[2026-09-29T21:14:52.854+00:00] I (360478) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=2 stale=1 probes=39 send_failures=43 kind_rejects=0
+[2026-09-29T21:14:52.854+00:00] I (360489) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:14:52.854+00:00] I (360496) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=1
+[2026-09-29T21:15:25.298+00:00] I (392906) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:15:25.298+00:00] W (392907) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:15:42.720+00:00] I (410407) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:15:42.720+00:00] W (410408) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:15:52.933+00:00] I (420461) RouteLoom: stack hwm rl_owner 10348 B
+[2026-09-29T21:15:52.933+00:00] I (420462) RouteLoom: owner polls=138099 empty=137456 rxq_max=1 max_us rx=3803 bootstrap=14370 node=3100 security=695959
+[2026-09-29T21:15:52.933+00:00] I (420465) RouteLoom: owner expiry_slots=49714920 hop_accept_expired=2
+[2026-09-29T21:15:52.933+00:00] I (420472) RouteLoom: HIL HEAP free=155156 largest=139264 min=154244 B
+[2026-09-29T21:15:52.933+00:00] I (420478) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=2 stale=1 probes=43 send_failures=47 kind_rejects=0
+[2026-09-29T21:15:52.933+00:00] I (420489) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:15:52.933+00:00] I (420496) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=1
+[2026-09-29T21:16:08.955+00:00] I (436509) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:16:08.955+00:00] W (436510) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:16:42.000+00:00] I (469602) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:16:42.000+00:00] W (469603) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:16:52.814+00:00] I (480463) RouteLoom: stack hwm rl_owner 10348 B
+[2026-09-29T21:16:52.814+00:00] I (480464) RouteLoom: owner polls=157987 empty=157306 rxq_max=1 max_us rx=3803 bootstrap=14370 node=3100 security=695959
+[2026-09-29T21:16:52.814+00:00] I (480467) RouteLoom: owner expiry_slots=56874600 hop_accept_expired=2
+[2026-09-29T21:16:52.814+00:00] I (480474) RouteLoom: HIL HEAP free=155156 largest=139264 min=154244 B
+[2026-09-29T21:16:52.814+00:00] I (480480) RouteLoom: HIL DISCOVERY candidates=1 neighbors=2 capacity=0 auth=2 stale=1 probes=46 send_failures=49 kind_rejects=0
+[2026-09-29T21:16:52.814+00:00] I (480491) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:16:52.814+00:00] I (480498) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=1
+[2026-09-29T21:16:54.616+00:00] I (482248) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:16:54.616+00:00] W (482249) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:17:08.438+00:00] I (496018) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-29T21:17:08.438+00:00] W (496018) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-29T21:17:10.241+00:00] I (497866) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:17:10.241+00:00] W (497867) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:17:21.856+00:00] I (509446) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:17:21.856+00:00] W (509447) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:17:28.064+00:00] I (515653) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:17:28.064+00:00] W (515654) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:17:36.475+00:00] I (524129) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:17:36.475+00:00] W (524130) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:17:51.295+00:00] I (539001) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:17:51.295+00:00] W (539002) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:17:52.897+00:00] I (540464) RouteLoom: stack hwm rl_owner 10348 B
+[2026-09-29T21:17:52.897+00:00] I (540465) RouteLoom: owner polls=177793 empty=177040 rxq_max=1 max_us rx=3803 bootstrap=14370 node=3100 security=695959
+[2026-09-29T21:17:52.897+00:00] I (540468) RouteLoom: owner expiry_slots=64004760 hop_accept_expired=2
+[2026-09-29T21:17:52.897+00:00] I (540475) RouteLoom: HIL HEAP free=155156 largest=139264 min=154244 B
+[2026-09-29T21:17:52.897+00:00] I (540481) RouteLoom: HIL DISCOVERY candidates=1 neighbors=2 capacity=0 auth=2 stale=1 probes=49 send_failures=51 kind_rejects=0
+[2026-09-29T21:17:52.897+00:00] I (540492) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:17:52.897+00:00] I (540499) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=1
+[2026-09-29T21:18:51.461+00:00] I (599000) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:18:51.461+00:00] W (599001) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:18:52.862+00:00] I (600464) RouteLoom: stack hwm rl_owner 10348 B
+[2026-09-29T21:18:52.862+00:00] I (600465) RouteLoom: owner polls=196467 empty=195682 rxq_max=1 max_us rx=3803 bootstrap=14370 node=3100 security=695959
+[2026-09-29T21:18:52.862+00:00] I (600468) RouteLoom: owner expiry_slots=70727400 hop_accept_expired=2
+[2026-09-29T21:18:52.862+00:00] I (600475) RouteLoom: HIL HEAP free=155156 largest=139264 min=154244 B
+[2026-09-29T21:18:52.862+00:00] I (600481) RouteLoom: HIL DISCOVERY candidates=1 neighbors=2 capacity=0 auth=2 stale=1 probes=54 send_failures=56 kind_rejects=0
+[2026-09-29T21:18:52.862+00:00] I (600492) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:18:52.862+00:00] I (600499) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=1
+[2026-09-29T21:19:20.282+00:00] I (627876) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:19:20.282+00:00] W (627877) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:19:52.925+00:00] I (660465) RouteLoom: stack hwm rl_owner 10348 B
+[2026-09-29T21:19:52.925+00:00] I (660466) RouteLoom: owner polls=215124 empty=214302 rxq_max=1 max_us rx=3803 bootstrap=14370 node=3100 security=695959
+[2026-09-29T21:19:52.925+00:00] I (660469) RouteLoom: owner expiry_slots=77443920 hop_accept_expired=2
+[2026-09-29T21:19:52.925+00:00] I (660476) RouteLoom: HIL HEAP free=155156 largest=139264 min=154244 B
+[2026-09-29T21:19:52.925+00:00] I (660482) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=2 stale=1 probes=58 send_failures=57 kind_rejects=0
+[2026-09-29T21:19:52.925+00:00] I (660493) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:19:52.925+00:00] I (660500) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=1
+[2026-09-29T21:20:20.361+00:00] I (687876) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:20:20.361+00:00] W (687877) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:20:28.772+00:00] I (696322) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-29T21:20:28.772+00:00] W (696322) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-29T21:20:52.804+00:00] I (720467) RouteLoom: stack hwm rl_owner 10348 B
+[2026-09-29T21:20:52.804+00:00] I (720468) RouteLoom: owner polls=233803 empty=232956 rxq_max=1 max_us rx=3803 bootstrap=14370 node=3100 security=695959
+[2026-09-29T21:20:52.804+00:00] I (720471) RouteLoom: owner expiry_slots=84168360 hop_accept_expired=2
+[2026-09-29T21:20:52.804+00:00] I (720478) RouteLoom: HIL HEAP free=155156 largest=139264 min=154244 B
+[2026-09-29T21:20:52.804+00:00] I (720484) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=2 stale=1 probes=62 send_failures=58 kind_rejects=0
+[2026-09-29T21:20:52.804+00:00] I (720495) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:20:52.804+00:00] I (720502) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=1
+[2026-09-29T21:21:20.245+00:00] I (747878) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T21:21:20.245+00:00] W (747879) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T21:21:52.888+00:00] I (780467) RouteLoom: stack hwm rl_owner 10348 B
+[2026-09-29T21:21:52.888+00:00] I (780468) RouteLoom: owner polls=253662 empty=252781 rxq_max=1 max_us rx=3803 bootstrap=14370 node=3100 security=695959
+[2026-09-29T21:21:52.888+00:00] I (780471) RouteLoom: owner expiry_slots=91317600 hop_accept_expired=2
+[2026-09-29T21:21:52.888+00:00] I (780478) RouteLoom: HIL HEAP free=155156 largest=139264 min=154244 B
+[2026-09-29T21:21:52.888+00:00] I (780484) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=2 stale=1 probes=74 send_failures=68 kind_rejects=0
+[2026-09-29T21:21:52.888+00:00] I (780495) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:21:52.888+00:00] I (780502) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=1
+[2026-09-29T21:21:55.692+00:00] I (783317) RouteLoomRef: discovery event=STALE peer=3
+[2026-09-29T21:21:55.692+00:00] W (783317) RouteLoomRef: diagnostic reason=STALE peer=3 message=none
+[2026-09-29T21:22:00.898+00:00] I (788563) RouteLoomRef: join mode=1 state=1 error=0
+[2026-09-29T21:22:01.699+00:00] I (789256) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:01.699+00:00] I (789260) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:01.699+00:00] I (789268) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:01.899+00:00] I (789584) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:01.899+00:00] I (789586) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:01.899+00:00] I (789595) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:02.300+00:00] I (789911) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:02.300+00:00] I (789913) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:02.300+00:00] I (789921) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:02.700+00:00] I (790238) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T21:22:02.700+00:00] I (790240) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T21:22:04.703+00:00] I (792367) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:04.703+00:00] I (792370) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:04.703+00:00] I (792379) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:05.103+00:00] I (792695) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:05.103+00:00] I (792697) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:05.103+00:00] I (792706) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:05.504+00:00] I (793022) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:05.504+00:00] I (793024) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:05.504+00:00] I (793033) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:05.704+00:00] I (793349) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T21:22:05.704+00:00] I (793351) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T21:22:10.510+00:00] I (798102) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:10.510+00:00] I (798105) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:10.510+00:00] I (798114) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:10.910+00:00] I (798430) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:10.910+00:00] I (798432) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:10.910+00:00] I (798441) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:11.111+00:00] I (798757) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:11.111+00:00] I (798759) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:11.111+00:00] I (798768) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:11.511+00:00] I (799084) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T21:22:11.511+00:00] I (799086) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T21:22:19.721+00:00] I (807426) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:19.721+00:00] I (807429) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:19.922+00:00] I (807438) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:20.122+00:00] I (807754) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:20.122+00:00] I (807756) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:20.122+00:00] I (807765) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:20.522+00:00] I (808081) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:20.522+00:00] I (808083) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:20.522+00:00] I (808092) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:20.722+00:00] I (808408) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T21:22:20.722+00:00] I (808410) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T21:22:35.741+00:00] I (823410) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:35.741+00:00] I (823413) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:35.741+00:00] I (823422) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:36.142+00:00] I (823738) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:36.142+00:00] I (823740) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:36.142+00:00] I (823749) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:36.543+00:00] I (824065) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:36.543+00:00] I (824067) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:36.543+00:00] I (824076) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:36.743+00:00] I (824392) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T21:22:36.744+00:00] I (824394) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T21:22:51.763+00:00] I (839394) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:51.763+00:00] I (839397) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:51.763+00:00] I (839406) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:52.163+00:00] I (839722) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:52.163+00:00] I (839724) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:52.163+00:00] I (839733) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:52.363+00:00] I (840049) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:22:52.364+00:00] I (840051) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:22:52.364+00:00] I (840060) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:22:52.764+00:00] I (840376) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T21:22:52.764+00:00] I (840378) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T21:22:52.764+00:00] I (840467) RouteLoom: stack hwm rl_owner 10348 B
+[2026-09-29T21:22:52.764+00:00] I (840467) RouteLoom: owner polls=281884 empty=280982 rxq_max=1 max_us rx=3803 bootstrap=14370 node=3100 security=695959
+[2026-09-29T21:22:52.964+00:00] I (840471) RouteLoom: owner expiry_slots=101477520 hop_accept_expired=2
+[2026-09-29T21:22:52.964+00:00] I (840478) RouteLoom: HIL HEAP free=155224 largest=139264 min=154244 B
+[2026-09-29T21:22:52.964+00:00] I (840484) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=2 stale=2 probes=76 send_failures=68 kind_rejects=0
+[2026-09-29T21:22:52.964+00:00] I (840495) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:22:52.964+00:00] I (840502) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:23:07.786+00:00] I (855379) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:23:07.786+00:00] I (855382) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:23:07.786+00:00] I (855391) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:23:08.186+00:00] I (855707) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:23:08.186+00:00] I (855709) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:23:08.187+00:00] I (855718) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:23:08.387+00:00] I (856034) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:23:08.387+00:00] I (856036) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:23:08.387+00:00] I (856045) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:23:08.787+00:00] I (856361) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T21:23:08.787+00:00] I (856363) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T21:23:23.811+00:00] I (871363) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:23:23.811+00:00] I (871366) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:23:23.811+00:00] I (871375) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:23:24.011+00:00] I (871691) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:23:24.011+00:00] I (871693) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:23:24.011+00:00] I (871702) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:23:24.412+00:00] I (872019) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:23:24.412+00:00] I (872021) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:23:24.412+00:00] I (872030) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:23:24.812+00:00] I (872346) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T21:23:24.812+00:00] I (872348) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T21:23:39.831+00:00] I (887348) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:23:39.832+00:00] I (887350) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:23:39.832+00:00] I (887359) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:23:40.032+00:00] I (887675) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:23:40.032+00:00] I (887677) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:23:40.032+00:00] I (887684) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:23:40.432+00:00] I (888003) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:23:40.432+00:00] I (888005) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:23:40.432+00:00] I (888012) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:23:40.632+00:00] I (888331) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T21:23:40.632+00:00] I (888333) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T21:23:52.848+00:00] I (900467) RouteLoom: stack hwm rl_owner 10348 B
+[2026-09-29T21:23:52.848+00:00] I (900467) RouteLoom: owner polls=311837 empty=310926 rxq_max=1 max_us rx=3803 bootstrap=14370 node=3100 security=695959
+[2026-09-29T21:23:52.848+00:00] I (900471) RouteLoom: owner expiry_slots=112260600 hop_accept_expired=2
+[2026-09-29T21:23:52.848+00:00] I (900478) RouteLoom: HIL HEAP free=155224 largest=139264 min=154244 B
+[2026-09-29T21:23:52.848+00:00] I (900484) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=2 stale=2 probes=76 send_failures=68 kind_rejects=0
+[2026-09-29T21:23:52.848+00:00] I (900495) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:23:52.848+00:00] I (900502) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:23:55.651+00:00] I (903334) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:23:55.651+00:00] I (903336) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:23:55.651+00:00] I (903345) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:23:56.052+00:00] I (903661) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:23:56.052+00:00] I (903663) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:23:56.052+00:00] I (903670) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:23:56.452+00:00] I (903989) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:23:56.452+00:00] I (903991) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:23:56.452+00:00] I (903998) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:23:56.652+00:00] I (904317) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T21:23:56.652+00:00] I (904319) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T21:24:11.673+00:00] I (919319) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:24:11.673+00:00] I (919321) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:24:11.673+00:00] I (919329) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:24:12.074+00:00] I (919646) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:24:12.074+00:00] I (919648) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:24:12.074+00:00] I (919655) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:24:12.274+00:00] I (919974) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:24:12.274+00:00] I (919976) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:24:12.274+00:00] I (919983) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:24:12.674+00:00] I (920302) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T21:24:12.674+00:00] I (920304) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T21:24:25.691+00:00] I (933400) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-29T21:24:25.691+00:00] W (933400) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-29T21:24:27.694+00:00] I (935304) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:24:27.694+00:00] I (935307) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:24:27.694+00:00] I (935316) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:24:28.094+00:00] I (935632) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:24:28.094+00:00] I (935635) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:24:28.094+00:00] I (935644) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:24:28.295+00:00] I (935960) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:24:28.295+00:00] I (935963) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:24:28.295+00:00] I (935972) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:24:28.695+00:00] I (936288) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T21:24:28.695+00:00] I (936291) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T21:24:43.715+00:00] I (951291) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:24:43.715+00:00] I (951294) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:24:43.715+00:00] I (951303) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:24:43.916+00:00] I (951619) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:24:43.916+00:00] I (951622) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:24:44.116+00:00] I (951631) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:24:44.316+00:00] I (951947) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:24:44.316+00:00] I (951950) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:24:44.316+00:00] I (951959) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:24:44.717+00:00] I (952275) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T21:24:44.717+00:00] I (952278) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T21:24:52.928+00:00] I (960467) RouteLoom: stack hwm rl_owner 10348 B
+[2026-09-29T21:24:52.928+00:00] I (960468) RouteLoom: owner polls=341769 empty=340836 rxq_max=1 max_us rx=3803 bootstrap=14370 node=3100 security=695959
+[2026-09-29T21:24:52.928+00:00] I (960471) RouteLoom: owner expiry_slots=123036120 hop_accept_expired=2
+[2026-09-29T21:24:52.928+00:00] I (960478) RouteLoom: HIL HEAP free=155176 largest=139264 min=154244 B
+[2026-09-29T21:24:52.928+00:00] I (960484) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=2 stale=2 probes=78 send_failures=69 kind_rejects=0
+[2026-09-29T21:24:52.928+00:00] I (960495) RouteLoom: HIL ROUTE peer=1 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T21:24:52.928+00:00] I (960502) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=2
+[2026-09-29T21:24:59.738+00:00] I (967279) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:24:59.738+00:00] I (967282) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:24:59.738+00:00] I (967291) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:24:59.938+00:00] I (967607) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:24:59.938+00:00] I (967610) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:24:59.938+00:00] I (967619) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:25:00.338+00:00] I (967935) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:25:00.338+00:00] I (967938) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:25:00.338+00:00] I (967947) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:25:00.739+00:00] I (968263) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T21:25:00.739+00:00] I (968266) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T21:25:15.559+00:00] I (983267) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:25:15.759+00:00] I (983270) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:25:15.759+00:00] I (983279) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:25:15.959+00:00] I (983596) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:25:15.959+00:00] I (983599) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:25:15.959+00:00] I (983607) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T21:25:30.984+00:00] I (998607) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:25:30.984+00:00] I (998610) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:25:30.984+00:00] I (998619) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:25:31.384+00:00] I (998935) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:25:31.384+00:00] I (998938) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:25:31.384+00:00] I (998947) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:25:31.584+00:00] I (999264) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T21:25:31.584+00:00] I (999267) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:25:31.584+00:00] I (999276) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T21:25:31.985+00:00] I (999592) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T21:25:31.985+00:00] I (999595) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T21:25:31.985+00:00] I (999603) RouteLoomRef: join mode=1 state=6 error=0
+[2026-09-29T21:25:32.385+00:00] I (1000031) RouteLoomRef: join mode=1 state=7 error=0
+[2026-09-29T21:25:32.585+00:00] I (1000142) RouteLoomRef: join mode=1 state=8 error=0
+[2026-09-29T21:25:32.585+00:00] W (1000144) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:25:32.585+00:00] W (1000200) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:25:32.585+00:00] W (1000222) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:25:32.585+00:00] W (1000239) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:25:32.585+00:00] W (1000258) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:25:32.786+00:00] I (1000374) RouteLoomEdhoc: HIL EDHOC ECDH us=105568 ok=1
+[2026-09-29T21:25:32.986+00:00] I (1000629) RouteLoomEdhoc: HIL EDHOC VERIFY us=124091 ok=1
+[2026-09-29T21:25:32.986+00:00] I (1000630) RouteLoomRef: join mode=1 state=9 error=0
+[2026-09-29T21:25:33.186+00:00] I (1000747) RouteLoomEdhoc: HIL EDHOC SIGN us=112086 ok=1
+[2026-09-29T21:25:33.186+00:00] I (1000751) RouteLoomRef: join mode=1 state=10 error=0
+[2026-09-29T21:25:33.186+00:00] W (1000753) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:25:33.186+00:00] W (1000767) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:25:33.186+00:00] W (1000786) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:25:33.186+00:00] W (1000803) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:25:33.787+00:00] W (1001366) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:25:33.787+00:00] W (1001388) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:25:33.787+00:00] W (1001405) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:25:33.787+00:00] W (1001422) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:25:33.787+00:00] I (1001426) RouteLoomRef: join mode=1 state=11 error=0
+[2026-09-29T21:25:33.987+00:00] I (1001561) RouteLoomRef: join mode=1 state=12 error=0
+[2026-09-29T21:25:34.788+00:00] W (1002450) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:25:34.988+00:00] W (1002513) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:25:34.988+00:00] W (1002547) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-29T21:25:34.988+00:00] I (1002564) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-29T21:25:34.988+00:00] W (1002564) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-29T21:25:34.988+00:00] W (1002571) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T21:25:37.391+00:00] W (1005102) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-29T21:25:37.791+00:00] I (1005498) RouteLoomEdhoc: HIL EDHOC ECDH us=106027 ok=1
+[2026-09-29T21:25:38.192+00:00] I (1005758) RouteLoomEdhoc: HIL EDHOC VERIFY us=127159 ok=1
+[2026-09-29T21:25:38.192+00:00] I (1005875) RouteLoomEdhoc: HIL EDHOC SIGN us=112266 ok=1
+[2026-09-29T21:25:38.592+00:00] W (1006284) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:25:38.992+00:00] W (1006637) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-29T21:25:38.992+00:00] W (1006650) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-29T21:25:38.992+00:00] W (1006662) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-29T21:25:38.992+00:00] W (1006676) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-29T21:25:38.992+00:00] W (1006692) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:25:39.192+00:00] W (1006707) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:25:39.192+00:00] W (1006746) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-29T21:25:39.192+00:00] W (1006777) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:25:39.192+00:00] HIL EDHOC HANDSHAKE us=2218718 role=1 scope=1 peer=1 heap_free=154984 heap_min=154128
+[2026-09-29T21:25:41.197+00:00] W (1008712) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:25:46.607+00:00] W (1014312) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-29T21:25:47.809+00:00] W (1015411) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:25:48.010+00:00] W (1015542) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:25:48.010+00:00] W (1015560) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:25:48.010+00:00] W (1015610) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:25:52.820+00:00] I (1020470) RouteLoom: stack hwm rl_owner 10328 B
+[2026-09-29T21:25:52.820+00:00] I (1020471) RouteLoom: owner polls=366211 empty=365113 rxq_max=6 max_us rx=4741 bootstrap=15739 node=3472 security=695959
+[2026-09-29T21:25:52.820+00:00] I (1020475) RouteLoom: owner expiry_slots=131835240 hop_accept_expired=8
+[2026-09-29T21:25:52.820+00:00] I (1020481) RouteLoom: HIL HEAP free=154984 largest=139264 min=154120 B
+[2026-09-29T21:25:52.820+00:00] I (1020487) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=3 stale=2 probes=89 send_failures=2809 kind_rejects=0
+[2026-09-29T21:25:52.820+00:00] I (1020499) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=37 seq=1
+[2026-09-29T21:25:52.820+00:00] I (1020506) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=2
+[2026-09-29T21:25:57.862+00:00] W (1025477) RouteLoomRef: diagnostic reason=session unknown context peer=3 message=none
+[2026-09-29T21:25:59.866+00:00] W (1027482) RouteLoomRef: diagnostic reason=session unknown context peer=3 message=none
+[2026-09-29T21:26:01.471+00:00] W (1028985) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:01.471+00:00] W (1029007) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:01.471+00:00] W (1029095) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:01.471+00:00] W (1029111) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:01.671+00:00] W (1029187) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:01.671+00:00] W (1029203) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:01.671+00:00] W (1029273) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:01.872+00:00] I (1029449) RouteLoomRef: discovery event=STALE peer=3
+[2026-09-29T21:26:01.872+00:00] W (1029449) RouteLoomRef: diagnostic reason=STALE peer=3 message=none
+[2026-09-29T21:26:01.872+00:00] W (1029482) RouteLoomRef: diagnostic reason=session unknown context peer=3 message=none
+[2026-09-29T21:26:02.072+00:00] W (1029779) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:26:02.273+00:00] W (1029798) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:26:02.273+00:00] W (1029820) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:26:02.273+00:00] W (1029838) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:26:03.878+00:00] I (1031450) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T21:26:03.878+00:00] W (1031451) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T21:26:04.479+00:00] W (1032020) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:26:04.479+00:00] W (1032057) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T21:26:04.479+00:00] I (1032139) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-29T21:26:04.479+00:00] W (1032139) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-29T21:26:05.882+00:00] W (1033580) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-29T21:26:05.882+00:00] W (1033592) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-29T21:26:06.082+00:00] W (1033607) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:06.082+00:00] W (1033705) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:06.283+00:00] W (1033809) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:06.283+00:00] W (1033936) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:06.484+00:00] W (1034184) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:06.885+00:00] W (1034439) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:06.885+00:00] W (1034476) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-29T21:26:06.885+00:00] W (1034488) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-29T21:26:06.885+00:00] W (1034498) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-29T21:26:07.086+00:00] W (1034629) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:07.086+00:00] W (1034742) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:07.286+00:00] W (1034847) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:07.286+00:00] W (1034957) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:07.487+00:00] W (1035013) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-29T21:26:07.487+00:00] W (1035142) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-29T21:26:07.688+00:00] W (1035280) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-29T21:26:07.688+00:00] W (1035290) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-29T21:26:07.688+00:00] W (1035298) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-29T21:26:07.688+00:00] W (1035316) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-29T21:26:07.688+00:00] W (1035331) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-29T21:26:07.688+00:00] W (1035343) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-29T21:26:07.688+00:00] W (1035354) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-29T21:26:07.688+00:00] W (1035366) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-29T21:26:07.688+00:00] W (1035389) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:07.688+00:00] W (1035398) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-29T21:26:07.888+00:00] W (1035434) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:07.888+00:00] W (1035450) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:07.888+00:00] W (1035465) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:07.888+00:00] W (1035527) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:07.888+00:00] W (1035579) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-29T21:26:08.089+00:00] W (1035622) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-29T21:26:08.089+00:00] W (1035654) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-29T21:26:08.089+00:00] W (1035673) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:08.289+00:00] W (1035922) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:08.289+00:00] W (1035970) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-29T21:26:09.091+00:00] W (1036768) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-29T21:26:09.292+00:00] W (1036928) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:09.292+00:00] W (1036976) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-29T21:26:10.294+00:00] W (1037932) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:10.294+00:00] W (1037982) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-29T21:26:11.297+00:00] W (1038935) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:11.297+00:00] W (1038983) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-29T21:26:12.300+00:00] W (1039940) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:12.301+00:00] W (1039993) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-29T21:26:13.303+00:00] W (1040946) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:13.303+00:00] W (1041001) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-29T21:26:14.309+00:00] W (1041952) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:14.309+00:00] W (1042000) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-29T21:26:15.310+00:00] W (1042956) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-29T21:26:15.310+00:00] W (1043005) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-29T21:26:16.312+00:00] W (1043878) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-29T21:26:16.312+00:00] I (1043974) RouteLoomRef: message origin=1 session=1104920800 sequence=65 bytes=5
+[2026-09-29T21:26:17.314+00:00] I (1044976) RouteLoomRef: message origin=1 session=1104920800 sequence=66 bytes=5
+[2026-09-29T21:26:18.316+00:00] I (1045983) RouteLoomRef: message origin=1 session=1104920800 sequence=67 bytes=5
+[2026-09-29T21:26:19.319+00:00] I (1046992) RouteLoomRef: message origin=1 session=1104920800 sequence=68 bytes=5
+[2026-09-29T21:26:20.358+00:00] I (1047997) RouteLoomRef: message origin=1 session=1104920800 sequence=69 bytes=5
+[2026-09-29T21:26:21.359+00:00] I (1049001) RouteLoomRef: message origin=1 session=1104920800 sequence=70 bytes=5
+[2026-09-29T21:26:22.361+00:00] I (1050010) RouteLoomRef: message origin=1 session=1104920800 sequence=71 bytes=5
+[2026-09-29T21:26:23.367+00:00] I (1051016) RouteLoomRef: message origin=1 session=1104920800 sequence=72 bytes=5
+[2026-09-29T21:26:24.368+00:00] I (1052024) RouteLoomRef: message origin=1 session=1104920800 sequence=73 bytes=5
+[2026-09-29T21:26:25.371+00:00] I (1053031) RouteLoomRef: message origin=1 session=1104920800 sequence=74 bytes=5
+[2026-09-29T21:26:52.901+00:00] I (1080470) RouteLoom: stack hwm rl_owner 10328 B
+[2026-09-29T21:26:52.901+00:00] I (1080471) RouteLoom: owner polls=384921 empty=383324 rxq_max=6 max_us rx=4741 bootstrap=15739 node=3472 security=695959
+[2026-09-29T21:26:52.901+00:00] I (1080475) RouteLoom: owner expiry_slots=138570840 hop_accept_expired=22
+[2026-09-29T21:26:52.901+00:00] I (1080481) RouteLoom: HIL HEAP free=155116 largest=139264 min=154120 B
+[2026-09-29T21:26:52.901+00:00] I (1080487) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=4 stale=3 probes=95 send_failures=5013 kind_rejects=0
+[2026-09-29T21:26:52.901+00:00] I (1080499) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=37 seq=1
+[2026-09-29T21:26:52.901+00:00] I (1080506) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=3
+[2026-09-29T21:27:52.792+00:00] I (1140470) RouteLoom: stack hwm rl_owner 10328 B
+[2026-09-29T21:27:52.792+00:00] I (1140471) RouteLoom: owner polls=404810 empty=403133 rxq_max=6 max_us rx=4741 bootstrap=15739 node=3472 security=695959
+[2026-09-29T21:27:52.792+00:00] I (1140475) RouteLoom: owner expiry_slots=145730880 hop_accept_expired=22
+[2026-09-29T21:27:52.792+00:00] I (1140481) RouteLoom: HIL HEAP free=155116 largest=139264 min=154120 B
+[2026-09-29T21:27:52.792+00:00] I (1140487) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=4 stale=3 probes=101 send_failures=5013 kind_rejects=0
+[2026-09-29T21:27:52.992+00:00] I (1140499) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=37 seq=1
+[2026-09-29T21:27:52.992+00:00] I (1140506) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=3
+[2026-09-29T21:28:52.914+00:00] I (1200471) RouteLoom: stack hwm rl_owner 10328 B
+[2026-09-29T21:28:52.914+00:00] I (1200472) RouteLoom: owner polls=424690 empty=422923 rxq_max=6 max_us rx=4741 bootstrap=15739 node=3472 security=695959
+[2026-09-29T21:28:52.914+00:00] I (1200476) RouteLoom: owner expiry_slots=152887680 hop_accept_expired=22
+[2026-09-29T21:28:52.914+00:00] I (1200482) RouteLoom: HIL HEAP free=155116 largest=139264 min=154120 B
+[2026-09-29T21:28:52.914+00:00] I (1200488) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=4 stale=3 probes=108 send_failures=5014 kind_rejects=0
+[2026-09-29T21:28:52.914+00:00] I (1200500) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=37 seq=1
+[2026-09-29T21:28:52.914+00:00] I (1200507) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=3
+[2026-09-29T21:29:52.781+00:00] I (1260473) RouteLoom: stack hwm rl_owner 10328 B
+[2026-09-29T21:29:52.781+00:00] I (1260474) RouteLoom: owner polls=444568 empty=442709 rxq_max=6 max_us rx=4741 bootstrap=15739 node=3472 security=695959
+[2026-09-29T21:29:52.781+00:00] I (1260478) RouteLoom: owner expiry_slots=160043760 hop_accept_expired=22
+[2026-09-29T21:29:52.781+00:00] I (1260484) RouteLoom: HIL HEAP free=155116 largest=139264 min=154120 B
+[2026-09-29T21:29:52.985+00:00] I (1260490) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=4 stale=3 probes=116 send_failures=5016 kind_rejects=0
+[2026-09-29T21:29:52.985+00:00] I (1260502) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=37 seq=1
+[2026-09-29T21:29:52.985+00:00] I (1260509) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=3
+[2026-09-29T21:30:52.914+00:00] I (1320473) RouteLoom: stack hwm rl_owner 10328 B
+[2026-09-29T21:30:52.914+00:00] I (1320474) RouteLoom: owner polls=464458 empty=462519 rxq_max=6 max_us rx=4741 bootstrap=15739 node=3472 security=695959
+[2026-09-29T21:30:52.914+00:00] I (1320478) RouteLoom: owner expiry_slots=167204160 hop_accept_expired=22
+[2026-09-29T21:30:52.914+00:00] I (1320484) RouteLoom: HIL HEAP free=155116 largest=139264 min=154120 B
+[2026-09-29T21:30:52.914+00:00] I (1320490) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=4 stale=3 probes=122 send_failures=5016 kind_rejects=0
+[2026-09-29T21:30:52.914+00:00] I (1320502) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=37 seq=1
+[2026-09-29T21:30:52.914+00:00] I (1320509) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=3
+[2026-09-29T21:31:52.869+00:00] I (1380473) RouteLoom: stack hwm rl_owner 10328 B
+[2026-09-29T21:31:52.869+00:00] I (1380474) RouteLoom: owner polls=484336 empty=482309 rxq_max=6 max_us rx=4741 bootstrap=15739 node=3472 security=695959
+[2026-09-29T21:31:52.869+00:00] I (1380478) RouteLoom: owner expiry_slots=174360240 hop_accept_expired=22
+[2026-09-29T21:31:52.869+00:00] I (1380484) RouteLoom: HIL HEAP free=155116 largest=139264 min=154120 B
+[2026-09-29T21:31:52.869+00:00] I (1380490) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=4 stale=3 probes=128 send_failures=5016 kind_rejects=0
+[2026-09-29T21:31:52.869+00:00] I (1380502) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=37 seq=1
+[2026-09-29T21:31:52.869+00:00] I (1380509) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=3
+[2026-09-29T21:32:52.794+00:00] I (1440474) RouteLoom: stack hwm rl_owner 10328 B
+[2026-09-29T21:32:52.794+00:00] I (1440475) RouteLoom: owner polls=504214 empty=502097 rxq_max=6 max_us rx=4741 bootstrap=15739 node=3472 security=695959
+[2026-09-29T21:32:52.794+00:00] I (1440479) RouteLoom: owner expiry_slots=181516320 hop_accept_expired=22
+[2026-09-29T21:32:52.794+00:00] I (1440485) RouteLoom: HIL HEAP free=155116 largest=139264 min=154120 B
+[2026-09-29T21:32:52.794+00:00] I (1440491) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=4 stale=3 probes=135 send_failures=5017 kind_rejects=0
+[2026-09-29T21:32:52.995+00:00] I (1440503) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=37 seq=1
+[2026-09-29T21:32:52.995+00:00] I (1440510) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=3
+[2026-09-29T21:33:52.805+00:00] I (1500476) RouteLoom: stack hwm rl_owner 10328 B
+[2026-09-29T21:33:52.805+00:00] I (1500477) RouteLoom: owner polls=524100 empty=521901 rxq_max=6 max_us rx=4741 bootstrap=15739 node=3472 security=695959
+[2026-09-29T21:33:52.805+00:00] I (1500481) RouteLoom: owner expiry_slots=188675280 hop_accept_expired=22
+[2026-09-29T21:33:52.805+00:00] I (1500487) RouteLoom: HIL HEAP free=155116 largest=139264 min=154120 B
+[2026-09-29T21:33:52.805+00:00] I (1500493) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=4 stale=3 probes=142 send_failures=5020 kind_rejects=0
+[2026-09-29T21:33:52.805+00:00] I (1500505) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=37 seq=1
+[2026-09-29T21:33:53.006+00:00] I (1500512) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=3
+[2026-09-29T21:34:52.886+00:00] I (1560476) RouteLoom: stack hwm rl_owner 10328 B
+[2026-09-29T21:34:52.886+00:00] I (1560477) RouteLoom: owner polls=543967 empty=541674 rxq_max=6 max_us rx=4741 bootstrap=15739 node=3472 security=695959
+[2026-09-29T21:34:52.886+00:00] I (1560481) RouteLoom: owner expiry_slots=195827400 hop_accept_expired=22
+[2026-09-29T21:34:52.886+00:00] I (1560487) RouteLoom: HIL HEAP free=155116 largest=139264 min=154120 B
+[2026-09-29T21:34:52.886+00:00] I (1560493) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=4 stale=3 probes=148 send_failures=5020 kind_rejects=0
+[2026-09-29T21:34:52.886+00:00] I (1560505) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=37 seq=1
+[2026-09-29T21:34:52.886+00:00] I (1560512) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=3
+[2026-09-29T21:35:52.783+00:00] I (1620478) RouteLoom: stack hwm rl_owner 10328 B
+[2026-09-29T21:35:52.783+00:00] I (1620479) RouteLoom: owner polls=563836 empty=561443 rxq_max=6 max_us rx=4741 bootstrap=15739 node=3472 security=695959
+[2026-09-29T21:35:52.783+00:00] I (1620483) RouteLoom: owner expiry_slots=202980240 hop_accept_expired=22
+[2026-09-29T21:35:52.783+00:00] I (1620489) RouteLoom: HIL HEAP free=155116 largest=139264 min=154120 B
+[2026-09-29T21:35:52.984+00:00] I (1620495) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=4 stale=3 probes=154 send_failures=5020 kind_rejects=0
+[2026-09-29T21:35:52.984+00:00] I (1620507) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=37 seq=1
+[2026-09-29T21:35:52.984+00:00] I (1620514) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=3
+[2026-09-29T21:36:52.887+00:00] I (1680479) RouteLoom: stack hwm rl_owner 10328 B
+[2026-09-29T21:36:52.887+00:00] I (1680480) RouteLoom: owner polls=583722 empty=581247 rxq_max=6 max_us rx=4741 bootstrap=15739 node=3472 security=695959
+[2026-09-29T21:36:52.887+00:00] I (1680484) RouteLoom: owner expiry_slots=210139200 hop_accept_expired=22
+[2026-09-29T21:36:52.887+00:00] I (1680490) RouteLoom: HIL HEAP free=155116 largest=139264 min=154120 B
+[2026-09-29T21:36:52.887+00:00] I (1680496) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=4 stale=3 probes=161 send_failures=5021 kind_rejects=0
+[2026-09-29T21:36:52.887+00:00] I (1680508) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=37 seq=1
+[2026-09-29T21:36:52.887+00:00] I (1680515) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=3
+[2026-09-29T21:37:52.789+00:00] I (1740480) RouteLoom: stack hwm rl_owner 10328 B
+[2026-09-29T21:37:52.789+00:00] I (1740481) RouteLoom: owner polls=603597 empty=601030 rxq_max=6 max_us rx=4741 bootstrap=15739 node=3472 security=695959
+[2026-09-29T21:37:52.789+00:00] I (1740485) RouteLoom: owner expiry_slots=217294200 hop_accept_expired=22
+[2026-09-29T21:37:52.789+00:00] I (1740491) RouteLoom: HIL HEAP free=155116 largest=139264 min=154120 B
+[2026-09-29T21:37:52.989+00:00] I (1740497) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=4 stale=3 probes=168 send_failures=5022 kind_rejects=0
+[2026-09-29T21:37:52.989+00:00] I (1740509) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=37 seq=1
+[2026-09-29T21:37:52.989+00:00] I (1740516) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=3
+[2026-09-29T21:38:52.884+00:00] I (1800480) RouteLoom: stack hwm rl_owner 10328 B
+[2026-09-29T21:38:52.884+00:00] I (1800481) RouteLoom: owner polls=623475 empty=620818 rxq_max=6 max_us rx=4741 bootstrap=15739 node=3472 security=695959
+[2026-09-29T21:38:52.884+00:00] I (1800485) RouteLoom: owner expiry_slots=224450280 hop_accept_expired=22
+[2026-09-29T21:38:52.884+00:00] I (1800491) RouteLoom: HIL HEAP free=155116 largest=139264 min=154120 B
+[2026-09-29T21:38:52.884+00:00] I (1800497) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=4 stale=3 probes=175 send_failures=5023 kind_rejects=0
+[2026-09-29T21:38:52.884+00:00] I (1800509) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=37 seq=1
+[2026-09-29T21:38:52.884+00:00] I (1800516) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=3
+[2026-09-29T21:39:52.772+00:00] I (1860482) RouteLoom: stack hwm rl_owner 10328 B
+[2026-09-29T21:39:52.972+00:00] I (1860483) RouteLoom: owner polls=643357 empty=640616 rxq_max=6 max_us rx=4741 bootstrap=15739 node=3472 security=695959
+[2026-09-29T21:39:52.972+00:00] I (1860487) RouteLoom: owner expiry_slots=231607800 hop_accept_expired=22
+[2026-09-29T21:39:52.972+00:00] I (1860493) RouteLoom: HIL HEAP free=155116 largest=139264 min=154120 B
+[2026-09-29T21:39:52.972+00:00] I (1860499) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=4 stale=3 probes=182 send_failures=5024 kind_rejects=0
+[2026-09-29T21:39:52.972+00:00] I (1860511) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=37 seq=1
+[2026-09-29T21:39:52.972+00:00] I (1860518) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=21 seq=3

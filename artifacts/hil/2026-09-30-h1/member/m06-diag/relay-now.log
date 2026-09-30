@@ -1,0 +1,8 @@
+[2026-09-29T20:55:21.129+00:00] !! opened
+[2026-09-29T20:55:41.363+00:00] I (120454) RouteLoom: stack hwm rl_owner 10376 B
+[2026-09-29T20:55:41.363+00:00] I (120455) RouteLoom: owner polls=39242 empty=39109 rxq_max=1 max_us rx=2613 bootstrap=4826 node=2881 security=696042
+[2026-09-29T20:55:41.363+00:00] I (120458) RouteLoom: owner expiry_slots=14126400 hop_accept_expired=1
+[2026-09-29T20:55:41.363+00:00] I (120464) RouteLoom: HIL HEAP free=155160 largest=139264 min=154292 B
+[2026-09-29T20:55:41.363+00:00] I (120471) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=9 send_failures=4 kind_rejects=0
+[2026-09-29T20:55:41.363+00:00] I (120482) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=21 seq=11
+[2026-09-29T20:55:41.363+00:00] I (120489) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0

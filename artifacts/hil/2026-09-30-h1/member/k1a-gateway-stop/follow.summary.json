@@ -1,0 +1,20 @@
+{
+  "requested": 100,
+  "host_accepted": 93,
+  "delivered": 92,
+  "stopped_reason": "device idempotency table full",
+  "success_rate": 0.989247311827957,
+  "rate_limit_retries": 0,
+  "pace_s": 9.0,
+  "elapsed_s": 828.11,
+  "latency_ms_median": 116.02,
+  "latency_ms_p95": 153.18,
+  "latency_ms_max": 292.05,
+  "by_destination": {
+    "3": {
+      "accepted": 93,
+      "delivered": 92
+    }
+  },
+  "evidence": "/home/sahur/orca/workspaces/RouteLoom/v2-h1/artifacts/hil/2026-09-30-h1/member/k1a-gateway-stop/follow.jsonl"
+}

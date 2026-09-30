@@ -19,7 +19,8 @@ for line in "$@"; do
      $line =~ ^CONFIG_ROUTELOOM_HIL_DROP_RX_MAC=\"([0-9a-f]{2}:){5}[0-9a-f]{2}\"$ ||
      $line =~ $peer_mac_pattern ||
      $line == 'CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y' ||
-     $line == 'CONFIG_ESP_CONSOLE_UART_DEFAULT=n' ]] || {
+     $line == 'CONFIG_ESP_CONSOLE_UART_DEFAULT=n' ||
+     $line == 'CONFIG_COMPILER_OPTIMIZATION_DEBUG=y' ]] || {
     echo 'unsupported or unsafe Kconfig override' >&2; exit 2;
   }
   [[ $line != *SECURE_BOOT* && $line != *FLASH_ENCRYPT* && $line != *EFUSE* ]] || {
