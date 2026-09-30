@@ -34,6 +34,10 @@ struct EspNowRuntimeTestAccess {
     const std::uint8_t frame = 0x42;
     return runtime.send_raw(mac, ByteView{&frame, 1});
   }
+  static void fence(EspNowRuntime& runtime) noexcept { runtime.channel_fence_tx(); }
+  static bool fenced(const EspNowRuntime& runtime) noexcept {
+    return runtime.fenced_outstanding_;
+  }
   static void set_release_pending(EspNowRuntime& runtime, NodeId peer) noexcept {
     if (auto* record = runtime.find_peer(peer)) record->release_pending = true;
   }
@@ -1352,10 +1356,31 @@ void test_completions_attribute_in_send_order_after_take_tx() {
   CHECK(esp_now_unregister_send_cb() == ESP_OK);
 }
 
+void test_cutover_fence_recovers_when_driver_omits_completion() {
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize().ok());
+  CHECK(runtime.start().ok());
+  CHECK(runtime.register_neighbor(kPeer, peer_mac(), 1).ok());
+  const std::uint8_t frame = 0x42;
+  CHECK(runtime.send(kPeer, 1, ByteView{&frame, 1}).ok());
+  EspNowRuntimeTestAccess::fence(runtime);
+  CHECK(EspNowRuntimeTestAccess::fenced(runtime));
+  CHECK(EspNowRuntimeTestAccess::raw_send(runtime, peer_mac()).code ==
+        routeloom::StatusCode::WouldBlock);
+  idf_stub::advance_ms(4000);
+  runtime.poll_once();
+  CHECK(!EspNowRuntimeTestAccess::fenced(runtime));
+  runtime.stop();
+}
+
 }  // namespace
 
 int main() {
   test_completions_attribute_in_send_order_after_take_tx();
+  test_cutover_fence_recovers_when_driver_omits_completion();
   test_boot_installs_lease_port();
   test_prestart_owner_pump();
   test_owner_drives_config_component();
