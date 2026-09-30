@@ -26,7 +26,7 @@ the Rust workspace and meshviz). Each surface below carries its own number.
 | Surface | Value | C / Rust name | Defined in | Rule |
 |---|---|---|---|---|
 | Core C ABI | 3 | `ROUTELOOM_CORE_C_ABI` / `CORE_C_ABI` | `components/routeloom/include/routeloom/routeloom.h` | exact major in every struct header; 3.x adds tail fields and functions only; layouts in protocol/abi-golden |
-| Device API (C++ and C) | reserved | - | `reserved` | reserved for the v2 Device API; no symbol exists yet |
+| Device C API | 1 | `ROUTELOOM_DEVICE_C_API` / `DEVICE_C_API` | `components/routeloom_device/include/routeloom/device.h` | exact major in every struct header; 1.x adds tail fields and functions only; layouts in protocol/abi-golden |
 | Mesh wire major | 2 | `ROUTELOOM_WIRE_MAJOR` / `WIRE_MAJOR` | `components/routeloom/include/routeloom/wire.hpp` | never changes within SDK 2.x; other majors are rejected |
 | Mesh wire minor | 0 | `ROUTELOOM_WIRE_MINOR` / `WIRE_MINOR` | `components/routeloom/include/routeloom/wire.hpp` | emitted by this build; decode accepts any minor of major 2 (forward-compatible additions only) |
 | RLD1 carrier | 1 | `ROUTELOOM_RLD1_VERSION` / `RLD1_VERSION` | `components/routeloom/include/routeloom/autonomy_wire.hpp` | classified once by magic+version |
@@ -186,6 +186,12 @@ tests: its security vtable holds static keys only, and production security
   `version.h`); 0 when the reason is not registered.
 - `rl_context` is opaque; storage is caller-provided via
   `rl_context_size()`/`rl_context_alignment()` + `rl_init`.
+- The Device C API (`routeloom/device.h`, `rl_dev_*`) follows the same
+  header rule with its own major, `RL_DEV_API_VERSION` (`1`); its layouts
+  are pinned in [`protocol/abi-golden/device-api1.json`](../../protocol/abi-golden/device-api1.json)
+  by the same tool. Its value types shared with the core (`rl_message_id_t`,
+  `rl_delivery_result_t`, `rl_applied_*_t`, `rl_group_send_options_t`) carry
+  `RL_ABI_VERSION`. Within 1.x it only grows.
 - ABI 2 callers must be rebuilt: an ABI 2 `rl_node_config_t` fails the
   version check in `rl_init`. From v2.0.0, major bumps follow the
   deprecation policy in §9.

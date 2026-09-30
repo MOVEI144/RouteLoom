@@ -1,4 +1,4 @@
-// RouteLoom ESP-NOW node example: an application on routeloom::Device.
+// RouteLoom endpoint example in C++: an application on routeloom::Device.
 // The Device boots the node on its own Owner task (NVS, boot session,
 // security owner, ESP-NOW runtime) from the component Kconfig. The app
 // logs what arrives and, from another task, posts one greeting a minute to

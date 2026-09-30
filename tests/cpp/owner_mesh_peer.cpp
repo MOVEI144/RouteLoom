@@ -149,6 +149,8 @@
 // connectivity_reason u16 | reentry_calls u32 | reentry_busy u32 |
 // applied_requests u32 | applied_completed u32 | applied_refused u32 |
 // policy_revision u32 (the Device events and ops count across restarts)
+// | c_checks u32 | c_check_failures u32 | c_posted_runs u32 |
+// c_messages u32 (the --c-app application; 0 without it)
 //
 // Setup arrives on argv (all integers accept 0x hex; blobs are hex):
 //
@@ -167,6 +169,9 @@
 //                            node config; the adopted config comes from
 //                            the real ApplyMemberConfig path)
 //   --flat                 use the product flat-route timers for route-loss tests
+//   --c-app                (member: S/A/B, C, D, L and Y, the Device events
+//                         and the APPLIED endpoint go through the C
+//                         application on the Device C API, device.h)
 //   --remote-config        (member: Device's remote-config target)
 //   --channel-plan         (Device's manual channel plan, Manual mode;
 //                         the gateway is the site's plan authority)
@@ -218,6 +223,8 @@
 #include "routeloom/device.hpp"
 #include "routeloom/gateway.hpp"
 #include "idf_stubs.hpp"
+#include "owner_mesh_c_app.h"
+#include "../../examples/standalone_gateway/main/app.hpp"
 
 namespace {
 
@@ -536,6 +543,7 @@ struct DeviceTestAccess {
   static espnow::EspNowRuntime& runtime(Device& device) noexcept { return *device.runtime_; }
   static usb::UsbBridge* bridge(Device& device) noexcept { return device.bridge_; }
   static const GatewayDelivery* gateway(Device& device) noexcept { return device.gateway_; }
+  static NodeObserver* app(Device& device) noexcept { return device.app_; }
 };
 
 }  // namespace routeloom
@@ -878,6 +886,8 @@ struct Setup {
   NodeId gw2{routeloom::kInvalidNodeId};
   bool flat{false};
   bool remote_config{false};
+  bool c_app{false};
+  bool standalone{false};
   std::uint8_t channel_plan{0};
   std::string nvs_load;
   std::string flash;
@@ -942,6 +952,10 @@ Setup parse_argv(int argc, char** argv) {
       setup.gw2 = parse_u64(value);
     } else if (arg == std::string("--flat")) {
       setup.flat = true;
+    } else if (arg == std::string("--c-app")) {
+      setup.c_app = true;
+    } else if (arg == std::string("--standalone")) {
+      setup.standalone = true;
     } else if (arg == std::string("--remote-config")) {
       setup.remote_config = true;
     } else if (arg == std::string("--channel-plan")) {
@@ -968,7 +982,6 @@ Setup parse_argv(int argc, char** argv) {
   if (setup.node == routeloom::kInvalidNodeId || setup.node == routeloom::kBroadcastNodeId) {
     fatal("bad node id");
   }
-  if (setup.gateway && setup.usb_secret.empty()) fatal("gateway needs --usb-secret");
   return setup;
 }
 
@@ -997,6 +1010,7 @@ class PipeByteStream final : public routeloom::usb::ByteStream {
 class TeeObserver final : public routeloom::NodeObserver {
  public:
   explicit TeeObserver(routeloom::NodeObserver* next) noexcept : next_(next) {}
+  void chain(routeloom::NodeObserver* next) noexcept { next_ = next; }
   void bind_device(routeloom::Device& device) noexcept { device_ = &device; }
 
   void on_message(const routeloom::MessageKey& key, NodeId source,
@@ -1155,7 +1169,22 @@ struct DeviceEvents final : public routeloom::DeviceObserver {
   }
 };
 DeviceEvents* g_device_events = nullptr;
+// --c-app: the C application observes the Device instead of DeviceEvents;
+// its counters are copied into DeviceEvents for the snapshot and restart.
+mesh_c_app_t* g_c_app = nullptr;
+void sync_c_app() {
+  if (g_c_app == nullptr || g_device_events == nullptr) return;
+  DeviceEvents& events = *g_device_events;
+  events.membership_events = g_c_app->membership_events;
+  events.last_cause = g_c_app->last_cause;
+  events.op_last = g_c_app->op_last;
+  events.op_result = g_c_app->op_result;
+  events.connectivity_events = g_c_app->connectivity_events;
+  events.reentry_calls = g_c_app->reentry_calls;
+  events.reentry_busy = g_c_app->reentry_busy;
+}
 void save_device_events() {
+  sync_c_app();
   if (g_device_events != nullptr) g_device_events->save();
 }
 
@@ -1402,6 +1431,10 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
   std::uint32_t revision = 0;
   (void)device.join_policy(policy, revision);
   put_u32(out, revision);
+  put_u32(out, g_c_app != nullptr ? g_c_app->checks : 0);
+  put_u32(out, g_c_app != nullptr ? g_c_app->check_failures : 0);
+  put_u32(out, g_c_app != nullptr ? g_c_app->posted_runs : 0);
+  put_u32(out, g_c_app != nullptr ? g_c_app->messages : 0);
   write_frame(out);
 }
 
@@ -1409,7 +1442,7 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
 
 int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--harness-version") == 0) {
-    std::fputs("6\n", stdout);
+    std::fputs("7\n", stdout);
     return 0;
   }
   using namespace routeloom;
@@ -1434,9 +1467,17 @@ int main(int argc, char** argv) {
   // The production boot: Device::open_storage then Device::begin.
   PipeByteStream usb_stream;
   TeeObserver observer(nullptr);
+  routeloom_example::StandaloneApp standalone;
   Device device;
   observer.bind_device(device);
   device.observe(&observer);
+  if (setup.standalone) {
+    if (!setup.gateway) fatal("--standalone needs a gateway");
+    observer.chain(&standalone);
+    device.on_poll([](Device& target, MonotonicMs, void* app) {
+      static_cast<routeloom_example::StandaloneApp*>(app)->answer(target);
+    }, &standalone);
+  }
   DeviceEvents events;
   events.device = &device;
   events.load();
@@ -1496,10 +1537,40 @@ int main(int argc, char** argv) {
   }
   status = device.begin(config, now);
   if (!status) boot_failed(status);
+  if (!idf_stub::log_contains(setup.devram ? "security profile: Development"
+                                         : "security profile: Candidate")) {
+    fatal("boot security profile is not visible");
+  }
   EspNowSecurityOwner& owner = DeviceTestAccess::owner(device);
   Sdkv1Stores& stores = DeviceTestAccess::stores(device);
   EspNowRuntime& runtime = DeviceTestAccess::runtime(device);
   UsbBridge* bridge = DeviceTestAccess::bridge(device);
+  mesh_c_app_t c_app{};
+  if (setup.c_app) {
+    if (setup.gateway) fatal("--c-app on the gateway");
+    c_app.membership_events = events.membership_events;
+    c_app.last_cause = events.last_cause;
+    c_app.op_last = events.op_last;
+    c_app.op_result = events.op_result;
+    c_app.connectivity_events = events.connectivity_events;
+    c_app.reentry_calls = events.reentry_calls;
+    c_app.reentry_busy = events.reentry_busy;
+    rl_dev_observer_t c_observer;
+    mesh_c_app_observer(&c_app, &c_observer);
+    rl_dev_observer_t invalid = c_observer;
+    invalid.struct_size = sizeof(invalid) - 1;
+    if (device_c_bind(device, &invalid) != nullptr) fatal("short C observer accepted");
+    invalid = c_observer;
+    invalid.version = RL_DEV_API_VERSION + 1;
+    if (device_c_bind(device, &invalid) != nullptr) fatal("unknown C observer accepted");
+    c_app.device = device_c_bind(device, &c_observer);
+    if (c_app.device == nullptr) fatal("valid C observer refused");
+    if (device_c_bind(device, nullptr) != nullptr) fatal("second C binding accepted");
+    g_c_app = &c_app;
+    // The harness tee stays first so the snapshot sees every message.
+    observer.chain(DeviceTestAccess::app(device));
+    device.observe(&observer);
+  }
 
   const std::uint32_t send_count_base = idf_stub::send_count();
   AppTx app_tx[kAppTxMax]{};
@@ -1530,6 +1601,12 @@ int main(int argc, char** argv) {
         applied.now = now;
         device.step(now);
         if (!applied.open.empty()) applied.poll(device, now);
+        if (setup.c_app) {
+          sync_c_app();
+          applied.requests = c_app.applied_requests;
+          applied.completed = c_app.applied_completed;
+          applied.refused = c_app.applied_refused;
+        }
         if (gw_tx.endpoint_valid) {
           GatewayDelivery& delivery = *device.gateway();
           const EndpointState state = delivery.endpoint_state(gw_tx.endpoint);
@@ -1660,7 +1737,22 @@ int main(int argc, char** argv) {
         options.lifetime_ms = 30000;
         MessageId id{};
         const ByteView body{payload.data() + head, length - head};
-        if (payload[0] == 'A') {
+        if (setup.c_app) {
+          rl_message_id_t c_id{};
+          if (payload[0] == 'B') {
+            status.code = static_cast<StatusCode>(mesh_c_app_send_applied(
+                &c_app, dst, payload.data() + 9, body.data, body.size, &c_id));
+          } else {
+            const std::uint8_t delivery = payload[0] == 'A' ? payload[9] : 1;
+            const std::uint16_t key =
+                payload[0] == 'A' ? static_cast<std::uint16_t>(payload[10] | (payload[11] << 8)) : 0;
+            status.code = static_cast<StatusCode>(mesh_c_app_send(
+                &c_app, dst, body.data, body.size, delivery, key,
+                payload[0] == 'A' ? kMaxMessageLifetimeMs : 30000, &c_id));
+          }
+          status.detail = rl_status_code_name(static_cast<rl_status_code_t>(status.code));
+          id = MessageId{c_id.session, c_id.sequence};
+        } else if (payload[0] == 'A') {
           options.lifetime_ms = kMaxMessageLifetimeMs;
           options.delivery = static_cast<DeliveryClass>(payload[9]);
           options.coalesce_key = static_cast<std::uint16_t>(payload[10] | (payload[11] << 8));
@@ -1690,7 +1782,11 @@ int main(int argc, char** argv) {
       case 'L':
       case 'Y': {
         OperationId op = 0;
-        status = payload[0] == 'L' ? device.leave(op) : device.request_join(op);
+        if (setup.c_app) {
+          status.code = static_cast<StatusCode>(mesh_c_app_operation(&c_app, payload[0] == 'L', &op));
+        } else {
+          status = payload[0] == 'L' ? device.leave(op) : device.request_join(op);
+        }
         if (status && payload[0] == 'L' && device.membership().stage != MembershipStage::Leaving) {
           fatal("leave must expose its durable intent immediately");
         }
@@ -1710,7 +1806,10 @@ int main(int argc, char** argv) {
         break;
       }
       case 'C': {
-        const ExecutionLease lease = runtime.node().applied_lease();
+        ExecutionLease lease = runtime.node().applied_lease();
+        if (setup.c_app && rl_dev_applied_lease(c_app.device, lease.data()) != RL_STATUS_OK) {
+          fatal("c app lease");
+        }
         Bytes reply{'c'};
         reply.insert(reply.end(), lease.begin(), lease.end());
         write_frame(reply);
@@ -1721,6 +1820,10 @@ int main(int argc, char** argv) {
         applied.delay_ms = static_cast<MonotonicMs>(payload[1] | (payload[2] << 8) |
                                                     (payload[3] << 16) |
                                                     (static_cast<std::uint32_t>(payload[4]) << 24));
+        if (setup.c_app) {
+          c_app.delay_ms = static_cast<std::uint32_t>(applied.delay_ms);
+          break;
+        }
         status = device.set_applied_sink(&applied);
         if (!status) fatal(status.detail);
         break;

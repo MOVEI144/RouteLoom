@@ -49,7 +49,7 @@ class ManifestDriftTest(unittest.TestCase):
         self.assertIsNotNone(targets)
         cells = json.loads((ROOT / "tools/ci/cells.json").read_text(encoding="utf-8"))["cells"]
         cell_targets = {cell["target"] for cell in cells}
-        for doc in ("docs/implementation/component-distribution.md", "examples/espnow_node/README.md"):
+        for doc in ("docs/implementation/component-distribution.md", "examples/endpoint_cpp/README.md"):
             text = (ROOT / doc).read_text(encoding="utf-8")
             for target in re.findall(r"^  - (esp32\w+)$", targets.group(1), re.M):
                 self.assertIn(target, text, f"{doc}: {target}")

@@ -106,7 +106,7 @@ flat profileの規則は`lifetime > (ceil(D/6) + 1) × period`（`flat_lifetime_
 |---|---|---|---|
 | C++ `NodeConfig` | `route_gateways`（最大4、`kInvalidNodeId`は空き枠。1つでも設定でscoped） | `route_advertisement_period_ms`／`route_lifetime_ms`、`route_refresh_ticks`（既定6） | `start()`の`validate_config()`がlease規則違反を`InvalidArgument`（`ROUTE_LIFETIME_BELOW_REFRESH_BOUND`）で拒否 |
 | C API `rl_node_config_t` | `route_gateway_count`（0＝flat、既定）＋`route_gateways[RL_MAX_ROUTE_GATEWAYS]`（優先順） | 既存の`route_advertisement_period_ms`／`route_lifetime_ms`、`route_refresh_ticks`（0＝SDK既定6） | `rl_init`が個数超過・count内の0・重複を`RL_STATUS_INVALID_ARGUMENT`で拒否（count以降の要素は無視）。lease規則違反とbroadcast IDは`rl_start`が`RL_STATUS_INVALID_ARGUMENT`で拒否 |
-| firmware Kconfig（reference_node／bridge_node／examples/espnow_node） | `ROUTELOOM_ROUTE_GATEWAY_SCOPED`（既定n）、`ROUTELOOM_ROUTE_GATEWAY_1`（既定0x1）、`ROUTELOOM_ROUTE_GATEWAY_2`（0＝なし）。bridge_nodeはgatewayなので自分の`ROUTELOOM_NODE_ID`を先頭に載せ、`_2`だけを持つ | `ROUTELOOM_ROUTE_PERIOD_MS`（既定5000）／`ROUTELOOM_ROUTE_LIFETIME_MS`（既定90000）。scoped時だけ現れ、flat buildはSDK既定（5s／15s）に触れない | gateway 0・重複・lease規則違反を`static_assert`でbuild失敗にする（起動時拒否より前に止める） |
+| firmware Kconfig（reference_node／bridge_node／examples/endpoint_cpp） | `ROUTELOOM_ROUTE_GATEWAY_SCOPED`（既定n）、`ROUTELOOM_ROUTE_GATEWAY_1`（既定0x1）、`ROUTELOOM_ROUTE_GATEWAY_2`（0＝なし）。bridge_nodeはgatewayなので自分の`ROUTELOOM_NODE_ID`を先頭に載せ、`_2`だけを持つ | `ROUTELOOM_ROUTE_PERIOD_MS`（既定5000）／`ROUTELOOM_ROUTE_LIFETIME_MS`（既定90000）。scoped時だけ現れ、flat buildはSDK既定（5s／15s）に触れない | gateway 0・重複・lease規則違反を`static_assert`でbuild失敗にする（起動時拒否より前に止める） |
 
 `rl_node_config_init()`はflat既定（5s／15s、gatewayなし）のままなので、C callerがscopedにするときは5s／90sを明示する（15sのままでは`rl_start`が拒否する）。実効gateway一覧は`rl_route_gateways()`で読める（0件＝flat）。
 

@@ -41,17 +41,18 @@ jobs:
       - name: Clippy (-D warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Build C++ peer for Unix interop tests
+      - name: Build C++ peers for Unix interop tests
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
           cmake -S .. -B ../build-host-os -DROUTELOOM_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
-          cmake --build ../build-host-os --parallel 2 --target routeloom_joiner_interop_peer
+          cmake --build ../build-host-os --parallel 2 --target routeloom_joiner_interop_peer routeloom_owner_mesh_peer
 
       - name: Test workspace
         env:
           ROUTELOOM_OWNER_PEER: ${{ github.workspace }}/build-host-os/tests/cpp/routeloom_joiner_interop_peer
+          ROUTELOOM_MESH_PEER: ${{ github.workspace }}/build-host-os/tests/cpp/routeloom_owner_mesh_peer
         run: cargo test --workspace
 
       - name: Build release binaries

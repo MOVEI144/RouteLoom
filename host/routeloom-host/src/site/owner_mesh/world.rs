@@ -271,17 +271,8 @@ impl MeshSite {
         Self::start_with_db(tag, now, None)
     }
 
-    fn start_with_db(tag: &str, now: u64, db: Option<&[u8]>) -> Self {
-        use std::os::unix::fs::DirBuilderExt;
-        let dir = std::env::temp_dir().join(format!(
-            "routeloom-owner-mesh-{tag}-{}-{}",
-            std::process::id(),
-            now_ms()
-        ));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&dir)
-            .expect("create private world directory");
+    fn start_with_db(_tag: &str, now: u64, db: Option<&[u8]>) -> Self {
+        let dir = super::super::short_socket_test_dir("om");
         if let Some(db) = db {
             write_private(&dir.join("site.db"), db);
         }

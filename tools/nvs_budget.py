@@ -35,7 +35,9 @@ APPS = (
     "firmware/reference_node",
     "firmware/bridge_node",
     "firmware/bench_node",
-    "examples/espnow_node",
+    "examples/endpoint_cpp",
+    "examples/endpoint_c",
+    "examples/standalone_gateway",
 )
 
 HEADERS = {

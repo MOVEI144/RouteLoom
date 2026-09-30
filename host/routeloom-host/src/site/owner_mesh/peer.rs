@@ -505,6 +505,12 @@ pub(super) struct MeshSnap {
     pub(super) applied_refused: u32,
     /// The stored JoinPolicy revision (0 before any).
     pub(super) policy_revision: u32,
+    /// `--c-app` (P05-C): boundary checks run and failed, posted jobs that
+    /// ran, messages the C application received (all 0 without it).
+    pub(super) c_checks: u32,
+    pub(super) c_check_failures: u32,
+    pub(super) c_posted_runs: u32,
+    pub(super) c_messages: u32,
 }
 
 #[allow(dead_code)]
@@ -690,6 +696,10 @@ pub(super) fn parse_mesh_snap(payload: &[u8]) -> MeshSnap {
     snap.applied_completed = get_u32(payload, &mut pos);
     snap.applied_refused = get_u32(payload, &mut pos);
     snap.policy_revision = get_u32(payload, &mut pos);
+    snap.c_checks = get_u32(payload, &mut pos);
+    snap.c_check_failures = get_u32(payload, &mut pos);
+    snap.c_posted_runs = get_u32(payload, &mut pos);
+    snap.c_messages = get_u32(payload, &mut pos);
     assert_eq!(pos, payload.len(), "G fully consumed");
     snap
 }
@@ -905,9 +915,26 @@ impl MeshPeer {
     pub(super) fn send(&mut self, payload: &[u8]) {
         assert!(!payload.is_empty() && payload.len() <= RPC_MAX, "rpc bound");
         let head = (payload.len() as u16).to_le_bytes();
-        self.stdin.write_all(&head).expect("peer input open");
-        self.stdin.write_all(payload).expect("peer input open");
-        self.stdin.flush().expect("peer input open");
+        let sent = self
+            .stdin
+            .write_all(&head)
+            .and_then(|()| self.stdin.write_all(payload))
+            .and_then(|()| self.stdin.flush());
+        if let Err(error) = sent {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "peer input: {error}"
+            );
+            // A planned reboot can close stdin before the next command.
+            // recv observes EOF and the existing caller respawns from NVS.
+            let status = self.child.wait().expect("peer reaped");
+            assert!(
+                matches!(status.code(), Some(42 | 43)),
+                "mesh peer {:x} crashed (not a lifecycle reboot): {status:?}",
+                self.node
+            );
+        }
     }
 
     /// Reads one frame; `None` is a clean peer exit (EOF): the
