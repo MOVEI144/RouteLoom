@@ -735,8 +735,6 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
       payload_hash(ByteView{tx_body_.data(), inner.size + 1});
   IdempotencyRecord* record = nullptr;
   const IdempotencyResult result = idempotency_.submit(
-      ByteView{transcript_.principal.data(), transcript_.principal_len},
-      transcript_.network, static_cast<std::uint8_t>(FrameKind::DataToMesh),
       idempotency_key, hash, keys_.session_id, now_ms, record);
   if (result == IdempotencyResult::Conflict) {
     refuse_legacy(request, UsbErrorCode::Conflict, ROUTELOOM_REASON_IDEMPOTENCY_CONFLICT, now_ms);
@@ -761,14 +759,10 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
       record->reported = false;
       (void)report_outcome(*record, now_ms);
     } else {
-      std::array<std::uint8_t, 8 + 4 + 8 + 1 + 3> body{};
-      write_u64(body.data(), request);
-      write_u32(body.data() + 8, record->message_session);
-      write_u64(body.data() + 12, record->message_sequence);
-      body[20] = static_cast<std::uint8_t>(DeliveryState::Accepted);
-      const std::size_t size =
-          21 + write_reason(body.data() + 21, ROUTELOOM_REASON_IDEMPOTENT_REPLAY, nullptr, 0);
-      enqueue(FrameKind::DeliveryEvent, 0, request, ByteView{body.data(), size}, now_ms);
+      (void)emit_delivery_event(request,
+          DeliveryResult{MessageId{record->message_session, record->message_sequence},
+                         DeliveryState::Accepted, nullptr},
+          nullptr, ROUTELOOM_REASON_IDEMPOTENT_REPLAY);
     }
     return;
   }
@@ -832,17 +826,9 @@ bool UsbBridge::report_outcome(IdempotencyRecord& record,
   const char* detail = record.replay ? nullptr : record.reason_detail;
   bool queued = false;
   if (record.accepted) {
-    // DeliveryEvent inner: request(8) || msg_session(4) || msg_seq(8) ||
-    // state(1) || reason_id(2) || detail_len(1) || detail
-    std::array<std::uint8_t, 8 + 4 + 8 + 1 + 3 + kMaxReasonLen> body{};
-    write_u64(body.data(), record.request);
-    write_u32(body.data() + 8, record.message_session);
-    write_u64(body.data() + 12, record.message_sequence);
-    body[20] = static_cast<std::uint8_t>(record.final_state);
-    const std::size_t size =
-        21 + write_reason(body.data() + 21, reason_id, detail, kMaxReasonLen);
-    queued = enqueue(FrameKind::DeliveryEvent, 0, record.request,
-                     ByteView{body.data(), size}, now_ms);
+    queued = emit_delivery_event(record.request,
+        DeliveryResult{MessageId{record.message_session, record.message_sequence},
+                       record.final_state, detail}, nullptr, reason_id);
   } else {
     queued = send_error(static_cast<UsbErrorCode>(record.error_code), record.request,
                         reason_id, detail, now_ms);
@@ -3219,7 +3205,8 @@ void UsbBridge::on_delivery(const DeliveryResult& result) noexcept {
 bool UsbBridge::emit_delivery_event(const std::uint64_t request,
                                     const DeliveryResult& result,
                                     const std::array<std::uint8_t, kOperationIdSize>*
-                                        operation_id) noexcept {
+                                        operation_id,
+                                    const std::uint16_t reason_id) noexcept {
   // inner: request(8) || msg_session(4) || msg_seq(8) || state(1) ||
   //        reason_id(2) || detail_len(1) || detail || [operation_id(24)]
   std::array<std::uint8_t, 8 + 4 + 8 + 1 + 3 + kMaxReasonLen + kOperationIdSize>
@@ -3229,8 +3216,9 @@ bool UsbBridge::emit_delivery_event(const std::uint64_t request,
   write_u64(inner.data() + 12, result.id.sequence);
   inner[20] = static_cast<std::uint8_t>(result.state);
   const std::size_t tail =
-      21 + write_reason(inner.data() + 21, reason_code(result.reason), result.reason,
-                        kMaxReasonLen);
+      21 + write_reason(inner.data() + 21,
+                        reason_id != 0 ? reason_id : reason_code(result.reason),
+                        result.reason, kMaxReasonLen);
   if (operation_id != nullptr) {
     std::memcpy(inner.data() + tail, operation_id->data(), operation_id->size());
   }

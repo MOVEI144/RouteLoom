@@ -183,14 +183,10 @@ SessionTag payload_hash(const ByteView canonical_request) noexcept {
 }
 
 IdempotencyResult IdempotencyTable::submit(
-    const ByteView principal, const NetworkId network,
-    const std::uint8_t operation_class, const std::uint64_t key,
+    const std::uint64_t key,
     const SessionTag& hash, const std::uint64_t usb_session,
     const MonotonicMs now_ms, IdempotencyRecord*& record) noexcept {
   record = nullptr;
-  if (principal.size > kMaxPrincipalSize) {
-    return IdempotencyResult::Conflict;  // unreachable via bridge (bounded)
-  }
   if (floor_session_ != usb_session) {
     floor_session_ = usb_session;
     has_floor_ = false;
@@ -198,15 +194,7 @@ IdempotencyResult IdempotencyTable::submit(
   for (std::size_t i = 0; i < kCapacity; ++i) {
     if (!used_[i]) continue;
     IdempotencyRecord& entry = records_[i];
-    if (entry.usb_session != usb_session || entry.network != network ||
-        entry.operation_class != operation_class ||
-        entry.key != key || entry.principal_len != principal.size) {
-      continue;
-    }
-    if (principal.size > 0 &&
-        std::memcmp(entry.principal.data(), principal.data, principal.size) != 0) {
-      continue;
-    }
+    if (entry.usb_session != usb_session || entry.key != key) continue;
     record = &entry;
     return entry.hash == hash ? IdempotencyResult::Existing
                               : IdempotencyResult::Conflict;
@@ -217,12 +205,6 @@ IdempotencyResult IdempotencyTable::submit(
   used_[slot] = true;
   IdempotencyRecord& entry = records_[slot];
   entry = IdempotencyRecord{};
-  if (principal.size > 0) {
-    std::memcpy(entry.principal.data(), principal.data, principal.size);
-  }
-  entry.principal_len = static_cast<std::uint8_t>(principal.size);
-  entry.network = network;
-  entry.operation_class = operation_class;
   entry.key = key;
   entry.hash = hash;
   entry.settled_ms = now_ms;

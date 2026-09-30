@@ -617,7 +617,8 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   bool emit_delivery_event(std::uint64_t request,
                            const DeliveryResult& result,
                            const std::array<std::uint8_t, kOperationIdSize>*
-                               operation_id = nullptr) noexcept;
+                               operation_id = nullptr,
+                           std::uint16_t reason_id = 0) noexcept;
   // Stamps one Diagnostic (boot, per-emission seq, cumulative drop count)
   // and queues it; false when the TX queue is full. The seq advances per
   // attempt, so a drop leaves a gap the PC can see.

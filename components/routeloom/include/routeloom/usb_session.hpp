@@ -119,14 +119,10 @@ Status open_body(const SessionKey& key, std::uint8_t direction, const UsbFrame& 
 // Idempotency payload identity: SHA-256 of the canonical request, first 16 B.
 SessionTag payload_hash(ByteView canonical_request) noexcept;
 
-// Fixed-capacity idempotency record set scoped by
-// (HostLink session, principal, network, operation_class, key). Same identity
-// and payload hash returns the stored result; different hash conflicts.
+// Legacy DataToMesh records scoped by authenticated HostLink incarnation
+// and key. The incarnation already binds the principal and network.
+// Same identity and payload hash replays; different hash conflicts.
 struct IdempotencyRecord {
-  std::array<std::uint8_t, kMaxPrincipalSize> principal{};
-  std::uint8_t principal_len{0};
-  NetworkId network{0};
-  std::uint8_t operation_class{0};
   std::uint64_t key{0};
   SessionTag hash{};
   // Stored outcome to replay on identical resubmission.
@@ -164,8 +160,7 @@ class IdempotencyTable {
   // the authenticated HostLink session: absent keys at/below its floor
   // never execute. A new incarnation starts a new key space; old sealed
   // frames are rejected by UsbBridge before they reach this table.
-  IdempotencyResult submit(ByteView principal, NetworkId network,
-                           std::uint8_t operation_class, std::uint64_t key,
+  IdempotencyResult submit(std::uint64_t key,
                            const SessionTag& hash, std::uint64_t usb_session,
                            MonotonicMs now_ms, IdempotencyRecord*& record) noexcept;
 

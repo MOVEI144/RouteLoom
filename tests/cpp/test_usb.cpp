@@ -536,14 +536,12 @@ void test_session_material_clears_on_destruction() {
 }
 
 void test_idempotency() {
-  const std::array<std::uint8_t, 4> principal{{'h', 'o', 's', 't'}};
-  const ByteView who{principal.data(), principal.size()};
   const SessionTag hash{};
   constexpr std::uint64_t s1 = 0x51, s2 = 0x52;
   IdempotencyRecord* record = nullptr;
   const auto submit = [&](IdempotencyTable& table, std::uint64_t key,
                           std::uint64_t session, MonotonicMs now) {
-    return table.submit(who, 7, 16, key, hash, session, now, record);
+    return table.submit(key, hash, session, now, record);
   };
   IdempotencyTable full;
   std::array<IdempotencyRecord*, IdempotencyTable::kCapacity> rows{};
@@ -573,7 +571,7 @@ void test_idempotency() {
   CHECK(submit(full, 100, s1, 6004) == IdempotencyResult::Existing);
   SessionTag other{};
   other[0] = 1;
-  CHECK(full.submit(who, 7, 16, 100, other, s1, 6004, record) ==
+  CHECK(full.submit(100, other, s1, 6004, record) ==
         IdempotencyResult::Conflict);
 
   // Retry reservations use the same bound and never steal an owed request.
