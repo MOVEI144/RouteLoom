@@ -263,6 +263,33 @@ fn mesh_p03_explicit_gateway_delivers_only_to_named_gateway() {
         "no substitute delivery"
     );
     assert_eq!(world.snaps[1].gw_receipts, 5, "no extra receipt");
+
+    // H1 S3: the USB bridge hands each SDK_RAM payload to its host, which
+    // frees the mailbox slot. Twenty sends (3.5 s apart, inside the 20/min
+    // acceptance rate) are all received, none refused CAPACITY, and the
+    // host got every payload.
+    let frames = world.usb_host.data_frames;
+    for round in 6..=20u32 {
+        let started = world.now;
+        world.peers[1].gateway_send(testkit::GATEWAY, b"p03-gateway");
+        world.step(25);
+        world.pump_until(400, |snaps| snaps[1].gw_send == GATEWAY_RECEIVED);
+        assert_eq!(
+            world.snaps[1].gw_send, GATEWAY_RECEIVED,
+            "send {round} received: A {:?}",
+            world.snaps[1]
+        );
+        while world.now - started < 3_500 {
+            world.step(25);
+        }
+    }
+    assert_eq!(world.snaps[0].gw_mailbox_stored, 20, "gateway mailbox");
+    assert!(
+        world.usb_host.data_frames >= frames + 15,
+        "the host read every payload: {} -> {}",
+        frames,
+        world.usb_host.data_frames
+    );
 }
 
 // --- Manual channel plan (P03 channel plan, V2-08) ---------------------------

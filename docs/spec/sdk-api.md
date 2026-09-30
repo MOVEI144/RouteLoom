@@ -58,6 +58,8 @@ public structにはstruct_size/versionを置く。整数幅、enum値、reserved
 
 明示Gatewayの宛先を途中で別Gatewayへ変えない。ANY_GATEWAY/SERVICEは許可集合内でoriginがproviderを固定する。APPLIEDではアプリが結果を返す必要があり、SDK受領だけで自動APPLIEDを出さない。
 
+`Device::gateway()`のendpoint（Descriptor）のleaseは15 s（`kGatewayDescriptorLeaseMs`）。sendのlifetimeは残りのleaseに収まる必要があり、収まらなければ`ENDPOINT_LEASE_TOO_SHORT`で拒否する（黙って短くしない）。lifetimeをleaseの20 %（3 s）以下にすれば、再resolveはleaseの80 %（12 s）を越えてからで足りる。GATEWAY_SDK_RAMの受領はgatewayの有界mailbox（8件）に入り、読まれるか60 sで消えるまで枠を占める。USB gatewayはappを持たないので、受領したpayloadを順にhostへメッシュのmessageとして渡し（ReceiveLog）、枠を空ける。
+
 sendがOKでもTX受付だけ。最終結果はEND_RECEIVED、APP_APPLIED、EXPIRED、REJECTED、CANCELLED_BEFORE_TX、INDETERMINATE等。遅いreceiptは同じMessage IDへ結び、呼出元が期限後に結果を照会できる保持方針を設ける。
 
 ## 5. bufferとthread

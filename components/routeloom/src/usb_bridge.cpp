@@ -3779,6 +3779,17 @@ void UsbBridge::pump_gateway(const MonotonicMs now_ms) noexcept {
       send.endpoint_held = false;
     }
   }
+  // The bridge runs no application: its host reads the GATEWAY_SDK_RAM
+  // mailbox. Each stored payload goes up as a mesh message, which frees its
+  // pending slot; an undrained mailbox refused every submit after eight.
+  if (gateway_ != nullptr && state_ == SessionState::Active) {
+    MessageKey key{};
+    std::array<std::uint8_t, kGatewayPayloadMaxBytes> payload{};
+    std::size_t size = 0;
+    while (!data_q_.full() && gateway_->mailbox_take(key, payload, size)) {
+      emit_ingress(key, ByteView{payload.data(), size}, nullptr);
+    }
+  }
 }
 
 }  // namespace routeloom::usb
