@@ -820,7 +820,6 @@ void test_authenticated_traffic_releases_quiet_m4() {
   CHECK(!pair.b->bank.has_authenticated_rx(SecurityScope::Link, kNodeA,
                                             established_b.rx_context_id + 1));
   CHECK_OK(pair.b->engine.poll(kT0 + 2230));
-  CHECK_OK(deliver_to(*pair.b, c, next_m1, cb, kT0 + 2240));
   HandshakeResult m2c{};
   CHECK_OK(pair.b->engine.take_result(m2c));
   CHECK(m2c.event == HandshakeEvent::Send && m2c.step == 2);

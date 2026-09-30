@@ -1366,6 +1366,7 @@ fn mesh_c7_old_epoch_boundary() {
         world.snaps[2].rx_count, b_rx_before,
         "held DATA never reached B"
     );
+    world.c7_hold_b_receipt = true;
     let staged_at = world.now;
     let operation_id = stage_cutover(&mut world, "c7");
     let (operation_id, next_gk, new_network, old_network, t0) =
@@ -1382,7 +1383,6 @@ fn mesh_c7_old_epoch_boundary() {
         world.switch.c7_old_cert.is_some(),
         "old MemberCert handshake left A"
     );
-    world.c7_hold_b_receipt = true;
     // Strand A fully dark while the COMMIT dispatch is still working
     // its way down the tree (the leaf commits last, so its downlink
     // has not landed yet). A stays Prepared on the old epoch.

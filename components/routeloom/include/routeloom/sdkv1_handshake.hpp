@@ -421,8 +421,8 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
     MonotonicMs deadline{0};
     MonotonicMs retransmit_at{0};
     std::uint8_t retransmits{0};
-    // Retransmit/duplicate caches (small messages only; m2/m3/m4 live in
-    // the single-flight big buffer).
+    // Small retries, including admitted m4 with its duplicate hashes.
+    // m2/m3 and unadmitted m4 use the single-flight big buffer.
     std::array<std::uint8_t, 256> last_tx{};
     std::size_t last_tx_size{0};
     std::uint8_t last_phase{0};

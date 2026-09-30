@@ -24,6 +24,10 @@ namespace {
 constexpr char kCookieLabel[] = "RouteLoom/v1/member-cookie";
 constexpr char kProofLabel[] = "RouteLoom/v1/handshake-proof";
 
+// The existing small retry cache can hold m4 and both duplicate hashes.
+constexpr std::size_t kM4M1HashOffset = 256 - 2 * sizeof(ScopeDigest);
+constexpr std::size_t kM4M3HashOffset = 256 - sizeof(ScopeDigest);
+
 constexpr std::int32_t kEadCredential = -65541;  // one MemberCert by value (<= 256 B)
 
 bool id_usable(const NodeId id) noexcept {
@@ -823,7 +827,6 @@ bool HandshakeEngine::big_tx_parkable() noexcept {
   switch (owner->state) {
     case RecordState::EdhocWaitM4:
     case RecordState::EdhocM4Pending:
-    case RecordState::EdhocM4Sent:
     case RecordState::EdhocM1Parked:
       return false;
     default:
@@ -1768,6 +1771,15 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
     if (record != nullptr) {
       ScopeDigest hash{};
       sha256(message, hash);
+      if (record->state == RecordState::EdhocM4Sent) {
+        if (record->last_tx_size != 0 &&
+            std::memcmp(hash.data(), record->last_tx.data() + kM4M1HashOffset,
+                        hash.size()) == 0) {
+          return emit_send(*record, 4, 4,
+                           ByteView{record->last_tx.data(), record->last_tx_size}, false);
+        }
+        return Status::success();
+      }
       const bool duplicate =
           edhoc_flight_.m1_seen && edhoc_flight_.owner_token == record->token &&
           std::memcmp(hash.data(), edhoc_flight_.m1_hash.data(), hash.size()) == 0;
@@ -1850,6 +1862,17 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
     return sent;
   }
   if (rx.step == 3) {
+    if (record->role == HandshakeRole::Responder && record->state == RecordState::EdhocM4Sent) {
+      ScopeDigest hash{};
+      sha256(message, hash);
+      if (record->last_tx_size != 0 &&
+          std::memcmp(hash.data(), record->last_tx.data() + kM4M3HashOffset,
+                      hash.size()) == 0) {
+        return emit_send(*record, 4, 4,
+                         ByteView{record->last_tx.data(), record->last_tx_size}, false);
+      }
+      return Status::success();
+    }
     if (record->role != HandshakeRole::Responder || !edhoc_flight_.active ||
         edhoc_flight_.owner_token != record->token) {
       return Status::success();
@@ -2828,7 +2851,8 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
     }
   }
   for (auto& record : records_) {
-    if (!record.used || now < record.retransmit_at) continue;
+    if (!record.used || now < record.retransmit_at ||
+        record.state == RecordState::EdhocM4Sent) continue;  // quiet: duplicate replies only
     const bool small_tx = record.last_tx_size != 0;
     const bool big_tx = (record.state == RecordState::EdhocWaitM4 ||
                          record.state == RecordState::EdhocM4Pending) && edhoc_flight_.active &&
@@ -2948,8 +2972,21 @@ Status HandshakeEngine::accept_send(const std::uint32_t token, const std::uint8_
   if (record->state != RecordState::EdhocM4Pending) {
     return Status::error(StatusCode::InvalidState, "m4 not pending");
   }
+  if (big_tx_owner_ != token || big_tx_size_ == 0 || big_tx_size_ > kM4M1HashOffset) {
+    return emit_failed(*record, StatusCode::ProtocolError);
+  }
   const Status committed = edhoc_commit(*record);
   if (!committed) return emit_failed(*record, map_commit_failure(committed));
+  // A parked m1 may reuse the large buffer; keep admitted m4 and its
+  // exact duplicate evidence in the already allocated small cache.
+  std::memcpy(record->last_tx.data(), big_tx_.data(), big_tx_size_);
+  record->last_tx_size = big_tx_size_;
+  record->last_phase = 4;
+  record->last_step = 4;
+  std::memcpy(record->last_tx.data() + kM4M1HashOffset, edhoc_flight_.m1_hash.data(),
+              edhoc_flight_.m1_hash.size());
+  std::memcpy(record->last_tx.data() + kM4M3HashOffset, edhoc_flight_.m3_hash.data(),
+              edhoc_flight_.m3_hash.size());
   StagedEstablished responder_done{};
   responder_done.token = record->token;
   responder_done.scope = record->scope;
