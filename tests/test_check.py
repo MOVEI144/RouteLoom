@@ -381,6 +381,27 @@ class Budget(unittest.TestCase):
         self.cells.write_text(json.dumps(data))
         self.assertEqual(self.size("a")[0], 0)
 
+    def test_member_image_refuses_configured_development_key(self):
+        key_hex = bytes(range(32)).hex()
+        setting = f'CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX="{key_hex}"'
+        image = self.dir / "a" / "routeloom_bench_node.bin"
+        config = self.dir / "sdkconfig"
+        for source in ("overlay", "sdkconfig"):
+            data = json.loads(self.cells.read_text())
+            data["cells"][0]["expect"] = ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"]
+            data["cells"][0]["overlay"] = [setting] if source == "overlay" else []
+            config.write_text(setting if source == "sdkconfig" else "")
+            self.cells.write_text(json.dumps(data))
+            image.write_bytes(bytes(1000))
+            self.assertEqual(self.size("a")[0], 0)
+            for key in (bytes.fromhex(key_hex), key_hex.encode(), key_hex.upper().encode()):
+                with self.subTest(source=source, encoding=key == bytes.fromhex(key_hex)):
+                    image.write_bytes(bytes(100) + key + bytes(1000 - 100 - len(key)))
+                    code, _, err = self.size("a")
+                    self.assertEqual(code, 1)
+                    self.assertIn("development key", err)
+                    self.assertNotIn(key_hex, err)
+
     def test_symbols_absent_requires_a_symbol_table(self):
         data = json.loads(self.cells.read_text())
         data["symbols_absent"] = [r"^legacy_psk_"]

@@ -534,9 +534,19 @@ def size_errors(data: dict, cell: dict, build: Path) -> list[str]:
             errors.append("missing development key definition for image inspection")
         else:
             image = files["bin"].read_bytes()
-            key_hex = key.group(1)
-            if bytes.fromhex(key_hex) in image or key_hex.lower().encode() in image.lower():
-                errors.append("MemberEdhoc image contains the quick-start development key")
+            keys = {key.group(1).lower()}
+            settings = cell.get("overlay", []) + cell.get("expect", [])
+            sdkconfig = build.parent / "sdkconfig"
+            if sdkconfig.is_file():
+                settings += sdkconfig.read_text(encoding="utf-8").splitlines()
+            for setting in settings:
+                configured = re.fullmatch(
+                    r'CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX="([0-9a-fA-F]{64})"', setting)
+                if configured is not None:
+                    keys.add(configured.group(1).lower())
+            image_lower = image.lower()
+            if any(bytes.fromhex(value) in image or value.encode() in image_lower for value in keys):
+                errors.append("MemberEdhoc image contains a development key")
     if app_bin > budget["app_bin_max"] + APP_BIN_DRIFT:
         errors.append(f"app.bin {app_bin} B > budget {budget['app_bin_max']} B "
                       f"(+{APP_BIN_DRIFT} B drift)")
