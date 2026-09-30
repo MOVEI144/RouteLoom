@@ -6121,6 +6121,10 @@ mod tests {
         );
         let first = &nodes[0];
         assert_eq!(first.get("connected").and_then(Json::as_bool), Some(true));
+        assert_eq!(
+            first.get("connectivity").and_then(Json::as_str),
+            Some("reachable")
+        );
         assert_eq!(first.get("hops").and_then(Json::as_u64), Some(1));
         assert_eq!(first.get("rssi_dbm").and_then(Json::as_i64), Some(-51));
         assert_eq!(first.get("link_cost").and_then(Json::as_u64), Some(1));
@@ -6159,6 +6163,25 @@ mod tests {
         );
         assert!(!response.contains("\"node\":\"0000000000000001\""));
         assert!(response.contains("\"hops\":null"));
+        // Lost by the gateway: degraded, then isolated after T_iso.
+        assert!(response.contains("\"connectivity\":\"degraded\""), "{response}");
+        let later = ctx(
+            None,
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            2_000 + crate::nodes::CONNECTIVITY_ISOLATED_MS,
+        );
+        let later = ApiContext {
+            node_table: &table,
+            ..later
+        };
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"n4\",\"method\":\"nodes.get\",\"params\":{\"node\":\"0000000000000004\"}}",
+            &later,
+        );
+        assert!(response.contains("\"connectivity\":\"isolated\""), "{response}");
         // nodes.get: found / NOT_FOUND / bad params.
         let response = handle(
             b"{\"v\":1,\"request_id\":\"g1\",\"method\":\"nodes.get\",\"params\":{\"node\":\"0000000000000002\"}}",

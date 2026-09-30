@@ -467,15 +467,44 @@ fn metric_opt(value: u16) -> String {
 
 /// The API1 node object shared by `nodes.list`, `nodes.get` and the event
 /// bodies. Unknown values are JSON null — never an inferred zero.
+/// A node the gateway lost stays `degraded` this long, then is `isolated`
+/// (the Device's T_iso, #192).
+pub const CONNECTIVITY_ISOLATED_MS: u64 = 120_000;
+
+/// The node's connectivity as the attached gateway sees it (#192), in the
+/// Device vocabulary: the gateway itself is `reachable` while its session
+/// is up; a node the gateway routes to is `reachable`, or `degraded` while
+/// its telemetry is stale; a node the gateway lost is `degraded` for
+/// [`CONNECTIVITY_ISOLATED_MS`], then `isolated`; a node never reported is
+/// `unknown`. The host sees no sleep, so it never reports `sleeping`.
+pub fn connectivity(record: &NodeRecord, now: u64) -> &'static str {
+    if record.gateway {
+        return if record.connected { "reachable" } else { "unknown" };
+    }
+    if record.connected {
+        let stale = record.live_status().is_some_and(|s| s.telemetry_stale());
+        return if stale { "degraded" } else { "reachable" };
+    }
+    if record.status.is_none() {
+        return "unknown";
+    }
+    if now.saturating_sub(record.changed_ms) < CONNECTIVITY_ISOLATED_MS {
+        "degraded"
+    } else {
+        "isolated"
+    }
+}
+
 pub fn node_json(record: &NodeRecord, now: u64) -> String {
     let status = record.live_status();
     let rssi = status.filter(|s| s.rssi_valid());
     let reachable = status.filter(|s| s.reachable());
     format!(
-        "{{\"node\":\"{:016x}\",\"role\":\"{}\",\"connected\":{},\"listed\":{},\"neighbor\":{},\"direct\":{},\"hops\":{},\"next_hop\":{},\"route_metric\":{},\"link_cost\":{},\"rssi_dbm\":{},\"rssi_avg_dbm\":{},\"telemetry_stale\":{},\"last_heard_ms\":{},\"heard_age_ms\":{},\"updated_ms\":{},\"changed_ms\":{}}}",
+        "{{\"node\":\"{:016x}\",\"role\":\"{}\",\"connected\":{},\"connectivity\":\"{}\",\"listed\":{},\"neighbor\":{},\"direct\":{},\"hops\":{},\"next_hop\":{},\"route_metric\":{},\"link_cost\":{},\"rssi_dbm\":{},\"rssi_avg_dbm\":{},\"telemetry_stale\":{},\"last_heard_ms\":{},\"heard_age_ms\":{},\"updated_ms\":{},\"changed_ms\":{}}}",
         record.node,
         if record.gateway { "gateway" } else { "peer" },
         record.connected,
+        connectivity(record, now),
         record.listed,
         record.neighbor(),
         record.gateway || reachable.is_some_and(|s| s.direct()),
