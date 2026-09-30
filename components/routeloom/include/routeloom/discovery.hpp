@@ -637,7 +637,7 @@ class NeighborDiscovery {
 
  private:
   Status begin_discovery_filtered(MonotonicMs now_ms, NodeId preferred_peer,
-                                  bool unbound_only) noexcept;
+                                  bool unbound_only, bool sweep = false) noexcept;
   enum class OutboundStage : std::uint8_t {
     Idle = 0,
     AwaitingOffers,    // DISCOVER sent, collecting OFFERs in the window
@@ -704,6 +704,8 @@ class NeighborDiscovery {
   struct Outbound {
     bool active{false};
     bool unbound_only{false};
+    // A start-sweep round: one attempt; an empty window ends the sweep.
+    bool sweep{false};
     NodeId preferred_peer{kInvalidNodeId};
     MacAddress preferred_mac{};
     MacAddress peer_mac{};
@@ -979,6 +981,24 @@ class NeighborDiscovery {
   // rediscovery prefers this peer while its record stays Stale; cleared
   // when a rediscovery begins for it.
   NodeId repair_demand_{kInvalidNodeId};
+  // Start sweep (member-handshake mode): the live neighbours of a node that
+  // starts all answer its DISCOVER, but one exchange binds only the first
+  // OFFER. When our last DISCOVER drew OFFERs from two or more unbound
+  // neighbours, one more unbound-only round follows the completed
+  // handshake; a handshake that never completes is retried by a round once
+  // the exchange bound has passed. The sweep ends at a round that binds
+  // without hearing another unbound neighbour, an empty round, or the
+  // round budget.
+  static constexpr std::uint8_t kSweepRounds = 8;
+  void note_sweep_offer(const std::array<std::uint8_t, 16>& nonce, NodeId peer) noexcept;
+  bool sweep_armed_{false};
+  bool sweep_seen_{false};   // the last DISCOVER drew a second unbound peer
+  bool sweep_retry_{false};  // a handed-off handshake has not completed
+  std::uint8_t sweep_rounds_{0};
+  MonotonicMs sweep_due_ms_{0};  // 0 = nothing to decide
+  MonotonicMs sweep_window_end_ms_{0};  // late OFFERs of the last DISCOVER
+  std::array<std::uint8_t, 16> sweep_nonce_{};  // the last DISCOVER's nonce
+  NodeId sweep_first_peer_{kInvalidNodeId};
   std::size_t transient_used_{0};
   std::size_t regular_used_{0};
   std::size_t pins_used_{0};

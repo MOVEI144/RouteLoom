@@ -373,6 +373,8 @@ Status NeighborDiscovery::start(const MonotonicMs now_ms) noexcept {
     }
   }
   started_ = true;
+  sweep_armed_ = true;
+  sweep_rounds_ = 0;
   return Status::success();
 }
 
@@ -383,7 +385,8 @@ Status NeighborDiscovery::begin_discovery(const MonotonicMs now_ms,
 
 Status NeighborDiscovery::begin_discovery_filtered(const MonotonicMs now_ms,
                                                    const NodeId preferred_peer,
-                                                   const bool unbound_only) noexcept {
+                                                   const bool unbound_only,
+                                                   const bool sweep) noexcept {
   if (!started_) {
     return Status::error(StatusCode::InvalidState, "discovery not started");
   }
@@ -424,6 +427,7 @@ Status NeighborDiscovery::begin_discovery_filtered(const MonotonicMs now_ms,
   outbound_ = Outbound{};
   outbound_.active = true;
   outbound_.unbound_only = unbound_only;
+  outbound_.sweep = sweep;
   outbound_.transient_held = true;
   if (preferred != nullptr) {
     outbound_.preferred_peer = preferred_peer;
@@ -441,8 +445,10 @@ Status NeighborDiscovery::begin_discovery_filtered(const MonotonicMs now_ms,
   // simultaneous boots do not burst in lock-step. A zero draw keeps the
   // send synchronous so its failure is reported to the caller; a deferred
   // send flows through the same discover_due path as a retry.
+  // A sweep round follows this node's own completed exchange: it is not in
+  // lock-step with anyone, so it takes no jitter.
   std::uint32_t jitter_ms = 0;
-  if (config_.cold_start_jitter_max_ms > 0) {
+  if (config_.cold_start_jitter_max_ms > 0 && !sweep) {
     std::uint64_t roll = 0;
     if (!next_u64(roll)) {
       clear_outbound();
@@ -451,7 +457,7 @@ Status NeighborDiscovery::begin_discovery_filtered(const MonotonicMs now_ms,
     jitter_ms =
         static_cast<std::uint32_t>(roll % config_.cold_start_jitter_max_ms);
   }
-  if (jitter_ms == 0) {
+  if (jitter_ms == 0 && !sweep) {
     outbound_.stage_deadline_ms = now_ms + config_.offer_window_ms;
     return send_discover(now_ms);
   }
@@ -896,6 +902,7 @@ void NeighborDiscovery::handle_offer(const DiscoveryRxMetadata& rx,
       return;
     }
   }
+  note_sweep_offer(env.transaction_nonce, env.claimed_node);
   if (!outbound_.active || outbound_.stage != OutboundStage::AwaitingOffers ||
       outbound_.have_offer || now_ms > outbound_.stage_deadline_ms) {
     return;
@@ -1025,6 +1032,19 @@ void NeighborDiscovery::accept_scoped_offer(PendingVerify& pending,
   outbound_.stage = OutboundStage::ProvePending;
   outbound_.stage_deadline_ms = now_ms + config_.auth_timeout_ms;
   membership_.begin_authentication();
+}
+
+void NeighborDiscovery::note_sweep_offer(const std::array<std::uint8_t, 16>& nonce,
+                                         const NodeId peer) noexcept {
+  // Unverified evidence: it can only ask for one more bounded round.
+  if (!sweep_armed_ || !member_handshake_mode_ || !nonce_equal(nonce, sweep_nonce_)) return;
+  const Neighbor* known = find_neighbor(peer);
+  if (known != nullptr && resolvable_phase(known->phase)) return;
+  if (sweep_first_peer_ == kInvalidNodeId) {
+    sweep_first_peer_ = peer;
+  } else if (peer != sweep_first_peer_) {
+    sweep_seen_ = true;
+  }
 }
 
 void NeighborDiscovery::accept_offer(
@@ -1795,6 +1815,12 @@ Status NeighborDiscovery::take_member_start(MemberStartRequest& out,
     out.carrier.capability_r = outbound_.peer_capability;
     out.carrier.scope_binding = outbound_.exchange.binding();
     out.expires_at_ms = outbound_.stage_deadline_ms;
+    // A handshake that never completes is retried once the exchange bound
+    // has passed.
+    if (sweep_armed_) {
+      sweep_retry_ = true;
+      sweep_due_ms_ = add_sat(now_ms, config_.auth_timeout_ms);
+    }
     // The coordinator owns its own reservation; discovery frees its slot
     // on handoff even if the handshake later fails.
     clear_outbound();
@@ -1914,6 +1940,12 @@ Status NeighborDiscovery::complete_handshake(const std::uint32_t token,
   }
   ++stats_.auths_completed;
   elevate_proven_peer(peer_mac, peer_node, now_ms);
+  // Decide once the new binding's first probe has left and the late OFFERs
+  // of the last DISCOVER had their chance.
+  if (sweep_armed_) {
+    sweep_retry_ = false;
+    sweep_due_ms_ = std::max(add_sat(now_ms, config_.backoff_min_ms), sweep_window_end_ms_);
+  }
   return Status::success();
 }
 
@@ -2102,6 +2134,10 @@ Status NeighborDiscovery::send_chunk_reply(
 }
 
 Status NeighborDiscovery::send_discover(const MonotonicMs now_ms) noexcept {
+  sweep_nonce_ = outbound_.our_nonce;
+  sweep_first_peer_ = kInvalidNodeId;
+  sweep_seen_ = false;
+  sweep_window_end_ms_ = add_sat(now_ms, 2ULL * config_.offer_window_ms);
   const bool scoped = scoped_attempt(now_ms);
   if (!scoped && scope_mode_scoped(config_.scope_mode)) {
     if (!legacy_permitted(now_ms)) {
@@ -2500,6 +2536,24 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
   }
   relax_membership();
 
+  // Start sweep: another unbound-only round once the slot is free, when a
+  // second unbound neighbour answered or the handed-off handshake failed.
+  if (sweep_due_ms_ != 0 && now_ms >= sweep_due_ms_ && !sweep_retry_ && !sweep_seen_) {
+    sweep_armed_ = false;
+    sweep_due_ms_ = 0;
+  }
+  if (sweep_due_ms_ != 0 && now_ms >= sweep_due_ms_ && !outbound_.active) {
+    sweep_retry_ = false;
+    const Status swept = begin_discovery_filtered(now_ms, kInvalidNodeId, true, true);
+    if (outbound_.active) {
+      sweep_due_ms_ = 0;  // the round is open; its window decides
+      if (++sweep_rounds_ >= kSweepRounds) sweep_armed_ = false;
+    } else if (swept.code != StatusCode::WouldBlock) {
+      sweep_due_ms_ = 0;
+      sweep_armed_ = false;
+    }
+  }
+
   // Outbound exchange driver.
   if (outbound_.active) {
     if (outbound_.stage == OutboundStage::ProvePending &&
@@ -2510,8 +2564,15 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
     // Member-handshake mode: the accepted OFFER stays parked for
     // take_member_start; the stage deadline below still sweeps untaken
     // starts, so parking is bounded either way.
-    if (outbound_.stage != OutboundStage::Idle &&
+    if (outbound_.sweep && outbound_.stage != OutboundStage::Idle &&
         now_ms > outbound_.stage_deadline_ms) {
+      // No unbound neighbour answered: the sweep is done.
+      sweep_armed_ = false;
+      sweep_due_ms_ = 0;
+      clear_outbound();
+      relax_membership();
+    } else if (outbound_.stage != OutboundStage::Idle &&
+               now_ms > outbound_.stage_deadline_ms) {
       // Exchange attempt failed: fresh attempt nonce, and the next retry
       // waits a uniform [backoff_min_ms, backoff_initial_max_ms] draw that
       // doubles toward backoff_max_ms (radio.md §7/§13).
@@ -2547,7 +2608,9 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
               MutableByteView{outbound_.our_nonce.data(), 16})
               .ok()) {
         outbound_.discover_due_ms = 0;
-        outbound_.stage_deadline_ms = now_ms + config_.offer_window_ms;
+        // A sweep's OFFERs queue behind the new binding's traffic.
+        outbound_.stage_deadline_ms =
+            now_ms + config_.offer_window_ms * (outbound_.sweep ? 2U : 1U);
         send_discover(now_ms);
       } else {
         fail_outbound(now_ms, "DISCOVERY_FAILED");
