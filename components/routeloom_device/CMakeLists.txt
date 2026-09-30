@@ -7,11 +7,24 @@ target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
 # ESP-IDF public headers use GNU extensions. Keep actionable project warnings
 # strict without promoting extensions in those headers to errors.
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
-# The public Kconfig default must not reach a deployment silently: it is
-# published in this repo, so any host holding it can open the USB session.
-if(CONFIG_ROUTELOOM_ROLE_GATEWAY AND CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE AND
-   CONFIG_ROUTELOOM_USB_DEV_SECRET STREQUAL "routeloom-dev-secret")
-  message(WARNING
-    "CONFIG_ROUTELOOM_USB_DEV_SECRET is the public development default; "
-    "set a private secret for any real deployment")
+# The remote-config journal takes about 42 KB of static RAM. On ESP32-C3 only
+# the endpoint resource profile keeps the boot heap floor that esp_wifi_init
+# needs (docs/design/sdk-v1/ram-budget.md §5, issue #166); a relay or gateway
+# profile with the journal would link and then fail to start the radio.
+if(NOT CMAKE_BUILD_EARLY_EXPANSION AND CONFIG_ROUTELOOM_CONFIG
+   AND CONFIG_IDF_TARGET_ESP32C3 AND
+   (NOT CONFIG_ROUTELOOM_RESOURCE_PROFILE_ENDPOINT OR NOT CONFIG_ROUTELOOM_ROLE_ENDPOINT))
+  message(FATAL_ERROR
+    "CONFIG_ROUTELOOM_CONFIG on ESP32-C3 needs "
+    "CONFIG_ROUTELOOM_RESOURCE_PROFILE_ENDPOINT=y and CONFIG_ROUTELOOM_ROLE_ENDPOINT=y: "
+    "the config journal does not fit the static RAM floor of the relay or gateway profiles")
+endif()
+# A channel plan is rooted in the site's SAK; DevRam has no Site Authority
+# and keeps its fixed channel. Refuse the selection instead of dropping it.
+if(NOT CMAKE_BUILD_EARLY_EXPANSION AND CONFIG_ROUTELOOM_MIGRATION
+   AND NOT CONFIG_ROUTELOOM_MIGRATION EQUAL 0
+   AND NOT CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC)
+  message(FATAL_ERROR
+    "CONFIG_ROUTELOOM_MIGRATION (channel plan) is MemberEdhoc only: "
+    "DevRam has no Site Authority to sign a plan and uses a fixed channel")
 endif()

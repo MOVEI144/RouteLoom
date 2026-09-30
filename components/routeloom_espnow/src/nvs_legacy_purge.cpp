@@ -59,15 +59,6 @@ Status take_across(std::size_t skip, const char*& name_space, char key[16],
 
 }  // namespace
 
-Status refuse_legacy_boot_after_migration() noexcept {
-  NvsLegacyPurgePort port;
-  bool migrated = false;
-  const Status status = port.migration(migrated);
-  if (!status) return status;
-  return migrated ? Status::error(StatusCode::RecoveryRequired, "legacy profile migrated")
-                  : Status::success();
-}
-
 Status NvsLegacyPurgePort::migration(bool& present) noexcept {
   present = false;
   nvs_handle_t handle = 0;

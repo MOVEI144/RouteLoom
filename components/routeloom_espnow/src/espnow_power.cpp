@@ -1,7 +1,6 @@
 #include "routeloom/espnow_power.hpp"
 
 #include <algorithm>
-#include <cstring>
 
 #include "esp_err.h"
 #include "esp_now.h"
@@ -137,32 +136,6 @@ Status EspNowPowerPort::start_discovery(const PowerImage& image) noexcept {
   // coordinator can log it instead of scanning unboundedly.
   return Status::error(StatusCode::Unsupported,
                       "bounded discovery not implemented");
-}
-
-Status NvsSleepStorage::read(const std::uint8_t slot,
-                             const MutableByteView target) noexcept {
-  if (slot >= kPowerImageSlots || target.data == nullptr ||
-      target.size != kPowerImageRecordSize) {
-    return Status::error(StatusCode::InvalidArgument,
-                        "invalid sleep image read");
-  }
-  bool found = false;
-  const auto status =
-      store_.load_blob(slot == 0 ? "img0" : "img1", target.data, target.size,
-                       found);
-  if (!status) return status;
-  if (!found) std::memset(target.data, 0, target.size);
-  return Status::success();
-}
-
-Status NvsSleepStorage::write(const std::uint8_t slot,
-                              const ByteView data) noexcept {
-  if (slot >= kPowerImageSlots || data.data == nullptr ||
-      data.size != kPowerImageRecordSize) {
-    return Status::error(StatusCode::InvalidArgument,
-                        "invalid sleep image write");
-  }
-  return store_.commit_blob(slot == 0 ? "img0" : "img1", data.data, data.size);
 }
 
 }  // namespace routeloom::espnow

@@ -60,8 +60,9 @@ class CellList(unittest.TestCase):
         # the C3/C6 Member maintenance images, the example and the
         # component-only external consumer (52); V2-08 moved the LegacyFixture
         # cells onto DevRam and Member, keeping one compatibility cell, and
-        # added the Member channel-plan gateway and participant (50).
-        self.assertEqual(len(cells), 50)
+        # added the Member channel-plan gateway and participant (50); V2-10
+        # removed that compatibility cell with LegacyFixture itself (49).
+        self.assertEqual(len(cells), 49)
         self.assertTrue({
             "bridge_node-esp32c3-normal-off-maintenance_member",
             "reference_node-esp32c6-normal-off-maintenance_member",
@@ -163,11 +164,72 @@ class CellList(unittest.TestCase):
 class Sdkconfig(unittest.TestCase):
     DATA = {"forbid_unless_named": {"CONFIG_A": ["y"], "CONFIG_M": ["1", "2"]}}
 
+    def test_project_rejects_retired_mode_before_idf_rewrites_sdkconfig(self):
+        guard = ROOT / "components/routeloom_device/retired_mode_guard.cmake"
+        for project in ("firmware/reference_node", "firmware/bridge_node",
+                        "firmware/bench_node", "examples/espnow_node"):
+            lines = (ROOT / project / "CMakeLists.txt").read_text(encoding="utf-8")
+            self.assertLess(lines.index("retired_mode_guard.cmake"),
+                            lines.index("project.cmake"), project)
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "sdkconfig"
+            token = "CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY" + "_FIXTURE=y\n"
+            config.write_text(token, encoding="utf-8")
+            args = ["cmake", f"-DSDKCONFIG={config}", "-P", str(guard)]
+            rejected = subprocess.run(args, capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("retired RouteLoom security mode", rejected.stderr)
+            config.write_text("CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y\n", encoding="utf-8")
+            accepted = subprocess.run(args, capture_output=True, text=True)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            defaults = Path(tmp) / "sdkconfig.defaults"
+            defaults.write_text(token, encoding="utf-8")
+            rejected_defaults = subprocess.run(args, cwd=tmp, capture_output=True, text=True)
+            self.assertNotEqual(rejected_defaults.returncode, 0)
+
+    def test_cell_refuses_retired_selection_before_compiling(self):
+        cell = {"id": "test", "app": "reference_node", "target": "esp32c3", "overlay": []}
+        steps = [step.argv for step in check.firmware_steps(cell)]
+        self.assertLess(steps.index(["assert-security-mode", "test"]),
+                        steps.index(["idf.py", "build"]))
+        switching = ("CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y\n"
+                     "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y\n")
+        self.assertEqual(check.security_mode_errors(switching), [])
+
     def test_overlay_expect_and_forbidden_values(self):
         cell = {"overlay": ["CONFIG_A=y"], "expect": ["CONFIG_P=5000"]}
         self.assertEqual(check.sdkconfig_errors(self.DATA, cell, "CONFIG_A=y\nCONFIG_P=5000\n"), [])
         self.assertEqual(check.sdkconfig_errors(self.DATA, cell, "CONFIG_P=5000\nCONFIG_M=2\n"),
                          ["missing `CONFIG_A=y`", "unexpected `CONFIG_M=2`"])
+
+    def test_retired_security_mode_is_refused(self):
+        old = "CONFIG_ROUTELOOM_SECURITY_MODE_" + "LEGACY" + "_FIXTURE=y"
+        cell = {"overlay": [], "expect": []}
+        self.assertTrue(check.sdkconfig_errors(self.DATA, cell, old + "\n"))
+
+    def test_c3_config_requires_endpoint_role_as_well_as_capacity(self):
+        cell = {"target": "esp32c3", "overlay": [], "expect": []}
+        common = "CONFIG_ROUTELOOM_CONFIG=y\nCONFIG_ROUTELOOM_RESOURCE_PROFILE_ENDPOINT=y\n"
+        self.assertEqual(check.sdkconfig_errors(
+            self.DATA, cell, common + "CONFIG_ROUTELOOM_ROLE_ENDPOINT=y\n"), [])
+        self.assertTrue(check.sdkconfig_errors(
+            self.DATA, cell, common + "CONFIG_ROUTELOOM_ROLE_RELAY=y\n"))
+
+    def test_channel_plan_is_member_only(self):
+        cell = {"overlay": [], "expect": []}
+        data = {"forbid_unless_named": {}}
+        member = "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y\nCONFIG_ROUTELOOM_MIGRATION=2\n"
+        self.assertEqual(check.sdkconfig_errors(data, cell, member), [])
+        for mode in ("1", "2"):
+            devram = f"CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y\nCONFIG_ROUTELOOM_MIGRATION={mode}\n"
+            self.assertTrue(check.sdkconfig_errors(data, cell, devram))
+        self.assertEqual(check.sdkconfig_errors(
+            data, cell, "CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y\nCONFIG_ROUTELOOM_MIGRATION=0\n"), [])
+
+    def test_device_cmake_refuses_devram_channel_plan(self):
+        text = (ROOT / "components/routeloom_device/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("CONFIG_ROUTELOOM_MIGRATION", text)
+        self.assertIn("NOT CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC", text)
 
 
 class HilMatrix(unittest.TestCase):
@@ -206,7 +268,7 @@ class HilMatrix(unittest.TestCase):
             env = {**os.environ, "PATH": f"{work}:{os.environ['PATH']}"}
             cases = (("bench_node", "esp32c6", []),
                      ("reference_node", "esp32c3",
-                      ['CONFIG_ROUTELOOM_PEER_MAC="94:a9:90:6a:ee:c4"']))
+                      ['CONFIG_ROUTELOOM_HIL_DROP_RX_MAC="94:a9:90:6a:ee:c4"']))
             for app, target, overlay in cases:
                 with self.subTest(app=app, target=target):
                     result = subprocess.run([str(script), app, target, str(work / "bundle"),

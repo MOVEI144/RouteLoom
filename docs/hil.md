@@ -9,8 +9,9 @@ records the first hardware run and its continuation. The bench contained
 three C3s and two C6s; C6 was then an experimental HIL target (v2 makes it
 a supported target built by every CI cell in `tools/ci/cells.json`). One C3 stopped enumerating, so the continuation exercised four
 boards (two C3s, two C6s). A five-node run and C5 hardware comparison remain
-unfinished. A C3 LegacyFixture deep-sleep replay fix passed a wake-and-deliver
-cycle in the R3 continuation; DevRam/MemberEdhoc sleep remains open. The
+unfinished. A C3 deep-sleep replay fix for the since-removed dev-PSK fixture
+profile passed a wake-and-deliver cycle in the R3 continuation;
+DevRam/MemberEdhoc sleep remains open. The
 [2026-09-26 fix report](hil/2026-09-26-fix-166-167.md) closes two of the
 bench findings: the default C3 images now start with measured heap headroom
 (issue #166, floors derived from the measurements) and delivery to a

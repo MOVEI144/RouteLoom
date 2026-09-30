@@ -47,4 +47,4 @@ git `path` 依存は component の subdirectory **だけ**を取り出す。こ�
 - 検証済み環境は `espressif/idf:v6.0.3`（CI pin）のみ。`idf >= 6.0` の下限はそれより古い系列を明確に拒否するためのもので、6.x 全系統の動作を保証しない。
 - Component Registry への upload・semver release は未実施。`2.0.0-dev` は pre-release 状態を表す。
 - build 成功は compile/link の証拠のみ。実機 RF、到達距離、電池寿命、認証適合は別途 HIL 認定が必要（`docs/STATUS.md` 参照）。
-- `DevelopmentPskSecurityProvider` は EXPERIMENTAL の開発 profile であり、本番 Identity（EDHOC/RPK）を置き換えない。既定 dev key を配備に使用してはいけない。
+- DevRam は EXPERIMENTAL の開発 profile であり、本番 Identity（EDHOC/RPK）を置き換えない。既定 dev key を配備に使用してはいけない。

@@ -7,6 +7,13 @@
 
 namespace routeloom::espnow {
 
+// Label of the dedicated NVS partition holding the SDK security state
+// (issue #37, sdk-v1/05 §4 D2-a). Keeping it apart from the default "nvs"
+// partition means exhausting it can never block the boot session (rlboot)
+// or any other system write. Firmware partition tables declare it;
+// nvs_flash_init_partition(kSecurityNvsPartition) mounts it.
+inline constexpr char kSecurityNvsPartition[] = "rlsec";
+
 // One NVS namespace of the `rlsec` partition as a sdkv1::BlobNamespace —
 // the ESP-IDF half of the SDK v1 store adapter (docs/design/sdk-v1/05 §5,
 // 08 P7-1). The slot/key mapping and the read-back contract (missing key =

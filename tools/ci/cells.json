@@ -1,10 +1,8 @@
 {
   "forbid_unless_named": {
     "CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM": ["y"],
-    "CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE": ["y"],
     "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC": ["y"],
     "CONFIG_ROUTELOOM_DEEP_SLEEP": ["y"],
-    "CONFIG_ROUTELOOM_DISCOVERY": ["y"],
     "CONFIG_ROUTELOOM_MIGRATION": ["1", "2"],
     "CONFIG_ROUTELOOM_CAPABILITY": ["0x1f"],
     "CONFIG_ROUTELOOM_CONFIG": ["y"],
@@ -12,7 +10,9 @@
     "CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED": ["y"],
     "CONFIG_ROUTELOOM_GROUP_TREE_FLAT": ["y"]
   },
-  "symbols_absent": [],
+  "symbols_absent": ["DevelopmentPskSecurityProvider", "NvsCounterStore", "NvsReplayStore",
+                     "NvsSleepStorage", "DevPskCommitVerifier", "6espnow16DevScopeProvider",
+                     "EspNowAutonomy"],
   "cells": [
     {
       "id": "reference_node-esp32c3-normal-off-off", "app": "reference_node", "target": "esp32c3",
@@ -104,11 +104,6 @@
       "overlay": ["CONFIG_ROUTELOOM_DEEP_SLEEP=y", "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
       "budget": {"app_bin_max": 1464160, "static_free_min": 41469, "rtc_used_max": 16056}
-    },
-    {
-      "id": "bridge_node-esp32c3-normal-observe-off", "app": "bridge_node", "target": "esp32c3",
-      "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE=y", "CONFIG_ROUTELOOM_DISCOVERY=y", "CONFIG_ROUTELOOM_MIGRATION=1"],
-      "budget": {"app_bin_max": 950976, "static_free_min": 84096, "rtc_used_max": 88}
     },
     {
       "id": "bridge_node-esp32c3-normal-off-endpoints_on", "app": "bridge_node", "target": "esp32c3",

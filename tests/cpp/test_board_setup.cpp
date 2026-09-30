@@ -96,7 +96,7 @@ struct BoardBench {
   BoardConfigStore config{config_slots};
   BoardSecretsStore secrets{secrets_slots};
   IdentityStore identity{identity_slots};
-  BoardSetupConsole console{config, secrets, identity, &expected};
+  BoardSetupConsole console{config, secrets, identity, expected};
 
   void expect(const BoardRole role, const BoardSecurity security) {
     expected.chip = kBoardChipEsp32C6;

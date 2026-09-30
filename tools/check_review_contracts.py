@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 from pathlib import Path
 
@@ -123,6 +124,30 @@ END_AAD_SOURCE_NAMES = {
     "header.end_counter": "end_counter",
     "header.payload_length": "payload_length",
 }
+
+
+# V2-10 removed the dev-PSK fixture security mode. Its Kconfig/profile token
+# must not come back; HIL records and captured artifacts are history.
+RETIRED_SECURITY_TOKEN = "LEGACY" + "_FIXTURE"
+RETIRED_TOKEN_SKIP_DIRS = {".git", "artifacts", "target", "third_party", "node_modules",
+                           "__pycache__", "managed_components"}
+
+
+def retired_token_hits(root: Path) -> list[str]:
+    hits = []
+    for directory, dirs, files in os.walk(root):
+        relative = Path(directory).relative_to(root)
+        dirs[:] = [d for d in dirs if d not in RETIRED_TOKEN_SKIP_DIRS
+                   and not d.startswith("build")
+                   and (relative / d).as_posix() != "docs/hil"]
+        for name in files:
+            path = Path(directory) / name
+            try:
+                if RETIRED_SECURITY_TOKEN in path.read_text(encoding="utf-8"):
+                    hits.append(path.relative_to(root).as_posix())
+            except (UnicodeDecodeError, OSError):
+                continue
+    return sorted(hits)
 
 
 def end_aad_layout(wire_source: str) -> list:
@@ -310,7 +335,6 @@ def validate(root: Path) -> dict:
             "c_api",
             "espnow_lr250_adapter",
             "reference_firmware_builds",
-            "development_psk_aead",
             "multi_hop_repair",
             "host_cli",
         }
@@ -360,8 +384,6 @@ def validate(root: Path) -> dict:
         build_only_features = {
             "espnow_lr250_adapter",
             "reference_firmware_builds",
-            "development_psk_aead",
-            "nvs_replay_store",
             "nvs_ledger_store",
             "espnow_power_port",
         }
@@ -393,9 +415,7 @@ def validate(root: Path) -> dict:
         )
         test(
             "production_security_not_claimed",
-            feature_map["development_psk_aead"]["implemented"] is True
-            and feature_map["development_psk_aead"]["design_target"] is False
-            and feature_map["secure_unicast"]["implemented"] is False,
+            feature_map["secure_unicast"]["implemented"] is False,
         )
         test(
             "advanced_features_not_claimed",
@@ -806,9 +826,8 @@ def validate(root: Path) -> dict:
                 "Status Device::begin(")
             and boot.index("open_storage(config.role")
             < boot.index("run_maintenance_console(*stores_)")
-            < boot.index("nvs_partition_peer_capacity(")
-            < boot.index("security.initialize("),
-            "factory console needs rlsec, not the development mesh security state",
+            < boot.index("status = begin(config"),
+            "factory console needs rlsec, not the mesh security owner",
         )
         for app in ("firmware/reference_node", "firmware/bench_node", "firmware/bridge_node",
                     "examples/espnow_node"):
@@ -1027,6 +1046,8 @@ def validate(root: Path) -> dict:
                 test(f"acceptance_trace:{i}", False, "no host test tags this ID")
     except (ValueError, KeyError, TypeError, OSError) as error:
         test("schema_read", False, str(error))
+    retired = retired_token_hits(root)
+    test("retired_security_mode_absent", not retired, ",".join(retired[:10]))
     return {
         "scope": "selected-design-contracts-and-document-consistency",
         "checks": len(checks),

@@ -127,14 +127,6 @@ def check_config(text, chip):
                 'CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX='
                 '"524f5554454c4f4f4d2d444556454c4f504d454e542d4b45592d4f4e4c592121"'):
             raise ValueError('private development key in bundle')
-        if line.startswith('CONFIG_ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX=') and line != (
-                'CONFIG_ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX=""'):
-            raise ValueError('private discovery key in bundle')
-        # The resolved sdkconfig is distributed verbatim, so only the public
-        # legacy USB development secret may be exported with bridge images.
-        if line.startswith('CONFIG_ROUTELOOM_USB_DEV_SECRET=') and line != (
-                'CONFIG_ROUTELOOM_USB_DEV_SECRET="routeloom-dev-secret"'):
-            raise ValueError('private USB secret in bundle')
         passive = ('CONFIG_SOC_', 'CONFIG_SECURE_BOOT_V2_RSA_SUPPORTED=',
                    'CONFIG_SECURE_BOOT_V2_ECC_SUPPORTED=',
                    'CONFIG_SECURE_BOOT_V2_ECDSA_INSECURE=',
@@ -154,9 +146,10 @@ def check_config(text, chip):
                 'CONFIG_BOOTLOADER_OFFSET_IN_FLASH': hex(BOOTLOADER_OFFSETS[chip])}
     if any(config.get(name) != value for name, value in required.items()):
         raise ValueError('resolved partition-table configuration mismatch')
+    # The removed dev-PSK fixture profile resolves to neither mode, so its
+    # bundles are refused here.
     modes = {'CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM': 'dev-ram',
-             'CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC': 'member-edhoc',
-             'CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE': 'legacy-fixture'}
+             'CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC': 'member-edhoc'}
     selected = [profile for name, profile in modes.items() if config.get(name) == 'y']
     if len(selected) != 1:
         raise ValueError('resolved security profile missing or ambiguous')
@@ -346,9 +339,8 @@ def package(app, build, out, private, chip, role, version, sdk_commit, source_di
                 'board_compatibility': [chip],
                 'security_profile': security_profile, 'power_profile': power_profile,
                 # BoardConfig-gated images take NodeId from rlcfg at boot, so
-                # one signed image serves every board of the chip x role pair;
-                # legacy fixtures embed the NodeId in the signed sdkconfig.
-                'generic_config': security_profile != 'legacy-fixture',
+                # one signed image serves every board of the chip x role pair.
+                'generic_config': True,
                 'capabilities': [], 'minimum_flash_bytes': max(
                     max(offset + size for _, _, _, offset, size in PARTITIONS[role]),
                     int(flash_size[:-2]) * 1024 * 1024),
@@ -390,11 +382,8 @@ def verify_bundle(root, public):
     if (manifest.get('board_compatibility') != [chip] or
             manifest.get('security_profile') != security_profile or
             manifest.get('power_profile') != power_profile or
-            # generic_config is signed claim vs resolved sdkconfig fact: a
-            # legacy-fixture bundle claiming generic would skip the assigned
-            # NodeId check, so the flag must match the security profile.
-            (manifest.get('generic_config') is True)
-            != (security_profile != 'legacy-fixture') or
+            # Every supported image takes its NodeId from rlcfg.
+            manifest.get('generic_config') is not True or
             manifest.get('flash_mode') != flash_mode or
             manifest.get('flash_frequency') != flash_frequency or
             (role == 'bridge_node' and power_profile == 'deep-sleep') or

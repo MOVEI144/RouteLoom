@@ -984,6 +984,13 @@ impl MeshPeer {
         }
     }
 
+    pub(super) fn nvs_image(&mut self) -> Vec<u8> {
+        self.send(b"N");
+        let reply = self.recv().expect("NVS reply");
+        assert_eq!(reply.first(), Some(&b'N'));
+        reply[1..].to_vec()
+    }
+
     pub(super) fn send_complete(&mut self, results: &[u8]) {
         if results.is_empty() {
             return;

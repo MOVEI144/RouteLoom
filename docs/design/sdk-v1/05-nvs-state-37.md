@@ -1,12 +1,14 @@
 # 05 — NVS状態の上限とIssue #37
 
+V2-10で旧開発PSK方式と`rlcounter`／`rlreplay`の書き手を撤去した。この文書の旧方式に関する容量・消去・試験の数値は経緯の記録であり、現行DevRam／Memberには適用しない。現行の資源契約は[電源断契約 §7](../../spec/crash-time-resources.md)を参照。
+
 ## 1. 現状（Wire v2 commit時点の事実）
 
 [Issue #37](https://github.com/MOVEI144/RouteLoom/issues/37)：ピアごとに作られる永続キーに削除経路が無い。
 
 | キー | 内容 | 作られる契機 | 1件のNVS entry（概算） |
 |---|---|---|---|
-| `c%08lx`（`rlcounter`） | TX counter lease（`CounterRecord` 32B、layout 2） | 新しい(scope, 宛先)への初送信（[psk_security.cpp](../../../components/routeloom_espnow/src/psk_security.cpp)） | 3 |
+| `c%08lx`（`rlcounter`） | TX counter lease（`CounterRecord` 32B、layout 2） | 新しい(scope, 宛先)への初送信（[psk_security.cpp](https://github.com/MOVEI144/RouteLoom/blob/488c45a64c233af2a26ee841754277c62483ffb1/components/routeloom_espnow/src/psk_security.cpp)） | 3 |
 | `f%08lx`（`rlreplay`） | replay floor（24B） | AEAD検証に成功した新しい(scope, 送信元) | 3 |
 | `r%08lx`（`rlreplay`） | replay window（40B） | 同上 | 4 |
 
@@ -181,10 +183,10 @@ NVS をすべて先頭に置くので、app slot の大きさが変わっても 
 
 | 策 | 実装 | 場所 |
 |---|---|---|
-| D2-a 起動の分離 | 全firmwareが`PT-4M-v2`の`partitions.csv`で`rlsec` 128KiBを確保（`nvs` 24KiB、OTA slot 各0x1D0000、4MB flash。§5.2）。`rlcounter`/`rlreplay`は`nvs_open_from_partition("rlsec", …)`。起動順は「既定`nvs`初期化→`rlboot`前進→`nvs_flash_init_partition("rlsec")`→Provider」で、`rlsec`の状態が`rlboot`の書込みを妨げない。sleep imageはsystem状態として既定`nvs`の`rlsleep`へ移した | [partitions.csv](../../../firmware/reference_node/partitions.csv)、[nvs_counter_store](../../../components/routeloom_espnow/src/nvs_counter_store.cpp)、各firmwareの`main.cpp` |
+| D2-a 起動の分離 | 全firmwareが`PT-4M-v2`の`partitions.csv`で`rlsec` 128KiBを確保（`nvs` 24KiB、OTA slot 各0x1D0000、4MB flash。§5.2）。`rlcounter`/`rlreplay`は`nvs_open_from_partition("rlsec", …)`。起動順は「既定`nvs`初期化→`rlboot`前進→`nvs_flash_init_partition("rlsec")`→Provider」で、`rlsec`の状態が`rlboot`の書込みを妨げない。sleep imageはsystem状態として既定`nvs`の`rlsleep`へ移した | [partitions.csv](../../../firmware/reference_node/partitions.csv)、[nvs_counter_store](https://github.com/MOVEI144/RouteLoom/blob/488c45a64c233af2a26ee841754277c62483ffb1/components/routeloom_espnow/src/nvs_counter_store.cpp)、各firmwareの`main.cpp` |
 | D2-b 死んだcounterの掃除 | Provider初期化時に`key_epoch < tx_epoch`（`tx_epoch`＝boot session）のTX recordを掃除する。1 passで最大16件を集め、その最大epochを証人`cmax`（u32）として**先に**commitし、成功後にだけ消去する。証人は単調（下げない）。破損・旧layout・大きさ不一致のrecordはepochが信用できないので消さない（そのslotはIntegrityErrorのまま）。`tx_epoch`より新しいrecordは`rlboot`後退の証拠として残し、ログに出す | [peer_state](../../../components/routeloom/src/peer_state.cpp)の`BoundedCounterStore` |
 | 証人の執行 | 起動時に`tx_epoch ≤ cmax`なら初期化を拒否する（`TX_EPOCH_AT_OR_BELOW_SWEEP_WITNESS`）。加えて**すべての**counter record commitで`key_epoch ≤ cmax`を拒否する。leaseは1個目のcounterを出す前に必ず予約blockをcommitする（`CounterLease::reserve_block`）ので、このcommit gate一つで掃除済みepochの鍵は二度と使われない | 同上 |
-| D2-c 永続ピア数の上限 | 上限は通常64ピア／gateway 128ピア（`kNodeMaxPersistedPeers`／`kGatewayMaxPersistedPeers`）。1ピアはLink＋EndToEndの2 scopeなので、TX record・RX floorそれぞれ上限の2倍のslotを持つ。firmwareは`nvs_get_stats("rlsec")`の総entryから計算した収容数で上限をさらに絞る。**新しい**slotだけを拒否し（`NoCapacity`、detail `PEER_STATE_CAPACITY`）、既存ピアのblock予約・window更新・epoch前進は続く。拒否はTX／RX別に計数し、起動時ログに件数・上限・掃除結果・`rlsec`使用entryを出す。件数の調査（census）に失敗した起動では新規ピアを拒否する（fail closed） | `BoundedCounterStore`／`BoundedReplayStore`、[psk_security](../../../components/routeloom_espnow/src/psk_security.cpp)の`log_peer_state` |
+| D2-c 永続ピア数の上限 | 上限は通常64ピア／gateway 128ピア（`kNodeMaxPersistedPeers`／`kGatewayMaxPersistedPeers`）。1ピアはLink＋EndToEndの2 scopeなので、TX record・RX floorそれぞれ上限の2倍のslotを持つ。firmwareは`nvs_get_stats("rlsec")`の総entryから計算した収容数で上限をさらに絞る。**新しい**slotだけを拒否し（`NoCapacity`、detail `PEER_STATE_CAPACITY`）、既存ピアのblock予約・window更新・epoch前進は続く。拒否はTX／RX別に計数し、起動時ログに件数・上限・掃除結果・`rlsec`使用entryを出す。件数の調査（census）に失敗した起動では新規ピアを拒否する（fail closed） | `BoundedCounterStore`／`BoundedReplayStore`、[psk_security](https://github.com/MOVEI144/RouteLoom/blob/488c45a64c233af2a26ee841754277c62483ffb1/components/routeloom_espnow/src/psk_security.cpp)の`log_peer_state` |
 | D2-d floor/windowは消さない | RX側には削除経路を作っていない。windowはそのpeer pairのfloorがあるslotにしか書かせない（ReplayGuardは常にfloorを先に確定するので挙動は変わらない）ため、windowの数もfloorの上限に収まる | `BoundedReplayStore` |
 | 予算の検査（§5.3） | `tools/nvs_budget.py`がheaderの`static_assert`（record長）と定数、各firmwareの`partitions.csv`・`sdkconfig.defaults`を読み、最悪時entry（上限×20＋固定3）が`rlsec`の使えるentryの80%以下、表がflashに収まること、custom表の選択、表が起動時検査の`PT-4M-v2`と一致すること、2つのOTA slotとbootloader rollbackの有効を検査する。`tests/test_nvs_budget.py`（負の変異を含む）でCIに入る | [nvs_budget.py](../../../tools/nvs_budget.py) |
 

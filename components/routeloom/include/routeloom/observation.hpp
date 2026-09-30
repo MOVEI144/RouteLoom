@@ -82,13 +82,15 @@ enum ObservationCoordMode : std::uint8_t {
 
 // Security-profile registry for ObservationSystem::sec_profile. The value
 // names the running provider family for lab display (MemberEdhoc vs
-// DevRam); it is NOT a production certification claim.
+// DevRam); it is NOT a production certification claim. 3 named the removed
+// dev-PSK fixture profile: it stays reserved and is never emitted or
+// accepted.
 enum ObservationProfile : std::uint8_t {
   kProfileUnknown = 0,
   kProfileMemberEdhoc = 1,
   kProfileDevRam = 2,
-  kProfileLegacyFixture = 3,
 };
+inline constexpr std::uint8_t kProfileMax = kProfileDevRam;
 
 // Membership registry for JoinMilestones::membership. Mirrors
 // MembershipState (admission.hpp) shifted by one so 0 stays unknown.
@@ -119,7 +121,7 @@ constexpr std::uint8_t kMilestoneConfirmed = 1u << 1;  // JoinConfirm ACK verifi
 
 // NeighborPhase registry for NeighborDetailEntry::phase: 0 is unknown,
 // 1..10 the discovery NeighborPhase shifted by one (a node without
-// discovery — DevRam, LegacyFixture, pre-adoption — reports unknown and
+// discovery — DevRam, pre-adoption — reports unknown and
 // never invents a phase from reachability).
 enum ObservationNeighborPhase : std::uint8_t {
   kNeighborPhaseUnknown = 0,

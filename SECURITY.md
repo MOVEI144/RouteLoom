@@ -51,8 +51,8 @@ In scope for reports:
 - USB/serial session authentication, framing and credit accounting
   (`usb_*`, `host/routeloom-protocol`)
 - Replay/counter and authority-ledger persistence
-- The development security providers (`DevelopmentPskSecurityProvider`,
-  DevRam) and the SDK v1 MemberEdhoc stack
+- The DevRam development security profile and the SDK v1 MemberEdhoc
+  stack
 - Host daemon/CLI/TUI input handling
 - CI/release pipeline integrity
 
@@ -70,9 +70,9 @@ Out of scope (already documented limitations, not vulnerabilities):
 This repository ships **well-known development key material**:
 
 - `CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX` defaults to the ASCII string
-  `ROUTELOOM-DEVELOPMENT-KEY-ONLY!!` (hex) in both firmware apps.
-- `DevelopmentPskSecurityProvider` (`components/routeloom_espnow`) is
-  pinned to `SecurityProfile::Development` and supplies AES-GCM with a
+  `ROUTELOOM-DEVELOPMENT-KEY-ONLY!!` (hex) for the DevRam quick start.
+- DevRam (`components/routeloom/src/sdkv1_dev_session.cpp`) is pinned to
+  `SecurityProfile::Development` and derives its RAM sessions from a
   shared master key.
 
 This key is a **test fixture, not a credential**. It is public by

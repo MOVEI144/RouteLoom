@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::config::{
-    ConfigIssuer, ConfigLane, ConfigOutcome, ConfigRequest, ConfigStep,
+    config_dev_key, ConfigIssuer, ConfigLane, ConfigOutcome, ConfigRequest, ConfigStep,
     SITE_CONFIG_AUTHORITY_GENERATION,
 };
 use crate::send_store::{MemoryOperationStore, ISSUE_PROFILE_COSE};
@@ -108,6 +108,164 @@ fn diagnostics(level: u8) -> ConfigRequest {
     }
 }
 
+fn assert_no_retired_peer_nvs(world: &mut MeshWorld) {
+    for peer in &mut world.peers {
+        let image = peer.nvs_image();
+        for retired in [b"rlcounter".as_slice(), b"rlreplay".as_slice()] {
+            assert!(
+                !image.windows(retired.len()).any(|window| window == retired),
+                "retired peer state namespace was created"
+            );
+        }
+    }
+}
+
+/// DevRam uses the same Device config target and gateway delivery path as a
+/// Member, but verifies a permit under its development PSK-derived key.
+#[test]
+fn mesh_p03_devram_config_and_gateway_survive_reset() {
+    let cap = format!("{}", USB_CAP | 0x18);
+    let Some(mut world) = MeshWorld::start_with_args(
+        "p03-devram",
+        Switch::direct(),
+        &["--devram", "--cap", &cap],
+        &["--devram", "--remote-config"],
+    ) else {
+        return;
+    };
+    world.pump_until(800, |snaps| {
+        snaps.iter().all(|s| s.mode == 3 && s.link_sessions > 0)
+    });
+    assert!(
+        world
+            .snaps
+            .iter()
+            .all(|s| s.mode == 3 && s.link_sessions > 0),
+        "all peers adopted DevRam and established links: {:?}",
+        world.snaps
+    );
+    world.pump_until(400, |_| false);
+    world.peers[0].app_send(NODE_A, b"devram-ready");
+    world.step(25);
+    world.pump_until(800, |snaps| snaps[1].rx_count > 0);
+    assert_eq!(world.snaps[1].rx_count, 1, "DevRam end session ready");
+    world.peers[1].app_send(testkit::GATEWAY, b"devram-return");
+    world.step(25);
+    world.pump_until(800, |snaps| snaps[0].rx_count > 0);
+    assert_eq!(world.snaps[0].rx_count, 1, "DevRam return route ready");
+
+    let key = config_dev_key(&[0x42; 32]);
+    let issuer = ConfigIssuer::new(key.to_vec(), u64::from(testkit::NETWORK_LOW), 1, 500);
+    let mut counter = 0u8;
+    let mut lane = ConfigLane::new(
+        issuer,
+        1,
+        Box::new(move |out: &mut [u8]| {
+            for byte in out.iter_mut() {
+                counter = counter.wrapping_add(1);
+                *byte = counter;
+            }
+        }),
+    );
+    let mut ledger = MemoryOperationStore::new([0xD3; 16]);
+    let mut forged_lane = ConfigLane::new(
+        ConfigIssuer::new(
+            config_dev_key(&[0x43; 32]).to_vec(),
+            u64::from(testkit::NETWORK_LOW),
+            1,
+            500,
+        ),
+        1,
+        Box::new(|out: &mut [u8]| out.fill(0xA5)),
+    );
+    let forged = config_run(&mut world, &mut forged_lane, &mut ledger, diagnostics(2));
+    assert!(
+        !matches!(
+            forged,
+            ConfigOutcome::Statused(ControlStatus {
+                phase: ConfigPhase::Active,
+                ..
+            })
+        ),
+        "foreign DevRam key applied: {forged:?}"
+    );
+    world.pump_until(200, |_| false);
+    let (revision0, _) = active(&mut world, &mut lane, &mut ledger);
+    assert_eq!(revision0, 0);
+    let mut outcome = config_run(&mut world, &mut lane, &mut ledger, diagnostics(2));
+    for _ in 0..20 {
+        let ConfigOutcome::Statused(status) = &outcome else {
+            break;
+        };
+        if status.phase == ConfigPhase::Active {
+            break;
+        }
+        let operation_id = status.operation_id;
+        world.pump_until(20, |_| false);
+        outcome = config_run(
+            &mut world,
+            &mut lane,
+            &mut ledger,
+            ConfigRequest::Status {
+                target: NODE_A,
+                config_namespace: SDK_NAMESPACE,
+                operation_id,
+            },
+        );
+    }
+    let ConfigOutcome::Statused(applied) = outcome else {
+        panic!("DevRam permit: {outcome:?}")
+    };
+    assert_eq!(applied.phase, ConfigPhase::Active);
+    assert_eq!(
+        active(&mut world, &mut lane, &mut ledger),
+        (applied.active_revision, applied.active_hash)
+    );
+
+    // The gateway accepts SDK RAM work only while a host mailbox reader is registered.
+    world.usb_host.register_gateway();
+    for _ in 0..100 {
+        if world.usb_host.gateway_token.is_some() {
+            break;
+        }
+        world.step(25);
+    }
+    assert!(
+        world.usb_host.gateway_token.is_some(),
+        "host registered as mailbox reader"
+    );
+    world.peers[1].gateway_send(testkit::GATEWAY, b"p03-devram");
+    world.step(25);
+    world.pump_until(400, |snaps| snaps[1].gw_send == GATEWAY_RECEIVED);
+    assert_eq!(world.snaps[1].gw_send, GATEWAY_RECEIVED);
+    world.peers[1].gateway_send(NODE_B, b"p03-wrong");
+    world.step(25);
+    world.pump_until(400, |snaps| snaps[1].gw_endpoint == ENDPOINT_FAILED);
+    assert_eq!(world.snaps[1].gw_endpoint, ENDPOINT_FAILED);
+
+    world.peers[1].power_cut();
+    let until = world.now + 1000;
+    while world.peers[1].reboots < 1 && world.now < until {
+        world.step(25);
+    }
+    assert_eq!(world.peers[1].reboots, 1);
+    world.pump_until(800, |snaps| {
+        snaps.iter().all(|s| s.mode == 3 && s.link_sessions > 0)
+    });
+    world.peers[1].app_send(testkit::GATEWAY, b"devram-reboot");
+    world.step(25);
+    world.pump_until(800, |snaps| snaps[0].rx_count > 1);
+    assert_eq!(
+        world.snaps[0].rx_count, 2,
+        "DevRam re-established end session"
+    );
+    assert_eq!(
+        active(&mut world, &mut lane, &mut ledger),
+        (applied.active_revision, applied.active_hash)
+    );
+    assert_no_retired_peer_nvs(&mut world);
+}
+
 /// P03 (Member remote config): a permit forged under the site's kid is
 /// refused with nothing applied; the SAK-signed permit reaches Active
 /// (journal readback verified), and after a power cut the member rebinds
@@ -205,6 +363,7 @@ fn mesh_p03_site_signed_config_applies_and_survives_reset() {
         (applied.active_revision, applied.active_hash),
         "the applied config survives the reset"
     );
+    assert_no_retired_peer_nvs(&mut world);
 }
 
 /// P03 (explicit gateway): A resolves the site gateway and five sends
@@ -619,4 +778,48 @@ fn mesh_p03_observe_does_not_advertise_plan_authority() {
         0,
         "Observe cannot issue a manual plan"
     );
+}
+
+/// The channel plan is MemberEdhoc only: DevRam has no Site Authority to
+/// sign a plan, so a DevRam node asking for one refuses to boot instead of
+/// silently running without it.
+#[test]
+fn mesh_p03_devram_refuses_channel_plan() {
+    let Some(path) = mesh_peer_path() else {
+        return;
+    };
+    for mode in ["--channel-plan", "--channel-plan-observe"] {
+        let dir = std::env::temp_dir().join(format!(
+            "routeloom-owner-mesh-devram-plan-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = Command::new(&path)
+            .args(["--node", &format!("{NODE_A:#x}"), "--mac", &hex(&MAC_A)])
+            .args(["--role", &format!("{ROLE_ENDPOINT}")])
+            .args(["--t0", "1000", "--seed", "7", "--member", "--channel", "6"])
+            .args(["--netlow", &format!("{:#x}", testkit::NETWORK_LOW)])
+            .args(["--devram", mode])
+            .arg("--nvs-save")
+            .arg(dir.join("nvs.bin"))
+            .stdin(Stdio::null())
+            .stderr(Stdio::inherit())
+            .output()
+            .expect("spawn DevRam channel-plan peer");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            !output.status.success(),
+            "{mode}: DevRam booted with a plan"
+        );
+        assert!(output.stdout.len() >= 3, "{mode}: missing fatal frame");
+        let length = usize::from(u16::from_le_bytes([output.stdout[0], output.stdout[1]]));
+        assert_eq!(
+            output.stdout.len(),
+            length + 2,
+            "{mode}: only one fatal frame"
+        );
+        assert_eq!(output.stdout[2], b'E', "{mode}: fatal frame tag");
+        assert_eq!(&output.stdout[3..], b"CHANNEL_PLAN_MEMBER_ONLY", "{mode}");
+    }
 }

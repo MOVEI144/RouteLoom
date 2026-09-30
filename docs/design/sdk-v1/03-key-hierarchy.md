@@ -34,7 +34,7 @@ Site Authority ── GK_g（32B乱数、authority channelで配布、RLS1）
 2. link・E2E・authorityはEDHOCのexchangeを分ける（[05本番認証 §5](../host-security-readiness/05-production-security.md)「同じ出力keyをlink/end/USBで使い回さない」）。
 3. Exporter contextは05 §5のdeterministic CBOR配列 `['RouteLoom',1,purpose,network,initiator_node,responder_node,initiator_kid,responder_kid,initiator_role,responder_role,grant_revision_pair,wire_version,context_epoch,direction,capability_digest]` を使う。本書は`purpose`へ`link=1, end=2, usb=3, authority=4, pending=5`、`context_epoch`へ受信側context id（§4.1）を割り当てる。
 4. GKからの導出はlabelで用途を分け、GKそのものをAEAD鍵にしない。
-5. 開発PSK profileの鍵（[psk_security.cpp](../../../components/routeloom_espnow/src/psk_security.cpp)のHMAC導出）はこの木に含めない。
+5. 開発PSK profileの鍵（[psk_security.cpp](https://github.com/MOVEI144/RouteLoom/blob/488c45a64c233af2a26ee841754277c62483ffb1/components/routeloom_espnow/src/psk_security.cpp)のHMAC導出）はこの木に含めない。
 
 ### 2.1 Exporter label（private-use、IANA登録済みではない）
 

@@ -149,7 +149,6 @@ int main() {
   rlsec_full = true;
   CHECK(port.commit_migration().ok());
   CHECK(port.migration(marker).ok() && marker);
-  CHECK(refuse_legacy_boot_after_migration().code == StatusCode::RecoveryRequired);
   CHECK(purge_legacy_state(port, true, true, result).code == StatusCode::RecoveryRequired);
   CHECK(erase_calls == 0);
   CHECK(entries[1].live && entries[2].live && entries[3].live);
@@ -164,11 +163,9 @@ int main() {
   entries[0].live = true;
   CHECK(port.migration(marker).code == StatusCode::StorageFailure);
   CHECK(!marker);
-  CHECK(refuse_legacy_boot_after_migration().code == StatusCode::StorageFailure);
   CHECK(purge_legacy_state(port, true, true, result).code == StatusCode::RecoveryRequired);
   entries[0].value = kLegacyMigrationMagic;
   CHECK(port.migration(marker).ok() && marker);
-  CHECK(refuse_legacy_boot_after_migration().code == StatusCode::RecoveryRequired);
   invalid_find = true;
   CHECK(purge_legacy_state(port, true, true, result).code == StatusCode::RecoveryRequired);
   CHECK(erase_calls == 0);
@@ -179,6 +176,6 @@ int main() {
   entries[0].u32 = false;
   CHECK(port.migration(marker).code == StatusCode::StorageFailure);
   entries[0].live = false;
-  CHECK(refuse_legacy_boot_after_migration().ok());
+  CHECK(port.migration(marker).ok() && !marker);
   return 0;
 }

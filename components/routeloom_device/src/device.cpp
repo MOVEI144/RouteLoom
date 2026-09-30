@@ -12,21 +12,18 @@
 #include "routeloom/config_wire.hpp"
 #include "routeloom/espnow_sdkv1.hpp"
 #include "routeloom/gateway.hpp"
-#include "routeloom/nvs_boot_session.hpp"
-#include "routeloom/nvs_counter_store.hpp"
-#include "routeloom/observation.hpp"
-#include "routeloom/rlcw1.hpp"
-#include "routeloom/secure_clear.hpp"
-#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
 #include "routeloom/espnow_sdkv1_entropy.hpp"
 #include "routeloom/espnow_security_owner.hpp"
+#include "routeloom/nvs_boot_session.hpp"
+#include "routeloom/nvs_sdkv1_store.hpp"
+#include "routeloom/observation.hpp"
+#include "routeloom/rlcw1.hpp"
 #include "routeloom/sdkv1_security_coordinator.hpp"
-#endif
+#include "routeloom/secure_clear.hpp"
 
 // Long-lived CPU-only state resides in LP SRAM on the C5 Owner profiles and
 // the gateway store set in the C3 RTC bank; radio buffers stay in HP SRAM.
-#if (CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC || CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM) && \
-    CONFIG_IDF_TARGET_ESP32C5
+#if CONFIG_IDF_TARGET_ESP32C5
 #define ROUTELOOM_OWNER_C5_LP RTC_DATA_ATTR
 #else
 #define ROUTELOOM_OWNER_C5_LP
@@ -120,14 +117,12 @@ void Device::Observer::on_diagnostic(const char* reason, const NodeId peer,
     ESP_LOGW(device_->tag_, "diagnostic reason=%s peer=%llu message=%s", reason,
              static_cast<unsigned long long>(peer), message == nullptr ? "none" : "present");
   }
-#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   // Unknown-epoch group traffic is the backstop pull trigger for a missed
   // rotation Wake (records only; the owner polls the flag).
   if (device_->owner_ != nullptr && reason != nullptr &&
       std::strcmp(reason, "GROUP_KEY_RETIRED") == 0) {
     device_->owner_->note_group_key_retired();
   }
-#endif
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
   if (device_->bridge_ != nullptr) device_->bridge_->on_diagnostic(reason, peer, message);
 #endif
@@ -142,8 +137,8 @@ Status Device::open_storage(const profile::Role role, const DeviceSecurity secur
   // partition, so an exhausted security partition can never block it.
   Status status = next_boot_session(boot_session_);
   if (!status) return status;
-  // Per-peer security state lives in its own partition (issue #37). Never
-  // erase automatically: that would turn a storage fault into key/counter
+  // Security state lives in its own partition (issue #37). Never erase
+  // automatically: that would turn a storage fault into key/counter
   // rollback.
   const esp_err_t error = nvs_flash_init_partition(espnow::kSecurityNvsPartition);
   if (error != ESP_OK) {
@@ -159,21 +154,14 @@ Status Device::open_storage(const profile::Role role, const DeviceSecurity secur
   static ROUTELOOM_OWNER_C5_LP espnow::Sdkv1Stores stores(
       role == profile::Role::Gateway ? sdkv1::kResumeGatewaySlots : sdkv1::kResumeNodeSlots);
   status = stores.open(espnow::kSecurityNvsPartition);
-  if (!status) {
-#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE && !CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
-    ESP_LOGE(tag_, "sdkv1 stores open failed: %s", status.detail);
-    return Status::success();
-#else
-    // The security owner (and a factory console) cannot work without
-    // stores — continuing would run a dead node.
-    return status;
-#endif
-  }
+  // The security owner (and a factory console) cannot work without
+  // stores — continuing would run a dead node.
+  if (!status) return status;
   stores_ = &stores;
   status = stores.initialize();
   if (!status) ESP_LOGE(tag_, "sdkv1 stores init: %s", status.detail);
   stores.log_state(tag_);
-#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE || CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
+#if CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
   static_cast<void>(security);
   return Status::success();
 #else
@@ -204,6 +192,11 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
   tag_ = config.log_tag;
   role_ = config.role;
   security_ = config.security;
+  // A channel plan is rooted in the adopted site's SAK: DevRam has no Site
+  // Authority and keeps its fixed (SitePackage/Kconfig) channel.
+  if (config.channel_plan != 0 && config.security != DeviceSecurity::Member) {
+    return Status::error(StatusCode::InvalidArgument, "CHANNEL_PLAN_MEMBER_ONLY");
+  }
   NodeConfig& node = config.radio.node;
   // The persisted monotonic boot session is the message session, the
   // durable boot token, the telemetry incarnation, the route generation
@@ -217,12 +210,6 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
   node.end_epoch = boot_session_;
   Status status = Status::success();
 
-#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
-  if (config.legacy_security == nullptr) {
-    return Status::error(StatusCode::InvalidArgument, "legacy security provider missing");
-  }
-  SecurityProvider& provider = *config.legacy_security;
-#else
   if (stores_ == nullptr) return Status::error(StatusCode::InvalidState, "storage not open");
   // The owner boots after radio-up (entropy + attach + boot below); the
   // node start stays deferred to ApplyMemberConfig or adopt_dev.
@@ -249,7 +236,6 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
   if (!status) return status;
   owner_ = &owner;
   SecurityProvider& provider = owner.session_provider();
-#endif
 
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
   if (config.usb != nullptr) {
@@ -257,7 +243,7 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
     bridge_config.secret = config.usb_secret;
     bridge_config.node = node.node;
     bridge_config.network = node.network;
-#if ROUTELOOM_DEVICE_MEMBER && !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+#if ROUTELOOM_DEVICE_MEMBER
     if (stores_ != nullptr && config.security == DeviceSecurity::Member) {
       bridge_config.network = usb_boot_network(stores_->site(), node.network);
     }
@@ -279,7 +265,6 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
   if (!status) return status;
   runtime_ = &runtime;
 
-#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   // Post-RF randomness first: boot() arms the cookie sealer from it.
   status = entropy.begin();
   if (!status) return status;
@@ -360,7 +345,6 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
   }
 #endif
   if (!adopted) return Status::error(StatusCode::Unsupported, "security mode not in this image");
-#endif
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
   if (bridge_ != nullptr) {
     bridge_->set_mesh(&runtime.node());
@@ -382,11 +366,9 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
       static ConfigGateway config_gateway(config_port, *bridge_);
       status = bridge_->attach_config(config_gateway);
       if (!status) return status;
-#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
       if (config.security == DeviceSecurity::Member) {
         config_gateway.attach_authority(owner_->authority_demux());
       }
-#endif
     }
 #endif
   }
@@ -411,9 +393,7 @@ void Device::step(const MonotonicMs now_ms) noexcept {
   if (bridge_ != nullptr) bridge_->poll(now_ms);
 #endif
   runtime_->poll_once();
-#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   if (owner_ != nullptr) owner_->poll(now_ms);
-#endif
 #if ROUTELOOM_DEVICE_REMOTE_CONFIG
   if (remote_config_ != nullptr) poll_remote_config(now_ms);
 #endif
@@ -463,7 +443,7 @@ void Device::run_posted() noexcept {
 }
 
 void Device::update_observation_remote() noexcept {
-#if CONFIG_ROUTELOOM_OBSERVATION_REMOTE && !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+#if CONFIG_ROUTELOOM_OBSERVATION_REMOTE
   // Only adopted modes answer remote observation queries; adoption and
   // revocation open and close the responder.
   if (owner_ == nullptr || observation_ == nullptr) return;
@@ -504,9 +484,6 @@ DeviceCapabilities Device::capabilities() const noexcept {
   DeviceCapabilities caps{};
   caps.role = role_;
   caps.member = security_ == DeviceSecurity::Member;
-#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
-  caps.member = false;
-#endif
   caps.usb_gateway = bridge_ != nullptr;
   caps.max_payload = static_cast<std::uint16_t>(kMaxApplicationPayload);
   caps.max_group_payload = static_cast<std::uint16_t>(kGroupPayloadMax);
@@ -522,11 +499,7 @@ NodeId Device::node_id() const noexcept {
 }
 
 const sdkv1::SecurityCoordinator* Device::security() const noexcept {
-#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
-  return nullptr;
-#else
   return owner_ == nullptr ? nullptr : &owner_->coordinator();
-#endif
 }
 
 MeshNode* Device::mesh() noexcept {

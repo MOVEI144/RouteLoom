@@ -606,9 +606,10 @@ pub const RX_ASSURANCE_REQUEST_SIZE: usize = 2;
 pub const RX_ASSURANCE_RESPONSE_SIZE: usize = 3;
 pub const INGRESS_ASSURANCE_TAIL_SIZE: usize = 8;
 pub const INGRESS_ASSURANCE_VERIFIED: u16 = 1 << 0;
-/// Highest valid profile id (observation kProfileLegacyFixture); anything
-/// above is rejected, never rendered.
-pub const INGRESS_ASSURANCE_PROFILE_MAX: u8 = 3;
+/// Highest valid profile id (observation kProfileMax, dev_ram); anything
+/// above, the retired fixture profile 3 included, is rejected, never
+/// rendered.
+pub const INGRESS_ASSURANCE_PROFILE_MAX: u8 = 2;
 
 pub fn encode_rx_assurance_enable() -> Vec<u8> {
     vec![HOST_OPS_SCHEMA, SUB_RX_ASSURANCE_ENABLE]
@@ -2456,7 +2457,7 @@ mod tests {
         bad[3] = 0x01;
         assert!(decode_ingress_assurance_tail(&bad).is_err());
         let mut bad = tail.clone();
-        bad[2] = 0x04;
+        bad[2] = 0x03; // retired fixture profile
         assert!(decode_ingress_assurance_tail(&bad).is_err());
     }
 

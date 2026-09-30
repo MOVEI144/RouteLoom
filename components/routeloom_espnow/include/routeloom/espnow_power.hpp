@@ -3,7 +3,6 @@
 #include <cstdint>
 
 #include "routeloom/espnow_runtime.hpp"
-#include "routeloom/nvs_counter_store.hpp"
 #include "routeloom/power.hpp"
 
 namespace routeloom::espnow {
@@ -46,19 +45,6 @@ class EspNowPowerPort final : public PowerPort {
   EspNowRuntime& runtime_;
   PreSleepHook* pre_sleep_hook_{nullptr};
   bool quiesced_{false};
-};
-
-// Two-slot PowerStorage backed by NVS blobs ("img0"/"img1") in an existing
-// NvsCounterStore namespace.
-class NvsSleepStorage final : public PowerStorage {
- public:
-  explicit NvsSleepStorage(NvsCounterStore& store) noexcept : store_(store) {}
-
-  Status read(std::uint8_t slot, MutableByteView target) noexcept override;
-  Status write(std::uint8_t slot, ByteView data) noexcept override;
-
- private:
-  NvsCounterStore& store_;
 };
 
 }  // namespace routeloom::espnow

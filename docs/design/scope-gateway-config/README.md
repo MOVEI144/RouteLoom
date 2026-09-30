@@ -42,7 +42,7 @@
 
 ### 機能flagとcapability
 
-- **Discovery Scope**：mode（Off/OpenLegacy/OptionalMigration/Required）はruntime設定でbuild flagを増やさない。reference_nodeのdiscovery配線は`CONFIG_ROUTELOOM_DISCOVERY`（既定n、autonomy laneと共有）。Requiredはscope key未提供/binding不能で起動拒否し、legacyへ降格しない。
+- **Discovery Scope**：mode（Off/OpenLegacy/OptionalMigration/Required）はruntime設定でbuild flagを増やさない。discovery配線はsecurity owner（DevRam／MemberEdhoc）が持つ。Requiredはscope key未提供/binding不能で起動拒否し、legacyへ降格しない。
 - **Explicit Gateway**：bridge_nodeの`CONFIG_ROUTELOOM_CAPABILITY` **bit3 (0x8)** がopt-in gate。ON→`attach_gateway`→HelloAckへbit3広告。OFF→未attach・未広告・全gateway opはUnsupported。
 - **Small Remote Config**：target側はreference_nodeの`CONFIG_ROUTELOOM_CONFIG`（既定n、EXPERIMENTAL・dev HMAC明記）。bridge lane側はcapability **bit4 (0x10)** で同じくattach/広告をgate。
 - `attach_gateway`/`attach_config`は接続時だけ対応bitを立てる。capabilityはHello transcriptへbindされる。未交渉opは常にUnsupported。

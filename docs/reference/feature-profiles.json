@@ -102,20 +102,6 @@
         "esp32c5"
       ]
     },
-    "development_psk_aead": {
-      "design_target": false,
-      "initial_target": true,
-      "implemented": true,
-      "host_tested": false,
-      "build_tested": true,
-      "hardware_tested": false,
-      "qualified": false,
-      "default_enabled": false,
-      "evidence": [
-        "components/routeloom_espnow/src/psk_security.cpp",
-        "docs/implementation/README.md"
-      ]
-    },
     "security_hardening": {
       "design_target": true,
       "initial_target": true,
@@ -131,20 +117,6 @@
         "components/routeloom/include/routeloom/security.hpp",
         "components/routeloom/src/node.cpp",
         "tests/cpp/test_hardening.cpp"
-      ]
-    },
-    "nvs_replay_store": {
-      "design_target": true,
-      "initial_target": true,
-      "implemented": true,
-      "host_tested": false,
-      "build_tested": true,
-      "hardware_tested": false,
-      "qualified": false,
-      "default_enabled": false,
-      "evidence": [
-        "components/routeloom_espnow/include/routeloom/nvs_replay_store.hpp",
-        "components/routeloom_espnow/src/nvs_replay_store.cpp"
       ]
     },
     "multi_hop_repair": {

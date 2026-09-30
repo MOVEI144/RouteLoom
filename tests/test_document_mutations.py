@@ -142,6 +142,14 @@ class MutationTests(unittest.TestCase):
     def test_additive_credit_mutation(self):
         self.change_json('protocol/semantics.json',lambda d:d.update(usb_credit='additive-delta')); self.rejected()
 
+    def test_retired_security_mode_token_fails(self):
+        token = 'LEGACY' + '_FIXTURE'
+        (self.root/'docs/hil/retired-record.md').write_text(token + '\n')  # history is exempt
+        self.assertEqual(validate(self.root)['failed'], [])
+        kconfig = self.root/'components/routeloom/Kconfig'
+        kconfig.write_text(kconfig.read_text() + f'# {token}\n')
+        failed = {item['name'] for item in validate(self.root)['failed']}
+        self.assertEqual(failed, {'retired_security_mode_absent'})
     def test_end_aad_drops_type_mutation(self):
         self.change_json('protocol/semantics.json',lambda d:d.update(end_aad_fields=[f for f in d['end_aad_fields'] if f['field']!='type'])); self.rejected()
     def test_end_aad_hop_mutable_mutation(self):

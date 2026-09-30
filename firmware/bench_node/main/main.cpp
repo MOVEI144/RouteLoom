@@ -154,7 +154,7 @@ routeloom::Device s_device;
 
 extern "C" void app_main(void) {
   // The authorized controller defaults to the adopted route gateway; the
-  // Kconfig pin exists for flat/legacy dev builds that adopt no gateway.
+  // Kconfig pin exists for flat dev builds that adopt no gateway.
   // The D02 BoardConfig digest is what this field becomes per-device.
   s_bench.config.controller = CONFIG_ROUTELOOM_BENCH_CONTROLLER;
   // App-image fingerprint for the STATUS identity page: first word of the

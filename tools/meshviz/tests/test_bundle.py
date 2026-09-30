@@ -178,11 +178,11 @@ class BundleTests(unittest.TestCase):
             (bundle / 'manifest.json').write_bytes(original_manifest)
             (bundle / 'SHA256SUMS').write_bytes(original_sums)
             (bundle / 'signature.json').write_bytes(original_sig)
-            # A correctly signed bundle must not distribute a personalized USB
-            # credential inside its public resolved sdkconfig.
+            # A correctly signed bundle must not distribute a personalized
+            # development key inside its public resolved sdkconfig.
             config_file = bundle / 'sdkconfig'
             original_config = config_file.read_bytes()
-            private_config = original_config + b'CONFIG_ROUTELOOM_USB_DEV_SECRET="private-usb-password"\n'
+            private_config = original_config + b'CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX="1234"\n'
             config_file.write_bytes(private_config)
             private_manifest = {**manifest, 'auxiliary': {
                 **manifest['auxiliary'], 'sdkconfig': catalog._hash(private_config)}}
@@ -678,9 +678,7 @@ class BundleTests(unittest.TestCase):
         for line in ('CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y',
                      'CONFIG_FLASH_ENCRYPTION_MODE_RELEASE=y',
                      'CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK=y',
-                     'CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX="1234"',
-                     'CONFIG_ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX="1234"',
-                     'CONFIG_ROUTELOOM_USB_DEV_SECRET="private-usb-password"'):
+                     'CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX="1234"'):
             with self.subTest(line=line), self.assertRaises(ValueError):
                 catalog.check_config(base + line + '\n', 'esp32c3')
 

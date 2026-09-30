@@ -229,7 +229,7 @@ component `Kconfig` files (`components/*/Kconfig`); an app's
 `main/Kconfig.projbuild` holds only that app's own symbols. Rules:
 
 - New symbols are additive and default to the safe/off value (EXPERIMENTAL
-  features default off; opt-ins are explicit, e.g. `ROUTELOOM_DISCOVERY`,
+  features default off; opt-ins are explicit, e.g. `ROUTELOOM_MIGRATION`,
   `ROUTELOOM_CONFIG`, `ROUTELOOM_CAPABILITY` bits).
 - Renaming a symbol, changing its type, or changing the meaning of an existing
   value is a **breaking change** requiring release-note documentation.

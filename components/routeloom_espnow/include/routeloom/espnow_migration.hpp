@@ -1,13 +1,8 @@
 #pragma once
 
 // ESP-NOW-side bundle for the P5b migration execution path
-// (docs/design/autonomous-mesh/04-channel-migration.md §5-§9). Three pieces:
+// (docs/design/autonomous-mesh/04-channel-migration.md §5-§9). Two pieces:
 //
-//   - DevPskCommitVerifier: CommitSignatureVerifier over the SAME development
-//     master key as DevelopmentPskSecurityProvider, domain-separated by HMAC
-//     derivation. EXPERIMENTAL — SecurityProfile::Development; the commit
-//     evidence is a real HMAC-SHA256 check, never a stubbed pass, but it is
-//     shared-key material and is never advertised as production identity.
 //   - NvsPlanStore: PlanStorage over NVS — two bounded hash-addressed blob
 //     slots plus fixed commit/active record keys. Power-cut-safe at the NVS
 //     commit boundary; CRC integrity lives in the record codecs.
@@ -27,50 +22,6 @@
 #include "routeloom/espnow_runtime.hpp"
 
 namespace routeloom::espnow {
-
-// EXPERIMENTAL development commit verifier (G-SEC production signing is
-// still pending — this is the explicit Development profile, surfaced as
-// such). Derives a dedicated key:
-//     key = HMAC-SHA256(master_key, "RouteLoom migration commit v1")
-// and verifies commit evidence as HMAC-SHA256 over the canonical signing
-// input (migration_wire commit_signing_input). Real cryptographic check;
-// shared-key semantics only.
-class DevPskCommitVerifier final : public CommitSignatureVerifier {
- public:
-  DevPskCommitVerifier() = default;
-  ~DevPskCommitVerifier() override;
-
-  DevPskCommitVerifier(const DevPskCommitVerifier&) = delete;
-  DevPskCommitVerifier& operator=(const DevPskCommitVerifier&) = delete;
-
-  // Derives the domain-separated key. PSA crypto must be initialized — the
-  // security provider's initialize() already does that on this runtime.
-  Status initialize(const std::array<std::uint8_t, 32>& master_key) noexcept;
-
-  bool ready() const noexcept override { return ready_; }
-  SecurityProfile security_profile() const noexcept override {
-    return SecurityProfile::Development;
-  }
-  Status verify_commit(const AuthorityOperation& operation,
-                       const Digest256& plan_hash, ChannelEpoch new_epoch,
-                       ByteView signature) noexcept override;
-  Status verify_snapshot(ByteView snapshot,
-                         ByteView signature) noexcept override;
-
-  // Issuer side (authority role only): produce the MAC a peer will verify.
-  Status sign_commit(const AuthorityOperation& operation,
-                     const Digest256& plan_hash, ChannelEpoch new_epoch,
-                     std::array<std::uint8_t, 32>& out) noexcept;
-  Status sign_snapshot(ByteView snapshot_body,
-                       std::array<std::uint8_t, 32>& out) noexcept;
-
- private:
-  Status mac(ByteView input, std::array<std::uint8_t, 32>& out) noexcept;
-  Status check(ByteView input, ByteView signature) noexcept;
-
-  std::array<std::uint8_t, 32> key_{};
-  bool ready_{false};
-};
 
 // PlanStorage over NVS. Keys in one namespace:
 //   "commit"  — the single durable commit record (kCommitRecordSize bound),

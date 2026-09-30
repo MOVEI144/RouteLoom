@@ -335,8 +335,8 @@ Status decode_rx_assurance_response(ByteView inner,
                                     RxAssuranceResponse& out) noexcept;
 
 // Extended DataFromMesh tail, decoded. `profile` is the observation
-// kProfile* id space (0 unknown .. 3 legacy_fixture); anything above is
-// rejected, never rendered.
+// kProfile* id space (0 unknown .. kProfileMax); anything above, the
+// retired 3 included, is rejected, never rendered.
 struct IngressAssurance {
   bool verified{false};
   std::uint8_t profile{kProfileUnknown};

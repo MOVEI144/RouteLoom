@@ -214,7 +214,6 @@ class Documentation(unittest.TestCase):
             (ROOT / "tools/ci/cells.json").read_text(encoding="utf-8"))["cells"]}
         cases = (
             ("bench_node-esp32c3-normal-off-off", "MEMBER_EDHOC"),
-            ("bridge_node-esp32c3-normal-observe-off", "LEGACY_FIXTURE"),
             ("bench_node-esp32c3-deep_sleep-off-owner_member", "MEMBER_EDHOC"),
             ("reference_node-esp32c3-normal-off-off", "DEV_RAM"),
         )

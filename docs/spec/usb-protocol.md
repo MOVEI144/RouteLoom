@@ -130,11 +130,11 @@ DataFromMeshごとのorigin検証証拠：gatewayの実効security profile・ope
 | `0x08` RX_ASSURANCE_ENABLE | H→G | 空（head 2Bのみ。存在がenable） |
 | `0x08` | G→H（同request id） | `result:u8`（HostOpsResult。`Ok`で当該sessionの拡張ingressをarm、`Unsupported`でlegacy継続） |
 
-enableはsession scoped（再接続で解除、再enableが必要。profile idはboot scopedで残る）。arm済みsessionの証拠付き配送はDataFromMeshのframe flags bit `0x0002`（`kFlagIngressAssurance`）を立て、payloadの後に8B tail（`flags:u16`＝bit0 VERIFIED、残り予約0／`profile:u8`＝実効profile id 0〜3／`reserved:u8=0`／`site_epoch:u32`＝配送headerのend_epoch）を付ける。20B headのoffsetは両形で同一。group配送（3引数`on_message`経路）はgroup鍵検証であってorigin END証明ではないため、arm済みでもlegacy形のまま送る。hostはflag付きでtail長に満たない・tail異常のframeをmalformedとして落とす（証拠なしへの格下げはしない）。host側の扱いは[Host §3](host.md)。
+enableはsession scoped（再接続で解除、再enableが必要。profile idはboot scopedで残る）。arm済みsessionの証拠付き配送はDataFromMeshのframe flags bit `0x0002`（`kFlagIngressAssurance`）を立て、payloadの後に8B tail（`flags:u16`＝bit0 VERIFIED、残り予約0／`profile:u8`＝実効profile id 0〜2（3は撤去したdev-PSK fixtureの予約で、送らず受け付けない）／`reserved:u8=0`／`site_epoch:u32`＝配送headerのend_epoch）を付ける。20B headのoffsetは両形で同一。group配送（3引数`on_message`経路）はgroup鍵検証であってorigin END証明ではないため、arm済みでもlegacy形のまま送る。hostはflag付きでtail長に満たない・tail異常のframeをmalformedとして落とす（証拠なしへの格下げはしない）。host側の扱いは[Host §3](host.md)。
 
 ## 12. 手動channel plan（channel_plan_v1、EXPERIMENTAL）
 
-MemberEdhocのsiteで、hostのSite AuthorityがSAKで署名したchannel planをgatewayへ渡し、gatewayがsiteのplan authorityとして各memberへ配る（issue #5の手動移行）。HelloAck capability bit 13（`0x2000`、`kCapChannelPlanV1`／`CAP_CHANNEL_PLAN_V1`）を広告するbridgeだけがHostOps `0x68`／`0x69`を扱う（bit 2も必要）。bitはbridge ownerが`attach_channel_plan`でplan authorityを渡した時だけ立ち、未attachの`0x68`はUnsupportedのError frameで返る。形式は§7と同じ4B head＋payload（big-endian、長さ完全一致）。
+MemberEdhoc専用（DevRamはSite Authorityが無く固定channel、[channel移行](channel-migration.md)）。MemberEdhocのsiteで、hostのSite AuthorityがSAKで署名したchannel planをgatewayへ渡し、gatewayがsiteのplan authorityとして各memberへ配る（issue #5の手動移行）。HelloAck capability bit 13（`0x2000`、`kCapChannelPlanV1`／`CAP_CHANNEL_PLAN_V1`）を広告するbridgeだけがHostOps `0x68`／`0x69`を扱う（bit 2も必要）。bitはbridge ownerが`attach_channel_plan`でplan authorityを渡した時だけ立ち、未attachの`0x68`はUnsupportedのError frameで返る。形式は§7と同じ4B head＋payload（big-endian、長さ完全一致）。
 
 | sub | 向き | payload |
 |---|---|---|

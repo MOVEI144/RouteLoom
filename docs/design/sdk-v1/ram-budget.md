@@ -16,7 +16,7 @@ MeshNodeを含むSDKの状態はすべて静的確保（`.bss`）である。gro
 
 ## 2. メモリモデル
 
-- **静的状態**：`EspNowRuntime`（`MeshNode`を内包）、`DevelopmentPskSecurityProvider`、`UsbBridge`、`GatewayDelivery`、`ConfigGateway`、discovery／migration／config journalは、firmwareの`app_main`内の関数static objectとして`.bss`に置かれる。SDKがheapから取るのは起動時のFreeRTOS queue（runtimeのRX/TX event queue 48件とbootstrap queue 8件）とtaskだけで、Wi-Fi driverのbufferもheapにある。容量はすべてcompile time定数で、枯渇は明示的な拒否（`NoCapacity`、BUSY、`TABLE_FULL`系diagnostic）になる。
+- **静的状態**：`EspNowRuntime`（`MeshNode`を内包）、security owner、`UsbBridge`、`GatewayDelivery`、`ConfigGateway`、discovery／migration／config journalは、firmwareの`app_main`内の関数static objectとして`.bss`に置かれる。SDKがheapから取るのは起動時のFreeRTOS queue（runtimeのRX/TX event queue 48件とbootstrap queue 8件）とtaskだけで、Wi-Fi driverのbufferもheapにある。容量はすべてcompile time定数で、枯渇は明示的な拒否（`NoCapacity`、BUSY、`TABLE_FULL`系diagnostic）になる。
 - **C3のSRAM**：IRAMのcode（`.iram0.text`）と`.data`／`.bss`が同じSRAM（esp-idf-sizeの表示名は`DRAM`、S3は`DIRAM`、C5は`HP SRAM`）を分け合い、`dram0_0_seg`の残りが起動時にheapになる。linkが失敗するのはこの領域の残量が負になったときで、CIが見る「free」はまさにその残量である。
 - **heapへ移さない理由**：大きなobjectを起動時に一度だけheapへ確保しても、heapの大部分は同じ`dram0_0_seg`の残りなので、合計のSRAMは増えない（heapのheaderの分だけ減る）。bootloaderが使っていた領域は起動後にheapへ戻るが、そこへ置けるかを示すには実機の`heap_caps_get_info`が要り、静的guardからもその分が見えなくなる。layoutだけで目標を超えたので、この改訂では行わない。
 - **stack**：`TxJob`は関数内のlocal copy（`TxJob job = physical_.job;`など）としても使われるので、1件880 B → 368 Bの縮小は8 KBの`app_main` stackの消費も減らす。
@@ -117,7 +117,7 @@ python3 tools/firmware_ram_report.py build/size.json --target <target> --app <ap
 | dedup容量 | ESP-IDF Kconfig *RouteLoom → Dedup capacity*（profile既定、または`CONFIG_ROUTELOOM_DEDUP_PROFILE_{LEAF,RELAY,GATEWAY}`で固定）、host CMake `-DROUTELOOM_DEDUP_PROFILE=leaf/relay/gateway` | profile既定はendpoint・gateway_smallが32、ほかは96／固定は32・96・256件 | 1件136 B（leaf 4.4 KB、relay 13.1 KB、gateway 34.8 KB） |
 | 経路profile | `CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED` | flat（既定）／gateway-scoped | 容量は同じ（経路表128件） |
 | USB bridge | `bridge_node`だけがlinkする。任意機能は`CONFIG_ROUTELOOM_USB_{NODE_STATUS,GATEWAY_ENDPOINT,GROUP,OBSERVATION}`（gateway_smallはNODE_STATUSとGATEWAY_ENDPOINTが既定off） | — | 33.8 KB（全機能） |
-| discovery／migration／config journal | `CONFIG_ROUTELOOM_DISCOVERY`／`CONFIG_ROUTELOOM_MIGRATION`／`CONFIG_ROUTELOOM_CONFIG` | 既定off | 16.3 KB／15.0 KB／約43.7 KB |
+| migration／config journal | `CONFIG_ROUTELOOM_MIGRATION`／`CONFIG_ROUTELOOM_CONFIG` | 既定off。C3の`CONFIG_ROUTELOOM_CONFIG`はendpoint profileだけ（relay・gatewayではreference床を割るのでbuildを止める） | 15.0 KB／約43.7 KB |
 
 firmwareの既定：reference_node・bench_nodeはrelay、exampleはendpoint、bridge_nodeはC3がgateway_small、S3・C5・C6がgateway（dedupはC6 256、S3 96、C5 32）。E2E sessionが満杯のときは一番古いidle context（seal中でないもの）を追い出してRLRES1で戻し、回数は`CoordinatorSnapshot::end_evictions`に出る。Live／Terminalのdedup recordは容量不足でも追い出されず、受付を拒否する。
 

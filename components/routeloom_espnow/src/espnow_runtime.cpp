@@ -1858,7 +1858,7 @@ Status EspNowRuntime::send_wire(const BindingId binding,
   frame.payload_size = payload.size;
   wire::EncodedFrame encoded{};
   // Link-scope seal via the existing provider — counters/AEAD stay inside
-  // DevelopmentPskSecurityProvider; no new crypto primitive here.
+  // the session provider; no new crypto primitive here.
   const Status status = wire::encode_new(frame, security_, encoded);
   if (!status) {
     return status;

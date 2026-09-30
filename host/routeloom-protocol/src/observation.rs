@@ -137,7 +137,7 @@ pub const fn profile_name(code: u8) -> &'static str {
     match code {
         1 => "member_edhoc",
         2 => "dev_ram",
-        3 => "legacy_fixture",
+        // 3 named the removed dev-PSK fixture profile; reserved.
         _ => "unknown",
     }
 }
@@ -1383,6 +1383,7 @@ mod tests {
         assert_eq!(power_name(1), "running");
         assert_eq!(coord_mode_name(3), "member");
         assert_eq!(profile_name(2), "dev_ram");
+        assert_eq!(profile_name(3), "unknown");
         assert_eq!(membership_name(5), "member");
         assert_eq!(joiner_name(2), "active");
         assert_eq!(joiner_name(0), "unknown");
