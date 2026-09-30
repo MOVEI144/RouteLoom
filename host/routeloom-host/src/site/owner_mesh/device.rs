@@ -543,6 +543,7 @@ fn mesh_p05_c_device_api() {
         "the job posted from on_membership ran"
     );
     deliver_each(&mut world, a, 0, 5, b"p05-c-back");
+    assert_eq!(world.snaps[a].c_check_failures, 0, "C post after rejoin");
 }
 
 /// P06: the standalone example serves two C endpoints after the host is

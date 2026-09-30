@@ -366,7 +366,7 @@ class Device {
   enum class Operation : std::uint8_t { None = 0, Join, Leave };
 
   bool callback_active() const noexcept;
-  void run_posted() noexcept;
+  void run_posted(std::uint8_t budget) noexcept;
   void update_observation_remote() noexcept;
   Status apply_join_policy(const JoinPolicy& policy) noexcept;
   MembershipStage current_stage() const noexcept;

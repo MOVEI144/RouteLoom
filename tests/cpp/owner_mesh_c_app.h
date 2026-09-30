@@ -40,6 +40,8 @@ typedef struct mesh_c_app {
   uint32_t check_failures;
   /* Jobs posted from membership callbacks that ran on a later pass. */
   uint32_t posted_runs;
+  uint32_t poll_passes;
+  uint32_t membership_post_pass;
   /* Application messages received through on_message. */
   uint32_t messages;
   rl_message_id_t applied_id;

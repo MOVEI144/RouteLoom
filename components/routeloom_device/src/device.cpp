@@ -478,6 +478,11 @@ void Device::usb_receive(const ByteView bytes, const MonotonicMs now_ms) noexcep
 
 void Device::step(const MonotonicMs now_ms) noexcept {
   if (runtime_ == nullptr) return;
+  // Only jobs waiting at the start of this Owner pass may run. Callbacks
+  // reached below can post, but their jobs belong to the next pass.
+  portENTER_CRITICAL(&posted_lock_);
+  const std::uint8_t posted_budget = posted_count_;
+  portEXIT_CRITICAL(&posted_lock_);
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
   if (bridge_ != nullptr) bridge_->poll(now_ms);
 #endif
@@ -491,7 +496,7 @@ void Device::step(const MonotonicMs now_ms) noexcept {
 #endif
   update_membership(now_ms);
   update_connectivity(now_ms);
-  run_posted();
+  run_posted(posted_budget);
   update_observation_remote();
   if (poll_hook_ != nullptr) poll_hook_(*this, now_ms, poll_ctx_);
 }
@@ -513,12 +518,7 @@ Status Device::post(const Job job, void* ctx) noexcept {
   return full ? Status::error(StatusCode::Busy, "post queue full") : Status::success();
 }
 
-void Device::run_posted() noexcept {
-  // A pass takes only the jobs that were waiting at its start. New jobs
-  // wait for the next pass, even if the queue was not full.
-  portENTER_CRITICAL(&posted_lock_);
-  std::uint8_t budget = posted_count_;
-  portEXIT_CRITICAL(&posted_lock_);
+void Device::run_posted(std::uint8_t budget) noexcept {
   while (budget-- > 0) {
     Posted next{};
     portENTER_CRITICAL(&posted_lock_);

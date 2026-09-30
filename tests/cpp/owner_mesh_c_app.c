@@ -85,6 +85,12 @@ static void posted(rl_dev_t* device, void* ctx) {
   }
 }
 
+static void posted_from_membership(rl_dev_t* device, void* ctx) {
+  mesh_c_app_t* app = (mesh_c_app_t*)ctx;
+  count(app, app->poll_passes > app->membership_post_pass);
+  posted(device, ctx);
+}
+
 static void on_message(void* user, rl_node_id_t origin, rl_message_id_t id,
                        const uint8_t* payload, size_t payload_size) {
   mesh_c_app_t* app = (mesh_c_app_t*)user;
@@ -106,11 +112,13 @@ static void on_delivery(void* user, const rl_delivery_result_t* result) {
 
 static void on_membership(void* user, const rl_dev_membership_t* snapshot, uint16_t cause) {
   mesh_c_app_t* app = (mesh_c_app_t*)user;
-  (void)snapshot;
   ++app->membership_events;
   app->last_cause = cause;
   try_reentry(app);
-  (void)rl_dev_post(app->device, posted, app);
+  app->membership_post_pass = app->poll_passes;
+  count(app, rl_dev_post(app->device,
+                        snapshot->since_ms > app->now_ms ? posted_from_membership : posted,
+                        app) == RL_STATUS_OK);
 }
 
 static void on_connectivity(void* user, const rl_dev_connectivity_t* snapshot) {
@@ -142,6 +150,7 @@ static void on_poll(void* user, rl_dev_t* device, rl_monotonic_ms_t now_ms) {
   uint8_t i = 0;
   (void)device;
   app->now_ms = now_ms;
+  ++app->poll_passes;
   if (app->checks == 0) {
     check_boundaries(app);
     for (uint8_t n = 0; n < 8; ++n)
