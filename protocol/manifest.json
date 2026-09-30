@@ -235,7 +235,8 @@
       {"id": 1077, "name": "RX_ASSURANCE_MALFORMED", "api1": null},
       {"id": 1078, "name": "REGISTER_MALFORMED", "api1": null},
       {"id": 1079, "name": "UNREGISTER_MALFORMED", "api1": null},
-      {"id": 1080, "name": "ACK_MALFORMED", "api1": null}
+      {"id": 1080, "name": "ACK_MALFORMED", "api1": null},
+      {"id": 1081, "name": "RESULT_EXPIRED", "api1": null}
     ]
   }
 }
