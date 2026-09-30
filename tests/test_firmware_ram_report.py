@@ -215,7 +215,7 @@ class Documentation(unittest.TestCase):
         cases = (
             ("bench_node-esp32c3-normal-off-off", "MEMBER_EDHOC"),
             ("bench_node-esp32c3-deep_sleep-off-owner_member", "MEMBER_EDHOC"),
-            ("reference_node-esp32c3-normal-off-off", "DEV_RAM"),
+            ("reference_node-esp32c3-normal-off-off", "MEMBER_EDHOC"),
         )
         for cell_id, security in cases:
             with self.subTest(cell=cell_id):
