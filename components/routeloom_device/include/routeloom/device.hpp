@@ -58,6 +58,9 @@
 #endif
 #endif
 
+struct rl_dev;
+struct rl_dev_observer;
+
 namespace routeloom {
 
 class EntropySource;
@@ -221,6 +224,13 @@ inline NetworkId usb_boot_network(const sdkv1::SiteStore& site, NetworkId bootst
 // image. Field images replace the identity from the verified BoardConfig.
 DeviceConfig device_config_from_kconfig() noexcept;
 #endif
+
+class Device;
+// The C API handle (device.h) over `device`, for an application that boots
+// the Device itself with begin() and step(). One handle per image: it
+// takes over observe(), observe_device() and on_poll(), and copies
+// `observer` (may be null). rl_dev_start() is the Kconfig boot path.
+rl_dev* device_c_bind(Device& device, const rl_dev_observer* observer) noexcept;
 
 class Device {
  public:

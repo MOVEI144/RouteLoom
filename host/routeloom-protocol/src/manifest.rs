@@ -4,6 +4,8 @@ pub const SDK_VERSION: &str = "2.0.0-dev";
 
 /// Core C ABI.
 pub const CORE_C_ABI: u32 = 3;
+/// Device C API.
+pub const DEVICE_C_API: u32 = 1;
 /// Mesh wire major.
 pub const WIRE_MAJOR: u32 = 2;
 /// Mesh wire minor.

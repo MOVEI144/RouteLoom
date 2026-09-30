@@ -4,6 +4,7 @@
 
 #include "routeloom/authority.hpp"
 #include "routeloom/autonomy_wire.hpp"
+#include "routeloom/device.h"
 #include "routeloom/device_credential.hpp"
 #include "routeloom/key_schedule.hpp"
 #include "routeloom/migration.hpp"
@@ -19,6 +20,7 @@
 #include "routeloom/wire.hpp"
 
 static_assert(RL_ABI_VERSION == ROUTELOOM_CORE_C_ABI, "protocol/manifest.json core_c_abi");
+static_assert(RL_DEV_API_VERSION == ROUTELOOM_DEVICE_C_API, "protocol/manifest.json device_api");
 static_assert(routeloom::wire::kMajor == ROUTELOOM_WIRE_MAJOR, "protocol/manifest.json wire_major");
 static_assert(routeloom::wire::kMinor == ROUTELOOM_WIRE_MINOR, "protocol/manifest.json wire_minor");
 static_assert(routeloom::autonomy::kRld1Version == ROUTELOOM_RLD1_VERSION, "protocol/manifest.json rld1_carrier");

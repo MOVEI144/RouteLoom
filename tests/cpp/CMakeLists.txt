@@ -50,6 +50,8 @@ add_test(NAME routeloom_ledger_tests COMMAND routeloom_ledger_tests)
 add_executable(routeloom_golden_tests test_golden.cpp manifest_check.cpp)
 target_link_libraries(routeloom_golden_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_golden_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_include_directories(routeloom_golden_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/components/routeloom_device/include)
 target_compile_definitions(routeloom_golden_tests PRIVATE
     ROUTELOOM_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/golden")
 add_test(NAME routeloom_golden_tests COMMAND routeloom_golden_tests)

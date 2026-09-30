@@ -36,7 +36,7 @@ public structにはstruct_size/versionを置く。整数幅、enum値、reserved
 
 ## 3. Device API（`routeloom::Device`）
 
-ESP-IDF の機器は `components/routeloom_device` の `routeloom::Device` を使う。C の `rl_dev_*` はこの薄い wrapper として V2-17 で足す。Device は所属・経路・session の写しを持たず、呼出しごとに Owner と MeshNode から読む。持つのは自分の event のための最小の記録（最後に通知した段階と接続状態とその時刻、進行中の操作 1 件）だけである。
+ESP-IDF の機器は `components/routeloom_device` の `routeloom::Device` を使う。C からは `routeloom/device.h` の `rl_dev_*`（Device C API 1）を使う。C 版は同じ Device の薄い wrapper で、状態を持たない（下の「Device C API」）。Device は所属・経路・session の写しを持たず、呼出しごとに Owner と MeshNode から読む。持つのは自分の event のための最小の記録（最後に通知した段階と接続状態とその時刻、進行中の操作 1 件）だけである。
 
 呼べるのは Owner task（poll hook と post した job）だけで、他の task は `post()` を使う（8 件、満杯は Busy）。Device の callback（`NodeObserver`、`DeviceObserver`）の中から Device を呼ぶと Busy を返し、何も変えない。
 
@@ -53,6 +53,17 @@ ESP-IDF の機器は `components/routeloom_device` の `routeloom::Device` を�
 | `capabilities()` | 役割、MemberEdhoc か、`security_profile`（DevRam は Development、MemberEdhoc は Candidate）、USB gateway、payload の上限など |
 
 `DeviceObserver` の `on_membership(snapshot, cause)` と `on_connectivity(snapshot)` は、変化ごとに 1 回だけ Owner task で呼ぶ。起動時の最初の状態は変化ではないので通知しない。JoinPolicy の孤立の通知時間を過ぎて Isolated が続くと、理由 ISOLATION_NOTICE で `on_connectivity` を 1 回出す（自動では離脱しない）。受信の `DeliveryAssurance` には、送信元の検証結果に加えて、MemberEdhoc では送信元の資格が認める役割（`source_role`）が入る。
+
+### Device C API（`routeloom/device.h`）
+
+C++ の各関数に対応する `rl_dev_*` を置く（`rl_dev_send`、`rl_dev_send_group`、`rl_dev_cancel`、`rl_dev_delivery`、`rl_dev_send_applied`、`rl_dev_complete_applied`、`rl_dev_applied_lease`、`rl_dev_applied_result`、`rl_dev_membership`、`rl_dev_connectivity`、`rl_dev_request_join`、`rl_dev_leave`、`rl_dev_set_join_policy`、`rl_dev_join_policy`、`rl_dev_capabilities`、`rl_dev_node_id`）。規則は C++ と同じで、違うのは次だけである。
+
+- 起動は `rl_dev_start(observer)`：component の Kconfig から Device を Owner task で起動し、handle を返す。image に Device は 1 つで、handle も 1 つ。
+- callback は `rl_dev_observer_t`（`on_message`、`on_delivery`、`on_membership`、`on_connectivity`、`on_operation`、`on_applied_request`、`on_poll`）。`on_poll` は Owner の pass ごとに callback の外で呼ぶので、そこから Device を呼べる。
+- APPLIED の受信側は常に非同期：`on_applied_request` で ticket を受け、callback の後で `rl_dev_complete_applied` を呼ぶ。`on_applied_request` が NULL なら NoEndpoint で拒否する。
+- 他の task からは `rl_dev_post(job, ctx)` だけ（8 件、満杯は `RL_STATUS_BUSY`）。
+- 全 struct の先頭に `{struct_size, version}`。version は `RL_DEV_API_VERSION`（1）、struct_size は header の宣言以上でなければ `RL_STATUS_INVALID_ARGUMENT`。大きい struct_size は受けて末尾を無視する。1.x は末尾の追加と関数の追加だけで、layout は `protocol/abi-golden/device-api1.json`（ILP32 と LP64）で固定する。共通の値の型（`rl_message_id_t`、`rl_delivery_result_t`、`rl_applied_*_t`、`rl_group_send_options_t`）は core ABI 3 のものを使い、version は `RL_ABI_VERSION`。
+- sleep の C 版は Device の sleep API（V2-15）と同時に足す。
 
 ### JoinPolicy
 
