@@ -15,7 +15,7 @@ use std::fmt;
 pub const CAP_HOST_OPS_V1: u32 = 1 << 2;
 /// scope-gateway-config P3 (05-wire-api.md §5.6): the device serves the
 /// Gateway HostOps subcommands 0x10-0x13 — host endpoint registration,
-/// scope-2 ReceiveLog ingress + ACK, and unregister. Advertised separately
+/// gateway ReceiveLog ingress + ACK, and unregister. Advertised separately
 /// from host_ops_v1.
 pub const CAP_GATEWAY_ENDPOINT_V1: u32 = 1 << 3;
 /// scope-gateway-config P5 (05-wire-api.md §5.6): the device serves the

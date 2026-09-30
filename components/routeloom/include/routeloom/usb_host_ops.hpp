@@ -41,7 +41,7 @@ constexpr std::uint32_t kCapHostOpsV1 = 1u << 2;
 
 // scope-gateway-config P3 (docs/design/scope-gateway-config/05-wire-api.md
 // §5.6): the device serves the Gateway HostOps subcommands 0x10-0x13 —
-// host endpoint registration, scope-2 ReceiveLog ingress + ACK, and
+// host endpoint registration, gateway ReceiveLog ingress + ACK, and
 // unregister. Advertised separately from host_ops_v1 so a bridge build can
 // expose the dispatch window without the gateway host lane.
 constexpr std::uint32_t kCapGatewayEndpointV1 = 1u << 3;
@@ -133,7 +133,7 @@ enum class HostOpsSub : std::uint8_t {
   RxAssuranceEnable = 0x08,  // H→G request (empty): enable extended ingress
                              // -> 0x08 reply (result u8)
   HostRegister = 0x10,      // H→G request: register/renew the host endpoint
-  GatewayIngress = 0x11,    // G→H request: scope-2 payload for ReceiveLog
+  GatewayIngress = 0x11,    // G→H request: scope-1/2 payload for ReceiveLog
   GatewayIngressAck = 0x12, // H→G response: storage outcome for 0x11
   HostUnregister = 0x13,    // H→G request: drop the current registration
   ConfigQuery = 0x20,       // H→G request: status query -> async 0x22 reply

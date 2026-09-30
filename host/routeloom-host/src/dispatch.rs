@@ -2530,7 +2530,7 @@ fn gateway_ingress_ack(state: &State, inner: &[u8], now: u64) -> Option<Vec<u8>>
     };
     // The frame arrived sealed on the live session; the prefix still has
     // to be the exact wire shape the digest commits to — version, submit
-    // subtype, host-receive scope, zero flags/reserved, matching length.
+    // subtype, a supported scope, zero flags/reserved, matching length.
     let prefix_len = u16::from_be_bytes([
         prefix[host_ops::SERVICE_PREFIX_LEN_OFFSET],
         prefix[host_ops::SERVICE_PREFIX_LEN_OFFSET + 1],
@@ -2542,7 +2542,7 @@ fn gateway_ingress_ack(state: &State, inner: &[u8], now: u64) -> Option<Vec<u8>>
     );
     let well_formed = prefix[0] == 1
         && prefix[1] == 3
-        && prefix[host_ops::SERVICE_PREFIX_SCOPE_OFFSET] == 2
+        && matches!(prefix[host_ops::SERVICE_PREFIX_SCOPE_OFFSET], 1 | 2)
         && prefix[3] == 0
         && prefix[30] == 0
         && prefix[31] == 0
@@ -2596,7 +2596,7 @@ fn gateway_ingress_ack(state: &State, inner: &[u8], now: u64) -> Option<Vec<u8>>
                 msg_session: ingress.ref_session,
                 msg_seq: ingress.ref_sequence,
                 payload: ingress.payload.clone(),
-                // Scope-2 ingress (0x11) carries no assurance tail —
+                // Gateway ingress (0x11) carries no assurance tail —
                 // per-delivery evidence is a DataFromMesh negotiation.
                 assurance: None,
             },
@@ -5025,6 +5025,28 @@ mod tests {
     }
 
     #[test]
+    fn sdk_ram_ingress_ack_follows_readable_host_storage() {
+        let state = gw_state();
+        mirror(&state, [0x5e; 16], 7);
+        let mut prefix = submit_prefix([0xa1; 16], BOOT, 3);
+        prefix[host_ops::SERVICE_PREFIX_SCOPE_OFFSET] = 1;
+        let body = ingress_body(prefix, 0xdead, 9, 42, &[1, 2, 3]);
+        let ack = ack_of(&gateway_ingress_ack(&state, &body, 5_000).unwrap());
+        assert_eq!(ack.outcome, GatewayOpsResult::Ok as u16);
+        assert_eq!(ack.token, [0x5e; 16]);
+        let read = state
+            .receive_log
+            .lock()
+            .unwrap()
+            .read(NET, 0, 8, 5_000, false);
+        let crate::receive_log::ReadOutcome::Batch(batch) = read else {
+            panic!("scope-1 payload must be readable after ACK")
+        };
+        assert_eq!(batch.records.len(), 1);
+        assert_eq!(batch.records[0].payload, vec![1, 2, 3]);
+    }
+
+    #[test]
     fn ingress_acks_registration_token_not_prefix_token() {
         // Real mesh ingress: the Service Submit prefix carries the ORIGIN's
         // lease token, which differs from the host registration token. The
@@ -5153,9 +5175,9 @@ mod tests {
     #[test]
     fn ingress_malformed_prefix_and_wrong_boot_are_invalid() {
         let state = gw_state();
-        // Scope 1 (SDK RAM) is not this daemon's endpoint — refused.
+        // An unknown scope is not a Service Submit this daemon can store.
         let mut prefix = submit_prefix([0xa1; 16], BOOT, 1);
-        prefix[host_ops::SERVICE_PREFIX_SCOPE_OFFSET] = 1;
+        prefix[host_ops::SERVICE_PREFIX_SCOPE_OFFSET] = 3;
         let body = ingress_body(prefix, 0xdead, 9, 42, &[9]);
         let ack = gateway_ingress_ack(&state, &body, 5_000).unwrap();
         assert_eq!(ack_of(&ack).outcome, GatewayOpsResult::Invalid as u16);

@@ -1286,4 +1286,40 @@ bool GatewayDelivery::mailbox_take(
   return true;              // outcome evidence for late duplicates
 }
 
+bool GatewayDelivery::mailbox_peek(
+    MessageKey& key, RequestDigest& digest,
+    endpoint::EncodedServicePayload& submit) const noexcept {
+  const PendingRecord* entry = pending_.find(
+      [](const PendingRecord& pending) { return pending.mailbox_held; });
+  if (entry == nullptr) return false;
+  const DedupRecord* record = receipts_.find(
+      [&](const DedupRecord& candidate) { return candidate.key == entry->key; });
+  if (record == nullptr) return false;
+  endpoint::ServiceSubmit value{};
+  value.scope = endpoint::GatewayScope::GatewaySdkRam;
+  value.token = record->token;
+  value.gateway_boot = record->gateway_boot;
+  value.payload_size = static_cast<std::uint16_t>(entry->payload_size);
+  if (entry->payload_size > 0) {
+    std::memcpy(value.payload.data(), entry->payload.data(), entry->payload_size);
+  }
+  if (!endpoint::service_submit_encode(value, submit)) return false;
+  key = entry->key;
+  digest = record->request_digest;
+  return true;
+}
+
+bool GatewayDelivery::mailbox_ack(const MessageKey& key, const bool stored) noexcept {
+  PendingRecord* entry = pending_.find(
+      [&](const PendingRecord& pending) {
+        return pending.mailbox_held && pending.key == key;
+      });
+  if (entry == nullptr) return false;
+  if (stored) {
+    entry->mailbox_held = false;
+    release_pending(entry);
+  }
+  return true;
+}
+
 }  // namespace routeloom

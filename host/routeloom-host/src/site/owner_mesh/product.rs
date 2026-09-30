@@ -220,6 +220,17 @@ fn mesh_p03_explicit_gateway_delivers_only_to_named_gateway() {
         return; // no C++ peers: skip (ignore-equivalent)
     };
     converge(&mut world, "p03 gateway");
+    world.usb_host.register_gateway();
+    for _ in 0..100 {
+        if world.usb_host.gateway_token.is_some() {
+            break;
+        }
+        world.step(25);
+    }
+    assert!(
+        world.usb_host.gateway_token.is_some(),
+        "host registered as mailbox reader"
+    );
     // The application may first request the gateway facade from an inbound
     // observer callback. Attachment must recover on the next Owner call.
     world.peers[2].app_send(NODE_A, b"attach-gateway");
@@ -264,11 +275,11 @@ fn mesh_p03_explicit_gateway_delivers_only_to_named_gateway() {
     );
     assert_eq!(world.snaps[1].gw_receipts, 5, "no extra receipt");
 
-    // H1 S3: the USB bridge hands each SDK_RAM payload to its host, which
+    // The USB bridge hands each SDK_RAM payload to its host, which
     // frees the mailbox slot. Twenty sends (3.5 s apart, inside the 20/min
     // acceptance rate) are all received, none refused CAPACITY, and the
     // host got every payload.
-    let frames = world.usb_host.data_frames;
+    let received = world.usb_host.gateway_payloads.len();
     for round in 6..=20u32 {
         let started = world.now;
         world.peers[1].gateway_send(testkit::GATEWAY, b"p03-gateway");
@@ -284,12 +295,16 @@ fn mesh_p03_explicit_gateway_delivers_only_to_named_gateway() {
         }
     }
     assert_eq!(world.snaps[0].gw_mailbox_stored, 20, "gateway mailbox");
-    assert!(
-        world.usb_host.data_frames >= frames + 15,
-        "the host read every payload: {} -> {}",
-        frames,
-        world.usb_host.data_frames
+    assert_eq!(
+        world.usb_host.gateway_payloads.len(),
+        received + 15,
+        "the host stored every payload"
     );
+    assert!(world
+        .usb_host
+        .gateway_payloads
+        .iter()
+        .all(|p| p == b"p03-gateway"));
 }
 
 // --- Manual channel plan (P03 channel plan, V2-08) ---------------------------

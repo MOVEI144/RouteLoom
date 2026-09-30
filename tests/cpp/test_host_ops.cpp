@@ -2816,6 +2816,78 @@ void test_bridge_gateway_ingress_resend_and_lease() {
   CHECK(expired.result == HostOpsResult::InvalidRequest);
 }
 
+// A scope-1 receipt precedes host storage. A USB session loss between the
+// receipt and the host ACK must leave the accepted payload readable.
+void test_bridge_sdk_ram_mailbox_survives_session_loss() {
+  GatewayWorld world;
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0x1111, 10) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  const auto reg_body = register_bytes(7, 0x99, 15000);
+  const auto reg_answer = transact(world, host, now, 60,
+      ByteView{reg_body.data(), reg_body.size()}, got_error, error_code);
+  HostRegisterResponse reg{};
+  CHECK(decode_host_register_response(ByteView{reg_answer.data(), reg_answer.size()}, reg));
+  CHECK(reg.result == static_cast<std::uint16_t>(GatewayOpsResult::Ok));
+
+  GatewayEndpoint endpoint{};
+  const HostDigest no_host{};
+  CHECK_OK(world.gateway2.resolve(1, endpoint::GatewayScope::GatewaySdkRam,
+                                  no_host, 5000, now, endpoint));
+  for (int i = 0; i < 40 &&
+       world.gateway2.endpoint_state(endpoint) != EndpointState::Ready; ++i) {
+    world.run_mesh(now, 100);
+  }
+  CHECK(world.gateway2.endpoint_state(endpoint) == EndpointState::Ready);
+  const std::array<std::uint8_t, 3> payload{{5, 6, 7}};
+  MessageId sent{};
+  CHECK_OK(world.gateway2.send(endpoint, ByteView{payload.data(), payload.size()},
+                               3000, now, sent));
+  for (int i = 0; i < 40 && world.gateway1.stats().sdk_ram_receipts == 0; ++i) {
+    world.run_mesh(now, 100);
+  }
+  CHECK(world.gateway1.stats().sdk_ram_receipts == 1);
+  CHECK(world.gateway1.mailbox_size() == 1);
+  world.bridge.notify_disconnect(now);
+  CHECK(world.gateway1.mailbox_size() == 1);
+
+  world.device_sink.frames.clear();
+  HostDriver next;
+  now += 100;
+  CHECK(host_handshake(world, next, now, 0x2222, 70) != 0);
+  auto frames = exchange(world, next, now, 72,
+      ByteView{reg_body.data(), reg_body.size()});
+  const DeviceFrame* register_frame = find_sub(frames,
+      static_cast<std::uint8_t>(HostOpsSub::HostRegister));
+  CHECK(register_frame != nullptr);
+  if (register_frame == nullptr) return;
+  HostRegisterResponse next_reg{};
+  CHECK(decode_host_register_response(
+      ByteView{register_frame->body.data(), register_frame->body.size()}, next_reg));
+  if (find_sub(frames, static_cast<std::uint8_t>(HostOpsSub::GatewayIngress)) == nullptr) {
+    world.run_mesh(now, 200);
+    frames = collect_host_ops(world, next);
+  }
+  const DeviceFrame* ingress_frame = find_sub(frames,
+      static_cast<std::uint8_t>(HostOpsSub::GatewayIngress));
+  CHECK(ingress_frame != nullptr);
+  if (ingress_frame == nullptr) return;
+  GatewayIngress ingress{};
+  CHECK(decode_gateway_ingress(ByteView{ingress_frame->body.data(),
+                                        ingress_frame->body.size()}, ingress));
+  CHECK(ingress.ref_origin == 2 && ingress.ref_session == sent.session &&
+        ingress.ref_sequence == sent.sequence);
+  CHECK(ingress.payload.size == payload.size());
+  CHECK(std::memcmp(ingress.payload.data, payload.data(), payload.size()) == 0);
+  const auto ack = ingress_ack_bytes(ingress, next_reg.token, GatewayOpsResult::Ok);
+  world.feed(next.sealed(FrameKind::HostOps, ingress_frame->request,
+                         ByteView{ack.data(), ack.size()}), now);
+  world.drain(now);
+  CHECK(world.gateway1.mailbox_size() == 0);
+}
+
 // Scope-2 remote send while the destination's host is down (G02): the
 // resolve can never name a live endpoint, the send ends Failed — never a
 // Delivered claim on gateway reachability alone.
@@ -4658,6 +4730,7 @@ int main() {
   test_bridge_gateway_unsupported();
   test_bridge_gateway_loopback();
   test_bridge_gateway_ingress_resend_and_lease();
+  test_bridge_sdk_ram_mailbox_survives_session_loss();
   test_bridge_gateway_host_down();
   test_bridge_gateway_ingress_busy();
   test_bridge_gateway_remote_send();

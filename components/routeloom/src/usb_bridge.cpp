@@ -3670,6 +3670,14 @@ void UsbBridge::handle_ingress_ack(const std::uint64_t request,
   const MessageKey key = slot->key;
   const bool loopback = slot->loopback;
   const std::uint64_t dispatch_seq = slot->dispatch_seq;
+  if (!loopback && gateway_ != nullptr && gateway_->mailbox_ack(key, stored)) {
+    // A scope-1 receipt already went to the sender. A failed host store
+    // leaves its mailbox entry intact, and this request expires before a
+    // later retry; only a storage ACK releases the accepted payload.
+    if (!stored) return;
+    *slot = PendingIngress{};
+    return;
+  }
   *slot = PendingIngress{};
   if (loopback) {
     (void)window_.note_gateway_outcome(dispatch_seq, stored,
@@ -3779,17 +3787,34 @@ void UsbBridge::pump_gateway(const MonotonicMs now_ms) noexcept {
       send.endpoint_held = false;
     }
   }
-  // The bridge runs no application: its host reads the GATEWAY_SDK_RAM
-  // mailbox. Each stored payload goes up as a mesh message, which frees its
-  // pending slot; an undrained mailbox refused every submit after eight.
-  if (gateway_ != nullptr && state_ == SessionState::Active) {
+  // A scope-1 receipt names the gateway mailbox. The host can take over as
+  // its reader, but the entry stays there until its ReceiveLog storage ACK.
+#if ROUTELOOM_USB_GATEWAY_ENDPOINT
+  if (gateway_ != nullptr && state_ == SessionState::Active &&
+      registration_[0].active && now_ms < registration_[0].lease_deadline_ms) {
     MessageKey key{};
-    std::array<std::uint8_t, kGatewayPayloadMaxBytes> payload{};
-    std::size_t size = 0;
-    while (!data_q_.full() && gateway_->mailbox_take(key, payload, size)) {
-      emit_ingress(key, ByteView{payload.data(), size}, nullptr);
+    RequestDigest digest{};
+    endpoint::EncodedServicePayload submit{};
+    if (gateway_->mailbox_peek(key, digest, submit)) {
+      bool pending = false;
+      for (const PendingIngress& slot : pending_ingress_) {
+        if (slot.occupied && slot.key == key) {
+          pending = true;
+          break;
+        }
+      }
+      if (!pending) {
+        const ByteView encoded = submit.view();
+        (void)queue_ingress(
+            /*loopback=*/false, key, digest,
+            ByteView{encoded.data, endpoint::kServiceSubmitHeaderSize},
+            ByteView{encoded.data + endpoint::kServiceSubmitHeaderSize,
+                     encoded.size - endpoint::kServiceSubmitHeaderSize},
+            /*dispatch_seq=*/0, now_ms);
+      }
     }
   }
+#endif
 }
 
 }  // namespace routeloom::usb

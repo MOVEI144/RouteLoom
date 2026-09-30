@@ -39,6 +39,11 @@ pub(super) struct UsbHost {
     pub(super) join_downs_sent: u64,
     pub(super) other_host_ops: u64,
     pub(super) data_frames: u64,
+    pub(super) gateway_payloads: Vec<Vec<u8>>,
+    pub(super) gateway_registering: bool,
+    pub(super) gateway_register_request: Option<u64>,
+    pub(super) gateway_register_ms: u64,
+    pub(super) gateway_token: Option<[u8; 16]>,
     pub(super) diagnostics: u64,
     /// Device Error frames as (code, reason_id): sealed ones once opened,
     /// pre-auth ones (session 0) straight off the wire.
@@ -87,6 +92,11 @@ impl UsbHost {
             join_downs_sent: 0,
             other_host_ops: 0,
             data_frames: 0,
+            gateway_payloads: Vec::new(),
+            gateway_registering: false,
+            gateway_register_request: None,
+            gateway_register_ms: 0,
+            gateway_token: None,
             diagnostics: 0,
             errors: Vec::new(),
             deliveries: Vec::new(),
@@ -122,6 +132,10 @@ impl UsbHost {
             join_note: None,
         });
         request
+    }
+
+    pub(super) fn register_gateway(&mut self) {
+        self.gateway_registering = true;
     }
 
     pub(super) fn queue_join_down(
@@ -286,7 +300,47 @@ impl UsbHost {
             }
             match kind {
                 FrameKind::HostOps => {
-                    if self.watch == Some(request) {
+                    if self.gateway_register_request == Some(request) {
+                        self.gateway_register_request = None;
+                        let response =
+                            routeloom_protocol::host_ops::decode_host_register_response(&inner)
+                                .expect("gateway register response");
+                        assert_eq!(response.result, 0, "gateway registration");
+                        self.gateway_token = Some(response.token);
+                    } else if inner.get(1)
+                        == Some(&routeloom_protocol::host_ops::SUB_GATEWAY_INGRESS)
+                    {
+                        let ingress = routeloom_protocol::host_ops::decode_gateway_ingress(&inner)
+                            .expect("gateway ingress");
+                        let mut canonical = ingress.submit_prefix.to_vec();
+                        canonical.extend_from_slice(&ingress.payload);
+                        assert_eq!(crate::canonical::sha256(&canonical), ingress.request_digest);
+                        assert_eq!(ingress.submit_prefix[2], 1, "SDK_RAM scope");
+                        let token = self
+                            .gateway_token
+                            .expect("gateway registration before ingress");
+                        self.gateway_payloads.push(ingress.payload);
+                        let body = routeloom_protocol::host_ops::encode_gateway_ingress_ack(
+                            &routeloom_protocol::host_ops::GatewayIngressAck {
+                                token,
+                                ref_origin: ingress.ref_origin,
+                                ref_session: ingress.ref_session,
+                                ref_sequence: ingress.ref_sequence,
+                                request_digest: ingress.request_digest,
+                                outcome: 0,
+                            },
+                        );
+                        self.pending.push(PendingFrame {
+                            frame: Frame {
+                                kind: FrameKind::HostOps,
+                                flags: 0,
+                                session: 0,
+                                request,
+                                body,
+                            },
+                            join_note: None,
+                        });
+                    } else if self.watch == Some(request) {
                         self.watch = None;
                         self.watched = Some(inner.to_vec());
                     } else if crate::site::channel_plan::channel_plan_sub(&inner).is_some() {
@@ -311,6 +365,26 @@ impl UsbHost {
                 FrameKind::Diagnostic => self.diagnostics += 1,
                 _ => {}
             }
+        }
+        if self.gateway_registering
+            && self.session.phase == SessionPhase::Active
+            && self.gateway_register_request.is_none()
+            && (self.gateway_token.is_none()
+                || now.saturating_sub(self.gateway_register_ms) >= 10_000)
+        {
+            let network = self.hello_network.expect("gateway network");
+            let request = self.queue_data(
+                FrameKind::HostOps,
+                routeloom_protocol::host_ops::encode_host_register(
+                    &routeloom_protocol::host_ops::HostRegisterRequest {
+                        network,
+                        host_boot: 0x99,
+                        lease_ms: 15_000,
+                    },
+                ),
+            );
+            self.gateway_register_request = Some(request);
+            self.gateway_register_ms = now;
         }
         // Authority downs ride sealed HostOps frames; credit-short sends
         // stay queued for the next step (the device grants on consume).

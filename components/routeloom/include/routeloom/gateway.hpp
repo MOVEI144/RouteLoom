@@ -281,6 +281,12 @@ class GatewayDelivery final : public GatewayServiceSink {
   bool mailbox_take(MessageKey& key,
                     std::array<std::uint8_t, kGatewayPayloadMaxBytes>& payload,
                     std::size_t& payload_size) noexcept;
+  // A bridge may hand a scope-1 entry to its host. The entry stays readable
+  // until storage ACK or the mailbox hold expires; a lost USB session can
+  // resend it within that hold.
+  bool mailbox_peek(MessageKey& key, RequestDigest& digest,
+                    endpoint::EncodedServicePayload& submit) const noexcept;
+  bool mailbox_ack(const MessageKey& key, bool stored) noexcept;
 
   // Host ingress ACK from the bridge (P3): `stored` = ReceiveLog evidence
   // (outcome OK). On it the pending record completes and its Receipt is
