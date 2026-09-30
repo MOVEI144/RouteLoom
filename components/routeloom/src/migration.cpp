@@ -849,16 +849,11 @@ Status MigrationParticipant::prepare(const ByteView plan_blob,
       ++stats_.plans_rejected;
       return reject(StatusCode::AuthorizationFailed, "PLAN_SCOPE_MISMATCH");
     }
-    // The hash already binds this blob to the committed plan — identity
-    // and epoch/base checks are settled. Structure and now-relative
-    // feasibility still apply: the node must refuse a blob it could never
-    // schedule, staying in Recovering for the recovery machinery.
+    // The hash already binds this blob to the verified commit — identity
+    // and epoch/base checks are settled. Like a signed snapshot, the
+    // catch-up of a commit whose switch already passed checks structure
+    // only: feasibility belonged to the pre-commit PREPARE round.
     status = check_plan_structure(plan);
-    if (!status) {
-      ++stats_.plans_rejected;
-      return status;
-    }
-    status = validate_plan_feasibility(plan, measurements, now_ms);
     if (!status) {
       ++stats_.plans_rejected;
       return status;

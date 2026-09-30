@@ -544,6 +544,37 @@ void test_commit_without_blob_refetches() {
   CHECK(rig.port.committed == 6);
 }
 
+// A member that missed a switch learns the commit late and refetches the
+// blob after the switch time: the verified commit is caught up (switch
+// now), never refused for a commit lead it could no longer meet.
+void test_refetched_blob_catches_up_after_switch() {
+  Rig rig{};
+  rig.ops.visit_hard_cap_ms = 1000;
+  ChannelOperationRunner runner(rig.port, rig.ops);
+  MigrationAuthority verify = rig.verifier_only();
+  MigrationParticipant participant(rig.participant_config, rig.storage,
+                                   verify, runner, &rig.hooks);
+  CHECK_OK(participant.note_clock(ClockMapping{0, 10}, kNow));
+  MigrationPlan plan = rig.plan(1, 1, 6, 7500, 1);
+  std::array<std::uint8_t, 512> buf{};
+  std::size_t size = 0;
+  const ByteView blob = rig.encode(plan, buf, size);
+  const Digest256 hash = plan_digest(blob);
+  const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
+  constexpr MonotonicMs kLate = 20000;
+  CHECK_OK(participant.note_commit_evidence(
+      op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kLate));
+  CHECK(participant.phase() == ParticipantPhase::Recovering);
+  CHECK_OK(participant.prepare(blob, rig.measurements(), kLate + 100));
+  CHECK(participant.phase() == ParticipantPhase::Committed);
+  participant.poll(kLate + 200);
+  runner.poll(kLate + 200);
+  participant.poll(kLate + 300);
+  CHECK(participant.phase() == ParticipantPhase::Verifying);
+  CHECK(rig.port.committed == 6);
+}
+
 void test_verified_plan_only() {
   Rig rig{};
   rig.ops.visit_hard_cap_ms = 1000;
@@ -1755,6 +1786,7 @@ void test_armed_commit_lead_and_unarmed_skip() {
 int main() {
   test_blob_alone_never_switches();
   test_commit_without_blob_refetches();
+  test_refetched_blob_catches_up_after_switch();
   test_verified_plan_only();
   test_required_set_gating();
   test_assess_survey_bookkeeping();
