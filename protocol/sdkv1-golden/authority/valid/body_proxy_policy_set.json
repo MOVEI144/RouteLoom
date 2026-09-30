@@ -1,0 +1,14 @@
+{
+  "codec": "authority_body",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "generation": 9,
+  "name": "body_proxy_policy_set",
+  "op": 1,
+  "plaintext_hex": "0101000000000009010203040506070801010000000000030000",
+  "policy_generation": 3,
+  "request_id": 72623859790382856,
+  "tlv_len": 0,
+  "type": 9,
+  "zero_touch_open": 0
+}

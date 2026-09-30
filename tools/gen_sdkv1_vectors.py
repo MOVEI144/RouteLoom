@@ -279,13 +279,18 @@ REVOCATION_DOMAIN = b"RouteLoom/revocation-set/v1\x00"
 POP_DOMAIN = b"RouteLoom/device-key-pop/v1\x00"
 
 
-def rrs1_payload(r: dict, count_override=None, version=1, flags=0) -> bytes:
+def rrs1_payload(r: dict, count_override=None, version=2, flags=0) -> bytes:
+    # Entries are (node, min_generation, reason[, readmit_gk_epoch]); version 2
+    # carries readmit_gk_epoch u32; version 1 had three zero bytes.
     entries = r["entries"]
     count = len(entries) if count_override is None else count_override
     out = (u8(version) + u8(flags) + u16(count) + u64(r["site_id"]) + u64(r["network"]) +
            u32(r["rs_epoch"]) + u32(r["site_epoch_floor"]))
-    for node, generation, reason in entries:
-        out += u64(node) + u32(generation) + u8(reason) + b"\x00" * 3
+    for entry in entries:
+        node, generation, reason = entry[:3]
+        readmit = entry[3] if len(entry) > 3 else 0
+        out += u64(node) + u32(generation) + u8(reason)
+        out += u32(readmit) if version == 2 else b"\x00" * 3
     return out
 
 
@@ -323,8 +328,8 @@ def rlp2(r: dict) -> bytes:
     return data + u32(crc32(data))
 
 
-def rlv1(r: dict, seal: int, commit_seq: int) -> bytes:
-    data = (b"RLV1" + u16(1) + u16(108) + u32(1) + u32(seal) + u32(commit_seq) +
+def rlv1(r: dict, seal: int, commit_seq: int, schema: int = 2) -> bytes:
+    data = (b"RLV1" + u16(1) + u16(108) + u32(schema) + u32(seal) + u32(commit_seq) +
             u64(r["local_node"]) + u64(r["site_id"]) + u64(r["network"]) +
             u32(r["removed_generation"]) + u32(r["rs_epoch_floor"]) +
             u32(r["site_epoch_floor"]) + u8(r["state"]) + u8(r["cause"]) + u16(0) +
@@ -593,11 +598,11 @@ def main() -> None:
 
     # ---- RRS1 --------------------------------------------------------------
     rrs1 = dict(site_id=site_id, network=network, rs_epoch=14, site_epoch_floor=2,
-                entries=[(0x00A1000000000100, 2, 1), (0x00A1000000000777, 4, 2),
+                entries=[(0x00A1000000000100, 2, 1), (0x00A1000000000777, 4, 2, 0x0123AB),
                          (0x00A10000000009AB, 1, 4)])
 
-    def rrs1_doc(r: dict, object_seq: int, sak_secret: int = sak) -> dict:
-        payload = rrs1_payload(r)
+    def rrs1_doc(r: dict, object_seq: int, sak_secret: int = sak, version: int = 2) -> dict:
+        payload = rrs1_payload(r, version=version)
         aad = rrs1_aad(r["network"])
         structure = sig_structure(payload, aad)
         signature = sign(sak_secret, structure)
@@ -609,20 +614,29 @@ def main() -> None:
                    object_hex=obj.hex(), commit_seq=object_seq, record_hex=record.hex(),
                    signer_secret_hex=sak_secret.to_bytes(32, "big").hex(),
                    signer_pubkey_hex=pubkey(sak_secret).hex())
-        for i, (node_id, generation, reason) in enumerate(r["entries"]):
-            doc[f"entry{i:02d}_node"] = node_id
-            doc[f"entry{i:02d}_min_generation"] = generation
-            doc[f"entry{i:02d}_reason"] = reason
+        for i, entry in enumerate(r["entries"]):
+            doc[f"entry{i:02d}_node"] = entry[0]
+            doc[f"entry{i:02d}_min_generation"] = entry[1]
+            doc[f"entry{i:02d}_reason"] = entry[2]
+            doc[f"entry{i:02d}_readmit_gk_epoch"] = entry[3] if len(entry) > 3 else 0
+        if version != 2:
+            doc["version"] = version
         return doc
 
     emit("valid", "rrs1_three_entries", dict(rrs1_doc(rrs1, 5), codec="rrs1", expect="ok"))
+    # The previous object version still reads, every entry with readmit 0.
+    v1 = dict(rrs1, entries=[e[:3] for e in rrs1["entries"]])
+    emit("valid", "rrs1_version_1", dict(rrs1_doc(v1, 5, version=1), codec="rrs1", expect="ok"))
+    readmit_max = dict(rrs1, rs_epoch=16,
+                       entries=[(0x00A1000000000100, 3, 1, 0xFFFFFFFF)])
+    emit("valid", "rrs1_readmit_max", dict(rrs1_doc(readmit_max, 6), codec="rrs1", expect="ok"))
     cutover = dict(rrs1, rs_epoch=15, site_epoch_floor=site_epoch, entries=[])
     emit("valid", "rrs1_cutover_empty", dict(rrs1_doc(cutover, 6), codec="rrs1", expect="ok"))
     full = dict(rrs1, rs_epoch=0xFFFFFFFF,
                 entries=[(0x00A1000000010000 + i * 3, i + 1, (i % 4) + 1) for i in range(32)])
     full_doc = rrs1_doc(full, 0xFFFFFFF0)
-    assert len(bytes.fromhex(full_doc["object_hex"])) == 616
-    assert len(bytes.fromhex(full_doc["record_hex"])) == 640
+    assert len(bytes.fromhex(full_doc["object_hex"])) == 648
+    assert len(bytes.fromhex(full_doc["record_hex"])) == 672
     emit("valid", "rrs1_full_32", dict(full_doc, codec="rrs1", expect="ok"))
     tomb = sealed(b"RRS1", b"", SEAL["RRS1"], seq=7)
     emit("valid", "rrs1_record_cleared", dict(codec="rrs1_record", expect="ok", commit_seq=7,
@@ -648,8 +662,12 @@ def main() -> None:
         "count disagrees with the payload length", **verify_ctx)
     bad("rrs1_flags_set", "rrs1", rrs1_signed(rrs1_payload(rrs1, flags=1)),
         "flags are reserved zero", **verify_ctx)
-    bad("rrs1_version_2", "rrs1", rrs1_signed(rrs1_payload(rrs1, version=2)),
+    bad("rrs1_version_3", "rrs1", rrs1_signed(rrs1_payload(rrs1, version=3)),
         "unknown payload version", **verify_ctx)
+    v1_readmit = bytearray(rrs1_payload(rrs1, version=1))
+    v1_readmit[28 + 8 + 4 + 1] = 1
+    bad("rrs1_v1_reserved_nonzero", "rrs1", rrs1_signed(bytes(v1_readmit)),
+        "version 1 entries carry three zero bytes", **verify_ctx)
     bad("rrs1_floor_above_network_epoch", "rrs1",
         rrs1_signed(rrs1_payload(dict(rrs1, site_epoch_floor=site_epoch + 1))),
         "site_epoch_floor may not exceed network>>32", **verify_ctx)
@@ -852,7 +870,7 @@ def main() -> None:
                          u64(route_parent) + u32(7) + u32(4242) + u32(41) + u32(30000))
     routestate_unavailable = (renew_head(6) + u8(1) + u8(1) + u16(0) + u64(0) + u64(0) +
                               u32(0) + u32(0) + u32(41) + u32(0))
-    assert len(prepare) <= 700 and len(commit) <= 799
+    assert len(prepare) <= 700 and len(commit) <= 28 + 155 + 648
     assert len(prepared_receipt) == len(applied_receipt) == len(commit_stored_receipt) == 76
     assert len(routestate_query) == len(routestate_report) == 60
     assert len(routestate_unavailable) == 60
@@ -961,9 +979,17 @@ def main() -> None:
                    rls_commit_seq=41, boot_witness=9000, holdoff_ms=600000)
     emit("valid", "rlv1_blocked", dict(removal, codec="rlv1", expect="ok", commit_seq=7,
                                        record_hex=rlv1(removal, RLV1_SEAL, 7).hex()))
-    cleaned = dict(removal, state=2, cause=2)
+    cleaned = dict(removal, state=2, cause=2, holdoff_ms=60000)
     emit("valid", "rlv1_cleaned", dict(cleaned, codec="rlv1", expect="ok", commit_seq=8,
                                        record_hex=rlv1(cleaned, RLV1_SEAL, 8).hex()))
+    longest = dict(removal, holdoff_ms=3600000)
+    emit("valid", "rlv1_holdoff_1h", dict(longest, codec="rlv1", expect="ok", commit_seq=9,
+                                          record_hex=rlv1(longest, RLV1_SEAL, 9).hex()))
+    # The previous schema still reads (it always carried 600000 ms); the
+    # device rewrites it as schema 2 on its next commit.
+    emit("valid", "rlv1_schema_1", dict(removal, codec="rlv1", expect="ok", commit_seq=7,
+                                        schema=1,
+                                        record_hex=rlv1(removal, RLV1_SEAL, 7, schema=1).hex()))
     good_rlv = rlv1(removal, RLV1_SEAL, 7)
     bad("rlv1_bad_crc", "rlv1", good_rlv[:-1] + bytes([good_rlv[-1] ^ 1]), "CRC mismatch")
     bad("rlv1_pending_seal", "rlv1", rlv1(removal, 0, 7), "a readable record is committed")
@@ -976,8 +1002,15 @@ def main() -> None:
     bad("rlv1_zero_evidence", "rlv1",
         rlv1(dict(removal, evidence_digest_hex="00" * 32), RLV1_SEAL, 7),
         "evidence is the digest of a verified object")
-    bad("rlv1_holdoff_changed", "rlv1", rlv1(dict(removal, holdoff_ms=599999), RLV1_SEAL, 7),
-        "holdoff is the fixed 600000 ms")
+    bad("rlv1_holdoff_below_range", "rlv1", rlv1(dict(removal, holdoff_ms=59999), RLV1_SEAL, 7),
+        "holdoff is 60000..3600000 ms")
+    bad("rlv1_holdoff_above_range", "rlv1",
+        rlv1(dict(removal, holdoff_ms=3600001), RLV1_SEAL, 7), "holdoff is 60000..3600000 ms")
+    bad("rlv1_schema_1_changed_holdoff", "rlv1",
+        rlv1(dict(removal, holdoff_ms=60000), RLV1_SEAL, 7, schema=1),
+        "schema 1 requires its fixed 600000 ms holdoff")
+    bad("rlv1_schema_3", "rlv1", rlv1(removal, RLV1_SEAL, 7, schema=3),
+        "unknown schema is Unsupported")
     bad("rlv1_reserved_nonzero", "rlv1",
         recrc(good_rlv[:58] + b"\x00\x01" + good_rlv[60:]), "reserved bytes must be zero")
     bad("rlv1_truncated", "rlv1", good_rlv[:107], "records are exactly 108 bytes")

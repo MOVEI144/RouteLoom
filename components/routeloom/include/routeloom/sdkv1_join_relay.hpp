@@ -319,6 +319,13 @@ class JoinProxy {
   // All mutators refuse re-entry from a port callback with Busy and change
   // nothing; a regressed clock fails new work with TimeUncertain.
   Status set_policy(bool zero_touch_open) noexcept;
+  // The site's distributed intake policy (ProxyPolicySet, #176), default
+  // open. Closed, the proxy OFFERs only to a DISCOVER whose preferred site
+  // hint is this site (a device holding this site's membership: rejoin,
+  // removal notice, cutover rescue); unassigned devices get no OFFER. The
+  // hint is unauthenticated: a forged one only reaches the authority,
+  // which still decides.
+  Status set_zero_touch_open(bool open) noexcept;
   Status set_authority(bool reachable, std::uint8_t hops, MonotonicMs now_ms) noexcept;
   Status set_membership(MembershipState state, MonotonicMs now_ms) noexcept;
 
@@ -343,6 +350,7 @@ class JoinProxy {
   struct PendingOffer {
     MacAddress mac{};
     JoinNonce nonce{};
+    bool retained{false};  // the DISCOVER preferred this site
     MonotonicMs due_ms{0};
   };
 
@@ -433,6 +441,7 @@ class JoinProxy {
   JoinCookieSealer& cookie_;
   EntropySource& entropy_;
   bool open_{false};
+  bool zero_touch_open_{true};
   bool reachable_{false};
   std::uint8_t hops_{kZtHopsUnknown};
   MembershipState membership_{MembershipState::Unprovisioned};

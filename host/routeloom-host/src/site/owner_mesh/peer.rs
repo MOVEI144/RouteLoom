@@ -335,12 +335,12 @@ impl LegacyPeer {
 
     pub(super) fn dump_extended(&mut self) -> Vec<u8> {
         self.send(b"X");
-        let mut image = Vec::with_capacity(4498);
+        let mut image = Vec::with_capacity(4562);
         for i in 0..4 {
             let payload = self.recv();
             assert_eq!(payload[0], b'X', "extended slot reply");
             let expect_store = if i < 2 { 2 } else { 3 };
-            let expect_len = if i < 2 { 640 } else { 1609 };
+            let expect_len = if i < 2 { 672 } else { 1609 };
             assert_eq!(payload[1], expect_store, "extended store id");
             assert_eq!(payload[2], (i % 2) as u8, "extended slot id");
             assert_eq!(payload.len(), 3 + expect_len, "extended slot image");
@@ -462,6 +462,13 @@ pub(super) struct MeshSnap {
     pub(super) rx_queue_max: u32,
     pub(super) expiry_slots_scanned: u64,
     pub(super) hop_accept_expired: u64,
+    /// Extension frames this terminal refused as UNSUPPORTED (P04).
+    pub(super) ext_unsupported: u32,
+    pub(super) group_delivered: u32,
+    /// Group frames refused (retired GK, revoked sender or relay).
+    pub(super) group_rejected: u32,
+    /// Armed `W` record-key faults that fired (F01/F02).
+    pub(super) key_fault_hits: u32,
     /// The Z send (explicit gateway): endpoint state, send state and
     /// Service reason; 0 before any.
     pub(super) gw_endpoint: u8,
@@ -629,6 +636,10 @@ pub(super) fn parse_mesh_snap(payload: &[u8]) -> MeshSnap {
     snap.rx_queue_max = get_u32(payload, &mut pos);
     snap.expiry_slots_scanned = get_u64(payload, &mut pos);
     snap.hop_accept_expired = get_u64(payload, &mut pos);
+    snap.ext_unsupported = get_u32(payload, &mut pos);
+    snap.group_delivered = get_u32(payload, &mut pos);
+    snap.group_rejected = get_u32(payload, &mut pos);
+    snap.key_fault_hits = get_u32(payload, &mut pos);
     snap.gw_endpoint = payload[pos];
     snap.gw_send = payload[pos + 1];
     snap.gw_reason = payload[pos + 2];
@@ -986,6 +997,45 @@ impl MeshPeer {
         assert!((1..=128).contains(&payload.len()), "app payload bound");
         let mut command = vec![b'S'];
         command.extend_from_slice(&dst.to_le_bytes());
+        command.extend_from_slice(payload);
+        self.send(&command);
+    }
+
+    /// Seals one end-protected frame of `frame_type` with this peer's live
+    /// sessions, addressed via `next_hop` (P04). Nothing is transmitted:
+    /// the caller injects the returned bytes at the next hop.
+    pub(super) fn craft_frame(
+        &mut self,
+        next_hop: u64,
+        dst: u64,
+        frame_type: u8,
+        minor: u8,
+        traffic: u8,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut command = vec![b'O'];
+        command.extend_from_slice(&next_hop.to_le_bytes());
+        command.extend_from_slice(&dst.to_le_bytes());
+        command.extend_from_slice(&[frame_type, minor, traffic]);
+        command.extend_from_slice(payload);
+        self.send(&command);
+        let reply = self.recv().expect("craft reply");
+        assert_eq!(reply[0], b'o');
+        reply[1..].to_vec()
+    }
+
+    /// Arms one fault at the next write of NVS record `key` (F01/F02):
+    /// 0 fails it once, 1 cuts power before it lands, 2 cuts power after
+    /// its commit. A cut respawns the peer from the saved image.
+    pub(super) fn arm_key_fault(&mut self, mode: u8, key: &str) {
+        let mut command = vec![b'W', mode];
+        command.extend_from_slice(key.as_bytes());
+        self.send(&command);
+    }
+
+    pub(super) fn group_send(&mut self, group: u16, payload: &[u8]) {
+        let mut command = vec![b'M'];
+        command.extend_from_slice(&group.to_le_bytes());
         command.extend_from_slice(payload);
         self.send(&command);
     }

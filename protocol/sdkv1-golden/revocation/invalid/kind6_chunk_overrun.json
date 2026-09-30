@@ -1,6 +1,6 @@
 {
   "codec": "rrs_kind6_chunk",
-  "encoded_hex": "010196dc77dd4ac7417cdf9c0b7c9f37b82519fabc4f29e131383358e05f3dae7bdf07f6000b0000000000000000000000",
+  "encoded_hex": "0101fd6b8a1f16b6223bb136f66ef9104d3d377420d218ec3629f2dd539fb4419f8707f6000b0000000000000000000000",
   "expect": "error",
   "format": "routeloom-sdkv1-revocation-golden-v1",
   "name": "kind6_chunk_overrun",

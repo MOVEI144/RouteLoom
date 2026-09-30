@@ -30,6 +30,19 @@ int main() {
       parsed.phase != GrantRenewPhase::RouteState) return 5;
   bytes[1] = 7;
   if (grant_renew_head_decode(ByteView{bytes.data(), bytes.size()}, parsed)) return 6;
+  // A full RRS1 v2 object must fit in a cutover COMMIT.
+  GrantRenewHead commit_head{GrantRenewPhase::Commit, 9, 1, 0x10000002aULL};
+  std::array<std::uint8_t, kGrantRenewHeadSize> commit_header{};
+  if (!grant_renew_head_encode(commit_head, commit_header)) return 26;
+  std::array<std::uint8_t, 28 + kCutoverObjectSize + kRevocationObjectMax> full_commit{};
+  std::memcpy(full_commit.data(), commit_header.data(), commit_header.size());
+  full_commit[24] = static_cast<std::uint8_t>(kCutoverObjectSize >> 8U);
+  full_commit[25] = static_cast<std::uint8_t>(kCutoverObjectSize);
+  full_commit[26] = static_cast<std::uint8_t>(kRevocationObjectMax >> 8U);
+  full_commit[27] = static_cast<std::uint8_t>(kRevocationObjectMax);
+  GrantCommit commit_parsed{};
+  if (!grant_commit_decode(ByteView{full_commit.data(), full_commit.size()}, commit_parsed) ||
+      commit_parsed.revocations.size != kRevocationObjectMax) return 27;
   // COMMIT_STORED is a receipt phase (76 B, same layout as APPLIED).
   GrantReceipt stored{};
   stored.head = {GrantRenewPhase::CommitStored, 9, 1, 0x10000002aULL};

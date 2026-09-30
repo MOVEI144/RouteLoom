@@ -447,7 +447,7 @@ impl AuthorityEnvelopeHeader {
     /// The 12-byte header, which is also the AEAD AAD. `None` for invalid fields.
     pub fn encode(&self) -> Option<[u8; AUTHORITY_ENVELOPE_HEADER]> {
         if self.version != AUTHORITY_ENVELOPE_VERSION
-            || !(1..=8).contains(&self.env_type)
+            || !(1..=9).contains(&self.env_type)
             || self.ctx_id == 0
             || self.counter > MAX_AEAD_COUNTER
         {
@@ -472,7 +472,7 @@ impl AuthorityEnvelopeHeader {
         if envelope[0] != AUTHORITY_ENVELOPE_VERSION {
             return Err(DecodeError::BadVersion);
         }
-        if !(1..=8).contains(&envelope[1]) {
+        if !(1..=9).contains(&envelope[1]) {
             return Err(DecodeError::BadType);
         }
         let ctx_id = u32::from_be_bytes(envelope[2..6].try_into().expect("4 bytes"));

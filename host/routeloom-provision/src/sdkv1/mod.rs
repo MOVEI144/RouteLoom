@@ -117,11 +117,16 @@ impl<'a> Reader<'a> {
 /// Sealed head: magic | format | used_len | schema | seal. `used_len` is
 /// patched by [`finish_record`].
 pub(crate) fn begin_record(magic: u32, seal: u32) -> Vec<u8> {
+    begin_record_schema(magic, seal, RECORD_SCHEMA)
+}
+
+/// [`begin_record`] for a record whose layout moved to a newer schema.
+pub(crate) fn begin_record_schema(magic: u32, seal: u32, schema: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(1024);
     out.extend_from_slice(&magic.to_be_bytes());
     out.extend_from_slice(&RECORD_FORMAT.to_be_bytes());
     out.extend_from_slice(&0_u16.to_be_bytes());
-    out.extend_from_slice(&RECORD_SCHEMA.to_be_bytes());
+    out.extend_from_slice(&schema.to_be_bytes());
     out.extend_from_slice(&seal.to_be_bytes());
     out
 }
@@ -146,6 +151,25 @@ pub(crate) fn read_record(
     min_len: usize,
     max_len: usize,
 ) -> Result<Reader<'_>> {
+    read_record_schema(
+        record,
+        magic,
+        seal_committed,
+        min_len,
+        max_len,
+        RECORD_SCHEMA,
+    )
+}
+
+/// [`read_record`] accepting schemas `RECORD_SCHEMA..=schema_max`.
+pub(crate) fn read_record_schema(
+    record: &[u8],
+    magic: u32,
+    seal_committed: u32,
+    min_len: usize,
+    max_len: usize,
+    schema_max: u32,
+) -> Result<Reader<'_>> {
     let mut reader = Reader::new(record);
     let got_magic = reader.u32()?;
     let format = reader.u16()?;
@@ -167,7 +191,7 @@ pub(crate) fn read_record(
     if crc32_iso_hdlc(&record[..used_len - 4]) != crc {
         return err(Code::IntegrityError, "record crc");
     }
-    if schema != RECORD_SCHEMA {
+    if !(RECORD_SCHEMA..=schema_max).contains(&schema) {
         return err(Code::Unsupported, "record schema");
     }
     Ok(Reader::new(&record[..used_len - 4]).skip(SEALED_HEAD_SIZE))

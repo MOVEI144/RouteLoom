@@ -1005,7 +1005,8 @@ Status AuthorityClient::do_seal(const keys::AuthorityEnvelopeType type, const By
 
 Status AuthorityClient::on_typed(const AuthorityTypedRequest& typed,
                                  const MonotonicMs now) noexcept {
-  if (typed.type < 5 || typed.type > 7 || typed.body.data == nullptr ||
+  // Types 5..7 are the P6 reports, 9 the ProxyPolicySet ACK (#176).
+  if (((typed.type < 5 || typed.type > 7) && typed.type != 9) || typed.body.data == nullptr ||
       typed.body.size == 0 || typed.body.size > 1024) {
     return Status::error(StatusCode::InvalidArgument, "AUTHORITY_TYPED_BODY");
   }
@@ -1353,7 +1354,7 @@ void AuthorityClient::on_envelope_ready(const AuthorityRxCarrier& rx,
       fail();
       return;
     default: {
-      // Types 5..8: AEAD-verified plaintext for the P6 sink. The head must
+      // Types 5..9: AEAD-verified plaintext for the P6 / policy sink. The head must
       // still be well-formed; the tail stays opaque to PR1. The observer
       // borrows `body` during the call, so notify first and wipe after.
       AuthorityBodyHead head{};

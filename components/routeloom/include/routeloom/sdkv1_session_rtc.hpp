@@ -134,7 +134,7 @@ class RtcWriteAheadProvider final : public SecurityProvider {
                           std::uint32_t& epoch) const noexcept override;
   Status tx_group_link_epochs(std::uint32_t& boot, std::uint32_t& g) noexcept override;
   bool accepts_group_epoch(std::uint32_t g) const noexcept override;
-  bool revoked_group_sender(NodeId sender) const noexcept override;
+  bool revoked_group_sender(NodeId sender, std::uint32_t gk_epoch) const noexcept override;
   void note_rx_unknown_context(const SecurityContext& context) noexcept override {
     inner_.note_rx_unknown_context(context);
   }

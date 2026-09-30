@@ -1,6 +1,7 @@
 //! GrantRenew type 7 and SAK-signed CutoverCommit wire. No Host production
 //! cutover API is enabled here: a signer can build test-only device fixtures.
 use routeloom_provision::sdkv1::cert::CERT_MAX;
+use routeloom_provision::sdkv1::revocation::REVOCATION_OBJECT_MAX;
 use routeloom_provision::sdkv1::{
     cose_es256_assemble, cose_es256_parse, cose_es256_sign, cose_es256_verify,
 };
@@ -14,7 +15,7 @@ pub const HEAD_SIZE: usize = 24;
 pub const RECEIPT_SIZE: usize = 76;
 pub const ROUTE_STATE_SIZE: usize = 60;
 pub const PREPARE_MAX: usize = 700;
-pub const COMMIT_MAX: usize = 799;
+pub const COMMIT_MAX: usize = 28 + COMMIT_OBJECT_SIZE + REVOCATION_OBJECT_MAX;
 
 fn invalid(message: &'static str) -> Error {
     Error::new(Code::ProtocolError, message)
@@ -128,7 +129,7 @@ impl Commit<'_> {
         if self.head.phase != Phase::Commit
             || self.proof.len() != COMMIT_OBJECT_SIZE
             || self.rrs.is_empty()
-            || self.rrs.len() > 616
+            || self.rrs.len() > REVOCATION_OBJECT_MAX
         {
             return Err(invalid("renew commit"));
         }
