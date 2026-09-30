@@ -897,7 +897,10 @@ void Device::update_connectivity(const MonotonicMs now_ms) noexcept {
                        stores_->site().has_site());
   if (!member) {
     contact_valid_ = false;
-  } else if (role_ == profile::Role::Gateway) {
+  } else if (security_ == DeviceSecurity::DevRam
+                 ? role_ == profile::Role::Gateway
+                 : stores_->site().has_site() &&
+                       (stores_->site().site().role & sdkv1::kMemberRoleGateway) != 0) {
     state = Connectivity::Reachable;
     reason = ROUTELOOM_REASON_SELF_GATEWAY;
   } else {

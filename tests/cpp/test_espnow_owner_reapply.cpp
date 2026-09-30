@@ -12,6 +12,7 @@
 #include "routeloom/psa_session_aead.hpp"
 
 #include "routeloom/device.hpp"
+#include "routeloom/nvs_legacy_purge.hpp"
 #include "idf_stubs.hpp"
 #include "nvs.h"
 #include "test_sdkv1.hpp"
@@ -70,6 +71,22 @@ Status EspOwnerEntropy::begin() noexcept {
   state_ = State::Failed;
   return Status::error(StatusCode::InvalidState, "unused entropy");
 }
+EspMaintenanceEntropy::~EspMaintenanceEntropy() noexcept = default;
+Status EspMaintenanceEntropy::fill(MutableByteView) noexcept {
+  return Status::error(StatusCode::InvalidState, "unused maintenance entropy");
+}
+Status NvsLegacyPurgePort::migration(bool&) noexcept {
+  return Status::error(StatusCode::InvalidState, "unused legacy purge");
+}
+Status NvsLegacyPurgePort::commit_migration() noexcept {
+  return Status::error(StatusCode::InvalidState, "unused legacy purge");
+}
+Status NvsLegacyPurgePort::next(std::size_t&, sdkv1::LegacyKey&, bool&) noexcept {
+  return Status::error(StatusCode::InvalidState, "unused legacy purge");
+}
+Status NvsLegacyPurgePort::erase(const sdkv1::LegacyKey&) noexcept {
+  return Status::error(StatusCode::InvalidState, "unused legacy purge");
+}
 void EspNowDiscoveryObserver::on_discovery_event(const char* reason, NodeId peer) noexcept {
   (void)tag_;
   if (runtime_ != nullptr && reason != nullptr) runtime_->note_diagnostic(reason, peer);
@@ -94,6 +111,15 @@ namespace routeloom {
 struct DeviceTestAccess {
   static void attach_runtime(Device& device, espnow::EspNowRuntime& runtime) noexcept {
     device.runtime_ = &runtime;
+  }
+  static void member_gateway_image(Device& device, espnow::Sdkv1Stores& stores) noexcept {
+    device.stores_ = &stores;
+    device.security_ = DeviceSecurity::Member;
+    device.role_ = profile::Role::Gateway;
+    device.stage_ = MembershipStage::Member;
+  }
+  static void connectivity(Device& device, MonotonicMs now) noexcept {
+    device.update_connectivity(now);
   }
 };
 }  // namespace routeloom
@@ -316,6 +342,36 @@ void test_same_boot_reapply(bool change_site_epoch) {
 // gateway list lands on route_gateways (scoped) or group_roots (flat
 // profile, Config::flat_group_routing) — the routing policy stays
 // separate from the root set.
+void test_connectivity_uses_granted_gateway_role() {
+  idf_stub::reset();
+  Stores stores{};
+  CHECK(stores.init());
+  EspNowSecurityOwner owner{};
+  EspNowSecurityOwnerTestAccess::install_coordinator(owner, stores.deps(owner));
+  routeloom_test::CapturingObserver observer{};
+  EspNowRuntime runtime(radio_config(), owner.session_provider(), observer);
+  CHECK(runtime.initialize().ok());
+  Sdkv1Stores device_stores{kResumeNodeSlots};
+  // The Device reads the real SiteStore; use the fixture's storage port.
+  device_stores.site().~SiteStore();
+  new (&device_stores.site()) SiteStore(stores.site_storage);
+  CHECK(device_stores.site().initialize().ok());
+  Device device;
+  DeviceTestAccess::attach_runtime(device, runtime);
+  DeviceTestAccess::member_gateway_image(device, device_stores);
+  DeviceTestAccess::connectivity(device, 1);
+  CHECK(device.connectivity().state == Connectivity::Unknown);
+  SiteRecord gateway = site_record();
+  gateway.role = static_cast<std::uint8_t>(kMemberRoleGateway);
+  CertClaims claims = membercert_claims(gateway.assignment_generation, gateway.network);
+  claims.role = kMemberRoleGateway;
+  gateway.member_cert = issue(claims, sak());
+  CHECK(device_stores.site().commit(gateway).ok());
+  DeviceTestAccess::connectivity(device, 2);
+  CHECK(device.connectivity().state == Connectivity::Reachable);
+  runtime.stop();
+}
+
 void test_member_root_mapping(bool flat) {
   idf_stub::reset();
   Stores stores{};
@@ -486,6 +542,7 @@ int main() {
   test_same_boot_reapply(true);
   test_member_root_mapping(false);
   test_member_root_mapping(true);
+  test_connectivity_uses_granted_gateway_role();
   test_member_adoption_restores_group_capability();
   test_device_post_bound();
   test_device_begin_clears_key_on_failure();
