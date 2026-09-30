@@ -215,6 +215,22 @@ class Sdkconfig(unittest.TestCase):
         self.assertTrue(check.sdkconfig_errors(
             self.DATA, cell, common + "CONFIG_ROUTELOOM_ROLE_RELAY=y\n"))
 
+    def test_channel_plan_is_member_only(self):
+        cell = {"overlay": [], "expect": []}
+        data = {"forbid_unless_named": {}}
+        member = "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y\nCONFIG_ROUTELOOM_MIGRATION=2\n"
+        self.assertEqual(check.sdkconfig_errors(data, cell, member), [])
+        for mode in ("1", "2"):
+            devram = f"CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y\nCONFIG_ROUTELOOM_MIGRATION={mode}\n"
+            self.assertTrue(check.sdkconfig_errors(data, cell, devram))
+        self.assertEqual(check.sdkconfig_errors(
+            data, cell, "CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y\nCONFIG_ROUTELOOM_MIGRATION=0\n"), [])
+
+    def test_device_cmake_refuses_devram_channel_plan(self):
+        text = (ROOT / "components/routeloom_device/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("CONFIG_ROUTELOOM_MIGRATION", text)
+        self.assertIn("NOT CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC", text)
+
 
 class HilMatrix(unittest.TestCase):
     def test_result_points_to_the_packaged_ram_report(self):

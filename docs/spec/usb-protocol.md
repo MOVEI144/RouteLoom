@@ -128,7 +128,7 @@ enableはsession scoped（再接続で解除、再enableが必要。profile id�
 
 ## 12. 手動channel plan（channel_plan_v1、EXPERIMENTAL）
 
-MemberEdhocのsiteで、hostのSite AuthorityがSAKで署名したchannel planをgatewayへ渡し、gatewayがsiteのplan authorityとして各memberへ配る（issue #5の手動移行）。HelloAck capability bit 13（`0x2000`、`kCapChannelPlanV1`／`CAP_CHANNEL_PLAN_V1`）を広告するbridgeだけがHostOps `0x68`／`0x69`を扱う（bit 2も必要）。bitはbridge ownerが`attach_channel_plan`でplan authorityを渡した時だけ立ち、未attachの`0x68`はUnsupportedのError frameで返る。形式は§7と同じ4B head＋payload（big-endian、長さ完全一致）。
+MemberEdhoc専用（DevRamはSite Authorityが無く固定channel、[channel移行](channel-migration.md)）。MemberEdhocのsiteで、hostのSite AuthorityがSAKで署名したchannel planをgatewayへ渡し、gatewayがsiteのplan authorityとして各memberへ配る（issue #5の手動移行）。HelloAck capability bit 13（`0x2000`、`kCapChannelPlanV1`／`CAP_CHANNEL_PLAN_V1`）を広告するbridgeだけがHostOps `0x68`／`0x69`を扱う（bit 2も必要）。bitはbridge ownerが`attach_channel_plan`でplan authorityを渡した時だけ立ち、未attachの`0x68`はUnsupportedのError frameで返る。形式は§7と同じ4B head＋payload（big-endian、長さ完全一致）。
 
 | sub | 向き | payload |
 |---|---|---|

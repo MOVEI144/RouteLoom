@@ -455,6 +455,9 @@ def sdkconfig_errors(data: dict, cell: dict, text: str) -> list[str]:
             and ("CONFIG_ROUTELOOM_RESOURCE_PROFILE_ENDPOINT=y" not in lines
                  or "CONFIG_ROUTELOOM_ROLE_ENDPOINT=y" not in lines)):
         errors.append("ESP32-C3 remote config needs endpoint resource profile and role")
+    if (any(f"CONFIG_ROUTELOOM_MIGRATION={v}" in lines for v in ("1", "2"))
+            and "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y" not in lines):
+        errors.append("channel plan (CONFIG_ROUTELOOM_MIGRATION) is MemberEdhoc only")
     return errors
 
 

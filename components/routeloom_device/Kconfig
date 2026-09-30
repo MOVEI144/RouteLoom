@@ -196,9 +196,12 @@ menu "RouteLoom device"
         int "Channel migration mode (0=Disabled, 1=Observe, 2=Manual)"
         range 0 2
         default 0
-        depends on ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
         help
-            EXPERIMENTAL: wires the migration participant and control-object
+            EXPERIMENTAL, MemberEdhoc only: a plan is signed by the adopted
+            site's authority key (SAK), which DevRam does not have. DevRam
+            keeps a fixed channel (SitePackage/Kconfig); a DevRam image with a
+            non-zero mode stops the build instead of dropping the setting.
+            Wires the migration participant and control-object
             transport onto the authenticated Wire lane. Observe runs the
             coordinator's evidence collection only; Manual additionally
             permits operator-driven plan issuance/surveys. Every member

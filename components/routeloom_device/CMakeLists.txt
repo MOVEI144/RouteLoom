@@ -19,3 +19,12 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION AND CONFIG_ROUTELOOM_CONFIG
     "CONFIG_ROUTELOOM_RESOURCE_PROFILE_ENDPOINT=y and CONFIG_ROUTELOOM_ROLE_ENDPOINT=y: "
     "the config journal does not fit the static RAM floor of the relay or gateway profiles")
 endif()
+# A channel plan is rooted in the site's SAK; DevRam has no Site Authority
+# and keeps its fixed channel. Refuse the selection instead of dropping it.
+if(NOT CMAKE_BUILD_EARLY_EXPANSION AND CONFIG_ROUTELOOM_MIGRATION
+   AND NOT CONFIG_ROUTELOOM_MIGRATION EQUAL 0
+   AND NOT CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC)
+  message(FATAL_ERROR
+    "CONFIG_ROUTELOOM_MIGRATION (channel plan) is MemberEdhoc only: "
+    "DevRam has no Site Authority to sign a plan and uses a fixed channel")
+endif()

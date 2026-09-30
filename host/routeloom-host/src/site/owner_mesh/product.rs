@@ -684,3 +684,47 @@ fn mesh_p03_observe_does_not_advertise_plan_authority() {
         "Observe cannot issue a manual plan"
     );
 }
+
+/// The channel plan is MemberEdhoc only: DevRam has no Site Authority to
+/// sign a plan, so a DevRam node asking for one refuses to boot instead of
+/// silently running without it.
+#[test]
+fn mesh_p03_devram_refuses_channel_plan() {
+    let Some(path) = mesh_peer_path() else {
+        return;
+    };
+    for mode in ["--channel-plan", "--channel-plan-observe"] {
+        let dir = std::env::temp_dir().join(format!(
+            "routeloom-owner-mesh-devram-plan-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = Command::new(&path)
+            .args(["--node", &format!("{NODE_A:#x}"), "--mac", &hex(&MAC_A)])
+            .args(["--role", &format!("{ROLE_ENDPOINT}")])
+            .args(["--t0", "1000", "--seed", "7", "--member", "--channel", "6"])
+            .args(["--netlow", &format!("{:#x}", testkit::NETWORK_LOW)])
+            .args(["--devram", mode])
+            .arg("--nvs-save")
+            .arg(dir.join("nvs.bin"))
+            .stdin(Stdio::null())
+            .stderr(Stdio::inherit())
+            .output()
+            .expect("spawn DevRam channel-plan peer");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            !output.status.success(),
+            "{mode}: DevRam booted with a plan"
+        );
+        assert!(output.stdout.len() >= 3, "{mode}: missing fatal frame");
+        let length = usize::from(u16::from_le_bytes([output.stdout[0], output.stdout[1]]));
+        assert_eq!(
+            output.stdout.len(),
+            length + 2,
+            "{mode}: only one fatal frame"
+        );
+        assert_eq!(output.stdout[2], b'E', "{mode}: fatal frame tag");
+        assert_eq!(&output.stdout[3..], b"CHANNEL_PLAN_MEMBER_ONLY", "{mode}");
+    }
+}

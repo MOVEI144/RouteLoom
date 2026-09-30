@@ -94,3 +94,5 @@ COMMITを失った端末は旧channelに残り得る。保存候補とLR250発�
 自動移行の認定には、事前planにrecovery担当・訪問CH・時刻/期間・反復上限・home待機役・中止条件を含め、clock誤差、有限loss、覆域の仮定を明示する。仮定外はRECOVERY_REQUIREDと物理保守へ移り、独断rollbackや「必ず再結合」を約束しない。
 
 手動操作でも同じ安全契約が要る。operator確認ボタンが未設計のrendezvousを補うとはしない。基準線の固定CH変更は、管理された停止と配備設定更新として扱う。
+
+手動channel plan（`CONFIG_ROUTELOOM_MIGRATION`、[USB §12](usb-protocol.md)）はMemberEdhoc専用。planの根は採用済みsiteのSite Authority署名（SAK）で、DevRamにはSite Authorityが無い。DevRamは開発用のquick start profileで、channelは固定（SitePackage／Kconfig）で使う。DevRamでplanを選んだ構成はbuild時にエラーで止め、`Device::begin`も`CHANNEL_PLAN_MEMBER_ONLY`で拒否する（黙って外さない）。remote configとexplicit gatewayはDevRam／Memberの両方で使える。

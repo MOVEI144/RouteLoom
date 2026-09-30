@@ -192,6 +192,11 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
   tag_ = config.log_tag;
   role_ = config.role;
   security_ = config.security;
+  // A channel plan is rooted in the adopted site's SAK: DevRam has no Site
+  // Authority and keeps its fixed (SitePackage/Kconfig) channel.
+  if (config.channel_plan != 0 && config.security != DeviceSecurity::Member) {
+    return Status::error(StatusCode::InvalidArgument, "CHANNEL_PLAN_MEMBER_ONLY");
+  }
   NodeConfig& node = config.radio.node;
   // The persisted monotonic boot session is the message session, the
   // durable boot token, the telemetry incarnation, the route generation
