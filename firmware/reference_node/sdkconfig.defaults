@@ -23,6 +23,3 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # no join relay gateway, no USB bridge.
 CONFIG_ROUTELOOM_ROLE_RELAY=y
 CONFIG_ROUTELOOM_RESOURCE_PROFILE_RELAY=y
-# Site membership and device credentials are required; quick starts use
-# the explicit DevRam profile in examples/endpoint_c and endpoint_cpp.
-CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y
