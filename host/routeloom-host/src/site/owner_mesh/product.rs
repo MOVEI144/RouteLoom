@@ -653,7 +653,12 @@ fn mesh_p03_manual_channel_plan_switches_and_returns() {
     let cap = format!("{}", USB_CAP | 0x2000);
     let Some(mut world) = MeshWorld::start_with_args(
         "p03-channel-plan",
-        Switch::direct(),
+        // Manual plan distribution requires a direct gateway binding for
+        // every participant; a member-to-member leg can win discovery first.
+        Switch::new(&Topology {
+            nodes: 3,
+            edges: vec![(0, 1), (0, 2)],
+        }),
         &["--cap", &cap, "--channel-plan"],
         &["--channel-plan"],
     ) else {
@@ -851,7 +856,10 @@ fn mesh_p03_member_that_missed_a_switch_returns() {
     let cap = format!("{}", USB_CAP | 0x2000);
     let Some(mut world) = MeshWorld::start_with_args(
         "p03-plan-straggler",
-        Switch::direct(),
+        Switch::new(&Topology {
+            nodes: 3,
+            edges: vec![(0, 1), (0, 2)],
+        }),
         &["--cap", &cap, "--channel-plan"],
         &["--channel-plan"],
     ) else {
