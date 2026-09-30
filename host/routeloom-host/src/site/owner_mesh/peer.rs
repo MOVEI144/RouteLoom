@@ -1129,7 +1129,10 @@ impl MeshPeer {
         };
         assert_eq!(reply.len(), 6);
         assert_eq!(reply[0], if leave { b'l' } else { b'y' });
-        Some((reply[1], u32::from_le_bytes([reply[2], reply[3], reply[4], reply[5]])))
+        Some((
+            reply[1],
+            u32::from_le_bytes([reply[2], reply[3], reply[4], reply[5]]),
+        ))
     }
 
     /// Tracked send with a delivery class (0 best effort, 1 reliable) and a
@@ -1186,7 +1189,10 @@ impl MeshPeer {
         let reply = self.recv().expect("policy reply");
         assert_eq!(reply.len(), 6);
         assert_eq!(reply[0], b'x');
-        (reply[1], u32::from_le_bytes([reply[2], reply[3], reply[4], reply[5]]))
+        (
+            reply[1],
+            u32::from_le_bytes([reply[2], reply[3], reply[4], reply[5]]),
+        )
     }
 
     /// Explicit gateway send (Service=21, SDK_RAM scope) through

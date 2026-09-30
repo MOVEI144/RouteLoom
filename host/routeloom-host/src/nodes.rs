@@ -479,7 +479,11 @@ pub const CONNECTIVITY_ISOLATED_MS: u64 = 120_000;
 /// `unknown`. The host sees no sleep, so it never reports `sleeping`.
 pub fn connectivity(record: &NodeRecord, now: u64) -> &'static str {
     if record.gateway {
-        return if record.connected { "reachable" } else { "unknown" };
+        return if record.connected {
+            "reachable"
+        } else {
+            "unknown"
+        };
     }
     if record.connected {
         let stale = record.live_status().is_some_and(|s| s.telemetry_stale());

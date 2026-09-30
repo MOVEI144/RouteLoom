@@ -2248,7 +2248,10 @@ fn leave_and_restart(world: &mut World, tag: &str, seed: u64) {
         t.owner.lifecycle_phase == PHASE_UNASSIGNED_READY
             && t.owner.lifecycle_action == ACTION_RESTART_UNASSIGNED
     });
-    assert_eq!(tick.owner.lifecycle_phase, PHASE_UNASSIGNED_READY, "{tag}: left");
+    assert_eq!(
+        tick.owner.lifecycle_phase, PHASE_UNASSIGNED_READY,
+        "{tag}: left"
+    );
     assert_eq!(tick.snap.store_site, 0, "{tag}: membership erased");
     assert_eq!(
         tick.owner.runtime_flags & (RUNTIME_REMOVED | TRUST_ERASED),

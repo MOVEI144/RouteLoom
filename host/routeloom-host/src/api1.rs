@@ -6164,7 +6164,10 @@ mod tests {
         assert!(!response.contains("\"node\":\"0000000000000001\""));
         assert!(response.contains("\"hops\":null"));
         // Lost by the gateway: degraded, then isolated after T_iso.
-        assert!(response.contains("\"connectivity\":\"degraded\""), "{response}");
+        assert!(
+            response.contains("\"connectivity\":\"degraded\""),
+            "{response}"
+        );
         let later = ctx(
             None,
             &acl,
@@ -6181,7 +6184,10 @@ mod tests {
             b"{\"v\":1,\"request_id\":\"n4\",\"method\":\"nodes.get\",\"params\":{\"node\":\"0000000000000004\"}}",
             &later,
         );
-        assert!(response.contains("\"connectivity\":\"isolated\""), "{response}");
+        assert!(
+            response.contains("\"connectivity\":\"isolated\""),
+            "{response}"
+        );
         // nodes.get: found / NOT_FOUND / bad params.
         let response = handle(
             b"{\"v\":1,\"request_id\":\"g1\",\"method\":\"nodes.get\",\"params\":{\"node\":\"0000000000000002\"}}",

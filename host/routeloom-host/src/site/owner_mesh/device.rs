@@ -30,8 +30,13 @@ fn until(world: &mut MeshWorld, budget_ms: u64, done: impl Fn(&MeshWorld) -> boo
 /// request_join on peer `a` until it is a confirmed member again
 /// (≤ 60 s); returns the elapsed ms.
 fn rejoin(world: &mut MeshWorld, a: usize) -> u64 {
-    let (status, op) = world.peers[a].device_op(false, world.now).expect("request_join answered");
-    assert!(status == STATUS_OK && op != 0, "request_join accepted: {status}");
+    let (status, op) = world.peers[a]
+        .device_op(false, world.now)
+        .expect("request_join answered");
+    assert!(
+        status == STATUS_OK && op != 0,
+        "request_join accepted: {status}"
+    );
     let took = until(world, 60_000, |w| {
         let s = &w.snaps[a];
         s.stage == STAGE_MEMBER && s.join_confirmed && s.op_last == op
@@ -64,7 +69,9 @@ fn mesh_j04_leave_and_rejoin() {
     world.step(25);
     let events = world.snaps[a].membership_events;
     let reboots = world.peers[a].reboots;
-    let (status, op) = world.peers[a].device_op(true, world.now).expect("leave answered");
+    let (status, op) = world.peers[a]
+        .device_op(true, world.now)
+        .expect("leave answered");
     assert!(status == STATUS_OK && op != 0, "leave accepted: {status}");
     world.step(25);
     let cancelled = world.snaps[a]
@@ -72,16 +79,27 @@ fn mesh_j04_leave_and_rejoin() {
         .iter()
         .filter(|tx| tx.state == DELIVERY_CANCELLED_BEFORE_TX && tx.reason == "CANCELLED_LE")
         .count();
-    assert_eq!(cancelled, 2, "untransmitted sends end CANCELLED_LEAVE: {:?}", world.snaps[a].app_tx);
+    assert_eq!(
+        cancelled, 2,
+        "untransmitted sends end CANCELLED_LEAVE: {:?}",
+        world.snaps[a].app_tx
+    );
     let took = until(&mut world, 5_000, |w| w.peers[a].reboots > reboots);
-    assert!(world.peers[a].reboots > reboots, "left within 5 s ({took} ms)");
+    assert!(
+        world.peers[a].reboots > reboots,
+        "left within 5 s ({took} ms)"
+    );
     world.step(25);
     let s = &world.snaps[a];
     assert!(
         s.has_identity && !s.has_site && s.id_fp == id_fp && s.stage == STAGE_JOINING,
         "identity kept, membership gone: {s:?}"
     );
-    assert_eq!(s.membership_events, events + 2, "Leaving and LEFT, once each");
+    assert_eq!(
+        s.membership_events,
+        events + 2,
+        "Leaving and LEFT, once each"
+    );
     assert_eq!(s.last_cause, reasons::REASON_LEFT);
     assert!(s.op_last == op && s.op_result == reasons::REASON_LEFT);
 
@@ -119,7 +137,9 @@ fn mesh_f01_leave_intent_power_cuts() {
         );
         cuts += 1;
         assert_eq!(world.peers[a].switching_cuts, cuts);
-        world.pump_until(2_000, |snaps| snaps[a].stage == STAGE_MEMBER && snaps[a].authority_ready);
+        world.pump_until(2_000, |snaps| {
+            snaps[a].stage == STAGE_MEMBER && snaps[a].authority_ready
+        });
         let s = &world.snaps[a];
         assert!(
             s.has_site && s.stage == STAGE_MEMBER && s.phase == PHASE_ACTIVE,
@@ -129,9 +149,14 @@ fn mesh_f01_leave_intent_power_cuts() {
 
     // The sealed intent landed: the next boot finishes the leave.
     world.peers[a].arm_key_fault(3, "x0");
-    assert!(world.peers[a].device_op(true, world.now).is_none(), "cut after the seal");
+    assert!(
+        world.peers[a].device_op(true, world.now).is_none(),
+        "cut after the seal"
+    );
     assert_eq!(world.peers[a].switching_cuts, cuts + 1);
-    until(&mut world, 5_000, |w| !w.snaps[a].has_site && w.snaps[a].stage == STAGE_JOINING);
+    until(&mut world, 5_000, |w| {
+        !w.snaps[a].has_site && w.snaps[a].stage == STAGE_JOINING
+    });
     let s = &world.snaps[a];
     assert!(
         !s.has_site && s.has_identity && s.id_fp == id_fp && s.last_cause == reasons::REASON_LEFT,
@@ -141,7 +166,9 @@ fn mesh_f01_leave_intent_power_cuts() {
     // Cut mid-erasure: resumes to the same end.
     rejoin(&mut world, a);
     let reboots = world.peers[a].reboots;
-    let (status, _) = world.peers[a].device_op(true, world.now).expect("leave answered");
+    let (status, _) = world.peers[a]
+        .device_op(true, world.now)
+        .expect("leave answered");
     assert_eq!(status, STATUS_OK);
     world.step(25);
     world.peers[a].power_cut();
@@ -170,20 +197,37 @@ fn mesh_f05_device_callback_reentry_is_busy() {
     world.peers[a].probe_reentry(true);
     deliver_each(&mut world, 0, a, 2, b"f05");
     let events = world.snaps[a].membership_events;
-    let (status, op) = world.peers[a].device_op(false, world.now).expect("request_join answered");
-    assert!(status == STATUS_OK && op != 0, "request_join accepted: {status}");
+    let (status, op) = world.peers[a]
+        .device_op(false, world.now)
+        .expect("request_join answered");
+    assert!(
+        status == STATUS_OK && op != 0,
+        "request_join accepted: {status}"
+    );
     let took = until(&mut world, 60_000, |w| w.snaps[a].op_last == op);
     let s = &world.snaps[a];
     assert!(
         s.stage == STAGE_MEMBER && s.op_result == reasons::REASON_JOINED,
         "re-verified within 60 s ({took} ms): {s:?}"
     );
-    assert_eq!(s.membership_events, events + 2, "Joining and Member, once each");
+    assert_eq!(
+        s.membership_events,
+        events + 2,
+        "Joining and Member, once each"
+    );
     assert!(s.reentry_calls >= 6, "callbacks tried: {}", s.reentry_calls);
-    assert_eq!(s.reentry_busy, s.reentry_calls, "every call from a callback is Busy");
+    assert_eq!(
+        s.reentry_busy, s.reentry_calls,
+        "every call from a callback is Busy"
+    );
     world.peers[a].probe_reentry(false);
-    until(&mut world, 120_000, |w| w.snaps[a].authority_ready && w.snaps[a].join_confirmed);
-    assert!(world.snaps[a].join_confirmed, "authority back after the re-verification");
+    until(&mut world, 120_000, |w| {
+        w.snaps[a].authority_ready && w.snaps[a].join_confirmed
+    });
+    assert!(
+        world.snaps[a].join_confirmed,
+        "authority back after the re-verification"
+    );
     deliver_each(&mut world, a, 0, 2, b"f05-after");
 }
 
@@ -218,23 +262,44 @@ fn mesh_m09_device_latest_value_sends() {
         tx.iter().any(|t| t.reason.starts_with("COALESCE_REQ")),
         "RELIABLE with a key refused: {tx:?}"
     );
-    until(&mut world, 5_000, |w| w.snaps[0].rx_count >= g_rx + 2 && w.snaps[b].rx_count > b_rx);
+    until(&mut world, 5_000, |w| {
+        w.snaps[0].rx_count >= g_rx + 2 && w.snaps[b].rx_count > b_rx
+    });
     until(&mut world, 1_000, |_| false);
-    assert_eq!(world.snaps[0].rx_count, g_rx + 2, "G got the latest of key 1 and key 2 only");
-    assert_eq!(world.snaps[b].rx_count, b_rx + 1, "the other destination kept its value");
+    assert_eq!(
+        world.snaps[0].rx_count,
+        g_rx + 2,
+        "G got the latest of key 1 and key 2 only"
+    );
+    assert_eq!(
+        world.snaps[b].rx_count,
+        b_rx + 1,
+        "the other destination kept its value"
+    );
 
     // 10 s outage: the first value reaches the radio and fails there; the
     // newer ones never report it cancelled (later ones may wait for a
     // route, untransmitted, and be replaced).
-    let before = world.snaps[a].app_tx.iter().map(|t| t.seq).max().unwrap_or(0);
+    let before = world.snaps[a]
+        .app_tx
+        .iter()
+        .map(|t| t.seq)
+        .max()
+        .unwrap_or(0);
     world.switch.isolate(a);
     for value in 0..5_u8 {
         world.peers[a].app_send_with(testkit::GATEWAY, 0, 1, &[b'o', value]);
         until(&mut world, 2_000, |_| false);
     }
-    let first = world.snaps[a].app_tx.iter().find(|t| t.seq == before + 1).cloned();
+    let first = world.snaps[a]
+        .app_tx
+        .iter()
+        .find(|t| t.seq == before + 1)
+        .cloned();
     assert!(
-        first.as_ref().is_some_and(|t| t.state == 8 && t.reason.starts_with("MAC_SEND")),
+        first
+            .as_ref()
+            .is_some_and(|t| t.state == 8 && t.reason.starts_with("MAC_SEND")),
         "the value on the air failed, never cancelled: {:?}",
         world.snaps[a].app_tx
     );
@@ -242,7 +307,10 @@ fn mesh_m09_device_latest_value_sends() {
     let g_rx = world.snaps[0].rx_count;
     world.peers[a].app_send_with(testkit::GATEWAY, 0, 1, b"after");
     until(&mut world, 30_000, |w| w.snaps[0].rx_count > g_rx);
-    assert_eq!(world.snaps[0].rx, b"after", "the newest value arrives after the heal");
+    assert_eq!(
+        world.snaps[0].rx, b"after",
+        "the newest value arrives after the heal"
+    );
 }
 
 /// P05-O: G's APPLIED request to A, whose endpoint defers and completes
@@ -261,16 +329,26 @@ fn mesh_p05_deferred_applied_ticket() {
     let lease = world.peers[a].applied_lease();
     for round in 0..20_u32 {
         let completed = world.snaps[a].applied_completed;
-        let last = world.snaps[0].app_tx.iter().map(|t| t.seq).max().unwrap_or(0);
+        let last = world.snaps[0]
+            .app_tx
+            .iter()
+            .map(|t| t.seq)
+            .max()
+            .unwrap_or(0);
         world.peers[0].applied_send(NODE_A, &lease, &round.to_le_bytes());
         until(&mut world, 1_900, |_| false);
         let pending = world.snaps[0].app_tx.iter().find(|t| t.seq > last).cloned();
         assert!(
-            pending.as_ref().is_some_and(|t| t.state != DELIVERY_DELIVERED),
+            pending
+                .as_ref()
+                .is_some_and(|t| t.state != DELIVERY_DELIVERED),
             "round {round}: not applied before the completion: {pending:?}"
         );
         until(&mut world, 3_000, |w| {
-            w.snaps[0].app_tx.iter().any(|t| t.seq > last && t.state == DELIVERY_DELIVERED)
+            w.snaps[0]
+                .app_tx
+                .iter()
+                .any(|t| t.seq > last && t.state == DELIVERY_DELIVERED)
         });
         let done = world.snaps[0].app_tx.iter().find(|t| t.seq > last).cloned();
         assert!(
@@ -284,13 +362,22 @@ fn mesh_p05_deferred_applied_ticket() {
     }
     // Completed after the 10 s request deadline: refused, never applied.
     world.peers[a].defer_applied(12_000);
-    let last = world.snaps[0].app_tx.iter().map(|t| t.seq).max().unwrap_or(0);
+    let last = world.snaps[0]
+        .app_tx
+        .iter()
+        .map(|t| t.seq)
+        .max()
+        .unwrap_or(0);
     world.peers[0].applied_send(NODE_A, &lease, b"late");
     until(&mut world, 16_000, |_| false);
-    assert_eq!(world.snaps[a].applied_refused, 1, "the late completion is refused");
+    assert_eq!(
+        world.snaps[a].applied_refused, 1,
+        "the late completion is refused"
+    );
     let late = world.snaps[0].app_tx.iter().find(|t| t.seq > last).cloned();
     assert!(
-        late.as_ref().is_some_and(|t| t.state == DELIVERY_INDETERMINATE),
+        late.as_ref()
+            .is_some_and(|t| t.state == DELIVERY_INDETERMINATE),
         "the origin never reports the late one applied: {late:?}"
     );
 }
@@ -305,22 +392,39 @@ fn mesh_join_policy_range_cas_and_holdoff() {
     };
     converge(&mut world, "join policy");
     let a = world.index_of(NODE_A);
-    assert_eq!(world.peers[a].set_join_policy(59, 0).0, STATUS_INVALID_ARGUMENT);
+    assert_eq!(
+        world.peers[a].set_join_policy(59, 0).0,
+        STATUS_INVALID_ARGUMENT
+    );
     assert_eq!(world.peers[a].set_join_policy(60, 1).0, STATUS_CONFLICT);
     assert_eq!(world.peers[a].set_join_policy(60, 0), (STATUS_OK, 1));
     assert_eq!(world.peers[a].set_join_policy(60, 0).0, STATUS_CONFLICT);
     world.peers[a].power_cut();
-    world.pump_until(2_000, |snaps| snaps[a].stage == STAGE_MEMBER && snaps[a].authority_ready);
-    assert_eq!(world.snaps[a].policy_revision, 1, "the policy survives the power cut");
+    world.pump_until(2_000, |snaps| {
+        snaps[a].stage == STAGE_MEMBER && snaps[a].authority_ready
+    });
+    assert_eq!(
+        world.snaps[a].policy_revision, 1,
+        "the policy survives the power cut"
+    );
 
     world
         .provision
         .site
         .link
-        .revoke(NODE_A, 1, routeloom_client::site::RemovalReason::Removed, "policy-holdoff")
+        .revoke(
+            NODE_A,
+            1,
+            routeloom_client::site::RemovalReason::Removed,
+            "policy-holdoff",
+        )
         .expect("revoke commits");
     world.pump_until(24_000, |snaps| snaps[a].phase == PHASE_HOLDOFF);
-    assert_eq!(world.snaps[a].phase, PHASE_HOLDOFF, "A erased: {:?}", world.snaps[a]);
+    assert_eq!(
+        world.snaps[a].phase, PHASE_HOLDOFF,
+        "A erased: {:?}",
+        world.snaps[a]
+    );
     let reboots = world.peers[a].reboots;
     let held = until(&mut world, 120_000, |w| w.peers[a].reboots > reboots);
     assert!(

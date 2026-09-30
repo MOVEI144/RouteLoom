@@ -136,10 +136,16 @@ fn mesh_m04_long_isolation_recovers_without_reset() {
     );
     deliver_each(&mut world, 1, 0, 10, b"m04-up");
     deliver_each(&mut world, 0, 1, 10, b"m04-down");
-    assert_eq!(world.snaps[1].connectivity, CONNECTIVITY_REACHABLE, "Reachable after the heal");
+    assert_eq!(
+        world.snaps[1].connectivity, CONNECTIVITY_REACHABLE,
+        "Reachable after the heal"
+    );
     let events = world.snaps[1].connectivity_events;
     steady_tail(&mut world, "m04");
-    assert_eq!(world.snaps[1].connectivity_events, events, "no connectivity flap in the tail");
+    assert_eq!(
+        world.snaps[1].connectivity_events, events,
+        "no connectivity flap in the tail"
+    );
 }
 
 /// J08 (K1a/K1b, isolation variant): A is isolated for 10 min virtual
