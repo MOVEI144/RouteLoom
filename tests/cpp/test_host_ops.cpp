@@ -2888,6 +2888,56 @@ void test_bridge_sdk_ram_mailbox_survives_session_loss() {
   CHECK(world.gateway1.mailbox_size() == 0);
 }
 
+void test_bridge_sdk_ram_requires_a_reader_for_new_work() {
+  GatewayWorld world;
+  MonotonicMs now = 1000;
+  const HostDigest no_host{};
+  GatewayEndpoint absent{};
+  CHECK_OK(world.gateway2.resolve(1, endpoint::GatewayScope::GatewaySdkRam,
+                                  no_host, 5000, now, absent));
+  for (int i = 0; i < 40 &&
+       world.gateway2.endpoint_state(absent) == EndpointState::Resolving; ++i) {
+    world.run_mesh(now, 100);
+  }
+  CHECK(world.gateway2.endpoint_state(absent) == EndpointState::Failed);
+  CHECK(world.gateway1.mailbox_size() == 0);
+
+  GatewayWorld with_host;
+  now = 1000;
+  HostDriver host;
+  CHECK(host_handshake(with_host, host, now, 0x1111, 10) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  const auto reg_body = register_bytes(7, 0x99, 15000);
+  const auto reg_answer = transact(with_host, host, now, 60,
+      ByteView{reg_body.data(), reg_body.size()}, got_error, error_code);
+  HostRegisterResponse reg{};
+  CHECK(decode_host_register_response(
+      ByteView{reg_answer.data(), reg_answer.size()}, reg));
+  CHECK(reg.result == static_cast<std::uint16_t>(GatewayOpsResult::Ok));
+
+  GatewayEndpoint ready{};
+  CHECK_OK(with_host.gateway2.resolve(1, endpoint::GatewayScope::GatewaySdkRam,
+                                  no_host, 5000, now, ready));
+  for (int i = 0; i < 40 &&
+       with_host.gateway2.endpoint_state(ready) == EndpointState::Resolving; ++i) {
+    with_host.run_mesh(now, 100);
+  }
+  CHECK(with_host.gateway2.endpoint_state(ready) == EndpointState::Ready);
+  with_host.bridge.notify_disconnect(now);
+  const std::array<std::uint8_t, 1> payload{{7}};
+  MessageId sent{};
+  CHECK_OK(with_host.gateway2.send(ready, ByteView{payload.data(), payload.size()},
+                               3000, now, sent));
+  for (int i = 0; i < 40 &&
+       with_host.gateway2.send_result(sent).state != GatewaySendState::Failed; ++i) {
+    with_host.run_mesh(now, 100);
+  }
+  CHECK(with_host.gateway2.send_result(sent).state == GatewaySendState::Failed);
+  CHECK(with_host.gateway1.stats().sdk_ram_receipts == 0);
+  CHECK(with_host.gateway1.mailbox_size() == 0);
+}
+
 // Scope-2 remote send while the destination's host is down (G02): the
 // resolve can never name a live endpoint, the send ends Failed — never a
 // Delivered claim on gateway reachability alone.
@@ -4748,6 +4798,7 @@ int main() {
   test_bridge_gateway_loopback();
   test_bridge_gateway_ingress_resend_and_lease();
   test_bridge_sdk_ram_mailbox_survives_session_loss();
+  test_bridge_sdk_ram_requires_a_reader_for_new_work();
   test_bridge_gateway_host_down();
   test_bridge_gateway_ingress_busy();
   test_bridge_gateway_remote_send();

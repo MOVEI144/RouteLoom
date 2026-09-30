@@ -58,7 +58,7 @@ public structにはstruct_size/versionを置く。整数幅、enum値、reserved
 
 明示Gatewayの宛先を途中で別Gatewayへ変えない。ANY_GATEWAY/SERVICEは許可集合内でoriginがproviderを固定する。APPLIEDではアプリが結果を返す必要があり、SDK受領だけで自動APPLIEDを出さない。
 
-`Device::gateway()`のendpoint（Descriptor）のleaseは15 s（`kGatewayDescriptorLeaseMs`）。sendのlifetimeは残りのleaseに収まる必要があり、収まらなければ`ENDPOINT_LEASE_TOO_SHORT`で拒否する（黙って短くしない）。lifetimeをleaseの20 %（3 s）以下にすれば、再resolveはleaseの80 %（12 s）を越えてからで足りる。GATEWAY_SDK_RAMの受領はgatewayの有界mailbox（8件）に入り、読まれるか60 sで消えるまで枠を占める。USB gatewayはappを持たないので、受領したpayloadをhostのReceiveLogへ渡す。hostが保存をACKしたら枠を空ける。未ACKの受領はUSB sessionを失っても60 sの保持期限までは再送できる。
+`Device::gateway()`のendpoint（Descriptor）のleaseは15 s（`kGatewayDescriptorLeaseMs`）。sendのlifetimeは残りのleaseに収まる必要があり、収まらなければ`ENDPOINT_LEASE_TOO_SHORT`で拒否する（黙って短くしない）。lifetimeをleaseの20 %（3 s）以下にすれば、再resolveはleaseの80 %（12 s）を越えてからで足りる。GATEWAY_SDK_RAMの受領はgatewayの有界mailbox（8件）に入り、読まれるか60 sで消えるまで枠を占める。USB gatewayはappを持たないので、hostが未登録のときは新しいresolve／submitを`HOST_UNAVAILABLE`で拒否する。受領したpayloadはhostのReceiveLogへ渡し、保存ACKの後に枠を空ける。既に受領したpayloadはUSB sessionを失っても60 sの保持期限までは再送できる。
 
 sendがOKでもTX受付だけ。最終結果はEND_RECEIVED、APP_APPLIED、EXPIRED、REJECTED、CANCELLED_BEFORE_TX、INDETERMINATE等。遅いreceiptは同じMessage IDへ結び、呼出元が期限後に結果を照会できる保持方針を設ける。
 

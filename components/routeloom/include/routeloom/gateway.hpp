@@ -189,6 +189,7 @@ struct GatewayRoleConfig {
   std::uint64_t gateway_boot{0};   // nonzero boot incarnation, persisted
   std::uint32_t capabilities{0};   // kGatewayCapHostReceive requires host_sink
   GatewayHostSink* host_sink{nullptr};  // P3 bridge implements; scope2 needs it
+  bool sdk_ram_host_reader{false};  // the bridge has no app mailbox reader
 };
 
 // Distinct diagnostic counters (03 §3.7): normal Node DATA, gateway SDK
@@ -447,6 +448,7 @@ class GatewayDelivery final : public GatewayServiceSink {
 
   struct Role {
     bool enabled{false};
+    bool sdk_ram_host_reader{false};
     std::uint64_t gateway_boot{0};
     std::uint32_t capabilities{0};
     GatewayHostSink* host_sink{nullptr};

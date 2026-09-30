@@ -109,6 +109,7 @@ Status UsbBridge::attach_gateway(GatewayDelivery& gateway) noexcept {
   role.gateway_boot = config_.boot_id;
   role.capabilities = kGatewayCapHostReceive;
   role.host_sink = this;
+  role.sdk_ram_host_reader = true;
   const Status enabled = gateway.enable_gateway(role);
   // Attaching the endpoint IS the advertisement: CAP_GATEWAY_ENDPOINT_V1 is
   // set exactly when the component exists and its role is enabled, mirroring
