@@ -125,6 +125,9 @@ struct CoordinatorEvent {
   // Boot transport: USB-direct (a gateway attached to its host) vs radio
   // scan. Healthy adopted boots ignore it (the Joiner adopts silently).
   bool usb_direct{false};
+  // Owner verified an RLX1 LeftReady boot: a local leave has no holdoff.
+  // RLV1 cleanup and generation checks still apply.
+  bool local_leave_completed{false};
   // Rld1Rx: the frame bytes are valid during the call only.
   JoinRxMeta rld1_meta{};
   ByteView rld1_frame{};

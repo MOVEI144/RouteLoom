@@ -717,8 +717,8 @@ Status SecurityCoordinator::on_boot(const CoordinatorEvent& event) noexcept {
   usb_direct_ = event.usb_direct;
   // A standing removal record restarts its RAM holdoff (the length it
   // recorded) on every boot — the Cleaned commit time does not survive the
-  // reboot.
-  if (deps_.local_revocation->has_record()) {
+  // reboot. A verified completed local leave skips only that timer.
+  if (deps_.local_revocation->has_record() && !event.local_leave_completed) {
     removal_holdoff_armed_ = true;
     removal_holdoff_at_ = event.now + deps_.local_revocation->record().holdoff_ms;
   }

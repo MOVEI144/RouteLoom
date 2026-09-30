@@ -695,6 +695,9 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
   event.boot_witness = rlboot_witness;
   event.boot_prepared = rlboot_prepared;
   event.usb_direct = usb_direct;
+  event.local_leave_completed = boot_snap.phase == sdkv1::LifecyclePhase::UnassignedReady &&
+                               journal.has_record() &&
+                               journal.record().mode == sdkv1::LifecycleMode::LeftReady;
   const Status status = coordinator().step(event);
   if (!status) return status;
   boot_witness_ = rlboot_witness;
