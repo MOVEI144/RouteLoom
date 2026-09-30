@@ -1,0 +1,15 @@
+{
+  "2": {
+    "attempted": 20,
+    "states": {
+      "failed": 20
+    }
+  },
+  "3": {
+    "attempted": 20,
+    "states": {
+      "failed": 5,
+      "expired": 15
+    }
+  }
+}

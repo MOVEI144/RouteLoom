@@ -1,0 +1,14 @@
+[2026-09-30T23:17:47.126+00:00] I (3076) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-30T23:17:47.126+00:00] W (3076) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-30T23:18:08.461+00:00] I (3107) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-30T23:18:08.461+00:00] W (3107) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-30T23:18:09.163+00:00] I (3848) RouteLoomRef: discovery event=BOUND peer=3
+[2026-09-30T23:18:09.163+00:00] W (3848) RouteLoomRef: diagnostic reason=BOUND peer=3 message=none
+[2026-09-30T23:18:23.390+00:00] I (2553) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-30T23:18:23.390+00:00] W (2553) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-30T23:18:24.091+00:00] I (3203) RouteLoomRef: discovery event=BOUND peer=3
+[2026-09-30T23:18:24.091+00:00] W (3203) RouteLoomRef: diagnostic reason=BOUND peer=3 message=none
+[2026-09-30T23:18:36.614+00:00] I (2336) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-30T23:18:36.614+00:00] W (2336) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-30T23:18:37.716+00:00] I (3452) RouteLoomRef: discovery event=BOUND peer=3
+[2026-09-30T23:18:37.716+00:00] W (3452) RouteLoomRef: diagnostic reason=BOUND peer=3 message=none

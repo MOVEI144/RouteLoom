@@ -1,0 +1,9 @@
+{
+  "cycles": [
+    {"cycle":0,"delivered":4,"first_delivery_s":8.445,"bound_s":{"1":2.696,"3":3.398}},
+    {"cycle":1,"delivered":4,"first_delivery_s":6.405,"bound_s":{"1":2.066,"3":2.767}},
+    {"cycle":2,"delivered":4,"first_delivery_s":6.215,"bound_s":{"1":1.859,"3":2.961}}
+  ],
+  "delivered": 12,
+  "note": "BOUND times use timestamped console observations; delivery offsets use the monotonic clock."
+}
