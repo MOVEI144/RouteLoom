@@ -164,6 +164,12 @@ class CellList(unittest.TestCase):
 class Sdkconfig(unittest.TestCase):
     DATA = {"forbid_unless_named": {"CONFIG_A": ["y"], "CONFIG_M": ["1", "2"]}}
 
+    def test_cell_refuses_retired_selection_before_compiling(self):
+        cell = {"id": "test", "app": "reference_node", "target": "esp32c3", "overlay": []}
+        steps = [step.argv for step in check.firmware_steps(cell)]
+        self.assertLess(steps.index(["assert-sdkconfig", "test"]),
+                        steps.index(["idf.py", "build"]))
+
     def test_overlay_expect_and_forbidden_values(self):
         cell = {"overlay": ["CONFIG_A=y"], "expect": ["CONFIG_P=5000"]}
         self.assertEqual(check.sdkconfig_errors(self.DATA, cell, "CONFIG_A=y\nCONFIG_P=5000\n"), [])
@@ -174,6 +180,14 @@ class Sdkconfig(unittest.TestCase):
         old = "CONFIG_ROUTELOOM_SECURITY_MODE_" + "LEGACY" + "_FIXTURE=y"
         cell = {"overlay": [], "expect": []}
         self.assertTrue(check.sdkconfig_errors(self.DATA, cell, old + "\n"))
+
+    def test_c3_config_requires_endpoint_role_as_well_as_capacity(self):
+        cell = {"target": "esp32c3", "overlay": [], "expect": []}
+        common = "CONFIG_ROUTELOOM_CONFIG=y\nCONFIG_ROUTELOOM_RESOURCE_PROFILE_ENDPOINT=y\n"
+        self.assertEqual(check.sdkconfig_errors(
+            self.DATA, cell, common + "CONFIG_ROUTELOOM_ROLE_ENDPOINT=y\n"), [])
+        self.assertTrue(check.sdkconfig_errors(
+            self.DATA, cell, common + "CONFIG_ROUTELOOM_ROLE_RELAY=y\n"))
 
 
 class HilMatrix(unittest.TestCase):

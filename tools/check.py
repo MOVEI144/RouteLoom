@@ -393,6 +393,7 @@ def firmware_steps(cell: dict, project_dir: str | Path | None = None,
     if cell["overlay"]:
         steps.append(Step(["append", "sdkconfig", *cell["overlay"]], cwd=app_dir))
     steps += [
+        Step(["assert-sdkconfig", cell["id"]], cwd=app_dir),
         Step(["idf.py", "build"], cwd=app_dir, env=env),
         Step(["assert-sdkconfig", cell["id"]], cwd=app_dir),
         Step(["idf.py", "size"], cwd=app_dir, env=env, stdout="build/size-report.txt"),
@@ -454,6 +455,10 @@ def sdkconfig_errors(data: dict, cell: dict, text: str) -> list[str]:
     errors += [f"unsupported security mode `{line}`" for line in lines
                if line.startswith("CONFIG_ROUTELOOM_SECURITY_MODE_")
                and line.endswith("=y") and line not in supported_modes]
+    if (cell.get("target") == "esp32c3" and "CONFIG_ROUTELOOM_CONFIG=y" in lines
+            and ("CONFIG_ROUTELOOM_RESOURCE_PROFILE_ENDPOINT=y" not in lines
+                 or "CONFIG_ROUTELOOM_ROLE_ENDPOINT=y" not in lines)):
+        errors.append("ESP32-C3 remote config needs endpoint resource profile and role")
     return errors
 
 
