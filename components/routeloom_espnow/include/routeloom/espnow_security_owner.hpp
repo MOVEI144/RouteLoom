@@ -161,6 +161,23 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // totals, outstanding-recovery state) for USB diagnostics and the
   // post-recovery mesh pull.
   const sdkv1::LifecycleJournal& lifecycle_journal() const noexcept;
+  // Device::leave: durably writes the RLX1 LocalLeave intent, then ends
+  // every live delivery (CANCELLED_LEAVE before TX). The erasure runs on
+  // the following polls and ends in a clean unassigned restart. Refused
+  // unless adopted as a member; Busy during a cutover or an RRS1 apply.
+  Status local_leave(MonotonicMs now_ms) noexcept;
+  // Device::request_join (see SecurityCoordinator::request_join).
+  Status request_join(MonotonicMs now_ms) noexcept;
+  // JoinPolicy (range-checked by the caller): joiner timing and role, and
+  // the removal holdoff of the coordinator (RLV1) and the lifecycle.
+  Status apply_join_policy(const sdkv1::JoinerConfig& policy, std::uint32_t holdoff_ms) noexcept;
+  // Called right before a lifecycle restart (`leave`: it completes a local
+  // leave), so the Device can report the outcome first. Must not re-enter.
+  using RestartHook = void (*)(void* ctx, bool leave) noexcept;
+  void set_restart_hook(RestartHook hook, void* ctx) noexcept {
+    restart_hook_ = hook;
+    restart_ctx_ = ctx;
+  }
   // A GROUP_KEY_RETIRED diagnostic was observed (node observer context:
   // records only). The next poll turns it into a throttled authority
   // pull — the backstop for a missed rotation Wake.
@@ -349,7 +366,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // resumes UnassignedReady without an action, and completes AdoptNetwork
   // via ActionDone once it re-adopts (adopt_network_disposition). Never
   // returns.
-  [[noreturn]] void reboot_for_lifecycle(const char* reason) noexcept;
+  [[noreturn]] void reboot_for_lifecycle(const char* reason, bool leave = false) noexcept;
 
   bool gateway_role() const noexcept { return config_.role == profile::Role::Gateway; }
   // The USB bridge exists on gateway profiles only; elsewhere this is a
@@ -499,6 +516,8 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   bool group_key_retired_{false};
   MonotonicMs last_pull_ms_{0};
   std::uint32_t usb_transfer_{0};
+  RestartHook restart_hook_{nullptr};
+  void* restart_ctx_{nullptr};
 };
 
 }  // namespace routeloom::espnow
