@@ -982,7 +982,6 @@ Setup parse_argv(int argc, char** argv) {
   if (setup.node == routeloom::kInvalidNodeId || setup.node == routeloom::kBroadcastNodeId) {
     fatal("bad node id");
   }
-  if (setup.gateway && setup.usb_secret.empty()) fatal("gateway needs --usb-secret");
   return setup;
 }
 

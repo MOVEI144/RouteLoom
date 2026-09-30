@@ -40,6 +40,8 @@ ESP-IDF の機器は `components/routeloom_device` の `routeloom::Device` を�
 
 呼べるのは Owner task（poll hook と post した job）だけで、他の task は `post()` を使う（8 件、満杯は Busy）。Device の callback（`NodeObserver`、`DeviceObserver`）の中から Device を呼ぶと Busy を返し、何も変えない。
 
+`DeviceConfig::usb` を接続する場合は HostLink secret（`usb_secret`）が必要。未設定（NULL または長さ 0）なら `begin()` は Owner／radio 起動前に InvalidArgument（`USB_SECRET_REQUIRED`）で拒否する。DevRam の Kconfig identity 経路は USB secret を持たないので gateway は BoardConfig と紐づく secret を provision して起動する。
+
 | 関数 | 契約 |
 |---|---|
 | `send(dst, payload, options, id)` | 受付だけ。結果は `on_delivery` と `delivery(id)`。`options.coalesce_key`（0 以外）は BEST_EFFORT のみ：同じ宛先・同じ key のまだ無線に渡していない仕事を置き換え、古い方は `CANCELLED_SUPERSEDED`（CancelledBeforeTx）で終わる。無線に渡した仕事は置き換えない。RELIABLE・APPLIED・sleep 保存との組合せは `InvalidArgument` |

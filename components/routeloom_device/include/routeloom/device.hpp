@@ -101,7 +101,8 @@ struct DeviceConfig {
   keys::Secret dev_psk{};
   // Gateway role: the USB byte stream, the session secret (outlives the
   // device), the HelloAck capability bitmap and the device nonce (0 draws
-  // one from the radio RNG after RF start).
+  // one from the radio RNG after RF start). An attached stream with an
+  // unset secret is rejected by begin() before Owner/radio startup.
   usb::ByteStream* usb{nullptr};
   ByteView usb_secret{};
   std::uint32_t usb_capability{0};

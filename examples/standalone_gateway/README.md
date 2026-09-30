@@ -10,6 +10,9 @@ The node takes its identity and keys from the provisioned BoardConfig, like
 `firmware/bridge_node`: commit it with the setup image first
 ([docs/hil.md](../../docs/hil.md), "BoardConfig"). The USB bridge is still
 attached, so a host can be connected for provisioning and joining.
+An attached USB bridge requires a provisioned HostLink secret. Device startup
+rejects an unset secret with `USB_SECRET_REQUIRED`; the Kconfig identity
+quick start therefore cannot boot this gateway.
 
 ## What works without a host
 

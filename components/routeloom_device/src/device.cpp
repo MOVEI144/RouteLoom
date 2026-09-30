@@ -268,6 +268,14 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
   if (config.channel_plan != 0 && config.security != DeviceSecurity::Member) {
     return Status::error(StatusCode::InvalidArgument, "CHANNEL_PLAN_MEMBER_ONLY");
   }
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
+  // An empty HostLink key would make every session proof publicly derivable.
+  // Refuse before constructing the bridge or starting the Owner/radio.
+  if (config.usb != nullptr &&
+      (config.usb_secret.data == nullptr || config.usb_secret.size == 0)) {
+    return Status::error(StatusCode::InvalidArgument, "USB_SECRET_REQUIRED");
+  }
+#endif
   NodeConfig& node = config.radio.node;
   // The persisted monotonic boot session is the message session, the
   // durable boot token, the telemetry incarnation, the route generation

@@ -19,6 +19,45 @@ const STATUS_CONFLICT: u8 = 20;
 const DELIVERY_CANCELLED_BEFORE_TX: u8 = 10;
 const DELIVERY_INDETERMINATE: u8 = 11;
 
+/// An attached USB bridge must never boot with an unset HostLink secret.
+#[test]
+fn mesh_p06_usb_secret_required() {
+    let Some(peer) = mesh_peer_path() else {
+        panic!("P06-U requires the real Owner mesh peer");
+    };
+    for devram in [false, true] {
+        let mut command = Command::new(&peer);
+        command.args([
+            "--node",
+            "1",
+            "--mac",
+            "020000000001",
+            "--role",
+            "4",
+            "--t0",
+            "0",
+            "--seed",
+            "1",
+            "--gateway",
+        ]);
+        if devram {
+            command.arg("--devram");
+        }
+        let output = command
+            .stdin(Stdio::null())
+            .output()
+            .expect("boot real Device with an attached USB stream and no secret");
+        assert!(
+            !output.status.success(),
+            "unset USB secret must refuse boot"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("USB_SECRET_REQUIRED"),
+            "Device must reject the configuration before Owner/RF startup: {output:?}"
+        );
+    }
+}
+
 /// Steps (25 ms) until `done` or `budget_ms`; returns the elapsed ms.
 fn until(world: &mut MeshWorld, budget_ms: u64, done: impl Fn(&MeshWorld) -> bool) -> u64 {
     let start = world.now;
