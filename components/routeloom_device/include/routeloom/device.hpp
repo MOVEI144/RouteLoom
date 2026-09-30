@@ -399,34 +399,33 @@ class Device {
   DeviceSecurity security_{DeviceSecurity::DevRam};
   profile::Role role_{profile::Role::Endpoint};
   bool observation_remote_{false};
-  bool in_callback_{false};
-  DeviceObserver* device_observer_{nullptr};
-  // Event bookkeeping (see the header comment).
-  bool stage_known_{false};
-  MembershipStage stage_{MembershipStage::Unprovisioned};
-  std::uint16_t stage_reason_{0};
+  // Event bookkeeping (see the header comment), widest fields first.
   MonotonicMs stage_since_ms_{0};
-  bool pending_authority_{false};
-  std::uint32_t seen_attempts_{0};
-  std::uint32_t pending_base_{0};
-  Connectivity connectivity_{Connectivity::Unknown};
-  std::uint16_t connectivity_reason_{0};
   MonotonicMs connectivity_since_ms_{0};
   MonotonicMs contact_ms_{0};
-  bool contact_valid_{false};
-  bool isolation_noticed_{false};
   MonotonicMs member_since_ms_{0};
-  Operation operation_{Operation::None};
-  OperationId operation_id_{0};
-  OperationId next_operation_{0};
   MonotonicMs operation_deadline_ms_{0};
-  bool operation_left_member_{false};
+  DeviceObserver* device_observer_{nullptr};
+  std::uint32_t seen_attempts_{0};
+  std::uint32_t pending_base_{0};
+  OperationId operation_id_{0};  // the last one issued; live while operation_ != None
   std::uint32_t operation_denies_{0};
   std::uint32_t operation_pendings_{0};
-  // JoinPolicy inputs that are not stored elsewhere.
+  std::uint32_t isolation_notice_ms_{0};  // JoinPolicy
+  std::uint16_t stage_reason_{0};
+  std::uint16_t connectivity_reason_{0};
+  bool in_callback_{false};
+  bool stage_known_{false};
+  MembershipStage stage_{MembershipStage::Unprovisioned};
+  bool pending_authority_{false};
+  Connectivity connectivity_{Connectivity::Unknown};
+  bool contact_valid_{false};
+  bool isolation_noticed_{false};
+  Operation operation_{Operation::None};
+  bool operation_left_member_{false};
+  // The image's requested role and the role bits a JoinPolicy may request.
   std::uint8_t default_role_{0};
   std::uint8_t allowed_roles_{0};
-  std::uint32_t isolation_notice_ms_{0};
   std::array<Posted, kPostCapacity> posted_{};
   std::uint8_t posted_head_{0};
   std::uint8_t posted_count_{0};

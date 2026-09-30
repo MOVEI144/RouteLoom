@@ -652,7 +652,7 @@ MembershipSnapshot Device::membership() const noexcept {
   out.since_ms = stage_since_ms_;
   out.reason = stage_reason_;
   out.boot = boot_session_;
-  out.operation = operation_id_;
+  out.operation = operation_ != Operation::None ? operation_id_ : 0;
   if (runtime_ != nullptr) out.node = runtime_->node().node_id();
   if (stage_ == MembershipStage::Member && security_ == DeviceSecurity::DevRam &&
       runtime_ != nullptr) {
@@ -724,7 +724,6 @@ void Device::update_membership(const MonotonicMs now_ms) noexcept {
 void Device::finish_operation(const std::uint16_t result) noexcept {
   const OperationId id = operation_id_;
   operation_ = Operation::None;
-  operation_id_ = 0;
   if (device_observer_ != nullptr) {
     CallbackScope scope(in_callback_);
     device_observer_->on_operation(id, result);
@@ -769,8 +768,7 @@ Status Device::request_join(OperationId& operation) noexcept {
   operation_pendings_ = joiner.counters.pendings;
   operation_left_member_ = owner_->coordinator().mode() != sdkv1::CoordinatorMode::Member;
   operation_deadline_ms_ = now_ms + kJoinOperationMs;
-  if (++next_operation_ == 0) ++next_operation_;
-  operation_id_ = next_operation_;
+  if (++operation_id_ == 0) ++operation_id_;
   operation_ = Operation::Join;
   operation = operation_id_;
   return Status::success();
@@ -786,11 +784,10 @@ Status Device::leave(OperationId& operation) noexcept {
     return Status::error(StatusCode::Unsupported, "DevRam has no membership");
   }
   if (operation_ != Operation::None) return Status::error(StatusCode::Busy, "OPERATION_IN_PROGRESS");
-  if (++next_operation_ == 0) ++next_operation_;
   // Deliveries cancelled by the leave report to the app inside this call.
   const Status status = owner_->local_leave(runtime_->now_ms());
   if (!status) return status;
-  operation_id_ = next_operation_;
+  if (++operation_id_ == 0) ++operation_id_;
   operation_ = Operation::Leave;
   operation = operation_id_;
   return Status::success();
