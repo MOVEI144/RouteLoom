@@ -883,6 +883,15 @@ void EspNowRuntime::poll_once() noexcept {
              static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
              static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
              static_cast<unsigned long>(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)));
+    std::uint8_t wifi_channel = 0;
+    (void)channel_readback(wifi_channel);
+    ESP_LOGI(kTag, "HIL RADIO wifi_channel=%u committed=%u generation=%lu busy=%d "
+                   "quarantined=%u fenced=%d",
+             static_cast<unsigned>(wifi_channel),
+             static_cast<unsigned>(channel_runner_.committed_channel()),
+             static_cast<unsigned long>(channel_runner_.radio_generation().value),
+             channel_runner_.busy() ? 1 : 0, static_cast<unsigned>(quarantined_count_),
+             fenced_outstanding_ ? 1 : 0);
     if (discovery_ != nullptr) {
       const auto& stats = discovery_->stats();
       ESP_LOGI(kTag, "HIL DISCOVERY candidates=%lu neighbors=%lu "
